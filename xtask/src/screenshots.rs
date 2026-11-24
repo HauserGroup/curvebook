@@ -16,6 +16,8 @@ use std::time::Duration;
 use curvebook_platform::read_regular_file_bytes;
 
 const MAX_DOC_PNG_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SCREENSHOT_BYTES: usize = 512 * 1024;
+const MAX_ICON_BYTES: usize = 64 * 1024;
 const MAX_ASSETS_MD_BYTES: usize = 4 * 1024 * 1024;
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -118,6 +120,9 @@ fn verify_existing(root: &Path) -> Result<(), String> {
     for rel in SCREENSHOT_REL_PATHS {
         let abs = root.join(rel);
         let bytes = read_non_symlink_png_bytes(&abs, rel)?;
+        if bytes.len() > MAX_SCREENSHOT_BYTES {
+            return Err(format!("`{rel}` size {} bytes exceeds screenshot budget ({MAX_SCREENSHOT_BYTES} bytes)", bytes.len()));
+        }
         let summary = validate_png_bytes(rel, &bytes)?;
         ensure_asset_listed(rel, &assets_md)?;
         println!(
@@ -135,6 +140,9 @@ fn verify_existing(root: &Path) -> Result<(), String> {
         let abs = root.join(rel);
         if abs.exists() {
             let bytes = read_non_symlink_png_bytes(&abs, rel)?;
+            if bytes.len() > MAX_ICON_BYTES {
+                return Err(format!("`{rel}` size {} bytes exceeds icon budget ({MAX_ICON_BYTES} bytes)", bytes.len()));
+            }
             let summary = validate_png_bytes_with_bounds(rel, &bytes, Some((exp_w, exp_h)), min_idat)?;
             ensure_asset_listed(rel, &assets_md)?;
             println!(

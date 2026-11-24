@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Run CurveBook on Linux (x86_64 and aarch64): free, open-source biostatistics, nonlinear curve fitting, and scientific graphing in a portable offline AppImage that opens .pzfx and .prism files.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Biostatistics and curve fitting on Linux — CurveBook</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/linux.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Biostatistics and curve fitting on Linux — CurveBook">
+  <meta property="og:description" content="Run CurveBook on Linux (x86_64 and aarch64): free, open-source biostatistics, nonlinear curve fitting, and scientific graphing in a portable offline AppImage that opens .pzfx and .prism files.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/linux.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-layout-dark.png">
+  <meta property="og:image:alt" content="CurveBook dark-theme Page Layout Composer showing a two-panel publication figure with a 4PL dose-response curve, potency bar chart with significance brackets, embedded summary table, and millimeter rulers.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="images/curvebook.png">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap" itemscope itemtype="https://schema.org/SoftwareApplication">
+    <meta itemprop="name" content="CurveBook">
+    <meta itemprop="applicationCategory" content="ScientificApplication">
+    <meta itemprop="operatingSystem" content="Linux">
+    <meta itemprop="license" content="https://spdx.org/licenses/MIT.html">
+    <meta itemprop="isAccessibleForFree" content="true">
+    <meta itemprop="url" content="https://hausergroup.github.io/curvebook/linux.html">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook</span>
+        </div>
+        <span class="window-status">Linux · AppImage</span>
+      </div>
+      <nav aria-label="Linux page navigation">
+        <a href="index.html">CurveBook home</a>
+        <a href="manual/latest/index.html">Documentation</a>
+        <a href="open-pzfx-files.html">.pzfx &amp; .prism</a>
+        <a href="faq.html">FAQ</a>
+        <a href="#install">Install</a>
+        <a href="#capabilities">Capabilities</a>
+        <a href="privacy.html">Privacy</a>
+      </nav>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <div class="overview doc-body">
+        <section id="summary" aria-labelledby="page-title" tabindex="-1">
+          <div class="document-brand"><img src="images/curvebook.png" width="64" height="64" alt=""><span>CurveBook</span></div>
+          <p class="eyebrow">Linux · <code>x86_64</code> · <code>aarch64</code></p>
+          <h1 id="page-title">Biostatistics and curve fitting on Linux.<br><span>Native, offline, and open source.</span></h1>
+          <p class="lead"><strong>CurveBook</strong> runs natively on Linux without Wine, virtual machines, or cloud accounts. Each portable <code>.AppImage</code> bundles the pure-Rust desktop GUI, the headless <code>curvebook-cli</code> runner, and the local stdio MCP server — opening <code>.pzfx</code>, <code>.prism</code>, <code>.xlsx</code>, and CSV/TSV data tables offline with zero telemetry.</p>
+          <ul class="pill-row" aria-label="Linux highlights">
+            <li class="pill">x86_64 &amp; aarch64 AppImage</li>
+            <li class="pill">Wayland &amp; X11</li>
+            <li class="pill">Desktop · CLI · MCP</li>
+            <li class="pill">MIT OR Apache-2.0</li>
+          </ul>
+          <div class="action-row">
+            <a class="button primary" href="https://github.com/HauserGroup/curvebook/releases">Download Linux AppImage <span aria-hidden="true">↗</span></a>
+            <a class="button secondary" href="manual/latest/get-started.html#install-linux">Install &amp; Checksums <span aria-hidden="true">→</span></a>
+          </div>
+        </section>
+
+        <hr>
+
+        <section id="install" aria-labelledby="install-title" tabindex="-1">
+          <p class="eyebrow">Quick start</p>
+          <h2 id="install-title">Install and run on Linux</h2>
+          <p>Download <code>curvebook-&lt;version&gt;-linux-x86_64.AppImage</code> (or <code>aarch64</code> for ARM Linux) from <a href="https://github.com/HauserGroup/curvebook/releases">GitHub Releases</a>, mark it executable, and launch:</p>
+          <pre><code>chmod +x curvebook-&lt;version&gt;-linux-x86_64.AppImage
+./curvebook-&lt;version&gt;-linux-x86_64.AppImage</code></pre>
+
+          <h3>Without FUSE v2 (<code>libfuse2</code>) or for headless CLI use</h3>
+          <p>If your distribution does not ship FUSE v2 (for example newer Ubuntu releases) or you want to invoke <code>curvebook-cli</code> directly in scripts and MCP clients, extract the AppImage once:</p>
+          <pre><code>./curvebook-&lt;version&gt;-linux-x86_64.AppImage --appimage-extract
+./squashfs-root/usr/bin/curvebook-cli --version</code></pre>
+          <p>See <a href="manual/latest/troubleshooting.html#linux-fuse">Troubleshooting: Linux FUSE</a> and <a href="manual/latest/get-started.html#verifying-downloads">Verifying downloads</a> for <code>SHA256SUMS.txt</code> and keyless GitHub Sigstore attestation checks.</p>
+        </section>
+
+        <hr>
+
+        <section id="capabilities" aria-labelledby="capabilities-title" tabindex="-1">
+          <p class="eyebrow">Full scientific workbench</p>
+          <h2 id="capabilities-title">What you can do on Linux</h2>
+          <ul>
+            <li><strong>Open existing lab files:</strong> read data tables from <code>.pzfx</code> and <code>.prism</code> files (<a href="open-pzfx-files.html">file-format guide</a>), Excel <code>.xlsx</code> workbooks, and CSV/TSV files, or work natively in <code>.curvebook</code> archives and Git-friendly <code>.curvebook.d/</code> directories.</li>
+            <li><strong>Biostatistics &amp; nonlinear regression:</strong> run <em>t</em>-tests, nonparametric comparisons, ordinary, repeated-measures, and REML mixed-effects ANOVA with multiple-comparison post tests, Kaplan–Meier and Cox proportional hazards survival analysis, contingency and ROC analyses, GLMs, PCA and clustering, power planning, and weighted or robust nonlinear curve fitting (including custom DSL and ODE models). See the <a href="manual/latest/analyses.html">analyses reference</a> and <a href="manual/latest/fitting.html">curve fitting reference</a>.</li>
+            <li><strong>Publication figures &amp; layouts:</strong> compose multi-panel figures on physical millimeter presets with significance brackets, compact letter display, live TeX equations, and colorblind-safe palettes, then export vector <code>SVG</code>, <code>PDF</code>, <code>EMF</code>, and raster <code>PNG</code> / <code>TIFF</code>. See <a href="manual/latest/graphs.html">graphs and layouts</a>.</li>
+            <li><strong>Headless CLI &amp; local AI automation (MCP):</strong> run reproducible batch pipelines with <code>curvebook-cli</code> or connect local MCP assistants via <code>curvebook-cli mcp --workdir &lt;folder&gt;</code>. See the <a href="manual/latest/mcp-for-beginners.html">Beginner's MCP Guide</a>.</li>
+          </ul>
+        </section>
+
+        <hr>
+
+        <section id="packaging" aria-labelledby="packaging-title" tabindex="-1">
+          <p class="eyebrow">Packaging scope</p>
+          <h2 id="packaging-title">Beta Linux packaging notes</h2>
+          <ul>
+            <li><strong>AppImage only in Beta:</strong> Beta GitHub Releases ship portable <code>x86_64</code> and <code>aarch64</code> AppImages tested with Wayland and X11 portals, paired with <code>SHA256SUMS.txt</code> and Sigstore build provenance attestations. Native <code>.deb</code>, <code>.rpm</code>, and Flatpak packages are not part of the Beta download set.</li>
+            <li><strong>Zero telemetry &amp; offline-first:</strong> CurveBook makes no outbound network connections, sends no analytics or crash reports, and includes no auto-updater. Read the <a href="privacy.html">Privacy Policy</a>.</li>
+            <li><strong>Build from source:</strong> CurveBook is dual-licensed under <strong>MIT OR Apache-2.0</strong> and builds from source with Rust; see the <a href="https://github.com/HauserGroup/curvebook">GitHub repository</a>.</li>
+          </ul>
+        </section>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. GitHub Pages logs visitor IP addresses for security. Read the <a href="privacy.html">Privacy Policy</a> · <a href="faq.html">FAQ</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Linux AppImage · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

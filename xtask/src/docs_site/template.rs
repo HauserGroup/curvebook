@@ -116,7 +116,7 @@ pub fn render_page(spec: &PageSpec<'_>) -> String {
     push_html_escaped(&canonical_url, &mut out);
     out.push_str("\">\n  <meta property=\"og:image\" content=\"");
     out.push_str(super::seo::SITE_BASE_URL);
-    out.push_str("images/workspace-split-fit.png\">\n  <meta name=\"twitter:card\" content=\"summary_large_image\">\n  <link rel=\"icon\" type=\"image/png\" href=\"");
+    out.push_str("images/workspace-layout-dark.png\">\n  <meta name=\"twitter:card\" content=\"summary_large_image\">\n  <link rel=\"icon\" type=\"image/png\" href=\"");
     out.push_str(&assets);
     out.push_str("images/curvebook.png\">\n  <link rel=\"stylesheet\" href=\"");
     out.push_str(&assets);
@@ -235,23 +235,28 @@ fn render_breadcrumbs(spec: &PageSpec<'_>, root: &str, out: &mut String) {
     if spec.rel_path == "index.html" {
         return;
     }
-    out.push_str("        <nav class=\"breadcrumbs\" aria-label=\"Breadcrumb\">\n");
-    out.push_str("          <a href=\"");
+    let mut pos = 1usize;
+    out.push_str("        <nav class=\"breadcrumbs\" aria-label=\"Breadcrumb\" itemscope itemtype=\"https://schema.org/BreadcrumbList\">\n");
+    out.push_str("          <span itemprop=\"itemListElement\" itemscope itemtype=\"https://schema.org/ListItem\"><a itemprop=\"item\" href=\"");
     out.push_str(root);
-    out.push_str("index.html\">Manual</a>\n");
+    out.push_str("index.html\"><span itemprop=\"name\">Manual</span></a><meta itemprop=\"position\" content=\"1\"></span>\n");
+    pos += 1;
     if let Some(sec_rel) = spec.section_rel_path
         && sec_rel != spec.rel_path
     {
-        out.push_str("          <span aria-hidden=\"true\">/</span>\n          <a href=\"");
+        out.push_str("          <span aria-hidden=\"true\">/</span>\n          <span itemprop=\"itemListElement\" itemscope itemtype=\"https://schema.org/ListItem\"><a itemprop=\"item\" href=\"");
         out.push_str(root);
         out.push_str(sec_rel);
-        out.push_str("\">");
+        out.push_str("\"><span itemprop=\"name\">");
         push_html_escaped(spec.section_title, out);
-        out.push_str("</a>\n");
+        out.push_str("</span></a><meta itemprop=\"position\" content=\"2\"></span>\n");
+        pos += 1;
     }
-    out.push_str("          <span aria-hidden=\"true\">/</span>\n          <span aria-current=\"page\">");
+    out.push_str("          <span aria-hidden=\"true\">/</span>\n          <span itemprop=\"itemListElement\" itemscope itemtype=\"https://schema.org/ListItem\"><span itemprop=\"name\" aria-current=\"page\">");
     push_html_escaped(spec.title, out);
-    out.push_str("</span>\n        </nav>\n");
+    out.push_str("</span><meta itemprop=\"position\" content=\"");
+    out.push_str(&pos.to_string());
+    out.push_str("\"></span>\n        </nav>\n");
 }
 
 fn render_toc(headings: &[TocHeading], out: &mut String) {
@@ -427,6 +432,77 @@ pub fn render_root_redirect_shim(title: &str, description: &str, target_href: &s
     out.push_str("      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>\n");
     out.push_str("      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>\n");
     out.push_str("      <p class=\"privacy\">CurveBook runs locally and collects no telemetry. Read the <a href=\"privacy.html\">Privacy Policy</a> · <a href=\"https://github.com/HauserGroup/curvebook\">Source code &amp; credits <span aria-hidden=\"true\">↗</span></a></p>\n");
+    out.push_str("    </footer>\n");
+    render_statusbar(&mut out);
+    out.push_str("  </div>\n</body>\n</html>\n");
+    out
+}
+
+/// Render a strict-CSP, script-free Classic coral `docs/404.html` page using `base_path`
+/// (e.g. `"/curvebook/"` or `"/"`) so assets and links work at any nested missing URL depth.
+#[must_use]
+pub fn render_not_found_page(base_path: &str) -> String {
+    let mut out = String::with_capacity(2560);
+    out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n");
+    out.push_str("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+    out.push_str("  <meta name=\"description\" content=\"The requested CurveBook page could not be found. Return to the home page, online manual, or FAQ.\">\n");
+    out.push_str("  <meta name=\"robots\" content=\"noindex\">\n");
+    out.push_str("  <meta name=\"referrer\" content=\"no-referrer\">\n");
+    out.push_str("  <meta http-equiv=\"Content-Security-Policy\" content=\"");
+    out.push_str(STRICT_CSP);
+    out.push_str("\">\n  <meta name=\"color-scheme\" content=\"light\">\n");
+    out.push_str("  <title>Page not found (404) — CurveBook</title>\n");
+    out.push_str("  <link rel=\"icon\" type=\"image/png\" href=\"");
+    out.push_str(base_path);
+    out.push_str("images/curvebook.png\">\n  <link rel=\"stylesheet\" href=\"");
+    out.push_str(base_path);
+    out.push_str("site.css\">\n</head>\n<body>\n");
+    out.push_str("  <a class=\"skip-link\" href=\"#main\">Skip to content</a>\n  <div class=\"desktop-window wrap\">\n");
+    out.push_str("    <header class=\"site-header\">\n      <div class=\"title-bar\">\n");
+    out.push_str("        <div class=\"wordmark\"><img src=\"");
+    out.push_str(base_path);
+    out.push_str("images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\"><span>CurveBook</span></div>\n");
+    out.push_str("        <span class=\"window-status\">404 · Not found</span>\n      </div>\n");
+    out.push_str("      <nav aria-label=\"Main navigation\">\n");
+    out.push_str("        <a href=\"");
+    out.push_str(base_path);
+    out.push_str("\">Home</a>\n        <a href=\"");
+    out.push_str(base_path);
+    out.push_str("manual/latest/index.html\">Documentation</a>\n        <a href=\"");
+    out.push_str(base_path);
+    out.push_str("faq.html\">FAQ</a>\n        <a href=\"");
+    out.push_str(base_path);
+    out.push_str("open-pzfx-files.html\">.pzfx &amp; .prism</a>\n        <a href=\"");
+    out.push_str(base_path);
+    out.push_str("privacy.html\">Privacy</a>\n        <a href=\"https://github.com/HauserGroup/curvebook\">GitHub <span aria-hidden=\"true\">↗</span></a>\n");
+    out.push_str("      </nav>\n    </header>\n");
+    out.push_str("    <main id=\"main\" tabindex=\"-1\">\n      <article class=\"overview doc-body\">\n");
+    out.push_str("        <p class=\"eyebrow\">HTTP 404</p>\n");
+    out.push_str("        <h1 id=\"page-title\" tabindex=\"-1\">Page not found.</h1>\n");
+    out.push_str("        <p class=\"lead\">The page you requested does not exist on the CurveBook site, or it moved when documentation URLs were updated.</p>\n");
+    out.push_str("        <div class=\"action-row\">\n          <a class=\"button primary\" href=\"");
+    out.push_str(base_path);
+    out.push_str("\">CurveBook Home</a>\n          <a class=\"button secondary\" href=\"");
+    out.push_str(base_path);
+    out.push_str("manual/latest/index.html\">Read the Manual <span aria-hidden=\"true\">→</span></a>\n        </div>\n");
+    out.push_str("        <h2>Helpful links</h2>\n        <ul>\n");
+    out.push_str("          <li><a href=\"");
+    out.push_str(base_path);
+    out.push_str("manual/latest/get-started.html\">Get Started &amp; Installation</a> — installers, checksums, and first run.</li>\n");
+    out.push_str("          <li><a href=\"");
+    out.push_str(base_path);
+    out.push_str("open-pzfx-files.html\">Open <code>.pzfx</code> and <code>.prism</code> files</a> — inspect tables and export to CSV.</li>\n");
+    out.push_str("          <li><a href=\"");
+    out.push_str(base_path);
+    out.push_str("faq.html\">FAQ &amp; Quick Facts</a> — licence, platforms, formats, and offline guarantees.</li>\n");
+    out.push_str("          <li><a href=\"https://github.com/HauserGroup/curvebook\">GitHub repository <span aria-hidden=\"true\">↗</span></a> — source code, issue tracker, and contributor documentation.</li>\n");
+    out.push_str("        </ul>\n      </article>\n    </main>\n");
+    out.push_str("    <footer class=\"site-footer\">\n");
+    out.push_str("      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>\n");
+    out.push_str("      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>\n");
+    out.push_str("      <p class=\"privacy\">CurveBook runs locally and collects no telemetry. Read the <a href=\"");
+    out.push_str(base_path);
+    out.push_str("privacy.html\">Privacy Policy</a> · <a href=\"https://github.com/HauserGroup/curvebook\">Source code &amp; credits <span aria-hidden=\"true\">↗</span></a></p>\n");
     out.push_str("    </footer>\n");
     render_statusbar(&mut out);
     out.push_str("  </div>\n</body>\n</html>\n");

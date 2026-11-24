@@ -8,6 +8,7 @@ CurveBook is written in pure Rust and dual-licensed under MIT OR Apache-2.0. It 
 
 - [CurveBook Home](https://hausergroup.github.io/curvebook/): Overview, workspace screenshots, core pillars, and Beta release downloads.
 - [Open .pzfx and .prism Files](https://hausergroup.github.io/curvebook/open-pzfx-files.html): Open .pzfx and .prism data files offline on macOS, Windows, and Linux and export tables to CSV or CurveBook projects.
+- [CurveBook on Linux](https://hausergroup.github.io/curvebook/linux.html): Native pure-Rust biostatistics and nonlinear curve fitting AppImage for Linux (x86_64 and aarch64), Wayland/X11, headless CLI, and local MCP.
 - [Frequently Asked Questions](https://hausergroup.github.io/curvebook/faq.html): Quick facts and direct answers on licensing, file formats, offline privacy, platforms, statistical methods, and MCP automation.
 - [Privacy Policy](https://hausergroup.github.io/curvebook/privacy.html): Local-first architecture, zero telemetry, no outbound network connections, and no auto-updater.
 - [Full Reference Compilation (llms-full.txt)](https://hausergroup.github.io/curvebook/llms-full.txt): Single-file plain-Markdown compilation of the CurveBook summary, quick facts, and all hand-written reference guides.

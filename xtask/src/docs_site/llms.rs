@@ -187,6 +187,11 @@ pub fn build_llms_txt(_root: &Path) -> Result<String, String> {
     );
     let _ = writeln!(
         out,
+        "- [CurveBook on Linux]({}): Native pure-Rust biostatistics and nonlinear curve fitting AppImage for Linux (x86_64 and aarch64), Wayland/X11, headless CLI, and local MCP.",
+        published_url("linux.html")
+    );
+    let _ = writeln!(
+        out,
         "- [Frequently Asked Questions]({}): Quick facts and direct answers on licensing, file formats, offline privacy, platforms, statistical methods, and MCP automation.",
         published_url("faq.html")
     );

@@ -102,7 +102,7 @@ Read these before editing code:
 - **Branch naming:** Use `<prefix>/<R<m>.<n>-short-slug>` with one of these prefixes:
   `feature/`, `bugfix/`, `hotfix/`, `refactor/`, `docs/`, `test/`, `chore/`, `audit/`
   Example: `feature/R0.10-platform-atomic-write`, `bugfix/R2.3-anova-unequal-n`.
-- **Pull requests & merge style:** PRs are **squash-merged** into `main`. Write a clear, plain-English PR title **ending with `(R<m>.<n>)`**, e.g.:
+- **Pull requests & merge style:** **All merges into `main` must be squash merges** (both GitHub PRs and local integrator merges via `git merge --squash`; do not create merge commits on `main`). Write a clear, plain-English PR or squash-commit title **ending with `(R<m>.<n>)`**, e.g.:
   `Move atomic saves into curvebook-platform (R0.10)`
   *(This replaces the legacy `M1.1: ...` title-prefix convention.)*
 - Keep each PR focused on **one** roadmap item (`R<m>.<n>`) unless splitting/grouping is explicitly planned in `docs/ROADMAP.md`.

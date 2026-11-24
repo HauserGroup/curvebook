@@ -25,6 +25,9 @@ pub use crate::pages_site::{CUSTOM_DOMAIN, LANDING_PAGES, SITE_BASE_URL};
 /// Repository-relative path of the generated sitemap.
 pub const SITEMAP_REL_PATH: &str = "docs/sitemap.xml";
 
+/// Repository-relative path of the generated custom 404 page.
+pub const NOT_FOUND_REL_PATH: &str = "docs/404.html";
+
 /// Published URL for a `docs/`-relative page path; the site root maps to [`SITE_BASE_URL`].
 #[must_use]
 pub fn published_url(docs_rel: &str) -> String {
@@ -117,7 +120,14 @@ pub fn write_sitemap(root: &Path) -> Result<usize, String> {
     Ok(xml.matches("<url>").count())
 }
 
-/// `--check` gate: the committed sitemap and `llms*.txt` match the published content byte-for-byte,
+/// Regenerate `docs/404.html` (`cargo xtask docs-site --sitemap`, and after `--release`).
+pub fn write_not_found_page(root: &Path) -> Result<(), String> {
+    let html = super::template::render_not_found_page(crate::pages_site::site_base_path());
+    let path = root.join(NOT_FOUND_REL_PATH);
+    write_atomic(&path, html.as_bytes()).map_err(|e| format!("write {NOT_FOUND_REL_PATH}: {e}"))
+}
+
+/// `--check` gate: the committed sitemap, `404.html`, and `llms*.txt` match the published content byte-for-byte,
 /// and every landing page declares its canonical link and Open Graph / Twitter Card metadata.
 pub fn check_search_metadata(root: &Path) -> Result<(), String> {
     validate_site_config(SITE_BASE_URL, CUSTOM_DOMAIN)?;
@@ -127,6 +137,13 @@ pub fn check_search_metadata(root: &Path) -> Result<(), String> {
         .map_err(|e| format!("read {SITEMAP_REL_PATH}: {e} (run `cargo xtask docs-site --sitemap`)"))?;
     if committed_sitemap != expected_sitemap {
         return Err(format!("{SITEMAP_REL_PATH} is out of date with the published pages; run `cargo xtask docs-site --sitemap`"));
+    }
+
+    let expected_404 = super::template::render_not_found_page(crate::pages_site::site_base_path());
+    let committed_404 = std::fs::read_to_string(root.join(NOT_FOUND_REL_PATH))
+        .map_err(|e| format!("read {NOT_FOUND_REL_PATH}: {e} (run `cargo xtask docs-site --sitemap`)"))?;
+    if committed_404 != expected_404 {
+        return Err(format!("{NOT_FOUND_REL_PATH} is out of date; run `cargo xtask docs-site --sitemap`"));
     }
 
     let expected_llms = build_llms_txt(root)?;
@@ -414,6 +431,7 @@ mod tests {
             [
                 "https://hausergroup.github.io/curvebook/",
                 "https://hausergroup.github.io/curvebook/open-pzfx-files.html",
+                "https://hausergroup.github.io/curvebook/linux.html",
                 "https://hausergroup.github.io/curvebook/faq.html",
                 "https://hausergroup.github.io/curvebook/privacy.html",
                 "https://hausergroup.github.io/curvebook/manual/v0.2/index.html",
@@ -433,6 +451,7 @@ mod tests {
             [
                 "https://hausergroup.github.io/curvebook/",
                 "https://hausergroup.github.io/curvebook/open-pzfx-files.html",
+                "https://hausergroup.github.io/curvebook/linux.html",
                 "https://hausergroup.github.io/curvebook/faq.html",
                 "https://hausergroup.github.io/curvebook/privacy.html",
                 "https://hausergroup.github.io/curvebook/manual/latest/index.html",
@@ -441,6 +460,7 @@ mod tests {
         );
 
         write_sitemap(&root).unwrap();
+        write_not_found_page(&root).unwrap();
         write_llms_files(&root).unwrap();
         assert!(check_search_metadata(&root).is_ok());
 
@@ -448,8 +468,11 @@ mod tests {
         write(&root, "docs/manual/latest/glossary.html", "new");
         assert!(check_search_metadata(&root).unwrap_err().contains("--sitemap"));
 
-        // Regenerate sitemap, then stale llms.txt must fail check_search_metadata.
+        // Regenerate sitemap, then stale 404.html and llms.txt must fail check_search_metadata.
         write_sitemap(&root).unwrap();
+        write(&root, NOT_FOUND_REL_PATH, "stale 404\n");
+        assert!(check_search_metadata(&root).unwrap_err().contains("docs/404.html"));
+        write_not_found_page(&root).unwrap();
         write(&root, LLMS_TXT_REL_PATH, "stale\n");
         assert!(check_search_metadata(&root).unwrap_err().contains("llms.txt"));
 
@@ -461,6 +484,7 @@ mod tests {
         let root = temp_root("canonical");
         seed_landing_pages(&root);
         write_sitemap(&root).unwrap();
+        write_not_found_page(&root).unwrap();
         write_llms_files(&root).unwrap();
         assert!(check_search_metadata(&root).is_ok());
 

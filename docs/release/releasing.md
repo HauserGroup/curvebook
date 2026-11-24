@@ -39,19 +39,21 @@ Before tagging or publishing a release, verify both source invariants and packag
      cargo xtask telemetry
      ```
      This asserts zero telemetry/analytics/crash-uploader egress across workspace sources, strict GitHub workflow `permissions` / `${{ }}` hygiene, and no-egress web headers.
-   - Verify clean-room workspace screenshots & `ASSETS.md` attribution:
+   - Verify (or refresh on UI changes) clean-room workspace screenshots & `ASSETS.md` attribution:
      ```sh
      cargo xtask screenshots --check
+     # or regenerate all 6 PNGs on demand:
+     cargo xtask screenshots
      ```
    - Run licence compliance & regenerate licence compendium:
      ```sh
      cargo xtask licenses
      ```
      This verifies crates offline against [docs/licences.md](../licences.md) (`deny.toml`), and runs `cargo deny check licenses` when installed (mandatory when `CI=true`); add `--html` to write `THIRD-PARTY-LICENSES.html`.
-   - Verify the offline documentation site (`docs-site`), and when cutting a release, generate and verify the versioned manual snapshot under `docs/manual/v<major>.<minor>/` (plus `docs/manual/index.html` redirect) for GitHub Pages publication:
+   - Verify the offline documentation site (`docs-site`), and when cutting a release, refresh screenshots and generate/verify the versioned and `/manual/latest/` snapshots, `404.html`, `sitemap.xml`, and `llms*.txt` in one command:
      ```sh
      cargo xtask docs-site --check
-     cargo xtask docs-site --release <version> --check
+     cargo xtask docs-site --release <version> --refresh-screenshots --check
      ```
    - Run the default CI gate suite:
      ```sh

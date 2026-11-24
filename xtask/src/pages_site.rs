@@ -27,13 +27,23 @@ pub const CUSTOM_DOMAIN: Option<&str> = None;
 
 /// Hand-written top-level pages under `docs/` that search engines should index, in sitemap order.
 /// Each must carry a canonical link and Open Graph / Twitter Card metadata (`docs-site --check`).
-pub const LANDING_PAGES: &[&str] = &["index.html", "open-pzfx-files.html", "faq.html", "privacy.html"];
+pub const LANDING_PAGES: &[&str] = &["index.html", "open-pzfx-files.html", "linux.html", "faq.html", "privacy.html"];
 
 /// Published redirect pages that forward to the newest release snapshot (left out of the sitemap).
 pub const REDIRECT_PAGES: &[&str] = &["get-started.html", "troubleshooting.html", "manual/index.html"];
 
 /// Other individual published files, relative to `docs/`.
-pub const SITE_FILES: &[&str] = &["site.css", "sitemap.xml", "llms.txt", "llms-full.txt"];
+pub const SITE_FILES: &[&str] = &["404.html", "site.css", "sitemap.xml", "llms.txt", "llms-full.txt"];
+
+/// Path prefix of [`SITE_BASE_URL`] (e.g. `"/curvebook/"` on `github.io`, `"/"` on a custom domain).
+#[must_use]
+pub fn site_base_path() -> &'static str {
+    let rest = SITE_BASE_URL.strip_prefix("https://").or_else(|| SITE_BASE_URL.strip_prefix("http://")).unwrap_or(SITE_BASE_URL);
+    match rest.find('/') {
+        Some(idx) => &rest[idx..],
+        None => "/",
+    }
+}
 
 /// Directories under `docs/` whose files are all published.
 pub const SITE_DIRS: &[&str] = &["images"];
@@ -243,10 +253,16 @@ fn push_local(raw: &str, out: &mut Vec<String>) {
 }
 
 /// Resolve `target` relative to the page at `from_rel`; `None` when it climbs above the site root.
-/// Root-absolute paths (`/x`) also return `None`: a project site lives below `/curvebook/`, so they
-/// would point outside it.
+/// Root-absolute paths (`/x`) return `None` on normal pages (a project site lives below `/curvebook/`),
+/// except on `404.html`, which GitHub Pages serves at arbitrary nested paths and therefore uses
+/// `site_base_path()`-prefixed URLs.
 fn resolve(from_rel: &str, target: &str) -> Option<String> {
     if target.starts_with('/') {
+        if from_rel == "404.html"
+            && let Some(stripped) = target.strip_prefix(site_base_path())
+        {
+            return resolve("index.html", stripped);
+        }
         return None;
     }
     let mut parts: Vec<&str> = from_rel.split('/').collect();
@@ -298,6 +314,7 @@ mod tests {
         let root = TempRoot::new(label);
         root.write("docs/index.html", "<a href=\"open-pzfx-files.html#convert\">x</a><a href=\"faq.html\">faq</a><img src=\"images/a.png\"><a href=\"https://github.com/x\">gh</a><a href=\"#top\">t</a><a href=\"mailto:a@b.c\">m</a>");
         root.write("docs/open-pzfx-files.html", "<a href=\"manual/latest/files.html\">f</a><link rel=\"stylesheet\" href=\"site.css\">");
+        root.write("docs/linux.html", "<a href=\"index.html\">h</a><a href=\"manual/latest/get-started.html\">gs</a>");
         root.write("docs/faq.html", "<a href=\"index.html\">h</a><a href=\"manual/latest/index.html\">m</a>");
         root.write("docs/privacy.html", "<a href=\"index.html\">h</a>");
         root.write("docs/get-started.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/get-started.html\">");
@@ -316,6 +333,10 @@ mod tests {
         root.write("docs/manual/v0.1/troubleshooting.html", "ts");
         root.write("docs/manual/v0.1/registry/formats.html", "<a href=\"../index.html\">up</a>");
         root.write("docs/site.css", "body{}");
+        root.write(
+            "docs/404.html",
+            "<link rel=\"stylesheet\" href=\"/curvebook/site.css\"><a href=\"/curvebook/\">h</a><a href=\"/curvebook/manual/latest/index.html\">m</a>",
+        );
         root.write("docs/images/a.png", "png");
         root.write("docs/llms.txt", "# CurveBook\n");
         root.write("docs/llms-full.txt", "# CurveBook Full\n");
@@ -337,10 +358,12 @@ mod tests {
         assert_eq!(
             files,
             [
+                "404.html",
                 "faq.html",
                 "get-started.html",
                 "images/a.png",
                 "index.html",
+                "linux.html",
                 "llms-full.txt",
                 "llms.txt",
                 "manual/index.html",
@@ -367,7 +390,7 @@ mod tests {
     fn r12_9_stage_copies_the_list_and_refuses_unsafe_targets() {
         let root = seed("stage");
         let out = root.0.join("_site");
-        assert_eq!(stage(&root.0, &out).unwrap(), 22);
+        assert_eq!(stage(&root.0, &out).unwrap(), 24);
         assert_eq!(std::fs::read_to_string(out.join("manual/latest/registry/formats.html")).unwrap(), "<a href=\"../index.html\">up</a>");
         assert_eq!(std::fs::read_to_string(out.join("manual/v0.1/registry/formats.html")).unwrap(), "<a href=\"../index.html\">up</a>");
         assert!(out.join("faq.html").is_file() && out.join("llms.txt").is_file() && out.join("llms-full.txt").is_file());
@@ -426,5 +449,8 @@ mod tests {
         assert_eq!(resolve("index.html", "manual/").as_deref(), Some("manual/index.html"));
         assert_eq!(resolve("index.html", "../x.html"), None);
         assert_eq!(resolve("index.html", "/ROADMAP.md"), None);
+        assert_eq!(resolve("404.html", "/curvebook/"), Some(String::from("index.html")));
+        assert_eq!(resolve("404.html", "/curvebook/site.css").as_deref(), Some("site.css"));
+        assert_eq!(resolve("404.html", "/other/site.css"), None);
     }
 }

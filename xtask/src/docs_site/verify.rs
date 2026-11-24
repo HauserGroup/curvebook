@@ -14,6 +14,7 @@ struct PageFacts {
     hrefs: Vec<String>,
     asset_srcs: Vec<String>,
     meta_refresh_targets: Vec<String>,
+    meta_descriptions: Vec<String>,
 }
 
 /// Verify all generated pages, links, fragments, CSP/privacy invariants, registry coverage,
@@ -27,6 +28,7 @@ pub fn verify_site(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Result<
         facts.insert(rel_path.clone(), page_facts);
     }
 
+    check_unique_meta_descriptions(facts.iter().map(|(k, v)| (k.as_str(), v)))?;
     check_internal_links_and_fragments(root, out_dir, site, &facts)?;
     check_registry_coverage(&facts, site)?;
     check_committed_snapshots(root)?;
@@ -34,6 +36,27 @@ pub fn verify_site(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Result<
     super::seo::check_search_metadata(root)?;
     crate::pages_site::check_publish_set(root)?;
     run_hygiene_scanners(root, out_dir)?;
+    Ok(())
+}
+
+fn check_unique_meta_descriptions<'a>(pages: impl IntoIterator<Item = (&'a str, &'a PageFacts)>) -> Result<(), String> {
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+    for (rel, facts) in pages {
+        if facts.meta_descriptions.len() != 1 {
+            return Err(format!(
+                "{rel}: expected exactly one `<meta name=\"description\">` tag, found {}",
+                facts.meta_descriptions.len()
+            ));
+        }
+        let desc = facts.meta_descriptions[0].trim();
+        if desc.is_empty() {
+            return Err(format!("{rel}: `<meta name=\"description\">` content must not be empty"));
+        }
+        let key = desc.to_ascii_lowercase();
+        if let Some(prev) = seen.insert(key, rel) {
+            return Err(format!("{rel}: duplicate `<meta name=\"description\">` already used by `{prev}`: \"{desc}\""));
+        }
+    }
     Ok(())
 }
 
@@ -132,6 +155,7 @@ fn scan_html_tags(rel_path: &str, html: &str, facts: &mut PageFacts) -> Result<(
 
 fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)], facts: &mut PageFacts) -> Result<(), String> {
     let mut is_meta_refresh = false;
+    let mut is_meta_description = false;
     let mut meta_content: Option<&str> = None;
     let mut rel_values = attrs.iter().filter(|(k, _)| k.eq_ignore_ascii_case("rel")).map(|(_, v)| v.trim());
     let is_canonical_link =
@@ -168,8 +192,29 @@ fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)]
             facts.asset_srcs.push(v.clone());
         } else if tag_lower == "meta" && key_lower == "http-equiv" && v.trim().eq_ignore_ascii_case("refresh") {
             is_meta_refresh = true;
+        } else if tag_lower == "meta" && key_lower == "name" && v.trim().eq_ignore_ascii_case("description") {
+            is_meta_description = true;
         } else if tag_lower == "meta" && key_lower == "content" {
             meta_content = Some(v.as_str());
+        }
+    }
+
+    if is_meta_description {
+        facts.meta_descriptions.push(meta_content.unwrap_or("").trim().to_owned());
+    }
+
+    if tag_lower == "img" {
+        let has_alt = attrs.iter().any(|(k, _)| k.eq_ignore_ascii_case("alt"));
+        if !has_alt {
+            return Err(format!("{rel_path}: `<img>` must declare an `alt` attribute (use `alt=\"\"` for decorative images)"));
+        }
+        if rel_path.starts_with("docs/") {
+            let valid_dim = |name: &str| {
+                attrs.iter().any(|(k, v)| k.eq_ignore_ascii_case(name) && v.trim().parse::<u32>().is_ok_and(|n| n > 0))
+            };
+            if !valid_dim("width") || !valid_dim("height") {
+                return Err(format!("{rel_path}: root page `<img>` must declare positive integer `width` and `height` attributes"));
+            }
         }
     }
 
@@ -687,7 +732,11 @@ pub fn check_root_pages(root: &Path) -> Result<(), String> {
     let docs_dir = root.join("docs");
     let required = ["index.html", "privacy.html", "manual/index.html"];
     let mut pages_to_audit: Vec<&str> = required.to_vec();
-    let optional = super::seo::LANDING_PAGES.iter().copied().filter(|p| !required.contains(p)).chain(["get-started.html", "troubleshooting.html"]);
+    let optional = super::seo::LANDING_PAGES
+        .iter()
+        .copied()
+        .filter(|p| !required.contains(p))
+        .chain(["404.html", "get-started.html", "troubleshooting.html"]);
     for shim in optional {
         let path = docs_dir.join(shim);
         if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
@@ -702,6 +751,8 @@ pub fn check_root_pages(root: &Path) -> Result<(), String> {
         let facts = audit_single_html(&format!("docs/{rel}"), &html)?;
         audited.insert(rel.to_owned(), facts);
     }
+
+    check_unique_meta_descriptions(audited.iter().map(|(k, v)| (k.as_str(), v)))?;
 
     let mut extra_html_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (rel, facts) in &audited {
@@ -748,6 +799,16 @@ fn verify_docs_relative_target(
         }
         return Ok(());
     }
+
+    let target_part = if from_rel == "404.html" && target_part.starts_with('/') {
+        let base_path = crate::pages_site::site_base_path();
+        let Some(stripped) = target_part.strip_prefix(base_path) else {
+            return Err(format!("docs/404.html: root-absolute target `{raw_ref}` must start with `{base_path}`"));
+        };
+        if stripped.is_empty() { "index.html" } else { stripped }
+    } else {
+        target_part
+    };
 
     let resolved = resolve_relative_segments(from_rel, target_part);
     if resolved.starts_with("..") {
@@ -1125,14 +1186,14 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         std::fs::write(docs.join("site.css"), "body {}\n").unwrap();
         std::fs::write(docs.join("images/curvebook.png"), b"png").unwrap();
 
-        let shim_gs = render_root_redirect_shim("Get Started", "Desc", "manual/v0.1/get-started.html", "v0.1.0");
-        let shim_ts = render_root_redirect_shim("Troubleshooting", "Desc", "manual/v0.1/troubleshooting.html#known-issues", "v0.1.0");
+        let shim_gs = render_root_redirect_shim("Get Started", "Get started redirect", "manual/v0.1/get-started.html", "v0.1.0");
+        let shim_ts = render_root_redirect_shim("Troubleshooting", "Troubleshooting redirect", "manual/v0.1/troubleshooting.html#known-issues", "v0.1.0");
         assert!(audit_single_html("docs/get-started.html", &shim_gs).is_ok());
         assert!(audit_single_html("docs/troubleshooting.html", &shim_ts).is_ok());
 
         let base_root_html = |title: &str, nav: &str| {
             format!(
-                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><title>{title}</title><link rel=\"icon\" href=\"images/curvebook.png\"><link rel=\"stylesheet\" href=\"site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>{title}</h1>{nav}</main></body></html>"
+                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"description\" content=\"{title} page description\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><title>{title}</title><link rel=\"icon\" href=\"images/curvebook.png\"><link rel=\"stylesheet\" href=\"site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>{title}</h1>{nav}</main></body></html>"
             )
         };
         std::fs::write(docs.join("index.html"), base_root_html("Home", "<a href=\"privacy.html\">P</a><a href=\"manual/index.html\">M</a>")).unwrap();
@@ -1140,7 +1201,7 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         std::fs::write(
             docs.join("manual/index.html"),
             format!(
-                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\"><title>Manual</title><link rel=\"stylesheet\" href=\"../site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>Manual</h1><a href=\"v0.1/index.html\">v0.1</a></main></body></html>"
+                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"description\" content=\"Manual redirect description\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\"><title>Manual</title><link rel=\"stylesheet\" href=\"../site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>Manual</h1><a href=\"v0.1/index.html\">v0.1</a></main></body></html>"
             ),
         )
         .unwrap();
@@ -1151,6 +1212,11 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         std::fs::write(docs.join("troubleshooting.html"), &shim_ts).unwrap();
 
         assert!(check_root_pages(&root_dir).is_ok());
+        // Duplicate meta description across root pages must fail check_root_pages.
+        let dup_privacy = base_root_html("Privacy", "<a href=\"index.html\">H</a>").replace("Privacy page description", "Home page description");
+        std::fs::write(docs.join("privacy.html"), dup_privacy).unwrap();
+        assert!(check_root_pages(&root_dir).unwrap_err().contains("duplicate `<meta name=\"description\">`"));
+        std::fs::write(docs.join("privacy.html"), base_root_html("Privacy", "<a href=\"index.html\">H</a>")).unwrap();
         // Breaking a local link inside docs/index.html must fail check_root_pages.
         std::fs::write(docs.join("index.html"), base_root_html("Home", "<a href=\"missing.html\">Broken</a>")).unwrap();
         assert!(check_root_pages(&root_dir).unwrap_err().contains("missing.html"));
@@ -1376,7 +1442,7 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         assert!(page.contains("<meta property=\"og:title\" content=\"Analyses — CurveBook Documentation\">"));
         assert!(page.contains("<meta property=\"og:description\" content=\"Statistical analyses reference.\">"));
         assert!(page.contains("<meta property=\"og:url\" content=\"https://hausergroup.github.io/curvebook/manual/latest/analyses.html\">"));
-        assert!(page.contains("<meta property=\"og:image\" content=\"https://hausergroup.github.io/curvebook/images/workspace-split-fit.png\">"));
+        assert!(page.contains("<meta property=\"og:image\" content=\"https://hausergroup.github.io/curvebook/images/workspace-layout-dark.png\">"));
         assert!(page.contains("<meta name=\"twitter:card\" content=\"summary_large_image\">"));
         assert!(!page.contains("<script"));
 

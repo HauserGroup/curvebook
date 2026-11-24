@@ -26,17 +26,18 @@ use sitemap::{GeneratedSite, assemble_site};
 use template::{SiteMeta, render_release_redirect_index, render_root_redirect_shim};
 use verify::{parse_minor_dir_version, verify_site};
 
-const USAGE: &str = "usage: cargo xtask docs-site [--check] [--output <dir>] [--release <ver>] [--sitemap]";
+const USAGE: &str = "usage: cargo xtask docs-site [--check] [--output <dir>] [--release <ver> [--refresh-screenshots]] [--sitemap]";
 
 #[derive(Debug, Default)]
 struct CliOptions {
     check: bool,
     output: Option<PathBuf>,
     release: Option<String>,
+    refresh_screenshots: bool,
     sitemap: bool,
 }
 
-/// CLI entrypoint for `cargo xtask docs-site [--check] [--output <dir>] [--release <ver>] [--sitemap]`.
+/// CLI entrypoint for `cargo xtask docs-site [--check] [--output <dir>] [--release <ver> [--refresh-screenshots]] [--sitemap]`.
 pub fn run_cli(root: &Path, args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
@@ -46,19 +47,32 @@ pub fn run_cli(root: &Path, args: &[String]) -> Result<(), String> {
     let root = root_buf.as_path();
     let opts = parse_args(args)?;
     if opts.sitemap {
-        if opts.check || opts.output.is_some() || opts.release.is_some() {
+        if opts.check || opts.output.is_some() || opts.release.is_some() || opts.refresh_screenshots {
             return Err(format!("`--sitemap` cannot be combined with other options\n{USAGE}"));
         }
         let count = seo::write_sitemap(root)?;
+        seo::write_not_found_page(root)?;
         llms::write_llms_files(root)?;
-        println!("docs-site: wrote {} ({count} URLs), {}, and {}", seo::SITEMAP_REL_PATH, llms::LLMS_TXT_REL_PATH, llms::LLMS_FULL_TXT_REL_PATH);
+        println!(
+            "docs-site: wrote {} ({count} URLs), {}, {}, and {}",
+            seo::SITEMAP_REL_PATH,
+            seo::NOT_FOUND_REL_PATH,
+            llms::LLMS_TXT_REL_PATH,
+            llms::LLMS_FULL_TXT_REL_PATH
+        );
         return Ok(());
     }
     if let Some(ref version) = opts.release {
         if opts.output.is_some() {
             return Err(format!("`--release` and `--output` are mutually exclusive\n{USAGE}"));
         }
+        if opts.refresh_screenshots {
+            crate::screenshots::run(root, &[])?;
+        }
         return run_release_snapshot(root, version, opts.check);
+    }
+    if opts.refresh_screenshots {
+        return Err(format!("`--refresh-screenshots` requires `--release <ver>`\n{USAGE}"));
     }
     let out_dir = opts.output.unwrap_or_else(|| default_output_dir(root));
     if opts.check {
@@ -92,6 +106,8 @@ fn parse_args(args: &[String]) -> Result<CliOptions, String> {
             opts.check = true;
         } else if arg == "--sitemap" {
             opts.sitemap = true;
+        } else if arg == "--refresh-screenshots" {
+            opts.refresh_screenshots = true;
         } else if let Some(val) = arg.strip_prefix("--output=") {
             if val.trim().is_empty() {
                 return Err(format!("--output= requires a directory path\n{USAGE}"));
@@ -218,6 +234,7 @@ fn run_release_snapshot(root: &Path, version_raw: &str, check_after: bool) -> Re
     write_atomic(&root.join("docs/troubleshooting.html"), troubleshooting_shim.as_bytes())
         .map_err(|e| format!("write docs/troubleshooting.html: {e}"))?;
     seo::write_sitemap(root)?;
+    seo::write_not_found_page(root)?;
     llms::write_llms_files(root)?;
 
     if check_after {
