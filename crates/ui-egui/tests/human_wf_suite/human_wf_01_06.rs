@@ -936,3 +936,146 @@ fn wf06_human_prune_descriptive_survival_imputation_reactive() -> TestRes {
     let _ = prune_id;
     run.finish()
 }
+
+// ---------------------------------------------------------------------------
+// R20.4: Five-Stage Dose-Response Split-View Acceptance Proof (pitfalls.md #7)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r20_4_five_stage_dose_response_split_view_acceptance() -> TestRes {
+    use curvebook_ui_egui::egui_shell::driver::{panel_header_baseline_parity, split_targeting_parity, split_unified_datagrid_parity};
+
+    // Stage 1: Empty UiApp -> XY dose-response table via Welcome Hub -> paste 4PL dataset.
+    let mut run = WorkflowRun::start("R20.4-Split-4PL");
+    let fx = dose_response_4pl();
+    let graphs_before = graph_id_set(run.document());
+    let xy_id = run.create_table_via_welcome("welcome.arch.xy", "Dose-Response Split 4PL", &["welcome.stepper.cols.dec", "welcome.subcol.raw"])?;
+    let graph_id = diff_new_graph_for_source(run.document(), &graphs_before, &xy_id)?;
+
+    run.enter_column_title(0, "Agonist_A")?;
+    run.enter_column_title(1, "Agonist_B")?;
+    let data_tsv: String = fx
+        .rows
+        .iter()
+        .map(|row| {
+            let mut cols = vec![format!("{}", row.x)];
+            for series in &row.series_replicates {
+                for &v in series {
+                    cols.push(format!("{v}"));
+                }
+            }
+            cols.join("\t")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    run.click("grid.xcell.0.0")?;
+    run.paste_clipboard(&data_tsv)?;
+
+    // Stage 2: Run 4PL nonlinear curve fit through Analyze modal.
+    let fit_id = run.run_analyze_entry("nonlinear", "analyze.entry.fit.nonlinear")?;
+    run.open_cmd_t()?;
+    run.click("fit.tab.model")?;
+    run.click("fit.eq.item.log_agonist_vs_response_4pl")?;
+    run.commit_modal_ok()?;
+
+    // Stage 3: Select XY DataSheet, open default `Data + Graph` split (auto-pinned Graph Inspector, zero manual pinning).
+    run.select_sheet(&xy_id)?;
+    run.click("toolbar.split")?;
+    run.click("toolbar.split.preset.data_graph")?;
+
+    ensure(run.app().split.enabled, "R20.4 split view must be enabled after Data + Graph preset")?;
+    ensure(run.app().split.inspector_pinned, "Data + Graph preset must auto-pin Graph Inspector with zero manual pinning")?;
+    ensure(
+        run.document().active_sheet_id.as_ref() == Some(&xy_id),
+        format!("active sheet must remain XY DataSheet `{}` in Data + Graph split, got {:?}", xy_id.as_str(), run.document().active_sheet_id),
+    )?;
+    ensure(
+        run.app().split.effective_inspector_target(run.document()) == Some(&graph_id),
+        format!(
+            "effective inspector target must be auto-pinned GraphSheet `{}`, got {:?}",
+            graph_id.as_str(),
+            run.app().split.effective_inspector_target(run.document())
+        ),
+    )?;
+
+    // Verify all three R20.3/R20.4 shell parity gates in split view.
+    run.assert_shell_health("r20_4_split_data_graph")?;
+    let hdr_v = panel_header_baseline_parity(run.frame_meta());
+    ensure(hdr_v.is_empty(), format!("panel_header_baseline_parity violations: {hdr_v:?}"))?;
+    let tgt_v = split_targeting_parity(run.app());
+    ensure(tgt_v.is_empty(), format!("split_targeting_parity violations: {tgt_v:?}"))?;
+    let grid_v = split_unified_datagrid_parity(run.frame_meta());
+    ensure(grid_v.is_empty(), format!("split_unified_datagrid_parity violations: {grid_v:?}"))?;
+
+    // Stage 4: D1 oracle parity against fresh headless Session.
+    let mut ref_sheet = fx.to_data_sheet("ref-r20-4").map_err(|e| e.to_string())?;
+    ref_sheet.title = String::from("Dose-Response Split 4PL");
+    let ref_nl = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
+    let nl_kind = serde_json::to_value(AnalysisKind::NonlinearRegression(ref_nl)).map_err(|e| e.to_string())?;
+
+    run.verify_reference(
+        ReferenceSpec::for_result(fit_id.clone(), move |sess| {
+            sess.execute(
+                "analysis.run",
+                json!({
+                    "source_sheet_id": "ref-r20-4",
+                    "sheet_id": "ref-fit-r20-4",
+                    "kind": nl_kind
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+            sess.execute("graph.create", json!({ "sheet_id": "ref-g-r20-4", "data_sheet_id": "ref-r20-4", "kind": "xy" }))
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_result_id(SheetId::new("ref-fit-r20-4"))
+        .with_graph(graph_id.clone())
+        .ref_graph_id(SheetId::new("ref-g-r20-4"))
+        .scalar("LogEC50", Some(0), 1e-4, 1e-4)
+        .scalar("HillSlope", Some(0), 1e-4, 1e-4)
+        .scalar("R2", None, 1e-6, 1e-6),
+    )?;
+
+    // Stage 5a: Edit a cell directly in the live split DataGrid -> live 4PL refit + SVG delta while split & pin stay intact.
+    let fit_check_id = fit_id.clone();
+    run.live_edit_all(
+        LiveEditTarget::gui(|wf| wf.enter_grid_cell(4, 0, 0, "45.0")),
+        vec![
+            LiveEditExpectation::scalar_changed(fit_id.clone(), "LogEC50", Some(0), 1e-4),
+            LiveEditExpectation::scalar_changed(fit_id, "R2", None, 1e-5),
+            LiveEditExpectation::graph_svg_changed(graph_id.clone()),
+            LiveEditExpectation::custom(move |_before, _after, doc| {
+                let rs = doc.result_sheet(&fit_check_id).ok_or_else(|| String::from("missing 4PL ResultSheet after split edit"))?;
+                if rs.status != ResultStatus::UpToDate {
+                    return Err(format!("expected UpToDate 4PL fit after split DataGrid edit, got {:?}", rs.status));
+                }
+                Ok(())
+            }),
+        ],
+    )?;
+
+    // Stage 5b: Adjust Graph Inspector controls while DataSheet stays active and GraphSheet remains auto-pinned.
+    ensure(run.app().split.enabled && run.app().split.inspector_pinned, "split and auto-pin must persist after live DataGrid edit")?;
+    ensure(run.document().active_sheet_id.as_ref() == Some(&xy_id), "active sheet must remain XY DataSheet before Graph Inspector edit")?;
+    run.click("inspector.graph.shape.Square")?;
+    let gs_after = run.document().graph_sheet(&graph_id).ok_or_else(|| String::from("missing GraphSheet after inspector edit"))?;
+    let first_marker = gs_after.spec.series.first().and_then(|s| match &s.gdo {
+        curvebook_doc::GraphicalDataObject::ScatterAndLine { marker: Some(m), .. } => Some(m.shape),
+        _ => None,
+    });
+    ensure(
+        first_marker == Some(MarkerShape::Square),
+        format!("expected Graph Inspector shape control to mutate pinned GraphSheet `{}` to Square, got {first_marker:?}", graph_id.as_str()),
+    )?;
+    ensure(
+        run.document().active_sheet_id.as_ref() == Some(&xy_id),
+        "adjusting pinned Graph Inspector control must NOT steal active_sheet_id from DataSheet",
+    )?;
+    ensure(
+        run.app().split.effective_inspector_target(run.document()) == Some(&graph_id),
+        "Graph Inspector target must remain pinned to GraphSheet after control edit",
+    )?;
+
+    run.finish()
+}

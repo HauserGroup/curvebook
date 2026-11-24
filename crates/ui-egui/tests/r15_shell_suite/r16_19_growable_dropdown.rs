@@ -509,7 +509,8 @@ fn human_path_split_selectors_grow_while_open() -> Result<(), Box<dyn std::error
     assert_eq!(driver.frame_meta().find_by_widget_id("split.primary_selector").map(|e| e.label.as_str()), Some("Cohort 7"));
 
     // Now exercise split.secondary_selector with a long sheet title in a narrow 640x480 viewport to verify single-line ellipsis + parity.
-    let col_long = make_column_sheet("col-long", "Very Long Experimental Dose Cohort Title", 9.0)?;
+    let long_title = "Very Long Experimental Dose Cohort Title With Extra Replicate Metadata And Assay Notes";
+    let col_long = make_column_sheet("col-long", long_title, 9.0)?;
     {
         let mut next_doc = driver.state().app.document().clone();
         next_doc.data_sheets.push(col_long);
@@ -520,17 +521,17 @@ fn human_path_split_selectors_grow_while_open() -> Result<(), Box<dyn std::error
     driver.click_widget_id("split.secondary_selector")?;
     let parity_sec = driver.verify_pixel_to_hit_box_parity();
     assert!(parity_sec.is_clean(), "open split.secondary_selector parity failed: {:?}", parity_sec.violations);
-    let long_pos = find_accesskit_center_by_label(&driver, "[Data] Very Long Experimental Dose Cohort Title")?;
+    let long_pos = find_accesskit_center_by_label(&driver, &format!("[Data] {long_title}"))?;
     driver.click_at(long_pos)?;
     assert_eq!(
         driver.state().app.split.secondary_sheet_id.as_ref().map(SheetId::as_str),
         Some("col-long"),
         "split.secondary_selector must switch secondary_sheet_id to col-long"
     );
-    driver.set_viewport(ViewportMetrics::new(640.0, 480.0, 1.0));
+    driver.set_viewport(ViewportMetrics::new(640.0, 640.0, 1.0));
     let parity_narrow = driver.verify_pixel_to_hit_box_parity();
-    assert!(parity_narrow.is_clean(), "narrow 640x480 split selectors parity failed: {:?}", parity_narrow.violations);
-    driver.verify_ellipsis_tooltip_and_accesskit("split.secondary_selector", "Very Long Experimental Dose Cohort Title")?;
+    assert!(parity_narrow.is_clean(), "narrow 640x640 split selectors parity failed: {:?}", parity_narrow.violations);
+    driver.verify_ellipsis_tooltip_and_accesskit("split.secondary_selector", long_title)?;
 
     Ok(())
 }

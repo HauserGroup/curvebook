@@ -89,16 +89,24 @@ pub struct CanvasSceneRenderSlot {
     pub layout_return_breadcrumb: Option<SheetId>,
 }
 
-/// Per-sheet persistent viewport pan & selection state (`FA-SEC16-10`).
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Per-sheet persistent viewport pan, Fit zoom, & selection state (`FA-SEC16-10`, `R20.4`).
+#[derive(Debug, Clone, PartialEq)]
 pub struct CanvasPerSheetViewportState {
     pub pan_pt: [f32; 2],
     pub selected_panel_index: Option<usize>,
     pub selected_graph_annotation: Option<usize>,
+    pub fit_zoom_active: bool,
+    pub last_fit_scale: f32,
 }
 
-/// Persistent `egui_shell` viewport state for `GraphSheet` and `LayoutSheet` scenes (`R15.3`).
-#[derive(Debug, Clone, Default, PartialEq)]
+impl Default for CanvasPerSheetViewportState {
+    fn default() -> Self {
+        Self { pan_pt: [0.0, 0.0], selected_panel_index: None, selected_graph_annotation: None, fit_zoom_active: true, last_fit_scale: 1.0 }
+    }
+}
+
+/// Persistent `egui_shell` viewport state for `GraphSheet` and `LayoutSheet` scenes (`R15.3`, `R20.4`).
+#[derive(Debug, Clone, PartialEq)]
 pub struct CanvasViewEguiState {
     pub slot: CanvasSceneRenderSlot,
     pub hover_readout: Option<CanvasHoverReadout>,
@@ -127,6 +135,39 @@ pub struct CanvasViewEguiState {
     pub active_viewport_sheet: Option<SheetId>,
     /// Saved pan & selection state keyed per [`SheetId`].
     pub sheet_viewports: BTreeMap<SheetId, CanvasPerSheetViewportState>,
+    /// Whether `Fit` zoom is currently active on this viewport (`true` on open; recalculates on resize/split-drag;
+    /// manual zoom overrides exit `Fit` and persist until `Fit` is re-selected; `R20.4`).
+    pub fit_zoom_active: bool,
+    /// Cached `fit_scale` from the most recent `Fit` calculation, anchored when manual zoom takes over.
+    pub last_fit_scale: f32,
+}
+
+impl Default for CanvasViewEguiState {
+    fn default() -> Self {
+        Self {
+            slot: CanvasSceneRenderSlot::default(),
+            hover_readout: None,
+            pan_pt: [0.0, 0.0],
+            selected_panel_index: None,
+            active_snap_guides: Vec::new(),
+            layout_drag: None,
+            last_snap_readout: None,
+            km_at_risk_rows: 0,
+            tex_equation_count: 0,
+            synchronous_raster: false,
+            layout_context_menu: None,
+            selected_graph_annotation: None,
+            graph_context_menu: None,
+            image_gesture: None,
+            last_active_paper_sheet_id: None,
+            last_paper_rect_pt: None,
+            last_scene_size_pt: None,
+            active_viewport_sheet: None,
+            sheet_viewports: BTreeMap::new(),
+            fit_zoom_active: true,
+            last_fit_scale: 1.0,
+        }
+    }
 }
 
 /// Input bundle passed to [`render_canvas_view`] (keeping argument count within `<= 7`).
@@ -515,7 +556,10 @@ pub fn render_canvas_view_for_sheet(
     let zoom = (app.canvas_dialogs.canvas.zoom as f32).clamp(MIN_ZOOM as f32, MAX_ZOOM as f32);
     let fit_scale =
         ((mat_rect.width() - 28.0).max(40.0) / scene_w_pt).min((mat_rect.height() - 28.0 - km_reserve_h).max(40.0) / scene_h_pt).clamp(0.2, 4.0);
-    let eff_scale = fit_scale * zoom;
+    if state.fit_zoom_active {
+        state.last_fit_scale = fit_scale;
+    }
+    let eff_scale = if state.fit_zoom_active { fit_scale } else { (state.last_fit_scale.max(0.2) * zoom).clamp(0.1, 8.0) };
     let paper_size = vec2(scene_w_pt * eff_scale, scene_h_pt * eff_scale);
     let pan_x = app.canvas_dialogs.canvas.pan_pt.x as f32 + state.pan_pt[0];
     let pan_y = app.canvas_dialogs.canvas.pan_pt.y as f32 + state.pan_pt[1];
@@ -626,6 +670,8 @@ pub fn render_canvas_view_for_sheet(
             pan_pt: state.pan_pt,
             selected_panel_index: state.selected_panel_index,
             selected_graph_annotation: state.selected_graph_annotation,
+            fit_zoom_active: state.fit_zoom_active,
+            last_fit_scale: state.last_fit_scale,
         },
     );
 
@@ -645,6 +691,8 @@ fn sync_canvas_sheet_viewport_state(state: &mut CanvasViewEguiState, doc: &Proje
                 pan_pt: state.pan_pt,
                 selected_panel_index: state.selected_panel_index,
                 selected_graph_annotation: state.selected_graph_annotation,
+                fit_zoom_active: state.fit_zoom_active,
+                last_fit_scale: state.last_fit_scale,
             },
         );
     }
@@ -652,10 +700,14 @@ fn sync_canvas_sheet_viewport_state(state: &mut CanvasViewEguiState, doc: &Proje
         state.pan_pt = saved.pan_pt;
         state.selected_panel_index = saved.selected_panel_index;
         state.selected_graph_annotation = saved.selected_graph_annotation;
+        state.fit_zoom_active = saved.fit_zoom_active;
+        state.last_fit_scale = saved.last_fit_scale;
     } else if state.active_viewport_sheet.is_some() {
         state.pan_pt = [0.0, 0.0];
         state.selected_panel_index = None;
         state.selected_graph_annotation = None;
+        state.fit_zoom_active = true;
+        state.last_fit_scale = 1.0;
     }
     state.active_viewport_sheet = Some(target_id.clone());
 }

@@ -1180,8 +1180,15 @@ fn render_footer_center_readout(
     } else if is_welcome {
         String::from("Welcome Hub")
     } else if let Some(sid) = doc.active_sheet_id.as_ref() {
-        let title = doc_sheet_title(doc, sid).unwrap_or_else(|| sid.as_str());
-        format!("{} — {title}", tr_or_fallback(locale, "w6.view.status.ready", "Ready"))
+        if let Some([w_pt, h_pt]) = views.canvas_view.last_scene_size_pt
+            && (doc.graph_sheet(sid).is_some() || doc.layout_sheet(sid).is_some())
+        {
+            let fit_tag = if views.canvas_view.fit_zoom_active { "Fit" } else { "Manual" };
+            format!("{w_pt:.0} × {h_pt:.0} pt · {fit_tag}")
+        } else {
+            let title = doc_sheet_title(doc, sid).unwrap_or_else(|| sid.as_str());
+            title.to_owned()
+        }
     } else {
         String::from(tr_or_fallback(locale, "w6.view.status.ready", "Ready"))
     };
@@ -1215,7 +1222,7 @@ fn render_footer_trailing_controls(
                     tooltip: "Fit canvas to viewport (ui.zoom.fitSheet)",
                     max_w: 34.0,
                     min_w: 26.0,
-                    selected: false,
+                    selected: app.egui_views.canvas_view.fit_zoom_active,
                     enabled: ctx_in.enabled,
                     accent_override: None,
                     widget_id: "status.zoom.fit",

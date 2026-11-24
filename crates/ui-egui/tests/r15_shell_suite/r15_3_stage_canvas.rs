@@ -1191,3 +1191,122 @@ fn da_05_06_result_tabs_overflow_escape_disabled_reset_and_scroll() -> Result<()
     );
     Ok(())
 }
+
+#[test]
+fn r20_4_fit_zoom_contract_and_wcag_258_spacing_equivalent_verification() -> Result<(), Box<dyn std::error::Error>> {
+    // Part A: Fit zoom contract on GraphSheet and LayoutSheet.
+    let mut app = make_full_project_app()?;
+    app.execute_command("sheet.select", json!({ "sheet_id": "g-1" }))?;
+    app.sync_views();
+
+    let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(
+        StageHarness::new(app),
+        ViewportMetrics::new(1440.0, 900.0, 1.0),
+        Tokens::default(),
+        build_driver_font_definitions(),
+        |ui, meta, st| {
+            let _ = render_egui_shell_frame(ui, &st.app, &mut st.views, meta, &mut st.intents);
+        },
+    );
+    driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+    driver.set_post_frame_hook(|st, settled| {
+        if settled {
+            st.app.egui_views = st.views.clone();
+            let res = st.intents.commit_if_settled(&mut st.app, false);
+            assert!(res.is_ok(), "intent commit failed: {res:?}");
+            st.views = st.app.egui_views.clone();
+        } else {
+            st.intents.clear();
+        }
+    });
+    driver.run_settled();
+
+    // 1. Fit is active on open for GraphSheet and recalculates paper_rect on window resize.
+    assert!(driver.state().app.egui_views.canvas_view.fit_zoom_active, "Fit zoom must be active on GraphSheet open");
+    let paper_wide = driver.state().app.egui_views.canvas_view.last_paper_rect_pt.expect("wide graph paper rect");
+    driver.set_viewport(ViewportMetrics::new(1040.0, 680.0, 1.0));
+    driver.run_settled();
+    let paper_narrow = driver.state().app.egui_views.canvas_view.last_paper_rect_pt.expect("narrow graph paper rect");
+    assert!(driver.state().app.egui_views.canvas_view.fit_zoom_active, "Fit zoom must stay active across window resize");
+    assert!(
+        paper_narrow.width() < paper_wide.width() - 5.0 || paper_narrow.height() < paper_wide.height() - 5.0,
+        "Fit zoom must recalculate paper_rect on resize: wide={paper_wide:?}, narrow={paper_narrow:?}"
+    );
+
+    // 2. Manual zoom exits Fit and persists across resize; clicking Fit re-enters Fit.
+    driver.click_widget_id("status.zoom.in")?;
+    assert!(!driver.state().app.egui_views.canvas_view.fit_zoom_active, "manual zoom must exit Fit mode");
+    let manual_zoom = driver.state().app.canvas_dialogs.canvas.zoom;
+    driver.set_viewport(ViewportMetrics::new(1280.0, 820.0, 1.0));
+    driver.run_settled();
+    assert!(!driver.state().app.egui_views.canvas_view.fit_zoom_active, "manual zoom must persist across resize");
+    assert!((driver.state().app.canvas_dialogs.canvas.zoom - manual_zoom).abs() < 1e-4, "manual zoom level must persist");
+    driver.click_widget_id("status.zoom.fit")?;
+    assert!(driver.state().app.egui_views.canvas_view.fit_zoom_active, "clicking Fit must re-enter Fit mode");
+
+    // 3. LayoutSheet also opens in Fit mode and exposes >= 24x24 pt numeric panel bounds (WCAG 2.2 SC 2.5.8 Equivalent).
+    driver.click_widget_id("nav.chip.layouts")?;
+    driver.click_widget_id("nav.sheet.lay-1")?;
+    assert!(driver.state().app.egui_views.canvas_view.fit_zoom_active, "Fit zoom must be active on LayoutSheet open");
+    let panel_w = driver
+        .frame_meta()
+        .find_by_widget_id("inspector.layout.panel.width_pt")
+        .expect("Layout inspector must expose numeric panel width equivalent");
+    let panel_h = driver
+        .frame_meta()
+        .find_by_widget_id("inspector.layout.panel.height_pt")
+        .expect("Layout inspector must expose numeric panel height equivalent");
+    assert!(
+        panel_w.clipped_rect.width() >= 24.0 && panel_w.clipped_rect.height() >= 24.0,
+        "inspector.layout.panel.width_pt must be >= 24x24 pt, got {:?}",
+        panel_w.clipped_rect
+    );
+    assert!(
+        panel_h.clipped_rect.width() >= 24.0 && panel_h.clipped_rect.height() >= 24.0,
+        "inspector.layout.panel.height_pt must be >= 24x24 pt, got {:?}",
+        panel_h.clipped_rect
+    );
+
+    // Part B: WCAG 2.2 SC 2.5.8 Spacing verification for Role::Splitter sashes vs adjacent controls.
+    driver.click_widget_id("nav.chip.all")?;
+    driver.click_widget_id("nav.sheet.col-1")?;
+    driver.click_widget_id("toolbar.split")?;
+    driver.click_widget_id("toolbar.split.preset.data_graph")?;
+    let meta = driver.frame_meta();
+    let splitters: Vec<_> = meta.entries.iter().filter(|e| e.enabled && e.role.eq_ignore_ascii_case("splitter")).collect();
+    assert!(!splitters.is_empty(), "expected active Role::Splitter sashes in split workspace");
+    for sp in &splitters {
+        for other in &meta.entries {
+            if !other.enabled || other.widget_id == sp.widget_id || other.z_layer != sp.z_layer {
+                continue;
+            }
+            if matches!(other.role.to_ascii_lowercase().as_str(), "region" | "label" | "heading" | "group" | "gridcell") {
+                continue;
+            }
+            let overlap = sp.clipped_rect.intersect(other.clipped_rect);
+            assert!(
+                overlap.width() <= 1.0 || overlap.height() <= 1.0,
+                "WCAG 2.2 SC 2.5.8 Spacing violation: splitter `{}` ({:?}) overlaps adjacent control `{}` ({:?})",
+                sp.widget_id,
+                sp.clipped_rect,
+                other.widget_id,
+                other.clipped_rect
+            );
+        }
+    }
+
+    // Part C: WCAG 2.2 SC 2.5.8 Equivalent verification for FormatImage numeric width/height/rotation inputs.
+    driver.state_mut().app.canvas_dialogs.active_dialog =
+        ActiveDialog::FormatImage { sheet_id: SheetId::new("g-1"), target_index: 0, is_layout: false };
+    driver.run_settled();
+    for wid in ["format_image.width_pt", "format_image.height_pt", "format_image.rotation_deg"] {
+        let entry = driver.frame_meta().find_by_widget_id(wid).unwrap_or_else(|| panic!("missing {wid} in FormatImage dialog"));
+        assert!(
+            entry.clipped_rect.width() >= 24.0 && entry.clipped_rect.height() >= 24.0,
+            "WCAG 2.2 SC 2.5.8 Equivalent violation: `{wid}` must be >= 24x24 pt, got {:?}",
+            entry.clipped_rect
+        );
+    }
+
+    Ok(())
+}

@@ -509,7 +509,7 @@ pub(super) fn segmented_control(
     }
     let m = tokens.metrics;
     let count = options.len();
-    let total_w = ui.available_width().max(m.min_hit_target_pt * (count as f32));
+    let total_w = ui.available_width().max(m.min_hit_target_pt * (count as f32) + m.space_xs);
     let track_h = m.min_hit_target_pt + m.space_xs;
     let (track_rect, _) = ui.allocate_exact_size(Vec2::new(total_w, track_h), Sense::hover());
     let track_r = CornerRadius::same(m.radius_md);

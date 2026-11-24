@@ -405,6 +405,8 @@ pub(super) fn render_page_layout_composer_studio(
     let can_reorder = ctx_in.enabled && spec.items.len() >= 2;
     let target_panel_idx = ctx_in.selected_panel_index.unwrap_or(0).min(spec.items.len().saturating_sub(1));
 
+    render_selected_panel_bounds_controls(ui, ls, target_panel_idx, ctx_in, meta, intents);
+
     ui.add_space(6.0);
     widgets::subheader(ui, "Panel Z-Order & Scaling");
     ui.horizontal_wrapped(|ui| {
@@ -468,7 +470,7 @@ pub(super) fn render_page_layout_composer_studio(
         tokens,
         meta,
         &StudioButtonSpec {
-            label: "More… Layout Composer",
+            label: "Layout Composer…",
             tooltip: "Open full Page Layout Composer dialog",
             selected: false,
             enabled: ctx_in.enabled,
@@ -547,6 +549,105 @@ fn render_layout_add_panel_controls(
                     }),
                 );
             }
+        }
+    });
+}
+
+fn layout_item_bounds_mut(item: &mut LayoutItem) -> Option<&mut RectPt> {
+    match item {
+        LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::EmbeddedImage { bounds_pt, .. } => {
+            Some(bounds_pt)
+        }
+        _ => None,
+    }
+}
+
+fn render_selected_panel_bounds_controls(
+    ui: &mut egui::Ui,
+    ls: &LayoutSheet,
+    target_panel_idx: usize,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let Some(item) = ls.spec.items.get(target_panel_idx) else {
+        return;
+    };
+    let bounds = match item {
+        LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::EmbeddedImage { bounds_pt, .. } => *bounds_pt,
+        _ => return,
+    };
+    ui.add_space(6.0);
+    widgets::subheader(ui, "Selected Panel Size");
+    let enabled = ctx_in.enabled;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+        ui.label("W:");
+        let mut w_pt = bounds.width;
+        let w_sized = ui
+            .add_enabled_ui(enabled, |ui| {
+                ui.add_sized(Vec2::new(68.0, 24.0), egui::DragValue::new(&mut w_pt).range(24.0..=2000.0).speed(1.0).suffix(" pt"))
+            })
+            .inner;
+        w_sized.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Width (pt)"));
+        meta.record_response(
+            ui,
+            &w_sized,
+            crate::egui_shell::FrameInspectEntryInput {
+                widget_id: "inspector.layout.panel.width_pt",
+                role: "spinbutton",
+                label: "Panel Width (pt)",
+                command_id: Some("layout.setSpec"),
+                value: Some(json!({ "width_pt": w_pt, "panel_index": target_panel_idx })),
+                enabled,
+                disabled_reason: None,
+                z_layer: crate::inspect::ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+        if w_sized.changed() && enabled {
+            let mut next_items = ls.spec.items.clone();
+            if let Some(it) = next_items.get_mut(target_panel_idx)
+                && let Some(b) = layout_item_bounds_mut(it)
+            {
+                b.width = w_pt.clamp(24.0, 2000.0);
+            }
+            intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "spec": { "items": next_items } }));
+        }
+
+        ui.label("H:");
+        let mut h_pt = bounds.height;
+        let h_sized = ui
+            .add_enabled_ui(enabled, |ui| {
+                ui.add_sized(Vec2::new(68.0, 24.0), egui::DragValue::new(&mut h_pt).range(24.0..=2000.0).speed(1.0).suffix(" pt"))
+            })
+            .inner;
+        h_sized.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Height (pt)"));
+        meta.record_response(
+            ui,
+            &h_sized,
+            crate::egui_shell::FrameInspectEntryInput {
+                widget_id: "inspector.layout.panel.height_pt",
+                role: "spinbutton",
+                label: "Panel Height (pt)",
+                command_id: Some("layout.setSpec"),
+                value: Some(json!({ "height_pt": h_pt, "panel_index": target_panel_idx })),
+                enabled,
+                disabled_reason: None,
+                z_layer: crate::inspect::ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+        if h_sized.changed() && enabled {
+            let mut next_items = ls.spec.items.clone();
+            if let Some(it) = next_items.get_mut(target_panel_idx)
+                && let Some(b) = layout_item_bounds_mut(it)
+            {
+                b.height = h_pt.clamp(24.0, 2000.0);
+            }
+            intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "spec": { "items": next_items } }));
         }
     });
 }

@@ -424,7 +424,7 @@ fn render_format_image_geometry(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &
         ui.set_max_width(gctx.body_w);
         ui.label("W:");
         let mut w_pt = fi.bounds_pt.width;
-        let w_dv = ui.add(egui::DragValue::new(&mut w_pt).range(8.0..=2000.0).speed(1.0).suffix(" pt"));
+        let w_dv = ui.add_sized(egui::vec2(72.0, 24.0), egui::DragValue::new(&mut w_pt).range(8.0..=2000.0).speed(1.0).suffix(" pt"));
         record_input(ui, &w_dv, gctx.meta, "format_image.width_pt", "Width", &format!("{w_pt:.1}"), true);
         if w_dv.changed() {
             let mut next = fi.clone();
@@ -437,7 +437,7 @@ fn render_format_image_geometry(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &
 
         ui.label("H:");
         let mut h_pt = fi.bounds_pt.height;
-        let h_dv = ui.add(egui::DragValue::new(&mut h_pt).range(8.0..=2000.0).speed(1.0).suffix(" pt"));
+        let h_dv = ui.add_sized(egui::vec2(72.0, 24.0), egui::DragValue::new(&mut h_pt).range(8.0..=2000.0).speed(1.0).suffix(" pt"));
         record_input(ui, &h_dv, gctx.meta, "format_image.height_pt", "Height", &format!("{h_pt:.1}"), true);
         if h_dv.changed() {
             let mut next = fi.clone();
@@ -486,7 +486,7 @@ fn render_format_image_geometry(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &
             }
         }
         let mut rot = fi.rotation_deg;
-        let rot_dv = ui.add(egui::DragValue::new(&mut rot).range(-360.0..=360.0).speed(1.0).suffix("°"));
+        let rot_dv = ui.add_sized(egui::vec2(72.0, 24.0), egui::DragValue::new(&mut rot).range(-360.0..=360.0).speed(1.0).suffix("°"));
         record_input(ui, &rot_dv, gctx.meta, "format_image.rotation_deg", "Angle", &format!("{rot:.1}"), true);
         if rot_dv.changed() {
             let mut next = fi.clone();

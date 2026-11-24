@@ -695,29 +695,31 @@ fn render_navigator_pane(
     });
     ui.add_space(4.0);
 
-    // Kind filter chips (2 crisp rows of 3 chips so 240 pt never overflows horizontally)
-    let chip_w = ((avail_w - 8.0) / 3.0).max(40.0);
-    for row_chips in NavigatorKindChip::ALL.chunks(3) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            for &chip in row_chips {
-                let selected = state.kind_chip == chip;
-                let resp = render_compact_chip(
-                    ui,
-                    CompactChipSpec { max_w: chip_w, widget_id: chip.widget_id(), label: chip.label(locale), selected, enabled },
-                    tokens,
-                    meta,
-                );
-                if resp.clicked() && enabled {
-                    state.kind_chip = chip;
-                }
-            }
-        });
-        ui.add_space(2.0);
+    // Compact single-row inline kind filter on `surface_recessed` (retiring stacked 2x3 bordered chips, R20.4).
+    let chip_labels = [
+        (NavigatorKindChip::All, "All"),
+        (NavigatorKindChip::Data, "D"),
+        (NavigatorKindChip::Info, "I"),
+        (NavigatorKindChip::Results, "R"),
+        (NavigatorKindChip::Graphs, "G"),
+        (NavigatorKindChip::Layouts, "L"),
+    ];
+    let filter_opts: Vec<super::ui_kit::SegmentedOption<'_>> = chip_labels
+        .iter()
+        .map(|(chip, short)| super::ui_kit::SegmentedOption {
+            widget_id: chip.widget_id(),
+            label: short,
+            tooltip: Some(chip.label(locale)),
+            value: None,
+        })
+        .collect();
+    let cur_chip_idx = chip_labels.iter().position(|(c, _)| *c == state.kind_chip).unwrap_or(0);
+    if let Some(chosen) = super::ui_kit::segmented_control(ui, tokens, meta, &filter_opts, cur_chip_idx, enabled, ZLayer::Workspace) {
+        state.kind_chip = chip_labels[chosen].0;
     }
-    ui.add_space(2.0);
+    ui.add_space(tokens.metrics.space_xs);
     ui.painter().hline(ui.available_rect_before_wrap().x_range(), ui.cursor().top(), Stroke::new(1.0, tokens.divider));
-    ui.add_space(3.0);
+    ui.add_space(tokens.metrics.space_xs);
 
     let visible_ids = collect_visible_sheet_ids(app, state);
     handle_navigator_keyboard(ui, app, state, &ctx_in, &visible_ids, intents);
@@ -976,6 +978,24 @@ fn allocate_visible_slot(ui: &mut egui::Ui, size: Vec2, sense: Sense) -> Option<
     Some(ui.allocate_exact_size(size, sense))
 }
 
+fn draw_disclosure_triangle(painter: &egui::Painter, center: Pos2, collapsed: bool, color: Color32) {
+    let r = 3.2_f32;
+    let stroke = Stroke::new(1.5, color);
+    if collapsed {
+        let top = Pos2::new(center.x - r * 0.45, center.y - r);
+        let tip = Pos2::new(center.x + r * 0.65, center.y);
+        let bot = Pos2::new(center.x - r * 0.45, center.y + r);
+        painter.line_segment([top, tip], stroke);
+        painter.line_segment([tip, bot], stroke);
+    } else {
+        let left = Pos2::new(center.x - r, center.y - r * 0.45);
+        let tip = Pos2::new(center.x, center.y + r * 0.65);
+        let right = Pos2::new(center.x + r, center.y - r * 0.45);
+        painter.line_segment([left, tip], stroke);
+        painter.line_segment([tip, right], stroke);
+    }
+}
+
 fn render_folder_header(ui: &mut egui::Ui, app: &UiApp, spec: FolderHeaderSpec<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
     let FolderHeaderSpec { section, count, collapsed, row_w, tokens, enabled } = spec;
     let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(row_w, 24.0), if enabled { Sense::click() } else { Sense::hover() }) else {
@@ -985,12 +1005,17 @@ fn render_folder_header(ui: &mut egui::Ui, app: &UiApp, spec: FolderHeaderSpec<'
     if enabled {
         super::widgets::paint_hover_row(ui, rect, CornerRadius::same(tokens.metrics.radius_md), resp.hovered(), false, tokens);
     }
-    let arrow = if collapsed { "▸" } else { "▾" };
-    let text = format!("{arrow} {label}");
-    let (galley, elided) =
-        super::ui_kit::elided_galley(ui.painter(), &text, FontId::proportional(11.5), tokens.text_muted, (row_w - 8.0).max(16.0), false);
+    draw_disclosure_triangle(ui.painter(), Pos2::new(rect.left() + 9.0, rect.center().y), collapsed, tokens.icon);
+    let (galley, elided) = super::ui_kit::elided_galley(
+        ui.painter(),
+        &label,
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
+        tokens.text_muted,
+        (row_w - 22.0).max(16.0),
+        false,
+    );
     ui.painter().with_clip_rect(rect.shrink(2.0)).galley(
-        Pos2::new(rect.left() + 4.0, rect.center().y - galley.size().y * 0.5),
+        Pos2::new(rect.left() + 18.0, rect.center().y - galley.size().y * 0.5),
         galley,
         tokens.text_muted,
     );
@@ -1103,14 +1128,7 @@ fn render_navigator_row(
         let tri_rect = Rect::from_min_size(Pos2::new(x_cur, rect.center().y - 8.0), Vec2::splat(16.0));
         let tri_resp =
             ui.interact(tri_rect, ui.scope_id().with(("nested_tri", &entry.sheet_id)), if enabled { Sense::click() } else { Sense::hover() });
-        let tri = if nested_collapsed { "▸" } else { "▾" };
-        ui.painter().text(
-            tri_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            tri,
-            FontId::proportional(tokens.metrics.font_ui_small_pt),
-            tokens.text_muted,
-        );
+        draw_disclosure_triangle(ui.painter(), tri_rect.center(), nested_collapsed, tokens.text_muted);
         if tri_resp.clicked() && enabled {
             if nested_collapsed {
                 state.nested_collapsed_parents.remove(&entry.sheet_id);
@@ -1322,9 +1340,15 @@ fn render_section_new_row(ui: &mut egui::Ui, app: &UiApp, spec: SectionNewRowSpe
     };
 
     let text = if label.starts_with('+') { label.to_owned() } else { format!("+ {label}") };
-    let fg = if row_enabled { tokens.accent } else { tokens.text_disabled };
     let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(row_w, 26.0), if row_enabled { Sense::click() } else { Sense::hover() }) else {
         return;
+    };
+    let fg = if !row_enabled {
+        tokens.text_disabled
+    } else if resp.hovered() {
+        tokens.text_strong
+    } else {
+        tokens.text_muted
     };
     if row_enabled {
         super::widgets::paint_hover_row(ui, rect, CornerRadius::same(tokens.metrics.radius_md), resp.hovered(), false, tokens);
@@ -1474,7 +1498,7 @@ fn render_family_pane(
             draw_sheet_vector_icon(ui.painter(), icon_rect, node.section, None, if in_chain { tokens.accent } else { tokens.icon });
 
             let multi_dep = multi_dependency_badge(doc, &node.sheet_id);
-            let badge_reserve = if multi_dep.is_some() { 28.0 } else { 4.0 };
+            let badge_reserve = if multi_dep.is_some() { 56.0 } else { 4.0 };
             let text_x = icon_rect.right() + 5.0;
             let max_text_w = (rect.right() - text_x - badge_reserve).max(16.0);
             let fg = if in_chain { tokens.text_strong } else { tokens.text_primary };
@@ -1596,16 +1620,16 @@ fn compute_active_chain(doc: &ProjectDocument) -> BTreeSet<SheetId> {
     chain
 }
 
-fn multi_dependency_badge(doc: &ProjectDocument, sheet_id: &SheetId) -> Option<&'static str> {
+fn multi_dependency_badge(doc: &ProjectDocument, sheet_id: &SheetId) -> Option<String> {
     if let Some(g) = doc.graph_sheet(sheet_id)
         && g.spec.series.len() > 1
     {
-        return Some("2+src");
+        return Some(format!("{} sources", g.spec.series.len()));
     }
     if let Some(l) = doc.layout_sheet(sheet_id)
         && l.spec.items.len() > 1
     {
-        return Some("2+src");
+        return Some(format!("{} sources", l.spec.items.len()));
     }
     None
 }
@@ -1865,45 +1889,60 @@ fn paint_row_badges(painter: &egui::Painter, rect: Rect, entry: &NavigatorEntry,
     }
 }
 
-fn draw_sheet_vector_icon(painter: &egui::Painter, rect: Rect, section: SheetSection, arch_lbl: Option<&str>, color: Color32) {
-    painter.rect_stroke(rect, CornerRadius::same(1), Stroke::new(1.0, color), StrokeKind::Inside);
+fn draw_sheet_vector_icon(painter: &egui::Painter, rect: Rect, section: SheetSection, _arch_lbl: Option<&str>, color: Color32) {
+    let r = rect.shrink(1.0);
+    let stroke = Stroke::new(1.25, color);
     match section {
         SheetSection::Data => {
-            let short = arch_lbl.unwrap_or("D");
-            let glyph = if short.starts_with("X") {
-                "XY"
-            } else if short.starts_with("G") {
-                "Gr"
-            } else if short.starts_with("S") {
-                "Sv"
-            } else if short.starts_with("N") {
-                "Ns"
-            } else {
-                "D"
-            };
-            painter.text(rect.center(), egui::Align2::CENTER_CENTER, glyph, FontId::proportional(7.5), color);
+            // Frameless 2x2 table grid icon (header rule + vertical & horizontal dividers).
+            let y_hdr = r.top() + r.height() * 0.34;
+            let y_mid = r.top() + r.height() * 0.68;
+            let x_mid = r.left() + r.width() * 0.45;
+            painter.hline(r.x_range(), r.top(), Stroke::new(1.5, color));
+            painter.hline(r.x_range(), y_hdr, stroke);
+            painter.hline(r.x_range(), y_mid, Stroke::new(1.0, color.linear_multiply(0.75)));
+            painter.vline(x_mid, r.top()..=r.bottom(), Stroke::new(1.0, color.linear_multiply(0.85)));
         }
         SheetSection::Info => {
-            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "i", FontId::proportional(9.0), color);
+            // Frameless info glyph: subtle circle + vertical stem + dot.
+            let c = r.center();
+            let rad = (r.width().min(r.height()) * 0.5).max(3.5);
+            painter.circle_stroke(c, rad, stroke);
+            painter.circle_filled(Pos2::new(c.x, c.y - rad * 0.38), 1.0, color);
+            painter.vline(c.x, (c.y - rad * 0.08)..=(c.y + rad * 0.48), stroke);
         }
         SheetSection::Analyses => {
-            painter.line_segment(
-                [Pos2::new(rect.left() + 2.0, rect.center().y + 1.0), Pos2::new(rect.center().x - 1.0, rect.bottom() - 2.0)],
-                Stroke::new(1.2, color),
-            );
-            painter.line_segment(
-                [Pos2::new(rect.center().x - 1.0, rect.bottom() - 2.0), Pos2::new(rect.right() - 2.0, rect.top() + 2.0)],
-                Stroke::new(1.2, color),
-            );
+            // Frameless analysis bars (three rising columns above a baseline, never a boxed checkmark).
+            painter.hline(r.x_range(), r.bottom(), stroke);
+            let w = r.width();
+            let h = r.height();
+            painter.vline(r.left() + w * 0.22, (r.bottom() - h * 0.42)..=r.bottom(), Stroke::new(1.8, color));
+            painter.vline(r.left() + w * 0.52, (r.bottom() - h * 0.72)..=r.bottom(), Stroke::new(1.8, color));
+            painter.vline(r.left() + w * 0.82, (r.bottom() - h * 0.92)..=r.bottom(), Stroke::new(1.8, color));
         }
         SheetSection::Graphs => {
-            painter.line_segment(
-                [Pos2::new(rect.left() + 2.0, rect.bottom() - 2.0), Pos2::new(rect.right() - 2.0, rect.top() + 2.0)],
-                Stroke::new(1.2, color),
-            );
+            // Frameless L-axes with a rising sigmoidal curve.
+            painter.vline(r.left() + 1.0, r.top()..=r.bottom(), stroke);
+            painter.hline((r.left() + 1.0)..=r.right(), r.bottom(), stroke);
+            let pts = [
+                Pos2::new(r.left() + 2.5, r.bottom() - 1.5),
+                Pos2::new(r.left() + r.width() * 0.42, r.bottom() - r.height() * 0.32),
+                Pos2::new(r.left() + r.width() * 0.68, r.top() + r.height() * 0.30),
+                Pos2::new(r.right() - 0.5, r.top() + 1.0),
+            ];
+            painter.add(egui::Shape::line(pts.to_vec(), Stroke::new(1.35, color)));
         }
         SheetSection::Layouts => {
-            painter.rect_filled(Rect::from_min_size(rect.min + Vec2::splat(2.0), Vec2::splat(4.0)), CornerRadius::ZERO, color);
+            // Frameless multi-panel page mosaic (two side-by-side panels over a wide footer panel).
+            let gap = 2.0;
+            let top_h = (r.height() - gap) * 0.52;
+            let half_w = (r.width() - gap) * 0.5;
+            let tl = Rect::from_min_size(r.min, Vec2::new(half_w, top_h));
+            let tr = Rect::from_min_size(Pos2::new(r.left() + half_w + gap, r.top()), Vec2::new(half_w, top_h));
+            let bot = Rect::from_min_size(Pos2::new(r.left(), r.top() + top_h + gap), Vec2::new(r.width(), r.height() - top_h - gap));
+            painter.rect_stroke(tl, CornerRadius::same(1), stroke, StrokeKind::Inside);
+            painter.rect_stroke(tr, CornerRadius::same(1), stroke, StrokeKind::Inside);
+            painter.rect_stroke(bot, CornerRadius::same(1), stroke, StrokeKind::Inside);
         }
     }
 }

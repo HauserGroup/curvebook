@@ -547,7 +547,11 @@ impl CellTextStyle {
 }
 
 pub(super) fn multi_text_style(pt: f32, mono: bool, color: Color32, align: Align, italic: bool, strike: bool) -> CellTextStyle {
-    let font_id = if mono { egui::FontId::new(pt, egui::FontFamily::Monospace) } else { egui::FontId::proportional(pt) };
+    let font_id = if mono {
+        egui::FontId::new(pt, egui::FontFamily::Name(std::sync::Arc::from(super::super::fonts::ALIGNED_NUMERAL_FONT_FAMILY)))
+    } else {
+        egui::FontId::proportional(pt)
+    };
     CellTextStyle { font_id, color, align, italic, strike }
 }
 

@@ -81,8 +81,9 @@ impl InteractiveClient {
 }
 
 fn find_bounds_in_snapshot(snap: &Value, target_wid: &str) -> Option<[f64; 4]> {
-    for group in ["toolbar", "tabs"] {
-        if let Some(arr) = snap.pointer(&format!("/result/{group}")).and_then(Value::as_array) {
+    let result_obj = snap.pointer("/result").and_then(Value::as_object)?;
+    for value in result_obj.values() {
+        if let Some(arr) = value.as_array() {
             for item in arr {
                 if item.get("widget_id").and_then(Value::as_str) == Some(target_wid)
                     && let Some(bounds) = item.get("bounds").and_then(Value::as_array)
@@ -290,7 +291,7 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
     let offscreen_val = json!({ "result": serde_json::to_value(&offscreen_snap)? });
 
     let mut live_bounds_before = std::collections::HashMap::new();
-    for wid in ["toolbar.home", "toolbar.command_palette", "toolbar.analyze", "nav.sheet.ds-qa3"] {
+    for wid in ["toolbar.home", "toolbar.command_palette", "toolbar.analyze", "toolbar.split"] {
         let live_entry = native_app
             .inspect_meta()
             .find_by_widget_id(wid)

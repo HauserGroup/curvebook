@@ -1115,7 +1115,7 @@ fn render_result_data_row(
             } else {
                 tokens.text_primary
             };
-            let font = FontId::monospace(tokens.metrics.font_grid_numeral_pt - 1.0);
+            let font = super::fonts::aligned_numeral_font_id(ui.ctx(), tokens);
             let elided = paint_table_cell_text(ui, cell_rect, &fmt.text, col, font, egui::Align::RIGHT, layout.visible_clip);
             if elided || fmt.is_ambiguous {
                 let tip = if fmt.is_ambiguous {

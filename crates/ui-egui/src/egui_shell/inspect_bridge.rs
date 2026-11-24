@@ -3133,6 +3133,11 @@ pub fn execute_switch_tab_fallback(app: &mut UiApp, target: &ParsedSwitchTabTarg
     match target {
         ParsedSwitchTabTarget::Sheet(sheet_id) => {
             let _ = app.execute_session_ui_cmd("sheet.select", json!({ "sheet_id": sheet_id }))?;
+            let doc = app.document().clone();
+            if let Some(active_id) = doc.active_sheet_id.clone() {
+                app.split.sync_pin_invariants(&doc);
+                app.canvas_dialogs.on_sheet_selected_with_auto_modal(&doc, &active_id, false);
+            }
             Ok(json!({ "switched": true, "sheet_id": sheet_id, "widget_id": format!("nav.sheet.{sheet_id}") }))
         }
         ParsedSwitchTabTarget::Tab(tab_id) => {

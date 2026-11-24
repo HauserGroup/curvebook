@@ -237,12 +237,16 @@ fn apply_shell_workspace_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
             let clamped = if zoom.is_finite() { zoom.clamp(0.1, 8.0) } else { 1.0 };
             app.canvas_dialogs.canvas.zoom = clamped;
             app.canvas_dialogs.pan_zoom.zoom = clamped;
+            app.egui_views.canvas_view.fit_zoom_active = false;
+            app.egui_views.center_stage.secondary_canvas_view.fit_zoom_active = false;
         }
         UiIntent::CanvasPinchZoom { scale_delta, anchor_pt } => {
             app.canvas_dialogs.pan_zoom.apply_pinch_zoom(scale_delta, anchor_pt);
             app.canvas_dialogs.canvas.zoom = app.canvas_dialogs.pan_zoom.zoom;
             app.canvas_dialogs.canvas.pan_pt =
                 curvebook_chart::PointPt::new(app.canvas_dialogs.pan_zoom.pan_pt[0], app.canvas_dialogs.pan_zoom.pan_pt[1]);
+            app.egui_views.canvas_view.fit_zoom_active = false;
+            app.egui_views.center_stage.secondary_canvas_view.fit_zoom_active = false;
         }
         UiIntent::CanvasPanDelta { delta_x, delta_y } => {
             app.canvas_dialogs.pan_zoom.apply_pan_delta([delta_x, delta_y], 0.016);

@@ -320,7 +320,7 @@ pub fn segmented_control(ui: &mut Ui, options: &[&str], selected: usize) -> Opti
     let m = t.metrics;
     let enabled = ui.is_enabled();
     let count = options.len();
-    let total_w = ui.available_width().max(m.min_hit_target_pt * (count as f32));
+    let total_w = ui.available_width().max(m.min_hit_target_pt * (count as f32) + m.space_xs);
     let track_h = m.min_hit_target_pt + m.space_xs;
     let (track_rect, _) = ui.allocate_exact_size(vec2(total_w, track_h), Sense::hover());
     let track_r = CornerRadius::same(m.radius_md);

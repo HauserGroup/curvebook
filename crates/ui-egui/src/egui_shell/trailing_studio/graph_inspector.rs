@@ -72,6 +72,14 @@ fn set_series_primary_color(series: &mut SeriesSpec, color: Rgba8) {
     }
 }
 
+fn current_series_marker_shape(series: &SeriesSpec) -> Option<MarkerShape> {
+    match &series.gdo {
+        GraphicalDataObject::ScatterAndLine { marker: Some(m), .. } | GraphicalDataObject::BeforeAfterLines { marker: Some(m), .. } => Some(m.shape),
+        GraphicalDataObject::AlignedDotPlot { marker, .. } => Some(marker.shape),
+        _ => None,
+    }
+}
+
 fn set_series_marker_shape(series: &mut SeriesSpec, shape: MarkerShape) -> bool {
     let apply_marker = |opt: &mut MarkerStyle| {
         opt.shape = shape;
@@ -153,6 +161,78 @@ fn render_graph_orientation_chips(
     });
 }
 
+fn render_graph_studio_tabs(
+    ui: &mut egui::Ui,
+    state: &mut TrailingStudioEguiState,
+    tokens: &crate::egui_shell::Tokens,
+    enabled: bool,
+    meta: &mut FrameInspectMeta,
+) {
+    let tab_kinds = [GraphStudioTab::Data, GraphStudioTab::Axes, GraphStudioTab::Legends, GraphStudioTab::Annotations, GraphStudioTab::Canvas];
+    let tab_specs = [
+        crate::egui_shell::ui_kit::UnderlineTabSpec { widget_id: "inspector.graph.tab.data", label: "Data", tooltip: Some("Data & Series") },
+        crate::egui_shell::ui_kit::UnderlineTabSpec { widget_id: "inspector.graph.tab.axes", label: "Axes", tooltip: Some("Axes & Frame") },
+        crate::egui_shell::ui_kit::UnderlineTabSpec { widget_id: "inspector.graph.tab.legends", label: "Legend", tooltip: Some("Legend") },
+        crate::egui_shell::ui_kit::UnderlineTabSpec {
+            widget_id: "inspector.graph.tab.annotations",
+            label: "Annotations",
+            tooltip: Some("Annotations & Pairwise"),
+        },
+        crate::egui_shell::ui_kit::UnderlineTabSpec { widget_id: "inspector.graph.tab.canvas", label: "Canvas", tooltip: Some("Canvas & Export") },
+    ];
+    let cur_tab_idx = tab_kinds.iter().position(|&k| k == state.graph_tab).unwrap_or(0);
+    if let Some(clicked_idx) =
+        crate::egui_shell::ui_kit::underline_tab_bar(ui, tokens, meta, &tab_specs, cur_tab_idx, crate::inspect::ZLayer::Workspace)
+        && enabled
+    {
+        state.graph_tab = tab_kinds[clicked_idx];
+    }
+    ui.add_space(tokens.metrics.space_xs);
+}
+
+fn render_graph_series_selector(
+    ui: &mut egui::Ui,
+    gs: &GraphSheet,
+    state: &mut TrailingStudioEguiState,
+    tokens: &crate::egui_shell::Tokens,
+    enabled: bool,
+    meta: &mut FrameInspectMeta,
+) {
+    if gs.spec.series.is_empty() {
+        return;
+    }
+    let sel_idx = state.graph_series_index;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+        for (idx, s) in gs.spec.series.iter().enumerate() {
+            let base_lbl = s.legend_label.clone().unwrap_or_else(|| format!("Series {}", idx + 1));
+            let lbl = format!("● {base_lbl}");
+            let rgba = series_primary_color(s);
+            let swatch = Color32::from_rgba_unmultiplied(rgba.r, rgba.g, rgba.b, 255);
+            let wid = format!("inspector.graph.series.{idx}");
+            if studio_chip(
+                ui,
+                tokens,
+                meta,
+                &StudioChipSpec {
+                    label: &lbl,
+                    tooltip: &base_lbl,
+                    max_w: 120.0,
+                    selected: idx == sel_idx,
+                    enabled,
+                    border_override: Some(swatch),
+                    widget_id: &wid,
+                    role: "button",
+                    command_id: None,
+                    disabled_reason: None,
+                },
+            ) {
+                state.graph_series_index = idx;
+            }
+        }
+    });
+}
+
 pub(super) fn render_graph_inspector_studio(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -165,39 +245,7 @@ pub(super) fn render_graph_inspector_studio(
     let tokens = ctx_in.tokens;
     let doc = app.document();
 
-    let tab_defs = [
-        ("Data", "inspector.graph.tab.data", GraphStudioTab::Data),
-        ("Axes", "inspector.graph.tab.axes", GraphStudioTab::Axes),
-        ("Leg", "inspector.graph.tab.legends", GraphStudioTab::Legends),
-        ("Annot", "inspector.graph.tab.annotations", GraphStudioTab::Annotations),
-        ("Canvas", "inspector.graph.tab.canvas", GraphStudioTab::Canvas),
-    ];
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.0;
-        let per_w = ((ui.available_width() - 12.0) / 5.0).max(34.0);
-        for (lbl, wid, tab_kind) in tab_defs {
-            if studio_chip(
-                ui,
-                tokens,
-                meta,
-                &StudioChipSpec {
-                    label: lbl,
-                    tooltip: lbl,
-                    max_w: per_w,
-                    selected: state.graph_tab == tab_kind,
-                    enabled: ctx_in.enabled,
-                    border_override: None,
-                    widget_id: wid,
-                    role: "tab",
-                    command_id: None,
-                    disabled_reason: None,
-                },
-            ) {
-                state.graph_tab = tab_kind;
-            }
-        }
-    });
-    ui.add_space(4.0);
+    render_graph_studio_tabs(ui, state, tokens, ctx_in.enabled, meta);
 
     let series_count = gs.spec.series.len();
     if series_count > 0 && state.graph_series_index >= series_count {
@@ -208,36 +256,7 @@ pub(super) fn render_graph_inspector_studio(
     match state.graph_tab {
         GraphStudioTab::Data => {
             widgets::subheader(ui, "Series & Error Bars");
-            if series_count > 0 {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-                    for (idx, s) in gs.spec.series.iter().enumerate() {
-                        let lbl = s.legend_label.clone().unwrap_or_else(|| format!("Series {}", idx + 1));
-                        let rgba = series_primary_color(s);
-                        let swatch = Color32::from_rgba_unmultiplied(rgba.r, rgba.g, rgba.b, 255);
-                        let wid = format!("inspector.graph.series.{idx}");
-                        if studio_chip(
-                            ui,
-                            tokens,
-                            meta,
-                            &StudioChipSpec {
-                                label: &lbl,
-                                tooltip: &lbl,
-                                max_w: 110.0,
-                                selected: idx == sel_idx,
-                                enabled: ctx_in.enabled,
-                                border_override: Some(swatch),
-                                widget_id: &wid,
-                                role: "button",
-                                command_id: None,
-                                disabled_reason: None,
-                            },
-                        ) {
-                            state.graph_series_index = idx;
-                        }
-                    }
-                });
-            }
+            render_graph_series_selector(ui, gs, state, tokens, ctx_in.enabled, meta);
 
             ui.add_space(4.0);
             widgets::subheader(ui, "Palette Preset");
@@ -278,43 +297,41 @@ pub(super) fn render_graph_inspector_studio(
             });
 
             if let Some(series) = gs.spec.series.get(sel_idx) {
-                ui.add_space(4.0);
+                ui.add_space(tokens.metrics.space_xs);
                 widgets::subheader(ui, "Symbol Shape");
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-                    for (shape, lbl) in
-                        [(MarkerShape::Circle, "●"), (MarkerShape::Square, "■"), (MarkerShape::TriangleUp, "▲"), (MarkerShape::Diamond, "◆")]
-                    {
-                        let wid = format!("inspector.graph.shape.{shape:?}");
-                        if studio_chip(
-                            ui,
-                            tokens,
-                            meta,
-                            &StudioChipSpec {
-                                label: lbl,
-                                tooltip: "Set series marker shape",
-                                max_w: 34.0,
-                                selected: false,
-                                enabled: ctx_in.enabled,
-                                border_override: None,
-                                widget_id: &wid,
-                                role: "button",
-                                command_id: Some("graph.setSeries"),
-                                disabled_reason: None,
-                            },
-                        ) {
-                            let mut cloned = series.clone();
-                            if set_series_marker_shape(&mut cloned, shape) {
-                                intents.push_engine(
-                                    "graph.setSeries",
-                                    json!({ "sheet_id": gs.id.as_str(), "series_index": sel_idx, "gdo": cloned.gdo }),
-                                );
-                            }
-                        }
+                let shapes = [
+                    (MarkerShape::Circle, "●", "inspector.graph.shape.Circle"),
+                    (MarkerShape::Square, "■", "inspector.graph.shape.Square"),
+                    (MarkerShape::TriangleUp, "▲", "inspector.graph.shape.TriangleUp"),
+                    (MarkerShape::Diamond, "◆", "inspector.graph.shape.Diamond"),
+                ];
+                let active_shape = current_series_marker_shape(series);
+                let active_shape_idx = active_shape.and_then(|cur| shapes.iter().position(|(s, _, _)| *s == cur)).unwrap_or(usize::MAX);
+                let seg_opts: Vec<crate::egui_shell::ui_kit::SegmentedOption<'_>> = shapes
+                    .iter()
+                    .map(|(_, lbl, wid)| crate::egui_shell::ui_kit::SegmentedOption {
+                        widget_id: wid,
+                        label: lbl,
+                        tooltip: Some("Set series marker shape"),
+                        value: None,
+                    })
+                    .collect();
+                if let Some(chosen_idx) = crate::egui_shell::ui_kit::segmented_control(
+                    ui,
+                    tokens,
+                    meta,
+                    &seg_opts,
+                    active_shape_idx,
+                    ctx_in.enabled,
+                    crate::inspect::ZLayer::Workspace,
+                ) {
+                    let mut cloned = series.clone();
+                    if set_series_marker_shape(&mut cloned, shapes[chosen_idx].0) {
+                        intents.push_engine("graph.setSeries", json!({ "sheet_id": gs.id.as_str(), "series_index": sel_idx, "gdo": cloned.gdo }));
                     }
-                });
+                }
 
-                ui.add_space(4.0);
+                ui.add_space(tokens.metrics.space_xs);
                 widgets::subheader(ui, "Opacity & Overlay Visibility");
                 let cur_alpha = extract_series_alpha_byte(&series.gdo);
                 let cur_pct = ((f64::from(cur_alpha) / 255.0) * 100.0).round() as u8;
@@ -346,20 +363,23 @@ pub(super) fn render_graph_inspector_studio(
                     }
                 });
 
-                ui.add_space(4.0);
-                if studio_full_button(
+                ui.add_space(tokens.metrics.space_xs);
+                if crate::egui_shell::ui_kit::choice_row(
                     ui,
                     tokens,
                     meta,
-                    &StudioButtonSpec {
-                        label: if series.show_raw_data { "Show Data Points: On" } else { "Show Data Points: Off" },
-                        tooltip: "Toggle raw data marks while preserving fitted regression overlays",
-                        selected: series.show_raw_data,
-                        enabled: ctx_in.enabled,
-                        primary: false,
+                    crate::egui_shell::ui_kit::ChoiceRowSpec {
                         widget_id: "inspector.graph.show_raw_data",
-                        command_id: Some("graph.setSeries"),
+                        label: "Data points",
+                        checked: series.show_raw_data,
+                        is_radio: false,
+                        enabled: ctx_in.enabled,
                         disabled_reason: None,
+                        font_size: tokens.metrics.font_ui_body_pt,
+                        row_height: tokens.metrics.min_hit_target_pt,
+                        z_layer: crate::inspect::ZLayer::Workspace,
+                        value: Value::Bool(series.show_raw_data),
+                        tooltip_mode: crate::egui_shell::ui_kit::TooltipMode::Standard,
                     },
                 ) {
                     intents.push_engine(
@@ -369,19 +389,22 @@ pub(super) fn render_graph_inspector_studio(
                 }
 
                 if series.regression_overlay.is_some()
-                    && studio_full_button(
+                    && crate::egui_shell::ui_kit::choice_row(
                         ui,
                         tokens,
                         meta,
-                        &StudioButtonSpec {
-                            label: "Hide Fitted Curve Overlay",
-                            tooltip: "Remove fitted regression curve overlay from this series",
-                            selected: false,
-                            enabled: ctx_in.enabled,
-                            primary: false,
+                        crate::egui_shell::ui_kit::ChoiceRowSpec {
                             widget_id: "inspector.graph.hide_fitted_curve",
-                            command_id: Some("graph.setSeries"),
+                            label: "Fitted curve overlay",
+                            checked: true,
+                            is_radio: false,
+                            enabled: ctx_in.enabled,
                             disabled_reason: None,
+                            font_size: tokens.metrics.font_ui_body_pt,
+                            row_height: tokens.metrics.min_hit_target_pt,
+                            z_layer: crate::inspect::ZLayer::Workspace,
+                            value: Value::Bool(true),
+                            tooltip_mode: crate::egui_shell::ui_kit::TooltipMode::Standard,
                         },
                     )
                 {
@@ -481,7 +504,7 @@ pub(super) fn render_graph_inspector_studio(
                 tokens,
                 meta,
                 &StudioButtonSpec {
-                    label: "More… Format Graph",
+                    label: "Format Graph…",
                     tooltip: "Open Format Graph dialog",
                     selected: false,
                     enabled: ctx_in.enabled,

@@ -283,7 +283,11 @@ pub fn resolve_studio_surface(app: &UiApp) -> StudioContextSurface {
         return StudioContextSurface::PageLayoutComposer;
     }
     if doc.graph_sheet(target).is_some() {
-        return if app.brushed_cell.is_some() { StudioContextSurface::DataPointDrillBack } else { StudioContextSurface::GraphInspector };
+        return if app.brushed_cell.is_some() && !(app.split.enabled && app.split.inspector_pinned) {
+            StudioContextSurface::DataPointDrillBack
+        } else {
+            StudioContextSurface::GraphInspector
+        };
     }
     if doc.result_sheet(target).is_some() {
         return StudioContextSurface::ResultsInterpret;

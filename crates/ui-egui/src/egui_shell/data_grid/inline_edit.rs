@@ -38,7 +38,7 @@ fn put_styled_inline_text_edit(
     ui.painter().rect_stroke(rect, CornerRadius::ZERO, Stroke::new(2.0, mctx.tokens.focus_ring), StrokeKind::Inside);
     let inner = rect.shrink2(vec2(2.0, 1.0));
     let font_style = if is_numeric_cell {
-        FontId::new(mctx.metrics.font_grid_numeral_pt, FontFamily::Monospace)
+        super::super::fonts::aligned_numeral_font_id(ui.ctx(), mctx.tokens)
     } else {
         FontId::new(mctx.metrics.font_ui_body_pt, FontFamily::Proportional)
     };

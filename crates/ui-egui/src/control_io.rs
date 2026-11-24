@@ -1224,7 +1224,11 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "ui.clonePipeline.open" => Some(|app, p| map_ui_err(dispatch_ui_clone_pipeline_open(app, p))),
         "ui.zoom.fitSheet" => Some(|app, _| {
             app.canvas_dialogs.reset_zoom_to_fit();
-            Ok(json!({ "zoom": app.canvas_dialogs.canvas.zoom }))
+            app.egui_views.canvas_view.fit_zoom_active = true;
+            app.egui_views.canvas_view.pan_pt = [0.0, 0.0];
+            app.egui_views.center_stage.secondary_canvas_view.fit_zoom_active = true;
+            app.egui_views.center_stage.secondary_canvas_view.pan_pt = [0.0, 0.0];
+            Ok(json!({ "zoom": app.canvas_dialogs.canvas.zoom, "fit": true }))
         }),
         "ui.gallery.toggle" => Some(|app, p| map_ui_err(dispatch_ui_gallery_toggle(app, p))),
         "ui.pane.cycle" => Some(|app, p| map_ui_err(dispatch_ui_pane_cycle(app, p))),

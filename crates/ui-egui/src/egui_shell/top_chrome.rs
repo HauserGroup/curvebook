@@ -317,7 +317,7 @@ struct PopupActionButtonSpec<'a> {
 ///
 /// Preserves exact widget IDs (`toolbar.home`, `toolbar.command_palette`,
 /// `toolbar.split`, `toolbar.preset`, `toolbar.analyze`,
-/// `toolbar.edit_params`, `toolbar.overflow`, `sheet.tab.<id>`).
+/// `toolbar.edit_params`, `toolbar.overflow`).
 pub fn render_top_chrome(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -950,7 +950,7 @@ fn render_tier1_right_group(
     }
 
     if fitted.split_toggle {
-        let split_lbl = if app.split.enabled { "Split •" } else { "Split" };
+        let split_lbl = "Split";
         let split_resp = chrome_button_fitted(
             ui,
             tokens,
