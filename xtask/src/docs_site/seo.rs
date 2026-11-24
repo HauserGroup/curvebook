@@ -13,12 +13,9 @@ use curvebook_platform::write_atomic;
 
 use super::verify::parse_minor_dir_version;
 
-/// Published base URL of the GitHub Pages site (`main` branch, `/docs` folder).
-pub const SITE_BASE_URL: &str = "https://hausergroup.github.io/curvebook/";
-
-/// Hand-written top-level pages under `docs/` that search engines should index, in sitemap order.
-/// Each must carry a canonical link to its own published URL.
-pub const LANDING_PAGES: &[&str] = &["index.html", "open-pzfx-files.html", "privacy.html"];
+/// The published base URL and landing pages live with the Pages publish list (`R12.9`), which builds
+/// without the `full-gates` feature.
+pub use crate::pages_site::{LANDING_PAGES, SITE_BASE_URL};
 
 /// Repository-relative path of the generated sitemap.
 pub const SITEMAP_REL_PATH: &str = "docs/sitemap.xml";

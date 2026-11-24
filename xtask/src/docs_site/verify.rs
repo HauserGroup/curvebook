@@ -32,6 +32,7 @@ pub fn verify_site(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Result<
     check_committed_snapshots(root)?;
     check_root_pages(root)?;
     super::seo::check_search_metadata(root)?;
+    crate::pages_site::check_publish_set(root)?;
     run_hygiene_scanners(root, out_dir)?;
     Ok(())
 }

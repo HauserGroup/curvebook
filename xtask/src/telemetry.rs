@@ -1454,7 +1454,12 @@ fn validate_permission_entry(
             && matches!(clean_scope, "contents" | "id-token" | "attestations");
         let prune_caches_ok =
             !is_top && rel == ".github/workflows/ci.yml" && state.current_job.as_deref() == Some("prune-caches") && clean_scope == "actions";
-        if !publish_ok && !prune_caches_ok {
+        // R12.9: the Pages Actions source needs `pages: write` and an OIDC token to deploy the staged site.
+        let pages_deploy_ok = !is_top
+            && rel == ".github/workflows/pages.yml"
+            && state.current_job.as_deref() == Some("deploy")
+            && matches!(clean_scope, "pages" | "id-token");
+        if !publish_ok && !prune_caches_ok && !pages_deploy_ok {
             violations.push(TelemetryViolation {
                 check: 4,
                 path: rel.to_owned(),
@@ -1462,7 +1467,8 @@ fn validate_permission_entry(
                 detail: format!(
                     "unexpected write permission `{clean_scope}: write` \
                      (only release.yml `publish` job may declare `contents: write`, `id-token: write`, or `attestations: write`, \
-                     and ci.yml `prune-caches` job may declare `actions: write`)"
+                     ci.yml `prune-caches` job may declare `actions: write`, \
+                     and pages.yml `deploy` job may declare `pages: write` or `id-token: write`)"
                 ),
             });
         }
@@ -2318,6 +2324,53 @@ mod tests {
         let (_, wf_hits) = run_checks(&dir_other_wf.path).unwrap();
         assert_eq!(wf_hits.len(), 1, "{wf_hits:?}");
         assert!(has_bad_write(&wf_hits, ".github/workflows/release.yml", "actions"), "{wf_hits:?}");
+    }
+
+    #[test]
+    fn check4_r12_9_allows_pages_deploy_job_only() {
+        let has_bad_write = |hits: &[super::TelemetryViolation], path: &str, scope: &str| {
+            let prefix = format!("unexpected write permission `{scope}: write`");
+            hits.iter().any(|v| v.check == 4 && v.path == path && v.detail.starts_with(&prefix))
+        };
+        let deploy_steps =
+            "    steps:\n      - id: deployment\n        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1\n";
+
+        let dir_ok_block = create_clean_fixture("check4-pages-ok-block");
+        dir_ok_block.write(
+            ".github/workflows/pages.yml",
+            &format!(
+                "name: Pages\non: [push]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo xtask pages-stage _site\n  deploy:\n    needs: build\n    runs-on: ubuntu-latest\n    permissions:\n      pages: write\n      id-token: write\n    environment:\n      name: github-pages\n      url: ${{{{ steps.deployment.outputs.page_url }}}}\n{deploy_steps}"
+            ),
+        );
+        let (_, ok_block_hits) = run_checks(&dir_ok_block.path).unwrap();
+        assert!(ok_block_hits.is_empty(), "expected pages.yml deploy pages/id-token write (block) to pass: {ok_block_hits:?}");
+
+        let dir_ok_inline = create_clean_fixture("check4-pages-ok-inline");
+        dir_ok_inline.write(
+            ".github/workflows/pages.yml",
+            &format!("name: Pages\non: [push]\npermissions:\n  contents: read\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    permissions: {{ pages: write, id-token: write }}\n{deploy_steps}"),
+        );
+        let (_, ok_inline_hits) = run_checks(&dir_ok_inline.path).unwrap();
+        assert!(ok_inline_hits.is_empty(), "expected pages.yml deploy pages/id-token write (inline) to pass: {ok_inline_hits:?}");
+
+        // Top level, another job, a wider scope on the deploy job, and another workflow stay rejected.
+        let dir_bad = create_clean_fixture("check4-pages-bad");
+        dir_bad.write(
+            ".github/workflows/pages.yml",
+            &format!(
+                "name: Pages\non: [push]\npermissions:\n  contents: read\n  pages: write\njobs:\n  build:\n    runs-on: ubuntu-latest\n    permissions:\n      id-token: write\n    steps:\n      - run: echo bad\n  deploy:\n    runs-on: ubuntu-latest\n    permissions:\n      pages: write\n      contents: write\n{deploy_steps}"
+            ),
+        );
+        dir_bad.write(
+            ".github/workflows/release.yml",
+            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    permissions:\n      pages: write\n    steps:\n      - run: echo bad\n",
+        );
+        let (_, bad_hits) = run_checks(&dir_bad.path).unwrap();
+        assert_eq!(bad_hits.len(), 4, "{bad_hits:?}");
+        assert!(has_bad_write(&bad_hits, ".github/workflows/pages.yml", "pages"), "{bad_hits:?}");
+        assert!(has_bad_write(&bad_hits, ".github/workflows/pages.yml", "id-token"), "{bad_hits:?}");
+        assert!(has_bad_write(&bad_hits, ".github/workflows/pages.yml", "contents"), "{bad_hits:?}");
+        assert!(has_bad_write(&bad_hits, ".github/workflows/release.yml", "pages"), "{bad_hits:?}");
     }
 
     #[test]
