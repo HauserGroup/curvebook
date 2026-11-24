@@ -10,6 +10,7 @@
 
 pub mod markdown;
 pub mod registries;
+pub mod seo;
 pub mod sitemap;
 pub mod template;
 pub mod verify;
@@ -24,16 +25,17 @@ use sitemap::{GeneratedSite, assemble_site};
 use template::{SiteMeta, render_release_redirect_index, render_root_redirect_shim};
 use verify::{parse_minor_dir_version, verify_site};
 
-const USAGE: &str = "usage: cargo xtask docs-site [--check] [--output <dir>] [--release <ver>]";
+const USAGE: &str = "usage: cargo xtask docs-site [--check] [--output <dir>] [--release <ver>] [--sitemap]";
 
 #[derive(Debug, Default)]
 struct CliOptions {
     check: bool,
     output: Option<PathBuf>,
     release: Option<String>,
+    sitemap: bool,
 }
 
-/// CLI entrypoint for `cargo xtask docs-site [--check] [--output <dir>] [--release <ver>]`.
+/// CLI entrypoint for `cargo xtask docs-site [--check] [--output <dir>] [--release <ver>] [--sitemap]`.
 pub fn run_cli(root: &Path, args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
@@ -42,6 +44,14 @@ pub fn run_cli(root: &Path, args: &[String]) -> Result<(), String> {
     let root_buf = std::env::var_os("CURVEBOOK_DOCS_SITE_ROOT").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
     let root = root_buf.as_path();
     let opts = parse_args(args)?;
+    if opts.sitemap {
+        if opts.check || opts.output.is_some() || opts.release.is_some() {
+            return Err(format!("`--sitemap` cannot be combined with other options\n{USAGE}"));
+        }
+        let count = seo::write_sitemap(root)?;
+        println!("docs-site: wrote {} with {count} URLs", seo::SITEMAP_REL_PATH);
+        return Ok(());
+    }
     if let Some(ref version) = opts.release {
         if opts.output.is_some() {
             return Err(format!("`--release` and `--output` are mutually exclusive\n{USAGE}"));
@@ -78,6 +88,8 @@ fn parse_args(args: &[String]) -> Result<CliOptions, String> {
         let arg = args[idx].as_str();
         if arg == "--check" {
             opts.check = true;
+        } else if arg == "--sitemap" {
+            opts.sitemap = true;
         } else if let Some(val) = arg.strip_prefix("--output=") {
             if val.trim().is_empty() {
                 return Err(format!("--output= requires a directory path\n{USAGE}"));
@@ -197,6 +209,7 @@ fn run_release_snapshot(root: &Path, version_raw: &str, check_after: bool) -> Re
     );
     write_atomic(&root.join("docs/troubleshooting.html"), troubleshooting_shim.as_bytes())
         .map_err(|e| format!("write docs/troubleshooting.html: {e}"))?;
+    seo::write_sitemap(root)?;
 
     if check_after {
         verify_site(root, &snap_dir, &site)?;

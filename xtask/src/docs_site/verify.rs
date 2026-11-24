@@ -31,6 +31,7 @@ pub fn verify_site(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Result<
     check_registry_coverage(&facts, site)?;
     check_committed_snapshots(root)?;
     check_root_pages(root)?;
+    super::seo::check_search_metadata(root)?;
     run_hygiene_scanners(root, out_dir)?;
     Ok(())
 }
@@ -131,6 +132,9 @@ fn scan_html_tags(rel_path: &str, html: &str, facts: &mut PageFacts) -> Result<(
 fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)], facts: &mut PageFacts) -> Result<(), String> {
     let mut is_meta_refresh = false;
     let mut meta_content: Option<&str> = None;
+    let mut rel_values = attrs.iter().filter(|(k, _)| k.eq_ignore_ascii_case("rel")).map(|(_, v)| v.trim());
+    let is_canonical_link =
+        tag_lower == "link" && rel_values.next().is_some_and(|v| v.eq_ignore_ascii_case("canonical")) && rel_values.next().is_none();
 
     for (k, v) in attrs {
         let key_lower = k.to_ascii_lowercase();
@@ -143,7 +147,12 @@ fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)]
         if key_lower == "id" && !v.is_empty() && !facts.ids.insert(v.clone()) {
             return Err(format!("{rel_path}: duplicate HTML id `#{v}`"));
         }
-        if key_lower == "href" {
+        if key_lower == "href" && is_canonical_link {
+            // Canonical links name the page's own published URL for search engines; nothing is fetched.
+            if !v.starts_with(super::seo::SITE_BASE_URL) {
+                return Err(format!("{rel_path}: canonical link `{v}` must point inside `{}`", super::seo::SITE_BASE_URL));
+            }
+        } else if key_lower == "href" {
             if is_forbidden_uri_scheme(v) {
                 return Err(format!("{rel_path}: forbidden `href` URI `{v}`"));
             }
@@ -656,14 +665,17 @@ pub fn check_committed_snapshots(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Audit root GitHub Pages HTML files (`docs/index.html`, `docs/privacy.html`, `docs/manual/index.html`,
+/// Audit root GitHub Pages HTML files (`docs/index.html`, `docs/privacy.html`, `docs/manual/index.html`, the other
+/// hand-written `seo::LANDING_PAGES`,
 /// and any existing root redirect shims `docs/get-started.html`, `docs/troubleshooting.html`) for
 /// strict CSP, `no-referrer`, accessibility structure, zero scripts/forms/inline styles/external
 /// assets, and valid local relative targets under `docs/`.
 pub fn check_root_pages(root: &Path) -> Result<(), String> {
     let docs_dir = root.join("docs");
-    let mut pages_to_audit: Vec<&str> = vec!["index.html", "privacy.html", "manual/index.html"];
-    for shim in ["get-started.html", "troubleshooting.html"] {
+    let required = ["index.html", "privacy.html", "manual/index.html"];
+    let mut pages_to_audit: Vec<&str> = required.to_vec();
+    let optional = super::seo::LANDING_PAGES.iter().copied().filter(|p| !required.contains(p)).chain(["get-started.html", "troubleshooting.html"]);
+    for shim in optional {
         let path = docs_dir.join(shim);
         if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
             pages_to_audit.push(shim);
@@ -1200,6 +1212,36 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
             meta: &meta,
         });
         assert!(audit_single_html("dup.html", &page).is_ok());
+    }
+
+    #[test]
+    fn r12_8_canonical_link_allows_only_the_published_site_url() {
+        let meta = test_meta();
+        let page = render_page(&PageSpec {
+            title: "Canon",
+            description: "Canon",
+            rel_path: "canon.html",
+            section_title: "Concepts",
+            section_rel_path: None,
+            h1: "Canon",
+            toc_headings: &[],
+            body_html: "<p>Body.</p>",
+            body_has_h1: false,
+            prev: None,
+            next: None,
+            meta: &meta,
+        });
+        let with_link = |tag: &str| page.replacen("</head>", &format!("{tag}</head>"), 1);
+
+        let ok = audit_single_html("canon.html", &with_link("<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/canon.html\">"))
+            .unwrap();
+        assert!(!ok.hrefs.iter().any(|h| h.ends_with("/curvebook/canon.html")), "canonical URL must not enter the local link checker");
+        let off_site = audit_single_html("canon.html", &with_link("<link rel=\"canonical\" href=\"https://evil.example/canon.html\">"));
+        assert!(off_site.unwrap_err().contains("canonical link"));
+        // Any other external `<link href>` stays forbidden.
+        let stylesheet =
+            audit_single_html("canon.html", &with_link("<link rel=\"stylesheet\" href=\"https://hausergroup.github.io/curvebook/site.css\">"));
+        assert!(stylesheet.unwrap_err().contains("external asset URL"));
     }
 
     #[test]
