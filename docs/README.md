@@ -61,6 +61,7 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 | [Desktop smoke QA](release/desktop-smoke-qa.md) | Manual desktop walkthrough for each release |
 | [Windows signing](release/windows-signing.md) | Test signing and distribution |
 | [GitHub Pages site](release/github-pages.md) | Design decisions, preview, checks, and publication for [`index.html`](index.html), [`privacy.html`](privacy.html), and the generated manual |
+| [Search discoverability actions](release/seo-actions.md) | Catalogue of possible search-engine actions for the site, with status and policy constraints |
 | [Images](images/) | Clean-room screenshots, attributed in [ASSETS.md](../ASSETS.md) |
 
 ## History
