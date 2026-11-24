@@ -39,10 +39,7 @@ pub const SITE_FILES: &[&str] = &["404.html", "site.css", "sitemap.xml", "llms.t
 #[must_use]
 pub fn site_base_path() -> &'static str {
     let rest = SITE_BASE_URL.strip_prefix("https://").or_else(|| SITE_BASE_URL.strip_prefix("http://")).unwrap_or(SITE_BASE_URL);
-    match rest.find('/') {
-        Some(idx) => &rest[idx..],
-        None => "/",
-    }
+    rest.find('/').and_then(|idx| rest.get(idx..)).unwrap_or("/")
 }
 
 /// Directories under `docs/` whose files are all published.
