@@ -3254,9 +3254,8 @@ fn dispatch_ui_export_figure_open(app: &mut UiApp, params: &Value) -> Result<Val
 fn dispatch_ui_export_table_csv_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let sheet_id = resolve_target_data_id(app.document(), params)?;
     app.canvas_dialogs.csv_export.reset_for_locale(app.locale_preset.decimal_separator);
-    app.canvas_dialogs.active_dialog = ActiveDialog::CsvExportOptions(crate::dialogs_canvas::CsvExportTargetKind::DataTable {
-        sheet_id: sheet_id.clone(),
-    });
+    app.canvas_dialogs.active_dialog =
+        ActiveDialog::CsvExportOptions(crate::dialogs_canvas::CsvExportTargetKind::DataTable { sheet_id: sheet_id.clone() });
     Ok(json!({
         "dialog": "CsvExportOptions",
         "target": "DataTable",
@@ -3269,9 +3268,8 @@ fn dispatch_ui_export_table_csv_open(app: &mut UiApp, params: &Value) -> Result<
 fn dispatch_ui_export_results_csv_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let sheet_id = resolve_target_result_sheet_id(app.document(), params)?;
     app.canvas_dialogs.csv_export.reset_for_locale(app.locale_preset.decimal_separator);
-    app.canvas_dialogs.active_dialog = ActiveDialog::CsvExportOptions(crate::dialogs_canvas::CsvExportTargetKind::ResultSheet {
-        sheet_id: sheet_id.clone(),
-    });
+    app.canvas_dialogs.active_dialog =
+        ActiveDialog::CsvExportOptions(crate::dialogs_canvas::CsvExportTargetKind::ResultSheet { sheet_id: sheet_id.clone() });
     Ok(json!({
         "dialog": "CsvExportOptions",
         "target": "ResultSheet",

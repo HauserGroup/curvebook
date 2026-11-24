@@ -592,11 +592,7 @@ fn resolve_palette_ui_route(app: &UiApp, command_id: &str) -> Option<PaletteComm
         | "ui.export.resultsCsv.open" => {
             Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_result_sheet_id(doc)) })
         }
-        "ui.analyze.open"
-        | "ui.grid.excludeWithReason"
-        | "ui.table.convertArchetype.open"
-        | "ui.graph.create.open"
-        | "ui.export.tableCsv.open" => {
+        "ui.analyze.open" | "ui.grid.excludeWithReason" | "ui.table.convertArchetype.open" | "ui.graph.create.open" | "ui.export.tableCsv.open" => {
             Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_data_sheet_id(doc)) })
         }
         "ui.table.openFormulaBar" => Some(PaletteCommandRoute::UiCommand {

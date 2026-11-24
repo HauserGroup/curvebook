@@ -665,12 +665,7 @@ impl StubPlatformFileDialogAdapter {
     /// Construct an empty stub file-dialog adapter.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            inner: std::sync::Arc::new(curvebook_platform::sync::RwLock::named(
-                "ui.stub_file_dialog",
-                StubPlatformFileDialogInner::default(),
-            )),
-        }
+        Self { inner: std::sync::Arc::new(curvebook_platform::sync::RwLock::named("ui.stub_file_dialog", StubPlatformFileDialogInner::default())) }
     }
 
     /// Enqueue a response for a specific `command_id` (`"project.open"`, `"file.save_as"`, `"export.svg"`, ...).

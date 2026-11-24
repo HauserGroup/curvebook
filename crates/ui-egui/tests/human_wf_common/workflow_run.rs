@@ -403,11 +403,7 @@ impl WorkflowRun {
 
     /// Start a five-stage GUI workflow test for `wf_id` wired to OS-boundary clipboard and file-dialog stubs.
     #[must_use]
-    pub fn start_with_adapters(
-        wf_id: &str,
-        clipboard: Arc<StubPlatformClipboardAdapter>,
-        file_dialog: Arc<StubPlatformFileDialogAdapter>,
-    ) -> Self {
+    pub fn start_with_adapters(wf_id: &str, clipboard: Arc<StubPlatformClipboardAdapter>, file_dialog: Arc<StubPlatformFileDialogAdapter>) -> Self {
         install_bg_panic_hook();
         let bg_panics_at_start = BG_PANIC_COUNT.load(Ordering::SeqCst);
         let harness = EguiWfHarness::new_with_adapters(default_viewport(), Arc::clone(&clipboard), Arc::clone(&file_dialog));

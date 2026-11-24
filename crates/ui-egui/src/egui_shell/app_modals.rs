@@ -2510,8 +2510,8 @@ fn app_record_visible(ui: &Ui, resp: &Response, meta: &mut FrameInspectMeta, inp
 }
 
 fn app_button(ui: &mut Ui, meta: &mut FrameInspectMeta, entry: AppBtn<'_>, tokens: &Tokens) -> Response {
-    let primary = entry.selected
-        && matches!(entry.widget_id, "modal.ok" | "dialog.button.save" | "dialog.feedback.open_github" | "import_project_mode.merge");
+    let primary =
+        entry.selected && matches!(entry.widget_id, "modal.ok" | "dialog.button.save" | "dialog.feedback.open_github" | "import_project_mode.merge");
     ui_kit::modal_button(
         ui,
         meta,

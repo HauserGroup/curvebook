@@ -415,7 +415,11 @@ enum LoadedPathPayload {
         import_warnings: Vec<curvebook_format::ImportWarning>,
         import_command_id: Option<&'static str>,
     },
-    DelimitedTable { importer_id: &'static str, title: String, is_tsv: bool },
+    DelimitedTable {
+        importer_id: &'static str,
+        title: String,
+        is_tsv: bool,
+    },
 }
 
 fn classify_and_load_path(path: &Path) -> Result<LoadedPathPayload, String> {
@@ -478,13 +482,7 @@ fn classify_and_load_path(path: &Path) -> Result<LoadedPathPayload, String> {
                 Some("xlsx") => Some("table.importXlsx"),
                 _ => None,
             };
-            Ok(LoadedPathPayload::Project {
-                doc: Box::new(doc),
-                archive_path: None,
-                clean_archive: false,
-                import_warnings,
-                import_command_id,
-            })
+            Ok(LoadedPathPayload::Project { doc: Box::new(doc), archive_path: None, clean_archive: false, import_warnings, import_command_id })
         }
         FormatKind::DelimitedText => {
             let is_tsv = path.extension().and_then(|e| e.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("tsv"));
@@ -1870,11 +1868,7 @@ impl DesktopHostRuntime {
                                 Self::completed_file_dialog_outcome(window_id, command_id, &path)
                             } else if win.app().document().total_sheet_count() > 0 || win.has_unsaved_changes() {
                                 let has_unsaved = win.has_unsaved_changes();
-                                win.app_mut().open_import_project_mode_dialog(
-                                    command_id,
-                                    path.to_string_lossy().into_owned(),
-                                    has_unsaved,
-                                );
+                                win.app_mut().open_import_project_mode_dialog(command_id, path.to_string_lossy().into_owned(), has_unsaved);
                                 DesktopEventOutcome {
                                     handled: true,
                                     action: format!("native_file_dialog.confirm_import_mode:{command_id}"),
@@ -1912,15 +1906,11 @@ impl DesktopHostRuntime {
                 };
                 match adapter.pick(&req)? {
                     Some(dir) => {
-                        std::fs::create_dir_all(&dir)
-                            .map_err(|err| format!("failed to prepare export folder `{}`: {err}", dir.display()))?;
+                        std::fs::create_dir_all(&dir).map_err(|err| format!("failed to prepare export folder `{}`: {err}", dir.display()))?;
                         let delimiter = params.get("delimiter").and_then(Value::as_str).unwrap_or(",").to_owned();
-                        let default_decimal = self
-                            .window(window_id)
-                            .map(|w| w.app().locale_preset.decimal_separator.to_string())
-                            .unwrap_or_else(|_| String::from("."));
-                        let decimal_separator =
-                            params.get("decimal_separator").and_then(Value::as_str).map_or(default_decimal, ToOwned::to_owned);
+                        let default_decimal =
+                            self.window(window_id).map(|w| w.app().locale_preset.decimal_separator.to_string()).unwrap_or_else(|_| String::from("."));
+                        let decimal_separator = params.get("decimal_separator").and_then(Value::as_str).map_or(default_decimal, ToOwned::to_owned);
                         let ext = if delimiter == "\t" { "tsv" } else { "csv" };
                         let mut used_stems: std::collections::HashSet<String> = std::collections::HashSet::new();
                         let mut planned: Vec<(SheetId, PathBuf)> = Vec::with_capacity(sheets.len());
@@ -3628,10 +3618,9 @@ fn resolve_host_or_ui_route(
             ui_command_id: String::from("ui.print.open"),
             params: sheet_id_obj_or_empty(resolve_any_sheet_id(doc)),
         })),
-        "ui.export.allTablesCsv" => Ok(Some(DesktopCommandRoute::UiCommand {
-            ui_command_id: String::from("ui.export.allTablesCsv.open"),
-            params: json!({}),
-        })),
+        "ui.export.allTablesCsv" => {
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.export.allTablesCsv.open"), params: json!({}) }))
+        }
         "ui.theme.set" => {
             let mode = variant.unwrap_or_else(|| next_theme_mode_name(app.theme.mode));
             Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.theme.set"), params: json!({ "mode": mode }) }))

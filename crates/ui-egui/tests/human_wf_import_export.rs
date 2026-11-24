@@ -21,8 +21,8 @@ use curvebook_doc::{AnalysisKind, CellCoord, CellValue, DataSheet, OneWayAnovaSp
 use curvebook_engine::Session;
 use curvebook_format::zip::ZipWriter;
 use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, CsvExportTargetKind};
-use curvebook_ui_egui::os_integration::NativeFileDialogKind;
 use curvebook_ui_egui::inspect_ui_tree;
+use curvebook_ui_egui::os_integration::NativeFileDialogKind;
 use human_wf_common::workflow_run::{LiveEditExpectation, LiveEditTarget, ReferenceSpec, WorkflowRun};
 use human_wf_common::{TestRes, ensure};
 use serde_json::json;
@@ -90,25 +90,16 @@ fn build_prism_fixture_bytes() -> Result<Vec<u8>, String> {
         .map_err(|e| format!("failed to add data/assay.csv: {e}"))?;
     zw.add_file("data/assay.json", br#"{"id":"prism-tbl-1","title":"Prism Assay","kind":"column"}"#.to_vec())
         .map_err(|e| format!("failed to add data/assay.json: {e}"))?;
-    zw.add_file(
-        "extras/unsupported_chunk.json",
-        br#"{"unsupported_vendor_extension":true,"payload":[1,2,3]}"#.to_vec(),
-    )
-    .map_err(|e| format!("failed to add extras/unsupported_chunk.json: {e}"))?;
+    zw.add_file("extras/unsupported_chunk.json", br#"{"unsupported_vendor_extension":true,"payload":[1,2,3]}"#.to_vec())
+        .map_err(|e| format!("failed to add extras/unsupported_chunk.json: {e}"))?;
     zw.finish().map_err(|e| format!("failed to build synthetic .prism zip: {e}"))
 }
 
 fn assert_datasheets_match(label: &str, gui_sheets: &[DataSheet], ref_sheets: &[DataSheet]) -> TestRes {
-    ensure(
-        gui_sheets.len() == ref_sheets.len(),
-        format!("{label}: DataSheet count mismatch: gui={}, ref={}", gui_sheets.len(), ref_sheets.len()),
-    )?;
+    ensure(gui_sheets.len() == ref_sheets.len(), format!("{label}: DataSheet count mismatch: gui={}, ref={}", gui_sheets.len(), ref_sheets.len()))?;
     for (idx, (g, r)) in gui_sheets.iter().zip(ref_sheets.iter()).enumerate() {
         ensure(g.title == r.title, format!("{label}: sheet[{idx}] title mismatch: gui={:?}, ref={:?}", g.title, r.title))?;
-        ensure(
-            g.archetype == r.archetype,
-            format!("{label}: sheet[{idx}] archetype/cells mismatch: gui={:?}, ref={:?}", g.archetype, r.archetype),
-        )?;
+        ensure(g.archetype == r.archetype, format!("{label}: sheet[{idx}] archetype/cells mismatch: gui={:?}, ref={:?}", g.archetype, r.archetype))?;
     }
     Ok(())
 }
@@ -170,14 +161,8 @@ fn r10_30_human_pzfx_and_prism_import_warnings_and_live_edit() -> TestRes {
         let snap_open = inspect_ui_tree(run.app(), None, false);
         let iw_open = snap_open.import_warnings.as_ref().ok_or("R10.30-PZFX: ui.inspect missing import_warnings")?;
         ensure(iw_open.open, "R10.30-PZFX: ui.inspect import_warnings.open should be true while modal is open")?;
-        ensure(
-            iw_open.command_id == "table.importPzfx",
-            format!("R10.30-PZFX: expected command_id=table.importPzfx, got {:?}", iw_open.command_id),
-        )?;
-        ensure(
-            iw_open.warnings.len() == run.app().import_warnings.warnings.len(),
-            "R10.30-PZFX: ui.inspect import_warnings count mismatch",
-        )?;
+        ensure(iw_open.command_id == "table.importPzfx", format!("R10.30-PZFX: expected command_id=table.importPzfx, got {:?}", iw_open.command_id))?;
+        ensure(iw_open.warnings.len() == run.app().import_warnings.warnings.len(), "R10.30-PZFX: ui.inspect import_warnings count mismatch")?;
 
         // Close the panel via synthesized click on Close button (`modal.cancel`).
         run.click("modal.cancel")?;
@@ -210,11 +195,7 @@ fn r10_30_human_pzfx_and_prism_import_warnings_and_live_edit() -> TestRes {
         let sheet_id = run.document().data_sheets.first().ok_or("R10.30-PZFX: missing imported sheet")?.id.clone();
         run.select_sheet(&sheet_id)?;
         run.enter_grid_cell(0, 0, 0, "42.5")?;
-        let edited_cell = run
-            .document()
-            .data_sheet(&sheet_id)
-            .and_then(|ds| ds.cell(CellCoord::new(0, 0, 0)))
-            .map(|c| &c.value);
+        let edited_cell = run.document().data_sheet(&sheet_id).and_then(|ds| ds.cell(CellCoord::new(0, 0, 0))).map(|c| &c.value);
         ensure(
             matches!(edited_cell, Some(CellValue::Number(v)) if (v - 42.5).abs() < 1e-9),
             format!("R10.30-PZFX: expected live-edited cell (0,0,0) to be 42.5, got {edited_cell:?}"),
@@ -248,10 +229,7 @@ fn r10_30_human_pzfx_and_prism_import_warnings_and_live_edit() -> TestRes {
         let snap_open = inspect_ui_tree(run.app(), None, false);
         let iw = snap_open.import_warnings.as_ref().ok_or("R10.30-PRISM: ui.inspect missing import_warnings")?;
         ensure(iw.open && !iw.warnings.is_empty(), "R10.30-PRISM: expected open non-empty import_warnings in ui.inspect")?;
-        ensure(
-            iw.command_id == "table.importPrism",
-            format!("R10.30-PRISM: expected command_id=table.importPrism, got {:?}", iw.command_id),
-        )?;
+        ensure(iw.command_id == "table.importPrism", format!("R10.30-PRISM: expected command_id=table.importPrism, got {:?}", iw.command_id))?;
 
         // Close, reopen via status footer pill, and close again.
         run.click("modal.cancel")?;
@@ -264,11 +242,7 @@ fn r10_30_human_pzfx_and_prism_import_warnings_and_live_edit() -> TestRes {
         let sheet_id = run.document().data_sheets.first().ok_or("R10.30-PRISM: missing imported sheet")?.id.clone();
         run.select_sheet(&sheet_id)?;
         run.enter_grid_cell(0, 0, 0, "99.5")?;
-        let edited_cell = run
-            .document()
-            .data_sheet(&sheet_id)
-            .and_then(|ds| ds.cell(CellCoord::new(0, 0, 0)))
-            .map(|c| &c.value);
+        let edited_cell = run.document().data_sheet(&sheet_id).and_then(|ds| ds.cell(CellCoord::new(0, 0, 0))).map(|c| &c.value);
         ensure(
             matches!(edited_cell, Some(CellValue::Number(v)) if (v - 99.5).abs() < 1e-9),
             format!("R10.30-PRISM: expected live-edited cell (0,0,0) to be 99.5, got {edited_cell:?}"),
@@ -377,8 +351,7 @@ fn r10_30_human_anova_exports_and_all_tables_csv() -> TestRes {
     let ref_source_id = anova_table_id.as_str().to_owned();
     run.verify_reference(
         ReferenceSpec::for_result(res_id.clone(), move |sess| {
-            sess.execute("analysis.run", json!({ "source_sheet_id": ref_source_id, "kind": anova_kind }))
-                .map_err(|e| e.to_string())?;
+            sess.execute("analysis.run", json!({ "source_sheet_id": ref_source_id, "kind": anova_kind })).map_err(|e| e.to_string())?;
             Ok(())
         })
         .with_reference_sheet(ref_sheet)?
@@ -536,10 +509,7 @@ fn r10_30_human_anova_exports_and_all_tables_csv() -> TestRes {
         format!("expected PickFolder request for ui.export.allTablesCsv, got {reqs:?}"),
     )?;
 
-    for (sheet_id, expected_file) in [
-        (&anova_table_id, "Dose Groups.csv"),
-        (&extra_table_id, "Secondary Cohort.csv"),
-    ] {
+    for (sheet_id, expected_file) in [(&anova_table_id, "Dose Groups.csv"), (&extra_table_id, "Secondary Cohort.csv")] {
         let gui_tbl_path = gui_all_tables_dir.join(expected_file);
         let ref_tbl_path = ref_all_tables_dir.join(expected_file);
         oracle
@@ -557,10 +527,7 @@ fn r10_30_human_anova_exports_and_all_tables_csv() -> TestRes {
     }
 
     // Stage 5: Live-edit upstream ANOVA table cell and finish with full 14-locale + parity checks.
-    run.live_edit(
-        LiveEditTarget::sheet_grid_cell(anova_table_id, 0, 2, 0, "35.0"),
-        LiveEditExpectation::scalar_changed(res_id, "F", None, 1.0),
-    )?;
+    run.live_edit(LiveEditTarget::sheet_grid_cell(anova_table_id, 0, 2, 0, "35.0"), LiveEditExpectation::scalar_changed(res_id, "F", None, 1.0))?;
 
     run.finish()
 }

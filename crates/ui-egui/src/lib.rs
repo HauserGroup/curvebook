@@ -896,11 +896,7 @@ impl UiApp {
                 } else if let Some(msg) = entry.as_str() {
                     let trimmed = msg.trim();
                     if !trimmed.is_empty() {
-                        items.push(ImportWarningItem {
-                            kind: String::from("warning"),
-                            source: source_label.to_owned(),
-                            message: trimmed.to_owned(),
-                        });
+                        items.push(ImportWarningItem { kind: String::from("warning"), source: source_label.to_owned(), message: trimmed.to_owned() });
                     }
                 }
             }
@@ -909,11 +905,7 @@ impl UiApp {
             for msg in &outcome.warnings {
                 let trimmed = msg.trim();
                 if !trimmed.is_empty() {
-                    items.push(ImportWarningItem {
-                        kind: String::from("warning"),
-                        source: source_label.to_owned(),
-                        message: trimmed.to_owned(),
-                    });
+                    items.push(ImportWarningItem { kind: String::from("warning"), source: source_label.to_owned(), message: trimmed.to_owned() });
                 }
             }
         }
@@ -923,12 +915,8 @@ impl UiApp {
                 self.canvas_dialogs.active_dialog = ActiveDialog::None;
             }
         } else {
-            self.import_warnings = ImportWarningsState {
-                source_label: source_label.to_owned(),
-                command_id: command_id.to_owned(),
-                warnings: items,
-                panel_open: true,
-            };
+            self.import_warnings =
+                ImportWarningsState { source_label: source_label.to_owned(), command_id: command_id.to_owned(), warnings: items, panel_open: true };
             self.canvas_dialogs.active_dialog = ActiveDialog::ImportWarnings;
         }
         self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
@@ -936,11 +924,7 @@ impl UiApp {
 
     /// Open the replace-or-merge confirmation modal before importing a multi-sheet file (`R10.29`).
     pub fn open_import_project_mode_dialog(&mut self, command_id: impl Into<String>, path: impl Into<String>, has_unsaved_changes: bool) {
-        self.canvas_dialogs.active_dialog = ActiveDialog::ImportProjectMode {
-            command_id: command_id.into(),
-            path: path.into(),
-            has_unsaved_changes,
-        };
+        self.canvas_dialogs.active_dialog = ActiveDialog::ImportProjectMode { command_id: command_id.into(), path: path.into(), has_unsaved_changes };
         self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
     }
 

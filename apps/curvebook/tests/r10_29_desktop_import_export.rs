@@ -116,7 +116,8 @@ fn build_anova_session() -> Result<Session, Box<dyn std::error::Error>> {
     }
     doc.add_data_sheet(ds)?;
     let mut session = Session::from_document(doc);
-    let _ = session.execute("analysis.run", json!({ "source_sheet_id": "anova-data", "kind": "one_way_anova", "sheet_id": "rs-anova", "alpha": 0.05 }))?;
+    let _ = session
+        .execute("analysis.run", json!({ "source_sheet_id": "anova-data", "kind": "one_way_anova", "sheet_id": "rs-anova", "alpha": 0.05 }))?;
     let _ = session.execute("sheet.select", json!({ "sheet_id": "rs-anova" }))?;
     Ok(session)
 }
@@ -211,11 +212,7 @@ fn import_into_existing_project_prompts_replace_or_merge_and_honors_both_modes()
 
     // Choosing merge: true preserves existing sheets AND keeps the active .curvebook file_path.
     let merge_out = rt
-        .dispatch_native_file_command_with_params(
-            wid,
-            "table.importPzfx",
-            &json!({ "path": incoming_pzfx.to_string_lossy(), "merge": true }),
-        )?
+        .dispatch_native_file_command_with_params(wid, "table.importPzfx", &json!({ "path": incoming_pzfx.to_string_lossy(), "merge": true }))?
         .expect("merge outcome");
     assert_eq!(merge_out.action, "native_file_dialog.completed:table.importPzfx");
     {
@@ -287,18 +284,10 @@ fn tsv_auto_delimiter_and_methods_report_extensions_and_export_all_tables() -> R
     // 2. analysis.exportCsv to `.tsv` auto-selects `\t` delimiter and includes `tsv` in dialog extensions.
     let results_tsv = tmp.0.join("anova_results.tsv");
     adapter.push_response("analysis.exportCsv", Some(results_tsv.clone()));
-    let _ = rt.dispatch_native_file_command_with_params(
-        wid,
-        "analysis.exportCsv",
-        &json!({ "delimiter": ",", "decimal_separator": "," }),
-    )?;
+    let _ = rt.dispatch_native_file_command_with_params(wid, "analysis.exportCsv", &json!({ "delimiter": ",", "decimal_separator": "," }))?;
     let results_tsv_text = fs::read_to_string(&results_tsv)?;
     assert!(results_tsv_text.contains('\t'), "analysis .tsv export must use tab delimiter: {results_tsv_text}");
-    let analysis_req = adapter
-        .requests()
-        .into_iter()
-        .find(|r| r.command_id == "analysis.exportCsv")
-        .expect("analysis.exportCsv dialog request");
+    let analysis_req = adapter.requests().into_iter().find(|r| r.command_id == "analysis.exportCsv").expect("analysis.exportCsv dialog request");
     assert!(analysis_req.extensions.iter().any(|e| e == "csv"));
     assert!(analysis_req.extensions.iter().any(|e| e == "tsv"));
 
@@ -332,11 +321,7 @@ fn tsv_auto_delimiter_and_methods_report_extensions_and_export_all_tables() -> R
         .dispatch_native_file_command_with_params(wid, "ui.export.allTablesCsv", &json!({ "delimiter": ";", "decimal_separator": "," }))?
         .expect("allTablesCsv outcome");
     assert_eq!(all_out.action, "native_file_dialog.completed:ui.export.allTablesCsv");
-    let folder_req = adapter
-        .requests()
-        .into_iter()
-        .find(|r| r.command_id == "ui.export.allTablesCsv")
-        .expect("PickFolder request");
+    let folder_req = adapter.requests().into_iter().find(|r| r.command_id == "ui.export.allTablesCsv").expect("PickFolder request");
     assert_eq!(folder_req.kind, NativeFileDialogKind::PickFolder);
 
     assert!(out_dir.join("Enzyme Activity.csv").exists());
