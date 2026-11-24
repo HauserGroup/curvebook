@@ -133,7 +133,7 @@ pub fn render_command_palette(
 
     if backdrop_resp.clicked() {
         report.outside_click_captured = true;
-        intents.push_set_palette_open(false);
+        intents.push(UiIntent::SetPaletteOpen { open: false });
     }
 
     if state.just_opened {
@@ -188,6 +188,9 @@ pub fn render_command_palette(
                 state.just_opened = false;
             }
             if state.query != prev_query {
+                let mut fields = serde_json::Map::new();
+                fields.insert(String::from("query"), serde_json::Value::String(state.query.clone()));
+                intents.push(UiIntent::PatchActiveDialog { fields });
                 items = query_unified(app, &state.query, 24, recents);
                 report.match_count = items.len();
                 state.selected_index = items.iter().position(|r| r.enabled).unwrap_or(0);
@@ -306,7 +309,7 @@ fn consume_palette_keys(
     let mut moved = false;
     let mut accepted_ghost = false;
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_set_palette_open(false);
+        intents.push(UiIntent::SetPaletteOpen { open: false });
         return PaletteKeyNavResult { moved, accepted_ghost };
     }
     if let Some(suffix) = ghost_suffix
@@ -1082,7 +1085,7 @@ pub(crate) fn resolve_shell_command_route(app: &UiApp, command_id: &str, is_ui_c
 /// Route a selected [`UnifiedSearchItem`] to its corresponding sheet, column, analysis, equation,
 /// or command intent, record it in [`SearchRecents`], and close the Command Palette.
 pub(crate) fn commit_unified_search_item(app: &UiApp, item: &UnifiedSearchItem, intents: &mut PendingUiIntents) {
-    intents.push_set_palette_open(false);
+    intents.push(UiIntent::SetPaletteOpen { open: false });
     intents.push(UiIntent::RecordSearchRecent(Box::new(item.clone())));
     match &item.action {
         UnifiedSearchAction::ActivateSheet(sheet_id) => {
@@ -1273,7 +1276,7 @@ mod unified_search_integration_tests {
 
         // Opening full palette renders CommandPalette dialog and palette.query.
         let mut intents = PendingUiIntents::default();
-        intents.push_set_palette_open(true);
+        intents.push(UiIntent::SetPaletteOpen { open: true });
         let _ = intents.commit_all_if_settled(&mut app, false);
         let snap_pal = inspect_live_egui_snapshot(&app, metrics, None, true);
         assert_eq!(snap_pal.active_dialog, "command_palette");

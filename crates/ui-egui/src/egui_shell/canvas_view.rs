@@ -20,7 +20,7 @@ use egui::{Color32, CornerRadius, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeK
 use serde_json::json;
 
 use crate::UiApp;
-use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, rgba8_to_color32};
+use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent, rgba8_to_color32};
 use crate::i18n::tr;
 use crate::inspect::ZLayer;
 
@@ -594,6 +594,32 @@ pub fn render_canvas_view_for_sheet(
         state.pan_pt[1] += resp.drag_delta().y;
     }
 
+    // Wheel pan / Ctrl+Meta wheel zoom / trackpad pinch zoom over canvas viewport
+    if ctx_in.enabled {
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()));
+        let over_canvas = pointer_pos.is_some_and(|p| mat_rect.contains(p)) || resp.hovered();
+        if over_canvas {
+            let anchor = pointer_pos.unwrap_or_else(|| mat_rect.center());
+            let anchor_pt = [f64::from(anchor.x), f64::from(anchor.y)];
+            let zoom_delta = ui.input(|i| i.zoom_delta());
+            if zoom_delta.is_finite() && (zoom_delta - 1.0).abs() > 1e-4 {
+                intents.push(UiIntent::CanvasPinchZoom { scale_delta: f64::from(zoom_delta), anchor_pt });
+            }
+            let (scroll_delta, mods) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers));
+            if scroll_delta != egui::Vec2::ZERO {
+                if mods.ctrl || mods.command || mods.mac_cmd {
+                    let scale_delta = (f64::from(-scroll_delta.y) * 0.002).exp().clamp(0.5, 2.0);
+                    intents.push(UiIntent::CanvasPinchZoom { scale_delta, anchor_pt });
+                } else {
+                    intents.push(UiIntent::CanvasPanDelta { delta_x: f64::from(scroll_delta.x), delta_y: f64::from(scroll_delta.y) });
+                }
+                ui.input_mut(|i| {
+                    i.smooth_scroll_delta = egui::Vec2::ZERO;
+                });
+            }
+        }
+    }
+
     state.sheet_viewports.insert(
         target_id.clone(),
         CanvasPerSheetViewportState {
@@ -1007,8 +1033,13 @@ fn render_graph_hud_overlays(
 
             if ctx_in.enabled && !ann_claimed_click && canvas_resp.clicked() {
                 let coord = GridCellCoord::new(hit.source_cell.row, hit.source_cell.col, hit.source_cell.subcol);
-                intents.push_brush_point(hit.source_cell.sheet_id.clone(), coord);
-                intents.push_select_grid_cell(coord);
+                let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl || i.modifiers.mac_cmd);
+                if additive {
+                    intents.push(UiIntent::AddBrushedPoint { sheet_id: hit.source_cell.sheet_id.clone(), coord });
+                } else {
+                    intents.push(UiIntent::BrushPoint { sheet_id: hit.source_cell.sheet_id.clone(), coord });
+                    intents.push(UiIntent::SelectGridCell { coord });
+                }
             }
         } else {
             let readout = CanvasHoverReadout {
@@ -2302,7 +2333,7 @@ fn render_graph_context_menu(
                 .show(menu_ui, |ui| {
                     ui.set_min_width(232.0);
                     if render_context_menu_item(ui, meta, "canvas.graph_ctx.copy_image", "Copy as Image", Some("edit.copy"), true) {
-                        intents.push_workspace_copy(144);
+                        intents.push(UiIntent::WorkspaceCopy { dpi: 144 });
                         close_menu = true;
                     }
                     if render_context_menu_item(
@@ -2313,7 +2344,7 @@ fn render_graph_context_menu(
                         Some("ui.clipboard.copyForSlides"),
                         true,
                     ) {
-                        intents.push_workspace_copy_for_slides(300);
+                        intents.push(UiIntent::WorkspaceCopyForSlides { dpi: 300 });
                         close_menu = true;
                     }
                     ui.separator();
@@ -2336,7 +2367,7 @@ fn render_graph_context_menu(
                         Some("edit.pasteImage"),
                         true,
                     ) {
-                        intents.push_paste_image_from_clipboard(gs.id.clone(), Some(scene_anchor));
+                        intents.push(UiIntent::PasteImageFromClipboard { target_sheet_id: gs.id.clone(), anchor_pt: Some(scene_anchor) });
                         close_menu = true;
                     }
                     if render_context_menu_item(
@@ -2415,7 +2446,7 @@ fn append_layout_context_menu_extras(
     let mut clicked = false;
 
     if render_context_menu_item(ui, meta, "canvas.layout_ctx.copy_image", "Copy as Image", Some("edit.copy"), true) {
-        intents.push_workspace_copy(144);
+        intents.push(UiIntent::WorkspaceCopy { dpi: 144 });
         clicked = true;
     }
     if render_context_menu_item(
@@ -2426,7 +2457,7 @@ fn append_layout_context_menu_extras(
         Some("ui.clipboard.copyForSlides"),
         true,
     ) {
-        intents.push_workspace_copy_for_slides(300);
+        intents.push(UiIntent::WorkspaceCopyForSlides { dpi: 300 });
         clicked = true;
     }
     ui.separator();
@@ -2460,7 +2491,7 @@ fn append_layout_context_menu_extras(
         }
     }
     if render_context_menu_item(ui, meta, "canvas.layout_ctx.paste_image", tr(locale, "r13.canvas.paste_image"), Some("edit.pasteImage"), true) {
-        intents.push_paste_image_from_clipboard(ls.id.clone(), Some([sc_pt.x, sc_pt.y]));
+        intents.push(UiIntent::PasteImageFromClipboard { target_sheet_id: ls.id.clone(), anchor_pt: Some([sc_pt.x, sc_pt.y]) });
         clicked = true;
     }
     if render_context_menu_item(ui, meta, "canvas.layout_ctx.insert_image", tr(locale, "r13.canvas.insert_image"), Some("layout.insertImage"), true) {

@@ -25,10 +25,8 @@ use curvebook_ui_egui::control_io::host_routing::{
     resolve_renderable_sheet_id, resolve_result_sheet_id, resolve_uninit_or_graph_sheet_id, resolve_xy_or_data_sheet_id, sheet_id_obj_or_empty,
     split_variant_command,
 };
-use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::grid_view::ImportOriginKind;
-use curvebook_ui_egui::interaction::{InlineEditorTarget, KeyModifiers, UiEventOutcome, UiInputEvent, ViewportMetrics, build_shortcut_candidates};
+use curvebook_ui_egui::interaction::{InlineEditorTarget, KeyModifiers, ViewportMetrics, build_shortcut_candidates};
 use curvebook_ui_egui::menus::{CuratedMenuNode, TOOLBAR_BUTTONS, curated_menu_bar, is_desktop_host_routed_command};
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::WelcomeMode;
@@ -43,7 +41,6 @@ use serde_json::{Value, json};
 const DEFAULT_RECOVERY_LOCK_TTL_MS: u64 = 5 * 60 * 1000;
 const BASE_LOGICAL_DPI: u16 = 72;
 const IN_WINDOW_MENU_BAR_HEIGHT_PT: f64 = 24.0;
-const VELOCITY_COAST_EPSILON_PT_PER_SEC: f64 = 0.5;
 
 static NEXT_INSTANCE_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -137,20 +134,6 @@ pub struct DesktopMenuChromeState {
     pub dispatched_actions: Vec<String>,
 }
 
-mod ui_backend_serde {
-    use curvebook_ui_egui::egui_shell::UiBackend;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(backend: &UiBackend, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(backend.as_str())
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<UiBackend, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        UiBackend::from_env_and_args(None, Some(&raw)).map_err(serde::de::Error::custom)
-    }
-}
-
 /// Host runtime configuration constructed from CLI flags (`--in-window-menus`, `--new-instance`, ...)
 /// or embedded test harnesses.
 #[derive(Clone, Serialize, Deserialize)]
@@ -159,8 +142,6 @@ pub struct DesktopHostConfig {
     pub new_instance: bool,
     #[serde(default)]
     pub gui_only: bool,
-    #[serde(default, with = "ui_backend_serde")]
-    pub ui_backend: UiBackend,
     pub locale_override: Option<String>,
     pub theme_override: Option<String>,
     pub recovery_root: Option<PathBuf>,
@@ -179,7 +160,6 @@ impl fmt::Debug for DesktopHostConfig {
             .field("in_window_menus", &self.in_window_menus)
             .field("new_instance", &self.new_instance)
             .field("gui_only", &self.gui_only)
-            .field("ui_backend", &self.ui_backend)
             .field("locale_override", &self.locale_override)
             .field("theme_override", &self.theme_override)
             .field("recovery_root", &self.recovery_root)
@@ -201,7 +181,6 @@ impl PartialEq for DesktopHostConfig {
         self.in_window_menus == other.in_window_menus
             && self.new_instance == other.new_instance
             && self.gui_only == other.gui_only
-            && self.ui_backend == other.ui_backend
             && self.locale_override == other.locale_override
             && self.theme_override == other.theme_override
             && self.recovery_root == other.recovery_root
@@ -218,7 +197,6 @@ impl Default for DesktopHostConfig {
             in_window_menus: false,
             new_instance: false,
             gui_only: false,
-            ui_backend: UiBackend::Egui,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -289,39 +267,6 @@ pub enum DesktopHostEvent {
     ScaleFactorChanged {
         window_id: DesktopWindowId,
         scale_factor: f32,
-    },
-    MouseWheel {
-        window_id: DesktopWindowId,
-        x_pt: f64,
-        y_pt: f64,
-        #[serde(default)]
-        delta_x: f64,
-        delta_y: f64,
-        #[serde(default)]
-        modifiers: KeyModifiers,
-    },
-    TrackpadMagnify {
-        window_id: DesktopWindowId,
-        anchor_x_pt: f64,
-        anchor_y_pt: f64,
-        magnification_delta: f64,
-    },
-    TrackpadScroll {
-        window_id: DesktopWindowId,
-        delta_x: f64,
-        delta_y: f64,
-        dt_sec: f64,
-        #[serde(default)]
-        phase_ended: bool,
-    },
-    KeyboardInput {
-        window_id: DesktopWindowId,
-        key: String,
-        pressed: bool,
-        #[serde(default)]
-        modifiers: KeyModifiers,
-        #[serde(default)]
-        text: Option<String>,
     },
     FileHovered {
         window_id: DesktopWindowId,
@@ -994,7 +939,6 @@ where
 }
 
 fn configure_app_overrides(app: &mut UiApp, cfg: &DesktopHostConfig) -> Result<(), String> {
-    app.set_ui_backend(cfg.ui_backend);
     if let Some(locale) = cfg.locale_override.as_deref() {
         let _ = app.set_locale(normalize_beta_gui_locale(locale));
     }
@@ -1028,7 +972,6 @@ pub struct DesktopWindowSession {
     recovered_from_crash: bool,
     recovery_warnings: Vec<JournalRecoveryWarning>,
     hovered_files: Vec<PathBuf>,
-    coasting_active: bool,
     last_frame: Option<DesktopFrameOutput>,
 }
 
@@ -1102,12 +1045,6 @@ impl DesktopWindowSession {
     #[must_use]
     pub fn hovered_files(&self) -> &[PathBuf] {
         &self.hovered_files
-    }
-
-    /// Whether inertial trackpad momentum coasting is actively ticking for this window.
-    #[must_use]
-    pub const fn is_coasting(&self) -> bool {
-        self.coasting_active
     }
 
     /// Last rendered software `egui` frame, if [`DesktopHostEvent::RedrawRequested`] has run.
@@ -2492,7 +2429,6 @@ impl DesktopHostRuntime {
             recovered_from_crash,
             recovery_warnings,
             hovered_files: Vec::new(),
-            coasting_active: false,
             last_frame: None,
         };
         self.windows.insert(id, win);
@@ -2529,18 +2465,6 @@ impl DesktopHostRuntime {
             DesktopHostEvent::WindowFocused { window_id } => self.handle_window_focused(window_id),
             DesktopHostEvent::Resized { window_id, width_px, height_px } => self.handle_resized(window_id, width_px, height_px),
             DesktopHostEvent::ScaleFactorChanged { window_id, scale_factor } => self.handle_scale_factor_changed(window_id, scale_factor),
-            DesktopHostEvent::MouseWheel { window_id, x_pt, y_pt, delta_x, delta_y, modifiers } => {
-                self.handle_mouse_wheel(window_id, x_pt, y_pt, delta_x, delta_y, modifiers)
-            }
-            DesktopHostEvent::TrackpadMagnify { window_id, anchor_x_pt, anchor_y_pt, magnification_delta } => {
-                self.handle_trackpad_magnify(window_id, anchor_x_pt, anchor_y_pt, magnification_delta)
-            }
-            DesktopHostEvent::TrackpadScroll { window_id, delta_x, delta_y, dt_sec, phase_ended } => {
-                self.handle_trackpad_scroll(window_id, delta_x, delta_y, dt_sec, phase_ended)
-            }
-            DesktopHostEvent::KeyboardInput { window_id, key, pressed, modifiers, text } => {
-                self.handle_keyboard_input(window_id, key, pressed, modifiers, text)
-            }
             DesktopHostEvent::FileHovered { window_id, paths } => self.handle_file_hovered(window_id, paths),
             DesktopHostEvent::FileHoverCancelled { window_id } => self.handle_file_hover_cancelled(window_id),
             DesktopHostEvent::FileDropped { window_id, path } => self.handle_file_dropped(window_id, path),
@@ -2670,249 +2594,6 @@ impl DesktopHostRuntime {
         })
     }
 
-    fn dispatch_ui_event_on_window(&mut self, window_id: DesktopWindowId, ui_event: UiInputEvent) -> Result<DesktopEventOutcome, String> {
-        let check_shortcuts = !matches!(ui_event, UiInputEvent::PointerMove { .. }) && self.preferences_persist_hook.is_some();
-        let win = self.window_mut(window_id)?;
-        let prev_undo = win.app.session().undo_depth();
-        let prev_redo = win.app.session().redo_depth();
-        let prev_dirty = win.app.session().is_dirty();
-        let prev_mutation_seq = win.app.mutation_seq();
-        let prev_basic = (win.app.locale.clone(), win.app.theme.mode, win.app.ui_scale().to_bits());
-        let prev_shortcuts = if check_shortcuts { Some(win.app.shortcuts.export_overrides_json().unwrap_or_default()) } else { None };
-        let ui_out: UiEventOutcome = win.app.dispatch_ui_event(ui_event, win.viewport)?;
-        win.record_ui_mutation_checkpoint(ui_out.command_id.as_deref(), prev_undo, prev_redo, prev_dirty, prev_mutation_seq)?;
-        let prefs_changed = prev_basic != (win.app.locale.clone(), win.app.theme.mode, win.app.ui_scale().to_bits())
-            || prev_shortcuts.as_deref().is_some_and(|before| before != win.app.shortcuts.export_overrides_json().unwrap_or_default());
-        if prefs_changed {
-            self.persist_window_preferences(window_id);
-        }
-        if ui_out.action == "welcome.open_file_requested" {
-            if let Some(outcome) = self.dispatch_native_file_command(window_id, "project.open")? {
-                return Ok(outcome);
-            }
-            if let Some(mut hook) = self.open_file_dialog_hook.take() {
-                let picked = (hook.0)(window_id);
-                self.open_file_dialog_hook = Some(hook);
-                if let Some(path) = picked? {
-                    return self.handle_file_dropped(window_id, path);
-                }
-            }
-        }
-        if ui_out.action == "file.save_as_dialog_requested"
-            && let Some(outcome) = self.dispatch_native_file_command(window_id, "file.save_as")?
-        {
-            return Ok(outcome);
-        }
-        let command_id = ui_out.command_id.or_else(|| (ui_out.action == "welcome.open_file_requested").then(|| String::from("project.open")));
-        Ok(DesktopEventOutcome {
-            handled: ui_out.handled,
-            action: ui_out.action,
-            window_id: Some(window_id),
-            command_id,
-            command_result: ui_out.command_result,
-            ..Default::default()
-        })
-    }
-
-    fn handle_mouse_wheel(
-        &mut self,
-        window_id: DesktopWindowId,
-        x_pt: f64,
-        y_pt: f64,
-        delta_x: f64,
-        delta_y: f64,
-        modifiers: KeyModifiers,
-    ) -> Result<DesktopEventOutcome, String> {
-        let (modal_open, grid_sheet_id, over_scene_paper) = {
-            let win = self.window(window_id)?;
-            if win.app.canvas_dialogs.active_dialog != ActiveDialog::None
-                || win.app.nav.welcome.open
-                || win.app.grid.import_wizard.open
-                || win.app.grid.variables_dialog.open
-            {
-                (true, None, false)
-            } else {
-                let doc = win.app.document();
-                let snap = curvebook_ui_egui::inspect_ui_tree_for_metrics(&win.app, win.viewport, None, true);
-                let [px, py] = win.viewport.logical_to_physical_px([x_pt, y_pt]);
-                let contains_pt = |bounds: Option<[f64; 4]>| -> bool {
-                    bounds.is_some_and(|b| b[2] > 0.0 && b[3] > 0.0 && px >= b[0] && px <= b[0] + b[2] && py >= b[1] && py <= b[1] + b[3])
-                };
-                let canvas_hits = snap.canvas_elements.as_deref().unwrap_or(&[]);
-                let over_nav = snap.navigator_sheets.as_deref().unwrap_or(&[]).iter().any(|n| contains_pt(n.bounds));
-                let over_viewport = !over_nav
-                    && canvas_hits
-                        .iter()
-                        .any(|n| matches!(n.widget_id.as_str(), "canvas.viewport" | "canvas.split.viewport") && contains_pt(n.bounds));
-                let over_grid_widget = !over_nav && snap.grid_cells.as_deref().unwrap_or(&[]).iter().any(|n| contains_pt(n.bounds));
-                let over_primary_pane = !over_nav && canvas_hits.iter().any(|n| n.widget_id == "center.pane.primary" && contains_pt(n.bounds));
-                let over_secondary_pane = !over_nav && canvas_hits.iter().any(|n| n.widget_id == "center.pane.secondary" && contains_pt(n.bounds));
-
-                let (primary_id, secondary_opt) =
-                    if win.app.split.enabled { win.app.split.resolve_sheets(doc) } else { (doc.active_sheet_id.clone(), None) };
-                let resolved_secondary = secondary_opt
-                    .or_else(|| doc.data_sheets.iter().find(|d| Some(&d.id) != primary_id.as_ref()).map(|d| d.id.clone()))
-                    .or_else(|| doc.data_sheets.first().map(|d| d.id.clone()));
-
-                let grid_target = if over_viewport {
-                    None
-                } else if over_secondary_pane && win.app.split.enabled {
-                    resolved_secondary.filter(|id| doc.data_sheet(id).is_some())
-                } else if over_grid_widget || over_primary_pane {
-                    primary_id.filter(|id| doc.data_sheet(id).is_some())
-                } else {
-                    None
-                };
-                let over_scene = grid_target.is_none() && over_viewport;
-                (false, grid_target, over_scene)
-            }
-        };
-
-        if modal_open {
-            return Ok(DesktopEventOutcome {
-                handled: false,
-                action: String::from("wheel.dialog_open_ignored"),
-                window_id: Some(window_id),
-                ..Default::default()
-            });
-        }
-
-        if let Some(sheet_id) = grid_sheet_id {
-            let win = self.window_mut(window_id)?;
-            if let Some(sheet) = win.app.document().data_sheet(&sheet_id).cloned() {
-                win.app.grid.tool.scroll_for_sheet(&sheet, -delta_x, -delta_y);
-                win.app.sync_views();
-                return Ok(DesktopEventOutcome {
-                    handled: true,
-                    action: String::from("grid.scroll"),
-                    window_id: Some(window_id),
-                    command_result: Some(json!({
-                        "sheet_id": sheet_id.as_str(),
-                        "scroll_x_px": win.app.grid.tool.viewport.scroll_x_px,
-                        "scroll_y_px": win.app.grid.tool.viewport.scroll_y_px,
-                    })),
-                    ..Default::default()
-                });
-            }
-        }
-
-        if !over_scene_paper {
-            return Ok(DesktopEventOutcome {
-                handled: false,
-                action: String::from("wheel.non_canvas_ignored"),
-                window_id: Some(window_id),
-                ..Default::default()
-            });
-        }
-
-        let ui_event = if modifiers.ctrl || modifiers.meta {
-            UiInputEvent::WheelZoom { x: x_pt, y: y_pt, delta_y, modifiers }
-        } else {
-            UiInputEvent::InertialPan { delta_x, delta_y, dt_sec: 0.016, step_coast: false }
-        };
-        self.dispatch_ui_event_on_window(window_id, ui_event)
-    }
-
-    fn handle_trackpad_magnify(
-        &mut self,
-        window_id: DesktopWindowId,
-        anchor_x_pt: f64,
-        anchor_y_pt: f64,
-        magnification_delta: f64,
-    ) -> Result<DesktopEventOutcome, String> {
-        if !magnification_delta.is_finite() {
-            return Ok(DesktopEventOutcome {
-                handled: false,
-                action: String::from("trackpad.magnify_ignored"),
-                window_id: Some(window_id),
-                ..Default::default()
-            });
-        }
-        let scale_delta = (1.0 + magnification_delta).clamp(0.05, 10.0);
-        self.dispatch_ui_event_on_window(window_id, UiInputEvent::PinchZoom { x: anchor_x_pt, y: anchor_y_pt, scale_delta })
-    }
-
-    fn handle_trackpad_scroll(
-        &mut self,
-        window_id: DesktopWindowId,
-        delta_x: f64,
-        delta_y: f64,
-        dt_sec: f64,
-        phase_ended: bool,
-    ) -> Result<DesktopEventOutcome, String> {
-        let outcome = self.dispatch_ui_event_on_window(window_id, UiInputEvent::InertialPan { delta_x, delta_y, dt_sec, step_coast: false })?;
-        let win = self.window_mut(window_id)?;
-        let vel = win.app.canvas_dialogs.pan_zoom.vel_pt_per_sec;
-        let speed = vel[0].hypot(vel[1]);
-        win.coasting_active = phase_ended && speed >= VELOCITY_COAST_EPSILON_PT_PER_SEC;
-        Ok(outcome)
-    }
-
-    fn handle_keyboard_input(
-        &mut self,
-        window_id: DesktopWindowId,
-        key: String,
-        pressed: bool,
-        modifiers: KeyModifiers,
-        text: Option<String>,
-    ) -> Result<DesktopEventOutcome, String> {
-        let _ = self.window(window_id)?;
-        if !pressed {
-            return Ok(DesktopEventOutcome {
-                handled: false,
-                action: String::from("key.released"),
-                window_id: Some(window_id),
-                ..Default::default()
-            });
-        }
-
-        let trimmed = key.trim();
-        let control_key = matches!(trimmed, "Enter" | "Return" | "Escape" | "Esc" | "Backspace" | "Tab");
-        let (inline_active, dialog_active, shortcut_route) = {
-            let win = self.window(window_id)?;
-            let inline = win.app.inline_editor.active;
-            let dialog = win.app.canvas_dialogs.active_dialog != ActiveDialog::None
-                || win.app.nav.welcome.open
-                || win.app.grid.import_wizard.open
-                || win.app.grid.variables_dialog.open;
-            let routed = if !inline && !dialog { match_routed_desktop_shortcut(&win.app, trimmed, modifiers) } else { None };
-            (inline, dialog, routed)
-        };
-        if inline_active
-            && !control_key
-            && !modifiers.ctrl
-            && !modifiers.meta
-            && !modifiers.alt
-            && let Some(input_text) = text.as_ref().filter(|t| !t.is_empty())
-        {
-            return self.dispatch_ui_event_on_window(window_id, UiInputEvent::TextInput { text: input_text.clone() });
-        }
-
-        if let Some(routed_cmd) = shortcut_route
-            && !dialog_active
-        {
-            return self.dispatch_routed_shortcut(window_id, &routed_cmd);
-        }
-
-        let out = self.dispatch_ui_event_on_window(window_id, UiInputEvent::KeyDown { key: key.clone(), modifiers })?;
-        if out.handled {
-            return Ok(out);
-        }
-
-        if (modifiers.meta || modifiers.ctrl) && !modifiers.alt && !modifiers.shift {
-            if trimmed.eq_ignore_ascii_case("x") {
-                return self.cut_selection(window_id);
-            }
-            if trimmed.eq_ignore_ascii_case("c") {
-                return self.handle_clipboard_copy(window_id);
-            }
-            if trimmed.eq_ignore_ascii_case("v") {
-                return self.handle_clipboard_paste(window_id, None);
-            }
-        }
-        Ok(out)
-    }
-
     fn handle_file_hovered(&mut self, window_id: DesktopWindowId, paths: Vec<PathBuf>) -> Result<DesktopEventOutcome, String> {
         let win = self.window_mut(window_id)?;
         win.hovered_files = paths;
@@ -3026,7 +2707,6 @@ impl DesktopHostRuntime {
                 }
                 record_dropped_warnings(win.app_mut(), &path);
                 win.dirty_commands.clear();
-                win.coasting_active = false;
                 win.checkpoint_recovery_journal()?;
                 Ok(DesktopEventOutcome {
                     handled: true,
@@ -3036,34 +2716,6 @@ impl DesktopHostRuntime {
                 })
             }
         }
-    }
-
-    fn dispatch_routed_shortcut(&mut self, window_id: DesktopWindowId, command_id: &str) -> Result<DesktopEventOutcome, String> {
-        if command_id == "sheet.createData" {
-            let result_sheet_id = {
-                let win = self.window(window_id)?;
-                let doc = win.app.document();
-                doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()).cloned()
-            };
-            if let Some(rs_id) = result_sheet_id {
-                let win = self.window_mut(window_id)?;
-                let payload = open_desktop_dialog(&mut win.app, DesktopDialogOpener::EditAnalysisParameters, Some(rs_id.as_str()), None)?;
-                win.app.sync_views();
-                return Ok(DesktopEventOutcome {
-                    handled: true,
-                    action: String::from("shortcut:EditAnalysisParameters"),
-                    window_id: Some(window_id),
-                    command_id: Some(String::from("analysis.updateParams")),
-                    command_result: Some(payload),
-                    ..Default::default()
-                });
-            }
-        }
-        let mut out = self.handle_menu_action(window_id, command_id.to_owned())?;
-        if out.action.starts_with("menu.") {
-            out.action = format!("shortcut:{command_id}");
-        }
-        Ok(out)
     }
 
     fn handle_menu_action(&mut self, window_id: DesktopWindowId, command_id: String) -> Result<DesktopEventOutcome, String> {
@@ -3421,11 +3073,22 @@ impl DesktopHostRuntime {
         };
 
         if inline_active {
-            let mut out = self.dispatch_ui_event_on_window(window_id, UiInputEvent::TextInput { text: paste_text })?;
-            if let Some(note) = os_note {
-                Self::attach_os_clipboard_note(&mut out.command_result, note);
+            let win = self.window_mut(window_id)?;
+            win.app.inline_editor.insert_text(&paste_text);
+            if matches!(win.app.inline_editor.target, Some(InlineEditorTarget::GridCell { .. } | InlineEditorTarget::GridXCell { .. })) {
+                win.app.grid.tool.editing_buffer = Some(win.app.inline_editor.buffer.clone());
             }
-            return Ok(out);
+            let mut command_result = Some(json!({ "text": win.app.inline_editor.buffer }));
+            if let Some(note) = os_note {
+                Self::attach_os_clipboard_note(&mut command_result, note);
+            }
+            return Ok(DesktopEventOutcome {
+                handled: true,
+                action: String::from("inline_edit.text_input"),
+                window_id: Some(window_id),
+                command_result,
+                ..Default::default()
+            });
         }
 
         let win = self.window_mut(window_id)?;
@@ -3489,27 +3152,8 @@ impl DesktopHostRuntime {
                 maybe_renew_journal_lease_periodically(journal);
             }
         }
-        if !dt_sec.is_finite() || dt_sec <= 0.0 {
-            return Ok(DesktopEventOutcome { handled: false, action: String::from("animation.tick_ignored"), ..Default::default() });
-        }
-
-        let coasting_ids: Vec<DesktopWindowId> = self.windows.iter().filter_map(|(id, win)| win.coasting_active.then_some(*id)).collect();
-        let mut any_moving = false;
-        for id in &coasting_ids {
-            let out = self.dispatch_ui_event_on_window(*id, UiInputEvent::InertialPan { delta_x: 0.0, delta_y: 0.0, dt_sec, step_coast: true })?;
-            let still_moving = out.command_result.as_ref().and_then(|v| v.get("moving")).and_then(Value::as_bool).unwrap_or(false);
-            if let Some(win) = self.windows.get_mut(id) {
-                win.coasting_active = still_moving;
-            }
-            any_moving |= still_moving;
-        }
-        Ok(DesktopEventOutcome {
-            handled: !coasting_ids.is_empty(),
-            action: if any_moving { String::from("animation.coasting") } else { String::from("animation.idle") },
-            window_id: coasting_ids.first().copied(),
-            command_result: Some(json!({ "ticked_windows": coasting_ids.len(), "moving": any_moving })),
-            ..Default::default()
-        })
+        let _ = dt_sec;
+        Ok(DesktopEventOutcome { handled: false, action: String::from("animation.idle"), ..Default::default() })
     }
 
     fn handle_redraw_requested(&mut self, window_id: DesktopWindowId) -> Result<DesktopEventOutcome, String> {

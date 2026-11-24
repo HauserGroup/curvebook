@@ -247,7 +247,7 @@ pub fn render_transform_modal(
         if state.hook_picker_open {
             state.hook_picker_open = false;
         } else if from_edit {
-            intents.push_dialog_button("cancel");
+            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
         } else {
             intents.push(UiIntent::CloseTransformModal);
         }
@@ -266,6 +266,7 @@ pub fn render_transform_modal(
     let dlg_w = (vp.width() - 24.0).clamp(320.0, 620.0);
     let dlg_h = (vp.height() - 24.0).clamp(240.0, 500.0);
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let source_sheet = resolve_source_sheet(app, state, from_edit);
     let modal_resp = egui::Modal::new(egui::Id::unique("egui_shell_transform_modal")).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
@@ -314,6 +315,32 @@ pub fn render_transform_modal(
         ui.add_space(4.0);
         render_transform_footer(ui, &mut modal_cx, effective_kind);
     });
+
+    if !wants_kb_before
+        && !ctx.egui_wants_keyboard_input()
+        && !state.hook_picker_open
+        && state.validation_error.is_none()
+        && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+    {
+        if from_edit {
+            if commit_edit_transform_draft_if_needed(app, source_sheet, effective_kind, state, intents) {
+                intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+                push_normalize_graph_if_requested(app, effective_kind, state, intents);
+            }
+        } else if let Some(sheet) = source_sheet {
+            match build_standalone_transform_params(app, sheet, effective_kind, state) {
+                Ok(cmd_params) => {
+                    intents.push_engine("transform.run", cmd_params);
+                    intents.push(UiIntent::CloseTransformModal);
+                }
+                Err(err) => {
+                    state.validation_error = Some(err);
+                }
+            }
+        } else {
+            intents.push(UiIntent::CloseTransformModal);
+        }
+    }
 
     let title_for_ak = title.to_owned();
     modal_resp.response.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Dialog, true, title_for_ak.clone()));
@@ -900,7 +927,7 @@ fn push_normalize_edit_draft(
         }
         *output_percent = state.norm_percent;
         *per_data_set = state.norm_per_dataset;
-        intents.push_set_edit_params_draft(spec);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec) });
     }
 }
 
@@ -1040,7 +1067,7 @@ fn render_remove_baseline_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
                 if from_edit {
                     if let Some(spec) = draft_spec.as_mut() {
                         spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: next_cols, operation: cur_op });
-                        intents.push_set_edit_params_draft(spec.clone());
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                     }
                 } else {
                     state.baseline_cols = next_cols;
@@ -1070,7 +1097,7 @@ fn render_remove_baseline_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
                     if let Some(spec) = draft_spec.as_mut() {
                         spec.kind =
                             AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: cur_cols.clone(), operation: op });
-                        intents.push_set_edit_params_draft(spec.clone());
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                     }
                 } else {
                     state.baseline_op = idx;
@@ -1094,7 +1121,7 @@ fn render_remove_baseline_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
                 BaselineOperation::FractionalChange => BaselineOperation::Difference,
             };
             spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: cur_cols.clone(), operation: next_op });
-            intents.push_set_edit_params_draft(spec.clone());
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
         }
     });
 
@@ -1181,7 +1208,7 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                                     target_archetype: target_arch,
                                     derived_columns: next_d,
                                 });
-                                intents.push_set_edit_params_draft(spec.clone());
+                                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                             } else {
                                 state.derived_cols.push((t, f));
                             }
@@ -1223,7 +1250,7 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                                     target_archetype: target_arch,
                                     derived_columns: next_d,
                                 });
-                                intents.push_set_edit_params_draft(spec.clone());
+                                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                             } else if idx < state.derived_cols.len() {
                                 state.derived_cols.remove(idx);
                             }
@@ -1249,7 +1276,7 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                         target_archetype: target_arch,
                         derived_columns: derived.clone(),
                     });
-                    intents.push_set_edit_params_draft(spec.clone());
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                 }
             }
             ui.horizontal(|row| {
@@ -1303,7 +1330,7 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                         target_archetype: target_arch,
                         derived_columns: derived.clone(),
                     });
-                    intents.push_set_edit_params_draft(spec.clone());
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                 }
             }
         }
@@ -1341,7 +1368,7 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                             state.standalone_selected_cols = selected.clone();
                             if from_edit && let Some(spec) = draft_spec.as_mut() {
                                 spec.selected_data_sets = selected.clone();
-                                intents.push_set_edit_params_draft(spec.clone());
+                                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                             }
                         }
                     }
@@ -1396,7 +1423,7 @@ fn render_target_archetype_selector(ui: &mut Ui, pcx: TargetArchetypePickerCtx<'
                     target_archetype: tk,
                     derived_columns: derived_columns.clone(),
                 });
-                intents.push_set_edit_params_draft(spec.clone());
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
             }
         };
     ui.label(RichText::new("Target Table Archetype:").strong().color(tokens.text_primary));
@@ -1467,7 +1494,7 @@ fn render_transpose_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
         state.transpose_swap_titles = swap_titles;
         if from_edit && let Some(spec) = draft_spec.as_mut() {
             spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::Transpose { swap_row_and_column_titles: swap_titles });
-            intents.push_set_edit_params_draft(spec.clone());
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
         }
     }
 }
@@ -1488,7 +1515,7 @@ fn render_prune_rows_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
     let push_prune = |k: usize, avg: bool, draft_spec: &mut Option<AnalysisSpec>, intents: &mut PendingUiIntents| {
         if from_edit && let Some(spec) = draft_spec.as_mut() {
             spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::PruneRows { every_k_rows: k, average_window: avg });
-            intents.push_set_edit_params_draft(spec.clone());
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
         }
     };
 
@@ -1812,7 +1839,7 @@ fn render_simulate_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
                 && let Some(mut spec) = app.canvas_dialogs.edit_params.draft.clone()
             {
                 spec.kind = AnalysisKind::Transform(tr_spec);
-                cx.intents.push_set_edit_params_draft(spec);
+                cx.intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec) });
             }
         }
         Err(err) => {
@@ -1928,7 +1955,7 @@ fn render_random_sample_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
                 && let Some(mut spec) = app.canvas_dialogs.edit_params.draft.clone()
             {
                 spec.kind = AnalysisKind::Transform(tr_spec);
-                cx.intents.push_set_edit_params_draft(spec);
+                cx.intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec) });
             }
         }
         Err(err) => {
@@ -2123,7 +2150,7 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
         meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal("modal.cancel", "button", cancel_lbl, None, true));
         if cancel_resp.clicked() {
             if from_edit {
-                intents.push_dialog_button("cancel");
+                intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
             } else {
                 intents.push(UiIntent::CloseTransformModal);
             }
@@ -2137,7 +2164,7 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
             if ok_resp.clicked() {
                 if from_edit {
                     if commit_edit_transform_draft_if_needed(app, ds, kind, state, intents) {
-                        intents.push_dialog_button("ok");
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                         push_normalize_graph_if_requested(app, kind, state, intents);
                     }
                 } else {
@@ -2162,7 +2189,7 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
                 let apply_resp = rhs.add_enabled(can_ok, egui::Button::new(apply_lbl));
                 meta.record_modal_response(rhs, &apply_resp, FrameInspectEntryInput::modal("modal.apply", "button", apply_lbl, None, can_ok));
                 if apply_resp.clicked() && commit_edit_transform_draft_if_needed(app, ds, kind, state, intents) {
-                    intents.push_dialog_button("apply");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("apply") });
                     push_normalize_graph_if_requested(app, kind, state, intents);
                 }
             }
@@ -2215,7 +2242,7 @@ fn commit_edit_transform_draft_if_needed(
             Ok(tr_spec) => {
                 if let Some(mut spec) = app.canvas_dialogs.edit_params.draft.clone() {
                     spec.kind = AnalysisKind::Transform(tr_spec);
-                    intents.push_set_edit_params_draft(spec);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec) });
                 }
                 true
             }
@@ -2228,7 +2255,7 @@ fn commit_edit_transform_draft_if_needed(
             Ok(tr_spec) => {
                 if let Some(mut spec) = app.canvas_dialogs.edit_params.draft.clone() {
                     spec.kind = AnalysisKind::Transform(tr_spec);
-                    intents.push_set_edit_params_draft(spec);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec) });
                 }
                 true
             }
@@ -2244,7 +2271,7 @@ fn commit_edit_transform_draft_if_needed(
                     Ok(Some(cols)) => {
                         if let Some(mut spec) = app.canvas_dialogs.edit_params.draft.clone() {
                             spec.selected_data_sets = cols;
-                            intents.push_set_edit_params_draft(spec);
+                            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec) });
                         }
                         true
                     }
@@ -2280,7 +2307,7 @@ fn apply_math_patch(
         if let Some(ep) = new_ep {
             *error_propagation = ep;
         }
-        intents.push_set_edit_params_draft(spec.clone());
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
     }
 }
 
@@ -2471,7 +2498,7 @@ pub fn render_exclude_with_reason_modal(
         return TransformModalFrameReport::default();
     }
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
     }
 
     if state.synced_exclude_tag.is_empty() {
@@ -2484,6 +2511,7 @@ pub fn render_exclude_with_reason_modal(
     let vp = ctx.content_rect();
     let dlg_w = (vp.width() - 24.0).clamp(280.0, 460.0);
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let modal_resp = egui::Modal::new(egui::Id::unique("egui_shell_exclude_reason_modal")).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
         let inner_w = (dlg_w - 24.0).max(240.0);
@@ -2508,7 +2536,7 @@ pub fn render_exclude_with_reason_modal(
                     state.exclude_reason_draft = (*tag).to_owned();
                     let mut f = Map::new();
                     f.insert(String::from("reason_tag"), Value::String((*tag).to_owned()));
-                    intents.push_patch_active_dialog(f);
+                    intents.push(UiIntent::PatchActiveDialog { fields: f });
                 }
             }
         });
@@ -2525,12 +2553,17 @@ pub fn render_exclude_with_reason_modal(
             if tr_box.changed() {
                 let mut f = Map::new();
                 f.insert(String::from("reason_tag"), Value::String(state.exclude_reason_draft.clone()));
-                intents.push_patch_active_dialog(f);
+                intents.push(UiIntent::PatchActiveDialog { fields: f });
             }
         });
         ui.label("Audit Note:");
+        let note_id = egui::Id::unique("exclude.note.input");
+        if !ui.ctx().memory(|m| m.has_focus(note_id)) && state.exclude_note_draft != app.canvas_dialogs.exclude_with_reason.note {
+            state.exclude_note_draft = app.canvas_dialogs.exclude_with_reason.note.clone();
+        }
         let nr = ui.add(
             egui::TextEdit::multiline(&mut state.exclude_note_draft)
+                .id(note_id)
                 .hint_text("Optional audit note…")
                 .desired_rows(2)
                 .desired_width((dlg_w - 44.0).max(160.0)),
@@ -2543,7 +2576,7 @@ pub fn render_exclude_with_reason_modal(
         if nr.changed() {
             let mut f = Map::new();
             f.insert(String::from("note"), Value::String(state.exclude_note_draft.clone()));
-            intents.push_patch_active_dialog(f);
+            intents.push(UiIntent::PatchActiveDialog { fields: f });
         }
 
         ui.add_space(8.0);
@@ -2552,7 +2585,7 @@ pub fn render_exclude_with_reason_modal(
             let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
             meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal("modal.cancel", "button", cancel_lbl, None, true));
             if cancel_resp.clicked() {
-                intents.push_dialog_button("cancel");
+                intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
             }
             footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
                 let ok_lbl = tr(tokens.locale, "btn.ok");
@@ -2560,7 +2593,7 @@ pub fn render_exclude_with_reason_modal(
                 let ok_resp = widgets::primary_button_enabled(rhs, ok_lbl, can_ok);
                 meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", ok_lbl, None, can_ok));
                 if ok_resp.clicked() {
-                    intents.push_dialog_button("ok");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
             });
         });
@@ -2575,6 +2608,14 @@ pub fn render_exclude_with_reason_modal(
         ModalCaptureSpec { widget_id: "dialog.exclude_with_reason", title, z_dialog: ZLayer::ModalDialog },
         meta,
     );
+    let can_ok = !state.exclude_reason_draft.trim().is_empty() && !app.canvas_dialogs.exclude_with_reason.coords.is_empty();
+    let cmd_enter = ctx.input_mut(|i| {
+        i.consume_key(Modifiers::COMMAND, Key::Enter) || i.consume_key(Modifiers::CTRL, Key::Enter) || i.consume_key(Modifiers::MAC_CMD, Key::Enter)
+    });
+    let plain_enter = !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+    if can_ok && (cmd_enter || plain_enter) {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+    }
     TransformModalFrameReport {
         modal_open: true,
         dialog_rect_pt: capture.dialog_rect_pt,

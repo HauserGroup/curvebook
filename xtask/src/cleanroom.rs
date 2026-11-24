@@ -4,9 +4,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use curvebook_format::{ZipArchive, ZipLimits};
-
 use crate::text_decode::{decode_utf16, detect_bomless_utf16};
+use crate::zip_read::{ZipArchive, ZipLimits};
 
 const SELF: &str = "xtask/src/cleanroom.rs";
 const AUDIT_DIR_PREFIX: &str = "docs/audit/";
@@ -457,7 +456,7 @@ fn collect_spans(haystack: &str, needle: &str, left: Boundary, right: Boundary, 
 
 #[cfg(test)]
 mod tests {
-    use curvebook_format::ZipWriter;
+    use crate::zip_read::TestZipWriter as ZipWriter;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 

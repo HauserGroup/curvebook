@@ -16,16 +16,16 @@ use curvebook_transform::{
     ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload, PlateGeometry, PlateMapTemplate, PlateWellRole, TargetArchetypeKind,
     TidyColumnMapping, apply_import_link_pipeline, map_plate_to_datasheet, pivot_tidy_long_to_datasheet,
 };
+use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{CommandOutcome, EngineError, ErrorCode, ExternalPathPolicy, dag};
 
 use super::{
-    BaselineInput, CellRangeInput, PlacementFields, anchor_schema, baseline_schema, cell_range_schema, col_ref_schema, decimal_sep_schema,
-    delimiter_schema, ensure_mv_edit_preserves_calculated, ensure_range_outside_linked_regions, import_filter_schema, parse_import_filter_val,
-    parse_table_kind, parse_target_archetype_kind, resolve_baseline_adjustment, resolve_decimal_char, resolve_delimiter, resolve_subcolumn_mode,
-    validate_project_cell_budget, validate_project_cell_budget_after_change,
+    BaselineInput, CellRangeInput, ImportFilterSchema, PlacementFields, ensure_mv_edit_preserves_calculated, ensure_range_outside_linked_regions,
+    parse_import_filter_val, parse_table_kind, parse_target_archetype_kind, resolve_baseline_adjustment, resolve_decimal_char, resolve_delimiter,
+    resolve_subcolumn_mode, validate_project_cell_budget, validate_project_cell_budget_after_change,
 };
 use crate::cmd::Ctx;
 use crate::cmd::helpers::{
@@ -34,10 +34,7 @@ use crate::cmd::helpers::{
     remap_graph_spec_references, remap_layout_spec_references, remap_sheet_id, require_data_sheet, select_result_tab,
     shift_point_overrides_on_insert_rows, snapshot_active_series_lengths, sync_info_linked_data_sheets,
 };
-use crate::cmd::params::{
-    any_json_schema, array_schema, bool_schema, deserialize_strict, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
-    parse_params, str_schema,
-};
+use crate::cmd::params::{command_schema, deserialize_strict, parse_params};
 use crate::cmd::project::recalculate_dirty_with_links;
 
 fn check_inline_payload_len(len: usize, max_bytes: usize, label: &str) -> Result<(), EngineError> {
@@ -121,57 +118,45 @@ pub(super) fn apply_pipeline_with_split_info(
 // Shared Deserialization & Parsing Types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct PasteLinkParams {
+    /// Destination data sheet identifier.
+    #[schemars(length(min = 1))]
     pub(super) target_sheet_id: String,
+    /// Direct ImportLinkSpec payload.
+    #[schemars(with = "Option<Map<String, Value>>")]
     pub(super) link_spec: Option<Value>,
+    /// Internal source Data or Result sheet ID.
+    #[schemars(length(min = 1))]
     pub(super) source_sheet_id: Option<String>,
+    /// Explicit source kind: data, result, analyzable_result, terminal_result.
     pub(super) source_kind: Option<String>,
+    /// Result sheet tab ID or title.
     pub(super) tab_id: Option<String>,
+    /// Optional source range.
     pub(super) source_range: Option<CellRangeInput>,
+    /// External delimited file path.
+    #[schemars(length(min = 1))]
     pub(super) source_path: Option<String>,
+    /// Column delimiter (`auto`, `,`, `\\t`/`tab`, `;`, or single character).
     pub(super) delimiter: Option<String>,
+    /// Decimal separator (`.`, `,`, `dot`, `comma`, `period`, or `auto`).
     pub(super) decimal_separator: Option<String>,
+    /// Infer European decimal separator when ambiguous.
     pub(super) normalize_decimal: Option<bool>,
+    /// Optional import filter specification.
+    #[schemars(with = "Option<ImportFilterSchema>")]
     pub(super) filter: Option<Value>,
+    /// Optional baseline adjustment.
     pub(super) baseline: Option<BaselineInput>,
+    /// Optional predicate excluding matching linked rows.
     pub(super) exclude_row_predicate: Option<String>,
+    /// Custom link identifier.
     pub(super) link_id: Option<String>,
+    /// Custom provenance note recorded in linked InfoSheet.
     pub(super) provenance: Option<String>,
     #[serde(flatten)]
     pub(super) placement: PlacementFields,
-}
-
-pub(super) fn schema_paste_link() -> Value {
-    obj_schema(
-        vec![
-            ("target_sheet_id", non_empty_str_schema("Destination data sheet identifier")),
-            ("link_spec", nullable_schema(json!({ "type": "object", "description": "Direct ImportLinkSpec payload" }))),
-            ("source_sheet_id", nullable_schema(non_empty_str_schema("Internal source Data or Result sheet ID"))),
-            ("source_kind", nullable_schema(str_schema("Explicit source kind: data, result, analyzable_result, terminal_result"))),
-            ("tab_id", nullable_schema(str_schema("Result sheet tab ID or title"))),
-            ("source_range", nullable_schema(cell_range_schema())),
-            ("source_path", nullable_schema(non_empty_str_schema("External delimited file path"))),
-            ("delimiter", delimiter_schema()),
-            ("decimal_separator", decimal_sep_schema()),
-            ("normalize_decimal", bool_schema("Infer European decimal separator when ambiguous")),
-            ("filter", nullable_schema(import_filter_schema())),
-            ("baseline", nullable_schema(baseline_schema())),
-            ("exclude_row_predicate", nullable_schema(str_schema("Optional predicate excluding matching linked rows"))),
-            ("link_id", nullable_schema(str_schema("Custom link identifier"))),
-            ("provenance", nullable_schema(str_schema("Custom provenance note recorded in linked InfoSheet"))),
-            ("anchor", anchor_schema()),
-            ("start_row", int_schema("Target anchor row", Some(0), None)),
-            ("start_col", int_schema("Target anchor column", Some(0), None)),
-            ("start_subcol", int_schema("Target anchor subcolumn", Some(0), None)),
-            ("mode", str_schema("Placement mode: overwrite, insert_rows, append_rows, append_columns")),
-            ("propagate_title_header", bool_schema("Propagate source titles to target headers")),
-            ("skip_contiguous_blanks", bool_schema("Skip contiguous blanks")),
-            ("transpose", bool_schema("Transpose source matrix")),
-        ],
-        &["target_sheet_id"],
-        false,
-    )
 }
 
 pub(super) fn summarize_link_source(source: &LinkSource) -> String {
@@ -313,7 +298,7 @@ pub(super) fn build_paste_link_spec(
 }
 
 pub(super) fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let p: PasteLinkParams = parse_params(&schema_paste_link(), raw)?;
+    let p: PasteLinkParams = parse_params(&command_schema::<PasteLinkParams>(), raw)?;
     let target_id = parse_sheet_id(&p.target_sheet_id)?;
     let policy = ctx.session.path_policy.clone();
     let doc = &mut ctx.session.doc;
@@ -431,65 +416,47 @@ pub(super) fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
 // 14. table.importCsv
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct ImportCsvParams {
+    /// Optional target sheet ID (auto-generated if omitted).
+    #[schemars(length(min = 1))]
     pub(super) sheet_id: Option<String>,
+    /// Inline CSV/TSV content.
     pub(super) csv: Option<String>,
+    /// Filesystem path to CSV/TSV file.
+    #[schemars(length(min = 1))]
     pub(super) path: Option<String>,
+    /// Column delimiter (`auto`, `,`, `\\t`/`tab`, `;`, or single character).
     pub(super) delimiter: Option<String>,
+    /// Decimal separator (`.`, `,`, `dot`, `comma`, `period`, or `auto`).
     pub(super) decimal_separator: Option<String>,
+    /// Infer European decimal separator when ambiguous.
     pub(super) normalize_decimal: Option<bool>,
+    /// Treat first row as column headers.
     pub(super) has_header: Option<bool>,
+    /// Number of header rows to combine into column titles (default 1 when `has_header` is true).
+    #[schemars(range(min = 0, max = 16))]
     pub(super) header_rows: Option<usize>,
+    /// Treat first column as row titles.
     pub(super) has_row_titles: Option<bool>,
+    /// Replicate count per group (default 1).
+    #[schemars(range(min = 1))]
     pub(super) replicates: Option<usize>,
+    /// Subcolumn mode name or object.
     pub(super) subcolumn_mode: Option<Value>,
+    /// Replace existing target sheet instead of placing into region.
     pub(super) replace: Option<bool>,
+    /// Title for imported sheet.
     pub(super) title: Option<String>,
+    /// Target archetype (XY, Column, Grouped, Contingency, Survival, PartsOfWhole, MultipleVariables, Nested).
     pub(super) archetype: Option<String>,
+    /// Optional import filter specification.
+    #[schemars(with = "Option<ImportFilterSchema>")]
     pub(super) filter: Option<Value>,
+    /// When importing from `path` into an existing sheet, keep a live file link.
     pub(super) link: Option<bool>,
     #[serde(flatten)]
     pub(super) placement: PlacementFields,
-}
-
-pub(super) fn schema_import_csv() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", nullable_schema(non_empty_str_schema("Optional target sheet ID (auto-generated if omitted)"))),
-            ("csv", nullable_schema(str_schema("Inline CSV/TSV content"))),
-            ("path", nullable_schema(non_empty_str_schema("Filesystem path to CSV/TSV file"))),
-            ("delimiter", delimiter_schema()),
-            ("decimal_separator", decimal_sep_schema()),
-            ("normalize_decimal", bool_schema("Infer European decimal separator when ambiguous")),
-            ("has_header", bool_schema("Treat first row as column headers")),
-            (
-                "header_rows",
-                int_schema("Number of header rows to combine into column titles (default 1 when `has_header` is true)", Some(0), Some(16)),
-            ),
-            ("has_row_titles", bool_schema("Treat first column as row titles")),
-            ("replicates", int_schema("Replicate count per group (default 1)", Some(1), None)),
-            ("subcolumn_mode", nullable_schema(any_json_schema("Subcolumn mode name or object"))),
-            ("replace", bool_schema("Replace existing target sheet instead of placing into region")),
-            ("title", nullable_schema(str_schema("Title for imported sheet"))),
-            (
-                "archetype",
-                nullable_schema(str_schema("Target archetype (XY, Column, Grouped, Contingency, Survival, PartsOfWhole, MultipleVariables, Nested)")),
-            ),
-            ("filter", nullable_schema(import_filter_schema())),
-            ("link", bool_schema("When importing from `path` into an existing sheet, keep a live file link")),
-            ("anchor", anchor_schema()),
-            ("start_row", int_schema("Target anchor row", Some(0), None)),
-            ("start_col", int_schema("Target anchor column", Some(0), None)),
-            ("start_subcol", int_schema("Target anchor subcolumn", Some(0), None)),
-            ("mode", str_schema("Placement mode: overwrite, insert_rows, append_rows, append_columns")),
-            ("propagate_title_header", bool_schema("Propagate header row titles")),
-            ("skip_contiguous_blanks", bool_schema("Skip contiguous blanks")),
-            ("transpose", bool_schema("Transpose imported table")),
-        ],
-        &[],
-        false,
-    )
 }
 
 pub(super) fn build_csv_options(delimiter: char, decimal_separator: char) -> CsvOptions {
@@ -609,7 +576,7 @@ pub(super) fn import_into_existing_sheet(
 }
 
 pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let p: ImportCsvParams = parse_params(&schema_import_csv(), raw)?;
+    let p: ImportCsvParams = parse_params(&command_schema::<ImportCsvParams>(), raw)?;
     if let Some(ref title) = p.title {
         validate_title(title)?;
     }
@@ -686,25 +653,19 @@ pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
 // 15. table.exportCsv
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ImportPrismParams {
+    /// Filesystem path to external archive.
+    #[schemars(length(min = 1))]
     pub(super) path: Option<String>,
+    /// Base64-encoded external archive bytes.
+    #[schemars(length(min = 1))]
     pub(super) bytes_base64: Option<String>,
+    /// Raw byte array of archive contents.
     pub(super) bytes: Option<Vec<u8>>,
+    /// Merge imported sheets into existing document instead of replacing (default false).
     pub(super) merge: Option<bool>,
-}
-
-pub(super) fn schema_import_prism() -> Value {
-    obj_schema(
-        vec![
-            ("path", nullable_schema(non_empty_str_schema("Filesystem path to external archive"))),
-            ("bytes_base64", nullable_schema(non_empty_str_schema("Base64-encoded external archive bytes"))),
-            ("bytes", array_schema("Raw byte array of archive contents", int_schema("Byte value 0..=255", Some(0), Some(255)), None, None)),
-            ("merge", bool_schema("Merge imported sheets into existing document instead of replacing (default false)")),
-        ],
-        &[],
-        false,
-    )
 }
 
 pub(super) fn collect_all_sheet_ids(doc: &ProjectDocument) -> HashSet<String> {
@@ -823,7 +784,7 @@ pub(super) fn merge_imported_document(doc: &mut ProjectDocument, mut imported: P
 }
 
 pub(super) fn run_import_prism(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let p: ImportPrismParams = parse_params(&schema_import_prism(), raw)?;
+    let p: ImportPrismParams = parse_params(&command_schema::<ImportPrismParams>(), raw)?;
     import_prism_with_params(ctx, p)
 }
 
@@ -884,29 +845,23 @@ fn import_prism_with_params(ctx: &mut Ctx<'_>, p: ImportPrismParams) -> Result<C
 // 17. table.importPzfx
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ImportPzfxParams {
+    /// Inline XML project string.
     pub(super) xml: Option<String>,
+    /// Filesystem path to XML project file.
+    #[schemars(length(min = 1))]
     pub(super) path: Option<String>,
+    /// Base64-encoded XML project bytes.
+    #[schemars(length(min = 1))]
     pub(super) bytes_base64: Option<String>,
+    /// Merge imported sheets into existing document instead of replacing (default false).
     pub(super) merge: Option<bool>,
 }
 
-pub(super) fn schema_import_pzfx() -> Value {
-    obj_schema(
-        vec![
-            ("xml", nullable_schema(str_schema("Inline XML project string"))),
-            ("path", nullable_schema(non_empty_str_schema("Filesystem path to XML project file"))),
-            ("bytes_base64", nullable_schema(non_empty_str_schema("Base64-encoded XML project bytes"))),
-            ("merge", bool_schema("Merge imported sheets into existing document instead of replacing (default false)")),
-        ],
-        &[],
-        false,
-    )
-}
-
 pub(super) fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let p: ImportPzfxParams = parse_params(&schema_import_pzfx(), raw)?;
+    let p: ImportPzfxParams = parse_params(&command_schema::<ImportPzfxParams>(), raw)?;
     let report = if let Some(xml) = p.xml.as_deref() {
         check_inline_payload_len(xml.len(), MAX_XML_BYTES, "XML")?;
         import_pzfx_str(xml)?
@@ -928,70 +883,42 @@ pub(super) fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
 // 17b. table.importXlsx
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ImportXlsxParams {
+    /// Filesystem path to `.xlsx` workbook.
+    #[schemars(length(min = 1))]
     pub(super) path: Option<String>,
+    /// Base64-encoded `.xlsx` workbook bytes.
+    #[schemars(length(min = 1))]
     pub(super) bytes_base64: Option<String>,
+    /// Raw byte array of `.xlsx` workbook.
     pub(super) bytes: Option<Vec<u8>>,
+    /// Worksheet tab names to import (imports all visible sheets if omitted).
     pub(super) sheets: Option<Vec<String>>,
+    /// Zero-based worksheet indices to import.
     pub(super) sheet_indices: Option<Vec<usize>>,
+    /// When true, enumerate workbook sheet names/indices without mutating the document.
     pub(super) list_sheets: Option<bool>,
+    /// Treat first row(s) of each sheet as column headers (default true).
     pub(super) has_header: Option<bool>,
+    /// Number of top header rows to merge into column titles (default 1 when `has_header` is true).
+    #[schemars(range(min = 0, max = 16))]
     pub(super) header_rows: Option<usize>,
+    /// Treat first column of each sheet as row titles (default false).
     pub(super) has_row_titles: Option<bool>,
+    /// Optional target archetype (XY, Column, Grouped, Contingency, Survival, PartsOfWhole, MultipleVariables, Nested); inferred per sheet when omitted.
     pub(super) archetype: Option<String>,
+    /// Subcolumn mode name or object.
     pub(super) subcolumn_mode: Option<Value>,
+    /// Include hidden worksheets when no explicit `sheets`/`sheet_indices` are supplied.
     pub(super) include_hidden: Option<bool>,
+    /// Merge imported worksheets into the current project instead of replacing it (default false).
     pub(super) merge: Option<bool>,
 }
 
-pub(super) fn schema_import_xlsx() -> Value {
-    obj_schema(
-        vec![
-            ("path", nullable_schema(non_empty_str_schema("Filesystem path to `.xlsx` workbook"))),
-            ("bytes_base64", nullable_schema(non_empty_str_schema("Base64-encoded `.xlsx` workbook bytes"))),
-            (
-                "bytes",
-                nullable_schema(array_schema("Raw byte array of `.xlsx` workbook", int_schema("Byte value 0..=255", Some(0), Some(255)), None, None)),
-            ),
-            (
-                "sheets",
-                nullable_schema(array_schema(
-                    "Worksheet tab names to import (imports all visible sheets if omitted)",
-                    str_schema("Worksheet name"),
-                    None,
-                    None,
-                )),
-            ),
-            (
-                "sheet_indices",
-                nullable_schema(array_schema("Zero-based worksheet indices to import", int_schema("Sheet index >= 0", Some(0), None), None, None)),
-            ),
-            ("list_sheets", bool_schema("When true, enumerate workbook sheet names/indices without mutating the document")),
-            ("has_header", bool_schema("Treat first row(s) of each sheet as column headers (default true)")),
-            (
-                "header_rows",
-                int_schema("Number of top header rows to merge into column titles (default 1 when `has_header` is true)", Some(0), Some(16)),
-            ),
-            ("has_row_titles", bool_schema("Treat first column of each sheet as row titles (default false)")),
-            (
-                "archetype",
-                nullable_schema(str_schema(
-                    "Optional target archetype (XY, Column, Grouped, Contingency, Survival, PartsOfWhole, MultipleVariables, Nested); inferred per sheet when omitted",
-                )),
-            ),
-            ("subcolumn_mode", nullable_schema(any_json_schema("Subcolumn mode name or object"))),
-            ("include_hidden", bool_schema("Include hidden worksheets when no explicit `sheets`/`sheet_indices` are supplied")),
-            ("merge", bool_schema("Merge imported worksheets into the current project instead of replacing it (default false)")),
-        ],
-        &[],
-        false,
-    )
-}
-
 pub(super) fn run_import_xlsx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let p: ImportXlsxParams = parse_params(&schema_import_xlsx(), raw)?;
+    let p: ImportXlsxParams = parse_params(&command_schema::<ImportXlsxParams>(), raw)?;
     let bytes = if let Some(path) = p.path.as_deref() {
         ctx.session.path_policy.read_binary_file(path, "workbook", MAX_ARCHIVE_FILE_BYTES)?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
@@ -1071,6 +998,15 @@ pub(super) fn run_import_xlsx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
 // 18-21. MultipleVariables Commands
 // ---------------------------------------------------------------------------
 
+fn plate_geometry_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [
+            { "type": "integer", "enum": [96, 384] },
+            { "type": "string", "minLength": 1 }
+        ]
+    })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub(super) enum PlateGeometryInput {
@@ -1093,7 +1029,7 @@ impl PlateGeometryInput {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub(super) enum PlateValuesInput {
     Flat(Vec<Option<f64>>),
@@ -1149,56 +1085,32 @@ impl PlateValuesInput {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ImportPlateMapParams {
+    /// Optional target sheet ID.
+    #[schemars(length(min = 1))]
     pub(super) sheet_id: Option<String>,
+    /// Imported sheet title (default `Plate Data`).
     pub(super) title: Option<String>,
+    /// Plate geometry: 96, 384, `Wells96`, or `Wells384`.
+    #[serde(default)]
+    #[schemars(schema_with = "plate_geometry_schema")]
     pub(super) geometry: Option<PlateGeometryInput>,
+    /// Flat (96/384) or 2D (8x12 / 16x24) plate readings array of finite numbers or nulls.
     pub(super) values: PlateValuesInput,
+    /// PlateMapTemplate object or `.cbtemplate` JSON string.
     pub(super) template: Option<Value>,
+    /// Array of per-well role definitions.
     pub(super) roles: Option<Vec<Value>>,
+    /// Template name when building from `roles`.
     pub(super) template_name: Option<String>,
+    /// X/concentration axis title (default `Concentration`).
     pub(super) x_title: Option<String>,
+    /// Target archetype (Grouped, XY, Column, MultipleVariables).
     pub(super) target_kind: Option<String>,
+    /// Subtract mean of Blank wells from Treatment readings.
     pub(super) subtract_blank_mean: Option<bool>,
-}
-
-pub(super) fn schema_import_plate_map() -> Value {
-    let geom_schema = nullable_schema(json!({
-        "description": "Plate geometry: 96, 384, `Wells96`, or `Wells384`",
-        "anyOf": [
-            { "type": "integer", "enum": [96, 384] },
-            non_empty_str_schema("Plate geometry string")
-        ]
-    }));
-    let values_schema = json!({
-        "description": "Flat (96/384) or 2D (8x12 / 16x24) plate readings array of finite numbers or nulls",
-        "anyOf": [
-            array_schema("1D array of well readings", nullable_schema(num_schema("Well reading", None, None)), None, None),
-            array_schema(
-                "2D plate row/col readings",
-                array_schema("Row of well readings", nullable_schema(num_schema("Well reading", None, None)), None, None),
-                None,
-                None,
-            )
-        ]
-    });
-    obj_schema(
-        vec![
-            ("sheet_id", nullable_schema(non_empty_str_schema("Optional target sheet ID"))),
-            ("title", nullable_schema(str_schema("Imported sheet title (default `Plate Data`)"))),
-            ("geometry", geom_schema),
-            ("values", values_schema),
-            ("template", nullable_schema(any_json_schema("PlateMapTemplate object or `.cbtemplate` JSON string"))),
-            ("roles", nullable_schema(array_schema("Array of per-well role definitions", any_json_schema("PlateWellRole"), None, None))),
-            ("template_name", nullable_schema(str_schema("Template name when building from `roles`"))),
-            ("x_title", nullable_schema(str_schema("X/concentration axis title (default `Concentration`)"))),
-            ("target_kind", nullable_schema(str_schema("Target archetype (Grouped, XY, Column, MultipleVariables)"))),
-            ("subtract_blank_mean", bool_schema("Subtract mean of Blank wells from Treatment readings")),
-        ],
-        &["values"],
-        false,
-    )
 }
 
 pub(super) fn parse_plate_well_role(val: &Value) -> Result<PlateWellRole, EngineError> {
@@ -1305,7 +1217,7 @@ pub(super) fn assign_and_add_imported_sheet(
 }
 
 pub(super) fn run_import_plate_map(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let p: ImportPlateMapParams = parse_params(&schema_import_plate_map(), raw)?;
+    let p: ImportPlateMapParams = parse_params(&command_schema::<ImportPlateMapParams>(), raw)?;
     let title = p.title.as_deref().unwrap_or("Plate Data");
     validate_title(title)?;
     let (geometry, template) = resolve_plate_template(&p, title)?;
@@ -1338,11 +1250,11 @@ pub(super) fn run_import_plate_map(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comm
 // 25. table.importTidyLong
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub(super) enum TidyColRef {
     Index(usize),
-    Name(String),
+    Name(#[schemars(length(min = 1))] String),
 }
 
 impl TidyColRef {
@@ -1363,75 +1275,48 @@ impl TidyColRef {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub(super) struct TidyMappingInput {
+    /// Zero-based header index or header name for X values.
     pub(super) x_col: Option<TidyColRef>,
+    /// Zero-based header index or header name for group/series.
     pub(super) group_col: Option<TidyColRef>,
+    /// Zero-based header index or header name for replicate.
     pub(super) replicate_col: Option<TidyColRef>,
+    /// Zero-based header index or header name for Y value.
     pub(super) value_col: Option<TidyColRef>,
+    /// Zero-based header index or header name for exclusion flag.
     pub(super) excluded_col: Option<TidyColRef>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct ImportTidyLongParams {
+    /// Optional target sheet ID.
+    #[schemars(length(min = 1))]
     pub(super) sheet_id: Option<String>,
+    /// Imported sheet title (default `Tidy Import`).
     pub(super) title: Option<String>,
+    /// Target archetype (Grouped, Column, XY, MultipleVariables).
     pub(super) target_kind: Option<String>,
+    /// Column header names when using `rows`.
     pub(super) headers: Option<Vec<String>>,
+    /// 2D tidy record rows.
     pub(super) rows: Option<Vec<Vec<Value>>>,
+    /// Inline delimited tidy table text.
     pub(super) csv: Option<String>,
+    /// Filesystem path to delimited tidy file.
+    #[schemars(length(min = 1))]
     pub(super) path: Option<String>,
+    /// Column delimiter (`auto`, `,`, `\\t`/`tab`, `;`, or single character).
     pub(super) delimiter: Option<String>,
+    /// Decimal separator (`.`, `,`, `dot`, `comma`, `period`, or `auto`).
     pub(super) decimal_sep: Option<String>,
+    /// Infer European decimal separator when ambiguous.
     pub(super) normalize_decimal: Option<bool>,
+    /// Column role mapping object.
     pub(super) mapping: Option<TidyMappingInput>,
     #[serde(flatten)]
     pub(super) flat_mapping: TidyMappingInput,
-}
-
-pub(super) fn schema_import_tidy_long() -> Value {
-    let tidy_col_schema = nullable_schema(col_ref_schema("Zero-based header index or header name"));
-    let mapping_schema = obj_schema(
-        vec![
-            ("x_col", tidy_col_schema.clone()),
-            ("group_col", tidy_col_schema.clone()),
-            ("replicate_col", tidy_col_schema.clone()),
-            ("value_col", tidy_col_schema.clone()),
-            ("excluded_col", tidy_col_schema.clone()),
-        ],
-        &[],
-        false,
-    );
-    obj_schema(
-        vec![
-            ("sheet_id", nullable_schema(non_empty_str_schema("Optional target sheet ID"))),
-            ("title", nullable_schema(str_schema("Imported sheet title (default `Tidy Import`)"))),
-            ("target_kind", nullable_schema(str_schema("Target archetype (Grouped, Column, XY, MultipleVariables)"))),
-            ("headers", nullable_schema(array_schema("Column header names when using `rows`", str_schema("Header name"), None, None))),
-            (
-                "rows",
-                nullable_schema(array_schema(
-                    "2D tidy record rows",
-                    array_schema("Record row", any_json_schema("Scalar cell"), None, None),
-                    None,
-                    None,
-                )),
-            ),
-            ("csv", nullable_schema(str_schema("Inline delimited tidy table text"))),
-            ("path", nullable_schema(non_empty_str_schema("Filesystem path to delimited tidy file"))),
-            ("delimiter", delimiter_schema()),
-            ("decimal_sep", decimal_sep_schema()),
-            ("normalize_decimal", bool_schema("Infer European decimal separator when ambiguous")),
-            ("mapping", nullable_schema(mapping_schema)),
-            ("x_col", tidy_col_schema.clone()),
-            ("group_col", tidy_col_schema.clone()),
-            ("replicate_col", tidy_col_schema.clone()),
-            ("value_col", tidy_col_schema.clone()),
-            ("excluded_col", tidy_col_schema),
-        ],
-        &[],
-        false,
-    )
 }
 
 pub(super) fn json_scalar_to_string(val: &Value) -> Result<String, EngineError> {
@@ -1541,7 +1426,7 @@ pub(super) fn resolve_tidy_mapping(p: &ImportTidyLongParams, headers: &[String])
 }
 
 pub(super) fn run_import_tidy_long(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let p: ImportTidyLongParams = parse_params(&schema_import_tidy_long(), raw)?;
+    let p: ImportTidyLongParams = parse_params(&command_schema::<ImportTidyLongParams>(), raw)?;
     let title = p.title.as_deref().unwrap_or("Tidy Import");
     validate_title(title)?;
     let target_kind = match p.target_kind.as_deref() {

@@ -40,6 +40,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 proptest = "1"
 quick-xml = { version = "0.42", default-features = false }
+schemars = "1"
 semver = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
@@ -53,7 +54,10 @@ fontdb = { version = "0.24", default-features = false }
 js-sys = "0.3"
 muda = { version = "0.21.2", default-features = false }
 png = "0.18"
+pulldown-cmark = { version = "0.13", default-features = false }
+read-fonts = "0.41"
 rfd = "0.18"
+skrifa = "0.44"
 wasm-bindgen = "=0.2.130"
 web-sys = { version = "0.3", default-features = false, features = ["Window"] }
 winresource = "0.1"

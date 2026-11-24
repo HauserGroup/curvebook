@@ -3,7 +3,7 @@
 //!
 //! Ensures UI widgets read colours and measurements from `Tokens` and `LayoutMetrics` rather than
 //! scattering ad-hoc RGB triples and pixel pairs across views and modals:
-//! - `crates/ui-egui/src/egui_shell/mod.rs` (`Tokens`) must contain **zero** raw colour literals
+//! - `crates/ui-egui/src/egui_shell/tokens.rs` (`Tokens`) must contain **zero** raw colour literals
 //!   (all UI colours derive from `ThemeSeeds` in `crates/ui-egui/src/theme.rs`).
 //! - Canonical token/seed definitions (`theme.rs`), procedural vector brand/icon art (`brand.rs`),
 //!   CPU screenshot encoding (`rasterizer.rs`), test driver (`driver.rs`), and test modules are exempt.
@@ -27,7 +27,7 @@ pub const MAX_RAW_COLORS: usize = 39;
 pub const MAX_RAW_SIZE_PAIRS: usize = 236;
 
 const UI_SRC_PREFIX: &str = "crates/ui-egui/src/";
-const TOKENS_MOD_REL: &str = "crates/ui-egui/src/egui_shell/mod.rs";
+const TOKENS_MOD_REL: &str = "crates/ui-egui/src/egui_shell/tokens.rs";
 const EXEMPT_MARKER: &str = concat!("design-token-", "exempt:");
 const BARE_EXEMPT_MARKER: &str = concat!("design-token-", "exempt");
 

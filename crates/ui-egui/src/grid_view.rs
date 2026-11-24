@@ -9,10 +9,12 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::i18n::LocalePreset;
 use crate::os_integration::ClipboardBundle;
+#[cfg(any(test, feature = "test-support"))]
+use curvebook_doc::SubcolumnMode;
 use curvebook_doc::{
     CategoricalLevelSummary, Cell, CellCoord, CellValue, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind,
-    LevelOrderSpec, LinkBorderColor, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange, SheetId, SubcolumnMode, TableArchetype,
-    TableKind, VariableRole, VariableSource, XColumnMode, default_column_label, infer_number_separators,
+    LevelOrderSpec, LinkBorderColor, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange, SheetId, TableArchetype, TableKind, VariableRole,
+    VariableSource, XColumnMode, default_column_label, infer_number_separators,
 };
 use curvebook_format::{
     CsvOptions, XlsxImportOptions, collapse_merged_header_rows, format_cell_token, import_xlsx_bytes_with_options, list_xlsx_sheets,
@@ -280,6 +282,7 @@ impl GridQuickStats {
     }
 
     /// Format a concise status-bar summary (`n`, `excluded`, `mean`, `SD`, `SEM`, `median`, `sum`).
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn format_footer(&self) -> String {
         let mut parts = vec![format!("n={}", self.n), format!("excluded={}", self.excluded)];
@@ -354,6 +357,7 @@ impl VariablesDialogState {
     }
 
     /// Merge multiple typo/synonym levels into one canonical `target` label.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn merge_levels_into(&mut self, sources: &[&str], target: &str) {
         for &src in sources {
             if src != target {
@@ -387,6 +391,7 @@ impl VariablesDialogState {
     }
 
     /// Emit a `"table.setVariableRole"` command intent for the selected column.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn build_role_command(&self, sheet_id: &SheetId) -> Option<ToolCommandIntent> {
         let col = self.selected_column?;
@@ -412,6 +417,7 @@ impl VariablesDialogState {
     }
 
     /// Emit a `"table.setCategoricalOrder"` command intent for `level_order`.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn build_order_command(&self, sheet_id: &SheetId) -> Option<ToolCommandIntent> {
         let col = self.selected_column?;
@@ -733,15 +739,6 @@ impl Default for ImportReshapeState {
 }
 
 impl ImportReshapeState {
-    /// Target engine command identifier for the currently selected reshape mode.
-    #[must_use]
-    pub const fn command_id(&self) -> &'static str {
-        match self.mode {
-            ImportReshapeMode::Plate96 | ImportReshapeMode::Plate384 => "table.importPlateMap",
-            ImportReshapeMode::TidyLongPivot => "table.importTidyLong",
-        }
-    }
-
     /// Build the engine [`ToolCommandIntent`] (`table.importPlateMap` or `table.importTidyLong`).
     ///
     /// # Errors
@@ -814,193 +811,6 @@ impl ImportReshapeState {
             }
         }
     }
-
-    /// Patch `ImportReshape` dialog state from scripted GUI actions / text fields.
-    ///
-    /// # Errors
-    /// Returns an error if `mode`, `target_kind`, `delimiter`, `plate_values`, or `plate_roles` is invalid.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
-    }
-
-    /// Patch `ImportReshape` dialog state using regional numeric parsing (`preset`).
-    ///
-    /// # Errors
-    /// Returns an error if any field name or value is invalid.
-    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
-        let dec_raw = fields.get("decimal_separator").or_else(|| fields.get("decimal_sep")).or_else(|| fields.get("import.decimal_separator"));
-        let active_preset = if let Some(dec_val) = dec_raw {
-            let ds = dec_val.as_str().ok_or_else(|| String::from("`decimal_separator` must be a string"))?;
-            let sep = match ds.trim() {
-                "," => ',',
-                "." => '.',
-                _ => return Err(format!("unsupported decimal_separator `{ds}`")),
-            };
-            self.decimal_separator = sep;
-            let mut p = preset.clone();
-            p.decimal_separator = sep;
-            p
-        } else {
-            let mut p = preset.clone();
-            if self.decimal_separator == ',' || self.decimal_separator == '.' {
-                p.decimal_separator = self.decimal_separator;
-            }
-            p
-        };
-        let effective_preset = active_preset;
-        for key in ["mode", "import.mode", "reshape_mode"] {
-            if let Some(val) = fields.get(key) {
-                let raw = val.as_str().ok_or_else(|| String::from("`mode` must be a string"))?;
-                let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
-                self.mode = match norm.as_str() {
-                    "plate96" | "plates96" | "wells96" | "96" => ImportReshapeMode::Plate96,
-                    "plate384" | "plates384" | "wells384" | "384" => ImportReshapeMode::Plate384,
-                    "tidylongpivot" | "tidylong" | "tidy" => ImportReshapeMode::TidyLongPivot,
-                    _ => return Err(format!("unsupported ImportReshape mode `{raw}`")),
-                };
-            }
-        }
-        for (key, val) in fields {
-            match key.as_str() {
-                "mode" | "import.mode" | "reshape_mode" => {}
-                "title" | "import.title" | "sheet_title" => {
-                    self.title = val.as_str().ok_or_else(|| String::from("`title` must be a string"))?.to_owned();
-                }
-                "target_kind" | "import.target_kind" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`target_kind` must be a string"))?;
-                    self.target_kind = crate::dialogs_canvas::parse_table_kind_str(raw)?;
-                }
-                "x_title" | "import.x_title" => {
-                    self.x_title = val.as_str().ok_or_else(|| String::from("`x_title` must be a string"))?.to_owned();
-                }
-                "subtract_blank_mean" | "import.subtract_blank_mean" => {
-                    self.subtract_blank_mean = val.as_bool().ok_or_else(|| String::from("`subtract_blank_mean` must be boolean"))?;
-                }
-                "tidy_csv" | "csv" | "import.tidy_csv" | "import.csv" => {
-                    self.tidy_csv = val.as_str().ok_or_else(|| String::from("`tidy_csv` must be a string"))?.to_owned();
-                }
-                "data" | "text" | "import.data" => {
-                    let s = val.as_str().ok_or_else(|| String::from("`data` must be a string"))?;
-                    if self.mode == ImportReshapeMode::TidyLongPivot {
-                        self.tidy_csv = s.to_owned();
-                    } else {
-                        self.plate_values = parse_plate_values_text(s, &effective_preset)?;
-                    }
-                }
-                "plate_values" | "values" | "import.plate_values" => {
-                    self.plate_values = parse_plate_values_json(val, &effective_preset)?;
-                }
-                "plate_roles" | "roles" | "import.plate_roles" => {
-                    let arr = val.as_array().ok_or_else(|| String::from("`plate_roles` must be an array"))?;
-                    self.plate_roles = arr.clone();
-                }
-                "tidy_delimiter" | "delimiter" | "import.delimiter" => {
-                    let s = val.as_str().ok_or_else(|| String::from("`delimiter` must be a string"))?;
-                    self.tidy_delimiter = match s.trim().to_ascii_lowercase().as_str() {
-                        "tab" | "\\t" | "\t" => '\t',
-                        "comma" | "," => ',',
-                        "semicolon" | ";" => ';',
-                        "pipe" | "|" => '|',
-                        _ => s.chars().next().ok_or_else(|| String::from("`delimiter` cannot be empty"))?,
-                    };
-                }
-                "decimal_separator" | "decimal_sep" | "import.decimal_separator" => {
-                    let s = val.as_str().ok_or_else(|| String::from("`decimal_separator` must be a string"))?;
-                    self.decimal_separator = match s.trim() {
-                        "," => ',',
-                        "." => '.',
-                        _ => return Err(format!("unsupported decimal_separator `{s}`")),
-                    };
-                }
-                "x_col" | "import.x_col" => {
-                    self.x_col = opt_nonempty_string(val, key)?;
-                }
-                "group_col" | "import.group_col" => {
-                    self.group_col = val.as_str().ok_or_else(|| String::from("`group_col` must be a string"))?.to_owned();
-                }
-                "replicate_col" | "import.replicate_col" => {
-                    self.replicate_col = opt_nonempty_string(val, key)?;
-                }
-                "value_col" | "import.value_col" => {
-                    self.value_col = val.as_str().ok_or_else(|| String::from("`value_col` must be a string"))?.to_owned();
-                }
-                "excluded_col" | "import.excluded_col" => {
-                    self.excluded_col = opt_nonempty_string(val, key)?;
-                }
-                other => return Err(format!("unknown Import Reshape field `{other}`")),
-            }
-        }
-        Ok(())
-    }
-}
-
-fn opt_nonempty_string(val: &Value, field: &str) -> Result<Option<String>, String> {
-    if val.is_null() {
-        return Ok(None);
-    }
-    let s = val.as_str().ok_or_else(|| format!("`{field}` must be a string or null"))?.trim();
-    Ok((!s.is_empty()).then(|| s.to_owned()))
-}
-
-fn parse_plate_cell_token(tok: &str, preset: &LocalePreset) -> Result<Option<f64>, String> {
-    let t = tok.trim();
-    if t.is_empty() || t.eq_ignore_ascii_case("na") || t.eq_ignore_ascii_case("null") || t == "-" {
-        return Ok(None);
-    }
-    parse_localized_number_input(t, preset).filter(|v| v.is_finite()).map(Some).ok_or_else(|| format!("invalid plate numeric token `{t}`"))
-}
-
-fn parse_plate_values_text(raw: &str, preset: &LocalePreset) -> Result<Vec<Option<f64>>, String> {
-    let mut out = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.contains('\t') || trimmed.contains(';') || (preset.decimal_separator != ',' && trimmed.contains(',')) {
-            let split_iter: Box<dyn Iterator<Item = &str>> =
-                if preset.decimal_separator == ',' { Box::new(trimmed.split(['\t', ';'])) } else { Box::new(trimmed.split([',', '\t', ';'])) };
-            for cell in split_iter {
-                out.push(parse_plate_cell_token(cell, preset)?);
-            }
-        } else {
-            for cell in trimmed.split_whitespace() {
-                out.push(parse_plate_cell_token(cell, preset)?);
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn parse_plate_values_json(val: &Value, preset: &LocalePreset) -> Result<Vec<Option<f64>>, String> {
-    if let Some(s) = val.as_str() {
-        return parse_plate_values_text(s, preset);
-    }
-    let arr = val.as_array().ok_or_else(|| String::from("`plate_values` must be an array or delimited string"))?;
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        if let Some(inner) = item.as_array() {
-            for sub in inner {
-                out.push(parse_plate_scalar(sub, preset)?);
-            }
-        } else {
-            out.push(parse_plate_scalar(item, preset)?);
-        }
-    }
-    Ok(out)
-}
-
-fn parse_plate_scalar(val: &Value, preset: &LocalePreset) -> Result<Option<f64>, String> {
-    if val.is_null() {
-        return Ok(None);
-    }
-    if let Some(f) = val.as_f64() {
-        return f.is_finite().then_some(Some(f)).ok_or_else(|| String::from("plate well value must be finite"));
-    }
-    if let Some(s) = val.as_str() {
-        return parse_plate_cell_token(s, preset);
-    }
-    Err(String::from("plate well value must be a number, string, or null"))
 }
 
 fn target_kind_wire_name(kind: TableKind) -> &'static str {
@@ -1252,6 +1062,7 @@ impl ImportPasteWizardState {
     }
 
     /// Advance to the next stage (`Source -> Filter -> Placement -> Provenance`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn next_stage(&mut self) {
         self.stage = match self.stage {
             ImportWizardStage::Source => ImportWizardStage::Filter,
@@ -1449,6 +1260,8 @@ pub struct GridViewState {
     pub import_wizard: ImportPasteWizardState,
     #[serde(default)]
     pub import_reshape: ImportReshapeState,
+    #[serde(default)]
+    pub import_paste: crate::import_paste::ImportPasteState,
     pub format_link_inspector: FormatLinkInspectorState,
     #[serde(default)]
     pub hover_exclusion_tooltip: Option<String>,
@@ -1590,12 +1403,6 @@ impl GridViewState {
         }
     }
 
-    /// Refresh [`Self::hover_exclusion_tooltip`] from the cell under pointer `coord`.
-    pub fn update_hover_exclusion_tooltip(&mut self, sheet: &DataSheet, coord: Option<GridCellCoord>) -> Option<&str> {
-        self.hover_exclusion_tooltip = coord.and_then(|c| Self::cell_exclusion_tooltip(sheet, c));
-        self.hover_exclusion_tooltip.as_deref()
-    }
-
     /// Clear multi-selection and select a single coordinate (`coord`).
     pub fn select_single_sync(&mut self, coord: GridCellCoord) {
         self.active_x_cell = None;
@@ -1668,6 +1475,7 @@ impl GridViewState {
 
     /// Select or toggle an entire row (across all data columns of `sheet`), supporting `Shift+Click`
     /// range and `Cmd/Ctrl+Click` discontiguous multi-row selection (`WF-22`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn select_row_click(&mut self, sheet: &DataSheet, row: usize, shift: bool, command: bool) {
         self.active_x_cell = None;
         let total_rows = sheet.archetype.row_count();
@@ -1701,6 +1509,7 @@ impl GridViewState {
         self.refresh_selection_stats_for_sheet(sheet);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn toggle_command_row_selection(&mut self, sheet: &DataSheet, clamped_row: usize, col_count: usize, first_coord: GridCellCoord) {
         use std::collections::BTreeSet;
 
@@ -1764,6 +1573,7 @@ impl GridViewState {
 
     /// Check in `O(1)` time for rectangular ranges (or `O(log k)` for discontiguous selections)
     /// whether `coord` is currently selected on `sheet`.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn is_cell_selected(&self, sheet: &DataSheet, coord: GridCellCoord) -> bool {
         let total_rows = sheet.archetype.row_count();
@@ -2079,6 +1889,7 @@ impl GridViewState {
 
     /// Materialize the two-tier `(Group x Subcolumn)` visible frame strictly for `[start_row..end_row)`
     /// and `[start_col..end_col)` in `O(visible_rows * visible_subcols)` time.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn visible_frame(&self, doc: &ProjectDocument) -> Option<GridVisibleFrame> {
         let active_id = doc.active_sheet_id.as_ref()?;
@@ -2129,6 +1940,7 @@ impl GridViewState {
     }
 
     /// Inspect any [`LinkedDataRegion`] containing `coord` (for double-click `Format Link`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inspect_link_at(&mut self, sheet: &DataSheet, coord: GridCellCoord) -> bool {
         if let Some(region) = find_linked_region_at(sheet, coord) {
             self.format_link_inspector = FormatLinkInspectorState {
@@ -2236,6 +2048,7 @@ impl GridViewState {
     }
 
     /// Build the `MultipleVariables` role/type column header strip across all variables in `sheet`.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn variable_role_strip(&self, sheet: &DataSheet) -> Vec<VariableRoleHeader> {
         let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
@@ -2340,7 +2153,7 @@ pub(crate) fn resolve_flat_coord(arch: &TableArchetype, flat_col: usize) -> Opti
 }
 
 #[must_use]
-fn selection_cell_count(sheet: &DataSheet, a: GridCellCoord, b: GridCellCoord) -> usize {
+pub(crate) fn selection_cell_count(sheet: &DataSheet, a: GridCellCoord, b: GridCellCoord) -> usize {
     let row_count = sheet.archetype.row_count();
     let total_flat = total_flat_data_subcolumns(&sheet.archetype);
     if row_count == 0 || total_flat == 0 {
@@ -2369,6 +2182,7 @@ fn graph_target_for_coord(arch: &TableArchetype, col: usize, row: usize, subcol:
     (series, row, sub_opt)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn append_row_coords_bounded(arch: &TableArchetype, row: usize, col_count: usize, coord_set: &mut std::collections::BTreeSet<GridCellCoord>) {
     for col in 0..col_count {
         let subs = data_set_subcolumn_count(arch, col);
@@ -2658,6 +2472,7 @@ pub fn subcolumn_header_labels(arch: &TableArchetype, col: usize) -> Vec<String>
 
 /// Return a compact group-level badge summarizing biological units (`Nested`) or replicate
 /// subcolumn modes (`Xy`, `Column`, `Grouped`) for column `col`, or `None` for single columns.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn biological_unit_label(arch: &TableArchetype, col: usize) -> Option<String> {
     match arch {
@@ -2672,6 +2487,7 @@ pub fn biological_unit_label(arch: &TableArchetype, col: usize) -> Option<String
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn replicate_mode_badge(mode: SubcolumnMode) -> Option<String> {
     match mode {
         SubcolumnMode::Single => None,
@@ -3372,6 +3188,477 @@ fn validate_formula_syntax(body: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn cell_existing_text(cell: Option<&Cell>) -> String {
+    cell.map(|c| match &c.value {
+        CellValue::Empty => String::new(),
+        CellValue::Number(v) => v.to_string(),
+        CellValue::Text(s) => s.clone(),
+    })
+    .unwrap_or_default()
+}
+
+pub(crate) fn parse_grid_scalar_value(final_text: &str, preset: &LocalePreset) -> Value {
+    if final_text.starts_with('*') {
+        Value::String(final_text.to_owned())
+    } else if let Some(num) = parse_localized_number_input(final_text, preset)
+        && num.is_finite()
+    {
+        json!(num)
+    } else {
+        Value::String(final_text.to_owned())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn parse_grid_cell_widget_id(wid: &str) -> Option<GridCellCoord> {
+    let tail = wid.strip_prefix("grid.cell.")?;
+    let mut parts = tail.split('.');
+    let row = parts.next()?.parse::<usize>().ok()?;
+    let col = parts.next()?.parse::<usize>().ok()?;
+    let subcol = parts.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+    Some(GridCellCoord::new(row, col, subcol))
+}
+
+pub(crate) fn parse_x_cell_widget_id(wid: &str) -> Option<(usize, usize)> {
+    if let Some(tail) = wid.strip_prefix("grid.xcell.").or_else(|| wid.strip_prefix("grid.x.")) {
+        let mut parts = tail.split('.');
+        let row = parts.next()?.parse::<usize>().ok()?;
+        let subcol = parts.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+        return Some((row, subcol));
+    }
+    if let Some(tail) = wid.strip_prefix("grid.cell.") {
+        let mut parts = tail.split('.');
+        let row = parts.next()?.parse::<usize>().ok()?;
+        let tag = parts.next()?;
+        if tag.eq_ignore_ascii_case("x") {
+            let subcol = parts.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+            return Some((row, subcol));
+        }
+    }
+    None
+}
+
+fn grid_disabled_err(reason: impl Into<String>) -> curvebook_engine::EngineError {
+    let msg = reason.into();
+    curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::Conflict, msg.clone())
+        .with_remediation("Satisfy the control precondition or select a compatible mode/sheet first.")
+        .with_details(json!({ "disabled": true, "disabled_reason": msg }))
+}
+
+/// Paste delimited/scalar text starting at `(x_row, x_subcol)` in the active X/Time column,
+/// spilling multi-column TSV into Y columns atomically on failure.
+pub(crate) fn paste_text_into_active_x_cell(
+    app: &mut crate::UiApp,
+    sheet_id: &SheetId,
+    x_row: usize,
+    x_subcol: usize,
+    text: &str,
+) -> Result<Value, curvebook_engine::EngineError> {
+    apply_type_text_to_x_cell(app, sheet_id, None, x_row, x_subcol, text, true, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_type_text_to_x_cell(
+    app: &mut crate::UiApp,
+    sheet_id: &SheetId,
+    wid: Option<&str>,
+    x_row: usize,
+    x_subcol: usize,
+    text: &str,
+    clear_existing: bool,
+    commit_enter: bool,
+) -> Result<Value, curvebook_engine::EngineError> {
+    if app.inline_editor.active {
+        crate::interaction::commit_inline_edit_if_active(app)
+            .map_err(|msg| curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::BadInput, msg))?;
+    }
+    {
+        let Some(ds) = app.document().data_sheet(sheet_id) else {
+            return Err(curvebook_engine::EngineError::with_code(
+                curvebook_doc::ErrorCode::NotFound,
+                format!("data sheet `{}` not found", sheet_id.as_str()),
+            ));
+        };
+        if ds.frozen {
+            return Err(grid_disabled_err("Data sheet is frozen (read-only)."));
+        }
+        match &ds.archetype {
+            TableArchetype::Xy(xy) if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) => {
+                return Err(grid_disabled_err("X column is a generated sequence (read-only)."));
+            }
+            TableArchetype::Xy(_) | TableArchetype::Survival(_) => {}
+            _ => {
+                return Err(curvebook_engine::EngineError::with_code(
+                    curvebook_doc::ErrorCode::BadInput,
+                    "active sheet does not have an X/Time column",
+                ));
+            }
+        }
+    }
+
+    if text.contains('\n') || text.contains('\t') {
+        let preset = app.locale_preset.clone();
+        let x_subcol_count = app.document().data_sheet(sheet_id).map_or(1, |ds| match &ds.archetype {
+            TableArchetype::Xy(xy) => xy.x_cells.first().map_or(1, Vec::len).max(1),
+            _ => 1,
+        });
+        let avail_x_cols = x_subcol_count.saturating_sub(x_subcol);
+        let mut x_edits = Vec::new();
+        let mut y_lines = Vec::new();
+        let mut has_y_cols = false;
+
+        for (dr, line) in text.lines().enumerate() {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            let cols: Vec<&str> = line.split('\t').collect();
+            for (dc, token) in cols.iter().take(avail_x_cols).enumerate() {
+                x_edits.push(json!({
+                    "row": x_row + dr,
+                    "subcol": x_subcol + dc,
+                    "value": parse_grid_scalar_value(token, &preset),
+                }));
+            }
+            if cols.len() > avail_x_cols {
+                has_y_cols = true;
+                y_lines.push(cols[avail_x_cols..].join("\t"));
+            } else {
+                y_lines.push(String::new());
+            }
+        }
+
+        let dec = if preset.decimal_separator == ',' { "," } else { "." };
+        let out = app.execute_atomic_group(|app| {
+            if has_y_cols {
+                let _ = app.execute_command(
+                    "table.paste",
+                    json!({
+                        "sheet_id": sheet_id.as_str(),
+                        "text": y_lines.join("\n"),
+                        "start_row": x_row,
+                        "start_col": 0,
+                        "start_subcol": 0,
+                        "delimiter": "\t",
+                        "decimal_separator": dec,
+                    }),
+                )?;
+            }
+
+            if x_edits.is_empty() {
+                app.execute_command(
+                    "table.setXCells",
+                    json!({
+                        "sheet_id": sheet_id.as_str(),
+                        "start_row": x_row,
+                        "subcol": x_subcol,
+                        "values": [],
+                    }),
+                )
+            } else {
+                app.execute_command(
+                    "table.setXCells",
+                    json!({
+                        "sheet_id": sheet_id.as_str(),
+                        "edits": x_edits,
+                    }),
+                )
+            }
+        })?;
+        app.grid.select_x_cell_sync(x_row, x_subcol);
+        app.grid.refresh_selection_stats(app.session.document());
+        return Ok(json!({
+            "pasted": true,
+            "x_col": true,
+            "multi_col_spill": has_y_cols,
+            "sheet_id": sheet_id.as_str(),
+            "row": x_row,
+            "subcol": x_subcol,
+            "payload": out.payload,
+        }));
+    }
+
+    let final_text = if clear_existing {
+        text.to_owned()
+    } else {
+        let existing = cell_existing_text(app.document().data_sheet(sheet_id).and_then(|ds| ds.x_or_time_cell(x_row, x_subcol)));
+        format!("{existing}{text}")
+    };
+    let scalar = parse_grid_scalar_value(&final_text, &app.locale_preset);
+    let out = app.execute_command(
+        "table.setXCells",
+        json!({
+            "sheet_id": sheet_id.as_str(),
+            "row": x_row,
+            "subcol": x_subcol,
+            "value": scalar,
+        }),
+    )?;
+    let next_row = if commit_enter { x_row + 1 } else { x_row };
+    app.grid.select_x_cell_sync(next_row, x_subcol);
+    if wid.is_some() || app.focus_widget_id.as_deref().and_then(parse_x_cell_widget_id).is_some() {
+        app.focus_widget_id = Some(format!("grid.xcell.{next_row}.{x_subcol}"));
+    }
+    app.grid.refresh_selection_stats(app.session.document());
+    Ok(json!({
+        "sheet_id": sheet_id.as_str(),
+        "x_col": true,
+        "row": x_row,
+        "subcol": x_subcol,
+        "value": scalar,
+        "mutated": out.mutated,
+    }))
+}
+
+pub(crate) fn commit_formula_bar(app: &mut crate::UiApp) -> Result<Value, curvebook_engine::EngineError> {
+    if !app.grid.formula_bar.active {
+        return Err(grid_disabled_err("formula bar is not active"));
+    }
+    if let Some(err) = app.grid.formula_bar.parse_error.clone() {
+        return Err(grid_disabled_err(err));
+    }
+    if !app.grid.formula_bar.is_valid {
+        return Err(grid_disabled_err("calculated variable formula is empty or invalid"));
+    }
+    let doc = app.document().clone();
+    let sheet_id =
+        app.grid.formula_bar.target_sheet_id.clone().or_else(|| doc.active_sheet_id.clone()).filter(|id| doc.data_sheet(id).is_some()).ok_or_else(
+            || curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::BadInput, "no active MultipleVariables sheet for formula bar"),
+        )?;
+    let intent = app.grid.formula_bar.commit_intent(&sheet_id).map_err(grid_disabled_err)?;
+    let out = app.execute_command(&intent.command_id, intent.params)?;
+    cancel_formula_bar(app);
+    Ok(json!({
+        "committed": true,
+        "command_id": out.command_id,
+        "mutated": out.mutated,
+        "payload": out.payload,
+    }))
+}
+
+pub(crate) fn cancel_formula_bar(app: &mut crate::UiApp) {
+    app.grid.formula_bar.cancel();
+    if app.focus_widget_id.as_deref() == Some("formula_bar.input") {
+        app.focus_widget_id = None;
+    }
+}
+
+/// Resolve a grid localization key with English fallback and caller-supplied default string.
+#[must_use]
+pub fn grid_tr(locale: &str, key: &str, fallback: &'static str) -> &'static str {
+    let canonical = crate::i18n::normalize_locale(locale);
+    crate::i18n::try_tr(canonical, key).or_else(|| crate::i18n::try_tr("en", key)).unwrap_or(fallback)
+}
+
+/// Return the [`LinkedDataRegion`](curvebook_doc::LinkedDataRegion) containing domain cell `(row, col)`, if any.
+#[must_use]
+pub fn linked_region_for_cell(ds: &DataSheet, row: usize, col: usize) -> Option<&curvebook_doc::LinkedDataRegion> {
+    ds.linked_regions.iter().find(|region| {
+        row >= region.target_range.start.row
+            && row <= region.target_range.end.row
+            && col >= region.target_range.start.col
+            && col <= region.target_range.end.col
+    })
+}
+
+/// Block direct typing when the active grid cell sits inside a frozen sheet or [`LinkedDataRegion`](curvebook_doc::LinkedDataRegion).
+#[must_use]
+pub fn handle_grid_text_input(app: &crate::UiApp, text: &str) -> crate::interaction::UiEventOutcome {
+    if text.is_empty() {
+        return crate::interaction::UiEventOutcome::default();
+    }
+    let doc = app.document();
+    let Some(ds) = doc.active_sheet_id.as_ref().and_then(|sid| doc.data_sheet(sid)) else {
+        return crate::interaction::UiEventOutcome::default();
+    };
+    if ds.frozen {
+        return crate::interaction::UiEventOutcome { handled: true, action: String::from("grid_core.frozen_read_only"), ..Default::default() };
+    }
+    let Some(active) = app.grid.tool.active else {
+        return crate::interaction::UiEventOutcome::default();
+    };
+    if linked_region_for_cell(ds, active.row, active.col).is_some() {
+        return crate::interaction::UiEventOutcome { handled: true, action: String::from("grid_core.link_read_only_prompt"), ..Default::default() };
+    }
+    crate::interaction::UiEventOutcome::default()
+}
+
+/// Handle grid keyboard navigation, range extension, boundary jumping, and Delete/Backspace clear.
+///
+/// # Errors
+/// Returns an error string when an underlying engine command fails.
+pub fn handle_grid_key_down(
+    app: &mut crate::UiApp,
+    key: &str,
+    mods: crate::interaction::KeyModifiers,
+) -> Result<crate::interaction::UiEventOutcome, String> {
+    let jump = mods.meta || mods.ctrl;
+    let action = match key {
+        "ArrowUp" | "Up" => Some(GridNavEvent::Arrow { dir: MoveDirection::Up, extend: mods.shift, jump }),
+        "ArrowDown" | "Down" => Some(GridNavEvent::Arrow { dir: MoveDirection::Down, extend: mods.shift, jump }),
+        "ArrowLeft" | "Left" => Some(GridNavEvent::Arrow { dir: MoveDirection::Left, extend: mods.shift, jump }),
+        "ArrowRight" | "Right" => Some(GridNavEvent::Arrow { dir: MoveDirection::Right, extend: mods.shift, jump }),
+        "Tab" => Some(GridNavEvent::Tab { backward: mods.shift }),
+        "Enter" | "Return" => Some(GridNavEvent::Enter { backward: mods.shift }),
+        "Delete" | "Backspace" => Some(GridNavEvent::ClearSelection),
+        _ => None,
+    };
+    let Some(nav) = action else {
+        return Ok(crate::interaction::UiEventOutcome::default());
+    };
+    apply_grid_nav_event(app, nav)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GridNavEvent {
+    Arrow { dir: MoveDirection, extend: bool, jump: bool },
+    Tab { backward: bool },
+    Enter { backward: bool },
+    ClearSelection,
+}
+
+enum ClearSelectionPlan {
+    Frozen,
+    LinkBlocked,
+    NothingToClear,
+    Execute { requests: Vec<Value> },
+}
+
+fn first_overlapping_linked_cell(ds: &DataSheet, range: SheetCellRange) -> bool {
+    let r_lo = range.start.row.min(range.end.row);
+    let r_hi = range.start.row.max(range.end.row);
+    let cs_lo = (range.start.col, range.start.subcol).min((range.end.col, range.end.subcol));
+    let cs_hi = (range.start.col, range.start.subcol).max((range.end.col, range.end.subcol));
+    ds.linked_regions.iter().any(|region| {
+        let rr_lo = region.target_range.start.row.min(region.target_range.end.row);
+        let rr_hi = region.target_range.start.row.max(region.target_range.end.row);
+        let rcs_lo =
+            (region.target_range.start.col, region.target_range.start.subcol).min((region.target_range.end.col, region.target_range.end.subcol));
+        let rcs_hi =
+            (region.target_range.start.col, region.target_range.start.subcol).max((region.target_range.end.col, region.target_range.end.subcol));
+        r_lo <= rr_hi && rr_lo <= r_hi && cs_lo <= rcs_hi && rcs_lo <= cs_hi
+    })
+}
+
+fn prepare_clear_selected_cells(ds: &DataSheet, grid: &GridViewState) -> ClearSelectionPlan {
+    if ds.frozen {
+        return ClearSelectionPlan::Frozen;
+    }
+    let target = match grid.clipboard_target(ds) {
+        GridClipboardTarget::WholeSheetFallback => match grid.tool.active {
+            Some(c) if c.row < ds.archetype.row_count() && c.col < ds.archetype.column_count() => {
+                GridClipboardTarget::Cells(vec![CellCoord::new(c.row, c.col, c.subcol)])
+            }
+            _ => return ClearSelectionPlan::NothingToClear,
+        },
+        other => other,
+    };
+    match &target {
+        GridClipboardTarget::Range(range) => {
+            if first_overlapping_linked_cell(ds, *range) {
+                return ClearSelectionPlan::LinkBlocked;
+            }
+        }
+        GridClipboardTarget::Cells(coords) => {
+            if coords.iter().any(|coord| linked_region_for_cell(ds, coord.row, coord.col).is_some()) {
+                return ClearSelectionPlan::LinkBlocked;
+            }
+        }
+        GridClipboardTarget::WholeSheetFallback => return ClearSelectionPlan::NothingToClear,
+    }
+    let requests = target.clear_cells_requests(ds);
+    if requests.is_empty() {
+        return ClearSelectionPlan::NothingToClear;
+    }
+    ClearSelectionPlan::Execute { requests }
+}
+
+fn step_tab_cell(grid: &mut GridViewState, ds: &DataSheet, backward: bool) {
+    let before = grid.tool.active.unwrap_or_default();
+    let dir = if backward { MoveDirection::Left } else { MoveDirection::Right };
+    grid.navigate(ds, dir, false, false);
+    if grid.tool.active.unwrap_or_default() == before {
+        let total_rows = ds.archetype.row_count();
+        let total_cols = ds.archetype.column_count();
+        if total_rows == 0 || total_cols == 0 {
+            return;
+        }
+        if !backward && before.row + 1 < total_rows {
+            grid.select_single_sync(GridCellCoord::new(before.row + 1, 0, 0));
+        } else if backward && before.row > 0 {
+            let last_col = total_cols.saturating_sub(1);
+            let last_sub = data_set_subcolumn_count(&ds.archetype, last_col).saturating_sub(1);
+            grid.select_single_sync(GridCellCoord::new(before.row - 1, last_col, last_sub));
+        }
+    }
+}
+
+fn apply_grid_nav_event(app: &mut crate::UiApp, event: GridNavEvent) -> Result<crate::interaction::UiEventOutcome, String> {
+    let mut outcome = crate::interaction::UiEventOutcome { handled: true, action: String::from("grid_core.nav"), ..Default::default() };
+
+    if matches!(event, GridNavEvent::ClearSelection) {
+        let prepared = {
+            let doc = app.session.document();
+            let Some(ds) = doc.active_sheet_id.as_ref().and_then(|sid| doc.data_sheet(sid)) else {
+                return Ok(crate::interaction::UiEventOutcome::default());
+            };
+            prepare_clear_selected_cells(ds, &app.grid)
+        };
+        match prepared {
+            ClearSelectionPlan::Frozen => outcome.action = String::from("grid_core.frozen_read_only"),
+            ClearSelectionPlan::LinkBlocked => outcome.action = String::from("grid_core.link_read_only_prompt"),
+            ClearSelectionPlan::NothingToClear => outcome.action = String::from("grid_core.clear_selection_empty"),
+            ClearSelectionPlan::Execute { requests } => {
+                let mut last_out = None;
+                for req in requests {
+                    last_out = Some(app.execute_command("table.clearCells", req).map_err(|e| e.to_string())?);
+                }
+                outcome.action = String::from("grid_core.clear_selection");
+                if let Some(out) = last_out {
+                    outcome.command_id = Some(out.command_id);
+                    outcome.command_result = Some(out.payload);
+                }
+            }
+        }
+        app.grid.refresh_selection_stats(app.session.document());
+        return Ok(outcome);
+    }
+
+    // Borrow `app.session` and `&mut app.grid` as disjoint fields so 1M-cell navigation never clones `DataSheet` or `ProjectDocument`.
+    {
+        let doc = app.session.document();
+        let Some(ds) = doc.active_sheet_id.as_ref().and_then(|sid| doc.data_sheet(sid)) else {
+            return Ok(crate::interaction::UiEventOutcome::default());
+        };
+        match event {
+            GridNavEvent::Arrow { dir, extend, jump } => {
+                app.grid.navigate(ds, dir, extend, jump);
+                let cur = app.grid.tool.active.unwrap_or_default();
+                if extend {
+                    app.grid.extend_shift_range(ds, cur);
+                } else {
+                    app.grid.select_single_sync(cur);
+                }
+                outcome.action = format!("grid_core.arrow:{dir:?}:extend={extend}:jump={jump}->({},{},{})", cur.row, cur.col, cur.subcol);
+            }
+            GridNavEvent::Tab { backward } => {
+                step_tab_cell(&mut app.grid, ds, backward);
+                let cur = app.grid.tool.active.unwrap_or_default();
+                app.grid.select_single_sync(cur);
+                outcome.action = format!("grid_core.tab:backward={backward}->({},{},{})", cur.row, cur.col, cur.subcol);
+            }
+            GridNavEvent::Enter { backward } => {
+                let dir = if backward { MoveDirection::Up } else { MoveDirection::Down };
+                app.grid.navigate(ds, dir, false, false);
+                let cur = app.grid.tool.active.unwrap_or_default();
+                app.grid.select_single_sync(cur);
+                outcome.action = format!("grid_core.enter:backward={backward}->({},{},{})", cur.row, cur.col, cur.subcol);
+            }
+            GridNavEvent::ClearSelection => {}
+        }
+        app.grid.refresh_selection_stats(doc);
+    }
+
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{GridQuickStats, GridViewState, ImportOriginKind, MoveDirection};
@@ -3523,7 +3810,6 @@ mod tests {
         use super::FORMULA_BUILTINS;
         use crate::UiApp;
         use crate::egui_shell::trailing_studio::studio_formula_signature;
-        use crate::views::mv_formula::formula_function_signature;
 
         let find_builtin = |name: &str| {
             FORMULA_BUILTINS.iter().find(|(label, _, _, _)| label.starts_with(&format!("{name}("))).map(|(label, insert, _, _)| (*label, *insert))
@@ -3535,10 +3821,6 @@ mod tests {
             !FORMULA_BUILTINS.iter().any(|(label, _, _, _)| label.contains("(cond, var)")),
             "FORMULA_BUILTINS must not suggest reversed (cond, var) hints"
         );
-
-        assert_eq!(formula_function_signature("countif"), Some("countif(cond)"));
-        assert_eq!(formula_function_signature("sumif"), Some("sumif(var, cond)"));
-        assert_eq!(formula_function_signature("meanif"), Some("meanif(var, cond)"));
 
         assert_eq!(studio_formula_signature("countif"), Some("countif(cond)"));
         assert_eq!(studio_formula_signature("sumif"), Some("sumif(var, cond)"));

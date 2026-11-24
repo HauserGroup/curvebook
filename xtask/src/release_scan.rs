@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use curvebook_format::{ZipArchive, ZipLimits};
+use crate::zip_read::{ZipArchive, ZipLimits};
 use curvebook_platform::process::ProcessCommand;
 use curvebook_platform::{PlatformError, read_regular_file_bytes, write_atomic};
 

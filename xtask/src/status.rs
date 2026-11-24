@@ -2036,9 +2036,9 @@ fn normalize_key(raw: &str) -> String {
 #[must_use]
 pub fn check_live_status_metrics(root: &Path, status_md: &str) -> Vec<EvidenceViolation> {
     let mut violations = Vec::new();
-    #[cfg(feature = "full-gates")]
+    #[cfg(feature = "docs-site")]
     let live_engine = Some(curvebook_engine::cmd::registry().len());
-    #[cfg(not(feature = "full-gates"))]
+    #[cfg(not(feature = "docs-site"))]
     let live_engine: Option<usize> = None;
     let live_ui = count_live_ui_commands(root);
     let live_pkgs = crate::layers::TABLE.len();
@@ -2283,9 +2283,9 @@ mod tests {
 
         let stale_status = status_md
             .replace("`106`** typed `CommandSpec`", "`95`** typed `CommandSpec`")
-            .replace("`54`** typed `UiCommandSpec`", "`32`** typed `UiCommandSpec`");
+            .replace("`61`** typed `UiCommandSpec`", "`32`** typed `UiCommandSpec`");
         let stale_hits = super::check_live_status_metrics(root, &stale_status);
-        #[cfg(feature = "full-gates")]
+        #[cfg(feature = "docs-site")]
         assert!(stale_hits.iter().any(|v| v.reason.contains("Engine command registry")), "{stale_hits:?}");
         assert!(stale_hits.iter().any(|v| v.reason.contains("UI command catalog")), "{stale_hits:?}");
     }

@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::dialogs_canvas::ResultSheetViewState;
 use crate::egui_shell::{
-    FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, Tokens, color32_to_rgba8, rgba8_to_color32,
+    FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, Tokens, UiIntent, color32_to_rgba8, rgba8_to_color32,
 };
 use crate::i18n::tr_or_fallback;
 use crate::inspect::ZLayer;
@@ -264,10 +264,10 @@ pub fn render_results_view_for_sheet(
         let next_pressed = ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::PageDown) || i.consume_key(Modifiers::COMMAND, Key::PageDown));
         if prev_pressed {
             active_idx = if active_idx == 0 { tab_count - 1 } else { active_idx - 1 };
-            intents.push_select_result_tab(active_idx);
+            intents.push(UiIntent::SelectResultTab { index: active_idx });
         } else if next_pressed {
             active_idx = (active_idx + 1) % tab_count;
-            intents.push_select_result_tab(active_idx);
+            intents.push(UiIntent::SelectResultTab { index: active_idx });
         }
     }
     report.active_tab_index = active_idx;
@@ -338,7 +338,7 @@ pub fn render_results_view_for_sheet(
                     },
                 );
                 if copy_resp.clicked() && enabled && has_tabs {
-                    intents.push_custom_view_action("results", format!("copy_selection:{}", rs.id.as_str()));
+                    intents.push(UiIntent::CopyResultTable { sheet_id: rs.id.clone(), force_full: false });
                 }
             }
 
@@ -715,7 +715,7 @@ fn render_result_tabs_overflow_popup(
                                 );
                             }
                             if item_resp.clicked() {
-                                intents.push_select_result_tab(*idx);
+                                intents.push(UiIntent::SelectResultTab { index: *idx });
                                 let x1 = *x0 + *w;
                                 state.tab_strip_scroll_x = (x1 - strip_w).max(*x0).clamp(0.0, max_scroll_x);
                                 state.tab_overflow_open = false;
@@ -1266,7 +1266,7 @@ fn render_result_tab_table(
     if next_range != prev_range
         && let (Some((_, _, ra, ca)), Some((_, _, rf, cf))) = (&state.selection_anchor, &state.selected_cell)
     {
-        intents.push_sync_result_selection(rs.id.clone(), active_tab_idx, (*ra, *ca), (*rf, *cf));
+        intents.push(UiIntent::SyncResultSelection { sheet_id: rs.id.clone(), tab_index: active_tab_idx, anchor: (*ra, *ca), focus: (*rf, *cf) });
     }
 
     render_result_context_menu(ui, ctx, active_tab_idx, state, meta, intents);
@@ -1325,7 +1325,7 @@ fn render_result_context_menu(
                         },
                     );
                     if btn_sel.clicked() {
-                        intents.push_custom_view_action("results", format!("copy_selection:{}", rs.id.as_str()));
+                        intents.push(UiIntent::CopyResultTable { sheet_id: rs.id.clone(), force_full: false });
                         close_menu = true;
                     }
                     let copy_all_lbl = tr(tokens.locale, "r13.result.copy_table");
@@ -1347,7 +1347,7 @@ fn render_result_context_menu(
                         },
                     );
                     if btn_all.clicked() {
-                        intents.push_custom_view_action("results", format!("copy_table:{}", rs.id.as_str()));
+                        intents.push(UiIntent::CopyResultTable { sheet_id: rs.id.clone(), force_full: true });
                         close_menu = true;
                     }
                 });
@@ -1544,6 +1544,6 @@ fn paint_result_tab_chip(ui: &mut egui::Ui, spec: &ResultTabChipSpec<'_>, meta: 
         },
     );
     if resp.clicked() && enabled && !selected {
-        intents.push_select_result_tab(spec.idx);
+        intents.push(UiIntent::SelectResultTab { index: spec.idx });
     }
 }

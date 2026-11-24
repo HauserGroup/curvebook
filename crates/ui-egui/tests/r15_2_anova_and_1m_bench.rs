@@ -24,7 +24,7 @@ use curvebook_ui_egui::egui_shell::inspect_bridge::{
     HybridCoexistenceArbiter, HybridModalSurface, HybridSheetSurface, build_ui_tree_snapshot_from_egui, render_egui_shell_frame,
 };
 use curvebook_ui_egui::egui_shell::stat_anova_modal::resolve_one_way_anova_banner;
-use curvebook_ui_egui::egui_shell::{EguiShellViewState, FrameInspectMeta, PendingUiIntents, Tokens, UiBackend, UiIntent};
+use curvebook_ui_egui::egui_shell::{EguiShellViewState, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 use curvebook_ui_egui::inspect::ZLayer;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
 use curvebook_ui_egui::theme::UiThemeSpec;
@@ -144,7 +144,7 @@ impl Drop for TempDirCleanup {
 
 fn run_egui_1m_column_benchmark(dpi_scale: f64, steady_frames: usize, input_events: usize) -> BackendBenchReport {
     let doc = build_one_million_cell_column_doc();
-    let mut app = UiApp::from_session(Session::from_document(doc)).with_ui_backend(UiBackend::Egui);
+    let mut app = UiApp::from_session(Session::from_document(doc));
     app.sync_views();
 
     let metrics = ViewportMetrics::new(BENCH_VIEWPORT_W, BENCH_VIEWPORT_H, dpi_scale);
@@ -552,7 +552,7 @@ fn r15_2_egui_r10_1_anova_human_path_cjk_inspect_and_journal() -> Result<(), Box
     let _cleanup = TempDirCleanup(dir.clone());
     let (session, mut journal, _report) = Session::open_dir_with_recovery(&dir, "egui-qa", 300_000, 1_000)?;
 
-    let mut app = UiApp::from_session(session).with_ui_backend(UiBackend::Egui);
+    let mut app = UiApp::from_session(session);
     app.execute_command("sheet.createData", json!({ "sheet_id": "col-spike", "title": "Drug Dose Assay", "kind": "column", "cols": 3, "rows": 6 }))?;
     app.execute_command("table.setTitles", json!({ "sheet_id": "col-spike", "titles": ["Control", "Treated", "HighDose"] }))?;
     let rows = [[10.0, 14.5, 20.1], [11.2, 15.1, 21.0], [9.8, 13.9, 19.6], [10.6, 14.8, 20.8], [10.4, 15.3, 21.5]];
@@ -590,7 +590,7 @@ fn r15_2_egui_r10_1_anova_human_path_cjk_inspect_and_journal() -> Result<(), Box
 
     // Verify 14 Beta locales on Column + EditAnalysisParameters hybrid parity & non-bleed.
     for &locale in &BETA_LOCALE_CODES {
-        let mut loc_app = UiApp::from_session(Session::from_document(driver.state().app.document().clone())).with_ui_backend(UiBackend::Egui);
+        let mut loc_app = UiApp::from_session(Session::from_document(driver.state().app.document().clone()));
         loc_app.nav.welcome.open = false;
         loc_app.execute_command("sheet.select", json!({ "sheet_id": "col-spike" }))?;
         assert_eq!(loc_app.set_locale(locale), locale);

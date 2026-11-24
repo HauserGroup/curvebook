@@ -9,12 +9,19 @@
 use std::borrow::Cow;
 
 use curvebook_palette::Rgba8;
+use read_fonts::tables::glyf::{Glyf, Glyph};
+use read_fonts::tables::loca::Loca;
+use read_fonts::types::GlyphId;
+use read_fonts::{FontRef, TableProvider};
 use serde::{Deserialize, Serialize};
+use skrifa::instance::{LocationRef, Size};
+use skrifa::outline::pen::PathStyle;
+use skrifa::outline::{DrawSettings, OutlineGlyphCollection, OutlineGlyphFormat, OutlinePen};
 
 use crate::markup::{RichSpan, RichText, SpanSlope, SpanWeight};
 use crate::metrics::{
-    TrueTypeFont, char_advance_em_with_font, core14_advance_em, effective_span_scale, is_combining_mark, read_i16_be, read_u16_be,
-    reorder_rich_text_bidi, rich_contains_rtl, script_baseline_offset_pt,
+    TrueTypeFont, char_advance_em_with_font, core14_advance_em, effective_span_scale, is_combining_mark, reorder_rich_text_bidi, rich_contains_rtl,
+    script_baseline_offset_pt,
 };
 use crate::shaping::{FontFamilyKind, SystemFontSet};
 
@@ -25,13 +32,13 @@ const MAX_TTF_TOTAL_COMPONENTS: usize = 256;
 const MAX_TTF_COMPONENT_DEPTH: usize = 8;
 
 #[derive(Debug)]
-struct TtfDecodeState {
+struct GlyfBudgetState {
     remaining_components: usize,
     remaining_points: usize,
     active_gids: [u16; MAX_TTF_COMPONENT_DEPTH],
 }
 
-impl TtfDecodeState {
+impl GlyfBudgetState {
     const fn new() -> Self {
         Self { remaining_components: MAX_TTF_TOTAL_COMPONENTS, remaining_points: MAX_TTF_TOTAL_POINTS, active_gids: [0; MAX_TTF_COMPONENT_DEPTH] }
     }
@@ -332,9 +339,9 @@ const fn is_below_combining_mark(ch: char) -> bool {
     )
 }
 
-/// Decode a single glyph's TrueType `glyf` contour from `ttf` into Y-down `GlyphOutlineCmd`s.
-/// Returns `None` if `ch` is not mapped in `cmap`, `ttf` lacks valid `loca`/`glyf` tables, or
-/// compound decoding exceeds depth, cycle, component, or point budgets.
+/// Decode a single glyph's SFNT outline (`glyf`, `CFF`, or `CFF2`) from `ttf` into Y-down `GlyphOutlineCmd`s.
+/// Returns `None` if `ch` is not mapped in `cmap`, `ttf` lacks outline tables, or decoding
+/// exceeds depth, cycle, component, or point budgets.
 #[must_use]
 pub fn outline_ttf_glyph(
     ttf: &TrueTypeFont<'_>,
@@ -344,7 +351,7 @@ pub fn outline_ttf_glyph(
     font_size_pt: f64,
     italic_slant: bool,
 ) -> Option<Vec<GlyphOutlineCmd>> {
-    if !font_size_pt.is_finite() || font_size_pt <= 0.0 || !ttf.has_glyf_outlines() {
+    if !font_size_pt.is_finite() || font_size_pt <= 0.0 {
         return None;
     }
     let gid = ttf.glyph_id(ch)?;
@@ -352,11 +359,25 @@ pub fn outline_ttf_glyph(
     if upem <= 0.0 {
         return None;
     }
-    let scale = font_size_pt / upem;
+    let font_ref = ttf.font_ref();
+    let outlines = OutlineGlyphCollection::new(font_ref);
+    let format = outlines.format()?;
+    if format == OutlineGlyphFormat::Glyf || ttf.has_glyf_outlines() {
+        validate_glyf_budgets(font_ref, gid, ttf.index_to_loc_format() == 1)?;
+    }
+    let outline_glyph = outlines.get(GlyphId::from(gid))?;
     let mut cmds = Vec::new();
-    let slant = if italic_slant { 0.2125 } else { 0.0 };
-    let mut state = TtfDecodeState::new();
-    decode_ttf_glyph_recursive(ttf, gid, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], scale, origin_x_pt, origin_y_pt, slant, 0, &mut state, &mut cmds)?;
+    let mut pen = GlyphOutlinePen {
+        origin_x: origin_x_pt,
+        origin_y: origin_y_pt,
+        scale: font_size_pt / upem,
+        slant: if italic_slant { 0.2125 } else { 0.0 },
+        contour_start: None,
+        last_was_line_to: false,
+        out: &mut cmds,
+    };
+    let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default()).with_path_style(PathStyle::HarfBuzz);
+    outline_glyph.draw(settings, &mut pen).ok()?;
     Some(cmds)
 }
 
@@ -460,19 +481,14 @@ fn rotate_commands(cmds: &mut [GlyphOutlineCmd], cx: f64, cy: f64, cos_a: f64, s
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn decode_ttf_glyph_recursive(
-    ttf: &TrueTypeFont<'_>,
-    gid: u16,
-    affine: [f64; 6],
-    scale: f64,
-    origin_x: f64,
-    origin_y: f64,
-    slant: f64,
-    depth: usize,
-    state: &mut TtfDecodeState,
-    out: &mut Vec<GlyphOutlineCmd>,
-) -> Option<()> {
+fn validate_glyf_budgets(font: &FontRef<'_>, gid: u16, is_long_loca: bool) -> Option<()> {
+    let loca = font.loca(Some(is_long_loca)).ok()?;
+    let glyf = font.glyf().ok()?;
+    let mut state = GlyfBudgetState::new();
+    validate_glyf_budgets_rec(&loca, &glyf, gid, 0, &mut state)
+}
+
+fn validate_glyf_budgets_rec(loca: &Loca<'_>, glyf: &Glyf<'_>, gid: u16, depth: usize, state: &mut GlyfBudgetState) -> Option<()> {
     if depth >= MAX_TTF_COMPONENT_DEPTH {
         return None;
     }
@@ -480,233 +496,92 @@ fn decode_ttf_glyph_recursive(
         return None;
     }
     state.consume_component()?;
-    let slice = ttf.glyf_slice(gid)?;
-    if slice.is_empty() {
+    let Some(glyph) = loca.get_glyf(GlyphId::from(gid), glyf).ok()? else {
         return Some(());
-    }
-    if slice.len() < 10 {
-        return None;
-    }
-    let num_contours = read_i16_be(slice, 0)?;
-    if num_contours == 0 {
-        return Some(());
-    }
-    if num_contours > 0 {
-        let count = usize::try_from(num_contours).ok()?;
-        if count > MAX_TTF_CONTOURS {
-            return None;
-        }
-        return decode_simple_ttf_glyph(slice, count, affine, scale, origin_x, origin_y, slant, state, out);
-    }
-    *state.active_gids.get_mut(depth)? = gid;
-    decode_compound_ttf_glyph(ttf, slice, affine, scale, origin_x, origin_y, slant, depth, state, out)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn decode_simple_ttf_glyph(
-    slice: &[u8],
-    num_contours: usize,
-    affine: [f64; 6],
-    scale: f64,
-    origin_x: f64,
-    origin_y: f64,
-    slant: f64,
-    state: &mut TtfDecodeState,
-    out: &mut Vec<GlyphOutlineCmd>,
-) -> Option<()> {
-    let mut end_pts = Vec::with_capacity(num_contours);
-    for i in 0..num_contours {
-        end_pts.push(usize::from(read_u16_be(slice, 10 + i * 2)?));
-    }
-    let total_points = end_pts.last().copied()?.checked_add(1)?;
-    if total_points > MAX_TTF_POINTS {
-        return None;
-    }
-    state.consume_points(total_points)?;
-
-    let inst_len_off = 10 + num_contours * 2;
-    let inst_len = usize::from(read_u16_be(slice, inst_len_off)?);
-    let mut cursor = inst_len_off.checked_add(2)?.checked_add(inst_len)?;
-    if cursor > slice.len() {
-        return None;
-    }
-
-    let flags = read_ttf_flags(slice, &mut cursor, total_points)?;
-    let xs = read_ttf_coords(slice, &mut cursor, &flags, 0x02, 0x10)?;
-    let ys = read_ttf_coords(slice, &mut cursor, &flags, 0x04, 0x20)?;
-
-    let mut pts = Vec::with_capacity(total_points);
-    for i in 0..total_points {
-        let raw_x = f64::from(*xs.get(i)?);
-        let raw_y = f64::from(*ys.get(i)?);
-        let tx = affine[0] * raw_x + affine[2] * raw_y + affine[4];
-        let ty = affine[1] * raw_x + affine[3] * raw_y + affine[5];
-        let x_pt = origin_x + (tx + ty * slant) * scale;
-        let y_pt = origin_y - ty * scale;
-        let on_curve = (*flags.get(i)? & 0x01) != 0;
-        pts.push((x_pt, y_pt, on_curve));
-    }
-
-    let mut start = 0usize;
-    for end in end_pts {
-        if end < start || end >= pts.len() {
-            return None;
-        }
-        emit_ttf_contour(&pts[start..=end], out);
-        start = end + 1;
-    }
-    Some(())
-}
-
-fn read_ttf_flags(slice: &[u8], cursor: &mut usize, total_points: usize) -> Option<Vec<u8>> {
-    let mut flags = Vec::with_capacity(total_points);
-    while flags.len() < total_points {
-        let flag = *slice.get(*cursor)?;
-        *cursor += 1;
-        flags.push(flag);
-        if (flag & 0x08) != 0 {
-            let repeat = usize::from(*slice.get(*cursor)?);
-            *cursor += 1;
-            let count = repeat.min(total_points.saturating_sub(flags.len()));
-            for _ in 0..count {
-                flags.push(flag);
-            }
-        }
-    }
-    Some(flags)
-}
-
-fn read_ttf_coords(slice: &[u8], cursor: &mut usize, flags: &[u8], short_bit: u8, same_or_pos_bit: u8) -> Option<Vec<i32>> {
-    let mut coords = Vec::with_capacity(flags.len());
-    let mut acc = 0i32;
-    for &flag in flags {
-        let delta = if (flag & short_bit) != 0 {
-            let mag = i32::from(*slice.get(*cursor)?);
-            *cursor += 1;
-            if (flag & same_or_pos_bit) != 0 { mag } else { -mag }
-        } else if (flag & same_or_pos_bit) != 0 {
-            0
-        } else {
-            let val = i32::from(read_i16_be(slice, *cursor)?);
-            *cursor += 2;
-            val
-        };
-        acc = acc.saturating_add(delta);
-        coords.push(acc);
-    }
-    Some(coords)
-}
-
-fn emit_ttf_contour(contour: &[(f64, f64, bool)], out: &mut Vec<GlyphOutlineCmd>) {
-    let n = contour.len();
-    if n < 2 {
-        return;
-    }
-    let Some((first_on_idx, start_pt)) = contour.iter().enumerate().find(|(_, p)| p.2).map(|(i, p)| (i, (p.0, p.1))) else {
-        // All off-curve points: start at midpoint between last and first.
-        let p0 = contour[0];
-        let pn = contour[n - 1];
-        let start = (0.5 * (pn.0 + p0.0), 0.5 * (pn.1 + p0.1));
-        out.push(GlyphOutlineCmd::MoveTo { x_pt: start.0, y_pt: start.1 });
-        for i in 0..n {
-            let cur = contour[i];
-            let nxt = contour[(i + 1) % n];
-            let mid = (0.5 * (cur.0 + nxt.0), 0.5 * (cur.1 + nxt.1));
-            out.push(GlyphOutlineCmd::QuadTo { cx_pt: cur.0, cy_pt: cur.1, x_pt: mid.0, y_pt: mid.1 });
-        }
-        out.push(GlyphOutlineCmd::Close);
-        return;
     };
-
-    out.push(GlyphOutlineCmd::MoveTo { x_pt: start_pt.0, y_pt: start_pt.1 });
-    let mut step = 1usize;
-    while step <= n {
-        let cur = contour[(first_on_idx + step) % n];
-        if cur.2 {
-            out.push(GlyphOutlineCmd::LineTo { x_pt: cur.0, y_pt: cur.1 });
-            step += 1;
-        } else {
-            let nxt = contour[(first_on_idx + step + 1) % n];
-            if nxt.2 {
-                out.push(GlyphOutlineCmd::QuadTo { cx_pt: cur.0, cy_pt: cur.1, x_pt: nxt.0, y_pt: nxt.1 });
-                step += 2;
-            } else {
-                let mid = (0.5 * (cur.0 + nxt.0), 0.5 * (cur.1 + nxt.1));
-                out.push(GlyphOutlineCmd::QuadTo { cx_pt: cur.0, cy_pt: cur.1, x_pt: mid.0, y_pt: mid.1 });
-                step += 1;
+    match glyph {
+        Glyph::Simple(simple) => {
+            let num_contours = simple.number_of_contours();
+            if num_contours == 0 {
+                return Some(());
             }
+            let count = usize::try_from(num_contours).ok()?;
+            let end_pts = simple.end_pts_of_contours();
+            if count > MAX_TTF_CONTOURS || end_pts.len() != count {
+                return None;
+            }
+            let points = simple.num_points();
+            if points > MAX_TTF_POINTS {
+                return None;
+            }
+            state.consume_points(points)
+        }
+        Glyph::Composite(composite) => {
+            *state.active_gids.get_mut(depth)? = gid;
+            for (comp_gid, _) in composite.component_glyphs_and_flags() {
+                validate_glyf_budgets_rec(loca, glyf, comp_gid.to_u16(), depth + 1, state)?;
+            }
+            Some(())
         }
     }
-    out.push(GlyphOutlineCmd::Close);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn decode_compound_ttf_glyph(
-    ttf: &TrueTypeFont<'_>,
-    slice: &[u8],
-    parent: [f64; 6],
-    scale: f64,
+struct GlyphOutlinePen<'a> {
     origin_x: f64,
     origin_y: f64,
+    scale: f64,
     slant: f64,
-    depth: usize,
-    state: &mut TtfDecodeState,
-    out: &mut Vec<GlyphOutlineCmd>,
-) -> Option<()> {
-    let mut cursor = 10usize;
-    for _ in 0..64 {
-        let flags = read_u16_be(slice, cursor)?;
-        let comp_gid = read_u16_be(slice, cursor + 2)?;
-        cursor += 4;
+    contour_start: Option<(f64, f64)>,
+    last_was_line_to: bool,
+    out: &'a mut Vec<GlyphOutlineCmd>,
+}
 
-        let (arg1, arg2) = if (flags & 0x0001) != 0 {
-            let a1 = read_i16_be(slice, cursor)?;
-            let a2 = read_i16_be(slice, cursor + 2)?;
-            cursor += 4;
-            (f64::from(a1), f64::from(a2))
-        } else {
-            let a1 = *slice.get(cursor)? as i8;
-            let a2 = *slice.get(cursor + 1)? as i8;
-            cursor += 2;
-            (f64::from(a1), f64::from(a2))
-        };
-
-        let (dx, dy) = if (flags & 0x0002) != 0 { (arg1, arg2) } else { (0.0, 0.0) };
-
-        let (a, b, c, d) = if (flags & 0x0008) != 0 {
-            let s = f64::from(read_i16_be(slice, cursor)?) / 16384.0;
-            cursor += 2;
-            (s, 0.0, 0.0, s)
-        } else if (flags & 0x0040) != 0 {
-            let sx = f64::from(read_i16_be(slice, cursor)?) / 16384.0;
-            let sy = f64::from(read_i16_be(slice, cursor + 2)?) / 16384.0;
-            cursor += 4;
-            (sx, 0.0, 0.0, sy)
-        } else if (flags & 0x0080) != 0 {
-            let m0 = f64::from(read_i16_be(slice, cursor)?) / 16384.0;
-            let m1 = f64::from(read_i16_be(slice, cursor + 2)?) / 16384.0;
-            let m2 = f64::from(read_i16_be(slice, cursor + 4)?) / 16384.0;
-            let m3 = f64::from(read_i16_be(slice, cursor + 6)?) / 16384.0;
-            cursor += 8;
-            (m0, m1, m2, m3)
-        } else {
-            (1.0, 0.0, 0.0, 1.0)
-        };
-
-        let combined = [
-            parent[0] * a + parent[2] * b,
-            parent[1] * a + parent[3] * b,
-            parent[0] * c + parent[2] * d,
-            parent[1] * c + parent[3] * d,
-            parent[0] * dx + parent[2] * dy + parent[4],
-            parent[1] * dx + parent[3] * dy + parent[5],
-        ];
-        decode_ttf_glyph_recursive(ttf, comp_gid, combined, scale, origin_x, origin_y, slant, depth + 1, state, out)?;
-        if (flags & 0x0020) == 0 {
-            break;
-        }
+impl GlyphOutlinePen<'_> {
+    fn map_pt(&self, fx: f32, fy: f32) -> (f64, f64) {
+        let x = f64::from(fx);
+        let y = f64::from(fy);
+        (self.origin_x + (x + y * self.slant) * self.scale, self.origin_y - y * self.scale)
     }
-    Some(())
+}
+
+impl OutlinePen for GlyphOutlinePen<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let (x_pt, y_pt) = self.map_pt(x, y);
+        self.contour_start = Some((x_pt, y_pt));
+        self.last_was_line_to = false;
+        self.out.push(GlyphOutlineCmd::MoveTo { x_pt, y_pt });
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let (x_pt, y_pt) = self.map_pt(x, y);
+        self.last_was_line_to = true;
+        self.out.push(GlyphOutlineCmd::LineTo { x_pt, y_pt });
+    }
+
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        let (cx_pt, cy_pt) = self.map_pt(cx0, cy0);
+        let (x_pt, y_pt) = self.map_pt(x, y);
+        self.last_was_line_to = false;
+        self.out.push(GlyphOutlineCmd::QuadTo { cx_pt, cy_pt, x_pt, y_pt });
+    }
+
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        let (c1x_pt, c1y_pt) = self.map_pt(cx0, cy0);
+        let (c2x_pt, c2y_pt) = self.map_pt(cx1, cy1);
+        let (x_pt, y_pt) = self.map_pt(x, y);
+        self.last_was_line_to = false;
+        self.out.push(GlyphOutlineCmd::CubicTo { c1x_pt, c1y_pt, c2x_pt, c2y_pt, x_pt, y_pt });
+    }
+
+    fn close(&mut self) {
+        if let Some((sx, sy)) = self.contour_start.take()
+            && self.last_was_line_to
+        {
+            self.out.push(GlyphOutlineCmd::LineTo { x_pt: sx, y_pt: sy });
+        }
+        self.last_was_line_to = false;
+        self.out.push(GlyphOutlineCmd::Close);
+    }
 }
 
 // ---------------------------------------------------------------------------

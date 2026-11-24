@@ -237,6 +237,7 @@ pub fn render_one_way_anova_modal(
     let title_for_ak = title_full.clone();
 
     let mut report = AnovaModalFrameReport { modal_open: true, resolved_test_banner: banner.clone(), ..AnovaModalFrameReport::default() };
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
 
     let frame = egui::Frame::window(&ctx.global_style())
         .fill(tokens.surface_bg)
@@ -367,7 +368,7 @@ pub fn render_one_way_anova_modal(
         action_rank: None,
     });
 
-    handle_modal_capture_and_keyboard(ctx, actual_dialog_rect, ep, state, intents, &mut report);
+    handle_modal_capture_and_keyboard(ctx, actual_dialog_rect, ep, state, intents, &mut report, wants_kb_before);
     report
 }
 
@@ -402,7 +403,7 @@ fn sync_modal_state_from_app(
             applied.selected_data_sets.clone_from(&spec.selected_data_sets);
             applied.custom_title.clone_from(&spec.custom_title);
             if applied != *spec {
-                intents.push_set_edit_params_draft(applied);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(applied) });
             }
             state.method_saved_as_default = true;
         } else {
@@ -441,6 +442,7 @@ fn handle_modal_capture_and_keyboard(
     state: &mut AnovaModalEguiState,
     intents: &mut PendingUiIntents,
     report: &mut AnovaModalFrameReport,
+    wants_kb_before: bool,
 ) {
     let pointer_pos = ctx.input(|i| i.pointer.latest_pos().or_else(|| i.pointer.interact_pos()));
     let outside_pointer = pointer_pos.is_some_and(|p| !dialog_rect.contains(p));
@@ -467,14 +469,14 @@ fn handle_modal_capture_and_keyboard(
         if state.show_method_reference {
             state.show_method_reference = false;
         } else {
-            intents.push_dialog_button("cancel");
+            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
         }
         return;
     }
 
-    let wants_text = ctx.egui_wants_keyboard_input();
+    let wants_text = wants_kb_before || ctx.egui_wants_keyboard_input();
     if !wants_text && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
-        intents.push_dialog_button("ok");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
         return;
     }
 
@@ -495,7 +497,7 @@ fn step_enabled_tab(ep: &EditAnalysisParametersState, state: &mut AnovaModalEgui
         let cand = AnovaModalTab::ALL[idx];
         if tab_enablement(ep, cand).enabled {
             state.active_tab = cand;
-            intents.push_custom_view_action("stat_params", format!("tab:{}", cand.legacy_id()));
+            intents.push(UiIntent::SetEditParamsActiveTab { tab: cand.legacy_id().to_owned() });
             break;
         }
     }
@@ -542,7 +544,7 @@ fn render_modal_header_and_banner(
         let resp = paint_icon_button_named(ui, resp, "close", close_lbl, close_lbl, false);
         record_widget(ui, meta, &resp, "modal.close", "button", close_lbl, None, None, true, None, ZLayer::ModalDialog, false, None);
         if resp.clicked() {
-            intents.push_dialog_button("cancel");
+            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
         }
     });
 
@@ -658,7 +660,7 @@ fn render_modal_tab_strip(
 
             if enablement.enabled && resp.clicked() {
                 state.active_tab = tab;
-                intents.push_custom_view_action("stat_params", format!("tab:{}", tab.legacy_id()));
+                intents.push(UiIntent::SetEditParamsActiveTab { tab: tab.legacy_id().to_owned() });
             }
 
             let wid = format!("edit.tab.{}", tab.legacy_id());
@@ -771,7 +773,7 @@ fn render_design_controls_left(
             rc.anova.method == OneWayMethod::OrdinaryAnova,
             &ControlEnablement::enabled(),
         ) {
-            intents.push_custom_view_action("stat_params", "set_one_way_method:ordinary");
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from("ordinary") }));
         }
         if render_modal_seg_btn(
             ui,
@@ -782,7 +784,7 @@ fn render_design_controls_left(
             rc.anova.method == OneWayMethod::BrownForsytheAndWelch,
             &ControlEnablement::enabled(),
         ) {
-            intents.push_custom_view_action("stat_params", "set_one_way_method:welch");
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from("welch") }));
         }
         if render_modal_seg_btn(
             ui,
@@ -793,7 +795,7 @@ fn render_design_controls_left(
             matches!(rc.anova.method, OneWayMethod::RepeatedMeasures { .. }),
             paired_en,
         ) {
-            intents.push_custom_view_action("stat_params", "set_one_way_method:rm");
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from("rm") }));
         }
         if render_modal_seg_btn(
             ui,
@@ -804,11 +806,11 @@ fn render_design_controls_left(
             rc.anova.method == OneWayMethod::KruskalWallis,
             assume_en,
         ) {
-            intents.push_custom_view_action("stat_params", "set_one_way_method:kruskal");
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from("kruskal") }));
         }
         let friedman_en = if !assume_en.enabled { assume_en } else { paired_en };
         if render_modal_seg_btn(ui, rc.tokens, meta, "edit.anova.friedman", "Friedman", rc.anova.method == OneWayMethod::Friedman, friedman_en) {
-            intents.push_custom_view_action("stat_params", "set_one_way_method:friedman");
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from("friedman") }));
         }
     });
 
@@ -854,13 +856,13 @@ fn render_design_right_pane(ui: &mut Ui, rc: &TabRenderCtx<'_>, reml_active: boo
     let selected_sets = rc.ep.draft.as_ref().map_or(&[][..], |d| d.selected_data_sets.as_slice());
     let all_checked = selected_sets.is_empty();
     if render_modal_checkbox(ui, rc.tokens, meta, "edit.dataset.all", "All Data Sets / Columns", all_checked, &ControlEnablement::enabled()) {
-        intents.push_custom_view_action("stat_params", "select_all_datasets");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::SelectAllDatasets));
     }
     for (idx, col_name) in titles.iter().enumerate() {
         let checked = selected_sets.is_empty() || selected_sets.contains(&idx);
         let wid = format!("edit.dataset.{idx}");
         if render_modal_checkbox(ui, rc.tokens, meta, &wid, col_name, checked, &ControlEnablement::enabled()) {
-            intents.push_custom_view_action("stat_params", format!("toggle_dataset:{idx}"));
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::ToggleDataset { idx }));
         }
     }
 }
@@ -952,7 +954,7 @@ fn draw_experimental_design_schematic(
         None,
     );
     if resp.clicked() {
-        intents.push_custom_view_action("stat_params", "schematic:toggle");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::ToggleSchematic));
     }
 }
 
@@ -977,7 +979,7 @@ fn render_tab_repeated_measures(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut Fr
     if render_modal_radio(ui, rc.tokens, meta, "edit.rm.assume_sphericity", "Assume sphericity (unadjusted df)", !gg_checked && !reml_active, &sph_en)
         && gg_checked
     {
-        intents.push_custom_view_action("stat_params", "toggle_geisser_greenhouse");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::ToggleGeisserGreenhouse));
     }
     if render_modal_checkbox(
         ui,
@@ -1028,7 +1030,7 @@ fn render_tab_repeated_measures(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut Fr
             rc.anova.residual_covariance == ResidualCovariance::CompoundSymmetry,
             &reml_en,
         ) {
-            intents.push_custom_view_action("stat_params", "set_residual_cov:compound_symmetry");
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetResidualCovariance { cov: String::from("compound_symmetry") }));
         }
         if render_modal_seg_btn(
             ui,
@@ -1039,7 +1041,7 @@ fn render_tab_repeated_measures(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut Fr
             rc.anova.residual_covariance == ResidualCovariance::Unstructured,
             &reml_en,
         ) {
-            intents.push_custom_view_action("stat_params", "set_residual_cov:unstructured");
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetResidualCovariance { cov: String::from("unstructured") }));
         }
     });
 
@@ -1127,7 +1129,7 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
         for (wid, slug, lbl, m) in seg_methods {
             let en = gate(m);
             if render_modal_seg_btn(ui, rc.tokens, meta, wid, lbl, mult.method == m, &en) {
-                intents.push_custom_view_action("stat_params", format!("set_multiplicity:{slug}"));
+                intents.push(UiIntent::StatParams(super::StatParamsIntent::SetMultiplicityMethod { slug: slug.to_owned() }));
             }
         }
     });
@@ -1145,9 +1147,9 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
         },
     );
     if step < 0 {
-        intents.push_custom_view_action("stat_params", "spinner:edit.mult_threshold:-0.01");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::StepMultiplicityThreshold { delta: -0.01 }));
     } else if step > 0 {
-        intents.push_custom_view_action("stat_params", "spinner:edit.mult_threshold:0.01");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::StepMultiplicityThreshold { delta: 0.01 }));
     }
 
     if render_modal_checkbox(
@@ -1161,12 +1163,12 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
     ) {
         let next_cmp = !rc.ep.compare_against_control;
         if next_cmp && rc.ep.assume_gaussian {
-            intents.push_custom_view_action("stat_params", "set_multiplicity:dunnett");
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetMultiplicityMethod { slug: String::from("dunnett") }));
         } else if !next_cmp {
-            let fallback = if rc.ep.assume_gaussian { "set_multiplicity:tukey" } else { "set_multiplicity:dunn" };
-            intents.push_custom_view_action("stat_params", fallback);
+            let fallback = if rc.ep.assume_gaussian { "tukey" } else { "dunn" };
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetMultiplicityMethod { slug: String::from(fallback) }));
         } else {
-            intents.push_custom_view_action("stat_params", "set_compare_against_control:true");
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetCompareAgainstControl { enabled: true }));
         }
     }
 
@@ -1175,7 +1177,7 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
     let ctrl_name = titles.get(rc.ep.control_column).cloned().unwrap_or_else(|| format!("Col {}", rc.ep.control_column + 1));
     let ctrl_lbl = format!("Control Column: {ctrl_name} (col {})", rc.ep.control_column + 1);
     if render_modal_seg_btn(ui, rc.tokens, meta, "edit.control_column", &ctrl_lbl, ctrl_en.enabled, &ctrl_en) {
-        intents.push_custom_view_action("stat_params", "cycle_control_column");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::CycleControlColumn));
     }
 
     if render_modal_checkbox(
@@ -1187,7 +1189,7 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
         mult.report_confidence_intervals,
         &ControlEnablement::enabled(),
     ) {
-        intents.push_custom_view_action("stat_params", "toggle_mult_report_ci");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::ToggleMultiplicityReportCi));
     }
 
     ui.add_space(4.0);
@@ -1225,7 +1227,9 @@ fn render_tab_options(
         {
             if render_modal_seg_btn(ui, rc.tokens, meta, wid, lbl, (rc.conf_pct - pct).abs() < 0.05, &ControlEnablement::enabled()) {
                 state.confidence_percent_draft = pct;
-                intents.push_custom_view_action("stat_params", format!("set_confidence:{pct:.1}"));
+                if let Ok(level) = curvebook_doc::ConfidenceLevel::from_percent(pct) {
+                    intents.push(UiIntent::SetEditParamsConfidence { level });
+                }
             }
         }
     });
@@ -1241,7 +1245,7 @@ fn render_tab_options(
         rc.anova.compute_effect_sizes,
         &ControlEnablement::enabled(),
     ) {
-        intents.push_custom_view_action("stat_params", "toggle_effect_sizes");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::ToggleEffectSizes));
     }
 
     let gg_checked = !matches!(rc.anova.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false });
@@ -1269,7 +1273,7 @@ fn render_tab_options(
             ("edit.pval.custom", "custom", "Custom", matches!(rc.spec_p_fmt, PValueFormat::Custom { .. })),
         ] {
             if render_modal_seg_btn(ui, rc.tokens, meta, wid, lbl, active, &ControlEnablement::enabled()) {
-                intents.push_custom_view_action("stat_params", format!("set_pvalue_format:{slug}"));
+                intents.push(UiIntent::StatParams(super::StatParamsIntent::SetPValueFormat { slug: slug.to_owned() }));
             }
         }
     });
@@ -1287,14 +1291,14 @@ fn render_tab_options(
         StepperSpec { id_prefix: "edit.pvalue.digits", label: "Custom P-Value Decimal Digits", value_text: &digits.to_string(), enablement: &r9_en },
     );
     if step < 0 {
-        intents.push_custom_view_action("stat_params", "spinner:edit.pvalue.digits:-1");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::StepPValueDigits { delta: -1 }));
     } else if step > 0 {
-        intents.push_custom_view_action("stat_params", "spinner:edit.pvalue.digits:1");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::StepPValueDigits { delta: 1 }));
     }
 }
 
 fn render_tab_residuals(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
-    let st = &rc.app.view_shards.stat_params;
+    let st = &rc.app.canvas_dialogs.edit_params;
     render_section_title(ui, rc.tokens, "Residual, Q-Q & Assumption Diagnostics");
     ui.label(
         egui::RichText::new("Client preview toggles: ResultSheet diagnostics tabs are generated automatically by the engine.")
@@ -1303,25 +1307,25 @@ fn render_tab_residuals(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut FrameInspe
     );
     ui.add_space(4.0);
 
-    for (wid, payload, lbl, checked) in [
-        ("edit.diag.qq_plot", "toggle_diag:qq", tr(rc.locale, "stat_params.label.qq_diagnostics"), st.diag_qq_plot),
-        ("edit.diag.residuals_table", "toggle_diag:residuals", tr(rc.locale, "stat_params.label.residuals_table"), st.diag_residuals_plot),
+    for (wid, flag, lbl, checked) in [
+        ("edit.diag.qq_plot", super::DiagToggleFlag::QqPlot, tr(rc.locale, "stat_params.label.qq_diagnostics"), st.diag_qq_plot),
+        ("edit.diag.residuals_table", super::DiagToggleFlag::Residuals, tr(rc.locale, "stat_params.label.residuals_table"), st.diag_residuals_plot),
         (
             "edit.diag.homoscedasticity",
-            "toggle_diag:homoscedasticity",
+            super::DiagToggleFlag::Homoscedasticity,
             "Test homogeneity of variances (Brown-Forsythe / Bartlett)",
             st.diag_homoscedasticity,
         ),
         (
             "edit.diag.assumption_checklist",
-            "toggle_diag:checklist",
+            super::DiagToggleFlag::Checklist,
             "Generate plain-language assumption diagnostic checklist",
             st.diag_assumption_checklist,
         ),
-        ("edit.diag.influence_leverage", "toggle_diag:influence", "Leverage & influence diagnostics", st.diag_influence_leverage),
+        ("edit.diag.influence_leverage", super::DiagToggleFlag::Influence, "Leverage & influence diagnostics", st.diag_influence_leverage),
     ] {
         if render_modal_checkbox(ui, rc.tokens, meta, wid, lbl, checked, &ControlEnablement::enabled()) {
-            intents.push_custom_view_action("stat_params", payload);
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::ToggleDiag { flag }));
         }
     }
 
@@ -1496,7 +1500,7 @@ fn render_modal_footer(
             ) {
                 state.saved_default_spec = Some(fc.spec.clone());
                 state.method_saved_as_default = true;
-                intents.push_save_edit_params_as_default();
+                intents.push(UiIntent::SaveEditParamsAsDefault);
             }
             if render_footer_button(
                 ui,
@@ -1504,7 +1508,7 @@ fn render_modal_footer(
                 meta,
                 FooterBtnSpec { widget_id: "modal.cancel", label: cancel_label, primary: false, selected: false, enabled: true },
             ) {
-                intents.push_dialog_button("cancel");
+                intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
             }
             if fc.apply_enabled
                 && render_footer_button(
@@ -1514,7 +1518,7 @@ fn render_modal_footer(
                     FooterBtnSpec { widget_id: "modal.apply", label: tr(fc.locale, "btn.apply"), primary: false, selected: false, enabled: true },
                 )
             {
-                intents.push_dialog_button("apply");
+                intents.push(UiIntent::DialogButtonAction { action: String::from("apply") });
             }
             if render_footer_button(
                 ui,
@@ -1522,7 +1526,7 @@ fn render_modal_footer(
                 meta,
                 FooterBtnSpec { widget_id: "modal.ok", label: primary_label, primary: true, selected: false, enabled: true },
             ) {
-                intents.push_dialog_button("ok");
+                intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
             }
         });
     } else {
@@ -1555,7 +1559,7 @@ fn render_modal_footer(
             ) {
                 state.saved_default_spec = Some(fc.spec.clone());
                 state.method_saved_as_default = true;
-                intents.push_save_edit_params_as_default();
+                intents.push(UiIntent::SaveEditParamsAsDefault);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if render_footer_button(
@@ -1564,7 +1568,7 @@ fn render_modal_footer(
                     meta,
                     FooterBtnSpec { widget_id: "modal.ok", label: primary_label, primary: true, selected: false, enabled: true },
                 ) {
-                    intents.push_dialog_button("ok");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
                 if fc.apply_enabled
                     && render_footer_button(
@@ -1574,7 +1578,7 @@ fn render_modal_footer(
                         FooterBtnSpec { widget_id: "modal.apply", label: tr(fc.locale, "btn.apply"), primary: false, selected: false, enabled: true },
                     )
                 {
-                    intents.push_dialog_button("apply");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("apply") });
                 }
                 if render_footer_button(
                     ui,
@@ -1582,7 +1586,7 @@ fn render_modal_footer(
                     meta,
                     FooterBtnSpec { widget_id: "modal.cancel", label: cancel_label, primary: false, selected: false, enabled: true },
                 ) {
-                    intents.push_dialog_button("cancel");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
             });
         });
@@ -1656,7 +1660,7 @@ fn render_multiplicity_dropdown(
             let resp = ui.add_enabled(en.enabled, egui::Button::selectable(rc.anova.multiplicity.method == method, lbl));
             let resp = if let Some(reason) = en.disabled_reason.as_deref() { resp.on_disabled_hover_text(reason) } else { resp };
             if en.enabled && resp.clicked() {
-                intents.push_custom_view_action("stat_params", format!("set_multiplicity:{slug}"));
+                intents.push(UiIntent::StatParams(super::StatParamsIntent::SetMultiplicityMethod { slug: slug.to_owned() }));
             }
         }
     });
@@ -1689,11 +1693,15 @@ fn render_alpha_stepper(ui: &mut Ui, rc: &TabRenderCtx<'_>, meta: &mut FrameInsp
     if step < 0 {
         let next_alpha = (alpha - 0.01).clamp(0.005, 0.50);
         let next_conf = ((1.0 - next_alpha) * 100.0).clamp(50.0, 99.5);
-        intents.push_custom_view_action("stat_params", format!("set_confidence:{next_conf:.1}"));
+        if let Ok(level) = curvebook_doc::ConfidenceLevel::from_percent(next_conf) {
+            intents.push(UiIntent::SetEditParamsConfidence { level });
+        }
     } else if step > 0 {
         let next_alpha = (alpha + 0.01).clamp(0.005, 0.50);
         let next_conf = ((1.0 - next_alpha) * 100.0).clamp(50.0, 99.5);
-        intents.push_custom_view_action("stat_params", format!("set_confidence:{next_conf:.1}"));
+        if let Ok(level) = curvebook_doc::ConfidenceLevel::from_percent(next_conf) {
+            intents.push(UiIntent::SetEditParamsConfidence { level });
+        }
     }
 }
 

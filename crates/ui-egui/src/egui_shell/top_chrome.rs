@@ -952,7 +952,7 @@ fn render_tier1_right_group(
                 let pal_resp = render_command_palette_icon_button(ui, tokens, meta, base_label, &tip_text, selected, enabled);
                 if pal_resp.clicked() && enabled {
                     state.close_all_popups();
-                    intents.push_set_palette_open(true);
+                    intents.push(UiIntent::SetPaletteOpen { open: true });
                 }
             }
         }
@@ -1105,7 +1105,7 @@ fn render_inline_search_capsule(
                     let carry = state.search_query.clone();
                     state.close_all_popups();
                     if carry.is_empty() {
-                        intents.push_set_palette_open(true);
+                        intents.push(UiIntent::SetPaletteOpen { open: true });
                     } else {
                         intents.push(UiIntent::OpenPaletteWithQuery { query: carry });
                     }

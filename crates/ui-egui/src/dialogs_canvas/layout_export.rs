@@ -1,15 +1,11 @@
 //! Multi-panel `Page Layout Composer` and `Export Figure` dialog state machines.
 
-use curvebook_doc::{
-    EmbeddedTableStyle, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, PageOrientation, PanelBadgeStyle, ProjectDocument, RectPt, SheetId,
-};
+use curvebook_doc::{EmbeddedTableStyle, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, PageOrientation, PanelBadgeStyle, RectPt, SheetId};
 use curvebook_render::TiffCompression;
 
 use curvebook_tools::ToolCommandIntent;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-
-use crate::dialogs_r9::{parse_export_format, parse_journal_preset_str, parse_page_orientation_str, parse_panel_badge_style_str, parse_usize_min};
+use serde_json::json;
 
 /// Multi-panel publication figure composer (`LayoutSpec`, journal presets, panel badges, alignment).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -141,61 +137,6 @@ impl PageLayoutComposerState {
         }
         out
     }
-
-    /// Apply modal/inspector field patches for `Page Layout` (`WF-48`).
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>, doc: Option<&ProjectDocument>) -> Result<(), String> {
-        let mut grid_changed = false;
-        let mut explicit_graph_ids: Option<Vec<SheetId>> = None;
-        for (key, val) in fields {
-            match key.as_str() {
-                "preset" | "layout.preset" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`preset` must be a string"))?;
-                    self.apply_preset(parse_journal_preset_str(raw)?);
-                }
-                "orientation" | "layout.orientation" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`orientation` must be a string"))?;
-                    self.orientation = parse_page_orientation_str(raw)?;
-                }
-                "rows" | "layout.rows" => {
-                    self.rows = u8::try_from(parse_usize_min(val, key, 1)?.min(12)).unwrap_or(12);
-                    grid_changed = true;
-                }
-                "cols" | "columns" | "layout.cols" => {
-                    self.cols = u8::try_from(parse_usize_min(val, key, 1)?.min(12)).unwrap_or(12);
-                    grid_changed = true;
-                }
-                "align_plot_origins" | "layout.align_plot_origins" => {
-                    self.align_plot_origins = val.as_bool().ok_or_else(|| String::from("`align_plot_origins` must be boolean"))?;
-                }
-                "panel_badges" | "layout.panel_badges" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`panel_badges` must be a string"))?;
-                    self.panel_badges = parse_panel_badge_style_str(raw)?;
-                }
-                "new_callout_markdown" | "callout" | "layout.new_callout_markdown" => {
-                    if let Some(s) = val.as_str() {
-                        self.new_callout_markdown = s.to_owned();
-                    }
-                }
-                "arrange_graph_ids" | "graph_ids" | "layout.arrange_graph_ids" => {
-                    let arr = val.as_array().ok_or_else(|| format!("`{key}` must be an array of sheet IDs"))?;
-                    let mut ids = Vec::with_capacity(arr.len());
-                    for (idx, item) in arr.iter().enumerate() {
-                        let raw = item.as_str().ok_or_else(|| format!("`{key}[{idx}]` must be a string"))?;
-                        ids.push(SheetId::try_new(raw).map_err(|e| e.to_string())?);
-                    }
-                    explicit_graph_ids = Some(ids);
-                }
-                other => return Err(format!("unknown Page Layout field `{other}`")),
-            }
-        }
-        if let Some(ids) = explicit_graph_ids {
-            self.arrange_grid(&ids, 18.0, 12.0);
-        } else if grid_changed && let Some(d) = doc {
-            let graph_ids: Vec<SheetId> = d.graph_sheets.iter().map(|g| g.id.clone()).collect();
-            self.arrange_grid(&graph_ids, 18.0, 12.0);
-        }
-        Ok(())
-    }
 }
 
 /// Output format for [`ExportFigureState`].
@@ -208,18 +149,40 @@ pub enum ExportFigureFormat {
     Tiff(TiffCompression),
 }
 
+fn default_export_color_space() -> String {
+    String::from("sRGB")
+}
+
+fn default_export_unit() -> String {
+    String::from("px")
+}
+
 /// Publication figure export modal state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportFigureState {
     pub format: ExportFigureFormat,
     pub width_px: u32,
     pub height_px: u32,
     pub dpi: u16,
+    #[serde(default)]
+    pub transparent_bg: bool,
+    #[serde(default = "default_export_color_space")]
+    pub color_space: String,
+    #[serde(default = "default_export_unit")]
+    pub unit: String,
 }
 
 impl Default for ExportFigureState {
     fn default() -> Self {
-        Self { format: ExportFigureFormat::Png, width_px: 1800, height_px: 1200, dpi: 300 }
+        Self {
+            format: ExportFigureFormat::Png,
+            width_px: 1800,
+            height_px: 1200,
+            dpi: 300,
+            transparent_bg: false,
+            color_space: default_export_color_space(),
+            unit: default_export_unit(),
+        }
     }
 }
 
@@ -250,29 +213,6 @@ impl ExportFigureState {
                 }),
             ),
         }
-    }
-
-    /// Apply modal field patches for `Export Figure...` (`WF-48`).
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "format" | "export.format" => self.format = parse_export_format(val)?,
-                "width_px" | "export.width_px" => {
-                    let w = parse_usize_min(val, key, 16)?;
-                    self.width_px = u32::try_from(w).unwrap_or(u32::MAX);
-                }
-                "height_px" | "export.height_px" => {
-                    let h = parse_usize_min(val, key, 16)?;
-                    self.height_px = u32::try_from(h).unwrap_or(u32::MAX);
-                }
-                "dpi" | "export.dpi" => {
-                    let d = parse_usize_min(val, key, 72)?;
-                    self.dpi = u16::try_from(d.clamp(72, 2400)).unwrap_or(600);
-                }
-                other => return Err(format!("unknown Export Figure field `{other}`")),
-            }
-        }
-        Ok(())
     }
 }
 

@@ -7,6 +7,7 @@
 
 use curvebook_doc::ErrorCode;
 use curvebook_engine::cmd::Effects;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -84,19 +85,111 @@ pub fn list_gui_tools() -> Vec<ToolDefinition> {
     .collect()
 }
 
-fn metrics_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "logical_width": { "type": "number", "exclusiveMinimum": 0.0, "description": "Logical viewport width in points (160..=16384)." },
-            "logical_height": { "type": "number", "exclusiveMinimum": 0.0, "description": "Logical viewport height in points (120..=16384)." },
-            "scale_factor": { "type": "number", "exclusiveMinimum": 0.0, "description": "HiDPI display scale factor (0.5..=8.0, default 1.0)." },
-            "width_px": { "type": "number", "exclusiveMinimum": 0.0, "description": "Alias for logical_width." },
-            "height_px": { "type": "number", "exclusiveMinimum": 0.0, "description": "Alias for logical_height." }
-        },
-        "additionalProperties": false,
-        "description": "Optional ViewportMetrics ({logical_width, logical_height, scale_factor}; also accepts width_px/height_px aliases) for HiDPI layout/dispatch."
+fn strict_schema<T: JsonSchema>() -> Value {
+    let mut root = schemars::generate::SchemaSettings::draft2020_12().into_generator().into_root_schema_for::<T>().to_value();
+    let defs = root
+        .as_object_mut()
+        .and_then(|obj| {
+            obj.remove("$schema");
+            obj.remove("title");
+            obj.remove("$defs")
+        })
+        .and_then(|v| match v {
+            Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+    normalize_gui_schema(&mut root, &defs, 0);
+    root
+}
+
+fn normalize_gui_schema(schema: &mut Value, defs: &Map<String, Value>, depth: usize) {
+    if depth >= 32 {
+        return;
+    }
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+
+    if let Some(def_name) = obj.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix("#/$defs/")).map(str::to_owned)
+        && let Some(mut resolved) = defs.get(&def_name).cloned()
+    {
+        normalize_gui_schema(&mut resolved, defs, depth + 1);
+        obj.remove("$ref");
+        if let Value::Object(resolved_map) = resolved {
+            for (k, v) in resolved_map {
+                obj.entry(k).or_insert(v);
+            }
+        }
+    }
+
+    if let Some(Value::Array(types)) = obj.get_mut("type") {
+        types.retain(|t| t.as_str() != Some("null"));
+        if types.len() == 1
+            && let Some(single) = types.pop()
+        {
+            obj.insert(String::from("type"), single);
+        }
+    }
+
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(Value::Array(items)) = obj.get_mut(key) {
+            for item in items.iter_mut() {
+                normalize_gui_schema(item, defs, depth + 1);
+            }
+        }
+    }
+
+    if let Some(Value::Array(branches)) = obj.get_mut("anyOf") {
+        branches.retain(|b| !matches!(b.as_object(), Some(m) if m.len() == 1 && m.get("type").and_then(Value::as_str) == Some("null")));
+        if branches.len() == 1
+            && let Some(Value::Object(only)) = branches.pop()
+        {
+            obj.remove("anyOf");
+            for (k, v) in only {
+                obj.entry(k).or_insert(v);
+            }
+        }
+    }
+
+    if let Some(Value::Object(props)) = obj.get_mut("properties") {
+        for prop in props.values_mut() {
+            normalize_gui_schema(prop, defs, depth + 1);
+        }
+        if obj.get("type").and_then(Value::as_str) == Some("object") && !obj.contains_key("additionalProperties") {
+            obj.insert(String::from("additionalProperties"), Value::Bool(false));
+        }
+    }
+
+    for key in ["items", "additionalProperties"] {
+        if let Some(child) = obj.get_mut(key) {
+            normalize_gui_schema(child, defs, depth + 1);
+        }
+    }
+    if let Some(Value::Array(prefix)) = obj.get_mut("prefixItems") {
+        for item in prefix.iter_mut() {
+            normalize_gui_schema(item, defs, depth + 1);
+        }
+    }
+}
+
+fn string_enum_schema(variants: &[&str]) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "enum": variants,
     })
+}
+
+fn inspect_scope_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    string_enum_schema(&VALID_INSPECT_SCOPES)
+}
+
+fn screenshot_target_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    string_enum_schema(&VALID_SCREENSHOT_TARGETS)
+}
+
+fn pointer_action_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    string_enum_schema(&["click", "double_click", "right_click", "drag", "hover", "wheel"])
 }
 
 fn def_ui_inspect() -> ToolDefinition {
@@ -105,22 +198,7 @@ fn def_ui_inspect() -> ToolDefinition {
         description: String::from(
             "Inspect the visible CurveBook GUI tree (shell, navigator, menus/toolbars, active modal/wizard with enabled/disabled_reason predicates, visible grid cells, and canvas hit targets).",
         ),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "scope": {
-                    "type": "string",
-                    "enum": VALID_INSPECT_SCOPES,
-                    "description": "Optional subtree scope filter (defaults to 'all')."
-                },
-                "include_bounds": {
-                    "type": "boolean",
-                    "description": "Include widget/hit-target bounding boxes in the snapshot."
-                },
-                "metrics": metrics_schema()
-            },
-            "additionalProperties": false
-        }),
+        input_schema: strict_schema::<UiInspectArgs>(),
         annotations: ToolAnnotations::from_effects(Effects::NONE.with(Effects::IDEMPOTENT)),
     }
 }
@@ -131,94 +209,16 @@ fn def_ui_screenshot() -> ToolDefinition {
         description: String::from(
             "Capture a deterministic PNG screenshot of the live CurveBook UI, returning inline PNG image content alongside pixel/DPI metadata (or atomically writing/overwriting an optional host output path outside --gui-only).",
         ),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "target": {
-                    "type": "string",
-                    "enum": VALID_SCREENSHOT_TARGETS,
-                    "description": "Optional visual surface target (defaults to 'workspace')."
-                },
-                "width_px": {
-                    "type": "integer",
-                    "minimum": 64,
-                    "maximum": 4096,
-                    "description": "Image width in pixels (64..=4096)."
-                },
-                "height_px": {
-                    "type": "integer",
-                    "minimum": 64,
-                    "maximum": 4096,
-                    "description": "Image height in pixels (64..=4096)."
-                },
-                "dpi": {
-                    "type": "integer",
-                    "minimum": 72,
-                    "maximum": 600,
-                    "description": "Optional render DPI (72..=600)."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Optional host output path (overwrites existing file; rejected with gui_only_violation when --gui-only is active)."
-                }
-            },
-            "additionalProperties": false
-        }),
+        input_schema: strict_schema::<UiScreenshotArgs>(),
         annotations: ToolAnnotations::from_effects(Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT)),
     }
-}
-
-fn modifiers_schema() -> Value {
-    json!({
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "shift": { "type": "boolean" },
-                    "ctrl": { "type": "boolean" },
-                    "alt": { "type": "boolean" },
-                    "meta": { "type": "boolean" },
-                    "cmd": { "type": "boolean" }
-                },
-                "additionalProperties": false
-            },
-            {
-                "type": "array",
-                "items": { "type": "string" }
-            }
-        ],
-        "description": "Optional modifier keys ({shift, ctrl, alt, meta, cmd} object or string list)."
-    })
 }
 
 fn def_ui_pointer_gesture() -> ToolDefinition {
     ToolDefinition {
         name: String::from("ui_pointer_gesture"),
         description: String::from("Dispatch a visible mouse/trackpad gesture against a widget_id or logical (x, y) viewport coordinates."),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["click", "double_click", "right_click", "drag", "hover", "wheel"],
-                    "description": "Pointer gesture kind."
-                },
-                "widget_id": { "type": "string", "description": "Target widget or canvas hit-target ID from ui_inspect." },
-                "target_id": { "type": "string", "description": "Alias for widget_id." },
-                "x": { "type": "number", "description": "Logical X coordinate when not addressing by widget_id." },
-                "y": { "type": "number", "description": "Logical Y coordinate when not addressing by widget_id." },
-                "to_widget_id": { "type": "string", "description": "Destination widget/hit-target ID for 'drag' gestures." },
-                "to_x": { "type": "number", "description": "Destination logical X coordinate for 'drag' gestures." },
-                "to_y": { "type": "number", "description": "Destination logical Y coordinate for 'drag' gestures." },
-                "modifiers": modifiers_schema(),
-                "delta_y": { "type": "number", "description": "Vertical scroll delta for 'wheel' gestures." },
-                "hover_fraction_x": { "type": "number", "description": "Optional fractional X coordinate [0.0, 1.0] for power curve hover." },
-                "hover_n": { "type": "number", "description": "Optional sample-size N coordinate for power curve hover." },
-                "metrics": metrics_schema()
-            },
-            "required": ["action"],
-            "additionalProperties": false
-        }),
+        input_schema: strict_schema::<UiPointerGestureArgs>(),
         annotations: ToolAnnotations::from_effects(GUI_DISPATCH_WORST_CASE_EFFECTS),
     }
 }
@@ -229,17 +229,7 @@ fn def_ui_type_text() -> ToolDefinition {
         description: String::from(
             "Type or paste UTF-8 text (including multi-cell TSV blocks with tabs/newlines) into the focused cell/field or specified widget_id.",
         ),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "text": { "type": "string", "description": "Exact UTF-8 text or TSV payload to enter (whitespace preserved)." },
-                "widget_id": { "type": "string", "description": "Optional widget ID to focus before entering text." },
-                "clear_existing": { "type": "boolean", "description": "Clear existing cell or field content before typing." },
-                "commit_enter": { "type": "boolean", "description": "Commit the inline edit or field with Enter after typing." }
-            },
-            "required": ["text"],
-            "additionalProperties": false
-        }),
+        input_schema: strict_schema::<UiTypeTextArgs>(),
         annotations: ToolAnnotations::from_effects(GUI_TYPE_TEXT_WORST_CASE_EFFECTS),
     }
 }
@@ -248,15 +238,7 @@ fn def_ui_press_key() -> ToolDefinition {
     ToolDefinition {
         name: String::from("ui_press_key"),
         description: String::from("Press a keyboard key or shortcut (e.g. Enter, Escape, Tab, Delete, Backspace, Cmd/Ctrl+T, Cmd/Ctrl+E)."),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "key": { "type": "string", "description": "Key identifier such as 'Enter', 'Escape', 'Tab', 'Delete', 'ArrowDown', 't', or 'e'." },
-                "modifiers": modifiers_schema()
-            },
-            "required": ["key"],
-            "additionalProperties": false
-        }),
+        input_schema: strict_schema::<UiPressKeyArgs>(),
         annotations: ToolAnnotations::from_effects(GUI_DISPATCH_WORST_CASE_EFFECTS),
     }
 }
@@ -265,21 +247,7 @@ fn def_ui_invoke_menu() -> ToolDefinition {
     ToolDefinition {
         name: String::from("ui_invoke_menu"),
         description: String::from("Invoke a visible menu bar, toolbar, or context-menu item by path or command_id (fails if disabled)."),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "oneOf": [
-                        { "type": "string" },
-                        { "type": "array", "items": { "type": "string" } }
-                    ],
-                    "description": "Visible menu path (e.g. 'Analyze > Column Analyses > One-way ANOVA') or array of segments."
-                },
-                "command_id": { "type": "string", "description": "Command identifier associated with the menu/toolbar item." },
-                "params": { "type": "object", "description": "Optional parameter payload for the invoked command or dialog initializer." }
-            },
-            "additionalProperties": false
-        }),
+        input_schema: strict_schema::<UiInvokeMenuArgs>(),
         annotations: ToolAnnotations::from_effects(GUI_DISPATCH_WORST_CASE_EFFECTS),
     }
 }
@@ -288,28 +256,7 @@ fn def_ui_switch_tab() -> ToolDefinition {
     ToolDefinition {
         name: String::from("ui_switch_tab"),
         description: String::from("Switch the active sheet, modal/wizard stage, or ResultSheet sub-tab (fails with disabled_reason if grayed out)."),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "tab": {
-                    "oneOf": [
-                        { "type": "string" },
-                        { "type": "integer", "minimum": 0 }
-                    ],
-                    "description": "Tab identifier, visible tab label, or zero-based tab index."
-                },
-                "tab_id": {
-                    "oneOf": [
-                        { "type": "string" },
-                        { "type": "integer", "minimum": 0 }
-                    ],
-                    "description": "Alias for tab."
-                },
-                "sheet_id": { "type": "string", "description": "Optional sheet identifier to activate before/when selecting a sub-tab." },
-                "widget_id": { "type": "string", "description": "Optional tab strip or widget identifier." }
-            },
-            "additionalProperties": false
-        }),
+        input_schema: strict_schema::<UiSwitchTabArgs>(),
         annotations: ToolAnnotations::from_effects(Effects::MUTATES_DOCUMENT.with(Effects::CHANGES_UI_STATE).with(Effects::IDEMPOTENT)),
     }
 }
@@ -320,18 +267,7 @@ fn def_ui_answer_dialog() -> ToolDefinition {
         description: String::from(
             "Update enabled modal/wizard controls by widget_id (`fields`/`values`/`patches`) and/or click a modal action button (e.g. 'ok', 'cancel', 'next', 'back', 'create', 'apply', 'preview').",
         ),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "action": { "type": "string", "description": "Modal button action to activate (e.g. 'ok', 'cancel', 'back', 'next', 'create', 'apply', 'preview')." },
-                "fields": { "type": "object", "description": "Map of modal widget_id -> value to set before clicking action." },
-                "values": { "type": "object", "description": "Alias for fields mapping widget_id -> value." },
-                "patches": { "type": "object", "description": "Alias for fields mapping widget_id -> value." },
-                "force_create_new": { "type": "boolean", "description": "Optional flag creating a new ResultSheet directly when committing AnalyzeSheet." },
-                "choice": { "type": "string", "description": "Optional selection for prompt dialogs (e.g. 'create_new' or 'modify_existing')." }
-            },
-            "additionalProperties": false
-        }),
+        input_schema: strict_schema::<UiAnswerDialogArgs>(),
         annotations: ToolAnnotations::from_effects(GUI_DIALOG_WORST_CASE_EFFECTS),
     }
 }
@@ -358,13 +294,26 @@ fn dispatch_json_result(state: &mut McpServerState, method: &str, params: Value)
     }
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+#[schemars(
+    description = "Optional ViewportMetrics ({logical_width, logical_height, scale_factor}; also accepts width_px/height_px aliases) for HiDPI layout/dispatch."
+)]
 struct MetricsArgs {
+    /// Logical viewport width in points (160..=16384).
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
     logical_width: Option<f64>,
+    /// Logical viewport height in points (120..=16384).
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
     logical_height: Option<f64>,
+    /// HiDPI display scale factor (0.5..=8.0, default 1.0).
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
     scale_factor: Option<f64>,
+    /// Alias for logical_width.
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
     width_px: Option<f64>,
+    /// Alias for logical_height.
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
     height_px: Option<f64>,
 }
 
@@ -378,7 +327,7 @@ struct NormalizedMetrics {
     scale_factor: Option<f64>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 struct ModifierFlagsObj {
     shift: Option<bool>,
@@ -388,32 +337,37 @@ struct ModifierFlagsObj {
     cmd: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(untagged)]
+#[schemars(description = "Optional modifier keys ({shift, ctrl, alt, meta, cmd} object or string list).")]
 enum ModifiersInput {
     Object(ModifierFlagsObj),
     List(Vec<String>),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(untagged)]
 enum TabTargetInput {
     Index(u64),
     Label(String),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(untagged)]
 enum MenuPathInput {
     Single(String),
     Segments(Vec<String>),
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 struct UiInspectArgs {
+    /// Optional subtree scope filter (defaults to 'all').
+    #[schemars(schema_with = "inspect_scope_schema")]
     scope: Option<String>,
+    /// Include widget/hit-target bounding boxes in the snapshot.
     include_bounds: Option<bool>,
+    /// Optional ViewportMetrics ({logical_width, logical_height, scale_factor}; also accepts width_px/height_px aliases) for HiDPI layout/dispatch.
     metrics: Option<MetricsArgs>,
 }
 
@@ -443,13 +397,22 @@ fn handle_ui_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> R
     dispatch_json_result(state, "ui.inspect", Value::Object(params))
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 struct UiScreenshotArgs {
+    /// Optional visual surface target (defaults to 'workspace').
+    #[schemars(schema_with = "screenshot_target_schema")]
     target: Option<String>,
+    /// Image width in pixels (64..=4096).
+    #[schemars(range(min = 64, max = 4096))]
     width_px: Option<u32>,
+    /// Image height in pixels (64..=4096).
+    #[schemars(range(min = 64, max = 4096))]
     height_px: Option<u32>,
+    /// Optional render DPI (72..=600).
+    #[schemars(range(min = 72, max = 600))]
     dpi: Option<u32>,
+    /// Optional host output path (overwrites existing file; rejected with gui_only_violation when --gui-only is active).
     path: Option<String>,
 }
 
@@ -533,21 +496,35 @@ fn format_screenshot_result(raw: Value) -> Result<ToolCallResult, ToolCallError>
     })
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 struct UiPointerGestureArgs {
+    /// Pointer gesture kind.
+    #[schemars(required, schema_with = "pointer_action_schema")]
     action: Option<String>,
+    /// Target widget or canvas hit-target ID from ui_inspect.
     widget_id: Option<String>,
+    /// Alias for widget_id.
     target_id: Option<String>,
+    /// Logical X coordinate when not addressing by widget_id.
     x: Option<f64>,
+    /// Logical Y coordinate when not addressing by widget_id.
     y: Option<f64>,
+    /// Destination widget/hit-target ID for 'drag' gestures.
     to_widget_id: Option<String>,
+    /// Destination logical X coordinate for 'drag' gestures.
     to_x: Option<f64>,
+    /// Destination logical Y coordinate for 'drag' gestures.
     to_y: Option<f64>,
+    /// Optional modifier keys ({shift, ctrl, alt, meta, cmd} object or string list).
     modifiers: Option<ModifiersInput>,
+    /// Vertical scroll delta for 'wheel' gestures.
     delta_y: Option<f64>,
+    /// Optional fractional X coordinate [0.0, 1.0] for power curve hover.
     hover_fraction_x: Option<f64>,
+    /// Optional sample-size N coordinate for power curve hover.
     hover_n: Option<f64>,
+    /// Optional ViewportMetrics ({logical_width, logical_height, scale_factor}; also accepts width_px/height_px aliases) for HiDPI layout/dispatch.
     metrics: Option<MetricsArgs>,
 }
 
@@ -607,12 +584,17 @@ fn handle_ui_pointer_gesture(state: &mut McpServerState, args: &Map<String, Valu
     dispatch_json_result(state, "ui.pointer_gesture", Value::Object(params))
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 struct UiTypeTextArgs {
+    /// Exact UTF-8 text or TSV payload to enter (whitespace preserved).
+    #[schemars(required)]
     text: Option<String>,
+    /// Optional widget ID to focus before entering text.
     widget_id: Option<String>,
+    /// Clear existing cell or field content before typing.
     clear_existing: Option<bool>,
+    /// Commit the inline edit or field with Enter after typing.
     commit_enter: Option<bool>,
 }
 
@@ -633,10 +615,13 @@ fn handle_ui_type_text(state: &mut McpServerState, args: &Map<String, Value>) ->
     dispatch_json_result(state, "ui.type_text", Value::Object(params))
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 struct UiPressKeyArgs {
+    /// Key identifier such as 'Enter', 'Escape', 'Tab', 'Delete', 'ArrowDown', 't', or 'e'.
+    #[schemars(required)]
     key: Option<String>,
+    /// Optional modifier keys ({shift, ctrl, alt, meta, cmd} object or string list).
     modifiers: Option<ModifiersInput>,
 }
 
@@ -654,11 +639,14 @@ fn handle_ui_press_key(state: &mut McpServerState, args: &Map<String, Value>) ->
     dispatch_json_result(state, "ui.press_key", Value::Object(params))
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 struct UiInvokeMenuArgs {
+    /// Visible menu path (e.g. 'Analyze > Column Analyses > One-way ANOVA') or array of segments.
     path: Option<MenuPathInput>,
+    /// Command identifier associated with the menu/toolbar item.
     command_id: Option<String>,
+    /// Optional parameter payload for the invoked command or dialog initializer.
     params: Option<Map<String, Value>>,
 }
 
@@ -696,12 +684,16 @@ fn handle_ui_invoke_menu(state: &mut McpServerState, args: &Map<String, Value>) 
     dispatch_json_result(state, "ui.invoke_menu", Value::Object(params))
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 struct UiSwitchTabArgs {
+    /// Tab identifier, visible tab label, or zero-based tab index.
     tab: Option<TabTargetInput>,
+    /// Alias for tab.
     tab_id: Option<TabTargetInput>,
+    /// Optional sheet identifier to activate before/when selecting a sub-tab.
     sheet_id: Option<String>,
+    /// Optional tab strip or widget identifier.
     widget_id: Option<String>,
 }
 
@@ -724,14 +716,20 @@ fn handle_ui_switch_tab(state: &mut McpServerState, args: &Map<String, Value>) -
     dispatch_json_result(state, "ui.switch_tab", Value::Object(params))
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 struct UiAnswerDialogArgs {
+    /// Modal button action to activate (e.g. 'ok', 'cancel', 'back', 'next', 'create', 'apply', 'preview').
     action: Option<String>,
+    /// Map of modal widget_id -> value to set before clicking action.
     fields: Option<Map<String, Value>>,
+    /// Alias for fields mapping widget_id -> value.
     values: Option<Map<String, Value>>,
+    /// Alias for fields mapping widget_id -> value.
     patches: Option<Map<String, Value>>,
+    /// Optional flag creating a new ResultSheet directly when committing AnalyzeSheet.
     force_create_new: Option<bool>,
+    /// Optional selection for prompt dialogs (e.g. 'create_new' or 'modify_existing').
     choice: Option<String>,
 }
 

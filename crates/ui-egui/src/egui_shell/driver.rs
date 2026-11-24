@@ -13,6 +13,7 @@ use egui::{
     Pos2, RawInput, Rect, Response, TouchPhase, Ui, Vec2, ViewportId, WidgetInfo,
 };
 
+pub use super::inspect_bridge::{parse_egui_key, to_egui_modifiers, to_egui_pointer_button};
 use super::{ActionRank, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, GeometryStamp, LayoutMetrics, Tokens};
 use crate::inspect::{ParityReport, ParityViolation, ZLayer};
 use crate::interaction::{KeyModifiers, PointerButton, ViewportMetrics};
@@ -71,51 +72,6 @@ pub struct EllipsisLabelOutput {
     pub response: Response,
     pub ellipsized: bool,
     pub full_label: String,
-}
-
-/// Convert [`KeyModifiers`] to [`egui::Modifiers`].
-#[must_use]
-pub const fn to_egui_modifiers(modifiers: KeyModifiers) -> Modifiers {
-    Modifiers { alt: modifiers.alt, ctrl: modifiers.ctrl, shift: modifiers.shift, mac_cmd: modifiers.meta, command: modifiers.ctrl || modifiers.meta }
-}
-
-/// Convert [`PointerButton`] to [`egui::PointerButton`].
-#[must_use]
-pub const fn to_egui_pointer_button(button: PointerButton) -> EguiPointerButton {
-    match button {
-        PointerButton::Primary => EguiPointerButton::Primary,
-        PointerButton::Secondary => EguiPointerButton::Secondary,
-        PointerButton::Middle => EguiPointerButton::Middle,
-    }
-}
-
-/// Parse a CurveBook/Web key token (`"Tab"`, `"Enter"`, `"Escape"`, `"a"`, etc.) into [`egui::Key`].
-#[must_use]
-pub fn parse_egui_key(key: &str) -> Option<Key> {
-    let trimmed = key.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(parsed) = Key::from_name(trimmed) {
-        return Some(parsed);
-    }
-    match trimmed.to_ascii_lowercase().as_str() {
-        "enter" | "return" => Some(Key::Enter),
-        "esc" | "escape" => Some(Key::Escape),
-        "tab" => Some(Key::Tab),
-        "backspace" => Some(Key::Backspace),
-        "del" | "delete" => Some(Key::Delete),
-        "space" => Some(Key::Space),
-        "up" | "arrowup" => Some(Key::ArrowUp),
-        "down" | "arrowdown" => Some(Key::ArrowDown),
-        "left" | "arrowleft" => Some(Key::ArrowLeft),
-        "right" | "arrowright" => Some(Key::ArrowRight),
-        "home" => Some(Key::Home),
-        "end" => Some(Key::End),
-        "pageup" => Some(Key::PageUp),
-        "pagedown" => Some(Key::PageDown),
-        _ => None,
-    }
 }
 
 fn non_empty_str(opt: Option<&str>) -> Option<&str> {

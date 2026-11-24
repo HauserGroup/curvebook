@@ -72,7 +72,7 @@ pub(super) fn render_two_group_design(
                 if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
                     tg.method = m;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     });
@@ -109,7 +109,7 @@ pub(super) fn render_two_group_design(
                             _ => {}
                         }
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             } else if !resp.has_focus() {
                 let canonical = format!("{hypothetical}");
@@ -130,7 +130,7 @@ pub(super) fn render_two_group_design(
             );
             if step != 0 {
                 ui.ctx().data_mut(|d| d.remove::<String>(hyp_key));
-                intents.push_custom_view_action("stat_params", format!("spinner:edit.two_group.hypothetical:{step}"));
+                intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::StepTwoGroupHypothetical { delta: f64::from(step) }));
             }
         });
     }
@@ -143,7 +143,7 @@ pub(super) fn render_two_group_design(
             if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
                 tg.two_tailed = !t.two_tailed;
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
         if render_modal_checkbox(
             ui,
@@ -158,7 +158,7 @@ pub(super) fn render_two_group_design(
             if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
                 tg.compute_effect_sizes = !t.compute_effect_sizes;
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
         if render_modal_checkbox(
             ui,
@@ -204,7 +204,7 @@ pub(super) fn render_two_group_design(
                         if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
                             tg.mv_group_column = Some(idx);
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                     if render_modal_seg_btn(
                         ui,
@@ -219,7 +219,7 @@ pub(super) fn render_two_group_design(
                         if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
                             tg.mv_response_column = Some(idx);
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                 });
                 if idx % 3 == 2 {

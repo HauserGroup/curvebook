@@ -8,11 +8,11 @@ use curvebook_doc::{ColumnDesignHint, DataSheet, SheetId, SubcolumnMode, TableAr
 use egui::{Align, CornerRadius, FontId, Key, Modifiers, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, WidgetInfo, pos2, vec2};
 use serde_json::json;
 
+use crate::grid_view::grid_tr;
 use crate::i18n::tr;
 use crate::inspect::ZLayer;
-use crate::views::grid_core::grid_tr;
 
-use super::super::FrameInspectEntryInput;
+use super::super::{FrameInspectEntryInput, UiIntent};
 use super::GridInlineEditTarget;
 use super::inline_edit::begin_inline_edit;
 use super::mv_roles::render_mv_tier3_role_chip;
@@ -431,7 +431,7 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
     if toggle_resp.clicked() && !blocked {
         let next = !geom.row_titles_collapsed;
         fstate.state.row_titles_collapsed = next;
-        fstate.intents.push_set_row_titles_collapsed(next);
+        fstate.intents.push(UiIntent::SetRowTitlesCollapsed { collapsed: next });
         ui.ctx().request_repaint();
     }
 

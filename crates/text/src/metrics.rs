@@ -7,6 +7,13 @@
 
 use std::sync::OnceLock;
 
+use read_fonts::tables::cmap::{Cmap, Cmap0, Cmap4, Cmap12, CmapIterLimits, CmapSubtable, PlatformId};
+use read_fonts::tables::head::MacStyle;
+use read_fonts::tables::name::Name;
+use read_fonts::tables::os2::{Os2, SelectionFlags};
+use read_fonts::tables::post::Post;
+use read_fonts::types::{GlyphId, Tag};
+use read_fonts::{CollectionRef, FontData, FontRead, FontRef, ReadError, TTCHeader, TableProvider};
 use serde::{Deserialize, Serialize};
 
 use crate::BUNDLED_FONTS;
@@ -527,19 +534,33 @@ const fn is_wide_cjk(ch: char) -> bool {
     )
 }
 
-/// Safe, zero-allocation SFNT/TrueType font metric & glyph slice reader.
-#[derive(Debug, Clone, Copy)]
+/// Safe, zero-allocation SFNT/TrueType font metric & glyph slice reader backed by `read-fonts`.
+#[derive(Clone)]
 pub struct TrueTypeFont<'a> {
-    head: &'a [u8],
-    hhea: &'a [u8],
-    cmap: &'a [u8],
-    hmtx: &'a [u8],
-    loca: Option<&'a [u8]>,
-    glyf: Option<&'a [u8]>,
-    os2: Option<&'a [u8]>,
-    post: Option<&'a [u8]>,
-    name: Option<&'a [u8]>,
-    core: SfntCore,
+    font: FontRef<'a>,
+    units_per_em: u16,
+    x_min: i16,
+    y_min: i16,
+    x_max: i16,
+    y_max: i16,
+    mac_style: MacStyle,
+    index_to_loc_format: i16,
+    ascent: i16,
+    descent: i16,
+    line_gap: i16,
+    num_glyphs: u16,
+    cmap_subtables: CmapSubtables,
+    has_glyf_outlines: bool,
+}
+
+impl std::fmt::Debug for TrueTypeFont<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrueTypeFont")
+            .field("units_per_em", &self.units_per_em)
+            .field("num_glyphs", &self.num_glyphs)
+            .field("index_to_loc_format", &self.index_to_loc_format)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> TrueTypeFont<'a> {
@@ -571,94 +592,152 @@ impl<'a> TrueTypeFont<'a> {
     /// # Errors
     /// Returns [`crate::TextError`] when the SFNT directory or required tables are invalid.
     pub fn parse_checked_at(bytes: &'a [u8], sfnt_offset: usize) -> Result<Self, crate::TextError> {
-        let layout = CachedSfntLayout::extract_checked(bytes, sfnt_offset)?;
-        layout.font(bytes).ok_or_else(|| invalid_sfnt("SFNT table slice out of bounds"))
+        if let Ok(collection) = CollectionRef::new(bytes) {
+            let ttc = TTCHeader::read(FontData::new(bytes)).map_err(map_read_error)?;
+            let face_index = ttc
+                .table_directory_offsets()
+                .iter()
+                .position(|off| usize::try_from(off.get()).ok() == Some(sfnt_offset))
+                .and_then(|idx| u32::try_from(idx).ok())
+                .ok_or_else(|| invalid_sfnt("SFNT offset not found in TTC header"))?;
+            let font = collection.get(face_index).map_err(map_read_error)?;
+            return Self::from_font_ref(font);
+        }
+        if sfnt_offset != 0 {
+            return Err(invalid_sfnt("non-zero SFNT offset on non-TTC font"));
+        }
+        let font = FontRef::new(bytes).map_err(map_read_error)?;
+        Self::from_font_ref(font)
     }
 
     /// Parse a single SFNT or TrueType Collection (`.ttc`) byte slice into `(sfnt_offset, font)` pairs.
     #[must_use]
     pub fn parse_collection(bytes: &'a [u8]) -> Vec<(usize, Self)> {
-        if bytes.get(0..4) == Some(b"ttcf") {
-            let Some(num_fonts_raw) = read_u32_be(bytes, 8) else {
-                return Vec::new();
-            };
-            let count = usize::try_from(num_fonts_raw).unwrap_or(0).min(64);
-            let mut out = Vec::with_capacity(count);
-            for i in 0..count {
-                let Some(off) = read_u32_be(bytes, 12 + i * 4).and_then(|v| usize::try_from(v).ok()) else {
-                    break;
-                };
-                if let Some(font) = Self::parse_at(bytes, off) {
-                    out.push((off, font));
-                }
-            }
-            return out;
+        if let (Ok(collection), Ok(ttc)) = (CollectionRef::new(bytes), TTCHeader::read(FontData::new(bytes))) {
+            return ttc
+                .table_directory_offsets()
+                .iter()
+                .enumerate()
+                .take(64)
+                .filter_map(|(idx, off_be)| {
+                    let off = usize::try_from(off_be.get()).ok()?;
+                    let idx_u32 = u32::try_from(idx).ok()?;
+                    let font = collection.get(idx_u32).ok()?;
+                    let parsed = Self::from_font_ref(font).ok()?;
+                    Some((off, parsed))
+                })
+                .collect();
         }
         Self::parse_at(bytes, 0).map_or_else(Vec::new, |font| vec![(0, font)])
     }
 
+    pub(crate) fn parse_ttc_index(bytes: &'a [u8], face_index: u32) -> Option<Self> {
+        let collection = CollectionRef::new(bytes).ok()?;
+        let font = collection.get(face_index).ok()?;
+        Self::from_font_ref(font).ok()
+    }
+
+    pub(crate) fn from_font_ref(font: FontRef<'a>) -> Result<Self, crate::TextError> {
+        validate_sfnt_directory(&font)?;
+        let head = font.head().map_err(map_read_error)?;
+        let units_per_em = head.units_per_em();
+        if !(16..=16384).contains(&units_per_em) {
+            return Err(invalid_sfnt("head unitsPerEm outside 16..=16384"));
+        }
+        let hhea = font.hhea().map_err(map_read_error)?;
+        let maxp = font.maxp().map_err(map_read_error)?;
+        let num_glyphs = maxp.num_glyphs();
+        if num_glyphs == 0 {
+            return Err(invalid_sfnt("maxp numGlyphs is zero"));
+        }
+        let num_h_metrics = hhea.number_of_h_metrics();
+        if num_h_metrics == 0 || num_h_metrics > num_glyphs {
+            return Err(invalid_sfnt("hhea numberOfHMetrics out of range for maxp numGlyphs"));
+        }
+        let hmtx_data = font.table_data(Tag::new(b"hmtx")).ok_or(crate::TextError::MissingSfntTable { tag: *b"hmtx" })?;
+        if hmtx_data.len() < usize::from(num_h_metrics) * 4 {
+            return Err(invalid_sfnt("hmtx table shorter than numberOfHMetrics * 4"));
+        }
+        let _ = font.hmtx().map_err(map_read_error)?;
+        let cmap = font.cmap().map_err(map_read_error)?;
+        let cmap_subtables = CmapSubtables::parse(&cmap)?;
+        let has_glyf_outlines = font.table_data(Tag::new(b"loca")).is_some() && font.table_data(Tag::new(b"glyf")).is_some();
+
+        Ok(Self {
+            font,
+            units_per_em,
+            x_min: head.x_min(),
+            y_min: head.y_min(),
+            x_max: head.x_max(),
+            y_max: head.y_max(),
+            mac_style: head.mac_style(),
+            index_to_loc_format: head.index_to_loc_format(),
+            ascent: hhea.ascender().to_i16(),
+            descent: hhea.descender().to_i16(),
+            line_gap: hhea.line_gap().to_i16(),
+            num_glyphs,
+            cmap_subtables,
+            has_glyf_outlines,
+        })
+    }
+
+    pub(crate) const fn font_ref(&self) -> &FontRef<'a> {
+        &self.font
+    }
+
     #[must_use]
     pub const fn units_per_em(&self) -> u16 {
-        self.core.units_per_em
+        self.units_per_em
     }
 
     #[must_use]
     pub const fn ascent(&self) -> i16 {
-        self.core.ascent
+        self.ascent
     }
 
     #[must_use]
     pub const fn descent(&self) -> i16 {
-        self.core.descent
+        self.descent
     }
 
     #[must_use]
     pub const fn line_gap(&self) -> i16 {
-        self.core.line_gap
+        self.line_gap
     }
 
     #[must_use]
     pub const fn num_glyphs(&self) -> u16 {
-        self.core.num_glyphs
+        self.num_glyphs
     }
 
     #[must_use]
     pub const fn index_to_loc_format(&self) -> i16 {
-        self.core.index_to_loc_format
+        self.index_to_loc_format
     }
 
     #[must_use]
     pub const fn has_glyf_outlines(&self) -> bool {
-        self.loca.is_some() && self.glyf.is_some()
+        self.has_glyf_outlines
     }
 
     /// Map Unicode scalar value `ch` to a non-zero TrueType glyph index via `cmap`.
     #[must_use]
     pub fn glyph_id(&self, ch: char) -> Option<u16> {
-        let sub = self.cmap.get(self.core.cmap.primary_offset..)?;
-        let gid = match self.core.cmap.primary_format {
-            12 => lookup_cmap_format12(sub, u32::from(ch))?,
-            4 => {
-                let code = u16::try_from(u32::from(ch)).ok()?;
-                lookup_cmap_format4(sub, code)?
-            }
-            0 => {
-                let code = u8::try_from(u32::from(ch)).ok()?;
-                u16::from(*sub.get(6 + usize::from(code))?)
-            }
-            _ => return None,
-        };
-        (gid != 0 && gid < self.core.num_glyphs).then_some(gid)
+        let cmap = self.font.cmap().ok()?;
+        let rec = cmap.encoding_records().get(self.cmap_subtables.primary_idx)?;
+        let sub = rec.subtable(cmap.offset_data()).ok()?;
+        let gid = u16::try_from(sub.map_codepoint(u32::from(ch))?.to_u32()).ok()?;
+        (gid != 0 && gid < self.num_glyphs).then_some(gid)
     }
 
     /// Read raw advance width in font design units from `hmtx` for `glyph_id`.
     #[must_use]
     pub fn glyph_advance_units(&self, glyph_id: u16) -> Option<u16> {
-        if glyph_id >= self.core.num_glyphs {
+        if glyph_id >= self.num_glyphs {
             return None;
         }
-        let metric_idx = glyph_id.min(self.core.num_h_metrics.saturating_sub(1));
-        read_u16_be(self.hmtx, usize::from(metric_idx) * 4)
+        let hmtx = self.font.hmtx().ok()?;
+        hmtx.advance(GlyphId::from(glyph_id))
     }
 
     /// Compute normalized `em` advance width for Unicode `ch` when mapped in `cmap`.
@@ -666,36 +745,24 @@ impl<'a> TrueTypeFont<'a> {
     pub fn advance_em(&self, ch: char) -> Option<f64> {
         let gid = self.glyph_id(ch)?;
         let adv = self.glyph_advance_units(gid)?;
-        Some(f64::from(adv) / f64::from(self.core.units_per_em))
+        Some(f64::from(adv) / f64::from(self.units_per_em))
     }
 
     /// Return the raw `glyf` table slice for `glyph_id` (empty slice for empty glyphs like space).
     #[must_use]
     pub fn glyf_slice(&self, glyph_id: u16) -> Option<&'a [u8]> {
-        if glyph_id >= self.core.num_glyphs {
+        if glyph_id >= self.num_glyphs {
             return None;
         }
-        let _ = (self.head, self.hhea);
-        let loca = self.loca?;
-        let glyf = self.glyf?;
+        let loca = self.font.loca(Some(self.index_to_loc_format == 1)).ok()?;
+        let glyf = self.font.table_data(Tag::new(b"glyf"))?;
         let idx = usize::from(glyph_id);
-        let (start, end) = match self.core.index_to_loc_format {
-            0 => {
-                let s = usize::from(read_u16_be(loca, idx.checked_mul(2)?)?) * 2;
-                let e = usize::from(read_u16_be(loca, (idx + 1).checked_mul(2)?)?) * 2;
-                (s, e)
-            }
-            1 => {
-                let s = usize::try_from(read_u32_be(loca, idx.checked_mul(4)?)?).ok()?;
-                let e = usize::try_from(read_u32_be(loca, (idx + 1).checked_mul(4)?)?).ok()?;
-                (s, e)
-            }
-            _ => return None,
-        };
+        let start = usize::try_from(loca.get_raw(idx)?).ok()?;
+        let end = usize::try_from(loca.get_raw(idx + 1)?).ok()?;
         if end < start || end > glyf.len() {
             return None;
         }
-        glyf.get(start..end)
+        glyf.as_bytes().get(start..end)
     }
 
     /// Extract PDF-descriptor metadata, Windows-1252 widths, and Unicode `cmap` mappings from this
@@ -705,14 +772,15 @@ impl<'a> TrueTypeFont<'a> {
     /// Returns [`crate::TextError`] if optional `OS/2`, `post`, `name`, or `cmap` subtable payloads
     /// are malformed.
     pub fn inspect_info(&self) -> Result<TrueTypeFontInfo, crate::TextError> {
-        let os2_metrics = self.os2.map(parse_os2_table).transpose()?;
-        let post_metrics = self.post.map(parse_post_table).transpose()?;
-        let (parsed_family, parsed_ps) = self.name.map(parse_name_table).transpose()?.unwrap_or_default();
-        let cmap_basic = collect_cmap_mappings(self.cmap, self.core.cmap, self.core.num_glyphs)?;
+        let os2_metrics = self.font.table_data(Tag::new(b"OS/2")).map(parse_os2_table).transpose()?;
+        let post_metrics = self.font.table_data(Tag::new(b"post")).map(parse_post_table).transpose()?;
+        let (parsed_family, parsed_ps) = self.font.table_data(Tag::new(b"name")).map(parse_name_table).transpose()?.unwrap_or_default();
+        let cmap = self.font.cmap().map_err(map_read_error)?;
+        let cmap_basic = collect_cmap_mappings(&cmap, self.cmap_subtables, self.num_glyphs)?;
 
-        let units_per_em = self.core.units_per_em;
-        let raw_asc = if self.core.ascent != 0 { self.core.ascent } else { os2_metrics.map_or(800, |m| m.typo_ascender) };
-        let raw_desc = if self.core.descent != 0 { self.core.descent } else { os2_metrics.map_or(-200, |m| m.typo_descender) };
+        let units_per_em = self.units_per_em;
+        let raw_asc = if self.ascent != 0 { self.ascent } else { os2_metrics.map_or(800, |m| m.typo_ascender) };
+        let raw_desc = if self.descent != 0 { self.descent } else { os2_metrics.map_or(-200, |m| m.typo_descender) };
 
         let ascender_1000 = scale_font_units_1000(i32::from(raw_asc), units_per_em);
         let descender_1000 = scale_font_units_1000(i32::from(raw_desc), units_per_em);
@@ -721,7 +789,7 @@ impl<'a> TrueTypeFont<'a> {
             .filter(|&c| c > 0)
             .map_or_else(|| (ascender_1000 * 7 / 8).max(1), |c| scale_font_units_1000(i32::from(c), units_per_em));
 
-        let is_italic_flag = os2_metrics.is_some_and(|m| (m.fs_selection & 0x0001) != 0) || (self.core.mac_style & 0x0002) != 0;
+        let is_italic_flag = os2_metrics.is_some_and(|m| m.is_italic) || self.mac_style.contains(MacStyle::ITALIC);
         let italic_angle = post_metrics.map_or(if is_italic_flag { -12.0 } else { 0.0 }, |p| p.italic_angle);
 
         let is_fixed_pitch = post_metrics.is_some_and(|p| p.is_fixed_pitch);
@@ -737,14 +805,14 @@ impl<'a> TrueTypeFont<'a> {
             flags |= 64;
         }
 
-        let weight_class = os2_metrics.map_or(if (self.core.mac_style & 0x0001) != 0 { 700 } else { 400 }, |m| m.weight_class);
+        let weight_class = os2_metrics.map_or(if self.mac_style.contains(MacStyle::BOLD) { 700 } else { 400 }, |m| m.weight_class);
         let stem_v = (10 + (i32::from(weight_class) / 100) * 18).clamp(30, 300);
 
         let bbox_1000 = [
-            scale_font_units_1000(i32::from(self.core.x_min), units_per_em),
-            scale_font_units_1000(i32::from(self.core.y_min), units_per_em),
-            scale_font_units_1000(i32::from(self.core.x_max), units_per_em),
-            scale_font_units_1000(i32::from(self.core.y_max), units_per_em),
+            scale_font_units_1000(i32::from(self.x_min), units_per_em),
+            scale_font_units_1000(i32::from(self.y_min), units_per_em),
+            scale_font_units_1000(i32::from(self.x_max), units_per_em),
+            scale_font_units_1000(i32::from(self.y_max), units_per_em),
         ];
 
         let widths_1000 = build_win1252_widths(self, &cmap_basic)?;
@@ -824,241 +892,147 @@ pub(crate) struct SfntFaceMeta {
     pub(crate) is_variable: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct SfntDirectory {
-    head: Option<(usize, usize)>,
-    hhea: Option<(usize, usize)>,
-    maxp: Option<(usize, usize)>,
-    cmap: Option<(usize, usize)>,
-    hmtx: Option<(usize, usize)>,
-    loca: Option<(usize, usize)>,
-    glyf: Option<(usize, usize)>,
-    os2: Option<(usize, usize)>,
-    post: Option<(usize, usize)>,
-    name: Option<(usize, usize)>,
-    has_fvar: bool,
-}
-
-impl SfntDirectory {
-    fn parse_at(bytes: &[u8], sfnt_offset: usize) -> Result<Self, crate::TextError> {
-        let dir_base = sfnt_offset.checked_add(12).ok_or_else(|| invalid_sfnt("SFNT header offset overflow"))?;
-        let header = bytes.get(sfnt_offset..dir_base).ok_or_else(|| invalid_sfnt("SFNT header shorter than 12 bytes"))?;
-        let version = header.get(0..4).ok_or_else(|| invalid_sfnt("SFNT header truncated"))?;
-        if version != [0x00, 0x01, 0x00, 0x00] && version != b"true" && version != b"OTTO" {
-            return Err(invalid_sfnt("unrecognized SFNT version tag"));
-        }
-        let num_tables = read_u16_be(bytes, sfnt_offset + 4).ok_or_else(|| invalid_sfnt("missing numTables"))?;
-        if num_tables == 0 || num_tables > 128 {
-            return Err(invalid_sfnt("invalid SFNT numTables"));
-        }
-        let dir_end = usize::from(num_tables)
-            .checked_mul(16)
-            .and_then(|n| dir_base.checked_add(n))
-            .ok_or_else(|| invalid_sfnt("SFNT directory size overflow"))?;
-        if dir_end > bytes.len() {
-            return Err(invalid_sfnt("SFNT table directory truncated"));
-        }
-
-        let mut dir = Self::default();
-        for i in 0..usize::from(num_tables) {
-            let rec_off = dir_base + i * 16;
-            let tag = bytes.get(rec_off..rec_off + 4).ok_or_else(|| invalid_sfnt("SFNT directory record truncated"))?;
-            let offset = read_u32_be(bytes, rec_off + 8).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| invalid_sfnt("invalid table offset"))?;
-            let length =
-                read_u32_be(bytes, rec_off + 12).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| invalid_sfnt("invalid table length"))?;
-            let end = offset.checked_add(length).ok_or_else(|| invalid_sfnt("table range overflow"))?;
-            if end > bytes.len() {
-                return Err(invalid_sfnt("SFNT table extends past EOF"));
-            }
-            let range = (offset, end);
-            match tag {
-                b"head" => dir.head.get_or_insert(range),
-                b"hhea" => dir.hhea.get_or_insert(range),
-                b"maxp" => dir.maxp.get_or_insert(range),
-                b"cmap" => dir.cmap.get_or_insert(range),
-                b"hmtx" => dir.hmtx.get_or_insert(range),
-                b"loca" => dir.loca.get_or_insert(range),
-                b"glyf" => dir.glyf.get_or_insert(range),
-                b"OS/2" => dir.os2.get_or_insert(range),
-                b"post" => dir.post.get_or_insert(range),
-                b"name" => dir.name.get_or_insert(range),
-                b"fvar" => {
-                    dir.has_fvar = true;
-                    continue;
-                }
-                _ => continue,
-            };
-        }
-        Ok(dir)
+fn validate_sfnt_directory(font: &FontRef<'_>) -> Result<(), crate::TextError> {
+    let bytes_len = font.data().len();
+    let dir = font.table_directory();
+    let num_tables = dir.num_tables();
+    if num_tables == 0 || num_tables > 128 {
+        return Err(invalid_sfnt("invalid SFNT numTables"));
     }
+    let records = dir.table_records();
+    if records.len() != usize::from(num_tables) {
+        return Err(invalid_sfnt("SFNT table directory truncated"));
+    }
+    for rec in records {
+        let offset = usize::try_from(rec.offset()).map_err(|_| invalid_sfnt("invalid table offset"))?;
+        if offset == 0 {
+            return Err(invalid_sfnt("null SFNT table offset"));
+        }
+        let length = usize::try_from(rec.length()).map_err(|_| invalid_sfnt("invalid table length"))?;
+        let end = offset.checked_add(length).ok_or_else(|| invalid_sfnt("table range overflow"))?;
+        if end > bytes_len {
+            return Err(invalid_sfnt("SFNT table extends past EOF"));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
 struct CmapSubtables {
-    primary_offset: usize,
-    primary_format: u16,
+    primary_idx: usize,
     best_fmt4: Option<usize>,
     best_fmt12: Option<usize>,
     best_fmt0: Option<usize>,
 }
 
 impl CmapSubtables {
-    fn parse(cmap: &[u8]) -> Result<Self, crate::TextError> {
-        if cmap.len() < 4 {
-            return Err(invalid_sfnt("cmap table shorter than 4 bytes"));
-        }
-        let num_subtables = read_u16_be(cmap, 2).ok_or_else(|| invalid_sfnt("missing cmap numTables"))?;
-        if num_subtables == 0 {
+    fn parse(cmap: &Cmap<'_>) -> Result<Self, crate::TextError> {
+        let num_tables = cmap.num_tables();
+        if num_tables == 0 {
             return Err(crate::TextError::UnsupportedCmap { message: String::from("cmap has zero encoding records") });
         }
-        let records_end =
-            usize::from(num_subtables).checked_mul(8).and_then(|n| 4usize.checked_add(n)).ok_or_else(|| invalid_sfnt("cmap directory overflow"))?;
-        if records_end > cmap.len() {
+        let records = cmap.encoding_records();
+        if records.len() != usize::from(num_tables) {
             return Err(invalid_sfnt("cmap encoding records truncated"));
         }
 
-        let mut primary: Option<(i32, usize, u16)> = None;
+        let mut primary: Option<(i32, usize)> = None;
         let mut best_fmt4: Option<(i32, usize)> = None;
         let mut best_fmt12: Option<(i32, usize)> = None;
         let mut best_fmt0: Option<(i32, usize)> = None;
+        let data = cmap.offset_data();
 
-        for i in 0..usize::from(num_subtables) {
-            let rec_off = 4 + i * 8;
-            let platform = read_u16_be(cmap, rec_off).ok_or_else(|| invalid_sfnt("cmap platformID"))?;
-            let encoding = read_u16_be(cmap, rec_off + 2).ok_or_else(|| invalid_sfnt("cmap encodingID"))?;
-            let sub_off =
-                read_u32_be(cmap, rec_off + 4).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| invalid_sfnt("cmap subtable offset overflow"))?;
-            let fmt = read_u16_be(cmap, sub_off).ok_or_else(|| invalid_sfnt("cmap subtable offset out of bounds"))?;
-            if !matches!(fmt, 0 | 4 | 12) {
-                continue;
-            }
-            let rank = match (platform, encoding, fmt) {
-                (3, 10, 12) => 100,
-                (0, 4, 12) => 95,
-                (3, 1, 4) => 90,
-                (0, 3, 4) => 85,
-                (0, _, 4) => 80,
-                (0, _, 12) => 75,
-                (1, 0, 0) => 20,
-                _ => 10,
+        for (idx, rec) in records.iter().enumerate() {
+            let sub = match rec.subtable(data) {
+                Ok(sub) => sub,
+                Err(ReadError::InvalidFormat(_)) => continue,
+                Err(err) => return Err(map_read_error(err)),
             };
-            if primary.is_none_or(|(b_rank, _, _)| rank > b_rank) {
-                primary = Some((rank, sub_off, fmt));
+            let fmt = match &sub {
+                CmapSubtable::Format0(_) => 0u16,
+                CmapSubtable::Format4(sub4) => {
+                    validate_cmap4(sub4)?;
+                    4u16
+                }
+                CmapSubtable::Format12(sub12) => {
+                    validate_cmap12(sub12)?;
+                    12u16
+                }
+                _ => continue,
+            };
+            let rank = cmap_subtable_rank(rec.platform_id(), rec.encoding_id(), fmt);
+            if primary.is_none_or(|(b_rank, _)| rank > b_rank) {
+                primary = Some((rank, idx));
             }
             match fmt {
-                4 if best_fmt4.is_none_or(|(r, _)| rank > r) => best_fmt4 = Some((rank, sub_off)),
-                12 if best_fmt12.is_none_or(|(r, _)| rank > r) => best_fmt12 = Some((rank, sub_off)),
-                0 if best_fmt0.is_none_or(|(r, _)| rank > r) => best_fmt0 = Some((rank, sub_off)),
+                4 if best_fmt4.is_none_or(|(r, _)| rank > r) => best_fmt4 = Some((rank, idx)),
+                12 if best_fmt12.is_none_or(|(r, _)| rank > r) => best_fmt12 = Some((rank, idx)),
+                0 if best_fmt0.is_none_or(|(r, _)| rank > r) => best_fmt0 = Some((rank, idx)),
                 _ => {}
             }
         }
 
-        let Some((_, primary_offset, primary_format)) = primary else {
+        let Some((_, primary_idx)) = primary else {
             return Err(crate::TextError::UnsupportedCmap { message: String::from("no format 0, 4, or 12 cmap subtable found") });
         };
         Ok(Self {
-            primary_offset,
-            primary_format,
-            best_fmt4: best_fmt4.map(|(_, off)| off),
-            best_fmt12: best_fmt12.map(|(_, off)| off),
-            best_fmt0: best_fmt0.map(|(_, off)| off),
+            primary_idx,
+            best_fmt4: best_fmt4.map(|(_, idx)| idx),
+            best_fmt12: best_fmt12.map(|(_, idx)| idx),
+            best_fmt0: best_fmt0.map(|(_, idx)| idx),
         })
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SfntCore {
-    units_per_em: u16,
-    x_min: i16,
-    y_min: i16,
-    x_max: i16,
-    y_max: i16,
-    mac_style: u16,
-    index_to_loc_format: i16,
-    ascent: i16,
-    descent: i16,
-    line_gap: i16,
-    num_glyphs: u16,
-    num_h_metrics: u16,
-    cmap: CmapSubtables,
-}
-
-impl SfntCore {
-    fn parse(head: &[u8], hhea: &[u8], maxp: &[u8], cmap: &[u8], hmtx: &[u8]) -> Result<Self, crate::TextError> {
-        if head.len() < 54 {
-            return Err(invalid_sfnt("head table shorter than 54 bytes"));
-        }
-        let units_per_em = read_u16_be(head, 18).ok_or_else(|| invalid_sfnt("missing unitsPerEm"))?;
-        if !(16..=16384).contains(&units_per_em) {
-            return Err(invalid_sfnt("head unitsPerEm outside 16..=16384"));
-        }
-        let x_min = read_i16_be(head, 36).ok_or_else(|| invalid_sfnt("missing head xMin"))?;
-        let y_min = read_i16_be(head, 38).ok_or_else(|| invalid_sfnt("missing head yMin"))?;
-        let x_max = read_i16_be(head, 40).ok_or_else(|| invalid_sfnt("missing head xMax"))?;
-        let y_max = read_i16_be(head, 42).ok_or_else(|| invalid_sfnt("missing head yMax"))?;
-        let mac_style = read_u16_be(head, 44).ok_or_else(|| invalid_sfnt("missing head macStyle"))?;
-        let index_to_loc_format = read_i16_be(head, 50).ok_or_else(|| invalid_sfnt("missing head indexToLocFormat"))?;
-
-        if hhea.len() < 36 {
-            return Err(invalid_sfnt("hhea table shorter than 36 bytes"));
-        }
-        let ascent = read_i16_be(hhea, 4).ok_or_else(|| invalid_sfnt("missing hhea ascender"))?;
-        let descent = read_i16_be(hhea, 6).ok_or_else(|| invalid_sfnt("missing hhea descender"))?;
-        let line_gap = read_i16_be(hhea, 8).ok_or_else(|| invalid_sfnt("missing hhea lineGap"))?;
-        let num_h_metrics = read_u16_be(hhea, 34).ok_or_else(|| invalid_sfnt("missing hhea numberOfHMetrics"))?;
-
-        if maxp.len() < 6 {
-            return Err(invalid_sfnt("maxp table shorter than 6 bytes"));
-        }
-        let num_glyphs = read_u16_be(maxp, 4).ok_or_else(|| invalid_sfnt("missing maxp numGlyphs"))?;
-        if num_glyphs == 0 {
-            return Err(invalid_sfnt("maxp numGlyphs is zero"));
-        }
-        if num_h_metrics == 0 || num_h_metrics > num_glyphs {
-            return Err(invalid_sfnt("hhea numberOfHMetrics out of range for maxp numGlyphs"));
-        }
-        if hmtx.len() < usize::from(num_h_metrics) * 4 {
-            return Err(invalid_sfnt("hmtx table shorter than numberOfHMetrics * 4"));
-        }
-        let cmap = CmapSubtables::parse(cmap)?;
-
-        Ok(Self {
-            units_per_em,
-            x_min,
-            y_min,
-            x_max,
-            y_max,
-            mac_style,
-            index_to_loc_format,
-            ascent,
-            descent,
-            line_gap,
-            num_glyphs,
-            num_h_metrics,
-            cmap,
-        })
+const fn cmap_subtable_rank(platform: PlatformId, encoding: u16, fmt: u16) -> i32 {
+    match (platform, encoding, fmt) {
+        (PlatformId::Windows, 10, 12) => 100,
+        (PlatformId::Unicode, 4, 12) => 95,
+        (PlatformId::Windows, 1, 4) => 90,
+        (PlatformId::Unicode, 3, 4) => 85,
+        (PlatformId::Unicode, _, 4) => 80,
+        (PlatformId::Unicode, _, 12) => 75,
+        (PlatformId::Macintosh, 0, 0) => 20,
+        _ => 10,
     }
 }
 
-pub(crate) fn inspect_sfnt_face_meta_at(bytes: &[u8], sfnt_offset: usize, fallback_name: &str) -> SfntFaceMeta {
-    let Ok(dir) = SfntDirectory::parse_at(bytes, sfnt_offset) else {
-        return SfntFaceMeta::default();
-    };
-    let slice_of = |r: Option<(usize, usize)>| r.and_then(|(s, e)| bytes.get(s..e));
-    let head = slice_of(dir.head);
-    let os2 = slice_of(dir.os2).and_then(|t| parse_os2_table(t).ok());
-    let post = slice_of(dir.post).and_then(|t| parse_post_table(t).ok());
-    let parsed_names = slice_of(dir.name).and_then(|t| parse_name_table(t).ok());
-    let is_variable = dir.has_fvar;
+fn validate_cmap4(sub4: &Cmap4<'_>) -> Result<(), crate::TextError> {
+    let seg_count_x2 = sub4.seg_count_x2();
+    if seg_count_x2 < 2 || !seg_count_x2.is_multiple_of(2) {
+        return Err(invalid_sfnt("invalid cmap4 segCountX2"));
+    }
+    let seg_count = usize::from(seg_count_x2 / 2);
+    if sub4.end_code().len() != seg_count
+        || sub4.start_code().len() != seg_count
+        || sub4.id_delta().len() != seg_count
+        || sub4.id_range_offsets().len() != seg_count
+    {
+        return Err(invalid_sfnt("cmap format 4 segments truncated"));
+    }
+    Ok(())
+}
 
-    let mac_style = head.and_then(|h| read_u16_be(h, 44)).unwrap_or(0);
+fn validate_cmap12(sub12: &Cmap12<'_>) -> Result<(), crate::TextError> {
+    if usize::try_from(sub12.num_groups()).ok() != Some(sub12.groups().len()) {
+        return Err(invalid_sfnt("cmap format 12 groups truncated"));
+    }
+    Ok(())
+}
+
+pub(crate) fn inspect_sfnt_face_meta(font: &FontRef<'_>, fallback_name: &str) -> SfntFaceMeta {
+    let os2 = font.table_data(Tag::new(b"OS/2")).and_then(|d| parse_os2_table(d).ok());
+    let post = font.table_data(Tag::new(b"post")).and_then(|d| parse_post_table(d).ok());
+    let parsed_names = font.table_data(Tag::new(b"name")).and_then(|d| parse_name_table(d).ok());
+    let is_variable = font.table_data(Tag::new(b"fvar")).is_some();
+
+    let mac_style = font.head().map_or_else(|_| MacStyle::empty(), |h| h.mac_style());
     let family_name = parsed_names.map(|(fam, ps)| if !fam.is_empty() { fam } else { ps }).unwrap_or_default();
     let combined_label = format!("{} {}", family_name.to_ascii_lowercase(), fallback_name.to_ascii_lowercase());
 
-    let is_bold =
-        os2.is_some_and(|m| m.weight_class >= 600 || (m.fs_selection & 0x0020) != 0) || (mac_style & 0x0001) != 0 || combined_label.contains("bold");
-    let is_italic = os2.is_some_and(|m| (m.fs_selection & 0x0001) != 0)
-        || (mac_style & 0x0002) != 0
+    let is_bold = os2.is_some_and(|m| m.weight_class >= 600 || m.is_bold) || mac_style.contains(MacStyle::BOLD) || combined_label.contains("bold");
+    let is_italic = os2.is_some_and(|m| m.is_italic)
+        || mac_style.contains(MacStyle::ITALIC)
         || post.is_some_and(|p| p.italic_angle.abs() > 1e-6)
         || combined_label.contains("italic")
         || combined_label.contains("oblique");
@@ -1078,203 +1052,6 @@ pub(crate) fn inspect_sfnt_face_meta_at(bytes: &[u8], sfnt_offset: usize, fallba
             || combined_label.contains("cambria"));
 
     SfntFaceMeta { family_name, is_bold, is_italic, is_fixed_pitch, is_serif, is_variable }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CachedSfntLayout {
-    head: (usize, usize),
-    hhea: (usize, usize),
-    cmap: (usize, usize),
-    hmtx: (usize, usize),
-    loca: Option<(usize, usize)>,
-    glyf: Option<(usize, usize)>,
-    os2: Option<(usize, usize)>,
-    post: Option<(usize, usize)>,
-    name: Option<(usize, usize)>,
-    core: SfntCore,
-}
-
-impl CachedSfntLayout {
-    pub(crate) fn extract(bytes: &[u8], sfnt_offset: usize) -> Option<Self> {
-        Self::extract_checked(bytes, sfnt_offset).ok()
-    }
-
-    fn extract_checked(bytes: &[u8], sfnt_offset: usize) -> Result<Self, crate::TextError> {
-        let dir = SfntDirectory::parse_at(bytes, sfnt_offset)?;
-        let head_r = dir.head.ok_or(crate::TextError::MissingSfntTable { tag: *b"head" })?;
-        let hhea_r = dir.hhea.ok_or(crate::TextError::MissingSfntTable { tag: *b"hhea" })?;
-        let maxp_r = dir.maxp.ok_or(crate::TextError::MissingSfntTable { tag: *b"maxp" })?;
-        let hmtx_r = dir.hmtx.ok_or(crate::TextError::MissingSfntTable { tag: *b"hmtx" })?;
-        let cmap_r = dir.cmap.ok_or(crate::TextError::MissingSfntTable { tag: *b"cmap" })?;
-
-        let head = bytes.get(head_r.0..head_r.1).ok_or_else(|| invalid_sfnt("head table out of bounds"))?;
-        let hhea = bytes.get(hhea_r.0..hhea_r.1).ok_or_else(|| invalid_sfnt("hhea table out of bounds"))?;
-        let maxp = bytes.get(maxp_r.0..maxp_r.1).ok_or_else(|| invalid_sfnt("maxp table out of bounds"))?;
-        let cmap = bytes.get(cmap_r.0..cmap_r.1).ok_or_else(|| invalid_sfnt("cmap table out of bounds"))?;
-        let hmtx = bytes.get(hmtx_r.0..hmtx_r.1).ok_or_else(|| invalid_sfnt("hmtx table out of bounds"))?;
-        let core = SfntCore::parse(head, hhea, maxp, cmap, hmtx)?;
-
-        Ok(Self {
-            head: head_r,
-            hhea: hhea_r,
-            cmap: cmap_r,
-            hmtx: hmtx_r,
-            loca: dir.loca,
-            glyf: dir.glyf,
-            os2: dir.os2,
-            post: dir.post,
-            name: dir.name,
-            core,
-        })
-    }
-
-    pub(crate) fn font<'a>(&self, bytes: &'a [u8]) -> Option<TrueTypeFont<'a>> {
-        Some(TrueTypeFont {
-            head: bytes.get(self.head.0..self.head.1)?,
-            hhea: bytes.get(self.hhea.0..self.hhea.1)?,
-            cmap: bytes.get(self.cmap.0..self.cmap.1)?,
-            hmtx: bytes.get(self.hmtx.0..self.hmtx.1)?,
-            loca: self.loca.and_then(|(s, e)| bytes.get(s..e)),
-            glyf: self.glyf.and_then(|(s, e)| bytes.get(s..e)),
-            os2: self.os2.and_then(|(s, e)| bytes.get(s..e)),
-            post: self.post.and_then(|(s, e)| bytes.get(s..e)),
-            name: self.name.and_then(|(s, e)| bytes.get(s..e)),
-            core: self.core,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CmapFormat4Layout {
-    seg_count: usize,
-    end_off: usize,
-    start_off: usize,
-    delta_off: usize,
-    range_off: usize,
-}
-
-impl CmapFormat4Layout {
-    fn parse(sub: &[u8]) -> Result<Self, crate::TextError> {
-        if sub.len() < 16 {
-            return Err(invalid_sfnt("cmap format 4 subtable shorter than 16 bytes"));
-        }
-        let seg_count_x2 = read_u16_be(sub, 6).ok_or_else(|| invalid_sfnt("missing cmap4 segCountX2"))?;
-        if seg_count_x2 < 2 || !seg_count_x2.is_multiple_of(2) {
-            return Err(invalid_sfnt("invalid cmap4 segCountX2"));
-        }
-        let seg_count = usize::from(seg_count_x2 / 2);
-        let seg_bytes = seg_count.checked_mul(2).ok_or_else(|| invalid_sfnt("cmap4 size overflow"))?;
-        let end_off = 14usize;
-        let start_off = end_off.checked_add(seg_bytes).and_then(|n| n.checked_add(2)).ok_or_else(|| invalid_sfnt("cmap4 offset overflow"))?;
-        let delta_off = start_off.checked_add(seg_bytes).ok_or_else(|| invalid_sfnt("cmap4 delta overflow"))?;
-        let range_off = delta_off.checked_add(seg_bytes).ok_or_else(|| invalid_sfnt("cmap4 range overflow"))?;
-        let min_len = range_off.checked_add(seg_bytes).ok_or_else(|| invalid_sfnt("cmap4 size overflow"))?;
-        if min_len > sub.len() {
-            return Err(invalid_sfnt("cmap format 4 segments truncated"));
-        }
-        Ok(Self { seg_count, end_off, start_off, delta_off, range_off })
-    }
-}
-
-fn parse_cmap_format12_groups(sub: &[u8]) -> Result<usize, crate::TextError> {
-    if sub.len() < 16 {
-        return Err(invalid_sfnt("cmap format 12 subtable shorter than 16 bytes"));
-    }
-    let num_groups = read_u32_be(sub, 12).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| invalid_sfnt("cmap12 numGroups overflow"))?;
-    let table_end = num_groups.checked_mul(12).and_then(|n| 16usize.checked_add(n)).ok_or_else(|| invalid_sfnt("cmap12 size overflow"))?;
-    if table_end > sub.len() {
-        return Err(invalid_sfnt("cmap format 12 groups truncated"));
-    }
-    Ok(num_groups)
-}
-
-fn lookup_cmap_format4(sub: &[u8], code: u16) -> Option<u16> {
-    let layout = CmapFormat4Layout::parse(sub).ok()?;
-    let mut lo = 0usize;
-    let mut hi = layout.seg_count;
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let end_code = read_u16_be(sub, layout.end_off + mid * 2)?;
-        if end_code < code {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    if lo >= layout.seg_count {
-        return None;
-    }
-
-    let start_code = read_u16_be(sub, layout.start_off + lo * 2)?;
-    if code < start_code {
-        return None;
-    }
-    let id_delta = read_i16_be(sub, layout.delta_off + lo * 2)?;
-    let id_range_offset = read_u16_be(sub, layout.range_off + lo * 2)?;
-    if id_range_offset == 0 {
-        return Some(code.wrapping_add_signed(id_delta));
-    }
-
-    let slot_off = layout.range_off + lo * 2;
-    let glyph_addr = slot_off.checked_add(usize::from(id_range_offset))?.checked_add(usize::from(code - start_code) * 2)?;
-    let raw_gid = read_u16_be(sub, glyph_addr)?;
-    if raw_gid == 0 {
-        return Some(0);
-    }
-    Some(raw_gid.wrapping_add_signed(id_delta))
-}
-
-fn lookup_cmap_format12(sub: &[u8], code: u32) -> Option<u16> {
-    let num_groups = parse_cmap_format12_groups(sub).ok()?;
-    let mut lo = 0usize;
-    let mut hi = num_groups;
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let g_off = 16 + mid * 12;
-        let end_code = read_u32_be(sub, g_off + 4)?;
-        if end_code < code {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    if lo >= num_groups {
-        return None;
-    }
-
-    let g_off = 16 + lo * 12;
-    let start_code = read_u32_be(sub, g_off)?;
-    let end_code = read_u32_be(sub, g_off + 4)?;
-    let start_gid = read_u32_be(sub, g_off + 8)?;
-    if code < start_code || code > end_code {
-        return None;
-    }
-    let gid = start_gid.checked_add(code - start_code)?;
-    u16::try_from(gid).ok()
-}
-
-pub(crate) fn read_u16_be(bytes: &[u8], offset: usize) -> Option<u16> {
-    let end = offset.checked_add(2)?;
-    let arr: [u8; 2] = bytes.get(offset..end)?.try_into().ok()?;
-    Some(u16::from_be_bytes(arr))
-}
-
-pub(crate) fn read_i16_be(bytes: &[u8], offset: usize) -> Option<i16> {
-    let end = offset.checked_add(2)?;
-    let arr: [u8; 2] = bytes.get(offset..end)?.try_into().ok()?;
-    Some(i16::from_be_bytes(arr))
-}
-
-pub(crate) fn read_u32_be(bytes: &[u8], offset: usize) -> Option<u32> {
-    let end = offset.checked_add(4)?;
-    let arr: [u8; 4] = bytes.get(offset..end)?.try_into().ok()?;
-    Some(u32::from_be_bytes(arr))
-}
-
-pub(crate) fn read_i32_be(bytes: &[u8], offset: usize) -> Option<i32> {
-    let end = offset.checked_add(4)?;
-    let arr: [u8; 4] = bytes.get(offset..end)?.try_into().ok()?;
-    Some(i32::from_be_bytes(arr))
 }
 
 // ---------------------------------------------------------------------------
@@ -1458,31 +1235,39 @@ fn invalid_sfnt(message: impl Into<String>) -> crate::TextError {
     crate::TextError::InvalidSfnt { message: message.into() }
 }
 
+fn map_read_error(err: ReadError) -> crate::TextError {
+    match err {
+        ReadError::TableIsMissing(tag) => crate::TextError::MissingSfntTable { tag: tag.into_bytes() },
+        other => invalid_sfnt(other.to_string()),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Os2Metrics {
     weight_class: u16,
     family_class: i16,
-    fs_selection: u16,
+    is_bold: bool,
+    is_italic: bool,
     typo_ascender: i16,
     typo_descender: i16,
     cap_height: Option<i16>,
 }
 
-fn parse_os2_table(os2: &[u8]) -> Result<Os2Metrics, crate::TextError> {
-    if os2.len() < 78 {
-        return Err(invalid_sfnt("OS/2 table shorter than 78 bytes"));
-    }
-    let version = read_u16_be(os2, 0).ok_or_else(|| invalid_sfnt("missing OS/2 version"))?;
-    if version >= 2 && os2.len() < 96 {
+fn parse_os2_table(data: FontData<'_>) -> Result<Os2Metrics, crate::TextError> {
+    let os2 = Os2::read(data).map_err(map_read_error)?;
+    if os2.version() >= 2 && data.len() < 96 {
         return Err(invalid_sfnt("OS/2 v2+ table shorter than 96 bytes"));
     }
-    let weight_class = read_u16_be(os2, 4).ok_or_else(|| invalid_sfnt("missing OS/2 usWeightClass"))?;
-    let family_class = read_i16_be(os2, 30).ok_or_else(|| invalid_sfnt("missing OS/2 sFamilyClass"))?;
-    let fs_selection = read_u16_be(os2, 62).ok_or_else(|| invalid_sfnt("missing OS/2 fsSelection"))?;
-    let typo_ascender = read_i16_be(os2, 68).ok_or_else(|| invalid_sfnt("missing OS/2 sTypoAscender"))?;
-    let typo_descender = read_i16_be(os2, 70).ok_or_else(|| invalid_sfnt("missing OS/2 sTypoDescender"))?;
-    let cap_height = if version >= 2 { read_i16_be(os2, 88) } else { None };
-    Ok(Os2Metrics { weight_class, family_class, fs_selection, typo_ascender, typo_descender, cap_height })
+    let fs = os2.fs_selection();
+    Ok(Os2Metrics {
+        weight_class: os2.us_weight_class(),
+        family_class: os2.s_family_class(),
+        is_bold: fs.contains(SelectionFlags::BOLD),
+        is_italic: fs.contains(SelectionFlags::ITALIC),
+        typo_ascender: os2.s_typo_ascender(),
+        typo_descender: os2.s_typo_descender(),
+        cap_height: if os2.version() >= 2 { os2.s_cap_height() } else { None },
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1491,59 +1276,40 @@ struct PostMetrics {
     is_fixed_pitch: bool,
 }
 
-fn parse_post_table(post: &[u8]) -> Result<PostMetrics, crate::TextError> {
-    if post.len() < 32 {
-        return Err(invalid_sfnt("post table shorter than 32 bytes"));
-    }
-    let italic_fixed = read_i32_be(post, 4).ok_or_else(|| invalid_sfnt("missing post italicAngle"))?;
-    let is_fixed_pitch = read_u32_be(post, 12).ok_or_else(|| invalid_sfnt("missing post isFixedPitch"))? != 0;
-    Ok(PostMetrics { italic_angle: f64::from(italic_fixed) / 65536.0, is_fixed_pitch })
+fn parse_post_table(data: FontData<'_>) -> Result<PostMetrics, crate::TextError> {
+    let post = Post::read(data).map_err(map_read_error)?;
+    Ok(PostMetrics { italic_angle: f64::from(post.italic_angle().to_bits()) / 65536.0, is_fixed_pitch: post.is_fixed_pitch() != 0 })
 }
 
-fn parse_name_table(name: &[u8]) -> Result<(String, String), crate::TextError> {
-    if name.len() < 6 {
-        return Err(invalid_sfnt("name table shorter than 6 bytes"));
-    }
-    let format = read_u16_be(name, 0).ok_or_else(|| invalid_sfnt("missing name format"))?;
-    if format > 1 {
+fn parse_name_table(data: FontData<'_>) -> Result<(String, String), crate::TextError> {
+    let name = Name::read(data).map_err(map_read_error)?;
+    if name.version() > 1 {
         return Err(invalid_sfnt("unsupported name table format"));
     }
-    let count = read_u16_be(name, 2).ok_or_else(|| invalid_sfnt("missing name count"))?;
-    let str_base = usize::from(read_u16_be(name, 4).ok_or_else(|| invalid_sfnt("missing name stringOffset"))?);
-    if str_base > name.len() {
+    if usize::from(name.storage_offset()) > data.len() {
         return Err(invalid_sfnt("name stringOffset past end of table"));
     }
-    let recs_end = usize::from(count).checked_mul(12).and_then(|n| 6usize.checked_add(n)).ok_or_else(|| invalid_sfnt("name count overflow"))?;
-    if recs_end > name.len() {
+    let records = name.name_record();
+    if records.len() != usize::from(name.count()) {
         return Err(invalid_sfnt("name records truncated"));
     }
-
+    let string_data = name.string_data();
     let mut best_family: Option<(i32, String)> = None;
     let mut best_ps: Option<(i32, String)> = None;
 
-    for i in 0..usize::from(count) {
-        let off = 6 + i * 12;
-        let platform = read_u16_be(name, off).ok_or_else(|| invalid_sfnt("name record platformID"))?;
-        let encoding = read_u16_be(name, off + 2).ok_or_else(|| invalid_sfnt("name record encodingID"))?;
-        let lang = read_u16_be(name, off + 4).ok_or_else(|| invalid_sfnt("name record languageID"))?;
-        let name_id = read_u16_be(name, off + 6).ok_or_else(|| invalid_sfnt("name record nameID"))?;
-        let len = usize::from(read_u16_be(name, off + 8).ok_or_else(|| invalid_sfnt("name record length"))?);
-        let str_off = usize::from(read_u16_be(name, off + 10).ok_or_else(|| invalid_sfnt("name record offset"))?);
-
-        let start = str_base.checked_add(str_off).ok_or_else(|| invalid_sfnt("name string start overflow"))?;
-        let end = start.checked_add(len).ok_or_else(|| invalid_sfnt("name string end overflow"))?;
-        let slice = name.get(start..end).ok_or_else(|| invalid_sfnt("name string slice out of bounds"))?;
-
+    for rec in records {
+        let decoded = rec.string(string_data).map_err(map_read_error)?;
+        let name_id = rec.name_id().to_u16();
         if !matches!(name_id, 1 | 6 | 16) {
             continue;
         }
-        let decoded = decode_name_string(slice, platform, encoding);
-        let trimmed = decoded.trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_owned();
+        let cleaned: String = decoded.chars().filter(|&c| c != '\0' && (c >= ' ' || c.is_whitespace())).collect();
+        let trimmed = cleaned.trim().to_owned();
         if trimmed.is_empty() {
             continue;
         }
 
-        let base_rank = match (platform, lang) {
+        let base_rank = match (rec.platform_id(), rec.language_id()) {
             (3, 0x0409) => 100,
             (3, _) => 80,
             (0, _) => 70,
@@ -1566,30 +1332,29 @@ fn parse_name_table(name: &[u8]) -> Result<(String, String), crate::TextError> {
     Ok((best_family.map_or_else(String::new, |(_, s)| s), best_ps.map_or_else(String::new, |(_, s)| s)))
 }
 
-fn decode_name_string(bytes: &[u8], platform: u16, encoding: u16) -> String {
-    if platform == 0 || (platform == 3 && matches!(encoding, 0 | 1 | 10)) {
-        let (pairs, _) = bytes.as_chunks::<2>();
-        let iter = pairs.iter().map(|&pair| u16::from_be_bytes(pair));
-        return char::decode_utf16(iter).filter_map(Result::ok).collect();
-    }
-    bytes.iter().filter_map(|&b| (0x20..=0x7E).contains(&b).then_some(char::from(b))).collect()
-}
-
-fn collect_cmap_mappings(cmap: &[u8], subtables: CmapSubtables, num_glyphs: u16) -> Result<Vec<(u32, u16)>, crate::TextError> {
+fn collect_cmap_mappings(cmap: &Cmap<'_>, subtables: CmapSubtables, num_glyphs: u16) -> Result<Vec<(u32, u16)>, crate::TextError> {
     let mut merged = Vec::new();
-    if let Some(off) = subtables.best_fmt4 {
-        let sub = cmap.get(off..).ok_or_else(|| invalid_sfnt("cmap format 4 out of bounds"))?;
-        collect_cmap_format4(sub, num_glyphs, &mut merged)?;
+    let records = cmap.encoding_records();
+    let data = cmap.offset_data();
+
+    if let Some(idx) = subtables.best_fmt4
+        && let Some(rec) = records.get(idx)
+        && let CmapSubtable::Format4(sub4) = rec.subtable(data).map_err(map_read_error)?
+    {
+        collect_cmap_format4(&sub4, num_glyphs, &mut merged)?;
     }
-    if let Some(off) = subtables.best_fmt12 {
-        let sub = cmap.get(off..).ok_or_else(|| invalid_sfnt("cmap format 12 out of bounds"))?;
-        collect_cmap_format12(sub, num_glyphs, &mut merged)?;
+    if let Some(idx) = subtables.best_fmt12
+        && let Some(rec) = records.get(idx)
+        && let CmapSubtable::Format12(sub12) = rec.subtable(data).map_err(map_read_error)?
+    {
+        collect_cmap_format12(&sub12, num_glyphs, &mut merged)?;
     }
     if merged.is_empty()
-        && let Some(off) = subtables.best_fmt0
+        && let Some(idx) = subtables.best_fmt0
+        && let Some(rec) = records.get(idx)
+        && let CmapSubtable::Format0(sub0) = rec.subtable(data).map_err(map_read_error)?
     {
-        let sub = cmap.get(off..).ok_or_else(|| invalid_sfnt("cmap format 0 out of bounds"))?;
-        collect_cmap_format0(sub, num_glyphs, &mut merged)?;
+        collect_cmap_format0(&sub0, num_glyphs, &mut merged);
     }
 
     merged.sort_unstable_by_key(|&(cp, _)| cp);
@@ -1597,133 +1362,57 @@ fn collect_cmap_mappings(cmap: &[u8], subtables: CmapSubtables, num_glyphs: u16)
     Ok(merged)
 }
 
-const MAX_CMAP4_INDIRECT_STEPS: usize = MAX_CMAP_COLLECT * 4;
-
-fn collect_cmap_format4(sub: &[u8], num_glyphs: u16, out: &mut Vec<(u32, u16)>) -> Result<(), crate::TextError> {
-    let layout = CmapFormat4Layout::parse(sub)?;
-
-    let mut indirect_steps = 0usize;
-    for i in 0..layout.seg_count {
-        let end_code = read_u16_be(sub, layout.end_off + i * 2).ok_or_else(|| invalid_sfnt("cmap4 endCode"))?;
-        let start_code = read_u16_be(sub, layout.start_off + i * 2).ok_or_else(|| invalid_sfnt("cmap4 startCode"))?;
-        let id_delta = read_i16_be(sub, layout.delta_off + i * 2).ok_or_else(|| invalid_sfnt("cmap4 idDelta"))?;
-        let id_range_offset = read_u16_be(sub, layout.range_off + i * 2).ok_or_else(|| invalid_sfnt("cmap4 idRangeOffset"))?;
-
-        if start_code > end_code {
+fn collect_cmap_format4(sub4: &Cmap4<'_>, num_glyphs: u16, out: &mut Vec<(u32, u16)>) -> Result<(), crate::TextError> {
+    for (start_be, end_be) in sub4.start_code().iter().zip(sub4.end_code().iter()) {
+        if start_be.get() > end_be.get() {
             return Err(invalid_sfnt("cmap4 segment has startCode > endCode"));
         }
-        if start_code == 0xFFFF && end_code == 0xFFFF {
-            continue;
-        }
+    }
+    for (cp, gid) in sub4.iter() {
         if out.len() >= MAX_CMAP_COLLECT {
             return Ok(());
         }
-        let seg_lo = start_code;
-        let seg_hi = end_code.min(0xFFFE);
-        if seg_lo > seg_hi {
+        if cp == 0xFFFF {
             continue;
         }
-
-        if id_range_offset == 0 {
-            if num_glyphs <= 1 {
-                continue;
-            }
-            let max_gid = num_glyphs - 1;
-            let delta_u = u16::from_be_bytes(id_delta.to_be_bytes());
-            let c_lo = 1u16.wrapping_sub(delta_u);
-            let c_hi = max_gid.wrapping_sub(delta_u);
-            let ranges = if c_lo <= c_hi { [(c_lo, c_hi), (1, 0)] } else { [(0, c_hi), (c_lo, 0xFFFE)] };
-            for (r_lo, r_hi) in ranges {
-                if r_lo > r_hi {
-                    continue;
-                }
-                let lo = seg_lo.max(r_lo);
-                let hi = seg_hi.min(r_hi);
-                if lo > hi {
-                    continue;
-                }
-                for code in lo..=hi {
-                    if out.len() >= MAX_CMAP_COLLECT {
-                        return Ok(());
-                    }
-                    let gid = code.wrapping_add_signed(id_delta);
-                    out.push((u32::from(code), gid));
-                }
-            }
-        } else {
-            let slot_off = layout.range_off + i * 2;
-            let first_addr = slot_off.checked_add(usize::from(id_range_offset)).ok_or_else(|| invalid_sfnt("cmap4 glyphIdArray offset overflow"))?;
-            let last_addr =
-                first_addr.checked_add(usize::from(seg_hi - seg_lo) * 2).ok_or_else(|| invalid_sfnt("cmap4 glyphIdArray offset overflow"))?;
-            if read_u16_be(sub, last_addr).is_none() {
-                return Err(invalid_sfnt("cmap4 glyphIdArray out of bounds"));
-            }
-            if num_glyphs <= 1 {
-                continue;
-            }
-            for code in seg_lo..=seg_hi {
-                if out.len() >= MAX_CMAP_COLLECT || indirect_steps >= MAX_CMAP4_INDIRECT_STEPS {
-                    return Ok(());
-                }
-                indirect_steps += 1;
-                let glyph_addr = first_addr + usize::from(code - seg_lo) * 2;
-                let raw = read_u16_be(sub, glyph_addr).ok_or_else(|| invalid_sfnt("cmap4 glyphIdArray out of bounds"))?;
-                let gid = if raw == 0 { 0 } else { raw.wrapping_add_signed(id_delta) };
-                if gid != 0 && gid < num_glyphs {
-                    out.push((u32::from(code), gid));
-                }
-            }
+        if let Ok(gid_u16) = u16::try_from(gid.to_u32())
+            && gid_u16 != 0
+            && gid_u16 < num_glyphs
+        {
+            out.push((cp, gid_u16));
         }
     }
     Ok(())
 }
 
-fn collect_cmap_format12(sub: &[u8], num_glyphs: u16, out: &mut Vec<(u32, u16)>) -> Result<(), crate::TextError> {
-    let num_groups = parse_cmap_format12_groups(sub)?;
-
-    for i in 0..num_groups {
-        let g_off = 16 + i * 12;
-        let start_code = read_u32_be(sub, g_off).ok_or_else(|| invalid_sfnt("cmap12 startCharCode"))?;
-        let end_code = read_u32_be(sub, g_off + 4).ok_or_else(|| invalid_sfnt("cmap12 endCharCode"))?;
-        let start_gid = read_u32_be(sub, g_off + 8).ok_or_else(|| invalid_sfnt("cmap12 startGlyphID"))?;
-        if start_code > end_code {
+fn collect_cmap_format12(sub12: &Cmap12<'_>, num_glyphs: u16, out: &mut Vec<(u32, u16)>) -> Result<(), crate::TextError> {
+    for group in sub12.groups() {
+        if group.start_char_code() > group.end_char_code() {
             return Err(invalid_sfnt("cmap12 group has startCharCode > endCharCode"));
         }
-        let span = end_code - start_code;
-        for delta in 0..=span {
-            if out.len() >= MAX_CMAP_COLLECT {
-                return Ok(());
-            }
-            let Some(gid_u32) = start_gid.checked_add(delta) else {
-                break;
-            };
-            if gid_u32 >= u32::from(num_glyphs) {
-                break;
-            }
-            if gid_u32 != 0
-                && let Ok(gid) = u16::try_from(gid_u32)
-            {
-                out.push((start_code + delta, gid));
-            }
+    }
+    let limits = CmapIterLimits { max_char: u32::from(char::MAX), glyph_count: u32::from(num_glyphs) };
+    for (cp, gid) in sub12.iter_with_limits(limits) {
+        if out.len() >= MAX_CMAP_COLLECT {
+            return Ok(());
+        }
+        if let Ok(gid_u16) = u16::try_from(gid.to_u32())
+            && gid_u16 != 0
+            && gid_u16 < num_glyphs
+        {
+            out.push((cp, gid_u16));
         }
     }
     Ok(())
 }
 
-fn collect_cmap_format0(sub: &[u8], num_glyphs: u16, out: &mut Vec<(u32, u16)>) -> Result<(), crate::TextError> {
-    if sub.len() < 262 {
-        return Err(invalid_sfnt("cmap format 0 subtable shorter than 262 bytes"));
-    }
-    for code in 0usize..256 {
-        let Some(&gid_byte) = sub.get(6 + code) else {
-            return Err(invalid_sfnt("cmap format 0 truncated"));
-        };
+fn collect_cmap_format0(sub0: &Cmap0<'_>, num_glyphs: u16, out: &mut Vec<(u32, u16)>) {
+    for (code, &gid_byte) in sub0.glyph_id_array().iter().enumerate() {
         let gid = u16::from(gid_byte);
         if gid != 0 && gid < num_glyphs {
             out.push((code as u32, gid));
         }
     }
-    Ok(())
 }
 
 fn build_win1252_widths(font: &TrueTypeFont<'_>, cmap: &[(u32, u16)]) -> Result<Vec<u16>, crate::TextError> {

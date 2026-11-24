@@ -172,7 +172,12 @@ fn render_axes_titles_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &m
         ui.set_max_width(gctx.body_w);
         let title_lbl = tr(gctx.locale, "axes.title_label");
         ui.label(title_lbl);
-        let title_edit = ui.add(egui::TextEdit::singleline(&mut state.format_axes_title_draft).desired_width((gctx.body_w - 120.0).max(120.0)));
+        let title_id = egui::Id::unique("axes.title.input");
+        if !ui.ctx().memory(|m| m.has_focus(title_id)) && state.format_axes_title_draft != fa.axis_draft.title {
+            state.format_axes_title_draft = fa.axis_draft.title.clone();
+        }
+        let title_edit =
+            ui.add(egui::TextEdit::singleline(&mut state.format_axes_title_draft).id(title_id).desired_width((gctx.body_w - 120.0).max(120.0)));
         record_input(ui, &title_edit, gctx.meta, "axes.title", title_lbl, &state.format_axes_title_draft, true);
         if title_edit.lost_focus() || title_edit.changed() {
             let mut next = fa.clone();

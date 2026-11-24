@@ -6,18 +6,15 @@ mod assets;
 mod brands;
 mod bundle;
 mod ci;
-mod ci_cache;
 mod ci_quick;
 mod citations;
 mod cleanroom;
-#[cfg(feature = "full-gates")]
 mod commands;
 mod contributors;
 mod corpus;
 mod coverage;
-mod cursors;
 mod design_tokens;
-#[cfg(feature = "full-gates")]
+#[cfg(feature = "docs-site")]
 mod docs_site;
 mod ico;
 mod layers;
@@ -38,10 +35,12 @@ mod ui_commands;
 mod version;
 mod web_fonts;
 mod workflows;
+mod zip_read;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::time::Duration;
 
 const HELP: &str = "\
 usage: cargo xtask <command> [args...]
@@ -49,9 +48,6 @@ usage: cargo xtask <command> [args...]
 commands:
   ci [stage]            run default gates or build/policy/lint/tests/doctests/features/performance/wasm
   ci quick [--base <ref>] policy gates + clippy/tests for packages changed since main and their dependents
-  ci-cache <trim|restore-mtimes>
-                        trim Cargo target cache to active build units or restore unchanged file mtimes
-  r10-gate              run R10 parity, Unicode, screenshot baseline, web parity & latency gates
   test [args...]        run workspace test suite (uses cargo-nextest when installed, else cargo test)
   layers                verify L0..L7 dependency rules, UI-crate isolation, and source hygiene
   secrets [--history]   scan repo (or git history additions) for API tokens, private keys, and local paths
@@ -65,7 +61,6 @@ commands:
   brands                verify user-facing strings and packaging contain no competitor trademarks
   cleanroom             verify no vendor copyright headers or vendor-created fixtures exist
   citations             verify D1 literature citations across math, stats, fit, and transform
-  cursors               verify Cursor variants match crates/tools/src/cursors.toml
   design-tokens [--verbose]
                         verify raw UI colours and sizes in crates/ui-egui/src stay within ratcheted ceilings
   i18n-report           report untranslated locale keys in curvebook-ui-egui
@@ -73,7 +68,7 @@ commands:
   commands [--check]    regenerate (or verify) docs/commands.md from curvebook-engine
   schemas [--check]     regenerate (or verify) docs/schemas/*.schema.json from curvebook-format
   docs-site [--check] [--output <dir>] [--release <ver>]
-                        build (or verify) the static GitHub Pages documentation site
+                        build (or verify) the static GitHub Pages documentation site (requires `--features docs-site`)
   pages-stage <dir> | --list | --check
                         copy only the published Pages site files into <dir> (or list / verify them)
   wasm                  check + clippy (-D warnings) wasm32 targets, trunk web-release build, and web bundle readiness
@@ -113,8 +108,6 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "ci" => ci::run(&root, rest),
-        "ci-cache" => ci_cache::run(&root, rest),
-        "r10-gate" => cmd_r10_gate(&root),
         "test" => cmd_test(&root, rest),
         "layers" => cmd_layers(&root),
         "secrets" => secrets::run_cli(&root, rest),
@@ -128,11 +121,10 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "brands" => brands::run(&root),
         "cleanroom" => cleanroom::run(&root),
         "citations" => citations::run(&root, rest),
-        "cursors" => cursors::run(&root),
         "design-tokens" => design_tokens::run(&root, rest),
         "i18n-report" => cmd_i18n_report(&root),
         "ui-commands" => ui_commands::run(&root, rest.iter().any(|a| a == "--check")),
-        "commands" => cmd_commands(&root, rest),
+        "commands" => commands::run_cli(&root, rest),
         "schemas" => schemas::run_cli(&root, rest),
         "docs-site" => cmd_docs_site(&root, rest),
         "pages-stage" => pages_site::run(&root, rest),
@@ -152,24 +144,50 @@ fn dispatch(args: &[String]) -> Result<(), String> {
     }
 }
 
-#[cfg(feature = "full-gates")]
-fn cmd_commands(root: &Path, rest: &[String]) -> Result<(), String> {
-    commands::run_cli(root, rest)
-}
-
-#[cfg(not(feature = "full-gates"))]
-fn cmd_commands(_root: &Path, _rest: &[String]) -> Result<(), String> {
-    Err(String::from("`commands` requires the default `full-gates` Cargo feature (rebuild without `--no-default-features`)"))
-}
-
-#[cfg(feature = "full-gates")]
+#[cfg(feature = "docs-site")]
 fn cmd_docs_site(root: &Path, rest: &[String]) -> Result<(), String> {
     docs_site::run_cli(root, rest)
 }
 
-#[cfg(not(feature = "full-gates"))]
+#[cfg(not(feature = "docs-site"))]
 fn cmd_docs_site(_root: &Path, _rest: &[String]) -> Result<(), String> {
-    Err(String::from("`docs-site` requires the default `full-gates` Cargo feature (rebuild without `--no-default-features`)"))
+    Err(String::from("`docs-site` requires `--features docs-site` (for example `cargo run -p xtask --features docs-site -- docs-site`)"))
+}
+
+pub(crate) fn resolve_target_dir_from_env(root: &Path) -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(raw) if !raw.is_empty() => {
+            let path = PathBuf::from(raw);
+            if path.is_absolute() { path } else { root.join(path) }
+        }
+        _ => root.join("target"),
+    }
+}
+
+pub(crate) fn run_workspace_example(root: &Path, package: &str, example: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    let target_dir = resolve_target_dir_from_env(root).join("xtask-examples");
+    let target_str = target_dir.to_str().ok_or_else(|| format!("non-UTF-8 target dir {}", target_dir.display()))?;
+    let mut cmd_args = vec!["run", "--locked", "-p", package, "--example", example];
+    if !args.is_empty() {
+        cmd_args.push("--");
+        cmd_args.extend_from_slice(args);
+    }
+    let out = dev_tool_command("cargo")
+        .current_dir(root)
+        .env("CARGO_TARGET_DIR", target_str)
+        .args(cmd_args)
+        .wall_timeout(Duration::from_secs(900))
+        .idle_timeout(Duration::from_secs(600))
+        .run()
+        .map_err(|e| format!("cargo run -p {package} --example {example}: {e}"))?;
+    if !out.success {
+        return Err(format!(
+            "`cargo run --locked -p {package} --example {example}` failed ({:?}):\n{}",
+            out.status_code,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(out.stdout)
 }
 
 pub(crate) fn workspace_root() -> Result<PathBuf, String> {
@@ -343,7 +361,7 @@ fn run_trunk_web_release_if_available(root: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let target_dir = ci_cache::resolve_target_dir_from_env(root);
+    let target_dir = resolve_target_dir_from_env(root);
     let dist_dir = target_dir.join("wasm-trunk-dist");
     std::fs::create_dir_all(&dist_dir).map_err(|e| format!("mkdir {}: {e}", dist_dir.display()))?;
     let dist_arg = dist_dir.to_string_lossy().into_owned();
@@ -372,15 +390,6 @@ fn run_trunk_web_release_if_available(root: &Path) -> Result<(), String> {
 
 fn has_trunk() -> bool {
     Command::new("trunk").arg("--version").output().is_ok_and(|o| o.status.success())
-}
-
-fn cmd_r10_gate(root: &Path) -> Result<(), String> {
-    run_cargo_strs(root, &["test", "-p", "curvebook-ui-egui", "--test", "r10_core_and_spike"])?;
-    run_cargo_strs(root, &["test", "-p", "curvebook-ui-egui", "--test", "r10_phase7_gates"])?;
-    run_cargo_strs(root, &["test", "-p", "curvebook-web", "--test", "r10_7_web_shared_layout"])?;
-    screenshots::run(root, &[String::from("--check")])?;
-    web_fonts::check_web_bundle_readiness(root)?;
-    Ok(())
 }
 
 fn run_cargo_strs(root: &Path, args: &[&str]) -> Result<(), String> {

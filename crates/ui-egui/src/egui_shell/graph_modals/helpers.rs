@@ -132,6 +132,27 @@ pub(super) fn record_checkbox(ui: &mut Ui, resp: &Response, meta: &mut FrameInsp
     crate::egui_shell::ui_kit::record_modal_checkbox(ui, resp, meta, widget_id, label, checked);
 }
 
+pub(super) struct CheckboxMeta<'a> {
+    pub(super) widget_id: &'a str,
+    pub(super) label: &'a str,
+    pub(super) checked: bool,
+    pub(super) enabled: bool,
+    pub(super) disabled_reason: Option<&'a str>,
+}
+
+pub(super) fn record_checkbox_enabled(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, entry: CheckboxMeta<'_>) {
+    crate::egui_shell::ui_kit::record_modal_checkbox_enabled(
+        ui,
+        resp,
+        meta,
+        entry.widget_id,
+        entry.label,
+        entry.checked,
+        entry.enabled,
+        entry.disabled_reason,
+    );
+}
+
 pub(super) fn record_input(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id: &str, label: &str, text: &str, enabled: bool) {
     crate::egui_shell::ui_kit::record_modal_input(ui, resp, meta, widget_id, label, text, enabled);
 }

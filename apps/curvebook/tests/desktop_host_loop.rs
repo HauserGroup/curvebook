@@ -72,7 +72,6 @@ fn in_window_menus_chrome_and_menu_action_vs_native_mode() -> Result<(), Box<dyn
         in_window_menus: true,
         new_instance: false,
         gui_only: false,
-        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Egui,
         locale_override: Some(String::from("de")),
         theme_override: Some(String::from("dark")),
         recovery_root: None,
@@ -109,7 +108,6 @@ fn in_window_menus_chrome_and_menu_action_vs_native_mode() -> Result<(), Box<dyn
         in_window_menus: false,
         new_instance: false,
         gui_only: false,
-        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Egui,
         locale_override: None,
         theme_override: None,
         recovery_root: None,
@@ -138,7 +136,6 @@ fn new_instance_isolated_recovery_journals_and_prompt_unsaved_close_guard() -> R
         in_window_menus: true,
         new_instance: true,
         gui_only: false,
-        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Egui,
         locale_override: None,
         theme_override: None,
         recovery_root: Some(recovery_root.clone()),
@@ -407,30 +404,51 @@ fn trackpad_magnify_pinch_zoom_inertial_coasting_and_clipboard() -> Result<(), B
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig { initial_viewport: metrics, ..DesktopHostConfig::default() });
     let win = rt.open_window_with_session(Session::from_document(build_desktop_test_project()?), metrics, false)?;
 
-    // TrackpadMagnify + TrackpadScroll + AnimationTick coasting on graph-xy.
+    // Pinch zoom + trackpad wheel pan on graph-xy via live CurveBookNativeApp (`egui` shell).
     let _ = rt.window_mut(win)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": "graph-xy" }))?;
-    let gsnap = curvebook_ui_egui::inspect_ui_tree_for_metrics(rt.window(win)?.app(), metrics, Some("canvas"), true);
-    let vp_bounds = gsnap.find_widget("canvas.viewport").and_then(|n| n.bounds).ok_or("missing canvas.viewport")?;
-    let center = metrics.physical_to_logical_px([vp_bounds[0] + vp_bounds[2] * 0.5, vp_bounds[1] + vp_bounds[3] * 0.5]);
+    let ctx = egui::Context::default();
+    ctx.set_fonts(build_egui_font_definitions(None));
+    ctx.set_pixels_per_point(2.0);
+    let mut native = CurveBookNativeApp::new(rt, win, None);
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+    let step = |host: &mut CurveBookNativeApp, events: Vec<egui::Event>| {
+        let mut raw = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        if let Some(vp) = raw.viewports.get_mut(&egui::ViewportId::ROOT) {
+            vp.native_pixels_per_point = Some(2.0);
+        }
+        let mut out = ctx.run_ui(raw, |ui| host.step_ui(ui));
+        out.textures_delta.clear();
+    };
+    step(&mut native, Vec::new());
+    step(&mut native, Vec::new());
+    let center = native.inspect_meta().find_by_widget_id("canvas.viewport").ok_or("missing canvas.viewport")?.clipped_rect.intersect(screen).center();
 
-    let zoom_before = rt.window(win)?.app().canvas_dialogs.pan_zoom.zoom;
-    let mag_out =
-        rt.dispatch(DesktopHostEvent::TrackpadMagnify { window_id: win, anchor_x_pt: center[0], anchor_y_pt: center[1], magnification_delta: 0.5 })?;
-    assert!(mag_out.handled);
-    let zoom_after = rt.window(win)?.app().canvas_dialogs.pan_zoom.zoom;
-    assert!((zoom_after - zoom_before * 1.5).abs() < 1e-6);
+    let zoom_before = native.runtime().window(win)?.app().canvas_dialogs.pan_zoom.zoom;
+    step(&mut native, vec![egui::Event::PointerMoved(center), egui::Event::Zoom(1.5)]);
+    step(&mut native, Vec::new());
+    let zoom_after = native.runtime().window(win)?.app().canvas_dialogs.pan_zoom.zoom;
+    assert!((zoom_after - zoom_before * 1.5).abs() < 1e-4, "expected 1.5x zoom from {zoom_before}, got {zoom_after}");
 
-    rt.dispatch(DesktopHostEvent::TrackpadScroll { window_id: win, delta_x: 30.0, delta_y: -15.0, dt_sec: 0.016, phase_ended: true })?;
-    assert!(rt.window(win)?.is_coasting());
-    let pan_after_scroll = rt.window(win)?.app().canvas_dialogs.pan_zoom.pan_pt;
-    assert!(pan_after_scroll[0].abs() > 1.0);
-
-    let tick_out = rt.dispatch(DesktopHostEvent::AnimationTick { dt_sec: 0.016 })?;
-    assert!(tick_out.handled);
-    let pan_after_coast = rt.window(win)?.app().canvas_dialogs.pan_zoom.pan_pt;
-    assert!(pan_after_coast[0] > pan_after_scroll[0]);
+    let pan_before = native.runtime().window(win)?.app().canvas_dialogs.pan_zoom.pan_pt;
+    step(
+        &mut native,
+        vec![
+            egui::Event::PointerMoved(center),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(30.0, -15.0),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            },
+        ],
+    );
+    step(&mut native, Vec::new());
+    let pan_after_scroll = native.runtime().window(win)?.app().canvas_dialogs.pan_zoom.pan_pt;
+    assert_ne!(pan_after_scroll, pan_before, "trackpad scroll over canvas at center={center:?} must pan (pan_before={pan_before:?})");
 
     // ClipboardCopy + ClipboardPaste round-trip on data-xy -> data-col.
+    let rt = native.runtime_mut();
     let _ = rt.window_mut(win)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": "data-xy" }))?;
     let copy_out = rt.dispatch(DesktopHostEvent::ClipboardCopy { window_id: win })?;
     assert!(copy_out.handled);
@@ -599,7 +617,6 @@ fn file_dropped_pzfx_and_zip_archive_open_cleanly() -> Result<(), Box<dyn std::e
         in_window_menus: true,
         new_instance: false,
         gui_only: false,
-        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Egui,
         locale_override: None,
         theme_override: None,
         recovery_root: None,

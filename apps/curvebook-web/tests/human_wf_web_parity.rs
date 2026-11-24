@@ -239,23 +239,6 @@ fn web_fontless_cjk_rtl_filter_preserves_ascii_and_geometry_invariants() -> Test
     Ok(())
 }
 
-fn encode_base64_web(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b0 = usize::from(*chunk.first().unwrap_or(&0));
-        let b1 = usize::from(*chunk.get(1).unwrap_or(&0));
-        let b2 = usize::from(*chunk.get(2).unwrap_or(&0));
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        let encode = |shift: usize| char::from(TABLE.get((triple >> shift) & 0x3F).copied().unwrap_or(b'A'));
-        out.push(encode(18));
-        out.push(encode(12));
-        out.push(if chunk.len() > 1 { encode(6) } else { '=' });
-        out.push(if chunk.len() > 2 { encode(0) } else { '=' });
-    }
-    out
-}
-
 fn exec_web(session: &mut WebBridgeSession, command_id: &str, params: curvebook_ui_egui::serde_json::Value) -> TestRes {
     session
         .handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from(command_id), params })
@@ -331,7 +314,7 @@ fn web_container_wf51_to_wf58_direct_exec_and_result_parity() -> TestRes {
     exec_web(
         &mut session,
         "layout.insertImage",
-        json!({ "sheet_id": "lay-w57", "bytes_base64": encode_base64_web(&png_bytes), "bounds_pt": [260.0, 24.0, 96.0, 72.0] }),
+        json!({ "sheet_id": "lay-w57", "bytes_base64": curvebook_platform::base64::encode(&png_bytes), "bounds_pt": [260.0, 24.0, 96.0, 72.0] }),
     )?;
     if !session.host.app().document().layout_sheets.iter().any(|l| l.id.as_str() == "lay-w57" && l.spec.items.len() >= 2) {
         return Err(String::from("WF-57 expected graph panel + embedded image items in lay-w57"));

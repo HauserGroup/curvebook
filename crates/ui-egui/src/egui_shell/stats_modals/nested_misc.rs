@@ -58,7 +58,7 @@ pub(super) fn render_contingency_design(
             if let AnalysisKind::Contingency(cg) = &mut next.kind {
                 cg.method = m;
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     }
     if render_modal_checkbox(
@@ -74,7 +74,7 @@ pub(super) fn render_contingency_design(
         if let AnalysisKind::Contingency(cg) = &mut next.kind {
             cg.compute_odds_and_risk_ratios = !c.compute_odds_and_risk_ratios;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(
         ui,
@@ -89,7 +89,7 @@ pub(super) fn render_contingency_design(
         if let AnalysisKind::Contingency(cg) = &mut next.kind {
             cg.compute_sensitivity_specificity = !c.compute_sensitivity_specificity;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(
         ui,
@@ -111,38 +111,38 @@ pub(super) fn render_contingency_design(
     let arr_ci_en = r6_contingency_ci_selector(rows, cols, ep.contingency_attributable_risk_checked, "Newcombe-Wilson");
     let diag_ci_en = r6_contingency_ci_selector(rows, cols, c.compute_sensitivity_specificity, "Wilson-Brown");
     ui.horizontal_wrapped(|ui| {
-        for (wid, lbl, active, en, payload) in [
+        for (wid, lbl, active, en, target) in [
             (
                 "edit.contingency.ci.baptista_pike",
                 format!("OR CI: {}", ep.contingency_or_ci_method),
                 ep.contingency_or_ci_method == "Baptista-Pike",
                 or_ci_en,
-                "cycle_contingency_ci:or",
+                crate::egui_shell::ContingencyCiTarget::OddsRatio,
             ),
             (
                 "edit.contingency.ci.koopman",
                 format!("RR CI: {}", ep.contingency_rr_ci_method),
                 ep.contingency_rr_ci_method == "Koopman",
                 rr_ci_en,
-                "cycle_contingency_ci:rr",
+                crate::egui_shell::ContingencyCiTarget::RelativeRisk,
             ),
             (
                 "edit.contingency.ci.newcombe_wilson",
                 format!("ARR CI: {}", ep.contingency_arr_ci_method),
                 ep.contingency_arr_ci_method == "Newcombe-Wilson",
                 arr_ci_en,
-                "cycle_contingency_ci:arr",
+                crate::egui_shell::ContingencyCiTarget::AttributableRisk,
             ),
             (
                 "edit.contingency.ci.wilson_brown",
                 format!("Diag CI: {}", ep.contingency_diag_ci_method),
                 ep.contingency_diag_ci_method == "Wilson-Brown",
                 diag_ci_en,
-                "cycle_contingency_ci:diag",
+                crate::egui_shell::ContingencyCiTarget::Diagnostic,
             ),
         ] {
             if render_modal_seg_btn(ui, tokens, meta, wid, &lbl, active, &en) {
-                intents.push_custom_view_action("stat_params", payload);
+                intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::CycleContingencyCi { which: target }));
             }
         }
     });
@@ -167,7 +167,7 @@ pub(super) fn render_misc_stats_design(
                     if let AnalysisKind::NestedComparison(ns) = &mut next.kind {
                         ns.two_group_t_test = val;
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
             render_df_method_picker(ui, spec, n.df_method, tokens, meta, intents);
@@ -188,7 +188,7 @@ pub(super) fn render_misc_stats_design(
                             mr.nonparametric = !m.nonparametric;
                         }
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
             if !m.nonparametric
@@ -207,7 +207,7 @@ pub(super) fn render_misc_stats_design(
                 if let AnalysisKind::MultipleRowTTests(mr) = &mut next.kind {
                     mr.assume_equal_sd = !m.assume_equal_sd;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
         AnalysisKind::DescriptiveStats(d) => {
@@ -224,7 +224,7 @@ pub(super) fn render_misc_stats_design(
                     if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
                         ds.aggregation = agg;
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
             if render_modal_checkbox(
@@ -240,7 +240,7 @@ pub(super) fn render_misc_stats_design(
                 if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
                     ds.run_normality_battery = !d.run_normality_battery;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
         }
@@ -257,39 +257,12 @@ pub(super) fn render_misc_stats_design(
                     if let AnalysisKind::BlandAltman(b) = &mut next.kind {
                         b.percent_difference = pct;
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
         }
         AnalysisKind::PValueStack(ps) => {
-            render_section_title(ui, tokens, "Multiplicity / FDR Correction Procedure");
-            for m in PValueStackMethod::ALL {
-                if render_modal_radio(ui, tokens, meta, &format!("edit.pstack.{m:?}"), m.label(), ps.method == m, &ControlEnablement::enabled()) {
-                    let mut next = spec.clone();
-                    if let AnalysisKind::PValueStack(p) = &mut next.kind {
-                        p.method = m;
-                    }
-                    intents.push_set_edit_params_draft(next);
-                }
-            }
-            let step = render_stepper_row(
-                ui,
-                tokens,
-                meta,
-                StepperSpec {
-                    id_prefix: "edit.pstack.threshold",
-                    label: if ps.method.is_fdr() { "Desired FDR Q" } else { "FWER Alpha" },
-                    value_text: &format!("{:.3}", ps.threshold),
-                    enablement: &ControlEnablement::enabled(),
-                },
-            );
-            if step != 0 {
-                let mut next = spec.clone();
-                if let AnalysisKind::PValueStack(p) = &mut next.kind {
-                    p.threshold = (p.threshold + if step > 0 { 0.01 } else { -0.01 }).clamp(0.001, 0.50);
-                }
-                intents.push_set_edit_params_draft(next);
-            }
+            render_pvalue_stack_design(ui, doc, spec, ps, tokens, meta, intents);
         }
         AnalysisKind::LinearRegression(lin) => {
             render_linear_regression_design(ui, doc, spec, lin, tokens, meta, intents);
@@ -318,7 +291,7 @@ pub(super) fn render_misc_stats_design(
                         if let AnalysisKind::PassingBablok(p) = &mut next.kind {
                             p.x_column = idx;
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                     if render_modal_seg_btn(
                         ui,
@@ -333,7 +306,7 @@ pub(super) fn render_misc_stats_design(
                         if let AnalysisKind::PassingBablok(p) = &mut next.kind {
                             p.y_column = idx;
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                 });
             }
@@ -349,12 +322,93 @@ pub(super) fn render_misc_stats_design(
                     if let AnalysisKind::RocCurve(rc) = &mut next.kind {
                         rc.ci_method = method;
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
             render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
         }
         _ => render_dataset_checklist(ui, doc, spec, tokens, meta, intents),
+    }
+}
+
+fn render_pvalue_stack_design(
+    ui: &mut Ui,
+    doc: &ProjectDocument,
+    spec: &curvebook_doc::AnalysisSpec,
+    ps: &curvebook_doc::PValueStackSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    render_section_title(ui, tokens, "Multiplicity / FDR Correction Procedure");
+    let method_lbl = ps.method.label();
+    let method_resp = crate::egui_shell::widgets::dropdown("edit.pvalue_stack.method", method_lbl)
+        .show_ui(ui, |ui| {
+            for m in PValueStackMethod::ALL {
+                if ui.selectable_label(ps.method == m, m.label()).clicked() {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::PValueStack(p) = &mut next.kind {
+                        p.method = m;
+                    }
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                }
+            }
+        })
+        .response;
+    record_widget(
+        ui,
+        meta,
+        &method_resp,
+        "edit.pvalue_stack.method",
+        "combobox",
+        method_lbl,
+        None,
+        Some(serde_json::json!(method_lbl)),
+        true,
+        None,
+        crate::inspect::ZLayer::ModalDialog,
+        false,
+        None,
+    );
+    for m in PValueStackMethod::ALL {
+        if render_modal_radio(ui, tokens, meta, &format!("edit.pstack.{m:?}"), m.label(), ps.method == m, &ControlEnablement::enabled()) {
+            let mut next = spec.clone();
+            if let AnalysisKind::PValueStack(p) = &mut next.kind {
+                p.method = m;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    }
+    let step = render_stepper_row(
+        ui,
+        tokens,
+        meta,
+        StepperSpec {
+            id_prefix: "edit.pvalue_stack.threshold",
+            label: if ps.method.is_fdr() { "Desired FDR Q" } else { "FWER Alpha" },
+            value_text: &format!("{:.3}", ps.threshold),
+            enablement: &ControlEnablement::enabled(),
+        },
+    );
+    if step != 0 {
+        let mut next = spec.clone();
+        if let AnalysisKind::PValueStack(p) = &mut next.kind {
+            p.threshold = (p.threshold + if step > 0 { 0.01 } else { -0.01 }).clamp(0.001, 0.50);
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    let titles = column_titles_for_draft(doc, Some(&spec.source_sheet_id));
+    let col_lbl = ps
+        .column
+        .and_then(|c| titles.get(c))
+        .map_or_else(|| ps.column.map_or_else(|| String::from("All"), |c| format!("Col {}", c + 1)), Clone::clone);
+    if render_modal_seg_btn(ui, tokens, meta, "edit.pvalue_stack.column", &format!("Source Column: {col_lbl}"), false, &ControlEnablement::enabled())
+    {
+        let mut next = spec.clone();
+        if let AnalysisKind::PValueStack(p) = &mut next.kind {
+            p.column = Some(p.column.map_or(0, |c| (c + 1) % titles.len().max(1)));
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
 }
 
@@ -372,12 +426,12 @@ fn render_outlier_design(
     if render_modal_radio(ui, tokens, meta, "edit.outlier.rout", "ROUT (Robust regression + FDR Q)", is_rout, &ControlEnablement::enabled()) {
         let mut next = spec.clone();
         next.kind = AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: 1.0 });
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_radio(ui, tokens, meta, "edit.outlier.grubbs", "Grubbs' ESD test (Alpha)", !is_rout, &ControlEnablement::enabled()) {
         let mut next = spec.clone();
         next.kind = AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha: 0.05, iterative: false });
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     match out {
         OutlierSpec::Rout { fdr_q_percent } => {
@@ -397,7 +451,7 @@ fn render_outlier_design(
                 if let AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: q }) = &mut next.kind {
                     *q = (*q + if step > 0 { 0.5 } else { -0.5 }).clamp(0.1, 10.0);
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
         OutlierSpec::Grubbs { alpha, iterative } => {
@@ -417,7 +471,7 @@ fn render_outlier_design(
                 if let AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha: a, .. }) = &mut next.kind {
                     *a = (*a + if step > 0 { 0.01 } else { -0.01 }).clamp(0.001, 0.25);
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             if render_modal_checkbox(
                 ui,
@@ -432,7 +486,7 @@ fn render_outlier_design(
                 if let AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { iterative: it, .. }) = &mut next.kind {
                     *it = !*it;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     }
@@ -491,7 +545,7 @@ fn render_linear_regression_design(
             if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                 l.deming_model_ii = deming;
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     }
     let ols_only_en = if lin.deming_model_ii { ControlEnablement::disabled("Unavailable in Deming Model II.") } else { ControlEnablement::enabled() };
@@ -512,7 +566,7 @@ fn render_linear_regression_design(
                 l.fixed_point = None;
             }
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(ui, tokens, meta, "edit.lin.fixed_point", tr(locale, "linear.fixed_point"), lin.fixed_point.is_some(), &ols_only_en) {
         let mut next = spec.clone();
@@ -524,7 +578,7 @@ fn render_linear_regression_design(
                 l.force_through_origin = false;
             }
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if !lin.deming_model_ii
         && let Some((x0, y0)) = lin.fixed_point
@@ -543,7 +597,7 @@ fn render_linear_regression_design(
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                     l.fixed_point = Some((new_x0, y0));
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             if let Some(new_y0) = render_linear_numeric_input(
                 ui,
@@ -558,7 +612,7 @@ fn render_linear_regression_design(
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                     l.fixed_point = Some((x0, new_y0));
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         });
     }
@@ -575,7 +629,7 @@ fn render_linear_regression_design(
         if let AnalysisKind::LinearRegression(l) = &mut next.kind {
             l.standard_addition = !lin.standard_addition;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(
         ui,
@@ -590,7 +644,7 @@ fn render_linear_regression_design(
         if let AnalysisKind::LinearRegression(l) = &mut next.kind {
             l.extend_line_to_x_intercept = !lin.extend_line_to_x_intercept;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if lin.deming_model_ii {
         render_deming_error_controls(ui, spec, lin, tokens, meta, intents);
@@ -608,7 +662,7 @@ fn render_linear_regression_design(
         if let AnalysisKind::LinearRegression(l) = &mut next.kind {
             l.interpolate_unknowns = !lin.interpolate_unknowns;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }
@@ -634,7 +688,7 @@ fn render_deming_error_controls(
         if let AnalysisKind::LinearRegression(l) = &mut next.kind {
             l.deming_error = DemingErrorSpec::EqualError;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_radio(ui, tokens, meta, "edit.lin.deming.sds", tr(locale, "linear.deming_sds"), is_sds, &ControlEnablement::enabled()) {
         let mut next = spec.clone();
@@ -643,7 +697,7 @@ fn render_deming_error_controls(
         {
             l.deming_error = DemingErrorSpec::StandardDeviations { sd_x: 1.0, sd_y: 1.0 };
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if let DemingErrorSpec::StandardDeviations { sd_x, sd_y } = lin.deming_error {
         ui.horizontal_wrapped(|ui| {
@@ -654,7 +708,7 @@ fn render_deming_error_controls(
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                     l.deming_error = DemingErrorSpec::StandardDeviations { sd_x: new_sd_x, sd_y };
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             if let Some(new_sd_y) =
                 render_linear_numeric_input(ui, meta, ("edit_lin_dem_sdy", sid), "edit.lin.deming.sd_y", tr(locale, "linear.deming_sd_y"), sd_y, true)
@@ -663,7 +717,7 @@ fn render_deming_error_controls(
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                     l.deming_error = DemingErrorSpec::StandardDeviations { sd_x, sd_y: new_sd_y };
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         });
     }
@@ -682,7 +736,7 @@ fn render_deming_error_controls(
         {
             l.deming_error = DemingErrorSpec::VarianceRatio { lambda: 1.0 };
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if let DemingErrorSpec::VarianceRatio { lambda } = lin.deming_error {
         ui.horizontal_wrapped(|ui| {
@@ -699,7 +753,7 @@ fn render_deming_error_controls(
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                     l.deming_error = DemingErrorSpec::VarianceRatio { lambda: new_lambda };
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         });
     }
@@ -730,7 +784,7 @@ fn render_simple_logistic_design(
         if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
             s.emit_row_classification = !sl.emit_row_classification;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(
         ui,
@@ -745,7 +799,7 @@ fn render_simple_logistic_design(
         if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
             s.confidence_bands = !sl.confidence_bands;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     ui.horizontal_wrapped(|ui| {
         if let Some(new_cut) = render_linear_numeric_input(
@@ -763,7 +817,7 @@ fn render_simple_logistic_design(
             if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
                 s.classification_cutoff = new_cut;
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     });
     ui.horizontal_wrapped(|ui| {
@@ -781,7 +835,7 @@ fn render_simple_logistic_design(
             if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
                 s.plot_x_min = if min_enabled { None } else { Some(0.0) };
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
         if let Some(x_min) = sl.plot_x_min
             && let Some(new_min) = render_linear_numeric_input(ui, meta, ("edit_sl_plot_xmin", sid), "edit.sl.plot_x_min", "", x_min, false)
@@ -790,7 +844,7 @@ fn render_simple_logistic_design(
             if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
                 s.plot_x_min = Some(new_min);
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
         let max_enabled = sl.plot_x_max.is_some();
         if render_modal_checkbox(
@@ -806,7 +860,7 @@ fn render_simple_logistic_design(
             if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
                 s.plot_x_max = if max_enabled { None } else { Some(10.0) };
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
         if let Some(x_max) = sl.plot_x_max
             && let Some(new_max) = render_linear_numeric_input(ui, meta, ("edit_sl_plot_xmax", sid), "edit.sl.plot_x_max", "", x_max, false)
@@ -815,7 +869,7 @@ fn render_simple_logistic_design(
             if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
                 s.plot_x_max = Some(new_max);
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     });
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
@@ -838,7 +892,7 @@ fn render_spline_lowess_design(
             if let AnalysisKind::FitSplineLowess(s) = &mut next.kind {
                 s.method = m;
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     }
 
@@ -861,7 +915,7 @@ fn render_spline_lowess_design(
             let updated = (s.segment_count as isize + delta).clamp(SplineLowessSpec::MIN_SEGMENTS as isize, SplineLowessSpec::MAX_SEGMENTS as isize);
             s.segment_count = updated as usize;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
 
     if sp.method == SplineLowessMethod::SmoothingSpline {
@@ -885,7 +939,7 @@ fn render_spline_lowess_design(
                 s.smoothing_knots = Some(updated);
                 s.smoothing_df = None;
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     }
 
@@ -907,7 +961,7 @@ fn render_spline_lowess_design(
                     s.lowess_preset = preset;
                     s.lowess_fraction = None;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
         let iter_step = render_stepper_row(
@@ -928,7 +982,7 @@ fn render_spline_lowess_design(
                     (s.lowess_robustness_iters as isize + isize::from(iter_step)).clamp(0, SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS as isize);
                 s.lowess_robustness_iters = updated as usize;
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     }
 
@@ -947,7 +1001,7 @@ fn render_spline_lowess_design(
         if let AnalysisKind::FitSplineLowess(s) = &mut next.kind {
             s.emit_curve_coordinates_tab = !sp.emit_curve_coordinates_tab;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(
         ui,
@@ -962,6 +1016,6 @@ fn render_spline_lowess_design(
         if let AnalysisKind::FitSplineLowess(s) = &mut next.kind {
             s.interpolate_unknowns = !sp.interpolate_unknowns;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
 }

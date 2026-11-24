@@ -15,11 +15,11 @@ use curvebook_doc::{
     ResultSheet, SheetFolderKind, SheetId, SheetSection, TableArchetype,
 };
 use curvebook_engine::services::{
-    ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterSizingPolicy, compile_visual_scene_for_sheet, export_document_artifact,
-    inspect_project_summary, inspect_sheet_detail,
+    DEFAULT_PREVIEW_DPI, DocumentExportFormat, ExportArtifactFormat, ExportArtifactRequest, ExportOptionsSpec, ExportTarget, RasterSizingPolicy,
+    compile_visual_scene_for_sheet, export_document_artifact, inspect_document_control_json, load_validated_ttf_font, parse_csv_delimiter_opt,
+    parse_dpi, parse_pdf_color_space, parse_pdf_version, parse_tiff_compression, resolve_tidy_flag,
 };
 use curvebook_engine::{BatchCommandStep, Caller, EngineError, Session, cmd};
-use curvebook_format::CsvOptions;
 use curvebook_palette::{CanvasPreviewFilter, Rgba8};
 use curvebook_pdf::{PdfColorSpace, PdfExportOptions, PdfVersion, render_pdf_pages};
 use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, TiffCompression};
@@ -31,7 +31,6 @@ use serde_json::{Map, Value, json};
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, AxisTarget};
 use crate::grid_view::ImportReshapeMode;
-use crate::gui_actions::{dispatch as dispatch_gui_action_impl, is_gui_action_method};
 use crate::i18n::{is_rtl_locale, locale_display_name, normalize_locale};
 use crate::interaction::{UiInputEvent, ViewportMetrics, dispatch_ui_event};
 use crate::menus::ui_commands::UI_COMMANDS;
@@ -202,12 +201,6 @@ pub fn is_http_request_line(line: &str) -> bool {
         || trimmed.eq_ignore_ascii_case("HTTP/2")
 }
 
-pub(crate) const DEFAULT_SCREENSHOT_WIDTH_PX: u32 = 1024;
-pub(crate) const DEFAULT_SCREENSHOT_HEIGHT_PX: u32 = 640;
-pub(crate) const DEFAULT_SCREENSHOT_DPI: u16 = 144;
-pub(crate) const MIN_SCREENSHOT_DIM_PX: u32 = 64;
-pub(crate) const MAX_SCREENSHOT_DIM_PX: u32 = 4096;
-pub(crate) const MIN_DPI: u16 = 72;
 const CROP_MARGIN_PT: f64 = 18.0;
 
 /// Control-loop continuation directive returned alongside a serialized response line.
@@ -957,7 +950,7 @@ where
         return (serialize_response(&resp), ControlLoopAction::Continue);
     };
 
-    let params = normalize_request_params(method, obj);
+    let params = host_routing::normalize_control_request_params(method, obj);
     let req = ControlRequest { id, method: method.to_owned(), params };
     let (response, action) = handler(app, req);
     (serialize_response(&response), action)
@@ -1067,6 +1060,23 @@ pub fn handle_control_line_with_action(app: &mut UiApp, line: &str) -> (String, 
 /// Returns `Ok(None)` when `command_id` is not a front-end UI command so callers can delegate
 /// to engine command execution cleanly.
 ///
+/// Returns `true` when `method` is one of the 8 interactive GUI action entry points allowed
+/// under strict `--gui-only`.
+#[must_use]
+pub(crate) fn is_gui_action_method(method: &str) -> bool {
+    matches!(
+        method,
+        "ui.inspect"
+            | "ui.screenshot"
+            | "ui.pointer_gesture"
+            | "ui.type_text"
+            | "ui.press_key"
+            | "ui.invoke_menu"
+            | "ui.switch_tab"
+            | "ui.answer_dialog"
+    )
+}
+
 /// Dispatch one of the 8 interactive GUI actions (`ui.inspect`, `ui.screenshot`,
 /// `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`,
 /// `ui.answer_dialog`) against `app` for in-process callers (`curvebook-cli` MCP bridge, `R8.7`).
@@ -1078,7 +1088,15 @@ pub fn handle_control_line_with_action(app: &mut UiApp, line: &str) -> (String, 
 /// (`ErrorCode::Conflict`), missing widgets (`ErrorCode::NotFound`), or blocked disk writes under
 /// strict `--gui-only` (`ErrorCode::GuiOnlyViolation`).
 pub fn dispatch_gui_action(app: &mut UiApp, method: &str, params: Value) -> Result<Value, EngineError> {
-    dispatch_gui_action_impl(app, method, params)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::egui_shell::inspect_bridge::dispatch_gui_action(app, method, params)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (app, params);
+        Err(EngineError::with_code(ErrorCode::Conflict, format!("GUI action `{method}` requires desktop egui_shell")))
+    }
 }
 
 /// Dispatch a UI command using `Caller::Ui` privileges (invoked internally by menus, shortcuts,
@@ -1203,7 +1221,6 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "ui.editParams.open" => Some(|app, p| map_ui_err(dispatch_ui_edit_params_open(app, p))),
         "ui.powerWizard.open" => Some(|app, p| map_ui_err(dispatch_ui_power_wizard_open(app, p))),
         "ui.formatPoints.open" => Some(|app, p| map_ui_err(dispatch_ui_format_points_open(app, p))),
-        "ui.changeGraphType.open" => Some(|app, p| map_ui_err(dispatch_ui_change_graph_type_open(app, p))),
         "ui.clonePipeline.open" => Some(|app, p| map_ui_err(dispatch_ui_clone_pipeline_open(app, p))),
         "ui.zoom.fitSheet" => Some(|app, _| {
             app.canvas_dialogs.reset_zoom_to_fit();
@@ -1228,23 +1245,18 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "ui.previewFilter.set" => Some(|app, p| map_ui_err(dispatch_ui_preview_filter_set(app, p))),
         "ui.workspacePreset.set" => Some(|app, p| map_ui_err(dispatch_ui_workspace_preset_set(app, p))),
         "ui.grid.excludeWithReason" => Some(dispatch_ui_grid_exclude_with_reason),
-        "ui.table.convertArchetype.open" => Some(|app, p| map_ui_err(dispatch_ui_table_convert_archetype_open(app, p))),
         "ui.table.randomizeGroups" => Some(|app, p| map_ui_err(dispatch_ui_randomize_groups_open(app, p))),
         "ui.table.randomSampleRows" => Some(|app, p| map_ui_err(dispatch_ui_random_sample_rows_open(app, p))),
         "ui.table.simulateDistributions" => Some(|app, p| map_ui_err(dispatch_ui_simulate_distributions_open(app, p))),
         "ui.table.openFormulaBar" => Some(|app, p| map_ui_err(dispatch_ui_open_formula_bar(app, p))),
         "ui.result.appendClusterColumn" => Some(dispatch_ui_append_cluster_column),
         "ui.graph.insertModelEquation" => Some(|app, p| map_ui_err(dispatch_ui_insert_model_equation_open(app, p))),
-        "ui.graph.bubblePlot.open" => Some(|app, p| map_ui_err(dispatch_ui_bubble_plot_open(app, p))),
-        "ui.graph.format.open" => Some(|app, p| map_ui_err(dispatch_ui_format_graph_open(app, p))),
         "ui.graph.axes.open" => Some(|app, p| map_ui_err(dispatch_ui_format_axes_open(app, p))),
-        "ui.graph.pairwise.open" => Some(|app, p| map_ui_err(dispatch_ui_pairwise_open(app, p))),
         "ui.applyStyleFrom.open" => Some(|app, p| map_ui_err(dispatch_ui_apply_style_from_open(app, p))),
-        "ui.layout.composer.open" => Some(|app, p| map_ui_err(dispatch_ui_layout_composer_open(app, p))),
         "ui.export.figure.open" => Some(|app, p| map_ui_err(dispatch_ui_export_figure_open(app, p))),
-        "ui.export.tableCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_export_table_csv_open(app, p))),
-        "ui.export.resultsCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_export_results_csv_open(app, p))),
-        "ui.export.allTablesCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_export_all_tables_csv_open(app, p))),
+        "ui.export.tableCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_csv_export_open(app, p, CsvExportOpenMode::DataTable))),
+        "ui.export.resultsCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_csv_export_open(app, p, CsvExportOpenMode::ResultSheet))),
+        "ui.export.allTablesCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_csv_export_open(app, p, CsvExportOpenMode::AllDataTables))),
         "ui.export.allTablesCsv" => Some(|app, p| map_ui_err(dispatch_ui_export_all_tables_csv_fallback(app, p))),
         "ui.import.warnings.open" => Some(|app, p| map_ui_err(dispatch_ui_import_warnings_open(app, p))),
         "ui.import.reshape.open" => Some(|app, p| map_ui_err(dispatch_ui_import_reshape_open(app, p))),
@@ -1256,7 +1268,6 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "app.feedback" => Some(dispatch_ui_app_feedback),
         "ui.view.rowTitles.toggle" => Some(|app, p| map_ui_err(dispatch_ui_row_titles_toggle(app, p))),
         "ui.graph.create.open" => Some(|app, p| map_ui_err(dispatch_ui_create_graph_open(app, p))),
-        "ui.layout.equalizeScaling.open" => Some(|app, p| map_ui_err(dispatch_ui_equalize_scaling_open(app, p))),
         "ui.gridOverlay.toggle" => Some(|app, p| map_ui_err(dispatch_ui_grid_overlay_toggle(app, p))),
         "ui.embeddedTable.format.open" => Some(|app, p| map_ui_err(dispatch_ui_embedded_object_format_open(app, p, false))),
         "ui.image.format.open" => Some(|app, p| map_ui_err(dispatch_ui_embedded_object_format_open(app, p, true))),
@@ -1292,6 +1303,10 @@ fn dispatch_ui_app_feedback(app: &mut UiApp, params: &Value) -> Result<Value, Co
 fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Value) -> Result<Option<Value>, ControlCallError> {
     if command_id == "analysis.updateParams" && (params.is_null() || params.as_object().is_some_and(Map::is_empty)) {
         return map_ui_err(dispatch_ui_edit_params_open(app, params)).map(Some);
+    }
+    if let Some(spec) = lookup_patched_sheet_dialog(command_id) {
+        require_params_object_or_null(params, command_id).map_err(ControlCallError::from)?;
+        return map_ui_err(open_patched_sheet_dialog_spec(app, params, spec)).map(Some);
     }
     let Some(handler) = lookup_ui_command_handler(command_id) else {
         return Ok(None);
@@ -1350,11 +1365,7 @@ fn dispatch_request_inner(
     }
 
     let result = if is_gui_action_method(method.as_str()) {
-        if let Some(hook_res) = try_invoke_egui_dispatch_hook(app, &method, &params, recorded.as_deref_mut()) {
-            hook_res
-        } else {
-            dispatch_gui_action_and_record(app, &method, params, recorded)
-        }
+        dispatch_gui_action_and_record(app, &method, params, recorded)
     } else {
         match method.as_str() {
             "ping" => Ok(json!({
@@ -1366,10 +1377,8 @@ fn dispatch_request_inner(
             "command.list" => Ok(handle_command_list(app)),
             "command.run" => handle_command_run(app, &params, recorded.as_deref_mut()),
             "command.batch" => handle_command_batch(app, &params, recorded, rolled_back),
-            "doc.inspect" => reject_control_if_gui_only(app, "doc.inspect").and_then(|()| {
-                handle_doc_inspect(app.session().document(), app.session().is_dirty(), app.session().file_path(), &params)
-                    .map_err(ControlCallError::from)
-            }),
+            "doc.inspect" => reject_control_if_gui_only(app, "doc.inspect")
+                .and_then(|()| handle_doc_inspect(app.session().document(), app.session().is_dirty(), app.session().file_path(), &params)),
             "doc.export" => handle_doc_export(app, &params),
             "render.svg" => handle_render_svg(app, &params),
             "render.pdf" => handle_render_pdf(app, &params),
@@ -1385,45 +1394,6 @@ fn dispatch_request_inner(
         Err(err) => ControlResponse::err_with_detail(id, err),
     };
     (response, ControlLoopAction::Continue)
-}
-
-fn try_invoke_egui_dispatch_hook(
-    app: &mut UiApp,
-    command_id: &str,
-    params: &Value,
-    recorded: Option<&mut Vec<ControlRecordedStep>>,
-) -> Option<Result<Value, ControlCallError>> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let hook = app.egui_dispatch_hook.0.clone()?;
-        let seq_before = app.mutation_seq();
-        let undo_before = app.session().undo_depth();
-        let redo_before = app.session().redo_depth();
-        let dirty_before = app.session().is_dirty();
-        let res = hook(app, command_id, params)?;
-        app.sync_views();
-        Some(match res {
-            Ok(value) => {
-                if let Some(steps) = recorded {
-                    let mutated = app.mutation_seq() != seq_before
-                        || app.session().undo_depth() != undo_before
-                        || app.session().redo_depth() != redo_before
-                        || (!dirty_before && app.session().is_dirty())
-                        || value.get("mutated").and_then(Value::as_bool).unwrap_or(false);
-                    if mutated {
-                        steps.push(ControlRecordedStep { command_id: command_id.to_owned(), params: params.clone(), mutated: true });
-                    }
-                }
-                Ok(value)
-            }
-            Err(err) => Err(ControlCallError::from(err)),
-        })
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = (app, command_id, params, recorded);
-        None
-    }
 }
 
 fn dispatch_gui_action_and_record(
@@ -1469,11 +1439,8 @@ fn dispatch_command_by_id(
     app: &mut UiApp,
     command_id: &str,
     params: Value,
-    mut recorded: Option<&mut Vec<ControlRecordedStep>>,
+    recorded: Option<&mut Vec<ControlRecordedStep>>,
 ) -> Result<Value, ControlCallError> {
-    if let Some(hook_res) = try_invoke_egui_dispatch_hook(app, command_id, &params, recorded.as_deref_mut()) {
-        return hook_res;
-    }
     if is_gui_action_method(command_id) {
         return dispatch_gui_action_and_record(app, command_id, params, recorded);
     }
@@ -1508,7 +1475,12 @@ fn dispatch_command_by_id(
     serde_json::to_value(outcome).map_err(|err| ControlCallError::from(format!("failed to serialize command outcome: {err}")))
 }
 
-fn parse_control_request(line: &str) -> Result<ControlRequest, (Value, String)> {
+/// Parse a raw JSON-lines control request into a normalized [`ControlRequest`].
+///
+/// # Errors
+/// Returns `(request_id, error_message)` if `line` is not valid JSON, not a JSON object,
+/// or lacks a non-empty `method`/`op` field.
+pub fn parse_control_request(line: &str) -> Result<ControlRequest, (Value, String)> {
     let raw: Value = serde_json::from_str(line).map_err(|err| (Value::String(String::new()), format!("invalid control JSON: {err}")))?;
     let Some(obj) = raw.as_object() else {
         return Err((Value::String(String::new()), String::from("control request must be a JSON object")));
@@ -1518,47 +1490,8 @@ fn parse_control_request(line: &str) -> Result<ControlRequest, (Value, String)> 
         return Err((id, String::from("missing non-empty 'method' or 'op' field")));
     };
 
-    let params = normalize_request_params(method, obj);
+    let params = host_routing::normalize_control_request_params(method, obj);
     Ok(ControlRequest { id, method: method.to_owned(), params })
-}
-
-fn normalize_request_params(method: &str, obj: &Map<String, Value>) -> Value {
-    if method == "command.run" && (obj.contains_key("command") || obj.contains_key("command_id")) {
-        let mut out = Map::new();
-        if let Some(cmd) = obj.get("command") {
-            out.insert(String::from("command"), cmd.clone());
-        }
-        if let Some(cmd_id) = obj.get("command_id") {
-            out.insert(String::from("command_id"), cmd_id.clone());
-        }
-        if let Some(inner) = obj.get("params") {
-            out.insert(String::from("params"), inner.clone());
-        } else {
-            let mut inner = Map::new();
-            for (key, value) in obj {
-                if !matches!(key.as_str(), "id" | "method" | "op" | "command" | "command_id" | "params" | "token" | "auth_token") {
-                    inner.insert(key.clone(), value.clone());
-                }
-            }
-            if !inner.is_empty() {
-                out.insert(String::from("params"), Value::Object(inner));
-            }
-        }
-        return Value::Object(out);
-    }
-
-    let mut base = match obj.get("params") {
-        Some(Value::Object(map)) => map.clone(),
-        Some(other) if !other.is_null() => return other.clone(),
-        _ => Map::new(),
-    };
-    for (key, value) in obj {
-        if matches!(key.as_str(), "id" | "method" | "op" | "params" | "token" | "auth_token") {
-            continue;
-        }
-        base.entry(key.clone()).or_insert_with(|| value.clone());
-    }
-    Value::Object(base)
 }
 
 fn serialize_response(resp: &ControlResponse) -> String {
@@ -1665,6 +1598,7 @@ fn is_batch_readonly_step(cmd_id: &str) -> bool {
 
 fn is_pure_engine_batch_step(cmd_id: &str) -> bool {
     !is_gui_action_method(cmd_id)
+        && lookup_patched_sheet_dialog(cmd_id).is_none()
         && lookup_ui_command_handler(cmd_id).is_none()
         && !cmd_id.starts_with("ui.")
         && !matches!(cmd_id, "app.about" | "app.feedback" | "file.print" | "app.quit")
@@ -1722,10 +1656,6 @@ fn try_execute_pure_engine_atomic_batch(
     recorded: Option<&mut Vec<ControlRecordedStep>>,
     rolled_back: Option<&mut bool>,
 ) -> Option<Result<Value, ControlCallError>> {
-    #[cfg(not(target_arch = "wasm32"))]
-    if app.egui_dispatch_hook.0.is_some() {
-        return None;
-    }
     if app.batch_undo_log.is_some() {
         return None;
     }
@@ -1931,76 +1861,11 @@ fn handle_ui_state(app: &mut UiApp) -> Value {
     })
 }
 
-fn handle_doc_inspect(doc: &ProjectDocument, dirty: bool, file_path: Option<&std::path::Path>, params: &Value) -> Result<Value, String> {
+fn handle_doc_inspect(doc: &ProjectDocument, dirty: bool, file_path: Option<&std::path::Path>, params: &Value) -> Result<Value, ControlCallError> {
     require_params_object_or_null(params, "doc.inspect")?;
     let include_cells = opt_bool_param(params, &["include_cells"])?.unwrap_or(false);
-    if let Some(sheet_id) = resolve_sheet_id_param(params)? {
-        return inspect_sheet_detail(doc, &sheet_id, include_cells).map_err(|err| err.to_string());
-    }
-    let summary = inspect_project_summary(doc, dirty, file_path, None).map_err(|err| err.to_string())?;
-    let data_sheets: Vec<Value> = summary
-        .data_sheets
-        .iter()
-        .map(|s| json!({ "id": s.id, "title": s.title, "kind": s.kind_label, "rows": s.rows, "cols": s.cols, "frozen": s.frozen }))
-        .collect();
-    let info_sheets: Vec<Value> =
-        summary.info_sheets.iter().map(|s| json!({ "id": s.id, "title": s.title, "constants": s.constants.len() })).collect();
-    let result_sheets: Vec<Value> = summary
-        .result_sheets
-        .iter()
-        .map(|s| {
-            json!({
-                "id": s.id,
-                "title": s.title,
-                "status": s.status,
-                "tabs": s.tabs,
-                "scalars": s.scalars,
-                "checklist": s.checklist,
-                "has_analyzable_data": s.analyzable,
-            })
-        })
-        .collect();
-    let graph_sheets: Vec<Value> = summary
-        .graph_sheets
-        .iter()
-        .map(|s| {
-            json!({
-                "id": s.id,
-                "title": s.title,
-                "initialized": s.initialized,
-                "kind": s.kind_debug,
-                "width_pt": s.width_pt,
-                "height_pt": s.height_pt,
-            })
-        })
-        .collect();
-    let layout_sheets: Vec<Value> = summary
-        .layout_sheets
-        .iter()
-        .map(|s| json!({ "id": s.id, "title": s.title, "items": s.item_count, "width_pt": s.width_pt, "height_pt": s.height_pt }))
-        .collect();
-
-    Ok(json!({
-        "title": summary.title,
-        "schema_version": summary.schema_version,
-        "dirty": summary.dirty,
-        "file_path": summary.file_path,
-        "active_sheet_id": summary.active_sheet_id,
-        "family_anchor_sheet_id": summary.family_anchor_sheet_id,
-        "counts": {
-            "total": summary.total_sheet_count,
-            "data": data_sheets.len(),
-            "info": info_sheets.len(),
-            "results": result_sheets.len(),
-            "graphs": graph_sheets.len(),
-            "layouts": layout_sheets.len(),
-        },
-        "data_sheets": data_sheets,
-        "info_sheets": info_sheets,
-        "result_sheets": result_sheets,
-        "graph_sheets": graph_sheets,
-        "layout_sheets": layout_sheets,
-    }))
+    let sheet_id = resolve_sheet_id_param(params)?;
+    Ok(inspect_document_control_json(doc, dirty, file_path, sheet_id.as_ref(), include_cells)?)
 }
 
 fn visual_sheet_title(doc: &ProjectDocument, sheet_id: &SheetId) -> String {
@@ -2043,10 +1908,14 @@ fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
     let doc = app.document();
     let all = opt_bool_param(params, &["all"])?.unwrap_or(false);
     let sheet_ids = if all { collect_all_renderable_ids(doc)? } else { vec![resolve_renderable_sheet_id(doc, params)?] };
-    let color_space = parse_pdf_color_space_fields(params, &["color_space"])?;
+    let color_space = opt_non_empty_str_param(params, &["color_space"])?.map(parse_pdf_color_space).transpose()?.unwrap_or(PdfColorSpace::Srgb);
     let options = PdfExportOptions { color_space, title: Some(doc.title.clone()), ..PdfExportOptions::default() };
+    let target = match sheet_ids.as_slice() {
+        [only] => ExportTarget::Explicit(only.clone()),
+        _ => ExportTarget::AutoOrExplicit(None),
+    };
     let request = ExportArtifactRequest {
-        target: if sheet_ids.len() == 1 { ExportTarget::Explicit(sheet_ids[0].clone()) } else { ExportTarget::AutoOrExplicit(None) },
+        target,
         format: ExportArtifactFormat::Pdf { options, all_graphs: false, sheet_ids: (sheet_ids.len() > 1).then(|| sheet_ids.clone()) },
     };
     let artifact = export_document_artifact(doc, &request, None, "render.pdf")?;
@@ -2061,7 +1930,7 @@ fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         "page_count": artifact.page_count,
         "encoding": "base64",
         "bytes_len": artifact.bytes.len(),
-        "data_base64": encode_base64(&artifact.bytes),
+        "data_base64": curvebook_platform::base64::encode(&artifact.bytes),
     }))
 }
 
@@ -2107,7 +1976,7 @@ fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCa
     require_params_object_or_null(params, "render.preview")?;
     let doc = app.document();
     let sheet_id = resolve_renderable_sheet_id(doc, params)?;
-    let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400)?.unwrap_or(144);
+    let dpi = parse_dpi(params.get("dpi"), DEFAULT_PREVIEW_DPI)?;
     let width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
     let height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
 
@@ -2117,7 +1986,12 @@ fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCa
         doc,
         &ExportArtifactRequest {
             target: ExportTarget::Explicit(sheet_id.clone()),
-            format: ExportArtifactFormat::Png { width_px, height_px, dpi: Some(dpi), sizing: RasterSizingPolicy::CapToLimits { default_dpi: 144 } },
+            format: ExportArtifactFormat::Png {
+                width_px,
+                height_px,
+                dpi: Some(dpi),
+                sizing: RasterSizingPolicy::CapToLimits { default_dpi: DEFAULT_PREVIEW_DPI },
+            },
         },
         None,
         "render.preview",
@@ -2138,187 +2012,56 @@ fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCa
         "primitives_count": scene.primitives.len(),
         "warnings": scene.warnings,
         "encoding": "base64",
-        "data_base64": encode_base64(&artifact.bytes),
+        "data_base64": curvebook_platform::base64::encode(&artifact.bytes),
     }))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-const MAX_CONTROL_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
-
-fn parse_doc_export_csv_options(params: &Value, format: &str) -> Result<CsvOptions, ControlCallError> {
-    let Some(delim) = opt_non_empty_str_param(params, &["csv_delimiter"])? else {
-        return Ok(if format == "tsv" { CsvOptions::tsv() } else { CsvOptions::csv() });
-    };
-    let mut chars = delim.chars();
-    let Some(ch) = chars.next() else {
-        return Err(ControlCallError::from("csv_delimiter must not be empty"));
-    };
-    if chars.next().is_some() {
-        return Err(ControlCallError::from("csv_delimiter must be a single character"));
-    }
-    let mut opts = CsvOptions::csv();
-    opts.delimiter = ch;
-    Ok(opts)
-}
-
-fn parse_doc_export_pdf_version(params: &Value) -> Result<PdfVersion, ControlCallError> {
-    match opt_non_empty_str_param(params, &["pdf_version"])? {
-        None => Ok(PdfVersion::Pdf17),
-        Some("1.4") => Ok(PdfVersion::Pdf14),
-        Some("1.7") => Ok(PdfVersion::Pdf17),
-        Some(other) => Err(ControlCallError::from(format!("unsupported pdf_version '{other}' (expected '1.4' or '1.7')"))),
-    }
-}
-
-fn load_validated_control_ttf_font(path_str: &str) -> Result<Vec<u8>, ControlCallError> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let path = std::path::Path::new(path_str);
-        let bytes = curvebook_platform::fs::read_regular_file_bytes(path, MAX_CONTROL_FONT_FILE_BYTES).map_err(|err| match err {
-            curvebook_platform::PlatformError::InvalidPath { reason } => {
-                ControlCallError::from(EngineError::with_code(ErrorCode::BadInput, format!("invalid TrueType font `{path_str}`: {reason}")))
-            }
-            other => ControlCallError::from(EngineError::from(other)),
-        })?;
-        let _info = curvebook_text::parse_truetype_font_info(&bytes).map_err(|err| {
-            ControlCallError::from(EngineError::with_code(ErrorCode::BadInput, format!("invalid TrueType font `{path_str}`: {err}")))
-        })?;
-        if !matches!(bytes.get(0..4), Some([0x00, 0x01, 0x00, 0x00] | b"true")) {
-            return Err(ControlCallError::from(EngineError::with_code(
-                ErrorCode::BadInput,
-                format!("unsupported SFNT font `{path_str}`: expected TrueType outlines (`0x00010000` or `true`), not CFF/OTTO"),
-            )));
-        }
-        Ok(bytes)
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = path_str;
-        Err(ControlCallError::from(EngineError::with_code(
-            ErrorCode::UnsupportedFormat,
-            "reading TrueType font from filesystem is unsupported on wasm32",
-        )))
-    }
 }
 
 fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
     reject_control_if_gui_only(app, "doc.export")?;
     require_params_object_or_null(params, "doc.export")?;
-    let format = opt_non_empty_str_param(params, &["format"])?
-        .ok_or_else(|| ControlCallError::from("doc.export requires a non-empty string 'format'"))?
-        .to_ascii_lowercase();
-    if !matches!(format.as_str(), "svg" | "pdf" | "emf" | "png" | "tiff" | "csv" | "tsv" | "json") {
-        return Err(ControlCallError::from(format!("unsupported export format '{format}'")));
-    }
+    let raw_format =
+        opt_non_empty_str_param(params, &["format"])?.ok_or_else(|| ControlCallError::from("doc.export requires a non-empty string 'format'"))?;
+    let format = DocumentExportFormat::parse(raw_format)?;
 
-    let opt_out_path = opt_non_empty_str_param(params, &["path", "output_path"])?;
-    let validated_out_path = match opt_out_path {
-        Some(raw) => Some(app.session().validate_host_write_path(raw)?),
-        None => None,
-    };
+    let validated_out_path =
+        opt_non_empty_str_param(params, &["path", "output_path"])?.map(|raw| app.session().validate_host_write_path(raw)).transpose()?;
 
     let opt_ttf_font = opt_non_empty_str_param(params, &["ttf_font"])?;
-    let validated_ttf_font = match opt_ttf_font {
-        Some(raw) => Some(app.session().validate_host_write_path(raw)?),
-        None => None,
-    };
-
-    let sheet_id_str = opt_non_empty_str_param(params, &["sheet_id", "sheetId"])?;
-    let pretty = opt_bool_param(params, &["pretty"])?.unwrap_or(true);
-    let explicit_tidy = opt_bool_param(params, &["tidy"])?;
-    let tab_id = opt_non_empty_str_param(params, &["tab_id", "tabId"])?;
-    if explicit_tidy == Some(true) && tab_id.is_some() {
-        return Err(ControlCallError::from(
-            "export `tidy: true` cannot be combined with `tab_id`; omit `tidy` or pass `tidy: false` to export a specific tab",
-        ));
+    if let Some(raw) = opt_ttf_font
+        && format != DocumentExportFormat::Pdf
+    {
+        let _ = app.session().validate_host_write_path(raw)?;
     }
-    let tidy = explicit_tidy.unwrap_or(tab_id.is_none());
-    let csv_opts = parse_doc_export_csv_options(params, &format)?;
-    let svg_precision = opt_u16_bounded_param(params, "svg_precision", 1, 8)?;
-    let pdf_color_space = parse_pdf_color_space_fields(params, &["pdf_color_space", "color_space"])?;
-    let pdf_version = parse_doc_export_pdf_version(params)?;
-    let all_graphs = opt_bool_param(params, &["all_graphs", "all"])?.unwrap_or(false);
-    let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400)?.unwrap_or(144);
-    let width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
-    let height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
-    let tiff_compression = match opt_non_empty_str_param(params, &["tiff_compression"])? {
-        Some(raw) => match raw.to_ascii_lowercase().as_str() {
-            "none" => TiffCompression::None,
-            "deflate" => TiffCompression::Deflate,
-            "lzw" => TiffCompression::Lzw,
-            other => return Err(ControlCallError::from(format!("unsupported tiff_compression '{other}'"))),
-        },
-        None => TiffCompression::Lzw,
-    };
 
-    let ttf_font_bytes = if format == "pdf" {
-        match validated_ttf_font.as_deref() {
-            Some(path_str) => Some(load_validated_control_ttf_font(path_str)?),
-            None => None,
-        }
+    let tab_id = opt_non_empty_str_param(params, &["tab_id", "tabId"])?;
+    let mut spec = ExportOptionsSpec::new(format);
+    spec.sheet_id = opt_non_empty_str_param(params, &["sheet_id", "sheetId"])?.map(SheetId::new);
+    spec.pretty = opt_bool_param(params, &["pretty"])?.unwrap_or(true);
+    spec.tidy = resolve_tidy_flag(opt_bool_param(params, &["tidy"])?, tab_id)?;
+    spec.tab_id = tab_id.map(str::to_owned);
+    spec.csv_options = parse_csv_delimiter_opt(opt_str_param(params, &["csv_delimiter"])?, "csv_delimiter")?;
+    spec.svg_precision = opt_u16_bounded_param(params, "svg_precision", 1, 8)?
+        .map(|p| u8::try_from(p).map_err(|_| ControlCallError::from("svg_precision out of range")))
+        .transpose()?;
+    spec.pdf_color_space =
+        opt_non_empty_str_param(params, &["pdf_color_space", "color_space"])?.map(parse_pdf_color_space).transpose()?.unwrap_or(PdfColorSpace::Srgb);
+    spec.pdf_version = opt_non_empty_str_param(params, &["pdf_version"])?.map(parse_pdf_version).transpose()?.unwrap_or(PdfVersion::Pdf17);
+    spec.all_graphs = opt_bool_param(params, &["all_graphs", "all"])?.unwrap_or(false);
+    spec.dpi = Some(parse_dpi(params.get("dpi"), DEFAULT_PREVIEW_DPI)?);
+    spec.width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
+    spec.height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
+    spec.tiff_compression =
+        opt_non_empty_str_param(params, &["tiff_compression"])?.map(parse_tiff_compression).transpose()?.unwrap_or(TiffCompression::Lzw);
+    spec.embedded_ttf_font = if format == DocumentExportFormat::Pdf {
+        opt_ttf_font.map(|raw| load_validated_ttf_font(app.session().path_policy(), raw)).transpose()?
     } else {
         None
     };
 
-    let doc = app.document();
-    let explicit_id = sheet_id_str.map(SheetId::new);
-    let target = if matches!(format.as_str(), "csv" | "tsv") && explicit_id.is_none() {
-        if let Some(tid) = tab_id {
-            let matched = doc
-                .active_sheet_id
-                .as_ref()
-                .and_then(|id| doc.result_sheet(id))
-                .filter(|rs| rs.tabs.iter().any(|t| t.id == tid))
-                .or_else(|| doc.result_sheets.iter().find(|rs| rs.tabs.iter().any(|t| t.id == tid)))
-                .ok_or_else(|| ControlCallError::from(format!("tab '{tid}' not found on any result sheet")))?;
-            ExportTarget::Explicit(matched.id.clone())
-        } else if let Some(active) = &doc.active_sheet_id
-            && (doc.result_sheet(active).is_some() || doc.data_sheet(active).is_some())
-        {
-            ExportTarget::Explicit(active.clone())
-        } else if let Some(rs) = doc.result_sheets.first() {
-            ExportTarget::Explicit(rs.id.clone())
-        } else {
-            ExportTarget::AutoOrExplicit(None)
-        }
-    } else {
-        ExportTarget::AutoOrExplicit(explicit_id)
-    };
-
-    let artifact_format = match format.as_str() {
-        "svg" => {
-            let mut options = SvgExportOptions { pretty, ..SvgExportOptions::default() };
-            if let Some(p) = svg_precision {
-                options.precision = u8::try_from(p).map_err(|_| ControlCallError::from("svg_precision out of range"))?;
-            }
-            ExportArtifactFormat::Svg { options }
-        }
-        "pdf" => ExportArtifactFormat::Pdf {
-            options: PdfExportOptions {
-                color_space: pdf_color_space,
-                version: pdf_version,
-                embedded_truetype_font: ttf_font_bytes,
-                ..PdfExportOptions::default()
-            },
-            all_graphs,
-            sheet_ids: None,
-        },
-        "emf" => ExportArtifactFormat::Emf { require_kind: None },
-        "png" => ExportArtifactFormat::Png { width_px, height_px, dpi: Some(dpi), sizing: RasterSizingPolicy::CapToLimits { default_dpi: 144 } },
-        "tiff" => ExportArtifactFormat::Tiff {
-            width_px,
-            height_px,
-            dpi: Some(dpi),
-            compression: tiff_compression,
-            sizing: RasterSizingPolicy::CapToLimits { default_dpi: 144 },
-        },
-        "csv" | "tsv" => ExportArtifactFormat::Csv { options: csv_opts, tab_id: tab_id.map(str::to_owned), tab_index: None, tidy },
-        "json" => ExportArtifactFormat::Json { pretty },
-        _ => return Err(ControlCallError::from(format!("unsupported export format '{format}'"))),
-    };
-
-    let artifact = export_document_artifact(doc, &ExportArtifactRequest { target, format: artifact_format }, None, "doc.export").map_err(|err| {
-        if matches!(format.as_str(), "csv" | "tsv") {
+    let request = spec.into_artifact_request(app.document(), true)?;
+    let is_delimited = matches!(format, DocumentExportFormat::Csv | DocumentExportFormat::Tsv);
+    let artifact = export_document_artifact(app.document(), &request, None, "doc.export").map_err(|err| {
+        if is_delimited {
             ControlCallError { message: format!("CSV export failed: {err}"), detail: Some(engine_error_detail(&err)) }
         } else {
             ControlCallError::from(err)
@@ -2329,7 +2072,7 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         app.session().write_host_file_atomic(&dest_path, &artifact.bytes)?;
         return Ok(json!({
             "exported": true,
-            "format": format,
+            "format": format.as_str(),
             "sheet_id": artifact.target_id,
             "path": dest_path,
             "bytes_written": artifact.bytes.len(),
@@ -2341,14 +2084,14 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
 
     enforce_control_payload_budget(artifact.bytes.len())?;
     Ok(json!({
-        "format": format,
+        "format": format.as_str(),
         "sheet_id": artifact.target_id,
         "width_px": artifact.raster.map(|r| r.width_px),
         "height_px": artifact.raster.map(|r| r.height_px),
         "dpi": artifact.raster.map(|r| r.dpi),
         "bytes_len": artifact.bytes.len(),
         "encoding": "base64",
-        "data_base64": encode_base64(&artifact.bytes),
+        "data_base64": curvebook_platform::base64::encode(&artifact.bytes),
     }))
 }
 
@@ -2452,36 +2195,146 @@ fn apply_open_patch(params: &Value, ignore_keys: &[&str], apply: impl FnOnce(&Ma
     Ok(())
 }
 
-fn open_graph_dialog_patched(
-    app: &mut UiApp,
-    params: &Value,
-    dialog_name: &str,
-    open: impl FnOnce(&mut UiApp, &ProjectDocument, &SheetId) -> bool,
-    patch: impl FnOnce(&mut UiApp, &ProjectDocument, &Map<String, Value>) -> Result<(), String>,
-) -> Result<Value, String> {
-    let doc = app.document().clone();
-    let graph_id = resolve_target_graph_id(&doc, params)?;
-    if !open(app, &doc, &graph_id) {
-        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
-    }
-    apply_open_patch(params, SHEET_ID_KEYS, |fields| patch(app, &doc, fields))?;
-    Ok(json!({ "dialog": dialog_name, "graph_sheet_id": graph_id.as_str() }))
+#[derive(Clone, Copy)]
+enum SheetDialogTarget {
+    Data,
+    Graph,
+    Layout,
 }
 
-fn open_layout_dialog_patched(
+impl SheetDialogTarget {
+    const fn kind_label(self) -> &'static str {
+        match self {
+            Self::Data => "data sheet",
+            Self::Graph => "graph sheet",
+            Self::Layout => "layout sheet",
+        }
+    }
+
+    const fn response_id_key(self) -> &'static str {
+        match self {
+            Self::Data => "sheet_id",
+            Self::Graph => "graph_sheet_id",
+            Self::Layout => "layout_sheet_id",
+        }
+    }
+
+    fn resolve(self, doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
+        match self {
+            Self::Data => resolve_target_data_id(doc, params),
+            Self::Graph => resolve_target_graph_id(doc, params),
+            Self::Layout => resolve_target_layout_id(doc, params),
+        }
+    }
+}
+
+type SheetDialogOpenFn = fn(&mut UiApp, &ProjectDocument, &SheetId) -> bool;
+type SheetDialogPatchFn = fn(&mut UiApp, &ProjectDocument, &Map<String, Value>) -> Result<(), String>;
+
+struct PatchedSheetDialogSpec {
+    command_id: &'static str,
+    dialog_name: &'static str,
+    target: SheetDialogTarget,
+    open: SheetDialogOpenFn,
+    patch: Option<SheetDialogPatchFn>,
+}
+
+const PATCHED_SHEET_DIALOGS: &[PatchedSheetDialogSpec] = &[
+    PatchedSheetDialogSpec {
+        command_id: "ui.changeGraphType.open",
+        dialog_name: "ChangeGraphType",
+        target: SheetDialogTarget::Graph,
+        open: |a, d, id| {
+            let Some(graph) = d.graph_sheet(id) else {
+                return false;
+            };
+            a.canvas_dialogs.change_graph_type.open_for_graph(graph, d);
+            a.canvas_dialogs.active_dialog = ActiveDialog::ChangeGraphType { graph_sheet_id: id.clone() };
+            true
+        },
+        patch: None,
+    },
+    PatchedSheetDialogSpec {
+        command_id: "ui.table.convertArchetype.open",
+        dialog_name: "ConvertArchetype",
+        target: SheetDialogTarget::Data,
+        open: |a, d, id| a.canvas_dialogs.open_convert_archetype(d, id),
+        patch: None,
+    },
+    PatchedSheetDialogSpec {
+        command_id: "ui.graph.bubblePlot.open",
+        dialog_name: "BubblePlotInspector",
+        target: SheetDialogTarget::Graph,
+        open: |a, d, id| a.canvas_dialogs.open_bubble_plot(d, id),
+        patch: Some(|a, _, f| crate::dialogs_canvas::dialog_patch::patch_bubble_plot(&mut a.canvas_dialogs.bubble_plot, f)),
+    },
+    PatchedSheetDialogSpec {
+        command_id: "ui.graph.format.open",
+        dialog_name: "FormatGraph",
+        target: SheetDialogTarget::Graph,
+        open: |a, d, id| a.canvas_dialogs.open_format_graph(d, id),
+        patch: Some(|a, _, f| {
+            let preset = a.locale_preset.clone();
+            crate::dialogs_canvas::dialog_patch::patch_format_graph(&mut a.canvas_dialogs.format_graph, f, &preset)
+        }),
+    },
+    PatchedSheetDialogSpec {
+        command_id: "ui.graph.pairwise.open",
+        dialog_name: "PairwiseComparisons",
+        target: SheetDialogTarget::Graph,
+        open: |a, d, id| a.canvas_dialogs.open_pairwise_comparisons(d, id),
+        patch: Some(|a, d, f| {
+            let preset = a.locale_preset.clone();
+            crate::dialogs_canvas::dialog_patch::patch_pairwise(&mut a.canvas_dialogs.pairwise, f, Some(d), &preset)
+        }),
+    },
+    PatchedSheetDialogSpec {
+        command_id: "ui.layout.composer.open",
+        dialog_name: "PageLayoutComposer",
+        target: SheetDialogTarget::Layout,
+        open: |a, d, id| {
+            let _ = a.canvas_dialogs.open_page_layout_composer(d, id);
+            true
+        },
+        patch: Some(|a, d, f| crate::dialogs_canvas::dialog_patch::patch_page_layout(&mut a.canvas_dialogs.page_layout, f, Some(d))),
+    },
+    PatchedSheetDialogSpec {
+        command_id: "ui.layout.equalizeScaling.open",
+        dialog_name: "EqualizeScaling",
+        target: SheetDialogTarget::Layout,
+        open: |a, d, id| a.canvas_dialogs.open_equalize_scaling(d, id),
+        patch: Some(|a, _, f| {
+            let preset = a.locale_preset.clone();
+            crate::dialogs_canvas::dialog_patch::patch_equalize_scaling(&mut a.canvas_dialogs.equalize_scaling, f, &preset)
+        }),
+    },
+];
+
+fn lookup_patched_sheet_dialog(command_id: &str) -> Option<&'static PatchedSheetDialogSpec> {
+    PATCHED_SHEET_DIALOGS.iter().find(|spec| spec.command_id == command_id)
+}
+
+fn open_sheet_dialog_patched(
     app: &mut UiApp,
     params: &Value,
+    target: SheetDialogTarget,
     dialog_name: &str,
     open: impl FnOnce(&mut UiApp, &ProjectDocument, &SheetId) -> bool,
-    patch: impl FnOnce(&mut UiApp, &ProjectDocument, &Map<String, Value>) -> Result<(), String>,
+    patch: Option<impl FnOnce(&mut UiApp, &ProjectDocument, &Map<String, Value>) -> Result<(), String>>,
 ) -> Result<Value, String> {
     let doc = app.document().clone();
-    let layout_id = resolve_target_layout_id(&doc, params)?;
-    if !open(app, &doc, &layout_id) {
-        return Err(format!("layout sheet `{}` not found", layout_id.as_str()));
+    let sheet_id = target.resolve(&doc, params)?;
+    if !open(app, &doc, &sheet_id) {
+        return Err(format!("{} `{}` not found", target.kind_label(), sheet_id.as_str()));
     }
-    apply_open_patch(params, SHEET_ID_KEYS, |fields| patch(app, &doc, fields))?;
-    Ok(json!({ "dialog": dialog_name, "layout_sheet_id": layout_id.as_str() }))
+    if let Some(patch_fn) = patch {
+        apply_open_patch(params, SHEET_ID_KEYS, |fields| patch_fn(app, &doc, fields))?;
+    }
+    Ok(json!({ "dialog": dialog_name, target.response_id_key(): sheet_id.as_str() }))
+}
+
+fn open_patched_sheet_dialog_spec(app: &mut UiApp, params: &Value, spec: &PatchedSheetDialogSpec) -> Result<Value, String> {
+    open_sheet_dialog_patched(app, params, spec.target, spec.dialog_name, spec.open, spec.patch)
 }
 
 fn dispatch_ui_analyze_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -2512,7 +2365,9 @@ fn dispatch_ui_analyze_open(app: &mut UiApp, params: &Value) -> Result<Value, St
 fn dispatch_ui_power_wizard_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     app.canvas_dialogs.open_power_wizard();
     let preset = app.locale_preset.clone();
-    apply_open_patch(params, SHEET_ID_KEYS, |f| app.canvas_dialogs.power_wizard.apply_field_patch_localized(f, &preset))?;
+    apply_open_patch(params, SHEET_ID_KEYS, |f| {
+        crate::dialogs_canvas::dialog_patch::patch_power_wizard(&mut app.canvas_dialogs.power_wizard, f, &preset)
+    })?;
     Ok(json!({
         "dialog": "PowerAndSampleSize",
         "stage": app.canvas_dialogs.power_wizard.stage.label(),
@@ -2542,21 +2397,14 @@ fn dispatch_ui_format_points_open(app: &mut UiApp, params: &Value) -> Result<Val
     points.dedup();
     app.canvas_dialogs.open_format_selected_points_with_subcols(&doc, &graph_id, points);
     let preset = app.locale_preset.clone();
-    apply_open_patch(params, &["sheet_id", "sheetId", "points"], |f| app.canvas_dialogs.format_points.apply_field_patch_localized(f, &preset))?;
+    apply_open_patch(params, &["sheet_id", "sheetId", "points"], |f| {
+        crate::dialogs_canvas::dialog_patch::patch_format_selected_points(&mut app.canvas_dialogs.format_points, f, &preset)
+    })?;
     Ok(json!({
         "dialog": "FormatSelectedPoints",
         "graph_sheet_id": graph_id.as_str(),
         "selected_count": app.canvas_dialogs.format_points.selected_points.len(),
     }))
-}
-
-fn dispatch_ui_change_graph_type_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.session().document().clone();
-    let graph_id = resolve_target_graph_id(&doc, params)?;
-    let graph = doc.graph_sheet(&graph_id).ok_or_else(|| format!("graph sheet `{}` not found", graph_id.as_str()))?;
-    app.canvas_dialogs.change_graph_type.open_for_graph(graph, &doc);
-    app.canvas_dialogs.active_dialog = ActiveDialog::ChangeGraphType { graph_sheet_id: graph_id.clone() };
-    Ok(json!({ "dialog": "ChangeGraphType", "graph_sheet_id": graph_id.as_str() }))
 }
 
 fn dispatch_ui_clone_pipeline_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -2791,17 +2639,28 @@ fn dispatch_ui_preview_filter_set(app: &mut UiApp, params: &Value) -> Result<Val
 
 fn dispatch_ui_workspace_preset_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let raw = opt_non_empty_str_param(params, &["preset"])?.ok_or_else(|| String::from("missing non-empty `preset` string"))?;
-    let preset = crate::egui_shell::WorkspacePreset::parse(raw).ok_or_else(|| format!("unknown workspace preset `{raw}`"))?;
-    let cfg = preset.default_dock_config();
-    app.nav.navigator_open = cfg.navigator_open;
-    app.family_open = cfg.family_open;
-    app.nav.inspector_open = cfg.inspector_open;
-    app.egui_views.workspace_preset = preset;
-    app.egui_views.leading_collapsed_rail = cfg.leading_collapsed_rail;
-    app.egui_views.trailing_collapsed_rail = cfg.trailing_collapsed_rail;
-    app.egui_views.leading_width_pt = Some(cfg.leading_width_pt);
-    app.egui_views.trailing_width_pt = Some(cfg.trailing_width_pt);
-    Ok(json!({ "workspace_preset": app.egui_views.workspace_preset.as_str() }))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let preset = crate::egui_shell::WorkspacePreset::parse(raw).ok_or_else(|| format!("unknown workspace preset `{raw}`"))?;
+        let cfg = preset.default_dock_config();
+        app.nav.navigator_open = cfg.navigator_open;
+        app.family_open = cfg.family_open;
+        app.nav.inspector_open = cfg.inspector_open;
+        app.egui_views.workspace_preset = preset;
+        app.egui_views.leading_collapsed_rail = cfg.leading_collapsed_rail;
+        app.egui_views.trailing_collapsed_rail = cfg.trailing_collapsed_rail;
+        app.egui_views.leading_width_pt = Some(cfg.leading_width_pt);
+        app.egui_views.trailing_width_pt = Some(cfg.trailing_width_pt);
+        Ok(json!({ "workspace_preset": app.egui_views.workspace_preset.as_str() }))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = app;
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "default" | "data_prep" | "modeling" | "publication" | "compact" => Ok(json!({ "workspace_preset": raw.trim().to_ascii_lowercase() })),
+            _ => Err(format!("unknown workspace preset `{raw}`")),
+        }
+    }
 }
 
 fn dispatch_ui_grid_exclude_with_reason(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
@@ -2838,19 +2697,12 @@ fn dispatch_ui_grid_exclude_with_reason(app: &mut UiApp, params: &Value) -> Resu
     Ok(json!({ "dialog": "ExcludeWithReason", "sheet_id": sheet_id.as_str(), "coords_count": app.canvas_dialogs.exclude_with_reason.coords.len() }))
 }
 
-fn dispatch_ui_table_convert_archetype_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
-    let sheet_id = resolve_target_data_id(&doc, params)?;
-    if !app.canvas_dialogs.open_convert_archetype(&doc, &sheet_id) {
-        return Err(format!("data sheet `{}` not found", sheet_id.as_str()));
-    }
-    Ok(json!({ "dialog": "ConvertArchetype", "sheet_id": sheet_id.as_str() }))
-}
-
 fn dispatch_ui_randomize_groups_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
     app.canvas_dialogs.open_randomize_groups(&doc);
-    apply_open_patch(params, SHEET_ID_KEYS, |f| app.canvas_dialogs.randomize_groups.apply_field_patch(f))?;
+    apply_open_patch(params, SHEET_ID_KEYS, |f| {
+        crate::dialogs_canvas::dialog_patch::patch_randomize_groups(&mut app.canvas_dialogs.randomize_groups, f)
+    })?;
     Ok(json!({
         "dialog": "RandomizeGroups",
         "groups": app.canvas_dialogs.randomize_groups.groups,
@@ -2864,7 +2716,9 @@ fn dispatch_ui_random_sample_rows_open(app: &mut UiApp, params: &Value) -> Resul
     if !app.canvas_dialogs.open_random_sample_rows(&doc, Some(&sheet_id)) {
         return Err(format!("data sheet `{}` not found", sheet_id.as_str()));
     }
-    apply_open_patch(params, &["source_sheet_id", "sheet_id", "sheetId"], |f| app.canvas_dialogs.random_sample_rows.apply_field_patch(f))?;
+    apply_open_patch(params, &["source_sheet_id", "sheet_id", "sheetId"], |f| {
+        crate::dialogs_canvas::dialog_patch::patch_random_sample_rows(&mut app.canvas_dialogs.random_sample_rows, f)
+    })?;
     Ok(json!({
         "dialog": "RandomSampleRows",
         "source_sheet_id": sheet_id.as_str(),
@@ -2875,7 +2729,9 @@ fn dispatch_ui_random_sample_rows_open(app: &mut UiApp, params: &Value) -> Resul
 fn dispatch_ui_simulate_distributions_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     app.canvas_dialogs.open_simulate_distributions();
     let preset = app.locale_preset.clone();
-    apply_open_patch(params, SHEET_ID_KEYS, |f| app.canvas_dialogs.simulate_distributions.apply_field_patch_localized(f, &preset))?;
+    apply_open_patch(params, SHEET_ID_KEYS, |f| {
+        crate::dialogs_canvas::dialog_patch::patch_simulate_distributions(&mut app.canvas_dialogs.simulate_distributions, f, &preset)
+    })?;
     Ok(json!({
         "dialog": "SimulateDistributions",
         "n_rows": app.canvas_dialogs.simulate_distributions.n_rows,
@@ -2885,12 +2741,15 @@ fn dispatch_ui_simulate_distributions_open(app: &mut UiApp, params: &Value) -> R
 
 fn dispatch_ui_insert_model_equation_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let preset = app.locale_preset.clone();
-    let mut payload = open_graph_dialog_patched(
+    let mut payload = open_sheet_dialog_patched(
         app,
         params,
+        SheetDialogTarget::Graph,
         "InsertModelEquation",
         |a, d, id| a.canvas_dialogs.open_insert_model_equation(d, id),
-        |a, _, f| a.canvas_dialogs.insert_model_equation.apply_field_patch_localized(f, &preset),
+        Some(|a: &mut UiApp, _: &ProjectDocument, f: &Map<String, Value>| {
+            crate::dialogs_canvas::dialog_patch::patch_insert_model_equation(&mut a.canvas_dialogs.insert_model_equation, f, &preset)
+        }),
     )?;
     if let Some(obj) = payload.as_object_mut() {
         obj.insert(
@@ -2900,27 +2759,6 @@ fn dispatch_ui_insert_model_equation_open(app: &mut UiApp, params: &Value) -> Re
         obj.insert(String::from("mode"), json!(app.canvas_dialogs.insert_model_equation.mode));
     }
     Ok(payload)
-}
-
-fn dispatch_ui_bubble_plot_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    open_graph_dialog_patched(
-        app,
-        params,
-        "BubblePlotInspector",
-        |a, d, id| a.canvas_dialogs.open_bubble_plot(d, id),
-        |a, _, f| a.canvas_dialogs.bubble_plot.apply_field_patch(f),
-    )
-}
-
-fn dispatch_ui_format_graph_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let preset = app.locale_preset.clone();
-    open_graph_dialog_patched(
-        app,
-        params,
-        "FormatGraph",
-        |a, d, id| a.canvas_dialogs.open_format_graph(d, id),
-        |a, _, f| a.canvas_dialogs.format_graph.apply_field_patch_localized(f, &preset),
-    )
 }
 
 fn dispatch_ui_apply_style_from_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -2945,7 +2783,15 @@ fn dispatch_ui_apply_style_from_open(app: &mut UiApp, params: &Value) -> Result<
             "target_sheet_ids": app.canvas_dialogs.apply_style.target_graph_ids.iter().map(SheetId::as_str).collect::<Vec<_>>(),
         }));
     }
-    open_graph_dialog_patched(app, params, "ApplyStyleFrom", |a, d, id| a.canvas_dialogs.open_apply_style_from(d, id), |_, _, _| Ok(()))
+    let no_patch: Option<SheetDialogPatchFn> = None;
+    open_sheet_dialog_patched(
+        app,
+        params,
+        SheetDialogTarget::Graph,
+        "ApplyStyleFrom",
+        |a, d, id| a.canvas_dialogs.open_apply_style_from(d, id),
+        no_patch,
+    )
 }
 
 fn dispatch_ui_format_axes_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -2961,7 +2807,9 @@ fn dispatch_ui_format_axes_open(app: &mut UiApp, params: &Value) -> Result<Value
     app.canvas_dialogs.format_axes.sync_from_graph(graph, initial_target);
     app.canvas_dialogs.active_dialog = ActiveDialog::FormatAxes { sheet_id: graph_id.clone() };
     let preset = app.locale_preset.clone();
-    apply_open_patch(params, SHEET_ID_KEYS, |f| app.canvas_dialogs.format_axes.apply_field_patch_localized(f, Some(&doc), &preset))?;
+    apply_open_patch(params, SHEET_ID_KEYS, |f| {
+        crate::dialogs_canvas::dialog_patch::patch_format_axes(&mut app.canvas_dialogs.format_axes, f, Some(&doc), &preset)
+    })?;
     Ok(json!({ "dialog": "FormatAxes", "sheet_id": graph_id.as_str(), "target_axis": format!("{:?}", app.canvas_dialogs.format_axes.target_axis) }))
 }
 
@@ -3128,40 +2976,6 @@ fn map_cluster_row_label_to_mv_row(label: Option<&str>, fallback_idx: usize, mv:
     (fallback_idx < row_count).then_some(fallback_idx)
 }
 
-fn dispatch_ui_pairwise_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let preset = app.locale_preset.clone();
-    open_graph_dialog_patched(
-        app,
-        params,
-        "PairwiseComparisons",
-        |a, d, id| a.canvas_dialogs.open_pairwise_comparisons(d, id),
-        |a, d, f| a.canvas_dialogs.pairwise.apply_field_patch_localized(f, Some(d), &preset),
-    )
-}
-
-fn dispatch_ui_layout_composer_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    open_layout_dialog_patched(
-        app,
-        params,
-        "PageLayoutComposer",
-        |a, d, id| {
-            let _ = a.canvas_dialogs.open_page_layout_composer(d, id);
-            true
-        },
-        |a, d, f| a.canvas_dialogs.page_layout.apply_field_patch(f, Some(d)),
-    )
-}
-
-fn dispatch_ui_equalize_scaling_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    open_layout_dialog_patched(
-        app,
-        params,
-        "EqualizeScaling",
-        |a, d, id| a.canvas_dialogs.open_equalize_scaling(d, id),
-        |a, _, f| a.canvas_dialogs.equalize_scaling.apply_field_patch(f),
-    )
-}
-
 fn dispatch_ui_create_graph_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
     const KEYS: &[&str] = &["data_sheet_id", "source_sheet_id", "sheet_id", "sheetId"];
@@ -3169,7 +2983,7 @@ fn dispatch_ui_create_graph_open(app: &mut UiApp, params: &Value) -> Result<Valu
     if !app.canvas_dialogs.open_create_graph(&doc, preferred.as_ref()) {
         return Err(String::from("no source data sheet available to create a graph"));
     }
-    apply_open_patch(params, KEYS, |f| app.canvas_dialogs.create_graph.apply_field_patch(f))?;
+    apply_open_patch(params, KEYS, |f| crate::dialogs_canvas::dialog_patch::patch_create_graph(&mut app.canvas_dialogs.create_graph, f))?;
     Ok(json!({ "dialog": "CreateGraph", "source_sheet_id": app.canvas_dialogs.create_graph.source_sheet_id.as_ref().map(SheetId::as_str) }))
 }
 
@@ -3238,8 +3052,13 @@ fn dispatch_ui_embedded_object_format_open(app: &mut UiApp, params: &Value, want
     if !opened {
         return Err(format!("failed opening {dialog_name} on `{}` index {idx}", sheet_id.as_str()));
     }
+    let preset = app.locale_preset.clone();
     apply_open_patch(params, EMBEDDED_OPEN_IGNORE_KEYS, |f| {
-        if want_image { app.canvas_dialogs.format_image.apply_field_patch(f) } else { app.canvas_dialogs.format_embedded_table.apply_field_patch(f) }
+        if want_image {
+            crate::dialogs_canvas::dialog_patch::patch_format_image(&mut app.canvas_dialogs.format_image, f, &preset)
+        } else {
+            crate::dialogs_canvas::dialog_patch::patch_format_embedded_table(&mut app.canvas_dialogs.format_embedded_table, f, &preset)
+        }
     })?;
     let is_layout = if want_image { app.canvas_dialogs.format_image.is_layout } else { app.canvas_dialogs.format_embedded_table.is_layout };
     Ok(json!({ "dialog": dialog_name, "sheet_id": sheet_id.as_str(), "target_index": idx, "is_layout": is_layout }))
@@ -3274,10 +3093,9 @@ fn dispatch_ui_row_titles_toggle(app: &mut UiApp, params: &Value) -> Result<Valu
     #[cfg(not(target_arch = "wasm32"))]
     let fallback_collapsed = app.egui_views.column_grid.row_titles_collapsed;
     #[cfg(target_arch = "wasm32")]
-    let fallback_collapsed = app.view_shards.grid_core.row_titles_collapsed;
+    let fallback_collapsed = false;
     let next_collapsed = explicit_collapsed.unwrap_or(!app.grid.row_titles_collapsed_override.unwrap_or(fallback_collapsed));
     app.grid.row_titles_collapsed_override = Some(next_collapsed);
-    app.view_shards.grid_core.row_titles_collapsed = next_collapsed;
     #[cfg(not(target_arch = "wasm32"))]
     {
         app.egui_views.column_grid.row_titles_collapsed = next_collapsed;
@@ -3288,51 +3106,53 @@ fn dispatch_ui_row_titles_toggle(app: &mut UiApp, params: &Value) -> Result<Valu
 fn dispatch_ui_export_figure_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
     app.canvas_dialogs.open_export_figure(&sheet_id);
-    apply_open_patch(params, SHEET_ID_KEYS, |f| app.canvas_dialogs.export_figure.apply_field_patch(f))?;
+    apply_open_patch(params, SHEET_ID_KEYS, |f| crate::dialogs_canvas::dialog_patch::patch_export_figure(&mut app.canvas_dialogs.export_figure, f))?;
     Ok(json!({ "dialog": "ExportFigure", "sheet_id": sheet_id.as_str(), "format": app.canvas_dialogs.export_figure.format }))
 }
 
-fn dispatch_ui_export_table_csv_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let sheet_id = resolve_target_data_id(app.document(), params)?;
-    app.canvas_dialogs.csv_export.reset_for_locale(app.locale_preset.decimal_separator);
-    app.canvas_dialogs.active_dialog =
-        ActiveDialog::CsvExportOptions(crate::dialogs_canvas::CsvExportTargetKind::DataTable { sheet_id: sheet_id.clone() });
-    Ok(json!({
-        "dialog": "CsvExportOptions",
-        "target": "DataTable",
-        "sheet_id": sheet_id.as_str(),
-        "delimiter": app.canvas_dialogs.csv_export.delimiter.to_string(),
-        "decimal_separator": app.canvas_dialogs.csv_export.decimal_separator.to_string(),
-    }))
+#[derive(Clone, Copy)]
+enum CsvExportOpenMode {
+    DataTable,
+    ResultSheet,
+    AllDataTables,
 }
 
-fn dispatch_ui_export_results_csv_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let sheet_id = resolve_target_result_sheet_id(app.document(), params)?;
+fn dispatch_ui_csv_export_open(app: &mut UiApp, params: &Value, mode: CsvExportOpenMode) -> Result<Value, String> {
+    use crate::dialogs_canvas::CsvExportTargetKind;
+
+    let (target_kind, target_label, sheet_id_opt, table_count_opt) = match mode {
+        CsvExportOpenMode::DataTable => {
+            let id = resolve_target_data_id(app.document(), params)?;
+            (CsvExportTargetKind::DataTable { sheet_id: id.clone() }, "DataTable", Some(id), None)
+        }
+        CsvExportOpenMode::ResultSheet => {
+            let id = resolve_target_result_sheet_id(app.document(), params)?;
+            (CsvExportTargetKind::ResultSheet { sheet_id: id.clone() }, "ResultSheet", Some(id), None)
+        }
+        CsvExportOpenMode::AllDataTables => {
+            if app.document().data_sheets.is_empty() {
+                return Err(String::from("no data tables available to export"));
+            }
+            (CsvExportTargetKind::AllDataTables, "AllDataTables", None, Some(app.document().data_sheets.len()))
+        }
+    };
     app.canvas_dialogs.csv_export.reset_for_locale(app.locale_preset.decimal_separator);
-    app.canvas_dialogs.active_dialog =
-        ActiveDialog::CsvExportOptions(crate::dialogs_canvas::CsvExportTargetKind::ResultSheet { sheet_id: sheet_id.clone() });
-    Ok(json!({
+    app.canvas_dialogs.active_dialog = ActiveDialog::CsvExportOptions(target_kind);
+    let mut payload = json!({
         "dialog": "CsvExportOptions",
-        "target": "ResultSheet",
-        "sheet_id": sheet_id.as_str(),
+        "target": target_label,
         "delimiter": app.canvas_dialogs.csv_export.delimiter.to_string(),
         "decimal_separator": app.canvas_dialogs.csv_export.decimal_separator.to_string(),
-    }))
-}
-
-fn dispatch_ui_export_all_tables_csv_open(app: &mut UiApp, _params: &Value) -> Result<Value, String> {
-    if app.document().data_sheets.is_empty() {
-        return Err(String::from("no data tables available to export"));
+    });
+    if let Some(obj) = payload.as_object_mut() {
+        if let Some(id) = sheet_id_opt {
+            obj.insert(String::from("sheet_id"), json!(id.as_str()));
+        }
+        if let Some(count) = table_count_opt {
+            obj.insert(String::from("table_count"), json!(count));
+        }
     }
-    app.canvas_dialogs.csv_export.reset_for_locale(app.locale_preset.decimal_separator);
-    app.canvas_dialogs.active_dialog = ActiveDialog::CsvExportOptions(crate::dialogs_canvas::CsvExportTargetKind::AllDataTables);
-    Ok(json!({
-        "dialog": "CsvExportOptions",
-        "target": "AllDataTables",
-        "table_count": app.document().data_sheets.len(),
-        "delimiter": app.canvas_dialogs.csv_export.delimiter.to_string(),
-        "decimal_separator": app.canvas_dialogs.csv_export.decimal_separator.to_string(),
-    }))
+    Ok(payload)
 }
 
 fn dispatch_ui_export_all_tables_csv_fallback(app: &mut UiApp, _params: &Value) -> Result<Value, String> {
@@ -3592,6 +3412,7 @@ fn dispatch_ui_theme_set(app: &mut UiApp, params: &Value) -> Result<Value, Strin
     }))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn parse_bounded_u32(raw: Option<&Value>, default: u32, min: u32, max: u32, field: &str) -> Result<u32, String> {
     let Some(val) = raw.filter(|v| !v.is_null()) else {
         return Ok(default);
@@ -3616,16 +3437,7 @@ fn extract_command_id(params: &Value) -> Result<String, String> {
 }
 
 fn extract_nested_params(params: &Value) -> Value {
-    if let Some(inner) = params.get("params") {
-        return inner.clone();
-    }
-    if let Some(obj) = params.as_object() {
-        let mut stripped = obj.clone();
-        stripped.remove("command");
-        stripped.remove("command_id");
-        return if stripped.is_empty() { Value::Null } else { Value::Object(stripped) };
-    }
-    Value::Null
+    params.as_object().map_or(Value::Null, host_routing::extract_nested_params_like_control_io)
 }
 
 fn resolve_sheet_id_param(params: &Value) -> Result<Option<SheetId>, String> {
@@ -3652,18 +3464,6 @@ fn resolve_print_sheet_ids(requested: &[SheetId], doc: &ProjectDocument) -> Resu
         return Ok(requested.to_vec());
     }
     collect_all_renderable_ids(doc)
-}
-
-fn parse_pdf_color_space_fields(params: &Value, fields: &[&str]) -> Result<PdfColorSpace, String> {
-    let Some(raw) = opt_non_empty_str_param(params, fields)? else {
-        return Ok(PdfColorSpace::Srgb);
-    };
-    match raw.to_ascii_lowercase().as_str() {
-        "srgb" | "rgb" => Ok(PdfColorSpace::Srgb),
-        "cmyk" => Ok(PdfColorSpace::Cmyk),
-        "grayscale" | "gray" => Ok(PdfColorSpace::Grayscale),
-        other => Err(format!("unsupported PDF color_space `{other}`; expected srgb, cmyk, or grayscale")),
-    }
 }
 
 fn scale_scene_for_print(scene: &ChartScene, factor: f64) -> ChartScene {
@@ -3843,10 +3643,6 @@ fn read_bounded_control_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> io
         let consumed = avail.len();
         reader.consume(consumed);
     }
-}
-
-pub(crate) fn encode_base64(input: &[u8]) -> String {
-    curvebook_platform::base64::encode(input)
 }
 
 const fn theme_mode_name(mode: UiThemeMode) -> &'static str {

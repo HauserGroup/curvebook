@@ -600,6 +600,22 @@ impl WorkflowRun {
         self.harness.driver.wheel_at(pos, delta)
     }
 
+    /// Scroll at `pos` in increments of `step` until `wid` appears in the settled frame
+    /// (fails if `wid` is still absent after `max_steps` wheel gestures).
+    pub fn wheel_until_visible(&mut self, pos: Pos2, step: Vec2, wid: &str, max_steps: usize) -> TestRes {
+        for _ in 0..max_steps {
+            if self.frame_meta().find_by_widget_id(wid).is_some() {
+                return Ok(());
+            }
+            self.wheel(pos, step)?;
+        }
+        if self.frame_meta().find_by_widget_id(wid).is_some() {
+            Ok(())
+        } else {
+            Err(format!("widget `{wid}` not visible after {max_steps} wheel steps at {pos:?}"))
+        }
+    }
+
     /// Type UTF-8 text into the currently focused widget.
     pub fn type_text(&mut self, text: &str) -> TestRes {
         let before_ds = self.document().data_sheets.len();

@@ -12,13 +12,7 @@ use curvebook_tools::ToolCommandIntent;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::dialogs_r9::parse_equation_display_mode_str;
-use crate::i18n::LocalePreset;
-
 use super::edit_params::default_true_flag;
-use super::parse_helpers::{
-    parse_dialog_num_with_locale, parse_frame_preset_str, parse_graph_kind_str, parse_grouped_arrangement_str, parse_palette_id_str,
-};
 
 const fn default_alpha_pct_100() -> u8 {
     100
@@ -289,8 +283,8 @@ impl FormatGraphState {
             if !lvls.is_empty() {
                 self.mv_levels = lvls;
                 self.mv_level_is_x = true;
-                self.mv_selected_level = crate::views::mv_formula::resolve_selected_level_idx(&self.mv_levels, self.mv_selected_level.as_deref())
-                    .and_then(|i| self.mv_levels.get(i).cloned());
+                self.mv_selected_level =
+                    resolve_selected_level_idx(&self.mv_levels, self.mv_selected_level.as_deref()).and_then(|i| self.mv_levels.get(i).cloned());
                 return;
             }
         }
@@ -302,8 +296,8 @@ impl FormatGraphState {
             if !lvls.is_empty() {
                 self.mv_levels = lvls;
                 self.mv_level_is_x = false;
-                self.mv_selected_level = crate::views::mv_formula::resolve_selected_level_idx(&self.mv_levels, self.mv_selected_level.as_deref())
-                    .and_then(|i| self.mv_levels.get(i).cloned());
+                self.mv_selected_level =
+                    resolve_selected_level_idx(&self.mv_levels, self.mv_selected_level.as_deref()).and_then(|i| self.mv_levels.get(i).cloned());
             }
         }
     }
@@ -313,14 +307,13 @@ impl FormatGraphState {
         if self.mv_levels.is_empty() {
             return;
         }
-        let cur = crate::views::mv_formula::resolve_selected_level_idx(&self.mv_levels, self.mv_selected_level.as_deref()).unwrap_or(0);
+        let cur = resolve_selected_level_idx(&self.mv_levels, self.mv_selected_level.as_deref()).unwrap_or(0);
         let next = (cur + 1) % self.mv_levels.len();
         self.mv_selected_level = self.mv_levels.get(next).cloned();
     }
 
     /// Stepwise reorder the selected MV level (`"top"`, `"up"`, `"down"`, `"end"`) into `Explicit` order.
     pub fn reorder_mv_level(&mut self, op_str: &str) -> Result<bool, String> {
-        use crate::views::mv_formula::{LevelMoveOp, apply_explicit_level_move};
         if self.mv_levels.is_empty() {
             return Err(String::from("Graph has no categorical levels to reorder."));
         }
@@ -445,168 +438,6 @@ impl FormatGraphState {
                 apply_marker_and_dash(&mut series.gdo, swatch, self.marker_size_pt, self.marker_fill_mode, self.line_dash);
             }
         }
-    }
-
-    /// Patch `FormatGraph` fields from scripted GUI actions / inspector text inputs.
-    ///
-    /// # Errors
-    /// Returns an error if a supplied enum variant or numeric value is invalid.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
-    }
-
-    /// Apply field patches using regional numeric parsing (`preset`).
-    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "show_legend" | "format_graph.show_legend" => {
-                    self.show_legend = val.as_bool().ok_or_else(|| String::from("`show_legend` must be boolean"))?;
-                }
-                "legend_bordered" | "format_graph.legend_bordered" => {
-                    self.legend_bordered = val.as_bool().ok_or_else(|| String::from("`legend_bordered` must be boolean"))?;
-                }
-                "error_bar_enabled" | "format_graph.error_bar_enabled" => {
-                    self.error_bar_enabled = val.as_bool().ok_or_else(|| String::from("`error_bar_enabled` must be boolean"))?;
-                }
-                "marker_size_pt" | "format_graph.marker_size_pt" => {
-                    let sz = parse_dialog_num_with_locale(val, key, preset)?;
-                    if sz <= 0.0 {
-                        return Err(String::from("`marker_size_pt` must be a finite positive number"));
-                    }
-                    self.marker_size_pt = sz.clamp(1.0, 24.0);
-                }
-                "selected_series_index" | "series_index" | "format_graph.selected_series_index" => {
-                    let idx = val
-                        .as_u64()
-                        .or_else(|| val.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-                        .ok_or_else(|| String::from("`selected_series_index` must be a non-negative integer"))?;
-                    self.selected_series_index = usize::try_from(idx).unwrap_or(usize::MAX);
-                }
-                "grouped_arrangement" | "format_graph.grouped_arrangement" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`grouped_arrangement` must be a string"))?;
-                    self.grouped_arrangement = parse_grouped_arrangement_str(raw)?;
-                }
-                "graph_kind" | "kind" | "format_graph.graph_kind" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`graph_kind` must be a string"))?;
-                    self.graph_kind = Some(parse_graph_kind_str(raw)?);
-                }
-                "palette" | "format_graph.palette" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`palette` must be a string"))?;
-                    self.palette = parse_palette_id_str(raw)?;
-                }
-                "frame_preset" | "format_graph.frame_preset" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`frame_preset` must be a string"))?;
-                    self.frame_preset = parse_frame_preset_str(raw)?;
-                }
-                "half_violin_with_points" | "raincloud" | "format_graph.half_violin_with_points" => {
-                    self.half_violin_with_points = val.as_bool().ok_or_else(|| String::from("`half_violin_with_points` must be boolean"))?;
-                }
-                "model_equation_mode" | "equation_mode" | "format_graph.model_equation_mode" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`model_equation_mode` must be `substituted` or `symbolic`"))?;
-                    let mode = parse_equation_display_mode_str(raw)?;
-                    self.set_model_equation_mode(mode);
-                }
-                "toggle_model_equation_mode" | "format_graph.toggle_model_equation_mode" => {
-                    let next = match self.model_equation_mode.unwrap_or_default() {
-                        EquationDisplayMode::Substituted => EquationDisplayMode::Symbolic,
-                        EquationDisplayMode::Symbolic => EquationDisplayMode::Substituted,
-                    };
-                    self.set_model_equation_mode(next);
-                }
-                "selected_level" | "format_graph.selected_level" => {
-                    let s = val.as_str().ok_or_else(|| String::from("`selected_level` must be a string"))?;
-                    self.mv_selected_level = Some(s.to_owned());
-                }
-                "move_to_top" | "format_graph.move_to_top" => {
-                    let _ = self.reorder_mv_level("top")?;
-                }
-                "move_up" | "format_graph.move_up" => {
-                    let _ = self.reorder_mv_level("up")?;
-                }
-                "move_down" | "format_graph.move_down" => {
-                    let _ = self.reorder_mv_level("down")?;
-                }
-                "move_to_end" | "format_graph.move_to_end" => {
-                    let _ = self.reorder_mv_level("end")?;
-                }
-                _ => self.apply_extended_format_graph_field(key, val, preset)?,
-            }
-        }
-        Ok(())
-    }
-
-    fn apply_extended_format_graph_field(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<(), String> {
-        match key {
-            "series_alpha_pct" | "alpha_pct" | "alpha" | "format_graph.alpha" => {
-                let raw = parse_dialog_num_with_locale(val, key, preset)?;
-                let pct = if raw <= 1.0 && !matches!(key, "series_alpha_pct" | "alpha_pct") { raw * 100.0 } else { raw };
-                self.series_alpha_pct = pct.round().clamp(0.0, 100.0) as u8;
-                self.alpha_dirty = true;
-            }
-            "show_raw_data" | "format_graph.show_raw_data" => {
-                self.show_raw_data = val.as_bool().ok_or_else(|| String::from("`show_raw_data` must be boolean"))?;
-            }
-            "show_fitted_curve" | "format_graph.show_fitted_curve" => {
-                self.show_fitted_curve = val.as_bool().ok_or_else(|| String::from("`show_fitted_curve` must be boolean"))?;
-            }
-            "apply_all_data_sets" | "apply_all" | "format_graph.apply_all_data_sets" | "format_graph.apply_globally" => {
-                self.apply_all_data_sets = val.as_bool().ok_or_else(|| String::from("`apply_all_data_sets` must be boolean"))?;
-            }
-            "paper_fill" | "format_graph.paper_fill" => {
-                self.paper_fill = parse_paper_fill_patch(val)?;
-                self.paper_fill_dirty = true;
-            }
-            "heatmap_labels" | "format_graph.heatmap_labels" => {
-                self.heatmap_labels =
-                    serde_json::from_value::<HeatmapLabelSpec>(val.clone()).map_err(|err| format!("invalid `heatmap_labels`: {err}"))?;
-                self.heatmap_labels_dirty = true;
-            }
-            "orientation" | "format_graph.orientation" => {
-                self.orientation = match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-                    Some("vertical") => CartesianOrientation::Vertical,
-                    Some("horizontal") => CartesianOrientation::Horizontal,
-                    _ => serde_json::from_value::<CartesianOrientation>(val.clone()).map_err(|err| format!("invalid `orientation`: {err}"))?,
-                };
-                self.orientation_dirty = true;
-            }
-            "show_symbols" | "format_graph.show_symbols" => {
-                self.show_symbols = val.as_bool().ok_or_else(|| String::from("`show_symbols` must be a boolean"))?;
-                self.show_symbols_dirty = true;
-            }
-            "replicate_lines" | "format_graph.replicate_lines" => {
-                self.replicate_lines = match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-                    Some("summary_center" | "summary") => ReplicateLineMode::SummaryCenter,
-                    Some("individual_replicate_trajectories" | "individual" | "individual_trajectories" | "spaghetti") => {
-                        ReplicateLineMode::IndividualReplicateTrajectories
-                    }
-                    _ => serde_json::from_value::<ReplicateLineMode>(val.clone()).map_err(|err| format!("invalid `replicate_lines`: {err}"))?,
-                };
-                self.replicate_lines_dirty = true;
-            }
-            "bind_to_right_y2" | "format_graph.bind_to_right_y2" => {
-                self.bind_to_right_y2 = val.as_bool().ok_or_else(|| String::from("`bind_to_right_y2` must be a boolean"))?;
-                self.bind_to_right_y2_dirty = true;
-            }
-            "offset_x_data" | "format_graph.offset_x_data" => {
-                let parsed = parse_dialog_num_with_locale(val, "offset_x_data", preset)?;
-                self.offset_x_data = parsed;
-                self.offset_x_data_dirty = true;
-            }
-            "bar_border_width_pt" | "border_width_pt" | "format_graph.bar_border_width_pt" => {
-                let parsed = parse_dialog_num_with_locale(val, "bar_border_width_pt", preset)?;
-                if parsed < 0.0 {
-                    return Err(String::from("`bar_border_width_pt` must be >= 0.0"));
-                }
-                self.bar_border_width_pt = parsed;
-                self.bar_border_width_dirty = true;
-            }
-            "forest_show_pooled_diamond" | "format_graph.forest_show_pooled_diamond" => {
-                self.forest_show_pooled_diamond = val.as_bool().ok_or_else(|| String::from("`forest_show_pooled_diamond` must be a boolean"))?;
-                self.forest_show_pooled_diamond_dirty = true;
-            }
-            other => return Err(format!("unknown Format Graph field `{other}`")),
-        }
-        Ok(())
     }
 
     /// Switch all [`GraphAnnotation::ModelEquation`] annotations on this graph to `mode`.
@@ -836,22 +667,55 @@ const fn extract_gdo_alpha_byte(gdo: &GraphicalDataObject) -> u8 {
     }
 }
 
-fn parse_paper_fill_patch(val: &Value) -> Result<Option<Rgba8>, String> {
-    if val.is_null() {
-        return Ok(None);
-    }
-    if let Some(s) = val.as_str() {
-        return match s.trim().to_ascii_lowercase().as_str() {
-            "none" | "transparent" => Ok(None),
-            "white" => Ok(Some(Rgba8::WHITE)),
-            "cream" => Ok(Some(Rgba8::rgb(255, 251, 235))),
-            "slate" => Ok(Some(Rgba8::rgb(241, 245, 249))),
-            other => Rgba8::from_hex(other).map(Some).ok_or_else(|| format!("invalid paper fill `{other}`")),
-        };
-    }
-    serde_json::from_value::<Rgba8>(val.clone()).map(Some).map_err(|err| format!("invalid `paper_fill`: {err}"))
-}
-
 const fn default_bar_border_width_pt() -> f64 {
     1.0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LevelMoveOp {
+    Top,
+    Up,
+    Down,
+    End,
+}
+
+/// Resolve the selected index in `levels` matching `selected`, defaulting to `0` when non-empty.
+pub(crate) fn resolve_selected_level_idx(levels: &[String], selected: Option<&str>) -> Option<usize> {
+    if levels.is_empty() {
+        return None;
+    }
+    selected.and_then(|name| levels.iter().position(|lvl| lvl == name)).or(Some(0))
+}
+
+/// Stepwise reorder the selected level in `levels`, updating `selected` to follow the moved item.
+fn apply_explicit_level_move(levels: &mut Vec<String>, selected: &mut Option<String>, op: LevelMoveOp) -> bool {
+    let Some(idx) = resolve_selected_level_idx(levels, selected.as_deref()) else {
+        return false;
+    };
+    let Some(moved_name) = levels.get(idx).cloned() else {
+        return false;
+    };
+    let changed = match op {
+        LevelMoveOp::Top if idx > 0 => {
+            let item = levels.remove(idx);
+            levels.insert(0, item);
+            true
+        }
+        LevelMoveOp::Up if idx > 0 => {
+            levels.swap(idx, idx - 1);
+            true
+        }
+        LevelMoveOp::Down if idx + 1 < levels.len() => {
+            levels.swap(idx, idx + 1);
+            true
+        }
+        LevelMoveOp::End if idx + 1 < levels.len() => {
+            let item = levels.remove(idx);
+            levels.push(item);
+            true
+        }
+        _ => false,
+    };
+    *selected = Some(moved_name);
+    changed
 }

@@ -16,7 +16,7 @@ use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::dispatch_gui_action;
 use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriver, TextBleedPolicy, build_driver_font_definitions};
 use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
-use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens, UiBackend, UiIntent, UiIntentOutcome};
+use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens, UiIntent, UiIntentOutcome};
 use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
 use curvebook_ui_egui::os_integration::{
@@ -59,7 +59,6 @@ impl WfShellState {
     /// Wrap `app` with a caller-held [`StubPlatformFileDialogAdapter`] for native file-picker tests.
     #[must_use]
     pub fn new_with_file_dialog(mut app: UiApp, file_dialog: Arc<StubPlatformFileDialogAdapter>) -> Self {
-        app.set_ui_backend(UiBackend::Egui);
         app.set_gui_only(true);
         app.set_human_path_only(true);
         let views = app.egui_views.clone();
@@ -101,7 +100,7 @@ impl EguiWfHarness {
         clipboard: Arc<StubPlatformClipboardAdapter>,
         file_dialog: Arc<StubPlatformFileDialogAdapter>,
     ) -> Self {
-        let mut app = UiApp::new().with_ui_backend(UiBackend::Egui);
+        let mut app = UiApp::new();
         app.set_gui_only(true);
         app.set_human_path_only(true);
         app.set_clipboard_adapter(clipboard);

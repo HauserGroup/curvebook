@@ -337,7 +337,7 @@ pub fn render_stat_params_modal(
             applied.selected_data_sets.clone_from(&spec.selected_data_sets);
             applied.custom_title.clone_from(&spec.custom_title);
             if applied != *spec {
-                intents.push_set_edit_params_draft(applied);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(applied) });
             }
             state.method_saved_as_default = true;
         } else {
@@ -362,6 +362,7 @@ pub fn render_stat_params_modal(
             state.lin_plot_max_draft.clear();
             state.lin_segments_draft.clear();
         }
+        state.custom_title_draft = spec.custom_title.as_deref().unwrap_or("").to_owned();
     } else {
         state.method_saved_as_default = state.saved_defaults.iter().any(|saved| {
             std::mem::discriminant(&saved.kind) == std::mem::discriminant(&spec.kind)
@@ -372,10 +373,15 @@ pub fn render_stat_params_modal(
         if !tabs.iter().any(|t| t.slug == state.active_tab) {
             state.active_tab = tabs[0].slug.to_owned();
         }
+        let spec_title = spec.custom_title.as_deref().unwrap_or("");
+        if !ctx.egui_wants_keyboard_input() && state.custom_title_draft != spec_title {
+            state.custom_title_draft = spec_title.to_owned();
+        }
     }
 
     let is_create_mode = doc.result_sheet(result_sheet_id).is_none();
     let ok_lbl = if is_create_mode { tr(locale, "anova.run_analysis") } else { tr(locale, "btn.ok") };
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
 
     let mut report = StatsModalFrameReport::from(show_wave4_modal(
         ctx,
@@ -401,13 +407,31 @@ pub fn render_stat_params_modal(
                     let selected = state.active_tab == tab.slug;
                     if render_modal_seg_btn(ui, tokens, meta, &format!("edit.tab.{}", tab.slug), tab.label, selected, &en) {
                         state.active_tab = tab.slug.to_owned();
-                        intents.push_set_edit_params_active_tab(tab.slug);
+                        intents.push(UiIntent::SetEditParamsActiveTab { tab: (tab.slug).into() });
                     }
                 }
             });
             if let Some(formula) = build_live_symbolic_formula(spec, doc) {
                 ui.add_space(4.0);
                 render_formula_bar(ui, tokens, meta, "edit.formula_bar", "Model Formula", &formula);
+            }
+            ui.add_space(4.0);
+            let before_custom = state.custom_title_draft.clone();
+            render_modal_textbox_row(
+                ui,
+                tokens,
+                meta,
+                intents,
+                "edit.custom_title",
+                "Custom Title",
+                "Optional custom result title",
+                &mut state.custom_title_draft,
+                220.0,
+            );
+            if state.custom_title_draft != before_custom {
+                let mut fields = serde_json::Map::new();
+                fields.insert(String::from("custom_title"), serde_json::Value::String(state.custom_title_draft.clone()));
+                intents.push(UiIntent::PatchActiveDialog { fields });
             }
         },
         |ui, state, _w, _h, meta, intents| {
@@ -455,11 +479,11 @@ pub fn render_stat_params_modal(
                     state.saved_defaults.retain(|d| std::mem::discriminant(&d.kind) != disc);
                     state.saved_defaults.push(spec.clone());
                     state.method_saved_as_default = true;
-                    intents.push_save_edit_params_as_default();
+                    intents.push(UiIntent::SaveEditParamsAsDefault);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if render_modal_action_button(ui, tokens, meta, "modal.ok", ok_lbl, true, false, &ControlEnablement::enabled()) {
-                        intents.push_dialog_button("ok");
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                     }
                     if !is_create_mode
                         && doc.result_sheet(result_sheet_id).is_some()
@@ -474,7 +498,7 @@ pub fn render_stat_params_modal(
                             &ControlEnablement::enabled(),
                         )
                     {
-                        intents.push_dialog_button("apply");
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("apply") });
                     }
                     if render_modal_action_button(
                         ui,
@@ -486,7 +510,7 @@ pub fn render_stat_params_modal(
                         false,
                         &ControlEnablement::enabled(),
                     ) {
-                        intents.push_dialog_button("cancel");
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                     }
                 });
             });
@@ -498,10 +522,10 @@ pub fn render_stat_params_modal(
         if state.show_method_reference {
             state.show_method_reference = false;
         } else {
-            intents.push_dialog_button("cancel");
+            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
         }
-    } else if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
-        intents.push_dialog_button("ok");
+    } else if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab) || i.consume_key(Modifiers::CTRL, Key::PageDown)) {
         step_stat_tab(ep, &tabs, state, 1, intents);
     } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) || i.consume_key(Modifiers::CTRL, Key::PageUp)) {
@@ -529,7 +553,7 @@ fn step_stat_tab(
         let cand = tabs[idx].slug;
         if crate::modal_predicates::evaluate_edit_params_tab(ep, cand).enabled {
             state.active_tab = cand.to_owned();
-            intents.push_set_edit_params_active_tab(cand);
+            intents.push(UiIntent::SetEditParamsActiveTab { tab: cand.into() });
             return;
         }
     }
@@ -658,7 +682,7 @@ fn render_stat_design_tab(
                     if let AnalysisKind::GeneralizedLinearModel(g) = &mut next.kind {
                         g.family = fam;
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
             if render_modal_checkbox(
@@ -674,7 +698,7 @@ fn render_stat_design_tab(
                 if let AnalysisKind::GeneralizedLinearModel(g) = &mut next.kind {
                     g.compute_vif = !glm.compute_vif;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
         AnalysisKind::Survival(surv) => render_survival_design(ui, doc, spec, surv, tokens, meta, intents),
@@ -710,7 +734,7 @@ fn render_stat_rm_tab(
                     if let AnalysisKind::FactorialAnova(fa) = &mut next.kind {
                         fa.repeated_measures = rm;
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
             if render_modal_checkbox(
@@ -726,7 +750,7 @@ fn render_stat_rm_tab(
                 if let AnalysisKind::FactorialAnova(fa) = &mut next.kind {
                     fa.mixed_effects_reml = !f.mixed_effects_reml;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             render_df_method_picker(ui, spec, f.df_method, tokens, meta, intents);
             render_cov_structure_picker(ui, spec, f.residual_covariance, tokens, meta, intents);
@@ -788,7 +812,7 @@ fn render_stat_multiplicity_tab(
                 AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity.method = m,
                 _ => {}
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     }
 }
@@ -805,8 +829,10 @@ fn render_stat_options_tab(
     let conf_pct = spec.confidence_level.percent();
     ui.horizontal_wrapped(|ui| {
         for (wid, pct, lbl) in [("edit.conf.90", 90.0_f64, "90% CI"), ("edit.conf.95", 95.0, "95% CI"), ("edit.conf.99", 99.0, "99% CI")] {
-            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, (conf_pct - pct).abs() < 0.05, &ControlEnablement::enabled()) {
-                intents.push_custom_view_action("stat_params", format!("set_confidence:{pct:.1}"));
+            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, (conf_pct - pct).abs() < 0.05, &ControlEnablement::enabled())
+                && let Ok(level) = curvebook_doc::ConfidenceLevel::from_percent(pct)
+            {
+                intents.push(UiIntent::SetEditParamsConfidence { level });
             }
         }
     });
@@ -821,7 +847,7 @@ fn render_stat_options_tab(
             ("edit.pval.custom", "custom", "Custom", matches!(spec.p_value_format, PValueFormat::Custom { .. })),
         ] {
             if render_modal_seg_btn(ui, tokens, meta, wid, lbl, active, &ControlEnablement::enabled()) {
-                intents.push_custom_view_action("stat_params", format!("set_pvalue_format:{slug}"));
+                intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::SetPValueFormat { slug: slug.to_owned() }));
             }
         }
     });
@@ -839,7 +865,7 @@ fn render_stat_options_tab(
         StepperSpec { id_prefix: "edit.pvalue.digits", label: "Custom P-Value Decimal Digits", value_text: &digits.to_string(), enablement: &r9_en },
     );
     if step != 0 {
-        intents.push_custom_view_action("stat_params", format!("spinner:edit.pvalue.digits:{step}"));
+        intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::StepPValueDigits { delta: i32::from(step) }));
     }
 
     if let AnalysisKind::OneWayAnova(a) = &spec.kind {
@@ -876,10 +902,11 @@ fn render_stat_diagnostics_tab(
                 meta,
                 "edit.diag.qq",
                 "Quantile-Quantile (QQ) residual plot",
-                app.view_shards.stat_params.diag_qq_plot,
+                app.canvas_dialogs.edit_params.diag_qq_plot,
                 &diag_en,
             ) {
-                intents.push_custom_view_action("stat_params", "toggle_diag:qq");
+                intents
+                    .push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::ToggleDiag { flag: crate::egui_shell::DiagToggleFlag::QqPlot }));
             }
             if render_modal_checkbox(
                 ui,
@@ -887,10 +914,12 @@ fn render_stat_diagnostics_tab(
                 meta,
                 "edit.diag.shapiro",
                 "Shapiro-Wilk normality check",
-                app.view_shards.stat_params.diag_assumption_checklist,
+                app.canvas_dialogs.edit_params.diag_assumption_checklist,
                 &diag_en,
             ) {
-                intents.push_custom_view_action("stat_params", "toggle_diag:checklist");
+                intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::ToggleDiag {
+                    flag: crate::egui_shell::DiagToggleFlag::Checklist,
+                }));
             }
         }
         AnalysisKind::LinearRegression(lin) => {
@@ -907,7 +936,7 @@ fn render_stat_diagnostics_tab(
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                     l.confidence_bands = !lin.confidence_bands;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             if render_modal_checkbox(
                 ui,
@@ -922,7 +951,7 @@ fn render_stat_diagnostics_tab(
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                     l.prediction_bands = !lin.prediction_bands;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
         _ => {

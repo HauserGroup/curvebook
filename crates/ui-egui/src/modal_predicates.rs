@@ -591,16 +591,59 @@ fn evaluate_pairwise_widget(pw: &PairwiseComparisonsState, widget_id: &str) -> C
     }
 }
 
+#[must_use]
+pub(crate) fn resolve_format_points_fallback_targets(app: &crate::UiApp) -> Vec<(usize, usize, Option<usize>)> {
+    let doc = app.document();
+    if let Some(active_ds_id) = app.brushed_points.first().map(|p| p.sheet_id.clone())
+        && let Some(ds) = doc.data_sheet(&active_ds_id)
+    {
+        let grid_targets = app.grid.selected_graph_point_targets(ds, usize::MAX);
+        if !grid_targets.is_empty() {
+            return grid_targets;
+        }
+        let mut brushed: Vec<(usize, usize, Option<usize>)> = app
+            .brushed_points
+            .iter()
+            .map(|pt| {
+                let subcols = doc.data_sheet(&pt.sheet_id).map_or(1, |d| crate::grid_view::data_set_subcolumn_count(&d.archetype, pt.col));
+                (pt.col, pt.row, (subcols > 1).then_some(pt.subcol))
+            })
+            .collect();
+        brushed.sort_unstable();
+        brushed.dedup();
+        return brushed;
+    }
+    if let ActiveDialog::FormatSelectedPoints { graph_sheet_id } = &app.canvas_dialogs.active_dialog
+        && let Some(graph) = doc.graph_sheet(graph_sheet_id)
+        && let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id)
+    {
+        return app.grid.selected_graph_point_targets(ds, graph.spec.series.len().max(1));
+    }
+    Vec::new()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn sync_format_points_fallback_targets(app: &mut crate::UiApp) {
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatSelectedPoints { .. })
+        && app.canvas_dialogs.format_points.selected_points.is_empty()
+    {
+        let targets = resolve_format_points_fallback_targets(app);
+        if !targets.is_empty() {
+            app.canvas_dialogs.format_points.set_selected_targets(targets);
+        }
+    }
+}
+
 /// Evaluate dialog footer buttons (`ok`, `apply`, `cancel`, `back`, `next`, `create`, `preview`)
 /// with live [`crate::UiApp`] context (including brushed/grid fallback targets for
 /// `FormatSelectedPoints`).
 #[must_use]
 pub fn evaluate_dialog_button_for_app(app: &crate::UiApp, action: &str) -> Option<ControlEnablement> {
-    let norm = normalize_key(action);
+    let norm = action.trim().to_ascii_lowercase();
     if let ActiveDialog::FormatSelectedPoints { graph_sheet_id } = &app.canvas_dialogs.active_dialog
-        && matches!(norm.as_str(), "ok" | "apply" | "cancel")
+        && matches!(norm.as_str(), "ok" | "cancel")
     {
-        let has_fallback = !crate::gui_actions::resolve_format_points_fallback_targets(app).is_empty();
+        let has_fallback = !resolve_format_points_fallback_targets(app).is_empty();
         return Some(evaluate_format_points_button_with_fallback(&app.canvas_dialogs, app.document(), graph_sheet_id, &norm, has_fallback));
     }
     evaluate_dialog_button(&app.canvas_dialogs, app.document(), action)
@@ -610,11 +653,41 @@ pub fn evaluate_dialog_button_for_app(app: &crate::UiApp, action: &str) -> Optio
 /// for `ui.inspect` and `ui.answer_dialog` validation.
 #[must_use]
 pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument, action: &str) -> Option<ControlEnablement> {
-    let norm = normalize_key(action);
+    let norm = action.trim().to_ascii_lowercase();
     match norm.as_str() {
         "cancel" => return Some(ControlEnablement::enabled()),
         "ok" | "apply" | "create" | "next" | "back" | "preview" => {}
         _ => return None,
+    }
+
+    match &dialogs.active_dialog {
+        ActiveDialog::None => {}
+        ActiveDialog::PowerAndSampleSize => {
+            if !matches!(norm.as_str(), "ok" | "create" | "next" | "back") {
+                return None;
+            }
+        }
+        ActiveDialog::EditAnalysisParameters { .. }
+        | ActiveDialog::ChangeGraphType { .. }
+        | ActiveDialog::FormatAxes { .. }
+        | ActiveDialog::PairwiseComparisons { .. }
+        | ActiveDialog::FormatGraph { .. }
+        | ActiveDialog::FormatEmbeddedTable { .. }
+        | ActiveDialog::FormatImage { .. } => {
+            if !matches!(norm.as_str(), "ok" | "apply") {
+                return None;
+            }
+        }
+        ActiveDialog::ConvertArchetype { .. } => {
+            if !matches!(norm.as_str(), "ok" | "preview") {
+                return None;
+            }
+        }
+        _ => {
+            if norm != "ok" {
+                return None;
+            }
+        }
     }
 
     Some(match &dialogs.active_dialog {
@@ -762,7 +835,7 @@ fn evaluate_format_points_button_with_fallback(
     button: &str,
     has_brushed_fallback: bool,
 ) -> ControlEnablement {
-    if !matches!(button, "ok" | "apply") {
+    if button != "ok" {
         return ControlEnablement::enabled();
     }
     if doc.graph_sheet(graph_id).is_none() {

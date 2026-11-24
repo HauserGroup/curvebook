@@ -8,7 +8,6 @@ use curvebook_doc::{
     MultipleVariablesTable, NestedTable, PartsOfWholeTable, ProjectDocument, ResultStatus, SheetFolderKind, SheetId, SheetSection, SubcolumnMode,
     SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
 };
-use curvebook_engine::Session;
 use curvebook_palette::Rgba8;
 use curvebook_tools::{NavigatorDragState, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
@@ -42,17 +41,6 @@ impl NavigatorBadgeColor {
             Self::Green => Rgba8::rgb(22, 163, 74),
             Self::Red => Rgba8::rgb(220, 38, 38),
             Self::Charcoal => Rgba8::rgb(55, 65, 81),
-        }
-    }
-
-    /// Map a document [`LinkBorderColor`] into its corresponding badge color.
-    #[must_use]
-    pub const fn from_link_border(color: LinkBorderColor) -> Self {
-        match color {
-            LinkBorderColor::Blue => Self::Blue,
-            LinkBorderColor::Green => Self::Green,
-            LinkBorderColor::Red => Self::Red,
-            LinkBorderColor::Charcoal => Self::Charcoal,
         }
     }
 }
@@ -208,6 +196,7 @@ impl TableCreationDraft {
 
     /// Update replicate count `k` (`1..=MAX_SUBCOLUMNS`) and keep `subcolumn_mode` synchronized
     /// for archetypes that support raw replicate subcolumns (`Xy`, `Grouped`, `Nested`).
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_replicates(mut self, k: usize) -> Self {
         let clamped = k.max(1);
@@ -223,6 +212,7 @@ impl TableCreationDraft {
     }
 
     /// Update the `Column` design hint (`UnpairedReplicates`, `PairedRepeatedMeasures`, `PrecomputedError`).
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_column_design(mut self, design: ColumnDesignHint) -> Self {
         self.column_design = design;
@@ -269,6 +259,7 @@ impl TableCreationDraft {
     }
 
     /// Emit a canonical `"sheet.createData"` command intent for the headless engine.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn to_command_intent(&self) -> ToolCommandIntent {
         ToolCommandIntent {
@@ -440,6 +431,7 @@ impl Default for ClonePipelineDraft {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl ClonePipelineDraft {
     /// Emit a `"sheet.clonePipeline"` command intent when `source_sheet_id` is configured.
     #[must_use]
@@ -492,19 +484,14 @@ impl Default for WelcomeWizardState {
 
 impl WelcomeWizardState {
     /// Move keyboard focus ring forward across the 8 table archetypes.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn focus_next_archetype(&mut self) {
         let idx = (self.focused_archetype_index + 1) % TableKind::ALL.len();
         self.select_archetype(TableKind::ALL[idx]);
     }
 
-    /// Move keyboard focus ring backward across the 8 table archetypes.
-    pub fn focus_prev_archetype(&mut self) {
-        let len = TableKind::ALL.len();
-        let idx = (self.focused_archetype_index + len - 1) % len;
-        self.select_archetype(TableKind::ALL[idx]);
-    }
-
     /// Select `kind` and update `focused_archetype_index` + `table_draft`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn select_archetype(&mut self, kind: TableKind) {
         if let Some(pos) = TableKind::ALL.iter().position(|&k| k == kind) {
             self.focused_archetype_index = pos;
@@ -515,6 +502,7 @@ impl WelcomeWizardState {
     }
 
     /// Update replicate count `k` on the current table creation draft.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_replicates(&mut self, k: usize) {
         self.table_draft = self.table_draft.clone().with_replicates(k);
     }
@@ -672,6 +660,7 @@ impl Default for WorkspaceNavState {
 }
 
 /// Resolve the live zero-based index of `sheet_id` inside `folder` of `doc`, if still present.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn live_sheet_index_in_folder(doc: &ProjectDocument, folder: SheetFolderKind, sheet_id: &str) -> Option<usize> {
     match folder {
@@ -683,6 +672,7 @@ pub fn live_sheet_index_in_folder(doc: &ProjectDocument, folder: SheetFolderKind
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn folder_len(doc: &ProjectDocument, folder: SheetFolderKind) -> usize {
     match folder {
         SheetFolderKind::Data => doc.data_sheets.len(),
@@ -701,16 +691,19 @@ impl WorkspaceNavState {
     }
 
     /// Begin dragging a navigator sheet within `folder` starting at `from_index`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn begin_sheet_drag(&mut self, folder: SheetFolderKind, sheet_id: impl Into<String>, from_index: usize) {
         self.navigator_drag.begin_drag(folder, sheet_id, from_index);
     }
 
     /// Update the live drop slot index during an active navigator sheet drag.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn update_sheet_hover(&mut self, to_index: usize) {
         self.navigator_drag.update_hover(to_index);
     }
 
     /// Update the live drop slot index only when `folder` matches the dragged sheet's folder.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn update_sheet_hover_in_folder(&mut self, folder: SheetFolderKind, to_index: usize) {
         self.navigator_drag.update_hover_in_folder(folder, to_index);
     }
@@ -721,6 +714,7 @@ impl WorkspaceNavState {
     }
 
     /// Commit an active navigator drag-reorder as an engine `("sheet.reorder", payload)` command pair.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn commit_sheet_drop_command(&mut self) -> Option<(&'static str, Value)> {
         let (folder, from_index, to_index) = self.navigator_drag.commit_drop()?;
         if from_index == to_index {
@@ -732,6 +726,7 @@ impl WorkspaceNavState {
     /// Commit an active navigator drag-reorder by resolving the dragged `sheet_id` against the
     /// live `ProjectDocument` (`R1-S11-11`) rather than relying on the start index captured before
     /// mid-drag edits.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn commit_sheet_drop_command_for_doc(&mut self, doc: &ProjectDocument) -> Option<(&'static str, Value)> {
         let (folder, sheet_id, _captured_from_index, raw_to_index) = self.navigator_drag.commit_drop_with_sheet()?;
         let live_from_index = live_sheet_index_in_folder(doc, folder, &sheet_id)?;
@@ -756,6 +751,7 @@ impl WorkspaceNavState {
     }
 
     /// Select a gallery card (single-select when `additive = false`, toggle membership when `additive = true`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn select_gallery_card(&mut self, sheet_id: &SheetId, additive: bool) {
         if additive {
             if !self.gallery.selected_ids.remove(sheet_id) {
@@ -771,6 +767,7 @@ impl WorkspaceNavState {
     }
 
     /// Clear all multi-selected Portfolio Gallery sheet IDs.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn clear_gallery_selection(&mut self) {
         self.gallery.selected_ids.clear();
         for card in &mut self.gallery.cards {
@@ -883,6 +880,7 @@ impl WorkspaceNavState {
     }
 
     /// Toggle collapsed state for a [`curvebook_doc::FloatingNote`] identifier and return the new collapsed flag.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn toggle_floating_note(&mut self, note_id: &str) -> bool {
         let collapsed = self.floating_notes_collapsed.entry(note_id.to_owned()).or_insert(false);
         *collapsed = !*collapsed;
@@ -890,6 +888,7 @@ impl WorkspaceNavState {
     }
 
     /// Return whether a [`curvebook_doc::FloatingNote`] is currently collapsed in the UI.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn is_floating_note_collapsed(&self, note_id: &str) -> bool {
         self.floating_notes_collapsed.get(note_id).copied().unwrap_or(false)
@@ -899,32 +898,21 @@ impl WorkspaceNavState {
 impl WorkspaceNavState {
     /// Switch between [`NavigatorNestingMode::SeparateFolders`] and
     /// [`NavigatorNestingMode::NestedResultsUnderData`] and refresh from `doc`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_nesting_mode(&mut self, mode: NavigatorNestingMode, doc: &ProjectDocument) {
         self.nesting_mode = mode;
         self.sync_from_document(doc);
     }
 
     /// Update the live navigator search filter and refresh entries from `doc`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_search_query(&mut self, query: impl Into<String>, doc: &ProjectDocument) {
         self.search_query = query.into();
         self.sync_from_document(doc);
     }
 
-    /// Toggle collapsed state for one of the five navigator folders.
-    pub fn toggle_folder_collapsed(&mut self, section: SheetSection) {
-        if let Some(pos) = self.collapsed_sections.iter().position(|&s| s == section) {
-            self.collapsed_sections.remove(pos);
-        } else {
-            self.collapsed_sections.push(section);
-        }
-        for folder in &mut self.folders {
-            if folder.section == section {
-                folder.collapsed = self.collapsed_sections.contains(&section);
-            }
-        }
-    }
-
     /// Enqueue a `sheet.select` intent for a click in the main Project Navigator without mutating `doc`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn click_navigator_entry(&mut self, doc: &ProjectDocument, sheet_id: &SheetId) -> Result<(), DocError> {
         if doc.sheet_section(sheet_id).is_none() {
             return Err(DocError::SheetNotFound { sheet_id: sheet_id.clone() });
@@ -939,6 +927,7 @@ impl WorkspaceNavState {
     /// Enqueue a `sheet.select` intent for a click or double-click inside the Family pane without mutating `doc`:
     /// - Single-clicking a `Result`, `Graph`, `Layout`, or `Info` keeps `family_anchor_sheet_id` stable.
     /// - Double-clicking OR choosing a `Data` sheet shifts `family_anchor_sheet_id`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn click_family_entry(&mut self, doc: &ProjectDocument, sheet_id: &SheetId, double_click: bool) -> Result<(), DocError> {
         let Some(section) = doc.sheet_section(sheet_id) else {
             return Err(DocError::SheetNotFound { sheet_id: sheet_id.clone() });
@@ -950,12 +939,8 @@ impl WorkspaceNavState {
         Ok(())
     }
 
-    /// Synchronize navigator entries against a [`Session`] without mutating document state.
-    pub fn sync_from_session(&mut self, session: &Session) {
-        self.sync_from_document(session.document());
-    }
-
     /// Borrow all matching entries for the active search filter.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn filtered_entries(&self) -> Vec<&NavigatorEntry> {
         self.entries.iter().collect()
@@ -1557,4 +1542,22 @@ fn build_nested_fixture(sheet_id: SheetId, title: &str) -> Result<DataSheet, Doc
         }
     }
     DataSheet::new(sheet_id, title, TableArchetype::Nested(nested))
+}
+
+/// Return all [`FloatingNote`](curvebook_doc::FloatingNote) overlays attached to sheet `id`.
+#[must_use]
+pub(crate) fn sheet_floating_notes<'a>(doc: &'a ProjectDocument, id: &SheetId) -> &'a [curvebook_doc::FloatingNote] {
+    if let Some(ds) = doc.data_sheet(id) {
+        &ds.floating_notes
+    } else if let Some(info) = doc.info_sheet(id) {
+        &info.floating_notes
+    } else if let Some(rs) = doc.result_sheet(id) {
+        &rs.floating_notes
+    } else if let Some(gs) = doc.graph_sheet(id) {
+        &gs.floating_notes
+    } else if let Some(ls) = doc.layout_sheet(id) {
+        &ls.floating_notes
+    } else {
+        &[]
+    }
 }

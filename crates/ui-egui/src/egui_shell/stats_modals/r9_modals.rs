@@ -11,7 +11,7 @@ use crate::modal_predicates::ControlEnablement;
 use crate::egui_shell::stat_anova_modal::{
     StepperSpec, column_titles_for_draft, render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_section_title, render_stepper_row,
 };
-use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 use super::helpers::{Wave4ModalShell, render_modal_action_button, show_wave4_modal};
 use super::{StatsModalFrameReport, StatsModalsEguiState};
@@ -68,13 +68,15 @@ fn render_randomize_groups_modal(
         |ui, _, _w, _h, meta, intents| {
             render_section_title(ui, tokens, "Treatment Arms Presets");
             ui.horizontal_wrapped(|ui| {
-                for (wid, lbl, payload) in [
-                    ("rand_groups.p2", "2 Arms (Ctrl / Tx)", "rand_groups:arms:two"),
-                    ("rand_groups.p3", "3 Arms (Ctrl / Low / High)", "rand_groups:arms:three"),
-                    ("rand_groups.pw", "Weighted 1:2", "rand_groups:arms:weighted"),
+                for (wid, lbl, raw) in [
+                    ("rand_groups.p2", "2 Arms (Ctrl / Tx)", "Control, Treatment"),
+                    ("rand_groups.p3", "3 Arms (Ctrl / Low / High)", "Control, Low Dose, High Dose"),
+                    ("rand_groups.pw", "Weighted 1:2", "Control:1, Treatment:2"),
                 ] {
                     if render_modal_seg_btn(ui, tokens, meta, wid, lbl, false, &ControlEnablement::enabled()) {
-                        intents.push_custom_view_action("dialogs_graph_misc", payload);
+                        let mut next = rg.clone();
+                        let _ = next.set_groups_from_str(raw);
+                        intents.push(UiIntent::UpdateRandomizeGroupsState(Box::new(next)));
                     }
                 }
             });
@@ -90,7 +92,9 @@ fn render_randomize_groups_modal(
                 },
             );
             if step_n != 0 {
-                intents.push_custom_view_action("dialogs_graph_misc", if step_n > 0 { "rand_groups:n_inc" } else { "rand_groups:n_dec" });
+                let mut next = rg.clone();
+                next.subject_count = if step_n > 0 { (rg.subject_count + 4).min(500) } else { rg.subject_count.saturating_sub(4).max(2) };
+                intents.push(UiIntent::UpdateRandomizeGroupsState(Box::new(next)));
             }
             ui.add_space(4.0);
             render_section_title(ui, tokens, "Randomization Scheme");
@@ -103,7 +107,9 @@ fn render_randomize_groups_modal(
                 rg.scheme == RandomizationSchemeKind::CompleteBalanced,
                 &ControlEnablement::enabled(),
             ) {
-                intents.push_custom_view_action("dialogs_graph_misc", "rand_groups:scheme:balanced");
+                let mut next = rg.clone();
+                next.scheme = RandomizationSchemeKind::CompleteBalanced;
+                intents.push(UiIntent::UpdateRandomizeGroupsState(Box::new(next)));
             }
             if render_modal_radio(
                 ui,
@@ -114,7 +120,9 @@ fn render_randomize_groups_modal(
                 rg.scheme == RandomizationSchemeKind::PermutedBlock,
                 &ControlEnablement::enabled(),
             ) {
-                intents.push_custom_view_action("dialogs_graph_misc", "rand_groups:scheme:block");
+                let mut next = rg.clone();
+                next.scheme = RandomizationSchemeKind::PermutedBlock;
+                intents.push(UiIntent::UpdateRandomizeGroupsState(Box::new(next)));
             }
             if rg.scheme == RandomizationSchemeKind::PermutedBlock {
                 let blk = rg.block_sizes.first().copied().unwrap_or(4);
@@ -130,7 +138,10 @@ fn render_randomize_groups_modal(
                     },
                 );
                 if step_b != 0 {
-                    intents.push_custom_view_action("dialogs_graph_misc", if step_b > 0 { "rand_groups:block_inc" } else { "rand_groups:block_dec" });
+                    let mut next = rg.clone();
+                    let next_blk = if step_b > 0 { (blk + 2).min(64) } else { blk.saturating_sub(2).max(2) };
+                    next.block_sizes = vec![next_blk];
+                    intents.push(UiIntent::UpdateRandomizeGroupsState(Box::new(next)));
                 }
             }
             let step_seed = render_stepper_row(
@@ -145,23 +156,27 @@ fn render_randomize_groups_modal(
                 },
             );
             if step_seed != 0 {
-                intents.push_custom_view_action("dialogs_graph_misc", if step_seed > 0 { "rand_groups:seed_inc" } else { "rand_groups:seed_dec" });
+                let mut next = rg.clone();
+                next.seed = if step_seed > 0 { rg.seed + 1 } else { rg.seed.saturating_sub(1).max(1) };
+                intents.push(UiIntent::UpdateRandomizeGroupsState(Box::new(next)));
             }
         },
         |ui, _state, meta, intents| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ControlEnablement::enabled()) {
-                    intents.push_dialog_button("ok");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
                 if render_modal_action_button(ui, tokens, meta, "modal.cancel", tr(locale, "btn.cancel"), false, false, &ControlEnablement::enabled())
                 {
-                    intents.push_dialog_button("cancel");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
             });
         },
     );
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+    } else if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     }
     StatsModalFrameReport::from(capture)
 }
@@ -207,7 +222,9 @@ fn render_random_sample_modal(
                 for (idx, ds) in doc.data_sheets.iter().enumerate() {
                     let selected = rs.source_sheet_id.as_ref() == Some(&ds.id);
                     if render_modal_radio(ui, tokens, meta, &format!("rand_sample.src.{idx}"), &ds.title, selected, &ControlEnablement::enabled()) {
-                        intents.push_custom_view_action("dialogs_graph_misc", format!("rand_sample:src:{idx}"));
+                        let mut next = rs.clone();
+                        next.source_sheet_id = Some(ds.id.clone());
+                        intents.push(UiIntent::UpdateRandomSampleRowsState(Box::new(next)));
                     }
                 }
                 ui.add_space(4.0);
@@ -223,7 +240,9 @@ fn render_random_sample_modal(
                     },
                 );
                 if step_n != 0 {
-                    intents.push_custom_view_action("dialogs_graph_misc", if step_n > 0 { "rand_sample:n_inc" } else { "rand_sample:n_dec" });
+                    let mut next = rs.clone();
+                    next.sample_size = if step_n > 0 { (rs.sample_size + 5).min(5000) } else { rs.sample_size.saturating_sub(5).max(1) };
+                    intents.push(UiIntent::UpdateRandomSampleRowsState(Box::new(next)));
                 }
                 let step_s = render_stepper_row(
                     ui,
@@ -237,7 +256,9 @@ fn render_random_sample_modal(
                     },
                 );
                 if step_s != 0 {
-                    intents.push_custom_view_action("dialogs_graph_misc", if step_s > 0 { "rand_sample:seed_inc" } else { "rand_sample:seed_dec" });
+                    let mut next = rs.clone();
+                    next.seed = if step_s > 0 { rs.seed + 1 } else { rs.seed.saturating_sub(1).max(1) };
+                    intents.push(UiIntent::UpdateRandomSampleRowsState(Box::new(next)));
                 }
             };
             let render_right = |ui: &mut Ui, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents| {
@@ -251,7 +272,9 @@ fn render_random_sample_modal(
                     rs.proportional_allocation,
                     &prop_en,
                 ) {
-                    intents.push_custom_view_action("dialogs_graph_misc", "rand_sample:proportional");
+                    let mut next = rs.clone();
+                    next.proportional_allocation = !rs.proportional_allocation;
+                    intents.push(UiIntent::UpdateRandomSampleRowsState(Box::new(next)));
                 }
                 if render_modal_radio(
                     ui,
@@ -262,7 +285,9 @@ fn render_random_sample_modal(
                     rs.stratify_column.is_none(),
                     &ControlEnablement::enabled(),
                 ) {
-                    intents.push_custom_view_action("dialogs_graph_misc", "rand_sample:stratify:none");
+                    let mut next = rs.clone();
+                    next.stratify_column = None;
+                    intents.push(UiIntent::UpdateRandomSampleRowsState(Box::new(next)));
                 }
                 for (ci, t) in titles.iter().enumerate() {
                     if render_modal_radio(
@@ -274,7 +299,9 @@ fn render_random_sample_modal(
                         rs.stratify_column == Some(ci),
                         &ControlEnablement::enabled(),
                     ) {
-                        intents.push_custom_view_action("dialogs_graph_misc", format!("rand_sample:stratify:{ci}"));
+                        let mut next = rs.clone();
+                        next.stratify_column = Some(ci);
+                        intents.push(UiIntent::UpdateRandomSampleRowsState(Box::new(next)));
                     }
                 }
             };
@@ -301,17 +328,19 @@ fn render_random_sample_modal(
         |ui, _state, meta, intents| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ControlEnablement::enabled()) {
-                    intents.push_dialog_button("ok");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
                 if render_modal_action_button(ui, tokens, meta, "modal.cancel", tr(locale, "btn.cancel"), false, false, &ControlEnablement::enabled())
                 {
-                    intents.push_dialog_button("cancel");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
             });
         },
     );
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+    } else if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     }
     StatsModalFrameReport::from(capture)
 }
@@ -325,7 +354,7 @@ fn render_simulate_dist_modal(
     intents: &mut PendingUiIntents,
 ) -> StatsModalFrameReport {
     let sd = &app.canvas_dialogs.simulate_distributions;
-    let col_idx = app.view_shards.dialogs_graph_misc.sim_selected_col_idx.min(sd.columns.len().saturating_sub(1));
+    let col_idx = sd.selected_col_idx.min(sd.columns.len().saturating_sub(1));
 
     let mut dummy = ();
     let capture = show_wave4_modal(
@@ -358,7 +387,9 @@ fn render_simulate_dist_modal(
                 },
             );
             if step_rows != 0 {
-                intents.push_custom_view_action("dialogs_graph_misc", if step_rows > 0 { "sim_dist:rows_inc" } else { "sim_dist:rows_dec" });
+                let mut next = sd.clone();
+                next.n_rows = if step_rows > 0 { (sd.n_rows + 25).min(10_000) } else { sd.n_rows.saturating_sub(25).max(5) };
+                intents.push(UiIntent::UpdateSimulateDistributionsState(Box::new(next)));
             }
             let step_seed = render_stepper_row(
                 ui,
@@ -372,7 +403,9 @@ fn render_simulate_dist_modal(
                 },
             );
             if step_seed != 0 {
-                intents.push_custom_view_action("dialogs_graph_misc", if step_seed > 0 { "sim_dist:seed_inc" } else { "sim_dist:seed_dec" });
+                let mut next = sd.clone();
+                next.seed = if step_seed > 0 { sd.seed + 1 } else { sd.seed.saturating_sub(1).max(1) };
+                intents.push(UiIntent::UpdateSimulateDistributionsState(Box::new(next)));
             }
             if render_modal_checkbox(
                 ui,
@@ -383,34 +416,48 @@ fn render_simulate_dist_modal(
                 sd.use_multiple_variables,
                 &ControlEnablement::enabled(),
             ) {
-                intents.push_custom_view_action("dialogs_graph_misc", "sim_dist:multi_var");
+                let mut next = sd.clone();
+                next.use_multiple_variables = !sd.use_multiple_variables;
+                intents.push(UiIntent::UpdateSimulateDistributionsState(Box::new(next)));
             }
             ui.add_space(4.0);
             render_section_title(ui, tokens, "Simulated Columns");
             ui.horizontal_wrapped(|ui| {
                 for (i, c) in sd.columns.iter().enumerate() {
                     if render_modal_seg_btn(ui, tokens, meta, &format!("sim_dist.col.{i}"), &c.name, i == col_idx, &ControlEnablement::enabled()) {
-                        intents.push_custom_view_action("dialogs_graph_misc", format!("sim_dist:col:{i}"));
+                        let mut next = sd.clone();
+                        next.selected_col_idx = i.min(next.columns.len().saturating_sub(1));
+                        intents.push(UiIntent::UpdateSimulateDistributionsState(Box::new(next)));
                     }
                 }
                 if render_modal_seg_btn(ui, tokens, meta, "sim_dist.add_col", "+ Add Column", false, &ControlEnablement::enabled()) {
-                    intents.push_custom_view_action("dialogs_graph_misc", "sim_dist:add_col");
+                    let mut next = sd.clone();
+                    let idx = next.columns.len();
+                    if idx < 12 {
+                        next.columns.push(crate::dialogs_r9::SimulatedDistColumnDraft { name: format!("Var {}", idx + 1), ..Default::default() });
+                        next.selected_col_idx = idx;
+                    }
+                    intents.push(UiIntent::UpdateSimulateDistributionsState(Box::new(next)));
                 }
             });
             if let Some(col) = sd.columns.get(col_idx) {
                 ui.add_space(4.0);
                 render_section_title(ui, tokens, "Distribution Family");
                 ui.horizontal_wrapped(|ui| {
-                    for (wid, slug, lbl, kind) in [
-                        ("sim_dist.d.uni", "uniform", "Uniform", SimDistKind::Uniform),
-                        ("sim_dist.d.gauss", "gaussian", "Gaussian", SimDistKind::Gaussian),
-                        ("sim_dist.d.logn", "lognormal", "LogNormal", SimDistKind::LogNormal),
-                        ("sim_dist.d.bin", "binomial", "Binomial", SimDistKind::Binomial),
-                        ("sim_dist.d.pois", "poisson", "Poisson", SimDistKind::Poisson),
-                        ("sim_dist.d.exp", "exponential", "Exponential", SimDistKind::Exponential),
+                    for (wid, lbl, kind) in [
+                        ("sim_dist.d.uni", "Uniform", SimDistKind::Uniform),
+                        ("sim_dist.d.gauss", "Gaussian", SimDistKind::Gaussian),
+                        ("sim_dist.d.logn", "LogNormal", SimDistKind::LogNormal),
+                        ("sim_dist.d.bin", "Binomial", SimDistKind::Binomial),
+                        ("sim_dist.d.pois", "Poisson", SimDistKind::Poisson),
+                        ("sim_dist.d.exp", "Exponential", SimDistKind::Exponential),
                     ] {
                         if render_modal_seg_btn(ui, tokens, meta, wid, lbl, col.distribution == kind, &ControlEnablement::enabled()) {
-                            intents.push_custom_view_action("dialogs_graph_misc", format!("sim_dist:dist:{slug}"));
+                            let mut next = sd.clone();
+                            if let Some(c) = next.columns.get_mut(col_idx) {
+                                c.distribution = kind;
+                            }
+                            intents.push(UiIntent::UpdateSimulateDistributionsState(Box::new(next)));
                         }
                     }
                 });
@@ -429,7 +476,22 @@ fn render_simulate_dist_modal(
                     StepperSpec { id_prefix: "sim_dist.p1", label: p1_lbl, value_text: &p1_val, enablement: &ControlEnablement::enabled() },
                 );
                 if s1 != 0 {
-                    intents.push_custom_view_action("dialogs_graph_misc", if s1 > 0 { "sim_dist:param:p1_inc" } else { "sim_dist:param:p1_dec" });
+                    let mut next = sd.clone();
+                    let s = if s1 > 0 { 1.0 } else { -1.0 };
+                    if let Some(c) = next.columns.get_mut(col_idx) {
+                        match c.distribution {
+                            SimDistKind::Uniform => c.min = (c.min + s).min(c.max - 0.5),
+                            SimDistKind::Gaussian => c.mean += s,
+                            SimDistKind::LogNormal => c.mean_log += s * 0.25,
+                            SimDistKind::Binomial => {
+                                let t = i64::try_from(c.trials).unwrap_or(10) + if s > 0.0 { 1 } else { -1 };
+                                c.trials = u64::try_from(t.clamp(1, 500)).unwrap_or(10);
+                            }
+                            SimDistKind::Poisson => c.lambda = (c.lambda + s).clamp(0.5, 500.0),
+                            SimDistKind::Exponential => c.rate = (c.rate + s * 0.25).clamp(0.05, 100.0),
+                        }
+                    }
+                    intents.push(UiIntent::UpdateSimulateDistributionsState(Box::new(next)));
                 }
                 if let Some((p2_lbl, p2_val)) = p2_opt {
                     let s2 = render_stepper_row(
@@ -439,7 +501,18 @@ fn render_simulate_dist_modal(
                         StepperSpec { id_prefix: "sim_dist.p2", label: p2_lbl, value_text: &p2_val, enablement: &ControlEnablement::enabled() },
                     );
                     if s2 != 0 {
-                        intents.push_custom_view_action("dialogs_graph_misc", if s2 > 0 { "sim_dist:param:p2_inc" } else { "sim_dist:param:p2_dec" });
+                        let mut next = sd.clone();
+                        let s = if s2 > 0 { 1.0 } else { -1.0 };
+                        if let Some(c) = next.columns.get_mut(col_idx) {
+                            match c.distribution {
+                                SimDistKind::Uniform => c.max = (c.max + s).max(c.min + 0.5),
+                                SimDistKind::Gaussian => c.sd = (c.sd + s * 0.5).clamp(0.1, 1000.0),
+                                SimDistKind::LogNormal => c.sd_log = (c.sd_log + s * 0.1).clamp(0.05, 10.0),
+                                SimDistKind::Binomial => c.p = (c.p + s * 0.05).clamp(0.05, 0.95),
+                                SimDistKind::Poisson | SimDistKind::Exponential => {}
+                            }
+                        }
+                        intents.push(UiIntent::UpdateSimulateDistributionsState(Box::new(next)));
                     }
                 }
             }
@@ -447,17 +520,19 @@ fn render_simulate_dist_modal(
         |ui, _state, meta, intents| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ControlEnablement::enabled()) {
-                    intents.push_dialog_button("ok");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
                 if render_modal_action_button(ui, tokens, meta, "modal.cancel", tr(locale, "btn.cancel"), false, false, &ControlEnablement::enabled())
                 {
-                    intents.push_dialog_button("cancel");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
             });
         },
     );
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+    } else if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     }
     StatsModalFrameReport::from(capture)
 }

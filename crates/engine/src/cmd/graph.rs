@@ -18,18 +18,51 @@ use serde_json::{Map, Value, json};
 use super::analysis::{de_present_opt, merge_json_struct, strip_keys};
 use super::export::{compile_scene_for_sheet, de_opt_u16, de_opt_usize};
 use super::helpers::{
-    de_some, deserialize_patch, next_unique_sheet_id, next_unique_sheet_id_excluding, parse_serde_enum, parse_serde_enum_str, parse_sheet_id,
-    require_graph_sheet, require_graph_sheet_mut, require_result_sheet, sheet_id_exists, validate_point_override_in_bounds,
+    bad_input, bad_input_ptr, de_some, deserialize_patch, has_analyzable_data_sheet, has_graph_or_layout, has_graph_sheet, next_unique_sheet_id,
+    next_unique_sheet_id_excluding, parse_serde_enum, parse_serde_enum_str, parse_sheet_id, require_graph_sheet, require_graph_sheet_mut,
+    require_result_sheet, sheet_id_exists, validate_point_override_in_bounds,
 };
 use super::params::{
     any_json_schema, array_schema, bool_schema, deserialize_strict, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
     obj_schema, parse_params, str_schema,
 };
-use super::{CommandGroup, CommandSpec, Ctx, Effects};
-use crate::{CommandOutcome, EngineError, Session};
+use super::{CommandGroup, CommandSpec, Ctx, Effects, command_specs};
+use crate::{CommandOutcome, EngineError};
 
 const MUTATE_IDEMPOTENT: Effects = Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT);
 const READ_ONLY_IDEMPOTENT: Effects = Effects::NONE.with(Effects::IDEMPOTENT);
+
+macro_rules! apply_opt {
+    ($($src:expr => $dst:expr),+ $(,)?) => {
+        $(
+            if let Some(val) = $src {
+                $dst = val;
+            }
+        )+
+    };
+}
+
+fn mutate_graph_sheet<T>(
+    doc: &mut ProjectDocument,
+    graph_id: &curvebook_doc::SheetId,
+    initialize: bool,
+    validate_in_doc: bool,
+    f: impl FnOnce(&ProjectDocument, &mut GraphSpec) -> Result<T, EngineError>,
+) -> Result<T, EngineError> {
+    let mut spec = require_graph_sheet(doc, graph_id)?.spec.clone();
+    let out = f(doc, &mut spec)?;
+    if validate_in_doc {
+        validate_graph_spec_in_doc(doc, graph_id, &spec)?;
+    } else {
+        spec.validate()?;
+    }
+    let graph = require_graph_sheet_mut(doc, graph_id)?;
+    graph.spec = spec;
+    if initialize {
+        graph.initialized = true;
+    }
+    Ok(out)
+}
 
 /// Return all registered graph configuration and preflight command specifications.
 #[must_use]
@@ -37,241 +70,196 @@ pub fn specs() -> &'static [CommandSpec] {
     SPECS
 }
 
-static SPECS: &[CommandSpec] = &[
-    CommandSpec {
+static SPECS: &[CommandSpec] = &command_specs!(
+    CommandGroup::Graph;
+    {
         id: "graph.create",
         label: "New Graph",
         menu_path: "Insert/New Graph...",
-        shortcut: "",
         summary: "Create a new graph sheet bound to an input data sheet with optional kind, title, and initialization state.",
         beginner: "Creates a new graph linked to one of your data tables.",
-        group: CommandGroup::Graph,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: schema_graph_create,
-        enabled: has_data_sheet,
+        enabled: has_analyzable_data_sheet,
         run: run_graph_create,
     },
-    CommandSpec {
+    {
         id: "graph.initialize",
         label: "Initialize Graph",
         menu_path: "Graph/Initialize...",
-        shortcut: "",
         summary: "Initialize an uninitialized graph sheet, applying its graph kind and default series styling.",
         beginner: "Chooses an initial plot type for a newly created graph sheet.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_graph_initialize,
         enabled: has_graph_sheet,
         run: run_graph_initialize,
     },
-    CommandSpec {
+    {
         id: "graph.setKind",
         label: "Change Graph Type",
         menu_path: "Change/Graph Type...",
-        shortcut: "",
         summary: "Switch a graph's visualization type (XY, column, grouped, survival, multivariate, diagnostic) with optional style reset.",
         beginner: "Changes the chart type of an existing graph without recreating the sheet.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_graph_set_kind,
         enabled: has_graph_sheet,
         run: run_graph_set_kind,
     },
-    CommandSpec {
+    {
         id: "graph.setSpec",
         label: "Update Graph Specification",
         menu_path: "Format/Graph...",
-        shortcut: "",
         summary: "Patch a graph's full GraphSpec, palette, frame, legend, title, survival options, or multivariate encoding.",
         beginner: "Updates visual graph settings such as palette, frame style, legend, or multivariate channels.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_graph_set_spec,
         enabled: has_graph_sheet,
         run: run_graph_set_spec,
     },
-    CommandSpec {
+    {
         id: "graph.setAxes",
         label: "Format Axes",
         menu_path: "Format/Axes...",
-        shortcut: "",
         summary: "Configure X, Y, and right-hand Y2 axes including log/probit/logit scales, segmented breaks, thresholds, and frame presets.",
         beginner: "Adjusts axis limits, log scales, titles, broken-axis gaps, and frame styling.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_graph_set_axes,
         enabled: has_graph_sheet,
         run: run_graph_set_axes,
     },
-    CommandSpec {
+    {
         id: "graph.setAdditionalTicks",
         label: "Set Additional Axis Ticks",
         menu_path: "Format/Additional Ticks...",
-        shortcut: "",
         summary: "Set custom callout ticks and optional gridlines along the `x`, `y`, or `y2` axis.",
         beginner: "Places custom reference ticks and gridlines at specific axis coordinates.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_graph_set_additional_ticks,
         enabled: has_graph_sheet,
         run: run_graph_set_additional_ticks,
     },
-    CommandSpec {
+    {
         id: "graph.setSeries",
         label: "Format Data Series",
         menu_path: "Format/Data on Graph...",
-        shortcut: "",
         summary: "Style one or all data series: colors, markers, connecting lines, error bars, right-Y binding, or multivariate encoding.",
         beginner: "Customizes markers, connecting lines, error bars, and colors for curves or bars.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_graph_set_series,
         enabled: has_graph_sheet,
         run: run_graph_set_series,
     },
-    CommandSpec {
+    {
         id: "graph.setRegressionOverlay",
         label: "Overlay Regression Curve",
         menu_path: "Graph/Regression Overlay...",
-        shortcut: "",
         summary: "Bind or clear a fitted curve overlay with optional confidence/prediction bands on one or all graph series.",
         beginner: "Overlays a curve fit line and confidence ribbons from a result sheet onto your graph.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_graph_set_regression_overlay,
         enabled: has_graph_sheet,
         run: run_graph_set_regression_overlay,
     },
-    CommandSpec {
+    {
         id: "graph.addComparisonBrackets",
         label: "Add Pairwise Significance Brackets",
         menu_path: "Draw/Pairwise Comparison Brackets...",
-        shortcut: "",
         summary: "Add statistical comparison brackets (stars or numeric P/q values) driven by a result sheet's pairwise comparisons.",
         beginner: "Draws significance brackets above compared groups using P values from your statistical test.",
-        group: CommandGroup::Graph,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: schema_graph_add_comparison_brackets,
         enabled: has_graph_sheet,
         run: run_graph_add_comparison_brackets,
     },
-    CommandSpec {
+    {
         id: "graph.addAnnotation",
         label: "Add Graph Annotation",
         menu_path: "Draw/Annotation...",
-        shortcut: "",
         summary: "Add a text box, line/arrow, shape, live embedded result table, or live fitted model equation annotation to a graph.",
         beginner: "Places labels, arrows, geometric callouts, embedded result summaries, or model equations onto a graph.",
-        group: CommandGroup::Graph,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: schema_graph_add_annotation,
         enabled: has_graph_sheet,
         run: run_graph_add_annotation,
     },
-    CommandSpec {
+    {
         id: "graph.applyStyleFrom",
         label: "Apply Graph Style From...",
         menu_path: "Format/Apply Style From...",
-        shortcut: "",
         summary: "Copy visual styling (palette, frame, axis styling, legend, and series appearances) from a donor graph.",
         beginner: "Copies the visual style of another graph sheet onto this graph without changing its data.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_graph_apply_style_from,
         enabled: has_graph_sheet,
         run: run_graph_apply_style_from,
     },
-    CommandSpec {
+    {
         id: "graph.applyCanvasPreset",
         label: "Apply Graph Canvas Preset",
         menu_path: "Format/Canvas Size Preset...",
-        shortcut: "",
         summary: "Resize a graph canvas to a journal column, slide, or poster preset (`KeepTypographyPt` or `ProportionalScale`).",
         beginner: "Resizes a graph to standard journal figure widths and runs a publication preflight check.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_apply_canvas_preset,
         enabled: has_graph_sheet,
         run: run_graph_apply_canvas_preset,
     },
-    CommandSpec {
+    {
         id: "graph.preflightCheck",
         label: "Preflight Check Figure",
         menu_path: "Analyze/Preflight Check",
-        shortcut: "",
         summary: "Compile a graph or layout sheet and check typography, hairlines, clipping, and overlap readiness.",
         beginner: "Audits a graph or layout for publication print issues like tiny fonts or clipped labels.",
-        group: CommandGroup::Graph,
         effects: READ_ONLY_IDEMPOTENT,
         input_schema: schema_graph_preflight_check,
         enabled: has_graph_or_layout,
         run: run_graph_preflight_check,
     },
-    CommandSpec {
+    {
         id: "graph.formatSelectedPoints",
         label: "Format Selected Points",
         menu_path: "Format/Selected Points...",
-        shortcut: "",
         summary: "Apply, merge, replace, or clear per-point visual overrides across one or more selected graph points.",
         beginner: "Highlights or hides specific data points (changing color, symbol, size, border, or visibility) without modifying the whole series.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_graph_format_selected_points,
         enabled: has_graph_sheet,
         run: run_graph_format_selected_points,
     },
-    CommandSpec {
+    {
         id: "graph.setCompactLetterDisplay",
         label: "Compact Letter Display",
         menu_path: "Draw/Compact Letter Display...",
-        shortcut: "",
         summary: "Configure or toggle Piepho (2004) compact letter display significance grouping letters and pairwise display mode on a graph.",
         beginner: "Places shared grouping letters (a, b, ab) above graph groups to summarize all-pairwise statistical comparisons.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_graph_set_compact_letter_display,
         enabled: has_graph_sheet,
         run: run_graph_set_compact_letter_display,
     },
-    CommandSpec {
+    {
         id: "graph.insertImage",
         label: "Insert Image on Graph",
         menu_path: "Insert/Image on Graph...",
-        shortcut: "",
         summary: "Embed a PNG, JPEG, or TIFF raster image annotation onto a graph sheet.",
         beginner: "Inserts a microscopy micrograph, Western blot, or schematic photo onto a graph.",
-        group: CommandGroup::Graph,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM),
         input_schema: schema_graph_insert_image,
         enabled: has_graph_sheet,
         run: run_graph_insert_image,
     },
-    CommandSpec {
+    {
         id: "graph.updateImage",
         label: "Format Embedded Graph Image",
         menu_path: "Format/Embedded Image...",
-        shortcut: "",
         summary: "Update placement bounds, aspect-ratio lock, rotation, crop insets, or border on an embedded graph image.",
         beginner: "Crops, rotates, resizes, or frames an embedded image on a graph.",
-        group: CommandGroup::Graph,
         effects: MUTATE_IDEMPOTENT,
         input_schema: schema_graph_update_image,
         enabled: has_graph_sheet,
         run: run_graph_update_image,
     },
-];
-
-fn has_data_sheet(session: &Session) -> bool {
-    !session.document().data_sheets.is_empty() || session.document().result_sheets.iter().any(|r| r.analyzable_data.is_some())
-}
-
-fn has_graph_sheet(session: &Session) -> bool {
-    !session.document().graph_sheets.is_empty()
-}
-
-pub(super) fn has_graph_or_layout(session: &Session) -> bool {
-    !session.document().graph_sheets.is_empty() || !session.document().layout_sheets.is_empty()
-}
+);
 
 // ---------------------------------------------------------------------------
 // Shared Graph / Layout Helpers (reused by layout.rs)
@@ -1145,23 +1133,20 @@ fn run_graph_initialize(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         curvebook_doc::validate_title(title)?;
     }
 
-    let mut updated_spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
-    if let Some(kind) = kind_opt {
-        apply_graph_kind(&mut updated_spec, kind, true);
-    }
-    validate_graph_spec_in_doc(ctx.session.document(), &id, &updated_spec)?;
-
-    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
-    graph.initialized = true;
+    let graph_kind = mutate_graph_sheet(&mut ctx.session.doc, &id, true, true, |_, updated_spec| {
+        if let Some(kind) = kind_opt {
+            apply_graph_kind(updated_spec, kind, true);
+        }
+        Ok(updated_spec.kind)
+    })?;
     if let Some(title) = params.title {
-        graph.title = title;
+        require_graph_sheet_mut(&mut ctx.session.doc, &id)?.title = title;
     }
-    graph.spec = updated_spec;
 
     Ok(CommandOutcome::mutated(
         "graph.initialize",
         format!("initialized graph `{id}`"),
-        json!({ "sheet_id": id.as_str(), "kind": graph.spec.kind, "initialized": true }),
+        json!({ "sheet_id": id.as_str(), "kind": graph_kind, "initialized": true }),
     ))
 }
 
@@ -1493,12 +1478,10 @@ fn run_graph_set_kind(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
     let id = parse_sheet_id(&params.sheet_id)?;
     let reset_series = params.reset_series_style.unwrap_or(true);
 
-    let mut spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
-    apply_graph_kind_with_option(&mut spec, kind, opt_arrangement, gdo_preset, reset_series);
-    validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
-    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
-    graph.initialized = true;
-    graph.spec = spec;
+    mutate_graph_sheet(&mut ctx.session.doc, &id, true, true, |_, spec| {
+        apply_graph_kind_with_option(spec, kind, opt_arrangement, gdo_preset, reset_series);
+        Ok(())
+    })?;
 
     let payload = match option_id {
         Some(opt) => json!({ "sheet_id": id.as_str(), "kind": kind, "option_id": opt }),
@@ -1511,79 +1494,75 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
     let schema = schema_graph_set_spec();
     let params: GraphSetSpecParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
-    let current_spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
 
     if params.spec.is_some() && (!params.patch_fields.is_empty() || params.multivariate.is_some() || params.survival_number_at_risk.is_some()) {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "cannot combine `spec` with top-level spec shorthand fields in `graph.setSpec`")
-            .with_remediation("Pass fields inside `spec` OR as top-level shorthand parameters, not both.")
-            .with_details(json!({ "pointer": "/spec" })));
+        return Err(bad_input_ptr("/spec", "cannot combine `spec` with top-level spec shorthand fields in `graph.setSpec`")
+            .with_remediation("Pass fields inside `spec` OR as top-level shorthand parameters, not both."));
+    }
+    if let Some(ref title) = params.title {
+        curvebook_doc::validate_title(title)?;
     }
 
     let base_ptr = if params.spec.is_some() { "/spec" } else { "" };
     let patch =
         params.spec.clone().unwrap_or_else(|| strip_keys(&Value::Object(params.patch_fields.clone()), &["sheet_id", "id", "title", "initialized"]));
     let patch_clean = strip_keys(&patch, &["multivariate", "paper_fill", "orientation", "forest_show_pooled_diamond", "heatmap_labels"]);
-    let mut merged = merge_json_struct(&current_spec, &patch_clean)?;
-    if let Some(cld_val) = merged.get_mut("compact_letter_display")
-        && let Some(cld_obj) = cld_val.as_object_mut()
-        && let Some(enabled_val) = cld_obj.remove("enabled")
-    {
-        let enabled = enabled_val.as_bool().ok_or_else(|| {
-            EngineError::with_code(ErrorCode::BadInput, "`compact_letter_display.enabled` must be a boolean")
-                .with_details(json!({ "pointer": format!("{base_ptr}/compact_letter_display/enabled") }))
+
+    let (kind, series_count) = mutate_graph_sheet(&mut ctx.session.doc, &id, false, true, |doc, current_spec| {
+        let mut merged = merge_json_struct(current_spec, &patch_clean)?;
+        if let Some(cld_val) = merged.get_mut("compact_letter_display")
+            && let Some(cld_obj) = cld_val.as_object_mut()
+            && let Some(enabled_val) = cld_obj.remove("enabled")
+        {
+            let enabled = enabled_val.as_bool().ok_or_else(|| {
+                bad_input_ptr(&format!("{base_ptr}/compact_letter_display/enabled"), "`compact_letter_display.enabled` must be a boolean")
+            })?;
+            if !enabled {
+                *cld_val = Value::Null;
+            }
+        }
+        let mut new_spec: GraphSpec = deserialize_strict(&merged, base_ptr).map_err(|mut err| {
+            if err.remediation.is_none() {
+                err.remediation = Some(String::from("Supply valid GraphSpec fields or shorthand parameters matching the schema."));
+            }
+            err
         })?;
-        if !enabled {
-            *cld_val = Value::Null;
+
+        if let Some(mv_val) = patch.get("multivariate").or(params.multivariate.as_ref()) {
+            new_spec.multivariate =
+                if mv_val.is_null() { None } else { Some(parse_multivariate_encoding(mv_val, current_spec.multivariate.as_ref())?) };
         }
-    }
-    let mut new_spec: GraphSpec = deserialize_strict(&merged, base_ptr).map_err(|mut err| {
-        if err.remediation.is_none() {
-            err.remediation = Some(String::from("Supply valid GraphSpec fields or shorthand parameters matching the schema."));
+        if let Some(pf_val) = patch.get("paper_fill").or_else(|| params.patch_fields.get("paper_fill")) {
+            new_spec.paper_fill = if pf_val.is_null() { None } else { Some(parse_rgba8(pf_val)?) };
         }
-        err
+        if let Some(or_val) = patch.get("orientation").or_else(|| params.patch_fields.get("orientation")) {
+            new_spec.orientation = parse_serde_enum(or_val, "`orientation`")?;
+        }
+        if let Some(f_val) = patch.get("forest_show_pooled_diamond").or_else(|| params.patch_fields.get("forest_show_pooled_diamond")) {
+            new_spec.forest_show_pooled_diamond = f_val.as_bool().ok_or_else(|| bad_input("`forest_show_pooled_diamond` must be a boolean"))?;
+        }
+        if let Some(hm_val) = patch.get("heatmap_labels").or_else(|| params.patch_fields.get("heatmap_labels")) {
+            new_spec.heatmap_labels = parse_heatmap_label_spec(hm_val, current_spec.heatmap_labels)?;
+        }
+        apply_opt!(params.survival_number_at_risk => new_spec.survival_number_at_risk);
+        let explicit_point_overrides = patch.get("point_overrides").is_some();
+        if explicit_point_overrides {
+            for ov in &new_spec.point_overrides {
+                validate_point_override_in_bounds(doc, &new_spec, ov.series_index, ov.point_index, ov.subcol)?;
+            }
+        } else if new_spec.series != current_spec.series {
+            reconcile_point_overrides_on_series_change(doc, &current_spec.series, &mut new_spec);
+        }
+        *current_spec = new_spec;
+        Ok((current_spec.kind, current_spec.series.len()))
     })?;
 
-    if let Some(mv_val) = patch.get("multivariate").or(params.multivariate.as_ref()) {
-        new_spec.multivariate = if mv_val.is_null() { None } else { Some(parse_multivariate_encoding(mv_val, current_spec.multivariate.as_ref())?) };
-    }
-    if let Some(pf_val) = patch.get("paper_fill").or_else(|| params.patch_fields.get("paper_fill")) {
-        new_spec.paper_fill = if pf_val.is_null() { None } else { Some(parse_rgba8(pf_val)?) };
-    }
-    if let Some(or_val) = patch.get("orientation").or_else(|| params.patch_fields.get("orientation")) {
-        new_spec.orientation = parse_serde_enum(or_val, "`orientation`")?;
-    }
-    if let Some(f_val) = patch.get("forest_show_pooled_diamond").or_else(|| params.patch_fields.get("forest_show_pooled_diamond")) {
-        new_spec.forest_show_pooled_diamond =
-            f_val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`forest_show_pooled_diamond` must be a boolean"))?;
-    }
-    if let Some(hm_val) = patch.get("heatmap_labels").or_else(|| params.patch_fields.get("heatmap_labels")) {
-        new_spec.heatmap_labels = parse_heatmap_label_spec(hm_val, current_spec.heatmap_labels)?;
-    }
-    if let Some(nar) = params.survival_number_at_risk {
-        new_spec.survival_number_at_risk = nar;
-    }
-    if let Some(ref title) = params.title {
-        curvebook_doc::validate_title(title)?;
-    }
-    let explicit_point_overrides = patch.get("point_overrides").is_some();
-    if explicit_point_overrides {
-        for ov in &new_spec.point_overrides {
-            validate_point_override_in_bounds(ctx.session.document(), &new_spec, ov.series_index, ov.point_index, ov.subcol)?;
-        }
-    } else if new_spec.series != current_spec.series {
-        reconcile_point_overrides_on_series_change(ctx.session.document(), &current_spec.series, &mut new_spec);
-    }
-    validate_graph_spec_in_doc(ctx.session.document(), &id, &new_spec)?;
-
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
-    graph.spec = new_spec;
     if let Some(title) = params.title {
         graph.title = title;
     }
     graph.initialized = params.initialized.unwrap_or(true);
 
-    let kind = graph.spec.kind;
-    let series_count = graph.spec.series.len();
     Ok(CommandOutcome::mutated(
         "graph.setSpec",
         format!("updated graph spec on `{id}`"),
@@ -1595,57 +1574,49 @@ fn run_graph_set_axes(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
     let schema = schema_graph_set_axes();
     let params: GraphSetAxesParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
-    let mut spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
 
-    if let Some(ref fp) = params.frame_preset {
-        spec.frame_preset = parse_serde_enum(fp, "`frame_preset`")?;
-    }
-    if let Some(ref x_val) = params.x_axis {
-        apply_axis_updates(&mut spec.x_axis, x_val)?;
-    }
-    if let Some(ref y_val) = params.y_axis {
-        apply_axis_updates(&mut spec.y_axis, y_val)?;
-    }
-    if let Some(y2_present) = params.y2_axis.as_ref() {
-        match y2_present {
-            None => spec.y2_axis = None,
-            Some(y2_val) => {
-                let mut y2 = spec.y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Right Y"));
-                apply_axis_updates(&mut y2, y2_val)?;
-                spec.y2_axis = Some(y2);
+    let (x_segs, y_segs) = mutate_graph_sheet(&mut ctx.session.doc, &id, true, true, |_, spec| {
+        if let Some(ref fp) = params.frame_preset {
+            spec.frame_preset = parse_serde_enum(fp, "`frame_preset`")?;
+        }
+        if let Some(ref x_val) = params.x_axis {
+            apply_axis_updates(&mut spec.x_axis, x_val)?;
+        }
+        if let Some(ref y_val) = params.y_axis {
+            apply_axis_updates(&mut spec.y_axis, y_val)?;
+        }
+        if let Some(y2_present) = params.y2_axis.as_ref() {
+            match y2_present {
+                None => spec.y2_axis = None,
+                Some(y2_val) => {
+                    let mut y2 = spec.y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Right Y"));
+                    apply_axis_updates(&mut y2, y2_val)?;
+                    spec.y2_axis = Some(y2);
+                }
             }
         }
-    }
 
-    if let Some(ref which) = params.axis {
-        let top_val = Value::Object(params.axis_fields);
-        match which.trim().to_ascii_lowercase().as_str() {
-            "x" | "x_axis" => apply_axis_updates(&mut spec.x_axis, &top_val)?,
-            "y" | "y_axis" => apply_axis_updates(&mut spec.y_axis, &top_val)?,
-            "y2" | "y2_axis" | "right_y" => {
-                let mut y2 = spec.y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Right Y"));
-                apply_axis_updates(&mut y2, &top_val)?;
-                spec.y2_axis = Some(y2);
+        if let Some(ref which) = params.axis {
+            let top_val = Value::Object(params.axis_fields);
+            match which.trim().to_ascii_lowercase().as_str() {
+                "x" | "x_axis" => apply_axis_updates(&mut spec.x_axis, &top_val)?,
+                "y" | "y_axis" => apply_axis_updates(&mut spec.y_axis, &top_val)?,
+                "y2" | "y2_axis" | "right_y" => {
+                    let mut y2 = spec.y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Right Y"));
+                    apply_axis_updates(&mut y2, &top_val)?;
+                    spec.y2_axis = Some(y2);
+                }
+                other => {
+                    return Err(bad_input_ptr("/axis", format!("unknown axis target `{other}`; expected `x`, `y`, or `y2`")));
+                }
             }
-            other => {
-                return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown axis target `{other}`; expected `x`, `y`, or `y2`"))
-                    .with_details(json!({ "pointer": "/axis" })));
-            }
-        }
-    } else if !params.axis_fields.is_empty() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "missing `axis` (`x`, `y`, or `y2`) when supplying top-level axis properties")
-            .with_remediation(
+        } else if !params.axis_fields.is_empty() {
+            return Err(bad_input_ptr("/axis", "missing `axis` (`x`, `y`, or `y2`) when supplying top-level axis properties").with_remediation(
                 "Pass `axis: \"x\" | \"y\" | \"y2\"` alongside top-level axis fields, or nest them under `x_axis` / `y_axis` / `y2_axis`.",
-            )
-            .with_details(json!({ "pointer": "/axis" })));
-    }
-
-    validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
-    let x_segs = spec.x_axis.segments.len();
-    let y_segs = spec.y_axis.segments.len();
-    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
-    graph.spec = spec;
-    graph.initialized = true;
+            ));
+        }
+        Ok((spec.x_axis.segments.len(), spec.y_axis.segments.len()))
+    })?;
 
     Ok(CommandOutcome::mutated(
         "graph.setAxes",
@@ -1658,43 +1629,38 @@ fn run_graph_set_additional_ticks(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comma
     let schema = schema_graph_set_additional_ticks();
     let params: GraphSetAdditionalTicksParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
-    let mut spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
 
     let mut ticks = Vec::with_capacity(params.ticks.len());
     for (idx, item) in params.ticks.into_iter().enumerate() {
         if !item.value.is_finite() {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "additional tick `value` must be finite")
-                .with_details(json!({ "pointer": format!("/ticks/{idx}/value") })));
+            return Err(bad_input_ptr(&format!("/ticks/{idx}/value"), "additional tick `value` must be finite"));
         }
         ticks.push(AdditionalTick { value: item.value, label: item.label, draw_gridline: item.draw_gridline.unwrap_or(false) });
     }
     let tick_count = ticks.len();
 
-    let norm_axis = match params.axis.trim().to_ascii_lowercase().as_str() {
-        "x" | "x_axis" => {
-            spec.x_axis.additional_ticks = ticks;
-            "x"
-        }
-        "y" | "y_axis" => {
-            spec.y_axis.additional_ticks = ticks;
-            "y"
-        }
-        "y2" | "y2_axis" | "right_y" => {
-            let mut y2 = spec.y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Right Y"));
-            y2.additional_ticks = ticks;
-            spec.y2_axis = Some(y2);
-            "y2"
-        }
-        other => {
-            return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown axis target `{other}`; expected `x`, `y`, or `y2`"))
-                .with_details(json!({ "pointer": "/axis" })));
-        }
-    };
-
-    spec.validate()?;
-    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
-    graph.spec = spec;
-    graph.initialized = true;
+    let norm_axis = mutate_graph_sheet(&mut ctx.session.doc, &id, true, false, |_, spec| {
+        let norm_axis = match params.axis.trim().to_ascii_lowercase().as_str() {
+            "x" | "x_axis" => {
+                spec.x_axis.additional_ticks = ticks;
+                "x"
+            }
+            "y" | "y_axis" => {
+                spec.y_axis.additional_ticks = ticks;
+                "y"
+            }
+            "y2" | "y2_axis" | "right_y" => {
+                let mut y2 = spec.y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Right Y"));
+                y2.additional_ticks = ticks;
+                spec.y2_axis = Some(y2);
+                "y2"
+            }
+            other => {
+                return Err(bad_input_ptr("/axis", format!("unknown axis target `{other}`; expected `x`, `y`, or `y2`")));
+            }
+        };
+        Ok(norm_axis)
+    })?;
 
     Ok(CommandOutcome::mutated(
         "graph.setAdditionalTicks",
@@ -1734,59 +1700,51 @@ fn run_graph_set_series(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     let schema = schema_graph_set_series();
     let params: GraphSetSeriesParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
-    let mut spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
-    let old_series = spec.series.clone();
     let replace_mode = parse_series_update_mode(params.mode.as_deref())?;
     let all_series = params.all_series.unwrap_or(false);
 
     if replace_mode && params.series.is_none() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "`mode: \"replace\"` requires a `series` array parameter")
-            .with_details(json!({ "pointer": "/mode" })));
+        return Err(bad_input_ptr("/mode", "`mode: \"replace\"` requires a `series` array parameter"));
     }
     if all_series && (params.series.is_some() || params.series_index.is_some() || params.data_set_index.is_some()) {
-        return Err(EngineError::with_code(
-            ErrorCode::BadInput,
-            "`all_series: true` cannot be combined with `series`, `series_index`, or `data_set_index`",
-        )
-        .with_details(json!({ "pointer": "/all_series" })));
+        return Err(bad_input_ptr("/all_series", "`all_series: true` cannot be combined with `series`, `series_index`, or `data_set_index`"));
     }
 
-    if let Some(ref series_list) = params.series {
-        if let Some(first_key) = params.patch_fields.keys().next() {
-            return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown field `{first_key}` in graph.setSeries")));
-        }
-        apply_series_array_update(&mut spec, series_list, replace_mode)?;
-    } else if all_series {
-        let patch_val = Value::Object(params.patch_fields);
-        let parsed_patch = parse_series_patch(&patch_val, false)?;
-        if spec.series.is_empty() {
-            return Err(EngineError::with_code(ErrorCode::Conflict, format!("graph `{id}` has no series configured")));
-        }
-        for s in &mut spec.series {
-            apply_parsed_series_patch(s, &parsed_patch)?;
-        }
-    } else {
-        let has_patch = !params.patch_fields.is_empty();
-        let patch_val = Value::Object(params.patch_fields);
-        let parsed_patch = parse_series_patch(&patch_val, false)?;
-        if params.series_index.is_some() || params.data_set_index.is_some() || has_patch {
-            let target_idx = resolve_series_target_index(&spec, params.series_index, params.data_set_index)?;
-            if let Some(s) = spec.series.get_mut(target_idx) {
+    let count = mutate_graph_sheet(&mut ctx.session.doc, &id, true, true, |doc, spec| {
+        let old_series = spec.series.clone();
+        if let Some(ref series_list) = params.series {
+            if let Some(first_key) = params.patch_fields.keys().next() {
+                return Err(bad_input(format!("unknown field `{first_key}` in graph.setSeries")));
+            }
+            apply_series_array_update(spec, series_list, replace_mode)?;
+        } else if all_series {
+            let patch_val = Value::Object(params.patch_fields);
+            let parsed_patch = parse_series_patch(&patch_val, false)?;
+            if spec.series.is_empty() {
+                return Err(EngineError::with_code(ErrorCode::Conflict, format!("graph `{id}` has no series configured")));
+            }
+            for s in &mut spec.series {
                 apply_parsed_series_patch(s, &parsed_patch)?;
             }
+        } else {
+            let has_patch = !params.patch_fields.is_empty();
+            let patch_val = Value::Object(params.patch_fields);
+            let parsed_patch = parse_series_patch(&patch_val, false)?;
+            if params.series_index.is_some() || params.data_set_index.is_some() || has_patch {
+                let target_idx = resolve_series_target_index(spec, params.series_index, params.data_set_index)?;
+                if let Some(s) = spec.series.get_mut(target_idx) {
+                    apply_parsed_series_patch(s, &parsed_patch)?;
+                }
+            }
         }
-    }
 
-    if let Some(ref mv_val) = params.multivariate {
-        spec.multivariate = if mv_val.is_null() { None } else { Some(parse_multivariate_encoding(mv_val, spec.multivariate.as_ref())?) };
-    }
+        if let Some(ref mv_val) = params.multivariate {
+            spec.multivariate = if mv_val.is_null() { None } else { Some(parse_multivariate_encoding(mv_val, spec.multivariate.as_ref())?) };
+        }
 
-    reconcile_point_overrides_on_series_change(ctx.session.document(), &old_series, &mut spec);
-    validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
-    let count = spec.series.len();
-    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
-    graph.spec = spec;
-    graph.initialized = true;
+        reconcile_point_overrides_on_series_change(doc, &old_series, spec);
+        Ok(spec.series.len())
+    })?;
 
     Ok(CommandOutcome::mutated(
         "graph.setSeries",
@@ -1915,26 +1873,23 @@ fn run_graph_set_regression_overlay(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
         })
     };
 
-    let mut spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
-    if spec.series.is_empty() {
-        return Err(EngineError::with_code(ErrorCode::Conflict, format!("graph `{id}` has no series to bind a regression overlay")));
-    }
-
-    if params.all_series.unwrap_or(false) {
-        for s in &mut spec.series {
-            s.regression_overlay = overlay.clone();
+    mutate_graph_sheet(&mut ctx.session.doc, &id, true, true, |_, spec| {
+        if spec.series.is_empty() {
+            return Err(EngineError::with_code(ErrorCode::Conflict, format!("graph `{id}` has no series to bind a regression overlay")));
         }
-    } else {
-        let idx = resolve_series_target_index(&spec, params.series_index, params.data_set_index)?;
-        if let Some(s) = spec.series.get_mut(idx) {
-            s.regression_overlay = overlay;
-        }
-    }
 
-    validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
-    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
-    graph.spec = spec;
-    graph.initialized = true;
+        if params.all_series.unwrap_or(false) {
+            for s in &mut spec.series {
+                s.regression_overlay = overlay.clone();
+            }
+        } else {
+            let idx = resolve_series_target_index(spec, params.series_index, params.data_set_index)?;
+            if let Some(s) = spec.series.get_mut(idx) {
+                s.regression_overlay = overlay;
+            }
+        }
+        Ok(())
+    })?;
 
     Ok(CommandOutcome::mutated(
         "graph.setRegressionOverlay",
@@ -1963,11 +1918,6 @@ fn run_graph_add_comparison_brackets(ctx: &mut Ctx<'_>, raw: Value) -> Result<Co
     let res_id = parse_sheet_id(&params.result_sheet_id)?;
     let comparisons = require_result_sheet(ctx.session.document(), &res_id)?.pairwise_comparisons.clone();
 
-    let mut spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
-    if params.clear_existing.unwrap_or(false) {
-        spec.comparisons.clear();
-    }
-
     let style = parse_bracket_style(params.style.as_deref())?;
     let label_mode = parse_bracket_label_mode(params.label_mode.as_ref())?;
     let hide_if_non_significant = params.hide_if_non_significant.unwrap_or(false);
@@ -1975,72 +1925,66 @@ fn run_graph_add_comparison_brackets(ctx: &mut Ctx<'_>, raw: Value) -> Result<Co
     let font_size_pt = params.font_size_pt.unwrap_or(8.5);
     let bracket_step_pt = params.bracket_step_pt.unwrap_or(12.0);
 
-    let (added, updated) = match (params.group_a.as_ref(), params.group_b.as_ref()) {
-        (Some(ga_val), Some(gb_val)) => {
-            let ga = resolve_group_index(ga_val, &comparisons)?;
-            let gb = resolve_group_index(gb_val, &comparisons)?;
-            if ga == gb {
-                return Err(EngineError::with_code(
-                    ErrorCode::BadInput,
-                    format!("comparison bracket requires two distinct groups, got index {ga} for both"),
-                ));
-            }
-            upsert_comparison_bracket(
-                &mut spec.comparisons,
-                PairwiseBracketSpec {
-                    result_sheet_id: res_id,
-                    group_a: ga,
-                    group_b: gb,
-                    style,
-                    label_mode,
-                    hide_if_non_significant,
-                    stroke_width_pt,
-                    font_size_pt,
-                    bracket_step_pt,
-                },
-            )
+    let (added, updated, total) = mutate_graph_sheet(&mut ctx.session.doc, &id, true, true, |_, spec| {
+        if params.clear_existing.unwrap_or(false) {
+            spec.comparisons.clear();
         }
-        (Some(_), None) | (None, Some(_)) => {
-            return Err(EngineError::with_code(
-                ErrorCode::BadInput,
-                "both `group_a` and `group_b` must be provided together to add a single comparison bracket",
-            )
-            .with_remediation("Pass both `group_a` and `group_b` for a single pair, or omit both to add all comparisons."));
-        }
-        (None, None) => {
-            let significant_only = params.significant_only.unwrap_or(false);
-            let mut added = 0_usize;
-            let mut updated = 0_usize;
-            for cmp in comparisons {
-                if significant_only && !cmp.significant {
-                    continue;
+        let (added, updated) = match (params.group_a.as_ref(), params.group_b.as_ref()) {
+            (Some(ga_val), Some(gb_val)) => {
+                let ga = resolve_group_index(ga_val, &comparisons)?;
+                let gb = resolve_group_index(gb_val, &comparisons)?;
+                if ga == gb {
+                    return Err(bad_input(format!("comparison bracket requires two distinct groups, got index {ga} for both")));
                 }
-                let (da, du) = upsert_comparison_bracket(
+                upsert_comparison_bracket(
                     &mut spec.comparisons,
                     PairwiseBracketSpec {
-                        result_sheet_id: res_id.clone(),
-                        group_a: cmp.group_a,
-                        group_b: cmp.group_b,
+                        result_sheet_id: res_id,
+                        group_a: ga,
+                        group_b: gb,
                         style,
-                        label_mode: label_mode.clone(),
+                        label_mode,
                         hide_if_non_significant,
                         stroke_width_pt,
                         font_size_pt,
                         bracket_step_pt,
                     },
-                );
-                added += da;
-                updated += du;
+                )
             }
-            (added, updated)
-        }
-    };
-
-    validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
-    let total = spec.comparisons.len();
-    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
-    graph.spec = spec;
-    graph.initialized = true;
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(bad_input("both `group_a` and `group_b` must be provided together to add a single comparison bracket")
+                    .with_remediation("Pass both `group_a` and `group_b` for a single pair, or omit both to add all comparisons."));
+            }
+            (None, None) => {
+                let significant_only = params.significant_only.unwrap_or(false);
+                let mut added = 0_usize;
+                let mut updated = 0_usize;
+                for cmp in comparisons {
+                    if significant_only && !cmp.significant {
+                        continue;
+                    }
+                    let (da, du) = upsert_comparison_bracket(
+                        &mut spec.comparisons,
+                        PairwiseBracketSpec {
+                            result_sheet_id: res_id.clone(),
+                            group_a: cmp.group_a,
+                            group_b: cmp.group_b,
+                            style,
+                            label_mode: label_mode.clone(),
+                            hide_if_non_significant,
+                            stroke_width_pt,
+                            font_size_pt,
+                            bracket_step_pt,
+                        },
+                    );
+                    added += da;
+                    updated += du;
+                }
+                (added, updated)
+            }
+        };
+        Ok((added, updated, spec.comparisons.len()))
+    })?;
 
     Ok(CommandOutcome::mutated(
         "graph.addComparisonBrackets",
@@ -2053,29 +1997,23 @@ fn run_graph_add_annotation(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutc
     let schema = schema_graph_add_annotation();
     let params: GraphAddAnnotationParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
-    let doc = ctx.session.document();
-    let annotation = if let Some(ref ann_val) = params.annotation {
-        let ann: GraphAnnotation = serde_json::from_value(ann_val.clone())
-            .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `annotation`: {err}")))?;
-        match &ann {
-            GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
-                let _ = require_result_sheet(doc, result_sheet_id)?;
+
+    let total = mutate_graph_sheet(&mut ctx.session.doc, &id, true, true, |doc, spec| {
+        let annotation = if let Some(ref ann_val) = params.annotation {
+            let ann: GraphAnnotation = serde_json::from_value(ann_val.clone()).map_err(|err| bad_input(format!("invalid `annotation`: {err}")))?;
+            match &ann {
+                GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
+                    let _ = require_result_sheet(doc, result_sheet_id)?;
+                }
+                _ => {}
             }
-            _ => {}
-        }
-        ann
-    } else {
-        parse_annotation_shorthand(doc, &Value::Object(params.fields))?
-    };
-
-    let mut spec = require_graph_sheet(doc, &id)?.spec.clone();
-    spec.annotations.push(annotation);
-    validate_graph_spec_in_doc(doc, &id, &spec)?;
-    let total = spec.annotations.len();
-
-    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
-    graph.spec = spec;
-    graph.initialized = true;
+            ann
+        } else {
+            parse_annotation_shorthand(doc, &Value::Object(params.fields))?
+        };
+        spec.annotations.push(annotation);
+        Ok(spec.annotations.len())
+    })?;
 
     Ok(CommandOutcome::mutated(
         "graph.addAnnotation",
@@ -2171,13 +2109,7 @@ fn run_graph_apply_canvas_preset(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comman
     let preset = parse_figure_canvas_preset(&params.preset)?;
     let mode = parse_canvas_resize_mode(params.resize_mode.as_deref())?;
 
-    let mut updated_spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
-    resize_graph_spec(&mut updated_spec, preset.dimensions_pt(), mode)?;
-    updated_spec.validate()?;
-
-    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
-    graph.spec = updated_spec;
-    graph.initialized = true;
+    mutate_graph_sheet(&mut ctx.session.doc, &id, true, false, |_, updated_spec| resize_graph_spec(updated_spec, preset.dimensions_pt(), mode))?;
 
     let scene = compile_scene_for_sheet(ctx.session.document(), &id)?;
     let issues = preflight_check_scene(&scene);
@@ -2591,21 +2523,13 @@ impl SegmentPatch {
         if let Some(ref s) = self.scale {
             seg.scale = parse_axis_scale(s)?;
         }
-        if let Some(v) = self.min {
-            seg.min = v;
-        }
-        if let Some(v) = self.max {
-            seg.max = v;
-        }
-        if let Some(share) = self.length_share {
-            seg.length_share = share;
-        }
-        if let Some(major) = self.major_tick_interval {
-            seg.major_tick_interval = major;
-        }
-        if let Some(minor) = self.minor_ticks_per_interval {
-            seg.minor_ticks_per_interval = minor;
-        }
+        apply_opt!(
+            self.min => seg.min,
+            self.max => seg.max,
+            self.length_share => seg.length_share,
+            self.major_tick_interval => seg.major_tick_interval,
+            self.minor_ticks_per_interval => seg.minor_ticks_per_interval,
+        );
         Ok(())
     }
 }
@@ -2641,20 +2565,8 @@ struct AxisPatch {
 
 fn apply_axis_updates(axis: &mut AxisSpec, val: &Value) -> Result<(), EngineError> {
     let patch: AxisPatch = deserialize_patch(val, "axis patch")?;
-    if let Some(title) = patch.title {
-        axis.title = title;
-    }
-    if let Some(gap) = patch.gap_width_pt {
-        axis.gap_width_pt = gap;
-    }
     if let Some(ref orn) = patch.break_ornament {
         axis.break_ornament = parse_serde_enum(orn, "`break_ornament`")?;
-    }
-    if let Some(sw) = patch.stroke_width_pt {
-        axis.stroke_width_pt = sw;
-    }
-    if let Some(angle) = patch.tick_angle_deg {
-        axis.tick_angle_deg = angle;
     }
     if let Some(ref tf) = patch.tick_format {
         axis.tick_format = parse_tick_format(tf)?;
@@ -2662,9 +2574,13 @@ fn apply_axis_updates(axis: &mut AxisSpec, val: &Value) -> Result<(), EngineErro
     if let Some(ref td) = patch.tick_direction {
         axis.tick_direction = parse_serde_enum(td, "`tick_direction`")?;
     }
-    if let Some(show) = patch.show_tick_labels {
-        axis.show_tick_labels = show;
-    }
+    apply_opt!(
+        patch.title => axis.title,
+        patch.gap_width_pt => axis.gap_width_pt,
+        patch.stroke_width_pt => axis.stroke_width_pt,
+        patch.tick_angle_deg => axis.tick_angle_deg,
+        patch.show_tick_labels => axis.show_tick_labels,
+    );
     if let Some(ref raw_segs) = patch.segments {
         if patch.segment.any_present() {
             return Err(EngineError::with_code(
@@ -2792,23 +2708,18 @@ fn apply_parsed_series_patch(series: &mut SeriesSpec, patch: &SeriesPatch) -> Re
     if let Some(ref src) = patch.source_sheet_id {
         series.source_sheet_id = parse_sheet_id(src)?;
     }
-    if let Some(ds_idx) = patch.data_set_index {
-        series.data_set_index = ds_idx;
-    }
+    apply_opt!(
+        patch.data_set_index => series.data_set_index,
+        patch.bind_to_right_y2 => series.bind_to_right_y2,
+    );
     if let Some(ref overlay_opt) = patch.regression_overlay {
         series.regression_overlay = match overlay_opt {
             None => None,
-            Some(v) => Some(
-                deserialize_strict(v, "/regression_overlay")
-                    .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `regression_overlay`: {err}")))?,
-            ),
+            Some(v) => Some(deserialize_strict(v, "/regression_overlay").map_err(|err| bad_input(format!("invalid `regression_overlay`: {err}")))?),
         };
     }
     if let Some(ref label_opt) = patch.legend_label {
         series.legend_label = label_opt.clone();
-    }
-    if let Some(y2) = patch.bind_to_right_y2 {
-        series.bind_to_right_y2 = y2;
     }
     if let Some(ref gdo_val) = patch.gdo {
         series.gdo = deserialize_strict(gdo_val, "/gdo").map_err(|err| {
@@ -2837,39 +2748,25 @@ fn apply_parsed_series_patch(series: &mut SeriesSpec, patch: &SeriesPatch) -> Re
 
 fn apply_extended_series_fields(series: &mut SeriesSpec, patch: &SeriesPatch) -> Result<(), EngineError> {
     if let Some(ref off) = patch.offset {
-        if let Some(v) = off.x_data {
-            series.offset.x_data = v;
-        }
-        if let Some(v) = off.x_pt {
-            series.offset.x_pt = v;
-        }
-        if let Some(v) = off.y_pt {
-            series.offset.y_pt = v;
-        }
+        apply_opt!(off.x_data => series.offset.x_data, off.x_pt => series.offset.x_pt, off.y_pt => series.offset.y_pt);
     }
-    if let Some(v) = patch.offset_x_data {
-        series.offset.x_data = v;
-    }
-    if let Some(v) = patch.offset_x_pt {
-        series.offset.x_pt = v;
-    }
-    if let Some(v) = patch.offset_y_pt {
-        series.offset.y_pt = v;
-    }
+    apply_opt!(
+        patch.offset_x_data => series.offset.x_data,
+        patch.offset_x_pt => series.offset.x_pt,
+        patch.offset_y_pt => series.offset.y_pt,
+        patch.show_raw_data => series.show_raw_data,
+    );
     if let Some(bw_opt) = patch.bar_width_pt {
         if let Some(w) = bw_opt
             && w <= 0.0
         {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "`bar_width_pt` must be > 0.0"));
+            return Err(bad_input("`bar_width_pt` must be > 0.0"));
         }
         series.bar_width_override_pt = bw_opt;
     }
-    if let Some(raw) = patch.show_raw_data {
-        series.show_raw_data = raw;
-    }
     if let Some(w) = patch.border_width_pt {
         if w < 0.0 {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "`border_width_pt` must be >= 0.0"));
+            return Err(bad_input("`border_width_pt` must be >= 0.0"));
         }
         if let GraphicalDataObject::BarWithReplicates { border_width_pt, .. } | GraphicalDataObject::FloatingBar { border_width_pt, .. } =
             &mut series.gdo
@@ -2898,24 +2795,14 @@ fn apply_extended_series_fields(series: &mut SeriesSpec, patch: &SeriesPatch) ->
         show_censored_ticks, show_greenwood_ci, ci_dashed, display_metric, staircase, error_display, ..
     } = &mut series.gdo
     {
-        if let Some(dm) = parsed_dm {
-            *display_metric = dm;
-        }
-        if let Some(st) = patch.staircase {
-            *staircase = st;
-        }
-        if let Some(ed) = parsed_err {
-            *error_display = ed;
-        }
-        if let Some(ci) = patch.show_greenwood_ci {
-            *show_greenwood_ci = ci;
-        }
-        if let Some(cens) = patch.show_censored_ticks {
-            *show_censored_ticks = cens;
-        }
-        if let Some(dashed) = patch.ci_dashed {
-            *ci_dashed = dashed;
-        }
+        apply_opt!(
+            parsed_dm => *display_metric,
+            patch.staircase => *staircase,
+            parsed_err => *error_display,
+            patch.show_greenwood_ci => *show_greenwood_ci,
+            patch.show_censored_ticks => *show_censored_ticks,
+            patch.ci_dashed => *ci_dashed,
+        );
     }
     if let Some(ref alpha_val) = patch.alpha {
         apply_alpha_to_gdo(&mut series.gdo, parse_alpha_byte(alpha_val)?);
@@ -3071,18 +2958,13 @@ fn apply_marker_patch(marker: &mut MarkerStyle, val: &Value) -> Result<(), Engin
     if let Some(ref fill_mode) = patch.fill_mode {
         marker.fill_mode = parse_marker_fill_mode(fill_mode)?;
     }
-    if let Some(size) = patch.size_pt {
-        marker.size_pt = size;
-    }
     if let Some(ref fc) = patch.fill_color {
         marker.fill_color = parse_rgba8(fc)?;
     }
     if let Some(ref sc) = patch.stroke_color {
         marker.stroke_color = parse_rgba8(sc)?;
     }
-    if let Some(sw) = patch.stroke_width_pt {
-        marker.stroke_width_pt = sw;
-    }
+    apply_opt!(patch.size_pt => marker.size_pt, patch.stroke_width_pt => marker.stroke_width_pt);
     Ok(())
 }
 
@@ -3123,12 +3005,7 @@ fn patch_error_bars(current: Option<ErrorBarSpec>, val: &Value) -> Result<Option
     if let Some(ref dash) = patch.dash_style {
         eb.dash_style = parse_line_dash_style(dash)?;
     }
-    if let Some(w) = patch.stroke_width_pt {
-        eb.stroke_width_pt = w;
-    }
-    if let Some(cw) = patch.cap_width_pt {
-        eb.cap_width_pt = cw;
-    }
+    apply_opt!(patch.stroke_width_pt => eb.stroke_width_pt, patch.cap_width_pt => eb.cap_width_pt);
     if let Some(ref c_opt) = patch.color {
         eb.color = c_opt.as_ref().map(parse_rgba8).transpose()?;
     }
@@ -3211,27 +3088,15 @@ fn parse_multivariate_encoding(val: &Value, current: Option<&MultivariateGraphEn
         show_convex_hulls: false,
         show_confidence_ellipses: false,
     });
-    if let Some(pm) = patch.plot_mode {
-        base.plot_mode = pm;
-    }
-    if let Some(xc) = patch.x_column {
-        base.x_column = xc;
-    }
-    if let Some(yc) = patch.y_column {
-        base.y_column = yc;
-    }
-    if let Some(lc) = patch.label_column {
-        base.label_column = lc;
-    }
-    if let Some(lo) = patch.x_level_order_override {
-        base.x_level_order_override = lo;
-    }
-    if let Some(hull) = patch.show_convex_hulls {
-        base.show_convex_hulls = hull;
-    }
-    if let Some(ell) = patch.show_confidence_ellipses {
-        base.show_confidence_ellipses = ell;
-    }
+    apply_opt!(
+        patch.plot_mode => base.plot_mode,
+        patch.x_column => base.x_column,
+        patch.y_column => base.y_column,
+        patch.label_column => base.label_column,
+        patch.x_level_order_override => base.x_level_order_override,
+        patch.show_convex_hulls => base.show_convex_hulls,
+        patch.show_confidence_ellipses => base.show_confidence_ellipses,
+    );
     if let Some(ref color_v) = patch.color {
         base.color = parse_color_channel(color_v)?;
     }
@@ -3459,19 +3324,15 @@ fn parse_graph_kind(val: &Value) -> Result<GraphKind, EngineError> {
 }
 
 fn parse_axis_scale(val: &Value) -> Result<GraphAxisScale, EngineError> {
-    if let Ok(scale) = serde_json::from_value::<GraphAxisScale>(val.clone()) {
+    if let Ok(scale) = parse_serde_enum::<GraphAxisScale>(val, "axis `scale`") {
         return Ok(scale);
     }
     match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("linear") => Ok(GraphAxisScale::Linear),
-        Some("log10" | "log") => Ok(GraphAxisScale::Log10),
-        Some("log2") => Ok(GraphAxisScale::Log2),
-        Some("ln") => Ok(GraphAxisScale::Ln),
-        Some("probit" | "probability") => Ok(GraphAxisScale::Probit),
+        Some("log") => Ok(GraphAxisScale::Log10),
+        Some("probability") => Ok(GraphAxisScale::Probit),
         Some("logit" | "logit_percent") => Ok(GraphAxisScale::Logit(LogitDomain::Percent)),
         Some("logit_proportion") => Ok(GraphAxisScale::Logit(LogitDomain::Proportion)),
-        Some("reciprocal") => Ok(GraphAxisScale::Reciprocal),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid axis `scale`: {val}"))),
+        _ => Err(bad_input(format!("invalid axis `scale`: {val}"))),
     }
 }
 
@@ -3505,9 +3366,7 @@ struct HeatmapLabelPatch {
 
 fn parse_heatmap_label_spec(val: &Value, mut out: HeatmapLabelSpec) -> Result<HeatmapLabelSpec, EngineError> {
     let patch: HeatmapLabelPatch = deserialize_patch(val, "`heatmap_labels`")?;
-    if let Some(ann) = patch.annotate_cells {
-        out.annotate_cells = ann;
-    }
+    apply_opt!(patch.annotate_cells => out.annotate_cells);
     if let Some(gap) = patch.cell_gap_pt {
         out.cell_gap_pt = gap.clamp(0.0, 12.0);
     }
@@ -3612,50 +3471,39 @@ fn parse_additional_ticks(val: &Value) -> Result<Vec<AdditionalTick>, EngineErro
 }
 
 fn parse_marker_shape(val: &Value) -> Result<MarkerShape, EngineError> {
-    if let Ok(s) = serde_json::from_value::<MarkerShape>(val.clone()) {
+    if let Ok(s) = parse_serde_enum::<MarkerShape>(val, "marker `shape`") {
         return Ok(s);
     }
     match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("circle") => Ok(MarkerShape::Circle),
-        Some("square") => Ok(MarkerShape::Square),
-        Some("triangle" | "triangle_up") => Ok(MarkerShape::TriangleUp),
-        Some("triangle_down") => Ok(MarkerShape::TriangleDown),
-        Some("diamond") => Ok(MarkerShape::Diamond),
-        Some("cross" | "x") => Ok(MarkerShape::Cross),
-        Some("plus") => Ok(MarkerShape::Plus),
-        Some("star") => Ok(MarkerShape::Star),
-        Some("hexagon") => Ok(MarkerShape::Hexagon),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid marker `shape`: {val}"))),
+        Some("triangle") => Ok(MarkerShape::TriangleUp),
+        Some("x") => Ok(MarkerShape::Cross),
+        _ => Err(bad_input(format!("invalid marker `shape`: {val}"))),
     }
 }
 
 fn parse_marker_fill_mode(val: &Value) -> Result<MarkerFillMode, EngineError> {
-    if let Ok(f) = serde_json::from_value::<MarkerFillMode>(val.clone()) {
+    if let Ok(f) = parse_serde_enum::<MarkerFillMode>(val, "marker `fill_mode`") {
         return Ok(f);
     }
     match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("filled" | "solid") => Ok(MarkerFillMode::Filled),
-        Some("open" | "hollow") => Ok(MarkerFillMode::Open),
+        Some("solid") => Ok(MarkerFillMode::Filled),
+        Some("hollow") => Ok(MarkerFillMode::Open),
         Some("semi_top") => Ok(MarkerFillMode::SemiFilledTop),
         Some("semi_bottom") => Ok(MarkerFillMode::SemiFilledBottom),
         Some("semi_left") => Ok(MarkerFillMode::SemiFilledLeft),
         Some("semi_right") => Ok(MarkerFillMode::SemiFilledRight),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid marker `fill_mode`: {val}"))),
+        _ => Err(bad_input(format!("invalid marker `fill_mode`: {val}"))),
     }
 }
 
 pub(super) fn parse_line_dash_style(val: &Value) -> Result<LineDashStyle, EngineError> {
-    if let Ok(d) = serde_json::from_value::<LineDashStyle>(val.clone()) {
+    if let Ok(d) = parse_serde_enum::<LineDashStyle>(val, "`dash_style`") {
         return Ok(d);
     }
     match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("solid") => Ok(LineDashStyle::Solid),
-        Some("dashed" | "dash") => Ok(LineDashStyle::Dashed),
-        Some("dotted" | "dot") => Ok(LineDashStyle::Dotted),
-        Some("dash_dot" | "dashdot") => Ok(LineDashStyle::DashDot),
-        Some("dash_dot_dot") => Ok(LineDashStyle::DashDotDot),
-        Some("long_dash") => Ok(LineDashStyle::LongDash),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `dash_style`: {val}"))),
+        Some("dash") => Ok(LineDashStyle::Dashed),
+        Some("dot") => Ok(LineDashStyle::Dotted),
+        _ => Err(bad_input(format!("invalid `dash_style`: {val}"))),
     }
 }
 
@@ -3709,68 +3557,64 @@ fn run_graph_set_compact_letter_display(ctx: &mut Ctx<'_>, raw: Value) -> Result
     let schema = schema_graph_set_compact_letter_display();
     let params: GraphSetCompactLetterDisplayParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
-    let doc = ctx.session.document();
-    let mut spec = require_graph_sheet(doc, &id)?.spec.clone();
 
-    if params.enabled == Some(false) {
-        spec.compact_letter_display = None;
-        spec.pairwise_display_mode = match params.pairwise_display_mode.as_deref() {
-            Some(m) => parse_pairwise_display_mode(m)?,
-            None => PairwiseDisplayMode::BracketsOnly,
-        };
-    } else {
-        let wants_cld = params.enabled == Some(true)
-            || params.result_sheet_id.is_some()
-            || params.ordering.is_some()
-            || params.uppercase.is_some()
-            || params.alpha_override.is_some()
-            || params.font_size_pt.is_some()
-            || params.offset_pt.is_some()
-            || params.color.as_ref().is_some_and(|v| !v.is_null());
+    let updated = mutate_graph_sheet(&mut ctx.session.doc, &id, true, true, |doc, spec| {
+        if params.enabled == Some(false) {
+            spec.compact_letter_display = None;
+            spec.pairwise_display_mode = match params.pairwise_display_mode.as_deref() {
+                Some(m) => parse_pairwise_display_mode(m)?,
+                None => PairwiseDisplayMode::BracketsOnly,
+            };
+        } else {
+            let wants_cld = params.enabled == Some(true)
+                || params.result_sheet_id.is_some()
+                || params.ordering.is_some()
+                || params.uppercase.is_some()
+                || params.alpha_override.is_some()
+                || params.font_size_pt.is_some()
+                || params.offset_pt.is_some()
+                || params.color.as_ref().is_some_and(|v| !v.is_null());
 
-        if wants_cld {
-            let mut cld = match params.result_sheet_id.as_deref() {
-                Some(raw_res) => {
-                    let res_id = parse_sheet_id(raw_res)?;
-                    let _ = require_result_sheet(doc, &res_id)?;
-                    match spec.compact_letter_display.take() {
-                        Some(mut existing) => {
-                            existing.result_sheet_id = res_id;
-                            existing
+            if wants_cld {
+                let mut cld = match params.result_sheet_id.as_deref() {
+                    Some(raw_res) => {
+                        let res_id = parse_sheet_id(raw_res)?;
+                        let _ = require_result_sheet(doc, &res_id)?;
+                        match spec.compact_letter_display.take() {
+                            Some(mut existing) => {
+                                existing.result_sheet_id = res_id;
+                                existing
+                            }
+                            None => CompactLetterDisplaySpec::new(res_id),
                         }
-                        None => CompactLetterDisplaySpec::new(res_id),
                     }
-                }
-                None => spec.compact_letter_display.take().ok_or_else(|| {
-                    EngineError::with_code(ErrorCode::BadInput, "enabling Compact Letter Display requires `result_sheet_id`")
-                        .with_details(json!({ "pointer": "/result_sheet_id" }))
-                })?,
-            };
-            apply_cld_field_updates(&mut cld, &params)?;
-            spec.compact_letter_display = Some(cld);
-        }
+                    None => spec
+                        .compact_letter_display
+                        .take()
+                        .ok_or_else(|| bad_input_ptr("/result_sheet_id", "enabling Compact Letter Display requires `result_sheet_id`"))?,
+                };
+                apply_cld_field_updates(&mut cld, &params)?;
+                spec.compact_letter_display = Some(cld);
+            }
 
-        if let Some(raw_mode) = params.pairwise_display_mode.as_deref() {
-            spec.pairwise_display_mode = parse_pairwise_display_mode(raw_mode)?;
-        } else if spec.compact_letter_display.is_some() && spec.pairwise_display_mode == PairwiseDisplayMode::BracketsOnly {
-            spec.pairwise_display_mode = if spec.comparisons.is_empty() {
-                PairwiseDisplayMode::CompactLetterDisplayOnly
-            } else {
-                PairwiseDisplayMode::BracketsAndCompactLetterDisplay
-            };
+            if let Some(raw_mode) = params.pairwise_display_mode.as_deref() {
+                spec.pairwise_display_mode = parse_pairwise_display_mode(raw_mode)?;
+            } else if spec.compact_letter_display.is_some() && spec.pairwise_display_mode == PairwiseDisplayMode::BracketsOnly {
+                spec.pairwise_display_mode = if spec.comparisons.is_empty() {
+                    PairwiseDisplayMode::CompactLetterDisplayOnly
+                } else {
+                    PairwiseDisplayMode::BracketsAndCompactLetterDisplay
+                };
+            }
         }
-    }
-
-    validate_graph_spec_in_doc(doc, &id, &spec)?;
-    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
-    graph.spec = spec;
-    graph.initialized = true;
+        Ok((spec.compact_letter_display.is_some(), spec.pairwise_display_mode, spec.compact_letter_display.clone()))
+    })?;
 
     let payload = json!({
         "sheet_id": id.as_str(),
-        "enabled": graph.spec.compact_letter_display.is_some(),
-        "pairwise_display_mode": graph.spec.pairwise_display_mode,
-        "compact_letter_display": graph.spec.compact_letter_display,
+        "enabled": updated.0,
+        "pairwise_display_mode": updated.1,
+        "compact_letter_display": updated.2,
     });
     Ok(CommandOutcome::mutated("graph.setCompactLetterDisplay", format!("updated compact letter display on `{id}`"), payload))
 }
@@ -3877,20 +3721,17 @@ pub(super) fn insert_image_on_graph(
     let crop = super::image::apply_crop_patch(args.crop, bounds_pt, curvebook_doc::CropInsetsPt::default())?;
     let border = super::image::apply_border_patch(args.border, None)?;
 
-    let mut spec = require_graph_sheet(doc, graph_id)?.spec.clone();
-    spec.annotations.push(GraphAnnotation::EmbeddedImage {
-        asset_id: resolved.asset_id.clone(),
-        bounds_pt,
-        rotation_deg,
-        lock_aspect_ratio,
-        crop,
-        border,
-    });
-    validate_graph_spec_in_doc(doc, graph_id, &spec)?;
-    let ann_idx = spec.annotations.len() - 1;
-    let graph = require_graph_sheet_mut(doc, graph_id)?;
-    graph.spec = spec;
-    graph.initialized = true;
+    let ann_idx = mutate_graph_sheet(doc, graph_id, true, true, |_, spec| {
+        spec.annotations.push(GraphAnnotation::EmbeddedImage {
+            asset_id: resolved.asset_id.clone(),
+            bounds_pt,
+            rotation_deg,
+            lock_aspect_ratio,
+            crop,
+            border,
+        });
+        Ok(spec.annotations.len() - 1)
+    })?;
 
     Ok(CommandOutcome::mutated(
         args.command_id,
@@ -3931,51 +3772,46 @@ fn run_graph_update_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcom
     let schema = schema_graph_update_image();
     let params: GraphUpdateImageParams = parse_params(&schema, raw)?;
     let graph_id = parse_sheet_id(&params.sheet_id)?;
-    let doc = &ctx.session.doc;
-    let mut spec = require_graph_sheet(doc, &graph_id)?.spec.clone();
-    let ann_len = spec.annotations.len();
-    let Some(ann) = spec.annotations.get_mut(params.annotation_index) else {
-        return Err(EngineError::with_code(
-            ErrorCode::NotFound,
-            format!("annotation_index {} out of bounds ({ann_len} annotations) on `{graph_id}`", params.annotation_index),
-        )
-        .with_details(json!({ "pointer": "/annotation_index" })));
-    };
-    let GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, lock_aspect_ratio, crop, border } = ann else {
-        return Err(EngineError::with_code(
-            ErrorCode::BadInput,
-            format!("annotation {} on `{graph_id}` is not an embedded image", params.annotation_index),
-        )
-        .with_details(json!({ "pointer": "/annotation_index" })));
-    };
-    let asset_id_str = asset_id.clone();
-    let intrinsic_px = doc.image_asset(&asset_id_str).map(|a| a.pixel_size);
-    if let Some(lock) = params.lock_aspect_ratio {
-        *lock_aspect_ratio = lock;
-    }
-    super::image::apply_image_bounds_update(
-        bounds_pt,
-        params.bounds_pt.as_ref(),
-        params.width_pt,
-        params.height_pt,
-        *lock_aspect_ratio,
-        intrinsic_px,
-    )?;
-    *rotation_deg = super::image::parse_rotation_deg(params.rotation_deg, *rotation_deg)?;
-    *crop = super::image::apply_crop_patch(params.crop.as_ref(), *bounds_pt, *crop)?;
-    *border = super::image::apply_border_patch(params.border.as_ref(), *border)?;
-    let updated_summary = json!({
-        "sheet_id": graph_id.as_str(),
-        "annotation_index": params.annotation_index,
-        "asset_id": asset_id_str,
-        "bounds_pt": *bounds_pt,
-        "rotation_deg": *rotation_deg,
-        "lock_aspect_ratio": *lock_aspect_ratio,
-        "crop": *crop,
-        "border": *border,
-    });
-    validate_graph_spec_in_doc(doc, &graph_id, &spec)?;
-    require_graph_sheet_mut(&mut ctx.session.doc, &graph_id)?.spec = spec;
+    let updated_summary = mutate_graph_sheet(&mut ctx.session.doc, &graph_id, false, true, |doc, spec| {
+        let ann_len = spec.annotations.len();
+        let Some(ann) = spec.annotations.get_mut(params.annotation_index) else {
+            return Err(EngineError::with_code(
+                ErrorCode::NotFound,
+                format!("annotation_index {} out of bounds ({ann_len} annotations) on `{graph_id}`", params.annotation_index),
+            )
+            .with_details(json!({ "pointer": "/annotation_index" })));
+        };
+        let GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, lock_aspect_ratio, crop, border } = ann else {
+            return Err(bad_input_ptr(
+                "/annotation_index",
+                format!("annotation {} on `{graph_id}` is not an embedded image", params.annotation_index),
+            ));
+        };
+        let asset_id_str = asset_id.clone();
+        let intrinsic_px = doc.image_asset(&asset_id_str).map(|a| a.pixel_size);
+        apply_opt!(params.lock_aspect_ratio => *lock_aspect_ratio);
+        super::image::apply_image_bounds_update(
+            bounds_pt,
+            params.bounds_pt.as_ref(),
+            params.width_pt,
+            params.height_pt,
+            *lock_aspect_ratio,
+            intrinsic_px,
+        )?;
+        *rotation_deg = super::image::parse_rotation_deg(params.rotation_deg, *rotation_deg)?;
+        *crop = super::image::apply_crop_patch(params.crop.as_ref(), *bounds_pt, *crop)?;
+        *border = super::image::apply_border_patch(params.border.as_ref(), *border)?;
+        Ok(json!({
+            "sheet_id": graph_id.as_str(),
+            "annotation_index": params.annotation_index,
+            "asset_id": asset_id_str,
+            "bounds_pt": *bounds_pt,
+            "rotation_deg": *rotation_deg,
+            "lock_aspect_ratio": *lock_aspect_ratio,
+            "crop": *crop,
+            "border": *border,
+        }))
+    })?;
     Ok(CommandOutcome::mutated("graph.updateImage", format!("updated embedded image on graph `{graph_id}`"), updated_summary))
 }
 
@@ -3997,6 +3833,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::Session;
 
     fn session_with_xy() -> Session {
         let mut doc = ProjectDocument::new("Graph Test").unwrap();

@@ -311,7 +311,7 @@ pub(super) fn render_canvas_media_buttons(
                 disabled_reason: None,
             },
         ) {
-            intents.push_paste_image_from_clipboard(spec.sheet_id.clone(), None);
+            intents.push(UiIntent::PasteImageFromClipboard { target_sheet_id: spec.sheet_id.clone(), anchor_pt: None });
         }
     });
 

@@ -7,18 +7,19 @@ use curvebook_doc::{ErrorCode, ProjectDocument, SheetId};
 use curvebook_pdf::{PdfColorSpace, PdfExportOptions};
 use curvebook_render::TiffCompression;
 use curvebook_svg::SvgExportOptions;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::{Deserializer, Error as DeError, Visitor};
 use serde_json::{Value, json};
 
-use super::helpers::{encode_base64, parse_sheet_id};
-use super::params::{array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema, parse_params, str_schema};
-use super::{CommandGroup, CommandSpec, Ctx, Effects};
+use super::helpers::{bad_input, bad_input_ptr, encode_base64, has_exportable_sheet, has_graph_sheet, has_layout_sheet, parse_sheet_id};
+use super::params::{NonEmptyStrSchema, command_schema, parse_params};
+use super::{CommandGroup, CommandSpec, Ctx, Effects, command_specs};
 use crate::services::{
     EmfSheetKind, ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterSizingPolicy, compile_visual_scene_for_sheet,
     export_document_artifact,
 };
-use crate::{CommandOutcome, EngineError, Session};
+use crate::{CommandOutcome, EngineError};
 
 const EXPORT_EFFECTS: Effects = Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT);
 
@@ -28,137 +29,108 @@ pub fn specs() -> &'static [CommandSpec] {
     SPECS
 }
 
-static SPECS: &[CommandSpec] = &[
-    CommandSpec {
+static SPECS: &[CommandSpec] = &command_specs!(
+    CommandGroup::Export;
+    {
         id: "export.svg",
         label: "Export SVG",
         menu_path: "File/Export/SVG...",
-        shortcut: "",
         summary: "Render a graph or layout sheet to scalable vector graphics (SVG) and optionally write it atomically to disk.",
         beginner: "Exports the selected graph or layout as crisp SVG text, optionally saving it to a file path.",
-        group: CommandGroup::Export,
         effects: EXPORT_EFFECTS,
-        input_schema: schema_export_svg,
+        input_schema: command_schema::<ExportSvgParams>,
         enabled: has_exportable_sheet,
         run: run_export_svg,
     },
-    CommandSpec {
+    {
         id: "export.pdf",
         label: "Export PDF",
         menu_path: "File/Export/PDF...",
-        shortcut: "",
         summary: "Render one or more graph or layout sheets to publication PDF (sRGB or print CMYK) and optionally write it atomically to disk.",
         beginner: "Creates a single-page or multi-page vector PDF from one or more graphs and layouts.",
-        group: CommandGroup::Export,
         effects: EXPORT_EFFECTS,
-        input_schema: schema_export_pdf,
+        input_schema: command_schema::<ExportPdfParams>,
         enabled: has_exportable_sheet,
         run: run_export_pdf,
     },
-    CommandSpec {
+    {
         id: "export.png",
         label: "Export PNG",
         menu_path: "File/Export/PNG...",
-        shortcut: "",
         summary: "Rasterize a graph or layout sheet to a PNG image at the requested pixel dimensions or DPI.",
         beginner: "Renders a graph or layout to a high-DPI PNG image, returning base64 bytes and optionally saving to disk.",
-        group: CommandGroup::Export,
         effects: EXPORT_EFFECTS,
-        input_schema: schema_export_png,
+        input_schema: command_schema::<ExportPngParams>,
         enabled: has_exportable_sheet,
         run: run_export_png,
     },
-    CommandSpec {
+    {
         id: "export.tiff",
         label: "Export TIFF",
         menu_path: "File/Export/TIFF...",
-        shortcut: "",
         summary: "Rasterize a graph or layout sheet to a TIFF image with selectable compression (`none`, `lzw`, `deflate`).",
         beginner: "Renders a publication TIFF image at custom DPI or resolution with lossless compression.",
-        group: CommandGroup::Export,
         effects: EXPORT_EFFECTS,
-        input_schema: schema_export_tiff,
+        input_schema: command_schema::<ExportTiffParams>,
         enabled: has_exportable_sheet,
         run: run_export_tiff,
     },
-    CommandSpec {
+    {
         id: "graph.exportSvg",
         label: "Export Graph SVG",
         menu_path: "File/Export/SVG",
-        shortcut: "",
         summary: "Export a graph sheet to SVG using the unified SVG renderer.",
         beginner: "Exports the active graph to vector SVG format.",
-        group: CommandGroup::Export,
         effects: EXPORT_EFFECTS,
-        input_schema: schema_export_svg,
+        input_schema: command_schema::<ExportSvgParams>,
         enabled: has_exportable_sheet,
         run: run_graph_export_svg,
     },
-    CommandSpec {
+    {
         id: "graph.exportPdf",
         label: "Export Graph PDF",
         menu_path: "File/Export/PDF",
-        shortcut: "",
         summary: "Export a graph sheet (or sheet list) to vector PDF.",
         beginner: "Exports the active graph to publication PDF format.",
-        group: CommandGroup::Export,
         effects: EXPORT_EFFECTS,
-        input_schema: schema_export_pdf,
+        input_schema: command_schema::<ExportPdfParams>,
         enabled: has_exportable_sheet,
         run: run_graph_export_pdf,
     },
-    CommandSpec {
+    {
         id: "graph.exportPng",
         label: "Export Graph PNG",
         menu_path: "File/Export/PNG",
-        shortcut: "",
         summary: "Export a graph sheet to a raster PNG image.",
         beginner: "Exports the active graph to a PNG bitmap at configurable DPI and size.",
-        group: CommandGroup::Export,
         effects: EXPORT_EFFECTS,
-        input_schema: schema_export_png,
+        input_schema: command_schema::<ExportPngParams>,
         enabled: has_exportable_sheet,
         run: run_graph_export_png,
     },
-    CommandSpec {
+    {
         id: "graph.exportEmf",
         label: "Export Graph EMF",
         menu_path: "File/Export/Graph EMF...",
-        shortcut: "",
         summary: "Export a graph sheet as a Windows Enhanced Metafile (EMF) vector graphic.",
         beginner: "Exports a graph sheet to EMF for insertion into Office documents.",
-        group: CommandGroup::Export,
         effects: EXPORT_EFFECTS,
-        input_schema: schema_export_emf,
+        input_schema: command_schema::<ExportEmfParams>,
         enabled: has_graph_sheet,
         run: run_graph_export_emf,
     },
-    CommandSpec {
+    {
         id: "layout.exportEmf",
         label: "Export Layout EMF",
         menu_path: "File/Export/Layout EMF...",
-        shortcut: "",
         summary: "Export a multi-panel layout sheet as a Windows Enhanced Metafile (EMF) vector graphic.",
         beginner: "Exports a multi-panel layout sheet to EMF for insertion into Office documents.",
-        group: CommandGroup::Export,
         effects: EXPORT_EFFECTS,
-        input_schema: schema_export_emf,
+        input_schema: command_schema::<ExportEmfParams>,
         enabled: has_layout_sheet,
         run: run_layout_export_emf,
     },
-];
-
-fn has_exportable_sheet(session: &Session) -> bool {
-    !session.document().graph_sheets.is_empty() || !session.document().layout_sheets.is_empty()
-}
-
-fn has_graph_sheet(session: &Session) -> bool {
-    !session.document().graph_sheets.is_empty()
-}
-
-fn has_layout_sheet(session: &Session) -> bool {
-    !session.document().layout_sheets.is_empty()
-}
+);
 
 // ---------------------------------------------------------------------------
 // Shared Export & Serde Utilities (reused across sibling cmd modules)
@@ -244,140 +216,109 @@ pub(super) fn de_opt_usize<'de, D: Deserializer<'de>>(deserializer: D) -> Result
 // Schemas & Typed Parameter Structs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ExportSvgParams {
+    /// Graph or layout sheet ID to export.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// Optional output file path.
+    #[schemars(length(min = 1))]
     path: Option<String>,
+    /// Format SVG XML with indentation.
     pretty: Option<bool>,
+    /// Include leading XML declaration.
     include_xml_declaration: Option<bool>,
+    /// Include document metadata block.
     include_metadata: Option<bool>,
+    /// Embed bundled font faces.
     embed_fonts: Option<bool>,
+    /// Numeric coordinate decimal precision (0..=255).
     #[serde(default, deserialize_with = "de_opt_u8")]
     precision: Option<u8>,
+    /// Convert glyphs into vector outline paths.
     outline_text: Option<bool>,
 }
 
-fn schema_export_svg() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("Graph or layout sheet ID to export")),
-            ("path", nullable_schema(non_empty_str_schema("Optional output file path"))),
-            ("pretty", nullable_schema(bool_schema("Format SVG XML with indentation"))),
-            ("include_xml_declaration", nullable_schema(bool_schema("Include leading XML declaration"))),
-            ("include_metadata", nullable_schema(bool_schema("Include document metadata block"))),
-            ("embed_fonts", nullable_schema(bool_schema("Embed bundled font faces"))),
-            ("precision", nullable_schema(int_schema("Numeric coordinate decimal precision (0..=255)", Some(0), Some(i64::from(u8::MAX))))),
-            ("outline_text", nullable_schema(bool_schema("Convert glyphs into vector outline paths"))),
-        ],
-        &["sheet_id"],
-        false,
-    )
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ExportPdfParams {
+    /// Graph or layout sheet ID for single-page PDF.
+    #[schemars(length(min = 1))]
     sheet_id: Option<String>,
+    /// Ordered sheet IDs for multi-page PDF export.
+    #[schemars(with = "Option<Vec<NonEmptyStrSchema>>")]
     sheet_ids: Option<Vec<String>>,
+    /// Optional output PDF file path.
+    #[schemars(length(min = 1))]
     path: Option<String>,
+    /// PDF output color space (`srgb` or `cmyk`).
     color_space: Option<String>,
+    /// Compress PDF content streams.
     compress_streams: Option<bool>,
+    /// Optional PDF document title metadata.
     title: Option<String>,
+    /// Outline text glyphs into vector paths.
     outline_text: Option<bool>,
 }
 
-fn schema_export_pdf() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", nullable_schema(non_empty_str_schema("Graph or layout sheet ID for single-page PDF"))),
-            ("sheet_ids", nullable_schema(array_schema("Ordered sheet IDs for multi-page PDF export", non_empty_str_schema("Sheet ID"), None, None))),
-            ("path", nullable_schema(non_empty_str_schema("Optional output PDF file path"))),
-            ("color_space", nullable_schema(str_schema("PDF output color space (`srgb` or `cmyk`)"))),
-            ("compress_streams", nullable_schema(bool_schema("Compress PDF content streams"))),
-            ("title", nullable_schema(str_schema("Optional PDF document title metadata"))),
-            ("outline_text", nullable_schema(bool_schema("Outline text glyphs into vector paths"))),
-        ],
-        &[],
-        false,
-    )
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ExportPngParams {
+    /// Graph or layout sheet ID to rasterize.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// Optional output PNG file path.
+    #[schemars(length(min = 1))]
     path: Option<String>,
+    /// Explicit raster width in pixels.
     #[serde(default, deserialize_with = "de_opt_u32")]
+    #[schemars(range(min = 1))]
     width_px: Option<u32>,
+    /// Explicit raster height in pixels.
     #[serde(default, deserialize_with = "de_opt_u32")]
+    #[schemars(range(min = 1))]
     height_px: Option<u32>,
+    /// Target resolution in dots per inch (default 300).
     #[serde(default, deserialize_with = "de_opt_u16")]
+    #[schemars(range(min = 1))]
     dpi: Option<u16>,
 }
 
-fn raster_dim_schema(label: &str) -> Value {
-    nullable_schema(int_schema(label, Some(1), Some(i64::from(u32::MAX))))
-}
-
-fn raster_dpi_schema() -> Value {
-    nullable_schema(int_schema("Target resolution in dots per inch (default 300)", Some(1), Some(i64::from(u16::MAX))))
-}
-
-fn schema_export_png() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("Graph or layout sheet ID to rasterize")),
-            ("path", nullable_schema(non_empty_str_schema("Optional output PNG file path"))),
-            ("width_px", raster_dim_schema("Explicit raster width in pixels")),
-            ("height_px", raster_dim_schema("Explicit raster height in pixels")),
-            ("dpi", raster_dpi_schema()),
-        ],
-        &["sheet_id"],
-        false,
-    )
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ExportTiffParams {
+    /// Graph or layout sheet ID to rasterize.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// Optional output TIFF file path.
+    #[schemars(length(min = 1))]
     path: Option<String>,
+    /// Explicit raster width in pixels.
     #[serde(default, deserialize_with = "de_opt_u32")]
+    #[schemars(range(min = 1))]
     width_px: Option<u32>,
+    /// Explicit raster height in pixels.
     #[serde(default, deserialize_with = "de_opt_u32")]
+    #[schemars(range(min = 1))]
     height_px: Option<u32>,
+    /// Target resolution in dots per inch (default 300).
     #[serde(default, deserialize_with = "de_opt_u16")]
+    #[schemars(range(min = 1))]
     dpi: Option<u16>,
+    /// TIFF compression codec (`none`, `lzw`, `deflate`).
     compression: Option<String>,
 }
 
-fn schema_export_tiff() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("Graph or layout sheet ID to rasterize")),
-            ("path", nullable_schema(non_empty_str_schema("Optional output TIFF file path"))),
-            ("width_px", raster_dim_schema("Explicit raster width in pixels")),
-            ("height_px", raster_dim_schema("Explicit raster height in pixels")),
-            ("dpi", raster_dpi_schema()),
-            ("compression", nullable_schema(str_schema("TIFF compression codec (`none`, `lzw`, `deflate`)"))),
-        ],
-        &["sheet_id"],
-        false,
-    )
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ExportEmfParams {
+    /// Target sheet ID to export to EMF.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// Optional output EMF file path.
+    #[schemars(length(min = 1))]
     path: Option<String>,
-}
-
-fn schema_export_emf() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("Target sheet ID to export to EMF")),
-            ("path", nullable_schema(non_empty_str_schema("Optional output EMF file path"))),
-        ],
-        &["sheet_id"],
-        false,
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -393,8 +334,7 @@ fn run_graph_export_svg(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
 }
 
 fn run_svg_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let schema = schema_export_svg();
-    let params: ExportSvgParams = parse_params(&schema, raw)?;
+    let params: ExportSvgParams = parse_params(&command_schema::<ExportSvgParams>(), raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
 
     let mut opts = SvgExportOptions::default();
@@ -452,15 +392,14 @@ fn parse_pdf_color_space(raw: Option<&str>) -> Result<PdfColorSpace, EngineError
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         None | Some("srgb" | "rgb") => Ok(PdfColorSpace::Srgb),
         Some("cmyk") => Ok(PdfColorSpace::Cmyk),
-        Some(other) => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown PDF `color_space` `{other}`"))
+        Some(other) => Err(bad_input(format!("unknown PDF `color_space` `{other}`"))
             .with_remediation("Use `srgb` or `cmyk`.")
             .with_details(json!({ "pointer": "/color_space", "color_space": other }))),
     }
 }
 
 fn run_pdf_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let schema = schema_export_pdf();
-    let params: ExportPdfParams = parse_params(&schema, raw)?;
+    let params: ExportPdfParams = parse_params(&command_schema::<ExportPdfParams>(), raw)?;
 
     let color_space = parse_pdf_color_space(params.color_space.as_deref())?;
     let mut opts = PdfExportOptions { color_space, ..PdfExportOptions::default() };
@@ -482,9 +421,8 @@ fn run_pdf_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
         (ExportTarget::AutoOrExplicit(None), Some(parsed_ids))
     } else {
         let raw_id = params.sheet_id.ok_or_else(|| {
-            EngineError::with_code(ErrorCode::BadInput, "missing required parameter `sheet_id` or `sheet_ids`")
+            bad_input_ptr("/sheet_id", "missing required parameter `sheet_id` or `sheet_ids`")
                 .with_remediation("Pass `sheet_id` for a single page or `sheet_ids` for a multi-page PDF.")
-                .with_details(json!({ "pointer": "/sheet_id" }))
         })?;
         (ExportTarget::Explicit(parse_sheet_id(&raw_id)?), None)
     };
@@ -518,8 +456,7 @@ fn run_graph_export_png(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
 }
 
 fn run_png_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let schema = schema_export_png();
-    let params: ExportPngParams = parse_params(&schema, raw)?;
+    let params: ExportPngParams = parse_params(&command_schema::<ExportPngParams>(), raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
     let req = ExportArtifactRequest {
         target: ExportTarget::Explicit(id.clone()),
@@ -554,15 +491,14 @@ fn parse_tiff_compression(raw: Option<&str>) -> Result<(&'static str, TiffCompre
         None | Some("deflate") => Ok(("deflate", TiffCompression::Deflate)),
         Some("none") => Ok(("none", TiffCompression::None)),
         Some("lzw") => Ok(("lzw", TiffCompression::Lzw)),
-        Some(other) => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown TIFF compression `{other}`"))
+        Some(other) => Err(bad_input(format!("unknown TIFF compression `{other}`"))
             .with_remediation("Use `none`, `lzw`, or `deflate`.")
             .with_details(json!({ "pointer": "/compression", "compression": other }))),
     }
 }
 
 fn run_export_tiff(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let schema = schema_export_tiff();
-    let params: ExportTiffParams = parse_params(&schema, raw)?;
+    let params: ExportTiffParams = parse_params(&command_schema::<ExportTiffParams>(), raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
     let (compression_label, compression) = parse_tiff_compression(params.compression.as_deref())?;
     let req = ExportArtifactRequest {
@@ -604,8 +540,7 @@ fn run_layout_export_emf(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
 }
 
 fn run_emf_with_kind(ctx: &mut Ctx<'_>, command_id: &str, kind: EmfSheetKind, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let schema = schema_export_emf();
-    let params: ExportEmfParams = parse_params(&schema, raw)?;
+    let params: ExportEmfParams = parse_params(&command_schema::<ExportEmfParams>(), raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
     let req = ExportArtifactRequest { target: ExportTarget::Explicit(id.clone()), format: ExportArtifactFormat::Emf { require_kind: Some(kind) } };
     let artifact = export_document_artifact(ctx.session.document(), &req, Some(ctx.cancelled), command_id)?;
@@ -645,6 +580,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::Session;
 
     fn doc_with_graph_and_layout() -> ProjectDocument {
         let mut doc = ProjectDocument::new("Export Test").unwrap();

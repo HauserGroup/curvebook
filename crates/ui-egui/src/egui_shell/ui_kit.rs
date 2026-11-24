@@ -591,6 +591,21 @@ pub(super) fn modal_tab(ui: &mut Ui, meta: &mut FrameInspectMeta, widget_id: &st
 
 /// Record a modal checkbox response into `meta` when visible.
 pub(super) fn record_modal_checkbox(ui: &Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id: &str, label: &str, checked: bool) {
+    record_modal_checkbox_enabled(ui, resp, meta, widget_id, label, checked, true, None);
+}
+
+/// Record a modal checkbox response with explicit enablement metadata when visible.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn record_modal_checkbox_enabled(
+    ui: &Ui,
+    resp: &Response,
+    meta: &mut FrameInspectMeta,
+    widget_id: &str,
+    label: &str,
+    checked: bool,
+    enabled: bool,
+    disabled_reason: Option<&str>,
+) {
     record_if_visible(
         ui,
         resp,
@@ -601,8 +616,8 @@ pub(super) fn record_modal_checkbox(ui: &Ui, resp: &Response, meta: &mut FrameIn
             label,
             command_id: None,
             value: Some(Value::Bool(checked)),
-            enabled: true,
-            disabled_reason: None,
+            enabled,
+            disabled_reason,
             z_layer: ZLayer::ModalDialog,
             ellipsized: false,
             full_label: None,

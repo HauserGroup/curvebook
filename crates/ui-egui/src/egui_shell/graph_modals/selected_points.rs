@@ -4,6 +4,7 @@ use curvebook_palette::MarkerShape;
 use egui::Ui;
 use serde_json::{Map, Value, json};
 
+use super::super::UiIntent;
 use super::super::unit_spinners::{ScrubUnitFieldConfig, render_scrub_unit_field};
 use super::helpers::{ButtonEntry, GraphModalCtx, record_button, record_checkbox};
 use super::state::GraphModalEguiState;
@@ -38,7 +39,7 @@ pub(super) fn render_format_selected_points_body(ui: &mut Ui, state: &mut GraphM
                 let mut patch = Map::new();
                 patch.insert(String::from("color"), Value::String(hex.to_owned()));
                 patch.insert(String::from("fill_color"), Value::String(hex.to_owned()));
-                gctx.intents.push_patch_active_dialog(patch);
+                gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
             }
         }
     });
@@ -72,7 +73,7 @@ pub(super) fn render_format_selected_points_body(ui: &mut Ui, state: &mut GraphM
             {
                 let mut patch = Map::new();
                 patch.insert(String::from("symbol"), Value::String(slug));
-                gctx.intents.push_patch_active_dialog(patch);
+                gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
             }
         }
     });
@@ -88,7 +89,7 @@ pub(super) fn render_format_selected_points_body(ui: &mut Ui, state: &mut GraphM
     if let Some(val) = size_out.committed_value {
         let mut patch = Map::new();
         patch.insert(String::from("size_pt"), json!(val.clamp(2.0, 24.0)));
-        gctx.intents.push_patch_active_dialog(patch);
+        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
     }
 
     let bw_cfg = ScrubUnitFieldConfig {
@@ -101,7 +102,7 @@ pub(super) fn render_format_selected_points_body(ui: &mut Ui, state: &mut GraphM
     if let Some(val) = bw_out.committed_value {
         let mut patch = Map::new();
         patch.insert(String::from("border_width_pt"), json!(val.clamp(0.5, 6.0)));
-        gctx.intents.push_patch_active_dialog(patch);
+        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
     }
 
     ui.add_space(4.0);
@@ -111,7 +112,7 @@ pub(super) fn render_format_selected_points_body(ui: &mut Ui, state: &mut GraphM
     if h_chk.changed() {
         let mut patch = Map::new();
         patch.insert(String::from("hidden"), Value::Bool(hidden));
-        gctx.intents.push_patch_active_dialog(patch);
+        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
     }
 
     let mut clear = fp.clear_overrides;
@@ -120,6 +121,6 @@ pub(super) fn render_format_selected_points_body(ui: &mut Ui, state: &mut GraphM
     if c_chk.changed() {
         let mut patch = Map::new();
         patch.insert(String::from("clear_overrides"), Value::Bool(clear));
-        gctx.intents.push_patch_active_dialog(patch);
+        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
     }
 }

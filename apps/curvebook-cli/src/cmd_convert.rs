@@ -3,44 +3,21 @@
 use std::fs;
 use std::path::Path;
 
-use curvebook_doc::{
-    GraphSheet, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, TableKind, XColumnMode, validate_project_cells, validate_sheet_cells,
+use curvebook_doc::{ErrorCode, ProjectDocument};
+use curvebook_engine::EngineError;
+use curvebook_engine::services::{
+    self, DEFAULT_EXPORT_DPI, DocumentExportFormat, ExportArtifactRequest, ExportOptionsSpec, ExportTarget, RasterSizingPolicy,
+    export_document_artifact, resolve_json_target_by_name_or_id, resolve_tabular_sheet_by_name_or_id, resolve_visual_sheet_by_name_or_id,
 };
-use curvebook_engine::services::{ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterSizingPolicy, export_document_artifact};
-use curvebook_format::registry::{ExportOptions, ExportSource, FormatKind, FormatRegistry, ImportOptions, ImportPayload};
-use curvebook_format::{
-    ArchiveKind, CsvOptions, ImportReport, MAX_ARCHIVE_FILE_BYTES, XlsxImportOptions, import_prism_bytes, import_pzfx_bytes, import_xlsx_bytes,
-    is_unpacked_project_dir, open_archive_bytes,
-};
-use curvebook_pdf::{PdfExportOptions, PdfVersion};
-use curvebook_platform::PlatformError;
+pub use curvebook_engine::services::{LoadedProject, is_unpacked_project_path, pdf_version_str};
+pub(crate) use curvebook_engine::services::{MAX_RASTER_DPI, MIN_RASTER_DPI};
+use curvebook_format::registry::{ExportOptions, ExportSource, FormatRegistry};
+use curvebook_pdf::PdfVersion;
 use curvebook_platform::fs::write_atomic;
 use curvebook_render::TiffCompression;
-use curvebook_svg::SvgExportOptions;
-use curvebook_text::parse_truetype_font_info;
 use serde_json::json;
 
 use crate::error::CliError;
-
-/// Default raster DPI used when `--dpi` is omitted on PNG/TIFF export.
-const DEFAULT_RASTER_DPI: u16 = 300;
-
-/// Minimum supported raster DPI for PNG/TIFF exports.
-pub(crate) const MIN_RASTER_DPI: u16 = 18;
-
-/// Maximum supported raster DPI for PNG/TIFF exports.
-pub(crate) const MAX_RASTER_DPI: u16 = 2400;
-
-/// Maximum TrueType SFNT font file read size (`64 MiB`).
-const MAX_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
-
-/// Loaded project document paired with its detected container format tag and import warnings.
-#[derive(Debug, Clone)]
-pub struct LoadedProject {
-    pub doc: ProjectDocument,
-    pub format_tag: &'static str,
-    pub warnings: Vec<String>,
-}
 
 /// Supported target export formats for `convert`, `export`, and batch manifest `exports`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,69 +176,21 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
 
 /// Parse a PDF specification version string (`1.4` or `1.7`).
 pub fn parse_pdf_version(raw: &str) -> Result<PdfVersion, CliError> {
-    match raw.trim() {
-        "1.4" => Ok(PdfVersion::Pdf14),
-        "1.7" => Ok(PdfVersion::Pdf17),
-        other => Err(CliError::Usage(format!("invalid --pdf-version `{other}` (expected `1.4` or `1.7`)"))),
-    }
+    services::parse_pdf_version(raw).map_err(|_| CliError::Usage(format!("invalid --pdf-version `{}` (expected `1.4` or `1.7`)", raw.trim())))
 }
 
-/// Canonical string representation of a [`PdfVersion`].
-#[must_use]
-pub const fn pdf_version_str(version: PdfVersion) -> &'static str {
-    match version {
-        PdfVersion::Pdf14 => "1.4",
-        PdfVersion::Pdf17 => "1.7",
-    }
-}
-
-/// Read and validate TrueType SFNT bytes from `path` via [`parse_truetype_font_info`].
+/// Read and validate TrueType SFNT bytes from `path`.
 pub fn load_validated_ttf_font(path: &Path) -> Result<Vec<u8>, CliError> {
-    let bytes = curvebook_platform::fs::read_regular_file_bytes(path, MAX_FONT_FILE_BYTES).map_err(|err| match err {
-        PlatformError::FileTooLarge { .. } => CliError::from(err),
-        other => CliError::Runtime(format!("failed to read TrueType font `{}`: {other}", path.display())),
-    })?;
-    let _info = parse_truetype_font_info(&bytes).map_err(|err| CliError::Runtime(format!("invalid TrueType font `{}`: {err}", path.display())))?;
-    if !matches!(bytes.get(0..4), Some([0x00, 0x01, 0x00, 0x00] | b"true")) {
-        return Err(CliError::Runtime(format!(
-            "unsupported SFNT font `{}`: expected TrueType outlines (`0x00010000` or `true`), not CFF/OTTO",
-            path.display()
-        )));
-    }
-    Ok(bytes)
-}
-
-/// Return `true` when `path` carries a `.curvebook.d` directory suffix (case-insensitive).
-#[must_use]
-pub fn has_unpacked_dir_suffix(path: &Path) -> bool {
-    path.file_name().and_then(std::ffi::OsStr::to_str).is_some_and(|name| name.to_ascii_lowercase().ends_with(".curvebook.d"))
-}
-
-/// Return `true` when `path` refers to an unpacked `.curvebook.d` directory (either by
-/// `.curvebook.d` suffix or an existing unpacked `manifest.json` marker), without classifying
-/// arbitrary directories such as `.` (`R2-S12-02`).
-#[must_use]
-pub fn is_unpacked_project_path(path: &Path) -> bool {
-    has_unpacked_dir_suffix(path) || is_unpacked_project_dir(path)
+    services::load_validated_ttf_font_bytes(path).map_err(|err| match err.code {
+        ErrorCode::ResourceLimit => CliError::from(err),
+        ErrorCode::IoError => CliError::Runtime(format!("failed to read TrueType font `{}`: {}", path.display(), err.message())),
+        _ => CliError::Runtime(err.message().to_owned()),
+    })
 }
 
 /// Compute total file byte size inside an unpacked directory tree.
 pub fn dir_size_bytes(root: &Path) -> Result<usize, CliError> {
-    let mut total = 0_u64;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = fs::read_dir(&dir).map_err(|err| CliError::Runtime(format!("failed to read `{}`: {err}", dir.display())))?;
-        for entry in entries {
-            let entry = entry.map_err(|err| CliError::Runtime(format!("failed to inspect `{}`: {err}", dir.display())))?;
-            let meta = entry.metadata().map_err(|err| CliError::Runtime(format!("failed to stat `{}`: {err}", entry.path().display())))?;
-            if meta.is_dir() {
-                stack.push(entry.path());
-            } else {
-                total = total.saturating_add(meta.len());
-            }
-        }
-    }
-    Ok(usize::try_from(total).unwrap_or(usize::MAX))
+    services::dir_size_bytes(root).map_err(|err| CliError::Runtime(err.message().to_owned()))
 }
 
 fn export_format_from_descriptor_id(id: &str) -> Option<ExportFormat> {
@@ -318,6 +247,16 @@ pub fn detect_export_format_from_path(path: &Path) -> Result<ExportFormat, CliEr
     parse_export_format(ext)
 }
 
+fn map_project_load_error(path: &Path, err: EngineError) -> CliError {
+    if err.code == ErrorCode::UnsupportedFormat && err.message().contains("delimited CSV/TSV") {
+        return CliError::Usage(err.message().to_owned());
+    }
+    if err.code == ErrorCode::IoError || (err.code == ErrorCode::BadInput && err.message().starts_with("invalid file ")) {
+        return CliError::Runtime(format!("failed to read `{}`: {}", path.display(), err.message()));
+    }
+    CliError::from(err)
+}
+
 /// Load a [`ProjectDocument`] from a file path or unpacked `.curvebook.d` directory, returning `(loaded, input_bytes)`.
 pub fn load_project_from_path(path: &Path, allow_delimited: bool) -> Result<(LoadedProject, usize), CliError> {
     load_project_from_path_with_xlsx_sheets(path, allow_delimited, None)
@@ -330,104 +269,14 @@ pub fn load_project_from_path_with_xlsx_sheets(
     allow_delimited: bool,
     xlsx_sheets: Option<&[String]>,
 ) -> Result<(LoadedProject, usize), CliError> {
-    if is_unpacked_project_path(path) {
-        let registry = FormatRegistry::default_registry();
-        let importer = registry
-            .importer_by_format("curvebook.d")
-            .ok_or_else(|| CliError::Runtime(String::from("missing `curvebook.d` importer in FormatRegistry")))?;
-        let payload = importer.import_path(path, &ImportOptions::default())?;
-        let doc = payload.into_document().ok_or_else(|| CliError::Runtime(String::from("`curvebook.d` importer returned non-document payload")))?;
-        let total_bytes = dir_size_bytes(path)?;
-        return Ok((LoadedProject { doc, format_tag: "curvebook.d", warnings: Vec::new() }, total_bytes));
-    }
-    let limit = FormatRegistry::default_registry().importer_for_path(path).map_or(MAX_ARCHIVE_FILE_BYTES, |importer| importer.max_input_bytes());
-    let bytes = curvebook_platform::fs::read_regular_file_bytes(path, limit).map_err(|err| match err {
-        PlatformError::FileTooLarge { .. } => CliError::from(err),
-        other => CliError::Runtime(format!("failed to read `{}`: {other}", path.display())),
-    })?;
-    let loaded = load_project_from_bytes_with_xlsx_sheets(path, &bytes, allow_delimited, xlsx_sheets)?;
-    Ok((loaded, bytes.len()))
-}
-
-fn load_project_from_bytes_with_xlsx_sheets(
-    path_hint: &Path,
-    bytes: &[u8],
-    allow_delimited: bool,
-    xlsx_sheets: Option<&[String]>,
-) -> Result<LoadedProject, CliError> {
-    let registry = FormatRegistry::default_registry();
-    if let Some(importer) = registry.importer_for_path(path_hint) {
-        let desc = importer.descriptor();
-        return import_with_registered_adapter(importer, desc.id, desc.kind, path_hint, bytes, allow_delimited, xlsx_sheets);
-    }
-    let ext = path_hint.extension().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase);
-    if ext.as_deref() == Some("json") {
-        return load_project_json(bytes);
-    }
-    sniff_project_bytes(bytes)
-}
-
-fn import_with_registered_adapter(
-    importer: &dyn curvebook_format::registry::Importer,
-    format_tag: &'static str,
-    kind: FormatKind,
-    path_hint: &Path,
-    bytes: &[u8],
-    allow_delimited: bool,
-    xlsx_sheets: Option<&[String]>,
-) -> Result<LoadedProject, CliError> {
-    match kind {
-        FormatKind::Template => {
-            let payload = importer.import_bytes(bytes, &ImportOptions::default())?;
-            let doc = payload.into_document().ok_or_else(|| CliError::Runtime(format!("importer `{format_tag}` returned non-document payload")))?;
-            Ok(LoadedProject { doc, format_tag, warnings: Vec::new() })
-        }
-        FormatKind::Archive => {
-            let doc = match importer.import_bytes(bytes, &ImportOptions::default()) {
-                Ok(payload) => {
-                    payload.into_document().ok_or_else(|| CliError::Runtime(format!("importer `{format_tag}` returned non-document payload")))?
-                }
-                Err(registry_err) => {
-                    if let Ok((_, doc)) = open_archive_bytes(bytes) {
-                        doc
-                    } else {
-                        return Err(CliError::from(registry_err));
-                    }
-                }
-            };
-            Ok(LoadedProject { doc, format_tag, warnings: Vec::new() })
-        }
-        FormatKind::ForeignProject => {
-            let mut opts = ImportOptions::default();
-            if format_tag == "xlsx"
-                && let Some(sheets) = xlsx_sheets
-            {
-                let stem = path_hint.file_stem().and_then(std::ffi::OsStr::to_str).map(str::to_owned);
-                opts.xlsx = Some(XlsxImportOptions { sheet_names: Some(sheets.to_vec()), title: stem, ..XlsxImportOptions::default() });
-            }
-            match importer.import_bytes(bytes, &opts)? {
-                ImportPayload::Report(report) => load_import_report(report, format_tag),
-                ImportPayload::Document(doc) => Ok(LoadedProject { doc, format_tag, warnings: Vec::new() }),
-                ImportPayload::DataSheet(_) => Err(CliError::Runtime(format!("importer `{format_tag}` returned unexpected single-sheet payload"))),
-            }
-        }
-        FormatKind::DelimitedText => {
-            if !allow_delimited {
-                return Err(CliError::Usage(String::from("delimited CSV/TSV files are not project archives")));
-            }
-            load_delimited_with_importer(importer, path_hint, bytes, format_tag)
-        }
-        FormatKind::ProjectDir | FormatKind::ResultTable | FormatKind::FigureVector | FormatKind::FigureRaster => sniff_project_bytes(bytes),
-    }
+    services::load_project_from_path_with_xlsx_sheets(path, allow_delimited, xlsx_sheets).map_err(|err| map_project_load_error(path, err))
 }
 
 /// Write an exported sheet or whole document to `req.out_path` using atomic writes and [`FormatRegistry`].
 pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSummary, CliError> {
     run_guarded_cli("cli.export_from_document", || {
-        if let Some(dpi) = req.dpi
-            && !(MIN_RASTER_DPI..=MAX_RASTER_DPI).contains(&dpi)
-        {
-            return Err(CliError::Usage(format!("--dpi must be in {MIN_RASTER_DPI}..={MAX_RASTER_DPI} (got {dpi})")));
+        if let Some(dpi) = req.dpi {
+            let _ = services::validate_dpi(dpi).map_err(|err| CliError::Usage(err.message().to_owned()))?;
         }
 
         if matches!(req.format, ExportFormat::CurveBook | ExportFormat::CurveBookDir) {
@@ -472,248 +321,54 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
     })
 }
 
-fn load_native_archive(bytes: &[u8]) -> Result<LoadedProject, CliError> {
-    let (kind, doc) = open_archive_bytes(bytes)?;
-    let format_tag = match kind {
-        ArchiveKind::Project => "curvebook",
-        ArchiveKind::Template => "cbtemplate",
-    };
-    Ok(LoadedProject { doc, format_tag, warnings: Vec::new() })
-}
-
-fn load_import_report(report: ImportReport, format_tag: &'static str) -> Result<LoadedProject, CliError> {
-    let warnings =
-        report
-            .warnings
-            .into_iter()
-            .map(|w| {
-                if w.source.trim().is_empty() {
-                    format!("[{:?}] {}", w.kind, w.message)
-                } else {
-                    format!("[{:?}] {}: {}", w.kind, w.source, w.message)
-                }
-            })
-            .collect();
-    Ok(LoadedProject { doc: report.document, format_tag, warnings })
-}
-
-fn load_project_json(bytes: &[u8]) -> Result<LoadedProject, CliError> {
-    let raw_value: serde_json::Value = serde_json::from_slice(bytes).map_err(|err| CliError::Runtime(format!("invalid project JSON: {err}")))?;
-    if !raw_value.is_object() {
-        return Err(CliError::Runtime(String::from("invalid project JSON: expected top-level JSON object")));
-    }
-    let doc_version = match raw_value.get("schema_version") {
-        None | Some(serde_json::Value::Null) => 0,
-        Some(v) => {
-            v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(|| CliError::Runtime(format!("invalid project `schema_version`: {v}")))?
-        }
-    };
-    let migrated_value = curvebook_format::archive::migrate_document_json(raw_value, doc_version)?;
-    let doc: ProjectDocument = serde_json::from_value(migrated_value).map_err(|err| CliError::Runtime(format!("invalid project JSON: {err}")))?;
-    validate_loaded_project_document(&doc)?;
-    Ok(LoadedProject { doc, format_tag: "json", warnings: Vec::new() })
-}
-
-fn validate_loaded_project_document(doc: &ProjectDocument) -> Result<(), CliError> {
-    curvebook_format::archive::validate_project_document(doc)?;
-    let mut total_cells = 0_usize;
-    for sheet in &doc.data_sheets {
-        if let TableArchetype::Xy(xy) = &sheet.archetype
-            && let XColumnMode::Numbers { subcolumn_mode } = xy.x_mode
-        {
-            subcolumn_mode.validate()?;
-        }
-        let slots = sheet.archetype.allocated_cell_slots();
-        validate_sheet_cells(slots)?;
-        total_cells = validate_project_cells(total_cells, slots)?;
-    }
-    Ok(())
-}
-
-fn load_delimited_with_importer(
-    importer: &dyn curvebook_format::registry::Importer,
-    path_hint: &Path,
-    bytes: &[u8],
-    format_tag: &'static str,
-) -> Result<LoadedProject, CliError> {
-    let stem = path_hint.file_stem().and_then(std::ffi::OsStr::to_str).filter(|s| !s.trim().is_empty()).unwrap_or("Imported Table");
-    let opts = ImportOptions {
-        sheet_id: SheetId::new("data_1"),
-        title: stem.to_owned(),
-        table_kind: TableKind::Xy,
-        subcolumn_mode: SubcolumnMode::Single,
-        csv: None,
-        xlsx: None,
-    };
-    let ds = importer
-        .import_bytes(bytes, &opts)?
-        .into_data_sheet()
-        .ok_or_else(|| CliError::Runtime(format!("delimited importer `{format_tag}` did not return a DataSheet")))?;
-    let mut doc = ProjectDocument::new(stem)?;
-    let mut graph = GraphSheet::new_uninitialized_for_data(SheetId::new("graph_1"), &ds)?;
-    graph.initialized = true;
-    doc.add_data_sheet(ds)?;
-    doc.add_graph_sheet(graph)?;
-    Ok(LoadedProject { doc, format_tag, warnings: Vec::new() })
-}
-
-fn sniff_project_bytes(bytes: &[u8]) -> Result<LoadedProject, CliError> {
-    if bytes.starts_with(b"PK\x03\x04") {
-        if let Ok(loaded) = load_native_archive(bytes) {
-            return Ok(loaded);
-        }
-        if let Ok(report) = import_xlsx_bytes(bytes) {
-            return load_import_report(report, "xlsx");
-        }
-        return load_import_report(import_prism_bytes(bytes)?, "prism");
-    }
-    let trimmed = bytes.iter().copied().find(|b| !b.is_ascii_whitespace());
-    match trimmed {
-        Some(b'<') => load_import_report(import_pzfx_bytes(bytes)?, "pzfx"),
-        Some(b'{') => load_project_json(bytes),
-        _ => Err(CliError::Runtime(String::from("unrecognized input file format"))),
-    }
-}
-
-fn find_sheet_id_by_name<T>(items: &[T], needle: &str, id_of: impl Fn(&T) -> &SheetId, title_of: impl Fn(&T) -> &str) -> Option<SheetId> {
-    items
-        .iter()
-        .find(|item| id_of(item).as_str() == needle)
-        .or_else(|| items.iter().find(|item| title_of(item) == needle))
-        .or_else(|| items.iter().find(|item| title_of(item).eq_ignore_ascii_case(needle)))
-        .map(id_of)
-        .cloned()
-}
-
-fn resolve_visual_sheet_id(doc: &ProjectDocument, sheet: Option<&str>) -> Result<SheetId, CliError> {
-    if let Some(needle) = sheet {
-        if let Some(id) = find_sheet_id_by_name(&doc.graph_sheets, needle, |g| &g.id, |g| &g.title) {
-            return Ok(id);
-        }
-        if let Some(id) = find_sheet_id_by_name(&doc.layout_sheets, needle, |l| &l.id, |l| &l.title) {
-            return Ok(id);
-        }
-        return Err(CliError::Runtime(format!("visual sheet `{needle}` was not found among graphs or layouts")));
-    }
-
-    if doc.graph_sheets.is_empty()
-        && let [only_layout] = doc.layout_sheets.as_slice()
-    {
-        return Ok(only_layout.id.clone());
-    }
-    if let Some(g) = doc.graph_sheets.iter().find(|g| g.initialized).or_else(|| doc.graph_sheets.first()) {
-        return Ok(g.id.clone());
-    }
-    if let Some(l) = doc.layout_sheets.first() {
-        return Ok(l.id.clone());
-    }
-    Err(CliError::Runtime(String::from("project contains no graph or layout sheets to render")))
-}
-
-fn resolve_tabular_sheet_id(doc: &ProjectDocument, sheet: Option<&str>) -> Result<SheetId, CliError> {
-    if let Some(needle) = sheet {
-        if let Some(id) = find_sheet_id_by_name(&doc.data_sheets, needle, |d| &d.id, |d| &d.title) {
-            return Ok(id);
-        }
-        if let Some(id) = find_sheet_id_by_name(&doc.result_sheets, needle, |r| &r.id, |r| r.title()) {
-            return Ok(id);
-        }
-        return Err(CliError::Runtime(format!("tabular sheet `{needle}` was not found")));
-    }
-    if let Some(d) = doc.data_sheets.first() {
-        return Ok(d.id.clone());
-    }
-    if let Some(r) = doc.result_sheets.first() {
-        return Ok(r.id.clone());
-    }
-    Err(CliError::Runtime(String::from("project contains no data or result sheets to export")))
-}
-
-fn resolve_json_target(doc: &ProjectDocument, sheet: Option<&str>) -> Result<(ExportTarget, Option<String>), CliError> {
-    if let Some(needle) = sheet {
-        let found = find_sheet_id_by_name(&doc.result_sheets, needle, |r| &r.id, |r| r.title())
-            .or_else(|| find_sheet_id_by_name(&doc.data_sheets, needle, |d| &d.id, |d| &d.title))
-            .or_else(|| find_sheet_id_by_name(&doc.info_sheets, needle, |s| &s.id, |s| &s.title));
-        let id = found.ok_or_else(|| CliError::Runtime(format!("sheet `{needle}` not found for JSON export")))?;
-        let label = id.as_str().to_owned();
-        return Ok((ExportTarget::Explicit(id), Some(label)));
-    }
-    if doc.data_sheets.is_empty()
-        && doc.graph_sheets.is_empty()
-        && doc.layout_sheets.is_empty()
-        && let [res] = doc.result_sheets.as_slice()
-    {
-        return Ok((ExportTarget::Explicit(res.id.clone()), Some(res.id.as_str().to_owned())));
-    }
-    Ok((ExportTarget::AutoOrExplicit(None), None))
-}
-
 fn build_cli_export_request(req: &ExportRequest<'_>) -> Result<(ExportArtifactRequest, Option<String>), CliError> {
-    let dpi = Some(req.dpi.unwrap_or(DEFAULT_RASTER_DPI));
-    let (target, sheet_id, format) = match req.format {
-        ExportFormat::Svg => {
-            let id = resolve_visual_sheet_id(req.doc, req.sheet)?;
-            let label = id.as_str().to_owned();
-            (ExportTarget::Explicit(id), Some(label), ExportArtifactFormat::Svg { options: SvgExportOptions::default() })
-        }
-        ExportFormat::Pdf => {
-            let id = resolve_visual_sheet_id(req.doc, req.sheet)?;
-            let label = id.as_str().to_owned();
-            let options = PdfExportOptions {
-                version: req.pdf_version,
-                embedded_truetype_font: req.embedded_truetype_font.map(<[u8]>::to_vec),
-                ..PdfExportOptions::default()
-            };
-            (ExportTarget::Explicit(id), Some(label), ExportArtifactFormat::Pdf { options, all_graphs: false, sheet_ids: None })
-        }
-        ExportFormat::Emf => {
-            let id = resolve_visual_sheet_id(req.doc, req.sheet)?;
-            let label = id.as_str().to_owned();
-            (ExportTarget::Explicit(id), Some(label), ExportArtifactFormat::Emf { require_kind: None })
-        }
-        ExportFormat::Png => {
-            let id = resolve_visual_sheet_id(req.doc, req.sheet)?;
-            let label = id.as_str().to_owned();
-            (
-                ExportTarget::Explicit(id),
-                Some(label),
-                ExportArtifactFormat::Png { width_px: None, height_px: None, dpi, sizing: RasterSizingPolicy::StrictLimits },
-            )
-        }
-        ExportFormat::Tiff => {
-            let id = resolve_visual_sheet_id(req.doc, req.sheet)?;
-            let label = id.as_str().to_owned();
-            (
-                ExportTarget::Explicit(id),
-                Some(label),
-                ExportArtifactFormat::Tiff {
-                    width_px: None,
-                    height_px: None,
-                    dpi,
-                    compression: TiffCompression::Deflate,
-                    sizing: RasterSizingPolicy::StrictLimits,
-                },
-            )
-        }
-        ExportFormat::Csv | ExportFormat::Tsv => {
-            let id = resolve_tabular_sheet_id(req.doc, req.sheet)?;
-            let label = id.as_str().to_owned();
-            let options = if req.format == ExportFormat::Tsv { CsvOptions::tsv() } else { CsvOptions::csv() };
-            (
-                ExportTarget::Explicit(id),
-                Some(label),
-                ExportArtifactFormat::Csv { options, tab_id: None, tab_index: req.tab_index, tidy: req.tab_index.is_none() },
-            )
-        }
-        ExportFormat::Json => {
-            let (target, label) = resolve_json_target(req.doc, req.sheet)?;
-            (target, label, ExportArtifactFormat::Json { pretty: req.pretty })
-        }
+    let doc_format = match req.format {
+        ExportFormat::Svg => DocumentExportFormat::Svg,
+        ExportFormat::Pdf => DocumentExportFormat::Pdf,
+        ExportFormat::Emf => DocumentExportFormat::Emf,
+        ExportFormat::Png => DocumentExportFormat::Png,
+        ExportFormat::Tiff => DocumentExportFormat::Tiff,
+        ExportFormat::Csv => DocumentExportFormat::Csv,
+        ExportFormat::Tsv => DocumentExportFormat::Tsv,
+        ExportFormat::Json => DocumentExportFormat::Json,
         ExportFormat::CurveBook | ExportFormat::CurveBookDir => {
             return Err(CliError::Runtime(format!("format `{}` is exported via FormatRegistry", req.format.as_str())));
         }
     };
-    Ok((ExportArtifactRequest { target, format }, sheet_id))
+    let mut spec = ExportOptionsSpec::new(doc_format);
+    spec.pretty = req.pretty;
+    spec.dpi = Some(req.dpi.unwrap_or(DEFAULT_EXPORT_DPI));
+    spec.sizing = RasterSizingPolicy::StrictLimits;
+    spec.tiff_compression = TiffCompression::Deflate;
+    spec.pdf_version = req.pdf_version;
+    spec.embedded_ttf_font = req.embedded_truetype_font.map(<[u8]>::to_vec);
+    spec.tab_index = req.tab_index;
+    spec.tidy = req.tab_index.is_none();
+
+    let sheet_label = match req.format {
+        ExportFormat::Svg | ExportFormat::Pdf | ExportFormat::Emf | ExportFormat::Png | ExportFormat::Tiff => {
+            let id = resolve_visual_sheet_by_name_or_id(req.doc, req.sheet)?;
+            let label = id.as_str().to_owned();
+            spec.sheet_id = Some(id);
+            Some(label)
+        }
+        ExportFormat::Csv | ExportFormat::Tsv => {
+            let id = resolve_tabular_sheet_by_name_or_id(req.doc, req.sheet)?;
+            let label = id.as_str().to_owned();
+            spec.sheet_id = Some(id);
+            Some(label)
+        }
+        ExportFormat::Json => {
+            let (target, label) = resolve_json_target_by_name_or_id(req.doc, req.sheet)?;
+            if let ExportTarget::Explicit(id) = target {
+                spec.sheet_id = Some(id);
+            }
+            label
+        }
+        ExportFormat::CurveBook | ExportFormat::CurveBookDir => None,
+    };
+    let artifact_req = spec.into_artifact_request(req.doc, false)?;
+    Ok((artifact_req, sheet_label))
 }
 
 #[cfg(test)]
@@ -820,12 +475,7 @@ fn consume_flag_opt(args: &[String], idx: &mut usize, flag: &str, missing_msg: &
 }
 
 fn parse_dpi_value(raw: &str) -> Result<u16, CliError> {
-    let dpi: u16 =
-        raw.parse().map_err(|_| CliError::Usage(format!("invalid --dpi `{raw}` (expected integer in {MIN_RASTER_DPI}..={MAX_RASTER_DPI})")))?;
-    if !(MIN_RASTER_DPI..=MAX_RASTER_DPI).contains(&dpi) {
-        return Err(CliError::Usage(format!("--dpi must be in {MIN_RASTER_DPI}..={MAX_RASTER_DPI} (got {dpi})")));
-    }
-    Ok(dpi)
+    services::parse_dpi_str(raw).map_err(|err| CliError::Usage(err.message().to_owned()))
 }
 
 #[cfg(test)]

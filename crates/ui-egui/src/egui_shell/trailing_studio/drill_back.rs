@@ -6,7 +6,7 @@ use egui::Stroke;
 use serde_json::json;
 
 use crate::UiApp;
-use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, widgets};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, UiIntent, widgets};
 use crate::i18n::tr;
 
 use super::helpers::{StudioButtonSpec, studio_full_button};
@@ -71,7 +71,7 @@ pub(super) fn render_data_point_drill_back_studio(
             disabled_reason: None,
         },
     ) {
-        intents.push_clear_brush();
+        intents.push(UiIntent::ClearBrush);
     }
 
     let Some(brushed) = app.brushed_cell.clone() else {
@@ -218,6 +218,6 @@ pub(super) fn render_data_point_drill_back_studio(
         },
     ) {
         intents.push_engine("sheet.select", json!({ "sheet_id": brushed.sheet_id.as_str() }));
-        intents.push_select_grid_cell(GridCellCoord::new(brushed.row, brushed.col, brushed.subcol));
+        intents.push(UiIntent::SelectGridCell { coord: GridCellCoord::new(brushed.row, brushed.col, brushed.subcol) });
     }
 }

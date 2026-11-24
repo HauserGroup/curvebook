@@ -9,12 +9,11 @@ use serde_json::{Map, Value, json};
 
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, ExportFigureFormat};
-use crate::gui_actions::dispatch as dispatch_gui_action;
 use crate::i18n::{BETA_ACTIVE_LOCALES, normalize_locale};
+use crate::import_paste::commit_import_paste_dialog;
 use crate::interaction::{UiEventOutcome, clear_modal_text_buffers, sync_edit_params_text_buffers, sync_format_axes_text_buffers};
 use crate::power_wizard::PowerWizardStage;
 use crate::theme::UiThemeMode;
-use crate::views::import_paste::commit_import_paste_dialog;
 
 /// Maximum recursive nesting depth for `command.run` / `engine.execute` / `command.batch` read-only inspection.
 pub const MAX_READ_ONLY_NESTING_DEPTH: usize = 8;
@@ -579,6 +578,7 @@ pub fn contextual_command_params(app: &UiApp, command_id: &str) -> Value {
                 json!({ "sheet_id": data_str, "cells": coords })
             }
         }
+        "ui.grid.excludeWithReason" => json!({ "sheet_id": active_sheet.or(data_str) }),
         "table.exclusionAuditReport" | "table.exportCsv" => json!({ "sheet_id": data_str }),
         "export.svg" | "graph.exportSvg" | "export.pdf" | "graph.exportPdf" | "export.png" | "graph.exportPng" | "export.tiff"
         | "graph.exportEmf" | "layout.exportEmf" | "ui.print.open" | "file.print" => json!({ "sheet_id": render_str }),
@@ -813,6 +813,7 @@ fn commit_analyze_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> {
 
 fn commit_edit_params_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> {
     sync_edit_params_text_buffers(app);
+    crate::dialogs_canvas::sync_fit_parameter_inputs(app)?;
     let doc = app.document().clone();
     let intents = app.canvas_dialogs.edit_params.commit_intents(Some(&doc));
     let mut iter = intents.into_iter();
@@ -827,17 +828,17 @@ fn commit_edit_params_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> 
 
 fn commit_export_figure_dialog(app: &mut UiApp, sheet_id: &SheetId) -> Result<UiEventOutcome, String> {
     let mut intent = app.canvas_dialogs.export_figure.commit_intent(sheet_id);
-    let export_opts = &app.view_shards.dialogs_graph_misc;
-    if matches!(app.canvas_dialogs.export_figure.format, ExportFigureFormat::Pdf)
+    let export_opts = &app.canvas_dialogs.export_figure;
+    if matches!(export_opts.format, ExportFigureFormat::Pdf)
         && let Some(obj) = intent.params.as_object_mut()
     {
-        let pdf_cs = if export_opts.export_color_space == "CMYK-Proof" { "cmyk" } else { "srgb" };
+        let pdf_cs = if export_opts.color_space == "CMYK-Proof" { "cmyk" } else { "srgb" };
         obj.insert(String::from("color_space"), json!(pdf_cs));
     }
     let opts_snapshot = json!({
-        "transparent_bg": export_opts.export_transparent_bg,
-        "color_space": export_opts.export_color_space,
-        "unit": export_opts.export_unit,
+        "transparent_bg": export_opts.transparent_bg,
+        "color_space": export_opts.color_space,
+        "unit": export_opts.unit,
     });
     let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
     let mut payload = out.payload;
@@ -872,12 +873,28 @@ fn commit_checkpoints_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> 
     })
 }
 
+pub(crate) fn commit_power_wizard_create(app: &mut UiApp, action: &str) -> Result<Value, curvebook_engine::EngineError> {
+    let created = app.execute_power_wizard_create()?;
+    let state_copy = app.canvas_dialogs.power_wizard.clone();
+    app.power_wizards_by_sheet.insert(created.result_sheet_id.clone(), state_copy);
+    app.canvas_dialogs.close_dialog();
+    app.sync_views();
+    Ok(json!({
+        "action": action,
+        "created": true,
+        "result_sheet_id": created.result_sheet_id.as_str(),
+        "graph_sheet_id": created.graph_sheet_id.as_ref().map(SheetId::as_str),
+        "data_sheet_id": created.data_sheet_id.as_str(),
+        "info_sheet_id": created.info_sheet_id.as_ref().map(SheetId::as_str),
+    }))
+}
+
 fn commit_power_wizard_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> {
     if app.canvas_dialogs.power_wizard.stage != PowerWizardStage::Results {
         let next = app.canvas_dialogs.power_wizard.advance()?;
         return Ok(UiEventOutcome { handled: true, action: format!("dialog.power_advance:{}", next.label()), ..Default::default() });
     }
-    let payload = dispatch_gui_action(app, "ui.answer_dialog", json!({ "action": "create" })).map_err(|e| e.to_string())?;
+    let payload = commit_power_wizard_create(app, "create").map_err(|e| e.to_string())?;
     app.focus_widget_id = None;
     Ok(UiEventOutcome {
         handled: true,

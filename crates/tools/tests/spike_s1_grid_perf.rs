@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Risk Spike S1 verification: O(1) virtualized 1,000,000-cell spreadsheet interaction latency.
 
 use std::hint::black_box;

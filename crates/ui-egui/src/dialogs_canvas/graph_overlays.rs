@@ -3,24 +3,16 @@
 use curvebook_doc::{
     BracketLabelMode, BracketStyle, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, GraphKind, GraphSheet, GraphSpec,
     MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PairwiseDisplayMode, ProjectDocument, SheetId, SizeChannelMapping,
-    SummaryMeasure,
 };
-use curvebook_palette::{ColorRamp, ColormapId, MarkerStyle, PaletteId, Rgba8};
+use curvebook_palette::{ColorRamp, ColormapId, PaletteId, Rgba8};
 
 use curvebook_tools::ToolCommandIntent;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::dialogs_r9::{
-    cld_ordering_str, norm_key, pairwise_display_mode_str, parse_bracket_label_mode, parse_bracket_style_str, parse_cld_ordering_str,
-    parse_colormap_id_str, parse_finite_f64_with_locale, parse_opt_finite_f64_with_locale, parse_pairwise_display_mode_str, parse_palette_str,
-    parse_usize_min,
-};
-use crate::i18n::LocalePreset;
+use crate::dialogs_r9::{cld_ordering_str, pairwise_display_mode_str};
 
 use super::analyze_dialog::{VariableCandidate, collect_variable_candidates};
-use super::graph_type::build_gdo_for_option;
-use super::parse_helpers::parse_dialog_num_with_locale;
 
 /// Live Pairwise Comparison Bracket & Compact Letter Display inspector (`Auto-add from analysis`, `R10.11`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -339,122 +331,6 @@ impl PairwiseComparisonsState {
         }
         intents
     }
-
-    /// Apply field patches for `Pairwise Comparisons` brackets and Compact Letter Display (`WF-46`, `WF-50`).
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>, doc: Option<&ProjectDocument>) -> Result<(), String> {
-        self.apply_field_patch_localized(fields, doc, &LocalePreset::period_comma("en-US"))
-    }
-
-    /// Apply field patches using regional numeric parsing (`preset`).
-    pub fn apply_field_patch_localized(
-        &mut self,
-        fields: &serde_json::Map<String, Value>,
-        doc: Option<&ProjectDocument>,
-        preset: &LocalePreset,
-    ) -> Result<(), String> {
-        let mut auto_add = false;
-        let mut explicit_mode = None;
-        let mut explicit_enabled = None;
-        for (key, val) in fields {
-            match key.as_str() {
-                "result_sheet_id" | "selected_result_sheet_id" | "pairwise.result_sheet_id" => {
-                    let s = val.as_str().ok_or_else(|| String::from("`result_sheet_id` must be a string"))?.trim();
-                    if !s.is_empty() {
-                        let sid = SheetId::try_new(s).map_err(|e| e.to_string())?;
-                        self.selected_result_sheet_id = Some(sid);
-                    }
-                }
-                "bracket_style" | "style" | "pairwise.bracket_style" | "pairwise.style" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`bracket_style` must be a string"))?;
-                    self.bracket_style = parse_bracket_style_str(raw)?;
-                    self.brackets_dirty = true;
-                }
-                "label_mode" | "pairwise.label_mode" => {
-                    self.label_mode = parse_bracket_label_mode(val)?;
-                    self.brackets_dirty = true;
-                }
-                "hide_non_significant" | "hide_if_non_significant" | "pairwise.hide_non_significant" => {
-                    self.hide_non_significant = val.as_bool().ok_or_else(|| String::from("`hide_non_significant` must be boolean"))?;
-                    self.brackets_dirty = true;
-                }
-                "auto_add" | "pairwise.auto_add" if val.as_bool() == Some(true) => {
-                    auto_add = true;
-                }
-                "display_mode" | "pairwise_display_mode" | "pairwise.display_mode" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`display_mode` must be a string"))?;
-                    let mode = parse_pairwise_display_mode_str(raw)?;
-                    self.display_mode = mode;
-                    explicit_mode = Some(mode);
-                }
-                "cld_enabled" | "enabled" | "compact_letter_display" | "pairwise.cld_enabled" => {
-                    let en = val.as_bool().ok_or_else(|| String::from("`cld_enabled` must be boolean"))?;
-                    self.cld_enabled = en;
-                    explicit_enabled = Some(en);
-                }
-                "cld_ordering" | "ordering" | "pairwise.cld_ordering" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`cld_ordering` must be a string"))?;
-                    self.cld_ordering = parse_cld_ordering_str(raw)?;
-                }
-                "cld_uppercase" | "uppercase" | "pairwise.cld_uppercase" => {
-                    self.cld_uppercase = val.as_bool().ok_or_else(|| String::from("`cld_uppercase` must be boolean"))?;
-                }
-                "cld_alpha_override" | "alpha_override" | "pairwise.cld_alpha_override" => {
-                    let alpha = parse_opt_finite_f64_with_locale(val, "cld_alpha_override", preset)?;
-                    if let Some(a) = alpha
-                        && (a <= 0.0 || a >= 1.0)
-                    {
-                        return Err(format!("`cld_alpha_override` must lie in (0, 1), got {a}"));
-                    }
-                    self.cld_alpha_override = alpha;
-                }
-                "cld_font_size_pt" | "font_size_pt" | "pairwise.cld_font_size_pt" => {
-                    let fs = parse_finite_f64_with_locale(val, "cld_font_size_pt", preset)?;
-                    if fs <= 0.0 || fs > 144.0 {
-                        return Err(format!("`cld_font_size_pt` must lie in (0, 144], got {fs}"));
-                    }
-                    self.cld_font_size_pt = fs;
-                }
-                "cld_offset_pt" | "offset_pt" | "pairwise.cld_offset_pt" => {
-                    let off = parse_dialog_num_with_locale(val, "cld_offset_pt", preset)?;
-                    if !(0.0..=200.0).contains(&off) {
-                        return Err(format!("`cld_offset_pt` must lie in [0, 200], got {off}"));
-                    }
-                    self.cld_offset_pt = off;
-                }
-                "auto_add" | "pairwise.auto_add" => {}
-                other => return Err(format!("unknown Pairwise Comparisons field `{other}`")),
-            }
-        }
-        if let Some(en) = explicit_enabled
-            && explicit_mode.is_none()
-        {
-            if en {
-                if self.display_mode == PairwiseDisplayMode::BracketsOnly {
-                    self.display_mode = if self.brackets.is_empty() {
-                        PairwiseDisplayMode::CompactLetterDisplayOnly
-                    } else {
-                        PairwiseDisplayMode::BracketsAndCompactLetterDisplay
-                    };
-                }
-            } else {
-                self.display_mode = PairwiseDisplayMode::BracketsOnly;
-            }
-        } else if let Some(mode) = explicit_mode
-            && explicit_enabled.is_none()
-        {
-            self.cld_enabled = mode != PairwiseDisplayMode::BracketsOnly;
-        }
-        for b in &mut self.brackets {
-            b.style = self.bracket_style;
-            b.label_mode = self.label_mode.clone();
-            b.hide_if_non_significant = self.hide_non_significant;
-        }
-        if auto_add && let Some(d) = doc {
-            let _ = self.auto_add_from_analysis(d);
-            self.brackets_dirty = true;
-        }
-        Ok(())
-    }
 }
 
 /// 5-channel `MultipleVariables` Bubble Plot inspector (`X`, `Y`, `Color`, `Size`, `Label`).
@@ -563,119 +439,6 @@ impl BubblePlotInspectorState {
                 "multivariate": self.to_encoding(),
             }),
         ))
-    }
-
-    /// Apply field patches for 5-channel `MultipleVariables` bubble & categorical summary plots (`WF-44`).
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        let mut color_mode: Option<String> = None;
-        let mut color_col: Option<usize> = None;
-        let mut palette_override: Option<PaletteId> = None;
-        let mut colormap_override: Option<ColormapId> = None;
-        for (key, val) in fields {
-            match key.as_str() {
-                "x_column" | "bubble.x_column" => self.x_column = parse_usize_min(val, key, 0)?,
-                "y_column" | "bubble.y_column" => self.y_column = parse_usize_min(val, key, 0)?,
-                "size_column" | "bubble.size_column" => {
-                    if val.is_null() {
-                        self.size_channel = SizeChannelMapping::Constant { radius_pt: 5.0 };
-                    } else {
-                        self.set_size_variable(parse_usize_min(val, key, 0)?, 2.5, 14.0);
-                    }
-                }
-                "label_column" | "group_column" | "bubble.label_column" => {
-                    self.label_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
-                }
-                "color_mode" | "bubble.color_mode" => {
-                    color_mode = val.as_str().map(norm_key);
-                }
-                "color_column" | "bubble.color_column" => {
-                    color_col = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
-                }
-                "palette" | "bubble.palette" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`palette` must be a string"))?;
-                    palette_override = Some(parse_palette_str(raw)?);
-                }
-                "colormap" | "bubble.colormap" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`colormap` must be a string"))?;
-                    colormap_override = Some(parse_colormap_id_str(raw)?);
-                }
-                "show_convex_hulls" | "bubble.show_convex_hulls" => {
-                    self.show_convex_hulls = val.as_bool().ok_or_else(|| String::from("`show_convex_hulls` must be boolean"))?;
-                }
-                "show_confidence_ellipses" | "bubble.show_confidence_ellipses" => {
-                    self.show_confidence_ellipses = val.as_bool().ok_or_else(|| String::from("`show_confidence_ellipses` must be boolean"))?;
-                }
-                "plot_mode" | "categorical_summary" | "bubble.plot_mode" => {
-                    let is_cat = val.as_bool().unwrap_or_else(|| val.as_str().is_some_and(|s| norm_key(s).contains("categorical")));
-                    self.plot_mode = if is_cat {
-                        MultivariatePlotMode::CategoricalSummary {
-                            gdo: build_gdo_for_option("col.box_whisker", self.palette_fallback(), MarkerStyle::default(), SummaryMeasure::Mean),
-                            y_error_bars: None,
-                        }
-                    } else {
-                        MultivariatePlotMode::BubbleScatter
-                    };
-                }
-                "bubble.color_channel" | "color_channel" => {
-                    if let Ok(ch) = serde_json::from_value::<ColorChannelMapping>(val.clone()) {
-                        self.color_channel = ch;
-                    } else if val.is_null() {
-                        self.color_channel = ColorChannelMapping::Constant(PaletteId::OkabeIto.color_at(0));
-                    } else if let Some(s) = val.as_str() {
-                        let norm = norm_key(s);
-                        if norm.contains("constant") {
-                            color_mode = Some(String::from("constant"));
-                        } else if norm.contains("continuous") {
-                            color_mode = Some(String::from("continuous"));
-                        } else if norm.contains("categorical") {
-                            color_mode = Some(String::from("categorical"));
-                        } else {
-                            return Err(format!("unsupported `{key}` value `{s}`"));
-                        }
-                    } else {
-                        return Err(format!("`{key}` must be a ColorChannelMapping object, mode string, or null"));
-                    }
-                }
-                "bubble.size_channel" | "size_channel" => {
-                    if let Ok(sz) = serde_json::from_value::<SizeChannelMapping>(val.clone()) {
-                        self.size_channel = sz;
-                    } else if val.is_null() {
-                        self.size_channel = SizeChannelMapping::Constant { radius_pt: 5.0 };
-                    } else if let Ok(col) = parse_usize_min(val, key, 0) {
-                        self.set_size_variable(col, 2.5, 14.0);
-                    } else {
-                        return Err(format!("`{key}` must be a SizeChannelMapping object, column index, or null"));
-                    }
-                }
-                other => return Err(format!("unknown Bubble Plot field `{other}`")),
-            }
-        }
-        if color_mode.is_some() || color_col.is_some() || palette_override.is_some() || colormap_override.is_some() {
-            match color_mode.as_deref() {
-                Some("constant") => self.color_channel = ColorChannelMapping::Constant(PaletteId::OkabeIto.color_at(0)),
-                Some("continuous") => {
-                    let col = color_col.unwrap_or(self.y_column);
-                    self.set_color_continuous(col, colormap_override.unwrap_or(ColormapId::Viridis), None);
-                }
-                Some("categorical") => {
-                    let col = color_col.unwrap_or(self.label_column.unwrap_or(0));
-                    self.set_color_categorical(col, palette_override.unwrap_or(PaletteId::OkabeIto));
-                }
-                _ if colormap_override.is_some() => {
-                    let col = color_col.unwrap_or(self.y_column);
-                    self.set_color_continuous(col, colormap_override.unwrap_or(ColormapId::Viridis), None);
-                }
-                _ if color_col.is_some() => {
-                    self.set_color_categorical(color_col.unwrap_or(0), palette_override.unwrap_or(PaletteId::OkabeIto));
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    fn palette_fallback(&self) -> Rgba8 {
-        PaletteId::OkabeIto.color_at(0)
     }
 }
 
@@ -790,43 +553,5 @@ impl ApplyStyleFromState {
                 "clone_error_bars_and_legend": self.clone_error_bars_and_legend,
             }),
         ))
-    }
-
-    /// Apply modal field patches for `Apply Style From...` (`WF-48`).
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "donor_graph_id" | "donor_sheet_id" | "style.donor_graph_id" | "apply_style.donor_graph_id" => {
-                    let s = val.as_str().ok_or_else(|| String::from("`donor_graph_id` must be a string"))?.trim();
-                    if !s.is_empty() {
-                        self.donor_graph_id = Some(SheetId::from(s));
-                    }
-                }
-                "target_sheet_ids" | "target_graph_ids" | "apply_style.target_sheet_ids" => {
-                    let arr = val.as_array().ok_or_else(|| String::from("`target_sheet_ids` must be an array"))?;
-                    let mut ids = Vec::with_capacity(arr.len());
-                    for entry in arr {
-                        let s = entry.as_str().ok_or_else(|| String::from("target sheet ID must be a string"))?;
-                        let sid = SheetId::from(s);
-                        if !ids.contains(&sid) {
-                            ids.push(sid);
-                        }
-                    }
-                    self.target_graph_id = ids.first().cloned();
-                    self.target_graph_ids = ids;
-                }
-                "clone_palette" | "style.clone_palette" | "apply_style.clone_palette" => {
-                    self.clone_palette = val.as_bool().ok_or_else(|| String::from("`clone_palette` must be boolean"))?;
-                }
-                "clone_frame_and_axes" | "style.clone_frame_and_axes" | "apply_style.clone_frame_and_axes" => {
-                    self.clone_frame_and_axes = val.as_bool().ok_or_else(|| String::from("`clone_frame_and_axes` must be boolean"))?;
-                }
-                "clone_error_bars_and_legend" | "style.clone_error_bars_and_legend" | "apply_style.clone_error_bars_and_legend" => {
-                    self.clone_error_bars_and_legend = val.as_bool().ok_or_else(|| String::from("`clone_error_bars_and_legend` must be boolean"))?;
-                }
-                other => return Err(format!("unknown Apply Style From field `{other}`")),
-            }
-        }
-        Ok(())
     }
 }

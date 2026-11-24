@@ -11,25 +11,19 @@ use curvebook_doc::{
     validate_sheet_cells, validate_subcolumns, validate_title,
 };
 use curvebook_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cmd::helpers::{
-    apply_result_tab_metadata_to_sheet, clip_safe_title, ensure_sheet_not_frozen, link_data_sheet_to_info, parse_sheet_id, remap_analysis_hooks,
-    remap_graph_spec_references, remap_layout_spec_references, require_data_sheet_mut, require_result_sheet, sanitize_title_controls,
-    select_result_tab, sheet_id_exists, sync_info_linked_data_sheets,
+    always_enabled, apply_result_tab_metadata_to_sheet, bad_input, bad_input_ptr, clip_safe_title, ensure_sheet_not_frozen, has_result_sheet,
+    link_data_sheet_to_info, parse_sheet_id, remap_analysis_hooks, remap_graph_spec_references, remap_layout_spec_references, require_data_sheet_mut,
+    require_result_sheet, sanitize_title_controls, select_result_tab, sheet_id_exists, sync_info_linked_data_sheets,
 };
-use crate::cmd::params::{
-    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema,
-    obj_schema_with_aliases, parse_params, str_schema,
-};
+use crate::cmd::params::{NonEmptyStrSchema, command_schema, command_schema_with_aliases, parse_params};
 use crate::cmd::project::{RecalcSummary, recalculate_dirty_with_links};
-use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
-use crate::{CommandOutcome, EngineError, Session};
-
-fn always_enabled(_session: &Session) -> bool {
-    true
-}
+use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects, command_specs};
+use crate::{CommandOutcome, EngineError};
 
 fn next_unique_id_with_reserved(doc: &ProjectDocument, base: &str, reserved: &HashSet<String>) -> Result<SheetId, EngineError> {
     let sanitized: String =
@@ -57,82 +51,69 @@ fn next_unique_sheet_id_hyphen(doc: &ProjectDocument, prefix: &str) -> Result<Sh
     next_unique_id_with_reserved(doc, prefix, &HashSet::new())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
 enum VariableInitInput {
     Name(String),
     Object { title: Option<String>, role: Option<String> },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CreateDataParams {
+    /// Optional explicit DataSheet ID (auto-generated if omitted).
+    #[schemars(length(min = 1))]
     sheet_id: Option<String>,
+    /// Optional human-readable table title.
     title: Option<String>,
+    /// Table archetype (`xy`, `column`, `grouped`, `contingency`, `survival`, `parts_of_whole`, `multiple_variables`, `nested`).
     kind: Option<String>,
+    /// Initial row count.
+    #[schemars(range(min = 1))]
     rows: Option<usize>,
+    /// Initial column / data-set count.
+    #[schemars(range(min = 1))]
     cols: Option<usize>,
+    /// Raw replicate subcolumns (or biological units for nested).
+    #[schemars(range(min = 1))]
     replicates: Option<usize>,
+    /// Replicate subcolumn mode string or structured SubcolumnMode object.
     subcolumn_mode: Option<Value>,
+    /// Optional X-column mode string or structured XColumnMode object.
     x_mode: Option<Value>,
+    /// Optional X-axis column title for XY tables.
     x_title: Option<String>,
+    /// Column table design hint (`unpaired`, `paired`, `precomputed`).
     design_hint: Option<Value>,
+    /// Row factor title for Grouped/Contingency tables.
     row_factor_title: Option<String>,
+    /// Column factor title for Grouped/Contingency tables.
     column_factor_title: Option<String>,
+    /// Elapsed time title for Survival tables.
     time_title: Option<String>,
+    /// Numeric status code denoting Event rows on Survival tables.
     event_code: Option<i64>,
+    /// Numeric status code denoting Censored rows on Survival tables.
     censored_code: Option<i64>,
+    /// Variable definitions for MultipleVariables tables.
     variables: Option<Vec<VariableInitInput>>,
+    /// Auto-create both linked InfoSheet and uninitialized GraphSheet.
     auto_family: Option<bool>,
+    /// Auto-create or attach paired InfoSheet.
     auto_info: Option<bool>,
+    /// Auto-create uninitialized GraphSheet for this table.
     auto_graph: Option<bool>,
+    /// Optional explicit InfoSheet ID to link or create.
+    #[schemars(length(min = 1))]
     info_sheet_id: Option<String>,
+    /// Optional explicit GraphSheet ID to create.
+    #[schemars(length(min = 1))]
     graph_sheet_id: Option<String>,
 }
 
 fn create_data_schema() -> Value {
     // Retained until Stage 4 retires r16_5_cli_and_callers.rs
-    obj_schema_with_aliases(
-        vec![
-            ("sheet_id", nullable_schema(non_empty_str_schema("Optional explicit DataSheet ID (auto-generated if omitted)"))),
-            ("title", nullable_schema(str_schema("Optional human-readable table title"))),
-            (
-                "kind",
-                nullable_schema(str_schema(
-                    "Table archetype (`xy`, `column`, `grouped`, `contingency`, `survival`, `parts_of_whole`, `multiple_variables`, `nested`)",
-                )),
-            ),
-            ("rows", nullable_schema(int_schema("Initial row count", Some(1), None))),
-            ("cols", nullable_schema(int_schema("Initial column / data-set count", Some(1), None))),
-            ("replicates", nullable_schema(int_schema("Raw replicate subcolumns (or biological units for nested)", Some(1), None))),
-            ("subcolumn_mode", nullable_schema(any_json_schema("Replicate subcolumn mode string or structured SubcolumnMode object"))),
-            ("x_mode", nullable_schema(any_json_schema("Optional X-column mode string or structured XColumnMode object"))),
-            ("x_title", nullable_schema(str_schema("Optional X-axis column title for XY tables"))),
-            ("design_hint", nullable_schema(any_json_schema("Column table design hint (`unpaired`, `paired`, `precomputed`)"))),
-            ("row_factor_title", nullable_schema(str_schema("Row factor title for Grouped/Contingency tables"))),
-            ("column_factor_title", nullable_schema(str_schema("Column factor title for Grouped/Contingency tables"))),
-            ("time_title", nullable_schema(str_schema("Elapsed time title for Survival tables"))),
-            ("event_code", nullable_schema(int_schema("Numeric status code denoting Event rows on Survival tables", None, None))),
-            ("censored_code", nullable_schema(int_schema("Numeric status code denoting Censored rows on Survival tables", None, None))),
-            (
-                "variables",
-                nullable_schema(array_schema(
-                    "Variable definitions for MultipleVariables tables",
-                    any_json_schema("Variable name or {title, role}"),
-                    None,
-                    None,
-                )),
-            ),
-            ("auto_family", nullable_schema(bool_schema("Auto-create both linked InfoSheet and uninitialized GraphSheet"))),
-            ("auto_info", nullable_schema(bool_schema("Auto-create or attach paired InfoSheet"))),
-            ("auto_graph", nullable_schema(bool_schema("Auto-create uninitialized GraphSheet for this table"))),
-            ("info_sheet_id", nullable_schema(non_empty_str_schema("Optional explicit InfoSheet ID to link or create"))),
-            ("graph_sheet_id", nullable_schema(non_empty_str_schema("Optional explicit GraphSheet ID to create"))),
-        ],
-        &[],
-        // Retained for R16.5 CLI deprecation-warning coverage (`r16_5_cli_and_callers.rs`).
-        vec![("kind", &["archetype"])],
-        false,
-    )
+    command_schema_with_aliases::<CreateDataParams>(&[("kind", &["archetype"])])
 }
 
 fn parse_table_kind(raw: &str) -> Result<TableKind, EngineError> {
@@ -145,7 +126,7 @@ fn parse_table_kind(raw: &str) -> Result<TableKind, EngineError> {
         "parts_of_whole" | "partsofwhole" | "parts-of-whole" | "pie" => Ok(TableKind::PartsOfWhole),
         "multiple_variables" | "multiplevariables" | "multiple-variables" | "multi" | "multivariate" => Ok(TableKind::MultipleVariables),
         "nested" => Ok(TableKind::Nested),
-        other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported table archetype `{other}`"))
+        other => Err(bad_input(format!("unsupported table archetype `{other}`"))
             .with_remediation("Use one of: xy, column, grouped, contingency, survival, parts_of_whole, multiple_variables, nested.")),
     }
 }
@@ -169,11 +150,10 @@ fn parse_subcolumn_mode(raw: Option<&Value>, replicates: usize) -> Result<Subcol
             "mean_low_high" | "meanlowhigh" => Ok(SubcolumnMode::MeanLowHigh),
             "upper_lower" | "upper_lower_limits" | "upperlowerlimits" | "mean_upper_lower" | "meanupperlower" => Ok(SubcolumnMode::UpperLowerLimits),
             "median_iqr" | "medianiqr" => Ok(SubcolumnMode::MedianIqr),
-            other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported subcolumn mode `{other}`"))),
+            other => Err(bad_input(format!("unsupported subcolumn mode `{other}`"))),
         };
     }
-    serde_json::from_value::<SubcolumnMode>(val.clone())
-        .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid subcolumn_mode: {err}")))
+    serde_json::from_value::<SubcolumnMode>(val.clone()).map_err(|err| bad_input(format!("invalid subcolumn_mode: {err}")))
 }
 
 fn parse_column_design_hint(raw: Option<&Value>) -> Result<ColumnDesignHint, EngineError> {
@@ -188,11 +168,10 @@ fn parse_column_design_hint(raw: Option<&Value>) -> Result<ColumnDesignHint, Eng
             "unpaired" | "unpaired_replicates" | "unpairedreplicates" => Ok(ColumnDesignHint::UnpairedReplicates),
             "paired" | "repeated" | "paired_repeated_measures" | "pairedrepeatedmeasures" => Ok(ColumnDesignHint::PairedRepeatedMeasures),
             "precomputed" | "precomputed_error" | "precomputederror" => Ok(ColumnDesignHint::PrecomputedError),
-            other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported design_hint `{other}`"))),
+            other => Err(bad_input(format!("unsupported design_hint `{other}`"))),
         };
     }
-    serde_json::from_value::<ColumnDesignHint>(val.clone())
-        .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid design_hint: {err}")))
+    serde_json::from_value::<ColumnDesignHint>(val.clone()).map_err(|err| bad_input(format!("invalid design_hint: {err}")))
 }
 
 fn parse_x_mode(raw: Option<&Value>) -> Result<XColumnMode, EngineError> {
@@ -211,10 +190,10 @@ fn parse_x_mode(raw: Option<&Value>) -> Result<XColumnMode, EngineError> {
             "sequence" | "generated" | "generated_sequence" => {
                 Ok(XColumnMode::GeneratedSequence { start: 0.0, step: 1.0, progression: curvebook_doc::SequenceProgression::Arithmetic })
             }
-            other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported x_mode `{other}`"))),
+            other => Err(bad_input(format!("unsupported x_mode `{other}`"))),
         };
     }
-    serde_json::from_value::<XColumnMode>(val.clone()).map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid x_mode: {err}")))
+    serde_json::from_value::<XColumnMode>(val.clone()).map_err(|err| bad_input(format!("invalid x_mode: {err}")))
 }
 
 fn parse_variable_role(raw: &str) -> Result<VariableRole, EngineError> {
@@ -223,7 +202,7 @@ fn parse_variable_role(raw: &str) -> Result<VariableRole, EngineError> {
         "categorical" | "category" | "factor" => Ok(VariableRole::Categorical),
         "label" | "identifier" | "id" | "text" => Ok(VariableRole::Label),
         "calculated" | "formula" => Ok(VariableRole::Calculated),
-        other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported variable role `{other}`"))),
+        other => Err(bad_input(format!("unsupported variable role `{other}`"))),
     }
 }
 
@@ -354,12 +333,11 @@ fn build_archetype_from_params(parsed: &CreateDataParams, existing_cells: usize)
                 surv.censored_code = cen;
             }
             if surv.event_code == surv.censored_code {
-                return Err(EngineError::with_code(
-                    ErrorCode::BadInput,
+                return Err(bad_input_ptr(
+                    "/censored_code",
                     format!("Survival `event_code` ({}) and `censored_code` ({}) must be distinct", surv.event_code, surv.censored_code),
                 )
-                .with_remediation("Supply distinct integer codes for `event_code` and `censored_code` (for example `1` and `0`).")
-                .with_details(json!({ "pointer": "/censored_code" })));
+                .with_remediation("Supply distinct integer codes for `event_code` and `censored_code` (for example `1` and `0`)."));
             }
             Ok(TableArchetype::Survival(surv))
         }
@@ -525,20 +503,20 @@ fn run_sheet_create_data(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutc
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RenameSheetParams {
+    /// ID of sheet to rename.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// New title for the sheet.
+    #[schemars(length(min = 1))]
     title: String,
 }
 
 fn rename_sheet_schema() -> Value {
     // Retained until Stage 4 retires r16_5_cli_and_callers.rs
-    obj_schema_with_aliases(
-        vec![("sheet_id", non_empty_str_schema("ID of sheet to rename")), ("title", non_empty_str_schema("New title for the sheet"))],
-        &["sheet_id", "title"],
-        vec![("sheet_id", &["id"]), ("title", &["new_title"])],
-        false,
-    )
+    command_schema_with_aliases::<RenameSheetParams>(&[("sheet_id", &["id"]), ("title", &["new_title"])])
 }
 
 fn run_sheet_rename(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
@@ -608,21 +586,14 @@ fn run_sheet_rename(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DeleteSheetParams {
+    /// ID of the sheet to delete.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// Delete downstream dependents (true) or refuse when dependents exist (false).
     cascade: Option<bool>,
-}
-
-fn delete_sheet_schema() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("ID of the sheet to delete")),
-            ("cascade", nullable_schema(bool_schema("Delete downstream dependents (true) or refuse when dependents exist (false)"))),
-        ],
-        &["sheet_id"],
-        false,
-    )
 }
 
 fn has_live_dependents(doc: &ProjectDocument, id: &SheetId, section: SheetSection) -> Result<(), EngineError> {
@@ -766,7 +737,7 @@ fn collect_downstream_for_delete(doc: &ProjectDocument, root_id: &SheetId, inclu
 }
 
 fn run_sheet_delete(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: DeleteSheetParams = parse_params(&delete_sheet_schema(), params)?;
+    let parsed: DeleteSheetParams = parse_params(&command_schema::<DeleteSheetParams>(), params)?;
     let id = parse_sheet_id(&parsed.sheet_id)?;
     let section = ctx
         .session
@@ -884,25 +855,19 @@ fn prune_deleted_sheets(doc: &mut ProjectDocument, to_delete: &HashSet<SheetId>)
     deleted_ids
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DuplicateSheetParams {
+    /// Source sheet ID to duplicate.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// Optional explicit ID for the duplicated sheet.
+    #[schemars(length(min = 1))]
     new_sheet_id: Option<String>,
+    /// Optional title override for the duplicate.
     title: Option<String>,
+    /// Preserve or set frozen flag on duplicated DataSheet (defaults to false).
     frozen: Option<bool>,
-}
-
-fn duplicate_sheet_schema() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("Source sheet ID to duplicate")),
-            ("new_sheet_id", nullable_schema(non_empty_str_schema("Optional explicit ID for the duplicated sheet"))),
-            ("title", nullable_schema(str_schema("Optional title override for the duplicate"))),
-            ("frozen", nullable_schema(bool_schema("Preserve or set frozen flag on duplicated DataSheet (defaults to false)"))),
-        ],
-        &["sheet_id"],
-        false,
-    )
 }
 
 fn allocate_new_sheet_id(doc: &ProjectDocument, explicit: Option<&str>, fallback_prefix: &str) -> Result<SheetId, EngineError> {
@@ -919,7 +884,7 @@ fn allocate_new_sheet_id(doc: &ProjectDocument, explicit: Option<&str>, fallback
 }
 
 fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: DuplicateSheetParams = parse_params(&duplicate_sheet_schema(), params)?;
+    let parsed: DuplicateSheetParams = parse_params(&command_schema::<DuplicateSheetParams>(), params)?;
     let id = parse_sheet_id(&parsed.sheet_id)?;
     let section = ctx
         .session
@@ -1027,68 +992,59 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DuplicateFamilyParams {
+    /// Root sheet ID whose family should be duplicated.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// ID prefix for duplicated sheets.
+    #[schemars(length(min = 1))]
     prefix: Option<String>,
+    /// Clear Y data and reset results when true (defaults to false).
     clear_data: Option<bool>,
+    /// Optional explicit ID for duplicated DataSheet.
+    #[schemars(length(min = 1))]
     new_sheet_id: Option<String>,
+    /// Optional title override for duplicated DataSheet.
     title: Option<String>,
 }
 
-fn duplicate_family_schema() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("Root sheet ID whose family should be duplicated")),
-            ("prefix", nullable_schema(non_empty_str_schema("ID prefix for duplicated sheets"))),
-            ("clear_data", nullable_schema(bool_schema("Clear Y data and reset results when true (defaults to false)"))),
-            ("new_sheet_id", nullable_schema(non_empty_str_schema("Optional explicit ID for duplicated DataSheet"))),
-            ("title", nullable_schema(str_schema("Optional title override for duplicated DataSheet"))),
-        ],
-        &["sheet_id"],
-        false,
-    )
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ClonePipelineParams {
+    /// Source root DataSheet (or family member) ID to clone.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// Optional explicit ID for the cloned DataSheet.
+    #[schemars(length(min = 1))]
     new_sheet_id: Option<String>,
+    /// Optional ID prefix for cloned sheets.
+    #[schemars(length(min = 1))]
     prefix: Option<String>,
+    /// Optional title for cloned DataSheet.
     title: Option<String>,
+    /// Convenience flag overriding keep_x_values / clear_y_values.
     clear_data: Option<bool>,
+    /// Preserve X values when cloning (defaults to true).
     keep_x_values: Option<bool>,
+    /// Clear Y values when cloning pipeline (defaults to true).
     clear_y_values: Option<bool>,
+    /// Clear dataset column titles (defaults to false).
     clear_column_titles: Option<bool>,
+    /// Clear row titles (defaults to false).
     clear_row_titles: Option<bool>,
+    /// Optional new replicate subcolumn count.
+    #[schemars(range(min = 1))]
     override_replicates: Option<usize>,
+    /// Clone downstream ResultSheets (defaults to true).
     clone_analyses: Option<bool>,
+    /// Clone downstream GraphSheets (defaults to true).
     clone_graphs: Option<bool>,
+    /// Clone downstream LayoutSheets (defaults to true).
     clone_layouts: Option<bool>,
+    /// Skip immediate recalculation and leave cloned ResultSheets stale.
     clear_results: Option<bool>,
-}
-
-fn clone_pipeline_schema() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("Source root DataSheet (or family member) ID to clone")),
-            ("new_sheet_id", nullable_schema(non_empty_str_schema("Optional explicit ID for the cloned DataSheet"))),
-            ("prefix", nullable_schema(non_empty_str_schema("Optional ID prefix for cloned sheets"))),
-            ("title", nullable_schema(str_schema("Optional title for cloned DataSheet"))),
-            ("clear_data", nullable_schema(bool_schema("Convenience flag overriding keep_x_values / clear_y_values"))),
-            ("keep_x_values", nullable_schema(bool_schema("Preserve X values when cloning (defaults to true)"))),
-            ("clear_y_values", nullable_schema(bool_schema("Clear Y values when cloning pipeline (defaults to true)"))),
-            ("clear_column_titles", nullable_schema(bool_schema("Clear dataset column titles (defaults to false)"))),
-            ("clear_row_titles", nullable_schema(bool_schema("Clear row titles (defaults to false)"))),
-            ("override_replicates", nullable_schema(int_schema("Optional new replicate subcolumn count", Some(1), None))),
-            ("clone_analyses", nullable_schema(bool_schema("Clone downstream ResultSheets (defaults to true)"))),
-            ("clone_graphs", nullable_schema(bool_schema("Clone downstream GraphSheets (defaults to true)"))),
-            ("clone_layouts", nullable_schema(bool_schema("Clone downstream LayoutSheets (defaults to true)"))),
-            ("clear_results", nullable_schema(bool_schema("Skip immediate recalculation and leave cloned ResultSheets stale"))),
-        ],
-        &["sheet_id"],
-        false,
-    )
 }
 
 struct FamilyCloneOptions<'a> {
@@ -1126,7 +1082,7 @@ fn resolve_family_root_data_id_with_visited(
     }
     if !visited.insert(raw_id.clone()) {
         active.remove(raw_id);
-        return Err(EngineError::with_code(ErrorCode::BadInput, format!("sheet `{}` cannot trace back to a data sheet", raw_id.as_str())));
+        return Err(bad_input(format!("sheet `{}` cannot trace back to a data sheet", raw_id.as_str())));
     }
 
     let outcome = resolve_family_root_data_id_inner(doc, raw_id, active, visited);
@@ -1150,7 +1106,7 @@ fn resolve_family_root_data_id_inner(
             .iter()
             .find(|ds| ds.info_sheet_id.as_ref() == Some(raw_id))
             .map(|ds| ds.id.clone())
-            .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("info sheet `{}` has no owning data sheet", raw_id.as_str()))),
+            .ok_or_else(|| bad_input(format!("info sheet `{}` has no owning data sheet", raw_id.as_str()))),
         SheetSection::Analyses => {
             let Some(rs) = doc.result_sheet(raw_id) else {
                 return Err(EngineError::with_code(ErrorCode::NotFound, format!("result sheet `{}` not found", raw_id.as_str())));
@@ -1160,10 +1116,7 @@ fn resolve_family_root_data_id_inner(
                 return Ok(up.clone());
             }
             if doc.sheet_section(up).is_none() {
-                return Err(EngineError::with_code(
-                    ErrorCode::BadInput,
-                    format!("result sheet `{}` cannot trace back to a data sheet", raw_id.as_str()),
-                ));
+                return Err(bad_input(format!("result sheet `{}` cannot trace back to a data sheet", raw_id.as_str())));
             }
             resolve_family_root_data_id_with_visited(doc, up, active, visited)
         }
@@ -1203,8 +1156,7 @@ fn resolve_family_root_data_id_inner(
                     Err(_) => {}
                 }
             }
-            Err(cycle_err
-                .unwrap_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("layout `{}` has no data sheet family", raw_id.as_str()))))
+            Err(cycle_err.unwrap_or_else(|| bad_input(format!("layout `{}` has no data sheet family", raw_id.as_str()))))
         }
     }
 }
@@ -1501,7 +1453,7 @@ fn clone_downstream_layouts(
 }
 
 fn run_sheet_duplicate_family(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: DuplicateFamilyParams = parse_params(&duplicate_family_schema(), params)?;
+    let parsed: DuplicateFamilyParams = parse_params(&command_schema::<DuplicateFamilyParams>(), params)?;
     let clear_data = parsed.clear_data.unwrap_or(false);
     let req = FamilyCloneOptions {
         command_id: "sheet.duplicateFamily",
@@ -1524,7 +1476,7 @@ fn run_sheet_duplicate_family(ctx: &mut Ctx<'_>, params: Value) -> Result<Comman
 }
 
 fn run_sheet_clone_pipeline(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: ClonePipelineParams = parse_params(&clone_pipeline_schema(), params)?;
+    let parsed: ClonePipelineParams = parse_params(&command_schema::<ClonePipelineParams>(), params)?;
     let (keep_x, clear_y) = match parsed.clear_data {
         Some(clear_all) => (!clear_all, clear_all),
         None => (parsed.keep_x_values.unwrap_or(true), parsed.clear_y_values.unwrap_or(true)),
@@ -1549,21 +1501,12 @@ fn run_sheet_clone_pipeline(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandO
     clone_family_into_doc(&mut ctx.session.doc, &req)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SheetIdParams {
+    /// Target DataSheet ID.
+    #[schemars(length(min = 1))]
     sheet_id: String,
-}
-
-fn sheet_id_schema(desc: &str) -> Value {
-    obj_schema(vec![("sheet_id", non_empty_str_schema(desc))], &["sheet_id"], false)
-}
-
-fn freeze_sheet_schema() -> Value {
-    sheet_id_schema("DataSheet ID to freeze against edits")
-}
-
-fn unfreeze_sheet_schema() -> Value {
-    sheet_id_schema("DataSheet ID to unfreeze and recalculate")
 }
 
 fn run_sheet_freeze(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
@@ -1575,7 +1518,7 @@ fn run_sheet_unfreeze(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome
 }
 
 fn set_sheet_frozen(ctx: &mut Ctx<'_>, command_id: &str, params: Value, frozen: bool) -> Result<CommandOutcome, EngineError> {
-    let parsed: SheetIdParams = parse_params(&freeze_sheet_schema(), params)?;
+    let parsed: SheetIdParams = parse_params(&command_schema::<SheetIdParams>(), params)?;
     let id = parse_sheet_id(&parsed.sheet_id)?;
     {
         let ds = require_data_sheet_mut(&mut ctx.session.doc, &id)?;
@@ -1597,34 +1540,25 @@ fn set_sheet_frozen(ctx: &mut Ctx<'_>, command_id: &str, params: Value, frozen: 
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReorderSheetParams {
+    /// Sheet folder (`data`, `info`, `results`, `graphs`, `layouts`).
     folder: Option<String>,
+    /// Navigator section name (`data`, `info`, `results`, `analyses`, `graphs`, `layouts`).
     section: Option<String>,
+    /// Source zero-based index for index swap/move.
     from_index: Option<usize>,
+    /// Destination zero-based index.
     to_index: Option<usize>,
+    /// Target sheet ID to move to `index`.
+    #[schemars(length(min = 1))]
     sheet_id: Option<String>,
+    /// Target zero-based index when reordering by `sheet_id`.
     index: Option<usize>,
+    /// Complete ordered list of sheet IDs for `section`.
+    #[schemars(with = "Option<Vec<NonEmptyStrSchema>>")]
     order: Option<Vec<String>>,
-}
-
-fn reorder_sheet_schema() -> Value {
-    obj_schema(
-        vec![
-            ("folder", nullable_schema(str_schema("Sheet folder (`data`, `info`, `results`, `graphs`, `layouts`)"))),
-            ("section", nullable_schema(str_schema("Navigator section name (`data`, `info`, `results`, `analyses`, `graphs`, `layouts`)"))),
-            ("from_index", nullable_schema(int_schema("Source zero-based index for index swap/move", Some(0), None))),
-            ("to_index", nullable_schema(int_schema("Destination zero-based index", Some(0), None))),
-            ("sheet_id", nullable_schema(non_empty_str_schema("Target sheet ID to move to `index`"))),
-            ("index", nullable_schema(int_schema("Target zero-based index when reordering by `sheet_id`", Some(0), None))),
-            (
-                "order",
-                nullable_schema(array_schema("Complete ordered list of sheet IDs for `section`", non_empty_str_schema("Sheet ID"), None, None)),
-            ),
-        ],
-        &[],
-        false,
-    )
 }
 
 fn parse_sheet_folder_str(raw: &str) -> Result<SheetFolderKind, EngineError> {
@@ -1634,8 +1568,7 @@ fn parse_sheet_folder_str(raw: &str) -> Result<SheetFolderKind, EngineError> {
         "results" | "analyses" | "analysis" => Ok(SheetFolderKind::Results),
         "graphs" | "graph" => Ok(SheetFolderKind::Graphs),
         "layouts" | "layout" => Ok(SheetFolderKind::Layouts),
-        other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported sheet folder `{other}`"))
-            .with_remediation("Use one of: data, info, results, graphs, layouts.")),
+        other => Err(bad_input(format!("unsupported sheet folder `{other}`")).with_remediation("Use one of: data, info, results, graphs, layouts.")),
     }
 }
 
@@ -1656,10 +1589,7 @@ fn reorder_by_explicit_order(doc: &mut ProjectDocument, folder: SheetFolderKind,
 
 fn apply_id_permutation<T>(items: &mut Vec<T>, order: &[SheetId], id_of: fn(&T) -> &SheetId) -> Result<(), EngineError> {
     if order.len() != items.len() {
-        return Err(EngineError::with_code(
-            ErrorCode::BadInput,
-            format!("`order` length ({}) does not match section sheet count ({})", order.len(), items.len()),
-        ));
+        return Err(bad_input(format!("`order` length ({}) does not match section sheet count ({})", order.len(), items.len())));
     }
     let mut by_id: HashMap<SheetId, T> = HashMap::with_capacity(items.len());
     for item in items.drain(..) {
@@ -1668,7 +1598,7 @@ fn apply_id_permutation<T>(items: &mut Vec<T>, order: &[SheetId], id_of: fn(&T) 
     for sid in order {
         let Some(item) = by_id.remove(sid) else {
             // Restore drained items on error isn't needed (session rolls back), return structured error cleanly.
-            return Err(EngineError::with_code(ErrorCode::BadInput, format!("`order` references unknown or duplicate sheet `{}`", sid.as_str())));
+            return Err(bad_input(format!("`order` references unknown or duplicate sheet `{}`", sid.as_str())));
         };
         items.push(item);
     }
@@ -1691,7 +1621,7 @@ fn move_item_to_index<T>(items: &mut Vec<T>, id: &SheetId, target_index: usize, 
         .position(|item| id_of(item) == id)
         .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("sheet `{}` not found in section", id.as_str())))?;
     if target_index >= items.len() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, format!("target index {target_index} out of bounds for {} sheets", items.len())));
+        return Err(bad_input(format!("target index {target_index} out of bounds for {} sheets", items.len())));
     }
     let item = items.remove(from);
     items.insert(target_index, item);
@@ -1699,12 +1629,11 @@ fn move_item_to_index<T>(items: &mut Vec<T>, id: &SheetId, target_index: usize, 
 }
 
 fn run_sheet_reorder(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: ReorderSheetParams = parse_params(&reorder_sheet_schema(), params)?;
+    let parsed: ReorderSheetParams = parse_params(&command_schema::<ReorderSheetParams>(), params)?;
     let section_raw = parsed.folder.as_deref().or(parsed.section.as_deref());
 
     if let Some(ref order_strs) = parsed.order {
-        let raw_folder =
-            section_raw.ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`sheet.reorder` with `order` requires `section` or `folder`"))?;
+        let raw_folder = section_raw.ok_or_else(|| bad_input("`sheet.reorder` with `order` requires `section` or `folder`"))?;
         let folder = parse_sheet_folder_str(raw_folder)?;
         let ordered = reorder_by_explicit_order(&mut ctx.session.doc, folder, order_strs)?;
         let section = folder.section();
@@ -1717,11 +1646,10 @@ fn run_sheet_reorder(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome,
     }
 
     if parsed.sheet_id.is_none() && (parsed.folder.is_some() || parsed.from_index.is_some()) {
-        let raw_folder = section_raw.ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`sheet.reorder` missing `folder`"))?;
+        let raw_folder = section_raw.ok_or_else(|| bad_input("`sheet.reorder` missing `folder`"))?;
         let folder = parse_sheet_folder_str(raw_folder)?;
-        let from_index = parsed.from_index.ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`sheet.reorder` requires `from_index`"))?;
-        let to_index =
-            parsed.to_index.or(parsed.index).ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`sheet.reorder` requires `to_index`"))?;
+        let from_index = parsed.from_index.ok_or_else(|| bad_input("`sheet.reorder` requires `from_index`"))?;
+        let to_index = parsed.to_index.or(parsed.index).ok_or_else(|| bad_input("`sheet.reorder` requires `to_index`"))?;
         ctx.session.doc.reorder_sheet(folder, from_index, to_index)?;
         return Ok(CommandOutcome::mutated(
             "sheet.reorder",
@@ -1730,15 +1658,10 @@ fn run_sheet_reorder(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome,
         ));
     }
 
-    let raw_sheet = parsed
-        .sheet_id
-        .as_deref()
-        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`sheet.reorder` requires `sheet_id` or (`folder`, `from_index`, `to_index`)"))?;
+    let raw_sheet =
+        parsed.sheet_id.as_deref().ok_or_else(|| bad_input("`sheet.reorder` requires `sheet_id` or (`folder`, `from_index`, `to_index`)"))?;
     let id = parse_sheet_id(raw_sheet)?;
-    let target_index = parsed
-        .index
-        .or(parsed.to_index)
-        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`sheet.reorder` requires `index` or `to_index`"))?;
+    let target_index = parsed.index.or(parsed.to_index).ok_or_else(|| bad_input("`sheet.reorder` requires `index` or `to_index`"))?;
     let section = ctx
         .session
         .doc
@@ -1748,10 +1671,7 @@ fn run_sheet_reorder(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome,
     if let Some(raw_folder) = section_raw {
         let expected_section = parse_sheet_folder_str(raw_folder)?.section();
         if expected_section != section {
-            return Err(EngineError::with_code(
-                ErrorCode::BadInput,
-                format!("sheet `{}` belongs to `{section:?}`, not `{expected_section:?}`", id.as_str()),
-            ));
+            return Err(bad_input(format!("sheet `{}` belongs to `{section:?}`, not `{expected_section:?}`", id.as_str())));
         }
     }
 
@@ -1763,25 +1683,18 @@ fn run_sheet_reorder(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome,
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SelectSheetParams {
+    /// Sheet ID to select.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// Selection pane (`navigator` or `family`, defaults to `navigator`).
     mode: Option<String>,
 }
 
-fn select_sheet_schema() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("Sheet ID to select")),
-            ("mode", nullable_schema(str_schema("Selection pane (`navigator` or `family`, defaults to `navigator`)"))),
-        ],
-        &["sheet_id"],
-        false,
-    )
-}
-
 fn run_sheet_select(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: SelectSheetParams = parse_params(&select_sheet_schema(), params)?;
+    let parsed: SelectSheetParams = parse_params(&command_schema::<SelectSheetParams>(), params)?;
     let id = parse_sheet_id(&parsed.sheet_id)?;
     let mode = parsed.mode.as_deref().unwrap_or("navigator").trim();
     if mode.eq_ignore_ascii_case("family") {
@@ -1789,8 +1702,7 @@ fn run_sheet_select(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
     } else if mode.eq_ignore_ascii_case("navigator") {
         ctx.session.doc.select_in_navigator(&id)?;
     } else {
-        return Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported selection mode `{mode}`"))
-            .with_remediation("Use `navigator` or `family`."));
+        return Err(bad_input(format!("unsupported selection mode `{mode}`")).with_remediation("Use `navigator` or `family`."));
     }
 
     Ok(CommandOutcome::read_only(
@@ -1805,39 +1717,34 @@ fn run_sheet_select(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
     ))
 }
 
-fn has_result_sheet(session: &Session) -> bool {
-    !session.document().result_sheets.is_empty()
+fn extract_archetype_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [
+            { "type": "string", "enum": ["auto", "column", "multiple_variables", "grouped"] },
+            { "type": "null" }
+        ]
+    })
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ExtractResultTabParams {
+    /// Source ResultSheet ID whose tab should be extracted.
+    #[schemars(length(min = 1))]
     result_sheet_id: String,
+    /// ResultTab ID or exact title (defaults to first tab).
     tab_id: Option<String>,
+    /// Optional destination DataSheet ID (auto-generated when omitted).
+    #[schemars(length(min = 1))]
     sheet_id: Option<String>,
+    /// Optional title for the extracted linked DataSheet.
     title: Option<String>,
+    /// Target table archetype: auto (default), column, multiple_variables, or grouped.
+    #[serde(default)]
+    #[schemars(schema_with = "extract_archetype_schema")]
     archetype: Option<String>,
+    /// When true, also create an uninitialized GraphSheet linked to the extracted DataSheet.
     auto_graph: Option<bool>,
-}
-
-fn extract_result_tab_schema() -> Value {
-    obj_schema(
-        vec![
-            ("result_sheet_id", non_empty_str_schema("Source ResultSheet ID whose tab should be extracted")),
-            ("tab_id", nullable_schema(str_schema("ResultTab ID or exact title (defaults to first tab)"))),
-            ("sheet_id", nullable_schema(non_empty_str_schema("Optional destination DataSheet ID (auto-generated when omitted)"))),
-            ("title", nullable_schema(str_schema("Optional title for the extracted linked DataSheet"))),
-            (
-                "archetype",
-                nullable_schema(enum_str_schema(
-                    "Target table archetype: auto (default), column, multiple_variables, or grouped",
-                    &["auto", "column", "multiple_variables", "grouped"],
-                )),
-            ),
-            ("auto_graph", bool_schema("When true, also create an uninitialized GraphSheet linked to the extracted DataSheet")),
-        ],
-        &["result_sheet_id"],
-        false,
-    )
 }
 
 fn tab_has_non_numeric_cells(tab: &ResultTab) -> bool {
@@ -1856,15 +1763,14 @@ fn resolve_extracted_table_kind(tab: &ResultTab, raw: Option<&str>) -> Result<Ta
         "column" => Ok(TableKind::Column),
         "multiple_variables" | "multivariate" => Ok(TableKind::MultipleVariables),
         "grouped" => Ok(TableKind::Grouped),
-        other => Err(EngineError::with_code(
-            ErrorCode::BadInput,
-            format!("unsupported `sheet.extractResultTab` archetype `{other}` (expected auto, column, multiple_variables, or grouped)"),
-        )),
+        other => Err(bad_input(format!(
+            "unsupported `sheet.extractResultTab` archetype `{other}` (expected auto, column, multiple_variables, or grouped)"
+        ))),
     }
 }
 
 fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: ExtractResultTabParams = parse_params(&extract_result_tab_schema(), params)?;
+    let parsed: ExtractResultTabParams = parse_params(&command_schema::<ExtractResultTabParams>(), params)?;
     let res_id = parse_sheet_id(&parsed.result_sheet_id)?;
 
     let (res, tab) = {
@@ -1900,10 +1806,7 @@ fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
         TableKind::Grouped => TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(1), col_count, row_count)?),
         TableKind::MultipleVariables => TableArchetype::MultipleVariables(MultipleVariablesTable::new(col_count, row_count)?),
         other => {
-            return Err(EngineError::with_code(
-                ErrorCode::BadInput,
-                format!("unsupported target archetype `{other:?}` for `sheet.extractResultTab`"),
-            ));
+            return Err(bad_input(format!("unsupported target archetype `{other:?}` for `sheet.extractResultTab`")));
         }
     };
 
@@ -1968,156 +1871,136 @@ fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
     ))
 }
 
-static SPECS: [CommandSpec; 11] = [
-    CommandSpec {
+static SPECS: &[CommandSpec] = &command_specs!(
+    CommandGroup::Sheet;
+    {
         id: "sheet.createData",
         label: "New Data Table",
         menu_path: "Insert/New Data Table",
         shortcut: "Cmd+T",
         summary: "Create a typed data table sheet and optional paired info/graph sheets.",
         beginner: "Creates one of the eight scientific table archetypes (XY, Column, Grouped, Contingency, Survival, Parts of Whole, Multiple Variables, or Nested).",
-        group: CommandGroup::Sheet,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: create_data_schema,
         enabled: always_enabled,
         run: run_sheet_create_data,
     },
-    CommandSpec {
+    {
         id: "sheet.rename",
         label: "Rename Sheet",
         menu_path: "Change/Rename Sheet",
-        shortcut: "",
         summary: "Rename any sheet in Data, Info, Results, Graphs, or Layouts.",
         beginner: "Updates the display title of a sheet (refusing frozen DataSheets) and refreshes dependent labels.",
-        group: CommandGroup::Sheet,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT),
         input_schema: rename_sheet_schema,
         enabled: always_enabled,
         run: run_sheet_rename,
     },
-    CommandSpec {
+    {
         id: "sheet.delete",
         label: "Delete Sheet",
         menu_path: "Edit/Delete Sheet",
-        shortcut: "",
         summary: "Delete a sheet and optionally cascade to its dependent family.",
         beginner: "Removes a sheet from the project, blocking deletion on frozen sheets or when `cascade: false` with active dependents.",
-        group: CommandGroup::Sheet,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA),
-        input_schema: delete_sheet_schema,
+        input_schema: command_schema::<DeleteSheetParams>,
         enabled: always_enabled,
         run: run_sheet_delete,
     },
-    CommandSpec {
+    {
         id: "sheet.duplicate",
         label: "Duplicate Sheet",
         menu_path: "Edit/Duplicate Sheet",
-        shortcut: "",
         summary: "Duplicate a single sheet within its section.",
         beginner: "Creates an independent copy of one Data, Info, Result, Graph, or Layout sheet.",
-        group: CommandGroup::Sheet,
         effects: Effects::MUTATES_DOCUMENT,
-        input_schema: duplicate_sheet_schema,
+        input_schema: command_schema::<DuplicateSheetParams>,
         enabled: always_enabled,
         run: run_sheet_duplicate,
     },
-    CommandSpec {
+    {
         id: "sheet.duplicateFamily",
         label: "Duplicate Family",
         menu_path: "Edit/Duplicate Family",
-        shortcut: "",
         summary: "Duplicate a data sheet together with its paired info, analyses, graphs, and layouts.",
         beginner: "Clones a complete linked family of sheets so all formulas, analyses, and figures remain wired to the copied table.",
-        group: CommandGroup::Sheet,
         effects: Effects::MUTATES_DOCUMENT,
-        input_schema: duplicate_family_schema,
+        input_schema: command_schema::<DuplicateFamilyParams>,
         enabled: always_enabled,
         run: run_sheet_duplicate_family,
     },
-    CommandSpec {
+    {
         id: "sheet.clonePipeline",
         label: "Clone Pipeline",
         menu_path: "Change/Clone Pipeline...",
-        shortcut: "",
         summary: "Clone a table structure and downstream analysis/graph/layout pipeline for a new experimental run.",
         beginner: "Creates a new table preserving X coordinates, analyses, graphs, and layouts while clearing Y replicates for new measurements.",
-        group: CommandGroup::Sheet,
         effects: Effects::MUTATES_DOCUMENT,
-        input_schema: clone_pipeline_schema,
+        input_schema: command_schema::<ClonePipelineParams>,
         enabled: always_enabled,
         run: run_sheet_clone_pipeline,
     },
-    CommandSpec {
+    {
         id: "sheet.freeze",
         label: "Freeze Sheet",
         menu_path: "Change/Freeze Sheet",
-        shortcut: "",
         summary: "Lock a DataSheet against accidental cell, link, or structural edits.",
         beginner: "Prevents mutations, link refreshes, renaming, and deletion on a DataSheet while allowing downstream reads and graphs.",
-        group: CommandGroup::Sheet,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT),
-        input_schema: freeze_sheet_schema,
+        input_schema: command_schema::<SheetIdParams>,
         enabled: always_enabled,
         run: run_sheet_freeze,
     },
-    CommandSpec {
+    {
         id: "sheet.unfreeze",
         label: "Unfreeze Sheet",
         menu_path: "Change/Unfreeze Sheet",
-        shortcut: "",
         summary: "Unlock a frozen DataSheet and recalculate linked dependents.",
         beginner: "Restores mutability to a frozen DataSheet and triggers immediate link/DAG recalculation.",
-        group: CommandGroup::Sheet,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT),
-        input_schema: unfreeze_sheet_schema,
+        input_schema: command_schema::<SheetIdParams>,
         enabled: always_enabled,
         run: run_sheet_unfreeze,
     },
-    CommandSpec {
+    {
         id: "sheet.reorder",
         label: "Reorder Sheet",
         menu_path: "Change/Reorder Sheet",
-        shortcut: "",
         summary: "Reorder sheets within a project navigator folder.",
         beginner: "Moves a sheet to a new index by (`sheet_id`, `index`), by (`folder`, `from_index`, `to_index`), or by explicit `order` array.",
-        group: CommandGroup::Sheet,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT),
-        input_schema: reorder_sheet_schema,
+        input_schema: command_schema::<ReorderSheetParams>,
         enabled: always_enabled,
         run: run_sheet_reorder,
     },
-    CommandSpec {
+    {
         id: "sheet.select",
         label: "Select Sheet",
         menu_path: "View/Select Sheet",
-        shortcut: "",
         summary: "Select the active sheet in the navigator or family pane.",
         beginner: "Focuses a sheet in the navigator (`mode: \"navigator\"`) or sub-sheet family view (`mode: \"family\"`).",
-        group: CommandGroup::Sheet,
         effects: Effects::CHANGES_UI_STATE.with(Effects::IDEMPOTENT),
-        input_schema: select_sheet_schema,
+        input_schema: command_schema::<SelectSheetParams>,
         enabled: always_enabled,
         run: run_sheet_select,
     },
-    CommandSpec {
+    {
         id: "sheet.extractResultTab",
         label: "Extract Result Tab to Data Table",
         menu_path: "Insert/Extract Result Tab...",
-        shortcut: "",
         summary: "Create a reactive linked DataSheet from a ResultSheet sub-tab (such as PC scores, residuals, or cleaned data).",
         beginner: "Copies a computed result table tab into a new linked data table so you can analyze or graph it.",
-        group: CommandGroup::Sheet,
         effects: Effects::MUTATES_DOCUMENT,
-        input_schema: extract_result_tab_schema,
+        input_schema: command_schema::<ExtractResultTabParams>,
         enabled: has_result_sheet,
         run: run_sheet_extract_result_tab,
     },
-];
+);
 
 /// Registered command specifications for the `sheet` group.
 #[must_use]
 pub fn specs() -> &'static [CommandSpec] {
-    &SPECS
+    SPECS
 }
 
 #[cfg(test)]
@@ -2126,7 +2009,7 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::cmd::Caller;
+    use crate::{Session, cmd::Caller};
 
     use super::*;
 

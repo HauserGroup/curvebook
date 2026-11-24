@@ -8,7 +8,7 @@ use crate::modal_predicates::{ControlEnablement, r_km_trend_test, survival_group
 use crate::egui_shell::stat_anova_modal::{
     column_titles_for_draft, render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_section_title,
 };
-use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 use super::helpers::{render_dataset_checklist, render_mv_role_badge, resolve_source_data_sheet};
 
@@ -103,7 +103,7 @@ pub(super) fn render_stat_mv_data_tab(
                             g.response_column = idx;
                             g.predictor_columns.retain(|&c| c != idx);
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                 });
             }
@@ -123,7 +123,7 @@ pub(super) fn render_stat_mv_data_tab(
                             g.predictor_columns.sort_unstable();
                         }
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
         }
@@ -146,7 +146,7 @@ pub(super) fn render_stat_mv_data_tab(
                         if let AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { time_column: tc, .. }) = &mut next.kind {
                             *tc = idx;
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                     if render_modal_seg_btn(
                         ui,
@@ -161,7 +161,7 @@ pub(super) fn render_stat_mv_data_tab(
                         if let AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { status_column: sc, .. }) = &mut next.kind {
                             *sc = idx;
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                     let pred_en = if *time_column == idx || *status_column == idx {
                         ControlEnablement::disabled("Time/status column cannot be a covariate.")
@@ -186,7 +186,7 @@ pub(super) fn render_stat_mv_data_tab(
                                 pc.sort_unstable();
                             }
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                 });
             }
@@ -211,7 +211,7 @@ pub(super) fn render_stat_mv_data_tab(
                             fa.response_column = Some(idx);
                             fa.multifactor_columns.retain(|&c| c != idx);
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                     let fac_en = if f.response_column == Some(idx) {
                         ControlEnablement::disabled("Outcome column cannot also be a factor.")
@@ -229,7 +229,7 @@ pub(super) fn render_stat_mv_data_tab(
                                 fa.multifactor_columns.sort_unstable();
                             }
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                 });
             }
@@ -253,7 +253,7 @@ pub(super) fn render_stat_mv_data_tab(
                         if let AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_time_column: c, .. }) = &mut next.kind {
                             *c = Some(idx);
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                     if render_modal_seg_btn(
                         ui,
@@ -268,7 +268,7 @@ pub(super) fn render_stat_mv_data_tab(
                         if let AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_status_column: c, .. }) = &mut next.kind {
                             *c = Some(idx);
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                     if render_modal_seg_btn(
                         ui,
@@ -283,7 +283,7 @@ pub(super) fn render_stat_mv_data_tab(
                         if let AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_group_column: c, .. }) = &mut next.kind {
                             *c = if *c == Some(idx) { None } else { Some(idx) };
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                 });
             }
@@ -313,7 +313,7 @@ pub(super) fn render_stat_mv_data_tab(
                                 pc.retain(|&c| c != idx);
                             }
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                     if render_modal_seg_btn(
                         ui,
@@ -333,7 +333,7 @@ pub(super) fn render_stat_mv_data_tab(
                                 pc.sort_unstable();
                             }
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                 });
             }
@@ -364,7 +364,7 @@ pub(super) fn render_survival_design(
                     if let AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { tie_method: tm_mut, .. }) = &mut next.kind {
                         *tm_mut = tm;
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
         }
@@ -402,7 +402,7 @@ pub(super) fn render_survival_design(
                             _ => *ac = !*ac,
                         }
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
             ui.add_space(6.0);

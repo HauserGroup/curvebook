@@ -22,6 +22,7 @@
 #![allow(clippy::indexing_slicing)] // Dev-only test helper crate (FA-SEC23-03); string_slice remains denied.
 
 pub mod dd;
+pub mod harness;
 pub mod metrics;
 pub mod nist_strd;
 pub mod r13_datasets;
@@ -29,6 +30,7 @@ pub mod sha256;
 pub mod wf_datasets;
 
 pub use dd::{DoubleDouble, oracle_univariate_f64};
+pub use harness::{TempDirGuard, assert_close, assert_rel_close};
 pub use metrics::{MAX_F64_LRE_DIGITS, approx_eq, assert_approx_eq, assert_lre_at_least, assert_ulp_le, log_relative_error, ulp_distance};
 pub use sha256::{CorpusError, CorpusManifestEntry, load_verified_corpus_file, sha256_bytes, sha256_hex, verify_blob};
 

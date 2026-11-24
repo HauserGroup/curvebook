@@ -4,39 +4,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-#[cfg(feature = "full-gates")]
-use curvebook_chart::compile_graph;
-#[cfg(feature = "full-gates")]
-use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, ConstantValue, GraphSheet, InfoSheet, LayoutItem, LayoutSheet, LayoutSpec, ProjectDocument, ResultSheet, SheetId,
-    TableKind,
-};
-#[cfg(feature = "full-gates")]
-use curvebook_engine::{Session, cmd::registry as engine_cmd_registry};
-use curvebook_format::{ZipArchive, ZipLimits};
-#[cfg(feature = "full-gates")]
-use curvebook_format::{save_project_bytes, save_template_bytes};
-#[cfg(feature = "full-gates")]
-use curvebook_mcp::{GuiSessionHost, McpServerState, dispatch_json_value};
-#[cfg(feature = "full-gates")]
-use curvebook_pdf::{PdfExportOptions, render_pdf};
-#[cfg(feature = "full-gates")]
-use curvebook_svg::{SvgExportOptions, render_svg};
-#[cfg(feature = "full-gates")]
-use curvebook_ui_egui::dialogs_canvas::{ANALYSIS_CATALOG, ActiveInspector, AnalysisCategory, CommandPaletteState};
-#[cfg(feature = "full-gates")]
-use curvebook_ui_egui::i18n;
-#[cfg(feature = "full-gates")]
-use curvebook_ui_egui::menus::{TOOLBAR_BUTTONS, UI_COMMANDS, menu_bar_tooltips, toolbar_tooltips};
-#[cfg(feature = "full-gates")]
-use curvebook_ui_egui::workspace_nav::{SAMPLE_FIXTURES, TableCreationDraft, WelcomeMode, instantiate_sample_fixture};
-#[cfg(feature = "full-gates")]
-use curvebook_ui_egui::{
-    ActiveDialog, ClipboardBundle, EguiSurfaceCapture, EguiSurfaceScanner, UiApp, UiTreeSnapshot, ViewportMetrics, inspect_ui_tree,
-};
-
 use crate::rust_lex::{ExtractedLiteral, RustLexer, push_char_with_line};
 use crate::text_decode::{decode_utf8_or_utf16, decode_utf16};
+use crate::zip_read::{ZipArchive, ZipLimits};
 
 /// Competitor vendor and product names checked on ASCII token boundaries (including CamelCase / snake_case / kebab-case splits).
 const BRANDS: &[&str] = &[
@@ -191,43 +161,17 @@ enum DecodedFile {
 
 pub fn run(root: &Path) -> Result<(), String> {
     let files = crate::repo_files(root)?;
-    #[cfg_attr(not(feature = "full-gates"), allow(unused_mut))]
-    let (mut hits, dist_stats) = scan_tree(root, &files)?;
-    #[cfg(feature = "full-gates")]
-    hits.extend(check_ui_surfaces()?);
+    let (hits, dist_stats) = scan_tree(root, &files)?;
     if hits.is_empty() {
-        #[cfg(feature = "full-gates")]
-        {
-            let i18n_total = i18n::LOCALES.len() * i18n::catalog_len();
-            if let Some(stats) = dist_stats {
-                println!(
-                    "brands: 0 unapproved brand or suite mentions across {} tracked files and {} dist/ files ({} archive entries) ({i18n_total} i18n entries, 16-locale live egui shell, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
-                    files.len(),
-                    stats.files,
-                    stats.archive_entries
-                );
-            } else {
-                println!(
-                    "brands: 0 unapproved brand or suite mentions across {} tracked files ({i18n_total} i18n entries, 16-locale live egui shell, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
-                    files.len()
-                );
-            }
-        }
-        #[cfg(not(feature = "full-gates"))]
-        {
-            if let Some(stats) = dist_stats {
-                println!(
-                    "brands: 0 unapproved brand or suite mentions across {} tracked files and {} dist/ files ({} archive entries) (light mode: live egui/MCP/export sweep skipped without `full-gates`)",
-                    files.len(),
-                    stats.files,
-                    stats.archive_entries
-                );
-            } else {
-                println!(
-                    "brands: 0 unapproved brand or suite mentions across {} tracked files (light mode: live egui/MCP/export sweep skipped without `full-gates`)",
-                    files.len()
-                );
-            }
+        if let Some(stats) = dist_stats {
+            println!(
+                "brands: 0 unapproved brand or suite mentions across {} tracked files and {} dist/ files ({} archive entries)",
+                files.len(),
+                stats.files,
+                stats.archive_entries
+            );
+        } else {
+            println!("brands: 0 unapproved brand or suite mentions across {} tracked files", files.len());
         }
         return Ok(());
     }
@@ -1689,6 +1633,7 @@ enum PrismPolicy<'a> {
         allow_it_statistica: bool,
         allow_test_container_op: bool,
     },
+    #[cfg(test)]
     UiTextRun {
         allow_it_statistica: bool,
         allow_palette_cmd_id: bool,
@@ -1857,6 +1802,7 @@ fn is_statistica_match_exempt(raw: &str, policy: PrismPolicy<'_>, pos: usize, en
     match policy {
         PrismPolicy::RustComment { allow_it_statistica } => allow_it_statistica,
         PrismPolicy::UiOrAppRustLiteral { allow_it_statistica, .. } => allow_it_statistica,
+        #[cfg(test)]
         PrismPolicy::UiTextRun { allow_it_statistica, .. } => allow_it_statistica,
         _ => false,
     }
@@ -1890,6 +1836,7 @@ fn is_prism_match_exempt(raw: &str, lower: &str, pos: usize, end: usize, policy:
                 || (allow_pzfx_xml && is_xml_prism_tag)
                 || (allow_test_container_op && raw.as_bytes().get(pos..end) == Some(b"prism"))
         }
+        #[cfg(test)]
         PrismPolicy::UiTextRun { allow_palette_cmd_id, .. } => allow_palette_cmd_id && is_cmd_prism,
         PrismPolicy::SvgTitleOrDesc { prev_word } => is_preceded_by_optical_modifier(lower.get(..pos).unwrap_or(""), prev_word),
     }
@@ -2162,7 +2109,7 @@ fn check_single_string(path: &str, line: usize, text: &str, prism_policy: PrismP
 /// Scan arbitrary UI, `egui_shell`, AccessKit, or tooltip `&str` slices for external
 /// brands and suite names. Allows `.prism` / `*.prism` only inside explicit import/export
 /// file-type descriptions.
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 #[must_use]
 pub fn check_text_runs<I, S>(source: &str, runs: I) -> Vec<BrandHit>
 where
@@ -2178,7 +2125,7 @@ where
 }
 
 /// Strictly scan text runs, rejecting every external brand, suite name, and non-extension `"prism"` mention.
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 #[must_use]
 pub fn check_text_runs_strict<I, S>(source: &str, runs: I) -> Vec<BrandHit>
 where
@@ -2194,7 +2141,7 @@ where
 
 /// Scan `(label, text)` pairs (for example `(node.id, node.a11y.label)` or `(key, text)`),
 /// tagging each hit with `label`.
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 #[must_use]
 pub fn check_labeled_text_runs<'a, I>(runs: I) -> Vec<BrandHit>
 where
@@ -2212,7 +2159,7 @@ where
 ///
 /// Rejects non-extension `"prism"` mentions everywhere, and permits lowercase Italian
 /// `"statistica"` only inside `locale == "it"`.
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 #[must_use]
 pub fn check_i18n_catalog_entries<'a, I>(entries: I) -> Vec<BrandHit>
 where
@@ -2228,23 +2175,6 @@ where
 }
 
 /// Scan all registered 16-locale `i18n::CATALOG` translations and locale display names.
-#[cfg(feature = "full-gates")]
-#[must_use]
-pub fn check_i18n_catalog() -> Vec<BrandHit> {
-    let mut entries: Vec<(&str, &str, &str)> = Vec::with_capacity(i18n::CATALOG.len() * i18n::LOCALES.len() + i18n::LOCALES.len());
-    for entry in i18n::CATALOG {
-        for (idx, &locale) in i18n::LOCALES.iter().enumerate() {
-            if let Some(&text) = entry.translations.get(idx) {
-                entries.push((entry.key, locale, text));
-            }
-        }
-    }
-    for &locale in i18n::LOCALES {
-        entries.push(("locale_display_name", locale, i18n::locale_display_name(locale)));
-    }
-    check_i18n_catalog_entries(entries)
-}
-
 fn decode_xml_or_html_entities(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
@@ -2818,7 +2748,7 @@ fn visit_json_strings(source: &str, val: &serde_json::Value, idx_hint: usize, ou
 }
 
 /// Inspect a desktop or browser window title string strictly.
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 #[must_use]
 pub fn check_window_title(source: &str, title: &str) -> Vec<BrandHit> {
     let mut out = Vec::new();
@@ -2826,383 +2756,7 @@ pub fn check_window_title(source: &str, title: &str) -> Vec<BrandHit> {
     out
 }
 
-#[cfg(feature = "full-gates")]
-fn collect_snapshot_strings(snap: &UiTreeSnapshot, context: &str, hits: &mut Vec<BrandHit>) {
-    let mut runs: Vec<(String, String)> = Vec::new();
-    if let Some(banner) = &snap.status_banner {
-        runs.push((format!("{context}:status_banner"), banner.clone()));
-    }
-    if let Some(target) = &snap.context_menu_target {
-        runs.push((format!("{context}:context_menu_target"), target.clone()));
-    }
-    if let Some(diag) = &snap.result_diagnostic_banner {
-        runs.push((format!("{context}:diag.summary"), diag.summary.clone()));
-        runs.push((format!("{context}:diag.limitation"), diag.limitation_note.clone()));
-        if let Some(metric) = &diag.diagnostic_metric {
-            runs.push((format!("{context}:diag.metric"), metric.clone()));
-        }
-    }
-    if let Some(menus) = &snap.menus {
-        for m in menus {
-            runs.push((format!("{context}:menu:{}", m.menu_key), m.title.clone()));
-            for n in &m.items {
-                push_widget_node_runs(context, n, &mut runs);
-            }
-        }
-    }
-    for (group, nodes) in [
-        ("toolbar", snap.toolbar.as_deref()),
-        ("tabs", snap.tabs.as_deref()),
-        ("canvas", snap.canvas_elements.as_deref()),
-        ("grid", snap.grid_cells.as_deref()),
-    ] {
-        if let Some(slice) = nodes {
-            for n in slice {
-                push_widget_node_runs(&format!("{context}:{group}"), n, &mut runs);
-            }
-        }
-    }
-    if let Some(nav) = &snap.navigator_sheets {
-        for entry in nav {
-            let nav_ctx = format!("{context}:nav:{}", entry.sheet_id);
-            hits.extend(check_text_runs_strict(&nav_ctx, [&entry.title, &entry.label]));
-        }
-    }
-    if let Some(dlg) = &snap.dialog {
-        runs.push((format!("{context}:dialog:{}:title", dlg.dialog_kind), dlg.title.clone()));
-        if let Some(stage) = &dlg.stage {
-            runs.push((format!("{context}:dialog:{}:stage", dlg.dialog_kind), stage.clone()));
-        }
-        for n in dlg.tabs.iter().chain(&dlg.controls).chain(&dlg.buttons) {
-            push_widget_node_runs(&format!("{context}:dialog:{}", dlg.dialog_kind), n, &mut runs);
-        }
-    }
-    for (label, text) in &runs {
-        let policy = PrismPolicy::UiTextRun { allow_it_statistica: label.contains(":it:"), allow_palette_cmd_id: false };
-        check_single_string(label, 1, text, policy, hits);
-    }
-}
-
-#[cfg(feature = "full-gates")]
-fn check_labeled_ui_pairs<'a>(runs: impl IntoIterator<Item = (&'a str, &'a str)>, allow_it_statistica: bool, hits: &mut Vec<BrandHit>) {
-    let policy = PrismPolicy::UiTextRun { allow_it_statistica, allow_palette_cmd_id: false };
-    for (idx, (label, text)) in runs.into_iter().enumerate() {
-        check_single_string(label, idx + 1, text, policy, hits);
-    }
-}
-
-#[cfg(feature = "full-gates")]
-fn check_ui_strings_with_locale<'a>(source: &str, runs: impl IntoIterator<Item = &'a str>, allow_it_statistica: bool, hits: &mut Vec<BrandHit>) {
-    let policy = PrismPolicy::UiTextRun { allow_it_statistica, allow_palette_cmd_id: false };
-    for (idx, text) in runs.into_iter().enumerate() {
-        check_single_string(source, idx + 1, text, policy, hits);
-    }
-}
-
-#[cfg(feature = "full-gates")]
-fn push_widget_node_runs(prefix: &str, node: &curvebook_ui_egui::inspect::UiWidgetNode, out: &mut Vec<(String, String)>) {
-    out.push((format!("{prefix}:{}", node.widget_id), node.label.clone()));
-    if let Some(reason) = &node.disabled_reason {
-        out.push((format!("{prefix}:{}:disabled_reason", node.widget_id), reason.clone()));
-    }
-    if let Some(serde_json::Value::String(v)) = &node.value {
-        out.push((format!("{prefix}:{}:value", node.widget_id), v.clone()));
-    }
-}
-
-#[cfg(feature = "full-gates")]
-fn build_brands_sweep_document() -> Result<ProjectDocument, String> {
-    let mut doc = ProjectDocument::new("CurveBook Brand Sweep").map_err(|e| format!("project init: {e}"))?;
-    for (idx, fixture) in SAMPLE_FIXTURES.iter().enumerate() {
-        let id = format!("data-{}", idx + 1);
-        let ds = instantiate_sample_fixture(fixture.id, id).map_err(|e| format!("fixture {}: {e}", fixture.id))?;
-        doc.add_data_sheet(ds).map_err(|e| format!("add fixture {}: {e}", fixture.id))?;
-    }
-    let mut info = InfoSheet::new_preseeded("info-1", "Protocol Constants").map_err(|e| format!("info sheet: {e}"))?;
-    info.constants
-        .push(curvebook_doc::InfoConstant::new("ControlEC50", ConstantValue::Number(12.5), Some(String::from("nM"))).map_err(|e| e.to_string())?);
-    doc.add_info_sheet(info).map_err(|e| e.to_string())?;
-
-    let spec =
-        AnalysisSpec::new("res-1", "data-2", AnalysisKind::OneWayAnova(curvebook_doc::OneWayAnovaSpec::default())).map_err(|e| e.to_string())?;
-    let res = ResultSheet::new(spec).map_err(|e| e.to_string())?;
-    doc.add_result_sheet(res).map_err(|e| e.to_string())?;
-
-    if let Some(ds_xy) = doc.data_sheet(&SheetId::new("data-1")).cloned() {
-        let mut g1 = GraphSheet::new_uninitialized_for_data("graph-1", &ds_xy).map_err(|e| e.to_string())?;
-        g1.initialized = true;
-        g1.title = String::from("Dose-Response Inhibition");
-        doc.add_graph_sheet(g1).map_err(|e| e.to_string())?;
-
-        let mut g2 = GraphSheet::new_uninitialized_for_data("graph-2", &ds_xy).map_err(|e| e.to_string())?;
-        g2.initialized = true;
-        g2.title = String::from("Secondary Curve Panel");
-        doc.add_graph_sheet(g2).map_err(|e| e.to_string())?;
-    }
-
-    let mut layout_spec = LayoutSpec::default();
-    layout_spec.items.push(LayoutItem::LiveGraph {
-        id: String::from("panel-a"),
-        graph_sheet_id: SheetId::new("graph-1"),
-        bounds_pt: curvebook_doc::RectPt::new(18.0, 18.0, 220.0, 160.0),
-        scale_percent: 100.0,
-        badge_override: Some(String::from("A")),
-    });
-    let layout = LayoutSheet::new("layout-1", "Publication Panel Layout", layout_spec).map_err(|e| e.to_string())?;
-    doc.add_layout_sheet(layout).map_err(|e| e.to_string())?;
-    Ok(doc)
-}
-
-#[cfg(feature = "full-gates")]
-fn check_tooltips_and_catalogs(app: &mut UiApp, hits: &mut Vec<BrandHit>) {
-    for &btn in TOOLBAR_BUTTONS {
-        hits.extend(check_labeled_text_runs([("TOOLBAR_BUTTONS.id", btn.id), ("TOOLBAR_BUTTONS.label_key", btn.label_key)]));
-    }
-    for &locale in i18n::LOCALES {
-        app.locale = locale.to_owned();
-        let is_it = locale == "it";
-        for section in menu_bar_tooltips(app) {
-            let ctx = format!("menu:{locale}:{}", section.menu_key);
-            check_ui_strings_with_locale(&ctx, [section.title], is_it, hits);
-            for tip in section.items {
-                let p_label = format!("{ctx}:{}:label", tip.command_id);
-                let p_loc = format!("{ctx}:{}:localized", tip.command_id);
-                let p_sum = format!("{ctx}:{}:summary", tip.command_id);
-                let p_beg = format!("{ctx}:{}:beginner", tip.command_id);
-                let p_path = format!("{ctx}:{}:menu_path", tip.command_id);
-                check_labeled_ui_pairs(
-                    [
-                        (p_label.as_str(), tip.label),
-                        (p_loc.as_str(), tip.localized_label),
-                        (p_sum.as_str(), tip.summary),
-                        (p_beg.as_str(), tip.beginner),
-                        (p_path.as_str(), tip.menu_path),
-                    ],
-                    is_it,
-                    hits,
-                );
-            }
-        }
-        for tb in toolbar_tooltips(app) {
-            let ctx = format!("toolbar:{locale}:{}", tb.button.id);
-            check_ui_strings_with_locale(&ctx, [tb.caption, tb.tooltip.localized_label, tb.tooltip.summary, tb.tooltip.beginner], is_it, hits);
-        }
-    }
-    app.locale = String::from("en");
-
-    for cat in AnalysisCategory::ALL {
-        hits.extend(check_text_runs("AnalysisCategory", [cat.label()]));
-    }
-    for item in ANALYSIS_CATALOG {
-        hits.extend(check_labeled_text_runs([
-            ("ANALYSIS_CATALOG.label", item.label),
-            ("ANALYSIS_CATALOG.summary", item.summary),
-            ("ANALYSIS_CATALOG.keywords", item.keywords),
-        ]));
-    }
-    for kind in TableKind::ALL {
-        let draft = TableCreationDraft::for_kind(kind);
-        hits.extend(check_text_runs("TableKind", [kind.label(), draft.title.as_str()]));
-    }
-    for fixture in SAMPLE_FIXTURES {
-        hits.extend(check_labeled_text_runs([("SAMPLE_FIXTURES.title", fixture.title), ("SAMPLE_FIXTURES.summary", fixture.summary)]));
-    }
-    let palette = CommandPaletteState::default();
-    for entry in palette.matches_with_shortcuts(Some(app.session()), &app.shortcuts) {
-        hits.extend(check_labeled_text_runs([
-            ("CommandPalette.label", entry.label),
-            ("CommandPalette.menu_path", entry.menu_path),
-            ("CommandPalette.summary", entry.summary),
-            ("CommandPalette.beginner", entry.beginner),
-        ]));
-    }
-}
-
-#[cfg(feature = "full-gates")]
-fn check_all_dialogs_and_inspectors(app: &mut UiApp, hits: &mut Vec<BrandHit>) {
-    let data_id = SheetId::new("data-1");
-    let res_id = SheetId::new("res-1");
-    let graph_id = SheetId::new("graph-1");
-    let layout_id = SheetId::new("layout-1");
-
-    for mode in [WelcomeMode::EmptyTypedTable, WelcomeMode::TutorialSample, WelcomeMode::FromTemplate, WelcomeMode::ClonePipeline] {
-        app.nav.welcome.open = true;
-        app.nav.welcome.mode = mode;
-        let snap = inspect_ui_tree(app, None, true);
-        collect_snapshot_strings(&snap, &format!("welcome:{mode:?}"), hits);
-    }
-    app.nav.welcome.open = false;
-
-    for inspector in [
-        ActiveInspector::None,
-        ActiveInspector::FormatGraph,
-        ActiveInspector::FormatAxes,
-        ActiveInspector::PairwiseComparisons,
-        ActiveInspector::BubblePlot,
-        ActiveInspector::PageLayout,
-        ActiveInspector::ResultDetails,
-    ] {
-        app.canvas_dialogs.active_inspector = inspector;
-        hits.extend(check_text_runs("ActiveInspector", [inspector.label()]));
-        let snap = inspect_ui_tree(app, None, true);
-        collect_snapshot_strings(&snap, &format!("inspector:{inspector:?}"), hits);
-    }
-
-    let dialogs = [
-        ActiveDialog::FormatAxes { sheet_id: graph_id.clone() },
-        ActiveDialog::AnalyzeSheet { source_sheet_id: data_id.clone() },
-        ActiveDialog::DuplicateAnalysisPrompt {
-            source_sheet_id: data_id.clone(),
-            existing_result_ids: vec![res_id.clone()],
-            pending_entry_id: String::from("stats.one_way_anova"),
-        },
-        ActiveDialog::EditAnalysisParameters { result_sheet_id: res_id.clone() },
-        ActiveDialog::ChangeDataAnalyzed { result_sheet_id: res_id.clone() },
-        ActiveDialog::ResultViewer { result_sheet_id: res_id.clone() },
-        ActiveDialog::ConstantHookPicker { target_sheet_id: res_id.clone() },
-        ActiveDialog::ChangeGraphType { graph_sheet_id: graph_id.clone() },
-        ActiveDialog::FormatGraph { graph_sheet_id: graph_id.clone() },
-        ActiveDialog::PairwiseComparisons { graph_sheet_id: graph_id.clone() },
-        ActiveDialog::BubblePlotInspector { graph_sheet_id: graph_id.clone() },
-        ActiveDialog::ApplyStyleFrom { target_graph_id: graph_id.clone() },
-        ActiveDialog::PageLayoutComposer { layout_sheet_id: layout_id.clone() },
-        ActiveDialog::ExportFigure { sheet_id: graph_id.clone() },
-        ActiveDialog::ConvertArchetype { sheet_id: data_id.clone() },
-        ActiveDialog::ImportReshape,
-        ActiveDialog::ExcludeWithReason { sheet_id: data_id.clone() },
-        ActiveDialog::FormatSelectedPoints { graph_sheet_id: graph_id.clone() },
-        ActiveDialog::PowerAndSampleSize,
-        ActiveDialog::Print { sheet_id: Some(layout_id.clone()) },
-        ActiveDialog::RandomizeGroups,
-        ActiveDialog::RandomSampleRows { source_sheet_id: Some(data_id.clone()) },
-        ActiveDialog::SimulateDistributions,
-        ActiveDialog::InsertModelEquation { graph_sheet_id: graph_id.clone() },
-        ActiveDialog::CreateGraph { source_sheet_id: Some(data_id.clone()) },
-        ActiveDialog::EqualizeScaling { layout_sheet_id: layout_id.clone() },
-        ActiveDialog::FormatEmbeddedTable { sheet_id: graph_id.clone(), target_index: 0, is_layout: false },
-        ActiveDialog::FormatImage { sheet_id: graph_id.clone(), target_index: 0, is_layout: false },
-        ActiveDialog::CommandPalette,
-        ActiveDialog::Checkpoints,
-        ActiveDialog::About,
-    ];
-    for dlg in dialogs {
-        app.canvas_dialogs.active_dialog = dlg.clone();
-        let snap = inspect_ui_tree(app, None, true);
-        collect_snapshot_strings(&snap, "dialog", hits);
-    }
-    app.canvas_dialogs.active_dialog = ActiveDialog::None;
-}
-
-#[cfg(feature = "full-gates")]
-fn check_export_metadata_sweep(doc: &ProjectDocument, hits: &mut Vec<BrandHit>) -> Result<(), String> {
-    let graph = doc.graph_sheet(&SheetId::new("graph-1")).ok_or_else(|| String::from("sweep graph-1 missing"))?;
-    let mut scene = compile_graph(graph, doc).map_err(|e| format!("compile sweep graph: {e}"))?;
-    scene.title = String::from("Dose-Response Inhibition");
-
-    let svg = render_svg(&scene, &SvgExportOptions::default()).map_err(|e| format!("sweep render_svg: {e}"))?;
-    hits.extend(check_svg_metadata("export:render_svg", &svg));
-
-    let pdf_ascii = render_pdf(&scene, &PdfExportOptions::default()).map_err(|e| format!("sweep render_pdf: {e}"))?;
-    hits.extend(check_pdf_metadata("export:render_pdf", &pdf_ascii));
-
-    let mut unicode_scene = scene.clone();
-    unicode_scene.title = String::from("Étude Dose–Réponse — αβγ");
-    let pdf_unicode = render_pdf(&unicode_scene, &PdfExportOptions::default()).map_err(|e| format!("sweep unicode render_pdf: {e}"))?;
-    hits.extend(check_pdf_metadata("export:render_pdf:unicode", &pdf_unicode));
-
-    let bundle = ClipboardBundle::from_scene(&scene, 144)?;
-    hits.extend(check_svg_metadata("clipboard:svg", &bundle.svg));
-    hits.extend(check_pdf_metadata("clipboard:pdf", &bundle.pdf_bytes));
-    hits.extend(check_html_metadata("clipboard:html", &bundle.html));
-
-    for (label, bytes_res) in
-        [("archive:project:manifest.json", save_project_bytes(doc)), ("archive:template:manifest.json", save_template_bytes(doc))]
-    {
-        let bytes = bytes_res.map_err(|e| format!("{label}: {e}"))?;
-        let zip = ZipArchive::from_bytes_with_limits(&bytes, ZipLimits::default()).map_err(|e| format!("{label} zip: {e}"))?;
-        let manifest = zip.get_utf8("manifest.json").map_err(|e| format!("{label}: {e}"))?.ok_or_else(|| format!("{label} missing manifest.json"))?;
-        hits.extend(check_manifest_metadata(label, manifest));
-    }
-
-    hits.extend(check_window_title("desktop:window_title:untitled", "Untitled — CurveBook"));
-    hits.extend(check_window_title("desktop:window_title:dirty", "study.curvebook * — CurveBook"));
-    Ok(())
-}
-
-/// Sweep in-process UI strings across 16-locale `i18n`, tooltips, all 8 table archetypes,
-/// all 26 `ActiveDialog` states, all 7 `ActiveInspector` tabs, live 16-locale `egui_shell` renders,
-/// live MCP headless & `--gui-only` JSON-RPC surfaces, `CommandPalette`, engine/UI command catalogs,
-/// and SVG/PDF/HTML/manifest/window export metadata.
-#[cfg(feature = "full-gates")]
-pub fn check_ui_surfaces() -> Result<Vec<BrandHit>, String> {
-    let mut hits = check_i18n_catalog();
-
-    let mut empty_app = UiApp::new();
-    let empty_snap = inspect_ui_tree(&empty_app, None, true);
-    collect_snapshot_strings(&empty_snap, "empty_ui", &mut hits);
-    check_tooltips_and_catalogs(&mut empty_app, &mut hits);
-    check_engine_and_ui_commands(&mut hits);
-
-    let doc = build_brands_sweep_document()?;
-    check_export_metadata_sweep(&doc, &mut hits)?;
-
-    let mut session = Session::from_document(doc);
-    session.recalculate_all().map_err(|e| format!("recalculate sweep session: {e}"))?;
-    let mut app = UiApp::from_session(session);
-    check_all_dialogs_and_inspectors(&mut app, &mut hits);
-    hits.extend(check_live_egui_shell_surfaces()?);
-    hits.extend(check_mcp_surfaces()?);
-
-    Ok(hits)
-}
-
-#[cfg(feature = "full-gates")]
-struct BrandsGuiSessionHost {
-    app: UiApp,
-}
-
-#[cfg(feature = "full-gates")]
-impl BrandsGuiSessionHost {
-    fn new(mut app: UiApp, gui_only: bool) -> Self {
-        app.set_gui_only(gui_only);
-        Self { app }
-    }
-}
-
-#[cfg(feature = "full-gates")]
-impl GuiSessionHost for BrandsGuiSessionHost {
-    fn call_gui(&mut self, method: &str, mut params: serde_json::Value) -> Result<serde_json::Value, curvebook_engine::EngineError> {
-        if method == "ui.screenshot"
-            && let Some(obj) = params.as_object_mut()
-            && matches!(obj.get("target").and_then(serde_json::Value::as_str), Some("workspace" | "viewport"))
-        {
-            obj.insert(String::from("target"), serde_json::Value::String(String::from("full_window")));
-        }
-        curvebook_ui_egui::dispatch_gui_action(&mut self.app, method, params)
-    }
-
-    fn set_gui_only(&mut self, gui_only: bool) {
-        self.app.set_gui_only(gui_only);
-    }
-
-    fn is_gui_only(&self) -> bool {
-        self.app.is_gui_only()
-    }
-
-    fn hosted_session(&self) -> Option<&Session> {
-        Some(self.app.session())
-    }
-
-    fn hosted_session_mut(&mut self) -> Option<&mut Session> {
-        Some(self.app.session_mut())
-    }
-
-    fn sync_after_session_mutation(&mut self) {
-        self.app.sync_views();
-    }
-}
-
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct McpScanCtx<'a> {
     source: &'a str,
@@ -3215,7 +2769,7 @@ struct McpScanCtx<'a> {
 /// `resources/list`, `resources/read`, `prompts/list`, `prompts/get`) for prohibited vendor,
 /// product, retired-suite, or pre-rename tokens while preserving the narrow `.prism`/`.pzfx`
 /// file-format boundary on `open_file` and `table_import_prism` / `table.importPrism`.
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 #[must_use]
 pub fn check_mcp_rpc_response(source: &str, method: &str, called_tool: Option<&str>, response: &serde_json::Value) -> Vec<BrandHit> {
     let mut out = Vec::new();
@@ -3224,7 +2778,7 @@ pub fn check_mcp_rpc_response(source: &str, method: &str, called_tool: Option<&s
     out
 }
 
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 fn scan_mcp_json_value(ctx: McpScanCtx<'_>, ptr: &str, val: &serde_json::Value, out: &mut Vec<BrandHit>) {
     match val {
         serde_json::Value::Object(map) => scan_mcp_json_object(ctx, ptr, map, out),
@@ -3238,7 +2792,7 @@ fn scan_mcp_json_value(ctx: McpScanCtx<'_>, ptr: &str, val: &serde_json::Value, 
     }
 }
 
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 fn scan_mcp_json_object(ctx: McpScanCtx<'_>, ptr: &str, map: &serde_json::Map<String, serde_json::Value>, out: &mut Vec<BrandHit>) {
     if ctx.method == "tools/call"
         && map.get("type").and_then(serde_json::Value::as_str) == Some("image")
@@ -3260,7 +2814,7 @@ fn scan_mcp_json_object(ctx: McpScanCtx<'_>, ptr: &str, map: &serde_json::Map<St
     }
 }
 
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 fn scan_mcp_inline_png_block(source: &str, ptr: &str, map: &serde_json::Map<String, serde_json::Value>, out: &mut Vec<BrandHit>) {
     let block_src = format!("{source}:{ptr}");
     for (idx, k) in map.keys().enumerate() {
@@ -3273,7 +2827,7 @@ fn scan_mcp_inline_png_block(source: &str, ptr: &str, map: &serde_json::Map<Stri
     }
 }
 
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 fn is_top_tool_field_ptr(ptr: &str, field: &str) -> bool {
     let Some(rest) = ptr.strip_prefix("/result/tools/") else {
         return false;
@@ -3284,7 +2838,7 @@ fn is_top_tool_field_ptr(ptr: &str, field: &str) -> bool {
     !idx_seg.is_empty() && idx_seg.bytes().all(|b| b.is_ascii_digit()) && tail == field
 }
 
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 fn scan_mcp_leaf_string(ctx: McpScanCtx<'_>, ptr: &str, text: &str, out: &mut Vec<BrandHit>) {
     if (ctx.method == "tools/call" || ctx.method == "resources/read") && ptr.ends_with("/text") {
         let trimmed = text.trim_start();
@@ -3317,7 +2871,7 @@ fn scan_mcp_leaf_string(ctx: McpScanCtx<'_>, ptr: &str, text: &str, out: &mut Ve
     check_single_string_with_extra(&full_source, 1, text, policy, true, out);
 }
 
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 fn is_exact_canonical_mcp_import_name(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> bool {
     if text != "table_import_prism" {
         return false;
@@ -3330,7 +2884,7 @@ fn is_exact_canonical_mcp_import_name(ctx: McpScanCtx<'_>, ptr: &str, text: &str
         && (ptr.ends_with("/name") || ptr.ends_with("/mcp_tool"))
 }
 
-#[cfg(any(feature = "full-gates", test))]
+#[cfg(test)]
 fn mcp_leaf_prism_policy<'a>(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> PrismPolicy<'a> {
     if ctx.method == "tools/list" {
         if ctx.entry_tool_name == Some("open_file") {
@@ -3354,451 +2908,6 @@ fn mcp_leaf_prism_policy<'a>(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> Pris
     }
 
     PrismPolicy::Strict
-}
-
-#[cfg(feature = "full-gates")]
-fn send_mcp_rpc(state: &mut McpServerState, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
-    let req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": params,
-    });
-    dispatch_json_value(req, state).ok_or_else(|| format!("MCP `{method}` produced no JSON-RPC response"))
-}
-
-#[cfg(feature = "full-gates")]
-fn ensure_mcp_ok<'a>(label: &str, resp: &'a serde_json::Value) -> Result<&'a serde_json::Value, String> {
-    if let Some(err) = resp.get("error") {
-        return Err(format!("MCP `{label}` returned unexpected JSON-RPC error: {err}"));
-    }
-    let result = resp.get("result").ok_or_else(|| format!("MCP `{label}` missing `result` field"))?;
-    if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
-        return Err(format!("MCP `{label}` returned tool execution error: {result}"));
-    }
-    Ok(result)
-}
-
-/// Drive actual in-memory `curvebook-mcp` JSON-RPC 2.0 sessions (both default headless mode and
-/// strict `--gui-only` mode) over a populated 5-sheet `ProjectDocument`, scanning `initialize`,
-/// `tools/list` (core + all progressive `CommandGroup`s + `gui`), `resources/list` + `resources/read`,
-/// `prompts/list` + `prompts/get`, and `tools/call` (`doc_inspect`, `render_preview`, `export`,
-/// `ui_inspect`, `ui_screenshot`).
-#[cfg(feature = "full-gates")]
-pub fn check_mcp_surfaces() -> Result<Vec<BrandHit>, String> {
-    let mut hits = Vec::new();
-    let doc = build_brands_sweep_document()?;
-    let mut session = Session::from_document(doc);
-    session.recalculate_all().map_err(|e| format!("MCP sweep recalculate: {e}"))?;
-
-    check_mcp_headless_mode(session.clone(), &mut hits)?;
-    check_mcp_gui_only_mode(session, &mut hits)?;
-    Ok(hits)
-}
-
-#[cfg(feature = "full-gates")]
-fn check_mcp_headless_mode(session: Session, hits: &mut Vec<BrandHit>) -> Result<(), String> {
-    let mut state = McpServerState::from_session(session);
-
-    let init = send_mcp_rpc(
-        &mut state,
-        "initialize",
-        serde_json::json!({ "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "xtask-brands", "version": "0.1.0" } }),
-    )?;
-    ensure_mcp_ok("headless:initialize", &init)?;
-    hits.extend(check_mcp_rpc_response("mcp:headless:initialize", "initialize", None, &init));
-
-    let core_tools = send_mcp_rpc(&mut state, "tools/list", serde_json::json!({}))?;
-    ensure_mcp_ok("headless:tools/list:core", &core_tools)?;
-    hits.extend(check_mcp_rpc_response("mcp:headless:tools/list:core", "tools/list", None, &core_tools));
-
-    let toolsets = send_mcp_rpc(&mut state, "tools/call", serde_json::json!({ "name": "list_toolsets", "arguments": {} }))?;
-    ensure_mcp_ok("headless:list_toolsets", &toolsets)?;
-    hits.extend(check_mcp_rpc_response("mcp:headless:list_toolsets", "tools/call", Some("list_toolsets"), &toolsets));
-
-    let enable = send_mcp_rpc(
-        &mut state,
-        "tools/call",
-        serde_json::json!({ "name": "enable_toolset", "arguments": { "group": "all", "groups": ["gui"], "enabled": true } }),
-    )?;
-    ensure_mcp_ok("headless:enable_toolset", &enable)?;
-    hits.extend(check_mcp_rpc_response("mcp:headless:enable_toolset", "tools/call", Some("enable_toolset"), &enable));
-    for notif in state.take_pending_notifications() {
-        hits.extend(check_mcp_rpc_response("mcp:headless:notif", "notification", None, &notif));
-    }
-
-    let all_tools = send_mcp_rpc(&mut state, "tools/list", serde_json::json!({}))?;
-    let all_res = ensure_mcp_ok("headless:tools/list:all", &all_tools)?;
-    let tool_count = all_res.get("tools").and_then(serde_json::Value::as_array).map_or(0, Vec::len);
-    if tool_count < 110 {
-        return Err(format!("expected >= 110 enabled MCP tools in sweep, got {tool_count}"));
-    }
-    hits.extend(check_mcp_rpc_response("mcp:headless:tools/list:all", "tools/list", None, &all_tools));
-
-    let cmd_list = send_mcp_rpc(&mut state, "tools/call", serde_json::json!({ "name": "command_list", "arguments": { "include_ui": true } }))?;
-    ensure_mcp_ok("headless:command_list", &cmd_list)?;
-    hits.extend(check_mcp_rpc_response("mcp:headless:command_list", "tools/call", Some("command_list"), &cmd_list));
-
-    check_mcp_resources_and_prompts(&mut state, "mcp:headless", false, hits)?;
-    check_mcp_headless_previews_and_inspect(&mut state, hits)?;
-    Ok(())
-}
-
-#[cfg(feature = "full-gates")]
-fn check_mcp_headless_previews_and_inspect(state: &mut McpServerState, hits: &mut Vec<BrandHit>) -> Result<(), String> {
-    let overview = send_mcp_rpc(state, "tools/call", serde_json::json!({ "name": "doc_inspect", "arguments": {} }))?;
-    ensure_mcp_ok("headless:doc_inspect", &overview)?;
-    hits.extend(check_mcp_rpc_response("mcp:headless:doc_inspect:root", "tools/call", Some("doc_inspect"), &overview));
-
-    for sid in ["data-1", "info-1", "res-1", "graph-1", "layout-1"] {
-        let sheet_ins =
-            send_mcp_rpc(state, "tools/call", serde_json::json!({ "name": "doc_inspect", "arguments": { "sheet_id": sid, "include_cells": true } }))?;
-        ensure_mcp_ok("headless:doc_inspect:sheet", &sheet_ins)?;
-        hits.extend(check_mcp_rpc_response(&format!("mcp:headless:doc_inspect:{sid}"), "tools/call", Some("doc_inspect"), &sheet_ins));
-    }
-
-    for sid in ["graph-1", "layout-1"] {
-        let preview = send_mcp_rpc(
-            state,
-            "tools/call",
-            serde_json::json!({ "name": "render_preview", "arguments": { "sheet_id": sid, "width_px": 320, "height_px": 220, "dpi": 144 } }),
-        )?;
-        ensure_mcp_ok("headless:render_preview", &preview)?;
-        hits.extend(check_mcp_rpc_response(&format!("mcp:headless:render_preview:{sid}"), "tools/call", Some("render_preview"), &preview));
-    }
-
-    let svg_export =
-        send_mcp_rpc(state, "tools/call", serde_json::json!({ "name": "export", "arguments": { "format": "svg", "sheet_id": "graph-1" } }))?;
-    ensure_mcp_ok("headless:export:svg", &svg_export)?;
-    hits.extend(check_mcp_rpc_response("mcp:headless:export:svg", "tools/call", Some("export"), &svg_export));
-    Ok(())
-}
-
-#[cfg(feature = "full-gates")]
-fn check_mcp_gui_only_mode(session: Session, hits: &mut Vec<BrandHit>) -> Result<(), String> {
-    let mut app = UiApp::from_session(session);
-    app.sync_views();
-    let mut state = McpServerState::with_gui_host(Box::new(BrandsGuiSessionHost::new(app, true)));
-
-    let init = send_mcp_rpc(
-        &mut state,
-        "initialize",
-        serde_json::json!({ "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "xtask-brands-gui", "version": "0.1.0" } }),
-    )?;
-    ensure_mcp_ok("gui_only:initialize", &init)?;
-    hits.extend(check_mcp_rpc_response("mcp:gui_only:initialize", "initialize", None, &init));
-
-    let gui_tools = send_mcp_rpc(&mut state, "tools/list", serde_json::json!({}))?;
-    let gui_res = ensure_mcp_ok("gui_only:tools/list", &gui_tools)?;
-    let gui_count = gui_res.get("tools").and_then(serde_json::Value::as_array).map_or(0, Vec::len);
-    if gui_count != 8 {
-        return Err(format!("expected 8 --gui-only MCP tools, got {gui_count}"));
-    }
-    hits.extend(check_mcp_rpc_response("mcp:gui_only:tools/list", "tools/list", None, &gui_tools));
-
-    check_mcp_resources_and_prompts(&mut state, "mcp:gui_only", true, hits)?;
-
-    let ui_ins = send_mcp_rpc(&mut state, "tools/call", serde_json::json!({ "name": "ui_inspect", "arguments": { "scope": "all" } }))?;
-    ensure_mcp_ok("gui_only:ui_inspect", &ui_ins)?;
-    hits.extend(check_mcp_rpc_response("mcp:gui_only:ui_inspect", "tools/call", Some("ui_inspect"), &ui_ins));
-
-    let ui_shot = send_mcp_rpc(
-        &mut state,
-        "tools/call",
-        serde_json::json!({ "name": "ui_screenshot", "arguments": { "target": "workspace", "width_px": 320, "height_px": 200, "dpi": 144 } }),
-    )?;
-    ensure_mcp_ok("gui_only:ui_screenshot", &ui_shot)?;
-    hits.extend(check_mcp_rpc_response("mcp:gui_only:ui_screenshot", "tools/call", Some("ui_screenshot"), &ui_shot));
-
-    let blocked = send_mcp_rpc(&mut state, "tools/call", serde_json::json!({ "name": "doc_inspect", "arguments": {} }))?;
-    hits.extend(check_mcp_rpc_response("mcp:gui_only:blocked_doc_inspect", "tools/call", Some("doc_inspect"), &blocked));
-    Ok(())
-}
-
-#[cfg(feature = "full-gates")]
-fn check_mcp_resources_and_prompts(state: &mut McpServerState, prefix: &str, gui_only: bool, hits: &mut Vec<BrandHit>) -> Result<(), String> {
-    let res_list = send_mcp_rpc(state, "resources/list", serde_json::json!({}))?;
-    let res_ok = ensure_mcp_ok(&format!("{prefix}:resources/list"), &res_list)?;
-    hits.extend(check_mcp_rpc_response(&format!("{prefix}:resources/list"), "resources/list", None, &res_list));
-
-    let uris: Vec<String> = res_ok
-        .get("resources")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("uri").and_then(serde_json::Value::as_str).map(str::to_owned))
-        .collect();
-    if !gui_only && (!uris.iter().any(|u| u.starts_with("sheet://")) || !uris.iter().any(|u| u.starts_with("result://"))) {
-        return Err(String::from("expected both sheet:// and result:// resources in headless MCP sweep"));
-    }
-    if gui_only {
-        let blocked_read = send_mcp_rpc(state, "resources/read", serde_json::json!({ "uri": "sheet://data-1" }))?;
-        hits.extend(check_mcp_rpc_response(&format!("{prefix}:resources/read:blocked"), "resources/read", None, &blocked_read));
-    } else {
-        for uri in &uris {
-            let read_resp = send_mcp_rpc(state, "resources/read", serde_json::json!({ "uri": uri }))?;
-            ensure_mcp_ok(&format!("{prefix}:resources/read:{uri}"), &read_resp)?;
-            hits.extend(check_mcp_rpc_response(&format!("{prefix}:resources/read:{uri}"), "resources/read", None, &read_resp));
-        }
-    }
-
-    let prompts_list = send_mcp_rpc(state, "prompts/list", serde_json::json!({}))?;
-    let prompts_ok = ensure_mcp_ok(&format!("{prefix}:prompts/list"), &prompts_list)?;
-    hits.extend(check_mcp_rpc_response(&format!("{prefix}:prompts/list"), "prompts/list", None, &prompts_list));
-
-    let names: Vec<String> = prompts_ok
-        .get("prompts")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str).map(str::to_owned))
-        .collect();
-    if names.is_empty() {
-        return Err(format!("{prefix}: expected non-empty prompts/list"));
-    }
-    for name in &names {
-        for (variant, args) in prompt_arg_variants(name) {
-            let prompt_resp = send_mcp_rpc(state, "prompts/get", serde_json::json!({ "name": name, "arguments": args }))?;
-            ensure_mcp_ok(&format!("{prefix}:prompts/get:{name}:{variant}"), &prompt_resp)?;
-            hits.extend(check_mcp_rpc_response(&format!("{prefix}:prompts/get:{name}:{variant}"), "prompts/get", None, &prompt_resp));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(feature = "full-gates")]
-fn prompt_arg_variants(name: &str) -> Vec<(&'static str, serde_json::Value)> {
-    match name {
-        "dose_response_curve_fit" => {
-            vec![("default", serde_json::json!({})), ("antagonist", serde_json::json!({ "sheet_id": "data-1", "response_type": "antagonist" }))]
-        }
-        "choose_two_group_test" => vec![
-            ("default", serde_json::json!({})),
-            ("paired_param", serde_json::json!({ "paired": "true", "parametric": "true" })),
-            ("paired_nonparam", serde_json::json!({ "paired": "true", "parametric": "false" })),
-            ("unpaired_param", serde_json::json!({ "paired": "false", "parametric": "true" })),
-            ("unpaired_nonparam", serde_json::json!({ "paired": "false", "parametric": "false" })),
-        ],
-        "publication_figure_checklist" => {
-            vec![("default", serde_json::json!({})), ("svg", serde_json::json!({ "graph_sheet_id": "graph-1", "target_format": "svg" }))]
-        }
-        _ => vec![("default", serde_json::json!({}))],
-    }
-}
-
-#[cfg(feature = "full-gates")]
-fn check_engine_and_ui_commands(hits: &mut Vec<BrandHit>) {
-    for spec in engine_cmd_registry().specs() {
-        let is_import_prism = spec.id == "table.importPrism";
-        let id_policy = PrismPolicy::UiTextRun { allow_it_statistica: false, allow_palette_cmd_id: is_import_prism };
-        check_single_string(&format!("engine_cmd:{}:id", spec.id), 1, spec.id, id_policy, hits);
-        for (field, val) in [("label", spec.label), ("menu_path", spec.menu_path), ("summary", spec.summary), ("beginner", spec.beginner)] {
-            check_single_string(&format!("engine_cmd:{}:{field}", spec.id), 1, val, PrismPolicy::Strict, hits);
-        }
-        if let Ok(schema_str) = serde_json::to_string(&(spec.input_schema)()) {
-            check_single_string(&format!("engine_cmd:{}:input_schema", spec.id), 1, &schema_str, PrismPolicy::Strict, hits);
-        }
-    }
-    for cmd in UI_COMMANDS {
-        let is_import_prism = cmd.id == "table.importPrism";
-        let id_policy = PrismPolicy::UiTextRun { allow_it_statistica: false, allow_palette_cmd_id: is_import_prism };
-        check_single_string(&format!("ui_cmd:{}:id", cmd.id), 1, cmd.id, id_policy, hits);
-        for (field, val) in [("label", cmd.label), ("params_doc", cmd.params_doc), ("summary", cmd.summary), ("beginner", cmd.beginner)] {
-            check_single_string(&format!("ui_cmd:{}:{field}", cmd.id), 1, val, PrismPolicy::Strict, hits);
-        }
-    }
-}
-
-/// Sweep live `egui_shell` painted text runs, `FrameInspectNodeMeta`, and AccessKit strings
-/// across ALL `16` `LOCALES`, all `5` sheet kinds, all `4` `WelcomeMode`s, all `7` `ActiveInspector`
-/// tabs, all `26` `ActiveDialog` variants, open dropdown menus, toolbar overflow, split view, and
-/// portfolio gallery.
-#[cfg(feature = "full-gates")]
-pub fn check_live_egui_shell_surfaces() -> Result<Vec<BrandHit>, String> {
-    let mut hits = Vec::new();
-    let desktop_vp = ViewportMetrics::new(1440.0, 900.0, 1.0);
-    let narrow_vp = ViewportMetrics::new(640.0, 560.0, 1.0);
-
-    let mut empty_app = UiApp::new();
-    let doc = build_brands_sweep_document()?;
-    let mut session = Session::from_document(doc);
-    session.recalculate_all().map_err(|e| format!("egui_shell sweep recalculate: {e}"))?;
-    let mut app = UiApp::from_session(session);
-    app.sync_views();
-
-    let sheet_ids = ["data-1", "info-1", "res-1", "graph-1", "layout-1"];
-    let menu_keys: Vec<&'static str> = menu_bar_tooltips(&app).into_iter().map(|s| s.menu_key).collect();
-    let dialogs = sweep_dialog_states();
-
-    for &locale in i18n::LOCALES {
-        let is_it = locale == "it";
-        let scanner = EguiSurfaceScanner::new();
-        empty_app.set_locale(locale);
-        for mode in [WelcomeMode::EmptyTypedTable, WelcomeMode::TutorialSample, WelcomeMode::FromTemplate, WelcomeMode::ClonePipeline] {
-            empty_app.nav.welcome.open = true;
-            empty_app.nav.welcome.mode = mode;
-            let cap = scanner.scan(&mut empty_app, desktop_vp);
-            collect_egui_surface_hits(&format!("egui_shell:{locale}:welcome:{mode:?}"), is_it, false, &cap, &mut hits);
-        }
-        empty_app.nav.welcome.open = false;
-
-        app.set_locale(locale);
-        app.nav.welcome.open = false;
-        app.canvas_dialogs.active_dialog = ActiveDialog::None;
-        app.canvas_dialogs.active_inspector = ActiveInspector::None;
-        app.interaction.open_menu = None;
-        app.view_shards.toolbar_menus.overflow_open = false;
-        app.split.enabled = false;
-        app.nav.gallery.open = false;
-
-        for sid in sheet_ids {
-            app.execute_command("sheet.select", serde_json::json!({ "sheet_id": sid })).map_err(|e| format!("select sheet `{sid}`: {e}"))?;
-            app.sync_views();
-            let cap = scanner.scan(&mut app, desktop_vp);
-            collect_egui_surface_hits(&format!("egui_shell:{locale}:sheet:{sid}"), is_it, false, &cap, &mut hits);
-        }
-        app.execute_command("sheet.select", serde_json::json!({ "sheet_id": "graph-1" })).map_err(|e| format!("select graph-1: {e}"))?;
-        app.sync_views();
-
-        for inspector in [
-            ActiveInspector::None,
-            ActiveInspector::FormatGraph,
-            ActiveInspector::FormatAxes,
-            ActiveInspector::PairwiseComparisons,
-            ActiveInspector::BubblePlot,
-            ActiveInspector::PageLayout,
-            ActiveInspector::ResultDetails,
-        ] {
-            app.canvas_dialogs.active_inspector = inspector;
-            let cap = scanner.scan(&mut app, desktop_vp);
-            collect_egui_surface_hits(&format!("egui_shell:{locale}:inspector:{inspector:?}"), is_it, false, &cap, &mut hits);
-        }
-        app.canvas_dialogs.active_inspector = ActiveInspector::None;
-
-        for dlg in &dialogs {
-            app.canvas_dialogs.active_dialog = dlg.clone();
-            if matches!(dlg, ActiveDialog::CommandPalette) {
-                app.canvas_dialogs.command_palette.open();
-                let cap_default = scanner.scan(&mut app, desktop_vp);
-                collect_egui_surface_hits(&format!("egui_shell:{locale}:dialog:CommandPalette:default"), is_it, false, &cap_default, &mut hits);
-                app.canvas_dialogs.command_palette.query = String::from("import");
-                let cap_import = scanner.scan(&mut app, desktop_vp);
-                collect_egui_surface_hits(&format!("egui_shell:{locale}:dialog:CommandPalette:import"), is_it, true, &cap_import, &mut hits);
-                app.canvas_dialogs.command_palette.open();
-            } else {
-                let cap = scanner.scan(&mut app, desktop_vp);
-                collect_egui_surface_hits(&format!("egui_shell:{locale}:dialog"), is_it, false, &cap, &mut hits);
-            }
-        }
-        app.canvas_dialogs.active_dialog = ActiveDialog::None;
-
-        for key in &menu_keys {
-            app.interaction.open_menu = Some((*key).to_owned());
-            let cap = scanner.scan(&mut app, desktop_vp);
-            collect_egui_surface_hits(&format!("egui_shell:{locale}:menu:{key}"), is_it, false, &cap, &mut hits);
-        }
-        app.interaction.open_menu = None;
-
-        app.view_shards.toolbar_menus.overflow_open = true;
-        let overflow_cap = scanner.scan(&mut app, narrow_vp);
-        collect_egui_surface_hits(&format!("egui_shell:{locale}:toolbar_overflow"), is_it, false, &overflow_cap, &mut hits);
-        app.view_shards.toolbar_menus.overflow_open = false;
-
-        app.split.enabled = true;
-        app.split.primary_sheet_id = Some(SheetId::new("data-1"));
-        app.split.secondary_sheet_id = Some(SheetId::new("graph-1"));
-        let split_cap = scanner.scan(&mut app, desktop_vp);
-        collect_egui_surface_hits(&format!("egui_shell:{locale}:split_workspace"), is_it, false, &split_cap, &mut hits);
-        app.split.enabled = false;
-
-        app.nav.gallery.open = true;
-        let gallery_doc = app.document().clone();
-        app.nav.sync_gallery(&gallery_doc);
-        let gallery_cap = scanner.scan(&mut app, desktop_vp);
-        collect_egui_surface_hits(&format!("egui_shell:{locale}:gallery"), is_it, false, &gallery_cap, &mut hits);
-        app.nav.gallery.open = false;
-    }
-
-    Ok(hits)
-}
-
-#[cfg(feature = "full-gates")]
-fn sweep_dialog_states() -> Vec<ActiveDialog> {
-    let data_id = SheetId::new("data-1");
-    let res_id = SheetId::new("res-1");
-    let graph_id = SheetId::new("graph-1");
-    let layout_id = SheetId::new("layout-1");
-    vec![
-        ActiveDialog::FormatAxes { sheet_id: graph_id.clone() },
-        ActiveDialog::AnalyzeSheet { source_sheet_id: data_id.clone() },
-        ActiveDialog::DuplicateAnalysisPrompt {
-            source_sheet_id: data_id.clone(),
-            existing_result_ids: vec![res_id.clone()],
-            pending_entry_id: String::from("stats.one_way_anova"),
-        },
-        ActiveDialog::EditAnalysisParameters { result_sheet_id: res_id.clone() },
-        ActiveDialog::ChangeDataAnalyzed { result_sheet_id: res_id.clone() },
-        ActiveDialog::ResultViewer { result_sheet_id: res_id.clone() },
-        ActiveDialog::ConstantHookPicker { target_sheet_id: res_id.clone() },
-        ActiveDialog::ChangeGraphType { graph_sheet_id: graph_id.clone() },
-        ActiveDialog::FormatGraph { graph_sheet_id: graph_id.clone() },
-        ActiveDialog::PairwiseComparisons { graph_sheet_id: graph_id.clone() },
-        ActiveDialog::BubblePlotInspector { graph_sheet_id: graph_id.clone() },
-        ActiveDialog::ApplyStyleFrom { target_graph_id: graph_id.clone() },
-        ActiveDialog::PageLayoutComposer { layout_sheet_id: layout_id.clone() },
-        ActiveDialog::ExportFigure { sheet_id: graph_id.clone() },
-        ActiveDialog::ConvertArchetype { sheet_id: data_id.clone() },
-        ActiveDialog::ImportReshape,
-        ActiveDialog::ExcludeWithReason { sheet_id: data_id.clone() },
-        ActiveDialog::FormatSelectedPoints { graph_sheet_id: graph_id.clone() },
-        ActiveDialog::PowerAndSampleSize,
-        ActiveDialog::Print { sheet_id: Some(layout_id.clone()) },
-        ActiveDialog::RandomizeGroups,
-        ActiveDialog::RandomSampleRows { source_sheet_id: Some(data_id.clone()) },
-        ActiveDialog::SimulateDistributions,
-        ActiveDialog::InsertModelEquation { graph_sheet_id: graph_id },
-        ActiveDialog::CreateGraph { source_sheet_id: Some(data_id) },
-        ActiveDialog::EqualizeScaling { layout_sheet_id: layout_id },
-        ActiveDialog::FormatEmbeddedTable { sheet_id: SheetId::new("graph-1"), target_index: 0, is_layout: false },
-        ActiveDialog::FormatImage { sheet_id: SheetId::new("graph-1"), target_index: 0, is_layout: false },
-        ActiveDialog::CommandPalette,
-        ActiveDialog::Checkpoints,
-        ActiveDialog::About,
-    ]
-}
-
-#[cfg(feature = "full-gates")]
-fn collect_egui_surface_hits(
-    context: &str,
-    allow_it_statistica: bool,
-    allow_palette_cmd_id: bool,
-    cap: &EguiSurfaceCapture,
-    hits: &mut Vec<BrandHit>,
-) {
-    for (idx, (owner, text)) in cap.text_runs.iter().enumerate() {
-        let is_palette_cmd = allow_palette_cmd_id && (owner == "palette.status" || owner.starts_with("palette.item."));
-        let run_ctx = format!("{context}:text_run:{owner}");
-        let policy = PrismPolicy::UiTextRun { allow_it_statistica, allow_palette_cmd_id: is_palette_cmd };
-        check_single_string(&run_ctx, idx + 1, text, policy, hits);
-    }
-    let a11y_policy = PrismPolicy::UiTextRun { allow_it_statistica, allow_palette_cmd_id: false };
-    for (idx, entry) in cap.a11y_entries.iter().enumerate() {
-        let a11y_ctx = format!("{context}:a11y:{}", entry.widget_id);
-        for txt in [Some(entry.label.as_str()), entry.value_text.as_deref(), entry.disabled_reason.as_deref(), entry.full_label.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            check_single_string(&a11y_ctx, idx + 1, txt, a11y_policy, hits);
-        }
-        if let Some(cmd) = &entry.command_id
-            && cmd != "table.importPrism"
-        {
-            hits.extend(check_text_runs_strict(&format!("{a11y_ctx}:command_id"), [cmd.as_str()]));
-        }
-    }
-    for (idx, ak) in cap.accesskit_labels.iter().enumerate() {
-        check_single_string(&format!("{context}:accesskit"), idx + 1, ak, a11y_policy, hits);
-    }
 }
 
 /// Inspect PNG binary metadata chunks (`tEXt`, `iTXt`, and compressed `zTXt`) strictly against
@@ -4301,7 +3410,7 @@ pub(crate) fn scan_compliance_text(display_path: &str, text: &str) -> Vec<BrandH
 
 /// Scan a generated static documentation site directory under the narrow generated-HTML
 /// format-boundary policy while keeping `PrismPolicy::Strict` on non-HTML text and suite brands.
-#[cfg(feature = "full-gates")]
+#[cfg(feature = "docs-site")]
 pub fn check_docs_site_dir(dir: &Path) -> Result<Vec<BrandHit>, String> {
     if !dir.exists() {
         return Err(format!("docs-site directory `{}` does not exist", dir.display()));
@@ -4404,8 +3513,6 @@ mod tests {
         assert!(ui_hits.iter().any(|h| h.brand == "vectorcraft"), "{ui_hits:?}");
     }
 
-    #[cfg(feature = "full-gates")]
-    use super::check_i18n_catalog;
     use super::{
         BrandHit, check_html_metadata, check_i18n_catalog_entries, check_labeled_text_runs, check_manifest_metadata, check_pdf_metadata,
         check_svg_metadata, check_text_runs, check_text_runs_strict, check_window_title, run, scan_file, scan_repo_checked, skip_path,
@@ -4876,9 +3983,6 @@ pub fn status_line() -> &'static str {
 
     #[test]
     fn checks_16_locale_i18n_catalog_and_entries() {
-        #[cfg(feature = "full-gates")]
-        assert_eq!(check_i18n_catalog(), Vec::new());
-
         let entries = [
             ("menu.file.open", "en", "CurveBook Project"),
             ("dialog.open.file_filter", "de", "Data files (*.curvebook, *.pzfx, *.prism)"),
@@ -5604,7 +4708,7 @@ it: "Copia Statistica report",
 
         // End-to-end: a `.curvebook` archive containing a `CurveBook.app/Contents/CodeResources` binary entry must fail closed.
         let dir = temp_dir("macos-ticket-zip-bypass");
-        let mut zip = curvebook_format::ZipWriter::new();
+        let mut zip = crate::zip_read::TestZipWriter::new();
         zip.add_file("CurveBook.app/Contents/CodeResources", valid_ticket.to_vec()).unwrap();
         std::fs::write(dir.join("project.curvebook"), zip.finish().unwrap()).unwrap();
         assert!(super::scan_dist_artefacts(&dir).is_err());

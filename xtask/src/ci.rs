@@ -3,12 +3,12 @@
 use std::path::Path;
 use std::time::Instant;
 
+#[cfg(feature = "docs-site")]
+use crate::docs_site;
 use crate::{
-    assets, brands, citations, cleanroom, cmd_i18n_report, cmd_layers, cmd_test, cmd_wasm, cursors, design_tokens, has_cargo_nextest, licenses,
+    assets, brands, citations, cleanroom, cmd_i18n_report, cmd_layers, cmd_test, cmd_wasm, commands, design_tokens, has_cargo_nextest, licenses,
     pending, run_cargo, run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, web_fonts, workflows,
 };
-#[cfg(feature = "full-gates")]
-use crate::{commands, docs_site};
 
 // Keep existing UI frame/latency (`r10_*`, including `r10_phase7_gates`), human-path
 // input-to-paint budgets (`human_wf_*`), grid, curve-fit, and ANOVA/1M throughput gates
@@ -152,29 +152,23 @@ pub(crate) fn policy(root: &Path, include_i18n: bool) -> Result<(), String> {
     assets::run(root)?;
     brands::run(root)?;
     cleanroom::run(root)?;
-    cursors::run(root)?;
     design_tokens::run(root, &[])?;
     if include_i18n {
         cmd_i18n_report(root)?;
     }
     ui_commands::run(root, true)?;
-    #[cfg(feature = "full-gates")]
-    {
-        commands::run(root, true)?;
-    }
+    commands::run(root, true)?;
     schemas::run(root, true)?;
-    #[cfg(feature = "full-gates")]
+    #[cfg(feature = "docs-site")]
     {
         docs_site::run_check(root)?;
     }
-    #[cfg(not(feature = "full-gates"))]
+    #[cfg(not(feature = "docs-site"))]
     {
         if workflows::is_ci_env() {
-            return Err(String::from(
-                "ci policy: `full-gates` feature is disabled while CI=true; cannot skip `commands --check` and `docs-site --check`",
-            ));
+            return Err(String::from("ci policy: `docs-site` feature is disabled while CI=true; cannot skip `docs-site --check`"));
         }
-        println!("ci policy: skipping `commands --check` and `docs-site --check` (`full-gates` feature disabled)");
+        println!("ci policy: skipping `docs-site --check` (`docs-site` feature disabled)");
     }
     cmd_layers(root)?;
     secrets::run(root)?;

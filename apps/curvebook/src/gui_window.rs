@@ -10,9 +10,9 @@ use std::sync::{Arc, OnceLock, mpsc};
 use curvebook_text::TrueTypeFont;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::rasterizer::EguiScreenshotRegions;
-use curvebook_ui_egui::egui_shell::{FrameInspectMeta, GeometryStamp, PendingUiIntents, Tokens, UiIntent, inspect_bridge};
+use curvebook_ui_egui::egui_shell::{FrameInspectMeta, GeometryStamp, PendingUiIntents, Tokens, UiIntent, UiIntentOutcome, inspect_bridge};
 use curvebook_ui_egui::interaction::KeyModifiers;
-use curvebook_ui_egui::{ControlAuth, ControlPostRequestContext, ControlRequest, UiApp, is_desktop_host_routed_command};
+use curvebook_ui_egui::{ControlAuth, ControlPostRequestContext, ControlRequest, UiApp, is_desktop_host_routed_command, parse_control_request};
 use eframe::egui;
 
 use crate::desktop_host::{
@@ -99,9 +99,47 @@ pub fn build_egui_font_definitions(extra_ttf: Option<&[u8]>) -> egui::FontDefini
     defs
 }
 
-struct DeferredLivePointerGesture {
+struct DeferredLiveRequest {
     req: LiveControlRequest,
-    response_payload: serde_json::Value,
+    scroll_attempted: bool,
+}
+
+enum PendingLiveUiActionKind {
+    PointerGesture {
+        action: String,
+        widget_id: Option<String>,
+        pos: egui::Pos2,
+        power_hover_meta: Option<(f64, Option<f64>, Option<f64>)>,
+        is_right_click_coords: bool,
+    },
+    TypeText {
+        text: String,
+        widget_id: Option<String>,
+        submit: bool,
+    },
+    PressKey {
+        key_raw: String,
+    },
+    SwitchTab {
+        response_payload: serde_json::Value,
+    },
+    AnswerDialog {
+        action: String,
+        was_power_wizard: bool,
+        button_widget_id: String,
+    },
+}
+
+struct PendingLiveUiAction {
+    req: LiveControlRequest,
+    request_id: serde_json::Value,
+    method: String,
+    kind: PendingLiveUiActionKind,
+    scroll_settle_budget: u8,
+    prev_undo_depth: usize,
+    prev_redo_depth: usize,
+    prev_dirty: bool,
+    prev_mutation_seq: u64,
 }
 
 /// Interactive `eframe::App` wrapping a [`DesktopHostRuntime`] session.
@@ -168,9 +206,13 @@ pub struct CurveBookNativeApp {
     last_regions: EguiScreenshotRegions,
     pending_intents: PendingUiIntents,
     discarded_carry_passes: u8,
-    deferred_live_requests: Vec<LiveControlRequest>,
+    deferred_live_requests: Vec<DeferredLiveRequest>,
     pending_synthetic_egui_batches: VecDeque<Vec<egui::Event>>,
-    pending_live_gesture: Option<DeferredLivePointerGesture>,
+    pending_live_action: Option<PendingLiveUiAction>,
+    pending_live_outcomes: Vec<UiIntentOutcome>,
+    pending_live_error: Option<curvebook_engine::EngineError>,
+    pending_live_ever_wanted_kb: bool,
+    last_egui_wants_kb: bool,
     menu_popup_was_open: bool,
     #[cfg(target_os = "macos")]
     mac_menu_host: crate::mac_menu::MacNativeMenuHost,
@@ -229,7 +271,11 @@ impl CurveBookNativeApp {
             discarded_carry_passes: 0,
             deferred_live_requests: Vec::new(),
             pending_synthetic_egui_batches: VecDeque::new(),
-            pending_live_gesture: None,
+            pending_live_action: None,
+            pending_live_outcomes: Vec::new(),
+            pending_live_error: None,
+            pending_live_ever_wanted_kb: false,
+            last_egui_wants_kb: false,
             menu_popup_was_open: false,
             #[cfg(target_os = "macos")]
             mac_menu_host: crate::mac_menu::MacNativeMenuHost::new(),
@@ -337,13 +383,13 @@ impl CurveBookNativeApp {
         }
         let count = pending.len();
         let mut defer_subsequent_commands =
-            !self.deferred_live_requests.is_empty() || !self.pending_synthetic_egui_batches.is_empty() || self.pending_live_gesture.is_some();
+            !self.deferred_live_requests.is_empty() || !self.pending_synthetic_egui_batches.is_empty() || self.pending_live_action.is_some();
         let mut immediate = Vec::new();
         for req in pending {
             if should_defer_to_settled_frame(&req)
                 || (defer_subsequent_commands && classify_control_frame(&req.raw_bytes) == ControlFrameKind::Command)
             {
-                self.deferred_live_requests.push(req);
+                self.deferred_live_requests.push(DeferredLiveRequest { req, scroll_attempted: false });
                 defer_subsequent_commands = true;
             } else {
                 immediate.push(req);
@@ -352,7 +398,7 @@ impl CurveBookNativeApp {
         let quit_requested = self.dispatch_pending_live_requests(immediate);
         if quit_requested {
             self.finish_live_quit(ctx);
-        } else if !self.deferred_live_requests.is_empty() || !self.pending_synthetic_egui_batches.is_empty() || self.pending_live_gesture.is_some() {
+        } else if !self.deferred_live_requests.is_empty() || !self.pending_synthetic_egui_batches.is_empty() || self.pending_live_action.is_some() {
             ctx.request_repaint();
         }
         count
@@ -374,6 +420,19 @@ impl CurveBookNativeApp {
         for req in pending {
             if quit_requested {
                 let _ = req.reply_tx.send(Err(String::from("desktop window is closing")));
+                continue;
+            }
+            if self.close_dialog_open
+                && is_request_authorized(&req)
+                && let Some(parsed) = parse_control_request_from_bytes(&req.raw_bytes)
+                && parsed.method == "ui.invoke_menu"
+            {
+                let _ = Self::send_live_engine_error(
+                    req,
+                    parsed.id,
+                    curvebook_doc::ErrorCode::Conflict,
+                    "cannot invoke menu command while unsaved changes dialog is open",
+                );
                 continue;
             }
             let res = self.dispatch_single_live_request(&req.raw_bytes, &req.auth, req.conn_authenticated, &mut post_hook);
@@ -411,24 +470,199 @@ impl CurveBookNativeApp {
         }
     }
 
-    fn complete_pending_live_gesture(&mut self) {
-        let Some(pending) = self.pending_live_gesture.take() else {
-            return;
-        };
-        let Ok(req) = serde_json::from_str::<ControlRequest>(std::str::from_utf8(&pending.req.raw_bytes).unwrap_or("").trim()) else {
-            let _ = pending.req.reply_tx.send(Err(String::from("invalid queued pointer gesture payload")));
-            return;
-        };
-        let reply = curvebook_ui_egui::encode_egui_control_response(req.id, Ok(pending.response_payload));
-        let Ok(mut response_bytes) = serde_json::to_vec(&reply) else {
-            let _ = pending.req.reply_tx.send(Err(String::from("failed to serialize pointer gesture reply")));
-            return;
-        };
-        response_bytes.push(b'\n');
-        let _ = pending.req.reply_tx.send(Ok(LiveControlFrameOutput { response_bytes, quit: false, close_connection: false, auth_succeeded: None }));
+    fn send_live_control_reply(req: LiveControlRequest, id: serde_json::Value, result: Result<serde_json::Value, curvebook_engine::EngineError>) {
+        let reply = curvebook_ui_egui::encode_egui_control_response(id, result);
+        let bytes = serde_json::to_vec(&reply).map(|mut b| {
+            b.push(b'\n');
+            LiveControlFrameOutput { response_bytes: b, quit: false, close_connection: false, auth_succeeded: None }
+        });
+        let _ = req.reply_tx.send(bytes.map_err(|e| e.to_string()));
     }
 
-    fn flush_deferred_live_requests(&mut self, ctx: &egui::Context) {
+    fn send_live_engine_error(
+        req: LiveControlRequest,
+        id: serde_json::Value,
+        code: curvebook_doc::ErrorCode,
+        msg: impl Into<String>,
+    ) -> LiveActionDispatch {
+        Self::send_live_control_reply(req, id, Err(curvebook_engine::EngineError::with_code(code, msg)));
+        LiveActionDispatch::ImmediateReply
+    }
+
+    fn send_live_engine_err_val(req: LiveControlRequest, id: serde_json::Value, err: curvebook_engine::EngineError) -> LiveActionDispatch {
+        Self::send_live_control_reply(req, id, Err(err));
+        LiveActionDispatch::ImmediateReply
+    }
+
+    fn capture_mutation_baseline(&self) -> (usize, usize, bool, u64) {
+        let win_id = self.active_window_id();
+        self.runtime.window(win_id).ok().map_or((0, 0, false, 0), |w| {
+            (w.app().session().undo_depth(), w.app().session().redo_depth(), w.app().session().is_dirty(), w.app().mutation_seq())
+        })
+    }
+
+    fn invoke_live_post_hook(
+        &self,
+        post_hook: &mut Option<LiveControlPostHook>,
+        method: &str,
+        baseline: (usize, usize, bool, u64),
+        request_ok: bool,
+    ) {
+        let Some(ref mut hook) = *post_hook else {
+            return;
+        };
+        let win_id = self.active_window_id();
+        let Ok(win) = self.runtime.window(win_id) else {
+            return;
+        };
+        let (prev_undo_depth, prev_redo_depth, prev_dirty, prev_mutation_seq) = baseline;
+        let mutated = win.app().mutation_seq() != prev_mutation_seq
+            || win.app().session().undo_depth() != prev_undo_depth
+            || win.app().session().redo_depth() != prev_redo_depth
+            || (!prev_dirty && win.app().session().is_dirty());
+        let steps = if mutated {
+            vec![curvebook_ui_egui::ControlRecordedStep { command_id: method.to_owned(), params: serde_json::Value::Null, mutated: true }]
+        } else {
+            Vec::new()
+        };
+        let hook_ctx = ControlPostRequestContext {
+            method,
+            steps: &steps,
+            prev_undo_depth,
+            prev_redo_depth,
+            prev_dirty,
+            prev_mutation_seq,
+            rolled_back: false,
+            request_ok,
+        };
+        let _ = hook(win.app(), &hook_ctx);
+    }
+
+    fn record_direct_live_mutation(&mut self, method: &str, baseline: (usize, usize, bool, u64)) {
+        let win_id = self.active_window_id();
+        if let Ok(win) = self.runtime.window_mut(win_id) {
+            win.app_mut().sync_views();
+            let _ = win.record_ui_mutation_checkpoint(Some(method), baseline.0, baseline.1, baseline.2, baseline.3);
+        }
+    }
+
+    fn begin_pending_live_action(
+        &mut self,
+        req: LiveControlRequest,
+        request_id: serde_json::Value,
+        method: &str,
+        kind: PendingLiveUiActionKind,
+        batches: Vec<Vec<egui::Event>>,
+    ) -> LiveActionDispatch {
+        let baseline = self.capture_mutation_baseline();
+        self.pending_live_outcomes.clear();
+        self.pending_live_error = None;
+        self.pending_live_ever_wanted_kb = false;
+        self.pending_synthetic_egui_batches.extend(batches);
+        // Append one empty settle pass so post-event layout & `PendingUiIntents` commit before reply/inspect.
+        self.pending_synthetic_egui_batches.push_back(Vec::new());
+        let scroll_settle_budget = match &kind {
+            PendingLiveUiActionKind::PointerGesture { action, .. } if action == "scroll" || action == "wheel" => 96,
+            _ => 0,
+        };
+        self.pending_live_action = Some(PendingLiveUiAction {
+            req,
+            request_id,
+            method: method.to_owned(),
+            kind,
+            scroll_settle_budget,
+            prev_undo_depth: baseline.0,
+            prev_redo_depth: baseline.1,
+            prev_dirty: baseline.2,
+            prev_mutation_seq: baseline.3,
+        });
+        LiveActionDispatch::EguiQueued
+    }
+
+    fn complete_pending_live_action(&mut self, ctx: &egui::Context, post_hook: &mut Option<LiveControlPostHook>) {
+        let Some(pending) = self.pending_live_action.take() else {
+            return;
+        };
+        let outcomes = std::mem::take(&mut self.pending_live_outcomes);
+        let pending_err = self.pending_live_error.take();
+        let ever_wanted_kb = std::mem::take(&mut self.pending_live_ever_wanted_kb);
+        let baseline = (pending.prev_undo_depth, pending.prev_redo_depth, pending.prev_dirty, pending.prev_mutation_seq);
+
+        let win_id = self.active_window_id();
+        if let Ok(win) = self.runtime.window_mut(win_id) {
+            inspect_bridge::clear_stale_non_grid_textbox_focus(
+                win.app_mut(),
+                &self.inspect_meta,
+                ever_wanted_kb || self.last_egui_wants_kb,
+                ctx.egui_wants_keyboard_input(),
+            );
+            win.app_mut().sync_views();
+        }
+
+        if let Some(err) = pending_err {
+            Self::send_live_control_reply(pending.req, pending.request_id, Err(err));
+            self.invoke_live_post_hook(post_hook, &pending.method, baseline, false);
+            return;
+        }
+
+        let result_val = match pending.kind {
+            PendingLiveUiActionKind::PointerGesture { action, widget_id, pos, power_hover_meta, is_right_click_coords } => {
+                if is_right_click_coords
+                    && !outcomes.iter().any(|o| !matches!(o, UiIntentOutcome::ShellUpdated))
+                    && let Ok(win) = self.runtime.window_mut(win_id)
+                {
+                    inspect_bridge::clear_right_click_miss_context_menu(win.app_mut());
+                }
+                let mut payload = inspect_bridge::format_pointer_gesture_result(&action, widget_id.as_deref(), pos, &outcomes);
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert(String::from("egui_dispatched"), serde_json::json!(true));
+                    if let Some((frac, hn, hp)) = power_hover_meta {
+                        obj.insert(String::from("hover_fraction_x"), serde_json::json!(frac));
+                        obj.insert(String::from("hover_n"), serde_json::json!(hn));
+                        obj.insert(String::from("hover_power"), serde_json::json!(hp));
+                    }
+                }
+                payload
+            }
+            PendingLiveUiActionKind::TypeText { text, widget_id, submit } => {
+                let Ok(win) = self.runtime.window(win_id) else {
+                    Self::send_live_control_reply(
+                        pending.req,
+                        pending.request_id,
+                        Err(curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::InternalError, "missing active window")),
+                    );
+                    return;
+                };
+                inspect_bridge::format_type_text_result(win.app(), &text, widget_id.as_deref(), submit, &outcomes)
+            }
+            PendingLiveUiActionKind::PressKey { key_raw } => inspect_bridge::format_press_key_result(&key_raw, &outcomes),
+            PendingLiveUiActionKind::SwitchTab { response_payload } => response_payload,
+            PendingLiveUiActionKind::AnswerDialog { action, was_power_wizard, button_widget_id } => {
+                let Ok(win) = self.runtime.window(win_id) else {
+                    Self::send_live_control_reply(
+                        pending.req,
+                        pending.request_id,
+                        Err(curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::InternalError, "missing active window")),
+                    );
+                    return;
+                };
+                inspect_bridge::format_answer_dialog_click_result(
+                    win.app(),
+                    &win.app().egui_views,
+                    self.close_dialog_open,
+                    &action,
+                    &button_widget_id,
+                    was_power_wizard,
+                    &outcomes,
+                )
+            }
+        };
+
+        Self::send_live_control_reply(pending.req, pending.request_id, Ok(result_val));
+        self.invoke_live_post_hook(post_hook, &pending.method, baseline, true);
+    }
+
+    fn flush_deferred_live_requests(&mut self, ctx: &egui::Context, scroll_active_this_frame: bool) {
         if ctx.will_discard() {
             return;
         }
@@ -439,37 +673,95 @@ impl CurveBookNativeApp {
             ctx.request_repaint();
             return;
         }
-        self.complete_pending_live_gesture();
-
-        if self.deferred_live_requests.is_empty() {
+        if let Some(ref mut pending) = self.pending_live_action
+            && pending.scroll_settle_budget > 0
+            && scroll_active_this_frame
+        {
+            pending.scroll_settle_budget = pending.scroll_settle_budget.saturating_sub(1);
+            ctx.request_repaint();
             return;
         }
+
+        let mut post_hook = self.live_control.as_mut().and_then(|ctrl| ctrl.post_hook.take());
+        self.complete_pending_live_action(ctx, &mut post_hook);
+
+        if self.deferred_live_requests.is_empty() {
+            if let Some(ref mut ctrl) = self.live_control {
+                ctrl.post_hook = post_hook;
+            }
+            return;
+        }
+
         let queued = std::mem::take(&mut self.deferred_live_requests);
         let mut iter = queued.into_iter();
-        let mut post_hook = self.live_control.as_mut().and_then(|ctrl| ctrl.post_hook.take());
         let mut quit_requested = false;
-        while let Some(req) = iter.next() {
+        while let Some(deferred) = iter.next() {
             if quit_requested {
-                let _ = req.reply_tx.send(Err(String::from("desktop window is closing")));
+                let _ = deferred.req.reply_tx.send(Err(String::from("desktop window is closing")));
                 continue;
             }
-            if is_pointer_gesture_request(&req) {
-                match self.try_enqueue_live_pointer_gesture(ctx, req, &mut post_hook) {
-                    LiveGestureDispatch::EguiQueued => {
-                        self.deferred_live_requests.extend(iter);
-                        ctx.request_repaint();
-                        break;
-                    }
-                    LiveGestureDispatch::ImmediateReply => {}
+            if !is_request_authorized(&deferred.req) {
+                let res =
+                    self.dispatch_single_live_request(&deferred.req.raw_bytes, &deferred.req.auth, deferred.req.conn_authenticated, &mut post_hook);
+                let _ = deferred.req.reply_tx.send(res);
+                continue;
+            }
+            let Some(parsed) = parse_control_request_from_bytes(&deferred.req.raw_bytes) else {
+                let res =
+                    self.dispatch_single_live_request(&deferred.req.raw_bytes, &deferred.req.auth, deferred.req.conn_authenticated, &mut post_hook);
+                if res.as_ref().is_ok_and(|out| out.quit) {
+                    quit_requested = true;
                 }
+                let _ = deferred.req.reply_tx.send(res);
                 continue;
+            };
+
+            let dispatch = match parsed.method.as_str() {
+                "ui.inspect" => {
+                    let res = self.handle_live_ui_inspect(ctx, stamp, &parsed.params);
+                    Self::send_live_control_reply(deferred.req, parsed.id, res);
+                    LiveActionDispatch::ImmediateReply
+                }
+                "ui.screenshot" => {
+                    let injected_bytes = self.prepare_settled_live_request_bytes(&deferred.req.raw_bytes, stamp);
+                    let res = self.dispatch_single_live_request(&injected_bytes, &deferred.req.auth, deferred.req.conn_authenticated, &mut post_hook);
+                    let _ = deferred.req.reply_tx.send(res);
+                    LiveActionDispatch::ImmediateReply
+                }
+                "ui.pointer_gesture" => self.try_enqueue_live_pointer_gesture(ctx, deferred, parsed, &mut post_hook),
+                "ui.type_text" => self.try_enqueue_live_type_text(ctx, deferred, parsed),
+                "ui.press_key" => self.try_enqueue_live_press_key(ctx, deferred.req, parsed),
+                "ui.switch_tab" => self.try_dispatch_live_switch_tab(deferred, parsed, &mut post_hook),
+                "ui.answer_dialog" => self.try_dispatch_live_answer_dialog(deferred.req, parsed, &mut post_hook),
+                _ => {
+                    let res = self.dispatch_single_live_request(
+                        &deferred.req.raw_bytes,
+                        &deferred.req.auth,
+                        deferred.req.conn_authenticated,
+                        &mut post_hook,
+                    );
+                    if res.as_ref().is_ok_and(|out| out.quit) {
+                        quit_requested = true;
+                    }
+                    let _ = deferred.req.reply_tx.send(res);
+                    if !iter.as_slice().is_empty() { LiveActionDispatch::YieldFrame } else { LiveActionDispatch::ImmediateReply }
+                }
+            };
+
+            match dispatch {
+                LiveActionDispatch::ImmediateReply => {}
+                LiveActionDispatch::EguiQueued | LiveActionDispatch::YieldFrame => {
+                    self.deferred_live_requests.extend(iter);
+                    ctx.request_repaint();
+                    break;
+                }
+                LiveActionDispatch::NeedsScrollRetry(retry_req) => {
+                    self.deferred_live_requests.push(retry_req);
+                    self.deferred_live_requests.extend(iter);
+                    ctx.request_repaint();
+                    break;
+                }
             }
-            let injected_bytes = self.prepare_settled_live_request_bytes(&req.raw_bytes, stamp);
-            let res = self.dispatch_single_live_request(&injected_bytes, &req.auth, req.conn_authenticated, &mut post_hook);
-            if res.as_ref().is_ok_and(|out| out.quit) {
-                quit_requested = true;
-            }
-            let _ = req.reply_tx.send(res);
         }
         if let Some(ref mut ctrl) = self.live_control {
             ctrl.post_hook = post_hook;
@@ -479,140 +771,531 @@ impl CurveBookNativeApp {
         }
     }
 
-    fn send_live_gesture_error(
-        req: LiveControlRequest,
-        id: serde_json::Value,
-        code: curvebook_doc::ErrorCode,
-        msg: impl Into<String>,
-    ) -> LiveGestureDispatch {
-        let err = curvebook_engine::EngineError::with_code(code, msg);
-        let reply = curvebook_ui_egui::encode_egui_control_response(id, Err(err));
-        let bytes = serde_json::to_vec(&reply).map(|mut b| {
-            b.push(b'\n');
-            LiveControlFrameOutput { response_bytes: b, quit: false, close_connection: false, auth_succeeded: None }
+    fn handle_live_ui_inspect(
+        &self,
+        ctx: &egui::Context,
+        stamp: GeometryStamp,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, curvebook_engine::EngineError> {
+        let mut parsed_params = inspect_bridge::parse_inspect_params(params)?;
+        if params.get("metrics").is_none() && params.get("viewport").is_none() {
+            let scale = f64::from(stamp.scale_factor());
+            let logical_w = (f64::from(stamp.physical_width_px) / scale).max(160.0);
+            let logical_h = (f64::from(stamp.physical_height_px) / scale).max(120.0);
+            parsed_params.metrics = curvebook_ui_egui::interaction::ViewportMetrics::new(logical_w, logical_h, scale);
+        }
+        let win = self
+            .runtime
+            .window(self.active_window_id())
+            .map_err(|e| curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::InternalError, e))?;
+        let focused_egui_id = ctx.memory(|m| m.focused());
+        let snap = inspect_bridge::build_live_ui_tree_snapshot(inspect_bridge::LiveInspectSnapshotInput {
+            app: win.app(),
+            views: &win.app().egui_views,
+            meta: &self.inspect_meta,
+            focused_egui_id,
+            host_close_dialog_open: self.close_dialog_open,
+            scope: parsed_params.scope,
+            include_bounds: parsed_params.include_bounds,
+            metrics: parsed_params.metrics,
         });
-        let _ = req.reply_tx.send(bytes.map_err(|e| e.to_string()));
-        LiveGestureDispatch::ImmediateReply
+        serde_json::to_value(snap).map_err(|e| curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::InternalError, e.to_string()))
     }
 
     fn try_enqueue_live_pointer_gesture(
         &mut self,
-        ctx: &egui::Context,
-        req: LiveControlRequest,
+        _ctx: &egui::Context,
+        mut deferred: DeferredLiveRequest,
+        parsed: ControlRequest,
         post_hook: &mut Option<LiveControlPostHook>,
-    ) -> LiveGestureDispatch {
-        let _ = ctx;
-        let Ok(text) = std::str::from_utf8(&req.raw_bytes) else {
-            let res = self.dispatch_single_live_request(&req.raw_bytes, &req.auth, req.conn_authenticated, post_hook);
-            let _ = req.reply_tx.send(res);
-            return LiveGestureDispatch::ImmediateReply;
-        };
-        let Ok(parsed) = serde_json::from_str::<ControlRequest>(text.trim()) else {
-            let res = self.dispatch_single_live_request(&req.raw_bytes, &req.auth, req.conn_authenticated, post_hook);
-            let _ = req.reply_tx.send(res);
-            return LiveGestureDispatch::ImmediateReply;
-        };
+    ) -> LiveActionDispatch {
         let params = &parsed.params;
-        let target = match parse_live_gesture_target(params) {
-            Ok(parsed_target) => parsed_target,
-            Err(err_msg) => return Self::send_live_gesture_error(req, parsed.id, curvebook_doc::ErrorCode::BadInput, err_msg),
+        let target = match inspect_bridge::parse_pointer_gesture_params(params, if params.get("delta_x").is_none() { -120.0 } else { 0.0 }) {
+            Ok(p) => p,
+            Err(err) => return Self::send_live_engine_err_val(deferred.req, parsed.id, err),
         };
-        let (action, widget_id, explicit_xy) = (target.action, target.widget_id, target.explicit_xy);
 
-        let meta_entry = if let Some(wid) = widget_id {
-            let Some(entry) = self.inspect_meta.find_by_widget_id(wid).cloned() else {
-                return Self::send_live_gesture_error(req, parsed.id, curvebook_doc::ErrorCode::NotFound, format!("unknown widget_id `{wid}`"));
+        let win_id = self.active_window_id();
+        let is_human_path_only = self.runtime.window(win_id).is_ok_and(|w| w.app().is_human_path_only());
+        if is_human_path_only && (target.widget_id.is_some() || target.to_widget_id.is_some()) {
+            return Self::send_live_engine_error(
+                deferred.req,
+                parsed.id,
+                curvebook_doc::ErrorCode::GuiOnlyViolation,
+                "direct `ui.pointer_gesture(widget_id)` is blocked in human-path-only mode",
+            );
+        }
+
+        if let Some(wid) = target.widget_id
+            && target.explicit_xy.is_none()
+            && !wid.starts_with("formula_bar.open_col.")
+            && !wid.starts_with("canvas.point.")
+            && inspect_bridge::resolve_widget_rect_in_meta(&self.inspect_meta, wid).is_none()
+            && !deferred.scroll_attempted
+            && let Ok(win) = self.runtime.window_mut(win_id)
+            && inspect_bridge::ensure_widget_scrolled_into_view_state(win.app_mut(), target.metrics, wid)
+        {
+            deferred.scroll_attempted = true;
+            return LiveActionDispatch::NeedsScrollRetry(deferred);
+        }
+
+        if let Some(wid) = target.widget_id
+            && let Some(col_str) = wid.strip_prefix("formula_bar.open_col.")
+            && let Ok(col) = col_str.parse::<usize>()
+        {
+            return self.try_open_live_formula_bar(deferred.req, parsed.id, wid, col, &target, post_hook);
+        }
+
+        let mut power_hover_meta: Option<(f64, Option<f64>, Option<f64>)> = None;
+        let pos = if target.widget_id == Some("power.curve_hover") {
+            let Ok(win) = self.runtime.window_mut(win_id) else {
+                return Self::send_live_engine_error(deferred.req, parsed.id, curvebook_doc::ErrorCode::InternalError, "missing active window");
             };
-            if !entry.enabled && action != "hover" {
-                let msg = entry.disabled_reason.clone().unwrap_or_else(|| format!("widget `{}` is disabled", entry.widget_id));
-                return Self::send_live_gesture_error(req, parsed.id, curvebook_doc::ErrorCode::Conflict, msg);
+            match inspect_bridge::resolve_power_curve_hover_target(win.app_mut(), &self.inspect_meta, params) {
+                Ok(hover) => {
+                    power_hover_meta = Some((hover.fraction_x, hover.hovered_pair.map(|(n, _)| n), hover.hovered_pair.map(|(_, p)| p)));
+                    hover.pos
+                }
+                Err(err) => return Self::send_live_engine_err_val(deferred.req, parsed.id, err),
             }
-            Some(entry)
-        } else {
-            None
-        };
-
-        let Some(pos) = meta_entry.as_ref().map(|e| e.clipped_rect.center()).or_else(|| {
+        } else if let Some((x, y)) = target.explicit_xy {
             #[allow(clippy::cast_possible_truncation)]
-            explicit_xy.map(|(x, y)| egui::pos2(x as f32, y as f32))
-        }) else {
-            return Self::send_live_gesture_error(
-                req,
+            egui::pos2(x as f32, y as f32)
+        } else if let Some(wid) = target.widget_id {
+            let Ok(win) = self.runtime.window(win_id) else {
+                return Self::send_live_engine_error(deferred.req, parsed.id, curvebook_doc::ErrorCode::InternalError, "missing active window");
+            };
+            match inspect_bridge::resolve_widget_center_in_meta(win.app(), &self.inspect_meta, target.metrics, wid) {
+                Ok((center, enabled, reason)) => {
+                    if !enabled && !matches!(target.kind.as_str(), "hover" | "move") {
+                        let msg = reason.unwrap_or_else(|| format!("widget `{wid}` is disabled"));
+                        return Self::send_live_engine_error(deferred.req, parsed.id, curvebook_doc::ErrorCode::Conflict, msg);
+                    }
+                    center
+                }
+                Err(err) => return Self::send_live_engine_err_val(deferred.req, parsed.id, err),
+            }
+        } else {
+            return Self::send_live_engine_error(
+                deferred.req,
                 parsed.id,
                 curvebook_doc::ErrorCode::BadInput,
                 "ui.pointer_gesture requires either `widget_id` or finite `x`/`y` coordinates",
             );
         };
+
         if !pos.x.is_finite() || !pos.y.is_finite() {
-            return Self::send_live_gesture_error(req, parsed.id, curvebook_doc::ErrorCode::BadInput, "resolved pointer coordinates must be finite");
+            return Self::send_live_engine_error(
+                deferred.req,
+                parsed.id,
+                curvebook_doc::ErrorCode::BadInput,
+                "resolved pointer coordinates must be finite",
+            );
         }
 
-        let egui_mods = parse_egui_modifiers_param(params.get("modifiers"));
-        let batches = build_synthetic_egui_gesture_batches(&action, pos, params, egui_mods);
-        self.pending_synthetic_egui_batches.extend(batches);
-        // Append one empty settle pass so post-gesture layout & `PendingUiIntents` commit before reply/inspect.
-        self.pending_synthetic_egui_batches.push_back(Vec::new());
-        self.pending_live_gesture = Some(DeferredLivePointerGesture {
+        let end_pos = if target.kind == "drag" {
+            if let Some((tx, ty)) = target.to_xy {
+                #[allow(clippy::cast_possible_truncation)]
+                Some(egui::pos2(tx as f32, ty as f32))
+            } else if let Some(to_wid) = target.to_widget_id {
+                let Ok(win) = self.runtime.window(win_id) else {
+                    return Self::send_live_engine_error(deferred.req, parsed.id, curvebook_doc::ErrorCode::InternalError, "missing active window");
+                };
+                match inspect_bridge::resolve_widget_center_in_meta(win.app(), &self.inspect_meta, target.metrics, to_wid) {
+                    Ok((center, _, _)) => Some(center),
+                    Err(err) => return Self::send_live_engine_err_val(deferred.req, parsed.id, err),
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Ok(win) = self.runtime.window_mut(win_id) {
+            let tracked = end_pos.unwrap_or(pos);
+            win.app_mut().interaction.last_logical_pos = Some([f64::from(tracked.x), f64::from(tracked.y)]);
+        }
+
+        let batches = inspect_bridge::build_pointer_gesture_batches(&target, pos, end_pos);
+        let is_right_click_coords = target.kind == "right_click" && target.widget_id.is_none();
+        let widget_id = target.widget_id.map(str::to_owned);
+        let action = target.kind;
+        self.begin_pending_live_action(
+            deferred.req,
+            parsed.id,
+            &parsed.method,
+            PendingLiveUiActionKind::PointerGesture { action, widget_id, pos, power_hover_meta, is_right_click_coords },
+            batches,
+        )
+    }
+
+    fn try_open_live_formula_bar(
+        &mut self,
+        req: LiveControlRequest,
+        request_id: serde_json::Value,
+        wid: &str,
+        col: usize,
+        target: &inspect_bridge::ParsedPointerGestureParams<'_>,
+        post_hook: &mut Option<LiveControlPostHook>,
+    ) -> LiveActionDispatch {
+        let win_id = self.active_window_id();
+        let baseline = self.capture_mutation_baseline();
+        let badge_wid = format!("mv_formula.role_badge.{col}");
+        if let Some(entry) = inspect_bridge::resolve_widget_rect_in_meta(&self.inspect_meta, &badge_wid)
+            && !entry.enabled
+        {
+            let msg = entry.disabled_reason.clone().unwrap_or_else(|| format!("widget `{wid}` is disabled"));
+            return Self::send_live_engine_error(req, request_id, curvebook_doc::ErrorCode::Conflict, msg);
+        }
+        let Ok(win) = self.runtime.window_mut(win_id) else {
+            return Self::send_live_engine_error(req, request_id, curvebook_doc::ErrorCode::InternalError, "missing active window");
+        };
+        if !win.app().grid.formula_bar.active
+            && let Err(err) = curvebook_ui_egui::dispatch_ui_command(win.app_mut(), "ui.table.openFormulaBar", &serde_json::json!({ "col": col }))
+        {
+            return Self::send_live_engine_error(req, request_id, curvebook_doc::ErrorCode::Conflict, err);
+        }
+        let active = win.app().grid.formula_bar.active;
+        self.record_direct_live_mutation("ui.pointer_gesture", baseline);
+        Self::send_live_control_reply(
             req,
-            response_payload: serde_json::json!({
-                "action": action,
-                "widget_id": widget_id,
-                "x": f64::from(pos.x),
-                "y": f64::from(pos.y),
+            request_id,
+            Ok(serde_json::json!({
+                "handled": true,
+                "kind": target.kind,
+                "action": target.kind,
+                "widget_id": wid,
+                "formula_bar_active": active,
                 "egui_dispatched": true,
-            }),
+            })),
+        );
+        self.invoke_live_post_hook(post_hook, "ui.pointer_gesture", baseline, true);
+        LiveActionDispatch::YieldFrame
+    }
+
+    fn try_enqueue_live_type_text(&mut self, ctx: &egui::Context, mut deferred: DeferredLiveRequest, parsed: ControlRequest) -> LiveActionDispatch {
+        let type_params = match inspect_bridge::parse_type_text_params(&parsed.params) {
+            Ok(p) => p,
+            Err(err) => return Self::send_live_engine_err_val(deferred.req, parsed.id, err),
+        };
+        let text = type_params.text.to_owned();
+        let clear_param = type_params.clear_param;
+        let submit = type_params.submit;
+        let widget_id = type_params.widget_id.map(str::to_owned);
+        let metrics = type_params.metrics;
+
+        let win_id = self.active_window_id();
+        let egui_wants_kb = ctx.egui_wants_keyboard_input();
+        let focused_egui_id = ctx.memory(|m| m.focused());
+        let live_focus_wid: Option<String> = focused_egui_id
+            .and_then(|eid| self.inspect_meta.find_by_egui_id(eid))
+            .map(|e| e.widget_id.clone())
+            .or_else(|| self.runtime.window(win_id).ok().and_then(|w| w.app().focus_widget_id.clone()));
+
+        let is_human_path_only = self.runtime.window(win_id).is_ok_and(|w| w.app().is_human_path_only());
+        if is_human_path_only
+            && let Some(ref wid) = widget_id
+            && live_focus_wid.as_deref() != Some(wid.as_str())
+        {
+            return Self::send_live_engine_error(
+                deferred.req,
+                parsed.id,
+                curvebook_doc::ErrorCode::GuiOnlyViolation,
+                format!("focus-jumping `ui.type_text(widget_id = {wid})` is blocked in human-path-only mode"),
+            );
+        }
+
+        if let Some(ref wid) = widget_id
+            && !is_human_path_only
+            && inspect_bridge::resolve_widget_rect_in_meta(&self.inspect_meta, wid).is_none()
+            && !deferred.scroll_attempted
+            && let Ok(win) = self.runtime.window_mut(win_id)
+            && inspect_bridge::ensure_widget_scrolled_into_view_state(win.app_mut(), metrics, wid)
+        {
+            deferred.scroll_attempted = true;
+            return LiveActionDispatch::NeedsScrollRetry(deferred);
+        }
+
+        let modal_backdrop_active = self.runtime.window(win_id).ok().is_some_and(|w| {
+            inspect_bridge::HybridCoexistenceArbiter::evaluate_with_views(w.app(), &w.app().egui_views, self.close_dialog_open).modal_backdrop_active
         });
-        LiveGestureDispatch::EguiQueued
+
+        let mut click_prefix_batches: Vec<Vec<egui::Event>> = Vec::new();
+        if let Some(ref wid) = widget_id {
+            if is_human_path_only {
+                if let Ok(win) = self.runtime.window(win_id)
+                    && let Some(pos) = inspect_bridge::find_non_grid_textbox_focus_center(win.app(), &self.inspect_meta, metrics, egui_wants_kb)
+                {
+                    click_prefix_batches.extend(inspect_bridge::click_pos_batches(pos, egui::PointerButton::Primary, egui::Modifiers::NONE));
+                    click_prefix_batches.push(Vec::new());
+                }
+            } else {
+                let Ok(win) = self.runtime.window(win_id) else {
+                    return Self::send_live_engine_error(deferred.req, parsed.id, curvebook_doc::ErrorCode::InternalError, "missing active window");
+                };
+                let already_selected_grid_cell =
+                    inspect_bridge::is_grid_cell_widget_selected_without_inline_edit(win.app(), wid) && !egui_wants_kb && !modal_backdrop_active;
+                if !already_selected_grid_cell {
+                    match inspect_bridge::resolve_widget_center_in_meta(win.app(), &self.inspect_meta, metrics, wid) {
+                        Ok((pos, enabled, reason)) => {
+                            if !enabled {
+                                let msg = reason.unwrap_or_else(|| format!("widget `{wid}` is disabled"));
+                                return Self::send_live_engine_error(deferred.req, parsed.id, curvebook_doc::ErrorCode::Conflict, msg);
+                            }
+                            click_prefix_batches.extend(inspect_bridge::click_pos_batches(pos, egui::PointerButton::Primary, egui::Modifiers::NONE));
+                            click_prefix_batches.push(Vec::new());
+                        }
+                        Err(err) => return Self::send_live_engine_err_val(deferred.req, parsed.id, err),
+                    }
+                }
+            }
+        } else if let Ok(win) = self.runtime.window(win_id)
+            && let Some(pos) = inspect_bridge::find_non_grid_textbox_focus_center(win.app(), &self.inspect_meta, metrics, egui_wants_kb)
+        {
+            click_prefix_batches.extend(inspect_bridge::click_pos_batches(pos, egui::PointerButton::Primary, egui::Modifiers::NONE));
+            click_prefix_batches.push(Vec::new());
+        }
+
+        let Ok(win) = self.runtime.window_mut(win_id) else {
+            return Self::send_live_engine_error(deferred.req, parsed.id, curvebook_doc::ErrorCode::InternalError, "missing active window");
+        };
+        let (is_x_cell_target, is_y_cell_target) = match inspect_bridge::prepare_grid_type_text_target(
+            win.app_mut(),
+            widget_id.as_deref(),
+            live_focus_wid.as_deref(),
+            modal_backdrop_active,
+            egui_wants_kb,
+        ) {
+            Ok(pair) => pair,
+            Err(err) => return Self::send_live_engine_err_val(deferred.req, parsed.id, err),
+        };
+        let clear_first = clear_param.unwrap_or_else(|| widget_id.is_some() && !(is_x_cell_target || is_y_cell_target));
+        let inline_open = win.app().egui_views.column_grid.inline_edit.is_some();
+        let mut batches = click_prefix_batches;
+        batches.extend(inspect_bridge::build_type_text_batches(&text, clear_first, submit, is_x_cell_target, is_y_cell_target, inline_open));
+        self.begin_pending_live_action(
+            deferred.req,
+            parsed.id,
+            &parsed.method,
+            PendingLiveUiActionKind::TypeText { text, widget_id, submit },
+            batches,
+        )
+    }
+
+    fn try_enqueue_live_press_key(&mut self, ctx: &egui::Context, req: LiveControlRequest, parsed: ControlRequest) -> LiveActionDispatch {
+        let key_params = match inspect_bridge::parse_press_key_params(&parsed.params) {
+            Ok(p) => p,
+            Err(err) => return Self::send_live_engine_err_val(req, parsed.id, err),
+        };
+        let key_raw = key_params.key_raw.to_owned();
+        let mut batches = Vec::new();
+        let win_id = self.active_window_id();
+        if let Ok(win) = self.runtime.window(win_id)
+            && let Some(pos) =
+                inspect_bridge::find_non_grid_textbox_focus_center(win.app(), &self.inspect_meta, key_params.metrics, ctx.egui_wants_keyboard_input())
+        {
+            batches.extend(inspect_bridge::click_pos_batches(pos, egui::PointerButton::Primary, egui::Modifiers::NONE));
+            batches.push(Vec::new());
+        }
+        batches.extend(inspect_bridge::build_press_key_batches(key_params.key, key_params.modifiers, key_params.repeat));
+        self.begin_pending_live_action(req, parsed.id, &parsed.method, PendingLiveUiActionKind::PressKey { key_raw }, batches)
+    }
+
+    fn try_dispatch_live_switch_tab(
+        &mut self,
+        deferred: DeferredLiveRequest,
+        parsed: ControlRequest,
+        post_hook: &mut Option<LiveControlPostHook>,
+    ) -> LiveActionDispatch {
+        let win_id = self.active_window_id();
+        if self.runtime.window(win_id).is_ok_and(|w| w.app().is_human_path_only()) {
+            return Self::send_live_engine_error(
+                deferred.req,
+                parsed.id,
+                curvebook_doc::ErrorCode::GuiOnlyViolation,
+                "direct `ui.switch_tab` is blocked in human-path-only mode",
+            );
+        }
+        let tab_params = match inspect_bridge::parse_switch_tab_params(&parsed.params) {
+            Ok(p) => p,
+            Err(err) => return Self::send_live_engine_err_val(deferred.req, parsed.id, err),
+        };
+        let baseline = self.capture_mutation_baseline();
+
+        if matches!(tab_params.target, inspect_bridge::ParsedSwitchTabTarget::Sheet(_))
+            && let Ok(win) = self.runtime.window_mut(win_id)
+        {
+            inspect_bridge::commit_active_grid_inline_edit(win.app_mut());
+        }
+
+        if let inspect_bridge::ParsedSwitchTabTarget::Tab(tab_id) = tab_params.target {
+            let pw_res = self.runtime.window_mut(win_id).ok().map(|win| inspect_bridge::try_switch_power_wizard_stage(win.app_mut(), tab_id));
+            match pw_res {
+                Some(Ok(Some(res_json))) => {
+                    self.record_direct_live_mutation("ui.switch_tab", baseline);
+                    Self::send_live_control_reply(deferred.req, parsed.id, Ok(res_json));
+                    self.invoke_live_post_hook(post_hook, "ui.switch_tab", baseline, true);
+                    return LiveActionDispatch::YieldFrame;
+                }
+                Some(Err(err)) => {
+                    self.invoke_live_post_hook(post_hook, "ui.switch_tab", baseline, false);
+                    return Self::send_live_engine_err_val(deferred.req, parsed.id, err);
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(entry) = inspect_bridge::find_switch_tab_widget_in_meta(&self.inspect_meta, &tab_params.target) {
+            if !entry.enabled {
+                let tab_label = match tab_params.target {
+                    inspect_bridge::ParsedSwitchTabTarget::Sheet(s) => s,
+                    inspect_bridge::ParsedSwitchTabTarget::Tab(t) => t,
+                };
+                let msg = entry.disabled_reason.clone().unwrap_or_else(|| format!("tab `{tab_label}` is disabled"));
+                return Self::send_live_engine_error(deferred.req, parsed.id, curvebook_doc::ErrorCode::Conflict, msg);
+            }
+            let pos = entry.clipped_rect.center();
+            let wid = entry.widget_id.clone();
+            let response_payload = match tab_params.target {
+                inspect_bridge::ParsedSwitchTabTarget::Sheet(sheet_id) => {
+                    serde_json::json!({ "switched": true, "sheet_id": sheet_id, "widget_id": wid })
+                }
+                inspect_bridge::ParsedSwitchTabTarget::Tab(tab_id) => {
+                    serde_json::json!({ "switched": true, "tab_id": tab_id, "widget_id": wid })
+                }
+            };
+            let batches = inspect_bridge::click_pos_batches(pos, egui::PointerButton::Primary, egui::Modifiers::NONE);
+            return self.begin_pending_live_action(
+                deferred.req,
+                parsed.id,
+                &parsed.method,
+                PendingLiveUiActionKind::SwitchTab { response_payload },
+                batches,
+            );
+        }
+
+        let Ok(win) = self.runtime.window_mut(win_id) else {
+            return Self::send_live_engine_error(deferred.req, parsed.id, curvebook_doc::ErrorCode::InternalError, "missing active window");
+        };
+        match inspect_bridge::execute_switch_tab_fallback(win.app_mut(), &tab_params.target) {
+            Ok(out) => {
+                self.record_direct_live_mutation("ui.switch_tab", baseline);
+                Self::send_live_control_reply(deferred.req, parsed.id, Ok(out));
+                self.invoke_live_post_hook(post_hook, "ui.switch_tab", baseline, true);
+                LiveActionDispatch::YieldFrame
+            }
+            Err(err) => {
+                self.invoke_live_post_hook(post_hook, "ui.switch_tab", baseline, false);
+                Self::send_live_engine_err_val(deferred.req, parsed.id, err)
+            }
+        }
+    }
+
+    fn try_dispatch_live_answer_dialog(
+        &mut self,
+        req: LiveControlRequest,
+        parsed: ControlRequest,
+        post_hook: &mut Option<LiveControlPostHook>,
+    ) -> LiveActionDispatch {
+        let dlg_params = match inspect_bridge::parse_answer_dialog_params(&parsed.params) {
+            Ok(p) => p,
+            Err(err) => return Self::send_live_engine_err_val(req, parsed.id, err),
+        };
+        let baseline = self.capture_mutation_baseline();
+        let win_id = self.active_window_id();
+        let close_open = self.close_dialog_open;
+
+        let patch_res = {
+            let Ok(win) = self.runtime.window_mut(win_id) else {
+                return Self::send_live_engine_error(req, parsed.id, curvebook_doc::ErrorCode::InternalError, "missing active window");
+            };
+            let views_snapshot = win.app().egui_views.clone();
+            inspect_bridge::prepare_answer_dialog_patch(win.app_mut(), &views_snapshot, close_open, &dlg_params)
+        };
+        match patch_res {
+            Ok(Some(patch_only_res)) => {
+                self.record_direct_live_mutation("ui.answer_dialog", baseline);
+                Self::send_live_control_reply(req, parsed.id, Ok(patch_only_res));
+                self.invoke_live_post_hook(post_hook, "ui.answer_dialog", baseline, true);
+                return LiveActionDispatch::YieldFrame;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                self.invoke_live_post_hook(post_hook, "ui.answer_dialog", baseline, false);
+                return Self::send_live_engine_err_val(req, parsed.id, err);
+            }
+        }
+
+        let action = dlg_params.action.unwrap_or_else(|| String::from("ok"));
+        let active_dialog_is_some = self.runtime.window(win_id).is_ok_and(|w| w.app().canvas_dialogs.active_dialog != ActiveDialog::None);
+        if active_dialog_is_some {
+            let Ok(win) = self.runtime.window_mut(win_id) else {
+                return Self::send_live_engine_error(req, parsed.id, curvebook_doc::ErrorCode::InternalError, "missing active window");
+            };
+            return match inspect_bridge::execute_active_dialog_answer(win.app_mut(), &action) {
+                Ok(res) => {
+                    self.record_direct_live_mutation("ui.answer_dialog", baseline);
+                    Self::send_live_control_reply(req, parsed.id, Ok(res));
+                    self.invoke_live_post_hook(post_hook, "ui.answer_dialog", baseline, true);
+                    LiveActionDispatch::YieldFrame
+                }
+                Err(err) => {
+                    self.invoke_live_post_hook(post_hook, "ui.answer_dialog", baseline, false);
+                    Self::send_live_engine_err_val(req, parsed.id, err)
+                }
+            };
+        }
+
+        let candidate_wids = inspect_bridge::answer_dialog_candidate_wids(&action);
+        if let Some(entry) = candidate_wids.iter().find_map(|w| self.inspect_meta.find_by_widget_id(w)) {
+            if !entry.enabled {
+                let msg = entry.disabled_reason.clone().unwrap_or_else(|| format!("dialog button `{action}` is disabled"));
+                return Self::send_live_engine_error(req, parsed.id, curvebook_doc::ErrorCode::Conflict, msg);
+            }
+            let pos = entry.clipped_rect.center();
+            let button_widget_id = entry.widget_id.clone();
+            let batches = inspect_bridge::click_pos_batches(pos, egui::PointerButton::Primary, egui::Modifiers::NONE);
+            return self.begin_pending_live_action(
+                req,
+                parsed.id,
+                &parsed.method,
+                PendingLiveUiActionKind::AnswerDialog { action, was_power_wizard: false, button_widget_id },
+                batches,
+            );
+        }
+
+        Self::send_live_engine_error(
+            req,
+            parsed.id,
+            curvebook_doc::ErrorCode::NotFound,
+            format!("dialog button `{action}` not found on active modal"),
+        )
     }
 
     fn prepare_settled_live_request_bytes(&self, raw_bytes: &[u8], stamp: GeometryStamp) -> Vec<u8> {
-        let Ok(text) = std::str::from_utf8(raw_bytes) else {
-            return raw_bytes.to_vec();
-        };
-        let Ok(mut req) = serde_json::from_str::<ControlRequest>(text.trim()) else {
+        let Some(mut req) = parse_control_request_from_bytes(raw_bytes) else {
             return raw_bytes.to_vec();
         };
         let scale = f64::from(stamp.scale_factor());
         let mut updated = false;
-        match req.method.as_str() {
-            "ui.screenshot" => {
-                let obj = ensure_params_object(&mut req.params);
-                if let Some(map) = obj {
-                    if !map.contains_key("width_px") {
-                        map.insert(String::from("width_px"), serde_json::json!(stamp.physical_width_px.max(64)));
-                        updated = true;
-                    }
-                    if !map.contains_key("height_px") {
-                        map.insert(String::from("height_px"), serde_json::json!(stamp.physical_height_px.max(64)));
-                        updated = true;
-                    }
-                    if !map.contains_key("dpi") {
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let dpi = (scale * 96.0).round().clamp(72.0, 600.0) as u16;
-                        map.insert(String::from("dpi"), serde_json::json!(dpi));
-                        updated = true;
-                    }
-                }
+        if req.method == "ui.screenshot"
+            && let Some(map) = ensure_params_object(&mut req.params)
+        {
+            if !map.contains_key("width_px") {
+                map.insert(String::from("width_px"), serde_json::json!(stamp.physical_width_px.max(64)));
+                updated = true;
             }
-            "ui.inspect" => {
-                let obj = ensure_params_object(&mut req.params);
-                if let Some(map) = obj
-                    && !map.contains_key("metrics")
-                {
-                    let logical_w = (f64::from(stamp.physical_width_px) / scale).max(160.0);
-                    let logical_h = (f64::from(stamp.physical_height_px) / scale).max(120.0);
-                    map.insert(
-                        String::from("metrics"),
-                        serde_json::json!({
-                            "logical_width": logical_w,
-                            "logical_height": logical_h,
-                            "scale_factor": scale,
-                        }),
-                    );
-                    updated = true;
-                }
+            if !map.contains_key("height_px") {
+                map.insert(String::from("height_px"), serde_json::json!(stamp.physical_height_px.max(64)));
+                updated = true;
             }
-            _ => {}
+            if !map.contains_key("dpi") {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let dpi = (scale * 96.0).round().clamp(72.0, 600.0) as u16;
+                map.insert(String::from("dpi"), serde_json::json!(dpi));
+                updated = true;
+            }
         }
         if !updated {
             return raw_bytes.to_vec();
@@ -627,8 +1310,11 @@ impl CurveBookNativeApp {
     }
 
     fn fail_deferred_live_requests(&mut self, reason: &str) {
-        for req in self.deferred_live_requests.drain(..) {
-            let _ = req.reply_tx.send(Err(String::from(reason)));
+        if let Some(pending) = self.pending_live_action.take() {
+            let _ = pending.req.reply_tx.send(Err(String::from(reason)));
+        }
+        for deferred in self.deferred_live_requests.drain(..) {
+            let _ = deferred.req.reply_tx.send(Err(String::from(reason)));
         }
     }
 
@@ -675,7 +1361,7 @@ impl CurveBookNativeApp {
                 {
                     host_commands.push((command_id.clone(), params.clone()));
                 }
-                UiIntent::CustomViewAction { domain, payload } if domain == "welcome" && payload == "action:open_file" => {
+                UiIntent::OpenProjectFile => {
                     host_commands.push((String::from("project.open"), serde_json::json!({})));
                 }
                 UiIntent::WorkspaceCopy { .. } if !active_is_result => {
@@ -714,6 +1400,14 @@ impl CurveBookNativeApp {
                 _ => None,
             });
             let batch = remaining_intents.commit_all_if_settled(win.app_mut(), false);
+            if self.pending_live_action.is_some() {
+                self.pending_live_outcomes.extend(batch.outcomes().iter().cloned());
+                if self.pending_live_error.is_none()
+                    && let Some(err) = batch.first_error()
+                {
+                    self.pending_live_error = Some(err.clone());
+                }
+            }
             let mut batch_err = batch.first_error().map(ToString::to_string);
             let command_hint = batch.first_succeeded_command_id().map(str::to_owned).or(fallback_command_hint);
             if let Err(err) = win.record_ui_mutation_checkpoint(command_hint.as_deref(), prev_undo, prev_redo, prev_dirty, prev_mutation_seq)
@@ -843,6 +1537,8 @@ impl CurveBookNativeApp {
             ctx.request_repaint();
         }
 
+        let frame_had_scroll_input = ctx.input(|i| i.smooth_scroll_delta.length_sq() > 0.01);
+        let prev_grid_scroll = self.runtime.window(input_window_id).ok().map(|w| w.app().egui_views.column_grid.scroll_offset_pt);
         let mut next_intents = PendingUiIntents::default();
         let mut next_meta = FrameInspectMeta::default();
         let report = if let Ok(win) = self.runtime.window_mut(input_window_id) {
@@ -860,6 +1556,8 @@ impl CurveBookNativeApp {
         } else {
             inspect_bridge::ShellAboutFrameReport::default()
         };
+        let post_grid_scroll = self.runtime.window(input_window_id).ok().map(|w| w.app().egui_views.column_grid.scroll_offset_pt);
+        let scroll_active_this_frame = frame_had_scroll_input || (prev_grid_scroll.is_some() && post_grid_scroll != prev_grid_scroll);
         self.inspect_meta = next_meta;
         self.last_regions = report.regions;
         self.pending_intents.merge_pass(next_intents);
@@ -894,10 +1592,19 @@ impl CurveBookNativeApp {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let phys_h = (content_rect.height() * ppp).round().max(1.0) as u32;
         self.last_geometry_stamp = Some(GeometryStamp::from_context(self.frame_seq, &ctx, [phys_w, phys_h], !will_discard));
-        if !will_discard {
-            self.flush_deferred_live_requests(&ctx);
+        let now_wants_kb = ctx.egui_wants_keyboard_input();
+        if self.pending_live_action.is_some() {
+            self.pending_live_ever_wanted_kb |= now_wants_kb;
         }
-        if !self.pending_synthetic_egui_batches.is_empty() || self.pending_live_gesture.is_some() {
+        if !will_discard {
+            let had_pending = self.pending_live_action.is_some();
+            self.flush_deferred_live_requests(&ctx, scroll_active_this_frame);
+            if !had_pending && let Ok(win) = self.runtime.window_mut(post_window_id) {
+                inspect_bridge::clear_stale_non_grid_textbox_focus(win.app_mut(), &self.inspect_meta, self.last_egui_wants_kb, now_wants_kb);
+            }
+            self.last_egui_wants_kb = now_wants_kb;
+        }
+        if !self.pending_synthetic_egui_batches.is_empty() || self.pending_live_action.is_some() {
             ctx.request_repaint();
         }
     }
@@ -1505,165 +2212,32 @@ impl eframe::App for CurveBookNativeApp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LiveGestureDispatch {
+enum LiveActionDispatch {
     ImmediateReply,
     EguiQueued,
+    YieldFrame,
+    NeedsScrollRetry(DeferredLiveRequest),
 }
 
-fn is_pointer_gesture_request(req: &LiveControlRequest) -> bool {
-    if !req.conn_authenticated || classify_control_frame(&req.raw_bytes) != ControlFrameKind::Command {
-        return false;
+fn parse_control_request_from_bytes(raw_bytes: &[u8]) -> Option<ControlRequest> {
+    let text = std::str::from_utf8(raw_bytes).ok()?;
+    parse_control_request(text.trim()).ok()
+}
+
+fn is_request_authorized(req: &LiveControlRequest) -> bool {
+    if req.conn_authenticated {
+        return true;
     }
     let Ok(text) = std::str::from_utf8(&req.raw_bytes) else {
         return false;
     };
-    let Ok(parsed) = serde_json::from_str::<ControlRequest>(text.trim()) else {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
         return false;
     };
-    parsed.method == "ui.pointer_gesture"
-}
-
-struct ParsedLiveGestureTarget<'a> {
-    action: String,
-    widget_id: Option<&'a str>,
-    explicit_xy: Option<(f64, f64)>,
-}
-
-fn parse_live_gesture_target(params: &serde_json::Value) -> Result<ParsedLiveGestureTarget<'_>, String> {
-    let raw_action = params.get("action").or_else(|| params.get("kind")).or_else(|| params.get("gesture"));
-    let action = match raw_action {
-        None | Some(serde_json::Value::Null) => String::from("click"),
-        Some(v) => v.as_str().ok_or_else(|| String::from("pointer gesture `action` must be a string"))?.trim().to_ascii_lowercase(),
+    let Some(token) = val.get("token").and_then(serde_json::Value::as_str) else {
+        return false;
     };
-    if !matches!(action.as_str(), "click" | "double_click" | "right_click" | "hover" | "scroll" | "wheel" | "drag") {
-        return Err(format!("unsupported pointer gesture action `{action}`"));
-    }
-
-    let raw_widget = params.get("widget_id").or_else(|| params.get("target_id"));
-    let widget_id = match raw_widget {
-        None | Some(serde_json::Value::Null) => None,
-        Some(v) => {
-            let trimmed =
-                v.as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| String::from("`widget_id` must be a non-empty string"))?;
-            Some(trimmed)
-        }
-    };
-
-    let raw_x = params.get("x").filter(|v| !v.is_null());
-    let raw_y = params.get("y").filter(|v| !v.is_null());
-    let explicit_xy = match (raw_x, raw_y) {
-        (None, None) => None,
-        (Some(xv), Some(yv)) => {
-            let x = xv.as_f64().filter(|n| n.is_finite()).ok_or_else(|| String::from("`x` must be a finite number"))?;
-            let y = yv.as_f64().filter(|n| n.is_finite()).ok_or_else(|| String::from("`y` must be a finite number"))?;
-            Some((x, y))
-        }
-        _ => return Err(String::from("both `x` and `y` coordinates are required when targeting by coordinates")),
-    };
-
-    if widget_id.is_some() && explicit_xy.is_some() {
-        return Err(String::from("ambiguous pointer gesture target: specify either `widget_id` or `x`/`y` coordinates, not both"));
-    }
-    if widget_id.is_none() && explicit_xy.is_none() {
-        return Err(String::from("ui.pointer_gesture requires either `widget_id` or finite `x`/`y` coordinates"));
-    }
-
-    if matches!(action.as_str(), "scroll" | "wheel") {
-        for key in ["delta_x", "delta_y"] {
-            if let Some(val) = params.get(key).filter(|v| !v.is_null())
-                && val.as_f64().is_none_or(|n| !n.is_finite())
-            {
-                return Err(format!("`{key}` must be a finite number"));
-            }
-        }
-    }
-    if action == "drag" {
-        let raw_ex = params.get("end_x").filter(|v| !v.is_null());
-        let raw_ey = params.get("end_y").filter(|v| !v.is_null());
-        match (raw_ex, raw_ey) {
-            (None, None) => {}
-            (Some(ex), Some(ey)) => {
-                if ex.as_f64().is_none_or(|n| !n.is_finite()) || ey.as_f64().is_none_or(|n| !n.is_finite()) {
-                    return Err(String::from("`end_x` and `end_y` must be finite numbers"));
-                }
-            }
-            _ => return Err(String::from("both `end_x` and `end_y` must be provided together for `drag`")),
-        }
-    }
-
-    Ok(ParsedLiveGestureTarget { action, widget_id, explicit_xy })
-}
-
-fn parse_egui_modifiers_param(val: Option<&serde_json::Value>) -> egui::Modifiers {
-    let Some(obj) = val.and_then(serde_json::Value::as_object) else {
-        return egui::Modifiers::NONE;
-    };
-    let flag = |k: &str| obj.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
-    let ctrl = flag("ctrl");
-    let meta = flag("meta");
-    egui::Modifiers { alt: flag("alt"), ctrl, shift: flag("shift"), mac_cmd: meta, command: ctrl || meta || flag("command") }
-}
-
-fn build_synthetic_egui_gesture_batches(
-    action: &str,
-    pos: egui::Pos2,
-    params: &serde_json::Value,
-    modifiers: egui::Modifiers,
-) -> Vec<Vec<egui::Event>> {
-    match action {
-        "hover" => vec![vec![egui::Event::PointerMoved(pos)]],
-        "scroll" | "wheel" => {
-            #[allow(clippy::cast_possible_truncation)]
-            let dx = params.get("delta_x").and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
-            #[allow(clippy::cast_possible_truncation)]
-            let dy = params.get("delta_y").and_then(serde_json::Value::as_f64).unwrap_or(if params.get("delta_x").is_none() { -120.0 } else { 0.0 })
-                as f32;
-            vec![vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Point,
-                    delta: egui::vec2(dx, dy),
-                    phase: egui::TouchPhase::Move,
-                    source: egui::MouseWheelSource::Unknown,
-                    modifiers,
-                },
-            ]]
-        }
-        "right_click" => vec![
-            vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed: true, modifiers },
-            ],
-            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed: false, modifiers }],
-        ],
-        "double_click" => vec![
-            vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers }],
-            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers }],
-            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers }],
-            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers }],
-        ],
-        "drag" => {
-            #[allow(clippy::cast_possible_truncation)]
-            let end_x = params.get("end_x").and_then(serde_json::Value::as_f64).map_or(pos.x, |v| v as f32);
-            #[allow(clippy::cast_possible_truncation)]
-            let end_y = params.get("end_y").and_then(serde_json::Value::as_f64).map_or(pos.y, |v| v as f32);
-            let end_pos = egui::pos2(end_x, end_y);
-            vec![
-                vec![
-                    egui::Event::PointerMoved(pos),
-                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers },
-                ],
-                vec![egui::Event::PointerMoved(end_pos)],
-                vec![egui::Event::PointerButton { pos: end_pos, button: egui::PointerButton::Primary, pressed: false, modifiers }],
-            ]
-        }
-        "click" => vec![
-            vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers }],
-            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers }],
-        ],
-        _ => Vec::new(),
-    }
+    req.auth.verify(token)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1699,16 +2273,16 @@ impl CurveBookNativeApp {
 }
 
 fn should_defer_to_settled_frame(req: &LiveControlRequest) -> bool {
-    if !req.conn_authenticated || classify_control_frame(&req.raw_bytes) != ControlFrameKind::Command {
+    if !is_request_authorized(req) || classify_control_frame(&req.raw_bytes) != ControlFrameKind::Command {
         return false;
     }
-    let Ok(text) = std::str::from_utf8(&req.raw_bytes) else {
+    let Some(parsed) = parse_control_request_from_bytes(&req.raw_bytes) else {
         return false;
     };
-    let Ok(parsed) = serde_json::from_str::<ControlRequest>(text.trim()) else {
-        return false;
-    };
-    matches!(parsed.method.as_str(), "ui.inspect" | "ui.screenshot" | "ui.pointer_gesture")
+    matches!(
+        parsed.method.as_str(),
+        "ui.inspect" | "ui.screenshot" | "ui.pointer_gesture" | "ui.type_text" | "ui.press_key" | "ui.switch_tab" | "ui.answer_dialog"
+    )
 }
 
 fn ensure_params_object(params: &mut serde_json::Value) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
@@ -1887,7 +2461,6 @@ pub fn run_native_desktop_with_control(
 #[cfg(test)]
 mod tests {
     use curvebook_doc::SheetId;
-    use curvebook_ui_egui::egui_shell::UiBackend;
     use curvebook_ui_egui::interaction::ViewportMetrics;
     use curvebook_ui_egui::{BETA_ACTIVE_LOCALES, locale_picker_label, normalize_beta_gui_locale};
     use serde_json::json;
@@ -1900,7 +2473,6 @@ mod tests {
             in_window_menus: true,
             new_instance: true,
             gui_only: false,
-            ui_backend: UiBackend::Egui,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -2359,7 +2931,6 @@ mod tests {
             in_window_menus: true,
             new_instance: true,
             gui_only: true,
-            ui_backend: UiBackend::Egui,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -2611,6 +3182,482 @@ mod tests {
         assert!(emf_bytes.len() > 80, "expected non-empty EMF output written to disk, got {} bytes", emf_bytes.len());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn m2_gui_window_remediation_guards_drag_alias_hover_and_pinch() -> Result<(), String> {
+        let mut runtime = DesktopHostRuntime::new(DesktopHostConfig {
+            in_window_menus: true,
+            new_instance: true,
+            gui_only: true,
+            locale_override: None,
+            theme_override: None,
+            recovery_root: None,
+            initial_viewport: ViewportMetrics::new(1024.0, 640.0, 1.0),
+            ..DesktopHostConfig::default()
+        });
+        let opened = runtime.dispatch(DesktopHostEvent::WindowOpened { initial_file: None, viewport: ViewportMetrics::new(1024.0, 640.0, 1.0) })?;
+        let id = opened.window_id.ok_or_else(|| String::from("missing window id"))?;
+        {
+            let win = runtime.window_mut(id)?;
+            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-m2", "kind": "xy", "cols": 1, "rows": 3, "auto_graph": false }))?;
+            win.execute_and_journal("table.setXCells", json!({ "sheet_id": "ds-m2", "values": [1.0, 2.0, 3.0] }))?;
+            win.execute_and_journal("table.setCells", json!({ "sheet_id": "ds-m2", "rows": [[4.0], [5.0], [6.0]] }))?;
+            win.execute_and_journal("graph.create", json!({ "sheet_id": "gs-m2", "data_sheet_id": "ds-m2" }))?;
+            win.execute_and_journal("layout.create", json!({ "sheet_id": "ly-m2", "title": "Layout M2" }))?;
+            let item = curvebook_doc::LayoutItem::LiveGraph {
+                id: String::from("item-1"),
+                graph_sheet_id: curvebook_doc::SheetId::from("gs-m2"),
+                bounds_pt: curvebook_doc::RectPt::new(40.0, 40.0, 200.0, 150.0),
+                scale_percent: 100.0,
+                badge_override: None,
+            };
+            win.execute_and_journal(
+                "layout.setSpec",
+                json!({
+                    "sheet_id": "ly-m2",
+                    "spec": { "items": [item] }
+                }),
+            )?;
+            win.execute_and_journal("sheet.select", json!({ "sheet_id": "ly-m2" }))?;
+        }
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let ctrl = LiveControlChannel {
+            request_rx: req_rx,
+            egui_ctx_cell: Arc::new(OnceLock::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            post_hook: None,
+        };
+        let mut app = CurveBookNativeApp::new(runtime, id, None).with_live_control(ctrl);
+        let ctx = egui::Context::default();
+        ctx.set_fonts(build_egui_font_definitions(None));
+
+        let step_once = |native: &mut CurveBookNativeApp| {
+            let mut raw_input =
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 640.0))), ..Default::default() };
+            native.drain_synthetic_events_into(&mut raw_input);
+            let mut out = ctx.run_ui(raw_input, |ui| native.step_ui(ui));
+            out.textures_delta.clear();
+        };
+
+        for _ in 0..3 {
+            step_once(&mut app);
+        }
+
+        let auth = ControlAuth::from_token("test-token-m2-w2").map_err(|e| e.to_string())?;
+        let send_ctrl = |native: &mut CurveBookNativeApp, req_json: Vec<u8>| -> Result<serde_json::Value, String> {
+            let (tx, rx) = mpsc::channel();
+            req_tx
+                .send(LiveControlRequest { raw_bytes: req_json, auth: auth.clone(), conn_authenticated: true, reply_tx: tx })
+                .map_err(|e| e.to_string())?;
+            for _ in 0..10 {
+                step_once(native);
+                if let Ok(res) = rx.try_recv() {
+                    let out = res?;
+                    let txt = String::from_utf8_lossy(&out.response_bytes);
+                    return serde_json::from_str(&txt).map_err(|e| format!("invalid control reply `{txt}`: {e}"));
+                }
+            }
+            Err(String::from("timed out waiting for LiveControlRequest reply"))
+        };
+
+        // 1. human_path_only blocks ui.pointer_gesture(widget_id) and ui.pointer_gesture(to_widget_id).
+        app.runtime_mut().window_mut(id)?.app_mut().set_human_path_only(true);
+        let blocked =
+            send_ctrl(&mut app, br#"{"id":"h1","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"toolbar.analyze"}}"#.to_vec())?;
+        assert_eq!(blocked.get("ok").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(blocked.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("gui_only_violation"));
+        let blocked_to = send_ctrl(
+            &mut app,
+            br#"{"id":"h2","method":"ui.pointer_gesture","params":{"action":"drag","x":100.0,"y":100.0,"to_widget_id":"toolbar.analyze"}}"#.to_vec(),
+        )?;
+        assert_eq!(blocked_to.get("ok").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(blocked_to.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("gui_only_violation"));
+        app.runtime_mut().window_mut(id)?.app_mut().set_human_path_only(false);
+
+        // 2. Drag rejects missing destination (BadInput) and unknown to_widget_id (NotFound).
+        let miss_drag = send_ctrl(
+            &mut app,
+            br#"{"id":"d1","method":"ui.pointer_gesture","params":{"action":"drag","widget_id":"canvas.layout_panel.0"}}"#.to_vec(),
+        )?;
+        assert_eq!(miss_drag.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("bad_input"), "got {miss_drag}");
+        let unk_drag = send_ctrl(
+            &mut app,
+            br#"{"id":"d2","method":"ui.pointer_gesture","params":{"action":"drag","widget_id":"canvas.layout_panel.0","to_widget_id":"nonexistent.target"}}"#.to_vec(),
+        )?;
+        assert_eq!(unk_drag.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("not_found"), "got {unk_drag}");
+
+        // 3. Short drags (7.5pt and 9.0pt) and diagonal drag genuinely translate layout item (not dx=0, dy=0).
+        for dist_pt in [7.5_f64, 9.0_f64] {
+            let before_x = app
+                .runtime()
+                .window(id)?
+                .app()
+                .document()
+                .layout_sheet(&curvebook_doc::SheetId::from("ly-m2"))
+                .and_then(|ls| ls.spec.items.first())
+                .and_then(|item| match item {
+                    curvebook_doc::LayoutItem::LiveGraph { bounds_pt, .. } => Some(bounds_pt.x),
+                    _ => None,
+                })
+                .ok_or_else(|| String::from("missing layout item 0"))?;
+            let center = app
+                .inspect_meta()
+                .find_by_widget_id("canvas.layout_panel.0")
+                .ok_or_else(|| String::from("missing canvas.layout_panel.0"))?
+                .clipped_rect
+                .center();
+            let short_req = serde_json::json!({
+                "id": format!("short_{dist_pt}"),
+                "method": "ui.pointer_gesture",
+                "params": {
+                    "action": "drag",
+                    "widget_id": "canvas.layout_panel.0",
+                    "to_x": f64::from(center.x) + dist_pt,
+                    "to_y": f64::from(center.y),
+                }
+            });
+            let short_ok = send_ctrl(&mut app, serde_json::to_vec(&short_req).map_err(|e| e.to_string())?)?;
+            assert_eq!(short_ok.get("ok").and_then(serde_json::Value::as_bool), Some(true), "short drag failed: {short_ok}");
+            step_once(&mut app);
+            let after_x = app
+                .runtime()
+                .window(id)?
+                .app()
+                .document()
+                .layout_sheet(&curvebook_doc::SheetId::from("ly-m2"))
+                .and_then(|ls| ls.spec.items.first())
+                .and_then(|item| match item {
+                    curvebook_doc::LayoutItem::LiveGraph { bounds_pt, .. } => Some(bounds_pt.x),
+                    _ => None,
+                })
+                .ok_or_else(|| String::from("missing layout item 0"))?;
+            assert!(after_x > before_x, "short {dist_pt}pt drag in gui_window produced zero delta_x ({before_x} -> {after_x})");
+        }
+
+        let p0_center = app
+            .inspect_meta()
+            .find_by_widget_id("canvas.layout_panel.0")
+            .ok_or_else(|| String::from("missing canvas.layout_panel.0"))?
+            .clipped_rect
+            .center();
+        let drag_req = serde_json::json!({
+            "id": "d3",
+            "method": "ui.pointer_gesture",
+            "params": {
+                "action": "drag",
+                "widget_id": "canvas.layout_panel.0",
+                "to_x": f64::from(p0_center.x) + 80.0,
+                "to_y": f64::from(p0_center.y) + 50.0,
+            }
+        });
+        let drag_ok = send_ctrl(&mut app, serde_json::to_vec(&drag_req).map_err(|e| e.to_string())?)?;
+        assert_eq!(drag_ok.get("ok").and_then(serde_json::Value::as_bool), Some(true), "drag failed: {drag_ok}");
+        step_once(&mut app);
+        let moved_bounds = app
+            .runtime()
+            .window(id)?
+            .app()
+            .document()
+            .layout_sheet(&curvebook_doc::SheetId::from("ly-m2"))
+            .and_then(|ls| ls.spec.items.first())
+            .and_then(|item| match item {
+                curvebook_doc::LayoutItem::LiveGraph { bounds_pt, .. } => Some(*bounds_pt),
+                _ => None,
+            })
+            .ok_or_else(|| String::from("missing layout item 0"))?;
+        assert!(moved_bounds.x > 60.0 && moved_bounds.y > 60.0, "expected genuine layout drag translation, got {moved_bounds:?}");
+
+        // 4. Pinch gesture rejects non-positive scale_delta with BadInput and accepts valid positive values.
+        for bad_payload in [
+            br#"{"id":"p0","method":"ui.pointer_gesture","params":{"action":"pinch","x":400.0,"y":300.0,"scale_delta":0.0}}"#.as_slice(),
+            br#"{"id":"pneg","method":"ui.pointer_gesture","params":{"action":"pinch","x":400.0,"y":300.0,"scale_delta":-1.5}}"#.as_slice(),
+        ] {
+            let pinch_bad = send_ctrl(&mut app, bad_payload.to_vec())?;
+            assert_eq!(pinch_bad.get("ok").and_then(serde_json::Value::as_bool), Some(false), "expected error for {pinch_bad}");
+            assert_eq!(pinch_bad.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("bad_input"), "got {pinch_bad}");
+        }
+        let pinch_ok = send_ctrl(
+            &mut app,
+            br#"{"id":"p1","method":"ui.pointer_gesture","params":{"action":"pinch","x":400.0,"y":300.0,"scale_delta":1.25}}"#.to_vec(),
+        )?;
+        assert_eq!(pinch_ok.get("ok").and_then(serde_json::Value::as_bool), Some(true), "pinch failed: {pinch_ok}");
+
+        // 5. Alias resolution (`dialog.button.cancel`), disabled hover (`dialog.button.back`), and `power.curve_hover` parity.
+        {
+            let win = app.runtime_mut().window_mut(id)?;
+            win.app_mut().canvas_dialogs.open_power_wizard();
+        }
+        step_once(&mut app);
+        let back_hover = send_ctrl(
+            &mut app,
+            br#"{"id":"h_back","method":"ui.pointer_gesture","params":{"action":"hover","widget_id":"dialog.button.back"}}"#.to_vec(),
+        )?;
+        assert_eq!(back_hover.get("ok").and_then(serde_json::Value::as_bool), Some(true), "disabled hover failed: {back_hover}");
+
+        for _ in 0..3 {
+            let nxt = send_ctrl(&mut app, br#"{"id":"nxt","method":"ui.answer_dialog","params":{"action":"next"}}"#.to_vec())?;
+            assert_eq!(nxt.get("ok").and_then(serde_json::Value::as_bool), Some(true), "next failed: {nxt}");
+            step_once(&mut app);
+        }
+        let tab_ok = send_ctrl(
+            &mut app,
+            br#"{"id":"ptab","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"power.tab.curve"}}"#.to_vec(),
+        )?;
+        assert_eq!(tab_ok.get("ok").and_then(serde_json::Value::as_bool), Some(true), "power.tab.curve failed: {tab_ok}");
+        step_once(&mut app);
+        let curve_hover = send_ctrl(
+            &mut app,
+            br#"{"id":"pch","method":"ui.pointer_gesture","params":{"action":"hover","widget_id":"power.curve_hover","hover_fraction_x":0.25}}"#
+                .to_vec(),
+        )?;
+        assert_eq!(curve_hover.get("ok").and_then(serde_json::Value::as_bool), Some(true), "curve hover failed: {curve_hover}");
+        assert!(curve_hover.pointer("/result/hover_n").and_then(serde_json::Value::as_f64).is_some(), "missing hover_n: {curve_hover}");
+        assert!(curve_hover.pointer("/result/hover_power").and_then(serde_json::Value::as_f64).is_some(), "missing hover_power: {curve_hover}");
+        assert!(app.runtime().window(id)?.app().canvas_dialogs.power_wizard.hover_n.is_some(), "power_wizard.hover_n must be synced");
+
+        let cancel_alias = send_ctrl(
+            &mut app,
+            br#"{"id":"c1","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"dialog.button.cancel"}}"#.to_vec(),
+        )?;
+        assert_eq!(cancel_alias.get("ok").and_then(serde_json::Value::as_bool), Some(true), "cancel alias failed: {cancel_alias}");
+        step_once(&mut app);
+        assert_eq!(app.runtime().window(id)?.app().canvas_dialogs.active_dialog, ActiveDialog::None);
+        Ok(())
+    }
+
+    struct W5LiveHarness {
+        app: CurveBookNativeApp,
+        win_id: DesktopWindowId,
+        ctx: egui::Context,
+        req_tx: mpsc::Sender<LiveControlRequest>,
+        auth: ControlAuth,
+    }
+
+    impl W5LiveHarness {
+        fn new() -> Result<Self, String> {
+            let mut runtime = DesktopHostRuntime::new(DesktopHostConfig {
+                in_window_menus: true,
+                new_instance: true,
+                gui_only: false,
+                locale_override: None,
+                theme_override: None,
+                recovery_root: None,
+                initial_viewport: ViewportMetrics::new(1280.0, 800.0, 1.0),
+                ..DesktopHostConfig::default()
+            });
+            let opened =
+                runtime.dispatch(DesktopHostEvent::WindowOpened { initial_file: None, viewport: ViewportMetrics::new(1280.0, 800.0, 1.0) })?;
+            let win_id = opened.window_id.ok_or_else(|| String::from("missing window id"))?;
+            {
+                let win = runtime.window_mut(win_id)?;
+                win.execute_and_journal(
+                    "sheet.createData",
+                    json!({ "sheet_id": "ds-col-w5", "kind": "column", "cols": 2, "rows": 4, "auto_graph": false }),
+                )?;
+                win.execute_and_journal("table.setCells", json!({ "sheet_id": "ds-col-w5", "rows": [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]] }))?;
+                win.execute_and_journal(
+                    "sheet.createData",
+                    json!({ "sheet_id": "ds-fit-w5", "kind": "xy", "cols": 1, "rows": 4, "auto_graph": false }),
+                )?;
+                win.execute_and_journal("table.setXCells", json!({ "sheet_id": "ds-fit-w5", "values": [1.0, 2.0, 3.0, 4.0] }))?;
+                win.execute_and_journal("table.setCells", json!({ "sheet_id": "ds-fit-w5", "rows": [[2.0], [4.0], [6.0], [8.0]] }))?;
+                win.execute_and_journal("sheet.select", json!({ "sheet_id": "ds-col-w5" }))?;
+            }
+            let (req_tx, req_rx) = mpsc::channel();
+            let ctrl = LiveControlChannel {
+                request_rx: req_rx,
+                egui_ctx_cell: Arc::new(OnceLock::new()),
+                shutdown: Arc::new(AtomicBool::new(false)),
+                post_hook: None,
+            };
+            let app = CurveBookNativeApp::new(runtime, win_id, None).with_live_control(ctrl);
+            let ctx = egui::Context::default();
+            ctx.set_fonts(build_egui_font_definitions(None));
+            let auth = ControlAuth::from_token("test-token-m2-w5").map_err(|e| e.to_string())?;
+            let mut harness = Self { app, win_id, ctx, req_tx, auth };
+            for _ in 0..4 {
+                harness.step_once();
+            }
+            Ok(harness)
+        }
+
+        fn step_once(&mut self) {
+            let mut raw_input =
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))), ..Default::default() };
+            self.app.drain_synthetic_events_into(&mut raw_input);
+            let mut out = self.ctx.run_ui(raw_input, |ui| self.app.step_ui(ui));
+            out.textures_delta.clear();
+        }
+
+        fn send_ctrl(&mut self, req: serde_json::Value) -> Result<serde_json::Value, String> {
+            let (tx, rx) = mpsc::channel();
+            let raw_bytes = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
+            self.req_tx
+                .send(LiveControlRequest { raw_bytes, auth: self.auth.clone(), conn_authenticated: true, reply_tx: tx })
+                .map_err(|e| e.to_string())?;
+            for _ in 0..24 {
+                self.step_once();
+                if let Ok(res) = rx.try_recv() {
+                    let out = res?;
+                    let txt = String::from_utf8_lossy(&out.response_bytes);
+                    return serde_json::from_str(&txt).map_err(|e| format!("invalid control reply `{txt}`: {e}"));
+                }
+            }
+            Err(format!("timed out waiting for LiveControlRequest reply to {req}"))
+        }
+
+        fn send_ok(&mut self, req: serde_json::Value, ctx_msg: &str) -> Result<serde_json::Value, String> {
+            let resp = self.send_ctrl(req)?;
+            assert_eq!(resp.get("ok").and_then(serde_json::Value::as_bool), Some(true), "{ctx_msg}: {resp}");
+            Ok(resp)
+        }
+
+        fn open_edit_modal(&mut self, ds_id: &str, entry_id: &str) -> Result<curvebook_doc::SheetId, String> {
+            self.send_ok(json!({ "id": "sw", "method": "ui.switch_tab", "params": { "sheet_id": ds_id } }), ds_id)?;
+            self.send_ok(
+                json!({ "id": "az", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": "toolbar.analyze" } }),
+                "az",
+            )?;
+            self.send_ok(
+                json!({ "id": "ans", "method": "ui.answer_dialog", "params": { "action": "ok", "fields": { "entry_id": entry_id } } }),
+                entry_id,
+            )?;
+            self.step_once();
+            let rs_id = if let ActiveDialog::EditAnalysisParameters { result_sheet_id } =
+                &self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog
+            {
+                result_sheet_id.clone()
+            } else {
+                let rs_id = self
+                    .app
+                    .runtime()
+                    .window(self.win_id)?
+                    .app()
+                    .document()
+                    .result_sheets
+                    .last()
+                    .map(|r| r.id.clone())
+                    .ok_or_else(|| String::from("missing result sheet after analyze"))?;
+                let doc = self.app.runtime().window(self.win_id)?.app().document().clone();
+                assert!(self.app.runtime_mut().window_mut(self.win_id)?.app_mut().canvas_dialogs.open_edit_parameters(&doc, &rs_id));
+                self.step_once();
+                rs_id
+            };
+            assert!(matches!(
+                self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog,
+                ActiveDialog::EditAnalysisParameters { .. }
+            ));
+            Ok(rs_id)
+        }
+
+        fn verify_grid_click_type_arrow(&mut self) -> Result<(), String> {
+            self.send_ok(
+                json!({ "id": "gc1", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": "grid.cell.0.0.0" } }),
+                "grid click",
+            )?;
+            self.send_ok(json!({ "id": "gt1", "method": "ui.type_text", "params": { "text": "123", "submit": true } }), "grid type")?;
+            self.send_ok(json!({ "id": "gd1", "method": "ui.press_key", "params": { "key": "ArrowDown" } }), "grid ArrowDown")?;
+            let insp = self.send_ok(json!({ "id": "gi1", "method": "ui.inspect", "params": { "scope": "grid" } }), "grid inspect")?;
+            assert_eq!(
+                insp.pointer("/result/grid_selection/active_cell/row").and_then(serde_json::Value::as_u64),
+                Some(2),
+                "Enter + ArrowDown from (0,0,0) must land active_cell on row 2: {insp}"
+            );
+            let cell_val = self
+                .app
+                .runtime()
+                .window(self.win_id)?
+                .app()
+                .document()
+                .data_sheet(&curvebook_doc::SheetId::from("ds-col-w5"))
+                .and_then(|ds| ds.cell(curvebook_doc::CellCoord::new(0, 0, 0)))
+                .map(|c| c.value.clone());
+            assert_eq!(cell_val, Some(curvebook_doc::CellValue::Number(123.0)), "expected grid cell (0,0,0) == 123.0");
+            Ok(())
+        }
+
+        fn verify_two_enter_textbox_commit(&mut self, widget_id: &str, text: &str, by_coords: bool) -> Result<(), String> {
+            if by_coords {
+                let dlg_insp = self.send_ok(
+                    json!({ "id": "di", "method": "ui.inspect", "params": { "scope": "dialog", "include_bounds": true } }),
+                    "dialog inspect",
+                )?;
+                let b = dlg_insp
+                    .pointer("/result/dialog/controls")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|nodes| nodes.iter().find(|n| n.get("widget_id").and_then(serde_json::Value::as_str) == Some(widget_id)))
+                    .and_then(|n| n.get("bounds"))
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| format!("missing {widget_id} bounds in {dlg_insp}"))?;
+                let x = b.first().and_then(serde_json::Value::as_f64).ok_or("x")? + b.get(2).and_then(serde_json::Value::as_f64).ok_or("w")? * 0.5;
+                let y = b.get(1).and_then(serde_json::Value::as_f64).ok_or("y")? + b.get(3).and_then(serde_json::Value::as_f64).ok_or("h")? * 0.5;
+                self.send_ok(json!({ "id": "cc", "method": "ui.pointer_gesture", "params": { "action": "click", "x": x, "y": y } }), "coord click")?;
+                let fi = self.send_ok(json!({ "id": "fi", "method": "ui.inspect", "params": { "scope": "dialog" } }), "focus inspect")?;
+                assert_eq!(fi.pointer("/result/focus_widget_id").and_then(serde_json::Value::as_str), Some(widget_id), "focus mismatch: {fi}");
+            } else {
+                self.send_ok(
+                    json!({ "id": "wc", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": widget_id } }),
+                    widget_id,
+                )?;
+            }
+            self.send_ok(json!({ "id": "tt", "method": "ui.type_text", "params": { "text": text, "clear_first": true } }), text)?;
+            self.send_ok(json!({ "id": "e1", "method": "ui.press_key", "params": { "key": "Enter" } }), "1st Enter")?;
+            assert!(
+                matches!(self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }),
+                "1st Enter inside {widget_id} must keep modal open"
+            );
+            let ie1 = self.send_ok(json!({ "id": "ie1", "method": "ui.inspect", "params": { "scope": "dialog" } }), "inspect after e1")?;
+            assert_eq!(ie1.pointer("/result/focus_widget_id"), Some(&serde_json::Value::Null), "1st Enter must clear focus: {ie1}");
+            self.send_ok(json!({ "id": "e2", "method": "ui.press_key", "params": { "key": "Enter" } }), "2nd Enter")?;
+            assert_eq!(self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::None);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn m2_w5_gui_window_live_context_unified_focus_type_key_inspect_switch_tab() -> Result<(), String> {
+        let mut h = W5LiveHarness::new()?;
+
+        // 1. Grid cell `ui.pointer_gesture` click -> `ui.type_text("123", submit: true)` -> `ui.press_key("ArrowDown")`.
+        h.verify_grid_click_type_arrow()?;
+
+        // 2. `stats.two_group`: click `edit.custom_title` -> type `"GwTitle"` -> 1st Enter (open, unfocused) -> 2nd Enter (commits).
+        let tg_rs_id = h.open_edit_modal("ds-col-w5", "stats.two_group")?;
+        h.verify_two_enter_textbox_commit("edit.custom_title", "GwTitle", false)?;
+        assert_eq!(
+            h.app.runtime().window(h.win_id)?.app().document().result_sheet(&tg_rs_id).and_then(|rs| rs.analysis.custom_title.as_deref()),
+            Some("GwTitle")
+        );
+
+        // 3. Coordinate-only human-path (`human_path_only = true` / `gui_only = true`): no `widget_id` allowed.
+        {
+            let doc = h.app.runtime().window(h.win_id)?.app().document().clone();
+            assert!(h.app.runtime_mut().window_mut(h.win_id)?.app_mut().canvas_dialogs.open_edit_parameters(&doc, &tg_rs_id));
+            h.app.runtime_mut().window_mut(h.win_id)?.app_mut().set_human_path_only(true);
+            h.step_once();
+        }
+        let blocked = h.send_ctrl(json!({ "id": "gob", "method": "ui.type_text", "params": { "widget_id": "edit.custom_title", "text": "Bad" } }))?;
+        assert_eq!(blocked.get("ok").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(blocked.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("gui_only_violation"));
+        h.verify_two_enter_textbox_commit("edit.custom_title", "GuiOnlyGw", true)?;
+        assert_eq!(
+            h.app.runtime().window(h.win_id)?.app().document().result_sheet(&tg_rs_id).and_then(|rs| rs.analysis.custom_title.as_deref()),
+            Some("GuiOnlyGw")
+        );
+        h.app.runtime_mut().window_mut(h.win_id)?.app_mut().set_human_path_only(false);
+
+        // 4. `FitModal` (`fit.nonlinear`) -> `ui.switch_tab("fit.tab.output")` -> click `fit.diagnostics.r2.input` -> `"0.95"` -> Enter -> Enter.
+        let nl_rs_id = h.open_edit_modal("ds-fit-w5", "fit.nonlinear")?;
+        h.send_ok(json!({ "id": "ft1", "method": "ui.switch_tab", "params": { "tab_id": "fit.tab.output" } }), "fit.tab.output")?;
+        h.verify_two_enter_textbox_commit("fit.diagnostics.r2.input", "0.95", false)?;
+        let committed_r2 = h.app.runtime().window(h.win_id)?.app().document().result_sheet(&nl_rs_id).and_then(|rs| match &rs.analysis.kind {
+            curvebook_doc::AnalysisKind::NonlinearRegression(fit) => fit.flag_r_squared_below,
+            _ => None,
+        });
+        assert!(committed_r2.is_some_and(|v| (v - 0.95).abs() < 1e-9), "expected flag_r_squared_below == Some(0.95), got {committed_r2:?}");
         Ok(())
     }
 }

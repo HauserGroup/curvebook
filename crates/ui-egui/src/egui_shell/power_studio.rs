@@ -21,7 +21,7 @@ use super::stat_anova_modal::{
 };
 use super::stats_modals::{Wave4ModalShell, render_modal_action_button, show_wave4_modal};
 use super::unit_spinners::{ScrubUnitFieldConfig, ScrubUnitFieldState, ScrubUnitKind, render_scrub_unit_field};
-use super::{FrameInspectMeta, PendingUiIntents, Tokens};
+use super::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 /// Three tabs rendered inside the `65%` Stage 4 results pane of `Power & Sample Size Studio`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -123,6 +123,7 @@ pub fn render_power_studio_modal(
         None => ControlEnablement::enabled(),
     };
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let capture = show_wave4_modal(
         ctx,
         tokens,
@@ -212,33 +213,33 @@ pub fn render_power_studio_modal(
                     if is_edit_mode {
                         let mut prev = pw.clone();
                         if prev.go_back().is_ok() {
-                            intents.push_update_power_wizard_state(prev);
+                            intents.push(UiIntent::UpdatePowerWizardState(Box::new(prev)));
                         }
                     } else {
-                        intents.push_commit_power_wizard("back");
+                        intents.push(UiIntent::CommitPowerWizard { action: String::from("back") });
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if is_edit_mode {
                         if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &can_ok_edit) {
                             reset_results_transient_state(footer_state);
-                            intents.push_dialog_button("ok");
+                            intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                         }
                         if pw.stage != PowerWizardStage::Results
                             && render_modal_action_button(ui, tokens, meta, "modal.next", "Next →", false, false, &can_next)
                         {
                             let mut next = pw.clone();
                             if next.advance().is_ok() {
-                                intents.push_update_power_wizard_state(next);
+                                intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
                             }
                         }
                     } else if pw.stage == PowerWizardStage::Results {
                         if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "w6.view.btn.create"), true, false, &can_create) {
                             reset_results_transient_state(footer_state);
-                            intents.push_commit_power_wizard("create");
+                            intents.push(UiIntent::CommitPowerWizard { action: String::from("create") });
                         }
                     } else if render_modal_action_button(ui, tokens, meta, "modal.next", "Next →", true, false, &can_next) {
-                        intents.push_commit_power_wizard("next");
+                        intents.push(UiIntent::CommitPowerWizard { action: String::from("next") });
                     }
                     if render_modal_action_button(
                         ui,
@@ -252,9 +253,9 @@ pub fn render_power_studio_modal(
                     ) {
                         reset_results_transient_state(footer_state);
                         if is_edit_mode {
-                            intents.push_dialog_button("cancel");
+                            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                         } else {
-                            intents.push_commit_power_wizard("cancel");
+                            intents.push(UiIntent::CommitPowerWizard { action: String::from("cancel") });
                         }
                     }
                 });
@@ -265,9 +266,23 @@ pub fn render_power_studio_modal(
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         reset_results_transient_state(state);
         if is_edit_mode {
-            intents.push_dialog_button("cancel");
+            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
         } else {
-            intents.push_commit_power_wizard("cancel");
+            intents.push(UiIntent::CommitPowerWizard { action: String::from("cancel") });
+        }
+    } else if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        if is_edit_mode {
+            if can_ok_edit.enabled {
+                reset_results_transient_state(state);
+                intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+            }
+        } else if pw.stage == PowerWizardStage::Results {
+            if can_create.enabled {
+                reset_results_transient_state(state);
+                intents.push(UiIntent::CommitPowerWizard { action: String::from("create") });
+            }
+        } else if can_next.enabled {
+            intents.push(UiIntent::CommitPowerWizard { action: String::from("next") });
         }
     }
 
@@ -313,7 +328,7 @@ fn render_power_stage_stepper(ui: &mut Ui, pw: &PowerWizardState, tokens: &Token
             if render_modal_seg_btn(ui, tokens, meta, &format!("power.stage.{}", idx + 1), lbl, selected, &en) {
                 let mut next = pw.clone();
                 if next.step_to_stage(stage).is_ok() {
-                    intents.push_update_power_wizard_state(next);
+                    intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
                 }
             }
         }
@@ -322,14 +337,13 @@ fn render_power_stage_stepper(ui: &mut Ui, pw: &PowerWizardState, tokens: &Token
 
 fn render_stage1_design(
     ui: &mut Ui,
-    app: &UiApp,
+    _app: &UiApp,
     pw: &PowerWizardState,
     state: &mut PowerStudioEguiState,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let vs = &app.view_shards.power_wizard;
     render_section_title(ui, tokens, tr(tokens.locale, "pw.section.families"));
 
     for (key, lbl, fam, is_surv) in [
@@ -344,9 +358,16 @@ fn render_stage1_design(
         ("simple_linear", "Simple Linear Regression Slope", PowerTestFamily::SimpleLinearRegression, false),
     ] {
         let active =
-            if is_surv { vs.survival_log_rank && pw.family == PowerTestFamily::TwoProportions } else { !vs.survival_log_rank && pw.family == fam };
+            if is_surv { pw.survival_log_rank && pw.family == PowerTestFamily::TwoProportions } else { !pw.survival_log_rank && pw.family == fam };
         if render_modal_radio(ui, tokens, meta, &format!("power.family.{key}"), lbl, active, &ControlEnablement::enabled()) {
-            intents.push_custom_view_action("power_wizard", format!("family:{key}"));
+            let mut next = pw.clone();
+            next.survival_log_rank = is_surv;
+            next.set_family(fam);
+            if is_surv {
+                next.sync_survival_proportions();
+                let _ = next.recalculate();
+            }
+            intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
     }
 
@@ -362,7 +383,7 @@ fn render_stage1_design(
                 let mut next = pw.clone();
                 next.solve_target = target;
                 let _ = next.recalculate();
-                intents.push_update_power_wizard_state(next);
+                intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
             }
         }
     });
@@ -384,7 +405,7 @@ fn render_stage1_design(
             let mut next = pw.clone();
             next.anova_groups = (next.anova_groups as isize + step as isize).clamp(2, 24) as usize;
             let _ = next.recalculate();
-            intents.push_update_power_wizard_state(next);
+            intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
     } else if pw.family == PowerTestFamily::ChiSquare {
         ui.add_space(4.0);
@@ -403,7 +424,7 @@ fn render_stage1_design(
             let mut next = pw.clone();
             next.chi_square_df = (next.chi_square_df + f64::from(step)).clamp(1.0, 40.0);
             let _ = next.recalculate();
-            intents.push_update_power_wizard_state(next);
+            intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
     }
 
@@ -422,7 +443,7 @@ fn render_stage1_design(
         let _ = next.recalculate();
         next.stage = PowerWizardStage::Results;
         state.results_tab = PowerResultsSubTab::NarrativeReport;
-        intents.push_update_power_wizard_state(next);
+        intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
     }
 }
 
@@ -457,7 +478,7 @@ fn render_pilot_stepper(
             next.standardized_effect = d;
         }
         let _ = next.recalculate();
-        intents.push_update_power_wizard_state(next);
+        intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
     }
 }
 
@@ -472,7 +493,11 @@ fn render_stage2_paired_t_inputs(ui: &mut Ui, pw: &PowerWizardState, tokens: &To
             pw.effect_mode == PowerEffectInputMode::MeansAndSd,
             &ControlEnablement::enabled(),
         ) {
-            intents.push_custom_view_action("power_wizard", "effect_mode:means_and_sd");
+            let mut next = pw.clone();
+            next.effect_mode = PowerEffectInputMode::MeansAndSd;
+            next.mean_diff = next.pilot_mean2 - next.pilot_mean1;
+            let _ = next.recalculate();
+            intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
         if render_modal_seg_btn(
             ui,
@@ -483,7 +508,10 @@ fn render_stage2_paired_t_inputs(ui: &mut Ui, pw: &PowerWizardState, tokens: &To
             pw.effect_mode == PowerEffectInputMode::PairedDiffDirect,
             &ControlEnablement::enabled(),
         ) {
-            intents.push_custom_view_action("power_wizard", "effect_mode:paired_diff");
+            let mut next = pw.clone();
+            next.effect_mode = PowerEffectInputMode::PairedDiffDirect;
+            let _ = next.recalculate();
+            intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
     });
     let mean_diff_str = format!("{:.2}", pw.mean_diff);
@@ -610,7 +638,10 @@ fn render_stage2_regression_inputs(ui: &mut Ui, pw: &PowerWizardState, tokens: &
             pw.effect_mode == PowerEffectInputMode::RegressionSlope,
             &ControlEnablement::enabled(),
         ) {
-            intents.push_custom_view_action("power_wizard", "effect_mode:slope");
+            let mut next = pw.clone();
+            next.effect_mode = PowerEffectInputMode::RegressionSlope;
+            let _ = next.recalculate();
+            intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
         if render_modal_seg_btn(
             ui,
@@ -621,7 +652,10 @@ fn render_stage2_regression_inputs(ui: &mut Ui, pw: &PowerWizardState, tokens: &
             pw.effect_mode == PowerEffectInputMode::RegressionRSquared,
             &ControlEnablement::enabled(),
         ) {
-            intents.push_custom_view_action("power_wizard", "effect_mode:r_squared");
+            let mut next = pw.clone();
+            next.effect_mode = PowerEffectInputMode::RegressionRSquared;
+            let _ = next.recalculate();
+            intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
     });
     if pw.effect_mode == PowerEffectInputMode::RegressionRSquared {
@@ -699,7 +733,19 @@ fn render_stage2_effect(
             pw.effect_mode != PowerEffectInputMode::Standardized,
             &ControlEnablement::enabled(),
         ) {
-            intents.push_custom_view_action("power_wizard", "effect_mode:pilot");
+            let mut next = pw.clone();
+            next.effect_mode = match next.family {
+                PowerTestFamily::TwoProportions => PowerEffectInputMode::Proportions,
+                PowerTestFamily::SimpleLinearRegression => PowerEffectInputMode::RegressionSlope,
+                _ => PowerEffectInputMode::MeansAndSd,
+            };
+            if next.effect_mode == PowerEffectInputMode::MeansAndSd
+                && matches!(next.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoSamplePairedT | PowerTestFamily::OneSampleT)
+            {
+                next.mean_diff = next.pilot_mean2 - next.pilot_mean1;
+            }
+            let _ = next.recalculate();
+            intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
         if render_modal_seg_btn(
             ui,
@@ -710,7 +756,10 @@ fn render_stage2_effect(
             pw.effect_mode == PowerEffectInputMode::Standardized,
             &ControlEnablement::enabled(),
         ) {
-            intents.push_custom_view_action("power_wizard", "effect_mode:direct");
+            let mut next = pw.clone();
+            next.effect_mode = PowerEffectInputMode::Standardized;
+            let _ = next.recalculate();
+            intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
     });
 
@@ -719,13 +768,54 @@ fn render_stage2_effect(
     ui.horizontal_wrapped(|ui| {
         for (k, lbl) in [("small", "Small"), ("medium", "Medium"), ("large", "Large")] {
             if render_modal_seg_btn(ui, tokens, meta, &format!("power.pilot.preset.{k}"), lbl, false, &ControlEnablement::enabled()) {
-                intents.push_custom_view_action("power_wizard", format!("pilot_preset:{k}"));
+                let mut next = pw.clone();
+                let eff = match (next.family, k) {
+                    (PowerTestFamily::OneWayAnova, "small") => 0.10,
+                    (PowerTestFamily::OneWayAnova, "medium") => 0.25,
+                    (PowerTestFamily::OneWayAnova, _) => 0.40,
+                    (PowerTestFamily::Correlation | PowerTestFamily::ChiSquare, "small") => 0.10,
+                    (PowerTestFamily::Correlation | PowerTestFamily::ChiSquare, "medium") => 0.30,
+                    (PowerTestFamily::Correlation | PowerTestFamily::ChiSquare, _) => 0.50,
+                    (PowerTestFamily::SimpleLinearRegression, "small") => 0.02,
+                    (PowerTestFamily::SimpleLinearRegression, "medium") => 0.15,
+                    (PowerTestFamily::SimpleLinearRegression, _) => 0.35,
+                    (_, "small") => 0.20,
+                    (_, "medium") => 0.50,
+                    (_, _) => 0.80,
+                };
+                next.standardized_effect = eff;
+                next.effect_mode = PowerEffectInputMode::Standardized;
+                if matches!(next.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoSamplePairedT | PowerTestFamily::OneSampleT) {
+                    next.mean_diff = eff * next.sd.max(0.01);
+                    next.pilot_mean2 = next.pilot_mean1 + next.mean_diff;
+                } else if next.family == PowerTestFamily::TwoProportions {
+                    if next.survival_log_rank {
+                        next.survival_hazard_ratio = match k {
+                            "small" => 0.82,
+                            "medium" => 0.65,
+                            _ => 0.48,
+                        };
+                        next.sync_survival_proportions();
+                    } else {
+                        next.p1 = 0.30;
+                        next.p2 = match k {
+                            "small" => 0.40,
+                            "medium" => 0.54,
+                            _ => 0.68,
+                        };
+                        next.effect_mode = PowerEffectInputMode::Proportions;
+                    }
+                } else if next.family == PowerTestFamily::SimpleLinearRegression {
+                    next.r_squared = eff / (1.0 + eff);
+                }
+                let _ = next.recalculate();
+                intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
             }
         }
     });
 
     ui.add_space(6.0);
-    let vs = &app.view_shards.power_wizard;
+    let _ = app;
     let eff = pw.derived_standardized_effect().unwrap_or(pw.standardized_effect);
     if pw.effect_mode == PowerEffectInputMode::Standardized {
         let eff_str = format!("{:.3}", pw.standardized_effect);
@@ -780,7 +870,7 @@ fn render_stage2_effect(
             }
             PowerTestFamily::TwoSamplePairedT => render_stage2_paired_t_inputs(ui, pw, tokens, meta, intents),
             PowerTestFamily::OneWayAnova => render_stage2_anova_inputs(ui, pw, tokens, meta, intents),
-            PowerTestFamily::TwoProportions if vs.survival_log_rank => {
+            PowerTestFamily::TwoProportions if pw.survival_log_rank => {
                 let s_hr = render_stepper_row(
                     ui,
                     tokens,
@@ -788,13 +878,16 @@ fn render_stage2_effect(
                     StepperSpec {
                         id_prefix: "power.pilot.hr",
                         label: tr(tokens.locale, "pw.pilot.hr"),
-                        value_text: &format!("{:.2}", vs.survival_hazard_ratio),
+                        value_text: &format!("{:.2}", pw.survival_hazard_ratio),
                         enablement: &ControlEnablement::enabled(),
                     },
                 );
                 if s_hr != 0 {
-                    let delta = if s_hr > 0 { "0.05" } else { "-0.05" };
-                    intents.push_custom_view_action("power_wizard", format!("spin:pilot_hr:{delta}"));
+                    let mut next = pw.clone();
+                    next.survival_hazard_ratio = (next.survival_hazard_ratio + f64::from(s_hr) * 0.05).clamp(0.10, 5.0);
+                    next.sync_survival_proportions();
+                    let _ = next.recalculate();
+                    intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
                 }
                 let s_ev = render_stepper_row(
                     ui,
@@ -803,13 +896,16 @@ fn render_stage2_effect(
                     StepperSpec {
                         id_prefix: "power.pilot.evprob",
                         label: tr(tokens.locale, "pw.pilot.evprob"),
-                        value_text: &format!("{:.2}", vs.survival_event_prob),
+                        value_text: &format!("{:.2}", pw.survival_event_prob),
                         enablement: &ControlEnablement::enabled(),
                     },
                 );
                 if s_ev != 0 {
-                    let delta = if s_ev > 0 { "0.05" } else { "-0.05" };
-                    intents.push_custom_view_action("power_wizard", format!("spin:pilot_evprob:{delta}"));
+                    let mut next = pw.clone();
+                    next.survival_event_prob = (next.survival_event_prob + f64::from(s_ev) * 0.05).clamp(0.05, 0.95);
+                    next.sync_survival_proportions();
+                    let _ = next.recalculate();
+                    intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
                 }
             }
             PowerTestFamily::TwoProportions => {
@@ -901,13 +997,13 @@ fn render_stage3_alpha_power(
         let mut next = pw.clone();
         next.two_tailed = true;
         let _ = next.recalculate();
-        intents.push_update_power_wizard_state(next);
+        intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
     }
     if render_modal_radio(ui, tokens, meta, "power.one_sided", "One-sided test", !pw.two_tailed, &one_en) {
         let mut next = pw.clone();
         next.two_tailed = false;
         let _ = next.recalculate();
-        intents.push_update_power_wizard_state(next);
+        intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
     }
 
     if !pw.two_tailed && one_en.enabled {
@@ -917,13 +1013,13 @@ fn render_stage3_alpha_power(
                 let mut next = pw.clone();
                 next.one_sided_greater = true;
                 let _ = next.recalculate();
-                intents.push_update_power_wizard_state(next);
+                intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
             }
             if render_modal_seg_btn(ui, tokens, meta, "power.tail.less", "H₁ < 0 (Less)", !pw.one_sided_greater, &ControlEnablement::enabled()) {
                 let mut next = pw.clone();
                 next.one_sided_greater = false;
                 let _ = next.recalculate();
-                intents.push_update_power_wizard_state(next);
+                intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
             }
         });
     }
@@ -944,7 +1040,7 @@ fn render_stage3_alpha_power(
                 let mut next = pw.clone();
                 next.alpha = val;
                 let _ = next.recalculate();
-                intents.push_update_power_wizard_state(next);
+                intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
             }
         }
     });
@@ -965,7 +1061,7 @@ fn render_stage3_alpha_power(
                 let mut next = pw.clone();
                 next.target_power = val;
                 let _ = next.recalculate();
-                intents.push_update_power_wizard_state(next);
+                intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
             }
         }
     });
@@ -991,7 +1087,7 @@ fn render_stage3_alpha_power(
                     let mut next = pw.clone();
                     next.two_proportions_mode = m;
                     let _ = next.recalculate();
-                    intents.push_update_power_wizard_state(next);
+                    intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
                 }
             }
         });
@@ -1007,7 +1103,7 @@ fn render_stage3_alpha_power(
             let mut next = pw.clone();
             next.continuity_correction = !pw.continuity_correction;
             let _ = next.recalculate();
-            intents.push_update_power_wizard_state(next);
+            intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
     } else if pw.family == PowerTestFamily::Correlation {
         ui.add_space(6.0);
@@ -1028,7 +1124,7 @@ fn render_stage3_alpha_power(
                     let mut next = pw.clone();
                     next.correlation_method = m;
                     let _ = next.recalculate();
-                    intents.push_update_power_wizard_state(next);
+                    intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
                 }
             }
         });
@@ -1229,7 +1325,7 @@ fn render_sensitivity_matrix_table(
                 next.alpha = cell.alpha;
                 next.target_power = cell.target_power;
                 let _ = next.recalculate();
-                intents.push_update_power_wizard_state(next);
+                intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
             }
             ui.end_row();
         }
@@ -1269,7 +1365,7 @@ fn render_live_sidebar(
         let mut next = pw.clone();
         next.alpha = next_alpha.clamp(0.001, 0.25);
         let _ = next.recalculate();
-        intents.push_update_power_wizard_state(next);
+        intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
     }
 
     ui.add_space(4.0);
@@ -1298,7 +1394,7 @@ fn render_live_sidebar(
         let mut next = pw.clone();
         next.target_power = (next_pct / 100.0).clamp(0.50, 0.995);
         let _ = next.recalculate();
-        intents.push_update_power_wizard_state(next);
+        intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
     }
 
     if pw.solve_target != PowerSolveTarget::SampleSize {
@@ -1318,7 +1414,7 @@ fn render_live_sidebar(
             let mut next = pw.clone();
             next.sample_size = (next.sample_size + f64::from(step_n) * 2.0).clamp(4.0, 10_000.0);
             let _ = next.recalculate();
-            intents.push_update_power_wizard_state(next);
+            intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
     }
 

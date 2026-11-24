@@ -14,7 +14,72 @@ use serde::Deserialize;
 use serde::de::{DeserializeOwned, Deserializer};
 use serde_json::{Value, json};
 
-use crate::{EngineError, ErrorCode, ExternalPathPolicy};
+use crate::{EngineError, ErrorCode, ExternalPathPolicy, Session};
+
+#[must_use]
+pub(super) fn always_enabled(_session: &Session) -> bool {
+    true
+}
+
+#[must_use]
+pub(super) fn has_data_sheet(session: &Session) -> bool {
+    !session.document().data_sheets.is_empty()
+}
+
+#[must_use]
+pub(super) fn has_analyzable_data_sheet(session: &Session) -> bool {
+    !session.document().data_sheets.is_empty() || session.document().result_sheets.iter().any(|r| r.analyzable_data.is_some())
+}
+
+#[must_use]
+pub(super) fn has_graph_sheet(session: &Session) -> bool {
+    !session.document().graph_sheets.is_empty()
+}
+
+#[must_use]
+pub(super) fn has_result_sheet(session: &Session) -> bool {
+    !session.document().result_sheets.is_empty()
+}
+
+#[must_use]
+pub(super) fn has_layout_sheet(session: &Session) -> bool {
+    !session.document().layout_sheets.is_empty()
+}
+
+#[must_use]
+pub(super) fn has_graph_or_layout(session: &Session) -> bool {
+    !session.document().graph_sheets.is_empty() || !session.document().layout_sheets.is_empty()
+}
+
+#[must_use]
+pub(super) fn has_data_or_result_sheet(session: &Session) -> bool {
+    !session.document().data_sheets.is_empty() || !session.document().result_sheets.is_empty()
+}
+
+#[must_use]
+pub(super) fn has_exportable_sheet(session: &Session) -> bool {
+    has_graph_or_layout(session)
+}
+
+#[must_use]
+pub(super) fn has_nested_sheet(session: &Session) -> bool {
+    session.document().data_sheets.iter().any(|ds| matches!(ds.archetype, TableArchetype::Nested(_)))
+}
+
+#[must_use]
+pub(super) fn has_multivar_sheet(session: &Session) -> bool {
+    session.document().data_sheets.iter().any(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_)))
+}
+
+#[must_use]
+pub(super) fn bad_input(msg: impl Into<String>) -> EngineError {
+    EngineError::with_code(ErrorCode::BadInput, msg)
+}
+
+#[must_use]
+pub(super) fn bad_input_ptr(pointer: &str, msg: impl Into<String>) -> EngineError {
+    EngineError::with_code(ErrorCode::BadInput, msg).with_details(json!({ "pointer": pointer }))
+}
 
 /// Parse and validate a non-empty [`SheetId`].
 ///
@@ -915,8 +980,32 @@ pub(super) fn shift_point_overrides_on_insert_rows(doc: &mut ProjectDocument, sh
     }
 }
 
+fn to_pascal_case(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut new_word = true;
+    let mut prev_lower_or_digit = false;
+    for ch in raw.chars() {
+        if !ch.is_ascii_alphanumeric() {
+            new_word = true;
+            prev_lower_or_digit = false;
+            continue;
+        }
+        if prev_lower_or_digit && ch.is_ascii_uppercase() {
+            new_word = true;
+        }
+        if new_word {
+            out.push(ch.to_ascii_uppercase());
+            new_word = false;
+        } else {
+            out.push(ch.to_ascii_lowercase());
+        }
+        prev_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    }
+    out
+}
+
 /// Deserialize an enum from its canonical serde JSON form (PascalCase string or tagged object) or
-/// a case/separator-insensitive string alias (snake_case or stripped-alphanumeric lowercase).
+/// a case/separator-insensitive string alias (snake_case, PascalCase, or stripped lowercase).
 pub(super) fn parse_serde_enum<T: DeserializeOwned>(val: &Value, field_desc: &str) -> Result<T, EngineError> {
     if let Ok(parsed) = serde_json::from_value::<T>(val.clone()) {
         return Ok(parsed);
@@ -925,6 +1014,10 @@ pub(super) fn parse_serde_enum<T: DeserializeOwned>(val: &Value, field_desc: &st
         let trimmed = raw.trim();
         let snake = trimmed.to_ascii_lowercase().replace(['-', ' '], "_");
         if let Ok(parsed) = serde_json::from_value::<T>(Value::String(snake)) {
+            return Ok(parsed);
+        }
+        let pascal = to_pascal_case(trimmed);
+        if let Ok(parsed) = serde_json::from_value::<T>(Value::String(pascal)) {
             return Ok(parsed);
         }
         let compact: String = trimmed.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();

@@ -9,13 +9,16 @@ use curvebook_format::{
     MAX_ARCHIVE_FILE_BYTES, instantiate_template_bytes, migrate_document_json, open_project_bytes, open_project_file, open_project_unpacked_dir,
     sanitize_circular_hooks, save_project_bytes, save_project_unpacked_dir, save_template_bytes, validate_project_document,
 };
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::cmd::helpers::{decode_base64_capped, encode_base64, parse_sheet_id, prune_out_of_bounds_point_overrides};
-use crate::cmd::params::{bool_schema, empty_object_schema, non_empty_str_schema, nullable_schema, obj_schema, parse_params, str_schema};
-use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
-use crate::{CommandOutcome, EngineError, ExternalPathPolicy, Session, dag};
+use crate::cmd::helpers::{
+    always_enabled, bad_input, bad_input_ptr, decode_base64_capped, encode_base64, parse_sheet_id, prune_out_of_bounds_point_overrides,
+};
+use crate::cmd::params::{command_schema, empty_object_schema, parse_params};
+use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects, command_specs};
+use crate::{CommandOutcome, EngineError, ExternalPathPolicy, dag};
 
 /// Summary returned by project link/recalculation helpers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,10 +40,6 @@ impl RecalcSummary {
         let ids: Vec<&str> = self.failed_result_sheets.iter().map(|f| f.sheet_id.as_str()).collect();
         Some(format!(" with {} failed result sheet(s): {}", self.failed_result_sheets.len(), ids.join(", ")))
     }
-}
-
-fn always_enabled(_session: &Session) -> bool {
-    true
 }
 
 /// Refresh internal/external linked regions and run full DAG recalculation under an explicit policy.
@@ -84,13 +83,11 @@ pub(super) fn current_utc_timestamp() -> String {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct NewProjectParams {
+    /// Title for the new project (defaults to `Untitled Project`).
     title: Option<String>,
-}
-
-fn new_project_schema() -> Value {
-    obj_schema(vec![("title", nullable_schema(str_schema("Title for the new project (defaults to `Untitled Project`)")))], &[], false)
 }
 
 fn run_file_new(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
@@ -102,7 +99,7 @@ fn run_project_new(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, E
 }
 
 fn run_new_project_with_id(ctx: &mut Ctx<'_>, command_id: &str, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: NewProjectParams = parse_params(&new_project_schema(), params)?;
+    let parsed: NewProjectParams = parse_params(&command_schema::<NewProjectParams>(), params)?;
     let title = parsed.title.unwrap_or_else(|| String::from("Untitled Project"));
     let doc = ProjectDocument::new(title)?;
     let result_title = doc.title.clone();
@@ -111,44 +108,35 @@ fn run_new_project_with_id(ctx: &mut Ctx<'_>, command_id: &str, params: Value) -
     Ok(CommandOutcome::mutated(command_id, "created new project", json!({ "title": result_title })))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct OpenProjectParams {
+    /// Filesystem path to `.curvebook` archive or `.curvebook.d/` directory.
     path: Option<String>,
+    /// Base64-encoded `.curvebook` zip archive bytes.
     bytes_base64: Option<String>,
+    /// Treat `path` as an unpacked `.curvebook.d/` project directory.
     unpacked: Option<bool>,
 }
 
-fn open_project_schema() -> Value {
-    obj_schema(
-        vec![
-            ("path", nullable_schema(str_schema("Filesystem path to `.curvebook` archive or `.curvebook.d/` directory"))),
-            ("bytes_base64", nullable_schema(str_schema("Base64-encoded `.curvebook` zip archive bytes"))),
-            ("unpacked", nullable_schema(bool_schema("Treat `path` as an unpacked `.curvebook.d/` project directory"))),
-        ],
-        &[],
-        false,
-    )
-}
-
 fn run_project_open(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: OpenProjectParams = parse_params(&open_project_schema(), params)?;
+    let parsed: OpenProjectParams = parse_params(&command_schema::<OpenProjectParams>(), params)?;
     let explicit_unpacked = parsed.unpacked.unwrap_or(false);
     let (loaded, used_unpacked, opened_path) = if let Some(ref path) = parsed.path {
         if path.trim().is_empty() {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "project.open `path` must not be empty"));
+            return Err(bad_input("project.open `path` must not be empty"));
         }
         let (resolved, use_unpacked) = ctx.session.path_policy.resolve_project_open_target(path, explicit_unpacked)?;
         let opened = if use_unpacked { open_project_unpacked_dir(&resolved)? } else { open_project_file(&resolved)? };
         (opened, use_unpacked, Some(resolved))
     } else if explicit_unpacked {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "project.open with `unpacked: true` requires `path`")
+        return Err(bad_input("project.open with `unpacked: true` requires `path`")
             .with_remediation("Provide a directory path in `path` when opening an unpacked project."));
     } else if let Some(ref b64) = parsed.bytes_base64 {
         let bytes = decode_base64_capped(b64, MAX_ARCHIVE_FILE_BYTES, "/bytes_base64")?;
         (open_project_bytes(&bytes)?, false, None)
     } else {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "project.open requires `path` or `bytes_base64`")
-            .with_remediation("Pass either `path` or `bytes_base64`."));
+        return Err(bad_input("project.open requires `path` or `bytes_base64`").with_remediation("Pass either `path` or `bytes_base64`."));
     };
 
     let opened_from_path = opened_path.is_some();
@@ -167,40 +155,29 @@ fn run_project_open(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SaveProjectParams {
+    /// Destination `.curvebook` archive path or `.curvebook.d/` directory.
     path: Option<String>,
+    /// Include base64-encoded `.curvebook` bytes in response (defaults to true when `path` is omitted).
     return_bytes: Option<bool>,
+    /// Save as an unpacked `.curvebook.d/` project directory.
     unpacked: Option<bool>,
 }
 
-fn save_project_schema() -> Value {
-    obj_schema(
-        vec![
-            ("path", nullable_schema(str_schema("Destination `.curvebook` archive path or `.curvebook.d/` directory"))),
-            (
-                "return_bytes",
-                nullable_schema(bool_schema("Include base64-encoded `.curvebook` bytes in response (defaults to true when `path` is omitted)")),
-            ),
-            ("unpacked", nullable_schema(bool_schema("Save as an unpacked `.curvebook.d/` project directory"))),
-        ],
-        &[],
-        false,
-    )
-}
-
 fn run_project_save(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: SaveProjectParams = parse_params(&save_project_schema(), params)?;
+    let parsed: SaveProjectParams = parse_params(&command_schema::<SaveProjectParams>(), params)?;
     let explicit_unpacked = parsed.unpacked.unwrap_or(false);
     if explicit_unpacked && parsed.path.is_none() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "project.save with `unpacked: true` requires `path`")
+        return Err(bad_input("project.save with `unpacked: true` requires `path`")
             .with_remediation("Provide a target directory `path` when saving unpacked format."));
     }
     let return_bytes = parsed.return_bytes.unwrap_or(parsed.path.is_none());
 
     let (used_unpacked, archive_bytes, saved_path) = if let Some(ref path) = parsed.path {
         if path.trim().is_empty() {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "project.save `path` must not be empty"));
+            return Err(bad_input("project.save `path` must not be empty"));
         }
         let (resolved, use_unpacked) = ctx.session.path_policy.resolve_project_save_target(path, explicit_unpacked)?;
         if use_unpacked {
@@ -236,28 +213,17 @@ fn run_project_save(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SaveTemplateParams {
+    /// Destination `.cbtemplate` file path.
     path: Option<String>,
+    /// Include base64-encoded template bytes in response (defaults to true when `path` is omitted).
     return_bytes: Option<bool>,
 }
 
-fn save_template_schema() -> Value {
-    obj_schema(
-        vec![
-            ("path", nullable_schema(str_schema("Destination `.cbtemplate` file path"))),
-            (
-                "return_bytes",
-                nullable_schema(bool_schema("Include base64-encoded template bytes in response (defaults to true when `path` is omitted)")),
-            ),
-        ],
-        &[],
-        false,
-    )
-}
-
 fn run_project_save_template(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: SaveTemplateParams = parse_params(&save_template_schema(), params)?;
+    let parsed: SaveTemplateParams = parse_params(&command_schema::<SaveTemplateParams>(), params)?;
     let return_bytes = parsed.return_bytes.unwrap_or(parsed.path.is_none());
     let bytes = save_template_bytes(&ctx.session.doc)?;
     if let Some(ref path) = parsed.path {
@@ -276,33 +242,25 @@ fn run_project_save_template(ctx: &mut Ctx<'_>, params: Value) -> Result<Command
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct InstantiateTemplateParams {
+    /// Path to `.cbtemplate` archive file.
     path: Option<String>,
+    /// Base64-encoded `.cbtemplate` archive bytes.
     bytes_base64: Option<String>,
+    /// Optional title override for the instantiated project.
     title: Option<String>,
 }
 
-fn instantiate_template_schema() -> Value {
-    obj_schema(
-        vec![
-            ("path", nullable_schema(str_schema("Path to `.cbtemplate` archive file"))),
-            ("bytes_base64", nullable_schema(str_schema("Base64-encoded `.cbtemplate` archive bytes"))),
-            ("title", nullable_schema(str_schema("Optional title override for the instantiated project"))),
-        ],
-        &[],
-        false,
-    )
-}
-
 fn run_project_instantiate_template(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: InstantiateTemplateParams = parse_params(&instantiate_template_schema(), params)?;
+    let parsed: InstantiateTemplateParams = parse_params(&command_schema::<InstantiateTemplateParams>(), params)?;
     let bytes = if let Some(ref path) = parsed.path {
         ctx.session.path_policy.read_binary_file(path, "template file", MAX_ARCHIVE_FILE_BYTES)?
     } else if let Some(ref b64) = parsed.bytes_base64 {
         decode_base64_capped(b64, MAX_ARCHIVE_FILE_BYTES, "/bytes_base64")?
     } else {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "project.instantiateTemplate requires `path` or `bytes_base64`")
+        return Err(bad_input("project.instantiateTemplate requires `path` or `bytes_base64`")
             .with_remediation("Pass either `path` or `bytes_base64` pointing to a template archive."));
     };
 
@@ -323,40 +281,29 @@ fn run_project_instantiate_template(ctx: &mut Ctx<'_>, params: Value) -> Result<
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct InspectProjectParams {
+    /// Optional sheet ID to focus dependency and section inspection on.
     sheet_id: Option<String>,
 }
 
-fn inspect_project_schema() -> Value {
-    obj_schema(vec![("sheet_id", nullable_schema(str_schema("Optional sheet ID to focus dependency and section inspection on")))], &[], false)
-}
-
 fn run_project_inspect(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: InspectProjectParams = parse_params(&inspect_project_schema(), params)?;
+    let parsed: InspectProjectParams = parse_params(&command_schema::<InspectProjectParams>(), params)?;
     let focus_id = parsed.sheet_id.as_deref().map(parse_sheet_id).transpose()?;
     let summary = crate::services::inspect_project_summary(&ctx.session.doc, ctx.session.is_dirty(), ctx.session.file_path(), focus_id.as_ref())?;
     Ok(CommandOutcome::read_only("project.inspect", "inspected project", summary.to_project_inspect_json()))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RecalculateParams {
+    /// Refresh external delimited-file links before recalculating downstream analyses (default true).
     include_external_links: Option<bool>,
 }
 
-fn recalculate_schema() -> Value {
-    obj_schema(
-        vec![(
-            "include_external_links",
-            nullable_schema(bool_schema("Refresh external delimited-file links before recalculating downstream analyses (default true)")),
-        )],
-        &[],
-        false,
-    )
-}
-
 fn run_project_recalculate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: RecalculateParams = parse_params(&recalculate_schema(), params)?;
+    let parsed: RecalculateParams = parse_params(&command_schema::<RecalculateParams>(), params)?;
     let include_external = parsed.include_external_links.unwrap_or(true);
     let recalc_policy = ctx.session.path_policy.clone();
     let summary = recalculate_with_links_under_policy(&mut ctx.session.doc, include_external, &recalc_policy)?;
@@ -376,25 +323,19 @@ fn run_project_recalculate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOu
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CreateCheckpointParams {
+    /// Human-readable checkpoint name.
+    #[schemars(length(min = 1))]
     name: String,
+    /// Optional unique checkpoint ID (auto-generated if omitted).
+    #[schemars(length(min = 1))]
     id: Option<String>,
+    /// Optional checkpoint description or note.
     note: Option<String>,
+    /// Optional explicit ISO-8601 UTC timestamp.
     timestamp_utc: Option<String>,
-}
-
-fn create_checkpoint_schema() -> Value {
-    obj_schema(
-        vec![
-            ("name", non_empty_str_schema("Human-readable checkpoint name")),
-            ("id", nullable_schema(non_empty_str_schema("Optional unique checkpoint ID (auto-generated if omitted)"))),
-            ("note", nullable_schema(str_schema("Optional checkpoint description or note"))),
-            ("timestamp_utc", nullable_schema(str_schema("Optional explicit ISO-8601 UTC timestamp"))),
-        ],
-        &["name"],
-        false,
-    )
 }
 
 fn next_checkpoint_id(doc: &ProjectDocument) -> String {
@@ -482,10 +423,10 @@ const MAX_CHECKPOINTS_PER_PROJECT: usize = 32;
 const MAX_TOTAL_CHECKPOINT_BYTES: usize = MAX_ARCHIVE_FILE_BYTES;
 
 fn run_project_create_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: CreateCheckpointParams = parse_params(&create_checkpoint_schema(), params)?;
+    let parsed: CreateCheckpointParams = parse_params(&command_schema::<CreateCheckpointParams>(), params)?;
     let name = parsed.name.trim().to_owned();
     if name.is_empty() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "checkpoint `name` must not be empty"));
+        return Err(bad_input("checkpoint `name` must not be empty"));
     }
     validate_title(&name)?;
 
@@ -493,7 +434,7 @@ fn run_project_create_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<Com
         Some(raw) => {
             let trimmed = raw.trim().to_owned();
             if trimmed.is_empty() {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "checkpoint `id` must not be empty"));
+                return Err(bad_input("checkpoint `id` must not be empty"));
             }
             validate_title(&trimmed)?;
             trimmed
@@ -519,15 +460,14 @@ fn run_project_create_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<Com
         Some(raw) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "`timestamp_utc` cannot be empty"));
+                return Err(bad_input("`timestamp_utc` cannot be empty"));
             }
             validate_title(trimmed)?;
             if !is_valid_iso8601_utc_timestamp(trimmed) {
-                return Err(EngineError::with_code(
-                    ErrorCode::BadInput,
+                return Err(bad_input_ptr(
+                    "/timestamp_utc",
                     format!("invalid `timestamp_utc` `{trimmed}`; expected ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) or `unix:<seconds>`"),
-                )
-                .with_details(json!({ "pointer": "/timestamp_utc" })));
+                ));
             }
             trimmed.to_owned()
         }
@@ -598,18 +538,13 @@ fn run_project_list_checkpoints(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CheckpointRefParams {
+    /// Checkpoint ID to locate.
     id: Option<String>,
+    /// Checkpoint name to locate.
     name: Option<String>,
-}
-
-fn checkpoint_ref_schema() -> Value {
-    obj_schema(
-        vec![("id", nullable_schema(str_schema("Checkpoint ID to locate"))), ("name", nullable_schema(str_schema("Checkpoint name to locate")))],
-        &[],
-        false,
-    )
 }
 
 fn find_checkpoint_index(doc: &ProjectDocument, command_id: &str, params: &CheckpointRefParams) -> Result<usize, EngineError> {
@@ -627,12 +562,11 @@ fn find_checkpoint_index(doc: &ProjectDocument, command_id: &str, params: &Check
             .position(|cp| cp.name == name)
             .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("checkpoint `{name}` not found")));
     }
-    Err(EngineError::with_code(ErrorCode::BadInput, format!("`{command_id}` requires `id` or `name`"))
-        .with_remediation("Provide a non-empty checkpoint `id` or `name`."))
+    Err(bad_input(format!("`{command_id}` requires `id` or `name`")).with_remediation("Provide a non-empty checkpoint `id` or `name`."))
 }
 
 fn run_project_restore_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: CheckpointRefParams = parse_params(&checkpoint_ref_schema(), params)?;
+    let parsed: CheckpointRefParams = parse_params(&command_schema::<CheckpointRefParams>(), params)?;
     let idx = find_checkpoint_index(&ctx.session.doc, "project.restoreCheckpoint", &parsed)?;
     let cp =
         ctx.session.doc.checkpoints.get(idx).cloned().ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, "checkpoint index out of bounds"))?;
@@ -677,7 +611,7 @@ fn run_project_restore_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<Co
 }
 
 fn run_project_delete_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: CheckpointRefParams = parse_params(&checkpoint_ref_schema(), params)?;
+    let parsed: CheckpointRefParams = parse_params(&command_schema::<CheckpointRefParams>(), params)?;
     let idx = find_checkpoint_index(&ctx.session.doc, "project.deleteCheckpoint", &parsed)?;
     let removed = ctx.session.doc.checkpoints.remove(idx);
 
@@ -692,169 +626,149 @@ fn run_project_delete_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<Com
     ))
 }
 
-static SPECS: [CommandSpec; 12] = [
-    CommandSpec {
+static SPECS: &[CommandSpec] = &command_specs!(
+    CommandGroup::Project;
+    {
         id: "file.new",
         label: "New Project",
         menu_path: "File/New Project",
         shortcut: "Cmd+N",
         summary: "Create a fresh empty CurveBook project.",
         beginner: "Replaces the active workspace with an empty project document (preserving undo history in this session).",
-        group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA),
-        input_schema: new_project_schema,
+        input_schema: command_schema::<NewProjectParams>,
         enabled: always_enabled,
         run: run_file_new,
     },
-    CommandSpec {
+    {
         id: "project.new",
         label: "New Project",
         menu_path: "File/New Project",
-        shortcut: "",
         summary: "Create a fresh empty CurveBook project.",
         beginner: "Creates a clean empty project document with an optional title; alias for `file.new`.",
-        group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA),
-        input_schema: new_project_schema,
+        input_schema: command_schema::<NewProjectParams>,
         enabled: always_enabled,
         run: run_project_new,
     },
-    CommandSpec {
+    {
         id: "project.open",
         label: "Open Project",
         menu_path: "File/Open...",
         shortcut: "Cmd+O",
         summary: "Load a `.curvebook` archive or unpacked `.curvebook.d/` directory.",
         beginner: "Opens a project from a filesystem path or base64 archive payload and replaces the current session document.",
-        group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA),
-        input_schema: open_project_schema,
+        input_schema: command_schema::<OpenProjectParams>,
         enabled: always_enabled,
         run: run_project_open,
     },
-    CommandSpec {
+    {
         id: "project.save",
         label: "Save Project",
         menu_path: "File/Save",
         shortcut: "Cmd+S",
         summary: "Save the active project atomically to `.curvebook`, unpacked directory, or bytes.",
         beginner: "Serializes the project document using atomic filesystem writes when a path is provided, or returns base64 bytes.",
-        group: CommandGroup::Project,
         effects: Effects::WRITES_FILESYSTEM,
-        input_schema: save_project_schema,
+        input_schema: command_schema::<SaveProjectParams>,
         enabled: always_enabled,
         run: run_project_save,
     },
-    CommandSpec {
+    {
         id: "project.saveTemplate",
         label: "Save Template",
         menu_path: "File/Save Template...",
-        shortcut: "",
         summary: "Export the project structure as a data-stripped `.cbtemplate` file.",
         beginner: "Strips raw data values while preserving table schemas, analyses, graphs, and layouts, then writes atomically to disk or base64.",
-        group: CommandGroup::Project,
         effects: Effects::WRITES_FILESYSTEM,
-        input_schema: save_template_schema,
+        input_schema: command_schema::<SaveTemplateParams>,
         enabled: always_enabled,
         run: run_project_save_template,
     },
-    CommandSpec {
+    {
         id: "project.instantiateTemplate",
         label: "New Project From Template",
         menu_path: "File/New From Template...",
-        shortcut: "",
         summary: "Create a new project from a `.cbtemplate` archive.",
         beginner: "Loads a saved template with its analysis pipelines, graphs, and layouts ready for new experimental data.",
-        group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA),
-        input_schema: instantiate_template_schema,
+        input_schema: command_schema::<InstantiateTemplateParams>,
         enabled: always_enabled,
         run: run_project_instantiate_template,
     },
-    CommandSpec {
+    {
         id: "project.inspect",
         label: "Inspect Project",
         menu_path: "View/Inspect Project",
-        shortcut: "",
         summary: "Inspect sheet structure, metadata, and upstream dependency edges.",
         beginner: "Returns a structured read-only summary of all sheets, constants, checkpoints, and optional single-sheet dependencies.",
-        group: CommandGroup::Project,
         effects: Effects::IDEMPOTENT,
-        input_schema: inspect_project_schema,
+        input_schema: command_schema::<InspectProjectParams>,
         enabled: always_enabled,
         run: run_project_inspect,
     },
-    CommandSpec {
+    {
         id: "project.recalculate",
         label: "Recalculate All",
         menu_path: "Analyze/Recalculate All",
-        shortcut: "",
         summary: "Refresh live links and recalculate all downstream analyses and graphs.",
         beginner: "Re-evaluates linked regions, calculated variables, statistical analyses, curve fits, and derived tables in dependency order.",
-        group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::IDEMPOTENT),
-        input_schema: recalculate_schema,
+        input_schema: command_schema::<RecalculateParams>,
         enabled: always_enabled,
         run: run_project_recalculate,
     },
-    CommandSpec {
+    {
         id: "project.createCheckpoint",
         label: "Create Checkpoint",
         menu_path: "File/Checkpoints/Create Checkpoint...",
-        shortcut: "",
         summary: "Save a named project snapshot checkpoint inside the document.",
         beginner: "Captures a named milestone copy of all sheets so you can restore or branch back to it later.",
-        group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT,
-        input_schema: create_checkpoint_schema,
+        input_schema: command_schema::<CreateCheckpointParams>,
         enabled: always_enabled,
         run: run_project_create_checkpoint,
     },
-    CommandSpec {
+    {
         id: "project.listCheckpoints",
         label: "List Checkpoints",
         menu_path: "File/Checkpoints/List Checkpoints",
-        shortcut: "",
         summary: "List named checkpoints stored in the project.",
         beginner: "Lists each checkpoint's ID, name, note, and UTC timestamp without dumping full snapshot payloads.",
-        group: CommandGroup::Project,
         effects: Effects::IDEMPOTENT,
         input_schema: empty_object_schema,
         enabled: always_enabled,
         run: run_project_list_checkpoints,
     },
-    CommandSpec {
+    {
         id: "project.restoreCheckpoint",
         label: "Restore Checkpoint",
         menu_path: "File/Checkpoints/Restore Checkpoint...",
-        shortcut: "",
         summary: "Restore the document to a previously saved named checkpoint.",
         beginner: "Replaces the current sheets with the chosen checkpoint snapshot while keeping existing checkpoints intact.",
-        group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA),
-        input_schema: checkpoint_ref_schema,
+        input_schema: command_schema::<CheckpointRefParams>,
         enabled: always_enabled,
         run: run_project_restore_checkpoint,
     },
-    CommandSpec {
+    {
         id: "project.deleteCheckpoint",
         label: "Delete Checkpoint",
         menu_path: "File/Checkpoints/Delete Checkpoint...",
-        shortcut: "",
         summary: "Remove a named checkpoint from the project.",
         beginner: "Deletes a stored checkpoint by ID or name without altering active data sheets.",
-        group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA),
-        input_schema: checkpoint_ref_schema,
+        input_schema: command_schema::<CheckpointRefParams>,
         enabled: always_enabled,
         run: run_project_delete_checkpoint,
     },
-];
+);
 
 /// Registered command specifications for the `project` group.
 #[must_use]
 pub fn specs() -> &'static [CommandSpec] {
-    &SPECS
+    SPECS
 }
 
 #[cfg(test)]
@@ -864,7 +778,7 @@ mod tests {
     use curvebook_doc::{DataSheet, InfoSheet, TableArchetype, XyTable};
     use serde_json::json;
 
-    use crate::cmd::Caller;
+    use crate::{Session, cmd::Caller};
 
     use super::*;
 

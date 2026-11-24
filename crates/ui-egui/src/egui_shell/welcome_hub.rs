@@ -10,7 +10,6 @@ use egui::{Align, Color32, CornerRadius, FontId, Id, Key, Layout, Modifiers, Pos
 use serde_json::{Value, json};
 
 use crate::UiApp;
-use crate::control_io::encode_base64;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent, doc_sheet_title};
 use crate::inspect::ZLayer;
 use crate::tr;
@@ -1674,7 +1673,7 @@ fn dispatch_welcome_primary_action(app: &UiApp, state: &mut WelcomeHubEguiState,
             match build_starter_template_bytes(tpl.id) {
                 Ok(bytes) => {
                     state.template_error = None;
-                    let b64 = encode_base64(&bytes);
+                    let b64 = curvebook_platform::base64::encode(&bytes);
                     let title_trim = state.schema.title.trim();
                     let mut obj = json!({ "bytes_base64": b64 });
                     if !title_trim.is_empty()
@@ -1718,7 +1717,7 @@ fn dispatch_welcome_primary_action(app: &UiApp, state: &mut WelcomeHubEguiState,
             let trimmed = state.open_file_path_draft.trim();
             if trimmed.is_empty() {
                 state.open_file_request_count = state.open_file_request_count.saturating_add(1);
-                intents.push_custom_view_action("welcome", "action:open_file");
+                intents.push(UiIntent::OpenProjectFile);
             } else {
                 intents.push_engine("project.open", json!({ "path": trimmed }));
                 intents.push(UiIntent::SetLauncherOpen { open: false });
@@ -2032,27 +2031,29 @@ fn matching_samples_for(arch: WelcomeArchetypeChoice) -> Vec<&'static SampleFixt
     SAMPLE_FIXTURES.iter().filter(|f| f.kind == arch.table_kind()).collect()
 }
 
-fn dispatch_sample_creation(app: &UiApp, arch: WelcomeArchetypeChoice, schema: &WelcomeSchemaDraft, intents: &mut PendingUiIntents) {
-    let fixtures = matching_samples_for(arch);
-    let Some(fx) = fixtures.get(schema.selected_sample_index.min(fixtures.len().saturating_sub(1))) else {
-        let params = build_empty_create_params(arch, schema, &app.locale);
-        intents.push_engine("sheet.createData", params);
-        return;
-    };
+/// Build an atomic [`UiIntent::EngineCommandGroup`] instantiating sample fixture `fixture_id`.
+///
+/// # Errors
+/// Returns an error string if `fixture_id` is unknown or cannot be constructed.
+pub fn build_sample_creation_intent(
+    app: &UiApp,
+    fixture_id: &str,
+    title_override: Option<&str>,
+    auto_graph: bool,
+    auto_info: bool,
+) -> Result<UiIntent, String> {
     let doc = app.document();
     let new_sid = next_unique_sheet_id(doc, "data");
-    let Ok(ds) = instantiate_sample_fixture(fx.id, new_sid.clone()) else {
-        return;
-    };
-    let title = if schema.title.trim().is_empty() { ds.title.clone() } else { schema.title.trim().to_owned() };
+    let ds = instantiate_sample_fixture(fixture_id, new_sid.clone()).map_err(|e| e.to_string())?;
+    let title = title_override.map(str::trim).filter(|s| !s.is_empty()).map_or_else(|| ds.title.clone(), str::to_owned);
     let mut create_obj = json!({
         "sheet_id": new_sid.as_str(),
         "title": title,
         "kind": ds.archetype.kind(),
         "cols": ds.archetype.column_count().max(1),
         "rows": ds.archetype.row_count().max(1),
-        "auto_graph": schema.auto_graph,
-        "auto_info": schema.auto_info,
+        "auto_graph": auto_graph,
+        "auto_info": auto_info,
     });
     if let Some(map) = create_obj.as_object_mut() {
         match &ds.archetype {
@@ -2090,11 +2091,24 @@ fn dispatch_sample_creation(app: &UiApp, arch: WelcomeArchetypeChoice, schema: &
             TableArchetype::PartsOfWhole(_) => {}
         }
     }
-    intents.push_engine("sheet.createData", create_obj);
-    enqueue_sample_population_intents(new_sid.as_str(), &ds.archetype, intents);
+    let mut commands = vec![(String::from("sheet.createData"), create_obj)];
+    collect_sample_population_commands(new_sid.as_str(), &ds.archetype, &mut commands);
+    Ok(UiIntent::EngineCommandGroup { commands })
 }
 
-fn enqueue_sample_population_intents(sid: &str, arch: &TableArchetype, intents: &mut PendingUiIntents) {
+fn dispatch_sample_creation(app: &UiApp, arch: WelcomeArchetypeChoice, schema: &WelcomeSchemaDraft, intents: &mut PendingUiIntents) {
+    let fixtures = matching_samples_for(arch);
+    let Some(fx) = fixtures.get(schema.selected_sample_index.min(fixtures.len().saturating_sub(1))) else {
+        let params = build_empty_create_params(arch, schema, &app.locale);
+        intents.push_engine("sheet.createData", params);
+        return;
+    };
+    if let Ok(intent) = build_sample_creation_intent(app, fx.id, Some(&schema.title), schema.auto_graph, schema.auto_info) {
+        intents.push(intent);
+    }
+}
+
+fn collect_sample_population_commands(sid: &str, arch: &TableArchetype, commands: &mut Vec<(String, Value)>) {
     let mut x_edits = Vec::new();
     match arch {
         TableArchetype::Xy(t) => {
@@ -2112,7 +2126,7 @@ fn enqueue_sample_population_intents(sid: &str, arch: &TableArchetype, intents: 
         _ => {}
     }
     if !x_edits.is_empty() {
-        intents.push_engine("table.setXCells", json!({ "sheet_id": sid, "edits": x_edits }));
+        commands.push((String::from("table.setXCells"), json!({ "sheet_id": sid, "edits": x_edits })));
     }
 
     let col_titles: Vec<String> = match arch {
@@ -2126,7 +2140,7 @@ fn enqueue_sample_population_intents(sid: &str, arch: &TableArchetype, intents: 
         TableArchetype::Nested(t) => t.groups.iter().map(|g| g.title.clone()).collect(),
     };
     if col_titles.iter().any(|t| !t.trim().is_empty()) {
-        intents.push_engine("table.setTitles", json!({ "sheet_id": sid, "titles": col_titles }));
+        commands.push((String::from("table.setTitles"), json!({ "sheet_id": sid, "titles": col_titles })));
     }
 
     let mut edits = Vec::new();
@@ -2155,7 +2169,7 @@ fn enqueue_sample_population_intents(sid: &str, arch: &TableArchetype, intents: 
         }
     }
     if !edits.is_empty() {
-        intents.push_engine("table.setCells", json!({ "sheet_id": sid, "edits": edits }));
+        commands.push((String::from("table.setCells"), json!({ "sheet_id": sid, "edits": edits })));
     }
 }
 

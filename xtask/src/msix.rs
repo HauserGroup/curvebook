@@ -111,12 +111,11 @@ fn stage(root: &Path, directory: &Path, binary_dir: &Path, options: &Options) ->
     // Render package-size raster variants from the existing attributed raster icon.
     // No SVG tools, new source artwork, or bundled fonts are involved.
     let icon_bytes = std::fs::read(root.join("assets/app-icon/curvebook-1024.png")).map_err(|e| format!("read icon: {e}"))?;
-    let icon = image::load_from_memory_with_format(&icon_bytes, image::ImageFormat::Png).map_err(|e| format!("decode icon: {e}"))?;
+    let (src_w, src_h, src_rgba) = decode_png_rgba8(&icon_bytes)?;
     for (name, size) in [("StoreLogo.png", 50), ("Square150x150Logo.png", 150), ("Square44x44Logo.png", 44)] {
-        let rendered = icon.resize_exact(size, size, image::imageops::FilterType::Lanczos3);
-        let mut encoded = Cursor::new(Vec::new());
-        rendered.write_to(&mut encoded, image::ImageFormat::Png).map_err(|e| format!("encode logo: {e}"))?;
-        write(&assets.join(name), &encoded.into_inner())?;
+        let resized = downscale_rgba_lanczos3(&src_rgba, src_w, src_h, size, size)?;
+        let encoded = encode_png_rgba8(size, size, &resized)?;
+        write(&assets.join(name), &encoded)?;
     }
     for name in ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ASSETS.md", "ATTRIBUTION.md"] {
         copy(&root.join(name), &directory.join(name))?;
@@ -195,6 +194,125 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     result.and(cleanup)
 }
 
+fn decode_png_rgba8(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let mut decoder = png::Decoder::new(Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().map_err(|e| format!("decode icon header: {e}"))?;
+    let buf_size = reader.output_buffer_size().ok_or_else(|| String::from("icon buffer size overflow"))?;
+    let mut raw = vec![0u8; buf_size];
+    let info = reader.next_frame(&mut raw).map_err(|e| format!("decode icon pixels: {e}"))?;
+    let src = raw.get(..info.buffer_size()).ok_or_else(|| String::from("decoded pixel frame out of bounds"))?;
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => src.to_vec(),
+        png::ColorType::Rgb => src.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect(),
+        png::ColorType::GrayscaleAlpha => src.as_chunks::<2>().0.iter().flat_map(|&[g, a]| [g, g, g, a]).collect(),
+        png::ColorType::Grayscale => src.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        other => return Err(format!("unsupported icon PNG color type {other:?}")),
+    };
+    Ok((info.width, info.height, rgba))
+}
+
+fn encode_png_rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|e| format!("encode icon header: {e}"))?;
+    writer.write_image_data(rgba).map_err(|e| format!("encode icon pixels: {e}"))?;
+    writer.finish().map_err(|e| format!("finish icon png: {e}"))?;
+    Ok(out)
+}
+
+fn lanczos3(x: f64) -> f64 {
+    let ax = x.abs();
+    if ax < 1e-12 {
+        return 1.0;
+    }
+    if ax >= 3.0 {
+        return 0.0;
+    }
+    let pi_x = std::f64::consts::PI * ax;
+    (pi_x.sin() / pi_x) * ((pi_x / 3.0).sin() / (pi_x / 3.0))
+}
+
+fn downscale_rgba_lanczos3(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Result<Vec<u8>, String> {
+    let (sw, sh, dw, dh) = (src_w as usize, src_h as usize, dst_w as usize, dst_h as usize);
+    let expected_len = sw.checked_mul(sh).and_then(|p| p.checked_mul(4)).ok_or_else(|| String::from("source dimensions overflow"))?;
+    if src.len() != expected_len || sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return Err(String::from("invalid icon dimensions for resize"));
+    }
+    let sx_ratio = sw as f64 / dw as f64;
+    let sy_ratio = sh as f64 / dh as f64;
+    let sup_x = 3.0 * sx_ratio.max(1.0);
+    let sup_y = 3.0 * sy_ratio.max(1.0);
+    let inv_sx = sx_ratio.max(1.0).recip();
+    let inv_sy = sy_ratio.max(1.0).recip();
+
+    let mut horiz = vec![0.0_f64; dw * sh * 4];
+    for y in 0..sh {
+        for x in 0..dw {
+            let center = (x as f64 + 0.5) * sx_ratio - 0.5;
+            let lo = (center - sup_x).floor().max(0.0) as usize;
+            let hi = ((center + sup_x).ceil() as isize).min(sw as isize - 1).max(0) as usize;
+            let (mut r, mut g, mut b, mut a, mut wsum) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            for ix in lo..=hi {
+                let w = lanczos3((ix as f64 - center) * inv_sx);
+                let base = (y * sw + ix) * 4;
+                let px = src.get(base..base + 4).ok_or_else(|| String::from("source pixel out of bounds"))?;
+                let pa = f64::from(*px.get(3).unwrap_or(&0)) / 255.0;
+                r += f64::from(*px.first().unwrap_or(&0)) * pa * w;
+                g += f64::from(*px.get(1).unwrap_or(&0)) * pa * w;
+                b += f64::from(*px.get(2).unwrap_or(&0)) * pa * w;
+                a += pa * w;
+                wsum += w;
+            }
+            let out_base = (y * dw + x) * 4;
+            if wsum.abs() > 1e-12
+                && let Some(dst) = horiz.get_mut(out_base..out_base + 4)
+                && let [dr, dg, db, da] = dst
+            {
+                *dr = r / wsum;
+                *dg = g / wsum;
+                *db = b / wsum;
+                *da = a / wsum;
+            }
+        }
+    }
+
+    let mut out = vec![0u8; dw * dh * 4];
+    for y in 0..dh {
+        let center = (y as f64 + 0.5) * sy_ratio - 0.5;
+        let lo = (center - sup_y).floor().max(0.0) as usize;
+        let hi = ((center + sup_y).ceil() as isize).min(sh as isize - 1).max(0) as usize;
+        for x in 0..dw {
+            let (mut r, mut g, mut b, mut a, mut wsum) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            for iy in lo..=hi {
+                let w = lanczos3((iy as f64 - center) * inv_sy);
+                let base = (iy * dw + x) * 4;
+                let px = horiz.get(base..base + 4).ok_or_else(|| String::from("intermediate pixel out of bounds"))?;
+                r += *px.first().unwrap_or(&0.0) * w;
+                g += *px.get(1).unwrap_or(&0.0) * w;
+                b += *px.get(2).unwrap_or(&0.0) * w;
+                a += *px.get(3).unwrap_or(&0.0) * w;
+                wsum += w;
+            }
+            let out_base = (y * dw + x) * 4;
+            if let Some(dst) = out.get_mut(out_base..out_base + 4)
+                && let [dr, dg, db, da] = dst
+            {
+                let norm = if wsum.abs() > 1e-12 { wsum } else { 1.0 };
+                let alpha = (a / norm).clamp(0.0, 1.0);
+                let unpremul = |v: f64| -> u8 { if alpha > 1e-6 { ((v / norm / alpha).clamp(0.0, 255.0)).round() as u8 } else { 0 } };
+                *dr = unpremul(r);
+                *dg = unpremul(g);
+                *db = unpremul(b);
+                *da = (alpha * 255.0).clamp(0.0, 255.0).round() as u8;
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Options, escape_xml, manifest, stage, validate_executable, validate_version};
@@ -261,8 +379,10 @@ mod tests {
             assert!(xml.contains("Alias=\"curvebook-cli.exe\""));
             assert!(!payload.join("should-not-ship.pfx").exists());
             for (name, expected) in [("StoreLogo.png", 50), ("Square150x150Logo.png", 150), ("Square44x44Logo.png", 44)] {
-                let (width, height) = image::image_dimensions(payload.join("Assets").join(name)).unwrap();
-                assert_eq!((width, height), (expected, expected));
+                let file = std::fs::File::open(payload.join("Assets").join(name)).unwrap();
+                let reader = png::Decoder::new(std::io::BufReader::new(file)).read_info().unwrap();
+                let info = reader.info();
+                assert_eq!((info.width, info.height), (expected, expected));
             }
             assert_eq!(escape_xml("<&\"'>"), "&lt;&amp;&quot;&apos;&gt;");
             Ok::<(), String>(())

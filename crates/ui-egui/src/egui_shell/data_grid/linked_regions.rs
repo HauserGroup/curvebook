@@ -4,8 +4,8 @@ use curvebook_doc::LinkedDataRegion;
 use egui::{Align, CornerRadius, FontId, Id, Key, Modifiers, Order, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, WidgetInfo, pos2, vec2};
 use serde_json::json;
 
+use crate::grid_view::grid_tr;
 use crate::inspect::ZLayer;
-use crate::views::grid_core::grid_tr;
 
 use super::super::FrameInspectEntryInput;
 use super::shared::{

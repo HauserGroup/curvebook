@@ -5,20 +5,14 @@
 //! declarative contract emitting pure [`ToolCommandIntent`] payloads into `curvebook-engine`.
 
 use curvebook_doc::{
-    AnalysisKind, BracketLabelMode, BracketStyle, BreakOrnament, ChecklistItem, ChecklistStatus, CldOrdering, ClusterDistance, ClusterLinkage,
-    CoxTieMethod, EquationDisplayMode, FitMethod, GlmFamily, GraphAnnotation, GraphAxisScale, GraphSheet, JournalWidthPreset, KappaWeighting,
-    PValueStackMethod, PageOrientation, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ProjectDocument, RectPt, RepeatedMeasuresDesign,
-    ResidualCovariance, SheetId, SumOfSquaresType, TwoGroupMethod, WeightingScheme,
+    AnalysisKind, ChecklistItem, ChecklistStatus, CldOrdering, EquationDisplayMode, GraphAnnotation, GraphSheet, PairwiseDisplayMode,
+    ProjectDocument, RectPt, SheetId,
 };
-use curvebook_palette::{ColormapId, PaletteId};
-use curvebook_render::TiffCompression;
 use curvebook_tools::ToolCommandIntent;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::dialogs_canvas::{ExportFigureFormat, data_column_title};
-use crate::grid_view::parse_localized_number_input;
-use crate::i18n::LocalePreset;
+use crate::dialogs_canvas::data_column_title;
 
 // ============================================================================
 // Shared String / Enum / JSON Parsers (reused across R9.12, R9.14, R9.16, WF-44..48)
@@ -30,466 +24,10 @@ pub(crate) fn norm_key(raw: &str) -> String {
     raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
 }
 
-/// Parse a finite `f64` from JSON number or localized numeric string.
-pub(crate) fn parse_finite_f64_with_locale(val: &Value, field: &str, preset: &LocalePreset) -> Result<f64, String> {
-    val.as_f64()
-        .or_else(|| val.as_str().and_then(|s| parse_localized_number_input(s, preset)))
-        .filter(|v| v.is_finite())
-        .ok_or_else(|| format!("`{field}` must be a finite number"))
-}
-
-/// Parse an optional finite `f64` using regional numeric parsing (`preset`).
-pub(crate) fn parse_opt_finite_f64_with_locale(val: &Value, field: &str, preset: &LocalePreset) -> Result<Option<f64>, String> {
-    if val.is_null() || val.as_str().is_some_and(|s| s.trim().is_empty()) {
-        return Ok(None);
-    }
-    parse_finite_f64_with_locale(val, field, preset).map(Some)
-}
-
-/// Parse a positive `usize` (`>= min_val`) from JSON integer or numeric string.
-pub(crate) fn parse_usize_min(val: &Value, field: &str, min_val: usize) -> Result<usize, String> {
-    let raw = val
-        .as_u64()
-        .or_else(|| val.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-        .ok_or_else(|| format!("`{field}` must be a non-negative integer"))?;
-    let n = usize::try_from(raw).map_err(|_| format!("`{field}` exceeds platform usize range"))?;
-    if n < min_val {
-        return Err(format!("`{field}` ({n}) must be >= {min_val}"));
-    }
-    Ok(n)
-}
-
-/// Parse a `u64` seed or count from JSON integer or string.
-pub(crate) fn parse_u64_val(val: &Value, field: &str) -> Result<u64, String> {
-    val.as_u64()
-        .or_else(|| val.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-        .ok_or_else(|| format!("`{field}` must be a non-negative integer"))
-}
-
-/// Parse a list of `usize` indices from JSON array or comma/semicolon-separated string.
-pub(crate) fn parse_usize_list(val: &Value, field: &str) -> Result<Vec<usize>, String> {
-    if let Some(arr) = val.as_array() {
-        let mut out = Vec::with_capacity(arr.len());
-        for item in arr {
-            out.push(parse_usize_min(item, field, 0)?);
-        }
-        return Ok(out);
-    }
-    if let Some(s) = val.as_str() {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::new();
-        for tok in trimmed.split([',', ';', ' ']).filter(|t| !t.trim().is_empty()) {
-            let v = tok.trim().parse::<usize>().map_err(|_| format!("`{field}` contains invalid integer `{tok}`"))?;
-            out.push(v);
-        }
-        return Ok(out);
-    }
-    Err(format!("`{field}` must be an integer array or comma-separated list"))
-}
-
-/// Parse a list of finite `f64` values from JSON array or locale-appropriate delimited string
-/// (preserving `,` decimal separators in comma-decimal locales where `;` or whitespace delimit entries).
-pub(crate) fn parse_f64_list_with_locale(val: &Value, field: &str, preset: &LocalePreset) -> Result<Vec<f64>, String> {
-    if let Some(arr) = val.as_array() {
-        let mut out = Vec::with_capacity(arr.len());
-        for item in arr {
-            out.push(parse_finite_f64_with_locale(item, field, preset)?);
-        }
-        return Ok(out);
-    }
-    if let Some(s) = val.as_str() {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::new();
-        let iter: Box<dyn Iterator<Item = &str>> = if preset.decimal_separator == ',' {
-            Box::new(trimmed.split([';', ' ', '\t', '\n', '\r']))
-        } else {
-            Box::new(trimmed.split([',', ';', ' ', '\t', '\n', '\r']))
-        };
-        for tok in iter.map(str::trim).filter(|t| !t.is_empty()) {
-            let v = parse_localized_number_input(tok, preset)
-                .filter(|x| x.is_finite())
-                .ok_or_else(|| format!("`{field}` contains invalid finite number `{tok}`"))?;
-            out.push(v);
-        }
-        return Ok(out);
-    }
-    Err(format!("`{field}` must be a numeric array or delimited list"))
-}
-
-/// Parse `(column, level)` reference-level overrides from JSON array or `"0:Control, 1:Placebo"` text.
-pub(crate) fn parse_reference_levels(val: &Value) -> Result<Vec<(usize, String)>, String> {
-    if val.is_null() {
-        return Ok(Vec::new());
-    }
-    if let Some(arr) = val.as_array() {
-        let mut out = Vec::with_capacity(arr.len());
-        for item in arr {
-            if let Ok(pair) = serde_json::from_value::<(usize, String)>(item.clone()) {
-                out.push(pair);
-            } else if let Some(obj) = item.as_object() {
-                let col = obj.get("column").or_else(|| obj.get("col")).ok_or_else(|| String::from("reference_levels item missing `column`"))?;
-                let lvl = obj
-                    .get("level")
-                    .or_else(|| obj.get("reference"))
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| String::from("reference_levels item missing non-empty `level`"))?;
-                out.push((parse_usize_min(col, "column", 0)?, lvl.to_owned()));
-            } else {
-                return Err(String::from("`reference_levels` elements must be `[col, level]` or `{column, level}`"));
-            }
-        }
-        return Ok(out);
-    }
-    if let Some(s) = val.as_str() {
-        let mut out = Vec::new();
-        for tok in s.split([',', ';']).filter(|t| !t.trim().is_empty()) {
-            let (left, right) =
-                tok.split_once(':').or_else(|| tok.split_once('=')).ok_or_else(|| format!("expected `col:level` entry, got `{tok}`"))?;
-            let col = left.trim().parse::<usize>().map_err(|_| format!("invalid column index `{left}`"))?;
-            let lvl = right.trim();
-            if lvl.is_empty() {
-                return Err(format!("reference level for column {col} cannot be empty"));
-            }
-            out.push((col, lvl.to_owned()));
-        }
-        return Ok(out);
-    }
-    Err(String::from("`reference_levels` must be an array or `col:level` string"))
-}
-
-pub(crate) fn parse_kappa_weighting(val: &Value) -> Result<KappaWeighting, String> {
-    let raw = val.as_str().ok_or_else(|| String::from("`kappa_weighting` must be a string"))?;
-    match norm_key(raw).as_str() {
-        "unweighted" | "none" | "simple" => Ok(KappaWeighting::Unweighted),
-        "linear" => Ok(KappaWeighting::Linear),
-        "quadratic" | "squared" | "fleiss" => Ok(KappaWeighting::Quadratic),
-        _ => Err(format!("unknown kappa weighting `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_two_group_method_str(raw: &str, hypothetical: f64) -> Result<TwoGroupMethod, String> {
-    match norm_key(raw).as_str() {
-        "unpairedt" | "unpaired" | "studentt" | "t" => Ok(TwoGroupMethod::UnpairedT),
-        "welcht" | "welch" => Ok(TwoGroupMethod::WelchT),
-        "pairedt" | "paired" => Ok(TwoGroupMethod::PairedT),
-        "ratiopairedt" | "ratiopaired" | "ratio" => Ok(TwoGroupMethod::RatioPairedT),
-        "lognormalunpairedt" | "lognormal" | "lognormalt" => Ok(TwoGroupMethod::LognormalUnpairedT),
-        "mannwhitneyu" | "mannwhitney" | "mw" => Ok(TwoGroupMethod::MannWhitneyU),
-        "wilcoxonsignedrank" | "wilcoxon" => Ok(TwoGroupMethod::WilcoxonSignedRank),
-        "kolmogorovsmirnov" | "ks" => Ok(TwoGroupMethod::KolmogorovSmirnov),
-        "onesamplet" => Ok(TwoGroupMethod::OneSampleT { hypothetical }),
-        "onesamplewilcoxon" => Ok(TwoGroupMethod::OneSampleWilcoxon { hypothetical }),
-        "pairedsigntest" | "signtest" | "pairedsign" => Ok(TwoGroupMethod::PairedSignTest),
-        _ => Err(format!("unknown two-group method `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_cluster_distance_str(raw: &str) -> Result<ClusterDistance, String> {
-    match norm_key(raw).as_str() {
-        "euclidean" | "l2" => Ok(ClusterDistance::Euclidean),
-        "manhattan" | "cityblock" | "l1" => Ok(ClusterDistance::Manhattan),
-        "pearson" | "correlation" => Ok(ClusterDistance::Pearson),
-        "cosine" => Ok(ClusterDistance::Cosine),
-        _ => Err(format!("unknown cluster distance `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_cluster_linkage_str(raw: &str) -> Result<ClusterLinkage, String> {
-    match norm_key(raw).as_str() {
-        "ward" | "wardd2" => Ok(ClusterLinkage::Ward),
-        "complete" => Ok(ClusterLinkage::Complete),
-        "single" => Ok(ClusterLinkage::Single),
-        "upgma" | "average" => Ok(ClusterLinkage::Upgma),
-        "wpgma" | "mcquitty" => Ok(ClusterLinkage::Wpgma),
-        "centroid" => Ok(ClusterLinkage::Centroid),
-        "median" => Ok(ClusterLinkage::Median),
-        _ => Err(format!("unknown cluster linkage `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_glm_family_str(raw: &str) -> Result<GlmFamily, String> {
-    match norm_key(raw).as_str() {
-        "linear" | "gaussian" | "ols" => Ok(GlmFamily::Linear),
-        "logistic" | "binomial" | "logit" => Ok(GlmFamily::Logistic),
-        "poisson" | "loglinear" => Ok(GlmFamily::Poisson),
-        _ => Err(format!("unknown GLM family `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_cox_tie_method_str(raw: &str) -> Result<CoxTieMethod, String> {
-    match norm_key(raw).as_str() {
-        "breslow" => Ok(CoxTieMethod::Breslow),
-        "efron" => Ok(CoxTieMethod::Efron),
-        "exact" => Ok(CoxTieMethod::Exact),
-        _ => Err(format!("unknown Cox tie method `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_ss_type_str(raw: &str) -> Result<SumOfSquaresType, String> {
-    match norm_key(raw).as_str() {
-        "typei" | "type1" | "i" | "1" | "sequential" => Ok(SumOfSquaresType::TypeI),
-        "typeiii" | "type3" | "iii" | "3" => Ok(SumOfSquaresType::TypeIII),
-        _ => Err(format!("unknown sum-of-squares type `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_rm_design_str(raw: &str) -> Result<RepeatedMeasuresDesign, String> {
-    match norm_key(raw).as_str() {
-        "none" | "nomatching" => Ok(RepeatedMeasuresDesign::None),
-        "rowfactormatched" | "row" | "rowfactor" => Ok(RepeatedMeasuresDesign::RowFactorMatched),
-        "columnfactormatched" | "column" | "col" | "columnfactor" => Ok(RepeatedMeasuresDesign::ColumnFactorMatched),
-        "bothfactorsmatched" | "both" => Ok(RepeatedMeasuresDesign::BothFactorsMatched),
-        _ => Err(format!("unknown repeated measures design `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_residual_covariance_str(raw: &str) -> Result<ResidualCovariance, String> {
-    match norm_key(raw).as_str() {
-        "compoundsymmetry" | "cs" | "randomintercept" => Ok(ResidualCovariance::CompoundSymmetry),
-        "unstructured" | "un" | "general" => Ok(ResidualCovariance::Unstructured),
-        _ => Err(format!("unknown residual covariance structure `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_weighting_scheme(val: &Value) -> Result<WeightingScheme, String> {
-    if let Ok(direct) = serde_json::from_value::<WeightingScheme>(val.clone()) {
-        return Ok(direct);
-    }
-    let raw = val.as_str().ok_or_else(|| String::from("`weighting` must be a string or WeightingScheme object"))?;
-    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
-    match (compact.as_str(), norm_key(raw).as_str()) {
-        (_, "none" | "equal" | "unweighted") => Ok(WeightingScheme::None),
-        ("1/y^2", _) | (_, "relativesquare" | "1y2") => Ok(WeightingScheme::RelativeSquare),
-        ("1/|y|" | "1/y", _) | (_, "relative") => Ok(WeightingScheme::Relative),
-        ("1/|x|" | "1/x", _) | (_, "inversex") => Ok(WeightingScheme::InverseX),
-        ("1/x^2", _) | (_, "inversex2") => Ok(WeightingScheme::InverseX2),
-        (_, "observedsd" | "1sd2") => Ok(WeightingScheme::ObservedSd),
-        _ => Err(format!("unknown weighting scheme `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_outlier_fdr_q_percent(val: &Value) -> Result<f64, String> {
-    let q = parse_finite_f64_with_locale(val, "fdr_q_percent", &LocalePreset::default())?;
-    if q <= 0.0 || q > 100.0 {
-        return Err(format!("`fdr_q_percent` must lie in (0, 100], got {q}"));
-    }
-    Ok(q)
-}
-
-pub(crate) fn parse_outlier_alpha(val: &Value) -> Result<f64, String> {
-    let a = parse_finite_f64_with_locale(val, "alpha", &LocalePreset::default())?;
-    if a <= 0.0 || a >= 1.0 {
-        return Err(format!("`alpha` must lie strictly in (0, 1), got {a}"));
-    }
-    Ok(a)
-}
-
-pub(crate) fn parse_outlier_method_str(raw: &str) -> Result<(&'static str, Option<bool>), String> {
-    match norm_key(raw).as_str() {
-        "rout" | "routq" | "fdrrout" => Ok(("rout", None)),
-        "grubbs" | "grubbss" | "grubbsesd" => Ok(("grubbs", None)),
-        "grubbssingle" | "singlegrubbs" => Ok(("grubbs", Some(false))),
-        "grubbsiterative" | "iterativegrubbs" => Ok(("grubbs", Some(true))),
-        _ => Err(format!("unknown outlier method `{raw}`; use `rout` or `grubbs`")),
-    }
-}
-
-fn parse_rout_inline_q(raw: &str) -> Result<Option<f64>, String> {
-    let trimmed = raw.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    if !lower.starts_with("rout") {
-        return Ok(None);
-    }
-    let Some(after_rout) = trimmed.get(4..) else {
-        return Ok(None);
-    };
-    let rest = after_rout.trim();
-    if rest.is_empty() {
-        return Ok(None);
-    }
-    // Accept forms like `"rout:2.5"`, `"rout(2.5)"`, `"rout@2.5"`, `"rout q=2.5"`, `"rout 2.5%"`.
-    let cleaned = rest.trim_start_matches([':', '@', '(', '=', ',', ' ', '_']).trim_end_matches([')', '%', ' ']).trim();
-    let after_q = cleaned
-        .strip_prefix("fdr_q_percent")
-        .or_else(|| cleaned.strip_prefix("fdr_q"))
-        .or_else(|| cleaned.strip_prefix("q_percent"))
-        .or_else(|| cleaned.strip_prefix("rout_q"))
-        .or_else(|| cleaned.strip_prefix('q'))
-        .or_else(|| cleaned.strip_prefix('Q'))
-        .map(|s| s.trim_start_matches(['=', ':', ' ']))
-        .unwrap_or(cleaned)
-        .trim_end_matches('%')
-        .trim();
-    if after_q.is_empty() || !after_q.chars().any(|c| c.is_ascii_digit()) {
-        return Ok(None);
-    }
-    let q: f64 = after_q.parse().map_err(|_| format!("invalid ROUT Q% in fit method `{raw}`"))?;
-    if !q.is_finite() || q <= 0.0 || q > 100.0 {
-        return Err(format!("ROUT `fdr_q_percent` must lie in (0, 100], got {q}"));
-    }
-    Ok(Some(q))
-}
-
-pub(crate) fn parse_fit_method(val: &Value) -> Result<FitMethod, String> {
-    if let Ok(direct) = serde_json::from_value::<FitMethod>(val.clone()) {
-        if let FitMethod::RoutOutlierElimination { fdr_q_percent } = direct
-            && (!fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 100.0)
-        {
-            return Err(format!("`fdr_q_percent` must lie in (0, 100], got {fdr_q_percent}"));
-        }
-        return Ok(direct);
-    }
-    if let Some(obj) = val.as_object() {
-        if let Some(rout_val) = obj.get("rout").or_else(|| obj.get("RoutOutlierElimination")) {
-            let q = match rout_val {
-                Value::Object(inner) => inner
-                    .get("fdr_q_percent")
-                    .or_else(|| inner.get("q_percent"))
-                    .or_else(|| inner.get("rout_q"))
-                    .or_else(|| inner.get("q"))
-                    .map(parse_outlier_fdr_q_percent)
-                    .transpose()?
-                    .unwrap_or(1.0),
-                other => parse_outlier_fdr_q_percent(other)?,
-            };
-            return Ok(FitMethod::RoutOutlierElimination { fdr_q_percent: q });
-        }
-        if let Some(method_raw) = obj.get("method").or_else(|| obj.get("type")).and_then(Value::as_str) {
-            let parsed = parse_fit_method(&Value::String(method_raw.to_owned()))?;
-            if let FitMethod::RoutOutlierElimination { fdr_q_percent } = parsed {
-                let q = obj
-                    .get("fdr_q_percent")
-                    .or_else(|| obj.get("q_percent"))
-                    .or_else(|| obj.get("rout_q"))
-                    .or_else(|| obj.get("q"))
-                    .map(parse_outlier_fdr_q_percent)
-                    .transpose()?
-                    .unwrap_or(fdr_q_percent);
-                return Ok(FitMethod::RoutOutlierElimination { fdr_q_percent: q });
-            }
-            return Ok(parsed);
-        }
-        return Err(String::from("`fit_method` object must specify `method` or `RoutOutlierElimination`"));
-    }
-    let raw = val.as_str().ok_or_else(|| String::from("`fit_method` must be a string or FitMethod object"))?;
-    if let Some(q) = parse_rout_inline_q(raw)? {
-        return Ok(FitMethod::RoutOutlierElimination { fdr_q_percent: q });
-    }
-    match norm_key(raw).as_str() {
-        "leastsquares" | "ols" | "ls" => Ok(FitMethod::LeastSquares),
-        "poissondeviance" | "poisson" => Ok(FitMethod::PoissonDeviance),
-        "robustcauchy" | "robust" | "cauchy" => Ok(FitMethod::RobustCauchy),
-        "rout" | "routoutlierelimination" | "routoutlier" => Ok(FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 }),
-        _ => Err(format!("unknown fit method `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_parameter_rules(val: &Value) -> Result<Vec<ParameterRule>, String> {
-    serde_json::from_value::<Vec<ParameterRule>>(val.clone()).map_err(|e| format!("invalid `parameter_rules`: {e}"))
-}
-
-pub(crate) fn parse_equation_display_mode_str(raw: &str) -> Result<EquationDisplayMode, String> {
-    match norm_key(raw).as_str() {
-        "substituted" | "values" | "numeric" | "evaluated" => Ok(EquationDisplayMode::Substituted),
-        "symbolic" | "formula" | "parameters" => Ok(EquationDisplayMode::Symbolic),
-        _ => Err(format!("unknown equation display mode `{raw}`")),
-    }
-}
-
 pub(crate) fn equation_display_mode_str(mode: EquationDisplayMode) -> &'static str {
     match mode {
         EquationDisplayMode::Substituted => "substituted",
         EquationDisplayMode::Symbolic => "symbolic",
-    }
-}
-
-pub(crate) fn parse_axis_scale_str(raw: &str) -> Result<GraphAxisScale, String> {
-    match norm_key(raw).as_str() {
-        "linear" => Ok(GraphAxisScale::Linear),
-        "log10" => Ok(GraphAxisScale::Log10),
-        "log2" => Ok(GraphAxisScale::Log2),
-        "ln" | "loge" => Ok(GraphAxisScale::Ln),
-        "logit" | "logitproportion" => Ok(GraphAxisScale::Logit(curvebook_doc::LogitDomain::Proportion)),
-        "logitpercent" => Ok(GraphAxisScale::Logit(curvebook_doc::LogitDomain::Percent)),
-        "probit" => Ok(GraphAxisScale::Probit),
-        "reciprocal" | "1x" => Ok(GraphAxisScale::Reciprocal),
-        _ => Err(format!("unknown axis scale `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_pvalue_stack_method_val(val: &Value) -> Result<PValueStackMethod, String> {
-    if let Ok(parsed) = serde_json::from_value::<PValueStackMethod>(val.clone()) {
-        return Ok(parsed);
-    }
-    let raw = val.as_str().ok_or_else(|| String::from("`pvalue_stack.method` must be a valid P-value stack multiplicity method string"))?;
-    let folded: String = raw
-        .chars()
-        .map(|c| match c {
-            'š' | 'Š' => 's',
-            'í' | 'Í' | 'ì' | 'î' | 'ï' => 'i',
-            'á' | 'Á' => 'a',
-            _ => c,
-        })
-        .collect();
-    match norm_key(&folded).as_str() {
-        "bonferroni" => Ok(PValueStackMethod::Bonferroni),
-        "holm" | "holmbonferroni" | "holm1979" => Ok(PValueStackMethod::HolmBonferroni),
-        "sidak" | "sidak1967" => Ok(PValueStackMethod::Sidak),
-        "holmsidak" => Ok(PValueStackMethod::HolmSidak),
-        "bh" | "benjaminihochberg" | "benjaminihochberg1995" | "benjaminihochbergfdr" | "fdrbh" | "fdr" => Ok(PValueStackMethod::BenjaminiHochberg),
-        "bky" | "twostagebky" | "twostagebkyfdr" | "benjaminikriegeryekutieli" | "benjaminikriegeryekutielitwostage2006" | "bky2006" => {
-            Ok(PValueStackMethod::TwoStageBky)
-        }
-        "by" | "benjaminiyekutieli" | "benjaminiyekutieli2001" | "benjaminiyekutielifdr" | "fdrby" => Ok(PValueStackMethod::BenjaminiYekutieli),
-        _ => Err(format!("unknown P-value stack multiplicity method `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_break_ornament_str(raw: &str) -> Result<BreakOrnament, String> {
-    match norm_key(raw).as_str() {
-        "doubleslash" | "slash" => Ok(BreakOrnament::DoubleSlash),
-        "zigzag" => Ok(BreakOrnament::Zigzag),
-        "blankgap" | "blank" | "gap" => Ok(BreakOrnament::BlankGap),
-        _ => Err(format!("unknown break_ornament `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_bracket_style_str(raw: &str) -> Result<BracketStyle, String> {
-    match norm_key(raw).as_str() {
-        "square" => Ok(BracketStyle::Square),
-        "halftick" => Ok(BracketStyle::HalfTick),
-        "flatline" | "flat" => Ok(BracketStyle::FlatLine),
-        "curlybrace" | "curly" => Ok(BracketStyle::CurlyBrace),
-        _ => Err(format!("unknown bracket_style `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_bracket_label_mode(val: &Value) -> Result<BracketLabelMode, String> {
-    if let Ok(direct) = serde_json::from_value::<BracketLabelMode>(val.clone()) {
-        return Ok(direct);
-    }
-    let raw = val.as_str().ok_or_else(|| String::from("`label_mode` must be a string or BracketLabelMode"))?;
-    match norm_key(raw).as_str() {
-        "summarystars" | "stars" => Ok(BracketLabelMode::SummaryStars),
-        "numericporq" | "numeric" | "pvalue" | "porq" => Ok(BracketLabelMode::NumericPOrQ),
-        _ => Ok(BracketLabelMode::Custom(raw.trim().to_owned())),
-    }
-}
-
-pub(crate) fn parse_pairwise_display_mode_str(raw: &str) -> Result<PairwiseDisplayMode, String> {
-    match norm_key(raw).as_str() {
-        "bracketsonly" | "brackets" => Ok(PairwiseDisplayMode::BracketsOnly),
-        "compactletterdisplayonly" | "cldonly" | "cld" | "lettersonly" | "letters" => Ok(PairwiseDisplayMode::CompactLetterDisplayOnly),
-        "bracketsandcompactletterdisplay" | "bracketsandcld" | "both" => Ok(PairwiseDisplayMode::BracketsAndCompactLetterDisplay),
-        _ => Err(format!("unknown pairwise display mode `{raw}`")),
     }
 }
 
@@ -501,78 +39,10 @@ pub(crate) fn pairwise_display_mode_str(mode: PairwiseDisplayMode) -> &'static s
     }
 }
 
-pub(crate) fn parse_cld_ordering_str(raw: &str) -> Result<CldOrdering, String> {
-    match norm_key(raw).as_str() {
-        "descendingmean" | "descending" | "desc" | "highestfirst" => Ok(CldOrdering::DescendingMean),
-        "ascendingmean" | "ascending" | "asc" | "lowestfirst" => Ok(CldOrdering::AscendingMean),
-        _ => Err(format!("unknown CLD ordering `{raw}`")),
-    }
-}
-
 pub(crate) fn cld_ordering_str(ordering: CldOrdering) -> &'static str {
     match ordering {
         CldOrdering::DescendingMean => "descending_mean",
         CldOrdering::AscendingMean => "ascending_mean",
-    }
-}
-
-pub(crate) fn parse_colormap_id_str(raw: &str) -> Result<ColormapId, String> {
-    match norm_key(raw).as_str() {
-        "viridis" => Ok(ColormapId::Viridis),
-        "cividis" => Ok(ColormapId::Cividis),
-        "plasma" => Ok(ColormapId::Plasma),
-        "divergingbluered" | "bluered" => Ok(ColormapId::DivergingBlueRed),
-        "grayscale" | "gray" => Ok(ColormapId::Grayscale),
-        _ => Err(format!("unknown colormap `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_palette_str(raw: &str) -> Result<PaletteId, String> {
-    match norm_key(raw).as_str() {
-        "okabeito" | "default" => Ok(PaletteId::OkabeIto),
-        "paultolbright" | "bright" => Ok(PaletteId::PaulTolBright),
-        "paultolmuted" | "muted" => Ok(PaletteId::PaulTolMuted),
-        "paultolhighcontrast" | "highcontrast" => Ok(PaletteId::PaulTolHighContrast),
-        "paultolvibrant" | "vibrant" => Ok(PaletteId::PaulTolVibrant),
-        "monochromeprint" | "monochrome" | "grayscale" => Ok(PaletteId::MonochromePrint),
-        _ => Err(format!("unknown palette `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_journal_preset_str(raw: &str) -> Result<JournalWidthPreset, String> {
-    JournalWidthPreset::from_canonical_name(&norm_key(raw)).ok_or_else(|| format!("unknown journal preset `{raw}`"))
-}
-
-pub(crate) fn parse_page_orientation_str(raw: &str) -> Result<PageOrientation, String> {
-    match norm_key(raw).as_str() {
-        "portrait" => Ok(PageOrientation::Portrait),
-        "landscape" => Ok(PageOrientation::Landscape),
-        _ => Err(format!("unknown page orientation `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_panel_badge_style_str(raw: &str) -> Result<PanelBadgeStyle, String> {
-    match norm_key(raw).as_str() {
-        "uppercaseletters" | "uppercase" | "abc" => Ok(PanelBadgeStyle::UpperCaseLetters),
-        "lowercaseletters" | "lowercase" => Ok(PanelBadgeStyle::LowerCaseLetters),
-        "none" => Ok(PanelBadgeStyle::None),
-        _ => Err(format!("unknown panel badge style `{raw}`")),
-    }
-}
-
-pub(crate) fn parse_export_format(val: &Value) -> Result<ExportFigureFormat, String> {
-    if let Ok(direct) = serde_json::from_value::<ExportFigureFormat>(val.clone()) {
-        return Ok(direct);
-    }
-    let raw = val.as_str().ok_or_else(|| String::from("`format` must be `svg`, `pdf`, `png`, or `tiff`"))?;
-    match norm_key(raw).as_str() {
-        "svg" => Ok(ExportFigureFormat::Svg),
-        "pdf" => Ok(ExportFigureFormat::Pdf),
-        "png" => Ok(ExportFigureFormat::Png),
-        "tiff" | "tifflzw" | "lzw" => Ok(ExportFigureFormat::Tiff(TiffCompression::Lzw)),
-        "tiffnone" | "uncompressedtiff" => Ok(ExportFigureFormat::Tiff(TiffCompression::None)),
-        "tiffdeflate" | "deflate" => Ok(ExportFigureFormat::Tiff(TiffCompression::Deflate)),
-        _ => Err(format!("unknown export format `{raw}`")),
     }
 }
 
@@ -722,90 +192,6 @@ impl RandomizeGroupsDialogState {
         Ok(())
     }
 
-    /// Apply modal field updates from `ui.answer_dialog` / widget controls.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "groups" | "randomize.groups" => {
-                    if let Some(s) = val.as_str() {
-                        self.set_groups_from_str(s)?;
-                    } else if let Some(arr) = val.as_array() {
-                        let mut next = Vec::with_capacity(arr.len());
-                        for item in arr {
-                            if let Some(label) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                                next.push((label.to_owned(), 1));
-                            } else if let Some(obj) = item.as_object() {
-                                let label = obj
-                                    .get("label")
-                                    .or_else(|| obj.get("name"))
-                                    .and_then(Value::as_str)
-                                    .map(str::trim)
-                                    .filter(|s| !s.is_empty())
-                                    .ok_or_else(|| String::from("group object missing non-empty `label`"))?;
-                                let weight = match obj.get("weight") {
-                                    Some(w) => parse_usize_min(w, "weight", 1)?,
-                                    None => 1,
-                                };
-                                next.push((label.to_owned(), weight));
-                            } else {
-                                return Err(String::from("`groups` items must be strings or `{label, weight}` objects"));
-                            }
-                        }
-                        if next.is_empty() {
-                            return Err(String::from("`groups` must contain at least one group"));
-                        }
-                        self.groups = next;
-                    } else {
-                        return Err(String::from("`groups` must be an array or comma-separated string"));
-                    }
-                }
-                "subject_count" | "n_subjects" | "randomize.subject_count" => {
-                    self.subject_count = parse_usize_min(val, key, 1)?;
-                }
-                "subject_ids" | "randomize.subject_ids" => {
-                    if val.is_null() {
-                        self.subject_ids.clear();
-                    } else if let Some(arr) = val.as_array() {
-                        self.subject_ids = arr.iter().filter_map(|v| v.as_str().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())).collect();
-                    } else if let Some(s) = val.as_str() {
-                        self.subject_ids = s.split([',', ';', '\n']).map(str::trim).filter(|t| !t.is_empty()).map(ToOwned::to_owned).collect();
-                    } else {
-                        return Err(String::from("`subject_ids` must be an array, string, or null"));
-                    }
-                }
-                "scheme" | "randomize.scheme" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`scheme` must be a string"))?;
-                    self.scheme = match norm_key(raw).as_str() {
-                        "completebalanced" | "complete" | "balanced" => RandomizationSchemeKind::CompleteBalanced,
-                        "permutedblock" | "block" => RandomizationSchemeKind::PermutedBlock,
-                        _ => return Err(format!("unknown randomization scheme `{raw}`")),
-                    };
-                }
-                "block_sizes" | "block_size" | "randomize.block_sizes" => {
-                    let blocks = if val.is_u64() { vec![parse_usize_min(val, key, 1)?] } else { parse_usize_list(val, key)? };
-                    if blocks.is_empty() || blocks.contains(&0) {
-                        return Err(String::from("`block_sizes` entries must be positive integers"));
-                    }
-                    self.block_sizes = blocks;
-                }
-                "seed" | "randomize.seed" => {
-                    self.seed = parse_u64_val(val, key)?;
-                }
-                "title" | "randomize.title" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`title` must be a string"))?.trim();
-                    if !raw.is_empty() {
-                        self.title = raw.to_owned();
-                    }
-                }
-                "info_sheet_id" | "target_info_sheet_id" | "randomize.info_sheet_id" => {
-                    self.target_info_sheet_id = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(SheetId::from);
-                }
-                other => return Err(format!("unknown Randomize Groups field `{other}`")),
-            }
-        }
-        Ok(())
-    }
-
     /// Emit `table.randomizeGroups` engine command intent.
     #[must_use]
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
@@ -885,46 +271,6 @@ impl RandomSampleRowsDialogState {
         true
     }
 
-    /// Apply modal field updates from `ui.answer_dialog` / widget controls.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "source_sheet_id" | "sample.source_sheet_id" => {
-                    if let Some(s) = val.as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                        self.source_sheet_id = Some(SheetId::from(s));
-                    }
-                }
-                "sample_size" | "sample.sample_size" => {
-                    self.sample_size = parse_usize_min(val, key, 1)?;
-                }
-                "seed" | "sample.seed" => {
-                    self.seed = parse_u64_val(val, key)?;
-                }
-                "stratify_column" | "sample.stratify_column" => {
-                    if val.is_null() {
-                        self.stratify_column = None;
-                    } else {
-                        self.stratify_column = Some(parse_usize_min(val, key, 0)?);
-                    }
-                }
-                "proportional_allocation" | "sample.proportional_allocation" => {
-                    self.proportional_allocation = val.as_bool().ok_or_else(|| String::from("`proportional_allocation` must be boolean"))?;
-                }
-                "title" | "sample.title" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`title` must be a string"))?.trim();
-                    if !raw.is_empty() {
-                        self.title = raw.to_owned();
-                    }
-                }
-                "info_sheet_id" | "target_info_sheet_id" | "sample.info_sheet_id" => {
-                    self.target_info_sheet_id = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(SheetId::from);
-                }
-                other => return Err(format!("unknown Random Sample Rows field `{other}`")),
-            }
-        }
-        Ok(())
-    }
-
     /// Emit `table.randomSampleRows` engine command intent.
     #[must_use]
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
@@ -976,7 +322,7 @@ impl SimDistKind {
         }
     }
 
-    fn from_str(raw: &str) -> Result<Self, String> {
+    pub(crate) fn from_str(raw: &str) -> Result<Self, String> {
         match norm_key(raw).as_str() {
             "uniform" => Ok(Self::Uniform),
             "gaussian" | "normal" => Ok(Self::Gaussian),
@@ -1038,34 +384,6 @@ impl SimulatedDistColumnDraft {
             SimDistKind::Exponential => json!({ "name": self.name, "distribution": "exponential", "rate": self.rate }),
         }
     }
-
-    fn apply_object_localized(&mut self, obj: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
-        if let Some(name) = obj.get("name").or_else(|| obj.get("title")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
-            self.name = name.to_owned();
-        }
-        if let Some(dist_raw) =
-            obj.get("distribution").and_then(|d| d.as_str().or_else(|| d.as_object().and_then(|o| o.get("kind").and_then(Value::as_str))))
-        {
-            self.distribution = SimDistKind::from_str(dist_raw)?;
-        }
-        for (field, val) in obj {
-            match field.as_str() {
-                "name" | "title" | "distribution" | "kind" => {}
-                "min" => self.min = parse_finite_f64_with_locale(val, field, preset)?,
-                "max" => self.max = parse_finite_f64_with_locale(val, field, preset)?,
-                "mean" | "mu" => self.mean = parse_finite_f64_with_locale(val, field, preset)?,
-                "sd" | "std" | "sigma" => self.sd = parse_finite_f64_with_locale(val, field, preset)?,
-                "mean_log" | "meanlog" => self.mean_log = parse_finite_f64_with_locale(val, field, preset)?,
-                "sd_log" | "sdlog" => self.sd_log = parse_finite_f64_with_locale(val, field, preset)?,
-                "trials" | "n" => self.trials = parse_u64_val(val, field)?,
-                "p" | "prob" | "probability" => self.p = parse_finite_f64_with_locale(val, field, preset)?,
-                "lambda" => self.lambda = parse_finite_f64_with_locale(val, field, preset)?,
-                "rate" => self.rate = parse_finite_f64_with_locale(val, field, preset)?,
-                other => return Err(format!("unknown simulated column field `{other}`")),
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Modal state for `Simulate Distributions...` (`R9.14`, `table.simulateDistributions`).
@@ -1076,6 +394,8 @@ pub struct SimulateDistributionsDialogState {
     pub use_multiple_variables: bool,
     pub title: String,
     pub columns: Vec<SimulatedDistColumnDraft>,
+    #[serde(default)]
+    pub selected_col_idx: usize,
 }
 
 impl Default for SimulateDistributionsDialogState {
@@ -1086,84 +406,12 @@ impl Default for SimulateDistributionsDialogState {
             use_multiple_variables: false,
             title: String::from("Simulated Distributions"),
             columns: vec![SimulatedDistColumnDraft::default()],
+            selected_col_idx: 0,
         }
     }
 }
 
 impl SimulateDistributionsDialogState {
-    /// Apply modal field updates from `ui.answer_dialog` / widget controls.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
-    }
-
-    /// Apply modal field updates using regional numeric parsing (`preset`).
-    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
-        if self.columns.is_empty() {
-            self.columns.push(SimulatedDistColumnDraft::default());
-        }
-        for (key, val) in fields {
-            match key.as_str() {
-                "n_rows" | "row_count" | "rows" | "simulate.n_rows" => {
-                    self.n_rows = parse_usize_min(val, key, 1)?;
-                }
-                "seed" | "simulate.seed" => {
-                    self.seed = parse_u64_val(val, key)?;
-                }
-                "use_multiple_variables" | "multiple_variables" | "simulate.use_multiple_variables" => {
-                    self.use_multiple_variables = val.as_bool().ok_or_else(|| String::from("`use_multiple_variables` must be boolean"))?;
-                }
-                "title" | "simulate.title" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`title` must be a string"))?.trim();
-                    if !raw.is_empty() {
-                        self.title = raw.to_owned();
-                    }
-                }
-                "columns" | "simulate.columns" => {
-                    let arr = val.as_array().ok_or_else(|| String::from("`columns` must be an array"))?;
-                    if arr.is_empty() {
-                        return Err(String::from("`columns` cannot be empty"));
-                    }
-                    let mut parsed = Vec::with_capacity(arr.len());
-                    for item in arr {
-                        let obj = item.as_object().ok_or_else(|| String::from("each column item must be an object"))?;
-                        let mut col = SimulatedDistColumnDraft::default();
-                        col.apply_object_localized(obj, preset)?;
-                        if let Some(params) = obj.get("params").and_then(Value::as_object) {
-                            col.apply_object_localized(params, preset)?;
-                        }
-                        if let Some(params) = obj.get("distribution").and_then(Value::as_object) {
-                            col.apply_object_localized(params, preset)?;
-                        }
-                        parsed.push(col);
-                    }
-                    self.columns = parsed;
-                }
-                "column_name" | "simulate.column_name" => {
-                    let s = val.as_str().ok_or_else(|| String::from("`column_name` must be a string"))?.trim();
-                    if !s.is_empty() {
-                        self.columns[0].name = s.to_owned();
-                    }
-                }
-                "distribution" | "simulate.distribution" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`distribution` must be a string"))?;
-                    self.columns[0].distribution = SimDistKind::from_str(raw)?;
-                }
-                "min" | "simulate.min" => self.columns[0].min = parse_finite_f64_with_locale(val, key, preset)?,
-                "max" | "simulate.max" => self.columns[0].max = parse_finite_f64_with_locale(val, key, preset)?,
-                "mean" | "simulate.mean" => self.columns[0].mean = parse_finite_f64_with_locale(val, key, preset)?,
-                "sd" | "simulate.sd" => self.columns[0].sd = parse_finite_f64_with_locale(val, key, preset)?,
-                "mean_log" | "simulate.mean_log" => self.columns[0].mean_log = parse_finite_f64_with_locale(val, key, preset)?,
-                "sd_log" | "simulate.sd_log" => self.columns[0].sd_log = parse_finite_f64_with_locale(val, key, preset)?,
-                "trials" | "simulate.trials" => self.columns[0].trials = parse_u64_val(val, key)?,
-                "p" | "simulate.p" => self.columns[0].p = parse_finite_f64_with_locale(val, key, preset)?,
-                "lambda" | "simulate.lambda" => self.columns[0].lambda = parse_finite_f64_with_locale(val, key, preset)?,
-                "rate" | "simulate.rate" => self.columns[0].rate = parse_finite_f64_with_locale(val, key, preset)?,
-                other => return Err(format!("unknown Simulate Distributions field `{other}`")),
-            }
-        }
-        Ok(())
-    }
-
     /// Emit `table.simulateDistributions` engine command intent.
     #[must_use]
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
@@ -1263,52 +511,6 @@ impl InsertModelEquationDialogState {
         self.mode
     }
 
-    /// Apply modal field updates from `ui.answer_dialog` / widget controls.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
-    }
-
-    /// Apply modal field updates using regional numeric parsing (`preset`).
-    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "result_sheet_id" | "equation.result_sheet_id" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`result_sheet_id` must be a string"))?.trim();
-                    if raw.is_empty() {
-                        return Err(String::from("`result_sheet_id` cannot be empty"));
-                    }
-                    self.result_sheet_id = Some(SheetId::from(raw));
-                }
-                "data_set_index" | "dataset_index" | "equation.data_set_index" => {
-                    self.data_set_index = parse_usize_min(val, key, 0)?;
-                }
-                "mode" | "display_mode" | "equation.mode" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`mode` must be `substituted` or `symbolic`"))?;
-                    self.mode = parse_equation_display_mode_str(raw)?;
-                }
-                "font_size_pt" | "equation.font_size_pt" => {
-                    let pt = parse_finite_f64_with_locale(val, key, preset)?;
-                    if !(4.0..=72.0).contains(&pt) {
-                        return Err(format!("`font_size_pt` ({pt}) must be within 4.0..=72.0"));
-                    }
-                    self.font_size_pt = pt;
-                }
-                "bordered" | "equation.bordered" => {
-                    self.bordered = val.as_bool().ok_or_else(|| String::from("`bordered` must be boolean"))?;
-                }
-                "update_existing" | "equation.update_existing" => {
-                    self.update_existing = val.as_bool().ok_or_else(|| String::from("`update_existing` must be boolean"))?;
-                }
-                "x_pt" | "equation.x_pt" => self.bounds_pt.x = parse_finite_f64_with_locale(val, key, preset)?,
-                "y_pt" | "equation.y_pt" => self.bounds_pt.y = parse_finite_f64_with_locale(val, key, preset)?,
-                "width_pt" | "equation.width_pt" => self.bounds_pt.width = parse_finite_f64_with_locale(val, key, preset)?.max(24.0),
-                "height_pt" | "equation.height_pt" => self.bounds_pt.height = parse_finite_f64_with_locale(val, key, preset)?.max(12.0),
-                other => return Err(format!("unknown Insert Model Equation field `{other}`")),
-            }
-        }
-        Ok(())
-    }
-
     /// Emit `graph.addAnnotation` (`kind: "equation"`) or update existing `ModelEquation` via `graph.setSpec`.
     #[must_use]
     pub fn commit_intent(&self, doc: Option<&ProjectDocument>) -> Option<ToolCommandIntent> {
@@ -1371,6 +573,7 @@ impl InsertModelEquationDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::LocalePreset;
     use curvebook_doc::{
         AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, ColumnTable, DataSheet, GraphKind, GraphSheet, LinearRegressionSpec,
         ProjectDocument, RemediationKind, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, TableArchetype,
@@ -1379,6 +582,7 @@ mod tests {
 
     #[test]
     fn r9_14_dialogs_validate_patches_and_emit_expected_intents() {
+        let preset = LocalePreset::default();
         let mut rand_dlg = RandomizeGroupsDialogState::default();
         let patch = serde_json::from_value::<serde_json::Map<String, Value>>(json!({
             "groups": "Vehicle:1, DrugA:2",
@@ -1389,7 +593,7 @@ mod tests {
             "title": "Preclinical Arms"
         }))
         .unwrap();
-        rand_dlg.apply_field_patch(&patch).unwrap();
+        crate::dialogs_canvas::dialog_patch::patch_randomize_groups(&mut rand_dlg, &patch).unwrap();
         let intent = rand_dlg.commit_intent().expect("randomize intent");
         assert_eq!(intent.command_id, "table.randomizeGroups");
         assert_eq!(intent.params["scheme"], "permuted_block");
@@ -1411,7 +615,7 @@ mod tests {
             "proportional_allocation": false
         }))
         .unwrap();
-        sample_dlg.apply_field_patch(&s_patch).unwrap();
+        crate::dialogs_canvas::dialog_patch::patch_random_sample_rows(&mut sample_dlg, &s_patch).unwrap();
         let s_intent = sample_dlg.commit_intent().expect("sample intent");
         assert_eq!(s_intent.command_id, "table.randomSampleRows");
         assert_eq!(s_intent.params["stratify_column"], 1);
@@ -1429,7 +633,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        sim_dlg.apply_field_patch(&sim_patch).unwrap();
+        crate::dialogs_canvas::dialog_patch::patch_simulate_distributions(&mut sim_dlg, &sim_patch, &preset).unwrap();
         let sim_intent = sim_dlg.commit_intent().expect("sim intent");
         assert_eq!(sim_intent.command_id, "table.simulateDistributions");
         assert_eq!(sim_intent.params["n_rows"], 24);

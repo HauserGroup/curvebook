@@ -29,6 +29,7 @@ curvebook-stats = { workspace = true }
 curvebook-svg = { workspace = true }
 curvebook-text = { workspace = true }
 curvebook-transform = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

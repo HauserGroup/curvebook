@@ -14,8 +14,8 @@ pub mod dialogs_r9;
 pub mod egui_shell;
 pub mod feedback;
 pub mod grid_view;
-mod gui_actions;
 pub mod i18n;
+pub mod import_paste;
 pub mod inspect;
 pub mod interaction;
 pub mod menus;
@@ -25,7 +25,6 @@ pub mod power_wizard;
 pub mod search_engine;
 pub mod text_bridge;
 pub mod theme;
-pub mod views;
 pub mod workspace_nav;
 
 pub use curvebook_chart::{ChartScene, PointPt, PreflightIssue, SourceCellId};
@@ -39,8 +38,8 @@ pub use serde_json;
 pub use control_io::{
     CONTROL_AUTH_TOKEN_BYTES, CONTROL_HTTP_FORBIDDEN_RESPONSE, ControlAuth, ControlLoopAction, ControlPostRequestContext, ControlRecordedStep,
     ControlRequest, ControlResponse, MAX_CONTROL_LINE_BYTES, MAX_CONTROL_TOKEN_BYTES, PrintJobSpec, PrintSpoolOutput, dispatch_gui_action,
-    dispatch_ui_command, handle_control_line, handle_control_line_with_action, is_http_request_line, parse_control_port, serve_control_stream,
-    serve_control_stream_with_quit, serve_control_stream_with_quit_and_hook, serve_control_stream_with_quit_and_token,
+    dispatch_ui_command, handle_control_line, handle_control_line_with_action, is_http_request_line, parse_control_port, parse_control_request,
+    serve_control_stream, serve_control_stream_with_quit, serve_control_stream_with_quit_and_hook, serve_control_stream_with_quit_and_token,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use control_io::{
@@ -60,10 +59,9 @@ pub use i18n::{
     BETA_ACTIVE_LOCALES, LOCALES, LocalePreset, is_beta_active_locale, is_draft_translation_locale, locale_display_name, locale_picker_label,
     normalize_beta_gui_locale, normalize_locale, tr, tr_or_fallback,
 };
-pub use inspect::{
-    ImportWarningsSnapshot, ParityReport, ParityViolation, ScreenshotRegionTarget, UiTreeSnapshot, ZLayer, inspect_ui_tree,
-    inspect_ui_tree_for_metrics,
-};
+pub use inspect::{ImportWarningsSnapshot, ParityReport, ParityViolation, ScreenshotRegionTarget, UiTreeSnapshot, ZLayer};
+#[cfg(not(target_arch = "wasm32"))]
+pub use inspect::{inspect_ui_tree, inspect_ui_tree_for_metrics};
 pub use interaction::{
     CanvasDragTarget, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers, LayoutResizeHandle, PointerButton,
     UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, build_shortcut_candidates, dispatch_mouse_wheel, dispatch_ui_event,
@@ -185,24 +183,37 @@ pub fn migrate_preferences_value_with_ui_scale(raw: &serde_json::Value) -> Resul
     Ok((serde_json::Value::Object(obj), scale))
 }
 
+/// Equality-transparent holder for a persistent headless `egui::Context` and simulation clock.
+///
+/// Cloning produces a fresh empty slot so cloned `UiApp` instances stay strictly isolated (`F8`).
 #[cfg(not(target_arch = "wasm32"))]
-/// Custom hook intercepting `ui.*` actions when an external `egui` host/driver is attached to [`UiApp`].
-pub type EguiDispatchHook =
-    std::sync::Arc<dyn Fn(&mut UiApp, &str, &serde_json::Value) -> Option<Result<serde_json::Value, EngineError>> + Send + Sync>;
+pub(crate) struct HeadlessEguiCtxSlot {
+    pub inner: std::sync::Arc<curvebook_platform::sync::Mutex<Option<(egui::Context, f64)>>>,
+}
 
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Default)]
-pub(crate) struct EguiDispatchHookSlot(pub Option<EguiDispatchHook>);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl std::fmt::Debug for EguiDispatchHookSlot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("EguiDispatchHookSlot").field(&self.0.is_some()).finish()
+impl Default for HeadlessEguiCtxSlot {
+    fn default() -> Self {
+        Self { inner: std::sync::Arc::new(curvebook_platform::sync::Mutex::new(None)) }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl PartialEq for EguiDispatchHookSlot {
+impl Clone for HeadlessEguiCtxSlot {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for HeadlessEguiCtxSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("HeadlessEguiCtxSlot").finish()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PartialEq for HeadlessEguiCtxSlot {
     fn eq(&self, _other: &Self) -> bool {
         true
     }
@@ -277,13 +288,8 @@ pub(crate) struct UiShellSnapshot {
     pub human_path_only: bool,
     pub host_draws_menu_bar: bool,
     #[cfg(not(target_arch = "wasm32"))]
-    pub ui_backend: egui_shell::UiBackend,
-    #[cfg(not(target_arch = "wasm32"))]
     pub egui_views: egui_shell::EguiShellViewState,
-    pub view_shards: views::ViewShardStates,
     pub clipboard_adapter: ClipboardAdapterSlot,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub egui_dispatch_hook: EguiDispatchHookSlot,
     pub mutation_seq: MutationCounter,
 }
 
@@ -424,14 +430,11 @@ pub struct UiApp {
     pub human_path_only: bool,
     pub host_draws_menu_bar: bool,
     #[cfg(not(target_arch = "wasm32"))]
-    pub ui_backend: egui_shell::UiBackend,
-    #[cfg(not(target_arch = "wasm32"))]
     pub egui_views: egui_shell::EguiShellViewState,
-    pub view_shards: views::ViewShardStates,
     pub(crate) clipboard_adapter: ClipboardAdapterSlot,
     pub(crate) url_opener: UrlOpenerSlot,
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) egui_dispatch_hook: EguiDispatchHookSlot,
+    pub(crate) headless_egui: HeadlessEguiCtxSlot,
     pub(crate) batch_undo_log: Option<BatchUndoTracker>,
     pub(crate) mutation_seq: MutationCounter,
 }
@@ -476,14 +479,11 @@ impl UiApp {
             human_path_only: false,
             host_draws_menu_bar: false,
             #[cfg(not(target_arch = "wasm32"))]
-            ui_backend: egui_shell::UiBackend::Egui,
-            #[cfg(not(target_arch = "wasm32"))]
             egui_views: egui_shell::EguiShellViewState::default(),
-            view_shards: views::ViewShardStates::default(),
             clipboard_adapter: ClipboardAdapterSlot::default(),
             url_opener: UrlOpenerSlot::default(),
             #[cfg(not(target_arch = "wasm32"))]
-            egui_dispatch_hook: EguiDispatchHookSlot::default(),
+            headless_egui: HeadlessEguiCtxSlot::default(),
             batch_undo_log: None,
             mutation_seq: MutationCounter(0),
         };
@@ -517,13 +517,8 @@ impl UiApp {
             human_path_only: self.human_path_only,
             host_draws_menu_bar: self.host_draws_menu_bar,
             #[cfg(not(target_arch = "wasm32"))]
-            ui_backend: self.ui_backend,
-            #[cfg(not(target_arch = "wasm32"))]
             egui_views: self.egui_views.clone(),
-            view_shards: self.view_shards.clone(),
             clipboard_adapter: self.clipboard_adapter.clone(),
-            #[cfg(not(target_arch = "wasm32"))]
-            egui_dispatch_hook: self.egui_dispatch_hook.clone(),
             mutation_seq: self.mutation_seq,
         }
     }
@@ -553,11 +548,11 @@ impl UiApp {
         self.host_draws_menu_bar = snap.host_draws_menu_bar;
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.ui_backend = snap.ui_backend;
             self.egui_views = snap.egui_views;
-            self.egui_dispatch_hook = snap.egui_dispatch_hook;
+            if let Ok(mut guard) = self.headless_egui.inner.lock() {
+                *guard = None;
+            }
         }
-        self.view_shards = snap.view_shards;
         self.clipboard_adapter = snap.clipboard_adapter;
         self.mutation_seq = snap.mutation_seq;
         self.sync_views();
@@ -695,39 +690,6 @@ impl UiApp {
     /// Reset user interface zoom scale to [`DEFAULT_UI_SCALE`] (`1.0x`, `Cmd/Ctrl 0`).
     pub fn reset_ui_scale(&mut self) -> f32 {
         self.set_ui_scale(DEFAULT_UI_SCALE)
-    }
-
-    /// Active desktop UI rendering/dispatch backend (`Legacy` default, or `Egui`).
-    #[cfg(not(target_arch = "wasm32"))]
-    #[must_use]
-    pub fn ui_backend(&self) -> egui_shell::UiBackend {
-        self.ui_backend
-    }
-
-    /// Switch the active UI backend between `Legacy` and `Egui`.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn set_ui_backend(&mut self, backend: egui_shell::UiBackend) {
-        self.ui_backend = backend;
-    }
-
-    /// Builder-style helper setting [`Self::ui_backend`].
-    #[cfg(not(target_arch = "wasm32"))]
-    #[must_use]
-    pub fn with_ui_backend(mut self, backend: egui_shell::UiBackend) -> Self {
-        self.ui_backend = backend;
-        self
-    }
-
-    /// Install a custom `egui` dispatch hook overriding control `ui.*` routing on this [`UiApp`].
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn set_egui_dispatch_hook(&mut self, hook: EguiDispatchHook) {
-        self.egui_dispatch_hook = EguiDispatchHookSlot(Some(hook));
-    }
-
-    /// Remove any previously installed [`EguiDispatchHook`].
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn clear_egui_dispatch_hook(&mut self) {
-        self.egui_dispatch_hook = EguiDispatchHookSlot(None);
     }
 
     /// Look up the localized UI string for `key` under the currently selected locale.
@@ -1035,11 +997,7 @@ impl UiApp {
                 !self.nav.gallery.open
                     && !self.nav.welcome.open
                     && self.document().total_sheet_count() > 0
-                    && self
-                        .document()
-                        .active_sheet_id
-                        .as_ref()
-                        .is_some_and(|id| !views::nav_notes::sheet_floating_notes(self.document(), id).is_empty())
+                    && self.document().active_sheet_id.as_ref().is_some_and(|id| !workspace_nav::sheet_floating_notes(self.document(), id).is_empty())
             }
         }
     }
@@ -1149,7 +1107,8 @@ impl UiApp {
                 metrics,
             )
         } else {
-            inspect::inspect_semantic_snapshot(self, metrics, scope, include_bounds)
+            let empty_meta = egui_shell::FrameInspectMeta::default();
+            egui_shell::inspect_bridge::build_ui_tree_snapshot_from_egui(self, &empty_meta, None, scope, include_bounds, metrics)
         }
     }
 
@@ -1212,13 +1171,6 @@ impl UiApp {
         let mut rasterizer = egui_shell::rasterizer::EguiSoftwareRasterizer::new();
         let (ctx, mut output, regions, clear_color) = self.capture_settled_egui_shell_output(target, &mut rasterizer)?;
         rasterizer.render_egui_screenshot_png(&ctx, &mut output, target, region, regions, clear_color)
-    }
-
-    /// Legacy pre-`control_io` backend hook retained as a compatibility no-op (`None`) so all
-    /// control requests route through `control_io` (`catch_unwind` + per-request token check).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn try_dispatch_egui_backend(&mut self, _method: &str, _params: &serde_json::Value) -> Option<Result<serde_json::Value, EngineError>> {
-        None
     }
 
     /// Dispatch a HiDPI interactive [`UiInputEvent`] through the interaction controller (`G6`, `M7`).
@@ -1417,7 +1369,7 @@ impl UiApp {
     /// Replace the active [`Session`] (e.g. when loading a dropped project into an existing
     /// window) while preserving host security policies (`gui_only`, `path_policy`,
     /// `human_path_only`), OS adapters (`clipboard_adapter`, `url_opener`, `egui_dispatch_hook`),
-    /// and user preferences (`theme`, `locale`, `shortcuts`, `ui_backend`, `host_draws_menu_bar`,
+    /// and user preferences (`theme`, `locale`, `shortcuts`, `host_draws_menu_bar`,
     /// `rulers_visible`).
     pub fn replace_session_preserving_policies(&mut self, mut session: Session) {
         session.set_gui_only(self.session.gui_only());
@@ -1442,7 +1394,6 @@ impl UiApp {
         {
             self.egui_views = egui_shell::EguiShellViewState::default();
         }
-        self.view_shards = views::ViewShardStates::default();
         self.batch_undo_log = None;
         self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
         self.sync_views();
@@ -1509,12 +1460,11 @@ impl UiApp {
     /// into TSV and update internal clipboard state (`R15-GUI-32`).
     pub fn copy_active_result_selection_tsv(&mut self) -> Option<String> {
         let rs_id = crate::interaction::resolve_result_sheet_for_shortcut(self, false)?;
-        let mut results_state = std::mem::take(&mut self.view_shards.results);
-        let out = crate::views::results::handle_custom_action(self, &mut results_state, &format!("copy_selection:{}", rs_id.as_str()));
-        self.view_shards.results = results_state;
-        out.ok()
-            .filter(|outcome| outcome.handled)
-            .and_then(|outcome| outcome.command_result)
+        let outcome = dialogs_canvas::copy_result_table_to_clipboard(self, rs_id.as_str(), false);
+        outcome
+            .handled
+            .then_some(outcome.command_result)
+            .flatten()
             .and_then(|val| val.get("copied_text").and_then(serde_json::Value::as_str).map(ToOwned::to_owned))
             .filter(|s| !s.is_empty())
     }
@@ -1735,7 +1685,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 60);
+        assert_eq!(UI_COMMANDS.len(), 61);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",

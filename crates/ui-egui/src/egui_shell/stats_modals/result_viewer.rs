@@ -8,7 +8,7 @@ use crate::i18n::{normalize_locale, tr};
 use crate::modal_predicates::ControlEnablement;
 
 use crate::egui_shell::stat_anova_modal::render_modal_seg_btn;
-use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 use super::StatsModalFrameReport;
 use super::helpers::{Wave4ModalShell, render_modal_action_button, show_wave4_modal};
@@ -63,7 +63,7 @@ pub fn render_result_viewer_modal(
                             idx == tab_idx.min(res.tabs.len() - 1),
                             &ControlEnablement::enabled(),
                         ) {
-                            intents.push_select_result_tab(idx);
+                            intents.push(UiIntent::SelectResultTab { index: idx });
                         }
                     }
                 });
@@ -93,17 +93,19 @@ pub fn render_result_viewer_modal(
         |ui, _state, meta, intents| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ControlEnablement::enabled()) {
-                    intents.push_dialog_button("ok");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
                 if render_modal_action_button(ui, tokens, meta, "modal.cancel", tr(locale, "btn.cancel"), false, false, &ControlEnablement::enabled())
                 {
-                    intents.push_dialog_button("cancel");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
             });
         },
     );
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+    } else if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     }
     StatsModalFrameReport::from(capture)
 }

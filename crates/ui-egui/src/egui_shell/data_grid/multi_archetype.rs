@@ -12,10 +12,10 @@ use serde_json::json;
 
 use crate::UiApp;
 use crate::grid_view::GridViewState;
+use crate::grid_view::{grid_tr, linked_region_for_cell};
 use crate::inspect::ZLayer;
-use crate::views::grid_core::{grid_tr, linked_region_for_cell};
 
-use super::super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
+use super::super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 use super::headers::{render_multi_column_headers, render_multi_corner, row_title_at};
 use super::inline_edit::{begin_inline_edit, render_multi_inline_editors};
 use super::linked_regions::{open_link_popover, render_link_provenance_strip, render_linked_region_guard_popover};
@@ -125,6 +125,7 @@ pub(super) fn render_multi_archetype_grid(
             forward_frozen_wheel(ui, &geom, fstate.state);
         }
         let prev_scroll = fstate.state.scroll_offset_pt;
+        fstate.state.last_available_rect = geom.available_rect;
         let body_out = render_multi_body(ui, &mctx, &mut fstate);
         render_multi_corner(ui, &mctx, &mut fstate);
         let active_mv_operands = active_mv_formula_operands(app, ds);
@@ -234,8 +235,8 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                 );
                 if resp.clicked() && !blocked && geom.col_count > 0 {
                     fstate.aux.selected_x_cell = None;
-                    fstate.intents.push_select_grid_cell(GridCellCoord::new(row, 0, 0));
-                    fstate.intents.push_extend_grid_selection(GridCellCoord::new(row, last_col, last_sub));
+                    fstate.intents.push(UiIntent::SelectGridCell { coord: GridCellCoord::new(row, 0, 0) });
+                    fstate.intents.push(UiIntent::ExtendGridSelection { coord: GridCellCoord::new(row, last_col, last_sub) });
                     set_grid_focus_active(gui, true);
                     gui.ctx().request_repaint();
                 }
@@ -897,10 +898,13 @@ fn handle_multi_data_cell_interactions(
         fstate.aux.active_role_menu_col = None;
         fstate.state.context_menu = None;
         set_grid_focus_active(body_ui, true);
-        if body_ui.input(|i| i.modifiers).shift {
-            fstate.intents.push_extend_grid_selection(coord);
+        let (shift_held, cmd_held) = body_ui.input(|i| (i.modifiers.shift, i.modifiers.command || i.modifiers.mac_cmd || i.modifiers.ctrl));
+        if shift_held {
+            fstate.intents.push(UiIntent::ExtendGridSelection { coord });
+        } else if cmd_held {
+            fstate.intents.push(UiIntent::ToggleGridCell { coord });
         } else {
-            fstate.intents.push_select_grid_cell(coord);
+            fstate.intents.push(UiIntent::SelectGridCell { coord });
         }
         if is_multi_click_edit(resp) {
             if flags.mv_is_calc {
@@ -938,7 +942,7 @@ fn handle_multi_data_cell_interactions(
         fstate.aux.selected_x_cell = None;
         let already_selected = app.grid.selected_coords.contains(&coord) || app.grid.tool.active == Some(coord);
         if !already_selected {
-            fstate.intents.push_select_grid_cell(coord);
+            fstate.intents.push(UiIntent::SelectGridCell { coord });
         }
         fstate.state.context_menu = Some(ContextMenuState {
             pos,
@@ -1197,7 +1201,7 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
                                 copy_x_cell_to_clipboard(list, app, ds, xr, xs);
                             } else {
                                 clear_x_clipboard_cache(list);
-                                intents.push_grid_copy_selection();
+                                intents.push(UiIntent::GridCopySelection);
                             }
                         }
                         "grid.ctx.paste" => {
@@ -1212,7 +1216,7 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
                                     push_x_cell_text_paste_intents(app, ds, xr, xs, &clip, intents);
                                 }
                             } else {
-                                intents.push_grid_paste_from_clipboard(app.grid.tool.active);
+                                intents.push(UiIntent::GridPasteFromClipboard { start_coord: app.grid.tool.active });
                             }
                         }
                         "grid.ctx.duplicate_column" => {
@@ -1365,6 +1369,6 @@ fn handle_grid_ctx_cut(
         return Some(reg.clone());
     }
     clear_x_clipboard_cache(ui);
-    intents.push_grid_cut_selection();
+    intents.push(UiIntent::GridCutSelection);
     None
 }

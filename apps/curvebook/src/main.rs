@@ -27,13 +27,12 @@ use curvebook_format::versioned::{
 use curvebook_render::RenderTargetSpec;
 use curvebook_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use curvebook_ui_egui::control_io::CONTROL_CLIENT_IDLE_TIMEOUT;
-use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::interaction::ViewportMetrics;
 use curvebook_ui_egui::theme::install_fonts;
 use curvebook_ui_egui::{
     ControlAuth, ControlPostRequestContext, DEFAULT_UI_SCALE, ScreenshotRegionTarget, UiApp, UiThemeMode, bind_control_tcp_listener,
-    extract_ui_scale_from_preferences_extra, normalize_beta_gui_locale, normalize_locale, parse_control_port, serve_control_listener_with_hook,
-    validate_loopback_addr, write_ui_scale_to_preferences_extra,
+    extract_ui_scale_from_preferences_extra, normalize_beta_gui_locale, normalize_locale, parse_control_port, validate_loopback_addr,
+    write_ui_scale_to_preferences_extra,
 };
 
 const RECOVERY_LOCK_TTL_MS: u64 = 300_000;
@@ -74,7 +73,6 @@ struct LaunchConfig {
     control_token: Option<String>,
     window: bool,
     gui_only: bool,
-    ui_backend: UiBackend,
     in_window_menus: bool,
     new_instance: bool,
     headless_once: bool,
@@ -305,11 +303,32 @@ fn parse_args_with_env_and_backend(
         }
     }
 
-    cfg.ui_backend = UiBackend::from_env_and_args(env_ui_backend, cli_ui_backend.as_deref())?;
+    validate_retired_ui_backend_flag(env_ui_backend, cli_ui_backend.as_deref())?;
     apply_env_control_overrides(&mut cfg, env_port, env_token)?;
     validate_launch_config(&cfg)?;
 
     Ok(CliAction::Launch(cfg))
+}
+
+fn validate_retired_ui_backend_flag(env_val: Option<&str>, cli_val: Option<&str>) -> Result<(), String> {
+    if let Some(cli) = cli_val.map(str::trim).filter(|s| !s.is_empty()) {
+        if cli.eq_ignore_ascii_case("legacy") {
+            return Err(String::from("invalid --ui-backend value `legacy`: legacy UI backend has been retired; use `egui`"));
+        }
+        if !cli.eq_ignore_ascii_case("egui") {
+            return Err(format!("invalid --ui-backend value `{cli}`; expected `egui`"));
+        }
+        return Ok(());
+    }
+    if let Some(env_raw) = env_val.map(str::trim).filter(|s| !s.is_empty()) {
+        if env_raw.eq_ignore_ascii_case("legacy") {
+            return Err(String::from("invalid CURVEBOOK_UI_BACKEND value `legacy`: legacy UI backend has been retired; use `egui`"));
+        }
+        if !env_raw.eq_ignore_ascii_case("egui") {
+            return Err(format!("invalid CURVEBOOK_UI_BACKEND value `{env_raw}`; expected `egui`"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_launch_config(cfg: &LaunchConfig) -> Result<(), String> {
@@ -449,7 +468,6 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
         in_window_menus: cfg.in_window_menus,
         new_instance: cfg.new_instance,
         gui_only: cfg.gui_only,
-        ui_backend: cfg.ui_backend,
         locale_override: None,
         theme_override: None,
         recovery_root: recovery_root.clone(),
@@ -663,6 +681,7 @@ fn make_control_pref_persist_hook(app_paths: &AppPaths, no_prefs: bool) -> Optio
     }))
 }
 
+#[cfg(test)]
 fn serve_control_with_pref_persistence<F>(win: &mut DesktopWindowSession, app_paths: &AppPaths, no_prefs: bool, mut runner: F) -> Result<(), String>
 where
     F: FnMut(&mut UiApp, &mut dyn FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>) -> std::io::Result<()>,
@@ -696,30 +715,26 @@ fn run_authenticated_control_server(
     let token_path = control_token_file_path(&app_paths.config_dir, port);
     write_control_token_file(&token_path, &auth)?;
     let token_guard = ControlTokenFileGuard { path: token_path };
-    if win.app().ui_backend() == UiBackend::Egui {
-        let (mut guards, mut channel) = start_live_window_control_on_listener(listener, auth.clone(), app_paths, no_prefs, token_guard)?;
-        let mut post_hook = channel.post_hook.take();
-        while let Ok(req) = channel.request_rx.recv() {
-            let res: Result<LiveControlFrameOutput, String> =
-                win.dispatch_live_control_frame_with_hook(&req.raw_bytes, &req.auth, req.conn_authenticated, |app, hook_ctx| {
-                    if let Some(ref mut hook) = post_hook {
-                        hook(app, hook_ctx)?;
-                    }
-                    Ok(())
-                });
-            let quit = res.as_ref().is_ok_and(|out| out.quit);
-            let _ = req.reply_tx.send(res);
-            if quit {
-                channel.shutdown.store(true, std::sync::atomic::Ordering::Release);
-                break;
-            }
+    let (mut guards, mut channel) = start_live_window_control_on_listener(listener, auth, app_paths, no_prefs, token_guard)?;
+    let mut post_hook = channel.post_hook.take();
+    while let Ok(req) = channel.request_rx.recv() {
+        let res: Result<LiveControlFrameOutput, String> =
+            win.dispatch_live_control_frame_with_hook(&req.raw_bytes, &req.auth, req.conn_authenticated, |app, hook_ctx| {
+                if let Some(ref mut hook) = post_hook {
+                    hook(app, hook_ctx)?;
+                }
+                Ok(())
+            });
+        let quit = res.as_ref().is_ok_and(|out| out.quit);
+        let _ = req.reply_tx.send(res);
+        if quit {
+            channel.shutdown.store(true, std::sync::atomic::Ordering::Release);
+            break;
         }
-        drop(channel);
-        guards._server_guard.stop();
-        return Ok(());
     }
-    let _token_guard = token_guard;
-    serve_control_with_pref_persistence(win, app_paths, no_prefs, |app, hook| serve_control_listener_with_hook(app, &listener, &auth, hook))
+    drop(channel);
+    guards._server_guard.stop();
+    Ok(())
 }
 
 struct LiveControlServerGuards {
@@ -1200,9 +1215,7 @@ mod tests {
     use curvebook_format::save_project_file;
     use eframe::egui;
 
-    use super::{
-        CURRENT_PREFERENCES_VERSION, CliAction, LaunchConfig, UiApp, UiBackend, UiThemeMode, load_startup_session, parse_args, parse_port, run,
-    };
+    use super::{CURRENT_PREFERENCES_VERSION, CliAction, LaunchConfig, UiApp, UiThemeMode, load_startup_session, parse_args, parse_port, run};
 
     #[test]
     fn cli_version_and_help_and_flags() {
@@ -1229,7 +1242,6 @@ mod tests {
                 control_token: None,
                 window: false,
                 gui_only: false,
-                ui_backend: UiBackend::Egui,
                 in_window_menus: true,
                 new_instance: true,
                 headless_once: false,
@@ -1249,7 +1261,6 @@ mod tests {
                 control_token: None,
                 window: false,
                 gui_only: true,
-                ui_backend: UiBackend::Egui,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: true,
@@ -1271,7 +1282,6 @@ mod tests {
                 control_token: None,
                 window: true,
                 gui_only: true,
-                ui_backend: UiBackend::Egui,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: false,
@@ -1303,7 +1313,6 @@ mod tests {
                 control_token: None,
                 window: false,
                 gui_only: false,
-                ui_backend: UiBackend::Egui,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: false,
@@ -2153,7 +2162,6 @@ mod tests {
             in_window_menus: true,
             new_instance: false,
             gui_only: false,
-            ui_backend: UiBackend::Egui,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -2280,10 +2288,10 @@ mod tests {
     #[test]
     fn r15_1_ui_backend_flag_env_and_preferences_ui_scale_migration() -> Result<(), Box<dyn std::error::Error>> {
         let default_egui = super::parse_args_with_env_and_backend(&[], None, None, None)?;
-        assert!(matches!(default_egui, CliAction::Launch(ref c) if c.ui_backend == UiBackend::Egui));
+        assert!(matches!(default_egui, CliAction::Launch(_)));
 
         let env_egui = super::parse_args_with_env_and_backend(&[], None, None, Some("egui"))?;
-        assert!(matches!(env_egui, CliAction::Launch(ref c) if c.ui_backend == UiBackend::Egui));
+        assert!(matches!(env_egui, CliAction::Launch(_)));
 
         let cli_legacy_err = super::parse_args_with_env_and_backend(&[String::from("--ui-backend=legacy")], None, None, Some("egui"));
         assert!(cli_legacy_err.is_err(), "--ui-backend=legacy must be rejected post-R15.5 cutover");
@@ -2292,7 +2300,7 @@ mod tests {
         assert!(env_legacy_err.is_err(), "CURVEBOOK_UI_BACKEND=legacy must be rejected post-R15.5 cutover");
 
         let cli_split_flag = super::parse_args_with_env_and_backend(&[String::from("--ui-backend"), String::from("egui")], None, None, None)?;
-        assert!(matches!(cli_split_flag, CliAction::Launch(ref c) if c.ui_backend == UiBackend::Egui));
+        assert!(matches!(cli_split_flag, CliAction::Launch(_)));
 
         assert!(super::parse_args_with_env_and_backend(&[String::from("--ui-backend=bogus")], None, None, None).is_err());
 

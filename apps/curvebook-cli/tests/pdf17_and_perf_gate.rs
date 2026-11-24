@@ -1,67 +1,29 @@
+#![forbid(unsafe_code)]
 //! Integration tests for CLI PDF 1.7 / 1.4 export, `--ttf-font` embedding,
 //! `WorkdirGuard` font path containment, and G12 `< 50 ms` 96-curve / `< 250 ms` 100k MV perf gates.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 
+use common::{CliHarness, TempDir};
 use curvebook_text::{build_minimal_truetype_font, parse_truetype_font_info};
 use serde_json::{Value, json};
 
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
 type TestResult = Result<(), String>;
 
-struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    fn new(prefix: &str) -> Result<Self, String> {
-        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), seq));
-        fs::create_dir_all(&dir).map_err(|e| format!("create temp dir `{}`: {e}", dir.display()))?;
-        Ok(Self { path: dir })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-fn cli_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_curvebook-cli")
-}
-
 fn path_str(p: &Path) -> Result<&str, String> {
-    p.to_str().ok_or_else(|| format!("non-UTF-8 path: {}", p.display()))
+    CliHarness::path_str(p)
 }
 
-fn run_cli(args: &[&str]) -> Result<Output, String> {
-    Command::new(cli_bin())
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("spawn cli: {e}"))
+fn run_cli(args: &[&str]) -> Result<std::process::Output, String> {
+    CliHarness::run(args)
 }
 
 fn run_cli_ok(args: &[&str]) -> Result<String, String> {
-    let out = run_cli(args)?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    if out.status.code() != Some(0) {
-        return Err(format!("CLI failed for {args:?} (code={:?})\nstdout:\n{stdout}\nstderr:\n{stderr}", out.status.code()));
-    }
-    Ok(stdout)
+    CliHarness::run_ok(args, None)
 }
 
 fn create_sample_archive(work: &Path) -> Result<PathBuf, String> {

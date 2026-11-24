@@ -19,7 +19,7 @@ pub use canvas::{
 pub use grid::{GridCellCoord, GridToolState, GridViewportSpec, GridVisibleWindow, SelectionQuickStats};
 
 /// Logical cursor shapes requested by interactive tools. Every variant is documented in
-/// `crates/tools/src/cursors.toml` (checked by `cargo xtask cursors`).
+/// `crates/tools/src/cursors.toml` (checked by `cursor_enum_matches_cursors_toml` test).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Cursor {
     /// Standard selection pointer over graphs, layouts and inspector chrome.
@@ -32,6 +32,70 @@ pub enum Cursor {
     AxisResize,
     /// Panning hand over a zoomed graph or multi-panel layout sheet.
     HandGrab,
+}
+
+impl Cursor {
+    /// Every [`Cursor`] variant, in declaration order.
+    pub const ALL: &[Self] = &[Self::Select, Self::CellGrid, Self::Crosshair, Self::AxisResize, Self::HandGrab];
+
+    /// Canonical variant name matching `name` entries in `crates/tools/src/cursors.toml`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Select => "Select",
+            Self::CellGrid => "CellGrid",
+            Self::Crosshair => "Crosshair",
+            Self::AxisResize => "AxisResize",
+            Self::HandGrab => "HandGrab",
+        }
+    }
+}
+
+#[cfg(test)]
+mod cursor_toml_tests {
+    use std::collections::BTreeSet;
+
+    use super::Cursor;
+
+    fn parse_toml_cursor_names(raw: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut in_cursor = false;
+        for line in raw.lines() {
+            let trimmed = line.split('#').next().unwrap_or("").trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with('[') {
+                in_cursor = trimmed == "[[cursor]]";
+                continue;
+            }
+            if in_cursor
+                && let Some((key, val)) = trimmed.split_once('=')
+                && key.trim() == "name"
+            {
+                let clean = val.trim().trim_matches('"').trim_matches('\'');
+                names.push(clean.to_owned());
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn cursor_enum_matches_cursors_toml() {
+        let doc = include_str!("cursors.toml");
+        let toml_names = parse_toml_cursor_names(doc);
+        assert_eq!(toml_names.len(), Cursor::ALL.len(), "cursors.toml count != Cursor::ALL: {toml_names:?}");
+
+        let enum_set: BTreeSet<&str> = Cursor::ALL.iter().map(|c| c.name()).collect();
+        let mut seen = BTreeSet::new();
+        for name in &toml_names {
+            assert!(seen.insert(name.as_str()), "duplicate [[cursor]] name `{name}` in cursors.toml");
+            assert!(enum_set.contains(name.as_str()), "stale [[cursor]] entry `{name}` in cursors.toml");
+        }
+        for c in Cursor::ALL {
+            assert!(seen.contains(c.name()), "missing [[cursor]] entry `{}` in cursors.toml", c.name());
+        }
+    }
 }
 
 #[cfg(test)]

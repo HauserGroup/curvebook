@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::inspect::ZLayer;
 
-use super::super::FrameInspectEntryInput;
+use super::super::{FrameInspectEntryInput, UiIntent};
 use super::shared::{
     MultiGridCtx, MultiGridFrameState, multi_text_style, record_meta_if_enabled, record_meta_with_unclipped_if_enabled, render_ellipsized_text,
 };
@@ -185,7 +185,7 @@ pub(super) fn render_mv_role_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fs
                     },
                 );
                 if mr.clicked() {
-                    fstate.intents.push_open_manage_variables(mctx.ds.id.clone(), Some(col));
+                    fstate.intents.push(UiIntent::OpenManageVariables { sheet_id: mctx.ds.id.clone(), column: Some(col) });
                     fstate.aux.active_role_menu_col = None;
                 }
             });

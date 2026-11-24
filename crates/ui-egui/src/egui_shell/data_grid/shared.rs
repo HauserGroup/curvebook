@@ -17,7 +17,7 @@ use crate::UiApp;
 use crate::grid_view::{data_set_subcolumn_count, format_cell_display, parse_localized_number_input};
 use crate::i18n::LocalePreset;
 
-use super::super::{FrameInspectEntryInput, FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens};
+use super::super::{FrameInspectEntryInput, FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens, UiIntent};
 use super::{ColumnGridEguiState, DataGridScrollTarget};
 
 pub(super) const ROW_NUM_WIDTH_PT: f32 = 48.0;
@@ -330,6 +330,49 @@ pub(super) fn clamp_multi_scroll(state: &mut ColumnGridEguiState, geom: &MultiGr
     let max_y = (geom.content_h - geom.body_inner_clip.height()).max(0.0);
     state.scroll_offset_pt.x = if state.scroll_offset_pt.x.is_finite() { state.scroll_offset_pt.x.clamp(0.0, max_x) } else { 0.0 };
     state.scroll_offset_pt.y = if state.scroll_offset_pt.y.is_finite() { state.scroll_offset_pt.y.clamp(0.0, max_y) } else { 0.0 };
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(in crate::egui_shell) struct ScrollCellTarget {
+    pub is_x: bool,
+    pub row: usize,
+    pub col: usize,
+    pub subcol: usize,
+}
+
+pub(in crate::egui_shell) fn scroll_cell_into_view(
+    app: &UiApp,
+    ds: &DataSheet,
+    state: &mut ColumnGridEguiState,
+    metrics: LayoutMetrics,
+    viewport_size_pt: (f32, f32),
+    target: ScrollCellTarget,
+) -> bool {
+    let ScrollCellTarget { is_x, row, col, subcol } = target;
+    let (viewport_w_pt, viewport_h_pt) = viewport_size_pt;
+    if row >= ds.archetype.row_count() {
+        return false;
+    }
+    if is_x {
+        if subcol >= archetype_x_subcol_count(&ds.archetype) {
+            return false;
+        }
+    } else if col >= ds.archetype.column_count() || subcol >= data_set_subcolumn_count(&ds.archetype, col) {
+        return false;
+    }
+    let est_w = (viewport_w_pt - 500.0).max(240.0);
+    let est_h = (viewport_h_pt - 140.0).max(200.0);
+    let avail = if state.last_available_rect.is_positive() { state.last_available_rect } else { Rect::from_min_size(Pos2::ZERO, vec2(est_w, est_h)) };
+    let geom = compute_multi_geom(app, ds, state, metrics, metrics.scroll_bar_thickness, avail);
+    let flat_all = geom.coord_to_flat_all(is_x, col, subcol);
+    #[allow(clippy::cast_precision_loss)]
+    let target_x = (flat_all as f32) * geom.subcol_w - geom.body_inner_clip.width() * 0.4;
+    #[allow(clippy::cast_precision_loss)]
+    let target_y = (row as f32) * geom.row_h - geom.body_inner_clip.height() * 0.4;
+    state.scroll_offset_pt.x = target_x.max(0.0);
+    state.scroll_offset_pt.y = target_y.max(0.0);
+    clamp_multi_scroll(state, &geom);
+    true
 }
 
 pub(super) fn apply_pending_scroll_target(state: &mut ColumnGridEguiState, geom: &MultiGridGeom) {
@@ -792,22 +835,23 @@ pub(super) fn handle_cell_pointer_drag_select(
     intents: &mut PendingUiIntents,
 ) -> bool {
     let key = grid_drag_anchor_key(sheet_id);
-    let (primary_pressed, primary_down, primary_released, shift, ptr_pos) = ui.input(|i| {
+    let (primary_pressed, primary_down, primary_released, shift, cmd_mod, ptr_pos) = ui.input(|i| {
         (
             i.pointer.primary_pressed(),
             i.pointer.primary_down(),
             i.pointer.primary_released(),
             i.modifiers.shift,
+            i.modifiers.command || i.modifiers.mac_cmd || i.modifiers.ctrl,
             i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()),
         )
     });
-    if primary_pressed && !shift && resp.is_pointer_button_down_on() {
+    if primary_pressed && !shift && !cmd_mod && resp.is_pointer_button_down_on() {
         if let Some(press_pos) = ptr_pos
             && !ui.ctx().will_discard()
         {
             ui.ctx().data_mut(|d| d.insert_temp(key, Some(GridDragAnchor { coord, press_pos })));
         }
-        intents.push_select_grid_cell(coord);
+        intents.push(UiIntent::SelectGridCell { coord });
         set_grid_focus_active(ui, true);
         return true;
     }
@@ -820,7 +864,7 @@ pub(super) fn handle_cell_pointer_drag_select(
             && a.coord != coord
             && pos.distance(a.press_pos) >= 4.0
         {
-            intents.push_extend_grid_selection(coord);
+            intents.push(UiIntent::ExtendGridSelection { coord });
             set_grid_focus_active(ui, true);
             return true;
         }

@@ -3,8 +3,8 @@
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ConvergenceStrictness, NonlinearFitSpec, OutlierHandling, ReplicateFitMode, SheetId, WeightingSource,
 };
-use curvebook_ui_egui::dialogs_canvas::EditAnalysisParametersState;
-use curvebook_ui_egui::i18n::{LOCALES, tr};
+use curvebook_ui_egui::dialogs_canvas::{EditAnalysisParametersState, dialog_patch};
+use curvebook_ui_egui::i18n::{LOCALES, LocalePreset, tr};
 use serde_json::json;
 
 #[test]
@@ -20,7 +20,7 @@ fn r18_1_edit_params_patches_all_new_nonlinear_fields() {
         "convergence_strictness": "Strict",
         "mv_y_columns": [2, 3]
     });
-    state.apply_field_patch(patch.as_object().unwrap()).unwrap();
+    dialog_patch::patch_edit_params(&mut state, patch.as_object().unwrap(), &LocalePreset::for_locale("en")).unwrap();
 
     assert!(
         matches!(

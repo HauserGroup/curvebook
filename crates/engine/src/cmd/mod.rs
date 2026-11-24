@@ -110,6 +110,46 @@ impl Ctx<'_> {
     }
 }
 
+macro_rules! command_specs {
+    (
+        $group:expr;
+        $(
+            {
+                id: $id:expr,
+                label: $label:expr,
+                menu_path: $menu_path:expr,
+                $(shortcut: $shortcut:expr,)?
+                summary: $summary:expr,
+                beginner: $beginner:expr,
+                effects: $effects:expr,
+                input_schema: $input_schema:expr,
+                enabled: $enabled:expr,
+                run: $run:expr $(,)?
+            }
+        ),* $(,)?
+    ) => {
+        [
+            $(
+                $crate::cmd::CommandSpec {
+                    id: $id,
+                    label: $label,
+                    menu_path: $menu_path,
+                    shortcut: "",
+                    summary: $summary,
+                    beginner: $beginner,
+                    group: $group,
+                    effects: $effects,
+                    input_schema: $input_schema,
+                    enabled: $enabled,
+                    run: $run,
+                }
+                $(.with_shortcut($shortcut))?
+            ),*
+        ]
+    };
+}
+pub(super) use command_specs;
+
 /// Declarative, metadata-rich definition of one engine command.
 #[derive(Copy, Clone)]
 pub struct CommandSpec {
@@ -124,6 +164,15 @@ pub struct CommandSpec {
     pub input_schema: fn() -> Value,
     pub enabled: fn(&Session) -> bool,
     pub run: fn(&mut Ctx<'_>, Value) -> Result<CommandOutcome, EngineError>,
+}
+
+impl CommandSpec {
+    /// Attach a keyboard shortcut to this command specification.
+    #[must_use]
+    pub const fn with_shortcut(mut self, shortcut: &'static str) -> Self {
+        self.shortcut = shortcut;
+        self
+    }
 }
 
 impl fmt::Debug for CommandSpec {

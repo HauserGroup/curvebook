@@ -29,17 +29,19 @@ use std::path::{Path, PathBuf};
 
 use curvebook_doc::{DataSheet, ErrorCode, ProjectDocument, SheetId, SubcolumnMode, TableKind};
 use curvebook_engine::services::{
-    ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterMetadata, RasterSizingPolicy, compile_visual_scene_for_sheet,
-    export_document_artifact,
+    DEFAULT_PREVIEW_DPI, DocumentExportFormat, ExportOptionsSpec, RasterMetadata, compile_visual_scene_for_sheet, export_document_artifact,
+    import_registered_path, load_validated_ttf_font_bytes, parse_csv_delimiter_opt, parse_dpi, parse_pdf_color_space, parse_pdf_version,
+    parse_tiff_compression, resolve_open_importer, resolve_preview_sheet_id, resolve_project_save_exporter, resolve_tidy_flag,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use curvebook_engine::services::{pdf_color_space_str, pdf_version_str, tiff_compression_str};
 use curvebook_engine::{EngineError, Session};
 use curvebook_format::{
-    CsvOptions, ExportOptions, ExportSource, Exporter, FormatRegistry, ImportOptions, ImportPayload, Importer, XlsxImportOptions,
-    decode_delimited_text_bytes, is_unpacked_project_dir, list_xlsx_sheets, strip_project_data_for_template,
+    CsvOptions, ExportOptions, ExportSource, FormatRegistry, ImportOptions, ImportPayload, XlsxImportOptions, decode_delimited_text_bytes,
+    list_xlsx_sheets, strip_project_data_for_template,
 };
-use curvebook_pdf::{PdfColorSpace, PdfExportOptions, PdfVersion};
+use curvebook_pdf::{PdfColorSpace, PdfVersion};
 use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, TiffCompression};
-use curvebook_svg::SvgExportOptions;
 use serde_json::{Map, Value, json};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -53,15 +55,10 @@ use crate::tools::{
     required_non_empty_str,
 };
 
-const DEFAULT_PREVIEW_DPI: u16 = 144;
-const MAX_DPI: u16 = 2400;
-const MIN_DPI: u16 = 18;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_LIVE_INLINE_ARCHIVE_BYTES: usize = ((crate::tools::MAX_CONTROL_RESPONSE_BYTES - 65_536) / 4) * 3;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_LIVE_INLINE_CSV_BYTES: usize = 8 * 1024 * 1024;
-#[cfg(not(target_arch = "wasm32"))]
-const MAX_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Resolve `raw_path` against the active filesystem trust boundary on `state`.
 ///
@@ -151,38 +148,30 @@ pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Va
     };
 
     let reg = FormatRegistry::default_registry();
-    let importer = resolve_importer(&reg, explicit_format.as_deref(), &resolved_path)?;
-    let import_opts = build_import_options(&resolved_path, importer.descriptor().id, args)?;
-
+    let importer = resolve_open_importer(&reg, explicit_format.as_deref(), &resolved_path, true)
+        .map_err(|err| ToolCallError::InvalidParams(err.message().to_owned()))?;
     let format_id = importer.descriptor().id;
+    let import_opts = build_import_options(&resolved_path, format_id, args)?;
+
     if list_sheets_only && format_id != "xlsx" {
         return Err(ToolCallError::InvalidParams(format!("`list_sheets` is only supported for `.xlsx` workbooks (got `{format_id}`)")));
     }
-    if format_id == "curvebook.d" {
-        let payload = match importer.import_path(&resolved_path, &import_opts) {
-            Ok(p) => p,
+    if format_id == "xlsx" && list_sheets_only {
+        #[cfg(not(target_arch = "wasm32"))]
+        let raw_bytes = match curvebook_platform::fs::read_regular_file_bytes(&resolved_path, importer.max_input_bytes()) {
+            Ok(bytes) => bytes,
+            Err(curvebook_platform::PlatformError::InvalidPath { reason }) => {
+                return Ok(errors::result_from_engine_error(&EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("invalid file `{}`: {reason}", resolved_path.display()),
+                )));
+            }
             Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
         };
-        return apply_imported_payload(state, &resolved_path, format_id, payload, None, title_override.as_deref(), &import_opts, append);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let raw_bytes = match curvebook_platform::fs::read_regular_file_bytes(&resolved_path, importer.max_input_bytes()) {
-        Ok(bytes) => bytes,
-        Err(curvebook_platform::PlatformError::InvalidPath { reason }) => {
-            return Ok(errors::result_from_engine_error(&EngineError::with_code(
-                ErrorCode::BadInput,
-                format!("invalid file `{}`: {reason}", resolved_path.display()),
-            )));
-        }
-        Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
-    };
-    #[cfg(target_arch = "wasm32")]
-    let raw_bytes: Vec<u8> = {
-        return Ok(errors::result_from_code(ErrorCode::IoError, "filesystem operations are not supported on wasm32"));
-    };
-
-    if format_id == "xlsx" && list_sheets_only {
+        #[cfg(target_arch = "wasm32")]
+        let raw_bytes: Vec<u8> = {
+            return Ok(errors::result_from_code(ErrorCode::IoError, "filesystem operations are not supported on wasm32"));
+        };
         let sheets = match list_xlsx_sheets(&raw_bytes) {
             Ok(s) => s,
             Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
@@ -196,12 +185,12 @@ pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Va
         }));
     }
 
-    let payload = match importer.import_bytes(&raw_bytes, &import_opts) {
-        Ok(p) => p,
-        Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
+    let (payload, raw_bytes) = match import_registered_path(importer, &resolved_path, &import_opts) {
+        Ok(res) => res,
+        Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
 
-    apply_imported_payload(state, &resolved_path, format_id, payload, Some(raw_bytes), title_override.as_deref(), &import_opts, append)
+    apply_imported_payload(state, &resolved_path, format_id, payload, raw_bytes, title_override.as_deref(), &import_opts, append)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -243,20 +232,6 @@ fn build_csv_import_params(
     Ok(Value::Object(map))
 }
 
-fn resolve_importer<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, path: &Path) -> Result<&'a dyn Importer, ToolCallError> {
-    if let Some(fmt) = explicit {
-        return reg.importer_by_format(fmt).ok_or_else(|| ToolCallError::InvalidParams(format!("unsupported open format '{fmt}'")));
-    }
-    if let Some(found) = reg.importer_for_path(path) {
-        return Ok(found);
-    }
-    match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-        Some("txt") => reg.importer_by_format("csv").ok_or_else(|| ToolCallError::InvalidParams(String::from("CSV importer unavailable"))),
-        None | Some("") => Err(ToolCallError::InvalidParams(String::from("cannot infer file format without extension; specify \"format\""))),
-        Some(other) => Err(ToolCallError::InvalidParams(format!("unsupported file extension '.{other}'"))),
-    }
-}
-
 fn build_import_options(path: &Path, format_id: &str, args: &Map<String, Value>) -> Result<ImportOptions, ToolCallError> {
     let explicit_kind = optional_non_empty_str(args, "target_kind")?.map(|raw| parse_table_kind(&raw)).transpose()?;
     let target_kind = explicit_kind.unwrap_or(TableKind::Xy);
@@ -265,20 +240,9 @@ fn build_import_options(path: &Path, format_id: &str, args: &Map<String, Value>)
         None => SubcolumnMode::Single,
     };
 
-    let csv_override = if let Some(delim) = optional_non_empty_str(args, "delimiter")? {
-        let mut chars = delim.chars();
-        let Some(ch) = chars.next() else {
-            return Err(ToolCallError::InvalidParams(String::from("delimiter must not be empty")));
-        };
-        if chars.next().is_some() {
-            return Err(ToolCallError::InvalidParams(String::from("delimiter must be a single character")));
-        }
-        let mut opts = CsvOptions::csv();
-        opts.delimiter = ch;
-        Some(opts)
-    } else {
-        None
-    };
+    let delim_raw = optional_non_empty_str(args, "delimiter")?;
+    let csv_override =
+        parse_csv_delimiter_opt(delim_raw.as_deref(), "delimiter").map_err(|err| ToolCallError::InvalidParams(err.message().to_owned()))?;
 
     let stem = path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.trim().is_empty()).unwrap_or("Imported Data");
     let explicit_title = optional_non_empty_str(args, "title")?;
@@ -872,7 +836,8 @@ pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Va
         };
         let explicit_format = optional_non_empty_str(args, "format")?.map(|s| s.to_ascii_lowercase());
         let reg = FormatRegistry::default_registry();
-        let exporter = resolve_save_exporter(&reg, explicit_format.as_deref(), &resolved_path)?;
+        let exporter = resolve_project_save_exporter(&reg, explicit_format.as_deref(), &resolved_path)
+            .map_err(|err| ToolCallError::InvalidParams(err.message().to_owned()))?;
         let format_id = exporter.descriptor().id;
         let cmd_id = if format_id == "cbtemplate" { "project.saveTemplate" } else { "project.save" };
         let mut cmd_params = json!({
@@ -916,7 +881,8 @@ pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Va
     };
     let explicit_format = optional_non_empty_str(args, "format")?.map(|s| s.to_ascii_lowercase());
     let reg = FormatRegistry::default_registry();
-    let exporter = resolve_save_exporter(&reg, explicit_format.as_deref(), &resolved_path)?;
+    let exporter = resolve_project_save_exporter(&reg, explicit_format.as_deref(), &resolved_path)
+        .map_err(|err| ToolCallError::InvalidParams(err.message().to_owned()))?;
     let format_id = exporter.descriptor().id;
 
     let doc = state.session().document().clone();
@@ -938,34 +904,11 @@ pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Va
     }))
 }
 
-fn has_curvebook_unpacked_suffix(path: &Path) -> bool {
-    path.file_name().and_then(std::ffi::OsStr::to_str).is_some_and(|name| name.to_ascii_lowercase().ends_with(".curvebook.d"))
-}
-
-fn resolve_save_exporter<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, path: &Path) -> Result<&'a dyn Exporter, ToolCallError> {
-    if let Some(fmt) = explicit {
-        if !matches!(fmt, "curvebook" | "curvebook.d" | "cbtemplate") {
-            return Err(ToolCallError::InvalidParams(format!("unsupported save format '{fmt}'")));
-        }
-        return reg.exporter_by_format(fmt).ok_or_else(|| ToolCallError::InvalidParams(format!("unsupported save format '{fmt}'")));
-    }
-    if !has_curvebook_unpacked_suffix(path) && !is_unpacked_project_dir(path) && path.is_dir() {
-        return Err(ToolCallError::InvalidParams(format!("save_file target `{}` is a directory without a `.curvebook.d` suffix", path.display())));
-    }
-    if let Some(found) = reg.exporter_for_path(path)
-        && matches!(found.descriptor().id, "curvebook" | "curvebook.d" | "cbtemplate")
-        && (found.descriptor().id != "curvebook.d" || has_curvebook_unpacked_suffix(path) || is_unpacked_project_dir(path))
-    {
-        return Ok(found);
-    }
-    reg.exporter_by_format("curvebook").ok_or_else(|| ToolCallError::InvalidParams(String::from("curvebook exporter unavailable")))
-}
-
 /// Handle `render_preview`: compile GraphSheet/LayoutSheet and rasterize PNG preview with metadata.
 pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     reject_unknown_args("render_preview", args, &["sheet_id", "width_px", "height_px", "dpi"])?;
     let sheet_id = optional_non_empty_str(args, "sheet_id")?;
-    let dpi = parse_dpi(args)?;
+    let dpi = parse_dpi(args.get("dpi"), DEFAULT_PREVIEW_DPI).map_err(|err| ToolCallError::InvalidParams(err.message().to_owned()))?;
     let requested_w = optional_u32_bounded(args, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
     let requested_h = optional_u32_bounded(args, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
 
@@ -1010,20 +953,16 @@ pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<Strin
         Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
     let cancel = state.current_cancel_token();
-    let artifact = match export_document_artifact(
-        doc,
-        &ExportArtifactRequest {
-            target: ExportTarget::Explicit(target_id.clone()),
-            format: ExportArtifactFormat::Png {
-                width_px: requested_w,
-                height_px: requested_h,
-                dpi: Some(dpi),
-                sizing: RasterSizingPolicy::CapToLimits { default_dpi: DEFAULT_PREVIEW_DPI },
-            },
-        },
-        Some(&cancel),
-        "render_preview",
-    ) {
+    let mut spec = ExportOptionsSpec::new(DocumentExportFormat::Png);
+    spec.sheet_id = Some(target_id.clone());
+    spec.width_px = requested_w;
+    spec.height_px = requested_h;
+    spec.dpi = Some(dpi);
+    let req = match spec.into_artifact_request(doc, true) {
+        Ok(req) => req,
+        Err(err) => return Ok(errors::result_from_engine_error(&err)),
+    };
+    let artifact = match export_document_artifact(doc, &req, Some(&cancel), "render_preview") {
         Ok(art) => art,
         Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
@@ -1080,14 +1019,12 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
             "csv_delimiter",
         ],
     )?;
-    let format = required_non_empty_str(args, "format")?.to_ascii_lowercase();
-    if !matches!(format.as_str(), "svg" | "pdf" | "emf" | "png" | "tiff" | "csv" | "tsv" | "json") {
-        return Err(ToolCallError::InvalidParams(format!("unsupported export format '{format}'")));
-    }
+    let raw_format = required_non_empty_str(args, "format")?;
+    let format = DocumentExportFormat::parse(&raw_format).map_err(|err| ToolCallError::InvalidParams(err.message().to_owned()))?;
 
     let sheet_id = optional_non_empty_str(args, "sheet_id")?;
     let output_path = optional_non_empty_str(args, "output_path")?.or(optional_non_empty_str(args, "path")?);
-    let cfg = ExportArtifactConfig::parse(args, sheet_id)?;
+    let (mut spec, ttf_font) = parse_mcp_export_spec(args, format, sheet_id)?;
 
     let resolved_path = match output_path.as_deref() {
         Some(raw) => match resolve_mcp_path(state, raw) {
@@ -1097,7 +1034,7 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
         None => None,
     };
 
-    let resolved_ttf_font = match cfg.ttf_font.as_deref() {
+    let resolved_ttf_font = match ttf_font.as_deref() {
         Some(raw) => match resolve_mcp_path(state, raw) {
             Ok(p) => Some(p),
             Err(err) => return Ok(errors::result_from_engine_error(&err)),
@@ -1105,35 +1042,26 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
         None => None,
     };
 
+    let format_str = format.as_str();
+
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = state.control_port() {
-        let pdf_cs = match cfg.pdf_color_space {
-            PdfColorSpace::Srgb => "srgb",
-            PdfColorSpace::Cmyk => "cmyk",
-            PdfColorSpace::Grayscale => "grayscale",
-        };
-        let pdf_ver = pdf_version_str(cfg.pdf_version);
-        let tiff_comp = match cfg.tiff_compression {
-            TiffCompression::None => "none",
-            TiffCompression::Deflate => "deflate",
-            TiffCompression::Lzw => "lzw",
-        };
         let mut live_params = json!({
-            "format": format,
-            "sheet_id": cfg.sheet_id,
-            "pretty": cfg.pretty,
-            "tidy": cfg.tidy,
-            "tab_id": cfg.tab_id,
-            "csv_delimiter": cfg.csv_opts.as_ref().map(|c| c.delimiter.to_string()),
-            "svg_precision": cfg.svg_precision,
-            "pdf_color_space": pdf_cs,
-            "pdf_version": pdf_ver,
+            "format": format_str,
+            "sheet_id": spec.sheet_id.as_ref().map(SheetId::as_str),
+            "pretty": spec.pretty,
+            "tidy": spec.tidy,
+            "tab_id": spec.tab_id,
+            "csv_delimiter": spec.csv_options.as_ref().map(|c| c.delimiter.to_string()),
+            "svg_precision": spec.svg_precision,
+            "pdf_color_space": pdf_color_space_str(spec.pdf_color_space),
+            "pdf_version": pdf_version_str(spec.pdf_version),
             "ttf_font": resolved_ttf_font.as_ref().map(|p| p.display().to_string()),
-            "all_graphs": cfg.all_graphs,
-            "dpi": cfg.dpi,
-            "width_px": cfg.width_px,
-            "height_px": cfg.height_px,
-            "tiff_compression": tiff_comp,
+            "all_graphs": spec.all_graphs,
+            "dpi": spec.dpi.unwrap_or(DEFAULT_PREVIEW_DPI),
+            "width_px": spec.width_px,
+            "height_px": spec.height_px,
+            "tiff_compression": tiff_compression_str(spec.tiff_compression),
         });
         if let Some(dest) = resolved_path.as_ref()
             && let Some(obj) = live_params.as_object_mut()
@@ -1153,7 +1081,7 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
                     "exported": true,
                     "mode": "live_attach",
                     "control_port": port,
-                    "format": format,
+                    "format": format_str,
                     "sheet_id": target_id,
                     "path": written_path,
                     "bytes_written": bytes_written,
@@ -1169,7 +1097,7 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
                 Ok(b) => b,
                 Err(err) => return Ok(errors::result_from_code(ErrorCode::InternalError, format!("invalid base64 from live doc.export: {err}"))),
             };
-            return write_atomic_export(&dest, &format, &target_id, &bytes);
+            return write_atomic_export(&dest, format_str, &target_id, &bytes);
         }
         let Some(b64) = remote.get("data_base64").and_then(Value::as_str) else {
             return Ok(errors::result_from_code(ErrorCode::InternalError, "live doc.export response missing data_base64"));
@@ -1182,28 +1110,26 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
             (Some(w), Some(h)) => {
                 let w32 = u32::try_from(w).unwrap_or(0);
                 let h32 = u32::try_from(h).unwrap_or(0);
-                let dpi_u16 = remote.get("dpi").and_then(Value::as_u64).and_then(|d| u16::try_from(d).ok()).unwrap_or(cfg.dpi);
+                let dpi_u16 =
+                    remote.get("dpi").and_then(Value::as_u64).and_then(|d| u16::try_from(d).ok()).unwrap_or(spec.dpi.unwrap_or(DEFAULT_PREVIEW_DPI));
                 Some(RasterMetadata { width_px: w32, height_px: h32, dpi: dpi_u16 })
             }
             _ => None,
         };
-        return format_inline_export_result(&format, &target_id, &bytes, raster_meta);
+        return format_inline_export_result(format_str, &target_id, &bytes, raster_meta);
     }
 
-    let embedded_ttf_font = if format == "pdf" {
-        match resolved_ttf_font.as_deref() {
-            Some(font_path) => match load_validated_ttf_font_bytes(font_path) {
-                Ok(bytes) => Some(bytes),
-                Err(err) => return Ok(errors::result_from_engine_error(&err)),
-            },
-            None => None,
-        }
-    } else {
-        None
-    };
+    if format == DocumentExportFormat::Pdf
+        && let Some(font_path) = resolved_ttf_font.as_deref()
+    {
+        spec.embedded_ttf_font = match load_validated_ttf_font_bytes(font_path) {
+            Ok(bytes) => Some(bytes),
+            Err(err) => return Ok(errors::result_from_engine_error(&err)),
+        };
+    }
 
     let doc = state.session().document();
-    let req = match build_export_artifact_request(doc, &format, &cfg, embedded_ttf_font) {
+    let req = match spec.into_artifact_request(doc, true) {
         Ok(req) => req,
         Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
@@ -1214,10 +1140,10 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
     };
 
     if let Some(dest) = resolved_path {
-        return write_atomic_export(&dest, &format, &artifact.target_id, &artifact.bytes);
+        return write_atomic_export(&dest, format_str, &artifact.target_id, &artifact.bytes);
     }
 
-    format_inline_export_result(&format, &artifact.target_id, &artifact.bytes, artifact.raster)
+    format_inline_export_result(format_str, &artifact.target_id, &artifact.bytes, artifact.raster)
 }
 
 fn write_atomic_export(dest: &Path, format: &str, target_id: &str, bytes: &[u8]) -> Result<ToolCallResult, ToolCallError> {
@@ -1307,270 +1233,46 @@ fn format_inline_export_result(
     }
 }
 
-#[derive(Clone)]
-struct ExportArtifactConfig {
+fn invalid_params_from_engine(err: EngineError) -> ToolCallError {
+    ToolCallError::InvalidParams(err.message().to_owned())
+}
+
+fn parse_mcp_export_spec(
+    args: &Map<String, Value>,
+    format: DocumentExportFormat,
     sheet_id: Option<String>,
-    pretty: bool,
-    tidy: bool,
-    tab_id: Option<String>,
-    csv_opts: Option<CsvOptions>,
-    svg_precision: Option<u8>,
-    pdf_color_space: PdfColorSpace,
-    pdf_version: PdfVersion,
-    ttf_font: Option<String>,
-    all_graphs: bool,
-    width_px: Option<u32>,
-    height_px: Option<u32>,
-    dpi: u16,
-    tiff_compression: TiffCompression,
-}
-
-impl ExportArtifactConfig {
-    fn parse(args: &Map<String, Value>, sheet_id: Option<String>) -> Result<Self, ToolCallError> {
-        let pretty = optional_bool(args, "pretty")?.unwrap_or(true);
-        let explicit_tidy = optional_bool(args, "tidy")?;
-        let tab_id = optional_non_empty_str(args, "tab_id")?;
-        if explicit_tidy == Some(true) && tab_id.is_some() {
-            return Err(ToolCallError::InvalidParams(String::from(
-                "export `tidy: true` cannot be combined with `tab_id`; omit `tidy` or pass `tidy: false` to export a specific tab",
-            )));
-        }
-        let tidy = explicit_tidy.unwrap_or(tab_id.is_none());
-        let csv_opts = match optional_non_empty_str(args, "csv_delimiter")? {
-            Some(delim) => {
-                let mut chars = delim.chars();
-                let Some(ch) = chars.next() else {
-                    return Err(ToolCallError::InvalidParams(String::from("csv_delimiter must not be empty")));
-                };
-                if chars.next().is_some() {
-                    return Err(ToolCallError::InvalidParams(String::from("csv_delimiter must be a single character")));
-                }
-                let mut opts = CsvOptions::csv();
-                opts.delimiter = ch;
-                Some(opts)
-            }
-            None => None,
-        };
-        let svg_precision = match optional_u32_bounded(args, "svg_precision", 1, 8)? {
-            Some(p) => Some(u8::try_from(p).map_err(|_| ToolCallError::InvalidParams(String::from("svg_precision out of bounds")))?),
-            None => None,
-        };
-        let pdf_color_space = match optional_non_empty_str(args, "pdf_color_space")? {
-            Some(raw) => parse_pdf_color_space(&raw)?,
-            None => PdfColorSpace::Srgb,
-        };
-        let pdf_version = match optional_non_empty_str(args, "pdf_version")? {
-            Some(raw) => parse_pdf_version(&raw)?,
-            None => PdfVersion::Pdf17,
-        };
-        let ttf_font = optional_non_empty_str(args, "ttf_font")?;
-        let all_graphs = optional_bool(args, "all_graphs")?.unwrap_or(false);
-        let dpi = parse_dpi(args)?;
-        let width_px = optional_u32_bounded(args, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
-        let height_px = optional_u32_bounded(args, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
-        let tiff_compression = match optional_non_empty_str(args, "tiff_compression")? {
-            Some(raw) => parse_tiff_compression(&raw)?,
-            None => TiffCompression::Lzw,
-        };
-
-        Ok(Self {
-            sheet_id,
-            pretty,
-            tidy,
-            tab_id,
-            csv_opts,
-            svg_precision,
-            pdf_color_space,
-            pdf_version,
-            ttf_font,
-            all_graphs,
-            width_px,
-            height_px,
-            dpi,
-            tiff_compression,
-        })
-    }
-}
-
-fn resolve_preview_sheet_id(doc: &ProjectDocument, sheet_id: Option<&str>) -> Result<(SheetId, &'static str), EngineError> {
-    if let Some(id_str) = sheet_id {
-        let id = SheetId::new(id_str);
-        if doc.graph_sheet(&id).is_some() {
-            return Ok((id, "graph"));
-        }
-        if doc.layout_sheet(&id).is_some() {
-            return Ok((id, "layout"));
-        }
-        return Err(EngineError::with_code(ErrorCode::NotFound, format!("graph or layout sheet '{id_str}' not found")));
-    }
-    if let Some(active) = &doc.active_sheet_id {
-        if doc.graph_sheet(active).is_some() {
-            return Ok((active.clone(), "graph"));
-        }
-        if doc.layout_sheet(active).is_some() {
-            return Ok((active.clone(), "layout"));
-        }
-    }
-    if let Some(gs) = doc.graph_sheets.first() {
-        return Ok((gs.id.clone(), "graph"));
-    }
-    if let Some(ls) = doc.layout_sheets.first() {
-        return Ok((ls.id.clone(), "layout"));
-    }
-    Err(EngineError::with_code(ErrorCode::NotFound, "no GraphSheet or LayoutSheet exists in the current document"))
-}
-
-fn resolve_mcp_csv_target(doc: &ProjectDocument, sheet_id: Option<&str>, tab_id: Option<&str>) -> Result<ExportTarget, EngineError> {
-    if let Some(id_str) = sheet_id {
-        return Ok(ExportTarget::Explicit(SheetId::new(id_str)));
-    }
-    if let Some(tid) = tab_id {
-        if let Some(active) = &doc.active_sheet_id
-            && let Some(rs) = doc.result_sheet(active)
-            && rs.tabs.iter().any(|t| t.id == tid)
-        {
-            return Ok(ExportTarget::Explicit(rs.id.clone()));
-        }
-        if let Some(rs) = doc.result_sheets.iter().find(|rs| rs.tabs.iter().any(|t| t.id == tid)) {
-            return Ok(ExportTarget::Explicit(rs.id.clone()));
-        }
-        return Err(EngineError::with_code(ErrorCode::NotFound, format!("tab '{tid}' not found on any result sheet")));
-    }
-    if let Some(active) = &doc.active_sheet_id
-        && (doc.result_sheet(active).is_some() || doc.data_sheet(active).is_some())
-    {
-        return Ok(ExportTarget::Explicit(active.clone()));
-    }
-    if let Some(rs) = doc.result_sheets.first() {
-        return Ok(ExportTarget::Explicit(rs.id.clone()));
-    }
-    Ok(ExportTarget::AutoOrExplicit(None))
-}
-
-fn build_export_artifact_request(
-    doc: &ProjectDocument,
-    format: &str,
-    cfg: &ExportArtifactConfig,
-    embedded_ttf_font: Option<Vec<u8>>,
-) -> Result<ExportArtifactRequest, EngineError> {
-    let default_target = ExportTarget::AutoOrExplicit(cfg.sheet_id.as_ref().map(SheetId::new));
-    let (target, artifact_format) = match format {
-        "svg" => {
-            let mut options = SvgExportOptions { pretty: cfg.pretty, ..SvgExportOptions::default() };
-            if let Some(p) = cfg.svg_precision {
-                options.precision = p;
-            }
-            (default_target, ExportArtifactFormat::Svg { options })
-        }
-        "pdf" => (
-            default_target,
-            ExportArtifactFormat::Pdf {
-                options: PdfExportOptions {
-                    color_space: cfg.pdf_color_space,
-                    version: cfg.pdf_version,
-                    embedded_truetype_font: embedded_ttf_font,
-                    ..PdfExportOptions::default()
-                },
-                all_graphs: cfg.all_graphs,
-                sheet_ids: None,
-            },
-        ),
-        "emf" => (default_target, ExportArtifactFormat::Emf { require_kind: None }),
-        "png" => (
-            default_target,
-            ExportArtifactFormat::Png {
-                width_px: cfg.width_px,
-                height_px: cfg.height_px,
-                dpi: Some(cfg.dpi),
-                sizing: RasterSizingPolicy::CapToLimits { default_dpi: DEFAULT_PREVIEW_DPI },
-            },
-        ),
-        "tiff" => (
-            default_target,
-            ExportArtifactFormat::Tiff {
-                width_px: cfg.width_px,
-                height_px: cfg.height_px,
-                dpi: Some(cfg.dpi),
-                compression: cfg.tiff_compression,
-                sizing: RasterSizingPolicy::CapToLimits { default_dpi: DEFAULT_PREVIEW_DPI },
-            },
-        ),
-        "csv" => (
-            resolve_mcp_csv_target(doc, cfg.sheet_id.as_deref(), cfg.tab_id.as_deref())?,
-            ExportArtifactFormat::Csv {
-                options: cfg.csv_opts.clone().unwrap_or_else(CsvOptions::csv),
-                tab_id: cfg.tab_id.clone(),
-                tab_index: None,
-                tidy: cfg.tidy,
-            },
-        ),
-        "tsv" => (
-            resolve_mcp_csv_target(doc, cfg.sheet_id.as_deref(), cfg.tab_id.as_deref())?,
-            ExportArtifactFormat::Csv {
-                options: cfg.csv_opts.clone().unwrap_or_else(CsvOptions::tsv),
-                tab_id: cfg.tab_id.clone(),
-                tab_index: None,
-                tidy: cfg.tidy,
-            },
-        ),
-        "json" => (default_target, ExportArtifactFormat::Json { pretty: cfg.pretty }),
-        _ => return Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported export format '{format}'"))),
+) -> Result<(ExportOptionsSpec, Option<String>), ToolCallError> {
+    let mut spec = ExportOptionsSpec::new(format);
+    spec.sheet_id = sheet_id.map(SheetId::new);
+    spec.pretty = optional_bool(args, "pretty")?.unwrap_or(true);
+    let explicit_tidy = optional_bool(args, "tidy")?;
+    let tab_id = optional_non_empty_str(args, "tab_id")?;
+    spec.tidy = resolve_tidy_flag(explicit_tidy, tab_id.as_deref()).map_err(invalid_params_from_engine)?;
+    spec.tab_id = tab_id;
+    let csv_delim = optional_non_empty_str(args, "csv_delimiter")?;
+    spec.csv_options = parse_csv_delimiter_opt(csv_delim.as_deref(), "csv_delimiter").map_err(invalid_params_from_engine)?;
+    spec.svg_precision = match optional_u32_bounded(args, "svg_precision", 1, 8)? {
+        Some(p) => Some(u8::try_from(p).map_err(|_| ToolCallError::InvalidParams(String::from("svg_precision out of bounds")))?),
+        None => None,
     };
-    Ok(ExportArtifactRequest { target, format: artifact_format })
-}
-
-fn load_validated_ttf_font_bytes(path: &Path) -> Result<Vec<u8>, EngineError> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let bytes = curvebook_platform::fs::read_regular_file_bytes(path, MAX_FONT_FILE_BYTES).map_err(|err| match err {
-            curvebook_platform::PlatformError::InvalidPath { reason } => {
-                EngineError::with_code(ErrorCode::BadInput, format!("invalid TrueType font `{}`: {reason}", path.display()))
-            }
-            other => EngineError::from(other),
-        })?;
-        if !matches!(bytes.get(0..4), Some([0x00, 0x01, 0x00, 0x00] | b"true")) {
-            return Err(EngineError::with_code(
-                ErrorCode::BadInput,
-                format!("unsupported SFNT font `{}`: expected TrueType outlines (`0x00010000` or `true`), not CFF/OTTO", path.display()),
-            ));
-        }
-        let Some(num_tables) = bytes.get(4..6).and_then(|s| <[u8; 2]>::try_from(s).ok()).map(u16::from_be_bytes) else {
-            return Err(EngineError::with_code(ErrorCode::BadInput, format!("truncated TrueType font `{}`", path.display())));
-        };
-        let min_header_len = 12_usize.saturating_add(usize::from(num_tables).saturating_mul(16));
-        if num_tables == 0 || bytes.len() < min_header_len {
-            return Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid TrueType SFNT table directory in `{}`", path.display())));
-        }
-        Ok(bytes)
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = path;
-        Err(EngineError::with_code(ErrorCode::IoError, "reading TrueType font files is not supported on wasm32"))
-    }
-}
-
-fn parse_pdf_version(raw: &str) -> Result<PdfVersion, ToolCallError> {
-    match raw.trim() {
-        "1.4" => Ok(PdfVersion::Pdf14),
-        "1.7" => Ok(PdfVersion::Pdf17),
-        other => Err(ToolCallError::InvalidParams(format!("unsupported pdf_version '{other}' (expected '1.4' or '1.7')"))),
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-const fn pdf_version_str(version: PdfVersion) -> &'static str {
-    match version {
-        PdfVersion::Pdf14 => "1.4",
-        PdfVersion::Pdf17 => "1.7",
-    }
-}
-
-fn parse_dpi(args: &Map<String, Value>) -> Result<u16, ToolCallError> {
-    match optional_u32_bounded(args, "dpi", u32::from(MIN_DPI), u32::from(MAX_DPI))? {
-        Some(v) => u16::try_from(v).map_err(|_| ToolCallError::InvalidParams(String::from("parameter \"dpi\" out of range"))),
-        None => Ok(DEFAULT_PREVIEW_DPI),
-    }
+    spec.pdf_color_space = match optional_non_empty_str(args, "pdf_color_space")? {
+        Some(raw) => parse_pdf_color_space(&raw).map_err(invalid_params_from_engine)?,
+        None => PdfColorSpace::Srgb,
+    };
+    spec.pdf_version = match optional_non_empty_str(args, "pdf_version")? {
+        Some(raw) => parse_pdf_version(&raw).map_err(invalid_params_from_engine)?,
+        None => PdfVersion::Pdf17,
+    };
+    let ttf_font = optional_non_empty_str(args, "ttf_font")?;
+    spec.all_graphs = optional_bool(args, "all_graphs")?.unwrap_or(false);
+    spec.dpi = Some(parse_dpi(args.get("dpi"), DEFAULT_PREVIEW_DPI).map_err(invalid_params_from_engine)?);
+    spec.width_px = optional_u32_bounded(args, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
+    spec.height_px = optional_u32_bounded(args, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
+    spec.tiff_compression = match optional_non_empty_str(args, "tiff_compression")? {
+        Some(raw) => parse_tiff_compression(&raw).map_err(invalid_params_from_engine)?,
+        None => TiffCompression::Lzw,
+    };
+    Ok((spec, ttf_font))
 }
 
 fn parse_table_kind(raw: &str) -> Result<TableKind, ToolCallError> {
@@ -1607,24 +1309,6 @@ fn parse_subcolumn_mode(raw: &str) -> Result<SubcolumnMode, ToolCallError> {
         "upper_lower_limits" => Ok(SubcolumnMode::UpperLowerLimits),
         "median_iqr" => Ok(SubcolumnMode::MedianIqr),
         _ => Err(ToolCallError::InvalidParams(format!("unknown subcolumn_mode '{raw}'"))),
-    }
-}
-
-fn parse_pdf_color_space(raw: &str) -> Result<PdfColorSpace, ToolCallError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "srgb" | "rgb" => Ok(PdfColorSpace::Srgb),
-        "cmyk" => Ok(PdfColorSpace::Cmyk),
-        "grayscale" | "gray" => Ok(PdfColorSpace::Grayscale),
-        _ => Err(ToolCallError::InvalidParams(format!("unsupported pdf_color_space '{raw}'"))),
-    }
-}
-
-fn parse_tiff_compression(raw: &str) -> Result<TiffCompression, ToolCallError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "none" => Ok(TiffCompression::None),
-        "deflate" => Ok(TiffCompression::Deflate),
-        "lzw" => Ok(TiffCompression::Lzw),
-        _ => Err(ToolCallError::InvalidParams(format!("unsupported tiff_compression '{raw}'"))),
     }
 }
 

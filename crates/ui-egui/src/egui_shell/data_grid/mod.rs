@@ -26,7 +26,7 @@ use crate::UiApp;
 
 use super::{FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens};
 
-pub(in crate::egui_shell) use shared::is_linked_region_broken;
+pub(in crate::egui_shell) use shared::{ScrollCellTarget, is_linked_region_broken, scroll_cell_into_view};
 
 /// Target inside the `Column` grid currently undergoing buffered inline text editing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,6 +84,7 @@ pub struct ColumnGridEguiState {
     pub last_visible_subcols: Range<usize>,
     pub ellipsized_headers: usize,
     pub record_inspect_meta: bool,
+    pub last_available_rect: Rect,
     pub active_find_matches: Option<DataGridFindHighlight>,
     pub pending_scroll_target: Option<DataGridScrollTarget>,
 }
@@ -100,6 +101,7 @@ impl Default for ColumnGridEguiState {
             last_visible_subcols: 0..0,
             ellipsized_headers: 0,
             record_inspect_meta: true,
+            last_available_rect: Rect::NOTHING,
             active_find_matches: None,
             pending_scroll_target: None,
         }

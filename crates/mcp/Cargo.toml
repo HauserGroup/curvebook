@@ -23,6 +23,7 @@ curvebook-pdf = { workspace = true }
 curvebook-platform = { workspace = true }
 curvebook-render = { workspace = true }
 curvebook-svg = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

@@ -625,7 +625,13 @@ fn parse_array_value(item_kind: Option<&PropKind>, raw: &str, flag_name: &str) -
     let item_kind_ref = item_kind.unwrap_or(&PropKind::AnyJson);
     let can_split_csv = !trimmed.starts_with('{')
         && trimmed.contains(',')
-        && matches!(item_kind_ref, PropKind::Bool | PropKind::Integer | PropKind::Number | PropKind::String | PropKind::AnyJson);
+        && match item_kind_ref {
+            PropKind::Bool | PropKind::Integer | PropKind::Number | PropKind::String | PropKind::AnyJson => true,
+            PropKind::Multi { options, .. } => {
+                options.iter().any(|opt| matches!(opt, PropKind::Bool | PropKind::Integer | PropKind::Number | PropKind::String | PropKind::AnyJson))
+            }
+            PropKind::Object | PropKind::Array { .. } => false,
+        };
 
     if can_split_csv {
         let mut items = Vec::new();

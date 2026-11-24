@@ -17,7 +17,7 @@ use crate::i18n::{normalize_locale, tr};
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
-use super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, widgets};
+use super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent, widgets};
 
 /// Filter tabs exposed in the `Manage Variables...` upper master list (`gui-layout-spec.md` §8.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -148,7 +148,7 @@ pub fn render_manage_vars_modal(
     }
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         let steps = state.session_undo_depth.take().map_or(0, |d| app.session().undo_depth().saturating_sub(d));
-        intents.push_cancel_manage_variables(steps);
+        intents.push(UiIntent::CancelManageVariables { revert_steps: steps });
     }
 
     let locale = normalize_locale(&app.locale);
@@ -157,6 +157,7 @@ pub fn render_manage_vars_modal(
     let max_w = (viewport.width() - 24.0).clamp(300.0, 780.0);
     let max_h = (viewport.height() - 24.0).clamp(240.0, 560.0);
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let mv_ctx = active_mv_sheet(app, state);
     let modal_resp = egui::Modal::new(egui::Id::unique("egui_shell_manage_vars_dialog")).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
@@ -173,7 +174,7 @@ pub fn render_manage_vars_modal(
                 let close_resp = rhs.button(close_lbl);
                 meta.record_modal_response(rhs, &close_resp, FrameInspectEntryInput::modal_button("mv_formula.vars.close", close_lbl, true));
                 if close_resp.clicked() {
-                    intents.push_close_manage_variables();
+                    intents.push(UiIntent::CloseManageVariables);
                 }
             });
         });
@@ -262,7 +263,7 @@ pub fn render_manage_vars_modal(
             meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal_button("modal.cancel", cancel_lbl, true));
             if cancel_resp.clicked() {
                 let steps = state.session_undo_depth.take().map_or(0, |d| app.session().undo_depth().saturating_sub(d));
-                intents.push_cancel_manage_variables(steps);
+                intents.push(UiIntent::CancelManageVariables { revert_steps: steps });
             }
 
             footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
@@ -290,11 +291,11 @@ pub fn render_manage_vars_modal(
                             }
                         }
                         if !app.grid.variables_dialog.recode_mappings.is_empty() {
-                            intents.push_apply_manage_var_recodes(ds.id.clone());
+                            intents.push(UiIntent::ApplyManageVarRecodes { sheet_id: ds.id.clone() });
                         }
                     }
                     state.session_undo_depth = None;
-                    intents.push_close_manage_variables();
+                    intents.push(UiIntent::CloseManageVariables);
                 }
             });
         });
@@ -309,6 +310,33 @@ pub fn render_manage_vars_modal(
         ModalCaptureSpec { widget_id: "dialog.manage_variables", title, z_dialog: ZLayer::ModalDialog },
         meta,
     );
+    if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+        if let Some((ds, mv)) = mv_ctx {
+            let col = app.grid.variables_dialog.selected_column.unwrap_or(0).min(mv.variables.len().saturating_sub(1));
+            if !ds.frozen && !state.title_draft.trim().is_empty() {
+                let next_title = combine_title_and_unit(&state.title_draft, &state.unit_draft);
+                if !next_title.is_empty() && mv.variables.get(col).is_some_and(|v| v.title != next_title) {
+                    intents.push_engine("table.setTitles", json!({ "sheet_id": ds.id.as_str(), "col": col, "title": next_title }));
+                }
+            }
+            if !ds.frozen
+                && let Some(sel_lvl) = state.selected_level.as_deref()
+            {
+                let trimmed = state.rename_draft.trim();
+                if !trimmed.is_empty() && trimmed != sel_lvl {
+                    intents.push_engine(
+                        "table.recodeLevels",
+                        json!({ "sheet_id": ds.id.as_str(), "col": col, "mappings": [{ "from": sel_lvl, "to": trimmed }] }),
+                    );
+                }
+            }
+            if !app.grid.variables_dialog.recode_mappings.is_empty() {
+                intents.push(UiIntent::ApplyManageVarRecodes { sheet_id: ds.id.clone() });
+            }
+        }
+        state.session_undo_depth = None;
+        intents.push(UiIntent::CloseManageVariables);
+    }
     ManageVarsModalFrameReport {
         modal_open: true,
         dialog_rect_pt: capture.dialog_rect_pt,
@@ -377,7 +405,7 @@ fn render_master_pane(
         let wid = format!("mv_formula.vars.col.{idx}");
         meta.record_modal_response(ui, &resp, FrameInspectEntryInput::modal_button(&wid, &text, true));
         if resp.clicked() {
-            intents.push_select_manage_var_column(ds.id.clone(), idx);
+            intents.push(UiIntent::SelectManageVarColumn { sheet_id: ds.id.clone(), column: idx });
         }
     }
 }
@@ -499,7 +527,7 @@ fn render_detail_pane(
                 let fr = widgets::secondary_button(row, "Edit Formula…");
                 meta.record_modal_response(row, &fr, FrameInspectEntryInput::modal_button("mv_formula.vars.edit_formula", "Edit Formula", true));
                 if fr.clicked() {
-                    intents.push_close_manage_variables();
+                    intents.push(UiIntent::CloseManageVariables);
                     intents.push_ui("ui.table.openFormulaBar", json!({ "sheet_id": ds.id.as_str(), "col": col }));
                 }
             });
@@ -523,7 +551,12 @@ fn render_detail_pane(
                 let wid = format!("mv_formula.vars.order.{slug}");
                 meta.record_modal_response(row, &r, FrameInspectEntryInput::modal_button(&wid, label, !ds.frozen));
                 if r.clicked() {
-                    intents.push_apply_manage_var_order(ds.id.clone(), col, LevelOrderSpec { order: kind, reversed: vd.level_order.reversed }, None);
+                    intents.push(UiIntent::ApplyManageVarOrder {
+                        sheet_id: ds.id.clone(),
+                        column: col,
+                        order: LevelOrderSpec { order: kind, reversed: vd.level_order.reversed },
+                        reference_level: None,
+                    });
                 }
             }
             let rev_lbl = tr(tokens.locale, "mv.vars.reverse_order");
@@ -535,7 +568,12 @@ fn render_detail_pane(
                 FrameInspectEntryInput::modal("mv_formula.vars.order.reversed", "checkbox", rev_lbl, Some(rev.to_string()), !ds.frozen),
             );
             if rr.changed() {
-                intents.push_apply_manage_var_order(ds.id.clone(), col, LevelOrderSpec { order: vd.level_order.order.clone(), reversed: rev }, None);
+                intents.push(UiIntent::ApplyManageVarOrder {
+                    sheet_id: ds.id.clone(),
+                    column: col,
+                    order: LevelOrderSpec { order: vd.level_order.order.clone(), reversed: rev },
+                    reference_level: None,
+                });
             }
             let apply_ord_lbl = tr(tokens.locale, "mv.vars.apply_order");
             let apply_ord = row.add_enabled(!ds.frozen, egui::Button::new(apply_ord_lbl));
@@ -545,7 +583,12 @@ fn render_detail_pane(
                 FrameInspectEntryInput::modal_button("mv_formula.vars.order.apply", apply_ord_lbl, !ds.frozen),
             );
             if apply_ord.clicked() {
-                intents.push_apply_manage_var_order(ds.id.clone(), col, vd.level_order.clone(), None);
+                intents.push(UiIntent::ApplyManageVarOrder {
+                    sheet_id: ds.id.clone(),
+                    column: col,
+                    order: vd.level_order.clone(),
+                    reference_level: None,
+                });
             }
         });
 
@@ -595,7 +638,10 @@ fn render_detail_pane(
             let stage_r = row.add_enabled(can_stage, egui::Button::new(stage_lbl));
             meta.record_modal_response(row, &stage_r, FrameInspectEntryInput::modal_button("mv_formula.vars.recode_stage", stage_lbl, can_stage));
             if stage_r.clicked() {
-                intents.push_stage_manage_var_recode(state.recode_from_draft.trim(), state.recode_to_draft.trim());
+                intents.push(UiIntent::StageManageVarRecode {
+                    from: (state.recode_from_draft.trim()).into(),
+                    to: (state.recode_to_draft.trim()).into(),
+                });
             }
         });
 
@@ -605,7 +651,7 @@ fn render_detail_pane(
             let clear_r = row.add_enabled(can_apply, egui::Button::new("Clear"));
             meta.record_modal_response(row, &clear_r, FrameInspectEntryInput::modal_button("mv_formula.vars.recode_clear", "Clear", can_apply));
             if clear_r.clicked() {
-                intents.push_clear_manage_var_recodes();
+                intents.push(UiIntent::ClearManageVarRecodes);
             }
             let apply_r = widgets::secondary_button_enabled(row, "Apply Recodes", can_apply);
             meta.record_modal_response(
@@ -614,7 +660,7 @@ fn render_detail_pane(
                 FrameInspectEntryInput::modal_button("mv_formula.vars.recode_apply", "Apply Recodes", can_apply),
             );
             if apply_r.clicked() {
-                intents.push_apply_manage_var_recodes(ds.id.clone());
+                intents.push(UiIntent::ApplyManageVarRecodes { sheet_id: ds.id.clone() });
             }
             let preview_txt = if vd.recode_mappings.is_empty() {
                 String::from("No staged recodes")
@@ -670,12 +716,12 @@ fn render_levels_inspector(
             {
                 let item = explicit_names.remove(i);
                 explicit_names.insert(target_pos.min(explicit_names.len()), item);
-                intents.push_apply_manage_var_order(
-                    ds.id.clone(),
-                    col,
-                    LevelOrderSpec { order: LevelOrderKind::Explicit(explicit_names.clone()), reversed: false },
-                    None,
-                );
+                intents.push(UiIntent::ApplyManageVarOrder {
+                    sheet_id: ds.id.clone(),
+                    column: col,
+                    order: LevelOrderSpec { order: LevelOrderKind::Explicit(explicit_names.clone()), reversed: false },
+                    reference_level: None,
+                });
                 break;
             }
         }
@@ -765,12 +811,12 @@ fn render_levels_inspector(
                         FrameInspectEntryInput::modal_button(&format!("mv_formula.vars.level_ref.{idx}"), "Pin Ref", !ds.frozen),
                     );
                     if ref_r.clicked() {
-                        intents.push_apply_manage_var_order(
-                            ds.id.clone(),
-                            col,
-                            LevelOrderSpec { order: LevelOrderKind::Explicit(explicit_names.clone()), reversed: false },
-                            Some(item.level.clone()),
-                        );
+                        intents.push(UiIntent::ApplyManageVarOrder {
+                            sheet_id: ds.id.clone(),
+                            column: col,
+                            order: LevelOrderSpec { order: LevelOrderKind::Explicit(explicit_names.clone()), reversed: false },
+                            reference_level: Some(item.level.clone()),
+                        });
                     }
                 });
 
@@ -832,12 +878,12 @@ fn render_levels_inspector(
     {
         let moved = explicit_names.remove(src);
         explicit_names.insert(dst.min(explicit_names.len()), moved);
-        intents.push_apply_manage_var_order(
-            ds.id.clone(),
-            col,
-            LevelOrderSpec { order: LevelOrderKind::Explicit(explicit_names), reversed: false },
-            None,
-        );
+        intents.push(UiIntent::ApplyManageVarOrder {
+            sheet_id: ds.id.clone(),
+            column: col,
+            order: LevelOrderSpec { order: LevelOrderKind::Explicit(explicit_names), reversed: false },
+            reference_level: None,
+        });
     }
 }
 

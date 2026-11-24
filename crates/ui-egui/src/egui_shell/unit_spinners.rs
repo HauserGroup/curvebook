@@ -220,8 +220,8 @@ fn render_scrub_text_editor(
         edit.request_focus();
         ui.ctx().data_mut(|d| d.remove::<bool>(bounds.focus_edit_flag));
     }
-    let enter_pressed = ui.input(|i| i.key_pressed(Key::Enter));
-    let escape_pressed = ui.input(|i| i.key_pressed(Key::Escape));
+    let enter_pressed = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+    let escape_pressed = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
     if escape_pressed {
         state.editing = false;
         state.draft_text.clear();

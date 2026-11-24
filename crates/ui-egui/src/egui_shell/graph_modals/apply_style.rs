@@ -36,7 +36,7 @@ pub(super) fn render_apply_style_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>)
                 {
                     let mut patch = Map::new();
                     patch.insert(String::from("donor_graph_id"), Value::String(id.as_str().to_owned()));
-                    gctx.intents.push_patch_active_dialog(patch);
+                    gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
                 }
             }
         });

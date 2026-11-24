@@ -14,7 +14,7 @@ use curvebook_engine::Session;
 use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::egui_shell::driver::{EguiHumanPathDriver, TextBleedPolicy};
 use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
-use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens, UiBackend};
+use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens};
 use curvebook_ui_egui::interaction::ViewportMetrics;
 use serde_json::json;
 
@@ -26,7 +26,6 @@ struct SplineModalState {
 
 impl SplineModalState {
     fn new(mut app: UiApp) -> Self {
-        app.set_ui_backend(UiBackend::Egui);
         app.set_gui_only(true);
         let views = app.egui_views.clone();
         Self { app, views, intents: PendingUiIntents::new() }
@@ -82,7 +81,6 @@ fn seed_spline_project() -> (UiApp, SheetId) {
     let res_id = SheetId::try_new("res-sp").unwrap();
 
     let mut app = UiApp::new();
-    app.set_ui_backend(UiBackend::Egui);
     app.set_gui_only(true);
     *app.session_mut() = session;
     app.sync_views();

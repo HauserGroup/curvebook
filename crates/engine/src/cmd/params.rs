@@ -2,6 +2,8 @@
 
 use std::cell::RefCell;
 
+use schemars::JsonSchema;
+use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
@@ -92,6 +94,148 @@ pub fn empty_object_schema() -> Value {
     })
 }
 
+/// Generate a self-contained Draft 2020-12 command parameter schema from `T`.
+///
+/// Inlines all local `$defs` references so command registry consumers
+/// (`summarize_schema_properties`, docs generation, and parameter validators)
+/// can inspect top-level `type`, `properties`, and `required` directly, ensures
+/// closed object schemas carry `"additionalProperties": false`, and preserves
+/// open maps/catch-all fields.
+#[must_use]
+pub fn command_schema<T: JsonSchema>() -> Value {
+    let mut root = SchemaSettings::draft2020_12().into_generator().into_root_schema_for::<T>().to_value();
+    postprocess_command_schema(&mut root);
+    root
+}
+
+/// Generate a Draft 2020-12 command parameter schema from `T` with retired legacy
+/// aliases documented via `x-deprecated-aliases`.
+#[must_use]
+pub fn command_schema_with_aliases<T: JsonSchema>(aliases: &[(&str, &[&str])]) -> Value {
+    let mut schema = command_schema::<T>();
+    attach_deprecated_aliases(&mut schema, aliases);
+    schema
+}
+
+/// Marker type for `#[schemars(with = "NonEmptyStrSchema")]` (and inside `Vec<NonEmptyStrSchema>`)
+/// to emit `{ "type": "string", "minLength": 1 }` without duplicating custom schema closures.
+pub(crate) struct NonEmptyStrSchema;
+
+impl JsonSchema for NonEmptyStrSchema {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("NonEmptyString")
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "minLength": 1
+        })
+    }
+}
+
+/// Attach `x-deprecated-aliases` metadata to an object schema.
+pub fn attach_deprecated_aliases(schema: &mut Value, aliases: &[(&str, &[&str])]) {
+    let mut alias_map = Map::new();
+    for (canonical, list) in aliases {
+        let items: Vec<Value> = list.iter().map(|a| Value::String((*a).to_owned())).collect();
+        alias_map.insert((*canonical).to_owned(), Value::Array(items));
+    }
+    if let Value::Object(map) = schema
+        && !alias_map.is_empty()
+    {
+        map.insert(String::from("x-deprecated-aliases"), Value::Object(alias_map));
+    }
+}
+
+fn postprocess_command_schema(root: &mut Value) {
+    let defs = root
+        .as_object_mut()
+        .and_then(|obj| {
+            obj.remove("title");
+            obj.remove("$defs").or_else(|| obj.remove("definitions"))
+        })
+        .and_then(|v| match v {
+            Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let mut visiting = Vec::new();
+    inline_and_close_schema(root, &defs, &mut visiting, 0, true);
+}
+
+fn schema_allows_object(obj: &Map<String, Value>) -> bool {
+    match obj.get("type") {
+        Some(Value::String(s)) => s == "object",
+        Some(Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some("object")),
+        _ => false,
+    }
+}
+
+fn inline_and_close_schema(schema: &mut Value, defs: &Map<String, Value>, visiting: &mut Vec<String>, depth: usize, is_root: bool) {
+    if depth >= MAX_SCHEMA_DEPTH {
+        return;
+    }
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+
+    if !is_root {
+        obj.remove("$schema");
+        obj.remove("title");
+    }
+
+    if let Some(def_name) = obj.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix("#/$defs/")).map(str::to_owned)
+        && !visiting.iter().any(|seen| seen == &def_name)
+        && let Some(mut resolved) = defs.get(&def_name).cloned()
+    {
+        visiting.push(def_name);
+        inline_and_close_schema(&mut resolved, defs, visiting, depth.saturating_add(1), false);
+        visiting.pop();
+        obj.remove("$ref");
+        if let Value::Object(resolved_map) = resolved {
+            for (k, v) in resolved_map {
+                obj.entry(k).or_insert(v);
+            }
+        }
+    }
+
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(Value::Array(items)) = obj.get_mut(key) {
+            for item in items.iter_mut() {
+                inline_and_close_schema(item, defs, visiting, depth.saturating_add(1), false);
+            }
+        }
+    }
+
+    if let Some(Value::Object(props)) = obj.get_mut("properties") {
+        for prop in props.values_mut() {
+            inline_and_close_schema(prop, defs, visiting, depth.saturating_add(1), false);
+        }
+        if schema_allows_object(obj) && !obj.contains_key("additionalProperties") {
+            obj.insert(String::from("additionalProperties"), Value::Bool(false));
+        }
+    } else if schema_allows_object(obj) && obj.get("additionalProperties") == Some(&Value::Bool(false)) {
+        obj.insert(String::from("properties"), Value::Object(Map::new()));
+    }
+
+    for key in ["items", "additionalProperties"] {
+        if let Some(child) = obj.get_mut(key) {
+            inline_and_close_schema(child, defs, visiting, depth.saturating_add(1), false);
+        }
+    }
+    if let Some(Value::Array(prefix)) = obj.get_mut("prefixItems") {
+        for item in prefix.iter_mut() {
+            inline_and_close_schema(item, defs, visiting, depth.saturating_add(1), false);
+        }
+    }
+}
+
 /// Build a Draft 2020-12 object schema from `(field_name, property_schema)` pairs.
 #[must_use]
 pub fn obj_schema(props: Vec<(&str, Value)>, required: &[&str], additional_properties: bool) -> Value {
@@ -118,16 +262,7 @@ pub fn obj_schema(props: Vec<(&str, Value)>, required: &[&str], additional_prope
 #[must_use]
 pub fn obj_schema_with_aliases(props: Vec<(&str, Value)>, required: &[&str], aliases: Vec<(&str, &[&str])>, additional_properties: bool) -> Value {
     let mut schema = obj_schema(props, required, additional_properties);
-    let mut alias_map = Map::new();
-    for (canonical, list) in aliases {
-        let items: Vec<Value> = list.iter().map(|a| Value::String((*a).to_owned())).collect();
-        alias_map.insert(canonical.to_owned(), Value::Array(items));
-    }
-    if let Value::Object(ref mut map) = schema
-        && !alias_map.is_empty()
-    {
-        map.insert(String::from("x-deprecated-aliases"), Value::Object(alias_map));
-    }
+    attach_deprecated_aliases(&mut schema, &aliases);
     schema
 }
 
@@ -1279,5 +1414,83 @@ mod tests {
         // Explicit empty-properties catch-all schema (`{"properties": {}, "additionalProperties": true}`) stays permissive.
         let catchall_schema = json!({ "type": "object", "properties": {}, "additionalProperties": true });
         parse_params::<EmptyCatchAllStruct>(&catchall_schema, json!({ "sheet_id": "res-1" })).expect("catch-all schema allowed");
+    }
+
+    #[test]
+    fn command_schema_inlines_defs_enforces_closed_objects_and_supports_aliases() {
+        #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
+        #[serde(rename_all = "snake_case")]
+        enum Kind {
+            Xy,
+            Column,
+        }
+
+        #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
+        struct NestedCrop {
+            #[schemars(range(min = 0.0))]
+            left_pt: Option<f64>,
+        }
+
+        #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
+        #[serde(deny_unknown_fields)]
+        struct SampleCmd {
+            #[schemars(length(min = 1))]
+            sheet_id: String,
+            kind: Option<Kind>,
+            #[schemars(range(min = 0))]
+            row: Option<i64>,
+            crop: Option<NestedCrop>,
+        }
+
+        #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
+        struct FlatTail {
+            title: Option<String>,
+        }
+
+        #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
+        struct FlattenedCmd {
+            #[schemars(length(min = 1))]
+            sheet_id: String,
+            #[serde(flatten)]
+            tail: FlatTail,
+        }
+
+        #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
+        #[serde(deny_unknown_fields)]
+        struct EmptyCmd {}
+
+        let schema = command_schema_with_aliases::<SampleCmd>(&[("sheet_id", &["id"])]);
+        assert!(schema.get("$defs").is_none(), "inlined schema must remove $defs: {schema}");
+        assert_eq!(schema.get("additionalProperties"), Some(&json!(false)));
+        assert!(schema.pointer("/properties/crop/anyOf/0/properties/left_pt").is_some(), "nested $ref must be inlined: {schema}");
+        assert_eq!(schema.pointer("/properties/crop/anyOf/0/additionalProperties"), Some(&json!(false)));
+
+        let ok = parse_params::<SampleCmd>(&schema, json!({ "id": "d1", "kind": null, "row": null, "crop": { "left_pt": 2.0 } }))
+            .expect("valid null and alias");
+        assert_eq!(ok.sheet_id, "d1");
+        assert_eq!(ok.kind, None);
+        assert_eq!(ok.row, None);
+
+        let neg_row = parse_params::<SampleCmd>(&schema, json!({ "sheet_id": "d1", "row": -1 })).expect_err("negative row rejected");
+        assert_eq!(neg_row.details.as_ref().and_then(|d| d.get("pointer")).and_then(Value::as_str), Some("/row"));
+
+        let flat_schema = command_schema::<FlattenedCmd>();
+        assert_eq!(flat_schema.get("additionalProperties"), Some(&json!(false)), "flattened fixed schema must be closed: {flat_schema}");
+        assert!(flat_schema.pointer("/properties/title").is_some(), "flattened field missing: {flat_schema}");
+
+        #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
+        struct LocalOpenPatch {
+            #[schemars(length(min = 1))]
+            sheet_id: String,
+            #[serde(flatten)]
+            extra: Map<String, Value>,
+        }
+
+        let open_schema = command_schema::<LocalOpenPatch>();
+        assert_ne!(open_schema.get("additionalProperties"), Some(&json!(false)), "open flattened Map schema must stay open: {open_schema}");
+
+        let empty_schema = command_schema::<EmptyCmd>();
+        assert_eq!(empty_schema.get("additionalProperties"), Some(&json!(false)));
+        assert_eq!(empty_schema.get("properties"), Some(&json!({})));
     }
 }

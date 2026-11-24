@@ -27,7 +27,7 @@ use super::stat_anova_modal::{
     render_modal_textbox_row, render_section_title, render_stepper_row,
 };
 use super::stats_modals::{Wave4ModalShell, render_modal_action_button, render_mv_role_badge, render_tex_equation_preview, show_wave4_modal};
-use super::{FrameInspectMeta, PendingUiIntents, Tokens};
+use super::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 /// Core tabs of the `Nonlinear Curve Fitting` parameter modal (`gui-layout-spec.md` §8.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -198,6 +198,7 @@ pub fn render_fit_modal(
     let commit_en = blocking_error.as_deref().map_or_else(ControlEnablement::enabled, ControlEnablement::disabled);
     let locale = normalize_locale(&app.locale);
     let is_create = doc.result_sheet(result_sheet_id).is_none();
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
 
     let capture = show_wave4_modal(
         ctx,
@@ -212,7 +213,7 @@ pub fn render_fit_modal(
             banner_widget_id: "edit.resolved_test_banner",
             max_width_pt: 820.0,
             max_height_pt: 580.0,
-            use_body_scroll: true,
+            use_body_scroll: false,
             footer_reserve_pt: 42.0,
         },
         |ui, state, meta, intents| {
@@ -230,7 +231,7 @@ pub fn render_fit_modal(
                         &ControlEnablement::enabled(),
                     ) {
                         state.active_tab = *tab;
-                        intents.push_set_edit_params_active_tab(tab.slug());
+                        intents.push(UiIntent::SetEditParamsActiveTab { tab: (tab.slug()).into() });
                     }
                 }
             });
@@ -261,20 +262,32 @@ pub fn render_fit_modal(
                     });
             }
         },
-        |ui, state, _avail_w, _avail_h, meta, intents| {
+        |ui, state, avail_w, avail_h, meta, intents| {
             let tab_ctx = FitTabCtx { result_sheet_id, doc, spec, nl, param_names: &param_names, locale_preset };
-            match state.active_tab {
-                FitModalTab::Data => render_fit_data_tab(ui, doc, spec, nl, tokens, meta, intents),
-                FitModalTab::Model => {
-                    render_fit_model_tab(ctx, ui, FitModelTabCtx { doc, spec, nl, param_names: &param_names }, state, tokens, meta, intents)
-                }
-                FitModalTab::Compare => render_fit_compare_tab(ui, spec, nl, locale, tokens, meta, intents),
-                FitModalTab::Constrain => render_fit_constrain_tab(ctx, ui, &tab_ctx, state, tokens, meta, intents),
-                FitModalTab::InitialValues => render_fit_initial_tab(ui, &tab_ctx, state, tokens, meta, intents),
-                FitModalTab::Range => render_fit_range_tab(ui, &tab_ctx, state, tokens, meta, intents),
-                FitModalTab::Weight => render_fit_weight_tab(ui, &tab_ctx, locale, tokens, meta, intents),
-                FitModalTab::Output => render_fit_output_tab(ui, spec, nl, locale, state, tokens, meta, intents),
-            }
+            let scroll_w = (avail_w - 18.0).max(160.0);
+            egui::ScrollArea::vertical()
+                .id_salt(("wave4_body_scroll", "dialog.nonlinear_fit", result_sheet_id.as_str(), state.active_tab.slug()))
+                .max_height(avail_h)
+                .min_scrolled_height(avail_h)
+                .auto_shrink([false, false])
+                .scroll_source(egui::scroll_area::ScrollSource { mouse_wheel: true, scroll_bar: true, ..egui::scroll_area::ScrollSource::NONE })
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                .show(ui, |ui| {
+                    ui.set_width(scroll_w);
+                    ui.set_max_width(scroll_w);
+                    match state.active_tab {
+                        FitModalTab::Data => render_fit_data_tab(ui, doc, spec, nl, tokens, meta, intents),
+                        FitModalTab::Model => {
+                            render_fit_model_tab(ctx, ui, FitModelTabCtx { doc, spec, nl, param_names: &param_names }, state, tokens, meta, intents)
+                        }
+                        FitModalTab::Compare => render_fit_compare_tab(ui, spec, nl, locale, tokens, meta, intents),
+                        FitModalTab::Constrain => render_fit_constrain_tab(ctx, ui, &tab_ctx, state, tokens, meta, intents),
+                        FitModalTab::InitialValues => render_fit_initial_tab(ui, &tab_ctx, state, tokens, meta, intents),
+                        FitModalTab::Range => render_fit_range_tab(ui, &tab_ctx, state, tokens, meta, intents),
+                        FitModalTab::Weight => render_fit_weight_tab(ui, &tab_ctx, locale, tokens, meta, intents),
+                        FitModalTab::Output => render_fit_output_tab(ui, spec, nl, locale, state, tokens, meta, intents),
+                    }
+                });
         },
         |ui, footer_state, meta, intents| {
             ui.horizontal(|ui| {
@@ -292,18 +305,18 @@ pub fn render_fit_modal(
                 ) {
                     footer_state.saved_default_spec = Some(spec.clone());
                     footer_state.method_saved_as_default = true;
-                    intents.push_save_edit_params_as_default();
+                    intents.push(UiIntent::SaveEditParamsAsDefault);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let ok_lbl = if is_create { tr(locale, "fit.commit.create") } else { tr(locale, "btn.ok") };
                     if render_modal_action_button(ui, tokens, meta, "modal.ok", ok_lbl, true, false, &commit_en) {
-                        intents.push_dialog_button("ok");
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                     }
                     if !is_create
                         && doc.result_sheet(result_sheet_id).is_some()
                         && render_modal_action_button(ui, tokens, meta, "modal.apply", tr(locale, "fit.commit.update"), false, false, &commit_en)
                     {
-                        intents.push_dialog_button("apply");
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("apply") });
                     }
                     if render_modal_action_button(
                         ui,
@@ -315,7 +328,7 @@ pub fn render_fit_modal(
                         false,
                         &ControlEnablement::enabled(),
                     ) {
-                        intents.push_dialog_button("cancel");
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                     }
                 });
             });
@@ -323,9 +336,13 @@ pub fn render_fit_modal(
     );
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
-    } else if !ctx.egui_wants_keyboard_input() && blocking_error.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
-        intents.push_dialog_button("ok");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+    } else if !wants_kb_before
+        && !ctx.egui_wants_keyboard_input()
+        && blocking_error.is_none()
+        && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+    {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab) || i.consume_key(Modifiers::CTRL, Key::PageDown)) {
         step_fit_tab(&tabs, state, 1, intents);
     } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) || i.consume_key(Modifiers::CTRL, Key::PageUp)) {
@@ -454,7 +471,7 @@ fn sync_fit_modal_state(
             applied.selected_data_sets.clone_from(&spec.selected_data_sets);
             applied.custom_title.clone_from(&spec.custom_title);
             if applied != *spec {
-                intents.push_set_edit_params_draft(applied);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(applied) });
             }
             state.method_saved_as_default = true;
             saved_nl
@@ -507,7 +524,7 @@ fn step_fit_tab(tabs: &[FitModalTab], state: &mut FitModalEguiState, dir: isize,
     let cur = tabs.iter().position(|&t| t == state.active_tab).unwrap_or(0) as isize;
     let next = tabs[(cur + dir).rem_euclid(len) as usize];
     state.active_tab = next;
-    intents.push_set_edit_params_active_tab(next.slug());
+    intents.push(UiIntent::SetEditParamsActiveTab { tab: (next.slug()).into() });
 }
 
 fn resolve_parameter_names(nl: &NonlinearFitSpec) -> Vec<String> {
@@ -691,7 +708,7 @@ fn render_fit_mv_mapping_grid(
                         fit.mv_y_columns.clear();
                         fit.mv_x_columns.retain(|&c| c != idx);
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
                 if render_modal_seg_btn(
                     ui,
@@ -718,7 +735,7 @@ fn render_fit_mv_mapping_grid(
                         }
                         fit.mv_y_column = fit.mv_y_columns.first().copied();
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
                 if render_modal_seg_btn(
                     ui,
@@ -738,7 +755,7 @@ fn render_fit_mv_mapping_grid(
                             fit.mv_x_columns.sort_unstable();
                         }
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
                 if render_modal_seg_btn(
                     ui,
@@ -758,7 +775,7 @@ fn render_fit_mv_mapping_grid(
                             fit.mv_group_columns.sort_unstable();
                         }
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             });
             if idx % 2 == 1 {
@@ -842,7 +859,7 @@ fn render_fit_model_tab(
                 if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                     fit.custom_dsl = None;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
         if render_modal_seg_btn(
@@ -859,7 +876,7 @@ fn render_fit_model_tab(
             if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                 fit.custom_dsl = Some(state.custom_equation_draft.clone());
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     });
 
@@ -878,7 +895,7 @@ fn render_fit_model_tab(
                     if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                         fit.custom_dsl = Some(state.custom_equation_draft.clone());
                     }
-                    intents.push_set_edit_params_draft(next);
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
         });
@@ -906,7 +923,7 @@ fn render_fit_model_tab(
             if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                 fit.custom_dsl = Some(state.custom_equation_draft.clone());
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
         match CompiledDslModel::compile("custom", &state.custom_equation_draft) {
             Ok(compiled) => {
@@ -1010,7 +1027,7 @@ fn render_fit_model_tab(
                 state.lower_bound_drafts.clear();
                 state.upper_bound_drafts.clear();
                 state.constant_drafts.clear();
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     }
@@ -1058,7 +1075,7 @@ fn render_fit_compare_tab(
             if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                 fit.comparison = comp.clone();
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     }
 
@@ -1075,7 +1092,7 @@ fn render_fit_compare_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.prefer_well_defined_fit = !nl.prefer_well_defined_fit;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
 
     if nl.comparison.is_some() || nl.comparison_question.is_some() {
@@ -1119,7 +1136,7 @@ fn render_fit_compare_tab(
                             Some(fit.comparison.as_ref().map_or(ModelComparisonMethod::ExtraSumOfSquaresF, ModelComparisonSpec::method));
                     }
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     }
@@ -1155,7 +1172,7 @@ fn render_fit_compare_tab(
                 if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                     fit.comparison = Some(updated);
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     }
@@ -1479,7 +1496,7 @@ fn render_fit_range_tab(
                 fit.x_range_filter = Some((Some(seed_min), Some(seed_max)));
             }
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if let Some((cur_lo, cur_hi)) = nl.x_range_filter {
         ui.horizontal_wrapped(|ui| {
@@ -1532,7 +1549,7 @@ fn render_fit_range_tab(
                 if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                     fit.x_range_filter = Some((lo_val, hi_val));
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         });
     }
@@ -1549,7 +1566,7 @@ fn render_fit_range_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.plot_function_only = !nl.plot_function_only;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     let step = render_stepper_row(
         ui,
@@ -1567,7 +1584,7 @@ fn render_fit_range_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.max_iters = (fit.max_iters as isize + step as isize * 100).clamp(50, NonlinearFitSpec::HARD_MAX_ITERS as isize) as usize;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
 }
 
@@ -1598,7 +1615,7 @@ fn render_fit_weight_tab(
             if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                 fit.method = method;
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     }
 
@@ -1615,7 +1632,7 @@ fn render_fit_weight_tab(
                 if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                     fit.outlier_handling = mode;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     });
@@ -1632,7 +1649,7 @@ fn render_fit_weight_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.emit_cleaned_data_tab = !nl.emit_cleaned_data_tab;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
 
     ui.add_space(6.0);
@@ -1654,7 +1671,7 @@ fn render_fit_weight_tab(
             if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                 fit.weighting = w;
             }
-            intents.push_set_edit_params_draft(next);
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     }
 
@@ -1677,7 +1694,7 @@ fn render_fit_weight_tab(
                 if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                     fit.weighting_source = src;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     });
@@ -1694,7 +1711,7 @@ fn render_fit_weight_tab(
                 if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                     fit.replicate_fit_mode = mode;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     });
@@ -1713,7 +1730,7 @@ fn render_fit_weight_tab(
                 if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                     fit.convergence_strictness = strictness;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     });
@@ -1744,21 +1761,23 @@ fn render_fit_output_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.profile_likelihood_ci = true;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_radio(ui, tokens, meta, "fit.ci.wald", "Symmetric Wald-t intervals", !nl.profile_likelihood_ci, &ControlEnablement::enabled()) {
         let mut next = spec.clone();
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.profile_likelihood_ci = false;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
 
     let conf_pct = spec.confidence_level.percent();
     ui.horizontal_wrapped(|ui| {
         for (wid, pct, lbl) in [("fit.conf.90", 90.0_f64, "90% CI"), ("fit.conf.95", 95.0, "95% CI"), ("fit.conf.99", 99.0, "99% CI")] {
-            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, (conf_pct - pct).abs() < 0.05, &ControlEnablement::enabled()) {
-                intents.push_custom_view_action("stat_params", format!("set_confidence:{pct:.1}"));
+            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, (conf_pct - pct).abs() < 0.05, &ControlEnablement::enabled())
+                && let Ok(level) = curvebook_doc::ConfidenceLevel::from_percent(pct)
+            {
+                intents.push(UiIntent::SetEditParamsConfidence { level });
             }
         }
     });
@@ -1771,7 +1790,7 @@ fn render_fit_output_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.confidence_bands = !nl.confidence_bands;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(ui, tokens, meta, "fit.out.pred_bands", "Plot 95% prediction bands", nl.prediction_bands, &ControlEnablement::enabled())
     {
@@ -1779,7 +1798,7 @@ fn render_fit_output_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.prediction_bands = !nl.prediction_bands;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(
         ui,
@@ -1794,7 +1813,7 @@ fn render_fit_output_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.interpolate_unknowns = !nl.interpolate_unknowns;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(
         ui,
@@ -1809,7 +1828,7 @@ fn render_fit_output_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.identify_unstable_parameters = !nl.identify_unstable_parameters;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(
         ui,
@@ -1824,7 +1843,7 @@ fn render_fit_output_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.normality_of_residuals = !nl.normality_of_residuals;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(
         ui,
@@ -1839,7 +1858,7 @@ fn render_fit_output_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.emit_residuals_tab = !nl.emit_residuals_tab;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(
         ui,
@@ -1854,7 +1873,7 @@ fn render_fit_output_tab(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.emit_covariance_tab = !nl.emit_covariance_tab;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     render_fit_identifiability_and_flags_controls(ui, spec, nl, locale, state, tokens, meta, intents);
 
@@ -1868,7 +1887,7 @@ fn render_fit_output_tab(
             ("fit.out.pval.custom", "custom", "Custom", matches!(spec.p_value_format, PValueFormat::Custom { .. })),
         ] {
             if render_modal_seg_btn(ui, tokens, meta, wid, lbl, active, &ControlEnablement::enabled()) {
-                intents.push_custom_view_action("stat_params", format!("set_pvalue_format:{slug}"));
+                intents.push(UiIntent::StatParams(super::StatParamsIntent::SetPValueFormat { slug: slug.to_owned() }));
             }
         }
     });
@@ -1890,9 +1909,9 @@ fn render_fit_output_tab(
         },
     );
     if step < 0 {
-        intents.push_custom_view_action("stat_params", "spinner:edit.pvalue.digits:-1");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::StepPValueDigits { delta: -1 }));
     } else if step > 0 {
-        intents.push_custom_view_action("stat_params", "spinner:edit.pvalue.digits:1");
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::StepPValueDigits { delta: 1 }));
     }
 }
 
@@ -1908,6 +1927,18 @@ fn render_fit_identifiability_and_flags_controls(
     intents: &mut PendingUiIntents,
 ) {
     ui.add_space(4.0);
+    render_modal_textbox_row(
+        ui,
+        tokens,
+        meta,
+        intents,
+        "fit.diagnostics.r2.input",
+        "Flag R² Below Threshold (0..1)",
+        "e.g. 0.90",
+        &mut state.r2_threshold_draft,
+        96.0,
+    );
+    ui.add_space(4.0);
     render_section_title(ui, tokens, tr(locale, "fit.ident.heading"));
     let eff_ident = nl.effective_identifiability_mode();
     ui.horizontal_wrapped(|ui| {
@@ -1922,7 +1953,7 @@ fn render_fit_identifiability_and_flags_controls(
                     fit.identifiability_mode = Some(mode);
                     fit.identify_unstable_parameters = mode == IdentifiabilityMode::IdentifyUnstableParameters;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     });
@@ -1939,20 +1970,8 @@ fn render_fit_identifiability_and_flags_controls(
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.show_standard_errors = Some(!nl.should_show_standard_errors());
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
-    ui.add_space(4.0);
-    render_modal_textbox_row(
-        ui,
-        tokens,
-        meta,
-        intents,
-        "fit.diagnostics.r2.input",
-        "Flag R² Below Threshold (0..1)",
-        "e.g. 0.90",
-        &mut state.r2_threshold_draft,
-        96.0,
-    );
     let flags_enabled = nl.fit_flag_rules.as_ref().is_some_and(FitFlagRules::has_any_rule);
     if render_modal_checkbox(ui, tokens, meta, "fit.flags.enable", tr(locale, "fit.flags.enable"), flags_enabled, &ControlEnablement::enabled()) {
         let mut next = spec.clone();
@@ -1971,7 +1990,7 @@ fn render_fit_identifiability_and_flags_controls(
                 })
             };
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if render_modal_checkbox(
         ui,
@@ -1989,7 +2008,7 @@ fn render_fit_identifiability_and_flags_controls(
                 fit.summary_parameter = resolve_model_from_spec(fit).ok().and_then(|m| m.param_names().first().cloned());
             }
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     let sig_display = nl.output_significant_digits.map_or_else(|| String::from("Auto"), |d| d.to_string());
     let sig_step = render_stepper_row(
@@ -2010,7 +2029,7 @@ fn render_fit_identifiability_and_flags_controls(
             let updated = (cur + sig_step as i16).clamp(1, 15) as u8;
             fit.output_significant_digits = Some(updated);
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
 }
 
@@ -2031,7 +2050,7 @@ fn update_param_rule<F: FnOnce(&mut ParameterRule)>(spec: &curvebook_doc::Analys
             fit.parameter_rules.push(created);
         }
     }
-    intents.push_set_edit_params_draft(next);
+    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
 }
 
 // ============================================================================
@@ -2068,6 +2087,7 @@ pub fn render_hook_constant_modal(
         .selected_option()
         .map(|_| ControlEnablement::enabled())
         .unwrap_or_else(|| ControlEnablement::disabled("Select a constant from one of the three branches."));
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
 
     let capture = show_wave4_modal(
         ctx,
@@ -2088,10 +2108,14 @@ pub fn render_hook_constant_modal(
         |ui, state, meta, intents| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
+                let hook_search_id = Id::unique("hook.search_input");
+                if !ui.ctx().memory(|m| m.has_focus(hook_search_id)) && state.hook_search_draft != hp.search_query {
+                    state.hook_search_draft = hp.search_query.clone();
+                }
                 let s_resp = ui.add_sized(
                     Vec2::new((ui.available_width() - 64.0).max(120.0), 22.0),
                     TextEdit::singleline(&mut state.hook_search_draft)
-                        .id(Id::unique("hook.search_input"))
+                        .id(hook_search_id)
                         .hint_text("Search Info Constants, Fit Parameters, Result Summaries…"),
                 );
                 record_widget(
@@ -2112,11 +2136,11 @@ pub fn render_hook_constant_modal(
                 if s_resp.changed() {
                     let mut fields = serde_json::Map::new();
                     fields.insert(String::from("hook.search_query"), serde_json::json!(state.hook_search_draft));
-                    intents.push_patch_active_dialog(fields);
+                    intents.push(UiIntent::PatchActiveDialog { fields });
                 }
                 if render_modal_seg_btn(ui, tokens, meta, "hook.search_clear", "Clear", false, &ControlEnablement::enabled()) {
                     state.hook_search_draft.clear();
-                    intents.push_custom_view_action("dialogs_graph_misc", "hook:clear_search");
+                    intents.push(UiIntent::ClearHookPickerSearch);
                 }
             });
         },
@@ -2157,7 +2181,7 @@ pub fn render_hook_constant_modal(
                         hp.selected_index == Some(idx),
                         &ControlEnablement::enabled(),
                     ) {
-                        intents.push_select_hook_constant(Some(idx));
+                        intents.push(UiIntent::SelectHookConstant { index: Some(idx) });
                     }
                 }
             }
@@ -2185,7 +2209,7 @@ pub fn render_hook_constant_modal(
                         hp.selected_index == Some(idx),
                         &ControlEnablement::enabled(),
                     ) {
-                        intents.push_select_hook_constant(Some(idx));
+                        intents.push(UiIntent::SelectHookConstant { index: Some(idx) });
                     }
                 }
             }
@@ -2213,7 +2237,7 @@ pub fn render_hook_constant_modal(
                         hp.selected_index == Some(idx),
                         &ControlEnablement::enabled(),
                     ) {
-                        intents.push_select_hook_constant(Some(idx));
+                        intents.push(UiIntent::SelectHookConstant { index: Some(idx) });
                     }
                 }
             }
@@ -2246,11 +2270,11 @@ pub fn render_hook_constant_modal(
         |ui, _state, meta, intents| {
             ui.horizontal(|ui| {
                 if render_modal_action_button(ui, tokens, meta, "hook.unlink", "Unlink", false, false, &ControlEnablement::enabled()) {
-                    intents.push_unlink_hook_constant();
+                    intents.push(UiIntent::UnlinkHookConstant);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if render_modal_action_button(ui, tokens, meta, "modal.ok", "Link Constant", true, false, &link_en) {
-                        intents.push_dialog_button("ok");
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                     }
                     if render_modal_action_button(
                         ui,
@@ -2262,7 +2286,7 @@ pub fn render_hook_constant_modal(
                         false,
                         &ControlEnablement::enabled(),
                     ) {
-                        intents.push_dialog_button("cancel");
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                     }
                 });
             });
@@ -2270,7 +2294,10 @@ pub fn render_hook_constant_modal(
     );
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+    } else if !wants_kb_before && !ctx.egui_wants_keyboard_input() && link_en.enabled && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+    {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     }
 
     FitModalFrameReport {

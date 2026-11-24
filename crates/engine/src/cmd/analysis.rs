@@ -21,16 +21,17 @@ use serde_json::{Map, Value, json};
 
 use super::export::de_opt_usize;
 use super::helpers::{
-    next_unique_sheet_id, parse_serde_enum, parse_sheet_id, require_analyzable_data_sheet, require_result_sheet, sheet_id_exists, write_output_file,
+    always_enabled, bad_input, has_analyzable_data_sheet, has_result_sheet, next_unique_sheet_id, parse_serde_enum, parse_sheet_id,
+    require_analyzable_data_sheet, require_result_sheet, sheet_id_exists, write_output_file,
 };
 use super::params::{
     any_json_schema, array_schema, bool_schema, deserialize_strict, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
     parse_params, str_schema,
 };
-use super::{CommandGroup, CommandSpec, Ctx, Effects};
+use super::{CommandGroup, CommandSpec, Ctx, Effects, command_specs};
 use crate::dag;
 use crate::methods_report::{ReportFormat, generate_methods_report};
-use crate::{CommandOutcome, EngineError, Session};
+use crate::{CommandOutcome, EngineError, ExternalPathPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AnalysisDomain {
@@ -51,176 +52,142 @@ pub fn specs() -> &'static [CommandSpec] {
     SPECS
 }
 
-static SPECS: &[CommandSpec] = &[
-    CommandSpec {
+static SPECS: &[CommandSpec] = &command_specs!(
+    CommandGroup::Analysis;
+    {
         id: "analyze.run",
         label: "Run Analyses",
         menu_path: "Analyze/Run Analyses",
         shortcut: "Cmd+Enter",
         summary: "Recalculate all dirty or upstream-dependent analysis result sheets across the project DAG.",
         beginner: "Refreshes every analysis sheet so all tables, stats, and curve fits match the latest data.",
-        group: CommandGroup::Analysis,
         effects: MUTATE_AND_IDEMPOTENT,
         input_schema: schema_analyze_run,
         enabled: always_enabled,
         run: run_analyze_run,
     },
-    CommandSpec {
+    {
         id: "transform.run",
         label: "Run Transformation",
         menu_path: "Analyze/Transform...",
-        shortcut: "",
         summary: "Create and execute a mathematical, normalization, baseline, transpose, prune, select, or simulation transformation sheet.",
         beginner: "Runs a reproducible data transformation pipeline on a data sheet and writes the output to a linked result sheet.",
-        group: CommandGroup::Analysis,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: schema_transform_run,
-        enabled: has_data_sheet,
+        enabled: has_analyzable_data_sheet,
         run: run_transform_run,
     },
-    CommandSpec {
+    {
         id: "stats.run",
         label: "Run Statistical Test",
         menu_path: "Analyze/Statistical Test...",
-        shortcut: "",
         summary: "Create and execute a hypothesis test, ANOVA, contingency, survival, ROC, GLM, or multivariate analysis.",
         beginner: "Runs a statistical test on a compatible data sheet and stores tables, P values, and assumption checks.",
-        group: CommandGroup::Analysis,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: schema_stats_run,
-        enabled: has_data_sheet,
+        enabled: has_analyzable_data_sheet,
         run: run_stats_run,
     },
-    CommandSpec {
+    {
         id: "fit.run",
         label: "Run Curve Fit / Regression",
         menu_path: "Analyze/Fit Curve...",
-        shortcut: "",
         summary: "Create and execute linear, Deming, built-in nonlinear, global shared-parameter, or custom DSL regression.",
         beginner: "Fits a linear or nonlinear dose-response/kinetic curve with confidence bands and model comparisons.",
-        group: CommandGroup::Analysis,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: schema_fit_run,
-        enabled: has_data_sheet,
+        enabled: has_analyzable_data_sheet,
         run: run_fit_run,
     },
-    CommandSpec {
+    {
         id: "analysis.add",
         label: "Add Analysis",
         menu_path: "Analyze/Add Analysis...",
-        shortcut: "",
         summary: "Attach and compute a new analysis of any domain (transform, stats, or regression) for a data sheet.",
         beginner: "Adds a new live analysis sheet linked to an input table and computes its initial results.",
-        group: CommandGroup::Analysis,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: schema_analysis_run,
-        enabled: has_data_sheet,
+        enabled: has_analyzable_data_sheet,
         run: run_analysis_add,
     },
-    CommandSpec {
+    {
         id: "analysis.run",
         label: "New / Run Analysis",
         menu_path: "Analyze/Analyze Data...",
-        shortcut: "",
         summary: "Create and run a new analysis sheet, recalculate an existing result sheet by ID, or recalculate the project when empty.",
         beginner: "Runs a new analysis when source and kind are provided, or refreshes an existing analysis sheet.",
-        group: CommandGroup::Analysis,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: schema_analysis_run,
         enabled: always_enabled,
         run: run_analysis_run,
     },
-    CommandSpec {
+    {
         id: "analysis.updateParams",
         label: "Change Analysis Parameters",
         menu_path: "Change/Analysis Parameters...",
-        shortcut: "",
         summary: "Update analysis kind, confidence level, dataset selection, P-value formatting, or parameter rules and recalculate.",
         beginner: "Modifies settings on an existing result sheet without recreating it and refreshes downstream sheets.",
-        group: CommandGroup::Analysis,
         effects: MUTATE_AND_IDEMPOTENT,
         input_schema: schema_analysis_update_params,
         enabled: has_result_sheet,
         run: run_analysis_update_params,
     },
-    CommandSpec {
+    {
         id: "analysis.retargetData",
         label: "Change Data Analyzed",
         menu_path: "Change/Data Analyzed...",
-        shortcut: "",
         summary: "Rebind an existing analysis result sheet to a different compatible data sheet or subset of datasets.",
         beginner: "Points an existing analysis at a different data table and recalculates it immediately.",
-        group: CommandGroup::Analysis,
         effects: MUTATE_AND_IDEMPOTENT,
         input_schema: schema_analysis_retarget_data,
         enabled: has_result_sheet,
         run: run_analysis_retarget_data,
     },
-    CommandSpec {
+    {
         id: "analysis.exportJson",
         label: "Export Result Sheet JSON",
         menu_path: "File/Export/Results JSON...",
-        shortcut: "",
         summary: "Serialize a result sheet (tables, scalars, parameters, checklist) to JSON and optionally save it atomically.",
         beginner: "Exports an analysis result sheet as structured JSON text or saves it to a `.json` file.",
-        group: CommandGroup::Analysis,
         effects: EXPORT_EFFECTS,
         input_schema: schema_analysis_export_json,
         enabled: has_result_sheet,
         run: run_analysis_export_json,
     },
-    CommandSpec {
+    {
         id: "analysis.exportCsv",
         label: "Export Result Sheet CSV",
         menu_path: "File/Export/Results CSV...",
-        shortcut: "",
         summary: "Export a specific tab or tidy combined CSV representation of a result sheet and optionally save it atomically.",
         beginner: "Exports result tables to CSV/TSV text with configurable delimiter and decimal separator.",
-        group: CommandGroup::Analysis,
         effects: EXPORT_EFFECTS,
         input_schema: schema_analysis_export_csv,
         enabled: has_result_sheet,
         run: run_analysis_export_csv,
     },
-    CommandSpec {
+    {
         id: "result.generateReport",
         label: "Generate Methods Report",
         menu_path: "File/Export/Methods Report...",
-        shortcut: "",
         summary: "Generate a publication-ready statistical methods prose report in `plain`, `markdown`, or `latex`, optionally saving to disk.",
         beginner: "Creates a narrative methods paragraph describing the statistical test, sample sizes, and options used.",
-        group: CommandGroup::Analysis,
         effects: EXPORT_EFFECTS,
         input_schema: schema_result_generate_report,
         enabled: has_result_sheet,
         run: run_result_generate_report,
     },
-    CommandSpec {
+    {
         id: "stats.pvalueStack",
         label: "Analyze a Stack of P Values",
         menu_path: "Analyze/Column Analyses/Analyze a Stack of P Values...",
-        shortcut: "",
         summary: "Adjust a column stack of raw P values across 7 FWER/FDR multiplicity procedures and report discoveries.",
         beginner: "Adjusts a column of P values using Bonferroni, Holm, Šídák, Holm-Šídák, Benjamini-Hochberg, BKY two-stage, or Benjamini-Yekutieli.",
-        group: CommandGroup::Analysis,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: schema_stats_pvalue_stack,
-        enabled: has_data_sheet,
+        enabled: has_analyzable_data_sheet,
         run: run_stats_pvalue_stack,
     },
-];
-
-fn always_enabled(_session: &Session) -> bool {
-    true
-}
-
-fn has_data_sheet(session: &Session) -> bool {
-    !session.document().data_sheets.is_empty() || session.document().result_sheets.iter().any(|r| r.analyzable_data.is_some())
-}
-
-fn has_result_sheet(session: &Session) -> bool {
-    !session.document().result_sheets.is_empty()
-}
+);
 
 // ---------------------------------------------------------------------------
 // Shared JSON Utilities (reused by graph.rs and layout.rs)
@@ -1043,6 +1010,20 @@ fn run_analysis_retarget_data(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     ))
 }
 
+fn write_export_outcome(
+    policy: &ExternalPathPolicy,
+    command_id: &str,
+    message: String,
+    path: Option<&str>,
+    text: &str,
+    payload: Value,
+) -> Result<CommandOutcome, EngineError> {
+    if let Some(p) = path {
+        write_output_file(policy, p, text.as_bytes())?;
+    }
+    Ok(CommandOutcome::read_only(command_id, message, payload))
+}
+
 fn run_analysis_export_json(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_analysis_export_json();
     let params: ExportResultJsonParams = parse_params(&schema, raw)?;
@@ -1050,14 +1031,15 @@ fn run_analysis_export_json(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutc
     let res = require_result_sheet(ctx.session.document(), &id)?;
     let pretty = params.pretty.unwrap_or(true);
     let json_text = export_result_sheet_json(res, pretty)?;
-    if let Some(ref p) = params.path {
-        write_output_file(&ctx.session.path_policy, p, json_text.as_bytes())?;
-    }
-    Ok(CommandOutcome::read_only(
+    let payload = json!({ "sheet_id": id.as_str(), "byte_len": json_text.len(), "path": params.path, "json": json_text });
+    write_export_outcome(
+        &ctx.session.path_policy,
         "analysis.exportJson",
         format!("exported analysis `{id}` to JSON"),
-        json!({ "sheet_id": id.as_str(), "byte_len": json_text.len(), "path": params.path, "json": json_text }),
-    ))
+        params.path.as_deref(),
+        &json_text,
+        payload,
+    )
 }
 
 fn run_analysis_export_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -1091,14 +1073,15 @@ fn run_analysis_export_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutco
         try_export_result_sheet_tidy_csv(res, &opts)?
     };
 
-    if let Some(ref p) = params.path {
-        write_output_file(&ctx.session.path_policy, p, csv.as_bytes())?;
-    }
-    Ok(CommandOutcome::read_only(
+    let payload = json!({ "sheet_id": id.as_str(), "byte_len": csv.len(), "path": params.path, "csv": csv });
+    write_export_outcome(
+        &ctx.session.path_policy,
         "analysis.exportCsv",
         format!("exported analysis `{id}` to CSV"),
-        json!({ "sheet_id": id.as_str(), "byte_len": csv.len(), "path": params.path, "csv": csv }),
-    ))
+        params.path.as_deref(),
+        &csv,
+        payload,
+    )
 }
 
 fn run_result_generate_report(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -1108,25 +1091,26 @@ fn run_result_generate_report(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let format = match params.format.as_deref() {
         None => ReportFormat::Markdown,
         Some(raw_fmt) => ReportFormat::from_name(raw_fmt).ok_or_else(|| {
-            EngineError::with_code(ErrorCode::BadInput, format!("unknown report format `{raw_fmt}`"))
+            bad_input(format!("unknown report format `{raw_fmt}`"))
                 .with_remediation("Use `plain`, `markdown`, or `latex`.")
                 .with_details(json!({ "pointer": "/format", "format": raw_fmt }))
         })?,
     };
     let report = generate_methods_report(ctx.session.document(), &id, format)?;
-    if let Some(ref p) = params.path {
-        write_output_file(&ctx.session.path_policy, p, report.as_bytes())?;
-    }
-    Ok(CommandOutcome::read_only(
+    let payload = json!({
+        "sheet_id": id.as_str(),
+        "format": format.as_str(),
+        "path": params.path,
+        "report": report,
+    });
+    write_export_outcome(
+        &ctx.session.path_policy,
         "result.generateReport",
         format!("generated {} methods report for `{id}`", format.as_str()),
-        json!({
-            "sheet_id": id.as_str(),
-            "format": format.as_str(),
-            "path": params.path,
-            "report": report,
-        }),
-    ))
+        params.path.as_deref(),
+        &report,
+        payload,
+    )
 }
 
 fn ensure_result_succeeded(res: &ResultSheet) -> Result<(), EngineError> {
@@ -3606,33 +3590,31 @@ fn single_char(raw: &str, name: &str) -> Result<char, EngineError> {
     Ok(ch)
 }
 
-fn opt_str_checked<'a>(params: &'a Value, key: &str) -> Result<Option<&'a str>, EngineError> {
+fn opt_field_checked<'a, T>(
+    params: &'a Value,
+    key: &str,
+    expected: &str,
+    extract: impl FnOnce(&'a Value) -> Option<T>,
+) -> Result<Option<T>, EngineError> {
     let Some(val) = params.get(key) else {
         return Ok(None);
     };
     if val.is_null() {
         return Ok(None);
     }
-    let s = val.as_str().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{key}` must be a string or null")))?;
-    Ok(Some(s))
+    extract(val).map(Some).ok_or_else(|| bad_input(format!("`{key}` must be {expected} or null")))
+}
+
+fn opt_str_checked<'a>(params: &'a Value, key: &str) -> Result<Option<&'a str>, EngineError> {
+    opt_field_checked(params, key, "a string", Value::as_str)
 }
 
 fn opt_bool_checked(params: &Value, key: &str) -> Result<Option<bool>, EngineError> {
-    let Some(val) = params.get(key) else {
-        return Ok(None);
-    };
-    if val.is_null() {
-        return Ok(None);
-    }
-    let b = val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{key}` must be a boolean or null")))?;
-    Ok(Some(b))
+    opt_field_checked(params, key, "a boolean", Value::as_bool)
 }
 
 fn opt_f64_checked(params: &Value, key: &str) -> Result<Option<f64>, EngineError> {
-    match params.get(key) {
-        Some(val) => parse_nullable_finite_f64(val, key),
-        None => Ok(None),
-    }
+    opt_field_checked(params, key, "finite number", |v| v.as_f64().filter(|x| x.is_finite()))
 }
 
 fn parse_simulate_parameters_override(val: &Value) -> Result<Vec<(String, f64)>, EngineError> {
@@ -3898,6 +3880,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::Session;
 
     fn session_with_col_data() -> Session {
         let mut doc = ProjectDocument::new("Analysis Unit Test").unwrap();

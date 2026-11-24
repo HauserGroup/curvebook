@@ -43,6 +43,7 @@ pub struct StatsModalsEguiState {
     pub lin_plot_min_draft: String,
     pub lin_plot_max_draft: String,
     pub lin_segments_draft: String,
+    pub custom_title_draft: String,
 }
 
 /// Frame geometry and modal capture report emitted by `stats_modals`.

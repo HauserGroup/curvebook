@@ -122,6 +122,27 @@ fn math(plain_s: impl Into<String>, md_s: impl Into<String>, tex_s: impl Into<St
     TextRun::Math { plain: plain_s.into(), markdown: md_s.into(), latex: tex_s.into() }
 }
 
+fn fwer_math(thresh: &str) -> TextRun {
+    math(format!("familywise alpha = {thresh}"), format!("familywise alpha = {thresh}"), format!("\\textrm{{familywise }}\\alpha = {thresh}"))
+}
+
+fn fdr_math(thresh: &str) -> TextRun {
+    math(format!("Q = {thresh}"), format!("Q = {thresh}"), format!("Q = {thresh}"))
+}
+
+fn multiplicity_adjustment_clause(lead: impl Into<String>, is_fdr: bool, thresh: &str, suffix: impl Into<String>) -> [TextRun; 3] {
+    [plain(lead), if is_fdr { fdr_math(thresh) } else { fwer_math(thresh) }, plain(suffix)]
+}
+
+fn bullet_kv<I>(label: &str, value: I) -> Vec<TextRun>
+where
+    I: IntoIterator<Item = TextRun>,
+{
+    let mut runs = vec![bold(format!("{label}:")), plain(" ")];
+    runs.extend(value);
+    runs
+}
+
 // ---------------------------------------------------------------------------
 // Report Assembly
 // ---------------------------------------------------------------------------
@@ -142,24 +163,20 @@ fn append_study_context_section(blocks: &mut Vec<ReportBlock>, doc: &ProjectDocu
     blocks.push(ReportBlock::Section(vec![plain("Study Context and Data Provenance (ARRIVE / ICMJE)")]));
 
     let mut bullets = vec![
-        vec![bold("Project:"), plain(" "), plain(&doc.title)],
-        vec![bold("Analysis sheet:"), plain(" "), plain(res.title()), plain(" ("), code(res.id.as_str()), plain(")")],
-        vec![bold("Procedure:"), plain(" "), plain(res.analysis.kind.derive_auto_title())],
-        vec![bold("Recalculation status:"), plain(" "), status_run(&res.status)],
+        bullet_kv("Project", [plain(&doc.title)]),
+        bullet_kv("Analysis sheet", [plain(res.title()), plain(" ("), code(res.id.as_str()), plain(")")]),
+        bullet_kv("Procedure", [plain(res.analysis.kind.derive_auto_title())]),
+        bullet_kv("Recalculation status", [status_run(&res.status)]),
     ];
 
     if let Some(ds) = source_ds {
         let arch_label = ds.kind().label();
         let rows = ds.archetype.row_count();
         let cols = ds.archetype.column_count();
-        let mut src_line = vec![
-            bold("Source table:"),
-            plain(" "),
-            plain(&ds.title),
-            plain(" ("),
-            code(ds.id.as_str()),
-            plain(format!("; {arch_label}, {rows} rows x {cols} columns")),
-        ];
+        let mut src_line = bullet_kv(
+            "Source table",
+            [plain(&ds.title), plain(" ("), code(ds.id.as_str()), plain(format!("; {arch_label}, {rows} rows x {cols} columns"))],
+        );
         if ds.frozen {
             src_line.push(plain("; frozen snapshot"));
         }
@@ -168,15 +185,15 @@ fn append_study_context_section(blocks: &mut Vec<ReportBlock>, doc: &ProjectDocu
 
         let selected_labels = selected_column_labels(ds, &res.analysis.selected_data_sets);
         if !selected_labels.is_empty() {
-            let scope = if res.analysis.selected_data_sets.is_empty() { "All columns analyzed:" } else { "Selected columns analyzed:" };
-            bullets.push(vec![bold(scope), plain(" "), plain(selected_labels.join(", "))]);
+            let scope = if res.analysis.selected_data_sets.is_empty() { "All columns analyzed" } else { "Selected columns analyzed" };
+            bullets.push(bullet_kv(scope, [plain(selected_labels.join(", "))]));
         }
 
         let excluded_count = count_excluded_cells(ds);
         let documented_count = count_active_exclusion_notes(ds);
         bullets.push(exclusion_audit_bullet(excluded_count, documented_count));
     } else {
-        bullets.push(vec![bold("Source table ID:"), plain(" "), code(res.analysis.source_sheet_id.as_str())]);
+        bullets.push(bullet_kv("Source table ID", [code(res.analysis.source_sheet_id.as_str())]));
     }
 
     blocks.push(ReportBlock::Bullets(bullets));
@@ -191,17 +208,12 @@ fn status_run(status: &ResultStatus) -> TextRun {
 }
 
 fn exclusion_audit_bullet(excluded_count: usize, documented_count: usize) -> Vec<TextRun> {
-    if excluded_count == 0 {
-        vec![bold("Observation exclusions:"), plain(" "), plain("0 cells excluded; all finite active observations were included.")]
+    let detail = if excluded_count == 0 {
+        String::from("0 cells excluded; all finite active observations were included.")
     } else {
-        vec![
-            bold("Observation exclusions:"),
-            plain(" "),
-            plain(format!(
-                "{excluded_count} cell(s) masked as excluded prior to analysis ({documented_count} with recorded audit justification note(s))."
-            )),
-        ]
-    }
+        format!("{excluded_count} cell(s) masked as excluded prior to analysis ({documented_count} with recorded audit justification note(s)).")
+    };
+    bullet_kv("Observation exclusions", [plain(detail)])
 }
 
 fn clean_percent_from_alpha(alpha: f64) -> f64 {
@@ -608,13 +620,12 @@ fn append_welch_posthoc_runs(runs: &mut Vec<TextRun>, mult: &MultiplicitySpec, r
             let ci_note = if mult.report_confidence_intervals && has_ci { " with multiplicity-adjusted confidence intervals" } else { "" };
             runs.push(plain("Control column for post-hoc comparisons: "));
             runs.push(code(ctrl_name));
-            runs.push(plain(". Multiple comparisons used unequal-variance Welch t comparisons versus the control group with heteroscedastic Dunnett loadings and Satterthwaite degrees of freedom at "));
-            runs.push(math(
-                format!("familywise alpha = {thresh}"),
-                format!("familywise alpha = {thresh}"),
-                format!("\\textrm{{familywise }}\\alpha = {thresh}"),
+            runs.extend(multiplicity_adjustment_clause(
+                ". Multiple comparisons used unequal-variance Welch t comparisons versus the control group with heteroscedastic Dunnett loadings and Satterthwaite degrees of freedom at ",
+                false,
+                &thresh,
+                format!("{ci_note}."),
             ));
-            runs.push(plain(format!("{ci_note}.")));
         }
         MultiplicityMethod::LinearTrend => {
             runs.push(plain(
@@ -1047,13 +1058,7 @@ fn describe_survival_pairwise_runs(mult: &MultiplicitySpec, source_ds: Option<&D
             let ctrl_lbl = column_title_at(source_ds, control_column);
             runs.push(plain("pairwise log-rank comparisons against control cohort "));
             runs.push(code(ctrl_lbl));
-            runs.push(plain(" used Bonferroni FWER adjustment at "));
-            runs.push(math(
-                format!("familywise alpha = {thresh}"),
-                format!("familywise alpha = {thresh}"),
-                format!("\\textrm{{familywise }}\\alpha = {thresh}"),
-            ));
-            runs.push(plain("."));
+            runs.extend(multiplicity_adjustment_clause(" used Bonferroni FWER adjustment at ", false, &thresh, "."));
         }
         MultiplicityMethod::Bonferroni
         | MultiplicityMethod::Sidak
@@ -1072,15 +1077,12 @@ fn describe_survival_pairwise_runs(mult: &MultiplicitySpec, source_ds: Option<&D
         | MultiplicityMethod::DunnettT3
         | MultiplicityMethod::DunnRankSum
         | MultiplicityMethod::LinearTrend => {
-            runs.push(plain(
+            runs.extend(multiplicity_adjustment_clause(
                 "pairwise log-rank comparisons across all cohort pairs mapped the ANOVA/rank post-hoc setting to Bonferroni FWER adjustment at ",
+                false,
+                &thresh,
+                ".",
             ));
-            runs.push(math(
-                format!("familywise alpha = {thresh}"),
-                format!("familywise alpha = {thresh}"),
-                format!("\\textrm{{familywise }}\\alpha = {thresh}"),
-            ));
-            runs.push(plain("."));
         }
     }
     runs
@@ -1377,15 +1379,16 @@ fn describe_nonlinear_regression(s: &NonlinearFitSpec, res: &ResultSheet) -> Vec
 
     // 1. Model identity and mathematical equation formula
     let (model_name, model_params, formula_plain, formula_latex) = resolve_equation_description(s);
-    blocks.push(ReportBlock::Paragraph(vec![
-        bold("Model and equation:"),
-        plain(" "),
-        plain(format!("{model_name} (")),
-        code(&s.equation_id),
-        plain("). Equation: "),
-        math(formula_plain.clone(), formula_plain, formula_latex),
-        plain(if model_params.is_empty() { String::new() } else { format!("; parameters: {}.", model_params.join(", ")) }),
-    ]));
+    blocks.push(ReportBlock::Paragraph(bullet_kv(
+        "Model and equation",
+        [
+            plain(format!("{model_name} (")),
+            code(&s.equation_id),
+            plain("). Equation: "),
+            math(formula_plain.clone(), formula_plain, formula_latex),
+            plain(if model_params.is_empty() { String::new() } else { format!("; parameters: {}.", model_params.join(", ")) }),
+        ],
+    )));
 
     // 2. Objective function, ROUT outlier settings, weighting, and iterations
     let mut obj_runs = Vec::new();
@@ -1924,12 +1927,26 @@ fn describe_multiplicity_runs(mult: &MultiplicitySpec, ci_available: bool) -> Ve
     if matches!(mult.method, MultiplicityMethod::None) {
         return vec![plain(format!("Multiple comparisons used {kind_lbl}{ci_note}."))];
     }
-    let target_math = if is_fdr {
-        math(format!("Q = {thresh}"), format!("Q = {thresh}"), format!("Q = {thresh}"))
-    } else {
-        math(format!("familywise alpha = {thresh}"), format!("familywise alpha = {thresh}"), format!("\\textrm{{familywise }}\\alpha = {thresh}"))
-    };
-    vec![plain(format!("Multiple comparisons used {kind_lbl} at ")), target_math, plain(format!("{ci_note}."))]
+    multiplicity_adjustment_clause(format!("Multiple comparisons used {kind_lbl} at "), is_fdr, &thresh, format!("{ci_note}.")).to_vec()
+}
+
+fn dunn_adjustment_desc(method: MultiplicityMethod) -> (&'static str, bool) {
+    match method {
+        MultiplicityMethod::TamhaneT2 | MultiplicityMethod::Sidak => ("Sidak FWER adjustment", false),
+        MultiplicityMethod::HolmSidak => ("Holm-Sidak step-down FWER adjustment", false),
+        MultiplicityMethod::BenjaminiHochbergFdr => ("Benjamini-Hochberg step-up FDR control", true),
+        MultiplicityMethod::BenjaminiYekutieliFdr => ("Benjamini-Yekutieli arbitrary-dependence FDR control", true),
+        MultiplicityMethod::TwoStageBkyFdr => ("two-stage Benjamini-Krieger-Yekutieli adaptive FDR control", true),
+        MultiplicityMethod::DunnRankSum
+        | MultiplicityMethod::LinearTrend
+        | MultiplicityMethod::TukeyHsd
+        | MultiplicityMethod::NewmanKeuls
+        | MultiplicityMethod::GamesHowell
+        | MultiplicityMethod::DunnettT3
+        | MultiplicityMethod::Bonferroni
+        | MultiplicityMethod::Dunnett { .. } => ("Bonferroni FWER adjustment", false),
+        MultiplicityMethod::None | MultiplicityMethod::FisherLsd => ("no adjustment", false),
+    }
 }
 
 fn describe_dunn_multiplicity_runs(mult: &MultiplicitySpec, source_ds: Option<&DataSheet>, rank_scope: &str) -> Vec<TextRun> {
@@ -1942,76 +1959,25 @@ fn describe_dunn_multiplicity_runs(mult: &MultiplicitySpec, source_ds: Option<&D
         }
         MultiplicityMethod::Dunnett { control_column } => {
             let ctrl_name = column_title_at(source_ds, control_column);
-            vec![
-                plain("Control column for post-hoc comparisons: "),
-                code(ctrl_name),
-                plain(format!(
-                    ". Multiple comparisons used Dunn's nonparametric {rank_scope} pairwise z-tests against the control group with Bonferroni FWER adjustment at "
-                )),
-                math(
-                    format!("familywise alpha = {thresh}"),
-                    format!("familywise alpha = {thresh}"),
-                    format!("\\textrm{{familywise }}\\alpha = {thresh}"),
-                ),
-                plain("."),
-            ]
+            let mut runs = vec![plain("Control column for post-hoc comparisons: "), code(ctrl_name)];
+            runs.extend(multiplicity_adjustment_clause(
+                format!(". Multiple comparisons used Dunn's nonparametric {rank_scope} pairwise z-tests against the control group with Bonferroni FWER adjustment at "),
+                false,
+                &thresh,
+                ".",
+            ));
+            runs
         }
-        MultiplicityMethod::DunnRankSum
-        | MultiplicityMethod::LinearTrend
-        | MultiplicityMethod::TukeyHsd
-        | MultiplicityMethod::NewmanKeuls
-        | MultiplicityMethod::GamesHowell
-        | MultiplicityMethod::DunnettT3
-        | MultiplicityMethod::Bonferroni => vec![
-            plain(format!("Multiple comparisons used Dunn's nonparametric {rank_scope} pairwise z-tests with Bonferroni FWER adjustment at ")),
-            math(
-                format!("familywise alpha = {thresh}"),
-                format!("familywise alpha = {thresh}"),
-                format!("\\textrm{{familywise }}\\alpha = {thresh}"),
-            ),
-            plain("."),
-        ],
-        MultiplicityMethod::TamhaneT2 | MultiplicityMethod::Sidak => vec![
-            plain(format!("Multiple comparisons used Dunn's nonparametric {rank_scope} pairwise z-tests with Sidak FWER adjustment at ")),
-            math(
-                format!("familywise alpha = {thresh}"),
-                format!("familywise alpha = {thresh}"),
-                format!("\\textrm{{familywise }}\\alpha = {thresh}"),
-            ),
-            plain("."),
-        ],
-        MultiplicityMethod::HolmSidak => vec![
-            plain(format!(
-                "Multiple comparisons used Dunn's nonparametric {rank_scope} pairwise z-tests with Holm-Sidak step-down FWER adjustment at "
-            )),
-            math(
-                format!("familywise alpha = {thresh}"),
-                format!("familywise alpha = {thresh}"),
-                format!("\\textrm{{familywise }}\\alpha = {thresh}"),
-            ),
-            plain("."),
-        ],
-        MultiplicityMethod::BenjaminiHochbergFdr => vec![
-            plain(format!(
-                "Multiple comparisons used Dunn's nonparametric {rank_scope} pairwise z-tests with Benjamini-Hochberg step-up FDR control at "
-            )),
-            math(format!("Q = {thresh}"), format!("Q = {thresh}"), format!("Q = {thresh}")),
-            plain("."),
-        ],
-        MultiplicityMethod::BenjaminiYekutieliFdr => vec![
-            plain(format!(
-                "Multiple comparisons used Dunn's nonparametric {rank_scope} pairwise z-tests with Benjamini-Yekutieli arbitrary-dependence FDR control at "
-            )),
-            math(format!("Q = {thresh}"), format!("Q = {thresh}"), format!("Q = {thresh}")),
-            plain("."),
-        ],
-        MultiplicityMethod::TwoStageBkyFdr => vec![
-            plain(format!(
-                "Multiple comparisons used Dunn's nonparametric {rank_scope} pairwise z-tests with two-stage Benjamini-Krieger-Yekutieli adaptive FDR control at "
-            )),
-            math(format!("Q = {thresh}"), format!("Q = {thresh}"), format!("Q = {thresh}")),
-            plain("."),
-        ],
+        other => {
+            let (adj_desc, is_fdr) = dunn_adjustment_desc(other);
+            multiplicity_adjustment_clause(
+                format!("Multiple comparisons used Dunn's nonparametric {rank_scope} pairwise z-tests with {adj_desc} at "),
+                is_fdr,
+                &thresh,
+                ".",
+            )
+            .to_vec()
+        }
     }
 }
 
@@ -2027,11 +1993,8 @@ fn append_results_section(blocks: &mut Vec<ReportBlock>, doc: &ProjectDocument, 
         for entry in &res.scalars {
             let ds_suffix = entry.data_set_index.map_or_else(String::new, |idx| format!(" [{}]", column_title_at(source_ds, idx)));
             let units_suffix = entry.units.as_ref().map_or_else(String::new, |u| format!(" {u}"));
-            scalar_bullets.push(vec![
-                bold(format!("{}{ds_suffix}:", entry.key)),
-                plain(" "),
-                plain(format!("{}{units_suffix}", format_stat_value(entry.value))),
-            ]);
+            scalar_bullets
+                .push(bullet_kv(&format!("{}{ds_suffix}", entry.key), [plain(format!("{}{units_suffix}", format_stat_value(entry.value)))]));
         }
         blocks.push(ReportBlock::Paragraph(vec![bold("Key scalar outputs:")]));
         blocks.push(ReportBlock::Bullets(scalar_bullets));
@@ -2192,7 +2155,7 @@ fn format_checklist_item(item: &ChecklistItem) -> Vec<TextRun> {
         ChecklistStatus::Violated => "[VIOLATED]",
         ChecklistStatus::Info => "[INFO]",
     };
-    let mut runs = vec![bold(format!("{badge} {}:", item.assumption)), plain(" ")];
+    let mut runs = bullet_kv(&format!("{badge} {}", item.assumption), []);
     if let Some(metric) = &item.diagnostic_metric {
         runs.push(plain(format!("({metric}) ")));
     }
@@ -2738,6 +2701,38 @@ fn guard_latex_leading_bracket(cell: &str) -> String {
     }
 }
 
+struct TableRowStyle<'a> {
+    prefix: &'a str,
+    sep: &'a str,
+    suffix: &'a str,
+    after_header: Option<&'a str>,
+}
+
+fn format_latex_table_cell(col_idx: usize, runs: &[TextRun]) -> String {
+    let s = render_runs_latex(runs, true);
+    if col_idx == 0 { guard_latex_leading_bracket(&s) } else { s }
+}
+
+fn write_formatted_table_rows(
+    out: &mut String,
+    headers: &[Vec<TextRun>],
+    rows: &[Vec<Vec<TextRun>>],
+    style: &TableRowStyle<'_>,
+    mut format_cell: impl FnMut(usize, &[TextRun]) -> String,
+) {
+    let mut format_line = |cells: &[Vec<TextRun>]| {
+        let formatted: Vec<String> = cells.iter().enumerate().map(|(c_idx, c)| format_cell(c_idx, c)).collect();
+        format!("{}{}{}", style.prefix, formatted.join(style.sep), style.suffix)
+    };
+    let _ = writeln!(out, "{}", format_line(headers));
+    if let Some(mid) = style.after_header {
+        let _ = writeln!(out, "{mid}");
+    }
+    for row in rows {
+        let _ = writeln!(out, "{}", format_line(row));
+    }
+}
+
 fn render_block_plain(block: &ReportBlock, out: &mut String) {
     match block {
         ReportBlock::Title(runs) => {
@@ -2760,12 +2755,8 @@ fn render_block_plain(block: &ReportBlock, out: &mut String) {
         }
         ReportBlock::Table(tbl) => {
             let _ = writeln!(out, "[{}]", collapse_line_breaks_to_space(&render_runs_plain(&tbl.caption)));
-            let header_line: Vec<String> = tbl.headers.iter().map(|h| collapse_line_breaks_to_space(&render_runs_plain(h))).collect();
-            let _ = writeln!(out, "  {}", header_line.join(" | "));
-            for row in &tbl.rows {
-                let row_cells: Vec<String> = row.iter().map(|c| collapse_line_breaks_to_space(&render_runs_plain(c))).collect();
-                let _ = writeln!(out, "  {}", row_cells.join(" | "));
-            }
+            let style = TableRowStyle { prefix: "  ", sep: " | ", suffix: "", after_header: None };
+            write_formatted_table_rows(out, &tbl.headers, &tbl.rows, &style, |_, c| collapse_line_breaks_to_space(&render_runs_plain(c)));
             for note in &tbl.footnotes {
                 let _ = writeln!(out, "  Note: {}", render_runs_plain(note));
             }
@@ -2791,14 +2782,9 @@ fn render_block_markdown(block: &ReportBlock, out: &mut String) {
         }
         ReportBlock::Table(tbl) => {
             let _ = writeln!(out, "### {}", render_runs_markdown(&tbl.caption, false));
-            let headers: Vec<String> = tbl.headers.iter().map(|h| render_runs_markdown(h, true)).collect();
-            let _ = writeln!(out, "| {} |", headers.join(" | "));
-            let seps = vec!["---"; headers.len()];
-            let _ = writeln!(out, "| {} |", seps.join(" | "));
-            for row in &tbl.rows {
-                let cells: Vec<String> = row.iter().map(|c| render_runs_markdown(c, true)).collect();
-                let _ = writeln!(out, "| {} |", cells.join(" | "));
-            }
+            let sep_row = format!("| {} |", vec!["---"; tbl.headers.len()].join(" | "));
+            let style = TableRowStyle { prefix: "| ", sep: " | ", suffix: " |", after_header: Some(&sep_row) };
+            write_formatted_table_rows(out, &tbl.headers, &tbl.rows, &style, |_, c| render_runs_markdown(c, true));
             for note in &tbl.footnotes {
                 let _ = writeln!(out, "*Note:* {}", render_runs_markdown(note, false));
             }
@@ -2829,28 +2815,8 @@ fn render_block_latex(block: &ReportBlock, out: &mut String) {
             let col_spec = "l".repeat(tbl.headers.len().max(1));
             let _ = writeln!(out, "\\begin{{tabular}}{{{col_spec}}}");
             let _ = writeln!(out, "\\hline");
-            let headers: Vec<String> = tbl
-                .headers
-                .iter()
-                .enumerate()
-                .map(|(c_idx, h)| {
-                    let s = render_runs_latex(h, true);
-                    if c_idx == 0 { guard_latex_leading_bracket(&s) } else { s }
-                })
-                .collect();
-            let _ = writeln!(out, "{} \\\\", headers.join(" & "));
-            let _ = writeln!(out, "\\hline");
-            for row in &tbl.rows {
-                let cells: Vec<String> = row
-                    .iter()
-                    .enumerate()
-                    .map(|(c_idx, c)| {
-                        let s = render_runs_latex(c, true);
-                        if c_idx == 0 { guard_latex_leading_bracket(&s) } else { s }
-                    })
-                    .collect();
-                let _ = writeln!(out, "{} \\\\", cells.join(" & "));
-            }
+            let style = TableRowStyle { prefix: "", sep: " & ", suffix: " \\\\", after_header: Some("\\hline") };
+            write_formatted_table_rows(out, &tbl.headers, &tbl.rows, &style, format_latex_table_cell);
             let _ = writeln!(out, "\\hline");
             let _ = writeln!(out, "\\end{{tabular}}");
             for note in &tbl.footnotes {
@@ -3033,4 +2999,171 @@ pub fn describe_power_analysis_spec(spec: &PowerAnalysisSpec) -> String {
     }
     parts.push(effect_desc);
     format!("{}.", parts.join("; "))
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::{Cell, ColumnDesignHint, ColumnTable, ResultScalarEntry};
+
+    use super::*;
+
+    fn dual_fnv1a(bytes: &[u8]) -> (usize, u64, u64) {
+        let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut h2: u64 = 0xaf63_bd4c_8601_b7df;
+        for &b in bytes {
+            h1 ^= u64::from(b);
+            h1 = h1.wrapping_mul(0x0100_0000_01b3);
+            h2 = h2.wrapping_mul(0x0100_0000_01b3);
+            h2 ^= u64::from(b);
+        }
+        (bytes.len(), h1, h2)
+    }
+
+    fn all_multiplicity_methods() -> Vec<MultiplicityMethod> {
+        vec![
+            MultiplicityMethod::None,
+            MultiplicityMethod::FisherLsd,
+            MultiplicityMethod::Dunnett { control_column: 0 },
+            MultiplicityMethod::Bonferroni,
+            MultiplicityMethod::Sidak,
+            MultiplicityMethod::HolmSidak,
+            MultiplicityMethod::TukeyHsd,
+            MultiplicityMethod::DunnettT3,
+            MultiplicityMethod::GamesHowell,
+            MultiplicityMethod::TamhaneT2,
+            MultiplicityMethod::NewmanKeuls,
+            MultiplicityMethod::DunnRankSum,
+            MultiplicityMethod::LinearTrend,
+            MultiplicityMethod::BenjaminiHochbergFdr,
+            MultiplicityMethod::BenjaminiYekutieliFdr,
+            MultiplicityMethod::TwoStageBkyFdr,
+        ]
+    }
+
+    fn build_fixture_corpus() -> Result<String, Box<dyn std::error::Error>> {
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3)?;
+        if let [c0, c1] = col.data_sets.as_mut_slice() {
+            c0.title = String::from("Vehicle [Ctrl]");
+            c1.title = String::from("Drug | High");
+            if let Some(cell) = c0.cells.get_mut(0).and_then(|r| r.first_mut()) {
+                *cell = Cell::number(1.0);
+            }
+            if let Some(cell) = c0.cells.get_mut(1).and_then(|r| r.first_mut()) {
+                *cell = Cell { excluded: true, ..Cell::number(99.0) };
+            }
+        }
+        let mut ds = DataSheet::new("ds-1", "Cohort & Drug", TableArchetype::Column(col))?;
+        ds.frozen = true;
+        let mut doc = ProjectDocument::new("Refactored Byte Parity")?;
+        doc.add_data_sheet(ds)?;
+
+        let mut anova = AnalysisSpec::new(
+            "res-1",
+            "ds-1",
+            AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+                method: OneWayMethod::BrownForsytheAndWelch,
+                multiplicity: MultiplicitySpec {
+                    method: MultiplicityMethod::Dunnett { control_column: 0 },
+                    threshold: 0.05,
+                    report_confidence_intervals: true,
+                },
+                ..OneWayAnovaSpec::default()
+            }),
+        )?;
+        anova.selected_data_sets = vec![0, 1];
+        let mut res = ResultSheet::new(anova)?;
+        res.status = ResultStatus::UpToDate;
+        res.scalars.push(ResultScalarEntry { key: String::from("Welch_W"), value: 4.5, units: Some(String::from("ratio")), data_set_index: Some(1) });
+        res.tabs.push(ResultTab {
+            id: String::from("tab-main"),
+            title: String::from("Summary [Bracket] & Pipe | Table"),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec![String::from("Est"), String::from("CI | 95%")],
+            row_labels: vec![String::from("[Alpha]"), String::from("Row\nTwo")],
+            rows: vec![
+                vec![
+                    ResultCell::Number { value: 1.25, prefix: None, units: None },
+                    ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Finite(2.5) },
+                ],
+                vec![ResultCell::Text(String::from("a | b\nc")), ResultCell::Empty],
+            ],
+            footnotes: vec![String::from("Footnote [1].")],
+        });
+        let mut coord_rows = Vec::new();
+        let mut coord_labels = Vec::new();
+        for i in 0..14 {
+            coord_labels.push(format!("R{i}"));
+            coord_rows.push(vec![ResultCell::Number { value: f64::from(i), prefix: None, units: None }]);
+        }
+        res.tabs.push(ResultTab {
+            id: String::from("tab-resid"),
+            title: String::from("Residuals"),
+            kind: ResultTabKind::Residuals,
+            column_headers: vec![String::from("Y")],
+            row_labels: coord_labels,
+            rows: coord_rows,
+            footnotes: Vec::new(),
+        });
+        doc.add_result_sheet(res)?;
+
+        let missing_spec = AnalysisSpec::new("res-missing", "ds-gone", AnalysisKind::DescriptiveStats(DescriptiveSpec::default()))?;
+        let mut missing_res = ResultSheet::new(missing_spec)?;
+        missing_res.status = ResultStatus::Dirty;
+        doc.add_result_sheet(missing_res)?;
+
+        let nl_res = ResultSheet::new(AnalysisSpec::new("res-nl", "ds-1", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("linear")))?)?;
+        doc.add_result_sheet(nl_res)?;
+
+        let mut corpus = String::new();
+        for id in ["res-1", "res-missing", "res-nl"] {
+            for fmt in [ReportFormat::PlainText, ReportFormat::Markdown, ReportFormat::Latex] {
+                let report = generate_methods_report(&doc, &SheetId::new(id), fmt)?;
+                let _ = writeln!(corpus, "=== {id} / {} ===\n{report}", fmt.as_str());
+            }
+        }
+
+        let ds_ref = doc.data_sheet(&SheetId::new("ds-1"));
+        let res_ref = doc.result_sheet(&SheetId::new("res-1")).ok_or("missing res-1")?;
+        for method in all_multiplicity_methods() {
+            for ci in [false, true] {
+                let spec = MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: ci };
+                let blocks = vec![
+                    ReportBlock::Paragraph(describe_multiplicity_runs(&spec, ci)),
+                    ReportBlock::Paragraph(describe_dunn_multiplicity_runs(&spec, ds_ref, "rank-sum")),
+                    ReportBlock::Paragraph(describe_survival_pairwise_runs(&spec, ds_ref)),
+                    {
+                        let mut welch = Vec::new();
+                        append_welch_posthoc_runs(&mut welch, &spec, res_ref, ds_ref, ci);
+                        ReportBlock::Paragraph(welch)
+                    },
+                ];
+                for fmt in [ReportFormat::PlainText, ReportFormat::Markdown, ReportFormat::Latex] {
+                    let rendered = render_blocks(&blocks, fmt);
+                    let _ = writeln!(corpus, "=== mult / {method:?} / {ci} / {} ===\n{rendered}", fmt.as_str());
+                }
+            }
+        }
+
+        // Cover 0-column Table edge case across all 3 formats.
+        let empty_tbl =
+            [ReportBlock::Table(TableBlock { caption: vec![plain("Empty")], headers: Vec::new(), rows: Vec::new(), footnotes: Vec::new() })];
+        for fmt in [ReportFormat::PlainText, ReportFormat::Markdown, ReportFormat::Latex] {
+            let rendered = render_blocks(&empty_tbl, fmt);
+            let _ = writeln!(corpus, "=== empty_tbl / {} ===\n{rendered}", fmt.as_str());
+        }
+        Ok(corpus)
+    }
+
+    #[test]
+    fn methods_report_outputs_stay_byte_identical() {
+        let corpus = match build_fixture_corpus() {
+            Ok(c) => c,
+            Err(err) => {
+                assert_eq!(err.to_string(), "");
+                return;
+            }
+        };
+        let digest = dual_fnv1a(corpus.as_bytes());
+        assert_eq!(digest, (77_365, 17_018_405_250_278_487_102, 7_477_326_593_824_657_170));
+    }
 }

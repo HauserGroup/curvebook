@@ -7,7 +7,7 @@ use egui::Ui;
 use crate::i18n::tr;
 
 use super::super::unit_spinners::{ScrubUnitFieldConfig, render_scrub_unit_field};
-use super::helpers::{ButtonEntry, GraphModalCtx, record_button, record_checkbox};
+use super::helpers::{ButtonEntry, CheckboxMeta, GraphModalCtx, record_button, record_checkbox, record_checkbox_enabled};
 use super::state::GraphModalEguiState;
 
 pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
@@ -130,16 +130,21 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
         }
     });
 
-    if pw.cld_enabled {
-        ui.add_space(4.0);
+    ui.add_space(4.0);
+    let cld_reason = (!pw.cld_enabled).then_some("Enable Compact Letter Display mode first");
+    ui.add_enabled_ui(pw.cld_enabled, |ui| {
         let font_cfg = ScrubUnitFieldConfig {
             step_per_pt: 0.5,
             decimals: 1,
+            enabled: pw.cld_enabled,
+            disabled_reason: cld_reason,
             allow_unit_switch: false,
             ..ScrubUnitFieldConfig::new("pairwise.cld_font_size", "CLD Font Size", 6.0, 24.0)
         };
         let f_out = render_scrub_unit_field(ui, pw.cld_font_size_pt, &mut state.cld_font_spinner, font_cfg, gctx.tokens, gctx.meta);
-        if let Some(v) = f_out.committed_value {
+        if pw.cld_enabled
+            && let Some(v) = f_out.committed_value
+        {
             let mut next = pw.clone();
             next.cld_font_size_pt = v.clamp(6.0, 24.0);
             gctx.intents.push(UiIntent::UpdatePairwiseState(Box::new(next)));
@@ -148,11 +153,15 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
         let off_cfg = ScrubUnitFieldConfig {
             step_per_pt: 1.0,
             decimals: 1,
+            enabled: pw.cld_enabled,
+            disabled_reason: cld_reason,
             allow_unit_switch: false,
             ..ScrubUnitFieldConfig::new("pairwise.cld_offset", "CLD Offset", 0.0, 48.0)
         };
         let o_out = render_scrub_unit_field(ui, pw.cld_offset_pt, &mut state.cld_offset_spinner, off_cfg, gctx.tokens, gctx.meta);
-        if let Some(v) = o_out.committed_value {
+        if pw.cld_enabled
+            && let Some(v) = o_out.committed_value
+        {
             let mut next = pw.clone();
             next.cld_offset_pt = v.clamp(0.0, 48.0);
             gctx.intents.push(UiIntent::UpdatePairwiseState(Box::new(next)));
@@ -160,8 +169,19 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
 
         let mut upper = pw.cld_uppercase;
         let chk = ui.checkbox(&mut upper, "Uppercase CLD Letters (A, AB)");
-        record_checkbox(ui, &chk, gctx.meta, "pairwise.cld_uppercase", "Uppercase CLD Letters", upper);
-        if chk.changed() {
+        record_checkbox_enabled(
+            ui,
+            &chk,
+            gctx.meta,
+            CheckboxMeta {
+                widget_id: "pairwise.cld_uppercase",
+                label: "Uppercase CLD Letters",
+                checked: upper,
+                enabled: pw.cld_enabled,
+                disabled_reason: cld_reason,
+            },
+        );
+        if pw.cld_enabled && chk.changed() {
             let mut next = pw.clone();
             next.cld_uppercase = upper;
             gctx.intents.push(UiIntent::UpdatePairwiseState(Box::new(next)));
@@ -175,16 +195,17 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
                 label: if desc { "Order: Descending Mean" } else { "Order: Ascending Mean" },
                 command_id: None,
                 selected: true,
-                enabled: true,
-                disabled_reason: None,
+                enabled: pw.cld_enabled,
+                disabled_reason: cld_reason,
             },
             gctx.tokens,
         )
         .clicked()
+            && pw.cld_enabled
         {
             gctx.intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("pairwise.cld_ordering") });
         }
-    }
+    });
     ui.add_space(4.0);
     ui.label(format!("Active brackets: {}", pw.brackets.len()));
 }

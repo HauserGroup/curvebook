@@ -4,6 +4,7 @@ use curvebook_doc::EquationDisplayMode;
 use egui::Ui;
 use serde_json::{Map, Value, json};
 
+use super::super::UiIntent;
 use super::super::unit_spinners::{ScrubUnitFieldConfig, render_scrub_unit_field};
 use super::helpers::{ButtonEntry, GraphModalCtx, record_button, record_checkbox};
 use super::state::GraphModalEguiState;
@@ -36,7 +37,7 @@ pub(super) fn render_insert_equation_body(ui: &mut Ui, state: &mut GraphModalEgu
                 {
                     let mut patch = Map::new();
                     patch.insert(String::from("result_sheet_id"), Value::String(rid.as_str().to_owned()));
-                    gctx.intents.push_patch_active_dialog(patch);
+                    gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
                 }
             }
         });
@@ -66,7 +67,7 @@ pub(super) fn render_insert_equation_body(ui: &mut Ui, state: &mut GraphModalEgu
             {
                 let mut patch = Map::new();
                 patch.insert(String::from("mode"), Value::String(slug.to_owned()));
-                gctx.intents.push_patch_active_dialog(patch);
+                gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
             }
         }
     });
@@ -82,7 +83,7 @@ pub(super) fn render_insert_equation_body(ui: &mut Ui, state: &mut GraphModalEgu
     if let Some(val) = out.committed_value {
         let mut patch = Map::new();
         patch.insert(String::from("font_size_pt"), json!(val.clamp(6.0, 36.0)));
-        gctx.intents.push_patch_active_dialog(patch);
+        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
     }
 
     let mut bordered = eq.bordered;
@@ -91,6 +92,6 @@ pub(super) fn render_insert_equation_body(ui: &mut Ui, state: &mut GraphModalEgu
     if brd_chk.changed() {
         let mut patch = Map::new();
         patch.insert(String::from("bordered"), Value::Bool(bordered));
-        gctx.intents.push_patch_active_dialog(patch);
+        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
     }
 }

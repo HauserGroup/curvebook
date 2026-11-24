@@ -26,6 +26,59 @@ use crate::workspace_nav::{ActiveWorkspacePane, build_set_info_constant_command,
 const MIN_SCALE_FACTOR: f64 = 0.5;
 const MAX_SCALE_FACTOR: f64 = 8.0;
 
+const MODAL_TEXTBOX_WIDGET_IDS: &[&str] = &[
+    "formula_bar.input",
+    "power.standardized_effect",
+    "power.within_pair_correlation",
+    "power.alpha",
+    "power.target_power",
+    "format_points.color",
+    "format_points.size_pt",
+    "analyze.search",
+    "analyze.transform.formula",
+    "analyze.transform.filter_formula",
+    "analyze.transform.selected_data_sets",
+    "analyze.transform.baseline_columns",
+    "analyze.expected_proportions",
+    "analyze.fit.equation_id",
+    "analyze.fit.custom_dsl",
+    "edit.custom_title",
+    "edit.transform.formula",
+    "edit.transform.filter_formula",
+    "edit.transform.selected_data_sets",
+    "edit.transform.baseline_columns",
+    "edit.contingency.expected_proportions",
+    "edit.glm.predictor_columns",
+    "edit.cox.predictor_columns",
+    "edit.fit.model_id",
+    "edit.fit.custom_dsl",
+    "import.title",
+    "import.x_title",
+    "import.tidy_csv",
+    "import.group_col",
+    "import.value_col",
+    "import.x_col",
+    "import.replicate_col",
+    "axes.title",
+    "axes.thresholds",
+    "axes.x_thresholds",
+    "axes.y_thresholds",
+    "create_graph.y_axis_title",
+    "create_graph.title",
+    "randomize.groups",
+    "randomize.block_sizes",
+    "randomize.title",
+    "sample.title",
+    "simulate.title",
+    "simulate.column_name",
+    "change_data.selected_data_sets",
+    "hook.search_query",
+    "exclude.note",
+    "palette.query",
+    "checkpoints.name",
+    "checkpoints.note",
+];
+
 /// HiDPI logical <-> physical coordinate metrics for a workspace viewport (`1.0x`, `1.5x`, `2.0x`, `3.0x`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ViewportMetrics {
@@ -1163,7 +1216,7 @@ pub(crate) fn clear_inspector_axis_buffers(app: &mut UiApp) {
 
 /// Clear transient modal textbox buffers so stale values never bleed across separate dialog sessions.
 pub fn clear_modal_text_buffers(app: &mut UiApp) {
-    for &id in crate::inspect::TEXTBOX_WIDGET_IDS {
+    for &id in MODAL_TEXTBOX_WIDGET_IDS {
         if id != "formula_bar.input" {
             app.interaction.text_field_buffers.remove(id);
         }
@@ -1189,31 +1242,13 @@ pub fn clear_modal_text_buffers(app: &mut UiApp) {
 
 pub(crate) fn close_active_modal(app: &mut UiApp) {
     if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
-        crate::views::fit_params::clear_fit_parameter_inputs(app);
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        app.egui_views.stats_modals.open_session_sheet_id = None;
-        app.egui_views.fit_modal.open_session_sheet_id = None;
+        crate::dialogs_canvas::clear_fit_parameter_inputs(app);
     }
     app.canvas_dialogs.close_dialog();
 }
 
 fn clear_context_menu_state(app: &mut UiApp) {
     app.interaction.context_menu_target = None;
-    app.view_shards.toolbar_menus.active_context_menu_id = None;
-    app.view_shards.toolbar_menus.context_menu_anchor_px = None;
-    app.view_shards.toolbar_menus.context_sheet_id = None;
-}
-
-/// Dismiss any stale sheet-bound modal (such as `ChangeGraphType` for a different graph) and synchronize dialog/inspector state for `sheet_id`.
-pub(crate) fn sync_dialogs_on_sheet_switch(app: &mut UiApp, sheet_id: &SheetId) {
-    if matches!(&app.canvas_dialogs.active_dialog, ActiveDialog::ChangeGraphType { graph_sheet_id } if graph_sheet_id != sheet_id) {
-        app.canvas_dialogs.close_dialog();
-    }
-    clear_inspector_axis_buffers(app);
-    let doc = app.document().clone();
-    app.canvas_dialogs.on_sheet_selected(&doc, sheet_id);
 }
 
 /// Dispatch a mouse-wheel or trackpad scroll event across data sheets and graph/layout canvases.
@@ -1242,15 +1277,6 @@ pub fn dispatch_mouse_wheel(
         let doc = app.document();
         if let Some(ds) = doc.data_sheet(&active_id).cloned() {
             app.grid.tool.scroll_for_sheet(&ds, -delta_x, -delta_y);
-            #[cfg(not(target_arch = "wasm32"))]
-            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-            {
-                let max_x = ((ds.archetype.column_count() as f32) * 140.0).max(2_000.0);
-                let max_y = ((ds.archetype.row_count() as f32) * 28.0).max(2_000.0);
-                let pt = &mut app.egui_views.column_grid.scroll_offset_pt;
-                pt.x = (pt.x - (delta_x as f32)).clamp(0.0, max_x);
-                pt.y = (pt.y - (delta_y as f32)).clamp(0.0, max_y);
-            }
             app.sync_views();
             return Ok(UiEventOutcome { handled: true, action: String::from("grid.scroll"), ..Default::default() });
         }
@@ -1372,23 +1398,10 @@ fn resolve_info_sheet_for_textbox(app: &UiApp, wid: &str) -> Option<SheetId> {
 
 fn initial_text_for_widget(app: &UiApp, wid: &str) -> String {
     if is_info_notes_widget_id(wid) {
-        if let Some(info_id) = resolve_info_sheet_for_textbox(app, wid) {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let view = if wid == "info.secondary.notes" || wid == "secondary.info.notes_editor" {
-                    &app.egui_views.center_stage.secondary_info_view
-                } else {
-                    &app.egui_views.info_view
-                };
-                if let Some((draft_id, draft)) = &view.notes_draft
-                    && draft_id == &info_id
-                {
-                    return draft.clone();
-                }
-            }
-            if let Some(info) = app.document().info_sheet(&info_id) {
-                return info.notes_markdown.clone();
-            }
+        if let Some(info_id) = resolve_info_sheet_for_textbox(app, wid)
+            && let Some(info) = app.document().info_sheet(&info_id)
+        {
+            return info.notes_markdown.clone();
         }
         return String::new();
     }
@@ -1444,14 +1457,14 @@ fn sync_power_pilot_text_field(app: &mut UiApp, fid: &str, text: &str) {
         return;
     };
     match fid {
-        "power.pilot.mean1.input" => app.view_shards.power_wizard.pilot_mean1 = val,
-        "power.pilot.mean2.input" => app.view_shards.power_wizard.pilot_mean2 = val,
+        "power.pilot.mean1.input" => app.canvas_dialogs.power_wizard.pilot_mean1 = val,
+        "power.pilot.mean2.input" => app.canvas_dialogs.power_wizard.pilot_mean2 = val,
         "power.pilot.sd.input" if val > 0.0 => app.canvas_dialogs.power_wizard.sd = val,
         "power.pilot.corr.input" => app.canvas_dialogs.power_wizard.within_pair_correlation = val.clamp(-0.99, 0.99),
         "power.pilot.p1.input" => app.canvas_dialogs.power_wizard.p1 = val.clamp(0.01, 0.99),
         "power.pilot.p2.input" => app.canvas_dialogs.power_wizard.p2 = val.clamp(0.01, 0.99),
-        "power.pilot.hr.input" => app.view_shards.power_wizard.survival_hazard_ratio = val.max(0.05),
-        "power.pilot.evprob.input" => app.view_shards.power_wizard.survival_event_prob = val.clamp(0.01, 0.99),
+        "power.pilot.hr.input" => app.canvas_dialogs.power_wizard.survival_hazard_ratio = val.max(0.05),
+        "power.pilot.evprob.input" => app.canvas_dialogs.power_wizard.survival_event_prob = val.clamp(0.01, 0.99),
         "power.pilot.r2.input" => app.canvas_dialogs.power_wizard.r_squared = val.clamp(0.001, 0.999),
         "power.pilot.std.input" => app.canvas_dialogs.power_wizard.standardized_effect = val,
         _ => {}
@@ -1494,23 +1507,13 @@ fn parse_f64_list_text(raw: &str, preset: &crate::i18n::LocalePreset) -> Option<
 fn sync_active_dialog_value(app: &mut UiApp, key: &str, val: Value) {
     let mut map = serde_json::Map::new();
     map.insert(key.to_owned(), val);
-    let _ = crate::gui_actions::patch_active_dialog(app, &map);
+    let _ = crate::dialogs_canvas::dialog_patch::patch_active_dialog(app, &map);
 }
 
 fn sync_info_notes_text_field(app: &mut UiApp, fid: &str, text: &str) {
     let Some(info_id) = resolve_info_sheet_for_textbox(app, fid) else {
         return;
     };
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let view = if fid == "info.secondary.notes" || fid == "secondary.info.notes_editor" {
-            &mut app.egui_views.center_stage.secondary_info_view
-        } else {
-            &mut app.egui_views.info_view
-        };
-        view.notes_draft = Some((info_id.clone(), text.to_owned()));
-        view.notes_dirty = false;
-    }
     if app.document().info_sheet(&info_id).is_some_and(|s| s.notes_markdown != text) {
         let intent = crate::workspace_nav::build_set_info_notes_command(&info_id, text, false);
         let _ = app.execute_command(&intent.command_id, intent.params);
@@ -1545,7 +1548,7 @@ fn sync_edit_params_text_field(app: &mut UiApp, fid: &str, text: &str) {
         }
         _ => return,
     }
-    let _ = app.canvas_dialogs.edit_params.apply_field_patch_localized(&map, &app.locale_preset);
+    let _ = crate::dialogs_canvas::dialog_patch::patch_edit_params(&mut app.canvas_dialogs.edit_params, &map, &app.locale_preset);
 }
 
 fn sync_format_axes_text_field(app: &mut UiApp, fid: &str, text: &str) {
@@ -1571,7 +1574,7 @@ fn sync_format_axes_text_field(app: &mut UiApp, fid: &str, text: &str) {
         }
         _ => return,
     }
-    let _ = app.canvas_dialogs.format_axes.apply_field_patch(&map, Some(&doc));
+    let _ = crate::dialogs_canvas::dialog_patch::patch_format_axes(&mut app.canvas_dialogs.format_axes, &map, Some(&doc), &app.locale_preset);
 }
 
 /// Flush any buffered `FormatAxes` textbox edits (`axes.title`, `axes.thresholds`, `axes.y_thresholds`, `axes.x_thresholds`) into `format_axes`.
@@ -1690,7 +1693,7 @@ fn sync_modal_text_field(app: &mut UiApp, fid: &str, text: &str) -> bool {
 fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
     let text = app.interaction.text_field_buffers.get(fid).map(|b| b.text.clone()).unwrap_or_default();
     if fid.starts_with("import_paste.input.") {
-        crate::views::import_paste::on_text_field_changed(app, fid, &text);
+        crate::import_paste::on_text_field_changed(app, fid, &text);
         return;
     }
     if fid.starts_with("power.pilot.") && fid.ends_with(".input") {
@@ -1709,12 +1712,8 @@ fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
         "formula_bar.input" => {
             let doc = app.document().clone();
             app.grid.formula_bar.set_input(&text, None, &doc);
-            app.view_shards.mv_formula.validation_feedback = None;
         }
-        "analyze.search" => {
-            app.view_shards.analyze_picker.search_query = text.clone();
-            app.canvas_dialogs.analyze.search_query = text;
-        }
+        "analyze.search" => app.canvas_dialogs.analyze.search_query = text,
         "navigator.search_input" => app.nav.search_query = text,
         "welcome.title.input" => app.nav.welcome.table_draft.title = text,
         "welcome.clone.title.input" => app.nav.welcome.clone_draft.options.title = text,
@@ -1731,14 +1730,7 @@ fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
             let _ = app.canvas_dialogs.randomize_groups.set_groups_from_str(&text);
         }
         "rand_groups.title_input" => app.canvas_dialogs.randomize_groups.title = text,
-        "mv_formula.func.search" => app.view_shards.mv_formula.function_search = text,
-        "mv_formula.name.input" => {
-            app.grid.formula_bar.target_title = text;
-            app.view_shards.mv_formula.validation_feedback = None;
-        }
-        "mv_formula.vars.recode_from.input" => app.view_shards.mv_formula.recode_from = text,
-        "mv_formula.vars.recode_to.input" => app.view_shards.mv_formula.recode_to = text,
-        "fit.eq.search" => app.view_shards.fit_params.model_search = text,
+        "mv_formula.name.input" => app.grid.formula_bar.target_title = text,
         "inspector.axes.title.input" | "inspector.mv.color_clamp_min.input" | "inspector.mv.color_clamp_max.input" => {}
         _ => {}
     }
@@ -1773,9 +1765,7 @@ fn handle_text_input(app: &mut UiApp, metrics: ViewportMetrics, text: &str) -> U
         && app.nav.active_pane == ActiveWorkspacePane::MainCanvasOrGrid
         && app.document().active_sheet_id.as_ref().is_some_and(|sid| app.document().data_sheet(sid).is_some())
     {
-        let mut grid_core = std::mem::take(&mut app.view_shards.grid_core);
-        let grid_out = crate::views::grid_core::handle_grid_text_input(app, &mut grid_core, text);
-        app.view_shards.grid_core = grid_core;
+        let grid_out = crate::grid_view::handle_grid_text_input(app, text);
         if grid_out.handled {
             return grid_out;
         }
@@ -1784,7 +1774,7 @@ fn handle_text_input(app: &mut UiApp, metrics: ViewportMetrics, text: &str) -> U
 }
 
 fn is_text_widget_id(wid: &str) -> bool {
-    crate::inspect::is_textbox_widget_id(wid)
+    MODAL_TEXTBOX_WIDGET_IDS.contains(&wid)
         || is_multiline_text_widget_id(wid)
         || matches!(
             wid,
@@ -1950,12 +1940,8 @@ fn try_handle_workspace_copy_shortcut(app: &mut UiApp, metrics: ViewportMetrics)
         return Ok(None);
     }
     if let Some(rs_id) = resolve_result_sheet_for_shortcut(app, false) {
-        let mut results_state = std::mem::take(&mut app.view_shards.results);
-        let out = crate::views::results::handle_custom_action(app, &mut results_state, &format!("copy_selection:{}", rs_id.as_str()));
-        app.view_shards.results = results_state;
-        if let Ok(outcome) = out
-            && outcome.handled
-        {
+        let outcome = crate::dialogs_canvas::copy_result_table_to_clipboard(app, rs_id.as_str(), false);
+        if outcome.handled {
             return Ok(Some(outcome));
         }
     }
@@ -1990,7 +1976,7 @@ fn try_handle_workspace_paste_shortcut(app: &mut UiApp) -> Result<Option<UiEvent
         return Ok(None);
     };
     if let Some((x_row, x_subcol)) = app.grid.active_x_cell {
-        let res = crate::gui_actions::paste_text_into_active_x_cell(app, &ds_id, x_row, x_subcol, &clip).map_err(|e| e.to_string())?;
+        let res = crate::grid_view::paste_text_into_active_x_cell(app, &ds_id, x_row, x_subcol, &clip).map_err(|e| e.to_string())?;
         app.grid.refresh_selection_stats(app.session.document());
         return Ok(Some(UiEventOutcome {
             handled: true,
@@ -2169,14 +2155,9 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
 
     if matches!(trimmed, "Escape" | "Esc") {
         clear_context_menu_state(app);
-        app.view_shards.toolbar_menus.overflow_open = false;
-        if app.view_shards.grid_core.editing_title.is_some() {
-            app.view_shards.grid_core.editing_title = None;
-            app.interaction.text_field_buffers.remove("grid.title_editor.input");
-            if app.focus_widget_id.as_deref() == Some("grid.title_editor.input") {
-                app.focus_widget_id = None;
-            }
-            return Ok(UiEventOutcome { handled: true, action: String::from("grid_core.title_cancel"), ..Default::default() });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            app.egui_views.top_chrome.overflow_menu_open = false;
         }
         if app.interaction.open_dropdown.take().is_some() || app.interaction.open_menu.take().is_some() {
             return Ok(UiEventOutcome { handled: true, action: String::from("popup.dismissed"), ..Default::default() });
@@ -2191,26 +2172,21 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
         }
     }
 
-    let editing_grid_title = app.view_shards.grid_core.editing_title.is_some();
     let grid_nav_key =
         matches!(trimmed, "ArrowUp" | "Up" | "ArrowDown" | "Down" | "ArrowLeft" | "Left" | "ArrowRight" | "Right" | "Delete" | "Backspace")
             || (matches!(trimmed, "Enter" | "Return")
-                && (editing_grid_title
-                    || (app.nav.active_pane == ActiveWorkspacePane::MainCanvasOrGrid
-                        && app.focus_widget_id.as_deref().is_none_or(|f| f.starts_with("grid.") || f.starts_with("secondary.grid.")))));
+                && app.nav.active_pane == ActiveWorkspacePane::MainCanvasOrGrid
+                && app.focus_widget_id.as_deref().is_none_or(|f| f.starts_with("grid.") || f.starts_with("secondary.grid.")));
     if grid_nav_key
         && !modifiers.alt
         && !app.nav.welcome.open
         && !app.nav.gallery.open
         && app.interaction.open_menu.is_none()
         && app.interaction.open_dropdown.is_none()
-        && (editing_grid_title
-            || (!text_focused && app.document().active_sheet_id.as_ref().is_some_and(|sid| app.document().data_sheet(sid).is_some())))
+        && !text_focused
+        && app.document().active_sheet_id.as_ref().is_some_and(|sid| app.document().data_sheet(sid).is_some())
     {
-        let mut grid_core = std::mem::take(&mut app.view_shards.grid_core);
-        let grid_out = crate::views::grid_core::handle_grid_key_down(app, &mut grid_core, trimmed, modifiers);
-        app.view_shards.grid_core = grid_core;
-        let outcome = grid_out?;
+        let outcome = crate::grid_view::handle_grid_key_down(app, trimmed, modifiers)?;
         if outcome.handled {
             return Ok(outcome);
         }
@@ -2279,11 +2255,32 @@ fn handle_modal_key_down(
     }
 
     if !modifiers.alt && matches!(trimmed, "Enter" | "Return") {
-        let res = crate::gui_actions::submit_active_dialog_ok(app).map_err(|e| e.to_string())?;
+        let out = crate::control_io::host_routing::commit_active_modal_dialog(app, |app, cmd_id| {
+            if let Some(res) = crate::control_io::dispatch_ui_command_as_ui(app, cmd_id, &Value::Null).map_err(|e| e.to_string())? {
+                return Ok(UiEventOutcome {
+                    handled: true,
+                    action: format!("palette:{cmd_id}"),
+                    command_id: Some(cmd_id.to_owned()),
+                    command_result: Some(res),
+                });
+            }
+            let outcome = app.execute_command(cmd_id, Value::Null).map_err(|e| e.to_string())?;
+            Ok(UiEventOutcome {
+                handled: true,
+                action: format!("palette:{cmd_id}"),
+                command_id: Some(cmd_id.to_owned()),
+                command_result: Some(outcome.payload),
+            })
+        })?;
         if app.canvas_dialogs.active_dialog == ActiveDialog::None {
             clear_context_menu_state(app);
         }
-        return Ok(UiEventOutcome { handled: true, action: String::from("dialog.confirmed"), command_result: Some(res), ..Default::default() });
+        return Ok(UiEventOutcome {
+            handled: out.handled,
+            action: String::from("dialog.confirmed"),
+            command_id: out.command_id,
+            command_result: out.command_result,
+        });
     }
 
     let _ = is_space;
@@ -2315,22 +2312,17 @@ fn handle_textbox_key(
     modifiers: KeyModifiers,
 ) -> Result<Option<UiEventOutcome>, String> {
     if matches!(fid, "formula_bar.input" | "mv_formula.name.input") && !modifiers.ctrl && !modifiers.meta && !modifiers.alt {
-        if matches!(key, "Enter" | "Return") {
-            if app.view_shards.mv_formula.right_panel_open {
-                return crate::views::mv_formula::commit_from_textbox_enter(app).map(Some);
-            }
-            if fid == "formula_bar.input" {
-                let res = crate::gui_actions::commit_formula_bar(app).map_err(|e| e.to_string())?;
-                return Ok(Some(UiEventOutcome {
-                    handled: true,
-                    action: String::from("formula_bar.committed"),
-                    command_result: Some(res),
-                    ..Default::default()
-                }));
-            }
+        if matches!(key, "Enter" | "Return") && fid == "formula_bar.input" {
+            let res = crate::grid_view::commit_formula_bar(app).map_err(|e| e.to_string())?;
+            return Ok(Some(UiEventOutcome {
+                handled: true,
+                action: String::from("formula_bar.committed"),
+                command_result: Some(res),
+                ..Default::default()
+            }));
         }
         if fid == "formula_bar.input" && matches!(key, "Escape" | "Esc") {
-            crate::gui_actions::cancel_formula_bar(app);
+            crate::grid_view::cancel_formula_bar(app);
             return Ok(Some(UiEventOutcome { handled: true, action: String::from("formula_bar.cancelled"), ..Default::default() }));
         }
     }

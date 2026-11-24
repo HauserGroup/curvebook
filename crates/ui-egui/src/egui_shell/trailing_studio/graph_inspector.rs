@@ -10,7 +10,7 @@ use egui::{Color32, Vec2};
 use serde_json::{Value, json};
 
 use crate::UiApp;
-use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, widgets};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, UiIntent, widgets};
 
 use super::helpers::{MediaControlsSpec, StudioButtonSpec, StudioChipSpec, render_canvas_media_buttons, studio_chip, studio_full_button};
 use super::{GraphStudioTab, TrailingStudioContext, TrailingStudioEguiState};
@@ -896,7 +896,9 @@ pub(super) fn render_graph_inspector_studio(
                     disabled_reason: None,
                 },
             ) {
-                intents.push_set_preview_filter(if is_gray { CanvasPreviewFilter::Normal } else { CanvasPreviewFilter::GrayscalePrint });
+                intents.push(UiIntent::SetPreviewFilter {
+                    filter: if is_gray { CanvasPreviewFilter::Normal } else { CanvasPreviewFilter::GrayscalePrint },
+                });
             }
 
             render_graph_canvas_media_controls(ui, app, gs, ctx_in, meta, intents);

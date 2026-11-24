@@ -6,18 +6,26 @@
 
 use std::collections::BTreeMap;
 
-use curvebook_doc::TableArchetype;
-use curvebook_engine::EngineError;
+use curvebook_doc::{ErrorCode, TableArchetype};
+use curvebook_engine::{EngineError, cmd};
+use curvebook_render::{RenderTargetSpec, encode_png};
 use egui::{Key, Modifiers, Pos2, Rect, Vec2};
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 use crate::UiApp;
-use crate::dialogs_canvas::ActiveDialog;
+use crate::control_io::host_routing::contextual_command_params;
+use crate::control_io::{
+    dispatch_ui_command_as_ui, opt_bool_param, opt_finite_f64_param, opt_non_empty_str_param, opt_str_param, parse_bounded_u32,
+    require_params_object_or_null,
+};
+use crate::dialogs_canvas::dialog_patch::patch_active_dialog;
+use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner};
 #[cfg(any(test, feature = "test-support"))]
 use crate::egui_shell::FrameInspectEntryInput;
 use crate::egui_shell::app_modals::render_app_modal;
 use crate::egui_shell::center_stage::{CenterStageContext, render_center_stage};
 use crate::egui_shell::command_palette::render_command_palette;
+use crate::egui_shell::dialog_actions::{is_gui_only_blocked_menu_command, submit_active_dialog_ok};
 use crate::egui_shell::fit_modal::{is_nonlinear_fit_dialog_active, render_fit_modal, render_hook_constant_modal};
 use crate::egui_shell::graph_modals::{is_graph_modal_active, render_graph_modal};
 use crate::egui_shell::import_wizard::render_import_or_convert_modal;
@@ -34,12 +42,19 @@ use crate::egui_shell::status_footer::{StatusFooterContext, render_status_footer
 use crate::egui_shell::top_chrome::{TopChromeContext, render_top_chrome};
 use crate::egui_shell::trailing_studio::{TrailingStudioContext, render_trailing_studio};
 use crate::egui_shell::transform_modals::{is_transform_edit_dialog_active, render_exclude_with_reason_modal, render_transform_modal};
-use crate::egui_shell::{EguiShellViewState, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ShellLayoutInput, Tokens, UiIntentOutcome};
+use crate::egui_shell::{
+    EguiShellViewState, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ShellLayoutInput, Tokens, UiIntent, UiIntentOutcome,
+};
+use crate::grid_view::{parse_grid_cell_widget_id, parse_x_cell_widget_id, selection_cell_count};
 use crate::inspect::{
-    GridSelectionSnapshot, UiDialogSnapshot, UiMenuSnapshot, UiNavigatorSheetNode, UiTreeSnapshot, UiWidgetNode, ZLayer, active_dialog_slug,
-    inspect_semantic_snapshot,
+    BrushedPointSnapshot, GridCoordSnapshot, GridSelectionSnapshot, MAX_INSPECT_SELECTED_COORDS, ScreenshotRegionTarget, UiDialogSnapshot,
+    UiMenuSnapshot, UiNavigatorSheetNode, UiTreeSnapshot, UiWidgetNode, ZLayer, active_dialog_slug,
 };
 use crate::interaction::{KeyModifiers, UiEventOutcome, ViewportMetrics};
+use crate::menus::{
+    CuratedMenuNode, UI_COMMANDS, command_tooltip, curated_menu_bar, is_desktop_host_routed_command, menu_bar_tooltips, toolbar_tooltips,
+};
+use crate::modal_predicates::{evaluate_dialog_button_for_app, sync_format_points_fallback_targets};
 use crate::tr;
 use crate::workspace_nav::ActiveWorkspacePane;
 
@@ -403,20 +418,34 @@ fn entry_belongs_to_scope(entry: &FrameInspectNodeMeta, scope_tag: &str) -> bool
                 || wid.starts_with("info.")
                 || wid.starts_with("welcome.")
         }
-        "grid" => wid.starts_with("grid."),
-        "dialog" => {
-            entry.z_layer == ZLayer::ModalDialog
-                || entry.z_layer == ZLayer::ModalBackdrop
-                || wid.starts_with("dialog.")
-                || wid.starts_with("modal.")
-                || wid.starts_with("edit.")
-                || wid.starts_with("palette.")
-        }
+        "grid" => wid.starts_with("grid.") || wid.starts_with("formula_bar.") || wid.starts_with("mv_formula."),
+        "dialog" => is_dialog_meta_entry(entry),
         "navigator" => wid.starts_with("nav."),
         "inspector" => wid.starts_with("inspector."),
         "status" => wid.starts_with("status."),
         _ => false,
     }
+}
+
+fn is_dialog_meta_entry(entry: &FrameInspectNodeMeta) -> bool {
+    let wid = entry.widget_id.as_str();
+    entry.z_layer == ZLayer::ModalDialog
+        || entry.z_layer == ZLayer::ModalBackdrop
+        || wid.starts_with("dialog.")
+        || wid.starts_with("modal.")
+        || wid.starts_with("edit.")
+        || wid.starts_with("palette.")
+        || wid.starts_with("power.")
+        || wid.starts_with("import.")
+        || wid.starts_with("transform.")
+        || wid.starts_with("analyze.")
+        || wid.starts_with("fit.")
+        || wid.starts_with("axes.")
+        || wid.starts_with("graph_type.")
+        || wid.starts_with("nav.delete_confirm.")
+        || wid.starts_with("unsaved.")
+        || wid.starts_with("prefs.")
+        || wid.starts_with("find.")
 }
 
 struct AccessKitLookup<'a> {
@@ -469,15 +498,122 @@ fn widget_node_from_meta(entry: &FrameInspectNodeMeta, ak: &AccessKitLookup<'_>,
     }
 }
 
+fn resolve_dialog_target_sheet_id(app: &UiApp) -> Option<String> {
+    match &app.canvas_dialogs.active_dialog {
+        ActiveDialog::FormatAxes { sheet_id }
+        | ActiveDialog::ExportFigure { sheet_id }
+        | ActiveDialog::ConvertArchetype { sheet_id }
+        | ActiveDialog::ExcludeWithReason { sheet_id } => Some(sheet_id.as_str().to_owned()),
+        ActiveDialog::AnalyzeSheet { source_sheet_id } | ActiveDialog::DuplicateAnalysisPrompt { source_sheet_id, .. } => {
+            Some(source_sheet_id.as_str().to_owned())
+        }
+        ActiveDialog::EditAnalysisParameters { result_sheet_id }
+        | ActiveDialog::ChangeDataAnalyzed { result_sheet_id }
+        | ActiveDialog::ResultViewer { result_sheet_id } => Some(result_sheet_id.as_str().to_owned()),
+        ActiveDialog::ConstantHookPicker { target_sheet_id } => Some(target_sheet_id.as_str().to_owned()),
+        ActiveDialog::ChangeGraphType { graph_sheet_id }
+        | ActiveDialog::FormatGraph { graph_sheet_id }
+        | ActiveDialog::PairwiseComparisons { graph_sheet_id }
+        | ActiveDialog::BubblePlotInspector { graph_sheet_id }
+        | ActiveDialog::FormatSelectedPoints { graph_sheet_id }
+        | ActiveDialog::InsertModelEquation { graph_sheet_id } => Some(graph_sheet_id.as_str().to_owned()),
+        ActiveDialog::ApplyStyleFrom { target_graph_id } => Some(target_graph_id.as_str().to_owned()),
+        ActiveDialog::PageLayoutComposer { layout_sheet_id } | ActiveDialog::EqualizeScaling { layout_sheet_id } => {
+            Some(layout_sheet_id.as_str().to_owned())
+        }
+        ActiveDialog::FormatEmbeddedTable { sheet_id, .. } | ActiveDialog::FormatImage { sheet_id, .. } => Some(sheet_id.as_str().to_owned()),
+        ActiveDialog::CreateGraph { source_sheet_id } | ActiveDialog::RandomSampleRows { source_sheet_id } => {
+            source_sheet_id.as_ref().map(|s| s.as_str().to_owned())
+        }
+        ActiveDialog::Print { sheet_id } => sheet_id.as_ref().map(|s| s.as_str().to_owned()),
+        _ => app.egui_views.leading_dock.delete_confirm.as_ref().map(|d| d.sheet_id.as_str().to_owned()),
+    }
+}
+
+fn resolve_dialog_stage(app: &UiApp) -> Option<String> {
+    match &app.canvas_dialogs.active_dialog {
+        ActiveDialog::PowerAndSampleSize => Some(app.canvas_dialogs.power_wizard.stage.label().to_owned()),
+        ActiveDialog::AnalyzeSheet { .. } => {
+            let doc = app.document();
+            let src_id = app.canvas_dialogs.analyze.source_sheet_id.as_ref().or(doc.active_sheet_id.as_ref())?;
+            doc.result_sheet(src_id).and_then(|rs| rs.tabs.get(app.canvas_dialogs.result_view.active_tab_index)).map(|t| t.id.clone())
+        }
+        _ if app.grid.import_wizard.open => Some(format!("{:?}", app.grid.import_wizard.stage)),
+        _ => None,
+    }
+}
+
+fn resolve_dialog_slug(app: &UiApp, decision: &HybridCoexistenceDecision, dialog_entry: Option<&FrameInspectNodeMeta>) -> String {
+    match decision.modal_surface {
+        HybridModalSurface::HostUnsavedClose => String::from("unsaved_changes"),
+        HybridModalSurface::EguiPreferences => String::from("preferences"),
+        HybridModalSurface::EguiFindReplace => String::from("find_replace"),
+        HybridModalSurface::EguiManageVariables => String::from("manage_variables"),
+        HybridModalSurface::EguiNavDeleteConfirm => String::from("nav_delete_confirm"),
+        HybridModalSurface::EguiCommandPalette => String::from("command_palette"),
+        _ if app.canvas_dialogs.active_dialog != ActiveDialog::None => active_dialog_slug(&app.canvas_dialogs.active_dialog),
+        HybridModalSurface::EguiImportWizard => String::from("import_paste_special"),
+        HybridModalSurface::EguiTransformModal => String::from("transform_modal"),
+        HybridModalSurface::None => String::from("none"),
+        _ => dialog_entry
+            .map(|e| match e.widget_id.as_str() {
+                "palette.dialog" => String::from("command_palette"),
+                raw => raw.strip_prefix("dialog.").or_else(|| raw.strip_prefix("modal.")).unwrap_or(raw).to_owned(),
+            })
+            .unwrap_or_else(|| String::from("shell_modal")),
+    }
+}
+
+fn fallback_dialog_title(app: &UiApp, dialog_kind: &str) -> String {
+    match dialog_kind {
+        "about" => tr(&app.locale, "menu.help.about").to_owned(),
+        "command_palette" => String::from("Command Palette"),
+        "preferences" => String::from("Preferences"),
+        "find_replace" => String::from("Find & Replace"),
+        "manage_variables" => String::from("Manage Variables"),
+        "import_paste_special" | "import_reshape" => String::from("Import & Paste Special"),
+        "transform_modal" => String::from("Transform"),
+        "power_and_sample_size" => String::from("Power & Sample Size"),
+        "analyze_sheet" => String::from("Analyze Data"),
+        "edit_analysis_parameters" => String::from("Edit Analysis Parameters"),
+        "change_data_analyzed" => String::from("Change Data Analyzed"),
+        "duplicate_analysis_prompt" => tr(&app.locale, "w6.view.modal.analysis_already_exists").to_owned(),
+        "format_axes" => String::from("Format Axes"),
+        "format_graph" => String::from("Format Graph"),
+        "format_selected_points" => String::from("Format Selected Points"),
+        "change_graph_type" => String::from("Change Graph Type"),
+        "create_graph" => String::from("Create New Graph"),
+        "unsaved_changes" => String::from("Unsaved Changes"),
+        "nav_delete_confirm" => String::from("Delete Sheet"),
+        _ => dialog_kind.replace('_', " "),
+    }
+}
+
+fn canonical_action_for_button_widget(wid: &str) -> Option<&'static str> {
+    match wid {
+        "modal.ok" | "graph_type.apply" | "import.commit" | "transform.commit" | "nav.delete_confirm.confirm" => Some("ok"),
+        "modal.cancel" | "nav.delete_confirm.cancel" => Some("cancel"),
+        "modal.apply" => Some("apply"),
+        "modal.create" | "power.commit" => Some("create"),
+        "modal.next" => Some("next"),
+        "modal.back" => Some("back"),
+        "modal.close" => Some("close"),
+        "modal.restore" => Some("restore"),
+        "modal.discard" => Some("discard"),
+        "modal.preview" => Some("preview"),
+        _ => None,
+    }
+}
+
 fn build_dialog_snapshot_from_meta(
     app: &UiApp,
+    views: &EguiShellViewState,
     meta: &FrameInspectMeta,
     ak: &AccessKitLookup<'_>,
-    _metrics: ViewportMetrics,
     include_bounds: bool,
-    baseline_dialog: Option<&UiDialogSnapshot>,
+    host_close_dialog_open: bool,
 ) -> Option<UiDialogSnapshot> {
-    let decision = HybridCoexistenceArbiter::evaluate(app, false);
+    let decision = HybridCoexistenceArbiter::evaluate_with_views(app, views, host_close_dialog_open);
     let dialog_entry = meta
         .find_by_widget_id("modal.dialog")
         .or_else(|| meta.find_by_widget_id("dialog.about"))
@@ -488,23 +624,7 @@ fn build_dialog_snapshot_from_meta(
         return None;
     }
 
-    let dialog_kind = match decision.modal_surface {
-        HybridModalSurface::HostUnsavedClose => String::from("unsaved_changes"),
-        HybridModalSurface::EguiPreferences => String::from("preferences"),
-        HybridModalSurface::EguiFindReplace => String::from("find_replace"),
-        HybridModalSurface::EguiManageVariables => String::from("manage_variables"),
-        HybridModalSurface::EguiNavDeleteConfirm => String::from("nav_delete_confirm"),
-        HybridModalSurface::EguiCommandPalette => String::from("command_palette"),
-        _ if app.canvas_dialogs.active_dialog != ActiveDialog::None => active_dialog_slug(&app.canvas_dialogs.active_dialog),
-        HybridModalSurface::EguiImportWizard => String::from("import_paste_special"),
-        HybridModalSurface::EguiTransformModal => String::from("transform_modal"),
-        _ => dialog_entry
-            .map(|e| match e.widget_id.as_str() {
-                "palette.dialog" => String::from("command_palette"),
-                raw => raw.strip_prefix("dialog.").or_else(|| raw.strip_prefix("modal.")).unwrap_or(raw).to_owned(),
-            })
-            .unwrap_or_else(|| String::from("shell_modal")),
-    };
+    let dialog_kind = resolve_dialog_slug(app, &decision, dialog_entry);
 
     let title = dialog_entry
         .and_then(|e| {
@@ -517,29 +637,21 @@ fn build_dialog_snapshot_from_meta(
                 .map(str::to_owned)
                 .or_else(|| (!e.label.trim().is_empty()).then(|| e.label.clone()))
         })
-        .or_else(|| baseline_dialog.map(|d| d.title.clone()))
-        .unwrap_or_else(|| tr(&app.locale, "menu.help.about").to_owned());
+        .unwrap_or_else(|| fallback_dialog_title(app, &dialog_kind));
 
-    let bounds = if include_bounds {
-        dialog_entry.and_then(|e| clipped_rect_to_bounds_px(e.clipped_rect, meta.scale_factor)).or_else(|| baseline_dialog.and_then(|d| d.bounds))
-    } else {
-        None
-    };
+    let bounds = if include_bounds { dialog_entry.and_then(|e| clipped_rect_to_bounds_px(e.clipped_rect, meta.scale_factor)) } else { None };
 
     let mut tabs = Vec::new();
     let mut controls = Vec::new();
     let mut buttons = Vec::new();
+    let mut rendered_buttons_by_action: BTreeMap<&'static str, UiWidgetNode> = BTreeMap::new();
+
     for entry in &meta.entries {
         let wid = entry.widget_id.as_str();
         if matches!(wid, "modal.backdrop" | "modal.dialog" | "dialog.about" | "palette.dialog" | "modal.title") || entry.role == "dialog" {
             continue;
         }
-        if !(entry.z_layer == ZLayer::ModalDialog
-            || wid.starts_with("dialog.")
-            || wid.starts_with("modal.")
-            || wid.starts_with("edit.")
-            || wid.starts_with("palette."))
-        {
+        if !is_dialog_meta_entry(entry) {
             continue;
         }
         let node = widget_node_from_meta(entry, ak, meta.scale_factor, include_bounds);
@@ -557,39 +669,31 @@ fn build_dialog_snapshot_from_meta(
                     | "modal.create"
                     | "modal.restore"
                     | "modal.discard"
+                    | "modal.preview"
+                    | "graph_type.apply"
+                    | "import.commit"
+                    | "transform.commit"
+                    | "power.commit"
                     | "nav.delete_confirm.cancel"
                     | "nav.delete_confirm.confirm"
             )
         {
+            if let Some(action) = canonical_action_for_button_widget(wid) {
+                rendered_buttons_by_action.entry(action).or_insert_with(|| node.clone());
+            }
             buttons.push(node);
         } else {
             controls.push(node);
         }
     }
 
-    if let Some(base) = baseline_dialog {
-        for tab in &base.tabs {
-            if !tabs.iter().any(|n| n.widget_id == tab.widget_id) {
-                tabs.push(tab.clone());
-            }
-        }
-        for ctrl in &base.controls {
-            if !controls.iter().any(|n| n.widget_id == ctrl.widget_id) {
-                controls.push(ctrl.clone());
-            }
-        }
-        for btn in &base.buttons {
-            if !buttons.iter().any(|n| n.widget_id == btn.widget_id) {
-                buttons.push(btn.clone());
-            }
-        }
-    }
+    append_synthetic_dialog_fallbacks(app, &rendered_buttons_by_action, &mut controls, &mut buttons);
 
     Some(UiDialogSnapshot {
         dialog_kind,
         title,
-        target_sheet_id: baseline_dialog.and_then(|d| d.target_sheet_id.clone()),
-        stage: baseline_dialog.and_then(|d| d.stage.clone()),
+        target_sheet_id: resolve_dialog_target_sheet_id(app),
+        stage: resolve_dialog_stage(app),
         bounds,
         tabs,
         controls,
@@ -597,11 +701,358 @@ fn build_dialog_snapshot_from_meta(
     })
 }
 
-fn configure_offscreen_egui_ctx(app: &UiApp, metrics: ViewportMetrics) -> (egui::Context, f32, f32, f32) {
-    let ctx = egui::Context::default();
-    ctx.enable_accesskit();
-    crate::egui_shell::fonts::install_default_egui_fonts_cached(&ctx);
+fn append_synthetic_dialog_fallbacks(
+    app: &UiApp,
+    rendered_buttons_by_action: &BTreeMap<&'static str, UiWidgetNode>,
+    controls: &mut Vec<UiWidgetNode>,
+    buttons: &mut Vec<UiWidgetNode>,
+) {
+    for (action, src) in rendered_buttons_by_action {
+        let canon_id = format!("dialog.button.{action}");
+        if !buttons.iter().any(|b| b.widget_id == canon_id) {
+            let eval = evaluate_dialog_button_for_app(app, action);
+            let enabled = eval.as_ref().map_or(src.enabled, |e| e.enabled && src.enabled);
+            let disabled_reason = eval.and_then(|e| e.disabled_reason).or_else(|| src.disabled_reason.clone());
+            buttons.push(UiWidgetNode {
+                widget_id: canon_id,
+                role: String::from("button"),
+                label: src.label.clone(),
+                command_id: src.command_id.clone(),
+                value: None,
+                enabled,
+                disabled_reason,
+                bounds: src.bounds,
+            });
+        }
+    }
 
+    if app.canvas_dialogs.active_dialog == ActiveDialog::PowerAndSampleSize {
+        if let Some(ok_src) = rendered_buttons_by_action.get("ok").cloned()
+            && !buttons.iter().any(|b| b.widget_id == "dialog.button.create")
+        {
+            let eval = evaluate_dialog_button_for_app(app, "create");
+            let enabled = eval.as_ref().map_or(ok_src.enabled, |e| e.enabled);
+            let disabled_reason = eval.and_then(|e| e.disabled_reason);
+            buttons.push(UiWidgetNode {
+                widget_id: String::from("dialog.button.create"),
+                role: String::from("button"),
+                label: tr(&app.locale, "w6.view.btn.create").to_owned(),
+                command_id: None,
+                value: None,
+                enabled,
+                disabled_reason,
+                bounds: ok_src.bounds,
+            });
+        }
+        for action in ["back", "next", "cancel", "create"] {
+            let canon_id = format!("dialog.button.{action}");
+            if !buttons.iter().any(|b| b.widget_id == canon_id)
+                && let Some(eval) = evaluate_dialog_button_for_app(app, action)
+            {
+                buttons.push(UiWidgetNode {
+                    widget_id: canon_id,
+                    role: String::from("button"),
+                    label: action.to_owned(),
+                    command_id: None,
+                    value: None,
+                    enabled: eval.enabled,
+                    disabled_reason: eval.disabled_reason,
+                    bounds: None,
+                });
+            }
+        }
+    }
+
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::DuplicateAnalysisPrompt { .. })
+        && !controls.iter().any(|c| c.widget_id == "duplicate.choice")
+    {
+        let dup_val = match app.canvas_dialogs.analyze.duplicate_choice {
+            crate::dialogs_canvas::DuplicateChoice::CreateNew => "create_new",
+            crate::dialogs_canvas::DuplicateChoice::ModifyExisting => "modify_existing",
+        };
+        let bounds = controls
+            .iter()
+            .find(|c| c.widget_id == "analyze_picker.dup.create_new" || c.widget_id == "analyze_picker.dup.modify_existing")
+            .and_then(|c| c.bounds);
+        controls.push(UiWidgetNode {
+            widget_id: String::from("duplicate.choice"),
+            role: String::from("radio_group"),
+            label: String::from("Duplicate analysis choice"),
+            command_id: None,
+            value: Some(json!(dup_val)),
+            enabled: true,
+            disabled_reason: None,
+            bounds,
+        });
+    }
+
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::InsertModelEquation { .. })
+        && !controls.iter().any(|c| c.widget_id == "equation.mode")
+    {
+        let mode_str = crate::dialogs_canvas::equation_display_mode_str(app.canvas_dialogs.insert_model_equation.mode);
+        let bounds = controls
+            .iter()
+            .find(|c| {
+                matches!(c.widget_id.as_str(), "eq.mode.substituted" | "eq.mode.symbolic" | "equation.mode.substituted" | "equation.mode.symbolic")
+            })
+            .and_then(|c| c.bounds);
+        controls.push(UiWidgetNode {
+            widget_id: String::from("equation.mode"),
+            role: String::from("radio_group"),
+            label: String::from("Equation display mode"),
+            command_id: None,
+            value: Some(json!(mode_str)),
+            enabled: true,
+            disabled_reason: None,
+            bounds,
+        });
+    }
+
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }) && !controls.iter().any(|c| c.widget_id == "analyze.entry") {
+        let bounds = controls.iter().find(|c| c.widget_id.starts_with("analyze_picker.")).and_then(|c| c.bounds);
+        controls.push(UiWidgetNode {
+            widget_id: String::from("analyze.entry"),
+            role: String::from("listbox"),
+            label: String::from("Analysis entry"),
+            command_id: None,
+            value: Some(json!(app.canvas_dialogs.analyze.selected_entry_id)),
+            enabled: true,
+            disabled_reason: None,
+            bounds,
+        });
+    }
+
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ChangeGraphType { .. }) {
+        let preview_bounds = controls.iter().find(|c| c.widget_id == "graph_type.preview_pane").and_then(|c| c.bounds);
+        let cgt = &app.canvas_dialogs.change_graph_type;
+        for (wid, role, label, val) in [
+            ("graph_type.selected", "listbox", "Selected graph type", json!(cgt.selected_option_id)),
+            ("graph_type.summary_measure", "combobox", "Summary measure", json!(cgt.summary_measure)),
+            ("graph_type.error_bar_metric", "combobox", "Error bar metric", json!(cgt.error_bar_metric)),
+        ] {
+            if !controls.iter().any(|c| c.widget_id == wid) {
+                controls.push(UiWidgetNode {
+                    widget_id: String::from(wid),
+                    role: String::from(role),
+                    label: String::from(label),
+                    command_id: None,
+                    value: Some(val),
+                    enabled: true,
+                    disabled_reason: None,
+                    bounds: preview_bounds,
+                });
+            }
+        }
+    }
+
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::BubblePlotInspector { .. }) {
+        let bp = &app.canvas_dialogs.bubble_plot;
+        let mode_str = match bp.plot_mode {
+            curvebook_doc::MultivariatePlotMode::BubbleScatter => "bubble_scatter",
+            curvebook_doc::MultivariatePlotMode::CategoricalSummary { .. } => "categorical_summary",
+        };
+        let color_mode_str = match &bp.color_channel {
+            curvebook_doc::ColorChannelMapping::Constant(_) => "constant",
+            curvebook_doc::ColorChannelMapping::Categorical { .. } => "categorical",
+            curvebook_doc::ColorChannelMapping::Continuous { .. } => "continuous",
+        };
+        let color_col = match &bp.color_channel {
+            curvebook_doc::ColorChannelMapping::Categorical { column, .. } | curvebook_doc::ColorChannelMapping::Continuous { column, .. } => {
+                Some(*column)
+            }
+            curvebook_doc::ColorChannelMapping::Constant(_) => None,
+        };
+        let size_col = match &bp.size_channel {
+            curvebook_doc::SizeChannelMapping::Variable { column, .. } => Some(*column),
+            curvebook_doc::SizeChannelMapping::Constant { .. } => None,
+        };
+        let bounds = controls.iter().find(|c| c.widget_id.starts_with("bubble.plot_mode.")).and_then(|c| c.bounds);
+        for (wid, role, label, val) in [
+            ("bubble.plot_mode", "radio_group", "Plot mode", json!(mode_str)),
+            ("bubble.x_column", "combobox", "X column", json!(bp.x_column)),
+            ("bubble.y_column", "combobox", "Y column", json!(bp.y_column)),
+            ("bubble.color_channel", "combobox", "Color channel", json!(bp.color_channel)),
+            ("bubble.size_channel", "combobox", "Size channel", json!(bp.size_channel)),
+            ("bubble.label_column", "combobox", "Label column", json!(bp.label_column)),
+            ("bubble.color_mode", "combobox", "Color mode", json!(color_mode_str)),
+            ("bubble.color_column", "combobox", "Color column", json!(color_col)),
+            ("bubble.size_column", "combobox", "Size column", json!(size_col)),
+            ("bubble.available_columns", "listbox", "Available columns", json!(bp.available_columns)),
+        ] {
+            if !controls.iter().any(|c| c.widget_id == wid) {
+                controls.push(UiWidgetNode {
+                    widget_id: String::from(wid),
+                    role: String::from(role),
+                    label: String::from(label),
+                    command_id: None,
+                    value: Some(val),
+                    enabled: true,
+                    disabled_reason: None,
+                    bounds,
+                });
+            }
+        }
+    }
+
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::PairwiseComparisons { .. })
+        && !controls.iter().any(|c| c.widget_id == "pairwise.display_mode")
+    {
+        let bounds = controls.iter().find(|c| c.widget_id.starts_with("pairwise.mode.")).and_then(|c| c.bounds);
+        controls.push(UiWidgetNode {
+            widget_id: String::from("pairwise.display_mode"),
+            role: String::from("radio_group"),
+            label: String::from("Pairwise display mode"),
+            command_id: None,
+            value: Some(json!(crate::dialogs_r9::pairwise_display_mode_str(app.canvas_dialogs.pairwise.display_mode))),
+            enabled: true,
+            disabled_reason: None,
+            bounds,
+        });
+    }
+
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ConvertArchetype { .. })
+        && !controls.iter().any(|c| c.widget_id == "convert.preview_ready")
+    {
+        controls.push(UiWidgetNode {
+            widget_id: String::from("convert.preview_ready"),
+            role: String::from("status"),
+            label: String::from("Conversion preview ready"),
+            command_id: None,
+            value: Some(json!(app.canvas_dialogs.convert_archetype.preview_ready)),
+            enabled: true,
+            disabled_reason: None,
+            bounds: None,
+        });
+    }
+}
+
+/// Convert CurveBook [`KeyModifiers`] to `egui::Modifiers`.
+#[must_use]
+pub const fn to_egui_modifiers(m: KeyModifiers) -> Modifiers {
+    Modifiers { alt: m.alt, ctrl: m.ctrl, shift: m.shift, mac_cmd: m.meta, command: m.meta || m.ctrl }
+}
+
+/// Convert CurveBook [`crate::interaction::PointerButton`] to `egui::PointerButton`.
+#[must_use]
+pub const fn to_egui_pointer_button(button: crate::interaction::PointerButton) -> egui::PointerButton {
+    match button {
+        crate::interaction::PointerButton::Primary => egui::PointerButton::Primary,
+        crate::interaction::PointerButton::Secondary => egui::PointerButton::Secondary,
+        crate::interaction::PointerButton::Middle => egui::PointerButton::Middle,
+    }
+}
+
+fn parse_pointer_button_str(button: &str) -> Result<egui::PointerButton, EngineError> {
+    match button.trim().to_ascii_lowercase().as_str() {
+        "primary" | "left" => Ok(egui::PointerButton::Primary),
+        "secondary" | "right" => Ok(egui::PointerButton::Secondary),
+        "middle" => Ok(egui::PointerButton::Middle),
+        other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported pointer button `{other}`"))),
+    }
+}
+
+/// Parse a symbolic key name into `egui::Key` (case-insensitive for named keys and ASCII letters).
+#[must_use]
+pub fn parse_egui_key(raw: &str) -> Option<Key> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "enter" | "return" => return Some(Key::Enter),
+        "escape" | "esc" => return Some(Key::Escape),
+        "tab" => return Some(Key::Tab),
+        "backspace" => return Some(Key::Backspace),
+        "delete" | "del" => return Some(Key::Delete),
+        "insert" | "ins" => return Some(Key::Insert),
+        "home" => return Some(Key::Home),
+        "end" => return Some(Key::End),
+        "pageup" | "page_up" => return Some(Key::PageUp),
+        "pagedown" | "page_down" => return Some(Key::PageDown),
+        "space" | " " => return Some(Key::Space),
+        "arrowup" | "arrow_up" | "up" => return Some(Key::ArrowUp),
+        "arrowdown" | "arrow_down" | "down" => return Some(Key::ArrowDown),
+        "arrowleft" | "arrow_left" | "left" => return Some(Key::ArrowLeft),
+        "arrowright" | "arrow_right" | "right" => return Some(Key::ArrowRight),
+        "plus" | "+" => return Some(Key::Plus),
+        "minus" | "-" => return Some(Key::Minus),
+        "equals" | "=" => return Some(Key::Equals),
+        "comma" | "," => return Some(Key::Comma),
+        "period" | "." => return Some(Key::Period),
+        "slash" | "/" => return Some(Key::Slash),
+        "backslash" | "\\" => return Some(Key::Backslash),
+        "semicolon" | ";" => return Some(Key::Semicolon),
+        "quote" | "'" => return Some(Key::Quote),
+        "openbracket" | "open_bracket" | "[" => return Some(Key::OpenBracket),
+        "closebracket" | "close_bracket" | "]" => return Some(Key::CloseBracket),
+        "f1" => return Some(Key::F1),
+        "f2" => return Some(Key::F2),
+        "f3" => return Some(Key::F3),
+        "f4" => return Some(Key::F4),
+        "f5" => return Some(Key::F5),
+        "f6" => return Some(Key::F6),
+        "f7" => return Some(Key::F7),
+        "f8" => return Some(Key::F8),
+        "f9" => return Some(Key::F9),
+        "f10" => return Some(Key::F10),
+        "f11" => return Some(Key::F11),
+        "f12" => return Some(Key::F12),
+        _ => {}
+    }
+    if trimmed.len() == 1
+        && let Some(ch) = trimmed.chars().next()
+    {
+        if ch.is_ascii_alphabetic() {
+            return match ch.to_ascii_uppercase() {
+                'A' => Some(Key::A),
+                'B' => Some(Key::B),
+                'C' => Some(Key::C),
+                'D' => Some(Key::D),
+                'E' => Some(Key::E),
+                'F' => Some(Key::F),
+                'G' => Some(Key::G),
+                'H' => Some(Key::H),
+                'I' => Some(Key::I),
+                'J' => Some(Key::J),
+                'K' => Some(Key::K),
+                'L' => Some(Key::L),
+                'M' => Some(Key::M),
+                'N' => Some(Key::N),
+                'O' => Some(Key::O),
+                'P' => Some(Key::P),
+                'Q' => Some(Key::Q),
+                'R' => Some(Key::R),
+                'S' => Some(Key::S),
+                'T' => Some(Key::T),
+                'U' => Some(Key::U),
+                'V' => Some(Key::V),
+                'W' => Some(Key::W),
+                'X' => Some(Key::X),
+                'Y' => Some(Key::Y),
+                'Z' => Some(Key::Z),
+                _ => None,
+            };
+        }
+        if ch.is_ascii_digit() {
+            return match ch {
+                '0' => Some(Key::Num0),
+                '1' => Some(Key::Num1),
+                '2' => Some(Key::Num2),
+                '3' => Some(Key::Num3),
+                '4' => Some(Key::Num4),
+                '5' => Some(Key::Num5),
+                '6' => Some(Key::Num6),
+                '7' => Some(Key::Num7),
+                '8' => Some(Key::Num8),
+                '9' => Some(Key::Num9),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+fn viewport_geom_for_app(app: &UiApp, metrics: ViewportMetrics) -> (f32, f32, f32) {
     #[allow(clippy::cast_possible_truncation)]
     let w_pt = metrics.logical_width.max(1.0) as f32;
     #[allow(clippy::cast_possible_truncation)]
@@ -610,11 +1061,56 @@ fn configure_offscreen_egui_ctx(app: &UiApp, metrics: ViewportMetrics) -> (egui:
     let ppp = metrics.clamped_scale_factor() as f32;
     let zoom = app.ui_scale();
     let native_ppp = (ppp / zoom).max(0.05);
+    (w_pt, h_pt, native_ppp)
+}
+
+fn configure_ctx_for_app(ctx: &egui::Context, app: &UiApp) {
+    let zoom = app.ui_scale();
     ctx.options_mut(|o| {
         o.zoom_with_keyboard = false;
         o.zoom_factor = zoom;
     });
+}
+
+fn configure_offscreen_egui_ctx(app: &UiApp, metrics: ViewportMetrics) -> (egui::Context, f32, f32, f32) {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    crate::egui_shell::fonts::install_default_egui_fonts_cached(&ctx);
+    configure_ctx_for_app(&ctx, app);
+    let (w_pt, h_pt, native_ppp) = viewport_geom_for_app(app, metrics);
     (ctx, w_pt, h_pt, native_ppp)
+}
+
+fn acquire_headless_egui_ctx(app: &UiApp, metrics: ViewportMetrics) -> (egui::Context, f32, f32, f32, f64) {
+    let (w_pt, h_pt, native_ppp) = viewport_geom_for_app(app, metrics);
+    let existing = app.headless_egui.inner.lock().ok().map(|mut guard| {
+        if let Some((ctx, t)) = guard.as_ref() {
+            (ctx.clone(), *t)
+        } else {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            crate::egui_shell::fonts::install_default_egui_fonts_cached(&ctx);
+            *guard = Some((ctx.clone(), 0.0));
+            (ctx, 0.0)
+        }
+    });
+    let (ctx, time_sec) = existing.unwrap_or_else(|| {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        crate::egui_shell::fonts::install_default_egui_fonts_cached(&ctx);
+        (ctx, 0.0)
+    });
+    let monotonic_t = time_sec.max(ctx.input(|i| i.time));
+    configure_ctx_for_app(&ctx, app);
+    (ctx, w_pt, h_pt, native_ppp, monotonic_t)
+}
+
+fn store_headless_egui_time(app: &UiApp, time_sec: f64) {
+    if let Ok(mut guard) = app.headless_egui.inner.lock()
+        && let Some((_, ref mut slot_t)) = *guard
+    {
+        *slot_t = time_sec;
+    }
 }
 
 fn step_egui_shell_with_events(
@@ -626,14 +1122,41 @@ fn step_egui_shell_with_events(
     time_sec: f64,
     initial_events: Vec<egui::Event>,
 ) -> Result<Vec<UiIntentOutcome>, EngineError> {
+    let (outcomes, _ak) = step_egui_shell_with_events_and_ak(ctx, app, views, meta, geom, time_sec, initial_events)?;
+    Ok(outcomes)
+}
+
+fn step_egui_shell_with_events_and_ak(
+    ctx: &egui::Context,
+    app: &mut UiApp,
+    views: &mut EguiShellViewState,
+    meta: &mut FrameInspectMeta,
+    geom: (f32, f32, f32),
+    time_sec: f64,
+    initial_events: Vec<egui::Event>,
+) -> Result<(Vec<UiIntentOutcome>, Option<egui::accesskit::TreeUpdate>), EngineError> {
+    let (outcomes, ak, _) = step_egui_shell_with_events_and_ak_repaint(ctx, app, views, meta, geom, time_sec, initial_events)?;
+    Ok((outcomes, ak))
+}
+
+fn step_egui_shell_with_events_and_ak_repaint(
+    ctx: &egui::Context,
+    app: &mut UiApp,
+    views: &mut EguiShellViewState,
+    meta: &mut FrameInspectMeta,
+    geom: (f32, f32, f32),
+    time_sec: f64,
+    initial_events: Vec<egui::Event>,
+) -> Result<(Vec<UiIntentOutcome>, Option<egui::accesskit::TreeUpdate>, bool), EngineError> {
     let (w_pt, h_pt, native_ppp) = geom;
     let mut pending_events = initial_events;
     let mut carried_intents = PendingUiIntents::default();
     for pass in 0..6_u32 {
         let events = std::mem::take(&mut pending_events);
+        let pass_time = time_sec + f64::from(pass) * 0.0005;
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(w_pt, h_pt))),
-            time: Some(time_sec),
+            time: Some(pass_time),
             predicted_dt: 1.0 / 60.0,
             focused: true,
             events,
@@ -649,15 +1172,79 @@ fn step_egui_shell_with_events(
             carried_intents.merge_pass(pass_intents);
             settled = !ui.ctx().will_discard();
         });
+        let immediate_repaint = output.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay == std::time::Duration::ZERO);
         output.textures_delta.clear();
         if (settled && !output.platform_output.requested_discard()) || pass == 5 {
             app.egui_views = views.clone();
+            let ak_update = output.platform_output.accesskit_update.take();
             let outcomes = carried_intents.commit_if_settled(app, false)?;
             *views = app.egui_views.clone();
-            return Ok(outcomes);
+            return Ok((outcomes, ak_update, immediate_repaint));
         }
     }
-    Ok(Vec::new())
+    Ok((Vec::new(), None, false))
+}
+
+/// Clear a stale non-grid textbox `app.focus_widget_id` after `egui` keyboard focus drops.
+pub fn clear_stale_non_grid_textbox_focus(app: &mut UiApp, meta: &FrameInspectMeta, ever_wanted_kb: bool, now_wants_kb: bool) {
+    if ever_wanted_kb
+        && !now_wants_kb
+        && let Some(fid) = app.focus_widget_id.as_deref()
+        && !fid.starts_with("grid.")
+        && meta.find_by_widget_id(fid).is_none_or(|e| matches!(e.role.as_str(), "textbox" | "input" | "textinput" | "searchbox" | "text"))
+    {
+        app.focus_widget_id = None;
+    }
+}
+
+fn step_headless_batches(
+    app: &mut UiApp,
+    metrics: ViewportMetrics,
+    batches: Vec<Vec<egui::Event>>,
+) -> Result<(FrameInspectMeta, Option<egui::accesskit::TreeUpdate>, Vec<UiIntentOutcome>), EngineError> {
+    app.sync_views();
+    let (ctx, w_pt, h_pt, native_ppp, mut time_sec) = acquire_headless_egui_ctx(app, metrics);
+    let geom = (w_pt, h_pt, native_ppp);
+    let mut views = app.egui_views.clone();
+    let mut meta = FrameInspectMeta::default();
+    let mut all_outcomes = Vec::new();
+    let mut last_ak = None;
+
+    let mut ever_wanted_kb = ctx.egui_wants_keyboard_input();
+
+    if time_sec == 0.0 {
+        time_sec = time_sec.max(ctx.input(|i| i.time)) + 1.0 / 60.0;
+        let _ = step_egui_shell_with_events_and_ak_repaint(&ctx, app, &mut views, &mut meta, geom, time_sec, Vec::new())?;
+        ever_wanted_kb |= ctx.egui_wants_keyboard_input();
+    }
+
+    for events in batches {
+        time_sec = time_sec.max(ctx.input(|i| i.time)) + 1.0 / 60.0;
+        let (outcomes, ak, _) = step_egui_shell_with_events_and_ak_repaint(&ctx, app, &mut views, &mut meta, geom, time_sec, events)?;
+        all_outcomes.extend(outcomes);
+        last_ak = ak;
+        ever_wanted_kb |= ctx.egui_wants_keyboard_input();
+    }
+
+    // Settle layout / modal auto_shrink / immediate repaint passes cleanly before returning `meta`.
+    for _ in 0..8_u32 {
+        time_sec = time_sec.max(ctx.input(|i| i.time)) + 1.0 / 60.0;
+        let (tail_outcomes, tail_ak, immediate_repaint) =
+            step_egui_shell_with_events_and_ak_repaint(&ctx, app, &mut views, &mut meta, geom, time_sec, Vec::new())?;
+        all_outcomes.extend(tail_outcomes);
+        if tail_ak.is_some() {
+            last_ak = tail_ak;
+        }
+        ever_wanted_kb |= ctx.egui_wants_keyboard_input();
+        if !immediate_repaint {
+            break;
+        }
+    }
+    clear_stale_non_grid_textbox_focus(app, &meta, ever_wanted_kb, ctx.egui_wants_keyboard_input());
+    app.egui_views = views;
+    let final_t = time_sec.max(ctx.input(|i| i.time));
+    store_headless_egui_time(app, final_t);
+    Ok((meta, last_ak, all_outcomes))
 }
 
 /// Drive a real `egui` pointer drag (`start_xy -> end_xy`) across settled shell frames,
@@ -676,13 +1263,7 @@ pub fn dispatch_egui_pointer_drag(
     let geom = (w_pt, h_pt, native_ppp);
     let mut views = app.egui_views.clone();
     let mut meta = FrameInspectMeta::default();
-    let egui_mods = Modifiers {
-        alt: modifiers.alt,
-        ctrl: modifiers.ctrl,
-        shift: modifiers.shift,
-        mac_cmd: modifiers.meta,
-        command: modifiers.meta || modifiers.ctrl,
-    };
+    let egui_mods = to_egui_modifiers(modifiers);
 
     #[allow(clippy::cast_possible_truncation)]
     let start = Pos2::new(start_xy[0] as f32, start_xy[1] as f32);
@@ -705,9 +1286,10 @@ pub fn dispatch_egui_pointer_drag(
         t,
         vec![egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui_mods }],
     )?;
-    if dist > 8.0 {
+    if dist > 6.1 {
         t += 0.02;
-        let trigger = start + delta.normalized() * 6.0;
+        let step = (dist - 0.1).min(6.2);
+        let trigger = start + delta.normalized() * step;
         let _ = step_egui_shell_with_events(&ctx, app, &mut views, &mut meta, geom, t, vec![egui::Event::PointerMoved(trigger)])?;
     }
     t += 0.02;
@@ -739,17 +1321,30 @@ pub fn dispatch_egui_pointer_drag(
     Ok(None)
 }
 
-/// Run a settled offscreen `egui` frame (reusing cached font definitions) and construct a canonical
-/// [`UiTreeSnapshot`] (`ui.inspect`) directly from settled `FrameInspectMeta` and AccessKit state.
+/// Run a settled offscreen `egui` frame (reusing cached font definitions and persistent headless
+/// context when initialized) and construct a canonical [`UiTreeSnapshot`] (`ui.inspect`).
 #[must_use]
 pub fn inspect_live_egui_snapshot(app: &UiApp, metrics: ViewportMetrics, scope: Option<&str>, include_bounds: bool) -> UiTreeSnapshot {
-    let (ctx, w_pt, h_pt, native_ppp) = configure_offscreen_egui_ctx(app, metrics);
+    let existing_ctx = app.headless_egui.inner.lock().ok().and_then(|g| g.as_ref().map(|(c, t)| (c.clone(), *t)));
+    let (ctx, w_pt, h_pt, native_ppp, time_sec) = match existing_ctx {
+        Some((ctx, t)) => {
+            configure_ctx_for_app(&ctx, app);
+            let (w_pt, h_pt, native_ppp) = viewport_geom_for_app(app, metrics);
+            (ctx, w_pt, h_pt, native_ppp, t)
+        }
+        None => {
+            let (ctx, w_pt, h_pt, native_ppp) = configure_offscreen_egui_ctx(app, metrics);
+            (ctx, w_pt, h_pt, native_ppp, 0.0)
+        }
+    };
 
     let mut views = app.egui_views.clone();
     let mut meta = FrameInspectMeta::default();
+    let mut last_ak = None;
     for _pass in 0..8_u32 {
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(w_pt, h_pt))),
+            time: Some(time_sec),
             viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(native_ppp), ..Default::default() })]
                 .into_iter()
                 .collect(),
@@ -762,18 +1357,182 @@ pub fn inspect_live_egui_snapshot(app: &UiApp, metrics: ViewportMetrics, scope: 
             settled = !ui.ctx().will_discard();
         });
         output.textures_delta.clear();
+        last_ak = output.platform_output.accesskit_update.take();
         if settled {
-            return build_ui_tree_snapshot_from_egui(app, &meta, output.platform_output.accesskit_update.as_ref(), scope, include_bounds, metrics);
+            break;
         }
     }
-    inspect_semantic_snapshot(app, metrics, scope, include_bounds)
+    build_ui_tree_snapshot_from_egui_with_views(app, &views, &meta, last_ak.as_ref(), scope, include_bounds, metrics)
+}
+
+fn navigator_section_slug(section: curvebook_doc::SheetSection) -> &'static str {
+    match section {
+        curvebook_doc::SheetSection::Data => "data",
+        curvebook_doc::SheetSection::Info => "info",
+        curvebook_doc::SheetSection::Analyses => "results",
+        curvebook_doc::SheetSection::Graphs => "graphs",
+        curvebook_doc::SheetSection::Layouts => "layouts",
+    }
+}
+
+fn build_menus_snapshot(app: &UiApp, meta: &FrameInspectMeta, include_bounds: bool) -> Vec<UiMenuSnapshot> {
+    menu_bar_tooltips(app)
+        .into_iter()
+        .map(|sec| {
+            let bounds = if include_bounds {
+                meta.find_by_widget_id(sec.menu_key).and_then(|e| clipped_rect_to_bounds_px(e.clipped_rect, meta.scale_factor))
+            } else {
+                None
+            };
+            let items = sec
+                .items
+                .into_iter()
+                .map(|item| {
+                    let widget_id = format!("menu.{}", item.command_id);
+                    let item_bounds = if include_bounds {
+                        meta.find_by_widget_id(&widget_id).and_then(|e| clipped_rect_to_bounds_px(e.clipped_rect, meta.scale_factor))
+                    } else {
+                        None
+                    };
+                    UiWidgetNode {
+                        widget_id,
+                        role: String::from("menuitem"),
+                        label: item.localized_label.to_owned(),
+                        command_id: Some(item.command_id.to_owned()),
+                        value: None,
+                        enabled: item.enabled,
+                        disabled_reason: (!item.enabled).then_some(String::from("unavailable")),
+                        bounds: item_bounds,
+                    }
+                })
+                .collect();
+            UiMenuSnapshot { menu_key: sec.menu_key.to_owned(), title: sec.title.to_owned(), bounds, items }
+        })
+        .collect()
+}
+
+fn build_toolbar_fallback(app: &UiApp) -> Vec<UiWidgetNode> {
+    toolbar_tooltips(app)
+        .into_iter()
+        .map(|entry| UiWidgetNode {
+            widget_id: entry.button.id.to_owned(),
+            role: String::from("button"),
+            label: entry.caption.to_owned(),
+            command_id: Some(entry.button.command_id.to_owned()),
+            value: None,
+            enabled: entry.tooltip.enabled,
+            disabled_reason: (!entry.tooltip.enabled).then_some(String::from("unavailable")),
+            bounds: None,
+        })
+        .collect()
+}
+
+fn build_navigator_snapshot(app: &UiApp, meta: &FrameInspectMeta, include_bounds: bool) -> Vec<UiNavigatorSheetNode> {
+    let mut out = Vec::new();
+    for folder in &app.nav.folders {
+        let sec_slug = navigator_section_slug(folder.section);
+        for entry in &folder.entries {
+            let wid = format!("nav.sheet.{}", entry.sheet_id.as_str());
+            let bounds = if include_bounds {
+                meta.find_by_widget_id(&wid).and_then(|e| clipped_rect_to_bounds_px(e.clipped_rect, meta.scale_factor))
+            } else {
+                None
+            };
+            out.push(UiNavigatorSheetNode {
+                widget_id: wid,
+                sheet_id: entry.sheet_id.as_str().to_owned(),
+                section: sec_slug.to_owned(),
+                title: entry.title.clone(),
+                selected: entry.is_active,
+                role: String::from("treeitem"),
+                label: entry.title.clone(),
+                enabled: true,
+                bounds,
+            });
+        }
+    }
+    out
+}
+
+fn build_canvas_snapshot(
+    app: &UiApp,
+    cv: &crate::egui_shell::canvas_view::CanvasViewEguiState,
+    meta: &FrameInspectMeta,
+    mut nodes: Vec<UiWidgetNode>,
+    include_bounds: bool,
+) -> Option<Vec<UiWidgetNode>> {
+    let doc = app.document();
+    if let Some(active_id) = doc.active_sheet_id.as_ref()
+        && let Some(gs) = doc.graph_sheet(active_id)
+        && let Ok(scene) = app.session().render_sheet_scene(&gs.id)
+    {
+        let paper_and_scene =
+            cv.last_active_paper_sheet_id.as_ref().filter(|id| *id == &gs.id).and_then(|_| cv.last_paper_rect_pt.zip(cv.last_scene_size_pt));
+        for pt in scene.plotted_points.iter().take(500) {
+            let wid = format!("canvas.point.{}.{}", pt.source_cell.col, pt.source_cell.row);
+            if nodes.iter().any(|n| n.widget_id == wid) {
+                continue;
+            }
+            let bounds = if include_bounds
+                && let Some((paper_rect, [sw, sh])) = paper_and_scene
+                && sw > 0.0
+                && sh > 0.0
+            {
+                let sx = f64::from(paper_rect.left()) + (pt.center_pt.x / sw) * f64::from(paper_rect.width());
+                let sy = f64::from(paper_rect.top()) + (pt.center_pt.y / sh) * f64::from(paper_rect.height());
+                let r_pt = (pt.radius_pt / sw * f64::from(paper_rect.width())).max(4.0);
+                #[allow(clippy::cast_possible_truncation)]
+                let rect = Rect::from_center_size(Pos2::new(sx as f32, sy as f32), Vec2::splat((r_pt * 2.0) as f32));
+                clipped_rect_to_bounds_px(rect, meta.scale_factor)
+            } else {
+                None
+            };
+            nodes.push(UiWidgetNode {
+                widget_id: wid,
+                role: String::from("point"),
+                label: pt.series_label.clone(),
+                command_id: Some(String::from("ui.brush.point")),
+                value: Some(json!({
+                    "sheet_id": pt.source_cell.sheet_id.as_str(),
+                    "row": pt.source_cell.row,
+                    "col": pt.source_cell.col,
+                    "subcol": pt.source_cell.subcol,
+                    "summary": pt.value_summary,
+                })),
+                enabled: true,
+                disabled_reason: None,
+                bounds,
+            });
+        }
+    }
+    if nodes.is_empty() { None } else { Some(nodes) }
+}
+
+fn build_grid_selection_snapshot(app: &UiApp) -> GridSelectionSnapshot {
+    let doc = app.document();
+    let active_ds = doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id));
+    let selected_coords: Vec<GridCoordSnapshot> = active_ds
+        .map(|ds| app.grid.all_selected_coords(ds).into_iter().take(MAX_INSPECT_SELECTED_COORDS).map(GridCoordSnapshot::from).collect())
+        .unwrap_or_default();
+    let selected_cells_count = if !app.grid.selected_coords.is_empty() {
+        app.grid.selected_coords.len()
+    } else if let (Some(ds), Some(a), Some(b)) = (active_ds, app.grid.tool.anchor, app.grid.tool.active) {
+        selection_cell_count(ds, a, b)
+    } else {
+        0
+    };
+    GridSelectionSnapshot {
+        active_cell: app.grid.tool.active.map(GridCoordSnapshot::from),
+        anchor_cell: app.grid.tool.anchor.map(GridCoordSnapshot::from),
+        selected_rows: app.grid.selected_rows.iter().copied().take(MAX_INSPECT_SELECTED_COORDS).collect(),
+        selected_coords,
+        selected_cells_count,
+        quick_stats: app.grid.quick_stats,
+    }
 }
 
 /// Build a [`UiTreeSnapshot`] (`ui.inspect`) directly from settled `egui` AccessKit output and
 /// [`FrameInspectMeta`].
-///
-/// Prefers settled `egui` `FrameInspectMeta` + AccessKit entries when non-empty for rendered scopes
-/// (`toolbar`, `tabs`, `grid_cells`, `dialog`), complementing them with semantic baseline context.
 #[must_use]
 pub fn build_ui_tree_snapshot_from_egui(
     app: &UiApp,
@@ -783,12 +1542,73 @@ pub fn build_ui_tree_snapshot_from_egui(
     include_bounds: bool,
     metrics: ViewportMetrics,
 ) -> UiTreeSnapshot {
-    let baseline = inspect_semantic_snapshot(app, metrics, scope, include_bounds);
+    build_ui_tree_snapshot_from_egui_with_views(app, &app.egui_views, meta, accesskit_update, scope, include_bounds, metrics)
+}
+
+/// Input bundle for building a [`UiTreeSnapshot`] from a live settled `egui` window frame.
+pub struct LiveInspectSnapshotInput<'a> {
+    pub app: &'a UiApp,
+    pub views: &'a EguiShellViewState,
+    pub meta: &'a FrameInspectMeta,
+    pub focused_egui_id: Option<egui::Id>,
+    pub host_close_dialog_open: bool,
+    pub scope: Option<&'a str>,
+    pub include_bounds: bool,
+    pub metrics: ViewportMetrics,
+}
+
+/// Build a [`UiTreeSnapshot`] (`ui.inspect`) directly from a live settled window's
+/// [`FrameInspectMeta`], [`EguiShellViewState`], and active `egui::Context` focus.
+#[must_use]
+pub fn build_live_ui_tree_snapshot(input: LiveInspectSnapshotInput<'_>) -> UiTreeSnapshot {
+    build_ui_tree_snapshot_inner(
+        input.app,
+        input.views,
+        input.meta,
+        None,
+        input.focused_egui_id,
+        input.host_close_dialog_open,
+        input.scope,
+        input.include_bounds,
+    )
+}
+
+/// Build a [`UiTreeSnapshot`] (`ui.inspect`) using the freshly rendered [`EguiShellViewState`]
+/// alongside [`FrameInspectMeta`] and AccessKit output.
+#[must_use]
+pub fn build_ui_tree_snapshot_from_egui_with_views(
+    app: &UiApp,
+    views: &EguiShellViewState,
+    meta: &FrameInspectMeta,
+    accesskit_update: Option<&egui::accesskit::TreeUpdate>,
+    scope: Option<&str>,
+    include_bounds: bool,
+    _metrics: ViewportMetrics,
+) -> UiTreeSnapshot {
+    build_ui_tree_snapshot_inner(app, views, meta, accesskit_update, None, false, scope, include_bounds)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_ui_tree_snapshot_inner(
+    app: &UiApp,
+    views: &EguiShellViewState,
+    meta: &FrameInspectMeta,
+    accesskit_update: Option<&egui::accesskit::TreeUpdate>,
+    live_focused_egui_id: Option<egui::Id>,
+    host_close_dialog_open: bool,
+    scope: Option<&str>,
+    include_bounds: bool,
+) -> UiTreeSnapshot {
+    let doc = app.document();
     let ak = AccessKitLookup::from_update(accesskit_update);
 
-    let mut focus_widget_id = baseline.focus_widget_id.clone();
+    let mut focus_widget_id = app.focus_widget_id.clone();
     if let Some(focused_ak_id) = ak.focus
         && let Some(entry) = meta.find_by_accesskit_id(focused_ak_id)
+    {
+        focus_widget_id = Some(entry.widget_id.clone());
+    } else if let Some(focused_egui_id) = live_focused_egui_id
+        && let Some(entry) = meta.find_by_egui_id(focused_egui_id)
     {
         focus_widget_id = Some(entry.widget_id.clone());
     }
@@ -803,23 +1623,36 @@ pub fn build_ui_tree_snapshot_from_egui(
 
     let toolbar = if scope_wants(scope, "toolbar") {
         let egui_nodes = collect_scope("toolbar");
-        if egui_nodes.is_empty() { baseline.toolbar.clone() } else { Some(egui_nodes) }
+        if egui_nodes.is_empty() { Some(build_toolbar_fallback(app)) } else { Some(egui_nodes) }
     } else {
         None
     };
 
-    let dialog = if scope_wants(scope, "dialog") || scope_wants(scope, "tabs") {
-        build_dialog_snapshot_from_meta(app, meta, &ak, metrics, include_bounds, baseline.dialog.as_ref())
-    } else {
-        None
-    };
+    let dialog = build_dialog_snapshot_from_meta(app, views, meta, &ak, include_bounds, host_close_dialog_open);
+    let active_dialog = dialog.as_ref().map_or_else(|| String::from("none"), |d| d.dialog_kind.clone());
 
     let tabs = if scope_wants(scope, "tabs") {
         let mut combined = collect_scope("tabs");
-        if let Some(ref base_tabs) = baseline.tabs {
-            for bt in base_tabs {
-                if bt.widget_id.starts_with("result.tab.") && !combined.iter().any(|n| n.widget_id == bt.widget_id) {
-                    combined.push(bt.clone());
+        if let Some(rs) = doc.active_sheet_id.as_ref().and_then(|id| doc.result_sheet(id)) {
+            let active_idx = if rs.tabs.is_empty() { 0 } else { app.canvas_dialogs.result_view.active_tab_index.min(rs.tabs.len() - 1) };
+            for (idx, tab) in rs.tabs.iter().enumerate() {
+                let wid = format!("result.tab.{}", tab.id);
+                if !combined.iter().any(|n| n.widget_id == wid) {
+                    let bounds = if include_bounds {
+                        meta.find_by_widget_id(&wid).and_then(|e| clipped_rect_to_bounds_px(e.clipped_rect, meta.scale_factor))
+                    } else {
+                        None
+                    };
+                    combined.push(UiWidgetNode {
+                        widget_id: wid,
+                        role: String::from("tab"),
+                        label: tab.title.clone(),
+                        command_id: None,
+                        value: Some(json!(idx == active_idx)),
+                        enabled: true,
+                        disabled_reason: None,
+                        bounds,
+                    });
                 }
             }
         }
@@ -830,70 +1663,100 @@ pub fn build_ui_tree_snapshot_from_egui(
                 }
             }
         }
-        if combined.is_empty() { baseline.tabs.clone() } else { Some(combined) }
-    } else {
-        None
-    };
-
-    let grid_cells = scope_wants(scope, "grid")
-        .then(|| build_egui_grid_cells_snapshot(meta, include_bounds, baseline.grid_cells, collect_scope("grid")))
-        .flatten();
-
-    let menus: Option<Vec<UiMenuSnapshot>> = if scope_wants(scope, "menus") { baseline.menus.clone() } else { None };
-    let navigator_sheets: Option<Vec<UiNavigatorSheetNode>> = if scope_wants(scope, "navigator") {
-        let egui_nav = collect_scope("navigator");
-        match baseline.navigator_sheets.clone() {
-            Some(mut nodes) if include_bounds && !egui_nav.is_empty() => {
-                for node in &mut nodes {
-                    if let Some(hit) = egui_nav.iter().find(|n| n.widget_id == node.widget_id)
-                        && hit.bounds.is_some()
-                    {
-                        node.bounds = hit.bounds;
-                    }
-                }
-                Some(nodes)
-            }
-            other => other,
-        }
-    } else {
-        None
-    };
-    let grid_selection: GridSelectionSnapshot = baseline.grid_selection;
-    let dialog_out = if scope_wants(scope, "dialog") { dialog } else { None };
-
-    let active_dialog = dialog_out.as_ref().map_or(baseline.active_dialog, |d| d.dialog_kind.clone());
-
-    let canvas_elements = if scope_wants(scope, "canvas") {
-        let mut combined = collect_scope("canvas");
-        if let Some(base_canvas) = baseline.canvas_elements {
-            for elem in base_canvas {
-                if !combined.iter().any(|n| n.widget_id == elem.widget_id) {
-                    combined.push(elem);
-                }
-            }
-        }
         if combined.is_empty() { None } else { Some(combined) }
     } else {
         None
     };
 
+    let dialog_out = if scope_wants(scope, "dialog") { dialog } else { None };
+
+    let grid_cells = scope_wants(scope, "grid").then(|| build_egui_grid_cells_snapshot(app, meta, include_bounds, collect_scope("grid"))).flatten();
+
+    let menus: Option<Vec<UiMenuSnapshot>> = scope_wants(scope, "menus").then(|| build_menus_snapshot(app, meta, include_bounds));
+    let navigator_sheets: Option<Vec<UiNavigatorSheetNode>> =
+        scope_wants(scope, "navigator").then(|| build_navigator_snapshot(app, meta, include_bounds));
+
+    let canvas_elements = if scope_wants(scope, "canvas") {
+        build_canvas_snapshot(app, &views.canvas_view, meta, collect_scope("canvas"), include_bounds)
+    } else {
+        None
+    };
+
+    let active_sheet_id = doc.active_sheet_id.as_ref().map(|id| id.as_str().to_owned());
+    let active_sheet_kind = doc.active_sheet_id.as_ref().and_then(|id| {
+        if doc.data_sheet(id).is_some() {
+            Some(String::from("data"))
+        } else if doc.info_sheet(id).is_some() {
+            Some(String::from("info"))
+        } else if doc.result_sheet(id).is_some() {
+            Some(String::from("result"))
+        } else if doc.graph_sheet(id).is_some() {
+            Some(String::from("graph"))
+        } else if doc.layout_sheet(id).is_some() {
+            Some(String::from("layout"))
+        } else {
+            None
+        }
+    });
+
+    let egui_or_ak_focused =
+        ak.focus.and_then(|id| meta.find_by_accesskit_id(id)).is_some() || live_focused_egui_id.and_then(|id| meta.find_by_egui_id(id)).is_some();
+    if !egui_or_ak_focused
+        && focus_widget_id.as_deref().is_some_and(|wid| wid.starts_with("grid."))
+        && (active_dialog != "none" || active_sheet_kind.as_deref() != Some("data"))
+    {
+        focus_widget_id = None;
+    }
+
+    let cursor_readout = if matches!(active_sheet_kind.as_deref(), Some("graph" | "layout")) { app.interaction.last_logical_pos } else { None };
+
+    let brushed_points = app
+        .brushed_points
+        .iter()
+        .map(|p| BrushedPointSnapshot { sheet_id: p.sheet_id.as_str().to_owned(), row: p.row, col: p.col, subcol: p.subcol })
+        .collect();
+
+    let result_diagnostic_banner = doc.active_sheet_id.as_ref().and_then(|id| doc.result_sheet(id)).and_then(AssumptionDiagnosticBanner::from_result);
+    let import_warnings_open = app.import_warnings.panel_open || app.canvas_dialogs.active_dialog == ActiveDialog::ImportWarnings;
+    let import_warnings = if !app.import_warnings.warnings.is_empty() || import_warnings_open {
+        Some(crate::inspect::ImportWarningsSnapshot {
+            open: import_warnings_open,
+            command_id: app.import_warnings.command_id.clone(),
+            source_label: app.import_warnings.source_label.clone(),
+            warnings: app.import_warnings.warnings.clone(),
+        })
+    } else {
+        None
+    };
+
     UiTreeSnapshot {
-        active_sheet_id: baseline.active_sheet_id,
-        active_sheet_kind: baseline.active_sheet_kind,
+        active_sheet_id,
+        active_sheet_kind,
         active_dialog,
         focus_widget_id,
-        zoom: baseline.zoom,
-        gui_only: baseline.gui_only,
-        undo_depth: baseline.undo_depth,
-        redo_depth: baseline.redo_depth,
-        dirty: baseline.dirty,
-        cursor_readout: baseline.cursor_readout,
-        grid_selection,
-        brushed_points: baseline.brushed_points,
-        status_banner: baseline.status_banner,
-        context_menu_target: baseline.context_menu_target,
-        result_diagnostic_banner: baseline.result_diagnostic_banner,
-        import_warnings: baseline.import_warnings,
+        zoom: app.canvas_dialogs.effective_zoom_and_pan().0,
+        gui_only: app.is_gui_only(),
+        undo_depth: app.session().undo_depth(),
+        redo_depth: app.session().redo_depth(),
+        dirty: app.session().is_dirty(),
+        cursor_readout,
+        grid_selection: if scope_wants(scope, "grid") {
+            build_grid_selection_snapshot(app)
+        } else {
+            GridSelectionSnapshot {
+                active_cell: None,
+                anchor_cell: None,
+                selected_rows: Vec::new(),
+                selected_coords: Vec::new(),
+                selected_cells_count: 0,
+                quick_stats: None,
+            }
+        },
+        brushed_points,
+        status_banner: app.canvas_dialogs.status_banner.clone(),
+        context_menu_target: app.interaction.context_menu_target.clone(),
+        result_diagnostic_banner,
+        import_warnings,
         menus,
         toolbar,
         navigator_sheets,
@@ -905,29 +1768,1686 @@ pub fn build_ui_tree_snapshot_from_egui(
 }
 
 fn build_egui_grid_cells_snapshot(
+    app: &UiApp,
     meta: &FrameInspectMeta,
     include_bounds: bool,
-    baseline_grid: Option<Vec<UiWidgetNode>>,
     mut egui_grid: Vec<UiWidgetNode>,
 ) -> Option<Vec<UiWidgetNode>> {
-    let has_base_grid = baseline_grid.is_some();
-    if let Some(base_grid) = baseline_grid {
-        for mut node in base_grid {
-            if !egui_grid.iter().any(|n| n.widget_id == node.widget_id) {
-                if include_bounds
-                    && let Some(col_str) = node.widget_id.strip_prefix("formula_bar.open_col.")
-                    && let Ok(col_idx) = col_str.parse::<usize>()
-                {
-                    let badge_id = format!("mv_formula.role_badge.{col_idx}");
-                    if let Some(badge) = meta.find_by_widget_id(&badge_id) {
-                        node.bounds = clipped_rect_to_bounds_px(badge.clipped_rect, meta.scale_factor);
-                    }
-                }
-                egui_grid.push(node);
+    let ds = app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id))?;
+
+    // Alias `grid.xcell.{r}.{s}` -> `grid.x.{r}.{s}` when absent so legacy callers resolve bounds.
+    let mut x_aliases = Vec::new();
+    for node in &egui_grid {
+        if let Some(rest) = node.widget_id.strip_prefix("grid.xcell.") {
+            let alias_id = format!("grid.x.{rest}");
+            if !egui_grid.iter().any(|n| n.widget_id == alias_id) {
+                let mut alias = node.clone();
+                alias.widget_id = alias_id;
+                x_aliases.push(alias);
             }
         }
     }
-    if egui_grid.is_empty() { has_base_grid.then(Vec::new) } else { Some(egui_grid) }
+    egui_grid.extend(x_aliases);
+
+    if let TableArchetype::MultipleVariables(mv) = &ds.archetype {
+        for (col_idx, var) in mv.variables.iter().enumerate() {
+            let wid = format!("formula_bar.open_col.{col_idx}");
+            if !egui_grid.iter().any(|n| n.widget_id == wid) {
+                let badge_id = format!("mv_formula.role_badge.{col_idx}");
+                let bounds = if include_bounds {
+                    meta.find_by_widget_id(&badge_id).and_then(|e| clipped_rect_to_bounds_px(e.clipped_rect, meta.scale_factor))
+                } else {
+                    None
+                };
+                egui_grid.push(UiWidgetNode {
+                    widget_id: wid,
+                    role: String::from("button"),
+                    label: format!("Formula Bar ({})", var.title),
+                    command_id: Some(String::from("ui.table.openFormulaBar")),
+                    value: None,
+                    enabled: !ds.frozen,
+                    disabled_reason: ds.frozen.then_some(String::from("sheet is frozen")),
+                    bounds,
+                });
+            }
+        }
+    }
+
+    if app.grid.formula_bar.active || matches!(ds.archetype, TableArchetype::MultipleVariables(_)) {
+        let active = app.grid.formula_bar.active;
+        let fb_nodes = [
+            (
+                "formula_bar.input",
+                "textbox",
+                "Formula Bar Input",
+                Some(json!(app.grid.formula_bar.input)),
+                !ds.frozen && active,
+                if ds.frozen {
+                    Some(String::from("sheet is frozen"))
+                } else if !active {
+                    Some(String::from("Formula bar is inactive"))
+                } else {
+                    None
+                },
+            ),
+            (
+                "formula_bar.commit",
+                "button",
+                "Apply Formula",
+                None,
+                !ds.frozen && active && app.grid.formula_bar.is_valid,
+                if ds.frozen {
+                    Some(String::from("sheet is frozen"))
+                } else if !active {
+                    Some(String::from("Formula bar is inactive"))
+                } else if !app.grid.formula_bar.is_valid {
+                    app.grid.formula_bar.parse_error.clone().or_else(|| Some(String::from("Formula is invalid")))
+                } else {
+                    None
+                },
+            ),
+            (
+                "formula_bar.cancel",
+                "button",
+                "Cancel Formula",
+                None,
+                !ds.frozen && active,
+                if ds.frozen {
+                    Some(String::from("sheet is frozen"))
+                } else if !active {
+                    Some(String::from("Formula bar is inactive"))
+                } else {
+                    None
+                },
+            ),
+        ];
+        for (wid, role, label, val, enabled, disabled_reason) in fb_nodes {
+            if let Some(existing) = egui_grid.iter_mut().find(|n| n.widget_id == wid) {
+                existing.enabled = enabled;
+                existing.disabled_reason = disabled_reason;
+            } else {
+                let bounds = if include_bounds {
+                    meta.find_by_widget_id(wid).and_then(|e| clipped_rect_to_bounds_px(e.clipped_rect, meta.scale_factor))
+                } else {
+                    None
+                };
+                egui_grid.push(UiWidgetNode {
+                    widget_id: String::from(wid),
+                    role: String::from(role),
+                    label: String::from(label),
+                    command_id: None,
+                    value: val,
+                    enabled,
+                    disabled_reason,
+                    bounds,
+                });
+            }
+        }
+    }
+
+    Some(egui_grid)
+}
+
+fn bad_input_err(msg: impl Into<String>) -> EngineError {
+    EngineError::with_code(ErrorCode::BadInput, msg)
+}
+
+fn parse_viewport_metrics_from_params(params: &Value) -> Result<ViewportMetrics, EngineError> {
+    let vp_obj = params.get("viewport").or_else(|| params.get("metrics")).unwrap_or(params);
+    let w = opt_finite_f64_param(vp_obj, &["logical_width", "width", "width_pt"]).map_err(bad_input_err)?.unwrap_or(1024.0);
+    let h = opt_finite_f64_param(vp_obj, &["logical_height", "height", "height_pt"]).map_err(bad_input_err)?.unwrap_or(640.0);
+    if !(128.0..=16384.0).contains(&w) || !(128.0..=16384.0).contains(&h) {
+        return Err(bad_input_err(format!("viewport dimensions ({w}x{h}) out of allowed bounds [128, 16384]")));
+    }
+    let scale = opt_finite_f64_param(vp_obj, &["scale_factor", "scale"])
+        .or_else(|_| opt_finite_f64_param(params, &["scale_factor", "scale"]))
+        .map_err(bad_input_err)?
+        .unwrap_or(1.0);
+    Ok(ViewportMetrics::new(w, h, scale))
+}
+
+fn parse_modifiers_from_params(params: &Value) -> Result<KeyModifiers, EngineError> {
+    let src = params.get("modifiers").unwrap_or(params);
+    Ok(KeyModifiers {
+        shift: opt_bool_param(src, &["shift"]).map_err(bad_input_err)?.unwrap_or(false),
+        ctrl: opt_bool_param(src, &["ctrl"]).map_err(bad_input_err)?.unwrap_or(false),
+        alt: opt_bool_param(src, &["alt"]).map_err(bad_input_err)?.unwrap_or(false),
+        meta: opt_bool_param(src, &["meta", "cmd", "command"]).map_err(bad_input_err)?.unwrap_or(false),
+    })
+}
+
+/// Resolve a canonical or legacy/aliased `widget_id` inside [`FrameInspectMeta`].
+#[must_use]
+pub fn resolve_widget_rect_in_meta<'a>(meta: &'a FrameInspectMeta, wid: &str) -> Option<&'a FrameInspectNodeMeta> {
+    if let Some(hit) = meta.find_by_widget_id(wid) {
+        return Some(hit);
+    }
+    if let Some(rest) = wid.strip_prefix("grid.x.") {
+        return meta.find_by_widget_id(&format!("grid.xcell.{rest}"));
+    }
+    if let Some(rest) = wid.strip_prefix("dialog.button.") {
+        let modal_wid = format!("modal.{rest}");
+        if let Some(hit) = meta.find_by_widget_id(&modal_wid) {
+            return Some(hit);
+        }
+        if rest == "ok" {
+            return meta
+                .find_by_widget_id("graph_type.apply")
+                .or_else(|| meta.find_by_widget_id("import.commit"))
+                .or_else(|| meta.find_by_widget_id("transform.commit"))
+                .or_else(|| meta.find_by_widget_id("nav.delete_confirm.confirm"));
+        }
+        if rest == "cancel" {
+            return meta.find_by_widget_id("nav.delete_confirm.cancel");
+        }
+        if rest == "create" {
+            return meta.find_by_widget_id("modal.create").or_else(|| meta.find_by_widget_id("modal.ok"));
+        }
+    }
+    if let Some(col_str) = wid.strip_prefix("formula_bar.open_col.") {
+        return meta.find_by_widget_id(&format!("mv_formula.role_badge.{col_str}"));
+    }
+    if wid == "custom_title" {
+        return meta.find_by_widget_id("edit.custom_title");
+    }
+    None
+}
+
+/// Resolve the center point (logical `pt`) and enabled state of `wid` inside [`FrameInspectMeta`].
+///
+/// # Errors
+/// Returns [`EngineError`] with `ErrorCode::NotFound` if `wid` is absent.
+pub fn resolve_widget_center_in_meta(
+    app: &UiApp,
+    meta: &FrameInspectMeta,
+    metrics: ViewportMetrics,
+    wid: &str,
+) -> Result<(Pos2, bool, Option<String>), EngineError> {
+    resolve_widget_center_pt(app, meta, metrics, wid)
+}
+
+fn resolve_widget_center_pt(
+    app: &UiApp,
+    meta: &FrameInspectMeta,
+    metrics: ViewportMetrics,
+    wid: &str,
+) -> Result<(Pos2, bool, Option<String>), EngineError> {
+    if let Some(entry) = resolve_widget_rect_in_meta(meta, wid) {
+        return Ok((entry.clipped_rect.center(), entry.enabled, entry.disabled_reason.clone()));
+    }
+    if wid.starts_with("canvas.point.") {
+        let snap = build_ui_tree_snapshot_from_egui(app, meta, None, Some("canvas"), true, metrics);
+        if let Some(node) = snap.find_widget(wid)
+            && let Some(bounds) = node.bounds
+        {
+            let scale = meta.scale_factor.max(0.05);
+            #[allow(clippy::cast_possible_truncation)]
+            let cx = ((bounds[0] + bounds[2] * 0.5) as f32) / scale;
+            #[allow(clippy::cast_possible_truncation)]
+            let cy = ((bounds[1] + bounds[3] * 0.5) as f32) / scale;
+            return Ok((Pos2::new(cx, cy), node.enabled, node.disabled_reason));
+        }
+    }
+    Err(EngineError::with_code(ErrorCode::NotFound, format!("widget `{wid}` not found in current UI tree")))
+}
+
+/// Build synthetic `egui` pointer click event batches at `pos`.
+#[must_use]
+pub fn click_pos_batches(pos: Pos2, button: egui::PointerButton, mods: Modifiers) -> Vec<Vec<egui::Event>> {
+    let mut batches = vec![
+        vec![egui::Event::ModifiersChanged(mods), egui::Event::PointerMoved(pos)],
+        vec![egui::Event::ModifiersChanged(mods), egui::Event::PointerButton { pos, button, pressed: true, modifiers: mods }],
+        vec![egui::Event::ModifiersChanged(mods), egui::Event::PointerButton { pos, button, pressed: false, modifiers: mods }],
+    ];
+    if !mods.is_none() {
+        batches.push(vec![egui::Event::ModifiersChanged(Modifiers::NONE)]);
+    }
+    batches
+}
+
+fn drag_pos_batches(start: Pos2, end: Pos2, button: egui::PointerButton, mods: Modifiers) -> Vec<Vec<egui::Event>> {
+    let delta = end - start;
+    let dist = delta.length();
+    let mut batches = vec![
+        vec![egui::Event::ModifiersChanged(mods), egui::Event::PointerMoved(start)],
+        vec![egui::Event::ModifiersChanged(mods), egui::Event::PointerButton { pos: start, button, pressed: true, modifiers: mods }],
+    ];
+    if dist > 6.1 {
+        let step = (dist - 0.1).min(6.2);
+        let trigger = start + delta.normalized() * step;
+        batches.push(vec![egui::Event::ModifiersChanged(mods), egui::Event::PointerMoved(trigger)]);
+    }
+    batches.push(vec![egui::Event::ModifiersChanged(mods), egui::Event::PointerMoved(end)]);
+    batches.push(vec![egui::Event::ModifiersChanged(mods), egui::Event::PointerButton { pos: end, button, pressed: false, modifiers: mods }]);
+    if !mods.is_none() {
+        batches.push(vec![egui::Event::ModifiersChanged(Modifiers::NONE)]);
+    }
+    batches
+}
+
+/// If `app.focus_widget_id` points to an enabled non-grid textbox while `egui` lacks keyboard focus,
+/// return its center coordinates so a live host can click-focus it.
+#[must_use]
+pub fn find_non_grid_textbox_focus_center(app: &UiApp, meta: &FrameInspectMeta, metrics: ViewportMetrics, egui_wants_kb: bool) -> Option<Pos2> {
+    if egui_wants_kb {
+        return None;
+    }
+    let fid = app.focus_widget_id.as_deref()?;
+    if fid.starts_with("grid.") {
+        return None;
+    }
+    if !meta.find_by_widget_id(fid).is_some_and(|e| matches!(e.role.as_str(), "textbox" | "input" | "textinput" | "searchbox" | "text")) {
+        return None;
+    }
+    resolve_widget_center_pt(app, meta, metrics, fid).ok().and_then(|(pos, enabled, _)| enabled.then_some(pos))
+}
+
+fn ensure_egui_focus_if_needed(
+    app: &mut UiApp,
+    metrics: ViewportMetrics,
+) -> Result<(FrameInspectMeta, Option<egui::accesskit::TreeUpdate>), EngineError> {
+    let (meta, ak, _) = step_headless_batches(app, metrics, Vec::new())?;
+    let wants_kb = app.headless_egui.inner.lock().ok().and_then(|g| g.as_ref().map(|(c, _)| c.egui_wants_keyboard_input())).unwrap_or(false);
+    if let Some(pos) = find_non_grid_textbox_focus_center(app, &meta, metrics, wants_kb) {
+        let (m2, ak2, _) = step_headless_batches(app, metrics, click_pos_batches(pos, egui::PointerButton::Primary, Modifiers::NONE))?;
+        return Ok((m2, ak2));
+    }
+    Ok((meta, ak))
+}
+
+/// Dispatch any of the 8 interactive GUI actions (`ui.inspect`, `ui.screenshot`, `ui.invoke_menu`,
+/// `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.switch_tab`, `ui.answer_dialog`)
+/// through settled `egui::Context::run` passes (`F8`).
+///
+/// # Errors
+/// Returns [`EngineError`] on bad parameters, missing/disabled widgets, invalid actions, or
+/// blocked disk/OS actions under `--gui-only`.
+pub(crate) fn dispatch_gui_action(app: &mut UiApp, method: &str, params: Value) -> Result<Value, EngineError> {
+    require_params_object_or_null(&params, method).map_err(bad_input_err)?;
+    match method {
+        "ui.inspect" => dispatch_gui_inspect(app, &params),
+        "ui.screenshot" => dispatch_gui_screenshot(app, &params),
+        "ui.invoke_menu" => dispatch_gui_invoke_menu(app, &params),
+        "ui.pointer_gesture" => dispatch_gui_pointer_gesture(app, &params),
+        "ui.type_text" => dispatch_gui_type_text(app, &params),
+        "ui.press_key" => dispatch_gui_press_key(app, &params),
+        "ui.switch_tab" => dispatch_gui_switch_tab(app, &params),
+        "ui.answer_dialog" => dispatch_gui_answer_dialog(app, &params),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported GUI action `{method}`"))),
+    }
+}
+
+/// Parsed and validated `ui.inspect` parameters.
+pub struct ParsedInspectParams<'a> {
+    pub scope: Option<&'a str>,
+    pub include_bounds: bool,
+    pub metrics: ViewportMetrics,
+}
+
+/// Parse and validate `ui.inspect` request parameters.
+///
+/// # Errors
+/// Returns [`EngineError`] with `ErrorCode::BadInput` on malformed parameters.
+pub fn parse_inspect_params(params: &Value) -> Result<ParsedInspectParams<'_>, EngineError> {
+    require_params_object_or_null(params, "ui.inspect").map_err(bad_input_err)?;
+    let scope = opt_non_empty_str_param(params, &["scope"]).map_err(bad_input_err)?;
+    let include_bounds = opt_bool_param(params, &["include_bounds"]).map_err(bad_input_err)?.unwrap_or(true);
+    let metrics = parse_viewport_metrics_from_params(params)?;
+    Ok(ParsedInspectParams { scope, include_bounds, metrics })
+}
+
+fn dispatch_gui_inspect(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
+    let parsed = parse_inspect_params(params)?;
+    let snap = inspect_live_egui_snapshot(app, parsed.metrics, parsed.scope, parsed.include_bounds);
+    serde_json::to_value(snap).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))
+}
+
+fn normalize_menu_token(raw: &str) -> String {
+    raw.trim().trim_end_matches("...").trim_end_matches('…').trim().to_ascii_lowercase()
+}
+
+fn normalize_menu_path_str(raw: &str) -> String {
+    raw.split(['>', '/']).map(normalize_menu_token).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("/")
+}
+
+fn strip_ci_prefix<'a>(haystack: &'a str, prefix: &str) -> Option<&'a str> {
+    let mut h_chars = haystack.chars();
+    for p_ch in prefix.chars() {
+        let h_ch = h_chars.next()?;
+        if !h_ch.eq_ignore_ascii_case(&p_ch) && h_ch.to_lowercase().ne(p_ch.to_lowercase()) {
+            return None;
+        }
+    }
+    Some(h_chars.as_str())
+}
+
+fn extract_menu_path_param(params: &Value) -> Result<Option<(String, Vec<String>)>, EngineError> {
+    let Some(val) = params.get("path").or_else(|| params.get("menu_path")) else {
+        return Ok(None);
+    };
+    match val {
+        Value::Null => Ok(None),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Err(bad_input_err("`path` must be a non-empty string"));
+            }
+            Ok(Some((trimmed.to_owned(), Vec::new())))
+        }
+        Value::Array(arr) => {
+            if arr.is_empty() {
+                return Err(bad_input_err("`path` array must not be empty"));
+            }
+            let mut segs = Vec::with_capacity(arr.len());
+            for item in arr {
+                let s = item.as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| bad_input_err("`path` must be a string"))?;
+                segs.push(s.to_owned());
+            }
+            Ok(Some((segs.join("/"), segs)))
+        }
+        _ => Err(bad_input_err("`path` must be a string")),
+    }
+}
+
+fn match_curated_nodes_recursive(
+    nodes: &[CuratedMenuNode],
+    rem_str: Option<&str>,
+    rem_segs: Option<&[String]>,
+    norm_full: &str,
+) -> Option<&'static str> {
+    for node in nodes {
+        match node {
+            CuratedMenuNode::Separator => {}
+            CuratedMenuNode::Action(tip) => {
+                if let Some(segs) = rem_segs
+                    && segs.len() == 1
+                {
+                    let seg_norm = normalize_menu_token(&segs[0]);
+                    if seg_norm == normalize_menu_token(tip.localized_label) || seg_norm == normalize_menu_token(tip.label) {
+                        return Some(tip.command_id);
+                    }
+                }
+                if let Some(rem) = rem_str {
+                    let rem_norm = normalize_menu_token(rem);
+                    if rem_norm == normalize_menu_token(tip.localized_label) || rem_norm == normalize_menu_token(tip.label) {
+                        return Some(tip.command_id);
+                    }
+                }
+                if !tip.menu_path.is_empty() && norm_full == normalize_menu_path_str(tip.menu_path) {
+                    return Some(tip.command_id);
+                }
+            }
+            CuratedMenuNode::Submenu { title, children, .. } => {
+                let next_segs = rem_segs.and_then(|segs| {
+                    if segs.len() >= 2 && normalize_menu_token(&segs[0]) == normalize_menu_token(title) { Some(&segs[1..]) } else { None }
+                });
+                let title_clean = title.trim_end_matches("...").trim_end_matches('…').trim();
+                let next_str = rem_str.and_then(|s| {
+                    strip_ci_prefix(s.trim_start(), title).or_else(|| strip_ci_prefix(s.trim_start(), title_clean)).and_then(|after| {
+                        let t = after.trim_start();
+                        t.strip_prefix('/').or_else(|| t.strip_prefix('>')).map(str::trim_start)
+                    })
+                });
+                if let Some(hit) = match_curated_nodes_recursive(children, next_str, next_segs, norm_full) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_menu_command_by_path(app: &UiApp, raw_path: &str, explicit_segs: &[String]) -> Option<String> {
+    let norm_full = normalize_menu_path_str(raw_path);
+    for sec in curated_menu_bar(app) {
+        let next_segs = (!explicit_segs.is_empty()).then_some(explicit_segs).and_then(|segs| {
+            if segs.len() >= 2 && normalize_menu_token(&segs[0]) == normalize_menu_token(sec.title) { Some(&segs[1..]) } else { None }
+        });
+        let next_str = strip_ci_prefix(raw_path.trim_start(), sec.title).and_then(|after| {
+            let t = after.trim_start();
+            t.strip_prefix('/').or_else(|| t.strip_prefix('>')).map(str::trim_start)
+        });
+        if let Some(cmd_id) = match_curated_nodes_recursive(&sec.nodes, next_str, next_segs, &norm_full) {
+            return Some(cmd_id.to_owned());
+        }
+    }
+
+    for spec in cmd::registry().specs() {
+        if let Some(tip) = command_tooltip(app, spec.id)
+            && ((!tip.menu_path.is_empty() && normalize_menu_path_str(tip.menu_path) == norm_full)
+                || normalize_menu_token(tip.localized_label) == norm_full
+                || normalize_menu_token(tip.label) == norm_full)
+        {
+            return Some(spec.id.to_owned());
+        }
+    }
+    for spec in UI_COMMANDS {
+        if let Some(tip) = command_tooltip(app, spec.id)
+            && ((!tip.menu_path.is_empty() && normalize_menu_path_str(tip.menu_path) == norm_full)
+                || normalize_menu_token(tip.localized_label) == norm_full
+                || normalize_menu_token(tip.label) == norm_full)
+        {
+            return Some(spec.id.to_owned());
+        }
+    }
+    None
+}
+
+fn dispatch_gui_screenshot(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
+    let region_raw = opt_non_empty_str_param(params, &["region", "target"]).map_err(bad_input_err)?.unwrap_or("full_window");
+    let region = match region_raw.to_ascii_lowercase().as_str() {
+        "full_window" | "full" | "window" | "workspace" | "viewport" => ScreenshotRegionTarget::FullWindow,
+        "canvas" => ScreenshotRegionTarget::Canvas,
+        "dialog" => ScreenshotRegionTarget::Dialog,
+        other => return Err(bad_input_err(format!("unsupported screenshot region `{other}`"))),
+    };
+    let width_px = parse_bounded_u32(params.get("width_px"), 1280, 64, 4096, "width_px").map_err(bad_input_err)?;
+    let height_px = parse_bounded_u32(params.get("height_px"), 800, 64, 4096, "height_px").map_err(bad_input_err)?;
+    let dpi = if params.get("dpi").is_some_and(|v| !v.is_null()) {
+        parse_bounded_u32(params.get("dpi"), 144, 72, 600, "dpi").map_err(bad_input_err)?
+    } else if let Some(sf) = opt_finite_f64_param(params, &["scale_factor"]).map_err(bad_input_err)? {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let computed = (96.0 * sf.clamp(0.5, 6.0)).round() as u32;
+        computed.clamp(72, 600)
+    } else {
+        144
+    };
+    let dpi_u16 = u16::try_from(dpi).unwrap_or(144);
+    let path_arg = opt_non_empty_str_param(params, &["path"]).map_err(bad_input_err)?;
+    let validated_path = if let Some(raw_path) = path_arg {
+        if app.is_gui_only() {
+            return Err(EngineError::with_code(
+                ErrorCode::GuiOnlyViolation,
+                "writing screenshots to disk via `ui.screenshot(path)` is blocked in --gui-only mode",
+            ));
+        }
+        Some(app.session().validate_host_write_path(raw_path)?)
+    } else {
+        None
+    };
+
+    let target = RenderTargetSpec { width_px, height_px, dpi: dpi_u16 };
+    let img = app.render_egui_shell_rgba(target, region).map_err(|err| {
+        let msg = err.to_string();
+        if msg.contains("no modal dialog") || msg.contains("unavailable") {
+            EngineError::with_code(ErrorCode::Conflict, msg)
+        } else {
+            EngineError::with_code(ErrorCode::BadInput, msg)
+        }
+    })?;
+    let png = encode_png(&img).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?;
+    if let Some(ref dest_path) = validated_path {
+        app.session().write_host_file_atomic(dest_path, &png)?;
+    }
+    let b64 = curvebook_platform::base64::encode(&png);
+    Ok(json!({
+        "region": region_raw,
+        "width_px": img.width_px,
+        "height_px": img.height_px,
+        "dpi": img.dpi,
+        "format": "png",
+        "mime_type": "image/png",
+        "bytes_len": png.len(),
+        "data_base64": b64,
+        "png_base64": b64,
+        "path": validated_path,
+    }))
+}
+
+fn dispatch_gui_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
+    let explicit_cmd = opt_non_empty_str_param(params, &["command_id", "command"]).map_err(bad_input_err)?;
+    let menu_path = extract_menu_path_param(params)?;
+    let has_explicit_params = params.get("params").is_some_and(|v| !v.is_null());
+    if app.is_human_path_only() && has_explicit_params {
+        return Err(EngineError::with_code(
+            ErrorCode::GuiOnlyViolation,
+            "direct command parameter injection via `ui.invoke_menu(params)` is blocked in human-path-only mode",
+        ));
+    }
+    let resolved_cmd: String = if let Some(cmd) = explicit_cmd {
+        cmd.to_owned()
+    } else if let Some((raw_path, segs)) = menu_path {
+        resolve_menu_command_by_path(app, &raw_path, &segs)
+            .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("menu path `{raw_path}` not found")))?
+    } else {
+        return Err(bad_input_err("`ui.invoke_menu` requires non-empty `command_id` or `path`"));
+    };
+    let command_id = resolved_cmd.as_str();
+    let cmd_params = match params.get("params") {
+        Some(v) if !v.is_null() => v.clone(),
+        _ => contextual_command_params(app, command_id),
+    };
+    if app.is_gui_only() {
+        if is_gui_only_blocked_menu_command(command_id) {
+            return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, format!("command `{command_id}` is blocked in --gui-only mode")));
+        }
+        if command_id == "ui.print.open" && cmd_params.get("submit_to_os").and_then(Value::as_bool) == Some(true) {
+            return Err(EngineError::with_code(
+                ErrorCode::GuiOnlyViolation,
+                "submitting print jobs directly to the OS queue is blocked under --gui-only",
+            ));
+        }
+        if !app.session().path_policy().is_constrained() && has_explicit_params {
+            curvebook_engine::enforce_unconstrained_gui_only_menu_params(Some(command_id), &cmd_params)?;
+        }
+    }
+    if HybridCoexistenceArbiter::evaluate(app, false).modal_backdrop_active {
+        return Err(EngineError::with_code(ErrorCode::Conflict, format!("cannot invoke menu command `{command_id}` while a modal dialog is open")));
+    }
+    if let Some(tip) = command_tooltip(app, command_id)
+        && !tip.enabled
+    {
+        return Err(EngineError::with_code(ErrorCode::Conflict, format!("menu command `{command_id}` is currently disabled")));
+    }
+
+    let (is_ui, result, mutated) = match dispatch_ui_command_as_ui(app, command_id, &cmd_params)? {
+        Some(res) => (true, res, false),
+        None => {
+            if cmd::registry().get(command_id).is_some() {
+                let out = app.execute_session_ui_cmd(command_id, cmd_params)?;
+                (false, out.payload, out.mutated)
+            } else {
+                return Err(EngineError::with_code(ErrorCode::NotFound, format!("unknown menu command `{command_id}`")));
+            }
+        }
+    };
+    let _ = step_headless_batches(app, ViewportMetrics::default(), Vec::new())?;
+    let mut response = json!({
+        "invoked": true,
+        "command_id": command_id,
+        "ui": is_ui,
+        "payload": result,
+        "result": result,
+    });
+    if let Some(obj) = response.as_object_mut() {
+        if is_ui {
+            obj.insert(String::from("active_dialog"), json!(format!("{:?}", app.canvas_dialogs.active_dialog)));
+        } else {
+            obj.insert(String::from("mutated"), json!(mutated));
+        }
+    }
+    Ok(response)
+}
+
+/// Schedule a scroll-into-view state adjustment on `app` for an offscreen Navigator sheet or
+/// grid cell widget (`wid`), returning `true` when scroll state was modified.
+pub fn ensure_widget_scrolled_into_view_state(app: &mut UiApp, metrics: ViewportMetrics, wid: &str) -> bool {
+    if let Some(sheet_str) = wid.strip_prefix("nav.sheet.") {
+        let sid = curvebook_doc::SheetId::from(sheet_str);
+        if app.nav.folders.iter().any(|f| f.entries.iter().any(|e| e.sheet_id == sid)) {
+            app.nav.navigator_open = true;
+            for folder in &mut app.nav.folders {
+                if folder.entries.iter().any(|e| e.sheet_id == sid) {
+                    folder.collapsed = false;
+                }
+            }
+            app.egui_views.leading_dock.nested_collapsed_parents.clear();
+            app.egui_views.leading_dock.scroll_to_sheet = Some(sid);
+            return true;
+        }
+    }
+    let active_ds = app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id)).cloned();
+    if let Some(ds) = active_ds {
+        let mut grid_state = std::mem::take(&mut app.egui_views.column_grid);
+        let layout_metrics = Tokens::from_theme_spec(&app.theme, &app.locale).metrics;
+        #[allow(clippy::cast_possible_truncation)]
+        let vp_w = metrics.logical_width as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let vp_h = metrics.logical_height as f32;
+        let scrolled = if let Some(coord) = parse_grid_cell_widget_id(wid) {
+            super::data_grid::scroll_cell_into_view(
+                app,
+                &ds,
+                &mut grid_state,
+                layout_metrics,
+                (vp_w, vp_h),
+                super::data_grid::ScrollCellTarget { is_x: false, row: coord.row, col: coord.col, subcol: coord.subcol },
+            )
+        } else if let Some(col) = wid.strip_prefix("grid.col_title.").and_then(|s| s.parse::<usize>().ok()) {
+            super::data_grid::scroll_cell_into_view(
+                app,
+                &ds,
+                &mut grid_state,
+                layout_metrics,
+                (vp_w, vp_h),
+                super::data_grid::ScrollCellTarget { is_x: false, row: 0, col, subcol: 0 },
+            )
+        } else if let Some((row, subcol)) =
+            parse_x_cell_widget_id(wid).or_else(|| wid.strip_prefix("grid.x.").and_then(|rest| parse_x_cell_widget_id(&format!("grid.xcell.{rest}"))))
+        {
+            super::data_grid::scroll_cell_into_view(
+                app,
+                &ds,
+                &mut grid_state,
+                layout_metrics,
+                (vp_w, vp_h),
+                super::data_grid::ScrollCellTarget { is_x: true, row, col: 0, subcol },
+            )
+        } else {
+            false
+        };
+        app.egui_views.column_grid = grid_state;
+        return scrolled;
+    }
+    false
+}
+
+fn ensure_widget_scrolled_into_view(app: &mut UiApp, metrics: ViewportMetrics, wid: &str, meta: &mut FrameInspectMeta) -> Result<(), EngineError> {
+    if resolve_widget_rect_in_meta(meta, wid).is_some() {
+        return Ok(());
+    }
+    if ensure_widget_scrolled_into_view_state(app, metrics, wid) {
+        let (m2, _, _) = step_headless_batches(app, metrics, Vec::new())?;
+        *meta = m2;
+    }
+    Ok(())
+}
+
+/// Parsed and validated `ui.pointer_gesture` parameters.
+pub struct ParsedPointerGestureParams<'a> {
+    pub kind: String,
+    pub button: egui::PointerButton,
+    pub egui_mods: Modifiers,
+    pub metrics: ViewportMetrics,
+    pub widget_id: Option<&'a str>,
+    pub to_widget_id: Option<&'a str>,
+    pub explicit_xy: Option<(f64, f64)>,
+    pub to_xy: Option<(f64, f64)>,
+    pub scale_delta: f64,
+    pub delta_xy: (f64, f64),
+}
+
+/// Parse and validate `ui.pointer_gesture` request parameters.
+///
+/// # Errors
+/// Returns [`EngineError`] on invalid actions, buttons, coordinates, or target ambiguity.
+pub fn parse_pointer_gesture_params(params: &Value, default_scroll_dy: f64) -> Result<ParsedPointerGestureParams<'_>, EngineError> {
+    require_params_object_or_null(params, "ui.pointer_gesture").map_err(bad_input_err)?;
+    let kind = opt_non_empty_str_param(params, &["kind", "action", "gesture"]).map_err(bad_input_err)?.unwrap_or("click").to_ascii_lowercase();
+    if !matches!(kind.as_str(), "click" | "double_click" | "right_click" | "hover" | "move" | "scroll" | "wheel" | "drag" | "pinch") {
+        return Err(bad_input_err(format!("unsupported pointer gesture kind `{kind}`")));
+    }
+    let button_str = opt_non_empty_str_param(params, &["button"]).map_err(bad_input_err)?.unwrap_or("primary");
+    let button = parse_pointer_button_str(button_str)?;
+    let key_mods = parse_modifiers_from_params(params)?;
+    let egui_mods = to_egui_modifiers(key_mods);
+    let metrics = parse_viewport_metrics_from_params(params)?;
+    let widget_id = opt_non_empty_str_param(params, &["widget_id", "target_id"]).map_err(bad_input_err)?;
+    let to_widget_id = opt_non_empty_str_param(params, &["to_widget_id", "end_widget_id"]).map_err(bad_input_err)?;
+    let explicit_x = opt_finite_f64_param(params, &["x"]).map_err(bad_input_err)?;
+    let explicit_y = opt_finite_f64_param(params, &["y"]).map_err(bad_input_err)?;
+    if explicit_x.is_some() != explicit_y.is_some() {
+        return Err(bad_input_err("both `x` and `y` coordinates are required when targeting by coordinates"));
+    }
+    if widget_id.is_some() && explicit_x.is_some() {
+        return Err(bad_input_err("ambiguous pointer gesture target: specify either `widget_id` or `x`/`y` coordinates, not both"));
+    }
+    if widget_id.is_none() && explicit_x.is_none() {
+        return Err(bad_input_err("ui.pointer_gesture requires either `widget_id` or finite `x`/`y` coordinates"));
+    }
+    let dx = opt_finite_f64_param(params, &["delta_x"]).map_err(bad_input_err)?.unwrap_or(0.0);
+    let dy = opt_finite_f64_param(params, &["delta_y"]).map_err(bad_input_err)?.unwrap_or(if params.get("delta_x").is_none() {
+        default_scroll_dy
+    } else {
+        0.0
+    });
+    let scale_delta = opt_finite_f64_param(params, &["scale_delta"]).map_err(bad_input_err)?.unwrap_or(1.0);
+    if kind == "pinch" && (!scale_delta.is_finite() || scale_delta <= 0.0) {
+        return Err(bad_input_err("`scale_delta` must be a positive finite number"));
+    }
+    let end_x = opt_finite_f64_param(params, &["to_x", "end_x"]).map_err(bad_input_err)?;
+    let end_y = opt_finite_f64_param(params, &["to_y", "end_y"]).map_err(bad_input_err)?;
+    if end_x.is_some() != end_y.is_some() {
+        return Err(bad_input_err("both `to_x`/`end_x` and `to_y`/`end_y` must be provided together for `drag`"));
+    }
+    let to_xy = end_x.zip(end_y);
+    if kind == "drag" && to_xy.is_none() && to_widget_id.is_none() {
+        return Err(bad_input_err("`drag` gesture requires `to_x`/`to_y` (or `end_x`/`end_y`) or `to_widget_id`"));
+    }
+    Ok(ParsedPointerGestureParams {
+        kind,
+        button,
+        egui_mods,
+        metrics,
+        widget_id,
+        to_widget_id,
+        explicit_xy: explicit_x.zip(explicit_y),
+        to_xy,
+        scale_delta,
+        delta_xy: (dx, dy),
+    })
+}
+
+/// Build synthetic `egui::Event` batches for a validated `ui.pointer_gesture`.
+#[must_use]
+pub fn build_pointer_gesture_batches(parsed: &ParsedPointerGestureParams<'_>, start_pos: Pos2, end_pos: Option<Pos2>) -> Vec<Vec<egui::Event>> {
+    let button = parsed.button;
+    let egui_mods = parsed.egui_mods;
+    match parsed.kind.as_str() {
+        "click" => click_pos_batches(start_pos, button, egui_mods),
+        "right_click" => click_pos_batches(start_pos, egui::PointerButton::Secondary, egui_mods),
+        "double_click" => vec![
+            vec![egui::Event::PointerMoved(start_pos)],
+            vec![egui::Event::PointerButton { pos: start_pos, button, pressed: true, modifiers: egui_mods }],
+            vec![egui::Event::PointerButton { pos: start_pos, button, pressed: false, modifiers: egui_mods }],
+            vec![egui::Event::PointerButton { pos: start_pos, button, pressed: true, modifiers: egui_mods }],
+            vec![egui::Event::PointerButton { pos: start_pos, button, pressed: false, modifiers: egui_mods }],
+        ],
+        "move" | "hover" => vec![vec![egui::Event::PointerMoved(start_pos)]],
+        "wheel" | "scroll" => {
+            #[allow(clippy::cast_possible_truncation)]
+            let delta = Vec2::new(parsed.delta_xy.0 as f32, parsed.delta_xy.1 as f32);
+            vec![
+                vec![egui::Event::PointerMoved(start_pos)],
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta,
+                    modifiers: egui_mods,
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Wheel,
+                }],
+            ]
+        }
+        "pinch" => {
+            #[allow(clippy::cast_possible_truncation)]
+            let zoom_f32 = parsed.scale_delta.clamp(0.1, 10.0) as f32;
+            vec![vec![egui::Event::PointerMoved(start_pos)], vec![egui::Event::Zoom(zoom_f32)]]
+        }
+        "drag" => {
+            let end = end_pos.unwrap_or(start_pos);
+            drag_pos_batches(start_pos, end, button, egui_mods)
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Clear `interaction.context_menu_target` after a coordinate `right_click` if no egui context menu opened.
+pub fn clear_right_click_miss_context_menu(app: &mut UiApp) {
+    if app.egui_views.column_grid.context_menu.is_none() && app.egui_views.leading_dock.context_menu.is_none() {
+        app.interaction.context_menu_target = None;
+    }
+}
+
+/// Return whether `wid` addresses the already-selected active grid cell without an open inline editor.
+#[must_use]
+pub fn is_grid_cell_widget_selected_without_inline_edit(app: &UiApp, wid: &str) -> bool {
+    crate::grid_view::parse_grid_cell_widget_id(wid).is_some_and(|coord| app.grid.tool.active == Some(coord))
+        && app.egui_views.column_grid.inline_edit.is_none()
+}
+
+/// Commit any active grid inline editor cleanly before switching sheets or tabs.
+pub fn commit_active_grid_inline_edit(app: &mut UiApp) {
+    let _ = crate::interaction::commit_inline_edit_if_active(app);
+}
+
+/// Format the JSON response payload for `ui.pointer_gesture` from committed intent outcomes.
+#[must_use]
+pub fn format_pointer_gesture_result(kind: &str, widget_id: Option<&str>, start_pos: Pos2, outcomes: &[UiIntentOutcome]) -> Value {
+    let cmd_ids: Vec<String> = outcomes
+        .iter()
+        .filter_map(|o| match o {
+            UiIntentOutcome::Engine { command_id, .. } | UiIntentOutcome::Ui { command_id, .. } => Some(command_id.clone()),
+            UiIntentOutcome::ShellUpdated => None,
+        })
+        .collect();
+    let mut out = json!({
+        "handled": true,
+        "kind": kind,
+        "action": kind,
+        "widget_id": widget_id,
+        "x": f64::from(start_pos.x),
+        "y": f64::from(start_pos.y),
+        "commands": cmd_ids,
+        "mutated": false,
+    });
+    if let Some(out_obj) = out.as_object_mut() {
+        for o in outcomes {
+            match o {
+                UiIntentOutcome::Engine { outcome, .. } => {
+                    if outcome.mutated {
+                        out_obj.insert(String::from("mutated"), json!(true));
+                    }
+                    if let Some(map) = outcome.payload.as_object() {
+                        for (k, v) in map {
+                            if !matches!(k.as_str(), "handled" | "kind" | "action" | "widget_id" | "x" | "y" | "commands") {
+                                out_obj.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                }
+                UiIntentOutcome::Ui { result: Some(val), .. } => {
+                    if let Some(map) = val.as_object() {
+                        for (k, v) in map {
+                            if !matches!(k.as_str(), "handled" | "kind" | "action" | "widget_id" | "x" | "y" | "commands") {
+                                out_obj.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                }
+                UiIntentOutcome::Ui { result: None, .. } | UiIntentOutcome::ShellUpdated => {}
+            }
+        }
+    }
+    out
+}
+
+/// Resolved pointer target and readout for `power.curve_hover`.
+#[derive(Debug, Clone, Copy)]
+pub struct PowerCurveHoverTarget {
+    pub pos: Pos2,
+    pub fraction_x: f64,
+    pub hovered_pair: Option<(f64, f64)>,
+}
+
+/// Compute `power.curve_hover` fraction, pointer coordinates, and `(n, power)` readout.
+///
+/// # Errors
+/// Returns [`EngineError`] if `power.curve_hover` is absent or `hover_fraction_x` is invalid.
+pub fn resolve_power_curve_hover_target(app: &mut UiApp, meta: &FrameInspectMeta, params: &Value) -> Result<PowerCurveHoverTarget, EngineError> {
+    let entry = meta
+        .find_by_widget_id("power.curve_hover")
+        .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, "widget `power.curve_hover` not found in current UI tree"))?;
+    let frac = opt_finite_f64_param(params, &["hover_fraction_x", "fraction_x"])
+        .map_err(bad_input_err)?
+        .map(|f| f.clamp(0.0, 1.0))
+        .or_else(|| {
+            opt_finite_f64_param(params, &["hover_n"]).ok().flatten().and_then(|n| {
+                let pts = &app.canvas_dialogs.power_wizard.result.as_ref()?.power_curve;
+                let min_n = pts.first().map_or(2.0, |p| p.n);
+                let max_n = pts.last().map_or(min_n + 1.0, |p| p.n).max(min_n + 1.0);
+                Some(((n - min_n) / (max_n - min_n)).clamp(0.0, 1.0))
+            })
+        })
+        .unwrap_or(0.5);
+    #[allow(clippy::cast_possible_truncation)]
+    let hover_x = entry.clipped_rect.left() + entry.clipped_rect.width() * (frac as f32);
+    let hover_pos = Pos2::new(hover_x, entry.clipped_rect.center().y);
+    let hovered_pair = app.canvas_dialogs.power_wizard.hover_at_fraction(frac);
+    Ok(PowerCurveHoverTarget { pos: hover_pos, fraction_x: frac, hovered_pair })
+}
+
+fn dispatch_gui_pointer_gesture(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
+    let parsed = parse_pointer_gesture_params(params, 0.0)?;
+    if app.is_human_path_only() && (parsed.widget_id.is_some() || parsed.to_widget_id.is_some()) {
+        return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, "direct `ui.pointer_gesture(widget_id)` is blocked in human-path-only mode"));
+    }
+
+    if parsed.kind == "click" {
+        let (_, _, _, _, t) = acquire_headless_egui_ctx(app, parsed.metrics);
+        store_headless_egui_time(app, t + 0.5);
+    }
+
+    let (mut meta, _ak, _) = step_headless_batches(app, parsed.metrics, Vec::new())?;
+
+    if let Some(wid) = parsed.widget_id
+        && parsed.explicit_xy.is_none()
+    {
+        ensure_widget_scrolled_into_view(app, parsed.metrics, wid, &mut meta)?;
+        if let Some(col_str) = wid.strip_prefix("formula_bar.open_col.")
+            && let Ok(col) = col_str.parse::<usize>()
+        {
+            let badge_wid = format!("mv_formula.role_badge.{col}");
+            if let Ok((pos, enabled, reason)) = resolve_widget_center_pt(app, &meta, parsed.metrics, &badge_wid) {
+                if !enabled {
+                    return Err(EngineError::with_code(ErrorCode::Conflict, reason.unwrap_or_else(|| format!("widget `{wid}` is disabled"))));
+                }
+                let _ = step_headless_batches(app, parsed.metrics, click_pos_batches(pos, egui::PointerButton::Primary, parsed.egui_mods))?;
+            }
+            if !app.grid.formula_bar.active {
+                let _ = dispatch_ui_command_as_ui(app, "ui.table.openFormulaBar", &json!({ "col": col }))?;
+                let _ = step_headless_batches(app, parsed.metrics, Vec::new())?;
+            }
+            return Ok(json!({
+                "handled": true,
+                "kind": parsed.kind,
+                "action": parsed.kind,
+                "widget_id": wid,
+                "formula_bar_active": app.grid.formula_bar.active,
+            }));
+        }
+
+        if wid == "power.curve_hover" {
+            let hover = resolve_power_curve_hover_target(app, &meta, params)?;
+            let _ = step_headless_batches(app, parsed.metrics, vec![vec![egui::Event::PointerMoved(hover.pos)]])?;
+            app.interaction.last_logical_pos = Some([f64::from(hover.pos.x), f64::from(hover.pos.y)]);
+            return Ok(json!({
+                "handled": true,
+                "kind": parsed.kind,
+                "action": parsed.kind,
+                "widget_id": wid,
+                "x": f64::from(hover.pos.x),
+                "y": f64::from(hover.pos.y),
+                "hover_fraction_x": hover.fraction_x,
+                "hover_n": hover.hovered_pair.map(|(n, _)| n),
+                "hover_power": hover.hovered_pair.map(|(_, p)| p),
+            }));
+        }
+    }
+
+    let start_pos = match (parsed.explicit_xy, parsed.widget_id) {
+        (Some((x, y)), _) =>
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            Pos2::new(x as f32, y as f32)
+        }
+        (None, Some(wid)) => {
+            let (center, enabled, reason) = resolve_widget_center_pt(app, &meta, parsed.metrics, wid)?;
+            if !enabled && !matches!(parsed.kind.as_str(), "hover" | "move") {
+                return Err(EngineError::with_code(ErrorCode::Conflict, reason.unwrap_or_else(|| format!("widget `{wid}` is disabled"))));
+            }
+            center
+        }
+        _ => return Err(bad_input_err("`ui.pointer_gesture` requires `widget_id` or numeric `x` and `y`")),
+    };
+
+    let end_pos = if parsed.kind == "drag" {
+        let ep = if let Some((tx, ty)) = parsed.to_xy {
+            #[allow(clippy::cast_possible_truncation)]
+            Pos2::new(tx as f32, ty as f32)
+        } else if let Some(to_wid) = parsed.to_widget_id {
+            let (center, _, _) = resolve_widget_center_pt(app, &meta, parsed.metrics, to_wid)?;
+            center
+        } else {
+            return Err(bad_input_err("`drag` gesture requires `to_x`/`to_y` (or `end_x`/`end_y`) or `to_widget_id`"));
+        };
+        app.interaction.last_logical_pos = Some([f64::from(ep.x), f64::from(ep.y)]);
+        Some(ep)
+    } else {
+        app.interaction.last_logical_pos = Some([f64::from(start_pos.x), f64::from(start_pos.y)]);
+        None
+    };
+
+    let batches = build_pointer_gesture_batches(&parsed, start_pos, end_pos);
+    let (_m2, _ak2, outcomes) = step_headless_batches(app, parsed.metrics, batches)?;
+    if parsed.kind == "right_click"
+        && parsed.widget_id.is_none()
+        && !outcomes.iter().any(|o| !matches!(o, UiIntentOutcome::ShellUpdated))
+        && app.egui_views.column_grid.context_menu.is_none()
+        && app.egui_views.leading_dock.context_menu.is_none()
+    {
+        app.interaction.context_menu_target = None;
+    }
+    Ok(format_pointer_gesture_result(&parsed.kind, parsed.widget_id, start_pos, &outcomes))
+}
+
+/// Parsed and validated `ui.type_text` parameters.
+pub struct ParsedTypeTextParams<'a> {
+    pub text: &'a str,
+    pub clear_param: Option<bool>,
+    pub submit: bool,
+    pub widget_id: Option<&'a str>,
+    pub metrics: ViewportMetrics,
+}
+
+/// Parse and validate `ui.type_text` request parameters.
+///
+/// # Errors
+/// Returns [`EngineError`] on invalid types or missing `text`.
+pub fn parse_type_text_params(params: &Value) -> Result<ParsedTypeTextParams<'_>, EngineError> {
+    require_params_object_or_null(params, "ui.type_text").map_err(bad_input_err)?;
+    let text = opt_str_param(params, &["text"]).map_err(bad_input_err)?.ok_or_else(|| bad_input_err("`ui.type_text` requires string `text`"))?;
+    let clear_param = opt_bool_param(params, &["clear_first", "clear_existing", "replace"]).map_err(bad_input_err)?;
+    let submit = opt_bool_param(params, &["submit", "commit_enter", "press_enter"]).map_err(bad_input_err)?.unwrap_or(false);
+    let widget_id = opt_non_empty_str_param(params, &["widget_id", "target_widget_id"]).map_err(bad_input_err)?;
+    let metrics = parse_viewport_metrics_from_params(params)?;
+    Ok(ParsedTypeTextParams { text, clear_param, submit, widget_id, metrics })
+}
+
+/// Validate read-only `LinkedDataRegion` constraints and classify grid typing targets.
+///
+/// # Errors
+/// Returns [`EngineError`] with `ErrorCode::Conflict` if the targeted cell belongs to a read-only `LinkedDataRegion`.
+pub fn prepare_grid_type_text_target(
+    app: &mut UiApp,
+    widget_id: Option<&str>,
+    live_focus_wid: Option<&str>,
+    modal_backdrop_active: bool,
+    egui_wants_kb: bool,
+) -> Result<(bool, bool), EngineError> {
+    let resolved_grid_coord =
+        widget_id.and_then(parse_grid_cell_widget_id).or_else(|| live_focus_wid.and_then(parse_grid_cell_widget_id)).or_else(|| {
+            if widget_id.is_none() && !modal_backdrop_active && !app.grid.formula_bar.active && live_focus_wid.is_none_or(|f| f.starts_with("grid."))
+            {
+                app.grid.tool.active
+            } else {
+                None
+            }
+        });
+    if let Some(coord) = resolved_grid_coord
+        && let Some(ds) = app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id))
+        && let Some(reg) = ds.linked_regions.iter().find(|r| {
+            coord.row >= r.target_range.start.row
+                && coord.row <= r.target_range.end.row
+                && coord.col >= r.target_range.start.col
+                && coord.col <= r.target_range.end.col
+        })
+    {
+        return Err(EngineError::with_code(
+            ErrorCode::Conflict,
+            format!("cell ({}, {}) belongs to read-only LinkedDataRegion `{}`", coord.row, coord.col, reg.id),
+        ));
+    }
+
+    let is_x_cell_target = widget_id.or(live_focus_wid).is_some_and(|w| parse_x_cell_widget_id(w).is_some());
+    let is_y_cell_target = widget_id.or(live_focus_wid).is_some_and(|w| parse_grid_cell_widget_id(w).is_some())
+        || (widget_id.is_none() && resolved_grid_coord.is_some() && !egui_wants_kb);
+
+    if let Some(wid) = widget_id.or(live_focus_wid)
+        && let Some((row, subcol)) = parse_x_cell_widget_id(wid)
+        && app
+            .document()
+            .active_sheet_id
+            .as_ref()
+            .and_then(|id| app.document().data_sheet(id))
+            .is_some_and(|ds| matches!(ds.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_)))
+        && app.egui_views.column_grid.inline_edit.is_none()
+    {
+        app.grid.select_x_cell_sync(row, subcol);
+    }
+
+    Ok((is_x_cell_target, is_y_cell_target))
+}
+
+/// Build `egui::Event` batches for `ui.type_text`.
+#[must_use]
+pub fn build_type_text_batches(
+    text: &str,
+    clear_first: bool,
+    submit: bool,
+    is_x_cell_target: bool,
+    is_y_cell_target: bool,
+    inline_edit_open: bool,
+) -> Vec<Vec<egui::Event>> {
+    let is_grid_cell = is_x_cell_target || is_y_cell_target;
+    let is_grid_tsv = is_grid_cell && (text.contains('\t') || text.contains('\n') || text.contains('\r'));
+    if is_grid_tsv {
+        return vec![vec![egui::Event::Paste(text.to_owned())]];
+    }
+    if is_grid_cell && text.is_empty() && (submit || clear_first) {
+        return vec![vec![
+            egui::Event::Key { key: Key::Backspace, physical_key: Some(Key::Backspace), pressed: true, repeat: false, modifiers: Modifiers::NONE },
+            egui::Event::Key { key: Key::Backspace, physical_key: Some(Key::Backspace), pressed: false, repeat: false, modifiers: Modifiers::NONE },
+        ]];
+    }
+    let mut batches = Vec::new();
+    if clear_first && (!is_grid_cell || inline_edit_open) {
+        batches.push(vec![
+            egui::Event::Key { key: Key::A, physical_key: Some(Key::A), pressed: true, repeat: false, modifiers: Modifiers::COMMAND },
+            egui::Event::Key { key: Key::A, physical_key: Some(Key::A), pressed: false, repeat: false, modifiers: Modifiers::COMMAND },
+            egui::Event::Key { key: Key::Backspace, physical_key: Some(Key::Backspace), pressed: true, repeat: false, modifiers: Modifiers::NONE },
+            egui::Event::Key { key: Key::Backspace, physical_key: Some(Key::Backspace), pressed: false, repeat: false, modifiers: Modifiers::NONE },
+        ]);
+    }
+    if !text.is_empty() {
+        batches.push(vec![egui::Event::Text(text.to_owned())]);
+    }
+    if !batches.is_empty() {
+        // Settle pass opens and focuses freshly activated inline cell editors (`first_frame = false`)
+        // so a subsequent `Enter` submit pass commits cleanly instead of being ignored on `first_frame`.
+        batches.push(Vec::new());
+    }
+    if submit {
+        batches.push(vec![
+            egui::Event::Key { key: Key::Enter, physical_key: Some(Key::Enter), pressed: true, repeat: false, modifiers: Modifiers::NONE },
+            egui::Event::Key { key: Key::Enter, physical_key: Some(Key::Enter), pressed: false, repeat: false, modifiers: Modifiers::NONE },
+        ]);
+    }
+    batches
+}
+
+/// Format the JSON response payload for `ui.type_text`.
+#[must_use]
+pub fn format_type_text_result(app: &UiApp, text: &str, widget_id: Option<&str>, submit: bool, outcomes: &[UiIntentOutcome]) -> Value {
+    let committed_cmd = outcomes.iter().rev().find_map(|o| match o {
+        UiIntentOutcome::Engine { command_id, .. } | UiIntentOutcome::Ui { command_id, .. } => Some(command_id.clone()),
+        UiIntentOutcome::ShellUpdated => None,
+    });
+    let mut out = json!({
+        "typed": true,
+        "text": text,
+        "widget_id": widget_id,
+        "submit": submit,
+        "committed": committed_cmd.is_some(),
+        "command_id": committed_cmd,
+    });
+    if (widget_id == Some("formula_bar.input") || app.grid.formula_bar.active)
+        && let Some(obj) = out.as_object_mut()
+    {
+        obj.insert(String::from("is_valid"), json!(app.grid.formula_bar.is_valid));
+        obj.insert(String::from("parse_error"), json!(app.grid.formula_bar.parse_error));
+        obj.insert(String::from("formula_bar_active"), json!(app.grid.formula_bar.active));
+    }
+    out
+}
+
+fn dispatch_gui_type_text(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
+    let parsed = parse_type_text_params(params)?;
+    if app.is_human_path_only()
+        && let Some(wid) = parsed.widget_id
+        && app.focus_widget_id.as_deref() != Some(wid)
+    {
+        return Err(EngineError::with_code(
+            ErrorCode::GuiOnlyViolation,
+            format!("focus-jumping `ui.type_text(widget_id = {wid})` is blocked in human-path-only mode"),
+        ));
+    }
+
+    if let Some(wid) = parsed.widget_id {
+        if app.is_human_path_only() {
+            let _ = ensure_egui_focus_if_needed(app, parsed.metrics)?;
+        } else {
+            if parse_grid_cell_widget_id(wid).is_some() || parse_x_cell_widget_id(wid).is_some() {
+                // Exceed egui's double-click interval so focusing a previously clicked cell never opens inline_edit.
+                let (_, _, _, _, t) = acquire_headless_egui_ctx(app, parsed.metrics);
+                store_headless_egui_time(app, t + 0.5);
+            }
+            let _ = dispatch_gui_pointer_gesture(app, &json!({ "kind": "click", "widget_id": wid, "viewport": params.get("viewport") }))?;
+        }
+    } else {
+        let _ = ensure_egui_focus_if_needed(app, parsed.metrics)?;
+    }
+
+    let modal_active = HybridCoexistenceArbiter::evaluate(app, false).modal_backdrop_active;
+    let egui_wants_kb = app.headless_egui.inner.lock().ok().and_then(|g| g.as_ref().map(|(c, _)| c.egui_wants_keyboard_input())).unwrap_or(false);
+    let focus_copy = app.focus_widget_id.clone();
+    let (is_x_cell_target, is_y_cell_target) =
+        prepare_grid_type_text_target(app, parsed.widget_id, focus_copy.as_deref(), modal_active, egui_wants_kb)?;
+    let explicit_y_cell = parsed.widget_id.is_some_and(|w| parse_grid_cell_widget_id(w).is_some());
+    if explicit_y_cell {
+        let _ = step_headless_batches(app, parsed.metrics, Vec::new())?;
+    }
+
+    let clear_first = parsed.clear_param.unwrap_or_else(|| parsed.widget_id.is_some() && !(is_x_cell_target || is_y_cell_target));
+    let inline_open = app.egui_views.column_grid.inline_edit.is_some();
+    let batches = build_type_text_batches(parsed.text, clear_first, parsed.submit, is_x_cell_target, is_y_cell_target, inline_open);
+    let (_, _, all_outcomes) =
+        if batches.is_empty() { (FrameInspectMeta::default(), None, Vec::new()) } else { step_headless_batches(app, parsed.metrics, batches)? };
+    Ok(format_type_text_result(app, parsed.text, parsed.widget_id, parsed.submit, &all_outcomes))
+}
+
+/// Parsed and validated `ui.press_key` parameters.
+pub struct ParsedPressKeyParams<'a> {
+    pub key_raw: &'a str,
+    pub key: Key,
+    pub modifiers: Modifiers,
+    pub repeat: bool,
+    pub metrics: ViewportMetrics,
+}
+
+/// Parse and validate `ui.press_key` request parameters.
+///
+/// # Errors
+/// Returns [`EngineError`] on missing/unsupported key or invalid modifiers/viewport.
+pub fn parse_press_key_params(params: &Value) -> Result<ParsedPressKeyParams<'_>, EngineError> {
+    require_params_object_or_null(params, "ui.press_key").map_err(bad_input_err)?;
+    let key_raw =
+        opt_non_empty_str_param(params, &["key"]).map_err(bad_input_err)?.ok_or_else(|| bad_input_err("`ui.press_key` requires non-empty `key`"))?;
+    let key = parse_egui_key(key_raw).ok_or_else(|| bad_input_err(format!("unsupported key `{key_raw}`")))?;
+    let key_mods = parse_modifiers_from_params(params)?;
+    let modifiers = to_egui_modifiers(key_mods);
+    let repeat = opt_bool_param(params, &["repeat"]).map_err(bad_input_err)?.unwrap_or(false);
+    let metrics = parse_viewport_metrics_from_params(params)?;
+    Ok(ParsedPressKeyParams { key_raw, key, modifiers, repeat, metrics })
+}
+
+/// Build `egui::Event` batches for `ui.press_key`.
+#[must_use]
+pub fn build_press_key_batches(key: Key, modifiers: Modifiers, repeat: bool) -> Vec<Vec<egui::Event>> {
+    let mut batches = vec![
+        vec![egui::Event::ModifiersChanged(modifiers), egui::Event::Key { key, physical_key: Some(key), pressed: true, repeat, modifiers }],
+        vec![egui::Event::ModifiersChanged(modifiers), egui::Event::Key { key, physical_key: Some(key), pressed: false, repeat, modifiers }],
+    ];
+    if !modifiers.is_none() {
+        batches.push(vec![egui::Event::ModifiersChanged(Modifiers::NONE)]);
+    }
+    batches
+}
+
+/// Format the JSON response payload for `ui.press_key`.
+#[must_use]
+pub fn format_press_key_result(key_raw: &str, outcomes: &[UiIntentOutcome]) -> Value {
+    let cmd_ids: Vec<String> = outcomes
+        .iter()
+        .filter_map(|o| match o {
+            UiIntentOutcome::Engine { command_id, .. } | UiIntentOutcome::Ui { command_id, .. } => Some(command_id.clone()),
+            UiIntentOutcome::ShellUpdated => None,
+        })
+        .collect();
+
+    let mut out = json!({
+        "handled": true,
+        "key": key_raw,
+        "commands": cmd_ids,
+    });
+    if let Some(out_obj) = out.as_object_mut() {
+        for o in outcomes {
+            let val_opt = match o {
+                UiIntentOutcome::Engine { outcome, .. } => Some(&outcome.payload),
+                UiIntentOutcome::Ui { result: Some(val), .. } => Some(val),
+                UiIntentOutcome::Ui { result: None, .. } | UiIntentOutcome::ShellUpdated => None,
+            };
+            if let Some(map) = val_opt.and_then(Value::as_object) {
+                for (k, v) in map {
+                    if !matches!(k.as_str(), "handled" | "key" | "commands") {
+                        out_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn dispatch_gui_press_key(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
+    let parsed = parse_press_key_params(params)?;
+    let _ = ensure_egui_focus_if_needed(app, parsed.metrics)?;
+    let batches = build_press_key_batches(parsed.key, parsed.modifiers, parsed.repeat);
+    let (_, _, outcomes) = step_headless_batches(app, parsed.metrics, batches)?;
+    Ok(format_press_key_result(parsed.key_raw, &outcomes))
+}
+
+/// Target parsed from `ui.switch_tab` parameters.
+pub enum ParsedSwitchTabTarget<'a> {
+    Sheet(&'a str),
+    Tab(&'a str),
+}
+
+/// Parsed and validated `ui.switch_tab` parameters.
+pub struct ParsedSwitchTabParams<'a> {
+    pub target: ParsedSwitchTabTarget<'a>,
+    pub metrics: ViewportMetrics,
+}
+
+/// Parse and validate `ui.switch_tab` request parameters.
+///
+/// # Errors
+/// Returns [`EngineError`] if neither `sheet_id` nor `tab_id` is present or metrics are invalid.
+pub fn parse_switch_tab_params(params: &Value) -> Result<ParsedSwitchTabParams<'_>, EngineError> {
+    require_params_object_or_null(params, "ui.switch_tab").map_err(bad_input_err)?;
+    let metrics = parse_viewport_metrics_from_params(params)?;
+    if let Some(sheet_id) = opt_non_empty_str_param(params, &["sheet_id"]).map_err(bad_input_err)? {
+        return Ok(ParsedSwitchTabParams { target: ParsedSwitchTabTarget::Sheet(sheet_id), metrics });
+    }
+    let tab_id = opt_non_empty_str_param(params, &["tab_id", "tab", "widget_id", "id"])
+        .map_err(bad_input_err)?
+        .ok_or_else(|| bad_input_err("`ui.switch_tab` requires non-empty `tab_id` or `sheet_id`"))?;
+    Ok(ParsedSwitchTabParams { target: ParsedSwitchTabTarget::Tab(tab_id), metrics })
+}
+
+/// Find the rendered widget node in `meta` corresponding to a `ui.switch_tab` target.
+#[must_use]
+pub fn find_switch_tab_widget_in_meta<'a>(meta: &'a FrameInspectMeta, target: &ParsedSwitchTabTarget<'_>) -> Option<&'a FrameInspectNodeMeta> {
+    match target {
+        ParsedSwitchTabTarget::Sheet(sheet_id) => {
+            let nav_wid = format!("nav.sheet.{sheet_id}");
+            meta.find_by_widget_id(&nav_wid).or_else(|| meta.find_by_widget_id(&format!("sheet.tab.{sheet_id}")))
+        }
+        ParsedSwitchTabTarget::Tab(tab_id) => {
+            let candidates = [(*tab_id).to_owned(), format!("result.tab.{tab_id}"), format!("edit.tab.{tab_id}")];
+            candidates.iter().find_map(|cand| meta.find_by_widget_id(cand)).or_else(|| {
+                meta.entries.iter().find(|e| {
+                    entry_belongs_to_scope(e, "tabs") && (e.widget_id.ends_with(&format!(".{tab_id}")) || e.label.eq_ignore_ascii_case(tab_id))
+                })
+            })
+        }
+    }
+}
+
+/// Execute `PowerAndSampleSize` stage switching directly on `app` when `tab_id` names a stage.
+///
+/// # Errors
+/// Returns [`EngineError`] if advancing or stepping back fails.
+pub fn try_switch_power_wizard_stage(app: &mut UiApp, tab_id: &str) -> Result<Option<Value>, EngineError> {
+    if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::PowerAndSampleSize) {
+        return Ok(None);
+    }
+    let target_idx = match tab_id.trim().to_ascii_lowercase().as_str() {
+        "0" | "design" | "experiment_design" | "power.stage.1" | "power.tab.design" => Some(0usize),
+        "1" | "effect" | "effect_size" | "power.stage.2" | "power.tab.effect" => Some(1),
+        "2" | "alpha" | "power" | "alpha_power" | "significance" | "significance_and_solve" | "power.stage.3" | "power.tab.alpha" => Some(2),
+        "3" | "results" | "sensitivity" | "power.stage.4" | "power.tab.results" => Some(3),
+        _ => None,
+    };
+    let Some(target_idx) = target_idx else {
+        return Ok(None);
+    };
+    while app.canvas_dialogs.power_wizard.stage.index() < target_idx {
+        let _ = crate::egui_shell::dialog_actions::execute_dialog_button_action(app, "next")?;
+    }
+    while app.canvas_dialogs.power_wizard.stage.index() > target_idx {
+        let _ = crate::egui_shell::dialog_actions::execute_dialog_button_action(app, "back")?;
+    }
+    Ok(Some(json!({
+        "switched": true,
+        "tab_id": tab_id,
+        "stage_index": app.canvas_dialogs.power_wizard.stage.index(),
+        "stage": app.canvas_dialogs.power_wizard.stage.label(),
+    })))
+}
+
+/// Switch to an off-screen `ResultSheet` tab or select a sheet by ID when not visible in `meta`.
+///
+/// # Errors
+/// Returns [`EngineError`] with `ErrorCode::NotFound` if the sheet or tab does not exist.
+pub fn execute_switch_tab_fallback(app: &mut UiApp, target: &ParsedSwitchTabTarget<'_>) -> Result<Value, EngineError> {
+    match target {
+        ParsedSwitchTabTarget::Sheet(sheet_id) => {
+            let _ = app.execute_session_ui_cmd("sheet.select", json!({ "sheet_id": sheet_id }))?;
+            Ok(json!({ "switched": true, "sheet_id": sheet_id, "widget_id": format!("nav.sheet.{sheet_id}") }))
+        }
+        ParsedSwitchTabTarget::Tab(tab_id) => {
+            let active_rs_id = app.document().active_sheet_id.clone();
+            if let Some(rs_id) = active_rs_id
+                && let Some(rs) = app.document().result_sheet(&rs_id).cloned()
+                && rs.tabs.iter().any(|t| t.id == *tab_id || t.title.eq_ignore_ascii_case(tab_id))
+            {
+                if !app.canvas_dialogs.result_view.select_tab_by_id(&rs, tab_id)
+                    && let Some(pos) = rs.tabs.iter().position(|t| t.title.eq_ignore_ascii_case(tab_id))
+                {
+                    app.canvas_dialogs.result_view.active_tab_index = pos;
+                }
+                return Ok(json!({ "switched": true, "tab_id": tab_id, "widget_id": format!("result.tab.{tab_id}") }));
+            }
+            Err(EngineError::with_code(ErrorCode::NotFound, format!("tab `{tab_id}` not found in current UI tree")))
+        }
+    }
+}
+
+fn dispatch_gui_switch_tab(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
+    if app.is_human_path_only() {
+        return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, "direct `ui.switch_tab` is blocked in human-path-only mode"));
+    }
+    let parsed = parse_switch_tab_params(params)?;
+    if matches!(parsed.target, ParsedSwitchTabTarget::Sheet(_)) {
+        let _ = crate::interaction::commit_inline_edit_if_active(app);
+    }
+    if let ParsedSwitchTabTarget::Tab(tab_id) = parsed.target
+        && let Some(res) = try_switch_power_wizard_stage(app, tab_id)?
+    {
+        let _ = step_headless_batches(app, parsed.metrics, Vec::new())?;
+        return Ok(res);
+    }
+    let (meta, _, _) = step_headless_batches(app, parsed.metrics, Vec::new())?;
+    if let Some(entry) = find_switch_tab_widget_in_meta(&meta, &parsed.target) {
+        if !entry.enabled {
+            let tab_label = match parsed.target {
+                ParsedSwitchTabTarget::Sheet(s) => s,
+                ParsedSwitchTabTarget::Tab(t) => t,
+            };
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                entry.disabled_reason.clone().unwrap_or_else(|| format!("tab `{tab_label}` is disabled")),
+            ));
+        }
+        let pos = entry.clipped_rect.center();
+        let wid = entry.widget_id.clone();
+        let _ = step_headless_batches(app, parsed.metrics, click_pos_batches(pos, egui::PointerButton::Primary, Modifiers::NONE))?;
+        return Ok(match parsed.target {
+            ParsedSwitchTabTarget::Sheet(sheet_id) => json!({ "switched": true, "sheet_id": sheet_id, "widget_id": wid }),
+            ParsedSwitchTabTarget::Tab(tab_id) => json!({ "switched": true, "tab_id": tab_id, "widget_id": wid }),
+        });
+    }
+    let out = execute_switch_tab_fallback(app, &parsed.target)?;
+    let _ = step_headless_batches(app, parsed.metrics, Vec::new())?;
+    Ok(out)
+}
+
+/// Parsed and validated `ui.answer_dialog` parameters.
+pub struct ParsedAnswerDialogParams<'a> {
+    pub dialog_id: Option<&'a str>,
+    pub action: Option<String>,
+    pub fields: Option<&'a Map<String, Value>>,
+    pub force_create_new: bool,
+    pub metrics: ViewportMetrics,
+}
+
+/// Parse and validate `ui.answer_dialog` request parameters.
+///
+/// # Errors
+/// Returns [`EngineError`] on invalid `fields`, `dialog_id`, `action`, or `metrics`.
+pub fn parse_answer_dialog_params(params: &Value) -> Result<ParsedAnswerDialogParams<'_>, EngineError> {
+    require_params_object_or_null(params, "ui.answer_dialog").map_err(bad_input_err)?;
+    let dialog_id = opt_non_empty_str_param(params, &["dialog_id"]).map_err(bad_input_err)?;
+    let action = opt_non_empty_str_param(params, &["action"]).map_err(bad_input_err)?.map(|s| s.to_ascii_lowercase());
+    let metrics = parse_viewport_metrics_from_params(params)?;
+    let force_create_new = params.get("force_create_new").and_then(Value::as_bool) == Some(true);
+    let fields = match params.get("fields").or_else(|| params.get("values")).or_else(|| params.get("patches")) {
+        Some(v) if !v.is_null() => Some(v.as_object().ok_or_else(|| bad_input_err("`fields` must be a JSON object"))?),
+        _ => None,
+    };
+    Ok(ParsedAnswerDialogParams { dialog_id, action, fields, force_create_new, metrics })
+}
+
+/// Validate dialog open state and `dialog_id`, then apply any `fields` patch to `app`.
+///
+/// Returns `Ok(Some(json))` when `parsed.action` is `None` (patch-only call); otherwise returns
+/// `Ok(None)` so the caller executes the requested dialog button action.
+///
+/// # Errors
+/// Returns [`EngineError`] on `--gui-only` violation, missing/mismatched dialog, or invalid fields.
+pub fn prepare_answer_dialog_patch(
+    app: &mut UiApp,
+    views: &EguiShellViewState,
+    host_close_dialog_open: bool,
+    parsed: &ParsedAnswerDialogParams<'_>,
+) -> Result<Option<Value>, EngineError> {
+    if app.is_human_path_only() {
+        return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, "direct `ui.answer_dialog` is blocked in human-path-only mode"));
+    }
+    let decision = HybridCoexistenceArbiter::evaluate_with_views(app, views, host_close_dialog_open);
+    if !decision.modal_backdrop_active && app.canvas_dialogs.active_dialog == ActiveDialog::None {
+        return Err(EngineError::with_code(ErrorCode::Conflict, "no modal dialog is currently open"));
+    }
+    if let Some(expected_id) = parsed.dialog_id {
+        let active_slug = resolve_dialog_slug(app, &decision, None);
+        let norm_expected: String = expected_id.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+        let norm_active: String = active_slug.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+        let is_import_wizard_alias = norm_active == "importpastespecial" && norm_expected == "importwizard";
+        if norm_expected != norm_active && !is_import_wizard_alias {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("expected modal dialog `{expected_id}`, but `{active_slug}` is currently open"),
+            ));
+        }
+    }
+
+    let mut want_force_create_new = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }) && parsed.force_create_new;
+    if let Some(fields_map) = parsed.fields {
+        if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. })
+            && (fields_map.get("create_new").and_then(Value::as_bool) == Some(true)
+                || fields_map.get("force_create_new").and_then(Value::as_bool) == Some(true))
+        {
+            want_force_create_new = true;
+        }
+        patch_active_dialog(app, fields_map)?;
+        if want_force_create_new {
+            app.canvas_dialogs.analyze.force_create_new_once = true;
+        }
+        if parsed.action.is_none() {
+            return Ok(Some(json!({ "updated": true, "dialog": format!("{:?}", app.canvas_dialogs.active_dialog) })));
+        }
+    } else if want_force_create_new {
+        app.canvas_dialogs.analyze.force_create_new_once = true;
+    }
+
+    sync_format_points_fallback_targets(app);
+    Ok(None)
+}
+
+/// Candidate widget IDs matching a canonical `ui.answer_dialog` `action` name.
+#[must_use]
+pub fn answer_dialog_candidate_wids(action: &str) -> Vec<String> {
+    match action {
+        "ok" => vec![
+            String::from("dialog.button.ok"),
+            String::from("modal.ok"),
+            String::from("graph_type.apply"),
+            String::from("dialog.button.save"),
+            String::from("nav.delete_confirm.confirm"),
+            String::from("import.commit"),
+            String::from("transform.commit"),
+        ],
+        "create" => vec![String::from("dialog.button.create"), String::from("modal.create"), String::from("modal.ok"), String::from("power.commit")],
+        "cancel" => vec![String::from("dialog.button.cancel"), String::from("modal.cancel"), String::from("nav.delete_confirm.cancel")],
+        "apply" => vec![String::from("dialog.button.apply"), String::from("modal.apply"), String::from("graph_type.apply")],
+        "dont_save" | "discard" => vec![String::from("dialog.button.dont_save"), String::from("modal.discard")],
+        other => vec![format!("dialog.button.{other}"), format!("modal.{other}")],
+    }
+}
+
+/// Execute an `ActiveDialog` button action directly on `app` and return the formatted `ui.answer_dialog` JSON.
+///
+/// # Errors
+/// Returns [`EngineError`] if the button is disabled, unknown, or fails to commit.
+pub fn execute_active_dialog_answer(app: &mut UiApp, action: &str) -> Result<Value, EngineError> {
+    if let Some(eval) = evaluate_dialog_button_for_app(app, action)
+        && !eval.enabled
+    {
+        return Err(EngineError::with_code(
+            ErrorCode::Conflict,
+            eval.disabled_reason.unwrap_or_else(|| format!("dialog button `{action}` is disabled")),
+        ));
+    }
+    let was_power_wizard = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::PowerAndSampleSize);
+    let prev_suppress = app.canvas_dialogs.suppress_auto_open_fit_params;
+    app.canvas_dialogs.suppress_auto_open_fit_params = true;
+    let res =
+        if action == "ok" { submit_active_dialog_ok(app) } else { crate::egui_shell::dialog_actions::execute_dialog_button_action(app, action) };
+    app.canvas_dialogs.suppress_auto_open_fit_params = prev_suppress;
+    let res = res?;
+    if !is_power_studio_dialog_active(app) {
+        super::power_studio::reset_results_transient_state(&mut app.egui_views.power_studio);
+    }
+    let active_after = HybridCoexistenceArbiter::evaluate(app, false).modal_surface != HybridModalSurface::None;
+    let mut out = json!({
+        "answered": true,
+        "action": action,
+        "modal_open_after": active_after,
+        "outcome": res,
+    });
+    if let Some(out_obj) = out.as_object_mut()
+        && let Some(res_map) = res.as_object()
+    {
+        for (k, v) in res_map {
+            out_obj.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        if let Some(payload) = res_map.get("payload").and_then(Value::as_object) {
+            for (k, v) in payload {
+                out_obj.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+    if was_power_wizard
+        && matches!(action, "next" | "back")
+        && let Some(out_obj) = out.as_object_mut()
+    {
+        out_obj.entry(String::from("stage")).or_insert_with(|| json!(app.canvas_dialogs.power_wizard.stage.label()));
+        out_obj.entry(String::from("stage_index")).or_insert_with(|| json!(app.canvas_dialogs.power_wizard.stage.index()));
+    }
+    Ok(out)
+}
+
+/// Format the JSON response payload for a clicked `ui.answer_dialog` button from settled intent outcomes.
+#[must_use]
+pub fn format_answer_dialog_click_result(
+    app: &UiApp,
+    views: &EguiShellViewState,
+    host_close_dialog_open: bool,
+    action: &str,
+    button_widget_id: &str,
+    was_power_wizard: bool,
+    outcomes: &[UiIntentOutcome],
+) -> Value {
+    let outcome = outcomes
+        .iter()
+        .find_map(|o| match o {
+            UiIntentOutcome::Engine { command_id, outcome } => Some(json!({
+                "command_id": command_id,
+                "command_result": outcome.payload,
+            })),
+            UiIntentOutcome::Ui { command_id, result } => Some(json!({
+                "command_id": command_id,
+                "command_result": result,
+            })),
+            UiIntentOutcome::ShellUpdated => None,
+        })
+        .unwrap_or_else(|| json!({}));
+    let active_after = HybridCoexistenceArbiter::evaluate_with_views(app, views, host_close_dialog_open).modal_surface != HybridModalSurface::None;
+    let mut out = json!({
+        "answered": true,
+        "action": action,
+        "button_widget_id": button_widget_id,
+        "modal_open_after": active_after,
+        "outcome": outcome,
+    });
+    if let Some(cmd_res_val) = outcome.get("command_result").filter(|v| !v.is_null())
+        && let Some(out_obj) = out.as_object_mut()
+        && let Some(cmd_res) = cmd_res_val.as_object()
+    {
+        for (k, v) in cmd_res {
+            out_obj.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        if !cmd_res.contains_key("payload") {
+            out_obj.entry(String::from("payload")).or_insert_with(|| cmd_res_val.clone());
+        }
+    }
+    if was_power_wizard
+        && matches!(action, "next" | "back")
+        && let Some(out_obj) = out.as_object_mut()
+    {
+        out_obj.entry(String::from("stage")).or_insert_with(|| json!(app.canvas_dialogs.power_wizard.stage.label()));
+        out_obj.entry(String::from("stage_index")).or_insert_with(|| json!(app.canvas_dialogs.power_wizard.stage.index()));
+    }
+    out
+}
+
+fn dispatch_gui_answer_dialog(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
+    let parsed = parse_answer_dialog_params(params)?;
+    let views_snapshot = app.egui_views.clone();
+    if let Some(patch_only_res) = prepare_answer_dialog_patch(app, &views_snapshot, false, &parsed)? {
+        let _ = step_headless_batches(app, parsed.metrics, Vec::new())?;
+        return Ok(patch_only_res);
+    }
+
+    let action = parsed.action.unwrap_or_else(|| String::from("ok"));
+    let (meta, _, _) = step_headless_batches(app, parsed.metrics, Vec::new())?;
+    if app.canvas_dialogs.active_dialog != ActiveDialog::None
+        && let Some(eval) = evaluate_dialog_button_for_app(app, &action)
+        && !eval.enabled
+    {
+        return Err(EngineError::with_code(
+            ErrorCode::Conflict,
+            eval.disabled_reason.unwrap_or_else(|| format!("dialog button `{action}` is disabled")),
+        ));
+    }
+
+    let candidate_wids = answer_dialog_candidate_wids(&action);
+    if let Some(entry) = candidate_wids.iter().find_map(|w| meta.find_by_widget_id(w)) {
+        if !entry.enabled {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                entry.disabled_reason.clone().unwrap_or_else(|| format!("dialog button `{action}` is disabled")),
+            ));
+        }
+        let pos = entry.clipped_rect.center();
+        let button_wid = entry.widget_id.clone();
+        let was_power_wizard = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::PowerAndSampleSize);
+        let prev_suppress = app.canvas_dialogs.suppress_auto_open_fit_params;
+        app.canvas_dialogs.suppress_auto_open_fit_params = true;
+        let step_res = step_headless_batches(app, parsed.metrics, click_pos_batches(pos, egui::PointerButton::Primary, Modifiers::NONE));
+        app.canvas_dialogs.suppress_auto_open_fit_params = prev_suppress;
+        let (_, _, outcomes) = step_res?;
+        let views_after = app.egui_views.clone();
+        return Ok(format_answer_dialog_click_result(app, &views_after, false, &action, &button_wid, was_power_wizard, &outcomes));
+    }
+
+    if app.canvas_dialogs.active_dialog != ActiveDialog::None {
+        let out = execute_active_dialog_answer(app, &action)?;
+        let _ = step_headless_batches(app, parsed.metrics, Vec::new())?;
+        return Ok(out);
+    }
+
+    Err(EngineError::with_code(ErrorCode::NotFound, format!("dialog button `{action}` not found on active modal")))
 }
 
 /// Render a minimal `egui_shell` workspace + `About` modal view (`R15.1` b4/b5) using canonical
@@ -1378,19 +3898,56 @@ fn handle_shell_global_shortcuts(
         && (!app.document().graph_sheets.is_empty() || !app.document().layout_sheets.is_empty());
     let mut slide_copy_triggered = false;
 
-    while let Some(m) = consume_matching_shortcut(ctx, app, on_result_sheet, |cmd| match cmd {
-        "ui.editParams.open" => on_result_sheet,
-        "ui.sheet.find" => on_searchable_sheet,
-        "ui.palette.open" | "edit.redo" | "edit.undo" | "ui.split.toggle" | "ui.pane.cycle" => true,
-        "edit.copy" => true,
-        "ui.clipboard.copyForSlides" => has_renderable_figure,
-        "edit.paste" | "edit.pasteImage" | "table.paste" => active_canvas_target.is_some(),
-        _ => false,
+    while let Some(m) = consume_matching_shortcut(ctx, app, on_result_sheet, |cmd| {
+        if matches!(
+            cmd,
+            "project.save"
+                | "project.saveAs"
+                | "project.open"
+                | "file.open"
+                | "file.save"
+                | "file.saveAs"
+                | "window.new"
+                | "window.close"
+                | "app.quit"
+        ) {
+            return false;
+        }
+        if app.host_draws_menu_bar
+            && !matches!(cmd, "edit.copy" | "edit.paste" | "edit.pasteImage" | "table.paste" | "ui.clipboard.copyForSlides")
+            && (is_desktop_host_routed_command(cmd) || cmd == "app.preferences")
+        {
+            return false;
+        }
+        match cmd {
+            "ui.editParams.open" => on_result_sheet,
+            "ui.sheet.find" => on_searchable_sheet,
+            "ui.clipboard.copyForSlides" => has_renderable_figure,
+            "edit.paste" | "edit.pasteImage" | "table.paste" => active_canvas_target.is_some(),
+            // Let LeadingDock / TrailingStudio / DataGrid own pane toggles, inline rename, and cell exclude/clear.
+            "ui.navigator.toggle"
+            | "ui.inspector.toggle"
+            | "ui.family.toggle"
+            | "sheet.rename"
+            | "table.excludeCells"
+            | "ui.grid.excludeWithReason"
+            | "table.clearCells" => false,
+            "ui.zoom.fitSheet" => {
+                let doc = app.document();
+                let canvas_moved = (app.canvas_dialogs.canvas.zoom - 1.0).abs() > 0.001
+                    || app.canvas_dialogs.canvas.pan_pt.x.abs() > 0.001
+                    || app.canvas_dialogs.canvas.pan_pt.y.abs() > 0.001;
+                let ui_zoomed = (app.ui_scale() - 1.0).abs() > 0.001;
+                doc.total_sheet_count() > 0 && (canvas_moved || !ui_zoomed)
+            }
+            _ => true,
+        }
     }) {
         match m.command_id.as_str() {
             "ui.editParams.open" => intents.push_ui("ui.editParams.open", json!({})),
-            "ui.sheet.find" => intents.push(crate::egui_shell::UiIntent::OpenSheetFind),
-            "ui.palette.open" => intents.push_set_palette_open(true),
+            "ui.sheet.find" => intents.push(UiIntent::OpenSheetFind),
+            "ui.palette.open" => intents.push(UiIntent::SetPaletteOpen { open: true }),
+            "sheet.createData" => intents.push(UiIntent::SetLauncherOpen { open: true }),
             "edit.redo" => {
                 if app.session().redo_depth() > 0 {
                     intents.push_engine("edit.redo", json!({}));
@@ -1403,20 +3960,27 @@ fn handle_shell_global_shortcuts(
             }
             "edit.copy" => {
                 let dpi = ViewportMetrics::new(1.0, 1.0, f64::from(ctx.pixels_per_point())).dpi_for_base(144);
-                intents.push_workspace_copy(dpi);
+                intents.push(UiIntent::WorkspaceCopy { dpi });
             }
             "ui.clipboard.copyForSlides" => {
                 slide_copy_triggered = true;
-                intents.push_workspace_copy_for_slides(300);
+                intents.push(UiIntent::WorkspaceCopyForSlides { dpi: 300 });
             }
             "edit.paste" | "edit.pasteImage" | "table.paste" => {
                 if let Some(ref target_id) = active_canvas_target {
-                    intents.push_canvas_paste(target_id.clone(), None);
+                    intents.push(UiIntent::CanvasPaste { target_sheet_id: target_id.clone(), anchor_pt: None });
                 }
             }
             "ui.split.toggle" => intents.push_ui("ui.split.toggle", json!({})),
             "ui.pane.cycle" => intents.push_ui("ui.pane.cycle", m.params),
-            _ => {}
+            other => {
+                let resolved_params = if m.params.is_null() { contextual_command_params(app, other) } else { m.params };
+                if UI_COMMANDS.iter().any(|spec| spec.id == other) || other.starts_with("ui.") || other.starts_with("app.") {
+                    intents.push_ui(other, resolved_params);
+                } else if cmd::registry().get(other).is_some() {
+                    intents.push_engine(other, resolved_params);
+                }
+            }
         }
     }
 
@@ -1457,7 +4021,7 @@ fn handle_shell_global_shortcuts(
     });
     if copy_triggered {
         let dpi = ViewportMetrics::new(1.0, 1.0, f64::from(ctx.pixels_per_point())).dpi_for_base(144);
-        intents.push_workspace_copy(dpi);
+        intents.push(UiIntent::WorkspaceCopy { dpi });
     }
 
     if let Some(target_id) = active_canvas_target {
@@ -1482,7 +4046,7 @@ fn handle_shell_global_shortcuts(
             hit
         });
         if paste_triggered {
-            intents.push_canvas_paste(target_id, None);
+            intents.push(UiIntent::CanvasPaste { target_sheet_id: target_id, anchor_pt: None });
         }
     }
 }
@@ -1606,5 +4170,520 @@ mod tests {
             assert!((round[0] - logical[0]).abs() < 1e-6);
             assert!((round[1] - logical[1]).abs() < 1e-6);
         }
+    }
+
+    fn build_xy_app_with_graphs() -> Result<UiApp, String> {
+        let mut app = UiApp::new();
+        app.execute_command("sheet.createData", json!({ "sheet_id": "ds-1", "kind": "xy", "cols": 1, "rows": 3, "auto_graph": false }))
+            .map_err(|e| e.to_string())?;
+        app.execute_command("table.setXCells", json!({ "sheet_id": "ds-1", "values": [1.0, 2.0, 3.0] })).map_err(|e| e.to_string())?;
+        app.execute_command("table.setCells", json!({ "sheet_id": "ds-1", "rows": [[10.0], [20.0], [30.0]] })).map_err(|e| e.to_string())?;
+        app.execute_command("graph.create", json!({ "sheet_id": "gs-a", "data_sheet_id": "ds-1", "title": "Graph A" })).map_err(|e| e.to_string())?;
+        app.execute_command("graph.create", json!({ "sheet_id": "gs-b", "data_sheet_id": "ds-1", "title": "Graph B" })).map_err(|e| e.to_string())?;
+        app.execute_command("sheet.select", json!({ "sheet_id": "gs-a" })).map_err(|e| e.to_string())?;
+        app.sync_views();
+        Ok(app)
+    }
+
+    #[test]
+    fn m2_inspect_canvas_points_have_bounds_immediately_and_after_sheet_switch() -> Result<(), String> {
+        let mut app = build_xy_app_with_graphs()?;
+        let metrics = ViewportMetrics::default();
+
+        // First ui.inspect without any prior pointer_gesture must populate bounds on canvas.point.*.
+        let snap_a = inspect_live_egui_snapshot(&app, metrics, Some("canvas"), true);
+        let pts_a: Vec<&UiWidgetNode> =
+            snap_a.canvas_elements.as_deref().unwrap_or_default().iter().filter(|n| n.widget_id.starts_with("canvas.point.")).collect();
+        assert_eq!(pts_a.len(), 3, "expected 3 plotted points on Graph A");
+        assert!(pts_a.iter().all(|n| n.bounds.is_some()), "initial inspect missing canvas.point bounds: {pts_a:?}");
+
+        // Immediate inspect after sheet.select to Graph B must also populate bounds.
+        app.execute_session_ui_cmd("sheet.select", json!({ "sheet_id": "gs-b" })).map_err(|e| e.to_string())?;
+        let snap_b = inspect_live_egui_snapshot(&app, metrics, Some("canvas"), true);
+        let pts_b: Vec<&UiWidgetNode> =
+            snap_b.canvas_elements.as_deref().unwrap_or_default().iter().filter(|n| n.widget_id.starts_with("canvas.point.")).collect();
+        assert_eq!(pts_b.len(), 3, "expected 3 plotted points on Graph B");
+        assert!(pts_b.iter().all(|n| n.bounds.is_some()), "post-switch inspect missing canvas.point bounds: {pts_b:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn m2_inspect_scope_tabs_includes_modal_tabs() -> Result<(), String> {
+        let mut app = build_xy_app_with_graphs()?;
+        dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.graph.axes.open" })).map_err(|e| e.to_string())?;
+        let metrics = ViewportMetrics::default();
+
+        let snap_all = inspect_live_egui_snapshot(&app, metrics, Some("all"), true);
+        let snap_tabs = inspect_live_egui_snapshot(&app, metrics, Some("tabs"), true);
+        let all_edit_tabs: Vec<&str> =
+            snap_all.tabs.as_deref().unwrap_or_default().iter().map(|t| t.widget_id.as_str()).filter(|w| w.starts_with("edit.tab.")).collect();
+        let scope_edit_tabs: Vec<&str> =
+            snap_tabs.tabs.as_deref().unwrap_or_default().iter().map(|t| t.widget_id.as_str()).filter(|w| w.starts_with("edit.tab.")).collect();
+        assert!(!all_edit_tabs.is_empty(), "expected edit.tab.* in scope=all");
+        assert_eq!(scope_edit_tabs, all_edit_tabs, "scope=tabs must preserve modal dialog.tabs");
+        Ok(())
+    }
+
+    #[test]
+    fn m2_press_key_enter_commits_modals_without_breaking_multiline_or_wizards() -> Result<(), String> {
+        // 1. SimulateDistributions commits on Enter via egui::Context::run.
+        let mut app = build_xy_app_with_graphs()?;
+        app.canvas_dialogs.open_simulate_distributions();
+        let before_sheets = app.document().data_sheets.len();
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None, "SimulateDistributions must close on Enter");
+        assert_eq!(app.document().data_sheets.len(), before_sheets + 1, "SimulateDistributions must create DataSheet on Enter");
+
+        // 2. FormatAxes (graph_modals) commits and closes on Enter.
+        dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.graph.axes.open" })).map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None, "FormatAxes must close on Enter");
+
+        // 3. Preferences (app_modals) saves and closes on Enter.
+        app.egui_views.app_modals.preferences_open = true;
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert!(!app.egui_views.app_modals.preferences_open, "Preferences must close on Enter");
+
+        // 4. ExcludeWithReason multiline textbox keeps Enter as newline without submitting, and Cmd+Enter submits.
+        app.canvas_dialogs.open_exclude_with_reason(curvebook_doc::SheetId::from("ds-1"), vec![curvebook_tools::GridCellCoord::new(0, 0, 0)]);
+        dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "exclude.note" })).map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.type_text", json!({ "text": "Line1" })).map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert!(
+            matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ExcludeWithReason { .. }),
+            "plain Enter in multiline exclude.note must keep modal open"
+        );
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter", "modifiers": { "meta": true } })).map_err(|e| e.to_string())?;
+        assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None, "Cmd+Enter must commit ExcludeWithReason");
+
+        // 5. PowerWizard step-by-step wizard advances from Stage 1 -> Stage 2 on Enter instead of skipping/erroring.
+        app.canvas_dialogs.open_power_wizard();
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert_eq!(app.canvas_dialogs.power_wizard.stage, crate::power_wizard::PowerWizardStage::EffectSize);
+        Ok(())
+    }
+
+    #[test]
+    fn m2_answer_dialog_strict_action_validation_and_shell_dialog_id() -> Result<(), String> {
+        let mut app = build_xy_app_with_graphs()?;
+        app.execute_command("sheet.select", json!({ "sheet_id": "ds-1" })).map_err(|e| e.to_string())?;
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_analyze_dialog(&doc, &curvebook_doc::SheetId::from("ds-1")));
+        app.canvas_dialogs.analyze.selected_entry_id = Some(String::from("fit.linear"));
+
+        let err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "nonexistent_btn_xyz" }))
+            .err()
+            .ok_or_else(|| String::from("expected NotFound for nonexistent button"))?;
+        assert_eq!(err.code, ErrorCode::NotFound, "expected NotFound, got {err:?}");
+        assert!(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }), "dialog must remain open");
+        assert!(app.document().result_sheets.is_empty(), "nonexistent action must not commit analysis");
+
+        let apply_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "apply" }))
+            .err()
+            .ok_or_else(|| String::from("expected NotFound for unsupported apply on AnalyzeSheet"))?;
+        assert_eq!(apply_err.code, ErrorCode::NotFound, "expected NotFound for apply on AnalyzeSheet, got {apply_err:?}");
+        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "cancel" })).map_err(|e| e.to_string())?;
+
+        // Shell-managed Preferences modal validates `dialog_id: "preferences"`.
+        app.egui_views.app_modals.preferences_open = true;
+        let mismatch = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "dialog_id": "analyze_sheet", "action": "ok" }))
+            .err()
+            .ok_or_else(|| String::from("expected Conflict for mismatched dialog_id"))?;
+        assert_eq!(mismatch.code, ErrorCode::Conflict);
+
+        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "dialog_id": "preferences", "action": "ok" })).map_err(|e| e.to_string())?;
+        assert!(!app.egui_views.app_modals.preferences_open, "preferences must close when answered with dialog_id=preferences");
+        Ok(())
+    }
+
+    #[test]
+    fn m2_power_stage_1_based_switch_tab_and_disabled_hover_and_dialog_patch_bad_input() -> Result<(), String> {
+        let mut app = build_xy_app_with_graphs()?;
+        app.canvas_dialogs.open_power_wizard();
+
+        // Disabled hover/move succeeds while click fails with Conflict.
+        dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "hover", "widget_id": "dialog.button.back" }))
+            .map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "move", "widget_id": "dialog.button.back" }))
+            .map_err(|e| e.to_string())?;
+        let click_err = dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.back" }))
+            .err()
+            .ok_or_else(|| String::from("expected Conflict clicking disabled back button"))?;
+        assert_eq!(click_err.code, ErrorCode::Conflict);
+
+        // 1-based power.stage.* tabs align with ui.inspect.
+        let s3 = dispatch_gui_action(&mut app, "ui.switch_tab", json!({ "tab_id": "power.stage.3" })).map_err(|e| e.to_string())?;
+        assert_eq!(s3.get("stage_index").and_then(Value::as_u64), Some(2));
+        let s4 = dispatch_gui_action(&mut app, "ui.switch_tab", json!({ "tab_id": "power.stage.4" })).map_err(|e| e.to_string())?;
+        assert_eq!(s4.get("stage_index").and_then(Value::as_u64), Some(3));
+        let s1 = dispatch_gui_action(&mut app, "ui.switch_tab", json!({ "tab_id": "power.stage.1" })).map_err(|e| e.to_string())?;
+        assert_eq!(s1.get("stage_index").and_then(Value::as_u64), Some(0));
+
+        // Unknown field keys in PowerAndSampleSize / AnalyzeSheet / EditAnalysisParameters return BadInput.
+        let pw_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "unknown_xyz": 1 } }))
+            .err()
+            .ok_or_else(|| String::from("expected BadInput for unknown power field"))?;
+        assert_eq!(pw_err.code, ErrorCode::BadInput, "got {pw_err:?}");
+        app.canvas_dialogs.close_dialog();
+
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_analyze_dialog(&doc, &curvebook_doc::SheetId::from("ds-1")));
+        let az_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "unknown_xyz": 1 } }))
+            .err()
+            .ok_or_else(|| String::from("expected BadInput for unknown analyze field"))?;
+        assert_eq!(az_err.code, ErrorCode::BadInput, "got {az_err:?}");
+        // Genuine disabled precondition still returns Conflict.
+        let az_dis = dispatch_gui_action(
+            &mut app,
+            "ui.answer_dialog",
+            json!({ "fields": { "entry_id": "stats.correlation", "correlation_all_pairs": false, "correlation_heatmap": true } }),
+        )
+        .err()
+        .ok_or_else(|| String::from("expected Conflict for disabled heatmap"))?;
+        assert_eq!(az_dis.code, ErrorCode::Conflict, "got {az_dis:?}");
+        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "entry_id": "fit.linear" } }))
+            .map_err(|e| e.to_string())?;
+
+        // EditAnalysisParameters unknown key returns BadInput.
+        let rs_id = app.document().result_sheets.first().map(|r| r.id.clone()).ok_or_else(|| String::from("missing result sheet"))?;
+        let doc_after = app.document().clone();
+        assert!(app.canvas_dialogs.open_edit_parameters(&doc_after, &rs_id));
+        let ep_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "unknown_xyz": 1 } }))
+            .err()
+            .ok_or_else(|| String::from("expected BadInput for unknown edit_params field"))?;
+        assert_eq!(ep_err.code, ErrorCode::BadInput, "got {ep_err:?}");
+        app.canvas_dialogs.close_dialog();
+        Ok(())
+    }
+
+    #[test]
+    fn m2_type_text_on_linked_data_region_returns_conflict() -> Result<(), String> {
+        let mut app = UiApp::new();
+        app.execute_command("sheet.createData", json!({ "sheet_id": "ds-lnk", "kind": "column", "cols": 1, "rows": 2, "auto_graph": false }))
+            .map_err(|e| e.to_string())?;
+        app.execute_command("table.setCells", json!({ "sheet_id": "ds-lnk", "rows": [[250.0], [350.0]] })).map_err(|e| e.to_string())?;
+        let mut doc = app.document().clone();
+        doc.data_sheet_mut(&curvebook_doc::SheetId::from("ds-lnk"))
+            .ok_or_else(|| String::from("missing ds-lnk"))?
+            .add_linked_region(curvebook_doc::LinkedDataRegion {
+                id: String::from("link-1"),
+                spec: curvebook_doc::ImportLinkSpec {
+                    source: curvebook_doc::LinkSource::Clipboard,
+                    filter: Default::default(),
+                    placement: Default::default(),
+                },
+                target_range: curvebook_doc::SheetCellRange::new(curvebook_doc::CellCoord::new(0, 0, 0), curvebook_doc::CellCoord::new(1, 0, 0)),
+                provenance_summary: String::from("Linked"),
+            })
+            .map_err(|e| e.to_string())?;
+        doc.active_sheet_id = Some(curvebook_doc::SheetId::from("ds-lnk"));
+        app = UiApp::from_session(curvebook_engine::Session::from_document(doc));
+        app.sync_views();
+
+        let err = dispatch_gui_action(&mut app, "ui.type_text", json!({ "widget_id": "grid.cell.0.0.0", "text": "999", "submit": true }))
+            .err()
+            .ok_or_else(|| String::from("expected Conflict typing into LinkedDataRegion cell"))?;
+        assert_eq!(err.code, ErrorCode::Conflict, "got {err:?}");
+
+        // Sequential focus (click then type_text without widget_id) must also return Conflict.
+        let seq_err = dispatch_gui_action(&mut app, "ui.type_text", json!({ "text": "999", "submit": true }))
+            .err()
+            .ok_or_else(|| String::from("expected Conflict on focused LinkedDataRegion cell"))?;
+        assert_eq!(seq_err.code, ErrorCode::Conflict, "got {seq_err:?}");
+
+        let cell_val = app
+            .document()
+            .data_sheet(&curvebook_doc::SheetId::from("ds-lnk"))
+            .and_then(|ds| ds.cell(curvebook_doc::CellCoord::new(0, 0, 0)))
+            .and_then(|c| c.active_number());
+        assert_eq!(cell_val, Some(250.0), "LinkedDataRegion cell must remain unmodified");
+        Ok(())
+    }
+
+    #[test]
+    fn m2_iter3_pinch_short_drag_human_path_import_wizard_and_format_points() -> Result<(), String> {
+        let mut app = build_xy_app_with_graphs()?;
+
+        // 1. Pinch rejects scale_delta <= 0 / NaN with BadInput and accepts positive finite values.
+        for bad_delta in [json!(0.0), json!(-1.5), json!("bad")] {
+            let err =
+                dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "pinch", "x": 400.0, "y": 300.0, "scale_delta": bad_delta }))
+                    .err()
+                    .ok_or_else(|| format!("expected BadInput for scale_delta={bad_delta}"))?;
+            assert_eq!(err.code, ErrorCode::BadInput, "got {err:?}");
+        }
+        dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "pinch", "x": 400.0, "y": 300.0, "scale_delta": 1.25 }))
+            .map_err(|e| e.to_string())?;
+
+        // 2. human_path_only blocks to_widget_id / end_widget_id as well as widget_id.
+        app.set_human_path_only(true);
+        let to_wid_err = dispatch_gui_action(
+            &mut app,
+            "ui.pointer_gesture",
+            json!({ "action": "drag", "x": 100.0, "y": 100.0, "to_widget_id": "nav.sheet.ds-1" }),
+        )
+        .err()
+        .ok_or_else(|| String::from("expected GuiOnlyViolation for to_widget_id under human_path_only"))?;
+        assert_eq!(to_wid_err.code, ErrorCode::GuiOnlyViolation, "got {to_wid_err:?}");
+        app.set_human_path_only(false);
+
+        // 3. Short drags (7.5pt and 9.0pt) on canvas.layout_panel.0 genuinely translate bounds_pt.x.
+        app.execute_command("layout.create", json!({ "sheet_id": "ly-m2", "title": "Layout M2" })).map_err(|e| e.to_string())?;
+        let item = curvebook_doc::LayoutItem::LiveGraph {
+            id: String::from("item-1"),
+            graph_sheet_id: curvebook_doc::SheetId::from("gs-a"),
+            bounds_pt: curvebook_doc::RectPt::new(40.0, 40.0, 200.0, 150.0),
+            scale_percent: 100.0,
+            badge_override: None,
+        };
+        app.execute_command("layout.setSpec", json!({ "sheet_id": "ly-m2", "spec": { "items": [item] } })).map_err(|e| e.to_string())?;
+        app.execute_command("sheet.select", json!({ "sheet_id": "ly-m2" })).map_err(|e| e.to_string())?;
+        app.sync_views();
+
+        let metrics = ViewportMetrics::default();
+        let read_x = |a: &UiApp| -> Result<f64, String> {
+            a.document()
+                .layout_sheet(&curvebook_doc::SheetId::from("ly-m2"))
+                .and_then(|ls| ls.spec.items.first())
+                .and_then(|it| match it {
+                    curvebook_doc::LayoutItem::LiveGraph { bounds_pt, .. } => Some(bounds_pt.x),
+                    _ => None,
+                })
+                .ok_or_else(|| String::from("missing layout item 0"))
+        };
+        for dist_pt in [7.5_f64, 9.0_f64] {
+            let before_x = read_x(&app)?;
+            let snap = inspect_live_egui_snapshot(&app, metrics, Some("canvas"), true);
+            let panel = snap
+                .canvas_elements
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find(|n| n.widget_id == "canvas.layout_panel.0")
+                .and_then(|n| n.bounds.as_ref())
+                .ok_or_else(|| String::from("missing canvas.layout_panel.0 bounds"))?;
+            let cx = panel[0] + panel[2] * 0.5;
+            let cy = panel[1] + panel[3] * 0.5;
+            dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "drag", "x": cx, "y": cy, "to_x": cx + dist_pt, "to_y": cy }))
+                .map_err(|e| e.to_string())?;
+            let after_x = read_x(&app)?;
+            assert!(after_x > before_x, "short {dist_pt}pt drag produced zero delta_x ({before_x} -> {after_x})");
+        }
+
+        // 4. ui.answer_dialog accepts `dialog_id: "import_wizard"` alias for HybridModalSurface::EguiImportWizard.
+        app.execute_command("sheet.select", json!({ "sheet_id": "ds-1" })).map_err(|e| e.to_string())?;
+        app.grid.import_wizard.open = true;
+        let mismatch = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "dialog_id": "preferences", "action": "cancel" }))
+            .err()
+            .ok_or_else(|| String::from("expected Conflict for mismatched dialog_id"))?;
+        assert_eq!(mismatch.code, ErrorCode::Conflict);
+        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "dialog_id": "import_wizard", "action": "cancel" })).map_err(|e| e.to_string())?;
+        assert!(!app.grid.import_wizard.open, "import_wizard must close when answered with dialog_id=import_wizard");
+
+        // 5. FormatSelectedPoints rejects `action: "apply"` with NotFound even with 0 selected points.
+        app.execute_command("sheet.select", json!({ "sheet_id": "gs-a" })).map_err(|e| e.to_string())?;
+        let doc_fp = app.document().clone();
+        assert!(app.canvas_dialogs.open_format_selected_points(&doc_fp, &curvebook_doc::SheetId::from("gs-a"), Vec::new()));
+        let fp_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "apply" }))
+            .err()
+            .ok_or_else(|| String::from("expected NotFound for FormatSelectedPoints apply"))?;
+        assert_eq!(fp_err.code, ErrorCode::NotFound, "got {fp_err:?}");
+        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "cancel" })).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn m2_iter3_singleline_textbox_enter_does_not_dismiss_fit_stat_or_anova_modals() -> Result<(), String> {
+        let mut app = build_xy_app_with_graphs()?;
+        app.execute_command("sheet.createData", json!({ "sheet_id": "ds-fit", "kind": "xy", "cols": 1, "rows": 6, "auto_graph": false }))
+            .map_err(|e| e.to_string())?;
+        app.execute_command("table.setXCells", json!({ "sheet_id": "ds-fit", "values": [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0] }))
+            .map_err(|e| e.to_string())?;
+        app.execute_command("table.setCells", json!({ "sheet_id": "ds-fit", "rows": [[10.0], [15.0], [35.0], [65.0], [88.0], [95.0]] }))
+            .map_err(|e| e.to_string())?;
+
+        let open_edit_for_entry = |a: &mut UiApp, sheet_id: &str, entry_id: &str| -> Result<curvebook_doc::SheetId, String> {
+            let doc = a.document().clone();
+            assert!(a.canvas_dialogs.open_analyze_dialog(&doc, &curvebook_doc::SheetId::from(sheet_id)));
+            dispatch_gui_action(a, "ui.answer_dialog", json!({ "action": "ok", "fields": { "entry_id": entry_id } })).map_err(|e| e.to_string())?;
+            if let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &a.canvas_dialogs.active_dialog {
+                return Ok(result_sheet_id.clone());
+            }
+            let rs_id = a.document().result_sheets.last().map(|r| r.id.clone()).ok_or_else(|| String::from("missing result sheet"))?;
+            let doc2 = a.document().clone();
+            assert!(a.canvas_dialogs.open_edit_parameters(&doc2, &rs_id), "failed to open edit parameters for {rs_id}");
+            Ok(rs_id)
+        };
+
+        // 1. FitModal (`fit.eq.search`): Enter inside singleline textbox keeps modal open; unfocused Enter commits.
+        let nl_rs_id = open_edit_for_entry(&mut app, "ds-fit", "fit.nonlinear")?;
+        dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "fit.eq.search" })).map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.type_text", json!({ "text": "4pl" })).map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert!(
+            matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }),
+            "Enter inside fit.eq.search must keep FitModal open"
+        );
+        // After TextEdit released focus on Enter, unfocused Enter commits the FitModal.
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None, "unfocused Enter must commit FitModal");
+
+        // 2. ConstantHookPicker (`hook.search_input`): Enter inside search textbox keeps modal open.
+        let doc = app.document().clone();
+        app.canvas_dialogs.open_hook_picker(&doc, &nl_rs_id, Some(String::from("Top")));
+        if app.canvas_dialogs.hook_picker.options.is_empty() {
+            app.canvas_dialogs.hook_picker.options.push(crate::dialogs_canvas::AvailableHookOption {
+                label: String::from("Mock Info"),
+                preview_value: String::from("1.0"),
+                template_token: String::from("{{info.mock}}"),
+                source: curvebook_doc::HookSource::InfoConstant {
+                    info_sheet_id: Some(curvebook_doc::SheetId::from("info-1")),
+                    constant_name: String::from("mock"),
+                },
+            });
+        }
+        app.canvas_dialogs.hook_picker.selected_index = Some(0);
+        dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "hook.search_input" }))
+            .map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.type_text", json!({ "text": "Mock" })).map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert!(
+            matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ConstantHookPicker { .. }),
+            "Enter inside hook.search_input must keep ConstantHookPicker open"
+        );
+        app.canvas_dialogs.close_dialog();
+
+        // 3. stat_params (`edit.custom_title` and `edit.two_group.hypothetical`): Enter inside textbox keeps modal open; unfocused Enter commits.
+        app.execute_command("sheet.createData", json!({ "sheet_id": "ds-col", "kind": "column", "cols": 3, "rows": 4, "auto_graph": false }))
+            .map_err(|e| e.to_string())?;
+        app.execute_command(
+            "table.setCells",
+            json!({ "sheet_id": "ds-col", "rows": [[1.0, 2.0, 5.0], [3.0, 4.0, 6.0], [5.0, 6.0, 7.0], [7.0, 8.0, 9.0]] }),
+        )
+        .map_err(|e| e.to_string())?;
+        let _tg_rs_id = open_edit_for_entry(&mut app, "ds-col", "stats.two_group")?;
+        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "two_group_method": "one_sample_t" } })).map_err(|e| e.to_string())?;
+
+        dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "edit.two_group.hypothetical" }))
+            .map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.type_text", json!({ "text": "42" })).map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert!(
+            matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }),
+            "Enter inside edit.two_group.hypothetical must keep stat_params open"
+        );
+
+        dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "edit.custom_title" }))
+            .map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.type_text", json!({ "text": "Custom" })).map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert!(
+            matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }),
+            "Enter inside edit.custom_title must keep stat_params open"
+        );
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None, "unfocused Enter must commit stat_params");
+
+        // 4. stat_anova_modal (`OneWayAnova`): unfocused Enter commits cleanly.
+        let _av_rs_id = open_edit_for_entry(&mut app, "ds-col", "stats.one_way_anova")?;
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None, "unfocused Enter must commit OneWayAnova");
+        Ok(())
+    }
+
+    #[test]
+    fn m2_iter4_render_modal_textbox_row_enter_commits_without_refocus_trap() -> Result<(), String> {
+        let mut app = build_xy_app_with_graphs()?;
+        app.execute_command("sheet.createData", json!({ "sheet_id": "ds-fit", "kind": "xy", "cols": 1, "rows": 6, "auto_graph": false }))
+            .map_err(|e| e.to_string())?;
+        app.execute_command("table.setXCells", json!({ "sheet_id": "ds-fit", "values": [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0] }))
+            .map_err(|e| e.to_string())?;
+        app.execute_command("table.setCells", json!({ "sheet_id": "ds-fit", "rows": [[10.0], [15.0], [35.0], [65.0], [88.0], [95.0]] }))
+            .map_err(|e| e.to_string())?;
+        app.execute_command("sheet.createData", json!({ "sheet_id": "ds-col", "kind": "column", "cols": 3, "rows": 4, "auto_graph": false }))
+            .map_err(|e| e.to_string())?;
+        app.execute_command(
+            "table.setCells",
+            json!({ "sheet_id": "ds-col", "rows": [[1.0, 2.0, 5.0], [3.0, 4.0, 6.0], [5.0, 6.0, 7.0], [7.0, 8.0, 9.0]] }),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let open_edit = |a: &mut UiApp, sheet_id: &str, entry_id: &str| -> Result<curvebook_doc::SheetId, String> {
+            let doc = a.document().clone();
+            assert!(a.canvas_dialogs.open_analyze_dialog(&doc, &curvebook_doc::SheetId::from(sheet_id)));
+            dispatch_gui_action(a, "ui.answer_dialog", json!({ "action": "ok", "fields": { "entry_id": entry_id } })).map_err(|e| e.to_string())?;
+            if let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &a.canvas_dialogs.active_dialog {
+                return Ok(result_sheet_id.clone());
+            }
+            let rs_id = a.document().result_sheets.last().map(|r| r.id.clone()).ok_or_else(|| String::from("missing result sheet"))?;
+            let doc2 = a.document().clone();
+            assert!(a.canvas_dialogs.open_edit_parameters(&doc2, &rs_id), "open edit params {rs_id}");
+            Ok(rs_id)
+        };
+
+        let verify_textbox_enter_commit = |a: &mut UiApp, tab_id: Option<&str>, widget_id: &str, text: &str| -> Result<(), String> {
+            if let Some(tab) = tab_id {
+                dispatch_gui_action(a, "ui.switch_tab", json!({ "tab_id": tab })).map_err(|e| e.to_string())?;
+            }
+            dispatch_gui_action(a, "ui.pointer_gesture", json!({ "action": "click", "widget_id": widget_id })).map_err(|e| e.to_string())?;
+            dispatch_gui_action(a, "ui.type_text", json!({ "text": text })).map_err(|e| e.to_string())?;
+            dispatch_gui_action(a, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+            assert!(
+                matches!(a.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }),
+                "1st Enter inside {widget_id} must keep modal open"
+            );
+            let snap = inspect_live_egui_snapshot(a, ViewportMetrics::default(), Some("dialog"), false);
+            assert_eq!(snap.focus_widget_id, None, "1st Enter must clear textbox focus on {widget_id}");
+            dispatch_gui_action(a, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+            assert_eq!(a.canvas_dialogs.active_dialog, ActiveDialog::None, "2nd Enter must commit modal after {widget_id}");
+            Ok(())
+        };
+
+        // 1. FitModal (`fit.nonlinear` -> `fit.tab.output` -> `fit.diagnostics.r2.input`)
+        let nl_rs_id = open_edit(&mut app, "ds-fit", "fit.nonlinear")?;
+        verify_textbox_enter_commit(&mut app, Some("fit.tab.output"), "fit.diagnostics.r2.input", "0.95")?;
+        let committed_r2 = app.document().result_sheet(&nl_rs_id).and_then(|rs| match &rs.analysis.kind {
+            curvebook_doc::AnalysisKind::NonlinearRegression(fit) => fit.flag_r_squared_below,
+            _ => None,
+        });
+        assert!(committed_r2.is_some_and(|v| (v - 0.95).abs() < 1e-9), "expected flag_r_squared_below == 0.95, got {committed_r2:?}");
+
+        // 2. stat_params (`stats.two_group` -> `edit.custom_title`)
+        let tg_rs_id = open_edit(&mut app, "ds-col", "stats.two_group")?;
+        verify_textbox_enter_commit(&mut app, None, "edit.custom_title", "Custom")?;
+        assert_eq!(app.document().result_sheet(&tg_rs_id).and_then(|rs| rs.analysis.custom_title.as_deref()), Some("Custom"));
+
+        // 3. stat_params (`fit.linear` -> `edit.tab.range` -> `fit.lr.range.input.x_min`)
+        let lr_rs_id = open_edit(&mut app, "ds-fit", "fit.linear")?;
+        verify_textbox_enter_commit(&mut app, Some("edit.tab.range"), "fit.lr.range.input.x_min", "-1.5")?;
+        let committed_range = app.document().result_sheet(&lr_rs_id).and_then(|rs| match &rs.analysis.kind {
+            curvebook_doc::AnalysisKind::LinearRegression(lr) => lr.x_range_filter,
+            _ => None,
+        });
+        assert!(
+            matches!(committed_range, Some((Some(lo), None)) if (lo - (-1.5)).abs() < 1e-9),
+            "expected x_range_filter == Some((Some(-1.5), None)), got {committed_range:?}"
+        );
+
+        // 4. Even when `app.focus_widget_id` is explicitly pre-seeded before typing, 1st Enter clears stale focus
+        // so 2nd Enter commits without looping in `ensure_egui_focus_if_needed`.
+        let doc_tg = app.document().clone();
+        assert!(app.canvas_dialogs.open_edit_parameters(&doc_tg, &tg_rs_id), "reopen two-group stat_params");
+        app.focus_widget_id = Some(String::from("edit.custom_title"));
+        dispatch_gui_action(&mut app, "ui.type_text", json!({ "text": "Preseeded", "clear_first": true })).map_err(|e| e.to_string())?;
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert!(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
+        assert_eq!(app.focus_widget_id, None, "pre-seeded focus_widget_id must clear when TextEdit releases focus on Enter");
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Enter" })).map_err(|e| e.to_string())?;
+        assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None);
+        assert_eq!(app.document().result_sheet(&tg_rs_id).and_then(|rs| rs.analysis.custom_title.as_deref()), Some("Preseeded"));
+
+        // 5. Parity with gui_window: passing both `widget_id` and `x`/`y` to `ui.pointer_gesture` returns BadInput.
+        let ambig_err =
+            dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "toolbar.analyze", "x": 10.0, "y": 10.0 }))
+                .err()
+                .ok_or_else(|| String::from("expected BadInput for ambiguous widget_id + x/y"))?;
+        assert_eq!(ambig_err.code, ErrorCode::BadInput, "got {ambig_err:?}");
+        Ok(())
     }
 }

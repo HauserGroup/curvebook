@@ -7,10 +7,7 @@ use curvebook_tools::{GridCellCoord, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::dialogs_r9::{is_inconclusive_info_item, parse_opt_finite_f64_with_locale, sanitize_diagnostics_only_text};
-use crate::i18n::LocalePreset;
-
-use super::parse_helpers::parse_table_kind_str;
+use crate::dialogs_r9::{is_inconclusive_info_item, sanitize_diagnostics_only_text};
 
 // ============================================================================
 // QOL-1 / QOL-3 / QOL-4 / QOL-7 / QOL-8 Dialog & Workspace Models
@@ -77,33 +74,6 @@ impl ConvertArchetypeDialogState {
         self.dropped_cells = 0;
         self.preserved_exclusions = 0;
         self.preview_warnings.clear();
-    }
-
-    /// Patch conversion dialog fields from scripted GUI actions / inspector text inputs.
-    ///
-    /// # Errors
-    /// Returns an error if `target_kind` is unrecognized or flags have wrong types.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "target_kind" | "kind" | "convert.target_kind" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`target_kind` must be a string"))?;
-                    let parsed = parse_table_kind_str(raw)?;
-                    if !Self::supported_targets().contains(&parsed) {
-                        return Err(format!("unsupported conversion target `{raw}`"));
-                    }
-                    self.set_target_kind(parsed);
-                }
-                "allow_lossy" | "convert.allow_lossy" => {
-                    self.allow_lossy = val.as_bool().ok_or_else(|| String::from("`allow_lossy` must be boolean"))?;
-                }
-                "preview_only" | "convert.preview_only" => {
-                    self.preview_only = val.as_bool().ok_or_else(|| String::from("`preview_only` must be boolean"))?;
-                }
-                other => return Err(format!("unknown Convert Table Archetype field `{other}`")),
-            }
-        }
-        Ok(())
     }
 
     /// Set a new target archetype, resetting stale preview state.
@@ -452,55 +422,6 @@ impl FormatSelectedPointsState {
     pub fn set_selected_targets(&mut self, targets: Vec<(usize, usize, Option<usize>)>) {
         self.selected_points = targets.iter().map(|&(s, p, _)| (s, p)).collect();
         self.selected_subcols = targets.into_iter().map(|(_, _, sc)| sc).collect();
-    }
-
-    /// Apply field patch payload from UI widgets or `ui.answer_dialog`.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
-    }
-
-    /// Apply field patch payload using regional numeric parsing (`preset`).
-    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
-        let opt_patch_str = |val: &Value, key: &str| -> Result<Option<String>, String> {
-            match val {
-                Value::Null => Ok(None),
-                Value::String(s) => Ok(Some(s.clone())),
-                _ => Err(format!("`{key}` must be a string or null")),
-            }
-        };
-        for (key, val) in fields {
-            match key.as_str() {
-                "points" | "selected_points" => {
-                    if !val.is_null() {
-                        let targets = crate::control_io::parse_selected_points_with_subcols(val, key)?;
-                        self.set_selected_targets(targets);
-                    }
-                }
-                "color" | "symbol_color" | "format_points.color" => self.color = opt_patch_str(val, key)?,
-                "fill_color" | "format_points.fill_color" => self.fill_color = opt_patch_str(val, key)?,
-                "symbol" | "shape" | "symbol_shape" | "format_points.symbol" => self.symbol = opt_patch_str(val, key)?,
-                "size_pt" | "format_points.size_pt" => self.size_pt = parse_opt_finite_f64_with_locale(val, key, preset)?,
-                "border_width_pt" | "stroke_width_pt" | "format_points.border_width_pt" => {
-                    self.border_width_pt = parse_opt_finite_f64_with_locale(val, key, preset)?;
-                }
-                "fill_mode" | "format_points.fill_mode" => self.fill_mode = opt_patch_str(val, key)?,
-                "hidden" | "format_points.hidden" => {
-                    self.hidden = match val {
-                        Value::Null => None,
-                        Value::Bool(b) => Some(*b),
-                        _ => return Err(format!("`{key}` must be a boolean or null")),
-                    };
-                }
-                "show_row_labels" | "format_points.show_row_labels" => {
-                    self.show_row_labels = val.as_bool().ok_or_else(|| format!("`{key}` must be a boolean"))?;
-                }
-                "clear" | "clear_overrides" | "format_points.clear" => {
-                    self.clear_overrides = val.as_bool().ok_or_else(|| format!("`{key}` must be a boolean"))?;
-                }
-                other => return Err(format!("unknown Format Selected Points field `{other}`")),
-            }
-        }
-        Ok(())
     }
 
     /// Build `graph.formatSelectedPoints` command intent across all selected points.

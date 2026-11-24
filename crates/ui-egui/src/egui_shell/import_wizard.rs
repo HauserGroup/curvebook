@@ -176,7 +176,7 @@ pub fn render_import_or_convert_modal(
         if is_wizard {
             intents.push(UiIntent::CloseImportWizard);
         } else {
-            intents.push_dialog_button("cancel");
+            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
         }
     }
 
@@ -200,6 +200,7 @@ pub fn render_import_or_convert_modal(
     let dlg_w = (vp.width() - 24.0).clamp(320.0, 680.0);
     let dlg_h = (vp.height() - 24.0).clamp(240.0, 520.0);
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let modal_resp = egui::Modal::new(egui::Id::unique(("egui_shell_import_modal", widget_id))).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
         let inner_w = (dlg_w - 24.0).max(280.0);
@@ -224,6 +225,20 @@ pub fn render_import_or_convert_modal(
         widgets::divider(ui);
         ui.add_space(4.0);
         render_wizard_footer(ui, &mut modal_cx, is_wizard, is_reshape);
+        if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+            if is_wizard {
+                let idx = ImportWizardStep::ALL.iter().position(|s| *s == modal_cx.state.active_step).unwrap_or(0);
+                if idx + 1 < ImportWizardStep::ALL.len() {
+                    modal_cx.state.active_step = ImportWizardStep::ALL[idx + 1];
+                    modal_cx.wiz.stage = modal_cx.state.active_step.sync_backend_stage();
+                    modal_cx.wiz_dirty = true;
+                } else {
+                    commit_wizard_import(&mut modal_cx);
+                }
+            } else {
+                modal_cx.intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+            }
+        }
         wiz_dirty = modal_cx.wiz_dirty;
         if wiz_dirty && is_wizard {
             modal_cx.intents.push(UiIntent::UpdateImportWizard(Box::new(modal_cx.wiz)));
@@ -247,8 +262,8 @@ fn sync_drafts_from_app(app: &UiApp, state: &mut ImportWizardEguiState) -> (Impo
     let mut wiz_dirty = false;
     state.active_step = ImportWizardStep::from_backend_stage(wiz.stage);
     state.preset_saved_feedback = false;
-    state.raw_source_draft = if wiz.raw_clipboard_text.is_empty() && !app.view_shards.import_paste.raw_source_text.is_empty() {
-        app.view_shards.import_paste.raw_source_text.clone()
+    state.raw_source_draft = if wiz.raw_clipboard_text.is_empty() && !app.grid.import_paste.raw_source_text.is_empty() {
+        app.grid.import_paste.raw_source_text.clone()
     } else {
         wiz.raw_clipboard_text.clone()
     };
@@ -1233,7 +1248,7 @@ fn render_paste_clipboard_button(ui: &mut Ui, meta: &mut FrameInspectMeta, inten
 fn patch_import_reshape_field(intents: &mut PendingUiIntents, key: &str, value: Value) {
     let mut fields = Map::new();
     fields.insert(key.to_owned(), value);
-    intents.push_patch_active_dialog(fields);
+    intents.push(UiIntent::PatchActiveDialog { fields });
 }
 
 fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32, body_h: f32) {
@@ -1290,7 +1305,12 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
             body.add_space(6.0);
             body.horizontal_wrapped(|row| {
                 row.label("Table Title:");
-                let tr = row.add(egui::TextEdit::singleline(&mut state.reshape_title_draft).hint_text("Sheet title").desired_width(140.0));
+                let title_id = egui::Id::unique("import_paste.input.title");
+                if !row.ctx().memory(|m| m.has_focus(title_id)) && state.reshape_title_draft != cx.app.grid.import_reshape.title {
+                    state.reshape_title_draft = cx.app.grid.import_reshape.title.clone();
+                }
+                let tr =
+                    row.add(egui::TextEdit::singleline(&mut state.reshape_title_draft).id(title_id).hint_text("Sheet title").desired_width(140.0));
                 meta.record_modal_response(
                     row,
                     &tr,
@@ -1427,7 +1447,7 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                     if ir.plate_roles.len() != expected {
                         f.insert(String::from("plate_roles"), Value::Array(default_plate_roles(is_384, ir.subtract_blank_mean)));
                     }
-                    intents.push_patch_active_dialog(f);
+                    intents.push(UiIntent::PatchActiveDialog { fields: f });
                 }
             }
         },
@@ -1465,7 +1485,7 @@ fn render_convert_archetype_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, body_
                 if r.clicked() {
                     let mut f = Map::new();
                     f.insert(String::from("target_kind"), Value::String(slug.to_owned()));
-                    intents.push_patch_active_dialog(f);
+                    intents.push(UiIntent::PatchActiveDialog { fields: f });
                 }
             }
         });
@@ -1527,7 +1547,7 @@ fn render_wizard_footer(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, is_wizard: boo
                 cx.intents.push(UiIntent::CloseImportWizard);
                 cx.wiz_dirty = false;
             } else {
-                cx.intents.push_dialog_button("cancel");
+                cx.intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
             }
         }
 
@@ -1539,7 +1559,7 @@ fn render_wizard_footer(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, is_wizard: boo
                 if is_wizard {
                     commit_wizard_import(cx);
                 } else {
-                    cx.intents.push_dialog_button("ok");
+                    cx.intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
             }
 

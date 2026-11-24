@@ -18,7 +18,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::egui_shell::canvas_view::CanvasHoverReadout;
 use crate::egui_shell::{
-    EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, doc_sheet_title,
+    EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, UiIntent, doc_sheet_title,
 };
 use crate::grid_view::{resolve_flat_coord, total_flat_data_subcolumns};
 use crate::i18n::{is_rtl_locale, tr_or_fallback};
@@ -1012,7 +1012,7 @@ fn render_footer_history_and_sections(
         meta,
     );
     if back_resp.clicked() {
-        intents.push_history_back();
+        intents.push(UiIntent::HistoryBack);
     }
 
     let fwd_resp = draw_footer_chip(
@@ -1034,7 +1034,7 @@ fn render_footer_history_and_sections(
         meta,
     );
     if fwd_resp.clicked() {
-        intents.push_history_forward();
+        intents.push(UiIntent::HistoryForward);
     }
 
     if report.section_pills_shown {
@@ -1284,7 +1284,7 @@ fn render_footer_trailing_controls(
             )
             .clicked()
             {
-                intents.push_set_canvas_zoom((zoom * 1.25).clamp(0.1, 8.0));
+                intents.push(UiIntent::SetCanvasZoom { zoom: (zoom * 1.25).clamp(0.1, 8.0) });
             }
 
             let zpct = format!("{:.0}%", zoom * 100.0);
@@ -1308,7 +1308,7 @@ fn render_footer_trailing_controls(
             )
             .clicked()
             {
-                intents.push_set_canvas_zoom(1.0);
+                intents.push(UiIntent::SetCanvasZoom { zoom: 1.0 });
             }
 
             if draw_footer_chip(
@@ -1331,7 +1331,7 @@ fn render_footer_trailing_controls(
             )
             .clicked()
             {
-                intents.push_set_canvas_zoom((zoom * 0.8).clamp(0.1, 8.0));
+                intents.push(UiIntent::SetCanvasZoom { zoom: (zoom * 0.8).clamp(0.1, 8.0) });
             }
         }
 

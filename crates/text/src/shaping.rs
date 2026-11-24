@@ -8,13 +8,14 @@
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
+use read_fonts::{CollectionRef, FontData, FontRead, FontRef, TTCHeader};
 use serde::{Deserialize, Serialize};
 
 use crate::BUNDLED_FONTS;
 use crate::glyph_paths::{GlyphOutlineCmd, has_cleanroom_vector_outline, outline_ttf_glyph};
 use crate::markup::{RichText, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, parse_markup, reorder_visual_bidi};
 use crate::metrics::{
-    CachedSfntLayout, SfntFaceMeta, TrueTypeFont, core14_advance_em, effective_span_scale, inspect_sfnt_face_meta_at, is_combining_mark, read_u32_be,
+    SfntFaceMeta, TrueTypeFont, core14_advance_em, effective_span_scale, inspect_sfnt_face_meta, is_combining_mark,
     reorder_rich_text_bidi_with_direction, rich_contains_rtl, script_baseline_offset_pt, split_rich_text_lines,
 };
 
@@ -244,7 +245,7 @@ struct LoadedFontFace {
     name: String,
     bytes: FontBytes,
     sfnt_offset: usize,
-    layout: CachedSfntLayout,
+    face_index: Option<u32>,
     source_tier: FontSourceTier,
     family_kind: FontFamilyKind,
     meta: SfntFaceMeta,
@@ -258,7 +259,11 @@ struct LoadedFontFace {
 
 impl LoadedFontFace {
     fn parsed(&self) -> Option<TrueTypeFont<'_>> {
-        self.layout.font(self.bytes.as_slice())
+        let slice = self.bytes.as_slice();
+        match self.face_index {
+            Some(index) => TrueTypeFont::parse_ttc_index(slice, index),
+            None => TrueTypeFont::parse(slice),
+        }
     }
 }
 
@@ -990,57 +995,65 @@ fn compute_mono_cell_em(ttf: &TrueTypeFont<'_>) -> f64 {
     ttf.advance_em('0').or_else(|| ttf.advance_em('M')).or_else(|| ttf.advance_em(' ')).filter(|w| w.is_finite() && *w > 0.0).unwrap_or(0.600)
 }
 
-fn collect_sfnt_offsets(slice: &[u8]) -> Vec<usize> {
-    if slice.get(0..4) == Some(b"ttcf") {
-        let Some(num_raw) = read_u32_be(slice, 8) else {
-            return Vec::new();
-        };
-        let count = usize::try_from(num_raw).unwrap_or(0).min(64);
-        let mut offsets = Vec::with_capacity(count);
-        for i in 0..count {
-            let Some(off) = read_u32_be(slice, 12 + i * 4).and_then(|v| usize::try_from(v).ok()) else {
-                break;
-            };
-            offsets.push(off);
-        }
-        return offsets;
-    }
-    vec![0]
+fn build_loaded_face(
+    name: &str,
+    bytes: &FontBytes,
+    sfnt_offset: usize,
+    face_index: Option<u32>,
+    font_ref: FontRef<'_>,
+    source_tier: FontSourceTier,
+    is_script_fallback: bool,
+) -> Option<Arc<LoadedFontFace>> {
+    let ttf = TrueTypeFont::from_font_ref(font_ref).ok()?;
+    let upem = f64::from(ttf.units_per_em().max(1));
+    let ascent_em = (f64::from(ttf.ascent()) / upem).clamp(0.5, 1.25);
+    let descent_em = (f64::from(-ttf.descent()) / upem).clamp(0.1, 0.65);
+    let line_gap_em = (f64::from(ttf.line_gap()) / upem).clamp(0.0, 0.50);
+    let meta = inspect_sfnt_face_meta(ttf.font_ref(), name);
+    let family_kind = classify_face_family(name, &meta);
+    let tabular_digit_em = compute_tabular_digit_em(&ttf);
+    let mono_cell_em = compute_mono_cell_em(&ttf);
+    let face_name = if sfnt_offset == 0 { name.to_owned() } else { format!("{name}@{sfnt_offset}") };
+    Some(Arc::new(LoadedFontFace {
+        name: face_name,
+        bytes: bytes.clone(),
+        sfnt_offset,
+        face_index,
+        source_tier,
+        family_kind,
+        meta,
+        ascent_em,
+        descent_em,
+        line_gap_em,
+        tabular_digit_em,
+        mono_cell_em,
+        is_script_fallback,
+    }))
 }
 
 fn append_faces_from_bytes(name: &str, bytes: &FontBytes, source_tier: FontSourceTier, is_script_fallback: bool, out: &mut Vec<Arc<LoadedFontFace>>) {
     let slice = bytes.as_slice();
-    for sfnt_offset in collect_sfnt_offsets(slice) {
-        let Some(layout) = CachedSfntLayout::extract(slice, sfnt_offset) else {
-            continue;
-        };
-        let Some(ttf) = layout.font(slice) else {
-            continue;
-        };
-        let upem = f64::from(ttf.units_per_em().max(1));
-        let ascent_em = (f64::from(ttf.ascent()) / upem).clamp(0.5, 1.25);
-        let descent_em = (f64::from(-ttf.descent()) / upem).clamp(0.1, 0.65);
-        let line_gap_em = (f64::from(ttf.line_gap()) / upem).clamp(0.0, 0.50);
-        let meta = inspect_sfnt_face_meta_at(slice, sfnt_offset, name);
-        let family_kind = classify_face_family(name, &meta);
-        let tabular_digit_em = compute_tabular_digit_em(&ttf);
-        let mono_cell_em = compute_mono_cell_em(&ttf);
-        let face_name = if sfnt_offset == 0 { name.to_owned() } else { format!("{name}@{sfnt_offset}") };
-        out.push(Arc::new(LoadedFontFace {
-            name: face_name,
-            bytes: bytes.clone(),
-            sfnt_offset,
-            layout,
-            source_tier,
-            family_kind,
-            meta,
-            ascent_em,
-            descent_em,
-            line_gap_em,
-            tabular_digit_em,
-            mono_cell_em,
-            is_script_fallback,
-        }));
+    if let (Ok(collection), Ok(ttc)) = (CollectionRef::new(slice), TTCHeader::read(FontData::new(slice))) {
+        for (idx, off_be) in ttc.table_directory_offsets().iter().enumerate().take(64) {
+            let Some(sfnt_offset) = usize::try_from(off_be.get()).ok() else {
+                break;
+            };
+            let Some(idx_u32) = u32::try_from(idx).ok() else {
+                break;
+            };
+            let Ok(font_ref) = collection.get(idx_u32) else {
+                continue;
+            };
+            if let Some(face) = build_loaded_face(name, bytes, sfnt_offset, Some(idx_u32), font_ref, source_tier, is_script_fallback) {
+                out.push(face);
+            }
+        }
+        return;
+    }
+    if let Ok(font_ref) = FontRef::new(slice)
+        && let Some(face) = build_loaded_face(name, bytes, 0, None, font_ref, source_tier, is_script_fallback)
+    {
+        out.push(face);
     }
 }
 

@@ -9,8 +9,6 @@ use curvebook_tools::ToolCommandIntent;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::format_axes::{parse_threshold_color, parse_threshold_dash_style};
-
 /// State for the `Create New Graph...` modal dialog (`WF-56` / `R13.3`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateGraphDialogState {
@@ -57,33 +55,6 @@ impl CreateGraphDialogState {
         self.one_per_data_set = false;
         self.y_axis_title.clear();
         self.graph_title.clear();
-    }
-
-    /// Apply modal field patch entries for interactive/headless GUI actions.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "data_sheet_id" | "source_sheet_id" | "create_graph.source_sheet_id" => {
-                    let s = val.as_str().ok_or_else(|| String::from("`source_sheet_id` must be a string"))?;
-                    self.source_sheet_id = Some(SheetId::new(s));
-                }
-                "kind" | "kind_slug" | "create_graph.kind" => {
-                    let s = val.as_str().ok_or_else(|| String::from("`kind` must be a string"))?;
-                    self.kind_slug = s.trim().to_ascii_lowercase();
-                }
-                "one_per_data_set" | "create_graph.one_per_data_set" => {
-                    self.one_per_data_set = val.as_bool().ok_or_else(|| String::from("`one_per_data_set` must be a boolean"))?;
-                }
-                "y_axis_title" | "create_graph.y_axis_title" => {
-                    self.y_axis_title = val.as_str().ok_or_else(|| String::from("`y_axis_title` must be a string"))?.to_owned();
-                }
-                "title" | "graph_title" | "create_graph.title" => {
-                    self.graph_title = val.as_str().ok_or_else(|| String::from("`title` must be a string"))?.to_owned();
-                }
-                other => return Err(format!("unknown CreateGraph field `{other}`")),
-            }
-        }
-        Ok(())
     }
 
     /// Build the `graph.create` engine command intent on confirmation.
@@ -149,41 +120,6 @@ impl EqualizeScalingDialogState {
                 self.available_panels.push((id.clone(), display));
             }
         }
-    }
-
-    /// Apply modal field patch entries for interactive/headless GUI actions.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "mode" | "equalize_scaling.mode" => {
-                    let s = val.as_str().ok_or_else(|| String::from("`mode` must be a string"))?;
-                    self.mode = match s.trim().to_ascii_lowercase().as_str() {
-                        "match_smallest" | "smallest" => String::from("match_smallest"),
-                        "match_largest" | "largest" => String::from("match_largest"),
-                        "explicit_percent" | "explicit" => String::from("explicit_percent"),
-                        other => return Err(format!("unknown EqualizeScaling mode `{other}`")),
-                    };
-                }
-                "percent" | "explicit_percent" | "equalize_scaling.percent" => {
-                    let p = val.as_f64().ok_or_else(|| String::from("`percent` must be a finite number"))?;
-                    if !p.is_finite() || !(5.0..=500.0).contains(&p) {
-                        return Err(String::from("`percent` must be finite in [5.0, 500.0]"));
-                    }
-                    self.explicit_percent = p;
-                }
-                "panel_ids" | "selected_panel_ids" | "equalize_scaling.panel_ids" => {
-                    let arr = val.as_array().ok_or_else(|| String::from("`panel_ids` must be an array"))?;
-                    let mut next = Vec::with_capacity(arr.len());
-                    for entry in arr {
-                        let s = entry.as_str().ok_or_else(|| String::from("panel ID must be a string"))?;
-                        next.push(s.to_owned());
-                    }
-                    self.selected_panel_ids = next;
-                }
-                other => return Err(format!("unknown EqualizeScaling field `{other}`")),
-            }
-        }
-        Ok(())
     }
 
     /// Build the `layout.equalizeScaling` engine command intent on confirmation.
@@ -264,55 +200,6 @@ impl FormatEmbeddedTableDialogState {
         self.bounds_pt = *bounds_pt;
         self.style = *style;
         true
-    }
-
-    /// Apply localized/headless field patch entries to this embedded table style draft.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "show_column_titles" | "embedded_table.show_column_titles" => {
-                    self.style.show_column_titles = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
-                }
-                "show_row_titles" | "embedded_table.show_row_titles" => {
-                    self.style.show_row_titles = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
-                }
-                "transpose" | "embedded_table.transpose" => {
-                    self.style.transpose = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
-                }
-                "bold_headers" | "embedded_table.bold_headers" => {
-                    self.style.bold_headers = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
-                }
-                "font_size_pt" | "embedded_table.font_size" => {
-                    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
-                    if !f.is_finite() || f <= 0.0 || f > 72.0 {
-                        return Err(format!("`{key}` must be in (0, 72]"));
-                    }
-                    self.style.font_size_pt = f;
-                }
-                "outer_border_width_pt" | "embedded_table.outer_border_width_pt" => {
-                    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
-                    if !f.is_finite() || !(0.0..=12.0).contains(&f) {
-                        return Err(format!("`{key}` must be in [0, 12]"));
-                    }
-                    self.style.outer_border_width_pt = f;
-                }
-                "gridline_width_pt" | "embedded_table.gridline_width_pt" => {
-                    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
-                    if !f.is_finite() || !(0.0..=12.0).contains(&f) {
-                        return Err(format!("`{key}` must be in [0, 12]"));
-                    }
-                    self.style.gridline_width_pt = f;
-                }
-                "border_color" | "embedded_table.border_color" => {
-                    self.style.border_color = parse_threshold_color(val, key)?;
-                }
-                "fill_color" | "embedded_table.fill_color" => {
-                    self.style.fill_color = if val.is_null() { None } else { Some(parse_threshold_color(val, key)?) };
-                }
-                other => return Err(format!("unknown FormatEmbeddedTable field `{other}`")),
-            }
-        }
-        Ok(())
     }
 
     /// Build single atomic `graph.setSpec` or `layout.setSpec` intent updating the target table item.
@@ -470,66 +357,6 @@ impl FormatImageDialogState {
             .unwrap_or_else(|| if self.bounds_pt.width > 0.0 { self.bounds_pt.height / self.bounds_pt.width } else { 1.0 })
     }
 
-    /// Apply localized/headless field patch entries to this embedded image draft.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "width_pt" | "format_image.width_pt" => {
-                    let w = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
-                    if !w.is_finite() || w <= 0.0 {
-                        return Err(format!("`{key}` must be finite and > 0"));
-                    }
-                    self.bounds_pt.width = w;
-                    if self.lock_aspect_ratio {
-                        self.bounds_pt.height = (w * self.aspect_h_over_w()).max(1.0);
-                    }
-                }
-                "height_pt" | "format_image.height_pt" => {
-                    let h = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
-                    if !h.is_finite() || h <= 0.0 {
-                        return Err(format!("`{key}` must be finite and > 0"));
-                    }
-                    self.bounds_pt.height = h;
-                    if self.lock_aspect_ratio {
-                        self.bounds_pt.width = (h / self.aspect_h_over_w().max(1e-9)).max(1.0);
-                    }
-                }
-                "lock_aspect_ratio" | "format_image.lock_aspect_ratio" => {
-                    self.lock_aspect_ratio = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
-                }
-                "rotation_deg" | "format_image.rotation_deg" => {
-                    let deg = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
-                    if !deg.is_finite() {
-                        return Err(format!("`{key}` must be finite"));
-                    }
-                    self.rotation_deg = deg;
-                }
-                "crop_left_pt" | "format_image.crop.left" => self.crop.left_pt = parse_nonneg_crop(val, key)?,
-                "crop_right_pt" | "format_image.crop.right" => self.crop.right_pt = parse_nonneg_crop(val, key)?,
-                "crop_top_pt" | "format_image.crop.top" => self.crop.top_pt = parse_nonneg_crop(val, key)?,
-                "crop_bottom_pt" | "format_image.crop.bottom" => self.crop.bottom_pt = parse_nonneg_crop(val, key)?,
-                "border_enabled" | "format_image.border.enabled" => {
-                    self.border_enabled = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
-                }
-                "border_width_pt" | "format_image.border.width" => {
-                    let w = parse_nonneg_crop(val, key)?;
-                    self.border_enabled = true;
-                    self.border_width_pt = w;
-                }
-                "border_color" | "format_image.border.color" => {
-                    self.border_enabled = true;
-                    self.border_color = parse_threshold_color(val, key)?;
-                }
-                "border_dash" | "format_image.border.dash" => {
-                    self.border_enabled = true;
-                    self.border_dash = parse_threshold_dash_style(val, key)?;
-                }
-                other => return Err(format!("unknown FormatImage field `{other}`")),
-            }
-        }
-        Ok(())
-    }
-
     /// Build `graph.updateImage` or `layout.updateImage` engine intent cleanly.
     #[must_use]
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
@@ -572,12 +399,4 @@ impl FormatImageDialogState {
         obj.insert(String::from("border"), border_val);
         Some(ToolCommandIntent::new(cmd_id, Value::Object(obj)))
     }
-}
-
-fn parse_nonneg_crop(val: &Value, key: &str) -> Result<f64, String> {
-    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
-    if !f.is_finite() || f < 0.0 {
-        return Err(format!("`{key}` must be finite and >= 0"));
-    }
-    Ok(f)
 }

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use curvebook_format::{ZipArchive, ZipLimits};
+use crate::zip_read::{ZipArchive, ZipLimits};
 
 const FONT_EXT: &[&str] = &["ttf", "otf", "ttc", "woff", "woff2", "eot", "pfb"];
 
@@ -1081,7 +1081,7 @@ See also `assets/prose.png` in prose.
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("assets/ui")).unwrap();
 
-        let mut zw = curvebook_format::ZipWriter::new();
+        let mut zw = crate::zip_read::TestZipWriter::new();
         zw.add_file("fonts/Sneaky.ttf", b"font".to_vec()).unwrap();
         std::fs::write(root.join("assets/ui/bundle.zip"), zw.finish().unwrap()).unwrap();
         let files = vec![String::from("assets/ui/bundle.zip")];
@@ -1099,11 +1099,11 @@ See also `assets/prose.png` in prose.
 
         let dist = root.join("dist");
         std::fs::create_dir_all(&dist).unwrap();
-        let mut lvl2 = curvebook_format::ZipWriter::new();
+        let mut lvl2 = crate::zip_read::TestZipWriter::new();
         lvl2.add_file("ok.txt", b"clean".to_vec()).unwrap();
-        let mut lvl1 = curvebook_format::ZipWriter::new();
+        let mut lvl1 = crate::zip_read::TestZipWriter::new();
         lvl1.add_file("inner.zip", lvl2.finish().unwrap()).unwrap();
-        let mut outer = curvebook_format::ZipWriter::new();
+        let mut outer = crate::zip_read::TestZipWriter::new();
         outer.add_file("mid.zip", lvl1.finish().unwrap()).unwrap();
         std::fs::write(dist.join("deep.zip"), outer.finish().unwrap()).unwrap();
         let cat = super::RepoAssetCatalog { allowed_sha256: std::collections::BTreeSet::new() };

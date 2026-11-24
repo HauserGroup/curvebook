@@ -1,15 +1,16 @@
 //! `Analyze Data...`, `DuplicateAnalysisPrompt`, and `Change Data Analyzed...` modals (§8.7).
 
-use curvebook_doc::SheetId;
+use curvebook_doc::{PValueStackMethod, SheetId};
 use egui::{Context, Id, Key, Modifiers, TextEdit, Ui, Vec2};
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
+use crate::dialogs_canvas::DuplicateChoice;
 use crate::dialogs_canvas::{ActiveDialog, AnalysisCategory, AnalyzeDialogState, VariableRoleFilter};
+use crate::egui_shell::AnalyzePickerIntent;
 use crate::i18n::{normalize_locale, tr};
 use crate::inspect::ZLayer;
 use crate::modal_predicates::{ControlEnablement, evaluate_dialog_button, r7_correlation_heatmap_toggle, r10_pcr_outcome_column, source_table_shape};
-use crate::views::analyze_picker::DuplicateChoice;
 
 use crate::egui_shell::stat_anova_modal::{
     ClippedTextSpec, StepperSpec, column_titles_for_draft, record_widget, render_clipped_text, render_modal_checkbox, render_modal_radio,
@@ -115,14 +116,14 @@ pub fn render_analyze_sheet_modal(
                 if render_modal_seg_btn(ui, tokens, meta, "analyze.search.clear", "Clear", false, &ControlEnablement::enabled()) {
                     state.analyze_query_draft.clear();
                     state.analyze_focus_requested = true;
-                    intents.push_custom_view_action("analyze_picker", "clear_search");
+                    intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ClearSearch));
                 }
             });
 
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 if render_modal_seg_btn(ui, tokens, meta, "analyze.cat.all", "All", az.category_filter.is_none(), &ControlEnablement::enabled()) {
-                    intents.push_custom_view_action("analyze_picker", "toggle_category:all");
+                    intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ToggleCategory { slug: String::from("all") }));
                 }
                 for (slug, cat) in [
                     ("column", AnalysisCategory::Column),
@@ -135,7 +136,7 @@ pub fn render_analyze_sheet_modal(
                 ] {
                     let active = az.category_filter == Some(cat);
                     if render_modal_seg_btn(ui, tokens, meta, &format!("analyze.cat.{slug}"), cat.label(), active, &ControlEnablement::enabled()) {
-                        intents.push_custom_view_action("analyze_picker", format!("toggle_category:{slug}"));
+                        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ToggleCategory { slug: slug.to_owned() }));
                     }
                 }
             });
@@ -166,7 +167,7 @@ pub fn render_analyze_sheet_modal(
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ok_en) {
-                        intents.push_dialog_button("ok");
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                     }
                     if render_modal_action_button(
                         ui,
@@ -178,7 +179,7 @@ pub fn render_analyze_sheet_modal(
                         false,
                         &ControlEnablement::enabled(),
                     ) {
-                        intents.push_dialog_button("cancel");
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                     }
                 });
             });
@@ -186,9 +187,9 @@ pub fn render_analyze_sheet_modal(
     );
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
     } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) && ok_en.enabled {
-        intents.push_dialog_button("ok");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     }
     StatsModalFrameReport::from(capture)
 }
@@ -274,7 +275,7 @@ fn render_analyze_datasets_pane(
                     pred_on,
                     &ControlEnablement::enabled(),
                 ) {
-                    intents.push_custom_view_action("analyze_picker", format!("toggle_pca_pred:{}", var.col_index));
+                    intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::TogglePcaPredictor { col: var.col_index }));
                 }
                 if is_pcr {
                     let pcr_en = r10_pcr_outcome_column(var.col_index, &az.pca_predictors);
@@ -287,7 +288,7 @@ fn render_analyze_datasets_pane(
                         az.pcr_outcome_column == Some(var.col_index),
                         &pcr_en,
                     ) {
-                        intents.push_custom_view_action("analyze_picker", format!("set_pcr_outcome:{}", var.col_index));
+                        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetPcrOutcome { col: var.col_index }));
                     }
                 }
             });
@@ -314,7 +315,7 @@ fn render_analyze_datasets_pane(
                     az.role_filter == target,
                     &ControlEnablement::enabled(),
                 ) {
-                    intents.push_custom_view_action("analyze_picker", format!("set_mv_role_filter:{slug}"));
+                    intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetMvRoleFilter { filter: target }));
                 }
             }
         });
@@ -332,7 +333,7 @@ fn render_analyze_datasets_pane(
                     checked,
                     &ControlEnablement::enabled(),
                 ) {
-                    intents.push_custom_view_action("analyze_picker", format!("toggle_mv_var:{}", var.col_index));
+                    intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ToggleMvVar { col: var.col_index }));
                 }
             });
         }
@@ -351,6 +352,17 @@ fn render_analyze_datasets_pane(
         }
     }
 
+    render_analyze_entry_specific_options(ui, app, az, tokens, meta, intents);
+}
+
+fn render_analyze_entry_specific_options(
+    ui: &mut Ui,
+    app: &UiApp,
+    az: &AnalyzeDialogState,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
     if matches!(az.selected_entry_id.as_deref(), Some("stats.outliers" | "outliers")) {
         ui.add_space(6.0);
         render_section_title(ui, tokens, "Outlier Identification Mode");
@@ -364,11 +376,11 @@ fn render_analyze_datasets_pane(
             !is_grubbs,
             &ControlEnablement::enabled(),
         ) {
-            intents.push_custom_view_action("analyze_picker", "outlier_mode:rout");
+            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetOutlierMethod { method: String::from("rout") }));
         }
         if render_modal_radio(ui, tokens, meta, "analyze.outlier.grubbs", "Grubbs' test (Alpha threshold)", is_grubbs, &ControlEnablement::enabled())
         {
-            intents.push_custom_view_action("analyze_picker", "outlier_mode:grubbs");
+            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetOutlierMethod { method: String::from("grubbs") }));
         }
         let step = render_stepper_row(
             ui,
@@ -382,9 +394,9 @@ fn render_analyze_datasets_pane(
             },
         );
         if step < 0 {
-            intents.push_custom_view_action("analyze_picker", if is_grubbs { "outlier_param_step:-0.01" } else { "outlier_param_step:-1" });
+            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::StepOutlierParam { delta: if is_grubbs { -0.01 } else { -1.0 } }));
         } else if step > 0 {
-            intents.push_custom_view_action("analyze_picker", if is_grubbs { "outlier_param_step:0.01" } else { "outlier_param_step:1" });
+            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::StepOutlierParam { delta: if is_grubbs { 0.01 } else { 1.0 } }));
         }
         if is_grubbs
             && render_modal_checkbox(
@@ -397,7 +409,7 @@ fn render_analyze_datasets_pane(
                 &ControlEnablement::enabled(),
             )
         {
-            intents.push_custom_view_action("analyze_picker", "outlier_toggle_iterative");
+            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ToggleOutlierIterative));
         }
     }
     if matches!(az.selected_entry_id.as_deref(), Some("stats.corr_matrix" | "correlation" | "correlation_matrix")) {
@@ -427,6 +439,92 @@ fn render_analyze_datasets_pane(
             intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.correlation.heatmap") });
         }
     }
+    if az.selected_entry_id.as_deref() == Some("stats.pvalue_stack") {
+        ui.add_space(6.0);
+        crate::egui_shell::stat_anova_modal::render_section_title(ui, tokens, "P-Value Stack Options");
+        let cur_method_lbl = az.pvalue_stack_method.label();
+        let next_idx = (PValueStackMethod::ALL.iter().position(|m| *m == az.pvalue_stack_method).unwrap_or(0) + 1) % PValueStackMethod::ALL.len();
+        let method_resp = crate::egui_shell::widgets::dropdown("analyze.pvalue_stack.method", cur_method_lbl)
+            .show_ui(ui, |ui| {
+                for m in PValueStackMethod::ALL {
+                    if ui.selectable_label(m == az.pvalue_stack_method, m.label()).clicked() {
+                        let mut patch = Map::new();
+                        patch.insert(String::from("pvalue_stack_method"), json!(m.label()));
+                        intents.push(UiIntent::PatchActiveDialog { fields: patch });
+                    }
+                }
+            })
+            .response;
+        record_widget(
+            ui,
+            meta,
+            &method_resp,
+            "analyze.pvalue_stack.method",
+            "combobox",
+            cur_method_lbl,
+            None,
+            Some(json!(cur_method_lbl)),
+            true,
+            None,
+            ZLayer::ModalDialog,
+            false,
+            None,
+        );
+        if method_resp.clicked() {
+            let mut patch = Map::new();
+            patch.insert(String::from("pvalue_stack_method"), json!(PValueStackMethod::ALL[next_idx].label()));
+            intents.push(UiIntent::PatchActiveDialog { fields: patch });
+        }
+
+        let thresh_step = render_stepper_row(
+            ui,
+            tokens,
+            meta,
+            StepperSpec {
+                id_prefix: "analyze.pvalue_stack.threshold",
+                label: if az.pvalue_stack_method.is_fdr() { "Desired FDR Q" } else { "FWER Alpha" },
+                value_text: &format!("{:.3}", az.pvalue_stack_threshold),
+                enablement: &ControlEnablement::enabled(),
+            },
+        );
+        if thresh_step != 0 {
+            let next_t = (az.pvalue_stack_threshold + if thresh_step > 0 { 0.01 } else { -0.01 }).clamp(0.001, 0.50);
+            let mut patch = Map::new();
+            patch.insert(String::from("pvalue_stack_threshold"), json!(next_t));
+            intents.push(UiIntent::PatchActiveDialog { fields: patch });
+        }
+
+        let col_lbl = az.pvalue_stack_column.map_or_else(|| String::from("All"), |c| format!("Col {}", c + 1));
+        if render_modal_seg_btn(
+            ui,
+            tokens,
+            meta,
+            "analyze.pvalue_stack.column",
+            &format!("Source Column: {col_lbl}"),
+            false,
+            &ControlEnablement::enabled(),
+        ) {
+            let next_col = match az.pvalue_stack_column {
+                None => Some(0usize),
+                Some(c) => Some(c + 1),
+            };
+            let mut patch = Map::new();
+            patch.insert(String::from("pvalue_stack_column"), json!(next_col));
+            intents.push(UiIntent::PatchActiveDialog { fields: patch });
+        }
+    }
+    if matches!(az.selected_entry_id.as_deref(), Some("stats.factorial_anova" | "two_way_anova")) {
+        ui.add_space(6.0);
+        crate::egui_shell::stat_anova_modal::render_section_title(ui, tokens, "REML Residual Covariance Structure");
+        let cov_en = crate::modal_predicates::evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "analyze.factorial.residual_covariance");
+        let cov_lbl = match az.factorial_residual_covariance {
+            curvebook_doc::ResidualCovariance::CompoundSymmetry => "Compound Symmetry",
+            curvebook_doc::ResidualCovariance::Unstructured => "Unstructured",
+        };
+        if render_modal_seg_btn(ui, tokens, meta, "analyze.factorial.residual_covariance", cov_lbl, false, &cov_en) {
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.factorial.residual_covariance") });
+        }
+    }
 }
 
 /// Render `DuplicateAnalysisPrompt` disambiguation modal.
@@ -442,7 +540,7 @@ pub fn render_duplicate_analysis_modal(
         return StatsModalFrameReport::default();
     };
     let locale = normalize_locale(&app.locale);
-    let shard = &app.view_shards.analyze_picker;
+    let az = &app.canvas_dialogs.analyze;
     let doc = app.document();
 
     let capture = show_wave4_modal(
@@ -463,7 +561,7 @@ pub fn render_duplicate_analysis_modal(
         },
         |_, _, _, _| {},
         |ui, _state, _w, _h, meta, intents| {
-            let is_create = shard.duplicate_choice == DuplicateChoice::CreateNew;
+            let is_create = az.duplicate_choice == DuplicateChoice::CreateNew;
             if render_modal_radio(
                 ui,
                 tokens,
@@ -473,7 +571,7 @@ pub fn render_duplicate_analysis_modal(
                 is_create,
                 &ControlEnablement::enabled(),
             ) {
-                intents.push_custom_view_action("analyze_picker", "dup_choice:create_new");
+                intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetDuplicateChoice { choice: DuplicateChoice::CreateNew }));
             }
             if render_modal_radio(
                 ui,
@@ -484,13 +582,13 @@ pub fn render_duplicate_analysis_modal(
                 !is_create,
                 &ControlEnablement::enabled(),
             ) {
-                intents.push_custom_view_action("analyze_picker", "dup_choice:modify_existing");
+                intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetDuplicateChoice { choice: DuplicateChoice::ModifyExisting }));
             }
 
             if !is_create && !existing_result_ids.is_empty() {
                 ui.add_space(6.0);
                 render_section_title(ui, tokens, "Select Existing ResultSheet");
-                let selected_id = shard.duplicate_target_id.as_deref().or_else(|| existing_result_ids.first().map(SheetId::as_str)).unwrap_or("");
+                let selected_id = az.duplicate_target_id.as_deref().or_else(|| existing_result_ids.first().map(SheetId::as_str)).unwrap_or("");
                 for (idx, rid) in existing_result_ids.iter().enumerate() {
                     let lbl = doc.result_sheet(rid).map_or_else(|| rid.as_str().to_owned(), |rs| format!("{} ({})", rs.title(), rid.as_str()));
                     if render_modal_radio(
@@ -502,7 +600,7 @@ pub fn render_duplicate_analysis_modal(
                         selected_id == rid.as_str(),
                         &ControlEnablement::enabled(),
                     ) {
-                        intents.push_custom_view_action("analyze_picker", format!("dup_target:{}", rid.as_str()));
+                        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetDuplicateTarget { target_id: rid.as_str().to_owned() }));
                     }
                 }
             }
@@ -510,18 +608,20 @@ pub fn render_duplicate_analysis_modal(
         |ui, _state, meta, intents| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ControlEnablement::enabled()) {
-                    intents.push_dialog_button("ok");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
                 if render_modal_action_button(ui, tokens, meta, "modal.cancel", tr(locale, "btn.cancel"), false, false, &ControlEnablement::enabled())
                 {
-                    intents.push_dialog_button("cancel");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
             });
         },
     );
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+    } else if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     }
     StatsModalFrameReport::from(capture)
 }
@@ -615,7 +715,7 @@ pub fn render_change_data_analyzed_modal(
                     ) {
                         let mut fields = Map::new();
                         fields.insert(String::from("selected_data_sets"), Value::Array(Vec::new()));
-                        intents.push_patch_active_dialog(fields);
+                        intents.push(UiIntent::PatchActiveDialog { fields });
                     }
                     for (ci, col_name) in titles.iter().enumerate() {
                         let on = cd.selected_data_sets.is_empty() || cd.selected_data_sets.contains(&ci);
@@ -629,7 +729,7 @@ pub fn render_change_data_analyzed_modal(
                             }
                             let mut fields = Map::new();
                             fields.insert(String::from("selected_data_sets"), Value::Array(next.into_iter().map(|i| json!(i)).collect()));
-                            intents.push_patch_active_dialog(fields);
+                            intents.push(UiIntent::PatchActiveDialog { fields });
                         }
                     }
                 }
@@ -638,18 +738,20 @@ pub fn render_change_data_analyzed_modal(
         |ui, _state, meta, intents| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ok_en) {
-                    intents.push_dialog_button("ok");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
                 if render_modal_action_button(ui, tokens, meta, "modal.cancel", tr(locale, "btn.cancel"), false, false, &ControlEnablement::enabled())
                 {
-                    intents.push_dialog_button("cancel");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
             });
         },
     );
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+    } else if !ctx.egui_wants_keyboard_input() && ok_en.enabled && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     }
     StatsModalFrameReport::from(capture)
 }

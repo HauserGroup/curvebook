@@ -139,6 +139,8 @@ pub struct CenterStageEguiState {
     pub last_synced_grid_coord: Option<GridCellCoord>,
     /// Anchor sheet ID for contiguous `Shift+Click` selection inside `Portfolio Gallery`.
     pub gallery_anchor_id: Option<SheetId>,
+    /// Tracks whether `app.grid.formula_bar.active` was open on the previous pass (for initial focus).
+    pub last_formula_bar_active: bool,
 }
 
 impl Default for CenterStageEguiState {
@@ -165,6 +167,7 @@ impl Default for CenterStageEguiState {
             banner_details_open: None,
             last_synced_grid_coord: None,
             gallery_anchor_id: None,
+            last_formula_bar_active: false,
         }
     }
 }
@@ -563,18 +566,18 @@ fn handle_f6_split_and_note_focus(
             } else if shift_held && views.center_stage.focused_split_pane == SplitPaneSlot::Secondary {
                 views.center_stage.focused_split_pane = SplitPaneSlot::Primary;
             } else if has_notes {
-                intents.push_set_focus_pane(ActiveWorkspacePane::FloatingNotes);
+                intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::FloatingNotes });
             } else {
                 views.center_stage.focused_split_pane = if shift_held { SplitPaneSlot::Secondary } else { SplitPaneSlot::Primary };
             }
         } else if has_notes {
-            intents.push_set_focus_pane(ActiveWorkspacePane::FloatingNotes);
+            intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::FloatingNotes });
         } else {
-            intents.push_set_focus_pane(ActiveWorkspacePane::Inspector);
+            intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::Inspector });
         }
     } else if ctx_in.focused_pane == ActiveWorkspacePane::FloatingNotes {
         views.center_stage.focused_split_pane = if shift_held && split_active { SplitPaneSlot::Secondary } else { SplitPaneSlot::Primary };
-        intents.push_set_focus_pane(ActiveWorkspacePane::MainCanvasOrGrid);
+        intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::MainCanvasOrGrid });
     }
 }
 
@@ -665,7 +668,7 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
             ratio = DEFAULT_SPLIT_RATIO;
             views.center_stage.split_ratio_override = Some(ratio);
             views.center_stage.last_seen_app_split_ratio = Some(f64::from(ratio).clamp(0.2, 0.8));
-            intents.push_set_split_ratio(f64::from(ratio));
+            intents.push(UiIntent::SetSplitRatio { ratio: f64::from(ratio) });
             (primary_rect, divider_visual_rect, _, secondary_rect) =
                 compute_split_geometries(work_rect, orientation, ratio, ctx_in.tokens.metrics.splitter_hit_slop_w);
         } else if divider_resp.dragged() {
@@ -678,7 +681,7 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
                 ratio = raw.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO);
                 views.center_stage.split_ratio_override = Some(ratio);
                 views.center_stage.last_seen_app_split_ratio = Some(f64::from(ratio).clamp(0.2, 0.8));
-                intents.push_set_split_ratio(f64::from(ratio));
+                intents.push(UiIntent::SetSplitRatio { ratio: f64::from(ratio) });
                 (primary_rect, divider_visual_rect, _, secondary_rect) =
                     compute_split_geometries(work_rect, orientation, ratio, ctx_in.tokens.metrics.splitter_hit_slop_w);
             }
@@ -774,7 +777,7 @@ fn render_split_pane_container(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterSt
     if enabled && click_in_pane {
         io.views.center_stage.focused_split_pane = slot;
         if ctx_in.focused_pane != ActiveWorkspacePane::MainCanvasOrGrid {
-            io.intents.push_set_focus_pane(ActiveWorkspacePane::MainCanvasOrGrid);
+            io.intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::MainCanvasOrGrid });
         }
     }
 
@@ -888,7 +891,7 @@ fn render_split_pane_header(
                 inspect_input("split.clear_brush", "button", "Clear Brush", None, None, enabled, ZLayer::Workspace),
             );
             if clr_resp.clicked() && enabled {
-                intents.push_clear_brush();
+                intents.push(UiIntent::ClearBrush);
             }
         }
     } else if slot == SplitPaneSlot::Primary && header_rect.width() >= 280.0 {
@@ -968,6 +971,9 @@ fn render_single_pane_mode(ui: &mut egui::Ui, app: &UiApp, target: SinglePaneTar
         }
         CenterStageMode::ColumnGrid | CenterStageMode::DataGrid => {
             report.handled_natively = true;
+            if slot == SplitPaneSlot::Primary {
+                render_mv_formula_bar_if_active(ui, app, views, ctx_in.tokens, enabled, meta, intents);
+            }
             let grid_rep = render_data_grid(
                 ui,
                 app,
@@ -1018,6 +1024,158 @@ fn render_single_pane_mode(ui: &mut egui::Ui, app: &UiApp, target: SinglePaneTar
             report.handled_natively = true;
         }
     }
+}
+
+fn render_mv_formula_bar_if_active(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    views: &mut EguiShellViewState,
+    tokens: &Tokens,
+    enabled: bool,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let doc = app.document();
+    let ds_opt = doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id));
+    let ds_frozen = ds_opt.is_some_and(|ds| ds.frozen);
+    let fb = &app.grid.formula_bar;
+    if ds_opt.is_none() || !fb.active {
+        views.center_stage.last_formula_bar_active = false;
+        return;
+    }
+
+    let input_enabled = enabled && !ds_frozen;
+    let has_target = fb.target_column.is_some() || !fb.target_title.trim().is_empty();
+    let commit_enabled = input_enabled && has_target && fb.is_valid && fb.parse_error.is_none();
+    let commit_reason = if !enabled {
+        Some("modal dialog is active")
+    } else if ds_frozen {
+        Some("Data sheet is frozen (read-only).")
+    } else if !has_target {
+        Some("Formula bar is not active.")
+    } else if fb.parse_error.is_some() {
+        fb.parse_error.as_deref()
+    } else if !fb.is_valid {
+        Some("Formula cannot be empty or invalid.")
+    } else {
+        None
+    };
+
+    let te_id = Id::unique("formula_bar.input");
+    let was_focused = ui.ctx().memory(|m| m.focused() == Some(te_id));
+    let enter_pressed = was_focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+    let esc_pressed = (was_focused || app.focus_widget_id.as_deref() == Some("formula_bar.input"))
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
+    let tab_pressed = was_focused && !fb.completions.is_empty() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab));
+
+    egui::Frame::NONE.fill(tokens.panel_bg).stroke(Stroke::new(1.0, tokens.border)).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |bar| {
+        bar.horizontal(|row| {
+            let target_lbl = if fb.target_title.trim().is_empty() { "fx" } else { fb.target_title.as_str() };
+            row.label(RichText::new(format!("fx ({target_lbl}) =")).small().strong().color(tokens.accent));
+
+            let mut draft = fb.input.clone();
+            let edit_w = (row.available_width() - 150.0).max(120.0);
+            let mut edit =
+                egui::TextEdit::singleline(&mut draft).id(te_id).desired_width(edit_w).hint_text("= [Variable A] + [Variable B]").lock_focus(true);
+            if !input_enabled {
+                edit = edit.interactive(false);
+            }
+            let edit_resp = row.add(edit);
+            if (!views.center_stage.last_formula_bar_active || app.focus_widget_id.as_deref() == Some("formula_bar.input"))
+                && input_enabled
+                && row.ctx().memory(|m| m.focused().is_none())
+            {
+                edit_resp.request_focus();
+            }
+            meta.record_response(
+                row,
+                &edit_resp,
+                FrameInspectEntryInput {
+                    widget_id: "formula_bar.input",
+                    role: "textbox",
+                    label: "Formula bar",
+                    command_id: None,
+                    value: Some(json!({
+                        "active": fb.active,
+                        "target_column": fb.target_column,
+                        "target_title": fb.target_title,
+                        "input": draft,
+                        "is_valid": fb.is_valid,
+                        "parse_error": fb.parse_error,
+                    })),
+                    enabled: input_enabled,
+                    disabled_reason: if !enabled {
+                        Some("modal dialog is active")
+                    } else if ds_frozen {
+                        Some("Data sheet is frozen (read-only).")
+                    } else {
+                        None
+                    },
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            if draft != fb.input && input_enabled {
+                intents.push(UiIntent::SetFormulaBarInput { text: draft });
+            }
+            if enter_pressed && input_enabled {
+                intents.push(UiIntent::CommitFormulaBar);
+            } else if esc_pressed && input_enabled {
+                intents.push(UiIntent::CancelFormulaBar);
+            } else if tab_pressed && input_enabled {
+                intents.push(UiIntent::AcceptFormulaBarCompletion);
+            }
+
+            let apply_resp = row.add_enabled(commit_enabled, egui::Button::new(RichText::new("Apply").small()));
+            meta.record_response(
+                row,
+                &apply_resp,
+                FrameInspectEntryInput {
+                    widget_id: "formula_bar.commit",
+                    role: "button",
+                    label: "Apply formula",
+                    command_id: Some("table.setCalculatedVariable"),
+                    value: Some(json!({
+                        "target_column": fb.target_column,
+                        "is_valid": fb.is_valid,
+                        "parse_error": fb.parse_error,
+                    })),
+                    enabled: commit_enabled,
+                    disabled_reason: commit_reason,
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            if apply_resp.clicked() && commit_enabled {
+                intents.push(UiIntent::CommitFormulaBar);
+            }
+
+            let cancel_resp = row.add_enabled(enabled, egui::Button::new(RichText::new("Cancel").small()));
+            meta.record_response(
+                row,
+                &cancel_resp,
+                FrameInspectEntryInput {
+                    widget_id: "formula_bar.cancel",
+                    role: "button",
+                    label: "Cancel formula",
+                    command_id: None,
+                    value: Some(json!({ "active": fb.active })),
+                    enabled,
+                    disabled_reason: (!enabled).then_some("modal dialog is active"),
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            if cancel_resp.clicked() && enabled {
+                intents.push(UiIntent::CancelFormulaBar);
+            }
+        });
+    });
+
+    views.center_stage.last_formula_bar_active = true;
 }
 
 fn render_split_column_sheet_preview(
@@ -1136,9 +1294,9 @@ fn render_split_column_sheet_preview(
                         let resp = row_ui.add_enabled(enabled, btn);
                         if resp.clicked() && enabled {
                             let coord = GridCellCoord::new(r_idx, c_idx, 0);
-                            intents.push_brush_point(ds.id.clone(), coord);
+                            intents.push(UiIntent::BrushPoint { sheet_id: ds.id.clone(), coord });
                             if app.document().active_sheet_id.as_ref() == Some(&ds.id) {
-                                intents.push_select_grid_cell(coord);
+                                intents.push(UiIntent::SelectGridCell { coord });
                             }
                         }
                         if r_idx < 12 && c_idx < 4 {
@@ -1238,7 +1396,7 @@ fn render_split_non_column_preview(
                     .stroke(Stroke::new(if is_brushed { 1.5 } else { 0.5 }, if is_brushed { tokens.accent } else { tokens.border }))
                     .min_size(vec2(col_w, row_h));
                     if row_ui.add_enabled(enabled, btn).clicked() && enabled {
-                        intents.push_brush_point(ds.id.clone(), cell.coord);
+                        intents.push(UiIntent::BrushPoint { sheet_id: ds.id.clone(), coord: cell.coord });
                     }
                 }
             });
@@ -1272,7 +1430,7 @@ fn sync_two_way_split_brushing(
     if let Some(coord) = selected_coord {
         views.center_stage.last_synced_grid_coord = Some(coord);
         if !has_brush_intent {
-            intents.push_brush_point(grid_id, coord);
+            intents.push(UiIntent::BrushPoint { sheet_id: grid_id, coord });
         }
         return;
     }
@@ -1280,7 +1438,7 @@ fn sync_two_way_split_brushing(
     if !has_brush_intent && doc.active_sheet_id.as_ref() == Some(&grid_id) && app.grid.tool.active != views.center_stage.last_synced_grid_coord {
         views.center_stage.last_synced_grid_coord = app.grid.tool.active;
         if let Some(coord) = app.grid.tool.active {
-            intents.push_brush_point(grid_id, coord);
+            intents.push(UiIntent::BrushPoint { sheet_id: grid_id, coord });
         }
     }
 }
@@ -1594,7 +1752,7 @@ fn render_gallery_card(
                 next.insert(card.sheet_id.clone());
             }
             *gallery_anchor = Some(card.sheet_id.clone());
-            intents.push_set_gallery_selection(next.into_iter().collect());
+            intents.push(UiIntent::SetGallerySelection { sheet_ids: next.into_iter().collect() });
         } else if modifiers.shift {
             let anchor_pos = gallery_anchor
                 .as_ref()
@@ -1608,10 +1766,10 @@ fn render_gallery_card(
             if gallery_anchor.is_none() {
                 *gallery_anchor = visible_ids.get(anchor_pos).cloned();
             }
-            intents.push_set_gallery_selection(range_ids);
+            intents.push(UiIntent::SetGallerySelection { sheet_ids: range_ids });
         } else {
             *gallery_anchor = Some(card.sheet_id.clone());
-            intents.push_set_gallery_selection(vec![card.sheet_id.clone()]);
+            intents.push(UiIntent::SetGallerySelection { sheet_ids: vec![card.sheet_id.clone()] });
             intents.push_engine("sheet.select", json!({ "sheet_id": card.sheet_id.as_str() }));
             intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
         }
@@ -1798,7 +1956,7 @@ fn render_bottom_banner(
             if !views.center_stage.dismissed_banner_sheets.contains(sheet_id) {
                 views.center_stage.dismissed_banner_sheets.push(sheet_id.clone());
             }
-            intents.push_dismiss_diagnostic_banner(sheet_id.clone());
+            intents.push(UiIntent::DismissDiagnosticBanner { sheet_id: sheet_id.clone() });
         }
 
         if why_text.is_some() {
@@ -1989,7 +2147,6 @@ fn render_floating_notes_overlay(
         return;
     }
     let doc = app.document();
-    let shard = &app.view_shards.nav_notes;
     let first_id = notes.first().map(|n| n.note.id.as_str().to_owned());
     if views.center_stage.focused_floating_note_id.is_none() {
         views.center_stage.focused_floating_note_id = first_id;
@@ -2000,7 +2157,6 @@ fn render_floating_notes_overlay(
         let note = item.note;
         let note_id = note.id.as_str().to_owned();
         let key = (sheet_id.clone(), note_id.clone());
-        let shard_key = format!("{}:{}", sheet_id.as_str(), note_id);
 
         let collapsed = views
             .center_stage
@@ -2019,13 +2175,7 @@ fn render_floating_notes_overlay(
         let card_h =
             if collapsed { FLOATING_NOTE_HEADER_H_PT } else { (raw_h.max(FLOATING_NOTE_MIN_H_PT)).clamp(FLOATING_NOTE_MIN_H_PT.min(max_h), max_h) };
 
-        let [rel_x, rel_y] = views
-            .center_stage
-            .note_positions_pt
-            .get(&key)
-            .copied()
-            .or_else(|| shard.note_positions_pt.get(&shard_key).map(|p| [p[0] as f32, p[1] as f32]))
-            .unwrap_or([note.bounds_pt.x as f32, note.bounds_pt.y as f32]);
+        let [rel_x, rel_y] = views.center_stage.note_positions_pt.get(&key).copied().unwrap_or([note.bounds_pt.x as f32, note.bounds_pt.y as f32]);
 
         let min_x = stage_bounds.left() + FLOATING_NOTE_MARGIN_PT;
         let max_x = (stage_bounds.right() - card_w - FLOATING_NOTE_MARGIN_PT).max(min_x);
@@ -2070,7 +2220,7 @@ fn render_floating_notes_overlay(
                 drag_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Move Floating Note"));
                 if drag_resp.clicked() && enabled {
                     views.center_stage.focused_floating_note_id = Some(note_id.clone());
-                    intents.push_set_focus_pane(ActiveWorkspacePane::FloatingNotes);
+                    intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::FloatingNotes });
                 }
                 if drag_resp.drag_started() && enabled {
                     views.center_stage.active_floating_note_drag = Some((sheet_id.clone(), idx));
@@ -2084,7 +2234,11 @@ fn render_floating_notes_overlay(
                 if drag_resp.drag_stopped() && enabled {
                     views.center_stage.active_floating_note_drag = None;
                     if let Some([nx, ny]) = views.center_stage.note_positions_pt.get(&key).copied() {
-                        intents.push_custom_view_action("nav_notes", format!("note.set_pos|{}|{}|{nx:.2}|{ny:.2}", sheet_id.as_str(), note_id));
+                        intents.push(UiIntent::SetFloatingNotePosition {
+                            sheet_id: sheet_id.clone(),
+                            note_id: note_id.clone(),
+                            pos_pt: [f64::from(nx), f64::from(ny)],
+                        });
                     }
                 }
 
@@ -2140,7 +2294,7 @@ fn render_floating_notes_overlay(
                 );
                 if col_resp.clicked() && enabled {
                     views.center_stage.note_collapsed.insert(key.clone(), !collapsed);
-                    intents.push_custom_view_action("nav_notes", format!("note.toggle|{}|{}", sheet_id.as_str(), note_id));
+                    intents.push(UiIntent::ToggleFloatingNoteCollapsed { sheet_id: sheet_id.clone(), note_id: note_id.clone() });
                 }
 
                 if !collapsed {

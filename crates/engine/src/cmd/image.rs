@@ -5,12 +5,13 @@
 use curvebook_doc::{CropInsetsPt, ErrorCode, ImageBorderSpec, ImageMimeKind, MAX_IMAGE_ASSET_BYTES, ProjectDocument, RectPt, TableKind};
 use curvebook_format::{FormatError, ingest_image_asset};
 use curvebook_palette::{LineDashStyle, Rgba8};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::graph::{parse_line_dash_style, parse_rect_pt, parse_rgba8};
-use super::helpers::decode_base64_capped;
-use super::params::{any_json_schema, bool_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema};
+use super::helpers::{bad_input, bad_input_ptr, decode_base64_capped};
+use super::params::{any_json_schema, bool_schema, command_schema, non_empty_str_schema, nullable_schema, num_schema};
 use crate::EngineError;
 
 /// Resolved image asset metadata after ingestion or project-store lookup.
@@ -21,50 +22,45 @@ pub(super) struct ResolvedImageAsset {
     pub pixel_size: (u32, u32),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct CropInsetsPatchParams {
+pub(super) struct CropInsetsPatchParams {
+    /// Left crop inset in points (>= 0).
+    #[schemars(range(min = 0.0))]
     left_pt: Option<f64>,
+    /// Right crop inset in points (>= 0).
+    #[schemars(range(min = 0.0))]
     right_pt: Option<f64>,
+    /// Top crop inset in points (>= 0).
+    #[schemars(range(min = 0.0))]
     top_pt: Option<f64>,
+    /// Bottom crop inset in points (>= 0).
+    #[schemars(range(min = 0.0))]
     bottom_pt: Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ImageBorderParams {
+pub(super) struct ImageBorderParams {
+    /// Border stroke width in points (>= 0).
+    #[schemars(range(min = 0.0))]
     width_pt: Option<f64>,
+    /// Border stroke color (`#RRGGBB` / `#RRGGBBAA` or `[r, g, b, a]`).
     color: Option<Value>,
+    /// Border dash style (`solid`, `dashed`, `dotted`, `dash_dot`, etc.).
     dash: Option<Value>,
 }
 
 /// JSON Schema snippet describing a non-negative crop insets object.
 #[must_use]
 pub(super) fn crop_schema() -> Value {
-    obj_schema(
-        vec![
-            ("left_pt", nullable_schema(num_schema("Left crop inset in points (>= 0)", Some(0.0), None))),
-            ("right_pt", nullable_schema(num_schema("Right crop inset in points (>= 0)", Some(0.0), None))),
-            ("top_pt", nullable_schema(num_schema("Top crop inset in points (>= 0)", Some(0.0), None))),
-            ("bottom_pt", nullable_schema(num_schema("Bottom crop inset in points (>= 0)", Some(0.0), None))),
-        ],
-        &[],
-        false,
-    )
+    command_schema::<CropInsetsPatchParams>()
 }
 
 /// JSON Schema snippet describing an optional image border specification.
 #[must_use]
 pub(super) fn border_schema() -> Value {
-    obj_schema(
-        vec![
-            ("width_pt", nullable_schema(num_schema("Border stroke width in points (>= 0)", Some(0.0), None))),
-            ("color", nullable_schema(any_json_schema("Border stroke color (`#RRGGBB` / `#RRGGBBAA` or `[r, g, b, a]`)"))),
-            ("dash", nullable_schema(any_json_schema("Border dash style (`solid`, `dashed`, `dotted`, `dash_dot`, etc.)"))),
-        ],
-        &[],
-        false,
-    )
+    command_schema::<ImageBorderParams>()
 }
 
 /// Common insert-image source and placement schema fields.
@@ -157,7 +153,7 @@ pub(super) fn resolve_image_source(
         reject_uri_scheme(raw_path)?;
         (read_image_file_bytes(raw_path)?, "/path")
     } else {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "missing image source"));
+        return Err(bad_input("missing image source"));
     };
 
     let asset = ingest_image_asset(&raw_bytes).map_err(|err| map_format_ingest_error(err, pointer))?;
@@ -200,8 +196,7 @@ pub(super) fn parse_image_insert_bounds(val: Option<&Value>, pixel_size: (u32, u
 /// Validate finite positive width/height for an image placement rectangle.
 pub(super) fn validate_positive_rect(rect: RectPt, pointer: &str) -> Result<(), EngineError> {
     if !rect.x.is_finite() || !rect.y.is_finite() || !rect.width.is_finite() || !rect.height.is_finite() || rect.width <= 0.0 || rect.height <= 0.0 {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "image `bounds_pt` must be finite with width > 0 and height > 0")
-            .with_details(json!({ "pointer": pointer })));
+        return Err(bad_input_ptr(pointer, "image `bounds_pt` must be finite with width > 0 and height > 0"));
     }
     Ok(())
 }
@@ -227,8 +222,7 @@ pub(super) fn apply_crop_patch(val: Option<&Value>, bounds: RectPt, base: CropIn
     }
     next.validate(TableKind::Xy)?;
     if next.visible_rect(bounds).is_none() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "image crop insets exceed `bounds_pt` dimensions")
-            .with_details(json!({ "pointer": "/crop" })));
+        return Err(bad_input_ptr("/crop", "image crop insets exceed `bounds_pt` dimensions"));
     }
     Ok(next)
 }
@@ -269,7 +263,7 @@ pub(super) fn apply_image_bounds_update(
     intrinsic_px: Option<(u32, u32)>,
 ) -> Result<(), EngineError> {
     if bounds_pt_arg.is_some() && (width_pt_arg.is_some() || height_pt_arg.is_some()) {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "cannot combine `bounds_pt` with `width_pt` or `height_pt`"));
+        return Err(bad_input("cannot combine `bounds_pt` with `width_pt` or `height_pt`"));
     }
     if let Some(raw_rect) = bounds_pt_arg {
         let next = parse_rect_pt(Some(raw_rect), *bounds)?;
@@ -285,16 +279,14 @@ pub(super) fn apply_image_bounds_update(
     match (width_pt_arg, height_pt_arg) {
         (Some(w), Some(h)) => {
             if !w.is_finite() || w <= 0.0 || !h.is_finite() || h <= 0.0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "`width_pt` and `height_pt` must be finite and > 0"));
+                return Err(bad_input("`width_pt` and `height_pt` must be finite and > 0"));
             }
             bounds.width = w;
             bounds.height = h;
         }
         (Some(w), None) => {
             if !w.is_finite() || w <= 0.0 {
-                return Err(
-                    EngineError::with_code(ErrorCode::BadInput, "`width_pt` must be finite and > 0").with_details(json!({ "pointer": "/width_pt" }))
-                );
+                return Err(bad_input_ptr("/width_pt", "`width_pt` must be finite and > 0"));
             }
             bounds.width = w;
             if lock_aspect_ratio {
@@ -303,8 +295,7 @@ pub(super) fn apply_image_bounds_update(
         }
         (None, Some(h)) => {
             if !h.is_finite() || h <= 0.0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "`height_pt` must be finite and > 0")
-                    .with_details(json!({ "pointer": "/height_pt" })));
+                return Err(bad_input_ptr("/height_pt", "`height_pt` must be finite and > 0"));
             }
             bounds.height = h;
             if lock_aspect_ratio {
@@ -322,7 +313,7 @@ pub(super) fn parse_rotation_deg(val: Option<f64>, current: f64) -> Result<f64, 
         return Ok(current);
     };
     if !deg.is_finite() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "`rotation_deg` must be finite").with_details(json!({ "pointer": "/rotation_deg" })));
+        return Err(bad_input_ptr("/rotation_deg", "`rotation_deg` must be finite"));
     }
     Ok(deg)
 }

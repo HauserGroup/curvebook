@@ -420,7 +420,10 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
     let ref_dir = sim_root.join("docs/reference");
     fs::create_dir_all(&ref_dir).map_err(|e| e.to_string())?;
     for (name, body) in [
-        ("get-started", "# Get Started\n\nSee [MCP Setup](../mcp-for-beginners.md).\n"),
+        (
+            "get-started",
+            "# Get Started\n\nSee [MCP Setup](../mcp-for-beginners.md).\n\n## Linux {#install-linux}\n\nLinux `.AppImage` install notes.\n\n## Verifying Downloads {#verifying-downloads}\n\nChecksum and attestation verification.\n",
+        ),
         ("desktop-gui", "# Desktop GUI Overview\n\nSee [Commands](../commands.md).\n"),
         ("concepts", "# Concepts\n\nSee [Tables](tables.md).\n"),
         ("tables", "# Data Tables\n\nSee [Formats](files.md).\n"),
@@ -432,7 +435,7 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
         ("privacy-security", "# Privacy & Security\n\nSee [Security](../../SECURITY.md).\n"),
         (
             "troubleshooting",
-            "# Troubleshooting\n\nSee [Privacy & Security](privacy-security.md).\n\n## Known Issues {#known-issues}\n\nBeta known issues.\n\n### MCP Client Cannot Connect {#mcp-connection}\n\nVerify absolute command and `--workdir` paths.\n",
+            "# Troubleshooting\n\nSee [Privacy & Security](privacy-security.md).\n\n## Known Issues {#known-issues}\n\nBeta known issues.\n\n### MCP Client Cannot Connect {#mcp-connection}\n\nVerify absolute command and `--workdir` paths.\n\n### Linux AppImage FUSE {#linux-fuse}\n\nRun with `--appimage-extract-and-run` if FUSE is unavailable.\n",
         ),
         ("glossary", "# Glossary\n\n## Reactive DAG {#term-reactive-dag}\n\nRecomputes sheets.\n"),
     ] {

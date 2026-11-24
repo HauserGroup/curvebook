@@ -5,17 +5,17 @@
 //! Power & Sample Size [`curvebook_doc::ResultSheet`] and linked [`curvebook_doc::GraphSheet`].
 
 use curvebook_doc::SheetId;
-use curvebook_engine::{EngineError, ErrorCode, Session};
+#[cfg(any(test, feature = "test-support"))]
+use curvebook_engine::Session;
+use curvebook_engine::{EngineError, ErrorCode};
+#[cfg(any(test, feature = "test-support"))]
+use curvebook_stats::power::paired_sd_from_correlation;
 use curvebook_stats::power::{
     CorrelationPowerMethod, OneSidedDirection, PowerAnalysisRequest, PowerAnalysisResult, PowerCurvePoint, PowerEffectSpec, PowerSolveTarget,
-    PowerTestFamily, SensitivityCell, TailMode, TwoProportionsMethod, cohens_d_from_means, cohens_dz_from_correlation, cohens_f_from_means,
-    paired_sd_from_correlation, solve_power,
+    PowerTestFamily, TailMode, TwoProportionsMethod, cohens_d_from_means, cohens_dz_from_correlation, cohens_f_from_means, solve_power,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-
-use crate::grid_view::parse_localized_number_input;
-use crate::i18n::LocalePreset;
 
 /// Wizard step across the 4-stage Power & Sample Size flow (`docs/gui-workflows.md` §3.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -159,6 +159,34 @@ pub struct PowerWizardState {
     pub hover_power: Option<f64>,
     pub hover_fraction_x: Option<f64>,
     pub created_sheets: Option<PowerWizardCreatedSheets>,
+
+    // Pilot / survival-log-rank input drafts
+    #[serde(default = "default_pilot_mean1")]
+    pub pilot_mean1: f64,
+    #[serde(default = "default_pilot_mean2")]
+    pub pilot_mean2: f64,
+    #[serde(default)]
+    pub survival_log_rank: bool,
+    #[serde(default = "default_survival_hr")]
+    pub survival_hazard_ratio: f64,
+    #[serde(default = "default_survival_event_prob")]
+    pub survival_event_prob: f64,
+}
+
+const fn default_pilot_mean1() -> f64 {
+    10.0
+}
+
+const fn default_pilot_mean2() -> f64 {
+    10.8
+}
+
+const fn default_survival_hr() -> f64 {
+    0.65
+}
+
+const fn default_survival_event_prob() -> f64 {
+    0.60
 }
 
 impl Default for PowerWizardState {
@@ -199,6 +227,11 @@ impl Default for PowerWizardState {
             hover_power: None,
             hover_fraction_x: None,
             created_sheets: None,
+            pilot_mean1: default_pilot_mean1(),
+            pilot_mean2: default_pilot_mean2(),
+            survival_log_rank: false,
+            survival_hazard_ratio: default_survival_hr(),
+            survival_event_prob: default_survival_event_prob(),
         };
         let _ = state.recalculate();
         state
@@ -206,6 +239,20 @@ impl Default for PowerWizardState {
 }
 
 impl PowerWizardState {
+    /// Synchronize survival log-rank proportions (`p1`, `p2`, and Cohen's `h`) from hazard ratio and event probability.
+    pub fn sync_survival_proportions(&mut self) {
+        let p1 = self.survival_event_prob.clamp(0.05, 0.95);
+        let s1 = (1.0 - p1).clamp(0.01, 0.99);
+        let s2 = s1.powf(self.survival_hazard_ratio.clamp(0.10, 5.0)).clamp(0.01, 0.99);
+        let p2 = (1.0 - s2).clamp(0.01, 0.99);
+        self.p1 = p1;
+        self.p2 = p2;
+        self.effect_mode = PowerEffectInputMode::Proportions;
+        if let Ok(h) = curvebook_stats::power::cohens_h(p1, p2) {
+            self.standardized_effect = h.abs().max(0.05);
+        }
+    }
+
     /// Set the active test family and normalize incompatible tail / effect input defaults.
     pub fn set_family(&mut self, family: PowerTestFamily) {
         self.family = family;
@@ -274,6 +321,7 @@ impl PowerWizardState {
     }
 
     /// Derived paired difference standard deviation `sigma_d = sigma * sqrt(2 * (1 - r))`.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn computed_paired_sigma_d(&self) -> Option<f64> {
         paired_sd_from_correlation(self.sd, self.within_pair_correlation).ok()
@@ -668,247 +716,6 @@ impl PowerWizardState {
         Some((clamped_n, power))
     }
 
-    /// Return sensitivity table cells grouped cleanly or directly from the solved result.
-    #[must_use]
-    pub fn sensitivity_cells(&self) -> &[SensitivityCell] {
-        self.result.as_ref().map_or(&[], |r| r.sensitivity_table.as_slice())
-    }
-
-    /// Format compact Stage 4 headline metric lines for compositor rendering & `ui.inspect`.
-    #[must_use]
-    pub fn summary_lines(&self) -> Vec<String> {
-        let Some(ref res) = self.result else {
-            return vec![
-                format!("Family: {}", self.family.label()),
-                self.validation_error.as_deref().unwrap_or("Adjust parameters to solve.").to_owned(),
-            ];
-        };
-        let mut lines = vec![
-            format!("Family: {} ({})", res.family.label(), solve_target_label(res.solve_target)),
-            format!("alpha = {:.4} | effect = {:.4} | power = {:.4}", res.alpha, res.effect_size, res.achieved_power),
-            match res.n_group2 {
-                Some(n2) => format!("Required N: n1 = {}, n2 = {}, total = {}", res.n_per_group, n2, res.total_n),
-                None => format!("Required N: per group = {}, total = {}", res.n_per_group, res.total_n),
-            },
-            format!("Critical = {:.4} | NCP = {:.4}", res.critical_value, res.noncentrality_param),
-        ];
-        if let (Some(hn), Some(hp)) = (self.hover_n, self.hover_power) {
-            lines.push(format!("Hover curve: N = {:.1}, Power = {:.4}", hn, hp));
-        }
-        lines
-    }
-
-    /// Apply a UI patch map (used by `ui.answer_dialog` and dialog form updates) and live-recalculate.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
-    }
-
-    /// Apply modal field updates using regional numeric parsing (`preset`).
-    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
-        for (key, val) in fields {
-            self.apply_single_field(key, val, preset)?;
-        }
-        if matches!(self.stage, PowerWizardStage::SignificanceAndSolve | PowerWizardStage::Results) || self.result.is_some() {
-            let _ = self.recalculate()?;
-        } else {
-            let _ = self.recalculate();
-        }
-        Ok(())
-    }
-
-    fn apply_single_field(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<(), String> {
-        match key {
-            "stage" | "power.stage" => self.patch_stage(val)?,
-            "family" | "power.family" => self.patch_family(val)?,
-            "solve_target" | "power.solve_target" => self.patch_solve_target(val)?,
-            "effect_mode" | "power.effect_mode" => self.patch_effect_mode(val)?,
-            "standardized_effect" | "power.standardized_effect" | "effect_size" | "d" => {
-                self.standardized_effect = parse_num_localized(val, key, preset)?;
-            }
-            "mean_diff" | "power.mean_diff" => self.mean_diff = parse_num_localized(val, key, preset)?,
-            "sd" | "sigma" | "power.sd" => self.sd = parse_num_localized(val, key, preset)?,
-            "sd_group2" | "power.sd_group2" => self.sd_group2 = parse_opt_num_localized(val, key, preset)?,
-            "within_pair_correlation" | "r" | "power.within_pair_correlation" => {
-                self.within_pair_correlation = parse_num_localized(val, key, preset)?;
-            }
-            "paired_sd_diff" | "sigma_d" | "power.paired_sd_diff" => self.paired_sd_diff = parse_num_localized(val, key, preset)?,
-            "anova_groups" | "num_groups" | "k" | "power.anova_groups" => {
-                let k = parse_positive_usize_arg(val, key, preset)?;
-                self.anova_groups = k.max(2);
-            }
-            "group_means" | "power.group_means" => self.patch_group_means(val, preset)?,
-            "p1" | "power.p1" => self.p1 = parse_num_localized(val, key, preset)?,
-            "p2" | "power.p2" => self.p2 = parse_num_localized(val, key, preset)?,
-            "r_squared" | "power.r_squared" => self.r_squared = parse_num_localized(val, key, preset)?,
-            "beta1" | "power.beta1" => self.beta1 = parse_num_localized(val, key, preset)?,
-            "sigma_x" | "power.sigma_x" => self.sigma_x = parse_num_localized(val, key, preset)?,
-            "sigma_eps" | "power.sigma_eps" => self.sigma_eps = parse_num_localized(val, key, preset)?,
-            "two_tailed" | "power.two_tailed" => {
-                let two = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
-                if !two && !self.family.supports_one_sided() {
-                    return Err(format!("{} only supports two-tailed tests", self.family.label()));
-                }
-                self.two_tailed = two;
-            }
-            "one_sided" | "power.one_sided" => {
-                let one = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
-                if one && !self.family.supports_one_sided() {
-                    return Err(format!("{} only supports two-tailed tests", self.family.label()));
-                }
-                self.two_tailed = !one;
-            }
-            "one_sided_greater" | "power.one_sided_greater" => {
-                self.one_sided_greater = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
-            }
-            "tail_mode" | "power.tail_mode" => self.patch_tail_mode(val)?,
-            "alpha" | "power.alpha" => self.alpha = parse_num_localized(val, key, preset)?,
-            "target_power" | "power" | "power.target_power" => self.target_power = parse_num_localized(val, key, preset)?,
-            "sample_size" | "n" | "power.sample_size" => self.sample_size = parse_num_localized(val, key, preset)?,
-            "sample_size_group2" | "n2" | "power.sample_size_group2" => {
-                self.sample_size_group2 = parse_opt_num_localized(val, key, preset)?;
-            }
-            "allocation_ratio" | "power.allocation_ratio" => self.allocation_ratio = parse_num_localized(val, key, preset)?,
-            "chi_square_df" | "df" | "power.chi_square_df" => self.chi_square_df = parse_num_localized(val, key, preset)?,
-            "continuity_correction" | "power.continuity_correction" => {
-                self.continuity_correction = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
-            }
-            "hover_n" | "power.hover_n" => {
-                let hn = parse_num_localized(val, key, preset)?;
-                if self.result.is_none() {
-                    let _ = self.recalculate()?;
-                }
-                let _ = self.hover_at_n(hn);
-            }
-            "hover_fraction_x" | "power.hover_fraction_x" => {
-                let f = parse_num_localized(val, key, preset)?;
-                if self.result.is_none() {
-                    let _ = self.recalculate()?;
-                }
-                let _ = self.hover_at_fraction(f);
-            }
-            "power.curve_hover" | "curve_hover" => {
-                if self.result.is_none() {
-                    let _ = self.recalculate()?;
-                }
-                if let Some(obj) = val.as_object() {
-                    if let Some(hn_v) = obj.get("hover_n") {
-                        let hn = parse_num_localized(hn_v, "power.curve_hover.hover_n", preset)?;
-                        let _ = self.hover_at_n(hn);
-                    } else if let Some(fx_v) = obj.get("hover_fraction_x").or_else(|| obj.get("fraction_x")) {
-                        let f = parse_num_localized(fx_v, "power.curve_hover.hover_fraction_x", preset)?;
-                        let _ = self.hover_at_fraction(f);
-                    } else {
-                        return Err(String::from("`power.curve_hover` object must specify `hover_n` or `hover_fraction_x`"));
-                    }
-                } else {
-                    let hn = parse_num_localized(val, key, preset)?;
-                    let _ = self.hover_at_n(hn);
-                }
-            }
-            other => return Err(format!("unknown power wizard field `{other}`")),
-        }
-        Ok(())
-    }
-
-    fn patch_stage(&mut self, val: &Value) -> Result<(), String> {
-        let target = if let Some(idx) = val.as_u64() {
-            PowerWizardStage::from_index(idx as usize).ok_or_else(|| format!("invalid power wizard stage index `{idx}`"))?
-        } else if let Some(raw) = val.as_str() {
-            let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
-            match norm.as_str() {
-                "1" | "experimentdesign" | "design" => PowerWizardStage::ExperimentDesign,
-                "2" | "effectsize" | "effect" => PowerWizardStage::EffectSize,
-                "3" | "significanceandsolve" | "significance" => PowerWizardStage::SignificanceAndSolve,
-                "4" | "results" | "resultssensitivity" => PowerWizardStage::Results,
-                _ => return Err(format!("unknown power wizard stage `{raw}`")),
-            }
-        } else {
-            return Err(String::from("`stage` must be a string or stage index"));
-        };
-        self.step_to_stage(target)
-    }
-
-    fn patch_family(&mut self, val: &Value) -> Result<(), String> {
-        let raw = val.as_str().ok_or_else(|| String::from("`family` must be a string"))?;
-        let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
-        let family = match norm.as_str() {
-            "unpairedt" | "twosampleunpairedt" | "independentt" => PowerTestFamily::TwoSampleUnpairedT,
-            "pairedt" | "twosamplepairedt" | "dependentt" => PowerTestFamily::TwoSamplePairedT,
-            "onesamplet" | "singlesamplet" => PowerTestFamily::OneSampleT,
-            "onewayanova" | "anova" => PowerTestFamily::OneWayAnova,
-            "twoproportions" | "proportions" => PowerTestFamily::TwoProportions,
-            "correlation" | "pearsoncorrelation" => PowerTestFamily::Correlation,
-            "chisquare" | "chi2" => PowerTestFamily::ChiSquare,
-            "simplelinearregression" | "linearregression" | "regression" => PowerTestFamily::SimpleLinearRegression,
-            _ => return Err(format!("unknown power test family `{raw}`")),
-        };
-        self.set_family(family);
-        Ok(())
-    }
-
-    fn patch_solve_target(&mut self, val: &Value) -> Result<(), String> {
-        let raw = val.as_str().ok_or_else(|| String::from("`solve_target` must be a string"))?;
-        let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
-        self.solve_target = match norm.as_str() {
-            "samplesize" | "n" => PowerSolveTarget::SampleSize,
-            "power" => PowerSolveTarget::Power,
-            "detectableeffect" | "effect" | "mde" => PowerSolveTarget::DetectableEffect,
-            _ => return Err(format!("unknown power solve target `{raw}`")),
-        };
-        Ok(())
-    }
-
-    fn patch_effect_mode(&mut self, val: &Value) -> Result<(), String> {
-        let raw = val.as_str().ok_or_else(|| String::from("`effect_mode` must be a string"))?;
-        let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
-        self.effect_mode = match norm.as_str() {
-            "standardized" | "direct" => PowerEffectInputMode::Standardized,
-            "meansandsd" | "rawmeans" | "means" => PowerEffectInputMode::MeansAndSd,
-            "paireddiffdirect" | "paireddiff" | "sigmad" => PowerEffectInputMode::PairedDiffDirect,
-            "proportions" | "twoproportions" => PowerEffectInputMode::Proportions,
-            "regressionrsquared" | "rsquared" | "r2" => PowerEffectInputMode::RegressionRSquared,
-            "regressionslope" | "slope" => PowerEffectInputMode::RegressionSlope,
-            _ => return Err(format!("unknown power effect mode `{raw}`")),
-        };
-        Ok(())
-    }
-
-    fn patch_group_means(&mut self, val: &Value, preset: &LocalePreset) -> Result<(), String> {
-        let parsed = crate::dialogs_r9::parse_f64_list_with_locale(val, "group_means", preset)?;
-        if parsed.len() < 2 {
-            return Err(String::from("`group_means` must contain at least 2 group means"));
-        }
-        self.anova_groups = parsed.len();
-        self.group_means = parsed;
-        Ok(())
-    }
-
-    fn patch_tail_mode(&mut self, val: &Value) -> Result<(), String> {
-        let raw = val.as_str().ok_or_else(|| String::from("`tail_mode` must be a string"))?;
-        let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
-        match norm.as_str() {
-            "twosided" | "twotailed" | "two" => {
-                self.two_tailed = true;
-            }
-            "onesidedgreater" | "onetailedgreater" | "onesided" | "onetailed" | "greater" => {
-                if !self.family.supports_one_sided() {
-                    return Err(format!("{} only supports two-tailed tests", self.family.label()));
-                }
-                self.two_tailed = false;
-                self.one_sided_greater = true;
-            }
-            "onesidedless" | "onetailedless" | "less" => {
-                if !self.family.supports_one_sided() {
-                    return Err(format!("{} only supports two-tailed tests", self.family.label()));
-                }
-                self.two_tailed = false;
-                self.one_sided_greater = false;
-            }
-            _ => return Err(format!("unknown tail mode `{raw}`")),
-        }
-        Ok(())
-    }
-
     /// Execute Stage 4 `Create` through `Session::execute_as_ui` (`Caller::Ui`), creating both
     /// Build the Power Curve DataSheet, ResultSheet, InfoSheet, and GraphSheet using a caller-provided
     /// command executor so batched UI transactions can record each engine step.
@@ -1014,6 +821,7 @@ impl PowerWizardState {
     }
 
     /// Build the Power Curve DataSheet, ResultSheet, InfoSheet, and GraphSheet into `session`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn execute_create(&mut self, session: &mut Session) -> Result<PowerWizardCreatedSheets, EngineError> {
         let res = session.execute_atomic_group(|s| self.execute_create_with(&mut |command_id, params| s.execute_as_ui(command_id, params)));
         if res.is_err() {
@@ -1113,30 +921,6 @@ fn interpolate_curve_power(curve: &[PowerCurvePoint], target_n: f64) -> Option<f
         }
     }
     curve.last().map(|p| p.power)
-}
-
-fn parse_num_localized(val: &Value, field: &str, preset: &LocalePreset) -> Result<f64, String> {
-    let parsed = val.as_f64().or_else(|| val.as_str().and_then(|s| parse_localized_number_input(s, preset)));
-    parsed.filter(|v| v.is_finite()).ok_or_else(|| format!("`{field}` must be a finite number"))
-}
-
-fn parse_opt_num_localized(val: &Value, field: &str, preset: &LocalePreset) -> Result<Option<f64>, String> {
-    if val.is_null() || val.as_str().is_some_and(|s| s.trim().is_empty()) {
-        return Ok(None);
-    }
-    parse_num_localized(val, field, preset).map(Some)
-}
-
-fn parse_positive_usize_arg(val: &Value, field: &str, preset: &LocalePreset) -> Result<usize, String> {
-    if let Some(u) = val.as_u64().filter(|&n| n >= 1) {
-        return usize::try_from(u).map_err(|_| format!("`{field}` exceeds platform integer bounds"));
-    }
-    let f = parse_num_localized(val, field, preset).map_err(|_| format!("`{field}` must be a positive integer"))?;
-    if f < 1.0 || (f - f.round()).abs() > 1e-9 || f > (usize::MAX as f64) {
-        return Err(format!("`{field}` must be a positive integer"));
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Ok(f.round() as usize)
 }
 
 fn extract_str_field(val: &Value, field: &str, label: &str) -> Result<String, EngineError> {
@@ -1262,23 +1046,24 @@ mod tests {
     #[test]
     fn anova_groups_accepts_integers_floats_and_numeric_strings() {
         let mut wizard = PowerWizardState::default();
+        let preset = crate::i18n::LocalePreset::default();
         let mut patch = serde_json::Map::new();
         patch.insert(String::from("family"), json!("one_way_anova"));
         patch.insert(String::from("power.anova_groups"), json!("4"));
-        wizard.apply_field_patch(&patch).expect("numeric string anova_groups");
+        crate::dialogs_canvas::dialog_patch::patch_power_wizard(&mut wizard, &patch, &preset).expect("numeric string anova_groups");
         assert_eq!(wizard.anova_groups, 4);
 
         patch.insert(String::from("power.anova_groups"), json!(5.0));
-        wizard.apply_field_patch(&patch).expect("float anova_groups");
+        crate::dialogs_canvas::dialog_patch::patch_power_wizard(&mut wizard, &patch, &preset).expect("float anova_groups");
         assert_eq!(wizard.anova_groups, 5);
 
         patch.insert(String::from("power.anova_groups"), json!("6.0"));
-        wizard.apply_field_patch(&patch).expect("float string anova_groups");
+        crate::dialogs_canvas::dialog_patch::patch_power_wizard(&mut wizard, &patch, &preset).expect("float string anova_groups");
         assert_eq!(wizard.anova_groups, 6);
 
         for invalid in [json!(0), json!(-2), json!("abc"), json!(2.5)] {
             patch.insert(String::from("power.anova_groups"), invalid);
-            assert!(wizard.apply_field_patch(&patch).is_err());
+            assert!(crate::dialogs_canvas::dialog_patch::patch_power_wizard(&mut wizard, &patch, &preset).is_err());
         }
     }
 }

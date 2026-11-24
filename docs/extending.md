@@ -17,7 +17,7 @@ Follow the existing seams below whenever adding a capability. Every user-facing 
 ### Cursor
 
 - **Where:** `crates/tools/src/cursors.toml`, `crates/tools/src/lib.rs` (`Cursor` enum), `UiApp::active_cursor` in `crates/ui-egui/src/lib.rs`
-- **How:** Add the `Cursor` variant in `crates/tools/src/lib.rs` and a matching `[[cursor]]` entry (`name`, `hotspot`, `when`) in `crates/tools/src/cursors.toml`; select it from `UiApp::active_cursor`. Record any new cursor image files in [ASSETS.md](../ASSETS.md) and run `cargo xtask cursors` + `cargo xtask assets`.
+- **How:** Add the `Cursor` variant in `crates/tools/src/lib.rs` and a matching `[[cursor]]` entry (`name`, `hotspot`, `when`) in `crates/tools/src/cursors.toml`; select it from `UiApp::active_cursor`. Record any new cursor image files in [ASSETS.md](../ASSETS.md) and run `cargo test -p curvebook-tools` + `cargo xtask assets`.
 
 ### Statistical / Scientific `AnalysisKind`
 

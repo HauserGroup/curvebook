@@ -4,8 +4,107 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::licenses::{extract_first_quoted, parse_cargo_lock, parse_section_header, strip_toml_comment, unquote_toml_str};
 use crate::rust_lex::{RustLexer, StrippedRust, is_ident_byte, strip_non_prod_rust_both as strip_non_prod_rust};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LockPackage {
+    name: String,
+    version: String,
+    source: Option<String>,
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_dq = false;
+    let mut in_sq = false;
+    let mut escaped = false;
+    for (i, ch) in line.char_indices() {
+        if in_dq {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_dq = false;
+            }
+        } else if in_sq {
+            if ch == '\'' {
+                in_sq = false;
+            }
+        } else {
+            match ch {
+                '"' => in_dq = true,
+                '\'' => in_sq = true,
+                '#' => return line.get(..i).unwrap_or(line),
+                _ => {}
+            }
+        }
+    }
+    line
+}
+
+fn parse_section_header(line: &str) -> Option<&str> {
+    if line.starts_with("[[") {
+        return None;
+    }
+    line.strip_prefix('[')?.strip_suffix(']').map(str::trim)
+}
+
+fn unquote_toml_str(s: &str) -> String {
+    let t = s.trim();
+    t.strip_prefix('"').and_then(|r| r.strip_suffix('"')).or_else(|| t.strip_prefix('\'').and_then(|r| r.strip_suffix('\''))).unwrap_or(t).to_owned()
+}
+
+fn extract_first_quoted(s: &str) -> String {
+    for quote in ['"', '\''] {
+        if let Some(rest) = s.strip_prefix(quote) {
+            return rest.split(quote).next().unwrap_or("").to_owned();
+        }
+    }
+    String::new()
+}
+
+fn parse_cargo_lock(lock_text: &str) -> Vec<LockPackage> {
+    let mut pkgs = Vec::new();
+    let mut current: Option<LockPackage> = None;
+
+    for raw in lock_text.lines() {
+        let line = raw.trim();
+        if line == "[[package]]" {
+            if let Some(pkg) = current.take()
+                && !pkg.name.is_empty()
+            {
+                pkgs.push(pkg);
+            }
+            current = Some(LockPackage { name: String::new(), version: String::new(), source: None });
+            continue;
+        }
+        if line.starts_with('[') {
+            if let Some(pkg) = current.take()
+                && !pkg.name.is_empty()
+            {
+                pkgs.push(pkg);
+            }
+            continue;
+        }
+        let Some(pkg) = current.as_mut() else {
+            continue;
+        };
+        if let Some((k, v)) = line.split_once('=') {
+            match k.trim() {
+                "name" => pkg.name = unquote_toml_str(v.trim()),
+                "version" => pkg.version = unquote_toml_str(v.trim()),
+                "source" => pkg.source = Some(unquote_toml_str(v.trim())),
+                _ => {}
+            }
+        }
+    }
+    if let Some(pkg) = current
+        && !pkg.name.is_empty()
+    {
+        pkgs.push(pkg);
+    }
+    pkgs
+}
 
 const ALLOWED_LOOPBACK_NET_FILES: &[&str] = &["crates/ui-egui/src/control_io.rs", "crates/mcp/src/tools.rs", "apps/curvebook/src/main.rs"];
 
@@ -331,7 +430,7 @@ fn extract_banned_web_sys_features(rhs: &str) -> Vec<String> {
     hits
 }
 
-fn scan_lock_for_banned_crates(lock_text: &str, lock_pkgs: &[crate::licenses::LockPackage], violations: &mut Vec<TelemetryViolation>) {
+fn scan_lock_for_banned_crates(lock_text: &str, lock_pkgs: &[LockPackage], violations: &mut Vec<TelemetryViolation>) {
     let mut pkg_lines: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     let mut in_pkg = false;
     for (idx, raw) in lock_text.lines().enumerate() {

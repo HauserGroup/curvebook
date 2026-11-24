@@ -16,7 +16,7 @@ use crate::egui_shell::stat_anova_modal::{
     ClippedTextSpec, column_titles_for_draft, record_widget, render_clipped_text, render_modal_checkbox, render_modal_seg_btn, render_section_title,
 };
 use crate::egui_shell::widgets::paint_icon_button_named;
-use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 /// Shared modal chrome configuration for Wave 4 native `egui` dialogs (`R15.4`).
 pub(in crate::egui_shell) struct Wave4ModalShell<'a> {
@@ -95,7 +95,7 @@ where
                 let close_resp = paint_icon_button_named(ui, close_alloc, "close", close_lbl, close_lbl, false);
                 record_widget(ui, meta, &close_resp, "modal.close", "button", close_lbl, None, None, true, None, ZLayer::ModalDialog, false, None);
                 if close_resp.clicked() {
-                    intents.push_dialog_button("cancel");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
             });
 
@@ -415,7 +415,7 @@ pub(super) fn render_df_method_picker(
                     AnalysisKind::NestedComparison(n) => n.df_method = m,
                     _ => {}
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     });
@@ -441,7 +441,7 @@ pub(super) fn render_cov_structure_picker(
                 if let AnalysisKind::FactorialAnova(f) = &mut next.kind {
                     f.residual_covariance = cov;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     });
@@ -463,12 +463,12 @@ pub(super) fn render_dataset_checklist(
     let sel = &spec.selected_data_sets;
     ui.horizontal_wrapped(|ui| {
         if render_modal_checkbox(ui, tokens, meta, "edit.dataset.all", "All Data Sets / Columns", sel.is_empty(), &ControlEnablement::enabled()) {
-            intents.push_custom_view_action("stat_params", "select_all_datasets");
+            intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::SelectAllDatasets));
         }
         for (idx, col_title) in titles.iter().enumerate() {
             let on = sel.is_empty() || sel.contains(&idx);
             if render_modal_checkbox(ui, tokens, meta, &format!("edit.dataset.{idx}"), col_title, on, &ControlEnablement::enabled()) {
-                intents.push_custom_view_action("stat_params", format!("toggle_dataset:{idx}"));
+                intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::ToggleDataset { idx }));
             }
         }
     });

@@ -5,13 +5,13 @@
 mod analysis_catalog;
 mod analyze_dialog;
 mod command_palette;
+pub mod dialog_patch;
 mod edit_params;
 mod format_axes;
 mod format_graph;
 mod graph_overlays;
 mod graph_type;
 mod layout_export;
-mod parse_helpers;
 mod print_dialog;
 mod r13_dialogs;
 mod results_hooks;
@@ -32,24 +32,26 @@ use crate::power_wizard::PowerWizardState;
 
 pub use analysis_catalog::{ANALYSIS_CATALOG, AnalysisCatalogItem, AnalysisCategory, default_analysis_kind_for_id};
 pub use analyze_dialog::{
-    AnalyzeDialogState, AnalyzeDuplicateChoice, VariableCandidate, VariableRoleFilter, variable_role_badge, variable_role_badge_fg,
+    AnalyzeDialogState, AnalyzeDuplicateChoice, DuplicateChoice, VariableCandidate, VariableRoleFilter, variable_role_badge, variable_role_badge_fg,
     variable_role_color,
 };
 pub use command_palette::{CommandOrigin, CommandPaletteEntry, CommandPaletteState};
-pub use edit_params::EditAnalysisParametersState;
+pub use edit_params::{EditAnalysisParametersState, TwoGroupSubmethodMemory};
+pub(crate) use edit_params::{clear_fit_parameter_inputs, sync_fit_parameter_inputs};
 pub use format_axes::{AxisTarget, FormatAxesState};
 pub use format_graph::FormatGraphState;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use format_graph::resolve_selected_level_idx;
 pub use graph_overlays::{ApplyStyleFromState, BubblePlotInspectorState, PairwiseComparisonsState};
 pub use graph_type::{ChangeGraphTypeState, GRAPH_TYPE_OPTIONS, GraphTypeOption, ThumbnailGlyphKind};
 pub use layout_export::{CsvExportOptionsState, CsvExportTargetKind, ExportFigureFormat, ExportFigureState, PageLayoutComposerState};
-pub(crate) use parse_helpers::parse_table_kind_str;
 pub use print_dialog::PrintDialogState;
 pub use r13_dialogs::{CreateGraphDialogState, EqualizeScalingDialogState, FormatEmbeddedTableDialogState, FormatImageDialogState};
+pub(crate) use results_hooks::data_column_title;
 pub use results_hooks::{
     AvailableHookOption, ChangeDataAnalyzedState, ChecklistSeverityFilter, ConstantHookPickerState, HookTargetKind, ResultSheetViewState,
-    RetargetCandidate,
+    RetargetCandidate, copy_result_table_to_clipboard,
 };
-pub(crate) use results_hooks::{data_column_title, format_compact_f64};
 pub use workspace_dialogs::{
     AssumptionDiagnosticBanner, ConvertArchetypeDialogState, ExcludeWithReasonDialogState, FormatSelectedPointsState, RemediationKind,
     SplitWorkspaceState,
@@ -270,6 +272,8 @@ pub struct CanvasDialogState {
     pub checkpoints: CheckpointsDialogState,
     #[serde(default)]
     pub csv_export: CsvExportOptionsState,
+    #[serde(skip)]
+    pub(crate) suppress_auto_open_fit_params: bool,
 }
 
 impl Default for CanvasDialogState {
@@ -318,6 +322,7 @@ impl Default for CanvasDialogState {
             format_image: FormatImageDialogState::default(),
             checkpoints: CheckpointsDialogState::default(),
             csv_export: CsvExportOptionsState::default(),
+            suppress_auto_open_fit_params: false,
         }
     }
 }
@@ -342,6 +347,7 @@ impl CanvasDialogState {
         self.pan_zoom = PanZoomInertiaState::default();
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn effective_zoom_and_pan(&self) -> (f64, [f64; 2]) {
         let zoom = if (self.pan_zoom.zoom - 1.0).abs() > 1e-9 { self.pan_zoom.zoom } else { self.canvas.zoom };
         let pan_x = if self.pan_zoom.pan_pt[0].abs() > 1e-9 { self.pan_zoom.pan_pt[0] } else { self.canvas.pan_pt.x };
@@ -395,12 +401,18 @@ impl CanvasDialogState {
     /// First-time visits to an uninitialized [`curvebook_doc::GraphSheet`] automatically present
     /// [`ActiveDialog::ChangeGraphType`].
     pub fn on_sheet_selected(&mut self, doc: &ProjectDocument, sheet_id: &SheetId) {
+        self.on_sheet_selected_with_auto_modal(doc, sheet_id, true);
+    }
+
+    /// Synchronize inspector state when selecting `sheet_id`, optionally auto-opening
+    /// [`ActiveDialog::ChangeGraphType`] on first-time visits to uninitialized graphs.
+    pub fn on_sheet_selected_with_auto_modal(&mut self, doc: &ProjectDocument, sheet_id: &SheetId, open_uninitialized_graph_chooser: bool) {
         if let Some(gs) = doc.graph_sheet(sheet_id) {
             self.format_graph.sync_from_graph(gs);
             self.format_axes.sync_from_graph(gs, AxisTarget::Y);
             self.pairwise.sync_from_graph(gs, doc);
             self.bubble_plot.sync_from_graph(gs, doc);
-            if !gs.initialized {
+            if open_uninitialized_graph_chooser && !gs.initialized {
                 self.change_graph_type.open_for_graph(gs, doc);
                 self.active_dialog = ActiveDialog::ChangeGraphType { graph_sheet_id: gs.id.clone() };
             }

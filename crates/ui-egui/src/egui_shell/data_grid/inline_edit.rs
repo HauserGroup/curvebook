@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::inspect::ZLayer;
 
-use super::super::{FrameInspectEntryInput, PendingUiIntents};
+use super::super::{FrameInspectEntryInput, PendingUiIntents, UiIntent};
 use super::shared::{
     AuxInlineTarget, MultiGridAuxState, MultiGridCtx, MultiGridFrameState, MultiGridGeom, parse_inline_cell_input, pending_commit_key,
     pressed_key_event_modifiers, record_meta_if_enabled,
@@ -194,14 +194,14 @@ fn render_standard_inline_editor(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
                     && mctx.geom.row_count > 0
                 {
                     let next_row = if mods.shift { coord.row.saturating_sub(1) } else { (coord.row + 1).min(mctx.geom.row_count - 1) };
-                    fstate.intents.push_select_grid_cell(GridCellCoord::new(next_row, coord.col, coord.subcol));
+                    fstate.intents.push(UiIntent::SelectGridCell { coord: GridCellCoord::new(next_row, coord.col, coord.subcol) });
                 } else if let Some(mods) = tab {
                     let (is_x, nc_opt, nx_opt) = step_cell_horiz(mctx.geom, Some(coord), None, mods.shift);
                     if is_x {
                         fstate.aux.selected_x_cell = nx_opt;
                     } else if let Some(nc) = nc_opt {
                         fstate.aux.selected_x_cell = None;
-                        fstate.intents.push_select_grid_cell(nc);
+                        fstate.intents.push(UiIntent::SelectGridCell { coord: nc });
                     }
                 }
             }
@@ -271,7 +271,7 @@ fn render_aux_inline_editor(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                         fstate.aux.selected_x_cell = nx_opt;
                     } else if let Some(nc) = nc_opt {
                         fstate.aux.selected_x_cell = None;
-                        fstate.intents.push_select_grid_cell(nc);
+                        fstate.intents.push(UiIntent::SelectGridCell { coord: nc });
                     }
                 }
             }
@@ -390,7 +390,13 @@ fn commit_aux_inline_edit(
                 let val = parse_inline_cell_input(app, &draft);
                 intents.push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": row, "subcol": subcol, "value": val }));
             }
-            aux.selected_x_cell = Some((row, subcol));
+            let selecting_y_grid = intents
+                .intents()
+                .iter()
+                .any(|it| matches!(it, UiIntent::SelectGridCell { .. } | UiIntent::ExtendGridSelection { .. } | UiIntent::ToggleGridCell { .. }));
+            if !selecting_y_grid {
+                aux.selected_x_cell = Some((row, subcol));
+            }
         }
         AuxInlineTarget::XTitle { .. } => {
             intents.push_engine("table.setTitles", json!({ "sheet_id": ds.id.as_str(), "x_title": draft.trim() }));

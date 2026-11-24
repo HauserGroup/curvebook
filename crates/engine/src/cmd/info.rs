@@ -1,40 +1,30 @@
 //! Info-sheet note and shared constant commands (`info.setNote`, `info.setConstant`, `info.removeConstant`).
 
 use curvebook_doc::{ConstantValue, ErrorCode};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::cmd::helpers::{require_info_sheet_mut, resolve_target_info_sheet_id};
-use crate::cmd::params::{any_json_schema, bool_schema, non_empty_str_schema, nullable_schema, obj_schema, parse_params, str_schema};
+use crate::cmd::helpers::{always_enabled, bad_input, require_info_sheet_mut, resolve_target_info_sheet_id};
+use crate::cmd::params::{command_schema, parse_params};
 use crate::cmd::project::recalculate_dirty_with_links;
-use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
-use crate::{CommandOutcome, EngineError, Session};
+use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects, command_specs};
+use crate::{CommandOutcome, EngineError};
 
-fn always_enabled(_session: &Session) -> bool {
-    true
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SetNoteParams {
+    /// Target InfoSheet ID or paired DataSheet ID.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// Markdown note content to set or append.
     text: String,
+    /// When true, append to existing notes instead of overwriting.
     append: Option<bool>,
 }
 
-fn set_note_schema() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("Target InfoSheet ID or paired DataSheet ID")),
-            ("text", str_schema("Markdown note content to set or append")),
-            ("append", nullable_schema(bool_schema("When true, append to existing notes instead of overwriting"))),
-        ],
-        &["sheet_id", "text"],
-        false,
-    )
-}
-
 fn run_info_set_note(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: SetNoteParams = parse_params(&set_note_schema(), params)?;
+    let parsed: SetNoteParams = parse_params(&command_schema::<SetNoteParams>(), params)?;
     let info_id = resolve_target_info_sheet_id(&ctx.session.doc, &parsed.sheet_id)?;
     let info = require_info_sheet_mut(&mut ctx.session.doc, &info_id)?;
     if parsed.append == Some(true) {
@@ -56,28 +46,22 @@ fn run_info_set_note(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome,
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SetConstantParams {
+    /// Target InfoSheet ID or paired DataSheet ID.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// Hookable constant name.
+    #[schemars(length(min = 1))]
     name: String,
+    /// Constant value (finite number, string, or null to clear).
     value: Value,
+    /// Optional physical unit label.
     #[serde(default, deserialize_with = "super::analysis::de_present_opt")]
     units: Option<Option<String>>,
+    /// Optional value kind hint (`number`, `text`, or `date`).
     kind: Option<String>,
-}
-
-fn set_constant_schema() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("Target InfoSheet ID or paired DataSheet ID")),
-            ("name", non_empty_str_schema("Hookable constant name")),
-            ("value", any_json_schema("Constant value (finite number, string, or null to clear)")),
-            ("units", nullable_schema(str_schema("Optional physical unit label"))),
-            ("kind", nullable_schema(str_schema("Optional value kind hint (`number`, `text`, or `date`)"))),
-        ],
-        &["sheet_id", "name", "value"],
-        false,
-    )
 }
 
 fn parse_constant_value(value: Value, kind: Option<&str>) -> Result<ConstantValue, EngineError> {
@@ -85,17 +69,13 @@ fn parse_constant_value(value: Value, kind: Option<&str>) -> Result<ConstantValu
     if let Some(ref k) = normalized_kind
         && !matches!(k.as_str(), "number" | "text" | "date" | "empty")
     {
-        return Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported constant kind `{k}`"))
-            .with_remediation("Use `number`, `text`, `date`, or omit `kind`."));
+        return Err(bad_input(format!("unsupported constant kind `{k}`")).with_remediation("Use `number`, `text`, `date`, or omit `kind`."));
     }
 
     match value {
         Value::Null => Ok(ConstantValue::Empty),
         Value::Number(n) => {
-            let f = n
-                .as_f64()
-                .filter(|v| v.is_finite())
-                .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "info constant numeric value must be finite"))?;
+            let f = n.as_f64().filter(|v| v.is_finite()).ok_or_else(|| bad_input("info constant numeric value must be finite"))?;
             Ok(ConstantValue::Number(f))
         }
         Value::String(s) => match normalized_kind.as_deref() {
@@ -106,22 +86,21 @@ fn parse_constant_value(value: Value, kind: Option<&str>) -> Result<ConstantValu
                     .parse()
                     .ok()
                     .filter(|v: &f64| v.is_finite())
-                    .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("constant string `{s}` is not a finite number")))?;
+                    .ok_or_else(|| bad_input(format!("constant string `{s}` is not a finite number")))?;
                 Ok(ConstantValue::Number(parsed))
             }
             _ => Ok(ConstantValue::Text(s)),
         },
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, "info constant `value` must be a finite number, string, or null")
-            .with_remediation("Pass a number, string, or null.")),
+        _ => Err(bad_input("info constant `value` must be a finite number, string, or null").with_remediation("Pass a number, string, or null.")),
     }
 }
 
 fn run_info_set_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: SetConstantParams = parse_params(&set_constant_schema(), params)?;
+    let parsed: SetConstantParams = parse_params(&command_schema::<SetConstantParams>(), params)?;
     let info_id = resolve_target_info_sheet_id(&ctx.session.doc, &parsed.sheet_id)?;
     let name = parsed.name.trim().to_owned();
     if name.is_empty() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "constant `name` must not be empty"));
+        return Err(bad_input("constant `name` must not be empty"));
     }
     let constant_value = parse_constant_value(parsed.value, parsed.kind.as_deref())?;
     let units = parsed.units.map(|u_opt| u_opt.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty()));
@@ -144,32 +123,26 @@ fn run_info_set_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutc
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RemoveConstantParams {
+    /// Target InfoSheet ID or paired DataSheet ID.
+    #[schemars(length(min = 1))]
     sheet_id: String,
+    /// Constant name to remove.
+    #[schemars(length(min = 1))]
     name: String,
+    /// Allow removing a non-existent constant without failing (default: false).
     #[serde(default)]
     if_exists: Option<bool>,
 }
 
-fn remove_constant_schema() -> Value {
-    obj_schema(
-        vec![
-            ("sheet_id", non_empty_str_schema("Target InfoSheet ID or paired DataSheet ID")),
-            ("name", non_empty_str_schema("Constant name to remove")),
-            ("if_exists", nullable_schema(bool_schema("Allow removing a non-existent constant without failing (default: false)"))),
-        ],
-        &["sheet_id", "name"],
-        false,
-    )
-}
-
 fn run_info_remove_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
-    let parsed: RemoveConstantParams = parse_params(&remove_constant_schema(), params)?;
+    let parsed: RemoveConstantParams = parse_params(&command_schema::<RemoveConstantParams>(), params)?;
     let info_id = resolve_target_info_sheet_id(&ctx.session.doc, &parsed.sheet_id)?;
     let name = parsed.name.trim().to_owned();
     if name.is_empty() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "constant `name` must not be empty"));
+        return Err(bad_input("constant `name` must not be empty"));
     }
     let if_exists = parsed.if_exists.unwrap_or(false);
 
@@ -211,47 +184,42 @@ fn run_info_remove_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandO
     })
 }
 
-static SPECS: [CommandSpec; 3] = [
-    CommandSpec {
+static SPECS: [CommandSpec; 3] = command_specs!(
+    CommandGroup::Info;
+    {
         id: "info.setNote",
         label: "Set Info Note",
         menu_path: "Info/Edit Note",
-        shortcut: "",
         summary: "Set or append markdown notes on an InfoSheet.",
         beginner: "Updates experiment notes on an InfoSheet (or the InfoSheet linked to a given DataSheet ID).",
-        group: CommandGroup::Info,
         effects: Effects::MUTATES_DOCUMENT,
-        input_schema: set_note_schema,
+        input_schema: command_schema::<SetNoteParams>,
         enabled: always_enabled,
         run: run_info_set_note,
     },
-    CommandSpec {
+    {
         id: "info.setConstant",
         label: "Set Info Constant",
         menu_path: "Info/Set Constant",
-        shortcut: "",
         summary: "Create or update a named InfoSheet constant and recalculate dependents.",
         beginner: "Sets a hookable constant (number, date, or text with optional units) used by formulas, fits, and graph titles.",
-        group: CommandGroup::Info,
         effects: Effects::MUTATES_DOCUMENT,
-        input_schema: set_constant_schema,
+        input_schema: command_schema::<SetConstantParams>,
         enabled: always_enabled,
         run: run_info_set_constant,
     },
-    CommandSpec {
+    {
         id: "info.removeConstant",
         label: "Remove Info Constant",
         menu_path: "Info/Remove Constant",
-        shortcut: "",
         summary: "Remove a named constant from an InfoSheet and recalculate dependents.",
         beginner: "Deletes a constant from an InfoSheet and re-evaluates any sheets that depended on it.",
-        group: CommandGroup::Info,
         effects: Effects::MUTATES_DOCUMENT,
-        input_schema: remove_constant_schema,
+        input_schema: command_schema::<RemoveConstantParams>,
         enabled: always_enabled,
         run: run_info_remove_constant,
     },
-];
+);
 
 /// Registered command specifications for the `info` group.
 #[must_use]
@@ -269,6 +237,7 @@ mod tests {
     use crate::cmd::Caller;
 
     use super::*;
+    use crate::Session;
 
     fn find_spec(id: &str) -> &'static CommandSpec {
         specs().iter().find(|s| s.id == id).unwrap()

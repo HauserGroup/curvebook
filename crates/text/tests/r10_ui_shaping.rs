@@ -4,26 +4,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use curvebook_testkit::assert_approx_eq;
+use curvebook_testkit::{TempDirGuard, assert_approx_eq};
 use curvebook_text::{
     FontFamilyKind, MeasuredTextMetrics, SpanSlope, SpanWeight, SystemFontSet, TextDirection, TextMeasurer, TrueTypeFont, UiTextStyle,
     build_minimal_truetype_font, has_cleanroom_vector_outline,
 };
-
-static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
-
-fn temp_font_dir(label: &str) -> PathBuf {
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("cb-r10-ui-shaping-{label}-{}-{seq}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create temp font dir");
-    dir
-}
 
 fn push_u16(buf: &mut Vec<u8>, v: u16) {
     buf.extend_from_slice(&v.to_be_bytes());
@@ -450,14 +438,15 @@ fn ttc_collection_and_fonts_dir_manifest_discovery_work_and_override_host() {
     assert_approx_eq(mono_shaped.glyphs[1].advance_px, 6.0, 1e-6, 1e-6, "ttc mono W");
 
     // CURVEBOOK_FONTS_DIR layout with `fonts/manifest.txt`.
-    let dir = temp_font_dir("manifest");
+    let dir_guard = TempDirGuard::new("r10-ui-shaping-manifest").expect("create temp font dir");
+    let dir = dir_guard.path();
     let fonts_sub = dir.join("fonts");
     std::fs::create_dir_all(&fonts_sub).expect("mkdir fonts");
     let custom_bytes = build_custom_advance_sfnt("Override Sans", &[('A', 900)], false);
     std::fs::write(fonts_sub.join("Override-Regular.ttf"), &custom_bytes).expect("write ttf");
     std::fs::write(fonts_sub.join("manifest.txt"), "# pinned test font\nOverride-Regular.ttf\n../escape.ttf\n").expect("write manifest");
 
-    let dir_set = SystemFontSet::from_fonts_dir(&dir);
+    let dir_set = SystemFontSet::from_fonts_dir(dir);
     assert_eq!(dir_set.face_count(), 1);
     let w = dir_set.measure(&UiTextStyle::ui_sans(10.0), "A", 96).width_px;
     assert_approx_eq(w, 9.0, 1e-6, 1e-6, "dir override advance 900/1000 * 10");
@@ -470,15 +459,13 @@ fn ttc_collection_and_fonts_dir_manifest_discovery_work_and_override_host() {
     } else {
         let exe = std::env::current_exe().expect("current test exe");
         let status = Command::new(exe)
-            .env("CURVEBOOK_FONTS_DIR", &dir)
+            .env("CURVEBOOK_FONTS_DIR", dir)
             .env("CB_R10_FONT_ENV_CHILD", "1")
             .args(["--exact", "ttc_collection_and_fonts_dir_manifest_discovery_work_and_override_host"])
             .status()
             .expect("spawn child test");
         assert!(status.success(), "CURVEBOOK_FONTS_DIR child process check failed");
     }
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

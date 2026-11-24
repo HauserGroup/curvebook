@@ -3,11 +3,6 @@
 use curvebook_doc::{ProjectDocument, SheetId};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
-use crate::i18n::LocalePreset;
-
-use super::parse_helpers::parse_dialog_num_with_locale;
 
 /// Interactive state for the `Print...` setup and OS print-spool dialog (`R5.4`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,69 +84,5 @@ impl PrintDialogState {
         if scale_percent.is_finite() {
             self.job.scale_percent = scale_percent.clamp(10.0, 400.0);
         }
-    }
-
-    /// Patch `Print` modal fields (`crop_marks`, `bleed_pt`, `copies`, `scale_percent`, `printer`, `title`).
-    ///
-    /// # Errors
-    /// Returns an error when any numeric field is out of valid range or has an invalid type.
-    /// Apply modal field updates from `ui.answer_dialog` / widget controls.
-    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
-    }
-
-    /// Apply modal field updates using regional numeric parsing (`preset`).
-    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
-        for (key, val) in fields {
-            match key.as_str() {
-                "crop_marks" | "print.crop_marks" => {
-                    self.job.crop_marks = val.as_bool().ok_or_else(|| String::from("`crop_marks` must be boolean"))?;
-                }
-                "bleed_pt" | "print.bleed_pt" => {
-                    let bleed = parse_dialog_num_with_locale(val, key, preset)?;
-                    if !(0.0..=144.0).contains(&bleed) {
-                        return Err(format!("`bleed_pt` ({bleed}) must be within 0.0..=144.0"));
-                    }
-                    self.job.bleed_pt = bleed;
-                }
-                "copies" | "print.copies" => {
-                    let raw = parse_dialog_num_with_locale(val, key, preset)?;
-                    if raw < 1.0 || raw > 999.0 || (raw - raw.round()).abs() > 1e-9 {
-                        return Err(format!("`copies` ({raw}) must be an integer within 1..=999"));
-                    }
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let count = raw.round() as u16;
-                    self.update_copies(count);
-                }
-                "scale_percent" | "print.scale_percent" => {
-                    let scale = parse_dialog_num_with_locale(val, key, preset)?;
-                    if !(10.0..=400.0).contains(&scale) {
-                        return Err(format!("`scale_percent` ({scale}) must be within 10.0..=400.0"));
-                    }
-                    self.set_scale_percent(scale);
-                }
-                "selected_printer" | "printer" | "print.printer" | "print.selected_printer" => {
-                    if val.is_null() {
-                        self.select_printer(None);
-                    } else {
-                        let s = val.as_str().ok_or_else(|| String::from("`printer` must be a string or null"))?;
-                        self.select_printer(Some(s.to_owned()));
-                    }
-                }
-                "title" | "print.title" => {
-                    if val.is_null() {
-                        self.job.title = None;
-                    } else {
-                        let s = val.as_str().ok_or_else(|| String::from("`title` must be a string or null"))?;
-                        self.job.title = (!s.trim().is_empty()).then(|| s.trim().to_owned());
-                    }
-                }
-                "submit_to_os" | "print.submit_to_os" => {
-                    self.submit_to_os = val.as_bool().ok_or_else(|| String::from("`submit_to_os` must be boolean"))?;
-                }
-                other => return Err(format!("unknown Print field `{other}`")),
-            }
-        }
-        Ok(())
     }
 }

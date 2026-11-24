@@ -11,7 +11,7 @@ Registered commands: 106
 - **Shortcut:** `Cmd+N`
 - **Summary:** Create a fresh empty CurveBook project.
 - **Beginner note:** Replaces the active workspace with an empty project document (preserving undo history in this session).
-- **Parameters:** `title` (any)
+- **Parameters:** `title` (string|null)
 
 ### `project.createCheckpoint` — Create Checkpoint
 
@@ -19,7 +19,7 @@ Registered commands: 106
 - **Menu:** `File/Checkpoints/Create Checkpoint...`
 - **Summary:** Save a named project snapshot checkpoint inside the document.
 - **Beginner note:** Captures a named milestone copy of all sheets so you can restore or branch back to it later.
-- **Parameters:** `id` (any), `name*` (string), `note` (any), `timestamp_utc` (any)
+- **Parameters:** `id` (string|null), `name*` (string), `note` (string|null), `timestamp_utc` (string|null)
 
 ### `project.deleteCheckpoint` — Delete Checkpoint
 
@@ -27,7 +27,7 @@ Registered commands: 106
 - **Menu:** `File/Checkpoints/Delete Checkpoint...`
 - **Summary:** Remove a named checkpoint from the project.
 - **Beginner note:** Deletes a stored checkpoint by ID or name without altering active data sheets.
-- **Parameters:** `id` (any), `name` (any)
+- **Parameters:** `id` (string|null), `name` (string|null)
 
 ### `project.inspect` — Inspect Project
 
@@ -35,7 +35,7 @@ Registered commands: 106
 - **Menu:** `View/Inspect Project`
 - **Summary:** Inspect sheet structure, metadata, and upstream dependency edges.
 - **Beginner note:** Returns a structured read-only summary of all sheets, constants, checkpoints, and optional single-sheet dependencies.
-- **Parameters:** `sheet_id` (any)
+- **Parameters:** `sheet_id` (string|null)
 
 ### `project.instantiateTemplate` — New Project From Template
 
@@ -43,7 +43,7 @@ Registered commands: 106
 - **Menu:** `File/New From Template...`
 - **Summary:** Create a new project from a `.cbtemplate` archive.
 - **Beginner note:** Loads a saved template with its analysis pipelines, graphs, and layouts ready for new experimental data.
-- **Parameters:** `bytes_base64` (any), `path` (any), `title` (any)
+- **Parameters:** `bytes_base64` (string|null), `path` (string|null), `title` (string|null)
 
 ### `project.listCheckpoints` — List Checkpoints
 
@@ -59,7 +59,7 @@ Registered commands: 106
 - **Menu:** `File/New Project`
 - **Summary:** Create a fresh empty CurveBook project.
 - **Beginner note:** Creates a clean empty project document with an optional title; alias for `file.new`.
-- **Parameters:** `title` (any)
+- **Parameters:** `title` (string|null)
 
 ### `project.open` — Open Project
 
@@ -68,7 +68,7 @@ Registered commands: 106
 - **Shortcut:** `Cmd+O`
 - **Summary:** Load a `.curvebook` archive or unpacked `.curvebook.d/` directory.
 - **Beginner note:** Opens a project from a filesystem path or base64 archive payload and replaces the current session document.
-- **Parameters:** `bytes_base64` (any), `path` (any), `unpacked` (any)
+- **Parameters:** `bytes_base64` (string|null), `path` (string|null), `unpacked` (boolean|null)
 
 ### `project.recalculate` — Recalculate All
 
@@ -76,7 +76,7 @@ Registered commands: 106
 - **Menu:** `Analyze/Recalculate All`
 - **Summary:** Refresh live links and recalculate all downstream analyses and graphs.
 - **Beginner note:** Re-evaluates linked regions, calculated variables, statistical analyses, curve fits, and derived tables in dependency order.
-- **Parameters:** `include_external_links` (any)
+- **Parameters:** `include_external_links` (boolean|null)
 
 ### `project.restoreCheckpoint` — Restore Checkpoint
 
@@ -84,7 +84,7 @@ Registered commands: 106
 - **Menu:** `File/Checkpoints/Restore Checkpoint...`
 - **Summary:** Restore the document to a previously saved named checkpoint.
 - **Beginner note:** Replaces the current sheets with the chosen checkpoint snapshot while keeping existing checkpoints intact.
-- **Parameters:** `id` (any), `name` (any)
+- **Parameters:** `id` (string|null), `name` (string|null)
 
 ### `project.save` — Save Project
 
@@ -93,7 +93,7 @@ Registered commands: 106
 - **Shortcut:** `Cmd+S`
 - **Summary:** Save the active project atomically to `.curvebook`, unpacked directory, or bytes.
 - **Beginner note:** Serializes the project document using atomic filesystem writes when a path is provided, or returns base64 bytes.
-- **Parameters:** `path` (any), `return_bytes` (any), `unpacked` (any)
+- **Parameters:** `path` (string|null), `return_bytes` (boolean|null), `unpacked` (boolean|null)
 
 ### `project.saveTemplate` — Save Template
 
@@ -101,7 +101,7 @@ Registered commands: 106
 - **Menu:** `File/Save Template...`
 - **Summary:** Export the project structure as a data-stripped `.cbtemplate` file.
 - **Beginner note:** Strips raw data values while preserving table schemas, analyses, graphs, and layouts, then writes atomically to disk or base64.
-- **Parameters:** `path` (any), `return_bytes` (any)
+- **Parameters:** `path` (string|null), `return_bytes` (boolean|null)
 
 ## Edit & History (`edit`)
 
@@ -111,7 +111,7 @@ Registered commands: 106
 - **Menu:** `Edit/Paste Image`
 - **Summary:** Paste or insert a PNG, JPEG, or TIFF raster image onto a graph annotation or multi-panel layout.
 - **Beginner note:** Pastes an image from bytes, local file path, or existing project asset onto a graph or layout page.
-- **Parameters:** `asset_id` (any), `badge_override` (any), `border` (any), `bounds_pt` (any), `bytes_base64` (any), `crop` (any), `lock_aspect_ratio` (any), `panel_id` (any), `path` (any), `rotation_deg` (any), `target_sheet_id*` (string)
+- **Parameters:** `asset_id` (string|null), `badge_override` (string|null), `border` (any), `bounds_pt` (any), `bytes_base64` (string|null), `crop` (any), `lock_aspect_ratio` (boolean|null), `panel_id` (string|null), `path` (string|null), `rotation_deg` (number|null), `target_sheet_id*` (string)
 
 ### `edit.pasteResultTable` — Paste Result Table
 
@@ -119,7 +119,7 @@ Registered commands: 106
 - **Menu:** `Edit/Paste Result Table`
 - **Summary:** Paste a live result or data table onto a graph annotation or multi-panel layout.
 - **Beginner note:** Places a formatted, auto-updating result table onto the selected graph or layout page.
-- **Parameters:** `bounds_pt` (any), `panel_id` (any), `selected_cols` (any), `selected_rows` (any), `source_sheet_id*` (string), `style` (any), `tab_id` (any), `target_sheet_id*` (string), `transpose` (any)
+- **Parameters:** `bounds_pt` (any), `panel_id` (string|null), `selected_cols` (array|null), `selected_rows` (array|null), `source_sheet_id*` (string), `style` (object|null), `tab_id` (string|null), `target_sheet_id*` (string), `transpose` (boolean|null)
 
 ### `edit.redo` — Redo
 
@@ -147,7 +147,7 @@ Registered commands: 106
 - **Menu:** `Change/Clone Pipeline...`
 - **Summary:** Clone a table structure and downstream analysis/graph/layout pipeline for a new experimental run.
 - **Beginner note:** Creates a new table preserving X coordinates, analyses, graphs, and layouts while clearing Y replicates for new measurements.
-- **Parameters:** `clear_column_titles` (any), `clear_data` (any), `clear_results` (any), `clear_row_titles` (any), `clear_y_values` (any), `clone_analyses` (any), `clone_graphs` (any), `clone_layouts` (any), `keep_x_values` (any), `new_sheet_id` (any), `override_replicates` (any), `prefix` (any), `sheet_id*` (string), `title` (any)
+- **Parameters:** `clear_column_titles` (boolean|null), `clear_data` (boolean|null), `clear_results` (boolean|null), `clear_row_titles` (boolean|null), `clear_y_values` (boolean|null), `clone_analyses` (boolean|null), `clone_graphs` (boolean|null), `clone_layouts` (boolean|null), `keep_x_values` (boolean|null), `new_sheet_id` (string|null), `override_replicates` (integer|null), `prefix` (string|null), `sheet_id*` (string), `title` (string|null)
 
 ### `sheet.createData` — New Data Table
 
@@ -156,7 +156,7 @@ Registered commands: 106
 - **Shortcut:** `Cmd+T`
 - **Summary:** Create a typed data table sheet and optional paired info/graph sheets.
 - **Beginner note:** Creates one of the eight scientific table archetypes (XY, Column, Grouped, Contingency, Survival, Parts of Whole, Multiple Variables, or Nested).
-- **Parameters:** `auto_family` (any), `auto_graph` (any), `auto_info` (any), `censored_code` (any), `cols` (any), `column_factor_title` (any), `design_hint` (any), `event_code` (any), `graph_sheet_id` (any), `info_sheet_id` (any), `kind` (any), `replicates` (any), `row_factor_title` (any), `rows` (any), `sheet_id` (any), `subcolumn_mode` (any), `time_title` (any), `title` (any), `variables` (any), `x_mode` (any), `x_title` (any)
+- **Parameters:** `auto_family` (boolean|null), `auto_graph` (boolean|null), `auto_info` (boolean|null), `censored_code` (integer|null), `cols` (integer|null), `column_factor_title` (string|null), `design_hint` (any), `event_code` (integer|null), `graph_sheet_id` (string|null), `info_sheet_id` (string|null), `kind` (string|null), `replicates` (integer|null), `row_factor_title` (string|null), `rows` (integer|null), `sheet_id` (string|null), `subcolumn_mode` (any), `time_title` (string|null), `title` (string|null), `variables` (array|null), `x_mode` (any), `x_title` (string|null)
 
 ### `sheet.delete` — Delete Sheet
 
@@ -164,7 +164,7 @@ Registered commands: 106
 - **Menu:** `Edit/Delete Sheet`
 - **Summary:** Delete a sheet and optionally cascade to its dependent family.
 - **Beginner note:** Removes a sheet from the project, blocking deletion on frozen sheets or when `cascade: false` with active dependents.
-- **Parameters:** `cascade` (any), `sheet_id*` (string)
+- **Parameters:** `cascade` (boolean|null), `sheet_id*` (string)
 
 ### `sheet.duplicate` — Duplicate Sheet
 
@@ -172,7 +172,7 @@ Registered commands: 106
 - **Menu:** `Edit/Duplicate Sheet`
 - **Summary:** Duplicate a single sheet within its section.
 - **Beginner note:** Creates an independent copy of one Data, Info, Result, Graph, or Layout sheet.
-- **Parameters:** `frozen` (any), `new_sheet_id` (any), `sheet_id*` (string), `title` (any)
+- **Parameters:** `frozen` (boolean|null), `new_sheet_id` (string|null), `sheet_id*` (string), `title` (string|null)
 
 ### `sheet.duplicateFamily` — Duplicate Family
 
@@ -180,7 +180,7 @@ Registered commands: 106
 - **Menu:** `Edit/Duplicate Family`
 - **Summary:** Duplicate a data sheet together with its paired info, analyses, graphs, and layouts.
 - **Beginner note:** Clones a complete linked family of sheets so all formulas, analyses, and figures remain wired to the copied table.
-- **Parameters:** `clear_data` (any), `new_sheet_id` (any), `prefix` (any), `sheet_id*` (string), `title` (any)
+- **Parameters:** `clear_data` (boolean|null), `new_sheet_id` (string|null), `prefix` (string|null), `sheet_id*` (string), `title` (string|null)
 
 ### `sheet.extractResultTab` — Extract Result Tab to Data Table
 
@@ -188,7 +188,7 @@ Registered commands: 106
 - **Menu:** `Insert/Extract Result Tab...`
 - **Summary:** Create a reactive linked DataSheet from a ResultSheet sub-tab (such as PC scores, residuals, or cleaned data).
 - **Beginner note:** Copies a computed result table tab into a new linked data table so you can analyze or graph it.
-- **Parameters:** `archetype` (any), `auto_graph` (boolean), `result_sheet_id*` (string), `sheet_id` (any), `tab_id` (any), `title` (any)
+- **Parameters:** `archetype` (any), `auto_graph` (boolean|null), `result_sheet_id*` (string), `sheet_id` (string|null), `tab_id` (string|null), `title` (string|null)
 
 ### `sheet.freeze` — Freeze Sheet
 
@@ -212,7 +212,7 @@ Registered commands: 106
 - **Menu:** `Change/Reorder Sheet`
 - **Summary:** Reorder sheets within a project navigator folder.
 - **Beginner note:** Moves a sheet to a new index by (`sheet_id`, `index`), by (`folder`, `from_index`, `to_index`), or by explicit `order` array.
-- **Parameters:** `folder` (any), `from_index` (any), `index` (any), `order` (any), `section` (any), `sheet_id` (any), `to_index` (any)
+- **Parameters:** `folder` (string|null), `from_index` (integer|null), `index` (integer|null), `order` (array|null), `section` (string|null), `sheet_id` (string|null), `to_index` (integer|null)
 
 ### `sheet.select` — Select Sheet
 
@@ -220,7 +220,7 @@ Registered commands: 106
 - **Menu:** `View/Select Sheet`
 - **Summary:** Select the active sheet in the navigator or family pane.
 - **Beginner note:** Focuses a sheet in the navigator (`mode: "navigator"`) or sub-sheet family view (`mode: "family"`).
-- **Parameters:** `mode` (any), `sheet_id*` (string)
+- **Parameters:** `mode` (string|null), `sheet_id*` (string)
 
 ### `sheet.unfreeze` — Unfreeze Sheet
 
@@ -238,7 +238,7 @@ Registered commands: 106
 - **Menu:** `Edit/Clear Cells`
 - **Summary:** Clear single cells, lists, ranges, or an entire table, optionally breaking live links.
 - **Beginner note:** Erase values from selected cells or clear the entire data table.
-- **Parameters:** `all` (boolean), `cells` (array), `clear_x` (boolean), `col` (integer), `col_end` (integer), `col_start` (integer), `coord` (object), `range` (object), `region_id` (string), `row` (integer), `row_end` (integer), `row_start` (integer), `sheet_id*` (string), `subcol` (integer), `subcol_end` (integer), `subcol_start` (integer), `unlink` (boolean)
+- **Parameters:** `all` (boolean|null), `cells` (array|null), `clear_x` (boolean|null), `col` (integer|null), `col_end` (integer|null), `col_start` (integer|null), `coord` (any), `range` (any), `region_id` (string|null), `row` (integer|null), `row_end` (integer|null), `row_start` (integer|null), `sheet_id*` (string), `subcol` (integer|null), `subcol_end` (integer|null), `subcol_start` (integer|null), `unlink` (boolean|null)
 
 ### `table.convertArchetype` — Convert Table Archetype
 
@@ -246,7 +246,7 @@ Registered commands: 106
 - **Menu:** `Change/Convert Table Structure...`
 - **Summary:** Preview or convert a data table between Column, Grouped, XY, and MultipleVariables archetypes.
 - **Beginner note:** Reshape a data table into another structure, previewing any lossy changes before applying.
-- **Parameters:** `allow_lossy` (boolean), `preview_only` (boolean), `sheet_id*` (string), `target_kind*` (string)
+- **Parameters:** `allow_lossy` (boolean|null), `preview_only` (boolean|null), `sheet_id*` (string), `target_kind*` (string)
 
 ### `table.excludeCells` — Exclude Cells
 
@@ -255,7 +255,7 @@ Registered commands: 106
 - **Shortcut:** `Cmd+E`
 - **Summary:** Toggle the exclusion mask on single cells, cell lists, or ranges (including X/time cells).
 - **Beginner note:** Exclude or include selected values so analyses ignore them without deleting data.
-- **Parameters:** `cells` (array), `col` (integer), `col_end` (integer), `col_start` (integer), `coord` (object), `excluded` (boolean), `range` (object), `row` (integer), `row_end` (integer), `row_start` (integer), `sheet_id*` (string), `subcol` (integer), `subcol_end` (integer), `subcol_start` (integer), `target` (string)
+- **Parameters:** `cells` (array|null), `col` (integer|null), `col_end` (integer|null), `col_start` (integer|null), `coord` (any), `excluded` (boolean|null), `range` (any), `row` (integer|null), `row_end` (integer|null), `row_start` (integer|null), `sheet_id*` (string), `subcol` (integer|null), `subcol_end` (integer|null), `subcol_start` (integer|null), `target` (string|null)
 
 ### `table.excludeCellsWithReason` — Exclude Cells With Reason
 
@@ -263,7 +263,7 @@ Registered commands: 106
 - **Menu:** `Change/Exclude Values With Reason...`
 - **Summary:** Exclude cells and attach a structured audit reason tag, note, and UTC timestamp.
 - **Beginner note:** Exclude values while recording a reason tag and audit timestamp for review.
-- **Parameters:** `col` (integer), `coord` (object), `coords` (array), `note` (any), `range` (object), `reason_tag*` (string), `row` (integer), `sheet_id*` (string), `subcol` (integer), `timestamp_utc` (any)
+- **Parameters:** `col` (integer|null), `coord` (any), `coords` (array|null), `note` (string|null), `range` (any), `reason_tag*` (string), `row` (integer|null), `sheet_id*` (string), `subcol` (integer|null), `timestamp_utc` (string|null)
 
 ### `table.exclusionAuditReport` — Exclusion Audit Report
 
@@ -271,7 +271,7 @@ Registered commands: 106
 - **Menu:** `Data/Exclusion Audit Report...`
 - **Summary:** Generate a read-only audit report of excluded cells and their reason annotations.
 - **Beginner note:** Inspect all excluded values and audit reasons across one sheet or the entire project.
-- **Parameters:** `sheet_id` (any)
+- **Parameters:** `sheet_id` (string|null)
 
 ### `table.exportCsv` — Export Table CSV / TSV
 
@@ -279,7 +279,7 @@ Registered commands: 106
 - **Menu:** `File/Export/Table CSV...`
 - **Summary:** Export a data or result sheet to CSV/TSV text and optionally write atomically to disk.
 - **Beginner note:** Save a data or result table as CSV or TSV without changing the project.
-- **Parameters:** `decimal_separator` (any), `delimiter` (any), `path` (any), `sheet_id*` (string)
+- **Parameters:** `decimal_separator` (string|null), `delimiter` (string|null), `path` (string|null), `sheet_id*` (string)
 
 ### `table.importCsv` — Import CSV / TSV
 
@@ -287,7 +287,7 @@ Registered commands: 106
 - **Menu:** `File/Import/CSV or TSV...`
 - **Summary:** Import CSV or TSV data from a file path or inline text into a new or existing data table.
 - **Beginner note:** Create a new data table or populate an existing one from a CSV or TSV file.
-- **Parameters:** `anchor` (object), `archetype` (any), `csv` (any), `decimal_separator` (any), `delimiter` (any), `filter` (any), `has_header` (boolean), `has_row_titles` (boolean), `header_rows` (integer), `link` (boolean), `mode` (string), `normalize_decimal` (boolean), `path` (any), `propagate_title_header` (boolean), `replace` (boolean), `replicates` (integer), `sheet_id` (any), `skip_contiguous_blanks` (boolean), `start_col` (integer), `start_row` (integer), `start_subcol` (integer), `subcolumn_mode` (any), `title` (any), `transpose` (boolean)
+- **Parameters:** `anchor` (any), `archetype` (string|null), `csv` (string|null), `decimal_separator` (string|null), `delimiter` (string|null), `filter` (any), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `link` (boolean|null), `mode` (string|null), `normalize_decimal` (boolean|null), `path` (string|null), `propagate_title_header` (boolean|null), `replace` (boolean|null), `replicates` (integer|null), `sheet_id` (string|null), `skip_contiguous_blanks` (boolean|null), `start_col` (integer|null), `start_row` (integer|null), `start_subcol` (integer|null), `subcolumn_mode` (any), `title` (string|null), `transpose` (boolean|null)
 
 ### `table.importPlateMap` — Import Plate Map
 
@@ -295,7 +295,7 @@ Registered commands: 106
 - **Menu:** `File/Import/Plate Map...`
 - **Summary:** Map 96-well or 384-well microplate readings and well roles into a structured data sheet.
 - **Beginner note:** Import 96-well or 384-well plate measurements using a plate template or role map.
-- **Parameters:** `geometry` (any), `roles` (any), `sheet_id` (any), `subtract_blank_mean` (boolean), `target_kind` (any), `template` (any), `template_name` (any), `title` (any), `values*` (any), `x_title` (any)
+- **Parameters:** `geometry` (any), `roles` (array|null), `sheet_id` (string|null), `subtract_blank_mean` (boolean|null), `target_kind` (string|null), `template` (any), `template_name` (string|null), `title` (string|null), `values*` (any), `x_title` (string|null)
 
 ### `table.importPrism` — Import External Archive
 
@@ -303,7 +303,7 @@ Registered commands: 106
 - **Menu:** `File/Import/External Archive...`
 - **Summary:** Import an external ZIP-based project archive from disk, base64, or raw byte array.
 - **Beginner note:** Open or merge an external ZIP-format statistical archive into the project.
-- **Parameters:** `bytes` (array), `bytes_base64` (any), `merge` (boolean), `path` (any)
+- **Parameters:** `bytes` (array|null), `bytes_base64` (string|null), `merge` (boolean|null), `path` (string|null)
 
 ### `table.importPzfx` — Import XML Project
 
@@ -311,7 +311,7 @@ Registered commands: 106
 - **Menu:** `File/Import/XML Project...`
 - **Summary:** Import an XML project document from disk, inline XML string, or base64 payload.
 - **Beginner note:** Open or merge an XML-format project file into the workspace.
-- **Parameters:** `bytes_base64` (any), `merge` (boolean), `path` (any), `xml` (any)
+- **Parameters:** `bytes_base64` (string|null), `merge` (boolean|null), `path` (string|null), `xml` (string|null)
 
 ### `table.importTidyLong` — Import Tidy Long Table
 
@@ -319,7 +319,7 @@ Registered commands: 106
 - **Menu:** `File/Import/Tidy Long Table...`
 - **Summary:** Pivot a long-format table (rows/headers or CSV/TSV file) into a Column, Grouped, XY, or MultipleVariables sheet.
 - **Beginner note:** Reshape long/tidy tabular records into a grouped or XY data table using column mappings.
-- **Parameters:** `csv` (any), `decimal_sep` (any), `delimiter` (any), `excluded_col` (any), `group_col` (any), `headers` (any), `mapping` (any), `normalize_decimal` (boolean), `path` (any), `replicate_col` (any), `rows` (any), `sheet_id` (any), `target_kind` (any), `title` (any), `value_col` (any), `x_col` (any)
+- **Parameters:** `csv` (string|null), `decimal_sep` (string|null), `delimiter` (string|null), `excluded_col` (any), `group_col` (any), `headers` (array|null), `mapping` (any), `normalize_decimal` (boolean|null), `path` (string|null), `replicate_col` (any), `rows` (array|null), `sheet_id` (string|null), `target_kind` (string|null), `title` (string|null), `value_col` (any), `x_col` (any)
 
 ### `table.importXlsx` — Import XLSX Workbook
 
@@ -327,7 +327,7 @@ Registered commands: 106
 - **Menu:** `File/Import/XLSX Workbook...`
 - **Summary:** Import one or more worksheets (or list available sheets) from an .xlsx workbook file, base64, or byte array.
 - **Beginner note:** Open or merge worksheets from a spreadsheet workbook (.xlsx) into the project.
-- **Parameters:** `archetype` (any), `bytes` (any), `bytes_base64` (any), `has_header` (boolean), `has_row_titles` (boolean), `header_rows` (integer), `include_hidden` (boolean), `list_sheets` (boolean), `merge` (boolean), `path` (any), `sheet_indices` (any), `sheets` (any), `subcolumn_mode` (any)
+- **Parameters:** `archetype` (string|null), `bytes` (array|null), `bytes_base64` (string|null), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `include_hidden` (boolean|null), `list_sheets` (boolean|null), `merge` (boolean|null), `path` (string|null), `sheet_indices` (array|null), `sheets` (array|null), `subcolumn_mode` (any)
 
 ### `table.paste` — Paste Special
 
@@ -336,7 +336,7 @@ Registered commands: 106
 - **Shortcut:** `Cmd+V`
 - **Summary:** Paste delimited clipboard text or a 2D cell grid into a table with placement, transpose, and filter options.
 - **Beginner note:** Paste tabular data into a table starting at an anchor cell, optionally transposing or filtering.
-- **Parameters:** `anchor` (object), `decimal_separator` (any), `delimiter` (any), `filter` (any), `mode` (string), `normalize_decimal` (boolean), `propagate_title_header` (boolean), `rows` (array), `sheet_id*` (string), `skip_contiguous_blanks` (boolean), `start_col` (integer), `start_row` (integer), `start_subcol` (integer), `text` (string), `transpose` (boolean)
+- **Parameters:** `anchor` (any), `decimal_separator` (string|null), `delimiter` (string|null), `filter` (any), `mode` (string|null), `normalize_decimal` (boolean|null), `propagate_title_header` (boolean|null), `rows` (array|null), `sheet_id*` (string), `skip_contiguous_blanks` (boolean|null), `start_col` (integer|null), `start_row` (integer|null), `start_subcol` (integer|null), `text` (string|null), `transpose` (boolean|null)
 
 ### `table.pasteLink` — Paste Link
 
@@ -344,7 +344,7 @@ Registered commands: 106
 - **Menu:** `Edit/Paste Link`
 - **Summary:** Attach a live linked region from an internal sheet or external delimited file and sync immediately.
 - **Beginner note:** Link a range from another sheet or CSV/TSV file so updates flow through automatically.
-- **Parameters:** `anchor` (object), `baseline` (any), `decimal_separator` (any), `delimiter` (any), `exclude_row_predicate` (any), `filter` (any), `link_id` (any), `link_spec` (any), `mode` (string), `normalize_decimal` (boolean), `propagate_title_header` (boolean), `provenance` (any), `skip_contiguous_blanks` (boolean), `source_kind` (any), `source_path` (any), `source_range` (any), `source_sheet_id` (any), `start_col` (integer), `start_row` (integer), `start_subcol` (integer), `tab_id` (any), `target_sheet_id*` (string), `transpose` (boolean)
+- **Parameters:** `anchor` (any), `baseline` (any), `decimal_separator` (string|null), `delimiter` (string|null), `exclude_row_predicate` (string|null), `filter` (any), `link_id` (string|null), `link_spec` (object|null), `mode` (string|null), `normalize_decimal` (boolean|null), `propagate_title_header` (boolean|null), `provenance` (string|null), `skip_contiguous_blanks` (boolean|null), `source_kind` (string|null), `source_path` (string|null), `source_range` (any), `source_sheet_id` (string|null), `start_col` (integer|null), `start_row` (integer|null), `start_subcol` (integer|null), `tab_id` (string|null), `target_sheet_id*` (string), `transpose` (boolean|null)
 
 ### `table.randomSampleRows` — Random Sample Rows
 
@@ -352,7 +352,7 @@ Registered commands: 106
 - **Menu:** `Data/Random Sample Rows...`
 - **Summary:** Draw a reproducible Fisher-Yates random sample of rows (optional stratification) into a new data sheet.
 - **Beginner note:** Creates a new table containing a seeded simple or stratified random subset of rows from a source sheet.
-- **Parameters:** `info_sheet_id` (any), `proportional_allocation` (any), `sample_size*` (integer), `seed` (any), `sheet_id` (any), `source_sheet_id*` (string), `stratify_column` (any), `title` (any)
+- **Parameters:** `info_sheet_id` (string|null), `proportional_allocation` (boolean|null), `sample_size*` (integer), `seed` (integer|null), `sheet_id` (string|null), `source_sheet_id*` (string), `stratify_column` (integer|null), `title` (string|null)
 
 ### `table.randomizeGroups` — Randomize Subjects to Groups
 
@@ -360,7 +360,7 @@ Registered commands: 106
 - **Menu:** `Data/Randomize Groups...`
 - **Summary:** Deterministically allocate subjects across treatment groups (complete-balanced or permuted-block) and upsert ARRIVE constants on an InfoSheet.
 - **Beginner note:** Randomizes subjects into balanced or blocked treatment arms and stores reproducibility metadata on an Info sheet.
-- **Parameters:** `block_sizes` (any), `groups*` (array), `info_sheet_id` (any), `scheme` (any), `seed` (any), `sheet_id` (any), `subject_count` (any), `subject_ids` (any), `title` (any)
+- **Parameters:** `block_sizes` (any), `groups*` (array), `info_sheet_id` (string|null), `scheme` (any), `seed` (integer|null), `sheet_id` (string|null), `subject_count` (integer|null), `subject_ids` (any), `title` (string|null)
 
 ### `table.recodeLevels` — Recode Categorical Levels
 
@@ -368,7 +368,7 @@ Registered commands: 106
 - **Menu:** `Data/Recode Levels...`
 - **Summary:** Map and rewrite categorical values in a MultipleVariables column.
 - **Beginner note:** Rename or merge category labels within a MultipleVariables column.
-- **Parameters:** `col` (any), `mappings*` (any), `sheet_id*` (string), `title` (any)
+- **Parameters:** `col` (any), `mappings*` (any), `sheet_id*` (string), `title` (string|null)
 
 ### `table.setCalculatedVariable` — Add / Update Calculated Variable
 
@@ -376,7 +376,7 @@ Registered commands: 106
 - **Menu:** `Data/Calculated Variable...`
 - **Summary:** Create or update a formula-driven variable column in a MultipleVariables table and evaluate it.
 - **Beginner note:** Add a computed column whose values update automatically from other variables via a formula.
-- **Parameters:** `col` (any), `formula*` (string), `sheet_id*` (string), `title` (any)
+- **Parameters:** `col` (any), `formula*` (string), `sheet_id*` (string), `title` (string|null)
 
 ### `table.setCategoricalOrder` — Set Categorical Order
 
@@ -384,7 +384,7 @@ Registered commands: 106
 - **Menu:** `Data/Set Categorical Order...`
 - **Summary:** Configure display/reference ordering of categorical levels in a MultipleVariables column.
 - **Beginner note:** Choose how categories are ordered (explicit list, alphabetical, entry order, or frequency).
-- **Parameters:** `col` (any), `levels` (array), `order` (any), `order_spec` (any), `reference_level` (any), `reversed` (boolean), `sheet_id*` (string), `title` (any)
+- **Parameters:** `col` (any), `levels` (array|null), `order` (any), `order_spec` (object|null), `reference_level` (string|null), `reversed` (boolean|null), `sheet_id*` (string), `title` (string|null)
 
 ### `table.setCell` — Set Cell Value
 
@@ -392,7 +392,7 @@ Registered commands: 106
 - **Menu:** `Data/Set Cell Value`
 - **Summary:** Set or update a single data cell value and optional exclusion flag, then recalculate downstream sheets.
 - **Beginner note:** Enter or edit one cell in a data table. Connected analyses and graphs refresh automatically.
-- **Parameters:** `col` (integer), `coord` (object), `decimal_separator` (any), `excluded` (boolean), `parse_asterisk_exclusion` (boolean), `row` (integer), `sheet_id*` (string), `subcol` (integer), `value` (any)
+- **Parameters:** `col` (integer|null), `coord` (any), `decimal_separator` (string|null), `excluded` (boolean|null), `parse_asterisk_exclusion` (boolean|null), `row` (integer|null), `sheet_id*` (string), `subcol` (integer|null), `value` (any)
 
 ### `table.setCells` — Set Multiple Cells
 
@@ -400,7 +400,7 @@ Registered commands: 106
 - **Menu:** `Data/Set Multiple Cells`
 - **Summary:** Apply a batch of cell edits or a 2D row/column block to a data table, then recalculate.
 - **Beginner note:** Update multiple cells in a data table at once from a list of edits or a 2D grid.
-- **Parameters:** `edits` (array), `rows` (array), `sheet_id*` (string), `start_col` (integer), `start_row` (integer), `start_subcol` (integer)
+- **Parameters:** `edits` (array|null), `rows` (array|null), `sheet_id*` (string), `start_col` (integer|null), `start_row` (integer|null), `start_subcol` (integer|null)
 
 ### `table.setGroupTitles` — Set Group Column Titles
 
@@ -408,7 +408,7 @@ Registered commands: 106
 - **Menu:** `Data/Set Column Titles`
 - **Summary:** Set group/dataset titles, X/time title, factor titles, or row titles on a data table.
 - **Beginner note:** Rename columns, X/time headers, or factor titles in a data table.
-- **Parameters:** `col` (integer), `column_factor_title` (any), `row_factor_title` (any), `row_titles` (array), `sheet_id*` (string), `start_col` (integer), `title` (any), `titles` (array), `x_title` (any)
+- **Parameters:** `col` (integer|null), `column_factor_title` (string|null), `row_factor_title` (string|null), `row_titles` (array|null), `sheet_id*` (string), `start_col` (integer|null), `title` (string|null), `titles` (array|null), `x_title` (string|null)
 
 ### `table.setRowTitles` — Set Row Titles
 
@@ -416,7 +416,7 @@ Registered commands: 106
 - **Menu:** `Data/Set Row Titles`
 - **Summary:** Set or clear one or more row titles (or PartsOfWhole slice labels) in a data table.
 - **Beginner note:** Label rows along the left edge of a data table.
-- **Parameters:** `row` (integer), `sheet_id*` (string), `start_row` (integer), `title` (any), `titles` (array)
+- **Parameters:** `row` (integer|null), `sheet_id*` (string), `start_row` (integer|null), `title` (string|null), `titles` (array|null)
 
 ### `table.setSubcolumnTitles` — Set Subcolumn Titles
 
@@ -424,7 +424,7 @@ Registered commands: 106
 - **Menu:** `Data/Set Subcolumn Titles`
 - **Summary:** Set explicit subcolumn titles on a Nested data table across one or all groups.
 - **Beginner note:** Rename nested replicate subcolumns for a specific group or all groups.
-- **Parameters:** `col` (any), `sheet_id*` (string), `start_subcol` (integer), `subcol` (integer), `title` (string), `titles` (array)
+- **Parameters:** `col` (integer|null), `sheet_id*` (string), `start_subcol` (integer|null), `subcol` (integer|null), `title` (string|null), `titles` (array|null)
 
 ### `table.setTitles` — Set Column Titles
 
@@ -432,7 +432,7 @@ Registered commands: 106
 - **Menu:** `Data/Set Column Titles`
 - **Summary:** Set dataset column titles, X/time title, factor titles, or row titles on a data table.
 - **Beginner note:** Rename column headers, X/time title, or factor titles in a data table.
-- **Parameters:** `col` (integer), `column_factor_title` (any), `row_factor_title` (any), `row_titles` (array), `sheet_id*` (string), `start_col` (integer), `title` (any), `titles` (array), `x_title` (any)
+- **Parameters:** `col` (integer|null), `column_factor_title` (string|null), `row_factor_title` (string|null), `row_titles` (array|null), `sheet_id*` (string), `start_col` (integer|null), `title` (string|null), `titles` (array|null), `x_title` (string|null)
 
 ### `table.setVariableRole` — Set Variable Role
 
@@ -440,7 +440,7 @@ Registered commands: 106
 - **Menu:** `Data/Variable Properties...`
 - **Summary:** Lock or re-infer the analytical role of a column in a MultipleVariables table.
 - **Beginner note:** Mark a variable column as continuous, categorical, label, calculated, or auto-inferred.
-- **Parameters:** `col` (any), `role*` (string), `sheet_id*` (string), `title` (any)
+- **Parameters:** `col` (any), `role*` (string), `sheet_id*` (string), `title` (string|null)
 
 ### `table.setXCells` — Set X / Time Column
 
@@ -448,7 +448,7 @@ Registered commands: 106
 - **Menu:** `Data/Set X Values`
 - **Summary:** Set one or more X or elapsed-time column cells on an XY or Survival table.
 - **Beginner note:** Fill or edit values in the X (or Survival time) column.
-- **Parameters:** `decimal_separator` (any), `edits` (array), `excluded` (boolean), `parse_asterisk_exclusion` (boolean), `row` (integer), `sheet_id*` (string), `start_row` (integer), `subcol` (integer), `value` (any), `values` (array)
+- **Parameters:** `decimal_separator` (string|null), `edits` (array|null), `excluded` (boolean|null), `parse_asterisk_exclusion` (boolean|null), `row` (integer|null), `sheet_id*` (string), `start_row` (integer|null), `subcol` (integer|null), `value` (any), `values` (array|null)
 
 ### `table.simulateDistributions` — Simulate Distributions
 
@@ -456,7 +456,7 @@ Registered commands: 106
 - **Menu:** `Insert/Simulate Distributions...`
 - **Summary:** Generate a Column or MultipleVariables table with columns sampled from Uniform, Gaussian, LogNormal, Binomial, Poisson, or Exponential distributions.
 - **Beginner note:** Creates a new table of seeded random variates drawn from parametric statistical distributions.
-- **Parameters:** `columns*` (array), `n_rows*` (integer), `seed` (any), `sheet_id` (any), `title` (any), `use_multiple_variables` (any)
+- **Parameters:** `columns*` (array), `n_rows*` (integer), `seed` (integer|null), `sheet_id` (string|null), `title` (string|null), `use_multiple_variables` (boolean|null)
 
 ### `table.simulateXy` — Simulate XY Data
 
@@ -464,7 +464,7 @@ Registered commands: 106
 - **Menu:** `Insert/Simulate Data...`
 - **Summary:** Generate a synthetic XY data sheet from a built-in equation, parameter map, and noise model.
 - **Beginner note:** Create synthetic XY curves with optional Gaussian, relative CV, or Poisson noise.
-- **Parameters:** `auto_info` (boolean), `cv_percent` (number), `equation_id` (string), `graph_sheet_id` (any), `noise_kind` (string), `noise_sd` (number), `parameters` (any), `replicates` (integer), `row_count` (integer), `seed` (integer), `sheet_id` (any), `title` (any), `x_max` (number), `x_min` (number)
+- **Parameters:** `auto_info` (boolean|null), `cv_percent` (number|null), `equation_id` (string|null), `graph_sheet_id` (string|null), `noise_kind` (string|null), `noise_sd` (number|null), `parameters` (any), `replicates` (integer|null), `row_count` (integer|null), `seed` (integer|null), `sheet_id` (string|null), `title` (string|null), `x_max` (number|null), `x_min` (number|null)
 
 ## Info & Constants (`info`)
 
@@ -474,7 +474,7 @@ Registered commands: 106
 - **Menu:** `Info/Remove Constant`
 - **Summary:** Remove a named constant from an InfoSheet and recalculate dependents.
 - **Beginner note:** Deletes a constant from an InfoSheet and re-evaluates any sheets that depended on it.
-- **Parameters:** `if_exists` (any), `name*` (string), `sheet_id*` (string)
+- **Parameters:** `if_exists` (boolean|null), `name*` (string), `sheet_id*` (string)
 
 ### `info.setConstant` — Set Info Constant
 
@@ -482,7 +482,7 @@ Registered commands: 106
 - **Menu:** `Info/Set Constant`
 - **Summary:** Create or update a named InfoSheet constant and recalculate dependents.
 - **Beginner note:** Sets a hookable constant (number, date, or text with optional units) used by formulas, fits, and graph titles.
-- **Parameters:** `kind` (any), `name*` (string), `sheet_id*` (string), `units` (any), `value*` (any)
+- **Parameters:** `kind` (string|null), `name*` (string), `sheet_id*` (string), `units` (string|null), `value*` (any)
 
 ### `info.setNote` — Set Info Note
 
@@ -490,7 +490,7 @@ Registered commands: 106
 - **Menu:** `Info/Edit Note`
 - **Summary:** Set or append markdown notes on an InfoSheet.
 - **Beginner note:** Updates experiment notes on an InfoSheet (or the InfoSheet linked to a given DataSheet ID).
-- **Parameters:** `append` (any), `sheet_id*` (string), `text*` (string)
+- **Parameters:** `append` (boolean|null), `sheet_id*` (string), `text*` (string)
 
 ## Analysis & Reports (`analysis`)
 
@@ -737,7 +737,7 @@ Registered commands: 106
 - **Menu:** `Insert/Layout Panel...`
 - **Summary:** Place a live graph panel, live table panel, or markdown text callout onto a layout sheet.
 - **Beginner note:** Adds a graph, data or result table, or label callout to an explicit rectangle or grid slot on a layout.
-- **Parameters:** `badge_override` (any), `bounds_pt` (any), `col` (any), `font_size_pt` (any), `graph_sheet_id` (any), `gutter_pt` (any), `kind` (any), `margin_pt` (any), `markdown` (any), `panel_id` (any), `row` (any), `scale_percent` (any), `sheet_id*` (string), `source_sheet_id` (any), `tab_id` (any)
+- **Parameters:** `badge_override` (string|null), `bounds_pt` (any), `col` (integer|null), `font_size_pt` (number|null), `graph_sheet_id` (string|null), `gutter_pt` (number|null), `kind` (string|null), `margin_pt` (number|null), `markdown` (string|null), `panel_id` (string|null), `row` (integer|null), `scale_percent` (number|null), `sheet_id*` (string), `source_sheet_id` (string|null), `tab_id` (string|null)
 
 ### `layout.alignOrigins` — Align Panel Origins
 
@@ -745,7 +745,7 @@ Registered commands: 106
 - **Menu:** `Arrange/Align Plot Origins`
 - **Summary:** Enable or disable plot-area origin alignment across layout panels and optionally normalize live graph bounds.
 - **Beginner note:** Lines up the X and Y axis origins of neighboring panels so multi-panel figures align cleanly.
-- **Parameters:** `align` (any), `normalize_bounds` (any), `sheet_id*` (string)
+- **Parameters:** `align` (boolean|null), `normalize_bounds` (boolean|null), `sheet_id*` (string)
 
 ### `layout.applyCanvasPreset` — Apply Layout Canvas Preset
 
@@ -753,7 +753,7 @@ Registered commands: 106
 - **Menu:** `Format/Layout Canvas Size Preset...`
 - **Summary:** Resize a layout page to a standard publication canvas preset while optionally preserving typography sizes.
 - **Beginner note:** Resizes a whole layout figure to a journal column width or slide preset and runs preflight checks.
-- **Parameters:** `preset*` (string), `resize_mode` (any), `sheet_id*` (string)
+- **Parameters:** `preset*` (string), `resize_mode` (string|null), `sheet_id*` (string)
 
 ### `layout.create` — New Layout
 
@@ -761,7 +761,7 @@ Registered commands: 106
 - **Menu:** `Insert/New Layout...`
 - **Summary:** Create a new publication layout sheet with a journal width preset, page orientation, and grid template.
 - **Beginner note:** Creates a multi-panel figure page where you can arrange graphs, tables, and text callouts.
-- **Parameters:** `align_plot_origins` (any), `background_fill` (any), `grid_template` (any), `height` (any), `orientation` (any), `panel_badges` (any), `preset` (any), `sheet_id` (any), `title` (any), `unit` (any), `width` (any)
+- **Parameters:** `align_plot_origins` (boolean|null), `background_fill` (any), `grid_template` (array|null), `height` (number|null), `orientation` (any), `panel_badges` (any), `preset` (any), `sheet_id` (string|null), `title` (string|null), `unit` (any), `width` (number|null)
 
 ### `layout.equalizeScaling` — Equalize Scaling
 
@@ -769,7 +769,7 @@ Registered commands: 106
 - **Menu:** `Arrange/Equalize Scaling`
 - **Summary:** Equalize rendered inner plot scaling across live graph panels on a layout sheet.
 - **Beginner note:** Resizes selected or all graph panels on a layout to match the smallest, largest, or an explicit scale percentage.
-- **Parameters:** `mode` (any), `panel_ids` (any), `panel_indices` (any), `percent` (any), `sheet_id*` (string)
+- **Parameters:** `mode` (any), `panel_ids` (array|null), `panel_indices` (array|null), `percent` (number|null), `sheet_id*` (string)
 
 ### `layout.insertImage` — Insert Image on Layout
 
@@ -777,7 +777,7 @@ Registered commands: 106
 - **Menu:** `Insert/Image on Layout...`
 - **Summary:** Embed a PNG, JPEG, or TIFF raster image item onto a publication layout sheet.
 - **Beginner note:** Places a microscopy image, gel photo, or schematic panel onto a layout page.
-- **Parameters:** `asset_id` (any), `badge_override` (any), `border` (any), `bounds_pt` (any), `bytes_base64` (any), `crop` (any), `lock_aspect_ratio` (any), `panel_id` (any), `path` (any), `rotation_deg` (any), `sheet_id*` (string)
+- **Parameters:** `asset_id` (string|null), `badge_override` (string|null), `border` (any), `bounds_pt` (any), `bytes_base64` (string|null), `crop` (any), `lock_aspect_ratio` (boolean|null), `panel_id` (string|null), `path` (string|null), `rotation_deg` (number|null), `sheet_id*` (string)
 
 ### `layout.reorderPanel` — Reorder Panel
 
@@ -785,7 +785,7 @@ Registered commands: 106
 - **Menu:** `Arrange/Reorder Panel`
 - **Summary:** Change the z-order stacking depth of a panel on a layout sheet.
 - **Beginner note:** Moves a graph, table, or text panel forward or backward in the layout paint order.
-- **Parameters:** `action*` (string), `panel_id` (any), `panel_index` (any), `sheet_id*` (string)
+- **Parameters:** `action*` (string), `panel_id` (string|null), `panel_index` (integer|null), `sheet_id*` (string)
 
 ### `layout.setSpec` — Format Layout
 
@@ -793,7 +793,7 @@ Registered commands: 106
 - **Menu:** `Format/Layout...`
 - **Summary:** Update a layout sheet's page dimensions, journal preset, grid template, origin alignment, badge style, or background.
 - **Beginner note:** Changes the page setup, grid arrangement, or panel lettering of an existing figure layout.
-- **Parameters:** `align_plot_origins` (any), `background_fill` (any), `grid_template` (any), `height` (any), `orientation` (any), `panel_badges` (any), `preset` (any), `sheet_id*` (string), `spec` (any), `title` (any), `unit` (any), `width` (any)
+- **Parameters:** `align_plot_origins` (boolean|null), `background_fill` (any), `grid_template` (array|null), `height` (number|null), `orientation` (any), `panel_badges` (any), `preset` (any), `sheet_id*` (string), `spec` (object|null), `title` (string|null), `unit` (any), `width` (number|null)
 
 ### `layout.updateImage` — Format Embedded Layout Image
 
@@ -801,7 +801,7 @@ Registered commands: 106
 - **Menu:** `Format/Layout Image...`
 - **Summary:** Update placement bounds, aspect-ratio lock, rotation, crop insets, border, or badge override on a layout image.
 - **Beginner note:** Crops, rotates, resizes, frames, or labels an embedded image panel on a layout sheet.
-- **Parameters:** `badge_override` (any), `border` (any), `bounds_pt` (any), `crop` (any), `height_pt` (any), `item_index` (any), `lock_aspect_ratio` (any), `panel_id` (any), `rotation_deg` (any), `sheet_id*` (string), `width_pt` (any)
+- **Parameters:** `badge_override` (string|null), `border` (any), `bounds_pt` (any), `crop` (any), `height_pt` (number|null), `item_index` (integer|null), `lock_aspect_ratio` (boolean|null), `panel_id` (string|null), `rotation_deg` (number|null), `sheet_id*` (string), `width_pt` (number|null)
 
 ## Vector & Raster Export (`export`)
 
@@ -811,7 +811,7 @@ Registered commands: 106
 - **Menu:** `File/Export/PDF...`
 - **Summary:** Render one or more graph or layout sheets to publication PDF (sRGB or print CMYK) and optionally write it atomically to disk.
 - **Beginner note:** Creates a single-page or multi-page vector PDF from one or more graphs and layouts.
-- **Parameters:** `color_space` (any), `compress_streams` (any), `outline_text` (any), `path` (any), `sheet_id` (any), `sheet_ids` (any), `title` (any)
+- **Parameters:** `color_space` (string|null), `compress_streams` (boolean|null), `outline_text` (boolean|null), `path` (string|null), `sheet_id` (string|null), `sheet_ids` (array|null), `title` (string|null)
 
 ### `export.png` — Export PNG
 
@@ -819,7 +819,7 @@ Registered commands: 106
 - **Menu:** `File/Export/PNG...`
 - **Summary:** Rasterize a graph or layout sheet to a PNG image at the requested pixel dimensions or DPI.
 - **Beginner note:** Renders a graph or layout to a high-DPI PNG image, returning base64 bytes and optionally saving to disk.
-- **Parameters:** `dpi` (any), `height_px` (any), `path` (any), `sheet_id*` (string), `width_px` (any)
+- **Parameters:** `dpi` (integer|null), `height_px` (integer|null), `path` (string|null), `sheet_id*` (string), `width_px` (integer|null)
 
 ### `export.svg` — Export SVG
 
@@ -827,7 +827,7 @@ Registered commands: 106
 - **Menu:** `File/Export/SVG...`
 - **Summary:** Render a graph or layout sheet to scalable vector graphics (SVG) and optionally write it atomically to disk.
 - **Beginner note:** Exports the selected graph or layout as crisp SVG text, optionally saving it to a file path.
-- **Parameters:** `embed_fonts` (any), `include_metadata` (any), `include_xml_declaration` (any), `outline_text` (any), `path` (any), `precision` (any), `pretty` (any), `sheet_id*` (string)
+- **Parameters:** `embed_fonts` (boolean|null), `include_metadata` (boolean|null), `include_xml_declaration` (boolean|null), `outline_text` (boolean|null), `path` (string|null), `precision` (integer|null), `pretty` (boolean|null), `sheet_id*` (string)
 
 ### `export.tiff` — Export TIFF
 
@@ -835,7 +835,7 @@ Registered commands: 106
 - **Menu:** `File/Export/TIFF...`
 - **Summary:** Rasterize a graph or layout sheet to a TIFF image with selectable compression (`none`, `lzw`, `deflate`).
 - **Beginner note:** Renders a publication TIFF image at custom DPI or resolution with lossless compression.
-- **Parameters:** `compression` (any), `dpi` (any), `height_px` (any), `path` (any), `sheet_id*` (string), `width_px` (any)
+- **Parameters:** `compression` (string|null), `dpi` (integer|null), `height_px` (integer|null), `path` (string|null), `sheet_id*` (string), `width_px` (integer|null)
 
 ### `graph.exportEmf` — Export Graph EMF
 
@@ -843,7 +843,7 @@ Registered commands: 106
 - **Menu:** `File/Export/Graph EMF...`
 - **Summary:** Export a graph sheet as a Windows Enhanced Metafile (EMF) vector graphic.
 - **Beginner note:** Exports a graph sheet to EMF for insertion into Office documents.
-- **Parameters:** `path` (any), `sheet_id*` (string)
+- **Parameters:** `path` (string|null), `sheet_id*` (string)
 
 ### `graph.exportPdf` — Export Graph PDF
 
@@ -851,7 +851,7 @@ Registered commands: 106
 - **Menu:** `File/Export/PDF`
 - **Summary:** Export a graph sheet (or sheet list) to vector PDF.
 - **Beginner note:** Exports the active graph to publication PDF format.
-- **Parameters:** `color_space` (any), `compress_streams` (any), `outline_text` (any), `path` (any), `sheet_id` (any), `sheet_ids` (any), `title` (any)
+- **Parameters:** `color_space` (string|null), `compress_streams` (boolean|null), `outline_text` (boolean|null), `path` (string|null), `sheet_id` (string|null), `sheet_ids` (array|null), `title` (string|null)
 
 ### `graph.exportPng` — Export Graph PNG
 
@@ -859,7 +859,7 @@ Registered commands: 106
 - **Menu:** `File/Export/PNG`
 - **Summary:** Export a graph sheet to a raster PNG image.
 - **Beginner note:** Exports the active graph to a PNG bitmap at configurable DPI and size.
-- **Parameters:** `dpi` (any), `height_px` (any), `path` (any), `sheet_id*` (string), `width_px` (any)
+- **Parameters:** `dpi` (integer|null), `height_px` (integer|null), `path` (string|null), `sheet_id*` (string), `width_px` (integer|null)
 
 ### `graph.exportSvg` — Export Graph SVG
 
@@ -867,7 +867,7 @@ Registered commands: 106
 - **Menu:** `File/Export/SVG`
 - **Summary:** Export a graph sheet to SVG using the unified SVG renderer.
 - **Beginner note:** Exports the active graph to vector SVG format.
-- **Parameters:** `embed_fonts` (any), `include_metadata` (any), `include_xml_declaration` (any), `outline_text` (any), `path` (any), `precision` (any), `pretty` (any), `sheet_id*` (string)
+- **Parameters:** `embed_fonts` (boolean|null), `include_metadata` (boolean|null), `include_xml_declaration` (boolean|null), `outline_text` (boolean|null), `path` (string|null), `precision` (integer|null), `pretty` (boolean|null), `sheet_id*` (string)
 
 ### `layout.exportEmf` — Export Layout EMF
 
@@ -875,5 +875,5 @@ Registered commands: 106
 - **Menu:** `File/Export/Layout EMF...`
 - **Summary:** Export a multi-panel layout sheet as a Windows Enhanced Metafile (EMF) vector graphic.
 - **Beginner note:** Exports a multi-panel layout sheet to EMF for insertion into Office documents.
-- **Parameters:** `path` (any), `sheet_id*` (string)
+- **Parameters:** `path` (string|null), `sheet_id*` (string)
 

@@ -341,6 +341,7 @@ fn render_unsaved_modal(
         intents.push(UiIntent::ResolveUnsavedChanges { action: UnsavedCloseAction::Cancel });
     }
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let capture = show_scrolled_modal(
         ctx,
         meta,
@@ -419,6 +420,10 @@ fn render_unsaved_modal(
         },
     );
 
+    if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+        intents.push(UiIntent::ResolveUnsavedChanges { action: UnsavedCloseAction::Save });
+    }
+
     report_from_capture(capture)
 }
 
@@ -464,6 +469,7 @@ fn render_preferences_modal(
     }
 
     let footer_h = if inner_w < 460.0 { 68.0 } else { 42.0 };
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let capture = show_scrolled_modal(
         ctx,
         meta,
@@ -479,7 +485,7 @@ fn render_preferences_modal(
             body_max_h: (max_h - 118.0 - footer_h).max(110.0),
             footer_separator: true,
         },
-        &mut (state, intents),
+        &mut (&mut *state, &mut *intents),
         |ui, meta, (state, _)| {
             // 4-Category tab/sidebar bar (wraps safely at 640x420 & 1440x600).
             ui.horizontal_wrapped(|ui| {
@@ -550,6 +556,16 @@ fn render_preferences_modal(
             });
         },
     );
+
+    if !state.preferences.shortcut_capture_armed
+        && !wants_kb_before
+        && !ctx.egui_wants_keyboard_input()
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+    {
+        state.preferences.shortcut_capture_armed = false;
+        intents.push(UiIntent::UpdatePreferencesDraft(Box::new(state.preferences.clone())));
+        intents.push(UiIntent::ClosePreferences { save: true });
+    }
 
     report_from_capture(capture)
 }
@@ -652,7 +668,7 @@ fn render_prefs_appearance(
             )
             .clicked()
             {
-                intents.push_set_preview_filter(filter);
+                intents.push(UiIntent::SetPreviewFilter { filter });
             }
         }
     });
@@ -1030,6 +1046,7 @@ fn render_find_replace_modal(
         intents.push(UiIntent::CloseFindReplace);
     }
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let capture = show_scrolled_modal(
         ctx,
         meta,
@@ -1045,7 +1062,7 @@ fn render_find_replace_modal(
             body_max_h: (max_h - 108.0).max(90.0),
             footer_separator: true,
         },
-        &mut (state, intents),
+        &mut (&mut *state, &mut *intents),
         |_, _, _| {},
         |ui, meta, (state, _)| {
             ui.horizontal_wrapped(|ui| {
@@ -1147,6 +1164,20 @@ fn render_find_replace_modal(
         },
     );
 
+    if !state.find_replace.find_query.is_empty()
+        && !wants_kb_before
+        && !ctx.egui_wants_keyboard_input()
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+    {
+        intents.push(UiIntent::ExecuteFindReplace {
+            replace_all: false,
+            find_query: state.find_replace.find_query.clone(),
+            replace_with: state.find_replace.replace_with.clone(),
+            match_case: state.find_replace.match_case,
+            match_entire_cell: state.find_replace.match_entire_cell,
+        });
+    }
+
     report_from_capture(capture)
 }
 
@@ -1173,9 +1204,10 @@ fn render_export_modal(
 
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
         state.export_emf_selected = false;
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
     }
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let capture = show_scrolled_modal(
         ctx,
         meta,
@@ -1191,7 +1223,7 @@ fn render_export_modal(
             body_max_h: (max_h - 108.0).max(100.0),
             footer_separator: true,
         },
-        &mut (state, intents),
+        &mut (&mut *state, &mut *intents),
         |_, _, _| {},
         |ui, meta, (state, intents)| {
             render_export_body(
@@ -1221,7 +1253,7 @@ fn render_export_modal(
                 .clicked()
                 {
                     state.export_emf_selected = false;
-                    intents.push_dialog_button("cancel");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
                 if app_button(
                     ui,
@@ -1247,6 +1279,13 @@ fn render_export_modal(
         },
     );
 
+    if target_valid && !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+        let (cmd, params) = export_figure_command_and_params(app, is_layout, &sheet_id, state.export_emf_selected);
+        state.export_emf_selected = false;
+        intents.push_engine(cmd, params);
+        intents.push(UiIntent::CloseAllModals);
+    }
+
     report_from_capture(capture)
 }
 
@@ -1268,7 +1307,7 @@ fn export_figure_command_and_params(
         }
         ExportFigureFormat::Pdf => {
             let cmd = if is_layout { "export.pdf" } else { "graph.exportPdf" };
-            let cs = if app.view_shards.dialogs_graph_misc.export_color_space == "CMYK-Proof" { "cmyk" } else { "srgb" };
+            let cs = if ef.color_space == "CMYK-Proof" { "cmyk" } else { "srgb" };
             (cmd, json!({ "sheet_id": sheet_id.as_str(), "color_space": cs }))
         }
         ExportFigureFormat::Png => {
@@ -1311,8 +1350,7 @@ fn render_export_body(
     intents: &mut PendingUiIntents,
 ) {
     let ExportBodyCtx { app, sheet_id, is_graph, is_layout, target_valid, body_w, tokens } = ctx;
-    let ef = app.canvas_dialogs.export_figure;
-    let vs = &app.view_shards.dialogs_graph_misc;
+    let ef = &app.canvas_dialogs.export_figure;
     let target_kind_lbl = if is_layout {
         format!("Target Layout Sheet: {}", sheet_id.as_str())
     } else if is_graph {
@@ -1345,8 +1383,11 @@ fn render_export_body(
             .clicked()
             {
                 state.export_emf_selected = false;
-                let mut next = ef;
+                let mut next = ef.clone();
                 next.format = fmt;
+                if matches!(fmt, ExportFigureFormat::Pdf) {
+                    next.transparent_bg = false;
+                }
                 intents.push(UiIntent::UpdateExportFigureState(Box::new(next)));
             }
         }
@@ -1387,7 +1428,7 @@ fn render_export_body(
     };
     let dpi_out = render_scrub_unit_field(ui, f64::from(ef.dpi), &mut state.export_dpi_spinner, dpi_cfg, tokens, meta);
     if let Some(dpi) = dpi_out.committed_value {
-        let mut next = ef;
+        let mut next = ef.clone();
         next.dpi = dpi.clamp(72.0, 2400.0).round() as u16;
         intents.push(UiIntent::UpdateExportFigureState(Box::new(next)));
     }
@@ -1406,7 +1447,7 @@ fn render_export_body(
                     widget_id: &format!("export.unit.{slug}"),
                     label: lbl,
                     command_id: None,
-                    selected: vs.export_unit == slug,
+                    selected: ef.unit == slug,
                     enabled: !is_vector,
                     disabled_reason: dim_disabled_reason,
                 },
@@ -1414,7 +1455,13 @@ fn render_export_body(
             )
             .clicked()
             {
-                intents.push_custom_view_action("dialogs_graph_misc", format!("export:unit:{slug}"));
+                let mut next = ef.clone();
+                next.unit = String::from(match slug {
+                    "mm" => "mm",
+                    "in" => "in",
+                    _ => "px",
+                });
+                intents.push(UiIntent::UpdateExportFigureState(Box::new(next)));
             }
         }
         ui.label(tr(normalize_locale(&app.locale), "export.journal_width"));
@@ -1434,7 +1481,7 @@ fn render_export_body(
             )
             .clicked()
             {
-                let mut next = ef;
+                let mut next = ef.clone();
                 next.width_px = ((mm / 25.4) * f64::from(ef.dpi.max(72))).round().clamp(16.0, 9600.0) as u32;
                 intents.push(UiIntent::UpdateExportFigureState(Box::new(next)));
             }
@@ -1443,14 +1490,14 @@ fn render_export_body(
 
     let dim_disabled_reason = is_vector.then_some("Vector formats (PDF/SVG/EMF) use sheet geometry instead of pixel dimensions");
     let dpi_f = f64::from(ef.dpi.max(72));
-    let (w_display, h_display, dim_max) = match vs.export_unit.as_str() {
+    let (w_display, h_display, dim_max) = match ef.unit.as_str() {
         "mm" => ((f64::from(ef.width_px) / dpi_f) * 25.4, (f64::from(ef.height_px) / dpi_f) * 25.4, 1000.0),
         "in" => (f64::from(ef.width_px) / dpi_f, f64::from(ef.height_px) / dpi_f, 40.0),
         _ => (f64::from(ef.width_px), f64::from(ef.height_px), 9600.0),
     };
     let w_cfg = ScrubUnitFieldConfig {
         step_per_pt: 2.0,
-        decimals: if vs.export_unit == "px" { 0 } else { 1 },
+        decimals: if ef.unit == "px" { 0 } else { 1 },
         allow_unit_switch: false,
         enabled: !is_vector,
         disabled_reason: dim_disabled_reason,
@@ -1458,8 +1505,8 @@ fn render_export_body(
     };
     let w_out = render_scrub_unit_field(ui, w_display, &mut state.export_width_spinner, w_cfg, tokens, meta);
     if !is_vector && let Some(val) = w_out.committed_value {
-        let mut next = ef;
-        let px = match vs.export_unit.as_str() {
+        let mut next = ef.clone();
+        let px = match ef.unit.as_str() {
             "mm" => (val / 25.4) * dpi_f,
             "in" => val * dpi_f,
             _ => val,
@@ -1470,7 +1517,7 @@ fn render_export_body(
 
     let h_cfg = ScrubUnitFieldConfig {
         step_per_pt: 2.0,
-        decimals: if vs.export_unit == "px" { 0 } else { 1 },
+        decimals: if ef.unit == "px" { 0 } else { 1 },
         allow_unit_switch: false,
         enabled: !is_vector,
         disabled_reason: dim_disabled_reason,
@@ -1478,8 +1525,8 @@ fn render_export_body(
     };
     let h_out = render_scrub_unit_field(ui, h_display, &mut state.export_height_spinner, h_cfg, tokens, meta);
     if !is_vector && let Some(val) = h_out.committed_value {
-        let mut next = ef;
-        let px = match vs.export_unit.as_str() {
+        let mut next = ef.clone();
+        let px = match ef.unit.as_str() {
             "mm" => (val / 25.4) * dpi_f,
             "in" => val * dpi_f,
             _ => val,
@@ -1490,7 +1537,7 @@ fn render_export_body(
 
     ui.add_space(6.0);
     // Transparency (blocked for opaque PDF / EMF).
-    let mut transparent = vs.export_transparent_bg && !is_opaque_vector;
+    let mut transparent = ef.transparent_bg && !is_opaque_vector;
     let trans_chk = ui.add_enabled(!is_opaque_vector, egui::Checkbox::new(&mut transparent, "Transparent Canvas Background"));
     let trans_tip = if is_opaque_vector { Some("PDF and EMF exports require opaque page backgrounds") } else { None };
     if let Some(reason) = trans_tip {
@@ -1513,7 +1560,9 @@ fn render_export_body(
         },
     );
     if trans_chk.changed() && !is_opaque_vector {
-        intents.push_custom_view_action("dialogs_graph_misc", "export:transparent_bg");
+        let mut next = ef.clone();
+        next.transparent_bg = !next.transparent_bg;
+        intents.push(UiIntent::UpdateExportFigureState(Box::new(next)));
     }
     if transparent {
         ui.label(egui::RichText::new("Note: exported files preserve the sheet canvas background.").small().weak());
@@ -1537,7 +1586,7 @@ fn render_export_body(
                 "p3" | "gray" => Some("Display-P3 and Grayscale color spaces are not yet supported"),
                 _ => None,
             };
-            let cs_selected = if is_pdf_export && vs.export_color_space == "CMYK-Proof" {
+            let cs_selected = if is_pdf_export && ef.color_space == "CMYK-Proof" {
                 slug == "cmyk"
             } else {
                 let _ = val;
@@ -1558,7 +1607,9 @@ fn render_export_body(
             )
             .clicked()
             {
-                intents.push_custom_view_action("dialogs_graph_misc", format!("export:cs:{slug}"));
+                let mut next = ef.clone();
+                next.color_space = String::from(val);
+                intents.push(UiIntent::UpdateExportFigureState(Box::new(next)));
             }
         }
     });
@@ -1582,9 +1633,10 @@ fn render_print_modal(
     let pd = app.canvas_dialogs.print.clone();
 
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
     }
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let capture = show_scrolled_modal(
         ctx,
         meta,
@@ -1600,7 +1652,7 @@ fn render_print_modal(
             body_max_h: (max_h - 108.0).max(100.0),
             footer_separator: true,
         },
-        &mut (state, intents),
+        &mut (&mut *state, &mut *intents),
         |_, _, _| {},
         |ui, meta, (state, intents)| {
             ui.label(egui::RichText::new("Printer Queue").strong());
@@ -1784,7 +1836,7 @@ fn render_print_modal(
                 )
                 .clicked()
                 {
-                    intents.push_dialog_button("cancel");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
                 if app_button(
                     ui,
@@ -1801,11 +1853,15 @@ fn render_print_modal(
                 )
                 .clicked()
                 {
-                    intents.push_dialog_button("ok");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
             });
         },
     );
+
+    if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+    }
 
     report_from_capture(capture)
 }
@@ -1846,9 +1902,10 @@ pub(crate) fn render_about_modal(
     let copied_id = egui::Id::unique(("egui_shell_app_modal", "dialog.about.copied"));
 
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
     }
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let capture = show_scrolled_modal(
         ctx,
         meta,
@@ -1961,11 +2018,16 @@ pub(crate) fn render_about_modal(
                 );
                 if ok_resp.clicked() {
                     ctx.data_mut(|d| d.insert_temp(copied_id, false));
-                    intents.push_dialog_button("ok");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
             });
         },
     );
+
+    if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+        ctx.data_mut(|d| d.insert_temp(copied_id, false));
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+    }
 
     report_from_capture(capture)
 }
@@ -1984,13 +2046,14 @@ fn render_checkpoints_modal(
 
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
         state.checkpoint_pending_restore_id = None;
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
     }
 
     let mut name_draft = app.canvas_dialogs.checkpoints.name_draft.clone();
     let mut note_draft = app.canvas_dialogs.checkpoints.note_draft.clone();
     let doc = app.document();
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let capture = show_scrolled_modal(
         ctx,
         meta,
@@ -2006,7 +2069,7 @@ fn render_checkpoints_modal(
             body_max_h: (max_h - 112.0).max(120.0),
             footer_separator: true,
         },
-        &mut (state, intents),
+        &mut (&mut *state, &mut *intents),
         |_, _, _| {},
         |ui, meta, (state, intents)| {
             ui.label(egui::RichText::new("Create Checkpoint").strong());
@@ -2054,7 +2117,7 @@ fn render_checkpoints_modal(
                         (String::from("note"), Value::String(note_draft.clone())),
                     ]),
                 });
-                intents.push_dialog_button("ok");
+                intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
             }
 
             ui.add_space(10.0);
@@ -2186,11 +2249,20 @@ fn render_checkpoints_modal(
                 .clicked()
                 {
                     state.checkpoint_pending_restore_id = None;
-                    intents.push_dialog_button("cancel");
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
             });
         },
     );
+
+    if !app.canvas_dialogs.checkpoints.name_draft.trim().is_empty()
+        && !wants_kb_before
+        && !ctx.egui_wants_keyboard_input()
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+    {
+        state.checkpoint_pending_restore_id = None;
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+    }
 
     report_from_capture(capture)
 }
@@ -2210,9 +2282,10 @@ fn render_feedback_modal(
     let diag = app.feedback_diagnostics();
 
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
-        intents.push_dialog_button("cancel");
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
     }
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let capture = show_scrolled_modal(
         ctx,
         meta,
@@ -2228,7 +2301,7 @@ fn render_feedback_modal(
             body_max_h: (max_h - 116.0).max(120.0),
             footer_separator: false,
         },
-        &mut (draft, changed, intents),
+        &mut (draft, changed, &mut *intents),
         |_, _, _| {},
         |ui, meta, (draft, changed, _)| {
             if render_feedback_category_row(ui, draft, tokens, meta) {
@@ -2256,6 +2329,10 @@ fn render_feedback_modal(
             render_feedback_footer(ui, &FeedbackFooterInput { locale, draft, active_diag, preview: &preview, body_w, tokens }, meta, intents);
         },
     );
+
+    if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+    }
 
     report_from_capture(capture)
 }
@@ -2401,7 +2478,7 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
         )
         .clicked()
         {
-            intents.push_dialog_button("cancel");
+            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
         }
 
         if app_button(

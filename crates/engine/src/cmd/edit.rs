@@ -1,28 +1,24 @@
 //! Editing and history commands (`edit.undo`, `edit.redo`, `edit.pasteResultTable`).
 
 use curvebook_doc::{DocError, EmbeddedTableStyle, ErrorCode, GraphAnnotation, LayoutItem, MAX_LAYOUT_ITEMS, RectPt, ResultStatus, SheetSection};
+use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::analysis::de_present_opt;
-use crate::cmd::graph::{GraphImageInsertArgs, has_graph_or_layout, insert_image_on_graph, parse_rect_pt, parse_rgba8, validate_graph_spec_in_doc};
+use crate::cmd::graph::{GraphImageInsertArgs, insert_image_on_graph, parse_rect_pt, parse_rgba8, validate_graph_spec_in_doc};
 use crate::cmd::helpers::{
-    parse_sheet_id, require_graph_sheet, require_graph_sheet_mut, require_layout_sheet, require_layout_sheet_mut, require_result_sheet,
+    always_enabled, bad_input, bad_input_ptr, has_graph_or_layout, parse_sheet_id, require_graph_sheet, require_graph_sheet_mut,
+    require_layout_sheet, require_layout_sheet_mut, require_result_sheet,
 };
+use crate::cmd::image::{CropInsetsPatchParams, ImageBorderParams};
 use crate::cmd::layout::{LayoutImageInsertArgs, insert_image_on_layout, validate_layout_spec_in_doc};
-use crate::cmd::params::{
-    any_json_schema, array_schema, bool_schema, empty_object_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema, parse_params,
-    str_schema,
-};
-use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
+use crate::cmd::params::{command_schema, empty_object_schema, parse_params};
+use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects, command_specs};
 use crate::{CommandOutcome, EngineError};
 
 #[derive(Debug, Deserialize)]
 struct EmptyEditParams {}
-
-fn always_enabled(_session: &crate::Session) -> bool {
-    true
-}
 
 fn run_edit_undo(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
     let _parsed: EmptyEditParams = parse_params(&empty_object_schema(), params)?;
@@ -50,83 +46,75 @@ fn run_edit_redo(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, Eng
     })
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EditPasteResultTableParams {
+    /// Source ResultSheet (or DataSheet for Layout target) ID.
+    #[schemars(length(min = 1))]
     source_sheet_id: String,
+    /// Target GraphSheet or LayoutSheet ID.
+    #[schemars(length(min = 1))]
     target_sheet_id: String,
+    /// Optional ResultTab ID or title (defaults to first tab).
     #[serde(default)]
     tab_id: Option<String>,
+    /// Optional placement `[x, y, width, height]` or `RectPt` in points.
     #[serde(default)]
     bounds_pt: Option<Value>,
+    /// Optional zero-based indices to include.
     #[serde(default)]
     selected_rows: Option<Vec<usize>>,
+    /// Optional zero-based indices to include.
     #[serde(default)]
     selected_cols: Option<Vec<usize>>,
+    /// Optional EmbeddedTableStyle overrides.
     #[serde(default)]
+    #[schemars(with = "Option<Map<String, Value>>")]
     style: Option<Value>,
+    /// Transpose rows and columns when rendering the pasted table.
     #[serde(default)]
     transpose: Option<bool>,
+    /// Optional panel identifier when pasting onto a LayoutSheet.
     #[serde(default)]
     panel_id: Option<String>,
-}
-
-fn schema_edit_paste_result_table() -> Value {
-    let idx_arr = nullable_schema(array_schema("Optional zero-based indices to include", int_schema("Index", Some(0), None), None, None));
-    obj_schema(
-        vec![
-            ("source_sheet_id", non_empty_str_schema("Source ResultSheet (or DataSheet for Layout target) ID")),
-            ("target_sheet_id", non_empty_str_schema("Target GraphSheet or LayoutSheet ID")),
-            ("tab_id", nullable_schema(str_schema("Optional ResultTab ID or title (defaults to first tab)"))),
-            ("bounds_pt", nullable_schema(any_json_schema("Optional placement `[x, y, width, height]` or `RectPt` in points"))),
-            ("selected_rows", idx_arr.clone()),
-            ("selected_cols", idx_arr),
-            ("transpose", nullable_schema(bool_schema("Transpose rows and columns when rendering the pasted table"))),
-            ("style", nullable_schema(json!({ "type": "object", "description": "Optional EmbeddedTableStyle overrides" }))),
-            ("panel_id", nullable_schema(str_schema("Optional panel identifier when pasting onto a LayoutSheet"))),
-        ],
-        &["source_sheet_id", "target_sheet_id"],
-        false,
-    )
 }
 
 fn parse_embedded_table_style(style_val: Option<&Value>, transpose_shorthand: Option<bool>) -> Result<EmbeddedTableStyle, EngineError> {
     let mut style = EmbeddedTableStyle::default();
     if let Some(val) = style_val {
         let Some(obj) = val.as_object() else {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "`style` must be an object"));
+            return Err(bad_input("`style` must be an object"));
         };
         if let Some(v) = obj.get("show_column_titles") {
-            style.show_column_titles =
-                v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`style.show_column_titles` must be bool"))?;
+            style.show_column_titles = v.as_bool().ok_or_else(|| bad_input("`style.show_column_titles` must be bool"))?;
         }
         if let Some(v) = obj.get("show_row_titles") {
-            style.show_row_titles = v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`style.show_row_titles` must be bool"))?;
+            style.show_row_titles = v.as_bool().ok_or_else(|| bad_input("`style.show_row_titles` must be bool"))?;
         }
         if let Some(v) = obj.get("transpose") {
-            style.transpose = v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`style.transpose` must be bool"))?;
+            style.transpose = v.as_bool().ok_or_else(|| bad_input("`style.transpose` must be bool"))?;
         }
         if let Some(v) = obj.get("bold_headers") {
-            style.bold_headers = v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`style.bold_headers` must be bool"))?;
+            style.bold_headers = v.as_bool().ok_or_else(|| bad_input("`style.bold_headers` must be bool"))?;
         }
         if let Some(v) = obj.get("font_size_pt") {
-            let f = v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`style.font_size_pt` must be numeric"))?;
+            let f = v.as_f64().ok_or_else(|| bad_input("`style.font_size_pt` must be numeric"))?;
             if !f.is_finite() || f <= 0.0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "`style.font_size_pt` must be finite and > 0"));
+                return Err(bad_input("`style.font_size_pt` must be finite and > 0"));
             }
             style.font_size_pt = f;
         }
         if let Some(v) = obj.get("outer_border_width_pt") {
-            let f = v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`style.outer_border_width_pt` must be numeric"))?;
+            let f = v.as_f64().ok_or_else(|| bad_input("`style.outer_border_width_pt` must be numeric"))?;
             if !f.is_finite() || f < 0.0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "`style.outer_border_width_pt` must be finite and >= 0"));
+                return Err(bad_input("`style.outer_border_width_pt` must be finite and >= 0"));
             }
             style.outer_border_width_pt = f;
         }
         if let Some(v) = obj.get("gridline_width_pt") {
-            let f = v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`style.gridline_width_pt` must be numeric"))?;
+            let f = v.as_f64().ok_or_else(|| bad_input("`style.gridline_width_pt` must be numeric"))?;
             if !f.is_finite() || f < 0.0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "`style.gridline_width_pt` must be finite and >= 0"));
+                return Err(bad_input("`style.gridline_width_pt` must be finite and >= 0"));
             }
             style.gridline_width_pt = f;
         }
@@ -161,8 +149,7 @@ fn validate_optional_result_tab(
 }
 
 fn run_edit_paste_result_table(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let schema = schema_edit_paste_result_table();
-    let params: EditPasteResultTableParams = parse_params(&schema, raw)?;
+    let params: EditPasteResultTableParams = parse_params(&command_schema::<EditPasteResultTableParams>(), raw)?;
     let source_id = parse_sheet_id(&params.source_sheet_id)?;
     let target_id = parse_sheet_id(&params.target_sheet_id)?;
     let style = parse_embedded_table_style(params.style.as_ref(), params.transpose)?;
@@ -179,7 +166,7 @@ fn run_edit_paste_result_table(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
             validate_optional_result_tab(doc, &source_id, tab_opt.as_deref())?;
             let bounds_pt = parse_rect_pt(params.bounds_pt.as_ref(), RectPt::new(180.0, 40.0, 180.0, 90.0))?;
             if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "`bounds_pt` width and height must be > 0"));
+                return Err(bad_input("`bounds_pt` width and height must be > 0"));
             }
             let mut spec = require_graph_sheet(doc, &target_id)?.spec.clone();
             spec.annotations.push(GraphAnnotation::EmbeddedResultTable {
@@ -213,10 +200,7 @@ fn run_edit_paste_result_table(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
                 Some(SheetSection::Analyses) => validate_optional_result_tab(doc, &source_id, tab_opt.as_deref())?,
                 Some(SheetSection::Data | SheetSection::Info) => {}
                 Some(_) => {
-                    return Err(EngineError::with_code(
-                        ErrorCode::BadInput,
-                        format!("table source `{source_id}` must reference a result, data, or info sheet"),
-                    ));
+                    return Err(bad_input(format!("table source `{source_id}` must reference a result, data, or info sheet")));
                 }
                 None => return Err(DocError::SheetNotFound { sheet_id: source_id }.into()),
             }
@@ -226,7 +210,7 @@ fn run_edit_paste_result_table(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
             }
             let bounds_pt = parse_rect_pt(params.bounds_pt.as_ref(), RectPt::new(24.0, 24.0, 220.0, 110.0))?;
             if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "`bounds_pt` width and height must be > 0"));
+                return Err(bad_input("`bounds_pt` width and height must be > 0"));
             }
             let panel_id = params.panel_id.unwrap_or_else(|| format!("panel-{}", candidate_spec.items.len() + 1));
             candidate_spec
@@ -259,49 +243,57 @@ fn run_edit_paste_result_table(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
             ))
         }
         SheetSection::Data | SheetSection::Info | SheetSection::Analyses => {
-            Err(EngineError::with_code(ErrorCode::BadInput, format!("target sheet `{target_id}` must be a graph or layout sheet"))
-                .with_details(json!({ "pointer": "/target_sheet_id" })))
+            Err(bad_input_ptr("/target_sheet_id", format!("target sheet `{target_id}` must be a graph or layout sheet")))
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EditPasteImageParams {
+    /// Target GraphSheet or LayoutSheet ID.
+    #[schemars(length(min = 1))]
     target_sheet_id: String,
+    /// Regular local file path to a PNG, JPEG, or TIFF image (URLs rejected).
     #[serde(default)]
+    #[schemars(length(min = 1))]
     path: Option<String>,
+    /// Base64-encoded PNG, JPEG, or TIFF image payload.
     #[serde(default)]
+    #[schemars(length(min = 1))]
     bytes_base64: Option<String>,
+    /// Existing content-addressed image `asset_id` already stored in the project.
     #[serde(default)]
+    #[schemars(length(min = 1))]
     asset_id: Option<String>,
+    /// Optional placement `[x, y, width, height]` or `RectPt` in points.
     #[serde(default)]
     bounds_pt: Option<Value>,
+    /// Clockwise rotation in degrees around the center of `bounds_pt`.
     #[serde(default)]
+    #[schemars(range(min = -3600.0, max = 3600.0))]
     rotation_deg: Option<f64>,
+    /// Preserve intrinsic image aspect ratio when resizing one dimension (default `true`).
     #[serde(default)]
     lock_aspect_ratio: Option<bool>,
+    /// Optional crop inset patch.
     #[serde(default)]
+    #[schemars(with = "Option<CropInsetsPatchParams>")]
     crop: Option<Value>,
+    /// Optional image border specification (or null to clear).
     #[serde(default, deserialize_with = "de_present_opt")]
+    #[schemars(with = "Option<ImageBorderParams>")]
     border: Option<Option<Value>>,
+    /// Optional panel identifier when pasting onto a LayoutSheet.
     #[serde(default)]
     panel_id: Option<String>,
+    /// Optional badge label when pasting onto a LayoutSheet.
     #[serde(default)]
     badge_override: Option<String>,
 }
 
-fn schema_edit_paste_image() -> Value {
-    let mut props = vec![("target_sheet_id", non_empty_str_schema("Target GraphSheet or LayoutSheet ID"))];
-    props.extend(crate::cmd::image::insert_image_common_props());
-    props.push(("panel_id", nullable_schema(str_schema("Optional panel identifier when pasting onto a LayoutSheet"))));
-    props.push(("badge_override", nullable_schema(str_schema("Optional badge label when pasting onto a LayoutSheet"))));
-    obj_schema(props, &["target_sheet_id"], false)
-}
-
 fn run_edit_paste_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let schema = schema_edit_paste_image();
-    let params: EditPasteImageParams = parse_params(&schema, raw)?;
+    let params: EditPasteImageParams = parse_params(&command_schema::<EditPasteImageParams>(), raw)?;
     let target_id = parse_sheet_id(&params.target_sheet_id)?;
     let doc = &mut ctx.session.doc;
     let section = doc.sheet_section(&target_id).ok_or_else(|| {
@@ -311,10 +303,7 @@ fn run_edit_paste_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     match section {
         SheetSection::Graphs => {
             if params.panel_id.is_some() || params.badge_override.is_some() {
-                return Err(EngineError::with_code(
-                    ErrorCode::BadInput,
-                    "`panel_id` and `badge_override` apply only when pasting an image onto a LayoutSheet",
-                ));
+                return Err(bad_input("`panel_id` and `badge_override` apply only when pasting an image onto a LayoutSheet"));
             }
             insert_image_on_graph(
                 doc,
@@ -350,71 +339,65 @@ fn run_edit_paste_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
             },
         ),
         SheetSection::Data | SheetSection::Info | SheetSection::Analyses => {
-            Err(EngineError::with_code(ErrorCode::BadInput, format!("target sheet `{target_id}` must be a graph or layout sheet"))
-                .with_details(json!({ "pointer": "/target_sheet_id" })))
+            Err(bad_input_ptr("/target_sheet_id", format!("target sheet `{target_id}` must be a graph or layout sheet")))
         }
     }
 }
 
-static SPECS: [CommandSpec; 4] = [
-    CommandSpec {
+static SPECS: &[CommandSpec] = &command_specs!(
+    CommandGroup::Edit;
+    {
         id: "edit.undo",
         label: "Undo",
         menu_path: "Edit/Undo",
         shortcut: "Cmd+Z",
         summary: "Undo the most recent document-mutating command.",
         beginner: "Restores the project snapshot captured immediately before the last edit; succeeds with mutated=false when the undo stack is empty.",
-        group: CommandGroup::Edit,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: empty_object_schema,
         enabled: always_enabled,
         run: run_edit_undo,
     },
-    CommandSpec {
+    {
         id: "edit.redo",
         label: "Redo",
         menu_path: "Edit/Redo",
         shortcut: "Cmd+Shift+Z",
         summary: "Redo the most recently undone document edit.",
         beginner: "Re-applies the project snapshot reverted by the last undo command; succeeds with mutated=false when the redo stack is empty.",
-        group: CommandGroup::Edit,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: empty_object_schema,
         enabled: always_enabled,
         run: run_edit_redo,
     },
-    CommandSpec {
+    {
         id: "edit.pasteResultTable",
         label: "Paste Result Table",
         menu_path: "Edit/Paste Result Table",
-        shortcut: "",
         summary: "Paste a live result or data table onto a graph annotation or multi-panel layout.",
         beginner: "Places a formatted, auto-updating result table onto the selected graph or layout page.",
-        group: CommandGroup::Edit,
         effects: Effects::MUTATES_DOCUMENT,
-        input_schema: schema_edit_paste_result_table,
+        input_schema: command_schema::<EditPasteResultTableParams>,
         enabled: has_graph_or_layout,
         run: run_edit_paste_result_table,
     },
-    CommandSpec {
+    {
         id: "edit.pasteImage",
         label: "Paste Image",
         menu_path: "Edit/Paste Image",
-        shortcut: "",
         summary: "Paste or insert a PNG, JPEG, or TIFF raster image onto a graph annotation or multi-panel layout.",
         beginner: "Pastes an image from bytes, local file path, or existing project asset onto a graph or layout page.",
-        group: CommandGroup::Edit,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM),
-        input_schema: schema_edit_paste_image,
+        input_schema: command_schema::<EditPasteImageParams>,
         enabled: has_graph_or_layout,
         run: run_edit_paste_image,
     },
-];
+);
 
 /// Registered command specifications for the `edit` group.
 #[must_use]
 pub fn specs() -> &'static [CommandSpec] {
-    &SPECS
+    SPECS
 }
 
 #[cfg(test)]

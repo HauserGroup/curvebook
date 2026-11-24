@@ -50,7 +50,7 @@ pub(super) fn render_factorial_anova_design(
                 if let AnalysisKind::FactorialAnova(fa) = &mut next.kind {
                     fa.ss_type = target;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     });
@@ -70,7 +70,7 @@ pub(super) fn render_factorial_anova_design(
                 if let AnalysisKind::FactorialAnova(fa) = &mut next.kind {
                     fa.max_interaction_order = ord;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     });
@@ -87,7 +87,7 @@ pub(super) fn render_factorial_anova_design(
         if let AnalysisKind::FactorialAnova(fa) = &mut next.kind {
             fa.compute_effect_sizes = !f.compute_effect_sizes;
         }
-        intents.push_set_edit_params_draft(next);
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if let Some(ds) = resolve_source_data_sheet(doc, &spec.source_sheet_id)
         && let TableArchetype::MultipleVariables(mv) = &ds.archetype
@@ -113,7 +113,7 @@ pub(super) fn render_factorial_anova_design(
                             fa.response_column = Some(idx);
                             fa.multifactor_columns.retain(|&c| c != idx);
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                     let fac_en = if f.response_column == Some(idx) {
                         ControlEnablement::disabled("Outcome column cannot also be a factor.")
@@ -130,7 +130,7 @@ pub(super) fn render_factorial_anova_design(
                                 fa.multifactor_columns.sort_unstable();
                             }
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                 });
                 if idx % 3 == 2 {
@@ -174,14 +174,14 @@ pub(super) fn render_multivariate_design_controls(
                 if let AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: s, .. }) = &mut next.kind {
                     *s = true;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             if render_modal_radio(ui, tokens, meta, "edit.pca.cov", "Center only (Covariance matrix)", !*standardize, &ControlEnablement::enabled()) {
                 let mut next = spec.clone();
                 if let AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: s, .. }) = &mut next.kind {
                     *s = false;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             if render_modal_checkbox(
                 ui,
@@ -196,7 +196,7 @@ pub(super) fn render_multivariate_design_controls(
                 if let AnalysisKind::Multivariate(MultivariateSpec::Pca { parallel_analysis_seed: seed, .. }) = &mut next.kind {
                     *seed = if seed.is_some() { None } else { Some(42) };
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             if let Some(ds) = resolve_source_data_sheet(doc, &spec.source_sheet_id)
                 && let TableArchetype::MultipleVariables(mv_tbl) = &ds.archetype
@@ -220,7 +220,7 @@ pub(super) fn render_multivariate_design_controls(
                             if let Some(y_col) = next_outcome {
                                 next.selected_data_sets.retain(|&c| c != y_col);
                             }
-                            intents.push_set_edit_params_draft(next);
+                            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                         }
                     }
                 });
@@ -241,7 +241,7 @@ pub(super) fn render_multivariate_design_controls(
                 if let AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: sr }) = &mut next.kind {
                     *sr = false;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             if render_modal_radio(
                 ui,
@@ -256,7 +256,7 @@ pub(super) fn render_multivariate_design_controls(
                 if let AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: sr }) = &mut next.kind {
                     *sr = true;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             if render_modal_checkbox(
                 ui,
@@ -267,11 +267,11 @@ pub(super) fn render_multivariate_design_controls(
                 ep.correlation_all_pairs,
                 &ControlEnablement::enabled(),
             ) {
-                intents.push_custom_view_action("stat_params", "toggle_corr_all_pairs");
+                intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::ToggleCorrAllPairs));
             }
             let heat_en = r7_correlation_heatmap_toggle(ep.correlation_all_pairs);
             if render_modal_checkbox(ui, tokens, meta, "edit.corr.heatmap", "Generate correlation heatmap graph", ep.correlation_heatmap, &heat_en) {
-                intents.push_custom_view_action("stat_params", "toggle_corr_heatmap");
+                intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::ToggleCorrHeatmap));
             }
         }
         MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
@@ -288,7 +288,7 @@ pub(super) fn render_multivariate_design_controls(
                         if let AnalysisKind::Multivariate(MultivariateSpec::Clustering { distance: dm, .. }) = &mut next.kind {
                             *dm = d;
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                 }
             });
@@ -307,7 +307,7 @@ pub(super) fn render_multivariate_design_controls(
                         if let AnalysisKind::Multivariate(MultivariateSpec::Clustering { linkage: lm, .. }) = &mut next.kind {
                             *lm = l;
                         }
-                        intents.push_set_edit_params_draft(next);
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                 }
             });
@@ -346,7 +346,7 @@ pub(super) fn render_multivariate_design_controls(
                     };
                     *km = if next_k == 0 { None } else { Some(next_k) };
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             let sweep_val = k_sweep_max.unwrap_or(6);
             let sweep_step = render_stepper_row(
@@ -366,7 +366,7 @@ pub(super) fn render_multivariate_design_controls(
                     let next_sweep = if sweep_step > 0 { sweep_val.saturating_add(1).clamp(2, 12) } else { sweep_val.saturating_sub(1).max(2) };
                     *ks = Some(next_sweep);
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
         MultivariateSpec::MultipleImputation { imputations_m, max_iters, seed, .. } => {
@@ -387,7 +387,7 @@ pub(super) fn render_multivariate_design_controls(
                 if let AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { imputations_m: m, .. }) = &mut next.kind {
                     *m = (*m as isize + step_m as isize).clamp(2, 50) as usize;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             let step_it = render_stepper_row(
                 ui,
@@ -405,7 +405,7 @@ pub(super) fn render_multivariate_design_controls(
                 if let AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { max_iters: it, .. }) = &mut next.kind {
                     *it = (*it as isize + step_it as isize * 5).clamp(5, 200) as usize;
                 }
-                intents.push_set_edit_params_draft(next);
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             ui.label(egui::RichText::new(format!("Deterministic PRNG seed: {seed}")).small().color(tokens.text_muted));
         }

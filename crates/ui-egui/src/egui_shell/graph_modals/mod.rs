@@ -29,7 +29,7 @@ use crate::i18n::{normalize_locale, tr};
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
-use super::{FrameInspectMeta, PendingUiIntents, Tokens};
+use super::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 use apply_style::render_apply_style_body;
 use bubble_plot::render_bubble_plot_body;
@@ -103,10 +103,11 @@ pub fn render_graph_modal(
         } else {
             reset_format_axes_session_state(state);
             reset_format_graph_local_drafts(state);
-            intents.push_dialog_button("cancel");
+            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
         }
     }
 
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
     let modal_resp = egui::Modal::new(egui::Id::unique(("egui_shell_graph_modal", widget_id))).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.set_min_width(inner_w);
         ui.set_max_width(inner_w);
@@ -143,6 +144,15 @@ pub fn render_graph_modal(
 
     modal_resp.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Dialog, true, title));
     let capture = finalize_egui_modal_response(ctx, &modal_resp, ModalCaptureSpec { widget_id, title, z_dialog: ZLayer::ModalDialog }, meta);
+    if !wants_kb_before
+        && !ctx.egui_wants_keyboard_input()
+        && !(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) && state.additional_ticks.open)
+        && crate::modal_predicates::evaluate_dialog_button_for_app(app, "ok").is_none_or(|e| e.enabled)
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+    {
+        let mut gctx = GraphModalCtx { app, tokens, locale, meta, intents, body_w };
+        commit_graph_modal_action(&mut gctx, state, "ok");
+    }
     GraphModalFrameReport {
         modal_open: true,
         dialog_rect_pt: capture.dialog_rect_pt,
@@ -238,7 +248,7 @@ fn render_dialog_top_strip(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &
                                 state.format_axes_pending_tab = Some(tab);
                                 let mut patch = Map::new();
                                 patch.insert(String::from("axes.target_axis"), Value::String(slug.to_owned()));
-                                gctx.intents.push_patch_active_dialog(patch);
+                                gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
                             }
                         } else {
                             state.format_axes_tab = tab;
@@ -311,7 +321,7 @@ fn render_dialog_footer(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut
             reset_format_axes_session_state(state);
             reset_format_graph_local_drafts(state);
             state.axis_ticks_error = None;
-            gctx.intents.push_dialog_button("cancel");
+            gctx.intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
         }
 
         let supports_apply = matches!(
@@ -423,11 +433,11 @@ fn commit_format_graph_heatmap(gctx: &mut GraphModalCtx<'_>, state: &mut GraphMo
     let fg = &gctx.app.canvas_dialogs.format_graph;
     let schema = FormatGraphSchema::detect(gctx.app);
     let Some(gid) = fg.graph_sheet_id.clone() else {
-        gctx.intents.push_dialog_button(action);
+        gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
         return;
     };
     if schema != FormatGraphSchema::Heatmap {
-        gctx.intents.push_dialog_button(action);
+        gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
         return;
     }
 
@@ -458,7 +468,7 @@ fn commit_format_graph_heatmap(gctx: &mut GraphModalCtx<'_>, state: &mut GraphMo
     };
 
     // Execute dialog button first so `FormatGraphState::commit_intents()` cannot overwrite explicit heatmap edits.
-    gctx.intents.push_dialog_button(action);
+    gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
 
     if let Some(clamp) = validated_clamp {
         let mut enc =
@@ -545,11 +555,11 @@ fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModa
             } else {
                 reset_format_axes_session_state(state);
                 state.axis_ticks_error = None;
-                gctx.intents.push_dialog_button(action);
+                gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
             }
         }
         _ => {
-            gctx.intents.push_dialog_button(action);
+            gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
         }
     }
 }

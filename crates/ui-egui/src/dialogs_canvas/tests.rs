@@ -326,7 +326,7 @@ mod r13_10_format_graph_unit_tests {
         // Patching orientation marks dirty and emits `"orientation"` in `graph.setSpec`.
         let mut patch = serde_json::Map::new();
         patch.insert(String::from("orientation"), json!("horizontal"));
-        fg.apply_field_patch(&patch).unwrap();
+        super::super::dialog_patch::patch_format_graph(&mut fg, &patch, &crate::i18n::LocalePreset::default()).unwrap();
         assert_eq!(fg.orientation, CartesianOrientation::Horizontal);
         assert!(fg.orientation_dirty);
 
@@ -370,7 +370,7 @@ mod r13_10_format_graph_unit_tests {
         let mut patch = serde_json::Map::new();
         patch.insert(String::from("show_symbols"), json!(false));
         patch.insert(String::from("replicate_lines"), json!("summary_center"));
-        fg.apply_field_patch(&patch).unwrap();
+        super::super::dialog_patch::patch_format_graph(&mut fg, &patch, &crate::i18n::LocalePreset::default()).unwrap();
         assert!(!fg.show_symbols);
         assert!(fg.show_symbols_dirty);
         assert_eq!(fg.replicate_lines, ReplicateLineMode::SummaryCenter);
@@ -433,7 +433,7 @@ mod r13_10_format_graph_unit_tests {
         patch.insert(String::from("bind_to_right_y2"), json!(false));
         patch.insert(String::from("offset_x_data"), json!(0.25));
         patch.insert(String::from("forest_show_pooled_diamond"), json!(true));
-        fg.apply_field_patch(&patch).unwrap();
+        super::super::dialog_patch::patch_format_graph(&mut fg, &patch, &crate::i18n::LocalePreset::default()).unwrap();
 
         let intents = fg.commit_intents();
         let spec_p = &intents.iter().find(|i| i.command_id == "graph.setSpec").unwrap().params;

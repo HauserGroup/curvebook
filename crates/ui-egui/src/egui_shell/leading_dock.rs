@@ -111,6 +111,7 @@ pub struct LeadingDockEguiState {
     pub hover_preview_active: bool,
     pub nav_pointer_hovered: bool,
     pub nested_collapsed_parents: BTreeSet<SheetId>,
+    pub scroll_to_sheet: Option<SheetId>,
     pub context_menu: Option<NavigatorContextMenuState>,
     pub delete_confirm: Option<NavigatorDeleteConfirmState>,
 }
@@ -132,6 +133,7 @@ impl Default for LeadingDockEguiState {
             hover_preview_active: false,
             nav_pointer_hovered: false,
             nested_collapsed_parents: BTreeSet::new(),
+            scroll_to_sheet: None,
             context_menu: None,
             delete_confirm: None,
         }
@@ -693,7 +695,7 @@ fn render_navigator_pane(
     let visible_ids = collect_visible_sheet_ids(app, state);
     handle_navigator_keyboard(ui, app, state, &ctx_in, &visible_ids, intents);
 
-    egui::ScrollArea::vertical().id_salt("leading_nav_scroll").auto_shrink([false, false]).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("leading_nav_scroll").animated(false).auto_shrink([false, false]).show(ui, |ui| {
         let row_w = (ui.available_width() - 12.0).max(96.0);
         let q = state.search_draft.trim().to_ascii_lowercase();
         let nested_mode = matches!(app.nav.nesting_mode, NavigatorNestingMode::NestedResultsUnderData);
@@ -1009,6 +1011,15 @@ fn render_navigator_row(
     let row_h = 26.0;
     let indent_px = (indent_depth.min(4) as f32) * 14.0;
 
+    if state.scroll_to_sheet.as_ref() == Some(&entry.sheet_id) {
+        let predicted = Rect::from_min_size(ui.cursor().min, Vec2::new(row_w, row_h));
+        ui.scroll_to_rect(predicted, Some(egui::Align::Center));
+        if !ui.ctx().will_discard() {
+            state.scroll_to_sheet = None;
+            ui.ctx().request_repaint();
+        }
+    }
+
     let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(row_w, row_h), if enabled { Sense::click_and_drag() } else { Sense::hover() })
     else {
         return;
@@ -1127,7 +1138,7 @@ fn render_navigator_row(
         begin_inline_rename(app, state, entry.sheet_id.clone());
     } else if resp.clicked() && enabled && state.dragging_sheet_id.is_none() {
         intents.push_engine("sheet.select", json!({ "sheet_id": entry.sheet_id.as_str(), "mode": "navigator" }));
-        intents.push_set_focus_pane(ActiveWorkspacePane::Navigator);
+        intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::Navigator });
     }
 
     let wid = format!("nav.sheet.{}", entry.sheet_id.as_str());
@@ -2508,6 +2519,11 @@ pub(crate) fn render_navigator_delete_confirm_modal(
         ModalCaptureSpec { widget_id: "dialog.nav_delete_confirm", title: &heading, z_dialog: ZLayer::ModalDialog },
         meta,
     );
+
+    if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        execute_delete = true;
+        close_confirm = true;
+    }
 
     if execute_delete {
         intents.push_engine("sheet.delete", json!({ "sheet_id": confirm.sheet_id.as_str(), "cascade": true }));
