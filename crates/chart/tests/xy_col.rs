@@ -813,3 +813,198 @@ fn model_equation_box_live_refresh_across_xy_and_column_graphs() {
     assert!(col_texts.contains("14.5"), "col_texts={col_texts}");
     assert!(col_texts.contains("3.25"), "col_texts={col_texts}");
 }
+
+#[test]
+fn auto_legend_stays_outside_plot_rect_for_dose_response_and_column_labels() {
+    fn legend_box_x_bounds(scene: &curvebook_chart::ChartScene) -> Option<(f64, f64)> {
+        scene.primitives.iter().find_map(|p| match p {
+            ScenePrimitive::Path { path, fill: Some(fill), stroke: Some(_), clip: None }
+                if fill.color == curvebook_palette::Rgba8::rgba(255, 255, 255, 235) =>
+            {
+                let mut min_x = f64::INFINITY;
+                let mut max_x = f64::NEG_INFINITY;
+                for cmd in &path.commands {
+                    match *cmd {
+                        PathCmd::MoveTo(pt) | PathCmd::LineTo(pt) => {
+                            min_x = min_x.min(pt.x);
+                            max_x = max_x.max(pt.x);
+                        }
+                        _ => {}
+                    }
+                }
+                (min_x.is_finite() && max_x.is_finite()).then_some((min_x, max_x))
+            }
+            _ => None,
+        })
+    }
+
+    // 1. XY dose-response curve with realistic series titles (>8 chars) on default 360x260 canvas.
+    let mut xy = XyTable::new(SubcolumnMode::Single, 3, 5).unwrap();
+    xy.data_sets[0].title = String::from("Wild-Type");
+    xy.data_sets[1].title = String::from("Variant R1");
+    xy.data_sets[2].title = String::from("Compound A (10 uM)");
+    for (row, x) in [-9.0, -8.0, -7.0, -6.0, -5.0].into_iter().enumerate() {
+        xy.x_cells[row] = vec![Cell::number(x)];
+        xy.data_sets[0].cells[row] = vec![Cell::number(10.0 + (row as f64) * 20.0)];
+        xy.data_sets[1].cells[row] = vec![Cell::number(12.0 + (row as f64) * 16.0)];
+        xy.data_sets[2].cells[row] = vec![Cell::number(8.0 + (row as f64) * 12.0)];
+    }
+    let ds = DataSheet::new("ds-dose", "Dose-Response", TableArchetype::Xy(xy)).unwrap();
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(ds.clone()).unwrap();
+    let mut graph = GraphSheet::new_uninitialized_for_data("g-dose", &ds).unwrap();
+    graph.spec.legend = curvebook_doc::LegendSpec { visible: true, position_pt: None, bordered: true };
+
+    let scene = compile_graph(&graph, &doc).unwrap();
+    let (bx0, bx1) = legend_box_x_bounds(&scene).expect("bordered legend rect");
+    assert!(
+        bx0 > scene.plot_rect_pt.right(),
+        "XY dose-response legend overlapped plot: legend=[{bx0:.1}, {bx1:.1}], plot_right={:.1}",
+        scene.plot_rect_pt.right()
+    );
+    assert!(bx1 <= scene.width_pt, "XY dose-response legend overflowed canvas: bx1={bx1:.1}, width={:.1}", scene.width_pt);
+    for expected in ["Wild-Type", "Variant R1", "Compound A (10 uM)"] {
+        let label_x = scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                ScenePrimitive::Text(t) if t.rich.plain_text() == expected => Some(t.anchor_pt.x),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing legend label {expected}"));
+        assert!(label_x > scene.plot_rect_pt.right(), "legend label {expected} overlapped plot: x={label_x:.1}");
+    }
+
+    // 2. Very long label still scales gently to stay outside-right without overlapping or truncating.
+    let long_label = "Compound A + 100 nM Inhibitor B";
+    graph.spec.series[2].legend_label = Some(String::from(long_label));
+    let long_scene = compile_graph(&graph, &doc).unwrap();
+    let (lbx0, lbx1) = legend_box_x_bounds(&long_scene).expect("bordered long legend rect");
+    assert!(
+        lbx0 > long_scene.plot_rect_pt.right(),
+        "long legend overlapped plot: legend=[{lbx0:.1}, {lbx1:.1}], plot_right={:.1}",
+        long_scene.plot_rect_pt.right()
+    );
+    assert!(lbx1 <= long_scene.width_pt, "long legend overflowed canvas: lbx1={lbx1:.1}, width={:.1}", long_scene.width_pt);
+    assert!(find_texts(&long_scene).iter().any(|t| t == long_label), "long legend label must not be truncated");
+
+    // 3. Column graph with multi-word group titles also keeps auto legend outside-right.
+    let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3).unwrap();
+    col.data_sets[0].title = String::from("Vehicle Control");
+    col.data_sets[1].title = String::from("Inhibitor 100 nM");
+    for c in 0..2 {
+        for r in 0..3 {
+            col.data_sets[c].cells[r][0] = Cell::number((c * 10 + r + 5) as f64);
+        }
+    }
+    let ds_col = DataSheet::new("ds-col-leg", "Groups", TableArchetype::Column(col)).unwrap();
+    doc.add_data_sheet(ds_col.clone()).unwrap();
+    let mut g_col = GraphSheet::new_uninitialized_for_data("g-col-leg", &ds_col).unwrap();
+    g_col.spec.legend = curvebook_doc::LegendSpec { visible: true, position_pt: None, bordered: true };
+    let col_scene = compile_graph(&g_col, &doc).unwrap();
+    let (cbx0, cbx1) = legend_box_x_bounds(&col_scene).expect("bordered column legend rect");
+    assert!(
+        cbx0 > col_scene.plot_rect_pt.right(),
+        "column legend overlapped plot: legend=[{cbx0:.1}, {cbx1:.1}], plot_right={:.1}",
+        col_scene.plot_rect_pt.right()
+    );
+    assert!(cbx1 <= col_scene.width_pt, "column legend overflowed canvas: cbx1={cbx1:.1}, width={:.1}", col_scene.width_pt);
+}
+
+#[test]
+fn auto_legend_respects_parts_of_whole_horizontal_overlays_grouped_and_y2() {
+    use curvebook_doc::{CartesianOrientation, GroupedTable, PartsOfWholeTable};
+
+    fn legend_box_x_bounds(scene: &curvebook_chart::ChartScene) -> Option<(f64, f64)> {
+        scene.primitives.iter().find_map(|p| match p {
+            ScenePrimitive::Path { path, fill: Some(fill), stroke: Some(_), clip: None }
+                if fill.color == curvebook_palette::Rgba8::rgba(255, 255, 255, 235) =>
+            {
+                let mut min_x = f64::INFINITY;
+                let mut max_x = f64::NEG_INFINITY;
+                for cmd in &path.commands {
+                    match *cmd {
+                        PathCmd::MoveTo(pt) | PathCmd::LineTo(pt) => {
+                            min_x = min_x.min(pt.x);
+                            max_x = max_x.max(pt.x);
+                        }
+                        _ => {}
+                    }
+                }
+                (min_x.is_finite() && max_x.is_finite()).then_some((min_x, max_x))
+            }
+            _ => None,
+        })
+    }
+
+    let mut doc = ProjectDocument::default();
+
+    // 1. Parts-of-Whole: formatted "Name (XX.X%)" legend must fit outside-right at full font size.
+    let mut pow = PartsOfWholeTable::new(1, 2).unwrap();
+    pow.slice_labels = vec![String::from("Responder"), String::from("Non-responder")];
+    pow.data_sets[0].cells = vec![vec![Cell::number(65.0)], vec![Cell::number(35.0)]];
+    let ds_pow = DataSheet::new("ds-pow", "Response", TableArchetype::PartsOfWhole(pow)).unwrap();
+    doc.add_data_sheet(ds_pow.clone()).unwrap();
+    let mut g_pow = GraphSheet::new_uninitialized_for_data("g-pow", &ds_pow).unwrap();
+    g_pow.spec.legend = curvebook_doc::LegendSpec { visible: true, position_pt: None, bordered: true };
+    let pow_scene = compile_graph(&g_pow, &doc).unwrap();
+    let (px0, px1) = legend_box_x_bounds(&pow_scene).expect("bordered parts-of-whole legend");
+    assert!(px0 > pow_scene.plot_rect_pt.right(), "PoW legend overlapped plot: [{px0:.1}, {px1:.1}] vs {:.1}", pow_scene.plot_rect_pt.right());
+    assert!(px1 <= pow_scene.width_pt, "PoW legend overflowed canvas: {px1:.1} > {:.1}", pow_scene.width_pt);
+
+    // 2. Grouped table with empty `spec.series` still reserves right margin for auto-built legend items.
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(1), 2, 2).unwrap();
+    grp.data_sets[0].title = String::from("Wild-Type");
+    grp.data_sets[1].title = String::from("Mutant K1");
+    for c in 0..2 {
+        for r in 0..2 {
+            grp.data_sets[c].cells[r][0] = Cell::number((c * 5 + r + 10) as f64);
+        }
+    }
+    let ds_grp = DataSheet::new("ds-grp-empty-series", "Grouped", TableArchetype::Grouped(grp)).unwrap();
+    doc.add_data_sheet(ds_grp.clone()).unwrap();
+    let mut g_grp = GraphSheet::new_uninitialized_for_data("g-grp-empty-series", &ds_grp).unwrap();
+    g_grp.spec.series.clear();
+    g_grp.spec.legend = curvebook_doc::LegendSpec { visible: true, position_pt: None, bordered: true };
+    let grp_scene = compile_graph(&g_grp, &doc).unwrap();
+    let (gx0, gx1) = legend_box_x_bounds(&grp_scene).expect("bordered grouped legend");
+    assert!(gx0 > grp_scene.plot_rect_pt.right(), "grouped legend overlapped plot: [{gx0:.1}, {gx1:.1}] vs {:.1}", grp_scene.plot_rect_pt.right());
+    assert!(gx1 <= grp_scene.width_pt, "grouped legend overflowed canvas: {gx1:.1} > {:.1}", grp_scene.width_pt);
+
+    // 3. Horizontal grouped chart with brackets/CLD offsets auto legend past the overlay band.
+    let mut g_horiz = GraphSheet::new_uninitialized_for_data("g-grp-horiz", &ds_grp).unwrap();
+    g_horiz.spec.orientation = CartesianOrientation::Horizontal;
+    g_horiz.spec.legend = curvebook_doc::LegendSpec { visible: true, position_pt: None, bordered: true };
+    let horiz_scene = compile_graph(&g_horiz, &doc).unwrap();
+    let (hx0, hx1) = legend_box_x_bounds(&horiz_scene).expect("bordered horizontal legend");
+    assert!(
+        hx0 > horiz_scene.plot_rect_pt.right(),
+        "horizontal legend overlapped plot: [{hx0:.1}, {hx1:.1}] vs {:.1}",
+        horiz_scene.plot_rect_pt.right()
+    );
+    assert!(hx1 <= horiz_scene.width_pt, "horizontal legend overflowed canvas: {hx1:.1} > {:.1}", horiz_scene.width_pt);
+
+    // 4. Dual-Y2 XY chart places auto legend outside-right past the Y2 axis band.
+    let mut xy = XyTable::new(SubcolumnMode::Single, 2, 3).unwrap();
+    xy.data_sets[0].title = String::from("Signal A");
+    xy.data_sets[1].title = String::from("Signal B");
+    for r in 0..3 {
+        xy.x_cells[r] = vec![Cell::number((r + 1) as f64)];
+        xy.data_sets[0].cells[r] = vec![Cell::number((r + 1) as f64 * 10.0)];
+        xy.data_sets[1].cells[r] = vec![Cell::number((r + 1) as f64 * 2.0)];
+    }
+    let ds_y2 = DataSheet::new("ds-y2-leg", "Dual Y2", TableArchetype::Xy(xy)).unwrap();
+    doc.add_data_sheet(ds_y2.clone()).unwrap();
+    let mut g_y2 = GraphSheet::new_uninitialized_for_data("g-y2-leg", &ds_y2).unwrap();
+    g_y2.spec.y2_axis = Some(curvebook_doc::AxisSpec::linear("Y2"));
+    g_y2.spec.series[1].bind_to_right_y2 = true;
+    g_y2.spec.legend = curvebook_doc::LegendSpec { visible: true, position_pt: None, bordered: true };
+    let y2_scene = compile_graph(&g_y2, &doc).unwrap();
+    let (yx0, yx1) = legend_box_x_bounds(&y2_scene).expect("bordered dual-Y2 legend");
+    assert!(
+        yx0 >= y2_scene.plot_rect_pt.right() + 48.0,
+        "dual-Y2 legend overlapped plot or Y2 band: [{yx0:.1}, {yx1:.1}], plot_right={:.1}",
+        y2_scene.plot_rect_pt.right()
+    );
+    assert!(yx1 <= y2_scene.width_pt, "dual-Y2 legend overflowed canvas: {yx1:.1} > {:.1}", y2_scene.width_pt);
+}

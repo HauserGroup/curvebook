@@ -72,13 +72,18 @@ struct ClipRegistry {
 }
 
 impl ClipRegistry {
-    fn register(&mut self, rect: RectPt, prec: usize) -> Result<String, SvgError> {
+    fn validate_rect(rect: RectPt) -> Result<(), SvgError> {
         if !rect.x.is_finite() || !rect.y.is_finite() || !rect.width.is_finite() || !rect.height.is_finite() {
             return Err(SvgError::InvalidScene { message: String::from("clip rectangle must have finite coordinates and extents") });
         }
         if rect.width < 0.0 || rect.height < 0.0 {
             return Err(SvgError::InvalidScene { message: String::from("clip rectangle dimensions must be non-negative") });
         }
+        Ok(())
+    }
+
+    fn register(&mut self, rect: RectPt, prec: usize) -> Result<String, SvgError> {
+        Self::validate_rect(rect)?;
         let x = format_scalar(rect.x, prec)?;
         let y = format_scalar(rect.y, prec)?;
         let width = format_scalar(rect.width, prec)?;
@@ -274,7 +279,7 @@ fn write_path_element(
     let active_stroke = stroke.filter(|s| s.color.a > 0 && s.width_pt > 0.0);
     if active_fill.is_none() && active_stroke.is_none() {
         if let Some(rect) = clip {
-            let _ = ctx.clips.register(rect, ctx.prec)?;
+            ClipRegistry::validate_rect(rect)?;
         }
         return Ok(());
     }
@@ -583,7 +588,7 @@ fn write_editable_text(ctx: &mut SvgRenderCtx<'_>, text: &PositionedText) -> Res
             if let Some(c) = span.color {
                 let span_hex = c.to_hex_rgb();
                 let _ = write!(ctx.body, " fill=\"{span_hex}\"");
-                if c.a < u8::MAX {
+                if c.a != text.color.a {
                     let span_op = format_opacity(c.a, ctx.opacity_prec)?;
                     let _ = write!(ctx.body, " fill-opacity=\"{span_op}\"");
                 }

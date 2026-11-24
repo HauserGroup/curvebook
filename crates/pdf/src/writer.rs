@@ -1144,6 +1144,7 @@ impl StreamCtx<'_> {
         }
         let span_color = span.color.unwrap_or(state.base_color);
         if span_color.a == 0 {
+            self.close_selectable_block(state);
             state.pen_u += measure_span_width_pt(span, state.font_size_pt, self.embedded_info, self.embedded_ttf);
             return Ok(());
         }

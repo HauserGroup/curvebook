@@ -683,3 +683,38 @@ fn pdf17_prunes_unreferenced_fonts_and_omits_font_dict_when_outlined() {
         assert!(!ttf_page.contains(unused), "unreferenced Core-14 font {unused} leaked into Page /Resources:\n{ttf_page}");
     }
 }
+
+#[test]
+fn pdf_selectable_invisible_midline_span_preserves_cursor_advance() {
+    use curvebook_text::RichSpan;
+
+    let mut scene = ChartScene::new("pdf-invis-span", "Invisible Span Advance", 240.0, 100.0, Some(Rgba8::WHITE));
+    let mut rich = RichText::default();
+    rich.spans.push(RichSpan::plain("Left"));
+    let mut gap = RichSpan::plain("HIDDEN_GAP");
+    gap.color = Some(Rgba8::rgba(0, 0, 0, 0));
+    rich.spans.push(gap);
+    rich.spans.push(RichSpan::plain("Right"));
+
+    scene.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich,
+        anchor_pt: PointPt::new(20.0, 50.0),
+        anchor: TextAnchor::Start,
+        font_size_pt: 12.0,
+        rotation_deg: 0.0,
+        color: Rgba8::BLACK,
+    }));
+
+    let opts = PdfExportOptions { version: PdfVersion::Pdf17, compress_streams: false, outline_text: false, ..PdfExportOptions::default() };
+    let bytes = render_pdf(&scene, &opts).expect("render pdf");
+    let parsed = parse_pdf_strict(&bytes, b"%PDF-1.7\n").expect("strict pdf parse");
+    let stream = String::from_utf8(parsed.streams[0].2.clone()).expect("UTF-8 stream");
+
+    assert!(!stream.contains("HIDDEN_GAP"), "0-alpha span must not emit literal text:\n{stream}");
+    let (_, after_left) = stream.split_once("(Left) Tj").expect("Left literal");
+    let (between, _) = after_left.split_once("(Right) Tj").expect("Right literal");
+    assert!(
+        between.contains("ET\n") && between.contains("BT\n") && between.contains(" Tm\n"),
+        "invisible mid-line span must close BT and emit a new Tm before subsequent text:\n{stream}"
+    );
+}

@@ -601,3 +601,39 @@ fn svg_interop_emits_xlink_and_suppresses_degenerate_strokes_and_alpha() {
         assert!(!svg.contains("Ghost Label"), "0-alpha text must be skipped cleanly");
     }
 }
+
+#[test]
+fn svg_editable_tspan_overrides_parent_opacity_and_skips_orphan_clip_paths() {
+    use curvebook_text::{RichSpan, RichText};
+
+    let mut scene = ChartScene::new("opacity-clip", "Opacity & Clip", 200.0, 120.0, Some(Rgba8::WHITE));
+    // 1. Opaque <tspan> inside a 0-alpha parent <text> must explicitly reset fill-opacity="1.000".
+    let mut rich = RichText::default();
+    let mut visible_span = RichSpan::plain("VisibleSpan");
+    visible_span.color = Some(Rgba8::rgba(255, 0, 0, 255));
+    rich.spans.push(visible_span);
+    scene.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich,
+        anchor_pt: PointPt::new(20.0, 40.0),
+        font_size_pt: 10.0,
+        anchor: TextAnchor::Start,
+        color: Rgba8::rgba(0, 0, 0, 0),
+        rotation_deg: 0.0,
+    }));
+
+    // 2. Invisible clipped path must NOT register an orphan <clipPath> in <defs>.
+    scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::line(PointPt::new(10.0, 80.0), PointPt::new(190.0, 80.0)),
+        fill: None,
+        stroke: Some(StrokePaint::solid(Rgba8::BLACK, 0.0)),
+        clip: Some(RectPt::new(10.0, 10.0, 180.0, 100.0)),
+    });
+
+    let svg = render_svg(&scene, &SvgExportOptions { outline_text: false, ..SvgExportOptions::default() }).expect("render editable svg");
+    validate_svg_structure(&svg).expect("valid svg");
+    assert!(
+        svg.contains("fill=\"#FF0000\" fill-opacity=\"1.000\">VisibleSpan</tspan>"),
+        "opaque tspan inside 0-alpha text must reset fill-opacity:\n{svg}"
+    );
+    assert!(!svg.contains("<clipPath"), "skipped invisible path must not leave an orphan <clipPath>:\n{svg}");
+}

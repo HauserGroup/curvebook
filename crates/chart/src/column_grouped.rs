@@ -25,7 +25,8 @@ use crate::scene::{
 use crate::xy::{
     AxisErrorTarget, ChromeAxes, LegendItem, SegmentedAxis, compute_central_tendency, compute_raw_error_bounds, configure_plot_rect,
     emit_directional_error_bar, expand_doc_text, format_point_value, is_log_like, primary_info_sheet_id, render_cartesian_chrome,
-    render_cartesian_chrome_full, render_legend_and_annotations, resolve_data_sheet, stroke_with_dash, summarize_subcells,
+    render_cartesian_chrome_full, render_legend_and_annotations, render_legend_and_annotations_with_offset, resolve_data_sheet, stroke_with_dash,
+    summarize_subcells,
 };
 
 const KDE_SAMPLES: usize = 65;
@@ -123,7 +124,10 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
     let resolved_cld = resolve_cld_overlay(graph, doc, &slot_metas, &mut scene.warnings);
     let bracket_margin_pt = if active_bracket_est > 0 { ((active_bracket_est.min(4) as f64) * 16.0).min(64.0) } else { 0.0 };
     let cld_margin_pt = if resolved_cld.is_some() { cld_reserved_top_margin_pt(&graph.spec) } else { 0.0 };
-    configure_plot_rect(graph, scene, has_y2, bracket_margin_pt + cld_margin_pt);
+    let legend_items = primary_opt.map(|primary| build_legend_items(graph, primary)).unwrap_or_default();
+    let info_id = primary_info_sheet_id(doc, &graph.spec.primary_source_sheet_id);
+    let legend_box_w = crate::scales::auto_legend_box_width_pt(&graph.spec.legend, legend_items.iter().map(|it| it.label.as_str()), doc, info_id);
+    configure_plot_rect(graph, scene, has_y2, bracket_margin_pt + cld_margin_pt, legend_box_w);
 
     let Some(primary) = primary_opt else {
         render_empty_axes(graph, doc, scene, has_y2);
@@ -183,7 +187,6 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
     if draw_brackets {
         render_pairwise_brackets(scene, graph, doc, &bounds);
     }
-    let legend_items = build_legend_items(graph, primary);
     render_legend_and_annotations(scene, graph, doc, &legend_items)?;
     Ok(())
 }
@@ -229,7 +232,10 @@ fn compile_horizontal_column_or_grouped(
         items.iter().map(|it| (it.group_key, it.match_label.as_str(), it.alt_label.as_str(), item_summary_value(it), it.x_pos)).collect();
     let resolved_cld = resolve_cld_overlay(graph, doc, &slot_metas, &mut scene.warnings);
 
-    configure_plot_rect(graph, scene, has_y2, 0.0);
+    let legend_items = primary_opt.map(|primary| build_legend_items(graph, primary)).unwrap_or_default();
+    let info_id = primary_info_sheet_id(doc, &graph.spec.primary_source_sheet_id);
+    let legend_box_w = crate::scales::auto_legend_box_width_pt(&graph.spec.legend, legend_items.iter().map(|it| it.label.as_str()), doc, info_id);
+    configure_plot_rect(graph, scene, has_y2, 0.0, legend_box_w);
     let has_y_title = !graph.spec.y_axis.title.trim().is_empty();
     let max_cat_w_pt = tick_positions.iter().map(|(_, lbl)| measure_text_pt(&parse_markup(lbl), 8.0).width_pt).fold(0.0_f64, f64::max);
     if max_cat_w_pt > 0.0 {
@@ -242,10 +248,13 @@ fn compile_horizontal_column_or_grouped(
     }
     let extra_right = (if active_bracket_est > 0 { ((active_bracket_est.min(4) as f64) * 18.0).min(72.0) } else { 0.0 })
         + if resolved_cld.is_some() { 24.0 } else { 0.0 };
-    if extra_right > 0.0 {
+    let applied_extra_right = if extra_right > 0.0 {
         let shrink = extra_right.min((scene.plot_rect_pt.width - 40.0).max(0.0));
         scene.plot_rect_pt.width -= shrink;
-    }
+        shrink
+    } else {
+        0.0
+    };
 
     let Some(primary) = primary_opt else {
         let r = scene.plot_rect_pt;
@@ -314,8 +323,7 @@ fn compile_horizontal_column_or_grouped(
         render_horizontal_pairwise_brackets(scene, graph, doc, &horiz_bounds);
     }
 
-    let legend_items = build_legend_items(graph, primary);
-    render_legend_and_annotations(scene, graph, doc, &legend_items)?;
+    render_legend_and_annotations_with_offset(scene, graph, doc, &legend_items, applied_extra_right)?;
     Ok(())
 }
 

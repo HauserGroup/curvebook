@@ -196,6 +196,8 @@ fn compile_bubble_scatter(
     let y_pad = (y_max - y_min).max(1.0) * 0.08;
     let has_colorbar = continuous_ramp.is_some();
     let x_cats_opt = x_is_cat.then(|| x_levels.iter().enumerate().map(|(i, lbl)| (i as f64, lbl.clone())).collect::<Vec<_>>());
+    let info_id = doc.paired_info_sheet_id(&graph.spec.primary_source_sheet_id);
+    let legend_box_width_pt = crate::scales::auto_legend_box_width_pt(&graph.spec.legend, cat_levels.iter().map(String::as_str), doc, info_id);
     let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
         scene,
         graph,
@@ -206,7 +208,7 @@ fn compile_bubble_scatter(
             y2_bounds: None,
             cat_x: x_cats_opt.as_deref(),
             cat_y: None,
-            margins: PlotMarginConfig { has_legend: !cat_levels.is_empty(), has_colorbar, ..PlotMarginConfig::default() },
+            margins: PlotMarginConfig { has_legend: !cat_levels.is_empty(), legend_box_width_pt, has_colorbar, ..PlotMarginConfig::default() },
         },
     );
 
@@ -1927,6 +1929,9 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     if frame_graph.spec.y_axis.title.trim().is_empty() || frame_graph.spec.y_axis.title == "Y" {
         frame_graph.spec.y_axis.title = String::from("-log10(P)");
     }
+    let info_id = doc.paired_info_sheet_id(&frame_graph.spec.primary_source_sheet_id);
+    let volcano_legend_labels = ["Up-regulated", "Down-regulated", "Not significant"];
+    let legend_box_width_pt = crate::scales::auto_legend_box_width_pt(&frame_graph.spec.legend, volcano_legend_labels, doc, info_id);
     let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
         scene,
         &frame_graph,
@@ -1937,7 +1942,7 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
             y2_bounds: None,
             cat_x: None,
             cat_y: None,
-            margins: PlotMarginConfig { has_legend: true, ..PlotMarginConfig::default() },
+            margins: PlotMarginConfig { has_legend: true, legend_box_width_pt, ..PlotMarginConfig::default() },
         },
     );
     let r = scene.plot_rect_pt;

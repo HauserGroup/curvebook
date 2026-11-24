@@ -175,7 +175,13 @@ pub(crate) fn primary_info_sheet_id<'a>(doc: &'a ProjectDocument, primary_data_i
 }
 
 /// Configure `scene.plot_rect_pt` with dynamic margins accounting for title, axis titles, Y2, brackets, and legend.
-pub(crate) fn configure_plot_rect(graph: &GraphSheet, scene: &mut ChartScene, has_y2: bool, top_bracket_extra_pt: f64) {
+pub(crate) fn configure_plot_rect(
+    graph: &GraphSheet,
+    scene: &mut ChartScene,
+    has_y2: bool,
+    top_bracket_extra_pt: f64,
+    auto_legend_box_w_pt: Option<f64>,
+) {
     let w = scene.width_pt;
     let h = scene.height_pt;
     let has_title = !graph.spec.title.trim().is_empty();
@@ -184,19 +190,24 @@ pub(crate) fn configure_plot_rect(graph: &GraphSheet, scene: &mut ChartScene, ha
     let y2_title_len = graph.spec.y2_axis.as_ref().map_or(0, |a| a.title.trim().len());
 
     let left_base: f64 = if has_y_title { 56.0 } else { 42.0 };
-    let right_base: f64 = if has_y2 || y2_title_len > 0 {
-        56.0
-    } else if graph.spec.legend.visible && graph.spec.legend.position_pt.is_none() && !graph.spec.series.is_empty() {
-        86.0
-    } else {
-        20.0
+    let has_right_y2 = has_y2 || y2_title_len > 0;
+    let right_base: f64 = match (has_right_y2, auto_legend_box_w_pt) {
+        (true, Some(box_w)) => 48.0 + box_w + 12.0,
+        (true, None) => 56.0,
+        (false, Some(box_w)) => (box_w + 12.0).max(86.0),
+        (false, None) => 20.0,
     };
     let top_base: f64 = if has_title { 32.0 } else { 18.0 } + top_bracket_extra_pt.max(0.0);
     let rot_extra: f64 = if graph.spec.x_axis.tick_angle_deg.abs() > 15.0 { 16.0 } else { 0.0 };
     let bottom_base: f64 = if has_x_title { 44.0 } else { 28.0 } + rot_extra;
 
     let left = left_base.min(w * 0.28);
-    let right = right_base.min(w * 0.30);
+    let max_right = match (has_right_y2, auto_legend_box_w_pt.is_some()) {
+        (true, true) => w * 0.48,
+        (false, true) => w * 0.42,
+        _ => w * 0.30,
+    };
+    let right = right_base.min(max_right);
     let top = top_base.min(h * 0.42);
     let bottom = bottom_base.min(h * 0.30);
 
@@ -1031,12 +1042,33 @@ pub(crate) fn render_legend_and_annotations(
     doc: &ProjectDocument,
     legend_items: &[LegendItem],
 ) -> Result<(), ChartError> {
+    render_legend_and_annotations_with_offset(scene, graph, doc, legend_items, 0.0)
+}
+
+pub(crate) fn render_legend_and_annotations_with_offset(
+    scene: &mut ChartScene,
+    graph: &GraphSheet,
+    doc: &ProjectDocument,
+    legend_items: &[LegendItem],
+    outside_right_offset_pt: f64,
+) -> Result<(), ChartError> {
     let info_id = primary_info_sheet_id(doc, &graph.spec.primary_source_sheet_id);
     let mut budget = crate::scales::AnnotationBudget::default();
     crate::scales::render_annotations_with_budget(&graph.spec.annotations, doc, info_id, &mut budget, scene)?;
     if graph.spec.legend.visible && !legend_items.is_empty() {
         let entries: Vec<crate::scales::LegendEntry> = legend_items.iter().map(legend_item_to_entry).collect();
-        crate::scales::render_legend_with_placement(&graph.spec.legend, &entries, doc, info_id, true, scene);
+        let has_right_y2 = graph.spec.y2_axis.is_some()
+            || graph.spec.series.iter().any(|s| s.bind_to_right_y2)
+            || matches!(graph.spec.frame_preset, FramePreset::DualYSecondaryRight);
+        let y2_offset = if has_right_y2 { 48.0 } else { 0.0 };
+        crate::scales::render_legend_with_placement(
+            &graph.spec.legend,
+            &entries,
+            doc,
+            info_id,
+            crate::scales::LegendPlacement { outside_right: true, outside_right_offset_pt: outside_right_offset_pt.max(0.0) + y2_offset },
+            scene,
+        );
     }
     Ok(())
 }
@@ -1433,9 +1465,10 @@ pub fn compile_xy_graph(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
 
     let has_y2_series = graph.spec.series.iter().any(|s| s.bind_to_right_y2);
     let has_y2 = graph.spec.y2_axis.is_some() || has_y2_series || matches!(graph.spec.frame_preset, FramePreset::DualYSecondaryRight);
-    configure_plot_rect(graph, scene, has_y2, 0.0);
-
     let extracted = extract_all_xy_series(graph, doc, &mut scene.warnings);
+    let info_id = primary_info_sheet_id(doc, &graph.spec.primary_source_sheet_id);
+    let legend_box_w = crate::scales::auto_legend_box_width_pt(&graph.spec.legend, extracted.iter().map(|d| d.label.as_str()), doc, info_id);
+    configure_plot_rect(graph, scene, has_y2, 0.0, legend_box_w);
     let (x_vals, y_vals, y2_vals) = collect_xy_domain_values(&graph.spec, &extracted);
     let has_bar_y =
         graph.spec.series.iter().any(|s| !s.bind_to_right_y2 && s.show_raw_data && matches!(s.gdo, GraphicalDataObject::BarWithReplicates { .. }));

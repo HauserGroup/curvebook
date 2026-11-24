@@ -2806,17 +2806,59 @@ fn entry_from_gdo(label: String, gdo: &curvebook_doc::GraphicalDataObject, fallb
     }
 }
 
+const LEGEND_FONT_SIZE_PT: f64 = 8.5;
+const LEGEND_ROW_H_PT: f64 = 13.0;
+const LEGEND_SWATCH_W_PT: f64 = 18.0;
+const LEGEND_PAD_PT: f64 = 6.0;
+const LEGEND_SWATCH_TEXT_GAP_PT: f64 = 6.0;
+const LEGEND_OUTSIDE_GAP_PT: f64 = 8.0;
+const LEGEND_OUTSIDE_RIGHT_BUFFER_PT: f64 = 2.0;
+
+fn legend_box_width_for_text(max_text_w: f64) -> f64 {
+    LEGEND_PAD_PT * 2.0 + LEGEND_SWATCH_W_PT + LEGEND_SWATCH_TEXT_GAP_PT + max_text_w
+}
+
+/// Measure the auto-placed legend box width (in points) for `labels` after expanding template hooks.
+/// Returns `None` if `legend` is hidden, has an explicit user `position_pt`, or `labels` is empty.
+pub(crate) fn auto_legend_box_width_pt<'a>(
+    legend: &LegendSpec,
+    labels: impl IntoIterator<Item = &'a str>,
+    doc: &ProjectDocument,
+    info_id: Option<&SheetId>,
+) -> Option<f64> {
+    if !legend.visible || legend.position_pt.is_some() {
+        return None;
+    }
+    let mut count = 0usize;
+    let mut max_text_w = 12.0_f64;
+    for label in labels {
+        count += 1;
+        let expanded = resolve_template_hooks_with_info(label, doc, info_id);
+        let rich = parse_markup(&expanded);
+        max_text_w = max_text_w.max(measure_text_pt(&rich, LEGEND_FONT_SIZE_PT).width_pt);
+    }
+    (count > 0).then(|| legend_box_width_for_text(max_text_w))
+}
+
+/// Placement hints for automatic figure legend layout.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LegendPlacement {
+    pub outside_right: bool,
+    pub outside_right_offset_pt: f64,
+}
+
 /// Render a figure legend from `legend` and `entries` into `scene`.
 pub fn render_legend(legend: &LegendSpec, entries: &[LegendEntry], doc: &ProjectDocument, primary_id: Option<&SheetId>, scene: &mut ChartScene) {
     let info_id = resolve_paired_info_id(doc, primary_id);
-    render_legend_with_placement(legend, entries, doc, info_id, false, scene);
+    render_legend_with_placement(legend, entries, doc, info_id, LegendPlacement::default(), scene);
 }
 
-fn auto_legend_origin(scene: &ChartScene, box_w: f64, place_outside_right_if_room: bool) -> (f64, f64) {
+fn auto_legend_origin(scene: &ChartScene, box_w: f64, placement: LegendPlacement) -> (f64, f64) {
     let r = scene.plot_rect_pt;
-    if place_outside_right_if_room && scene.width_pt - r.right() >= box_w + 10.0 {
-        (r.right() + 8.0, r.y)
-    } else if place_outside_right_if_room {
+    let start_x = r.right() + placement.outside_right_offset_pt.max(0.0) + LEGEND_OUTSIDE_GAP_PT;
+    if placement.outside_right && scene.width_pt - start_x + 0.5 >= box_w + LEGEND_OUTSIDE_RIGHT_BUFFER_PT {
+        (start_x, r.y)
+    } else if placement.outside_right {
         ((r.right() - box_w - 4.0).max(r.x + 2.0), r.y + 4.0)
     } else {
         ((r.right() - box_w - 6.0).max(r.x + 4.0), r.y + 6.0)
@@ -2828,16 +2870,16 @@ pub(crate) fn render_legend_with_placement(
     entries: &[LegendEntry],
     doc: &ProjectDocument,
     info_id: Option<&SheetId>,
-    place_outside_right_if_room: bool,
+    placement: LegendPlacement,
     scene: &mut ChartScene,
 ) {
     if !legend.visible || entries.is_empty() {
         return;
     }
-    let font_size = 8.5_f64;
-    let row_h = 13.0_f64;
-    let swatch_w = 18.0_f64;
-    let pad = 6.0_f64;
+    let mut font_size = LEGEND_FONT_SIZE_PT;
+    let mut row_h = LEGEND_ROW_H_PT;
+    let swatch_w = LEGEND_SWATCH_W_PT;
+    let pad = LEGEND_PAD_PT;
 
     let mut parsed_labels = Vec::with_capacity(entries.len());
     let mut max_text_w = 12.0_f64;
@@ -2848,7 +2890,20 @@ pub(crate) fn render_legend_with_placement(
         parsed_labels.push(rich);
     }
 
-    let box_w = pad * 2.0 + swatch_w + 6.0 + max_text_w;
+    let mut box_w = legend_box_width_for_text(max_text_w);
+    if placement.outside_right && legend.position_pt.is_none() {
+        let avail_right = scene.width_pt - (scene.plot_rect_pt.right() + placement.outside_right_offset_pt.max(0.0));
+        let max_outside_box_w = avail_right - (LEGEND_OUTSIDE_GAP_PT + LEGEND_OUTSIDE_RIGHT_BUFFER_PT);
+        let chrome_w = LEGEND_PAD_PT * 2.0 + LEGEND_SWATCH_W_PT + LEGEND_SWATCH_TEXT_GAP_PT;
+        if box_w > max_outside_box_w && max_outside_box_w > chrome_w + 12.0 {
+            let target_text_w = (max_outside_box_w - chrome_w - 0.5).max(12.0);
+            let scale = (target_text_w / max_text_w).clamp(0.65, 1.0);
+            font_size = (LEGEND_FONT_SIZE_PT * scale).max(5.5);
+            row_h = (LEGEND_ROW_H_PT * scale).max(9.5);
+            max_text_w = parsed_labels.iter().map(|rich| measure_text_pt(rich, font_size).width_pt).fold(12.0_f64, f64::max);
+            box_w = legend_box_width_for_text(max_text_w);
+        }
+    }
     let box_h = pad * 2.0 + (entries.len() as f64) * row_h;
     let (bx, by) = match legend.position_pt {
         Some((px, py)) if px.is_finite() && py.is_finite() => (px, py),
@@ -2857,9 +2912,9 @@ pub(crate) fn render_legend_with_placement(
                 "non_finite_legend_position",
                 format!("ignored non-finite legend position ({px}, {py}); placed automatically"),
             ));
-            auto_legend_origin(scene, box_w, place_outside_right_if_room)
+            auto_legend_origin(scene, box_w, placement)
         }
-        None => auto_legend_origin(scene, box_w, place_outside_right_if_room),
+        None => auto_legend_origin(scene, box_w, placement),
     };
     let box_rect = RectPt::new(bx, by, box_w, box_h);
 

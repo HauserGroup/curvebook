@@ -30,6 +30,7 @@ pub(crate) struct PlotMarginConfig {
     pub extra_left_pt: f64,
     pub extra_right_pt: f64,
     pub has_legend: bool,
+    pub legend_box_width_pt: Option<f64>,
     pub has_colorbar: bool,
     pub suppress_y_axis_labels: bool,
 }
@@ -42,6 +43,7 @@ impl Default for PlotMarginConfig {
             extra_left_pt: 0.0,
             extra_right_pt: 0.0,
             has_legend: false,
+            legend_box_width_pt: None,
             has_colorbar: false,
             suppress_y_axis_labels: false,
         }
@@ -156,11 +158,11 @@ pub(crate) fn update_plot_rect_for_labels(scene: &mut ChartScene, spec: &GraphSp
     let right_legend: f64 = if cfg.has_colorbar {
         76.0
     } else if cfg.has_legend && spec.legend.visible && spec.legend.position_pt.is_none() {
-        86.0
+        cfg.legend_box_width_pt.map_or(86.0, |box_w| (box_w + 12.0).max(86.0))
     } else {
         18.0
     };
-    let max_right = if cfg.extra_right_pt > 0.0 { scene.width_pt * 0.44 } else { scene.width_pt * 0.34 };
+    let max_right = if cfg.extra_right_pt > 0.0 || cfg.legend_box_width_pt.is_some() { scene.width_pt * 0.44 } else { scene.width_pt * 0.34 };
     let right = (right_legend + cfg.extra_right_pt.max(0.0)).min(max_right);
 
     let x_title_space = if !spec.x_axis.title.trim().is_empty() { 15.0 } else { 0.0 };
@@ -315,7 +317,14 @@ pub(crate) fn draw_legend_entries(scene: &mut ChartScene, spec: &GraphSpec, entr
         })
         .collect();
     let info_id = doc.paired_info_sheet_id(&spec.primary_source_sheet_id);
-    crate::scales::render_legend_with_placement(&spec.legend, &scaled, doc, info_id, true, scene);
+    crate::scales::render_legend_with_placement(
+        &spec.legend,
+        &scaled,
+        doc,
+        info_id,
+        crate::scales::LegendPlacement { outside_right: true, outside_right_offset_pt: 0.0 },
+        scene,
+    );
 }
 
 pub(crate) fn draw_colorbar(scene: &mut ChartScene, ramp: &ColorRamp, min_v: f64, max_v: f64, title: &str, bar_rect: RectPt) {
@@ -579,6 +588,8 @@ fn compile_survival(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Chart
     let extra_bottom = if show_nar { 20.0 + (cohorts.len() as f64) * 13.0 } else { 0.0 };
     let max_cohort_lbl_w = if show_nar { cohorts.iter().map(|c| text_metrics(&c.label, 8.0).width_pt + 10.0).fold(0.0_f64, f64::max) } else { 0.0 };
 
+    let info_id = doc.paired_info_sheet_id(&graph.spec.primary_source_sheet_id);
+    let legend_box_width_pt = crate::scales::auto_legend_box_width_pt(&graph.spec.legend, cohorts.iter().map(|c| c.label.as_str()), doc, info_id);
     let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
         scene,
         graph,
@@ -592,7 +603,8 @@ fn compile_survival(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Chart
             margins: PlotMarginConfig {
                 extra_bottom_pt: extra_bottom,
                 extra_left_pt: max_cohort_lbl_w.saturating_sub_nonneg(36.0),
-                has_legend: cohorts.len() > 1,
+                has_legend: !cohorts.is_empty(),
+                legend_box_width_pt,
                 ..PlotMarginConfig::default()
             },
         },
@@ -1366,6 +1378,8 @@ fn compile_contingency(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
     let n_cats = mat.category_labels.len().max(1);
     let x_cat_positions: Vec<(f64, String)> = mat.category_labels.iter().enumerate().map(|(idx, lbl)| ((idx as f64) + 0.5, lbl.clone())).collect();
 
+    let info_id = doc.paired_info_sheet_id(&graph.spec.primary_source_sheet_id);
+    let legend_box_width_pt = crate::scales::auto_legend_box_width_pt(&graph.spec.legend, mat.series_labels.iter().map(String::as_str), doc, info_id);
     let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
         scene,
         graph,
@@ -1376,7 +1390,7 @@ fn compile_contingency(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
             y2_bounds: None,
             cat_x: Some(&x_cat_positions),
             cat_y: None,
-            margins: PlotMarginConfig { has_legend: !mat.series_labels.is_empty(), ..PlotMarginConfig::default() },
+            margins: PlotMarginConfig { has_legend: !mat.series_labels.is_empty(), legend_box_width_pt, ..PlotMarginConfig::default() },
         },
     );
 
@@ -1587,13 +1601,6 @@ fn compile_parts_of_whole(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut
         return Ok(());
     }
 
-    let _ = update_plot_rect_for_labels(
-        scene,
-        &graph.spec,
-        &[],
-        PlotMarginConfig { has_legend: true, suppress_y_axis_labels: true, ..PlotMarginConfig::default() },
-    );
-
     let mut legend_entries = Vec::with_capacity(slices.len());
     for (idx, slice) in slices.iter().enumerate() {
         let color = graph.spec.palette.color_at(idx);
@@ -1606,6 +1613,16 @@ fn compile_parts_of_whole(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut
             is_line: false,
         });
     }
+
+    let info_id = doc.paired_info_sheet_id(&graph.spec.primary_source_sheet_id);
+    let legend_box_width_pt =
+        crate::scales::auto_legend_box_width_pt(&graph.spec.legend, legend_entries.iter().map(|e| e.label.as_str()), doc, info_id);
+    let _ = update_plot_rect_for_labels(
+        scene,
+        &graph.spec,
+        &[],
+        PlotMarginConfig { has_legend: true, legend_box_width_pt, suppress_y_axis_labels: true, ..PlotMarginConfig::default() },
+    );
 
     match layout_mode {
         PartsOfWholeLayout::Pie => render_pie_or_donut(scene, &graph.spec, &slices, 0.0, false),
