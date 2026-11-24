@@ -35,7 +35,7 @@
       </nav>
     </header>
     <div class="version-banner" role="note" aria-label="Documentation version">
-      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-23 (commit <code>4964288a03</code>)</span>
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>2dc1679162</code>)</span>
       <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
     </div>
     <main id="main" tabindex="-1">
@@ -179,7 +179,7 @@
 <hr>
 <h2 id="known-issues" tabindex="-1">Known Issues &amp; Beta Scope</h2>
 <ul>
-<li><strong>Supported Interfaces &amp; Verification Boundary:</strong> The native <code>egui</code> desktop GUI (<code>curvebook</code>) is a supported CurveBook interface alongside <code>curvebook-cli</code> and <code>curvebook-cli mcp</code> (the Alpha <em>&quot;GUI is pre-alpha&quot;</em> warning no longer applies). Automated <code>R15</code> and <code>R13</code> <code>EguiHumanPathDriver</code> / <code>egui_kittest</code> desktop suites verify interactive widget, menu, dialog, and canvas parity across the automated desktop workflows (<code>R10.25</code> Beta gate), while recorded interactive OS walkthroughs (<code>R10.13</code> macOS/browser walkthroughs and <code>R10.24</code> cross-OS Windows/Linux smoke QA) are <strong>1.0</strong> release-gate verification. The FreeBSD <code>x86_64</code> package (<code>curvebook-&lt;version&gt;-freebsd-x86_64.tar.gz</code>) is shipped as a <strong>preview</strong> (<code>R10.24</code>, <code>R8.5</code>).</li>
+<li><strong>Supported Interfaces &amp; Verification Boundary:</strong> The native <code>egui</code> desktop GUI (<code>curvebook</code>) is a supported CurveBook interface alongside <code>curvebook-cli</code> and <code>curvebook-cli mcp</code> (the Alpha <em>&quot;GUI is pre-alpha&quot;</em> warning no longer applies). Automated <code>R15</code> and <code>R13</code> <code>EguiHumanPathDriver</code> / <code>egui_kittest</code> desktop suites verify interactive widget, menu, dialog, and canvas parity across the automated desktop workflows (<code>R10.25</code> Beta gate), while recorded interactive OS walkthroughs (<code>R10.13</code> macOS/browser walkthroughs and <code>R10.24</code> cross-OS Windows/Linux smoke QA) are <strong>1.0</strong> release-gate verification. The FreeBSD <code>x86_64</code> package (<code>curvebook-&lt;version&gt;-freebsd-x86_64.tar.gz</code>) is a <strong>Tier 2 CLI-only</strong> archive (<code>curvebook-cli</code> and local MCP; no desktop GUI).</li>
 <li><strong>Windows <code>x86</code> Dropped &amp; Unsigned Beta <code>.msi</code> Installers:</strong> Beta omits 32-bit Windows (<code>x86</code>) and <code>-portable.zip</code> archives (<code>R0.28</code>). <code>curvebook-&lt;version&gt;-windows-x64.msi</code> and <code>curvebook-&lt;version&gt;-windows-arm64.msi</code> are currently <strong>unsigned</strong> until <code>R8.11</code> (Windows Defender SmartScreen prompts <strong>More info</strong> -&gt; <strong>Run anyway</strong>, and Windows 11 Smart App Control in enforcement mode blocks unsigned installers until Authenticode signing or Microsoft Store MSIX distribution under <code>R8.9</code> arrives). Direct <code>x64</code> <code>.msi</code> upgrade over an Alpha <code>x86</code> <code>.msi</code> has not yet been runner-verified; manually uninstall any Alpha <code>x86</code> copy before installing <code>x64</code>.</li>
 <li><strong>Draft Non-English Translations (<code>[Draft]</code>):</strong> All Beta-active non-English UI locales (<code>de</code>, <code>es</code>, <code>fr</code>, <code>ja</code>, <code>ko</code>, <code>pt-BR</code>, <code>zh-CN</code>, <code>zh-TW</code>, <code>it</code>, <code>nl</code>, <code>pl</code>, <code>ru</code>, <code>tr</code>) carry <code>[Draft]</code> suffix labels in <strong>View › Language</strong> (<code>BETA_ACTIVE_LOCALES</code>) pending native-speaker scientific review (<code>R10.23</code>).</li>
 <li><strong>Right-to-Left (<code>ar</code>, <code>fa</code>, <code>he</code>, <code>ur</code>) GUI Locales Deferred to <code>1.0</code>:</strong> While the underlying localization catalog (<code>LOCALES</code>) and text-shaping modules recognize <code>ar</code> and <code>he</code>, full right-to-left desktop GUI mirroring (<code>ar</code>, <code>fa</code>, <code>he</code>, <code>ur</code>, and legacy <code>iw</code>) is deferred to CurveBook <strong><code>1.0</code></strong>. In Beta desktop builds, the GUI language picker exposes only active LTR/CJK locales (<code>BETA_ACTIVE_LOCALES</code>: <code>en</code> plus <code>[Draft]</code> translations) and hides RTL options; any existing <code>preferences.json</code> specifying an RTL locale falls back cleanly to <code>&quot;en&quot;</code> on startup (<code>normalize_beta_gui_locale</code>) while mathematical coordinate axes and formulas stay left-to-right.</li>
@@ -200,6 +200,12 @@
       <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
       <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
     </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
   </div>
 </body>
 </html>

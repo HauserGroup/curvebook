@@ -35,7 +35,7 @@
       </nav>
     </header>
     <div class="version-banner" role="note" aria-label="Documentation version">
-      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-23 (commit <code>4964288a03</code>)</span>
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>2dc1679162</code>)</span>
       <span>No scripts · No telemetry · <a href="../az-index.html">A–Z Index</a></span>
     </div>
     <main id="main" tabindex="-1">
@@ -69,17 +69,18 @@
 <h2 id="cli-subcommands" tabindex="-1">Subcommands</h2>
 <div class="entry-card" id="cli-info" tabindex="-1">
   <h3><code>info</code></h3>
-  <p>inspect tables, info sheets, analyses, graphs and layouts in an archive</p>
-  <pre><code class="language-sh">curvebook-cli info &lt;file&gt; [--json]</code></pre>
+  <p>inspect tables, info sheets, analyses, graphs, layouts, or .xlsx workbook tabs</p>
+  <pre><code class="language-sh">curvebook-cli info &lt;file&gt; [--list-sheets] [--json]</code></pre>
 <div class="table-wrap"><table>
 <thead><tr><th>Argument</th><th>Required</th><th>Description</th></tr></thead>
 <tbody>
-<tr><td><code>&lt;file&gt;</code></td><td>required</td><td>Input <code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, <code>.prism</code>, <code>.pzfx</code>, <code>.csv</code>, <code>.tsv</code>, or project <code>.json</code> path.</td></tr>
+<tr><td><code>&lt;file&gt;</code></td><td>required</td><td>Input <code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, <code>.prism</code>, <code>.pzfx</code>, <code>.xlsx</code>, <code>.csv</code>, <code>.tsv</code>, or project <code>.json</code> path.</td></tr>
 </tbody>
 </table></div>
 <div class="table-wrap"><table>
 <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
 <tbody>
+<tr><td><code>--list-sheets</code></td><td>false</td><td>Enumerate worksheet tab names and indices in an <code>.xlsx</code> workbook.</td></tr>
 <tr><td><code>--json</code></td><td>false</td><td>Emit structured JSON output (and structured JSON errors on failure).</td></tr>
 </tbody>
 </table></div>
@@ -170,6 +171,7 @@
 <tr><td><code>-o, --out &lt;out&gt;</code></td><td>positional <code>&lt;out&gt;</code></td><td>Explicit output file or <code>.curvebook.d</code> directory path.</td></tr>
 <tr><td><code>--format &lt;fmt&gt;</code></td><td>inferred from <code>&lt;out&gt;</code> extension</td><td>Explicit target format (<code>curvebook</code>, <code>curvebook.d</code>, <code>svg</code>, <code>pdf</code>, <code>emf</code>, <code>png</code>, <code>tiff</code>, <code>csv</code>, <code>tsv</code>, <code>json</code>).</td></tr>
 <tr><td><code>--sheet &lt;id&gt;</code></td><td>first matching sheet</td><td>Target sheet ID or title to export.</td></tr>
+<tr><td><code>--xlsx-sheets &lt;names&gt;</code></td><td>all visible sheets</td><td>Comma-separated <code>.xlsx</code> worksheet names to import from an input workbook.</td></tr>
 <tr><td><code>--dpi &lt;u16&gt;</code></td><td>300</td><td>Rasterization resolution in dots per inch for <code>png</code> and <code>tiff</code> exports (18..=2400).</td></tr>
 <tr><td><code>--pdf-version &lt;1.4|1.7&gt;</code></td><td>1.7</td><td>PDF specification level for <code>pdf</code> exports (<code>1.4</code> or <code>1.7</code>).</td></tr>
 <tr><td><code>--ttf-font &lt;path&gt;</code></td><td>none</td><td>Optional TrueType <code>.ttf</code> font file embedded as <code>/FontFile2</code> in <code>pdf</code> exports.</td></tr>
@@ -194,6 +196,7 @@
 <tr><td><code>-o, --out &lt;out&gt;</code></td><td>positional <code>&lt;out&gt;</code></td><td>Explicit output file or <code>.curvebook.d</code> directory path.</td></tr>
 <tr><td><code>--format &lt;fmt&gt;</code></td><td>inferred from <code>&lt;out&gt;</code> extension</td><td>Explicit target format (<code>curvebook</code>, <code>curvebook.d</code>, <code>svg</code>, <code>pdf</code>, <code>emf</code>, <code>png</code>, <code>tiff</code>, <code>csv</code>, <code>tsv</code>, <code>json</code>).</td></tr>
 <tr><td><code>--sheet &lt;id&gt;</code></td><td>first matching sheet</td><td>Target sheet ID or title to export.</td></tr>
+<tr><td><code>--xlsx-sheets &lt;names&gt;</code></td><td>all visible sheets</td><td>Comma-separated <code>.xlsx</code> worksheet names to import from an input workbook.</td></tr>
 <tr><td><code>--dpi &lt;u16&gt;</code></td><td>300</td><td>Rasterization resolution in dots per inch for <code>png</code> and <code>tiff</code> exports (18..=2400).</td></tr>
 <tr><td><code>--pdf-version &lt;1.4|1.7&gt;</code></td><td>1.7</td><td>PDF specification level for <code>pdf</code> exports (<code>1.4</code> or <code>1.7</code>).</td></tr>
 <tr><td><code>--ttf-font &lt;path&gt;</code></td><td>none</td><td>Optional TrueType <code>.ttf</code> font file embedded as <code>/FontFile2</code> in <code>pdf</code> exports.</td></tr>
@@ -265,6 +268,12 @@
       <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
       <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
     </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
   </div>
 </body>
 </html>

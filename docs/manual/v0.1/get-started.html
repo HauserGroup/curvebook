@@ -35,7 +35,7 @@
       </nav>
     </header>
     <div class="version-banner" role="note" aria-label="Documentation version">
-      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-23 (commit <code>4964288a03</code>)</span>
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>2dc1679162</code>)</span>
       <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
     </div>
     <main id="main" tabindex="-1">
@@ -55,7 +55,7 @@
             <li><a href="#install-macos">— macOS (universal.dmg)</a></li>
             <li><a href="#install-windows">— Windows (x64 / arm64 .msi)</a></li>
             <li><a href="#install-linux">— Linux (x86_64 / aarch64 .AppImage)</a></li>
-            <li><a href="#install-freebsd">— FreeBSD Preview (x86_64 .tar.gz)</a></li>
+            <li><a href="#install-freebsd">— FreeBSD Tier 2 CLI-Only (x86_64 .tar.gz)</a></li>
             <li><a href="#verifying-downloads">Verifying Checksums &amp; Build Attestations</a></li>
             <li><a href="#verification-meaning">— What a Passing Check Means</a></li>
             <li><a href="#verification-fails">— If a Check Fails</a></li>
@@ -69,14 +69,14 @@
 <p>CurveBook ships standalone desktop (<code>curvebook</code>) and headless CLI/MCP (<code>curvebook-cli</code>) binaries built in pure Rust with zero telemetry and zero runtime network egress.</p>
 <hr>
 <h2 id="system-requirements" tabindex="-1">Which File Do I Need? (System Requirements &amp; Beta Assets)</h2>
-<p>Every Beta release attaches one installer package per supported desktop platform/architecture under the naming scheme <code>curvebook-&lt;version&gt;-&lt;os&gt;-&lt;arch&gt;.&lt;ext&gt;</code>. Every package bundles both the desktop GUI (<code>curvebook</code>) and the headless CLI/MCP executable (<code>curvebook-cli</code>):</p>
+<p>Every Beta release attaches one installer package per supported desktop platform/architecture under the naming scheme <code>curvebook-&lt;version&gt;-&lt;os&gt;-&lt;arch&gt;.&lt;ext&gt;</code>. Desktop packages bundle both the desktop GUI (<code>curvebook</code>) and the headless CLI/MCP executable (<code>curvebook-cli</code>); FreeBSD ships as a Tier 2 CLI-only archive:</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Platform</th><th>Beta Release Asset(s)</th><th>Notes &amp; Omitted Formats (<code>R0.28</code>)</th></tr></thead>
 <tbody>
 <tr><td><strong>macOS</strong></td><td><code>curvebook-&lt;version&gt;-macos-universal.dmg</code></td><td>macOS 11+ (<code>arm64</code> Apple Silicon and <code>x86_64</code> Intel universal binary); Developer ID signed &amp; Apple-notarized (<code>R8.10</code>). Bundles <code>CurveBook.app</code> and <code>curvebook-cli</code> (no separate macOS CLI <code>.zip</code>).</td></tr>
 <tr><td><strong>Windows</strong></td><td><code>curvebook-&lt;version&gt;-windows-x64.msi</code><br><code>curvebook-&lt;version&gt;-windows-arm64.msi</code></td><td>Windows 10/11 (<code>x64</code> / <code>arm64</code>). Currently <strong>unsigned</strong> pending code signing (<code>R8.11</code>). Windows <code>x86</code> (32-bit) and <code>-portable.zip</code> are dropped; Microsoft Store MSIX (<code>R8.9</code>) is a separate Store channel alternative.</td></tr>
 <tr><td><strong>Linux</strong></td><td><code>curvebook-&lt;version&gt;-linux-x86_64.AppImage</code><br><code>curvebook-&lt;version&gt;-linux-aarch64.AppImage</code></td><td>Wayland / X11 desktop + bundled <code>curvebook-cli</code>. Requires FUSE v2 (<code>libfuse2</code>) or <code>--appimage-extract</code>. <code>.AppImage.zsync</code>, <code>.deb</code>, <code>.rpm</code>, <code>.tar.gz</code>, and Flatpak packages are omitted.</td></tr>
-<tr><td><strong>FreeBSD (Preview)</strong></td><td><code>curvebook-&lt;version&gt;-freebsd-x86_64.tar.gz</code></td><td>Desktop GUI &amp; CLI <strong>preview</strong> tarball for <code>x86_64</code>.</td></tr>
+<tr><td><strong>FreeBSD (Tier 2 · CLI)</strong></td><td><code>curvebook-&lt;version&gt;-freebsd-x86_64.tar.gz</code></td><td>Tier 2 CLI-only tarball for <code>x86_64</code> (<code>curvebook-cli</code> + local MCP; no desktop GUI).</td></tr>
 <tr><td><strong>Shared Verification &amp; Attribution</strong></td><td><code>SHA256SUMS.txt</code><br><code>THIRD-PARTY-LICENSES.html</code></td><td>Published alongside every GitHub Release for checksum verification and dependency licence disclosure.</td></tr>
 </tbody>
 </table></div>
@@ -119,8 +119,8 @@
 <pre><code class="language-sh">./curvebook-&lt;version&gt;-linux-x86_64.AppImage --appimage-extract
 ./squashfs-root/usr/bin/curvebook-cli --version</code></pre>
 <p>See <a href="troubleshooting.html#linux-fuse">Troubleshooting</a> if FUSE v2 is unavailable.</p>
-<h3 id="install-freebsd" tabindex="-1">FreeBSD Preview (<code>x86_64</code> <code>.tar.gz</code>)</h3>
-<p>Extract the preview archive and run <code>bin/curvebook</code> or <code>bin/curvebook-cli</code>:</p>
+<h3 id="install-freebsd" tabindex="-1">FreeBSD Tier 2 CLI-Only (<code>x86_64</code> <code>.tar.gz</code>)</h3>
+<p>Extract the Tier 2 CLI-only archive and run <code>bin/curvebook-cli</code> (no desktop GUI is included on FreeBSD):</p>
 <pre><code class="language-sh">tar -xzf curvebook-&lt;version&gt;-freebsd-x86_64.tar.gz</code></pre>
 <hr>
 <h2 id="verifying-downloads" tabindex="-1">Verifying Checksums &amp; Build Attestations</h2>
@@ -210,6 +210,12 @@
       <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
       <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
     </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
   </div>
 </body>
 </html>

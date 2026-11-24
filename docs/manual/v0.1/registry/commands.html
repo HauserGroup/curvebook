@@ -35,7 +35,7 @@
       </nav>
     </header>
     <div class="version-banner" role="note" aria-label="Documentation version">
-      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-23 (commit <code>4964288a03</code>)</span>
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>2dc1679162</code>)</span>
       <span>No scripts · No telemetry · <a href="../az-index.html">A–Z Index</a></span>
     </div>
     <main id="main" tabindex="-1">
@@ -55,7 +55,7 @@
             <li><a href="#group-project">— Project &amp; Files (12)</a></li>
             <li><a href="#group-edit">— Edit &amp; History (4)</a></li>
             <li><a href="#group-sheet">— Sheets &amp; Pipelines (11)</a></li>
-            <li><a href="#group-table">— Data Tables (28)</a></li>
+            <li><a href="#group-table">— Data Tables (29)</a></li>
             <li><a href="#group-info">— Info &amp; Constants (3)</a></li>
             <li><a href="#group-analysis">— Analysis &amp; Reports (12)</a></li>
             <li><a href="#group-graph">— Graphs &amp; Styling (17)</a></li>
@@ -64,7 +64,7 @@
             <li><a href="#ui-commands">Desktop UI Commands (UI_COMMANDS)</a></li>
           </ul>
         </details>
-<p class="lead">Complete catalog of <strong>105</strong> engine commands compiled from <code>curvebook_engine::cmd::registry()</code> and <strong>53</strong> desktop shell commands from <code>UI_COMMANDS</code>.</p>
+<p class="lead">Complete catalog of <strong>106</strong> engine commands compiled from <code>curvebook_engine::cmd::registry()</code> and <strong>54</strong> desktop shell commands from <code>UI_COMMANDS</code>.</p>
 <p>For wire execution syntax across MCP, CLI, and loopback <code>--control</code>, see <a href="../automation/mcp.html">MCP Server Reference</a>, <a href="../automation/cli.html">CLI Reference</a>, and <a href="mcp-tools.html">MCP Tools Registry</a>.</p>
 <h2 id="engine-commands" tabindex="-1">Engine Commands (cmd::registry)</h2>
 <h3 id="group-project" tabindex="-1">Project &amp; Files (12)</h3>
@@ -95,12 +95,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;title&quot;: [
-      &quot;name&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-project-createcheckpoint" tabindex="-1">
@@ -160,25 +155,7 @@
   &quot;required&quot;: [
     &quot;name&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;id&quot;: [
-      &quot;checkpoint_id&quot;,
-      &quot;checkpointId&quot;
-    ],
-    &quot;name&quot;: [
-      &quot;label&quot;,
-      &quot;title&quot;
-    ],
-    &quot;note&quot;: [
-      &quot;description&quot;
-    ],
-    &quot;timestamp_utc&quot;: [
-      &quot;timestampUtc&quot;,
-      &quot;created_utc&quot;,
-      &quot;createdUtc&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-project-deletecheckpoint" tabindex="-1">
@@ -219,18 +196,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;id&quot;: [
-      &quot;checkpoint_id&quot;,
-      &quot;checkpointId&quot;
-    ],
-    &quot;name&quot;: [
-      &quot;checkpoint_name&quot;,
-      &quot;checkpointName&quot;,
-      &quot;title&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-project-inspect" tabindex="-1">
@@ -260,13 +226,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-project-instantiatetemplate" tabindex="-1">
@@ -318,23 +278,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;bytes_base64&quot;: [
-      &quot;bytesBase64&quot;,
-      &quot;archive_base64&quot;
-    ],
-    &quot;path&quot;: [
-      &quot;file_path&quot;,
-      &quot;filePath&quot;,
-      &quot;template_path&quot;,
-      &quot;templatePath&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;project_title&quot;,
-      &quot;projectTitle&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-project-listcheckpoints" tabindex="-1">
@@ -381,12 +325,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;title&quot;: [
-      &quot;name&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-project-open" tabindex="-1">
@@ -438,21 +377,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;bytes_base64&quot;: [
-      &quot;bytesBase64&quot;,
-      &quot;archive_base64&quot;
-    ],
-    &quot;path&quot;: [
-      &quot;file_path&quot;,
-      &quot;filePath&quot;
-    ],
-    &quot;unpacked&quot;: [
-      &quot;unpacked_dir&quot;,
-      &quot;unpackedDir&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-project-recalculate" tabindex="-1">
@@ -482,12 +407,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;include_external_links&quot;: [
-      &quot;includeExternalLinks&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-project-restorecheckpoint" tabindex="-1">
@@ -528,18 +448,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;id&quot;: [
-      &quot;checkpoint_id&quot;,
-      &quot;checkpointId&quot;
-    ],
-    &quot;name&quot;: [
-      &quot;checkpoint_name&quot;,
-      &quot;checkpointName&quot;,
-      &quot;title&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-project-save" tabindex="-1">
@@ -591,22 +500,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;path&quot;: [
-      &quot;file_path&quot;,
-      &quot;filePath&quot;
-    ],
-    &quot;return_bytes&quot;: [
-      &quot;returnBytes&quot;,
-      &quot;include_bytes&quot;,
-      &quot;includeBytes&quot;
-    ],
-    &quot;unpacked&quot;: [
-      &quot;unpacked_dir&quot;,
-      &quot;unpackedDir&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-project-savetemplate" tabindex="-1">
@@ -647,18 +541,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;path&quot;: [
-      &quot;file_path&quot;,
-      &quot;filePath&quot;
-    ],
-    &quot;return_bytes&quot;: [
-      &quot;returnBytes&quot;,
-      &quot;include_bytes&quot;,
-      &quot;includeBytes&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <h3 id="group-edit" tabindex="-1">Edit &amp; History (4)</h3>
@@ -1212,53 +1095,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;clear_column_titles&quot;: [
-      &quot;clearColumnTitles&quot;
-    ],
-    &quot;clear_data&quot;: [
-      &quot;clearData&quot;
-    ],
-    &quot;clear_results&quot;: [
-      &quot;clearResults&quot;
-    ],
-    &quot;clear_row_titles&quot;: [
-      &quot;clearRowTitles&quot;
-    ],
-    &quot;clear_y_values&quot;: [
-      &quot;clearYValues&quot;
-    ],
-    &quot;clone_analyses&quot;: [
-      &quot;cloneAnalyses&quot;
-    ],
-    &quot;clone_graphs&quot;: [
-      &quot;cloneGraphs&quot;
-    ],
-    &quot;clone_layouts&quot;: [
-      &quot;cloneLayouts&quot;
-    ],
-    &quot;keep_x_values&quot;: [
-      &quot;keepXValues&quot;
-    ],
-    &quot;new_sheet_id&quot;: [
-      &quot;newSheetId&quot;,
-      &quot;target_sheet_id&quot;,
-      &quot;targetSheetId&quot;
-    ],
-    &quot;override_replicates&quot;: [
-      &quot;overrideReplicates&quot;,
-      &quot;replicates&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;new_title&quot;,
-      &quot;newTitle&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-sheet-createdata" tabindex="-1">
@@ -1516,86 +1353,8 @@
   &quot;required&quot;: [],
   &quot;type&quot;: &quot;object&quot;,
   &quot;x-deprecated-aliases&quot;: {
-    &quot;auto_family&quot;: [
-      &quot;autoFamily&quot;
-    ],
-    &quot;auto_graph&quot;: [
-      &quot;autoGraph&quot;
-    ],
-    &quot;auto_info&quot;: [
-      &quot;autoInfo&quot;
-    ],
-    &quot;censored_code&quot;: [
-      &quot;censoredCode&quot;
-    ],
-    &quot;cols&quot;: [
-      &quot;columns&quot;,
-      &quot;data_sets&quot;,
-      &quot;dataSets&quot;,
-      &quot;column_count&quot;,
-      &quot;columnCount&quot;,
-      &quot;groups&quot;,
-      &quot;cohorts&quot;
-    ],
-    &quot;column_factor_title&quot;: [
-      &quot;columnFactorTitle&quot;
-    ],
-    &quot;design_hint&quot;: [
-      &quot;designHint&quot;
-    ],
-    &quot;event_code&quot;: [
-      &quot;eventCode&quot;
-    ],
-    &quot;graph_sheet_id&quot;: [
-      &quot;graphSheetId&quot;
-    ],
-    &quot;info_sheet_id&quot;: [
-      &quot;infoSheetId&quot;
-    ],
     &quot;kind&quot;: [
-      &quot;archetype&quot;,
-      &quot;table_kind&quot;,
-      &quot;tableKind&quot;,
-      &quot;type&quot;
-    ],
-    &quot;replicates&quot;: [
-      &quot;replicate_k&quot;,
-      &quot;k&quot;,
-      &quot;subcolumns&quot;,
-      &quot;biological_units&quot;,
-      &quot;biologicalUnits&quot;
-    ],
-    &quot;row_factor_title&quot;: [
-      &quot;rowFactorTitle&quot;
-    ],
-    &quot;rows&quot;: [
-      &quot;row_count&quot;,
-      &quot;rowCount&quot;,
-      &quot;slices&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;subcolumn_mode&quot;: [
-      &quot;subcolumnMode&quot;
-    ],
-    &quot;time_title&quot;: [
-      &quot;timeTitle&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;name&quot;
-    ],
-    &quot;variables&quot;: [
-      &quot;titles&quot;,
-      &quot;variable_titles&quot;,
-      &quot;variableTitles&quot;
-    ],
-    &quot;x_mode&quot;: [
-      &quot;xMode&quot;
-    ],
-    &quot;x_title&quot;: [
-      &quot;xTitle&quot;
+      &quot;archetype&quot;
     ]
   }
 }</code></pre>
@@ -1634,13 +1393,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-sheet-duplicate" tabindex="-1">
@@ -1700,23 +1453,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;new_sheet_id&quot;: [
-      &quot;newSheetId&quot;,
-      &quot;target_sheet_id&quot;,
-      &quot;targetSheetId&quot;,
-      &quot;new_id&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;new_title&quot;,
-      &quot;newTitle&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-sheet-duplicatefamily" tabindex="-1">
@@ -1788,25 +1525,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;clear_data&quot;: [
-      &quot;clearData&quot;
-    ],
-    &quot;new_sheet_id&quot;: [
-      &quot;newSheetId&quot;,
-      &quot;target_sheet_id&quot;,
-      &quot;targetSheetId&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;new_title&quot;,
-      &quot;newTitle&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-sheet-extractresulttab" tabindex="-1">
@@ -1887,21 +1606,7 @@
   &quot;required&quot;: [
     &quot;result_sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;archetype&quot;: [
-      &quot;kind&quot;
-    ],
-    &quot;result_sheet_id&quot;: [
-      &quot;source_sheet_id&quot;,
-      &quot;source_sheet&quot;,
-      &quot;result_id&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;,
-      &quot;target_sheet_id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-sheet-freeze" tabindex="-1">
@@ -1927,13 +1632,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-sheet-rename" tabindex="-1">
@@ -1968,13 +1667,10 @@
   &quot;type&quot;: &quot;object&quot;,
   &quot;x-deprecated-aliases&quot;: {
     &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
       &quot;id&quot;
     ],
     &quot;title&quot;: [
-      &quot;new_title&quot;,
-      &quot;newTitle&quot;,
-      &quot;name&quot;
+      &quot;new_title&quot;
     ]
   }
 }</code></pre>
@@ -2081,22 +1777,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;from_index&quot;: [
-      &quot;fromIndex&quot;
-    ],
-    &quot;index&quot;: [
-      &quot;position&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;to_index&quot;: [
-      &quot;toIndex&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-sheet-select" tabindex="-1">
@@ -2133,16 +1814,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;mode&quot;: [
-      &quot;pane&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-sheet-unfreeze" tabindex="-1">
@@ -2168,16 +1840,10 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
-<h3 id="group-table" tabindex="-1">Data Tables (28)</h3>
+<h3 id="group-table" tabindex="-1">Data Tables (29)</h3>
 <div class="entry-card" id="cmd-table-clearcells" tabindex="-1">
   <h4><code>table.clearCells</code> — Clear Cells</h4>
   <p>Clear single cells, lists, ranges, or an entire table, optionally breaking live links.</p>
@@ -2228,18 +1894,7 @@
               }
             },
             &quot;required&quot;: [],
-            &quot;type&quot;: &quot;object&quot;,
-            &quot;x-deprecated-aliases&quot;: {
-              &quot;col&quot;: [
-                &quot;data_set&quot;,
-                &quot;dataSet&quot;,
-                &quot;column&quot;
-              ],
-              &quot;subcol&quot;: [
-                &quot;subcolumn&quot;,
-                &quot;replicate&quot;
-              ]
-            }
+            &quot;type&quot;: &quot;object&quot;
           },
           &quot;row&quot;: {
             &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -2253,21 +1908,7 @@
           }
         },
         &quot;required&quot;: [],
-        &quot;type&quot;: &quot;object&quot;,
-        &quot;x-deprecated-aliases&quot;: {
-          &quot;col&quot;: [
-            &quot;data_set&quot;,
-            &quot;dataSet&quot;,
-            &quot;column&quot;
-          ],
-          &quot;coord&quot;: [
-            &quot;coordinate&quot;
-          ],
-          &quot;subcol&quot;: [
-            &quot;subcolumn&quot;,
-            &quot;replicate&quot;
-          ]
-        }
+        &quot;type&quot;: &quot;object&quot;
       },
       &quot;type&quot;: &quot;array&quot;
     },
@@ -2320,18 +1961,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col&quot;: [
-              &quot;data_set&quot;,
-              &quot;dataSet&quot;,
-              &quot;column&quot;
-            ],
-            &quot;subcol&quot;: [
-              &quot;subcolumn&quot;,
-              &quot;replicate&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         &quot;row&quot;: {
           &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -2345,21 +1975,7 @@
         }
       },
       &quot;required&quot;: [],
-      &quot;type&quot;: &quot;object&quot;,
-      &quot;x-deprecated-aliases&quot;: {
-        &quot;col&quot;: [
-          &quot;data_set&quot;,
-          &quot;dataSet&quot;,
-          &quot;column&quot;
-        ],
-        &quot;coord&quot;: [
-          &quot;coordinate&quot;
-        ],
-        &quot;subcol&quot;: [
-          &quot;subcolumn&quot;,
-          &quot;replicate&quot;
-        ]
-      }
+      &quot;type&quot;: &quot;object&quot;
     },
     &quot;range&quot;: {
       &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
@@ -2395,18 +2011,7 @@
                 }
               },
               &quot;required&quot;: [],
-              &quot;type&quot;: &quot;object&quot;,
-              &quot;x-deprecated-aliases&quot;: {
-                &quot;col&quot;: [
-                  &quot;data_set&quot;,
-                  &quot;dataSet&quot;,
-                  &quot;column&quot;
-                ],
-                &quot;subcol&quot;: [
-                  &quot;subcolumn&quot;,
-                  &quot;replicate&quot;
-                ]
-              }
+              &quot;type&quot;: &quot;object&quot;
             },
             &quot;row&quot;: {
               &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -2420,21 +2025,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col&quot;: [
-              &quot;data_set&quot;,
-              &quot;dataSet&quot;,
-              &quot;column&quot;
-            ],
-            &quot;coord&quot;: [
-              &quot;coordinate&quot;
-            ],
-            &quot;subcol&quot;: [
-              &quot;subcolumn&quot;,
-              &quot;replicate&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         &quot;start&quot;: {
           &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
@@ -2466,18 +2057,7 @@
                 }
               },
               &quot;required&quot;: [],
-              &quot;type&quot;: &quot;object&quot;,
-              &quot;x-deprecated-aliases&quot;: {
-                &quot;col&quot;: [
-                  &quot;data_set&quot;,
-                  &quot;dataSet&quot;,
-                  &quot;column&quot;
-                ],
-                &quot;subcol&quot;: [
-                  &quot;subcolumn&quot;,
-                  &quot;replicate&quot;
-                ]
-              }
+              &quot;type&quot;: &quot;object&quot;
             },
             &quot;row&quot;: {
               &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -2491,35 +2071,13 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col&quot;: [
-              &quot;data_set&quot;,
-              &quot;dataSet&quot;,
-              &quot;column&quot;
-            ],
-            &quot;coord&quot;: [
-              &quot;coordinate&quot;
-            ],
-            &quot;subcol&quot;: [
-              &quot;subcolumn&quot;,
-              &quot;replicate&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         }
       },
       &quot;required&quot;: [
         &quot;start&quot;
       ],
-      &quot;type&quot;: &quot;object&quot;,
-      &quot;x-deprecated-aliases&quot;: {
-        &quot;end&quot;: [
-          &quot;to&quot;
-        ],
-        &quot;start&quot;: [
-          &quot;from&quot;
-        ]
-      }
+      &quot;type&quot;: &quot;object&quot;
     },
     &quot;region_id&quot;: {
       &quot;description&quot;: &quot;When `unlink` is true, detach only the linked region matching this identifier&quot;,
@@ -2569,60 +2127,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;cells&quot;: [
-      &quot;coords&quot;
-    ],
-    &quot;clear_x&quot;: [
-      &quot;clearX&quot;,
-      &quot;include_x&quot;,
-      &quot;includeX&quot;
-    ],
-    &quot;col&quot;: [
-      &quot;data_set&quot;,
-      &quot;dataSet&quot;,
-      &quot;column&quot;
-    ],
-    &quot;col_end&quot;: [
-      &quot;colEnd&quot;
-    ],
-    &quot;col_start&quot;: [
-      &quot;colStart&quot;
-    ],
-    &quot;coord&quot;: [
-      &quot;coordinate&quot;
-    ],
-    &quot;range&quot;: [
-      &quot;selection&quot;
-    ],
-    &quot;region_id&quot;: [
-      &quot;regionId&quot;
-    ],
-    &quot;row_end&quot;: [
-      &quot;rowEnd&quot;
-    ],
-    &quot;row_start&quot;: [
-      &quot;rowStart&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;subcol&quot;: [
-      &quot;subcolumn&quot;,
-      &quot;replicate&quot;
-    ],
-    &quot;subcol_end&quot;: [
-      &quot;subcolEnd&quot;
-    ],
-    &quot;subcol_start&quot;: [
-      &quot;subcolStart&quot;
-    ],
-    &quot;unlink&quot;: [
-      &quot;break_links&quot;,
-      &quot;breakLinks&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-convertarchetype" tabindex="-1">
@@ -2677,26 +2182,7 @@
     &quot;sheet_id&quot;,
     &quot;target_kind&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;allow_lossy&quot;: [
-      &quot;allowLossy&quot;
-    ],
-    &quot;preview_only&quot;: [
-      &quot;previewOnly&quot;,
-      &quot;preview&quot;,
-      &quot;dry_run&quot;,
-      &quot;dryRun&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;target_kind&quot;: [
-      &quot;targetKind&quot;,
-      &quot;kind&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-excludecells" tabindex="-1">
@@ -2745,18 +2231,7 @@
               }
             },
             &quot;required&quot;: [],
-            &quot;type&quot;: &quot;object&quot;,
-            &quot;x-deprecated-aliases&quot;: {
-              &quot;col&quot;: [
-                &quot;data_set&quot;,
-                &quot;dataSet&quot;,
-                &quot;column&quot;
-              ],
-              &quot;subcol&quot;: [
-                &quot;subcolumn&quot;,
-                &quot;replicate&quot;
-              ]
-            }
+            &quot;type&quot;: &quot;object&quot;
           },
           &quot;row&quot;: {
             &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -2770,21 +2245,7 @@
           }
         },
         &quot;required&quot;: [],
-        &quot;type&quot;: &quot;object&quot;,
-        &quot;x-deprecated-aliases&quot;: {
-          &quot;col&quot;: [
-            &quot;data_set&quot;,
-            &quot;dataSet&quot;,
-            &quot;column&quot;
-          ],
-          &quot;coord&quot;: [
-            &quot;coordinate&quot;
-          ],
-          &quot;subcol&quot;: [
-            &quot;subcolumn&quot;,
-            &quot;replicate&quot;
-          ]
-        }
+        &quot;type&quot;: &quot;object&quot;
       },
       &quot;type&quot;: &quot;array&quot;
     },
@@ -2833,18 +2294,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col&quot;: [
-              &quot;data_set&quot;,
-              &quot;dataSet&quot;,
-              &quot;column&quot;
-            ],
-            &quot;subcol&quot;: [
-              &quot;subcolumn&quot;,
-              &quot;replicate&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         &quot;row&quot;: {
           &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -2858,21 +2308,7 @@
         }
       },
       &quot;required&quot;: [],
-      &quot;type&quot;: &quot;object&quot;,
-      &quot;x-deprecated-aliases&quot;: {
-        &quot;col&quot;: [
-          &quot;data_set&quot;,
-          &quot;dataSet&quot;,
-          &quot;column&quot;
-        ],
-        &quot;coord&quot;: [
-          &quot;coordinate&quot;
-        ],
-        &quot;subcol&quot;: [
-          &quot;subcolumn&quot;,
-          &quot;replicate&quot;
-        ]
-      }
+      &quot;type&quot;: &quot;object&quot;
     },
     &quot;excluded&quot;: {
       &quot;description&quot;: &quot;Whether to exclude (true) or include (false); default true&quot;,
@@ -2912,18 +2348,7 @@
                 }
               },
               &quot;required&quot;: [],
-              &quot;type&quot;: &quot;object&quot;,
-              &quot;x-deprecated-aliases&quot;: {
-                &quot;col&quot;: [
-                  &quot;data_set&quot;,
-                  &quot;dataSet&quot;,
-                  &quot;column&quot;
-                ],
-                &quot;subcol&quot;: [
-                  &quot;subcolumn&quot;,
-                  &quot;replicate&quot;
-                ]
-              }
+              &quot;type&quot;: &quot;object&quot;
             },
             &quot;row&quot;: {
               &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -2937,21 +2362,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col&quot;: [
-              &quot;data_set&quot;,
-              &quot;dataSet&quot;,
-              &quot;column&quot;
-            ],
-            &quot;coord&quot;: [
-              &quot;coordinate&quot;
-            ],
-            &quot;subcol&quot;: [
-              &quot;subcolumn&quot;,
-              &quot;replicate&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         &quot;start&quot;: {
           &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
@@ -2983,18 +2394,7 @@
                 }
               },
               &quot;required&quot;: [],
-              &quot;type&quot;: &quot;object&quot;,
-              &quot;x-deprecated-aliases&quot;: {
-                &quot;col&quot;: [
-                  &quot;data_set&quot;,
-                  &quot;dataSet&quot;,
-                  &quot;column&quot;
-                ],
-                &quot;subcol&quot;: [
-                  &quot;subcolumn&quot;,
-                  &quot;replicate&quot;
-                ]
-              }
+              &quot;type&quot;: &quot;object&quot;
             },
             &quot;row&quot;: {
               &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -3008,35 +2408,13 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col&quot;: [
-              &quot;data_set&quot;,
-              &quot;dataSet&quot;,
-              &quot;column&quot;
-            ],
-            &quot;coord&quot;: [
-              &quot;coordinate&quot;
-            ],
-            &quot;subcol&quot;: [
-              &quot;subcolumn&quot;,
-              &quot;replicate&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         }
       },
       &quot;required&quot;: [
         &quot;start&quot;
       ],
-      &quot;type&quot;: &quot;object&quot;,
-      &quot;x-deprecated-aliases&quot;: {
-        &quot;end&quot;: [
-          &quot;to&quot;
-        ],
-        &quot;start&quot;: [
-          &quot;from&quot;
-        ]
-      }
+      &quot;type&quot;: &quot;object&quot;
     },
     &quot;row&quot;: {
       &quot;description&quot;: &quot;Row index&quot;,
@@ -3081,48 +2459,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;cells&quot;: [
-      &quot;coords&quot;
-    ],
-    &quot;col&quot;: [
-      &quot;data_set&quot;,
-      &quot;dataSet&quot;,
-      &quot;column&quot;
-    ],
-    &quot;col_end&quot;: [
-      &quot;colEnd&quot;
-    ],
-    &quot;col_start&quot;: [
-      &quot;colStart&quot;
-    ],
-    &quot;coord&quot;: [
-      &quot;coordinate&quot;
-    ],
-    &quot;range&quot;: [
-      &quot;selection&quot;
-    ],
-    &quot;row_end&quot;: [
-      &quot;rowEnd&quot;
-    ],
-    &quot;row_start&quot;: [
-      &quot;rowStart&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;subcol&quot;: [
-      &quot;subcolumn&quot;,
-      &quot;replicate&quot;
-    ],
-    &quot;subcol_end&quot;: [
-      &quot;subcolEnd&quot;
-    ],
-    &quot;subcol_start&quot;: [
-      &quot;subcolStart&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-excludecellswithreason" tabindex="-1">
@@ -3174,18 +2511,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col&quot;: [
-              &quot;data_set&quot;,
-              &quot;dataSet&quot;,
-              &quot;column&quot;
-            ],
-            &quot;subcol&quot;: [
-              &quot;subcolumn&quot;,
-              &quot;replicate&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         &quot;row&quot;: {
           &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -3199,21 +2525,7 @@
         }
       },
       &quot;required&quot;: [],
-      &quot;type&quot;: &quot;object&quot;,
-      &quot;x-deprecated-aliases&quot;: {
-        &quot;col&quot;: [
-          &quot;data_set&quot;,
-          &quot;dataSet&quot;,
-          &quot;column&quot;
-        ],
-        &quot;coord&quot;: [
-          &quot;coordinate&quot;
-        ],
-        &quot;subcol&quot;: [
-          &quot;subcolumn&quot;,
-          &quot;replicate&quot;
-        ]
-      }
+      &quot;type&quot;: &quot;object&quot;
     },
     &quot;coords&quot;: {
       &quot;description&quot;: &quot;List of coordinates to exclude&quot;,
@@ -3260,18 +2572,7 @@
                   }
                 },
                 &quot;required&quot;: [],
-                &quot;type&quot;: &quot;object&quot;,
-                &quot;x-deprecated-aliases&quot;: {
-                  &quot;col&quot;: [
-                    &quot;data_set&quot;,
-                    &quot;dataSet&quot;,
-                    &quot;column&quot;
-                  ],
-                  &quot;subcol&quot;: [
-                    &quot;subcolumn&quot;,
-                    &quot;replicate&quot;
-                  ]
-                }
+                &quot;type&quot;: &quot;object&quot;
               },
               &quot;row&quot;: {
                 &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -3285,21 +2586,7 @@
               }
             },
             &quot;required&quot;: [],
-            &quot;type&quot;: &quot;object&quot;,
-            &quot;x-deprecated-aliases&quot;: {
-              &quot;col&quot;: [
-                &quot;data_set&quot;,
-                &quot;dataSet&quot;,
-                &quot;column&quot;
-              ],
-              &quot;coord&quot;: [
-                &quot;coordinate&quot;
-              ],
-              &quot;subcol&quot;: [
-                &quot;subcolumn&quot;,
-                &quot;replicate&quot;
-              ]
-            }
+            &quot;type&quot;: &quot;object&quot;
           }
         ],
         &quot;description&quot;: &quot;Cell coordinate `{ row, col, subcol? }` or `[row, col, subcol?]`&quot;
@@ -3352,18 +2639,7 @@
                 }
               },
               &quot;required&quot;: [],
-              &quot;type&quot;: &quot;object&quot;,
-              &quot;x-deprecated-aliases&quot;: {
-                &quot;col&quot;: [
-                  &quot;data_set&quot;,
-                  &quot;dataSet&quot;,
-                  &quot;column&quot;
-                ],
-                &quot;subcol&quot;: [
-                  &quot;subcolumn&quot;,
-                  &quot;replicate&quot;
-                ]
-              }
+              &quot;type&quot;: &quot;object&quot;
             },
             &quot;row&quot;: {
               &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -3377,21 +2653,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col&quot;: [
-              &quot;data_set&quot;,
-              &quot;dataSet&quot;,
-              &quot;column&quot;
-            ],
-            &quot;coord&quot;: [
-              &quot;coordinate&quot;
-            ],
-            &quot;subcol&quot;: [
-              &quot;subcolumn&quot;,
-              &quot;replicate&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         &quot;start&quot;: {
           &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
@@ -3423,18 +2685,7 @@
                 }
               },
               &quot;required&quot;: [],
-              &quot;type&quot;: &quot;object&quot;,
-              &quot;x-deprecated-aliases&quot;: {
-                &quot;col&quot;: [
-                  &quot;data_set&quot;,
-                  &quot;dataSet&quot;,
-                  &quot;column&quot;
-                ],
-                &quot;subcol&quot;: [
-                  &quot;subcolumn&quot;,
-                  &quot;replicate&quot;
-                ]
-              }
+              &quot;type&quot;: &quot;object&quot;
             },
             &quot;row&quot;: {
               &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -3448,35 +2699,13 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col&quot;: [
-              &quot;data_set&quot;,
-              &quot;dataSet&quot;,
-              &quot;column&quot;
-            ],
-            &quot;coord&quot;: [
-              &quot;coordinate&quot;
-            ],
-            &quot;subcol&quot;: [
-              &quot;subcolumn&quot;,
-              &quot;replicate&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         }
       },
       &quot;required&quot;: [
         &quot;start&quot;
       ],
-      &quot;type&quot;: &quot;object&quot;,
-      &quot;x-deprecated-aliases&quot;: {
-        &quot;end&quot;: [
-          &quot;to&quot;
-        ],
-        &quot;start&quot;: [
-          &quot;from&quot;
-        ]
-      }
+      &quot;type&quot;: &quot;object&quot;
     },
     &quot;reason_tag&quot;: {
       &quot;description&quot;: &quot;Short non-empty audit reason tag&quot;,
@@ -3514,40 +2743,7 @@
     &quot;sheet_id&quot;,
     &quot;reason_tag&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;col&quot;: [
-      &quot;data_set&quot;,
-      &quot;dataSet&quot;,
-      &quot;column&quot;
-    ],
-    &quot;coord&quot;: [
-      &quot;coordinate&quot;
-    ],
-    &quot;coords&quot;: [
-      &quot;cells&quot;
-    ],
-    &quot;note&quot;: [
-      &quot;comment&quot;
-    ],
-    &quot;reason_tag&quot;: [
-      &quot;reasonTag&quot;,
-      &quot;reason&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;subcol&quot;: [
-      &quot;subcolumn&quot;,
-      &quot;replicate&quot;
-    ],
-    &quot;timestamp_utc&quot;: [
-      &quot;timestampUtc&quot;,
-      &quot;created_utc&quot;,
-      &quot;createdUtc&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-exclusionauditreport" tabindex="-1">
@@ -3578,13 +2774,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-exportcsv" tabindex="-1">
@@ -3644,20 +2834,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;decimal_separator&quot;: [
-      &quot;decimalSeparator&quot;,
-      &quot;decimal&quot;
-    ],
-    &quot;path&quot;: [
-      &quot;file_path&quot;,
-      &quot;filePath&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-importcsv" tabindex="-1">
@@ -3695,26 +2872,7 @@
         }
       },
       &quot;required&quot;: [],
-      &quot;type&quot;: &quot;object&quot;,
-      &quot;x-deprecated-aliases&quot;: {
-        &quot;col&quot;: [
-          &quot;target_col&quot;,
-          &quot;targetCol&quot;,
-          &quot;data_set&quot;,
-          &quot;dataSet&quot;,
-          &quot;column&quot;
-        ],
-        &quot;row&quot;: [
-          &quot;target_row&quot;,
-          &quot;targetRow&quot;
-        ],
-        &quot;subcol&quot;: [
-          &quot;target_subcol&quot;,
-          &quot;targetSubcol&quot;,
-          &quot;subcolumn&quot;,
-          &quot;replicate&quot;
-        ]
-      }
+      &quot;type&quot;: &quot;object&quot;
     },
     &quot;archetype&quot;: {
       &quot;anyOf&quot;: [
@@ -3908,34 +3066,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col_end&quot;: [
-              &quot;colEnd&quot;
-            ],
-            &quot;col_start&quot;: [
-              &quot;colStart&quot;
-            ],
-            &quot;decimate_every_k&quot;: [
-              &quot;decimateEveryK&quot;,
-              &quot;every_nth_row&quot;,
-              &quot;everyNthRow&quot;
-            ],
-            &quot;parse_asterisk_exclusions&quot;: [
-              &quot;parseAsteriskExclusions&quot;,
-              &quot;parse_asterisk_exclusion&quot;,
-              &quot;parseAsteriskExclusion&quot;
-            ],
-            &quot;row_end&quot;: [
-              &quot;rowEnd&quot;
-            ],
-            &quot;row_start&quot;: [
-              &quot;rowStart&quot;
-            ],
-            &quot;unstack_group_column&quot;: [
-              &quot;unstackGroupColumn&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         {
           &quot;type&quot;: &quot;null&quot;
@@ -3949,6 +3080,12 @@
     &quot;has_row_titles&quot;: {
       &quot;description&quot;: &quot;Treat first column as row titles&quot;,
       &quot;type&quot;: &quot;boolean&quot;
+    },
+    &quot;header_rows&quot;: {
+      &quot;description&quot;: &quot;Number of header rows to combine into column titles (default 1 when `has_header` is true)&quot;,
+      &quot;maximum&quot;: 16,
+      &quot;minimum&quot;: 0,
+      &quot;type&quot;: &quot;integer&quot;
     },
     &quot;link&quot;: {
       &quot;description&quot;: &quot;When importing from `path` into an existing sheet, keep a live file link&quot;,
@@ -4045,88 +3182,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;anchor&quot;: [
-      &quot;start&quot;
-    ],
-    &quot;archetype&quot;: [
-      &quot;kind&quot;,
-      &quot;table_kind&quot;,
-      &quot;tableKind&quot;
-    ],
-    &quot;csv&quot;: [
-      &quot;tsv&quot;,
-      &quot;text&quot;,
-      &quot;content&quot;
-    ],
-    &quot;decimal_separator&quot;: [
-      &quot;decimalSeparator&quot;,
-      &quot;decimal&quot;
-    ],
-    &quot;filter&quot;: [
-      &quot;slice&quot;
-    ],
-    &quot;has_header&quot;: [
-      &quot;hasHeader&quot;,
-      &quot;first_row_titles&quot;,
-      &quot;firstRowTitles&quot;
-    ],
-    &quot;has_row_titles&quot;: [
-      &quot;hasRowTitles&quot;
-    ],
-    &quot;link&quot;: [
-      &quot;live_link&quot;,
-      &quot;liveLink&quot;
-    ],
-    &quot;mode&quot;: [
-      &quot;placement_mode&quot;,
-      &quot;placementMode&quot;
-    ],
-    &quot;normalize_decimal&quot;: [
-      &quot;normalizeDecimal&quot;
-    ],
-    &quot;path&quot;: [
-      &quot;file_path&quot;,
-      &quot;filePath&quot;
-    ],
-    &quot;propagate_title_header&quot;: [
-      &quot;propagateTitleHeader&quot;
-    ],
-    &quot;replicates&quot;: [
-      &quot;k&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;skip_contiguous_blanks&quot;: [
-      &quot;skipContiguousBlanks&quot;
-    ],
-    &quot;start_col&quot;: [
-      &quot;startCol&quot;,
-      &quot;target_col&quot;,
-      &quot;targetCol&quot;,
-      &quot;col&quot;,
-      &quot;data_set&quot;,
-      &quot;dataSet&quot;
-    ],
-    &quot;start_row&quot;: [
-      &quot;startRow&quot;,
-      &quot;target_row&quot;,
-      &quot;targetRow&quot;,
-      &quot;row&quot;
-    ],
-    &quot;start_subcol&quot;: [
-      &quot;startSubcol&quot;,
-      &quot;target_subcol&quot;,
-      &quot;targetSubcol&quot;,
-      &quot;subcol&quot;,
-      &quot;subcolumn&quot;
-    ],
-    &quot;subcolumn_mode&quot;: [
-      &quot;subcolumnMode&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-importplatemap" tabindex="-1">
@@ -4294,44 +3350,7 @@
   &quot;required&quot;: [
     &quot;values&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;geometry&quot;: [
-      &quot;plate_geometry&quot;,
-      &quot;plateGeometry&quot;
-    ],
-    &quot;roles&quot;: [
-      &quot;wells&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;subtract_blank_mean&quot;: [
-      &quot;subtractBlankMean&quot;
-    ],
-    &quot;target_kind&quot;: [
-      &quot;targetKind&quot;,
-      &quot;kind&quot;
-    ],
-    &quot;template&quot;: [
-      &quot;plate_template&quot;,
-      &quot;plateTemplate&quot;
-    ],
-    &quot;template_name&quot;: [
-      &quot;templateName&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;name&quot;
-    ],
-    &quot;values&quot;: [
-      &quot;readings&quot;,
-      &quot;well_values&quot;
-    ],
-    &quot;x_title&quot;: [
-      &quot;xTitle&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-importprism" tabindex="-1">
@@ -4388,17 +3407,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;bytes_base64&quot;: [
-      &quot;bytesBase64&quot;,
-      &quot;archive_base64&quot;
-    ],
-    &quot;path&quot;: [
-      &quot;file_path&quot;,
-      &quot;filePath&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-importpzfx" tabindex="-1">
@@ -4456,20 +3465,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;bytes_base64&quot;: [
-      &quot;bytesBase64&quot;
-    ],
-    &quot;path&quot;: [
-      &quot;file_path&quot;,
-      &quot;filePath&quot;
-    ],
-    &quot;xml&quot;: [
-      &quot;text&quot;,
-      &quot;content&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-importtidylong" tabindex="-1">
@@ -4696,24 +3692,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;excluded_col&quot;: [
-              &quot;excludedCol&quot;
-            ],
-            &quot;group_col&quot;: [
-              &quot;groupCol&quot;
-            ],
-            &quot;replicate_col&quot;: [
-              &quot;replicateCol&quot;
-            ],
-            &quot;value_col&quot;: [
-              &quot;valueCol&quot;
-            ],
-            &quot;x_col&quot;: [
-              &quot;xCol&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         {
           &quot;type&quot;: &quot;null&quot;
@@ -4856,56 +3835,145 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;csv&quot;: [
-      &quot;text&quot;,
-      &quot;tsv&quot;,
-      &quot;source&quot;
-    ],
-    &quot;decimal_sep&quot;: [
-      &quot;decimalSep&quot;,
-      &quot;decimal_separator&quot;,
-      &quot;decimalSeparator&quot;
-    ],
-    &quot;excluded_col&quot;: [
-      &quot;excludedCol&quot;
-    ],
-    &quot;group_col&quot;: [
-      &quot;groupCol&quot;
-    ],
-    &quot;mapping&quot;: [
-      &quot;column_mapping&quot;,
-      &quot;columnMapping&quot;
-    ],
-    &quot;normalize_decimal&quot;: [
-      &quot;normalizeDecimal&quot;
-    ],
-    &quot;path&quot;: [
-      &quot;file_path&quot;,
-      &quot;filePath&quot;
-    ],
-    &quot;replicate_col&quot;: [
-      &quot;replicateCol&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;target_kind&quot;: [
-      &quot;targetKind&quot;,
-      &quot;kind&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;name&quot;
-    ],
-    &quot;value_col&quot;: [
-      &quot;valueCol&quot;
-    ],
-    &quot;x_col&quot;: [
-      &quot;xCol&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
+}</code></pre>
+</div>
+<div class="entry-card" id="cmd-table-importxlsx" tabindex="-1">
+  <h4><code>table.importXlsx</code> — Import XLSX Workbook</h4>
+  <p>Import one or more worksheets (or list available sheets) from an .xlsx workbook file, base64, or byte array.</p>
+  <div class="badge-row">
+    <span class="badge">group: table</span>
+    <span class="badge">effects: MUTATES_DOCUMENT, READS_FILESYSTEM, MAY_DISCARD_DATA</span>
+    <span class="badge">menu: File/Import/XLSX Workbook...</span>
+    <span class="badge">shortcut: —</span>
+  </div>
+  <p>MCP tool: <a href="mcp-tools.html#mcp-tool-table_import_xlsx"><code>table_import_xlsx</code></a> · CLI: <code>curvebook-cli table.importXlsx [flags]</code></p>
+  <pre><code class="language-json">{
+  &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+  &quot;additionalProperties&quot;: false,
+  &quot;properties&quot;: {
+    &quot;archetype&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Optional target archetype (XY, Column, Grouped, Contingency, Survival, PartsOfWhole, MultipleVariables, Nested); inferred per sheet when omitted&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;bytes&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Raw byte array of `.xlsx` workbook&quot;,
+          &quot;items&quot;: {
+            &quot;description&quot;: &quot;Byte value 0..=255&quot;,
+            &quot;maximum&quot;: 255,
+            &quot;minimum&quot;: 0,
+            &quot;type&quot;: &quot;integer&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;bytes_base64&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Base64-encoded `.xlsx` workbook bytes&quot;,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;has_header&quot;: {
+      &quot;description&quot;: &quot;Treat first row(s) of each sheet as column headers (default true)&quot;,
+      &quot;type&quot;: &quot;boolean&quot;
+    },
+    &quot;has_row_titles&quot;: {
+      &quot;description&quot;: &quot;Treat first column of each sheet as row titles (default false)&quot;,
+      &quot;type&quot;: &quot;boolean&quot;
+    },
+    &quot;header_rows&quot;: {
+      &quot;description&quot;: &quot;Number of top header rows to merge into column titles (default 1 when `has_header` is true)&quot;,
+      &quot;maximum&quot;: 16,
+      &quot;minimum&quot;: 0,
+      &quot;type&quot;: &quot;integer&quot;
+    },
+    &quot;include_hidden&quot;: {
+      &quot;description&quot;: &quot;Include hidden worksheets when no explicit `sheets`/`sheet_indices` are supplied&quot;,
+      &quot;type&quot;: &quot;boolean&quot;
+    },
+    &quot;list_sheets&quot;: {
+      &quot;description&quot;: &quot;When true, enumerate workbook sheet names/indices without mutating the document&quot;,
+      &quot;type&quot;: &quot;boolean&quot;
+    },
+    &quot;merge&quot;: {
+      &quot;description&quot;: &quot;Merge imported worksheets into the current project instead of replacing it (default false)&quot;,
+      &quot;type&quot;: &quot;boolean&quot;
+    },
+    &quot;path&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Filesystem path to `.xlsx` workbook&quot;,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;sheet_indices&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Zero-based worksheet indices to import&quot;,
+          &quot;items&quot;: {
+            &quot;description&quot;: &quot;Sheet index &gt;= 0&quot;,
+            &quot;minimum&quot;: 0,
+            &quot;type&quot;: &quot;integer&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;sheets&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Worksheet tab names to import (imports all visible sheets if omitted)&quot;,
+          &quot;items&quot;: {
+            &quot;description&quot;: &quot;Worksheet name&quot;,
+            &quot;type&quot;: &quot;string&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;subcolumn_mode&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Subcolumn mode name or object&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    }
+  },
+  &quot;required&quot;: [],
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-paste" tabindex="-1">
@@ -4943,26 +4011,7 @@
         }
       },
       &quot;required&quot;: [],
-      &quot;type&quot;: &quot;object&quot;,
-      &quot;x-deprecated-aliases&quot;: {
-        &quot;col&quot;: [
-          &quot;target_col&quot;,
-          &quot;targetCol&quot;,
-          &quot;data_set&quot;,
-          &quot;dataSet&quot;,
-          &quot;column&quot;
-        ],
-        &quot;row&quot;: [
-          &quot;target_row&quot;,
-          &quot;targetRow&quot;
-        ],
-        &quot;subcol&quot;: [
-          &quot;target_subcol&quot;,
-          &quot;targetSubcol&quot;,
-          &quot;subcolumn&quot;,
-          &quot;replicate&quot;
-        ]
-      }
+      &quot;type&quot;: &quot;object&quot;
     },
     &quot;decimal_separator&quot;: {
       &quot;anyOf&quot;: [
@@ -5134,34 +4183,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col_end&quot;: [
-              &quot;colEnd&quot;
-            ],
-            &quot;col_start&quot;: [
-              &quot;colStart&quot;
-            ],
-            &quot;decimate_every_k&quot;: [
-              &quot;decimateEveryK&quot;,
-              &quot;every_nth_row&quot;,
-              &quot;everyNthRow&quot;
-            ],
-            &quot;parse_asterisk_exclusions&quot;: [
-              &quot;parseAsteriskExclusions&quot;,
-              &quot;parse_asterisk_exclusion&quot;,
-              &quot;parseAsteriskExclusion&quot;
-            ],
-            &quot;row_end&quot;: [
-              &quot;rowEnd&quot;
-            ],
-            &quot;row_start&quot;: [
-              &quot;rowStart&quot;
-            ],
-            &quot;unstack_group_column&quot;: [
-              &quot;unstackGroupColumn&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         {
           &quot;type&quot;: &quot;null&quot;
@@ -5201,28 +4223,6 @@
             {
               &quot;additionalProperties&quot;: false,
               &quot;properties&quot;: {
-                &quot;decimal&quot;: {
-                  &quot;anyOf&quot;: [
-                    {
-                      &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                      &quot;type&quot;: &quot;string&quot;
-                    },
-                    {
-                      &quot;type&quot;: &quot;null&quot;
-                    }
-                  ]
-                },
-                &quot;decimalSeparator&quot;: {
-                  &quot;anyOf&quot;: [
-                    {
-                      &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                      &quot;type&quot;: &quot;string&quot;
-                    },
-                    {
-                      &quot;type&quot;: &quot;null&quot;
-                    }
-                  ]
-                },
                 &quot;decimal_separator&quot;: {
                   &quot;anyOf&quot;: [
                     {
@@ -5236,10 +4236,6 @@
                 },
                 &quot;excluded&quot;: {
                   &quot;description&quot;: &quot;Optional explicit exclusion flag&quot;,
-                  &quot;type&quot;: &quot;boolean&quot;
-                },
-                &quot;parseAsteriskExclusion&quot;: {
-                  &quot;description&quot;: &quot;Interpret trailing `*` in string tokens as excluded (default true)&quot;,
                   &quot;type&quot;: &quot;boolean&quot;
                 },
                 &quot;parse_asterisk_exclusion&quot;: {
@@ -5298,66 +4294,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;anchor&quot;: [
-      &quot;start&quot;
-    ],
-    &quot;decimal_separator&quot;: [
-      &quot;decimalSeparator&quot;,
-      &quot;decimal&quot;
-    ],
-    &quot;filter&quot;: [
-      &quot;slice&quot;
-    ],
-    &quot;mode&quot;: [
-      &quot;placement_mode&quot;,
-      &quot;placementMode&quot;
-    ],
-    &quot;normalize_decimal&quot;: [
-      &quot;normalizeDecimal&quot;
-    ],
-    &quot;propagate_title_header&quot;: [
-      &quot;propagateTitleHeader&quot;
-    ],
-    &quot;rows&quot;: [
-      &quot;grid&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;target_sheet_id&quot;,
-      &quot;targetSheetId&quot;
-    ],
-    &quot;skip_contiguous_blanks&quot;: [
-      &quot;skipContiguousBlanks&quot;
-    ],
-    &quot;start_col&quot;: [
-      &quot;startCol&quot;,
-      &quot;target_col&quot;,
-      &quot;targetCol&quot;,
-      &quot;col&quot;,
-      &quot;data_set&quot;,
-      &quot;dataSet&quot;
-    ],
-    &quot;start_row&quot;: [
-      &quot;startRow&quot;,
-      &quot;target_row&quot;,
-      &quot;targetRow&quot;,
-      &quot;row&quot;
-    ],
-    &quot;start_subcol&quot;: [
-      &quot;startSubcol&quot;,
-      &quot;target_subcol&quot;,
-      &quot;targetSubcol&quot;,
-      &quot;subcol&quot;,
-      &quot;subcolumn&quot;
-    ],
-    &quot;text&quot;: [
-      &quot;tsv&quot;,
-      &quot;csv&quot;,
-      &quot;clipboard&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-pastelink" tabindex="-1">
@@ -5395,26 +4332,7 @@
         }
       },
       &quot;required&quot;: [],
-      &quot;type&quot;: &quot;object&quot;,
-      &quot;x-deprecated-aliases&quot;: {
-        &quot;col&quot;: [
-          &quot;target_col&quot;,
-          &quot;targetCol&quot;,
-          &quot;data_set&quot;,
-          &quot;dataSet&quot;,
-          &quot;column&quot;
-        ],
-        &quot;row&quot;: [
-          &quot;target_row&quot;,
-          &quot;targetRow&quot;
-        ],
-        &quot;subcol&quot;: [
-          &quot;target_subcol&quot;,
-          &quot;targetSubcol&quot;,
-          &quot;subcolumn&quot;,
-          &quot;replicate&quot;
-        ]
-      }
+      &quot;type&quot;: &quot;object&quot;
     },
     &quot;baseline&quot;: {
       &quot;anyOf&quot;: [
@@ -5447,18 +4365,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col&quot;: [
-              &quot;column&quot;,
-              &quot;reference_col&quot;,
-              &quot;referenceCol&quot;
-            ],
-            &quot;op&quot;: [
-              &quot;operation&quot;,
-              &quot;mode&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         {
           &quot;type&quot;: &quot;null&quot;
@@ -5646,34 +4553,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col_end&quot;: [
-              &quot;colEnd&quot;
-            ],
-            &quot;col_start&quot;: [
-              &quot;colStart&quot;
-            ],
-            &quot;decimate_every_k&quot;: [
-              &quot;decimateEveryK&quot;,
-              &quot;every_nth_row&quot;,
-              &quot;everyNthRow&quot;
-            ],
-            &quot;parse_asterisk_exclusions&quot;: [
-              &quot;parseAsteriskExclusions&quot;,
-              &quot;parse_asterisk_exclusion&quot;,
-              &quot;parseAsteriskExclusion&quot;
-            ],
-            &quot;row_end&quot;: [
-              &quot;rowEnd&quot;
-            ],
-            &quot;row_start&quot;: [
-              &quot;rowStart&quot;
-            ],
-            &quot;unstack_group_column&quot;: [
-              &quot;unstackGroupColumn&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         {
           &quot;type&quot;: &quot;null&quot;
@@ -5788,18 +4668,7 @@
                     }
                   },
                   &quot;required&quot;: [],
-                  &quot;type&quot;: &quot;object&quot;,
-                  &quot;x-deprecated-aliases&quot;: {
-                    &quot;col&quot;: [
-                      &quot;data_set&quot;,
-                      &quot;dataSet&quot;,
-                      &quot;column&quot;
-                    ],
-                    &quot;subcol&quot;: [
-                      &quot;subcolumn&quot;,
-                      &quot;replicate&quot;
-                    ]
-                  }
+                  &quot;type&quot;: &quot;object&quot;
                 },
                 &quot;row&quot;: {
                   &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -5813,21 +4682,7 @@
                 }
               },
               &quot;required&quot;: [],
-              &quot;type&quot;: &quot;object&quot;,
-              &quot;x-deprecated-aliases&quot;: {
-                &quot;col&quot;: [
-                  &quot;data_set&quot;,
-                  &quot;dataSet&quot;,
-                  &quot;column&quot;
-                ],
-                &quot;coord&quot;: [
-                  &quot;coordinate&quot;
-                ],
-                &quot;subcol&quot;: [
-                  &quot;subcolumn&quot;,
-                  &quot;replicate&quot;
-                ]
-              }
+              &quot;type&quot;: &quot;object&quot;
             },
             &quot;start&quot;: {
               &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
@@ -5859,18 +4714,7 @@
                     }
                   },
                   &quot;required&quot;: [],
-                  &quot;type&quot;: &quot;object&quot;,
-                  &quot;x-deprecated-aliases&quot;: {
-                    &quot;col&quot;: [
-                      &quot;data_set&quot;,
-                      &quot;dataSet&quot;,
-                      &quot;column&quot;
-                    ],
-                    &quot;subcol&quot;: [
-                      &quot;subcolumn&quot;,
-                      &quot;replicate&quot;
-                    ]
-                  }
+                  &quot;type&quot;: &quot;object&quot;
                 },
                 &quot;row&quot;: {
                   &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -5884,35 +4728,13 @@
                 }
               },
               &quot;required&quot;: [],
-              &quot;type&quot;: &quot;object&quot;,
-              &quot;x-deprecated-aliases&quot;: {
-                &quot;col&quot;: [
-                  &quot;data_set&quot;,
-                  &quot;dataSet&quot;,
-                  &quot;column&quot;
-                ],
-                &quot;coord&quot;: [
-                  &quot;coordinate&quot;
-                ],
-                &quot;subcol&quot;: [
-                  &quot;subcolumn&quot;,
-                  &quot;replicate&quot;
-                ]
-              }
+              &quot;type&quot;: &quot;object&quot;
             }
           },
           &quot;required&quot;: [
             &quot;start&quot;
           ],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;end&quot;: [
-              &quot;to&quot;
-            ],
-            &quot;start&quot;: [
-              &quot;from&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         {
           &quot;type&quot;: &quot;null&quot;
@@ -5970,91 +4792,7 @@
   &quot;required&quot;: [
     &quot;target_sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;anchor&quot;: [
-      &quot;start&quot;
-    ],
-    &quot;decimal_separator&quot;: [
-      &quot;decimalSeparator&quot;,
-      &quot;decimal&quot;
-    ],
-    &quot;exclude_row_predicate&quot;: [
-      &quot;excludeRowPredicate&quot;
-    ],
-    &quot;filter&quot;: [
-      &quot;slice&quot;
-    ],
-    &quot;link_id&quot;: [
-      &quot;linkId&quot;
-    ],
-    &quot;link_spec&quot;: [
-      &quot;linkSpec&quot;
-    ],
-    &quot;mode&quot;: [
-      &quot;placement_mode&quot;,
-      &quot;placementMode&quot;
-    ],
-    &quot;normalize_decimal&quot;: [
-      &quot;normalizeDecimal&quot;
-    ],
-    &quot;propagate_title_header&quot;: [
-      &quot;propagateTitleHeader&quot;
-    ],
-    &quot;provenance&quot;: [
-      &quot;provenance_summary&quot;
-    ],
-    &quot;skip_contiguous_blanks&quot;: [
-      &quot;skipContiguousBlanks&quot;
-    ],
-    &quot;source_kind&quot;: [
-      &quot;sourceKind&quot;
-    ],
-    &quot;source_path&quot;: [
-      &quot;sourcePath&quot;,
-      &quot;path&quot;,
-      &quot;file_path&quot;,
-      &quot;filePath&quot;
-    ],
-    &quot;source_range&quot;: [
-      &quot;sourceRange&quot;,
-      &quot;range&quot;
-    ],
-    &quot;source_sheet_id&quot;: [
-      &quot;sourceSheetId&quot;
-    ],
-    &quot;start_col&quot;: [
-      &quot;startCol&quot;,
-      &quot;target_col&quot;,
-      &quot;targetCol&quot;,
-      &quot;col&quot;,
-      &quot;data_set&quot;,
-      &quot;dataSet&quot;
-    ],
-    &quot;start_row&quot;: [
-      &quot;startRow&quot;,
-      &quot;target_row&quot;,
-      &quot;targetRow&quot;,
-      &quot;row&quot;
-    ],
-    &quot;start_subcol&quot;: [
-      &quot;startSubcol&quot;,
-      &quot;target_subcol&quot;,
-      &quot;targetSubcol&quot;,
-      &quot;subcol&quot;,
-      &quot;subcolumn&quot;
-    ],
-    &quot;tab_id&quot;: [
-      &quot;tabId&quot;,
-      &quot;source_tab_id&quot;,
-      &quot;sourceTabId&quot;
-    ],
-    &quot;target_sheet_id&quot;: [
-      &quot;targetSheetId&quot;,
-      &quot;sheet_id&quot;,
-      &quot;sheetId&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-randomsamplerows" tabindex="-1">
@@ -6156,30 +4894,7 @@
     &quot;source_sheet_id&quot;,
     &quot;sample_size&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;info_sheet_id&quot;: [
-      &quot;info_sheet&quot;
-    ],
-    &quot;sample_size&quot;: [
-      &quot;n_samples&quot;,
-      &quot;count&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;source_sheet_id&quot;: [
-      &quot;source_sheet&quot;,
-      &quot;data_sheet_id&quot;
-    ],
-    &quot;stratify_column&quot;: [
-      &quot;stratify_col&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;name&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-randomizegroups" tabindex="-1">
@@ -6239,12 +4954,7 @@
             &quot;required&quot;: [
               &quot;label&quot;
             ],
-            &quot;type&quot;: &quot;object&quot;,
-            &quot;x-deprecated-aliases&quot;: {
-              &quot;label&quot;: [
-                &quot;name&quot;
-              ]
-            }
+            &quot;type&quot;: &quot;object&quot;
           }
         ]
       },
@@ -6346,23 +5056,7 @@
   &quot;required&quot;: [
     &quot;groups&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;info_sheet_id&quot;: [
-      &quot;info_sheet&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;subject_count&quot;: [
-      &quot;n_subjects&quot;,
-      &quot;count&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;name&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-recodelevels" tabindex="-1">
@@ -6415,17 +5109,7 @@
               &quot;from&quot;,
               &quot;to&quot;
             ],
-            &quot;type&quot;: &quot;object&quot;,
-            &quot;x-deprecated-aliases&quot;: {
-              &quot;from&quot;: [
-                &quot;old&quot;,
-                &quot;source&quot;
-              ],
-              &quot;to&quot;: [
-                &quot;new&quot;,
-                &quot;target&quot;
-              ]
-            }
+            &quot;type&quot;: &quot;object&quot;
           },
           &quot;type&quot;: &quot;array&quot;
         },
@@ -6459,24 +5143,7 @@
     &quot;sheet_id&quot;,
     &quot;mappings&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;col&quot;: [
-      &quot;column&quot;,
-      &quot;column_index&quot;,
-      &quot;columnIndex&quot;,
-      &quot;index&quot;,
-      &quot;variable&quot;
-    ],
-    &quot;mappings&quot;: [
-      &quot;mapping&quot;,
-      &quot;map&quot;,
-      &quot;recode&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-setcalculatedvariable" tabindex="-1">
@@ -6533,25 +5200,7 @@
     &quot;sheet_id&quot;,
     &quot;formula&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;col&quot;: [
-      &quot;column&quot;,
-      &quot;column_index&quot;,
-      &quot;columnIndex&quot;,
-      &quot;index&quot;,
-      &quot;variable&quot;
-    ],
-    &quot;formula&quot;: [
-      &quot;expression&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;name&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-setcategoricalorder" tabindex="-1">
@@ -6654,29 +5303,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;col&quot;: [
-      &quot;column&quot;,
-      &quot;column_index&quot;,
-      &quot;columnIndex&quot;,
-      &quot;index&quot;,
-      &quot;variable&quot;
-    ],
-    &quot;levels&quot;: [
-      &quot;explicit&quot;
-    ],
-    &quot;order&quot;: [
-      &quot;kind&quot;,
-      &quot;mode&quot;
-    ],
-    &quot;order_spec&quot;: [
-      &quot;orderSpec&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-setcell" tabindex="-1">
@@ -6728,18 +5355,7 @@
             }
           },
           &quot;required&quot;: [],
-          &quot;type&quot;: &quot;object&quot;,
-          &quot;x-deprecated-aliases&quot;: {
-            &quot;col&quot;: [
-              &quot;data_set&quot;,
-              &quot;dataSet&quot;,
-              &quot;column&quot;
-            ],
-            &quot;subcol&quot;: [
-              &quot;subcolumn&quot;,
-              &quot;replicate&quot;
-            ]
-          }
+          &quot;type&quot;: &quot;object&quot;
         },
         &quot;row&quot;: {
           &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -6753,21 +5369,7 @@
         }
       },
       &quot;required&quot;: [],
-      &quot;type&quot;: &quot;object&quot;,
-      &quot;x-deprecated-aliases&quot;: {
-        &quot;col&quot;: [
-          &quot;data_set&quot;,
-          &quot;dataSet&quot;,
-          &quot;column&quot;
-        ],
-        &quot;coord&quot;: [
-          &quot;coordinate&quot;
-        ],
-        &quot;subcol&quot;: [
-          &quot;subcolumn&quot;,
-          &quot;replicate&quot;
-        ]
-      }
+      &quot;type&quot;: &quot;object&quot;
     },
     &quot;decimal_separator&quot;: {
       &quot;anyOf&quot;: [
@@ -6820,28 +5422,6 @@
         {
           &quot;additionalProperties&quot;: false,
           &quot;properties&quot;: {
-            &quot;decimal&quot;: {
-              &quot;anyOf&quot;: [
-                {
-                  &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                  &quot;type&quot;: &quot;string&quot;
-                },
-                {
-                  &quot;type&quot;: &quot;null&quot;
-                }
-              ]
-            },
-            &quot;decimalSeparator&quot;: {
-              &quot;anyOf&quot;: [
-                {
-                  &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                  &quot;type&quot;: &quot;string&quot;
-                },
-                {
-                  &quot;type&quot;: &quot;null&quot;
-                }
-              ]
-            },
             &quot;decimal_separator&quot;: {
               &quot;anyOf&quot;: [
                 {
@@ -6855,10 +5435,6 @@
             },
             &quot;excluded&quot;: {
               &quot;description&quot;: &quot;Optional explicit exclusion flag&quot;,
-              &quot;type&quot;: &quot;boolean&quot;
-            },
-            &quot;parseAsteriskExclusion&quot;: {
-              &quot;description&quot;: &quot;Interpret trailing `*` in string tokens as excluded (default true)&quot;,
               &quot;type&quot;: &quot;boolean&quot;
             },
             &quot;parse_asterisk_exclusion&quot;: {
@@ -6881,31 +5457,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;col&quot;: [
-      &quot;data_set&quot;,
-      &quot;dataSet&quot;,
-      &quot;column&quot;
-    ],
-    &quot;coord&quot;: [
-      &quot;coordinate&quot;
-    ],
-    &quot;decimal_separator&quot;: [
-      &quot;decimalSeparator&quot;,
-      &quot;decimal&quot;
-    ],
-    &quot;parse_asterisk_exclusion&quot;: [
-      &quot;parseAsteriskExclusion&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;subcol&quot;: [
-      &quot;subcolumn&quot;,
-      &quot;replicate&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-setcells" tabindex="-1">
@@ -6963,18 +5515,7 @@
                   }
                 },
                 &quot;required&quot;: [],
-                &quot;type&quot;: &quot;object&quot;,
-                &quot;x-deprecated-aliases&quot;: {
-                  &quot;col&quot;: [
-                    &quot;data_set&quot;,
-                    &quot;dataSet&quot;,
-                    &quot;column&quot;
-                  ],
-                  &quot;subcol&quot;: [
-                    &quot;subcolumn&quot;,
-                    &quot;replicate&quot;
-                  ]
-                }
+                &quot;type&quot;: &quot;object&quot;
               },
               &quot;row&quot;: {
                 &quot;description&quot;: &quot;Zero-based row index&quot;,
@@ -6988,21 +5529,7 @@
               }
             },
             &quot;required&quot;: [],
-            &quot;type&quot;: &quot;object&quot;,
-            &quot;x-deprecated-aliases&quot;: {
-              &quot;col&quot;: [
-                &quot;data_set&quot;,
-                &quot;dataSet&quot;,
-                &quot;column&quot;
-              ],
-              &quot;coord&quot;: [
-                &quot;coordinate&quot;
-              ],
-              &quot;subcol&quot;: [
-                &quot;subcolumn&quot;,
-                &quot;replicate&quot;
-              ]
-            }
+            &quot;type&quot;: &quot;object&quot;
           },
           &quot;decimal_separator&quot;: {
             &quot;anyOf&quot;: [
@@ -7050,28 +5577,6 @@
               {
                 &quot;additionalProperties&quot;: false,
                 &quot;properties&quot;: {
-                  &quot;decimal&quot;: {
-                    &quot;anyOf&quot;: [
-                      {
-                        &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                        &quot;type&quot;: &quot;string&quot;
-                      },
-                      {
-                        &quot;type&quot;: &quot;null&quot;
-                      }
-                    ]
-                  },
-                  &quot;decimalSeparator&quot;: {
-                    &quot;anyOf&quot;: [
-                      {
-                        &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                        &quot;type&quot;: &quot;string&quot;
-                      },
-                      {
-                        &quot;type&quot;: &quot;null&quot;
-                      }
-                    ]
-                  },
                   &quot;decimal_separator&quot;: {
                     &quot;anyOf&quot;: [
                       {
@@ -7085,10 +5590,6 @@
                   },
                   &quot;excluded&quot;: {
                     &quot;description&quot;: &quot;Optional explicit exclusion flag&quot;,
-                    &quot;type&quot;: &quot;boolean&quot;
-                  },
-                  &quot;parseAsteriskExclusion&quot;: {
-                    &quot;description&quot;: &quot;Interpret trailing `*` in string tokens as excluded (default true)&quot;,
                     &quot;type&quot;: &quot;boolean&quot;
                   },
                   &quot;parse_asterisk_exclusion&quot;: {
@@ -7109,28 +5610,7 @@
           }
         },
         &quot;required&quot;: [],
-        &quot;type&quot;: &quot;object&quot;,
-        &quot;x-deprecated-aliases&quot;: {
-          &quot;col&quot;: [
-            &quot;data_set&quot;,
-            &quot;dataSet&quot;,
-            &quot;column&quot;
-          ],
-          &quot;coord&quot;: [
-            &quot;coordinate&quot;
-          ],
-          &quot;decimal_separator&quot;: [
-            &quot;decimalSeparator&quot;,
-            &quot;decimal&quot;
-          ],
-          &quot;parse_asterisk_exclusion&quot;: [
-            &quot;parseAsteriskExclusion&quot;
-          ],
-          &quot;subcol&quot;: [
-            &quot;subcolumn&quot;,
-            &quot;replicate&quot;
-          ]
-        }
+        &quot;type&quot;: &quot;object&quot;
       },
       &quot;type&quot;: &quot;array&quot;
     },
@@ -7155,28 +5635,6 @@
             {
               &quot;additionalProperties&quot;: false,
               &quot;properties&quot;: {
-                &quot;decimal&quot;: {
-                  &quot;anyOf&quot;: [
-                    {
-                      &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                      &quot;type&quot;: &quot;string&quot;
-                    },
-                    {
-                      &quot;type&quot;: &quot;null&quot;
-                    }
-                  ]
-                },
-                &quot;decimalSeparator&quot;: {
-                  &quot;anyOf&quot;: [
-                    {
-                      &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                      &quot;type&quot;: &quot;string&quot;
-                    },
-                    {
-                      &quot;type&quot;: &quot;null&quot;
-                    }
-                  ]
-                },
                 &quot;decimal_separator&quot;: {
                   &quot;anyOf&quot;: [
                     {
@@ -7190,10 +5648,6 @@
                 },
                 &quot;excluded&quot;: {
                   &quot;description&quot;: &quot;Optional explicit exclusion flag&quot;,
-                  &quot;type&quot;: &quot;boolean&quot;
-                },
-                &quot;parseAsteriskExclusion&quot;: {
-                  &quot;description&quot;: &quot;Interpret trailing `*` in string tokens as excluded (default true)&quot;,
                   &quot;type&quot;: &quot;boolean&quot;
                 },
                 &quot;parse_asterisk_exclusion&quot;: {
@@ -7240,27 +5694,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;edits&quot;: [
-      &quot;cells&quot;
-    ],
-    &quot;rows&quot;: [
-      &quot;grid&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;start_col&quot;: [
-      &quot;startCol&quot;
-    ],
-    &quot;start_row&quot;: [
-      &quot;startRow&quot;
-    ],
-    &quot;start_subcol&quot;: [
-      &quot;startSubcol&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-setgrouptitles" tabindex="-1">
@@ -7363,46 +5797,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;col&quot;: [
-      &quot;group&quot;,
-      &quot;data_set&quot;,
-      &quot;dataSet&quot;,
-      &quot;column&quot;,
-      &quot;index&quot;
-    ],
-    &quot;column_factor_title&quot;: [
-      &quot;columnFactorTitle&quot;
-    ],
-    &quot;row_factor_title&quot;: [
-      &quot;rowFactorTitle&quot;
-    ],
-    &quot;row_titles&quot;: [
-      &quot;rowTitles&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;start_col&quot;: [
-      &quot;startCol&quot;
-    ],
-    &quot;titles&quot;: [
-      &quot;group_titles&quot;,
-      &quot;groupTitles&quot;,
-      &quot;column_titles&quot;,
-      &quot;columnTitles&quot;,
-      &quot;data_set_titles&quot;,
-      &quot;dataSetTitles&quot;,
-      &quot;y_titles&quot;,
-      &quot;yTitles&quot;
-    ],
-    &quot;x_title&quot;: [
-      &quot;xTitle&quot;,
-      &quot;time_title&quot;,
-      &quot;timeTitle&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-setrowtitles" tabindex="-1">
@@ -7464,19 +5859,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;start_row&quot;: [
-      &quot;startRow&quot;
-    ],
-    &quot;titles&quot;: [
-      &quot;row_titles&quot;,
-      &quot;rowTitles&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-setsubcolumntitles" tabindex="-1">
@@ -7536,30 +5919,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;col&quot;: [
-      &quot;group&quot;,
-      &quot;data_set&quot;,
-      &quot;dataSet&quot;,
-      &quot;column&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;start_subcol&quot;: [
-      &quot;startSubcol&quot;
-    ],
-    &quot;subcol&quot;: [
-      &quot;subcolumn&quot;,
-      &quot;replicate&quot;,
-      &quot;index&quot;
-    ],
-    &quot;titles&quot;: [
-      &quot;subcolumn_titles&quot;,
-      &quot;subcolumnTitles&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-settitles" tabindex="-1">
@@ -7662,46 +6022,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;col&quot;: [
-      &quot;group&quot;,
-      &quot;data_set&quot;,
-      &quot;dataSet&quot;,
-      &quot;column&quot;,
-      &quot;index&quot;
-    ],
-    &quot;column_factor_title&quot;: [
-      &quot;columnFactorTitle&quot;
-    ],
-    &quot;row_factor_title&quot;: [
-      &quot;rowFactorTitle&quot;
-    ],
-    &quot;row_titles&quot;: [
-      &quot;rowTitles&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;start_col&quot;: [
-      &quot;startCol&quot;
-    ],
-    &quot;titles&quot;: [
-      &quot;group_titles&quot;,
-      &quot;groupTitles&quot;,
-      &quot;column_titles&quot;,
-      &quot;columnTitles&quot;,
-      &quot;data_set_titles&quot;,
-      &quot;dataSetTitles&quot;,
-      &quot;y_titles&quot;,
-      &quot;yTitles&quot;
-    ],
-    &quot;x_title&quot;: [
-      &quot;xTitle&quot;,
-      &quot;time_title&quot;,
-      &quot;timeTitle&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-setvariablerole" tabindex="-1">
@@ -7759,19 +6080,7 @@
     &quot;sheet_id&quot;,
     &quot;role&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;col&quot;: [
-      &quot;column&quot;,
-      &quot;column_index&quot;,
-      &quot;columnIndex&quot;,
-      &quot;index&quot;,
-      &quot;variable&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-setxcells" tabindex="-1">
@@ -7851,28 +6160,6 @@
               {
                 &quot;additionalProperties&quot;: false,
                 &quot;properties&quot;: {
-                  &quot;decimal&quot;: {
-                    &quot;anyOf&quot;: [
-                      {
-                        &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                        &quot;type&quot;: &quot;string&quot;
-                      },
-                      {
-                        &quot;type&quot;: &quot;null&quot;
-                      }
-                    ]
-                  },
-                  &quot;decimalSeparator&quot;: {
-                    &quot;anyOf&quot;: [
-                      {
-                        &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                        &quot;type&quot;: &quot;string&quot;
-                      },
-                      {
-                        &quot;type&quot;: &quot;null&quot;
-                      }
-                    ]
-                  },
                   &quot;decimal_separator&quot;: {
                     &quot;anyOf&quot;: [
                       {
@@ -7886,10 +6173,6 @@
                   },
                   &quot;excluded&quot;: {
                     &quot;description&quot;: &quot;Optional explicit exclusion flag&quot;,
-                    &quot;type&quot;: &quot;boolean&quot;
-                  },
-                  &quot;parseAsteriskExclusion&quot;: {
-                    &quot;description&quot;: &quot;Interpret trailing `*` in string tokens as excluded (default true)&quot;,
                     &quot;type&quot;: &quot;boolean&quot;
                   },
                   &quot;parse_asterisk_exclusion&quot;: {
@@ -7912,20 +6195,7 @@
         &quot;required&quot;: [
           &quot;row&quot;
         ],
-        &quot;type&quot;: &quot;object&quot;,
-        &quot;x-deprecated-aliases&quot;: {
-          &quot;decimal_separator&quot;: [
-            &quot;decimalSeparator&quot;,
-            &quot;decimal&quot;
-          ],
-          &quot;parse_asterisk_exclusion&quot;: [
-            &quot;parseAsteriskExclusion&quot;
-          ],
-          &quot;subcol&quot;: [
-            &quot;subcolumn&quot;,
-            &quot;replicate&quot;
-          ]
-        }
+        &quot;type&quot;: &quot;object&quot;
       },
       &quot;type&quot;: &quot;array&quot;
     },
@@ -7974,28 +6244,6 @@
         {
           &quot;additionalProperties&quot;: false,
           &quot;properties&quot;: {
-            &quot;decimal&quot;: {
-              &quot;anyOf&quot;: [
-                {
-                  &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                  &quot;type&quot;: &quot;string&quot;
-                },
-                {
-                  &quot;type&quot;: &quot;null&quot;
-                }
-              ]
-            },
-            &quot;decimalSeparator&quot;: {
-              &quot;anyOf&quot;: [
-                {
-                  &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                  &quot;type&quot;: &quot;string&quot;
-                },
-                {
-                  &quot;type&quot;: &quot;null&quot;
-                }
-              ]
-            },
             &quot;decimal_separator&quot;: {
               &quot;anyOf&quot;: [
                 {
@@ -8009,10 +6257,6 @@
             },
             &quot;excluded&quot;: {
               &quot;description&quot;: &quot;Optional explicit exclusion flag&quot;,
-              &quot;type&quot;: &quot;boolean&quot;
-            },
-            &quot;parseAsteriskExclusion&quot;: {
-              &quot;description&quot;: &quot;Interpret trailing `*` in string tokens as excluded (default true)&quot;,
               &quot;type&quot;: &quot;boolean&quot;
             },
             &quot;parse_asterisk_exclusion&quot;: {
@@ -8050,28 +6294,6 @@
           {
             &quot;additionalProperties&quot;: false,
             &quot;properties&quot;: {
-              &quot;decimal&quot;: {
-                &quot;anyOf&quot;: [
-                  {
-                    &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                    &quot;type&quot;: &quot;string&quot;
-                  },
-                  {
-                    &quot;type&quot;: &quot;null&quot;
-                  }
-                ]
-              },
-              &quot;decimalSeparator&quot;: {
-                &quot;anyOf&quot;: [
-                  {
-                    &quot;description&quot;: &quot;Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)&quot;,
-                    &quot;type&quot;: &quot;string&quot;
-                  },
-                  {
-                    &quot;type&quot;: &quot;null&quot;
-                  }
-                ]
-              },
               &quot;decimal_separator&quot;: {
                 &quot;anyOf&quot;: [
                   {
@@ -8085,10 +6307,6 @@
               },
               &quot;excluded&quot;: {
                 &quot;description&quot;: &quot;Optional explicit exclusion flag&quot;,
-                &quot;type&quot;: &quot;boolean&quot;
-              },
-              &quot;parseAsteriskExclusion&quot;: {
-                &quot;description&quot;: &quot;Interpret trailing `*` in string tokens as excluded (default true)&quot;,
                 &quot;type&quot;: &quot;boolean&quot;
               },
               &quot;parse_asterisk_exclusion&quot;: {
@@ -8113,32 +6331,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;decimal_separator&quot;: [
-      &quot;decimalSeparator&quot;,
-      &quot;decimal&quot;
-    ],
-    &quot;edits&quot;: [
-      &quot;cells&quot;
-    ],
-    &quot;parse_asterisk_exclusion&quot;: [
-      &quot;parseAsteriskExclusion&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;start_row&quot;: [
-      &quot;startRow&quot;
-    ],
-    &quot;subcol&quot;: [
-      &quot;subcolumn&quot;,
-      &quot;replicate&quot;
-    ],
-    &quot;values&quot;: [
-      &quot;x&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-simulatedistributions" tabindex="-1">
@@ -8180,7 +6373,7 @@
             ]
           },
           &quot;lambda&quot;: {
-            &quot;description&quot;: &quot;Rate/mean parameter for poisson/exponential distribution&quot;,
+            &quot;description&quot;: &quot;Rate/mean parameter for poisson distribution&quot;,
             &quot;type&quot;: &quot;number&quot;
           },
           &quot;max&quot;: {
@@ -8188,29 +6381,16 @@
             &quot;type&quot;: &quot;number&quot;
           },
           &quot;mean&quot;: {
-            &quot;description&quot;: &quot;Mean for gaussian/poisson distribution&quot;,
+            &quot;description&quot;: &quot;Mean for gaussian distribution&quot;,
             &quot;type&quot;: &quot;number&quot;
           },
           &quot;mean_log&quot;: {
             &quot;description&quot;: &quot;Log-space mean for log_normal distribution&quot;,
             &quot;type&quot;: &quot;number&quot;
           },
-          &quot;meanlog&quot;: {
-            &quot;description&quot;: &quot;Log-space mean alias&quot;,
-            &quot;type&quot;: &quot;number&quot;
-          },
           &quot;min&quot;: {
             &quot;description&quot;: &quot;Minimum bound for uniform distribution&quot;,
             &quot;type&quot;: &quot;number&quot;
-          },
-          &quot;mu&quot;: {
-            &quot;description&quot;: &quot;Mean alias for gaussian/log_normal distribution&quot;,
-            &quot;type&quot;: &quot;number&quot;
-          },
-          &quot;n&quot;: {
-            &quot;description&quot;: &quot;Number of trials alias&quot;,
-            &quot;minimum&quot;: 0,
-            &quot;type&quot;: &quot;integer&quot;
           },
           &quot;name&quot;: {
             &quot;minLength&quot;: 1,
@@ -8223,16 +6403,8 @@
           &quot;params&quot;: {
             &quot;type&quot;: &quot;object&quot;
           },
-          &quot;prob&quot;: {
-            &quot;description&quot;: &quot;Success probability alias&quot;,
-            &quot;type&quot;: &quot;number&quot;
-          },
-          &quot;probability&quot;: {
-            &quot;description&quot;: &quot;Success probability alias&quot;,
-            &quot;type&quot;: &quot;number&quot;
-          },
           &quot;rate&quot;: {
-            &quot;description&quot;: &quot;Rate parameter for exponential/poisson distribution&quot;,
+            &quot;description&quot;: &quot;Rate parameter for exponential distribution&quot;,
             &quot;type&quot;: &quot;number&quot;
           },
           &quot;sd&quot;: {
@@ -8241,18 +6413,6 @@
           },
           &quot;sd_log&quot;: {
             &quot;description&quot;: &quot;Log-space standard deviation for log_normal distribution&quot;,
-            &quot;type&quot;: &quot;number&quot;
-          },
-          &quot;sdlog&quot;: {
-            &quot;description&quot;: &quot;Log-space standard deviation alias&quot;,
-            &quot;type&quot;: &quot;number&quot;
-          },
-          &quot;sigma&quot;: {
-            &quot;description&quot;: &quot;Standard deviation alias&quot;,
-            &quot;type&quot;: &quot;number&quot;
-          },
-          &quot;std&quot;: {
-            &quot;description&quot;: &quot;Standard deviation alias&quot;,
             &quot;type&quot;: &quot;number&quot;
           },
           &quot;trials&quot;: {
@@ -8265,12 +6425,7 @@
           &quot;name&quot;,
           &quot;distribution&quot;
         ],
-        &quot;type&quot;: &quot;object&quot;,
-        &quot;x-deprecated-aliases&quot;: {
-          &quot;name&quot;: [
-            &quot;title&quot;
-          ]
-        }
+        &quot;type&quot;: &quot;object&quot;
       },
       &quot;minItems&quot;: 1,
       &quot;type&quot;: &quot;array&quot;
@@ -8331,23 +6486,7 @@
     &quot;columns&quot;,
     &quot;n_rows&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;n_rows&quot;: [
-      &quot;row_count&quot;,
-      &quot;rows&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;name&quot;
-    ],
-    &quot;use_multiple_variables&quot;: [
-      &quot;multiple_variables&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-table-simulatexy" tabindex="-1">
@@ -8465,53 +6604,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;auto_info&quot;: [
-      &quot;autoInfo&quot;
-    ],
-    &quot;cv_percent&quot;: [
-      &quot;cvPercent&quot;
-    ],
-    &quot;equation_id&quot;: [
-      &quot;equationId&quot;,
-      &quot;equation&quot;
-    ],
-    &quot;graph_sheet_id&quot;: [
-      &quot;graphSheetId&quot;
-    ],
-    &quot;noise_kind&quot;: [
-      &quot;noiseKind&quot;,
-      &quot;noise&quot;
-    ],
-    &quot;noise_sd&quot;: [
-      &quot;noiseSd&quot;,
-      &quot;sd&quot;
-    ],
-    &quot;parameters&quot;: [
-      &quot;params&quot;
-    ],
-    &quot;replicates&quot;: [
-      &quot;k&quot;,
-      &quot;subcolumns&quot;
-    ],
-    &quot;row_count&quot;: [
-      &quot;rows&quot;,
-      &quot;rowCount&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;name&quot;
-    ],
-    &quot;x_max&quot;: [
-      &quot;xMax&quot;
-    ],
-    &quot;x_min&quot;: [
-      &quot;xMin&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <h3 id="group-info" tabindex="-1">Info &amp; Constants (3)</h3>
@@ -8555,20 +6648,7 @@
     &quot;sheet_id&quot;,
     &quot;name&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;if_exists&quot;: [
-      &quot;ifExists&quot;
-    ],
-    &quot;name&quot;: [
-      &quot;key&quot;,
-      &quot;constant&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-info-setconstant" tabindex="-1">
@@ -8626,16 +6706,7 @@
     &quot;name&quot;,
     &quot;value&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;name&quot;: [
-      &quot;key&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-info-setnote" tabindex="-1">
@@ -8677,20 +6748,7 @@
     &quot;sheet_id&quot;,
     &quot;text&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;sheetId&quot;,
-      &quot;id&quot;
-    ],
-    &quot;text&quot;: [
-      &quot;note&quot;,
-      &quot;notes&quot;,
-      &quot;notes_markdown&quot;,
-      &quot;notesMarkdown&quot;,
-      &quot;markdown&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <h3 id="group-analysis" tabindex="-1">Analysis &amp; Reports (12)</h3>
@@ -8742,6 +6800,16 @@
         }
       ]
     },
+    &quot;deming_error&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Model II Deming error model (`EqualError`, `StandardDeviations`, or `VarianceRatio`)&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
     &quot;df_method&quot;: {
       &quot;anyOf&quot;: [
         {
@@ -8756,9 +6824,30 @@
     &quot;equation_id&quot;: {
       &quot;anyOf&quot;: [
         {
-          &quot;description&quot;: &quot;Built-in or custom equation identifier&quot;,
+          &quot;description&quot;: &quot;Built-in equation ID (e.g. `log_inhibitor_vs_response_4pl`, `log_agonist_vs_response_4pl`, `log_agonist_vs_response_3pl`, `michaelis_menten`, `one_phase_decay`, `two_phase_decay`, `exponential_growth`, `one_site_specific_binding`, `gaussian`, `bell_shaped_dose_response`) or custom label with `custom_dsl`&quot;,
           &quot;minLength&quot;: 1,
           &quot;type&quot;: &quot;string&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;extend_line_to_x_intercept&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Extend fitted regression line plot range to include the X-intercept&quot;,
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;fixed_point&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Optional fixed-point constraint [x0, y0] forcing Y - y0 = slope * (X - x0)&quot;
         },
         {
           &quot;type&quot;: &quot;null&quot;
@@ -8803,6 +6892,16 @@
         }
       ],
       &quot;description&quot;: &quot;Any analysis kind shorthand or typed AnalysisKind object&quot;
+    },
+    &quot;method&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Fitting/outlier method: `least_squares` (default), `robust` (Cauchy), `rout` (ROUT FDR 1% outlier elimination + OLS refit), or `{\&quot;rout_outlier_elimination\&quot;: {\&quot;fdr_q_percent\&quot;: 1.0}}`&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
     },
     &quot;multiplicity&quot;: {
       &quot;anyOf&quot;: [
@@ -8958,6 +7057,17 @@
         }
       ]
     },
+    &quot;standard_addition&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Report standard-addition unknown concentration (-X-intercept) and negated Fieller CI&quot;,
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
     &quot;title&quot;: {
       &quot;anyOf&quot;: [
         {
@@ -9002,29 +7112,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;comparison&quot;: [
-      &quot;model_comparison&quot;
-    ],
-    &quot;confidence_percent&quot;: [
-      &quot;confidence_level&quot;
-    ],
-    &quot;selected_data_sets&quot;: [
-      &quot;selected_columns&quot;,
-      &quot;columns&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ],
-    &quot;source_sheet_id&quot;: [
-      &quot;source_sheet&quot;,
-      &quot;data_sheet_id&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;custom_title&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-analysis-exportcsv" tabindex="-1">
@@ -9110,12 +7198,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-analysis-exportjson" tabindex="-1">
@@ -9164,12 +7247,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-analysis-retargetdata" tabindex="-1">
@@ -9228,16 +7306,7 @@
     &quot;sheet_id&quot;,
     &quot;source_sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ],
-    &quot;source_sheet_id&quot;: [
-      &quot;source_sheet&quot;,
-      &quot;data_sheet_id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-analysis-run" tabindex="-1">
@@ -9288,6 +7357,16 @@
         }
       ]
     },
+    &quot;deming_error&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Model II Deming error model (`EqualError`, `StandardDeviations`, or `VarianceRatio`)&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
     &quot;df_method&quot;: {
       &quot;anyOf&quot;: [
         {
@@ -9302,9 +7381,30 @@
     &quot;equation_id&quot;: {
       &quot;anyOf&quot;: [
         {
-          &quot;description&quot;: &quot;Built-in or custom equation identifier&quot;,
+          &quot;description&quot;: &quot;Built-in equation ID (e.g. `log_inhibitor_vs_response_4pl`, `log_agonist_vs_response_4pl`, `log_agonist_vs_response_3pl`, `michaelis_menten`, `one_phase_decay`, `two_phase_decay`, `exponential_growth`, `one_site_specific_binding`, `gaussian`, `bell_shaped_dose_response`) or custom label with `custom_dsl`&quot;,
           &quot;minLength&quot;: 1,
           &quot;type&quot;: &quot;string&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;extend_line_to_x_intercept&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Extend fitted regression line plot range to include the X-intercept&quot;,
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;fixed_point&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Optional fixed-point constraint [x0, y0] forcing Y - y0 = slope * (X - x0)&quot;
         },
         {
           &quot;type&quot;: &quot;null&quot;
@@ -9349,6 +7449,16 @@
         }
       ],
       &quot;description&quot;: &quot;Any analysis kind shorthand or typed AnalysisKind object&quot;
+    },
+    &quot;method&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Fitting/outlier method: `least_squares` (default), `robust` (Cauchy), `rout` (ROUT FDR 1% outlier elimination + OLS refit), or `{\&quot;rout_outlier_elimination\&quot;: {\&quot;fdr_q_percent\&quot;: 1.0}}`&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
     },
     &quot;multiplicity&quot;: {
       &quot;anyOf&quot;: [
@@ -9504,6 +7614,17 @@
         }
       ]
     },
+    &quot;standard_addition&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Report standard-addition unknown concentration (-X-intercept) and negated Fieller CI&quot;,
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
     &quot;title&quot;: {
       &quot;anyOf&quot;: [
         {
@@ -9548,29 +7669,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;comparison&quot;: [
-      &quot;model_comparison&quot;
-    ],
-    &quot;confidence_percent&quot;: [
-      &quot;confidence_level&quot;
-    ],
-    &quot;selected_data_sets&quot;: [
-      &quot;selected_columns&quot;,
-      &quot;columns&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ],
-    &quot;source_sheet_id&quot;: [
-      &quot;source_sheet&quot;,
-      &quot;data_sheet_id&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;custom_title&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-analysis-updateparams" tabindex="-1">
@@ -9672,25 +7771,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;confidence_percent&quot;: [
-      &quot;confidence_level&quot;
-    ],
-    &quot;params&quot;: [
-      &quot;patch&quot;
-    ],
-    &quot;selected_data_sets&quot;: [
-      &quot;selected_columns&quot;,
-      &quot;columns&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;custom_title&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-analyze-run" tabindex="-1">
@@ -9757,6 +7838,16 @@
         }
       ]
     },
+    &quot;deming_error&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Model II Deming error model (`EqualError`, `StandardDeviations`, or `VarianceRatio`)&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
     &quot;df_method&quot;: {
       &quot;anyOf&quot;: [
         {
@@ -9771,9 +7862,30 @@
     &quot;equation_id&quot;: {
       &quot;anyOf&quot;: [
         {
-          &quot;description&quot;: &quot;Built-in or custom equation identifier&quot;,
+          &quot;description&quot;: &quot;Built-in equation ID (e.g. `log_inhibitor_vs_response_4pl`, `log_agonist_vs_response_4pl`, `log_agonist_vs_response_3pl`, `michaelis_menten`, `one_phase_decay`, `two_phase_decay`, `exponential_growth`, `one_site_specific_binding`, `gaussian`, `bell_shaped_dose_response`) or custom label with `custom_dsl`&quot;,
           &quot;minLength&quot;: 1,
           &quot;type&quot;: &quot;string&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;extend_line_to_x_intercept&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Extend fitted regression line plot range to include the X-intercept&quot;,
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;fixed_point&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Optional fixed-point constraint [x0, y0] forcing Y - y0 = slope * (X - x0)&quot;
         },
         {
           &quot;type&quot;: &quot;null&quot;
@@ -9817,7 +7929,17 @@
           &quot;type&quot;: &quot;null&quot;
         }
       ],
-      &quot;description&quot;: &quot;Regression kind or equation shorthand (e.g. `four_parameter_logistic`, `linear`, `deming`) or typed object&quot;
+      &quot;description&quot;: &quot;Regression kind or equation shorthand (e.g. `4pl` / `log_agonist_vs_response_4pl`, `4pl_inhibitor` / `log_inhibitor_vs_response_4pl`, `3pl`, `linear`, `deming`, `michaelis_menten`, `one_phase_decay`, `one_site_specific_binding`) or typed object&quot;
+    },
+    &quot;method&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Fitting/outlier method: `least_squares` (default), `robust` (Cauchy), `rout` (ROUT FDR 1% outlier elimination + OLS refit), or `{\&quot;rout_outlier_elimination\&quot;: {\&quot;fdr_q_percent\&quot;: 1.0}}`&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
     },
     &quot;multiplicity&quot;: {
       &quot;anyOf&quot;: [
@@ -9973,6 +8095,17 @@
         }
       ]
     },
+    &quot;standard_addition&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;description&quot;: &quot;Report standard-addition unknown concentration (-X-intercept) and negated Fieller CI&quot;,
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
     &quot;title&quot;: {
       &quot;anyOf&quot;: [
         {
@@ -10017,29 +8150,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;comparison&quot;: [
-      &quot;model_comparison&quot;
-    ],
-    &quot;confidence_percent&quot;: [
-      &quot;confidence_level&quot;
-    ],
-    &quot;selected_data_sets&quot;: [
-      &quot;selected_columns&quot;,
-      &quot;columns&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ],
-    &quot;source_sheet_id&quot;: [
-      &quot;source_sheet&quot;,
-      &quot;data_sheet_id&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;custom_title&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-result-generatereport" tabindex="-1">
@@ -10089,13 +8200,7 @@
   &quot;required&quot;: [
     &quot;result_sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;result_sheet_id&quot;: [
-      &quot;sheet_id&quot;,
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-stats-pvaluestack" tabindex="-1">
@@ -10217,26 +8322,7 @@
   &quot;required&quot;: [
     &quot;source_sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;selected_data_sets&quot;: [
-      &quot;selected_columns&quot;,
-      &quot;columns&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ],
-    &quot;source_sheet_id&quot;: [
-      &quot;source_sheet&quot;,
-      &quot;source&quot;,
-      &quot;data_sheet_id&quot;
-    ],
-    &quot;threshold&quot;: [
-      &quot;alpha&quot;,
-      &quot;q&quot;,
-      &quot;fdr_q&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-stats-run" tabindex="-1">
@@ -10290,7 +8376,7 @@
           &quot;type&quot;: &quot;null&quot;
         }
       ],
-      &quot;description&quot;: &quot;Statistical test kind shorthand or typed AnalysisKind object&quot;
+      &quot;description&quot;: &quot;Statistical test shorthand (e.g. `unpaired_t`, `welch_t`, `paired_t`, `mann_whitney`, `wilcoxon`, `one_sample_t`, `one_way_anova`, `welch_anova`, `rm_one_way_anova`, `kruskal_wallis`, `friedman`, `two_way_anova`, `three_way_anova`, `nested_t`, `nested_anova`, `descriptive`, `rout`, `grubbs`, `multiple_row_t_tests`, `contingency`, `fisher_exact`, `kaplan_meier`, `cox_ph`, `roc`, `bland_altman`, `passing_bablok`, `pvalue_stack`, `power`, `pca`, `correlation`, `clustering`) or typed AnalysisKind object&quot;
     },
     &quot;multiplicity&quot;: {
       &quot;anyOf&quot;: [
@@ -10410,29 +8496,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;comparison&quot;: [
-      &quot;model_comparison&quot;
-    ],
-    &quot;confidence_percent&quot;: [
-      &quot;confidence_level&quot;
-    ],
-    &quot;selected_data_sets&quot;: [
-      &quot;selected_columns&quot;,
-      &quot;columns&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ],
-    &quot;source_sheet_id&quot;: [
-      &quot;source_sheet&quot;,
-      &quot;data_sheet_id&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;custom_title&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-transform-run" tabindex="-1">
@@ -10585,29 +8649,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;comparison&quot;: [
-      &quot;model_comparison&quot;
-    ],
-    &quot;confidence_percent&quot;: [
-      &quot;confidence_level&quot;
-    ],
-    &quot;selected_data_sets&quot;: [
-      &quot;selected_columns&quot;,
-      &quot;columns&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ],
-    &quot;source_sheet_id&quot;: [
-      &quot;source_sheet&quot;,
-      &quot;data_sheet_id&quot;
-    ],
-    &quot;title&quot;: [
-      &quot;custom_title&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <h3 id="group-graph" tabindex="-1">Graphs &amp; Styling (17)</h3>
@@ -10741,12 +8783,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-addcomparisonbrackets" tabindex="-1">
@@ -10888,15 +8925,7 @@
     &quot;sheet_id&quot;,
     &quot;result_sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;result_sheet_id&quot;: [
-      &quot;result_sheet&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-applycanvaspreset" tabindex="-1">
@@ -10940,15 +8969,7 @@
     &quot;sheet_id&quot;,
     &quot;preset&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;resize_mode&quot;: [
-      &quot;mode&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-applystylefrom" tabindex="-1">
@@ -11035,17 +9056,7 @@
   &quot;required&quot;: [
     &quot;donor_sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;donor_sheet_id&quot;: [
-      &quot;from_sheet_id&quot;,
-      &quot;source_graph_id&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;target_sheet_id&quot;,
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-create" tabindex="-1">
@@ -11137,16 +9148,7 @@
   &quot;required&quot;: [
     &quot;data_sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;data_sheet_id&quot;: [
-      &quot;source_sheet_id&quot;,
-      &quot;source_sheet&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-formatselectedpoints" tabindex="-1">
@@ -11323,19 +9325,7 @@
           &quot;series_index&quot;,
           &quot;point_index&quot;
         ],
-        &quot;type&quot;: &quot;object&quot;,
-        &quot;x-deprecated-aliases&quot;: {
-          &quot;border_width_pt&quot;: [
-            &quot;stroke_width_pt&quot;
-          ],
-          &quot;subcol&quot;: [
-            &quot;subcolumn&quot;,
-            &quot;replicate&quot;
-          ],
-          &quot;symbol&quot;: [
-            &quot;shape&quot;
-          ]
-        }
+        &quot;type&quot;: &quot;object&quot;
       },
       &quot;type&quot;: &quot;array&quot;
     },
@@ -11372,13 +9362,7 @@
           &quot;series_index&quot;,
           &quot;point_index&quot;
         ],
-        &quot;type&quot;: &quot;object&quot;,
-        &quot;x-deprecated-aliases&quot;: {
-          &quot;subcol&quot;: [
-            &quot;subcolumn&quot;,
-            &quot;replicate&quot;
-          ]
-        }
+        &quot;type&quot;: &quot;object&quot;
       },
       &quot;type&quot;: &quot;array&quot;
     },
@@ -11413,19 +9397,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;border_width_pt&quot;: [
-      &quot;stroke_width_pt&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;,
-      &quot;graph_sheet_id&quot;
-    ],
-    &quot;symbol&quot;: [
-      &quot;shape&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-initialize" tabindex="-1">
@@ -11472,12 +9444,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-insertimage" tabindex="-1">
@@ -11709,12 +9676,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-setadditionalticks" tabindex="-1">
@@ -11786,19 +9748,7 @@
     &quot;axis&quot;,
     &quot;ticks&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;axis&quot;: [
-      &quot;which&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;,
-      &quot;graph_sheet_id&quot;
-    ],
-    &quot;ticks&quot;: [
-      &quot;additional_ticks&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-setaxes" tabindex="-1">
@@ -11879,15 +9829,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;axis&quot;: [
-      &quot;which&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-setcompactletterdisplay" tabindex="-1">
@@ -12016,18 +9958,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;pairwise_display_mode&quot;: [
-      &quot;display_mode&quot;
-    ],
-    &quot;result_sheet_id&quot;: [
-      &quot;result_sheet&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-setkind" tabindex="-1">
@@ -12079,12 +10010,7 @@
     &quot;sheet_id&quot;,
     &quot;kind&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-setregressionoverlay" tabindex="-1">
@@ -12214,15 +10140,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;result_sheet_id&quot;: [
-      &quot;result_sheet&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-setseries" tabindex="-1">
@@ -12351,15 +10269,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;all_series&quot;: [
-      &quot;allSeries&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-setspec" tabindex="-1">
@@ -12487,12 +10397,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-updateimage" tabindex="-1">
@@ -12881,27 +10786,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;badge_override&quot;: [
-      &quot;badge&quot;
-    ],
-    &quot;graph_sheet_id&quot;: [
-      &quot;graph_sheet&quot;
-    ],
-    &quot;kind&quot;: [
-      &quot;type&quot;
-    ],
-    &quot;markdown&quot;: [
-      &quot;text&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ],
-    &quot;source_sheet_id&quot;: [
-      &quot;source_sheet&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-layout-alignorigins" tabindex="-1">
@@ -12949,15 +10834,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;align&quot;: [
-      &quot;align_plot_origins&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-layout-applycanvaspreset" tabindex="-1">
@@ -13001,15 +10878,7 @@
     &quot;sheet_id&quot;,
     &quot;preset&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;resize_mode&quot;: [
-      &quot;mode&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-layout-create" tabindex="-1">
@@ -13155,12 +11024,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-layout-equalizescaling" tabindex="-1">
@@ -13695,12 +11559,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-layout-updateimage" tabindex="-1">
@@ -14032,15 +11891,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;outline_text&quot;: [
-      &quot;vector_text&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-export-png" tabindex="-1">
@@ -14117,12 +11968,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-export-svg" tabindex="-1">
@@ -14228,12 +12074,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-export-tiff" tabindex="-1">
@@ -14321,12 +12162,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-exportemf" tabindex="-1">
@@ -14364,12 +12200,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-exportpdf" tabindex="-1">
@@ -14472,15 +12303,7 @@
     }
   },
   &quot;required&quot;: [],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;outline_text&quot;: [
-      &quot;vector_text&quot;
-    ],
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-exportpng" tabindex="-1">
@@ -14557,12 +12380,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-graph-exportsvg" tabindex="-1">
@@ -14668,12 +12486,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <div class="entry-card" id="cmd-layout-exportemf" tabindex="-1">
@@ -14711,12 +12524,7 @@
   &quot;required&quot;: [
     &quot;sheet_id&quot;
   ],
-  &quot;type&quot;: &quot;object&quot;,
-  &quot;x-deprecated-aliases&quot;: {
-    &quot;sheet_id&quot;: [
-      &quot;id&quot;
-    ]
-  }
+  &quot;type&quot;: &quot;object&quot;
 }</code></pre>
 </div>
 <h2 id="ui-commands" tabindex="-1">Desktop UI Commands (UI_COMMANDS)</h2>
@@ -14776,6 +12584,7 @@
 <tr id="ui-cmd-ui-gridoverlay-toggle" tabindex="-1"><td><code>ui.gridOverlay.toggle</code></td><td>Canvas Grid</td><td>—</td><td><code>{&quot;visible&quot;:&quot;optional bool&quot;,&quot;spacing_pt&quot;:&quot;optional number&quot;}</code></td><td>Toggle the non-exported alignment grid overlay on GraphSheet and LayoutSheet canvases.</td></tr>
 <tr id="ui-cmd-ui-embeddedtable-format-open" tabindex="-1"><td><code>ui.embeddedTable.format.open</code></td><td>Format Embedded Table...</td><td>—</td><td><code>{&quot;sheet_id&quot;:&quot;optional GraphSheetId|LayoutSheetId&quot;,&quot;annotation_index&quot;:&quot;optional usize&quot;,&quot;panel_index&quot;:&quot;optional usize&quot;}</code></td><td>Open the Format Embedded Table dialog for a pasted ResultSheet or LiveTable annotation.</td></tr>
 <tr id="ui-cmd-ui-image-format-open" tabindex="-1"><td><code>ui.image.format.open</code></td><td>Format Image...</td><td>—</td><td><code>{&quot;sheet_id&quot;:&quot;optional GraphSheetId|LayoutSheetId&quot;,&quot;annotation_index&quot;:&quot;optional usize&quot;,&quot;panel_index&quot;:&quot;optional usize&quot;}</code></td><td>Open the Format Image dialog to edit bounds, aspect lock, rotation, 4-edge crop, and border.</td></tr>
+<tr id="ui-cmd-ui-clipboard-copyforslides" tabindex="-1"><td><code>ui.clipboard.copyForSlides</code></td><td>Copy for Slides &amp; Documents</td><td>Cmd+Shift+C</td><td><code>{&quot;sheet_id&quot;:&quot;optional GraphSheetId|LayoutSheetId&quot;,&quot;dpi&quot;:&quot;optional u16 (72..=1200, default 300)&quot;}</code></td><td>Copy the active graph or layout figure at 300 DPI (PDF, PNG, TIFF, EMF, SVG, and &lt;img&gt; HTML) without raw SVG XML plain-text fallback for Keynote, PowerPoint, and Word.</td></tr>
 </tbody>
 </table></div>
         <nav class="pager" aria-label="Previous and next pages">
@@ -14789,6 +12598,12 @@
       <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
       <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
     </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
   </div>
 </body>
 </html>
