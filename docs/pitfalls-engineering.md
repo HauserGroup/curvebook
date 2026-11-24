@@ -48,7 +48,7 @@ A fix on `main` may postdate the release the reporter ran.
 
 **Test the merge result of PRs that touch a gate or what a gate covers.**
 Two PRs can each pass on their own branch and fail together once both are on `main`.
-*In CurveBook:* the `untranslated_report` test in `crates/ui-egui/src/i18n.rs` pins the catalogue size, so two PRs that each add a UI string conflict only after merging; the same applies to `cargo xtask layers`, `status`, and generated files. Before merging a PR whose base moved, build the merge (`git merge-tree --write-tree origin/main origin/<branch>`, then a scratch branch) and run `cargo xtask ci` on it; after merging several PRs in a row, run it once more on `main`.
+*In CurveBook:* the `untranslated_report` test in `crates/ui-egui/src/i18n.rs` pins the catalogue size, so two PRs that each add a UI string conflict only after merging; the same applies to `cargo xtask layers`, `status`, and generated files. Before merging a PR whose base moved, build the merge (`git merge-tree --write-tree origin/main origin/<branch>`, then a scratch branch) and run `cargo xtask ci quick` on it (reserving full local `cargo xtask ci` for gate/broad changes or multi-agent integration waves, per `AGENTS.md` › Verification policy); let hosted CI on `main` serve as the post-merge full gate instead of repeating full local `cargo xtask ci` after every merge.
 
 **A dependency change always ships with its `Cargo.lock` change.**
 Staging selected folders easily leaves the root lockfile behind.

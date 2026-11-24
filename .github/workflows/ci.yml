@@ -19,8 +19,68 @@ env:
   CARGO_NET_RETRY: '5'
 
 jobs:
+  classify:
+    name: Classify changed files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.diff.outputs.docs_only }}
+    steps:
+      - name: Checkout PR commits
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Determine whether PR is docs-only
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ] || [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git -c core.quotepath=false diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/changed-files.txt"
+          docs_only="$(
+            CHANGED_FILE_LIST="$RUNNER_TEMP/changed-files.txt" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          ROOT_DOCS = {
+              "README.md",
+              "CONTRIBUTING.md",
+              "AGENTS.md",
+              "CLAUDE.md",
+              "ROADMAP.md",
+              "SECURITY.md",
+          }
+
+          def is_docs_only_path(path: str) -> bool:
+              if path in ROOT_DOCS:
+                  return True
+              if path.startswith("plan/"):
+                  return True
+              if path.startswith("docs/"):
+                  if path == "docs/control-protocol.md" or path.startswith("docs/schemas/"):
+                      return False
+                  return True
+              return False
+
+          raw = Path(os.environ["CHANGED_FILE_LIST"]).read_text(encoding="utf-8")
+          files = [line.strip() for line in raw.splitlines() if line.strip()]
+          print("true" if files and all(is_docs_only_path(p) for p in files) else "false")
+          PY
+          )"
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build native test archive
+    needs: [classify]
+    if: needs.classify.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -77,7 +137,7 @@ jobs:
         with:
           install-gui-libs: 'true'
           install-linters: ${{ matrix.stage == 'policy' && 'true' || 'false' }}
-          install-nextest: ${{ (matrix.stage == 'tests' || matrix.stage == 'performance' || matrix.stage == 'features') && 'true' || 'false' }}
+          install-nextest: ${{ (matrix.stage == 'tests' || matrix.stage == 'performance') && 'true' || 'false' }}
           # The release-scan tests unpack a synthetic `.rpm` that only libarchive can read.
           install-libarchive: ${{ matrix.stage == 'tests' && 'true' || 'false' }}
           install-pdf-qa: ${{ matrix.stage == 'tests' && 'true' || 'false' }}
@@ -127,21 +187,50 @@ jobs:
           cp target/debug/xtask "$RUNNER_TEMP/curvebook-ci"
           "$RUNNER_TEMP/curvebook-ci" ci "$CI_STAGE"
 
+  docs-policy:
+    name: CI / docs-only policy
+    needs: [classify]
+    if: needs.classify.outputs.docs_only == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/ci-setup
+        with:
+          install-gui-libs: 'true'
+          install-linters: 'true'
+          install-deny: 'false'
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run policy stage
+        run: cargo run --locked -p xtask -- ci policy
+
   gate:
     # Keep the existing required-check name while requiring every stage to succeed.
     name: Workspace CI gate
-    needs: [build, checks]
+    needs: [classify, build, checks, docs-policy]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require all quality stages
         env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          DOCS_ONLY: ${{ needs.classify.outputs.docs_only }}
           BUILD_RESULT: ${{ needs.build.result }}
           CHECKS_RESULT: ${{ needs.checks.result }}
+          DOCS_POLICY_RESULT: ${{ needs.docs-policy.result }}
         run: |
-          test "$BUILD_RESULT" = success
-          test "$CHECKS_RESULT" = success
+          set -euo pipefail
+          test "$CLASSIFY_RESULT" = success
+          if [ "$DOCS_ONLY" = true ]; then
+            test "$DOCS_POLICY_RESULT" = success
+          else
+            test "$BUILD_RESULT" = success
+            test "$CHECKS_RESULT" = success
+          fi
 
   prune-caches:
     name: Prune superseded CI caches
