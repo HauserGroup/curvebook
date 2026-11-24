@@ -20,10 +20,11 @@ pub use services::{BatchCommandStep, BatchStepFailure};
 use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use curvebook_chart::{ChartError, ChartScene};
-use curvebook_doc::{DocError, ProjectDocument, SheetId, SummaryPointError};
+use curvebook_doc::{Cell, CellCoord, CellExclusionNote, DocError, ProjectDocument, SheetId, SummaryPointError, TableArchetype, VariableRole};
 pub use curvebook_doc::{ErrorCategory, ErrorCode, RemediationKind};
 use curvebook_fit::FitError;
 #[cfg(not(target_arch = "wasm32"))]
@@ -724,18 +725,104 @@ pub const MAX_UNDO_CELL_BUDGET: usize = 25_000_000;
 pub const MAX_UNDO_CHECKPOINT_BYTES_BUDGET: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
-struct UndoEntry {
-    doc: ProjectDocument,
+struct SingleCellDelta {
+    sheet_id: SheetId,
+    coord: CellCoord,
+    cell: Cell,
+    mv_role: Option<VariableRole>,
+    exclusion_notes: Option<Vec<CellExclusionNote>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum UndoPayload {
+    Snapshot(ProjectDocument),
+    CellDelta(SingleCellDelta),
+}
+
+#[derive(Debug, Clone)]
+struct UndoEntryInner {
+    payload: UndoPayload,
     file_path: Option<PathBuf>,
     cell_slots: usize,
     checkpoint_bytes: usize,
+    cp_verified: bool,
 }
 
+impl PartialEq for UndoEntryInner {
+    fn eq(&self, other: &Self) -> bool {
+        self.payload == other.payload
+            && self.file_path == other.file_path
+            && self.cell_slots == other.cell_slots
+            && self.checkpoint_bytes == other.checkpoint_bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct UndoEntry(Arc<UndoEntryInner>);
+
 impl UndoEntry {
-    fn from_snapshot(doc: ProjectDocument, file_path: Option<PathBuf>) -> Self {
+    fn from_snapshot(doc: ProjectDocument, file_path: Option<PathBuf>, cp_verified: bool) -> Self {
         let cell_slots = document_allocated_cell_slots(&doc);
         let checkpoint_bytes = document_checkpoint_bytes(&doc);
-        Self { doc, file_path, cell_slots, checkpoint_bytes }
+        Self(Arc::new(UndoEntryInner { payload: UndoPayload::Snapshot(doc), file_path, cell_slots, checkpoint_bytes, cp_verified }))
+    }
+
+    fn from_cell_delta(delta: SingleCellDelta, file_path: Option<PathBuf>, cell_slots: usize, checkpoint_bytes: usize, cp_verified: bool) -> Self {
+        Self(Arc::new(UndoEntryInner { payload: UndoPayload::CellDelta(delta), file_path, cell_slots, checkpoint_bytes, cp_verified }))
+    }
+
+    fn cell_slots(&self) -> usize {
+        self.0.cell_slots
+    }
+
+    fn checkpoint_bytes(&self) -> usize {
+        self.0.checkpoint_bytes
+    }
+
+    fn swap_into_document(
+        self,
+        doc: &mut ProjectDocument,
+        file_path: &mut Option<PathBuf>,
+        current_cp_verified: bool,
+    ) -> Result<(Self, bool), EngineError> {
+        let mut inner = match Arc::try_unwrap(self.0) {
+            Ok(owned) => owned,
+            Err(shared) => (*shared).clone(),
+        };
+        match inner.payload {
+            UndoPayload::Snapshot(prev_doc) => {
+                let current_doc = std::mem::replace(doc, prev_doc);
+                let current_path = std::mem::replace(file_path, inner.file_path);
+                Ok((Self::from_snapshot(current_doc, current_path, current_cp_verified), inner.cp_verified))
+            }
+            UndoPayload::CellDelta(ref mut delta) => {
+                let ds = doc
+                    .data_sheet_mut(&delta.sheet_id)
+                    .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, format!("undo target sheet `{}` missing", delta.sheet_id)))?;
+                let slot = ds.archetype.data_cell_mut(delta.coord).ok_or_else(|| {
+                    EngineError::with_code(
+                        ErrorCode::InternalError,
+                        format!("undo target cell ({},{},{}) missing", delta.coord.row, delta.coord.col, delta.coord.subcol),
+                    )
+                })?;
+                std::mem::swap(slot, &mut delta.cell);
+                if let TableArchetype::MultipleVariables(mv) = &mut ds.archetype
+                    && let Some(var) = mv.variables.get_mut(delta.coord.col)
+                    && let Some(prev_role) = delta.mv_role.take()
+                {
+                    delta.mv_role = Some(var.role);
+                    var.role = prev_role;
+                }
+                if let Some(prev_notes) = delta.exclusion_notes.take() {
+                    let old_notes = std::mem::replace(&mut ds.exclusion_notes, prev_notes);
+                    delta.exclusion_notes = Some(old_notes);
+                }
+                let current_path = std::mem::replace(file_path, inner.file_path.take());
+                inner.file_path = current_path;
+                inner.cp_verified = current_cp_verified;
+                Ok((Self(Arc::new(inner)), true))
+            }
+        }
     }
 }
 
@@ -747,6 +834,22 @@ fn document_checkpoint_bytes(doc: &ProjectDocument) -> usize {
     let cp_bytes = doc.checkpoints.iter().fold(0usize, |acc, cp| acc.saturating_add(cp.snapshot_json.len()));
     let asset_bytes = doc.image_assets.iter().fold(0usize, |acc, asset| acc.saturating_add(asset.bytes.len()));
     cp_bytes.saturating_add(asset_bytes)
+}
+
+fn command_may_modify_checkpoints(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "file.new"
+            | "project.new"
+            | "project.open"
+            | "project.instantiateTemplate"
+            | "project.createCheckpoint"
+            | "project.deleteCheckpoint"
+            | "project.renameCheckpoint"
+            | "project.restoreCheckpoint"
+            | "table.importPrism"
+            | "table.importPzfx"
+    )
 }
 
 fn is_preview_only_convert(params: &serde_json::Value) -> bool {
@@ -1033,6 +1136,7 @@ pub struct Session {
     mutation_epoch: u64,
     history_epoch: u64,
     clean_epoch: u64,
+    baseline_verified: bool,
 }
 
 impl PartialEq for Session {
@@ -1369,6 +1473,13 @@ impl Session {
     #[must_use]
     pub fn from_document(mut document: ProjectDocument) -> Self {
         let _ = curvebook_format::sanitize_circular_hooks(&mut document);
+        let empty_baseline = document.data_sheets.is_empty()
+            && document.info_sheets.is_empty()
+            && document.result_sheets.is_empty()
+            && document.graph_sheets.is_empty()
+            && document.layout_sheets.is_empty()
+            && document.checkpoints.is_empty()
+            && document.image_assets.is_empty();
         Self {
             doc: document,
             file_path: None,
@@ -1380,6 +1491,7 @@ impl Session {
             mutation_epoch: 0,
             history_epoch: 0,
             clean_epoch: 0,
+            baseline_verified: empty_baseline,
         }
     }
 
@@ -1511,25 +1623,29 @@ impl Session {
     /// Total allocated data-table cell slots across all retained undo snapshots.
     #[must_use]
     pub fn undo_cell_slots(&self) -> usize {
-        self.undo_stack.iter().fold(0usize, |acc, entry| acc.saturating_add(entry.cell_slots))
+        self.undo_stack.iter().fold(0usize, |acc, entry| acc.saturating_add(entry.cell_slots()))
     }
 
     fn undo_checkpoint_bytes(&self) -> usize {
-        self.undo_stack.iter().fold(0usize, |acc, entry| acc.saturating_add(entry.checkpoint_bytes))
+        self.undo_stack.iter().fold(0usize, |acc, entry| acc.saturating_add(entry.checkpoint_bytes()))
     }
 
-    fn push_undo_snapshot(&mut self, doc: ProjectDocument, file_path: Option<PathBuf>) {
-        self.undo_stack.push_back(UndoEntry::from_snapshot(doc, file_path));
+    fn push_undo_entry(&mut self, entry: UndoEntry) {
+        self.undo_stack.push_back(entry);
         let mut total_cells = self.undo_cell_slots();
         let mut total_cp_bytes = self.undo_checkpoint_bytes();
         while self.undo_stack.len() > 1
             && (self.undo_stack.len() > MAX_UNDO_ENTRIES || total_cells > MAX_UNDO_CELL_BUDGET || total_cp_bytes > MAX_UNDO_CHECKPOINT_BYTES_BUDGET)
         {
             if let Some(evicted) = self.undo_stack.pop_front() {
-                total_cells = total_cells.saturating_sub(evicted.cell_slots);
-                total_cp_bytes = total_cp_bytes.saturating_sub(evicted.checkpoint_bytes);
+                total_cells = total_cells.saturating_sub(evicted.cell_slots());
+                total_cp_bytes = total_cp_bytes.saturating_sub(evicted.checkpoint_bytes());
             }
         }
+    }
+
+    fn push_undo_snapshot(&mut self, doc: ProjectDocument, file_path: Option<PathBuf>, cp_verified: bool) {
+        self.push_undo_entry(UndoEntry::from_snapshot(doc, file_path, cp_verified));
     }
 
     /// Collapse a sequence of mutating operations executed after `baseline` into a single atomic
@@ -1553,7 +1669,7 @@ impl Session {
             let pre_doc = std::mem::take(&mut baseline.doc);
             let pre_path = baseline.file_path.take();
             self.undo_stack = baseline.undo_stack;
-            self.push_undo_snapshot(pre_doc, pre_path);
+            self.push_undo_snapshot(pre_doc, pre_path, baseline.baseline_verified);
             self.redo_stack.clear();
             if !saved_or_opened_clean {
                 self.dirty = true;
@@ -1562,6 +1678,7 @@ impl Session {
         } else {
             self.undo_stack = baseline.undo_stack;
             self.redo_stack = baseline.redo_stack;
+            self.baseline_verified = baseline.baseline_verified;
             if !saved_or_opened_clean {
                 self.dirty = baseline.dirty;
             }
@@ -1720,6 +1837,7 @@ impl Session {
     {
         let before_dirty = self.dirty;
         let before_history_epoch = self.history_epoch;
+        let before_cp_verified = self.baseline_verified;
         let redo_may_evict = spec.id == "edit.redo"
             && !self.redo_stack.is_empty()
             && (self.undo_stack.len() >= MAX_UNDO_ENTRIES
@@ -1732,20 +1850,19 @@ impl Session {
             if res.mutated {
                 if spec.id == "edit.undo" {
                     if let Some(before_entry) = self.redo_stack.pop() {
-                        let undone_doc = std::mem::replace(&mut self.doc, before_entry.doc);
-                        let undone_path = std::mem::replace(&mut self.file_path, before_entry.file_path);
-                        self.undo_stack.push_back(UndoEntry::from_snapshot(undone_doc, undone_path));
+                        let (restored, _) = before_entry.swap_into_document(&mut self.doc, &mut self.file_path, self.baseline_verified)?;
+                        self.undo_stack.push_back(restored);
                     }
                 } else if let Some(prev_entry) = self.undo_stack.pop_back() {
-                    let redone_doc = std::mem::replace(&mut self.doc, prev_entry.doc);
-                    let redone_path = std::mem::replace(&mut self.file_path, prev_entry.file_path);
-                    self.redo_stack.push(UndoEntry::from_snapshot(redone_doc, redone_path));
+                    let (restored, _) = prev_entry.swap_into_document(&mut self.doc, &mut self.file_path, self.baseline_verified)?;
+                    self.redo_stack.push(restored);
                     if let Some(full_undo) = undo_backup {
                         self.undo_stack = full_undo;
                     }
                 }
                 self.dirty = before_dirty;
                 self.history_epoch = before_history_epoch;
+                self.baseline_verified = before_cp_verified;
             }
             return Err(hook_err);
         }
@@ -1763,11 +1880,80 @@ impl Session {
     where
         F: FnOnce(&Self, &CommandOutcome) -> Result<(), EngineError>,
     {
+        if spec.id == "table.setCell" && self.baseline_verified {
+            let scope = cmd::params::DeprecationScope::enter();
+            let prep = guard::run_guarded(spec.id, || cmd::table::prepare_fast_set_cell(&self.doc, &params))?;
+            if let Some(fast) = prep {
+                let mut outcome = cmd::table::fast_set_cell_outcome(&fast.sheet_id, fast.coord);
+                let warnings = scope.finish_warnings(spec.id);
+                if caller != Caller::Replay {
+                    outcome.warnings.extend(warnings);
+                }
+                let cell_slots = document_allocated_cell_slots(&self.doc);
+                let checkpoint_bytes = document_checkpoint_bytes(&self.doc);
+                let before_dirty = self.dirty;
+                let ds = self
+                    .doc
+                    .data_sheet_mut(&fast.sheet_id)
+                    .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{}` not found", fast.sheet_id)))?;
+                let prev_cell = ds.archetype.data_cell(fast.coord).cloned().ok_or_else(|| {
+                    EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("cell ({},{},{}) out of bounds", fast.coord.row, fast.coord.col, fast.coord.subcol),
+                    )
+                })?;
+                let prev_mv_role = match &ds.archetype {
+                    TableArchetype::MultipleVariables(mv) => mv.variables.get(fast.coord.col).map(|v| v.role),
+                    _ => None,
+                };
+                let prev_exclusion_notes = if !fast.cell.excluded && ds.exclusion_notes.iter().any(|entry| entry.coord == fast.coord) {
+                    Some(ds.exclusion_notes.clone())
+                } else {
+                    None
+                };
+                if let Err(err) = ds.set_cell(fast.coord, fast.cell) {
+                    return Err(err.into());
+                }
+                self.dirty = true;
+                if let Err(hook_err) = after_commit(self, &outcome) {
+                    if let Some(ds_mut) = self.doc.data_sheet_mut(&fast.sheet_id) {
+                        if let Some(slot) = ds_mut.archetype.data_cell_mut(fast.coord) {
+                            *slot = prev_cell;
+                        }
+                        if let TableArchetype::MultipleVariables(mv) = &mut ds_mut.archetype
+                            && let Some(var) = mv.variables.get_mut(fast.coord.col)
+                            && let Some(prev_role) = prev_mv_role
+                        {
+                            var.role = prev_role;
+                        }
+                        if let Some(notes) = prev_exclusion_notes {
+                            ds_mut.exclusion_notes = notes;
+                        }
+                    }
+                    self.dirty = before_dirty;
+                    return Err(hook_err);
+                }
+                let delta = SingleCellDelta {
+                    sheet_id: fast.sheet_id,
+                    coord: fast.coord,
+                    cell: prev_cell,
+                    mv_role: prev_mv_role,
+                    exclusion_notes: prev_exclusion_notes,
+                };
+                self.push_undo_entry(UndoEntry::from_cell_delta(delta, self.file_path.clone(), cell_slots, checkpoint_bytes, true));
+                self.redo_stack.clear();
+                self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+                return Ok(outcome);
+            }
+        }
+
         let opens_project_path = spec.id == "project.open" && params.get("path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty());
         let clears_file_path_on_mutate = matches!(spec.id, "file.new" | "project.new" | "project.instantiateTemplate")
             || (matches!(spec.id, "table.importPrism" | "table.importPzfx") && !params.get("merge").and_then(Value::as_bool).unwrap_or(false))
             || (spec.id == "project.open" && !opens_project_path);
         let has_inline_bytes = has_inline_archive_bytes(&params);
+        let may_modify_checkpoints = !self.baseline_verified || command_may_modify_checkpoints(spec.id);
+        let before_cp_verified = self.baseline_verified;
         let before = self.doc.clone();
         let before_path = self.file_path.clone();
         let before_dirty = self.dirty;
@@ -1776,7 +1962,13 @@ impl Session {
         match outcome {
             Ok(res) => {
                 if res.mutated {
-                    if let Err(err) = curvebook_format::validate_project_document(&self.doc) {
+                    let cp_len_changed = self.doc.checkpoints.len() != before.checkpoints.len();
+                    let val_res = if may_modify_checkpoints || cp_len_changed {
+                        curvebook_format::validate_project_document(&self.doc)
+                    } else {
+                        curvebook_format::validate_project_document_skip_checkpoints(&self.doc)
+                    };
+                    if let Err(err) = val_res {
                         self.doc = before;
                         self.file_path = before_path;
                         self.dirty = before_dirty;
@@ -1810,7 +2002,9 @@ impl Session {
                         self.dirty = before_dirty;
                         return Err(hook_err);
                     }
-                    self.push_undo_snapshot(before, before_path);
+                    self.baseline_verified = true;
+                    let before_snapshot_verified = before_cp_verified && !may_modify_checkpoints && !cp_len_changed;
+                    self.push_undo_snapshot(before, before_path, before_snapshot_verified);
                     self.redo_stack.clear();
                     self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
                     if opens_project_path {
@@ -1835,9 +2029,9 @@ impl Session {
         let Some(prev) = self.undo_stack.pop_back() else {
             return Ok(false);
         };
-        let current_doc = std::mem::replace(&mut self.doc, prev.doc);
-        let current_path = std::mem::replace(&mut self.file_path, prev.file_path);
-        self.redo_stack.push(UndoEntry::from_snapshot(current_doc, current_path));
+        let (redo_entry, restored_verified) = prev.swap_into_document(&mut self.doc, &mut self.file_path, self.baseline_verified)?;
+        self.redo_stack.push(redo_entry);
+        self.baseline_verified = restored_verified;
         self.dirty = true;
         self.history_epoch = self.history_epoch.wrapping_add(1);
         Ok(true)
@@ -1848,9 +2042,9 @@ impl Session {
         let Some(next) = self.redo_stack.pop() else {
             return Ok(false);
         };
-        let current_doc = std::mem::replace(&mut self.doc, next.doc);
-        let current_path = std::mem::replace(&mut self.file_path, next.file_path);
-        self.push_undo_snapshot(current_doc, current_path);
+        let (undo_entry, restored_verified) = next.swap_into_document(&mut self.doc, &mut self.file_path, self.baseline_verified)?;
+        self.push_undo_entry(undo_entry);
+        self.baseline_verified = restored_verified;
         self.dirty = true;
         self.history_epoch = self.history_epoch.wrapping_add(1);
         Ok(true)
@@ -2038,5 +2232,78 @@ mod tests {
         let mut pure_mem = Session::new().with_gui_only(GuiOnlyPolicy::Strict);
         pure_mem.execute_as_ui("sheet.createData", json!({ "sheet_id": "m1", "kind": "Column" })).expect("create m1");
         pure_mem.execute_as_ui("project.recalculate", json!({})).expect("in-memory recalc succeeds");
+    }
+
+    #[test]
+    fn fast_set_cell_delta_preserves_mv_role_exclusion_notes_and_rollback() {
+        use curvebook_doc::{
+            Cell, CellCoord, CellExclusionNote, CellValue, DataSheet, MultipleVariablesTable, ProjectDocument, TableArchetype, VariableRole,
+        };
+
+        let mut mv = MultipleVariablesTable::new(1, 3).expect("mv table");
+        if let Some(var) = mv.variables.get_mut(0) {
+            var.role = VariableRole::Continuous;
+            var.role_inferred = true;
+            if let Some(slot) = var.cells.get_mut(0) {
+                *slot = Cell::excluded_number(10.0);
+            }
+            if let Some(slot) = var.cells.get_mut(1) {
+                *slot = Cell::number(20.0);
+            }
+        }
+        let mut ds = DataSheet::new(SheetId::from("mv-1"), "MV", TableArchetype::MultipleVariables(mv)).expect("mv sheet");
+        ds.exclusion_notes.push(CellExclusionNote {
+            coord: CellCoord::new(0, 0, 0),
+            reason_tag: String::from("outlier"),
+            note: String::from("pipetting outlier"),
+            timestamp_utc: String::from("unix:1"),
+        });
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(ds).expect("add mv");
+        let mut session = Session::from_document(doc);
+
+        // First mutation validates document cleanly and primes `baseline_verified`.
+        session.execute("table.setCell", json!({ "sheet_id": "mv-1", "row": 1, "col": 0, "value": 25.0 })).expect("first edit");
+
+        // Second mutation uses O(1) cell delta fast path: replaces excluded cell with text, updating MV role + exclusion notes.
+        session
+            .execute("table.setCell", json!({ "sheet_id": "mv-1", "row": 0, "col": 0, "value": "Control", "excluded": false }))
+            .expect("fast text edit");
+
+        let ds_after = session.document().data_sheet(&SheetId::from("mv-1")).expect("mv-1");
+        assert!(ds_after.exclusion_notes.is_empty(), "clearing excluded flag must clear exclusion note");
+        let mv_after = match &ds_after.archetype {
+            TableArchetype::MultipleVariables(t) => t,
+            other => panic!("unexpected archetype: {other:?}"),
+        };
+        assert_eq!(mv_after.variables.first().map(|v| v.role), Some(VariableRole::Categorical));
+
+        // Failing post-commit hook on fast path must roll back cell, MV role, notes, and dirty state.
+        let snapshot_before_fail = session.clone();
+        let cancel = AtomicBool::new(false);
+        let _err = session
+            .execute_with_caller_and_hook(
+                "table.setCell",
+                json!({ "sheet_id": "mv-1", "row": 2, "col": 0, "value": 99.0 }),
+                Caller::Ui,
+                &cancel,
+                |_, _| Err(EngineError::new("forced commit failure")),
+            )
+            .expect_err("forced hook error");
+        assert_eq!(session, snapshot_before_fail);
+
+        // Undo and redo must faithfully restore excluded value, exclusion note, and inferred Continuous role.
+        assert!(session.undo().expect("undo text edit"));
+        let ds_undone = session.document().data_sheet(&SheetId::from("mv-1")).expect("mv-1 undone");
+        assert_eq!(ds_undone.exclusion_notes.len(), 1);
+        assert_eq!(ds_undone.cell(CellCoord::new(0, 0, 0)), Some(&Cell::excluded_number(10.0)));
+        if let TableArchetype::MultipleVariables(t) = &ds_undone.archetype {
+            assert_eq!(t.variables.first().map(|v| v.role), Some(VariableRole::Continuous));
+        }
+
+        assert!(session.redo().expect("redo text edit"));
+        let ds_redone = session.document().data_sheet(&SheetId::from("mv-1")).expect("mv-1 redone");
+        assert!(ds_redone.exclusion_notes.is_empty());
+        assert_eq!(ds_redone.cell(CellCoord::new(0, 0, 0)), Some(&Cell { value: CellValue::Text(String::from("Control")), excluded: false }));
     }
 }

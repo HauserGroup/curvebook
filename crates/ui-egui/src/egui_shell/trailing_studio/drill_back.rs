@@ -12,25 +12,28 @@ use crate::i18n::tr;
 use super::helpers::{StudioButtonSpec, studio_full_button};
 use super::{DrillBackPointEntry, TrailingStudioContext, TrailingStudioEguiState};
 
-fn ensure_drill_points_cache<'a>(app: &UiApp, gs: &GraphSheet, state: &'a mut TrailingStudioEguiState) -> &'a [DrillBackPointEntry] {
+fn ensure_drill_points_cache<'a>(
+    ctx: &egui::Context,
+    app: &UiApp,
+    gs: &GraphSheet,
+    state: &'a mut TrailingStudioEguiState,
+) -> &'a [DrillBackPointEntry] {
     let seq = app.mutation_seq();
     let hit = state.drill_cache_key.as_ref().is_some_and(|(sid, s)| sid == &gs.id && *s == seq);
     if !hit {
         state.drill_cache_key = Some((gs.id.clone(), seq));
-        state.drill_cached_points = app
-            .session()
-            .render_sheet_scene(&gs.id)
+        state.drill_cached_points = crate::egui_shell::canvas_view::resolve_cached_scene(ctx, app, &gs.id, "canvas")
             .map(|scene| {
                 scene
                     .plotted_points
-                    .into_iter()
+                    .iter()
                     .map(|p| DrillBackPointEntry {
                         source_sheet_id: p.source_cell.sheet_id.clone(),
                         row: p.source_cell.row,
                         col: p.source_cell.col,
                         subcol: p.source_cell.subcol,
-                        series_label: p.series_label,
-                        value_summary: p.value_summary,
+                        series_label: p.series_label.clone(),
+                        value_summary: p.value_summary.clone(),
                         x_pt_tenths: (p.center_pt.x * 10.0).round() as i64,
                         y_pt_tenths: (p.center_pt.y * 10.0).round() as i64,
                     })
@@ -76,7 +79,7 @@ pub(super) fn render_data_point_drill_back_studio(
         return;
     };
 
-    let points = ensure_drill_points_cache(app, gs, state);
+    let points = ensure_drill_points_cache(ui.ctx(), app, gs, state);
     let matched_pt =
         points.iter().find(|p| p.source_sheet_id == brushed.sheet_id && p.row == brushed.row && p.col == brushed.col && p.subcol == brushed.subcol);
     let brushed_on_graph = matched_pt.is_some()

@@ -502,6 +502,13 @@ pub(crate) fn recalculate_dirty_with_links_report(
     recalculate_project_scoped(doc, external_policy, Some(dirty_seeds))
 }
 
+pub(crate) fn data_sheet_has_calculated_variables(ds: &DataSheet) -> bool {
+    matches!(
+        &ds.archetype,
+        TableArchetype::MultipleVariables(mv) if mv.variables.iter().any(|v| matches!(v.source, curvebook_doc::VariableSource::Calculated { .. }))
+    )
+}
+
 fn recalculate_project_scoped(
     doc: &mut ProjectDocument,
     external_policy: Option<&ExternalPathPolicy>,
@@ -509,19 +516,57 @@ fn recalculate_project_scoped(
 ) -> Result<(RecalcReport, usize), EngineError> {
     let order = topological_order(doc)?;
     let dirty_closure = dirty_seeds.map(|seeds| compute_dirty_closure(doc, &order, seeds, external_policy));
+    let in_scope = |sheet_id: &SheetId| dirty_closure.as_ref().is_none_or(|dirty| dirty.contains(sheet_id));
+
+    // Only dirty unfrozen data sheets with links or calculated variables can mutate data or fail.
+    // Skipping whole-document cloning (and massive checkpoints/assets) keeps plain cell edits O(1).
+    let has_fallible_dirty_ds =
+        doc.data_sheets.iter().any(|ds| in_scope(&ds.id) && !ds.frozen && (!ds.linked_regions.is_empty() || data_sheet_has_calculated_variables(ds)));
+
+    if !has_fallible_dirty_ds {
+        let mut report = RecalcReport { evaluated_order: order.clone(), ..RecalcReport::default() };
+        for sheet_id in order {
+            if !in_scope(&sheet_id) {
+                continue;
+            }
+            if let Some(ds) = doc.data_sheet(&sheet_id) {
+                if ds.frozen {
+                    report.skipped_frozen_sheets.push(sheet_id);
+                }
+            } else if let Some(res_idx) = doc.result_sheets.iter().position(|s| s.id == sheet_id) {
+                if recompute_result_sheet(doc, res_idx) {
+                    report.updated_result_sheets.push(sheet_id);
+                } else {
+                    report.failed_result_sheets.push(sheet_id);
+                }
+            } else if doc.graph_sheets.iter().any(|g| g.id == sheet_id) {
+                report.preserved_graph_sheets.push(sheet_id);
+            }
+        }
+        crate::cmd::helpers::prune_out_of_bounds_point_overrides(doc);
+        return Ok((report, 0));
+    }
+
+    let saved_checkpoints = std::mem::take(&mut doc.checkpoints);
+    let saved_assets = std::mem::take(&mut doc.image_assets);
     let mut working = doc.clone();
     let mut report = RecalcReport { evaluated_order: order.clone(), ..RecalcReport::default() };
     let mut refreshed_links = 0usize;
 
     for sheet_id in order {
-        if let Some(ref dirty) = dirty_closure
-            && !dirty.contains(&sheet_id)
-        {
+        if !in_scope(&sheet_id) {
             continue;
         }
         if let Some(ds_idx) = working.data_sheets.iter().position(|s| s.id == sheet_id) {
-            let refreshed = evaluate_data_sheet_node(&mut working, ds_idx, &mut report, external_policy)?;
-            refreshed_links = refreshed_links.saturating_add(refreshed);
+            let evaluated = evaluate_data_sheet_node(&mut working, ds_idx, &mut report, external_policy);
+            match evaluated {
+                Ok(refreshed) => refreshed_links = refreshed_links.saturating_add(refreshed),
+                Err(err) => {
+                    doc.checkpoints = saved_checkpoints;
+                    doc.image_assets = saved_assets;
+                    return Err(err);
+                }
+            }
         } else if let Some(res_idx) = working.result_sheets.iter().position(|s| s.id == sheet_id) {
             let succeeded = recompute_result_sheet(&mut working, res_idx);
             if succeeded {
@@ -534,6 +579,8 @@ fn recalculate_project_scoped(
         }
     }
 
+    working.checkpoints = saved_checkpoints;
+    working.image_assets = saved_assets;
     *doc = working;
     crate::cmd::helpers::prune_out_of_bounds_point_overrides(doc);
     Ok((report, refreshed_links))
@@ -617,6 +664,9 @@ fn evaluate_data_sheet_node(
     let sheet_id = ds.id.clone();
     if ds.frozen {
         report.skipped_frozen_sheets.push(sheet_id);
+        return Ok(0);
+    }
+    if ds.linked_regions.is_empty() && !data_sheet_has_calculated_variables(ds) {
         return Ok(0);
     }
 

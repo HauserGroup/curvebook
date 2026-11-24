@@ -834,8 +834,12 @@ fn active_series_row_len(ds: &DataSheet, col: usize) -> usize {
     0
 }
 
-/// Record the active non-empty trailing length of each dataset column in `ds` prior to a cell edit.
+/// Record the active non-empty trailing length of each dataset column in `ds` prior to a cell edit
+/// when any graph sheet holds per-point style overrides that might need pruning.
 pub(crate) fn snapshot_active_series_lengths(doc: &ProjectDocument, sheet_id: &SheetId) -> Vec<usize> {
+    if !doc.graph_sheets.iter().any(|gs| !gs.spec.point_overrides.is_empty()) {
+        return Vec::new();
+    }
     let Some(ds) = doc.data_sheet(sheet_id) else {
         return Vec::new();
     };
@@ -844,6 +848,9 @@ pub(crate) fn snapshot_active_series_lengths(doc: &ProjectDocument, sheet_id: &S
 
 /// Prune point overrides targeting trailing rows of `sheet_id` when an edit shortened active data.
 pub(crate) fn prune_shortened_series_overrides(doc: &mut ProjectDocument, sheet_id: &SheetId, before_active: &[usize]) {
+    if before_active.is_empty() || !doc.graph_sheets.iter().any(|gs| !gs.spec.point_overrides.is_empty()) {
+        return;
+    }
     let Some(ds) = doc.data_sheet(sheet_id) else {
         return;
     };

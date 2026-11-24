@@ -78,6 +78,7 @@ pub struct LayoutPanelDragState {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CanvasSceneRenderSlot {
     pub cached_texture: Option<egui::TextureId>,
+    pub last_raster_failed: bool,
     pub last_sheet_id: Option<SheetId>,
     pub last_mutation_seq: u64,
     pub last_width_px: u32,
@@ -226,6 +227,12 @@ struct AsyncRasterWorkerHandle {
     owner: Arc<AsyncRasterWorkerOwner>,
 }
 
+enum AsyncRasterPoll {
+    Ready(Option<RasterImage>),
+    InFlight,
+    Unavailable,
+}
+
 impl AsyncRasterWorkerHandle {
     fn try_get(ctx: &egui::Context) -> Option<Self> {
         let worker_id = Id::unique("egui_shell.canvas_async_worker");
@@ -271,15 +278,19 @@ impl AsyncRasterWorkerHandle {
         scene: &Arc<ChartScene>,
         filter: CanvasPreviewFilter,
         ctx_wake: &egui::Context,
-    ) -> Option<Option<RasterImage>> {
-        let mut guard = self.owner.results.write_or_recover().ok()?;
+    ) -> AsyncRasterPoll {
+        let Ok(mut guard) = self.owner.results.write_or_recover() else {
+            return AsyncRasterPoll::Unavailable;
+        };
         if let Some(pos) = guard.completed.iter().position(|(sk, rk, _)| *sk == slot_key && *rk == req_key) {
             let (_, _, img) = guard.completed.remove(pos);
-            return Some(img);
+            return AsyncRasterPoll::Ready(img);
         }
         let already_submitted = guard.last_submitted.iter().any(|(sk, rk)| *sk == slot_key && *rk == req_key);
-        if !already_submitted
-            && let Ok(tx_guard) = self.owner.tx.read_or_recover()
+        if already_submitted {
+            return AsyncRasterPoll::InFlight;
+        }
+        if let Ok(tx_guard) = self.owner.tx.read_or_recover()
             && let Some(tx) = tx_guard.as_ref()
         {
             let request = RasterJobRequest {
@@ -296,9 +307,10 @@ impl AsyncRasterWorkerHandle {
                     guard.last_submitted.push((slot_key, req_key));
                 }
                 guard.submitted_count = guard.submitted_count.saturating_add(1);
+                return AsyncRasterPoll::InFlight;
             }
         }
-        None
+        AsyncRasterPoll::Unavailable
     }
 }
 
@@ -314,6 +326,15 @@ fn coalesce_pending_raster_jobs(rx: &mpsc::Receiver<RasterJobRequest>, pending: 
 }
 
 fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<RasterWorkerResults>) {
+    struct WakeGuard(Option<egui::Context>);
+    impl Drop for WakeGuard {
+        fn drop(&mut self) {
+            if let Some(ctx) = self.0.take() {
+                ctx.request_repaint();
+            }
+        }
+    }
+
     let mut pending: Vec<RasterJobRequest> = Vec::new();
     loop {
         if pending.is_empty() {
@@ -324,6 +345,7 @@ fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<Ra
         }
         coalesce_pending_raster_jobs(rx, &mut pending);
         let job = pending.remove(0);
+        let mut wake_guard = WakeGuard(Some(job.ctx_wake.clone()));
 
         let rendered =
             render_scene(&job.scene, RenderTargetSpec { width_px: job.req_key.width_px, height_px: job.req_key.height_px, dpi: job.req_key.dpi })
@@ -337,6 +359,9 @@ fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<Ra
 
         coalesce_pending_raster_jobs(rx, &mut pending);
         let superseded = pending.iter().any(|p| p.slot_key == job.slot_key);
+        if superseded {
+            let _ = wake_guard.0.take();
+        }
         if let Ok(mut guard) = results.write_or_recover() {
             guard.rendered_count = guard.rendered_count.saturating_add(1);
             if !superseded {
@@ -347,8 +372,8 @@ fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<Ra
                 }
             }
         }
-        if !superseded {
-            job.ctx_wake.request_repaint();
+        if !superseded && let Some(ctx) = wake_guard.0.take() {
+            ctx.request_repaint();
         }
     }
 }
@@ -658,7 +683,7 @@ fn render_layout_breadcrumb_bar(
     });
 }
 
-fn resolve_cached_scene(ctx: &egui::Context, app: &UiApp, sheet_id: &SheetId, slot_tag: &str) -> Option<Arc<ChartScene>> {
+pub(super) fn resolve_cached_scene(ctx: &egui::Context, app: &UiApp, sheet_id: &SheetId, slot_tag: &str) -> Option<Arc<ChartScene>> {
     let seq = app.mutation_seq();
     let cache_id = Id::unique(("egui_shell.compiled_scene", slot_tag, sheet_id.as_str()));
     let cached: Option<CachedCompiledScene> = ctx.data(|d| d.get_temp(cache_id));
@@ -707,11 +732,15 @@ fn composite_async_scene_texture(ui: &egui::Ui, app: &UiApp, spec: CompositeScen
         && state.slot.last_height_px == height_px
         && state.slot.last_dpi == dpi
         && state.slot.last_filter_slug == filter_slug
-        && state.slot.cached_texture.is_some();
+        && (state.slot.cached_texture.is_some() || state.slot.last_raster_failed);
 
-    if slot_matches && let Some(tex_id) = state.slot.cached_texture {
+    if slot_matches {
         state.slot.rendering_in_flight = false;
-        painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        if let Some(tex_id) = state.slot.cached_texture {
+            painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        } else {
+            paint_chart_scene_vector_preview(painter, scene, paper_rect);
+        }
         return;
     }
 
@@ -734,34 +763,56 @@ fn composite_async_scene_texture(ui: &egui::Ui, app: &UiApp, spec: CompositeScen
             let color_img = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
             let tex_id = upload_canvas_texture(ui.ctx(), slot_tag, color_img);
             state.slot.cached_texture = Some(tex_id);
+            state.slot.last_raster_failed = false;
             painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-            return;
+        } else {
+            state.slot.cached_texture = None;
+            state.slot.last_raster_failed = true;
+            paint_chart_scene_vector_preview(painter, scene, paper_rect);
         }
+        return;
     }
 
     if let Some(worker) = worker {
         let slot_key = (slot_tag.to_owned(), sheet_id.clone());
-        if let Some(maybe_img) = worker.poll_or_submit(slot_key, req_key.clone(), scene, app.preview_filter, ui.ctx()) {
-            state.slot.rendering_in_flight = false;
-            state.slot.last_sheet_id = Some(sheet_id.clone());
-            state.slot.last_mutation_seq = req_key.mutation_seq;
-            state.slot.last_width_px = width_px;
-            state.slot.last_height_px = height_px;
-            state.slot.last_dpi = dpi;
-            state.slot.last_filter_slug = filter_slug.clone();
-            if let Some(raster) = maybe_img {
-                let color_img = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
-                let tex_id = upload_canvas_texture(ui.ctx(), slot_tag, color_img);
-                state.slot.cached_texture = Some(tex_id);
-                painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        match worker.poll_or_submit(slot_key, req_key.clone(), scene, app.preview_filter, ui.ctx()) {
+            AsyncRasterPoll::Ready(maybe_img) => {
+                state.slot.rendering_in_flight = false;
+                state.slot.last_sheet_id = Some(sheet_id.clone());
+                state.slot.last_mutation_seq = req_key.mutation_seq;
+                state.slot.last_width_px = width_px;
+                state.slot.last_height_px = height_px;
+                state.slot.last_dpi = dpi;
+                state.slot.last_filter_slug = filter_slug;
+                if let Some(raster) = maybe_img {
+                    let color_img = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
+                    let tex_id = upload_canvas_texture(ui.ctx(), slot_tag, color_img);
+                    state.slot.cached_texture = Some(tex_id);
+                    state.slot.last_raster_failed = false;
+                    painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                } else {
+                    state.slot.cached_texture = None;
+                    state.slot.last_raster_failed = true;
+                    paint_chart_scene_vector_preview(painter, scene, paper_rect);
+                }
                 return;
             }
-        } else {
-            state.slot.rendering_in_flight = true;
-            // Wake cleanly via `job.ctx_wake.request_repaint()` when the worker finishes, with a
-            // 16 ms fallback timer rather than zero-delay `request_repaint()` so headless drivers
-            // and tests do not spin 12+ settle passes per input event while async raster is busy.
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+            AsyncRasterPoll::InFlight => {
+                // Worker thread wakes `job.ctx_wake.request_repaint()` directly when done;
+                // avoid polling the main thread on a 16 ms timer while rasterization runs.
+                state.slot.rendering_in_flight = true;
+            }
+            AsyncRasterPoll::Unavailable => {
+                state.slot.rendering_in_flight = false;
+                state.slot.last_sheet_id = Some(sheet_id.clone());
+                state.slot.last_mutation_seq = req_key.mutation_seq;
+                state.slot.last_width_px = width_px;
+                state.slot.last_height_px = height_px;
+                state.slot.last_dpi = dpi;
+                state.slot.last_filter_slug = filter_slug;
+                state.slot.cached_texture = None;
+                state.slot.last_raster_failed = true;
+            }
         }
     }
 
@@ -1473,6 +1524,25 @@ struct LayoutHudInput<'a> {
     ctx_in: &'a CanvasViewContext<'a>,
 }
 
+fn collect_layout_snap_plot_origins(ctx: &egui::Context, app: &UiApp, ls: &LayoutSheet, state: &CanvasViewEguiState) -> Vec<(usize, PointPt)> {
+    if state.layout_drag.is_none() || !super::trailing_studio::studio_snap_enabled(ctx) {
+        return Vec::new();
+    }
+    ls.spec
+        .items
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, item)| {
+            if let LayoutItem::LiveGraph { graph_sheet_id, .. } = item {
+                let gs_scene = resolve_cached_scene(ctx, app, graph_sheet_id, "layout_hud")?;
+                Some((idx, PointPt::new(gs_scene.plot_rect_pt.x, gs_scene.plot_rect_pt.y)))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn render_layout_hud_overlays(
     ui: &mut egui::Ui,
     input: LayoutHudInput<'_>,
@@ -1523,25 +1593,7 @@ fn render_layout_hud_overlays(
         panel_rects.push((idx, item, bounds, r));
     }
 
-    // Sibling inner plot-axis frame offsets for 0.1 pt alignment snapping
-    let plot_origins: Vec<(usize, PointPt)> = ls
-        .spec
-        .items
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, item)| {
-            if let LayoutItem::LiveGraph { graph_sheet_id, .. } = item {
-                let p_off = app
-                    .session()
-                    .render_sheet_scene(graph_sheet_id)
-                    .ok()
-                    .map(|gs_scene| PointPt::new(gs_scene.plot_rect_pt.x, gs_scene.plot_rect_pt.y))?;
-                Some((idx, p_off))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let plot_origins = collect_layout_snap_plot_origins(ui.ctx(), app, ls, state);
 
     let mut panel_opened_ctx_menu = false;
     for (idx, item, bounds, r) in panel_rects {
@@ -2938,5 +2990,117 @@ mod raster_worker_drop_tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(finished.load(Ordering::SeqCst), "worker thread panicked or hung while dropping its own owner");
+    }
+
+    #[test]
+    fn async_failed_raster_clears_stale_texture_and_stops_polling() {
+        use std::sync::atomic::AtomicUsize;
+
+        use curvebook_chart::ChartScene;
+        use curvebook_doc::SheetId;
+        use curvebook_palette::Rgba8;
+
+        use super::{CanvasViewEguiState, CompositeSceneSpec, composite_async_scene_texture};
+        use crate::UiApp;
+
+        let ctx = egui::Context::default();
+        let repaints = Arc::new(AtomicUsize::new(0));
+        let repaints_cb = Arc::clone(&repaints);
+        ctx.set_request_repaint_callback(move |_| {
+            repaints_cb.fetch_add(1, Ordering::Relaxed);
+        });
+
+        let app = UiApp::new();
+        let mut state = CanvasViewEguiState::default();
+        // Seed a stale texture from an earlier valid sheet to verify failed raster clears it.
+        state.slot.cached_texture = Some(egui::TextureId::Managed(42));
+        state.slot.last_sheet_id = Some(SheetId::from("old-sheet"));
+
+        // Scene with invalid width_pt = 0.0 causes render_scene() to return Err -> worker yields None.
+        let mut raw_bad = ChartScene::new("bad-gs", "Bad", 100.0, 100.0, Some(Rgba8::WHITE));
+        raw_bad.width_pt = 0.0;
+        let bad_scene = Arc::new(raw_bad);
+        let bad_id = SheetId::from("bad-gs");
+        let paper = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(300.0, 220.0));
+
+        // Warm up initial egui frame before measuring repaints from the async raster submission.
+        let mut sim = 0.5_f64;
+        let mut warm = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                time: Some(sim),
+                focused: true,
+                ..Default::default()
+            },
+            |_| {},
+        );
+        warm.textures_delta.clear();
+        repaints.store(0, Ordering::SeqCst);
+
+        // Frame 0: submits async raster job without scheduling a 16 ms polling timer.
+        sim = 1.0_f64;
+        let mut out0 = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                time: Some(sim),
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                composite_async_scene_texture(
+                    ui,
+                    &app,
+                    CompositeSceneSpec { scene: &bad_scene, sheet_id: &bad_id, paper_rect: paper, slot_tag: "main", painter: ui.painter() },
+                    &mut state,
+                );
+            },
+        );
+        out0.textures_delta.clear();
+        let d0 = out0.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+        assert_ne!(d0, Some(Duration::from_millis(16)), "must not poll at 16 ms while async worker runs");
+
+        // Wait up to 2s for BOTH worker completion (`rendered_count >= 1`) AND wakeup callback.
+        let worker = super::AsyncRasterWorkerHandle::try_get(&ctx).expect("worker handle must be installed");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let worker_done = worker.owner.results.read_or_recover().is_ok_and(|g| g.rendered_count >= 1);
+            if worker_done && repaints.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(worker.owner.results.read_or_recover().is_ok_and(|g| g.rendered_count >= 1), "async worker must finish failed raster within 2s");
+        assert!(repaints.load(Ordering::SeqCst) >= 1, "worker must wake ctx when job finishes");
+
+        for pass in 0..10 {
+            sim += 0.05;
+            let before = repaints.load(Ordering::Relaxed);
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                    time: Some(sim),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| {
+                    composite_async_scene_texture(
+                        ui,
+                        &app,
+                        CompositeSceneSpec { scene: &bad_scene, sheet_id: &bad_id, paper_rect: paper, slot_tag: "main", painter: ui.painter() },
+                        &mut state,
+                    );
+                },
+            );
+            let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+            out.textures_delta.clear();
+            let after = repaints.load(Ordering::Relaxed);
+            assert!(!state.slot.rendering_in_flight, "failed raster must not leave rendering_in_flight=true on pass {pass}");
+            assert!(state.slot.last_raster_failed, "failed raster flag must be recorded");
+            assert!(state.slot.cached_texture.is_none(), "stale texture from previous sheet must be cleared");
+            if pass >= 2 {
+                assert_eq!(after - before, 0, "idle frame {pass} after failed raster must emit zero repaints");
+                assert_eq!(delay, Some(Duration::MAX));
+            }
+        }
     }
 }

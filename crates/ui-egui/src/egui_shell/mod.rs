@@ -923,6 +923,9 @@ impl Tokens {
         visuals.widgets.open.weak_bg_fill = self.hover_bg;
         visuals.widgets.open.bg_stroke = Stroke::new(thin, self.border);
         visuals.widgets.open.fg_stroke = Stroke::new(thin, self.text_strong);
+        // Solid, high-contrast caret: avoids waking the GPU/CPU at 2 Hz forever when dialogs
+        // auto-focus a search box or an inline grid editor stays open idle.
+        visuals.text_cursor.blink = false;
         visuals
     }
 

@@ -2937,6 +2937,13 @@ pub fn validate_project_document(doc: &ProjectDocument) -> Result<(), FormatErro
     validate_project_document_inner(doc, true)
 }
 
+/// Enforce all `curvebook-doc` structural bounds, finite-float invariants, and DAG cycle absence
+/// while skipping redundant `checkpoint.snapshot_json` re-deserialization when callers guarantee
+/// `doc.checkpoints` is unchanged since an earlier full validation.
+pub fn validate_project_document_skip_checkpoints(doc: &ProjectDocument) -> Result<(), FormatError> {
+    validate_project_document_inner(doc, false)
+}
+
 fn validate_project_document_inner(doc: &ProjectDocument, validate_checkpoint_entries: bool) -> Result<(), FormatError> {
     doc.validate_structural_limits()?;
     if let Some(location) = doc.first_non_finite_float() {
