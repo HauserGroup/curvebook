@@ -640,6 +640,7 @@ impl CurveBookNativeApp {
         let mut remaining_intents = PendingUiIntents::default();
         let mut host_commands: Vec<(String, serde_json::Value)> = Vec::new();
         let mut host_copy = false;
+        let mut host_copy_for_slides: Option<u16> = None;
         let mut host_cut = false;
         let mut host_paste = false;
         let active_is_result = self.runtime.window(window_id).ok().is_some_and(|w| {
@@ -666,6 +667,9 @@ impl CurveBookNativeApp {
                 }
                 UiIntent::WorkspaceCopy { .. } if !active_is_result => {
                     host_copy = true;
+                }
+                UiIntent::WorkspaceCopyForSlides { dpi } => {
+                    host_copy_for_slides = Some(*dpi);
                 }
                 UiIntent::GridCopySelection => {
                     host_copy = true;
@@ -721,6 +725,9 @@ impl CurveBookNativeApp {
         }
         if host_copy {
             self.dispatch_clipboard_copy(ctx, window_id);
+        }
+        if let Some(dpi) = host_copy_for_slides {
+            self.dispatch_clipboard_copy_for_slides(window_id, dpi);
         }
         if host_cut {
             self.dispatch_clipboard_cut(ctx, window_id);
@@ -1115,9 +1122,11 @@ impl CurveBookNativeApp {
                     self.quit_in_progress = false;
                     self.on_active_window_switched();
                 }
-                if outcome.command_id.as_deref().is_some_and(|c| matches!(c, "edit.copy" | "edit.cut")) {
+                if outcome.command_id.as_deref().is_some_and(|c| matches!(c, "edit.copy" | "edit.cut" | "ui.clipboard.copyForSlides")) {
                     self.apply_clipboard_outcome_status(&outcome);
-                    if let Some(ctx_ref) = ctx {
+                    if outcome.command_id.as_deref() != Some("ui.clipboard.copyForSlides")
+                        && let Some(ctx_ref) = ctx
+                    {
                         self.maybe_sync_plain_text_fallback(ctx_ref, &outcome);
                     }
                 }
@@ -1257,6 +1266,17 @@ impl CurveBookNativeApp {
             Ok(outcome) => {
                 self.apply_clipboard_outcome_status(&outcome);
                 self.maybe_sync_plain_text_fallback(ctx, &outcome);
+            }
+            Err(err) => {
+                self.status_banner = Some(err);
+            }
+        }
+    }
+
+    fn dispatch_clipboard_copy_for_slides(&mut self, window_id: DesktopWindowId, dpi: u16) {
+        match self.runtime.handle_clipboard_copy_for_slides(window_id, dpi) {
+            Ok(outcome) => {
+                self.apply_clipboard_outcome_status(&outcome);
             }
             Err(err) => {
                 self.status_banner = Some(err);

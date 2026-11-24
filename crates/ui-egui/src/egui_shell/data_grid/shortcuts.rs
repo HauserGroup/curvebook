@@ -170,8 +170,10 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &m
     let app = mctx.app;
     let ds = mctx.ds;
     let has_workspace_copy = fstate.intents.intents().iter().any(|it| matches!(it, UiIntent::WorkspaceCopy { .. }));
-    let copy_key = ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Copy)))
-        || pressed_key_event_modifiers(ui, Key::C).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
+    let has_slide_copy = fstate.intents.intents().iter().any(|it| matches!(it, UiIntent::WorkspaceCopyForSlides { .. }));
+    let copy_key = !has_slide_copy
+        && (ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Copy)))
+            || pressed_key_event_modifiers(ui, Key::C).is_some_and(|m| !m.shift && !m.alt && (m.command || m.mac_cmd || m.ctrl)));
     if has_workspace_copy || copy_key {
         if let Some((xr, xs)) = fstate.aux.selected_x_cell {
             let _ = take_workspace_copy_intent(fstate.intents);

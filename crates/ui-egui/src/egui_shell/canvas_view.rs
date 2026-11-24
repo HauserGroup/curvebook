@@ -2253,6 +2253,17 @@ fn render_graph_context_menu(
                         intents.push_workspace_copy(144);
                         close_menu = true;
                     }
+                    if render_context_menu_item(
+                        ui,
+                        meta,
+                        "canvas.graph_ctx.copy_for_slides",
+                        "Copy for Slides & Documents",
+                        Some("ui.clipboard.copyForSlides"),
+                        true,
+                    ) {
+                        intents.push_workspace_copy_for_slides(300);
+                        close_menu = true;
+                    }
                     ui.separator();
                     if render_context_menu_item(
                         ui,
@@ -2353,6 +2364,17 @@ fn append_layout_context_menu_extras(
 
     if render_context_menu_item(ui, meta, "canvas.layout_ctx.copy_image", "Copy as Image", Some("edit.copy"), true) {
         intents.push_workspace_copy(144);
+        clicked = true;
+    }
+    if render_context_menu_item(
+        ui,
+        meta,
+        "canvas.layout_ctx.copy_for_slides",
+        "Copy for Slides & Documents",
+        Some("ui.clipboard.copyForSlides"),
+        true,
+    ) {
+        intents.push_workspace_copy_for_slides(300);
         clicked = true;
     }
     ui.separator();

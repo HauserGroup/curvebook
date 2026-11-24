@@ -15,20 +15,22 @@ use curvebook_pdf::{PdfExportOptions, render_pdf};
 use curvebook_platform::PlatformError;
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_platform::process::{DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_WALL_TIMEOUT, ProcessCommand, ProcessOutput};
-use curvebook_render::{RenderTargetSpec, encode_emf, encode_png, render_scene};
+use curvebook_render::{RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff, render_scene};
 use curvebook_svg::{SvgExportOptions, render_svg};
 use serde::{Deserialize, Serialize};
 
 const MIN_DPI: u16 = 72;
 const MAX_DPI: u16 = 1200;
 
-/// Multi-flavor publication clipboard payload (`PDF`, `SVG`, `HTML`, high-DPI `PNG`, and `EMF`).
+/// Multi-flavor publication clipboard payload (`PDF`, `TIFF`, `SVG`, `HTML`, high-DPI `PNG`, and `EMF`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClipboardBundle {
     pub pdf_bytes: Vec<u8>,
     pub svg: String,
     pub html: String,
     pub png_bytes: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiff_bytes: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emf_bytes: Option<Vec<u8>>,
     pub width_pt: f64,
@@ -39,7 +41,7 @@ pub struct ClipboardBundle {
 }
 
 impl ClipboardBundle {
-    /// Build a multi-flavor clipboard payload (`PDF`, `SVG`, `HTML`, `PNG`, `EMF`) from a compiled [`ChartScene`].
+    /// Build a multi-flavor clipboard payload (`PDF`, `TIFF`, `SVG`, `HTML`, `PNG`, `EMF`) from a compiled [`ChartScene`].
     ///
     /// # Errors
     /// Returns an error if `dpi` is outside `72..=1200`, scene bounds are invalid, or any vector/raster encoder fails.
@@ -58,13 +60,26 @@ impl ClipboardBundle {
         let pdf_opts = PdfExportOptions { title: Some(scene.title.clone()), ..PdfExportOptions::default() };
         let pdf_bytes = render_pdf(scene, &pdf_opts).map_err(|err| format!("clipboard PDF encode failed: {err}"))?;
         let svg = render_svg(scene, &SvgExportOptions::default()).map_err(|err| format!("clipboard SVG encode failed: {err}"))?;
-        let html = build_html_clipboard_wrapper(&scene.title, &svg, scene.width_pt, scene.height_pt);
         let raster =
             render_scene(scene, RenderTargetSpec { width_px, height_px, dpi }).map_err(|err| format!("clipboard raster render failed: {err}"))?;
         let png_bytes = encode_png(&raster).map_err(|err| format!("clipboard PNG encode failed: {err}"))?;
+        let tiff_bytes = Some(encode_tiff(&raster, TiffCompression::Deflate).map_err(|err| format!("clipboard TIFF encode failed: {err}"))?);
+        let html = build_html_clipboard_wrapper(&scene.title, &png_bytes, &svg, scene.width_pt, scene.height_pt);
         let emf_bytes = Some(encode_emf(scene).map_err(|err| format!("clipboard EMF encode failed: {err}"))?);
 
-        Ok(Self { pdf_bytes, svg, html, png_bytes, emf_bytes, width_pt: scene.width_pt, height_pt: scene.height_pt, width_px, height_px, dpi })
+        Ok(Self {
+            pdf_bytes,
+            svg,
+            html,
+            png_bytes,
+            tiff_bytes,
+            emf_bytes,
+            width_pt: scene.width_pt,
+            height_pt: scene.height_pt,
+            width_px,
+            height_px,
+            dpi,
+        })
     }
 
     /// Compile `sheet_id` from `session` and build its multi-flavor [`ClipboardBundle`].
@@ -100,7 +115,7 @@ impl ClipboardBundle {
     /// Names of non-empty clipboard flavors encoded inside this bundle.
     #[must_use]
     pub fn available_flavors(&self) -> Vec<&'static str> {
-        let mut flavors = Vec::with_capacity(5);
+        let mut flavors = Vec::with_capacity(6);
         if !self.pdf_bytes.is_empty() {
             flavors.push("pdf");
         }
@@ -112,6 +127,9 @@ impl ClipboardBundle {
         }
         if !self.png_bytes.is_empty() {
             flavors.push("png");
+        }
+        if self.tiff_bytes.as_ref().is_some_and(|bytes| !bytes.is_empty()) {
+            flavors.push("tiff");
         }
         if self.emf_bytes.as_ref().is_some_and(|bytes| !bytes.is_empty()) {
             flavors.push("emf");
@@ -168,11 +186,20 @@ pub trait PlatformClipboardAdapter: std::fmt::Debug + Send + Sync {
     /// Returns a descriptive error string when the clipboard backend fails unexpectedly.
     fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String>;
 
-    /// Write a multi-flavor [`ClipboardBundle`] (`%PDF-1.7`, `SVG`, `HTML`, `PNG`, `EMF`) to the platform clipboard.
+    /// Write a multi-flavor [`ClipboardBundle`] (`%PDF-1.7`, `TIFF`, `SVG`, `HTML`, `PNG`, `EMF`) to the platform clipboard.
     ///
     /// # Errors
     /// Returns a descriptive error string when the bundle is empty or the clipboard backend fails.
     fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String>;
+
+    /// Write a slide/document-optimized [`ClipboardBundle`] (vector PDF/SVG + 300 DPI PNG/TIFF + HTML `<img>`,
+    /// omitting raw `<svg>` XML plain-text) so Word, PowerPoint, Keynote, and Google Docs paste graphics cleanly.
+    ///
+    /// # Errors
+    /// Returns a descriptive error string when the bundle is empty or the clipboard backend fails.
+    fn write_slide_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        self.write_bundle(bundle)
+    }
 
     /// Read plain UTF-8 text from the platform clipboard, if supported by the adapter.
     ///
@@ -222,6 +249,20 @@ impl PlatformClipboardAdapter for SystemPlatformClipboardAdapter {
         }
     }
 
+    fn write_slide_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            write_os_clipboard_bundle_for_slides(bundle)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            if bundle.available_flavors().is_empty() {
+                return Err(String::from("cannot write empty clipboard bundle to pasteboard"));
+            }
+            Ok(OsAdapterStatus::unavailable("wasm-pasteboard", "browser clipboard requires host DOM bridge"))
+        }
+    }
+
     fn read_text(&self) -> Result<OsAdapterStatus, String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -249,6 +290,7 @@ impl PlatformClipboardAdapter for SystemPlatformClipboardAdapter {
 #[derive(Debug, Clone, Default)]
 struct StubClipboardInner {
     bundles: Vec<ClipboardBundle>,
+    slide_bundles: Vec<ClipboardBundle>,
     texts: Vec<String>,
     image_bytes: Option<Vec<u8>>,
     available: bool,
@@ -277,7 +319,7 @@ impl StubPlatformClipboardAdapter {
         Self {
             inner: std::sync::Arc::new(curvebook_platform::sync::RwLock::named(
                 "ui.stub_clipboard",
-                StubClipboardInner { bundles: Vec::new(), texts: Vec::new(), image_bytes: None, available: true },
+                StubClipboardInner { bundles: Vec::new(), slide_bundles: Vec::new(), texts: Vec::new(), image_bytes: None, available: true },
             )),
         }
     }
@@ -289,7 +331,7 @@ impl StubPlatformClipboardAdapter {
         Self {
             inner: std::sync::Arc::new(curvebook_platform::sync::RwLock::named(
                 "ui.stub_clipboard.unavailable",
-                StubClipboardInner { bundles: Vec::new(), texts: Vec::new(), image_bytes: None, available: false },
+                StubClipboardInner { bundles: Vec::new(), slide_bundles: Vec::new(), texts: Vec::new(), image_bytes: None, available: false },
             )),
         }
     }
@@ -300,10 +342,22 @@ impl StubPlatformClipboardAdapter {
         self.inner.read_or_recover().map(|guard| guard.bundles.clone()).unwrap_or_default()
     }
 
+    /// Return all captured slide/document [`ClipboardBundle`] writes in submission order.
+    #[must_use]
+    pub fn captured_slide_bundles(&self) -> Vec<ClipboardBundle> {
+        self.inner.read_or_recover().map(|guard| guard.slide_bundles.clone()).unwrap_or_default()
+    }
+
     /// Return the most recently captured [`ClipboardBundle`], if any.
     #[must_use]
     pub fn last_bundle(&self) -> Option<ClipboardBundle> {
         self.inner.read_or_recover().ok().and_then(|guard| guard.bundles.last().cloned())
+    }
+
+    /// Return the most recently captured slide/document [`ClipboardBundle`], if any.
+    #[must_use]
+    pub fn last_slide_bundle(&self) -> Option<ClipboardBundle> {
+        self.inner.read_or_recover().ok().and_then(|guard| guard.slide_bundles.last().cloned())
     }
 
     /// Return all captured plain-text / TSV writes in submission order.
@@ -337,6 +391,7 @@ impl StubPlatformClipboardAdapter {
     pub fn clear(&self) {
         if let Ok(mut guard) = self.inner.write_or_recover() {
             guard.bundles.clear();
+            guard.slide_bundles.clear();
             guard.texts.clear();
             guard.image_bytes = None;
         }
@@ -376,6 +431,28 @@ impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
                 availability: OsAdapterAvailability::Submitted,
                 backend: String::from("stub-pasteboard"),
                 detail: format!("captured {} pasteboard flavors ({})", flavors.len(), flavors.join(", ")),
+                text: None,
+                job_id: None,
+            })
+        } else {
+            Ok(OsAdapterStatus::unavailable("stub-pasteboard", "stubbed pasteboard marked unavailable"))
+        }
+    }
+
+    fn write_slide_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        let flavors = bundle.available_flavors();
+        if flavors.is_empty() {
+            return Err(String::from("cannot write empty clipboard bundle to pasteboard"));
+        }
+        let mut guard = self.inner.write_or_recover().map_err(|err| err.to_string())?;
+        guard.bundles.push(bundle.clone());
+        guard.slide_bundles.push(bundle.clone());
+        if guard.available {
+            Ok(OsAdapterStatus {
+                available: true,
+                availability: OsAdapterAvailability::Submitted,
+                backend: String::from("stub-pasteboard"),
+                detail: format!("captured {} slide/document pasteboard flavors ({})", flavors.len(), flavors.join(", ")),
                 text: None,
                 job_id: None,
             })
@@ -828,6 +905,22 @@ pub fn write_os_clipboard_bundle(bundle: &ClipboardBundle) -> Result<OsAdapterSt
     write_os_clipboard_bundle_platform(bundle, primary_text, &flavors)
 }
 
+/// Write a slide/document-optimized [`ClipboardBundle`] to the native OS pasteboard without raw
+/// XML `<svg>` plain-text fallback, prioritizing vector (`PDF`/`SVG`/`EMF`), 300 DPI bitmap
+/// (`TIFF`/`PNG`), and `<img>`-backed HTML flavors so Word, PowerPoint, Keynote, and Google Docs
+/// paste graphics cleanly instead of raw SVG source text.
+///
+/// # Errors
+/// Returns an error if `bundle` has no populated flavors or writing to the OS pasteboard fails.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_os_clipboard_bundle_for_slides(bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+    let flavors = bundle.available_flavors();
+    if flavors.is_empty() {
+        return Err(String::from("cannot write empty clipboard bundle to OS pasteboard"));
+    }
+    write_os_clipboard_bundle_platform(bundle, "", &flavors)
+}
+
 #[cfg(target_os = "macos")]
 fn write_os_clipboard_bundle_platform(bundle: &ClipboardBundle, primary_text: &str, flavors: &[&str]) -> Result<OsAdapterStatus, String> {
     const JXA_WRITE_PASTEBOARD: &str = "\
@@ -836,10 +929,11 @@ ObjC.import('AppKit');
 function run(argv) {
   var mapping = [
     ['com.adobe.pdf', argv[0]],
-    ['public.png', argv[1]],
-    ['public.svg-image', argv[2]],
-    ['public.html', argv[3]],
-    ['public.utf8-plain-text', argv[4]]
+    ['public.tiff', argv[1]],
+    ['public.png', argv[2]],
+    ['public.svg-image', argv[3]],
+    ['public.html', argv[4]],
+    ['public.utf8-plain-text', argv[5]]
   ];
   var types = $.NSMutableArray.alloc.init;
   var payloads = [];
@@ -868,6 +962,7 @@ function run(argv) {
 
     let stage_dir = StageDirGuard::create("pb-write")?;
     let pdf_arg = stage_optional_file(stage_dir.path(), "clip.pdf", &bundle.pdf_bytes)?;
+    let tiff_arg = stage_optional_file(stage_dir.path(), "clip.tiff", bundle.tiff_bytes.as_deref().unwrap_or(&[]))?;
     let png_arg = stage_optional_file(stage_dir.path(), "clip.png", &bundle.png_bytes)?;
     let svg_arg = stage_optional_file(stage_dir.path(), "clip.svg", bundle.svg.as_bytes())?;
     let html_arg = stage_optional_file(stage_dir.path(), "clip.html", bundle.html.as_bytes())?;
@@ -881,6 +976,7 @@ function run(argv) {
             String::from("-e"),
             String::from(JXA_WRITE_PASTEBOARD),
             pdf_arg,
+            tiff_arg,
             png_arg,
             svg_arg,
             html_arg,
@@ -902,6 +998,9 @@ function run(argv) {
     }
 
     drop(stage_dir);
+    if primary_text.is_empty() {
+        return Ok(OsAdapterStatus::unavailable("os-pasteboard", "no desktop clipboard display session is active in this environment"));
+    }
     let fallback_candidates = os_pasteboard_write_candidates();
     if fallback_candidates.is_empty() {
         return Ok(OsAdapterStatus::unavailable("os-pasteboard", "no desktop clipboard display session is active in this environment"));
@@ -1028,6 +1127,28 @@ fn write_os_clipboard_bundle_platform(bundle: &ClipboardBundle, primary_text: &s
     let fallback_candidates = os_pasteboard_write_candidates();
     if fallback_candidates.is_empty() {
         return Ok(OsAdapterStatus::unavailable("os-pasteboard", "no desktop clipboard display session is active in this environment"));
+    }
+
+    if primary_text.is_empty() && !bundle.png_bytes.is_empty() {
+        let mut png_candidates = Vec::new();
+        if has_nonempty_env("WAYLAND_DISPLAY") {
+            png_candidates.push(OsCommandCandidate::new("wl-copy", &["--type", "image/png"]));
+        }
+        if has_nonempty_env("DISPLAY") {
+            png_candidates.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard", "-t", "image/png"]));
+        }
+        for candidate in &png_candidates {
+            if let Ok(Some(_output)) = spawn_candidate_discard_output(candidate, Some(&bundle.png_bytes)) {
+                return Ok(OsAdapterStatus {
+                    available: true,
+                    availability: OsAdapterAvailability::Submitted,
+                    backend: candidate.program.clone(),
+                    detail: format!("wrote {} bytes as image/png (flavors: {})", bundle.png_bytes.len(), flavors.join(", ")),
+                    text: None,
+                    job_id: None,
+                });
+            }
+        }
     }
 
     if !bundle.pdf_bytes.is_empty() {
@@ -1819,12 +1940,20 @@ fn has_nonempty_env(key: &str) -> bool {
     std::env::var_os(key).is_some_and(|v| !v.is_empty())
 }
 
-fn build_html_clipboard_wrapper(title: &str, svg: &str, width_pt: f64, height_pt: f64) -> String {
+fn build_html_clipboard_wrapper(title: &str, png_bytes: &[u8], svg: &str, width_pt: f64, height_pt: f64) -> String {
     let escaped_title = escape_html(title);
-    format!(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{escaped_title}</title></head>\
+    if !png_bytes.is_empty() {
+        let b64 = curvebook_platform::base64::encode(png_bytes);
+        format!(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{escaped_title}</title></head>\
+<body><div class=\"curvebook-figure\" style=\"width:{width_pt:.3}pt;height:{height_pt:.3}pt;\"><img src=\"data:image/png;base64,{b64}\" alt=\"{escaped_title}\" style=\"display:block;width:{width_pt:.3}pt;height:auto;max-width:100%;\"/></div></body></html>"
+        )
+    } else {
+        format!(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{escaped_title}</title></head>\
 <body><div class=\"curvebook-figure\" style=\"width:{width_pt:.3}pt;height:{height_pt:.3}pt;\">{svg}</div></body></html>"
-    )
+        )
+    }
 }
 
 fn escape_html(input: &str) -> String {
@@ -1923,7 +2052,12 @@ mod tests {
         assert!(emf.len() >= 88);
         assert_eq!(&emf[0..4], &1u32.to_le_bytes());
         assert_eq!(&emf[40..44], &0x464D_4520u32.to_le_bytes());
+        let tiff = bundle.tiff_bytes.as_deref().ok_or("missing tiff_bytes")?;
+        assert!(tiff.starts_with(b"II*\0"), "expected little-endian TIFF header");
         assert!(bundle.available_flavors().contains(&"emf"));
+        assert!(bundle.available_flavors().contains(&"tiff"));
+        assert!(bundle.html.contains("<img src=\"data:image/png;base64,"), "HTML wrapper must embed PNG img fallback");
+        assert!(!bundle.html.contains("<svg "), "HTML wrapper should embed PNG img rather than raw inline <svg> when raster exists");
 
         #[cfg(unix)]
         {
@@ -1931,6 +2065,12 @@ mod tests {
             let status = write_os_clipboard_bundle_with(&write_mock, &bundle, &bundle.svg, &bundle.available_flavors())?;
             assert!(status.available);
             assert!(status.detail.contains("emf"));
+            assert!(status.detail.contains("tiff"));
+
+            let slide_status = write_os_clipboard_bundle_with(&write_mock, &bundle, "", &bundle.available_flavors())?;
+            assert!(slide_status.available);
+            assert!(slide_status.detail.contains("pdf"));
+            assert!(slide_status.detail.contains("tiff"));
         }
         let _ = RectPt::new(0.0, 0.0, 1.0, 1.0);
         Ok(())

@@ -186,6 +186,7 @@ pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.layout.equalizeScaling.open" => ("menu.graph", "Arrange/Equalize Scaling..."),
         "ui.embeddedTable.format.open" => ("menu.graph", "Graph/Format Embedded Table..."),
         "ui.image.format.open" => ("menu.graph", "Graph/Format Image..."),
+        "ui.clipboard.copyForSlides" => ("menu.edit", "Edit/Copy for Slides & Documents"),
         _ => ("menu.view", "UI"),
     }
 }
@@ -235,7 +236,9 @@ pub(crate) fn ui_command_enabled_for_doc(doc: &curvebook_doc::ProjectDocument, i
             doc.graph_sheets.iter().any(|g| g.spec.annotations.iter().any(|a| matches!(a, curvebook_doc::GraphAnnotation::EmbeddedImage { .. })))
                 || doc.layout_sheets.iter().any(|l| l.spec.items.iter().any(|it| matches!(it, curvebook_doc::LayoutItem::EmbeddedImage { .. })))
         }
-        "ui.canvas.applyPreset" | "ui.canvas.preflight" | "ui.export.figure.open" => !doc.graph_sheets.is_empty() || !doc.layout_sheets.is_empty(),
+        "ui.canvas.applyPreset" | "ui.canvas.preflight" | "ui.export.figure.open" | "ui.clipboard.copyForSlides" => {
+            !doc.graph_sheets.is_empty() || !doc.layout_sheets.is_empty()
+        }
         _ => true,
     }
 }

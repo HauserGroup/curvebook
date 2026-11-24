@@ -1873,48 +1873,75 @@ fn copy_figure_sheet_bundle(app: &mut UiApp, sheet_id: &SheetId, metrics: Viewpo
 }
 
 pub(crate) fn copy_figure_sheet_bundle_dpi(app: &mut UiApp, sheet_id: &SheetId, dpi: u16) -> Result<UiEventOutcome, String> {
-    let bundle = crate::os_integration::ClipboardBundle::from_sheet(app.session(), sheet_id, dpi.max(72))?;
+    copy_figure_sheet_bundle_inner(app, sheet_id, dpi, false)
+}
+
+pub(crate) fn copy_figure_sheet_slide_bundle_dpi(app: &mut UiApp, sheet_id: &SheetId, dpi: u16) -> Result<UiEventOutcome, String> {
+    copy_figure_sheet_bundle_inner(app, sheet_id, dpi, true)
+}
+
+fn copy_figure_sheet_bundle_inner(app: &mut UiApp, sheet_id: &SheetId, dpi: u16, for_slides: bool) -> Result<UiEventOutcome, String> {
+    let effective_dpi = dpi.max(72);
+    let bundle = crate::os_integration::ClipboardBundle::from_sheet(app.session(), sheet_id, effective_dpi)?;
     let flavors = bundle.available_flavors();
     let pdf_bytes = bundle.pdf_bytes.len();
     let svg_bytes = bundle.svg.len();
     let png_bytes = bundle.png_bytes.len();
+    let tiff_bytes = bundle.tiff_bytes.as_ref().map_or(0, Vec::len);
     let emf_bytes = bundle.emf_bytes.as_ref().map_or(0, Vec::len);
-    let write_res = app.write_clipboard_bundle(&bundle);
-    app.interaction.last_clipboard_text = (!bundle.svg.is_empty()).then(|| bundle.svg.clone());
+    let width_px = bundle.width_px;
+    let height_px = bundle.height_px;
+    let write_res = if for_slides { app.write_slide_clipboard_bundle(&bundle) } else { app.write_clipboard_bundle(&bundle) };
+    app.interaction.last_clipboard_text = if for_slides || bundle.svg.is_empty() { None } else { Some(bundle.svg.clone()) };
     app.interaction.last_clipboard_bundle = Some(bundle);
+
+    let mut payload = json!({
+        "sheet_id": sheet_id.as_str(),
+        "dpi": effective_dpi,
+        "width_px": width_px,
+        "height_px": height_px,
+        "flavors": flavors,
+        "pdf_bytes": pdf_bytes,
+        "svg_bytes": svg_bytes,
+        "png_bytes": png_bytes,
+        "tiff_bytes": tiff_bytes,
+        "emf_bytes": emf_bytes,
+    });
+    if for_slides && let Some(obj) = payload.as_object_mut() {
+        obj.insert(String::from("profile"), json!("slides_and_documents"));
+        obj.insert(String::from("omits_plain_text_svg"), json!(true));
+    }
 
     match write_res {
         Ok(status) => {
-            let action = if status.available { "clipboard.copied_bundle" } else { "clipboard.copied_bundle_os_unavailable" };
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(String::from("os_clipboard"), json!(status));
+            }
+            let action = match (for_slides, status.available) {
+                (true, true) => "clipboard.copied_slide_bundle",
+                (true, false) => "clipboard.copied_slide_bundle_os_unavailable",
+                (false, true) => "clipboard.copied_bundle",
+                (false, false) => "clipboard.copied_bundle_os_unavailable",
+            };
             Ok(UiEventOutcome {
                 handled: true,
                 action: String::from(action),
-                command_id: None,
-                command_result: Some(json!({
-                    "sheet_id": sheet_id.as_str(),
-                    "flavors": flavors,
-                    "pdf_bytes": pdf_bytes,
-                    "svg_bytes": svg_bytes,
-                    "png_bytes": png_bytes,
-                    "emf_bytes": emf_bytes,
-                    "os_clipboard": status,
-                })),
+                command_id: for_slides.then(|| String::from("ui.clipboard.copyForSlides")),
+                command_result: Some(payload),
             })
         }
-        Err(err) => Ok(UiEventOutcome {
-            handled: true,
-            action: String::from("clipboard.copied_bundle_os_failed"),
-            command_id: None,
-            command_result: Some(json!({
-                "sheet_id": sheet_id.as_str(),
-                "flavors": flavors,
-                "pdf_bytes": pdf_bytes,
-                "svg_bytes": svg_bytes,
-                "png_bytes": png_bytes,
-                "emf_bytes": emf_bytes,
-                "os_clipboard": { "available": false, "error": err },
-            })),
-        }),
+        Err(err) => {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(String::from("os_clipboard"), json!({ "available": false, "error": err }));
+            }
+            let action = if for_slides { "clipboard.copied_slide_bundle_os_failed" } else { "clipboard.copied_bundle_os_failed" };
+            Ok(UiEventOutcome {
+                handled: true,
+                action: String::from(action),
+                command_id: for_slides.then(|| String::from("ui.clipboard.copyForSlides")),
+                command_result: Some(payload),
+            })
+        }
     }
 }
 

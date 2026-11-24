@@ -646,7 +646,7 @@ impl EmfWriter {
             return Ok(());
         }
 
-        let family = span.font_family.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("Arial");
+        let family = normalize_emf_font_family(span.font_family.as_deref());
         let font_handle = self.create_font(family, size_pt, escapement_tenths, span.weight, span.slope)?;
         self.select_object(font_handle)?;
         self.emit_u32_record(EMR_SETTEXTCOLOR, &[colorref(color)])?;
@@ -880,7 +880,12 @@ impl EmfWriter {
         let handle = self.handles.alloc()?;
         let width_log = scale_logical(stroke.width_pt).max(1);
         let color = blend_over_bg(stroke.color, self.bg_color);
-        let use_ext = stroke.dash != LineDashStyle::Solid || stroke.cap != LineCap::Butt || stroke.join != LineJoin::Miter;
+        // Windows GDI `EMR_CREATEPEN` (`PS_SOLID`) forces round caps and joins for strokes wider
+        // than 1 device pixel, so thick solid strokes with flat/square caps or miter/bevel joins
+        // must use geometric `EMR_EXTCREATEPEN`. Keep `EMR_CREATEPEN` for narrow <=1pt Butt/Miter
+        // or Round/Round solid pens.
+        let non_round_thick = stroke.width_pt > 1.0 && (stroke.cap != LineCap::Round || stroke.join != LineJoin::Round);
+        let use_ext = stroke.dash != LineDashStyle::Solid || stroke.cap == LineCap::Square || stroke.join == LineJoin::Bevel || non_round_thick;
 
         if !use_ext {
             let mut payload = Vec::with_capacity(20);
@@ -1093,6 +1098,25 @@ fn push_rect_bytes(out: &mut Vec<u8>, ltrb: [i32; 4]) {
     for coord in ltrb {
         out.extend_from_slice(&coord.to_le_bytes());
     }
+}
+
+fn normalize_emf_font_family(raw: Option<&str>) -> &str {
+    let Some(list) = raw else {
+        return "Arial";
+    };
+    for candidate in list.split(',') {
+        let trimmed = candidate.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        return match trimmed.to_ascii_lowercase().as_str() {
+            "sans-serif" | "system-ui" | "-apple-system" => "Arial",
+            "serif" => "Times New Roman",
+            "monospace" => "Courier New",
+            _ => trimmed,
+        };
+    }
+    "Arial"
 }
 
 fn push_utf16_fixed(out: &mut Vec<u8>, text: &str, max_units: usize) {

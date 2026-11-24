@@ -639,3 +639,47 @@ fn cld_compiled_graph_exports_deterministic_pdf17_with_selectable_and_outlined_l
     assert_eq!(q_count, big_q_count, "outlined graphics stack q/Q must balance");
     assert!(!out_stream.contains(" Tj\n"), "outlined PDF must not emit Tj text operators");
 }
+
+#[test]
+fn pdf17_prunes_unreferenced_fonts_and_omits_font_dict_when_outlined() {
+    let mut ascii_scene = ChartScene::new("graph-pruned", "ASCII TrueType", 320.0, 220.0, Some(Rgba8::WHITE));
+    ascii_scene.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich: parse_markup("Linear Calibration"),
+        anchor_pt: PointPt::new(160.0, 40.0),
+        anchor: TextAnchor::Middle,
+        font_size_pt: 12.0,
+        rotation_deg: 0.0,
+        color: Rgba8::BLACK,
+    }));
+
+    let find_page_dict = |parsed: &ParsedPdf| -> String {
+        parsed
+            .objects
+            .values()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .find(|s| s.contains("/Type /Page ") || s.contains("/Type /Page\n"))
+            .expect("missing /Type /Page object")
+    };
+
+    // 1. Outlined PDF must omit `/Font << ... >>` from the Page `/Resources` dictionary completely.
+    let out_opts = PdfExportOptions { version: PdfVersion::Pdf17, outline_text: true, ..PdfExportOptions::default() };
+    let out_pdf = render_pdf(&ascii_scene, &out_opts).expect("outlined pdf");
+    let out_parsed = parse_pdf_strict(&out_pdf, b"%PDF-1.7\n").expect("strict outlined pdf");
+    let out_page = find_page_dict(&out_parsed);
+    assert!(!out_page.contains("/Font"), "outlined Page /Resources must omit unused /Font dict:\n{out_page}");
+
+    // 2. Embedded TrueType ASCII PDF must list only `/F5` and omit unused Core-14 Type 1 font refs (`/F1`..`/F4`).
+    let ttf_opts = PdfExportOptions {
+        version: PdfVersion::Pdf17,
+        outline_text: false,
+        embedded_truetype_font: Some(build_minimal_truetype_font()),
+        ..PdfExportOptions::default()
+    };
+    let ttf_pdf = render_pdf(&ascii_scene, &ttf_opts).expect("ttf pdf");
+    let ttf_parsed = parse_pdf_strict(&ttf_pdf, b"%PDF-1.7\n").expect("strict ttf pdf");
+    let ttf_page = find_page_dict(&ttf_parsed);
+    assert!(ttf_page.contains("/F6 "), "expected embedded TrueType `/F6` reference in Page /Resources:\n{ttf_page}");
+    for unused in ["/F1 ", "/F2 ", "/F3 ", "/F4 ", "/F5 "] {
+        assert!(!ttf_page.contains(unused), "unreferenced Core-14 font {unused} leaked into Page /Resources:\n{ttf_page}");
+    }
+}

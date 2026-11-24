@@ -1,10 +1,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use curvebook_chart::{
-    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
-    compile_graph, compile_layout,
+    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint,
+    TextAnchor, compile_graph, compile_layout,
 };
-use curvebook_doc::{DataSheet, GraphSheet, LayoutSheet, LayoutSpec, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
+use curvebook_doc::{
+    CropInsetsPt, DataSheet, GraphSheet, ImageMimeKind, LayoutSheet, LayoutSpec, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable,
+};
 use curvebook_palette::{LineDashStyle, OKABE_ITO_BLUE, OKABE_ITO_VERMILION, Rgba8};
 use curvebook_svg::{SVG_XMLNS, SvgError, SvgExportOptions, render_svg, validate_svg_structure};
 use curvebook_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, parse_markup};
@@ -535,5 +537,67 @@ fn cld_compiled_graph_exports_deterministic_editable_and_outlined_svg() {
             let (_, y_ab) = extract_svg_text_xy(&svg_both, "ab");
             assert!(y_sig + 8.0 < y_ab, "bracket label y={y_sig} must clear CLD label y={y_ab} without overlap");
         }
+    }
+}
+
+#[test]
+fn svg_interop_emits_xlink_and_suppresses_degenerate_strokes_and_alpha() {
+    let mut no_img_scene = ChartScene::new("no-img", "Vector Only", 160.0, 120.0, Some(Rgba8::WHITE));
+    no_img_scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::line(PointPt::new(10.0, 20.0), PointPt::new(150.0, 20.0)),
+        fill: None,
+        stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.5)),
+        clip: None,
+    });
+    let no_img_svg = render_svg(&no_img_scene, &SvgExportOptions::default()).expect("render vector-only svg");
+    validate_svg_structure(&no_img_svg).expect("valid vector-only svg");
+    assert!(!no_img_svg.contains("xmlns:xlink"), "SVG without <image> must not emit unused xmlns:xlink");
+
+    let mut scene = no_img_scene;
+    scene.sheet_id = String::from("img-and-degenerate");
+    // 1. Degenerate zero-width dashed stroke (like hidden minor gridlines).
+    scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::line(PointPt::new(10.0, 40.0), PointPt::new(150.0, 40.0)),
+        fill: None,
+        stroke: Some(StrokePaint { color: Rgba8::BLACK, width_pt: 0.0, dash: LineDashStyle::DashDot, cap: LineCap::Butt, join: LineJoin::Miter }),
+        clip: None,
+    });
+    // 2. Zero-alpha fill + stroke should be omitted cleanly.
+    scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::rect(RectPt::new(20.0, 50.0, 40.0, 20.0)),
+        fill: Some(FillPaint::solid(Rgba8::rgba(255, 0, 0, 0))),
+        stroke: Some(StrokePaint::solid(Rgba8::rgba(0, 0, 255, 0), 1.0)),
+        clip: None,
+    });
+    // 3. Zero-alpha text should not emit a ghost <text> element.
+    scene.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich: parse_markup("Ghost Label"),
+        anchor_pt: PointPt::new(20.0, 60.0),
+        font_size_pt: 10.0,
+        anchor: TextAnchor::Start,
+        color: Rgba8::rgba(0, 0, 0, 0),
+        rotation_deg: 0.0,
+    }));
+    // 4. Embedded raster image should emit xmlns:xlink + both xlink:href and href for Illustrator/Office/SVG2.
+    scene.primitives.push(ScenePrimitive::RasterImage(SceneRasterImage {
+        asset_id: String::from("img-1"),
+        media_type: ImageMimeKind::Png,
+        pixel_size: (2, 2),
+        rgba: vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255],
+        bounds_pt: RectPt::new(20.0, 30.0, 60.0, 60.0),
+        crop: CropInsetsPt::default(),
+        rotation_deg: 0.0,
+        clip: None,
+    }));
+
+    for outline_text in [false, true] {
+        let svg = render_svg(&scene, &SvgExportOptions { outline_text, ..SvgExportOptions::default() }).expect("render image interop svg");
+        validate_svg_structure(&svg).expect("valid image interop svg");
+        assert!(svg.contains("xmlns:xlink=\"http://www.w3.org/1999/xlink\""), "missing xmlns:xlink (outline={outline_text})");
+        assert!(svg.contains("xlink:href=\"data:image/png;base64,"), "missing xlink:href data URI (outline={outline_text})");
+        assert!(svg.contains(" href=\"data:image/png;base64,"), "missing SVG2 href data URI (outline={outline_text})");
+        assert!(!svg.contains("stroke-width=\"0.000\""), "unexpected zero stroke-width in SVG:\n{svg}");
+        assert!(!svg.contains("stroke-dasharray=\"0.000"), "unexpected zero stroke-dasharray in SVG:\n{svg}");
+        assert!(!svg.contains("Ghost Label"), "0-alpha text must be skipped cleanly");
     }
 }
