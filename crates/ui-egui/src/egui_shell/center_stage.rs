@@ -19,10 +19,14 @@ use serde_json::json;
 use crate::UiApp;
 use crate::dialogs_canvas::AssumptionDiagnosticBanner;
 use crate::egui_shell::canvas_view::{CanvasViewContext, CanvasViewEguiState, render_canvas_view_for_sheet};
-use crate::egui_shell::data_grid::{ColumnGridRenderContext, render_data_grid};
+use crate::egui_shell::data_grid::{ColumnGridRenderContext, DataGridScrollTarget, render_data_grid};
 use crate::egui_shell::info_view::{InfoViewEguiState, render_info_view_for_sheet};
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
 use crate::egui_shell::results_view::{ResultsViewEguiState, render_results_view_for_sheet};
+use crate::egui_shell::sheet_find_bar::{
+    DataSheetFindMatch, DataSheetFindOverlay, ResultSheetFindOverlay, find_matches_in_data_sheet, find_matches_in_result_sheet,
+    render_sheet_find_bar,
+};
 use crate::egui_shell::welcome_hub::render_welcome_hub;
 use crate::egui_shell::widgets::dropdown;
 use crate::egui_shell::{
@@ -299,6 +303,7 @@ pub fn render_center_stage(
 
     let modal_blocked = !ctx_in.enabled || views.progress_modal.is_some();
     let stage_enabled = !modal_blocked;
+    let sheet_find_sync = sync_sheet_find_before_stage(app, views, mode, active_sheet_id.as_ref(), intents);
 
     // Reserve bottom 32 pt for QOL-7 banner when visible so scrollbars and footer stay unoccluded.
     // In split view, the primary pane's sheet owns the singleton bottom banner.
@@ -389,8 +394,103 @@ pub fn render_center_stage(
         }
     }
 
+    if stage_enabled
+        && let Some((is_data, is_result, match_count)) = sheet_find_sync
+    {
+        let anchor_rect = report.primary_rect_pt.unwrap_or(work_rect);
+        let still_open = render_sheet_find_bar(
+            ui.ctx(),
+            anchor_rect,
+            is_data,
+            is_result,
+            match_count,
+            &mut views.sheet_find,
+            ctx_in.tokens,
+            meta,
+            intents,
+        );
+        if !still_open {
+            views.column_grid.active_find_matches = None;
+            views.results_view.active_find_matches = None;
+        }
+    }
+
     render_progress_modal_if_open(ui, app, views, ctx_in.tokens, meta);
     report
+}
+
+fn sync_sheet_find_before_stage(
+    app: &UiApp,
+    views: &mut EguiShellViewState,
+    mode: CenterStageMode,
+    active_sheet_id: Option<&SheetId>,
+    intents: &mut PendingUiIntents,
+) -> Option<(bool, bool, usize)> {
+    let is_data = matches!(mode, CenterStageMode::ColumnGrid | CenterStageMode::DataGrid);
+    let is_result = mode == CenterStageMode::ResultSheet;
+    if !views.sheet_find.open || (!is_data && !is_result) {
+        views.column_grid.active_find_matches = None;
+        views.results_view.active_find_matches = None;
+        return None;
+    }
+
+    let sheet_id = active_sheet_id?;
+    if views.sheet_find.last_sheet_id.as_ref() != Some(sheet_id) {
+        views.sheet_find.last_sheet_id = Some(sheet_id.clone());
+        views.sheet_find.active_match_index = 0;
+        views.sheet_find.pending_scroll_to_active = true;
+    }
+
+    let doc = app.document();
+    if is_data && let Some(ds) = doc.data_sheet(sheet_id) {
+        let matches = find_matches_in_data_sheet(ds, &views.sheet_find.query, views.sheet_find.match_case, views.sheet_find.match_entire_cell);
+        views.sheet_find.sync_match_count(matches.len());
+        let overlay = DataSheetFindOverlay::from_matches(&matches, views.sheet_find.active_match_index);
+        views.column_grid.active_find_matches = (!overlay.is_empty()).then(|| overlay.to_grid_highlight());
+        views.results_view.active_find_matches = None;
+        if views.sheet_find.pending_scroll_to_active {
+            if let Some(active) = matches.get(views.sheet_find.active_match_index) {
+                let target = match active {
+                    DataSheetFindMatch::Cell(coord) => DataGridScrollTarget::Cell(*coord),
+                    DataSheetFindMatch::ColumnTitle { col } => DataGridScrollTarget::ColumnTitle { col: *col },
+                    DataSheetFindMatch::RowTitle { row } => DataGridScrollTarget::RowTitle { row: *row },
+                };
+                views.column_grid.scroll_to_target(target);
+            }
+            views.sheet_find.pending_scroll_to_active = false;
+        }
+        return Some((true, false, matches.len()));
+    }
+
+    if is_result && let Some(rs) = doc.result_sheet(sheet_id) {
+        let active_tab_idx = app.canvas_dialogs.result_view.active_tab_index.min(rs.tabs.len().saturating_sub(1));
+        let matches = find_matches_in_result_sheet(
+            rs,
+            active_tab_idx,
+            views.sheet_find.all_result_tabs,
+            &views.sheet_find.query,
+            views.sheet_find.match_case,
+            views.sheet_find.match_entire_cell,
+        );
+        views.sheet_find.sync_match_count(matches.len());
+        let overlay = ResultSheetFindOverlay::from_matches(&matches, views.sheet_find.active_match_index);
+        views.results_view.active_find_matches = (!overlay.is_empty()).then(|| overlay.to_results_highlight(active_tab_idx));
+        views.column_grid.active_find_matches = None;
+        if views.sheet_find.pending_scroll_to_active {
+            if let Some(active) = matches.get(views.sheet_find.active_match_index) {
+                if active.tab_idx != active_tab_idx {
+                    intents.push(UiIntent::SelectResultTab { index: active.tab_idx });
+                }
+                views.results_view.scroll_to_match(sheet_id.clone(), active.tab_idx, active.row_idx, active.col_idx);
+            }
+            views.sheet_find.pending_scroll_to_active = false;
+        }
+        return Some((false, true, matches.len()));
+    }
+
+    views.column_grid.active_find_matches = None;
+    views.results_view.active_find_matches = None;
+    None
 }
 
 fn ensure_solid_stage_scrollbars(ui: &mut egui::Ui, tokens: &Tokens) {

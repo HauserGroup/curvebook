@@ -56,6 +56,14 @@ impl ResultTabCategory {
     }
 }
 
+/// Optional find-in-sheet highlight overlay painted on matching cells in the active `ResultSheet` tab (`R15`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResultsFindHighlight {
+    pub tab_idx: usize,
+    pub active_match: Option<(usize, usize)>,
+    pub matching_cells: BTreeSet<(usize, usize)>,
+}
+
 /// Persistent `egui_shell` state for the multi-tab `ResultSheet` viewer (`R15.3`, `R13.4`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResultsViewEguiState {
@@ -68,9 +76,18 @@ pub struct ResultsViewEguiState {
     pub collapsed_sections: BTreeSet<String>,
     pub tab_strip_scroll_x: f32,
     pub tab_overflow_open: bool,
+    pub active_find_matches: Option<ResultsFindHighlight>,
+    pub pending_scroll_to_match: Option<(SheetId, usize, usize, usize)>,
 }
 
 impl ResultsViewEguiState {
+    /// Request scrolling the results table to `(tab_idx, row_idx, col_idx)` and selecting that cell.
+    pub fn scroll_to_match(&mut self, sheet_id: SheetId, tab_idx: usize, row_idx: usize, col_idx: usize) {
+        self.selection_anchor = Some((sheet_id.clone(), tab_idx, row_idx, col_idx));
+        self.selected_cell = Some((sheet_id.clone(), tab_idx, row_idx, col_idx));
+        self.pending_scroll_to_match = Some((sheet_id, tab_idx, row_idx, col_idx));
+    }
+
     /// Active rectangular selection `(min_row, max_row, min_col, max_col)` when bound to `(sheet_id, tab_idx)`.
     #[must_use]
     pub fn selected_range(&self, sheet_id: &SheetId, tab_idx: usize) -> Option<(usize, usize, usize, usize)> {
@@ -469,14 +486,31 @@ pub fn render_results_view_for_sheet(
             render_ambiguity_callout(ui, rs, tokens, enabled, meta, intents);
         }
 
-        let scroll_out = egui::ScrollArea::both()
+        let scroll_to_y = if state.pending_scroll_to_match.as_ref().is_some_and(|(sid, t, _, _)| sid == &rs.id && *t == active_idx) {
+            state.pending_scroll_to_match.take().map(|(_, _, target_row, _)| {
+                expand_section_containing_row(&rs.id, tab, target_row, &mut state.collapsed_sections);
+                let row_stride = 24.0_f32 + ui.spacing().item_spacing.y;
+                #[allow(clippy::cast_precision_loss)]
+                let y = ((target_row as f32) * row_stride - row_stride * 2.0).max(0.0);
+                state.scroll_offset_y = y;
+                y
+            })
+        } else {
+            None
+        };
+
+        let mut scroll_area = egui::ScrollArea::both()
             .id_salt(("egui_shell.results.body", rs.id.as_str(), &tab.id))
             .scroll_bar_visibility(if enabled {
                 egui::scroll_area::ScrollBarVisibility::AlwaysVisible
             } else {
                 egui::scroll_area::ScrollBarVisibility::AlwaysHidden
             })
-            .auto_shrink([false, false])
+            .auto_shrink([false, false]);
+        if let Some(target_y) = scroll_to_y {
+            scroll_area = scroll_area.vertical_scroll_offset(target_y);
+        }
+        let scroll_out = scroll_area
             .show_viewport(ui, |ui, viewport| {
                 render_result_tab_table(ui, &tab_ctx, active_idx, is_survival_summary, viewport, state, meta, intents);
                 if !tab.footnotes.is_empty() {
@@ -518,6 +552,21 @@ pub fn render_results_view_for_sheet(
     });
 
     report
+}
+
+fn expand_section_containing_row(sheet_id: &SheetId, tab: &ResultTab, target_row: usize, collapsed_sections: &mut BTreeSet<String>) {
+    if collapsed_sections.is_empty() || tab.rows.is_empty() {
+        return;
+    }
+    let upper = target_row.min(tab.rows.len().saturating_sub(1));
+    for r in (0..=upper).rev() {
+        let lbl = tab.row_labels.get(r).map_or("", String::as_str);
+        if !lbl.is_empty() && tab.rows[r].iter().all(|c| matches!(c, ResultCell::Empty)) {
+            let sec_key = format!("{}:{}:{r}", sheet_id.as_str(), tab.id);
+            collapsed_sections.remove(&sec_key);
+            break;
+        }
+    }
 }
 
 fn tab_contains_ambiguity(tab: &ResultTab, _p_format: PValueFormat, is_survival_summary: bool) -> bool {
@@ -1023,10 +1072,23 @@ fn render_result_data_row(
 
         let selected =
             state.selected_range(&rs.id, active_tab_idx).is_some_and(|(r0, r1, c0, c1)| r_idx >= r0 && r_idx <= r1 && c_idx >= c0 && c_idx <= c1);
-        if selected {
+        let find_hl = state.active_find_matches.as_ref().filter(|h| h.tab_idx == active_tab_idx);
+        let find_active = find_hl.is_some_and(|h| h.active_match == Some((r_idx, c_idx)));
+        let find_match = find_active || find_hl.is_some_and(|h| h.matching_cells.contains(&(r_idx, c_idx)));
+        if selected || find_match {
             let cell_painter = ui.painter().with_clip_rect(cell_vis);
-            cell_painter.rect_filled(cell_vis, CornerRadius::ZERO, tokens.active_bg);
-            cell_painter.rect_stroke(cell_rect, CornerRadius::ZERO, Stroke::new(1.5, tokens.accent), StrokeKind::Inside);
+            if selected {
+                cell_painter.rect_filled(cell_vis, CornerRadius::ZERO, tokens.active_bg);
+            }
+            if find_match {
+                let tint = tokens.warning.linear_multiply(if find_active { 0.38 } else { 0.22 });
+                cell_painter.rect_filled(cell_vis, CornerRadius::ZERO, tint);
+            }
+            if find_active {
+                cell_painter.rect_stroke(cell_rect, CornerRadius::ZERO, Stroke::new(2.0, tokens.accent), StrokeKind::Inside);
+            } else if selected {
+                cell_painter.rect_stroke(cell_rect, CornerRadius::ZERO, Stroke::new(1.5, tokens.accent), StrokeKind::Inside);
+            }
         }
 
         if !fmt.text.is_empty() {

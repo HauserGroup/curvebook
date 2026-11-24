@@ -3,11 +3,12 @@
 
 use std::sync::Arc;
 
-use egui::{Color32, CornerRadius, FontId, Id, Order, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use egui::{Color32, CornerRadius, FontId, Id, Key, Modifiers, Order, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, SplitWorkspaceState};
+use crate::egui_shell::command_palette::{commit_unified_search_item, paint_inline_ghost_completion, paint_unified_search_row_content};
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
 use crate::egui_shell::top_bar_fit::{MIN_SWITCHER_PT, RankedToolbarSlot, RightWidths, SearchVisibility, fit_ranked_toolbar, fit_right_group};
 use crate::egui_shell::{
@@ -18,6 +19,7 @@ use crate::i18n::{LOCALES, locale_picker_label, normalize_locale};
 use crate::inspect::ZLayer;
 use crate::interaction::resolve_result_sheet_for_shortcut;
 use crate::menus::{CommandTooltip, CuratedMenuNode, command_tooltip, curated_menu_bar, default_command_action_rank, format_shortcut_for_platform};
+use crate::search_engine::{SearchRecents, UnifiedSearchAction, compute_ghost_completion, query_unified};
 use crate::tr;
 use curvebook_doc::{AnalysisKind, InfoSheet, MultivariateSpec, SheetId, TableArchetype};
 
@@ -152,17 +154,28 @@ pub fn collect_in_window_menu_sections(app: &UiApp) -> Vec<InWindowMenuSectionPa
         .collect()
 }
 
-/// Persistent `egui_shell` top chrome state (split/preset/overflow popups + active in-window menu).
+/// Persistent `egui_shell` top chrome state (split/preset/overflow popups, inline search, and active in-window menu).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TopChromeEguiState {
     pub split_menu_open: bool,
     pub preset_menu_open: bool,
     pub overflow_menu_open: bool,
     pub active_in_window_menu: Option<String>,
+    pub search_query: String,
+    pub search_dropdown_open: bool,
+    pub search_selected_index: usize,
 }
 
 impl TopChromeEguiState {
     fn close_all_popups(&mut self) {
+        self.split_menu_open = false;
+        self.preset_menu_open = false;
+        self.overflow_menu_open = false;
+        self.active_in_window_menu = None;
+        self.search_dropdown_open = false;
+    }
+
+    fn close_menus_keep_search(&mut self) {
         self.split_menu_open = false;
         self.preset_menu_open = false;
         self.overflow_menu_open = false;
@@ -181,6 +194,7 @@ pub struct TopChromeContext<'a> {
     pub host_draws_menu_bar: bool,
     pub project_title: &'a str,
     pub dirty: bool,
+    pub search_recents: &'a SearchRecents,
 }
 
 /// Per-frame geometry & popup report emitted by [`render_top_chrome`].
@@ -225,6 +239,7 @@ struct Tier1PopupsInput<'a> {
     tokens: &'a Tokens,
     enabled: bool,
     workspace_preset: WorkspacePreset,
+    search_recents: &'a SearchRecents,
 }
 
 #[derive(Clone, Copy)]
@@ -238,6 +253,7 @@ struct Tier1BarInput<'a> {
 struct Tier1Anchors {
     split: Option<Rect>,
     preset: Option<Rect>,
+    search_capsule: Option<Rect>,
 }
 
 #[derive(Default)]
@@ -367,7 +383,13 @@ pub fn render_top_chrome(
         state.overflow_menu_open = false;
     }
 
-    let popup_ctx = Tier1PopupsInput { app, tokens, enabled, workspace_preset: ctx_in.workspace_preset };
+    let popup_ctx = Tier1PopupsInput { app, tokens, enabled, workspace_preset: ctx_in.workspace_preset, search_recents: ctx_in.search_recents };
+    if state.search_dropdown_open
+        && enabled
+        && let Some(anchor) = tier1_anchors.search_capsule
+    {
+        render_inline_search_dropdown(ui.ctx(), &popup_ctx, state, anchor, meta, intents);
+    }
     if state.split_menu_open
         && let Some(anchor) = tier1_anchors.split
     {
@@ -385,7 +407,8 @@ pub fn render_top_chrome(
         render_tier2_overflow_popup(ui.ctx(), &popup_ctx, state, &tier2_overflow.items, anchor, meta, intents);
     }
 
-    report.menu_popup_open = state.active_in_window_menu.is_some() || state.split_menu_open || state.preset_menu_open || state.overflow_menu_open;
+    report.menu_popup_open =
+        state.active_in_window_menu.is_some() || state.split_menu_open || state.preset_menu_open || state.overflow_menu_open || state.search_dropdown_open;
     report
 }
 
@@ -899,29 +922,33 @@ fn render_tier1_right_group(
         let plat_shortcut = format_shortcut_for_platform(app.shortcuts.active_combo("ui.palette.open").unwrap_or("Cmd+K"));
         let selected = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette);
         let tip_text = if enabled { format!("{base_label} ({plat_shortcut})") } else { String::from("modal dialog is active") };
-        let pal_resp = match fitted.search {
-            SearchVisibility::Field => chrome_button_fitted(
-                ui,
-                tokens,
-                meta,
-                ChromeButtonSpec {
-                    widget_id: "toolbar.command_palette",
-                    label: base_label,
-                    command_id: Some("ui.palette.open"),
-                    selected,
-                    enabled,
-                    disabled_reason: modal_reason(enabled),
-                    max_w: 176.0,
-                },
-            )
-            .on_hover_text(tip_text),
-            SearchVisibility::Icon | SearchVisibility::Hidden => {
-                render_command_palette_icon_button(ui, tokens, meta, base_label, &tip_text, selected, enabled)
+        match fitted.search {
+            SearchVisibility::Field => {
+                let capsule_rect = render_inline_search_capsule(
+                    ui,
+                    InlineSearchCapsuleSpec {
+                        app,
+                        tokens,
+                        search_recents: ctx_in.search_recents,
+                        base_label,
+                        plat_shortcut: &plat_shortcut,
+                        tip_text: &tip_text,
+                        selected,
+                        enabled,
+                    },
+                    state,
+                    meta,
+                    intents,
+                );
+                anchors.search_capsule = Some(capsule_rect);
             }
-        };
-        if pal_resp.clicked() && enabled {
-            state.close_all_popups();
-            intents.push_set_palette_open(true);
+            SearchVisibility::Icon | SearchVisibility::Hidden => {
+                let pal_resp = render_command_palette_icon_button(ui, tokens, meta, base_label, &tip_text, selected, enabled);
+                if pal_resp.clicked() && enabled {
+                    state.close_all_popups();
+                    intents.push_set_palette_open(true);
+                }
+            }
         }
     }
 
@@ -970,6 +997,335 @@ fn render_tier1_right_group(
             state.close_all_popups();
             state.preset_menu_open = next;
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct InlineSearchCapsuleSpec<'a> {
+    app: &'a UiApp,
+    tokens: &'a Tokens,
+    search_recents: &'a SearchRecents,
+    base_label: &'a str,
+    plat_shortcut: &'a str,
+    tip_text: &'a str,
+    selected: bool,
+    enabled: bool,
+}
+
+fn render_inline_search_capsule(
+    ui: &mut egui::Ui,
+    spec: InlineSearchCapsuleSpec<'_>,
+    state: &mut TopChromeEguiState,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> Rect {
+    let InlineSearchCapsuleSpec { app, tokens, search_recents, base_label, plat_shortcut, tip_text, selected, enabled } = spec;
+    let search_input_id = Id::unique("egui_shell.toolbar.search_input");
+    let input_focused = ui.ctx().memory(|m| m.focused()) == Some(search_input_id);
+
+    if enabled && (state.search_dropdown_open || input_focused) {
+        consume_inline_search_keys(ui.ctx(), app, state, search_recents, search_input_id, intents);
+    }
+
+    let (sc_galley, _) = layout_single_line_job(ui.painter(), plat_shortcut, 54.0, tokens.text_muted, 10.5);
+    let kbd_btn_w = (sc_galley.size().x + 12.0).clamp(32.0, 56.0);
+    let capsule_w = 176.0;
+    let capsule_h = 24.0;
+    let input_w = (capsule_w - kbd_btn_w - 10.0).max(72.0);
+
+    let frame_stroke = if input_focused && enabled {
+        Stroke::new(1.5, tokens.focus_ring)
+    } else {
+        Stroke::new(1.0, tokens.border)
+    };
+    let frame_fill = if enabled { tokens.surface_bg } else { tokens.panel_bg };
+
+    let capsule_resp = egui::Frame::NONE
+        .fill(frame_fill)
+        .stroke(frame_stroke)
+        .corner_radius(CornerRadius::same(tokens.metrics.radius_md))
+        .inner_margin(egui::Margin::symmetric(4, 1))
+        .show(ui, |ui| {
+            ui.set_height(capsule_h - 2.0);
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let prev_query = state.search_query.clone();
+                let edit_resp = ui.add_enabled(
+                    enabled,
+                    egui::TextEdit::singleline(&mut state.search_query)
+                        .id(search_input_id)
+                        .frame(egui::Frame::NONE)
+                        .hint_text("Search sheets, analyses, commands…")
+                        .desired_width(input_w),
+                );
+                if enabled && (edit_resp.gained_focus() || edit_resp.changed() || edit_resp.clicked()) {
+                    state.close_menus_keep_search();
+                    state.search_dropdown_open = true;
+                }
+                if state.search_query != prev_query {
+                    state.search_selected_index = 0;
+                }
+                if enabled && !state.search_query.is_empty() && (edit_resp.has_focus() || state.search_dropdown_open) {
+                    let top_hits = query_unified(app, &state.search_query, 1, search_recents);
+                    if let Some(suffix) = compute_ghost_completion(&state.search_query, top_hits.first()) {
+                        paint_inline_ghost_completion(ui, &edit_resp, &state.search_query, &suffix, tokens);
+                    }
+                }
+                meta.record_response(
+                    ui,
+                    &edit_resp,
+                    FrameInspectEntryInput {
+                        widget_id: "toolbar.search_input",
+                        role: "textbox",
+                        label: "Search sheets, analyses, commands",
+                        command_id: None,
+                        value: Some(json!(state.search_query)),
+                        enabled,
+                        disabled_reason: modal_reason(enabled),
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: false,
+                        full_label: None,
+                    },
+                );
+
+                let btn_fill = if selected { tokens.active_bg } else { tokens.panel_bg };
+                let btn_stroke = if selected { Stroke::new(1.0, tokens.accent) } else { Stroke::new(1.0, tokens.border) };
+                let pal_resp = ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(egui::RichText::new(plat_shortcut).size(10.5).color(if enabled {
+                            tokens.text_muted
+                        } else {
+                            tokens.text_disabled
+                        }))
+                        .fill(btn_fill)
+                        .stroke(btn_stroke)
+                        .corner_radius(CornerRadius::same(3))
+                        .min_size(Vec2::new(kbd_btn_w, 18.0)),
+                    )
+                    .on_hover_text(tip_text);
+                let ak_lbl = base_label.to_owned();
+                pal_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, ak_lbl.clone()));
+                meta.record_response(
+                    ui,
+                    &pal_resp,
+                    FrameInspectEntryInput {
+                        widget_id: "toolbar.command_palette",
+                        role: "button",
+                        label: base_label,
+                        command_id: Some("ui.palette.open"),
+                        value: Some(json!(selected)),
+                        enabled,
+                        disabled_reason: modal_reason(enabled),
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: false,
+                        full_label: None,
+                    },
+                );
+                if pal_resp.clicked() && enabled {
+                    let carry = state.search_query.clone();
+                    state.close_all_popups();
+                    if carry.is_empty() {
+                        intents.push_set_palette_open(true);
+                    } else {
+                        intents.push(UiIntent::OpenPaletteWithQuery { query: carry });
+                    }
+                }
+            });
+        });
+
+    capsule_resp.response.rect
+}
+
+fn consume_inline_search_keys(
+    ctx: &egui::Context,
+    app: &UiApp,
+    state: &mut TopChromeEguiState,
+    search_recents: &SearchRecents,
+    search_input_id: Id,
+    intents: &mut PendingUiIntents,
+) {
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        state.search_dropdown_open = false;
+        ctx.memory_mut(|m| m.surrender_focus(search_input_id));
+        return;
+    }
+    let items = query_unified(app, &state.search_query, 10, search_recents);
+    if !items.is_empty() && state.search_selected_index >= items.len() {
+        state.search_selected_index = items.len() - 1;
+    }
+    if let Some(suffix) = compute_ghost_completion(&state.search_query, items.first())
+        && !suffix.is_empty()
+        && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab))
+    {
+        state.search_query.push_str(&suffix);
+        state.search_selected_index = 0;
+        return;
+    }
+    if !items.is_empty() {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown)) {
+            state.search_selected_index = (state.search_selected_index + 1) % items.len();
+            state.search_dropdown_open = true;
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp)) {
+            state.search_selected_index = if state.search_selected_index == 0 { items.len() - 1 } else { state.search_selected_index - 1 };
+            state.search_dropdown_open = true;
+        }
+    }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+        && let Some(item) = items.get(state.search_selected_index)
+        && item.enabled
+    {
+        commit_unified_search_item(app, item, intents);
+        state.search_dropdown_open = false;
+        state.search_query.clear();
+        ctx.memory_mut(|m| m.surrender_focus(search_input_id));
+    }
+}
+
+fn render_inline_search_dropdown(
+    ctx: &egui::Context,
+    input: &Tier1PopupsInput<'_>,
+    state: &mut TopChromeEguiState,
+    anchor: Rect,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let items = query_unified(input.app, &state.search_query, 10, input.search_recents);
+    if items.is_empty() {
+        state.search_selected_index = 0;
+    } else if state.search_selected_index >= items.len() {
+        state.search_selected_index = items.len() - 1;
+    }
+
+    let screen = ctx.content_rect();
+    let popup_w = if screen.width() >= 376.0 { (screen.width() - 16.0).clamp(360.0, 420.0) } else { (screen.width() - 16.0).max(200.0) };
+    let desired_x = (anchor.right() - popup_w).clamp(screen.left() + 8.0, (screen.right() - popup_w - 8.0).max(screen.left() + 8.0));
+    let desired_y = (anchor.bottom() + 4.0).clamp(screen.top() + 8.0, (screen.bottom() - 80.0).max(screen.top() + 8.0));
+    let tokens = input.tokens;
+    let plat_shortcut = format_shortcut_for_platform(input.app.shortcuts.active_combo("ui.palette.open").unwrap_or("Cmd+K"));
+
+    let area_resp = egui::Area::new(Id::unique("egui_shell.toolbar.search_dropdown"))
+        .fixed_pos(Pos2::new(desired_x, desired_y))
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(tokens.panel_bg)
+                .stroke(Stroke::new(1.0, tokens.border))
+                .corner_radius(CornerRadius::same(tokens.metrics.radius_lg))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.set_width(popup_w - 12.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    if items.is_empty() {
+                        ui.colored_label(tokens.text_muted, "No matching sheets, analyses, or commands.");
+                    } else {
+                        for (idx, item) in items.iter().enumerate() {
+                            let is_selected = idx == state.search_selected_index;
+                            let row_w = ui.available_width().max(120.0);
+                            let (rect, resp) =
+                                ui.allocate_exact_size(Vec2::new(row_w, 30.0), if item.enabled { Sense::click() } else { Sense::hover() });
+                            let bg = if !item.enabled {
+                                Color32::TRANSPARENT
+                            } else if is_selected {
+                                tokens.active_bg
+                            } else if resp.hovered() {
+                                tokens.hover_bg
+                            } else {
+                                tokens.surface_bg
+                            };
+                            let border = if is_selected { Stroke::new(1.0, tokens.accent) } else { Stroke::NONE };
+                            ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
+                            if border != Stroke::NONE {
+                                ui.painter().rect_stroke(rect, CornerRadius::same(4), border, StrokeKind::Inside);
+                            }
+                            let ellipsized = paint_unified_search_row_content(ui, rect, item, tokens);
+                            let command_id_opt = match &item.action {
+                                UnifiedSearchAction::RunCommand { command_id, .. } => Some(command_id.as_str()),
+                                _ => None,
+                            };
+                            let wid = format!("toolbar.search_item.{idx}");
+                            meta.record_ranked_response(
+                                ui,
+                                &resp,
+                                FrameInspectEntryInput {
+                                    widget_id: &wid,
+                                    role: "button",
+                                    label: &item.title,
+                                    command_id: command_id_opt,
+                                    value: Some(json!(item.enabled)),
+                                    enabled: item.enabled,
+                                    disabled_reason: (!item.enabled).then_some("Unavailable"),
+                                    z_layer: ZLayer::DropdownMenu,
+                                    ellipsized,
+                                    full_label: ellipsized.then_some(item.title.as_str()),
+                                },
+                                ActionRank::Secondary,
+                            );
+                            if resp.clicked() && item.enabled {
+                                commit_unified_search_item(input.app, item, intents);
+                                state.search_dropdown_open = false;
+                                state.search_query.clear();
+                            }
+                        }
+                    }
+
+                    ui.separator();
+                    let footer_label = format!("Open full search ({plat_shortcut})");
+                    let footer_resp = ui.add(
+                        egui::Button::new(egui::RichText::new(&footer_label).size(11.5).color(tokens.accent))
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(Stroke::NONE)
+                            .min_size(Vec2::new(ui.available_width(), 24.0)),
+                    );
+                    meta.record_response(
+                        ui,
+                        &footer_resp,
+                        FrameInspectEntryInput {
+                            widget_id: "toolbar.search_open_palette",
+                            role: "button",
+                            label: &footer_label,
+                            command_id: Some("ui.palette.open"),
+                            value: None,
+                            enabled: true,
+                            disabled_reason: None,
+                            z_layer: ZLayer::DropdownMenu,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                    if footer_resp.clicked() {
+                        let carry = state.search_query.clone();
+                        state.search_dropdown_open = false;
+                        intents.push(UiIntent::OpenPaletteWithQuery { query: carry });
+                    }
+                });
+        });
+
+    let popup_rect = area_resp.response.rect;
+    meta.record(FrameInspectNodeMeta {
+        egui_id: area_resp.response.id,
+        accesskit_id: area_resp.response.id.accesskit_id(),
+        widget_id: String::from("toolbar.search_dropdown"),
+        role: String::from("menu"),
+        label: String::from("Search Suggestions"),
+        command_id: None,
+        value: Some(json!(items.len())),
+        enabled: true,
+        disabled_reason: None,
+        unclipped_rect: popup_rect,
+        clipped_rect: meta.viewport_rect.intersect(popup_rect),
+        z_layer: ZLayer::DropdownMenu,
+        ellipsized: false,
+        full_label: None,
+        action_rank: None,
+    });
+
+    let clicked_outside = ctx.input(|i| {
+        i.pointer.any_click()
+            && i.pointer.latest_pos().or_else(|| i.pointer.interact_pos()).is_some_and(|p| !popup_rect.contains(p) && !anchor.contains(p))
+    });
+    if clicked_outside {
+        state.search_dropdown_open = false;
     }
 }
 

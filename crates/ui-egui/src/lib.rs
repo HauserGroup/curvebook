@@ -22,6 +22,7 @@ pub mod menus;
 pub mod modal_predicates;
 pub mod os_integration;
 pub mod power_wizard;
+pub mod search_engine;
 pub mod text_bridge;
 pub mod theme;
 pub mod views;
@@ -1734,12 +1735,13 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 54);
+        assert_eq!(UI_COMMANDS.len(), 60);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",
             "ui.family.toggle",
             "ui.palette.open",
+            "ui.sheet.find",
             "ui.analyze.open",
             "ui.editParams.open",
             "ui.changeGraphType.open",

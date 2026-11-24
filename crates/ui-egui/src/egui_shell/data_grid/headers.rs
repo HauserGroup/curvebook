@@ -18,7 +18,7 @@ use super::inline_edit::begin_inline_edit;
 use super::mv_roles::render_mv_tier3_role_chip;
 use super::shared::{
     AuxInlineTarget, CellTextStyle, MultiGridCtx, MultiGridFrameState, archetype_badge, compute_visible_range, is_multi_click_edit,
-    pressed_key_event_modifiers, record_meta_if_enabled, record_meta_with_unclipped_if_enabled, render_ellipsized_text,
+    paint_find_highlight, pressed_key_event_modifiers, record_meta_if_enabled, record_meta_with_unclipped_if_enabled, render_ellipsized_text,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -720,7 +720,12 @@ fn render_multi_data_col_headers(
             let wid = format!("grid.col_title.{col}");
             let col_editable = !blocked && !ds.frozen;
             let resp = hdr_ui.interact(t2_r, hdr_ui.make_persistent_id(&wid), if col_editable { Sense::click() } else { Sense::hover() });
-            if resp.hovered() && col_editable {
+            let col_find_active = fstate.state.active_find_matches.as_ref().is_some_and(|h| h.active_col_title == Some(col));
+            let col_find_match =
+                col_find_active || fstate.state.active_find_matches.as_ref().is_some_and(|h| h.matching_col_titles.contains(&col));
+            if col_find_match {
+                paint_find_highlight(hdr_ui, t2_r, tokens, col_find_active);
+            } else if resp.hovered() && col_editable {
                 hdr_ui.painter().rect_filled(t2_r, 0.0, tokens.hover_bg);
             }
             let (ellip, _) = render_ellipsized_text(

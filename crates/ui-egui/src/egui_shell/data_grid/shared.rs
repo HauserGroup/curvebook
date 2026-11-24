@@ -18,7 +18,7 @@ use crate::grid_view::{data_set_subcolumn_count, format_cell_display, parse_loca
 use crate::i18n::LocalePreset;
 
 use super::super::{FrameInspectEntryInput, FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens};
-use super::ColumnGridEguiState;
+use super::{ColumnGridEguiState, DataGridScrollTarget};
 
 pub(super) const ROW_NUM_WIDTH_PT: f32 = 48.0;
 pub(super) const ROW_TITLES_EXPANDED_WIDTH_PT: f32 = 112.0;
@@ -330,6 +330,56 @@ pub(super) fn clamp_multi_scroll(state: &mut ColumnGridEguiState, geom: &MultiGr
     let max_y = (geom.content_h - geom.body_inner_clip.height()).max(0.0);
     state.scroll_offset_pt.x = if state.scroll_offset_pt.x.is_finite() { state.scroll_offset_pt.x.clamp(0.0, max_x) } else { 0.0 };
     state.scroll_offset_pt.y = if state.scroll_offset_pt.y.is_finite() { state.scroll_offset_pt.y.clamp(0.0, max_y) } else { 0.0 };
+}
+
+pub(super) fn apply_pending_scroll_target(state: &mut ColumnGridEguiState, geom: &MultiGridGeom) {
+    let Some(target) = state.pending_scroll_target.take() else {
+        return;
+    };
+    let vis_w = geom.body_inner_clip.width().max(geom.subcol_w);
+    let vis_h = geom.body_inner_clip.height().max(geom.row_h);
+    match target {
+        DataGridScrollTarget::Cell(coord) => {
+            let flat = geom.coord_to_flat_all(false, coord.col, coord.subcol);
+            #[allow(clippy::cast_precision_loss)]
+            let x0 = (flat as f32) * geom.subcol_w;
+            let x1 = x0 + geom.subcol_w;
+            if x0 < state.scroll_offset_pt.x || x1 > state.scroll_offset_pt.x + vis_w {
+                state.scroll_offset_pt.x = (x0 - vis_w * 0.35).max(0.0);
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let y0 = (coord.row as f32) * geom.row_h;
+            let y1 = y0 + geom.row_h;
+            if y0 < state.scroll_offset_pt.y || y1 > state.scroll_offset_pt.y + vis_h {
+                state.scroll_offset_pt.y = (y0 - vis_h * 0.35).max(0.0);
+            }
+        }
+        DataGridScrollTarget::ColumnTitle { col } => {
+            let (flat_start, _) = geom.col_span_flat(col);
+            #[allow(clippy::cast_precision_loss)]
+            let x0 = (flat_start as f32) * geom.subcol_w;
+            let x1 = x0 + geom.subcol_w;
+            if x0 < state.scroll_offset_pt.x || x1 > state.scroll_offset_pt.x + vis_w {
+                state.scroll_offset_pt.x = (x0 - vis_w * 0.35).max(0.0);
+            }
+        }
+        DataGridScrollTarget::RowTitle { row } => {
+            #[allow(clippy::cast_precision_loss)]
+            let y0 = (row as f32) * geom.row_h;
+            let y1 = y0 + geom.row_h;
+            if y0 < state.scroll_offset_pt.y || y1 > state.scroll_offset_pt.y + vis_h {
+                state.scroll_offset_pt.y = (y0 - vis_h * 0.35).max(0.0);
+            }
+        }
+    }
+}
+
+pub(super) fn paint_find_highlight(ui: &Ui, rect: Rect, tokens: &Tokens, is_active: bool) {
+    let tint = tokens.warning.linear_multiply(if is_active { 0.38 } else { 0.22 });
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, tint);
+    if is_active {
+        ui.painter().rect_stroke(rect, CornerRadius::ZERO, Stroke::new(2.0, tokens.accent), StrokeKind::Inside);
+    }
 }
 
 pub(super) fn forward_frozen_wheel(ui: &mut Ui, geom: &MultiGridGeom, state: &mut ColumnGridEguiState) {

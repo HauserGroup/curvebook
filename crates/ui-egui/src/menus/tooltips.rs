@@ -139,6 +139,7 @@ pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.inspector.toggle" => ("menu.view", "View/Inspector"),
         "ui.family.toggle" => ("menu.view", "View/Family Pane"),
         "ui.palette.open" => ("menu.view", "View/Command Palette..."),
+        "ui.sheet.find" => ("menu.edit", "Edit/Find in Sheet..."),
         "ui.zoom.fitSheet" => ("menu.view", "View/Zoom to Fit"),
         "ui.gallery.toggle" => ("menu.view", "View/Gallery View"),
         "ui.rulers.toggle" => ("menu.view", "View/Rulers"),
@@ -234,6 +235,7 @@ pub(crate) fn ui_command_enabled_for_doc(doc: &curvebook_doc::ProjectDocument, i
         | "ui.export.tableCsv.open"
         | "ui.export.allTablesCsv.open"
         | "ui.export.allTablesCsv" => !doc.data_sheets.is_empty(),
+        "ui.sheet.find" => !doc.data_sheets.is_empty() || !doc.result_sheets.is_empty(),
         "ui.zoom.fitSheet" => doc.total_sheet_count() > 0,
         "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => !doc.layout_sheets.is_empty(),
         "ui.embeddedTable.format.open" => {
@@ -361,7 +363,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert!(seen.len() >= 60 && seen.len() <= 96, "expected curated menu size, got {}", seen.len());
+        assert!(seen.len() >= 60 && seen.len() <= 104, "expected curated menu size, got {}", seen.len());
         Ok(())
     }
 }

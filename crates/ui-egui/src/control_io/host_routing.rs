@@ -101,6 +101,7 @@ pub fn is_read_only_ui_command(command_id: &str) -> bool {
             | "ui.theme.set"
             | "ui.locale.set"
             | "ui.palette.open"
+            | "ui.sheet.find"
             | "ui.about.open"
             | "ui.sheet.select"
             | "ui.split.set"

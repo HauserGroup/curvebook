@@ -44,6 +44,7 @@ pub mod manage_vars_modal;
 pub mod power_studio;
 pub mod rasterizer;
 pub mod results_view;
+pub mod sheet_find_bar;
 pub mod specimen;
 pub mod stat_anova_modal;
 pub mod stats_modals;
@@ -195,6 +196,8 @@ pub struct EguiShellViewState {
     pub center_stage: center_stage::CenterStageEguiState,
     pub info_view: info_view::InfoViewEguiState,
     pub results_view: results_view::ResultsViewEguiState,
+    pub sheet_find: sheet_find_bar::SheetFindBarState,
+    pub search_recents: crate::search_engine::SearchRecents,
     pub canvas_view: canvas_view::CanvasViewEguiState,
     pub trailing_studio: trailing_studio::TrailingStudioEguiState,
     pub status_footer: status_footer::StatusFooterEguiState,
@@ -1186,6 +1189,13 @@ pub enum UiIntent {
     ResetFeedbackDraft,
     CopyImportWarnings,
     UpdateCsvExportOptions(Box<crate::dialogs_canvas::CsvExportOptionsState>),
+    OpenPaletteWithQuery { query: String },
+    OpenAnalyzeWithCatalog { catalog_id: String },
+    OpenFitWithEquation { equation_id: String },
+    JumpToDataColumn { sheet_id: SheetId, col: usize },
+    OpenSheetFind,
+    CloseSheetFind,
+    RecordSearchRecent(Box<crate::search_engine::UnifiedSearchItem>),
 }
 
 /// Outcome produced when committing a buffered [`UiIntent`].
@@ -1931,8 +1941,96 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::ResetFeedbackDraft
         | UiIntent::CopyImportWarnings
         | UiIntent::UpdateCsvExportOptions(_) => apply_wave4_app_modal_intent(app, intent),
+        UiIntent::OpenPaletteWithQuery { .. }
+        | UiIntent::OpenAnalyzeWithCatalog { .. }
+        | UiIntent::OpenFitWithEquation { .. }
+        | UiIntent::JumpToDataColumn { .. }
+        | UiIntent::OpenSheetFind
+        | UiIntent::CloseSheetFind
+        | UiIntent::RecordSearchRecent(_) => apply_search_and_find_intent(app, intent),
         _ => Ok(UiIntentOutcome::ShellUpdated),
     }
+}
+
+fn resolve_active_or_first_data_sheet_id(doc: &curvebook_doc::ProjectDocument) -> Option<SheetId> {
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
+        return Some(active.clone());
+    }
+    if let Some(active) = doc.active_sheet_id.as_ref() {
+        if let Some(graph) = doc.graph_sheet(active)
+            && doc.data_sheet(&graph.spec.primary_source_sheet_id).is_some()
+        {
+            return Some(graph.spec.primary_source_sheet_id.clone());
+        }
+        if let Some(res) = doc.result_sheet(active)
+            && doc.data_sheet(&res.analysis.source_sheet_id).is_some()
+        {
+            return Some(res.analysis.source_sheet_id.clone());
+        }
+    }
+    doc.data_sheets.first().map(|s| s.id.clone())
+}
+
+fn apply_search_and_find_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
+    match intent {
+        UiIntent::OpenPaletteWithQuery { query } => {
+            app.canvas_dialogs.open_command_palette();
+            app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
+            app.egui_views.command_palette.query = query;
+            app.egui_views.command_palette.preserve_query_on_open = true;
+            app.egui_views.command_palette.just_opened = true;
+        }
+        UiIntent::OpenAnalyzeWithCatalog { catalog_id } => {
+            let doc = app.session.document().clone();
+            if let Some(source_id) = resolve_active_or_first_data_sheet_id(&doc)
+                && app.canvas_dialogs.open_analyze_dialog(&doc, &source_id)
+            {
+                app.canvas_dialogs.analyze.select_catalog_entry(&catalog_id);
+            }
+        }
+        UiIntent::OpenFitWithEquation { equation_id } => {
+            let doc = app.session.document().clone();
+            if let Some(source_id) = resolve_active_or_first_data_sheet_id(&doc)
+                && app.canvas_dialogs.open_analyze_dialog(&doc, &source_id)
+            {
+                app.canvas_dialogs.analyze.select_catalog_entry("fit.nonlinear");
+                app.canvas_dialogs.analyze.equation_id = equation_id;
+            }
+        }
+        UiIntent::JumpToDataColumn { sheet_id, col } => {
+            if app.session.document().active_sheet_id.as_ref() != Some(&sheet_id) {
+                let _ = app.execute_session_ui_cmd("sheet.select", serde_json::json!({ "sheet_id": sheet_id.as_str() }))?;
+            }
+            app.egui_views.launcher_open = false;
+            app.nav.welcome.open = false;
+            app.nav.gallery.open = false;
+            app.egui_views.column_grid.scroll_to_column_title(col);
+            let coord = curvebook_tools::GridCellCoord::new(0, col, 0);
+            app.grid.select_single_sync(coord);
+            app.focus_widget_id = Some(format!("grid.cell.0.{col}.0"));
+        }
+        UiIntent::OpenSheetFind => {
+            let doc = app.session.document();
+            let target = doc
+                .active_sheet_id
+                .as_ref()
+                .filter(|sid| doc.data_sheet(sid).is_some() || doc.result_sheet(sid).is_some())
+                .cloned();
+            if target.is_some() {
+                app.egui_views.sheet_find.open_for_sheet(target);
+            }
+        }
+        UiIntent::CloseSheetFind => {
+            app.egui_views.sheet_find.close();
+            app.egui_views.column_grid.active_find_matches = None;
+            app.egui_views.results_view.active_find_matches = None;
+        }
+        UiIntent::RecordSearchRecent(item) => {
+            app.egui_views.search_recents.record(&item);
+        }
+        _ => {}
+    }
+    Ok(UiIntentOutcome::ShellUpdated)
 }
 
 fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {

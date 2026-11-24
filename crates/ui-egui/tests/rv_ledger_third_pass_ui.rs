@@ -41,13 +41,13 @@ fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
     // Integrated UI command & i18n invariants:
     assert_eq!(
         UI_COMMANDS.len(),
-        59,
-        "UI_COMMANDS length should be 59 after R13.8 Part 2, app.feedback, R15-GUI-35, R17.2 copyForSlides, and R10.29"
+        60,
+        "UI_COMMANDS length should be 60 after R13.8 Part 2, app.feedback, R15-GUI-35, R17.2 copyForSlides, R10.29, and ui.sheet.find"
     );
     assert_eq!(
         catalog_len(),
-        750,
-        "i18n::catalog_len() should be 750 after catalog consolidation, SEC-18 16-locale modal entries, R15.10 F1, R17.1 cmd.table.importXlsx, R17.2 copyForSlides, R18.5, and R10.29"
+        752,
+        "i18n::catalog_len() should be 752 after catalog consolidation, SEC-18 16-locale modal entries, R15.10 F1, R17.1 cmd.table.importXlsx, R17.2 copyForSlides, R18.5, R10.29, and ui.sheet.find"
     );
     assert!(UI_COMMANDS.iter().any(|c| c.id == "ui.editParams.open" && c.shortcut == "Cmd+T"));
     let edit_params_entry = CATALOG.iter().find(|e| e.key == "cmd.ui.editParams.open").ok_or("missing cmd.ui.editParams.open in i18n::CATALOG")?;

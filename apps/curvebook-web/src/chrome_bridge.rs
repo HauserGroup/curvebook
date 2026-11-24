@@ -210,6 +210,15 @@ pub const WEB_SHORTCUT_MAPPINGS: &[WebShortcutMapping] = &[
         menu_fallback_path: "View/Open Command Palette",
     },
     WebShortcutMapping {
+        command_id: "ui.sheet.find",
+        desktop_combo: "Cmd+F",
+        web_combo: "Alt+F",
+        browser_reserved: true,
+        prevent_default_on_canvas: true,
+        reservation_reason: Some("Browsers bind Cmd/Ctrl+F to browser page find; Alt+F always opens Find in Sheet"),
+        menu_fallback_path: "Edit/Find in Sheet...",
+    },
+    WebShortcutMapping {
         command_id: "ui.zoom.fitSheet",
         desktop_combo: "Cmd+0",
         web_combo: "Alt+0",
@@ -477,6 +486,7 @@ impl WebShortcutRouter {
             ("i", true) => ("ui.inspector.toggle", "Alt+Shift+I mapped from browser-reserved Cmd/Ctrl+Shift+I"),
             ("l", false) => ("sheet.freeze", "Alt+L mapped from browser-reserved Ctrl+L"),
             ("k", false) => ("ui.palette.open", "Alt+K opens Command Palette without browser address-bar clash"),
+            ("f", false) => ("ui.sheet.find", "Alt+F opens Find in Sheet without browser page-find clash"),
             ("0", false) => ("ui.zoom.fitSheet", "Alt+0 mapped from browser-reserved Cmd/Ctrl+0"),
             ("e", false) => ("table.excludeCells", "Alt+E aliases Exclude Values"),
             ("e", true) => ("ui.grid.excludeWithReason", "Alt+Shift+E aliases Exclude With Reason"),
@@ -502,6 +512,7 @@ impl WebShortcutRouter {
             ("p", false) => WebShortcutAction::PrintCurrentSheet,
             ("c", false) => WebShortcutAction::CopyClipboard,
             ("k", false) => make_cmd("ui.palette.open"),
+            ("f", false) => make_cmd("ui.sheet.find"),
             ("t", false) => {
                 if let Some(rs_id) = active_result_sheet_id(app) {
                     WebShortcutAction::OpenEditAnalysisParameters(rs_id)
@@ -524,6 +535,7 @@ impl WebShortcutRouter {
         let note = match lower.as_str() {
             "t" => Some("Cmd/Ctrl+T handled on canvas; use Alt+T when browser reserves Ctrl/Cmd+T"),
             "k" => Some("Cmd/Ctrl+K prevented on canvas; Alt+K always available"),
+            "f" => Some("Cmd/Ctrl+F prevented on canvas; Alt+F always available"),
             _ => None,
         };
         Some(WebKeyRouteResult { handled: true, prevent_default: true, used_web_alias: false, browser_reserved_note: note, action })

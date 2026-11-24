@@ -23,11 +23,12 @@ use super::mv_roles::{active_mv_formula_operands, render_mv_role_menu_popup};
 use super::shared::LinkedEdgePaint;
 use super::shared::{
     AuxInlineTarget, CellTextStyle, ContextCellTarget, ContextMenuState, MultiGridAuxState, MultiGridCtx, MultiGridFrameState, MultiGridGeom,
-    SelectionFastLookup, alt_row_fill, any_pointer_click_in, clamp_multi_scroll, clear_grid_drag_anchor_if_released, compute_multi_geom,
-    compute_multi_scrollbar_rects, compute_visible_range, ensure_solid_scrollbar_style, format_cell_into_with_decimals, forward_frozen_wheel,
-    handle_cell_pointer_drag_select, initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit, link_border_color32, multi_text_style,
-    paint_exclusion_corner_marker, paint_linked_perimeter_edges, paint_scrollbar_corner_cap, record_meta_if_enabled,
-    record_meta_with_unclipped_if_enabled, render_ellipsized_text, set_grid_focus_active, table_display_decimals,
+    SelectionFastLookup, alt_row_fill, any_pointer_click_in, apply_pending_scroll_target, clamp_multi_scroll, clear_grid_drag_anchor_if_released,
+    compute_multi_geom, compute_multi_scrollbar_rects, compute_visible_range, ensure_solid_scrollbar_style, format_cell_into_with_decimals,
+    forward_frozen_wheel, handle_cell_pointer_drag_select, initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit,
+    link_border_color32, multi_text_style, paint_exclusion_corner_marker, paint_find_highlight, paint_linked_perimeter_edges,
+    paint_scrollbar_corner_cap, record_meta_if_enabled, record_meta_with_unclipped_if_enabled, render_ellipsized_text, set_grid_focus_active,
+    table_display_decimals,
 };
 use super::shortcuts::{
     clear_x_clipboard_cache, copy_x_cell_to_clipboard, first_linked_region_in_bounds, handle_multi_keyboard_shortcuts, is_x_column_readonly,
@@ -103,6 +104,7 @@ pub(super) fn render_multi_archetype_grid(
             ..DataGridFrameReport::default()
         };
     }
+    apply_pending_scroll_target(state, &geom);
     clamp_multi_scroll(state, &geom);
 
     let blocked = render_ctx.modal_blocked || state.active_link_popover.is_some();
@@ -249,6 +251,12 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
             let rt_r = rt_raw.intersect(g_rect);
             if rt_r.height() > 1.0 {
                 let row_title = row_title_at(&ds.archetype, row);
+                let rt_find_active = fstate.state.active_find_matches.as_ref().is_some_and(|h| h.active_row_title == Some(row));
+                let rt_find_match =
+                    rt_find_active || fstate.state.active_find_matches.as_ref().is_some_and(|h| h.matching_row_titles.contains(&row));
+                if rt_find_match {
+                    paint_find_highlight(gui, rt_r, tokens, rt_find_active);
+                }
                 if geom.row_titles_collapsed {
                     let wid = format!("grid.row_title_collapsed.{row}");
                     let resp = gui.interact(rt_r, gui.make_persistent_id(&wid), Sense::hover());
@@ -667,6 +675,8 @@ struct MultiCellFlags<'a> {
     is_active: bool,
     is_selected: bool,
     contingency_invalid: bool,
+    find_match: bool,
+    find_active: bool,
 }
 
 fn render_single_multi_data_cell(
@@ -695,6 +705,8 @@ fn render_single_multi_data_cell(
     let linked = if dbuf.has_links { linked_region_for_cell(ds, coord.row, coord.col) } else { None };
     let is_active = fstate.aux.selected_x_cell.is_none() && dbuf.sel.active == Some(coord);
     let is_selected = is_active || (fstate.aux.selected_x_cell.is_none() && dbuf.sel.contains(coord, cell.flat_data_col));
+    let find_active = fstate.state.active_find_matches.as_ref().is_some_and(|h| h.active_cell == Some(coord));
+    let find_match = find_active || fstate.state.active_find_matches.as_ref().is_some_and(|h| h.matching_cells.contains(&coord));
     let mut flags = MultiCellFlags {
         cell_opt,
         excluded: cell_opt.is_some_and(|c| c.excluded),
@@ -706,6 +718,8 @@ fn render_single_multi_data_cell(
         is_active,
         is_selected,
         contingency_invalid: dbuf.is_cont && is_invalid_contingency_cell(cell_opt),
+        find_match,
+        find_active,
     };
 
     flags.elided = paint_single_multi_data_cell(body_ui, mctx, cell, dbuf, &flags);
@@ -753,6 +767,9 @@ fn paint_single_multi_data_cell(
         dbuf.base_row_bg
     };
     body_ui.painter().rect_filled(clipped, 0.0, fill);
+    if flags.find_match {
+        paint_find_highlight(body_ui, clipped, tokens, flags.find_active);
+    }
     if flags.is_selected && !flags.is_active {
         body_ui.painter().rect_stroke(clipped, 0.0, Stroke::new(1.0, tokens.accent), StrokeKind::Inside);
     }

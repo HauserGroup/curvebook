@@ -57,7 +57,7 @@ fn view_shards_and_custom_action_dispatch_smoke() -> Result<(), String> {
     assert!(err.is_err(), "unknown custom view action domain must return Err");
 
     assert!(EXTRA_SHARD_CATALOGS.is_empty());
-    assert_eq!(all_keys().count(), 750);
+    assert_eq!(all_keys().count(), 752);
     assert!(missing_translations().is_empty());
     for &locale in LOCALES {
         assert!(try_tr(locale, "menu.file").is_some(), "missing menu.file for `{locale}`");

@@ -15,6 +15,7 @@ mod shortcuts;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use curvebook_doc::{SheetId, TableArchetype};
@@ -51,6 +52,26 @@ pub struct LinkedRegionPopover {
     pub message: String,
 }
 
+/// Optional find-in-sheet highlight overlay painted on visible matching cells, column titles,
+/// and row titles (`R15`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DataGridFindHighlight {
+    pub active_cell: Option<GridCellCoord>,
+    pub active_col_title: Option<usize>,
+    pub active_row_title: Option<usize>,
+    pub matching_cells: HashSet<GridCellCoord>,
+    pub matching_col_titles: HashSet<usize>,
+    pub matching_row_titles: HashSet<usize>,
+}
+
+/// Deferred scroll target resolved on the next [`render_data_grid`] frame once layout geometry is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DataGridScrollTarget {
+    Cell(GridCellCoord),
+    ColumnTitle { col: usize },
+    RowTitle { row: usize },
+}
+
 /// Persistent transient UI state for [`render_column_grid`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnGridEguiState {
@@ -63,6 +84,8 @@ pub struct ColumnGridEguiState {
     pub last_visible_subcols: Range<usize>,
     pub ellipsized_headers: usize,
     pub record_inspect_meta: bool,
+    pub active_find_matches: Option<DataGridFindHighlight>,
+    pub pending_scroll_target: Option<DataGridScrollTarget>,
 }
 
 impl Default for ColumnGridEguiState {
@@ -77,7 +100,31 @@ impl Default for ColumnGridEguiState {
             last_visible_subcols: 0..0,
             ellipsized_headers: 0,
             record_inspect_meta: true,
+            active_find_matches: None,
+            pending_scroll_target: None,
         }
+    }
+}
+
+impl ColumnGridEguiState {
+    /// Request scrolling the grid viewport on the next render so `(row, col, subcol)` is brought into view.
+    pub fn scroll_to_cell(&mut self, row: usize, col: usize, subcol: usize) {
+        self.pending_scroll_target = Some(DataGridScrollTarget::Cell(GridCellCoord::new(row, col, subcol)));
+    }
+
+    /// Request scrolling the grid viewport horizontally on the next render so column `col` is brought into view.
+    pub fn scroll_to_column_title(&mut self, col: usize) {
+        self.pending_scroll_target = Some(DataGridScrollTarget::ColumnTitle { col });
+    }
+
+    /// Request scrolling the grid viewport vertically on the next render so row `row` is brought into view.
+    pub fn scroll_to_row_title(&mut self, row: usize) {
+        self.pending_scroll_target = Some(DataGridScrollTarget::RowTitle { row });
+    }
+
+    /// Request scrolling the grid viewport on the next render to bring `target` into view.
+    pub fn scroll_to_target(&mut self, target: DataGridScrollTarget) {
+        self.pending_scroll_target = Some(target);
     }
 }
 

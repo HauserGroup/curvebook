@@ -85,6 +85,15 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         rank: ActionRank::Secondary,
     },
     UiCommandSpec {
+        id: "ui.sheet.find",
+        label: "Find in Sheet",
+        shortcut: "Cmd+F",
+        params_doc: "{}",
+        summary: "Open the floating Find bar to search cells, headers, or results in the active sheet.",
+        beginner: "Search values and titles inside the active Data or Results sheet and jump between matches with Enter / Shift+Enter.",
+        rank: ActionRank::Secondary,
+    },
+    UiCommandSpec {
         id: "ui.analyze.open",
         label: "Open Analyze Dialog",
         shortcut: "Cmd+Shift+A",

@@ -1069,6 +1069,7 @@ pub fn render_egui_shell_frame_with_host(
             host_draws_menu_bar: app.host_draws_menu_bar,
             project_title,
             dirty: app.session().is_dirty(),
+            search_recents: &views.search_recents,
         },
         meta,
         intents,
@@ -1162,7 +1163,7 @@ pub fn render_egui_shell_frame_with_host(
             report.resolved_test_banner = anova_rep.resolved_test_banner;
         }
         HybridModalSurface::EguiCommandPalette => {
-            record_modal!(render_command_palette(&ctx, app, &mut views.command_palette, &tokens, meta, intents));
+            record_modal!(render_command_palette(&ctx, app, &mut views.command_palette, &views.search_recents, &tokens, meta, intents));
         }
         HybridModalSurface::EguiManageVariables => {
             record_modal!(render_manage_vars_modal(&ctx, app, &mut views.manage_vars_modal, &tokens, meta, intents));
@@ -1356,6 +1357,12 @@ fn handle_shell_global_shortcuts(
     }
 
     let on_result_sheet = crate::interaction::resolve_result_sheet_for_shortcut(app, true).is_some();
+    let on_searchable_sheet = !views.launcher_open
+        && !app.nav.welcome.open
+        && !app.nav.gallery.open
+        && app.document().active_sheet_id.as_ref().is_some_and(|id| {
+            app.document().data_sheet(id).is_some() || app.document().result_sheet(id).is_some()
+        });
     let active_canvas_target = if !app.egui_views.launcher_open && !app.nav.welcome.open && !app.nav.gallery.open {
         let doc = app.document();
         doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned()
@@ -1371,6 +1378,7 @@ fn handle_shell_global_shortcuts(
 
     while let Some(m) = consume_matching_shortcut(ctx, app, on_result_sheet, |cmd| match cmd {
         "ui.editParams.open" => on_result_sheet,
+        "ui.sheet.find" => on_searchable_sheet,
         "ui.palette.open" | "edit.redo" | "edit.undo" | "ui.split.toggle" | "ui.pane.cycle" => true,
         "edit.copy" => true,
         "ui.clipboard.copyForSlides" => has_renderable_figure,
@@ -1379,6 +1387,7 @@ fn handle_shell_global_shortcuts(
     }) {
         match m.command_id.as_str() {
             "ui.editParams.open" => intents.push_ui("ui.editParams.open", json!({})),
+            "ui.sheet.find" => intents.push(crate::egui_shell::UiIntent::OpenSheetFind),
             "ui.palette.open" => intents.push_set_palette_open(true),
             "edit.redo" => {
                 if app.session().redo_depth() > 0 {

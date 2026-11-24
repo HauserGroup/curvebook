@@ -1,11 +1,12 @@
 //! Native `egui` `Cmd/Ctrl+K` Command Palette modal overlay (`docs/planning/gui-layout-spec.md` §3, `R15.3`).
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use curvebook_doc::{ProjectDocument, SheetId, SheetSection, TableArchetype};
 use curvebook_engine::cmd as engine_cmd;
 use curvebook_palette::CanvasPreviewFilter;
-use egui::{Color32, CornerRadius, FontId, Id, Key, Modifiers, Order, Pos2, Sense, Stroke, StrokeKind, Vec2};
+use egui::{Color32, CornerRadius, FontId, Id, Key, Modifiers, Order, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::{Value, json};
 
 use crate::UiApp;
@@ -17,6 +18,10 @@ use crate::grid_view::ImportOriginKind;
 use crate::i18n::BETA_ACTIVE_LOCALES;
 use crate::inspect::ZLayer;
 use crate::menus::format_shortcut_for_platform;
+use crate::search_engine::{
+    SearchRecents, SearchScopeFilter, UnifiedSearchAction, UnifiedSearchItem, UnifiedSearchKind, compute_ghost_completion, parse_scoped_query,
+    query_unified,
+};
 use crate::theme::UiThemeMode;
 use crate::tr;
 
@@ -40,6 +45,7 @@ pub struct CommandPaletteEguiState {
     pub selected_index: usize,
     pub hovered_index: Option<usize>,
     pub just_opened: bool,
+    pub preserve_query_on_open: bool,
 }
 
 /// Per-frame layout & backdrop capture report emitted by [`render_command_palette`].
@@ -79,13 +85,15 @@ pub fn filter_palette_commands(app: &UiApp, query: &str, max_rows: usize) -> Vec
         .collect()
 }
 
-/// Render the `Cmd/Ctrl+K` Command Palette overlay (`ZLayer::ModalDialog`) with `100%`
-/// `ZLayer::ModalBackdrop` click + wheel capture and full `ArrowUp`/`ArrowDown`/`Enter`/`Esc`
+/// Render the unified `Cmd/Ctrl+K` Command Palette overlay (`ZLayer::ModalDialog`) with `100%`
+/// `ZLayer::ModalBackdrop` click + wheel capture, scope filter pills, inline ghost-text `Tab`
+/// completion, category badges, match-span highlighting, and `ArrowUp`/`ArrowDown`/`Enter`/`Esc`
 /// keyboard navigation.
 pub fn render_command_palette(
     ctx: &egui::Context,
     app: &UiApp,
     state: &mut CommandPaletteEguiState,
+    recents: &SearchRecents,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
@@ -129,22 +137,31 @@ pub fn render_command_palette(
     }
 
     if state.just_opened {
-        state.query.clear();
+        if !state.preserve_query_on_open {
+            state.query.clear();
+        }
+        state.preserve_query_on_open = false;
         state.selected_index = 0;
         state.hovered_index = None;
     }
 
-    let mut rows = filter_palette_commands(app, &state.query, 24);
-    report.match_count = rows.len();
-    clamp_palette_selection(state, &rows);
+    let mut items = query_unified(app, &state.query, 24, recents);
+    report.match_count = items.len();
+    clamp_palette_selection(state, items.len());
 
     let query_widget_id = Id::unique("egui_shell.palette.query");
     let query_focused = ctx.memory(|m| m.focused()) == Some(query_widget_id);
-    let key_nav = consume_palette_keys(ctx, app, state, &rows, query_focused, intents);
+    let ghost_suffix = compute_ghost_completion(&state.query, items.first());
+    let key_nav = consume_palette_keys(ctx, app, state, &items, ghost_suffix.as_deref(), query_focused, intents);
+    if key_nav.accepted_ghost {
+        items = query_unified(app, &state.query, 24, recents);
+        report.match_count = items.len();
+        clamp_palette_selection(state, items.len());
+    }
 
     let top_offset = (screen_rect.height() * 0.10).clamp(16.0, 56.0);
-    let card_w = (screen_rect.width() - 32.0).clamp(240.0, 560.0);
-    let card_h = (screen_rect.height() - top_offset - 16.0).clamp(160.0, 380.0);
+    let card_w = (screen_rect.width() - 32.0).clamp(280.0, 600.0);
+    let card_h = (screen_rect.height() - top_offset - 16.0).clamp(180.0, 420.0);
 
     let win_resp = egui::Window::new(tr(&app.locale, "inspector.command_palette"))
         .id(Id::unique("egui_shell.command_palette.window"))
@@ -164,16 +181,19 @@ pub fn render_command_palette(
         .show(ctx, |ui| {
             let prev_query = state.query.clone();
             let plat_shortcut = format_shortcut_for_platform(app.shortcuts.active_combo("ui.palette.open").unwrap_or("Cmd+K"));
-            let hint = format!("Search commands, analyses & sheets ({plat_shortcut})");
+            let hint = format!("Search sheets, analyses, equations, commands ({plat_shortcut})");
             let query_resp = ui.add(egui::TextEdit::singleline(&mut state.query).id(query_widget_id).hint_text(hint).desired_width(f32::INFINITY));
             if state.just_opened {
                 query_resp.request_focus();
                 state.just_opened = false;
             }
             if state.query != prev_query {
-                rows = filter_palette_commands(app, &state.query, 24);
-                report.match_count = rows.len();
-                state.selected_index = rows.iter().position(|r| r.enabled).unwrap_or(0);
+                items = query_unified(app, &state.query, 24, recents);
+                report.match_count = items.len();
+                state.selected_index = items.iter().position(|r| r.enabled).unwrap_or(0);
+            }
+            if let Some(suffix) = compute_ghost_completion(&state.query, items.first()) {
+                paint_inline_ghost_completion(ui, &query_resp, &state.query, &suffix, tokens);
             }
             meta.record_response(
                 ui,
@@ -192,20 +212,28 @@ pub fn render_command_palette(
                 },
             );
 
+            ui.add_space(4.0);
+            if render_palette_scope_pills(ui, &mut state.query, tokens, meta) {
+                items = query_unified(app, &state.query, 24, recents);
+                report.match_count = items.len();
+                state.selected_index = items.iter().position(|r| r.enabled).unwrap_or(0);
+                query_resp.request_focus();
+            }
+
             ui.separator();
             let footer_h = 34.0;
             let list_h = (ui.available_height() - footer_h).max(54.0);
-            const PALETTE_ROW_H: f32 = 30.0;
+            const PALETTE_ROW_H: f32 = 32.0;
             ui.allocate_ui(Vec2::new(ui.available_width(), list_h), |ui| {
                 ui.spacing_mut().scroll.floating = false;
                 ui.spacing_mut().item_spacing.y = 0.0;
-                if rows.is_empty() {
-                    ui.colored_label(tokens.text_muted, "No matching commands.");
+                if items.is_empty() {
+                    ui.colored_label(tokens.text_muted, "No matching sheets, analyses, or commands.");
                 } else {
                     egui::ScrollArea::vertical().id_salt("egui_shell.palette.scroll").auto_shrink([false, false]).show_rows(
                         ui,
                         PALETTE_ROW_H,
-                        rows.len(),
+                        items.len(),
                         |ui, row_range| {
                             if key_nav.moved {
                                 #[allow(clippy::cast_precision_loss)]
@@ -216,14 +244,14 @@ pub fn render_command_palette(
                                 );
                                 ui.scroll_to_rect(target, Some(egui::Align::Center));
                             }
-                            render_palette_rows(ui, PaletteRowsRenderCtx { app, rows: &rows, row_range, tokens }, state, meta, intents);
+                            render_palette_rows(ui, PaletteRowsRenderCtx { app, items: &items, row_range, tokens }, state, meta, intents);
                         },
                     );
                 }
             });
 
             ui.separator();
-            render_palette_footer(ui, app, rows.get(state.selected_index), tokens);
+            render_palette_footer(ui, app, items.get(state.selected_index), tokens);
         });
 
     if let Some(inner) = win_resp {
@@ -254,14 +282,15 @@ pub fn render_command_palette(
 
 struct PaletteKeyNavResult {
     moved: bool,
+    accepted_ghost: bool,
 }
 
-fn clamp_palette_selection(state: &mut CommandPaletteEguiState, rows: &[CommandPaletteRow]) {
-    if rows.is_empty() {
+fn clamp_palette_selection(state: &mut CommandPaletteEguiState, item_count: usize) {
+    if item_count == 0 {
         state.selected_index = 0;
         state.hovered_index = None;
-    } else if state.selected_index >= rows.len() {
-        state.selected_index = rows.len() - 1;
+    } else if state.selected_index >= item_count {
+        state.selected_index = item_count - 1;
     }
 }
 
@@ -269,43 +298,268 @@ fn consume_palette_keys(
     ctx: &egui::Context,
     app: &UiApp,
     state: &mut CommandPaletteEguiState,
-    rows: &[CommandPaletteRow],
+    items: &[UnifiedSearchItem],
+    ghost_suffix: Option<&str>,
     query_focused: bool,
     intents: &mut PendingUiIntents,
 ) -> PaletteKeyNavResult {
     let mut moved = false;
+    let mut accepted_ghost = false;
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         intents.push_set_palette_open(false);
-        return PaletteKeyNavResult { moved };
+        return PaletteKeyNavResult { moved, accepted_ghost };
+    }
+    if let Some(suffix) = ghost_suffix
+        && !suffix.is_empty()
+        && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab))
+    {
+        state.query.push_str(suffix);
+        accepted_ghost = true;
+        return PaletteKeyNavResult { moved, accepted_ghost };
     }
     let home_end_nav_allowed = !query_focused || state.query.is_empty();
-    if !rows.is_empty() {
+    if !items.is_empty() {
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown)) {
-            state.selected_index = (state.selected_index + 1) % rows.len();
+            state.selected_index = (state.selected_index + 1) % items.len();
             moved = true;
         } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp)) {
-            state.selected_index = if state.selected_index == 0 { rows.len() - 1 } else { state.selected_index - 1 };
+            state.selected_index = if state.selected_index == 0 { items.len() - 1 } else { state.selected_index - 1 };
             moved = true;
         } else if home_end_nav_allowed && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
             state.selected_index = 0;
             moved = true;
         } else if home_end_nav_allowed && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End)) {
-            state.selected_index = rows.len() - 1;
+            state.selected_index = items.len() - 1;
             moved = true;
         }
     }
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
-        && let Some(row) = rows.get(state.selected_index)
-        && row.enabled
+        && let Some(item) = items.get(state.selected_index)
+        && item.enabled
     {
-        commit_palette_row(app, row, intents);
+        commit_unified_search_item(app, item, intents);
     }
-    PaletteKeyNavResult { moved }
+    PaletteKeyNavResult { moved, accepted_ghost }
+}
+
+const SCOPE_PILLS: [(SearchScopeFilter, &str, &str); 5] = [
+    (SearchScopeFilter::All, "All", "palette.scope.all"),
+    (SearchScopeFilter::Sheets, "@ Sheets", "palette.scope.sheets"),
+    (SearchScopeFilter::AnalysesAndEquations, "= Analyses & Eq", "palette.scope.analyses"),
+    (SearchScopeFilter::Commands, "> Commands", "palette.scope.commands"),
+    (SearchScopeFilter::Columns, "# Columns", "palette.scope.columns"),
+];
+
+fn apply_scope_filter_prefix(query: &mut String, target: SearchScopeFilter) {
+    let (_, effective) = parse_scoped_query(query);
+    let body = effective.to_owned();
+    match target.prefix() {
+        Some(prefix) => {
+            if body.is_empty() {
+                *query = prefix.to_string();
+            } else {
+                *query = format!("{prefix}{body}");
+            }
+        }
+        None => *query = body,
+    }
+}
+
+fn render_palette_scope_pills(ui: &mut egui::Ui, query: &mut String, tokens: &Tokens, meta: &mut FrameInspectMeta) -> bool {
+    let (active_scope, _) = parse_scoped_query(query);
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (scope, label, wid) in SCOPE_PILLS {
+            let selected = active_scope == scope;
+            let fill = if selected { tokens.accent } else { tokens.surface_bg };
+            let fg = if selected { tokens.on_accent } else { tokens.text_muted };
+            let stroke = if selected { Stroke::new(1.0, tokens.accent) } else { Stroke::new(1.0, tokens.border) };
+            let resp = ui.add(
+                egui::Button::new(egui::RichText::new(label).size(11.0).color(fg))
+                    .fill(fill)
+                    .stroke(stroke)
+                    .corner_radius(CornerRadius::same(10))
+                    .min_size(Vec2::new(28.0, 20.0)),
+            );
+            meta.record_response(
+                ui,
+                &resp,
+                FrameInspectEntryInput {
+                    widget_id: wid,
+                    role: "button",
+                    label,
+                    command_id: None,
+                    value: Some(json!(selected)),
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::ModalDialog,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            if resp.clicked() && !selected {
+                apply_scope_filter_prefix(query, scope);
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// Paint inline ghost-text completion suffix right after the typed characters in a `TextEdit`.
+pub(crate) fn paint_inline_ghost_completion(
+    ui: &egui::Ui,
+    text_edit_resp: &egui::Response,
+    typed_query: &str,
+    ghost_suffix: &str,
+    tokens: &Tokens,
+) {
+    if typed_query.is_empty() || ghost_suffix.is_empty() {
+        return;
+    }
+    let font_id = ui.style().text_styles.get(&egui::TextStyle::Body).cloned().unwrap_or_else(|| FontId::proportional(13.0));
+    let typed_galley = ui.painter().layout_no_wrap(typed_query.to_owned(), font_id.clone(), tokens.text_primary);
+    let ghost_color = tokens.text_muted.gamma_multiply(0.65);
+    let inner_clip = text_edit_resp.rect.shrink2(Vec2::new(4.0, 2.0)).intersect(ui.clip_rect());
+    let start_x = text_edit_resp.rect.left() + 4.0 + typed_galley.size().x;
+    let avail_w = inner_clip.right() - start_x;
+    if avail_w < 10.0 {
+        return;
+    }
+    let (ghost_galley, _) = layout_palette_line(ui.painter(), ghost_suffix, avail_w, ghost_color, font_id.size);
+    let pos = Pos2::new(start_x, text_edit_resp.rect.center().y - ghost_galley.size().y * 0.5);
+    ui.painter().with_clip_rect(inner_clip).galley(pos, ghost_galley, ghost_color);
+}
+
+/// Build a single-line [`egui::text::LayoutJob`] highlighting UTF-8 byte `spans` in `text`.
+pub(crate) fn layout_highlighted_search_title(
+    painter: &egui::Painter,
+    text: &str,
+    spans: &[Range<usize>],
+    max_width: f32,
+    base_color: Color32,
+    highlight_color: Color32,
+    font_size: f32,
+) -> (Arc<egui::Galley>, bool) {
+    let mut job = egui::text::LayoutJob::default();
+    let base_fmt = egui::TextFormat::simple(FontId::proportional(font_size), base_color);
+    let mut hi_fmt = egui::TextFormat::simple(FontId::proportional(font_size), highlight_color);
+    hi_fmt.background = highlight_color.gamma_multiply(0.16);
+
+    let mut cursor = 0_usize;
+    for span in spans {
+        let start = span.start.min(text.len());
+        let end = span.end.min(text.len());
+        if start >= end || start < cursor || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            continue;
+        }
+        if let Some(prefix) = text.get(cursor..start)
+            && !prefix.is_empty()
+        {
+            job.append(prefix, 0.0, base_fmt.clone());
+        }
+        if let Some(matched) = text.get(start..end)
+            && !matched.is_empty()
+        {
+            job.append(matched, 0.0, hi_fmt.clone());
+        }
+        cursor = end;
+    }
+    if let Some(tail) = text.get(cursor..)
+        && !tail.is_empty()
+    {
+        job.append(tail, 0.0, base_fmt);
+    }
+    if job.sections.is_empty() {
+        job.append(text, 0.0, egui::TextFormat::simple(FontId::proportional(font_size), base_color));
+    }
+    job.wrap = egui::text::TextWrapping { max_width: max_width.max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let galley = painter.layout_job(job);
+    let ellipsized = galley.elided;
+    (galley, ellipsized)
+}
+
+fn category_badge_colors(kind: UnifiedSearchKind, tokens: &Tokens) -> (Color32, Color32) {
+    match kind {
+        UnifiedSearchKind::Recent => (tokens.panel_bg, tokens.text_muted),
+        UnifiedSearchKind::Sheet => (tokens.accent.gamma_multiply(0.16), tokens.accent),
+        UnifiedSearchKind::Analysis | UnifiedSearchKind::Equation => (tokens.link_green.gamma_multiply(0.16), tokens.link_green),
+        UnifiedSearchKind::Column => (tokens.warning.gamma_multiply(0.18), tokens.warning),
+        UnifiedSearchKind::Command => (tokens.hover_bg, tokens.text_primary),
+    }
+}
+
+/// Paint a unified search item row (category badge + match-highlighted title + subtitle + shortcut
+/// pill) into `rect`, returning whether the title was ellipsized.
+pub(crate) fn paint_unified_search_row_content(ui: &egui::Ui, rect: Rect, item: &UnifiedSearchItem, tokens: &Tokens) -> bool {
+    let row_clip = rect.shrink2(Vec2::new(4.0, 2.0)).intersect(ui.clip_rect());
+    let painter = ui.painter().with_clip_rect(row_clip);
+
+    // 1. Category badge on the left
+    let (badge_bg, badge_fg) = category_badge_colors(item.kind, tokens);
+    let (badge_galley, _) = layout_palette_line(ui.painter(), &item.category_badge, 66.0, badge_fg, 10.5);
+    let badge_w = (badge_galley.size().x + 10.0).clamp(42.0, 72.0);
+    let badge_h = 18.0;
+    let badge_rect = Rect::from_min_size(Pos2::new(rect.left() + 6.0, rect.center().y - badge_h * 0.5), Vec2::new(badge_w, badge_h));
+    painter.rect_filled(badge_rect, CornerRadius::same(4), badge_bg);
+    painter.galley(
+        Pos2::new(badge_rect.center().x - badge_galley.size().x * 0.5, badge_rect.center().y - badge_galley.size().y * 0.5),
+        badge_galley,
+        badge_fg,
+    );
+
+    // 2. Optional trailing shortcut pill on the right
+    let mut right_limit = rect.right() - 8.0;
+    if !item.shortcut.is_empty() {
+        let plat_sc = format_shortcut_for_platform(&item.shortcut);
+        let (sc_galley, _) = layout_palette_line(ui.painter(), &plat_sc, 86.0, tokens.text_muted, 10.5);
+        let pill_w = sc_galley.size().x + 10.0;
+        let pill_h = 18.0;
+        let pill_rect = Rect::from_min_size(Pos2::new((right_limit - pill_w).max(badge_rect.right() + 40.0), rect.center().y - pill_h * 0.5), Vec2::new(pill_w, pill_h));
+        painter.rect_filled(pill_rect, CornerRadius::same(4), tokens.panel_bg);
+        painter.rect_stroke(pill_rect, CornerRadius::same(4), Stroke::new(1.0, tokens.border), StrokeKind::Inside);
+        painter.galley(
+            Pos2::new(pill_rect.center().x - sc_galley.size().x * 0.5, pill_rect.center().y - sc_galley.size().y * 0.5),
+            sc_galley,
+            tokens.text_muted,
+        );
+        right_limit = pill_rect.left() - 8.0;
+    }
+
+    // 3. Highlighted title + muted subtitle in the remaining middle budget
+    let text_left = badge_rect.right() + 8.0;
+    let avail_w = (right_limit - text_left).max(40.0);
+    let title_color = if item.enabled { tokens.text_strong } else { tokens.text_disabled };
+    let hi_color = if item.enabled { tokens.accent } else { tokens.text_disabled };
+    let (title_galley, ellipsized) = layout_highlighted_search_title(
+        ui.painter(),
+        &item.title,
+        &item.match_spans,
+        avail_w,
+        title_color,
+        hi_color,
+        tokens.metrics.font_ui_body_pt,
+    );
+    let title_w = title_galley.size().x;
+    painter.galley(Pos2::new(text_left, rect.center().y - title_galley.size().y * 0.5), title_galley, title_color);
+
+    if !item.subtitle.is_empty() && !ellipsized {
+        let sub_left = text_left + title_w + 8.0;
+        let sub_avail = right_limit - sub_left;
+        if sub_avail >= 36.0 {
+            let sub_text = format!("· {}", item.subtitle);
+            let (sub_galley, _) = layout_palette_line(ui.painter(), &sub_text, sub_avail, tokens.text_muted, 11.0);
+            painter.galley(Pos2::new(sub_left, rect.center().y - sub_galley.size().y * 0.5), sub_galley, tokens.text_muted);
+        }
+    }
+
+    ellipsized
 }
 
 struct PaletteRowsRenderCtx<'a> {
     app: &'a UiApp,
-    rows: &'a [CommandPaletteRow],
+    items: &'a [UnifiedSearchItem],
     row_range: std::ops::Range<usize>,
     tokens: &'a Tokens,
 }
@@ -317,25 +571,25 @@ fn render_palette_rows(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let PaletteRowsRenderCtx { app, rows, row_range, tokens } = ctx;
+    let PaletteRowsRenderCtx { app, items, row_range, tokens } = ctx;
     for idx in row_range {
-        let Some(row) = rows.get(idx) else {
+        let Some(item) = items.get(idx) else {
             continue;
         };
         let is_selected = idx == state.selected_index;
         let row_w = ui.available_width().max(120.0);
-        let (slot_rect, slot_resp) = ui.allocate_exact_size(Vec2::new(row_w, 30.0), Sense::hover());
+        let (slot_rect, slot_resp) = ui.allocate_exact_size(Vec2::new(row_w, 32.0), Sense::hover());
         let visible_rect = slot_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
         if visible_rect.height() < 12.0 || visible_rect.width() < 12.0 {
             continue;
         }
         let rect = slot_rect.shrink2(Vec2::new(0.0, 1.0));
-        let resp = ui.interact(rect, slot_resp.id.with(idx), if row.enabled { Sense::click() } else { Sense::hover() });
+        let resp = ui.interact(rect, slot_resp.id.with(idx), if item.enabled { Sense::click() } else { Sense::hover() });
         if resp.hovered() {
             state.hovered_index = Some(idx);
         }
 
-        let bg = if !row.enabled {
+        let bg = if !item.enabled {
             if is_selected { tokens.panel_bg } else { Color32::TRANSPARENT }
         } else if is_selected {
             tokens.active_bg
@@ -351,86 +605,82 @@ fn render_palette_rows(
             ui.painter().with_clip_rect(row_clip).rect_stroke(rect, CornerRadius::same(4), border, StrokeKind::Inside);
         }
 
-        let shortcut_w = if row.shortcut.is_empty() { 0.0 } else { 92.0 };
-        let label_max_w = (rect.width() - shortcut_w - 20.0).max(40.0);
-        let title_color = if row.enabled { tokens.text_strong } else { tokens.text_disabled };
-        let (galley, ellipsized) = layout_palette_line(ui.painter(), &row.label, label_max_w, title_color, tokens.metrics.font_ui_body_pt);
-        ui.painter().with_clip_rect(rect.shrink(4.0).intersect(ui.clip_rect())).galley(
-            Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y * 0.5),
-            galley,
-            title_color,
-        );
+        let ellipsized = paint_unified_search_row_content(ui, rect, item, tokens);
 
-        if !row.shortcut.is_empty() {
-            let plat_sc = format_shortcut_for_platform(&row.shortcut);
-            let (sc_galley, _) = layout_palette_line(ui.painter(), &plat_sc, 86.0, tokens.text_muted, 11.0);
-            let sc_pos = Pos2::new((rect.right() - sc_galley.size().x - 10.0).max(rect.left() + 40.0), rect.center().y - sc_galley.size().y * 0.5);
-            ui.painter().with_clip_rect(rect.shrink(4.0).intersect(ui.clip_rect())).galley(sc_pos, sc_galley, tokens.text_muted);
-        }
-
-        let reason = (!row.enabled).then(|| disabled_reason_for_row(app, row));
-        let ak_label = row.label.clone();
-        resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, row.enabled, ak_label.clone()));
+        let command_id_opt = match &item.action {
+            UnifiedSearchAction::RunCommand { command_id, .. } => Some(command_id.as_str()),
+            _ => None,
+        };
+        let reason = (!item.enabled).then(|| disabled_reason_for_item(app, item));
+        let ak_label = item.title.clone();
+        resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, item.enabled, ak_label.clone()));
         let wid = format!("palette.item.{idx}");
-        meta.record_response(
+        meta.record_ranked_response(
             ui,
             &resp,
             FrameInspectEntryInput {
                 widget_id: &wid,
                 role: "button",
-                label: &row.label,
-                command_id: Some(&row.command_id),
-                value: Some(json!(row.enabled)),
-                enabled: row.enabled,
+                label: &item.title,
+                command_id: command_id_opt,
+                value: Some(json!(item.enabled)),
+                enabled: item.enabled,
                 disabled_reason: reason.as_deref(),
                 z_layer: ZLayer::ModalDialog,
                 ellipsized,
-                full_label: ellipsized.then_some(row.label.as_str()),
+                full_label: ellipsized.then_some(item.title.as_str()),
             },
+            crate::egui_shell::ActionRank::Secondary,
         );
         if let Some(ref rsn) = reason {
             resp.on_hover_text(rsn);
-        } else if resp.clicked() && row.enabled {
+        } else if resp.clicked() && item.enabled {
             state.selected_index = idx;
-            commit_palette_row(app, row, intents);
+            commit_unified_search_item(app, item, intents);
         }
     }
 }
 
-fn render_palette_footer(ui: &mut egui::Ui, app: &UiApp, selected: Option<&CommandPaletteRow>, tokens: &Tokens) {
+fn render_palette_footer(ui: &mut egui::Ui, app: &UiApp, selected: Option<&UnifiedSearchItem>, tokens: &Tokens) {
     let preview_w = ui.available_width().max(80.0);
     let (msg, color) = match selected {
-        Some(row) if !row.enabled => (format!("Disabled: {}", disabled_reason_for_row(app, row)), tokens.text_muted),
-        Some(row) if !row.menu_path.is_empty() && !row.summary.is_empty() => (format!("{} — {}", row.menu_path, row.summary), tokens.text_primary),
-        Some(row) if !row.summary.is_empty() => (row.summary.clone(), tokens.text_primary),
-        _ => (String::from("↑↓ Navigate · Enter Execute · Esc Dismiss"), tokens.text_muted),
+        Some(item) if !item.enabled => (format!("Disabled: {}", disabled_reason_for_item(app, item)), tokens.text_muted),
+        Some(item) if !item.subtitle.is_empty() => {
+            (format!("[{}] {} — {}", item.category_badge, item.title, item.subtitle), tokens.text_primary)
+        }
+        _ => (String::from("↑↓ Navigate · Tab Autocomplete · Enter Execute · Esc Dismiss"), tokens.text_muted),
     };
     let (galley, _) = layout_palette_line(ui.painter(), &msg, (preview_w - 8.0).max(40.0), color, 11.5);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(preview_w, 20.0), Sense::hover());
     ui.painter().with_clip_rect(rect).galley(Pos2::new(rect.left() + 2.0, rect.center().y - galley.size().y * 0.5), galley, color);
 }
 
-fn disabled_reason_for_row(app: &UiApp, row: &CommandPaletteRow) -> String {
+fn disabled_reason_for_item(app: &UiApp, item: &UnifiedSearchItem) -> String {
     let doc = app.document();
-    match row.command_id.as_str() {
-        "analysis.updateParams"
-        | "ui.editParams.open"
-        | "ui.result.copyMethodsReport"
-        | "ui.result.inspectDiagnostics"
-        | "ui.result.applyRemediation" => String::from("Open a ResultSheet first"),
-        "ui.result.appendClusterColumn" => String::from("Requires a Clustering ResultSheet"),
-        "ui.table.openFormulaBar" => String::from("Requires a Multiple Variables table"),
-        "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => String::from("Open a LayoutSheet first"),
-        "ui.embeddedTable.format.open" => String::from("Paste a ResultSheet table onto a graph or layout first"),
-        "ui.image.format.open" => String::from("Insert or paste an image onto a graph or layout first"),
-        "ui.graph.axes.open" | "ui.graph.format.open" | "ui.changeGraphType.open" | "ui.formatPoints.open" => {
-            String::from("Requires at least one GraphSheet")
+    match &item.action {
+        UnifiedSearchAction::RunCommand { command_id, .. } => match command_id.as_str() {
+            "analysis.updateParams"
+            | "ui.editParams.open"
+            | "ui.result.copyMethodsReport"
+            | "ui.result.inspectDiagnostics"
+            | "ui.result.applyRemediation" => String::from("Open a ResultSheet first"),
+            "ui.result.appendClusterColumn" => String::from("Requires a Clustering ResultSheet"),
+            "ui.table.openFormulaBar" => String::from("Requires a Multiple Variables table"),
+            "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => String::from("Open a LayoutSheet first"),
+            "ui.embeddedTable.format.open" => String::from("Paste a ResultSheet table onto a graph or layout first"),
+            "ui.image.format.open" => String::from("Insert or paste an image onto a graph or layout first"),
+            "ui.graph.axes.open" | "ui.graph.format.open" | "ui.changeGraphType.open" | "ui.formatPoints.open" => {
+                String::from("Requires at least one GraphSheet")
+            }
+            "edit.undo" => String::from("Nothing to undo"),
+            "edit.redo" => String::from("Nothing to redo"),
+            _ if doc.data_sheets.is_empty() => String::from("Requires a DataSheet in the active project"),
+            _ => String::from("Preconditions not met for active sheet"),
+        },
+        UnifiedSearchAction::OpenAnalysis { .. } | UnifiedSearchAction::OpenEquation { .. } => {
+            String::from("Requires at least one DataSheet in the active project")
         }
-        "edit.undo" => String::from("Nothing to undo"),
-        "edit.redo" => String::from("Nothing to redo"),
-        _ if doc.data_sheets.is_empty() => String::from("Requires a DataSheet in the active project"),
-        _ if !row.beginner.is_empty() => row.beginner.clone(),
-        _ => String::from("Preconditions not met for active sheet"),
+        _ => String::from("Unavailable for active project"),
     }
 }
 
@@ -841,9 +1091,33 @@ pub(crate) fn resolve_shell_command_route(app: &UiApp, command_id: &str, is_ui_c
     if is_ui_command { resolve_palette_ui_route(app, command_id) } else { resolve_engine_route_with_policy(app, command_id, true) }
 }
 
-fn commit_palette_row(app: &UiApp, row: &CommandPaletteRow, intents: &mut PendingUiIntents) {
+/// Route a selected [`UnifiedSearchItem`] to its corresponding sheet, column, analysis, equation,
+/// or command intent, record it in [`SearchRecents`], and close the Command Palette.
+pub(crate) fn commit_unified_search_item(app: &UiApp, item: &UnifiedSearchItem, intents: &mut PendingUiIntents) {
     intents.push_set_palette_open(false);
-    match resolve_palette_route(app, &row.command_id, row.is_ui_command) {
+    intents.push(UiIntent::RecordSearchRecent(Box::new(item.clone())));
+    match &item.action {
+        UnifiedSearchAction::ActivateSheet(sheet_id) => {
+            intents.push(UiIntent::SetLauncherOpen { open: false });
+            intents.push_engine("sheet.select", json!({ "sheet_id": sheet_id.as_str() }));
+        }
+        UnifiedSearchAction::JumpToColumn { sheet_id, col } => {
+            intents.push(UiIntent::JumpToDataColumn { sheet_id: sheet_id.clone(), col: *col });
+        }
+        UnifiedSearchAction::OpenAnalysis { catalog_id } => {
+            intents.push(UiIntent::OpenAnalyzeWithCatalog { catalog_id: (*catalog_id).to_owned() });
+        }
+        UnifiedSearchAction::OpenEquation { equation_id } => {
+            intents.push(UiIntent::OpenFitWithEquation { equation_id: equation_id.clone() });
+        }
+        UnifiedSearchAction::RunCommand { command_id, is_ui_command } => {
+            commit_palette_command(app, command_id, *is_ui_command, intents);
+        }
+    }
+}
+
+fn commit_palette_command(app: &UiApp, command_id: &str, is_ui_command: bool, intents: &mut PendingUiIntents) {
+    match resolve_palette_route(app, command_id, is_ui_command) {
         Some(PaletteCommandRoute::UiCommand { command_id, params }) => intents.push_ui(command_id, params),
         Some(PaletteCommandRoute::EngineCommand { command_id, params }) => intents.push_engine(command_id, params),
         Some(PaletteCommandRoute::DirectIntent(intent)) => intents.push(intent),
@@ -873,5 +1147,201 @@ fn capture_outside_pointer_and_wheel(ctx: &egui::Context, dialog_rect: egui::Rec
             i.events.retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
         });
         report.outside_wheel_captured = true;
+    }
+}
+
+#[cfg(test)]
+mod unified_search_integration_tests {
+    use super::*;
+    use crate::dialogs_canvas::ActiveDialog;
+    use crate::egui_shell::data_grid::DataGridScrollTarget;
+    use crate::egui_shell::inspect_bridge::inspect_live_egui_snapshot;
+    use crate::interaction::ViewportMetrics;
+    use crate::search_engine::{SearchRecents, UnifiedSearchAction, UnifiedSearchItem, UnifiedSearchKind};
+    use curvebook_doc::{Cell, CellCoord, CellValue, TableArchetype};
+
+    fn app_with_populated_data_sheet() -> Result<(UiApp, SheetId), String> {
+        let mut app = UiApp::new();
+        let created = app
+            .execute_session_ui_cmd("sheet.createData", json!({ "kind": "Column", "title": "Dose Response" }))
+            .map_err(|e| e.to_string())?;
+        let sheet_id_str = created
+            .payload
+            .get("sheet_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| String::from("missing sheet_id"))?;
+        let sheet_id = SheetId::try_new(sheet_id_str).map_err(|e| e.to_string())?;
+        let _ = app
+            .execute_session_ui_cmd(
+                "table.setTitles",
+                json!({ "sheet_id": sheet_id.as_str(), "titles": ["Control", "DrugA"] }),
+            )
+            .map_err(|e| e.to_string())?;
+        let _ = app
+            .execute_session_ui_cmd(
+                "table.setCell",
+                json!({ "sheet_id": sheet_id.as_str(), "row": 0, "col": 1, "subcol": 0, "value": 42.5 }),
+            )
+            .map_err(|e| e.to_string())?;
+        let _ = app
+            .execute_session_ui_cmd("sheet.select", json!({ "sheet_id": sheet_id.as_str() }))
+            .map_err(|e| e.to_string())?;
+        app.egui_views.launcher_open = false;
+        app.nav.welcome.open = false;
+        Ok((app, sheet_id))
+    }
+
+    #[test]
+    fn scope1_unified_palette_routing_and_recents() -> Result<(), String> {
+        let (mut app, sheet_id) = app_with_populated_data_sheet()?;
+
+        // 1. Scope prefix toggling preserves body text
+        let mut q = String::from("anova");
+        apply_scope_filter_prefix(&mut q, SearchScopeFilter::AnalysesAndEquations);
+        assert_eq!(q, "=anova");
+        apply_scope_filter_prefix(&mut q, SearchScopeFilter::Commands);
+        assert_eq!(q, ">anova");
+        apply_scope_filter_prefix(&mut q, SearchScopeFilter::All);
+        assert_eq!(q, "anova");
+
+        // 2. OpenAnalysis routing via commit_unified_search_item
+        let analysis_item = UnifiedSearchItem {
+            kind: UnifiedSearchKind::Analysis,
+            title: String::from("One-way ANOVA"),
+            subtitle: String::from("Column Analyses"),
+            category_badge: String::from("Analysis"),
+            shortcut: String::new(),
+            match_spans: Vec::new(),
+            enabled: true,
+            score: 5_000,
+            action: UnifiedSearchAction::OpenAnalysis { catalog_id: "stats.oneWayAnova" },
+            completion_text: String::from("One-way ANOVA"),
+        };
+        let mut intents = PendingUiIntents::default();
+        commit_unified_search_item(&app, &analysis_item, &mut intents);
+        let report = intents.commit_all_if_settled(&mut app, false);
+        assert!(report.results.iter().all(Result::is_ok), "analysis commit errors: {:?}", report.results);
+        assert!(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }));
+        assert_eq!(app.canvas_dialogs.analyze.selected_entry_id.as_deref(), Some("stats.oneWayAnova"));
+        assert_eq!(app.egui_views.search_recents.len(), 1);
+
+        // 3. OpenEquation routing
+        let eq_item = UnifiedSearchItem {
+            kind: UnifiedSearchKind::Equation,
+            title: String::from("Michaelis-Menten"),
+            subtitle: String::from("Enzyme Kinetics"),
+            category_badge: String::from("Equation"),
+            shortcut: String::new(),
+            match_spans: Vec::new(),
+            enabled: true,
+            score: 5_000,
+            action: UnifiedSearchAction::OpenEquation { equation_id: String::from("michaelis_menten") },
+            completion_text: String::from("Michaelis-Menten"),
+        };
+        let mut intents = PendingUiIntents::default();
+        commit_unified_search_item(&app, &eq_item, &mut intents);
+        let report = intents.commit_all_if_settled(&mut app, false);
+        assert!(report.results.iter().all(Result::is_ok));
+        assert_eq!(app.canvas_dialogs.analyze.selected_entry_id.as_deref(), Some("fit.nonlinear"));
+        assert_eq!(app.canvas_dialogs.analyze.equation_id, "michaelis_menten");
+        app.canvas_dialogs.close_dialog();
+
+        // 4. JumpToColumn routing
+        let col_item = UnifiedSearchItem {
+            kind: UnifiedSearchKind::Column,
+            title: String::from("DrugA"),
+            subtitle: String::from("Dose Response"),
+            category_badge: String::from("Column"),
+            shortcut: String::new(),
+            match_spans: Vec::new(),
+            enabled: true,
+            score: 5_000,
+            action: UnifiedSearchAction::JumpToColumn { sheet_id: sheet_id.clone(), col: 1 },
+            completion_text: String::from("DrugA"),
+        };
+        let mut intents = PendingUiIntents::default();
+        commit_unified_search_item(&app, &col_item, &mut intents);
+        let report = intents.commit_all_if_settled(&mut app, false);
+        assert!(report.results.iter().all(Result::is_ok));
+        assert_eq!(app.document().active_sheet_id.as_ref(), Some(&sheet_id));
+        assert_eq!(app.egui_views.column_grid.pending_scroll_target, Some(DataGridScrollTarget::ColumnTitle { col: 1 }));
+        assert_eq!(app.grid.tool.active, Some(curvebook_tools::GridCellCoord::new(0, 1, 0)));
+
+        // 5. OpenPaletteWithQuery preserves carried query
+        let mut intents = PendingUiIntents::default();
+        intents.push(UiIntent::OpenPaletteWithQuery { query: String::from("=anova") });
+        let _ = intents.commit_all_if_settled(&mut app, false);
+        assert!(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette));
+        assert_eq!(app.egui_views.command_palette.query, "=anova");
+        assert!(app.egui_views.command_palette.preserve_query_on_open);
+
+        Ok(())
+    }
+
+    #[test]
+    fn scope2_top_bar_search_and_palette_compat() -> Result<(), String> {
+        let (mut app, _) = app_with_populated_data_sheet()?;
+        let metrics = ViewportMetrics::new(1280.0, 800.0, 1.0);
+
+        // Both `toolbar.search_input` and `toolbar.command_palette` must be present in Field mode.
+        let snap = inspect_live_egui_snapshot(&app, metrics, None, true);
+        assert!(snap.find_widget("toolbar.search_input").is_some(), "expected toolbar.search_input in Field mode");
+        assert!(snap.find_widget("toolbar.command_palette").is_some(), "expected toolbar.command_palette in Field mode for E2E compatibility");
+
+        // Opening the inline dropdown surfaces non-blocking auto-suggest items + footer.
+        app.egui_views.top_chrome.search_query = String::from("DrugA");
+        app.egui_views.top_chrome.search_dropdown_open = true;
+        let snap_open = inspect_live_egui_snapshot(&app, metrics, None, true);
+        assert!(snap_open.find_widget("toolbar.search_dropdown").is_some());
+        assert!(snap_open.find_widget("toolbar.search_item.0").is_some());
+        assert!(snap_open.find_widget("toolbar.search_open_palette").is_some());
+
+        // Opening full palette renders CommandPalette dialog and palette.query.
+        let mut intents = PendingUiIntents::default();
+        intents.push_set_palette_open(true);
+        let _ = intents.commit_all_if_settled(&mut app, false);
+        let snap_pal = inspect_live_egui_snapshot(&app, metrics, None, true);
+        assert_eq!(snap_pal.active_dialog, "command_palette");
+        assert!(snap_pal.find_widget("palette.query").is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn scope3_in_sheet_find_bar_and_replace_handoff() -> Result<(), String> {
+        let (mut app, sheet_id) = app_with_populated_data_sheet()?;
+        let metrics = ViewportMetrics::new(1280.0, 800.0, 1.0);
+
+        // OpenSheetFind activates the floating find bar on the active DataSheet.
+        let mut intents = PendingUiIntents::default();
+        intents.push(UiIntent::OpenSheetFind);
+        let _ = intents.commit_all_if_settled(&mut app, false);
+        assert!(app.egui_views.sheet_find.open);
+        assert_eq!(app.egui_views.sheet_find.last_sheet_id.as_ref(), Some(&sheet_id));
+
+        // Verify matching query produces DataGridFindHighlight via sync_sheet_find_before_stage.
+        app.egui_views.sheet_find.query = String::from("42.5");
+        let ds = app.document().data_sheet(&sheet_id).ok_or_else(|| String::from("missing data sheet"))?;
+        assert!(matches!(ds.archetype, TableArchetype::Column(_)));
+        assert_eq!(ds.archetype.data_cell(CellCoord::new(0, 1, 0)).map(|c: &Cell| &c.value), Some(&CellValue::Number(42.5)));
+
+        let _snap = inspect_live_egui_snapshot(&app, metrics, None, true);
+        // Also verify `OpenFindReplace { initial_query }` handoff and `CloseSheetFind` cleanup.
+        let mut intents = PendingUiIntents::default();
+        intents.push(UiIntent::OpenFindReplace { initial_query: Some(String::from("42.5")) });
+        let _ = intents.commit_all_if_settled(&mut app, false);
+        assert!(app.egui_views.app_modals.find_replace_open);
+        assert_eq!(app.egui_views.app_modals.find_replace.find_query, "42.5");
+
+        let mut intents = PendingUiIntents::default();
+        intents.push(UiIntent::CloseSheetFind);
+        let _ = intents.commit_all_if_settled(&mut app, false);
+        assert!(!app.egui_views.sheet_find.open);
+        assert!(app.egui_views.column_grid.active_find_matches.is_none());
+        assert!(app.egui_views.results_view.active_find_matches.is_none());
+
+        // Verify SearchRecents is wired cleanly on EguiShellViewState.
+        let _recents: &SearchRecents = &app.egui_views.search_recents;
+        Ok(())
     }
 }

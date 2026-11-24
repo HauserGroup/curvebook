@@ -1198,6 +1198,7 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
                 "dialog": "CommandPalette",
             }))
         }),
+        "ui.sheet.find" => Some(|app, p| map_ui_err(dispatch_ui_sheet_find(app, p))),
         "ui.analyze.open" => Some(|app, p| map_ui_err(dispatch_ui_analyze_open(app, p))),
         "ui.editParams.open" => Some(|app, p| map_ui_err(dispatch_ui_edit_params_open(app, p))),
         "ui.powerWizard.open" => Some(|app, p| map_ui_err(dispatch_ui_power_wizard_open(app, p))),
@@ -3226,6 +3227,30 @@ fn dispatch_ui_embedded_object_format_open(app: &mut UiApp, params: &Value, want
     })?;
     let is_layout = if want_image { app.canvas_dialogs.format_image.is_layout } else { app.canvas_dialogs.format_embedded_table.is_layout };
     Ok(json!({ "dialog": dialog_name, "sheet_id": sheet_id.as_str(), "target_index": idx, "is_layout": is_layout }))
+}
+
+fn dispatch_ui_sheet_find(app: &mut UiApp, _params: &Value) -> Result<Value, String> {
+    let doc = app.document();
+    let active_sheet_id = doc
+        .active_sheet_id
+        .as_ref()
+        .filter(|sid| doc.data_sheet(sid).is_some() || doc.result_sheet(sid).is_some())
+        .or_else(|| doc.data_sheets.first().map(|s| &s.id))
+        .or_else(|| doc.result_sheets.first().map(|s| &s.id))
+        .map(|sid| sid.as_str().to_owned());
+    let Some(sheet_id) = active_sheet_id else {
+        return Err(String::from("no data or result sheet available to search"));
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Ok(sid) = SheetId::try_new(&sheet_id) {
+            app.egui_views.sheet_find.open_for_sheet(Some(sid));
+        }
+    }
+    Ok(json!({
+        "sheet_find_open": true,
+        "sheet_id": sheet_id,
+    }))
 }
 
 fn dispatch_ui_row_titles_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {

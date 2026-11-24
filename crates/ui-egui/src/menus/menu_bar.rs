@@ -250,6 +250,8 @@ fn build_edit_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut nodes, app, "edit.pasteResultTable", None);
     push_action(&mut nodes, app, "edit.pasteImage", None);
     nodes.push(CuratedMenuNode::Separator);
+    push_action(&mut nodes, app, "ui.sheet.find", Some("menu.edit.find_in_sheet"));
+    nodes.push(CuratedMenuNode::Separator);
     push_action(&mut nodes, app, "table.excludeCells", None);
     push_action(&mut nodes, app, "ui.grid.excludeWithReason", None);
     push_action(&mut nodes, app, "table.exclusionAuditReport", None);
