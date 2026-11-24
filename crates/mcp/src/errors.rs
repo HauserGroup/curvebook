@@ -126,7 +126,7 @@ pub fn result_from_payload_with_extra(payload: &StructuredErrorPayload, extra: M
             obj.insert(k, v);
         }
     }
-    let text = serde_json::to_string_pretty(&val).unwrap_or_else(|_| payload.message.clone());
+    let text = serde_json::to_string(&val).unwrap_or_else(|_| payload.message.clone());
     ToolCallResult { content: vec![ContentBlock::Text { text }], is_error: true, structured_content: Some(val) }
 }
 

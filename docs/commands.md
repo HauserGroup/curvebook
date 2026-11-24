@@ -492,7 +492,7 @@ Registered commands: 105
 - **Menu:** `Analyze/Add Analysis...`
 - **Summary:** Attach and compute a new analysis of any domain (transform, stats, or regression) for a data sheet.
 - **Beginner note:** Adds a new live analysis sheet linked to an input table and computes its initial results.
-- **Parameters:** `comparison` (any), `confidence_percent` (any), `custom_dsl` (any), `df_method` (any), `equation_id` (any), `flag_r_squared_below` (any), `identify_unstable_parameters` (any), `kind` (any), `multiplicity` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
+- **Parameters:** `comparison` (any), `confidence_percent` (any), `custom_dsl` (any), `df_method` (any), `equation_id` (any), `flag_r_squared_below` (any), `identify_unstable_parameters` (any), `kind` (any), `method` (any), `multiplicity` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
 
 ### `analysis.exportCsv` — Export Result Sheet CSV
 
@@ -524,7 +524,7 @@ Registered commands: 105
 - **Menu:** `Analyze/Analyze Data...`
 - **Summary:** Create and run a new analysis sheet, recalculate an existing result sheet by ID, or recalculate the project when empty.
 - **Beginner note:** Runs a new analysis when source and kind are provided, or refreshes an existing analysis sheet.
-- **Parameters:** `comparison` (any), `confidence_percent` (any), `custom_dsl` (any), `df_method` (any), `equation_id` (any), `flag_r_squared_below` (any), `identify_unstable_parameters` (any), `kind` (any), `multiplicity` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
+- **Parameters:** `comparison` (any), `confidence_percent` (any), `custom_dsl` (any), `df_method` (any), `equation_id` (any), `flag_r_squared_below` (any), `identify_unstable_parameters` (any), `kind` (any), `method` (any), `multiplicity` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
 
 ### `analysis.updateParams` — Change Analysis Parameters
 
@@ -549,7 +549,7 @@ Registered commands: 105
 - **Menu:** `Analyze/Fit Curve...`
 - **Summary:** Create and execute linear, Deming, built-in nonlinear, global shared-parameter, or custom DSL regression.
 - **Beginner note:** Fits a linear or nonlinear dose-response/kinetic curve with confidence bands and model comparisons.
-- **Parameters:** `comparison` (any), `confidence_percent` (any), `custom_dsl` (any), `df_method` (any), `equation_id` (any), `flag_r_squared_below` (any), `identify_unstable_parameters` (any), `kind` (any), `multiplicity` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
+- **Parameters:** `comparison` (any), `confidence_percent` (any), `custom_dsl` (any), `df_method` (any), `equation_id` (any), `flag_r_squared_below` (any), `identify_unstable_parameters` (any), `kind` (any), `method` (any), `multiplicity` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
 
 ### `result.generateReport` — Generate Methods Report
 

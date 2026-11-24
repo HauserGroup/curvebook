@@ -12,7 +12,7 @@ use curvebook_doc::{
     RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec,
     TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XyTable,
 };
-use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
+use curvebook_fit::{get_builtin_model, list_builtin_equations, resolve_model_from_spec};
 use curvebook_format::{CsvOptions, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
 use curvebook_math::PValueFormat;
 use serde::{Deserialize, Serialize};
@@ -384,7 +384,15 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
         props.push(("df_method", nullable_schema(str_schema("REML denominator degrees-of-freedom method (`kenward_roger`, `satterthwaite`)"))));
     }
     if include_fit_extras {
-        props.push(("equation_id", nullable_schema(non_empty_str_schema("Built-in or custom equation identifier"))));
+        props.push(("equation_id", nullable_schema(non_empty_str_schema(
+            "Built-in equation ID (e.g. `log_inhibitor_vs_response_4pl`, `log_agonist_vs_response_4pl`, `log_agonist_vs_response_3pl`, `michaelis_menten`, `one_phase_decay`, `two_phase_decay`, `exponential_growth`, `one_site_specific_binding`, `gaussian`, `bell_shaped_dose_response`) or custom label with `custom_dsl`",
+        ))));
+        props.push((
+            "method",
+            nullable_schema(any_json_schema(
+                "Fitting/outlier method: `least_squares` (default), `robust` (Cauchy), `rout` (ROUT FDR 1% outlier elimination + OLS refit), or `{\"rout_outlier_elimination\": {\"fdr_q_percent\": 1.0}}`",
+            )),
+        ));
         props.push(("weighting", nullable_schema(str_schema("Regression weighting scheme (`none`, `1/y`, `1/y2`, `1/x`, `1/x2`)"))));
         props.push(("custom_dsl", nullable_schema(str_schema("Custom mathematical equation DSL string"))));
         props.push((
@@ -433,7 +441,11 @@ fn schema_transform_run() -> Value {
 }
 
 fn schema_stats_run() -> Value {
-    schema_analysis_base("Statistical test kind shorthand or typed AnalysisKind object", false, true)
+    schema_analysis_base(
+        "Statistical test shorthand (e.g. `unpaired_t`, `welch_t`, `paired_t`, `mann_whitney`, `wilcoxon`, `one_sample_t`, `one_way_anova`, `welch_anova`, `rm_one_way_anova`, `kruskal_wallis`, `friedman`, `two_way_anova`, `three_way_anova`, `nested_t`, `nested_anova`, `descriptive`, `rout`, `grubbs`, `multiple_row_t_tests`, `contingency`, `fisher_exact`, `kaplan_meier`, `cox_ph`, `roc`, `bland_altman`, `passing_bablok`, `pvalue_stack`, `power`, `pca`, `correlation`, `clustering`) or typed AnalysisKind object",
+        false,
+        true,
+    )
 }
 
 fn schema_stats_pvalue_stack() -> Value {
@@ -468,7 +480,11 @@ fn schema_stats_pvalue_stack() -> Value {
 }
 
 fn schema_fit_run() -> Value {
-    schema_analysis_base("Regression kind or equation shorthand (e.g. `four_parameter_logistic`, `linear`, `deming`) or typed object", true, true)
+    schema_analysis_base(
+        "Regression kind or equation shorthand (e.g. `4pl` / `log_agonist_vs_response_4pl`, `4pl_inhibitor` / `log_inhibitor_vs_response_4pl`, `3pl`, `linear`, `deming`, `michaelis_menten`, `one_phase_decay`, `one_site_specific_binding`) or typed object",
+        true,
+        true,
+    )
 }
 
 fn schema_analysis_run() -> Value {
@@ -2453,9 +2469,16 @@ fn resolve_fit_shorthand(name: &str, params: &Value) -> Result<AnalysisKind, Eng
             } else if explicit_dsl.is_some() {
                 "custom_dsl"
             } else {
+                let suggestions = suggest_analysis_kinds(other);
+                let mut remediation = String::from(
+                    "Supply a supported analysis kind (`unpaired_t`, `welch_t`, `mann_whitney`, `one_way_anova`, `kruskal_wallis`, `two_way_anova`, `descriptive`, `rout`, `linear`, `log_inhibitor_vs_response_4pl`, `log_agonist_vs_response_4pl`, ...) or pass `custom_dsl`.",
+                );
+                if !suggestions.is_empty() {
+                    remediation = format!("Did you mean: {}? {remediation}", suggestions.join(", "));
+                }
                 return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown analysis kind or equation `{other}`"))
-                    .with_remediation("Supply a supported analysis kind or built-in curve fit equation identifier.")
-                    .with_details(json!({ "pointer": "/kind", "kind": other })));
+                    .with_remediation(remediation)
+                    .with_details(json!({ "pointer": "/kind", "kind": other, "suggestions": suggestions })));
             }
         }
     };
@@ -2465,6 +2488,72 @@ fn resolve_fit_shorthand(name: &str, params: &Value) -> Result<AnalysisKind, Eng
         fit.custom_dsl = Some(dsl.to_owned());
     }
     Ok(AnalysisKind::NonlinearRegression(fit))
+}
+
+fn suggest_analysis_kinds(raw: &str) -> Vec<String> {
+    const KNOWN_SHORTHANDS: &[&str] = &[
+        "unpaired_t",
+        "welch_t",
+        "paired_t",
+        "ratio_paired_t",
+        "lognormal_t",
+        "mann_whitney",
+        "wilcoxon",
+        "paired_sign_test",
+        "kolmogorov_smirnov",
+        "one_sample_t",
+        "one_sample_wilcoxon",
+        "one_way_anova",
+        "welch_anova",
+        "rm_one_way_anova",
+        "kruskal_wallis",
+        "friedman",
+        "two_way_anova",
+        "three_way_anova",
+        "descriptive",
+        "rout",
+        "grubbs",
+        "nested_t",
+        "nested_anova",
+        "multiple_row_t_tests",
+        "bland_altman",
+        "passing_bablok",
+        "pvalue_stack",
+        "power",
+        "contingency",
+        "chi_square",
+        "fisher_exact",
+        "cohen_kappa",
+        "fleiss_kappa",
+        "kaplan_meier",
+        "cox_ph",
+        "roc",
+        "linear_glm",
+        "logistic_glm",
+        "poisson_glm",
+        "pca",
+        "correlation",
+        "clustering",
+        "multiple_imputation",
+        "linear",
+        "deming",
+        "4pl",
+        "4pl_inhibitor",
+        "3pl",
+        "3pl_inhibitor",
+        "one_site_binding",
+        "math",
+        "normalize",
+        "remove_baseline",
+        "transpose",
+        "prune_rows",
+        "select_and_transform",
+        "simulate",
+        "random_sample",
+    ];
+    let eqs = list_builtin_equations();
+    let all_candidates = KNOWN_SHORTHANDS.iter().copied().chain(eqs.iter().map(|eq| eq.id.as_str()));
+    super::fuzzy_suggest(raw, '_', all_candidates, 3)
 }
 
 fn map_canonical_kind_fields(params: &Value, kind: &AnalysisKind) -> Value {

@@ -76,6 +76,12 @@ pub fn list_gui_tools() -> Vec<ToolDefinition> {
         def_ui_switch_tab(),
         def_ui_answer_dialog(),
     ]
+    .into_iter()
+    .map(|mut def| {
+        def.input_schema = crate::toolsets::compact_json_schema(def.input_schema);
+        def
+    })
+    .collect()
 }
 
 fn metrics_schema() -> Value {
