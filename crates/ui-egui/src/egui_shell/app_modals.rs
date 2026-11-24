@@ -4,6 +4,7 @@
 //! staged `Keyboard Shortcuts` editor and strict 14-locale Beta language selector).
 
 use curvebook_doc::SheetId;
+use curvebook_palette::CanvasPreviewFilter;
 use curvebook_pdf::PdfColorSpace;
 use curvebook_render::TiffCompression;
 use egui::scroll_area::ScrollBarVisibility;
@@ -73,6 +74,7 @@ pub struct PreferencesSnapshot {
     pub theme_mode: UiThemeMode,
     pub ui_scale: f32,
     pub nesting_mode: NavigatorNestingMode,
+    pub preview_filter: CanvasPreviewFilter,
 }
 
 /// Editable draft settings inside the 4-category `Preferences` modal.
@@ -110,9 +112,16 @@ impl Default for PreferencesModalState {
 }
 
 impl PreferencesModalState {
-    /// Capture live `locale`, `theme_mode`, `ui_scale`, and `nesting_mode` when opening Preferences.
-    pub fn capture_live_snapshot(&mut self, locale: &str, theme_mode: UiThemeMode, ui_scale: f32, nesting_mode: NavigatorNestingMode) {
-        self.initial_snapshot = Some(PreferencesSnapshot { locale: locale.to_owned(), theme_mode, ui_scale, nesting_mode });
+    /// Capture live `locale`, `theme_mode`, `ui_scale`, `nesting_mode`, and `preview_filter` when opening Preferences.
+    pub fn capture_live_snapshot(
+        &mut self,
+        locale: &str,
+        theme_mode: UiThemeMode,
+        ui_scale: f32,
+        nesting_mode: NavigatorNestingMode,
+        preview_filter: CanvasPreviewFilter,
+    ) {
+        self.initial_snapshot = Some(PreferencesSnapshot { locale: locale.to_owned(), theme_mode, ui_scale, nesting_mode, preview_filter });
     }
 
     /// Reset transient UI scale spinner state back to `ScrubUnitFieldState::new(Percent)`.
@@ -424,7 +433,7 @@ fn render_preferences_modal(
         state.preferences.staged_shortcuts = Some(app.shortcuts.clone());
     }
     if state.preferences.initial_snapshot.is_none() {
-        state.preferences.capture_live_snapshot(&app.locale, app.theme.mode, app.theme.ui_scale, app.nav.nesting_mode);
+        state.preferences.capture_live_snapshot(&app.locale, app.theme.mode, app.theme.ui_scale, app.nav.nesting_mode, app.preview_filter);
     }
     let locale = normalize_locale(&app.locale);
     let title = tr(locale, "prefs.title");
@@ -611,6 +620,37 @@ fn render_prefs_appearance(
         let clamped = (pct / 100.0).clamp(0.75, 3.0) as f32;
         intents.push(UiIntent::SetUiScale(clamped));
     }
+
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Color-Vision Deficiency & Grayscale Preview (CVD)").strong());
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(body_w);
+        for (wid, lbl, filter) in [
+            ("prefs.appearance.cvd.normal", if locale.starts_with("zh") { "正常视觉" } else { "Normal" }, CanvasPreviewFilter::Normal),
+            ("prefs.appearance.cvd.protanopia", "Protanopia", CanvasPreviewFilter::Protanopia),
+            ("prefs.appearance.cvd.deuteranopia", "Deuteranopia", CanvasPreviewFilter::Deuteranopia),
+            ("prefs.appearance.cvd.tritanopia", "Tritanopia", CanvasPreviewFilter::Tritanopia),
+            ("prefs.appearance.cvd.grayscale", "Grayscale", CanvasPreviewFilter::GrayscalePrint),
+        ] {
+            if app_button(
+                ui,
+                meta,
+                AppBtn {
+                    widget_id: wid,
+                    label: lbl,
+                    command_id: Some("ui.previewFilter.set"),
+                    selected: app.preview_filter == filter,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                tokens,
+            )
+            .clicked()
+            {
+                intents.push_set_preview_filter(filter);
+            }
+        }
+    });
 
     ui.add_space(6.0);
     ui.label(format!("Active font book: proportional + tabular monospace metrics ({:.0}%)", scale_pct));

@@ -6,14 +6,14 @@ CurveBook ships standalone desktop (`curvebook`) and headless CLI/MCP (`curveboo
 
 ## Which File Do I Need? (System Requirements & Beta Assets) {#system-requirements}
 
-Every Beta release attaches one installer package per supported desktop platform/architecture under the naming scheme `curvebook-<version>-<os>-<arch>.<ext>`. Every package bundles both the desktop GUI (`curvebook`) and the headless CLI/MCP executable (`curvebook-cli`):
+Every Beta release attaches one installer package per supported desktop platform/architecture under the naming scheme `curvebook-<version>-<os>-<arch>.<ext>`. Desktop packages bundle both the desktop GUI (`curvebook`) and the headless CLI/MCP executable (`curvebook-cli`); FreeBSD ships as a Tier 2 CLI-only archive:
 
 | Platform | Beta Release Asset(s) | Notes & Omitted Formats (`R0.28`) |
 |---|---|---|
 | **macOS** | `curvebook-<version>-macos-universal.dmg` | macOS 11+ (`arm64` Apple Silicon and `x86_64` Intel universal binary); Developer ID signed & Apple-notarized (`R8.10`). Bundles `CurveBook.app` and `curvebook-cli` (no separate macOS CLI `.zip`). |
 | **Windows** | `curvebook-<version>-windows-x64.msi`<br>`curvebook-<version>-windows-arm64.msi` | Windows 10/11 (`x64` / `arm64`). Currently **unsigned** pending code signing (`R8.11`). Windows `x86` (32-bit) and `-portable.zip` are dropped; Microsoft Store MSIX (`R8.9`) is a separate Store channel alternative. |
 | **Linux** | `curvebook-<version>-linux-x86_64.AppImage`<br>`curvebook-<version>-linux-aarch64.AppImage` | Wayland / X11 desktop + bundled `curvebook-cli`. Requires FUSE v2 (`libfuse2`) or `--appimage-extract`. `.AppImage.zsync`, `.deb`, `.rpm`, `.tar.gz`, and Flatpak packages are omitted. |
-| **FreeBSD (Preview)** | `curvebook-<version>-freebsd-x86_64.tar.gz` | Desktop GUI & CLI **preview** tarball for `x86_64`. |
+| **FreeBSD (Tier 2 · CLI)** | `curvebook-<version>-freebsd-x86_64.tar.gz` | Tier 2 CLI-only tarball for `x86_64` (`curvebook-cli` + local MCP; no desktop GUI). |
 | **Shared Verification & Attribution** | `SHA256SUMS.txt`<br>`THIRD-PARTY-LICENSES.html` | Published alongside every GitHub Release for checksum verification and dependency licence disclosure. |
 
 > [!NOTE]
@@ -64,9 +64,9 @@ chmod +x curvebook-<version>-linux-x86_64.AppImage
 
 See [Troubleshooting](troubleshooting.md#linux-fuse) if FUSE v2 is unavailable.
 
-### FreeBSD Preview (`x86_64` `.tar.gz`) {#install-freebsd}
+### FreeBSD Tier 2 CLI-Only (`x86_64` `.tar.gz`) {#install-freebsd}
 
-Extract the preview archive and run `bin/curvebook` or `bin/curvebook-cli`:
+Extract the Tier 2 CLI-only archive and run `bin/curvebook-cli` (no desktop GUI is included on FreeBSD):
 
 ```sh
 tar -xzf curvebook-<version>-freebsd-x86_64.tar.gz

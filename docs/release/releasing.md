@@ -97,14 +97,14 @@ Before tagging or publishing a release, verify both source invariants and packag
 
 ## 2. Shipped Beta Release Artefacts (`R0.28`)
 
-Beta releases ship one installer format per OS and one file per architecture (every installer bundles both `curvebook` and `curvebook-cli`), plus compliance notices and checksums:
+Beta releases ship one installer format per OS and one file per architecture (desktop installers bundle both `curvebook` and `curvebook-cli`; FreeBSD ships a Tier 2 CLI-only archive), plus compliance notices and checksums:
 
 | Platform | Asset Filename | Builder / Config | Notes |
 | :--- | :--- | :--- | :--- |
 | **macOS** | `curvebook-<version>-macos-universal.dmg` | `packaging/macos/package.sh`, `Info.plist.in`, `entitlements.plist` | Universal `arm64` + `x86_64` DMG containing `CurveBook.app` (with `curvebook-cli` inside `Contents/MacOS/`). Signed with Developer ID + hardened runtime, notarized, and stapled (`R8.10`; non-Alpha runs fail closed if credentials are missing). Separate CLI `.zip` dropped (`R0.28`). |
 | **Windows (`x64`, `arm64`)** | `curvebook-<version>-windows-x64.msi`, `curvebook-<version>-windows-arm64.msi` | `packaging/windows/package.ps1`, `curvebook.wxs`, `install-policy.wxi`, [`INSTALLATION.md`](../../packaging/windows/INSTALLATION.md) | Dual-scope WiX v5 MSI (`PerUser` default, optional `PerMachine`) with static MSVC CRT bundling `curvebook.exe` + `curvebook-cli.exe`. Ships **unsigned** for Beta until `R8.11`. `x86` and `-portable.zip` dropped (`R0.28`). |
 | **Linux (`x86_64`, `aarch64`)** | `curvebook-<version>-linux-x86_64.AppImage`, `curvebook-<version>-linux-aarch64.AppImage` | `packaging/linux/package.sh`, `apprun-test.sh` | Self-contained AppImage bundling `curvebook`, `curvebook-cli`, `.desktop`, AppStream metadata, MIME associations, and icons. `.AppImage.zsync`, `.deb`, `.rpm`, `.tar.gz`, and Flatpak/OCI dropped (`R0.28`). |
-| **FreeBSD (`x86_64`)** | `curvebook-<version>-freebsd-x86_64.tar.gz` | `packaging/freebsd/package.sh` | Preview desktop & CLI tarball built on FreeBSD VM and scanned on Ubuntu host. |
+| **FreeBSD (`x86_64`)** | `curvebook-<version>-freebsd-x86_64.tar.gz` | `packaging/freebsd/package.sh` | Tier 2 CLI-only tarball (`curvebook-cli` + MCP; no desktop GUI) built on FreeBSD VM and scanned on Ubuntu host. |
 | **Compliance & Checksums** | `THIRD-PARTY-LICENSES.html`, `SHA256SUMS.txt` | `cargo xtask licenses`, `sha256sum`, `actions/attest-build-provenance` | Every asset in the `R0.28` Beta asset set receives a keyless GitHub Sigstore build provenance attestation and is verified by `release-scan --expect-beta-set`. |
 
 **Browser bundle (`curvebook-web`, deferred to `1.0`).** `curvebook-web-<version>.zip` is omitted from Beta GitHub Release assets (`R0.28`, [`R11`](../ROADMAP.md#r11-usable-browser-app)). Automatic WASM verification is paused in both CI and the release workflow. To verify a browser bundle on demand, build it with `./packaging/web/package.sh` and run `CURVEBOOK_REQUIRE_WEB_BUNDLE=1 cargo xtask web-bundle` to check the `R10.22` size budget.
@@ -129,7 +129,8 @@ Use this template when editing a drafted Beta GitHub Release (`v<version>`) befo
 
 - **macOS (`curvebook-<version>-macos-universal.dmg`):** Developer ID signed and notarized (`CurveBook.app` bundles `curvebook-cli` inside `Contents/MacOS/`).
 - **Windows (`curvebook-<version>-windows-x64.msi`, `curvebook-<version>-windows-arm64.msi`):** Ships **unsigned** until `R8.11`; verify `SHA256SUMS.txt` and the GitHub Sigstore attestation before running.
-- **Linux (`curvebook-<version>-linux-x86_64.AppImage`, `curvebook-<version>-linux-aarch64.AppImage`) & FreeBSD (`curvebook-<version>-freebsd-x86_64.tar.gz`):** Self-contained desktop + CLI downloads; verify via `SHA256SUMS.txt` and `gh attestation verify`.
+- **Linux (`curvebook-<version>-linux-x86_64.AppImage`, `curvebook-<version>-linux-aarch64.AppImage`):** Self-contained desktop + CLI downloads; verify via `SHA256SUMS.txt` and `gh attestation verify`.
+- **FreeBSD (`curvebook-<version>-freebsd-x86_64.tar.gz`):** Tier 2 CLI-only archive (`curvebook-cli` + MCP; no desktop GUI); verify via `SHA256SUMS.txt` and `gh attestation verify`.
 - **Notices & Checksums:** `THIRD-PARTY-LICENSES.html` and `SHA256SUMS.txt`.
 ```
 

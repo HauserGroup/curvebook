@@ -2476,7 +2476,13 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
     match intent {
         UiIntent::OpenPreferences { category } => {
             app.egui_views.app_modals.open_preferences(&app.shortcuts, category);
-            app.egui_views.app_modals.preferences.capture_live_snapshot(&app.locale, app.theme.mode, app.theme.ui_scale, app.nav.nesting_mode);
+            app.egui_views.app_modals.preferences.capture_live_snapshot(
+                &app.locale,
+                app.theme.mode,
+                app.theme.ui_scale,
+                app.nav.nesting_mode,
+                app.preview_filter,
+            );
         }
         UiIntent::ClosePreferences { save } => {
             if save {
@@ -2495,6 +2501,7 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
                     let _ = app.set_ui_scale(snap.ui_scale);
                     let _ = app.set_locale(&snap.locale);
                     app.nav.nesting_mode = snap.nesting_mode;
+                    app.preview_filter = snap.preview_filter;
                 }
                 app.egui_views.app_modals.preferences.reset_scale_spinner();
             }

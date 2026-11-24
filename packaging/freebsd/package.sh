@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and package CurveBook for FreeBSD:
+# Build and package CurveBook for FreeBSD (Tier 2: headless CLI + MCP):
 #
 #   $DIST/curvebook-<version>-freebsd-<arch>.tar.gz
 #
@@ -7,8 +7,6 @@
 set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
-LINUX="$ROOT/packaging/linux"
-APP_ID=org.curvebook.CurveBook
 
 SKIP_BUILD=0
 while [[ $# -gt 0 ]]; do
@@ -38,21 +36,15 @@ BASENAME="curvebook-$VERSION-freebsd-$ARCH"
 echo "==> CurveBook $VERSION for FreeBSD $ARCH"
 
 if [[ "$SKIP_BUILD" = 0 ]]; then
-  (cd "$ROOT" && cargo build --release --locked -p curvebook -p curvebook-cli ${CARGO_BUILD_TARGET:+--target "$CARGO_BUILD_TARGET"})
+  (cd "$ROOT" && cargo build --release --locked -p curvebook-cli ${CARGO_BUILD_TARGET:+--target "$CARGO_BUILD_TARGET"})
 fi
 WORK="$CARGO_TARGET_DIR/freebsd-package"
 STAGE="$WORK/$BASENAME"
 rm -rf "$WORK"
 
-mkdir -p "$STAGE/bin" "$STAGE/share/applications" "$STAGE/share/mime/packages" "$STAGE/share/metainfo" \
-  "$STAGE/share/icons" "$STAGE/share/doc/curvebook"
-install -m 755 "$BIN/curvebook" "$BIN/curvebook-cli" "$STAGE/bin/"
-strip "$STAGE/bin/curvebook" "$STAGE/bin/curvebook-cli" 2>/dev/null || true
-install -m 644 "$LINUX/$APP_ID.desktop" "$STAGE/share/applications/$APP_ID.desktop"
-install -m 644 "$LINUX/$APP_ID.mime.xml" "$STAGE/share/mime/packages/$APP_ID.xml"
-sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$CURVEBOOK_BUILD_DATE/g" \
-  "$LINUX/$APP_ID.metainfo.xml.in" >"$STAGE/share/metainfo/$APP_ID.metainfo.xml"
-cp -R "$ROOT/assets/app-icon/hicolor" "$STAGE/share/icons/"
+mkdir -p "$STAGE/bin" "$STAGE/share/doc/curvebook"
+install -m 755 "$BIN/curvebook-cli" "$STAGE/bin/"
+strip "$STAGE/bin/curvebook-cli" 2>/dev/null || true
 copy_docs "$STAGE/share/doc/curvebook"
 
 tar -C "$WORK" -czf "$DIST/$BASENAME.tar.gz" "$BASENAME"

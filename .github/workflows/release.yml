@@ -458,7 +458,7 @@ jobs:
           if-no-files-found: error
 
   freebsd:
-    name: FreeBSD x86_64
+    name: FreeBSD x86_64 (CLI)
     needs: [git-sources, credits, licenses]
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -698,4 +698,4 @@ jobs:
             gh release create "$tag" dist/release/* "${release_flags[@]}" --target "$GITHUB_SHA" --generate-notes
           fi
           url="$(gh release view "$tag" --json url --jq .url)"
-          printf '### Draft release\n\n[%s](%s)\n\nInstallers (macOS DMG, Windows MSI), Linux AppImage, FreeBSD preview archive, licence disclosures, and SHA256SUMS.txt are attached under **Assets**. This draft is not publicly published.\n' "$title" "$url" >> "$GITHUB_STEP_SUMMARY"
+          printf '### Draft release\n\n[%s](%s)\n\nInstallers (macOS DMG, Windows MSI), Linux AppImage, FreeBSD CLI archive, licence disclosures, and SHA256SUMS.txt are attached under **Assets**. This draft is not publicly published.\n' "$title" "$url" >> "$GITHUB_STEP_SUMMARY"

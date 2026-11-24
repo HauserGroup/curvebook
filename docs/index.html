@@ -111,7 +111,7 @@
         <div class="download-content">
           <div>
             <h2 id="downloads-title">Download Beta releases</h2>
-            <p>Choose an installer or archive for your computer from the latest release’s <strong>Assets</strong> list (avoid GitHub’s automatic source tarballs unless building from source). Every package bundles both the <code>curvebook</code> desktop app and <code>curvebook-cli</code>.</p>
+            <p>Choose an installer or archive for your computer from the latest release’s <strong>Assets</strong> list (avoid GitHub’s automatic source tarballs unless building from source). Desktop packages bundle both the <code>curvebook</code> desktop app and <code>curvebook-cli</code> (FreeBSD ships a Tier 2 CLI-only archive).</p>
             <div class="download-links">
               <a href="https://github.com/HauserGroup/curvebook/releases">GitHub Releases <span aria-hidden="true">↗</span></a>
               <a href="manual/index.html">Online Manual</a>
@@ -122,7 +122,7 @@
 
           <aside class="release-status" aria-label="Release status">
             <p><strong>Beta · desktop GUI, CLI &amp; MCP</strong></p>
-            <p>The native desktop GUI (verified across automated five-stage workflows), <code>curvebook-cli</code>, local MCP, and Developer ID notarized macOS packages are ready in Beta. FreeBSD ships as a preview archive, Windows <code>.msi</code> installers ship unsigned until Authenticode signing lands, and manual cross-OS human walkthroughs, RTL GUI mirroring, and the WebAssembly browser app (<code>curvebook-web</code>) remain scoped for <code>1.0</code>.</p>
+            <p>The native desktop GUI (verified across automated five-stage workflows), <code>curvebook-cli</code>, local MCP, and Developer ID notarized macOS packages are ready in Beta. FreeBSD ships as a Tier 2 CLI-only archive, Windows <code>.msi</code> installers ship unsigned until Authenticode signing lands, and manual cross-OS human walkthroughs, RTL GUI mirroring, and the WebAssembly browser app (<code>curvebook-web</code>) remain scoped for <code>1.0</code>.</p>
             <div class="download-links">
               <a href="manual/v0.1/troubleshooting.html#known-issues">Beta known issues</a>
               <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/STATUS.md">Engineering status <span aria-hidden="true">↗</span></a>
@@ -160,10 +160,10 @@
             <article class="platform-card">
               <div class="platform-card-head">
                 <h3>FreeBSD (<code>x86_64</code>)</h3>
-                <span class="platform-tag">Preview</span>
+                <span class="platform-tag">Tier 2 · CLI</span>
               </div>
               <p class="platform-asset"><code>curvebook-&lt;version&gt;-freebsd-x86_64.tar.gz</code></p>
-              <p>Preview desktop GUI and CLI tarball for <code>x86_64</code>. Verify integrity against <code>SHA256SUMS.txt</code> and Sigstore provenance before running.</p>
+              <p>Headless CLI and local MCP tarball for <code>x86_64</code> (no desktop GUI). Verify integrity against <code>SHA256SUMS.txt</code> and Sigstore provenance before running.</p>
             </article>
           </div>
 
