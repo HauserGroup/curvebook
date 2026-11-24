@@ -256,7 +256,9 @@ impl<'a> Parser<'a> {
 
     fn handle_infix(&mut self) -> Result<bool, FitError> {
         let tok = &self.tokens[self.pos];
-        if let Some((bop, prec, left_assoc)) = infix_binary_op(tok.kind) {
+        let infix_op = infix_binary_op(tok.kind)
+            .or_else(|| if tok.kind == TokenKind::Ident && tok.text.eq_ignore_ascii_case("mod") { Some((BinaryOp::Rem, 5, true)) } else { None });
+        if let Some((bop, prec, left_assoc)) = infix_op {
             let (line, col) = (tok.line, tok.col);
             self.track_node(line, col)?;
             self.pop_ops_above(prec, left_assoc)?;

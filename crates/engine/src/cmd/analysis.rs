@@ -411,6 +411,19 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
                 Some(LinearRegressionSpec::MAX_PLOT_SEGMENTS as i64),
             )),
         ));
+        props.push(("fixed_point", nullable_schema(any_json_schema("Optional fixed-point constraint [x0, y0] forcing Y - y0 = slope * (X - x0)"))));
+        props.push((
+            "standard_addition",
+            nullable_schema(bool_schema("Report standard-addition unknown concentration (-X-intercept) and negated Fieller CI")),
+        ));
+        props.push((
+            "extend_line_to_x_intercept",
+            nullable_schema(bool_schema("Extend fitted regression line plot range to include the X-intercept")),
+        ));
+        props.push((
+            "deming_error",
+            nullable_schema(any_json_schema("Model II Deming error model (`EqualError`, `StandardDeviations`, or `VarianceRatio`)")),
+        ));
         props.push(("y_range_filter", nullable_schema(any_json_schema("Optional [min, max] Y inclusion filter"))));
         props.push(("identify_unstable_parameters", nullable_schema(bool_schema("Assess nonlinear parameter identifiability"))));
         props.push((
@@ -2013,6 +2026,10 @@ fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str, allow_ui_update_compat
                     "deming"
                         | "deming_model_ii"
                         | "force_through_origin"
+                        | "fixed_point"
+                        | "standard_addition"
+                        | "extend_line_to_x_intercept"
+                        | "deming_error"
                         | "confidence_bands"
                         | "prediction_bands"
                         | "interpolate_unknowns"
@@ -2585,7 +2602,7 @@ fn is_omitted_optional_field(kind: &AnalysisKind, key: &str) -> bool {
         AnalysisKind::Contingency(_) => matches!(key, "expected_proportions" | "null_proportion"),
         AnalysisKind::Multivariate(MultivariateSpec::Pca { .. }) => key == "pcr_outcome_column",
         AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }) => key == "k_sweep_max",
-        AnalysisKind::LinearRegression(_) => matches!(key, "plot_x_min" | "plot_x_max" | "plot_segments"),
+        AnalysisKind::LinearRegression(_) => matches!(key, "fixed_point" | "plot_x_min" | "plot_x_max" | "plot_segments"),
         AnalysisKind::NonlinearRegression(_) => key == "flag_r_squared_below",
         AnalysisKind::PowerAnalysis(_) => key == "info_sheet_id",
         _ => false,
@@ -2593,6 +2610,7 @@ fn is_omitted_optional_field(kind: &AnalysisKind, key: &str) -> bool {
 }
 
 const NULLABLE_KIND_FIELDS: &[&str] = &[
+    "fixed_point",
     "plot_x_min",
     "plot_x_max",
     "plot_segments",
@@ -2724,6 +2742,17 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
         AnalysisKind::LinearRegression(spec) => {
             if let Some(v) = norm.get("x_range_filter") {
                 spec.x_range_filter = parse_opt_range_filter(v, "x_range_filter")?;
+            }
+            if let Some((x0, y0)) = spec.fixed_point
+                && (!x0.is_finite() || !y0.is_finite())
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`fixed_point` coordinates (x0, y0) must be finite numbers"));
+            }
+            if spec.deming_error.resolved_lambda().is_none() {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    "`deming_error` standard deviations and variance ratio lambda must be finite and strictly positive",
+                ));
             }
         }
         AnalysisKind::TwoGroupComparison(spec) => {

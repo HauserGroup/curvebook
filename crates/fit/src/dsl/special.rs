@@ -12,7 +12,7 @@
 use std::sync::OnceLock;
 
 use curvebook_math::quad::{QuadOptions, integrate_adaptive};
-use curvebook_math::special::{digamma, gamma, ln_gamma};
+use curvebook_math::special::{digamma, gamma, ln_factorial, ln_gamma, reg_beta};
 use curvebook_math::sum::NeumaierSum;
 
 use crate::dsl::limits::MAX_BESSEL_ORDER;
@@ -629,6 +629,176 @@ pub(in crate::dsl) fn bessel_k1(x: f64) -> Option<f64> {
                 + y * (0.234_986_19 + y * (-0.036_556_20 + y * (0.015_042_68 + y * (-0.007_803_53 + y * (0.003_256_14 - y * 0.000_682_45))))))
     };
     if ans.is_finite() { Some(ans) } else { None }
+}
+
+/// Modified Bessel function of the first kind `I_n(x)` for integer order `n`.
+///
+/// Uses the strictly positive ascending power series (DLMF §10.25.2) for `|x| <= 25`,
+/// and Miller's downward recurrence `I_{k-1}(x) = I_{k+1}(x) + (2k/x) I_k(x)` normalized
+/// by the generating-function identity `I_0(x) + 2 sum_{k>=1} I_k(x) = exp(x)` (DLMF §10.29.1,
+/// §10.35.1; Press et al. 2007 §6.6) with log-scale rescaling for `|x| > 25`.
+/// Symmetry: `I_{-n}(x) = I_n(x)` (DLMF §10.27.1), `I_n(-x) = (-1)^n I_n(x)` (DLMF §10.34.1).
+pub(in crate::dsl) fn bessel_in(n: i32, x: f64) -> Option<f64> {
+    if !x.is_finite() {
+        return None;
+    }
+    let m = n.unsigned_abs();
+    let ax = x.abs();
+    if ax == 0.0 {
+        return Some(if m == 0 { 1.0 } else { 0.0 });
+    }
+    let sign = if x < 0.0 && m % 2 == 1 { -1.0 } else { 1.0 };
+    if ax <= 25.0 {
+        let mf = f64::from(m);
+        let ln_lead = mf * (0.5 * ax).ln() - ln_factorial(u64::from(m));
+        let q = 0.25 * ax * ax;
+        let mut sum = 1.0_f64;
+        let mut term = 1.0_f64;
+        for k in 1..=256_u32 {
+            let kf = f64::from(k);
+            term *= q / (kf * (mf + kf));
+            sum += term;
+            if term <= sum * 1e-16 {
+                break;
+            }
+        }
+        let ln_val = ln_lead + sum.ln();
+        if !ln_val.is_finite() || ln_val > 709.78 {
+            return None;
+        }
+        if ln_val < -745.0 {
+            return Some(0.0);
+        }
+        let val = sign * ln_val.exp();
+        return val.is_finite().then_some(val);
+    }
+    // Guard against extreme arguments that would make Miller's starting order exceed bounded work.
+    if ax > 500_000.0 {
+        return None;
+    }
+    let m_base = m.max(ax.ceil() as u32);
+    let extra = (40.0 * ax.max(f64::from(m))).sqrt().ceil() as u32 + 32;
+    let m_start = m_base.saturating_add(extra);
+    let two_over_x = 2.0 / ax;
+    const RESCALE: f64 = 1e-100;
+    const LN_RESCALE: f64 = -230.258_509_299_404_6; // -100 * ln(10)
+
+    let mut bip = 0.0_f64;
+    let mut bi = 1.0_f64;
+    let mut sum = 0.0_f64;
+    let mut ans = 0.0_f64;
+    let mut have_ans = false;
+    let mut ans_log_scale = 0.0_f64;
+
+    for k in (1..=m_start).rev() {
+        if k == m {
+            ans = bi;
+            have_ans = true;
+        }
+        sum += 2.0 * bi;
+        let bim = bip + f64::from(k) * two_over_x * bi;
+        bip = bi;
+        bi = bim;
+        if bi > 1e100 {
+            bi *= RESCALE;
+            bip *= RESCALE;
+            sum *= RESCALE;
+            if have_ans {
+                ans_log_scale += LN_RESCALE;
+            }
+        }
+    }
+    if m == 0 {
+        ans = bi;
+        have_ans = true;
+    }
+    sum += bi;
+    if !have_ans || ans <= 0.0 || sum <= 0.0 || !sum.is_finite() {
+        return None;
+    }
+    let ln_val = ans.ln() + ans_log_scale + ax - sum.ln();
+    if !ln_val.is_finite() || ln_val > 709.78 {
+        return None;
+    }
+    if ln_val < -745.0 {
+        return Some(0.0);
+    }
+    let val = sign * ln_val.exp();
+    val.is_finite().then_some(val)
+}
+
+/// Modified Bessel function of the second kind `K_n(x)` for integer order `n` and `x > 0`.
+///
+/// Uses symmetry `K_{-n}(x) = K_n(x)` (DLMF §10.27.3) and the unconditionally stable upward
+/// recurrence `K_{k+1}(x) = K_{k-1}(x) + (2k/x) K_k(x)` seeded from `K_0(x)` and `K_1(x)`
+/// (DLMF §10.29.1; Press et al. 2007 §6.6).
+pub(in crate::dsl) fn bessel_kn(n: i32, x: f64) -> Option<f64> {
+    if !x.is_finite() || x <= 0.0 {
+        return None;
+    }
+    let m = n.unsigned_abs();
+    if m == 0 {
+        return bessel_k0(x);
+    }
+    if m == 1 {
+        return bessel_k1(x);
+    }
+    let mut k_prev = bessel_k0(x)?;
+    let mut k_curr = bessel_k1(x)?;
+    let two_over_x = 2.0 / x;
+    for k in 1..m {
+        let k_next = k_prev + f64::from(k) * two_over_x * k_curr;
+        if !k_next.is_finite() {
+            return None;
+        }
+        k_prev = k_curr;
+        k_curr = k_next;
+    }
+    k_curr.is_finite().then_some(k_curr)
+}
+
+/// Factorial `n!` for non-negative integers `n` (`0 <= n <= 170`).
+///
+/// Reference: Abramowitz & Stegun (1964) §6.1.6.
+pub(in crate::dsl) fn factorial_f64(x: f64) -> Option<f64> {
+    if !x.is_finite() || x < 0.0 {
+        return None;
+    }
+    let r = x.round();
+    if (x - r).abs() > 1e-12 || r > 170.0 {
+        return None;
+    }
+    let n = r as u32;
+    let mut acc = 1.0_f64;
+    for k in 2..=n {
+        acc *= f64::from(k);
+    }
+    acc.is_finite().then_some(acc)
+}
+
+/// Binomial upper cumulative tail `P(X >= ceil(k)) = sum_{j = ceil(k)}^{n} C(n, j) p^j (1 - p)^{n - j}`.
+///
+/// Evaluated via the exact regularized incomplete beta identity `I_p(j0, n - j0 + 1)`
+/// (Abramowitz & Stegun 1964 §26.5.24; DLMF §8.17.5).
+pub(in crate::dsl) fn binomial_upper_tail(k: f64, n: f64, p: f64) -> Option<f64> {
+    if !k.is_finite() || !n.is_finite() || !p.is_finite() {
+        return None;
+    }
+    if !(0.0..=1.0).contains(&p) || n < 0.0 || n > 1e15 {
+        return None;
+    }
+    let n_int = n.round();
+    if (n - n_int).abs() > 1e-12 {
+        return None;
+    }
+    let j0 = k.ceil();
+    if j0 <= 0.0 {
+        return Some(1.0);
+    }
+    if j0 > n_int {
+        return Some(0.0);
+    }
+    reg_beta(p, j0, n_int - j0 + 1.0).ok()
 }
 
 pub(in crate::dsl) fn is_non_positive_integer(v: f64) -> bool {

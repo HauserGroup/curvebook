@@ -9,7 +9,13 @@
 //!
 //! Reference: Zar, J. H. (2010). *Biostatistical Analysis*, 5th ed. Pearson Prentice Hall.
 //!
+//! Reference: Fieller, E. C. (1940). The biological standardization of insulin. *Supplement to the Journal of the Royal Statistical Society* 7(1), 1–64. doi:10.2307/2983630
+//!
 //! Reference: Fieller, E. C. (1954). Some problems in interval estimation. *Journal of the Royal Statistical Society, Series B* 16(2), 175–185.
+//!
+//! Reference: Dahlberg, G. (1940). *Statistical Methods for Medical and Biological Students*. Interscience Publications.
+//!
+//! Reference: Bland, J. M. & Altman, D. G. (1996). Measurement error. *BMJ* 313(7059), 744. doi:10.1136/bmj.313.7059.744
 //!
 //! Reference: Seber, G. A. F. & Lee, A. J. (2003). *Linear Regression Analysis*, 2nd ed. Wiley.
 //!
@@ -38,7 +44,20 @@ use crate::types::{DataPoint, validated_replicate_moments};
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimpleLinearOptions {
     /// When `true`, constrain intercept to `0.0` (`y = b * x`, 1 free parameter, `df = n - 1`).
+    /// Retained for backward compatibility; superseded by [`Self::fixed_point`] when `Some((x0, y0))`.
     pub force_through_origin: bool,
+    /// Optional arbitrary fixed-point constraint `(X0, Y0)` forcing `Y - Y0 = slope * (X - X0)` (`df = n - 1`).
+    /// Takes precedence over [`Self::force_through_origin`] when `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_point: Option<(f64, f64)>,
+    /// When `true`, populate [`SimpleLinearResult::standard_addition_concentration`] (`-x_intercept`) and
+    /// [`SimpleLinearResult::standard_addition_ci`] (negated, order-swapped Fieller limits `[-U, -L]`).
+    #[serde(default)]
+    pub standard_addition: bool,
+    /// When `true`, extend fitted band/line plotting bounds to include the estimated *X*-intercept when finite
+    /// (unless overridden by explicit [`Self::plot_x_range`] endpoints).
+    #[serde(default)]
+    pub extend_line_to_x_intercept: bool,
     /// Two-sided confidence level used for parameter CIs and pointwise regression bands (default `0.95` / 95%).
     pub confidence_level: ConfidenceLevel,
     /// When `true`, populate pointwise mean-response confidence bands along `[x_min, x_max]`.
@@ -57,10 +76,27 @@ pub struct SimpleLinearOptions {
     pub unknown_x_values: Vec<f64>,
 }
 
+impl SimpleLinearOptions {
+    /// Resolve the active fixed-point constraint `(X0, Y0)`, falling back to `(0.0, 0.0)` when `force_through_origin` is `true`.
+    #[must_use]
+    pub const fn effective_fixed_point(&self) -> Option<(f64, f64)> {
+        if let Some(pt) = self.fixed_point {
+            Some(pt)
+        } else if self.force_through_origin {
+            Some((0.0, 0.0))
+        } else {
+            None
+        }
+    }
+}
+
 impl Default for SimpleLinearOptions {
     fn default() -> Self {
         Self {
             force_through_origin: false,
+            fixed_point: None,
+            standard_addition: false,
+            extend_line_to_x_intercept: false,
             confidence_level: ConfidenceLevel::DEFAULT_95,
             compute_bands: true,
             band_grid_points: 101,
@@ -166,6 +202,22 @@ impl InverseIntervalSet {
         }
     }
 
+    /// Negate and reverse endpoint ordering (`x -> -x`), mapping `[L, U]` to `[-U, -L]`
+    /// (used for Standard Addition unknown concentration `-X_intercept`; Fieller 1940).
+    #[must_use]
+    pub const fn negate(&self) -> Self {
+        match *self {
+            Self::Bounded { lower, upper } => Self::Bounded { lower: -upper, upper: -lower },
+            Self::HalfLine { lower: Some(lo), upper: None } => Self::HalfLine { lower: None, upper: Some(-lo) },
+            Self::HalfLine { lower: None, upper: Some(hi) } => Self::HalfLine { lower: Some(-hi), upper: None },
+            Self::HalfLine { lower: Some(lo), upper: Some(hi) } => Self::HalfLine { lower: Some(-hi), upper: Some(-lo) },
+            Self::HalfLine { lower: None, upper: None } => Self::HalfLine { lower: None, upper: None },
+            Self::TwoRays { left_upper, right_lower } => Self::TwoRays { left_upper: -right_lower, right_lower: -left_upper },
+            Self::AllReals => Self::AllReals,
+            Self::Undefined => Self::Undefined,
+        }
+    }
+
     /// Test whether candidate `x` belongs to this solution set.
     #[must_use]
     pub fn contains(&self, x: f64) -> bool {
@@ -220,6 +272,10 @@ pub struct LinearResidual {
     pub residual: f64,
 }
 
+const fn default_inverse_interval_undefined() -> InverseIntervalSet {
+    InverseIntervalSet::Undefined
+}
+
 /// Complete simple linear regression output.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimpleLinearResult {
@@ -228,38 +284,50 @@ pub struct SimpleLinearResult {
     /// Number of observations excluded by the inclusive X filter.
     #[serde(default)]
     pub n_excluded_by_range: usize,
-    /// Residual degrees of freedom (`n - 1` when `force_through_origin`, else `n - 2`).
+    /// Residual degrees of freedom (`n - 1` when constrained through a fixed point or origin, else `n - 2`).
     pub df_residual: usize,
     /// Whether the fit constrained the intercept to zero (`y = slope * x`).
     pub force_through_origin: bool,
+    /// Active fixed-point constraint `(X0, Y0)` when constrained (`Some((0.0, 0.0))` when `force_through_origin` is `true` without an explicit `fixed_point`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_point: Option<(f64, f64)>,
     /// Least-squares slope estimate in `Y / X` units.
     pub slope: f64,
     /// Least-squares `Y`-intercept estimate in `Y` units (`0.0` when `force_through_origin`).
     pub intercept: f64,
     /// Standard error of `slope` (`sqrt(s^2 / S_xx)`).
     pub se_slope: f64,
-    /// Standard error of `intercept` (`0.0` when `force_through_origin`).
+    /// Standard error of `intercept` (`|X0| * se_slope` when fixed at `(X0, Y0)`, `0.0` when `X0 == 0`).
     pub se_intercept: f64,
     /// Two-sided `t(df_residual)` confidence interval `(lower, upper)` for `slope` at configured `ConfidenceLevel`.
     pub ci_slope: (f64, f64),
-    /// Two-sided `t(df_residual)` confidence interval `(lower, upper)` for `intercept` (`(0.0, 0.0)` when `force_through_origin`).
+    /// Two-sided `t(df_residual)` confidence interval `(lower, upper)` for `intercept` (`(Y0, Y0)` when `X0 == 0`).
     pub ci_intercept: (f64, f64),
-    /// Coefficient of determination $R^2 \in [0, 1]$ (`1 - rss / ss_total`; computed relative to mean or zero when forced through origin per Draper & Smith 1998).
+    /// Coefficient of determination $R^2 \in [0, 1]$ (`1 - rss / ss_total`; computed relative to mean or `Y0` when constrained per Draper & Smith 1998).
     pub r_squared: f64,
-    /// Signed Pearson correlation $r = \mathrm{sign}(\text{slope})\sqrt{R^2}$ (`NaN` when forced through origin or zero total variance).
+    /// Signed Pearson correlation $r = \mathrm{sign}(\text{slope})\sqrt{R^2}$ (`NaN` when constrained or zero total variance).
     pub r: f64,
     /// Residual standard deviation $S_{y.x} = \sqrt{\text{rss} / \text{df\_residual}}$ in `Y` units.
     pub sy_x: f64,
     /// Residual sum of squares $\sum (y_i - \hat{y}_i)^2$ in `Y^2` units.
     pub rss: f64,
-    /// Total sum of squares ($\sum (y_i - \bar{y})^2$, or $\sum y_i^2$ when `force_through_origin`).
+    /// Total sum of squares ($\sum (y_i - \bar{y})^2$, or $\sum (y_i - Y_0)^2$ when constrained through `(X0, Y0)`).
     pub ss_total: f64,
     /// Omnibus *F*-statistic $((\text{ss\_total} - \text{rss}) / 1) / (\text{rss} / \text{df\_residual})$ testing zero slope (`f64::INFINITY` on zero residual SS).
     pub f_stat: f64,
     /// Upper-tail $F(1, \text{df\_residual})$ *P* value testing $H_0: \text{slope} = 0$ (`0.0` on exact noiseless non-zero slope).
     pub p_value: f64,
-    /// X-intercept `-intercept / slope` where `y = 0` (`None` when `force_through_origin` or `slope == 0`).
+    /// X-intercept `-intercept / slope` where `y = 0` (`None` when forced through origin `(0, 0)` or `slope == 0`).
     pub x_intercept: Option<f64>,
+    /// Exact Fieller (1940) confidence set for the *X*-intercept (`InverseIntervalSet::Undefined` when `x_intercept` is `None`).
+    #[serde(default = "default_inverse_interval_undefined")]
+    pub x_intercept_ci: InverseIntervalSet,
+    /// Standard-addition unknown concentration `-x_intercept` when `SimpleLinearOptions::standard_addition` is `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standard_addition_concentration: Option<f64>,
+    /// Negated, order-swapped Fieller (1940) confidence set `[-U, -L]` for [`Self::standard_addition_concentration`] when `standard_addition` is `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standard_addition_ci: Option<InverseIntervalSet>,
     /// Reciprocal slope `1 / slope` (`None` when `slope == 0`).
     pub one_over_slope: Option<f64>,
     /// Wald–Wolfowitz runs test along sorted `X` testing systematic departure from linearity.
@@ -401,8 +469,14 @@ struct OlsFitCore {
     residuals: Vec<LinearResidual>,
 }
 
-fn fit_ols_core(points: &[DataPoint], force_through_origin: bool) -> Result<OlsFitCore, FitError> {
-    let min_n = if force_through_origin { 2 } else { 3 };
+fn fit_ols_core(points: &[DataPoint], fixed_point: Option<(f64, f64)>) -> Result<OlsFitCore, FitError> {
+    if let Some((x0, y0)) = fixed_point
+        && (!x0.is_finite() || !y0.is_finite())
+    {
+        return Err(FitError::InvalidParameter { name: "fixed_point", reason: String::from("fixed point coordinates (X0, Y0) must be finite") });
+    }
+    let constrained = fixed_point.is_some();
+    let min_n = if constrained { 2 } else { 3 };
     if points.is_empty() {
         return Err(FitError::EmptyInput);
     }
@@ -412,13 +486,13 @@ fn fit_ols_core(points: &[DataPoint], force_through_origin: bool) -> Result<OlsF
         return Err(FitError::InsufficientData { required: min_n, actual: n });
     }
 
-    let (slope, intercept, se_slope_factor, se_intercept_factor, s_xx, s_yy, s_xy, x_mean) = if force_through_origin {
-        fit_through_origin(&series.xs, &series.ys, &series.ns, series.ss_within)?
+    let (slope, intercept, se_slope_factor, se_intercept_factor, s_xx, s_yy, s_xy, x_mean) = if let Some((x0, y0)) = fixed_point {
+        fit_through_fixed_point(&series.xs, &series.ys, &series.ns, series.ss_within, x0, y0)?
     } else {
         fit_with_intercept(&series.xs, &series.ys, &series.ns, series.n_total, series.ss_within)?
     };
 
-    let df_res = if force_through_origin { n - 1 } else { n - 2 };
+    let df_res = if constrained { n - 1 } else { n - 2 };
     let mut rss_acc = NeumaierSum::new();
     let mut residuals = Vec::with_capacity(series.xs.len());
     let mut raw_res = Vec::with_capacity(series.xs.len());
@@ -432,8 +506,8 @@ fn fit_ols_core(points: &[DataPoint], force_through_origin: bool) -> Result<OlsF
     rss_acc.add(series.ss_within);
     let rss = rss_acc.total().max(0.0);
     let sy_x = (rss / (df_res as f64)).sqrt();
-    let (se_slope, se_intercept) =
-        if force_through_origin { (sy_x * se_slope_factor, 0.0) } else { (sy_x * se_slope_factor, sy_x * se_intercept_factor) };
+    let se_slope = sy_x * se_slope_factor;
+    let se_intercept = sy_x * se_intercept_factor;
 
     Ok(OlsFitCore { series, n, df_res, slope, intercept, se_slope, se_intercept, s_xx, s_yy, s_xy, x_mean, rss, sy_x, raw_res, residuals })
 }
@@ -470,9 +544,20 @@ pub(crate) fn resolve_linear_grid_bounds(
     xs: impl Iterator<Item = f64> + Clone,
     filter: (Option<f64>, Option<f64>),
     plot: (Option<f64>, Option<f64>),
+    extend_x_intercept: Option<f64>,
 ) -> Result<(f64, f64), FitError> {
-    let x_min = plot.0.or(filter.0).unwrap_or_else(|| xs.clone().fold(f64::INFINITY, f64::min));
-    let x_max = plot.1.or(filter.1).unwrap_or_else(|| xs.fold(f64::NEG_INFINITY, f64::max));
+    let mut x_min = plot.0.or(filter.0).unwrap_or_else(|| xs.clone().fold(f64::INFINITY, f64::min));
+    let mut x_max = plot.1.or(filter.1).unwrap_or_else(|| xs.fold(f64::NEG_INFINITY, f64::max));
+    if let Some(x_int) = extend_x_intercept
+        && x_int.is_finite()
+    {
+        if plot.0.is_none() {
+            x_min = x_min.min(x_int);
+        }
+        if plot.1.is_none() {
+            x_max = x_max.max(x_int);
+        }
+    }
     if x_min > x_max || !x_min.is_finite() || !x_max.is_finite() || !(x_max - x_min).is_finite() {
         return Err(FitError::InvalidParameter {
             name: "plot_x_range",
@@ -513,18 +598,15 @@ pub(crate) fn fit_linear_points(
     opts: &SimpleLinearOptions,
     n_excluded_by_range: usize,
 ) -> Result<SimpleLinearResult, FitError> {
-    let fit = fit_ols_core(points, opts.force_through_origin)?;
+    let fixed_point = opts.effective_fixed_point();
+    let is_constrained = fixed_point.is_some();
+    let fit = fit_ols_core(points, fixed_point)?;
     let t_crit = student_t_two_sided_isf(opts.confidence_level.alpha(), fit.df_res as f64)?;
     let ci_slope = (fit.slope - t_crit * fit.se_slope, fit.slope + t_crit * fit.se_slope);
-    let ci_intercept =
-        if opts.force_through_origin { (0.0, 0.0) } else { (fit.intercept - t_crit * fit.se_intercept, fit.intercept + t_crit * fit.se_intercept) };
+    let ci_intercept = (fit.intercept - t_crit * fit.se_intercept, fit.intercept + t_crit * fit.se_intercept);
 
     let r_squared = if fit.s_yy > 0.0 { (1.0 - fit.rss / fit.s_yy).clamp(0.0, 1.0) } else { 1.0 };
-    let r = if !opts.force_through_origin && fit.s_xx > 0.0 && fit.s_yy > 0.0 {
-        (fit.s_xy / (fit.s_xx * fit.s_yy).sqrt()).clamp(-1.0, 1.0)
-    } else {
-        f64::NAN
-    };
+    let r = if !is_constrained && fit.s_xx > 0.0 && fit.s_yy > 0.0 { (fit.s_xy / (fit.s_xx * fit.s_yy).sqrt()).clamp(-1.0, 1.0) } else { f64::NAN };
     let ms_res = fit.rss / (fit.df_res as f64);
     let ss_reg = (fit.s_yy - fit.rss).max(0.0);
     let f_stat = if ms_res > 0.0 {
@@ -543,12 +625,47 @@ pub(crate) fn fit_linear_points(
     let runs = runs_test(&sorted_res);
     let lack_of_fit = replicates_lack_of_fit(points, fit.rss, fit.df_res);
 
+    let inv_ctx = InverseQuadraticContext::from_fit(&fit, t_crit, is_constrained);
+    let (x_intercept, x_intercept_ci) = match fixed_point {
+        Some((0.0, 0.0)) => (None, InverseIntervalSet::Undefined),
+        Some((x0, 0.0)) => (Some(x0), InverseIntervalSet::Bounded { lower: x0, upper: x0 }),
+        Some((x0, y0)) => {
+            if fit.slope != 0.0 && fit.slope.is_finite() {
+                let xi = x0 - y0 / fit.slope;
+                if xi.is_finite() {
+                    (Some(xi), solve_inverse_quadratic(&inv_ctx, 0.0, xi, inv_ctx.n_inv))
+                } else {
+                    (None, InverseIntervalSet::Undefined)
+                }
+            } else {
+                (None, InverseIntervalSet::Undefined)
+            }
+        }
+        None => {
+            if fit.slope != 0.0 && fit.slope.is_finite() {
+                let xi = -fit.intercept / fit.slope;
+                if xi.is_finite() {
+                    (Some(xi), solve_inverse_quadratic(&inv_ctx, 0.0, xi, inv_ctx.n_inv))
+                } else {
+                    (None, InverseIntervalSet::Undefined)
+                }
+            } else {
+                (None, InverseIntervalSet::Undefined)
+            }
+        }
+    };
+
+    let (standard_addition_concentration, standard_addition_ci) =
+        if opts.standard_addition { (x_intercept.map(|xi| -xi), Some(x_intercept_ci.negate())) } else { (None, None) };
+
+    let extend_x = if opts.extend_line_to_x_intercept { x_intercept } else { None };
     let bands = if opts.compute_bands {
         build_linear_bands(
             resolve_linear_grid_bounds(
                 fit.series.xs.iter().copied(),
                 opts.x_range_filter.unwrap_or_default(),
                 opts.plot_x_range.unwrap_or_default(),
+                extend_x,
             )?,
             fit.n,
             fit.slope,
@@ -557,14 +674,13 @@ pub(crate) fn fit_linear_points(
             t_crit,
             fit.x_mean,
             fit.s_xx,
-            opts.force_through_origin,
+            is_constrained,
             opts.band_grid_points,
         )?
     } else {
         Vec::new()
     };
 
-    let inv_ctx = InverseQuadraticContext::from_fit(&fit, t_crit, opts.force_through_origin);
     let interpolated_x_from_y = interpolate_x_list(&opts.unknown_y_values, &inv_ctx);
     let interpolated_y_from_x = interpolate_y_list(&opts.unknown_x_values, &inv_ctx);
 
@@ -572,7 +688,8 @@ pub(crate) fn fit_linear_points(
         n: fit.n,
         n_excluded_by_range,
         df_residual: fit.df_res,
-        force_through_origin: opts.force_through_origin,
+        force_through_origin: opts.force_through_origin || fixed_point == Some((0.0, 0.0)),
+        fixed_point,
         slope: fit.slope,
         intercept: fit.intercept,
         se_slope: fit.se_slope,
@@ -586,7 +703,10 @@ pub(crate) fn fit_linear_points(
         ss_total: fit.s_yy,
         f_stat,
         p_value,
-        x_intercept: if !opts.force_through_origin && fit.slope != 0.0 { Some(-fit.intercept / fit.slope) } else { None },
+        x_intercept,
+        x_intercept_ci,
+        standard_addition_concentration,
+        standard_addition_ci,
         one_over_slope: if fit.slope != 0.0 { Some(1.0 / fit.slope) } else { None },
         runs_test: runs,
         lack_of_fit,
@@ -620,7 +740,7 @@ pub fn interpolate_x_from_y(
     if unknown_replicates == 0 {
         return Err(FitError::InvalidParameter { name: "unknown_replicates", reason: String::from("must be at least 1") });
     }
-    let fit = fit_ols_core(points, force_through_origin)?;
+    let fit = fit_ols_core(points, force_through_origin.then_some((0.0, 0.0)))?;
     let t_crit = student_t_two_sided_isf(confidence_level.alpha(), fit.df_res as f64)?;
     let ctx = InverseQuadraticContext::from_fit(&fit, t_crit, force_through_origin);
     let inv_m = 1.0 / (unknown_replicates as f64);
@@ -705,7 +825,14 @@ fn fit_with_intercept(
 }
 
 #[allow(clippy::type_complexity)]
-fn fit_through_origin(xs: &[f64], ys: &[f64], ns: &[f64], ss_within: f64) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), FitError> {
+fn fit_through_fixed_point(
+    xs: &[f64],
+    ys: &[f64],
+    ns: &[f64],
+    ss_within: f64,
+    x0: f64,
+    y0: f64,
+) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), FitError> {
     let mut s_xx_acc = NeumaierSum::new();
     let mut s_yy_acc = NeumaierSum::new();
     let mut s_xy_acc = NeumaierSum::new();
@@ -713,19 +840,25 @@ fn fit_through_origin(xs: &[f64], ys: &[f64], ns: &[f64], ss_within: f64) -> Res
         if !x.is_finite() || !y.is_finite() {
             return Err(FitError::InvalidParameter { name: "xy", reason: String::from("non-finite value") });
         }
-        s_xx_acc.add(w * x * x);
-        s_yy_acc.add(w * y * y);
-        s_xy_acc.add(w * x * y);
+        let u = x - x0;
+        let v = y - y0;
+        s_xx_acc.add(w * u * u);
+        s_yy_acc.add(w * v * v);
+        let p = w * u * v;
+        s_xy_acc.add(p);
+        s_xy_acc.add((w * u).mul_add(v, -p));
     }
     let s_xx = s_xx_acc.total();
     let s_yy = s_yy_acc.total() + ss_within;
     let s_xy = s_xy_acc.total();
     if s_xx <= 0.0 || !s_xx.is_finite() {
-        return Err(FitError::InvalidParameter { name: "x", reason: String::from("sum of X^2 must be positive for origin-forced regression") });
+        return Err(FitError::InvalidParameter { name: "x", reason: String::from("sum of (X - X0)^2 must be positive for fixed-point regression") });
     }
     let slope = s_xy / s_xx;
+    let intercept = y0 - slope * x0;
     let se_slope_factor = (1.0 / s_xx).sqrt();
-    Ok((slope, 0.0, se_slope_factor, 0.0, s_xx, s_yy, s_xy, 0.0))
+    let se_intercept_factor = x0.abs() * se_slope_factor;
+    Ok((slope, intercept, se_slope_factor, se_intercept_factor, s_xx, s_yy, s_xy, x0))
 }
 
 pub(crate) fn linear_grid((x_min, x_max): (f64, f64), grid_points: usize) -> impl ExactSizeIterator<Item = f64> {
@@ -758,7 +891,7 @@ fn build_linear_bands(
     let mut out = Vec::with_capacity(grid.len());
     for x in grid {
         let y = intercept + slope * x;
-        let dx = if origin { x } else { x - x_mean };
+        let dx = x - x_mean;
         let h = n_inv + (dx * dx) / s_xx;
         let ci_half = t_crit * sy_x * h.sqrt();
         let pi_half = t_crit * sy_x * (1.0 + h).sqrt();
@@ -812,7 +945,7 @@ impl InverseQuadraticContext {
             sy_x: fit.sy_x,
             t_crit,
             n_inv: if origin { 0.0 } else { 1.0 / (fit.n as f64) },
-            x_center: if origin { 0.0 } else { fit.x_mean },
+            x_center: fit.x_mean,
             s_xx: fit.s_xx,
             sqrt_sxx,
             g,
@@ -1024,7 +1157,7 @@ pub fn compare_linear_lines(datasets: &[&[DataPoint]], force_through_origin: boo
             return Err(FitError::InsufficientData { required: min_per, actual: series.n_total });
         }
         let (slope, intercept, _, _, s_xx, s_yy, s_xy, _) = if force_through_origin {
-            fit_through_origin(&series.xs, &series.ys, &series.ns, series.ss_within)?
+            fit_through_fixed_point(&series.xs, &series.ys, &series.ns, series.ss_within, 0.0, 0.0)?
         } else {
             fit_with_intercept(&series.xs, &series.ys, &series.ns, series.n_total, series.ss_within)?
         };
@@ -1105,6 +1238,49 @@ pub fn compare_linear_lines(datasets: &[&[DataPoint]], force_through_origin: boo
         p_intercepts: Some(p_int),
         intercepts_significantly_different: Some(p_int < 0.05),
     })
+}
+
+/// Compute within-method repeatability standard deviation from `m >= 1` duplicate measurement pairs
+/// `(a_j, b_j)` using Dahlberg's formula:
+/// `s_err = sqrt(sum_{j=1}^m (a_j - b_j)^2 / (2 m))`
+/// (Dahlberg 1940; Linnet 1990; Bland & Altman 1996).
+///
+/// Suitable for supplying `sd_x` or `sd_y` to [`curvebook_doc::DemingErrorSpec::StandardDeviations`]
+/// in Model II Deming regression.
+///
+/// # Errors
+/// Returns [`FitError::EmptyInput`] when `pairs` is empty, or [`FitError::InvalidParameter`] when
+/// any observation is non-finite or the pair difference overflows `f64`.
+pub fn duplicate_pair_repeatability_sd(pairs: &[(f64, f64)]) -> Result<f64, FitError> {
+    if pairs.is_empty() {
+        return Err(FitError::EmptyInput);
+    }
+    let mut max_abs = 0.0_f64;
+    for &(a, b) in pairs {
+        if !a.is_finite() || !b.is_finite() {
+            return Err(FitError::InvalidParameter { name: "pairs", reason: String::from("duplicate pair contains non-finite value") });
+        }
+        let d = (a - b).abs();
+        if !d.is_finite() {
+            return Err(FitError::InvalidParameter { name: "pairs", reason: String::from("duplicate pair difference overflowed f64 range") });
+        }
+        if d > max_abs {
+            max_abs = d;
+        }
+    }
+    if max_abs == 0.0 {
+        return Ok(0.0);
+    }
+    let mut sum_sq = NeumaierSum::new();
+    for &(a, b) in pairs {
+        let scaled = (a - b) / max_abs;
+        sum_sq.add(scaled * scaled);
+    }
+    let sd = max_abs * (sum_sq.total().max(0.0) / (2.0 * (pairs.len() as f64))).sqrt();
+    if !sd.is_finite() {
+        return Err(FitError::InvalidParameter { name: "pairs", reason: String::from("repeatability SD overflowed f64 range") });
+    }
+    Ok(sd)
 }
 
 /// Model II Deming regression for errors in both `X` and `Y` (`lambda = sigma_x^2 / sigma_y^2`,

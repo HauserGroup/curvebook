@@ -368,3 +368,69 @@ fn nist_reparam_polynomial_corpus_pontius_and_wampler1_to_5() {
         verify_polynomial_lls("polynomial_5", &ds, 1e-6, 1e-5);
     }
 }
+
+#[test]
+fn nist_reparam_r18_3_extended_builtins() {
+    let Some(dir) = resolve_corpus_dir() else {
+        return;
+    };
+
+    // 9. Eckerle4 -> gaussian_area (Area = b1 * sqrt(2*pi), Mean = b3, SD = b2)
+    let eckerle4 = load_corpus_nonlinear(&dir, "Eckerle4").unwrap();
+    let b = &eckerle4.certified_betas;
+    let s = &eckerle4.certified_se_betas;
+    let sqrt_2pi = (2.0 * std::f64::consts::PI).sqrt();
+    let ser_e4 = series_from_nls(&eckerle4, false);
+    let ga = run_fit("gaussian_area", &ser_e4, vec![rule_local("Area", b[0] * sqrt_2pi * 1.05), rule_local("Mean", 451.0), rule_local("SD", 5.0)]);
+    assert_param(&ga, "Area", b[0] * sqrt_2pi, s[0] * sqrt_2pi, 1e-7, 1e-6, "Eckerle4>gaussian_area");
+    assert_param(&ga, "Mean", b[2], s[2], 1e-7, 1e-6, "Eckerle4>gaussian_area");
+    assert_param(&ga, "SD", b[1], s[1], 1e-7, 1e-6, "Eckerle4>gaussian_area");
+    assert_approx_eq(ga.rss, eckerle4.certified_rss, 1e-12, 1e-9, "Eckerle4>gaussian_area RSS");
+    let amp_d = ga.derived_scalars[0].iter().find(|d| d.name == "Amplitude").expect("Amplitude derived scalar");
+    assert_approx_eq(amp_d.value, b[0] / b[1], 1e-12, 1e-7, "Eckerle4>gaussian_area derived Amplitude");
+
+    // 10. Rat42 -> boltzmann_sigmoid (Bottom = 0, Top = b1, V50 = b2 / b3, Slope = 1 / b3)
+    // Secondary R 4.5.2 nls vcov SE for V50: 1.179440601976244
+    let rat42 = load_corpus_nonlinear(&dir, "Rat42").unwrap();
+    let b = &rat42.certified_betas;
+    let s = &rat42.certified_se_betas;
+    let v50_cert = b[1] / b[2];
+    let slope_cert = 1.0 / b[2];
+    let se_slope = s[2] / (b[2] * b[2]);
+    let ser_r42 = series_from_nls(&rat42, false);
+    let boltz = run_fit(
+        "boltzmann_sigmoid",
+        &ser_r42,
+        vec![rule_const("Bottom", 0.0), rule_local("Top", b[0] * 1.05), rule_local("V50", v50_cert * 1.05), rule_local("Slope", slope_cert * 1.05)],
+    );
+    assert_param(&boltz, "Top", b[0], s[0], 1e-6, 1e-5, "Rat42>boltzmann_sigmoid");
+    assert_param(&boltz, "V50", v50_cert, 1.179_440_601_976_244, 1e-6, 1e-5, "Rat42>boltzmann_sigmoid");
+    assert_param(&boltz, "Slope", slope_cert, se_slope, 1e-6, 1e-5, "Rat42>boltzmann_sigmoid");
+    assert_approx_eq(boltz.rss, rat42.certified_rss, 1e-12, 1e-9, "Rat42>boltzmann_sigmoid RSS");
+
+    // 11. BoxBOD -> two_phase_association (Y0 = 0, PercentFast = 100, KSlow = 0.01)
+    let boxbod = load_corpus_nonlinear(&dir, "BoxBOD").unwrap();
+    let ser_bb = series_from_nls(&boxbod, false);
+    let tpa = run_fit(
+        "two_phase_association",
+        &ser_bb,
+        vec![
+            rule_const("Y0", 0.0),
+            rule_local("Plateau", 200.0),
+            rule_const("PercentFast", 100.0),
+            rule_local("KFast", 0.5),
+            rule_const("KSlow", 0.01),
+        ],
+    );
+    assert_param(&tpa, "Plateau", boxbod.certified_betas[0], boxbod.certified_se_betas[0], 1e-7, 1e-6, "BoxBOD>two_phase_association");
+    assert_param(&tpa, "KFast", boxbod.certified_betas[1], boxbod.certified_se_betas[1], 1e-7, 1e-6, "BoxBOD>two_phase_association");
+    assert_approx_eq(tpa.rss, boxbod.certified_rss, 1e-12, 1e-9, "BoxBOD>two_phase_association RSS");
+
+    // 12. DanWood -> power_series_two_term (C = 0, D = 1 => y = A * x^B)
+    let danwood = load_corpus_nonlinear(&dir, "DanWood").unwrap();
+    let ser_dw = series_from_nls(&danwood, false);
+    let pst = run_fit("power_series_two_term", &ser_dw, vec![rule_local("A", 1.0), rule_local("B", 5.0), rule_const("C", 0.0), rule_const("D", 1.0)]);
+    assert_param(&pst, "A", danwood.certified_betas[0], danwood.certified_se_betas[0], 1e-7, 1e-6, "DanWood>power_series_two_term");
+    assert_param(&pst, "B", danwood.certified_betas[1], danwood.certified_se_betas[1], 1e-7, 1e-6, "DanWood>power_series_two_term");
+    assert_approx_eq(pst.rss, danwood.certified_rss, 1e-12, 1e-9, "DanWood>power_series_two_term RSS");
+}

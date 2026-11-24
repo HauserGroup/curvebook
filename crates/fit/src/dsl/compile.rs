@@ -135,14 +135,7 @@ pub(in crate::dsl) fn schedule_expr_compile<'a>(
             tasks.push(CompileTask::Eval(cond));
         }
         Expr::Call { name, args } => {
-            let (bf, expected_arity) = resolve_builtin_fn(name)?;
-            if args.len() != expected_arity {
-                return Err(FitError::DslCompileError {
-                    message: format!("Function `{name}` expects {expected_arity} argument(s), got {}", args.len()),
-                    line: 1,
-                    column: 1,
-                });
-            }
+            let bf = resolve_builtin_fn(name, args.len())?;
             tasks.push(CompileTask::EmitCall(bf, args.len()));
             for a in args.iter().rev() {
                 tasks.push(CompileTask::Eval(a));
@@ -271,11 +264,19 @@ pub(in crate::dsl) fn compile_ident(
     Ok(())
 }
 
-pub(in crate::dsl) fn resolve_builtin_fn(name: &str) -> Result<(BuiltinFn, usize), FitError> {
+pub(in crate::dsl) fn resolve_builtin_fn(name: &str, argc: usize) -> Result<BuiltinFn, FitError> {
     let u = name.to_ascii_lowercase();
-    let res = match u.as_str() {
+    if u == "norminv" {
+        return match argc {
+            1 => Ok(BuiltinFn::NormInv),
+            3 => Ok(BuiltinFn::NormInv3),
+            _ => Err(FitError::DslCompileError { message: format!("Function `{name}` expects 1 or 3 argument(s), got {argc}"), line: 1, column: 1 }),
+        };
+    }
+    let (bf, expected_arity) = match u.as_str() {
         "abs" => (BuiltinFn::Abs, 1),
         "sqrt" => (BuiltinFn::Sqrt, 1),
+        "sqr" => (BuiltinFn::Sqr, 1),
         "cbrt" => (BuiltinFn::Cbrt, 1),
         "exp" => (BuiltinFn::Exp, 1),
         "exp10" => (BuiltinFn::Exp10, 1),
@@ -298,19 +299,43 @@ pub(in crate::dsl) fn resolve_builtin_fn(name: &str) -> Result<(BuiltinFn, usize
         "floor" => (BuiltinFn::Floor, 1),
         "ceil" => (BuiltinFn::Ceil, 1),
         "round" => (BuiltinFn::Round, 1),
-        "trunc" => (BuiltinFn::Trunc, 1),
+        "trunc" | "int" => (BuiltinFn::Trunc, 1),
         "sign" | "sgn" => (BuiltinFn::Sign, 1),
+        "mod" => (BuiltinFn::Mod, 2),
         "min" => (BuiltinFn::Min, 2),
         "max" => (BuiltinFn::Max, 2),
         "clamp" => (BuiltinFn::Clamp, 3),
         "hypot" => (BuiltinFn::Hypot, 2),
         "pow" => (BuiltinFn::PowFn, 2),
+        "fact" => (BuiltinFn::Fact, 1),
+        "logit" => (BuiltinFn::Logit, 1),
+        "probit" => (BuiltinFn::Probit, 1),
+        "perc" => (BuiltinFn::Perc, 1),
+        "deg" => (BuiltinFn::Deg, 1),
+        "rad" => (BuiltinFn::Rad, 1),
+        "is_defined" => (BuiltinFn::IsDefined, 1),
         "erf" => (BuiltinFn::Erf, 1),
         "erfc" => (BuiltinFn::Erfc, 1),
-        "normcdf" | "phi" => (BuiltinFn::NormCdf, 1),
-        "norminv" | "probit" => (BuiltinFn::NormInv, 1),
+        "ibeta" => (BuiltinFn::IBeta, 3),
+        "igamma" => (BuiltinFn::IGamma, 2),
+        "igammac" => (BuiltinFn::IGammaC, 2),
+        "normcdf" | "phi" | "zdist" => (BuiltinFn::NormCdf, 1),
+        "zinv" => (BuiltinFn::NormInv, 1),
+        "zpdf" => (BuiltinFn::NormPdf, 1),
+        "normdist" => (BuiltinFn::NormDist3, 3),
+        "normpdf" => (BuiltinFn::NormPdf3, 3),
+        "tdist" => (BuiltinFn::TDist, 2),
+        "tinv" => (BuiltinFn::TInv, 2),
+        "tpdf" => (BuiltinFn::TPdf, 2),
+        "fdist" => (BuiltinFn::FDist, 3),
+        "finv" => (BuiltinFn::FInv, 3),
+        "fpdf" => (BuiltinFn::FPdf, 3),
+        "chidist" => (BuiltinFn::ChiDist, 2),
+        "chisqc" => (BuiltinFn::ChiSqC, 2),
+        "chiinv" => (BuiltinFn::ChiInv, 2),
+        "binomial" => (BuiltinFn::Binomial, 3),
         "gamma" => (BuiltinFn::Gamma, 1),
-        "lngamma" | "lgamma" => (BuiltinFn::LnGamma, 1),
+        "lngamma" | "lgamma" | "gammaln" => (BuiltinFn::LnGamma, 1),
         "beta" => (BuiltinFn::Beta, 2),
         "digamma" | "psi" => (BuiltinFn::Digamma, 1),
         "besselj0" | "j0" => (BuiltinFn::BesselJ0, 1),
@@ -321,14 +346,23 @@ pub(in crate::dsl) fn resolve_builtin_fn(name: &str) -> Result<(BuiltinFn, usize
         "besselyn" | "yn" => (BuiltinFn::BesselYn, 2),
         "besseli0" | "i0" => (BuiltinFn::BesselI0, 1),
         "besseli1" | "i1" => (BuiltinFn::BesselI1, 1),
+        "besseli" | "besselin" => (BuiltinFn::BesselIn, 2),
         "besselk0" | "k0" => (BuiltinFn::BesselK0, 1),
         "besselk1" | "k1" => (BuiltinFn::BesselK1, 1),
-        "hyp1f1" | "m" => (BuiltinFn::Hyp1F1, 3),
-        "hyp2f1" => (BuiltinFn::Hyp2F1, 4),
-        "confluent_u" | "u" => (BuiltinFn::ConfluentU, 3),
+        "besselk" | "besselkn" => (BuiltinFn::BesselKn, 2),
+        "hyp1f1" | "m" | "hypgeometricm" => (BuiltinFn::Hyp1F1, 3),
+        "hyp2f1" | "hypgeometricf" => (BuiltinFn::Hyp2F1, 4),
+        "confluent_u" | "u" | "hypgeometricu" => (BuiltinFn::ConfluentU, 3),
         _ => {
             return Err(FitError::DslCompileError { message: format!("Unknown function `{name}`"), line: 1, column: 1 });
         }
     };
-    Ok(res)
+    if argc != expected_arity {
+        return Err(FitError::DslCompileError {
+            message: format!("Function `{name}` expects {expected_arity} argument(s), got {argc}"),
+            line: 1,
+            column: 1,
+        });
+    }
+    Ok(bf)
 }

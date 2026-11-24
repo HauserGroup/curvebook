@@ -418,8 +418,60 @@ pub enum BuiltinFn {
     Erfc,
     /// Standard normal CDF `Phi(x)` (zero mean, unit SD).
     NormCdf,
-    /// Inverse standard normal CDF (probit) `Phi^-1(p)` for `p in (0, 1)`.
+    /// Standard normal PDF `phi(x)` (zero mean, unit SD).
+    NormPdf,
+    /// Inverse standard normal CDF `Phi^-1(p)` for `p in (0, 1)`.
     NormInv,
+    /// Three-argument normal CDF `Phi((x - mean) / sd)` (`normdist(x, mean, sd)`).
+    NormDist3,
+    /// Three-argument inverse normal CDF `mean + sd * Phi^-1(p)` (`norminv(p, mean, sd)`).
+    NormInv3,
+    /// Three-argument normal PDF `phi((x - mean) / sd) / sd` (`normpdf(x, mean, sd)`).
+    NormPdf3,
+    /// Regularized incomplete beta function `I_x(a, b)` (`ibeta(a, b, x)`).
+    IBeta,
+    /// Lower regularized incomplete gamma function `P(a, x)` (`igamma(a, x)`).
+    IGamma,
+    /// Upper regularized incomplete gamma function `Q(a, x)` (`igammac(a, x)`).
+    IGammaC,
+    /// Student `t` one-tailed upper probability `P(T_df > t)` (`tdist(t, df)`).
+    TDist,
+    /// Student `t` two-tailed critical quantile `t_{1 - p/2, df}` (`tinv(p, df)`).
+    TInv,
+    /// Student `t` probability density `f_t(t; df)` (`tpdf(t, df)`).
+    TPdf,
+    /// Snedecor `F` upper-tail probability `P(F_{df1, df2} > f)` (`fdist(f, df1, df2)`).
+    FDist,
+    /// Snedecor `F` upper-tail critical quantile `F_{1 - p; df1, df2}` (`finv(p, df1, df2)`).
+    FInv,
+    /// Snedecor `F` probability density `f_F(f; df1, df2)` (`fpdf(f, df1, df2)`).
+    FPdf,
+    /// Chi-square upper-tail probability `P(chi^2_df > x2)` (`chidist(x2, df)`).
+    ChiDist,
+    /// Chi-square lower cumulative probability `P(chi^2_df <= x2)` (`chisqc(x2, df)`).
+    ChiSqC,
+    /// Chi-square upper-tail critical quantile (`chiinv(p, df)`).
+    ChiInv,
+    /// Binomial upper cumulative tail `sum_{j = ceil(k)}^{n} C(n, j) p^j (1 - p)^(n - j)` (`binomial(k, n, p)`).
+    Binomial,
+    /// Factorial `n!` for non-negative integers `n` (`fact(n)`).
+    Fact,
+    /// Logit log-odds `ln(p / (1 - p))` for `p in (0, 1)` (`logit(p)`).
+    Logit,
+    /// Finney probit `5 + Phi^-1(p)` for `p in (0, 1)` (`probit(p)`).
+    Probit,
+    /// Percentage to proportion `x / 100` (`perc(x)`).
+    Perc,
+    /// Radians to degrees (`deg(rad)`).
+    Deg,
+    /// Degrees to radians (`rad(deg)`).
+    Rad,
+    /// Square `x^2` (`sqr(x)`).
+    Sqr,
+    /// Floating-point remainder `x % y` (`mod(x, y)`).
+    Mod,
+    /// Finite / non-blank predicate returning `1.0` when `x` is finite and `0.0` otherwise (`is_defined(x)`).
+    IsDefined,
     /// Complete Gamma function `Gamma(x)`.
     Gamma,
     /// Natural log of `|Gamma(x)|` (`lngamma(x)`).
@@ -444,10 +496,14 @@ pub enum BuiltinFn {
     BesselI0,
     /// Modified Bessel function of the first kind, order 1 (`I_1(x)`).
     BesselI1,
+    /// Modified Bessel function of the first kind, integer order `n` (`I_n(x)`).
+    BesselIn,
     /// Modified Bessel function of the second kind, order 0 (`K_0(x)`, `x > 0`).
     BesselK0,
     /// Modified Bessel function of the second kind, order 1 (`K_1(x)`, `x > 0`).
     BesselK1,
+    /// Modified Bessel function of the second kind, integer order `n` (`K_n(x)`, `x > 0`).
+    BesselKn,
     /// Confluent hypergeometric function of the first kind (Kummer `M(a, b, z) = 1F1(a; b; z)`).
     Hyp1F1,
     /// Gauss hypergeometric function `2F1(a, b; c; z)`.

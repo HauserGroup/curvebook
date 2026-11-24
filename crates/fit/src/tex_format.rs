@@ -392,6 +392,12 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
                 ctx.pow_base("EC50", "\\text{EC}_{50}"),
             )
         }
+        "agonist_vs_response_normalized" => {
+            format!("Y = \\frac{{100 \\cdot X}}{{{} + X}}", ctx.val("EC50", "\\text{EC}_{50}"))
+        }
+        "agonist_vs_response_normalized_var" => {
+            format!("Y = \\frac{{100}}{{1 + ({} / X)^{{{}}}}}", ctx.val("EC50", "\\text{EC}_{50}"), ctx.val("HillSlope", "\\text{HillSlope}"),)
+        }
         "log_agonist_vs_response_5pl" | "5pl" => format!(
             "Y = {} + \\frac{{{} - {}}}{{(1 + 10^{{({} - X) \\cdot {}}})^{{{}}}}}",
             ctx.val("Bottom", "\\text{Bottom}"),
@@ -401,6 +407,17 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             ctx.factor("HillSlope", "\\text{HillSlope}"),
             ctx.val("S", "S"),
         ),
+        "agonist_vs_response_5pl" => {
+            let s_val = ctx.val("S", "S");
+            format!(
+                "Y = {} + \\frac{{{} - {}}}{{(1 + (2^{{1 / {s_val}}} - 1) \\cdot ({} / X)^{{{}}})^{{{s_val}}}}}",
+                ctx.val("Bottom", "\\text{Bottom}"),
+                ctx.val("Top", "\\text{Top}"),
+                ctx.val("Bottom", "\\text{Bottom}"),
+                ctx.val("EC50", "\\text{EC}_{50}"),
+                ctx.val("HillSlope", "\\text{HillSlope}"),
+            )
+        }
         "bell_shaped_dose_response" => {
             let dip = ctx.val("Dip", "\\text{Dip}");
             format!(
@@ -411,6 +428,18 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
                 ctx.val("Plateau2", "\\text{Plateau}_2"),
                 ctx.val("LogEC50_2", "\\log\\text{EC}_{50,2}"),
                 ctx.factor("nH2", "n_{H2}"),
+            )
+        }
+        "bell_shaped_dose_response_conc" => {
+            let dip = ctx.val("Dip", "\\text{Dip}");
+            format!(
+                "Y = {dip} + \\frac{{{} - {dip}}}{{1 + (X / {})^{{{}}}}} + \\frac{{{} - {dip}}}{{1 + ({} / X)^{{{}}}}}",
+                ctx.val("Plateau1", "\\text{Plateau}_1"),
+                ctx.denom("EC50_1", "\\text{EC}_{50,1}"),
+                ctx.val("nH1", "n_{H1}"),
+                ctx.val("Plateau2", "\\text{Plateau}_2"),
+                ctx.val("EC50_2", "\\text{EC}_{50,2}"),
+                ctx.val("nH2", "n_{H2}"),
             )
         }
         "biphasic_dose_response" => {
@@ -425,6 +454,18 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
                 ctx.factor("nH2", "n_{H2}"),
             )
         }
+        "biphasic_dose_response_conc" => {
+            let bot = ctx.val("Bottom", "\\text{Bottom}");
+            let top = ctx.val("Top", "\\text{Top}");
+            let frac = ctx.val("Frac", "\\text{Frac}");
+            format!(
+                "Y = {bot} + ({top} - {bot}) \\cdot (\\frac{{{frac}}}{{1 + ({} / X)^{{{}}}}} + \\frac{{1 - {frac}}}{{1 + ({} / X)^{{{}}}}})",
+                ctx.val("EC50_1", "\\text{EC}_{50,1}"),
+                ctx.val("nH1", "n_{H1}"),
+                ctx.val("EC50_2", "\\text{EC}_{50,2}"),
+                ctx.val("nH2", "n_{H2}"),
+            )
+        }
         "log_agonist_vs_response_ecf" | "ecf" => {
             let f = ctx.val("F", "F");
             let f_den = ctx.denom("F", "F");
@@ -437,6 +478,18 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
                 ctx.factor("HillSlope", "\\text{HillSlope}"),
             )
         }
+        "agonist_vs_response_ecf" => {
+            let f = ctx.val("F", "F");
+            let f_den = ctx.denom("F", "F");
+            format!(
+                "Y = {} + \\frac{{{} - {}}}{{1 + \\frac{{100 - {f}}}{{{f_den}}} \\cdot ({} / X)^{{{}}}}}",
+                ctx.val("Bottom", "\\text{Bottom}"),
+                ctx.val("Top", "\\text{Top}"),
+                ctx.val("Bottom", "\\text{Bottom}"),
+                ctx.val("ECF", "\\text{EC}_F"),
+                ctx.val("HillSlope", "\\text{HillSlope}"),
+            )
+        }
         "ec50_shift_gaddum_schild" | "gaddum_schild" => format!(
             "Y = {} + \\frac{{{} - {}}}{{1 + 10^{{({} + \\log(1 + ({} \\cdot 10^{{{}}})^{{{}}}) - X) \\cdot {}}}}}",
             ctx.val("Bottom", "\\text{Bottom}"),
@@ -447,6 +500,55 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             ctx.val("pA2", "\\text{pA}_2"),
             ctx.val("SchildSlope", "\\text{SchildSlope}"),
             ctx.factor("HillSlope", "\\text{HillSlope}"),
+        ),
+        "ec50_shift_gaddum_schild_conc" => format!(
+            "Y = {} + \\frac{{{} - {}}}{{1 + ({} \\cdot (1 + ({} \\cdot 10^{{{}}})^{{{}}}) / X)^{{{}}}}}",
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("Top", "\\text{Top}"),
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("EC50", "\\text{EC}_{50}"),
+            ctx.val("AntagConc", "\\text{AntagConc}"),
+            ctx.val("pA2", "\\text{pA}_2"),
+            ctx.val("SchildSlope", "\\text{SchildSlope}"),
+            ctx.val("HillSlope", "\\text{HillSlope}"),
+        ),
+        "ec50_shift_gaddum_schild_unity_log" => format!(
+            "Y = {} + \\frac{{{} - {}}}{{1 + 10^{{({} + \\log(1 + {} \\cdot 10^{{{}}}) - X) \\cdot {}}}}}",
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("Top", "\\text{Top}"),
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("LogEC50", "\\log\\text{EC}_{50}"),
+            ctx.val("AntagConc", "\\text{AntagConc}"),
+            ctx.val("pKB", "\\text{pK}_B"),
+            ctx.factor("HillSlope", "\\text{HillSlope}"),
+        ),
+        "ec50_shift_gaddum_schild_unity_conc" => format!(
+            "Y = {} + \\frac{{{} - {}}}{{1 + ({} \\cdot (1 + {} \\cdot 10^{{{}}}) / X)^{{{}}}}}",
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("Top", "\\text{Top}"),
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("EC50", "\\text{EC}_{50}"),
+            ctx.val("AntagConc", "\\text{AntagConc}"),
+            ctx.val("pKB", "\\text{pK}_B"),
+            ctx.val("HillSlope", "\\text{HillSlope}"),
+        ),
+        "ec50_shift_ratio_log" => format!(
+            "Y = {} + \\frac{{{} - {}}}{{1 + 10^{{({} + \\log({}) - X) \\cdot {}}}}}",
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("Top", "\\text{Top}"),
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("LogEC50Control", "\\log\\text{EC}_{50,\\text{ctrl}}"),
+            ctx.val("EC50Ratio", "\\text{EC}_{50\\text{Ratio}}"),
+            ctx.factor("HillSlope", "\\text{HillSlope}"),
+        ),
+        "ec50_shift_ratio_conc" => format!(
+            "Y = {} + \\frac{{{} - {}}}{{1 + ({} \\cdot {} / X)^{{{}}}}}",
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("Top", "\\text{Top}"),
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("EC50Control", "\\text{EC}_{50,\\text{ctrl}}"),
+            ctx.factor("EC50Ratio", "\\text{EC}_{50\\text{Ratio}}"),
+            ctx.val("HillSlope", "\\text{HillSlope}"),
         ),
         "allosteric_ec50_shift" => {
             let mod_c = ctx.val("ModConc", "\\text{ModConc}");
@@ -461,6 +563,19 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
                 ctx.factor("HillSlope", "\\text{HillSlope}"),
             )
         }
+        "allosteric_ec50_shift_conc" => {
+            let mod_c = ctx.val("ModConc", "\\text{ModConc}");
+            let kb = ctx.denom("Kb", "K_b");
+            let alpha = ctx.val("alpha", "\\alpha");
+            format!(
+                "Y = {} + \\frac{{{} - {}}}{{1 + ({} \\cdot \\frac{{1 + {mod_c} / {kb}}}{{1 + {alpha} \\cdot {mod_c} / {kb}}} / X)^{{{}}}}}",
+                ctx.val("Bottom", "\\text{Bottom}"),
+                ctx.val("Top", "\\text{Top}"),
+                ctx.val("Bottom", "\\text{Bottom}"),
+                ctx.val("EC50", "\\text{EC}_{50}"),
+                ctx.val("HillSlope", "\\text{HillSlope}"),
+            )
+        }
         "operational_model_agonist" => {
             let basal = ctx.val("Basal", "\\text{Basal}");
             let emax = ctx.val("Emax", "E_{\\max}");
@@ -470,6 +585,32 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             format!(
                 "Y = {basal} + \\frac{{({emax} - {basal}) \\cdot (10^{{{log_tau} + X}})^{{{n}}}}}{{(10^{{{log_tau} + X}})^{{{n}}} + (10^{{X}} + 10^{{{log_ka}}})^{{{n}}}}}"
             )
+        }
+        "operational_model_agonist_conc" => {
+            let basal = ctx.val("Basal", "\\text{Basal}");
+            let emax = ctx.val("Emax", "E_{\\max}");
+            let ka = ctx.val("KA", "K_A");
+            let tau = ctx.val("Tau", "\\tau");
+            let n = ctx.val("n", "n");
+            format!("Y = {basal} + \\frac{{{emax} - {basal}}}{{1 + (\\frac{{{ka} + X}}{{{tau} \\cdot X}})^{{{n}}}}}")
+        }
+        "operational_model_depletion_log" => {
+            let basal = ctx.val("Basal", "\\text{Basal}");
+            let emax = ctx.val("EffectMax", "\\text{Effect}_{\\max}");
+            let log_ka = ctx.val("LogKA", "\\log K_A");
+            let log_tau = ctx.val("LogTau", "\\log\\tau");
+            let n = ctx.val("n", "n");
+            format!(
+                "Y = {basal} + \\frac{{({emax} - {basal}) \\cdot (10^{{{log_tau} + X}})^{{{n}}}}}{{(10^{{{log_tau} + X}})^{{{n}}} + (10^{{X}} + 10^{{{log_ka}}})^{{{n}}}}}"
+            )
+        }
+        "operational_model_depletion_conc" => {
+            let basal = ctx.val("Basal", "\\text{Basal}");
+            let emax = ctx.val("EffectMax", "\\text{Effect}_{\\max}");
+            let ka = ctx.val("KA", "K_A");
+            let tau = ctx.val("Tau", "\\tau");
+            let n = ctx.val("n", "n");
+            format!("Y = {basal} + \\frac{{{emax} - {basal}}}{{1 + (\\frac{{{ka} + X}}{{{tau} \\cdot X}})^{{{n}}}}}")
         }
         "log_inhibitor_vs_response_3pl" | "log_inhibitor_vs_response" | "ic50_3pl" => format!(
             "Y = {} + \\frac{{{} - {}}}{{1 + 10^{{X - {}}}}}",
@@ -509,6 +650,12 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             ctx.denom("IC50", "\\text{IC}_{50}"),
             ctx.val("HillSlope", "\\text{HillSlope}"),
         ),
+        "inhibitor_vs_response_normalized" => {
+            format!("Y = \\frac{{100}}{{1 + X / {}}}", ctx.denom("IC50", "\\text{IC}_{50}"))
+        }
+        "inhibitor_vs_response_normalized_var" => {
+            format!("Y = \\frac{{100}}{{1 + ({} / X)^{{{}}}}}", ctx.val("IC50", "\\text{IC}_{50}"), ctx.val("HillSlope", "\\text{HillSlope}"),)
+        }
         "absolute_ic50_4pl" => {
             let bot = ctx.val("Bottom", "\\text{Bottom}");
             let top = ctx.val("Top", "\\text{Top}");
@@ -519,6 +666,18 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
                 "Y = {bot} + \\frac{{{top} - {bot}}}{{1 + \\frac{{{top} - {midpoint}}}{{{midpoint} - {bot}}} \\cdot 10^{{(X - {}) \\cdot {}}}}}",
                 ctx.val("LogIC50", "\\log\\text{IC}_{50}"),
                 ctx.factor("HillSlope", "\\text{HillSlope}"),
+            )
+        }
+        "absolute_ic50_4pl_conc" => {
+            let bot = ctx.val("Bottom", "\\text{Bottom}");
+            let top = ctx.val("Top", "\\text{Top}");
+            let c0 = ctx.val("Control0", "\\text{Control}_0");
+            let c100 = ctx.val("Control100", "\\text{Control}_{100}");
+            let midpoint = format!("0.5 \\cdot ({c0} + {c100})");
+            format!(
+                "Y = {bot} + \\frac{{{top} - {bot}}}{{1 + \\frac{{{top} - {midpoint}}}{{{midpoint} - {bot}}} \\cdot (X / {})^{{{}}}}}",
+                ctx.denom("IC50", "\\text{IC}_{50}"),
+                ctx.val("HillSlope", "\\text{HillSlope}"),
             )
         }
         _ => return None,
@@ -557,6 +716,17 @@ fn format_binding_kinetics_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
                 "Y = \\frac{{{rt} + X + {kd} \\cdot (1 + {ns}) - \\sqrt{{({kd} \\cdot (1 + {ns}) + {rt} - X)^{{2}} + 4 \\cdot (1 + {ns}) \\cdot {kd} \\cdot X}}}}{{2}}"
             )
         }
+        "one_site_total_ligand_depletion" => {
+            let bmax = ctx.val("Bmax", "B_{\\max}");
+            let kd = ctx.val("Kd", "K_d");
+            let ns = ctx.val("NS", "\\text{NS}");
+            let sa = ctx.factor("SpecAct", "\\text{SpecAct}");
+            let vol = ctx.factor("Vol", "\\text{Vol}");
+            let kd_cpm = format!("({kd} \\cdot {vol} \\cdot 1000 \\cdot {sa})");
+            let b_term = format!("{kd_cpm} \\cdot (1 + {ns}) + X \\cdot (1 + 2 \\cdot {ns}) + {bmax}");
+            let c_term = format!("X \\cdot ({ns} \\cdot {kd_cpm} + {ns} \\cdot X + {bmax})");
+            format!("Y = \\frac{{2 \\cdot {c_term}}}{{{b_term} + \\sqrt{{({b_term})^{{2}} - 4 \\cdot (1 + {ns}) \\cdot {c_term}}}}}")
+        }
         "one_site_competition_ligand_depletion" => {
             let rt = ctx.val("Rt", "R_t");
             let hot_f = ctx.factor("HotNM", "\\text{HotNM}");
@@ -575,6 +745,16 @@ fn format_binding_kinetics_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
                 "Y = \\frac{{{} \\cdot X \\cdot (1 + {alpha} \\cdot {mod_c} / {kb})}}{{{} \\cdot (1 + {mod_c} / {kb}) + X \\cdot (1 + {alpha} \\cdot {mod_c} / {kb})}}",
                 ctx.val("Bmax", "B_{\\max}"),
                 ctx.val("Kd", "K_d"),
+            )
+        }
+        "allosteric_modulator_competition" => {
+            let y0 = ctx.val("Y0", "Y_0");
+            let log_kb = ctx.val("LogKB", "\\log K_B");
+            let log_alpha = ctx.val("LogAlpha", "\\log\\alpha");
+            let hot = ctx.val("RadioligandNM", "[\\text{Hot}]");
+            let kd = ctx.val("HotKdNM", "K_{d,\\text{hot}}");
+            format!(
+                "Y = {y0} \\cdot \\frac{{{hot} + {kd}}}{{{hot} + {kd} \\cdot \\frac{{1 + 10^{{X - {log_kb}}}}}{{1 + 10^{{X - {log_kb} + {log_alpha}}}}}}}"
             )
         }
         "homologous_one_site_competition" => {
@@ -609,6 +789,16 @@ fn format_binding_kinetics_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             ctx.val("Bottom", "\\text{Bottom}"),
             ctx.val("LogIC50", "\\log\\text{IC}_{50}"),
         ),
+        "two_sites_fit_logic50" => {
+            let bot = ctx.val("Bottom", "\\text{Bottom}");
+            let top = ctx.val("Top", "\\text{Top}");
+            let f_hi = ctx.val("FractionHi", "\\text{Fraction}_{\\text{Hi}}");
+            format!(
+                "Y = {bot} + ({top} - {bot}) \\cdot (\\frac{{{f_hi}}}{{1 + 10^{{X - {}}}}} + \\frac{{1 - {f_hi}}}{{1 + 10^{{X - {}}}}})",
+                ctx.val("LogIC50_Hi", "\\log\\text{IC}_{50,\\text{Hi}}"),
+                ctx.val("LogIC50_Lo", "\\log\\text{IC}_{50,\\text{Lo}}"),
+            )
+        }
         "two_sites_fit_ki" => {
             let bot = ctx.val("Bottom", "\\text{Bottom}");
             let top = ctx.val("Top", "\\text{Top}");
@@ -795,6 +985,16 @@ fn format_exponential_growth_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             let y0 = ctx.val("Y0", "Y_0");
             format!("Y = {y0} + ({} - {y0}) \\cdot (1 - \\exp(-{} \\cdot X))", ctx.val("Plateau", "\\text{Plateau}"), ctx.val("K", "K"))
         }
+        "two_phase_association" => {
+            let y0 = ctx.val("Y0", "Y_0");
+            let p = ctx.val("Plateau", "\\text{Plateau}");
+            let pf = ctx.val("PercentFast", "\\text{PercentFast}");
+            format!(
+                "Y = {y0} + ({p} - {y0}) \\cdot (\\frac{{{pf}}}{{100}} \\cdot (1 - \\exp(-{} \\cdot X)) + (1 - \\frac{{{pf}}}{{100}}) \\cdot (1 - \\exp(-{} \\cdot X)))",
+                ctx.val("KFast", "K_{\\text{Fast}}"),
+                ctx.val("KSlow", "K_{\\text{Slow}}"),
+            )
+        }
         "plateau_followed_by_one_phase_association" => {
             let y0 = ctx.val("Y0", "Y_0");
             format!(
@@ -807,6 +1007,9 @@ fn format_exponential_growth_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         "exponential_growth" | "malthusian_growth" | "exponential_growth_malthusian" => {
             format!("Y = {} \\cdot \\exp({} \\cdot X)", ctx.val("Y0", "Y_0"), ctx.val("K", "K"))
         }
+        "log_exponential_growth" => {
+            format!("Y = {} + {} \\cdot X", ctx.val("LnY0", "\\ln Y_0"), ctx.val("k", "k"))
+        }
         "exponential_plateau" => {
             let ym = ctx.val("YM", "Y_M");
             format!("Y = {ym} - ({ym} - {}) \\cdot \\exp(-{} \\cdot X)", ctx.val("Y0", "Y_0"), ctx.val("K", "K"))
@@ -815,6 +1018,15 @@ fn format_exponential_growth_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             let ym = ctx.val("YM", "Y_M");
             let y0 = ctx.val("Y0", "Y_0");
             format!("Y = \\frac{{{ym} \\cdot {y0}}}{{({ym} - {y0}) \\cdot \\exp(-{} \\cdot X) + {y0}}}", ctx.val("K", "K"))
+        }
+        "boltzmann_sigmoid" => {
+            let bot = ctx.val("Bottom", "\\text{Bottom}");
+            format!(
+                "Y = {bot} + \\frac{{{} - {bot}}}{{1 + \\exp(\\frac{{{} - X}}{{{}}})}}",
+                ctx.val("Top", "\\text{Top}"),
+                ctx.val("V50", "V_{50}"),
+                ctx.val("Slope", "\\text{Slope}"),
+            )
         }
         "gompertz_growth" => {
             let ym = ctx.val("YM", "Y_M");
@@ -832,6 +1044,27 @@ fn format_exponential_growth_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         "linear_quadratic_survival" => {
             format!("Y = \\exp(-({} \\cdot D + {} \\cdot D^2))", ctx.val("alpha", "\\alpha"), ctx.val("beta", "\\beta"))
         }
+        "linear_quadratic_percent_surviving" => {
+            format!("Y = 100 \\cdot \\exp(-({} \\cdot D + {} \\cdot D^2))", ctx.val("alpha", "\\alpha"), ctx.val("beta", "\\beta"))
+        }
+        "linear_quadratic_number_surviving" => format!(
+            "Y = {} \\cdot \\exp(-({} \\cdot D + {} \\cdot D^2))",
+            ctx.val("Y0", "Y_0"),
+            ctx.val("alpha", "\\alpha"),
+            ctx.val("beta", "\\beta"),
+        ),
+        "linear_quadratic_fraction_dead" => {
+            format!("Y = 1 - \\exp(-({} \\cdot D + {} \\cdot D^2))", ctx.val("alpha", "\\alpha"), ctx.val("beta", "\\beta"))
+        }
+        "linear_quadratic_percent_dead" => {
+            format!("Y = 100 \\cdot (1 - \\exp(-({} \\cdot D + {} \\cdot D^2)))", ctx.val("alpha", "\\alpha"), ctx.val("beta", "\\beta"))
+        }
+        "linear_quadratic_number_dead" => format!(
+            "Y = {} \\cdot (1 - \\exp(-({} \\cdot D + {} \\cdot D^2)))",
+            ctx.val("Y0", "Y_0"),
+            ctx.val("alpha", "\\alpha"),
+            ctx.val("beta", "\\beta"),
+        ),
         _ => return None,
     };
     Some(s)
@@ -852,6 +1085,14 @@ fn format_peak_wave_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             ctx.val("Mean", "\\text{Mean}"),
             ctx.val("SD", "\\text{SD}"),
         ),
+        "gaussian_area" => {
+            let sd = ctx.val("SD", "\\text{SD}");
+            format!(
+                "Y = \\frac{{{}}}{{{sd} \\cdot \\sqrt{{2\\pi}}}} \\cdot \\exp(-\\frac{{1}}{{2}} \\cdot (\\frac{{X - {}}}{{{sd}}})^{{2}})",
+                ctx.val("Area", "\\text{Area}"),
+                ctx.val("Mean", "\\text{Mean}"),
+            )
+        }
         "sum_of_two_gaussians" => format!(
             "Y = {} \\cdot \\exp(-\\frac{{1}}{{2}} \\cdot (\\frac{{X - {}}}{{{}}})^{{2}}) + {} \\cdot \\exp(-\\frac{{1}}{{2}} \\cdot (\\frac{{X - {}}}{{{}}})^{{2}})",
             ctx.val("Amp1", "A_1"),
@@ -864,6 +1105,12 @@ fn format_peak_wave_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         "log_gaussian" => format!(
             "Y = {} \\cdot \\exp(-\\frac{{1}}{{2}} \\cdot (\\frac{{\\ln(X / {})}}{{\\ln({})}})^{{2}})",
             ctx.val("Amplitude", "\\text{Amplitude}"),
+            ctx.denom("GeoMean", "\\text{GeoMean}"),
+            ctx.val("GeoSD", "\\text{GeoSD}"),
+        ),
+        "lognormal_area" => format!(
+            "Y = \\frac{{{}}}{{X}} \\cdot \\exp(-\\frac{{1}}{{2}} \\cdot (\\frac{{\\ln(X / {})}}{{\\ln({})}})^{{2}})",
+            ctx.val("A", "A"),
             ctx.denom("GeoMean", "\\text{GeoMean}"),
             ctx.val("GeoSD", "\\text{GeoSD}"),
         ),
@@ -907,6 +1154,12 @@ fn format_peak_wave_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             ctx.factor("Frequency", "\\text{Frequency}"),
             ctx.val("PhaseShift", "\\text{PhaseShift}"),
         ),
+        "standard_sine_wave" => format!(
+            "Y = {} \\cdot \\sin(\\frac{{2\\pi \\cdot X}}{{{}}} + {})",
+            ctx.val("Amplitude", "\\text{Amplitude}"),
+            ctx.val("Wavelength", "\\text{Wavelength}"),
+            ctx.val("PhaseShift", "\\text{PhaseShift}"),
+        ),
         "damped_sine_wave" => format!(
             "Y = {} + {} \\cdot \\exp(-{} \\cdot X) \\cdot \\sin(2\\pi \\cdot {} \\cdot X + {})",
             ctx.val("Baseline", "\\text{Baseline}"),
@@ -933,6 +1186,12 @@ fn format_line_poly_curve_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
     let s = match id {
         "straight_line" => format_polynomial_equation_tex(1, false, ctx.params, ctx.substituted, ctx.sig_figs),
         "line_through_origin" => format_polynomial_equation_tex(1, true, ctx.params, ctx.substituted, ctx.sig_figs),
+        "two_lines_intersection" => format!(
+            "Y = {} + {} \\cdot (X - {})",
+            ctx.val("YCross", "Y_{\\text{cross}}"),
+            ctx.val("Slope", "\\text{Slope}"),
+            ctx.val("XCross", "X_{\\text{cross}}"),
+        ),
         "segmental_linear" => format!(
             "Y = {} + {} \\cdot \\min(X, {}) + {} \\cdot \\max(0, X - {})",
             ctx.val("Intercept1", "\\text{Intercept}_1"),
@@ -964,6 +1223,9 @@ fn format_line_poly_curve_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         "centered_poly_5" | "centered_polynomial_5" => format_centered_poly_tex(5, ctx),
         "centered_poly_6" | "centered_polynomial_6" => format_centered_poly_tex(6, ctx),
         "power_law" | "power_series" => format!("Y = {} \\cdot X^{{{}}}", ctx.val("a", "a"), ctx.val("b", "b")),
+        "power_series_two_term" => {
+            format!("Y = {} \\cdot X^{{{}}} + {} \\cdot X^{{{}}}", ctx.val("A", "A"), ctx.val("B", "B"), ctx.val("C", "C"), ctx.val("D", "D"),)
+        }
         "logarithmic_curve" => format!("Y = {} \\cdot \\ln(X) + {}", ctx.val("a", "a"), ctx.val("b", "b")),
         "semi_log_line" | "semilog_line" => {
             format!("Y = {} \\cdot \\log(X) + {}", ctx.val("Slope", "\\text{Slope}"), ctx.val("YIntercept", "\\text{YIntercept}"))

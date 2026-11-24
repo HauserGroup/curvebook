@@ -44,6 +44,7 @@ pub struct CompiledDslModel {
     pub(in crate::dsl) initial_hints: HashMap<String, f64>,
     pub(in crate::dsl) initial_rules: Vec<CompiledInitRule>,
     pub(in crate::dsl) init_local_count: usize,
+    pub(in crate::dsl) column_title_values: Vec<f64>,
     pub(in crate::dsl) transforms: Vec<(String, usize, CompiledProgram)>,
     pub(in crate::dsl) transform_local_count: usize,
     pub(in crate::dsl) warnings: Vec<DslCompileWarning>,
@@ -290,10 +291,87 @@ impl CompiledDslModel {
             initial_hints,
             initial_rules,
             init_local_count,
+            column_title_values: Vec::new(),
             transforms,
             transform_local_count,
             warnings,
         })
+    }
+
+    /// Attach numeric dataset column-title values used by `MeanColumnTitle` and
+    /// `LogMeanColumnTitle` inside `[InitialValues]` rules.
+    #[must_use]
+    pub fn with_column_title_values(mut self, values: impl Into<Vec<f64>>) -> Self {
+        self.column_title_values = values.into();
+        self
+    }
+
+    /// Update numeric dataset column-title values used by `MeanColumnTitle` and
+    /// `LogMeanColumnTitle` inside `[InitialValues]` rules.
+    pub fn set_column_title_values(&mut self, values: impl Into<Vec<f64>>) {
+        self.column_title_values = values.into();
+    }
+
+    /// Evaluate compiled `[InitialValues]` rules against `points` and optional numeric
+    /// `column_titles` (used by `MeanColumnTitle` and `LogMeanColumnTitle`).
+    #[must_use]
+    pub fn initial_guess_with_column_titles(&self, points: &[DataPoint], column_titles: &[f64]) -> Vec<f64> {
+        let finite_ys: Vec<f64> = points.iter().filter(|p| p.x0().is_finite() && p.y.is_finite()).map(|p| p.y).collect();
+        let mean_y = if finite_ys.is_empty() {
+            1.0
+        } else {
+            let n = finite_ys.len() as f64;
+            let avg = finite_ys.iter().map(|&y| y / n).sum::<f64>();
+            if avg.is_finite() { avg } else { 1.0 }
+        };
+        let mut guesses: Vec<f64> = self
+            .param_names
+            .iter()
+            .map(|p| {
+                if let Some(&v) = self.initial_hints.get(p) {
+                    return v;
+                }
+                if p.eq_ignore_ascii_case("Y0") || p.eq_ignore_ascii_case("Top") { mean_y.max(0.1) } else { 1.0 }
+            })
+            .collect();
+        if self.initial_rules.is_empty() {
+            return guesses;
+        }
+        let stats = compute_dataset_stats(points, column_titles);
+        let same_ds = points.first().map(|p0| p0.data_set_index).filter(|&first| points.iter().all(|p| p.data_set_index == first));
+        let eval_ds = same_ds.unwrap_or(0);
+        let mut applied = vec![false; guesses.len()];
+        let mut locals = vec![None; self.init_local_count];
+        for pass in 0..2 {
+            if pass == 1 && same_ds.is_some() {
+                break;
+            }
+            for rule in &self.initial_rules {
+                let matches = match (same_ds, pass) {
+                    (Some(ds), 0) => rule.filter.matches(ds),
+                    (Some(_), _) => false,
+                    (None, 0) => rule.filter == DatasetFilter::Any,
+                    (None, _) => rule.filter != DatasetFilter::Any && rule.filter.matches(0),
+                };
+                if !matches {
+                    continue;
+                }
+                if let Some(val) = eval_bytecode_with_locals(&rule.prog, &[0.0], f64::NAN, &stats, eval_ds, &mut locals)
+                    && val.is_finite()
+                {
+                    if rule.slot < locals.len() {
+                        locals[rule.slot] = Some(val);
+                    }
+                    if let Some(p_idx) = rule.param_idx
+                        && !(pass == 1 && applied[p_idx])
+                    {
+                        guesses[p_idx] = val;
+                        applied[p_idx] = true;
+                    }
+                }
+            }
+        }
+        guesses
     }
 
     /// Return the structural form (`Explicit`, `Implicit`, or `OdeFirstOrder`) of this compiled equation.
@@ -587,62 +665,7 @@ impl ParametricModel for CompiledDslModel {
         }
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
-        let finite_ys: Vec<f64> = points.iter().filter(|p| p.x0().is_finite() && p.y.is_finite()).map(|p| p.y).collect();
-        let mean_y = if finite_ys.is_empty() {
-            1.0
-        } else {
-            let n = finite_ys.len() as f64;
-            let avg = finite_ys.iter().map(|&y| y / n).sum::<f64>();
-            if avg.is_finite() { avg } else { 1.0 }
-        };
-        let mut guesses: Vec<f64> = self
-            .param_names
-            .iter()
-            .map(|p| {
-                if let Some(&v) = self.initial_hints.get(p) {
-                    return v;
-                }
-                if p.eq_ignore_ascii_case("Y0") || p.eq_ignore_ascii_case("Top") { mean_y.max(0.1) } else { 1.0 }
-            })
-            .collect();
-        if self.initial_rules.is_empty() {
-            return guesses;
-        }
-        let stats = compute_dataset_stats(points);
-        let same_ds = points.first().map(|p0| p0.data_set_index).filter(|&first| points.iter().all(|p| p.data_set_index == first));
-        let eval_ds = same_ds.unwrap_or(0);
-        let mut applied = vec![false; guesses.len()];
-        let mut locals = vec![None; self.init_local_count];
-        for pass in 0..2 {
-            if pass == 1 && same_ds.is_some() {
-                break;
-            }
-            for rule in &self.initial_rules {
-                let matches = match (same_ds, pass) {
-                    (Some(ds), 0) => rule.filter.matches(ds),
-                    (Some(_), _) => false,
-                    (None, 0) => rule.filter == DatasetFilter::Any,
-                    (None, _) => rule.filter != DatasetFilter::Any && rule.filter.matches(0),
-                };
-                if !matches {
-                    continue;
-                }
-                if let Some(val) = eval_bytecode_with_locals(&rule.prog, &[0.0], f64::NAN, &stats, eval_ds, &mut locals)
-                    && val.is_finite()
-                {
-                    if rule.slot < locals.len() {
-                        locals[rule.slot] = Some(val);
-                    }
-                    if let Some(p_idx) = rule.param_idx
-                        && !(pass == 1 && applied[p_idx])
-                    {
-                        guesses[p_idx] = val;
-                        applied[p_idx] = true;
-                    }
-                }
-            }
-        }
-        guesses
+        self.initial_guess_with_column_titles(points, &self.column_title_values)
     }
 
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {

@@ -293,7 +293,7 @@ mod tests {
         let catalog = list_builtin_equations();
         let catalog_ids: Vec<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(catalog_ids, expected_ids);
-        assert_eq!(catalog.len(), 47 + 43 + 27);
+        assert_eq!(catalog.len(), 68 + 56 + 27);
 
         // Spot-check representative aliases across all three families (including hyphen/case normalization).
         assert_eq!(get_builtin_model("4PL").unwrap().id(), "log_agonist_vs_response_4pl");

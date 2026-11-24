@@ -1023,13 +1023,75 @@ pub enum MultivariateSpec {
 // Linear & Nonlinear Regression Specifications (`docs/implementation/curve-fitting-implementation.md`)
 // ============================================================================
 
+/// Measurement-error variance specification for Model II Deming regression
+/// (Deming 1943; Linnet 1990, 1993).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum DemingErrorSpec {
+    /// Equal measurement-error variances in *X* and *Y* (`lambda = sigma_x^2 / sigma_y^2 = 1.0`, orthogonal / major-axis Deming regression).
+    #[default]
+    #[serde(alias = "equal_error", alias = "equal")]
+    EqualError,
+    /// Explicit measurement-error standard deviations for *X* and *Y*, yielding `lambda = (sd_x / sd_y)^2`.
+    StandardDeviations {
+        /// Measurement-error standard deviation of *X* (`sd_x > 0`).
+        sd_x: f64,
+        /// Measurement-error standard deviation of *Y* (`sd_y > 0`).
+        sd_y: f64,
+    },
+    /// Explicit error variance ratio `lambda = sigma_x^2 / sigma_y^2` (`lambda > 0`).
+    VarianceRatio {
+        /// Ratio of *X* error variance to *Y* error variance (`sigma_x^2 / sigma_y^2 > 0`).
+        lambda: f64,
+    },
+}
+
+impl DemingErrorSpec {
+    /// Returns `true` when this error model is the default [`Self::EqualError`].
+    #[must_use]
+    pub const fn is_equal_error(&self) -> bool {
+        matches!(self, Self::EqualError)
+    }
+
+    /// Resolve the positive finite error variance ratio `lambda = sigma_x^2 / sigma_y^2`.
+    ///
+    /// Returns `None` when any supplied standard deviation or variance ratio is non-finite or `<= 0.0`,
+    /// or when `(sd_x / sd_y)^2` overflows or underflows to `0.0`.
+    #[must_use]
+    pub fn resolved_lambda(self) -> Option<f64> {
+        match self {
+            Self::EqualError => Some(1.0),
+            Self::StandardDeviations { sd_x, sd_y } => {
+                if !sd_x.is_finite() || !sd_y.is_finite() || sd_x <= 0.0 || sd_y <= 0.0 {
+                    return None;
+                }
+                let ratio = sd_x / sd_y;
+                let lambda = ratio * ratio;
+                (lambda.is_finite() && lambda > 0.0).then_some(lambda)
+            }
+            Self::VarianceRatio { lambda } => (lambda.is_finite() && lambda > 0.0).then_some(lambda),
+        }
+    }
+}
+
 /// Simple ordinary least-squares (Model I) or Deming orthogonal/errors-in-variables (Model II) linear regression specification (`crates/fit::linear`).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LinearRegressionSpec {
-    /// When `true`, fits Deming (1943) Model II regression accounting for measurement error in both *X* and *Y* (equal-variance ratio `delta = 1` by default) with jackknife SEs; when `false`, fits ordinary least-squares `Y = intercept + slope * X` (plus ANCOVA slope/intercept comparison across `>= 2` datasets).
+    /// When `true`, fits Deming (1943) Model II regression accounting for measurement error in both *X* and *Y* (configured via [`Self::deming_error`], defaulting to equal-variance ratio `lambda = 1`) with jackknife SEs; when `false`, fits ordinary least-squares `Y = intercept + slope * X` (plus ANCOVA slope/intercept comparison across `>= 2` datasets).
     pub deming_model_ii: bool,
-    /// When `true`, constrains `intercept = 0.0` (`Y = slope * X`, `df = n - 1`).
+    /// When `true`, constrains `intercept = 0.0` (`Y = slope * X`, `df = n - 1`). Retained for backward compatibility; superseded by [`Self::fixed_point`] when `Some((x0, y0))`.
     pub force_through_origin: bool,
+    /// Optional arbitrary fixed-point constraint `(X0, Y0)` forcing `Y - Y0 = slope * (X - X0)` (`df = n - 1`). Takes precedence over [`Self::force_through_origin`] when `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_point: Option<(f64, f64)>,
+    /// When `true`, reports standard-addition unknown concentration `-X_intercept` with negated, order-swapped Fieller (1940) confidence limits `[-U, -L]`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub standard_addition: bool,
+    /// When `true`, extends the fitted regression line plot range to include the estimated *X*-intercept (`Y = 0`) when finite.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub extend_line_to_x_intercept: bool,
+    /// Measurement-error variance specification for Model II Deming regression (`EqualError` by default).
+    #[serde(default, skip_serializing_if = "DemingErrorSpec::is_equal_error")]
+    pub deming_error: DemingErrorSpec,
     /// When `true`, samples two-sided Working–Hotelling / Student-*t* confidence bands around the fitted line at [`AnalysisSpec::confidence_level`].
     pub confidence_bands: bool,
     /// When `true`, samples two-sided single-observation prediction bands around the fitted line at [`AnalysisSpec::confidence_level`].
@@ -1055,6 +1117,18 @@ impl LinearRegressionSpec {
     pub const DEFAULT_PLOT_SEGMENTS: usize = 100;
     /// Maximum number of segments for a fitted line.
     pub const MAX_PLOT_SEGMENTS: usize = 10_000;
+
+    /// Effective fixed-point constraint `(X0, Y0)`, resolving [`Self::fixed_point`] first and falling back to `(0.0, 0.0)` when [`Self::force_through_origin`] is `true`.
+    #[must_use]
+    pub const fn effective_fixed_point(&self) -> Option<(f64, f64)> {
+        if let Some(pt) = self.fixed_point {
+            Some(pt)
+        } else if self.force_through_origin {
+            Some((0.0, 0.0))
+        } else {
+            None
+        }
+    }
 }
 
 impl Default for LinearRegressionSpec {
@@ -1062,6 +1136,10 @@ impl Default for LinearRegressionSpec {
         Self {
             deming_model_ii: false,
             force_through_origin: false,
+            fixed_point: None,
+            standard_addition: false,
+            extend_line_to_x_intercept: false,
+            deming_error: DemingErrorSpec::EqualError,
             confidence_bands: true,
             prediction_bands: false,
             interpolate_unknowns: false,
@@ -2478,4 +2556,50 @@ fn parse_strict_number_with_unit(expr: &str, original_title: &str) -> Result<f64
         }
     }
     Ok(if val == 0.0 { 0.0 } else { val })
+}
+
+#[cfg(test)]
+mod r18_5_linear_spec_tests {
+    use super::{DemingErrorSpec, LinearRegressionSpec};
+    use crate::error::CURRENT_SCHEMA_VERSION;
+
+    #[test]
+    fn linear_regression_spec_backward_compat_and_deming_error_spec() {
+        assert_eq!(CURRENT_SCHEMA_VERSION, 7);
+
+        let legacy_json = r#"{
+            "deming_model_ii": false,
+            "force_through_origin": true,
+            "confidence_bands": true,
+            "prediction_bands": false,
+            "interpolate_unknowns": false
+        }"#;
+        let parsed: LinearRegressionSpec = serde_json::from_str(legacy_json).unwrap();
+        assert!(!parsed.deming_model_ii);
+        assert!(parsed.force_through_origin);
+        assert_eq!(parsed.fixed_point, None);
+        assert_eq!(parsed.effective_fixed_point(), Some((0.0, 0.0)));
+        assert!(!parsed.standard_addition);
+        assert!(!parsed.extend_line_to_x_intercept);
+        assert_eq!(parsed.deming_error, DemingErrorSpec::EqualError);
+
+        assert_eq!(DemingErrorSpec::EqualError.resolved_lambda(), Some(1.0));
+        assert_eq!(DemingErrorSpec::StandardDeviations { sd_x: 3.0, sd_y: 2.0 }.resolved_lambda(), Some(2.25));
+        assert_eq!(DemingErrorSpec::VarianceRatio { lambda: 0.5 }.resolved_lambda(), Some(0.5));
+        assert_eq!(DemingErrorSpec::StandardDeviations { sd_x: 0.0, sd_y: 1.0 }.resolved_lambda(), None);
+        assert_eq!(DemingErrorSpec::VarianceRatio { lambda: -1.0 }.resolved_lambda(), None);
+        assert_eq!(DemingErrorSpec::VarianceRatio { lambda: f64::NAN }.resolved_lambda(), None);
+
+        let custom = LinearRegressionSpec {
+            deming_model_ii: true,
+            fixed_point: Some((1.5, 2.5)),
+            standard_addition: true,
+            extend_line_to_x_intercept: true,
+            deming_error: DemingErrorSpec::StandardDeviations { sd_x: 0.4, sd_y: 0.2 },
+            ..LinearRegressionSpec::default()
+        };
+        assert_eq!(custom.effective_fixed_point(), Some((1.5, 2.5)));
+        let roundtrip: LinearRegressionSpec = serde_json::from_str(&serde_json::to_string(&custom).unwrap()).unwrap();
+        assert_eq!(roundtrip, custom);
+    }
 }

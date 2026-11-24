@@ -1,16 +1,21 @@
 //! Nested, Multiple Row t-Tests, Contingency, Descriptive, Outlier, and Linear Regression design controls.
 
-use curvebook_doc::{AnalysisKind, ContingencyMethod, KappaWeighting, OutlierSpec, PValueStackMethod, ProjectDocument, SubcolumnAggregation};
-use egui::Ui;
+use curvebook_doc::{
+    AnalysisKind, ContingencyMethod, DemingErrorSpec, KappaWeighting, OutlierSpec, PValueStackMethod, ProjectDocument, SubcolumnAggregation,
+};
+use egui::{Id, TextEdit, Ui, Vec2};
 
 use crate::dialogs_canvas::EditAnalysisParametersState;
+use crate::i18n::tr;
+use crate::inspect::ZLayer;
 use crate::modal_predicates::{
     ControlEnablement, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend, r6_contingency_ci_selector, r8_subcolumn_aggregation,
     source_table_shape,
 };
 
 use crate::egui_shell::stat_anova_modal::{
-    StepperSpec, column_titles_for_draft, render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_section_title, render_stepper_row,
+    StepperSpec, column_titles_for_draft, record_widget, render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_section_title,
+    render_stepper_row,
 };
 use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
@@ -428,6 +433,38 @@ fn render_outlier_design(
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }
 
+fn render_linear_numeric_input(
+    ui: &mut Ui,
+    meta: &mut FrameInspectMeta,
+    salt: (&str, &str),
+    widget_id: &str,
+    label: &str,
+    current: f64,
+    positive_only: bool,
+) -> Option<f64> {
+    let key = Id::unique(salt);
+    let mut draft: String = ui.ctx().data(|d| d.get_temp(key)).unwrap_or_else(|| format!("{current}"));
+    let mut updated = None;
+    ui.label(label);
+    let resp = ui.add_sized(Vec2::new(72.0, 22.0), TextEdit::singleline(&mut draft).id(key));
+    record_widget(ui, meta, &resp, widget_id, "textbox", label, None, Some(serde_json::json!(draft)), true, None, ZLayer::ModalDialog, false, None);
+    if resp.changed() {
+        ui.ctx().data_mut(|d| d.insert_temp(key, draft.clone()));
+        if let Ok(parsed) = draft.trim().replace(',', ".").parse::<f64>()
+            && parsed.is_finite()
+            && (!positive_only || parsed > 0.0)
+        {
+            updated = Some(parsed);
+        }
+    } else if !resp.has_focus() {
+        let canonical = format!("{current}");
+        if draft != canonical {
+            ui.ctx().data_mut(|d| d.insert_temp(key, canonical));
+        }
+    }
+    updated
+}
+
 fn render_linear_regression_design(
     ui: &mut Ui,
     doc: &ProjectDocument,
@@ -437,6 +474,8 @@ fn render_linear_regression_design(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let locale = tokens.locale;
+    let sid = spec.source_sheet_id.as_str();
     render_section_title(ui, tokens, "Regression Model");
     for (wid, lbl, deming) in
         [("edit.lin.ols", "Ordinary Least Squares (Model I)", false), ("edit.lin.deming", "Deming Model II (Error in both X and Y)", true)]
@@ -449,17 +488,106 @@ fn render_linear_regression_design(
             intents.push_set_edit_params_draft(next);
         }
     }
-    let origin_en = if lin.deming_model_ii {
-        ControlEnablement::disabled("Force through origin is unavailable in Deming Model II.")
-    } else {
-        ControlEnablement::enabled()
-    };
-    if render_modal_checkbox(ui, tokens, meta, "edit.lin.origin", "Force line through origin (X=0, Y=0)", lin.force_through_origin, &origin_en) {
+    let ols_only_en = if lin.deming_model_ii { ControlEnablement::disabled("Unavailable in Deming Model II.") } else { ControlEnablement::enabled() };
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.lin.origin",
+        "Force line through origin (X=0, Y=0)",
+        lin.force_through_origin && lin.fixed_point.is_none(),
+        &ols_only_en,
+    ) {
         let mut next = spec.clone();
         if let AnalysisKind::LinearRegression(l) = &mut next.kind {
-            l.force_through_origin = !lin.force_through_origin;
+            let next_val = !(lin.force_through_origin && lin.fixed_point.is_none());
+            l.force_through_origin = next_val;
+            if next_val {
+                l.fixed_point = None;
+            }
         }
         intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(ui, tokens, meta, "edit.lin.fixed_point", tr(locale, "linear.fixed_point"), lin.fixed_point.is_some(), &ols_only_en) {
+        let mut next = spec.clone();
+        if let AnalysisKind::LinearRegression(l) = &mut next.kind {
+            if lin.fixed_point.is_some() {
+                l.fixed_point = None;
+            } else {
+                l.fixed_point = Some((0.0, 0.0));
+                l.force_through_origin = false;
+            }
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if !lin.deming_model_ii
+        && let Some((x0, y0)) = lin.fixed_point
+    {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(new_x0) = render_linear_numeric_input(
+                ui,
+                meta,
+                ("edit_lin_fp_x0", sid),
+                "edit.lin.fixed_point_x0",
+                tr(locale, "linear.fixed_point_x0"),
+                x0,
+                false,
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::LinearRegression(l) = &mut next.kind {
+                    l.fixed_point = Some((new_x0, y0));
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+            if let Some(new_y0) = render_linear_numeric_input(
+                ui,
+                meta,
+                ("edit_lin_fp_y0", sid),
+                "edit.lin.fixed_point_y0",
+                tr(locale, "linear.fixed_point_y0"),
+                y0,
+                false,
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::LinearRegression(l) = &mut next.kind {
+                    l.fixed_point = Some((x0, new_y0));
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        });
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.lin.standard_addition",
+        tr(locale, "linear.standard_addition"),
+        lin.standard_addition,
+        &ols_only_en,
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::LinearRegression(l) = &mut next.kind {
+            l.standard_addition = !lin.standard_addition;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.lin.extend_x_int",
+        tr(locale, "linear.extend_x_int"),
+        lin.extend_line_to_x_intercept,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::LinearRegression(l) = &mut next.kind {
+            l.extend_line_to_x_intercept = !lin.extend_line_to_x_intercept;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if lin.deming_model_ii {
+        render_deming_error_controls(ui, spec, lin, tokens, meta, intents);
     }
     if render_modal_checkbox(
         ui,
@@ -477,4 +605,96 @@ fn render_linear_regression_design(
         intents.push_set_edit_params_draft(next);
     }
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
+}
+
+fn render_deming_error_controls(
+    ui: &mut Ui,
+    spec: &curvebook_doc::AnalysisSpec,
+    lin: &curvebook_doc::LinearRegressionSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let locale = tokens.locale;
+    let sid = spec.source_sheet_id.as_str();
+    render_section_title(ui, tokens, tr(locale, "linear.deming_error_section"));
+    let is_equal = matches!(lin.deming_error, DemingErrorSpec::EqualError);
+    let is_sds = matches!(lin.deming_error, DemingErrorSpec::StandardDeviations { .. });
+    let is_ratio = matches!(lin.deming_error, DemingErrorSpec::VarianceRatio { .. });
+
+    if render_modal_radio(ui, tokens, meta, "edit.lin.deming.equal", tr(locale, "linear.deming_equal_error"), is_equal, &ControlEnablement::enabled())
+    {
+        let mut next = spec.clone();
+        if let AnalysisKind::LinearRegression(l) = &mut next.kind {
+            l.deming_error = DemingErrorSpec::EqualError;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_radio(ui, tokens, meta, "edit.lin.deming.sds", tr(locale, "linear.deming_sds"), is_sds, &ControlEnablement::enabled()) {
+        let mut next = spec.clone();
+        if let AnalysisKind::LinearRegression(l) = &mut next.kind
+            && !matches!(l.deming_error, DemingErrorSpec::StandardDeviations { .. })
+        {
+            l.deming_error = DemingErrorSpec::StandardDeviations { sd_x: 1.0, sd_y: 1.0 };
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if let DemingErrorSpec::StandardDeviations { sd_x, sd_y } = lin.deming_error {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(new_sd_x) =
+                render_linear_numeric_input(ui, meta, ("edit_lin_dem_sdx", sid), "edit.lin.deming.sd_x", tr(locale, "linear.deming_sd_x"), sd_x, true)
+            {
+                let mut next = spec.clone();
+                if let AnalysisKind::LinearRegression(l) = &mut next.kind {
+                    l.deming_error = DemingErrorSpec::StandardDeviations { sd_x: new_sd_x, sd_y };
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+            if let Some(new_sd_y) =
+                render_linear_numeric_input(ui, meta, ("edit_lin_dem_sdy", sid), "edit.lin.deming.sd_y", tr(locale, "linear.deming_sd_y"), sd_y, true)
+            {
+                let mut next = spec.clone();
+                if let AnalysisKind::LinearRegression(l) = &mut next.kind {
+                    l.deming_error = DemingErrorSpec::StandardDeviations { sd_x, sd_y: new_sd_y };
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        });
+    }
+    if render_modal_radio(
+        ui,
+        tokens,
+        meta,
+        "edit.lin.deming.ratio",
+        tr(locale, "linear.deming_variance_ratio"),
+        is_ratio,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::LinearRegression(l) = &mut next.kind
+            && !matches!(l.deming_error, DemingErrorSpec::VarianceRatio { .. })
+        {
+            l.deming_error = DemingErrorSpec::VarianceRatio { lambda: 1.0 };
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if let DemingErrorSpec::VarianceRatio { lambda } = lin.deming_error {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(new_lambda) = render_linear_numeric_input(
+                ui,
+                meta,
+                ("edit_lin_dem_lambda", sid),
+                "edit.lin.deming.lambda",
+                tr(locale, "linear.deming_lambda"),
+                lambda,
+                true,
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::LinearRegression(l) = &mut next.kind {
+                    l.deming_error = DemingErrorSpec::VarianceRatio { lambda: new_lambda };
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        });
+    }
 }
