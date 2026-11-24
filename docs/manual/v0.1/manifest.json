@@ -1,22 +1,22 @@
 {
-  "commit": "4964288a03100132d7ca77f264e43d35eb101dcf",
+  "commit": "2dc167916239346fcc036752ff8aa93cef2405de",
   "minor_dir": "v0.1",
   "page_count": 40,
   "registry_counts": {
     "analysis_kinds": 19,
     "cli_commands": 10,
-    "engine_commands": 105,
-    "fit_equations": 117,
-    "formats": 13,
+    "engine_commands": 106,
+    "fit_equations": 151,
+    "formats": 14,
     "graph_kinds": 14,
     "graph_options": 21,
     "mcp_prompts": 3,
-    "mcp_tools": 123,
+    "mcp_tools": 124,
     "preference_keys": 4,
     "table_kinds": 8,
-    "ui_commands": 53
+    "ui_commands": 54
   },
-  "release_date": "2026-11-23",
+  "release_date": "2026-11-24",
   "schema": "curvebook.docs.manifest.v1",
   "version": "0.1.0-alpha.2"
 }

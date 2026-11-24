@@ -35,7 +35,7 @@
       </nav>
     </header>
     <div class="version-banner" role="note" aria-label="Documentation version">
-      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-23 (commit <code>4964288a03</code>)</span>
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>2dc1679162</code>)</span>
       <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
     </div>
     <main id="main" tabindex="-1">
@@ -298,8 +298,8 @@
 <h2 id="oracle-verification" tabindex="-1">Published D1 References &amp; Oracle Verification</h2>
 <p>Every fitting algorithm and built-in curve model is verified offline under CurveBook&#39;s clean-room <strong>Decision D1</strong> policy against public reference corpora and primary statistical literature:</p>
 <ul>
-<li><strong>NIST StRD Nonlinear Least Squares (<code>nist_strd</code>):</strong> Certified parameter estimates, asymptotic SEs, residual sums of squares, and residual standard deviations across Lower, Average, and Higher difficulty benchmarks with both <code>start_1</code> and <code>start_2</code> starting guesses (including logarithmic response transformations for the <code>Nelson</code> model).</li>
-<li><strong>Pharmacology, Biochemistry &amp; Growth Oracles:</strong> 4PL/5PL log-dose-response (<code>Motulsky &amp; Christopoulos 2004</code>), Gaddum–Schild competitive antagonism (<code>pA2</code>, <code>Arunlakshana &amp; Schild 1959</code>), Cheng–Prusoff receptor binding (<code>Ki</code>, <code>Cheng &amp; Prusoff 1973</code>), Michaelis–Menten / Hill allosteric / Haldane substrate inhibition / Morrison tight-binding enzyme kinetics (<code>Cornish-Bowden 1974</code>; <code>Morrison 1969</code>), multi-phase exponential decay, association–dissociation binding, <code>Verhulst (1838)</code> logistic, <code>Gompertz (1825)</code>, <code>Watts &amp; Bacon (1974)</code> smooth hyperbolic hinge, <code>Limpert et al. (2001)</code> log-Gaussian, and <code>Weibull (1951)</code> peaks.</li>
+<li><strong>NIST StRD Nonlinear Least Squares (<code>nist_strd</code>, <code>d1_nist_reparam_builtins</code>):</strong> Certified parameter estimates, asymptotic SEs, residual sums of squares, and residual standard deviations across Lower, Average, and Higher difficulty benchmarks with both <code>start_1</code> and <code>start_2</code> starting guesses (including logarithmic response transformations for the <code>Nelson</code> model), plus algebraic NIST StRD reparameterization checks across 18 user-facing built-in pharmacology, kinetics, growth, Gaussian, Boltzmann, power-series, and polynomial equation IDs.</li>
+<li><strong>Pharmacology, Biochemistry, Radiobiology &amp; Growth Oracles (<code>d1_r18_3_extended_equations</code>):</strong> 4PL/5PL log- and linear-concentration dose-response (<code>Motulsky &amp; Christopoulos 2004</code>; <code>Gottschalk &amp; Dunn 2005</code>; <code>Liao &amp; Liu 2009</code>), Gaddum–Schild competitive antagonism and unity-slope <code>pKB</code> (<code>Arunlakshana &amp; Schild 1959</code>; <code>Colquhoun 2007</code>), Black–Leff operational partial agonism and receptor depletion (<code>Black &amp; Leff 1983</code>), Cheng–Prusoff and two-site receptor binding (<code>Cheng &amp; Prusoff 1973</code>), Swillens ligand-depletion total saturation (<code>Swillens 1995</code>), Christopoulos–Kenakin allosteric modulator titration (<code>Christopoulos &amp; Kenakin 2002</code>), Michaelis–Menten / Hill allosteric / Haldane substrate inhibition / Morrison tight-binding enzyme kinetics (<code>Cornish-Bowden 1974</code>; <code>Morrison 1969</code>), multi-phase exponential decay and two-phase association, association–dissociation binding, <code>Verhulst (1838)</code> logistic, <code>Hodgkin &amp; Huxley (1952)</code> Boltzmann sigmoid, <code>Gompertz (1825)</code>, <code>Watts &amp; Bacon (1974)</code> smooth hyperbolic hinge, <code>Limpert et al. (2001)</code> log-Gaussian and area-parameterized lognormal, <code>Weibull (1951)</code> peaks, and the complete 6-form Linear–Quadratic radiobiology family (<code>Chadwick &amp; Leenhouts 1973</code>; <code>Brenner 2008</code>) verified against <code>R 4.5.2</code> <code>stats::nls</code> / <code>stats::lm</code>.</li>
 <li><strong>Fit Uncertainty, ROUT &amp; Comparison Oracles:</strong> High-precision <code>mpmath 1.3.0</code> (80/120-digit decimal equality) and <code>R 4.5.2</code> (<code>stats::nls</code>, <code>stats::glm</code>, <code>stats::lm</code>) verification for Venzon–Moolgavkar (1988) profile-likelihood and Poisson deviance intervals (<code>CiBound::Open</code> boundary checks), Bates &amp; Watts (1988) / Seber &amp; Wild (1989) linearization covariance and Hougaard (1985) skewness, Cook &amp; Weisberg (1982) leverage residuals, Burnham &amp; Anderson (2002) <span class="math"><span class="math-text">AIC</span><sub>c</sub></span> weights, Motulsky &amp; Brown (2006) ROUT <code>Q = 1%</code> detection on raw and weighted curves, Sebaugh (2011) sparse-curve identifiability detection, Deming (1943) / Linnet (1990) jackknife Model II regression, Brent (1973) implicit root precision over 400 orders of magnitude, and Hairer, Nørsett &amp; Wanner (1993) RK45 ODE parameter estimation.</li>
 </ul>
         <nav class="pager" aria-label="Previous and next pages">
@@ -313,6 +313,12 @@
       <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
       <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
     </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
   </div>
 </body>
 </html>
