@@ -453,10 +453,16 @@ fn preferences_5_categories_14_locales_and_shortcut_conflict_guard() -> Result<(
     driver.click_widget_id("prefs.locale.ja")?;
     assert_eq!(driver.state().app.locale, "ja");
 
-    // Appearance category: switch theme mode cleanly.
+    // Appearance category: switch theme mode and CVD preview filter cleanly.
     driver.click_widget_id("edit.tab.prefs.appearance")?;
     driver.click_widget_id("prefs.appearance.theme.dark")?;
     assert_eq!(driver.state().app.theme.mode, UiThemeMode::Dark);
+    driver.click_widget_id("prefs.appearance.cvd.deuteranopia")?;
+    assert_eq!(driver.state().app.preview_filter, curvebook_palette::CanvasPreviewFilter::Deuteranopia);
+    driver.click_widget_id("prefs.appearance.cvd.grayscale")?;
+    assert_eq!(driver.state().app.preview_filter, curvebook_palette::CanvasPreviewFilter::GrayscalePrint);
+    driver.click_widget_id("prefs.appearance.cvd.normal")?;
+    assert_eq!(driver.state().app.preview_filter, curvebook_palette::CanvasPreviewFilter::Normal);
 
     // Keyboard Shortcuts category: UI_COMMANDS conflict check & valid rebind + reset.
     driver.click_widget_id("edit.tab.prefs.keyboard_shortcuts")?;

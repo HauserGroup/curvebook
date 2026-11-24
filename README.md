@@ -7,7 +7,7 @@
     <a href="https://github.com/HauserGroup/curvebook/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/HauserGroup/curvebook/ci.yml?branch=main&style=flat-square&label=CI" alt="CI" /></a>
     <img src="https://img.shields.io/badge/Status-Beta-D96240?style=flat-square" alt="Status: Beta" />
     <img src="https://img.shields.io/badge/Rust-Pure%20Rust-B7410E?style=flat-square" alt="Pure Rust" />
-    <img src="https://img.shields.io/badge/Platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux%20%C2%B7%20FreeBSD-374151?style=flat-square" alt="macOS · Windows · Linux · FreeBSD" />
+    <img src="https://img.shields.io/badge/Platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-374151?style=flat-square" alt="macOS · Windows · Linux" />
     <a href="https://hausergroup.github.io/curvebook/privacy.html"><img src="https://img.shields.io/badge/Telemetry-Zero-059669?style=flat-square" alt="Zero Telemetry" /></a>
     <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-2563EB?style=flat-square" alt="MIT OR Apache-2.0" /></a>
   </p>
@@ -67,7 +67,7 @@ Beta installers ship from **[GitHub Releases](https://github.com/HauserGroup/cur
 | **macOS** (`arm64` + `x86_64`) | `curvebook-<version>-macos-universal.dmg` | Signed and notarized `.dmg` bundling `CurveBook.app` and `curvebook-cli`. |
 | **Windows** (`x64`, `arm64`) | `curvebook-<version>-windows-<arch>.msi` | Dual-scope installer (`curvebook.exe` + `curvebook-cli.exe`); ships **unsigned** in Beta — review [SmartScreen guidance](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues). |
 | **Linux** (`x86_64`, `aarch64`) | `curvebook-<version>-linux-<arch>.AppImage` | Portable desktop bundle including `curvebook` and `curvebook-cli`, tested with Wayland and X11 portals. |
-| **FreeBSD** (`x86_64`) | `curvebook-<version>-freebsd-x86_64.tar.gz` | Headless CLI + Beta desktop preview archive (full FreeBSD desktop QA targets `1.0`). |
+| **FreeBSD** (`x86_64`) | `curvebook-<version>-freebsd-x86_64.tar.gz` | Tier 2 CLI-only archive (`curvebook-cli` + local MCP; no desktop GUI). |
 
 - **Installation, PATH setup, and SHA-256 / Sigstore verification:** Follow the **[Get Started Guide](https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html)**.
 - **Known Beta issues & workarounds:** Check **[Troubleshooting & Known Issues](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues)** before filing a report.

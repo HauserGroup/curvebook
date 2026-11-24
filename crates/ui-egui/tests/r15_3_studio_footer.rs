@@ -27,7 +27,7 @@ use curvebook_doc::{
 };
 use curvebook_engine::Session;
 use curvebook_math::AxisScale;
-use curvebook_palette::{CanvasPreviewFilter, PaletteId};
+use curvebook_palette::PaletteId;
 use curvebook_tools::GridCellCoord;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::canvas_view::CanvasHoverReadout;
@@ -516,12 +516,8 @@ fn status_footer_history_sections_switcher_links_cursor_cvd_rulers_and_zoom_gate
     driver.click_widget_id("status.link_indicator.item.0")?;
     assert_eq!(driver.state().app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("mv-1"));
 
-    driver.click_widget_id("status.preview_filter")?;
-    driver.click_widget_id("status.preview_filter.deuteranopia")?;
-    assert_eq!(driver.state().app.preview_filter, CanvasPreviewFilter::Deuteranopia);
-    driver.click_widget_id("status.preview_filter")?;
-    driver.click_widget_id("status.preview_filter.grayscale")?;
-    assert_eq!(driver.state().app.preview_filter, CanvasPreviewFilter::GrayscalePrint);
+    // CVD preview filter now lives in Preferences (Options) rather than the main status footer.
+    assert!(driver.frame_meta().find_by_widget_id("status.preview_filter").is_none());
     Ok(())
 }
 

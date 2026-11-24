@@ -3,15 +3,14 @@
 //! Renders navigation history (`< >`), clickable section & active-sheet switcher controls,
 //! [`LinkedDataRegion`] upstream provenance indicators, `< 0.5 ms` cached selection Quick-Stats
 //! (`N`, `Mean`, `SD`, `SEM`, `Median`, `Range`) or live canvas cursor `(X, Y)` coordinates,
-//! CVD/Grayscale preview filter selector, `ChartScene`/`LayoutScene`-only Rulers toggle, and
-//! strictly `Graph`/`Layout`/`Gallery`-only canvas Zoom controls.
+//! `ChartScene`/`LayoutScene`-only Rulers toggle, and strictly `Graph`/`Layout`/`Gallery`-only
+//! canvas Zoom controls.
 
 use std::cmp::Ordering;
 
 use curvebook_doc::{
     Cell, CellCoord, CellValue, DataSheet, LinkBorderColor, LinkedDataRegion, ProjectDocument, ResultStatus, SheetId, SheetSection, TableArchetype,
 };
-use curvebook_palette::CanvasPreviewFilter;
 use curvebook_tools::GridCellCoord;
 use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::json;
@@ -512,10 +511,9 @@ fn format_compact_stat(val: f64) -> String {
     }
 }
 
-/// Persistent UI state for Footer popups (`PreviewFilter` menu, sheet switcher, link details, stats details).
+/// Persistent UI state for Footer popups (sheet switcher, link details, stats details).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StatusFooterEguiState {
-    pub filter_popup_open: bool,
     pub sheet_switcher_open: bool,
     pub link_popover_open: bool,
     pub stats_popover_open: bool,
@@ -666,35 +664,6 @@ fn first_sheet_in_section(doc: &ProjectDocument, section: SheetSection) -> Optio
         SheetSection::Analyses => doc.result_sheets.first().map(|s| &s.id),
         SheetSection::Graphs => doc.graph_sheets.first().map(|s| &s.id),
         SheetSection::Layouts => doc.layout_sheets.first().map(|s| &s.id),
-    }
-}
-
-#[must_use]
-fn localized_preview_filter_label(locale: &str, filter: CanvasPreviewFilter) -> &'static str {
-    let is_cjk_zh = locale.starts_with("zh");
-    match filter {
-        CanvasPreviewFilter::Normal => {
-            if is_cjk_zh {
-                "正常视觉"
-            } else {
-                "Normal"
-            }
-        }
-        CanvasPreviewFilter::Protanopia => "Protanopia",
-        CanvasPreviewFilter::Deuteranopia => "Deuteranopia",
-        CanvasPreviewFilter::Tritanopia => "Tritanopia",
-        CanvasPreviewFilter::GrayscalePrint => "Grayscale",
-    }
-}
-
-#[must_use]
-fn short_preview_filter_badge(filter: CanvasPreviewFilter) -> &'static str {
-    match filter {
-        CanvasPreviewFilter::Normal => "CVD",
-        CanvasPreviewFilter::Protanopia => "CVD: Prot",
-        CanvasPreviewFilter::Deuteranopia => "CVD: Deut",
-        CanvasPreviewFilter::Tritanopia => "CVD: Trit",
-        CanvasPreviewFilter::GrayscalePrint => "Gray",
     }
 }
 
@@ -988,7 +957,6 @@ fn popup_menu_item(ui: &mut egui::Ui, tokens: &Tokens, spec: PopupMenuItemSpec<'
 
 #[derive(Default)]
 struct FooterAnchors {
-    preview: Option<Rect>,
     sheet: Option<Rect>,
     link: Option<Rect>,
     stats: Option<Rect>,
@@ -1167,7 +1135,6 @@ fn render_footer_history_and_sections(
     let sheet_anchor = Some(sw_resp.rect);
     if sw_resp.clicked() {
         views.status_footer.sheet_switcher_open = !views.status_footer.sheet_switcher_open;
-        views.status_footer.filter_popup_open = false;
         views.status_footer.link_popover_open = false;
         views.status_footer.stats_popover_open = false;
     }
@@ -1236,7 +1203,6 @@ fn render_footer_center_readout(
         );
         if resp.clicked() {
             views.status_footer.stats_popover_open = !views.status_footer.stats_popover_open;
-            views.status_footer.filter_popup_open = false;
             views.status_footer.sheet_switcher_open = false;
             views.status_footer.link_popover_open = false;
         }
@@ -1265,15 +1231,11 @@ fn render_footer_center_readout(
 fn render_footer_trailing_controls(
     ui: &mut egui::Ui,
     app: &UiApp,
-    views: &mut EguiShellViewState,
     ctx_in: StatusFooterContext<'_>,
     flags: FooterTrailingFlags,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
-) -> Option<Rect> {
-    let locale = &ctx_in.tokens.locale;
-    let mut preview_anchor: Option<Rect> = None;
-
+) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
 
@@ -1399,46 +1361,10 @@ fn render_footer_trailing_controls(
                 intents.push_ui("ui.rulers.toggle", json!({}));
             }
         }
-
-        let filter = app.preview_filter;
-        let filter_active = filter != CanvasPreviewFilter::Normal;
-        let cvd_label = if flags.compact {
-            short_preview_filter_badge(filter).to_owned()
-        } else {
-            format!("CVD: {}", localized_preview_filter_label(locale, filter))
-        };
-        let cvd_resp = draw_footer_chip(
-            ui,
-            ctx_in.tokens,
-            FooterChipSpec {
-                label: &cvd_label,
-                tooltip: "Color-Vision Deficiency & Grayscale Preview",
-                max_w: if flags.compact { 64.0 } else { 94.0 },
-                min_w: 44.0,
-                selected: filter_active || views.status_footer.filter_popup_open,
-                enabled: ctx_in.enabled,
-                accent_override: filter_active.then_some(ctx_in.tokens.selected_accent_text()),
-                widget_id: "status.preview_filter",
-                role: "button",
-                command_id: Some("ui.previewFilter.set"),
-                disabled_reason: None,
-            },
-            meta,
-        );
-        preview_anchor = Some(cvd_resp.rect);
-        if cvd_resp.clicked() {
-            views.status_footer.filter_popup_open = !views.status_footer.filter_popup_open;
-            views.status_footer.sheet_switcher_open = false;
-            views.status_footer.link_popover_open = false;
-            views.status_footer.stats_popover_open = false;
-        }
     });
-
-    preview_anchor
 }
 
 fn close_all_footer_popovers(state: &mut StatusFooterEguiState) {
-    state.filter_popup_open = false;
     state.sheet_switcher_open = false;
     state.link_popover_open = false;
     state.stats_popover_open = false;
@@ -1456,52 +1382,7 @@ fn render_footer_popovers(
     let anchors = data.anchors;
     let doc = app.document();
     let gallery_open = app.nav.gallery.open;
-    let locale = &tokens.locale;
     let mut popup_rects: Vec<Rect> = Vec::new();
-
-    if views.status_footer.filter_popup_open
-        && let Some(anchor) = anchors.preview
-    {
-        let mut close_all = false;
-        let options = [
-            (CanvasPreviewFilter::Normal, "status.preview_filter.normal"),
-            (CanvasPreviewFilter::Protanopia, "status.preview_filter.protanopia"),
-            (CanvasPreviewFilter::Deuteranopia, "status.preview_filter.deuteranopia"),
-            (CanvasPreviewFilter::Tritanopia, "status.preview_filter.tritanopia"),
-            (CanvasPreviewFilter::GrayscalePrint, "status.preview_filter.grayscale"),
-        ];
-        let popup_rect = show_footer_popup(
-            ui.ctx(),
-            tokens,
-            FooterPopupSpec { viewport: meta.viewport_rect, anchor, popup_id: "egui_shell.footer.cvd_popup", min_width: 148.0, max_width: 200.0 },
-            |ui| {
-                for (flt, wid) in options {
-                    let lbl = localized_preview_filter_label(locale, flt);
-                    if popup_menu_item(
-                        ui,
-                        tokens,
-                        PopupMenuItemSpec {
-                            label: lbl,
-                            selected: app.preview_filter == flt,
-                            accent: None,
-                            widget_id: wid,
-                            command_id: Some("ui.previewFilter.set"),
-                        },
-                        meta,
-                    ) {
-                        intents.push_set_preview_filter(flt);
-                        close_all = true;
-                    }
-                }
-            },
-        );
-        popup_rects.push(popup_rect);
-        if close_all {
-            views.status_footer.filter_popup_open = false;
-        }
-    } else {
-        views.status_footer.filter_popup_open = false;
-    }
 
     if views.status_footer.sheet_switcher_open
         && let Some(anchor) = anchors.sheet
@@ -1642,7 +1523,7 @@ fn render_footer_popovers(
             i.pointer.primary_clicked()
                 && i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()).is_some_and(|p| {
                     let in_popup = popup_rects.iter().any(|r| r.contains(p));
-                    let in_anchor = [anchors.preview, anchors.sheet, anchors.link, anchors.stats].into_iter().flatten().any(|r| r.contains(p));
+                    let in_anchor = [anchors.sheet, anchors.link, anchors.stats].into_iter().flatten().any(|r| r.contains(p));
                     !in_popup && !in_anchor
                 })
         });
@@ -1686,10 +1567,9 @@ pub fn render_status_footer(
             report.section_pills_shown = total_w >= 860.0;
 
             let compact = total_w < 760.0;
-            let cvd_w = if compact { 66.0 } else { 96.0 };
             let rulers_w = if show_rulers { if compact { 32.0 } else { 58.0 } } else { 0.0 };
             let zoom_w = if show_zoom { 136.0 } else { 0.0 };
-            let right_budget = cvd_w + rulers_w + zoom_w + 18.0;
+            let right_budget = rulers_w + zoom_w + 18.0;
 
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -1723,7 +1603,6 @@ pub fn render_status_footer(
                     anchors.link = Some(link_resp.rect);
                     if link_resp.clicked() {
                         views.status_footer.link_popover_open = !views.status_footer.link_popover_open;
-                        views.status_footer.filter_popup_open = false;
                         views.status_footer.sheet_switcher_open = false;
                         views.status_footer.stats_popover_open = false;
                     }
@@ -1733,8 +1612,7 @@ pub fn render_status_footer(
                 let (stats_anchor, active_stats) = render_footer_center_readout(ui, app, views, ctx_in, center_budget, meta, &mut report);
                 anchors.stats = stats_anchor;
 
-                anchors.preview =
-                    render_footer_trailing_controls(ui, app, views, ctx_in, FooterTrailingFlags { compact, show_zoom, show_rulers }, meta, intents);
+                render_footer_trailing_controls(ui, app, ctx_in, FooterTrailingFlags { compact, show_zoom, show_rulers }, meta, intents);
 
                 if !ctx_in.enabled {
                     close_all_footer_popovers(&mut views.status_footer);

@@ -223,6 +223,7 @@ fn fa_sec18_05_preferences_cancel_and_escape_restore_all_5_categories() -> TestR
     driver.click_widget_id("prefs.general.nav_nested")?;
     driver.click_widget_id("edit.tab.prefs.appearance")?;
     driver.click_widget_id("prefs.appearance.theme.dark")?;
+    driver.click_widget_id("prefs.appearance.cvd.deuteranopia")?;
     driver.state_mut().intents.push(UiIntent::SetUiScale(1.5));
     commit_intents(&mut driver);
     driver.click_widget_id("edit.tab.prefs.language")?;
@@ -237,6 +238,7 @@ fn fa_sec18_05_preferences_cancel_and_escape_restore_all_5_categories() -> TestR
 
     assert_eq!(driver.state().app.nav.nesting_mode, NavigatorNestingMode::NestedResultsUnderData);
     assert_eq!(driver.state().app.theme.mode, UiThemeMode::Dark);
+    assert_eq!(driver.state().app.preview_filter, curvebook_palette::CanvasPreviewFilter::Deuteranopia);
     assert!((driver.state().app.theme.ui_scale - 1.5).abs() < 0.01);
     assert_eq!(driver.state().app.locale, "de");
 
@@ -245,6 +247,7 @@ fn fa_sec18_05_preferences_cancel_and_escape_restore_all_5_categories() -> TestR
     assert!(!driver.state().app.egui_views.app_modals.preferences_open);
     assert_eq!(driver.state().app.nav.nesting_mode, NavigatorNestingMode::SeparateFolders);
     assert_eq!(driver.state().app.theme.mode, UiThemeMode::Light);
+    assert_eq!(driver.state().app.preview_filter, curvebook_palette::CanvasPreviewFilter::Normal);
     assert!((driver.state().app.theme.ui_scale - 1.0).abs() < 0.01);
     assert_eq!(driver.state().app.locale, "en");
     assert_eq!(driver.state().app.shortcuts.active_combo("project.save"), Some(orig_save.as_str()));
