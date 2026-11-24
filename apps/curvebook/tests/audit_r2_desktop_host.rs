@@ -643,7 +643,7 @@ fn r2_s11_14_open_filter_matches_format_registry_and_exposes_unpacked_folder_act
     for ext in &registry_file_exts {
         assert!(NATIVE_OPEN_FILE_EXTENSIONS.contains(ext), "NATIVE_OPEN_FILE_EXTENSIONS missing registry ext `{ext}`");
     }
-    assert!(!NATIVE_OPEN_FILE_EXTENSIONS.contains(&"xlsx"));
+    assert!(NATIVE_OPEN_FILE_EXTENSIONS.contains(&"xlsx"));
     assert!(!NATIVE_OPEN_FILE_EXTENSIONS.contains(&"json"));
     assert!(menu_action_triggers_native_file_dialog("file.open_unpacked_dir"));
 }

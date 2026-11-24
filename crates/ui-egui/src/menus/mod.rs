@@ -34,6 +34,7 @@ pub const DESKTOP_HOST_ROUTED_COMMANDS: &[&str] = &[
     "table.importCsv",
     "table.importPrism",
     "table.importPzfx",
+    "table.importXlsx",
     "export.svg",
     "file.export_svg",
     "graph.exportSvg",

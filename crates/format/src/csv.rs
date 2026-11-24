@@ -7,8 +7,9 @@ use curvebook_doc::{
     Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DelimitedScanError, DelimitedScanOptions,
     DelimitedVisitorError, DocError, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS,
     MAX_SUBCOLUMNS, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable, PlacementMode, SheetCellRange, SheetId, SubcolumnMode,
-    SurvivalTable, TableArchetype, TableKind, VariableColumn, XColumnMode, XyTable, default_column_label, scan_delimited, transpose_cell_grid,
-    validate_cell_grid, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
+    SurvivalTable, TableArchetype, TableKind, VariableColumn, XColumnMode, XyTable, default_column_label, infer_number_separators,
+    parse_import_number, scan_delimited, transpose_cell_grid, validate_cell_grid, validate_data_sets, validate_rows, validate_subcolumns,
+    validate_title,
 };
 
 use crate::error::FormatError;
@@ -66,42 +67,128 @@ impl CsvOptions {
         Self { delimiter: ';', decimal_separator: ',', ..Self::csv() }
     }
 
-    /// Auto-detect delimiter (`,`, `;`, `\t`) and decimal separator (`.` vs `,`) from sample text.
+    /// Auto-detect delimiter (`,`, `;`, `\t`), decimal separator (`.` vs `,`), and optional
+    /// thousands grouping separator from sample text (handling quoted fields and multi-line cells).
     #[must_use]
     pub fn detect(input: &str) -> Self {
         let sample = input.strip_prefix('\u{FEFF}').unwrap_or(input);
-        let lines: Vec<&str> = sample.lines().filter(|l| !l.trim().is_empty()).take(10).collect();
+        let lines = detect_sample_lines(sample);
         if lines.is_empty() {
             return Self::csv();
         }
-        let candidates = ['\t', ';', ','];
+
         let mut best_delim = ',';
         let mut best_score = 0_usize;
+        let mut explained_commas_per_line: Option<Vec<usize>> = None;
 
-        for delim in candidates {
+        for delim in ['\t', ';'] {
             let counts: Vec<usize> = lines.iter().map(|l| count_unquoted_char(l, delim, '"')).collect();
             let first = counts.first().copied().unwrap_or(0);
-            if first > 0 && counts.iter().all(|&c| c == first) {
-                let score = first * lines.len() + 10;
-                if score > best_score {
-                    best_score = score;
-                    best_delim = delim;
-                }
+            let score = if first > 0 && counts.iter().all(|&c| c == first) {
+                first.saturating_mul(lines.len()).saturating_add(10)
             } else {
-                let total: usize = counts.iter().sum();
-                if total > best_score {
-                    best_score = total;
-                    best_delim = delim;
-                }
+                counts.iter().sum()
+            };
+            if score > best_score {
+                best_score = score;
+                best_delim = delim;
+                let (per_line, num_commas) = count_numeric_commas_under_delim(&lines, &counts, delim);
+                explained_commas_per_line = (num_commas > 0).then_some(per_line);
             }
         }
 
-        let mut opts = Self { delimiter: best_delim, ..Self::csv() };
-        if best_delim == ';' && looks_like_comma_decimal(&lines, ';') {
-            opts.decimal_separator = ',';
+        let raw_comma_counts: Vec<usize> = lines.iter().map(|l| count_unquoted_char(l, ',', '"')).collect();
+        let effective_comma_counts: Vec<usize> = match explained_commas_per_line {
+            Some(ref explained) => raw_comma_counts.iter().zip(explained.iter()).map(|(&raw, &exp)| raw.saturating_sub(exp)).collect(),
+            None => raw_comma_counts,
+        };
+        let first_comma = effective_comma_counts.first().copied().unwrap_or(0);
+        let comma_score = if first_comma > 0 && effective_comma_counts.iter().all(|&c| c == first_comma) {
+            first_comma.saturating_mul(lines.len()).saturating_add(10)
+        } else {
+            effective_comma_counts.iter().sum()
+        };
+        if comma_score > best_score {
+            best_delim = ',';
         }
+
+        let mut opts = Self { delimiter: best_delim, ..Self::csv() };
+        let sample_tokens = collect_detection_tokens(sample, best_delim);
+        let (decimal, thousands) = infer_number_separators(sample_tokens.iter().map(String::as_str), best_delim);
+        opts.decimal_separator = decimal;
+        opts.thousands_separator = thousands;
         opts
     }
+
+    /// Detect decimal and thousands separators for tab-delimited (`\t`) text.
+    #[must_use]
+    pub fn detect_tsv(input: &str) -> Self {
+        let sample = input.strip_prefix('\u{FEFF}').unwrap_or(input);
+        let sample_tokens = collect_detection_tokens(sample, '\t');
+        let (decimal, thousands) = infer_number_separators(sample_tokens.iter().map(String::as_str), '\t');
+        Self { delimiter: '\t', decimal_separator: decimal, thousands_separator: thousands, ..Self::tsv() }
+    }
+}
+
+/// Decode raw bytes for delimited text (CSV/TSV/clipboard), supporting UTF-8 (with or without BOM),
+/// UTF-16 LE BOM (`0xFF 0xFE`), and UTF-16 BE BOM (`0xFE 0xFF`) while rejecting ZIP archives.
+pub fn decode_delimited_text_bytes(bytes: &[u8], format_id: &str) -> Result<String, FormatError> {
+    if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
+        return Err(FormatError::UnsupportedFormat { reason: format!("binary ZIP archive payload cannot be imported as `{format_id}`") });
+    }
+    if bytes.len() > MAX_CSV_FILE_BYTES {
+        return Err(FormatError::FileTooLarge {
+            path: format_id.to_owned(),
+            actual_bytes: Some(bytes.len() as u64),
+            limit_bytes: MAX_CSV_FILE_BYTES,
+        });
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return decode_utf16_bytes(rest, false, format_id);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        return decode_utf16_bytes(rest, true, format_id);
+    }
+    let utf8_bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let text = std::str::from_utf8(utf8_bytes)
+        .map_err(|err| FormatError::CsvParse { line: 1, reason: format!("invalid UTF-8 in {format_id} input: {err}") })?;
+    Ok(text.strip_prefix('\u{FEFF}').unwrap_or(text).to_owned())
+}
+
+fn decode_utf16_bytes(bytes: &[u8], big_endian: bool, format_id: &str) -> Result<String, FormatError> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err(FormatError::CsvParse { line: 1, reason: format!("odd byte length in UTF-16 {format_id} input") });
+    }
+    let (chunks, _) = bytes.as_chunks::<2>();
+    let units = chunks.iter().map(|&[b0, b1]| if big_endian { u16::from_be_bytes([b0, b1]) } else { u16::from_le_bytes([b0, b1]) });
+    let mut out = String::with_capacity(bytes.len() / 2);
+    for decoded in char::decode_utf16(units) {
+        let ch = decoded.map_err(|_| FormatError::CsvParse { line: 1, reason: format!("invalid UTF-16 surrogate in {format_id} input") })?;
+        out.push(ch);
+    }
+    Ok(out.strip_prefix('\u{FEFF}').unwrap_or(&out).to_owned())
+}
+
+fn collect_detection_tokens(sample: &str, delim: char) -> Vec<String> {
+    let opts = DelimitedScanOptions { delimiter: delim, quote_char: Some('"') };
+    let mut tokens = Vec::new();
+    let _ = scan_delimited(sample, opts, |field| {
+        if field.record_index >= 32 || tokens.len() >= 1_024 {
+            return Ok::<(), FormatError>(());
+        }
+        if field.record_index > 0 || tokens.len() < 32 {
+            tokens.push(field.text);
+        }
+        Ok::<(), FormatError>(())
+    });
+    if tokens.is_empty() {
+        for line in sample.lines().take(16) {
+            for part in line.split(delim) {
+                tokens.push(part.trim_matches('"').to_owned());
+            }
+        }
+    }
+    tokens
 }
 
 fn default_missing_sentinels() -> Vec<String> {
@@ -121,20 +208,54 @@ fn count_unquoted_char(line: &str, target: char, quote: char) -> usize {
     count
 }
 
-fn looks_like_comma_decimal(lines: &[&str], delim: char) -> bool {
-    let mut comma_decimals = 0_usize;
-    let mut dot_decimals = 0_usize;
-    for line in lines.iter().skip(1) {
-        for field in line.split(delim) {
-            let trimmed = field.trim().trim_matches('"').trim_matches('*');
-            if trimmed.contains(',') && !trimmed.contains('.') && trimmed.replace(',', ".").parse::<f64>().is_ok() {
-                comma_decimals += 1;
-            } else if trimmed.contains('.') && trimmed.parse::<f64>().is_ok() {
-                dot_decimals += 1;
-            }
+fn detect_sample_lines(sample: &str) -> Vec<&str> {
+    if !sample.contains('\n') && sample.contains('\r') {
+        sample.split('\r').filter(|l| !l.trim().is_empty()).take(10).collect()
+    } else {
+        sample.lines().filter(|l| !l.trim().is_empty()).take(10).collect()
+    }
+}
+
+fn token_is_numeric_with_comma(raw: &str) -> bool {
+    let trimmed = raw.trim().trim_matches('*').trim();
+    trimmed.contains(',') && (parse_import_number(trimmed, ',', None).is_some() || parse_import_number(trimmed, '.', Some(',')).is_some())
+}
+
+fn split_unquoted_line_fields(line: &str, delim: char, quote: char) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in line.chars() {
+        if ch == quote {
+            in_quotes = !in_quotes;
+        } else if !in_quotes && ch == delim {
+            fields.push(std::mem::take(&mut current));
+        } else {
+            current.push(ch);
         }
     }
-    comma_decimals > dot_decimals
+    fields.push(current);
+    fields
+}
+
+fn count_numeric_commas_under_delim(lines: &[&str], delim_counts: &[usize], delim: char) -> (Vec<usize>, usize) {
+    let mut per_line = Vec::with_capacity(lines.len());
+    let mut total = 0_usize;
+    for (&line, &dcount) in lines.iter().zip(delim_counts.iter()) {
+        if dcount == 0 {
+            per_line.push(0);
+            continue;
+        }
+        let mut line_commas = 0_usize;
+        for field in split_unquoted_line_fields(line, delim, '"') {
+            if token_is_numeric_with_comma(&field) {
+                line_commas = line_commas.saturating_add(field.chars().filter(|&c| c == ',').count());
+            }
+        }
+        total = total.saturating_add(line_commas);
+        per_line.push(line_commas);
+    }
+    (per_line, total)
 }
 
 /// Parse RFC-4180 delimited text into rectangular/jagged string records.
@@ -250,19 +371,7 @@ pub fn parse_cell_token(raw: &str, opts: &CsvOptions) -> Cell {
         return Cell { value: CellValue::Empty, excluded };
     }
 
-    let mut normalized = core.to_owned();
-    if let Some(thousands) = opts.thousands_separator
-        && thousands != opts.decimal_separator
-    {
-        normalized = normalized.replace(thousands, "");
-    }
-    if opts.decimal_separator == ',' {
-        normalized = normalized.replace(',', ".");
-    }
-
-    if let Ok(num) = normalized.parse::<f64>()
-        && num.is_finite()
-    {
+    if let Some(num) = parse_import_number(core, opts.decimal_separator, opts.thousands_separator) {
         return Cell { value: CellValue::Number(num), excluded };
     }
 
@@ -754,7 +863,7 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
     let records = parse_delimited_records_with_quotes_and_limits(input, opts, max_cols, max_fields)?;
 
     let header_count = opts.header_rows.min(records.len());
-    let headers = header_count.checked_sub(1).and_then(|idx| records.get(idx)).cloned().unwrap_or_default();
+    let headers = collapse_delimited_headers(records.get(..header_count).unwrap_or(&[]));
     let data_rows = records.get(header_count..).unwrap_or(&[]);
     let row_count = data_rows.len();
     validate_rows(row_count)?;
@@ -1090,6 +1199,83 @@ fn header_field_title(field: &ParsedCsvField) -> Result<String, FormatError> {
         Ok(field.text.clone())
     } else {
         sanitize_title(&field.text)
+    }
+}
+
+fn collapse_delimited_headers(header_rows: &[Vec<ParsedCsvField>]) -> Vec<ParsedCsvField> {
+    match header_rows {
+        [] => Vec::new(),
+        [single] => single.clone(),
+        many => {
+            let raw_rows: Vec<Vec<String>> = many.iter().map(|row| row.iter().map(|f| f.text.clone()).collect()).collect();
+            let col_count = many.iter().map(Vec::len).max().unwrap_or(0);
+            let collapsed = collapse_merged_header_rows(&raw_rows);
+            collapsed
+                .into_iter()
+                .enumerate()
+                .take(col_count.max(many.first().map_or(0, Vec::len)))
+                .map(|(col_idx, text)| {
+                    let quoted = many.iter().any(|row| row.get(col_idx).is_some_and(|f| f.quoted));
+                    ParsedCsvField { text, quoted }
+                })
+                .collect()
+        }
+    }
+}
+
+/// Collapse multi-row (possibly horizontally merged/blank-spanned) header rows into single column titles.
+///
+/// For `rows.len() > 1`, non-empty labels in upper header tiers are carried forward across adjacent
+/// empty cells up to the last non-empty header column, then non-empty distinct tiers per column are
+/// joined with `" - "`.
+#[must_use]
+pub fn collapse_merged_header_rows(rows: &[Vec<String>]) -> Vec<String> {
+    match rows {
+        [] => Vec::new(),
+        [single] => single.clone(),
+        many => {
+            let active_cols = many.iter().map(|r| r.iter().rposition(|s| !s.trim().is_empty()).map_or(0, |idx| idx + 1)).max().unwrap_or(0);
+            if active_cols == 0 {
+                return Vec::new();
+            }
+
+            let mut expanded: Vec<Vec<String>> = Vec::with_capacity(many.len());
+            for (tier_idx, row) in many.iter().enumerate() {
+                let mut tier = Vec::with_capacity(active_cols);
+                let mut carry: Option<String> = None;
+                let fill_blanks = tier_idx + 1 < many.len();
+                for col in 0..active_cols {
+                    let cell = row.get(col).map(|s| s.trim()).unwrap_or("");
+                    if !cell.is_empty() {
+                        carry = Some(cell.to_owned());
+                        tier.push(cell.to_owned());
+                    } else if fill_blanks
+                        && let Some(ref carried) = carry
+                        && many.iter().skip(tier_idx + 1).any(|lower| lower.get(col).is_some_and(|s| !s.trim().is_empty()))
+                    {
+                        tier.push(carried.clone());
+                    } else {
+                        tier.push(String::new());
+                    }
+                }
+                expanded.push(tier);
+            }
+
+            let mut out = Vec::with_capacity(active_cols);
+            for col in 0..active_cols {
+                let mut parts: Vec<&str> = Vec::with_capacity(expanded.len());
+                for tier in &expanded {
+                    if let Some(val) = tier.get(col).map(String::as_str)
+                        && !val.is_empty()
+                        && parts.last().copied() != Some(val)
+                    {
+                        parts.push(val);
+                    }
+                }
+                out.push(parts.join(" - "));
+            }
+            out
+        }
     }
 }
 

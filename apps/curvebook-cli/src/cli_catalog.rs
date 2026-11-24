@@ -134,6 +134,13 @@ const EXPORT_CONVERT_FLAGS: &[CliFlagSpec] = &[
         description: "Target sheet ID or title to export.",
     },
     CliFlagSpec {
+        long: "--xlsx-sheets",
+        short: None,
+        value_placeholder: Some("<names>"),
+        default_value: "all visible sheets",
+        description: "Comma-separated `.xlsx` worksheet names to import from an input workbook.",
+    },
+    CliFlagSpec {
         long: "--dpi",
         short: None,
         value_placeholder: Some("<u16>"),
@@ -161,14 +168,23 @@ const EXPORT_CONVERT_FLAGS: &[CliFlagSpec] = &[
 pub const CLI_COMMANDS: &[CliCommandSpec] = &[
     CliCommandSpec {
         id: "info",
-        usage_line: "info <file> [--json]",
-        summary: "inspect tables, info sheets, analyses, graphs and layouts in an archive",
+        usage_line: "info <file> [--list-sheets] [--json]",
+        summary: "inspect tables, info sheets, analyses, graphs, layouts, or .xlsx workbook tabs",
         positionals: &[CliPositionalSpec {
             syntax: "<file>",
             required: true,
-            description: "Input `.curvebook`, `.curvebook.d/`, `.cbtemplate`, `.prism`, `.pzfx`, `.csv`, `.tsv`, or project `.json` path.",
+            description: "Input `.curvebook`, `.curvebook.d/`, `.cbtemplate`, `.prism`, `.pzfx`, `.xlsx`, `.csv`, `.tsv`, or project `.json` path.",
         }],
-        flags: &[FLAG_JSON],
+        flags: &[
+            CliFlagSpec {
+                long: "--list-sheets",
+                short: None,
+                value_placeholder: None,
+                default_value: "false",
+                description: "Enumerate worksheet tab names and indices in an `.xlsx` workbook.",
+            },
+            FLAG_JSON,
+        ],
     },
     CliCommandSpec {
         id: "commands",

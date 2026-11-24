@@ -42,8 +42,8 @@ fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
     assert_eq!(UI_COMMANDS.len(), 54, "UI_COMMANDS length should be 54 after R13.8 Part 2, app.feedback, R15-GUI-35, and R17.2 copyForSlides");
     assert_eq!(
         catalog_len(),
-        709,
-        "i18n::catalog_len() should be 709 after catalog consolidation, SEC-18 16-locale modal entries, R15.10 F1, and R17.2"
+        710,
+        "i18n::catalog_len() should be 710 after catalog consolidation, SEC-18 16-locale modal entries, R15.10 F1, R17.1 cmd.table.importXlsx, and R17.2 copyForSlides"
     );
     assert!(UI_COMMANDS.iter().any(|c| c.id == "ui.editParams.open" && c.shortcut == "Cmd+T"));
     let edit_params_entry = CATALOG.iter().find(|e| e.key == "cmd.ui.editParams.open").ok_or("missing cmd.ui.editParams.open in i18n::CATALOG")?;

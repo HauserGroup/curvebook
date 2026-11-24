@@ -3,9 +3,9 @@
 
 use curvebook_doc::{
     Cell, CellCoord, CiBound, DataSheet, ImportFilterSpec, ImportPlacementSpec, PlacementMode, ResultCell, SheetCellRange, SheetId, TableArchetype,
-    TableKind, format_linked_paste_tsv_cell,
+    TableKind, infer_number_separators,
 };
-use curvebook_format::{CsvOptions, parse_delimited_records};
+use curvebook_format::{CsvOptions, collapse_merged_header_rows, parse_delimited_records, write_delimited_records};
 use curvebook_transform::{
     PlateGeometry, PlateMapTemplate, PlateWellRole, TargetArchetypeKind, map_plate_to_datasheet, pivot_tidy_long_to_datasheet,
 };
@@ -37,6 +37,14 @@ const WID_LINK_ID: &str = "import_paste.input.link_id";
 const WID_NOTES: &str = "import_paste.input.notes";
 
 /// Transient view state owned by the import / paste / format dialog shard.
+fn default_import_paste_header_rows() -> usize {
+    1
+}
+
+fn default_import_paste_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ImportPasteViewState {
@@ -46,7 +54,15 @@ pub struct ImportPasteViewState {
     pub encoding: String,
     pub auto_detect_header: bool,
     pub has_header_row: bool,
+    #[serde(default = "default_import_paste_header_rows")]
+    pub header_rows: usize,
     pub has_row_titles: bool,
+    #[serde(default)]
+    pub xlsx_bytes_base64: Option<String>,
+    #[serde(default)]
+    pub xlsx_sheets: Vec<String>,
+    #[serde(default = "default_import_paste_true")]
+    pub xlsx_merge: bool,
     pub raw_source_text: String,
     pub external_path: String,
     pub internal_source_sheet_id: Option<String>,
@@ -89,7 +105,11 @@ impl Default for ImportPasteViewState {
             encoding: String::from("utf-8"),
             auto_detect_header: true,
             has_header_row: true,
+            header_rows: 1,
             has_row_titles: false,
+            xlsx_bytes_base64: None,
+            xlsx_sheets: Vec::new(),
+            xlsx_merge: true,
             raw_source_text: String::new(),
             external_path: String::new(),
             internal_source_sheet_id: None,
@@ -203,6 +223,7 @@ fn sync_import_wizard_from_state(app: &mut UiApp, state: &ImportPasteViewState) 
     let w = &mut app.grid.import_wizard;
     w.origin_kind = match state.source_origin.as_str() {
         "external_csv" => ImportOriginKind::ExternalDelimitedFile,
+        "xlsx" => ImportOriginKind::XlsxWorkbook,
         "internal_sheet" => {
             if is_result_sheet {
                 ImportOriginKind::InternalResultSheet
@@ -212,6 +233,7 @@ fn sync_import_wizard_from_state(app: &mut UiApp, state: &ImportPasteViewState) 
         }
         _ => ImportOriginKind::Clipboard,
     };
+    w.header_rows = if state.has_header_row { state.header_rows.max(1) } else { 0 };
     w.delimiter = app.grid.import_reshape.tidy_delimiter;
     w.decimal_separator = app.grid.import_reshape.decimal_separator;
     w.source_sheet_id = state.internal_source_sheet_id.as_deref().and_then(|s| SheetId::try_new(s).ok());
@@ -283,10 +305,6 @@ fn effective_plate_values(app: &UiApp) -> Vec<Option<f64>> {
         return parsed;
     }
     app.grid.import_reshape.plate_values.clone()
-}
-
-fn parse_cell_token_preview(tok: &str, decimal_sep: char, parse_asterisk: bool) -> Cell {
-    Cell::parse_import_token(tok, decimal_sep, parse_asterisk)
 }
 
 fn build_filter_spec(state: &ImportPasteViewState) -> ImportFilterSpec {
@@ -407,6 +425,7 @@ fn commit_external_csv_non_live(app: &mut UiApp, state: &ImportPasteViewState, p
     params.insert(String::from("delimiter"), json!(app.grid.import_reshape.tidy_delimiter.to_string()));
     params.insert(String::from("decimal_separator"), json!(app.grid.import_reshape.decimal_separator.to_string()));
     params.insert(String::from("has_header"), json!(state.has_header_row));
+    params.insert(String::from("header_rows"), json!(if state.has_header_row { state.header_rows.max(1) } else { 0 }));
     params.insert(String::from("has_row_titles"), json!(state.has_row_titles));
     let target_id_opt = if state.target_mode == "existing_sheet" {
         let target_id = resolve_existing_target_sheet(app, state)?;
@@ -437,7 +456,40 @@ fn commit_external_csv_non_live(app: &mut UiApp, state: &ImportPasteViewState, p
     Ok(out.payload)
 }
 
+fn commit_xlsx_workbook(app: &mut UiApp, state: &ImportPasteViewState) -> Result<Value, String> {
+    let mut params = serde_json::Map::new();
+    if let Some(b64) = state.xlsx_bytes_base64.as_ref().filter(|s| !s.is_empty()) {
+        params.insert(String::from("bytes_base64"), json!(b64));
+    } else {
+        let path = effective_text(app, WID_PATH, &state.external_path);
+        if path.trim().is_empty() {
+            return Err(String::from("XLSX import requires a workbook path or bytes payload"));
+        }
+        params.insert(String::from("path"), json!(path.trim()));
+    }
+    if !state.xlsx_sheets.is_empty() {
+        params.insert(String::from("sheets"), json!(state.xlsx_sheets));
+    }
+    let header_rows = if state.has_header_row { state.header_rows.max(1) } else { 0 };
+    params.insert(String::from("has_header"), json!(state.has_header_row));
+    params.insert(String::from("header_rows"), json!(header_rows));
+    params.insert(String::from("has_row_titles"), json!(state.has_row_titles));
+    params.insert(String::from("include_hidden"), json!(true));
+    params.insert(String::from("merge"), json!(state.xlsx_merge));
+    let target_kind = app.grid.import_reshape.target_kind;
+    let subcol_wire = if matches!(target_kind, TableKind::Grouped | TableKind::Nested) { "raw_replicates" } else { "single" };
+    params.insert(String::from("archetype"), json!(table_kind_wire_name(target_kind)));
+    params.insert(String::from("subcolumn_mode"), json!(subcol_wire));
+    let out = app.execute_command("table.importXlsx", Value::Object(params)).map_err(|e| e.to_string())?;
+    let first_sid = out.payload.get("imported_sheet_ids").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str);
+    maybe_append_provenance_to_info(app, state, first_sid);
+    Ok(out.payload)
+}
+
 fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteViewState) -> Result<Value, String> {
+    if state.source_origin == "xlsx" {
+        return commit_xlsx_workbook(app, state);
+    }
     if state.source_origin == "reshape" {
         if matches!(app.grid.import_reshape.mode, ImportReshapeMode::Plate96 | ImportReshapeMode::Plate384) {
             let intent = app.grid.import_reshape.build_import_intent()?;
@@ -606,6 +658,7 @@ fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteViewState
                 "delimiter": "\t",
                 "decimal_separator": ".",
                 "has_header": true,
+                "header_rows": 1,
                 "has_row_titles": !preview.row_labels.is_empty(),
             }),
         )
@@ -707,20 +760,28 @@ fn table_kind_wire_name(kind: TableKind) -> &'static str {
     }
 }
 
+fn format_preview_cell_preserving_newlines(cell: &Cell) -> String {
+    let base = match &cell.value {
+        curvebook_doc::CellValue::Empty => String::new(),
+        curvebook_doc::CellValue::Number(v) => v.to_string(),
+        curvebook_doc::CellValue::Text(s) => s.clone(),
+    };
+    if cell.excluded && !base.is_empty() && !base.ends_with('*') { format!("{base}*") } else { base }
+}
+
 fn serialize_preview_as_tsv(preview: &ImportPreviewGrid, include_headers: bool) -> String {
-    let mut lines = Vec::new();
+    let mut records: Vec<Vec<String>> = Vec::new();
     if include_headers && !preview.headers.is_empty() {
-        lines.push(preview.headers.join("\t"));
+        records.push(preview.headers.clone());
     }
     for row in &preview.rows {
-        let toks: Vec<String> = row.iter().map(format_linked_paste_tsv_cell).collect();
-        lines.push(toks.join("\t"));
+        records.push(row.iter().map(format_preview_cell_preserving_newlines).collect());
     }
-    lines.join("\n")
+    write_delimited_records(&records, &CsvOptions::tsv())
 }
 
 fn serialize_preview_as_csv_with_headers(preview: &ImportPreviewGrid) -> String {
-    let mut lines = Vec::new();
+    let mut records: Vec<Vec<String>> = Vec::new();
     let has_rows_col = !preview.row_labels.is_empty();
     if !preview.headers.is_empty() {
         let mut hdr_toks = Vec::with_capacity(preview.headers.len() + usize::from(has_rows_col));
@@ -728,24 +789,24 @@ fn serialize_preview_as_csv_with_headers(preview: &ImportPreviewGrid) -> String 
             hdr_toks.push(String::from("Row"));
         }
         hdr_toks.extend(preview.headers.iter().cloned());
-        lines.push(hdr_toks.join("\t"));
+        records.push(hdr_toks);
     } else if let Some(first) = preview.rows.first() {
         let mut hdr_toks = Vec::with_capacity(first.len() + usize::from(has_rows_col));
         if has_rows_col {
             hdr_toks.push(String::from("Row"));
         }
         hdr_toks.extend((0..first.len()).map(curvebook_doc::default_column_label));
-        lines.push(hdr_toks.join("\t"));
+        records.push(hdr_toks);
     }
     for (r_idx, row) in preview.rows.iter().enumerate() {
         let mut toks = Vec::new();
         if has_rows_col {
             toks.push(preview.row_labels.get(r_idx).cloned().unwrap_or_default());
         }
-        toks.extend(row.iter().map(format_linked_paste_tsv_cell));
-        lines.push(toks.join("\t"));
+        toks.extend(row.iter().map(format_preview_cell_preserving_newlines));
+        records.push(toks);
     }
-    lines.join("\n")
+    write_delimited_records(&records, &CsvOptions::tsv())
 }
 
 // ============================================================================
@@ -783,12 +844,13 @@ fn compute_import_preview(app: &UiApp, state: &ImportPasteViewState) -> ImportPr
         };
     }
 
+    let header_rows = if state.has_header_row { state.header_rows.max(1) } else { 0 };
     let opts = CsvOptions {
         delimiter: delim,
         quote_char: '"',
         decimal_separator: dec,
         thousands_separator: None,
-        header_rows: usize::from(state.has_header_row),
+        header_rows,
         has_row_titles: state.has_row_titles,
         parse_asterisk_exclusions: state.parse_asterisk_exclusions,
         missing_sentinels: Vec::new(),
@@ -813,7 +875,15 @@ fn compute_import_preview(app: &UiApp, state: &ImportPasteViewState) -> ImportPr
         return compute_tidy_pivot_preview(app, state, records);
     }
 
-    let mut headers = if state.has_header_row && !records.is_empty() { records.remove(0) } else { Vec::new() };
+    let mut headers = if state.has_header_row && !records.is_empty() {
+        let n = header_rows.min(records.len());
+        let raw_hdr: Vec<Vec<String>> = records.drain(..n).collect();
+        if raw_hdr.len() > 1 { collapse_merged_header_rows(&raw_hdr) } else { raw_hdr.into_iter().next().unwrap_or_default() }
+    } else {
+        Vec::new()
+    };
+    let (_, detected_thousands) = infer_number_separators(records.iter().flatten().map(String::as_str), delim);
+    let thousands_sep = detected_thousands.filter(|&t| t != dec);
     let mut row_labels = Vec::new();
     let mut grid: Vec<Vec<Cell>> = Vec::with_capacity(records.len());
     for row in records {
@@ -821,7 +891,8 @@ fn compute_import_preview(app: &UiApp, state: &ImportPasteViewState) -> ImportPr
         if state.has_row_titles {
             row_labels.push(iter.next().unwrap_or_default());
         }
-        let cells: Vec<Cell> = iter.map(|tok| parse_cell_token_preview(&tok, dec, state.parse_asterisk_exclusions)).collect();
+        let cells: Vec<Cell> =
+            iter.map(|tok| Cell::parse_import_token_with_thousands(&tok, dec, thousands_sep, state.parse_asterisk_exclusions)).collect();
         grid.push(cells);
     }
     if state.has_row_titles && !headers.is_empty() {

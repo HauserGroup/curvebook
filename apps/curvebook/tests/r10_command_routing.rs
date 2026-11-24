@@ -641,6 +641,7 @@ fn native_file_dialog_routing_covers_all_import_export_template_commands() {
         "table.importCsv",
         "table.importPrism",
         "table.importPzfx",
+        "table.importXlsx",
         "table.exportCsv",
         "analysis.exportJson",
         "analysis.exportCsv",
@@ -657,9 +658,9 @@ fn native_file_dialog_routing_covers_all_import_export_template_commands() {
 
 #[test]
 fn native_open_template_filters_and_foreign_import_file_path_clearing() -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(NATIVE_OPEN_FILE_EXTENSIONS, ["curvebook", "cbtemplate", "prism", "pzfx", "csv", "tsv"]);
+    assert_eq!(NATIVE_OPEN_FILE_EXTENSIONS, ["curvebook", "cbtemplate", "prism", "pzfx", "xlsx", "csv", "tsv"]);
     assert!(!NATIVE_OPEN_FILE_EXTENSIONS.contains(&"json"));
-    assert!(!NATIVE_OPEN_FILE_EXTENSIONS.contains(&"xlsx"));
+    assert!(NATIVE_OPEN_FILE_EXTENSIONS.contains(&"xlsx"));
     assert!(NATIVE_OPEN_FILE_EXTENSIONS.contains(&"cbtemplate"));
     assert!(NATIVE_OPEN_FILE_EXTENSIONS.contains(&"prism"));
 
@@ -669,6 +670,7 @@ fn native_open_template_filters_and_foreign_import_file_path_clearing() -> Resul
     assert!(native_import_replaces_project_file_path("project.instantiateTemplate"));
     assert!(native_import_replaces_project_file_path("table.importPrism"));
     assert!(native_import_replaces_project_file_path("table.importPzfx"));
+    assert!(native_import_replaces_project_file_path("table.importXlsx"));
     assert!(!native_import_replaces_project_file_path("table.importCsv"));
 
     // Save a `.curvebook` project + `.cbtemplate` file, then verify CSV preserves `file_path`

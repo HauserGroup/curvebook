@@ -9,8 +9,8 @@ use curvebook_doc::{
     ResultSheet, SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableArchetype, VariableSource, validate_project_cells, validate_title,
 };
 use curvebook_format::{
-    CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes,
-    import_pzfx_str, parse_delimited_records,
+    CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, XlsxImportOptions, import_csv_to_datasheet, import_prism_bytes,
+    import_pzfx_bytes, import_pzfx_str, import_xlsx_bytes_with_options, list_xlsx_sheets, parse_delimited_records,
 };
 use curvebook_transform::{
     ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload, PlateGeometry, PlateMapTemplate, PlateWellRole, TargetArchetypeKind,
@@ -71,7 +71,7 @@ pub(super) fn resolve_initial_link_source_payload(
                 dag::ResolvedInternalLinkSource::Result(rs) => OwnedSourcePayload::Result(Box::new(rs.clone())),
             })),
         LinkSource::ExternalDelimitedFile { path, delimiter, decimal_separator } => {
-            let text = policy.read_utf8_file(path, "linked file", MAX_CSV_FILE_BYTES)?;
+            let text = policy.read_delimited_text_file(path, "linked file", MAX_CSV_FILE_BYTES)?;
             Ok(Some(OwnedSourcePayload::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
         }
     }
@@ -298,7 +298,7 @@ pub(super) fn build_paste_link_spec(
         };
         LinkSource::InternalSheet { sheet_id: src_id, kind, tab_id, range }
     } else if let Some(path) = p.source_path.as_deref() {
-        let preview_text = policy.read_utf8_file(path, "external link file", MAX_CSV_FILE_BYTES)?;
+        let preview_text = policy.read_delimited_text_file(path, "external link file", MAX_CSV_FILE_BYTES)?;
         let delimiter = resolve_delimiter(p.delimiter.as_deref(), &preview_text)?;
         let decimal_separator = resolve_decimal_char(p.decimal_separator.as_deref(), p.normalize_decimal.unwrap_or(false), &preview_text, delimiter)?;
         let mut src = LinkSource::ExternalDelimitedFile { path: path.to_owned(), delimiter, decimal_separator };
@@ -440,6 +440,7 @@ pub(super) struct ImportCsvParams {
     pub(super) decimal_separator: Option<String>,
     pub(super) normalize_decimal: Option<bool>,
     pub(super) has_header: Option<bool>,
+    pub(super) header_rows: Option<usize>,
     pub(super) has_row_titles: Option<bool>,
     pub(super) replicates: Option<usize>,
     pub(super) subcolumn_mode: Option<Value>,
@@ -462,6 +463,10 @@ pub(super) fn schema_import_csv() -> Value {
             ("decimal_separator", decimal_sep_schema()),
             ("normalize_decimal", bool_schema("Infer European decimal separator when ambiguous")),
             ("has_header", bool_schema("Treat first row as column headers")),
+            (
+                "header_rows",
+                int_schema("Number of header rows to combine into column titles (default 1 when `has_header` is true)", Some(0), Some(16)),
+            ),
             ("has_row_titles", bool_schema("Treat first column as row titles")),
             ("replicates", int_schema("Replicate count per group (default 1)", Some(1), None)),
             ("subcolumn_mode", nullable_schema(any_json_schema("Subcolumn mode name or object"))),
@@ -618,7 +623,7 @@ pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
         check_inline_payload_len(inline.len(), MAX_CSV_FILE_BYTES, "CSV")?;
         inline.clone()
     } else if let Some(path) = &p.path {
-        policy.read_utf8_file(path, "CSV", MAX_CSV_FILE_BYTES)?
+        policy.read_delimited_text_file(path, "CSV", MAX_CSV_FILE_BYTES)?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.importCsv requires `path` or `csv`/`text`")
             .with_remediation("Provide a CSV/TSV file `path` or inline `csv` text."));
@@ -627,7 +632,13 @@ pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
     let delimiter = resolve_delimiter(p.delimiter.as_deref(), &text)?;
     let decimal_separator = resolve_decimal_char(p.decimal_separator.as_deref(), p.normalize_decimal.unwrap_or(false), &text, delimiter)?;
     let mut csv_opts = build_csv_options(delimiter, decimal_separator);
-    if let Some(first_row_titles) = p.has_header {
+    let detected = CsvOptions::detect(&text);
+    if detected.decimal_separator == decimal_separator {
+        csv_opts.thousands_separator = detected.thousands_separator;
+    }
+    if let Some(header_rows) = p.header_rows {
+        csv_opts.header_rows = header_rows;
+    } else if let Some(first_row_titles) = p.has_header {
         csv_opts.header_rows = usize::from(first_row_titles);
     }
     if let Some(has_row_titles) = p.has_row_titles {
@@ -911,6 +922,149 @@ pub(super) fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     };
 
     finish_project_import_report(ctx, "table.importPzfx", "imported XML project", report, p.merge.unwrap_or(false))
+}
+
+// ---------------------------------------------------------------------------
+// 17b. table.importXlsx
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ImportXlsxParams {
+    pub(super) path: Option<String>,
+    pub(super) bytes_base64: Option<String>,
+    pub(super) bytes: Option<Vec<u8>>,
+    pub(super) sheets: Option<Vec<String>>,
+    pub(super) sheet_indices: Option<Vec<usize>>,
+    pub(super) list_sheets: Option<bool>,
+    pub(super) has_header: Option<bool>,
+    pub(super) header_rows: Option<usize>,
+    pub(super) has_row_titles: Option<bool>,
+    pub(super) archetype: Option<String>,
+    pub(super) subcolumn_mode: Option<Value>,
+    pub(super) include_hidden: Option<bool>,
+    pub(super) merge: Option<bool>,
+}
+
+pub(super) fn schema_import_xlsx() -> Value {
+    obj_schema(
+        vec![
+            ("path", nullable_schema(non_empty_str_schema("Filesystem path to `.xlsx` workbook"))),
+            ("bytes_base64", nullable_schema(non_empty_str_schema("Base64-encoded `.xlsx` workbook bytes"))),
+            (
+                "bytes",
+                nullable_schema(array_schema("Raw byte array of `.xlsx` workbook", int_schema("Byte value 0..=255", Some(0), Some(255)), None, None)),
+            ),
+            (
+                "sheets",
+                nullable_schema(array_schema(
+                    "Worksheet tab names to import (imports all visible sheets if omitted)",
+                    str_schema("Worksheet name"),
+                    None,
+                    None,
+                )),
+            ),
+            (
+                "sheet_indices",
+                nullable_schema(array_schema("Zero-based worksheet indices to import", int_schema("Sheet index >= 0", Some(0), None), None, None)),
+            ),
+            ("list_sheets", bool_schema("When true, enumerate workbook sheet names/indices without mutating the document")),
+            ("has_header", bool_schema("Treat first row(s) of each sheet as column headers (default true)")),
+            (
+                "header_rows",
+                int_schema("Number of top header rows to merge into column titles (default 1 when `has_header` is true)", Some(0), Some(16)),
+            ),
+            ("has_row_titles", bool_schema("Treat first column of each sheet as row titles (default false)")),
+            (
+                "archetype",
+                nullable_schema(str_schema(
+                    "Optional target archetype (XY, Column, Grouped, Contingency, Survival, PartsOfWhole, MultipleVariables, Nested); inferred per sheet when omitted",
+                )),
+            ),
+            ("subcolumn_mode", nullable_schema(any_json_schema("Subcolumn mode name or object"))),
+            ("include_hidden", bool_schema("Include hidden worksheets when no explicit `sheets`/`sheet_indices` are supplied")),
+            ("merge", bool_schema("Merge imported worksheets into the current project instead of replacing it (default false)")),
+        ],
+        &[],
+        false,
+    )
+}
+
+pub(super) fn run_import_xlsx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let p: ImportXlsxParams = parse_params(&schema_import_xlsx(), raw)?;
+    let bytes = if let Some(path) = p.path.as_deref() {
+        ctx.session.path_policy.read_binary_file(path, "workbook", MAX_ARCHIVE_FILE_BYTES)?
+    } else if let Some(b64) = p.bytes_base64.as_deref() {
+        decode_base64(b64)?
+    } else if let Some(raw_bytes) = p.bytes {
+        check_inline_payload_len(raw_bytes.len(), MAX_ARCHIVE_FILE_BYTES, "workbook")?;
+        raw_bytes
+    } else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "table.importXlsx requires `path`, `bytes_base64`, or `bytes`")
+            .with_remediation("Supply a `.xlsx` file `path`, `bytes_base64`, or `bytes`."));
+    };
+
+    if p.list_sheets.unwrap_or(false) {
+        let sheets = list_xlsx_sheets(&bytes)?;
+        return Ok(CommandOutcome::read_only(
+            "table.importXlsx",
+            format!("listed {} worksheet(s) from .xlsx workbook", sheets.len()),
+            json!({
+                "sheet_count": sheets.len(),
+                "sheets": sheets,
+            }),
+        ));
+    }
+
+    let has_header = p.has_header.unwrap_or(true);
+    let header_rows = match p.header_rows {
+        Some(n) => n,
+        None => usize::from(has_header),
+    };
+    let table_kind = p.archetype.as_deref().map(parse_table_kind).transpose()?;
+    let subcolumn_mode = resolve_subcolumn_mode(p.subcolumn_mode.as_ref(), 1)?;
+    let title = p
+        .path
+        .as_deref()
+        .and_then(|raw_path| std::path::Path::new(raw_path).file_stem().and_then(|s| s.to_str()).filter(|s| !s.trim().is_empty()).map(str::to_owned));
+
+    let opts = XlsxImportOptions {
+        sheet_names: p.sheets,
+        sheet_indices: p.sheet_indices,
+        has_header,
+        header_rows,
+        has_row_titles: p.has_row_titles.unwrap_or(false),
+        table_kind,
+        subcolumn_mode,
+        include_hidden: p.include_hidden.unwrap_or(false),
+        title,
+    };
+
+    let report = import_xlsx_bytes_with_options(&bytes, &opts)?;
+    let doc = &mut ctx.session.doc;
+    let imported_ids: Vec<String> = if p.merge.unwrap_or(false) {
+        let before_count = doc.data_sheets.len();
+        merge_imported_document(doc, report.document)?;
+        doc.data_sheets.iter().skip(before_count).map(|s| s.id.as_str().to_owned()).collect()
+    } else {
+        validate_project_cells(0, report.document.total_allocated_cells()?)?;
+        let ids = report.document.data_sheets.iter().map(|s| s.id.as_str().to_owned()).collect();
+        *doc = report.document;
+        ids
+    };
+    sync_info_linked_data_sheets(doc, &HashSet::new());
+    let mut outcome = CommandOutcome::mutated(
+        "table.importXlsx",
+        format!("imported {} worksheet(s) from .xlsx workbook", imported_ids.len()),
+        json!({
+            "title": doc.title,
+            "sheet_count": doc.total_sheet_count(),
+            "imported_sheet_ids": imported_ids,
+            "warnings": report.warnings,
+        }),
+    );
+    outcome.warnings = report.warnings.iter().map(format_import_warning_text).collect();
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -1336,7 +1490,7 @@ pub(super) fn extract_tidy_data(p: &ImportTidyLongParams, policy: &ExternalPathP
         check_inline_payload_len(inline.len(), MAX_CSV_FILE_BYTES, "CSV")?;
         inline.clone()
     } else if let Some(path) = &p.path {
-        policy.read_utf8_file(path, "tidy file", MAX_CSV_FILE_BYTES)?
+        policy.read_delimited_text_file(path, "tidy file", MAX_CSV_FILE_BYTES)?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.importTidyLong requires `rows` or `csv`")
             .with_remediation("Supply `rows`, inline `csv` text, or a file `path`."));

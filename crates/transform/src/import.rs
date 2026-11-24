@@ -365,8 +365,8 @@ fn parse_delimited_text(text: &str, delimiter: char, decimal_sep: char, parse_as
     let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS);
     let max_cells = MAX_IMPORT_CELLS;
 
-    let mut rows: Vec<Vec<Cell>> = Vec::new();
-    let mut current_row: Vec<Cell> = Vec::new();
+    let mut raw_rows: Vec<Vec<String>> = Vec::new();
+    let mut current_row: Vec<String> = Vec::new();
     let mut total_cells = 0_usize;
     let scan_opts = DelimitedScanOptions { delimiter, quote_char: (delimiter != '"').then_some('"') };
 
@@ -382,12 +382,12 @@ fn parse_delimited_text(text: &str, delimiter: char, decimal_sep: char, parse_as
             return Err(TransformError::InvalidSpec { message: format!("delimited cell count exceeds limit {max_cells}") });
         }
         total_cells = next_total;
-        current_row.push(Cell::parse_import_token(&field.text, decimal_sep, parse_asterisk));
+        current_row.push(field.text);
         if field.end_of_record {
-            if rows.len() >= MAX_ROWS {
+            if raw_rows.len() >= MAX_ROWS {
                 return Err(TransformError::InvalidSpec { message: format!("delimited row count exceeds limit {MAX_ROWS}") });
             }
-            rows.push(std::mem::take(&mut current_row));
+            raw_rows.push(std::mem::take(&mut current_row));
         }
         Ok(())
     })
@@ -396,6 +396,13 @@ fn parse_delimited_text(text: &str, delimiter: char, decimal_sep: char, parse_as
         DelimitedVisitorError::Callback(e) => e,
     })?;
 
+    let (inferred_dec, inferred_thousands) =
+        curvebook_doc::infer_number_separators(raw_rows.iter().take(32).flat_map(|row| row.iter().map(String::as_str)), delimiter);
+    let thousands = if inferred_dec == decimal_sep { inferred_thousands } else { None };
+    let rows = raw_rows
+        .into_iter()
+        .map(|row| row.into_iter().map(|tok| Cell::parse_import_token_with_thousands(&tok, decimal_sep, thousands, parse_asterisk)).collect())
+        .collect();
     Ok(rows)
 }
 

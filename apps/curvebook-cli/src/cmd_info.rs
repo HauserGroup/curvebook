@@ -13,13 +13,36 @@ use crate::error::CliError;
 
 struct InfoArgs {
     file: String,
+    list_sheets: bool,
     json: bool,
 }
 
-/// Execute `curvebook-cli info <file> [--json]`.
+/// Execute `curvebook-cli info <file> [--list-sheets] [--json]`.
 pub fn run_info(args: &[String]) -> Result<(), CliError> {
     let parsed = parse_info_args(args)?;
     let path = Path::new(&parsed.file);
+    if parsed.list_sheets {
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(path, curvebook_format::MAX_ARCHIVE_FILE_BYTES)
+            .map_err(|err| CliError::Runtime(format!("failed to read `{}`: {err}", path.display())))?;
+        let sheets = curvebook_format::list_xlsx_sheets(&bytes)?;
+        if parsed.json {
+            let payload = json!({
+                "file": parsed.file,
+                "format": "xlsx",
+                "sheet_count": sheets.len(),
+                "sheets": sheets,
+            });
+            let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
+            println!("{text}");
+        } else {
+            println!("File: {} (xlsx, {} sheet(s))", sanitize_terminal_text(&parsed.file), sheets.len());
+            for s in &sheets {
+                let state_note = s.state.as_deref().map_or(String::new(), |st| format!(" [{st}]"));
+                println!("  [{}] `{}`{}", s.index, sanitize_terminal_text(&s.name), state_note);
+            }
+        }
+        return Ok(());
+    }
     let (loaded, _bytes) = load_project_from_path(path, false)?;
 
     if parsed.json {
@@ -339,20 +362,23 @@ fn print_human_sections(summary: &ProjectInspectSummary, doc: &ProjectDocument) 
 
 fn parse_info_args(args: &[String]) -> Result<InfoArgs, CliError> {
     let mut file = None;
+    let mut list_sheets = false;
     let mut json = false;
     for arg in args {
         if arg == "--json" {
             json = true;
+        } else if arg == "--list-sheets" {
+            list_sheets = true;
         } else if arg.starts_with('-') {
             return Err(CliError::Usage(format!("unknown flag `{arg}` for `info`")));
         } else if file.is_none() {
             file = Some(arg.clone());
         } else {
-            return Err(CliError::Usage(String::from("usage: curvebook-cli info <file> [--json]")));
+            return Err(CliError::Usage(String::from("usage: curvebook-cli info <file> [--list-sheets] [--json]")));
         }
     }
     let Some(file) = file else {
-        return Err(CliError::Usage(String::from("usage: curvebook-cli info <file> [--json]")));
+        return Err(CliError::Usage(String::from("usage: curvebook-cli info <file> [--list-sheets] [--json]")));
     };
-    Ok(InfoArgs { file, json })
+    Ok(InfoArgs { file, list_sheets, json })
 }

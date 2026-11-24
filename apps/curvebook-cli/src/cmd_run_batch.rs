@@ -539,10 +539,11 @@ fn load_manifest_inputs(session: &mut Session, inputs: &[BatchInputSpec]) -> Res
     let cancelled = AtomicBool::new(false);
     let mut warnings = Vec::new();
     for (idx, input) in inputs.iter().enumerate() {
-        let csv_text = curvebook_platform::fs::read_regular_file_utf8(&input.csv_path, MAX_CSV_FILE_BYTES).map_err(|err| match err {
+        let raw_bytes = curvebook_platform::fs::read_regular_file_bytes(&input.csv_path, MAX_CSV_FILE_BYTES).map_err(|err| match err {
             PlatformError::FileTooLarge { .. } => CliError::from(err),
             other => CliError::Runtime(format!("failed to read input `{}`: {other}", input.csv_path.display())),
         })?;
+        let csv_text = curvebook_format::decode_delimited_text_bytes(&raw_bytes, &input.csv_path.display().to_string())?;
 
         let matched_sheet_id = resolve_existing_data_sheet_id(session.document(), input.sheet.as_deref());
         let target_sheet_id = matched_sheet_id.clone().or_else(|| input.sheet.clone()).unwrap_or_else(|| format!("data_{}", idx + 1));

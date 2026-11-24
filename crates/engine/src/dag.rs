@@ -874,7 +874,7 @@ fn resolve_refresh_source<'a>(
             let Some(policy) = external_policy else {
                 return Ok(None);
             };
-            let text = policy.read_utf8_file(path, "linked file", MAX_CSV_FILE_BYTES)?;
+            let text = policy.read_delimited_text_file(path, "linked file", MAX_CSV_FILE_BYTES)?;
             Ok(Some(ResolvedRefreshSource::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
         }
     }

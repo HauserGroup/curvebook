@@ -965,6 +965,7 @@ impl GridToolState {
                 "sheet_id": sheet_id.as_str(),
                 "anchor": { "row": anchor.row, "col": anchor.col, "subcol": anchor.subcol },
                 "text": raw_tsv,
+                "delimiter": "\t",
                 "decimal_separator": self.decimal_separator.to_string(),
                 "transpose": transpose,
                 "filter": { "parse_asterisk_exclusions": parse_asterisk_exclusions },
@@ -1068,25 +1069,32 @@ pub fn format_selection_tsv(sheet: &DataSheet, a: GridCellCoord, b: GridCellCoor
     out
 }
 
-/// Parse TSV clipboard text (supporting RFC-4180 quotes, CRLF/LF, regional decimals, and `*` exclusions).
+/// Parse TSV clipboard text (supporting RFC-4180 quotes, CRLF/CR/LF, regional decimals,
+/// thousands grouping, ragged rows, and `*` exclusions).
 pub fn parse_tsv_clipboard(raw: &str, decimal_separator: char, parse_asterisk_exclusions: bool) -> Result<Vec<Vec<Cell>>, GridToolError> {
     let cleaned = raw.strip_prefix('\u{feff}').unwrap_or(raw);
-    let trimmed_end = cleaned.strip_suffix("\r\n").or_else(|| cleaned.strip_suffix('\n')).unwrap_or(cleaned);
+    let trimmed_end = cleaned.strip_suffix("\r\n").or_else(|| cleaned.strip_suffix('\n')).or_else(|| cleaned.strip_suffix('\r')).unwrap_or(cleaned);
     if trimmed_end.is_empty() {
         return Ok(Vec::new());
     }
 
     let raw_rows = split_tsv_records(trimmed_end);
-    let mut total_cells = 0usize;
-    let mut rows = Vec::with_capacity(raw_rows.len());
-    for raw_row in raw_rows {
-        total_cells = total_cells.saturating_add(raw_row.len());
-        if total_cells > MAX_CLIPBOARD_CELLS {
-            return Err(GridToolError::ClipboardTooLarge { cell_count: total_cells, max: MAX_CLIPBOARD_CELLS });
-        }
-        let parsed_row = raw_row.into_iter().map(|tok| Cell::parse_import_token(&tok, decimal_separator, parse_asterisk_exclusions)).collect();
-        rows.push(parsed_row);
+    let total_cells = raw_rows.iter().map(Vec::len).sum();
+    if total_cells > MAX_CLIPBOARD_CELLS {
+        return Err(GridToolError::ClipboardTooLarge { cell_count: total_cells, max: MAX_CLIPBOARD_CELLS });
     }
+    let (inferred_dec, inferred_thousands) =
+        curvebook_doc::infer_number_separators(raw_rows.iter().take(32).flat_map(|row| row.iter().map(String::as_str)), '\t');
+    let thousands = if inferred_dec == decimal_separator { inferred_thousands } else { None };
+    let rows = raw_rows
+        .into_iter()
+        .map(|raw_row| {
+            raw_row
+                .into_iter()
+                .map(|tok| Cell::parse_import_token_with_thousands(&tok, decimal_separator, thousands, parse_asterisk_exclusions))
+                .collect()
+        })
+        .collect();
     Ok(rows)
 }
 

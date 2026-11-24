@@ -2064,6 +2064,19 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::CommitImportWizard { close_after } => {
+            if app.grid.import_wizard.origin_kind == ImportOriginKind::XlsxWorkbook {
+                if !app.grid.import_wizard.xlsx_sheets.is_empty() && app.grid.import_wizard.selected_xlsx_sheet_names().is_empty() {
+                    return Err(EngineError::with_code(ErrorCode::BadInput, "select at least one worksheet before importing the .xlsx workbook"));
+                }
+                let Some(params) = app.grid.import_wizard.build_xlsx_import_params() else {
+                    return Err(EngineError::with_code(ErrorCode::BadInput, "choose an .xlsx file path or load workbook bytes before importing"));
+                };
+                let outcome = app.execute_session_ui_cmd("table.importXlsx", params)?;
+                if close_after {
+                    app.grid.import_wizard.open = false;
+                }
+                return Ok(UiIntentOutcome::Engine { command_id: String::from("table.importXlsx"), outcome });
+            }
             let doc = app.session.document();
             let existing_target = app
                 .grid
@@ -2304,17 +2317,24 @@ fn execute_grid_clipboard_paste(app: &mut UiApp, start_coord: Option<curvebook_t
         return Ok(UiIntentOutcome::ShellUpdated);
     }
     let anchor = start_coord.or(app.grid.tool.active).unwrap_or(curvebook_tools::GridCellCoord::new(0, 0, 0));
-    let outcome = app.execute_session_ui_cmd(
-        "table.paste",
-        serde_json::json!({
-            "sheet_id": ds_id.as_str(),
-            "text": clip,
-            "start_row": anchor.row,
-            "start_col": anchor.col,
-            "start_subcol": anchor.subcol,
-            "propagate_title_header": false,
-        }),
-    )?;
+    let clean_clip = clip.strip_prefix('\u{FEFF}').unwrap_or(&clip).replace('\0', "");
+    let mut params = serde_json::json!({
+        "sheet_id": ds_id.as_str(),
+        "text": clean_clip,
+        "decimal_separator": if app.locale_preset.decimal_separator == ',' { "," } else { "auto" },
+        "start_row": anchor.row,
+        "start_col": anchor.col,
+        "start_subcol": anchor.subcol,
+        "propagate_title_header": false,
+    });
+    if app.locale_preset.decimal_separator == ','
+        && !clean_clip.contains(';')
+        && (clean_clip.contains('\t') || clean_clip.lines().all(|line| line.matches(',').count() <= 1))
+        && let Some(obj) = params.as_object_mut()
+    {
+        obj.insert(String::from("delimiter"), serde_json::json!("\t"));
+    }
+    let outcome = app.execute_session_ui_cmd("table.paste", params)?;
     Ok(UiIntentOutcome::Engine { command_id: String::from("table.paste"), outcome })
 }
 

@@ -214,7 +214,7 @@ fn doc_inspect_compact_sections_limits_and_single_sheet_graph_trimming() -> Resu
 fn command_list_list_toolsets_and_compacted_tool_schemas() -> Result<(), String> {
     let mut state = McpServerState::new();
 
-    // Default `command_list({})` omits 105 raw schemas and empty boilerplate fields.
+    // Default `command_list({})` omits 106 raw schemas and empty boilerplate fields.
     let list_default = call_json_ok(&mut state, "command_list", json!({}))?;
     let cmds = list_default["commands"].as_array().ok_or("missing commands")?;
     let fit_entry = cmds.iter().find(|c| c["id"] == json!("fit.run")).ok_or("missing fit.run")?;

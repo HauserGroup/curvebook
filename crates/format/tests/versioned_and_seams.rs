@@ -234,7 +234,7 @@ fn format_registry_lookup_and_roundtrips() {
     let mut reg = FormatRegistry::default_registry();
 
     let import_ids: Vec<&str> = reg.supported_import_formats().into_iter().map(|d| d.id).collect();
-    assert_eq!(import_ids, vec!["curvebook", "curvebook.d", "cbtemplate", "prism", "pzfx", "csv", "tsv"]);
+    assert_eq!(import_ids, vec!["curvebook", "curvebook.d", "cbtemplate", "prism", "pzfx", "xlsx", "csv", "tsv"]);
 
     let export_ids: Vec<&str> = reg.supported_export_formats().into_iter().map(|d| d.id).collect();
     assert_eq!(export_ids, vec!["curvebook", "curvebook.d", "cbtemplate", "csv", "tsv", "json", "svg", "pdf", "png", "tiff", "emf"]);
@@ -244,6 +244,7 @@ fn format_registry_lookup_and_roundtrips() {
     assert_eq!(reg.importer_for_path(Path::new("nested/study.curvebook.d")).unwrap().descriptor().id, "curvebook.d");
     assert_eq!(reg.importer_for_path(Path::new("STUDY.PZFX")).unwrap().descriptor().id, "pzfx");
     assert_eq!(reg.importer_for_path(Path::new("legacy.prism")).unwrap().descriptor().id, "prism");
+    assert_eq!(reg.importer_for_path(Path::new("workbook.XLSX")).unwrap().descriptor().id, "xlsx");
     assert_eq!(reg.exporter_by_format("tif").unwrap().descriptor().id, "tiff");
     assert_eq!(reg.exporter_for_path(Path::new("figure.TIFF")).unwrap().descriptor().id, "tiff");
     assert_eq!(reg.exporter_for_path(Path::new("out.curvebook.d")).unwrap().descriptor().kind, FormatKind::ProjectDir);

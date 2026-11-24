@@ -283,6 +283,7 @@ fn desktop_host_routed_commands_include_all_file_backed_exports_imports_and_temp
         "table.importCsv",
         "table.importPrism",
         "table.importPzfx",
+        "table.importXlsx",
         "table.exportCsv",
         "analysis.exportJson",
         "analysis.exportCsv",

@@ -1,6 +1,6 @@
 # CurveBook Command Reference
 
-Registered commands: 105
+Registered commands: 106
 
 ## Project & Files (`project`)
 
@@ -287,7 +287,7 @@ Registered commands: 105
 - **Menu:** `File/Import/CSV or TSV...`
 - **Summary:** Import CSV or TSV data from a file path or inline text into a new or existing data table.
 - **Beginner note:** Create a new data table or populate an existing one from a CSV or TSV file.
-- **Parameters:** `anchor` (object), `archetype` (any), `csv` (any), `decimal_separator` (any), `delimiter` (any), `filter` (any), `has_header` (boolean), `has_row_titles` (boolean), `link` (boolean), `mode` (string), `normalize_decimal` (boolean), `path` (any), `propagate_title_header` (boolean), `replace` (boolean), `replicates` (integer), `sheet_id` (any), `skip_contiguous_blanks` (boolean), `start_col` (integer), `start_row` (integer), `start_subcol` (integer), `subcolumn_mode` (any), `title` (any), `transpose` (boolean)
+- **Parameters:** `anchor` (object), `archetype` (any), `csv` (any), `decimal_separator` (any), `delimiter` (any), `filter` (any), `has_header` (boolean), `has_row_titles` (boolean), `header_rows` (integer), `link` (boolean), `mode` (string), `normalize_decimal` (boolean), `path` (any), `propagate_title_header` (boolean), `replace` (boolean), `replicates` (integer), `sheet_id` (any), `skip_contiguous_blanks` (boolean), `start_col` (integer), `start_row` (integer), `start_subcol` (integer), `subcolumn_mode` (any), `title` (any), `transpose` (boolean)
 
 ### `table.importPlateMap` — Import Plate Map
 
@@ -320,6 +320,14 @@ Registered commands: 105
 - **Summary:** Pivot a long-format table (rows/headers or CSV/TSV file) into a Column, Grouped, XY, or MultipleVariables sheet.
 - **Beginner note:** Reshape long/tidy tabular records into a grouped or XY data table using column mappings.
 - **Parameters:** `csv` (any), `decimal_sep` (any), `delimiter` (any), `excluded_col` (any), `group_col` (any), `headers` (any), `mapping` (any), `normalize_decimal` (boolean), `path` (any), `replicate_col` (any), `rows` (any), `sheet_id` (any), `target_kind` (any), `title` (any), `value_col` (any), `x_col` (any)
+
+### `table.importXlsx` — Import XLSX Workbook
+
+- **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM | MAY_DISCARD_DATA`
+- **Menu:** `File/Import/XLSX Workbook...`
+- **Summary:** Import one or more worksheets (or list available sheets) from an .xlsx workbook file, base64, or byte array.
+- **Beginner note:** Open or merge worksheets from a spreadsheet workbook (.xlsx) into the project.
+- **Parameters:** `archetype` (any), `bytes` (any), `bytes_base64` (any), `has_header` (boolean), `has_row_titles` (boolean), `header_rows` (integer), `include_hidden` (boolean), `list_sheets` (boolean), `merge` (boolean), `path` (any), `sheet_indices` (any), `sheets` (any), `subcolumn_mode` (any)
 
 ### `table.paste` — Paste Special
 
