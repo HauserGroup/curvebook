@@ -1871,8 +1871,17 @@ fn is_jmp_match_exempt(policy: PrismPolicy<'_>) -> bool {
     matches!(policy, PrismPolicy::RustIdent { allow_dsl_jmp: true, .. })
 }
 
+/// Whether one `prism` match is allowed under `policy`.
+///
+/// The lowercase `.prism` file extension (`.prism`, `*.prism`, `experiment.prism`) names a file
+/// format, not a product, so it is allowed under every policy, including [`PrismPolicy::Strict`]
+/// surfaces such as page titles, meta descriptions, and UI text (maintainer decision 2026-11-24,
+/// `R12.8`). Bare `prism`/`Prism`, capitalised `.Prism`, and domain-like `.prism.<tld>` stay flagged.
 fn is_prism_match_exempt(raw: &str, lower: &str, pos: usize, end: usize, policy: PrismPolicy<'_>) -> bool {
     let is_lower_dot_ext = raw.as_bytes().get(pos..end) == Some(b"prism") && is_prism_extension_token(lower.as_bytes(), pos, end);
+    if is_lower_dot_ext {
+        return true;
+    }
     let is_cmd_prism = matches!(raw.get(pos.saturating_sub(12)..end), Some("table.importPrism"))
         || matches!(raw.get(pos.saturating_sub(6)..end), Some("importPrism"));
     let is_xml_prism_tag = raw.get(pos..pos + 9) == Some("PrismFile") || raw.get(pos..pos + 15) == Some("PrismXMLVersion");
@@ -4958,11 +4967,11 @@ pub fn dialog_strings() {
     let _ = (ok_brand, ok_slug, ok_art, ok_win95, ok_filter);
 
     let bad_bare = "prism";
-    let bad_sentence = "Switch to .prism for layout";
+    let ok_sentence = "Switch to .prism for layout";
     let bad_vendor = "GraphPad";
     let bad_suite = "ArtCraft";
     let bad_cap = "Prism";
-    let _ = (bad_bare, bad_sentence, bad_vendor, bad_suite, bad_cap);
+    let _ = (bad_bare, ok_sentence, bad_vendor, bad_suite, bad_cap);
 }
 "#;
         scan_file("crates/ui-egui/src/dialogs_canvas.rs", ui_rs, &mut hits);
@@ -4988,7 +4997,6 @@ pub fn status_line() -> &'static str {
             vec![
                 BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 13, brand: "artcraft" },
                 BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 10, brand: "prism" },
-                BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 11, brand: "prism" },
                 BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 12, brand: "graphpad" },
                 BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 14, brand: "prism" },
                 BrandHit { path: String::from("apps/curvebook-web/src/lib.rs"), line: 12, brand: "prism" },
@@ -5044,8 +5052,8 @@ pub fn status_line() -> &'static str {
         );
 
         assert_eq!(
-            check_text_runs_strict("window_labels", ["CurveBook", "Import .prism archive"]),
-            vec![BrandHit { path: String::from("window_labels"), line: 2, brand: "prism" }]
+            check_text_runs_strict("window_labels", ["CurveBook", "Import .prism archive", "Import Prism archive"]),
+            vec![BrandHit { path: String::from("window_labels"), line: 3, brand: "prism" }]
         );
 
         let labeled =
@@ -5109,7 +5117,6 @@ pub fn status_line() -> &'static str {
         assert_eq!(
             check_manifest_metadata("manifest.json", dirty_manifest),
             vec![
-                BrandHit { path: String::from("manifest.json"), line: 2, brand: "prism" },
                 BrandHit { path: String::from("manifest.json"), line: 3, brand: "prism" },
                 BrandHit { path: String::from("manifest.json"), line: 4, brand: "graphpad" },
             ]
@@ -5424,7 +5431,8 @@ it: "Copia Statistica report",
         let tool_hits = super::check_mcp_rpc_response("tools", "tools/list", None, &dirty_tools);
         assert!(tool_hits.iter().any(|h| h.brand == "graphpad"), "{tool_hits:?}");
         assert!(tool_hits.iter().any(|h| h.brand == "originpro"), "{tool_hits:?}");
-        assert!(tool_hits.iter().filter(|h| h.brand == "prism").count() >= 2, "{tool_hits:?}");
+        // Only the bare product name is a hit; the `.prism`-only descriptions name a file format (`R12.8`).
+        assert_eq!(tool_hits.iter().filter(|h| h.brand == "prism").count(), 1, "{tool_hits:?}");
 
         let dirty_prompt = serde_json::json!({
             "jsonrpc": "2.0",
@@ -5476,6 +5484,27 @@ it: "Copia Statistica report",
         });
         let svg_hits = super::check_mcp_rpc_response("export", "tools/call", Some("export"), &dirty_svg_export);
         assert!(svg_hits.iter().any(|h| h.brand == "prism"), "{svg_hits:?}");
+    }
+
+    #[test]
+    fn r12_8_lowercase_dot_prism_extension_is_allowed_on_strict_surfaces() {
+        let page = |title: &str| {
+            format!("<html><head><title>{title}</title><meta name=\"description\" content=\"{title}\"></head><body><h1>{title}</h1></body></html>")
+        };
+        let prism_hits = |html: &str| super::check_html_metadata("docs/page.html", html).into_iter().filter(|h| h.brand == "prism").count();
+
+        assert_eq!(prism_hits(&page("Open .pzfx and .prism files")), 0);
+        assert_eq!(prism_hits(&page("Filter *.prism or experiment.prism")), 0);
+        // The product name, a capitalised extension, and a domain stay flagged.
+        assert!(prism_hits(&page("Open Prism files")) > 0);
+        assert!(prism_hits(&page("Open .Prism files")) > 0);
+        assert!(prism_hits(&page("See example.prism.com")) > 0);
+
+        let mut hits = Vec::new();
+        super::collect_line_words("docs/page.html", 1, "Export .prism tables", &["prism"], super::PrismPolicy::Strict, &mut hits);
+        assert!(hits.is_empty(), "{hits:?}");
+        super::collect_line_words("docs/page.html", 1, "Export prism tables", &["prism"], super::PrismPolicy::Strict, &mut hits);
+        assert_eq!(hits.len(), 1, "{hits:?}");
     }
 
     #[test]
