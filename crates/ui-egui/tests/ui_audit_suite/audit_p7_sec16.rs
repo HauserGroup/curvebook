@@ -450,7 +450,8 @@ fn fa_sec16_09_footer_cursor_uses_paper_coords_and_popovers_dismiss_on_esc_click
     let expected_x = format!("X: {:.1}, Y: {:.1} pt", scene_sz[0] * 0.5, scene_sz[1] * 0.5);
     assert!(summary.label.contains(&expected_x), "expected scene-center readout `{expected_x}` in footer summary `{}`", summary.label);
 
-    // Dismiss sheet switcher with Escape.
+    // Dismiss collapsed-Navigator sheet switcher with Escape.
+    driver.click_widget_id("nav.collapse_rail")?;
     driver.click_widget_id("status.sheet_switcher")?;
     assert!(driver.state().views.status_footer.sheet_switcher_open);
     driver.press_egui_key(egui::Key::Escape, egui::Modifiers::NONE);
@@ -614,7 +615,7 @@ fn fa_sec16_11_split_preview_focus_recorded_and_note_pinned_persists_across_shee
     app.sync_views();
 
     let mut driver = make_shell_driver(app, 1280.0, 760.0);
-    assert!(driver.frame_meta().find_by_widget_id("split.focus_in_grid").is_some(), "Focus in Grid must be inspectable");
+    assert!(driver.frame_meta().find_by_widget_id("grid.cell.0.0.0").is_some(), "Unified split DataGrid cell must be inspectable");
 
     // Pin floating note on Graph, close Split and switch to Column sheet -> pinned note persists cleanly across sheet switch.
     let pin_wid = format!("floating_note.{g_id}.pin-1.pin");

@@ -290,7 +290,7 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
     let offscreen_val = json!({ "result": serde_json::to_value(&offscreen_snap)? });
 
     let mut live_bounds_before = std::collections::HashMap::new();
-    for wid in ["toolbar.home", "toolbar.command_palette", "toolbar.analyze", "sheet.tab.ds-qa3"] {
+    for wid in ["toolbar.home", "toolbar.command_palette", "toolbar.analyze", "nav.sheet.ds-qa3"] {
         let live_entry = native_app
             .inspect_meta()
             .find_by_widget_id(wid)

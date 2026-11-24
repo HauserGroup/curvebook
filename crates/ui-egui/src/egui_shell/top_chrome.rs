@@ -313,15 +313,6 @@ struct PopupActionButtonSpec<'a> {
     disabled_reason: Option<&'a str>,
 }
 
-#[derive(Clone, Copy)]
-struct ChromeTabSpec<'a> {
-    widget_id: &'a str,
-    label: &'a str,
-    selected: bool,
-    enabled: bool,
-    max_w: f32,
-}
-
 /// Render Tier 1 (`32 pt`) Application Bar and Tier 2 (`38 pt`) Contextual Action Strip cleanly.
 ///
 /// Preserves exact widget IDs (`toolbar.home`, `toolbar.command_palette`,
@@ -1367,7 +1358,10 @@ fn render_split_preset_popup(
                 if dg.clicked()
                     && let (Some(ds), Some(gs)) = (first_ds.as_ref(), first_gs.as_ref())
                 {
-                    intents.push_ui("ui.split.toggle", json!({ "enabled": true, "primary_sheet_id": ds, "secondary_sheet_id": gs, "ratio": 0.5 }));
+                    intents.push_ui(
+                        "ui.split.toggle",
+                        json!({ "enabled": true, "primary_sheet_id": ds, "secondary_sheet_id": gs, "ratio": 0.4, "auto_pin_graph": true }),
+                    );
                     state.split_menu_open = false;
                 }
 
@@ -1387,7 +1381,10 @@ fn render_split_preset_popup(
                 if dr.clicked()
                     && let (Some(ds), Some(rs)) = (first_ds.as_ref(), first_rs.as_ref())
                 {
-                    intents.push_ui("ui.split.toggle", json!({ "enabled": true, "primary_sheet_id": ds, "secondary_sheet_id": rs, "ratio": 0.5 }));
+                    intents.push_ui(
+                        "ui.split.toggle",
+                        json!({ "enabled": true, "primary_sheet_id": ds, "secondary_sheet_id": rs, "ratio": 0.5, "auto_pin_graph": false }),
+                    );
                     state.split_menu_open = false;
                 }
 
@@ -1407,7 +1404,10 @@ fn render_split_preset_popup(
                 if two.clicked()
                     && let Some((p, s)) = two_up_pair.as_ref()
                 {
-                    intents.push_ui("ui.split.toggle", json!({ "enabled": true, "primary_sheet_id": p, "secondary_sheet_id": s, "ratio": 0.5 }));
+                    intents.push_ui(
+                        "ui.split.toggle",
+                        json!({ "enabled": true, "primary_sheet_id": p, "secondary_sheet_id": s, "ratio": 0.5, "auto_pin_graph": false }),
+                    );
                     state.split_menu_open = false;
                 }
 
@@ -1497,25 +1497,21 @@ fn render_tier2_strip(
     let Tier1BarInput { app, ctx_in, enabled } = input;
     let tokens = ctx_in.tokens;
     let actions = collect_tier2_actions(app, enabled);
-    let tab_entries = collect_all_sheet_tabs(app);
     let strip_w = ui.available_width().max(40.0);
-
-    // Reserve tab strip and overflow room so every visible button & tab remains strictly inside `strip_w`.
-    let tabs_reserve = if tab_entries.is_empty() { 0.0 } else { (strip_w * 0.34).clamp(96.0, 280.0) };
-    let action_budget = (strip_w - tabs_reserve).max(110.0);
+    let action_budget = strip_w.max(110.0);
 
     let mut slots = Vec::with_capacity(actions.len());
     for act in &actions {
-        let (galley, _) = layout_single_line_job(ui.painter(), &act.label, 152.0, tokens.text_primary, 12.0);
-        let desired_width_pt = (galley.size().x + 16.0).clamp(tokens.metrics.min_toolbar_target_pt, 168.0);
+        let (galley, _) = layout_single_line_job(ui.painter(), &act.label, 152.0, tokens.text_primary, tokens.metrics.font_ui_body_pt);
+        let desired_width_pt = (galley.size().x + tokens.metrics.space_xl).clamp(tokens.metrics.min_toolbar_target_pt, 168.0);
         slots.push(RankedToolbarSlot { rank: act.rank, desired_width_pt });
     }
 
     let overflow_btn_w = 34.0;
-    let plan = fit_ranked_toolbar(action_budget, tokens.metrics.space_sm, overflow_btn_w, tokens.metrics.min_toolbar_target_pt, 8, &slots);
+    let plan = fit_ranked_toolbar(action_budget, tokens.metrics.space_xs, overflow_btn_w, tokens.metrics.min_toolbar_target_pt, 8, &slots);
 
     ui.horizontal_centered(|ui| {
-        ui.spacing_mut().item_spacing.x = tokens.metrics.space_sm;
+        ui.spacing_mut().item_spacing.x = tokens.metrics.space_xs;
         for &idx in &plan.visible_indices {
             let act = &actions[idx];
             let resp = chrome_button_fitted_with_rank(
@@ -1565,56 +1561,7 @@ fn render_tier2_strip(
                 state.overflow_menu_open = next;
             }
         }
-
-        let rem_tabs_w = ui.available_width().max(0.0);
-        if !tab_entries.is_empty() && rem_tabs_w >= 44.0 {
-            ui.separator();
-            render_tier2_sheet_tabs(ui, tokens, meta, intents, &tab_entries, enabled);
-        }
     });
-}
-
-fn render_tier2_sheet_tabs(
-    ui: &mut egui::Ui,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-    tabs: &[(String, String, bool)],
-    enabled: bool,
-) {
-    let switcher_w = ui.available_width().max(32.0);
-    let max_vis_tabs = ((switcher_w / 62.0).floor() as usize).clamp(1, tabs.len());
-    let gap = 6.0 * max_vis_tabs.saturating_sub(1) as f32;
-    let max_tab_w = ((switcher_w - gap) / max_vis_tabs as f32).clamp(32.0, 148.0);
-    for (sheet_id, title, is_active) in tabs.iter().take(max_vis_tabs) {
-        let wid = format!("sheet.tab.{sheet_id}");
-        let resp = chrome_tab(ui, tokens, meta, ChromeTabSpec { widget_id: &wid, label: title, selected: *is_active, enabled, max_w: max_tab_w });
-        if resp.clicked() && enabled && !*is_active {
-            intents.push_engine("sheet.select", json!({ "sheet_id": sheet_id }));
-        }
-    }
-}
-
-fn collect_all_sheet_tabs(app: &UiApp) -> Vec<(String, String, bool)> {
-    let doc = app.document();
-    let active = doc.active_sheet_id.as_ref();
-    let mut tabs = Vec::new();
-    for ds in &doc.data_sheets {
-        tabs.push((ds.id.as_str().to_owned(), ds.title.clone(), active == Some(&ds.id)));
-    }
-    for info in &doc.info_sheets {
-        tabs.push((info.id.as_str().to_owned(), info.title.clone(), active == Some(&info.id)));
-    }
-    for rs in &doc.result_sheets {
-        tabs.push((rs.id.as_str().to_owned(), rs.title().to_owned(), active == Some(&rs.id)));
-    }
-    for gs in &doc.graph_sheets {
-        tabs.push((gs.id.as_str().to_owned(), gs.title.clone(), active == Some(&gs.id)));
-    }
-    for ls in &doc.layout_sheets {
-        tabs.push((ls.id.as_str().to_owned(), ls.title.clone(), active == Some(&ls.id)));
-    }
-    tabs
 }
 
 fn detect_tier2_context(app: &UiApp) -> Tier2SheetContext {
@@ -2476,68 +2423,4 @@ fn render_command_palette_icon_button(
         );
     }
     resp.on_hover_text(tooltip)
-}
-
-fn chrome_tab(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: ChromeTabSpec<'_>) -> egui::Response {
-    let ChromeTabSpec { widget_id, label, selected, enabled, max_w } = spec;
-    let text_max_w = (max_w - 14.0).max(16.0);
-    let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, text_max_w, tokens.text_primary, 11.5);
-    let w = (galley.size().x + 14.0).clamp(32.0_f32.min(max_w), max_w);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), if enabled { Sense::click() } else { Sense::hover() });
-    super::widgets::paint_interactive_chrome(
-        ui,
-        rect,
-        tokens,
-        super::widgets::InteractiveChromeSpec {
-            radius: CornerRadius::same(tokens.metrics.radius_md),
-            base_bg: if enabled { tokens.surface_bg } else { tokens.panel_bg },
-            base_border: Some(if enabled { tokens.border } else { tokens.divider }),
-            hovered: resp.hovered(),
-            selected,
-            pressed: resp.is_pointer_button_down_on(),
-            enabled,
-        },
-    );
-    let fg = if !enabled {
-        tokens.text_disabled
-    } else if selected {
-        tokens.text_strong
-    } else {
-        tokens.text_primary
-    };
-    ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
-        Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
-        galley,
-        fg,
-    );
-
-    let ak_label = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::Tab, enabled, selected, ak_label.clone()));
-    let resp = if !enabled {
-        resp.on_hover_text("modal dialog is active")
-    } else if ellipsized {
-        resp.on_hover_text(label)
-    } else {
-        resp
-    };
-
-    if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
-        meta.record_response(
-            ui,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id,
-                role: "tab",
-                label,
-                command_id: None,
-                value: Some(json!(selected)),
-                enabled,
-                disabled_reason: (!enabled).then_some("modal dialog is active"),
-                z_layer: ZLayer::Workspace,
-                ellipsized,
-                full_label: ellipsized.then_some(label),
-            },
-        );
-    }
-    resp
 }

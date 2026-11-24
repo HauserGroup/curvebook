@@ -409,7 +409,7 @@ fn entry_belongs_to_scope(entry: &FrameInspectNodeMeta, scope_tag: &str) -> bool
     match scope_tag {
         "toolbar" => wid.starts_with("toolbar."),
         "menus" => wid.starts_with("menu."),
-        "tabs" => wid.starts_with("tab.") || wid.starts_with("sheet.tab.") || wid.starts_with("result.tab."),
+        "tabs" => wid.starts_with("tab.") || wid.starts_with("result.tab."),
         "canvas" => {
             wid.starts_with("canvas.")
                 || wid.starts_with("center.pane.")
@@ -3080,7 +3080,7 @@ pub fn find_switch_tab_widget_in_meta<'a>(meta: &'a FrameInspectMeta, target: &P
     match target {
         ParsedSwitchTabTarget::Sheet(sheet_id) => {
             let nav_wid = format!("nav.sheet.{sheet_id}");
-            meta.find_by_widget_id(&nav_wid).or_else(|| meta.find_by_widget_id(&format!("sheet.tab.{sheet_id}")))
+            meta.find_by_widget_id(&nav_wid)
         }
         ParsedSwitchTabTarget::Tab(tab_id) => {
             let candidates = [(*tab_id).to_owned(), format!("result.tab.{tab_id}"), format!("edit.tab.{tab_id}")];
@@ -3558,20 +3558,23 @@ pub fn render_egui_shell_frame_with_host(
     handle_shell_global_shortcuts(&ctx, app, views, &decision, intents);
 
     let content_rect = ctx.content_rect();
-    let layout = tokens.metrics.solve_shell_layout(ShellLayoutInput {
-        viewport_w_pt: content_rect.width(),
-        viewport_h_pt: content_rect.height(),
-        empty_workspace: app.document().total_sheet_count() == 0,
-        navigator_open: app.nav.navigator_open,
-        inspector_open: app.nav.inspector_open,
-        family_open: app.family_open,
-        leading_user_collapsed: views.leading_collapsed_rail,
-        trailing_user_collapsed: views.trailing_collapsed_rail,
-        leading_width_override_pt: views.leading_width_pt,
-        trailing_width_override_pt: views.trailing_width_pt,
-        host_draws_menu_bar: app.host_draws_menu_bar,
-        is_rtl: crate::i18n::is_rtl_locale(&app.locale),
-    });
+    let layout = tokens.metrics.solve_split_shell_layout(
+        ShellLayoutInput {
+            viewport_w_pt: content_rect.width(),
+            viewport_h_pt: content_rect.height(),
+            empty_workspace: app.document().total_sheet_count() == 0,
+            navigator_open: app.nav.navigator_open,
+            inspector_open: app.nav.inspector_open,
+            family_open: app.family_open,
+            leading_user_collapsed: views.leading_collapsed_rail,
+            trailing_user_collapsed: views.trailing_collapsed_rail,
+            leading_width_override_pt: views.leading_width_pt,
+            trailing_width_override_pt: views.trailing_width_pt,
+            host_draws_menu_bar: app.host_draws_menu_bar,
+            is_rtl: crate::i18n::is_rtl_locale(&app.locale),
+        },
+        app.split.enabled,
+    );
     views.last_shell_layout = Some(layout);
 
     let enabled = !decision.modal_backdrop_active;

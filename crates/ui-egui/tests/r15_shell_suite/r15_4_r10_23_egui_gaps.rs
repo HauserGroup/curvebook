@@ -85,9 +85,7 @@ fn assert_clean_section_9_4(driver: &EguiHumanPathDriver<'_, GapsState>, label: 
     }
     let vp = driver.viewport_rect();
     for entry in &driver.frame_meta().entries {
-        if (entry.widget_id.starts_with("toolbar.") || entry.widget_id.starts_with("menu.") || entry.widget_id.starts_with("sheet.tab."))
-            && entry.clipped_rect.right() > vp.right() + 0.5
-        {
+        if (entry.widget_id.starts_with("toolbar.") || entry.widget_id.starts_with("menu.")) && entry.clipped_rect.right() > vp.right() + 0.5 {
             return Err(format!(
                 "{label}: chrome widget `{}` overflowed viewport right edge {:.1}: {:?}",
                 entry.widget_id,

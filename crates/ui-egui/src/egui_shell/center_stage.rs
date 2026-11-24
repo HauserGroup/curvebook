@@ -7,8 +7,7 @@ use std::collections::BTreeMap;
 
 use curvebook_chart::preflight_check_scene;
 use curvebook_doc::{
-    CellValue, DataSheet, FloatingNote, GraphSheet, InfoSheet, LayoutItem, LayoutSheet, ProjectDocument, ResultSheet, SheetFolderKind, SheetId,
-    TableArchetype,
+    FloatingNote, GraphSheet, InfoSheet, LayoutItem, LayoutSheet, ProjectDocument, ResultSheet, SheetFolderKind, SheetId, TableArchetype,
 };
 use curvebook_palette::Rgba8;
 use curvebook_text::expand_template_hooks;
@@ -19,7 +18,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::dialogs_canvas::AssumptionDiagnosticBanner;
 use crate::egui_shell::canvas_view::{CanvasViewContext, CanvasViewEguiState, render_canvas_view_for_sheet};
-use crate::egui_shell::data_grid::{ColumnGridRenderContext, DataGridScrollTarget, render_data_grid};
+use crate::egui_shell::data_grid::{ColumnGridEguiState, ColumnGridRenderContext, DataGridScrollTarget, render_data_grid_for_sheet};
 use crate::egui_shell::info_view::{InfoViewEguiState, render_info_view_for_sheet};
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
 use crate::egui_shell::results_view::{ResultsViewEguiState, render_results_view_for_sheet};
@@ -40,7 +39,6 @@ const MIN_SPLIT_RATIO: f32 = 0.15;
 const MAX_SPLIT_RATIO: f32 = 0.85;
 const DEFAULT_SPLIT_RATIO: f32 = 0.50;
 const SPLITTER_VISUAL_PT: f32 = 4.0;
-const PANE_HEADER_HEIGHT_PT: f32 = 24.0;
 const BOTTOM_BANNER_HEIGHT_PT: f32 = 32.0;
 const FLOATING_NOTE_HEADER_H_PT: f32 = 26.0;
 const FLOATING_NOTE_MIN_W_PT: f32 = 160.0;
@@ -127,6 +125,8 @@ pub struct CenterStageEguiState {
     pub note_pinned: BTreeMap<(SheetId, String), bool>,
     /// Active resize corner gesture for a `FloatingNote` card.
     pub active_floating_note_resize: Option<(SheetId, usize)>,
+    /// Independent `DataGrid` view state when the secondary split pane displays a `DataSheet` (`R20.3`).
+    pub secondary_column_grid: ColumnGridEguiState,
     /// Independent `InfoSheet` view state when the secondary split pane displays an `InfoSheet`.
     pub secondary_info_view: InfoViewEguiState,
     /// Independent `ResultSheet` view state when the secondary split pane displays a `ResultSheet`.
@@ -161,6 +161,7 @@ impl Default for CenterStageEguiState {
             note_collapsed: BTreeMap::new(),
             note_pinned: BTreeMap::new(),
             active_floating_note_resize: None,
+            secondary_column_grid: ColumnGridEguiState::default(),
             secondary_info_view: InfoViewEguiState::default(),
             secondary_results_view: ResultsViewEguiState::default(),
             secondary_canvas_view: CanvasViewEguiState::default(),
@@ -637,17 +638,64 @@ struct SinglePaneTarget<'a> {
     enabled: bool,
 }
 
-struct SplitSheetPreviewSpec<'a> {
-    ds: &'a DataSheet,
-    slot: SplitPaneSlot,
-    tokens: &'a Tokens,
-    enabled: bool,
-}
-
 fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContext<'_>, work_rect: Rect, enabled: bool, io: &mut StageFrameIo<'_>) {
     let StageFrameIo { views, meta, intents, report } = io;
     let doc = app.document();
-    let orientation = if work_rect.width() >= 720.0 { SplitOrientation::Horizontal } else { SplitOrientation::Vertical };
+    let orientation = if work_rect.width() >= ctx_in.tokens.metrics.split_vertical_breakpoint_w {
+        SplitOrientation::Horizontal
+    } else if work_rect.height() >= ctx_in.tokens.metrics.split_vertical_min_h {
+        SplitOrientation::Vertical
+    } else {
+        SplitOrientation::CompactSinglePane
+    };
+
+    let (primary_id, secondary_resolved) = app.split.resolve_sheets(doc);
+    let secondary_id = secondary_resolved.or_else(|| pick_fallback_secondary_sheet(doc, primary_id.as_ref())).or_else(|| primary_id.clone());
+
+    if orientation == SplitOrientation::CompactSinglePane {
+        let show_secondary = if doc.active_sheet_id.as_ref() == secondary_id.as_ref() && primary_id != secondary_id {
+            true
+        } else if doc.active_sheet_id.as_ref() == primary_id.as_ref() {
+            false
+        } else {
+            views.center_stage.focused_split_pane == SplitPaneSlot::Secondary
+        };
+        let visible_slot = if show_secondary { SplitPaneSlot::Secondary } else { SplitPaneSlot::Primary };
+        let visible_sheet = if show_secondary { secondary_id.as_ref() } else { primary_id.as_ref() };
+        views.center_stage.focused_split_pane = visible_slot;
+        report.primary_rect_pt = Some(work_rect);
+        report.secondary_rect_pt = None;
+
+        let header_h = ctx_in.tokens.metrics.panel_header_h.min(work_rect.height());
+        let header_rect = Rect::from_min_max(work_rect.min, pos2(work_rect.right(), work_rect.top() + header_h));
+        let body_rect = Rect::from_min_max(pos2(work_rect.left(), header_rect.bottom()), work_rect.max);
+        render_compact_split_flip_header(
+            ui,
+            doc,
+            header_rect,
+            primary_id.as_ref(),
+            secondary_id.as_ref(),
+            show_secondary,
+            ctx_in.tokens,
+            enabled,
+            meta,
+            intents,
+        );
+        let pane_mode = visible_sheet.map_or(CenterStageMode::Welcome, |id| mode_for_sheet(doc, id));
+        let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)));
+        body_ui.set_clip_rect(body_rect);
+        let mut pane_io = StageFrameIo { views, meta, intents, report };
+        render_single_pane_mode(
+            &mut body_ui,
+            app,
+            SinglePaneTarget { mode: pane_mode, sheet_id: visible_sheet, slot: visible_slot, enabled },
+            ctx_in,
+            &mut pane_io,
+        );
+        sync_two_way_split_brushing(app, pane_io.views, primary_id.as_ref(), secondary_id.as_ref(), pane_io.intents);
+        return;
+    }
+
     let mut ratio = resolve_effective_split_ratio(app, &mut views.center_stage);
 
     let (mut primary_rect, mut divider_visual_rect, divider_hit_rect, mut secondary_rect) =
@@ -659,15 +707,17 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
     if enabled {
         let cursor = match orientation {
             SplitOrientation::Horizontal => egui::CursorIcon::ResizeHorizontal,
-            SplitOrientation::Vertical => egui::CursorIcon::ResizeVertical,
+            SplitOrientation::Vertical | SplitOrientation::CompactSinglePane => egui::CursorIcon::ResizeVertical,
         };
         if divider_resp.hovered() || divider_resp.dragged() {
             ui.ctx().set_cursor_icon(cursor);
         }
         if divider_resp.double_clicked() {
-            ratio = DEFAULT_SPLIT_RATIO;
+            let is_data_graph = primary_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some())
+                && secondary_id.as_ref().is_some_and(|id| doc.graph_sheet(id).is_some());
+            ratio = if is_data_graph { 0.40 } else { DEFAULT_SPLIT_RATIO };
             views.center_stage.split_ratio_override = Some(ratio);
-            views.center_stage.last_seen_app_split_ratio = Some(f64::from(ratio).clamp(0.2, 0.8));
+            views.center_stage.last_seen_app_split_ratio = Some(f64::from(ratio).clamp(0.15, 0.85));
             intents.push(UiIntent::SetSplitRatio { ratio: f64::from(ratio) });
             (primary_rect, divider_visual_rect, _, secondary_rect) =
                 compute_split_geometries(work_rect, orientation, ratio, ctx_in.tokens.metrics.splitter_hit_slop_w);
@@ -676,11 +726,11 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
             if let Some(pointer) = divider_resp.interact_pointer_pos() {
                 let raw = match orientation {
                     SplitOrientation::Horizontal => (pointer.x - work_rect.left()) / work_rect.width().max(1.0),
-                    SplitOrientation::Vertical => (pointer.y - work_rect.top()) / work_rect.height().max(1.0),
+                    SplitOrientation::Vertical | SplitOrientation::CompactSinglePane => (pointer.y - work_rect.top()) / work_rect.height().max(1.0),
                 };
                 ratio = raw.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO);
                 views.center_stage.split_ratio_override = Some(ratio);
-                views.center_stage.last_seen_app_split_ratio = Some(f64::from(ratio).clamp(0.2, 0.8));
+                views.center_stage.last_seen_app_split_ratio = Some(f64::from(ratio).clamp(0.15, 0.85));
                 intents.push(UiIntent::SetSplitRatio { ratio: f64::from(ratio) });
                 (primary_rect, divider_visual_rect, _, secondary_rect) =
                     compute_split_geometries(work_rect, orientation, ratio, ctx_in.tokens.metrics.splitter_hit_slop_w);
@@ -691,7 +741,15 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
     }
 
     let divider_color = if divider_resp.hovered() || divider_resp.dragged() { ctx_in.tokens.accent } else { ctx_in.tokens.divider };
-    ui.painter().rect_filled(divider_visual_rect, CornerRadius::ZERO, divider_color);
+    ui.painter().rect_filled(divider_visual_rect, CornerRadius::ZERO, ctx_in.tokens.panel_bg);
+    match orientation {
+        SplitOrientation::Horizontal => {
+            ui.painter().vline(divider_visual_rect.center().x, divider_visual_rect.y_range(), Stroke::new(1.0, divider_color));
+        }
+        SplitOrientation::Vertical | SplitOrientation::CompactSinglePane => {
+            ui.painter().hline(divider_visual_rect.x_range(), divider_visual_rect.center().y, Stroke::new(1.0, divider_color));
+        }
+    }
     meta.record_response(
         ui,
         &divider_resp,
@@ -708,9 +766,6 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
             full_label: None,
         },
     );
-
-    let (primary_id, secondary_resolved) = app.split.resolve_sheets(doc);
-    let secondary_id = secondary_resolved.or_else(|| pick_fallback_secondary_sheet(doc, primary_id.as_ref())).or_else(|| primary_id.clone());
 
     report.primary_rect_pt = Some(primary_rect);
     report.secondary_rect_pt = Some(secondary_rect);
@@ -758,10 +813,72 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
     sync_two_way_split_brushing(app, views, primary_id.as_ref(), secondary_id.as_ref(), intents);
 }
 
+#[allow(clippy::too_many_arguments)]
+fn render_compact_split_flip_header(
+    ui: &mut egui::Ui,
+    doc: &ProjectDocument,
+    header_rect: Rect,
+    primary_id: Option<&SheetId>,
+    secondary_id: Option<&SheetId>,
+    show_secondary: bool,
+    tokens: &Tokens,
+    enabled: bool,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    ui.painter().rect_filled(header_rect, CornerRadius::ZERO, tokens.panel_bg);
+    ui.painter().hline(header_rect.x_range(), header_rect.bottom(), Stroke::new(1.0, tokens.divider));
+    ui.painter().hline(header_rect.x_range(), header_rect.top() + 1.0, Stroke::new(tokens.metrics.stroke_focus_pt, tokens.accent));
+
+    let p_title = primary_id.and_then(|id| doc_sheet_title(doc, id)).unwrap_or("Sheet 1");
+    let s_title = secondary_id.and_then(|id| doc_sheet_title(doc, id)).unwrap_or("Sheet 2");
+
+    let mut hdr_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(header_rect.shrink2(vec2(tokens.metrics.space_md, tokens.metrics.space_xxs)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    hdr_ui.set_clip_rect(header_rect);
+
+    let close_w = 48.0;
+    let seg_w = (hdr_ui.available_width() - close_w - tokens.metrics.space_md).max(120.0);
+    hdr_ui.allocate_ui(vec2(seg_w, tokens.metrics.min_hit_target_pt + tokens.metrics.space_xs), |seg_ui| {
+        let opts = [
+            crate::egui_shell::ui_kit::SegmentedOption { widget_id: "split.compact.primary", label: p_title, tooltip: Some(p_title), value: None },
+            crate::egui_shell::ui_kit::SegmentedOption { widget_id: "split.compact.secondary", label: s_title, tooltip: Some(s_title), value: None },
+        ];
+        if let Some(chosen) =
+            crate::egui_shell::ui_kit::segmented_control(seg_ui, tokens, meta, &opts, usize::from(show_secondary), enabled, ZLayer::Workspace)
+        {
+            let target = if chosen == 1 { secondary_id } else { primary_id };
+            if let Some(sid) = target {
+                intents.push_engine("sheet.select", json!({ "sheet_id": sid.as_str(), "mode": "family" }));
+            }
+        }
+    });
+
+    hdr_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |right_ui| {
+        let (_, clicked) = crate::egui_shell::ui_kit::ghost_action_button(
+            right_ui,
+            tokens,
+            meta,
+            "split.close",
+            "Close",
+            Some("ui.split.toggle"),
+            false,
+            enabled,
+            ZLayer::Workspace,
+        );
+        if clicked {
+            intents.push_ui("ui.split.toggle", json!({ "enabled": false }));
+        }
+    });
+}
+
 fn render_split_pane_container(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContext<'_>, pane: SplitPaneSpec<'_>, io: &mut StageFrameIo<'_>) {
     let SplitPaneSpec { slot, pane_rect, sheet_id, other_sheet_id, locale, enabled, focused } = pane;
     let doc = app.document();
-    let header_h = PANE_HEADER_HEIGHT_PT.min(pane_rect.height());
+    let header_h = ctx_in.tokens.metrics.panel_header_h.min(pane_rect.height());
     let header_rect = Rect::from_min_max(pane_rect.min, pos2(pane_rect.right(), pane_rect.top() + header_h));
     let body_rect = Rect::from_min_max(pos2(pane_rect.left(), header_rect.bottom()), pane_rect.max);
 
@@ -773,11 +890,16 @@ fn render_split_pane_container(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterSt
         io.intents,
     );
 
-    let click_in_pane = ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| pane_rect.contains(p)));
+    let click_in_pane = ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| body_rect.contains(p)));
     if enabled && click_in_pane {
         io.views.center_stage.focused_split_pane = slot;
         if ctx_in.focused_pane != ActiveWorkspacePane::MainCanvasOrGrid {
             io.intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::MainCanvasOrGrid });
+        }
+        if let Some(sid) = sheet_id
+            && doc.active_sheet_id.as_ref() != Some(sid)
+        {
+            io.intents.push_engine("sheet.select", json!({ "sheet_id": sid.as_str(), "mode": "family" }));
         }
     }
 
@@ -785,35 +907,7 @@ fn render_split_pane_container(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterSt
     let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)));
     body_ui.set_clip_rect(body_rect);
 
-    let active_matches = sheet_id.is_some_and(|id| doc.active_sheet_id.as_ref() == Some(id));
-    let can_use_primary_grid_state = slot == SplitPaneSlot::Primary || other_sheet_id != sheet_id;
-
-    if pane_mode == CenterStageMode::ColumnGrid && !(active_matches && can_use_primary_grid_state) {
-        io.report.handled_natively = true;
-        if let Some(ds) = sheet_id.and_then(|id| doc.data_sheet(id)) {
-            render_split_column_sheet_preview(
-                &mut body_ui,
-                app,
-                SplitSheetPreviewSpec { ds, slot, tokens: ctx_in.tokens, enabled },
-                io.meta,
-                io.intents,
-                io.report,
-            );
-        }
-    } else if pane_mode == CenterStageMode::DataGrid && !(active_matches && can_use_primary_grid_state) {
-        io.report.handled_natively = true;
-        if let Some(ds) = sheet_id.and_then(|id| doc.data_sheet(id)) {
-            render_split_non_column_preview(
-                &mut body_ui,
-                app,
-                SplitSheetPreviewSpec { ds, slot, tokens: ctx_in.tokens, enabled },
-                io.meta,
-                io.intents,
-            );
-        }
-    } else {
-        render_single_pane_mode(&mut body_ui, app, SinglePaneTarget { mode: pane_mode, sheet_id, slot, enabled }, ctx_in, io);
-    }
+    render_single_pane_mode(&mut body_ui, app, SinglePaneTarget { mode: pane_mode, sheet_id, slot, enabled }, ctx_in, io);
 
     let meta = &mut *io.meta;
 
@@ -828,7 +922,6 @@ fn render_split_pane_container(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterSt
     let pane_a11y = ui.interact(pane_rect, Id::unique(("center_stage_pane_a11y", pane_wid)), Sense::hover());
     pane_a11y.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Region, enabled, pane_lbl));
     record_region_meta(meta, ui, &pane_a11y, inspect_input(pane_wid, "region", pane_lbl, None, None, enabled, ZLayer::Workspace));
-    draw_focus_ring_if_active(ui, pane_rect, ctx_in.tokens, focused);
 }
 
 fn render_split_pane_header(
@@ -840,19 +933,26 @@ fn render_split_pane_header(
 ) {
     let SplitPaneHeaderSpec { slot, header_rect, sheet_id, other_sheet_id, locale, tokens, enabled, focused } = spec;
     let doc = app.document();
-    let bg = if focused { tokens.active_bg } else { tokens.panel_bg };
-    ui.painter().rect_filled(header_rect, CornerRadius::ZERO, bg);
-    ui.painter().hline(header_rect.x_range(), header_rect.bottom(), Stroke::new(1.0, tokens.border));
+    ui.painter().rect_filled(header_rect, CornerRadius::ZERO, tokens.panel_bg);
+    ui.painter().hline(header_rect.x_range(), header_rect.bottom(), Stroke::new(1.0, tokens.divider));
+    if focused {
+        ui.painter().hline(header_rect.x_range(), header_rect.top() + 1.0, Stroke::new(tokens.metrics.stroke_focus_pt, tokens.accent));
+    }
 
-    let mut hdr_ui =
-        ui.new_child(egui::UiBuilder::new().max_rect(header_rect.shrink2(vec2(6.0, 2.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    hdr_ui.set_clip_rect(header_rect);
-
-    let slot_badge = match slot {
-        SplitPaneSlot::Primary => tr_or_fallback(locale, "w5.split.primary", "Primary"),
-        SplitPaneSlot::Secondary => tr_or_fallback(locale, "w5.split.secondary", "Secondary"),
+    let header_wid = match slot {
+        SplitPaneSlot::Primary => "split.header.primary",
+        SplitPaneSlot::Secondary => "split.header.secondary",
     };
-    hdr_ui.label(RichText::new(slot_badge).small().strong().color(if focused { tokens.accent } else { tokens.text_muted }));
+    let hdr_region = ui.interact(header_rect, Id::unique(("split_pane_header_region", header_wid)), Sense::hover());
+    hdr_region.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Region, enabled, "Split Pane Header"));
+    meta.record_response(ui, &hdr_region, inspect_input(header_wid, "region", "Split Pane Header", None, None, enabled, ZLayer::Workspace));
+
+    let mut hdr_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(header_rect.shrink2(vec2(tokens.metrics.space_md, tokens.metrics.space_xs)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    hdr_ui.set_clip_rect(header_rect);
 
     let current_title = sheet_id.and_then(|id| doc_sheet_title(doc, id)).unwrap_or("(None)");
     let sel_wid = match slot {
@@ -860,8 +960,8 @@ fn render_split_pane_header(
         SplitPaneSlot::Secondary => "split.secondary_selector",
     };
     let all_sheets = collect_all_sheet_ids(doc);
-    let combo = dropdown(("split_pane_sheet", slot), RichText::new(current_title).small())
-        .width((header_rect.width() * 0.40).clamp(72.0, 200.0))
+    let combo = dropdown(("split_pane_sheet", slot), RichText::new(current_title).size(tokens.metrics.font_ui_body_pt))
+        .width((header_rect.width() * 0.52).clamp(96.0, 240.0))
         .enabled(enabled)
         .show_ui(&mut hdr_ui, |combo_ui| {
             for (cand_id, cand_title, kind_badge) in &all_sheets {
@@ -872,6 +972,9 @@ fn render_split_pane_header(
                         SplitPaneSlot::Secondary => "secondary_sheet_id",
                     };
                     intents.push_ui("ui.split.toggle", json!({ "enabled": true, param_key: cand_id.as_str() }));
+                    if doc.active_sheet_id.as_ref() == sheet_id {
+                        intents.push_engine("sheet.select", json!({ "sheet_id": cand_id.as_str(), "mode": "family" }));
+                    }
                 }
             }
         });
@@ -880,51 +983,62 @@ fn render_split_pane_header(
     inspect.full_label = combo.ellipsized.then_some(current_title);
     meta.record_response(&hdr_ui, &combo.response, inspect);
 
-    if let Some(brushed) = app.brushed_cell.as_ref() {
-        let brush_label = format!("Brush R{}C{}", brushed.row + 1, brushed.col + 1);
-        hdr_ui.label(RichText::new(brush_label).small().color(tokens.accent));
+    if let Some(brushed) = app.brushed_cell.as_ref()
+        && header_rect.width() >= 280.0
+    {
+        let brush_label = format!("R{}C{}", brushed.row + 1, brushed.col + 1);
+        hdr_ui.label(RichText::new(brush_label).small().color(tokens.text_muted));
         if slot == SplitPaneSlot::Secondary {
-            let clr_resp = hdr_ui.add_enabled(enabled, egui::Button::new(RichText::new("×").small()).min_size(vec2(18.0, 18.0)));
-            meta.record_response(
-                &hdr_ui,
-                &clr_resp,
-                inspect_input("split.clear_brush", "button", "Clear Brush", None, None, enabled, ZLayer::Workspace),
+            let (_, clicked) = crate::egui_shell::ui_kit::ghost_action_button(
+                &mut hdr_ui,
+                tokens,
+                meta,
+                "split.clear_brush",
+                "×",
+                None,
+                false,
+                enabled,
+                ZLayer::Workspace,
             );
-            if clr_resp.clicked() && enabled {
+            if clicked {
                 intents.push(UiIntent::ClearBrush);
             }
         }
-    } else if slot == SplitPaneSlot::Primary && header_rect.width() >= 280.0 {
-        hdr_ui.label(RichText::new(tr_or_fallback(locale, "w5.split.brush_sync", "Sync Brush")).small().color(tokens.text_muted));
     }
 
     if slot == SplitPaneSlot::Secondary {
         hdr_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |right_ui| {
+            right_ui.spacing_mut().item_spacing.x = tokens.metrics.space_xs;
             let close_lbl = tr_or_fallback(locale, "w5.split.close", "Close");
-            let close_resp = right_ui.add_enabled(enabled, egui::Button::new(RichText::new(close_lbl).small()).min_size(vec2(44.0, 18.0)));
-            meta.record_response(
+            let (_, close_clicked) = crate::egui_shell::ui_kit::ghost_action_button(
                 right_ui,
-                &close_resp,
-                inspect_input("split.close", "button", close_lbl, Some("ui.split.toggle"), None, enabled, ZLayer::Workspace),
+                tokens,
+                meta,
+                "split.close",
+                close_lbl,
+                Some("ui.split.toggle"),
+                false,
+                enabled,
+                ZLayer::Workspace,
             );
-            if close_resp.clicked() && enabled {
+            if close_clicked {
                 intents.push_ui("ui.split.toggle", json!({ "enabled": false }));
             }
 
             let swap_lbl = tr_or_fallback(locale, "w5.split.swap", "Swap");
-            let swap_resp = right_ui.add_enabled(
-                enabled && sheet_id.is_some() && other_sheet_id.is_some(),
-                egui::Button::new(RichText::new(swap_lbl).small()).min_size(vec2(40.0, 18.0)),
-            );
-            meta.record_response(
+            let swap_enabled = enabled && sheet_id.is_some() && other_sheet_id.is_some();
+            let (_, swap_clicked) = crate::egui_shell::ui_kit::ghost_action_button(
                 right_ui,
-                &swap_resp,
-                inspect_input("split.swap", "button", swap_lbl, Some("ui.split.toggle"), None, enabled, ZLayer::Workspace),
+                tokens,
+                meta,
+                "split.swap",
+                swap_lbl,
+                Some("ui.split.toggle"),
+                false,
+                swap_enabled,
+                ZLayer::Workspace,
             );
-            if swap_resp.clicked()
-                && enabled
-                && let (Some(sec), Some(prim)) = (sheet_id, other_sheet_id)
-            {
+            if swap_clicked && let (Some(sec), Some(prim)) = (sheet_id, other_sheet_id) {
                 intents.push_ui(
                     "ui.split.toggle",
                     json!({
@@ -950,7 +1064,7 @@ fn compute_split_geometries(work_rect: Rect, orientation: SplitOrientation, rati
             let hit = Rect::from_min_max(pos2(split_x - half_hit, work_rect.top()), pos2(split_x + half_hit, work_rect.bottom()));
             (left, vis, hit, right)
         }
-        SplitOrientation::Vertical => {
+        SplitOrientation::Vertical | SplitOrientation::CompactSinglePane => {
             let split_y = (work_rect.top() + work_rect.height() * ratio).clamp(work_rect.top() + 48.0, work_rect.bottom() - 48.0);
             let top = Rect::from_min_max(work_rect.min, pos2(work_rect.right(), split_y - half_vis));
             let bottom = Rect::from_min_max(pos2(work_rect.left(), split_y + half_vis), work_rect.max);
@@ -974,11 +1088,16 @@ fn render_single_pane_mode(ui: &mut egui::Ui, app: &UiApp, target: SinglePaneTar
             if slot == SplitPaneSlot::Primary {
                 render_mv_formula_bar_if_active(ui, app, views, ctx_in.tokens, enabled, meta, intents);
             }
-            let grid_rep = render_data_grid(
+            let (grid_state, pane_salt) = match slot {
+                SplitPaneSlot::Primary => (&mut views.column_grid, "primary"),
+                SplitPaneSlot::Secondary => (&mut views.center_stage.secondary_column_grid, "secondary"),
+            };
+            let grid_rep = render_data_grid_for_sheet(
                 ui,
                 app,
-                &mut views.column_grid,
-                ColumnGridRenderContext::new(ctx_in.tokens, !enabled || ctx_in.decision.blocks_egui_grid),
+                sheet_id,
+                grid_state,
+                ColumnGridRenderContext::new(ctx_in.tokens, !enabled || ctx_in.decision.blocks_egui_grid).with_pane_salt(pane_salt),
                 meta,
                 intents,
             );
@@ -1176,232 +1295,6 @@ fn render_mv_formula_bar_if_active(
     });
 
     views.center_stage.last_formula_bar_active = true;
-}
-
-fn render_split_column_sheet_preview(
-    ui: &mut egui::Ui,
-    app: &UiApp,
-    spec: SplitSheetPreviewSpec<'_>,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-    report: &mut CenterStageFrameReport,
-) {
-    let SplitSheetPreviewSpec { ds, slot, tokens, enabled } = spec;
-    let TableArchetype::Column(col_table) = &ds.archetype else {
-        return;
-    };
-    let avail = ui.available_rect_before_wrap();
-    let bar_h = 26.0_f32.min(avail.height());
-    let pad_x = tokens.metrics.space_sm;
-    let bar_rect =
-        Rect::from_min_max(pos2(avail.left() + pad_x, avail.top()), pos2((avail.right() - pad_x).max(avail.left() + pad_x), avail.top() + bar_h));
-    let body_rect = Rect::from_min_max(pos2(avail.left(), bar_rect.bottom()), avail.max);
-
-    ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |bar_ui| {
-        bar_ui.set_clip_rect(bar_rect);
-        bar_ui.horizontal(|row| {
-            row.label(
-                RichText::new(format!("{} ({} cols × {} rows)", ds.title, col_table.data_sets.len(), col_table.row_count()))
-                    .small()
-                    .color(tokens.text_muted),
-            );
-            let focus_resp = row.add_enabled(enabled, egui::Button::new(RichText::new("Focus in Grid").small()));
-            meta.record_response(
-                row,
-                &focus_resp,
-                inspect_input("split.focus_in_grid", "button", "Focus in Grid", Some("sheet.select"), None, enabled, ZLayer::Workspace),
-            );
-            if focus_resp.clicked() && enabled {
-                intents.push_engine("sheet.select", json!({ "sheet_id": ds.id.as_str() }));
-            }
-        });
-    });
-
-    if !body_rect.is_positive() {
-        return;
-    }
-
-    let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-    body_ui.set_clip_rect(body_rect);
-
-    let row_h = 22.0;
-    let col_w = 88.0;
-    let idx_w = 44.0;
-    let max_cols = col_table.data_sets.len().min(64);
-    let total_rows = col_table.row_count();
-    let scroll = egui::ScrollArea::both().id_salt(("split_col_preview", slot, ds.id.as_str())).auto_shrink([false, false]).show_rows(
-        &mut body_ui,
-        row_h,
-        total_rows + 1,
-        |grid_ui, row_range| {
-            let item_sp = grid_ui.spacing().item_spacing.x;
-            let col_step = col_w + item_sp;
-            let clip = grid_ui.clip_rect();
-            let cells_x = grid_ui.cursor().left() + idx_w + item_sp;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let first_col = (((clip.left() - cells_x) / col_step).floor().max(0.0) as usize).min(max_cols);
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let last_col = ((((clip.right() - cells_x) / col_step).ceil().max(0.0) as usize) + 1).min(max_cols);
-            let leading_w = f32::from(u16::try_from(first_col).unwrap_or(u16::MAX)) * col_step;
-            let trailing_w = f32::from(u16::try_from(max_cols.saturating_sub(last_col)).unwrap_or(u16::MAX)) * col_step;
-
-            for vis_row in row_range {
-                if vis_row == 0 {
-                    grid_ui.horizontal(|hdr| {
-                        hdr.add_sized([idx_w, row_h], egui::Label::new(RichText::new("#").small().strong().color(tokens.text_muted)));
-                        if leading_w > 0.0 {
-                            hdr.add_space(leading_w);
-                        }
-                        for c_idx in first_col..last_col {
-                            let col = &col_table.data_sets[c_idx];
-                            let lbl = if col.title.is_empty() { format!("Col {}", c_idx + 1) } else { col.title.clone() };
-                            hdr.add_sized([col_w, row_h], egui::Label::new(RichText::new(lbl).small().strong()).truncate());
-                        }
-                        if trailing_w > 0.0 {
-                            hdr.add_space(trailing_w);
-                        }
-                    });
-                    continue;
-                }
-                let r_idx = vis_row - 1;
-                grid_ui.horizontal(|row_ui| {
-                    row_ui.add_sized([idx_w, row_h], egui::Label::new(RichText::new(format!("{}", r_idx + 1)).small().color(tokens.text_muted)));
-                    if leading_w > 0.0 {
-                        row_ui.add_space(leading_w);
-                    }
-                    for c_idx in first_col..last_col {
-                        let is_brushed = app.brushed_points.iter().any(|b| b.sheet_id == ds.id && b.row == r_idx && b.col == c_idx)
-                            || app.brushed_cell.as_ref().is_some_and(|b| b.sheet_id == ds.id && b.row == r_idx && b.col == c_idx);
-                        let cell_txt = col_table
-                            .data_sets
-                            .get(c_idx)
-                            .and_then(|d| d.cells.get(r_idx))
-                            .and_then(|sub| sub.first())
-                            .map(|c| match &c.value {
-                                CellValue::Empty => String::new(),
-                                CellValue::Number(v) => format!("{v:.4}"),
-                                CellValue::Text(s) => s.clone(),
-                            })
-                            .unwrap_or_default();
-                        let btn = egui::Button::new(RichText::new(cell_txt).small().monospace().color(if is_brushed {
-                            tokens.accent
-                        } else {
-                            tokens.text_primary
-                        }))
-                        .fill(if is_brushed { tokens.active_bg } else { tokens.surface_bg })
-                        .stroke(Stroke::new(if is_brushed { 1.5 } else { 0.5 }, if is_brushed { tokens.accent } else { tokens.border }))
-                        .min_size(vec2(col_w, row_h));
-                        let resp = row_ui.add_enabled(enabled, btn);
-                        if resp.clicked() && enabled {
-                            let coord = GridCellCoord::new(r_idx, c_idx, 0);
-                            intents.push(UiIntent::BrushPoint { sheet_id: ds.id.clone(), coord });
-                            if app.document().active_sheet_id.as_ref() == Some(&ds.id) {
-                                intents.push(UiIntent::SelectGridCell { coord });
-                            }
-                        }
-                        if r_idx < 12 && c_idx < 4 {
-                            let wid = format!("split.col_preview.{r_idx}.{c_idx}");
-                            let lbl = format!("Split cell R{}C{}", r_idx + 1, c_idx + 1);
-                            meta.record_response(row_ui, &resp, inspect_input(&wid, "button", &lbl, None, None, enabled, ZLayer::Workspace));
-                        }
-                    }
-                    if trailing_w > 0.0 {
-                        row_ui.add_space(trailing_w);
-                    }
-                });
-            }
-        },
-    );
-
-    if report.scrollbar_rect_pt.is_none() && scroll.content_size.y > scroll.inner_rect.height() + 0.5 {
-        let bar_w = body_ui.spacing().scroll.bar_width.max(10.0);
-        report.scrollbar_rect_pt = Some(Rect::from_min_max(
-            pos2((scroll.inner_rect.right() + 2.0).min(body_rect.right()), scroll.inner_rect.top()),
-            pos2((scroll.inner_rect.right() + 2.0 + bar_w).min(body_rect.right()), scroll.inner_rect.bottom()),
-        ));
-    }
-}
-
-fn render_split_non_column_preview(
-    ui: &mut egui::Ui,
-    app: &UiApp,
-    spec: SplitSheetPreviewSpec<'_>,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
-    let SplitSheetPreviewSpec { ds, slot, tokens, enabled } = spec;
-    let avail = ui.available_rect_before_wrap();
-    let bar_h = 26.0_f32.min(avail.height());
-    let pad_x = tokens.metrics.space_sm;
-    let bar_rect =
-        Rect::from_min_max(pos2(avail.left() + pad_x, avail.top()), pos2((avail.right() - pad_x).max(avail.left() + pad_x), avail.top() + bar_h));
-    let body_rect = Rect::from_min_max(pos2(avail.left(), bar_rect.bottom()), avail.max);
-
-    ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |bar_ui| {
-        bar_ui.set_clip_rect(bar_rect);
-        bar_ui.horizontal(|row| {
-            row.label(
-                RichText::new(format!("{} ({:?} · {} rows)", ds.title, ds.archetype.kind(), ds.archetype.row_count()))
-                    .small()
-                    .color(tokens.text_muted),
-            );
-            let btn = row.add_enabled(enabled, egui::Button::new(RichText::new("Focus in Grid").small()));
-            meta.record_response(
-                row,
-                &btn,
-                inspect_input("split.activate_data_sheet", "button", "Focus in Grid", Some("sheet.select"), None, enabled, ZLayer::Workspace),
-            );
-            if btn.clicked() && enabled {
-                intents.push_engine("sheet.select", json!({ "sheet_id": ds.id.as_str() }));
-            }
-        });
-    });
-
-    if !body_rect.is_positive() {
-        return;
-    }
-
-    let preview_grid = crate::grid_view::GridViewState { decimal_separator: app.grid.decimal_separator, ..Default::default() };
-    let frame = preview_grid.visible_frame_for_sheet(ds);
-    let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-    body_ui.set_clip_rect(body_rect);
-
-    egui::ScrollArea::both().id_salt(("split_data_preview", slot, ds.id.as_str())).auto_shrink([false, false]).show(&mut body_ui, |grid_ui| {
-        let row_h = 22.0;
-        let col_w = 80.0;
-        grid_ui.horizontal(|hdr| {
-            hdr.add_sized([36.0, row_h], egui::Label::new(RichText::new("#").small().strong().color(tokens.text_muted)));
-            if let Some(x_title) = &frame.x_column_title {
-                hdr.add_sized([col_w, row_h], egui::Label::new(RichText::new(x_title).small().strong()).truncate());
-            }
-            for sub in frame.tier2_subcolumns.iter().take(16) {
-                hdr.add_sized([col_w, row_h], egui::Label::new(RichText::new(&sub.label).small().strong()).truncate());
-            }
-        });
-        for row in frame.rows.iter().take(64) {
-            grid_ui.horizontal(|row_ui| {
-                row_ui.add_sized([36.0, row_h], egui::Label::new(RichText::new(format!("{}", row.row + 1)).small().color(tokens.text_muted)));
-                if let Some(x_txt) = &row.leading.x_or_time_display {
-                    row_ui.add_sized([col_w, row_h], egui::Label::new(RichText::new(x_txt).small().monospace()).truncate());
-                }
-                for cell in row.cells.iter().take(16) {
-                    let is_brushed = app.brushed_points.iter().any(|b| b.sheet_id == ds.id && b.row == row.row && b.col == cell.coord.col)
-                        || app.brushed_cell.as_ref().is_some_and(|b| b.sheet_id == ds.id && b.row == row.row && b.col == cell.coord.col);
-                    let btn = egui::Button::new(RichText::new(&cell.display_text).small().monospace().color(if is_brushed {
-                        tokens.accent
-                    } else {
-                        tokens.text_primary
-                    }))
-                    .fill(if is_brushed { tokens.active_bg } else { tokens.surface_bg })
-                    .stroke(Stroke::new(if is_brushed { 1.5 } else { 0.5 }, if is_brushed { tokens.accent } else { tokens.border }))
-                    .min_size(vec2(col_w, row_h));
-                    if row_ui.add_enabled(enabled, btn).clicked() && enabled {
-                        intents.push(UiIntent::BrushPoint { sheet_id: ds.id.clone(), coord: cell.coord });
-                    }
-                }
-            });
-        }
-    });
 }
 
 fn sync_two_way_split_brushing(

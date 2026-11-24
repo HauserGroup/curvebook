@@ -657,6 +657,7 @@ fn build_data_links_summary(doc: &ProjectDocument, ds: &DataSheet, tokens: &Toke
     LinkHealthSummary { badge_text, tooltip, accent, upstream_links }
 }
 
+#[allow(dead_code)]
 fn first_sheet_in_section(doc: &ProjectDocument, section: SheetSection) -> Option<&SheetId> {
     match section {
         SheetSection::Data => doc.data_sheets.first().map(|s| &s.id),
@@ -989,7 +990,7 @@ fn render_footer_history_and_sections(
     let locale = &ctx_in.tokens.locale;
     let is_rtl = is_rtl_locale(locale);
     let gallery_open = app.nav.gallery.open;
-    let active_section = doc.active_sheet_id.as_ref().and_then(|sid| doc.sheet_section(sid));
+    let _ = doc.active_sheet_id.as_ref().and_then(|sid| doc.sheet_section(sid));
     let is_welcome = doc.active_sheet_id.is_none() && !gallery_open;
     let compact = !report.section_pills_shown && ui.available_width() < 760.0;
 
@@ -1038,55 +1039,14 @@ fn render_footer_history_and_sections(
     }
 
     if report.section_pills_shown {
-        let sections: [(SheetSection, &str, &str, &str); 5] = [
-            (SheetSection::Data, "status.section.data", "nav.data_tables", "Data"),
-            (SheetSection::Info, "status.section.info", "nav.info", "Info"),
-            (SheetSection::Analyses, "status.section.results", "nav.results", "Results"),
-            (SheetSection::Graphs, "status.section.graphs", "nav.graphs", "Graphs"),
-            (SheetSection::Layouts, "status.section.layouts", "nav.layouts", "Layouts"),
-        ];
-        for (sec, wid, i18n_key, fallback) in sections {
-            let first_id = first_sheet_in_section(doc, sec).cloned();
-            let label = tr_or_fallback(locale, i18n_key, fallback);
-            let is_selected = !gallery_open && active_section == Some(sec);
-            let has_sheets = first_id.is_some();
-            let pill_resp = draw_footer_chip(
-                ui,
-                ctx_in.tokens,
-                FooterChipSpec {
-                    label,
-                    tooltip: label,
-                    max_w: 96.0,
-                    min_w: 36.0,
-                    selected: is_selected,
-                    enabled: ctx_in.enabled && has_sheets,
-                    accent_override: None,
-                    widget_id: wid,
-                    role: "button",
-                    command_id: first_id.as_ref().map(|_| "sheet.select"),
-                    disabled_reason: (!has_sheets).then_some("no sheets in section"),
-                },
-                meta,
-            );
-            if pill_resp.clicked()
-                && let Some(target_id) = first_id
-            {
-                if gallery_open {
-                    intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
-                }
-                intents.push_engine("sheet.select", json!({ "sheet_id": target_id.as_str() }));
-            }
-        }
-
-        let gal_lbl = tr_or_fallback(locale, "cmd.ui.gallery.toggle", "Gallery");
         let gal_resp = draw_footer_chip(
             ui,
             ctx_in.tokens,
             FooterChipSpec {
-                label: gal_lbl,
+                label: "Gallery",
                 tooltip: "Portfolio Gallery",
                 max_w: 88.0,
-                min_w: 40.0,
+                min_w: 44.0,
                 selected: gallery_open,
                 enabled: ctx_in.enabled,
                 accent_override: None,
@@ -1102,41 +1062,47 @@ fn render_footer_history_and_sections(
         }
     }
 
-    let active_label = if gallery_open {
-        String::from("Portfolio Gallery")
-    } else if is_welcome {
-        String::from("Welcome")
-    } else if let Some(sid) = doc.active_sheet_id.as_ref() {
-        let title = doc_sheet_title(doc, sid).unwrap_or_else(|| sid.as_str());
-        format!("{title} ▾")
+    let navigator_collapsed = ctx_in.layout.leading_collapsed_to_rail || !ctx_in.layout.leading_visible;
+    let mut sheet_anchor = None;
+    if navigator_collapsed {
+        let active_label = if gallery_open {
+            String::from("Gallery")
+        } else if is_welcome {
+            String::from("Welcome")
+        } else if let Some(sid) = doc.active_sheet_id.as_ref() {
+            let title = doc_sheet_title(doc, sid).unwrap_or_else(|| sid.as_str());
+            format!("{title} ▾")
+        } else {
+            String::from("Sheets ▾")
+        };
+        let switcher_max_w = if compact { 108.0 } else { 150.0 };
+        let any_sheet = doc_has_any_sheet(doc);
+        let sw_resp = draw_footer_chip(
+            ui,
+            ctx_in.tokens,
+            FooterChipSpec {
+                label: &active_label,
+                tooltip: "Switch active sheet",
+                max_w: switcher_max_w,
+                min_w: 48.0,
+                selected: views.status_footer.sheet_switcher_open,
+                enabled: ctx_in.enabled && any_sheet,
+                accent_override: None,
+                widget_id: "status.sheet_switcher",
+                role: "button",
+                command_id: Some("sheet.select"),
+                disabled_reason: (!any_sheet).then_some("project has no sheets"),
+            },
+            meta,
+        );
+        sheet_anchor = Some(sw_resp.rect);
+        if sw_resp.clicked() {
+            views.status_footer.sheet_switcher_open = !views.status_footer.sheet_switcher_open;
+            views.status_footer.link_popover_open = false;
+            views.status_footer.stats_popover_open = false;
+        }
     } else {
-        String::from("Sheets ▾")
-    };
-    let switcher_max_w = if compact { 108.0 } else { 150.0 };
-    let any_sheet = doc_has_any_sheet(doc);
-    let sw_resp = draw_footer_chip(
-        ui,
-        ctx_in.tokens,
-        FooterChipSpec {
-            label: &active_label,
-            tooltip: "Switch active sheet",
-            max_w: switcher_max_w,
-            min_w: 48.0,
-            selected: views.status_footer.sheet_switcher_open,
-            enabled: ctx_in.enabled && any_sheet,
-            accent_override: None,
-            widget_id: "status.sheet_switcher",
-            role: "button",
-            command_id: Some("sheet.select"),
-            disabled_reason: (!any_sheet).then_some("project has no sheets"),
-        },
-        meta,
-    );
-    let sheet_anchor = Some(sw_resp.rect);
-    if sw_resp.clicked() {
-        views.status_footer.sheet_switcher_open = !views.status_footer.sheet_switcher_open;
-        views.status_footer.link_popover_open = false;
-        views.status_footer.stats_popover_open = false;
+        views.status_footer.sheet_switcher_open = false;
     }
 
     let link_summary = if !gallery_open { summarize_sheet_links(app, ctx_in.tokens) } else { None };

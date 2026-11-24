@@ -24,7 +24,7 @@ use egui::{Color32, Pos2, Sense, Stroke, Vec2};
 use serde_json::json;
 
 use crate::UiApp;
-use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, UiIntent, widgets};
+use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, UiIntent};
 use crate::i18n::is_rtl_locale;
 use crate::inspect::ZLayer;
 
@@ -271,26 +271,27 @@ pub struct TrailingStudioFrameReport {
     pub referenced_by_count: usize,
 }
 
-/// Resolve the active [`StudioContextSurface`] strictly from live document sheet & brushing state.
+/// Resolve the active [`StudioContextSurface`] strictly from live document sheet & brushing state,
+/// respecting Split Comparison's explicit [`SplitWorkspaceState::effective_inspector_target`] (`R20.3`).
 #[must_use]
 pub fn resolve_studio_surface(app: &UiApp) -> StudioContextSurface {
     let doc = app.document();
-    let Some(active) = doc.active_sheet_id.as_ref() else {
+    let Some(target) = app.split.effective_inspector_target(doc) else {
         return StudioContextSurface::TableSelection;
     };
-    if doc.layout_sheet(active).is_some() {
+    if doc.layout_sheet(target).is_some() {
         return StudioContextSurface::PageLayoutComposer;
     }
-    if doc.graph_sheet(active).is_some() {
+    if doc.graph_sheet(target).is_some() {
         return if app.brushed_cell.is_some() { StudioContextSurface::DataPointDrillBack } else { StudioContextSurface::GraphInspector };
     }
-    if doc.result_sheet(active).is_some() {
+    if doc.result_sheet(target).is_some() {
         return StudioContextSurface::ResultsInterpret;
     }
-    if doc.info_sheet(active).is_some() {
+    if doc.info_sheet(target).is_some() {
         return StudioContextSurface::MetadataHooks;
     }
-    if let Some(ds) = doc.data_sheet(active)
+    if let Some(ds) = doc.data_sheet(target)
         && matches!(ds.archetype, TableArchetype::MultipleVariables(_))
     {
         return StudioContextSurface::MultipleVariablesFormula;
@@ -333,11 +334,11 @@ pub fn render_trailing_studio(
     let w = ctx_in.layout.trailing_dock_w_pt;
     let dock_frame = egui::Frame::NONE
         .fill(ctx_in.tokens.panel_bg)
-        .stroke(Stroke::new(1.0, if ctx_in.focused { ctx_in.tokens.focus_ring } else { ctx_in.tokens.border }))
-        .inner_margin(egui::Margin::same(if ctx_in.layout.trailing_collapsed_to_rail { 4 } else { 6 }));
+        .stroke(Stroke::new(1.0, if ctx_in.focused { ctx_in.tokens.focus_ring } else { ctx_in.tokens.divider }))
+        .inner_margin(if ctx_in.layout.trailing_collapsed_to_rail { egui::Margin::same(4) } else { egui::Margin::ZERO });
 
     let doc = app.document();
-    let active_id = doc.active_sheet_id.as_ref();
+    let active_id = app.split.effective_inspector_target(doc);
 
     let panel_builder =
         if ctx_in.layout.rtl_mirrored { egui::Panel::left("egui_shell.trailing_studio") } else { egui::Panel::right("egui_shell.trailing_studio") };
@@ -354,122 +355,202 @@ pub fn render_trailing_studio(
                 return;
             }
 
-            // Expanded Studio Header
-            ui.horizontal(|ui| {
-                let title = surface_localized_title(ctx_in.tokens.locale, surface);
-                let title_budget = (ui.available_width() - 32.0).max(40.0);
-                let mut job = egui::text::LayoutJob::simple_singleline(
-                    title.to_owned(),
-                    egui::FontId::proportional(ctx_in.tokens.metrics.font_ui_title_pt),
-                    ctx_in.tokens.text_strong,
+            // Shared 32 pt Panel Header (aligned flush with Navigator and Center Split pane headers).
+            let header_h = ctx_in.tokens.metrics.panel_header_h;
+            let (header_rect, hdr_region) = ui.allocate_exact_size(Vec2::new(ui.available_width(), header_h), Sense::hover());
+            let hdr_enabled = ctx_in.enabled;
+            hdr_region.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Region, hdr_enabled, "Trailing Studio Header"));
+            ui.painter().rect_filled(header_rect, egui::CornerRadius::ZERO, ctx_in.tokens.panel_bg);
+            ui.painter().hline(header_rect.x_range(), header_rect.bottom(), Stroke::new(1.0, ctx_in.tokens.divider));
+            meta.record_response(
+                ui,
+                &hdr_region,
+                FrameInspectEntryInput {
+                    widget_id: "inspector.panel_header",
+                    role: "region",
+                    label: "Trailing Studio Header",
+                    command_id: None,
+                    value: None,
+                    enabled: ctx_in.enabled,
+                    disabled_reason: None,
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+
+            let mut hdr_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(header_rect.shrink2(Vec2::new(ctx_in.tokens.metrics.space_md, ctx_in.tokens.metrics.space_xs)))
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            hdr_ui.set_clip_rect(header_rect);
+
+            let base_title = surface_localized_title(ctx_in.tokens.locale, surface);
+            let title_owned = if app.split.enabled
+                && let Some(target_title) = active_id.and_then(|id| crate::egui_shell::doc_sheet_title(doc, id))
+            {
+                format!("{base_title} · {target_title}")
+            } else {
+                base_title.to_owned()
+            };
+            let right_reserve = if app.split.enabled { 84.0 } else { 32.0 };
+            let title_budget = (hdr_ui.available_width() - right_reserve).max(40.0);
+            let mut job = egui::text::LayoutJob::simple_singleline(
+                title_owned.clone(),
+                egui::FontId::proportional(ctx_in.tokens.metrics.font_ui_body_pt),
+                ctx_in.tokens.text_strong,
+            );
+            job.wrap = egui::text::TextWrapping { max_rows: 1, break_anywhere: true, overflow_character: Some('…'), ..Default::default() };
+            job.wrap.max_width = title_budget;
+            let galley = hdr_ui.fonts_mut(|f| f.layout_job(job));
+            let elided = galley.elided;
+            let (t_rect, t_resp) = hdr_ui.allocate_exact_size(Vec2::new(title_budget, ctx_in.tokens.metrics.min_hit_target_pt), Sense::hover());
+            if hdr_ui.is_rect_visible(t_rect) {
+                let tp = Pos2::new(t_rect.min.x, t_rect.center().y - galley.size().y * 0.5);
+                let painter = hdr_ui.painter().with_clip_rect(t_rect);
+                painter.galley(tp, galley, ctx_in.tokens.text_strong);
+            }
+            let acc_title = title_owned.clone();
+            t_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Heading, true, acc_title.clone()));
+            let t_resp = if elided { t_resp.on_hover_text(title_owned.as_str()) } else { t_resp };
+            if t_rect.intersect(hdr_ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
+                meta.record_response(
+                    &hdr_ui,
+                    &t_resp,
+                    FrameInspectEntryInput {
+                        widget_id: "inspector.surface_title",
+                        role: "heading",
+                        label: &title_owned,
+                        command_id: None,
+                        value: Some(json!(surface.slug())),
+                        enabled: true,
+                        disabled_reason: None,
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: elided,
+                        full_label: elided.then_some(title_owned.as_str()),
+                    },
                 );
-                job.wrap = egui::text::TextWrapping { max_rows: 1, break_anywhere: true, overflow_character: Some('…'), ..Default::default() };
-                job.wrap.max_width = title_budget;
-                let galley = ui.fonts_mut(|f| f.layout_job(job));
-                let elided = galley.elided;
-                let (t_rect, t_resp) = ui.allocate_exact_size(Vec2::new(title_budget, 24.0), Sense::hover());
-                if ui.is_rect_visible(t_rect) {
-                    let tp = Pos2::new(t_rect.min.x, t_rect.center().y - galley.size().y * 0.5);
-                    let painter = ui.painter().with_clip_rect(t_rect);
-                    painter.galley(tp, galley, ctx_in.tokens.text_strong);
-                }
-                let acc_title = title.to_owned();
-                t_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Heading, true, acc_title.clone()));
-                let t_resp = if elided { t_resp.on_hover_text(title) } else { t_resp };
-                if t_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
-                    meta.record_response(
-                        ui,
-                        &t_resp,
-                        FrameInspectEntryInput {
-                            widget_id: "inspector.surface_title",
-                            role: "heading",
-                            label: title,
-                            command_id: None,
-                            value: Some(json!(surface.slug())),
-                            enabled: true,
-                            disabled_reason: None,
-                            z_layer: ZLayer::Workspace,
-                            ellipsized: elided,
-                            full_label: elided.then_some(title),
-                        },
-                    );
+            }
+
+            hdr_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = ctx_in.tokens.metrics.space_xs;
+                let collapse_tip = format_studio_toggle_tooltip(app, "Collapse Studio");
+                let c_resp = studio_chip(
+                    ui,
+                    ctx_in.tokens,
+                    meta,
+                    &StudioChipSpec {
+                        label: if is_rtl_locale(ctx_in.tokens.locale) { "«" } else { "»" },
+                        tooltip: &collapse_tip,
+                        max_w: 24.0,
+                        selected: false,
+                        enabled: ctx_in.enabled,
+                        border_override: None,
+                        widget_id: "inspector.collapse_rail",
+                        role: "button",
+                        command_id: Some("ui.inspector.toggle"),
+                        disabled_reason: (!ctx_in.enabled).then_some("modal dialog is active"),
+                    },
+                );
+                if c_resp && ctx_in.enabled {
+                    intents.push(UiIntent::ToggleTrailingCollapsedRail);
                 }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let collapse_tip = format_studio_toggle_tooltip(app, "Collapse Studio");
-                    let c_resp = studio_chip(
+                if app.split.enabled {
+                    let pin_label = if app.split.inspector_pinned { "Pinned" } else { "Pin" };
+                    let (_, pin_clicked) = crate::egui_shell::ui_kit::ghost_action_button(
                         ui,
                         ctx_in.tokens,
                         meta,
-                        &StudioChipSpec {
-                            label: if is_rtl_locale(ctx_in.tokens.locale) { "«" } else { "»" },
-                            tooltip: &collapse_tip,
-                            max_w: 24.0,
-                            selected: false,
-                            enabled: ctx_in.enabled,
-                            border_override: None,
-                            widget_id: "inspector.collapse_rail",
-                            role: "button",
-                            command_id: Some("ui.inspector.toggle"),
-                            disabled_reason: (!ctx_in.enabled).then_some("modal dialog is active"),
-                        },
+                        "inspector.pin_toggle",
+                        pin_label,
+                        None,
+                        app.split.inspector_pinned,
+                        ctx_in.enabled,
+                        ZLayer::Workspace,
                     );
-                    if c_resp && ctx_in.enabled {
-                        intents.push(UiIntent::ToggleTrailingCollapsedRail);
+                    if pin_clicked {
+                        intents.push(UiIntent::ToggleInspectorPin);
                     }
-                });
+                }
             });
 
-            ui.add_space(2.0);
-            widgets::divider(ui);
-            ui.add_space(4.0);
+            // When pinned in Split Comparison and `doc.active_sheet_id` differs, offer one-click Switch chip.
+            if app.split.enabled
+                && app.split.inspector_pinned
+                && let Some(doc_active) = doc.active_sheet_id.as_ref()
+                && active_id != Some(doc_active)
+                && let Some(active_title) = crate::egui_shell::doc_sheet_title(doc, doc_active)
+            {
+                let switch_lbl = format!("Switch to {active_title}");
+                egui::Frame::NONE.inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                    let (_, clicked) = crate::egui_shell::ui_kit::ghost_action_button(
+                        ui,
+                        ctx_in.tokens,
+                        meta,
+                        "inspector.switch_to_active",
+                        &switch_lbl,
+                        None,
+                        false,
+                        ctx_in.enabled,
+                        ZLayer::Workspace,
+                    );
+                    if clicked {
+                        intents.push(UiIntent::SwitchInspectorTarget { sheet_id: doc_active.clone() });
+                    }
+                });
+            }
 
             // Reserve dedicated right gutter inside ScrollArea so `Role::ScrollBar` NEVER overlaps any widget.
             ui.spacing_mut().scroll.floating = false;
-            let content_max_w = (ui.available_width() - SCROLL_BAR_RESERVE_PT).max(120.0);
-            egui::ScrollArea::vertical().id_salt("egui_shell.trailing_studio.scroll").auto_shrink([false, false]).show(ui, |ui| {
-                egui::Frame::NONE.inner_margin(egui::Margin { right: STUDIO_INNER_PAD as i8, ..Default::default() }).show(ui, |ui| {
-                    ui.set_max_width(content_max_w);
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                    match surface {
-                        StudioContextSurface::MultipleVariablesFormula => {
-                            if let Some(ds) = active_id.and_then(|id| doc.data_sheet(id))
-                                && let TableArchetype::MultipleVariables(mv) = &ds.archetype
-                            {
-                                render_mv_formula_studio(ui, ds, mv, state, ctx_in, meta, intents);
-                                report.operand_highlight_count = state.mv_operand_highlights.len();
+            let body_margin = egui::Margin::symmetric(ctx_in.tokens.metrics.space_md as i8, ctx_in.tokens.metrics.space_xs as i8);
+            egui::Frame::NONE.inner_margin(body_margin).show(ui, |ui| {
+                let content_max_w = (ui.available_width() - SCROLL_BAR_RESERVE_PT).max(120.0);
+                egui::ScrollArea::vertical().id_salt("egui_shell.trailing_studio.scroll").auto_shrink([false, false]).show(ui, |ui| {
+                    egui::Frame::NONE.inner_margin(egui::Margin { right: STUDIO_INNER_PAD as i8, ..Default::default() }).show(ui, |ui| {
+                        ui.set_max_width(content_max_w);
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                        match surface {
+                            StudioContextSurface::MultipleVariablesFormula => {
+                                if let Some(ds) = active_id.and_then(|id| doc.data_sheet(id))
+                                    && let TableArchetype::MultipleVariables(mv) = &ds.archetype
+                                {
+                                    render_mv_formula_studio(ui, ds, mv, state, ctx_in, meta, intents);
+                                    report.operand_highlight_count = state.mv_operand_highlights.len();
+                                }
+                            }
+                            StudioContextSurface::TableSelection => {
+                                let ds = active_id.and_then(|id| doc.data_sheet(id));
+                                render_table_selection_studio(ui, app, ds, state, ctx_in, meta, intents);
+                            }
+                            StudioContextSurface::MetadataHooks => {
+                                if let Some(info) = active_id.and_then(|id| doc.info_sheet(id)) {
+                                    report.referenced_by_count = render_metadata_hooks_studio(ui, app, info, state, ctx_in, meta, intents);
+                                }
+                            }
+                            StudioContextSurface::ResultsInterpret => {
+                                if let Some(rs) = active_id.and_then(|id| doc.result_sheet(id)) {
+                                    render_results_interpret_studio(ui, app, rs, state, ctx_in, meta, intents);
+                                }
+                            }
+                            StudioContextSurface::GraphInspector => {
+                                if let Some(gs) = active_id.and_then(|id| doc.graph_sheet(id)) {
+                                    render_graph_inspector_studio(ui, app, gs, state, ctx_in, meta, intents);
+                                }
+                            }
+                            StudioContextSurface::DataPointDrillBack => {
+                                if let Some(gs) = active_id.and_then(|id| doc.graph_sheet(id)) {
+                                    render_data_point_drill_back_studio(ui, app, gs, state, ctx_in, meta, intents);
+                                }
+                            }
+                            StudioContextSurface::PageLayoutComposer => {
+                                if let Some(ls) = active_id.and_then(|id| doc.layout_sheet(id)) {
+                                    render_page_layout_composer_studio(ui, app, ls, state, ctx_in, meta, intents);
+                                }
                             }
                         }
-                        StudioContextSurface::TableSelection => {
-                            let ds = active_id.and_then(|id| doc.data_sheet(id));
-                            render_table_selection_studio(ui, app, ds, state, ctx_in, meta, intents);
-                        }
-                        StudioContextSurface::MetadataHooks => {
-                            if let Some(info) = active_id.and_then(|id| doc.info_sheet(id)) {
-                                report.referenced_by_count = render_metadata_hooks_studio(ui, app, info, state, ctx_in, meta, intents);
-                            }
-                        }
-                        StudioContextSurface::ResultsInterpret => {
-                            if let Some(rs) = active_id.and_then(|id| doc.result_sheet(id)) {
-                                render_results_interpret_studio(ui, app, rs, state, ctx_in, meta, intents);
-                            }
-                        }
-                        StudioContextSurface::GraphInspector => {
-                            if let Some(gs) = active_id.and_then(|id| doc.graph_sheet(id)) {
-                                render_graph_inspector_studio(ui, app, gs, state, ctx_in, meta, intents);
-                            }
-                        }
-                        StudioContextSurface::DataPointDrillBack => {
-                            if let Some(gs) = active_id.and_then(|id| doc.graph_sheet(id)) {
-                                render_data_point_drill_back_studio(ui, app, gs, state, ctx_in, meta, intents);
-                            }
-                        }
-                        StudioContextSurface::PageLayoutComposer => {
-                            if let Some(ls) = active_id.and_then(|id| doc.layout_sheet(id)) {
-                                render_page_layout_composer_studio(ui, app, ls, state, ctx_in, meta, intents);
-                            }
-                        }
-                    }
+                    });
                 });
             });
         })

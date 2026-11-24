@@ -211,29 +211,47 @@ impl ExcludeWithReasonDialogState {
     }
 }
 
-/// Simultaneous side-by-side Data/Result + live Graph split-pane workspace configuration (`QOL-4`).
+/// Simultaneous side-by-side Data/Result + live Graph split-pane workspace configuration (`QOL-4`, `R20.3`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SplitWorkspaceState {
     pub enabled: bool,
-    /// Fraction of center canvas width allocated to the primary pane in `[0.2, 0.8]`.
+    /// Fraction of center canvas width allocated to the primary pane in `[0.15, 0.85]`.
     pub ratio: f64,
     pub primary_sheet_id: Option<SheetId>,
     pub secondary_sheet_id: Option<SheetId>,
     #[serde(default)]
     pub dragging_divider: bool,
+    /// Ephemeral Inspector target sheet ID (`gui-layout-spec.md` §2.4; never persisted).
+    #[serde(skip)]
+    pub inspector_target_sheet_id: Option<SheetId>,
+    /// Whether the Trailing Studio Inspector stays pinned to [`Self::inspector_target_sheet_id`]
+    /// while Split Comparison is active (`gui-layout-spec.md` §2.4; never persisted).
+    #[serde(skip)]
+    pub inspector_pinned: bool,
 }
 
 impl Default for SplitWorkspaceState {
     fn default() -> Self {
-        Self { enabled: false, ratio: 0.5, primary_sheet_id: None, secondary_sheet_id: None, dragging_divider: false }
+        Self {
+            enabled: false,
+            ratio: 0.5,
+            primary_sheet_id: None,
+            secondary_sheet_id: None,
+            dragging_divider: false,
+            inspector_target_sheet_id: None,
+            inspector_pinned: false,
+        }
     }
 }
 
 impl SplitWorkspaceState {
-    /// Clamp split divider fraction into `[0.2, 0.8]`.
+    /// Default primary/secondary split ratio for `Data + Graph` (`40/60`, `gui-layout-spec.md` §2.3).
+    pub const DATA_GRAPH_DEFAULT_RATIO: f64 = 0.40;
+
+    /// Clamp split divider fraction into `[0.15, 0.85]`.
     pub fn set_ratio(&mut self, ratio: f64) {
         if ratio.is_finite() {
-            self.ratio = ratio.clamp(0.2, 0.8);
+            self.ratio = ratio.clamp(0.15, 0.85);
         }
     }
 
@@ -279,6 +297,82 @@ impl SplitWorkspaceState {
         });
 
         (primary, secondary)
+    }
+
+    /// Materialize concrete [`Self::primary_sheet_id`] and [`Self::secondary_sheet_id`] against `doc`
+    /// so split pane assignments never drift with `doc.active_sheet_id` (`gui-layout-spec.md` §2.4).
+    pub fn materialize_sheets(&mut self, doc: &ProjectDocument) -> (Option<SheetId>, Option<SheetId>) {
+        let (primary, secondary) = self.resolve_sheets(doc);
+        self.primary_sheet_id = primary.clone();
+        self.secondary_sheet_id = secondary.clone();
+        (primary, secondary)
+    }
+
+    /// Return `true` when `sheet_id` is currently displayed in either materialized split pane.
+    #[must_use]
+    pub fn contains_sheet(&self, sheet_id: &SheetId) -> bool {
+        self.primary_sheet_id.as_ref() == Some(sheet_id) || self.secondary_sheet_id.as_ref() == Some(sheet_id)
+    }
+
+    /// Resolve the explicit sheet ID targeted by Trailing Studio Inspector controls (`gui-layout-spec.md` §2.4).
+    #[must_use]
+    pub fn effective_inspector_target<'a>(&'a self, doc: &'a ProjectDocument) -> Option<&'a SheetId> {
+        if self.enabled
+            && self.inspector_pinned
+            && let Some(target) = self.inspector_target_sheet_id.as_ref()
+            && doc.sheet_section(target).is_some()
+            && self.contains_sheet(target)
+        {
+            return Some(target);
+        }
+        doc.active_sheet_id.as_ref()
+    }
+
+    /// Enforce three-way split pin lifecycle invariants (`gui-layout-spec.md` §2.4):
+    /// auto-unpin whenever Split closes, the pinned sheet is deleted, or it leaves the split pair.
+    pub fn sync_pin_invariants(&mut self, doc: &ProjectDocument) {
+        if !self.enabled {
+            self.inspector_pinned = false;
+            self.inspector_target_sheet_id = doc.active_sheet_id.clone();
+            return;
+        }
+        if self.primary_sheet_id.as_ref().is_none_or(|id| doc.sheet_section(id).is_none())
+            || self.secondary_sheet_id.as_ref().is_none_or(|id| doc.sheet_section(id).is_none())
+        {
+            let _ = self.materialize_sheets(doc);
+        }
+        if self.inspector_pinned {
+            let valid = self.inspector_target_sheet_id.as_ref().is_some_and(|id| doc.sheet_section(id).is_some() && self.contains_sheet(id));
+            if !valid {
+                self.inspector_pinned = false;
+                self.inspector_target_sheet_id = doc.active_sheet_id.clone();
+            }
+        } else {
+            self.inspector_target_sheet_id = doc.active_sheet_id.clone();
+        }
+    }
+
+    /// Apply §2.4 Navigator/Footer selection rules while Split Comparison is active.
+    pub fn on_navigator_select(&mut self, doc: &ProjectDocument, prev_active: Option<&SheetId>, new_active: &SheetId, last_focused_secondary: bool) {
+        if !self.enabled {
+            self.sync_pin_invariants(doc);
+            return;
+        }
+        if !self.contains_sheet(new_active) {
+            let replace_secondary = if prev_active.is_some() && self.secondary_sheet_id.as_ref() == prev_active {
+                true
+            } else if prev_active.is_some() && self.primary_sheet_id.as_ref() == prev_active {
+                false
+            } else {
+                last_focused_secondary
+            };
+            if replace_secondary {
+                self.secondary_sheet_id = Some(new_active.clone());
+            } else {
+                self.primary_sheet_id = Some(new_active.clone());
+            }
+        }
+        self.sync_pin_invariants(doc);
     }
 }
 

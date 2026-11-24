@@ -136,13 +136,21 @@ pub struct ColumnGridRenderContext<'a> {
     pub tokens: &'a Tokens,
     pub metrics: LayoutMetrics,
     pub modal_blocked: bool,
+    pub pane_salt: &'static str,
 }
 
 impl<'a> ColumnGridRenderContext<'a> {
     /// Construct render options inheriting `tokens.metrics`.
     #[must_use]
     pub const fn new(tokens: &'a Tokens, modal_blocked: bool) -> Self {
-        Self { tokens, metrics: tokens.metrics, modal_blocked }
+        Self { tokens, metrics: tokens.metrics, modal_blocked, pane_salt: "primary" }
+    }
+
+    /// Scope egui transient IDs to an explicit split-pane slot (`"primary"` / `"secondary"`).
+    #[must_use]
+    pub const fn with_pane_salt(mut self, pane_salt: &'static str) -> Self {
+        self.pane_salt = pane_salt;
+        self
     }
 }
 
@@ -210,7 +218,7 @@ pub fn render_column_grid(
             ..ColumnGridFrameReport::default()
         };
     }
-    multi_archetype::render_multi_archetype_grid(ui, app, state, render_ctx, meta, intents)
+    multi_archetype::render_multi_archetype_grid(ui, app, app.document().active_sheet_id.as_ref(), state, render_ctx, meta, intents)
 }
 
 /// Render the active `DataSheet` natively for all 8 table archetypes (`Column`, `XY`, `Grouped`,
@@ -224,5 +232,18 @@ pub fn render_data_grid(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> DataGridFrameReport {
-    multi_archetype::render_multi_archetype_grid(ui, app, state, render_ctx, meta, intents)
+    render_data_grid_for_sheet(ui, app, app.document().active_sheet_id.as_ref(), state, render_ctx, meta, intents)
+}
+
+/// Render an explicit `sheet_id` `DataSheet` using the unified virtualized grid renderer (`R20.3`).
+pub fn render_data_grid_for_sheet(
+    ui: &mut Ui,
+    app: &UiApp,
+    sheet_id: Option<&SheetId>,
+    state: &mut DataGridEguiState,
+    render_ctx: DataGridRenderContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> DataGridFrameReport {
+    multi_archetype::render_multi_archetype_grid(ui, app, sheet_id, state, render_ctx, meta, intents)
 }

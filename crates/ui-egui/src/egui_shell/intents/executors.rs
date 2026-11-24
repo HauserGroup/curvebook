@@ -24,6 +24,8 @@ pub(super) fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Resul
             {
                 obj.insert(String::from("sheet_id"), serde_json::Value::String(active_id.as_str().to_owned()));
             }
+            let prev_active_id = app.session.document().active_sheet_id.clone();
+            let select_mode_is_family = command_id == "sheet.select" && params.get("mode").and_then(serde_json::Value::as_str) == Some("family");
             let outcome = app.execute_session_ui_cmd(&command_id, params)?;
             if matches!(command_id.as_str(), "edit.undo" | "edit.redo" | "sheet.select") {
                 crate::interaction::clear_inspector_axis_buffers(app);
@@ -32,7 +34,20 @@ pub(super) fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Resul
                 && let Some(active_id) = app.session.document().active_sheet_id.clone()
             {
                 let doc = app.session.document().clone();
+                if app.split.enabled {
+                    if select_mode_is_family {
+                        app.split.sync_pin_invariants(&doc);
+                    } else {
+                        let last_sec = app.egui_views.center_stage.focused_split_pane == crate::egui_shell::center_stage::SplitPaneSlot::Secondary;
+                        app.split.on_navigator_select(&doc, prev_active_id.as_ref(), &active_id, last_sec);
+                    }
+                } else {
+                    app.split.sync_pin_invariants(&doc);
+                }
                 app.canvas_dialogs.on_sheet_selected_with_auto_modal(&doc, &active_id, false);
+            } else if command_id == "sheet.delete" {
+                let doc = app.session.document().clone();
+                app.split.sync_pin_invariants(&doc);
             }
             Ok(UiIntentOutcome::Engine { command_id, outcome })
         }
@@ -268,6 +283,31 @@ fn apply_shell_workspace_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
         }
         UiIntent::SetSplitRatio { ratio } => {
             app.split.set_ratio(ratio);
+        }
+        UiIntent::ToggleInspectorPin => {
+            let doc = app.session.document().clone();
+            if app.split.enabled {
+                if app.split.inspector_pinned {
+                    app.split.inspector_pinned = false;
+                    app.split.inspector_target_sheet_id = doc.active_sheet_id.clone();
+                } else {
+                    let target = app.split.effective_inspector_target(&doc).cloned();
+                    app.split.inspector_target_sheet_id = target;
+                    app.split.inspector_pinned = app.split.inspector_target_sheet_id.is_some();
+                }
+            } else {
+                app.split.inspector_pinned = false;
+                app.split.inspector_target_sheet_id = doc.active_sheet_id.clone();
+            }
+        }
+        UiIntent::SwitchInspectorTarget { sheet_id } => {
+            let doc = app.session.document().clone();
+            if doc.sheet_section(&sheet_id).is_some() {
+                app.split.inspector_target_sheet_id = Some(sheet_id);
+                if app.split.enabled {
+                    app.split.sync_pin_invariants(&doc);
+                }
+            }
         }
         UiIntent::SetPreviewFilter { filter } => {
             app.preview_filter = filter;

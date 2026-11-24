@@ -578,7 +578,7 @@ fn r15_2_egui_r10_1_anova_human_path_cjk_inspect_and_journal() -> Result<(), Box
     assert!(shell_inspect.undo_depth > seed_undo);
 
     // Switch back to Column sheet tab and verify CJK header/cell text appears in egui `ui.inspect` grid scope.
-    driver.click_widget_id("sheet.tab.col-spike")?;
+    driver.click_widget_id("nav.sheet.col-spike")?;
     let grid_inspect = driver.state_mut().app.inspect_egui_shell_snapshot(metrics, Some("grid"), true);
     let cells = grid_inspect.grid_cells.as_ref().ok_or("expected egui grid_cells in ui.inspect")?;
     assert!(cells.iter().any(|w| w.widget_id == "grid.col_title.0" && w.label == "対照群"));

@@ -274,7 +274,7 @@ pub fn render_leading_dock(
     let dock_frame = egui::Frame::NONE
         .fill(tokens.panel_bg)
         .stroke(Stroke::new(1.0, tokens.divider))
-        .inner_margin(egui::Margin::symmetric(if ctx_in.layout.leading_collapsed_to_rail { 4 } else { 6 }, 6));
+        .inner_margin(if ctx_in.layout.leading_collapsed_to_rail { egui::Margin::same(4) } else { egui::Margin::ZERO });
 
     let mut hovered_family_this_frame = None;
     let panel_builder =
@@ -579,45 +579,72 @@ fn render_navigator_pane(
     let locale = &app.locale;
     let avail_w = ui.available_width().max(120.0);
 
-    // Header row: Title + Nesting View Toggle + Collapse rail
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        let title_w = (avail_w - 86.0).max(40.0);
-        render_clipped_label(
-            ui,
-            "nav.header.title",
-            tr(locale, "menu.view.navigator"),
-            title_w,
-            FontId::proportional(12.5),
-            tokens.text_strong,
-            meta,
-        );
+    // Shared 32 pt Panel Header (aligned flush with Center Split panes and Trailing Studio).
+    let header_h = tokens.metrics.panel_header_h;
+    let (header_rect, hdr_region) = ui.allocate_exact_size(Vec2::new(avail_w, header_h), Sense::hover());
+    hdr_region.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Region, enabled, "Project Navigator Header"));
+    ui.painter().rect_filled(header_rect, CornerRadius::ZERO, tokens.panel_bg);
+    ui.painter().hline(header_rect.x_range(), header_rect.bottom(), Stroke::new(1.0, tokens.divider));
+    meta.record_response(
+        ui,
+        &hdr_region,
+        FrameInspectEntryInput {
+            widget_id: "nav.panel_header",
+            role: "region",
+            label: "Project Navigator Header",
+            command_id: None,
+            value: None,
+            enabled,
+            disabled_reason: None,
+            z_layer: ZLayer::Workspace,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
 
-        let is_nested = matches!(app.nav.nesting_mode, NavigatorNestingMode::NestedResultsUnderData);
-        let view_lbl = if is_nested { "Nested" } else { "Folders" };
-        let view_resp = render_compact_chip(
-            ui,
-            CompactChipSpec { max_w: 54.0, widget_id: "nav.view_mode.toggle", label: view_lbl, selected: is_nested, enabled },
-            tokens,
-            meta,
-        );
-        if view_resp.clicked() && enabled {
-            let next = if is_nested { NavigatorNestingMode::SeparateFolders } else { NavigatorNestingMode::NestedResultsUnderData };
-            intents.push(UiIntent::SetNavigatorNesting { mode: next });
-        }
+    let mut hdr_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(header_rect.shrink2(Vec2::new(tokens.metrics.space_md, tokens.metrics.space_xs)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    hdr_ui.set_clip_rect(header_rect);
+    hdr_ui.spacing_mut().item_spacing.x = tokens.metrics.space_xs;
+    let hdr_inner_w = hdr_ui.available_width().max(80.0);
+    let title_w = (hdr_inner_w - 86.0).max(40.0);
+    render_clipped_label(
+        &mut hdr_ui,
+        "nav.header.title",
+        tr(locale, "menu.view.navigator"),
+        title_w,
+        FontId::proportional(tokens.metrics.font_ui_body_pt),
+        tokens.text_strong,
+        meta,
+    );
 
-        let collapse_glyph = if ctx_in.layout.rtl_mirrored { "»" } else { "«" };
-        let col_resp = render_compact_chip(
-            ui,
-            CompactChipSpec { max_w: 24.0, widget_id: "nav.collapse_rail", label: collapse_glyph, selected: false, enabled },
-            tokens,
-            meta,
-        );
-        if col_resp.clicked() && enabled {
-            intents.push(UiIntent::ToggleLeadingCollapsedRail);
-        }
-    });
-    ui.add_space(4.0);
+    let is_nested = matches!(app.nav.nesting_mode, NavigatorNestingMode::NestedResultsUnderData);
+    let view_lbl = if is_nested { "Nested" } else { "Folders" };
+    let view_resp = render_compact_chip(
+        &mut hdr_ui,
+        CompactChipSpec { max_w: 54.0, widget_id: "nav.view_mode.toggle", label: view_lbl, selected: is_nested, enabled },
+        tokens,
+        meta,
+    );
+    if view_resp.clicked() && enabled {
+        let next = if is_nested { NavigatorNestingMode::SeparateFolders } else { NavigatorNestingMode::NestedResultsUnderData };
+        intents.push(UiIntent::SetNavigatorNesting { mode: next });
+    }
+
+    let collapse_glyph = if ctx_in.layout.rtl_mirrored { "»" } else { "«" };
+    let col_resp = render_compact_chip(
+        &mut hdr_ui,
+        CompactChipSpec { max_w: 24.0, widget_id: "nav.collapse_rail", label: collapse_glyph, selected: false, enabled },
+        tokens,
+        meta,
+    );
+    if col_resp.clicked() && enabled {
+        intents.push(UiIntent::ToggleLeadingCollapsedRail);
+    }
+    ui.add_space(tokens.metrics.space_xs);
 
     // Search filter box + clear X
     if state.last_synced_query != app.nav.search_query {

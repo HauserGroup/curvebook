@@ -39,6 +39,7 @@ use super::{DataGridEguiState, DataGridFrameReport, DataGridRenderContext, GridI
 pub(super) fn render_multi_archetype_grid(
     ui: &mut Ui,
     app: &UiApp,
+    target_sheet_id: Option<&SheetId>,
     state: &mut DataGridEguiState,
     render_ctx: DataGridRenderContext<'_>,
     meta: &mut FrameInspectMeta,
@@ -47,7 +48,7 @@ pub(super) fn render_multi_archetype_grid(
     let available = ui.available_rect_before_wrap();
     state.ellipsized_headers = 0;
 
-    let Some(ds) = app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id)) else {
+    let Some(ds) = target_sheet_id.and_then(|id| app.document().data_sheet(id)) else {
         state.last_visible_rows = 0..0;
         state.last_visible_subcols = 0..0;
         return DataGridFrameReport {
@@ -65,13 +66,13 @@ pub(super) fn render_multi_archetype_grid(
         return DataGridFrameReport { grid_rect_pt: available, ..DataGridFrameReport::default() };
     }
 
-    let last_sheet_key = Id::unique("r15_4_multi_grid_last_sheet");
+    let last_sheet_key = Id::unique(("r15_4_multi_grid_last_sheet", render_ctx.pane_salt));
     let prev_sheet = ui.ctx().data_mut(|d| {
         let prev = d.get_temp::<SheetId>(last_sheet_key);
         d.insert_temp(last_sheet_key, ds.id.clone());
         prev
     });
-    let aux_id = Id::unique(("r15_4_multi_grid_aux", ds.id.as_str()));
+    let aux_id = Id::unique(("r15_4_multi_grid_aux", render_ctx.pane_salt, ds.id.as_str()));
     let mut aux: MultiGridAuxState = ui.ctx().data_mut(|d| d.get_temp::<MultiGridAuxState>(aux_id).unwrap_or_default());
     if aux.sheet_id.as_ref() != Some(&ds.id) {
         aux = MultiGridAuxState { sheet_id: Some(ds.id.clone()), ..MultiGridAuxState::default() };

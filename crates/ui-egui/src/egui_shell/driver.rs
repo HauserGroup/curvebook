@@ -639,7 +639,7 @@ pub fn classify_entry_region(entry: &FrameInspectNodeMeta) -> ShellRegion {
         ZLayer::Workspace | ZLayer::FloatingOverlay | ZLayer::SplitHandle | ZLayer::Tooltip => {}
     }
     let id = entry.widget_id.as_str();
-    if id.starts_with("toolbar.") || id.starts_with("menu.") || id.starts_with("sheet.tab.") {
+    if id.starts_with("toolbar.") || id.starts_with("menu.") {
         ShellRegion::TopChrome
     } else if id.starts_with("navigator.") || id.starts_with("nav.") || id.starts_with("family.") {
         ShellRegion::Navigator
@@ -929,6 +929,104 @@ pub fn check_region_control_budgets(meta: &FrameInspectMeta, budgets: &RegionBud
                 widget_id: format!("region:{region:?}"),
                 check: String::from("region_control_budget"),
                 detail: format!("region {region:?} exposes {actual} enabled clickable controls (budget <= {limit})"),
+            });
+        }
+    }
+    violations
+}
+
+/// Assert that visible top-level panel headers (`nav.panel_header`, `split.header.primary`,
+/// `split.header.secondary`, `inspector.panel_header`) share one horizontal baseline and `32 pt` height (`R20.3`).
+#[must_use]
+pub fn panel_header_baseline_parity(meta: &FrameInspectMeta) -> Vec<ParityViolation> {
+    let ids = ["nav.panel_header", "split.header.primary", "split.header.secondary", "inspector.panel_header"];
+    let found: Vec<&FrameInspectNodeMeta> = ids.iter().filter_map(|id| meta.find_by_widget_id(id)).collect();
+    if found.len() < 2 {
+        return Vec::new();
+    }
+    let ref_entry = found[0];
+    let ref_top = ref_entry.clipped_rect.top();
+    let ref_bot = ref_entry.clipped_rect.bottom();
+    let mut violations = Vec::new();
+    for entry in found.iter().skip(1) {
+        let top_diff = (entry.clipped_rect.top() - ref_top).abs();
+        let bot_diff = (entry.clipped_rect.bottom() - ref_bot).abs();
+        if top_diff > 1.5 || bot_diff > 1.5 {
+            violations.push(ParityViolation {
+                widget_id: entry.widget_id.clone(),
+                check: String::from("panel_header_baseline_parity"),
+                detail: format!(
+                    "panel header `{}` y=[{:.1}, {:.1}] differs from `{}` y=[{:.1}, {:.1}]",
+                    entry.widget_id,
+                    entry.clipped_rect.top(),
+                    entry.clipped_rect.bottom(),
+                    ref_entry.widget_id,
+                    ref_top,
+                    ref_bot,
+                ),
+            });
+        }
+    }
+    violations
+}
+
+/// Assert three-way split-view targeting invariants (`R20.3`, `gui-layout-spec.md` §2.4):
+/// materialized split sheet IDs exist in `doc`, and any pinned Inspector target stays within the active split pair.
+#[must_use]
+pub fn split_targeting_parity(app: &crate::UiApp) -> Vec<ParityViolation> {
+    let mut violations = Vec::new();
+    let doc = app.document();
+    if !app.split.enabled {
+        if app.split.inspector_pinned {
+            violations.push(ParityViolation {
+                widget_id: String::from("inspector.pin_toggle"),
+                check: String::from("split_targeting_parity"),
+                detail: String::from("inspector_pinned must be false when Split Comparison is closed"),
+            });
+        }
+        return violations;
+    }
+    if app.split.primary_sheet_id.as_ref().is_none_or(|id| doc.sheet_section(id).is_none()) {
+        violations.push(ParityViolation {
+            widget_id: String::from("split.primary_selector"),
+            check: String::from("split_targeting_parity"),
+            detail: String::from("primary_sheet_id must be materialized and present in document when split is active"),
+        });
+    }
+    if app.split.secondary_sheet_id.as_ref().is_none_or(|id| doc.sheet_section(id).is_none()) {
+        violations.push(ParityViolation {
+            widget_id: String::from("split.secondary_selector"),
+            check: String::from("split_targeting_parity"),
+            detail: String::from("secondary_sheet_id must be materialized and present in document when split is active"),
+        });
+    }
+    if app.split.inspector_pinned {
+        let valid = app.split.inspector_target_sheet_id.as_ref().is_some_and(|id| doc.sheet_section(id).is_some() && app.split.contains_sheet(id));
+        if !valid {
+            violations.push(ParityViolation {
+                widget_id: String::from("inspector.pin_toggle"),
+                check: String::from("split_targeting_parity"),
+                detail: String::from("pinned inspector_target_sheet_id must remain inside the active split pair"),
+            });
+        }
+    }
+    violations
+}
+
+/// Assert that Split Comparison never falls back to retired preview grids (`R20.3`):
+/// zero `split.col_preview.*`, `split.focus_in_grid`, or `split.activate_data_sheet` entries may appear.
+#[must_use]
+pub fn split_unified_datagrid_parity(meta: &FrameInspectMeta) -> Vec<ParityViolation> {
+    let mut violations = Vec::new();
+    for entry in &meta.entries {
+        if entry.widget_id.starts_with("split.col_preview.")
+            || entry.widget_id == "split.focus_in_grid"
+            || entry.widget_id == "split.activate_data_sheet"
+        {
+            violations.push(ParityViolation {
+                widget_id: entry.widget_id.clone(),
+                check: String::from("split_unified_datagrid_parity"),
+                detail: format!("retired split preview widget `{}` must not appear; use unified parameterized DataGrid", entry.widget_id),
             });
         }
     }

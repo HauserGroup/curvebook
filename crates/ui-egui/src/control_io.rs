@@ -2440,8 +2440,19 @@ fn dispatch_ui_event_cmd(app: &mut UiApp, params: &Value) -> Result<Value, Strin
 fn dispatch_ui_split_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let enabled_opt = opt_bool_param(params, &["enabled"])?;
     let ratio_opt = opt_finite_f64_param(params, &["ratio"])?;
+    let auto_pin_graph_opt = opt_bool_param(params, &["auto_pin_graph"])?;
     let primary_opt = opt_non_empty_str_param(params, &["primary_sheet_id"])?.map(SheetId::try_new).transpose().map_err(|e| e.to_string())?;
     let secondary_opt = opt_non_empty_str_param(params, &["secondary_sheet_id"])?.map(SheetId::try_new).transpose().map_err(|e| e.to_string())?;
+
+    let was_enabled = app.split.enabled;
+    let prev_primary = app.split.primary_sheet_id.clone();
+    let prev_secondary = app.split.secondary_sheet_id.clone();
+    let is_swap = was_enabled
+        && enabled_opt != Some(false)
+        && primary_opt.is_some()
+        && secondary_opt.is_some()
+        && primary_opt == prev_secondary
+        && secondary_opt == prev_primary;
 
     app.split.enabled = enabled_opt.unwrap_or(!app.split.enabled);
     if let Some(ratio) = ratio_opt {
@@ -2453,12 +2464,40 @@ fn dispatch_ui_split_toggle(app: &mut UiApp, params: &Value) -> Result<Value, St
     if let Some(s_id) = secondary_opt {
         app.split.secondary_sheet_id = Some(s_id);
     }
-    let (primary, secondary) = app.split.resolve_sheets(app.document());
+
+    let doc = app.session.document().clone();
+    let (primary, secondary) = if app.split.enabled {
+        let (p, s) = app.split.materialize_sheets(&doc);
+        let is_data_graph_pair =
+            p.as_ref().is_some_and(|id| doc.data_sheet(id).is_some()) && s.as_ref().is_some_and(|id| doc.graph_sheet(id).is_some());
+        if !is_swap && (auto_pin_graph_opt == Some(true) || (!was_enabled && is_data_graph_pair && auto_pin_graph_opt != Some(false))) {
+            if ratio_opt.is_none() {
+                app.split.set_ratio(crate::dialogs_canvas::SplitWorkspaceState::DATA_GRAPH_DEFAULT_RATIO);
+            }
+            if let Some(graph_id) = s.as_ref().filter(|id| doc.graph_sheet(id).is_some()) {
+                app.split.inspector_target_sheet_id = Some(graph_id.clone());
+                app.split.inspector_pinned = true;
+            }
+        } else if !is_swap && auto_pin_graph_opt == Some(false) {
+            app.split.inspector_pinned = false;
+            app.split.inspector_target_sheet_id = doc.active_sheet_id.clone();
+        }
+        if !is_swap {
+            app.split.sync_pin_invariants(&doc);
+        }
+        (p, s)
+    } else {
+        app.split.sync_pin_invariants(&doc);
+        app.split.resolve_sheets(&doc)
+    };
+
     Ok(json!({
         "enabled": app.split.enabled,
         "ratio": app.split.ratio,
         "primary_sheet_id": primary.as_ref().map(SheetId::as_str),
         "secondary_sheet_id": secondary.as_ref().map(SheetId::as_str),
+        "inspector_target_sheet_id": app.split.effective_inspector_target(&doc).map(SheetId::as_str),
+        "inspector_pinned": app.split.inspector_pinned,
     }))
 }
 

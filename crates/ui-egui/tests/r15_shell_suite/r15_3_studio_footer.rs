@@ -445,15 +445,20 @@ fn verify_footer_visibility_and_cursor_readout(driver: &mut EguiHumanPathDriver<
     assert!(driver.frame_meta().find_by_widget_id("status.rulers").is_none(), "rulers hidden on DataSheet");
     assert!(driver.frame_meta().find_by_widget_id("status.zoom.fit").is_none(), "zoom hidden on DataSheet");
 
-    driver.click_widget_id("status.section.info")?;
+    // Duplicate 5-category footer jump pills are retired in R20.3; switch sheets via Navigator.
+    assert!(driver.frame_meta().find_by_widget_id("status.section.info").is_none());
+    driver.click_widget_id("nav.chip.info")?;
+    driver.click_widget_id("nav.sheet.info-1")?;
     assert!(driver.frame_meta().find_by_widget_id("status.rulers").is_none());
     assert!(driver.frame_meta().find_by_widget_id("status.zoom.in").is_none());
 
-    driver.click_widget_id("status.section.results")?;
+    driver.click_widget_id("nav.chip.results")?;
+    driver.click_widget_id("nav.sheet.res-anova")?;
     assert!(driver.frame_meta().find_by_widget_id("status.rulers").is_none());
     assert!(driver.frame_meta().find_by_widget_id("status.zoom.in").is_none());
 
-    driver.click_widget_id("status.section.graphs")?;
+    driver.click_widget_id("nav.chip.graphs")?;
+    driver.click_widget_id("nav.sheet.graph-1")?;
     assert!(driver.frame_meta().find_by_widget_id("status.rulers").is_some());
     assert!(driver.frame_meta().find_by_widget_id("status.zoom.in").is_some());
     driver.dispatch_events(vec![egui::Event::PointerMoved(egui::pos2(520.0, 260.0))]);
@@ -489,7 +494,9 @@ fn status_footer_history_sections_switcher_links_cursor_cvd_rulers_and_zoom_gate
     driver.click_widget_id("status.zoom.reset")?;
     assert!((driver.state().app.canvas_dialogs.canvas.zoom - 1.0).abs() < 1e-6);
 
-    driver.click_widget_id("status.section.layouts")?;
+    driver.click_widget_id("nav.chip.layouts")?;
+    driver.click_widget_id("nav.sheet.layout-1")?;
+    driver.click_widget_id("nav.chip.all")?;
     assert_eq!(driver.state().app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("layout-1"));
     assert!(driver.frame_meta().find_by_widget_id("status.rulers").is_some());
     assert!(driver.frame_meta().find_by_widget_id("status.zoom.in").is_some());
@@ -506,6 +513,9 @@ fn status_footer_history_sections_switcher_links_cursor_cvd_rulers_and_zoom_gate
     driver.click_widget_id("status.history.forward")?;
     assert_eq!(driver.state().app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("layout-1"));
 
+    // Collapsed-Navigator active-sheet footer switcher appears only when Navigator is collapsed (R20.3).
+    assert!(driver.frame_meta().find_by_widget_id("status.sheet_switcher").is_none());
+    driver.click_widget_id("nav.collapse_rail")?;
     driver.click_widget_id("status.sheet_switcher")?;
     driver.click_widget_id("status.sheet_switcher.item.col-1")?;
     assert_eq!(driver.state().app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("col-1"));

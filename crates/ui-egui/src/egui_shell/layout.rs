@@ -140,7 +140,9 @@ pub struct LayoutMetrics {
     pub splitter_visual_w: f32,
     pub splitter_hit_slop_w: f32,
     pub center_stage_min_w: f32,
+    pub split_center_preferred_w: f32,
     pub split_vertical_breakpoint_w: f32,
+    pub split_vertical_min_h: f32,
     pub grid_row_h: f32,
     pub grid_header_tier_heights: [f32; 3],
     pub min_hit_target_pt: f32,
@@ -192,7 +194,9 @@ impl LayoutMetrics {
         splitter_visual_w: 4.0,
         splitter_hit_slop_w: 8.0,
         center_stage_min_w: 360.0,
+        split_center_preferred_w: 760.0,
         split_vertical_breakpoint_w: 720.0,
+        split_vertical_min_h: 520.0,
         grid_row_h: 24.0,
         grid_header_tier_heights: [24.0, 24.0, 24.0],
         min_hit_target_pt: 24.0,
@@ -260,6 +264,13 @@ impl LayoutMetrics {
     /// Solve responsive dock collapse, splitter widths, and Center Stage budget (`gui-layout-spec.md` §2.3).
     #[must_use]
     pub fn solve_shell_layout(self, input: ShellLayoutInput) -> ResponsiveShellLayout {
+        self.solve_split_shell_layout(input, false)
+    }
+
+    /// Solve responsive dock collapse and Split Comparison usable-width degradation (`760 pt` preferred /
+    /// `720 pt` hard horizontal floor / `< 720 × 520 pt` compact single-pane flip; `gui-layout-spec.md` §2.3).
+    #[must_use]
+    pub fn solve_split_shell_layout(self, input: ShellLayoutInput, split_active: bool) -> ResponsiveShellLayout {
         let w = sanitize_nonneg(input.viewport_w_pt);
         let h = sanitize_nonneg(input.viewport_h_pt);
         let tier = if w >= self.wide_desktop_breakpoint_w {
@@ -271,13 +282,24 @@ impl LayoutMetrics {
         } else {
             ViewportTier::NarrowHeadless
         };
-        let split_orientation = if w >= self.split_vertical_breakpoint_w { SplitOrientation::Horizontal } else { SplitOrientation::Vertical };
 
         let tier1_app_bar_h_pt = self.app_bar_h.min(h * 0.45).max(0.0);
         let tier2_action_strip_h_pt = self.action_strip_h.min((h - tier1_app_bar_h_pt).max(0.0) * 0.65).max(0.0);
         let top_chrome_h_pt = tier1_app_bar_h_pt + tier2_action_strip_h_pt;
         let status_bar_h_pt = self.status_bar_h.min((h - top_chrome_h_pt).max(0.0)).max(0.0);
         let center_stage_h_pt = (h - top_chrome_h_pt - status_bar_h_pt).max(0.0);
+
+        let resolve_split_orientation = |center_w: f32, center_h: f32| -> SplitOrientation {
+            if !split_active {
+                if w >= self.split_vertical_breakpoint_w { SplitOrientation::Horizontal } else { SplitOrientation::Vertical }
+            } else if center_w >= self.split_vertical_breakpoint_w {
+                SplitOrientation::Horizontal
+            } else if center_h >= self.split_vertical_min_h {
+                SplitOrientation::Vertical
+            } else {
+                SplitOrientation::CompactSinglePane
+            }
+        };
 
         if w < 420.0 {
             return ResponsiveShellLayout {
@@ -297,7 +319,7 @@ impl LayoutMetrics {
                 trailing_splitter_w_pt: 0.0,
                 center_stage_w_pt: w,
                 center_stage_h_pt,
-                split_orientation,
+                split_orientation: resolve_split_orientation(w, center_stage_h_pt),
                 rtl_mirrored: input.is_rtl,
             };
         }
@@ -306,6 +328,7 @@ impl LayoutMetrics {
             let show_rails = w >= self.min_window_w_pt;
             let lead_w = if show_rails && input.navigator_open { self.dock_collapsed_rail_w } else { 0.0 };
             let trail_w = if show_rails && input.inspector_open { self.dock_collapsed_rail_w } else { 0.0 };
+            let center_w = (w - lead_w - trail_w).max(0.0);
             return ResponsiveShellLayout {
                 tier,
                 top_chrome_h_pt,
@@ -321,9 +344,9 @@ impl LayoutMetrics {
                 trailing_collapsed_to_rail: trail_w > 0.0,
                 trailing_visible: trail_w > 0.0,
                 trailing_splitter_w_pt: 0.0,
-                center_stage_w_pt: (w - lead_w - trail_w).max(0.0),
+                center_stage_w_pt: center_w,
                 center_stage_h_pt,
-                split_orientation,
+                split_orientation: resolve_split_orientation(center_w, center_stage_h_pt),
                 rtl_mirrored: input.is_rtl,
             };
         }
@@ -346,8 +369,13 @@ impl LayoutMetrics {
         let mut lead_split = if lead_collapsed { 0.0 } else { split };
         let mut trail_split = if trail_collapsed { 0.0 } else { split };
 
-        let target_center_min =
-            if !lead_collapsed && !trail_collapsed && w >= self.inspector_collapse_breakpoint_w { 480.0 } else { self.center_stage_min_w };
+        let target_center_min = if split_active {
+            self.split_center_preferred_w
+        } else if !lead_collapsed && !trail_collapsed && w >= self.inspector_collapse_breakpoint_w {
+            480.0
+        } else {
+            self.center_stage_min_w
+        };
 
         let mut center_w = w - lead_w - lead_split - trail_w - trail_split;
         if center_w < target_center_min {
@@ -371,19 +399,21 @@ impl LayoutMetrics {
             center_w = w - lead_w - lead_split - trail_w - trail_split;
         }
 
-        if center_w < self.center_stage_min_w && !trail_collapsed {
+        let collapse_floor = if split_active { self.split_center_preferred_w } else { self.center_stage_min_w };
+        if center_w < collapse_floor && !trail_collapsed {
             trail_collapsed = true;
             trail_w = rail;
             trail_split = 0.0;
             center_w = w - lead_w - lead_split - trail_w - trail_split;
         }
-        if center_w < self.center_stage_min_w && !lead_collapsed {
+        if center_w < collapse_floor && !lead_collapsed {
             lead_collapsed = true;
             lead_w = rail;
             lead_split = 0.0;
             center_w = w - lead_w - lead_split - trail_w - trail_split;
         }
 
+        let final_center_w = center_w.max(0.0);
         ResponsiveShellLayout {
             tier,
             top_chrome_h_pt,
@@ -399,9 +429,9 @@ impl LayoutMetrics {
             trailing_collapsed_to_rail: trail_collapsed,
             trailing_visible: trail_w > 0.0,
             trailing_splitter_w_pt: trail_split,
-            center_stage_w_pt: center_w.max(0.0),
+            center_stage_w_pt: final_center_w,
             center_stage_h_pt,
-            split_orientation,
+            split_orientation: resolve_split_orientation(final_center_w, center_stage_h_pt),
             rtl_mirrored: input.is_rtl,
         }
     }
@@ -421,12 +451,14 @@ pub enum ViewportTier {
     NarrowHeadless,
 }
 
-/// Center split orientation derived from window width (`< 720 pt` switches to Vertical).
+/// Center split orientation derived from settled logical center area (`gui-layout-spec.md` §2.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum SplitOrientation {
     #[default]
     Horizontal,
     Vertical,
+    /// `< 720 × 520 pt` single-pane header flip fallback preserving both materialized split IDs.
+    CompactSinglePane,
 }
 
 /// Pure input parameters evaluated by [`LayoutMetrics::solve_shell_layout`].

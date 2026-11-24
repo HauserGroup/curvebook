@@ -112,6 +112,8 @@ pub enum UiIntent {
     SetNavigatorSearch { query: String },
     SetNavigatorNesting { mode: NavigatorNestingMode },
     SetSplitRatio { ratio: f64 },
+    ToggleInspectorPin,
+    SwitchInspectorTarget { sheet_id: SheetId },
     SetPreviewFilter { filter: CanvasPreviewFilter },
     SetPaletteOpen { open: bool },
     OpenCheckpointsDialog,

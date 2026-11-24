@@ -115,7 +115,7 @@ fn top_chrome_all_14_beta_locales_zero_bleed_640x420_and_1440x600() -> Result<()
             assert!((compact_t2.height() - 38.0).abs() <= 1.0, "compact tier2 must stay single-row 38pt, got {}", compact_t2.height());
 
             for entry in &driver.frame_meta().entries {
-                if entry.widget_id.starts_with("toolbar.") || entry.widget_id.starts_with("menu.") || entry.widget_id.starts_with("sheet.tab.") {
+                if entry.widget_id.starts_with("toolbar.") || entry.widget_id.starts_with("menu.") {
                     assert!(
                         entry.clipped_rect.right() <= 640.5,
                         "locale `{locale}` widget `{}` overflowed 640pt right edge: {:?}",
@@ -235,13 +235,8 @@ fn verify_info_layout_and_overflow(driver: &mut EguiHumanPathDriver<'_, TopChrom
         assert_eq!(ov_item.z_layer, ZLayer::DropdownMenu);
     }
 
-    // Sheet tab switching via Tier 2 `sheet.tab.<id>` commits through PendingUiIntents cleanly.
-    if driver.frame_meta().find_by_widget_id("sheet.tab.ds-col").is_some()
-        && driver.state().app.document().active_sheet_id.as_ref().map(|s| s.as_str()) != Some("ds-col")
-    {
-        driver.click_widget_id("sheet.tab.ds-col")?;
-        assert_eq!(driver.state().app.document().active_sheet_id.as_ref().map(|s| s.as_str()), Some("ds-col"));
-    }
+    // Duplicate Tier 2 `sheet.tab.*` tabs are retired in R20.3 (single-owner Navigator browsing).
+    assert!(driver.frame_meta().find_by_widget_id("sheet.tab.ds-col").is_none());
 
     Ok(())
 }
@@ -405,7 +400,7 @@ fn da_05_06_top_chrome_popups_dismiss_on_escape() -> Result<(), String> {
     assert!(driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").is_none(), "Escape must dismiss split preset popup");
 
     // 2. Tier2 overflow popup dismisses on Escape (narrow viewport forces overflow button).
-    driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.0));
+    driver.set_viewport(ViewportMetrics::new(420.0, 420.0, 1.0));
     driver.click_widget_id("toolbar.overflow")?;
     assert!(driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").is_some(), "tier2 overflow popup should be open");
     driver.press_egui_key(Key::Escape, Modifiers::NONE);

@@ -491,14 +491,14 @@ pub(super) fn archetype_x_subcol_count(arch: &TableArchetype) -> usize {
 
 pub(super) fn archetype_badge(arch: &TableArchetype) -> &'static str {
     match arch {
-        TableArchetype::Column(_) => "Col",
+        TableArchetype::Column(_) => "COL",
         TableArchetype::Xy(_) => "XY",
-        TableArchetype::Grouped(_) => "Grp",
-        TableArchetype::Contingency(_) => "Cont",
-        TableArchetype::Survival(_) => "Surv",
-        TableArchetype::PartsOfWhole(_) => "PoW",
+        TableArchetype::Grouped(_) => "GRP",
+        TableArchetype::Contingency(_) => "CONT",
+        TableArchetype::Survival(_) => "SURV",
+        TableArchetype::PartsOfWhole(_) => "POW",
         TableArchetype::MultipleVariables(_) => "MV",
-        TableArchetype::Nested(_) => "Nest",
+        TableArchetype::Nested(_) => "NEST",
     }
 }
 

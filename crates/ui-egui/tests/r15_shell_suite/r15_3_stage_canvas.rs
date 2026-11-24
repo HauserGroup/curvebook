@@ -271,12 +271,12 @@ fn center_stage_five_modes_and_split_15_to_85_clamping_with_brushing() -> Result
     let clamped_max = driver.state().views.center_stage.split_ratio_override.expect("split ratio override");
     assert!((clamped_max - 0.85).abs() < 0.02, "expected ~85% right clamp, got {clamped_max}");
 
-    // Double-click divider -> resets cleanly to 0.50.
+    // Double-click divider -> resets cleanly to Data + Graph preset default (0.40).
     let div_center = driver.frame_meta().find_by_widget_id("split.divider").expect("divider").clipped_rect.center();
     driver.click_at(div_center)?;
     driver.click_at(div_center)?;
     let reset_ratio = driver.state().views.center_stage.split_ratio_override.expect("split ratio override");
-    assert!((reset_ratio - 0.50).abs() < 0.05, "expected ~50% reset on double-click, got {reset_ratio}");
+    assert!((reset_ratio - 0.40).abs() < 0.05, "expected ~40% Data + Graph reset on double-click, got {reset_ratio}");
 
     // Verify vertical split fallback when width < 720 pt.
     driver.set_viewport(ViewportMetrics::new(640.0, 620.0, 1.0));
@@ -301,15 +301,80 @@ fn center_stage_five_modes_and_split_15_to_85_clamping_with_brushing() -> Result
     let brushed2 = driver.state().app.brushed_cell.clone().expect("brushed from swapped column pane");
     assert_eq!((brushed2.row, brushed2.col), (3, 0));
 
-    // When active_sheet_id switches to GraphSheet ("g-1"), non-active Column sheet uses split.col_preview and still syncs two-way brushing.
+    // When active_sheet_id switches to GraphSheet ("g-1"), secondary Column sheet renders unified interactive DataGrid and still syncs two-way brushing.
     driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "g-1" }))?;
     driver.run_settled();
-    driver.click_widget_id("split.col_preview.4.0")?;
-    let brushed3 = driver.state().app.brushed_cell.clone().expect("brushed from split col preview");
+    driver.click_widget_id("grid.cell.4.0.0")?;
+    let brushed3 = driver.state().app.brushed_cell.clone().expect("brushed from unified split DataGrid");
     assert_eq!((brushed3.row, brushed3.col), (4, 0));
 
     driver.click_widget_id("split.close")?;
     assert!(!driver.state().app.split.enabled);
+    assert!(!driver.state().app.split.inspector_pinned, "closing split must auto-unpin Inspector");
+    Ok(())
+}
+
+#[test]
+fn r20_3_three_way_split_targeting_shared_headers_and_compact_flip() -> Result<(), Box<dyn std::error::Error>> {
+    use curvebook_ui_egui::egui_shell::driver::{panel_header_baseline_parity, split_targeting_parity, split_unified_datagrid_parity};
+    use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, inspect_bridge};
+
+    let mut app = make_full_project_app()?;
+    let col_id = SheetId::new("col-1");
+    let g_id = SheetId::new("g-1");
+    app.execute_command("sheet.select", json!({ "sheet_id": "col-1" }))?;
+    let initial_family_anchor = app.document().family_anchor_sheet_id.clone();
+
+    let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(
+        (app, EguiShellViewState::default()),
+        ViewportMetrics::new(1440.0, 800.0, 1.0),
+        Tokens::default(),
+        build_driver_font_definitions(),
+        |ui, meta, (ap, views)| {
+            let mut intents = PendingUiIntents::new();
+            let _ = inspect_bridge::render_egui_shell_frame(ui, ap, views, meta, &mut intents);
+            let _ = intents.commit_all_if_settled(ap, ui.ctx().will_discard());
+        },
+    );
+    driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+    driver.run_settled();
+
+    // Open Data + Graph split via Tier 1 Split preset -> materializes both IDs, 0.40 ratio, auto-pins Graph Inspector.
+    driver.click_widget_id("toolbar.split")?;
+    driver.click_widget_id("toolbar.split.preset.data_graph")?;
+    assert!(driver.state().0.split.enabled);
+    assert!(driver.state().0.split.inspector_pinned);
+    assert_eq!(driver.state().0.split.inspector_target_sheet_id, Some(g_id.clone()));
+    assert!((driver.state().0.split.ratio - 0.40).abs() < 1e-6);
+
+    assert!(panel_header_baseline_parity(driver.frame_meta()).is_empty(), "panel headers must share 32pt baseline");
+    assert!(split_targeting_parity(&driver.state().0).is_empty(), "split targeting invariants must hold");
+    assert!(split_unified_datagrid_parity(driver.frame_meta()).is_empty(), "zero retired split previews allowed");
+
+    // Clicking Swap preserves doc.active_sheet_id, inspector_target_sheet_id, and inspector_pinned.
+    driver.click_widget_id("split.swap")?;
+    assert_eq!(driver.state().0.split.primary_sheet_id, Some(g_id.clone()));
+    assert_eq!(driver.state().0.split.secondary_sheet_id, Some(col_id.clone()));
+    assert_eq!(driver.state().0.document().active_sheet_id, Some(col_id.clone()));
+    assert!(driver.state().0.split.inspector_pinned);
+    assert_eq!(driver.state().0.split.inspector_target_sheet_id, Some(g_id.clone()));
+    assert_eq!(driver.state().0.document().family_anchor_sheet_id, initial_family_anchor);
+
+    // Compact < 720x520 pt fallback shows single-pane header flip keeping both materialized IDs intact.
+    driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.0));
+    driver.run_settled();
+    assert!(driver.frame_meta().find_by_widget_id("split.compact.primary").is_some());
+    assert!(driver.frame_meta().find_by_widget_id("split.compact.secondary").is_some());
+    driver.click_widget_id("split.compact.primary")?;
+    assert_eq!(driver.state().0.document().active_sheet_id, Some(g_id.clone()));
+    assert_eq!(driver.state().0.document().family_anchor_sheet_id, initial_family_anchor, "compact flip must preserve family anchor");
+    assert!(driver.state().0.split.inspector_pinned);
+
+    // Closing split auto-unpins Inspector.
+    driver.click_widget_id("split.close")?;
+    assert!(!driver.state().0.split.enabled);
+    assert!(!driver.state().0.split.inspector_pinned);
+    assert!(split_targeting_parity(&driver.state().0).is_empty());
     Ok(())
 }
 
