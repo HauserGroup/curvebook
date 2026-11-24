@@ -445,7 +445,40 @@ fn lookup_named_xml_entity(entity: &str) -> Option<char> {
         "equiv" => Some('\u{2261}'),
         "rarr" => Some('\u{2192}'),
         "larr" => Some('\u{2190}'),
+        "uarr" => Some('\u{2191}'),
+        "darr" => Some('\u{2193}'),
         "harr" => Some('\u{2194}'),
+        "copy" => Some('\u{00A9}'),
+        "reg" => Some('\u{00AE}'),
+        "trade" => Some('\u{2122}'),
+        "lsquo" => Some('\u{2018}'),
+        "rsquo" => Some('\u{2019}'),
+        "sbquo" => Some('\u{201A}'),
+        "ldquo" => Some('\u{201C}'),
+        "rdquo" => Some('\u{201D}'),
+        "bdquo" => Some('\u{201E}'),
+        "laquo" => Some('\u{00AB}'),
+        "raquo" => Some('\u{00BB}'),
+        "frac14" => Some('\u{00BC}'),
+        "frac12" => Some('\u{00BD}'),
+        "frac34" => Some('\u{00BE}'),
+        "Aring" => Some('\u{00C5}'),
+        "aring" => Some('\u{00E5}'),
+        "dagger" => Some('\u{2020}'),
+        "Dagger" => Some('\u{2021}'),
+        "sect" => Some('\u{00A7}'),
+        "para" => Some('\u{00B6}'),
+        "sdot" => Some('\u{22C5}'),
+        "sum" => Some('\u{2211}'),
+        "prod" => Some('\u{220F}'),
+        "radic" => Some('\u{221A}'),
+        "part" => Some('\u{2202}'),
+        "int" => Some('\u{222B}'),
+        "sim" => Some('\u{223C}'),
+        "cong" => Some('\u{2245}'),
+        "prop" => Some('\u{221D}'),
+        "perp" => Some('\u{22A5}'),
+        "ang" => Some('\u{2220}'),
         _ => None,
     }
 }
@@ -467,6 +500,16 @@ mod tests {
         assert_eq!(root.children[0], XmlNode::Text(String::from("pre α")));
         assert_eq!(root.children[2], XmlNode::Text(String::from("±10°")));
         assert_eq!(root.children[3], XmlNode::Text(String::from("<raw>&amp;")));
+    }
+
+    #[test]
+    fn quick_xml_adapter_decodes_extended_scientific_and_xhtml_entities() {
+        let xml = "<Root>&copy;&reg;&trade;&lsquo;a&rsquo;&ldquo;b&rdquo;&frac12;&uarr;&darr;&sum;&radic;&part;&int;&sim;&cong;&Aring;</Root>";
+        let root = parse_xml(xml).unwrap();
+        assert_eq!(
+            root.plain_text(),
+            "\u{00A9}\u{00AE}\u{2122}\u{2018}a\u{2019}\u{201C}b\u{201D}\u{00BD}\u{2191}\u{2193}\u{2211}\u{221A}\u{2202}\u{222B}\u{223C}\u{2245}\u{00C5}"
+        );
     }
 
     #[test]

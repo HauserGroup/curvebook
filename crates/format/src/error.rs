@@ -109,7 +109,12 @@ pub enum ImportWarningKind {
     UnsupportedTableType,
     UnsupportedChunk,
     IgnoredSection,
+    UnsupportedAnalysis,
+    UnsupportedEquation,
+    UnsupportedGraphOrLayout,
+    UnsupportedScript,
     TruncatedTitle,
+    TruncatedMetadata,
     CoercedValue,
     MissingMetadata,
 }

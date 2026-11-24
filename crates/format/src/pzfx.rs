@@ -8,10 +8,10 @@ use std::collections::HashSet;
 
 use curvebook_doc::error::MAX_SHEET_ID_BYTES;
 use curvebook_doc::{
-    Cell, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, InfoConstant, InfoSheet,
-    MAX_TITLE_BYTES, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable, ProjectDocument, SequenceProgression, SheetId,
-    SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable, default_column_label, validate_data_sets, validate_rows,
-    validate_subcolumns,
+    Cell, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSetColumn, DataSheet, FloatingNote, GroupedTable,
+    InfoConstant, InfoSheet, MAX_TITLE_BYTES, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable, ProjectDocument, RectPt,
+    SequenceProgression, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable, default_column_label,
+    validate_data_sets, validate_rows, validate_subcolumns,
 };
 
 use crate::archive::validate_project_document;
@@ -47,18 +47,83 @@ pub(crate) fn import_pzfx_str_with_used_cells(xml: &str, used_cells: &mut usize)
     }
 
     let mut warnings = Vec::new();
-    let title =
-        root.first_child("Title").map(XmlElement::plain_text).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| String::from("Imported Project"));
+    check_schema_version(&root, &mut warnings);
+    let title = extract_element_title(&root).unwrap_or_else(|| String::from("Imported Project"));
     let clamped_title = clamp_title(&title, "project", &mut warnings);
     let mut doc = ProjectDocument::new(clamped_title)?;
     let mut used_ids = HashSet::new();
+    let root_decimal_comma = detect_decimal_separator_attr(&root);
 
-    import_info_sections(&root, &mut doc, &mut used_ids, &mut warnings)?;
-    import_table_sections(&root, &mut doc, &mut used_ids, &mut warnings, used_cells)?;
+    import_info_sections(&root, &mut doc, &mut used_ids, &mut warnings, root_decimal_comma)?;
+    import_table_sections(&root, &mut doc, &mut used_ids, &mut warnings, used_cells, root_decimal_comma)?;
+    attach_root_notes(&root, &mut doc, &mut used_ids, &mut warnings)?;
     warn_ignored_sections(&root, &mut warnings);
 
     validate_project_document(&doc)?;
     Ok(ImportReport { document: doc, warnings })
+}
+
+fn check_schema_version(root: &XmlElement, warnings: &mut Vec<ImportWarning>) {
+    let Some((attr_name, raw)) = root
+        .attr("PrismXMLVersion")
+        .map(|v| ("PrismXMLVersion", v))
+        .or_else(|| root.attr("SchemaVersion").map(|v| ("SchemaVersion", v)))
+        .or_else(|| root.attr("Version").map(|v| ("Version", v)))
+    else {
+        return;
+    };
+    let trimmed = raw.trim();
+    let major = trimmed.split('.').next().and_then(|head| head.parse::<u32>().ok());
+    match major {
+        Some(1..=10) => {}
+        _ => warnings.push(ImportWarning::new(
+            ImportWarningKind::MissingMetadata,
+            attr_name,
+            format!("unrecognized `.pzfx` {attr_name} `{trimmed}`; imported using compatibility fallback"),
+        )),
+    }
+}
+
+fn collect_element_notes_text(el: &XmlElement) -> Option<String> {
+    let mut parts = Vec::new();
+    for tag in ["Notes", "Note", "Description"] {
+        for child in el.children_named(tag) {
+            let text = child.plain_text();
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_owned());
+            }
+        }
+    }
+    if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
+}
+
+fn attach_root_notes(
+    root: &XmlElement,
+    doc: &mut ProjectDocument,
+    used_ids: &mut HashSet<String>,
+    warnings: &mut Vec<ImportWarning>,
+) -> Result<(), FormatError> {
+    let Some(root_notes) = collect_element_notes_text(root) else {
+        return Ok(());
+    };
+    if let Some(info) = doc.info_sheets.first_mut() {
+        if info.notes_markdown.trim().is_empty() {
+            info.notes_markdown = root_notes;
+        } else {
+            info.notes_markdown.push_str("\n\n");
+            info.notes_markdown.push_str(&root_notes);
+        }
+    } else if let Some(ds) = doc.data_sheets.first_mut() {
+        ds.floating_notes.push(FloatingNote::new("note-project", RectPt::new(16.0, 16.0, 240.0, 72.0), root_notes));
+    } else {
+        let id = allocate_valid_unique_sheet_id(Some("info-notes"), "info", 1, used_ids, warnings);
+        let mut sheet = InfoSheet::new_preseeded(id.as_str().to_owned(), "Project Notes")?;
+        sheet.constants.clear();
+        sheet.notes_markdown = root_notes;
+        doc.add_info_sheet(sheet)?;
+    }
+    Ok(())
 }
 
 fn import_info_sections(
@@ -66,6 +131,7 @@ fn import_info_sections(
     doc: &mut ProjectDocument,
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
+    root_decimal_comma: Option<bool>,
 ) -> Result<(), FormatError> {
     let mut info_nodes: Vec<&XmlElement> = Vec::new();
     for seq in root.children_named("InfoSequence") {
@@ -75,12 +141,12 @@ fn import_info_sections(
 
     for (idx, info_el) in info_nodes.iter().enumerate() {
         let id = allocate_valid_unique_sheet_id(info_el.attr("ID"), "info", idx + 1, used_ids, warnings);
-        let raw_title =
-            info_el.first_child("Title").map(XmlElement::plain_text).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| format!("Info {}", idx + 1));
+        let raw_title = extract_element_title(info_el).unwrap_or_else(|| format!("Info {}", idx + 1));
         let title = clamp_title(&raw_title, id.as_str(), warnings);
 
         let mut sheet = InfoSheet::new_preseeded(id.as_str().to_owned(), title)?;
         sheet.constants.clear();
+        let decimal_comma = detect_decimal_separator_attr(info_el).or(root_decimal_comma);
         for c_el in info_el.children_named("Constant") {
             let name_raw = c_el
                 .first_child("Name")
@@ -95,12 +161,20 @@ fn import_info_sections(
             let val_trimmed = val_raw.trim();
             let value = if val_trimmed.is_empty() {
                 ConstantValue::Empty
-            } else if let Ok(num) = val_trimmed.parse::<f64>()
-                && num.is_finite()
-            {
-                ConstantValue::Number(num)
             } else {
-                ConstantValue::Text(val_trimmed.to_owned())
+                match parse_pzfx_numeric_token(val_trimmed, decimal_comma) {
+                    Some((num, normalized)) => {
+                        if normalized {
+                            warnings.push(ImportWarning::new(
+                                ImportWarningKind::CoercedValue,
+                                id.as_str(),
+                                format!("normalized locale decimal format in Info constant `{name}` from `{val_trimmed}`"),
+                            ));
+                        }
+                        ConstantValue::Number(num)
+                    }
+                    None => ConstantValue::Text(val_trimmed.to_owned()),
+                }
             };
             let units = c_el
                 .first_child("Units")
@@ -109,8 +183,8 @@ fn import_info_sections(
                 .filter(|u| !u.is_empty());
             sheet.constants.push(InfoConstant::new(name, value, units)?);
         }
-        if let Some(notes_el) = info_el.first_child("Notes") {
-            sheet.notes_markdown = notes_el.plain_text().trim().to_owned();
+        if let Some(notes_text) = collect_element_notes_text(info_el) {
+            sheet.notes_markdown = notes_text;
         }
         doc.add_info_sheet(sheet)?;
     }
@@ -123,16 +197,23 @@ fn import_table_sections(
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
     total_cells: &mut usize,
+    root_decimal_comma: Option<bool>,
 ) -> Result<(), FormatError> {
-    let mut table_nodes: Vec<&XmlElement> = Vec::new();
+    let mut table_nodes: Vec<(&XmlElement, bool)> = Vec::new();
     for seq in root.children_named("TableSequence") {
-        table_nodes.extend(seq.children_named("Table"));
+        table_nodes.extend(seq.children_named("Table").map(|el| (el, false)));
+        table_nodes.extend(seq.children_named("HugeTable").map(|el| (el, true)));
     }
-    table_nodes.extend(root.children_named("Table"));
+    for seq in root.children_named("HugeTableSequence") {
+        table_nodes.extend(seq.children_named("HugeTable").map(|el| (el, true)));
+        table_nodes.extend(seq.children_named("Table").map(|el| (el, true)));
+    }
+    table_nodes.extend(root.children_named("Table").map(|el| (el, false)));
+    table_nodes.extend(root.children_named("HugeTable").map(|el| (el, true)));
 
     let primary_info = doc.info_sheets.first().map(|s| s.id.clone());
-    for (idx, table_el) in table_nodes.iter().enumerate() {
-        let mut ds = parse_table_element(table_el, idx + 1, used_ids, warnings, *total_cells)?;
+    for (idx, (table_el, is_huge)) in table_nodes.iter().enumerate() {
+        let mut ds = parse_table_element(table_el, idx + 1, *is_huge, used_ids, warnings, *total_cells, root_decimal_comma)?;
         let actual_cells = ds.archetype.allocated_cell_slots();
         let next_total = total_cells.checked_add(actual_cells).ok_or_else(|| FormatError::XmlParse {
             offset: 0,
@@ -160,26 +241,43 @@ fn import_table_sections(
 fn parse_table_element(
     table_el: &XmlElement,
     one_based_idx: usize,
+    is_huge: bool,
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
     used_cells: usize,
+    root_decimal_comma: Option<bool>,
 ) -> Result<DataSheet, FormatError> {
     let id = allocate_valid_unique_sheet_id(table_el.attr("ID"), "data", one_based_idx, used_ids, warnings);
-    let raw_title =
-        table_el.first_child("Title").map(XmlElement::plain_text).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| format!("Data {one_based_idx}"));
+    let raw_title = extract_element_title(table_el).unwrap_or_else(|| format!("Data {one_based_idx}"));
     let title = clamp_title(&raw_title, id.as_str(), warnings);
 
-    let kind = resolve_table_kind(table_el.attr("TableType"), id.as_str(), warnings);
-    let explicit_replicates = table_el.attr("Replicates").and_then(|s| s.trim().parse::<usize>().ok());
-    let replicates = explicit_replicates.unwrap_or(1);
+    let kind = resolve_table_kind(table_el.attr("TableType"), is_huge, id.as_str(), warnings);
+    let (replicates, malformed_replicates) = parse_replicates_attr(table_el.attr("Replicates"));
+    if let Some(raw_rep) = malformed_replicates {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::CoercedValue,
+            id.as_str(),
+            format!("invalid Replicates=\"{raw_rep}\" in table `{title}`, defaulting to 1"),
+        ));
+    }
     if replicates > 0 {
         validate_subcolumns(replicates)?;
     }
-    let y_format = table_el.attr("YFormat").or_else(|| table_el.attr("EVFormat"));
-    let initial_subcolumn_mode = resolve_subcolumn_mode(kind, y_format, replicates, id.as_str(), warnings)?;
+
+    let ev_role = classify_ev_format(table_el.attr("EVFormat"));
+    let y_format = table_el
+        .attr("YFormat")
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| (ev_role == EvFormatRole::SubcolumnModeFallback).then(|| table_el.attr("EVFormat")).flatten());
+    let (initial_subcolumn_mode, is_plus_minus_y) = resolve_subcolumn_mode(kind, y_format, replicates, id.as_str(), warnings)?;
+
+    let explicit_decimal_comma = detect_decimal_separator_attr(table_el).or(root_decimal_comma);
+    let table_decimal_comma = explicit_decimal_comma.or_else(|| detect_table_decimal_comma(table_el));
+    let cell_opts = CellParseOptions { ev_role, decimal_comma: table_decimal_comma, column_excluded: false };
 
     let row_titles_el = table_el.first_child("RowTitlesColumn");
-    let row_titles_declared_subs = row_titles_el.map(parse_subcolumns_attr).transpose()?.flatten();
+    let row_factor_title = row_titles_el.and_then(extract_element_title).map(|raw| clamp_title(&raw, id.as_str(), warnings));
+    let row_titles_declared_subs = row_titles_el.map(|el| parse_subcolumns_attr(el, id.as_str(), "RowTitlesColumn", warnings)).transpose()?.flatten();
     let row_titles_cols = row_titles_el.map(extract_raw_subcolumn_strings).unwrap_or_default();
     warn_discarded_subcolumns(
         warnings,
@@ -194,15 +292,31 @@ fn parse_table_element(
     let row_titles: Vec<String> = row_titles_raw.iter().map(|raw| clamp_title(raw, &format!("table `{title}` row title"), warnings)).collect();
 
     let x_el = table_el.first_child("XColumn");
-    let x_declared_subs = x_el.map(parse_subcolumns_attr).transpose()?.flatten();
-    let x_title = x_el
-        .and_then(|el| el.first_child("Title"))
-        .map(XmlElement::plain_text)
-        .filter(|s| !s.trim().is_empty())
-        .map(|raw| clamp_title(&raw, id.as_str(), warnings))
-        .unwrap_or_else(|| String::from("X"));
-    let x_cols = x_el.map(extract_column_subcolumns).unwrap_or_default();
-    let x_mode = resolve_x_mode(table_el, &x_cols, x_declared_subs)?;
+    let x_declared_subs = x_el.map(|el| parse_subcolumns_attr(el, id.as_str(), "XColumn", warnings)).transpose()?.flatten();
+    let x_title = x_el.and_then(extract_element_title).map(|raw| clamp_title(&raw, id.as_str(), warnings)).unwrap_or_else(|| String::from("X"));
+    let x_opts = CellParseOptions { column_excluded: x_el.is_some_and(element_is_excluded), ..cell_opts };
+    let mut x_sub_titles = Vec::new();
+    let mut x_cols = x_el
+        .map(|el| {
+            let (subs_t, cols) = extract_labeled_subcolumns(el, id.as_str(), warnings, x_opts);
+            x_sub_titles = subs_t;
+            cols
+        })
+        .unwrap_or_default();
+    let x_resolution = resolve_x_mode(table_el, &x_cols, x_declared_subs, explicit_decimal_comma, warnings, id.as_str())?;
+    let x_mode = x_resolution.mode;
+    normalize_error_subcolumns(
+        &mut x_cols,
+        &x_sub_titles,
+        match x_mode {
+            XColumnMode::Numbers { subcolumn_mode } => subcolumn_mode,
+            _ => SubcolumnMode::Single,
+        },
+        x_resolution.is_plus_minus,
+        id.as_str(),
+        &x_title,
+        warnings,
+    );
 
     let y_elements: Vec<&XmlElement> =
         table_el.children_named("YColumn").chain(table_el.children_named("Column")).chain(table_el.children_named("VariableColumn")).collect();
@@ -210,18 +324,18 @@ fn parse_table_element(
 
     let mut parsed_y: Vec<ParsedYColumn> = Vec::with_capacity(y_elements.len());
     for (c_idx, y_el) in y_elements.iter().enumerate() {
-        let col_title = y_el
-            .first_child("Title")
-            .map(XmlElement::plain_text)
-            .filter(|s| !s.trim().is_empty())
-            .map(|raw| clamp_title(&raw, id.as_str(), warnings))
-            .unwrap_or_else(|| default_column_label(c_idx));
-        let declared_subcolumns = parse_subcolumns_attr(y_el)?;
-        let (sub_titles, subcolumns) = extract_labeled_subcolumns(y_el, id.as_str(), warnings);
+        let col_title =
+            extract_element_title(y_el).map(|raw| clamp_title(&raw, id.as_str(), warnings)).unwrap_or_else(|| default_column_label(c_idx));
+        let declared_subcolumns = parse_subcolumns_attr(y_el, id.as_str(), &col_title, warnings)?;
+        let y_opts = CellParseOptions { column_excluded: element_is_excluded(y_el), ..cell_opts };
+        let (sub_titles, subcolumns) = extract_labeled_subcolumns(y_el, id.as_str(), warnings, y_opts);
         parsed_y.push(ParsedYColumn { title: col_title, declared_subcolumns, sub_titles, subcolumns });
     }
 
     let subcolumn_mode = widen_y_subcolumn_mode(kind, initial_subcolumn_mode, &parsed_y)?;
+    for col in &mut parsed_y {
+        normalize_error_subcolumns(&mut col.subcolumns, &col.sub_titles, subcolumn_mode, is_plus_minus_y, id.as_str(), &col.title, warnings);
+    }
 
     let max_y_rows = parsed_y.iter().flat_map(|col| col.subcolumns.iter().map(Vec::len)).max().unwrap_or(0);
     let max_x_rows = x_cols.iter().map(Vec::len).max().unwrap_or(0);
@@ -270,17 +384,45 @@ fn parse_table_element(
         let mut labels: Vec<String> = first_x_raw.iter().map(|raw| clamp_title(raw, &format!("table `{title}` slice label"), warnings)).collect();
         labels.resize(row_count, String::new());
         (labels, true)
+    } else if kind == TableKind::Xy
+        && x_resolution.is_text_x
+        && !has_row_titles
+        && let Some(first_x_raw) = x_el.and_then(|el| extract_raw_subcolumn_strings(el).into_iter().next())
+    {
+        let mut labels: Vec<String> = first_x_raw.iter().map(|raw| clamp_title(raw, &format!("table `{title}` row title"), warnings)).collect();
+        labels.resize(row_count, String::new());
+        let any_non_empty = labels.iter().any(|s| !s.is_empty());
+        (labels, any_non_empty)
     } else {
         (padded_row_titles, has_row_titles)
     };
-    let mut arch =
-        build_table_archetype(kind, subcolumn_mode, x_mode, &x_title, &x_cols, &parsed_y, effective_row_titles, effective_has_row_titles, row_count)?;
+    let mut arch = build_table_archetype(
+        kind,
+        subcolumn_mode,
+        x_mode,
+        &x_title,
+        &x_cols,
+        &parsed_y,
+        effective_row_titles,
+        effective_has_row_titles,
+        row_factor_title.as_deref(),
+        row_count,
+    )?;
     if let TableArchetype::Nested(ref mut nested) = arch {
         let nested_sub_titles: Vec<Vec<Option<String>>> = parsed_y.iter().map(|col| col.sub_titles.clone()).collect();
         apply_nested_subcolumn_titles(nested, &nested_sub_titles);
     }
 
-    Ok(DataSheet::new(id, title, arch)?)
+    if table_decimal_comma == Some(true) && (x_cols.iter().any(|s| !s.is_empty()) || !parsed_y.is_empty()) {
+        emit_decimal_comma_warning_if_applied(table_el, id.as_str(), warnings);
+    }
+    warn_domain_and_non_numeric_anomalies(id.as_str(), kind, &x_cols, &parsed_y, warnings);
+
+    let mut sheet = DataSheet::new(id, title, arch)?;
+    if let Some(table_notes) = collect_element_notes_text(table_el) {
+        sheet.floating_notes.push(FloatingNote::new("note-1", RectPt::new(16.0, 16.0, 220.0, 64.0), table_notes));
+    }
+    Ok(sheet)
 }
 
 struct ParsedYColumn {
@@ -290,14 +432,24 @@ struct ParsedYColumn {
     subcolumns: Vec<Vec<Cell>>,
 }
 
-fn parse_subcolumns_attr(el: &XmlElement) -> Result<Option<usize>, FormatError> {
+fn parse_subcolumns_attr(el: &XmlElement, table_id: &str, col_label: &str, warnings: &mut Vec<ImportWarning>) -> Result<Option<usize>, FormatError> {
     let Some(raw) = el.attr("Subcolumns").map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
     let Ok(count) = raw.parse::<usize>() else {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::CoercedValue,
+            table_id,
+            format!("invalid Subcolumns=\"{raw}\" on `{col_label}` in table `{table_id}`; ignoring attribute"),
+        ));
         return Ok(None);
     };
     if count == 0 {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::CoercedValue,
+            table_id,
+            format!("Subcolumns=\"0\" on `{col_label}` in table `{table_id}` is invalid; ignoring attribute"),
+        ));
         return Ok(None);
     }
     validate_subcolumns(count)?;
@@ -439,6 +591,7 @@ fn build_table_archetype(
     parsed_y: &[ParsedYColumn],
     row_titles: Vec<String>,
     has_row_titles: bool,
+    row_factor_title: Option<&str>,
     row_count: usize,
 ) -> Result<TableArchetype, FormatError> {
     match kind {
@@ -467,12 +620,18 @@ fn build_table_archetype(
         }
         TableKind::Grouped => {
             let mut grp = GroupedTable::new(subcolumn_mode, parsed_y.len(), row_count)?;
+            if let Some(rf) = row_factor_title {
+                grp.row_factor_title = rf.to_owned();
+            }
             grp.row_titles = row_titles;
             fill_datasets(&mut grp.data_sets, parsed_y);
             Ok(TableArchetype::Grouped(grp))
         }
         TableKind::Contingency => {
             let mut cont = ContingencyTable::new(parsed_y.len(), row_count)?;
+            if let Some(rf) = row_factor_title {
+                cont.row_factor_title = rf.to_owned();
+            }
             cont.row_titles = row_titles;
             fill_datasets(&mut cont.data_sets, parsed_y);
             Ok(TableArchetype::Contingency(cont))
@@ -543,36 +702,132 @@ fn build_table_archetype(
     }
 }
 
-fn resolve_x_mode(table_el: &XmlElement, x_cols: &[Vec<Cell>], x_declared_subs: Option<usize>) -> Result<XColumnMode, FormatError> {
+struct XModeResolution {
+    mode: XColumnMode,
+    is_plus_minus: bool,
+    is_text_x: bool,
+}
+
+fn resolve_x_mode(
+    table_el: &XmlElement,
+    x_cols: &[Vec<Cell>],
+    x_declared_subs: Option<usize>,
+    decimal_comma: Option<bool>,
+    warnings: &mut Vec<ImportWarning>,
+    table_id: &str,
+) -> Result<XModeResolution, FormatError> {
     let x_fmt = table_el.attr("XFormat").unwrap_or("").trim();
+    if x_fmt.eq_ignore_ascii_case("text") || x_fmt.eq_ignore_ascii_case("labels") || x_fmt.eq_ignore_ascii_case("categories") {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::CoercedValue,
+            table_id,
+            format!(
+                "table `{table_id}` uses categorical XFormat=\"{x_fmt}\"; CurveBook XY tables store numeric X values, so text X cells and row labels were preserved as-is"
+            ),
+        ));
+        return Ok(XModeResolution { mode: XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, is_plus_minus: false, is_text_x: true });
+    }
     if x_fmt.eq_ignore_ascii_case("date") || x_fmt.eq_ignore_ascii_case("time") || x_fmt.eq_ignore_ascii_case("elapsed-time") {
         let unit_label = table_el
             .first_child("XColumn")
-            .and_then(|el| el.first_child("Title"))
-            .map(XmlElement::plain_text)
-            .filter(|s| !s.trim().is_empty())
+            .and_then(extract_element_title)
+            .map(|raw| clamp_title(&raw, table_id, warnings))
             .unwrap_or_else(|| String::from("Time"));
-        return Ok(XColumnMode::DateOrElapsedTime { unit_label });
+        if x_cols.first().is_some_and(|col| col.iter().any(|c| matches!(c.value, CellValue::Text(_)))) {
+            warnings.push(ImportWarning::new(
+                ImportWarningKind::CoercedValue,
+                table_id,
+                format!(
+                    "table `{table_id}` XFormat=\"{x_fmt}\" contains string date/time entries preserved as text without automatic calendar conversion"
+                ),
+            ));
+        }
+        return Ok(XModeResolution { mode: XColumnMode::DateOrElapsedTime { unit_label }, is_plus_minus: false, is_text_x: false });
     }
     if x_fmt.eq_ignore_ascii_case("start-step") || x_fmt.eq_ignore_ascii_case("sequence") {
-        let start = table_el.attr("X0").and_then(|s| s.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(0.0);
-        let step = table_el.attr("DeltaX").and_then(|s| s.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(1.0);
-        return Ok(XColumnMode::GeneratedSequence { start, step, progression: SequenceProgression::Arithmetic });
+        let x_el = table_el.first_child("XColumn");
+        let start_raw = table_attr_or_x_prop(table_el, x_el, &["X0", "Start"]);
+        let step_raw = table_attr_or_x_prop(table_el, x_el, &["DeltaX", "Step"]);
+        let start = parse_sequence_param(start_raw.as_deref(), 0.0, "X0", decimal_comma, warnings, table_id);
+        let step = parse_sequence_param(step_raw.as_deref(), 1.0, "DeltaX", decimal_comma, warnings, table_id);
+        return Ok(XModeResolution {
+            mode: XColumnMode::GeneratedSequence { start, step, progression: SequenceProgression::Arithmetic },
+            is_plus_minus: false,
+            is_text_x: false,
+        });
     }
     if x_fmt.eq_ignore_ascii_case("replicates") {
         let count = x_cols.len().max(x_declared_subs.unwrap_or(0)).max(1);
         validate_subcolumns(count)?;
-        return Ok(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(count) });
+        return Ok(XModeResolution {
+            mode: XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(count) },
+            is_plus_minus: false,
+            is_text_x: false,
+        });
     }
-    if x_cols.len() == 3 || (x_fmt.eq_ignore_ascii_case("err") && x_cols.len() >= 3) {
-        let sub_mode = match table_el.attr("XEVFormat").unwrap_or("").trim() {
-            "SEM" => SubcolumnMode::MeanSemN,
-            "CV" => SubcolumnMode::MeanCvN,
-            _ => SubcolumnMode::MeanSdN,
+    let x_ev = table_el.attr("XEVFormat").map(str::trim).filter(|s| !s.is_empty());
+    let has_err_x = x_fmt.eq_ignore_ascii_case("err")
+        || x_fmt.eq_ignore_ascii_case("error")
+        || x_ev.is_some_and(|ev| !ev.is_empty() && x_cols.len() >= 2)
+        || x_cols.len() == 3;
+    if has_err_x {
+        let (sub_mode, is_pm) = match x_ev.unwrap_or("SDN").to_ascii_lowercase().as_str() {
+            "sem" | "semn" | "sen" | "se" | "meansemn" => (SubcolumnMode::MeanSemN, false),
+            "cv" | "cvn" | "meancvn" => (SubcolumnMode::MeanCvN, false),
+            "low-high" | "lowhigh" | "meanlowhigh" => (SubcolumnMode::MeanLowHigh, false),
+            "plus-minus" | "plusminus" | "meanplusminus" => (SubcolumnMode::MeanLowHigh, true),
+            "upper-lower" | "upper-lower-limits" | "upperlowerlimits" | "upperlower" | "limits" => (SubcolumnMode::UpperLowerLimits, false),
+            "median-iqr" | "medianiqr" | "iqr" => (SubcolumnMode::MedianIqr, false),
+            _ => (SubcolumnMode::MeanSdN, false),
         };
-        return Ok(XColumnMode::Numbers { subcolumn_mode: sub_mode });
+        return Ok(XModeResolution { mode: XColumnMode::Numbers { subcolumn_mode: sub_mode }, is_plus_minus: is_pm, is_text_x: false });
     }
-    Ok(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single })
+    Ok(XModeResolution { mode: XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, is_plus_minus: false, is_text_x: false })
+}
+
+fn table_attr_or_x_prop(table_el: &XmlElement, x_el: Option<&XmlElement>, names: &[&str]) -> Option<String> {
+    for name in names {
+        if let Some(v) = table_el.attr(name).map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(v.to_owned());
+        }
+        if let Some(el) = x_el {
+            if let Some(v) = el.attr(name).map(str::trim).filter(|s| !s.is_empty()) {
+                return Some(v.to_owned());
+            }
+            if let Some(child) = el.first_child(name) {
+                let text = child.plain_text();
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_sequence_param(
+    raw: Option<&str>,
+    default: f64,
+    label: &str,
+    decimal_comma: Option<bool>,
+    warnings: &mut Vec<ImportWarning>,
+    table_id: &str,
+) -> f64 {
+    let Some(text) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return default;
+    };
+    match parse_pzfx_numeric_token(text, decimal_comma) {
+        Some((val, _)) => val,
+        None => {
+            warnings.push(ImportWarning::new(
+                ImportWarningKind::CoercedValue,
+                table_id,
+                format!("non-finite or invalid sequence attribute {label}=\"{text}\" in table `{table_id}`; defaulted to {default}"),
+            ));
+            default
+        }
+    }
 }
 
 fn fill_datasets(target: &mut [DataSetColumn], parsed_y: &[ParsedYColumn]) {
@@ -595,41 +850,127 @@ fn fill_datasets(target: &mut [DataSetColumn], parsed_y: &[ParsedYColumn]) {
     }
 }
 
-fn parse_pzfx_cell(d_el: &XmlElement) -> Cell {
-    let excluded = d_el.attr("Excluded").is_some_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvFormatRole {
+    AsteriskAfter,
+    AsteriskBefore,
+    AsteriskEither,
+    NonNumericOrBlank,
+    SubcolumnModeFallback,
+    Unspecified,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CellParseOptions {
+    ev_role: EvFormatRole,
+    decimal_comma: Option<bool>,
+    column_excluded: bool,
+}
+
+impl Default for CellParseOptions {
+    fn default() -> Self {
+        Self { ev_role: EvFormatRole::Unspecified, decimal_comma: None, column_excluded: false }
+    }
+}
+
+fn classify_ev_format(raw: Option<&str>) -> EvFormatRole {
+    let trimmed = raw.map(str::trim).unwrap_or("");
+    if trimmed.is_empty() {
+        return EvFormatRole::Unspecified;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "asteriskafternumber" | "asteriskafter" | "asterisk-after" => EvFormatRole::AsteriskAfter,
+        "asteriskbeforenumber" | "asteriskbefore" | "asterisk-before" => EvFormatRole::AsteriskBefore,
+        "asterisk" | "asteriskbeforeorafter" => EvFormatRole::AsteriskEither,
+        "blank" | "workingwithexcluded" | "workingwith" | "exclude" | "empty" => EvFormatRole::NonNumericOrBlank,
+        _ => EvFormatRole::SubcolumnModeFallback,
+    }
+}
+
+fn element_is_excluded(el: &XmlElement) -> bool {
+    el.attr("Excluded").is_some_and(|v| {
+        let t = v.trim();
+        t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+    })
+}
+
+fn strip_asterisk_for_ev(trimmed: &str, ev_role: EvFormatRole, attr_excluded: bool) -> (&str, bool) {
+    match ev_role {
+        EvFormatRole::AsteriskAfter => {
+            if let Some(core) = trimmed.strip_suffix('*') {
+                return (core.trim(), true);
+            }
+        }
+        EvFormatRole::AsteriskBefore => {
+            if let Some(core) = trimmed.strip_prefix('*') {
+                return (core.trim(), true);
+            }
+        }
+        EvFormatRole::AsteriskEither => {
+            if let Some(core) = trimmed.strip_suffix('*').or_else(|| trimmed.strip_prefix('*')) {
+                return (core.trim(), true);
+            }
+        }
+        EvFormatRole::Unspecified | EvFormatRole::SubcolumnModeFallback | EvFormatRole::NonNumericOrBlank => {
+            if attr_excluded && let Some(core) = trimmed.strip_suffix('*').or_else(|| trimmed.strip_prefix('*')) {
+                return (core.trim(), true);
+            }
+        }
+    }
+    (trimmed, false)
+}
+
+fn parse_pzfx_cell_with_opts(d_el: &XmlElement, opts: CellParseOptions) -> Cell {
+    let attr_excluded = opts.column_excluded || element_is_excluded(d_el);
     let raw = d_el.plain_text();
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Cell { value: CellValue::Empty, excluded };
+        return Cell { value: CellValue::Empty, excluded: attr_excluded };
     }
-    if let Ok(num) = trimmed.parse::<f64>()
-        && num.is_finite()
+    let (candidate, asterisk_excluded) = strip_asterisk_for_ev(trimmed, opts.ev_role, attr_excluded);
+    let excluded = attr_excluded || asterisk_excluded;
+    if !candidate.is_empty()
+        && let Some((num, _)) = parse_pzfx_numeric_token(candidate, opts.decimal_comma)
     {
         return Cell { value: CellValue::Number(num), excluded };
     }
     Cell { value: CellValue::Text(raw), excluded }
 }
 
-fn extract_subcolumn_cells(sub_el: &XmlElement) -> Vec<Cell> {
-    sub_el.children_named("d").map(parse_pzfx_cell).collect()
+fn extract_subcolumn_cells_with_opts(sub_el: &XmlElement, opts: CellParseOptions) -> Vec<Cell> {
+    let sub_opts = CellParseOptions { column_excluded: opts.column_excluded || element_is_excluded(sub_el), ..opts };
+    sub_el.children_named("d").map(|d_el| parse_pzfx_cell_with_opts(d_el, sub_opts)).collect()
 }
 
 fn extract_raw_subcolumn_strings(col_el: &XmlElement) -> Vec<Vec<String>> {
-    col_el.children_named("Subcolumn").map(|sub_el| sub_el.children_named("d").map(XmlElement::plain_text).collect()).collect()
+    let subs: Vec<Vec<String>> =
+        col_el.children_named("Subcolumn").map(|sub_el| sub_el.children_named("d").map(XmlElement::plain_text).collect()).collect();
+    if !subs.is_empty() {
+        return subs;
+    }
+    let direct: Vec<String> = col_el.children_named("d").map(XmlElement::plain_text).collect();
+    if direct.is_empty() { Vec::new() } else { vec![direct] }
 }
 
-fn extract_labeled_subcolumns(col_el: &XmlElement, source_id: &str, warnings: &mut Vec<ImportWarning>) -> (Vec<Option<String>>, Vec<Vec<Cell>>) {
+fn extract_labeled_subcolumns(
+    col_el: &XmlElement,
+    source_id: &str,
+    warnings: &mut Vec<ImportWarning>,
+    opts: CellParseOptions,
+) -> (Vec<Option<String>>, Vec<Vec<Cell>>) {
     let mut titles = Vec::new();
     let mut subcolumns = Vec::new();
     for sub_el in col_el.children_named("Subcolumn") {
-        let sub_title = sub_el
-            .first_child("Title")
-            .map(XmlElement::plain_text)
-            .or_else(|| sub_el.attr("Title").map(str::to_owned))
-            .filter(|s| !s.trim().is_empty())
-            .map(|raw| clamp_title(&raw, source_id, warnings));
+        let sub_title = extract_element_title(sub_el).map(|raw| clamp_title(&raw, source_id, warnings));
         titles.push(sub_title);
-        subcolumns.push(extract_subcolumn_cells(sub_el));
+        subcolumns.push(extract_subcolumn_cells_with_opts(sub_el, opts));
+    }
+    if subcolumns.is_empty() {
+        let direct: Vec<Cell> = col_el.children_named("d").map(|d_el| parse_pzfx_cell_with_opts(d_el, opts)).collect();
+        if !direct.is_empty() {
+            titles.push(None);
+            subcolumns.push(direct);
+        }
     }
     (titles, subcolumns)
 }
@@ -649,25 +990,441 @@ fn apply_nested_subcolumn_titles(nested: &mut NestedTable, nested_sub_titles: &[
     }
 }
 
+#[cfg(test)]
 fn extract_column_subcolumns(col_el: &XmlElement) -> Vec<Vec<Cell>> {
-    col_el.children_named("Subcolumn").map(extract_subcolumn_cells).collect()
+    let opts = CellParseOptions { column_excluded: element_is_excluded(col_el), ..CellParseOptions::default() };
+    let subs: Vec<Vec<Cell>> = col_el.children_named("Subcolumn").map(|sub_el| extract_subcolumn_cells_with_opts(sub_el, opts)).collect();
+    if !subs.is_empty() {
+        return subs;
+    }
+    let direct: Vec<Cell> = col_el.children_named("d").map(|d_el| parse_pzfx_cell_with_opts(d_el, opts)).collect();
+    if direct.is_empty() { Vec::new() } else { vec![direct] }
 }
 
-fn resolve_table_kind(raw: Option<&str>, id: &str, warnings: &mut Vec<ImportWarning>) -> TableKind {
-    match raw.map(str::trim).unwrap_or("") {
-        "XY" | "xy" => TableKind::Xy,
-        "OneWay" | "Column" | "column" | "" => TableKind::Column,
-        "TwoWay" | "Grouped" | "grouped" => TableKind::Grouped,
-        "Contingency" | "contingency" => TableKind::Contingency,
-        "Survival" | "survival" => TableKind::Survival,
-        "PartsOfWhole" | "parts-of-whole" => TableKind::PartsOfWhole,
-        "MultipleVariables" | "multiple-variables" => TableKind::MultipleVariables,
-        "Nested" | "nested" => TableKind::Nested,
-        other => {
+fn extract_element_title(el: &XmlElement) -> Option<String> {
+    el.first_child("Title")
+        .map(XmlElement::plain_text)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| el.attr("Title").map(str::to_owned).filter(|s| !s.trim().is_empty()))
+}
+
+fn parse_replicates_attr(raw: Option<&str>) -> (usize, Option<&str>) {
+    let Some(val) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return (1, None);
+    };
+    match val.parse::<usize>() {
+        Ok(n) if n >= 1 => (n, None),
+        _ => (1, Some(val)),
+    }
+}
+
+fn detect_decimal_separator_attr(el: &XmlElement) -> Option<bool> {
+    match el.attr("DecimalSeparator").map(str::trim) {
+        Some(",") | Some("comma") => Some(true),
+        Some(".") | Some("dot") | Some("period") => Some(false),
+        _ => None,
+    }
+}
+
+fn detect_table_decimal_comma(table_el: &XmlElement) -> Option<bool> {
+    let mut dot_decimals = 0_usize;
+    let mut comma_decimals = 0_usize;
+    for tag in ["XColumn", "YColumn", "Column", "VariableColumn"] {
+        for col in table_el.children_named(tag) {
+            for sub in col.children_named("Subcolumn") {
+                for d_el in sub.children_named("d") {
+                    tally_decimal_style(&d_el.plain_text(), &mut dot_decimals, &mut comma_decimals);
+                }
+            }
+            for d_el in col.children_named("d") {
+                tally_decimal_style(&d_el.plain_text(), &mut dot_decimals, &mut comma_decimals);
+            }
+        }
+    }
+    match (dot_decimals > 0, comma_decimals > 0) {
+        (false, true) => Some(true),
+        (true, false) => Some(false),
+        _ => None,
+    }
+}
+
+fn tally_decimal_style(raw: &str, dot_decimals: &mut usize, comma_decimals: &mut usize) {
+    let t = raw.trim().trim_matches('*').trim();
+    if t.is_empty() || t.chars().any(char::is_whitespace) {
+        return;
+    }
+    let normalized = if t.contains('\u{2212}') { t.replace('\u{2212}', "-") } else { t.to_owned() };
+    if normalized.contains('.') && !normalized.contains(',') && normalized.parse::<f64>().is_ok_and(f64::is_finite) {
+        *dot_decimals += 1;
+        return;
+    }
+    if parse_eu_grouped_comma_number(&normalized).is_some()
+        || (matches_comma_decimal_syntax(&normalized) && comma_fractional_digits(&normalized) != Some(3))
+    {
+        *comma_decimals += 1;
+    }
+}
+
+fn comma_fractional_digits(s: &str) -> Option<usize> {
+    let (_, after_comma) = s.split_once(',')?;
+    let mantissa_frac = after_comma.split(['e', 'E']).next()?;
+    Some(mantissa_frac.len())
+}
+
+fn matches_comma_decimal_syntax(s: &str) -> bool {
+    let rest = s.strip_prefix(['+', '-']).unwrap_or(s);
+    let Some((int_part, frac_and_exp)) = rest.split_once(',') else {
+        return false;
+    };
+    let (frac_part, exp_part) = match frac_and_exp.find(['e', 'E']) {
+        Some(idx) => {
+            let Some(head) = frac_and_exp.get(..idx) else {
+                return false;
+            };
+            let Some(tail) = frac_and_exp.get(idx + 1..) else {
+                return false;
+            };
+            (head, Some(tail))
+        }
+        None => (frac_and_exp, None),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return false;
+    }
+    let digits_ok = |part: &str| part.chars().all(|c| c.is_ascii_digit());
+    if !digits_ok(int_part) || !digits_ok(frac_part) {
+        return false;
+    }
+    match exp_part {
+        None => true,
+        Some(exp) => {
+            let exp_digits = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+            !exp_digits.is_empty() && digits_ok(exp_digits)
+        }
+    }
+}
+
+fn parse_eu_grouped_comma_number(s: &str) -> Option<f64> {
+    let (sign, rest) = if let Some(r) = s.strip_prefix('-') {
+        ("-", r)
+    } else if let Some(r) = s.strip_prefix('+') {
+        ("", r)
+    } else {
+        ("", s)
+    };
+    let (int_dots, after_comma) = rest.split_once(',')?;
+    if !int_dots.contains('.') {
+        return None;
+    }
+    let mut groups = int_dots.split('.');
+    let first = groups.next()?;
+    if first.is_empty() || first.len() > 3 || !first.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    for grp in groups {
+        if grp.len() != 3 || !grp.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+    }
+    let (frac_part, exp_part) = match after_comma.find(['e', 'E']) {
+        Some(idx) => (after_comma.get(..idx)?, Some(after_comma.get(idx..)?)),
+        None => (after_comma, None),
+    };
+    if !frac_part.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if let Some(exp) = exp_part {
+        let exp_body = exp.get(1..)?;
+        let exp_digits = exp_body.strip_prefix(['+', '-']).unwrap_or(exp_body);
+        if exp_digits.is_empty() || !exp_digits.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+    }
+    let assembled = format!("{sign}{}.{after_comma}", int_dots.replace('.', ""));
+    assembled.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+fn parse_us_grouped_thousands_number(s: &str) -> Option<f64> {
+    let (sign, rest) = if let Some(r) = s.strip_prefix('-') {
+        ("-", r)
+    } else if let Some(r) = s.strip_prefix('+') {
+        ("", r)
+    } else {
+        ("", s)
+    };
+    if !rest.contains(',') {
+        return None;
+    }
+    let (before_exp, exp_part) = match rest.find(['e', 'E']) {
+        Some(idx) => (rest.get(..idx)?, rest.get(idx..)?),
+        None => (rest, ""),
+    };
+    let (int_commas, dot_frac) = match before_exp.split_once('.') {
+        Some((l, r)) => (l, Some(r)),
+        None => (before_exp, None),
+    };
+    let mut groups = int_commas.split(',');
+    let first = groups.next()?;
+    if first.is_empty() || first.len() > 3 || !first.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let mut group_count = 0_usize;
+    for grp in groups {
+        if grp.len() != 3 || !grp.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        group_count += 1;
+    }
+    if dot_frac.is_none() && group_count < 2 {
+        return None;
+    }
+    if let Some(frac) = dot_frac
+        && !frac.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let assembled = match dot_frac {
+        Some(frac) => format!("{sign}{}.{frac}{exp_part}", int_commas.replace(',', "")),
+        None => format!("{sign}{}{exp_part}", int_commas.replace(',', "")),
+    };
+    assembled.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+fn parse_pzfx_numeric_token(raw_trimmed: &str, decimal_comma: Option<bool>) -> Option<(f64, bool)> {
+    if raw_trimmed.is_empty() || raw_trimmed.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let normalized = if raw_trimmed.contains('\u{2212}') { raw_trimmed.replace('\u{2212}', "-") } else { raw_trimmed.to_owned() };
+    if let Ok(num) = normalized.parse::<f64>()
+        && num.is_finite()
+    {
+        return Some((num, false));
+    }
+    if decimal_comma != Some(true)
+        && let Some(num) = parse_us_grouped_thousands_number(&normalized)
+    {
+        return Some((num, true));
+    }
+    if let Some(num) = parse_eu_grouped_comma_number(&normalized) {
+        return Some((num, true));
+    }
+    if decimal_comma != Some(false) && matches_comma_decimal_syntax(&normalized) {
+        let allow = decimal_comma == Some(true) || comma_fractional_digits(&normalized) != Some(3);
+        if allow
+            && let Ok(num) = normalized.replace(',', ".").parse::<f64>()
+            && num.is_finite()
+        {
+            return Some((num, true));
+        }
+    }
+    None
+}
+
+fn emit_decimal_comma_warning_if_applied(table_el: &XmlElement, table_id: &str, warnings: &mut Vec<ImportWarning>) {
+    let used_comma = ["XColumn", "YColumn", "Column", "VariableColumn"].iter().any(|tag| {
+        table_el.children_named(tag).any(|col| {
+            col.children_named("Subcolumn")
+                .flat_map(|s| s.children_named("d"))
+                .chain(col.children_named("d"))
+                .any(|d_el| d_el.plain_text().contains(','))
+        })
+    });
+    if used_comma {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::CoercedValue,
+            table_id,
+            format!("normalized locale decimal-comma numbers in table `{table_id}`"),
+        ));
+    }
+}
+
+fn classify_limit_sign_hint(title: Option<&str>) -> Option<bool> {
+    let raw = title?.trim().to_ascii_lowercase();
+    if raw.is_empty() {
+        return None;
+    }
+    let is_plus = raw.contains('+') || raw.contains("plus") || raw.contains("upper") || raw.contains("high") || raw.contains("max");
+    let is_minus =
+        raw.contains('-') || raw.contains('\u{2212}') || raw.contains("minus") || raw.contains("lower") || raw.contains("low") || raw.contains("min");
+    match (is_plus, is_minus) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    }
+}
+
+fn normalize_error_subcolumns(
+    subcolumns: &mut Vec<Vec<Cell>>,
+    sub_titles: &[Option<String>],
+    mode: SubcolumnMode,
+    is_plus_minus: bool,
+    table_id: &str,
+    col_label: &str,
+    warnings: &mut Vec<ImportWarning>,
+) {
+    if !mode.is_pre_summarized() {
+        return;
+    }
+    let non_empty_count = subcolumns.len();
+    if is_plus_minus && non_empty_count == 2 {
+        if let Some(err_col) = subcolumns.get(1).cloned() {
+            subcolumns.push(err_col);
+            warnings.push(ImportWarning::new(
+                ImportWarningKind::CoercedValue,
+                table_id,
+                format!(
+                    "table `{table_id}` column `{col_label}` used 2-subcolumn PlusMinus format; duplicated ±Error into both -Error and +Error slots"
+                ),
+            ));
+        }
+        return;
+    }
+    if non_empty_count == 2 {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::MissingMetadata,
+            table_id,
+            format!("table `{table_id}` column `{col_label}` has 2 summary subcolumns for mode {mode:?}; third subcolumn (N/limit) left empty"),
+        ));
+        return;
+    }
+    if matches!(mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits) && subcolumns.len() >= 3 {
+        let first_hint = sub_titles.get(1).and_then(|o| classify_limit_sign_hint(o.as_deref()));
+        let second_hint = sub_titles.get(2).and_then(|o| classify_limit_sign_hint(o.as_deref()));
+        if first_hint == Some(true) && second_hint == Some(false) {
+            subcolumns.swap(1, 2);
+            warnings.push(ImportWarning::new(
+                ImportWarningKind::CoercedValue,
+                table_id,
+                format!("reordered asymmetric error subcolumns in table `{table_id}` column `{col_label}` to place Lower/-Error before Upper/+Error"),
+            ));
+        }
+    }
+}
+
+fn warn_domain_and_non_numeric_anomalies(
+    table_id: &str,
+    kind: TableKind,
+    x_cols: &[Vec<Cell>],
+    parsed_y: &[ParsedYColumn],
+    warnings: &mut Vec<ImportWarning>,
+) {
+    match kind {
+        TableKind::Contingency => {
+            for col in parsed_y {
+                if let Some(sub) = col.subcolumns.first() {
+                    let invalid = sub.iter().any(|c| match &c.value {
+                        CellValue::Number(v) => *v < 0.0 || v.fract().abs() > 1e-9,
+                        CellValue::Text(_) => true,
+                        CellValue::Empty => false,
+                    });
+                    if invalid {
+                        warnings.push(ImportWarning::new(
+                            ImportWarningKind::CoercedValue,
+                            table_id,
+                            format!(
+                                "contingency table `{table_id}` column `{}` contains negative, fractional, or non-numeric entries preserved verbatim",
+                                col.title
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        TableKind::Survival => {
+            if let Some(times) = x_cols.first()
+                && times.iter().any(|c| match &c.value {
+                    CellValue::Number(t) => *t < 0.0,
+                    CellValue::Text(_) => true,
+                    CellValue::Empty => false,
+                })
+            {
+                warnings.push(ImportWarning::new(
+                    ImportWarningKind::CoercedValue,
+                    table_id,
+                    format!("survival table `{table_id}` time column contains negative or non-numeric values preserved verbatim"),
+                ));
+            }
+            for col in parsed_y {
+                if let Some(sub) = col.subcolumns.first()
+                    && sub.iter().any(|c| match &c.value {
+                        CellValue::Number(s) => (*s - 0.0).abs() > 1e-9 && (*s - 1.0).abs() > 1e-9,
+                        CellValue::Text(_) => true,
+                        CellValue::Empty => false,
+                    })
+                {
+                    warnings.push(ImportWarning::new(
+                        ImportWarningKind::CoercedValue,
+                        table_id,
+                        format!("survival table `{table_id}` cohort `{}` contains status codes other than 0/1 preserved verbatim", col.title),
+                    ));
+                }
+            }
+        }
+        TableKind::PartsOfWhole => {
+            for col in parsed_y {
+                if let Some(sub) = col.subcolumns.first()
+                    && sub.iter().any(|c| matches!(c.value, CellValue::Number(v) if v < 0.0) || matches!(c.value, CellValue::Text(_)))
+                {
+                    warnings.push(ImportWarning::new(
+                        ImportWarningKind::CoercedValue,
+                        table_id,
+                        format!(
+                            "parts-of-whole table `{table_id}` column `{}` contains negative or non-numeric entries preserved verbatim",
+                            col.title
+                        ),
+                    ));
+                }
+            }
+        }
+        TableKind::Xy | TableKind::Column | TableKind::Grouped | TableKind::Nested => {
+            let x_text = x_cols.iter().flat_map(|col| col.iter()).any(|c| matches!(c.value, CellValue::Text(_)));
+            let y_text =
+                parsed_y.iter().flat_map(|col| col.subcolumns.iter().flat_map(|sub| sub.iter())).any(|c| matches!(c.value, CellValue::Text(_)));
+            if x_text || y_text {
+                warnings.push(ImportWarning::new(
+                    ImportWarningKind::CoercedValue,
+                    table_id,
+                    format!("numeric table `{table_id}` contains non-numeric, non-finite, or placeholder cell entries preserved verbatim as text"),
+                ));
+            }
+        }
+        TableKind::MultipleVariables => {}
+    }
+}
+
+fn resolve_table_kind(raw: Option<&str>, is_huge: bool, id: &str, warnings: &mut Vec<ImportWarning>) -> TableKind {
+    let trimmed = raw.map(str::trim).unwrap_or("");
+    if is_huge && trimmed.is_empty() {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::UnsupportedTableType,
+            id,
+            format!("`<HugeTable>` `{id}` imported as MultipleVariables table"),
+        ));
+        return TableKind::MultipleVariables;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "xy" => TableKind::Xy,
+        "oneway" | "column" | "" => TableKind::Column,
+        "twoway" | "grouped" => TableKind::Grouped,
+        "contingency" => TableKind::Contingency,
+        "survival" => TableKind::Survival,
+        "partsofwhole" | "parts-of-whole" => TableKind::PartsOfWhole,
+        "multiplevariables" | "multiple-variables" | "huge" => {
+            if trimmed.eq_ignore_ascii_case("huge") {
+                warnings.push(ImportWarning::new(
+                    ImportWarningKind::UnsupportedTableType,
+                    id,
+                    format!("TableType `Huge` on `{id}` mapped to MultipleVariables"),
+                ));
+            }
+            TableKind::MultipleVariables
+        }
+        "nested" => TableKind::Nested,
+        _ => {
             warnings.push(ImportWarning::new(
                 ImportWarningKind::UnsupportedTableType,
                 id,
-                format!("unrecognized TableType `{other}`, defaulting to Column"),
+                format!("unrecognized TableType `{trimmed}`, defaulting to Column"),
             ));
             TableKind::Column
         }
@@ -680,21 +1437,23 @@ fn resolve_subcolumn_mode(
     replicates: usize,
     id: &str,
     warnings: &mut Vec<ImportWarning>,
-) -> Result<SubcolumnMode, FormatError> {
+) -> Result<(SubcolumnMode, bool), FormatError> {
     let fmt = raw_fmt.map(str::trim).unwrap_or("");
-    let candidate = match fmt {
-        "SD" | "MeanSDN" => SubcolumnMode::MeanSdN,
-        "SEM" | "MeanSemN" => SubcolumnMode::MeanSemN,
-        "CV" | "MeanCvN" => SubcolumnMode::MeanCvN,
-        "SDN" | "low-high" | "MeanLowHigh" => SubcolumnMode::MeanLowHigh,
-        "upper-lower" | "UpperLowerLimits" => SubcolumnMode::UpperLowerLimits,
-        "median-iqr" | "MedianIqr" | "IQR" => SubcolumnMode::MedianIqr,
-        "replicates" => SubcolumnMode::RawReplicates(replicates.max(1)),
-        "" | "none" => {
+    let fmt_lower = fmt.to_ascii_lowercase();
+    let (candidate, is_plus_minus) = match fmt_lower.as_str() {
+        "sd" | "sdn" | "meansdn" => (SubcolumnMode::MeanSdN, false),
+        "sem" | "semn" | "sen" | "se" | "meansemn" => (SubcolumnMode::MeanSemN, false),
+        "cv" | "cvn" | "meancvn" => (SubcolumnMode::MeanCvN, false),
+        "low-high" | "lowhigh" | "meanlowhigh" => (SubcolumnMode::MeanLowHigh, false),
+        "plus-minus" | "plusminus" | "meanplusminus" => (SubcolumnMode::MeanLowHigh, true),
+        "upper-lower" | "upper-lower-limits" | "upperlowerlimits" | "upperlower" | "limits" => (SubcolumnMode::UpperLowerLimits, false),
+        "median-iqr" | "medianiqr" | "iqr" => (SubcolumnMode::MedianIqr, false),
+        "replicates" | "raw" | "raw-replicates" => (SubcolumnMode::RawReplicates(replicates.max(1)), false),
+        "" | "none" | "single" => {
             if matches!(kind, TableKind::Grouped | TableKind::Nested) {
-                SubcolumnMode::RawReplicates(replicates.max(1))
+                (SubcolumnMode::RawReplicates(replicates.max(1)), false)
             } else if kind == TableKind::Xy && replicates > 1 {
-                SubcolumnMode::RawReplicates(replicates)
+                (SubcolumnMode::RawReplicates(replicates), false)
             } else {
                 if replicates > 1 {
                     warnings.push(ImportWarning::new(
@@ -703,40 +1462,40 @@ fn resolve_subcolumn_mode(
                         format!("Replicates=\"{replicates}\" is not valid for {kind:?} without a summary YFormat, using Single"),
                     ));
                 }
-                SubcolumnMode::Single
+                (SubcolumnMode::Single, false)
             }
         }
-        other => {
+        _ => {
             warnings.push(ImportWarning::new(
                 ImportWarningKind::CoercedValue,
                 id,
-                format!("unrecognized YFormat `{other}`, falling back to default subcolumn mode"),
+                format!("unrecognized YFormat `{fmt}`, falling back to default subcolumn mode"),
             ));
             if matches!(kind, TableKind::Grouped | TableKind::Nested) {
-                SubcolumnMode::RawReplicates(replicates.max(1))
+                (SubcolumnMode::RawReplicates(replicates.max(1)), false)
             } else {
-                SubcolumnMode::Single
+                (SubcolumnMode::Single, false)
             }
         }
     };
 
     if kind.allows_subcolumn_mode(candidate) {
         candidate.validate()?;
-        Ok(candidate)
+        Ok((candidate, is_plus_minus))
     } else if matches!(kind, TableKind::Grouped | TableKind::Nested) {
         warnings.push(ImportWarning::new(
             ImportWarningKind::CoercedValue,
             id,
             format!("subcolumn mode {candidate:?} is not valid for {kind:?}, using RawReplicates"),
         ));
-        Ok(SubcolumnMode::RawReplicates(replicates.max(1)))
+        Ok((SubcolumnMode::RawReplicates(replicates.max(1)), false))
     } else {
         warnings.push(ImportWarning::new(
             ImportWarningKind::CoercedValue,
             id,
             format!("subcolumn mode {candidate:?} is not valid for {kind:?}, using Single"),
         ));
-        Ok(SubcolumnMode::Single)
+        Ok((SubcolumnMode::Single, false))
     }
 }
 
@@ -750,6 +1509,30 @@ fn warn_ignored_sections(root: &XmlElement, warnings: &mut Vec<ImportWarning>) {
                 tag,
                 format!("section `<{tag}>` is not imported automatically; data tables and info constants were preserved"),
             ));
+        }
+    }
+    for (tag, kind, desc) in [
+        ("EquationSequence", ImportWarningKind::UnsupportedEquation, "custom equations"),
+        ("UserEquations", ImportWarningKind::UnsupportedEquation, "user-defined equations"),
+        ("Equations", ImportWarningKind::UnsupportedEquation, "equations"),
+        ("Equation", ImportWarningKind::UnsupportedEquation, "equation definitions"),
+        ("ResultsSequence", ImportWarningKind::UnsupportedAnalysis, "cached analysis results"),
+        ("AnalysisResults", ImportWarningKind::UnsupportedAnalysis, "cached analysis results"),
+        ("Analysis", ImportWarningKind::UnsupportedAnalysis, "top-level analysis definitions"),
+        ("Result", ImportWarningKind::UnsupportedAnalysis, "top-level result definitions"),
+        ("Graph", ImportWarningKind::UnsupportedGraphOrLayout, "top-level graph definitions"),
+        ("Layout", ImportWarningKind::UnsupportedGraphOrLayout, "top-level layout definitions"),
+        ("Script", ImportWarningKind::UnsupportedScript, "top-level embedded scripts"),
+    ] {
+        for el in root.children_named(tag) {
+            if el.child_elements().next().is_some() || !el.plain_text().trim().is_empty() || el.attrs.iter().any(|_| true) {
+                warnings.push(ImportWarning::new(
+                    kind,
+                    tag,
+                    format!("section `<{tag}>` ({desc}) is not imported automatically; data tables and info constants were preserved"),
+                ));
+                break;
+            }
         }
     }
 }
@@ -834,7 +1617,7 @@ fn truncate_utf8_to_bytes(raw: &str, max_bytes: usize) -> &str {
     raw.get(..end).unwrap_or("")
 }
 
-fn clamp_title(raw: &str, source: &str, warnings: &mut Vec<ImportWarning>) -> String {
+pub(crate) fn clamp_title(raw: &str, source: &str, warnings: &mut Vec<ImportWarning>) -> String {
     if raw.len() <= MAX_TITLE_BYTES {
         return raw.to_owned();
     }
@@ -893,15 +1676,15 @@ mod tests {
         let seq = root.first_child("TableSequence").unwrap();
         let mut total_slots = 0_usize;
         for table_el in seq.children_named("Table") {
-            let kind = resolve_table_kind(table_el.attr("TableType"), "t", &mut Vec::new());
+            let kind = resolve_table_kind(table_el.attr("TableType"), false, "t", &mut Vec::new());
             let reps = table_el.attr("Replicates").and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(1);
-            let mode = resolve_subcolumn_mode(kind, table_el.attr("YFormat"), reps, "t", &mut Vec::new()).unwrap();
+            let (mode, _) = resolve_subcolumn_mode(kind, table_el.attr("YFormat"), reps, "t", &mut Vec::new()).unwrap();
             let row_titles = table_el
                 .first_child("RowTitlesColumn")
                 .map(|el| extract_column_subcolumns(el).into_iter().next().unwrap_or_default())
                 .unwrap_or_default();
             let x_cols = table_el.first_child("XColumn").map(extract_column_subcolumns).unwrap_or_default();
-            let x_mode = resolve_x_mode(table_el, &x_cols, None).unwrap();
+            let x_res = resolve_x_mode(table_el, &x_cols, None, None, &mut Vec::new(), "t").unwrap();
             let parsed_y: Vec<ParsedYColumn> = table_el
                 .children_named("YColumn")
                 .enumerate()
@@ -915,8 +1698,8 @@ mod tests {
             let max_y = parsed_y.iter().flat_map(|c| c.subcolumns.iter().map(Vec::len)).max().unwrap_or(0);
             let max_x = x_cols.iter().map(Vec::len).max().unwrap_or(0);
             let rows = row_titles.len().max(max_x).max(max_y);
-            let est = estimate_table_cells(kind, mode, &x_mode, &parsed_y, rows).unwrap();
-            let arch = build_table_archetype(kind, mode, x_mode, "X", &x_cols, &parsed_y, vec![String::new(); rows], false, rows).unwrap();
+            let est = estimate_table_cells(kind, mode, &x_res.mode, &parsed_y, rows).unwrap();
+            let arch = build_table_archetype(kind, mode, x_res.mode, "X", &x_cols, &parsed_y, vec![String::new(); rows], false, None, rows).unwrap();
             assert_eq!(est, arch.allocated_cell_slots(), "estimate mismatch for {kind:?}");
             total_slots += arch.allocated_cell_slots();
         }

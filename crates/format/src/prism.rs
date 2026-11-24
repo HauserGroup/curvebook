@@ -19,7 +19,7 @@ use crate::archive::{
 use crate::csv::{CsvOptions, import_csv_to_datasheet_with_budget, parse_delimited_records};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 use crate::image_asset::validate_image_asset_parts;
-use crate::pzfx::{allocate_valid_unique_sheet_id, import_pzfx_bytes_with_used_cells};
+use crate::pzfx::{allocate_valid_unique_sheet_id, clamp_title, import_pzfx_bytes_with_used_cells};
 use crate::zip::{ZipArchive, ZipLimits};
 
 /// Maximum cumulative dense `Cell` entries allocated across all tables of a `.prism` import.
@@ -28,33 +28,54 @@ pub const MAX_PROJECT_CELLS: usize = crate::csv::MAX_IMPORT_CELLS;
 /// Optional metadata sidecar describing a tabular CSV sheet inside a `.prism` ZIP archive.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 struct PrismTableMeta {
+    #[serde(alias = "sheet_id", alias = "sheetId")]
     id: Option<String>,
+    #[serde(alias = "name")]
     title: Option<String>,
-    #[serde(alias = "table_type", alias = "archetype")]
+    #[serde(alias = "table_type", alias = "tableType", alias = "archetype")]
     kind: Option<String>,
+    #[serde(alias = "subcolumnMode", alias = "y_format", alias = "yFormat", alias = "error_format")]
     subcolumn_mode: Option<String>,
+    #[serde(alias = "replicate_count", alias = "replicateCount")]
     replicates: Option<usize>,
     delimiter: Option<char>,
+    #[serde(alias = "decimalSeparator")]
     decimal_separator: Option<char>,
+    #[serde(alias = "hasRowTitles")]
     has_row_titles: Option<bool>,
+    #[serde(alias = "csvPath", alias = "path", alias = "data_path", alias = "dataPath", alias = "file")]
     csv_path: Option<String>,
 }
 
-/// Optional top-level `.prism` manifest JSON.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+/// Optional top-level `.prism` manifest JSON or external `document.json`.
+#[derive(Debug, Clone, Default)]
 struct PrismManifest {
     title: Option<String>,
-    sheets: Option<Vec<PrismTableMeta>>,
-    info_sheets: Option<Vec<PrismInfoMeta>>,
+    sheets: Vec<(String, PrismTableMeta)>,
+    info_sheets: Vec<PrismInfoMeta>,
+    unsupported_sections: Vec<(ImportWarningKind, String, String)>,
 }
 
 /// Optional info metadata JSON inside a `.prism` ZIP archive.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default)]
 struct PrismInfoMeta {
     id: Option<String>,
     title: Option<String>,
     notes: Option<String>,
-    constants: Option<BTreeMap<String, serde_json::Value>>,
+    constants: Vec<ParsedInfoConstantEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedInfoConstantEntry {
+    name: String,
+    value: ConstantValue,
+    units: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReferencedCsvPath {
+    lookup_key: String,
+    raw_display: String,
 }
 
 /// Import a `.prism` ZIP container from raw bytes using [`ZipLimits::default`].
@@ -62,87 +83,204 @@ pub fn import_prism_bytes(bytes: &[u8]) -> Result<ImportReport, FormatError> {
     import_prism_bytes_with_limits(bytes, ZipLimits::default())
 }
 
+enum ProjectJsonLoadOutcome {
+    Absent,
+    Embedded(Box<ImportReport>),
+    ExternalMeta { path: String, value: serde_json::Value },
+    InvalidJsonChunk(String),
+}
+
+struct TableMetaIndex {
+    by_csv: BTreeMap<String, PrismTableMeta>,
+    by_stem: BTreeMap<String, PrismTableMeta>,
+    by_dir: BTreeMap<String, PrismTableMeta>,
+    expected_csv_refs: Vec<ReferencedCsvPath>,
+}
+
+impl TableMetaIndex {
+    fn new() -> Self {
+        Self { by_csv: BTreeMap::new(), by_stem: BTreeMap::new(), by_dir: BTreeMap::new(), expected_csv_refs: Vec::new() }
+    }
+}
+
 /// Import a `.prism` ZIP container enforcing explicit [`ZipLimits`].
 pub fn import_prism_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result<ImportReport, FormatError> {
     let archive = ZipArchive::from_bytes_with_limits(bytes, limits)?;
-    let manifest_state = inspect_manifest_bounded(&archive)?;
+    let root_prefix = detect_archive_root_prefix(&archive);
+    let manifest_entry = find_archive_entry_ci(&archive, "manifest.json", &root_prefix);
+    let manifest_state = inspect_manifest_bounded(manifest_entry)?;
     let mut warnings = Vec::new();
-
-    if let Some(doc_report) = try_load_embedded_project_json(&archive, &mut warnings)? {
-        return Ok(doc_report);
-    }
-
-    let mut manifest_meta: Option<PrismManifest> = None;
     let mut handled_paths: HashSet<String> = HashSet::new();
 
-    match manifest_state {
-        ManifestParseState::Absent => {}
-        ManifestParseState::ValidValue(val) => {
-            handled_paths.insert(String::from("manifest.json"));
-            match serde_json::from_value::<PrismManifest>(val) {
-                Ok(parsed) => manifest_meta = Some(parsed),
-                Err(err) => warnings.push(ImportWarning::new(
-                    ImportWarningKind::MissingMetadata,
-                    "manifest.json",
-                    format!("could not parse manifest.json: {err}"),
-                )),
-            }
+    let mut parsed_manifest = match try_load_project_json(&archive, &root_prefix, &mut warnings)? {
+        ProjectJsonLoadOutcome::Embedded(report) => return Ok(*report),
+        ProjectJsonLoadOutcome::ExternalMeta { path, value } => {
+            handled_paths.insert(path.clone());
+            Some(parse_external_project_meta(&value, &path, &mut warnings))
         }
-        ManifestParseState::InvalidSyntax(err) => {
-            handled_paths.insert(String::from("manifest.json"));
-            warnings.push(ImportWarning::new(ImportWarningKind::MissingMetadata, "manifest.json", format!("could not parse manifest.json: {err}")));
+        ProjectJsonLoadOutcome::InvalidJsonChunk(path) => {
+            handled_paths.insert(path);
+            None
+        }
+        ProjectJsonLoadOutcome::Absent => None,
+    };
+
+    if let Some(manifest_from_file) = apply_manifest_parse_state(manifest_state, &mut handled_paths, &mut warnings) {
+        match parsed_manifest {
+            Some(doc_fallback) => {
+                let mut merged = manifest_from_file;
+                merge_manifest_fallback(&mut merged, doc_fallback);
+                parsed_manifest = Some(merged);
+            }
+            None => parsed_manifest = Some(manifest_from_file),
         }
     }
 
-    let proj_title =
-        manifest_meta.as_ref().and_then(|m| m.title.clone()).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| String::from("Imported Project"));
+    let raw_proj_title =
+        parsed_manifest.as_ref().and_then(|m| m.title.clone()).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| String::from("Imported Project"));
+    let proj_title = clamp_title(&raw_proj_title, "project", &mut warnings);
     let mut doc = ProjectDocument::new(proj_title)?;
     let mut used_ids: HashSet<String> = HashSet::new();
+    let mut meta_index = TableMetaIndex::new();
 
-    let mut meta_by_stem: BTreeMap<String, PrismTableMeta> = BTreeMap::new();
-    let mut meta_by_csv: BTreeMap<String, PrismTableMeta> = BTreeMap::new();
+    if let Some(manifest) = &parsed_manifest {
+        register_manifest_entries(manifest, &mut doc, &mut used_ids, &mut warnings, &mut meta_index)?;
+    }
 
-    if let Some(manifest) = &manifest_meta {
-        if let Some(sheets) = &manifest.sheets {
-            for item in sheets {
-                if let Some(csv_path) = &item.csv_path {
-                    meta_by_csv.insert(csv_path.clone(), item.clone());
-                }
-            }
-        }
-        if let Some(infos) = &manifest.info_sheets {
-            for meta in infos {
-                import_info_meta(meta, &mut doc, &mut used_ids, &mut warnings)?;
+    import_json_pass(&archive, &root_prefix, &mut handled_paths, &mut doc, &mut used_ids, &mut warnings, &mut meta_index)?;
+    let mut used_cells = import_csv_pass(&archive, &root_prefix, &mut handled_paths, &mut doc, &mut used_ids, &mut warnings, &meta_index)?;
+    import_pzfx_and_tail_passes(&archive, &mut handled_paths, &mut doc, &mut used_ids, &mut warnings, &mut used_cells)?;
+
+    if let Some(primary_info) = doc.info_sheets.first().map(|s| s.id.clone()) {
+        for ds in &mut doc.data_sheets {
+            if ds.info_sheet_id.is_none() {
+                ds.info_sheet_id = Some(primary_info.clone());
             }
         }
     }
 
-    // First pass: parse JSON metadata / info sheets.
+    validate_project_document(&doc)?;
+    Ok(ImportReport { document: doc, warnings })
+}
+
+fn apply_manifest_parse_state(
+    manifest_state: ManifestParseState,
+    handled_paths: &mut HashSet<String>,
+    warnings: &mut Vec<ImportWarning>,
+) -> Option<PrismManifest> {
+    match manifest_state {
+        ManifestParseState::Absent => None,
+        ManifestParseState::ValidValue(entry_path, val) => {
+            handled_paths.insert(entry_path.clone());
+            Some(parse_external_project_meta(&val, &entry_path, warnings))
+        }
+        ManifestParseState::InvalidSyntax(entry_path, err) => {
+            handled_paths.insert(entry_path);
+            warnings.push(ImportWarning::new(ImportWarningKind::MissingMetadata, "manifest.json", format!("could not parse manifest.json: {err}")));
+            None
+        }
+    }
+}
+
+fn register_manifest_entries(
+    manifest: &PrismManifest,
+    doc: &mut ProjectDocument,
+    used_ids: &mut HashSet<String>,
+    warnings: &mut Vec<ImportWarning>,
+    meta_index: &mut TableMetaIndex,
+) -> Result<(), FormatError> {
+    for (source_path, item) in &manifest.sheets {
+        if let Some(csv_path) = &item.csv_path {
+            let norm = normalize_rel_csv_key(csv_path, "");
+            if !norm.is_empty() {
+                meta_index.by_csv.insert(norm.clone(), item.clone());
+                meta_index.expected_csv_refs.push(ReferencedCsvPath { lookup_key: norm, raw_display: csv_path.clone() });
+            }
+        } else if let Some(id_or_title) = item.id.as_deref().or(item.title.as_deref()) {
+            let norm = stem_without_ext(id_or_title).to_ascii_lowercase();
+            if !norm.is_empty() {
+                meta_index.by_stem.insert(norm, item.clone());
+            }
+            let _ = source_path;
+        }
+    }
+    for info_meta in &manifest.info_sheets {
+        import_info_meta(info_meta, doc, used_ids, warnings)?;
+    }
+    for (kind, source, msg) in &manifest.unsupported_sections {
+        warnings.push(ImportWarning::new(*kind, source, msg));
+    }
+    Ok(())
+}
+
+fn import_json_pass(
+    archive: &ZipArchive,
+    root_prefix: &str,
+    handled_paths: &mut HashSet<String>,
+    doc: &mut ProjectDocument,
+    used_ids: &mut HashSet<String>,
+    warnings: &mut Vec<ImportWarning>,
+    meta_index: &mut TableMetaIndex,
+) -> Result<(), FormatError> {
     for (path, payload) in archive.iter() {
-        if handled_paths.contains(path) || !path.ends_with(".json") {
+        if handled_paths.contains(path) || !has_ext_ci(path, ".json") {
             continue;
         }
-        if is_info_json_path(path) {
-            handled_paths.insert(path.to_owned());
-            import_info_json(path, payload, &mut doc, &mut used_ids, &mut warnings)?;
-            continue;
-        }
-        if let Some(meta) = parse_table_meta_bounded(payload)?
-            && (meta.kind.is_some() || meta.title.is_some() || meta.csv_path.is_some() || meta.subcolumn_mode.is_some())
-        {
-            handled_paths.insert(path.to_owned());
-            if let Some(csv_p) = &meta.csv_path {
-                meta_by_csv.insert(csv_p.clone(), meta.clone());
-            }
-            meta_by_stem.insert(stem_without_ext(path).to_owned(), meta);
-        }
-    }
+        let rel = strip_root_prefix(path, root_prefix);
+        handled_paths.insert(path.to_owned());
 
-    // Second pass: parse CSV / TSV data tables while enforcing cumulative project cell budget.
+        if is_info_json_path(rel) {
+            import_info_json(path, payload, doc, used_ids, warnings)?;
+            continue;
+        }
+        if let Some((kind, desc)) = classify_unsupported_json_dir(rel) {
+            warnings.push(ImportWarning::new(
+                kind,
+                path,
+                format!("{desc} entry `{path}` is not imported automatically; data tables and info constants were preserved"),
+            ));
+            continue;
+        }
+
+        let val = match parse_bounded_json_outcome(payload) {
+            BoundedJsonOutcome::Value(v) => v,
+            BoundedJsonOutcome::BudgetExceeded(err) => return Err(err),
+            BoundedJsonOutcome::SyntaxOrType(err) => {
+                warnings.push(ImportWarning::new(ImportWarningKind::UnsupportedChunk, path, format!("could not parse JSON entry `{path}`: {err}")));
+                continue;
+            }
+        };
+
+        classify_and_register_json_value(
+            rel,
+            path,
+            &val,
+            doc,
+            used_ids,
+            warnings,
+            &mut meta_index.by_csv,
+            &mut meta_index.by_stem,
+            &mut meta_index.by_dir,
+            &mut meta_index.expected_csv_refs,
+        )?;
+    }
+    Ok(())
+}
+
+fn import_csv_pass(
+    archive: &ZipArchive,
+    root_prefix: &str,
+    handled_paths: &mut HashSet<String>,
+    doc: &mut ProjectDocument,
+    used_ids: &mut HashSet<String>,
+    warnings: &mut Vec<ImportWarning>,
+    meta_index: &TableMetaIndex,
+) -> Result<usize, FormatError> {
     let mut used_cells: usize = 0;
     let mut data_idx = 1_usize;
+    let mut matched_csv_keys: HashSet<String> = HashSet::new();
     for (path, payload) in archive.iter() {
-        if handled_paths.contains(path) || !(path.ends_with(".csv") || path.ends_with(".tsv")) {
+        if handled_paths.contains(path) || !(has_ext_ci(path, ".csv") || has_ext_ci(path, ".tsv")) {
             continue;
         }
         handled_paths.insert(path.to_owned());
@@ -157,54 +295,80 @@ pub fn import_prism_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
                 continue;
             }
         };
-        let meta = meta_by_csv.get(path).or_else(|| meta_by_stem.get(stem_without_ext(path))).cloned().unwrap_or_default();
+        let rel = strip_root_prefix(path, root_prefix);
+        let rel_lower = rel.to_ascii_lowercase();
+        let rel_stem = stem_without_ext(rel).to_ascii_lowercase();
+        let rel_dir = parent_dir(rel).to_ascii_lowercase();
+        let base_stem = rel.rsplit('/').next().map(stem_without_ext).unwrap_or("").to_ascii_lowercase();
+
+        let meta = if let Some(m) = meta_index.by_csv.get(&rel_lower) {
+            matched_csv_keys.insert(rel_lower);
+            m.clone()
+        } else if let Some(m) = meta_index.by_dir.get(&rel_dir) {
+            m.clone()
+        } else if let Some(m) = meta_index.by_stem.get(&rel_stem).or_else(|| meta_index.by_stem.get(&base_stem)) {
+            m.clone()
+        } else {
+            PrismTableMeta::default()
+        };
+
         let remaining_cells = MAX_PROJECT_CELLS.saturating_sub(used_cells);
-        let ds = import_csv_entry(path, text, &meta, data_idx, &mut used_ids, &mut warnings, remaining_cells)?;
+        let ds = import_csv_entry(path, text, &meta, data_idx, used_ids, warnings, remaining_cells)?;
         used_cells = accumulate_project_cells(used_cells, &ds)?;
         doc.add_data_sheet(ds)?;
         data_idx += 1;
     }
 
-    // Embedded `.pzfx` payloads inside a `.prism` ZIP container (if any).
-    for (path, payload) in archive.iter() {
-        if handled_paths.contains(path) || !path.ends_with(".pzfx") {
-            continue;
-        }
-        handled_paths.insert(path.to_owned());
-        merge_embedded_pzfx(payload, &mut doc, &mut used_ids, &mut warnings, &mut used_cells)?;
-    }
-
-    // Third pass: warn on any unrecognized binary/script/other chunks without panicking.
-    for (path, _) in archive.iter() {
-        if !handled_paths.contains(path) {
+    let mut reported_missing: HashSet<String> = HashSet::new();
+    for expected in &meta_index.expected_csv_refs {
+        if !matched_csv_keys.contains(&expected.lookup_key) && reported_missing.insert(expected.lookup_key.clone()) {
             warnings.push(ImportWarning::new(
-                ImportWarningKind::UnsupportedChunk,
-                path,
-                format!("unsupported or binary `.prism` chunk `{path}` was skipped"),
+                ImportWarningKind::MissingMetadata,
+                expected.raw_display.clone(),
+                format!("referenced table CSV/TSV `{}` was not found in the `.prism` archive", expected.raw_display),
             ));
         }
     }
+    Ok(used_cells)
+}
 
-    if let Some(primary_info) = doc.info_sheets.first().map(|s| s.id.clone()) {
-        for ds in &mut doc.data_sheets {
-            if ds.info_sheet_id.is_none() {
-                ds.info_sheet_id = Some(primary_info.clone());
-            }
+fn import_pzfx_and_tail_passes(
+    archive: &ZipArchive,
+    handled_paths: &mut HashSet<String>,
+    doc: &mut ProjectDocument,
+    used_ids: &mut HashSet<String>,
+    warnings: &mut Vec<ImportWarning>,
+    used_cells: &mut usize,
+) -> Result<(), FormatError> {
+    for (path, payload) in archive.iter() {
+        if handled_paths.contains(path) || !has_ext_ci(path, ".pzfx") {
+            continue;
         }
+        handled_paths.insert(path.to_owned());
+        merge_embedded_pzfx(payload, doc, used_ids, warnings, used_cells)?;
     }
 
-    validate_project_document(&doc)?;
-    Ok(ImportReport { document: doc, warnings })
+    for (path, payload) in archive.iter() {
+        if !handled_paths.contains(path) {
+            let msg = if is_sqlite_chunk(path, payload) {
+                format!("embedded SQLite database `{path}` cannot be imported natively without tabular CSV/JSON/PZFX chunks")
+            } else {
+                format!("unsupported or binary `.prism` chunk `{path}` was skipped")
+            };
+            warnings.push(ImportWarning::new(ImportWarningKind::UnsupportedChunk, path, msg));
+        }
+    }
+    Ok(())
 }
 
 enum ManifestParseState {
     Absent,
-    ValidValue(serde_json::Value),
-    InvalidSyntax(FormatError),
+    ValidValue(String, serde_json::Value),
+    InvalidSyntax(String, FormatError),
 }
 
-fn inspect_manifest_bounded(archive: &ZipArchive) -> Result<ManifestParseState, FormatError> {
-    let Some(manifest_bytes) = archive.get("manifest.json") else {
+fn inspect_manifest_bounded(entry: Option<(&str, &[u8])>) -> Result<ManifestParseState, FormatError> {
+    let Some((path, manifest_bytes)) = entry else {
         return Ok(ManifestParseState::Absent);
     };
     match parse_bounded_json_outcome(manifest_bytes) {
@@ -216,32 +380,36 @@ fn inspect_manifest_bounded(archive: &ZipArchive) -> Result<ManifestParseState, 
                     reason: format!("legacy LumenCraft archive (`{format}`) cannot be imported as a `.prism` project"),
                 });
             }
-            Ok(ManifestParseState::ValidValue(manifest_val))
+            Ok(ManifestParseState::ValidValue(path.to_owned(), manifest_val))
         }
         BoundedJsonOutcome::BudgetExceeded(err) => Err(err),
-        BoundedJsonOutcome::SyntaxOrType(err) => Ok(ManifestParseState::InvalidSyntax(err)),
+        BoundedJsonOutcome::SyntaxOrType(err) => Ok(ManifestParseState::InvalidSyntax(path.to_owned(), err)),
     }
 }
 
-fn parse_table_meta_bounded(payload: &[u8]) -> Result<Option<PrismTableMeta>, FormatError> {
-    match parse_bounded_json_outcome(payload) {
-        BoundedJsonOutcome::Value(val) => Ok(serde_json::from_value(val).ok()),
-        BoundedJsonOutcome::BudgetExceeded(err) => Err(err),
-        BoundedJsonOutcome::SyntaxOrType(_) => Ok(None),
-    }
-}
-
-fn try_load_embedded_project_json(archive: &ZipArchive, warnings: &mut Vec<ImportWarning>) -> Result<Option<ImportReport>, FormatError> {
-    let Some(doc_bytes) = archive.get("document.json") else {
-        return Ok(None);
+fn try_load_project_json(archive: &ZipArchive, root_prefix: &str, warnings: &mut Vec<ImportWarning>) -> Result<ProjectJsonLoadOutcome, FormatError> {
+    let Some((doc_path, doc_bytes)) = find_archive_entry_ci(archive, "document.json", root_prefix) else {
+        return Ok(ProjectJsonLoadOutcome::Absent);
     };
     let streamed = match parse_streamed_document_outcome(doc_bytes) {
         StreamedDocumentOutcome::Parsed(doc) => *doc,
         StreamedDocumentOutcome::BudgetExceeded(err) | StreamedDocumentOutcome::DataError(err) => return Err(err),
-        StreamedDocumentOutcome::NonObject | StreamedDocumentOutcome::SyntaxOrType(_) => return Ok(None),
+        StreamedDocumentOutcome::NonObject | StreamedDocumentOutcome::SyntaxOrType(_) => match parse_bounded_json_outcome(doc_bytes) {
+            BoundedJsonOutcome::Value(value) => return Ok(ProjectJsonLoadOutcome::ExternalMeta { path: doc_path.to_owned(), value }),
+            BoundedJsonOutcome::BudgetExceeded(err) => return Err(err),
+            BoundedJsonOutcome::SyntaxOrType(err) => {
+                warnings.push(ImportWarning::new(ImportWarningKind::UnsupportedChunk, doc_path, format!("could not parse `{doc_path}`: {err}")));
+                return Ok(ProjectJsonLoadOutcome::InvalidJsonChunk(doc_path.to_owned()));
+            }
+        },
     };
     if !streamed.has_data_sheets_key {
-        return Ok(None);
+        let value = match parse_bounded_json_outcome(doc_bytes) {
+            BoundedJsonOutcome::Value(v) => v,
+            BoundedJsonOutcome::BudgetExceeded(err) => return Err(err),
+            BoundedJsonOutcome::SyntaxOrType(_) => serde_json::Value::Object(serde_json::Map::new()),
+        };
+        return Ok(ProjectJsonLoadOutcome::ExternalMeta { path: doc_path.to_owned(), value });
     }
     let version = match streamed.meta_doc.get("schema_version") {
         None | Some(serde_json::Value::Null) => 0,
@@ -256,20 +424,25 @@ fn try_load_embedded_project_json(archive: &ZipArchive, warnings: &mut Vec<Impor
     precheck_migrated_image_assets(&migrated)?;
     let mut doc = finalize_migrated_document(migrated, streamed.heavy)?;
     doc.data_sheets.iter().try_fold(0_usize, accumulate_project_cells)?;
-    hydrate_embedded_image_assets(archive, &mut doc)?;
+    hydrate_embedded_image_assets(archive, root_prefix, &mut doc)?;
     sanitize_invalid_document_sheet_ids(&mut doc, warnings);
     validate_project_document(&doc)?;
 
-    for (path, _) in archive.iter() {
-        if path != "document.json" && path != "manifest.json" && !path.starts_with("sheets/") && !path.starts_with("assets/") {
-            warnings.push(ImportWarning::new(
-                ImportWarningKind::UnsupportedChunk,
-                path,
-                format!("auxiliary `.prism` chunk `{path}` was ignored because `document.json` provided full project state"),
-            ));
+    for (path, payload) in archive.iter() {
+        let rel = strip_root_prefix(path, root_prefix);
+        if !rel.eq_ignore_ascii_case("document.json")
+            && !rel.eq_ignore_ascii_case("manifest.json")
+            && !starts_with_dir_ci(rel, &["sheets/", "assets/"])
+        {
+            let msg = if is_sqlite_chunk(path, payload) {
+                format!("embedded SQLite database `{path}` was ignored because `document.json` provided full project state")
+            } else {
+                format!("auxiliary `.prism` chunk `{path}` was ignored because `document.json` provided full project state")
+            };
+            warnings.push(ImportWarning::new(ImportWarningKind::UnsupportedChunk, path, msg));
         }
     }
-    Ok(Some(ImportReport { document: doc, warnings: std::mem::take(warnings) }))
+    Ok(ProjectJsonLoadOutcome::Embedded(Box::new(ImportReport { document: doc, warnings: std::mem::take(warnings) })))
 }
 
 fn precheck_migrated_image_assets(migrated: &serde_json::Value) -> Result<(), FormatError> {
@@ -311,7 +484,7 @@ fn precheck_migrated_image_assets(migrated: &serde_json::Value) -> Result<(), Fo
     Ok(())
 }
 
-fn hydrate_embedded_image_assets(archive: &ZipArchive, doc: &mut ProjectDocument) -> Result<(), FormatError> {
+fn hydrate_embedded_image_assets(archive: &ZipArchive, root_prefix: &str, doc: &mut ProjectDocument) -> Result<(), FormatError> {
     if doc.image_assets.len() > MAX_PROJECT_IMAGE_ASSETS {
         return Err(FormatError::Doc(curvebook_doc::DocError::TooManyImageAssets { count: doc.image_assets.len(), max: MAX_PROJECT_IMAGE_ASSETS }));
     }
@@ -324,8 +497,9 @@ fn hydrate_embedded_image_assets(archive: &ZipArchive, doc: &mut ProjectDocument
             return Err(FormatError::DuplicateEntry { path: asset.asset_id.clone() });
         }
         let expected_path = format!("assets/{}.{}", asset.asset_id, asset.media_type.extension());
+        let entry = find_archive_entry_ci(archive, &expected_path, root_prefix);
         if asset.bytes.is_empty() {
-            let Some(bytes) = archive.get(&expected_path) else {
+            let Some((_, bytes)) = entry else {
                 return Err(FormatError::MissingArchiveEntry { path: expected_path });
             };
             if bytes.len() > MAX_IMAGE_ASSET_BYTES {
@@ -339,7 +513,7 @@ fn hydrate_embedded_image_assets(archive: &ZipArchive, doc: &mut ProjectDocument
             asset.bytes = bytes.to_vec();
         } else {
             validate_image_asset_parts(&asset.asset_id, asset.media_type, asset.pixel_size, &asset.bytes)?;
-            if let Some(archived) = archive.get(&expected_path)
+            if let Some((_, archived)) = entry
                 && archived != asset.bytes.as_slice()
             {
                 return Err(FormatError::Json(format!(
@@ -352,8 +526,409 @@ fn hydrate_embedded_image_assets(archive: &ZipArchive, doc: &mut ProjectDocument
     Ok(())
 }
 
-fn is_info_json_path(path: &str) -> bool {
-    path.starts_with("info/") || path.ends_with("/info.json") || path == "info.json"
+fn detect_archive_root_prefix(archive: &ZipArchive) -> String {
+    if find_archive_entry_exact_or_ci_top(archive, "manifest.json").is_some()
+        || find_archive_entry_exact_or_ci_top(archive, "document.json").is_some()
+    {
+        return String::new();
+    }
+    let mut common_dir: Option<String> = None;
+    for (path, _) in archive.iter() {
+        if path.starts_with("__MACOSX/") {
+            continue;
+        }
+        let Some((first_seg, _)) = path.split_once('/') else {
+            return String::new();
+        };
+        let candidate = format!("{first_seg}/");
+        match &common_dir {
+            None => common_dir = Some(candidate),
+            Some(prev) if prev.eq_ignore_ascii_case(&candidate) => {}
+            Some(_) => return String::new(),
+        }
+    }
+    let Some(dir) = common_dir else {
+        return String::new();
+    };
+    let lower = dir.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "sheets/" | "info/" | "assets/" | "scripts/" | "analyses/" | "analysis/" | "graphs/" | "layouts/" | "equations/" | "tables/" | "data/"
+    ) {
+        String::new()
+    } else {
+        dir
+    }
+}
+
+fn find_archive_entry_exact_or_ci_top<'a>(archive: &'a ZipArchive, target: &str) -> Option<(&'a str, &'a [u8])> {
+    archive.iter().find(|(p, _)| *p == target).or_else(|| archive.iter().find(|(p, _)| p.eq_ignore_ascii_case(target)))
+}
+
+fn find_archive_entry_ci<'a>(archive: &'a ZipArchive, rel_target: &str, root_prefix: &str) -> Option<(&'a str, &'a [u8])> {
+    if let Some(hit) = archive.iter().find(|(p, _)| *p == rel_target) {
+        return Some(hit);
+    }
+    if !root_prefix.is_empty() {
+        let prefixed = format!("{root_prefix}{rel_target}");
+        if let Some(hit) = archive.iter().find(|(p, _)| *p == prefixed) {
+            return Some(hit);
+        }
+        if let Some(hit) = archive.iter().find(|(p, _)| p.eq_ignore_ascii_case(&prefixed)) {
+            return Some(hit);
+        }
+    }
+    archive.iter().find(|(p, _)| strip_root_prefix(p, root_prefix).eq_ignore_ascii_case(rel_target))
+}
+
+fn strip_root_prefix<'a>(path: &'a str, root_prefix: &str) -> &'a str {
+    if root_prefix.is_empty() {
+        return path;
+    }
+    if path.len() >= root_prefix.len() && path.get(..root_prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(root_prefix)) {
+        path.get(root_prefix.len()..).unwrap_or(path)
+    } else {
+        path
+    }
+}
+
+fn has_ext_ci(path: &str, ext_with_dot: &str) -> bool {
+    path.len() >= ext_with_dot.len()
+        && path.get(path.len().saturating_sub(ext_with_dot.len())..).is_some_and(|tail| tail.eq_ignore_ascii_case(ext_with_dot))
+}
+
+fn starts_with_dir_ci(rel_path: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| rel_path.len() >= prefix.len() && rel_path.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix)))
+}
+
+fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+fn normalize_rel_csv_key(raw: &str, base_dir: &str) -> String {
+    let mut trimmed = raw.trim().replace('\\', "/");
+    while let Some(rest) = trimmed.strip_prefix("./") {
+        trimmed = rest.to_owned();
+    }
+    let trimmed = trimmed.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if !trimmed.contains('/') && !base_dir.is_empty() { format!("{}/{trimmed}", base_dir.to_ascii_lowercase()) } else { trimmed.to_ascii_lowercase() }
+}
+
+fn is_sqlite_chunk(path: &str, payload: &[u8]) -> bool {
+    has_ext_ci(path, ".sqlite") || has_ext_ci(path, ".sqlite3") || has_ext_ci(path, ".db") || payload.starts_with(b"SQLite format 3\0")
+}
+
+fn is_info_json_path(rel_path: &str) -> bool {
+    let lower = rel_path.to_ascii_lowercase();
+    let basename = lower.rsplit('/').next().unwrap_or(&lower);
+    lower.starts_with("info/") || lower == "info.json" || lower.ends_with("/info.json") || basename.starts_with("info_")
+}
+
+fn classify_unsupported_json_dir(rel_path: &str) -> Option<(ImportWarningKind, &'static str)> {
+    let lower = rel_path.to_ascii_lowercase();
+    let basename = lower.rsplit('/').next().unwrap_or(&lower);
+    if starts_with_dir_ci(&lower, &["analyses/", "analysis/", "results/"]) || matches!(basename, "analyses.json" | "analysis.json" | "results.json") {
+        Some((ImportWarningKind::UnsupportedAnalysis, "analysis definition"))
+    } else if starts_with_dir_ci(&lower, &["graphs/", "graph/", "layouts/", "layout/"]) || matches!(basename, "graphs.json" | "layouts.json") {
+        Some((ImportWarningKind::UnsupportedGraphOrLayout, "graph/layout definition"))
+    } else if starts_with_dir_ci(&lower, &["equations/", "equation/"]) || matches!(basename, "equations.json" | "user_equations.json") {
+        Some((ImportWarningKind::UnsupportedEquation, "user equation definition"))
+    } else if starts_with_dir_ci(&lower, &["scripts/", "script/"]) || matches!(basename, "scripts.json" | "script.json") {
+        Some((ImportWarningKind::UnsupportedScript, "script definition"))
+    } else {
+        None
+    }
+}
+
+fn parse_external_project_meta(val: &serde_json::Value, source_path: &str, warnings: &mut Vec<ImportWarning>) -> PrismManifest {
+    let Some(obj) = val.as_object() else {
+        warnings.push(ImportWarning::new(ImportWarningKind::MissingMetadata, source_path, format!("expected JSON object in `{source_path}`")));
+        return PrismManifest::default();
+    };
+    let mut out = PrismManifest {
+        title: obj
+            .get("title")
+            .or_else(|| obj.get("name"))
+            .or_else(|| obj.get("project_title"))
+            .or_else(|| obj.get("projectTitle"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        ..PrismManifest::default()
+    };
+
+    for key in ["sheets", "tables", "data_tables", "dataTables", "data_sheets", "data"] {
+        if let Some(raw_sheets) = obj.get(key) {
+            parse_manifest_sheets_value(raw_sheets, source_path, &mut out.sheets, warnings);
+        }
+    }
+    for key in ["info_sheets", "infoSheets", "info_tables", "infoTables", "info", "infos"] {
+        if let Some(raw_infos) = obj.get(key) {
+            parse_manifest_infos_value(raw_infos, source_path, &mut out.info_sheets, warnings);
+        }
+    }
+
+    for (key, kind, desc) in [
+        ("analyses", ImportWarningKind::UnsupportedAnalysis, "analyses"),
+        ("results", ImportWarningKind::UnsupportedAnalysis, "cached analysis results"),
+        ("graphs", ImportWarningKind::UnsupportedGraphOrLayout, "graphs"),
+        ("layouts", ImportWarningKind::UnsupportedGraphOrLayout, "layouts"),
+        ("equations", ImportWarningKind::UnsupportedEquation, "equations"),
+        ("user_equations", ImportWarningKind::UnsupportedEquation, "user equations"),
+        ("scripts", ImportWarningKind::UnsupportedScript, "scripts"),
+    ] {
+        if let Some(section) = obj.get(key) {
+            let non_empty = match section {
+                serde_json::Value::Array(arr) => !arr.is_empty(),
+                serde_json::Value::Object(map) => !map.is_empty(),
+                serde_json::Value::Bool(b) => *b,
+                serde_json::Value::String(s) => !s.trim().is_empty(),
+                serde_json::Value::Number(_) => true,
+                serde_json::Value::Null => false,
+            };
+            if non_empty {
+                out.unsupported_sections.push((
+                    kind,
+                    source_path.to_owned(),
+                    format!("`{source_path}` section `{key}` ({desc}) is not imported automatically; tabular data was preserved"),
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn merge_manifest_fallback(target: &mut PrismManifest, fallback: PrismManifest) {
+    if target.title.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        target.title = fallback.title;
+    }
+    target.sheets.extend(fallback.sheets);
+    target.info_sheets.extend(fallback.info_sheets);
+    target.unsupported_sections.extend(fallback.unsupported_sections);
+}
+
+fn parse_manifest_sheets_value(
+    raw: &serde_json::Value,
+    source_path: &str,
+    out: &mut Vec<(String, PrismTableMeta)>,
+    warnings: &mut Vec<ImportWarning>,
+) {
+    match raw {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                match serde_json::from_value::<PrismTableMeta>(item.clone()) {
+                    Ok(meta) => out.push((source_path.to_owned(), meta)),
+                    Err(err) => warnings.push(ImportWarning::new(
+                        ImportWarningKind::MissingMetadata,
+                        source_path,
+                        format!("could not parse sheet entry in `{source_path}`: {err}"),
+                    )),
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                match serde_json::from_value::<PrismTableMeta>(item.clone()) {
+                    Ok(mut meta) => {
+                        if meta.id.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                            meta.id = Some(key.clone());
+                        }
+                        out.push((source_path.to_owned(), meta));
+                    }
+                    Err(err) => warnings.push(ImportWarning::new(
+                        ImportWarningKind::MissingMetadata,
+                        source_path,
+                        format!("could not parse sheet entry `{key}` in `{source_path}`: {err}"),
+                    )),
+                }
+            }
+        }
+        serde_json::Value::Null => {}
+        _ => warnings.push(ImportWarning::new(
+            ImportWarningKind::MissingMetadata,
+            source_path,
+            format!("unexpected sheet list type in `{source_path}`"),
+        )),
+    }
+}
+
+fn parse_manifest_infos_value(raw: &serde_json::Value, source_path: &str, out: &mut Vec<PrismInfoMeta>, warnings: &mut Vec<ImportWarning>) {
+    match raw {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                match parse_info_meta_value(item) {
+                    Some(meta) => out.push(meta),
+                    None => warnings.push(ImportWarning::new(
+                        ImportWarningKind::MissingMetadata,
+                        source_path,
+                        format!("could not parse info entry in `{source_path}`"),
+                    )),
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if map.contains_key("constants") || map.contains_key("notes") || map.contains_key("notes_markdown") || map.contains_key("title") {
+                if let Some(meta) = parse_info_meta_value(raw) {
+                    out.push(meta);
+                }
+            } else {
+                for (key, item) in map {
+                    if let Some(mut meta) = parse_info_meta_value(item) {
+                        if meta.id.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                            meta.id = Some(key.clone());
+                        }
+                        out.push(meta);
+                    }
+                }
+            }
+        }
+        serde_json::Value::Null => {}
+        _ => {}
+    }
+}
+
+fn parse_info_meta_value(val: &serde_json::Value) -> Option<PrismInfoMeta> {
+    let obj = val.as_object()?;
+    let id = obj.get("id").or_else(|| obj.get("sheet_id")).and_then(serde_json::Value::as_str).map(str::to_owned);
+    let title = obj.get("title").or_else(|| obj.get("name")).and_then(serde_json::Value::as_str).map(str::to_owned);
+    let notes = obj
+        .get("notes")
+        .or_else(|| obj.get("notes_markdown"))
+        .or_else(|| obj.get("description"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let mut constants = Vec::new();
+    if let Some(raw_consts) = obj.get("constants") {
+        match raw_consts {
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    let trimmed = k.trim();
+                    if !trimmed.is_empty() {
+                        let (cval, units) = parse_prism_constant_value(v);
+                        constants.push(ParsedInfoConstantEntry { name: trimmed.to_owned(), value: cval, units });
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    if let Some(entry_obj) = item.as_object()
+                        && let Some(name) = entry_obj.get("name").or_else(|| entry_obj.get("key")).and_then(serde_json::Value::as_str)
+                    {
+                        let trimmed = name.trim();
+                        if !trimmed.is_empty() {
+                            let val_node = entry_obj.get("value").unwrap_or(&serde_json::Value::Null);
+                            let units = entry_obj
+                                .get("units")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned);
+                            constants.push(ParsedInfoConstantEntry { name: trimmed.to_owned(), value: scalar_json_to_constant(val_node), units });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(PrismInfoMeta { id, title, notes, constants })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_and_register_json_value(
+    rel_path: &str,
+    full_path: &str,
+    val: &serde_json::Value,
+    doc: &mut ProjectDocument,
+    used_ids: &mut HashSet<String>,
+    warnings: &mut Vec<ImportWarning>,
+    meta_by_csv: &mut BTreeMap<String, PrismTableMeta>,
+    meta_by_stem: &mut BTreeMap<String, PrismTableMeta>,
+    meta_by_dir: &mut BTreeMap<String, PrismTableMeta>,
+    expected_csv_refs: &mut Vec<ReferencedCsvPath>,
+) -> Result<(), FormatError> {
+    let Some(obj) = val.as_object() else {
+        warnings.push(ImportWarning::new(ImportWarningKind::UnsupportedChunk, full_path, format!("non-object JSON chunk `{full_path}` was skipped")));
+        return Ok(());
+    };
+
+    let has_info_shape = obj.contains_key("constants")
+        || (obj.contains_key("notes_markdown") && !obj.contains_key("csv_path") && !obj.contains_key("csvPath") && !obj.contains_key("kind"));
+    if has_info_shape && let Some(info_meta) = parse_info_meta_value(val) {
+        return import_info_meta(&info_meta, doc, used_ids, warnings);
+    }
+
+    if let Some((kind, desc)) = detect_unsupported_json_payload_keys(obj) {
+        warnings.push(ImportWarning::new(
+            kind,
+            full_path,
+            format!("{desc} JSON `{full_path}` is not imported automatically; data tables and info constants were preserved"),
+        ));
+        return Ok(());
+    }
+
+    let is_table_sidecar_dir = starts_with_dir_ci(rel_path, &["sheets/", "tables/", "data/"]);
+    let has_table_keys = obj.contains_key("csv_path")
+        || obj.contains_key("csvPath")
+        || obj.contains_key("data_path")
+        || obj.contains_key("dataPath")
+        || obj.contains_key("kind")
+        || obj.contains_key("table_type")
+        || obj.contains_key("tableType")
+        || obj.contains_key("archetype")
+        || obj.contains_key("subcolumn_mode")
+        || obj.contains_key("subcolumnMode")
+        || obj.contains_key("replicates")
+        || obj.contains_key("delimiter")
+        || obj.contains_key("decimal_separator")
+        || obj.contains_key("decimalSeparator")
+        || obj.contains_key("has_row_titles")
+        || obj.contains_key("hasRowTitles")
+        || (is_table_sidecar_dir && obj.contains_key("title"));
+
+    if has_table_keys && let Ok(meta) = serde_json::from_value::<PrismTableMeta>(val.clone()) {
+        let json_dir = parent_dir(rel_path);
+        if let Some(csv_p) = &meta.csv_path {
+            let root_key = normalize_rel_csv_key(csv_p, "");
+            let rel_key = normalize_rel_csv_key(csv_p, json_dir);
+            meta_by_csv.insert(root_key, meta.clone());
+            if !rel_key.is_empty() {
+                meta_by_csv.insert(rel_key.clone(), meta.clone());
+                expected_csv_refs.push(ReferencedCsvPath { lookup_key: rel_key, raw_display: csv_p.clone() });
+            }
+        }
+        let stem_lower = stem_without_ext(rel_path).to_ascii_lowercase();
+        let file_stem = rel_path.rsplit('/').next().map(stem_without_ext).unwrap_or("").to_ascii_lowercase();
+        if matches!(file_stem.as_str(), "meta" | "sheet" | "table") && !json_dir.is_empty() {
+            meta_by_dir.insert(json_dir.to_ascii_lowercase(), meta);
+        } else {
+            meta_by_stem.insert(stem_lower, meta);
+        }
+        return Ok(());
+    }
+
+    warnings.push(ImportWarning::new(ImportWarningKind::UnsupportedChunk, full_path, format!("unrecognized JSON chunk `{full_path}` was skipped")));
+    Ok(())
+}
+
+fn detect_unsupported_json_payload_keys(obj: &serde_json::Map<String, serde_json::Value>) -> Option<(ImportWarningKind, &'static str)> {
+    if obj.contains_key("equation") || obj.contains_key("formula") || obj.contains_key("user_equation") {
+        Some((ImportWarningKind::UnsupportedEquation, "equation"))
+    } else if obj.contains_key("analysis")
+        || obj.contains_key("analysis_spec")
+        || obj.contains_key("fit_results")
+        || obj.contains_key("fitted_curves")
+    {
+        Some((ImportWarningKind::UnsupportedAnalysis, "analysis"))
+    } else if obj.contains_key("axes") || obj.contains_key("series") || obj.contains_key("layout_items") || obj.contains_key("graph_spec") {
+        Some((ImportWarningKind::UnsupportedGraphOrLayout, "graph/layout"))
+    } else if obj.contains_key("script") || obj.contains_key("code") {
+        Some((ImportWarningKind::UnsupportedScript, "script"))
+    } else {
+        None
+    }
 }
 
 fn stem_without_ext(path: &str) -> &str {
@@ -454,12 +1029,9 @@ fn import_info_json(
             return Ok(());
         }
     };
-    let meta: PrismInfoMeta = match serde_json::from_value(val) {
-        Ok(m) => m,
-        Err(err) => {
-            warnings.push(ImportWarning::new(ImportWarningKind::UnsupportedChunk, path, format!("could not parse info JSON `{path}`: {err}")));
-            return Ok(());
-        }
+    let Some(meta) = parse_info_meta_value(&val) else {
+        warnings.push(ImportWarning::new(ImportWarningKind::UnsupportedChunk, path, format!("could not parse info JSON `{path}`")));
+        return Ok(());
     };
     import_info_meta(&meta, doc, used_ids, warnings)
 }
@@ -472,17 +1044,14 @@ fn import_info_meta(
 ) -> Result<(), FormatError> {
     let idx = doc.info_sheets.len() + 1;
     let id = allocate_valid_unique_sheet_id(meta.id.as_deref(), "info", idx, used_ids, warnings);
-    let title = meta.title.as_deref().map(str::trim).filter(|s| !s.is_empty()).map_or_else(|| format!("Info {idx}"), str::to_owned);
+    let raw_title = meta.title.as_deref().map(str::trim).filter(|s| !s.is_empty()).map_or_else(|| format!("Info {idx}"), str::to_owned);
+    let title = clamp_title(&raw_title, id.as_str(), warnings);
     let mut sheet = InfoSheet::new_preseeded(id.as_str().to_owned(), title)?;
     sheet.constants.clear();
-    if let Some(map) = &meta.constants {
-        for (k, v) in map {
-            if k.trim().is_empty() {
-                continue;
-            }
-            let (cval, units) = parse_prism_constant_value(v);
-            sheet.constants.push(InfoConstant::new(k.clone(), cval, units)?);
-        }
+    for entry in &meta.constants {
+        let name = clamp_title(&entry.name, id.as_str(), warnings);
+        let units = entry.units.as_deref().map(|u| clamp_title(u, "units", warnings)).filter(|u| !u.is_empty());
+        sheet.constants.push(InfoConstant::new(name, entry.value.clone(), units)?);
     }
     if let Some(notes) = &meta.notes {
         sheet.notes_markdown = notes.clone();
@@ -516,21 +1085,35 @@ fn scalar_json_to_constant(v: &serde_json::Value) -> ConstantValue {
 
 fn import_csv_entry(
     path: &str,
-    text: &str,
+    raw_text: &str,
     meta: &PrismTableMeta,
     idx: usize,
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
     remaining_cells: usize,
 ) -> Result<DataSheet, FormatError> {
+    let text = raw_text.strip_prefix('\u{FEFF}').unwrap_or(raw_text);
     let fallback_title = path.rsplit('/').next().map(stem_without_ext).filter(|s| !s.is_empty()).unwrap_or("Table");
     let id = allocate_valid_unique_sheet_id(meta.id.as_deref(), "data", idx, used_ids, warnings);
-    let title = meta.title.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| fallback_title.to_owned());
+    let raw_title = meta.title.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| fallback_title.to_owned());
+    let title = clamp_title(&raw_title, id.as_str(), warnings);
 
     let kind = parse_table_kind(meta.kind.as_deref(), path, warnings);
-    let subcolumn_mode = parse_subcolumn_mode(kind, meta.subcolumn_mode.as_deref(), meta.replicates.unwrap_or(1), path, warnings);
+    let replicates = match meta.replicates {
+        Some(0) => {
+            warnings.push(ImportWarning::new(
+                ImportWarningKind::CoercedValue,
+                path,
+                format!("`.prism` table `{path}` specified replicates=0; defaulted to 1"),
+            ));
+            1
+        }
+        Some(n) => n,
+        None => 1,
+    };
+    let subcolumn_mode = parse_subcolumn_mode(kind, meta.subcolumn_mode.as_deref(), replicates, path, warnings);
 
-    let mut opts = if path.ends_with(".tsv") { CsvOptions::tsv() } else { CsvOptions::detect(text) };
+    let mut opts = if has_ext_ci(path, ".tsv") { CsvOptions::tsv() } else { CsvOptions::detect(text) };
     if let Some(d) = meta.delimiter {
         opts.delimiter = d;
     }
@@ -547,7 +1130,7 @@ fn import_csv_entry(
 }
 
 fn csv_has_explicit_row_title_header(text: &str, kind: TableKind, opts: &CsvOptions) -> bool {
-    let prefix: String = text.lines().take(2).collect::<Vec<_>>().join("\n");
+    let prefix: String = text.strip_prefix('\u{FEFF}').unwrap_or(text).lines().take(16).collect::<Vec<_>>().join("\n");
     let Ok(records) = parse_delimited_records(&prefix, opts) else {
         return false;
     };
@@ -560,26 +1143,39 @@ fn csv_has_explicit_row_title_header(text: &str, kind: TableKind, opts: &CsvOpti
     if first_row.len() < 2 {
         return false;
     }
-    first_hdr.eq_ignore_ascii_case("Row Title")
-        || (kind == TableKind::Contingency && first_hdr.eq_ignore_ascii_case("Outcome / Exposure"))
-        || (kind == TableKind::Grouped && first_hdr.eq_ignore_ascii_case("Row Factor"))
+    let first_line = first_hdr.split('\n').next().map(str::trim).unwrap_or("");
+    let header_matches =
+        |expected: &str| first_hdr.eq_ignore_ascii_case(expected) || (first_hdr.contains('\n') && first_line.eq_ignore_ascii_case(expected));
+    header_matches("Row Title")
+        || (kind == TableKind::Contingency && header_matches("Outcome / Exposure"))
+        || (kind == TableKind::Grouped && header_matches("Row Factor"))
 }
 
 fn parse_table_kind(raw: Option<&str>, source: &str, warnings: &mut Vec<ImportWarning>) -> TableKind {
-    match raw.map(str::trim).unwrap_or("") {
-        "" | "Column" | "column" | "OneWay" => TableKind::Column,
-        "XY" | "Xy" | "xy" => TableKind::Xy,
-        "Grouped" | "grouped" | "TwoWay" => TableKind::Grouped,
-        "Contingency" | "contingency" => TableKind::Contingency,
-        "Survival" | "survival" => TableKind::Survival,
-        "PartsOfWhole" | "parts_of_whole" | "parts-of-whole" => TableKind::PartsOfWhole,
-        "MultipleVariables" | "multiple_variables" | "multiple-variables" => TableKind::MultipleVariables,
-        "Nested" | "nested" => TableKind::Nested,
-        other => {
+    let trimmed = raw.map(str::trim).unwrap_or("");
+    match trimmed.to_ascii_lowercase().as_str() {
+        "" | "column" | "oneway" => TableKind::Column,
+        "xy" => TableKind::Xy,
+        "grouped" | "twoway" => TableKind::Grouped,
+        "contingency" => TableKind::Contingency,
+        "survival" => TableKind::Survival,
+        "partsofwhole" | "parts_of_whole" | "parts-of-whole" => TableKind::PartsOfWhole,
+        "multiplevariables" | "multiple_variables" | "multiple-variables" | "huge" => {
+            if trimmed.eq_ignore_ascii_case("huge") {
+                warnings.push(ImportWarning::new(
+                    ImportWarningKind::UnsupportedTableType,
+                    source,
+                    format!("`.prism` table kind `Huge` on `{source}` mapped to MultipleVariables"),
+                ));
+            }
+            TableKind::MultipleVariables
+        }
+        "nested" => TableKind::Nested,
+        _ => {
             warnings.push(ImportWarning::new(
                 ImportWarningKind::UnsupportedTableType,
                 source,
-                format!("unrecognized `.prism` table kind `{other}`, defaulting to Column"),
+                format!("unrecognized `.prism` table kind `{trimmed}`, defaulting to Column"),
             ));
             TableKind::Column
         }
@@ -587,26 +1183,41 @@ fn parse_table_kind(raw: Option<&str>, source: &str, warnings: &mut Vec<ImportWa
 }
 
 fn parse_subcolumn_mode(kind: TableKind, raw: Option<&str>, replicates: usize, source: &str, warnings: &mut Vec<ImportWarning>) -> SubcolumnMode {
-    let candidate = match raw.map(str::trim).unwrap_or("") {
-        "" | "Single" | "single" => {
+    let trimmed = raw.map(str::trim).unwrap_or("");
+    let candidate = match trimmed.to_ascii_lowercase().as_str() {
+        "" | "single" | "none" => {
             if matches!(kind, TableKind::Grouped | TableKind::Nested) {
                 SubcolumnMode::RawReplicates(replicates.max(1))
             } else {
+                if replicates > 1
+                    && matches!(
+                        kind,
+                        TableKind::Column | TableKind::Contingency | TableKind::Survival | TableKind::PartsOfWhole | TableKind::MultipleVariables
+                    )
+                {
+                    warnings.push(ImportWarning::new(
+                        ImportWarningKind::CoercedValue,
+                        source,
+                        format!("replicates={replicates} is not supported for `{kind:?}` without a summary mode; using Single"),
+                    ));
+                } else if replicates > 1 && kind == TableKind::Xy {
+                    return SubcolumnMode::RawReplicates(replicates);
+                }
                 SubcolumnMode::Single
             }
         }
-        "RawReplicates" | "replicates" => SubcolumnMode::RawReplicates(replicates.max(1)),
-        "MeanSdN" | "SD" => SubcolumnMode::MeanSdN,
-        "MeanSemN" | "SEM" => SubcolumnMode::MeanSemN,
-        "MeanCvN" | "CV" => SubcolumnMode::MeanCvN,
-        "MeanLowHigh" => SubcolumnMode::MeanLowHigh,
-        "UpperLowerLimits" => SubcolumnMode::UpperLowerLimits,
-        "MedianIqr" => SubcolumnMode::MedianIqr,
-        other => {
+        "rawreplicates" | "replicates" | "raw" | "raw-replicates" => SubcolumnMode::RawReplicates(replicates.max(1)),
+        "meansdn" | "sd" | "sdn" => SubcolumnMode::MeanSdN,
+        "meansemn" | "sem" | "semn" | "sen" | "se" => SubcolumnMode::MeanSemN,
+        "meancvn" | "cv" | "cvn" => SubcolumnMode::MeanCvN,
+        "meanlowhigh" | "low-high" | "lowhigh" | "plus-minus" | "plusminus" => SubcolumnMode::MeanLowHigh,
+        "upperlowerlimits" | "upper-lower" | "upper-lower-limits" | "upperlower" | "limits" => SubcolumnMode::UpperLowerLimits,
+        "medianiqr" | "median-iqr" | "iqr" => SubcolumnMode::MedianIqr,
+        _ => {
             warnings.push(ImportWarning::new(
                 ImportWarningKind::CoercedValue,
                 source,
-                format!("unrecognized `.prism` subcolumn mode `{other}`, using default"),
+                format!("unrecognized `.prism` subcolumn mode `{trimmed}`, using default"),
             ));
             if matches!(kind, TableKind::Grouped | TableKind::Nested) {
                 SubcolumnMode::RawReplicates(replicates.max(1))
@@ -618,8 +1229,18 @@ fn parse_subcolumn_mode(kind: TableKind, raw: Option<&str>, replicates: usize, s
     if kind.allows_subcolumn_mode(candidate) {
         candidate
     } else if matches!(kind, TableKind::Grouped | TableKind::Nested) {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::CoercedValue,
+            source,
+            format!("subcolumn mode {candidate:?} is not valid for {kind:?} on `{source}`; using RawReplicates"),
+        ));
         SubcolumnMode::RawReplicates(replicates.max(1))
     } else {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::CoercedValue,
+            source,
+            format!("subcolumn mode {candidate:?} is not valid for {kind:?} on `{source}`; using Single"),
+        ));
         SubcolumnMode::Single
     }
 }
