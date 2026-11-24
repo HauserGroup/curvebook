@@ -304,6 +304,54 @@ fn summarize_schema_properties(schema: &Value) -> String {
     parts.join(", ")
 }
 
+/// Rank up to `limit` unique candidate identifiers closest to `query` using token overlap + edit distance.
+#[must_use]
+pub fn fuzzy_suggest<'a>(query: &str, token_sep: char, candidates: impl IntoIterator<Item = &'a str>, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let q_norm = query.trim().to_ascii_lowercase().replace('-', &token_sep.to_string());
+    let q_tokens: Vec<&str> = q_norm.split(token_sep).filter(|t| !t.is_empty()).collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut scored: Vec<(usize, String)> = Vec::new();
+    for cand in candidates {
+        let trimmed = cand.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_owned()) {
+            continue;
+        }
+        let c_lower = trimmed.to_ascii_lowercase();
+        let c_tokens: Vec<&str> = c_lower.split(token_sep).filter(|t| !t.is_empty()).collect();
+        let shared = q_tokens.iter().filter(|tok| c_tokens.contains(tok)).count();
+        let contains = usize::from(c_lower.contains(&q_norm) || q_norm.contains(&c_lower)) * 4;
+        let bonus = shared * 6 + contains;
+        let score = levenshtein_distance(&q_norm, &c_lower).saturating_sub(bonus);
+        scored.push((score, trimmed.to_owned()));
+    }
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().take(limit).map(|(_, name)| name).collect()
+}
+
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut curr = Vec::with_capacity(b_chars.len() + 1);
+    for (i, ca) in a.chars().enumerate() {
+        curr.clear();
+        curr.push(i + 1);
+        let mut left = i + 1;
+        for (j, cb) in b_chars.iter().copied().enumerate() {
+            let diag = prev.get(j).copied().unwrap_or(usize::MAX);
+            let up = prev.get(j + 1).copied().unwrap_or(usize::MAX);
+            let cost = usize::from(ca != cb);
+            let cell = diag.saturating_add(cost).min(up.saturating_add(1)).min(left.saturating_add(1));
+            curr.push(cell);
+            left = cell;
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev.last().copied().unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

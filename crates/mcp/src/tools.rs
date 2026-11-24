@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use curvebook_doc::{ErrorCode, ProjectDocument, ResultSheet, SheetId, SheetSection};
+use curvebook_doc::{CiBound, ErrorCode, ProjectDocument, ResultCell, ResultScalarEntry, ResultSheet, ResultTab, SheetId, SheetSection};
 use curvebook_engine::cmd::{Caller, CommandGroup, Effects, registry};
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_engine::services::command_step_writes_filesystem;
@@ -805,10 +805,10 @@ impl ToolCallResult {
         Self { content: vec![ContentBlock::Text { text: text.into() }], is_error: false, structured_content: None }
     }
 
-    /// Construct a non-error pretty-printed JSON text result with matching `structuredContent`.
+    /// Construct a compact JSON text result with matching `structuredContent`.
     pub fn ok_json(value: &impl Serialize) -> Result<Self, ToolCallError> {
         let structured = serde_json::to_value(value).map_err(|err| ToolCallError::Execution(format!("JSON serialization error: {err}")))?;
-        let text = serde_json::to_string_pretty(&structured).map_err(|err| ToolCallError::Execution(format!("JSON serialization error: {err}")))?;
+        let text = serde_json::to_string(&structured).map_err(|err| ToolCallError::Execution(format!("JSON serialization error: {err}")))?;
         Ok(Self { content: vec![ContentBlock::Text { text }], is_error: false, structured_content: Some(structured) })
     }
 
@@ -870,7 +870,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("doc_inspect"),
             description: String::from(concat!(
-                "Inspect the active project's sheets, variables, hooks, analyses, graphs, and layouts. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Inspect the active project's sheets, variables, analyses, graphs, and layouts (supports compact summaries, section filtering, and bounded cell/tab previews). Docs: https://hausergroup.github.io/curvebook/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -879,8 +879,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "sheet_id": { "type": "string", "description": "Optional specific sheet ID to inspect in full detail." },
-                    "include_cells": { "type": "boolean", "description": "Include preview cell contents when inspecting a single sheet." }
+                    "sheet_id": { "type": "string", "description": "Optional specific sheet ID to inspect." },
+                    "include_cells": { "type": "boolean", "description": "Include preview cell contents, result tabs/checklist, or full graph/layout spec when inspecting a single sheet." },
+                    "detail": { "type": "string", "enum": ["compact", "standard", "full"], "description": "Detail level: 'compact' omits large scalar arrays and specs, 'standard' (default) returns bounded summaries, 'full' includes full specs/null metadata." },
+                    "sections": { "type": "array", "items": { "type": "string", "enum": ["data", "info", "analyses", "graphs", "layouts", "variables", "hooks"] }, "description": "Optional project overview sections to return." },
+                    "tab_id": { "type": "string", "description": "Filter single ResultSheet inspection to one ResultTab ID (when include_cells is true)." },
+                    "max_rows": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum CSV preview rows or ResultTab rows returned when include_cells is true (default 100)." },
+                    "max_scalars": { "type": "integer", "minimum": 1, "maximum": 2048, "description": "Maximum scalar entries returned per ResultSheet (default 2048)." }
                 },
                 "additionalProperties": false
             }),
@@ -903,8 +908,8 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "path": { "type": "string", "description": "Filesystem path to open or import." },
                     "format": { "type": "string", "enum": ["curvebook", "curvebook.d", "cbtemplate", "prism", "pzfx", "csv", "tsv"] },
                     "target_kind": { "type": "string", "enum": ["xy", "column", "grouped", "contingency", "survival", "parts_of_whole", "multiple_variables", "nested"] },
-                    "subcolumn_mode": { "type": "string" },
-                    "delimiter": { "type": "string", "description": "Optional single-character delimiter override for delimited text." },
+                    "subcolumn_mode": { "type": "string", "description": "Optional subcolumn layout (e.g. 'none', 'replicates:3', 'mean_sd_n', 'mean_sem_n', 'mean_sd', 'mean_sem')." },
+                    "delimiter": { "type": "string", "description": "Optional single-character delimiter override for delimited text (omit to auto-detect comma, tab, semicolon, and European decimal comma)." },
                     "sheet_id": { "type": "string", "description": "Sheet ID used when importing delimited data." },
                     "title": { "type": "string", "description": "Optional title override for imported sheet or instantiated template." },
                     "append": { "type": "boolean", "description": "When importing CSV, TSV, or external archive/XML files, append/merge sheets into the active project instead of replacing it." }
@@ -935,7 +940,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("command_list"),
             description: String::from(concat!(
-                "List all headless engine commands and desktop UI commands (marked with \"ui\": true). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "List headless engine commands and desktop UI commands (marked with \"ui\": true); returns compact summaries by default or full schemas when filtering a single `command_id` or passing `include_schemas: true`. Docs: https://hausergroup.github.io/curvebook/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -944,8 +949,11 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "filter": { "type": "string", "description": "Case-insensitive substring filter across id, label, menu_path, and summary." },
+                    "filter": { "type": "string", "description": "Case-insensitive substring filter across id, mcp_tool, label, menu_path, and summary." },
                     "group": { "type": "string", "enum": group_enum_json(), "description": "Optional engine CommandGroup filter." },
+                    "command_id": { "type": "string", "description": "Optional exact command ID (or mcp_tool name) to inspect with its parameter schema." },
+                    "include_schemas": { "type": "boolean", "description": "Include compacted parameter JSON schemas (default: false for lists, true when command_id is supplied)." },
+                    "detail": { "type": "string", "enum": ["summary", "full"], "description": "'summary' (default) omits empty metadata and schemas; 'full' includes schemas, effects, menu paths, and beginner notes." },
                     "include_ui": { "type": "boolean", "description": "Include UI-only commands from ui_catalog (default: true)." },
                     "ui_only": { "type": "boolean", "description": "Return only UI-only commands (default: false)." }
                 },
@@ -956,7 +964,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("command_run"),
             description: String::from(concat!(
-                "Execute a single engine command (or live UI command when attached to --control) with JSON parameters. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Execute a single engine command (or live UI command when attached to --control) with JSON parameters. Use `command_list(command_id=..., include_schemas=true)` to inspect exact parameter fields. Docs: https://hausergroup.github.io/curvebook/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -966,8 +974,8 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 "type": "object",
                 "required": ["command_id"],
                 "properties": {
-                    "command_id": { "type": "string", "description": "Catalog command identifier (e.g. sheet.createData, table.setCell, fit.run)." },
-                    "params": { "type": "object", "description": "Command parameter payload object." }
+                    "command_id": { "type": "string", "description": "Catalog command identifier (e.g. sheet.createData, table.excludeCellsWithReason, stats.run, fit.run, graph.setAxes)." },
+                    "params": { "type": "object", "description": "Command parameter payload object (inspect exact keys via `command_list` with `command_id`)." }
                 },
                 "additionalProperties": false
             }),
@@ -1082,7 +1090,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("list_toolsets"),
             description: String::from(concat!(
-                "List all CommandGroup toolsets, their enabled status, and normalized per-command MCP tools. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "List CommandGroup toolsets, their enabled status, and per-command MCP tools (pass `include_tools: false` for group inventory only). Docs: https://hausergroup.github.io/curvebook/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -1090,7 +1098,11 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             )),
             input_schema: json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "group": { "type": "string", "enum": group_enum_json(), "description": "Optional single CommandGroup filter." },
+                    "include_tools": { "type": "boolean", "description": "Include per-command tool entries inside each group (default: true)." },
+                    "detail": { "type": "string", "enum": ["compact", "full"], "description": "'compact' (default) omits redundant annotations/labels; 'full' includes full labels, descriptions, and annotations." }
+                },
                 "additionalProperties": false
             }),
             annotations: ToolAnnotations::from_effects(Effects::NONE.with(Effects::IDEMPOTENT)),
@@ -1244,6 +1256,13 @@ fn handle_direct_command_tool(state: &mut McpServerState, command_id: &str, para
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectDetail {
+    Compact,
+    Standard,
+    Full,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DocInspectArgs {
@@ -1251,12 +1270,73 @@ struct DocInspectArgs {
     sheet_id: Option<String>,
     #[serde(default)]
     include_cells: Option<bool>,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    sections: Option<Vec<String>>,
+    #[serde(default)]
+    tab_id: Option<String>,
+    #[serde(default)]
+    max_rows: Option<u32>,
+    #[serde(default)]
+    max_scalars: Option<u32>,
+}
+
+fn parse_inspect_detail(raw: Option<String>) -> Result<InspectDetail, ToolCallError> {
+    match trim_opt_non_empty(raw, "detail")? {
+        None => Ok(InspectDetail::Standard),
+        Some(val) => match val.to_ascii_lowercase().as_str() {
+            "compact" => Ok(InspectDetail::Compact),
+            "standard" => Ok(InspectDetail::Standard),
+            "full" => Ok(InspectDetail::Full),
+            _ => Err(ToolCallError::InvalidParams(format!("unsupported doc_inspect `detail` '{val}'; expected 'compact', 'standard', or 'full'"))),
+        },
+    }
+}
+
+fn parse_inspect_sections(raw: Option<Vec<String>>) -> Result<Option<BTreeSet<String>>, ToolCallError> {
+    const VALID_SECTIONS: [&str; 7] = ["data", "info", "analyses", "graphs", "layouts", "variables", "hooks"];
+    let Some(items) = raw else {
+        return Ok(None);
+    };
+    let mut set = BTreeSet::new();
+    for item in items {
+        let norm = item.trim().to_ascii_lowercase();
+        if !VALID_SECTIONS.contains(&norm.as_str()) {
+            return Err(ToolCallError::InvalidParams(format!(
+                "unsupported doc_inspect section '{item}'; expected one of: data, info, analyses, graphs, layouts, variables, hooks"
+            )));
+        }
+        set.insert(norm);
+    }
+    Ok(Some(set))
+}
+
+fn parse_bounded_limit(raw: Option<u32>, key: &str, max: usize, default: usize) -> Result<usize, ToolCallError> {
+    let Some(v) = raw else {
+        return Ok(default);
+    };
+    let n = v as usize;
+    if n == 0 || n > max {
+        return Err(ToolCallError::InvalidParams(format!("`{key}` must be in 1..={max}, got {v}")));
+    }
+    Ok(n)
 }
 
 fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     let parsed: DocInspectArgs = deserialize_args("doc_inspect", args)?;
     let sheet_id = trim_opt_non_empty(parsed.sheet_id, "sheet_id")?;
     let include_cells = parsed.include_cells.unwrap_or(false);
+    let detail = parse_inspect_detail(parsed.detail)?;
+    let sections = parse_inspect_sections(parsed.sections)?;
+    let tab_id = trim_opt_non_empty(parsed.tab_id, "tab_id")?;
+    let max_rows = parse_bounded_limit(parsed.max_rows, "max_rows", crate::resources::MAX_CSV_PREVIEW_ROWS, crate::resources::MAX_CSV_PREVIEW_ROWS)?;
+    let max_scalars = parse_bounded_limit(
+        parsed.max_scalars,
+        "max_scalars",
+        crate::resources::MAX_RESULT_PREVIEW_SCALARS,
+        crate::resources::MAX_RESULT_PREVIEW_SCALARS,
+    )?;
 
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = state.control_port() {
@@ -1305,19 +1385,31 @@ fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> 
     let doc = state.session().document();
     if let Some(target_id) = sheet_id {
         let target = SheetId::new(target_id);
-        return inspect_single_sheet(doc, &target, include_cells);
+        return inspect_single_sheet(doc, &target, include_cells, detail, tab_id.as_deref(), max_rows, max_scalars);
     }
 
-    let summary = build_document_summary(state.session());
+    let summary = build_document_summary(state.session(), detail, sections.as_ref(), max_scalars);
     ToolCallResult::ok_json(&summary)
 }
 
-fn inspect_single_sheet(doc: &ProjectDocument, target: &SheetId, include_cells: bool) -> Result<ToolCallResult, ToolCallError> {
+fn inspect_single_sheet(
+    doc: &ProjectDocument,
+    target: &SheetId,
+    include_cells: bool,
+    detail: InspectDetail,
+    tab_id: Option<&str>,
+    max_rows: usize,
+    max_scalars: usize,
+) -> Result<ToolCallResult, ToolCallError> {
     let Some(section) = doc.sheet_section(target) else {
-        return Ok(errors::result_from_code(ErrorCode::NotFound, format!("sheet '{}' not found", target.as_str())));
+        return Ok(errors::result_from_code(
+            ErrorCode::NotFound,
+            format!("sheet '{}' not found; call `doc_inspect` with no `sheet_id` to list valid sheet IDs", target.as_str()),
+        ));
     };
-    let fetch_detail_cells = include_cells || !matches!(section, SheetSection::Data);
-    let mut service_detail = match inspect_sheet_detail(doc, target, fetch_detail_cells) {
+    let full_detail = detail == InspectDetail::Full;
+    let fetch_detail_cells = include_cells || full_detail;
+    let mut service_detail = match inspect_sheet_detail(doc, target, false) {
         Ok(val) => val,
         Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
@@ -1327,8 +1419,22 @@ fn inspect_single_sheet(doc: &ProjectDocument, target: &SheetId, include_cells: 
             if let Some(obj) = service_detail.as_object_mut() {
                 obj.insert(String::from("section"), Value::String(String::from("data")));
                 obj.remove("cols");
+                if !full_detail {
+                    strip_empty_or_null(obj, &["info_sheet_id", "upstream_dependencies"]);
+                }
                 if let Some(ds) = doc.data_sheet(target) {
-                    obj.insert(String::from("linked_regions"), serde_json::to_value(&ds.linked_regions).unwrap_or(Value::Null));
+                    if fetch_detail_cells {
+                        match crate::resources::build_csv_preview_with_limit(ds, max_rows) {
+                            Ok((csv_preview, truncated)) => {
+                                obj.insert(String::from("csv_preview"), Value::String(csv_preview));
+                                obj.insert(String::from("csv_preview_truncated"), Value::Bool(truncated));
+                            }
+                            Err(err) => return Ok(errors::result_from_code(ErrorCode::InternalError, err.to_string())),
+                        }
+                    }
+                    if full_detail || !ds.linked_regions.is_empty() {
+                        obj.insert(String::from("linked_regions"), serde_json::to_value(&ds.linked_regions).unwrap_or(Value::Null));
+                    }
                 }
             }
             ToolCallResult::ok_json(&service_detail)
@@ -1336,8 +1442,19 @@ fn inspect_single_sheet(doc: &ProjectDocument, target: &SheetId, include_cells: 
         SheetSection::Info => {
             if let Some(obj) = service_detail.as_object_mut() {
                 obj.insert(String::from("section"), Value::String(String::from("info")));
-                if let Some(entries) = obj.remove("constants_entries") {
-                    obj.insert(String::from("constants"), entries);
+                if let Some(info) = doc.info_sheet(target)
+                    && (fetch_detail_cells || !info.constants.is_empty())
+                {
+                    obj.insert(String::from("constants"), serde_json::to_value(&info.constants).unwrap_or_else(|_| json!([])));
+                }
+                if fetch_detail_cells
+                    && let Some(info) = doc.info_sheet(target)
+                    && !info.notes_markdown.is_empty()
+                {
+                    obj.insert(String::from("notes_markdown"), Value::String(info.notes_markdown.clone()));
+                }
+                if !full_detail {
+                    strip_empty_or_null(obj, &["linked_data_sheets", "upstream_dependencies"]);
                 }
             }
             ToolCallResult::ok_json(&service_detail)
@@ -1347,198 +1464,415 @@ fn inspect_single_sheet(doc: &ProjectDocument, target: &SheetId, include_cells: 
                 return Ok(errors::result_from_code(ErrorCode::NotFound, format!("sheet '{}' not found", target.as_str())));
             };
             let deps = doc.upstream_dependencies(target);
-            let mut val = summarize_result_sheet_from_detail(rs, &deps, &mut service_detail);
-            if include_cells
-                && let Some(obj) = val.as_object_mut()
-                && let Some(src) = service_detail.as_object_mut()
-            {
-                if let Some(tabs) = src.remove("tabs_data") {
-                    obj.insert(String::from("tabs"), tabs);
-                }
-                if let Some(trunc) = src.remove("tabs_truncated") {
-                    obj.insert(String::from("tabs_truncated"), trunc);
-                }
-                if let Some(checklist) = src.remove("checklist_entries") {
-                    obj.insert(String::from("checklist"), checklist);
-                }
-                if let Some(trunc) = src.remove("checklist_truncated") {
-                    obj.insert(String::from("checklist_truncated"), trunc);
+            let mut val = summarize_result_sheet_direct(rs, &deps, detail, max_scalars);
+            if let Some(obj) = val.as_object_mut() {
+                let tab_ids: Vec<&str> = rs.tabs.iter().map(|t| t.id.as_str()).collect();
+                obj.insert(String::from("tab_ids"), json!(tab_ids));
+                if fetch_detail_cells || tab_id.is_some() {
+                    if let Some(target_tab) = tab_id
+                        && !rs.tabs.iter().any(|t| t.id == target_tab)
+                    {
+                        return Ok(errors::result_from_payload(
+                            &errors::StructuredErrorPayload::new(
+                                ErrorCode::NotFound,
+                                format!("tab_id '{target_tab}' not found on result sheet '{}'", rs.id.as_str()),
+                            )
+                            .with_remediation(format!("Choose one of `tab_ids`: {}", tab_ids.join(", "))),
+                        ));
+                    }
+                    let (tabs_preview, tabs_truncated) = crate::resources::slice_result_tabs_preview_with_opts(&rs.tabs, max_rows, tab_id);
+                    let tabs_val = if full_detail {
+                        serde_json::to_value(&tabs_preview).unwrap_or_else(|_| json!([]))
+                    } else {
+                        compact_result_tabs_value(&tabs_preview)
+                    };
+                    obj.insert(String::from("tabs"), tabs_val);
+                    obj.insert(String::from("tabs_truncated"), Value::Bool(tabs_truncated));
+                    let (checklist_preview, checklist_truncated) =
+                        crate::resources::slice_preview_vec(&rs.checklist, crate::resources::MAX_RESULT_PREVIEW_CHECKLIST);
+                    obj.insert(String::from("checklist"), serde_json::to_value(&checklist_preview).unwrap_or_else(|_| json!([])));
+                    obj.insert(String::from("checklist_truncated"), Value::Bool(checklist_truncated));
                 }
             }
             ToolCallResult::ok_json(&val)
         }
-        SheetSection::Graphs | SheetSection::Layouts => {
+        SheetSection::Graphs => {
             if let Some(obj) = service_detail.as_object_mut() {
-                let sec = if matches!(section, SheetSection::Graphs) { "graphs" } else { "layouts" };
-                obj.insert(String::from("section"), Value::String(String::from(sec)));
+                obj.insert(String::from("section"), Value::String(String::from("graphs")));
+                if let Some(gs) = doc.graph_sheet(target) {
+                    obj.insert(String::from("kind"), json!(gs.spec.kind));
+                    if !gs.spec.primary_source_sheet_id.as_str().is_empty() {
+                        obj.insert(String::from("primary_source_sheet_id"), json!(gs.spec.primary_source_sheet_id));
+                    }
+                    obj.insert(String::from("series_count"), json!(gs.spec.series.len()));
+                    obj.insert(String::from("annotations_count"), json!(gs.spec.annotations.len()));
+                    obj.insert(String::from("comparisons_count"), json!(gs.spec.comparisons.len()));
+                    let series_brief: Vec<Value> = gs
+                        .spec
+                        .series
+                        .iter()
+                        .map(|s| json!({ "legend_label": s.legend_label, "source_sheet_id": s.source_sheet_id, "data_set_index": s.data_set_index }))
+                        .collect();
+                    obj.insert(String::from("series_summary"), Value::Array(series_brief));
+                    if fetch_detail_cells {
+                        obj.insert(String::from("spec"), serde_json::to_value(&gs.spec).unwrap_or(Value::Null));
+                    }
+                }
+                if !full_detail {
+                    strip_empty_or_null(obj, &["upstream_dependencies"]);
+                }
+            }
+            ToolCallResult::ok_json(&service_detail)
+        }
+        SheetSection::Layouts => {
+            if let Some(obj) = service_detail.as_object_mut() {
+                obj.insert(String::from("section"), Value::String(String::from("layouts")));
+                if let Some(ls) = doc.layout_sheet(target) {
+                    obj.insert(String::from("width"), json!(ls.spec.width));
+                    obj.insert(String::from("height"), json!(ls.spec.height));
+                    obj.insert(String::from("unit"), json!(ls.spec.unit));
+                    obj.insert(String::from("orientation"), json!(ls.spec.orientation));
+                    obj.insert(String::from("items_count"), json!(ls.spec.items.len()));
+                    if fetch_detail_cells {
+                        obj.insert(String::from("spec"), serde_json::to_value(&ls.spec).unwrap_or(Value::Null));
+                    }
+                }
+                if !full_detail {
+                    strip_empty_or_null(obj, &["upstream_dependencies"]);
+                }
             }
             ToolCallResult::ok_json(&service_detail)
         }
     }
 }
 
-fn build_document_summary(session: &Session) -> Value {
+fn build_document_summary(session: &Session, detail: InspectDetail, sections: Option<&BTreeSet<String>>, max_scalars: usize) -> Value {
     let doc = session.document();
     let Ok(project) = inspect_project_summary(doc, session.is_dirty(), session.file_path(), None) else {
         return json!({});
     };
+    let full_detail = detail == InspectDetail::Full;
+    let compact_detail = detail == InspectDetail::Compact;
+    let want = |name: &str| sections.is_none_or(|set| set.contains(name));
 
-    let data_list: Vec<Value> = project
-        .data_sheets
-        .iter()
-        .map(|ds| {
-            json!({
-                "id": ds.id,
-                "title": ds.title,
-                "kind": ds.kind_label,
-                "frozen": ds.frozen,
-                "info_sheet_id": ds.info_sheet_id,
-                "rows": ds.rows,
-                "columns": ds.cols,
-                "linked_regions_count": ds.linked_regions,
-                "upstream_dependencies": ds.upstream_dependencies,
-            })
-        })
-        .collect();
-
-    let info_list: Vec<Value> = project
-        .info_sheets
-        .iter()
-        .map(|info| {
-            json!({
-                "id": info.id,
-                "title": info.title,
-                "linked_data_sheets": info.linked_data_sheets,
-                "constants": info.constants,
-                "notes_markdown_len": info.notes_len,
-            })
-        })
-        .collect();
-
-    let analyses_list: Vec<Value> = doc
-        .result_sheets
-        .iter()
-        .map(|rs| {
-            let deps = doc.upstream_dependencies(&rs.id);
-            let mut detail = inspect_sheet_detail(doc, &rs.id, true).unwrap_or(Value::Null);
-            summarize_result_sheet_from_detail(rs, &deps, &mut detail)
-        })
-        .collect();
-
-    let graphs_list: Vec<Value> = doc
-        .graph_sheets
-        .iter()
-        .map(|gs| {
-            json!({
-                "id": gs.id,
-                "title": gs.title,
-                "kind": gs.spec.kind,
-                "primary_source_sheet_id": gs.spec.primary_source_sheet_id,
-                "initialized": gs.initialized,
-                "canvas_size_pt": gs.spec.canvas_size_pt,
-                "frame_preset": gs.spec.frame_preset,
-                "series_count": gs.spec.series.len(),
-                "annotations_count": gs.spec.annotations.len(),
-                "comparisons_count": gs.spec.comparisons.len(),
-                "upstream_dependencies": doc.upstream_dependencies(&gs.id),
-            })
-        })
-        .collect();
-
-    let layouts_list: Vec<Value> = doc
-        .layout_sheets
-        .iter()
-        .map(|ls| {
-            json!({
-                "id": ls.id,
-                "title": ls.title,
-                "width": ls.spec.width,
-                "height": ls.spec.height,
-                "unit": ls.spec.unit,
-                "page_size_pt": ls.spec.page_size_pt(),
-                "orientation": ls.spec.orientation,
-                "items_count": ls.spec.items.len(),
-                "upstream_dependencies": doc.upstream_dependencies(&ls.id),
-            })
-        })
-        .collect();
-
-    let (variables, hooks) = collect_variables_and_hooks(doc);
-
-    json!({
-        "title": project.title,
-        "schema_version": project.schema_version,
-        "file_path": project.file_path,
-        "dirty": project.dirty,
-        "total_sheet_count": project.total_sheet_count,
-        "active_sheet_id": project.active_sheet_id,
-        "family_anchor_sheet_id": project.family_anchor_sheet_id,
-        "sheets": {
-            "data": data_list,
-            "info": info_list,
-            "analyses": analyses_list,
-            "graphs": graphs_list,
-            "layouts": layouts_list,
-        },
-        "variables": variables,
-        "hooks": hooks,
-        "analyses": analyses_list,
-        "graphs": graphs_list,
-        "layouts": layouts_list,
-    })
-}
-
-fn summarize_result_sheet_from_detail(rs: &ResultSheet, deps: &[SheetId], detail: &mut Value) -> Value {
-    let scalars_preview = detail.as_object_mut().and_then(|obj| obj.remove("scalars_data")).unwrap_or_else(|| json!([]));
-    let scalars_truncated = detail.as_object_mut().and_then(|obj| obj.remove("scalars_truncated")).unwrap_or(Value::Bool(false));
-    let mut payload = json!({
-        "section": "analyses",
-        "id": rs.id,
-        "title": rs.title(),
-        "source_sheet_id": rs.analysis.source_sheet_id,
-        "selected_data_sets": rs.analysis.selected_data_sets,
-        "status": rs.status,
-        "has_analyzable_data": rs.analyzable_data.is_some(),
-        "tabs_count": rs.tabs.len(),
-        "scalars": scalars_preview,
-        "scalars_truncated": scalars_truncated,
-        "pairwise_comparisons_count": rs.pairwise_comparisons.len(),
-        "fitted_curves_count": rs.fitted_curves.len(),
-        "checklist_count": rs.checklist.len(),
-        "upstream_dependencies": deps,
-    });
-    if matches!(&rs.analysis.kind, curvebook_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == curvebook_doc::FitMethod::RobustCauchy)
-        && let Some(obj) = payload.as_object_mut()
-    {
-        obj.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));
+    let mut root = Map::new();
+    root.insert(String::from("title"), json!(project.title));
+    root.insert(String::from("schema_version"), json!(project.schema_version));
+    root.insert(String::from("file_path"), json!(project.file_path));
+    root.insert(String::from("dirty"), json!(project.dirty));
+    root.insert(String::from("total_sheet_count"), json!(project.total_sheet_count));
+    if full_detail || project.active_sheet_id.is_some() {
+        root.insert(String::from("active_sheet_id"), json!(project.active_sheet_id));
     }
-    payload
+    if full_detail || project.family_anchor_sheet_id.is_some() {
+        root.insert(String::from("family_anchor_sheet_id"), json!(project.family_anchor_sheet_id));
+    }
+
+    if want("data") || want("info") {
+        let mut sheets_obj = Map::new();
+        if want("data") {
+            let data_list: Vec<Value> = project
+                .data_sheets
+                .iter()
+                .map(|ds| {
+                    let mut m = Map::new();
+                    m.insert(String::from("id"), json!(ds.id));
+                    m.insert(String::from("title"), json!(ds.title));
+                    m.insert(String::from("kind"), json!(ds.kind_label));
+                    m.insert(String::from("rows"), json!(ds.rows));
+                    m.insert(String::from("columns"), json!(ds.cols));
+                    if full_detail || ds.frozen {
+                        m.insert(String::from("frozen"), json!(ds.frozen));
+                    }
+                    if full_detail || ds.info_sheet_id.is_some() {
+                        m.insert(String::from("info_sheet_id"), json!(ds.info_sheet_id));
+                    }
+                    if full_detail || ds.linked_regions > 0 {
+                        m.insert(String::from("linked_regions_count"), json!(ds.linked_regions));
+                    }
+                    if full_detail || !ds.upstream_dependencies.is_empty() {
+                        m.insert(String::from("upstream_dependencies"), json!(ds.upstream_dependencies));
+                    }
+                    Value::Object(m)
+                })
+                .collect();
+            sheets_obj.insert(String::from("data"), Value::Array(data_list));
+        }
+        if want("info") {
+            let info_list: Vec<Value> = project
+                .info_sheets
+                .iter()
+                .map(|info| {
+                    let mut m = Map::new();
+                    m.insert(String::from("id"), json!(info.id));
+                    m.insert(String::from("title"), json!(info.title));
+                    if full_detail || !info.linked_data_sheets.is_empty() {
+                        m.insert(String::from("linked_data_sheets"), json!(info.linked_data_sheets));
+                    }
+                    m.insert(String::from("constants"), json!(info.constants));
+                    if full_detail || info.notes_len > 0 {
+                        m.insert(String::from("notes_markdown_len"), json!(info.notes_len));
+                    }
+                    Value::Object(m)
+                })
+                .collect();
+            sheets_obj.insert(String::from("info"), Value::Array(info_list));
+        }
+        root.insert(String::from("sheets"), Value::Object(sheets_obj));
+    }
+
+    if want("analyses") {
+        let analyses_list: Vec<Value> = doc
+            .result_sheets
+            .iter()
+            .map(|rs| {
+                let deps = doc.upstream_dependencies(&rs.id);
+                summarize_result_sheet_direct(rs, &deps, detail, max_scalars)
+            })
+            .collect();
+        root.insert(String::from("analyses"), Value::Array(analyses_list));
+    }
+
+    if want("graphs") {
+        let graphs_list: Vec<Value> = doc
+            .graph_sheets
+            .iter()
+            .map(|gs| {
+                let deps = doc.upstream_dependencies(&gs.id);
+                let mut m = Map::new();
+                m.insert(String::from("id"), json!(gs.id));
+                m.insert(String::from("title"), json!(gs.title));
+                m.insert(String::from("kind"), json!(gs.spec.kind));
+                if full_detail || !gs.spec.primary_source_sheet_id.as_str().is_empty() {
+                    m.insert(String::from("primary_source_sheet_id"), json!(gs.spec.primary_source_sheet_id));
+                }
+                m.insert(String::from("initialized"), json!(gs.initialized));
+                m.insert(String::from("series_count"), json!(gs.spec.series.len()));
+                if full_detail {
+                    m.insert(String::from("canvas_size_pt"), json!(gs.spec.canvas_size_pt));
+                    m.insert(String::from("frame_preset"), json!(gs.spec.frame_preset));
+                }
+                if full_detail || !gs.spec.annotations.is_empty() {
+                    m.insert(String::from("annotations_count"), json!(gs.spec.annotations.len()));
+                }
+                if full_detail || !gs.spec.comparisons.is_empty() {
+                    m.insert(String::from("comparisons_count"), json!(gs.spec.comparisons.len()));
+                }
+                if full_detail || !deps.is_empty() {
+                    m.insert(String::from("upstream_dependencies"), json!(deps));
+                }
+                Value::Object(m)
+            })
+            .collect();
+        root.insert(String::from("graphs"), Value::Array(graphs_list));
+    }
+
+    if want("layouts") {
+        let layouts_list: Vec<Value> = doc
+            .layout_sheets
+            .iter()
+            .map(|ls| {
+                let deps = doc.upstream_dependencies(&ls.id);
+                let mut m = Map::new();
+                m.insert(String::from("id"), json!(ls.id));
+                m.insert(String::from("title"), json!(ls.title));
+                m.insert(String::from("width"), json!(ls.spec.width));
+                m.insert(String::from("height"), json!(ls.spec.height));
+                m.insert(String::from("unit"), json!(ls.spec.unit));
+                if full_detail {
+                    m.insert(String::from("page_size_pt"), json!(ls.spec.page_size_pt()));
+                }
+                m.insert(String::from("orientation"), json!(ls.spec.orientation));
+                m.insert(String::from("items_count"), json!(ls.spec.items.len()));
+                if full_detail || !deps.is_empty() {
+                    m.insert(String::from("upstream_dependencies"), json!(deps));
+                }
+                Value::Object(m)
+            })
+            .collect();
+        root.insert(String::from("layouts"), Value::Array(layouts_list));
+    }
+
+    if want("variables") || want("hooks") {
+        let (variables, hooks) = collect_variables_and_hooks(doc, detail);
+        if want("variables")
+            && !(compact_detail && sections.is_none() && doc.info_sheets.iter().all(|i| i.constants.is_empty()) && doc.result_sheets.is_empty())
+        {
+            root.insert(String::from("variables"), variables);
+        }
+        if want("hooks") && (full_detail || !hooks.is_empty()) {
+            root.insert(String::from("hooks"), Value::Array(hooks));
+        }
+    }
+
+    Value::Object(root)
 }
 
-fn collect_variables_and_hooks(doc: &ProjectDocument) -> (Value, Vec<Value>) {
+fn strip_empty_or_null(obj: &mut Map<String, Value>, keys: &[&str]) {
+    for &key in keys {
+        let remove = match obj.get(key) {
+            Some(Value::Null) => true,
+            Some(Value::Array(arr)) => arr.is_empty(),
+            _ => false,
+        };
+        if remove {
+            obj.remove(key);
+        }
+    }
+}
+
+fn compact_scalar_value(s: &ResultScalarEntry, full_detail: bool) -> Value {
+    if full_detail {
+        return json!({
+            "key": s.key,
+            "data_set_index": s.data_set_index,
+            "value": s.value,
+            "units": s.units,
+        });
+    }
+    let mut m = Map::new();
+    m.insert(String::from("key"), json!(s.key));
+    m.insert(String::from("value"), json!(s.value));
+    if let Some(dsi) = s.data_set_index {
+        m.insert(String::from("data_set_index"), json!(dsi));
+    }
+    if let Some(units) = &s.units {
+        m.insert(String::from("units"), json!(units));
+    }
+    Value::Object(m)
+}
+
+fn compact_result_tabs_value(tabs: &[ResultTab]) -> Value {
+    let out: Vec<Value> = tabs
+        .iter()
+        .map(|tab| {
+            let rows: Vec<Value> = tab.rows.iter().map(|row| Value::Array(row.iter().map(compact_result_cell_value).collect())).collect();
+            let mut m = Map::new();
+            m.insert(String::from("id"), json!(tab.id));
+            m.insert(String::from("title"), json!(tab.title));
+            m.insert(String::from("kind"), json!(tab.kind));
+            m.insert(String::from("column_headers"), json!(tab.column_headers));
+            if !tab.row_labels.is_empty() {
+                m.insert(String::from("row_labels"), json!(tab.row_labels));
+            }
+            m.insert(String::from("rows"), Value::Array(rows));
+            if !tab.footnotes.is_empty() {
+                m.insert(String::from("footnotes"), json!(tab.footnotes));
+            }
+            Value::Object(m)
+        })
+        .collect();
+    Value::Array(out)
+}
+
+fn compact_result_cell_value(cell: &ResultCell) -> Value {
+    match cell {
+        ResultCell::Empty => Value::Null,
+        ResultCell::Boolean(b) => Value::Bool(*b),
+        ResultCell::Text(s) => Value::String(s.clone()),
+        ResultCell::Number { value, prefix: None, units: None } => json!(value),
+        ResultCell::Number { value, prefix, units } => {
+            let mut m = Map::new();
+            m.insert(String::from("value"), json!(value));
+            if let Some(p) = prefix {
+                m.insert(String::from("prefix"), json!(p));
+            }
+            if let Some(u) = units {
+                m.insert(String::from("units"), json!(u));
+            }
+            Value::Object(m)
+        }
+        ResultCell::ConfidenceInterval { lower, upper } => {
+            let bound = |b: &CiBound| match b {
+                CiBound::Finite(v) => json!(v),
+                CiBound::Open => Value::String(String::from("open")),
+            };
+            json!({ "ci": [bound(lower), bound(upper)] })
+        }
+        ResultCell::PValue { raw, formatted, stars } => {
+            json!({ "p": raw, "formatted": formatted, "stars": stars })
+        }
+    }
+}
+
+fn summarize_result_sheet_direct(rs: &ResultSheet, deps: &[SheetId], detail: InspectDetail, max_scalars: usize) -> Value {
+    let full_detail = detail == InspectDetail::Full;
+    let compact_detail = detail == InspectDetail::Compact;
+    let total_scalars = rs.scalars.len();
+    let scalars_truncated = total_scalars > max_scalars;
+    let mut m = Map::new();
+    m.insert(String::from("section"), json!("analyses"));
+    m.insert(String::from("id"), json!(rs.id));
+    m.insert(String::from("title"), json!(rs.title()));
+    m.insert(String::from("source_sheet_id"), json!(rs.analysis.source_sheet_id));
+    if full_detail || !rs.analysis.selected_data_sets.is_empty() {
+        m.insert(String::from("selected_data_sets"), json!(rs.analysis.selected_data_sets));
+    }
+    m.insert(String::from("status"), json!(rs.status));
+    if full_detail || rs.analyzable_data.is_some() {
+        m.insert(String::from("has_analyzable_data"), json!(rs.analyzable_data.is_some()));
+    }
+    m.insert(String::from("tabs_count"), json!(rs.tabs.len()));
+    m.insert(String::from("scalars_count"), json!(total_scalars));
+    if !compact_detail {
+        let scalars_preview: Vec<Value> = rs.scalars.iter().take(max_scalars).map(|s| compact_scalar_value(s, full_detail)).collect();
+        m.insert(String::from("scalars"), Value::Array(scalars_preview));
+        m.insert(String::from("scalars_truncated"), json!(scalars_truncated));
+    } else if scalars_truncated {
+        m.insert(String::from("scalars_truncated"), json!(true));
+    }
+    if full_detail || !rs.pairwise_comparisons.is_empty() {
+        m.insert(String::from("pairwise_comparisons_count"), json!(rs.pairwise_comparisons.len()));
+    }
+    if full_detail || !rs.fitted_curves.is_empty() {
+        m.insert(String::from("fitted_curves_count"), json!(rs.fitted_curves.len()));
+    }
+    m.insert(String::from("checklist_count"), json!(rs.checklist.len()));
+    if full_detail || !deps.is_empty() {
+        m.insert(String::from("upstream_dependencies"), json!(deps));
+    }
+    if matches!(&rs.analysis.kind, curvebook_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == curvebook_doc::FitMethod::RobustCauchy) {
+        m.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));
+    }
+    Value::Object(m)
+}
+
+fn collect_variables_and_hooks(doc: &ProjectDocument, detail: InspectDetail) -> (Value, Vec<Value>) {
+    let full_detail = detail == InspectDetail::Full;
+    let compact_detail = detail == InspectDetail::Compact;
     let mut info_constants = Vec::new();
     for info in &doc.info_sheets {
         for c in &info.constants {
-            info_constants.push(json!({
-                "info_sheet_id": info.id,
-                "name": c.name,
-                "value": c.value,
-                "units": c.units,
-            }));
+            let mut m = Map::new();
+            m.insert(String::from("info_sheet_id"), json!(info.id));
+            m.insert(String::from("name"), json!(c.name));
+            m.insert(String::from("value"), json!(c.value));
+            if full_detail || c.units.is_some() {
+                m.insert(String::from("units"), json!(c.units));
+            }
+            info_constants.push(Value::Object(m));
         }
     }
 
     let mut result_scalars = Vec::new();
+    let mut total_result_scalars = 0_usize;
     let mut hooks = Vec::new();
     for rs in &doc.result_sheets {
-        for s in &rs.scalars {
-            result_scalars.push(json!({
-                "result_sheet_id": rs.id,
-                "key": s.key,
-                "data_set_index": s.data_set_index,
-                "value": s.value,
-                "units": s.units,
-            }));
+        total_result_scalars += rs.scalars.len();
+        if !compact_detail {
+            for s in &rs.scalars {
+                let mut m = Map::new();
+                m.insert(String::from("result_sheet_id"), json!(rs.id));
+                m.insert(String::from("key"), json!(s.key));
+                m.insert(String::from("value"), json!(s.value));
+                if full_detail || s.data_set_index.is_some() {
+                    m.insert(String::from("data_set_index"), json!(s.data_set_index));
+                }
+                if full_detail || s.units.is_some() {
+                    m.insert(String::from("units"), json!(s.units));
+                }
+                result_scalars.push(Value::Object(m));
+            }
         }
         for hook in rs.analysis.kind.hooked_sources() {
             hooks.push(json!({ "consumer_sheet_id": rs.id, "consumer_section": "analyses", "hook": hook }));
@@ -1556,11 +1890,16 @@ fn collect_variables_and_hooks(doc: &ProjectDocument) -> (Value, Vec<Value>) {
         }
     }
 
-    let variables = json!({
-        "info_constants": info_constants,
-        "result_scalars": result_scalars,
-    });
-    (variables, hooks)
+    let mut vars = Map::new();
+    if full_detail || !info_constants.is_empty() {
+        vars.insert(String::from("info_constants"), Value::Array(info_constants));
+    }
+    if compact_detail {
+        vars.insert(String::from("result_scalars_count"), json!(total_result_scalars));
+    } else {
+        vars.insert(String::from("result_scalars"), Value::Array(result_scalars));
+    }
+    (Value::Object(vars), hooks)
 }
 
 #[derive(Deserialize)]
@@ -1571,6 +1910,12 @@ struct CommandListArgs {
     #[serde(default)]
     group: Option<String>,
     #[serde(default)]
+    command_id: Option<String>,
+    #[serde(default)]
+    include_schemas: Option<bool>,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
     include_ui: Option<bool>,
     #[serde(default)]
     ui_only: Option<bool>,
@@ -1579,13 +1924,32 @@ struct CommandListArgs {
 fn handle_command_list(state: &McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     let parsed: CommandListArgs = deserialize_args("command_list", args)?;
     let filter = trim_opt_non_empty(parsed.filter, "filter")?.map(|s| s.to_ascii_lowercase());
+    let exact_cmd = trim_opt_non_empty(parsed.command_id, "command_id")?;
     let group_filter = match trim_opt_non_empty(parsed.group, "group")? {
         Some(raw) => Some(parse_command_group(&raw)?),
         None => None,
     };
+    let full_detail = match trim_opt_non_empty(parsed.detail, "detail")? {
+        Some(raw) => match raw.to_ascii_lowercase().as_str() {
+            "summary" => false,
+            "full" => true,
+            _ => {
+                return Err(ToolCallError::InvalidParams(format!("unsupported command_list `detail` '{raw}'; expected 'summary' or 'full'")));
+            }
+        },
+        None => false,
+    };
+    let include_schemas = parsed.include_schemas.unwrap_or(full_detail || exact_cmd.is_some());
     let include_ui = parsed.include_ui.unwrap_or(true);
     let ui_only = parsed.ui_only.unwrap_or(false);
     let attached = is_attached(state);
+
+    let matches_exact = |id: &str, mcp_tool: Option<&str>| -> bool {
+        let Some(target) = exact_cmd.as_deref() else {
+            return true;
+        };
+        id.eq_ignore_ascii_case(target) || mcp_tool.is_some_and(|t| t.eq_ignore_ascii_case(target))
+    };
 
     let mut commands = Vec::new();
     if !ui_only {
@@ -1593,41 +1957,65 @@ fn handle_command_list(state: &McpServerState, args: &Map<String, Value>) -> Res
             if group_filter.is_some_and(|g| spec.group != g) {
                 continue;
             }
-            if matches_filter(filter.as_deref(), spec.id, spec.label, spec.menu_path, spec.summary) {
-                commands.push(json!({
-                    "id": spec.id,
-                    "label": spec.label,
-                    "menu_path": spec.menu_path,
-                    "shortcut": spec.shortcut,
-                    "group": spec.group.as_str(),
-                    "group_title": spec.group.title(),
-                    "effects": spec.effects.flag_names(),
-                    "summary": spec.summary,
-                    "beginner": spec.beginner,
-                    "input_schema": (spec.input_schema)(),
-                    "mcp_tool": command_id_to_mcp_tool_name(spec.id),
-                    "ui": false,
-                    "available": true,
-                }));
+            let mcp_tool = command_id_to_mcp_tool_name(spec.id);
+            if !matches_exact(spec.id, Some(mcp_tool.as_str())) {
+                continue;
+            }
+            if matches_filter(filter.as_deref(), spec.id, Some(mcp_tool.as_str()), spec.label, spec.menu_path, spec.summary) {
+                let mut m = Map::new();
+                m.insert(String::from("id"), json!(spec.id));
+                m.insert(String::from("label"), json!(spec.label));
+                m.insert(String::from("group"), json!(spec.group.as_str()));
+                m.insert(String::from("summary"), json!(spec.summary));
+                m.insert(String::from("mcp_tool"), json!(mcp_tool));
+                m.insert(String::from("ui"), json!(false));
+                m.insert(String::from("available"), json!(true));
+                if full_detail {
+                    if !spec.menu_path.is_empty() {
+                        m.insert(String::from("menu_path"), json!(spec.menu_path));
+                    }
+                    if !spec.shortcut.is_empty() {
+                        m.insert(String::from("shortcut"), json!(spec.shortcut));
+                    }
+                    m.insert(String::from("group_title"), json!(spec.group.title()));
+                    m.insert(String::from("effects"), json!(spec.effects.flag_names()));
+                    if !spec.beginner.is_empty() {
+                        m.insert(String::from("beginner"), json!(spec.beginner));
+                    }
+                }
+                if include_schemas {
+                    m.insert(String::from("input_schema"), toolsets::compact_json_schema((spec.input_schema)()));
+                }
+                commands.push(Value::Object(m));
             }
         }
     }
 
     if (include_ui || ui_only) && group_filter.is_none() {
         for spec in UI_COMMANDS {
-            if matches_filter(filter.as_deref(), spec.id, spec.label, "", spec.summary) {
-                commands.push(json!({
-                    "id": spec.id,
-                    "label": spec.label,
-                    "menu_path": "",
-                    "shortcut": spec.shortcut,
-                    "params_doc": spec.params_doc,
-                    "summary": spec.summary,
-                    "beginner": spec.beginner,
-                    "ui": true,
-                    "requires_live_attach": true,
-                    "available": attached,
-                }));
+            if !matches_exact(spec.id, None) {
+                continue;
+            }
+            if matches_filter(filter.as_deref(), spec.id, None, spec.label, "", spec.summary) {
+                let mut m = Map::new();
+                m.insert(String::from("id"), json!(spec.id));
+                m.insert(String::from("label"), json!(spec.label));
+                m.insert(String::from("summary"), json!(spec.summary));
+                m.insert(String::from("ui"), json!(true));
+                m.insert(String::from("requires_live_attach"), json!(true));
+                m.insert(String::from("available"), json!(attached));
+                if include_schemas || full_detail {
+                    m.insert(String::from("params_doc"), json!(spec.params_doc));
+                }
+                if full_detail {
+                    if !spec.shortcut.is_empty() {
+                        m.insert(String::from("shortcut"), json!(spec.shortcut));
+                    }
+                    if !spec.beginner.is_empty() {
+                        m.insert(String::from("beginner"), json!(spec.beginner));
+                    }
+                }
+                commands.push(Value::Object(m));
             }
         }
     }
@@ -1640,11 +2028,14 @@ fn handle_command_list(state: &McpServerState, args: &Map<String, Value>) -> Res
     }))
 }
 
-fn matches_filter(filter: Option<&str>, id: &str, label: &str, menu_path: &str, summary: &str) -> bool {
+fn matches_filter(filter: Option<&str>, id: &str, mcp_tool: Option<&str>, label: &str, menu_path: &str, summary: &str) -> bool {
     let Some(needle) = filter else {
         return true;
     };
+    let norm_needle = needle.replace('_', ".");
     id.to_ascii_lowercase().contains(needle)
+        || id.to_ascii_lowercase().contains(&norm_needle)
+        || mcp_tool.is_some_and(|t| t.to_ascii_lowercase().contains(needle))
         || label.to_ascii_lowercase().contains(needle)
         || menu_path.to_ascii_lowercase().contains(needle)
         || summary.to_ascii_lowercase().contains(needle)
@@ -2028,11 +2419,36 @@ fn execute_single_command(state: &mut McpServerState, command_id: &str, mut para
         return Err(ui_command_requires_attach_error(command_id));
     }
 
-    let (outcome, dirty) = state.mutate_active_session(|session| {
-        let out = session.execute_with_caller(command_id, params, Caller::Mcp, &cancel)?;
-        Ok::<_, EngineError>((out, session.is_dirty()))
-    })?;
+    if registry().get(command_id).is_none() {
+        let suggestions = suggest_command_ids(command_id);
+        let hint = if suggestions.is_empty() {
+            String::from("Call `command_list` to discover available engine and UI commands.")
+        } else {
+            format!("Did you mean: {}? Inspect schemas with `command_list({{\"command_id\":\"<id>\"}})`.", suggestions.join(", "))
+        };
+        return Err(EngineError::with_code(ErrorCode::NotFound, format!("unknown command `{command_id}`"))
+            .with_remediation(hint)
+            .with_details(json!({ "command_id": command_id, "suggestions": suggestions })));
+    }
+
+    let (outcome, dirty) = state
+        .mutate_active_session(|session| {
+            let out = session.execute_with_caller(command_id, params, Caller::Mcp, &cancel)?;
+            Ok::<_, EngineError>((out, session.is_dirty()))
+        })
+        .map_err(|mut err| {
+            if err.code == ErrorCode::BadInput && err.remediation.is_none() {
+                err.remediation =
+                    Some(format!("Inspect expected fields via `command_list` (`{{\"command_id\":\"{command_id}\",\"include_schemas\":true}}`)."));
+            }
+            err
+        })?;
     Ok(format_command_outcome_json(&outcome, dirty))
+}
+
+fn suggest_command_ids(raw: &str) -> Vec<String> {
+    let normalized = raw.trim().replace('_', ".");
+    curvebook_engine::cmd::fuzzy_suggest(&normalized, '.', registry().specs().map(|spec| spec.id), 3)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

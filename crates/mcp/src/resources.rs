@@ -46,13 +46,15 @@ pub fn list_resource_templates() -> Vec<ResourceTemplateDescriptor> {
         ResourceTemplateDescriptor {
             uri_template: String::from("sheet://{id}"),
             name: String::from("Sheet summary"),
-            description: String::from("Active project sheet summary/preview (Data, Info, Analyses, Graphs, Layouts)."),
+            description: String::from("Active project sheet summary/preview (supports optional `?max_rows=N&tab_id=<id>&detail=summary|full`)."),
             mime_type: String::from("application/json"),
         },
         ResourceTemplateDescriptor {
             uri_template: String::from("result://{id}"),
             name: String::from("Result sheet JSON"),
-            description: String::from("Canonical computed ResultSheet JSON export."),
+            description: String::from(
+                "Canonical computed ResultSheet JSON export (supports `?include_curves=false` or `?detail=summary` to omit dense curve sample arrays).",
+            ),
             mime_type: String::from("application/json"),
         },
     ]
@@ -76,6 +78,14 @@ pub enum ResourceError {
     NotFound(String),
     /// Serialization error while formatting resource contents (`-32603`).
     Internal(String),
+}
+
+impl std::fmt::Display for ResourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidUri(msg) | Self::NotFound(msg) | Self::Internal(msg) => f.write_str(msg),
+        }
+    }
 }
 
 /// Enumerate all `sheet://<id>` and `result://<id>` resources in `doc`.
@@ -136,19 +146,78 @@ pub fn list_resources(doc: &ProjectDocument) -> Vec<ResourceDescriptor> {
 /// Read a single `sheet://<id>` or `result://<id>` resource from `doc`.
 pub fn read_resource(doc: &ProjectDocument, uri: &str) -> Result<Vec<ResourceContent>, ResourceError> {
     let trimmed = uri.trim();
-    if let Some(sheet_id_raw) = trimmed.strip_prefix("sheet://") {
-        if sheet_id_raw.trim().is_empty() {
+    if let Some(sheet_raw) = trimmed.strip_prefix("sheet://") {
+        let (id_str, query) = split_resource_query(sheet_raw)?;
+        if id_str.trim().is_empty() {
             return Err(ResourceError::InvalidUri(String::from("sheet:// URI requires a non-empty sheet id")));
         }
-        return read_sheet_resource(doc, trimmed, sheet_id_raw);
+        return read_sheet_resource(doc, trimmed, id_str, &query);
     }
-    if let Some(result_id_raw) = trimmed.strip_prefix("result://") {
-        if result_id_raw.trim().is_empty() {
+    if let Some(result_raw) = trimmed.strip_prefix("result://") {
+        let (id_str, query) = split_resource_query(result_raw)?;
+        if id_str.trim().is_empty() {
             return Err(ResourceError::InvalidUri(String::from("result:// URI requires a non-empty result sheet id")));
         }
-        return read_result_resource(doc, trimmed, result_id_raw);
+        return read_result_resource(doc, trimmed, id_str, &query);
     }
     Err(ResourceError::InvalidUri(format!("unsupported resource URI scheme '{trimmed}'; expected sheet://<id> or result://<id>")))
+}
+
+#[derive(Default)]
+struct ResourceQuery {
+    include_curves: Option<bool>,
+    detail_summary: bool,
+    max_rows: Option<usize>,
+    tab_id: Option<String>,
+}
+
+fn split_resource_query(raw: &str) -> Result<(&str, ResourceQuery), ResourceError> {
+    let Some((id, query_str)) = raw.split_once('?') else {
+        return Ok((raw, ResourceQuery::default()));
+    };
+    let mut query = ResourceQuery::default();
+    for pair in query_str.split('&').filter(|s| !s.is_empty()) {
+        let (key, val) = pair
+            .split_once('=')
+            .ok_or_else(|| ResourceError::InvalidUri(format!("invalid query parameter '{pair}' in resource URI; expected key=value")))?;
+        match key {
+            "include_curves" => match val.to_ascii_lowercase().as_str() {
+                "true" | "1" => query.include_curves = Some(true),
+                "false" | "0" => query.include_curves = Some(false),
+                _ => {
+                    return Err(ResourceError::InvalidUri(format!("invalid `include_curves` value '{val}'; expected true or false")));
+                }
+            },
+            "detail" => match val.to_ascii_lowercase().as_str() {
+                "summary" | "compact" => query.detail_summary = true,
+                "full" => query.detail_summary = false,
+                _ => {
+                    return Err(ResourceError::InvalidUri(format!("invalid `detail` value '{val}'; expected summary, compact, or full")));
+                }
+            },
+            "max_rows" => {
+                let parsed = val
+                    .parse::<usize>()
+                    .map_err(|_| ResourceError::InvalidUri(format!("invalid `max_rows` value '{val}'; expected positive integer")))?;
+                if parsed == 0 || parsed > MAX_CSV_PREVIEW_ROWS {
+                    return Err(ResourceError::InvalidUri(format!("`max_rows` must be in 1..={MAX_CSV_PREVIEW_ROWS}, got {parsed}")));
+                }
+                query.max_rows = Some(parsed);
+            }
+            "tab_id" => {
+                if val.trim().is_empty() {
+                    return Err(ResourceError::InvalidUri(String::from("`tab_id` query parameter must not be empty")));
+                }
+                query.tab_id = Some(val.to_owned());
+            }
+            other => {
+                return Err(ResourceError::InvalidUri(format!(
+                    "unsupported resource query parameter '{other}'; supported: detail, include_curves, max_rows, tab_id"
+                )));
+            }
+        }
+    }
+    Ok((id, query))
 }
 
 fn slice_dataset_columns(cols: &[DataSetColumn], max_rows: usize) -> Vec<DataSetColumn> {
@@ -252,12 +321,13 @@ fn truncate_csv_bytes(mut csv: String, max_bytes: usize) -> (String, bool) {
     (csv, true)
 }
 
-pub(crate) fn build_csv_preview(ds: &DataSheet) -> Result<(String, bool), ResourceError> {
+pub(crate) fn build_csv_preview_with_limit(ds: &DataSheet, max_rows: usize) -> Result<(String, bool), ResourceError> {
+    let capped_rows = max_rows.clamp(1, MAX_CSV_PREVIEW_ROWS);
     ds.archetype.validate().map_err(|err| ResourceError::Internal(format!("CSV preview export failed: {err}")))?;
     let row_count = ds.archetype.row_count();
-    let row_truncated = row_count > MAX_CSV_PREVIEW_ROWS;
+    let row_truncated = row_count > capped_rows;
     let raw_csv = if row_truncated {
-        let sliced = slice_archetype_rows(&ds.archetype, MAX_CSV_PREVIEW_ROWS);
+        let sliced = slice_archetype_rows(&ds.archetype, capped_rows);
         let preview_ds = DataSheet::new(ds.id.clone(), ds.title.clone(), sliced)
             .map_err(|err| ResourceError::Internal(format!("CSV preview export failed: {err}")))?;
         export_datasheet_to_csv(&preview_ds, &CsvOptions::csv())
@@ -274,19 +344,24 @@ pub(crate) fn slice_preview_vec<T: Clone>(items: &[T], limit: usize) -> (Vec<T>,
     (items.iter().take(limit).cloned().collect(), truncated)
 }
 
-pub(crate) fn slice_result_tabs_preview(tabs: &[ResultTab]) -> (Vec<ResultTab>, bool) {
-    let mut truncated = tabs.len() > MAX_RESULT_PREVIEW_TABS;
+pub(crate) fn slice_result_tabs_preview_with_opts(tabs: &[ResultTab], max_rows: usize, tab_id: Option<&str>) -> (Vec<ResultTab>, bool) {
+    let row_cap = max_rows.clamp(1, MAX_RESULT_PREVIEW_ROWS);
+    let filtered: Vec<&ResultTab> = match tab_id {
+        Some(target) => tabs.iter().filter(|t| t.id == target).collect(),
+        None => tabs.iter().collect(),
+    };
+    let mut truncated = filtered.len() > MAX_RESULT_PREVIEW_TABS;
     let mut remaining_cells = MAX_RESULT_PREVIEW_TOTAL_CELLS;
-    let mut out = Vec::with_capacity(tabs.len().min(MAX_RESULT_PREVIEW_TABS));
+    let mut out = Vec::with_capacity(filtered.len().min(MAX_RESULT_PREVIEW_TABS));
 
-    for tab in tabs.iter().take(MAX_RESULT_PREVIEW_TABS) {
-        if tab.column_headers.len() > MAX_RESULT_PREVIEW_COLS || tab.rows.len() > MAX_RESULT_PREVIEW_ROWS {
+    for tab in filtered.into_iter().take(MAX_RESULT_PREVIEW_TABS) {
+        if tab.column_headers.len() > MAX_RESULT_PREVIEW_COLS || tab.rows.len() > row_cap {
             truncated = true;
         }
         let column_headers: Vec<String> = tab.column_headers.iter().take(MAX_RESULT_PREVIEW_COLS).cloned().collect();
         let mut out_rows = Vec::new();
         let mut out_row_labels = Vec::new();
-        for (r_idx, row) in tab.rows.iter().take(MAX_RESULT_PREVIEW_ROWS).enumerate() {
+        for (r_idx, row) in tab.rows.iter().take(row_cap).enumerate() {
             if row.len() > MAX_RESULT_PREVIEW_COLS {
                 truncated = true;
             }
@@ -321,7 +396,7 @@ pub(crate) fn slice_result_tabs_preview(tabs: &[ResultTab]) -> (Vec<ResultTab>, 
     (out, truncated)
 }
 
-fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result<Vec<ResourceContent>, ResourceError> {
+fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str, query: &ResourceQuery) -> Result<Vec<ResourceContent>, ResourceError> {
     let target = SheetId::new(id_str);
     let deps = doc.upstream_dependencies(&target);
     let Some(section) = doc.sheet_section(&target) else {
@@ -331,7 +406,8 @@ fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result
     let payload: Option<Value> = match section {
         SheetSection::Data => match doc.data_sheet(&target) {
             Some(ds) => {
-                let (csv_preview, csv_preview_truncated) = build_csv_preview(ds)?;
+                let row_cap = query.max_rows.unwrap_or(MAX_CSV_PREVIEW_ROWS);
+                let (csv_preview, csv_preview_truncated) = build_csv_preview_with_limit(ds, row_cap)?;
                 Some(json!({
                     "uri": uri,
                     "section": "data",
@@ -363,9 +439,16 @@ fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result
             })
         }),
         SheetSection::Analyses => doc.result_sheet(&target).map(|rs| {
-            let (tabs_preview, tabs_truncated) = slice_result_tabs_preview(&rs.tabs);
+            let row_cap = query.max_rows.unwrap_or(MAX_RESULT_PREVIEW_ROWS);
+            let (tabs_preview, tabs_truncated) = slice_result_tabs_preview_with_opts(&rs.tabs, row_cap, query.tab_id.as_deref());
             let (scalars_preview, scalars_truncated) = slice_preview_vec(&rs.scalars, MAX_RESULT_PREVIEW_SCALARS);
             let (checklist_preview, checklist_truncated) = slice_preview_vec(&rs.checklist, MAX_RESULT_PREVIEW_CHECKLIST);
+            let include_curves = query.include_curves.unwrap_or(!query.detail_summary);
+            let curves_val = if include_curves {
+                serde_json::to_value(&rs.fitted_curves).unwrap_or_else(|_| json!([]))
+            } else {
+                Value::Array(rs.fitted_curves.iter().map(summarize_fitted_curve_meta).collect())
+            };
             let mut payload = json!({
                 "uri": uri,
                 "section": "analyses",
@@ -380,7 +463,7 @@ fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result
                 "scalars": scalars_preview,
                 "scalars_truncated": scalars_truncated,
                 "pairwise_comparisons": rs.pairwise_comparisons,
-                "fitted_curves": rs.fitted_curves,
+                "fitted_curves": curves_val,
                 "checklist": checklist_preview,
                 "checklist_truncated": checklist_truncated,
                 "upstream_dependencies": deps,
@@ -418,15 +501,65 @@ fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result
     let Some(val) = payload else {
         return Err(ResourceError::NotFound(format!("resource not found: {uri}")));
     };
-    let text = serde_json::to_string_pretty(&val).map_err(|err| ResourceError::Internal(format!("JSON serialization failed: {err}")))?;
+    let text = serde_json::to_string(&val).map_err(|err| ResourceError::Internal(format!("JSON serialization failed: {err}")))?;
     Ok(vec![ResourceContent { uri: uri.to_owned(), mime_type: String::from("application/json"), text }])
 }
 
-fn read_result_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result<Vec<ResourceContent>, ResourceError> {
+fn summarize_fitted_curve_meta(curve: &curvebook_doc::FittedCurveOverlay) -> Value {
+    json!({
+        "data_set_index": curve.data_set_index,
+        "equation_id": curve.equation_id,
+        "converged": curve.converged,
+        "ambiguous": curve.ambiguous,
+        "points_count": curve.points.len(),
+        "points_omitted": true,
+    })
+}
+
+fn read_result_resource(doc: &ProjectDocument, uri: &str, id_str: &str, query: &ResourceQuery) -> Result<Vec<ResourceContent>, ResourceError> {
     let target = SheetId::new(id_str);
     let Some(rs) = doc.result_sheet(&target) else {
         return Err(ResourceError::NotFound(format!("resource not found: {uri}")));
     };
-    let text = export_result_sheet_json(rs, true).map_err(|err| ResourceError::Internal(format!("result JSON export failed: {err}")))?;
-    Ok(vec![ResourceContent { uri: uri.to_owned(), mime_type: String::from("application/json"), text }])
+    let text = export_result_sheet_json(rs, false).map_err(|err| ResourceError::Internal(format!("result JSON export failed: {err}")))?;
+    let include_curves = query.include_curves.unwrap_or(!query.detail_summary);
+    if include_curves && query.tab_id.is_none() && query.max_rows.is_none() {
+        return Ok(vec![ResourceContent { uri: uri.to_owned(), mime_type: String::from("application/json"), text }]);
+    }
+    let mut val: Value = serde_json::from_str(&text).map_err(|err| ResourceError::Internal(format!("result JSON parse failed: {err}")))?;
+    if let Some(obj) = val.as_object_mut() {
+        if !include_curves {
+            let summaries: Vec<Value> = rs.fitted_curves.iter().map(summarize_fitted_curve_meta).collect();
+            obj.insert(String::from("fitted_curves"), Value::Array(summaries));
+        }
+        if let Some(target_tab) = query.tab_id.as_deref()
+            && !rs.tabs.iter().any(|t| t.id == target_tab)
+        {
+            let available: Vec<&str> = rs.tabs.iter().map(|t| t.id.as_str()).collect();
+            return Err(ResourceError::NotFound(format!(
+                "tab_id '{target_tab}' not found on '{}'; available tab_ids: {}",
+                rs.id.as_str(),
+                available.join(", ")
+            )));
+        }
+        if (query.tab_id.is_some() || query.max_rows.is_some())
+            && let Some(tabs_arr) = obj.get_mut("tabs").and_then(Value::as_array_mut)
+        {
+            if let Some(target_tab) = query.tab_id.as_deref() {
+                tabs_arr.retain(|t| t.get("id").and_then(Value::as_str) == Some(target_tab));
+            }
+            if let Some(row_cap) = query.max_rows {
+                for tab in tabs_arr.iter_mut() {
+                    if let Some(rows) = tab.get_mut("rows").and_then(Value::as_array_mut) {
+                        rows.truncate(row_cap);
+                    }
+                    if let Some(labels) = tab.get_mut("row_labels").and_then(Value::as_array_mut) {
+                        labels.truncate(row_cap);
+                    }
+                }
+            }
+        }
+    }
+    let compact = serde_json::to_string(&val).map_err(|err| ResourceError::Internal(format!("JSON serialization failed: {err}")))?;
+    Ok(vec![ResourceContent { uri: uri.to_owned(), mime_type: String::from("application/json"), text: compact }])
 }

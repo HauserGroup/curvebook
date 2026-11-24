@@ -25,9 +25,9 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// Guidance string advertised to MCP clients during `initialize`.
 pub const SERVER_INSTRUCTIONS: &str = concat!(
     "CurveBook MCP server for scientific tables, statistical analysis, curve fitting, and publication figures. ",
-    "Use `doc_inspect` or MCP resources (`resources/list`, `resources/read` with `sheet://<id>` or `result://<id>`) to inspect active sheets and results. ",
-    "Core tools are available immediately; call `list_toolsets` and `enable_toolset` to dynamically load per-command CommandGroup tools (which emits `notifications/tools/list_changed`). ",
-    "Inspect each tool's `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) before executing mutating or filesystem commands, and use `prompts/list` + `prompts/get` for guided analysis workflows. ",
+    "Inspect state with `doc_inspect` (supports `detail: 'compact'|'standard'|'full'`, `sections`, `sheet_id`, `tab_id`, `max_rows`, `max_scalars`) or resources (`sheet://<id>`, `result://<id>?include_curves=false`). ",
+    "Discover commands with `command_list` (`filter`, `group`, `command_id`, `include_schemas`) and `list_toolsets` / `enable_toolset` (emits `notifications/tools/list_changed`). ",
+    "Use `fit.run` `method: 'rout'` + `identify_unstable_parameters: true` for dose-response outlier detection and identifiability diagnostics, inspect tool `annotations` before mutating/filesystem calls, and pass string arguments to `prompts/list` + `prompts/get`. ",
     "Reference docs: https://hausergroup.github.io/curvebook/manual/v",
     env!("CARGO_PKG_VERSION_MAJOR"),
     ".",
@@ -466,7 +466,19 @@ fn handle_tools_call(id: Value, params: Value, state: &mut McpServerState) -> Js
             Ok(val) => JsonRpcResponse::ok(id, val),
             Err(err) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, format!("failed to encode tool result: {err}"), None),
         },
-        Err(ToolCallError::UnknownTool(unknown)) => JsonRpcResponse::err(id, ERR_INVALID_PARAMS, format!("unknown tool: {unknown}"), None),
+        Err(ToolCallError::UnknownTool(unknown)) => {
+            let hint = if let Some(spec) = crate::toolsets::find_command_spec_by_tool_name(&unknown) {
+                format!(
+                    "unknown tool: {unknown} (belongs to disabled `{}` toolset; call `enable_toolset` with `{{\"group\":\"{}\"}}` or run `command_run` with `command_id: \"{}\"`)",
+                    spec.group.as_str(),
+                    spec.group.as_str(),
+                    spec.id,
+                )
+            } else {
+                format!("unknown tool: {unknown} (check `tools/list` or call `list_toolsets` / `command_list`)")
+            };
+            JsonRpcResponse::err(id, ERR_INVALID_PARAMS, hint, None)
+        }
         Err(ToolCallError::InvalidParams(msg)) => JsonRpcResponse::err(id, ERR_INVALID_PARAMS, msg, None),
         Err(ToolCallError::Execution(msg)) => {
             let err_result = errors::result_from_error_message(msg);

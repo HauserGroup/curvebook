@@ -608,7 +608,7 @@ fn execute_csv_import_on_session(
 }
 
 fn sheet_summary_json(format_id: &str, resolved_path: &Path, ds: &DataSheet) -> Result<ToolCallResult, ToolCallError> {
-    ToolCallResult::ok_json(&json!({
+    let mut payload = json!({
         "opened": true,
         "format": format_id,
         "path": resolved_path.display().to_string(),
@@ -617,7 +617,72 @@ fn sheet_summary_json(format_id: &str, resolved_path: &Path, ds: &DataSheet) -> 
         "table_kind": ds.kind().label(),
         "rows": ds.archetype.row_count(),
         "columns": ds.archetype.column_count(),
-    }))
+    });
+    let text_warnings = inspect_delimited_import_warnings(ds);
+    if !text_warnings.is_empty()
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert(String::from("warnings"), json!(text_warnings));
+        obj.insert(
+            String::from("next_step_hint"),
+            json!(format!(
+                "Inspect cells with `doc_inspect({{\"sheet_id\":\"{}\",\"include_cells\":true,\"max_rows\":20}})` and clean placeholders/preamble rows via `table.clearCells`, `table.setCells`, or `table.excludeCells`.",
+                ds.id.as_str()
+            )),
+        );
+    }
+    ToolCallResult::ok_json(&payload)
+}
+
+fn inspect_delimited_import_warnings(ds: &DataSheet) -> Vec<String> {
+    use curvebook_doc::{CellValue, DataSetColumn, TableArchetype, XColumnMode};
+    let mut non_numeric_text = 0_usize;
+    let mut samples: Vec<String> = Vec::new();
+    let mut record_text = |text: &str| {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            non_numeric_text += 1;
+            if samples.len() < 3 && !samples.iter().any(|s| s == trimmed) {
+                samples.push(trimmed.chars().take(32).collect());
+            }
+        }
+    };
+    let scan_data_sets = |cols: &[DataSetColumn], record: &mut dyn FnMut(&str)| {
+        for col in cols {
+            for row in &col.cells {
+                for cell in row {
+                    if !cell.excluded
+                        && let CellValue::Text(s) = &cell.value
+                    {
+                        record(s);
+                    }
+                }
+            }
+        }
+    };
+    match &ds.archetype {
+        TableArchetype::Xy(xy) => {
+            if matches!(xy.x_mode, XColumnMode::Numbers { .. }) {
+                for row in &xy.x_cells {
+                    for cell in row {
+                        if !cell.excluded
+                            && let CellValue::Text(s) = &cell.value
+                        {
+                            record_text(s);
+                        }
+                    }
+                }
+            }
+            scan_data_sets(&xy.data_sets, &mut record_text);
+        }
+        TableArchetype::Column(col_t) => scan_data_sets(&col_t.data_sets, &mut record_text),
+        TableArchetype::Grouped(grp) => scan_data_sets(&grp.data_sets, &mut record_text),
+        _ => {}
+    }
+    if non_numeric_text == 0 {
+        return Vec::new();
+    }
+    vec![format!("Found {non_numeric_text} non-numeric text cell(s) in numeric data columns (samples: {}).", samples.join(", "))]
 }
 
 /// Handle `save_file` dispatched via [`FormatRegistry`] (which persists atomically via `write_atomic`).

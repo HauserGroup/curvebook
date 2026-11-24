@@ -103,6 +103,60 @@ pub fn parse_command_group(raw: &str) -> Result<CommandGroup, ToolCallError> {
         .ok_or_else(|| ToolCallError::InvalidParams(format!("unknown command group toolset '{raw}'")))
 }
 
+/// Compact an engine or tool JSON Schema for LLM token efficiency without changing validation semantics:
+/// strips redundant nested `$schema` tags and collapses `anyOf: [<primitive>, {"type":"null"}]`
+/// wrappers into `{"type": [<primitive>, "null"], ...}`.
+#[must_use]
+pub fn compact_json_schema(value: Value) -> Value {
+    match value {
+        Value::Object(mut obj) => {
+            obj.remove("$schema");
+            if let Some(any_of) = obj.get("anyOf").and_then(Value::as_array)
+                && any_of.len() == 2
+                && let Some(compacted) = collapse_nullable_any_of(any_of)
+            {
+                return compact_json_schema(Value::Object(compacted));
+            }
+            let keys: Vec<String> = obj.keys().cloned().collect();
+            for key in keys {
+                if let Some(val) = obj.remove(&key) {
+                    obj.insert(key, compact_json_schema(val));
+                }
+            }
+            Value::Object(obj)
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(compact_json_schema).collect()),
+        other => other,
+    }
+}
+
+fn collapse_nullable_any_of(items: &[Value]) -> Option<Map<String, Value>> {
+    let first = items.first()?;
+    let second = items.get(1)?;
+    let inner = if is_null_type_only(second) {
+        first.as_object()?
+    } else if is_null_type_only(first) {
+        second.as_object()?
+    } else {
+        return None;
+    };
+    if inner.contains_key("anyOf") || inner.contains_key("oneOf") || inner.contains_key("allOf") {
+        return None;
+    }
+    let prim_type = inner.get("type")?.as_str()?;
+    let mut merged = inner.clone();
+    merged.remove("$schema");
+    merged.insert(String::from("type"), json!([prim_type, "null"]));
+    Some(merged)
+}
+
+fn is_null_type_only(val: &Value) -> bool {
+    let Some(obj) = val.as_object() else {
+        return false;
+    };
+    obj.get("type").and_then(Value::as_str) == Some("null") && obj.len() == 1
+}
+
 /// Convert a static [`CommandSpec`] into a full per-command MCP [`ToolDefinition`].
 #[must_use]
 pub fn command_spec_to_tool_definition(spec: &'static CommandSpec) -> ToolDefinition {
@@ -114,7 +168,7 @@ pub fn command_spec_to_tool_definition(spec: &'static CommandSpec) -> ToolDefini
     ToolDefinition {
         name: command_id_to_mcp_tool_name(spec.id),
         description,
-        input_schema: (spec.input_schema)(),
+        input_schema: compact_json_schema((spec.input_schema)()),
         annotations: ToolAnnotations::from_effects(spec.effects),
     }
 }
@@ -140,45 +194,107 @@ pub fn group_enum_json() -> Value {
 
 /// Build the structured response for the `list_toolsets` MCP tool.
 pub fn handle_list_toolsets(state: &McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    crate::gui_tools::reject_unknown_args("list_toolsets", args, &[])?;
+    crate::gui_tools::reject_unknown_args("list_toolsets", args, &["include_tools", "group", "detail"])?;
+    let include_tools = crate::tools::optional_bool(args, "include_tools")?.unwrap_or(true);
+    let group_filter = match crate::tools::trim_opt_non_empty(
+        args.get("group")
+            .map(|v| {
+                v.as_str().map(str::to_owned).ok_or_else(|| ToolCallError::InvalidParams(String::from("list_toolsets `group` must be a string")))
+            })
+            .transpose()?,
+        "group",
+    )? {
+        Some(raw) => Some(parse_command_group(&raw)?),
+        None => None,
+    };
+    let detail = match crate::tools::trim_opt_non_empty(
+        args.get("detail")
+            .map(|v| {
+                v.as_str().map(str::to_owned).ok_or_else(|| ToolCallError::InvalidParams(String::from("list_toolsets `detail` must be a string")))
+            })
+            .transpose()?,
+        "detail",
+    )? {
+        Some(raw) => {
+            let lower = raw.to_ascii_lowercase();
+            match lower.as_str() {
+                "compact" | "full" => lower,
+                _ => {
+                    return Err(ToolCallError::InvalidParams(format!("unsupported list_toolsets detail '{raw}'; expected 'compact' or 'full'")));
+                }
+            }
+        }
+        None => String::from("compact"),
+    };
+    let full_detail = detail == "full";
+
     let reg = registry();
     let enabled = state.enabled_toolsets();
     let mut toolsets = Vec::with_capacity(CommandGroup::all().len());
 
     for &group in CommandGroup::all() {
+        if group_filter.is_some_and(|target| group != target) {
+            continue;
+        }
         let specs = reg.specs_by_group(group);
-        let tools: Vec<Value> = specs
-            .iter()
-            .map(|spec| {
-                json!({
-                    "name": command_id_to_mcp_tool_name(spec.id),
-                    "command_id": spec.id,
-                    "label": spec.label,
-                    "summary": spec.summary,
-                    "annotations": ToolAnnotations::from_effects(spec.effects),
+        let command_count = specs.len();
+        let mut group_obj = serde_json::Map::new();
+        group_obj.insert(String::from("group"), Value::String(group.as_str().to_owned()));
+        group_obj.insert(String::from("title"), Value::String(group.title().to_owned()));
+        group_obj.insert(String::from("enabled"), Value::Bool(enabled.contains(&group)));
+        group_obj.insert(String::from("command_count"), json!(command_count));
+        if include_tools {
+            let tools: Vec<Value> = specs
+                .iter()
+                .map(|spec| {
+                    if full_detail {
+                        json!({
+                            "name": command_id_to_mcp_tool_name(spec.id),
+                            "command_id": spec.id,
+                            "label": spec.label,
+                            "summary": spec.summary,
+                            "annotations": ToolAnnotations::from_effects(spec.effects),
+                        })
+                    } else {
+                        json!({
+                            "name": command_id_to_mcp_tool_name(spec.id),
+                            "command_id": spec.id,
+                            "summary": spec.summary,
+                        })
+                    }
                 })
-            })
-            .collect();
-        toolsets.push(json!({
-            "group": group.as_str(),
-            "title": group.title(),
-            "enabled": enabled.contains(&group),
-            "command_count": tools.len(),
-            "tools": tools,
-        }));
+                .collect();
+            group_obj.insert(String::from("tools"), Value::Array(tools));
+        }
+        toolsets.push(Value::Object(group_obj));
     }
 
     let gui_list = crate::gui_tools::list_gui_tools();
-    let gui_summaries: Vec<Value> = gui_list
-        .iter()
-        .map(|tool| {
-            json!({
-                "name": tool.name,
-                "description": tool.description,
-                "annotations": tool.annotations,
+    let mut gui_obj = serde_json::Map::new();
+    gui_obj.insert(String::from("group"), Value::String(String::from("gui")));
+    gui_obj.insert(String::from("title"), Value::String(String::from("GUI Automation")));
+    gui_obj.insert(String::from("enabled"), Value::Bool(state.is_gui_toolset_enabled()));
+    gui_obj.insert(String::from("tool_count"), json!(gui_list.len()));
+    if include_tools && group_filter.is_none() {
+        let gui_summaries: Vec<Value> = gui_list
+            .iter()
+            .map(|tool| {
+                if full_detail {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "annotations": tool.annotations,
+                    })
+                } else {
+                    json!({
+                        "name": tool.name,
+                        "annotations": tool.annotations,
+                    })
+                }
             })
-        })
-        .collect();
+            .collect();
+        gui_obj.insert(String::from("tools"), Value::Array(gui_summaries));
+    }
 
     let mut enabled_groups: Vec<&'static str> = enabled.iter().copied().map(CommandGroup::as_str).collect();
     if state.is_gui_toolset_enabled() {
@@ -186,13 +302,7 @@ pub fn handle_list_toolsets(state: &McpServerState, args: &Map<String, Value>) -
     }
     ToolCallResult::ok_json(&json!({
         "toolsets": toolsets,
-        "gui_toolset": {
-            "group": "gui",
-            "title": "GUI Automation",
-            "enabled": state.is_gui_toolset_enabled(),
-            "tool_count": gui_summaries.len(),
-            "tools": gui_summaries,
-        },
+        "gui_toolset": Value::Object(gui_obj),
         "enabled_groups": enabled_groups,
         "total_engine_commands": reg.len(),
     }))
