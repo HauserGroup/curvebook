@@ -816,6 +816,42 @@ pub(super) fn run_import_prism(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
     import_prism_with_params(ctx, p)
 }
 
+fn format_import_warning_text(warning: &curvebook_format::ImportWarning) -> String {
+    if warning.source.trim().is_empty() {
+        format!("[{:?}] {}", warning.kind, warning.message)
+    } else {
+        format!("[{:?}] {}: {}", warning.kind, warning.source, warning.message)
+    }
+}
+
+fn finish_project_import_report(
+    ctx: &mut Ctx<'_>,
+    command_id: &str,
+    summary: &str,
+    report: curvebook_format::ImportReport,
+    merge: bool,
+) -> Result<CommandOutcome, EngineError> {
+    let doc = &mut ctx.session.doc;
+    if merge {
+        merge_imported_document(doc, report.document)?;
+    } else {
+        validate_project_cells(0, report.document.total_allocated_cells()?)?;
+        *doc = report.document;
+    }
+    sync_info_linked_data_sheets(doc, &HashSet::new());
+    let mut outcome = CommandOutcome::mutated(
+        command_id,
+        summary,
+        json!({
+            "title": doc.title,
+            "sheet_count": doc.total_sheet_count(),
+            "warnings": report.warnings,
+        }),
+    );
+    outcome.warnings = report.warnings.iter().map(format_import_warning_text).collect();
+    Ok(outcome)
+}
+
 fn import_prism_with_params(ctx: &mut Ctx<'_>, p: ImportPrismParams) -> Result<CommandOutcome, EngineError> {
     let bytes = if let Some(path) = p.path.as_deref() {
         ctx.session.path_policy.read_binary_file(path, "archive", MAX_ARCHIVE_FILE_BYTES)?
@@ -830,23 +866,7 @@ fn import_prism_with_params(ctx: &mut Ctx<'_>, p: ImportPrismParams) -> Result<C
     };
 
     let report = import_prism_bytes(&bytes)?;
-    let doc = &mut ctx.session.doc;
-    if p.merge.unwrap_or(false) {
-        merge_imported_document(doc, report.document)?;
-    } else {
-        validate_project_cells(0, report.document.total_allocated_cells()?)?;
-        *doc = report.document;
-    }
-    sync_info_linked_data_sheets(doc, &HashSet::new());
-    Ok(CommandOutcome::mutated(
-        "table.importPrism",
-        "imported external archive",
-        json!({
-            "title": doc.title,
-            "sheet_count": doc.total_sheet_count(),
-            "warnings": report.warnings,
-        }),
-    ))
+    finish_project_import_report(ctx, "table.importPrism", "imported external archive", report, p.merge.unwrap_or(false))
 }
 
 // ---------------------------------------------------------------------------
@@ -890,23 +910,7 @@ pub(super) fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
             .with_remediation("Provide an XML `path`, inline `xml` string, or `bytes_base64`."));
     };
 
-    let doc = &mut ctx.session.doc;
-    if p.merge.unwrap_or(false) {
-        merge_imported_document(doc, report.document)?;
-    } else {
-        validate_project_cells(0, report.document.total_allocated_cells()?)?;
-        *doc = report.document;
-    }
-    sync_info_linked_data_sheets(doc, &HashSet::new());
-    Ok(CommandOutcome::mutated(
-        "table.importPzfx",
-        "imported XML project",
-        json!({
-            "title": doc.title,
-            "sheet_count": doc.total_sheet_count(),
-            "warnings": report.warnings,
-        }),
-    ))
+    finish_project_import_report(ctx, "table.importPzfx", "imported XML project", report, p.merge.unwrap_or(false))
 }
 
 // ---------------------------------------------------------------------------

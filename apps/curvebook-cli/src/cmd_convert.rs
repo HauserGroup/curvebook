@@ -183,6 +183,9 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
             let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
             println!("{text}");
         } else {
+            for warning in &loaded.warnings {
+                eprintln!("warning: {warning}");
+            }
             println!(
                 "{verb} `{}` ({}) -> `{}` ({}, {} bytes)",
                 parsed.input_path, loaded.format_tag, summary.out_path, summary.format, summary.bytes_written
@@ -454,7 +457,18 @@ fn load_native_archive(bytes: &[u8]) -> Result<LoadedProject, CliError> {
 }
 
 fn load_import_report(report: ImportReport, format_tag: &'static str) -> Result<LoadedProject, CliError> {
-    let warnings = report.warnings.into_iter().map(|w| w.message).collect();
+    let warnings =
+        report
+            .warnings
+            .into_iter()
+            .map(|w| {
+                if w.source.trim().is_empty() {
+                    format!("[{:?}] {}", w.kind, w.message)
+                } else {
+                    format!("[{:?}] {}: {}", w.kind, w.source, w.message)
+                }
+            })
+            .collect();
     Ok(LoadedProject { doc: report.document, format_tag, warnings })
 }
 
