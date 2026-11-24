@@ -71,7 +71,7 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 
 | Folder | Holds |
 |---|---|
-| top level | Entry points, gate-checked governance files (`ROADMAP.md`, `STATUS.md`, `gui-workflows.md`), generated `commands.md`, contributor guides the documentation site links to, and the Pages files (`index.html`, `privacy.html`, `site.css`, `.nojekyll`) |
+| top level | Entry points, gate-checked governance files (`ROADMAP.md`, `STATUS.md`, `gui-workflows.md`), generated `commands.md`, contributor guides the documentation site links to, and the Pages files (`index.html`, `privacy.html`, `site.css`) |
 | `reference/` | User documentation rendered to the documentation site |
 | `implementation/` | Domain implementation specifications |
 | `evidence/` | Capability evidence checklists |

@@ -382,7 +382,7 @@ Owner: maintainers · Status: in progress · Was: Maintainer request 2026-11-18;
 
 The site itself: generator, page template, navigation, versioned publication, and the gates that keep it complete. Content comes from `R12.3`, `R12.4`, and `R12.5`.
 
-- [ ] Push the pending landing-page Alpha wording and the `README.md` website/release links, then record the public-result checks in [`github-pages.md`](release/github-pages.md). Pages is already enabled from `main` `/docs` at <https://hausergroup.github.io/curvebook/>. *(from R0.14)*
+- [ ] Push the pending landing-page Alpha wording and the `README.md` website/release links, then record the public-result checks in [`github-pages.md`](release/github-pages.md). Pages is published at <https://hausergroup.github.io/curvebook/> via [`.github/workflows/pages.yml`](../.github/workflows/pages.yml) (`R12.9`). *(from R0.14)*
 - [x] **Generator:** add `cargo xtask docs-site` that renders hand-written Markdown sources and generated registry pages into static HTML. Use a pure-Rust Markdown renderer with an allow-listed licence (`cargo xtask licenses`, `cargo deny`), added to `xtask` only. Output is deterministic (stable ordering, no timestamps beyond the release date). Write local previews to `target/docs-site/` (gitignored). *(Done 2026-11-18 in `xtask/src/docs_site/` with zero new external Cargo dependencies; `r12_docs_site` `3 passed`.)*
 - [x] **Template:** one original page template in the landing page's Classic coral design ([`github-pages.md#design-decisions`](release/github-pages.md#design-decisions)): skip link, semantic headings, per-page contents, previous/next links, a version banner naming the documented release, visible focus, AA contrast, and reflow at narrow widths without horizontal scrolling. Local HTML/CSS/PNG only: no scripts, forms, external fonts, or background requests. Keep the landing page's content-security and referrer policies. *(Done 2026-11-18 in `xtask/src/docs_site/template.rs` and `docs/site.css`.)*
 - [x] **Navigation:** section index pages following the site map, an A–Z index of analyses, fit equations, graph types, table types, commands, MCP tools, CLI commands, and settings, and a glossary. Every reference entry has a stable fragment ID so other pages and the application can link to it. *(Done 2026-11-18 across `40` generated HTML pages in `xtask/src/docs_site/sitemap.rs` and [`glossary.md`](reference/glossary.md).)*
@@ -443,7 +443,7 @@ People who need to open an existing `.pzfx` or `.prism` file, or who search for 
 - [ ] Follow-ups need their own decisions: publish only the generated site instead of the whole `docs/` folder (now [`R12.9`](#r129-publish-only-the-site-on-pages)), and add task-oriented analysis pages once `R12.2` starts.
 
 ### R12.9 Publish only the site on Pages
-Owner: maintainers · Status: in progress — claimed: jsture, branch `chore/R12.9-pages-publish-set` · Was: split from `R12.8` 2026-11-24 · Est. note: 4–8 h · Depends on: `R12.8` · Gate: none
+Owner: maintainers · Status: done · Was: split from `R12.8` 2026-11-24 · Est. note: 4–8 h · Depends on: `R12.8` · Gate: none
 
 Pages currently serves every file under `docs/` from `main`, so internal Markdown (roadmap, audits, planning, evidence, reference sources, schemas) is reachable and indexable next to the site. The repository stays public; this removes the duplicate website copies, not access to the files.
 
@@ -451,7 +451,7 @@ Pages currently serves every file under `docs/` from `main`, so internal Markdow
 - [x] **Staging command:** `cargo xtask pages-stage <dir>` copies only the listed files and fails if a staged page links to a local file that was not staged. *(Done 2026-11-24; also runs inside `cargo xtask docs-site --check`, and `--list` / `--check` inspect the list.)*
 - [x] **Deploy workflow:** `.github/workflows/pages.yml` stages the site and deploys it with the Pages Actions source. Only its `deploy` job may declare `pages: write` and `id-token: write`, enforced by `cargo xtask telemetry` and recorded in `AGENTS.md`. *(Done 2026-11-24 in [`pages.yml`](../.github/workflows/pages.yml); actions pinned by commit SHA.)*
 - [x] **Docs:** [`github-pages.md`](release/github-pages.md) describes the publish list, the Actions source, and the one-time switch-over. *(Done 2026-11-24 in [`github-pages.md`](release/github-pages.md#what-pages-publishes-r129).)*
-- [ ] **Switch-over:** a maintainer sets **Settings → Pages → Source** to **GitHub Actions**, runs the workflow, checks that site pages return 200 and internal files such as `/ROADMAP.md` return 404, then removes `docs/.nojekyll` and the `R12.1` note that Pages publishes from `main` `/docs` ([steps](release/github-pages.md#what-pages-publishes-r129)). *(Maintainer action.)*
+- [x] **Switch-over:** a maintainer sets **Settings → Pages → Source** to **GitHub Actions**, runs the workflow, checks that site pages return 200 and internal files such as `/ROADMAP.md` return 404, then removes `docs/.nojekyll` and the `R12.1` note that Pages publishes from `main` `/docs` ([steps](release/github-pages.md#what-pages-publishes-r129)). *(Done 2026-11-24: switched to GitHub Actions, removed `docs/.nojekyll`, and updated the `R12.1` note.)*
 
 ---
 
