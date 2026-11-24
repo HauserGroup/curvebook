@@ -1,7 +1,7 @@
 # CurveBook Overall GUI Layout Specification
 
-> **Scope:** Canonical clean-room layout, information-hierarchy, responsive-geometry, and interaction specification for the CurveBook desktop graphical user interface (`apps/curvebook`, `crates/ui-egui`) built under [`R15`](../history/roadmap/r15.md#r15-modern-egui-desktop-gui-overhaul-beta-gate) (**Beta** gate). In `R15.5`, desktop cutover deletes the legacy `LayoutTree`, `SoftwareTextPainter`, `layout/paint.rs`, `compositor.rs`, and legacy `HumanPathDriver` code immediately without retaining legacy GUI code for `apps/curvebook-web`; browser (`apps/curvebook-web`) `eframe::WebRunner` migration waits strictly until post-Beta [`R11.11`](../ROADMAP.md#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) (**1.0** gate).
-> **Related Tracked Docs:** [`../architecture.md`](../architecture.md), [`../evidence/user-interface.md`](../evidence/user-interface.md), [`../gui-workflows.md`](../gui-workflows.md), [`../localization.md`](../localization.md), [`../ROADMAP.md`](../ROADMAP.md), [`../../AGENTS.md`](../../AGENTS.md).
+> **Scope:** Canonical clean-room layout, information-hierarchy, responsive-geometry, and interaction specification for the CurveBook desktop graphical user interface (`apps/curvebook`, `crates/ui-egui`) built under [`R15`](../history/roadmap/r15.md#r15-modern-egui-desktop-gui-overhaul-beta-gate) (**Beta** gate) and refined under [`R20`](../ROADMAP.md#r20-desktop-gui-visual-system--layout-overhaul) (`R20.1`–`R20.4`, non-blocking for **Beta**). In `R15.5`, desktop cutover deletes the legacy `LayoutTree`, `SoftwareTextPainter`, `layout/paint.rs`, `compositor.rs`, and legacy `HumanPathDriver` code immediately without retaining legacy GUI code for `apps/curvebook-web`; browser (`apps/curvebook-web`) `eframe::WebRunner` migration waits strictly until post-Beta [`R11.11`](../ROADMAP.md#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) (**1.0** gate). Statements tagged **`[Target]`** specify planned `R20.2`–`R20.4` refinements alongside **`[Implemented]`** `R15` baseline behaviour.
+> **Related Tracked Docs:** [`../design-language.md`](../design-language.md), [`../architecture.md`](../architecture.md), [`../evidence/user-interface.md`](../evidence/user-interface.md), [`../gui-workflows.md`](../gui-workflows.md), [`../localization.md`](../localization.md), [`../ROADMAP.md`](../ROADMAP.md), [`../../AGENTS.md`](../../AGENTS.md).
 
 ---
 
@@ -17,8 +17,8 @@ CurveBook is an integrated scientific workbench for structured tabular data entr
    All chrome regions, scrollable viewports, hit boxes, clip rectangles, focus rings, and accessibility roles derive from a single settled stock `egui 0.37` layout pass (`!ctx.will_discard()`) paired with `egui` AccessKit output and a thin `FrameInspectMeta` side-table, plus a pure-Rust CPU `egui` tessellation rasterizer for GPU-less CI screenshots, so rendered pixels, pointer hit-testing, and desktop accessibility nodes never diverge (`verify_pixel_to_hit_box_parity`). Legacy `LayoutTree` is deleted on desktop cutover (`R15.5`); browser `eframe::WebRunner` adoption awaits post-Beta [`R11.11`](../ROADMAP.md#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) (**1.0**).
 3. **Modeless Inspection First, Deep Modals on Escalation:**
    Everyday exploration—changing symbol encodings, rescaling axes, editing column formulas, inspecting assumption checklists, or drilling from an outlier point back to its source row—happens live inside the **Trailing Inspector & Studio Dock** with immediate undoable canvas/grid feedback. Multi-tab modal dialogs (`Edit Analysis Parameters`, `Format Graph`, `Format Axes`, `Import & Paste Special`) handle multi-property batch configuration with explicit `Apply` (non-closing preview), `Cancel`, and primary commit actions.
-4. **Original Visual Composition & Attributed Component Reuse:**
-   CurveBook uses an original two-tier scientific header (`Application Bar` + single-row `Contextual Action Strip`), a native split-comparison center stage, and a unified context-sensitive right-hand studio rail—deliberately avoiding tall, crowded multi-row legacy icon ribbons. Permissively licensed pure-`egui` widget helpers and AccessKit/top-bar utilities adapted under [`../../AGENTS.md`](../../AGENTS.md) follow the attribution requirements in [`../../ATTRIBUTION.md`](../../ATTRIBUTION.md) and [`../../NOTICE`](../../NOTICE) while retaining CurveBook's own terminology, layout proportions, original vector iconography ([`../../ASSETS.md`](../../ASSETS.md)), and color tokens.
+4. **Surface-First Single Theme, Single-Owner Navigation & Attributed Reuse:**
+   CurveBook uses an original two-tier scientific header (`Application Bar` + single-row `Contextual Action Strip`), single-owner `Project Navigator` sheet browsing, a native split-comparison center stage with an explicit three-way targeting contract (§2.4), and a unified context-sensitive right-hand studio rail—built from one canonical theme and widget module ([`../design-language.md`](../design-language.md)) using three opaque neutral surface tiers rather than repeated widget outlines. Permissively licensed pure-`egui` widget helpers and AccessKit/top-bar utilities adapted under [`../../AGENTS.md`](../../AGENTS.md) follow the attribution requirements in [`../../ATTRIBUTION.md`](../../ATTRIBUTION.md) and [`../../NOTICE`](../../NOTICE) while retaining CurveBook's own terminology, layout proportions, original vector iconography ([`../../ASSETS.md`](../../ASSETS.md)), and color tokens.
 5. **Zero-Crash, Zero-Telemetry, Multilingual & HiDPI-Exact Geometry:**
    Every layout calculation uses saturating/checked arithmetic down to degenerate `0×0` and `64×64` viewports without panicking; scales cleanly across `1.0x`–`4.0x` HiDPI factors; enforces text fitting across all `14` Beta-active LTR/CJK locales (with the `4` RTL locales `ar`, `fa`, `he`, `ur` and horizontal RTL mirroring gated on **1.0** and mapped cleanly to `"en"` on saved Beta `preferences.json` files while keeping mathematical coordinate axes and formulas left-to-right); and never initiates network egress.
 
@@ -29,59 +29,57 @@ CurveBook is an integrated scientific workbench for structured tabular data entr
 ### 2.1 Canonical Shell Anatomy (LTR Orientation)
 
 ```text
-+--------------------------------------------------------------------------------------------------+
-| [Home] [File Edit View Insert Data Analyze Graph Help]               [Project/Doc] [Commands][Mode]|  32 pt  Tier 1: Application & Document Bar
-+--------------------------------------------------------------------------------------------------+
-| [+ Sheet v] [Undo Redo] | [Primary Sheet CTA: Analyze... / Fit... / Graph Type...] [Quick Tools] |  38 pt  Tier 2: Contextual Action Strip
-+-----------------------+--------------------------------------------------+-----------------------+
-| [Search sheets...  x] | [Primary Pane Header / Sub-Tabs / Split Controls]| [Context Studio Tabs] |
-| v Data Tables      [+] |                                                  |                       |
-|   # Dose-Response     |                                                  |  Live Context-Driven  |
-| v Info             [+] |           CENTER WORKSPACE STAGE                 |  Inspector / Studio   |
-|   i Experiment Meta   |                                                  |                       |
-| v Results          [+] |   - Single Sheet (Grid / Results / Info / Plot)  |  - MV Formula Studio  |
-|   = 4PL Curve Fit     |   - Split Comparison (Primary || Secondary)      |  - Selection & Links  |
-| v Graphs           [+] |   - Multi-Sheet Thumbnail Gallery                |  - Interpret Drawer   |
-|   * Dose Curve        |   - Empty-Project / New-Sheet Launcher           |  - Graph Inspector    |
-| v Layouts          [+] |   - Prospective Power & Sample Size Studio       |  - Layout Composer    |
-|   [] Manuscript Fig 1 |                                                  |  - Point Drill-Back   |
-|-----------------------|   + [Floating Callout Notes]                     |                       |
-| v Lineage (Family)    |   + [Bottom-Edge Non-Blocking Diagnostic Banner] |  [All Options...]     |
-|   # Dose-Response     |                                                  |                       |
-|     = 4PL Curve Fit   |                                                  |                       |
-|     * Dose Curve      |                                                  |                       |
-|     [] Manuscript Fig |                                                  |                       |
-+-----------------------+--------------------------------------------------+-----------------------+
-| [< >] [Data|Info|Res|Graph|Layout|Gallery] [Sheet v] [Link OK] | Selection/Coords | [CVD] [100%] |  26 pt  Tier 3: Workspace Status & Nav Bar
-+--------------------------------------------------------------------------------------------------+
-     240 pt (resizable)                Protected Flexible Stage                 280 pt (resizable)
++-----------------------------------------------------------------------------------------------------------------+
+| [Home] [File Edit View Insert Data Analyze Graph Help]                     [Project] [Find...] [Cmd+K] [Split]  |  32 pt  Tier 1: Application Bar
++-----------------------------------------------------------------------------------------------------------------+
+| [+ Sheet v] [Undo Redo] | [Primary CTA: Analyze... / Graph Type...]  Ghost Quick Tools                    [...] |  36 pt* Tier 2: Action Strip (no sheet tabs)
++-----------------------+-----------------------------------------------+-----------------------------------------+
+| Project Navigator [<<]| [Dose-Response v]      | [4PL Curve Fit v] [x]| Graph Inspector · 4PL Fit     [Pin][>>] |  32 pt* Shared Panel Header Baseline
+|-----------------------+------------------------+----------------------+-----------------------------------------+
+| [Search...] [All v]   |   #  | X     | Y1 | Y2 |                      | Data  Axes  Legend  Annotations  Canvas |
+| > Data Tables         |   1  | 0.01  |98.4|97.1|   Live Graph Sheet   | ────                                    |
+|   Dose-Response       |   2  | 0.10  |97.9|98.1|  (Fit Zoom Active)   |  [x] Data points                        |
+|   + New Data Table... |   3  | 1.00  |74.5|71.0|                      |  [x] Fitted curve overlay               |
+| > Info                |                        |  Draggable 40/60     |                                         |
+| > Results             |   Unified Virtualized  |  Split (1 pt divider,|  Series: (●) Compound 7                 |
+| > Graphs              |       DataGrid         |  8 pt hit slop)      |  Shape:  [ ○ | □ | △ | ◇ ]              |
+| > Layouts             |  (Contiguous Hairlines)|                      |                                         |
+|-----------------------|                        |                      |                                         |
+| Family (Lineage)      |   + [Floating Notes]   | + [Bottom Banner]    |  [Format Graph...]                      |
+|   Dose-Response       |                        |                      |  [Apply Style From...]                  |
+|     4PL Curve Fit     |                        |                      |                                         |
++-----------------------+------------------------+----------------------+-----------------------------------------+
+| [< >] [Gallery] [Sheet v*] [Link OK] | Quick-Stats / Canvas Size               | [CVD] [- Fit v +]              |  26 pt  Tier 3: Status Footer
++-----------------------------------------------------------------------------------------------------------------+
+   232 pt* (192-380 pt)              Protected Flexible Center Stage                  276 pt* (240-420 pt)
+   * [Target] provisional R20.2-R20.4 metrics (Sheet v shown in Footer only when Navigator is collapsed)
 ```
 
 ```mermaid
 flowchart TB
-    subgraph TopChrome["Top Window Chrome (70 pt total)"]
-        AppBar["Tier 1: Application & Document Bar (32 pt)<br/>Home | Menus | Active Project Header | Command Search (Cmd/Ctrl+K) | Workspace Preset"]
-        ActionStrip["Tier 2: Contextual Action Strip (38 pt)<br/>Sheet Lifecycle & Undo | Sheet-Adaptive Primary CTAs | Archetype Quick Actions | Overflow (...)"]
+    subgraph TopChrome["Top Window Chrome (68 pt target / 70 pt baseline)"]
+        AppBar["Tier 1: Application Bar (32 pt) — Home, Menus, Project Title, Find, Cmd/Ctrl+K, Split"]
+        ActionStrip["Tier 2: Contextual Action Strip (36 pt target / 38 pt baseline) — Fixed Anchors, Single Primary CTA, Ghost Tools, Overflow"]
     end
 
-    subgraph Body["Three-Column Workspace Body (RTL mirroring at 1.0)"]
-        subgraph LeadingDock["Leading Dock (240 pt default, 180-380 pt, collapsible to 36 pt)"]
-            NavTree["Project Navigator (~65%)<br/>Search | 5 Folders or Nested Data+Results | Inline +New"]
-            FamilyDAG["Scoped Lineage ('Family') (~35%)<br/>Upstream/Downstream DAG & Multi-Source Highlighting"]
+    subgraph Body["Three-Column Workspace Body (Shared 32 pt provisional panel header baseline; RTL at 1.0)"]
+        subgraph LeadingDock["Leading Dock (232 pt target, 192-380 pt, 36 pt rail)"]
+            NavTree["Project Navigator (~65%) — Sole Primary Sheet Browser, Search + Inline Kind Filter, 5 Folders or Nested Data+Results"]
+            FamilyDAG["Scoped Lineage ('Family') (~35%) — Upstream/Downstream DAG & Multi-Source Highlighting"]
         end
 
-        subgraph CenterStage["Protected Center Stage (>= 360 pt)"]
-            PrimaryPane["Primary Sheet Viewport<br/>Data Grid | Results | Info | Graph | Layout | Launcher | Gallery | Power Studio"]
-            SplitPane["Optional Split Secondary Viewport (Cmd/Ctrl+\\)<br/>15%-85% Draggable Divider + Two-Way Point Brushing"]
-            Overlays["Non-Modal Stage Overlays<br/>Draggable Floating Notes | Bottom-Edge Diagnostic & Clipping Banners"]
+        subgraph CenterStage["Protected Center Stage (760 pt preferred / 720 pt horizontal split floor)"]
+            PrimaryPane["Left / Primary Split Pane — Unified DataGrid, Results, Info, Graph, Layout, Launcher, Gallery, or Power Studio"]
+            SplitPane["Right / Secondary Split Pane (Cmd/Ctrl+\\) — 40/60 Data+Graph Default, 1 pt Divider, Two-Way Point Brushing"]
+            Overlays["Non-Modal Stage Overlays — Draggable Floating Notes & Bottom-Edge Diagnostic Banners"]
         end
 
-        subgraph TrailingDock["Trailing Studio Dock (280 pt default, 220-420 pt, collapsible to 36 pt)"]
-            Studio["Context-Sensitive Inspector<br/>MV Formula & Roles | Table Selection | Results Interpret | Graph 5-Tab + Point Drill-Back | Page Layout"]
+        subgraph TrailingDock["Trailing Studio Dock (276 pt target, 240-420 pt, 36 pt rail)"]
+            Studio["Context-Sensitive Inspector — Explicit Target Header + Pin Toggle, Underline Tabs, Standard Controls"]
         end
     end
 
-    Footer["Tier 3: Status, Quick-Stats & Viewport Footer (26 pt)<br/>History < > | Section Pills | Active Sheet & Link Status | Live Quick-Stats or Cursor Coords | CVD Preview & Canvas Zoom"]
+    Footer["Tier 3: Status & Viewport Footer (26 pt) — History, Gallery, Collapsed-Nav Sheet Switcher, Link Status, Readout, CVD & Fit Zoom"]
 
     AppBar --> ActionStrip --> Body --> Footer
     NavTree --- FamilyDAG
@@ -94,10 +92,10 @@ Every painted primitive and interactive hit region belongs to a strict z-order p
 
 | Ordinal | `ZLayer` | Contents & Pointer Capture Rules |
 |---:|---|---|
-| `0` | `Workspace` | Docked panels (`AppBar`, `ActionStrip`, `Navigator`, `Family`, `CenterStage`, `TrailingDock`, `StatusBar`), virtualized cells, chart scenes, and scrollbars. |
-| `10` | `FloatingOverlay` | Sheet-anchored `FloatingNote` cards, non-blocking bottom canvas diagnostic banners, active-pane focus ring (`2 px` accent stroke), and linked-region hover badges. |
-| `20` | `SplitHandle` | Draggable resize dividers (`Navigator/Center`, `Navigator/Family`, `Primary/Secondary` center split, `Center/Inspector`, and column-header resize grips). |
-| `30` | `DropdownMenu` | Top menu bar popups, workspace switcher popup, action-strip overflow menu (`⋯`), and workspace combobox lists. |
+| `0` | `Workspace` | Docked panels (`AppBar`, `ActionStrip`, `Navigator`, `Family`, `CenterStage`, `TrailingDock`, `StatusBar`), virtualized contiguous grid cells, chart scenes, and scrollbars. |
+| `10` | `FloatingOverlay` | Sheet-anchored `FloatingNote` cards, non-blocking bottom canvas diagnostic banners, linked-region hover badges, and transient `2 pt` keyboard focus / `F6` landmark cues (`[Target]`: never a permanent full-pane blue border cage over blank canvas or table whitespace). |
+| `20` | `SplitHandle` | Draggable resize dividers (`Navigator/Center`, `Navigator/Family`, `Left/Right` center split, `Center/Inspector`, and column-header resize grips). |
+| `30` | `DropdownMenu` | Top menu bar popups, pane sheet selectors, compact kind filter, action-strip overflow menu (`⋯`), and workspace combobox lists. |
 | `40` | `ModalBackdrop` | Dimmed translucent full-window scrim (`rgba(15, 23, 42, 128)`). Captures **100%** of outside pointer clicks and wheel events when any modal is active. |
 | `50` | `ModalDialog` | Active modal dialog window, `Cmd/Ctrl+K` Command Palette, or nested detail sub-modal (`Additional Ticks & Reference Lines`, `Clone Pipeline Options`). |
 | `60` | `ModalDropdown` | Combobox/dropdown popups, color-swatch popovers, and constant-hook pickers opened *inside* an active modal dialog. |
@@ -110,16 +108,64 @@ Minimum supported desktop window size is **`640 × 420 pt`** (default **`1280 ×
 
 | Breakpoint | Logical Width (`pt`) | Layout Behavior & Deterministic Auto-Collapse Order |
 |---|---|---|
-| **Wide Desktop** | `>= 1440 pt` | Both `Navigator` (`240 pt`) and `TrailingDock` (`280–310 pt`) open comfortably alongside a `>= 900 pt` `CenterStage` (ideal for side-by-side Split Comparison). `AppBar` shows full `Cmd/Ctrl+K` search field and workspace preset label. |
-| **Standard Laptop** | `960 – 1439 pt` | `Navigator` (`210–240 pt`), `CenterStage` (`>= 480 pt`), and `TrailingDock` (`250–280 pt`) remain simultaneously visible; `ActionStrip` condenses secondary labels into icon+tooltip buttons before spilling to `⋯`. |
-| **Compact / Tablet** | `640 – 959 pt` | Auto-collapses in strict priority order to preserve `>= 360 pt` for `CenterStage`: (1) `AppBar` search field condenses to a search icon; (2) `TrailingDock` collapses into a `36 pt` vertical tab strip (opening as an overlay flyout when clicked); (3) if `< 760 pt`, `Navigator` collapses into a `36 pt` leading icon strip; (4) Center Split switches from horizontal (`Left || Right`) to vertical (`Top / Bottom`) below `720 pt`. |
+| **Wide Desktop** | `>= 1440 pt` | Both `Navigator` (`232 pt` `[Target]` / `240 pt` `[Implemented]`) and `TrailingDock` (`276–310 pt`) open comfortably alongside a wide `CenterStage` (`>= 900 pt`), giving horizontal Split Comparison full breathing room. `AppBar` shows the inline search/find capsule and `Cmd/Ctrl+K` button. |
+| **Standard Laptop** | `960 – 1439 pt` | In single-sheet mode, `Navigator` (`192–232 pt`), `CenterStage` (`>= 480 pt`), and `TrailingDock` (`240–276 pt`) stay visible simultaneously; `ActionStrip` sheds `Overflow` then `Secondary` actions into `⋯` via `fit_ranked_toolbar`. In Split Comparison, the usable-width cascade below governs dock narrowing and collapse. |
+| **Compact / Tablet** | `640 – 959 pt` | Auto-collapses in strict priority order to preserve `>= 360 pt` for `CenterStage`: (1) `AppBar` search/find condenses to icons; (2) `TrailingDock` collapses into a `36 pt` vertical rail (opening as an overlay flyout when explicitly expanded); (3) if `< 760 pt`, `Navigator` collapses into a `36 pt` leading rail (overlay flyout when expanded); (4) Split Comparison follows the narrow-viewport cascade below. |
+
+#### Split-Comparison Usable-Width & Narrow-Viewport Degradation Cascade (`[Target]`)
+
+Split Comparison computes all thresholds against the **settled logical center area** (the logical `pt` width and height remaining inside `CenterStage` after OS display scaling and CurveBook `ui_scale` have already been applied once by `egui`). Increased text scale (`ui_scale > 1.0`) therefore shrinks logical viewport dimensions naturally and flows through the identical deterministic cascade—always preserving both materialized split IDs (`primary_sheet_id`, `secondary_sheet_id`) so widening restores the split pair intact:
+
+- **Preferred horizontal split width (`split_center_preferred_w`):** **`760 pt`** *(provisional target, validated empirically at default and `ui_scale > 1.0`)* with a draggable **`40/60`** initial ratio for `Data + Graph` (`50/50` for symmetric sheet pairs).
+- **Hard horizontal split floor (`split_center_min_horizontal_w`):** **`720 pt`**. Widths inside the **`720–759 pt` compact horizontal band** are explicitly accepted as horizontal when docks have already narrowed to their minimums or remain user-expanded.
+
+Deterministic degradation order whenever Split Comparison is active:
+
+1. **Narrow docks first:** if settled logical center width would fall below `760 pt`, narrow Leading Navigator (`232 -> 192 pt`) and Trailing Studio (`276 -> 240 pt`) proportionally before collapsing either dock.
+2. **Collapse Trailing Studio (unless user-expanded):** if settled logical center width still falls below `760 pt`, collapse Trailing Studio to its `36 pt` rail—unless the user explicitly expanded it during the current split session, in which case it stays open (rendering as an overlay flyout in Compact `< 960 pt` windows) and the remaining center width recalculates.
+3. **Collapse Leading Navigator (unless user-expanded):** if settled logical center width still falls below `760 pt`, collapse Leading Navigator to its `36 pt` rail (with the same overlay-flyout rule if user-expanded in Compact `< 960 pt` windows; the Bottom Footer exposes a compact Active Sheet Switcher whenever Navigator is collapsed).
+4. **Vertical split (`< 720 pt` width, `>= 520 pt` height):** whenever settled logical center width drops below the **`720 pt` hard floor**—whether from a narrow window, user-expanded docks, or `ui_scale > 1.0`—and settled logical center height is `>= 520 pt`, switch Split Comparison automatically from Horizontal (`Left || Right`) to Vertical (`Top / Bottom`).
+5. **Single-pane compact flip fallback (`< 720 pt` width AND `< 520 pt` height, e.g., `640 × 420 pt` or high `ui_scale`):** when neither horizontal nor vertical split can give both panes usable room, temporarily show one split pane at a time with a compact segmented pane-flip control in the shared `32 pt` pane header (`[Dose-Response Assay | 4PL Curve Fit]`), keeping both materialized split IDs intact until usable space returns. **Invariant:** in this mode the visible pane always holds `doc.active_sheet_id`. Any action that makes the hidden split sheet the command target (a `Project Navigator` or footer sheet-switcher selection) also flips to that pane, so the visible sheet and the Tier 2 toolbar target never differ.
 
 ### 2.4 Keyboard Focus Cycling & RTL Mirroring
 
+#### Three-Way Split-View Targeting & Keyboard Focus Contract (`[Target]`)
+
+To prevent split-pane focus, Navigator selection, and Inspector controls from fighting over one implicit sheet ID—and to retire the button-based split preview fallback—Split Comparison separates **three independent states** with explicit persistence and command boundaries:
+
+1. **Contextual Command Target = Persisted `doc.active_sheet_id`:**
+   - The contextual command target **is** `ProjectDocument::active_sheet_id` (`crates/doc/src/project.rs`), persisted in `.curvebook` / `.prism` archives and updated solely through `curvebook-engine` (`sheet.select`).
+   - **Preserved `sheet.select` semantics:** `sheet.select` is registered with `Effects::CHANGES_UI_STATE | Effects::IDEMPOTENT` (not `MUTATES_DOCUMENT`) and returns `CommandOutcome::read_only(...)`, so changing the active command target **never creates an undo step, never marks the session dirty, and never appends to `ops.journal`**.
+   - **Family-anchor preservation:** Selecting a sheet in `Project Navigator` calls `sheet.select` with default `mode: "navigator"` (updating both `active_sheet_id` and `family_anchor_sheet_id`). **Activating a split pane or switching panes in compact fallback calls `sheet.select` with `mode: "family"`**, updating `doc.active_sheet_id` while **preserving `family_anchor_sheet_id`** so editing cells in a split table does not re-anchor or churn the Family lineage tree.
+   - Drives Tier 2 contextual actions (`Analyze…`, `Graph Type…`, `Export…`) and Navigator/Family active-row selection.
+2. **Pane Display Assignment (`primary_sheet_id`, `secondary_sheet_id` — Ephemeral UI View State):**
+   - Materialized as concrete `SheetId`s inside `SplitWorkspaceState` the instant Split Comparison opens; never left `None` to drift with `doc.active_sheet_id` (falling back only if an assigned sheet is deleted) and never persisted to `ProjectDocument` or `ops.journal`.
+   - Both panes instantiate full native renderers parameterized by explicit `sheet_id`—including the unified virtualized `DataGrid` with independent per-pane scroll and cell-selection state—**retiring `render_split_non_column_preview` and `render_split_column_sheet_preview`**.
+3. **Keyboard Focus (`focused_pane`, focused widget/cell) & Inspector Target + Pin (`inspector_target_sheet_id`, `inspector_pinned` — Ephemeral UI View State):**
+   - Strictly ephemeral UI view state (never persisted or journaled).
+   - **Keyboard Focus** controls solely where typing, arrow keys, `Tab`, `Enter`, and `F6` route. Indicated by a `2 pt` `focus_ring` on the active widget or grid cell, a quiet `2 pt` top accent bar on the focused split-pane header, and a transient `2 pt` landmark cue during `F6` traversal—never a permanent full-pane blue cage over blank whitespace.
+   - **Inspector Target, Auto-Pin Default & Pin Lifecycle:** When `inspector_pinned == false`, `inspector_target_sheet_id` follows `doc.active_sheet_id`. **Opening the `Data + Graph` split preset automatically sets `inspector_target_sheet_id` to the graph sheet and sets `inspector_pinned = true`**, showing the explicit target title and an interactive `Pinned` toggle in the Trailing Studio header (e.g., `Graph Inspector · 4PL Curve Fit [Pinned]`). Thus editing a split table cell, watching the fitted curve refit, and adjusting graph settings works immediately with **zero manual pinning**. *(Auto-pin applies only to the `Data + Graph` preset. The other shipped presets, `Data + Results` and `2-Up (50 / 50)`, open unpinned, with the Inspector following `doc.active_sheet_id`.)* **Pin invalidation:** whenever the pinned sheet leaves the displayed split pair (via pane selector or Navigator replacement), is deleted (`sheet.delete`), or Split Comparison closes (`ui.split.toggle { enabled: false }`), `inspector_pinned` resets automatically to `false` and `inspector_target_sheet_id` falls back to `doc.active_sheet_id`.
+   - **UI Call-Site Explicit `sheet_id` Audit Mandate:** Engine commands (`graph.setSpec`, `graph.setSeries`, `graph.setAxes`, `table.setCell`, etc.) already require `sheet_id`. Every Trailing Studio Inspector UI call site in `crates/ui-egui` MUST fill `sheet_id` from `inspector_target_sheet_id`, and every split `DataGrid` UI call site MUST fill `sheet_id` from its own pane's materialized `SheetId`—never implicitly reading `doc.active_sheet_id`.
+   - **Document-Scoped vs. Sheet-Local Shortcuts:** Project-wide `Undo` / `Redo` (`edit.undo` / `edit.redo` in `crates/engine/src/lib.rs`) remain document-scoped across the session and are never treated as sheet-local grid shortcuts. Sheet-local grid shortcuts (`Enter`, `Tab`, arrows, `Copy`/`Paste`, `Exclude`, `Delete`) target the focused pane's explicit `sheet_id`.
+
+| User Action | Pane Display (`primary_sheet_id`, `secondary_sheet_id`) | Keyboard Focus (`focused_pane` / widget) | Command Target (`doc.active_sheet_id`) | Inspector Target (`inspector_target_sheet_id`, `inspector_pinned`) |
+|---|---|---|---|---|
+| **Click or edit a cell in a split `DataGrid`** | Unchanged | Moves to clicked cell; inline edits & sheet-local grid shortcuts commit using this pane's explicit `sheet_id` | **Updates** to this pane's `DataSheet` via non-mutating `sheet.select { mode: "family" }` (Tier 2 table actions update; Family anchor preserved) | If `inspector_pinned == true` (default on `Data + Graph`), **stays on pinned target** with visible target title/pin; if unpinned, follows `doc.active_sheet_id` |
+| **Click into a split `GraphSheet` / `LayoutSheet` canvas** | Unchanged | Moves to clicked canvas / mark | **Updates** to this pane's sheet via `sheet.select { mode: "family" }` (Family anchor preserved) | If unpinned, follows `doc.active_sheet_id`; if pinned to another sheet, stays pinned and shows a one-click `Switch to <Sheet>` chip |
+| **Press `F6` / `Shift+F6`** | Unchanged | Cycles visible landmarks only (`Navigator -> Family -> Left Pane -> Right Pane -> Floating Notes -> Trailing Studio`; in the compact single-pane flip, only the visible pane is a stop) with transient `2 pt` cue | **Unchanged** | **Unchanged** |
+| **Select a sheet in `Project Navigator` (or the footer sheet switcher)** | If already displayed in either split pane: **unchanged** (in the compact single-pane flip, that pane also becomes the visible pane). Otherwise: replaces the explicit `SheetId` of the pane holding the previous `doc.active_sheet_id` (falling back to last focused split pane, then Primary) | Stays in Navigator for arrow browsing (moves into pane on `Enter` or pane click) | **Updates** to selected sheet via `sheet.select { mode: "navigator" }` (re-anchors Family as today) | If unpinned, follows selected sheet. If pinned and pinned sheet stays in the sibling pane, stays pinned (showing `Switch to <Sheet>`). If the replaced pane held the pinned sheet, **unpins (`false`)** and follows selected sheet |
+| **Click a control in `Trailing Studio` Inspector** | Unchanged | Moves to clicked Inspector control | **Unchanged** (every Inspector call site passes explicit `inspector_target_sheet_id`) | **Unchanged** (header displays `inspector_target_sheet_id`) |
+| **Change a pane's header sheet selector** | Updates that pane's explicit `SheetId` | Stays in the interacted pane | Updates to the newly assigned sheet via `sheet.select { mode: "family" }` if that pane previously held `doc.active_sheet_id` | Follows if unpinned; if the pinned sheet left the split pair, **unpins (`false`)** and follows `doc.active_sheet_id` |
+| **Click `Swap` (widget `split.swap`; dispatches `ui.split.toggle` with `primary_sheet_id` and `secondary_sheet_id` exchanged, no separate swap command is registered)** | Exchanges pane positions (`primary_sheet_id <-> secondary_sheet_id`) | Moves with the previously focused sheet (or stays on the interacted pane header) | **Unchanged** (stays attached to its sheet regardless of left/right position) | **Unchanged** (both `inspector_target_sheet_id` and `inspector_pinned` stay attached to their sheet) |
+| **Switch visible pane in Compact `< 720 × 520 pt` flip (`[Sheet A \| Sheet B]`)** | Preserves both materialized split IDs while switching which pane is displayed | Moves to newly visible pane | **Updates** to the newly visible sheet via `sheet.select { mode: "family" }` (keeping visible pane and Tier 2 toolbar in sync; Family anchor preserved) | **Preserves `inspector_pinned`** and `inspector_target_sheet_id` while both sheets remain in the active split pair; if unpinned, follows `doc.active_sheet_id` |
+| **Delete pinned sheet (`sheet.delete`) or close Split Comparison** | Clears deleted ID (falling back to surviving sheet) or exits split to `doc.active_sheet_id` | Moves to surviving active pane | Resolves via engine to surviving `doc.active_sheet_id` | **Unpins (`false`)** and resets `inspector_target_sheet_id` to `doc.active_sheet_id` |
+
+#### Landmark Focus Order & RTL Mirroring
+
 - **Pane Focus Traversal (`F6` / `Shift+F6`):** Cycles keyboard focus across visible top-level scopes in deterministic order:
-  `Navigator` -> `Family` (if open) -> `Center Primary` -> `Center Secondary` (if split active) -> `Floating Notes` (if present) -> `Trailing Studio Dock` (if open). The active scope renders a `2 px` high-contrast accent frame.
+  `Navigator` -> `Family` (if open) -> `Left / Primary Pane` -> `Right / Secondary Pane` (if split active and visible; the compact single-pane flip exposes only its visible pane) -> `Floating Notes` (if present) -> `Trailing Studio Dock` (if open). The active landmark renders a transient `2 pt` `focus_ring` cue during keyboard traversal.
 - **RTL Locale Mirroring (`1.0` gate — `ar`, `fa`, `he`, `ur` hidden at Beta with `"en"` fallback in `preferences.json`):**
-  - Horizontal panel docking mirrors cleanly (`Navigator` docks right, `TrailingDock` docks left, `AppBar` menus start right, `StatusBar` zoom moves left, disclosure chevrons and history arrows flip).
+  - Horizontal panel docking mirrors cleanly (`Navigator` docks right, `TrailingDock` docks left, `AppBar` menus start right, `StatusBar` zoom moves left, disclosure triangles and history arrows flip).
   - **Scientific invariance in RTL:** Numeric digits, mathematical expressions (`f(x) = ...`), $\TeX$ equations, and standard Cartesian `X` axes remain left-to-right unless an explicit axis-reversal property is toggled by the user.
 
 ---
@@ -134,21 +180,21 @@ Minimum supported desktop window size is **`640 × 420 pt`** (default **`1280 ×
   - **Menu Bar:** Routed to the native macOS menu bar via macOS-only `muda` (`cfg(target_os = "macos")`, `default-features = false`) while keeping the in-`egui` `MenuBar` active on Windows/Linux/FreeBSD, under `--in-window-menus`, and across `EguiHumanPathDriver`/`egui_kittest` runs with an automated `command_id`/enablement parity test:
     `File` · `Edit` · `View` · `Insert` · `Data` · `Analyze` · `Graph` · `Help`.
 - **Middle Cluster — Active Project Header / Optional Multi-Project Tabs:**
-  - In **Beta**, renders the active project header and dirty-state indicator (`•`) for `apps/curvebook`'s single-session window; multi-project in-window document tabs (`.curvebook` tab strip, `+` new project, OS window drag-out, and `Window › Consolidate / Tile`) are optional post-Beta enhancements.
+  - In **Beta**, renders the active project header and unsaved dirty-state indicator (`•`) for `apps/curvebook`'s single-session window; multi-project in-window document tabs (`.curvebook` tab strip, `+` new project, OS window drag-out, and `Window › Consolidate / Tile`) are deferred post-1.0.
 - **Trailing Cluster (Right-to-Left Fit Solver):**
-  - **Command Search Pill (`Cmd/Ctrl+K`)**: Displays `"Search commands, analyses & sheets (Cmd+K)"` when room permits (`>= 180 pt`), degrading cleanly to a `Search` icon button in narrow windows; disabled while a modal dialog owns focus.
-  - **Split-Workspace Quick Toggle (`Cmd/Ctrl+\`)**: One-click toggle and layout preset menu (`Off`, `Data + Graph`, `Data + Results`, `Results + Graph`, `Swap Panes`).
-  - **Workspace Preset Switcher**: Compact pill (`Default`, `Data Prep`, `Modeling`, `Publication`, `Compact`) that recalls saved panel visibility and widths.
+  - **`[Implemented]` Inline Find Capsule (`Cmd/Ctrl+F`) & Command Palette (`Cmd/Ctrl+K`):** Displays an inline search/find capsule when room permits (`>= 180 pt`), degrading cleanly to icon buttons in narrow windows; disabled while a modal dialog owns focus.
+  - **Split-Workspace Quick Toggle (`Cmd/Ctrl+\`):** One-click toggle and preset menu (`Off`, `Data + Graph`, `Swap Panes`, and orientation options). **`[Target]`** Active split state renders via a subtle recessed pill or active icon tint—never appending `•` (reserved exclusively for unsaved dirty state).
+  - **`[Implemented]` Workspace Presets under `View`:** Workspace layout presets (`Default`, `Data Prep`, `Modeling`, `Publication`, `Compact`) live in the `View` menu rather than competing for horizontal space in Tier 1.
 
 ### 3.2 Tier 2 — Sheet-Adaptive Contextual Action Strip (`38 pt`)
 
-A single, uncluttered horizontal strip divided by subtle `1 pt` vertical rules into semantic groups. Universal left-hand anchors stay in fixed pixel positions across sheet switches so muscle memory never breaks; right-hand groups adapt to the active sheet kind and table archetype:
+A single uncluttered horizontal strip (`38 pt` `[Implemented]`; **`36 pt` `[Target]` provisional height**) divided by subtle `1 pt` `divider` rules into semantic groups. **`[Target]` Single-owner navigation:** Tier 2 never renders duplicate open-sheet tabs (`sheet.tab.*` retired in `R20.3`; `Project Navigator` is the sole primary sheet browser). Secondary actions render as borderless **Ghost Actions** at rest on `surface_chrome` (highlighting with `hover_bg` on hover), keeping at most one accent **Primary** CTA per context and spilling lower-priority controls into `⋯` via `fit_ranked_toolbar`. Universal left-hand anchors stay in fixed positions across sheet switches so muscle memory never breaks; right-hand groups adapt to `doc.active_sheet_id`'s sheet kind and table archetype:
 
 | Active Context | Fixed Leading Anchors | Primary Contextual CTA Group | Secondary Contextual Tools | Trailing Output & View Group |
 |---|---|---|---|---|
 | **`EmptyWorkspace` / Launcher** | `New Project`, `Open…` | `New Data Table…`, `Browse Samples`, `Clone Pipeline…` | `Import CSV / TSV…`, `Power & Sample Size…` | `Theme`, `Language` |
-| **`DataSheet` (Structured)** | `+ New Sheet v`, `Undo`, `Redo`, `Cut/Copy/Paste`, `Paste Link` | **`Analyze…`** (accent button) + **Archetype Quick-Run Pills** (e.g., `t-Test` / `ANOVA` on Column; `Fit Curve` / `Linear Reg.` on XY; `2-Way ANOVA` on Grouped; `Contingency` on Contingency; `Kaplan-Meier` on Survival) | `Import / Reshape…`, `Transform…`, `Exclude (Cmd+E)`, `Freeze Table`, `Sort / Prune`, `Decimals (.00)` | `New Graph`, `Inspector`, `⋯` |
-| **`DataSheet` (`MultipleVariables`)** | `+ New Sheet v`, `Undo`, `Redo`, `Cut/Copy/Paste`, `Paste Link` | **`Analyze…`** (accent button) + **`+ Calculated Variable (fx)`** + **Quick-Run Pills** (`Linear/GLM`, `PCA`, `Cluster`, `MV Plot`) | `Manage Variables…`, `Filter & Transform…`, `Extract & Rearrange…`, `Exclude (Cmd+E)`, `Freeze Table` | `New MV Graph`, `Formula Studio`, `⋯` |
+| **`DataSheet` (Structured)** | `+ New Sheet v`, `Undo`, `Redo`, `Cut/Copy/Paste`, `Paste Link` | **`Analyze…`** (accent button) + **Archetype Quick-Run Actions** (e.g., `t-Test` / `ANOVA` on Column; `Fit Curve` / `Linear Reg.` on XY; `2-Way ANOVA` on Grouped; `Contingency` on Contingency; `Kaplan-Meier` on Survival) | `Import / Reshape…`, `Transform…`, `Exclude (Cmd+E)`, `Freeze Table`, `Sort / Prune`, `Decimals (.00)` | `New Graph`, `Inspector`, `⋯` |
+| **`DataSheet` (`MultipleVariables`)** | `+ New Sheet v`, `Undo`, `Redo`, `Cut/Copy/Paste`, `Paste Link` | **`Analyze…`** (accent button) + **`+ Calculated Variable (fx)`** + **Quick-Run Actions** (`Linear/GLM`, `PCA`, `Cluster`, `MV Plot`) | `Manage Variables…`, `Filter & Transform…`, `Extract & Rearrange…`, `Exclude (Cmd+E)`, `Freeze Table` | `New MV Graph`, `Formula Studio`, `⋯` |
 | **`InfoSheet`** | `+ New Sheet v`, `Undo`, `Redo`, `Copy/Paste` | **`+ Add Constant`** | `Add Date/ID Preset`, `Link Constant…`, `Format Notes` (`Bold`, `Italic`, `List`) | `Inspector`, `⋯` |
 | **`ResultSheet`** | `+ New Sheet v`, `Undo`, `Redo`, `Copy`, `Copy Methods` | **`Edit Parameters… (Cmd+T)`** (accent button) + **`Interpret & Checklist`** (badge shows warning count) | `Change Data Analyzed…`, `Chain Analysis…`, `New Graph from Tab…` | `Export Table…`, `Inspector`, `⋯` |
 | **`GraphSheet`** | `+ New Sheet v`, `Undo`, `Redo`, `Copy Vector` | **`Graph Type…`** + **`Analyze / Fit…`** | `Format Graph…`, `Format Axes…`, `Pairwise / CLD v`, `Insert Text / TeX / Bracket v`, `Palette` | **`Export Figure…`**, `Print…`, `Inspector`, `⋯` |
@@ -160,8 +206,11 @@ A single, uncluttered horizontal strip divided by subtle `1 pt` vertical rules i
 
 ### 4.1 Upper Pane — Project Navigator (`~65%` height, resizable)
 
-1. **Filter Header (`32 pt`):** Instant substring search input (`navigator.search_input`) with clear (`×`) button and optional sheet-kind filter chip (`All`, `Data`, `Info`, `Results`, `Graphs`, `Layouts`).
-2. **Two Organization Modes (toggled via Navigator header menu or `Preferences › Workspace`):**
+`Project Navigator` is the **sole primary sheet browser** (`232 pt` `[Target]` default width, min `192 pt`; `240 pt` `[Implemented]`).
+
+1. **Shared Panel Header (`32 pt` provisional `[Target]`):** Aligns horizontally on the same baseline, padding, and `1 pt` bottom `divider` rule as Center Split pane headers and Trailing Studio, with a crisp `1.5 pt`-stroke vector sidebar-collapse button.
+2. **Search & Compact Kind Filter (`[Target]`):** Directly below the header sits the bordered substring search input (`navigator.search_input`) with clear (`×`) button paired inline with a single compact **Kind Filter dropdown** (`All`, `Data`, `Info`, `Results`, `Graphs`, `Layouts`), replacing the stacked 2×3 bordered filter-chip block.
+3. **Two Organization Modes (toggled via Navigator header menu or `Preferences › Workspace`):**
    - **Five-Folder Category Mode (Default):** Collapsible top-level sections:
      1. `Data Tables`
      2. `Info`
@@ -169,23 +218,25 @@ A single, uncluttered horizontal strip divided by subtle `1 pt` vertical rules i
      4. `Graphs`
      5. `Layouts`
    - **Nested Pipeline Mode (`Data with Results`):** Folds each derived `ResultSheet` directly underneath its upstream `DataSheet` as an expandable child tree (matching natural experimental notebook hierarchy), while keeping `Info`, `Graphs`, and `Layouts` as sibling sections.
-3. **Row Anatomy (`26 pt` height, `>= 24 pt` hit box, scrollbar never overlaps right-edge badges):**
-   - Disclosure triangle (if nested children exist) + original sheet-archetype icon (`XY`, `Col`, `Grp`, `Cnt`, `Surv`, `PoW`, `MV`, `Nest`, `Info`, `Res`, `Graph`, `Layout`) + editable sheet title + trailing status badges (`Frozen` snowflake/lock badge, `Color Tag` dot, `Warning/Unconverged` indicator).
+4. **Row Anatomy (`26 pt` height, `>= 24 pt` hit box, scrollbar never overlaps right-edge badges):**
+   - **`[Target]` Vector disclosure triangles & frameless sheet icons:** Crisp `1.5 pt`-stroke disclosure triangles (pointing inward collapsed, downward expanded—never dot-like Unicode bullets) + frameless semantic sheet-kind icons (never checkbox-like checkmark-in-box or slash-in-box frames) + editable sheet title + trailing status badges (`Frozen` lock badge, `Color Tag` dot, `Warning/Unconverged` indicator).
+   - Active selection uses `active_bg` when Navigator holds focus and neutral `selection_unemphasized_bg` when focus lives in another pane (`[Target]`).
    - Clicking a section header's **`Folder Gallery`** icon switches the Center Stage into the Multi-Sheet Thumbnail Gallery filtered to that section.
-   - Each section ends with a muted inline **`+ New <Kind>…`** row for zero-menu sheet creation.
-4. **Direct Manipulation & Cascading Integrity:**
+   - Each section ends with a **neutral muted** inline **`+ New <Kind>…`** row (`text_muted` at rest, `text_strong` on hover—never accent blue) for zero-menu sheet creation.
+5. **Direct Manipulation & Cascading Integrity:**
    - **Double-click title (`F2`):** Inline rename (`sheet.rename`), automatically cascading updated titles to dependent default analysis headers, graph titles, and legend labels.
    - **Drag-reorder within section:** Reorders sheets deterministically without mutating stable `SheetId`s.
    - **Drag an Analysis (`ResultSheet`) onto another compatible `DataSheet`:** Opens the `Retarget Analysis` confirmation preview and rebinds the entire downstream analysis + graph lineage to the target data table.
 
 ### 4.2 Lower Pane — Scoped Lineage ("Family") Tree (`~35%` height, `Cmd/Ctrl+Shift+F`)
 
-Separated from the Project Navigator by a `4 pt` vertical splitter:
-- Displays **only** the connected topological subgraph of the currently active sheet:
+Separated from the Project Navigator by a `1 pt` `divider` centered inside a `4 pt` (`8 pt` hit-slop) splitter:
+- Displays **only** the connected topological subgraph of the current Family anchor (`doc.family_anchor_sheet_id`):
   `Root Data Table(s)` -> indented `Chained Transforms / Analyses` -> `Derived Graphs` -> `Referencing Page Layouts`.
+- Selecting a sheet in `Project Navigator` re-anchors `Family` (`sheet.select { mode: "navigator" }`); activating a pane inside Split Comparison updates `doc.active_sheet_id` while **preserving `family_anchor_sheet_id`** (`sheet.select { mode: "family" }`, §2.4).
 - **Active-Node & Multi-Dependency Highlighting:**
-  - The currently active sheet renders with an accent pill background.
-  - When a **Composite `LayoutSheet`** or **Multi-Dataset `GraphSheet`** is selected, *all* upstream Data Tables, Analyses, and Graphs contributing panels or curves to that sheet are highlighted in **bold** in both the `Family` tree and the upper `Project Navigator` so multi-experiment dependencies are immediately legible.
+  - The active command target (`doc.active_sheet_id`) renders with emphasized (`active_bg`) or unemphasized (`selection_unemphasized_bg`) selection depending on focus.
+  - When a **Composite `LayoutSheet`** or **Multi-Dataset `GraphSheet`** is selected, *all* upstream Data Tables, Analyses, and Graphs contributing panels or curves to that sheet are highlighted in **bold** in both `Family` and `Project Navigator`, pairing a clear multi-source badge (e.g., `2 sources` with a tooltip listing upstream tables—replacing opaque abbreviations such as `"2+src"`, `[Target]`).
 - **Hover Quick-Preview:** Hovering an inactive node in `Family` for `>= 450 ms` displays a compact read-only summary tooltip (table dimensions/archetype, test name + primary $P$-value, or thumbnail aspect preview).
 
 ---
@@ -196,11 +247,13 @@ The Center Stage is a protected dock target (cannot be closed or floated away) t
 
 1. **Single-Sheet Mode (Default):** Full central area renders the active `DataSheet`, `InfoSheet`, `ResultSheet`, `GraphSheet`, or `LayoutSheet`.
 2. **Split-Comparison Mode (`Cmd/Ctrl+\`):**
-   - Divides the Center Stage into **Primary** and **Secondary** sheet panes separated by a `4 pt` draggable splitter (`15%`–`85%` clamp, double-click resets to `50%`, button/shortcut swaps panes).
-   - Each pane renders a compact `24 pt` **Pane Header Strip** (`Pinned Sheet Selector v`, `Sync Brushing` indicator, `Swap`, `Close Split`).
+   - **`[Target]` Materialized Pane IDs & `40/60` Default:** Divides the Center Stage into two explicitly assigned panes (`primary_sheet_id`, `secondary_sheet_id`, §2.4) separated by a `1 pt` `divider` line inside a `4 pt` (`8 pt` hit-slop) draggable splitter (`15%`–`85%` clamp; **`40/60`** default ratio for `Data + Graph`, `50/50` for symmetric pairs; double-click resets to the preset default).
+   - **`[Target]` Shared `32 pt` (Provisional) Pane Header Strip:** Aligns flush with `Project Navigator` and `Trailing Studio` on the shared header baseline. Each pane's **frameless sheet icon + sheet-selector dropdown IS the pane title**—dropping redundant `"Primary"` / `"Secondary"` labels and the duplicate sub-header bar—paired with borderless ghost `Swap` and `Close` actions (or the compact `[Sheet A | Sheet B]` pane-flip switcher when `< 720 × 520 pt` per §2.3).
+   - **`[Target]` Quiet Active-Pane Focus Cue:** The pane owning keyboard focus displays a `2 pt` top accent bar along its header strip (retiring the permanent `2 pt` full-pane blue cage around blank whitespace).
+   - **`[Target]` Unified Native Renderers (Zero Preview-Grid Fallback):** Both panes instantiate the real sheet renderer parameterized by explicit `sheet_id`—including the virtualized contiguous `DataGrid` (§8.2) with independent per-pane scroll and selection state—**retiring `render_split_non_column_preview` and `render_split_column_sheet_preview`**.
    - **Live Two-Way Point Brushing:** Selecting or hovering rows in a Data/Residual Grid highlights the corresponding plotted marks/bars on an adjacent `GraphSheet`, and box-selecting or clicking plotted marks on a `GraphSheet` scrolls to and highlights the originating cells in the adjacent `DataSheet`.
 3. **Multi-Sheet Portfolio Gallery Mode:**
-   - Activated by clicking a Navigator folder gallery icon, the `Gallery` status-bar pill, or `View › Sheet Gallery`.
+   - Activated by clicking a Navigator folder gallery icon, the `Gallery` footer button (`ui.gallery.toggle`), or `View › Sheet Gallery`.
    - Renders a responsive grid of live-rendered sheet preview cards with folder filter chips (`All`, `Graphs`, `Layouts`, `Data`, `Results`), thumbnail zoom slider, `F6` pane cycling, and click-to-open. Multi-card selection checkboxes (`Shift+Click` range, `Cmd/Ctrl+Click` multi-select) and batch cloning actions (`Apply Style From…`, `Export Selected…`, `Place Selected onto New Layout`) plug into this view on the **1.0** gate (`R13.3`).
 4. **Project Launcher Mode:** Shown automatically when `total_sheet_count() == 0` or when `Home` / `File › New Data Table…` is invoked in full-stage mode (see §8.1).
 5. **Prospective Power & Sample Size Studio Mode:** Full-stage or large-modal interactive study-planning workflow (see §8.13).
@@ -208,7 +261,7 @@ The Center Stage is a protected dock target (cannot be closed or floated away) t
 ### 5.1 Stage-Level Non-Modal Overlays (`ZLayer::FloatingOverlay`)
 
 - **Floating Callout Notes (`FloatingNote`):**
-  - Draggable, collapsible cards pinned to a specific sheet in logical coordinates (`note_positions_pt`), with color-coded header band (neutral slate, amber note, sky info, emerald checklist), collapse chevron, and inline rich-text body; clamped so headers never escape the visible viewport or block split-pane dividers.
+  - Draggable, collapsible cards pinned to a specific sheet in logical coordinates (`note_positions_pt`), with color-coded header band (neutral slate, amber note, sky info, emerald checklist), crisp vector collapse triangle, and inline rich-text body; clamped so headers never escape the visible viewport or block split-pane dividers.
 - **Non-Blocking Bottom-Edge Diagnostic & Clipping Banner (`28–36 pt`):**
   - Docked flush along the bottom inside edge of a `GraphSheet` or `ResultSheet` viewport whenever data-visibility caveats exist:
     - *Unplotted Missing Rows:* `"4 rows with missing values in mapped variables were omitted from this plot. [Show Rows] [Dismiss]"`
@@ -219,36 +272,47 @@ The Center Stage is a protected dock target (cannot be closed or floated away) t
 
 ## 6. Trailing Dock: Context-Sensitive Live Inspector & Studio Rail
 
-Instead of forcing users into modal dialogs for routine edits—or hiding multivariable formula tools in detached popups—CurveBook unifies its right-hand dock (`280 pt` default, `Cmd/Ctrl+Shift+I`) into a **Context-Sensitive Studio** whose header badge and tab strip adapt automatically to the focused Center Stage pane:
+Instead of forcing users into modal dialogs for routine edits—or hiding multivariable formula tools in detached popups—CurveBook unifies its right-hand dock (`276 pt` `[Target]` default, min `240 pt`, range `220–420 pt`; `280 pt` `[Implemented]`; `Cmd/Ctrl+Shift+I`) into a **Context-Sensitive Studio** aligned on the shared **`32 pt` provisional panel-header baseline**:
 
-| Focused Surface | Studio Title & Mode | Sub-Tabs / Accordion Sections | Escalation Footer Button |
+- **`[Target]` Explicit Target Header & Split Pin Toggle:** Displays the active studio mode, the target sheet title (`inspector_target_sheet_id`), and—while Split Comparison is active—an interactive **`Pinned`** toggle (auto-pinned to the graph on the `Data + Graph` split preset, e.g., `Graph Inspector · 4PL Curve Fit [Pinned]`). Whenever `doc.active_sheet_id` differs from a pinned target, a subtle one-click `Switch to <Sheet>` chip appears directly beneath the header. Every Inspector UI call site passes `inspector_target_sheet_id` explicitly in engine command parameters (§2.4).
+- **`[Target]` Standard Inspector Control Kit:**
+  - **Borderless Underline Tabs:** Full, non-abbreviated tab labels (`Data` · `Axes` · `Legend` · `Annotations` · `Canvas`, preserving `Annotations` semantics and stable `inspector.graph.tab.*` IDs; never clipped to `"Leg"`, `"Annot"`, or `"Can…"`) with a `2 pt` bottom accent indicator on the active tab.
+  - **Affirmative Checkboxes:** Boolean visibility options render as leading-aligned checkboxes with affirmative sentence-case noun phrases (`Data points`, `Fitted curve overlay`), replacing mixed `"Show Data Points: On"` / `"Hide Fitted Curve Overlay"` buttons.
+  - **Segmented Tracks & Series Pickers:** Mutually exclusive options (`Symbol Shape`, axis scale) use equal-width segmented controls on `surface_recessed` with an unmistakable elevated active segment; series dropdowns include a leading series colour dot.
+  - **Trailing-Ellipsis Escalation Links:** Footer actions that open modal dialogs place `…` only at the trailing end (`Format Graph…`, `Apply Style From…`, never `"More… Format Graph"`).
+
+| Targeted Surface (`inspector_target_sheet_id`) | Studio Title & Mode | Sub-Tabs / Accordion Sections | Escalation Footer Button |
 |---|---|---|---|
 | **`DataSheet` (`MultipleVariables`)** | **Variable & Formula Studio** | 1. **`Formula (fx)`**: Variable Name, live `f(x) =` expression box with inline syntax/cycle status, searchable `Variables` list, searchable `Functions` catalog (`Recent` + categorized `Math`, `Stats/Column`, `Logic`, `Text`) with signature doc card.<br/>2. **`Role & Levels`**: Type selector (`Auto`, `Continuous`, `Categorical`, `Label`), missing-value summary, inline categorical level recoding & explicit level ordering (`Up`/`Down`, reference level). | `Manage All Variables…` |
 | **`DataSheet` (Structured)** | **Table & Selection Studio** | 1. **`Structure`**: Table archetype summary, X/subcolumn configuration, `Convert Archetype…` trigger.<br/>2. **`Selection & Provenance`**: Linked-region source inspector (`Go to Source`, `Edit Link`, `Unlink`), excluded-cell reason audit list, and **Selected-Row Graph Override** (`Marker Color`, `Shape`, `Size`, `Show Row Title on Graph`, `Reset to Series`). | `Format Data Table…` |
 | **`InfoSheet`** | **Metadata & Hooks Studio** | **Referenced By** list showing every analysis constraint, transform `K` parameter, and graph/layout text box currently hot-linked to the selected `Info` constant, plus typed format controls (`ISO Date`, `Number`, `Text`, `ORCID/DOI`). | `Open Hook Browser…` |
 | **`ResultSheet`** | **Interpret & Diagnostics** | 1. **`Assumptions`**: Interactive methodological checklist (`Pass`, `Review`, `Violated` badges + severity filter).<br/>2. **`Guidance`**: Diagnostics-only plain-language explanation of test structure and effect sizes (strictly non-prescriptive).<br/>3. **`Methods`**: Copyable publication methods paragraph interpolating exact model settings, sample sizes, and software version. | `Edit Parameters… (Cmd+T)` |
-| **`GraphSheet` (No single point selected)** | **Graph Inspector** | Five top tabs:<br/>1. **`Data`** (Series/Channel encodings, `Symbols`, `Bars/Boxes`, `Error Bars`, `Lines/Curves`, `Ellipses/Hulls`, `Heatmap/Dendrogram`)<br/>2. **`Axes`** (`X` / `Left Y` / `Right Y`: auto/manual range, interval, scale, breaks, titles, label angle)<br/>3. **`Legends`** (visibility, placement, discrete vs 3-point continuous bubble/colorbar legends)<br/>4. **`Annotations`** (`Pairwise Brackets` vs `Compact Letter Display`, equations, threshold lines)<br/>5. **`Canvas`** (palette cards, background/plot-area fill & alpha, aspect ratio, display checkboxes) | `All Graph Options…` / `All Axis Options…` |
+| **`GraphSheet` (No single point selected)** | **Graph Inspector** | Five underline tabs (full labels, `[Target]`):<br/>1. **`Data`** (color-dot Series/Channel selector, `Symbols` segmented controls, `Bars/Boxes`, `Error Bars`, `Lines/Curves`, affirmative visibility checkboxes, `Ellipses/Hulls`, `Heatmap/Dendrogram`)<br/>2. **`Axes`** (`X` / `Left Y` / `Right Y`: auto/manual range, interval, scale, breaks, titles, label angle)<br/>3. **`Legend`** (visibility, placement, discrete vs 3-point continuous bubble/colorbar legends)<br/>4. **`Annotations`** (`Pairwise Brackets` vs `Compact Letter Display`, equations, threshold lines)<br/>5. **`Canvas`** (palette cards, background/plot-area fill & alpha, aspect ratio, display checkboxes) | `Format Graph…` / `Apply Style From…` |
 | **`GraphSheet` (Single plotted point clicked)** | **Data Point Drill-Back** | Source `DataSheet` link, `Row #` & Row Title, series/variable coordinates (`X`, `Y`, `Color`, `Size`), individual point style override controls, `Exclude Point…`, and primary **`Jump to Row in Data Table`** button (`← Back to Graph Inspector` in header). | `Format Selected Points…` |
 | **`LayoutSheet`** | **Page Layout Composer** | 1. **`Page`** (Journal width presets: `85 mm` 1-col, `114 mm` 1.5-col, `174 mm` 2-col, `A4`/`Letter`; orientation; margins; DPI preflight).<br/>2. **`Grid & Align`** (rows×cols template, snap guides, align plot frames vs outer bounds, lock shared scale).<br/>3. **`Annotations`** (auto `A, B, C` panel badges, scale bar generator, hooked constants). | `Export Layout…` |
 
-Every section header inside the `Graph Inspector` includes a compact **`More…`** link that opens the corresponding tab of the full `Format Graph` or `Format Axes` modal dialog when advanced multi-series or sub-tick editing is needed.
+Every section header inside the `Graph Inspector` includes a compact **`Format…`** or **`Details…`** link (trailing ellipsis) that opens the corresponding tab of `Format Graph` or `Format Axes` when advanced multi-series or sub-tick editing is needed.
 
 ---
 
 ## 7. Bottom Status, Quick-Stats & Viewport Footer (`26 pt`)
 
-1. **Leading Navigation Cluster:**
+All footer controls render as quiet, borderless **Ghost Actions** on `surface_chrome` (`[Target]`), keeping the status bar visually lighter than the workspace above it:
+
+1. **Leading Navigation & Link Cluster:**
    - `Back (<)` / `Forward (>)` sheet-visit history steppers.
-   - Five compact section jump pills (`Data`, `Info`, `Results`, `Graphs`, `Layouts`) + `Gallery` grid toggle.
-   - Active Sheet Combobox (`Sheet Switcher`) + `Upstream Link Status` icon (green/blue when all live links and formulas are up to date; amber if an external file link is stale).
+   - **`[Target]` Retire duplicate 5-category jump pills:** `Data`, `Info`, `Results`, `Graphs`, and `Layouts` category jump pills are removed so sheet navigation has one primary home in `Project Navigator`.
+   - Concise **`Gallery`** toggle button (decoupled from the Command Palette label `"Toggle Portfolio Gallery"`, preserving `ui.gallery.toggle` and avoiding `"Toggle Portf…"` truncation).
+   - **`[Target]` Collapsed-Navigator Active Sheet Switcher:** Renders a compact active-sheet dropdown **when Leading Navigator is collapsed** so researchers working in narrow or focused split views still have one-click sheet switching without reopening the dock.
+   - `Upstream Link Status` icon (green/blue when all live links and formulas are up to date; amber with warning glyph if an external file link is stale).
 2. **Center Contextual Readout (`status.summary`):**
-   - **When a `DataSheet` or `ResultSheet` is focused:** Live **Selection Quick-Stats** formatted in tabular numerals:
+   - **When a `DataSheet` or `ResultSheet` is targeted:** Live **Selection Quick-Stats** formatted in aligned numerals:
      `n = 24 (2 excl) · Mean = 48.32 · SD = 6.14 · SEM = 1.25 · Median = 47.90 · Sum = 1,159.7` (capped at `50,000` cells per frame to stay under `0.5 ms`).
-   - **When a `GraphSheet` or `LayoutSheet` is focused:** Live physical pointer coordinates (`X: 42.5 mm, Y: 18.0 mm` or data-space `(x, y)` readout when hovering inside a plot frame).
+   - **When a `GraphSheet` or `LayoutSheet` is targeted:** Live physical pointer coordinates (`X: 42.5 mm, Y: 18.0 mm` or data-space `(x, y)` readout) while hovering inside the plot frame, and concise passive canvas dimensions or fit/link status at rest (`[Target]`, retiring filler text such as `"Graph ready"`).
 3. **Trailing Viewport Cluster:**
-   - **Accessibility & Print Preview Filter Pill:** `Normal` · `Deuteranopia` · `Protanopia` · `Tritanopia` · `Grayscale Print`.
+   - **Accessibility & Print Preview Filter:** `Normal` · `Deuteranopia` · `Protanopia` · `Tritanopia` · `Grayscale Print`.
    - **Rulers & Snap Toggle** (enabled on `GraphSheet` / `LayoutSheet`; optional non-exported canvas grid overlay joins at `1.0` per `R13.4`).
-   - **Canvas Zoom Controls (`-`, slider/preset `100% v`, `+`, `Fit`):** Strictly scoped to `GraphSheet`, `LayoutSheet`, and `PortfolioGallery`—never zooms `DataSheet` or `ResultSheet` text/rows on trackpad or mouse-wheel scroll.
+   - **Canvas Zoom Controls (`-`, `Fit` / percentage menu `100% v`, `+`):** Strictly scoped to `GraphSheet`, `LayoutSheet`, and `PortfolioGallery`—never zooms `DataSheet` or `ResultSheet` text/rows on trackpad or mouse-wheel scroll.
 
 ---
 
@@ -312,10 +376,11 @@ Every section header inside the `Graph Inspector` includes a compact **`More…`
 +--------+------------+----------+------+------+------+------+------+------+
 ```
 
-- **Performance & Scrolling Contract:**
-  - Only visible `(row, flat_subcol)` cells are formatted and emitted into the UI tree (`<= 16.67 ms` 60-fps budget verified at `1,000 × 1,000 = 1,000,000` cells); inline `TextEdit` changes buffer locally and commit once via `Session::execute` on `Enter`, `Tab`, or focus loss to preserve exact undo and `ops.journal` parity.
-  - Two-axis independent scrollbars (`ScrollAxes::Both`); frozen top 3-tier header band and frozen leading `#` (`48 px`) + collapsible/resizable `Row Titles` (`112 px` default, `34 px` collapsed) columns.
-- **Top-Left Corner Schema Button:** Displays the current archetype (`XY`, `Col`, `Grp`, `MV`, …) and opens `Format Data Table` / `Convert Table Archetype…` (with live mapping preview and lossy-conversion warning).
+- **Performance, Unified Split Rendering & Scrolling Contract:**
+  - Only visible `(row, flat_subcol)` cells are formatted and emitted into the UI tree (`<= 16.67 ms` 60-fps budget verified at `1,000 × 1,000 = 1,000,000` cells); inline `TextEdit` changes buffer locally and commit once via `Session::execute` on `Enter`, `Tab`, or focus loss using the pane's explicit `sheet_id` to preserve exact undo and `ops.journal` parity.
+  - **`[Target]` Unified Single & Split Renderer:** Both single-sheet and split-comparison panes render this identical virtualized contiguous spreadsheet parameterized by explicit `sheet_id` with independent per-pane scroll and selection state—retiring button-based split preview fallbacks (`render_split_non_column_preview`, `render_split_column_sheet_preview`).
+  - Two-axis independent scrollbars (`ScrollAxes::Both`, overflow-only muted bars); frozen top 3-tier header band and frozen leading `#` (`48 px`) + collapsible/resizable `Row Titles` (`112 px` default, `34 px` collapsed) columns.
+- **Top-Left Corner Schema Button:** Displays the current archetype in uppercase (`XY`, `COL`, `GRP`, `MV`, …; `[Target]`, never mixed-case `"Xy"`) and opens `Format Data Table` / `Convert Table Archetype…` (with live mapping preview and lossy-conversion warning).
 - **Multivariable Tier-3 Type & Role Header Strip:**
   - When `TableArchetype::MultipleVariables` is active, Tier 3 renders per-column interactive **Role Chips**:
     - `Auto` (infers `Continuous` when numeric, automatically switching to `Categorical` when text tokens are entered),
@@ -323,8 +388,9 @@ Every section header inside the `Graph Inspector` includes a compact **`More…`
     - `CAT` (`Categorical` bar icon),
     - `LBL` (`Label / Identifier` tag icon), and
     - `FX=` (`Calculated` badge — locks cells to read-only italicized formula output; clicking focuses the right-hand Formula Studio).
-- **Cell Visual States & Provenance:**
-  - **Numeric Alignment:** Right-aligned tabular lining numerals (`tnum`); categorical/label strings start-aligned.
+- **Cell Visual States, Surface Styling & Provenance:**
+  - **`[Target]` Flat Contiguous Spreadsheet Plane:** All `X` and `Y` data cells sit uniformly on `surface_content` divided by quiet `1 pt` `divider` hairlines with subtle alternating row tints—zero individually rounded resting cell boxes. Column headers render in `text_strong` on neutral `header_bg` (never accent blue). Active cell selection displays `active_bg` + `2 pt` `focus_ring` when the grid owns focus and `selection_unemphasized_bg` when focus lives in another pane.
+  - **Numeric Alignment:** Right-aligned numerals (`12.5 pt` `[Implemented]`; **`13 pt` `[Target]`** in `R20.2` backed by a runtime ASCII `'0'..='9'` advance-width check on the resolved primary proportional sans face—using `13 pt` primary sans when digits share equal width, or selecting a uniform-digit system sans / cap-height-matched system monospace fallback strictly for aligned numeric columns); categorical/label strings start-aligned.
   - **Missing vs Excluded Observations:** Empty cells represent missing values (`NaN`/unbalanced design, tolerated natively by ANOVA/GLM/Regression). Excluded cells (`Cmd/Ctrl+E` or `Exclude with Reason…` `Cmd/Ctrl+Shift+E`) stay visible in place with muted color, strikethrough, italic text, a corner reason-indicator triangle, and a hover tooltip showing timestamp/reason.
   - **Linked Data Regions (`LinkedDataRegion`):** Cell ranges populated via `Paste Link` or linked file import draw a `2 px` color-coded perimeter border (`link_blue`, `link_green`, …) with a header pill showing upstream source (`Raw Plate › A1:H12`) and quick actions (`Go to Source`, `Re-import`, `Unlink`). Typing inside a linked region triggers a non-destructive read-only guard popover rather than silently corrupting provenance.
   - **Row-Subset -> Graph Override Context Menu:** Selecting rows (e.g., after sorting a fold-change/P-value table) and right-clicking exposes `Style Selected Points on Graph…` (color + alpha, shape, size, border), `Show Row Titles on Graph`, `Reset to Dataset Style`, and `Exclude Selected`.
@@ -489,7 +555,8 @@ Prepended as Tab 1 whenever a classical analysis (`t`-Test, Multifactor ANOVA, K
 ### 8.11 Graph Canvas, Type Switcher & Dual-Schema Formatting Modals (`GraphSheet`)
 
 #### A. Interactive Graph Canvas Viewport
-- **Aspect-Ratio Paper Frame:** Centered on a neutral `canvas_mat` background with optional physical `mm`/`in`/`pt` rulers and non-intrusive selection chrome (series chips, resize handles, and rotation grips appear *only* on hover or explicit selection so publication previews stay uncluttered).
+- **Aspect-Ratio Paper Frame & `Fit` Zoom Contract (`[Target]`):** Centered on a neutral `canvas_mat` (`surface_recessed`) background with optional physical `mm`/`in`/`pt` rulers and non-intrusive selection chrome (series chips, resize handles, and rotation grips appear *only* on hover or explicit selection so publication previews stay uncluttered). **`Fit` Zoom Contract (`R20.4`):** Viewports open in **`Fit`** mode so the paper frame fills available center space comfortably without floating tiny inside empty mat; while `Fit` is active, `fit_scale` recomputes automatically across window resizes and split-divider drags. Any manual zoom action (`+`, `-`, pinch/wheel, explicit percentage) exits `Fit` and preserves the user's chosen manual zoom until `Fit` is re-selected.
+- **Decoupled Chart Rendering (`crates/chart`):** Exported figure typography, fit-summary readability (evaluating a readable adjacent fit summary before committing to automatic inside-plot inset placement), and Y-axis autoranging headroom are decoupled from UI chrome tokens and tracked separately in post-Beta [`R20.5`](../ROADMAP.md#r205-chart-fit-summary-readability-inset-layout--axis-autoranging) with explicit compatibility rules for saved figures, manual axis limits, and SVG/PDF/PNG export determinism.
 - **Rich Hover Provenance Tooltips:**
   - Hovering any plotted point, bar, box, violin, or residual mark displays a crisp card: `Source: Dose-Response · Group B (Compound 7) · Row 4 (Well A04) · X = 1.0, Y = 42.1 · Right-click to style or exclude`.
   - Hovering a continuous heatmap or bubble **colorbar** displays the exact interpolated numeric value and hex/RGB color at the pointer position.
@@ -585,24 +652,27 @@ Includes cross-jump buttons (`Change Graph Type…`, `Format Axes…`) plus `Can
 | Token | Logical Value | Scaling & Ergonomic Rule |
 |---|---|---|
 | `chrome.app_bar_h` | `32 pt` | Scales by `round(px * scale_factor)` |
-| `chrome.action_strip_h` | `38 pt` | Single horizontal row; overflow items collapse into trailing `⋯` popup |
-| `chrome.status_bar_h` | `26 pt` | Fixed single-line footer; tabular numerals for quick-stats & zoom |
-| `dock.navigator_w` | `240 pt` (`180–380 pt`) | Collapses to `36 pt` icon rail; auto-collapses below `760 pt` window width |
-| `dock.inspector_w` | `280 pt` (`220–420 pt`) | Collapses to `36 pt` icon rail; auto-collapses below `960 pt` window width |
-| `dock.splitter_w` | `4 pt` (`8 pt` hit slop) | Visual `1 pt` border line centered inside an `8 pt` pointer grab zone |
-| `grid.row_h` / `header_h` | `24 pt` / `24+24+24 pt` | Target size per WCAG 2.2 SC 2.5.8 (`24 × 24 pt`, or `24 pt` spacing circle on compact strips; `>= 28 × 28 pt` on toolbar buttons) |
-| `scroll.bar_thickness` | `10 pt` (`12 pt` hover) | Reserved gutter alongside content—**scrollbars must never overlap controls or row badges** |
-| `font.ui_body` / `ui_small` | `13 pt` / `11.5 pt` | System SFNT proportional family discovered via `fontdb` (`memmap` off) + CJK/deterministic SFNT symbol fallback chain (**Beta:** `14` LTR/CJK locales; **1.0:** + `4` RTL locales); zero bundled font binaries |
-| `font.grid_numeral` | `12.5 pt` tabular | Proportional tabular-lining or monospace SFNT so decimal points align vertically |
+| `chrome.action_strip_h` | `38 pt` `[Implemented]` / `36 pt` `[Target]` *(provisional)* | Single horizontal row (no sheet tabs); overflow items collapse into trailing `⋯` popup via `fit_ranked_toolbar` |
+| `chrome.panel_header_h` | `32 pt` `[Target]` *(provisional)* | Shared top header baseline across Navigator, Center Split panes, and Trailing Studio with `1 pt` bottom `divider`; validated at default and `ui_scale > 1.0` |
+| `chrome.status_bar_h` | `26 pt` | Fixed single-line footer with borderless ghost controls and aligned numerals for quick-stats & zoom |
+| `dock.navigator_w` | `232 pt` `[Target]` (`192–380 pt`; `240 pt` `[Implemented]`) | Narrows to `192 pt` before collapsing to `36 pt` rail (§2.3) |
+| `dock.inspector_w` | `276 pt` `[Target]` (`240–420 pt`; `280 pt` `[Implemented]`) | Narrows to `240 pt` before collapsing to `36 pt` rail (§2.3) |
+| `split.center_preferred_w` / `min_horizontal_w` | `760 pt` *(provisional)* / `720 pt` `[Target]` | Computed against settled logical center area: `760 pt` drives dock narrowing/collapse; `720–759 pt` accepted as compact horizontal band; `< 720 pt` switches vertical when height `>= 520 pt`; `< 720 × 520 pt` uses single-pane header flip (§2.3) |
+| `dock.splitter_w` | `4 pt` (`8 pt` hit slop) | Visual `1 pt` `divider` stroke centered inside an `8 pt` pointer grab zone |
+| `grid.row_h` / `header_h` | `24 pt` / `24+24+24 pt` | Default cells (`24 × 48+ pt`) and standalone controls (`>= 24 × 24 pt`; `>= 28 × 28 pt` on toolbars) map `1.0` logical `pt` at `1.0x` `ui_scale` to `1 CSS px` per WCAG 2.2 SC 2.5.8 by WCAG2ICT analogy (§9.4) |
+| `scroll.bar_thickness` | `10 pt` (`12 pt` hover) | Overflow-only muted gutter alongside content—**scrollbars must never overlap controls or row badges** |
+| `font.ui_body` / `ui_small` | `13 pt` / `11.5 pt` | System SFNT proportional family discovered via `fontdb` (`memmap` off) + CJK/deterministic SFNT symbol fallback chain (zero bundled font binaries; RTL mirroring gated on **1.0**) |
+| `font.grid_numeral` | `12.5 pt` `[Implemented]` / `13 pt` `[Target]` | `[Target]` `R20.2` runtime ASCII `'0'..='9'` advance-width check on the resolved primary sans face: uses `13 pt` primary sans when equal-width, or falls back to uniform-digit system sans / cap-height-matched monospace strictly for aligned numeric columns |
 
-### 9.2 Theme & Semantic Color Tokens (`WCAG 2.1 AA` Verified)
+### 9.2 Theme & Semantic Color Tokens (`WCAG 2.2 AA` by WCAG2ICT Analogy)
 
-All three shipped themes (`Light`, `Dark`, `HighContrast`) provide validated contrast (`>= 4.5:1` body text, `>= 3.0:1` interactive boundaries and badges):
-- **Chrome & Surfaces:** `app_bar`, `panel_bg`, `surface_bg`, `canvas_mat`, `header_bg`, `border`, `hover_bg`, `active_bg`, `focus_ring` (`2 px` accent).
+All three shipped themes (`Light`, `Dark`, `HighContrast`) derive from `ThemeSeeds` in `crates/ui-egui/src/theme.rs` and apply WCAG 2.2 criteria to desktop software by analogy per W3C WCAG2ICT guidance (`>= 4.5:1` body text in `Light`/`Dark`, `>= 7.0:1` AAA in `HighContrast`, and **SC 1.4.11 Level AA `>= 3.0:1` non-text contrast** across every visual cue required to identify interactive components and their states—rest, hover, pressed, selected, checked, focused, error—explicitly tested per theme rather than assuming a `1 pt` border establishes conformance):
+- **Three Opaque Neutral Surface Tiers (`[Target]`):** `surface_chrome` (`app_bar`, `panel_bg`), `surface_recessed` (segmented tracks, filter wells, `canvas_mat`), and `surface_content` (`surface_bg`, contiguous grid, `paper_white`), stepping **lighter** on elevation in `Dark` mode and retaining explicit structural borders in `HighContrast`.
+- **Strokes, Selection & Scoped Accent:** quiet `divider` vs. editable `input_border`; emphasized (`active_bg`) vs. unfocused (`selection_unemphasized_bg`) selection; `hover_bg`; and a restrained single accent (`focus_ring`, single `Primary` CTA, active selection cue, `2 pt` focused split-pane header bar—never static table headers, `+ New…` rows, or full-pane whitespace cages).
 - **Data Provenance & Roles:**
   - Variable Role Badges: `NUM` (blue), `CAT` (amber/vermilion), `LBL` (slate), `FX=` (emerald/teal).
-  - Provenance Borders: `link_blue`, `link_green`, `link_red` (broken/stale external link), `excluded_cell_text` (muted + strikethrough).
-  - Default Chart Series Palette: 8-color **Okabe-Ito** colorblind-safe categorical palette (`#000000`, `#E69F00`, `#56B4E9`, `#009E73`, `#F0E442`, `#0072B2`, `#D55E00`, `#CC79A7`) + perceptually uniform **Viridis / Cividis / Diverging Blue-White-Vermilion** colormaps.
+  - Provenance Borders: `link_blue`, `link_green`, `link_red` (broken/stale external link paired with broken-link glyph and dashed pattern), `excluded_cell_text` (muted + strikethrough).
+  - Default Chart Series Palette (decoupled in `crates/palette`): 8-color **Okabe–Ito** colorblind-safe categorical palette (`#000000`, `#E69F00`, `#56B4E9`, `#009E73`, `#F0E442`, `#0072B2`, `#D55E00`, `#CC79A7`) + perceptually uniform **Viridis / Cividis / Diverging Blue-White-Vermilion** colormaps.
 
 ### 9.3 Attributed Upstream UI Adaptation & Clean-Room Rewrite Boundaries
 
@@ -623,113 +693,124 @@ Per [`../../AGENTS.md`](../../AGENTS.md) (*Attributed VectorCraft GUI source reu
 Every desktop layout change in `crates/ui-egui` and `apps/curvebook` must pass (and browser `apps/curvebook-web` aligns post-Beta in [`R11.11`](../ROADMAP.md#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) on **1.0**):
 
 1. **Pixel-to-Hit-Box & Phantom-Widget Gate (`verify_pixel_to_hit_box_parity`):** Every interactive node in AccessKit-backed `ui.inspect` (`FrameInspectMeta`) and `EguiHumanPathDriver` / `egui_kittest` has non-zero visible bounds matching CPU-rasterized `ui.screenshot` pixels across `Light`/`Dark`/`HighContrast` and `1.0x`–`3.0x` HiDPI scales (**1.0** adds `RTL` and Web ARIA), with `100%` `ZLayer::ModalBackdrop` outside click/wheel capture and zero click-through.
-2. **Scrollbar, Interactive Non-Overlap & WCAG 2.5.8 Target-Size Gate:** Zero `Role::ScrollBar` intersections with clickable/focusable child controls, zero partial overlaps between enabled clickable chrome controls on the same `ZLayer` (nesting and user-positioned `ZLayer::FloatingOverlay` WYSIWYG canvas panels/annotations permitted), and WCAG 2.2 SC 2.5.8 target-size compliance (`>= 24 × 24 pt` or `24 pt`-diameter spacing clearance; spreadsheet `gridcell`s, `Role::Splitter` sashes, and canvas corner/rotation grips exempt) across workspace views, dialogs, and menus (`640 × 420 pt` through `1920 × 1080 pt`).
-3. **14-Locale Beta Text Fitting, Symbol Coverage & Ellipsis Gate (`R10.9` / `R15.1`):** Zero unclipped text bleed across all `14` Beta-active LTR/CJK locales (extending to all `16` incl. the `4` RTL locales at **1.0**); mandatory non-missing glyph coverage across UI and scientific symbols (`→ ▾ ● ✓ ± ≤ ≥ μ χ²`); and any ellipsized label sets `state.ellipsized = true` and exposes its full un-truncated label via hover tooltip and accessibility name.
+2. **Scrollbar, Interactive Non-Overlap & WCAG 2.2 SC 2.5.8 Target-Size Gate (`verify_egui_frame_parity` in [`driver.rs`](../../crates/ui-egui/src/egui_shell/driver.rs) & integration test suite [`zz_overlap_probe.rs`](../../crates/ui-egui/tests/ui_audit_suite/zz_overlap_probe.rs)):** Zero `Role::ScrollBar` intersections with clickable/focusable child controls and zero partial overlaps between enabled clickable chrome controls on the same `ZLayer` (nesting and user-positioned `ZLayer::FloatingOverlay` WYSIWYG canvas panels/annotations permitted) across `640 × 420 pt` through `1920 × 1080 pt`. For target sizes, CurveBook applies WCAG 2.2 SC 2.5.8 (Level AA, `24 × 24 CSS px`) by WCAG2ICT analogy (`24 × 24` logical `pt` at `1.0x` `ui_scale`) and separates automated test-gate exclusions from per-control WCAG justifications (noting that WCAG's **Equivalent** exception requires another qualifying `>= 24 × 24 pt` **pointer** control on the same screen; keyboard alternatives alone do not qualify):
+   - *Automated `wcag_258_target_size` gate exclusions:* spreadsheet `gridcell`s, `Role::Splitter` sashes, and canvas corner/rotation grips are excluded from the standalone-button bounding-box assertion.
+   - *Per-control WCAG 2.2 SC 2.5.8 justifications:*
+     - Standalone toolbar/dock/inspector/footer controls directly meet `>= 24 × 24 pt` or satisfy **Spacing** (`24 pt`-diameter clear offset circle).
+     - `Role::Splitter` sashes (**pending verification**): the intended basis is **Spacing**, which still has to be checked against the adjacent controls (grid cells, pane headers, canvas) on both sides of the `8 pt` hit zone. **Equivalent** applies only where a visible `>= 24 × 24 pt` pointer control sets the split ratio.
+     - Canvas corner/rotation grips (**pending verification**): the intended basis is **Equivalent**, via the numeric bounds and rotation input fields in the Inspector and Format dialogs. It remains to verify that those inputs are `>= 24 × 24 pt` and produce the same resize and rotation results.
+     - Spreadsheet `gridcell`s meet `24 × 48+ pt` by default (`>= 24 × 24 pt`); columns explicitly narrowed below `24 pt` by the user are documented as a known limitation rather than claiming **Essential**.
+3. **Beta Text Fitting, Symbol Coverage & Ellipsis Gate (`R10.9` / `R15.1`):** Zero unclipped text bleed across all Beta-active LTR/CJK locales (extending to RTL locales at **1.0**); mandatory non-missing glyph coverage across UI and scientific symbols (`→ ▾ ● ✓ ± ≤ ≥ μ χ²`); and any ellipsized label sets `state.ellipsized = true` and exposes its full un-truncated label via hover tooltip and accessibility name.
 4. **1,000,000-Cell 60-FPS Virtualization Gate (`R10.22` / `R15.2`):** Matched `1,000,000`-cell `Column` scrolling, selection, and exclusion benchmarks stay strictly inside `<= 16.67 ms` steady-state frame time and `<= 50 ms` input-to-paint latency (`1.0x`/`2.0x` DPI).
 5. **Clean-Room & Brand Gate (`cargo xtask brands && cargo xtask cleanroom && cargo xtask assets`):** Zero competitor trademarks, zero external suite identifiers, zero unattributed assets, and zero bundled font binaries.
+6. **R20 Visual System, Split Targeting & `WorkflowRun` Acceptance Gates (`[Target]`, `R20.2`–`R20.4`):**
+   - `panel_header_baseline_parity`: asserts Navigator, Center Split panes, and Trailing Studio share an aligned top header bar across default (`1280 × 800 pt`), narrow (`640 × 420 pt`), and increased text scale (`ui_scale > 1.0`).
+   - `split_targeting_parity`: asserts every row of the §2.4 targeting table (cell click -> `doc.active_sheet_id` via non-mutating `sheet.select { mode: "family" }` preserving Family anchor + pinned Graph Inspector; `F6` focus-only; `Swap` preserving both command target and Inspector pin; compact `< 720 × 520 pt` flip activating the visible sheet while preserving the pin; Navigator or footer selection of the hidden split sheet revealing its pane; `F6` visiting only visible panes; auto-unpin on leaving split / `sheet.delete` / split close; explicit `sheet_id` on all Inspector and split-grid UI commands).
+   - `split_unified_datagrid_parity`: asserts split `DataSheet` panes mount the real virtualized `DataGrid` with zero fallback preview buttons.
+   - **Five-Stage `WorkflowRun` Dose-Response Split Acceptance Proof (`R20.4`, [`../pitfalls.md`](../pitfalls.md) #7):** starts from an empty `UiApp`, constructs an XY dose-response table, fits a 4PL curve, opens the default `Data + Graph` split view (verifying the auto-pinned Graph Inspector with zero manual pinning), edits a cell live inside the split `DataGrid` to verify curve refit and `D1` oracle parity, and adjusts a Graph Inspector control with clear target identity at every step. Screenshot refresh (`cargo xtask screenshots`) is a separate `R20.4` step, not part of the test.
 
 ---
 
 ## 10. Visual Design Rules
 
-> **Status:** Accepted. See [`../design-language.md`](../design-language.md) for the high-level design language, seed-derived OKLab/OKLCH colour system, action-hierarchy (`ActionRank`) rules, and `xtask` / specimen enforcement gates. These rules apply across the structure set by §1–9. The §10.1–10.6 design tokens, spacing/type/radius scales, bold system UI face (`type.section` with `14 pt` regular fallback when no bold face is present), 150 ms motion cap, hover contrast (`>= 3:1` border + elevated fill delta), modal footer button ordering, and §10.5 broken-link glyph/pattern live in `LayoutMetrics`, `Tokens` (`crates/ui-egui/src/egui_shell/mod.rs`), `UiThemeSpec` (`crates/ui-egui/src/theme.rs`), and `crates/ui-egui/src/egui_shell/fonts.rs`. Token names below map directly to `LayoutMetrics` and `Tokens` fields; all sizes are logical points at `1.0x`.
+> **Status:** Accepted (`R15.9` baseline `[Implemented]`; `R20.2`–`R20.4` refinements tagged `[Target]`). See [`../design-language.md`](../design-language.md) for the canonical single-theme visual system, three opaque neutral surface tiers, strict single-accent budget, standard control kit, and `xtask` / specimen enforcement gates. All tokens live in `LayoutMetrics`, `Tokens` (`crates/ui-egui/src/egui_shell/mod.rs`), `UiThemeSpec` (`crates/ui-egui/src/theme.rs`), and `crates/ui-egui/src/egui_shell/fonts.rs`; all sizes are logical points at `1.0x`.
 
 ### 10.1 Spacing Scale
 
-All padding, gaps, and margins come from this scale. Any other value needs a code comment explaining why.
+All padding, gaps, and margins follow a `4`-point rhythm (`[Target]` gradual migration in `R20.2`). Any off-scale value needs a code comment explaining why.
 
 | Token | Value | Use |
 |---|---|---|
-| `space.xxs` *new* | `2 pt` | Between an icon and its badge, or inside a control |
-| `space.xs` *new* | `4 pt` | Between an icon and its label, or between controls that work together |
-| `space.sm` *new* | `6 pt` | Between rows in a form, between controls in one row, and padding inside side docks |
-| `space.md` *new* | `8 pt` | Padding inside cards and popovers |
-| `space.lg` *new* | `12 pt` | Between groups in a panel, dialog margins, and one nesting indent |
-| `space.xl` *new* | `16 pt` | Between major sections in a dialog or page |
-| `space.xxl` *new* | `24 pt` | Around the edges of the Welcome screen and empty states |
+| `space.xxs` | `2 pt` | Micro-inset inside a compact control or badge |
+| `space.xs` | `4 pt` | Between an icon and its label, or tightly coupled controls |
+| `space.sm` *(provisional retirement `[Target]`)* | `6 pt` `[Implemented]` | Legacy dock/form step; provisionally retiring onto `4 pt` or `8 pt` in `R20.2` after empirical verification at default and `ui_scale > 1.0` |
+| `space.md` | `8 pt` | Between controls in a group, form rows, and dock/card/popover padding |
+| `space.lg` | `12 pt` | Between groups in a panel, dialog margins, and one nesting indent |
+| `space.xl` | `16 pt` | Between major sections in a dialog or inspector |
+| `space.xxl` | `24 pt` | Outer margins on Welcome and empty states |
 
 **Rules**
 
-1. **Groups are set apart by space first.** The gap between groups is at least twice the gap inside a group. Add a divider line only when spacing alone cannot separate them.
-2. **One framed box per level.** No frame inside a frame inside a panel. A group inside a frame is shown by spacing and a heading.
-3. **Padding by container.** Side docks use `space.sm`, cards and popovers use `space.md`, and dialogs use `space.lg`, so narrow docks keep their width for content.
-4. Gaps that fall off the scale (for example `3 pt` and `10 pt`) move to the nearest value on the scale.
+1. **Groups are set apart by space first.** Inter-group spacing is at least twice intra-group spacing. Add a `1 pt` `divider` line only when spacing alone cannot separate regions.
+2. **Surfaces before boxes.** Do not nest bordered frames inside bordered panels; use opaque surface contrast, spacing, and a bold section heading instead.
+3. **Padding by container.** Keep dock padding compact (`space.md` or transitional `space.sm`) and dialog margins comfortable (`space.lg`) so narrow docks preserve content width.
+4. Gaps that fall off the scale (such as `3 pt` or `10 pt`) move to the nearest token on the scale.
 
 ### 10.2 Type Scale & Text Hierarchy
+
+Strictly **four UI type sizes** (`[Target]`, retiring the legacy `12.5 pt` numeral step in `R20.2`):
 
 | Token | Size & weight | Use |
 |---|---|---|
 | `type.small` | `11.5 pt` regular | Smallest UI text: secondary labels, status bar, badges, hints (`font_ui_small_pt`) |
-| `type.numeral` | `12.5 pt` tabular | Grid cells and numbers in results (`font_grid_numeral_pt`) |
 | `type.body` | `13 pt` regular | Default text for labels, controls, and menus (`font_ui_body_pt`) |
-| `type.section` *new* | `13 pt` bold, `text_strong` | Group headings inside panels and dialogs |
-| `type.title` *new* | `15 pt` regular, `text_strong` | Panel and dialog titles. Replaces the `15 pt` heading size currently set directly in `Tokens::configure_style`. |
-| `type.display` *new* | `18 pt` regular | Welcome screen and empty-state headlines only |
+| `type.section` | `13 pt` bold, `text_strong` | Group headings inside panels and dialogs |
+| `type.numeral` | `13 pt` aligned `[Target]` (`12.5 pt` `[Implemented]`) | Data-grid cells and result-table numbers (`R20.2` runtime `'0'..='9'` advance-width check on primary sans, falling back to uniform-digit sans or cap-height-matched monospace) |
+| `type.title` | `15 pt` regular, `text_strong` | Panel and dialog titles |
+| `type.display` | `18 pt` regular | Welcome screen and empty-state headlines only |
 
-**Bold face** *new*: the font setup loads the bold face of the same system UI family alongside the regular face (system fonts only; zero bundled font binaries per §9.1). If no bold face is found, `type.section` falls back to `14 pt` regular.
+**Bold face (`[Implemented]`):** Font setup loads the bold face of the same system UI family alongside regular (system fonts only; zero bundled font binaries per §9.1). If no bold face is found, `type.section` falls back to `14 pt` regular.
 
 **Rules**
 
-1. **At most three text sizes on one panel at a time,** not counting `type.numeral` in grids and result tables. Section headings differ from body text by weight, not size.
-2. **Each tool has one job.** Size marks titles, weight marks section headings and the active item in a list, and `text_muted` marks secondary text. Never bold whole paragraphs.
-3. **Numbers** use tabular digits, right-aligned, with decimal points lined up (§9.1).
-4. **Capitalisation (English).** Title Case for menus, menu items, buttons, tabs, and dialog and panel titles. Sentence case for descriptions, hints, tooltips, checkbox and radio labels, and messages. Variable-role badges such as `NUM` and `CAT` (§9.2) stay in capitals. Other locales follow their own conventions.
-5. **Minimum size.** No UI text below `type.small` (`11.5 pt`). Letters drawn inside icons count as icons (§10.5). Chart text follows the graph's own format settings.
+1. **At most three text sizes on one panel at a time.** Section headings differ from body text by weight, not size.
+2. **Each typographic cue has one job.** Size marks titles, weight marks section headings and the active item in a list, and `text_muted` marks secondary text. Never bold whole paragraphs.
+3. **Numbers** are right-aligned with aligned digit columns per §9.1 and §8.2.
+4. **Capitalisation & writing (English).** Title Case for menus, buttons, tabs, and panel/dialog titles; sentence case for descriptions, hints, tooltips, affirmative checkbox noun phrases (`Data points`), and messages. Variable-role badges (`NUM`, `CAT`, `LBL`, `FX=`) and archetype badges (`XY`) stay uppercase. Place `…` only at the trailing end of dialog-opening controls (`Format Graph…`). Reserve `•` strictly for unsaved dirty state.
+5. **Minimum size.** No UI text below `type.small` (`11.5 pt`). Exported chart typography follows `crates/chart` format settings independently (`R20.5`).
 
 ### 10.3 Corner Radius, Strokes & Elevation
 
 | Token | Value | Use |
 |---|---|---|
-| `radius.sm` *new* | `2 pt` | Badges, chips, cell highlights |
-| `radius.md` *new* | `4 pt` | Buttons, inputs, toggles, list rows |
-| `radius.lg` *new* | `6 pt` | Popups, menus, cards, windows (matches the current `window_corner_radius`) |
+| `radius.sm` | `2 pt` | Badges, cell highlights |
+| `radius.md` | `4 pt` | Buttons, inputs, segmented tracks, list rows |
+| `radius.lg` | `6 pt` | Popups, menus, cards, dialogs |
 
-- **Strokes.** Borders and dividers are `1 pt`. Only the keyboard focus ring and the active selection use `2 pt`. Icon line weights follow §10.5 instead.
-- **Elevation has four levels:**
-  - **Base** (`panel_bg`): docks and toolbars.
-  - **Raised** (`surface_bg` plus a `1 pt` `border`): cards and the center stage.
-  - **Floating** (`border` plus a soft shadow): menus, popovers, tooltips.
-  - **Modal** (`scrim` backdrop): dialogs.
-- Shadows are used only at the floating and modal levels, never on content inside a panel.
-- Radii that fall off the scale move to the nearest token. Round shapes such as toggle tracks keep a radius of half their height.
+- **Strokes:** Quiet `1 pt` `divider` for pane seams, header baselines, and contiguous grid lines; higher-contrast `1 pt` `input_border` strictly on editable text/numeric inputs and dropdowns; `2 pt` `stroke_focus_pt` strictly for keyboard `focus_ring`, active underline-tab indicators, and the focused split-pane header bar.
+- **Opaque surface hierarchy & elevation (`[Target]`):**
+  - **Chrome (`surface_chrome`):** top bars, docks, and footer (borderless ghost actions at rest).
+  - **Recessed (`surface_recessed`):** segmented-control tracks, inset wells, and figure `canvas_mat`.
+  - **Content (`surface_content`):** contiguous data grids, result sheets, notes, and figure `paper_white`.
+  - **Floating (`surface_content` + `border` + soft shadow):** menus, popovers, tooltips.
+  - **Modal (`scrim` backdrop + soft shadow):** dialogs.
+  - In `Dark` mode, elevated tiers step **lighter** in OKLab lightness; in `HighContrast`, explicit structural borders reinforce every surface tier. Shadows never appear on inline panel content.
+- Radii that fall off the scale move to the nearest token; pill/switch tracks use half their height.
 
 ### 10.4 Alignment, Density & Grouping
 
-1. **One left edge per panel.** Labels, headings, and controls start on the same vertical line. Indent only to show nesting, one step of `space.lg` per level.
-2. **Inspector forms.** Labels sit in a left column sized to the longest label in the group (`widgets::dim_label_width`, `widgets::label_row`), capped at 40% of the panel width. When a label does not fit within that cap, it goes above its control instead of being truncated.
-3. **Rows.** Controls in one row are centred vertically on each other. Text in a row shares a baseline.
-4. **Compact density by default.** Use the §9.1 heights (`grid_row_h`, `min_toolbar_target_pt`). Make room by removing clutter, not by shrinking controls below those targets.
-5. **One primary action per surface.** Dialog footers use the same order on every platform, from the leading to the trailing edge: Cancel, then Apply when present, then the primary action. A destructive action is never the default (Return-key) button.
-6. **Progressive disclosure.** Advanced options go in a collapsed group, not in a second column.
+1. **Shared panel-header baseline & one left edge per panel:** Navigator, Center Split panes, and Trailing Studio align horizontally on the shared `chrome.panel_header_h` baseline (`32 pt` provisional). Within each panel, labels, headings, and controls share one vertical left edge; indent only for nesting (`space.lg` per level).
+2. **Inspector forms:** Labels sit in a left column sized to the longest label in the group (`widgets::dim_label_width`, `widgets::label_row`), capped at `40%` of panel width; labels exceeding that cap stack cleanly above their control instead of truncating.
+3. **Rows & standard control types:** Controls in a row share vertical centers and text baselines. Use borderless ghost actions in toolbars/footers, equal-width segmented tracks for short exclusive choices, borderless underline tabs with full words in panels/inspectors, and leading-aligned affirmative checkboxes in panel/dialog bodies (never checkboxes in top toolbars).
+4. **Compact density without shrinking hit targets:** Reclaim space by retiring duplicate chrome and box soup rather than shrinking targets below §9.1 minimums (`24 × 24 pt` / `28 pt` toolbars).
+5. **One primary action per surface:** Dialog footers order consistently leading-to-trailing: `Cancel`, `Apply` (when present), then the single `Primary` action. A destructive action is never the Return-key default.
+6. **Progressive disclosure:** Advanced options collapse into vector disclosure sections rather than adding extra columns.
 
 ### 10.5 Iconography & Imagery
 
-1. **Sizes.** `16 pt` in toolbars and the action strip, `14 pt` beside text, `12 pt` in badges. All icons at one size share one line weight.
-2. All icons use the `icon` colour token and come from CurveBook's own icon set ([`../../ASSETS.md`](../../ASSETS.md)).
-3. **Icon-only buttons** need a tooltip and an accessible name, the same as ellipsized labels in §9.4.
-4. **State is never shown by colour alone.** Pair colour with an icon, a text change, or a pattern. Known gap: linked-cell provenance borders (§9.2) currently tell valid and broken links apart by colour only, and need a broken-link glyph.
+1. **Sizes & weights:** `16 pt` in toolbars and the action strip, `14 pt` beside text, `12 pt` in badges; crisp `1.5 pt` vector line weight for disclosure triangles (inward collapsed, downward expanded) and sidebar collapse/expand controls.
+2. **Original frameless vector icons:** All icons use the `icon` colour token and come from CurveBook's own vector icon set ([`../../ASSETS.md`](../../ASSETS.md)). Sheet-kind icons stay frameless (never checkmark-in-box or slash-in-box squares, and never dot-like Unicode bullets for disclosures).
+3. **Icon-only buttons** always supply a tooltip and an accessible name (§9.4).
+4. **State is never shown by colour alone:** Pair colour with a distinct icon, stroke pattern, typography style, or text label (including `[Implemented]` broken-link glyphs and dashed provenance borders).
 
 ### 10.6 Motion & State Feedback
 
-1. **Every interactive widget has distinct looks for six states:** rest, hover, pressed, focused, selected, and disabled, using the existing tokens (`hover_bg`, `active_bg`, `focus_ring`, `text_disabled`).
-2. **Keyboard focus is always visible,** shown by the `2 pt` `focus_ring`.
-3. **Motion is short and functional.** At most `150 ms` for hover, expand, and collapse. Data, grid, and chart updates appear immediately, without animation.
-4. When a reduced-motion setting is available, every transition becomes immediate.
+1. **Distinct interactive states (`WCAG 2.2 SC 1.4.11 Level AA`):** Every interactive widget distinguishes rest, hover, pressed, focused, selected (emphasized vs. unemphasized across panes), and disabled states using canonical theme tokens (`hover_bg`, `active_bg`, `selection_unemphasized_bg`, `focus_ring`, `text_disabled`), with every necessary cue clearing `>= 3:1` contrast per theme.
+2. **Visible keyboard focus:** Shown by the `2 pt` `focus_ring` on the active widget or grid cell (plus the `2 pt` top accent bar on the focused split-pane header and transient `F6` landmark cue).
+3. **Short, functional motion:** At most `150 ms` for hover, expand, and collapse. Data, grid, and chart updates render immediately without animation.
+4. When a reduced-motion preference is active, all transitions become immediate.
 
 ### 10.7 Visual Review Checklist
 
-Before a GUI change counts as done, take screenshots at `1280 × 800 pt` (default window), `1440 × 600 pt`, and `640 × 420 pt` (the §9.4 gate sizes), in the `Light`, `Dark`, and `HighContrast` themes. Check each one for:
+Before a GUI change counts as done, inspect screenshots at `1280 × 800 pt` (default window), `1440 × 600 pt`, and `640 × 420 pt` (plus increased `ui_scale > 1.0` where text/header density is affected), across `Light`, `Dark`, and `HighContrast`:
 
-- [ ] Every gap and padding comes from §10.1, and the gap between groups is at least twice the gap inside a group.
-- [ ] Each panel has one left edge, and there are no frames nested beyond one level.
-- [ ] No more than three text sizes per panel (grid numerals excepted), and no UI text below `11.5 pt`.
-- [ ] Section headings are bold, and English labels follow the §10.2 capitalisation rule.
-- [ ] Each surface has exactly one primary action, and dialog footers read Cancel, Apply, primary.
-- [ ] Corner radius is the same across each kind of element (§10.3).
-- [ ] Icons are the same size within each area, and every icon-only button has a tooltip.
-- [ ] Interface colours come only from `Tokens`. Document content (series colours, user-chosen colours, palette swatches) is exempt.
-- [ ] No state is shown by colour alone.
-- [ ] Disabled controls are clearly different from enabled ones in all three themes.
-- [ ] Nothing is cut off without an ellipsis and tooltip (§9.4).
+- [ ] Surface tiers establish hierarchy without "box soup" (resting `1 pt` borders appear on inputs/dropdowns, not every toolbar/footer button or spreadsheet cell).
+- [ ] Navigator, Center Split panes, and Trailing Studio align cleanly on the shared panel-header baseline, with one left edge per panel and no nested framed boxes.
+- [ ] Every gap and padding follows §10.1 (`4`-point rhythm; inter-group gap `>= 2×` intra-group gap), and no UI text falls below `11.5 pt` or uses more than three sizes per panel.
+- [ ] Section headings are bold, English labels follow §10.2 capitalisation, checkboxes use affirmative noun phrases, `…` appears only at the trailing end of modal launchers, and `•` marks unsaved dirty state only.
+- [ ] Each surface has at most one primary accent action, accent colour is absent from static headers and `+ New…` rows, and dialog footers read `Cancel`, `Apply`, `Primary`.
+- [ ] In Split Comparison, command target, keyboard focus, and Inspector target/pin are visually unambiguous, and split `DataSheet` panes render the full contiguous `DataGrid`.
+- [ ] Disclosure triangles and frameless sheet icons are crisp vector glyphs at uniform size, and every icon-only button has a tooltip and accessible name.
+- [ ] Interface colours come exclusively from `Tokens` (plotted data/palette swatches exempt), no state relies on colour alone, disabled controls remain distinct across all themes, and nothing truncates without an ellipsis and full tooltip (§9.4).
 
-This checklist reviews appearance only. It is not evidence that a person can complete a workflow through the GUI ([`../pitfalls.md`](../pitfalls.md) #6).
+This checklist reviews appearance only. It is not evidence that a person can complete a workflow through the GUI ([`../pitfalls.md`](../pitfalls.md) #6). For staged implementation waves, see [`R20.2`–`R20.5` in `docs/ROADMAP.md`](../ROADMAP.md#r20-desktop-gui-visual-system--layout-overhaul).
