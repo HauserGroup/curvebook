@@ -2613,6 +2613,16 @@ fn curly_brace_path(x0: f64, x1: f64, y: f64, amp: f64) -> Path2D {
     }
 }
 
+fn data_set_title(archetype: &TableArchetype, data_set_index: usize) -> Option<String> {
+    let title = match archetype {
+        TableArchetype::Column(t) => t.data_sets.get(data_set_index).map(|ds| ds.title.as_str()),
+        TableArchetype::Nested(t) => t.groups.get(data_set_index).map(|g| g.title.as_str()),
+        TableArchetype::Contingency(t) => t.data_sets.get(data_set_index).map(|ds| ds.title.as_str()),
+        _ => None,
+    }?;
+    (!title.trim().is_empty()).then(|| title.to_owned())
+}
+
 fn build_legend_items(graph: &GraphSheet, sheet: &curvebook_doc::DataSheet) -> Vec<LegendItem> {
     if !matches!(sheet.archetype, TableArchetype::Grouped(_)) && graph.spec.series.len() <= 1 {
         return Vec::new();
@@ -2636,7 +2646,8 @@ fn build_legend_items(graph: &GraphSheet, sheet: &curvebook_doc::DataSheet) -> V
         .iter()
         .enumerate()
         .map(|(idx, s)| {
-            let label = s.legend_label.clone().unwrap_or_else(|| format!("Group {}", idx + 1));
+            let label =
+                s.legend_label.clone().or_else(|| data_set_title(&sheet.archetype, s.data_set_index)).unwrap_or_else(|| format!("Group {}", idx + 1));
             legend_item_from_gdo(label, &s.gdo)
         })
         .collect()
@@ -3046,5 +3057,78 @@ mod tests {
         gs.spec.compact_letter_display = Some(CompactLetterDisplaySpec::new(SheetId::new("res_stk")));
         let s_stk = compile_graph(&gs, &doc).expect("stacked cld");
         assert!(s_stk.warnings.iter().any(|w| w.code == "stacked_cld_guarded"));
+    }
+
+    #[test]
+    fn column_nested_and_contingency_legends_fall_back_to_data_set_titles() {
+        use curvebook_doc::{ContingencyTable, NestedTable};
+
+        // 1. Column graph: actual column titles appear in both build_legend_items and compiled scene,
+        // while explicit legend_label overrides and out-of-bounds indices fall back to "Group N".
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 2).expect("column table");
+        col.data_sets[0].title = String::from("Vehicle");
+        col.data_sets[0].cells = vec![vec![Cell::number(10.0)], vec![Cell::number(12.0)]];
+        col.data_sets[1].title = String::from("Drug X");
+        col.data_sets[1].cells = vec![vec![Cell::number(18.0)], vec![Cell::number(20.0)]];
+        col.data_sets[2].title = String::from("Drug Y");
+        col.data_sets[2].cells = vec![vec![Cell::number(25.0)], vec![Cell::number(27.0)]];
+        let col_ds = DataSheet::new(SheetId::new("col_leg"), "Column", TableArchetype::Column(col)).expect("col ds");
+        let mut col_gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_col_leg"), &col_ds).expect("col gs");
+        col_gs.spec.legend.visible = true;
+        col_gs.spec.series[0].legend_label = None;
+        col_gs.spec.series[1].legend_label = None;
+        col_gs.spec.series[2].legend_label = Some(String::from("Custom Override"));
+
+        let col_items = super::build_legend_items(&col_gs, &col_ds);
+        let col_labels: Vec<&str> = col_items.iter().map(|it| it.label.as_str()).collect();
+        assert_eq!(col_labels, vec!["Vehicle", "Drug X", "Custom Override"]);
+
+        // Out-of-bounds data_set_index falls back to "Group N".
+        let mut oob_gs = col_gs.clone();
+        oob_gs.spec.series[1].data_set_index = 99;
+        let oob_items = super::build_legend_items(&oob_gs, &col_ds);
+        assert_eq!(oob_items[1].label, "Group 2");
+
+        // End-to-end compile_graph check: rendered scene contains column titles, not "Group 1"/"Group 2".
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(col_ds).expect("add col ds");
+        doc.add_graph_sheet(col_gs.clone()).expect("add col gs");
+        let scene = compile_graph(&col_gs, &doc).expect("compile col graph");
+        let texts: Vec<String> = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                ScenePrimitive::Text(t) => Some(t.rich.plain_text()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "Vehicle"), "expected Vehicle in legend texts: {texts:?}");
+        assert!(texts.iter().any(|t| t == "Drug X"), "expected Drug X in legend texts: {texts:?}");
+        assert!(texts.iter().any(|t| t == "Custom Override"), "expected Custom Override in legend texts: {texts:?}");
+        assert!(!texts.iter().any(|t| t == "Group 1" || t == "Group 2"), "unexpected Group N fallback in scene texts: {texts:?}");
+
+        // 2. Nested graph: falls back to NestedGroupColumn::title.
+        let mut nested = NestedTable::new(2, 2, 2).expect("nested table");
+        nested.groups[0].title = String::from("Wildtype");
+        nested.groups[1].title = String::from("Knockout");
+        let nested_ds = DataSheet::new(SheetId::new("nst_leg"), "Nested", TableArchetype::Nested(nested)).expect("nested ds");
+        let mut nested_gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_nst_leg"), &nested_ds).expect("nested gs");
+        for s in &mut nested_gs.spec.series {
+            s.legend_label = None;
+        }
+        let nested_labels: Vec<String> = super::build_legend_items(&nested_gs, &nested_ds).into_iter().map(|it| it.label).collect();
+        assert_eq!(nested_labels, vec!["Wildtype", "Knockout"]);
+
+        // 3. Contingency graph: falls back to ContingencyTable data_sets title.
+        let mut cont = ContingencyTable::new(2, 2).expect("contingency table");
+        cont.data_sets[0].title = String::from("Responder");
+        cont.data_sets[1].title = String::from("Non-responder");
+        let cont_ds = DataSheet::new(SheetId::new("ctg_leg"), "Contingency", TableArchetype::Contingency(cont)).expect("cont ds");
+        let mut cont_gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_ctg_leg"), &cont_ds).expect("cont gs");
+        for s in &mut cont_gs.spec.series {
+            s.legend_label = None;
+        }
+        let cont_labels: Vec<String> = super::build_legend_items(&cont_gs, &cont_ds).into_iter().map(|it| it.label).collect();
+        assert_eq!(cont_labels, vec!["Responder", "Non-responder"]);
     }
 }

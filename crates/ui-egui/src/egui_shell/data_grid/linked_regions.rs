@@ -199,7 +199,10 @@ pub(super) fn render_linked_region_guard_popover(ui: &mut Ui, mctx: &MultiGridCt
                             },
                         );
                         if unlink_resp.clicked() && !mctx.ds.frozen {
-                            fstate.intents.push_engine("table.clearCells", json!({ "sheet_id": mctx.ds.id.as_str(), "cells": [], "unlink": true }));
+                            fstate.intents.push_engine(
+                                "table.clearCells",
+                                json!({ "sheet_id": mctx.ds.id.as_str(), "cells": [], "unlink": true, "region_id": pop.region_id }),
+                            );
                             should_close = true;
                         }
 

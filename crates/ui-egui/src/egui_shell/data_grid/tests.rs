@@ -103,6 +103,59 @@ fn linked_region_guard_opens_on_double_click_and_blocks_outside_clicks() {
 }
 
 #[test]
+fn linked_region_popover_unlink_detaches_only_targeted_region() {
+    let mut app = build_column_app(4, 8);
+    {
+        let mut doc = app.document().clone();
+        let ds = doc.data_sheet_mut(&SheetId::from("col-1")).expect("sheet");
+        ds.add_linked_region(LinkedDataRegion {
+            id: String::from("link-1"),
+            spec: ImportLinkSpec { source: LinkSource::Clipboard, filter: Default::default(), placement: Default::default() },
+            target_range: SheetCellRange::new(curvebook_doc::CellCoord::new(0, 0, 0), curvebook_doc::CellCoord::new(2, 0, 0)),
+            provenance_summary: String::from("Plate A › A1:A3"),
+        })
+        .expect("add link-1");
+        ds.add_linked_region(LinkedDataRegion {
+            id: String::from("link-2"),
+            spec: ImportLinkSpec { source: LinkSource::Clipboard, filter: Default::default(), placement: Default::default() },
+            target_range: SheetCellRange::new(curvebook_doc::CellCoord::new(0, 2, 0), curvebook_doc::CellCoord::new(2, 2, 0)),
+            provenance_summary: String::from("Plate B › C1:C3"),
+        })
+        .expect("add link-2");
+        *app.session_mut() = Session::from_document(doc);
+        app.sync_views();
+    }
+    let tokens = Tokens::default();
+    let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(
+        (app, ColumnGridEguiState::default()),
+        ViewportMetrics::new(1024.0, 640.0, 1.0),
+        tokens,
+        build_driver_font_definitions(),
+        |ui, meta, (app, grid_state)| {
+            let mut intents = PendingUiIntents::new();
+            let t = Tokens::get(ui.ctx());
+            let _ = render_column_grid(ui, app, grid_state, ColumnGridRenderContext::new(&t, false), meta, &mut intents);
+            let _ = intents.commit_if_settled(app, ui.ctx().will_discard());
+        },
+    );
+
+    // Double-click cell (row=1, col=0) inside link-1 to open its popover.
+    let cell_center = driver.frame_meta().find_by_widget_id("grid.cell.1.0.0").expect("cell meta").clipped_rect.center();
+    driver.click_at(cell_center).expect("click 1");
+    driver.click_at(cell_center).expect("click 2");
+    assert_eq!(driver.state().1.active_link_popover.as_ref().map(|p| p.region_id.as_str()), Some("link-1"));
+
+    // Click Unlink in the popover and verify only link-1 is detached while link-2 remains intact.
+    let unlink_center = driver.frame_meta().find_by_widget_id("grid.link_popover.unlink").expect("unlink button meta").clipped_rect.center();
+    driver.click_at(unlink_center).expect("click unlink");
+
+    assert!(driver.state().1.active_link_popover.is_none(), "popover should close after unlink");
+    let ds = driver.state().0.document().data_sheet(&SheetId::from("col-1")).expect("sheet");
+    let remaining_ids: Vec<&str> = ds.linked_regions.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(remaining_ids, vec!["link-2"], "unlinking link-1 must leave link-2 attached");
+}
+
+#[test]
 fn buffered_inline_edit_commits_once_on_enter_and_cancels_on_escape() {
     let app = build_column_app(2, 5);
     let tokens = Tokens::default();

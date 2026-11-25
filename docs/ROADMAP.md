@@ -288,12 +288,12 @@ The human-path suites cover figure export (`WF-28`) but no test imports a `.pris
 - [ ] Cite these tests from the `R12.2` tutorials that show these GUI steps.
 
 ### R10.31 Desktop graph, image, gallery & linked-region UI parity fixes
-Owner: open · Status: todo · Was: GUI & layout spec audit 2026-11-24 · Depends on: none · Gate: post-Beta · Est. note: 8–14 h
+Owner: open · Status: in progress · Was: GUI & layout spec audit 2026-11-24 · Depends on: none · Gate: post-Beta · Est. note: 8–14 h
 
 Closes concrete UI/chart defects and modal controls where the engine or layout specification already defines the behavior but the desktop UI omits or misroutes it.
 
-- [ ] Fix `build_legend_items` in `crates/chart/src/column_grouped.rs` so `Column`, `Nested`, and `Contingency` graphs fall back to data-set column titles (`ds.title`) rather than `"Group N"` when `SeriesSpec::legend_label` is `None`, with a chart regression test.
-- [ ] Pass the targeted `region_id` in the linked-region grid popover's **Unlink** action (`crates/ui-egui/src/egui_shell/data_grid/linked_regions.rs`) instead of calling `table.clearCells` with `unlink: true` across the entire sheet, with a multi-region unlink regression test.
+- [x] Fix `build_legend_items` in `crates/chart/src/column_grouped.rs` so `Column`, `Nested`, and `Contingency` graphs fall back to data-set column titles (`ds.title`) rather than `"Group N"` when `SeriesSpec::legend_label` is `None`, with a chart regression test. *(Regression test: `column_nested_and_contingency_legends_fall_back_to_data_set_titles`.)*
+- [x] Pass the targeted `region_id` in the linked-region grid popover's **Unlink** action (`crates/ui-egui/src/egui_shell/data_grid/linked_regions.rs`) instead of calling `table.clearCells` with `unlink: true` across the entire sheet, with a multi-region unlink regression test. *(Regression test: `linked_region_popover_unlink_detaches_only_targeted_region`.)*
 - [ ] Expose a `Bar width (pt)` numeric spinner bound to `SeriesSpec::bar_width_override_pt` in `crates/ui-egui/src/egui_shell/graph_modals/format_graph/series.rs`.
 - [ ] Expose `(X, Y)` position inputs and a `pt`/`mm`/`cm`/`in` unit selector in `render_format_image_geometry` (`crates/ui-egui/src/egui_shell/graph_modals/r13_modals.rs`).
 - [ ] Add `Export Selected…` and `Place Selected onto New Layout` batch actions to `PortfolioGallery` (`crates/ui-egui/src/egui_shell/center_stage.rs`) and a `Target Scope` toggle (`Active sheet` vs `Selected gallery sheets`) to `ActiveDialog::ExportFigure` (`crates/ui-egui/src/egui_shell/app_modals.rs`).
