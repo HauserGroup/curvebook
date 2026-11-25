@@ -16,8 +16,8 @@ use curvebook_format::{
     parse_preferences_json,
 };
 use curvebook_ui_egui::control_io::host_routing::{
-    HostPrefFingerprint, capture_pref_fingerprint, command_replaces_project, has_non_null_path_param, is_command_read_only,
-    normalize_control_request_params,
+    HostPrefFingerprint, SheetClipboardPayload, build_sheet_clipboard_payload, capture_pref_fingerprint, command_replaces_project,
+    has_non_null_path_param, is_command_read_only, normalize_control_request_params,
 };
 use curvebook_ui_egui::{
     ActiveDialog, CanvasPreviewFilter, ClipboardBundle, KeyModifiers, PointerButton, PrintJobSpec, UiApp, UiEventOutcome, UiInputEvent,
@@ -2516,13 +2516,9 @@ impl WebBridgeSession {
             return Err(WebAdapterError::Clipboard(format!("clipboard DPI {dpi} out of supported range {MIN_CLIPBOARD_DPI}..={MAX_CLIPBOARD_DPI}")));
         }
 
-        let target = resolve_clipboard_target(self.host.app(), sheet_id)?;
-        match target {
-            ClipboardTarget::Data(target_id) => build_data_clipboard_payload(self.host.app(), &target_id, dpi),
-            ClipboardTarget::Graph(target_id) => build_graph_clipboard_payload(self.host.app_mut(), &target_id, dpi),
-            ClipboardTarget::Layout(target_id) => build_layout_clipboard_payload(self.host.app_mut(), &target_id, dpi),
-            ClipboardTarget::Result(target_id) => build_result_clipboard_payload(self.host.app(), &target_id, dpi),
-            ClipboardTarget::Info(target_id) => build_info_clipboard_payload(self.host.app(), &target_id, dpi),
+        match build_sheet_clipboard_payload(self.host.app_mut(), sheet_id, dpi).map_err(WebAdapterError::Clipboard)? {
+            SheetClipboardPayload::Bundle { bundle, tsv } => Ok(clipboard_payload_from_bundle(*bundle, tsv)),
+            SheetClipboardPayload::TextOnly { tsv } => Ok(text_only_clipboard_payload(tsv, dpi)),
         }
     }
 
@@ -3697,73 +3693,6 @@ impl WebBridgeSession {
     }
 }
 
-enum ClipboardTarget {
-    Data(String),
-    Graph(String),
-    Layout(String),
-    Result(String),
-    Info(String),
-}
-
-fn resolve_clipboard_target(app: &UiApp, sheet_id: Option<&str>) -> Result<ClipboardTarget, WebAdapterError> {
-    let doc = app.document();
-    if let Some(raw) = sheet_id {
-        if let Some(s) = doc.data_sheets.iter().find(|s| s.id.as_str() == raw) {
-            return Ok(ClipboardTarget::Data(s.id.as_str().to_owned()));
-        }
-        if let Some(s) = doc.graph_sheets.iter().find(|s| s.id.as_str() == raw) {
-            return Ok(ClipboardTarget::Graph(s.id.as_str().to_owned()));
-        }
-        if let Some(s) = doc.layout_sheets.iter().find(|s| s.id.as_str() == raw) {
-            return Ok(ClipboardTarget::Layout(s.id.as_str().to_owned()));
-        }
-        if let Some(s) = doc.result_sheets.iter().find(|s| s.id.as_str() == raw) {
-            return Ok(ClipboardTarget::Result(s.id.as_str().to_owned()));
-        }
-        if let Some(s) = doc.info_sheets.iter().find(|s| s.id.as_str() == raw) {
-            return Ok(ClipboardTarget::Info(s.id.as_str().to_owned()));
-        }
-        return Err(WebAdapterError::Clipboard(format!("sheet `{raw}` not found for clipboard export")));
-    }
-
-    if let Some(active) = doc.active_sheet_id.as_ref() {
-        let id = active.as_str().to_owned();
-        if doc.data_sheet(active).is_some() {
-            return Ok(ClipboardTarget::Data(id));
-        }
-        if doc.graph_sheet(active).is_some() {
-            return Ok(ClipboardTarget::Graph(id));
-        }
-        if doc.layout_sheet(active).is_some() {
-            return Ok(ClipboardTarget::Layout(id));
-        }
-        if doc.result_sheet(active).is_some() {
-            return Ok(ClipboardTarget::Result(id));
-        }
-        if doc.info_sheet(active).is_some() {
-            return Ok(ClipboardTarget::Info(id));
-        }
-    }
-
-    if let Some(s) = doc.graph_sheets.first() {
-        return Ok(ClipboardTarget::Graph(s.id.as_str().to_owned()));
-    }
-    if let Some(s) = doc.layout_sheets.first() {
-        return Ok(ClipboardTarget::Layout(s.id.as_str().to_owned()));
-    }
-    if let Some(s) = doc.data_sheets.first() {
-        return Ok(ClipboardTarget::Data(s.id.as_str().to_owned()));
-    }
-    if let Some(s) = doc.result_sheets.first() {
-        return Ok(ClipboardTarget::Result(s.id.as_str().to_owned()));
-    }
-    if let Some(s) = doc.info_sheets.first() {
-        return Ok(ClipboardTarget::Info(s.id.as_str().to_owned()));
-    }
-
-    Err(WebAdapterError::Clipboard(String::from("no printable graph/layout or data sheet available for clipboard export")))
-}
-
 fn extract_control_reply_error<'a>(reply: &'a Value, fallback: &'a str) -> &'a str {
     reply
         .get("error")
@@ -3771,108 +3700,6 @@ fn extract_control_reply_error<'a>(reply: &'a Value, fallback: &'a str) -> &'a s
         .or_else(|| reply.pointer("/error_detail/message").and_then(Value::as_str))
         .filter(|msg| !msg.trim().is_empty())
         .unwrap_or(fallback)
-}
-
-fn build_data_clipboard_payload(app: &UiApp, target_id: &str, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
-    let doc = app.document();
-    let ds = doc
-        .data_sheets
-        .iter()
-        .find(|s| s.id.as_str() == target_id)
-        .ok_or_else(|| WebAdapterError::Clipboard(format!("data sheet `{target_id}` not found for clipboard export")))?;
-    let is_active = doc.active_sheet_id.as_ref().is_some_and(|id| id.as_str() == target_id);
-    let decimal_sep = app.locale_preset.decimal_separator;
-    let selected_tsv = if is_active
-        && let Some((lo, hi)) = app.grid.tool.selection_bounds()
-        && let Ok(range) = serde_json::from_value(json!({
-            "start": { "row": lo.row, "col": lo.col, "subcol": lo.subcol },
-            "end": { "row": hi.row, "col": hi.col, "subcol": hi.subcol },
-        })) {
-        let block = ClipboardBundle::tsv_from_datasheet_range(ds, range, decimal_sep);
-        (!block.is_empty()).then_some(block)
-    } else {
-        None
-    };
-    let tsv = match selected_tsv {
-        Some(block) => block,
-        None => ClipboardBundle::tsv_from_datasheet(ds, decimal_sep).map_err(WebAdapterError::Clipboard)?,
-    };
-    Ok(text_only_clipboard_payload(tsv, dpi))
-}
-
-fn build_graph_clipboard_payload(app: &mut UiApp, target_id: &str, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
-    let decimal_sep = app.locale_preset.decimal_separator;
-    let session = app.session_mut();
-    let (render_id, tsv) = {
-        let doc = session.document();
-        let gs = doc
-            .graph_sheets
-            .iter()
-            .find(|s| s.id.as_str() == target_id)
-            .ok_or_else(|| WebAdapterError::Clipboard(format!("graph sheet `{target_id}` not found for clipboard export")))?;
-        let tsv = match doc.data_sheet(&gs.spec.primary_source_sheet_id) {
-            Some(ds) => Some(ClipboardBundle::tsv_from_datasheet(ds, decimal_sep).map_err(WebAdapterError::Clipboard)?),
-            None => None,
-        };
-        (gs.id.clone(), tsv)
-    };
-    let bundle = ClipboardBundle::from_sheet(session, &render_id, dpi).map_err(WebAdapterError::Clipboard)?;
-    Ok(clipboard_payload_from_bundle(bundle, tsv))
-}
-
-fn build_layout_clipboard_payload(app: &mut UiApp, target_id: &str, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
-    let session = app.session_mut();
-    let render_id = session
-        .document()
-        .layout_sheets
-        .iter()
-        .find(|s| s.id.as_str() == target_id)
-        .map(|s| s.id.clone())
-        .ok_or_else(|| WebAdapterError::Clipboard(format!("layout sheet `{target_id}` not found for clipboard export")))?;
-    let bundle = ClipboardBundle::from_sheet(session, &render_id, dpi).map_err(WebAdapterError::Clipboard)?;
-    Ok(clipboard_payload_from_bundle(bundle, None))
-}
-
-fn build_result_clipboard_payload(app: &UiApp, target_id: &str, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
-    let rs = app
-        .document()
-        .result_sheets
-        .iter()
-        .find(|s| s.id.as_str() == target_id)
-        .ok_or_else(|| WebAdapterError::Clipboard(format!("result sheet `{target_id}` not found for clipboard export")))?;
-    let mut lines = Vec::new();
-    if let Some(tab) = rs.tabs.first() {
-        if !tab.column_headers.is_empty() {
-            lines.push(tab.column_headers.join("\t"));
-        }
-        for row in &tab.rows {
-            let cols: Vec<String> = row
-                .iter()
-                .map(|cell| curvebook_ui_egui::dialogs_canvas::ResultSheetViewState::format_result_cell(cell, rs.analysis.p_value_format))
-                .collect();
-            lines.push(cols.join("\t"));
-        }
-    } else {
-        lines.push(rs.title().to_owned());
-    }
-    Ok(text_only_clipboard_payload(lines.join("\n"), dpi))
-}
-
-fn build_info_clipboard_payload(app: &UiApp, target_id: &str, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
-    let info = app
-        .document()
-        .info_sheets
-        .iter()
-        .find(|s| s.id.as_str() == target_id)
-        .ok_or_else(|| WebAdapterError::Clipboard(format!("info sheet `{target_id}` not found for clipboard export")))?;
-    let mut lines = vec![info.title.clone()];
-    if !info.notes_markdown.is_empty() {
-        lines.push(info.notes_markdown.clone());
-    }
-    for c in &info.constants {
-        lines.push(format!("{}\t{:?}", c.name, c.value));
-    }
-    Ok(text_only_clipboard_payload(lines.join("\n"), dpi))
 }
 
 fn clipboard_payload_from_bundle(bundle: ClipboardBundle, tsv: Option<String>) -> WebClipboardPayload {

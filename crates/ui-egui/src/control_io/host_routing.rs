@@ -923,3 +923,110 @@ fn commit_format_points_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String
     }
     commit_modal_intent_batch(app, pairs, "dialog.format_points_committed")
 }
+
+/// Cross-host clipboard export payload assembled from any sheet kind in [`UiApp`].
+pub enum SheetClipboardPayload {
+    /// Multi-flavor vector/raster figure bundle with optional companion TSV data.
+    Bundle { bundle: Box<crate::os_integration::ClipboardBundle>, tsv: Option<String> },
+    /// Plain TSV text payload for Data, Result, or Info sheets.
+    TextOnly { tsv: String },
+}
+
+/// Resolve `sheet_id` (falling back to the active sheet, then the first graph/layout/data/result/info
+/// sheet) and assemble a [`SheetClipboardPayload`] at `dpi`.
+///
+/// # Errors
+/// Returns an error string when the target sheet is missing, no copyable sheet exists, or bundle
+/// generation fails.
+pub fn build_sheet_clipboard_payload(app: &mut UiApp, sheet_id: Option<&str>, dpi: u16) -> Result<SheetClipboardPayload, String> {
+    use crate::os_integration::ClipboardBundle;
+
+    let doc = app.document();
+    let target_id = if let Some(raw) = sheet_id {
+        let sid = SheetId::from(raw);
+        if doc.sheet_section(&sid).is_none() {
+            return Err(format!("sheet `{raw}` not found for clipboard export"));
+        }
+        sid
+    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.sheet_section(id).is_some()) {
+        active.clone()
+    } else if let Some(sid) = doc
+        .graph_sheets
+        .first()
+        .map(|s| &s.id)
+        .or_else(|| doc.layout_sheets.first().map(|s| &s.id))
+        .or_else(|| doc.data_sheets.first().map(|s| &s.id))
+        .or_else(|| doc.result_sheets.first().map(|s| &s.id))
+        .or_else(|| doc.info_sheets.first().map(|s| &s.id))
+    {
+        sid.clone()
+    } else {
+        return Err(String::from("no printable graph/layout or data sheet available for clipboard export"));
+    };
+
+    let dec = app.locale_preset.decimal_separator;
+    match doc.sheet_section(&target_id) {
+        Some(curvebook_doc::SheetSection::Data) => {
+            let ds = doc.data_sheet(&target_id).ok_or_else(|| format!("data sheet `{target_id}` not found for clipboard export"))?;
+            let is_active = doc.active_sheet_id.as_ref() == Some(&target_id);
+            let selected = is_active
+                .then(|| app.grid.tool.selection_bounds())
+                .flatten()
+                .and_then(|(lo, hi)| {
+                    serde_json::from_value(json!({
+                        "start": { "row": lo.row, "col": lo.col, "subcol": lo.subcol },
+                        "end": { "row": hi.row, "col": hi.col, "subcol": hi.subcol },
+                    }))
+                    .ok()
+                })
+                .map(|range| ClipboardBundle::tsv_from_datasheet_range(ds, range, dec))
+                .filter(|b| !b.is_empty());
+            let tsv = match selected {
+                Some(block) => block,
+                None => ClipboardBundle::tsv_from_datasheet(ds, dec)?,
+            };
+            Ok(SheetClipboardPayload::TextOnly { tsv })
+        }
+        Some(curvebook_doc::SheetSection::Graphs) => {
+            let gs = doc.graph_sheet(&target_id).ok_or_else(|| format!("graph sheet `{target_id}` not found for clipboard export"))?;
+            let tsv = doc.data_sheet(&gs.spec.primary_source_sheet_id).map(|ds| ClipboardBundle::tsv_from_datasheet(ds, dec)).transpose()?;
+            let bundle = ClipboardBundle::from_sheet(app.session(), &target_id, dpi)?;
+            Ok(SheetClipboardPayload::Bundle { bundle: Box::new(bundle), tsv })
+        }
+        Some(curvebook_doc::SheetSection::Layouts) => {
+            let bundle = ClipboardBundle::from_sheet(app.session(), &target_id, dpi)?;
+            Ok(SheetClipboardPayload::Bundle { bundle: Box::new(bundle), tsv: None })
+        }
+        Some(curvebook_doc::SheetSection::Analyses) => {
+            let rs = doc.result_sheet(&target_id).ok_or_else(|| format!("result sheet `{target_id}` not found for clipboard export"))?;
+            let mut lines = Vec::new();
+            if let Some(tab) = rs.tabs.first() {
+                if !tab.column_headers.is_empty() {
+                    lines.push(tab.column_headers.join("\t"));
+                }
+                for row in &tab.rows {
+                    let cols: Vec<String> = row
+                        .iter()
+                        .map(|cell| crate::dialogs_canvas::ResultSheetViewState::format_result_cell(cell, rs.analysis.p_value_format))
+                        .collect();
+                    lines.push(cols.join("\t"));
+                }
+            } else {
+                lines.push(rs.title().to_owned());
+            }
+            Ok(SheetClipboardPayload::TextOnly { tsv: lines.join("\n") })
+        }
+        Some(curvebook_doc::SheetSection::Info) => {
+            let info = doc.info_sheet(&target_id).ok_or_else(|| format!("info sheet `{target_id}` not found for clipboard export"))?;
+            let mut lines = vec![info.title.clone()];
+            if !info.notes_markdown.is_empty() {
+                lines.push(info.notes_markdown.clone());
+            }
+            for c in &info.constants {
+                lines.push(format!("{}\t{:?}", c.name, c.value));
+            }
+            Ok(SheetClipboardPayload::TextOnly { tsv: lines.join("\n") })
+        }
+        None => Err(format!("sheet `{target_id}` not found for clipboard export")),
+    }
+}

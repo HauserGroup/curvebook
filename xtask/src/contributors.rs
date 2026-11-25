@@ -165,34 +165,7 @@ fn apply_person_field(entry: &mut PersonOverride, key: &str, rhs: &str) {
     }
 }
 
-fn strip_toml_comment(line: &str) -> &str {
-    let mut in_double = false;
-    let mut in_single = false;
-    let mut escaped = false;
-    for (idx, ch) in line.char_indices() {
-        if in_double {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_double = false;
-            }
-        } else if in_single {
-            if ch == '\'' {
-                in_single = false;
-            }
-        } else {
-            match ch {
-                '"' => in_double = true,
-                '\'' => in_single = true,
-                '#' => return line.get(..idx).unwrap_or(line),
-                _ => {}
-            }
-        }
-    }
-    line
-}
+use crate::scan_util::strip_toml_comment;
 
 fn parse_quoted_value(rhs: &str) -> Option<String> {
     if let Some(inner) = rhs.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {

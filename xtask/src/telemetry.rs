@@ -13,34 +13,7 @@ struct LockPackage {
     source: Option<String>,
 }
 
-fn strip_toml_comment(line: &str) -> &str {
-    let mut in_dq = false;
-    let mut in_sq = false;
-    let mut escaped = false;
-    for (i, ch) in line.char_indices() {
-        if in_dq {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_dq = false;
-            }
-        } else if in_sq {
-            if ch == '\'' {
-                in_sq = false;
-            }
-        } else {
-            match ch {
-                '"' => in_dq = true,
-                '\'' => in_sq = true,
-                '#' => return line.get(..i).unwrap_or(line),
-                _ => {}
-            }
-        }
-    }
-    line
-}
+use crate::scan_util::strip_toml_comment;
 
 fn parse_section_header(line: &str) -> Option<&str> {
     if line.starts_with("[[") {
