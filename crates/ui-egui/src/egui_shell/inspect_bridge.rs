@@ -51,9 +51,7 @@ use crate::inspect::{
     UiMenuSnapshot, UiNavigatorSheetNode, UiTreeSnapshot, UiWidgetNode, ZLayer, active_dialog_slug,
 };
 use crate::interaction::{KeyModifiers, UiEventOutcome, ViewportMetrics};
-use crate::menus::{
-    CuratedMenuNode, UI_COMMANDS, command_tooltip, curated_menu_bar, is_desktop_host_routed_command, menu_bar_tooltips, toolbar_tooltips,
-};
+use crate::menus::{CuratedMenuNode, UI_COMMANDS, command_tooltip, curated_menu_bar, is_desktop_host_routed_command, menu_bar_tooltips};
 use crate::modal_predicates::{evaluate_dialog_button_for_app, sync_format_points_fallback_targets};
 use crate::tr;
 use crate::workspace_nav::ActiveWorkspacePane;
@@ -428,25 +426,27 @@ fn entry_belongs_to_scope(entry: &FrameInspectNodeMeta, scope_tag: &str) -> bool
     }
 }
 
+const DIALOG_WIDGET_PREFIXES: &[&str] = &[
+    "dialog.",
+    "modal.",
+    "edit.",
+    "palette.",
+    "power.",
+    "import.",
+    "transform.",
+    "analyze.",
+    "fit.",
+    "axes.",
+    "graph_type.",
+    "nav.delete_confirm.",
+    "unsaved.",
+    "prefs.",
+    "find.",
+];
+
 fn is_dialog_meta_entry(entry: &FrameInspectNodeMeta) -> bool {
     let wid = entry.widget_id.as_str();
-    entry.z_layer == ZLayer::ModalDialog
-        || entry.z_layer == ZLayer::ModalBackdrop
-        || wid.starts_with("dialog.")
-        || wid.starts_with("modal.")
-        || wid.starts_with("edit.")
-        || wid.starts_with("palette.")
-        || wid.starts_with("power.")
-        || wid.starts_with("import.")
-        || wid.starts_with("transform.")
-        || wid.starts_with("analyze.")
-        || wid.starts_with("fit.")
-        || wid.starts_with("axes.")
-        || wid.starts_with("graph_type.")
-        || wid.starts_with("nav.delete_confirm.")
-        || wid.starts_with("unsaved.")
-        || wid.starts_with("prefs.")
-        || wid.starts_with("find.")
+    matches!(entry.z_layer, ZLayer::ModalDialog | ZLayer::ModalBackdrop) || DIALOG_WIDGET_PREFIXES.iter().any(|p| wid.starts_with(p))
 }
 
 struct AccessKitLookup<'a> {
@@ -565,45 +565,53 @@ fn resolve_dialog_slug(app: &UiApp, decision: &HybridCoexistenceDecision, dialog
     }
 }
 
+const FALLBACK_DIALOG_TITLES: &[(&str, &str)] = &[
+    ("command_palette", "Command Palette"),
+    ("preferences", "Preferences"),
+    ("find_replace", "Find & Replace"),
+    ("manage_variables", "Manage Variables"),
+    ("import_paste_special", "Import & Paste Special"),
+    ("import_reshape", "Import & Paste Special"),
+    ("transform_modal", "Transform"),
+    ("power_and_sample_size", "Power & Sample Size"),
+    ("analyze_sheet", "Analyze Data"),
+    ("edit_analysis_parameters", "Edit Analysis Parameters"),
+    ("change_data_analyzed", "Change Data Analyzed"),
+    ("format_axes", "Format Axes"),
+    ("format_graph", "Format Graph"),
+    ("format_selected_points", "Format Selected Points"),
+    ("change_graph_type", "Change Graph Type"),
+    ("create_graph", "Create New Graph"),
+    ("unsaved_changes", "Unsaved Changes"),
+    ("nav_delete_confirm", "Delete Sheet"),
+];
+
 fn fallback_dialog_title(app: &UiApp, dialog_kind: &str) -> String {
     match dialog_kind {
         "about" => tr(&app.locale, "menu.help.about").to_owned(),
-        "command_palette" => String::from("Command Palette"),
-        "preferences" => String::from("Preferences"),
-        "find_replace" => String::from("Find & Replace"),
-        "manage_variables" => String::from("Manage Variables"),
-        "import_paste_special" | "import_reshape" => String::from("Import & Paste Special"),
-        "transform_modal" => String::from("Transform"),
-        "power_and_sample_size" => String::from("Power & Sample Size"),
-        "analyze_sheet" => String::from("Analyze Data"),
-        "edit_analysis_parameters" => String::from("Edit Analysis Parameters"),
-        "change_data_analyzed" => String::from("Change Data Analyzed"),
         "duplicate_analysis_prompt" => tr(&app.locale, "w6.view.modal.analysis_already_exists").to_owned(),
-        "format_axes" => String::from("Format Axes"),
-        "format_graph" => String::from("Format Graph"),
-        "format_selected_points" => String::from("Format Selected Points"),
-        "change_graph_type" => String::from("Change Graph Type"),
-        "create_graph" => String::from("Create New Graph"),
-        "unsaved_changes" => String::from("Unsaved Changes"),
-        "nav_delete_confirm" => String::from("Delete Sheet"),
-        _ => dialog_kind.replace('_', " "),
+        _ => FALLBACK_DIALOG_TITLES
+            .iter()
+            .find_map(|(k, title)| (*k == dialog_kind).then(|| (*title).to_owned()))
+            .unwrap_or_else(|| dialog_kind.replace('_', " ")),
     }
 }
 
+const BUTTON_ACTION_ALIASES: &[(&str, &[&str])] = &[
+    ("ok", &["modal.ok", "graph_type.apply", "import.commit", "transform.commit", "nav.delete_confirm.confirm"]),
+    ("cancel", &["modal.cancel", "nav.delete_confirm.cancel"]),
+    ("apply", &["modal.apply"]),
+    ("create", &["modal.create", "power.commit"]),
+    ("next", &["modal.next"]),
+    ("back", &["modal.back"]),
+    ("close", &["modal.close"]),
+    ("restore", &["modal.restore"]),
+    ("discard", &["modal.discard"]),
+    ("preview", &["modal.preview"]),
+];
+
 fn canonical_action_for_button_widget(wid: &str) -> Option<&'static str> {
-    match wid {
-        "modal.ok" | "graph_type.apply" | "import.commit" | "transform.commit" | "nav.delete_confirm.confirm" => Some("ok"),
-        "modal.cancel" | "nav.delete_confirm.cancel" => Some("cancel"),
-        "modal.apply" => Some("apply"),
-        "modal.create" | "power.commit" => Some("create"),
-        "modal.next" => Some("next"),
-        "modal.back" => Some("back"),
-        "modal.close" => Some("close"),
-        "modal.restore" => Some("restore"),
-        "modal.discard" => Some("discard"),
-        "modal.preview" => Some("preview"),
-        _ => None,
-    }
+    BUTTON_ACTION_ALIASES.iter().find_map(|(action, wids)| wids.contains(&wid).then_some(*action))
 }
 
 fn build_dialog_snapshot_from_meta(
@@ -658,30 +666,10 @@ fn build_dialog_snapshot_from_meta(
         let node = widget_node_from_meta(entry, ak, meta.scale_factor, include_bounds);
         if wid.starts_with("edit.tab.") || wid.contains(".tab.") || node.role == "tab" {
             tabs.push(node);
-        } else if wid.starts_with("dialog.button.")
-            || matches!(
-                wid,
-                "modal.ok"
-                    | "modal.cancel"
-                    | "modal.apply"
-                    | "modal.close"
-                    | "modal.next"
-                    | "modal.back"
-                    | "modal.create"
-                    | "modal.restore"
-                    | "modal.discard"
-                    | "modal.preview"
-                    | "graph_type.apply"
-                    | "import.commit"
-                    | "transform.commit"
-                    | "power.commit"
-                    | "nav.delete_confirm.cancel"
-                    | "nav.delete_confirm.confirm"
-            )
-        {
-            if let Some(action) = canonical_action_for_button_widget(wid) {
-                rendered_buttons_by_action.entry(action).or_insert_with(|| node.clone());
-            }
+        } else if let Some(action) = canonical_action_for_button_widget(wid) {
+            rendered_buttons_by_action.entry(action).or_insert_with(|| node.clone());
+            buttons.push(node);
+        } else if wid.starts_with("dialog.button.") {
             buttons.push(node);
         } else {
             controls.push(node);
@@ -702,6 +690,31 @@ fn build_dialog_snapshot_from_meta(
     })
 }
 
+struct SyntheticNodeSpec<'a> {
+    widget_id: &'a str,
+    role: &'a str,
+    label: &'a str,
+    value: Option<Value>,
+    enabled: bool,
+    disabled_reason: Option<String>,
+    bounds: Option<[f64; 4]>,
+}
+
+fn push_synthetic_node(list: &mut Vec<UiWidgetNode>, spec: SyntheticNodeSpec<'_>) {
+    if !list.iter().any(|n| n.widget_id == spec.widget_id) {
+        list.push(UiWidgetNode {
+            widget_id: spec.widget_id.to_owned(),
+            role: spec.role.to_owned(),
+            label: spec.label.to_owned(),
+            command_id: None,
+            value: spec.value,
+            enabled: spec.enabled,
+            disabled_reason: spec.disabled_reason,
+            bounds: spec.bounds,
+        });
+    }
+}
+
 fn append_synthetic_dialog_fallbacks(
     app: &UiApp,
     rendered_buttons_by_action: &BTreeMap<&'static str, UiWidgetNode>,
@@ -710,10 +723,10 @@ fn append_synthetic_dialog_fallbacks(
 ) {
     for (action, src) in rendered_buttons_by_action {
         let canon_id = format!("dialog.button.{action}");
+        let eval = evaluate_dialog_button_for_app(app, action);
+        let enabled = eval.as_ref().map_or(src.enabled, |e| e.enabled && src.enabled);
+        let disabled_reason = eval.and_then(|e| e.disabled_reason).or_else(|| src.disabled_reason.clone());
         if !buttons.iter().any(|b| b.widget_id == canon_id) {
-            let eval = evaluate_dialog_button_for_app(app, action);
-            let enabled = eval.as_ref().map_or(src.enabled, |e| e.enabled && src.enabled);
-            let disabled_reason = eval.and_then(|e| e.disabled_reason).or_else(|| src.disabled_reason.clone());
             buttons.push(UiWidgetNode {
                 widget_id: canon_id,
                 role: String::from("button"),
@@ -727,203 +740,78 @@ fn append_synthetic_dialog_fallbacks(
         }
     }
 
-    if app.canvas_dialogs.active_dialog == ActiveDialog::PowerAndSampleSize {
-        if let Some(ok_src) = rendered_buttons_by_action.get("ok").cloned()
-            && !buttons.iter().any(|b| b.widget_id == "dialog.button.create")
-        {
-            let eval = evaluate_dialog_button_for_app(app, "create");
-            let enabled = eval.as_ref().map_or(ok_src.enabled, |e| e.enabled);
-            let disabled_reason = eval.and_then(|e| e.disabled_reason);
-            buttons.push(UiWidgetNode {
-                widget_id: String::from("dialog.button.create"),
-                role: String::from("button"),
-                label: tr(&app.locale, "w6.view.btn.create").to_owned(),
-                command_id: None,
-                value: None,
-                enabled,
-                disabled_reason,
-                bounds: ok_src.bounds,
-            });
-        }
-        for action in ["back", "next", "cancel", "create"] {
-            let canon_id = format!("dialog.button.{action}");
-            if !buttons.iter().any(|b| b.widget_id == canon_id)
-                && let Some(eval) = evaluate_dialog_button_for_app(app, action)
-            {
-                buttons.push(UiWidgetNode {
-                    widget_id: canon_id,
-                    role: String::from("button"),
-                    label: action.to_owned(),
-                    command_id: None,
-                    value: None,
-                    enabled: eval.enabled,
-                    disabled_reason: eval.disabled_reason,
-                    bounds: None,
-                });
+    match app.canvas_dialogs.active_dialog {
+        ActiveDialog::PowerAndSampleSize => {
+            if let Some(ok_src) = rendered_buttons_by_action.get("ok") {
+                let eval = evaluate_dialog_button_for_app(app, "create");
+                push_synthetic_node(
+                    buttons,
+                    SyntheticNodeSpec {
+                        widget_id: "dialog.button.create",
+                        role: "button",
+                        label: tr(&app.locale, "w6.view.btn.create"),
+                        value: None,
+                        enabled: eval.as_ref().map_or(ok_src.enabled, |e| e.enabled),
+                        disabled_reason: eval.and_then(|e| e.disabled_reason),
+                        bounds: ok_src.bounds,
+                    },
+                );
+            }
+            for action in ["back", "next", "cancel", "create"] {
+                let canon_id = format!("dialog.button.{action}");
+                if let Some(eval) = evaluate_dialog_button_for_app(app, action) {
+                    push_synthetic_node(
+                        buttons,
+                        SyntheticNodeSpec {
+                            widget_id: &canon_id,
+                            role: "button",
+                            label: action,
+                            value: None,
+                            enabled: eval.enabled,
+                            disabled_reason: eval.disabled_reason,
+                            bounds: None,
+                        },
+                    );
+                }
             }
         }
-    }
-
-    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::DuplicateAnalysisPrompt { .. })
-        && !controls.iter().any(|c| c.widget_id == "duplicate.choice")
-    {
-        let dup_val = match app.canvas_dialogs.analyze.duplicate_choice {
-            crate::dialogs_canvas::DuplicateChoice::CreateNew => "create_new",
-            crate::dialogs_canvas::DuplicateChoice::ModifyExisting => "modify_existing",
-        };
-        let bounds = controls
-            .iter()
-            .find(|c| c.widget_id == "analyze_picker.dup.create_new" || c.widget_id == "analyze_picker.dup.modify_existing")
-            .and_then(|c| c.bounds);
-        controls.push(UiWidgetNode {
-            widget_id: String::from("duplicate.choice"),
-            role: String::from("radio_group"),
-            label: String::from("Duplicate analysis choice"),
-            command_id: None,
-            value: Some(json!(dup_val)),
-            enabled: true,
-            disabled_reason: None,
-            bounds,
-        });
-    }
-
-    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::InsertModelEquation { .. })
-        && !controls.iter().any(|c| c.widget_id == "equation.mode")
-    {
-        let mode_str = crate::dialogs_canvas::equation_display_mode_str(app.canvas_dialogs.insert_model_equation.mode);
-        let bounds = controls
-            .iter()
-            .find(|c| {
-                matches!(c.widget_id.as_str(), "eq.mode.substituted" | "eq.mode.symbolic" | "equation.mode.substituted" | "equation.mode.symbolic")
-            })
-            .and_then(|c| c.bounds);
-        controls.push(UiWidgetNode {
-            widget_id: String::from("equation.mode"),
-            role: String::from("radio_group"),
-            label: String::from("Equation display mode"),
-            command_id: None,
-            value: Some(json!(mode_str)),
-            enabled: true,
-            disabled_reason: None,
-            bounds,
-        });
-    }
-
-    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }) && !controls.iter().any(|c| c.widget_id == "analyze.entry") {
-        let bounds = controls.iter().find(|c| c.widget_id.starts_with("analyze_picker.")).and_then(|c| c.bounds);
-        controls.push(UiWidgetNode {
-            widget_id: String::from("analyze.entry"),
-            role: String::from("listbox"),
-            label: String::from("Analysis entry"),
-            command_id: None,
-            value: Some(json!(app.canvas_dialogs.analyze.selected_entry_id)),
-            enabled: true,
-            disabled_reason: None,
-            bounds,
-        });
-    }
-
-    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ChangeGraphType { .. }) {
-        let preview_bounds = controls.iter().find(|c| c.widget_id == "graph_type.preview_pane").and_then(|c| c.bounds);
-        let cgt = &app.canvas_dialogs.change_graph_type;
-        for (wid, role, label, val) in [
-            ("graph_type.selected", "listbox", "Selected graph type", json!(cgt.selected_option_id)),
-            ("graph_type.summary_measure", "combobox", "Summary measure", json!(cgt.summary_measure)),
-            ("graph_type.error_bar_metric", "combobox", "Error bar metric", json!(cgt.error_bar_metric)),
-        ] {
-            if !controls.iter().any(|c| c.widget_id == wid) {
-                controls.push(UiWidgetNode {
-                    widget_id: String::from(wid),
-                    role: String::from(role),
-                    label: String::from(label),
-                    command_id: None,
-                    value: Some(val),
-                    enabled: true,
-                    disabled_reason: None,
-                    bounds: preview_bounds,
-                });
-            }
-        }
-    }
-
-    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::BubblePlotInspector { .. }) {
-        let bp = &app.canvas_dialogs.bubble_plot;
-        let mode_str = match bp.plot_mode {
-            curvebook_doc::MultivariatePlotMode::BubbleScatter => "bubble_scatter",
-            curvebook_doc::MultivariatePlotMode::CategoricalSummary { .. } => "categorical_summary",
-        };
-        let color_mode_str = match &bp.color_channel {
-            curvebook_doc::ColorChannelMapping::Constant(_) => "constant",
-            curvebook_doc::ColorChannelMapping::Categorical { .. } => "categorical",
-            curvebook_doc::ColorChannelMapping::Continuous { .. } => "continuous",
-        };
-        let color_col = match &bp.color_channel {
-            curvebook_doc::ColorChannelMapping::Categorical { column, .. } | curvebook_doc::ColorChannelMapping::Continuous { column, .. } => {
-                Some(*column)
-            }
-            curvebook_doc::ColorChannelMapping::Constant(_) => None,
-        };
-        let size_col = match &bp.size_channel {
-            curvebook_doc::SizeChannelMapping::Variable { column, .. } => Some(*column),
-            curvebook_doc::SizeChannelMapping::Constant { .. } => None,
-        };
-        let bounds = controls.iter().find(|c| c.widget_id.starts_with("bubble.plot_mode.")).and_then(|c| c.bounds);
-        for (wid, role, label, val) in [
-            ("bubble.plot_mode", "radio_group", "Plot mode", json!(mode_str)),
-            ("bubble.x_column", "combobox", "X column", json!(bp.x_column)),
-            ("bubble.y_column", "combobox", "Y column", json!(bp.y_column)),
-            ("bubble.color_channel", "combobox", "Color channel", json!(bp.color_channel)),
-            ("bubble.size_channel", "combobox", "Size channel", json!(bp.size_channel)),
-            ("bubble.label_column", "combobox", "Label column", json!(bp.label_column)),
-            ("bubble.color_mode", "combobox", "Color mode", json!(color_mode_str)),
-            ("bubble.color_column", "combobox", "Color column", json!(color_col)),
-            ("bubble.size_column", "combobox", "Size column", json!(size_col)),
-            ("bubble.available_columns", "listbox", "Available columns", json!(bp.available_columns)),
-        ] {
-            if !controls.iter().any(|c| c.widget_id == wid) {
-                controls.push(UiWidgetNode {
-                    widget_id: String::from(wid),
-                    role: String::from(role),
-                    label: String::from(label),
-                    command_id: None,
-                    value: Some(val),
+        ActiveDialog::DuplicateAnalysisPrompt { .. } => {
+            let dup_val = match app.canvas_dialogs.analyze.duplicate_choice {
+                crate::dialogs_canvas::DuplicateChoice::CreateNew => "create_new",
+                crate::dialogs_canvas::DuplicateChoice::ModifyExisting => "modify_existing",
+            };
+            let bounds = controls
+                .iter()
+                .find(|c| matches!(c.widget_id.as_str(), "analyze_picker.dup.create_new" | "analyze_picker.dup.modify_existing"))
+                .and_then(|c| c.bounds);
+            push_synthetic_node(
+                controls,
+                SyntheticNodeSpec {
+                    widget_id: "duplicate.choice",
+                    role: "radio_group",
+                    label: "Duplicate analysis choice",
+                    value: Some(json!(dup_val)),
                     enabled: true,
                     disabled_reason: None,
                     bounds,
-                });
+                },
+            );
+        }
+        ActiveDialog::ChangeGraphType { .. } => {
+            let bounds = controls.iter().find(|c| c.widget_id == "graph_type.preview_pane").and_then(|c| c.bounds);
+            let cgt = &app.canvas_dialogs.change_graph_type;
+            for (widget_id, role, label, val) in [
+                ("graph_type.selected", "listbox", "Selected graph type", json!(cgt.selected_option_id)),
+                ("graph_type.summary_measure", "combobox", "Summary measure", json!(cgt.summary_measure)),
+                ("graph_type.error_bar_metric", "combobox", "Error bar metric", json!(cgt.error_bar_metric)),
+            ] {
+                push_synthetic_node(
+                    controls,
+                    SyntheticNodeSpec { widget_id, role, label, value: Some(val), enabled: true, disabled_reason: None, bounds },
+                );
             }
         }
-    }
-
-    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::PairwiseComparisons { .. })
-        && !controls.iter().any(|c| c.widget_id == "pairwise.display_mode")
-    {
-        let bounds = controls.iter().find(|c| c.widget_id.starts_with("pairwise.mode.")).and_then(|c| c.bounds);
-        controls.push(UiWidgetNode {
-            widget_id: String::from("pairwise.display_mode"),
-            role: String::from("radio_group"),
-            label: String::from("Pairwise display mode"),
-            command_id: None,
-            value: Some(json!(crate::dialogs_r9::pairwise_display_mode_str(app.canvas_dialogs.pairwise.display_mode))),
-            enabled: true,
-            disabled_reason: None,
-            bounds,
-        });
-    }
-
-    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ConvertArchetype { .. })
-        && !controls.iter().any(|c| c.widget_id == "convert.preview_ready")
-    {
-        controls.push(UiWidgetNode {
-            widget_id: String::from("convert.preview_ready"),
-            role: String::from("status"),
-            label: String::from("Conversion preview ready"),
-            command_id: None,
-            value: Some(json!(app.canvas_dialogs.convert_archetype.preview_ready)),
-            enabled: true,
-            disabled_reason: None,
-            bounds: None,
-        });
+        _ => {}
     }
 }
 
@@ -952,6 +840,95 @@ fn parse_pointer_button_str(button: &str) -> Result<egui::PointerButton, EngineE
     }
 }
 
+const ALPHA_KEYS: [(Key, &str); 26] = [
+    (Key::A, "A"),
+    (Key::B, "B"),
+    (Key::C, "C"),
+    (Key::D, "D"),
+    (Key::E, "E"),
+    (Key::F, "F"),
+    (Key::G, "G"),
+    (Key::H, "H"),
+    (Key::I, "I"),
+    (Key::J, "J"),
+    (Key::K, "K"),
+    (Key::L, "L"),
+    (Key::M, "M"),
+    (Key::N, "N"),
+    (Key::O, "O"),
+    (Key::P, "P"),
+    (Key::Q, "Q"),
+    (Key::R, "R"),
+    (Key::S, "S"),
+    (Key::T, "T"),
+    (Key::U, "U"),
+    (Key::V, "V"),
+    (Key::W, "W"),
+    (Key::X, "X"),
+    (Key::Y, "Y"),
+    (Key::Z, "Z"),
+];
+
+const DIGIT_KEYS: [(Key, &str); 10] = [
+    (Key::Num0, "0"),
+    (Key::Num1, "1"),
+    (Key::Num2, "2"),
+    (Key::Num3, "3"),
+    (Key::Num4, "4"),
+    (Key::Num5, "5"),
+    (Key::Num6, "6"),
+    (Key::Num7, "7"),
+    (Key::Num8, "8"),
+    (Key::Num9, "9"),
+];
+
+const FUNCTION_KEYS: [(Key, &str, &str); 12] = [
+    (Key::F1, "F1", "f1"),
+    (Key::F2, "F2", "f2"),
+    (Key::F3, "F3", "f3"),
+    (Key::F4, "F4", "f4"),
+    (Key::F5, "F5", "f5"),
+    (Key::F6, "F6", "f6"),
+    (Key::F7, "F7", "f7"),
+    (Key::F8, "F8", "f8"),
+    (Key::F9, "F9", "f9"),
+    (Key::F10, "F10", "f10"),
+    (Key::F11, "F11", "f11"),
+    (Key::F12, "F12", "f12"),
+];
+
+const PUNCT_KEYS: [(Key, &str, &[&str]); 11] = [
+    (Key::Plus, "+", &["plus", "+"]),
+    (Key::Minus, "-", &["minus", "-"]),
+    (Key::Equals, "=", &["equals", "="]),
+    (Key::Comma, ",", &["comma", ","]),
+    (Key::Period, ".", &["period", "."]),
+    (Key::Slash, "/", &["slash", "/"]),
+    (Key::Backslash, "\\", &["backslash", "\\"]),
+    (Key::Semicolon, ";", &["semicolon", ";"]),
+    (Key::Quote, "'", &["quote", "'"]),
+    (Key::OpenBracket, "[", &["openbracket", "open_bracket", "["]),
+    (Key::CloseBracket, "]", &["closebracket", "close_bracket", "]"]),
+];
+
+const NAV_KEYS: [(Key, &[&str]); 15] = [
+    (Key::Enter, &["enter", "return"]),
+    (Key::Escape, &["escape", "esc"]),
+    (Key::Tab, &["tab"]),
+    (Key::Backspace, &["backspace"]),
+    (Key::Delete, &["delete", "del"]),
+    (Key::Insert, &["insert", "ins"]),
+    (Key::Home, &["home"]),
+    (Key::End, &["end"]),
+    (Key::PageUp, &["pageup", "page_up"]),
+    (Key::PageDown, &["pagedown", "page_down"]),
+    (Key::Space, &["space", " "]),
+    (Key::ArrowUp, &["arrowup", "arrow_up", "up"]),
+    (Key::ArrowDown, &["arrowdown", "arrow_down", "down"]),
+    (Key::ArrowLeft, &["arrowleft", "arrow_left", "left"]),
+    (Key::ArrowRight, &["arrowright", "arrow_right", "right"]),
+];
+
 /// Parse a symbolic key name into `egui::Key` (case-insensitive for named keys and ASCII letters).
 #[must_use]
 pub fn parse_egui_key(raw: &str) -> Option<Key> {
@@ -959,95 +936,25 @@ pub fn parse_egui_key(raw: &str) -> Option<Key> {
     if trimmed.is_empty() {
         return None;
     }
-    match trimmed.to_ascii_lowercase().as_str() {
-        "enter" | "return" => return Some(Key::Enter),
-        "escape" | "esc" => return Some(Key::Escape),
-        "tab" => return Some(Key::Tab),
-        "backspace" => return Some(Key::Backspace),
-        "delete" | "del" => return Some(Key::Delete),
-        "insert" | "ins" => return Some(Key::Insert),
-        "home" => return Some(Key::Home),
-        "end" => return Some(Key::End),
-        "pageup" | "page_up" => return Some(Key::PageUp),
-        "pagedown" | "page_down" => return Some(Key::PageDown),
-        "space" | " " => return Some(Key::Space),
-        "arrowup" | "arrow_up" | "up" => return Some(Key::ArrowUp),
-        "arrowdown" | "arrow_down" | "down" => return Some(Key::ArrowDown),
-        "arrowleft" | "arrow_left" | "left" => return Some(Key::ArrowLeft),
-        "arrowright" | "arrow_right" | "right" => return Some(Key::ArrowRight),
-        "plus" | "+" => return Some(Key::Plus),
-        "minus" | "-" => return Some(Key::Minus),
-        "equals" | "=" => return Some(Key::Equals),
-        "comma" | "," => return Some(Key::Comma),
-        "period" | "." => return Some(Key::Period),
-        "slash" | "/" => return Some(Key::Slash),
-        "backslash" | "\\" => return Some(Key::Backslash),
-        "semicolon" | ";" => return Some(Key::Semicolon),
-        "quote" | "'" => return Some(Key::Quote),
-        "openbracket" | "open_bracket" | "[" => return Some(Key::OpenBracket),
-        "closebracket" | "close_bracket" | "]" => return Some(Key::CloseBracket),
-        "f1" => return Some(Key::F1),
-        "f2" => return Some(Key::F2),
-        "f3" => return Some(Key::F3),
-        "f4" => return Some(Key::F4),
-        "f5" => return Some(Key::F5),
-        "f6" => return Some(Key::F6),
-        "f7" => return Some(Key::F7),
-        "f8" => return Some(Key::F8),
-        "f9" => return Some(Key::F9),
-        "f10" => return Some(Key::F10),
-        "f11" => return Some(Key::F11),
-        "f12" => return Some(Key::F12),
-        _ => {}
+    let lower = trimmed.to_ascii_lowercase();
+    let tok = lower.as_str();
+    if let Some((k, _)) = NAV_KEYS.iter().find(|(_, aliases)| aliases.contains(&tok)) {
+        return Some(*k);
+    }
+    if let Some((k, _, _)) = PUNCT_KEYS.iter().find(|(_, _, aliases)| aliases.contains(&tok)) {
+        return Some(*k);
+    }
+    if let Some((k, _, _)) = FUNCTION_KEYS.iter().find(|(_, _, alias)| *alias == tok) {
+        return Some(*k);
     }
     if trimmed.len() == 1
-        && let Some(ch) = trimmed.chars().next()
+        && let Some(b) = trimmed.as_bytes().first().copied()
     {
-        if ch.is_ascii_alphabetic() {
-            return match ch.to_ascii_uppercase() {
-                'A' => Some(Key::A),
-                'B' => Some(Key::B),
-                'C' => Some(Key::C),
-                'D' => Some(Key::D),
-                'E' => Some(Key::E),
-                'F' => Some(Key::F),
-                'G' => Some(Key::G),
-                'H' => Some(Key::H),
-                'I' => Some(Key::I),
-                'J' => Some(Key::J),
-                'K' => Some(Key::K),
-                'L' => Some(Key::L),
-                'M' => Some(Key::M),
-                'N' => Some(Key::N),
-                'O' => Some(Key::O),
-                'P' => Some(Key::P),
-                'Q' => Some(Key::Q),
-                'R' => Some(Key::R),
-                'S' => Some(Key::S),
-                'T' => Some(Key::T),
-                'U' => Some(Key::U),
-                'V' => Some(Key::V),
-                'W' => Some(Key::W),
-                'X' => Some(Key::X),
-                'Y' => Some(Key::Y),
-                'Z' => Some(Key::Z),
-                _ => None,
-            };
+        if b.is_ascii_alphabetic() {
+            return ALPHA_KEYS.get(usize::from(b.to_ascii_uppercase() - b'A')).map(|(k, _)| *k);
         }
-        if ch.is_ascii_digit() {
-            return match ch {
-                '0' => Some(Key::Num0),
-                '1' => Some(Key::Num1),
-                '2' => Some(Key::Num2),
-                '3' => Some(Key::Num3),
-                '4' => Some(Key::Num4),
-                '5' => Some(Key::Num5),
-                '6' => Some(Key::Num6),
-                '7' => Some(Key::Num7),
-                '8' => Some(Key::Num8),
-                '9' => Some(Key::Num9),
-                _ => None,
-            };
+        if b.is_ascii_digit() {
+            return DIGIT_KEYS.get(usize::from(b - b'0')).map(|(k, _)| *k);
         }
     }
     None
@@ -1412,22 +1319,6 @@ fn build_menus_snapshot(app: &UiApp, meta: &FrameInspectMeta, include_bounds: bo
         .collect()
 }
 
-fn build_toolbar_fallback(app: &UiApp) -> Vec<UiWidgetNode> {
-    toolbar_tooltips(app)
-        .into_iter()
-        .map(|entry| UiWidgetNode {
-            widget_id: entry.button.id.to_owned(),
-            role: String::from("button"),
-            label: entry.caption.to_owned(),
-            command_id: Some(entry.button.command_id.to_owned()),
-            value: None,
-            enabled: entry.tooltip.enabled,
-            disabled_reason: (!entry.tooltip.enabled).then_some(String::from("unavailable")),
-            bounds: None,
-        })
-        .collect()
-}
-
 fn build_navigator_snapshot(app: &UiApp, meta: &FrameInspectMeta, include_bounds: bool) -> Vec<UiNavigatorSheetNode> {
     let mut out = Vec::new();
     for folder in &app.nav.folders {
@@ -1622,12 +1513,7 @@ fn build_ui_tree_snapshot_inner(
             .collect()
     };
 
-    let toolbar = if scope_wants(scope, "toolbar") {
-        let egui_nodes = collect_scope("toolbar");
-        if egui_nodes.is_empty() { Some(build_toolbar_fallback(app)) } else { Some(egui_nodes) }
-    } else {
-        None
-    };
+    let toolbar = scope_wants(scope, "toolbar").then(|| collect_scope("toolbar"));
 
     let dialog = build_dialog_snapshot_from_meta(app, views, meta, &ak, include_bounds, host_close_dialog_open);
     let active_dialog = dialog.as_ref().map_or_else(|| String::from("none"), |d| d.dialog_kind.clone());
@@ -1926,22 +1812,16 @@ pub fn resolve_widget_rect_in_meta<'a>(meta: &'a FrameInspectMeta, wid: &str) ->
         return meta.find_by_widget_id(&format!("grid.xcell.{rest}"));
     }
     if let Some(rest) = wid.strip_prefix("dialog.button.") {
-        let modal_wid = format!("modal.{rest}");
-        if let Some(hit) = meta.find_by_widget_id(&modal_wid) {
+        if let Some(hit) = meta.find_by_widget_id(&format!("modal.{rest}")) {
             return Some(hit);
         }
-        if rest == "ok" {
-            return meta
-                .find_by_widget_id("graph_type.apply")
-                .or_else(|| meta.find_by_widget_id("import.commit"))
-                .or_else(|| meta.find_by_widget_id("transform.commit"))
-                .or_else(|| meta.find_by_widget_id("nav.delete_confirm.confirm"));
-        }
-        if rest == "cancel" {
-            return meta.find_by_widget_id("nav.delete_confirm.cancel");
+        if let Some((_, aliases)) = BUTTON_ACTION_ALIASES.iter().find(|(action, _)| *action == rest)
+            && let Some(hit) = aliases.iter().find_map(|alias| meta.find_by_widget_id(alias))
+        {
+            return Some(hit);
         }
         if rest == "create" {
-            return meta.find_by_widget_id("modal.create").or_else(|| meta.find_by_widget_id("modal.ok"));
+            return meta.find_by_widget_id("modal.ok");
         }
     }
     if let Some(col_str) = wid.strip_prefix("formula_bar.open_col.") {
@@ -3067,6 +2947,13 @@ pub fn find_switch_tab_widget_in_meta<'a>(meta: &'a FrameInspectMeta, target: &P
     }
 }
 
+const POWER_STAGE_ALIASES: &[(&[&str], usize)] = &[
+    (&["0", "design", "experiment_design", "power.stage.1", "power.tab.design"], 0),
+    (&["1", "effect", "effect_size", "power.stage.2", "power.tab.effect"], 1),
+    (&["2", "alpha", "power", "alpha_power", "significance", "significance_and_solve", "power.stage.3", "power.tab.alpha"], 2),
+    (&["3", "results", "sensitivity", "power.stage.4", "power.tab.results"], 3),
+];
+
 /// Execute `PowerAndSampleSize` stage switching directly on `app` when `tab_id` names a stage.
 ///
 /// # Errors
@@ -3075,14 +2962,8 @@ pub fn try_switch_power_wizard_stage(app: &mut UiApp, tab_id: &str) -> Result<Op
     if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::PowerAndSampleSize) {
         return Ok(None);
     }
-    let target_idx = match tab_id.trim().to_ascii_lowercase().as_str() {
-        "0" | "design" | "experiment_design" | "power.stage.1" | "power.tab.design" => Some(0usize),
-        "1" | "effect" | "effect_size" | "power.stage.2" | "power.tab.effect" => Some(1),
-        "2" | "alpha" | "power" | "alpha_power" | "significance" | "significance_and_solve" | "power.stage.3" | "power.tab.alpha" => Some(2),
-        "3" | "results" | "sensitivity" | "power.stage.4" | "power.tab.results" => Some(3),
-        _ => None,
-    };
-    let Some(target_idx) = target_idx else {
+    let norm = tab_id.trim().to_ascii_lowercase();
+    let Some(target_idx) = POWER_STAGE_ALIASES.iter().find_map(|(aliases, idx)| aliases.contains(&norm.as_str()).then_some(*idx)) else {
         return Ok(None);
     };
     while app.canvas_dialogs.power_wizard.stage.index() < target_idx {
@@ -3729,69 +3610,13 @@ pub fn render_egui_shell_frame_with_host(
     report
 }
 
-pub(crate) const fn map_egui_key_to_shortcut_name(key: Key) -> Option<&'static str> {
-    match key {
-        Key::A => Some("A"),
-        Key::B => Some("B"),
-        Key::C => Some("C"),
-        Key::D => Some("D"),
-        Key::E => Some("E"),
-        Key::F => Some("F"),
-        Key::G => Some("G"),
-        Key::H => Some("H"),
-        Key::I => Some("I"),
-        Key::J => Some("J"),
-        Key::K => Some("K"),
-        Key::L => Some("L"),
-        Key::M => Some("M"),
-        Key::N => Some("N"),
-        Key::O => Some("O"),
-        Key::P => Some("P"),
-        Key::Q => Some("Q"),
-        Key::R => Some("R"),
-        Key::S => Some("S"),
-        Key::T => Some("T"),
-        Key::U => Some("U"),
-        Key::V => Some("V"),
-        Key::W => Some("W"),
-        Key::X => Some("X"),
-        Key::Y => Some("Y"),
-        Key::Z => Some("Z"),
-        Key::Num0 => Some("0"),
-        Key::Num1 => Some("1"),
-        Key::Num2 => Some("2"),
-        Key::Num3 => Some("3"),
-        Key::Num4 => Some("4"),
-        Key::Num5 => Some("5"),
-        Key::Num6 => Some("6"),
-        Key::Num7 => Some("7"),
-        Key::Num8 => Some("8"),
-        Key::Num9 => Some("9"),
-        Key::F1 => Some("F1"),
-        Key::F2 => Some("F2"),
-        Key::F3 => Some("F3"),
-        Key::F4 => Some("F4"),
-        Key::F5 => Some("F5"),
-        Key::F6 => Some("F6"),
-        Key::F7 => Some("F7"),
-        Key::F8 => Some("F8"),
-        Key::F9 => Some("F9"),
-        Key::F10 => Some("F10"),
-        Key::F11 => Some("F11"),
-        Key::F12 => Some("F12"),
-        Key::Backslash => Some("\\"),
-        Key::Slash => Some("/"),
-        Key::Minus => Some("-"),
-        Key::Plus => Some("+"),
-        Key::Equals => Some("="),
-        Key::Comma => Some(","),
-        Key::Period => Some("."),
-        Key::Semicolon => Some(";"),
-        Key::Quote => Some("'"),
-        Key::OpenBracket => Some("["),
-        Key::CloseBracket => Some("]"),
-        _ => None,
-    }
+pub(crate) fn map_egui_key_to_shortcut_name(key: Key) -> Option<&'static str> {
+    ALPHA_KEYS
+        .iter()
+        .chain(DIGIT_KEYS.iter())
+        .find_map(|(k, name)| (*k == key).then_some(*name))
+        .or_else(|| FUNCTION_KEYS.iter().find_map(|(k, name, _)| (*k == key).then_some(*name)))
+        .or_else(|| PUNCT_KEYS.iter().find_map(|(k, name, _)| (*k == key).then_some(*name)))
 }
 
 const fn egui_mods_to_key_mods(m: Modifiers) -> KeyModifiers {

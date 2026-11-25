@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
+use crate::dialogs_canvas::dialog_patch as dp;
 use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, AxisTarget};
 use crate::grid_view::ImportReshapeMode;
 use crate::i18n::{is_rtl_locale, locale_display_name, normalize_locale};
@@ -1089,38 +1090,10 @@ type UiCommandHandler = fn(&mut UiApp, &Value) -> Result<Value, ControlCallError
 
 fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
     match command_id {
-        "ui.navigator.toggle" => Some(|app, _| Ok(json!({ "navigator_open": app.toggle_navigator_pane() }))),
-        "ui.inspector.toggle" => Some(|app, _| Ok(json!({ "inspector_open": app.toggle_inspector_pane() }))),
-        "ui.family.toggle" => Some(|app, _| Ok(json!({ "family_open": app.toggle_family_pane() }))),
-        "ui.palette.open" => Some(|app, _| {
-            app.canvas_dialogs.open_command_palette();
-            app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
-            Ok(json!({
-                "palette_open": matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette),
-                "dialog": "CommandPalette",
-            }))
-        }),
         "ui.sheet.find" => Some(|app, p| map_ui_err(dispatch_ui_sheet_find(app, p))),
-        "ui.analyze.open" => Some(|app, p| map_ui_err(dispatch_ui_analyze_open(app, p))),
         "ui.editParams.open" => Some(|app, p| map_ui_err(dispatch_ui_edit_params_open(app, p))),
-        "ui.powerWizard.open" => Some(|app, p| map_ui_err(dispatch_ui_power_wizard_open(app, p))),
         "ui.formatPoints.open" => Some(|app, p| map_ui_err(dispatch_ui_format_points_open(app, p))),
         "ui.clonePipeline.open" => Some(|app, p| map_ui_err(dispatch_ui_clone_pipeline_open(app, p))),
-        "ui.zoom.fitSheet" => Some(|app, _| {
-            app.canvas_dialogs.reset_zoom_to_fit();
-            app.egui_views.canvas_view.fit_zoom_active = true;
-            app.egui_views.canvas_view.pan_pt = [0.0, 0.0];
-            app.egui_views.center_stage.secondary_canvas_view.fit_zoom_active = true;
-            app.egui_views.center_stage.secondary_canvas_view.pan_pt = [0.0, 0.0];
-            Ok(json!({ "zoom": app.canvas_dialogs.canvas.zoom, "fit": true }))
-        }),
-        "ui.gallery.toggle" => Some(|app, p| map_ui_err(dispatch_ui_gallery_toggle(app, p))),
-        "ui.pane.cycle" => Some(|app, p| map_ui_err(dispatch_ui_pane_cycle(app, p))),
-        "ui.rulers.toggle" => Some(|app, p| map_ui_err(dispatch_ui_rulers_toggle(app, p))),
-        "ui.shortcut.set" => Some(|app, p| map_ui_err(dispatch_ui_shortcut_set(app, p))),
-        "ui.shortcut.reset" => Some(|app, p| map_ui_err(dispatch_ui_shortcut_reset(app, p))),
-        "ui.locale.set" => Some(|app, p| map_ui_err(dispatch_ui_locale_set(app, p))),
-        "ui.theme.set" => Some(|app, p| map_ui_err(dispatch_ui_theme_set(app, p))),
         "ui.screenshot" => Some(|app, p| dispatch_gui_action(app, "ui.screenshot", p.clone()).map_err(ControlCallError::from)),
         "ui.event.dispatch" => Some(|app, p| map_ui_err(dispatch_ui_event_cmd(app, p))),
         "ui.split.toggle" => Some(|app, p| map_ui_err(dispatch_ui_split_toggle(app, p))),
@@ -1130,33 +1103,17 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "ui.result.inspectDiagnostics" => Some(|app, p| map_ui_err(dispatch_ui_result_inspect_diagnostics(app, p))),
         "ui.canvas.applyPreset" => Some(dispatch_ui_canvas_apply_preset),
         "ui.canvas.preflight" => Some(dispatch_ui_canvas_preflight),
-        "ui.previewFilter.set" => Some(|app, p| map_ui_err(dispatch_ui_preview_filter_set(app, p))),
         "ui.workspacePreset.set" => Some(|app, p| map_ui_err(dispatch_ui_workspace_preset_set(app, p))),
         "ui.grid.excludeWithReason" => Some(dispatch_ui_grid_exclude_with_reason),
-        "ui.table.randomizeGroups" => Some(|app, p| map_ui_err(dispatch_ui_randomize_groups_open(app, p))),
-        "ui.table.randomSampleRows" => Some(|app, p| map_ui_err(dispatch_ui_random_sample_rows_open(app, p))),
-        "ui.table.simulateDistributions" => Some(|app, p| map_ui_err(dispatch_ui_simulate_distributions_open(app, p))),
         "ui.table.openFormulaBar" => Some(|app, p| map_ui_err(dispatch_ui_open_formula_bar(app, p))),
         "ui.result.appendClusterColumn" => Some(dispatch_ui_append_cluster_column),
-        "ui.graph.insertModelEquation" => Some(|app, p| map_ui_err(dispatch_ui_insert_model_equation_open(app, p))),
-        "ui.graph.axes.open" => Some(|app, p| map_ui_err(dispatch_ui_format_axes_open(app, p))),
         "ui.applyStyleFrom.open" => Some(|app, p| map_ui_err(dispatch_ui_apply_style_from_open(app, p))),
-        "ui.export.figure.open" => Some(|app, p| map_ui_err(dispatch_ui_export_figure_open(app, p))),
         "ui.export.tableCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_csv_export_open(app, p, CsvExportOpenMode::DataTable))),
         "ui.export.resultsCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_csv_export_open(app, p, CsvExportOpenMode::ResultSheet))),
         "ui.export.allTablesCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_csv_export_open(app, p, CsvExportOpenMode::AllDataTables))),
         "ui.export.allTablesCsv" => Some(|app, p| map_ui_err(dispatch_ui_export_all_tables_csv_fallback(app, p))),
-        "ui.import.warnings.open" => Some(|app, p| map_ui_err(dispatch_ui_import_warnings_open(app, p))),
-        "ui.import.reshape.open" => Some(|app, p| map_ui_err(dispatch_ui_import_reshape_open(app, p))),
         "ui.print.open" | "file.print" => Some(|app, p| map_ui_err(dispatch_ui_print_open(app, p))),
-        "app.about" => Some(|app, _| {
-            app.canvas_dialogs.active_dialog = ActiveDialog::About;
-            Ok(json!({ "dialog": "About", "version": env!("CARGO_PKG_VERSION") }))
-        }),
         "app.feedback" => Some(dispatch_ui_app_feedback),
-        "ui.view.rowTitles.toggle" => Some(|app, p| map_ui_err(dispatch_ui_row_titles_toggle(app, p))),
-        "ui.graph.create.open" => Some(|app, p| map_ui_err(dispatch_ui_create_graph_open(app, p))),
-        "ui.gridOverlay.toggle" => Some(|app, p| map_ui_err(dispatch_ui_grid_overlay_toggle(app, p))),
         "ui.embeddedTable.format.open" => Some(|app, p| map_ui_err(dispatch_ui_embedded_object_format_open(app, p, false))),
         "ui.image.format.open" => Some(|app, p| map_ui_err(dispatch_ui_embedded_object_format_open(app, p, true))),
         "ui.clipboard.copyForSlides" => Some(dispatch_ui_copy_for_slides),
@@ -1195,6 +1152,10 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
     if let Some(spec) = lookup_patched_sheet_dialog(command_id) {
         require_params_object_or_null(params, command_id).map_err(ControlCallError::from)?;
         return map_ui_err(open_patched_sheet_dialog_spec(app, params, spec)).map(Some);
+    }
+    if let Some(run) = lookup_ui_toggle_or_setter(command_id) {
+        require_params_object_or_null(params, command_id).map_err(ControlCallError::from)?;
+        return map_ui_err(run(app, params)).map(Some);
     }
     let Some(handler) = lookup_ui_command_handler(command_id) else {
         return Ok(None);
@@ -2055,184 +2016,288 @@ fn apply_open_patch(params: &Value, ignore_keys: &[&str], apply: impl FnOnce(&Ma
     Ok(())
 }
 
+const SOURCE_SHEET_ID_KEYS: &[&str] = &["source_sheet_id", "sheet_id", "sheetId"];
+const CREATE_GRAPH_ID_KEYS: &[&str] = &["data_sheet_id", "source_sheet_id", "sheet_id", "sheetId"];
+
 #[derive(Clone, Copy)]
 enum SheetDialogTarget {
+    None,
     Data,
+    DataSource,
+    Analyzable,
     Graph,
     Layout,
+    Renderable,
 }
 
 impl SheetDialogTarget {
     const fn kind_label(self) -> &'static str {
         match self {
-            Self::Data => "data sheet",
+            Self::None => "dialog",
+            Self::Data | Self::DataSource => "data sheet",
+            Self::Analyzable => "data or analyzable sheet",
             Self::Graph => "graph sheet",
             Self::Layout => "layout sheet",
+            Self::Renderable => "graph or layout sheet",
         }
     }
 
-    const fn response_id_key(self) -> &'static str {
+    const fn default_response_id_key(self) -> Option<&'static str> {
         match self {
-            Self::Data => "sheet_id",
-            Self::Graph => "graph_sheet_id",
-            Self::Layout => "layout_sheet_id",
+            Self::None => None,
+            Self::Data | Self::Renderable => Some("sheet_id"),
+            Self::DataSource | Self::Analyzable => Some("source_sheet_id"),
+            Self::Graph => Some("graph_sheet_id"),
+            Self::Layout => Some("layout_sheet_id"),
         }
     }
 
-    fn resolve(self, doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    fn resolve(self, doc: &ProjectDocument, params: &Value) -> Result<Option<SheetId>, String> {
         match self {
-            Self::Data => resolve_target_data_id(doc, params),
-            Self::Graph => resolve_target_graph_id(doc, params),
-            Self::Layout => resolve_target_layout_id(doc, params),
+            Self::None => Ok(None),
+            Self::Data | Self::DataSource => resolve_target_data_id(doc, params).map(Some),
+            Self::Analyzable => resolve_target_sheet_matching(
+                doc,
+                params,
+                &[],
+                "data or analyzable sheet",
+                false,
+                |d, id| {
+                    d.data_sheet(id).is_some()
+                        || d.result_sheet(id).is_some_and(|rs| {
+                            rs.analyzable_data.is_some() || rs.tabs.iter().any(|t| !t.column_headers.is_empty() && !t.rows.is_empty())
+                        })
+                },
+                |d| d.data_sheets.first().map(|ds| ds.id.clone()),
+            )
+            .map(Some),
+            Self::Graph => resolve_target_graph_id(doc, params).map(Some),
+            Self::Layout => resolve_target_layout_id(doc, params).map(Some),
+            Self::Renderable => resolve_renderable_sheet_id(doc, params).map(Some),
         }
     }
 }
 
-type SheetDialogOpenFn = fn(&mut UiApp, &ProjectDocument, &SheetId) -> bool;
+enum DialogOpenAction {
+    Sheet(fn(&mut UiApp, &ProjectDocument, &SheetId) -> bool),
+    Custom(fn(&mut UiApp, &ProjectDocument, Option<&SheetId>, &Value) -> Result<(), String>),
+}
+
 type SheetDialogPatchFn = fn(&mut UiApp, &ProjectDocument, &Map<String, Value>) -> Result<(), String>;
+type SheetDialogExtraFn = fn(&UiApp) -> Value;
 
 struct PatchedSheetDialogSpec {
     command_id: &'static str,
     dialog_name: &'static str,
     target: SheetDialogTarget,
-    open: SheetDialogOpenFn,
+    id_key_override: Option<&'static str>,
+    ignore_keys: &'static [&'static str],
+    open: DialogOpenAction,
     patch: Option<SheetDialogPatchFn>,
+    extra: Option<SheetDialogExtraFn>,
 }
 
+impl PatchedSheetDialogSpec {
+    const fn new(command_id: &'static str, dialog_name: &'static str, target: SheetDialogTarget, open: DialogOpenAction) -> Self {
+        Self { command_id, dialog_name, target, id_key_override: None, ignore_keys: SHEET_ID_KEYS, open, patch: None, extra: None }
+    }
+    const fn sheet(cmd: &'static str, dlg: &'static str, t: SheetDialogTarget, f: fn(&mut UiApp, &ProjectDocument, &SheetId) -> bool) -> Self {
+        Self::new(cmd, dlg, t, DialogOpenAction::Sheet(f))
+    }
+    const fn custom(
+        cmd: &'static str,
+        dlg: &'static str,
+        t: SheetDialogTarget,
+        f: fn(&mut UiApp, &ProjectDocument, Option<&SheetId>, &Value) -> Result<(), String>,
+    ) -> Self {
+        Self::new(cmd, dlg, t, DialogOpenAction::Custom(f))
+    }
+    const fn patch(mut self, f: SheetDialogPatchFn) -> Self {
+        self.patch = Some(f);
+        self
+    }
+    const fn extra(mut self, f: SheetDialogExtraFn) -> Self {
+        self.extra = Some(f);
+        self
+    }
+    const fn id_key(mut self, k: &'static str) -> Self {
+        self.id_key_override = Some(k);
+        self
+    }
+    const fn ignore_keys(mut self, k: &'static [&'static str]) -> Self {
+        self.ignore_keys = k;
+        self
+    }
+}
+
+fn require_open_ok(opened: bool, target: SheetDialogTarget, id: Option<&SheetId>) -> Result<(), String> {
+    if opened { Ok(()) } else { Err(format!("{} `{}` not found", target.kind_label(), id.map_or("", SheetId::as_str))) }
+}
+
+const IMPORT_RESHAPE_MODES: &[(ImportReshapeMode, &[&str])] = &[
+    (ImportReshapeMode::Plate96, &["plate96", "plate_96", "96"]),
+    (ImportReshapeMode::Plate384, &["plate384", "plate_384", "384"]),
+    (ImportReshapeMode::TidyLongPivot, &["tidylongpivot", "tidy_long_pivot", "tidylong", "tidy"]),
+];
+
 const PATCHED_SHEET_DIALOGS: &[PatchedSheetDialogSpec] = &[
-    PatchedSheetDialogSpec {
-        command_id: "ui.changeGraphType.open",
-        dialog_name: "ChangeGraphType",
-        target: SheetDialogTarget::Graph,
-        open: |a, d, id| {
-            let Some(graph) = d.graph_sheet(id) else {
-                return false;
-            };
-            a.canvas_dialogs.change_graph_type.open_for_graph(graph, d);
-            a.canvas_dialogs.active_dialog = ActiveDialog::ChangeGraphType { graph_sheet_id: id.clone() };
-            true
-        },
-        patch: None,
-    },
-    PatchedSheetDialogSpec {
-        command_id: "ui.table.convertArchetype.open",
-        dialog_name: "ConvertArchetype",
-        target: SheetDialogTarget::Data,
-        open: |a, d, id| a.canvas_dialogs.open_convert_archetype(d, id),
-        patch: None,
-    },
-    PatchedSheetDialogSpec {
-        command_id: "ui.graph.bubblePlot.open",
-        dialog_name: "BubblePlotInspector",
-        target: SheetDialogTarget::Graph,
-        open: |a, d, id| a.canvas_dialogs.open_bubble_plot(d, id),
-        patch: Some(|a, _, f| crate::dialogs_canvas::dialog_patch::patch_bubble_plot(&mut a.canvas_dialogs.bubble_plot, f)),
-    },
-    PatchedSheetDialogSpec {
-        command_id: "ui.graph.format.open",
-        dialog_name: "FormatGraph",
-        target: SheetDialogTarget::Graph,
-        open: |a, d, id| a.canvas_dialogs.open_format_graph(d, id),
-        patch: Some(|a, _, f| {
-            let preset = a.locale_preset.clone();
-            crate::dialogs_canvas::dialog_patch::patch_format_graph(&mut a.canvas_dialogs.format_graph, f, &preset)
-        }),
-    },
-    PatchedSheetDialogSpec {
-        command_id: "ui.graph.pairwise.open",
-        dialog_name: "PairwiseComparisons",
-        target: SheetDialogTarget::Graph,
-        open: |a, d, id| a.canvas_dialogs.open_pairwise_comparisons(d, id),
-        patch: Some(|a, d, f| {
-            let preset = a.locale_preset.clone();
-            crate::dialogs_canvas::dialog_patch::patch_pairwise(&mut a.canvas_dialogs.pairwise, f, Some(d), &preset)
-        }),
-    },
-    PatchedSheetDialogSpec {
-        command_id: "ui.layout.composer.open",
-        dialog_name: "PageLayoutComposer",
-        target: SheetDialogTarget::Layout,
-        open: |a, d, id| {
-            let _ = a.canvas_dialogs.open_page_layout_composer(d, id);
-            true
-        },
-        patch: Some(|a, d, f| crate::dialogs_canvas::dialog_patch::patch_page_layout(&mut a.canvas_dialogs.page_layout, f, Some(d))),
-    },
-    PatchedSheetDialogSpec {
-        command_id: "ui.layout.equalizeScaling.open",
-        dialog_name: "EqualizeScaling",
-        target: SheetDialogTarget::Layout,
-        open: |a, d, id| a.canvas_dialogs.open_equalize_scaling(d, id),
-        patch: Some(|a, _, f| {
-            let preset = a.locale_preset.clone();
-            crate::dialogs_canvas::dialog_patch::patch_equalize_scaling(&mut a.canvas_dialogs.equalize_scaling, f, &preset)
-        }),
-    },
+    PatchedSheetDialogSpec::custom("ui.palette.open", "CommandPalette", SheetDialogTarget::None, |a, _, _, _| {
+        a.canvas_dialogs.open_command_palette();
+        a.canvas_dialogs.command_palette.sync_shortcuts(&a.shortcuts);
+        Ok(())
+    })
+    .extra(|a| json!({ "palette_open": matches!(a.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette) })),
+    PatchedSheetDialogSpec::custom("app.about", "About", SheetDialogTarget::None, |a, _, _, _| {
+        a.canvas_dialogs.active_dialog = ActiveDialog::About;
+        Ok(())
+    })
+    .extra(|_| json!({ "version": env!("CARGO_PKG_VERSION") })),
+    PatchedSheetDialogSpec::custom("ui.analyze.open", "AnalyzeSheet", SheetDialogTarget::Analyzable, |a, d, id, _| {
+        let sid = id.ok_or_else(|| String::from("no data or analyzable sheet available"))?;
+        if a.canvas_dialogs.open_analyze_dialog(d, sid) {
+            Ok(())
+        } else {
+            Err(format!("sheet `{}` is not a data sheet or tabular result sheet", sid.as_str()))
+        }
+    })
+    .extra(|a| json!({ "extracted_result_tab_id": a.canvas_dialogs.analyze.extracted_result_tab_id })),
+    PatchedSheetDialogSpec::custom("ui.powerWizard.open", "PowerAndSampleSize", SheetDialogTarget::None, |a, _, _, _| {
+        a.canvas_dialogs.open_power_wizard();
+        Ok(())
+    })
+    .patch(|a, _, f| dp::patch_power_wizard(&mut a.canvas_dialogs.power_wizard, f, &a.locale_preset.clone()))
+    .extra(|a| json!({ "stage": a.canvas_dialogs.power_wizard.stage.label(), "stage_index": a.canvas_dialogs.power_wizard.stage.index() })),
+    PatchedSheetDialogSpec::sheet("ui.changeGraphType.open", "ChangeGraphType", SheetDialogTarget::Graph, |a, d, sid| {
+        let Some(graph) = d.graph_sheet(sid) else { return false };
+        a.canvas_dialogs.change_graph_type.open_for_graph(graph, d);
+        a.canvas_dialogs.active_dialog = ActiveDialog::ChangeGraphType { graph_sheet_id: sid.clone() };
+        true
+    }),
+    PatchedSheetDialogSpec::sheet("ui.table.convertArchetype.open", "ConvertArchetype", SheetDialogTarget::Data, |a, d, sid| {
+        a.canvas_dialogs.open_convert_archetype(d, sid)
+    }),
+    PatchedSheetDialogSpec::sheet("ui.graph.bubblePlot.open", "BubblePlotInspector", SheetDialogTarget::Graph, |a, d, sid| {
+        a.canvas_dialogs.open_bubble_plot(d, sid)
+    })
+    .patch(|a, _, f| dp::patch_bubble_plot(&mut a.canvas_dialogs.bubble_plot, f)),
+    PatchedSheetDialogSpec::sheet("ui.graph.format.open", "FormatGraph", SheetDialogTarget::Graph, |a, d, sid| {
+        a.canvas_dialogs.open_format_graph(d, sid)
+    })
+    .patch(|a, _, f| dp::patch_format_graph(&mut a.canvas_dialogs.format_graph, f, &a.locale_preset.clone())),
+    PatchedSheetDialogSpec::sheet("ui.graph.pairwise.open", "PairwiseComparisons", SheetDialogTarget::Graph, |a, d, sid| {
+        a.canvas_dialogs.open_pairwise_comparisons(d, sid)
+    })
+    .patch(|a, d, f| dp::patch_pairwise(&mut a.canvas_dialogs.pairwise, f, Some(d), &a.locale_preset.clone())),
+    PatchedSheetDialogSpec::sheet("ui.layout.composer.open", "PageLayoutComposer", SheetDialogTarget::Layout, |a, d, sid| {
+        let _ = a.canvas_dialogs.open_page_layout_composer(d, sid);
+        true
+    })
+    .patch(|a, d, f| dp::patch_page_layout(&mut a.canvas_dialogs.page_layout, f, Some(d))),
+    PatchedSheetDialogSpec::sheet("ui.layout.equalizeScaling.open", "EqualizeScaling", SheetDialogTarget::Layout, |a, d, sid| {
+        a.canvas_dialogs.open_equalize_scaling(d, sid)
+    })
+    .patch(|a, _, f| dp::patch_equalize_scaling(&mut a.canvas_dialogs.equalize_scaling, f, &a.locale_preset.clone())),
+    PatchedSheetDialogSpec::custom("ui.table.randomizeGroups", "RandomizeGroups", SheetDialogTarget::None, |a, d, _, _| {
+        a.canvas_dialogs.open_randomize_groups(d);
+        Ok(())
+    })
+    .patch(|a, _, f| dp::patch_randomize_groups(&mut a.canvas_dialogs.randomize_groups, f))
+    .extra(|a| json!({ "groups": a.canvas_dialogs.randomize_groups.groups, "subject_count": a.canvas_dialogs.randomize_groups.subject_count })),
+    PatchedSheetDialogSpec::sheet("ui.table.randomSampleRows", "RandomSampleRows", SheetDialogTarget::DataSource, |a, d, sid| {
+        a.canvas_dialogs.open_random_sample_rows(d, Some(sid))
+    })
+    .ignore_keys(SOURCE_SHEET_ID_KEYS)
+    .patch(|a, _, f| dp::patch_random_sample_rows(&mut a.canvas_dialogs.random_sample_rows, f))
+    .extra(|a| json!({ "sample_size": a.canvas_dialogs.random_sample_rows.sample_size })),
+    PatchedSheetDialogSpec::custom("ui.table.simulateDistributions", "SimulateDistributions", SheetDialogTarget::None, |a, _, _, _| {
+        a.canvas_dialogs.open_simulate_distributions();
+        Ok(())
+    })
+    .patch(|a, _, f| dp::patch_simulate_distributions(&mut a.canvas_dialogs.simulate_distributions, f, &a.locale_preset.clone()))
+    .extra(|a| json!({ "n_rows": a.canvas_dialogs.simulate_distributions.n_rows, "column_count": a.canvas_dialogs.simulate_distributions.columns.len() })),
+    PatchedSheetDialogSpec::sheet("ui.graph.insertModelEquation", "InsertModelEquation", SheetDialogTarget::Graph, |a, d, sid| {
+        a.canvas_dialogs.open_insert_model_equation(d, sid)
+    })
+    .patch(|a, _, f| dp::patch_insert_model_equation(&mut a.canvas_dialogs.insert_model_equation, f, &a.locale_preset.clone()))
+    .extra(|a| json!({ "result_sheet_id": a.canvas_dialogs.insert_model_equation.result_sheet_id.as_ref().map(SheetId::as_str), "mode": a.canvas_dialogs.insert_model_equation.mode })),
+    PatchedSheetDialogSpec::custom("ui.graph.axes.open", "FormatAxes", SheetDialogTarget::Graph, |a, d, id, params| {
+        let Some(sid) = id else { return require_open_ok(false, SheetDialogTarget::Graph, None) };
+        let Some(graph) = d.graph_sheet(sid) else { return require_open_ok(false, SheetDialogTarget::Graph, Some(sid)) };
+        let initial_target = match opt_non_empty_str_param(params, &["target_axis"])?.unwrap_or("y").to_ascii_lowercase().as_str() {
+            "x" => AxisTarget::X,
+            "y" => AxisTarget::Y,
+            "y2" => AxisTarget::Y2,
+            other => return Err(format!("unsupported target_axis `{other}`; expected x, y, or y2")),
+        };
+        a.canvas_dialogs.format_axes.sync_from_graph(graph, initial_target);
+        a.canvas_dialogs.active_dialog = ActiveDialog::FormatAxes { sheet_id: sid.clone() };
+        Ok(())
+    })
+    .id_key("sheet_id")
+    .patch(|a, d, f| dp::patch_format_axes(&mut a.canvas_dialogs.format_axes, f, Some(d), &a.locale_preset.clone()))
+    .extra(|a| json!({ "target_axis": format!("{:?}", a.canvas_dialogs.format_axes.target_axis) })),
+    PatchedSheetDialogSpec::custom("ui.graph.create.open", "CreateGraph", SheetDialogTarget::None, |a, d, _, params| {
+        let preferred = opt_non_empty_str_param(params, CREATE_GRAPH_ID_KEYS)?.map(SheetId::new);
+        if a.canvas_dialogs.open_create_graph(d, preferred.as_ref()) {
+            Ok(())
+        } else {
+            Err(String::from("no source data sheet available to create a graph"))
+        }
+    })
+    .ignore_keys(CREATE_GRAPH_ID_KEYS)
+    .patch(|a, _, f| dp::patch_create_graph(&mut a.canvas_dialogs.create_graph, f))
+    .extra(|a| json!({ "source_sheet_id": a.canvas_dialogs.create_graph.source_sheet_id.as_ref().map(SheetId::as_str) })),
+    PatchedSheetDialogSpec::sheet("ui.export.figure.open", "ExportFigure", SheetDialogTarget::Renderable, |a, _, sid| {
+        a.canvas_dialogs.open_export_figure(sid);
+        true
+    })
+    .patch(|a, _, f| dp::patch_export_figure(&mut a.canvas_dialogs.export_figure, f))
+    .extra(|a| json!({ "format": a.canvas_dialogs.export_figure.format })),
+    PatchedSheetDialogSpec::custom("ui.import.warnings.open", "ImportWarnings", SheetDialogTarget::None, |a, _, _, _| {
+        a.import_warnings.panel_open = true;
+        a.canvas_dialogs.active_dialog = ActiveDialog::ImportWarnings;
+        Ok(())
+    })
+    .extra(|a| json!({ "open": true, "count": a.import_warnings.warnings.len(), "command_id": a.import_warnings.command_id, "source_label": a.import_warnings.source_label })),
+    PatchedSheetDialogSpec::custom("ui.import.reshape.open", "ImportReshape", SheetDialogTarget::None, |a, _, _, params| {
+        if let Some(raw) = opt_non_empty_str_param(params, &["mode"])? {
+            let norm = raw.to_ascii_lowercase();
+            a.grid.import_reshape.mode = IMPORT_RESHAPE_MODES
+                .iter()
+                .find_map(|(m, aliases)| aliases.contains(&norm.as_str()).then_some(*m))
+                .ok_or_else(|| format!("unknown import reshape mode `{norm}`"))?;
+        }
+        a.canvas_dialogs.open_import_reshape();
+        Ok(())
+    })
+    .extra(|a| json!({ "mode": format!("{:?}", a.grid.import_reshape.mode) })),
 ];
 
 fn lookup_patched_sheet_dialog(command_id: &str) -> Option<&'static PatchedSheetDialogSpec> {
     PATCHED_SHEET_DIALOGS.iter().find(|spec| spec.command_id == command_id)
 }
 
-fn open_sheet_dialog_patched(
-    app: &mut UiApp,
-    params: &Value,
-    target: SheetDialogTarget,
-    dialog_name: &str,
-    open: impl FnOnce(&mut UiApp, &ProjectDocument, &SheetId) -> bool,
-    patch: Option<impl FnOnce(&mut UiApp, &ProjectDocument, &Map<String, Value>) -> Result<(), String>>,
-) -> Result<Value, String> {
-    let doc = app.document().clone();
-    let sheet_id = target.resolve(&doc, params)?;
-    if !open(app, &doc, &sheet_id) {
-        return Err(format!("{} `{}` not found", target.kind_label(), sheet_id.as_str()));
-    }
-    if let Some(patch_fn) = patch {
-        apply_open_patch(params, SHEET_ID_KEYS, |fields| patch_fn(app, &doc, fields))?;
-    }
-    Ok(json!({ "dialog": dialog_name, target.response_id_key(): sheet_id.as_str() }))
-}
-
 fn open_patched_sheet_dialog_spec(app: &mut UiApp, params: &Value, spec: &PatchedSheetDialogSpec) -> Result<Value, String> {
-    open_sheet_dialog_patched(app, params, spec.target, spec.dialog_name, spec.open, spec.patch)
-}
-
-fn dispatch_ui_analyze_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.session().document().clone();
-    let target_id = resolve_target_sheet_matching(
-        &doc,
-        params,
-        &[],
-        "data or analyzable sheet",
-        false,
-        |d, id| {
-            d.data_sheet(id).is_some()
-                || d.result_sheet(id)
-                    .is_some_and(|rs| rs.analyzable_data.is_some() || rs.tabs.iter().any(|t| !t.column_headers.is_empty() && !t.rows.is_empty()))
-        },
-        |d| d.data_sheets.first().map(|ds| ds.id.clone()),
-    )?;
-    if !app.canvas_dialogs.open_analyze_dialog(&doc, &target_id) {
-        return Err(format!("sheet `{}` is not a data sheet or tabular result sheet", target_id.as_str()));
+    let doc = app.document().clone();
+    let sheet_id = spec.target.resolve(&doc, params)?;
+    match spec.open {
+        DialogOpenAction::Sheet(f) => require_open_ok(sheet_id.as_ref().is_some_and(|sid| f(app, &doc, sid)), spec.target, sheet_id.as_ref())?,
+        DialogOpenAction::Custom(f) => f(app, &doc, sheet_id.as_ref(), params)?,
     }
-    Ok(json!({
-        "dialog": "AnalyzeSheet",
-        "source_sheet_id": target_id.as_str(),
-        "extracted_result_tab_id": app.canvas_dialogs.analyze.extracted_result_tab_id,
-    }))
-}
-
-fn dispatch_ui_power_wizard_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    app.canvas_dialogs.open_power_wizard();
-    let preset = app.locale_preset.clone();
-    apply_open_patch(params, SHEET_ID_KEYS, |f| {
-        crate::dialogs_canvas::dialog_patch::patch_power_wizard(&mut app.canvas_dialogs.power_wizard, f, &preset)
-    })?;
-    Ok(json!({
-        "dialog": "PowerAndSampleSize",
-        "stage": app.canvas_dialogs.power_wizard.stage.label(),
-        "stage_index": app.canvas_dialogs.power_wizard.stage.index(),
-    }))
+    if let Some(patch_fn) = spec.patch {
+        apply_open_patch(params, spec.ignore_keys, |fields| patch_fn(app, &doc, fields))?;
+    }
+    let mut obj = Map::new();
+    obj.insert(String::from("dialog"), Value::String(spec.dialog_name.to_owned()));
+    if let (Some(id_key), Some(sid)) = (spec.id_key_override.or_else(|| spec.target.default_response_id_key()), sheet_id.as_ref()) {
+        obj.insert(id_key.to_owned(), Value::String(sid.as_str().to_owned()));
+    }
+    if let Some(extra_fn) = spec.extra
+        && let Value::Object(extra_map) = extra_fn(app)
+    {
+        obj.extend(extra_map);
+    }
+    Ok(Value::Object(obj))
 }
 
 fn dispatch_ui_format_points_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -2529,13 +2594,6 @@ fn dispatch_ui_canvas_preflight(app: &mut UiApp, params: &Value) -> Result<Value
     }))
 }
 
-fn dispatch_ui_preview_filter_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let raw = opt_non_empty_str_param(params, &["filter"])?.ok_or_else(|| String::from("missing non-empty `filter` string"))?;
-    let filter = CanvasPreviewFilter::from_name(raw).ok_or_else(|| format!("unknown preview filter `{raw}`"))?;
-    app.preview_filter = filter;
-    Ok(json!({ "preview_filter": app.preview_filter.as_str() }))
-}
-
 fn dispatch_ui_workspace_preset_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let raw = opt_non_empty_str_param(params, &["preset"])?.ok_or_else(|| String::from("missing non-empty `preset` string"))?;
     #[cfg(not(target_arch = "wasm32"))]
@@ -2596,70 +2654,6 @@ fn dispatch_ui_grid_exclude_with_reason(app: &mut UiApp, params: &Value) -> Resu
     Ok(json!({ "dialog": "ExcludeWithReason", "sheet_id": sheet_id.as_str(), "coords_count": app.canvas_dialogs.exclude_with_reason.coords.len() }))
 }
 
-fn dispatch_ui_randomize_groups_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
-    app.canvas_dialogs.open_randomize_groups(&doc);
-    apply_open_patch(params, SHEET_ID_KEYS, |f| {
-        crate::dialogs_canvas::dialog_patch::patch_randomize_groups(&mut app.canvas_dialogs.randomize_groups, f)
-    })?;
-    Ok(json!({
-        "dialog": "RandomizeGroups",
-        "groups": app.canvas_dialogs.randomize_groups.groups,
-        "subject_count": app.canvas_dialogs.randomize_groups.subject_count,
-    }))
-}
-
-fn dispatch_ui_random_sample_rows_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
-    let sheet_id = resolve_target_data_id(&doc, params)?;
-    if !app.canvas_dialogs.open_random_sample_rows(&doc, Some(&sheet_id)) {
-        return Err(format!("data sheet `{}` not found", sheet_id.as_str()));
-    }
-    apply_open_patch(params, &["source_sheet_id", "sheet_id", "sheetId"], |f| {
-        crate::dialogs_canvas::dialog_patch::patch_random_sample_rows(&mut app.canvas_dialogs.random_sample_rows, f)
-    })?;
-    Ok(json!({
-        "dialog": "RandomSampleRows",
-        "source_sheet_id": sheet_id.as_str(),
-        "sample_size": app.canvas_dialogs.random_sample_rows.sample_size,
-    }))
-}
-
-fn dispatch_ui_simulate_distributions_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    app.canvas_dialogs.open_simulate_distributions();
-    let preset = app.locale_preset.clone();
-    apply_open_patch(params, SHEET_ID_KEYS, |f| {
-        crate::dialogs_canvas::dialog_patch::patch_simulate_distributions(&mut app.canvas_dialogs.simulate_distributions, f, &preset)
-    })?;
-    Ok(json!({
-        "dialog": "SimulateDistributions",
-        "n_rows": app.canvas_dialogs.simulate_distributions.n_rows,
-        "column_count": app.canvas_dialogs.simulate_distributions.columns.len(),
-    }))
-}
-
-fn dispatch_ui_insert_model_equation_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let preset = app.locale_preset.clone();
-    let mut payload = open_sheet_dialog_patched(
-        app,
-        params,
-        SheetDialogTarget::Graph,
-        "InsertModelEquation",
-        |a, d, id| a.canvas_dialogs.open_insert_model_equation(d, id),
-        Some(|a: &mut UiApp, _: &ProjectDocument, f: &Map<String, Value>| {
-            crate::dialogs_canvas::dialog_patch::patch_insert_model_equation(&mut a.canvas_dialogs.insert_model_equation, f, &preset)
-        }),
-    )?;
-    if let Some(obj) = payload.as_object_mut() {
-        obj.insert(
-            String::from("result_sheet_id"),
-            app.canvas_dialogs.insert_model_equation.result_sheet_id.as_ref().map_or(Value::Null, |id| Value::String(id.as_str().to_owned())),
-        );
-        obj.insert(String::from("mode"), json!(app.canvas_dialogs.insert_model_equation.mode));
-    }
-    Ok(payload)
-}
-
 fn dispatch_ui_apply_style_from_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
     if let Some(arr) = params.get("target_sheet_ids").and_then(Value::as_array) {
@@ -2682,34 +2676,9 @@ fn dispatch_ui_apply_style_from_open(app: &mut UiApp, params: &Value) -> Result<
             "target_sheet_ids": app.canvas_dialogs.apply_style.target_graph_ids.iter().map(SheetId::as_str).collect::<Vec<_>>(),
         }));
     }
-    let no_patch: Option<SheetDialogPatchFn> = None;
-    open_sheet_dialog_patched(
-        app,
-        params,
-        SheetDialogTarget::Graph,
-        "ApplyStyleFrom",
-        |a, d, id| a.canvas_dialogs.open_apply_style_from(d, id),
-        no_patch,
-    )
-}
-
-fn dispatch_ui_format_axes_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
     let graph_id = resolve_target_graph_id(&doc, params)?;
-    let graph = doc.graph_sheet(&graph_id).ok_or_else(|| format!("graph sheet `{}` not found", graph_id.as_str()))?;
-    let initial_target = match opt_non_empty_str_param(params, &["target_axis"])?.unwrap_or("y").to_ascii_lowercase().as_str() {
-        "x" => AxisTarget::X,
-        "y" => AxisTarget::Y,
-        "y2" => AxisTarget::Y2,
-        other => return Err(format!("unsupported target_axis `{other}`; expected x, y, or y2")),
-    };
-    app.canvas_dialogs.format_axes.sync_from_graph(graph, initial_target);
-    app.canvas_dialogs.active_dialog = ActiveDialog::FormatAxes { sheet_id: graph_id.clone() };
-    let preset = app.locale_preset.clone();
-    apply_open_patch(params, SHEET_ID_KEYS, |f| {
-        crate::dialogs_canvas::dialog_patch::patch_format_axes(&mut app.canvas_dialogs.format_axes, f, Some(&doc), &preset)
-    })?;
-    Ok(json!({ "dialog": "FormatAxes", "sheet_id": graph_id.as_str(), "target_axis": format!("{:?}", app.canvas_dialogs.format_axes.target_axis) }))
+    require_open_ok(app.canvas_dialogs.open_apply_style_from(&doc, &graph_id), SheetDialogTarget::Graph, Some(&graph_id))?;
+    Ok(json!({ "dialog": "ApplyStyleFrom", "graph_sheet_id": graph_id.as_str() }))
 }
 
 fn dispatch_ui_open_formula_bar(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -2875,17 +2844,6 @@ fn map_cluster_row_label_to_mv_row(label: Option<&str>, fallback_idx: usize, mv:
     (fallback_idx < row_count).then_some(fallback_idx)
 }
 
-fn dispatch_ui_create_graph_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
-    const KEYS: &[&str] = &["data_sheet_id", "source_sheet_id", "sheet_id", "sheetId"];
-    let preferred = opt_non_empty_str_param(params, KEYS)?.map(SheetId::new);
-    if !app.canvas_dialogs.open_create_graph(&doc, preferred.as_ref()) {
-        return Err(String::from("no source data sheet available to create a graph"));
-    }
-    apply_open_patch(params, KEYS, |f| crate::dialogs_canvas::dialog_patch::patch_create_graph(&mut app.canvas_dialogs.create_graph, f))?;
-    Ok(json!({ "dialog": "CreateGraph", "source_sheet_id": app.canvas_dialogs.create_graph.source_sheet_id.as_ref().map(SheetId::as_str) }))
-}
-
 fn resolve_target_embedded_index(doc: &ProjectDocument, sheet_id: &SheetId, explicit_idx: Option<usize>, want_image: bool) -> Option<usize> {
     let match_ann = |a: &curvebook_doc::GraphAnnotation| {
         if want_image {
@@ -2912,20 +2870,6 @@ fn resolve_target_embedded_index(doc: &ProjectDocument, sheet_id: &SheetId, expl
         Some(idx) => ls.spec.items.get(idx).is_some_and(match_item).then_some(idx),
         None => ls.spec.items.iter().rposition(match_item),
     }
-}
-
-fn dispatch_ui_grid_overlay_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    if let Some(spacing) = opt_finite_f64_param(params, &["spacing_pt"])? {
-        if spacing <= 1.0 || spacing > 200.0 {
-            return Err(String::from("`spacing_pt` must be in (1.0, 200.0]"));
-        }
-        app.canvas_dialogs.grid_overlay_spacing_pt = spacing;
-    }
-    app.canvas_dialogs.grid_overlay_visible = opt_bool_param(params, &["visible"])?.unwrap_or(!app.canvas_dialogs.grid_overlay_visible);
-    Ok(json!({
-        "grid_overlay_visible": app.canvas_dialogs.grid_overlay_visible,
-        "spacing_pt": app.canvas_dialogs.grid_overlay_spacing_pt,
-    }))
 }
 
 fn dispatch_ui_embedded_object_format_open(app: &mut UiApp, params: &Value, want_image: bool) -> Result<Value, String> {
@@ -2987,28 +2931,6 @@ fn dispatch_ui_sheet_find(app: &mut UiApp, _params: &Value) -> Result<Value, Str
     }))
 }
 
-fn dispatch_ui_row_titles_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let explicit_collapsed = opt_bool_param(params, &["collapsed"])?;
-    #[cfg(not(target_arch = "wasm32"))]
-    let fallback_collapsed = app.egui_views.column_grid.row_titles_collapsed;
-    #[cfg(target_arch = "wasm32")]
-    let fallback_collapsed = false;
-    let next_collapsed = explicit_collapsed.unwrap_or(!app.grid.row_titles_collapsed_override.unwrap_or(fallback_collapsed));
-    app.grid.row_titles_collapsed_override = Some(next_collapsed);
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        app.egui_views.column_grid.row_titles_collapsed = next_collapsed;
-    }
-    Ok(json!({ "row_titles_collapsed": next_collapsed, "row_titles_expanded": !next_collapsed }))
-}
-
-fn dispatch_ui_export_figure_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
-    app.canvas_dialogs.open_export_figure(&sheet_id);
-    apply_open_patch(params, SHEET_ID_KEYS, |f| crate::dialogs_canvas::dialog_patch::patch_export_figure(&mut app.canvas_dialogs.export_figure, f))?;
-    Ok(json!({ "dialog": "ExportFigure", "sheet_id": sheet_id.as_str(), "format": app.canvas_dialogs.export_figure.format }))
-}
-
 #[derive(Clone, Copy)]
 enum CsvExportOpenMode {
     DataTable,
@@ -3061,40 +2983,12 @@ fn dispatch_ui_export_all_tables_csv_fallback(app: &mut UiApp, _params: &Value) 
     Err(String::from("ui.export.allTablesCsv requires the native desktop host folder picker"))
 }
 
-fn dispatch_ui_import_warnings_open(app: &mut UiApp, _params: &Value) -> Result<Value, String> {
-    app.import_warnings.panel_open = true;
-    app.canvas_dialogs.active_dialog = ActiveDialog::ImportWarnings;
-    Ok(json!({
-        "dialog": "ImportWarnings",
-        "open": true,
-        "count": app.import_warnings.warnings.len(),
-        "command_id": app.import_warnings.command_id,
-        "source_label": app.import_warnings.source_label,
-    }))
-}
-
 fn dispatch_ui_copy_for_slides(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
     require_params_object_or_null(params, "ui.clipboard.copyForSlides")?;
     let sheet_id = resolve_renderable_sheet_id(app.document(), params).map_err(ControlCallError::from)?;
     let dpi = opt_u16_bounded_param(params, "dpi", 72, 1200)?.unwrap_or(300);
     let outcome = crate::interaction::copy_figure_sheet_slide_bundle_dpi(app, &sheet_id, dpi).map_err(ControlCallError::from)?;
     Ok(outcome.command_result.unwrap_or_else(|| json!({ "sheet_id": sheet_id.as_str(), "dpi": dpi })))
-}
-
-fn dispatch_ui_import_reshape_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    if let Some(mode_raw) = opt_non_empty_str_param(params, &["mode"])? {
-        app.grid.import_reshape.mode = match mode_raw.to_ascii_lowercase().as_str() {
-            "plate96" | "plate_96" | "96" => ImportReshapeMode::Plate96,
-            "plate384" | "plate_384" | "384" => ImportReshapeMode::Plate384,
-            "tidylongpivot" | "tidy_long_pivot" | "tidylong" | "tidy" => ImportReshapeMode::TidyLongPivot,
-            other => return Err(format!("unknown import reshape mode `{other}`")),
-        };
-    }
-    app.canvas_dialogs.open_import_reshape();
-    Ok(json!({
-        "dialog": "ImportReshape",
-        "mode": format!("{:?}", app.grid.import_reshape.mode),
-    }))
 }
 
 fn dispatch_ui_print_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -3145,167 +3039,202 @@ fn dispatch_ui_print_open(app: &mut UiApp, params: &Value) -> Result<Value, Stri
     }))
 }
 
-const fn physical_unit_name(unit: PhysicalUnit) -> &'static str {
-    match unit {
-        PhysicalUnit::Millimeters => "mm",
-        PhysicalUnit::Inches => "in",
-        PhysicalUnit::Points => "pt",
-    }
+const PHYSICAL_UNITS: &[(PhysicalUnit, &str, &[&str])] = &[
+    (PhysicalUnit::Millimeters, "mm", &["mm", "millimeters", "millimeter"]),
+    (PhysicalUnit::Inches, "in", &["in", "inch", "inches"]),
+    (PhysicalUnit::Points, "pt", &["pt", "points", "point"]),
+];
+
+const ACTIVE_PANES: &[(ActiveWorkspacePane, &str)] = &[
+    (ActiveWorkspacePane::Navigator, "Navigator"),
+    (ActiveWorkspacePane::FamilyStrip, "FamilyStrip"),
+    (ActiveWorkspacePane::MainCanvasOrGrid, "MainCanvasOrGrid"),
+    (ActiveWorkspacePane::Inspector, "Inspector"),
+    (ActiveWorkspacePane::FloatingNotes, "FloatingNotes"),
+];
+
+const SHEET_FOLDER_KINDS: &[(SheetFolderKind, &str, &[&str])] = &[
+    (SheetFolderKind::Data, "data", &["data"]),
+    (SheetFolderKind::Info, "info", &["info"]),
+    (SheetFolderKind::Results, "results", &["results", "analyses", "analysis"]),
+    (SheetFolderKind::Graphs, "graphs", &["graphs", "graph"]),
+    (SheetFolderKind::Layouts, "layouts", &["layouts", "layout"]),
+];
+
+const THEME_MODES: &[(UiThemeMode, &str, &[&str])] = &[
+    (UiThemeMode::Light, "light", &["light"]),
+    (UiThemeMode::Dark, "dark", &["dark"]),
+    (UiThemeMode::HighContrast, "high_contrast", &["high_contrast", "highcontrast"]),
+];
+
+const SUPPORTED_LOCALE_PRIMARIES: &[&str] = &["en", "de", "es", "fr", "ja", "ko", "pt", "zh", "it", "nl", "pl", "ru", "tr", "ar", "he", "iw"];
+
+fn enum_canonical_name<T: Copy + PartialEq>(table: &[(T, &'static str, &[&str])], val: T) -> &'static str {
+    table.iter().find_map(|(v, name, _)| (*v == val).then_some(*name)).unwrap_or("")
 }
 
-const fn active_pane_name(pane: ActiveWorkspacePane) -> &'static str {
-    match pane {
-        ActiveWorkspacePane::Navigator => "Navigator",
-        ActiveWorkspacePane::FamilyStrip => "FamilyStrip",
-        ActiveWorkspacePane::MainCanvasOrGrid => "MainCanvasOrGrid",
-        ActiveWorkspacePane::Inspector => "Inspector",
-        ActiveWorkspacePane::FloatingNotes => "FloatingNotes",
-    }
+fn parse_enum_alias<T: Copy>(table: &[(T, &str, &[&str])], raw: &str) -> Option<T> {
+    table.iter().find_map(|(v, _, aliases)| aliases.contains(&raw).then_some(*v))
 }
 
-const fn sheet_folder_kind_name(folder: SheetFolderKind) -> &'static str {
-    match folder {
-        SheetFolderKind::Data => "data",
-        SheetFolderKind::Info => "info",
-        SheetFolderKind::Results => "results",
-        SheetFolderKind::Graphs => "graphs",
-        SheetFolderKind::Layouts => "layouts",
-    }
+fn physical_unit_name(unit: PhysicalUnit) -> &'static str {
+    enum_canonical_name(PHYSICAL_UNITS, unit)
 }
 
-fn parse_gallery_folder(raw: &str) -> Result<Option<SheetFolderKind>, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "all" => Ok(None),
-        "data" => Ok(Some(SheetFolderKind::Data)),
-        "info" => Ok(Some(SheetFolderKind::Info)),
-        "results" | "analyses" | "analysis" => Ok(Some(SheetFolderKind::Results)),
-        "graphs" | "graph" => Ok(Some(SheetFolderKind::Graphs)),
-        "layouts" | "layout" => Ok(Some(SheetFolderKind::Layouts)),
-        other => Err(format!("unsupported gallery folder `{other}`; expected data, info, results, graphs, layouts, or all")),
-    }
+fn active_pane_name(pane: ActiveWorkspacePane) -> &'static str {
+    ACTIVE_PANES.iter().find_map(|(p, name)| (*p == pane).then_some(*name)).unwrap_or("MainCanvasOrGrid")
 }
 
-fn dispatch_ui_gallery_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    if let Some(folder_val) = params.get("folder") {
-        let folder = match folder_val {
-            Value::Null => None,
-            Value::String(raw) => parse_gallery_folder(raw)?,
-            other => return Err(format!("ui.gallery.toggle 'folder' must be a string, got {other}")),
-        };
-        app.nav.set_gallery_filter(folder, app.session.document());
-    } else {
-        app.nav.sync_gallery(app.session.document());
-    }
-    match opt_bool_param(params, &["open"])? {
-        None => {
-            let _ = app.nav.toggle_gallery();
+fn sheet_folder_kind_name(folder: SheetFolderKind) -> &'static str {
+    enum_canonical_name(SHEET_FOLDER_KINDS, folder)
+}
+
+fn theme_mode_name(mode: UiThemeMode) -> &'static str {
+    enum_canonical_name(THEME_MODES, mode)
+}
+
+type UiToggleFn = fn(&mut UiApp, &Value) -> Result<Value, String>;
+
+const UI_TOGGLE_AND_SETTER_SPECS: &[(&str, UiToggleFn)] = &[
+    ("ui.navigator.toggle", |a, _| Ok(json!({ "navigator_open": a.toggle_navigator_pane() }))),
+    ("ui.inspector.toggle", |a, _| Ok(json!({ "inspector_open": a.toggle_inspector_pane() }))),
+    ("ui.family.toggle", |a, _| Ok(json!({ "family_open": a.toggle_family_pane() }))),
+    ("ui.zoom.fitSheet", |a, _| {
+        a.canvas_dialogs.reset_zoom_to_fit();
+        a.egui_views.canvas_view.fit_zoom_active = true;
+        a.egui_views.canvas_view.pan_pt = [0.0, 0.0];
+        a.egui_views.center_stage.secondary_canvas_view.fit_zoom_active = true;
+        a.egui_views.center_stage.secondary_canvas_view.pan_pt = [0.0, 0.0];
+        Ok(json!({ "zoom": a.canvas_dialogs.canvas.zoom, "fit": true }))
+    }),
+    ("ui.gridOverlay.toggle", |a, p| {
+        if let Some(spacing) = opt_finite_f64_param(p, &["spacing_pt"])? {
+            if spacing <= 1.0 || spacing > 200.0 {
+                return Err(String::from("`spacing_pt` must be in (1.0, 200.0]"));
+            }
+            a.canvas_dialogs.grid_overlay_spacing_pt = spacing;
         }
-        Some(explicit) => app.nav.gallery.open = explicit,
-    }
-    Ok(json!({
-        "gallery_open": app.nav.gallery.open,
-        "filter_folder": app.nav.gallery.filter_folder.map(sheet_folder_kind_name),
-        "card_count": app.nav.gallery.cards.len(),
-    }))
-}
-
-fn dispatch_ui_pane_cycle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let reverse = opt_bool_param(params, &["reverse"])?.unwrap_or(false);
-    let active = app.cycle_focus_pane(reverse);
-    Ok(json!({ "active_pane": active_pane_name(active), "reverse": reverse }))
-}
-
-fn dispatch_ui_rulers_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let unit_override = match opt_non_empty_str_param(params, &["unit"])? {
-        Some(raw_unit) => Some(match raw_unit.to_ascii_lowercase().as_str() {
-            "mm" | "millimeters" | "millimeter" => PhysicalUnit::Millimeters,
-            "in" | "inch" | "inches" => PhysicalUnit::Inches,
-            "pt" | "points" | "point" => PhysicalUnit::Points,
-            other => return Err(format!("unsupported ruler unit `{other}`; expected pt, in, or mm")),
-        }),
-        None => None,
-    };
-    let visible_override = opt_bool_param(params, &["visible"])?;
-    if let Some(unit) = unit_override {
-        app.canvas_dialogs.ruler_unit = unit;
-    }
-    app.canvas_dialogs.rulers_visible = visible_override.unwrap_or(!app.canvas_dialogs.rulers_visible);
-    Ok(json!({ "rulers_visible": app.canvas_dialogs.rulers_visible, "unit": physical_unit_name(app.canvas_dialogs.ruler_unit) }))
-}
-
-fn dispatch_ui_shortcut_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let Some(command_id) = opt_non_empty_str_param(params, &["command_id", "id"])? else {
-        return Err(String::from("ui.shortcut.set requires non-empty string 'command_id'"));
-    };
-    let Some(shortcut) = opt_str_param(params, &["shortcut", "combo"])? else {
-        return Err(String::from("ui.shortcut.set requires string 'shortcut'"));
-    };
-    app.shortcuts.set_shortcut(command_id, shortcut)?;
-    app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
-    let active = app.shortcuts.active_combo(command_id).unwrap_or("");
-    Ok(json!({
-        "command_id": command_id,
-        "shortcut": active,
-    }))
-}
-
-fn dispatch_ui_shortcut_reset(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let target = opt_non_empty_str_param(params, &["command_id", "id"])?;
-    if let Some(command_id) = target {
-        app.shortcuts.reset_shortcut(command_id)?;
-        app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
-        let active = app.shortcuts.active_combo(command_id).unwrap_or("");
+        a.canvas_dialogs.grid_overlay_visible = opt_bool_param(p, &["visible"])?.unwrap_or(!a.canvas_dialogs.grid_overlay_visible);
+        Ok(json!({ "grid_overlay_visible": a.canvas_dialogs.grid_overlay_visible, "spacing_pt": a.canvas_dialogs.grid_overlay_spacing_pt }))
+    }),
+    ("ui.view.rowTitles.toggle", |a, p| {
+        let explicit = opt_bool_param(p, &["collapsed"])?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let fallback = a.egui_views.column_grid.row_titles_collapsed;
+        #[cfg(target_arch = "wasm32")]
+        let fallback = false;
+        let next = explicit.unwrap_or(!a.grid.row_titles_collapsed_override.unwrap_or(fallback));
+        a.grid.row_titles_collapsed_override = Some(next);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            a.egui_views.column_grid.row_titles_collapsed = next;
+        }
+        Ok(json!({ "row_titles_collapsed": next, "row_titles_expanded": !next }))
+    }),
+    ("ui.rulers.toggle", |a, p| {
+        let unit_override = opt_non_empty_str_param(p, &["unit"])?
+            .map(|raw| {
+                let norm = raw.to_ascii_lowercase();
+                parse_enum_alias(PHYSICAL_UNITS, &norm).ok_or_else(|| format!("unsupported ruler unit `{norm}`; expected pt, in, or mm"))
+            })
+            .transpose()?;
+        let visible_override = opt_bool_param(p, &["visible"])?;
+        if let Some(unit) = unit_override {
+            a.canvas_dialogs.ruler_unit = unit;
+        }
+        a.canvas_dialogs.rulers_visible = visible_override.unwrap_or(!a.canvas_dialogs.rulers_visible);
+        Ok(json!({ "rulers_visible": a.canvas_dialogs.rulers_visible, "unit": physical_unit_name(a.canvas_dialogs.ruler_unit) }))
+    }),
+    ("ui.gallery.toggle", |a, p| {
+        if let Some(folder_val) = p.get("folder") {
+            let folder =
+                match folder_val {
+                    Value::Null => None,
+                    Value::String(raw) => {
+                        let norm = raw.trim().to_ascii_lowercase();
+                        if norm.is_empty() || norm == "all" {
+                            None
+                        } else {
+                            Some(parse_enum_alias(SHEET_FOLDER_KINDS, &norm).ok_or_else(|| {
+                                format!("unsupported gallery folder `{norm}`; expected data, info, results, graphs, layouts, or all")
+                            })?)
+                        }
+                    }
+                    other => return Err(format!("ui.gallery.toggle 'folder' must be a string, got {other}")),
+                };
+            a.nav.set_gallery_filter(folder, a.session.document());
+        } else {
+            a.nav.sync_gallery(a.session.document());
+        }
+        match opt_bool_param(p, &["open"])? {
+            None => {
+                let _ = a.nav.toggle_gallery();
+            }
+            Some(explicit) => a.nav.gallery.open = explicit,
+        }
         Ok(json!({
-            "command_id": command_id,
-            "shortcut": active,
-            "reset_all": false,
+            "gallery_open": a.nav.gallery.open,
+            "filter_folder": a.nav.gallery.filter_folder.map(sheet_folder_kind_name),
+            "card_count": a.nav.gallery.cards.len(),
         }))
-    } else {
-        app.shortcuts.reset_all();
-        app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
+    }),
+    ("ui.pane.cycle", |a, p| {
+        let reverse = opt_bool_param(p, &["reverse"])?.unwrap_or(false);
+        Ok(json!({ "active_pane": active_pane_name(a.cycle_focus_pane(reverse)), "reverse": reverse }))
+    }),
+    ("ui.previewFilter.set", |a, p| {
+        let raw = opt_non_empty_str_param(p, &["filter"])?.ok_or_else(|| String::from("missing non-empty `filter` string"))?;
+        a.preview_filter = CanvasPreviewFilter::from_name(raw).ok_or_else(|| format!("unknown preview filter `{raw}`"))?;
+        Ok(json!({ "preview_filter": a.preview_filter.as_str() }))
+    }),
+    ("ui.locale.set", |a, p| {
+        let raw = opt_non_empty_str_param(p, &["locale"])?.ok_or_else(|| String::from("ui.locale.set requires non-empty string 'locale'"))?;
+        let lower = raw.replace('_', "-").to_ascii_lowercase();
+        if !SUPPORTED_LOCALE_PRIMARIES.contains(&lower.split('-').next().unwrap_or("")) {
+            return Err(format!(
+                "unsupported locale `{raw}`; expected one of en, de, es, fr, ja, ko, pt-BR, zh-CN, zh-TW, it, nl, pl, ru, tr, ar, he"
+            ));
+        }
+        a.set_locale(normalize_locale(raw));
         Ok(json!({
-            "reset_all": true,
+            "locale": a.locale,
+            "display_name": locale_display_name(&a.locale),
+            "decimal_separator": a.locale_preset.decimal_separator.to_string(),
+            "csv_delimiter": a.locale_preset.csv_delimiter.to_string(),
         }))
-    }
-}
+    }),
+    ("ui.theme.set", |a, p| {
+        let raw = opt_non_empty_str_param(p, &["mode", "theme"])?
+            .ok_or_else(|| String::from("ui.theme.set requires non-empty 'mode' (light | dark | high_contrast)"))?;
+        let norm = raw.replace(['-', ' '], "_").to_ascii_lowercase();
+        let mode =
+            parse_enum_alias(THEME_MODES, &norm).ok_or_else(|| format!("unsupported theme mode `{norm}`; expected light, dark, or high_contrast"))?;
+        a.theme = UiThemeSpec::for_mode(mode);
+        Ok(json!({ "mode": theme_mode_name(a.theme.mode), "wcag_aa": a.theme.meets_wcag_aa() }))
+    }),
+    ("ui.shortcut.set", |a, p| {
+        let cmd_id = opt_non_empty_str_param(p, &["command_id", "id"])?
+            .ok_or_else(|| String::from("ui.shortcut.set requires non-empty string 'command_id'"))?;
+        let shortcut = opt_str_param(p, &["shortcut", "combo"])?.ok_or_else(|| String::from("ui.shortcut.set requires string 'shortcut'"))?;
+        a.shortcuts.set_shortcut(cmd_id, shortcut)?;
+        a.canvas_dialogs.command_palette.sync_shortcuts(&a.shortcuts);
+        Ok(json!({ "command_id": cmd_id, "shortcut": a.shortcuts.active_combo(cmd_id).unwrap_or("") }))
+    }),
+    ("ui.shortcut.reset", |a, p| {
+        if let Some(cmd_id) = opt_non_empty_str_param(p, &["command_id", "id"])? {
+            a.shortcuts.reset_shortcut(cmd_id)?;
+            a.canvas_dialogs.command_palette.sync_shortcuts(&a.shortcuts);
+            Ok(json!({ "command_id": cmd_id, "shortcut": a.shortcuts.active_combo(cmd_id).unwrap_or(""), "reset_all": false }))
+        } else {
+            a.shortcuts.reset_all();
+            a.canvas_dialogs.command_palette.sync_shortcuts(&a.shortcuts);
+            Ok(json!({ "reset_all": true }))
+        }
+    }),
+];
 
-fn dispatch_ui_locale_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let Some(raw_locale) = opt_non_empty_str_param(params, &["locale"])? else {
-        return Err(String::from("ui.locale.set requires non-empty string 'locale'"));
-    };
-    let lower = raw_locale.replace('_', "-").to_ascii_lowercase();
-    let primary = lower.split('-').next().unwrap_or("");
-    if !matches!(primary, "en" | "de" | "es" | "fr" | "ja" | "ko" | "pt" | "zh" | "it" | "nl" | "pl" | "ru" | "tr" | "ar" | "he" | "iw") {
-        return Err(format!(
-            "unsupported locale `{raw_locale}`; expected one of en, de, es, fr, ja, ko, pt-BR, zh-CN, zh-TW, it, nl, pl, ru, tr, ar, he"
-        ));
-    }
-    let normalized = normalize_locale(raw_locale);
-    app.set_locale(normalized);
-    Ok(json!({
-        "locale": app.locale,
-        "display_name": locale_display_name(&app.locale),
-        "decimal_separator": app.locale_preset.decimal_separator.to_string(),
-        "csv_delimiter": app.locale_preset.csv_delimiter.to_string(),
-    }))
-}
-
-fn dispatch_ui_theme_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let Some(raw_mode) = opt_non_empty_str_param(params, &["mode", "theme"])? else {
-        return Err(String::from("ui.theme.set requires non-empty 'mode' (light | dark | high_contrast)"));
-    };
-
-    let mode = match raw_mode.replace(['-', ' '], "_").to_ascii_lowercase().as_str() {
-        "light" => UiThemeMode::Light,
-        "dark" => UiThemeMode::Dark,
-        "high_contrast" | "highcontrast" => UiThemeMode::HighContrast,
-        other => return Err(format!("unsupported theme mode `{other}`; expected light, dark, or high_contrast")),
-    };
-    app.theme = UiThemeSpec::for_mode(mode);
-    Ok(json!({
-        "mode": theme_mode_name(app.theme.mode),
-        "wcag_aa": app.theme.meets_wcag_aa(),
-    }))
+fn lookup_ui_toggle_or_setter(command_id: &str) -> Option<UiToggleFn> {
+    UI_TOGGLE_AND_SETTER_SPECS.iter().find_map(|(id, run)| (*id == command_id).then_some(*run))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3538,14 +3467,6 @@ fn read_bounded_control_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> io
         line.extend_from_slice(avail);
         let consumed = avail.len();
         reader.consume(consumed);
-    }
-}
-
-const fn theme_mode_name(mode: UiThemeMode) -> &'static str {
-    match mode {
-        UiThemeMode::Light => "light",
-        UiThemeMode::Dark => "dark",
-        UiThemeMode::HighContrast => "high_contrast",
     }
 }
 
@@ -4469,6 +4390,145 @@ mod tests {
         assert_eq!(bad_font_reply["ok"], serde_json::json!(false));
 
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn live_control_screenshots_result_chaining_cluster_append_and_r9_7_policy() -> Result<(), Box<dyn std::error::Error>> {
+        use super::dispatch_gui_action;
+        use crate::UiApp;
+        use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner};
+        use curvebook_doc::{AnalysisKind, CellCoord, CellValue, ChecklistStatus, ErrorCode, SheetId, TableArchetype, VariableRole};
+        use serde_json::{Value, json};
+
+        let mut app = UiApp::new();
+
+        // 1. Disabled menu refuses with Conflict on empty workspace.
+        let disabled = dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.formatPoints.open" }));
+        assert_eq!(disabled.as_ref().err().map(|e| e.code), Some(ErrorCode::Conflict));
+
+        // 2. Create heteroscedastic Column table, paste TSV via ui.type_text, run One-Way ANOVA.
+        app.execute_command("sheet.createData", json!({ "sheet_id": "col-1", "kind": "column", "cols": 3, "rows": 5, "auto_graph": false }))?;
+        dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "grid.cell.0.0.0" }))?;
+        dispatch_gui_action(
+            &mut app,
+            "ui.type_text",
+            json!({
+                "widget_id": "grid.cell.0.0.0",
+                "text": "10.0\t20.0\t50.0\n10.1\t35.0\t120.0\n10.2\t12.0\t30.0\n10.0\t48.0\t160.0\n10.1\t22.0\t95.0",
+                "clear_existing": true
+            }),
+        )?;
+        dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "path": "Analyze/Analyze..." }))?;
+        let anova = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "entry_id": "stats.one_way_anova" } }))?;
+        let res_id = anova.pointer("/payload/sheet_id").and_then(Value::as_str).ok_or("missing anova sheet_id")?.to_owned();
+
+        // 3. Open EditAnalysisParameters via Cmd+T; verify R1 disabled tab, invalid confidence guard,
+        //    all 5 ui.screenshot targets, wheel alias, and Escape close.
+        let press_t = dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "t", "modifiers": { "meta": true } }))?;
+        assert_eq!(press_t.get("result_sheet_id").and_then(Value::as_str), Some(res_id.as_str()));
+        assert!(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
+        assert_eq!(
+            dispatch_gui_action(&mut app, "ui.switch_tab", json!({ "tab": "repeated_measures" })).as_ref().err().map(|e| e.code),
+            Some(ErrorCode::Conflict)
+        );
+        assert_eq!(
+            dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "confidence_percent": 150.0 } }))
+                .as_ref()
+                .err()
+                .map(|e| e.code),
+            Some(ErrorCode::Conflict)
+        );
+        for target in ["full_window", "workspace", "viewport", "canvas", "dialog"] {
+            let shot = dispatch_gui_action(&mut app, "ui.screenshot", json!({ "target": target, "width_px": 480, "height_px": 320 }))?;
+            let b64 = shot.get("data_base64").and_then(Value::as_str).ok_or("missing data_base64")?;
+            assert!(b64.starts_with("iVBORw0KGgo"), "screenshot `{target}` must start with PNG magic prefix");
+            assert!(shot.get("bytes_len").and_then(Value::as_u64).unwrap_or(0) > 64);
+            assert!(shot.get("path").is_some_and(Value::is_null));
+        }
+        dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "wheel", "x": 400.0, "y": 240.0, "delta_y": 120.0 }))?;
+        dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "Escape" }))?;
+        assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None);
+
+        // 4. R9.7 diagnostics-only banner & applyRemediation rejection (zero mutation).
+        let snap = dispatch_gui_action(&mut app, "ui.inspect", json!({ "scope": "all", "include_bounds": true }))?;
+        assert!(snap.get("result_diagnostic_banner").is_some_and(Value::is_object));
+        let rs_sid = SheetId::try_new(&res_id)?;
+        let banner =
+            AssumptionDiagnosticBanner::from_result(app.document().result_sheet(&rs_sid).ok_or("missing rs")?).ok_or("expected diagnostic banner")?;
+        assert!(matches!(banner.severity, ChecklistStatus::Violated | ChecklistStatus::Warn));
+        let undo_before = app.session().undo_depth();
+        let count_before = app.document().result_sheets.len();
+        let banner_click =
+            dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "result.diagnostic_banner" }))?;
+        assert_eq!(banner_click["mutated"], json!(false));
+        assert_eq!(app.session().undo_depth(), undo_before);
+        let rem_err = dispatch_gui_action(
+            &mut app,
+            "ui.invoke_menu",
+            json!({ "command_id": "ui.result.applyRemediation", "params": { "result_sheet_id": res_id } }),
+        )
+        .err()
+        .ok_or("applyRemediation must fail under QOL-7 diagnostics-only policy")?;
+        assert!(rem_err.message().contains("diagnostics_only_policy"));
+        assert_eq!(app.document().result_sheets.len(), count_before);
+
+        // 5. ResultSheet -> Analyze... automatic sheet.extractResultTab chaining & ui.result.appendClusterColumn.
+        app.execute_command(
+            "sheet.createData",
+            json!({ "sheet_id": "mv-1", "kind": "multiple_variables", "cols": 3, "rows": 6, "variables": ["F1", "F2", "F3"], "auto_family": false }),
+        )?;
+        app.execute_command(
+            "table.setCells",
+            json!({
+                "sheet_id": "mv-1",
+                "rows": [[1.0, 1.0, 2.0], [1.1, 0.9, 2.1], [0.9, 1.1, 1.9], [10.0, 10.0, 8.0], [10.2, 9.8, 8.2], [9.9, 10.1, 7.9]]
+            }),
+        )?;
+        app.execute_command(
+            "analysis.run",
+            json!({ "source_sheet_id": "mv-1", "sheet_id": "res-pca", "kind": { "Multivariate": { "Pca": { "standardize": true, "parallel_analysis_seed": 7 } } } }),
+        )?;
+        app.execute_command("sheet.select", json!({ "sheet_id": "res-pca" }))?;
+        let pca_sid = SheetId::try_new("res-pca")?;
+        let scores_tab = app
+            .document()
+            .result_sheet(&pca_sid)
+            .and_then(|rs| rs.tabs.iter().find(|t| t.id.contains("score")).or_else(|| rs.tabs.first()))
+            .map(|t| t.id.clone())
+            .ok_or("missing PCA tab")?;
+        dispatch_gui_action(&mut app, "ui.switch_tab", json!({ "tab": scores_tab }))?;
+        dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "path": "Analyze/Analyze..." }))?;
+        let chained = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "entry_id": "stats.descriptive" } }))?;
+        let downstream_sid = SheetId::try_new(chained.pointer("/payload/sheet_id").and_then(Value::as_str).ok_or("missing chained sheet_id")?)?;
+        let downstream_rs = app.document().result_sheet(&downstream_sid).ok_or("missing downstream ResultSheet")?;
+        assert!(matches!(downstream_rs.analysis.kind, AnalysisKind::DescriptiveStats(_)));
+
+        app.execute_command("sheet.select", json!({ "sheet_id": "mv-1" }))?;
+        dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.analyze.open" }))?;
+        let cl = dispatch_gui_action(
+            &mut app,
+            "ui.answer_dialog",
+            json!({ "action": "ok", "force_create_new": true, "fields": { "entry_id": "stats.clustering", "k_means_k": 2 } }),
+        )?;
+        let cl_id = cl.pointer("/payload/sheet_id").and_then(Value::as_str).ok_or("missing cluster sheet_id")?.to_owned();
+        dispatch_gui_action(&mut app, "ui.switch_tab", json!({ "sheet_id": cl_id }))?;
+        let append1 = dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.result.appendClusterColumn" }))?;
+        assert_eq!(append1.pointer("/result/updated_existing").and_then(Value::as_bool), Some(false));
+        let mv_sid = SheetId::try_new("mv-1")?;
+        let mv_ds = app.document().data_sheet(&mv_sid).ok_or("missing mv-1")?;
+        let TableArchetype::MultipleVariables(ref mv_tbl) = mv_ds.archetype else {
+            return Err("expected MultipleVariables archetype".into());
+        };
+        assert_eq!(mv_tbl.variables.len(), 4);
+        assert_eq!(mv_tbl.variables[3].title, "Cluster");
+        assert_eq!(mv_tbl.variables[3].role, VariableRole::Categorical);
+        assert!(
+            matches!(mv_ds.archetype.data_cell(CellCoord::new(0, 3, 0)).map(|c| &c.value), Some(CellValue::Text(s)) if s.starts_with("Cluster "))
+        );
+        let append2 = dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.result.appendClusterColumn" }))?;
+        assert_eq!(append2.pointer("/result/updated_existing").and_then(Value::as_bool), Some(true));
         Ok(())
     }
 }

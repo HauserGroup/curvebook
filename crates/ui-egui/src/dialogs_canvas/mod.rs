@@ -40,8 +40,6 @@ pub use edit_params::{EditAnalysisParametersState, TwoGroupSubmethodMemory};
 pub(crate) use edit_params::{clear_fit_parameter_inputs, sync_fit_parameter_inputs};
 pub use format_axes::{AxisTarget, FormatAxesState};
 pub use format_graph::FormatGraphState;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use format_graph::resolve_selected_level_idx;
 pub use graph_overlays::{ApplyStyleFromState, BubblePlotInspectorState, PairwiseComparisonsState};
 pub use graph_type::{ChangeGraphTypeState, GRAPH_TYPE_OPTIONS, GraphTypeOption, ThumbnailGlyphKind};
 pub use layout_export::{CsvExportOptionsState, CsvExportTargetKind, ExportFigureFormat, ExportFigureState, PageLayoutComposerState};
