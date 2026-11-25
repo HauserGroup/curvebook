@@ -9,13 +9,13 @@ use std::fmt::Write as _;
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ChecklistItem, ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage,
     ContingencyMethod, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, DataSheet, DescriptiveSpec,
-    ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, IdentifiabilityMode, KappaWeighting, LinearRegressionSpec,
-    MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec, MultipleRowTestsSpec,
-    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
-    OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec,
-    PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument,
-    RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod,
-    RocSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SumOfSquaresType,
+    ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, IdentifiabilityMode, KappaWeighting, LeveneCenter,
+    LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion,
+    ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
+    NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule,
+    ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily,
+    ProjectDocument, RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+    RocCiMethod, RocSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SumOfSquaresType,
     SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod, WeightingScheme,
     WeightingSource,
 };
@@ -302,6 +302,7 @@ fn describe_analysis_kind(doc: &ProjectDocument, spec: &AnalysisSpec, res: &Resu
         AnalysisKind::OutlierDetection(s) => describe_outlier_detection(s),
         AnalysisKind::Transform(s) => describe_transform(s),
         AnalysisKind::SimpleLogisticRegression(s) => describe_simple_logistic(s),
+        AnalysisKind::LeveneTest(s) => describe_levene_test(s),
     }
 }
 
@@ -848,6 +849,18 @@ fn describe_pvalue_stack(s: &PValueStackSpec, source_ds: Option<&DataSheet>) -> 
         format_exact_float(s.threshold)
     )));
     vec![ReportBlock::Paragraph(runs)]
+}
+
+fn describe_levene_test(s: &LeveneTestSpec) -> Vec<ReportBlock> {
+    let text = match s.center {
+        LeveneCenter::Median => {
+            "Homogeneity of variances across the selected columns was assessed with the Brown-Forsythe test, a one-way ANOVA F test on absolute deviations from each group's median (Brown & Forsythe 1974), with DFn = k - 1 and DFd = N - k."
+        }
+        LeveneCenter::Mean => {
+            "Homogeneity of variances across the selected columns was assessed with Levene's test, a one-way ANOVA F test on absolute deviations from each group's mean (Levene 1960), with DFn = k - 1 and DFd = N - k."
+        }
+    };
+    vec![ReportBlock::Paragraph(vec![plain(text)])]
 }
 
 fn describe_passing_bablok(s: &PassingBablokSpec, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {

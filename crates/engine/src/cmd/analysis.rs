@@ -5,13 +5,13 @@ use std::collections::HashSet;
 use curvebook_doc::{
     AnalysisDomainKind, AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, CellValue, ClusterDistance, ClusterLinkage,
     ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError, ErrorCode, ErrorPropagationMode,
-    FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, GraphSheet, HookSource, KappaWeighting, LinearRegressionSpec, MAX_SHEETS_PER_PROJECT,
-    MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
-    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackSpec, ParameterRule,
-    ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerTailMode, ProjectDocument,
-    RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod,
-    SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
-    VariableColumn, VariableRole, XyTable,
+    FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, GraphSheet, HookSource, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec,
+    MAX_SHEETS_PER_PROJECT, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod,
+    MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
+    PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerTailMode,
+    ProjectDocument, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimpleLogisticSpec, SimulationNoise,
+    SplineLowessMethod, SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod,
+    TwoGroupSpec, VariableColumn, VariableRole, XyTable,
 };
 use curvebook_fit::{get_builtin_model, list_builtin_equations, resolve_model_from_spec};
 use curvebook_format::{CsvOptions, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
@@ -1784,6 +1784,7 @@ fn persist_default_mv_columns(source_ds: &DataSheet, spec: &mut AnalysisSpec, ex
         | AnalysisKind::OutlierDetection(_)
         | AnalysisKind::RocCurve(_)
         | AnalysisKind::PValueStack(_)
+        | AnalysisKind::LeveneTest(_)
             if spec.selected_data_sets.is_empty() =>
         {
             let numeric_cols: Vec<usize> = mv.variables.iter().enumerate().filter(|(_, v)| is_mv_numeric_var(v)).map(|(i, _)| i).collect();
@@ -2333,6 +2334,7 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
         AnalysisKind::SimpleLogisticRegression(_) => {
             matches!(key, "emit_row_classification" | "confidence_bands" | "classification_cutoff" | "plot_x_min" | "plot_x_max" | "plot_segments")
         }
+        AnalysisKind::LeveneTest(_) => key == "center",
         AnalysisKind::Transform(_) | AnalysisKind::FitSplineLowess(_) | AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {
             false
         }
@@ -2640,6 +2642,15 @@ fn resolve_other_stats_shorthand(name: &str) -> Option<AnalysisKind> {
         "simple_logistic" | "simple_logistic_regression" | "stats.simple_logistic" | "xy_logistic" => {
             AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default())
         }
+        "levene_mean" => AnalysisKind::LeveneTest(LeveneTestSpec { center: LeveneCenter::Mean }),
+        "levene"
+        | "levene_test"
+        | "stats.levene"
+        | "levene_median"
+        | "brown_forsythe_variance"
+        | "brown_forsythe_levene"
+        | "variance_homogeneity"
+        | "equal_variance_test" => AnalysisKind::LeveneTest(LeveneTestSpec { center: LeveneCenter::Median }),
         "pca" | "stats.pca" | "principal_components" | "pcr" | "stats.pcr" | "principal_component_regression" => {
             AnalysisKind::Multivariate(default_pca())
         }
@@ -2730,6 +2741,8 @@ fn suggest_analysis_kinds(raw: &str) -> Vec<String> {
         "passing_bablok",
         "pvalue_stack",
         "power",
+        "levene",
+        "levene_mean",
         "contingency",
         "chi_square",
         "fisher_exact",

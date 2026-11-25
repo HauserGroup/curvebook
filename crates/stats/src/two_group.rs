@@ -159,12 +159,40 @@ pub struct LeveneTestResult {
 ///
 /// One-way ANOVA *F* on absolute deviations `|x_ij - c_i|`, where `c_i` is the group mean
 /// (Levene 1960) or the group median (Brown & Forsythe 1974).
+///
+/// When every group's absolute deviations are identical (zero within-group spread of `|x_ij - c_i|`)
+/// the *F* ratio is undefined; this function keeps its historical convention of returning
+/// `F = 0, p = 1` (no between-group spread either) or `F = +Inf, p = 0`. The standalone analysis in
+/// [`crate::variance_homogeneity`] instead rejects that case with [`StatsError::ZeroVariance`].
 pub fn levene_variance_test(groups: &[&[f64]], use_median: bool) -> Result<LeveneTestResult, StatsError> {
+    Ok(levene_variance_core(groups, use_median)?.test)
+}
+
+/// Per-group intermediate quantities of the Levene / Brown–Forsythe computation.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LeveneCore {
+    /// Omnibus test result (`F`, `df`, `p`).
+    pub(crate) test: LeveneTestResult,
+    /// Per-group centre `c_i` (mean or median).
+    pub(crate) centers: Vec<f64>,
+    /// Per-group mean absolute deviation `mean_j |x_ij - c_i|`.
+    pub(crate) mean_abs_deviations: Vec<f64>,
+    /// Within-group sum of squares of the absolute deviations (`SS_within` of the ANOVA on `z_ij`).
+    pub(crate) ss_within: f64,
+    /// Rounding-noise floor for [`Self::ss_within`]: `N * (8 * eps * max_ij |x_ij|)^2`.
+    pub(crate) ss_within_noise_floor: f64,
+}
+
+/// Shared Levene / Brown–Forsythe computation (Levene 1960; Brown & Forsythe 1974) returning the
+/// omnibus result together with per-group centres and the within-group dispersion of `|x_ij - c_i|`.
+pub(crate) fn levene_variance_core(groups: &[&[f64]], use_median: bool) -> Result<LeveneCore, StatsError> {
     if groups.len() < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "Levene test", required: 2, actual: groups.len() });
     }
     let mut z_groups = Vec::with_capacity(groups.len());
     let mut all_z = Vec::new();
+    let mut centers = Vec::with_capacity(groups.len());
+    let mut max_abs = 0.0_f64;
     for grp in groups {
         validate_finite_slice(grp)?;
         if grp.len() < 2 {
@@ -176,20 +204,24 @@ pub fn levene_variance_test(groups: &[&[f64]], use_median: bool) -> Result<Leven
         } else {
             SummaryMoments::from_slice(grp)?.mean
         };
+        max_abs = grp.iter().fold(max_abs, |m, &v| m.max(v.abs()));
         let z: Vec<f64> = grp.iter().map(|&v| (v - center).abs()).collect();
         all_z.extend_from_slice(&z);
         z_groups.push(z);
+        centers.push(center);
     }
     let total_n = all_z.len();
     let k = groups.len();
     let grand = SummaryMoments::from_slice(&all_z)?;
     let mut ss_b = NeumaierSum::new();
     let mut ss_w = NeumaierSum::new();
+    let mut mean_abs_deviations = Vec::with_capacity(k);
     for zg in &z_groups {
         let gm = SummaryMoments::from_slice(zg)?;
         let d = gm.mean - grand.mean;
         ss_b.add((gm.count as f64) * d * d);
         ss_w.add(gm.css);
+        mean_abs_deviations.push(gm.mean);
     }
     let df_b = (k - 1) as f64;
     let df_w = (total_n - k) as f64;
@@ -203,7 +235,14 @@ pub fn levene_variance_test(groups: &[&[f64]], use_median: bool) -> Result<Leven
     } else {
         (f64::INFINITY, 0.0)
     };
-    Ok(LeveneTestResult { use_median, f_statistic: f_stat, df_between: df_b, df_within: df_w, p_value: p_val })
+    let noise = 8.0 * f64::EPSILON * max_abs;
+    Ok(LeveneCore {
+        test: LeveneTestResult { use_median, f_statistic: f_stat, df_between: df_b, df_within: df_w, p_value: p_val },
+        centers,
+        mean_abs_deviations,
+        ss_within: ssw,
+        ss_within_noise_floor: (total_n as f64) * noise * noise,
+    })
 }
 
 // ============================================================================

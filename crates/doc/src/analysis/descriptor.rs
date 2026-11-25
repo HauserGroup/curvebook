@@ -56,11 +56,13 @@ pub enum AnalysisKindId {
     SimpleLogisticRegression = 19,
     /// Model-free XY spline (natural cubic, Akima, smoothing), LOWESS, and dense point-to-point curve fitting ([`AnalysisKind::FitSplineLowess`]).
     FitSplineLowess = 20,
+    /// Standalone Levene / Brown–Forsythe homogeneity-of-variance test ([`AnalysisKind::LeveneTest`]).
+    LeveneTest = 21,
 }
 
 impl AnalysisKindId {
-    /// Complete ordered list of all 21 [`AnalysisKindId`] discriminants.
-    pub const ALL: [Self; 21] = [
+    /// Complete ordered list of every [`AnalysisKindId`] discriminant.
+    pub const ALL: [Self; 22] = [
         Self::Transform,
         Self::DescriptiveStats,
         Self::OutlierDetection,
@@ -82,6 +84,7 @@ impl AnalysisKindId {
         Self::PowerAnalysis,
         Self::SimpleLogisticRegression,
         Self::FitSplineLowess,
+        Self::LeveneTest,
     ];
 
     /// Total number of [`AnalysisKind`] variants registered in [`ALL_ANALYSIS_DESCRIPTORS`].
@@ -115,6 +118,7 @@ impl AnalysisKindId {
             AnalysisKind::PowerAnalysis(_) => Self::PowerAnalysis,
             AnalysisKind::SimpleLogisticRegression(_) => Self::SimpleLogisticRegression,
             AnalysisKind::FitSplineLowess(_) => Self::FitSplineLowess,
+            AnalysisKind::LeveneTest(_) => Self::LeveneTest,
         }
     }
 
@@ -146,6 +150,7 @@ impl AnalysisKindId {
             Self::PowerAnalysis => &ALL_ANALYSIS_DESCRIPTORS[18],
             Self::SimpleLogisticRegression => &ALL_ANALYSIS_DESCRIPTORS[19],
             Self::FitSplineLowess => &ALL_ANALYSIS_DESCRIPTORS[20],
+            Self::LeveneTest => &ALL_ANALYSIS_DESCRIPTORS[21],
         }
     }
 
@@ -1144,6 +1149,38 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["fit.spline_lowess"],
         docs_anchor: "analysis-fit-spline-lowess",
+    },
+    AnalysisKindDescriptor {
+        id: AnalysisKindId::LeveneTest,
+        slug: "levene-test",
+        serde_variant: "LeveneTest",
+        title: "Levene / Brown–Forsythe Variance Test",
+        short_label: "Levene / Brown–Forsythe",
+        description: "Homogeneity-of-variance F test on absolute deviations from each group's median (Brown–Forsythe, default) or mean (Levene).",
+        domain: AnalysisDomainKind::Stats,
+        recompute_strategy: AnalysisRecomputeStrategy::Stats,
+        ui_category: AnalysisUiCategory::Column,
+        compatible_table_kinds: COL_MV,
+        has_method_specific_table_rules: false,
+        canonical_shorthand: "levene",
+        shorthands: &[
+            "levene",
+            "levene_test",
+            "stats.levene",
+            "levene_median",
+            "levene_mean",
+            "brown_forsythe_variance",
+            "brown_forsythe_levene",
+            "variance_homogeneity",
+            "equal_variance_test",
+        ],
+        accepts_equation_id_shorthand: false,
+        canonical_param_keys: &["center"],
+        supports_multiplicity: false,
+        supports_info_hooks: false,
+        auto_selects_mv_numeric_columns: true,
+        ui_catalog_ids: &["stats.levene"],
+        docs_anchor: "analysis-levene-test",
     },
 ];
 

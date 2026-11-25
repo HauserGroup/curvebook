@@ -54,6 +54,9 @@
                 "GeneralizedLinearModel": {
                   "type": "object"
                 },
+                "LeveneTest": {
+                  "type": "object"
+                },
                 "LinearRegression": {
                   "type": "object"
                 },

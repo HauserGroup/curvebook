@@ -1,7 +1,8 @@
 //! Nested, Multiple Row t-Tests, Contingency, Descriptive, Outlier, and Linear Regression design controls.
 
 use curvebook_doc::{
-    AnalysisKind, ContingencyMethod, DemingErrorSpec, KappaWeighting, OutlierSpec, PValueStackMethod, ProjectDocument, SubcolumnAggregation,
+    AnalysisKind, ContingencyMethod, DemingErrorSpec, KappaWeighting, LeveneCenter, OutlierSpec, PValueStackMethod, ProjectDocument,
+    SubcolumnAggregation,
 };
 use egui::{Id, TextEdit, Ui, Vec2};
 
@@ -263,6 +264,22 @@ pub(super) fn render_misc_stats_design(
         }
         AnalysisKind::PValueStack(ps) => {
             render_pvalue_stack_design(ui, doc, spec, ps, tokens, meta, intents);
+        }
+        AnalysisKind::LeveneTest(lt) => {
+            render_section_title(ui, tokens, "Deviations measured from each group's");
+            for (wid, lbl, center) in [
+                ("edit.levene.center.median", "Median (Brown-Forsythe, robust; recommended)", LeveneCenter::Median),
+                ("edit.levene.center.mean", "Mean (Levene's original test)", LeveneCenter::Mean),
+            ] {
+                if render_modal_radio(ui, tokens, meta, wid, lbl, lt.center == center, &ControlEnablement::enabled()) {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::LeveneTest(l) = &mut next.kind {
+                        l.center = center;
+                    }
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                }
+            }
+            render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
         }
         AnalysisKind::LinearRegression(lin) => {
             render_linear_regression_design(ui, doc, spec, lin, tokens, meta, intents);

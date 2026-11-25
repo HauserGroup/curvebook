@@ -9,7 +9,7 @@ use curvebook_doc::analysis::{
 };
 use curvebook_doc::{
     AnalysisKind, BlandAltmanSpec, ContingencyMethod, ContingencySpec, DescriptiveSpec, FactorialAnovaSpec, GlmFamily, GlmSpec, KappaWeighting,
-    LinearRegressionSpec, MultipleRowTestsSpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, OneWayAnovaSpec, OutlierSpec,
+    LeveneTestSpec, LinearRegressionSpec, MultipleRowTestsSpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, OneWayAnovaSpec, OutlierSpec,
     PValueStackSpec, PassingBablokSpec, PowerAnalysisSpec, RocSpec, SimpleLogisticSpec, SplineLowessSpec, SurvivalAnalysisSpec, TableKind,
     TransformAnalysisSpec, TwoGroupSpec,
 };
@@ -55,6 +55,7 @@ fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
         (AnalysisKindId::PowerAnalysis, AnalysisKind::PowerAnalysis(PowerAnalysisSpec::default())),
         (AnalysisKindId::SimpleLogisticRegression, AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default())),
         (AnalysisKindId::FitSplineLowess, AnalysisKind::FitSplineLowess(SplineLowessSpec::default())),
+        (AnalysisKindId::LeveneTest, AnalysisKind::LeveneTest(LeveneTestSpec::default())),
     ]
 }
 

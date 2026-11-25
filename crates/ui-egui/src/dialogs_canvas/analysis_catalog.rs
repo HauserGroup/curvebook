@@ -2,9 +2,9 @@
 
 use curvebook_doc::{
     AnalysisKind, BaselineOperation, BlandAltmanSpec, ContingencySpec, CoxTieMethod, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec,
-    GlmFamily, GlmSpec, LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
-    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, RocSpec, SimpleLogisticSpec,
-    SplineLowessSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
+    GlmFamily, GlmSpec, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec,
+    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, RocSpec,
+    SimpleLogisticSpec, SplineLowessSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
 };
 
 use serde::{Deserialize, Serialize};
@@ -252,6 +252,13 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         summary: "Paired bias and 95% limits of agreement across two measurement methods.",
     },
     AnalysisCatalogItem {
+        id: "stats.levene",
+        label: "Levene / Brown-Forsythe Variance Test",
+        category: AnalysisCategory::Column,
+        keywords: "levene brown forsythe homogeneity equal variances variance test homoscedasticity spread median mean deviation",
+        summary: "Test whether the selected columns have equal variances (median-centered Brown-Forsythe or mean-centered Levene).",
+    },
+    AnalysisCatalogItem {
         id: "stats.passing_bablok",
         label: "Passing-Bablok Regression",
         category: AnalysisCategory::XyAndRegression,
@@ -386,6 +393,7 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
         "stats.pvalue_stack" => Some(AnalysisKind::PValueStack(PValueStackSpec::default())),
         "stats.power" => Some(AnalysisKind::PowerAnalysis(curvebook_doc::PowerAnalysisSpec::default())),
         "stats.simple_logistic" => Some(AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default())),
+        "stats.levene" => Some(AnalysisKind::LeveneTest(LeveneTestSpec::default())),
         _ => None,
     }
 }

@@ -776,6 +776,7 @@ fn analysis_spec_schema() -> SchemaNode {
             "LinearRegression",
             "NonlinearRegression",
             "PValueStack",
+            "LeveneTest",
         ]
         .into_iter()
         .map(|tag| (tag, kind_obj.clone()))

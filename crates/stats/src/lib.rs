@@ -45,6 +45,7 @@ pub mod roc;
 pub mod simple_logistic;
 pub mod survival;
 pub mod two_group;
+pub mod variance_homogeneity;
 
 use curvebook_doc::{AnalysisKind, AnalysisSpec, DataSheet, ResultSheet};
 
@@ -109,5 +110,6 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         AnalysisKind::PValueStack(ps) => pvalue_stack::run_pvalue_stack_analysis(sheet, spec, ps),
         AnalysisKind::PowerAnalysis(p) => power::run_power_analysis(sheet, spec, p),
         AnalysisKind::SimpleLogisticRegression(sl) => simple_logistic::run_simple_logistic_analysis(sheet, spec, sl),
+        AnalysisKind::LeveneTest(lt) => variance_homogeneity::run_levene_analysis(sheet, spec, lt),
     }
 }

@@ -1022,6 +1022,13 @@ fn apply_edit_draft_kind_field(working: &mut EditAnalysisParametersState, key: &
             _ => Ok(false),
         },
         AnalysisKind::PowerAnalysis(pa) => patch_power_spec(key, val, preset, pa),
+        AnalysisKind::LeveneTest(lt) => match key {
+            "center" | "levene_center" | "edit.levene.center" => {
+                lt.center = serde_json::from_value(val.clone()).map_err(|e| format!("invalid Levene `center` (expected `median` or `mean`): {e}"))?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
         AnalysisKind::FitSplineLowess(sp) => patch_spline_lowess_spec(key, val, sp),
         AnalysisKind::Multivariate(mv) => patch_multivariate_spec(key, val, mv),
         AnalysisKind::GeneralizedLinearModel(glm) => patch_glm_spec(key, val, glm),

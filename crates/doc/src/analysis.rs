@@ -588,6 +588,55 @@ impl Default for PValueStackSpec {
     }
 }
 
+/// Centre used for the absolute deviations `|x_ij - c_i|` in a standalone Levene-type
+/// homogeneity-of-variance test (`R19.2`; `crates/stats::variance_homogeneity`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum LeveneCenter {
+    /// Group mean `c_i = mean(x_i)` (Levene 1960; Olkin et al., *Contributions to Probability and Statistics*, pp. 278–292).
+    #[serde(alias = "mean", alias = "levene", alias = "levene_mean")]
+    Mean,
+    /// Group median `c_i = median(x_i)` (Brown & Forsythe 1974, *JASA* 69(346):364–367), robust to skewed
+    /// and heavy-tailed data and therefore the default.
+    #[default]
+    #[serde(alias = "median", alias = "brown_forsythe", alias = "levene_median")]
+    Median,
+}
+
+impl LeveneCenter {
+    /// Both centring choices in display order (default first).
+    pub const ALL: [Self; 2] = [Self::Median, Self::Mean];
+
+    /// Canonical method label for result tables, methods reports, and parameter dialogs.
+    #[must_use]
+    pub const fn method_label(self) -> &'static str {
+        match self {
+            Self::Mean => "Levene (mean-centered)",
+            Self::Median => "Brown-Forsythe (median-centered Levene)",
+        }
+    }
+
+    /// Short lowercase centre name (`"mean"` or `"median"`).
+    #[must_use]
+    pub const fn center_name(self) -> &'static str {
+        match self {
+            Self::Mean => "mean",
+            Self::Median => "median",
+        }
+    }
+}
+
+/// Standalone Levene / Brown–Forsythe homogeneity-of-variance test over the selected columns of a
+/// raw-replicate `Column` or `MultipleVariables` table (`R19.2`).
+///
+/// Each selected column is one group; the test is a one-way ANOVA *F* on `|x_ij - c_i|`
+/// (Levene 1960; Brown & Forsythe 1974).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct LeveneTestSpec {
+    /// Deviation centre (default [`LeveneCenter::Median`], the Brown–Forsythe variant).
+    #[serde(default)]
+    pub center: LeveneCenter,
+}
+
 /// Omnibus one-way comparison method across `k >= 2` groups (`crates/stats::anova`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum OneWayMethod {
@@ -2652,6 +2701,8 @@ pub enum AnalysisKind {
     PowerAnalysis(PowerAnalysisSpec),
     /// Standalone single-predictor binary logistic regression on `XY` tables ([`SimpleLogisticSpec`]).
     SimpleLogisticRegression(SimpleLogisticSpec),
+    /// Standalone Levene (mean-centered) or Brown–Forsythe (median-centered) homogeneity-of-variance test ([`LeveneTestSpec`]).
+    LeveneTest(LeveneTestSpec),
 }
 
 impl AnalysisKind {
@@ -2750,6 +2801,10 @@ impl AnalysisKind {
             Self::PValueStack(s) => format!("Analyze stack of P values ({})", s.method.label()),
             Self::PowerAnalysis(s) => s.derive_auto_title(),
             Self::SimpleLogisticRegression(_) => String::from("Simple logistic regression"),
+            Self::LeveneTest(s) => match s.center {
+                LeveneCenter::Mean => String::from("Levene's test (mean)"),
+                LeveneCenter::Median => String::from("Brown-Forsythe test (median)"),
+            },
         }
     }
 

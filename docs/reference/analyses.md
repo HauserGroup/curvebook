@@ -361,3 +361,19 @@ This reference documents every statistical, transformation, and regression `Anal
 - **Assumptions & QOL-7 diagnostics:** Emits a `Warn` checklist diagnostic when `Lowess` is run on $N < 20$ active observations (recommending Natural Cubic Spline, Akima Subspline, or Smoothing Spline for small samples).
 - **Edge cases & limits:** Collapses replicate/tied $X$ rows to `(x_g, mean y_g)` for spline/Akima/point-to-point and multiplicity-weighted means for Reinsch smoothing splines; rejects non-finite inputs, `< 2` distinct $X$ values, out-of-range spans/degrees of freedom, and non-`Xy` tables.
 - **Published D1 references & oracle verification:** de Boor (1978); Akima (1970); Reinsch (1967); Hutchinson & de Hoog (1985); Cleveland (1979); Brent (1973); verified against R `4.5.2` (`stats::splinefun(..., method="natural")`, `stats::smooth.spline`, `stats::lowess`) and analytical Akima step-overshoot oracles in `crates/transform/tests/d1_r18_7_spline_lowess.rs`.
+
+---
+
+## Levene / Brown–Forsythe Variance Test {#analysis-levene-test}
+
+- **Purpose & compatible tables:** Standalone test of the null hypothesis that the selected columns (groups) have equal population variances. Each selected column of a raw-replicate `Column` table (or each selected numeric variable of a `MultipleVariables` table) is one group; pre-summarized `Column` subcolumns are rejected because absolute deviations need individual replicates (see [Analysis Registry: `levene-test`](registry/tables.html#analysis-kind-levene-test)).
+- **Engine command & canonical options/defaults:** Run via [`analysis.run`](../commands.md) or `stats.run` with shorthands `levene` (canonical), `levene_test`, `stats.levene`, `levene_median`, `brown_forsythe_variance`, `brown_forsythe_levene`, `variance_homogeneity`, `equal_variance_test` (all median-centered), or `levene_mean` (mean-centered):
+  - `center` (`LeveneCenter`): `median` (default; Brown–Forsythe) or `mean` (Levene's original test).
+  - `selected_data_sets`: the columns to compare (empty means every column; on `MultipleVariables` tables, every numeric variable).
+- **Reported values:**
+  - `MainSummary` (`levene-summary`): method, centre, number of groups $k$, total $N$, $F$, $\text{DFn} = k - 1$, $\text{DFd} = N - k$, *P* value, and the decision at the analysis alpha.
+  - `DescriptiveSummary` (`levene-groups`): per-group $n$, centre (median or mean), mean absolute deviation, and SD.
+  - Scalars: `F`, `DFn`, `DFd`, `P value`, `Groups`, `Total N`, and per-group `N`, `Center`, `Mean abs deviation` (keyed by column index).
+- **Assumptions & QOL-7 diagnostics:** Checklist reports the decision (variances differ vs. equal variances not rejected), warns when any group has fewer than five values, notes that mean-centered deviations are sensitive to skewed data, and lists excluded and ignored text or non-finite cells.
+- **Edge cases & limits:** Fewer than two groups or any group with $n < 2$ returns `InsufficientSampleSize`; zero within-group spread of the absolute deviations (for example constant groups, or every group of size two) returns `ZeroVariance` instead of an undefined $F$; non-`Column`/`MultipleVariables` tables return `IncompatibleTable`; blank, excluded, text, and non-finite cells are not observations.
+- **Published D1 references & oracle verification:** Levene (1960); Brown & Forsythe (1974); Zar (2010, ch. 10); verified through `Session::execute` in `crates/engine/tests/r19_2_levene_engine.rs` against `scipy.stats.levene` (SciPy 1.18.1) and R 4.5.2 `anova(lm(|x - c| ~ g))` reference values, matching the stats-level oracles in `d1_extended_stats_oracles.rs`.

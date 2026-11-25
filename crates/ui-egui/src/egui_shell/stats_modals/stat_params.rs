@@ -294,6 +294,9 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
         AnalysisKind::FitSplineLowess(sp) => {
             (String::from("Parameters: Fit Spline / LOWESS Curve"), format!("{} ({} vertices)", sp.method.label(), sp.segment_count))
         }
+        AnalysisKind::LeveneTest(lt) => {
+            (String::from("Parameters: Levene / Brown-Forsythe Variance Test"), format!("{} (α={alpha:.3})", lt.center.method_label()))
+        }
         _ => (String::from("Parameters: Analysis"), format!("{} (α={alpha:.3})", spec.effective_title())),
     }
 }

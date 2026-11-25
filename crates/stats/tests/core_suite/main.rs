@@ -13,6 +13,7 @@ mod r017_lilliefors_oracles;
 mod r1010_pvalue_stack_oracles;
 mod r1011_cld_piepho_oracles;
 mod r13_2_survival_group_exclusion;
+mod r19_2_levene_edge_cases;
 mod r34_unstructured_reml_oracles;
 mod r35_anova_reml_oracles;
 mod r35_power_multiplicity_oracles;

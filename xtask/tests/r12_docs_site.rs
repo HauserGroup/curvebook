@@ -464,6 +464,7 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
         "power-analysis",
         "simple-logistic-regression",
         "fit-spline-lowess",
+        "levene-test",
     ] {
         analyses_md.push_str(&format!("## {slug} {{#analysis-{slug}}}\n\nReference details.\n\n"));
     }
