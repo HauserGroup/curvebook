@@ -2,9 +2,7 @@
 //!
 //! Covers:
 //! 1. Exhaustive valid execution of every `CommandSpec` in `curvebook_engine::cmd::registry()`.
-//! 2. Exhaustive hostile/malformed-input sweep across every `CommandSpec` (wrong types,
-//!    non-finite/`NaN` strings, `u64::MAX` indices, nonexistent sheets, cyclic links/formulas,
-//!    frozen sheet protections, malformed archives/XML/CSV).
+//! 2. Exhaustive hostile/malformed-input sweep across every `CommandSpec`.
 //! 3. `proptest!` arbitrary corrupt JSON fuzzing across all registered commands.
 //! 4. `proptest!` random multi-step command sequences verifying zero internal panics, strict
 //!    transactional rollback on error, and exact `ProjectDocument` undo/redo equality.
@@ -13,22 +11,20 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use curvebook_doc::{InfoSheet, ProjectDocument, TableKind};
+use curvebook_doc::{Cell, ColumnDesignHint, InfoSheet, ProjectDocument, TableKind, VariableRole};
 use curvebook_engine::cmd;
 use curvebook_engine::{CommandOutcome, EngineError, Session};
 use proptest::collection::vec;
 use proptest::prelude::TestCaseError;
-use proptest::prop_assert;
-use proptest::prop_assert_eq;
-use proptest::proptest;
 use proptest::strategy::{BoxedStrategy, Just, Strategy};
+use proptest::{prop_assert, prop_assert_eq, proptest};
 use serde_json::{Value, json};
 
-use super::common::unique_temp_path as next_temp_file;
+use super::common::{TempDir, col_sheet, col_sheet_opts, encode_base64, mv_sheet, unique_temp_path as next_temp_file, xy_sheet};
 
 fn check_no_panic(command_id: &str, res: &Result<CommandOutcome, EngineError>) {
     if let Err(err) = res {
-        assert!(!err.message().contains("recovered from internal panic"), "command `{command_id}` triggered an internal panic: {}", err.message());
+        assert!(!err.message().contains("recovered from internal panic"), "command `{command_id}` panicked: {}", err.message());
     }
 }
 
@@ -37,219 +33,75 @@ fn execute_checked(session: &mut Session, command_id: &str, params: Value) -> Re
     let res = session.execute(command_id, params);
     check_no_panic(command_id, &res);
     if let Err(ref err) = res {
-        assert_eq!(session.document(), before.document(), "failed command `{command_id}` mutated ProjectDocument: {}", err.message());
-        assert_eq!(session, &before, "failed command `{command_id}` mutated Session state: {}", err.message());
+        assert_eq!(session.document(), before.document(), "failed `{command_id}` mutated doc: {}", err.message());
+        assert_eq!(session, &before, "failed `{command_id}` mutated Session: {}", err.message());
     }
     res
 }
 
 fn run_valid(session: &mut Session, covered: &mut BTreeSet<&'static str>, command_id: &'static str, params: Value) -> Result<CommandOutcome, String> {
     covered.insert(command_id);
-    let outcome = execute_checked(session, command_id, params).map_err(|err| format!("valid sweep command `{command_id}` failed: {err}"))?;
+    let outcome = execute_checked(session, command_id, params).map_err(|err| format!("valid sweep `{command_id}` failed: {err}"))?;
     assert_eq!(outcome.command_id, command_id);
     Ok(outcome)
 }
 
+fn run_valid_batch(session: &mut Session, covered: &mut BTreeSet<&'static str>, cmds: &[(&'static str, Value)]) -> Result<(), String> {
+    for (id, params) in cmds {
+        run_valid(session, covered, id, params.clone())?;
+    }
+    Ok(())
+}
+
 fn seed_rich_fixture() -> Result<Session, String> {
     let mut doc = ProjectDocument::new("Sweep Fixture").map_err(|e| e.to_string())?;
-    let info = InfoSheet::new_preseeded("info-1", "Experiment Info").map_err(|e| e.to_string())?;
-    doc.add_info_sheet(info).map_err(|e| e.to_string())?;
+    doc.add_info_sheet(InfoSheet::new_preseeded("info-1", "Experiment Info").map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    for sheet in [
+        xy_sheet(
+            "xy-1",
+            "Dose Response",
+            "X",
+            &[0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0],
+            &[("A", &[98.0, 85.0, 52.0, 21.0, 8.0, 4.0]), ("B", &[100.0, 90.0, 60.0, 30.0, 12.0, 6.0])],
+        ),
+        col_sheet("col-1", "Column Groups", &[("A", &[10.0, 12.0, 11.0, 13.0]), ("B", &[24.0, 26.0, 25.0, 27.0]), ("C", &[40.0, 42.0, 41.0, 43.0])]),
+        col_sheet_opts(
+            "col-2",
+            "Column Retarget",
+            ColumnDesignHint::UnpairedReplicates,
+            &[
+                ("A", &[Some(5.0), Some(6.0), Some(7.0), None]),
+                ("B", &[Some(15.0), Some(16.0), Some(17.0), None]),
+                ("C", &[Some(25.0), Some(26.0), Some(27.0), None]),
+            ],
+        ),
+        mv_sheet(
+            "mv-1",
+            "Cohort Table",
+            &[],
+            &[
+                ("Cohort", Some(VariableRole::Categorical), &[Cell::text("Low"), Cell::text("High"), Cell::text("Low")]),
+                ("Score", Some(VariableRole::Continuous), &[Cell::number(10.0), Cell::number(20.0), Cell::number(30.0)]),
+                ("Scaled", Some(VariableRole::Continuous), &[]),
+            ],
+        ),
+    ] {
+        doc.add_data_sheet(sheet).map_err(|e| e.to_string())?;
+    }
     let mut s = Session::from_document(doc);
-    let setup: [(&str, Value); 16] = [
+    for (cmd_id, params) in [
         (
             "sheet.createData",
-            json!({
-                "sheet_id": "xy-1",
-                "title": "Dose Response",
-                "archetype": "xy",
-                "cols": 2,
-                "rows": 6
-            }),
+            json!({ "sheet_id": "nested-1", "title": "Nested Plates", "archetype": "nested", "cols": 2, "rows": 3, "replicates": 2 }),
         ),
-        (
-            "table.setXCells",
-            json!({
-                "sheet_id": "xy-1",
-                "edits": [
-                    { "row": 0, "value": 0.1 },
-                    { "row": 1, "value": 1.0 },
-                    { "row": 2, "value": 10.0 },
-                    { "row": 3, "value": 100.0 },
-                    { "row": 4, "value": 1000.0 },
-                    { "row": 5, "value": 10000.0 }
-                ]
-            }),
-        ),
-        (
-            "table.setCells",
-            json!({
-                "sheet_id": "xy-1",
-                "edits": [
-                    { "row": 0, "col": 0, "value": 98.0 },
-                    { "row": 1, "col": 0, "value": 85.0 },
-                    { "row": 2, "col": 0, "value": 52.0 },
-                    { "row": 3, "col": 0, "value": 21.0 },
-                    { "row": 4, "col": 0, "value": 8.0 },
-                    { "row": 5, "col": 0, "value": 4.0 },
-                    { "row": 0, "col": 1, "value": 100.0 },
-                    { "row": 1, "col": 1, "value": 90.0 },
-                    { "row": 2, "col": 1, "value": 60.0 },
-                    { "row": 3, "col": 1, "value": 30.0 },
-                    { "row": 4, "col": 1, "value": 12.0 },
-                    { "row": 5, "col": 1, "value": 6.0 }
-                ]
-            }),
-        ),
-        (
-            "sheet.createData",
-            json!({
-                "sheet_id": "col-1",
-                "title": "Column Groups",
-                "archetype": "column",
-                "cols": 3,
-                "rows": 4
-            }),
-        ),
-        (
-            "table.setCells",
-            json!({
-                "sheet_id": "col-1",
-                "edits": [
-                    { "row": 0, "col": 0, "value": 10.0 },
-                    { "row": 1, "col": 0, "value": 12.0 },
-                    { "row": 2, "col": 0, "value": 11.0 },
-                    { "row": 3, "col": 0, "value": 13.0 },
-                    { "row": 0, "col": 1, "value": 24.0 },
-                    { "row": 1, "col": 1, "value": 26.0 },
-                    { "row": 2, "col": 1, "value": 25.0 },
-                    { "row": 3, "col": 1, "value": 27.0 },
-                    { "row": 0, "col": 2, "value": 40.0 },
-                    { "row": 1, "col": 2, "value": 42.0 },
-                    { "row": 2, "col": 2, "value": 41.0 },
-                    { "row": 3, "col": 2, "value": 43.0 }
-                ]
-            }),
-        ),
-        (
-            "sheet.createData",
-            json!({
-                "sheet_id": "col-2",
-                "title": "Column Retarget",
-                "archetype": "column",
-                "cols": 3,
-                "rows": 4
-            }),
-        ),
-        (
-            "table.setCells",
-            json!({
-                "sheet_id": "col-2",
-                "edits": [
-                    { "row": 0, "col": 0, "value": 5.0 },
-                    { "row": 1, "col": 0, "value": 6.0 },
-                    { "row": 2, "col": 0, "value": 7.0 },
-                    { "row": 0, "col": 1, "value": 15.0 },
-                    { "row": 1, "col": 1, "value": 16.0 },
-                    { "row": 2, "col": 1, "value": 17.0 },
-                    { "row": 0, "col": 2, "value": 25.0 },
-                    { "row": 1, "col": 2, "value": 26.0 },
-                    { "row": 2, "col": 2, "value": 27.0 }
-                ]
-            }),
-        ),
-        (
-            "sheet.createData",
-            json!({
-                "sheet_id": "nested-1",
-                "title": "Nested Plates",
-                "archetype": "nested",
-                "cols": 2,
-                "rows": 3,
-                "replicates": 2
-            }),
-        ),
-        (
-            "sheet.createData",
-            json!({
-                "sheet_id": "mv-1",
-                "title": "Cohort Table",
-                "archetype": "multiple_variables",
-                "cols": 3,
-                "rows": 3,
-                "variables": [
-                    { "title": "Cohort", "role": "Categorical" },
-                    { "title": "Score", "role": "Continuous" },
-                    { "title": "Scaled", "role": "Continuous" }
-                ]
-            }),
-        ),
-        (
-            "table.setCells",
-            json!({
-                "sheet_id": "mv-1",
-                "edits": [
-                    { "row": 0, "col": 0, "value": "Low" },
-                    { "row": 1, "col": 0, "value": "High" },
-                    { "row": 2, "col": 0, "value": "Low" },
-                    { "row": 0, "col": 1, "value": 10.0 },
-                    { "row": 1, "col": 1, "value": 20.0 },
-                    { "row": 2, "col": 1, "value": 30.0 }
-                ]
-            }),
-        ),
-        (
-            "sheet.createData",
-            json!({
-                "sheet_id": "xy-dest",
-                "title": "XY Scratch",
-                "archetype": "xy",
-                "cols": 2,
-                "rows": 6
-            }),
-        ),
-        (
-            "transform.run",
-            json!({
-                "sheet_id": "res-xform-seed",
-                "source_sheet_id": "xy-1",
-                "kind": "normalize"
-            }),
-        ),
-        (
-            "stats.run",
-            json!({
-                "sheet_id": "res-anova-seed",
-                "source_sheet_id": "col-1",
-                "kind": "one_way_anova"
-            }),
-        ),
-        (
-            "fit.run",
-            json!({
-                "sheet_id": "res-fit-seed",
-                "source_sheet_id": "xy-1",
-                "kind": "linear_regression"
-            }),
-        ),
-        (
-            "graph.create",
-            json!({
-                "sheet_id": "gr-seed",
-                "data_sheet_id": "col-1",
-                "kind": "column"
-            }),
-        ),
-        (
-            "graph.create",
-            json!({
-                "sheet_id": "gr-uninit",
-                "data_sheet_id": "xy-1",
-                "initialized": false
-            }),
-        ),
-    ];
-    for (cmd, params) in setup {
-        execute_checked(&mut s, cmd, params).map_err(|err| format!("fixture setup `{cmd}` failed: {err}"))?;
+        ("sheet.createData", json!({ "sheet_id": "xy-dest", "title": "XY Scratch", "archetype": "xy", "cols": 2, "rows": 6 })),
+        ("transform.run", json!({ "sheet_id": "res-xform-seed", "source_sheet_id": "xy-1", "kind": "normalize" })),
+        ("stats.run", json!({ "sheet_id": "res-anova-seed", "source_sheet_id": "col-1", "kind": "one_way_anova" })),
+        ("fit.run", json!({ "sheet_id": "res-fit-seed", "source_sheet_id": "xy-1", "kind": "linear_regression" })),
+        ("graph.create", json!({ "sheet_id": "gr-seed", "data_sheet_id": "col-1", "kind": "column" })),
+        ("graph.create", json!({ "sheet_id": "gr-uninit", "data_sheet_id": "xy-1", "initialized": false })),
+    ] {
+        execute_checked(&mut s, cmd_id, params).map_err(|err| format!("fixture setup `{cmd_id}` failed: {err}"))?;
     }
     Ok(s)
 }
@@ -259,11 +111,8 @@ fn sweep_every_catalog_command_valid_realistic_params() -> Result<(), String> {
     let mut s = seed_rich_fixture()?;
     let mut covered = BTreeSet::new();
 
-    // Mark setup commands that we will also explicitly invoke here for crystal clarity.
-    sweep_valid_sheet_commands(&mut s, &mut covered)?;
-    sweep_valid_table_commands(&mut s, &mut covered)?;
-    sweep_valid_info_and_analysis_commands(&mut s, &mut covered)?;
-    sweep_valid_graph_and_layout_commands(&mut s, &mut covered)?;
+    sweep_valid_sheet_and_table_commands(&mut s, &mut covered)?;
+    sweep_valid_info_analysis_and_graph_commands(&mut s, &mut covered)?;
     sweep_valid_export_and_project_commands(&mut s, &mut covered)?;
 
     let registry_ids: BTreeSet<&'static str> = cmd::registry().specs().map(|s| s.id).collect();
@@ -271,521 +120,247 @@ fn sweep_every_catalog_command_valid_realistic_params() -> Result<(), String> {
     Ok(())
 }
 
-fn sweep_valid_sheet_commands(s: &mut Session, covered: &mut BTreeSet<&'static str>) -> Result<(), String> {
-    run_valid(
+fn sweep_valid_sheet_and_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static str>) -> Result<(), String> {
+    let plate_roles: Vec<Value> = (0..96_usize)
+        .map(|i| match i {
+            0..=1 => json!("Blank"),
+            2..=5 => json!({ "role": "treatment", "group_name": "Dose", "dilution_x": ((i - 2) / 2 + 1) as f64, "replicate": ((i - 2) % 2) + 1 }),
+            _ => json!("Excluded"),
+        })
+        .collect();
+
+    run_valid_batch(
         s,
         covered,
-        "sheet.createData",
-        json!({
-            "sheet_id": "xy-extra",
-            "title": "Extra XY",
-            "archetype": "xy",
-            "cols": 1,
-            "rows": 3
-        }),
-    )?;
-    run_valid(s, covered, "sheet.rename", json!({ "sheet_id": "xy-extra", "title": "Extra XY Renamed" }))?;
-    run_valid(s, covered, "sheet.duplicate", json!({ "sheet_id": "xy-extra", "new_sheet_id": "xy-dup", "title": "Duplicated XY" }))?;
-    run_valid(s, covered, "sheet.duplicateFamily", json!({ "sheet_id": "xy-1", "prefix": "fam", "clear_data": false }))?;
-    run_valid(s, covered, "sheet.clonePipeline", json!({ "sheet_id": "col-1", "prefix": "pipe", "clear_data": false }))?;
-    run_valid(s, covered, "sheet.freeze", json!({ "sheet_id": "xy-dup" }))?;
-    run_valid(s, covered, "sheet.unfreeze", json!({ "sheet_id": "xy-dup" }))?;
-    run_valid(s, covered, "sheet.reorder", json!({ "sheet_id": "xy-extra", "index": 0 }))?;
-    run_valid(s, covered, "sheet.select", json!({ "sheet_id": "xy-1" }))?;
-    run_valid(s, covered, "sheet.delete", json!({ "sheet_id": "xy-dup", "cascade": false }))?;
-    run_valid(
-        s,
-        covered,
-        "sheet.extractResultTab",
-        json!({ "result_sheet_id": "res-fit-seed", "sheet_id": "res-tab-sweep", "archetype": "column" }),
-    )?;
-    Ok(())
+        &[
+            ("sheet.createData", json!({ "sheet_id": "xy-extra", "title": "Extra XY", "archetype": "xy", "cols": 1, "rows": 3 })),
+            ("sheet.rename", json!({ "sheet_id": "xy-extra", "title": "Extra XY Renamed" })),
+            ("sheet.duplicate", json!({ "sheet_id": "xy-extra", "new_sheet_id": "xy-dup", "title": "Duplicated XY" })),
+            ("sheet.duplicateFamily", json!({ "sheet_id": "xy-1", "prefix": "fam", "clear_data": false })),
+            ("sheet.clonePipeline", json!({ "sheet_id": "col-1", "prefix": "pipe", "clear_data": false })),
+            ("sheet.freeze", json!({ "sheet_id": "xy-dup" })),
+            ("sheet.unfreeze", json!({ "sheet_id": "xy-dup" })),
+            ("sheet.reorder", json!({ "sheet_id": "xy-extra", "index": 0 })),
+            ("sheet.select", json!({ "sheet_id": "xy-1" })),
+            ("sheet.delete", json!({ "sheet_id": "xy-dup", "cascade": false })),
+            ("sheet.extractResultTab", json!({ "result_sheet_id": "res-fit-seed", "sheet_id": "res-tab-sweep", "archetype": "column" })),
+            ("table.setCell", json!({ "sheet_id": "xy-extra", "row": 0, "col": 0, "value": 42.0 })),
+            ("table.setCells", json!({ "sheet_id": "xy-extra", "edits": [{ "row": 1, "col": 0, "value": 84.0 }] })),
+            ("table.setXCells", json!({ "sheet_id": "xy-extra", "edits": [{ "row": 0, "value": 1.0 }, { "row": 1, "value": 2.0 }] })),
+            ("table.setRowTitles", json!({ "sheet_id": "xy-extra", "titles": ["Row A", "Row B"] })),
+            ("table.setGroupTitles", json!({ "sheet_id": "xy-extra", "titles": ["Series One"] })),
+            ("table.setTitles", json!({ "sheet_id": "xy-extra", "x_title": "Time", "titles": ["Signal"] })),
+            ("table.setSubcolumnTitles", json!({ "sheet_id": "nested-1", "col": 0, "titles": ["Rep 1", "Rep 2"] })),
+            ("table.excludeCells", json!({ "sheet_id": "xy-extra", "cells": [{ "row": 1, "col": 0 }], "excluded": true })),
+            (
+                "table.excludeCellsWithReason",
+                json!({ "sheet_id": "xy-extra", "coords": [{ "row": 0, "col": 0 }], "reason_tag": "outlier", "note": "sweep exclusion" }),
+            ),
+            ("table.exclusionAuditReport", json!({ "sheet_id": "xy-extra" })),
+            ("table.clearCells", json!({ "sheet_id": "xy-extra", "row_start": 0, "row_end": 0, "col_start": 0, "col_end": 0 })),
+            ("table.paste", json!({ "sheet_id": "xy-dest", "start_row": 0, "start_col": 0, "rows": [[1.0, 2.0], [3.0, 4.0]] })),
+            (
+                "table.pasteLink",
+                json!({ "target_sheet_id": "xy-dest", "source_sheet_id": "xy-1", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } }, "start_row": 2, "start_col": 0 }),
+            ),
+            ("table.importCsv", json!({ "sheet_id": "csv-1", "title": "CSV Import", "archetype": "column", "csv": "Ctrl,Drug\n10,20\n12,24\n" })),
+            ("table.exportCsv", json!({ "sheet_id": "xy-1" })),
+            ("table.setVariableRole", json!({ "sheet_id": "mv-1", "col": 0, "role": "Categorical" })),
+            ("table.recodeLevels", json!({ "sheet_id": "mv-1", "col": 0, "mappings": { "Low": "Control" } })),
+            ("table.setCategoricalOrder", json!({ "sheet_id": "mv-1", "col": 0, "order": ["Control", "High"] })),
+            ("table.setCalculatedVariable", json!({ "sheet_id": "mv-1", "col": 2, "title": "Scaled", "formula": "= [Score] * 2" })),
+            (
+                "table.simulateXy",
+                json!({ "sheet_id": "sim-1", "row_count": 6, "replicates": 1, "x_min": 0.0, "x_max": 5.0, "equation_id": "linear", "parameters": { "slope": 2.0, "intercept": 1.0 }, "seed": 7 }),
+            ),
+            ("table.convertArchetype", json!({ "sheet_id": "csv-1", "target_kind": "Grouped", "allow_lossy": true })),
+            (
+                "table.importPlateMap",
+                json!({ "sheet_id": "plate-1", "title": "Plate 96", "geometry": "Wells96", "values": vec![10.0_f64; 96], "roles": plate_roles, "subtract_blank_mean": true }),
+            ),
+            (
+                "table.importTidyLong",
+                json!({ "sheet_id": "tidy-1", "title": "Tidy Long", "csv": "Group,Value\nCtrl,10\nCtrl,12\nDrug,20\nDrug,22\n", "mapping": { "group_col": "Group", "value_col": "Value" } }),
+            ),
+            (
+                "table.randomizeGroups",
+                json!({ "sheet_id": "rand-1", "groups": [{ "label": "Vehicle", "weight": 1 }, { "label": "Drug", "weight": 1 }], "subject_count": 8, "scheme": "permuted_block", "block_sizes": [4], "seed": 17 }),
+            ),
+            ("table.randomSampleRows", json!({ "sheet_id": "sample-1", "source_sheet_id": "tidy-1", "sample_size": 2, "seed": 19 })),
+            (
+                "table.simulateDistributions",
+                json!({ "sheet_id": "dist-1", "n_rows": 8, "seed": 23, "columns": [{ "name": "Unif", "distribution": "uniform", "min": 0.0, "max": 1.0 }, { "name": "Norm", "distribution": "gaussian", "mean": 5.0, "sd": 1.5 }] }),
+            ),
+        ],
+    )
 }
 
-fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static str>) -> Result<(), String> {
-    run_valid(s, covered, "table.setCell", json!({ "sheet_id": "xy-extra", "row": 0, "col": 0, "value": 42.0 }))?;
-    run_valid(
-        s,
-        covered,
-        "table.setCells",
-        json!({
-            "sheet_id": "xy-extra",
-            "edits": [{ "row": 1, "col": 0, "value": 84.0 }]
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "table.setXCells",
-        json!({
-            "sheet_id": "xy-extra",
-            "edits": [{ "row": 0, "value": 1.0 }, { "row": 1, "value": 2.0 }]
-        }),
-    )?;
-    run_valid(s, covered, "table.setRowTitles", json!({ "sheet_id": "xy-extra", "titles": ["Row A", "Row B"] }))?;
-    run_valid(s, covered, "table.setGroupTitles", json!({ "sheet_id": "xy-extra", "titles": ["Series One"] }))?;
-    run_valid(s, covered, "table.setTitles", json!({ "sheet_id": "xy-extra", "x_title": "Time", "titles": ["Signal"] }))?;
-    run_valid(s, covered, "table.setSubcolumnTitles", json!({ "sheet_id": "nested-1", "col": 0, "titles": ["Rep 1", "Rep 2"] }))?;
-    run_valid(s, covered, "table.excludeCells", json!({ "sheet_id": "xy-extra", "cells": [{ "row": 1, "col": 0 }], "excluded": true }))?;
-    run_valid(
-        s,
-        covered,
-        "table.excludeCellsWithReason",
-        json!({ "sheet_id": "xy-extra", "coords": [{ "row": 0, "col": 0 }], "reason_tag": "outlier", "note": "sweep exclusion" }),
-    )?;
-    run_valid(s, covered, "table.exclusionAuditReport", json!({ "sheet_id": "xy-extra" }))?;
-    run_valid(
-        s,
-        covered,
-        "table.clearCells",
-        json!({
-            "sheet_id": "xy-extra",
-            "row_start": 0,
-            "row_end": 0,
-            "col_start": 0,
-            "col_end": 0
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "table.paste",
-        json!({
-            "sheet_id": "xy-dest",
-            "start_row": 0,
-            "start_col": 0,
-            "rows": [[1.0, 2.0], [3.0, 4.0]]
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "table.pasteLink",
-        json!({
-            "target_sheet_id": "xy-dest",
-            "source_sheet_id": "xy-1",
-            "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } },
-            "start_row": 2,
-            "start_col": 0
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "table.importCsv",
-        json!({
-            "sheet_id": "csv-1",
-            "title": "CSV Import",
-            "archetype": "column",
-            "csv": "Ctrl,Drug\n10,20\n12,24\n"
-        }),
-    )?;
-    run_valid(s, covered, "table.exportCsv", json!({ "sheet_id": "xy-1" }))?;
-    run_valid(s, covered, "table.setVariableRole", json!({ "sheet_id": "mv-1", "col": 0, "role": "Categorical" }))?;
-    run_valid(s, covered, "table.recodeLevels", json!({ "sheet_id": "mv-1", "col": 0, "mappings": { "Low": "Control" } }))?;
-    run_valid(s, covered, "table.setCategoricalOrder", json!({ "sheet_id": "mv-1", "col": 0, "order": ["Control", "High"] }))?;
-    run_valid(
-        s,
-        covered,
-        "table.setCalculatedVariable",
-        json!({
-            "sheet_id": "mv-1",
-            "col": 2,
-            "title": "Scaled",
-            "formula": "= [Score] * 2"
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "table.simulateXy",
-        json!({
-            "sheet_id": "sim-1",
-            "row_count": 6,
-            "replicates": 1,
-            "x_min": 0.0,
-            "x_max": 5.0,
-            "equation_id": "linear",
-            "parameters": { "slope": 2.0, "intercept": 1.0 },
-            "seed": 7
-        }),
-    )?;
-    run_valid(s, covered, "table.convertArchetype", json!({ "sheet_id": "csv-1", "target_kind": "Grouped", "allow_lossy": true }))?;
-    let plate_values = vec![10.0_f64; 96];
-    let mut plate_roles = Vec::with_capacity(96);
-    for idx in 0..96_usize {
-        if idx < 2 {
-            plate_roles.push(json!("Blank"));
-        } else if idx < 6 {
-            let offset = idx - 2;
-            plate_roles.push(json!({
-                "role": "treatment",
-                "group_name": "Dose",
-                "dilution_x": (offset / 2 + 1) as f64,
-                "replicate": (offset % 2) + 1
-            }));
-        } else {
-            plate_roles.push(json!("Excluded"));
-        }
-    }
-    run_valid(
-        s,
-        covered,
-        "table.importPlateMap",
-        json!({
-            "sheet_id": "plate-1",
-            "title": "Plate 96",
-            "geometry": "Wells96",
-            "values": plate_values,
-            "roles": plate_roles,
-            "subtract_blank_mean": true
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "table.importTidyLong",
-        json!({
-            "sheet_id": "tidy-1",
-            "title": "Tidy Long",
-            "csv": "Group,Value\nCtrl,10\nCtrl,12\nDrug,20\nDrug,22\n",
-            "mapping": { "group_col": "Group", "value_col": "Value" }
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "table.randomizeGroups",
-        json!({
-            "sheet_id": "rand-1",
-            "groups": [{ "label": "Vehicle", "weight": 1 }, { "label": "Drug", "weight": 1 }],
-            "subject_count": 8,
-            "scheme": "permuted_block",
-            "block_sizes": [4],
-            "seed": 17
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "table.randomSampleRows",
-        json!({
-            "sheet_id": "sample-1",
-            "source_sheet_id": "tidy-1",
-            "sample_size": 2,
-            "seed": 19
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "table.simulateDistributions",
-        json!({
-            "sheet_id": "dist-1",
-            "n_rows": 8,
-            "seed": 23,
-            "columns": [
-                { "name": "Unif", "distribution": "uniform", "min": 0.0, "max": 1.0 },
-                { "name": "Norm", "distribution": "gaussian", "mean": 5.0, "sd": 1.5 }
-            ]
-        }),
-    )?;
-    Ok(())
-}
-
-fn sweep_valid_info_and_analysis_commands(s: &mut Session, covered: &mut BTreeSet<&'static str>) -> Result<(), String> {
-    let info_id = s.document().info_sheets.first().ok_or_else(|| String::from("missing info sheet"))?.id.as_str().to_string();
-    run_valid(s, covered, "info.setNote", json!({ "sheet_id": info_id, "text": "Baseline experimental log" }))?;
-    run_valid(s, covered, "info.setConstant", json!({ "sheet_id": info_id, "name": "TempC", "value": 37.0 }))?;
-    run_valid(s, covered, "info.removeConstant", json!({ "sheet_id": info_id, "name": "TempC" }))?;
-
-    run_valid(s, covered, "analyze.run", json!({ "sheet_id": "res-desc", "source_sheet_id": "col-1", "kind": "descriptive_stats" }))?;
-    run_valid(s, covered, "transform.run", json!({ "sheet_id": "res-xform", "source_sheet_id": "xy-1", "kind": "normalize" }))?;
-    run_valid(s, covered, "stats.run", json!({ "sheet_id": "res-anova", "source_sheet_id": "col-1", "kind": "one_way_anova" }))?;
+fn sweep_valid_info_analysis_and_graph_commands(s: &mut Session, covered: &mut BTreeSet<&'static str>) -> Result<(), String> {
+    let info_id = s.document().info_sheets.first().ok_or_else(|| String::from("missing info sheet"))?.id.as_str().to_owned();
     execute_checked(s, "sheet.createData", json!({ "sheet_id": "pval-1", "title": "P Stack", "archetype": "column", "cols": 1, "rows": 4 }))
         .map_err(|e| e.to_string())?;
     execute_checked(
         s,
         "table.setCells",
-        json!({
-            "sheet_id": "pval-1",
-            "edits": [
-                { "row": 0, "col": 0, "value": 0.001 },
-                { "row": 1, "col": 0, "value": 0.02 },
-                { "row": 2, "col": 0, "value": 0.04 },
-                { "row": 3, "col": 0, "value": 0.50 }
-            ]
-        }),
+        json!({ "sheet_id": "pval-1", "edits": [{ "row": 0, "col": 0, "value": 0.001 }, { "row": 1, "col": 0, "value": 0.02 }, { "row": 2, "col": 0, "value": 0.04 }, { "row": 3, "col": 0, "value": 0.50 }] }),
     )
     .map_err(|e| e.to_string())?;
-    run_valid(
-        s,
-        covered,
-        "stats.pvalueStack",
-        json!({ "sheet_id": "res-pstack", "source_sheet_id": "pval-1", "method": "benjamini_hochberg", "threshold": 0.05 }),
-    )?;
-    run_valid(s, covered, "fit.run", json!({ "sheet_id": "res-fit", "source_sheet_id": "xy-1", "kind": "linear_regression" }))?;
-    run_valid(s, covered, "analysis.add", json!({ "sheet_id": "res-ba", "source_sheet_id": "col-1", "kind": "stats.bland_altman" }))?;
-    run_valid(s, covered, "analysis.run", json!({ "sheet_id": "res-col", "source_sheet_id": "col-1", "kind": "descriptive_stats" }))?;
-    run_valid(s, covered, "analysis.updateParams", json!({ "sheet_id": "res-anova", "confidence_percent": 99.0 }))?;
-    run_valid(s, covered, "analysis.retargetData", json!({ "sheet_id": "res-anova", "source_sheet_id": "col-2" }))?;
-    run_valid(s, covered, "analysis.exportJson", json!({ "sheet_id": "res-anova" }))?;
-    run_valid(s, covered, "analysis.exportCsv", json!({ "sheet_id": "res-anova" }))?;
-    run_valid(s, covered, "result.generateReport", json!({ "result_sheet_id": "res-anova", "format": "markdown" }))?;
-    Ok(())
-}
 
-fn sweep_valid_graph_and_layout_commands(s: &mut Session, covered: &mut BTreeSet<&'static str>) -> Result<(), String> {
-    run_valid(s, covered, "graph.create", json!({ "sheet_id": "gr-1", "data_sheet_id": "xy-1", "kind": "xy" }))?;
-    run_valid(s, covered, "graph.create", json!({ "sheet_id": "gr-col", "data_sheet_id": "col-2", "initialized": false }))?;
-    run_valid(
+    run_valid_batch(
         s,
         covered,
-        "graph.initialize",
-        json!({
-            "sheet_id": "gr-col",
-            "kind": "column",
-            "title": "Column Summary"
-        }),
+        &[
+            ("info.setNote", json!({ "sheet_id": info_id, "text": "Baseline experimental log" })),
+            ("info.setConstant", json!({ "sheet_id": info_id, "name": "TempC", "value": 37.0 })),
+            ("info.removeConstant", json!({ "sheet_id": info_id, "name": "TempC" })),
+            ("analyze.run", json!({ "sheet_id": "res-desc", "source_sheet_id": "col-1", "kind": "descriptive_stats" })),
+            ("transform.run", json!({ "sheet_id": "res-xform", "source_sheet_id": "xy-1", "kind": "normalize" })),
+            ("stats.run", json!({ "sheet_id": "res-anova", "source_sheet_id": "col-1", "kind": "one_way_anova" })),
+            (
+                "stats.pvalueStack",
+                json!({ "sheet_id": "res-pstack", "source_sheet_id": "pval-1", "method": "benjamini_hochberg", "threshold": 0.05 }),
+            ),
+            ("fit.run", json!({ "sheet_id": "res-fit", "source_sheet_id": "xy-1", "kind": "linear_regression" })),
+            ("analysis.add", json!({ "sheet_id": "res-ba", "source_sheet_id": "col-1", "kind": "stats.bland_altman" })),
+            ("analysis.run", json!({ "sheet_id": "res-col", "source_sheet_id": "col-1", "kind": "descriptive_stats" })),
+            ("analysis.updateParams", json!({ "sheet_id": "res-anova", "confidence_percent": 99.0 })),
+            ("analysis.retargetData", json!({ "sheet_id": "res-anova", "source_sheet_id": "col-2" })),
+            ("analysis.exportJson", json!({ "sheet_id": "res-anova" })),
+            ("analysis.exportCsv", json!({ "sheet_id": "res-anova" })),
+            ("result.generateReport", json!({ "result_sheet_id": "res-anova", "format": "markdown" })),
+            ("graph.create", json!({ "sheet_id": "gr-1", "data_sheet_id": "xy-1", "kind": "xy" })),
+            ("graph.create", json!({ "sheet_id": "gr-col", "data_sheet_id": "col-2", "initialized": false })),
+            ("graph.initialize", json!({ "sheet_id": "gr-col", "kind": "column", "title": "Column Summary" })),
+            ("graph.setKind", json!({ "sheet_id": "gr-col", "kind": "column" })),
+            ("graph.setSpec", json!({ "sheet_id": "gr-col", "title": "Updated Column Title" })),
+            ("graph.setAxes", json!({ "sheet_id": "gr-1", "x_axis": { "scale": "log10" } })),
+            (
+                "graph.setAdditionalTicks",
+                json!({ "sheet_id": "gr-1", "axis": "x", "ticks": [{ "value": 10.0, "label": "EC50", "draw_gridline": true }] }),
+            ),
+            ("graph.setSeries", json!({ "sheet_id": "gr-1", "series_index": 0, "color": "#1F77B4CC" })),
+            ("graph.setRegressionOverlay", json!({ "sheet_id": "gr-1", "result_sheet_id": "res-fit", "series_index": 0 })),
+            ("graph.addComparisonBrackets", json!({ "sheet_id": "gr-col", "result_sheet_id": "res-anova", "significant_only": false })),
+            (
+                "graph.setCompactLetterDisplay",
+                json!({ "sheet_id": "gr-col", "result_sheet_id": "res-anova", "pairwise_display_mode": "brackets_and_compact_letter_display", "ordering": "descending_mean", "uppercase": false }),
+            ),
+            ("graph.addAnnotation", json!({ "sheet_id": "gr-1", "kind": "text", "text": "Peak", "x_pt": 180.0, "y_pt": 60.0 })),
+            ("graph.applyStyleFrom", json!({ "sheet_id": "gr-col", "donor_sheet_id": "gr-1" })),
+            ("graph.applyCanvasPreset", json!({ "sheet_id": "gr-col", "preset": "SingleColumn88mm", "resize_mode": "KeepTypographyPt" })),
+            ("graph.preflightCheck", json!({ "sheet_id": "gr-col" })),
+            (
+                "graph.formatSelectedPoints",
+                json!({ "sheet_id": "gr-1", "points": [{ "series_index": 0, "point_index": 0 }], "color": "#D55E00", "symbol": "diamond", "size_pt": 7.0 }),
+            ),
+            (
+                "layout.create",
+                json!({ "sheet_id": "lay-1", "title": "Figure 1", "preset": "double_column", "grid_template": [1, 2], "panel_badges": "uppercase" }),
+            ),
+            ("layout.setSpec", json!({ "sheet_id": "lay-1", "orientation": "landscape" })),
+            ("layout.addPanel", json!({ "sheet_id": "lay-1", "kind": "graph", "graph_sheet_id": "gr-1", "bounds_pt": [20.0, 20.0, 220.0, 140.0] })),
+            (
+                "layout.addPanel",
+                json!({ "sheet_id": "lay-1", "kind": "graph", "graph_sheet_id": "gr-col", "bounds_pt": [260.0, 20.0, 220.0, 140.0] }),
+            ),
+            ("layout.alignOrigins", json!({ "sheet_id": "lay-1", "align": true })),
+            ("layout.applyCanvasPreset", json!({ "sheet_id": "lay-1", "preset": "DoubleColumn180mm", "resize_mode": "KeepTypographyPt" })),
+            ("edit.pasteResultTable", json!({ "source_sheet_id": "res-fit", "target_sheet_id": "gr-1", "bounds_pt": [40.0, 40.0, 140.0, 60.0] })),
+            ("layout.equalizeScaling", json!({ "sheet_id": "lay-1", "mode": "match_smallest" })),
+            ("layout.reorderPanel", json!({ "sheet_id": "lay-1", "panel_index": 0, "action": "bring_to_front" })),
+        ],
     )?;
-    run_valid(s, covered, "graph.setKind", json!({ "sheet_id": "gr-col", "kind": "column" }))?;
-    run_valid(s, covered, "graph.setSpec", json!({ "sheet_id": "gr-col", "title": "Updated Column Title" }))?;
-    run_valid(s, covered, "graph.setAxes", json!({ "sheet_id": "gr-1", "x_axis": { "scale": "log10" } }))?;
-    run_valid(
-        s,
-        covered,
-        "graph.setAdditionalTicks",
-        json!({
-            "sheet_id": "gr-1",
-            "axis": "x",
-            "ticks": [{ "value": 10.0, "label": "EC50", "draw_gridline": true }]
-        }),
-    )?;
-    run_valid(s, covered, "graph.setSeries", json!({ "sheet_id": "gr-1", "series_index": 0, "color": "#1F77B4CC" }))?;
-    run_valid(s, covered, "graph.setRegressionOverlay", json!({ "sheet_id": "gr-1", "result_sheet_id": "res-fit", "series_index": 0 }))?;
-    run_valid(s, covered, "graph.addComparisonBrackets", json!({ "sheet_id": "gr-col", "result_sheet_id": "res-anova", "significant_only": false }))?;
-    run_valid(
-        s,
-        covered,
-        "graph.setCompactLetterDisplay",
-        json!({
-            "sheet_id": "gr-col",
-            "result_sheet_id": "res-anova",
-            "pairwise_display_mode": "brackets_and_compact_letter_display",
-            "ordering": "descending_mean",
-            "uppercase": false
-        }),
-    )?;
-    run_valid(s, covered, "graph.addAnnotation", json!({ "sheet_id": "gr-1", "kind": "text", "text": "Peak", "x_pt": 180.0, "y_pt": 60.0 }))?;
-    run_valid(s, covered, "graph.applyStyleFrom", json!({ "sheet_id": "gr-col", "donor_sheet_id": "gr-1" }))?;
-    run_valid(
-        s,
-        covered,
-        "graph.applyCanvasPreset",
-        json!({ "sheet_id": "gr-col", "preset": "SingleColumn88mm", "resize_mode": "KeepTypographyPt" }),
-    )?;
-    run_valid(s, covered, "graph.preflightCheck", json!({ "sheet_id": "gr-col" }))?;
-    run_valid(
-        s,
-        covered,
-        "graph.formatSelectedPoints",
-        json!({
-            "sheet_id": "gr-1",
-            "points": [{ "series_index": 0, "point_index": 0 }],
-            "color": "#D55E00",
-            "symbol": "diamond",
-            "size_pt": 7.0
-        }),
-    )?;
-
-    run_valid(
-        s,
-        covered,
-        "layout.create",
-        json!({
-            "sheet_id": "lay-1",
-            "title": "Figure 1",
-            "preset": "double_column",
-            "grid_template": [1, 2],
-            "panel_badges": "uppercase"
-        }),
-    )?;
-    run_valid(s, covered, "layout.setSpec", json!({ "sheet_id": "lay-1", "orientation": "landscape" }))?;
-    run_valid(
-        s,
-        covered,
-        "layout.addPanel",
-        json!({ "sheet_id": "lay-1", "kind": "graph", "graph_sheet_id": "gr-1", "bounds_pt": [20.0, 20.0, 220.0, 140.0] }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "layout.addPanel",
-        json!({ "sheet_id": "lay-1", "kind": "graph", "graph_sheet_id": "gr-col", "bounds_pt": [260.0, 20.0, 220.0, 140.0] }),
-    )?;
-    run_valid(s, covered, "layout.alignOrigins", json!({ "sheet_id": "lay-1", "align": true }))?;
-    run_valid(
-        s,
-        covered,
-        "layout.applyCanvasPreset",
-        json!({ "sheet_id": "lay-1", "preset": "DoubleColumn180mm", "resize_mode": "KeepTypographyPt" }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "edit.pasteResultTable",
-        json!({ "source_sheet_id": "res-fit", "target_sheet_id": "gr-1", "bounds_pt": [40.0, 40.0, 140.0, 60.0] }),
-    )?;
-    run_valid(s, covered, "layout.equalizeScaling", json!({ "sheet_id": "lay-1", "mode": "match_smallest" }))?;
-    run_valid(s, covered, "layout.reorderPanel", json!({ "sheet_id": "lay-1", "panel_index": 0, "action": "bring_to_front" }))?;
 
     const SAMPLE_PNG_2X2_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP4z8DwHwyBdMP///8bAEbOCPny53p1AAAAAElFTkSuQmCC";
     let g_img = run_valid(
         s,
         covered,
         "graph.insertImage",
-        json!({
-            "sheet_id": "gr-1",
-            "bytes_base64": SAMPLE_PNG_2X2_B64,
-            "bounds_pt": [12.0, 12.0, 48.0, 48.0],
-            "rotation_deg": 0.0,
-            "lock_aspect_ratio": true,
-            "border": { "width_pt": 1.0, "color": "#222222", "dash": "solid" }
-        }),
+        json!({ "sheet_id": "gr-1", "bytes_base64": SAMPLE_PNG_2X2_B64, "bounds_pt": [12.0, 12.0, 48.0, 48.0], "rotation_deg": 0.0, "lock_aspect_ratio": true, "border": { "width_pt": 1.0, "color": "#222222", "dash": "solid" } }),
     )?;
     let g_ann_idx = g_img.payload.get("annotation_index").and_then(Value::as_u64).unwrap_or(0);
-    let g_asset_id = g_img.payload.get("asset_id").and_then(Value::as_str).unwrap_or_default().to_string();
-    run_valid(
+    let g_asset_id = g_img.payload.get("asset_id").and_then(Value::as_str).unwrap_or_default().to_owned();
+    run_valid_batch(
         s,
         covered,
-        "graph.updateImage",
-        json!({
-            "sheet_id": "gr-1",
-            "annotation_index": g_ann_idx,
-            "width_pt": 64.0,
-            "rotation_deg": 15.0,
-            "crop": { "left_pt": 2.0, "right_pt": 2.0 },
-            "border": null
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "layout.insertImage",
-        json!({
-            "sheet_id": "lay-1",
-            "panel_id": "img-sweep-1",
-            "asset_id": g_asset_id,
-            "bounds_pt": [10.0, 170.0, 40.0, 40.0],
-            "badge_override": "C"
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "layout.updateImage",
-        json!({
-            "sheet_id": "lay-1",
-            "panel_id": "img-sweep-1",
-            "height_pt": 48.0,
-            "rotation_deg": -10.0,
-            "crop": { "top_pt": 1.0, "bottom_pt": 1.0 },
-            "border": { "width_pt": 0.75, "color": "#000000", "dash": "dashed" }
-        }),
-    )?;
-    run_valid(
-        s,
-        covered,
-        "edit.pasteImage",
-        json!({
-            "target_sheet_id": "lay-1",
-            "panel_id": "img-sweep-pasted",
-            "bytes_base64": SAMPLE_PNG_2X2_B64,
-            "bounds_pt": [60.0, 170.0, 32.0, 32.0]
-        }),
-    )?;
-    Ok(())
+        &[
+            (
+                "graph.updateImage",
+                json!({ "sheet_id": "gr-1", "annotation_index": g_ann_idx, "width_pt": 64.0, "rotation_deg": 15.0, "crop": { "left_pt": 2.0, "right_pt": 2.0 }, "border": null }),
+            ),
+            (
+                "layout.insertImage",
+                json!({ "sheet_id": "lay-1", "panel_id": "img-sweep-1", "asset_id": g_asset_id, "bounds_pt": [10.0, 170.0, 40.0, 40.0], "badge_override": "C" }),
+            ),
+            (
+                "layout.updateImage",
+                json!({ "sheet_id": "lay-1", "panel_id": "img-sweep-1", "height_pt": 48.0, "rotation_deg": -10.0, "crop": { "top_pt": 1.0, "bottom_pt": 1.0 }, "border": { "width_pt": 0.75, "color": "#000000", "dash": "dashed" } }),
+            ),
+            (
+                "edit.pasteImage",
+                json!({ "target_sheet_id": "lay-1", "panel_id": "img-sweep-pasted", "bytes_base64": SAMPLE_PNG_2X2_B64, "bounds_pt": [60.0, 170.0, 32.0, 32.0] }),
+            ),
+        ],
+    )
 }
 
 fn sweep_valid_export_and_project_commands(s: &mut Session, covered: &mut BTreeSet<&'static str>) -> Result<(), String> {
-    let svg_path = next_temp_file("graph", "svg");
-    let pdf_path = next_temp_file("graph", "pdf");
-    let png_path = next_temp_file("graph", "png");
-    let tiff_path = next_temp_file("graph", "tiff");
-    let g_svg_path = next_temp_file("graph2", "svg");
-    let g_pdf_path = next_temp_file("graph2", "pdf");
-    let g_png_path = next_temp_file("graph2", "png");
-    let g_emf_path = next_temp_file("graph2", "emf");
-    let lay_emf_path = next_temp_file("layout1", "emf");
-
-    run_valid(s, covered, "export.svg", json!({ "sheet_id": "gr-1", "path": svg_path }))?;
-    run_valid(s, covered, "export.pdf", json!({ "sheet_id": "gr-1", "path": pdf_path }))?;
-    run_valid(s, covered, "export.png", json!({ "sheet_id": "gr-1", "path": png_path, "width_px": 64, "height_px": 48, "dpi": 72 }))?;
-    run_valid(s, covered, "export.tiff", json!({ "sheet_id": "gr-1", "path": tiff_path, "width_px": 64, "height_px": 48, "dpi": 72 }))?;
-    run_valid(s, covered, "graph.exportSvg", json!({ "sheet_id": "gr-col", "path": g_svg_path }))?;
-    run_valid(s, covered, "graph.exportPdf", json!({ "sheet_id": "gr-col", "path": g_pdf_path }))?;
-    run_valid(s, covered, "graph.exportPng", json!({ "sheet_id": "gr-col", "path": g_png_path, "width_px": 64, "height_px": 48, "dpi": 72 }))?;
-    run_valid(s, covered, "graph.exportEmf", json!({ "sheet_id": "gr-col", "path": g_emf_path }))?;
-    run_valid(s, covered, "layout.exportEmf", json!({ "sheet_id": "lay-1", "path": lay_emf_path }))?;
-
-    for p in [&svg_path, &pdf_path, &png_path, &tiff_path, &g_svg_path, &g_pdf_path, &g_png_path, &g_emf_path, &lay_emf_path] {
-        let _ = fs::remove_file(p);
-    }
-
-    run_valid(s, covered, "project.inspect", json!({}))?;
-    run_valid(s, covered, "project.recalculate", json!({}))?;
-    run_valid(s, covered, "project.createCheckpoint", json!({ "name": "cp-sweep", "note": "sweep baseline" }))?;
-    run_valid(s, covered, "project.listCheckpoints", json!({}))?;
-    run_valid(s, covered, "project.restoreCheckpoint", json!({ "name": "cp-sweep" }))?;
-    run_valid(s, covered, "project.deleteCheckpoint", json!({ "name": "cp-sweep" }))?;
-    run_valid(s, covered, "edit.undo", json!({}))?;
-    run_valid(s, covered, "edit.redo", json!({}))?;
-
-    let proj_path = next_temp_file("saved", "cbproj");
-    let saved = run_valid(s, covered, "project.save", json!({ "path": proj_path, "return_bytes": true }))?;
-    let saved_b64 =
-        saved.payload.get("bytes_base64").and_then(Value::as_str).ok_or_else(|| String::from("missing project bytes_base64"))?.to_string();
-    let tpl_saved = run_valid(s, covered, "project.saveTemplate", json!({ "return_bytes": true }))?;
-    let tpl_b64 =
-        tpl_saved.payload.get("bytes_base64").and_then(Value::as_str).ok_or_else(|| String::from("missing template bytes_base64"))?.to_string();
-
-    run_valid(s, covered, "table.importPrism", json!({ "bytes_base64": saved_b64 }))?;
-    run_valid(
+    let dir = TempDir::new("sweep-exp");
+    run_valid_batch(
         s,
         covered,
-        "table.importPzfx",
-        json!({
-            "xml": "<PrismFile><Table ID=\"T1\" TableType=\"XY\"><Title>Imported XY</Title><XColumn><Title>X</Title><Subcolumn><d>1</d><d>2</d></Subcolumn></XColumn><YColumn><Title>Y</Title><Subcolumn><d>10</d><d>20</d></Subcolumn></YColumn></Table></PrismFile>"
-        }),
+        &[
+            ("export.svg", json!({ "sheet_id": "gr-1", "path": dir.child("g.svg") })),
+            ("export.pdf", json!({ "sheet_id": "gr-1", "path": dir.child("g.pdf") })),
+            ("export.png", json!({ "sheet_id": "gr-1", "path": dir.child("g.png"), "width_px": 64, "height_px": 48, "dpi": 72 })),
+            ("export.tiff", json!({ "sheet_id": "gr-1", "path": dir.child("g.tiff"), "width_px": 64, "height_px": 48, "dpi": 72 })),
+            ("graph.exportSvg", json!({ "sheet_id": "gr-col", "path": dir.child("g2.svg") })),
+            ("graph.exportPdf", json!({ "sheet_id": "gr-col", "path": dir.child("g2.pdf") })),
+            ("graph.exportPng", json!({ "sheet_id": "gr-col", "path": dir.child("g2.png"), "width_px": 64, "height_px": 48, "dpi": 72 })),
+            ("graph.exportEmf", json!({ "sheet_id": "gr-col", "path": dir.child("g2.emf") })),
+            ("layout.exportEmf", json!({ "sheet_id": "lay-1", "path": dir.child("l1.emf") })),
+            ("project.inspect", json!({})),
+            ("project.recalculate", json!({})),
+            ("project.createCheckpoint", json!({ "name": "cp-sweep", "note": "sweep baseline" })),
+            ("project.listCheckpoints", json!({})),
+            ("project.restoreCheckpoint", json!({ "name": "cp-sweep" })),
+            ("project.deleteCheckpoint", json!({ "name": "cp-sweep" })),
+            ("edit.undo", json!({})),
+            ("edit.redo", json!({})),
+        ],
     )?;
-    let mut xlsx_zip = curvebook_format::ZipWriter::new();
-    xlsx_zip
-        .add_file(
-            "xl/workbook.xml",
-            br#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec(),
-        )
-        .map_err(|e| e.to_string())?;
-    xlsx_zip
-        .add_file(
-            "xl/_rels/workbook.xml.rels",
-            br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec(),
-        )
-        .map_err(|e| e.to_string())?;
-    xlsx_zip
-        .add_file(
-            "xl/worksheets/sheet1.xml",
-            br#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>X</t></is></c><c r="B1" t="inlineStr"><is><t>Y</t></is></c></row><row r="2"><c r="A2"><v>1</v></c><c r="B2"><v>2</v></c></row></sheetData></worksheet>"#.to_vec(),
-        )
-        .map_err(|e| e.to_string())?;
-    let xlsx_b64 = curvebook_engine::cmd::helpers::encode_base64(&xlsx_zip.finish().map_err(|e| e.to_string())?);
-    run_valid(s, covered, "table.importXlsx", json!({ "bytes_base64": xlsx_b64 }))?;
-    run_valid(s, covered, "file.new", json!({ "title": "Reset File" }))?;
-    run_valid(s, covered, "project.open", json!({ "bytes_base64": saved_b64 }))?;
-    run_valid(s, covered, "project.new", json!({ "title": "Reset Project" }))?;
-    run_valid(s, covered, "project.instantiateTemplate", json!({ "bytes_base64": tpl_b64, "title": "Template Instance" }))?;
 
-    let _ = fs::remove_file(proj_path);
-    Ok(())
+    let saved = run_valid(s, covered, "project.save", json!({ "path": dir.child("saved.cbproj"), "return_bytes": true }))?;
+    let saved_b64 = saved.payload["bytes_base64"].as_str().ok_or_else(|| String::from("missing project bytes_base64"))?.to_owned();
+    let tpl_saved = run_valid(s, covered, "project.saveTemplate", json!({ "return_bytes": true }))?;
+    let tpl_b64 = tpl_saved.payload["bytes_base64"].as_str().ok_or_else(|| String::from("missing template bytes_base64"))?.to_owned();
+
+    let mut xlsx_zip = curvebook_format::ZipWriter::new();
+    for (name, bytes) in [
+        ("xl/workbook.xml", br#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#.as_slice()),
+        ("xl/_rels/workbook.xml.rels", br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.as_slice()),
+        ("xl/worksheets/sheet1.xml", br#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>X</t></is></c><c r="B1" t="inlineStr"><is><t>Y</t></is></c></row><row r="2"><c r="A2"><v>1</v></c><c r="B2"><v>2</v></c></row></sheetData></worksheet>"#.as_slice()),
+    ] {
+        xlsx_zip.add_file(name, bytes.to_vec()).map_err(|e| e.to_string())?;
+    }
+    let xlsx_b64 = encode_base64(&xlsx_zip.finish().map_err(|e| e.to_string())?);
+
+    run_valid_batch(
+        s,
+        covered,
+        &[
+            ("table.importPrism", json!({ "bytes_base64": saved_b64 })),
+            (
+                "table.importPzfx",
+                json!({ "xml": "<PrismFile><Table ID=\"T1\" TableType=\"XY\"><Title>Imported XY</Title><XColumn><Title>X</Title><Subcolumn><d>1</d><d>2</d></Subcolumn></XColumn><YColumn><Title>Y</Title><Subcolumn><d>10</d><d>20</d></Subcolumn></YColumn></Table></PrismFile>" }),
+            ),
+            ("table.importXlsx", json!({ "bytes_base64": xlsx_b64 })),
+            ("file.new", json!({ "title": "Reset File" })),
+            ("project.open", json!({ "bytes_base64": saved_b64 })),
+            ("project.new", json!({ "title": "Reset Project" })),
+            ("project.instantiateTemplate", json!({ "bytes_base64": tpl_b64, "title": "Template Instance" })),
+        ],
+    )
 }
 
 #[test]
@@ -800,43 +375,9 @@ fn sweep_every_catalog_command_hostile_and_corrupt_inputs() -> Result<(), String
         json!("not-an-object"),
         json!([]),
         json!({}),
-        json!({
-            "sheet_id": 999,
-            "source_sheet_id": ["bad"],
-            "target_sheet_id": null,
-            "row": u64::MAX,
-            "col": u64::MAX,
-            "subcol": u64::MAX,
-            "index": u64::MAX,
-            "rows": u64::MAX,
-            "cols": u64::MAX,
-            "value": "NaN",
-            "confidence_percent": "Infinity",
-            "kind": 42
-        }),
-        json!({
-            "sheet_id": "nonexistent-sheet-id",
-            "source_sheet_id": "nonexistent-sheet-id",
-            "target_sheet_id": "nonexistent-sheet-id",
-            "result_sheet_id": "nonexistent-result",
-            "graph_sheet_id": "nonexistent-graph",
-            "bytes_base64": "====invalid-b64====",
-            "xml": "<unclosed><tag>",
-            "csv": "",
-            "path": "/nonexistent_dir_cb_sweep/should_fail.out",
-            "width_px": 0,
-            "height_px": 0,
-            "dpi": 0
-        }),
-        json!({
-            "sheet_id": "xy-1",
-            "row": "zero",
-            "col": -1,
-            "cells": "not-an-array",
-            "x": "NaN",
-            "y": "Infinity",
-            "bounds_pt": ["bad", "array"]
-        }),
+        json!({ "sheet_id": 999, "source_sheet_id": ["bad"], "target_sheet_id": null, "row": u64::MAX, "col": u64::MAX, "subcol": u64::MAX, "index": u64::MAX, "rows": u64::MAX, "cols": u64::MAX, "value": "NaN", "confidence_percent": "Infinity", "kind": 42 }),
+        json!({ "sheet_id": "nonexistent-sheet-id", "source_sheet_id": "nonexistent-sheet-id", "target_sheet_id": "nonexistent-sheet-id", "result_sheet_id": "nonexistent-result", "graph_sheet_id": "nonexistent-graph", "bytes_base64": "====invalid-b64====", "xml": "<unclosed><tag>", "csv": "", "path": "/nonexistent_dir_cb_sweep/should_fail.out", "width_px": 0, "height_px": 0, "dpi": 0 }),
+        json!({ "sheet_id": "xy-1", "row": "zero", "col": -1, "cells": "not-an-array", "x": "NaN", "y": "Infinity", "bounds_pt": ["bad", "array"] }),
     ];
 
     for spec in cmd::registry().specs() {
@@ -972,9 +513,7 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
 
     for params in bad_inputs {
         let mut s = base.clone();
-        let res = execute_checked(&mut s, command_id, params);
-        // Almost all of these are strictly erroneous; ensure any error rolled back cleanly.
-        if let Ok(outcome) = res {
+        if let Ok(outcome) = execute_checked(&mut s, command_id, params) {
             assert_eq!(outcome.command_id, command_id);
         }
     }
@@ -982,56 +521,19 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
 
 fn verify_cyclic_and_frozen_protections() -> Result<(), String> {
     let mut s = seed_rich_fixture()?;
-    execute_checked(&mut s, "sheet.createData", json!({ "sheet_id": "link-a", "archetype": "xy", "cols": 1, "rows": 4 }))
-        .map_err(|e| e.to_string())?;
-    execute_checked(&mut s, "sheet.createData", json!({ "sheet_id": "link-b", "archetype": "xy", "cols": 1, "rows": 4 }))
-        .map_err(|e| e.to_string())?;
-    execute_checked(&mut s, "sheet.createData", json!({ "sheet_id": "link-c", "archetype": "xy", "cols": 1, "rows": 4 }))
-        .map_err(|e| e.to_string())?;
-    execute_checked(
-        &mut s,
-        "table.pasteLink",
-        json!({
-            "target_sheet_id": "link-b",
-            "source_sheet_id": "link-a",
-            "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } },
-            "start_row": 0,
-            "start_col": 0
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-    execute_checked(
-        &mut s,
-        "table.pasteLink",
-        json!({
-            "target_sheet_id": "link-c",
-            "source_sheet_id": "link-b",
-            "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } },
-            "start_row": 0,
-            "start_col": 0
-        }),
-    )
-    .map_err(|e| e.to_string())?;
+    for id in ["link-a", "link-b", "link-c"] {
+        execute_checked(&mut s, "sheet.createData", json!({ "sheet_id": id, "archetype": "xy", "cols": 1, "rows": 4 })).map_err(|e| e.to_string())?;
+    }
+    let link_params = |dst: &str, src: &str, sr: usize| json!({ "target_sheet_id": dst, "source_sheet_id": src, "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } }, "start_row": sr, "start_col": 0 });
+    execute_checked(&mut s, "table.pasteLink", link_params("link-b", "link-a", 0)).map_err(|e| e.to_string())?;
+    execute_checked(&mut s, "table.pasteLink", link_params("link-c", "link-b", 0)).map_err(|e| e.to_string())?;
 
-    // Closing 2-cycle (link-b -> link-a) or 3-cycle (link-c -> link-a) must fail atomically.
     for src in ["link-b", "link-c"] {
-        let res = execute_checked(
-            &mut s,
-            "table.pasteLink",
-            json!({
-                "target_sheet_id": "link-a",
-                "source_sheet_id": src,
-                "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } },
-                "start_row": 0,
-                "start_col": 0
-            }),
-        );
-        assert!(res.is_err(), "closing cycle link-a <- {src} must fail");
+        assert!(execute_checked(&mut s, "table.pasteLink", link_params("link-a", src, 0)).is_err(), "closing cycle link-a <- {src} must fail");
     }
 
-    // Freeze link-b; mutations and deleting upstream link-a must fail atomically.
     execute_checked(&mut s, "sheet.freeze", json!({ "sheet_id": "link-b" })).map_err(|e| e.to_string())?;
-    let frozen_cmds: [(&str, Value); 6] = [
+    for (cmd_id, params) in [
         ("sheet.rename", json!({ "sheet_id": "link-b", "title": "Hacked" })),
         ("sheet.delete", json!({ "sheet_id": "link-b" })),
         ("sheet.delete", json!({ "sheet_id": "link-a", "cascade": false })),
@@ -1039,27 +541,19 @@ fn verify_cyclic_and_frozen_protections() -> Result<(), String> {
         ("table.excludeCells", json!({ "sheet_id": "link-b", "cells": [{ "row": 0, "col": 0 }], "excluded": true })),
         (
             "table.pasteLink",
-            json!({
-                "target_sheet_id": "link-b",
-                "source_sheet_id": "link-a",
-                "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 0, "col": 0 } },
-                "start_row": 1,
-                "start_col": 0
-            }),
+            json!({ "target_sheet_id": "link-b", "source_sheet_id": "link-a", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 0, "col": 0 } }, "start_row": 1, "start_col": 0 }),
         ),
-    ];
-    for (cmd, params) in frozen_cmds {
-        assert!(execute_checked(&mut s, cmd, params).is_err(), "{cmd} should fail on frozen state");
+    ] {
+        assert!(execute_checked(&mut s, cmd_id, params).is_err(), "{cmd_id} should fail on frozen state");
     }
 
-    // Cyclic calculated variable: A = [B] + 1, B = [A] + 1.
     execute_checked(&mut s, "table.setCalculatedVariable", json!({ "sheet_id": "mv-1", "col": 2, "title": "Scaled", "formula": "= [Score] * 2" }))
         .map_err(|e| e.to_string())?;
     assert!(
         execute_checked(
             &mut s,
             "table.setCalculatedVariable",
-            json!({ "sheet_id": "mv-1", "col": 1, "title": "Score", "formula": "= [Scaled] + 1" }),
+            json!({ "sheet_id": "mv-1", "col": 1, "title": "Score", "formula": "= [Scaled] + 1" })
         )
         .is_err()
     );
@@ -1067,34 +561,32 @@ fn verify_cyclic_and_frozen_protections() -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Proptest 3: Arbitrary corrupt JSON fuzzing across all 73 catalog commands
+// Proptest 3: Arbitrary corrupt JSON fuzzing across all catalog commands
 // ---------------------------------------------------------------------------
 
-fn corrupt_string_strategy() -> BoxedStrategy<String> {
-    proptest::sample::select(vec![
-        String::new(),
-        String::from("NaN"),
-        String::from("Infinity"),
-        String::from("-Infinity"),
-        String::from("xy-1"),
-        String::from("col-1"),
-        String::from("mv-1"),
-        String::from("res-anova-seed"),
-        String::from("nonexistent"),
-        String::from("===="),
-        String::from("<unclosed"),
-        String::from("= [Missing] + 1"),
-        String::from("18446744073709551615"),
-    ])
-    .boxed()
-}
-
 fn corrupt_value_strategy() -> BoxedStrategy<Value> {
+    let strings = proptest::sample::select(vec![
+        "",
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        "xy-1",
+        "col-1",
+        "mv-1",
+        "res-anova-seed",
+        "nonexistent",
+        "====",
+        "<unclosed",
+        "= [Missing] + 1",
+        "18446744073709551615",
+    ])
+    .prop_map(|s| Value::String(s.to_owned()));
+
     let leaf = proptest::prop_oneof![
         Just(Value::Null),
         proptest::arbitrary::any::<bool>().prop_map(Value::Bool),
-        proptest::sample::select(vec![json!(0), json!(-1), json!(1), json!(1000001), json!(u64::MAX), json!(1e308), json!(-1e308),]),
-        corrupt_string_strategy().prop_map(Value::String),
+        proptest::sample::select(vec![json!(0), json!(-1), json!(1), json!(1000001), json!(u64::MAX), json!(1e308), json!(-1e308)]),
+        strings,
     ];
 
     leaf.prop_recursive(3, 16, 4, |inner| {
@@ -1128,20 +620,10 @@ fn corrupt_value_strategy() -> BoxedStrategy<Value> {
         ]);
         proptest::prop_oneof![
             vec(inner.clone(), 0..4).prop_map(Value::Array),
-            vec((keys, inner), 0..5).prop_map(|pairs| {
-                let mut map = serde_json::Map::new();
-                for (k, v) in pairs {
-                    map.insert(k.to_string(), v);
-                }
-                Value::Object(map)
-            }),
+            vec((keys, inner), 0..5).prop_map(|pairs| Value::Object(pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())),
         ]
     })
     .boxed()
-}
-
-fn command_index_strategy() -> BoxedStrategy<usize> {
-    (0..cmd::registry().len()).boxed()
 }
 
 proptest! {
@@ -1149,16 +631,12 @@ proptest! {
 
     #[test]
     fn proptest_arbitrary_corrupt_json_across_all_commands(
-        steps in vec((command_index_strategy(), corrupt_value_strategy()), 1..20)
+        steps in vec(((0..cmd::registry().len()).boxed(), corrupt_value_strategy()), 1..20)
     ) {
         let mut session = seed_rich_fixture().map_err(TestCaseError::fail)?;
         let specs: Vec<_> = cmd::registry().specs().collect();
-        // Keep path-bearing commands safely inside temp or rejected rather than writing workspace files.
         for (cmd_idx, mut params) in steps {
-            let Some(spec) = specs.get(cmd_idx) else {
-                return Err(TestCaseError::fail(format!("command index out of bounds: {cmd_idx}")));
-            };
-            let cmd = spec.id;
+            let cmd = specs.get(cmd_idx).ok_or_else(|| TestCaseError::fail(format!("oob cmd idx: {cmd_idx}")))?.id;
             let mut created_temp: Option<PathBuf> = None;
             if let Some(obj) = params.as_object_mut() {
                 if obj.contains_key("path") || cmd.starts_with("export.") || cmd.contains("export") || cmd == "project.save" {
@@ -1166,15 +644,10 @@ proptest! {
                     obj.insert(String::from("path"), json!(&safe));
                     created_temp = Some(safe);
                 }
-                if let Some(w) = obj.get("width_px").and_then(Value::as_u64)
-                    && w > 128
-                {
-                    obj.insert(String::from("width_px"), json!(u32::MAX));
-                }
-                if let Some(h) = obj.get("height_px").and_then(Value::as_u64)
-                    && h > 128
-                {
-                    obj.insert(String::from("height_px"), json!(u32::MAX));
+                for dim in ["width_px", "height_px"] {
+                    if obj.get(dim).and_then(Value::as_u64).is_some_and(|v| v > 128) {
+                        obj.insert(dim.to_owned(), json!(u32::MAX));
+                    }
                 }
             }
 
@@ -1184,11 +657,7 @@ proptest! {
                 let _ = fs::remove_file(path);
             }
             if let Err(ref err) = res {
-                prop_assert!(
-                    !err.message().contains("recovered from internal panic"),
-                    "fuzzed `{cmd}` panicked internally: {}",
-                    err.message()
-                );
+                prop_assert!(!err.message().contains("recovered from internal panic"), "fuzzed `{cmd}` panicked: {}", err.message());
                 prop_assert_eq!(session.document(), before.document());
                 prop_assert_eq!(&session, &before);
             }
@@ -1232,10 +701,8 @@ fn sweep_step_strategy() -> BoxedStrategy<SweepStep> {
             .prop_map(|(target_idx, row, col, val_kind)| SweepStep::SetCells { target_idx, row, col, val_kind }),
         2 => (0..8usize, 0..6u8, 0..4u8, proptest::arbitrary::any::<bool>(), proptest::bool::weighted(0.25))
             .prop_map(|(target_idx, row, col, excluded, huge)| SweepStep::ExcludeCells { target_idx, row, col, excluded, huge }),
-        2 => (0..8usize, 0..8usize, 0..5u8)
-            .prop_map(|(dst_idx, src_idx, cyclic_or_missing)| SweepStep::PasteLink { dst_idx, src_idx, cyclic_or_missing }),
-        2 => (0..8usize, 0..5u8)
-            .prop_map(|(target_idx, formula_kind)| SweepStep::SetCalculatedVariable { target_idx, formula_kind }),
+        2 => (0..8usize, 0..8usize, 0..5u8).prop_map(|(dst_idx, src_idx, cyclic_or_missing)| SweepStep::PasteLink { dst_idx, src_idx, cyclic_or_missing }),
+        2 => (0..8usize, 0..5u8).prop_map(|(target_idx, formula_kind)| SweepStep::SetCalculatedVariable { target_idx, formula_kind }),
         2 => (0..8usize, 0..4usize).prop_map(|(src_idx, kind_idx)| SweepStep::TransformRun { src_idx, kind_idx }),
         2 => (0..8usize, 0..4usize).prop_map(|(src_idx, kind_idx)| SweepStep::StatsRun { src_idx, kind_idx }),
         2 => (0..8usize, 0..4usize).prop_map(|(src_idx, kind_idx)| SweepStep::FitRun { src_idx, kind_idx }),
@@ -1256,65 +723,43 @@ fn sweep_step_strategy() -> BoxedStrategy<SweepStep> {
     .boxed()
 }
 
+fn pick_id<T>(items: &[T], idx: usize, fallback: &str, id_of: fn(&T) -> &str) -> String {
+    if items.is_empty() { fallback.to_owned() } else { id_of(&items[idx % items.len()]).to_owned() }
+}
+
 fn pick_data_id(doc: &ProjectDocument, idx: usize) -> String {
-    if doc.data_sheets.is_empty() {
-        String::from("missing-data")
-    } else {
-        doc.data_sheets.get(idx % doc.data_sheets.len()).map_or_else(|| String::from("missing-data"), |d| d.id.as_str().to_string())
-    }
+    pick_id(&doc.data_sheets, idx, "missing-data", |s| s.id.as_str())
 }
 
 fn pick_mv_or_any_id(doc: &ProjectDocument, idx: usize) -> String {
     let mv: Vec<&str> = doc.data_sheets.iter().filter(|d| d.archetype.kind() == TableKind::MultipleVariables).map(|d| d.id.as_str()).collect();
-    if idx % 4 != 3
-        && !mv.is_empty()
-        && let Some(&id) = mv.get(idx % mv.len())
-    {
-        id.to_string()
-    } else {
-        pick_data_id(doc, idx)
-    }
+    if idx % 4 != 3 && !mv.is_empty() { mv[idx % mv.len()].to_owned() } else { pick_data_id(doc, idx) }
 }
 
 fn pick_result_id(doc: &ProjectDocument, idx: usize, prefer_pairwise: bool) -> String {
     if prefer_pairwise {
         let with_pw: Vec<&str> = doc.result_sheets.iter().filter(|r| !r.pairwise_comparisons.is_empty()).map(|r| r.id.as_str()).collect();
-        if !with_pw.is_empty()
-            && let Some(&id) = with_pw.get(idx % with_pw.len())
-        {
-            return id.to_string();
+        if !with_pw.is_empty() {
+            return with_pw[idx % with_pw.len()].to_owned();
         }
     }
-    if doc.result_sheets.is_empty() {
-        String::from("missing-result")
-    } else {
-        doc.result_sheets.get(idx % doc.result_sheets.len()).map_or_else(|| String::from("missing-result"), |r| r.id.as_str().to_string())
-    }
+    pick_id(&doc.result_sheets, idx, "missing-result", |s| s.id.as_str())
 }
 
 fn pick_graph_id(doc: &ProjectDocument, idx: usize) -> String {
-    if doc.graph_sheets.is_empty() {
-        String::from("missing-graph")
-    } else {
-        doc.graph_sheets.get(idx % doc.graph_sheets.len()).map_or_else(|| String::from("missing-graph"), |g| g.id.as_str().to_string())
-    }
-}
-
-fn pick_layout_id(doc: &ProjectDocument, idx: usize) -> String {
-    if doc.layout_sheets.is_empty() {
-        String::from("missing-layout")
-    } else {
-        doc.layout_sheets.get(idx % doc.layout_sheets.len()).map_or_else(|| String::from("missing-layout"), |l| l.id.as_str().to_string())
-    }
+    pick_id(&doc.graph_sheets, idx, "missing-graph", |s| s.id.as_str())
 }
 
 fn pick_any_sheet_id(doc: &ProjectDocument, idx: usize) -> String {
-    let mut all: Vec<&str> = Vec::new();
-    all.extend(doc.data_sheets.iter().map(|s| s.id.as_str()));
-    all.extend(doc.result_sheets.iter().map(|s| s.id.as_str()));
-    all.extend(doc.graph_sheets.iter().map(|s| s.id.as_str()));
-    all.extend(doc.layout_sheets.iter().map(|s| s.id.as_str()));
-    if all.is_empty() { String::from("missing-any") } else { all.get(idx % all.len()).copied().unwrap_or("missing-any").to_string() }
+    let all: Vec<&str> = doc
+        .data_sheets
+        .iter()
+        .map(|s| s.id.as_str())
+        .chain(doc.result_sheets.iter().map(|s| s.id.as_str()))
+        .chain(doc.graph_sheets.iter().map(|s| s.id.as_str()))
+        .chain(doc.layout_sheets.iter().map(|s| s.id.as_str()))
+        .collect();
+    if all.is_empty() { String::from("missing-any") } else { all[idx % all.len()].to_owned() }
 }
 
 fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) -> (&'static str, Value) {
@@ -1328,29 +773,18 @@ fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) 
                 };
                 return ("sheet.createData", p);
             }
-            let arch = ["xy", "column", "grouped", "multiple_variables", "nested"].get(arch_idx % 5).copied().unwrap_or("xy");
+            let arch = ["xy", "column", "grouped", "multiple_variables", "nested"][arch_idx % 5];
             let sid = format!("d-{step_num}-{id_tag}");
             if arch == "multiple_variables" {
                 (
                     "sheet.createData",
-                    json!({
-                        "sheet_id": sid,
-                        "archetype": "multiple_variables",
-                        "cols": 3,
-                        "rows": *rows,
-                        "variables": [
-                            { "title": "Cohort", "role": "Categorical" },
-                            { "title": "Score", "role": "Continuous" },
-                            { "title": "Scaled", "role": "Continuous" }
-                        ]
-                    }),
+                    json!({ "sheet_id": sid, "archetype": "multiple_variables", "cols": 3, "rows": *rows, "variables": [{ "title": "Cohort", "role": "Categorical" }, { "title": "Score", "role": "Continuous" }, { "title": "Scaled", "role": "Continuous" }] }),
                 )
             } else {
                 ("sheet.createData", json!({ "sheet_id": sid, "archetype": arch, "cols": *cols, "rows": *rows }))
             }
         }
         SweepStep::SetCells { target_idx, row, col, val_kind } => {
-            let sid = pick_data_id(doc, *target_idx);
             let val = match val_kind % 6 {
                 0 => json!(10.0 + f64::from(*row)),
                 1 => json!(f64::from(*col) * 3.5 + 1.0),
@@ -1360,12 +794,11 @@ fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) 
                 _ => json!([1, 2]),
             };
             let r = if *val_kind == 5 { json!(u64::MAX) } else { json!(*row) };
-            ("table.setCells", json!({ "sheet_id": sid, "edits": [{ "row": r, "col": *col, "value": val }] }))
+            ("table.setCells", json!({ "sheet_id": pick_data_id(doc, *target_idx), "edits": [{ "row": r, "col": *col, "value": val }] }))
         }
         SweepStep::ExcludeCells { target_idx, row, col, excluded, huge } => {
-            let sid = pick_data_id(doc, *target_idx);
             let r = if *huge { u64::MAX } else { u64::from(*row) };
-            ("table.excludeCells", json!({ "sheet_id": sid, "cells": [{ "row": r, "col": *col }], "excluded": *excluded }))
+            ("table.excludeCells", json!({ "sheet_id": pick_data_id(doc, *target_idx), "cells": [{ "row": r, "col": *col }], "excluded": *excluded }))
         }
         SweepStep::PasteLink { dst_idx, src_idx, cyclic_or_missing } => {
             let dst = pick_data_id(doc, *dst_idx);
@@ -1376,17 +809,10 @@ fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) 
             };
             (
                 "table.pasteLink",
-                json!({
-                    "target_sheet_id": dst,
-                    "source_sheet_id": src,
-                    "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } },
-                    "start_row": 0,
-                    "start_col": 0
-                }),
+                json!({ "target_sheet_id": dst, "source_sheet_id": src, "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } }, "start_row": 0, "start_col": 0 }),
             )
         }
         SweepStep::SetCalculatedVariable { target_idx, formula_kind } => {
-            let sid = pick_mv_or_any_id(doc, *target_idx);
             let (col, title, formula) = match formula_kind % 5 {
                 0 => (2u64, "Scaled", "= [Score] * 2"),
                 1 => (2u64, "Scaled", "= [Score] + 10"),
@@ -1394,31 +820,29 @@ fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) 
                 3 => (2u64, "Scaled", "= [Scaled] + 1"),
                 _ => (u64::MAX, "BadCol", "= 1"),
             };
-            ("table.setCalculatedVariable", json!({ "sheet_id": sid, "col": col, "title": title, "formula": formula }))
+            (
+                "table.setCalculatedVariable",
+                json!({ "sheet_id": pick_mv_or_any_id(doc, *target_idx), "col": col, "title": title, "formula": formula }),
+            )
         }
         SweepStep::TransformRun { src_idx, kind_idx } => {
             let src = if *kind_idx == 3 { String::from("missing-src") } else { pick_data_id(doc, *src_idx) };
-            let kind = ["normalize", "log10", "baseline_subtract", "bogus_xform"].get(kind_idx % 4).copied().unwrap_or("normalize");
+            let kind = ["normalize", "log10", "baseline_subtract", "bogus_xform"][kind_idx % 4];
             ("transform.run", json!({ "sheet_id": format!("rx-{step_num}"), "source_sheet_id": src, "kind": kind }))
         }
         SweepStep::StatsRun { src_idx, kind_idx } => {
             let src = if *kind_idx == 3 { String::from("missing-src") } else { pick_data_id(doc, *src_idx) };
-            let kind =
-                ["descriptive_stats", "one_way_anova", "unpaired_t_test", "bogus_stat"].get(kind_idx % 4).copied().unwrap_or("descriptive_stats");
+            let kind = ["descriptive_stats", "one_way_anova", "unpaired_t_test", "bogus_stat"][kind_idx % 4];
             ("stats.run", json!({ "sheet_id": format!("rs-{step_num}"), "source_sheet_id": src, "kind": kind }))
         }
         SweepStep::FitRun { src_idx, kind_idx } => {
             let src = if *kind_idx == 3 { String::from("missing-src") } else { pick_data_id(doc, *src_idx) };
-            let kind = ["linear_regression", "nonlinear_4pl", "exponential_one_phase_decay", "bogus_fit"]
-                .get(kind_idx % 4)
-                .copied()
-                .unwrap_or("linear_regression");
+            let kind = ["linear_regression", "nonlinear_4pl", "exponential_one_phase_decay", "bogus_fit"][kind_idx % 4];
             ("fit.run", json!({ "sheet_id": format!("rf-{step_num}"), "source_sheet_id": src, "kind": kind }))
         }
         SweepStep::GraphInitialize { src_idx, kind_idx } => {
-            let uninit = doc.graph_sheets.iter().find(|g| !g.initialized).map(|g| g.id.as_str().to_string());
-            let kind = ["xy", "column", "grouped", "multiple_variables", "bad_graph_kind"].get(kind_idx % 5).copied().unwrap_or("xy");
-            if let Some(gid) = uninit
+            let kind = ["xy", "column", "grouped", "multiple_variables", "bad_graph_kind"][kind_idx % 5];
+            if let Some(gid) = doc.graph_sheets.iter().find(|g| !g.initialized).map(|g| g.id.as_str().to_owned())
                 && *kind_idx != 4
             {
                 ("graph.initialize", json!({ "sheet_id": gid, "kind": kind }))
@@ -1437,19 +861,11 @@ fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) 
         }
         SweepStep::GraphAddComparisonBrackets { graph_idx, res_idx } => (
             "graph.addComparisonBrackets",
-            json!({
-                "sheet_id": pick_graph_id(doc, *graph_idx),
-                "result_sheet_id": pick_result_id(doc, *res_idx, true),
-                "significant_only": false
-            }),
+            json!({ "sheet_id": pick_graph_id(doc, *graph_idx), "result_sheet_id": pick_result_id(doc, *res_idx, true), "significant_only": false }),
         ),
-        SweepStep::GraphApplyStyleFrom { dst_idx, src_idx } => (
-            "graph.applyStyleFrom",
-            json!({
-                "sheet_id": pick_graph_id(doc, *dst_idx),
-                "donor_sheet_id": pick_graph_id(doc, *src_idx)
-            }),
-        ),
+        SweepStep::GraphApplyStyleFrom { dst_idx, src_idx } => {
+            ("graph.applyStyleFrom", json!({ "sheet_id": pick_graph_id(doc, *dst_idx), "donor_sheet_id": pick_graph_id(doc, *src_idx) }))
+        }
         SweepStep::LayoutCreate { hostile } => {
             if *hostile {
                 ("layout.create", json!({ "sheet_id": "", "preset": 123 }))
@@ -1458,17 +874,15 @@ fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) 
             }
         }
         SweepStep::LayoutAddPanel { lay_idx, graph_idx, slot_idx, hostile } => {
-            let lid = pick_layout_id(doc, *lay_idx);
+            let lid = pick_id(&doc.layout_sheets, *lay_idx, "missing-layout", |s| s.id.as_str());
             let gid = pick_graph_id(doc, *graph_idx);
-            if *hostile {
-                ("layout.addPanel", json!({ "sheet_id": lid, "kind": "graph", "graph_sheet_id": gid, "bounds_pt": ["bad"] }))
+            let bounds = if *hostile {
+                json!(["bad"])
             } else {
-                let offset = f64::from(*slot_idx % 4) * 30.0;
-                (
-                    "layout.addPanel",
-                    json!({ "sheet_id": lid, "kind": "graph", "graph_sheet_id": gid, "bounds_pt": [20.0 + offset, 20.0 + offset, 180.0, 120.0] }),
-                )
-            }
+                let o = f64::from(*slot_idx % 4) * 30.0;
+                json!([20.0 + o, 20.0 + o, 180.0, 120.0])
+            };
+            ("layout.addPanel", json!({ "sheet_id": lid, "kind": "graph", "graph_sheet_id": gid, "bounds_pt": bounds }))
         }
         SweepStep::ClonePipeline { src_idx } => {
             ("sheet.clonePipeline", json!({ "sheet_id": pick_data_id(doc, *src_idx), "prefix": format!("cp{step_num}"), "clear_data": false }))
@@ -1492,68 +906,45 @@ fn execute_tracked_step(
 ) -> Result<(), TestCaseError> {
     let before_session = session.clone();
     let before_doc = before_session.document().clone();
-    let res = session.execute(cmd, params);
-
-    match res {
+    match session.execute(cmd, params) {
         Err(err) => {
-            prop_assert!(!err.message().contains("recovered from internal panic"), "command `{cmd}` panicked internally: {}", err.message());
+            prop_assert!(!err.message().contains("recovered from internal panic"), "command `{cmd}` panicked: {}", err.message());
             prop_assert_eq!(session.document(), &before_doc);
             prop_assert_eq!(session, &before_session);
         }
         Ok(outcome) => {
             prop_assert_eq!(outcome.command_id.as_str(), cmd);
-            if cmd == "edit.undo" {
-                if let Some(expected_prev) = undo_model.pop() {
-                    prop_assert!(outcome.mutated, "expected edit.undo to mutate when undo stack non-empty");
-                    prop_assert_eq!(session.document(), &expected_prev);
-                    redo_model.push(before_doc);
-                } else {
-                    prop_assert!(!outcome.mutated, "expected edit.undo no-op when undo stack empty");
-                    prop_assert_eq!(session.document(), &before_doc);
-                }
-            } else if cmd == "edit.redo" {
-                if let Some(expected_next) = redo_model.pop() {
-                    prop_assert!(outcome.mutated, "expected edit.redo to mutate when redo stack non-empty");
-                    prop_assert_eq!(session.document(), &expected_next);
+            match cmd {
+                "edit.undo" => match undo_model.pop() {
+                    Some(prev) => {
+                        prop_assert!(outcome.mutated);
+                        prop_assert_eq!(session.document(), &prev);
+                        redo_model.push(before_doc);
+                    }
+                    None => {
+                        prop_assert!(!outcome.mutated);
+                        prop_assert_eq!(session.document(), &before_doc);
+                    }
+                },
+                "edit.redo" => match redo_model.pop() {
+                    Some(next) => {
+                        prop_assert!(outcome.mutated);
+                        prop_assert_eq!(session.document(), &next);
+                        undo_model.push(before_doc);
+                    }
+                    None => {
+                        prop_assert!(!outcome.mutated);
+                        prop_assert_eq!(session.document(), &before_doc);
+                    }
+                },
+                _ if outcome.mutated => {
                     undo_model.push(before_doc);
-                } else {
-                    prop_assert!(!outcome.mutated, "expected edit.redo no-op when redo stack empty");
-                    prop_assert_eq!(session.document(), &before_doc);
+                    redo_model.clear();
                 }
-            } else if outcome.mutated {
-                undo_model.push(before_doc);
-                redo_model.clear();
-            } else {
-                prop_assert_eq!(session.document(), &before_doc);
+                _ => prop_assert_eq!(session.document(), &before_doc),
             }
         }
     }
-    Ok(())
-}
-
-fn verify_full_undo_redo_roundtrip(
-    session: &mut Session,
-    undo_model: &mut Vec<ProjectDocument>,
-    redo_model: &mut Vec<ProjectDocument>,
-    initial_doc: &ProjectDocument,
-) -> Result<(), TestCaseError> {
-    while !undo_model.is_empty() {
-        execute_tracked_step(session, undo_model, redo_model, "edit.undo", json!({}))?;
-    }
-    prop_assert_eq!(session.document(), initial_doc);
-
-    // Extra undo at root must be a clean non-mutating no-op.
-    execute_tracked_step(session, undo_model, redo_model, "edit.undo", json!({}))?;
-    prop_assert_eq!(session.document(), initial_doc);
-
-    while !redo_model.is_empty() {
-        execute_tracked_step(session, undo_model, redo_model, "edit.redo", json!({}))?;
-    }
-
-    // Extra redo at tip must be a clean non-mutating no-op.
-    let tip_doc = session.document().clone();
-    execute_tracked_step(session, undo_model, redo_model, "edit.redo", json!({}))?;
-    prop_assert_eq!(session.document(), &tip_doc);
     Ok(())
 }
 
@@ -1564,18 +955,27 @@ proptest! {
     fn proptest_interleaved_sequences_zero_panic_rollback_and_undo_redo(
         steps in vec(sweep_step_strategy(), 12..36)
     ) {
-        let session = seed_rich_fixture().map_err(TestCaseError::fail)?;
-        // Reset stacks cleanly onto initial_doc by seeding via from_document so full root undo matches initial_doc.
-        let initial_doc = session.document().clone();
+        let initial_doc = seed_rich_fixture().map_err(TestCaseError::fail)?.document().clone();
         let mut session = Session::from_document(initial_doc.clone());
-        let mut undo_model: Vec<ProjectDocument> = Vec::new();
-        let mut redo_model: Vec<ProjectDocument> = Vec::new();
+        let (mut undo_model, mut redo_model) = (Vec::new(), Vec::new());
 
         for (step_num, step) in steps.iter().enumerate() {
             let (cmd, params) = build_step_command(session.document(), step, step_num);
             execute_tracked_step(&mut session, &mut undo_model, &mut redo_model, cmd, params)?;
         }
 
-        verify_full_undo_redo_roundtrip(&mut session, &mut undo_model, &mut redo_model, &initial_doc)?;
+        while !undo_model.is_empty() {
+            execute_tracked_step(&mut session, &mut undo_model, &mut redo_model, "edit.undo", json!({}))?;
+        }
+        prop_assert_eq!(session.document(), &initial_doc);
+        execute_tracked_step(&mut session, &mut undo_model, &mut redo_model, "edit.undo", json!({}))?;
+        prop_assert_eq!(session.document(), &initial_doc);
+
+        while !redo_model.is_empty() {
+            execute_tracked_step(&mut session, &mut undo_model, &mut redo_model, "edit.redo", json!({}))?;
+        }
+        let tip_doc = session.document().clone();
+        execute_tracked_step(&mut session, &mut undo_model, &mut redo_model, "edit.redo", json!({}))?;
+        prop_assert_eq!(session.document(), &tip_doc);
     }
 }

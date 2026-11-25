@@ -2634,10 +2634,10 @@ pub fn run_native_desktop_with_control(
 
 #[cfg(test)]
 mod tests {
-    use curvebook_doc::SheetId;
+    use curvebook_doc::{CellCoord, CellValue, SheetId};
     use curvebook_ui_egui::interaction::ViewportMetrics;
     use curvebook_ui_egui::{BETA_ACTIVE_LOCALES, locale_picker_label, normalize_beta_gui_locale};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::desktop_host::DesktopHostConfig;
@@ -2646,8 +2646,6 @@ mod tests {
         let mut runtime = DesktopHostRuntime::new(DesktopHostConfig {
             in_window_menus: true,
             new_instance: true,
-            locale_override: None,
-            theme_override: None,
             recovery_root: None,
             initial_viewport: viewport,
             ..DesktopHostConfig::default()
@@ -2657,127 +2655,197 @@ mod tests {
         Ok((runtime, id))
     }
 
-    #[test]
-    fn egui_headless_frame_with_built_fonts_succeeds() -> Result<(), String> {
-        let ctx = egui::Context::default();
-        ctx.set_fonts(build_egui_font_definitions(None));
+    struct GuiHarness {
+        app: CurveBookNativeApp,
+        win_id: DesktopWindowId,
+        ctx: egui::Context,
+        size: egui::Vec2,
+        req_tx: Option<mpsc::Sender<LiveControlRequest>>,
+        auth: ControlAuth,
+    }
 
-        let (runtime, id) = test_runtime(ViewportMetrics::new(960.0, 640.0, 1.0))?;
-        let mut app = CurveBookNativeApp::new(runtime, id, None);
+    impl GuiHarness {
+        fn new<T>(
+            w: f32,
+            h: f32,
+            with_control: bool,
+            setup: impl FnOnce(&mut DesktopHostRuntime, DesktopWindowId) -> Result<T, String>,
+        ) -> Result<Self, String> {
+            let (mut runtime, win_id) = test_runtime(ViewportMetrics::new(f64::from(w), f64::from(h), 1.0))?;
+            let _ = setup(&mut runtime, win_id)?;
+            let mut app = CurveBookNativeApp::new(runtime, win_id, None);
+            let req_tx = if with_control {
+                let (tx, rx) = mpsc::channel();
+                app = app.with_live_control(LiveControlChannel {
+                    request_rx: rx,
+                    egui_ctx_cell: Arc::new(OnceLock::new()),
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                    post_hook: None,
+                });
+                Some(tx)
+            } else {
+                None
+            };
+            let ctx = egui::Context::default();
+            ctx.set_fonts(build_egui_font_definitions(None));
+            let auth = ControlAuth::from_token("test-token-gui-harness").map_err(|e| e.to_string())?;
+            Ok(Self { app, win_id, ctx, size: egui::vec2(w, h), req_tx, auth })
+        }
 
-        let raw_input =
-            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(960.0, 640.0))), ..Default::default() };
+        fn step(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            let mut raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.size)), events, ..Default::default() };
+            self.app.drain_synthetic_events_into(&mut raw);
+            let mut out = self.ctx.run_ui(raw, |ui| self.app.step_ui(ui));
+            out.textures_delta.clear();
+            out
+        }
 
-        let mut output = ctx.run_ui(raw_input, |ui| {
-            app.step_ui(ui);
-        });
-        output.textures_delta.clear();
+        fn settle(&mut self, n: usize) {
+            for _ in 0..n {
+                let _ = self.step(Vec::new());
+            }
+        }
 
-        assert!(!output.shapes.is_empty());
-        assert!(app.last_frame_size[0] > 0 && app.last_frame_size[1] > 0);
-        Ok(())
+        fn send_ctrl(&mut self, req: Value) -> Result<Value, String> {
+            let raw_bytes = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
+            let (tx, rx) = mpsc::channel();
+            self.req_tx
+                .as_ref()
+                .ok_or_else(|| String::from("live control not enabled"))?
+                .send(LiveControlRequest { raw_bytes, auth: self.auth.clone(), conn_authenticated: true, reply_tx: tx })
+                .map_err(|e| e.to_string())?;
+            for _ in 0..24 {
+                let _ = self.step(Vec::new());
+                if let Ok(res) = rx.try_recv() {
+                    let out = res?;
+                    let txt = String::from_utf8_lossy(&out.response_bytes);
+                    return serde_json::from_str(&txt).map_err(|e| format!("invalid control reply `{txt}`: {e}"));
+                }
+            }
+            Err(format!("timed out waiting for LiveControlRequest reply to {req}"))
+        }
+
+        fn send_ok(&mut self, req: Value, msg: &str) -> Result<Value, String> {
+            let resp = self.send_ctrl(req)?;
+            assert_eq!(resp.get("ok").and_then(Value::as_bool), Some(true), "{msg}: {resp}");
+            Ok(resp)
+        }
+
+        fn open_edit_modal(&mut self, ds_id: &str, entry_id: &str) -> Result<SheetId, String> {
+            self.send_ok(json!({ "id": "sw", "method": "ui.switch_tab", "params": { "sheet_id": ds_id } }), ds_id)?;
+            self.send_ok(
+                json!({ "id": "az", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": "toolbar.analyze" } }),
+                "az",
+            )?;
+            self.send_ok(
+                json!({ "id": "ans", "method": "ui.answer_dialog", "params": { "action": "ok", "fields": { "entry_id": entry_id } } }),
+                entry_id,
+            )?;
+            let _ = self.step(Vec::new());
+            let rs_id = if let ActiveDialog::EditAnalysisParameters { result_sheet_id } =
+                &self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog
+            {
+                result_sheet_id.clone()
+            } else {
+                let rs_id =
+                    self.app.runtime().window(self.win_id)?.app().document().result_sheets.last().map(|r| r.id.clone()).ok_or("missing result")?;
+                let doc = self.app.runtime().window(self.win_id)?.app().document().clone();
+                assert!(self.app.runtime_mut().window_mut(self.win_id)?.app_mut().canvas_dialogs.open_edit_parameters(&doc, &rs_id));
+                let _ = self.step(Vec::new());
+                rs_id
+            };
+            assert!(matches!(
+                self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog,
+                ActiveDialog::EditAnalysisParameters { .. }
+            ));
+            Ok(rs_id)
+        }
+
+        fn verify_two_enter_textbox_commit(&mut self, widget_id: &str, text: &str, by_coords: bool) -> Result<(), String> {
+            if by_coords {
+                let dlg =
+                    self.send_ok(json!({ "id": "di", "method": "ui.inspect", "params": { "scope": "dialog", "include_bounds": true } }), "di")?;
+                let b = dlg
+                    .pointer("/result/dialog/controls")
+                    .and_then(Value::as_array)
+                    .and_then(|nodes| nodes.iter().find(|n| n.get("widget_id").and_then(Value::as_str) == Some(widget_id)))
+                    .and_then(|n| n.get("bounds"))
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| format!("missing {widget_id} bounds in {dlg}"))?;
+                let x = b.first().and_then(Value::as_f64).ok_or("x")? + b.get(2).and_then(Value::as_f64).ok_or("w")? * 0.5;
+                let y = b.get(1).and_then(Value::as_f64).ok_or("y")? + b.get(3).and_then(Value::as_f64).ok_or("h")? * 0.5;
+                self.send_ok(json!({ "id": "cc", "method": "ui.pointer_gesture", "params": { "action": "click", "x": x, "y": y } }), "coord click")?;
+                let fi = self.send_ok(json!({ "id": "fi", "method": "ui.inspect", "params": { "scope": "dialog" } }), "fi")?;
+                assert_eq!(fi.pointer("/result/focus_widget_id").and_then(Value::as_str), Some(widget_id), "focus mismatch: {fi}");
+            } else {
+                self.send_ok(
+                    json!({ "id": "wc", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": widget_id } }),
+                    widget_id,
+                )?;
+            }
+            self.send_ok(json!({ "id": "tt", "method": "ui.type_text", "params": { "text": text, "clear_first": true } }), text)?;
+            self.send_ok(json!({ "id": "e1", "method": "ui.press_key", "params": { "key": "Enter" } }), "1st Enter")?;
+            assert!(matches!(
+                self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog,
+                ActiveDialog::EditAnalysisParameters { .. }
+            ));
+            let ie1 = self.send_ok(json!({ "id": "ie1", "method": "ui.inspect", "params": { "scope": "dialog" } }), "ie1")?;
+            assert_eq!(ie1.pointer("/result/focus_widget_id"), Some(&Value::Null));
+            self.send_ok(json!({ "id": "e2", "method": "ui.press_key", "params": { "key": "Enter" } }), "2nd Enter")?;
+            assert_eq!(self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::None);
+            Ok(())
+        }
+    }
+
+    fn ptr_btn(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    fn key_evt(key: egui::Key, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers }
     }
 
     #[test]
     fn inline_editor_42_key_plus_text_does_not_duplicate() -> Result<(), String> {
-        let (mut runtime, id) = test_runtime(ViewportMetrics::new(960.0, 640.0, 1.0))?;
-        {
-            let win = runtime.window_mut(id)?;
-            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-inline", "kind": "column", "cols": 1, "rows": 3 }))?;
-        }
-        let mut app = CurveBookNativeApp::new(runtime, id, None);
-        let ctx = egui::Context::default();
-        ctx.set_fonts(build_egui_font_definitions(None));
-
-        let step = |native: &mut CurveBookNativeApp, events: Vec<egui::Event>| {
-            let mut out = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))),
-                    events,
-                    ..Default::default()
-                },
-                |ui| native.step_ui(ui),
-            );
-            out.textures_delta.clear();
-        };
-
-        for _ in 0..2 {
-            step(&mut app, Vec::new());
-        }
-        let cell_center = app.inspect_meta().find_by_widget_id("grid.cell.0.0.0").ok_or("missing grid.cell.0.0.0")?.clipped_rect.center();
-        step(
-            &mut app,
-            vec![
-                egui::Event::PointerMoved(cell_center),
-                egui::Event::PointerButton {
-                    pos: cell_center,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-                egui::Event::PointerButton {
-                    pos: cell_center,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                },
-                egui::Event::PointerButton {
-                    pos: cell_center,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-                egui::Event::PointerButton {
-                    pos: cell_center,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
-        );
-        step(&mut app, Vec::new());
-        step(
-            &mut app,
-            vec![
-                egui::Event::Key { key: egui::Key::Num4, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
-                egui::Event::Text(String::from("4")),
-                egui::Event::Key { key: egui::Key::Num2, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
-                egui::Event::Text(String::from("2")),
-                egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
-            ],
-        );
-        step(&mut app, Vec::new());
-
-        let win = app.runtime.window(id)?;
-        let ds = win.app().document().data_sheet(&SheetId::new("ds-inline")).ok_or("missing ds-inline")?;
-        assert_eq!(ds.cell(curvebook_doc::CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), Some(42.0));
+        let mut h = GuiHarness::new(960.0, 640.0, false, |rt, id| {
+            rt.window_mut(id)?.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-inline", "kind": "column", "cols": 1, "rows": 3 }))
+        })?;
+        h.settle(2);
+        let c = h.app.inspect_meta().find_by_widget_id("grid.cell.0.0.0").ok_or("missing grid.cell.0.0.0")?.clipped_rect.center();
+        let _ = h.step(vec![egui::Event::PointerMoved(c), ptr_btn(c, true), ptr_btn(c, false), ptr_btn(c, true), ptr_btn(c, false)]);
+        let _ = h.step(Vec::new());
+        let _ = h.step(vec![
+            key_evt(egui::Key::Num4, true, egui::Modifiers::NONE),
+            egui::Event::Text(String::from("4")),
+            key_evt(egui::Key::Num2, true, egui::Modifiers::NONE),
+            egui::Event::Text(String::from("2")),
+            key_evt(egui::Key::Enter, true, egui::Modifiers::NONE),
+        ]);
+        let _ = h.step(Vec::new());
+        let ds = h.app.runtime.window(h.win_id)?.app().document().data_sheet(&SheetId::new("ds-inline")).ok_or("missing ds-inline")?;
+        assert_eq!(ds.cell(CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), Some(42.0));
         Ok(())
     }
 
     #[test]
     fn hidpi_canvas_resize_and_relative_pointer_offset() -> Result<(), String> {
-        let (runtime, id) = test_runtime(ViewportMetrics::new(400.0, 300.0, 1.0))?;
-        let mut app = CurveBookNativeApp::new(runtime, id, None);
-        let ctx = egui::Context::default();
-        ctx.set_fonts(build_egui_font_definitions(None));
-        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 500.0));
-
-        let mut out = ctx.run_ui(
+        let mut h = GuiHarness::new(400.0, 300.0, false, |_, _| Ok(()))?;
+        let mut out = h.ctx.run_ui(
             egui::RawInput {
-                screen_rect: Some(rect),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 500.0))),
                 viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(2.0), ..Default::default() })]
                     .into_iter()
                     .collect(),
                 events: vec![egui::Event::PointerMoved(egui::pos2(120.0, 74.0))],
                 ..Default::default()
             },
-            |ui| app.step_ui(ui),
+            |ui| h.app.step_ui(ui),
         );
         out.textures_delta.clear();
-
-        let win = app.runtime.window(id)?;
+        assert!(!out.shapes.is_empty());
+        let win = h.app.runtime.window(h.win_id)?;
         assert_eq!(win.viewport().scale_factor, 2.0);
-        assert!(app.last_frame_size[0] > 0 && app.last_frame_size[1] > 0);
+        assert!(h.app.last_frame_size[0] > 0 && h.app.last_frame_size[1] > 0);
         assert!(win.viewport().logical_width > 0.0 && win.viewport().logical_width <= 800.0);
         assert!(win.viewport().logical_height > 0.0 && win.viewport().logical_height <= 500.0);
         Ok(())
@@ -2785,27 +2853,14 @@ mod tests {
 
     #[test]
     fn unsaved_close_request_opens_modal_and_cancels_os_close() -> Result<(), String> {
-        let (mut runtime, id) = test_runtime(ViewportMetrics::new(960.0, 640.0, 1.0))?;
-        {
-            let win = runtime.window_mut(id)?;
-            win.execute_and_journal("table.importCsv", json!({ "csv": "X,Y\n1,2\n" }))?;
-        }
-        let mut app = CurveBookNativeApp::new(runtime, id, None);
-        let ctx = egui::Context::default();
-        let mut raw_input =
-            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(960.0, 640.0))), ..Default::default() };
-        raw_input.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
-
-        let mut output = ctx.run_ui(raw_input, |ui| {
-            app.handle_close_request(ui.ctx(), id);
-        });
-        output.textures_delta.clear();
-
-        assert!(app.close_dialog_open);
-        assert!(!app.close_confirmed);
-        let cancel_sent =
-            output.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose));
-        assert!(cancel_sent);
+        let mut h =
+            GuiHarness::new(960.0, 640.0, false, |rt, id| rt.window_mut(id)?.execute_and_journal("table.importCsv", json!({ "csv": "X,Y\n1,2\n" })))?;
+        let mut raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, h.size)), ..Default::default() };
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+        let mut out = h.ctx.run_ui(raw, |ui| h.app.handle_close_request(ui.ctx(), h.win_id));
+        out.textures_delta.clear();
+        assert!(h.app.close_dialog_open && !h.app.close_confirmed);
+        assert!(out.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose)));
         Ok(())
     }
 
@@ -2813,60 +2868,21 @@ mod tests {
     struct TestGuiClipboard {
         fail_writes: bool,
         available: bool,
-        writes_text: curvebook_platform::sync::RwLock<Vec<String>>,
-        writes_bundle_count: std::sync::atomic::AtomicUsize,
-    }
-
-    impl TestGuiClipboard {
-        fn new(available: bool, fail_writes: bool) -> Self {
-            Self {
-                fail_writes,
-                available,
-                writes_text: curvebook_platform::sync::RwLock::named("gui_window.test_clipboard", Vec::new()),
-                writes_bundle_count: std::sync::atomic::AtomicUsize::new(0),
-            }
-        }
     }
 
     impl crate::desktop_host::OsClipboardAdapter for TestGuiClipboard {
-        fn write_text(&self, text: &str) -> Result<curvebook_ui_egui::OsAdapterStatus, String> {
+        fn write_text(&self, _text: &str) -> Result<curvebook_ui_egui::OsAdapterStatus, String> {
             if self.fail_writes {
                 return Err(String::from("pasteboard write denied"));
             }
-            if let Ok(mut guard) = self.writes_text.write() {
-                guard.push(text.to_owned());
-            }
-            Ok(curvebook_ui_egui::OsAdapterStatus {
-                available: self.available,
-                availability: if self.available {
-                    curvebook_ui_egui::OsAdapterAvailability::Submitted
-                } else {
-                    curvebook_ui_egui::OsAdapterAvailability::Unavailable
-                },
-                backend: String::from("mock"),
-                detail: String::from(if self.available { "ok" } else { "headless" }),
-                text: None,
-                job_id: None,
-            })
+            Ok(self.status())
         }
 
         fn write_bundle(&self, _bundle: &curvebook_ui_egui::ClipboardBundle) -> Result<curvebook_ui_egui::OsAdapterStatus, String> {
             if self.fail_writes {
                 return Err(String::from("bundle write denied"));
             }
-            self.writes_bundle_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(curvebook_ui_egui::OsAdapterStatus {
-                available: self.available,
-                availability: if self.available {
-                    curvebook_ui_egui::OsAdapterAvailability::Submitted
-                } else {
-                    curvebook_ui_egui::OsAdapterAvailability::Unavailable
-                },
-                backend: String::from("mock"),
-                detail: String::from(if self.available { "ok" } else { "headless" }),
-                text: None,
-                job_id: None,
-            })
+            Ok(self.status())
         }
 
         fn read_text(&self) -> Result<curvebook_ui_egui::OsAdapterStatus, String> {
@@ -2874,70 +2890,58 @@ mod tests {
         }
     }
 
+    impl TestGuiClipboard {
+        fn status(&self) -> curvebook_ui_egui::OsAdapterStatus {
+            curvebook_ui_egui::OsAdapterStatus {
+                available: self.available,
+                availability: if self.available {
+                    curvebook_ui_egui::OsAdapterAvailability::Submitted
+                } else {
+                    curvebook_ui_egui::OsAdapterAvailability::Unavailable
+                },
+                backend: String::from("mock"),
+                detail: String::from(if self.available { "ok" } else { "headless" }),
+                text: None,
+                job_id: None,
+            }
+        }
+    }
+
     #[test]
     fn r2_s11_07_graph_copy_skips_ctx_copy_text_surfaces_errors_and_cut_clears_selection() -> Result<(), String> {
-        let (mut runtime, id) = test_runtime(ViewportMetrics::new(960.0, 640.0, 1.0))?;
-        runtime.set_clipboard_adapter(Box::new(TestGuiClipboard::new(true, false)));
-        let graph_id = {
-            let win = runtime.window_mut(id)?;
+        let mut graph_id = SheetId::new("g");
+        let mut h = GuiHarness::new(960.0, 640.0, false, |rt, id| {
+            rt.set_clipboard_adapter(Box::new(TestGuiClipboard { available: true, fail_writes: false }));
+            let win = rt.window_mut(id)?;
             win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-1", "kind": "column", "cols": 1, "rows": 3, "auto_graph": true }))?;
             win.execute_and_journal("table.setCell", json!({ "sheet_id": "ds-1", "row": 0, "col": 0, "value": 11.0 }))?;
             win.execute_and_journal("table.setCell", json!({ "sheet_id": "ds-1", "row": 1, "col": 0, "value": 22.0 }))?;
-            let graph_id = win.app().document().graph_sheets.first().ok_or("missing graph")?.id.clone();
-            win.execute_and_journal("sheet.select", json!({ "sheet_id": graph_id.as_str() }))?;
-            graph_id
-        };
-        let mut app = CurveBookNativeApp::new(runtime, id, None);
-        let ctx = egui::Context::default();
-        ctx.set_fonts(build_egui_font_definitions(None));
+            graph_id = win.app().document().graph_sheets.first().ok_or("missing graph")?.id.clone();
+            win.execute_and_journal("sheet.select", json!({ "sheet_id": graph_id.as_str() }))
+        })?;
 
-        let run_events = |native: &mut CurveBookNativeApp, events: Vec<egui::Event>| {
-            let mut out = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))),
-                    events,
-                    ..Default::default()
-                },
-                |ui| native.step_ui(ui),
-            );
-            out.textures_delta.clear();
-            out
-        };
+        // 1. Copy on GraphSheet must NOT emit OutputCommand::CopyText.
+        let _ = h.step(Vec::new());
+        let out_graph = h.step(vec![egui::Event::Copy]);
+        assert!(h.app.runtime.clipboard_bundle().is_some() && h.app.runtime.clipboard_text().is_none());
+        assert!(!out_graph.platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(_))));
 
-        // 1. Copy on GraphSheet must NOT emit OutputCommand::CopyText (preserves PDF/PNG/HTML bundle).
-        run_events(&mut app, Vec::new());
-        let out_graph = run_events(&mut app, vec![egui::Event::Copy]);
-        assert!(app.runtime.clipboard_bundle().is_some());
-        assert!(app.runtime.clipboard_text().is_none());
-        let emitted_copy_text = out_graph.platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(_)));
-        assert!(!emitted_copy_text, "graph bundle copy must NOT overwrite OS multi-flavor clipboard with ctx.copy_text");
-
-        // 2. Cut on DataSheet clears ONLY the selected cell, leaving unselected rows intact.
-        {
-            let win = app.runtime.window_mut(id)?;
-            win.execute_and_journal("sheet.select", json!({ "sheet_id": "ds-1" }))?;
-        }
-        run_events(&mut app, Vec::new());
-        let cell_pt = app.inspect_meta().find_by_widget_id("grid.cell.0.0.0").ok_or("missing grid.cell.0.0.0")?.clipped_rect.center();
-        run_events(
-            &mut app,
-            vec![
-                egui::Event::PointerMoved(cell_pt),
-                egui::Event::PointerButton { pos: cell_pt, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
-                egui::Event::PointerButton { pos: cell_pt, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
-            ],
-        );
-        run_events(&mut app, vec![egui::Event::Cut]);
-        let ds = app.runtime.window(id)?.app().document().data_sheet(&SheetId::new("ds-1")).ok_or("missing ds-1")?;
-        assert_eq!(ds.cell(curvebook_doc::CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), None);
-        assert_eq!(ds.cell(curvebook_doc::CellCoord::new(1, 0, 0)).and_then(|c| c.active_number()), Some(22.0));
+        // 2. Cut on DataSheet clears ONLY the selected cell.
+        h.app.runtime.window_mut(h.win_id)?.execute_and_journal("sheet.select", json!({ "sheet_id": "ds-1" }))?;
+        let _ = h.step(Vec::new());
+        let pt = h.app.inspect_meta().find_by_widget_id("grid.cell.0.0.0").ok_or("missing grid.cell.0.0.0")?.clipped_rect.center();
+        let _ = h.step(vec![egui::Event::PointerMoved(pt), ptr_btn(pt, true), ptr_btn(pt, false)]);
+        let _ = h.step(vec![egui::Event::Cut]);
+        let ds = h.app.runtime.window(h.win_id)?.app().document().data_sheet(&SheetId::new("ds-1")).ok_or("missing ds-1")?;
+        assert_eq!(ds.cell(CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), None);
+        assert_eq!(ds.cell(CellCoord::new(1, 0, 0)).and_then(|c| c.active_number()), Some(22.0));
 
         // 3. Failing OS clipboard surfaced in status_banner.
-        app.runtime.window_mut(id)?.execute_and_journal("sheet.select", json!({ "sheet_id": graph_id.as_str() }))?;
-        app.runtime.set_clipboard_adapter(Box::new(TestGuiClipboard::new(true, true)));
-        run_events(&mut app, Vec::new());
-        run_events(&mut app, vec![egui::Event::Copy]);
-        assert!(app.status_banner().is_some_and(|s| s.contains("denied")), "banner: {:?}", app.status_banner());
+        h.app.runtime.window_mut(h.win_id)?.execute_and_journal("sheet.select", json!({ "sheet_id": graph_id.as_str() }))?;
+        h.app.runtime.set_clipboard_adapter(Box::new(TestGuiClipboard { available: true, fail_writes: true }));
+        let _ = h.step(Vec::new());
+        let _ = h.step(vec![egui::Event::Copy]);
+        assert!(h.app.status_banner().is_some_and(|s| s.contains("denied")));
         Ok(())
     }
 
@@ -2949,63 +2953,53 @@ mod tests {
         let archive_path = base_dir.join("project.curvebook");
         let unpacked_path = base_dir.join("project.curvebook.d");
 
-        let (mut runtime, id) = test_runtime(ViewportMetrics::new(960.0, 640.0, 1.0))?;
-        {
-            let win = runtime.window_mut(id)?;
+        let mut h = GuiHarness::new(960.0, 640.0, false, |rt, id| {
+            let win = rt.window_mut(id)?;
             win.execute_and_journal("sheet.createData", json!({ "sheet_id": "sv-1", "kind": "column", "cols": 1, "rows": 2 }))?;
             win.execute_and_journal("project.save", json!({ "path": archive_path.to_string_lossy(), "unpacked": false }))?;
             win.app_mut().session_mut().set_file_path(Some(archive_path.clone()), true);
-            win.execute_and_journal("table.setCell", json!({ "sheet_id": "sv-1", "row": 0, "col": 0, "value": 77.25 }))?;
+            win.execute_and_journal("table.setCell", json!({ "sheet_id": "sv-1", "row": 0, "col": 0, "value": 77.25 }))
+        })?;
+        let cmd_s = key_evt(egui::Key::S, true, egui::Modifiers::COMMAND);
+
+        for is_vars in [false, true] {
+            let g = &mut h.app.runtime.window_mut(h.win_id)?.app_mut().grid;
+            if is_vars {
+                g.variables_dialog.open = true;
+            } else {
+                g.import_wizard.open = true;
+            }
+            h.app.dispatch_egui_events(&h.ctx, h.win_id, std::slice::from_ref(&cmd_s));
+            assert!(h.app.runtime.window(h.win_id)?.has_unsaved_changes());
+            let g = &mut h.app.runtime.window_mut(h.win_id)?.app_mut().grid;
+            if is_vars {
+                g.variables_dialog.open = false;
+            } else {
+                g.import_wizard.open = false;
+            }
         }
 
-        let mut app = CurveBookNativeApp::new(runtime, id, None);
-        let ctx = egui::Context::default();
-        let cmd_s = egui::Event::Key {
-            key: egui::Key::S,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers { command: true, ..egui::Modifiers::NONE },
-        };
-
-        // Blocked while import_wizard / variables_dialog / close_dialog_open are open.
-        app.runtime.window_mut(id)?.app_mut().grid.import_wizard.open = true;
-        app.dispatch_egui_events(&ctx, id, std::slice::from_ref(&cmd_s));
-        assert!(app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must be blocked while ImportWizard is open");
-        app.runtime.window_mut(id)?.app_mut().grid.import_wizard.open = false;
-
-        app.runtime.window_mut(id)?.app_mut().grid.variables_dialog.open = true;
-        app.dispatch_egui_events(&ctx, id, std::slice::from_ref(&cmd_s));
-        assert!(app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must be blocked while VariablesDialog is open");
-        app.runtime.window_mut(id)?.app_mut().grid.variables_dialog.open = false;
-
-        // With all modals closed, Cmd+S saves archive to disk cleanly.
-        app.dispatch_egui_events(&ctx, id, std::slice::from_ref(&cmd_s));
-        assert!(!app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must persist dirty archive");
+        h.app.dispatch_egui_events(&h.ctx, h.win_id, std::slice::from_ref(&cmd_s));
+        assert!(!h.app.runtime.window(h.win_id)?.has_unsaved_changes());
         let reopened = curvebook_format::open_project_file(&archive_path).map_err(|e| e.to_string())?;
         assert_eq!(
-            reopened.data_sheet(&SheetId::new("sv-1")).and_then(|s| s.cell(curvebook_doc::CellCoord::new(0, 0, 0))).and_then(|c| c.active_number()),
+            reopened.data_sheet(&SheetId::new("sv-1")).and_then(|s| s.cell(CellCoord::new(0, 0, 0))).and_then(|c| c.active_number()),
             Some(77.25)
         );
 
-        // Save as unpacked `.curvebook.d`, dirty again, and confirm Cmd+S saves back as unpacked dir (`unpacked: true`).
         {
-            let win = app.runtime.window_mut(id)?;
+            let win = h.app.runtime.window_mut(h.win_id)?;
             win.execute_and_journal("project.save", json!({ "path": unpacked_path.to_string_lossy(), "unpacked": true }))?;
             win.app_mut().session_mut().set_file_path(Some(unpacked_path.clone()), true);
             win.execute_and_journal("table.setCell", json!({ "sheet_id": "sv-1", "row": 1, "col": 0, "value": 88.5 }))?;
         }
-        app.dispatch_egui_events(&ctx, id, &[cmd_s]);
-        assert!(!app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must persist dirty unpacked dir");
+        h.app.dispatch_egui_events(&h.ctx, h.win_id, &[cmd_s]);
+        assert!(!h.app.runtime.window(h.win_id)?.has_unsaved_changes());
         let reopened_dir = curvebook_format::open_project_unpacked_dir(&unpacked_path).map_err(|e| e.to_string())?;
         assert_eq!(
-            reopened_dir
-                .data_sheet(&SheetId::new("sv-1"))
-                .and_then(|s| s.cell(curvebook_doc::CellCoord::new(1, 0, 0)))
-                .and_then(|c| c.active_number()),
+            reopened_dir.data_sheet(&SheetId::new("sv-1")).and_then(|s| s.cell(CellCoord::new(1, 0, 0))).and_then(|c| c.active_number()),
             Some(88.5)
         );
-
         let _ = std::fs::remove_dir_all(&base_dir);
         Ok(())
     }
@@ -3013,106 +3007,59 @@ mod tests {
     #[cfg(feature = "accessibility")]
     #[test]
     fn r10_w5_accesskit_tree_sync_preserves_single_parent_and_focus() -> Result<(), String> {
-        let (mut runtime, id) = test_runtime(ViewportMetrics::new(1024.0, 640.0, 1.0))?;
-        {
-            let win = runtime.window_mut(id)?;
-            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ak-1", "kind": "column", "cols": 2, "rows": 3 }))?;
-        }
-        let mut app = CurveBookNativeApp::new(runtime, id, None);
-        let ctx = egui::Context::default();
-        ctx.set_fonts(build_egui_font_definitions(None));
-        ctx.enable_accesskit();
-        let raw_input =
-            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0))), ..Default::default() };
-
+        let mut h = GuiHarness::new(1024.0, 640.0, false, |rt, id| {
+            rt.window_mut(id)?.execute_and_journal("sheet.createData", json!({ "sheet_id": "ak-1", "kind": "column", "cols": 2, "rows": 3 }))
+        })?;
+        h.ctx.enable_accesskit();
         let mut last_update = None;
         for _ in 0..3 {
-            let mut output = ctx.run_ui(raw_input.clone(), |ui| {
-                app.step_ui(ui);
-            });
-            output.textures_delta.clear();
-            last_update = output.platform_output.accesskit_update;
+            last_update = h.step(Vec::new()).platform_output.accesskit_update;
         }
-        let update = last_update.ok_or_else(|| String::from("expected accesskit_update when accesskit is enabled"))?;
-        assert!(!update.nodes.is_empty(), "expected non-empty accesskit nodes");
-
+        let update = last_update.ok_or("expected accesskit_update")?;
+        assert!(!update.nodes.is_empty());
         let mut parent_counts: std::collections::BTreeMap<egui::accesskit::NodeId, usize> = std::collections::BTreeMap::new();
         for (_, node) in &update.nodes {
             for &child_id in node.children() {
                 *parent_counts.entry(child_id).or_default() += 1;
             }
         }
-        for (nid, count) in &parent_counts {
-            assert_eq!(*count, 1, "accesskit node {nid:?} has {count} parents (expected 1)");
-        }
-        let analyze_entry = app.inspect_meta().find_by_widget_id("toolbar.analyze").ok_or("missing toolbar.analyze in inspect_meta")?.clone();
-        assert!(
-            update.nodes.iter().any(|(nid, _)| *nid == analyze_entry.accesskit_id),
-            "expected toolbar.analyze accesskit node in AccessKit TreeUpdate"
-        );
+        assert!(parent_counts.values().all(|&c| c == 1));
+        let analyze = h.app.inspect_meta().find_by_widget_id("toolbar.analyze").ok_or("missing toolbar.analyze")?.clone();
+        assert!(update.nodes.iter().any(|(nid, _)| *nid == analyze.accesskit_id));
 
-        // Dispatch AccessKit Click action on `toolbar.analyze` -> opens AnalyzeSheet dialog.
         let req = egui::accesskit::ActionRequest {
             action: egui::accesskit::Action::Click,
             target_tree: egui::accesskit::TreeId::ROOT,
-            target_node: analyze_entry.accesskit_id,
+            target_node: analyze.accesskit_id,
             data: None,
         };
-        let mut click_in = raw_input.clone();
-        click_in.events.push(egui::Event::AccessKitActionRequest(req));
-        let mut out_click = ctx.run_ui(click_in, |ui| app.step_ui(ui));
-        out_click.textures_delta.clear();
-        let mut out_settle = ctx.run_ui(raw_input, |ui| app.step_ui(ui));
-        out_settle.textures_delta.clear();
-        assert!(
-            matches!(app.runtime.window(id)?.app().canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }),
-            "expected AccessKit Click on toolbar.analyze to open AnalyzeSheet"
-        );
+        let _ = h.step(vec![egui::Event::AccessKitActionRequest(req)]);
+        let _ = h.step(Vec::new());
+        assert!(matches!(h.app.runtime.window(h.win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }));
         Ok(())
     }
 
     #[test]
     fn language_picker_labels_mark_15_non_english_locales_as_draft() {
         use curvebook_ui_egui::LOCALES;
-        assert_eq!(LOCALES.len(), 16);
-        assert_eq!(locale_picker_label("en"), "English (en)");
-        let draft_labels: Vec<String> = LOCALES.iter().skip(1).map(|&loc| locale_picker_label(loc)).collect();
-        assert_eq!(draft_labels.len(), 15);
-        for (&loc, label) in LOCALES.iter().skip(1).zip(&draft_labels) {
-            assert!(label.ends_with(" [Draft]"), "expected `[Draft]` suffix on `{loc}`, got `{label}`");
-            assert!(label.contains(&format!("({loc})")), "expected locale tag `({loc})` in `{label}`");
+        assert_eq!((LOCALES.len(), locale_picker_label("en").as_str()), (16, "English (en)"));
+        for &loc in LOCALES.iter().skip(1) {
+            let label = locale_picker_label(loc);
+            assert!(label.ends_with(" [Draft]") && label.contains(&format!("({loc})")));
         }
-
-        assert_eq!(BETA_ACTIVE_LOCALES.len(), 14);
-        assert_eq!(BETA_ACTIVE_LOCALES.first().copied(), Some("en"));
-        let beta_drafts: Vec<String> = BETA_ACTIVE_LOCALES.iter().skip(1).map(|&loc| locale_picker_label(loc)).collect();
-        assert_eq!(beta_drafts.len(), 13);
-        for (&loc, label) in BETA_ACTIVE_LOCALES.iter().skip(1).zip(&beta_drafts) {
-            assert!(!curvebook_ui_egui::i18n::is_rtl_locale(loc), "RTL locale `{loc}` must be excluded from BETA_ACTIVE_LOCALES");
-            assert!(label.ends_with(" [Draft]"), "expected `[Draft]` suffix on `{loc}`, got `{label}`");
+        assert_eq!((BETA_ACTIVE_LOCALES.len(), BETA_ACTIVE_LOCALES.first().copied()), (14, Some("en")));
+        for &loc in BETA_ACTIVE_LOCALES.iter().skip(1) {
+            assert!(!curvebook_ui_egui::i18n::is_rtl_locale(loc) && locale_picker_label(loc).ends_with(" [Draft]"));
         }
-        assert_eq!(normalize_beta_gui_locale("ar"), "en");
-        assert_eq!(normalize_beta_gui_locale("he"), "en");
-        assert_eq!(normalize_beta_gui_locale("fa"), "en");
-        assert_eq!(normalize_beta_gui_locale("ur"), "en");
-        assert_eq!(normalize_beta_gui_locale("pt"), "pt-BR");
+        for (raw, expected) in [("ar", "en"), ("he", "en"), ("fa", "en"), ("ur", "en"), ("pt", "pt-BR")] {
+            assert_eq!(normalize_beta_gui_locale(raw), expected);
+        }
     }
 
     #[test]
     fn r15_5_gui_window_pure_egui_live_gesture_analyze_and_edit_params() -> Result<(), String> {
-        let mut runtime = DesktopHostRuntime::new(DesktopHostConfig {
-            in_window_menus: true,
-            new_instance: true,
-            locale_override: None,
-            theme_override: None,
-            recovery_root: None,
-            initial_viewport: ViewportMetrics::new(1024.0, 640.0, 1.0),
-            ..DesktopHostConfig::default()
-        });
-        let opened = runtime.dispatch(DesktopHostEvent::WindowOpened { initial_file: None, viewport: ViewportMetrics::new(1024.0, 640.0, 1.0) })?;
-        let id = opened.window_id.ok_or_else(|| String::from("missing window id"))?;
-        {
-            let win = runtime.window_mut(id)?;
+        let mut h = GuiHarness::new(1024.0, 640.0, true, |rt, id| {
+            let win = rt.window_mut(id)?;
             win.execute_and_journal("sheet.createData", json!({ "sheet_id": "col-h1", "kind": "column", "cols": 3, "rows": 4 }))?;
             for col in 0..3 {
                 for row in 0..4 {
@@ -3120,88 +3067,28 @@ mod tests {
                     win.execute_and_journal("table.setCell", json!({ "sheet_id": "col-h1", "row": row, "col": col, "value": val }))?;
                 }
             }
-        }
+            Ok(())
+        })?;
+        h.settle(3);
+        assert!(h.app.inspect_meta().find_by_widget_id("toolbar.analyze").is_some());
 
-        let (req_tx, req_rx) = mpsc::channel();
-        let ctrl = LiveControlChannel {
-            request_rx: req_rx,
-            egui_ctx_cell: Arc::new(OnceLock::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
-            post_hook: None,
-        };
-        let mut app = CurveBookNativeApp::new(runtime, id, None).with_live_control(ctrl);
-        let ctx = egui::Context::default();
-        ctx.set_fonts(build_egui_font_definitions(None));
+        let g1 = h.send_ok(json!({"id":"g1","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"toolbar.analyze"}}), "g1")?;
+        assert_eq!(g1.pointer("/result/egui_dispatched").and_then(Value::as_bool), Some(true));
+        let _ = h.step(Vec::new());
+        assert!(matches!(h.app.runtime().window(h.win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }));
 
-        let step_once = |native: &mut CurveBookNativeApp, extra: Vec<egui::Event>| {
-            let mut raw_input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 640.0))),
-                events: extra,
-                ..Default::default()
-            };
-            native.drain_synthetic_events_into(&mut raw_input);
-            let mut out = ctx.run_ui(raw_input, |ui| native.step_ui(ui));
-            out.textures_delta.clear();
-        };
-
-        // Settle initial Column grid frame so inspect_meta captures `toolbar.analyze`.
-        for _ in 0..3 {
-            step_once(&mut app, Vec::new());
-        }
-        assert!(app.inspect_meta().find_by_widget_id("toolbar.analyze").is_some(), "expected settled toolbar.analyze");
-
-        let auth = ControlAuth::from_token("test-token-r15-5").map_err(|e| e.to_string())?;
-        let send_ctrl = |native: &mut CurveBookNativeApp, req_json: Vec<u8>| -> Result<serde_json::Value, String> {
-            let (tx, rx) = mpsc::channel();
-            req_tx
-                .send(LiveControlRequest { raw_bytes: req_json, auth: auth.clone(), conn_authenticated: true, reply_tx: tx })
-                .map_err(|e| e.to_string())?;
-            for _ in 0..8 {
-                step_once(native, Vec::new());
-                if let Ok(res) = rx.try_recv() {
-                    let out = res?;
-                    let txt = String::from_utf8_lossy(&out.response_bytes);
-                    return serde_json::from_str(&txt).map_err(|e| format!("invalid control reply `{txt}`: {e}"));
-                }
-            }
-            Err(String::from("timed out waiting for LiveControlRequest reply"))
-        };
-
-        let gesture_val =
-            send_ctrl(&mut app, br#"{"id":"g1","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"toolbar.analyze"}}"#.to_vec())?;
-        assert_eq!(gesture_val.pointer("/result/egui_dispatched").and_then(serde_json::Value::as_bool), Some(true), "got {gesture_val}");
-        step_once(&mut app, Vec::new());
-
-        // Native egui AnalyzeSheet modal rendered cleanly over Column grid.
-        assert!(matches!(app.runtime().window(id)?.app().canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }));
-
-        // Select `analyze.entry.stats.one_way_anova` via live `egui` widget pointer click & confirm!
-        let sel_val = send_ctrl(
-            &mut app,
-            br#"{"id":"sel","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"analyze.entry.stats.one_way_anova"}}"#.to_vec(),
+        h.send_ok(
+            json!({"id":"sel","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"analyze.entry.stats.one_way_anova"}}),
+            "sel",
         )?;
-        assert_eq!(sel_val.get("ok").and_then(serde_json::Value::as_bool), Some(true), "select one_way_anova failed: {sel_val}");
+        h.send_ok(json!({"id":"run","method":"ui.answer_dialog","params":{"dialog_id":"analyze_sheet","action":"ok"}}), "run")?;
+        let _ = h.step(Vec::new());
+        let active_rs = h.app.runtime().window(h.win_id)?.app().document().active_sheet_id.clone().ok_or("expected ResultSheet")?;
+        assert!(h.app.runtime().window(h.win_id)?.app().document().result_sheet(&active_rs).is_some());
 
-        let ok_val =
-            send_ctrl(&mut app, br#"{"id":"run","method":"ui.answer_dialog","params":{"dialog_id":"analyze_sheet","action":"ok"}}"#.to_vec())?;
-        assert_eq!(ok_val.get("ok").and_then(serde_json::Value::as_bool), Some(true), "confirm analyze_sheet failed: {ok_val}");
-        step_once(&mut app, Vec::new());
-        let active_rs = app.runtime().window(id)?.app().document().active_sheet_id.clone().ok_or("expected active ResultSheet")?;
-        assert!(app.runtime().window(id)?.app().document().result_sheet(&active_rs).is_some());
-
-        // Press Cmd+T on ResultSheet -> opens `egui` One-Way ANOVA modal!
-        step_once(
-            &mut app,
-            vec![
-                egui::Event::Key { key: egui::Key::T, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND },
-                egui::Event::Key { key: egui::Key::T, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::COMMAND },
-            ],
-        );
-        step_once(&mut app, Vec::new());
-        assert!(
-            matches!(app.runtime().window(id)?.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }),
-            "Cmd+T on ResultSheet must open egui EditAnalysisParameters modal"
-        );
+        let _ = h.step(vec![key_evt(egui::Key::T, true, egui::Modifiers::COMMAND), key_evt(egui::Key::T, false, egui::Modifiers::COMMAND)]);
+        let _ = h.step(Vec::new());
+        assert!(matches!(h.app.runtime().window(h.win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
         Ok(())
     }
 
@@ -3213,8 +3100,8 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert_eq!((icon.width, icon.height), (256, 256));
         assert_eq!(icon.rgba.len(), (icon.width as usize) * (icon.height as usize) * 4);
-        assert_eq!(icon.rgba[3], 0, "outer corner should be transparent");
-        assert!(icon.rgba.as_chunks::<4>().0.iter().any(|px| px[3] == 255), "icon must contain opaque logo pixels");
+        assert_eq!(icon.rgba[3], 0);
+        assert!(icon.rgba.as_chunks::<4>().0.iter().any(|px| px[3] == 255));
     }
 
     #[test]
@@ -3227,11 +3114,10 @@ mod tests {
         std::fs::create_dir_all(&resources)?;
         std::fs::write(&exe, b"")?;
 
-        assert!(!super::is_macos_app_bundle_exe(&exe), "bundle without curvebook.icns must fall back to runtime icon");
+        assert!(!super::is_macos_app_bundle_exe(&exe));
         std::fs::write(resources.join("curvebook.icns"), b"icns")?;
-        assert!(super::is_macos_app_bundle_exe(&exe), "bundle with curvebook.icns must keep native CFBundleIconFile");
+        assert!(super::is_macos_app_bundle_exe(&exe));
         assert!(!super::is_macos_app_bundle_exe(std::path::Path::new("/usr/local/bin/curvebook")));
-
         let _ = std::fs::remove_dir_all(&base);
         Ok(())
     }
@@ -3244,34 +3130,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&rec_dir);
         let mut runtime = DesktopHostRuntime::new(DesktopHostConfig { recovery_root: Some(rec_dir.clone()), ..DesktopHostConfig::default() });
         let pref_calls = Arc::new(AtomicUsize::new(0));
-        let pref_calls_hook = Arc::clone(&pref_calls);
+        let pref_hook = Arc::clone(&pref_calls);
         runtime.set_preferences_persist_hook(move |_| {
-            pref_calls_hook.fetch_add(1, Ordering::Relaxed);
+            pref_hook.fetch_add(1, Ordering::Relaxed);
         });
         let win_id = runtime.open_window(None, ViewportMetrics::new(1024.0, 640.0, 1.0))?;
         let mut native = CurveBookNativeApp::new(runtime, win_id, None);
         let ctx = egui::Context::default();
 
-        native.pending_intents.push_engine(
-            "sheet.createData",
-            serde_json::json!({ "sheet_id": "ds-a1-host", "title": "A1 Host", "kind": "column", "auto_graph": false }),
-        );
-        native.pending_intents.push_engine("sheet.delete", serde_json::json!({ "sheet_id": "missing-sheet" }));
+        native
+            .pending_intents
+            .push_engine("sheet.createData", json!({ "sheet_id": "ds-a1-host", "title": "A1 Host", "kind": "column", "auto_graph": false }));
+        native.pending_intents.push_engine("sheet.delete", json!({ "sheet_id": "missing-sheet" }));
         native.pending_intents.push(UiIntent::SetUiScale(1.25));
-
         native.commit_pending_intents(&ctx, win_id, false);
 
-        assert!(native.status_banner().is_some(), "failing intent must be surfaced in host status_banner");
+        assert!(native.status_banner().is_some());
         let win = native.runtime().window(win_id)?;
-        assert!(win.app().document().data_sheet(&curvebook_doc::SheetId::from("ds-a1-host")).is_some(), "succeeding intent must land");
-        assert!(
-            win.dirty_commands().iter().any(|c| c == "sheet.createData"),
-            "record_ui_mutation_checkpoint must run on partial error: {:?}",
-            win.dirty_commands()
-        );
-        assert!((win.app().ui_scale() - 1.25).abs() < 1e-4, "trailing preference intent must apply");
-        assert!(pref_calls.load(Ordering::Relaxed) >= 1, "notify_preferences_changed must still run");
-
+        assert!(win.app().document().data_sheet(&SheetId::from("ds-a1-host")).is_some());
+        assert!(win.dirty_commands().iter().any(|c| c == "sheet.createData"));
+        assert!((win.app().ui_scale() - 1.25).abs() < 1e-4 && pref_calls.load(Ordering::Relaxed) >= 1);
         let _ = std::fs::remove_dir_all(&rec_dir);
         Ok(())
     }
@@ -3285,21 +3163,17 @@ mod tests {
         std::fs::create_dir_all(&tmp_dir)?;
         let saved_project = tmp_dir.join("saved-assay.curvebook");
         let emf_out = tmp_dir.join("figure-out.emf");
-
-        // Build and save a real `.curvebook` archive with a data sheet and graph sheet.
         {
             let mut seed = UiApp::new();
             let _ = seed.execute_command(
                 "sheet.createData",
-                serde_json::json!({ "sheet_id": "ds-saved", "title": "Saved Assay", "kind": "xy", "cols": 1, "rows": 3, "auto_graph": false }),
+                json!({ "sheet_id": "ds-saved", "title": "Saved Assay", "kind": "xy", "cols": 1, "rows": 3, "auto_graph": false }),
             )?;
-            let _ = seed.execute_command("table.setXCells", serde_json::json!({ "sheet_id": "ds-saved", "values": [1.0, 2.0, 3.0] }))?;
-            let _ = seed.execute_command("table.setCells", serde_json::json!({ "sheet_id": "ds-saved", "rows": [[5.0], [10.0], [15.0]] }))?;
-            let _ =
-                seed.execute_command("graph.create", serde_json::json!({ "sheet_id": "gs-emf", "data_sheet_id": "ds-saved", "title": "EMF Graph" }))?;
-            let _ = seed.execute_command("project.save", serde_json::json!({ "path": saved_project.to_string_lossy(), "unpacked": false }))?;
+            let _ = seed.execute_command("table.setXCells", json!({ "sheet_id": "ds-saved", "values": [1.0, 2.0, 3.0] }))?;
+            let _ = seed.execute_command("table.setCells", json!({ "sheet_id": "ds-saved", "rows": [[5.0], [10.0], [15.0]] }))?;
+            let _ = seed.execute_command("graph.create", json!({ "sheet_id": "gs-emf", "data_sheet_id": "ds-saved", "title": "EMF Graph" }))?;
+            let _ = seed.execute_command("project.save", json!({ "path": saved_project.to_string_lossy(), "unpacked": false }))?;
         }
-        assert!(saved_project.exists(), "fixture .curvebook archive must exist");
 
         let adapter = Arc::new(StubNativeFileDialogAdapter::new());
         let mut runtime = DesktopHostRuntime::new(DesktopHostConfig::default());
@@ -3308,70 +3182,46 @@ mod tests {
         let mut native = CurveBookNativeApp::new(runtime, win_id, None);
         let ctx = egui::Context::default();
 
-        // 1. Clean window: Welcome Hub `project.open` with explicit `path` loads directly without opening OS picker.
-        native.pending_intents.push_engine("project.open", serde_json::json!({ "path": saved_project.to_string_lossy() }));
+        // 1. Clean window: Welcome Hub `project.open` with explicit `path` loads directly without OS picker.
+        native.pending_intents.push_engine("project.open", json!({ "path": saved_project.to_string_lossy() }));
         native.commit_pending_intents(&ctx, win_id, false);
-        assert!(native.status_banner().is_none(), "clean open-by-path failed: {:?}", native.status_banner());
-        assert!(adapter.requests().is_empty(), "open-by-path must NOT invoke the OS file picker");
-        assert!(
-            native.runtime().window(win_id)?.app().document().data_sheet(&curvebook_doc::SheetId::from("ds-saved")).is_some(),
-            "saved project must load into clean window"
-        );
-        assert_eq!(native.runtime().window_count(), 1);
+        assert!(native.status_banner().is_none() && adapter.requests().is_empty() && native.runtime().window_count() == 1);
+        assert!(native.runtime().window(win_id)?.app().document().data_sheet(&SheetId::from("ds-saved")).is_some());
 
-        // 2. Dirty window: mutate a cell so `has_unsaved_changes() == true`; opening by path must preserve the dirty
-        //    document and open the target project in a new window rather than silently overwriting unsaved work.
-        {
-            let win = native.runtime_mut().window_mut(win_id)?;
-            win.execute_and_journal("table.setCell", serde_json::json!({ "sheet_id": "ds-saved", "row": 0, "col": 0, "value": 999.0 }))?;
-            assert!(win.has_unsaved_changes());
-        }
-        native.pending_intents.push_engine("project.open", serde_json::json!({ "path": saved_project.to_string_lossy() }));
+        // 2. Dirty window preserves edit and opens target in a new window.
+        native
+            .runtime_mut()
+            .window_mut(win_id)?
+            .execute_and_journal("table.setCell", json!({ "sheet_id": "ds-saved", "row": 0, "col": 0, "value": 999.0 }))?;
+        native.pending_intents.push_engine("project.open", json!({ "path": saved_project.to_string_lossy() }));
         native.commit_pending_intents(&ctx, win_id, false);
-        assert!(native.status_banner().is_none(), "dirty open-by-path failed: {:?}", native.status_banner());
-        assert!(adapter.requests().is_empty(), "dirty open-by-path must NOT invoke the OS file picker");
-        assert_eq!(native.runtime().window_count(), 2, "dirty window must be preserved while target opens in a new window");
-        let orig_cell = native
+        assert!(native.status_banner().is_none() && adapter.requests().is_empty() && native.runtime().window_count() == 2);
+        let orig = native
             .runtime()
             .window(win_id)?
             .app()
             .document()
-            .data_sheet(&curvebook_doc::SheetId::from("ds-saved"))
-            .and_then(|ds| ds.cell(curvebook_doc::CellCoord::new(0, 0, 0)))
-            .ok_or("missing original dirty cell")?;
-        assert_eq!(orig_cell.value, curvebook_doc::CellValue::Number(999.0), "dirty window edit must remain intact");
+            .data_sheet(&SheetId::from("ds-saved"))
+            .and_then(|d| d.cell(CellCoord::new(0, 0, 0)))
+            .ok_or("missing")?;
+        assert_eq!(orig.value, CellValue::Number(999.0));
 
-        // 3. Export dialog EMF option routes `graph.exportEmf` through the host SaveFile dialog and writes EMF bytes to disk.
+        // 3. EMF option routes through SaveFile dialog and writes EMF bytes.
         adapter.push_response("graph.exportEmf", Some(emf_out.clone()));
-        native.pending_intents.push_engine("graph.exportEmf", serde_json::json!({ "sheet_id": "gs-emf" }));
+        native.pending_intents.push_engine("graph.exportEmf", json!({ "sheet_id": "gs-emf" }));
         native.commit_pending_intents(&ctx, win_id, false);
-        assert!(native.status_banner().is_none(), "EMF host export failed: {:?}", native.status_banner());
+        assert!(native.status_banner().is_none());
         let reqs = adapter.requests();
-        assert_eq!(reqs.len(), 1, "expected 1 SaveFile request for graph.exportEmf");
-        assert_eq!(reqs[0].command_id, "graph.exportEmf");
-        assert_eq!(reqs[0].kind, NativeFileDialogKind::SaveFile);
-        let emf_bytes = std::fs::read(&emf_out)?;
-        assert!(emf_bytes.len() > 80, "expected non-empty EMF output written to disk, got {} bytes", emf_bytes.len());
-
+        assert!(reqs.len() == 1 && reqs[0].command_id == "graph.exportEmf" && reqs[0].kind == NativeFileDialogKind::SaveFile);
+        assert!(std::fs::read(&emf_out)?.len() > 80);
         let _ = std::fs::remove_dir_all(&tmp_dir);
         Ok(())
     }
 
     #[test]
     fn m2_gui_window_remediation_guards_drag_alias_hover_and_pinch() -> Result<(), String> {
-        let mut runtime = DesktopHostRuntime::new(DesktopHostConfig {
-            in_window_menus: true,
-            new_instance: true,
-            locale_override: None,
-            theme_override: None,
-            recovery_root: None,
-            initial_viewport: ViewportMetrics::new(1024.0, 640.0, 1.0),
-            ..DesktopHostConfig::default()
-        });
-        let opened = runtime.dispatch(DesktopHostEvent::WindowOpened { initial_file: None, viewport: ViewportMetrics::new(1024.0, 640.0, 1.0) })?;
-        let id = opened.window_id.ok_or_else(|| String::from("missing window id"))?;
-        {
-            let win = runtime.window_mut(id)?;
+        let mut h = GuiHarness::new(1024.0, 640.0, true, |rt, id| {
+            let win = rt.window_mut(id)?;
             win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-m2", "kind": "xy", "cols": 1, "rows": 3, "auto_graph": false }))?;
             win.execute_and_journal("table.setXCells", json!({ "sheet_id": "ds-m2", "values": [1.0, 2.0, 3.0] }))?;
             win.execute_and_journal("table.setCells", json!({ "sheet_id": "ds-m2", "rows": [[4.0], [5.0], [6.0]] }))?;
@@ -3379,424 +3229,135 @@ mod tests {
             win.execute_and_journal("layout.create", json!({ "sheet_id": "ly-m2", "title": "Layout M2" }))?;
             let item = curvebook_doc::LayoutItem::LiveGraph {
                 id: String::from("item-1"),
-                graph_sheet_id: curvebook_doc::SheetId::from("gs-m2"),
+                graph_sheet_id: SheetId::from("gs-m2"),
                 bounds_pt: curvebook_doc::RectPt::new(40.0, 40.0, 200.0, 150.0),
                 scale_percent: 100.0,
                 badge_override: None,
             };
-            win.execute_and_journal(
-                "layout.setSpec",
-                json!({
-                    "sheet_id": "ly-m2",
-                    "spec": { "items": [item] }
-                }),
-            )?;
-            win.execute_and_journal("sheet.select", json!({ "sheet_id": "ly-m2" }))?;
+            win.execute_and_journal("layout.setSpec", json!({ "sheet_id": "ly-m2", "spec": { "items": [item] } }))?;
+            win.execute_and_journal("sheet.select", json!({ "sheet_id": "ly-m2" }))
+        })?;
+        h.settle(3);
+
+        // 1. human_path_only blocks widget_id / to_widget_id.
+        h.app.runtime_mut().window_mut(h.win_id)?.app_mut().set_human_path_only(true);
+        for req in [
+            json!({"id":"h1","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"toolbar.analyze"}}),
+            json!({"id":"h2","method":"ui.pointer_gesture","params":{"action":"drag","x":100.0,"y":100.0,"to_widget_id":"toolbar.analyze"}}),
+        ] {
+            let r = h.send_ctrl(req)?;
+            assert_eq!(r.pointer("/error_detail/code").and_then(Value::as_str), Some("conflict"));
+            assert_eq!(r.pointer("/error_detail/details/code").and_then(Value::as_str), Some("human_path_only_policy"));
         }
-
-        let (req_tx, req_rx) = mpsc::channel();
-        let ctrl = LiveControlChannel {
-            request_rx: req_rx,
-            egui_ctx_cell: Arc::new(OnceLock::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
-            post_hook: None,
-        };
-        let mut app = CurveBookNativeApp::new(runtime, id, None).with_live_control(ctrl);
-        let ctx = egui::Context::default();
-        ctx.set_fonts(build_egui_font_definitions(None));
-
-        let step_once = |native: &mut CurveBookNativeApp| {
-            let mut raw_input =
-                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 640.0))), ..Default::default() };
-            native.drain_synthetic_events_into(&mut raw_input);
-            let mut out = ctx.run_ui(raw_input, |ui| native.step_ui(ui));
-            out.textures_delta.clear();
-        };
-
-        for _ in 0..3 {
-            step_once(&mut app);
-        }
-
-        let auth = ControlAuth::from_token("test-token-m2-w2").map_err(|e| e.to_string())?;
-        let send_ctrl = |native: &mut CurveBookNativeApp, req_json: Vec<u8>| -> Result<serde_json::Value, String> {
-            let (tx, rx) = mpsc::channel();
-            req_tx
-                .send(LiveControlRequest { raw_bytes: req_json, auth: auth.clone(), conn_authenticated: true, reply_tx: tx })
-                .map_err(|e| e.to_string())?;
-            for _ in 0..10 {
-                step_once(native);
-                if let Ok(res) = rx.try_recv() {
-                    let out = res?;
-                    let txt = String::from_utf8_lossy(&out.response_bytes);
-                    return serde_json::from_str(&txt).map_err(|e| format!("invalid control reply `{txt}`: {e}"));
-                }
-            }
-            Err(String::from("timed out waiting for LiveControlRequest reply"))
-        };
-
-        // 1. human_path_only blocks ui.pointer_gesture(widget_id) and ui.pointer_gesture(to_widget_id).
-        app.runtime_mut().window_mut(id)?.app_mut().set_human_path_only(true);
-        let blocked =
-            send_ctrl(&mut app, br#"{"id":"h1","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"toolbar.analyze"}}"#.to_vec())?;
-        assert_eq!(blocked.get("ok").and_then(serde_json::Value::as_bool), Some(false));
-        assert_eq!(blocked.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("conflict"));
-        assert_eq!(blocked.pointer("/error_detail/details/code").and_then(serde_json::Value::as_str), Some("human_path_only_policy"));
-        let blocked_to = send_ctrl(
-            &mut app,
-            br#"{"id":"h2","method":"ui.pointer_gesture","params":{"action":"drag","x":100.0,"y":100.0,"to_widget_id":"toolbar.analyze"}}"#.to_vec(),
-        )?;
-        assert_eq!(blocked_to.get("ok").and_then(serde_json::Value::as_bool), Some(false));
-        assert_eq!(blocked_to.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("conflict"));
-        assert_eq!(blocked_to.pointer("/error_detail/details/code").and_then(serde_json::Value::as_str), Some("human_path_only_policy"));
-        app.runtime_mut().window_mut(id)?.app_mut().set_human_path_only(false);
+        h.app.runtime_mut().window_mut(h.win_id)?.app_mut().set_human_path_only(false);
 
         // 2. Drag rejects missing destination (BadInput) and unknown to_widget_id (NotFound).
-        let miss_drag = send_ctrl(
-            &mut app,
-            br#"{"id":"d1","method":"ui.pointer_gesture","params":{"action":"drag","widget_id":"canvas.layout_panel.0"}}"#.to_vec(),
-        )?;
-        assert_eq!(miss_drag.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("bad_input"), "got {miss_drag}");
-        let unk_drag = send_ctrl(
-            &mut app,
-            br#"{"id":"d2","method":"ui.pointer_gesture","params":{"action":"drag","widget_id":"canvas.layout_panel.0","to_widget_id":"nonexistent.target"}}"#.to_vec(),
-        )?;
-        assert_eq!(unk_drag.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("not_found"), "got {unk_drag}");
-
-        // 3. Short drags (7.5pt and 9.0pt) and diagonal drag genuinely translate layout item (not dx=0, dy=0).
-        for dist_pt in [7.5_f64, 9.0_f64] {
-            let before_x = app
-                .runtime()
-                .window(id)?
-                .app()
-                .document()
-                .layout_sheet(&curvebook_doc::SheetId::from("ly-m2"))
-                .and_then(|ls| ls.spec.items.first())
-                .and_then(|item| match item {
-                    curvebook_doc::LayoutItem::LiveGraph { bounds_pt, .. } => Some(bounds_pt.x),
-                    _ => None,
-                })
-                .ok_or_else(|| String::from("missing layout item 0"))?;
-            let center = app
-                .inspect_meta()
-                .find_by_widget_id("canvas.layout_panel.0")
-                .ok_or_else(|| String::from("missing canvas.layout_panel.0"))?
-                .clipped_rect
-                .center();
-            let short_req = serde_json::json!({
-                "id": format!("short_{dist_pt}"),
-                "method": "ui.pointer_gesture",
-                "params": {
-                    "action": "drag",
-                    "widget_id": "canvas.layout_panel.0",
-                    "to_x": f64::from(center.x) + dist_pt,
-                    "to_y": f64::from(center.y),
-                }
-            });
-            let short_ok = send_ctrl(&mut app, serde_json::to_vec(&short_req).map_err(|e| e.to_string())?)?;
-            assert_eq!(short_ok.get("ok").and_then(serde_json::Value::as_bool), Some(true), "short drag failed: {short_ok}");
-            step_once(&mut app);
-            let after_x = app
-                .runtime()
-                .window(id)?
-                .app()
-                .document()
-                .layout_sheet(&curvebook_doc::SheetId::from("ly-m2"))
-                .and_then(|ls| ls.spec.items.first())
-                .and_then(|item| match item {
-                    curvebook_doc::LayoutItem::LiveGraph { bounds_pt, .. } => Some(bounds_pt.x),
-                    _ => None,
-                })
-                .ok_or_else(|| String::from("missing layout item 0"))?;
-            assert!(after_x > before_x, "short {dist_pt}pt drag in gui_window produced zero delta_x ({before_x} -> {after_x})");
-        }
-
-        let p0_center = app
-            .inspect_meta()
-            .find_by_widget_id("canvas.layout_panel.0")
-            .ok_or_else(|| String::from("missing canvas.layout_panel.0"))?
-            .clipped_rect
-            .center();
-        let drag_req = serde_json::json!({
-            "id": "d3",
-            "method": "ui.pointer_gesture",
-            "params": {
-                "action": "drag",
-                "widget_id": "canvas.layout_panel.0",
-                "to_x": f64::from(p0_center.x) + 80.0,
-                "to_y": f64::from(p0_center.y) + 50.0,
-            }
-        });
-        let drag_ok = send_ctrl(&mut app, serde_json::to_vec(&drag_req).map_err(|e| e.to_string())?)?;
-        assert_eq!(drag_ok.get("ok").and_then(serde_json::Value::as_bool), Some(true), "drag failed: {drag_ok}");
-        step_once(&mut app);
-        let moved_bounds = app
-            .runtime()
-            .window(id)?
-            .app()
-            .document()
-            .layout_sheet(&curvebook_doc::SheetId::from("ly-m2"))
-            .and_then(|ls| ls.spec.items.first())
-            .and_then(|item| match item {
-                curvebook_doc::LayoutItem::LiveGraph { bounds_pt, .. } => Some(*bounds_pt),
-                _ => None,
-            })
-            .ok_or_else(|| String::from("missing layout item 0"))?;
-        assert!(moved_bounds.x > 60.0 && moved_bounds.y > 60.0, "expected genuine layout drag translation, got {moved_bounds:?}");
-
-        // 4. Pinch gesture rejects non-positive scale_delta with BadInput and accepts valid positive values.
-        for bad_payload in [
-            br#"{"id":"p0","method":"ui.pointer_gesture","params":{"action":"pinch","x":400.0,"y":300.0,"scale_delta":0.0}}"#.as_slice(),
-            br#"{"id":"pneg","method":"ui.pointer_gesture","params":{"action":"pinch","x":400.0,"y":300.0,"scale_delta":-1.5}}"#.as_slice(),
+        for (req, code) in [
+            (json!({"id":"d1","method":"ui.pointer_gesture","params":{"action":"drag","widget_id":"canvas.layout_panel.0"}}), "bad_input"),
+            (
+                json!({"id":"d2","method":"ui.pointer_gesture","params":{"action":"drag","widget_id":"canvas.layout_panel.0","to_widget_id":"nonexistent.target"}}),
+                "not_found",
+            ),
         ] {
-            let pinch_bad = send_ctrl(&mut app, bad_payload.to_vec())?;
-            assert_eq!(pinch_bad.get("ok").and_then(serde_json::Value::as_bool), Some(false), "expected error for {pinch_bad}");
-            assert_eq!(pinch_bad.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("bad_input"), "got {pinch_bad}");
-        }
-        let pinch_ok = send_ctrl(
-            &mut app,
-            br#"{"id":"p1","method":"ui.pointer_gesture","params":{"action":"pinch","x":400.0,"y":300.0,"scale_delta":1.25}}"#.to_vec(),
-        )?;
-        assert_eq!(pinch_ok.get("ok").and_then(serde_json::Value::as_bool), Some(true), "pinch failed: {pinch_ok}");
-
-        // 5. Alias resolution (`dialog.button.cancel`), disabled hover (`dialog.button.back`), and `power.curve_hover` parity.
-        {
-            let win = app.runtime_mut().window_mut(id)?;
-            win.app_mut().canvas_dialogs.open_power_wizard();
-        }
-        step_once(&mut app);
-        let back_hover = send_ctrl(
-            &mut app,
-            br#"{"id":"h_back","method":"ui.pointer_gesture","params":{"action":"hover","widget_id":"dialog.button.back"}}"#.to_vec(),
-        )?;
-        assert_eq!(back_hover.get("ok").and_then(serde_json::Value::as_bool), Some(true), "disabled hover failed: {back_hover}");
-
-        for _ in 0..3 {
-            let nxt = send_ctrl(&mut app, br#"{"id":"nxt","method":"ui.answer_dialog","params":{"action":"next"}}"#.to_vec())?;
-            assert_eq!(nxt.get("ok").and_then(serde_json::Value::as_bool), Some(true), "next failed: {nxt}");
-            step_once(&mut app);
-        }
-        let tab_ok = send_ctrl(
-            &mut app,
-            br#"{"id":"ptab","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"power.tab.curve"}}"#.to_vec(),
-        )?;
-        assert_eq!(tab_ok.get("ok").and_then(serde_json::Value::as_bool), Some(true), "power.tab.curve failed: {tab_ok}");
-        step_once(&mut app);
-        let curve_hover = send_ctrl(
-            &mut app,
-            br#"{"id":"pch","method":"ui.pointer_gesture","params":{"action":"hover","widget_id":"power.curve_hover","hover_fraction_x":0.25}}"#
-                .to_vec(),
-        )?;
-        assert_eq!(curve_hover.get("ok").and_then(serde_json::Value::as_bool), Some(true), "curve hover failed: {curve_hover}");
-        assert!(curve_hover.pointer("/result/hover_n").and_then(serde_json::Value::as_f64).is_some(), "missing hover_n: {curve_hover}");
-        assert!(curve_hover.pointer("/result/hover_power").and_then(serde_json::Value::as_f64).is_some(), "missing hover_power: {curve_hover}");
-        assert!(app.runtime().window(id)?.app().canvas_dialogs.power_wizard.hover_n.is_some(), "power_wizard.hover_n must be synced");
-
-        let cancel_alias = send_ctrl(
-            &mut app,
-            br#"{"id":"c1","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"dialog.button.cancel"}}"#.to_vec(),
-        )?;
-        assert_eq!(cancel_alias.get("ok").and_then(serde_json::Value::as_bool), Some(true), "cancel alias failed: {cancel_alias}");
-        step_once(&mut app);
-        assert_eq!(app.runtime().window(id)?.app().canvas_dialogs.active_dialog, ActiveDialog::None);
-        Ok(())
-    }
-
-    struct W5LiveHarness {
-        app: CurveBookNativeApp,
-        win_id: DesktopWindowId,
-        ctx: egui::Context,
-        req_tx: mpsc::Sender<LiveControlRequest>,
-        auth: ControlAuth,
-    }
-
-    impl W5LiveHarness {
-        fn new() -> Result<Self, String> {
-            let mut runtime = DesktopHostRuntime::new(DesktopHostConfig {
-                in_window_menus: true,
-                new_instance: true,
-                locale_override: None,
-                theme_override: None,
-                recovery_root: None,
-                initial_viewport: ViewportMetrics::new(1280.0, 800.0, 1.0),
-                ..DesktopHostConfig::default()
-            });
-            let opened =
-                runtime.dispatch(DesktopHostEvent::WindowOpened { initial_file: None, viewport: ViewportMetrics::new(1280.0, 800.0, 1.0) })?;
-            let win_id = opened.window_id.ok_or_else(|| String::from("missing window id"))?;
-            {
-                let win = runtime.window_mut(win_id)?;
-                win.execute_and_journal(
-                    "sheet.createData",
-                    json!({ "sheet_id": "ds-col-w5", "kind": "column", "cols": 2, "rows": 4, "auto_graph": false }),
-                )?;
-                win.execute_and_journal("table.setCells", json!({ "sheet_id": "ds-col-w5", "rows": [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]] }))?;
-                win.execute_and_journal(
-                    "sheet.createData",
-                    json!({ "sheet_id": "ds-fit-w5", "kind": "xy", "cols": 1, "rows": 4, "auto_graph": false }),
-                )?;
-                win.execute_and_journal("table.setXCells", json!({ "sheet_id": "ds-fit-w5", "values": [1.0, 2.0, 3.0, 4.0] }))?;
-                win.execute_and_journal("table.setCells", json!({ "sheet_id": "ds-fit-w5", "rows": [[2.0], [4.0], [6.0], [8.0]] }))?;
-                win.execute_and_journal("sheet.select", json!({ "sheet_id": "ds-col-w5" }))?;
-            }
-            let (req_tx, req_rx) = mpsc::channel();
-            let ctrl = LiveControlChannel {
-                request_rx: req_rx,
-                egui_ctx_cell: Arc::new(OnceLock::new()),
-                shutdown: Arc::new(AtomicBool::new(false)),
-                post_hook: None,
-            };
-            let app = CurveBookNativeApp::new(runtime, win_id, None).with_live_control(ctrl);
-            let ctx = egui::Context::default();
-            ctx.set_fonts(build_egui_font_definitions(None));
-            let auth = ControlAuth::from_token("test-token-m2-w5").map_err(|e| e.to_string())?;
-            let mut harness = Self { app, win_id, ctx, req_tx, auth };
-            for _ in 0..4 {
-                harness.step_once();
-            }
-            Ok(harness)
+            assert_eq!(h.send_ctrl(req)?.pointer("/error_detail/code").and_then(Value::as_str), Some(code));
         }
 
-        fn step_once(&mut self) {
-            let mut raw_input =
-                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))), ..Default::default() };
-            self.app.drain_synthetic_events_into(&mut raw_input);
-            let mut out = self.ctx.run_ui(raw_input, |ui| self.app.step_ui(ui));
-            out.textures_delta.clear();
-        }
-
-        fn send_ctrl(&mut self, req: serde_json::Value) -> Result<serde_json::Value, String> {
-            let (tx, rx) = mpsc::channel();
-            let raw_bytes = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
-            self.req_tx
-                .send(LiveControlRequest { raw_bytes, auth: self.auth.clone(), conn_authenticated: true, reply_tx: tx })
-                .map_err(|e| e.to_string())?;
-            for _ in 0..24 {
-                self.step_once();
-                if let Ok(res) = rx.try_recv() {
-                    let out = res?;
-                    let txt = String::from_utf8_lossy(&out.response_bytes);
-                    return serde_json::from_str(&txt).map_err(|e| format!("invalid control reply `{txt}`: {e}"));
-                }
-            }
-            Err(format!("timed out waiting for LiveControlRequest reply to {req}"))
-        }
-
-        fn send_ok(&mut self, req: serde_json::Value, ctx_msg: &str) -> Result<serde_json::Value, String> {
-            let resp = self.send_ctrl(req)?;
-            assert_eq!(resp.get("ok").and_then(serde_json::Value::as_bool), Some(true), "{ctx_msg}: {resp}");
-            Ok(resp)
-        }
-
-        fn open_edit_modal(&mut self, ds_id: &str, entry_id: &str) -> Result<curvebook_doc::SheetId, String> {
-            self.send_ok(json!({ "id": "sw", "method": "ui.switch_tab", "params": { "sheet_id": ds_id } }), ds_id)?;
-            self.send_ok(
-                json!({ "id": "az", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": "toolbar.analyze" } }),
-                "az",
-            )?;
-            self.send_ok(
-                json!({ "id": "ans", "method": "ui.answer_dialog", "params": { "action": "ok", "fields": { "entry_id": entry_id } } }),
-                entry_id,
-            )?;
-            self.step_once();
-            let rs_id = if let ActiveDialog::EditAnalysisParameters { result_sheet_id } =
-                &self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog
-            {
-                result_sheet_id.clone()
-            } else {
-                let rs_id = self
-                    .app
-                    .runtime()
-                    .window(self.win_id)?
-                    .app()
-                    .document()
-                    .result_sheets
-                    .last()
-                    .map(|r| r.id.clone())
-                    .ok_or_else(|| String::from("missing result sheet after analyze"))?;
-                let doc = self.app.runtime().window(self.win_id)?.app().document().clone();
-                assert!(self.app.runtime_mut().window_mut(self.win_id)?.app_mut().canvas_dialogs.open_edit_parameters(&doc, &rs_id));
-                self.step_once();
-                rs_id
-            };
-            assert!(matches!(
-                self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog,
-                ActiveDialog::EditAnalysisParameters { .. }
-            ));
-            Ok(rs_id)
-        }
-
-        fn verify_grid_click_type_arrow(&mut self) -> Result<(), String> {
-            self.send_ok(
-                json!({ "id": "gc1", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": "grid.cell.0.0.0" } }),
-                "grid click",
-            )?;
-            self.send_ok(json!({ "id": "gt1", "method": "ui.type_text", "params": { "text": "123", "submit": true } }), "grid type")?;
-            self.send_ok(json!({ "id": "gd1", "method": "ui.press_key", "params": { "key": "ArrowDown" } }), "grid ArrowDown")?;
-            let insp = self.send_ok(json!({ "id": "gi1", "method": "ui.inspect", "params": { "scope": "grid" } }), "grid inspect")?;
-            assert_eq!(
-                insp.pointer("/result/grid_selection/active_cell/row").and_then(serde_json::Value::as_u64),
-                Some(2),
-                "Enter + ArrowDown from (0,0,0) must land active_cell on row 2: {insp}"
-            );
-            let cell_val = self
-                .app
-                .runtime()
-                .window(self.win_id)?
+        // 3. Short drags (7.5pt, 9.0pt) and diagonal drag genuinely translate layout item.
+        let panel_bounds = |app: &CurveBookNativeApp, wid: DesktopWindowId| -> Result<curvebook_doc::RectPt, String> {
+            app.runtime()
+                .window(wid)?
                 .app()
                 .document()
-                .data_sheet(&curvebook_doc::SheetId::from("ds-col-w5"))
-                .and_then(|ds| ds.cell(curvebook_doc::CellCoord::new(0, 0, 0)))
-                .map(|c| c.value.clone());
-            assert_eq!(cell_val, Some(curvebook_doc::CellValue::Number(123.0)), "expected grid cell (0,0,0) == 123.0");
-            Ok(())
+                .layout_sheet(&SheetId::from("ly-m2"))
+                .and_then(|ls| ls.spec.items.first())
+                .and_then(|it| match it {
+                    curvebook_doc::LayoutItem::LiveGraph { bounds_pt, .. } => Some(*bounds_pt),
+                    _ => None,
+                })
+                .ok_or_else(|| String::from("missing layout item 0"))
+        };
+        for dist_pt in [7.5_f64, 9.0_f64] {
+            let before_x = panel_bounds(&h.app, h.win_id)?.x;
+            let c = h.app.inspect_meta().find_by_widget_id("canvas.layout_panel.0").ok_or("missing panel 0")?.clipped_rect.center();
+            h.send_ok(json!({"id":format!("short_{dist_pt}"),"method":"ui.pointer_gesture","params":{"action":"drag","widget_id":"canvas.layout_panel.0","to_x":f64::from(c.x)+dist_pt,"to_y":f64::from(c.y)}}), "short drag")?;
+            let _ = h.step(Vec::new());
+            assert!(panel_bounds(&h.app, h.win_id)?.x > before_x);
         }
+        let c = h.app.inspect_meta().find_by_widget_id("canvas.layout_panel.0").ok_or("missing panel 0")?.clipped_rect.center();
+        h.send_ok(json!({"id":"d3","method":"ui.pointer_gesture","params":{"action":"drag","widget_id":"canvas.layout_panel.0","to_x":f64::from(c.x)+80.0,"to_y":f64::from(c.y)+50.0}}), "diag drag")?;
+        let _ = h.step(Vec::new());
+        let moved = panel_bounds(&h.app, h.win_id)?;
+        assert!(moved.x > 60.0 && moved.y > 60.0);
 
-        fn verify_two_enter_textbox_commit(&mut self, widget_id: &str, text: &str, by_coords: bool) -> Result<(), String> {
-            if by_coords {
-                let dlg_insp = self.send_ok(
-                    json!({ "id": "di", "method": "ui.inspect", "params": { "scope": "dialog", "include_bounds": true } }),
-                    "dialog inspect",
-                )?;
-                let b = dlg_insp
-                    .pointer("/result/dialog/controls")
-                    .and_then(serde_json::Value::as_array)
-                    .and_then(|nodes| nodes.iter().find(|n| n.get("widget_id").and_then(serde_json::Value::as_str) == Some(widget_id)))
-                    .and_then(|n| n.get("bounds"))
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| format!("missing {widget_id} bounds in {dlg_insp}"))?;
-                let x = b.first().and_then(serde_json::Value::as_f64).ok_or("x")? + b.get(2).and_then(serde_json::Value::as_f64).ok_or("w")? * 0.5;
-                let y = b.get(1).and_then(serde_json::Value::as_f64).ok_or("y")? + b.get(3).and_then(serde_json::Value::as_f64).ok_or("h")? * 0.5;
-                self.send_ok(json!({ "id": "cc", "method": "ui.pointer_gesture", "params": { "action": "click", "x": x, "y": y } }), "coord click")?;
-                let fi = self.send_ok(json!({ "id": "fi", "method": "ui.inspect", "params": { "scope": "dialog" } }), "focus inspect")?;
-                assert_eq!(fi.pointer("/result/focus_widget_id").and_then(serde_json::Value::as_str), Some(widget_id), "focus mismatch: {fi}");
-            } else {
-                self.send_ok(
-                    json!({ "id": "wc", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": widget_id } }),
-                    widget_id,
-                )?;
-            }
-            self.send_ok(json!({ "id": "tt", "method": "ui.type_text", "params": { "text": text, "clear_first": true } }), text)?;
-            self.send_ok(json!({ "id": "e1", "method": "ui.press_key", "params": { "key": "Enter" } }), "1st Enter")?;
-            assert!(
-                matches!(self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }),
-                "1st Enter inside {widget_id} must keep modal open"
-            );
-            let ie1 = self.send_ok(json!({ "id": "ie1", "method": "ui.inspect", "params": { "scope": "dialog" } }), "inspect after e1")?;
-            assert_eq!(ie1.pointer("/result/focus_widget_id"), Some(&serde_json::Value::Null), "1st Enter must clear focus: {ie1}");
-            self.send_ok(json!({ "id": "e2", "method": "ui.press_key", "params": { "key": "Enter" } }), "2nd Enter")?;
-            assert_eq!(self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::None);
-            Ok(())
+        // 4. Pinch rejects non-positive scale_delta and accepts positive values.
+        for bad in [0.0_f64, -1.5] {
+            let r =
+                h.send_ctrl(json!({"id":"pb","method":"ui.pointer_gesture","params":{"action":"pinch","x":400.0,"y":300.0,"scale_delta":bad}}))?;
+            assert_eq!(r.pointer("/error_detail/code").and_then(Value::as_str), Some("bad_input"));
         }
+        h.send_ok(json!({"id":"p1","method":"ui.pointer_gesture","params":{"action":"pinch","x":400.0,"y":300.0,"scale_delta":1.25}}), "pinch")?;
+
+        // 5. Alias resolution, disabled hover, and `power.curve_hover` parity.
+        h.app.runtime_mut().window_mut(h.win_id)?.app_mut().canvas_dialogs.open_power_wizard();
+        let _ = h.step(Vec::new());
+        h.send_ok(json!({"id":"hb","method":"ui.pointer_gesture","params":{"action":"hover","widget_id":"dialog.button.back"}}), "disabled hover")?;
+        for _ in 0..3 {
+            h.send_ok(json!({"id":"nxt","method":"ui.answer_dialog","params":{"action":"next"}}), "next")?;
+            let _ = h.step(Vec::new());
+        }
+        h.send_ok(json!({"id":"pt","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"power.tab.curve"}}), "power tab")?;
+        let _ = h.step(Vec::new());
+        let ch = h.send_ok(
+            json!({"id":"pch","method":"ui.pointer_gesture","params":{"action":"hover","widget_id":"power.curve_hover","hover_fraction_x":0.25}}),
+            "curve hover",
+        )?;
+        assert!(
+            ch.pointer("/result/hover_n").and_then(Value::as_f64).is_some() && ch.pointer("/result/hover_power").and_then(Value::as_f64).is_some()
+        );
+        assert!(h.app.runtime().window(h.win_id)?.app().canvas_dialogs.power_wizard.hover_n.is_some());
+        h.send_ok(json!({"id":"c1","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"dialog.button.cancel"}}), "cancel")?;
+        let _ = h.step(Vec::new());
+        assert_eq!(h.app.runtime().window(h.win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::None);
+        Ok(())
     }
 
     #[test]
     fn m2_w5_gui_window_live_context_unified_focus_type_key_inspect_switch_tab() -> Result<(), String> {
-        let mut h = W5LiveHarness::new()?;
+        let mut h = GuiHarness::new(1280.0, 800.0, true, |rt, id| {
+            let win = rt.window_mut(id)?;
+            win.execute_and_journal(
+                "sheet.createData",
+                json!({ "sheet_id": "ds-col-w5", "kind": "column", "cols": 2, "rows": 4, "auto_graph": false }),
+            )?;
+            win.execute_and_journal("table.setCells", json!({ "sheet_id": "ds-col-w5", "rows": [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]] }))?;
+            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-fit-w5", "kind": "xy", "cols": 1, "rows": 4, "auto_graph": false }))?;
+            win.execute_and_journal("table.setXCells", json!({ "sheet_id": "ds-fit-w5", "values": [1.0, 2.0, 3.0, 4.0] }))?;
+            win.execute_and_journal("table.setCells", json!({ "sheet_id": "ds-fit-w5", "rows": [[2.0], [4.0], [6.0], [8.0]] }))?;
+            win.execute_and_journal("sheet.select", json!({ "sheet_id": "ds-col-w5" }))
+        })?;
+        h.settle(4);
 
-        // 1. Grid cell `ui.pointer_gesture` click -> `ui.type_text("123", submit: true)` -> `ui.press_key("ArrowDown")`.
-        h.verify_grid_click_type_arrow()?;
+        // 1. Grid click -> type_text(submit: true) -> ArrowDown.
+        h.send_ok(
+            json!({ "id": "gc1", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": "grid.cell.0.0.0" } }),
+            "grid click",
+        )?;
+        h.send_ok(json!({ "id": "gt1", "method": "ui.type_text", "params": { "text": "123", "submit": true } }), "grid type")?;
+        h.send_ok(json!({ "id": "gd1", "method": "ui.press_key", "params": { "key": "ArrowDown" } }), "grid ArrowDown")?;
+        let insp = h.send_ok(json!({ "id": "gi1", "method": "ui.inspect", "params": { "scope": "grid" } }), "grid inspect")?;
+        assert_eq!(insp.pointer("/result/grid_selection/active_cell/row").and_then(Value::as_u64), Some(2));
+        let cell_val = h
+            .app
+            .runtime()
+            .window(h.win_id)?
+            .app()
+            .document()
+            .data_sheet(&SheetId::from("ds-col-w5"))
+            .and_then(|ds| ds.cell(CellCoord::new(0, 0, 0)))
+            .map(|c| c.value.clone());
+        assert_eq!(cell_val, Some(CellValue::Number(123.0)));
 
-        // 2. `stats.two_group`: click `edit.custom_title` -> type `"GwTitle"` -> 1st Enter (open, unfocused) -> 2nd Enter (commits).
+        // 2. `stats.two_group`: two-Enter textbox commit.
         let tg_rs_id = h.open_edit_modal("ds-col-w5", "stats.two_group")?;
         h.verify_two_enter_textbox_commit("edit.custom_title", "GwTitle", false)?;
         assert_eq!(
@@ -3804,17 +3365,14 @@ mod tests {
             Some("GwTitle")
         );
 
-        // 3. Coordinate-only human-path (`human_path_only = true`): no `widget_id` allowed.
-        {
-            let doc = h.app.runtime().window(h.win_id)?.app().document().clone();
-            assert!(h.app.runtime_mut().window_mut(h.win_id)?.app_mut().canvas_dialogs.open_edit_parameters(&doc, &tg_rs_id));
-            h.app.runtime_mut().window_mut(h.win_id)?.app_mut().set_human_path_only(true);
-            h.step_once();
-        }
+        // 3. Coordinate-only human-path (`human_path_only = true`).
+        let doc = h.app.runtime().window(h.win_id)?.app().document().clone();
+        assert!(h.app.runtime_mut().window_mut(h.win_id)?.app_mut().canvas_dialogs.open_edit_parameters(&doc, &tg_rs_id));
+        h.app.runtime_mut().window_mut(h.win_id)?.app_mut().set_human_path_only(true);
+        let _ = h.step(Vec::new());
         let blocked = h.send_ctrl(json!({ "id": "gob", "method": "ui.type_text", "params": { "widget_id": "edit.custom_title", "text": "Bad" } }))?;
-        assert_eq!(blocked.get("ok").and_then(serde_json::Value::as_bool), Some(false));
-        assert_eq!(blocked.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("conflict"));
-        assert_eq!(blocked.pointer("/error_detail/details/code").and_then(serde_json::Value::as_str), Some("human_path_only_policy"));
+        assert_eq!(blocked.pointer("/error_detail/code").and_then(Value::as_str), Some("conflict"));
+        assert_eq!(blocked.pointer("/error_detail/details/code").and_then(Value::as_str), Some("human_path_only_policy"));
         h.verify_two_enter_textbox_commit("edit.custom_title", "HumanPathGw", true)?;
         assert_eq!(
             h.app.runtime().window(h.win_id)?.app().document().result_sheet(&tg_rs_id).and_then(|rs| rs.analysis.custom_title.as_deref()),
@@ -3822,7 +3380,7 @@ mod tests {
         );
         h.app.runtime_mut().window_mut(h.win_id)?.app_mut().set_human_path_only(false);
 
-        // 4. `FitModal` (`fit.nonlinear`) -> `ui.switch_tab("fit.tab.output")` -> click `fit.diagnostics.r2.input` -> `"0.95"` -> Enter -> Enter.
+        // 4. `FitModal` -> `ui.switch_tab("fit.tab.output")` -> `"0.95"` -> Enter -> Enter.
         let nl_rs_id = h.open_edit_modal("ds-fit-w5", "fit.nonlinear")?;
         h.send_ok(json!({ "id": "ft1", "method": "ui.switch_tab", "params": { "tab_id": "fit.tab.output" } }), "fit.tab.output")?;
         h.verify_two_enter_textbox_commit("fit.diagnostics.r2.input", "0.95", false)?;
@@ -3830,53 +3388,37 @@ mod tests {
             curvebook_doc::AnalysisKind::NonlinearRegression(fit) => fit.flag_r_squared_below,
             _ => None,
         });
-        assert!(committed_r2.is_some_and(|v| (v - 0.95).abs() < 1e-9), "expected flag_r_squared_below == Some(0.95), got {committed_r2:?}");
+        assert!(committed_r2.is_some_and(|v| (v - 0.95).abs() < 1e-9));
         Ok(())
     }
 
     #[test]
     fn graphics_init_and_runtime_diagnostics_include_actionable_gpu_metal_guidance() {
-        let surface_err = eframe::Error::Wgpu(eframe::egui_wgpu::WgpuError::NoSurfaceFormatsAvailable);
-        let msg = super::format_graphics_init_error(&surface_err);
-        assert!(msg.contains("no compatible GPU surface format found"), "msg: {msg}");
-        assert!(msg.contains("Metal"), "expected Metal compatibility guidance: {msg}");
-        assert!(msg.contains("WGPU_BACKEND"), "expected WGPU_BACKEND guidance: {msg}");
-        assert!(msg.contains("curvebook-cli"), "expected headless CLI fallback guidance: {msg}");
-        assert!(msg.contains("troubleshooting.md#gpu-graphics"), "expected troubleshooting link: {msg}");
-
-        let adapter_err = eframe::Error::Wgpu(eframe::egui_wgpu::WgpuError::CustomNativeAdapterSelectionError(String::from("no Metal adapter")));
-        let adapter_msg = super::format_graphics_init_error(&adapter_err);
-        assert!(adapter_msg.contains("no Metal adapter"), "msg: {adapter_msg}");
-        assert!(adapter_msg.contains("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1"), "msg: {adapter_msg}");
-
+        let msg = super::format_graphics_init_error(&eframe::Error::Wgpu(eframe::egui_wgpu::WgpuError::NoSurfaceFormatsAvailable));
+        for needle in ["no compatible GPU surface format found", "Metal", "WGPU_BACKEND", "curvebook-cli", "troubleshooting.md#gpu-graphics"] {
+            assert!(msg.contains(needle), "missing `{needle}` in {msg}");
+        }
+        let adapter_msg = super::format_graphics_init_error(&eframe::Error::Wgpu(eframe::egui_wgpu::WgpuError::CustomNativeAdapterSelectionError(
+            String::from("no Metal adapter"),
+        )));
+        assert!(adapter_msg.contains("no Metal adapter") && adapter_msg.contains("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1"));
         let lost_msg = super::format_graphics_runtime_diagnostic("GPU device lost", "Unknown: Metal device reset");
-        assert!(lost_msg.contains("GPU device lost"), "msg: {lost_msg}");
-        assert!(lost_msg.contains("Metal"), "msg: {lost_msg}");
-        assert!(lost_msg.contains("curvebook-cli"), "msg: {lost_msg}");
+        assert!(lost_msg.contains("GPU device lost") && lost_msg.contains("Metal") && lost_msg.contains("curvebook-cli"));
     }
 
     #[test]
     fn classify_wgpu_surface_status_maps_recovery_actions_and_diagnostics() {
         use eframe::egui_wgpu::{SurfaceErrorAction, wgpu::CurrentSurfaceTexture};
-
-        let (outdated_action, outdated_msg) = super::classify_wgpu_surface_status(&CurrentSurfaceTexture::Outdated);
-        assert!(matches!(outdated_action, SurfaceErrorAction::Reconfigure));
-        assert!(outdated_msg.is_none());
-
-        let (occluded_action, occluded_msg) = super::classify_wgpu_surface_status(&CurrentSurfaceTexture::Occluded);
-        assert!(matches!(occluded_action, SurfaceErrorAction::SkipFrame));
-        assert!(occluded_msg.is_none());
-
-        let (lost_action, lost_msg) = super::classify_wgpu_surface_status(&CurrentSurfaceTexture::Lost);
-        assert!(matches!(lost_action, SurfaceErrorAction::RecreateSurface));
-        assert!(lost_msg.is_some());
-
-        let (timeout_action, timeout_msg) = super::classify_wgpu_surface_status(&CurrentSurfaceTexture::Timeout);
-        assert!(matches!(timeout_action, SurfaceErrorAction::SkipFrame));
-        assert!(timeout_msg.is_some());
-
-        let (val_action, val_msg) = super::classify_wgpu_surface_status(&CurrentSurfaceTexture::Validation);
-        assert!(matches!(val_action, SurfaceErrorAction::SkipFrame));
-        assert!(val_msg.is_some());
+        for (status, expected_action, expect_msg) in [
+            (CurrentSurfaceTexture::Outdated, SurfaceErrorAction::Reconfigure, false),
+            (CurrentSurfaceTexture::Occluded, SurfaceErrorAction::SkipFrame, false),
+            (CurrentSurfaceTexture::Lost, SurfaceErrorAction::RecreateSurface, true),
+            (CurrentSurfaceTexture::Timeout, SurfaceErrorAction::SkipFrame, true),
+            (CurrentSurfaceTexture::Validation, SurfaceErrorAction::SkipFrame, true),
+        ] {
+            let (action, msg) = super::classify_wgpu_surface_status(&status);
+            assert_eq!(std::mem::discriminant(&action), std::mem::discriminant(&expected_action));
+            assert_eq!(msg.is_some(), expect_msg);
+        }
     }
 }

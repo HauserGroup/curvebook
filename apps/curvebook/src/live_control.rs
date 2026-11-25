@@ -488,6 +488,23 @@ mod tests {
     };
     use crate::desktop_host::LiveControlFrameOutput;
 
+    fn probe_loopback_listener() -> Result<Option<(std::net::TcpListener, SocketAddr)>, Box<dyn std::error::Error>> {
+        let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(None),
+            other => other?,
+        };
+        let addr = listener.local_addr()?;
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
+            Ok(probe) => {
+                drop(probe);
+                let _ = listener.accept();
+                Ok(Some((listener, addr)))
+            }
+            Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => Ok(None),
+            Err(err) => Err(Box::new(err)),
+        }
+    }
+
     #[test]
     fn rv10_32_idle_clients_plus_33rd_rejects_without_blocking_and_34th_succeeds_after_slot_release() -> Result<(), Box<dyn std::error::Error>> {
         let auth = ControlAuth::from_token("rv10-slot-secret")?;
@@ -562,19 +579,9 @@ mod tests {
         guard.stop();
 
         // Also run over real loopback TCP sockets whenever permitted by the execution environment.
-        let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-            Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
-            other => other?,
+        let Some((listener, addr)) = probe_loopback_listener()? else {
+            return Ok(());
         };
-        let addr = listener.local_addr()?;
-        match TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
-            Ok(probe) => {
-                drop(probe);
-                let _ = listener.accept();
-            }
-            Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => return Ok(()),
-            Err(err) => return Err(Box::new(err)),
-        }
         listener.set_nonblocking(true)?;
         let (tcp_bridge, tcp_channel) = LiveControlBridge::new(auth.clone());
         let responder = std::thread::spawn(move || {
@@ -684,7 +691,6 @@ mod tests {
     }
 
     struct TrickleReader {
-        emitted: usize,
         delay: Duration,
         byte: [u8; 1],
     }
@@ -694,7 +700,6 @@ mod tests {
             std::thread::sleep(self.delay);
             if let Some(slot) = buf.first_mut() {
                 *slot = b'a';
-                self.emitted += 1;
                 Ok(1)
             } else {
                 Ok(0)
@@ -706,7 +711,6 @@ mod tests {
         fn fill_buf(&mut self) -> io::Result<&[u8]> {
             std::thread::sleep(self.delay);
             self.byte = *b"a";
-            self.emitted += 1;
             Ok(&self.byte)
         }
 
@@ -717,7 +721,7 @@ mod tests {
     fn rv12_slowloris_trickle_hits_wall_clock_deadline_and_pre_auth_cap_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
         // 1. Trickling 1 byte every 15ms (faster than idle timeout) must still hit the per-line wall-clock deadline.
         let shutdown = AtomicBool::new(false);
-        let mut trickle = TrickleReader { emitted: 0, delay: Duration::from_millis(15), byte: [0] };
+        let mut trickle = TrickleReader { delay: Duration::from_millis(15), byte: [0] };
         let start = Instant::now();
         let outcome = read_bounded_control_line_with_deadlines(
             &mut trickle,
@@ -778,19 +782,9 @@ mod tests {
 
     #[test]
     fn rv54_headless_control_listener_serves_concurrent_clients_while_stalled_clients_hold_sockets() -> Result<(), Box<dyn std::error::Error>> {
-        let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-            Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
-            other => other?,
+        let Some((listener, addr)) = probe_loopback_listener()? else {
+            return Ok(());
         };
-        let addr = listener.local_addr()?;
-        match TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
-            Ok(probe) => {
-                drop(probe);
-                let _ = listener.accept();
-            }
-            Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => return Ok(()),
-            Err(err) => return Err(Box::new(err)),
-        }
 
         let auth = ControlAuth::generate()?;
         let server_auth = auth.clone();

@@ -1201,112 +1201,186 @@ fn parse_port(raw: &str) -> Result<u16, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    use curvebook_doc::{DataSheet, ProjectDocument, SubcolumnMode, TableArchetype, XyTable};
+    use curvebook::desktop_host::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime};
+    use curvebook::gui_window::{CurveBookNativeApp, build_egui_font_definitions};
+    use curvebook_doc::{CellCoord, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
     use curvebook_format::save_project_file;
+    use curvebook_ui_egui::{ControlAuth, ViewportMetrics, bind_control_tcp_listener, serve_control_stream_with_quit_and_hook};
     use eframe::egui;
+    use serde_json::json;
 
     use super::{CURRENT_PREFERENCES_VERSION, CliAction, LaunchConfig, UiApp, UiThemeMode, load_startup_session, parse_args, parse_port, run};
 
+    static DIR_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(tag: &str) -> Result<Self, std::io::Error> {
+            let seq = DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+            let p = std::env::temp_dir().join(format!("cb-main-{tag}-{}-{seq}-{nanos}", std::process::id()));
+            std::fs::create_dir_all(&p)?;
+            Ok(Self(p))
+        }
+        fn join(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
     #[test]
-    fn cli_version_and_help_and_flags() {
-        assert!(run(&[String::from("--version")]).is_ok());
-        assert!(run(&[String::from("--help")]).is_ok());
-        assert!(run(&[String::from("--in-window-menus"), String::from("--new-instance"), String::from("--headless-once")]).is_ok());
-        assert!(run(&[String::from("--definitely-unknown-flag")]).is_err());
+    fn cli_flags_env_backend_double_dash_and_new_instance() -> Result<(), Box<dyn std::error::Error>> {
+        assert!(run(&sv(&["--version"])).is_ok());
+        assert!(run(&sv(&["--help"])).is_ok());
+        assert!(run(&sv(&["--in-window-menus", "--new-instance", "--headless-once"])).is_ok());
+        assert!(run(&sv(&["--definitely-unknown-flag"])).is_err());
 
-        assert!(parse_port("0").is_err());
-        assert!(parse_port("65536").is_err());
-        assert_eq!(parse_port("9001").ok(), Some(9001));
-
-        let args = vec![
-            String::from("--control"),
-            String::from("9123"),
-            String::from("--in-window-menus"),
-            String::from("--new-instance"),
-            String::from("study.curvebook"),
-        ];
-        assert_eq!(
-            parse_args(&args, None).ok(),
-            Some(CliAction::Launch(LaunchConfig {
-                control_port: Some(9123),
-                control_token: None,
-                window: false,
-                in_window_menus: true,
-                new_instance: true,
-                headless_once: false,
-                portable_dir: None,
-                ttf_font: None,
-                rulers: false,
-                event_script: None,
-                files: vec![PathBuf::from("study.curvebook")],
-            }))
-        );
-
-        assert!(!super::USAGE.contains("--gui-only"));
-        assert!(super::USAGE.contains("--window"));
-        assert!(parse_args(&[String::from("--gui-only")], None).is_err());
-
-        let window_args = vec![String::from("--control"), String::from("9125"), String::from("--window")];
-        assert_eq!(
-            parse_args(&window_args, None).ok(),
-            Some(CliAction::Launch(LaunchConfig {
-                control_port: Some(9125),
-                control_token: None,
-                window: true,
-                in_window_menus: false,
-                new_instance: false,
-                headless_once: false,
-                portable_dir: None,
-                ttf_font: None,
-                rulers: false,
-                event_script: None,
-                files: Vec::new(),
-            }))
-        );
+        for (raw, ok) in [("0", false), ("65536", false), ("9001", true)] {
+            assert_eq!(parse_port(raw).is_ok(), ok, "parse_port({raw})");
+        }
         assert!(
-            super::parse_args(&[String::from("--control"), String::from("9125"), String::from("--window"), String::from("--headless-once")], None)
-                .is_err()
+            !super::USAGE.contains("--gui-only")
+                && super::USAGE.contains("--window")
+                && super::USAGE.contains("[--]")
+                && super::USAGE.contains("--new-instance")
         );
 
-        let portable_args = vec![
-            String::from("--portable-dir"),
-            String::from("/tmp/cb-usb"),
-            String::from("--ttf-font"),
-            String::from("/tmp/sans.ttf"),
-            String::from("--rulers"),
-            String::from("--event-script"),
-            String::from("/tmp/script.jsonl"),
-        ];
+        // Table-driven LaunchConfig checks.
+        let cfg_basic = LaunchConfig {
+            control_port: Some(9123),
+            in_window_menus: true,
+            new_instance: true,
+            files: vec![PathBuf::from("study.curvebook")],
+            ..LaunchConfig::default()
+        };
         assert_eq!(
-            parse_args(&portable_args, None).ok(),
+            parse_args(&sv(&["--control", "9123", "--in-window-menus", "--new-instance", "study.curvebook"]), None).ok(),
+            Some(CliAction::Launch(cfg_basic))
+        );
+        assert_eq!(
+            parse_args(&sv(&["--control", "9125", "--window"]), None).ok(),
+            Some(CliAction::Launch(LaunchConfig { control_port: Some(9125), window: true, ..LaunchConfig::default() }))
+        );
+        assert_eq!(
+            parse_args(
+                &sv(&["--portable-dir", "/tmp/cb-usb", "--ttf-font", "/tmp/sans.ttf", "--rulers", "--event-script", "/tmp/script.jsonl"]),
+                None
+            )
+            .ok(),
             Some(CliAction::Launch(LaunchConfig {
-                control_port: None,
-                control_token: None,
-                window: false,
-                in_window_menus: false,
-                new_instance: false,
-                headless_once: false,
                 portable_dir: Some(PathBuf::from("/tmp/cb-usb")),
                 ttf_font: Some(PathBuf::from("/tmp/sans.ttf")),
                 rulers: true,
                 event_script: Some(PathBuf::from("/tmp/script.jsonl")),
-                files: Vec::new(),
+                ..LaunchConfig::default()
             }))
         );
+
+        // Rejected flag/env combinations (including post-R15.5 --ui-backend=legacy).
+        for (args, ep, et, eb) in [
+            (sv(&["--gui-only"]), None, None, None),
+            (sv(&["--control", "9125", "--window", "--headless-once"]), None, None, None),
+            (sv(&["--control", "0"]), None, None, None),
+            (sv(&["--control", "abc"]), None, None, None),
+            (sv(&["--control", "9126"]), None, Some("bad token"), None),
+            (sv(&[]), Some("9125"), Some("bad token"), None),
+            (sv(&["--ui-backend=legacy"]), None, None, Some("egui")),
+            (sv(&[]), None, None, Some("legacy")),
+            (sv(&["--ui-backend=bogus"]), None, None, None),
+        ] {
+            assert!(super::parse_args_with_env_and_backend(&args, ep, et, eb).is_err(), "expected err for {args:?} {ep:?} {et:?} {eb:?}");
+        }
+        for (args, eb) in [(sv(&[]), None), (sv(&[]), Some("egui")), (sv(&["--ui-backend", "egui"]), None)] {
+            assert!(matches!(super::parse_args_with_env_and_backend(&args, None, None, eb)?, CliAction::Launch(_)));
+        }
+
+        // Invalid CURVEBOOK_CONTROL_PORT / TOKEN ignored on uncontrolled launches; valid env port & CLI override work.
+        for bad_port in ["abc", "0", "65536", "-1", "127.0.0.1:9125"] {
+            let CliAction::Launch(cfg) = super::parse_args_with_env(&sv(&["--headless-once"]), Some(bad_port), Some("bad token"))? else {
+                return Err("expected Launch".into());
+            };
+            assert!(cfg.headless_once && cfg.control_port.is_none() && cfg.control_token.is_none());
+        }
+        assert!(matches!(super::parse_args_with_env(&[], Some(" 9125 "), None)?, CliAction::Launch(c) if c.control_port == Some(9125)));
+        assert!(
+            matches!(super::parse_args_with_env(&sv(&["--control", "9126"]), Some("abc"), None)?, CliAction::Launch(c) if c.control_port == Some(9126))
+        );
+
+        // Non-UTF-8 Unix control env vars: port ignored when uncontrolled, token rejected when controlled.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let non_utf8 = OsString::from_vec(vec![0xff, 0xfe]);
+            super::run_with_process_env(&sv(&["--headless-once"]), None, None, |k| (k == "CURVEBOOK_CONTROL_PORT").then(|| non_utf8.clone()))?;
+            let err =
+                super::run_with_process_env(&sv(&["--control", "9126"]), None, None, |k| (k == "CURVEBOOK_CONTROL_TOKEN").then(|| non_utf8.clone()))
+                    .expect_err("non-UTF-8 token must fail");
+            assert!(err.contains("CURVEBOOK_CONTROL_TOKEN"));
+        }
+
+        // `--` option terminator allows `-`-prefixed paths while bare `-data.csv` fails.
+        let dash_err = super::parse_args_with_env(&sv(&["-data.csv"]), None, None).expect_err("bare -data.csv");
+        assert!(dash_err.contains("unknown option") && dash_err.contains("--"));
+        let CliAction::Launch(term_cfg) =
+            super::parse_args_with_env(&sv(&["--headless-once", "--", "-data.csv", "--help", "-V", "--control", "--"]), None, None)?
+        else {
+            return Err("expected Launch".into());
+        };
+        assert_eq!(
+            term_cfg.files,
+            vec![PathBuf::from("-data.csv"), PathBuf::from("--help"), PathBuf::from("-V"), PathBuf::from("--control"), PathBuf::from("--")]
+        );
+        assert!(matches!(super::parse_args_with_env(&sv(&["--"]), None, None)?, CliAction::Launch(c) if c.files.is_empty()));
+
+        // `--new-instance` opens an isolated recovery dir without colliding on an active primary lock.
+        let dir = TestDir::new("new-inst")?;
+        let paths = super::resolve_app_paths(None, Some(dir.path()))?;
+        std::fs::create_dir_all(&paths.recovery_dir)?;
+        let (_primary, primary_journal, _) =
+            curvebook_engine::Session::open_dir_with_recovery(&paths.recovery_dir, "active-primary", 300_000, super::now_epoch_ms())?;
+
+        let single_cfg =
+            LaunchConfig { headless_once: true, portable_dir: Some(dir.path().to_path_buf()), new_instance: false, ..LaunchConfig::default() };
+        assert!(super::launch_application_with_env(&single_cfg, |_| None).is_err());
+
+        let dash_csv = dir.join("-data.csv");
+        std::fs::write(&dash_csv, "X,Y\n1,2\n3,4\n")?;
+        let new_inst_cfg = LaunchConfig {
+            headless_once: true,
+            portable_dir: Some(dir.path().to_path_buf()),
+            new_instance: true,
+            files: vec![dash_csv],
+            ..LaunchConfig::default()
+        };
+        super::launch_application_with_env(&new_inst_cfg, |_| None)?;
+        assert!(paths.recovery_dir.join(curvebook_format::LOCKFILE_NAME).is_file());
+        drop(primary_journal.abandon());
+        Ok(())
     }
 
     #[test]
     fn portable_mode_detection_and_standard_app_paths() -> Result<(), Box<dyn std::error::Error>> {
-        use std::ffi::OsString;
-
-        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("cb-app-paths-{}-{unique}", std::process::id()));
+        let dir = TestDir::new("app-paths")?;
         let exe_dir = dir.join("bin");
         std::fs::create_dir_all(&exe_dir)?;
 
-        // Standard (non-portable) mode resolves platform dirs via env without touching portable.txt
         let std_paths = super::resolve_app_paths_with_env(Some(&exe_dir), None, |key| match key {
             "HOME" | "USERPROFILE" => Some(OsString::from("/mock/home")),
             "XDG_CONFIG_HOME" => Some(OsString::from("/mock/xdg-config")),
@@ -1315,314 +1389,255 @@ mod tests {
             "LOCALAPPDATA" => Some(OsString::from("/mock/localappdata")),
             _ => None,
         })?;
-        assert!(!std_paths.portable);
-        assert!(!std_paths.config_dir.ends_with("curvebook-data"));
+        assert!(!std_paths.portable && !std_paths.config_dir.ends_with("curvebook-data"));
 
-        // Explicit --portable-dir routes config, shortcuts, preferences, and recovery into ./curvebook-data/
         let explicit_dir = dir.join("usb-stick");
         let explicit_paths = super::resolve_app_paths(Some(&exe_dir), Some(&explicit_dir))?;
+        let expected_root = explicit_dir.join("curvebook-data");
         assert!(explicit_paths.portable);
-        let expected_explicit_root = explicit_dir.join("curvebook-data");
-        assert_eq!(explicit_paths.config_dir, expected_explicit_root);
-        assert_eq!(explicit_paths.data_dir, expected_explicit_root);
-        assert_eq!(explicit_paths.preferences_file, expected_explicit_root.join("preferences.json"));
-        assert_eq!(explicit_paths.shortcuts_file, expected_explicit_root.join("shortcuts.json"));
-        assert_eq!(explicit_paths.recovery_dir, expected_explicit_root.join("recovery"));
+        assert_eq!(explicit_paths.config_dir, expected_root);
+        assert_eq!(explicit_paths.data_dir, expected_root);
+        assert_eq!(explicit_paths.preferences_file, expected_root.join("preferences.json"));
+        assert_eq!(explicit_paths.shortcuts_file, expected_root.join("shortcuts.json"));
+        assert_eq!(explicit_paths.recovery_dir, expected_root.join("recovery"));
 
-        // portable.txt next to executable activates ./curvebook-data/
         std::fs::write(exe_dir.join("portable.txt"), "CurveBook portable mode\n")?;
         let marker_paths = super::resolve_app_paths(Some(&exe_dir), None)?;
-        assert!(marker_paths.portable);
-        assert_eq!(marker_paths.config_dir, exe_dir.join("curvebook-data"));
-        assert_eq!(marker_paths.recovery_dir, exe_dir.join("curvebook-data").join("recovery"));
+        assert!(marker_paths.portable && marker_paths.config_dir == exe_dir.join("curvebook-data"));
 
-        // Shortcut preferences save & reload round-trip in portable mode (versioned preferences.json)
-        let mut app = curvebook_ui_egui::UiApp::new();
+        // Shortcut preferences save & reload round-trip + valid/invalid --ttf-font loading.
+        let mut app = UiApp::new();
         app.shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+L")?;
         super::save_shortcut_preferences(&app, &marker_paths)?;
-        assert!(marker_paths.preferences_file.is_file());
-        let saved_prefs_raw = std::fs::read_to_string(&marker_paths.preferences_file)?;
-        let saved_prefs_val: serde_json::Value = serde_json::from_str(&saved_prefs_raw)?;
-        assert_eq!(saved_prefs_val["version"], serde_json::json!(curvebook_format::versioned::CURRENT_PREFERENCES_VERSION));
-        let mut reloaded = curvebook_ui_egui::UiApp::new();
-        let imported = super::load_shortcut_preferences(&mut reloaded, &marker_paths)?;
-        assert_eq!(imported, 1);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&marker_paths.preferences_file)?)?;
+        assert_eq!(saved["version"], json!(CURRENT_PREFERENCES_VERSION));
+        let mut reloaded = UiApp::new();
+        assert_eq!(super::load_shortcut_preferences(&mut reloaded, &marker_paths)?, 1);
         assert_eq!(reloaded.shortcuts.active_combo("ui.gallery.toggle"), Some("Ctrl+Shift+L"));
 
-        // Valid & invalid --ttf-font loading
         let valid_ttf = dir.join("minimal.ttf");
         std::fs::write(&valid_ttf, curvebook_text::build_minimal_truetype_font())?;
-        let (_, font_info) = super::load_validated_ttf_font(&valid_ttf)?;
-        assert!(!font_info.family_name.is_empty());
-
+        assert!(!super::load_validated_ttf_font(&valid_ttf)?.1.family_name.is_empty());
         let invalid_ttf = dir.join("bad.ttf");
         std::fs::write(&invalid_ttf, b"not-a-ttf")?;
         assert!(super::load_validated_ttf_font(&invalid_ttf).is_err());
 
-        // Portable-dir recovery journal startup -> simulated crash -> WAL recovery -> clean shutdown
+        // Portable-dir recovery journal startup -> simulated crash -> WAL recovery -> clean shutdown.
         let recovery_root = dir.join("portable-recovery");
         let rec_paths = super::resolve_app_paths(None, Some(&recovery_root))?;
         let mut s1 = super::open_startup_session_with_recovery(&[], &rec_paths, true, 1_000)?;
         let mut journal1 = s1.journal.ok_or("portable recovery should attach journal")?;
         assert!(s1.report.is_some_and(|r| r.recovered_commands.is_empty()));
-        s1.session.execute_and_record(&mut journal1, "sheet.createData", serde_json::json!({ "sheet_id": "rec-1", "title": "Recovered" }))?;
+        s1.session.execute_and_record(&mut journal1, "sheet.createData", json!({ "sheet_id": "rec-1", "title": "Recovered" }))?;
         drop(journal1.abandon());
 
         let s2 = super::open_startup_session_with_recovery(&[], &rec_paths, true, 1_000 + super::RECOVERY_LOCK_TTL_MS + 10)?;
         let report2 = s2.report.ok_or("recovery report expected on reopen")?;
-        assert!(report2.recovered_from_stale_lock.is_some());
-        assert_eq!(report2.recovered_commands.len(), 1);
+        assert!(report2.recovered_from_stale_lock.is_some() && report2.recovered_commands.len() == 1);
         assert!(s2.session.document().data_sheets.iter().any(|s| s.id.as_str() == "rec-1"));
-
-        let mut app2 = curvebook_ui_egui::UiApp::from_session(s2.session);
+        let mut app2 = UiApp::from_session(s2.session);
         super::close_startup_recovery_cleanly(&mut app2, s2.journal)?;
         assert!(!app2.session().is_dirty());
 
         let s3 = super::open_startup_session_with_recovery(&[], &rec_paths, true, 2_000 + super::RECOVERY_LOCK_TTL_MS)?;
-        let report3 = s3.report.ok_or("reopen after clean close should return report")?;
-        assert!(report3.recovered_from_stale_lock.is_none());
-        assert!(report3.recovered_commands.is_empty());
+        let report3 = s3.report.ok_or("reopen report expected")?;
+        assert!(report3.recovered_from_stale_lock.is_none() && report3.recovered_commands.is_empty());
         assert!(s3.session.document().data_sheets.iter().any(|s| s.id.as_str() == "rec-1"));
-        let mut app3 = curvebook_ui_egui::UiApp::from_session(s3.session);
+        let mut app3 = UiApp::from_session(s3.session);
         super::close_startup_recovery_cleanly(&mut app3, s3.journal)?;
 
-        // Headless launch wiring test with --portable-dir, --ttf-font, and --rulers
-        let headless_cfg = super::LaunchConfig {
+        super::launch_application(&LaunchConfig {
             headless_once: true,
             portable_dir: Some(recovery_root),
             ttf_font: Some(valid_ttf),
             rulers: true,
-            ..super::LaunchConfig::default()
-        };
-        super::launch_application(&headless_cfg)?;
-        let _ = std::fs::remove_dir_all(&dir);
+            ..LaunchConfig::default()
+        })?;
         Ok(())
     }
 
     #[test]
     fn cli_file_startup_attaches_recovery_and_control_port_window_routing() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = std::env::temp_dir().join(format!("cb-main-new12-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir)?;
-
-        // NEW-1 + NEW-2: CLI file startup attaches recovery journal AND protects existing primary crash.
-        let cli_rec_root = dir.join("cli-file-portable");
-        let cli_rec_paths = super::resolve_app_paths(None, Some(&cli_rec_root))?;
+        let dir = TestDir::new("new12")?;
+        let cli_rec_paths = super::resolve_app_paths(None, Some(&dir.join("cli-file-portable")))?;
         let cli_project = dir.join("startup-file.curvebook");
-        let mut cli_doc = curvebook_doc::ProjectDocument::new("Startup File")?;
-        cli_doc.add_data_sheet(curvebook_doc::DataSheet::new(
+        let mut cli_doc = ProjectDocument::new("Startup File")?;
+        cli_doc.add_data_sheet(DataSheet::new(
             "cli-s1",
             "CLI Data",
-            curvebook_doc::TableArchetype::Column(curvebook_doc::ColumnTable::new(curvebook_doc::ColumnDesignHint::default(), 1, 2)?),
+            TableArchetype::Column(ColumnTable::new(ColumnDesignHint::default(), 1, 2)?),
         )?)?;
-        curvebook_format::save_project_file(&cli_project, &cli_doc)?;
+        save_project_file(&cli_project, &cli_doc)?;
 
+        // NEW-1: CLI file startup attaches recovery journal.
         let mut cli_start = super::open_startup_session_with_recovery(std::slice::from_ref(&cli_project), &cli_rec_paths, true, 5_000)?;
         let mut cli_journal = cli_start.journal.ok_or("NEW-1: CLI file startup must attach live recovery journal")?;
         assert_eq!(cli_start.recovery_dir.as_deref(), Some(cli_rec_paths.recovery_dir.as_path()));
         cli_start.session.execute_and_record(
             &mut cli_journal,
             "table.setCell",
-            serde_json::json!({ "sheet_id": "cli-s1", "row": 0, "col": 0, "value": 98.75 }),
+            json!({ "sheet_id": "cli-s1", "row": 0, "col": 0, "value": 98.75 }),
         )?;
         drop(cli_journal.abandon());
 
         let cli_recovered = super::open_startup_session_with_recovery(&[], &cli_rec_paths, true, 5_000 + super::RECOVERY_LOCK_TTL_MS + 10)?;
-        let crashed_sheet =
-            cli_recovered.session.document().data_sheet(&curvebook_doc::SheetId::new("cli-s1")).ok_or("missing recovered CLI sheet")?;
-        assert_eq!(crashed_sheet.cell(curvebook_doc::CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), Some(98.75));
-        let mut rec_app = curvebook_ui_egui::UiApp::from_session(cli_recovered.session);
+        assert_eq!(
+            cli_recovered
+                .session
+                .document()
+                .data_sheet(&SheetId::new("cli-s1"))
+                .ok_or("missing")?
+                .cell(CellCoord::new(0, 0, 0))
+                .and_then(|c| c.active_number()),
+            Some(98.75)
+        );
+        let mut rec_app = UiApp::from_session(cli_recovered.session);
         super::close_startup_recovery_cleanly(&mut rec_app, cli_recovered.journal)?;
 
-        // NEW-2: If primary recovery_dir holds an unrecovered crash, launching with another CLI file
-        // preserves the crashed primary journal intact and runs in an isolated journal directory.
+        // NEW-2: Unrecovered primary crash stays intact while CLI file launch uses isolated journal dir.
         {
             let (mut s_crash, mut j_crash, _) =
                 curvebook_engine::Session::open_dir_with_recovery(&cli_rec_paths.recovery_dir, "crashed-proc", super::RECOVERY_LOCK_TTL_MS, 10_000)?;
-            s_crash.execute_and_record(&mut j_crash, "sheet.createData", serde_json::json!({ "sheet_id": "keep-crash", "title": "Preserved" }))?;
+            s_crash.execute_and_record(&mut j_crash, "sheet.createData", json!({ "sheet_id": "keep-crash", "title": "Preserved" }))?;
             drop(j_crash.abandon());
         }
-        let isolated_cli = super::open_startup_session_with_recovery(
+        let isolated = super::open_startup_session_with_recovery(
             std::slice::from_ref(&cli_project),
             &cli_rec_paths,
             true,
             10_000 + super::RECOVERY_LOCK_TTL_MS + 10,
         )?;
-        let iso_journal = isolated_cli.journal.ok_or("NEW-2: isolated CLI file launch must still attach a journal")?;
-        assert_ne!(isolated_cli.recovery_dir.as_deref(), Some(cli_rec_paths.recovery_dir.as_path()));
-        let mut iso_app = curvebook_ui_egui::UiApp::from_session(isolated_cli.session);
+        let iso_journal = isolated.journal.ok_or("NEW-2: isolated journal")?;
+        assert_ne!(isolated.recovery_dir.as_deref(), Some(cli_rec_paths.recovery_dir.as_path()));
+        let mut iso_app = UiApp::from_session(isolated.session);
         super::close_startup_recovery_cleanly(&mut iso_app, Some(iso_journal))?;
 
-        let primary_still_has_crash =
-            super::open_startup_session_with_recovery(&[], &cli_rec_paths, true, 10_000 + super::RECOVERY_LOCK_TTL_MS + 20)?;
-        assert!(
-            primary_still_has_crash.session.document().data_sheet(&curvebook_doc::SheetId::new("keep-crash")).is_some(),
-            "crashed primary journal must not be overwritten when launching with a CLI file"
-        );
-        let mut clean_primary_app = curvebook_ui_egui::UiApp::from_session(primary_still_has_crash.session);
-        super::close_startup_recovery_cleanly(&mut clean_primary_app, primary_still_has_crash.journal)?;
+        let primary = super::open_startup_session_with_recovery(&[], &cli_rec_paths, true, 10_000 + super::RECOVERY_LOCK_TTL_MS + 20)?;
+        assert!(primary.session.document().data_sheet(&SheetId::new("keep-crash")).is_some());
+        let mut clean_primary = UiApp::from_session(primary.session);
+        super::close_startup_recovery_cleanly(&mut clean_primary, primary.journal)?;
 
-        // R2-S11-09 (#362): CURVEBOOK_CONTROL_PORT matches --control behavior (headless unless --window).
-        let env_headless = super::parse_args(&[], Some("9125"))?;
-        let super::CliAction::Launch(cfg_headless) = env_headless else {
-            return Err("expected Launch for CURVEBOOK_CONTROL_PORT".into());
-        };
-        assert_eq!(cfg_headless.control_port, Some(9125));
-        assert!(!cfg_headless.window);
-        assert!(!super::should_launch_window(&cfg_headless));
-
-        let env_windowed = super::parse_args(&[String::from("--window")], Some("9125"))?;
-        let super::CliAction::Launch(cfg_windowed) = env_windowed else {
-            return Err("expected Launch for CURVEBOOK_CONTROL_PORT + --window".into());
-        };
-        assert_eq!(cfg_windowed.control_port, Some(9125));
-        assert!(cfg_windowed.window);
-        assert!(super::should_launch_window(&cfg_windowed));
-
-        let _ = std::fs::remove_dir_all(&dir);
+        // R2-S11-09: CURVEBOOK_CONTROL_PORT matches --control behavior (headless unless --window).
+        let CliAction::Launch(cfg_h) = parse_args(&[], Some("9125"))? else { return Err("expected Launch".into()) };
+        assert!(cfg_h.control_port == Some(9125) && !cfg_h.window && !super::should_launch_window(&cfg_h));
+        let CliAction::Launch(cfg_w) = parse_args(&sv(&["--window"]), Some("9125"))? else { return Err("expected Launch".into()) };
+        assert!(cfg_w.control_port == Some(9125) && cfg_w.window && super::should_launch_window(&cfg_w));
         Ok(())
     }
 
     #[test]
-    fn startup_loads_project_and_csv_files() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = std::env::temp_dir().join(format!("cb-main-startup-{}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-
-        let project_path = dir.join("sample.curvebook");
-        let mut doc = ProjectDocument::new("Startup Assay")?;
-        let xy = XyTable::new(SubcolumnMode::Single, 1, 3)?;
-        doc.add_data_sheet(DataSheet::new("data-1", "Dose", TableArchetype::Xy(xy))?)?;
-        save_project_file(&project_path, &doc)?;
-
-        let session = load_startup_session(std::slice::from_ref(&project_path))?;
-        assert_eq!(session.document().title, "Startup Assay");
-        assert_eq!(session.document().data_sheets.len(), 1);
-        assert!(!session.is_dirty());
-
+    fn startup_session_loads_projects_unpacked_dirs_and_csv_merges() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TestDir::new("startup")?;
+        let mut doc_a = ProjectDocument::new("Project Alpha")?;
+        doc_a.add_data_sheet(DataSheet::new("data-a", "Alpha Table", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 2)?))?)?;
+        let proj_a = dir.join("a.curvebook");
+        save_project_file(&proj_a, &doc_a)?;
+        let proj_b = dir.join("b.curvebook");
+        save_project_file(&proj_b, &ProjectDocument::new("Project Beta")?)?;
         let csv_path = dir.join("plate.csv");
         std::fs::write(&csv_path, "Ctrl,Treated\n1.0,2.5\n3.0,4.5\n")?;
-        let csv_session = load_startup_session(&[csv_path])?;
-        assert_eq!(csv_session.document().data_sheets.len(), 1);
-        assert_eq!(csv_session.document().data_sheets[0].title, "plate");
 
-        let _ = std::fs::remove_dir_all(&dir);
-        Ok(())
-    }
+        let s_proj = load_startup_session(std::slice::from_ref(&proj_a))?;
+        assert!(s_proj.document().title == "Project Alpha" && s_proj.document().data_sheets.len() == 1 && !s_proj.is_dirty());
 
-    #[test]
-    fn startup_and_session_auto_detect_unpacked_project_dirs() -> Result<(), Box<dyn std::error::Error>> {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-main-unpacked-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
+        let s_csv = load_startup_session(std::slice::from_ref(&csv_path))?;
+        assert!(s_csv.document().data_sheets.len() == 1 && s_csv.document().data_sheets[0].title == "plate");
 
+        // Multiple project archives fail; CSV before or after archive merges and marks dirty.
+        assert!(load_startup_session(&[proj_a.clone(), proj_b]).expect_err("multi-project").contains("cannot open multiple project files"));
+        for order in [[csv_path.clone(), proj_a.clone()], [proj_a.clone(), csv_path]] {
+            let merged = load_startup_session(&order)?;
+            assert!(
+                merged.document().title == "Project Alpha"
+                    && merged.document().data_sheets.len() == 2
+                    && merged.file_path() == Some(proj_a.as_path())
+                    && merged.is_dirty()
+            );
+        }
+
+        // Auto-detect unpacked `.curvebook.d` and plain `unpacked: true` project directories.
         let unpacked_dot_d = dir.join("study.curvebook.d");
-        let mut doc = ProjectDocument::new("Unpacked Startup")?;
-        let xy = XyTable::new(SubcolumnMode::Single, 1, 2)?;
-        doc.add_data_sheet(DataSheet::new("data-1", "Dose", TableArchetype::Xy(xy))?)?;
-        curvebook_format::save_project_unpacked_dir(&doc, &unpacked_dot_d)?;
+        curvebook_format::save_project_unpacked_dir(&doc_a, &unpacked_dot_d)?;
+        let mut s_dir = load_startup_session(std::slice::from_ref(&unpacked_dot_d))?;
+        assert!(s_dir.file_path() == Some(unpacked_dot_d.as_path()) && !s_dir.is_dirty());
 
-        let session = load_startup_session(std::slice::from_ref(&unpacked_dot_d))?;
-        assert_eq!(session.document().title, "Unpacked Startup");
-        assert_eq!(session.file_path(), Some(unpacked_dot_d.as_path()));
-        assert!(!session.is_dirty());
-
-        let mut mut_session = session;
-        // 1. Auto-detect `.curvebook.d` suffix when saving without explicit `unpacked: true`.
         let saved_dot_d = dir.join("saved.curvebook.d");
-        let save_resp =
-            mut_session.execute("project.save", serde_json::json!({ "path": saved_dot_d.display().to_string(), "return_bytes": false }))?;
-        assert_eq!(save_resp.payload.get("unpacked").and_then(|v| v.as_bool()), Some(true));
-        assert!(curvebook_format::is_unpacked_project_dir(&saved_dot_d));
+        let r1 = s_dir.execute("project.save", json!({ "path": saved_dot_d.display().to_string(), "return_bytes": false }))?;
+        assert_eq!(r1.payload["unpacked"], json!(true));
+        assert!(curvebook_format::is_unpacked_project_dir(&saved_dot_d) && load_startup_session(&[saved_dot_d])?.document().title == "Project Alpha");
 
-        let reopened_dot_d = load_startup_session(std::slice::from_ref(&saved_dot_d))?;
-        assert_eq!(reopened_dot_d.document().title, "Unpacked Startup");
-
-        // 2. Also auto-detect an unpacked directory without `.curvebook.d` suffix via `is_unpacked_project_dir`.
         let plain_unpacked = dir.join("plain_project_dir");
-        let save_plain_resp = mut_session
-            .execute("project.save", serde_json::json!({ "path": plain_unpacked.display().to_string(), "unpacked": true, "return_bytes": false }))?;
-        assert_eq!(save_plain_resp.payload.get("unpacked").and_then(|v| v.as_bool()), Some(true));
-        assert!(curvebook_format::is_unpacked_project_dir(&plain_unpacked));
-
-        let reopened = load_startup_session(std::slice::from_ref(&plain_unpacked))?;
-        assert_eq!(reopened.document().title, "Unpacked Startup");
-        assert_eq!(reopened.document().data_sheets.len(), 1);
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let r2 = s_dir.execute("project.save", json!({ "path": plain_unpacked.display().to_string(), "unpacked": true, "return_bytes": false }))?;
+        assert_eq!(r2.payload["unpacked"], json!(true));
+        let reopened = load_startup_session(&[plain_unpacked])?;
+        assert!(reopened.document().title == "Project Alpha" && reopened.document().data_sheets.len() == 1);
         Ok(())
     }
 
     #[test]
     fn preferences_preserve_forward_fields_and_refuse_newer_version_overwrite() -> Result<(), Box<dyn std::error::Error>> {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-main-prefs-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-        let paths = super::resolve_app_paths(None, Some(&dir))?;
+        let dir = TestDir::new("prefs")?;
+        let paths = super::resolve_app_paths(None, Some(dir.path()))?;
         std::fs::create_dir_all(&paths.config_dir)?;
 
-        // 1. Legacy v0 preferences file without explicit `version` upgrades and preserves metadata.
-        let legacy_raw = serde_json::json!({
-            "locale": "en-US",
-            "theme": "light",
-            "shortcuts": { "ui.gallery.toggle": "Ctrl+Alt+G" },
-            "future_flag": true
-        });
+        // 1. Legacy v0 preferences upgrade, preserve unknown forward fields, migrate `scale` -> `ui_scale`, and normalize RTL `ar` -> `en`.
+        let legacy_raw = json!({ "locale": "en-US", "theme": "light", "shortcuts": { "ui.gallery.toggle": "Ctrl+Alt+G" }, "future_flag": true });
         std::fs::write(&paths.preferences_file, serde_json::to_string_pretty(&legacy_raw)?)?;
-        let mut app = curvebook_ui_egui::UiApp::new();
-        let count = super::load_shortcut_preferences(&mut app, &paths)?;
-        assert_eq!(count, 1);
+        let mut app = UiApp::new();
+        assert_eq!(super::load_shortcut_preferences(&mut app, &paths)?, 1);
         assert_eq!(app.shortcuts.active_combo("ui.gallery.toggle"), Some("Ctrl+Alt+G"));
-
         app.shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+G")?;
         super::save_shortcut_preferences(&app, &paths)?;
         let after_save: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&paths.preferences_file)?)?;
-        assert_eq!(after_save["version"], serde_json::json!(super::CURRENT_PREFERENCES_VERSION));
-        assert_eq!(after_save["locale"], serde_json::json!("en-US"));
-        assert_eq!(after_save["future_flag"], serde_json::json!(true));
+        assert_eq!(after_save["version"], json!(CURRENT_PREFERENCES_VERSION));
+        assert_eq!(after_save["locale"], json!("en-US"));
+        assert_eq!(after_save["future_flag"], json!(true));
+
+        std::fs::write(&paths.preferences_file, r#"{"locale":"ar","theme":"dark","scale":1.35}"#)?;
+        let mut scale_app = UiApp::new();
+        super::load_shortcut_preferences(&mut scale_app, &paths)?;
+        assert_eq!(scale_app.locale, "en");
+        assert_eq!(scale_app.theme.mode, UiThemeMode::Dark);
+        assert!((scale_app.ui_scale() - 1.35).abs() < 1e-4);
+        scale_app.zoom_ui_scale_in();
+        super::save_shortcut_preferences(&scale_app, &paths)?;
+        let saved_scale: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&paths.preferences_file)?)?;
+        assert_eq!(saved_scale["ui_scale"], json!(1.45));
+        assert!(saved_scale.get("scale").is_none());
 
         // 2. Future version file on disk must never be overwritten.
-        let future_raw = serde_json::json!({
-            "version": super::CURRENT_PREFERENCES_VERSION + 42,
+        let future_text = serde_json::to_string_pretty(&json!({
+            "version": CURRENT_PREFERENCES_VERSION + 42,
             "shortcuts": { "ui.gallery.toggle": "Ctrl+Alt+F" },
             "custom_future_setting": 123
-        });
-        let future_text = serde_json::to_string_pretty(&future_raw)?;
+        }))?;
         std::fs::write(&paths.preferences_file, &future_text)?;
-
-        let mut future_app = curvebook_ui_egui::UiApp::new();
+        let mut future_app = UiApp::new();
         assert!(super::load_shortcut_preferences(&mut future_app, &paths).is_err());
         future_app.shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+X")?;
         assert!(super::save_shortcut_preferences(&future_app, &paths).is_err());
-        assert_eq!(std::fs::read_to_string(&paths.preferences_file)?, future_text, "newer-version preferences file must remain untouched");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(std::fs::read_to_string(&paths.preferences_file)?, future_text);
         Ok(())
     }
 
     #[test]
     fn control_token_cli_env_override_and_restricted_file_cleanup() -> Result<(), Box<dyn std::error::Error>> {
-        let env_only = super::parse_args_with_env(&[String::from("--control"), String::from("9125")], None, Some("  sample-env-token  "));
-        let Ok(CliAction::Launch(env_cfg)) = env_only else {
-            return Err(String::from("expected launch config from env token").into());
+        let CliAction::Launch(env_cfg) = super::parse_args_with_env(&sv(&["--control", "9125"]), None, Some("  sample-env-token  "))? else {
+            return Err("expected Launch".into());
         };
-        assert_eq!(env_cfg.control_port, Some(9125));
-        assert_eq!(env_cfg.control_token.as_deref(), Some("sample-env-token"));
+        assert_eq!((env_cfg.control_port, env_cfg.control_token.as_deref()), (Some(9125), Some("sample-env-token")));
 
-        let cli_wins = super::parse_args_with_env(
-            &[String::from("--control"), String::from("9126"), String::from("--control-token"), String::from("sample-cli-token")],
-            None,
-            Some("sample-env-token"),
-        );
-        let Ok(CliAction::Launch(cli_cfg)) = cli_wins else {
-            return Err(String::from("expected launch config from cli token").into());
+        let CliAction::Launch(cli_cfg) =
+            super::parse_args_with_env(&sv(&["--control", "9126", "--control-token", "sample-cli-token"]), None, Some("sample-env-token"))?
+        else {
+            return Err("expected Launch".into());
         };
         assert_eq!(cli_cfg.control_token.as_deref(), Some("sample-cli-token"));
-        assert!(super::parse_args_with_env(&[String::from("--control-token"), String::from("")], None, None).is_err());
-        assert!(super::parse_args_with_env(&[String::from("--control-token")], None, None).is_err());
+        assert!(super::parse_args_with_env(&sv(&["--control-token", ""]), None, None).is_err());
+        assert!(super::parse_args_with_env(&sv(&["--control-token"]), None, None).is_err());
 
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-ctrl-tok-file-{}-{nanos}", std::process::id()));
-        let paths = super::resolve_app_paths(None, Some(&dir))?;
+        let dir = TestDir::new("ctrl-tok")?;
+        let paths = super::resolve_app_paths(None, Some(dir.path()))?;
         let token_path = super::control_token_file_path(&paths.config_dir, 9127);
         let auth = super::resolve_control_auth(&LaunchConfig::default())?;
         assert_eq!(auth.as_str().len(), curvebook_ui_egui::CONTROL_AUTH_TOKEN_BYTES * 2);
@@ -1634,241 +1649,138 @@ mod tests {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mode = std::fs::metadata(&token_path)?.permissions().mode() & 0o777;
-                assert_eq!(mode, 0o600, "control token file must use 0600 permissions");
+                assert_eq!(std::fs::metadata(&token_path)?.permissions().mode() & 0o777, 0o600);
             }
         }
         assert!(!token_path.exists(), "ControlTokenFileGuard must remove token file on drop");
-
-        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 
     #[test]
     fn r1_s11_02_launch_failure_releases_acquired_recovery_lock() -> Result<(), Box<dyn std::error::Error>> {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-main-lock-cleanup-{}-{nanos}", std::process::id()));
+        let dir = TestDir::new("lock-cleanup")?;
         let recovery_dir = dir.join("curvebook-data").join("recovery");
 
-        // Trigger failure AFTER opening window + acquiring recovery lock (`--event-script` missing file).
         let failing_cfg = LaunchConfig {
-            portable_dir: Some(dir.clone()),
+            portable_dir: Some(dir.path().to_path_buf()),
             event_script: Some(dir.join("definitely-missing-script.jsonl")),
             ..LaunchConfig::default()
         };
         let err = super::launch_application_with_env(&failing_cfg, |_| None).expect_err("missing --event-script should fail launch");
         assert!(err.contains("--event-script"));
-        assert!(!recovery_dir.join(curvebook_format::LOCKFILE_NAME).exists(), "failed launch must still release curvebook.lock");
+        assert!(!recovery_dir.join(curvebook_format::LOCKFILE_NAME).exists(), "failed launch must release curvebook.lock");
 
-        // Immediate relaunch without waiting for TTL must succeed cleanly.
-        let ok_cfg = LaunchConfig { headless_once: true, portable_dir: Some(dir.clone()), ..LaunchConfig::default() };
+        let ok_cfg = LaunchConfig { headless_once: true, portable_dir: Some(dir.path().to_path_buf()), ..LaunchConfig::default() };
         super::launch_application_with_env(&ok_cfg, |_| None)?;
         assert!(!recovery_dir.join(curvebook_format::LOCKFILE_NAME).exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 
     #[test]
-    fn r1_s11_04_multi_file_args_and_csv_dirty_flag() -> Result<(), Box<dyn std::error::Error>> {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-main-s11-04-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-
-        let proj_a = dir.join("a.curvebook");
-        let mut doc_a = ProjectDocument::new("Project Alpha")?;
-        doc_a.add_data_sheet(DataSheet::new("data-a", "Alpha Table", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 2)?))?)?;
-        save_project_file(&proj_a, &doc_a)?;
-
-        let proj_b = dir.join("b.curvebook");
-        let doc_b = ProjectDocument::new("Project Beta")?;
-        save_project_file(&proj_b, &doc_b)?;
-
-        let csv_path = dir.join("extra.csv");
-        std::fs::write(&csv_path, "X,Y\n1,2\n3,4\n")?;
-
-        // 1. Multiple project archives must return an explicit error rather than silently dropping the first.
-        let multi_err = load_startup_session(&[proj_a.clone(), proj_b]).expect_err("multiple project archives must fail");
-        assert!(multi_err.contains("cannot open multiple project files"));
-
-        // 2. CSV before project archive loads archive AND merges CSV, marking session dirty.
-        let before = load_startup_session(&[csv_path.clone(), proj_a.clone()])?;
-        assert_eq!(before.document().title, "Project Alpha");
-        assert_eq!(before.document().data_sheets.len(), 2);
-        assert_eq!(before.file_path(), Some(proj_a.as_path()));
-        assert!(before.is_dirty(), "merging CSV before project archive must mark session dirty");
-
-        // 3. CSV after project archive loads archive AND merges CSV, marking session dirty.
-        let after = load_startup_session(&[proj_a.clone(), csv_path])?;
-        assert_eq!(after.document().title, "Project Alpha");
-        assert_eq!(after.document().data_sheets.len(), 2);
-        assert_eq!(after.file_path(), Some(proj_a.as_path()));
-        assert!(after.is_dirty(), "merging CSV after project archive must mark session dirty");
-
-        let _ = std::fs::remove_dir_all(&dir);
-        Ok(())
-    }
-
-    #[test]
-    fn r1_s11_05_corrupt_prefs_and_shortcuts_warn_instead_of_aborting_launch() -> Result<(), Box<dyn std::error::Error>> {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-main-s11-05-{}-{nanos}", std::process::id()));
+    fn corrupt_prefs_config_dir_and_no_prefs_env() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TestDir::new("s11-05-06")?;
         let data_dir = dir.join("curvebook-data");
         std::fs::create_dir_all(&data_dir)?;
+        let headless_cfg = LaunchConfig { headless_once: true, portable_dir: Some(dir.path().to_path_buf()), ..LaunchConfig::default() };
 
-        // Corrupt shortcuts.json must warn and fall back to defaults instead of aborting launch.
-        std::fs::write(data_dir.join("shortcuts.json"), "{definitely invalid json")?;
-        let headless_cfg = LaunchConfig { headless_once: true, portable_dir: Some(dir.clone()), ..LaunchConfig::default() };
+        // Corrupt shortcuts.json / preferences.json warn instead of aborting launch.
+        std::fs::write(data_dir.join("shortcuts.json"), "{invalid json")?;
+        super::launch_application_with_env(&headless_cfg, |_| None)?;
+        std::fs::write(data_dir.join("preferences.json"), "{broken json")?;
         super::launch_application_with_env(&headless_cfg, |_| None)?;
 
-        // Corrupt preferences.json must warn at launch and on exit without aborting cleanup.
-        std::fs::write(data_dir.join("preferences.json"), "{broken preferences json")?;
-        super::launch_application_with_env(&headless_cfg, |_| None)?;
-
-        // Swapped shortcuts.json loads cleanly through configure_window_preferences.
+        // Swapped shortcuts.json loads cleanly via configure_window_preferences.
         std::fs::remove_file(data_dir.join("preferences.json"))?;
         std::fs::write(data_dir.join("shortcuts.json"), r#"{"ui.palette.open":"F6","ui.pane.cycle":"Cmd+K"}"#)?;
-        let app_paths = super::resolve_app_paths(None, Some(&dir))?;
-        let mut app = curvebook_ui_egui::UiApp::new();
+        let app_paths = super::resolve_app_paths(None, Some(dir.path()))?;
+        let mut app = UiApp::new();
         super::configure_window_preferences(&mut app, &app_paths, &LaunchConfig::default(), false);
-        assert_eq!(app.shortcuts.active_combo("ui.palette.open"), Some("F6"));
-        assert_eq!(app.shortcuts.active_combo("ui.pane.cycle"), Some("Cmd+K"));
+        assert_eq!((app.shortcuts.active_combo("ui.palette.open"), app.shortcuts.active_combo("ui.pane.cycle")), (Some("F6"), Some("Cmd+K")));
 
-        let _ = std::fs::remove_dir_all(&dir);
-        Ok(())
-    }
-
-    #[test]
-    fn r1_s11_06_config_dir_and_no_prefs_env_vars() -> Result<(), Box<dyn std::error::Error>> {
-        use std::ffi::OsString;
-
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-main-s11-06-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
+        // CURVEBOOK_CONFIG_DIR + CURVEBOOK_NO_PREFS=1/true/YES skip prefs & recovery; unset enables recovery.
         let env_cfg_dir = dir.join("custom-cfg");
         std::fs::create_dir_all(&env_cfg_dir)?;
-
-        let paths =
-            super::resolve_app_paths_with_env(
-                None,
-                None,
-                |key| {
-                    if key == "CURVEBOOK_CONFIG_DIR" { Some(OsString::from(&env_cfg_dir)) } else { None }
-                },
-            )?;
-        assert_eq!(paths.config_dir, env_cfg_dir);
-        assert_eq!(paths.preferences_file, env_cfg_dir.join("preferences.json"));
-        assert_eq!(paths.shortcuts_file, env_cfg_dir.join("shortcuts.json"));
-        assert_eq!(paths.recovery_dir, env_cfg_dir.join("recovery"));
-
-        // With CURVEBOOK_NO_PREFS=1 (and true/yes), corrupt prefs are skipped, no prefs are saved,
-        // and no shared recovery lock/journal is touched even on non-headless event script execution.
-        let mut prefs = curvebook_format::versioned::PreferencesFile::default();
-        prefs.shortcuts.insert(String::from("ui.gallery.toggle"), String::from("Ctrl+Alt+G"));
-        curvebook_format::versioned::save_preferences_file(&paths.preferences_file, &prefs)?;
+        let paths = super::resolve_app_paths_with_env(None, None, |k| (k == "CURVEBOOK_CONFIG_DIR").then(|| OsString::from(&env_cfg_dir)))?;
+        assert_eq!((&paths.config_dir, &paths.recovery_dir), (&env_cfg_dir, &env_cfg_dir.join("recovery")));
 
         let script_path = dir.join("noop.jsonl");
         std::fs::write(&script_path, "{\"WindowFocused\":{\"window_id\":1}}\n")?;
         let cfg = LaunchConfig { event_script: Some(script_path), ..LaunchConfig::default() };
-
         for val in ["1", "true", "YES"] {
             let env_dir = env_cfg_dir.clone();
             let flag = OsString::from(val);
-            super::launch_application_with_env(&cfg, move |key| match key {
+            super::launch_application_with_env(&cfg, move |k| match k {
                 "CURVEBOOK_CONFIG_DIR" => Some(OsString::from(&env_dir)),
                 "CURVEBOOK_NO_PREFS" => Some(flag.clone()),
                 _ => None,
             })?;
             assert!(!paths.recovery_dir.exists(), "CURVEBOOK_NO_PREFS={val} must not touch recovery_dir");
         }
-
-        // Verify a customized app does NOT write preferences when CURVEBOOK_NO_PREFS is true.
-        let mut custom_app = curvebook_ui_egui::UiApp::new();
+        let mut custom_app = UiApp::new();
         custom_app.shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+Y")?;
         let fresh_paths = super::resolve_app_paths(None, Some(&dir.join("unused-portable")))?;
         super::persist_window_preferences_best_effort(&custom_app, &fresh_paths, true);
         assert!(!fresh_paths.preferences_file.exists());
 
-        // Contrast: without CURVEBOOK_NO_PREFS, CURVEBOOK_CONFIG_DIR is used for recovery_dir.
         let env_dir_enabled = env_cfg_dir.clone();
-        super::launch_application_with_env(
-            &cfg,
-            move |key| {
-                if key == "CURVEBOOK_CONFIG_DIR" { Some(OsString::from(&env_dir_enabled)) } else { None }
-            },
-        )?;
-        assert!(paths.recovery_dir.is_dir(), "expected CURVEBOOK_CONFIG_DIR/recovery when CURVEBOOK_NO_PREFS is unset");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        super::launch_application_with_env(&cfg, move |k| (k == "CURVEBOOK_CONFIG_DIR").then(|| OsString::from(&env_dir_enabled)))?;
+        assert!(paths.recovery_dir.is_dir());
         Ok(())
     }
 
     #[test]
     fn r1_s11_07_persists_locale_theme_and_shortcuts_across_control_and_gui_close() -> Result<(), Box<dyn std::error::Error>> {
-        use curvebook::desktop_host::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime};
-        use curvebook_ui_egui::{ControlAuth, UiThemeMode, ViewportMetrics, serve_control_stream_with_quit_and_hook};
-
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-main-s11-07-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-        let app_paths = super::resolve_app_paths(None, Some(&dir))?;
+        let dir = TestDir::new("s11-07")?;
+        let app_paths = super::resolve_app_paths(None, Some(dir.path()))?;
         std::fs::create_dir_all(&app_paths.config_dir)?;
+        let load_fresh = || {
+            let mut a = UiApp::new();
+            super::configure_window_preferences(&mut a, &app_paths, &LaunchConfig::default(), false);
+            a
+        };
 
         // Part A: Versioned PreferencesFile handles `"shortcuts": null` and swapped shortcuts + locale/theme cleanly.
         std::fs::write(&app_paths.preferences_file, r#"{"version":1,"locale":"fr","theme":"dark","shortcuts":null}"#)?;
-        let mut reloaded_null = curvebook_ui_egui::UiApp::new();
-        super::configure_window_preferences(&mut reloaded_null, &app_paths, &LaunchConfig::default(), false);
-        assert_eq!(reloaded_null.locale, "fr");
-        assert_eq!(reloaded_null.theme.mode, UiThemeMode::Dark);
-        reloaded_null.shortcuts.set_shortcut("ui.palette.open", "Ctrl+Shift+F9")?;
-        reloaded_null.shortcuts.set_shortcut("ui.pane.cycle", "Cmd+K")?;
-        reloaded_null.shortcuts.set_shortcut("ui.palette.open", "F6")?;
-        super::persist_window_preferences_best_effort(&reloaded_null, &app_paths, false);
-
-        let mut swapped_app = curvebook_ui_egui::UiApp::new();
-        super::configure_window_preferences(&mut swapped_app, &app_paths, &LaunchConfig::default(), false);
-        assert_eq!(swapped_app.locale, "fr");
-        assert_eq!(swapped_app.theme.mode, UiThemeMode::Dark);
-        assert_eq!(swapped_app.shortcuts.active_combo("ui.palette.open"), Some("F6"));
-        assert_eq!(swapped_app.shortcuts.active_combo("ui.pane.cycle"), Some("Cmd+K"));
+        let mut app = load_fresh();
+        assert_eq!((app.locale.as_str(), app.theme.mode), ("fr", UiThemeMode::Dark));
+        app.shortcuts.set_shortcut("ui.palette.open", "Ctrl+Shift+F9")?;
+        app.shortcuts.set_shortcut("ui.pane.cycle", "Cmd+K")?;
+        app.shortcuts.set_shortcut("ui.palette.open", "F6")?;
+        super::persist_window_preferences_best_effort(&app, &app_paths, false);
+        let swapped = load_fresh();
+        assert_eq!((swapped.locale.as_str(), swapped.theme.mode), ("fr", UiThemeMode::Dark));
+        assert_eq!((swapped.shortcuts.active_combo("ui.palette.open"), swapped.shortcuts.active_combo("ui.pane.cycle")), (Some("F6"), Some("Cmd+K")));
 
         // Part B: GUI DesktopHostRuntime close path persists locale, theme, and shortcuts even on dirty close ("Don't Save").
-        let mut rt =
-            DesktopHostRuntime::new(DesktopHostConfig { initial_viewport: ViewportMetrics::new(800.0, 600.0, 2.0), ..DesktopHostConfig::default() });
-        let win_id = rt.open_window(None, ViewportMetrics::new(800.0, 600.0, 2.0))?;
+        let vp = ViewportMetrics::new(800.0, 600.0, 2.0);
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig { initial_viewport: vp, ..DesktopHostConfig::default() });
+        let win_id = rt.open_window(None, vp)?;
         let hook_paths = app_paths.clone();
-        rt.set_preferences_persist_hook(move |app| {
-            super::persist_window_preferences_best_effort(app, &hook_paths, false);
-        });
+        rt.set_preferences_persist_hook(move |a| super::persist_window_preferences_best_effort(a, &hook_paths, false));
         {
             let win = rt.window_mut(win_id)?;
             win.app_mut().set_locale("de");
             win.app_mut().set_theme_mode(UiThemeMode::HighContrast);
             win.app_mut().shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+U")?;
-            let _ = win.app_mut().session_mut().execute("sheet.createData", serde_json::json!({ "sheet_id": "dirty-s11", "title": "DirtyTable" }))?;
+            let _ = win.app_mut().session_mut().execute("sheet.createData", json!({ "sheet_id": "dirty-s11", "title": "DirtyTable" }))?;
         }
         let _ = rt.dispatch(DesktopHostEvent::WindowCloseRequested { window_id: win_id, force: false })?;
-        let mut post_gui = curvebook_ui_egui::UiApp::new();
-        super::configure_window_preferences(&mut post_gui, &app_paths, &LaunchConfig::default(), false);
-        assert_eq!(post_gui.locale, "de");
-        assert_eq!(post_gui.theme.mode, UiThemeMode::HighContrast);
-        assert_eq!(post_gui.shortcuts.active_combo("ui.gallery.toggle"), Some("Ctrl+Shift+U"));
-
-        // Discard dirty prompt via close_all_force after another preference change; must still persist.
+        let post_gui = load_fresh();
+        assert_eq!(
+            (post_gui.locale.as_str(), post_gui.theme.mode, post_gui.shortcuts.active_combo("ui.gallery.toggle")),
+            ("de", UiThemeMode::HighContrast, Some("Ctrl+Shift+U"))
+        );
         rt.window_mut(win_id)?.app_mut().set_theme_mode(UiThemeMode::Light);
         rt.close_all_force()?;
-        let mut post_force = curvebook_ui_egui::UiApp::new();
-        super::configure_window_preferences(&mut post_force, &app_paths, &LaunchConfig::default(), false);
-        assert_eq!(post_force.theme.mode, UiThemeMode::Light);
-        assert_eq!(post_force.locale, "de");
+        let post_force = load_fresh();
+        assert_eq!((post_force.locale.as_str(), post_force.theme.mode), ("de", UiThemeMode::Light));
 
         // Part C: Authenticated `--control` post-request hook immediately persists locale, theme, and shortcuts.
-        let mut ctrl_rt =
-            DesktopHostRuntime::new(DesktopHostConfig { initial_viewport: ViewportMetrics::new(800.0, 600.0, 2.0), ..DesktopHostConfig::default() });
-        let ctrl_win_id = ctrl_rt.open_window(None, ViewportMetrics::new(800.0, 600.0, 2.0))?;
+        let mut ctrl_rt = DesktopHostRuntime::new(DesktopHostConfig { initial_viewport: vp, ..DesktopHostConfig::default() });
+        let ctrl_win_id = ctrl_rt.open_window(None, vp)?;
         let auth_tok = ControlAuth::generate()?;
         let script = [
-            serde_json::json!({"id": 1, "method": "auth", "params": {"token": auth_tok.as_str()}}).to_string(),
+            json!({"id": 1, "method": "auth", "params": {"token": auth_tok.as_str()}}).to_string(),
             String::from(r#"{"id":2,"method":"ui.locale.set","params":{"locale":"ja"}}"#),
             String::from(r#"{"id":3,"method":"ui.theme.set","params":{"mode":"dark"}}"#),
             String::from(r#"{"id":4,"method":"ui.shortcut.set","params":{"command_id":"ui.palette.open","shortcut":"F7"}}"#),
@@ -1877,223 +1789,76 @@ mod tests {
         .join("\n")
             + "\n";
         let mut out_bytes = Vec::new();
-        let mut observed_immediate_pre_quit = false;
-        super::serve_control_with_pref_persistence(ctrl_rt.window_mut(ctrl_win_id)?, &app_paths, false, |app, hook| {
+        let mut observed_pre_quit = false;
+        super::serve_control_with_pref_persistence(ctrl_rt.window_mut(ctrl_win_id)?, &app_paths, false, |app_ref, hook| {
             let mut reader = std::io::BufReader::new(std::io::Cursor::new(script.as_bytes()));
-            let quit = serve_control_stream_with_quit_and_hook(app, &mut reader, &mut out_bytes, &auth_tok, |app_ref, ctx| {
-                hook(app_ref, ctx)?;
+            let quit = serve_control_stream_with_quit_and_hook(app_ref, &mut reader, &mut out_bytes, &auth_tok, |a, ctx| {
+                hook(a, ctx)?;
                 if ctx.method == "ui.shortcut.set" {
                     let saved = std::fs::read_to_string(&app_paths.preferences_file).map_err(|e| e.to_string())?;
-                    if saved.contains("\"ja\"") && saved.contains("\"dark\"") && saved.contains("\"F7\"") {
-                        observed_immediate_pre_quit = true;
-                    }
+                    observed_pre_quit = saved.contains("\"ja\"") && saved.contains("\"dark\"") && saved.contains("\"F7\"");
                 }
                 Ok(())
             })
             .map_err(std::io::Error::other)?;
-            assert!(quit, "expected app.quit to stop control stream");
+            assert!(quit);
             Ok(())
         })?;
-        assert!(observed_immediate_pre_quit, "expected immediate pre-quit preference persistence during control stream");
+        assert!(observed_pre_quit);
         let resp_text = String::from_utf8(out_bytes)?;
-        assert_eq!(resp_text.lines().count(), 5);
-        for line in resp_text.lines() {
-            assert!(line.contains("\"ok\":true"), "control response error: {line}");
-        }
+        assert!(resp_text.lines().count() == 5 && resp_text.lines().all(|l| l.contains("\"ok\":true")));
         ctrl_rt.close_all_force()?;
 
-        let mut post_ctrl = curvebook_ui_egui::UiApp::new();
-        super::configure_window_preferences(&mut post_ctrl, &app_paths, &LaunchConfig::default(), false);
-        assert_eq!(post_ctrl.locale, "ja");
-        assert_eq!(post_ctrl.theme.mode, UiThemeMode::Dark);
-        assert_eq!(post_ctrl.shortcuts.active_combo("ui.palette.open"), Some("F7"));
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let post_ctrl = load_fresh();
+        assert_eq!(
+            (post_ctrl.locale.as_str(), post_ctrl.theme.mode, post_ctrl.shortcuts.active_combo("ui.palette.open")),
+            ("ja", UiThemeMode::Dark, Some("F7"))
+        );
         Ok(())
     }
 
     #[cfg(unix)]
     #[test]
     fn r1_s11_09_unset_home_uses_private_uid_dirs_and_rejects_symlinks() -> Result<(), Box<dyn std::error::Error>> {
-        use std::ffi::OsString;
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-main-s11-09-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-
+        let dir = TestDir::new("s11-09")?;
         let uid = super::current_unix_uid()?;
         let uid_dir_name = format!("curvebook-uid-{uid}");
 
         // Case 1: HOME/XDG unset creates per-UID 0700 dirs (never fixed shared /tmp/curvebook).
         let tmp_ok = dir.join("tmp-ok");
         std::fs::create_dir_all(&tmp_ok)?;
-        let tmp_ok_os = OsString::from(&tmp_ok);
-        let paths = super::resolve_app_paths_with_env(None, None, |key| if key == "TMPDIR" { Some(tmp_ok_os.clone()) } else { None })?;
-        assert!(paths.config_dir.to_string_lossy().contains(&uid_dir_name));
-        assert!(paths.recovery_dir.to_string_lossy().contains(&uid_dir_name));
+        let paths = super::resolve_app_paths_with_env(None, None, |k| (k == "TMPDIR").then(|| OsString::from(&tmp_ok)))?;
+        assert!(paths.config_dir.to_string_lossy().contains(&uid_dir_name) && paths.recovery_dir.to_string_lossy().contains(&uid_dir_name));
         assert_ne!(paths.config_dir, std::env::temp_dir().join("curvebook"));
-        let uid_root = tmp_ok.join(&uid_dir_name);
-        let root_meta = std::fs::symlink_metadata(&uid_root)?;
-        assert!(!root_meta.file_type().is_symlink());
-        assert!(root_meta.is_dir());
-        assert_eq!(root_meta.uid(), uid);
-        assert_eq!(root_meta.mode() & 0o777, 0o700);
+        let root_meta = std::fs::symlink_metadata(tmp_ok.join(&uid_dir_name))?;
+        assert!(!root_meta.file_type().is_symlink() && root_meta.is_dir() && root_meta.uid() == uid && (root_meta.mode() & 0o777) == 0o700);
 
-        // Case 2: Pre-planted symlink at curvebook-uid-<uid> is rejected explicitly.
-        let tmp_sym = dir.join("tmp-sym");
-        std::fs::create_dir_all(&tmp_sym)?;
-        let decoy = dir.join("decoy");
-        std::fs::create_dir_all(&decoy)?;
+        // Case 2 & 3: Symlink or permissive 0755 fallback dir rejected explicitly.
+        let (tmp_sym, decoy, tmp_perm) = (dir.join("tmp-sym"), dir.join("decoy"), dir.join("tmp-perm"));
+        for p in [&tmp_sym, &decoy, &tmp_perm.join(&uid_dir_name)] {
+            std::fs::create_dir_all(p)?;
+        }
         std::os::unix::fs::symlink(&decoy, tmp_sym.join(&uid_dir_name))?;
-        let tmp_sym_os = OsString::from(&tmp_sym);
-        assert!(super::resolve_app_paths_with_env(None, None, |key| if key == "TMPDIR" { Some(tmp_sym_os.clone()) } else { None }).is_err());
+        std::fs::set_permissions(tmp_perm.join(&uid_dir_name), std::fs::Permissions::from_mode(0o755))?;
+        for bad_tmp in [&tmp_sym, &tmp_perm] {
+            assert!(super::resolve_app_paths_with_env(None, None, |k| (k == "TMPDIR").then(|| OsString::from(bad_tmp))).is_err());
+        }
 
-        // Case 3: Permissive 0755 fallback dir is rejected explicitly.
-        let tmp_perm = dir.join("tmp-perm");
-        std::fs::create_dir_all(&tmp_perm)?;
-        let bad_dir = tmp_perm.join(&uid_dir_name);
-        std::fs::create_dir_all(&bad_dir)?;
-        std::fs::set_permissions(&bad_dir, std::fs::Permissions::from_mode(0o755))?;
-        let tmp_perm_os = OsString::from(&tmp_perm);
-        assert!(super::resolve_app_paths_with_env(None, None, |key| if key == "TMPDIR" { Some(tmp_perm_os.clone()) } else { None }).is_err());
-
-        // Case 4: Valid 0700 XDG_RUNTIME_DIR works; permissive or symlinked XDG_RUNTIME_DIR fails explicitly.
+        // Case 4: Valid 0700 XDG_RUNTIME_DIR works; permissive or symlinked fails explicitly.
         let xdg_ok = dir.join("xdg-ok");
         std::fs::create_dir_all(&xdg_ok)?;
         std::fs::set_permissions(&xdg_ok, std::fs::Permissions::from_mode(0o700))?;
-        let xdg_ok_os = OsString::from(&xdg_ok);
-        let xdg_paths = super::resolve_app_paths_with_env(None, None, |key| if key == "XDG_RUNTIME_DIR" { Some(xdg_ok_os.clone()) } else { None })?;
+        let xdg_paths = super::resolve_app_paths_with_env(None, None, |k| (k == "XDG_RUNTIME_DIR").then(|| OsString::from(&xdg_ok)))?;
         assert!(xdg_paths.config_dir.starts_with(xdg_ok.join("curvebook")));
 
         std::fs::set_permissions(&xdg_ok, std::fs::Permissions::from_mode(0o755))?;
-        assert!(super::resolve_app_paths_with_env(None, None, |key| if key == "XDG_RUNTIME_DIR" { Some(xdg_ok_os.clone()) } else { None }).is_err());
-
         let xdg_sym = dir.join("xdg-sym");
         std::os::unix::fs::symlink(&decoy, &xdg_sym)?;
-        let xdg_sym_os = OsString::from(&xdg_sym);
-        assert!(super::resolve_app_paths_with_env(None, None, |key| if key == "XDG_RUNTIME_DIR" { Some(xdg_sym_os.clone()) } else { None }).is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
-        Ok(())
-    }
-
-    #[test]
-    fn r1_s11_13_env_control_port_double_dash_and_new_instance() -> Result<(), Box<dyn std::error::Error>> {
-        use std::ffi::OsString;
-
-        assert!(super::USAGE.contains("[--]"));
-        assert!(super::USAGE.contains("--new-instance"));
-
-        // 1. Invalid CURVEBOOK_CONTROL_PORT is ignored on uncontrolled launches instead of aborting.
-        for bad_port in ["abc", "0", "65536", "-1", "127.0.0.1:9125"] {
-            let parsed = super::parse_args_with_env(&[String::from("--headless-once")], Some(bad_port), None)?;
-            let CliAction::Launch(cfg) = parsed else {
-                return Err(String::from("expected Launch action").into());
-            };
-            assert!(cfg.headless_once);
-            assert_eq!(cfg.control_port, None, "bad env port `{bad_port}` should be ignored");
+        for bad_xdg in [&xdg_ok, &xdg_sym] {
+            assert!(super::resolve_app_paths_with_env(None, None, |k| (k == "XDG_RUNTIME_DIR").then(|| OsString::from(bad_xdg))).is_err());
         }
-
-        // Valid CURVEBOOK_CONTROL_PORT still applies; CLI --control takes precedence and stays strict.
-        let env_valid = super::parse_args_with_env(&[], Some(" 9125 "), None)?;
-        let CliAction::Launch(env_cfg) = env_valid else {
-            return Err(String::from("expected Launch action").into());
-        };
-        assert_eq!(env_cfg.control_port, Some(9125));
-
-        let cli_override = super::parse_args_with_env(&[String::from("--control"), String::from("9126")], Some("abc"), None)?;
-        let CliAction::Launch(cli_cfg) = cli_override else {
-            return Err(String::from("expected Launch action").into());
-        };
-        assert_eq!(cli_cfg.control_port, Some(9126));
-        assert!(super::parse_args_with_env(&[String::from("--control"), String::from("0")], None, None).is_err());
-        assert!(super::parse_args_with_env(&[String::from("--control"), String::from("abc")], None, None).is_err());
-
-        // Invalid CURVEBOOK_CONTROL_TOKEN only aborts when control mode is actually enabled.
-        let ignored_tok = super::parse_args_with_env(&[String::from("--headless-once")], Some("abc"), Some("bad token"))?;
-        let CliAction::Launch(ignored_cfg) = ignored_tok else {
-            return Err(String::from("expected Launch action").into());
-        };
-        assert_eq!(ignored_cfg.control_port, None);
-        assert_eq!(ignored_cfg.control_token, None);
-        assert!(super::parse_args_with_env(&[String::from("--control"), String::from("9126")], None, Some("bad token")).is_err());
-        assert!(super::parse_args_with_env(&[], Some("9125"), Some("bad token")).is_err());
-
-        // Non-UTF-8 CURVEBOOK_CONTROL_PORT is ignored on uncontrolled launches; non-UTF-8 token fails when control is enabled.
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStringExt;
-            let non_utf8 = OsString::from_vec(vec![0xff, 0xfe]);
-            super::run_with_process_env(&[String::from("--headless-once")], None, None, |key| {
-                if key == "CURVEBOOK_CONTROL_PORT" { Some(non_utf8.clone()) } else { None }
-            })?;
-            let token_err = super::run_with_process_env(&[String::from("--control"), String::from("9126")], None, None, |key| {
-                if key == "CURVEBOOK_CONTROL_TOKEN" { Some(non_utf8.clone()) } else { None }
-            })
-            .expect_err("non-UTF-8 token must fail when --control is enabled");
-            assert!(token_err.contains("CURVEBOOK_CONTROL_TOKEN"));
-        }
-
-        // 2. `--` ends option parsing so `-`-prefixed file paths are accepted, while bare `-` flags are still rejected.
-        let dash_err = super::parse_args_with_env(&[String::from("-data.csv")], None, None).expect_err("bare -data.csv must be rejected");
-        assert!(dash_err.contains("unknown option"));
-        assert!(dash_err.contains("--"));
-
-        let terminated = super::parse_args_with_env(
-            &[
-                String::from("--headless-once"),
-                String::from("--"),
-                String::from("-data.csv"),
-                String::from("--help"),
-                String::from("-V"),
-                String::from("--control"),
-                String::from("--"),
-            ],
-            None,
-            None,
-        )?;
-        let CliAction::Launch(term_cfg) = terminated else {
-            return Err(String::from("expected Launch action for post-`--` args").into());
-        };
-        assert!(term_cfg.headless_once);
-        assert_eq!(
-            term_cfg.files,
-            vec![PathBuf::from("-data.csv"), PathBuf::from("--help"), PathBuf::from("-V"), PathBuf::from("--control"), PathBuf::from("--"),]
-        );
-
-        let empty_terminated = super::parse_args_with_env(&[String::from("--")], None, None)?;
-        let CliAction::Launch(empty_term_cfg) = empty_terminated else {
-            return Err(String::from("expected Launch action for bare `--`").into());
-        };
-        assert!(empty_term_cfg.files.is_empty());
-
-        // 3. `--new-instance` opens an isolated recovery dir without colliding on an active primary lock.
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-main-s11-13-{}-{nanos}", std::process::id()));
-        let paths = super::resolve_app_paths(None, Some(&dir))?;
-        std::fs::create_dir_all(&paths.recovery_dir)?;
-
-        let (_primary_session, primary_journal, _report) =
-            curvebook_engine::Session::open_dir_with_recovery(&paths.recovery_dir, "active-primary", 300_000, super::now_epoch_ms())?;
-
-        let single_cfg = LaunchConfig { headless_once: true, portable_dir: Some(dir.clone()), new_instance: false, ..LaunchConfig::default() };
-        assert!(super::launch_application_with_env(&single_cfg, |_| None).is_err(), "single-instance launch must fail when primary lock is held");
-
-        let dash_csv = dir.join("-data.csv");
-        std::fs::write(&dash_csv, "X,Y\n1,2\n3,4\n")?;
-        let new_inst_cfg = LaunchConfig {
-            headless_once: true,
-            portable_dir: Some(dir.clone()),
-            new_instance: true,
-            files: vec![dash_csv],
-            ..LaunchConfig::default()
-        };
-        super::launch_application_with_env(&new_inst_cfg, |_| None)?;
-        assert!(paths.recovery_dir.join(curvebook_format::LOCKFILE_NAME).is_file(), "primary lock must remain untouched");
-
-        drop(primary_journal.abandon());
-        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 
@@ -2102,10 +1867,6 @@ mod tests {
         use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Write};
         use std::net::{SocketAddr, TcpStream};
         use std::time::{Duration, Instant};
-
-        use curvebook::desktop_host::{DesktopHostConfig, DesktopHostRuntime};
-        use curvebook::gui_window::{CurveBookNativeApp, build_egui_font_definitions};
-        use curvebook_ui_egui::{ControlAuth, ViewportMetrics, bind_control_tcp_listener};
 
         let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
             Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
@@ -2121,25 +1882,16 @@ mod tests {
             Err(err) => return Err(Box::new(err)),
         }
 
-        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("cb-main-live-win-{}-{unique}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-        let app_paths = super::resolve_app_paths(None, Some(&dir))?;
+        let dir = TestDir::new("live-win")?;
+        let app_paths = super::resolve_app_paths(None, Some(dir.path()))?;
         let token_path = super::control_token_file_path(&app_paths.config_dir, addr.port());
         let auth = ControlAuth::generate()?;
         super::write_control_token_file(&token_path, &auth)?;
         let token_guard = super::ControlTokenFileGuard { path: token_path.clone() };
 
-        let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
-            in_window_menus: true,
-            new_instance: false,
-            locale_override: None,
-            theme_override: None,
-            recovery_root: None,
-            initial_viewport: ViewportMetrics::new(960.0, 640.0, 1.0),
-            ..DesktopHostConfig::default()
-        });
-        let win_id = rt.open_window(None, ViewportMetrics::new(960.0, 640.0, 1.0))?;
+        let vp = ViewportMetrics::new(960.0, 640.0, 1.0);
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig { in_window_menus: true, initial_viewport: vp, ..DesktopHostConfig::default() });
+        let win_id = rt.open_window(None, vp)?;
         let (guards, channel) = super::start_live_window_control_on_listener(listener, auth.clone(), &app_paths, false, token_guard)?;
 
         let ctx = egui::Context::default();
@@ -2165,149 +1917,61 @@ mod tests {
                 writer.flush().map_err(|e| e.to_string())?;
                 let mut line = String::new();
                 reader.read_line(&mut line).map_err(|e| e.to_string())?;
-                let parsed: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-                replies.push(parsed);
+                replies.push(serde_json::from_str(&line).map_err(|e| e.to_string())?);
             }
             Ok(replies)
         });
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while !native_app.close_confirmed() && Instant::now() < deadline {
-            let raw_input =
-                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(960.0, 640.0))), ..Default::default() };
-            let mut out = ctx.run_ui(raw_input, |ui| native_app.step_ui(ui));
+            let raw =
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))), ..Default::default() };
+            let mut out = ctx.run_ui(raw, |ui| native_app.step_ui(ui));
             out.textures_delta.clear();
             std::thread::sleep(Duration::from_millis(5));
         }
 
         let replies = client.join().map_err(|_| "client thread panicked")??;
-        assert_eq!(replies.len(), 4);
-        assert!(replies.iter().all(|r| r["ok"] == serde_json::json!(true)));
-        assert!(native_app.close_confirmed());
+        assert!(replies.len() == 4 && replies.iter().all(|r| r["ok"] == json!(true)) && native_app.close_confirmed());
         let win = native_app.runtime().window(win_id)?;
-        assert!(win.app().document().data_sheet(&curvebook_doc::SheetId::new("live-1")).is_some());
-        assert_eq!(win.app().theme.mode, curvebook_ui_egui::UiThemeMode::Dark);
+        assert!(win.app().document().data_sheet(&SheetId::new("live-1")).is_some());
+        assert_eq!(win.app().theme.mode, UiThemeMode::Dark);
         assert!(app_paths.preferences_file.is_file());
 
         native_app.finish_exit();
         drop(guards);
         assert!(!token_path.exists(), "token file must be removed when live server guards drop");
-        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 
     #[test]
     fn rv51_control_token_help_and_cli_argv_warning_semantics() -> Result<(), Box<dyn std::error::Error>> {
-        assert!(super::USAGE.contains("prefer CURVEBOOK_CONTROL_TOKEN"), "USAGE should recommend CURVEBOOK_CONTROL_TOKEN");
-        assert!(super::USAGE.contains("ps"), "USAGE should mention process list (`ps`) visibility");
+        assert!(super::USAGE.contains("prefer CURVEBOOK_CONTROL_TOKEN") && super::USAGE.contains("ps"));
+        for (args, expected) in [
+            (sv(&["--control", "9125", "--control-token", "secret-tok"]), true),
+            (sv(&["--ui-backend", "egui", "--control-token", "secret-tok"]), true),
+            (sv(&["--ui-backend", "--control-token"]), false),
+            (sv(&["--control", "9125"]), false),
+            (sv(&["--headless-once", "--", "--control-token"]), false),
+        ] {
+            assert_eq!(super::args_contain_cli_control_token(&args), expected, "args={args:?}");
+        }
 
-        assert!(super::args_contain_cli_control_token(&[
-            String::from("--control"),
-            String::from("9125"),
-            String::from("--control-token"),
-            String::from("secret-tok"),
-        ]));
-        assert!(super::args_contain_cli_control_token(&[
-            String::from("--ui-backend"),
-            String::from("egui"),
-            String::from("--control-token"),
-            String::from("secret-tok"),
-        ]));
-        assert!(!super::args_contain_cli_control_token(&[String::from("--ui-backend"), String::from("--control-token")]));
-        assert!(!super::args_contain_cli_control_token(&[String::from("--control"), String::from("9125")]));
-        assert!(!super::args_contain_cli_control_token(&[String::from("--headless-once"), String::from("--"), String::from("--control-token"),]));
-
-        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("cb-rv51-tok-warn-{}-{unique}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-
+        let dir = TestDir::new("rv51-tok-warn")?;
         let mut stderr_buf = Vec::new();
         super::run_with_process_env_and_stderr(
-            &[
-                String::from("--portable-dir"),
-                dir.display().to_string(),
-                String::from("--headless-once"),
-                String::from("--control-token"),
-                String::from("cli-visible-token-123"),
-            ],
+            &sv(&["--portable-dir", &dir.path().display().to_string(), "--headless-once", "--control-token", "cli-visible-token-123"]),
             None,
             None,
             |_| None,
             &mut stderr_buf,
         )?;
         let stderr = String::from_utf8(stderr_buf)?;
-        assert!(
-            stderr.contains("curvebook warning:") && stderr.contains("CURVEBOOK_CONTROL_TOKEN"),
-            "expected stderr warning recommending CURVEBOOK_CONTROL_TOKEN, got: {stderr}"
-        );
-        assert!(!stderr.contains("cli-visible-token-123"), "warning must never echo the secret token value");
+        assert!(stderr.contains("curvebook warning:") && stderr.contains("CURVEBOOK_CONTROL_TOKEN") && !stderr.contains("cli-visible-token-123"));
 
         let mut help_stderr = Vec::new();
-        super::run_with_process_env_and_stderr(
-            &[String::from("--control-token"), String::from("cli-visible-token-123"), String::from("--help")],
-            None,
-            None,
-            |_| None,
-            &mut help_stderr,
-        )?;
-        assert!(help_stderr.is_empty(), "--help must keep stderr empty");
-
-        let _ = std::fs::remove_dir_all(&dir);
-        Ok(())
-    }
-
-    #[test]
-    fn r15_1_ui_backend_flag_env_and_preferences_ui_scale_migration() -> Result<(), Box<dyn std::error::Error>> {
-        let default_egui = super::parse_args_with_env_and_backend(&[], None, None, None)?;
-        assert!(matches!(default_egui, CliAction::Launch(_)));
-
-        let env_egui = super::parse_args_with_env_and_backend(&[], None, None, Some("egui"))?;
-        assert!(matches!(env_egui, CliAction::Launch(_)));
-
-        let cli_legacy_err = super::parse_args_with_env_and_backend(&[String::from("--ui-backend=legacy")], None, None, Some("egui"));
-        assert!(cli_legacy_err.is_err(), "--ui-backend=legacy must be rejected post-R15.5 cutover");
-
-        let env_legacy_err = super::parse_args_with_env_and_backend(&[], None, None, Some("legacy"));
-        assert!(env_legacy_err.is_err(), "CURVEBOOK_UI_BACKEND=legacy must be rejected post-R15.5 cutover");
-
-        let cli_split_flag = super::parse_args_with_env_and_backend(&[String::from("--ui-backend"), String::from("egui")], None, None, None)?;
-        assert!(matches!(cli_split_flag, CliAction::Launch(_)));
-
-        assert!(super::parse_args_with_env_and_backend(&[String::from("--ui-backend=bogus")], None, None, None).is_err());
-
-        // Preferences migration for `ui_scale`, RTL locale fallback (`ar` -> `en`), and newer version refusal.
-        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("cb-r15-prefs-{}-{unique}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-        let paths = super::resolve_app_paths(None, Some(&dir))?;
-        if let Some(parent) = paths.preferences_file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        // Legacy v0 file with `"scale": 1.35` and `"locale": "ar"` migrates safely.
-        std::fs::write(&paths.preferences_file, r#"{"locale":"ar","theme":"dark","scale":1.35}"#)?;
-        let mut app = UiApp::new();
-        super::load_shortcut_preferences(&mut app, &paths)?;
-        assert_eq!(app.locale, "en", "RTL locale `ar` must normalize to `en` on Beta desktop host load");
-        assert_eq!(app.theme.mode, UiThemeMode::Dark);
-        assert!((app.ui_scale() - 1.35).abs() < 1e-4);
-
-        app.zoom_ui_scale_in();
-        super::save_shortcut_preferences(&app, &paths)?;
-        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&paths.preferences_file)?)?;
-        assert_eq!(saved["version"], serde_json::json!(CURRENT_PREFERENCES_VERSION));
-        assert_eq!(saved["ui_scale"], serde_json::json!(1.45));
-        assert!(saved.get("scale").is_none());
-
-        // Newer version file must be refused cleanly without overwriting.
-        let future_body = r#"{"version":999,"locale":"en","theme":"light","ui_scale":2.0}"#;
-        std::fs::write(&paths.preferences_file, future_body)?;
-        let mut future_app = UiApp::new();
-        assert!(super::load_shortcut_preferences(&mut future_app, &paths).is_err());
-        assert!(super::save_shortcut_preferences(&future_app, &paths).is_err());
-        assert_eq!(std::fs::read_to_string(&paths.preferences_file)?, future_body);
-
-        let _ = std::fs::remove_dir_all(&dir);
+        super::run_with_process_env_and_stderr(&sv(&["--control-token", "cli-visible-token-123", "--help"]), None, None, |_| None, &mut help_stderr)?;
+        assert!(help_stderr.is_empty());
         Ok(())
     }
 }

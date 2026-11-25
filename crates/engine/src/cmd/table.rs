@@ -3026,72 +3026,43 @@ fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::sync::atomic::AtomicBool;
-
-    use curvebook_transform::{PlateGeometry, PlateMapTemplate, PlateWellRole};
 
     use super::*;
     use crate::Session;
     use crate::cmd::{Caller, build_registry};
 
     fn seeded_session() -> Session {
-        let mut session = Session::new();
-        session.execute("sheet.createData", json!({ "sheet_id": "xy-1", "archetype": "xy", "cols": 2, "rows": 4 })).expect("create xy-1");
-        session.execute("sheet.createData", json!({ "sheet_id": "col-1", "archetype": "column", "cols": 2, "rows": 4 })).expect("create col-1");
-        session
-            .execute("sheet.createData", json!({ "sheet_id": "nest-1", "archetype": "nested", "cols": 2, "rows": 3, "replicates": 3 }))
-            .expect("create nest-1");
-        session
-            .execute(
-                "sheet.createData",
-                json!({
-                    "sheet_id": "mv-1",
-                    "archetype": "multiple_variables",
-                    "cols": 2,
-                    "rows": 3,
-                    "variables": [{ "title": "Arm", "role": "Categorical" }, { "title": "Dose", "role": "Continuous" }]
-                }),
-            )
-            .expect("create mv-1");
-        session
-    }
-
-    #[test]
-    fn specs_cover_all_29_table_commands_uniquely_and_register() {
-        let listed = specs();
-        assert_eq!(listed.len(), 29);
-        let ids: BTreeSet<&'static str> = listed.iter().map(|s| s.id).collect();
-        assert_eq!(ids.len(), 29);
-        for spec in listed {
-            assert_eq!(spec.group, CommandGroup::Table);
-            assert!(!spec.label.is_empty());
-            assert!(!spec.menu_path.is_empty());
-            assert!(!spec.summary.is_empty());
-            assert!(!spec.beginner.is_empty());
-            let schema = (spec.input_schema)();
-            assert_eq!(schema.get("type").and_then(Value::as_str), Some("object"), "{}", spec.id);
+        let mut s = Session::new();
+        for p in [
+            json!({ "sheet_id": "xy-1", "archetype": "xy", "cols": 2, "rows": 4 }),
+            json!({ "sheet_id": "col-1", "archetype": "column", "cols": 2, "rows": 4 }),
+            json!({ "sheet_id": "nest-1", "archetype": "nested", "cols": 2, "rows": 3, "replicates": 3 }),
+            json!({
+                "sheet_id": "mv-1", "archetype": "multiple_variables", "cols": 2, "rows": 3,
+                "variables": [{ "title": "Arm", "role": "Categorical" }, { "title": "Dose", "role": "Continuous" }]
+            }),
+        ] {
+            s.execute("sheet.createData", p).expect("seed sheet");
         }
-
-        let reg = build_registry().expect("registry build succeeds");
-        for id in ids {
-            assert!(reg.get(id).is_some(), "missing {id} in registry");
-        }
+        s
     }
 
     #[test]
     fn enabled_predicates_gate_empty_and_typed_sessions() {
-        let empty = Session::new();
+        let (empty, rich) = (Session::new(), seeded_session());
         let reg = build_registry().expect("registry");
-        assert!(!(reg.get("table.setCell").expect("spec").enabled)(&empty));
-        assert!(!(reg.get("table.exportCsv").expect("spec").enabled)(&empty));
-        assert!((reg.get("table.importCsv").expect("spec").enabled)(&empty));
-        assert!((reg.get("table.exclusionAuditReport").expect("spec").enabled)(&empty));
-
-        let rich = seeded_session();
-        assert!((reg.get("table.setCell").expect("spec").enabled)(&rich));
-        assert!((reg.get("table.setSubcolumnTitles").expect("spec").enabled)(&rich));
-        assert!((reg.get("table.setVariableRole").expect("spec").enabled)(&rich));
+        for (id, empty_ok, rich_ok) in [
+            ("table.setCell", false, true),
+            ("table.exportCsv", false, true),
+            ("table.importCsv", true, true),
+            ("table.exclusionAuditReport", true, true),
+            ("table.setSubcolumnTitles", false, true),
+            ("table.setVariableRole", false, true),
+        ] {
+            let pred = reg.get(id).expect("spec").enabled;
+            assert_eq!((pred(&empty), pred(&rich)), (empty_ok, rich_ok), "{id}");
+        }
     }
 
     #[test]
@@ -3112,256 +3083,166 @@ mod tests {
             )
             .expect_err("blank reason_tag");
         assert_eq!(err2.code, ErrorCode::BadInput);
-        assert!(err2.remediation.is_some());
-        assert!(err2.to_string().contains("reason_tag"));
+        assert!(err2.remediation.is_some() && err2.to_string().contains("reason_tag"));
     }
 
     #[test]
     fn frozen_sheet_returns_frozen_error_and_preview_convert_is_read_only() {
         let mut s = seeded_session();
         s.execute("sheet.freeze", json!({ "sheet_id": "xy-1" })).expect("freeze");
-        let err = s.execute("table.setCell", json!({ "sheet_id": "xy-1", "row": 0, "col": 0, "value": 10.0 })).expect_err("frozen");
-        assert_eq!(err.code, ErrorCode::FrozenSheet);
+        assert_eq!(
+            s.execute("table.setCell", json!({ "sheet_id": "xy-1", "row": 0, "col": 0, "value": 10.0 })).expect_err("frozen").code,
+            ErrorCode::FrozenSheet
+        );
 
         let depth_before = s.undo_depth();
         let preview = s
             .execute("table.convertArchetype", json!({ "sheet_id": "xy-1", "target_kind": "Column", "allow_lossy": true, "preview_only": true }))
             .expect("preview on frozen");
-        assert!(!preview.mutated);
-        assert_eq!(s.undo_depth(), depth_before);
-
-        let err_conv = s
-            .execute("table.convertArchetype", json!({ "sheet_id": "xy-1", "target_kind": "Column", "allow_lossy": true }))
-            .expect_err("mutating convert on frozen");
-        assert_eq!(err_conv.code, ErrorCode::FrozenSheet);
-    }
-
-    #[test]
-    fn cell_title_exclusion_paste_export_and_multivar_round_trip() {
-        let mut s = seeded_session();
-        let cell_out =
-            s.execute("table.setCell", json!({ "sheet_id": "xy-1", "coord": { "row": 0, "col": 0 }, "value": 12.5 })).expect("setCell canonical");
-        assert!(cell_out.warnings.is_empty(), "canonical params should emit zero warnings");
-        s.execute("table.setCells", json!({ "sheet_id": "col-1", "rows": [[1.0, 2.0], [3.0, 4.0]] })).expect("setCells rows");
-        s.execute("table.setXCells", json!({ "sheet_id": "xy-1", "values": [1.0, 2.0, 3.0] })).expect("setXCells");
-        s.execute("table.setRowTitles", json!({ "sheet_id": "col-1", "titles": ["R1", null] })).expect("setRowTitles");
-        let gt_out = s.execute("table.setGroupTitles", json!({ "sheet_id": "col-1", "titles": ["G1", "G2"] })).expect("setGroupTitles");
-        assert_eq!(gt_out.command_id, "table.setGroupTitles");
-        assert!(gt_out.warnings.is_empty());
-        let st_out = s.execute("table.setTitles", json!({ "sheet_id": "xy-1", "x_title": "Dose", "titles": ["Resp"] })).expect("setTitles");
-        assert_eq!(st_out.command_id, "table.setTitles");
-        assert!(st_out.warnings.is_empty());
-        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-1", "col": 0, "titles": ["A", "B", "C"] })).expect("setSubcolumnTitles");
-
-        s.execute("table.excludeCells", json!({ "sheet_id": "col-1", "row": 0, "col": 0 })).expect("exclude");
-        s.execute("table.excludeCellsWithReason", json!({ "sheet_id": "col-1", "reason_tag": "outlier", "coords": [[1, 0]] }))
-            .expect("excludeWithReason");
-        let audit = s.execute("table.exclusionAuditReport", json!({ "sheet_id": "col-1" })).expect("audit");
-        assert!(!audit.mutated);
-        assert_eq!(audit.payload.get("total_excluded").and_then(Value::as_u64), Some(2));
-        assert_eq!(audit.payload.get("annotated_count").and_then(Value::as_u64), Some(1));
-
-        s.execute("table.clearCells", json!({ "sheet_id": "col-1", "row_start": 0, "row_end": 0, "col_start": 1, "col_end": 1 })).expect("clear");
-        s.execute("table.paste", json!({ "sheet_id": "col-1", "text": "5\t6\n7\t8" })).expect("paste");
-        s.execute("table.pasteLink", json!({ "target_sheet_id": "xy-1", "source_sheet_id": "col-1" })).expect("pasteLink");
-
-        let tmp_dir = std::env::temp_dir().join(format!("cb-w9b-table-test-{}", std::process::id()));
-        let csv_path = tmp_dir.join("out.csv");
-        let exp = s.execute("table.exportCsv", json!({ "sheet_id": "col-1", "path": csv_path.to_string_lossy() })).expect("exportCsv");
-        assert!(!exp.mutated);
-        assert!(csv_path.exists());
-        let csv_text = exp.payload.get("csv").and_then(Value::as_str).expect("csv payload");
-        s.execute("table.importCsv", json!({ "csv": csv_text })).expect("importCsv");
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-
-        s.execute("table.setVariableRole", json!({ "sheet_id": "mv-1", "col": 0, "role": "categorical" })).expect("setVariableRole");
-        s.execute(
-            "table.setCells",
-            json!({ "sheet_id": "mv-1", "edits": [{ "row": 0, "col": 0, "value": "A" }, { "row": 0, "col": 1, "value": 10.0 }] }),
-        )
-        .expect("mv cells");
-        s.execute("table.recodeLevels", json!({ "sheet_id": "mv-1", "col": 0, "mappings": { "A": "Alpha" } })).expect("recodeLevels");
-        s.execute("table.setCategoricalOrder", json!({ "sheet_id": "mv-1", "col": 0, "order": ["Alpha"] })).expect("setCategoricalOrder");
-        s.execute("table.setCalculatedVariable", json!({ "sheet_id": "mv-1", "title": "Double", "formula": "= [Dose] * 2" }))
-            .expect("setCalculatedVariable");
-        s.execute("table.simulateXy", json!({ "row_count": 6, "replicates": 2 })).expect("simulateXy");
-
-        let mut roles = vec![PlateWellRole::Blank, PlateWellRole::PositiveControl, PlateWellRole::Excluded];
-        roles.resize(96, PlateWellRole::Treatment { group_name: String::from("Drug"), dilution_x: 1.0, replicate: 1 });
-        let tpl = PlateMapTemplate::from_wells("P96", PlateGeometry::Wells96, "Conc", roles).expect("tpl");
-        s.execute("table.importPlateMap", json!({ "values": vec![1.0_f64; 96], "template": tpl })).expect("importPlateMap");
-        s.execute(
-            "table.importTidyLong",
-            json!({
-                "csv": "grp,dose,val\nCtrl,0,10\nTx,1,20",
-                "mapping": { "group_col": "grp", "x_col": "dose", "value_col": "val" }
-            }),
-        )
-        .expect("importTidyLong");
+        assert!(!preview.mutated && s.undo_depth() == depth_before);
+        assert_eq!(
+            s.execute("table.convertArchetype", json!({ "sheet_id": "xy-1", "target_kind": "Column", "allow_lossy": true }))
+                .expect_err("mutating convert on frozen")
+                .code,
+            ErrorCode::FrozenSheet
+        );
     }
 
     #[test]
     fn nested_subcolumn_titles_preserve_biological_unit_width_and_checkpoint_roundtrip() -> Result<(), String> {
         let mut s = Session::new();
-        // rows (4) > biological_units (2)
-        s.execute("sheet.createData", json!({ "sheet_id": "nest-tall", "kind": "nested", "cols": 2, "rows": 4, "replicates": 2 }))
-            .map_err(|e| e.to_string())?;
-        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "titles": ["Unit 1", "Unit 2"] }))
-            .map_err(|e| e.to_string())?;
-        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "subcol": 1, "title": "Shared Bio 2" })).map_err(|e| e.to_string())?;
+        for (cmd, p) in [
+            ("sheet.createData", json!({ "sheet_id": "nest-tall", "kind": "nested", "cols": 2, "rows": 4, "replicates": 2 })),
+            ("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "titles": ["Unit 1", "Unit 2"] })),
+            ("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "subcol": 1, "title": "Shared Bio 2" })),
+        ] {
+            s.execute(cmd, p).map_err(|e| e.to_string())?;
+        }
 
-        // Out-of-bounds subcolumn must be rejected against biological-unit width (2), not row count (4).
         let oob = s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 2, "title": "Bad" }));
-        assert!(oob.as_ref().is_err_and(|e| e.code == ErrorCode::BadInput), "expected BadInput for subcol >= width, got {oob:?}");
-
-        // Oversized title must be rejected by validate_title.
+        assert!(oob.as_ref().is_err_and(|e| e.code == ErrorCode::BadInput));
         let oversized = "T".repeat(curvebook_doc::MAX_TITLE_BYTES + 1);
-        let too_long = s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 0, "title": oversized }));
-        assert!(too_long.is_err(), "expected oversized subcolumn title to fail validation");
+        assert!(s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 0, "title": oversized })).is_err());
 
-        let ds = s.document().data_sheet(&SheetId::new("nest-tall")).ok_or_else(|| String::from("missing nest-tall"))?;
-        let TableArchetype::Nested(nt) = &ds.archetype else {
-            return Err(String::from("expected Nested archetype"));
-        };
+        fn nested_of<'a>(sess: &'a Session, id: &str) -> Result<&'a curvebook_doc::NestedTable, String> {
+            match &sess.document().data_sheet(&SheetId::new(id)).ok_or_else(|| format!("missing {id}"))?.archetype {
+                TableArchetype::Nested(nt) => Ok(nt),
+                _ => Err(String::from("expected Nested")),
+            }
+        }
+        let nt = nested_of(&s, "nest-tall")?;
         nt.validate().map_err(|e| e.to_string())?;
         assert_eq!(nt.groups[0].subcolumn_titles, vec!["Unit 1", "Shared Bio 2"]);
-        assert_eq!(nt.groups[1].subcolumn_titles.len(), 2);
-        assert_eq!(nt.groups[1].subcolumn_titles[1], "Shared Bio 2");
+        assert_eq!((nt.groups[1].subcolumn_titles.len(), nt.groups[1].subcolumn_titles[1].as_str()), (2, "Shared Bio 2"));
 
-        // Checkpoint save + mutate + restore exercises NestedTable::deserialize -> validate().
-        s.execute("project.createCheckpoint", json!({ "name": "cp-nested" })).map_err(|e| e.to_string())?;
-        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 0, "title": "Temp" }))
-            .map_err(|e| e.to_string())?;
-        s.execute("project.restoreCheckpoint", json!({ "name": "cp-nested" })).map_err(|e| e.to_string())?;
-        let ds_restored = s.document().data_sheet(&SheetId::new("nest-tall")).ok_or_else(|| String::from("missing restored nest-tall"))?;
-        let TableArchetype::Nested(nt_restored) = &ds_restored.archetype else {
-            return Err(String::from("expected Nested archetype after restore"));
-        };
-        assert_eq!(nt_restored.groups[0].subcolumn_titles, vec!["Unit 1", "Shared Bio 2"]);
+        for (cmd, p) in [
+            ("project.createCheckpoint", json!({ "name": "cp-nested" })),
+            ("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 0, "title": "Temp" })),
+            ("project.restoreCheckpoint", json!({ "name": "cp-nested" })),
+        ] {
+            s.execute(cmd, p).map_err(|e| e.to_string())?;
+        }
+        assert_eq!(nested_of(&s, "nest-tall")?.groups[0].subcolumn_titles, vec!["Unit 1", "Shared Bio 2"]);
 
-        // rows (2) < biological_units (4)
         s.execute("sheet.createData", json!({ "sheet_id": "nest-wide", "archetype": "nested", "cols": 1, "rows": 2, "replicates": 4 }))
             .map_err(|e| e.to_string())?;
         s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-wide", "col": 0, "subcol": 3, "title": "Unit 4" }))
             .map_err(|e| e.to_string())?;
-        let ds_wide = s.document().data_sheet(&SheetId::new("nest-wide")).ok_or_else(|| String::from("missing nest-wide"))?;
-        let TableArchetype::Nested(nt_wide) = &ds_wide.archetype else {
-            return Err(String::from("expected Nested archetype for nest-wide"));
-        };
+        let nt_wide = nested_of(&s, "nest-wide")?;
         nt_wide.validate().map_err(|e| e.to_string())?;
-        assert_eq!(nt_wide.groups[0].subcolumn_titles.len(), 4);
-        assert_eq!(nt_wide.groups[0].subcolumn_titles[3], "Unit 4");
+        assert_eq!((nt_wide.groups[0].subcolumn_titles.len(), nt_wide.groups[0].subcolumn_titles[3].as_str()), (4, "Unit 4"));
         Ok(())
     }
 
     #[test]
     fn mv_set_titles_rewrites_calculated_formulas_reevaluates_and_undoes_atomically() -> Result<(), String> {
         let mut s = Session::new();
-        s.execute("sheet.createData", json!({ "sheet_id": "mv-1", "archetype": "multiple_variables", "cols": 3, "rows": 3 }))
-            .map_err(|e| e.to_string())?;
-        s.execute("table.setTitles", json!({ "sheet_id": "mv-1", "titles": ["Dose", "Weight", "Ratio"] })).map_err(|e| e.to_string())?;
-        s.execute(
-            "table.setCells",
-            json!({
-                "sheet_id": "mv-1",
-                "edits": [
-                    { "row": 0, "col": 0, "value": 10.0 },
-                    { "row": 1, "col": 0, "value": 20.0 },
-                    { "row": 2, "col": 0, "value": 30.0 },
-                    { "row": 0, "col": 1, "value": 2.0 },
-                    { "row": 1, "col": 1, "value": 4.0 },
-                    { "row": 2, "col": 1, "value": 5.0 },
-                ]
-            }),
-        )
-        .map_err(|e| e.to_string())?;
-        s.execute("table.setCalculatedVariable", json!({ "sheet_id": "mv-1", "col": 2, "formula": "[Dose] / [Weight]" }))
-            .map_err(|e| e.to_string())?;
+        for (cmd, p) in [
+            ("sheet.createData", json!({ "sheet_id": "mv-1", "archetype": "multiple_variables", "cols": 3, "rows": 3 })),
+            ("table.setTitles", json!({ "sheet_id": "mv-1", "titles": ["Dose", "Weight", "Ratio"] })),
+            (
+                "table.setCells",
+                json!({
+                    "sheet_id": "mv-1",
+                    "edits": [
+                        { "row": 0, "col": 0, "value": 10.0 }, { "row": 1, "col": 0, "value": 20.0 }, { "row": 2, "col": 0, "value": 30.0 },
+                        { "row": 0, "col": 1, "value": 2.0 }, { "row": 1, "col": 1, "value": 4.0 }, { "row": 2, "col": 1, "value": 5.0 },
+                    ]
+                }),
+            ),
+            ("table.setCalculatedVariable", json!({ "sheet_id": "mv-1", "col": 2, "formula": "[Dose] / [Weight]" })),
+        ] {
+            s.execute(cmd, p).map_err(|e| e.to_string())?;
+        }
 
-        // Rename `Dose` -> `Dose (mg/kg)`: formula must rewrite & evaluate cleanly in the same command.
+        fn mv_of(sess: &Session) -> Result<&curvebook_doc::MultipleVariablesTable, String> {
+            match &sess.document().data_sheet(&SheetId::new("mv-1")).ok_or("missing mv-1")?.archetype {
+                TableArchetype::MultipleVariables(mv) => Ok(mv),
+                _ => Err(String::from("expected MultipleVariables")),
+            }
+        }
+
         let undo_before = s.undo_depth();
         s.execute("table.setTitles", json!({ "sheet_id": "mv-1", "col": 0, "title": "Dose (mg/kg)" })).map_err(|e| e.to_string())?;
         assert_eq!(s.undo_depth(), undo_before + 1);
-
-        let ds = s.document().data_sheet(&SheetId::new("mv-1")).ok_or_else(|| String::from("missing mv-1"))?;
-        let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
-            return Err(String::from("expected MultipleVariables"));
-        };
+        let mv = mv_of(&s)?;
         assert_eq!(mv.variables[0].title, "Dose (mg/kg)");
         assert_eq!(mv.variables[2].source, VariableSource::Calculated { formula: String::from("[Dose (mg/kg)] / [Weight]") });
-        assert_eq!(mv.variables[2].cells[0].active_number(), Some(5.0));
-        assert_eq!(mv.variables[2].cells[1].active_number(), Some(5.0));
-        assert_eq!(mv.variables[2].cells[2].active_number(), Some(6.0));
+        let vals: Vec<Option<f64>> = mv.variables[2].cells.iter().map(Cell::active_number).collect();
+        assert_eq!(vals, vec![Some(5.0), Some(5.0), Some(6.0)]);
 
-        // Update a Dose cell afterwards to prove ongoing recalculation works with the rewritten formula.
         s.execute("table.setCell", json!({ "sheet_id": "mv-1", "row": 0, "col": 0, "value": 14.0 })).map_err(|e| e.to_string())?;
-        let ds2 = s.document().data_sheet(&SheetId::new("mv-1")).ok_or_else(|| String::from("missing mv-1"))?;
-        let TableArchetype::MultipleVariables(mv2) = &ds2.archetype else {
-            return Err(String::from("expected MultipleVariables"));
-        };
-        assert_eq!(mv2.variables[2].cells[0].active_number(), Some(7.0));
+        assert_eq!(mv_of(&s)?.variables[2].cells[0].active_number(), Some(7.0));
 
-        // Undo cell edit, then undo rename -> restores BOTH original title `Dose` and `[Dose] / [Weight]`.
         s.execute("edit.undo", json!({})).map_err(|e| e.to_string())?;
         s.execute("edit.undo", json!({})).map_err(|e| e.to_string())?;
-        let ds_undo = s.document().data_sheet(&SheetId::new("mv-1")).ok_or_else(|| String::from("missing mv-1"))?;
-        let TableArchetype::MultipleVariables(mv_undo) = &ds_undo.archetype else {
-            return Err(String::from("expected MultipleVariables"));
-        };
-        assert_eq!(mv_undo.variables[0].title, "Dose");
-        assert_eq!(mv_undo.variables[2].source, VariableSource::Calculated { formula: String::from("[Dose] / [Weight]") });
-        assert_eq!(mv_undo.variables[2].cells[0].active_number(), Some(5.0));
+        let mv_u = mv_of(&s)?;
+        assert_eq!(mv_u.variables[0].title, "Dose");
+        assert_eq!(mv_u.variables[2].source, VariableSource::Calculated { formula: String::from("[Dose] / [Weight]") });
+        assert_eq!(mv_u.variables[2].cells[0].active_number(), Some(5.0));
         Ok(())
     }
 
     #[test]
     fn clear_cells_unlink_region_id_detaches_only_target_and_validates_before_mutating() -> Result<(), String> {
         let mut s = Session::new();
-        s.execute("sheet.createData", json!({ "sheet_id": "src-a", "kind": "column", "cols": 1, "rows": 2 })).map_err(|e| e.to_string())?;
-        s.execute("sheet.createData", json!({ "sheet_id": "src-b", "kind": "column", "cols": 1, "rows": 2 })).map_err(|e| e.to_string())?;
-        s.execute(
-            "table.setCells",
-            json!({ "sheet_id": "src-a", "edits": [{ "row": 0, "col": 0, "value": 10.0 }, { "row": 1, "col": 0, "value": 11.0 }] }),
-        )
-        .map_err(|e| e.to_string())?;
-        s.execute(
-            "table.setCells",
-            json!({ "sheet_id": "src-b", "edits": [{ "row": 0, "col": 0, "value": 20.0 }, { "row": 1, "col": 0, "value": 21.0 }] }),
-        )
-        .map_err(|e| e.to_string())?;
-        s.execute("sheet.createData", json!({ "sheet_id": "dst", "kind": "column", "cols": 2, "rows": 2 })).map_err(|e| e.to_string())?;
-        s.execute("table.pasteLink", json!({ "target_sheet_id": "dst", "source_sheet_id": "src-a", "anchor": { "row": 0, "col": 0 } }))
-            .map_err(|e| e.to_string())?;
-        s.execute("table.pasteLink", json!({ "target_sheet_id": "dst", "source_sheet_id": "src-b", "anchor": { "row": 0, "col": 1 } }))
-            .map_err(|e| e.to_string())?;
+        for (cmd, p) in [
+            ("sheet.createData", json!({ "sheet_id": "src-a", "kind": "column", "cols": 1, "rows": 2 })),
+            ("sheet.createData", json!({ "sheet_id": "src-b", "kind": "column", "cols": 1, "rows": 2 })),
+            (
+                "table.setCells",
+                json!({ "sheet_id": "src-a", "edits": [{ "row": 0, "col": 0, "value": 10.0 }, { "row": 1, "col": 0, "value": 11.0 }] }),
+            ),
+            (
+                "table.setCells",
+                json!({ "sheet_id": "src-b", "edits": [{ "row": 0, "col": 0, "value": 20.0 }, { "row": 1, "col": 0, "value": 21.0 }] }),
+            ),
+            ("sheet.createData", json!({ "sheet_id": "dst", "kind": "column", "cols": 2, "rows": 2 })),
+            ("table.pasteLink", json!({ "target_sheet_id": "dst", "source_sheet_id": "src-a", "anchor": { "row": 0, "col": 0 } })),
+            ("table.pasteLink", json!({ "target_sheet_id": "dst", "source_sheet_id": "src-b", "anchor": { "row": 0, "col": 1 } })),
+        ] {
+            s.execute(cmd, p).map_err(|e| e.to_string())?;
+        }
 
-        let region_ids: Vec<String> = {
-            let ds = s.document().data_sheet(&SheetId::new("dst")).ok_or_else(|| String::from("missing dst"))?;
-            ds.linked_regions.iter().map(|r| r.id.clone()).collect()
-        };
+        let region_ids: Vec<String> =
+            s.document().data_sheet(&SheetId::new("dst")).ok_or("missing dst")?.linked_regions.iter().map(|r| r.id.clone()).collect();
         assert_eq!(region_ids.len(), 2);
-        let first_id = region_ids[0].clone();
-        let second_id = region_ids[1].clone();
 
-        // Unknown region_id must fail with NotFound before clearing any cells or detaching existing regions.
         let missing_err = s
             .execute("table.clearCells", json!({ "sheet_id": "dst", "row": 0, "col": 0, "unlink": true, "region_id": "missing-region" }))
             .expect_err("unknown region_id must fail");
         assert_eq!(missing_err.code, ErrorCode::NotFound);
-        let dst_after_miss = s.document().data_sheet(&SheetId::new("dst")).ok_or_else(|| String::from("missing dst"))?;
-        assert_eq!(dst_after_miss.linked_regions.len(), 2);
-        assert_eq!(dst_after_miss.cell(CellCoord::new(0, 0, 0)).and_then(Cell::active_number), Some(10.0));
+        let dst = s.document().data_sheet(&SheetId::new("dst")).ok_or("missing dst")?;
+        assert_eq!(dst.linked_regions.len(), 2);
+        assert_eq!(dst.cell(CellCoord::new(0, 0, 0)).and_then(Cell::active_number), Some(10.0));
 
-        // Detaching first_id via cells: [] preserves the second linked region and existing values.
-        s.execute("table.clearCells", json!({ "sheet_id": "dst", "cells": [], "unlink": true, "region_id": first_id })).map_err(|e| e.to_string())?;
-        let dst_after_detach = s.document().data_sheet(&SheetId::new("dst")).ok_or_else(|| String::from("missing dst"))?;
-        assert_eq!(dst_after_detach.linked_regions.len(), 1);
-        assert_eq!(dst_after_detach.linked_regions[0].id, second_id);
+        s.execute("table.clearCells", json!({ "sheet_id": "dst", "cells": [], "unlink": true, "region_id": region_ids[0] }))
+            .map_err(|e| e.to_string())?;
+        let dst = s.document().data_sheet(&SheetId::new("dst")).ok_or("missing dst")?;
+        assert_eq!((dst.linked_regions.len(), dst.linked_regions[0].id.as_str()), (1, region_ids[1].as_str()));
 
-        // Detach all remaining regions when region_id is omitted.
         s.execute("table.clearCells", json!({ "sheet_id": "dst", "cells": [], "unlink": true })).map_err(|e| e.to_string())?;
-        let dst_after_clear_all = s.document().data_sheet(&SheetId::new("dst")).ok_or_else(|| String::from("missing dst"))?;
-        assert!(dst_after_clear_all.linked_regions.is_empty());
+        assert!(s.document().data_sheet(&SheetId::new("dst")).ok_or("missing dst")?.linked_regions.is_empty());
         Ok(())
     }
 }
