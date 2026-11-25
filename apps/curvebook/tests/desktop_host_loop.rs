@@ -636,10 +636,12 @@ fn file_dropped_pzfx_and_zip_archive_open_cleanly() -> Result<(), Box<dyn std::e
         assert!(rt.window(pzfx_win)?.app().session().file_path().is_none(), "foreign .pzfx drop detaches native archive path");
     }
 
-    // Drop .prism
-    let zip_out = rt.dispatch(DesktopHostEvent::FileDropped { window_id: wid, path: archive_path })?;
+    // Drop .prism onto a second, empty window: dropping it onto the now non-empty first window
+    // would open the replace-or-merge import prompt instead of loading directly.
+    let empty_wid = rt.open_window(None, metrics)?;
+    let zip_out = rt.dispatch(DesktopHostEvent::FileDropped { window_id: empty_wid, path: archive_path })?;
     assert!(zip_out.handled);
-    let zip_win = zip_out.opened_window_id.unwrap_or(wid);
+    let zip_win = zip_out.opened_window_id.unwrap_or(empty_wid);
     {
         let doc = rt.window(zip_win)?.app().document();
         let ds = doc.data_sheets.iter().find(|d| d.title == "Dropped Archive Trace").ok_or("missing dropped .prism sheet")?;

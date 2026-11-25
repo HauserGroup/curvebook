@@ -367,6 +367,32 @@ enum LoadedPathPayload {
     },
 }
 
+/// Map a `.prism` / `.pzfx` / `.xlsx` path to the File › Import command that imports it
+/// (`table.importPrism`, `table.importPzfx`, `table.importXlsx`), or `None` for every other extension.
+fn interchange_import_command_for_extension(path: &Path) -> Option<&'static str> {
+    match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("prism") => Some("table.importPrism"),
+        Some("pzfx") => Some("table.importPzfx"),
+        Some("xlsx") => Some("table.importXlsx"),
+        _ => None,
+    }
+}
+
+/// Open the replace-or-merge import prompt (`ActiveDialog::ImportProjectMode`) when importing
+/// `path` with `command_id` would otherwise replace a window whose document has sheets or unsaved
+/// changes. Returns `true` when the prompt was opened; the caller then waits for the user's answer,
+/// which re-enters the host as `command_id` with explicit `{ "path", "merge" }` params.
+///
+/// Shared by File › Import and file drops so both use the same condition and prompt.
+fn open_import_mode_prompt_if_needed(win: &mut DesktopWindowSession, command_id: &str, path: &Path) -> bool {
+    let has_unsaved = win.has_unsaved_changes();
+    if win.app().document().total_sheet_count() == 0 && !has_unsaved {
+        return false;
+    }
+    win.app_mut().open_import_project_mode_dialog(command_id, path.to_string_lossy().into_owned(), has_unsaved);
+    true
+}
+
 fn classify_and_load_path(path: &Path) -> Result<LoadedPathPayload, String> {
     let registry = FormatRegistry::default_registry();
     let importer = if is_unpacked_project_target(path) { registry.importer_by_format("curvebook.d") } else { registry.importer_for_path(path) };
@@ -421,12 +447,7 @@ fn classify_and_load_path(path: &Path) -> Result<LoadedPathPayload, String> {
                     return Err(format!("file `{}` did not yield a project document", path.display()));
                 }
             };
-            let import_command_id = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-                Some("prism") => Some("table.importPrism"),
-                Some("pzfx") => Some("table.importPzfx"),
-                Some("xlsx") => Some("table.importXlsx"),
-                _ => None,
-            };
+            let import_command_id = interchange_import_command_for_extension(path);
             Ok(LoadedPathPayload::Project { doc: Box::new(doc), archive_path: None, clean_archive: false, import_warnings, import_command_id })
         }
         FormatKind::DelimitedText => {
@@ -1700,7 +1721,7 @@ impl DesktopHostRuntime {
         if matches!(command_id, "project.open" | "file.open")
             && let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
         {
-            return self.handle_file_dropped(window_id, PathBuf::from(explicit_path)).map(Some);
+            return self.open_path_in_window(window_id, PathBuf::from(explicit_path)).map(Some);
         }
         if matches!(command_id, "table.importPrism" | "table.importPzfx" | "table.importXlsx")
             && let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
@@ -1717,7 +1738,7 @@ impl DesktopHostRuntime {
             let picked = (hook.0)(window_id);
             self.open_file_dialog_hook = Some(hook);
             if let Some(path) = picked? {
-                return self.handle_file_dropped(window_id, path).map(Some);
+                return self.open_path_in_window(window_id, path).map(Some);
             }
             return Ok(Some(Self::cancelled_file_dialog_outcome(window_id, command_id)));
         }
@@ -1738,7 +1759,7 @@ impl DesktopHostRuntime {
                     default_file_name: None,
                 };
                 match adapter.pick(&req)? {
-                    Some(path) => self.handle_file_dropped(window_id, path)?,
+                    Some(path) => self.open_path_in_window(window_id, path)?,
                     None => Self::cancelled_file_dialog_outcome(window_id, command_id),
                 }
             }
@@ -1751,7 +1772,7 @@ impl DesktopHostRuntime {
                     default_file_name: None,
                 };
                 match adapter.pick(&req)? {
-                    Some(path) => self.handle_file_dropped(window_id, path)?,
+                    Some(path) => self.open_path_in_window(window_id, path)?,
                     None => Self::cancelled_file_dialog_outcome(window_id, command_id),
                 }
             }
@@ -1803,9 +1824,7 @@ impl DesktopHostRuntime {
                             if let Some(merge) = params.get("merge").and_then(Value::as_bool) {
                                 execute_native_import_at_path(win, command_id, &path, merge)?;
                                 Self::completed_file_dialog_outcome(window_id, command_id, &path)
-                            } else if win.app().document().total_sheet_count() > 0 || win.has_unsaved_changes() {
-                                let has_unsaved = win.has_unsaved_changes();
-                                win.app_mut().open_import_project_mode_dialog(command_id, path.to_string_lossy().into_owned(), has_unsaved);
+                            } else if open_import_mode_prompt_if_needed(win, command_id, &path) {
                                 DesktopEventOutcome {
                                     handled: true,
                                     action: format!("native_file_dialog.confirm_import_mode:{command_id}"),
@@ -2606,7 +2625,36 @@ impl DesktopHostRuntime {
         Ok(DesktopEventOutcome { handled: true, action: String::from("file.hover_cancelled"), window_id: Some(window_id), ..Default::default() })
     }
 
+    /// Handle an OS file drop onto `window_id`.
+    ///
+    /// `.prism`, `.pzfx`, and `.xlsx` drops onto a window whose document has sheets or unsaved
+    /// changes open the same replace-or-merge prompt as File › Import (see
+    /// [`open_import_mode_prompt_if_needed`]); every other drop goes through [`Self::open_path_in_window`].
     fn handle_file_dropped(&mut self, window_id: DesktopWindowId, path: PathBuf) -> Result<DesktopEventOutcome, String> {
+        if let Some(command_id) = interchange_import_command_for_extension(&path)
+            && !is_unpacked_project_target(&path)
+        {
+            let win = self.window_mut(window_id)?;
+            win.hovered_files.clear();
+            if open_import_mode_prompt_if_needed(win, command_id, &path) {
+                return Ok(DesktopEventOutcome {
+                    handled: true,
+                    action: format!("file.dropped_confirm_import_mode:{command_id}"),
+                    window_id: Some(window_id),
+                    command_id: Some(command_id.to_owned()),
+                    command_result: Some(json!({ "path": path.to_string_lossy(), "prompted": true })),
+                    ..Default::default()
+                });
+            }
+        }
+        self.open_path_in_window(window_id, path)
+    }
+
+    /// Open or import `path` into `window_id` without an import-mode prompt: CSV/TSV become a new
+    /// table, and projects, templates, and interchange files load in place (or in a new window when
+    /// the target has unsaved changes or `new_instance` is set). Used by File › Open and by drops
+    /// that need no prompt.
+    fn open_path_in_window(&mut self, window_id: DesktopWindowId, path: PathBuf) -> Result<DesktopEventOutcome, String> {
         {
             let win = self.window_mut(window_id)?;
             win.hovered_files.clear();

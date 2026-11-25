@@ -13,6 +13,7 @@ mod r15_1_host_backend;
 mod r15_2_live_control_grid;
 mod r15_3_menus_chrome;
 mod r17_1_dnd_and_paste;
+mod r17_1_drop_import_prompt;
 mod r17_3_idle_repaint;
 mod r73_shared_window;
 mod recovery_wiring;

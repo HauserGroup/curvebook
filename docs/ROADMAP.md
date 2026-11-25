@@ -655,6 +655,7 @@ Most bench scientists store raw data in Excel or Google Sheets. Requiring manual
 - [x] Harden delimited and clipboard paste for real-world Excel/Sheets exports (`crates/doc/src/cell.rs`, `crates/format/src/csv.rs`, `crates/transform/src/import.rs`, `crates/tools/src/grid.rs`): locale decimal commas (`1,23`) vs. thousands separators, UTF-8/UTF-16 LE/BE BOMs, merged/multi-row headers, ragged rows, and quoted newlines, backed by unit and `EguiHumanPathDriver` regression tests (`r17_1_xlsx_and_paste`, `audit_p8_sec19`).
 - [x] Verify locally: `cargo xtask ci` and `cargo xtask wasm` pass on the integrated `feature/R17-integration` tree.
 - [ ] Confirm green hosted CI on the pull request / `main` push.
+- [x] Follow-up (`bugfix/R17.1-drop-import-prompt`): dropping a `.prism`, `.pzfx`, or `.xlsx` file onto a window whose project has sheets or unsaved changes opens the same replace-or-merge import prompt as File › Import (shared `open_import_mode_prompt_if_needed` in `apps/curvebook/src/desktop_host.rs`) instead of silently replacing the open project and its undo history; empty-window drops, `.curvebook` drops, CSV/TSV drops, and File › Open are unchanged. *(Harness evidence only, not human-path evidence: `r17_1_drop_import_prompt` and `desktop_host_loop::file_dropped_pzfx_and_zip_archive_open_cleanly`.)*
 
 ### R17.2 Downstream vector and document export interoperability
 Owner: open · Status: in progress · Was: post-Beta prioritization 2026-11-23 · Depends on: **Beta** release · Gate: post-Beta · Est. note: 8–14 h

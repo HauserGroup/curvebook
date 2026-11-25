@@ -749,6 +749,7 @@ dependencies = [
  "curvebook-format",
  "curvebook-platform",
  "curvebook-render",
+ "curvebook-testkit",
  "curvebook-text",
  "curvebook-ui-egui",
  "eframe",
