@@ -40,7 +40,7 @@
 //!    layout is explicitly opted into via [`crate::compile_graph_with_options`].
 //! 3. **Manual axis limits (`auto_range == false`) preserved:** Explicit `AxisSegment::min` /
 //!    `AxisSegment::max` values are never altered by autoranging headroom or nice-tick snapping
-//!    (enforced in [`crate::scales::resolve_sample_segment_domain`]).
+//!    (enforced in `crate::scales::resolve_sample_segment_domain`).
 //! 4. **Deterministic export:** All text measurements, corner occlusion counts, tie-breaking
 //!    (`TopLeft` -> `BottomRight` -> `TopRight` -> `BottomLeft`), and coordinate math are pure,
 //!    deterministic IEEE-754 operations yielding bit-identical `ChartScene`s and SHA-256 identical
