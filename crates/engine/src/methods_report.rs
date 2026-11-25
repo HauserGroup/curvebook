@@ -12,12 +12,12 @@ use curvebook_doc::{
     ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, IdentifiabilityMode, KappaWeighting, LeveneCenter,
     LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion,
     ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
-    NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule,
-    ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily,
-    ProjectDocument, RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
-    RocCiMethod, RocSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SumOfSquaresType,
-    SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod, WeightingScheme,
-    WeightingSource,
+    NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec,
+    PairedObservationAccounting, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection,
+    PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell,
+    ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod,
+    SplineLowessSpec, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod,
+    TwoGroupSpec, TwoProportionsMethod, WeightingScheme, WeightingSource,
 };
 use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
 
@@ -195,8 +195,33 @@ fn append_study_context_section(blocks: &mut Vec<ReportBlock>, doc: &ProjectDocu
     } else {
         bullets.push(bullet_kv("Source table ID", [code(res.analysis.source_sheet_id.as_str())]));
     }
+    if let Some(accounting) = res.paired_observation_accounting() {
+        bullets.push(paired_observations_bullet(&accounting));
+    }
 
     blocks.push(ReportBlock::Bullets(bullets));
+}
+
+/// Describe complete-case pairing from the counts the analysis recorded, so the report states the
+/// observations actually analyzed rather than inferring them from the exclusion mask alone.
+fn paired_observations_bullet(acc: &PairedObservationAccounting) -> Vec<TextRun> {
+    let pairs = acc.pairs_analyzed;
+    let omitted = acc.rows_omitted();
+    let detail = if omitted == 0 {
+        format!("{pairs} complete pair(s) analyzed; no rows omitted.")
+    } else {
+        let reasons: Vec<String> = [
+            (acc.omitted_missing_partner, "missing a partner value"),
+            (acc.omitted_excluded, "containing an excluded cell"),
+            (acc.omitted_non_numeric, "containing a non-numeric cell"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, why)| format!("{n} {why}"))
+        .collect();
+        format!("{pairs} complete pair(s) analyzed; {omitted} row(s) omitted by complete-case pairing ({}).", reasons.join(", "))
+    };
+    bullet_kv("Paired observations", [plain(detail)])
 }
 
 fn status_run(status: &ResultStatus) -> TextRun {
@@ -209,7 +234,7 @@ fn status_run(status: &ResultStatus) -> TextRun {
 
 fn exclusion_audit_bullet(excluded_count: usize, documented_count: usize) -> Vec<TextRun> {
     let detail = if excluded_count == 0 {
-        String::from("0 cells excluded; all finite active observations were included.")
+        String::from("0 cells masked as excluded prior to analysis.")
     } else {
         format!("{excluded_count} cell(s) masked as excluded prior to analysis ({documented_count} with recorded audit justification note(s)).")
     };

@@ -94,8 +94,9 @@ pub use links::{
 };
 pub use project::{NamedCheckpoint, ProjectDocument, SheetFolderKind};
 pub use result::{
-    ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, ErrorCategory, ErrorCode, FittedCurveOverlay, PairwiseComparisonRecord,
-    RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, format_significant_digits,
+    ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, ErrorCategory, ErrorCode, FittedCurveOverlay, PairedObservationAccounting,
+    PairwiseComparisonRecord, RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+    format_significant_digits,
 };
 pub use result_builder::{
     KvTabBuilder, TabBuilder, bool_cell, ci_cell, finite_ci_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, p_cell_at_alpha, text_cell,

@@ -10,8 +10,8 @@
 //!   `doi:10.1080/01621459.1952.10483441`.
 
 use curvebook_doc::{
-    AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, RemediationKind, ResultCell, ResultScalarEntry, ResultSheet,
-    ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole,
+    AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, PairedObservationAccounting, RemediationKind, ResultCell,
+    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole,
 };
 pub use curvebook_doc::{
     KvTabBuilder, TabBuilder, bool_cell, ci_cell, finite_ci_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, p_cell_at_alpha, text_cell,
@@ -295,6 +295,8 @@ pub struct PairedValuesReport {
     pub skipped_incomplete_rows: usize,
     /// Number of non-numeric text cells encountered inside examined pair slots.
     pub non_numeric_cells: usize,
+    /// Pairs analyzed and omitted rows broken down by reason; the omitted counts sum to `skipped_incomplete_rows`.
+    pub accounting: PairedObservationAccounting,
 }
 
 /// Extract paired numeric values `(x, y)` across two columns of `Column` or `MultipleVariables`,
@@ -331,6 +333,7 @@ pub fn extract_paired_values_with_report(sheet: &DataSheet, col_a: usize, col_b:
     let mut ys = Vec::new();
     let mut skipped_incomplete_rows = 0_usize;
     let mut non_numeric_cells = 0_usize;
+    let mut accounting = PairedObservationAccounting::default();
     for r in 0..=end_row {
         let ca = get_cell(r, col_a);
         let cb = get_cell(r, col_b);
@@ -346,12 +349,27 @@ pub fn extract_paired_values_with_report(sheet: &DataSheet, col_a: usize, col_b:
             ys.push(b);
         } else if has_entry {
             skipped_incomplete_rows += 1;
+            record_omitted_pair(&mut accounting, ca, cb);
         }
     }
     if xs.is_empty() {
         return Err(StatsError::EmptyInput);
     }
-    Ok(PairedValuesReport { xs, ys, skipped_incomplete_rows, non_numeric_cells })
+    accounting.pairs_analyzed = xs.len();
+    Ok(PairedValuesReport { xs, ys, skipped_incomplete_rows, non_numeric_cells, accounting })
+}
+
+/// Count one omitted row of a pair under its reason, in the order documented on
+/// [`PairedObservationAccounting`]: an excluded cell, then a non-numeric cell, then an empty partner.
+pub fn record_omitted_pair(accounting: &mut PairedObservationAccounting, a: Option<&Cell>, b: Option<&Cell>) {
+    let pair = [a, b];
+    if pair.iter().any(|c| c.is_some_and(|c| c.excluded)) {
+        accounting.omitted_excluded = accounting.omitted_excluded.saturating_add(1);
+    } else if pair.iter().any(|c| c.is_some_and(is_ignored_non_numeric_cell)) {
+        accounting.omitted_non_numeric = accounting.omitted_non_numeric.saturating_add(1);
+    } else {
+        accounting.omitted_missing_partner = accounting.omitted_missing_partner.saturating_add(1);
+    }
 }
 
 /// Extract paired numeric values `(row_label, x, y)` across two columns of `Column` or `MultipleVariables`.

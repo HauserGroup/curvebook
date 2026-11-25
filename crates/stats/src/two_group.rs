@@ -1947,6 +1947,7 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
 }
 
 fn report_paired_extraction(res: &mut ResultSheet, analysis: &str, lbl_a: &str, lbl_b: &str, report: &crate::common::PairedValuesReport) {
+    report.accounting.push_scalars(res);
     append_listwise_filtered_checklist_and_footnote(res, analysis, report.skipped_incomplete_rows, report.xs.len());
     if report.non_numeric_cells > 0 {
         append_ignored_text_checklist_and_footnote(res, analysis, &[(format!("{lbl_a} / {lbl_b}"), report.non_numeric_cells)]);
@@ -2019,6 +2020,7 @@ pub fn run_bland_altman_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ba: &Bl
         Some(format!("n = {} pairs", out.n)),
         "Limits of Agreement assume differences follow an approximately normal distribution with constant variance across the measurement range.",
     ));
+    ba_report.accounting.push_scalars(&mut res);
     append_listwise_filtered_checklist_and_footnote(&mut res, "Bland-Altman agreement", ba_report.skipped_incomplete_rows, out.n);
     if ba_report.non_numeric_cells > 0 {
         append_ignored_text_checklist_and_footnote(
@@ -2400,6 +2402,8 @@ struct BlandAltmanExtractedPairs {
     ys: Vec<f64>,
     skipped_incomplete_rows: usize,
     non_numeric_cells: usize,
+    /// Pairs analyzed and omitted rows by reason.
+    accounting: curvebook_doc::PairedObservationAccounting,
 }
 
 fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result<BlandAltmanExtractedPairs, StatsError> {
@@ -2421,6 +2425,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                 ys: report.ys,
                 skipped_incomplete_rows: report.skipped_incomplete_rows,
                 non_numeric_cells: report.non_numeric_cells,
+                accounting: report.accounting,
             })
         }
         TableArchetype::MultipleVariables(mv) => {
@@ -2437,6 +2442,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                 ys: report.ys,
                 skipped_incomplete_rows: report.skipped_incomplete_rows,
                 non_numeric_cells: report.non_numeric_cells,
+                accounting: report.accounting,
             })
         }
         TableArchetype::Xy(xy) => {
@@ -2472,6 +2478,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                 let mut ys = Vec::new();
                 let mut non_numeric_cells = 0_usize;
                 let mut skipped_incomplete_rows = 0_usize;
+                let mut accounting = curvebook_doc::PairedObservationAccounting::default();
                 for r in 0..=end_row {
                     let x_cell = xy.materialized_x_cell_at(r);
                     if !is_gen && is_ignored_non_numeric_cell(&x_cell) {
@@ -2488,6 +2495,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                             ys.push(y);
                         } else if x_has_entry || !cy.is_empty() || cy.excluded {
                             skipped_incomplete_rows += 1;
+                            crate::common::record_omitted_pair(&mut accounting, (!is_gen).then_some(&x_cell), Some(cy));
                         }
                     }
                 }
@@ -2497,6 +2505,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                 Ok(BlandAltmanExtractedPairs {
                     label_a: xy.x_title.clone(),
                     label_b: ds.title.clone(),
+                    accounting: curvebook_doc::PairedObservationAccounting { pairs_analyzed: xs.len(), ..accounting },
                     xs,
                     ys,
                     skipped_incomplete_rows,
@@ -2512,6 +2521,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                 let mut ys = Vec::new();
                 let mut non_numeric_cells = 0_usize;
                 let mut skipped_incomplete_rows = 0_usize;
+                let mut accounting = curvebook_doc::PairedObservationAccounting::default();
                 for r in 0..xy.row_count() {
                     let sa = dsa.cells.get(r).map(Vec::as_slice).unwrap_or(&[]);
                     let sb = dsb.cells.get(r).map(Vec::as_slice).unwrap_or(&[]);
@@ -2531,6 +2541,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                             ys.push(b);
                         } else if has_entry {
                             skipped_incomplete_rows += 1;
+                            crate::common::record_omitted_pair(&mut accounting, Some(ca), Some(cb));
                         }
                     }
                 }
@@ -2540,6 +2551,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                 Ok(BlandAltmanExtractedPairs {
                     label_a: dsa.title.clone(),
                     label_b: dsb.title.clone(),
+                    accounting: curvebook_doc::PairedObservationAccounting { pairs_analyzed: xs.len(), ..accounting },
                     xs,
                     ys,
                     skipped_incomplete_rows,

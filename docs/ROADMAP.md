@@ -732,6 +732,16 @@ Owner: open · Status: todo · Was: oracle coverage audit 2026-11-24 · Depends 
 - [ ] Add remaining base-R `4.5.2` oracle assertions in `crates/stats/tests/d1_extended_stats_oracles.rs` and `crates/fit/tests/` covering: 4PL standard-curve interpolation (`nls` + `uniroot`), `mean_ci` vs `t.test`, `power.*` vs base R (replacing unversioned `pwr` citations), `Dunn` per-value R provenance, `Fisher LSD`, `Newman–Keuls`, `Tamhane T2`, `multiple t tests`, `sign test` vs `binom.test`, `Baptista–Pike` root-finding oracle, fixed-centre Lloyd `k-means`, Hyndman–Fan Type-6 quantiles, and exact `binom.test`.
 - [ ] Add NIST `GEAR.DAT` worked-example oracle tests (Levene `W = 1.705910`, Bartlett `T = 20.78580`) with full provenance entries in `ASSETS.md` / `ATTRIBUTION.md`.
 
+### R19.4 Methods report observation accounting
+Owner: open · Status: in progress (paired observation accounting landed locally; follow-up open) · Was: reporting-accuracy review 2026-11-24 · Depends on: none · Gate: post-Beta · Est. note: 4–8 h
+
+The methods report said "all finite active observations were included" whenever no cell was masked as excluded, even when a paired analysis had dropped rows whose partner value was missing.
+
+- [x] Record paired observation accounting (pairs analyzed; rows omitted for a missing partner value, an excluded cell, or a non-numeric cell) as result scalars from the paired t, ratio paired t, Wilcoxon signed-rank, paired sign, and Bland–Altman analyses.
+- [x] Report those counts in the methods report, and stop claiming that every observation was included when the report cannot know it.
+- [x] Test that the results checklist and the generated methods report give the same counts.
+- [ ] Follow-up: extend the same accounting to listwise-filtered ANOVA, regression, and survival analyses and to ignored non-numeric cells in unpaired analyses.
+
 ---
 
 ## R20 Desktop GUI visual system & layout overhaul

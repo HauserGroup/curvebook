@@ -641,6 +641,74 @@ impl ResultSheet {
             .map(|s| s.value)
             .filter(|v| v.is_finite())
     }
+
+    /// Complete-case pairing counts recorded by a paired analysis, or `None` when this result is not
+    /// up to date or its analysis records no pairing (see [`PairedObservationAccounting`]).
+    #[must_use]
+    pub fn paired_observation_accounting(&self) -> Option<PairedObservationAccounting> {
+        PairedObservationAccounting::from_result(self)
+    }
+}
+
+/// Complete-case pairing counts for a paired analysis, stored as whole-table result scalars so the
+/// results view, constant hooks, and the methods report all read the counts the analysis itself used.
+///
+/// Every omitted row is counted under exactly one reason, checked in this order: an excluded cell,
+/// then a non-numeric cell, then an empty partner value. Rows where both cells are empty lie outside
+/// the data and are not counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PairedObservationAccounting {
+    /// Complete pairs entered into the analysis.
+    pub pairs_analyzed: usize,
+    /// Rows omitted because one member of the pair was masked as excluded.
+    pub omitted_excluded: usize,
+    /// Rows omitted because one member of the pair held non-numeric text.
+    pub omitted_non_numeric: usize,
+    /// Rows omitted because one member of the pair was empty.
+    pub omitted_missing_partner: usize,
+}
+
+impl PairedObservationAccounting {
+    /// Scalar key for [`Self::pairs_analyzed`].
+    pub const KEY_PAIRS_ANALYZED: &'static str = "PairsAnalyzed";
+    /// Scalar key for [`Self::omitted_excluded`].
+    pub const KEY_OMITTED_EXCLUDED: &'static str = "PairsOmittedExcluded";
+    /// Scalar key for [`Self::omitted_non_numeric`].
+    pub const KEY_OMITTED_NON_NUMERIC: &'static str = "PairsOmittedNonNumeric";
+    /// Scalar key for [`Self::omitted_missing_partner`].
+    pub const KEY_OMITTED_MISSING_PARTNER: &'static str = "PairsOmittedMissingPartner";
+
+    /// Total rows omitted for any reason.
+    #[must_use]
+    pub fn rows_omitted(&self) -> usize {
+        self.omitted_excluded.saturating_add(self.omitted_non_numeric).saturating_add(self.omitted_missing_partner)
+    }
+
+    /// Append these counts to `sheet.scalars` as whole-table entries.
+    pub fn push_scalars(&self, sheet: &mut ResultSheet) {
+        for (key, count) in [
+            (Self::KEY_PAIRS_ANALYZED, self.pairs_analyzed),
+            (Self::KEY_OMITTED_EXCLUDED, self.omitted_excluded),
+            (Self::KEY_OMITTED_NON_NUMERIC, self.omitted_non_numeric),
+            (Self::KEY_OMITTED_MISSING_PARTNER, self.omitted_missing_partner),
+        ] {
+            sheet.scalars.push(ResultScalarEntry { key: String::from(key), data_set_index: None, value: count as f64, units: None });
+        }
+    }
+
+    fn from_result(sheet: &ResultSheet) -> Option<Self> {
+        let count = |key: &str| -> Option<usize> {
+            let v = sheet.lookup_scalar(key, None)?;
+            // Counts are written as exact non-negative integers; reject anything else rather than guess.
+            if v >= 0.0 && v.fract() == 0.0 && v <= u32::MAX as f64 { usize::try_from(v as u64).ok() } else { None }
+        };
+        Some(Self {
+            pairs_analyzed: count(Self::KEY_PAIRS_ANALYZED)?,
+            omitted_excluded: count(Self::KEY_OMITTED_EXCLUDED)?,
+            omitted_non_numeric: count(Self::KEY_OMITTED_NON_NUMERIC)?,
+            omitted_missing_partner: count(Self::KEY_OMITTED_MISSING_PARTNER)?,
+        })
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for ResultSheet {
