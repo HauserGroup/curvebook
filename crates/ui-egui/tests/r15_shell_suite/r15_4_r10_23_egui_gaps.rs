@@ -154,9 +154,7 @@ fn build_r10_23_column_and_nav_app() -> Result<UiApp, String> {
     doc.add_layout_sheet(ls).map_err(|e| e.to_string())?;
 
     doc.select_in_navigator(&SheetId::from("col-1")).map_err(|e| e.to_string())?;
-    let mut app = UiApp::from_session(Session::from_document(doc));
-    app.set_gui_only(true);
-    Ok(app)
+    Ok(UiApp::from_session(Session::from_document(doc)))
 }
 
 #[test]
@@ -473,13 +471,11 @@ fn r15_4_r10_23_egui_drag_select_clipboard_bundle_language_draft_and_wave4_grids
         *app.session_mut() = Session::from_document(doc);
         app.sync_views();
     }
-    app.set_gui_only(false);
     let kind_val = serde_json::to_value(AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).map_err(|e| e.to_string())?;
     let res_out = app
         .execute_command("analysis.run", json!({ "source_sheet_id": "col-1", "sheet_id": "res-gap", "kind": kind_val }))
         .map_err(|e| e.to_string())?;
     assert!(res_out.payload.get("sheet_id").is_some());
-    app.set_gui_only(true);
     app.execute_command("sheet.select", json!({ "sheet_id": "col-1" })).map_err(|e| e.to_string())?;
 
     let mut driver = make_driver(app, ViewportMetrics::new(1280.0, 800.0, 1.0), build_driver_font_definitions());

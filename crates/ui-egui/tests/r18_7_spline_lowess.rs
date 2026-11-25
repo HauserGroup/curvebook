@@ -25,8 +25,7 @@ struct SplineModalState {
 }
 
 impl SplineModalState {
-    fn new(mut app: UiApp) -> Self {
-        app.set_gui_only(true);
+    fn new(app: UiApp) -> Self {
         let views = app.egui_views.clone();
         Self { app, views, intents: PendingUiIntents::new() }
     }
@@ -81,7 +80,6 @@ fn seed_spline_project() -> (UiApp, SheetId) {
     let res_id = SheetId::try_new("res-sp").unwrap();
 
     let mut app = UiApp::new();
-    app.set_gui_only(true);
     *app.session_mut() = session;
     app.sync_views();
     let doc_snap = app.document().clone();

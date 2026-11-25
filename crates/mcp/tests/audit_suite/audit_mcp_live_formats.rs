@@ -319,16 +319,7 @@ fn live_control_auth_resp_id_mismatch_rejected_over_tcp() -> TestResult {
     }
 
     let handle = thread::spawn(move || {
-        // Connection 1: initial `ping` policy sync (small payload -> single frame)
-        if let Ok((mut stream, _)) = listener.accept() {
-            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-            let mut line = String::new();
-            let _ = reader.read_line(&mut line);
-            let resp = json!({ "id": "mcp-1", "ok": true, "result": { "pong": true, "gui_only": false } });
-            let _ = stream.write_all(format!("{resp}\n").as_bytes());
-            let _ = stream.flush();
-        }
-        // Connection 2: large >32 KiB `engine.execute` triggers `mcp-auth`; reply with mismatched id.
+        // Large >32 KiB `engine.execute` triggers `mcp-auth`; reply with mismatched id.
         if let Ok((mut stream, _)) = listener.accept() {
             let mut reader = BufReader::new(stream.try_clone().expect("clone"));
             let mut line = String::new();
@@ -525,7 +516,7 @@ fn live_attach_doc_inspect_enriches_summary_for_default_and_include_cells() -> T
             guard.push((method.to_owned(), params.clone()));
         }
         match method {
-            "ping" => Ok(json!({ "pong": true, "gui_only": false })),
+            "ping" => Ok(json!({ "pong": true })),
             "state.snapshot" => Ok(json!({
                 "title": "Live Study",
                 "active_sheet_id": "ds-1",
@@ -589,7 +580,7 @@ fn live_attach_doc_inspect_enriches_summary_for_default_and_include_cells() -> T
 
     let calls = seen_calls.lock_or_recover().map_err(|e| format!("lock: {e}"))?;
     let method_names: Vec<&str> = calls.iter().map(|(m, _)| m.as_str()).collect();
-    assert_eq!(method_names, vec!["ping", "state.snapshot", "doc.inspect", "state.snapshot", "doc.inspect", "doc.inspect"]);
+    assert_eq!(method_names, vec!["state.snapshot", "doc.inspect", "state.snapshot", "doc.inspect", "doc.inspect"]);
     Ok(())
 }
 
@@ -622,7 +613,7 @@ fn live_attach_command_batch_delegates_to_desktop_command_batch_with_full_rollba
         let mut guard = desktop_cb.lock_or_recover().map_err(|e| format!("lock: {e}"))?;
         guard.methods.push(method.to_owned());
         match method {
-            "ping" => Ok(json!({ "pong": true, "gui_only": false })),
+            "ping" => Ok(json!({ "pong": true })),
             "command.batch" => {
                 let atomic = params.get("atomic").and_then(Value::as_bool).unwrap_or(false);
                 let commands = params.get("commands").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -736,9 +727,9 @@ fn live_attach_command_batch_delegates_to_desktop_command_batch_with_full_rollba
     assert_eq!(fs_fail["rolled_back"], json!(false));
     assert_eq!(fs_fail["persisted_filesystem_steps"][0]["command_id"], json!("export.svg"));
 
-    // Confirm ZERO engine.execute / edit.undo replay calls were sent; only ping + 3 command.batch calls.
+    // Confirm ZERO engine.execute / edit.undo replay calls were sent; only 3 command.batch calls.
     let methods = desktop.lock_or_recover().map_err(|e| format!("lock: {e}"))?.methods.clone();
-    assert_eq!(methods, vec!["ping", "command.batch", "command.batch", "command.batch"]);
+    assert_eq!(methods, vec!["command.batch", "command.batch", "command.batch"]);
     Ok(())
 }
 
@@ -754,7 +745,7 @@ fn live_attach_export_writes_directly_without_base64_and_inline_decodes_base64()
     let captured_clone = Arc::clone(&captured_params);
 
     let mut state = McpServerState::with_control_port(49303)?.with_control_handler(move |method, params| match method {
-        "ping" => Ok(json!({ "pong": true, "gui_only": false })),
+        "ping" => Ok(json!({ "pong": true })),
         "doc.export" => {
             if let Ok(mut guard) = captured_clone.lock_or_recover() {
                 guard.push(params.clone());
@@ -846,7 +837,7 @@ fn da_06_02_live_attach_absolutizes_relative_paths_against_mcp_cwd() -> TestResu
             guard.push((method.to_owned(), params.clone()));
         }
         match method {
-            "ping" => Ok(json!({ "pong": true, "gui_only": false })),
+            "ping" => Ok(json!({ "pong": true })),
             "engine.execute" => Ok(json!({ "mutated": false, "payload": {} })),
             "doc.inspect" => Ok(json!({ "schema_version": 2, "counts": { "total": 1 } })),
             "doc.export" => Ok(json!({

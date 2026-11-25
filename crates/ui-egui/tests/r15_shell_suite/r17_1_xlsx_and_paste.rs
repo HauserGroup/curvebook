@@ -24,7 +24,6 @@ struct ShellTestState {
 
 impl ShellTestState {
     fn new(mut app: UiApp) -> Self {
-        app.set_gui_only(true);
         app.set_human_path_only(true);
         app.nav.welcome.open = false;
         app.egui_views.launcher_open = false;

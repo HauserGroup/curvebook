@@ -148,12 +148,10 @@ fn r1_s11_11_navigator_drag_preserves_sheet_id_under_mid_drag_edits() -> TestRes
     ]);
 
     // Mid-drag external reorder moves data-b to index 0 (`[data-b, data-a, data-c]`).
-    harness.app_mut().set_gui_only(false);
     harness
         .app_mut()
         .execute_command("sheet.reorder", json!({ "sheet_id": "data-b", "index": 0 }))
         .map_err(|e| format!("mid-drag reorder failed: {e}"))?;
-    harness.app_mut().set_gui_only(true);
     harness.driver.run_settled();
 
     harness.driver.dispatch_events(vec![

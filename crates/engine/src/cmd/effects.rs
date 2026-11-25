@@ -114,14 +114,6 @@ impl Effects {
         )
     }
 
-    /// Return `true` when this command is a pure read-only inspection with zero document, UI-state,
-    /// filesystem, process, or data-discard side effects (safe for non-UI callers under strict
-    /// `--gui-only` policy).
-    #[must_use]
-    pub const fn strict_gui_only_allowed(self) -> bool {
-        self.read_only_hint() && !self.intersects(Self::READS_FILESYSTEM.with(Self::CHANGES_UI_STATE))
-    }
-
     /// Hint for callers whether this command may discard or overwrite user data (in memory or on disk).
     #[must_use]
     pub const fn destructive_hint(self) -> bool {
@@ -157,7 +149,6 @@ mod tests {
     fn combinators_and_hints_work_accurately() {
         assert!(Effects::NONE.is_empty());
         assert!(Effects::NONE.read_only_hint());
-        assert!(Effects::NONE.strict_gui_only_allowed());
         assert!(!Effects::NONE.destructive_hint());
         assert!(!Effects::NONE.needs_consent());
         assert!(Effects::NONE.flag_names().is_empty());
@@ -165,12 +156,10 @@ mod tests {
         let ui_select = Effects::CHANGES_UI_STATE.with(Effects::IDEMPOTENT);
         assert!(!ui_select.read_only_hint());
         assert!(!ui_select.destructive_hint());
-        assert!(!ui_select.strict_gui_only_allowed());
 
         let fs_read = Effects::READS_FILESYSTEM.with(Effects::IDEMPOTENT);
         assert!(fs_read.read_only_hint());
         assert!(!fs_read.destructive_hint());
-        assert!(!fs_read.strict_gui_only_allowed());
         assert!(fs_read.needs_consent());
 
         let doc_edit = Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT);

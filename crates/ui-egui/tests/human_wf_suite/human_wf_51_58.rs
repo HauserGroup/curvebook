@@ -4,8 +4,8 @@
 //! Native `egui` Human-Path Acceptance Matrix (`WF-51`–`WF-58`, Shard 8, `R13.6`).
 //!
 //! Exercises workflows `WF-51` through `WF-58` on [`EguiHumanPathDriver`] via real pointer,
-//! wheel, drag, modifier-click, keyboard, and IME events under `GuiOnlyPolicy::Strict` and
-//! `HumanPathOnly`, passing `14`-locale `gui-layout-spec.md` §9.4 parity and latency budgets.
+//! wheel, drag, modifier-click, keyboard, and IME events under `HumanPathOnly`, passing
+//! `14`-locale `gui-layout-spec.md` §9.4 parity and latency budgets.
 
 use std::sync::Arc;
 

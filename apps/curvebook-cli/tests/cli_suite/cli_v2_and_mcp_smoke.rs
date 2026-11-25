@@ -254,6 +254,7 @@ fn mcp_control_port_and_token_flag_validation_reject_invalid_and_unexpected_args
         &["mcp", "--control-token="][..],
         &["mcp", "--control-token", "has space"][..],
         &["mcp", "--control-token"][..],
+        &["mcp", "--gui-only"][..],
         &["mcp", "--unexpected-flag"][..],
         &["mcp", "extra-arg"][..],
     ] {
@@ -267,7 +268,7 @@ fn mcp_control_port_and_token_flag_validation_reject_invalid_and_unexpected_args
     let help = run_cli(&["--help"], None)?;
     assert!(help.status.success());
     let help_text = String::from_utf8_lossy(&help.stdout);
-    assert!(help_text.contains("mcp [--control-port <port>] [--gui-only] [--workdir <dir>] [--control-token <token>]"));
+    assert!(help_text.contains("mcp [--control-port <port>] [--workdir <dir>] [--control-token <token>]"));
     Ok(())
 }
 

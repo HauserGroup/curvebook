@@ -137,11 +137,11 @@ fn r1_x1_04_mcp_workdir_enforces_containment_across_all_surfaces() -> Result<(),
     let linked_escape = dirs.workdir.join("linked_escape.curvebook");
     save_project_with_external_link(&linked_escape, &outside_csv.display().to_string());
 
-    // 1. CLI `--help` documents `--workdir <dir>` while preserving `--gui-only` substring.
+    // 1. CLI `--help` documents `--workdir <dir>`.
     let help = Command::new(bin).arg("--help").output()?;
     assert!(help.status.success());
     let help_text = String::from_utf8(help.stdout)?;
-    assert!(help_text.contains("mcp [--control-port <port>] [--gui-only] [--workdir <dir>]"), "unexpected --help:\n{help_text}");
+    assert!(help_text.contains("mcp [--control-port <port>] [--workdir <dir>]"), "unexpected --help:\n{help_text}");
 
     // 2. Non-existent or non-directory `--workdir` exits cleanly with policy/usage exit code 2.
     let missing_wd = dirs.root.join("no-such-dir").display().to_string();
@@ -218,11 +218,7 @@ fn audit_23_cli_mcp_rejects_combining_control_port_with_workdir() -> Result<(), 
     let dirs = TempDirPair::new("audit23-cli-exclusive");
     let wd_str = dirs.workdir.display().to_string();
 
-    for args in [
-        vec!["mcp", "--control-port", "49154", "--workdir", &wd_str],
-        vec!["mcp", "--workdir", &wd_str, "--control-port=49154", "--gui-only"],
-        vec!["mcp", "--gui-only", "--control-port=49154", "--workdir", &wd_str],
-    ] {
+    for args in [vec!["mcp", "--control-port", "49154", "--workdir", &wd_str], vec!["mcp", "--workdir", &wd_str, "--control-port=49154"]] {
         let out = Command::new(bin).args(&args).stdin(Stdio::null()).output()?;
         assert_eq!(out.status.code(), Some(2), "expected exit 2 for {args:?}, got {:?}", out.status.code());
         let stderr = String::from_utf8_lossy(&out.stderr);

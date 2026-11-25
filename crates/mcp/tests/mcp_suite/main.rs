@@ -4,7 +4,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-mod gui_only_surface;
+mod gui_tools_surface;
 mod mcp_e2e;
 mod mcp_surface;
 mod protocol_props;

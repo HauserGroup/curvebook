@@ -110,7 +110,6 @@ fn muda_vs_egui_menubar_1_to_1_parity_across_locales_and_sheet_states() -> Resul
         let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
             in_window_menus: true,
             new_instance: true,
-            gui_only: false,
             locale_override: Some(loc.to_owned()),
             theme_override: None,
             recovery_root: None,
@@ -202,7 +201,6 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus,
         new_instance: true,
-        gui_only: false,
         locale_override: None,
         theme_override: None,
         recovery_root: None,

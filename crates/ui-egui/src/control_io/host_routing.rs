@@ -679,9 +679,6 @@ where
         }
         ActiveDialog::Print { .. } => {
             let submit = app.canvas_dialogs.print.submit_to_os;
-            if submit && app.is_gui_only() {
-                return Err(String::from("submitting print jobs directly to the OS queue is blocked under --gui-only"));
-            }
             let out = app.execute_print_dialog_spool(submit)?;
             Ok(finish_modal_commit(
                 app,

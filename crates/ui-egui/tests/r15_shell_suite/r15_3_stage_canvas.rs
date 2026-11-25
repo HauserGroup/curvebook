@@ -172,7 +172,6 @@ fn make_full_project_app() -> Result<UiApp, Box<dyn std::error::Error>> {
     doc.active_sheet_id = Some(SheetId::new("col-1"));
 
     let mut app = UiApp::from_session(Session::from_document(doc));
-    app.set_gui_only(true);
     app.sync_views();
     Ok(app)
 }
@@ -1011,7 +1010,6 @@ fn grid_core_arrow_down_nav_zero_1m_clone_fast() -> Result<(), Box<dyn std::erro
     let ds = DataSheet::new("col-1m", "One Million Cell Sheet", TableArchetype::Column(table))?;
     let doc = ProjectDocument { data_sheets: vec![ds], active_sheet_id: Some(SheetId::new("col-1m")), ..Default::default() };
     let mut app = UiApp::from_session(Session::from_document(doc));
-    app.set_gui_only(true);
     app.sync_views();
 
     let start = Instant::now();

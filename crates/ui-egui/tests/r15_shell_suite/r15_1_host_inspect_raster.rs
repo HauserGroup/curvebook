@@ -101,8 +101,7 @@ fn canonical_ui_inspect_about_dialog_and_toolbar_disablement() -> Result<(), Box
 #[test]
 fn pending_ui_intents_commit_strictly_once_after_request_discard_settles() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = UiApp::new();
-    // `--gui-only` allows `Caller::Ui` mutations (`PendingUiIntents` executes as `Caller::Ui`).
-    app.set_gui_only(true);
+    // `PendingUiIntents` executes committed actions as `Caller::Ui`.
     let sheet_before = app.document().data_sheets.len();
     let undo_before = app.session().undo_depth();
 
@@ -350,14 +349,8 @@ fn dpi_roundtrip_geometry_stamp_and_preferences_ui_scale_migration() -> Result<(
     let future = json!({ "version": 99, "ui_scale": 1.25 });
     assert!(migrate_preferences_value_with_ui_scale(&future).is_err(), "future preferences version must be refused");
 
-    // Egui dispatch hook + GuiOnlyPolicy::Strict on `UiApp::dispatch_control_line`.
+    // Egui dispatch hook + `UiApp::dispatch_control_line` screenshot capture.
     let mut egui_app = UiApp::new();
-    egui_app.set_gui_only(true);
-    let shot_err: serde_json::Value =
-        serde_json::from_str(&egui_app.dispatch_control_line(r#"{"id":"s1","method":"ui.screenshot","params":{"path":"blocked.png"}}"#))?;
-    assert_eq!(shot_err["ok"], json!(false));
-    assert_eq!(shot_err["error_detail"]["code"], json!("gui_only_violation"));
-
     let ok_shot: serde_json::Value = serde_json::from_str(
         &egui_app.dispatch_control_line(r#"{"id":"s2","method":"ui.screenshot","params":{"width_px":320,"height_px":200,"dpi":96}}"#),
     )?;

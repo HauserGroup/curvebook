@@ -372,7 +372,7 @@ An option that duplicates an existing path under a new name confuses users and c
 
 **A restricted mode holds on every entry point, not just the main one.**
 One side door that skips the mode check defeats it.
-*In CurveBook:* strict `--gui-only` (`GuiOnlyPolicy::Strict`, AGENTS.md › Command Registries) must reject direct mutations, `doc_inspect`, `resources/read`, and disk-path screenshots alike; when adding an MCP or control method, add it to the `gui_only_surface` / `mcp_gui_only_parity` coverage.
+*In CurveBook:* `--workdir` path confinement (`ExternalPathPolicy::Workdir` / `WorkdirGuard`) must hold across direct file tools (`open_file`, `save_file`, `export`), `command_run` / `command_batch`, `ui_invoke_menu`, `ui_screenshot`, and stored `ExternalDelimitedFile` refreshes alike; when adding a file-bearing MCP or control method, add it to the `workdir` confinement test coverage. (Strict `--gui-only` enforcement was removed after `EguiHumanPathDriver` superseded it.)
 
 **Tools that agents drive do what they safely can and take whole sets.**
 A tool that refuses for a fixable reason (missing output folder, one item per call) pushes the agent to work around it, often badly.

@@ -13,7 +13,7 @@ use curvebook_doc::{
     SurvivalAnalysisSpec, SurvivalTable, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, XyTable,
 };
 use curvebook_engine::methods_report::{ReportFormat, describe_power_analysis_spec, generate_methods_report};
-use curvebook_engine::{Caller, ErrorCode, GuiOnlyPolicy, Session};
+use curvebook_engine::{Caller, ErrorCode, Session};
 use curvebook_palette::{LineDashStyle, PaletteId, Rgba8};
 use serde_json::{Value, json};
 
@@ -88,19 +88,13 @@ fn seed_mv_survival_sheet(id: &str) -> DataSheet {
 }
 
 #[test]
-fn r2_s07_01_convert_archetype_strict_policy_aliases_preview_and_undo() {
+fn r2_s07_01_convert_archetype_preview_validation_and_undo() {
     let mut doc = ProjectDocument::new("Convert Policy").unwrap();
     doc.add_data_sheet(seed_two_group_col("col-1")).unwrap();
-    let mut session = Session::from_document(doc).with_gui_only(GuiOnlyPolicy::Strict);
+    let mut session = Session::from_document(doc);
     let cancel = AtomicBool::new(false);
 
-    // Mutating convertArchetype blocked under Strict for non-UI callers.
-    let err_strict = session
-        .execute_with_caller("table.convertArchetype", json!({ "sheet_id": "col-1", "target_kind": "Grouped" }), Caller::Mcp, &cancel)
-        .unwrap_err();
-    assert_eq!(err_strict.code, ErrorCode::GuiOnlyViolation);
-
-    // Read-only preview (`preview_only: true`) permitted under Strict; retired aliases rejected.
+    // Read-only preview (`preview_only: true`) does not mutate the document.
     let preview = session
         .execute_with_caller(
             "table.convertArchetype",
@@ -120,7 +114,7 @@ fn r2_s07_01_convert_archetype_strict_policy_aliases_preview_and_undo() {
             &cancel,
         )
         .unwrap_err();
-    assert_eq!(non_bool_mcp.code, ErrorCode::GuiOnlyViolation);
+    assert_eq!(non_bool_mcp.code, ErrorCode::BadInput);
     let non_bool_ui = session
         .execute_with_caller(
             "table.convertArchetype",
@@ -131,7 +125,7 @@ fn r2_s07_01_convert_archetype_strict_policy_aliases_preview_and_undo() {
         .unwrap_err();
     assert_eq!(non_bool_ui.code, ErrorCode::BadInput);
 
-    // UI caller can mutate cleanly with undo rollback.
+    // Caller can mutate cleanly with undo rollback.
     let committed =
         session.execute_with_caller("table.convertArchetype", json!({ "sheet_id": "col-1", "target_kind": "Grouped" }), Caller::Ui, &cancel).unwrap();
     assert!(committed.mutated);

@@ -102,7 +102,8 @@ fn r1_s10_09_b_docs_and_params_doc_cover_handler_parameters() -> Result<(), Box<
     assert!(screenshot_doc.contains("\"target\""), "ui.screenshot missing target param: {screenshot_doc}");
     assert!(screenshot_doc.contains("64..=4096"), "ui.screenshot missing pixel bounds: {screenshot_doc}");
     assert!(screenshot_doc.contains("72..=600"), "ui.screenshot missing DPI bounds: {screenshot_doc}");
-    assert!(screenshot_doc.contains("--gui-only"), "ui.screenshot missing --gui-only restriction note: {screenshot_doc}");
+    assert!(screenshot_doc.contains("\"path\""), "ui.screenshot missing path param: {screenshot_doc}");
+    assert!(!screenshot_doc.contains("--gui-only"), "ui.screenshot still mentions removed --gui-only: {screenshot_doc}");
 
     let proto_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/control-protocol.md");
     let proto_doc = std::fs::read_to_string(&proto_path)?;

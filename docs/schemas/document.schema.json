@@ -368,7 +368,6 @@
         "solver_failed",
         "insufficient_data",
         "cancelled",
-        "gui_only_violation",
         "internal_panic",
         "internal_error"
       ],

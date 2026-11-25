@@ -113,7 +113,6 @@ fn make_xy_and_graph_doc() -> Result<(ProjectDocument, SheetId, SheetId), Box<dy
 
 fn new_egui_app(doc: ProjectDocument) -> UiApp {
     let mut app = UiApp::from_session(Session::from_document(doc));
-    app.set_gui_only(true);
     app.set_human_path_only(true);
     app.nav.welcome.open = false;
     app.egui_views.launcher_open = false;

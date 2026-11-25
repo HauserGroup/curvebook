@@ -38,8 +38,7 @@ struct LeveneUiState {
     intents: PendingUiIntents,
 }
 
-fn make_driver<'a>(mut app: UiApp) -> EguiHumanPathDriver<'a, LeveneUiState> {
-    app.set_gui_only(true);
+fn make_driver<'a>(app: UiApp) -> EguiHumanPathDriver<'a, LeveneUiState> {
     let views = app.egui_views.clone();
     let state = LeveneUiState { app, views, intents: PendingUiIntents::new() };
     let tokens = Tokens::from_theme_spec(&state.app.theme, &state.app.locale);

@@ -1,30 +1,24 @@
-//! Wave 1 security regression suite (`FA-SEC13-01` & `ui-egui` `--gui-only` boundary for `FA-X1-01`).
+//! Wave 1 security regression suite (`FA-SEC13-01` host path containment for `render.pdf` and `ui.screenshot`).
 //!
 //! Verifies:
 //! - `render.pdf`, semantic `ui.screenshot`, and `egui`-backend `ui.screenshot` enforce
 //!   [`ExternalPathPolicy::RejectExternal`] and [`ExternalPathPolicy::Workdir`] containment
 //!   (including relative traversal, sibling prefix confusion, and symlink escapes) before writing
 //!   to the host filesystem.
-//! - Under `--gui-only` without `--workdir`, `ui.invoke_menu` blocks inline project/template/archive/XML
-//!   imports, `ExternalDelimitedFile` `link_spec` payloads, `include_external_links: true`, persistent
-//!   file links, and host path keys while preserving legitimate in-memory `--gui-only` workflows.
 #![forbid(unsafe_code)]
 
 use std::fs;
 use std::path::Path;
 
-use curvebook_doc::{
-    CellCoord, ErrorCode, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkSource, LinkedDataRegion, SheetCellRange, SheetId,
-};
-use curvebook_engine::{ExternalPathPolicy, Session};
-use curvebook_format::save_project_bytes;
+use curvebook_doc::ErrorCode;
+use curvebook_engine::ExternalPathPolicy;
 use curvebook_platform::WorkdirGuard;
 use curvebook_ui_egui::{UiApp, dispatch_gui_action, handle_control_line};
 use serde_json::{Value, json};
 
 type TestRes = Result<(), String>;
 
-use crate::common::{encode_base64, temp_dir};
+use crate::common::temp_dir;
 
 fn build_sample_app(policy: ExternalPathPolicy) -> Result<UiApp, String> {
     let mut app = UiApp::new();
@@ -73,7 +67,6 @@ fn fa_sec13_01_reject_external_blocks_pdf_and_both_screenshot_paths() -> TestRes
     let outside_egui_png = root.path().join("outside_egui.png");
 
     let mut app = build_sample_app(ExternalPathPolicy::RejectExternal)?;
-    assert!(!app.is_gui_only());
 
     let pdf_resp = call_control(
         &mut app,
@@ -227,117 +220,5 @@ fn fa_sec13_01_workdir_blocks_escapes_and_allows_atomic_writes_inside_workdir() 
     {
         return Err(String::from("escaping write left files in outside or sibling directory"));
     }
-    Ok(())
-}
-
-#[test]
-fn fa_x1_01_ui_invoke_menu_gui_only_without_workdir_blocks_host_file_exfiltration() -> TestRes {
-    let root = temp_dir("x1-01")?;
-    let secret_csv = root.path().join("host_secret.csv");
-    fs::write(&secret_csv, "SecretKey,SecretVal\nCANARY_SECRET_X1,999.5\n").map_err(|err| format!("write secret: {err}"))?;
-
-    // Build poisoned `.curvebook` archive containing an ExternalDelimitedFile link pointing at host_secret.csv.
-    let mut builder = Session::new();
-    builder
-        .execute("sheet.createData", json!({ "sheet_id": "poison", "title": "Poison", "kind": "xy", "cols": 1, "rows": 2 }))
-        .map_err(|err| format!("create poison sheet: {err}"))?;
-    let mut poisoned_doc = builder.document().clone();
-    poisoned_doc.data_sheet_mut(&SheetId::new("poison")).ok_or_else(|| String::from("missing poison sheet"))?.linked_regions.push(LinkedDataRegion {
-        id: String::from("ext-secret"),
-        spec: ImportLinkSpec {
-            source: LinkSource::ExternalDelimitedFile { path: secret_csv.to_string_lossy().into_owned(), delimiter: ',', decimal_separator: '.' },
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec::default(),
-        },
-        target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
-        provenance_summary: String::from("external"),
-    });
-    let archive_bytes = save_project_bytes(&poisoned_doc).map_err(|err| format!("save poisoned bytes: {err}"))?;
-    let poisoned_b64 = encode_base64(&archive_bytes);
-
-    let mut app = UiApp::new();
-    app.set_gui_only(true);
-    dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "sheet.createData", "params": { "sheet_id": "m1", "kind": "Column" } }))
-        .map_err(|err| format!("legitimate sheet.createData via ui.invoke_menu failed: {err}"))?;
-
-    for (label, invoke_params) in [
-        ("project.open bytes_base64", json!({ "command_id": "project.open", "params": { "bytes_base64": poisoned_b64 } })),
-        ("File/Open bytes_base64", json!({ "path": "File/Open...", "params": { "bytes_base64": poisoned_b64 } })),
-        (
-            "project.instantiateTemplate bytesBase64",
-            json!({ "command_id": "project.instantiateTemplate", "params": { "bytesBase64": poisoned_b64 } }),
-        ),
-        ("table.importPrism archive_base64", json!({ "command_id": "table.importPrism", "params": { "archive_base64": poisoned_b64 } })),
-        ("table.importPzfx xml", json!({ "command_id": "table.importPzfx", "params": { "xml": "<XmlProject/>" } })),
-        (
-            "table.pasteLink ExternalDelimitedFile",
-            json!({
-                "command_id": "table.pasteLink",
-                "params": {
-                    "target_sheet_id": "m1",
-                    "link_spec": {
-                        "source": {
-                            "ExternalDelimitedFile": {
-                                "path": secret_csv.to_string_lossy(),
-                                "delimiter": ",",
-                                "decimal_separator": "."
-                            }
-                        }
-                    }
-                }
-            }),
-        ),
-        ("project.recalculate explicit true", json!({ "command_id": "project.recalculate", "params": { "include_external_links": true } })),
-        ("Analyze/Recalculate All alias", json!({ "path": ["Analyze", "Recalculate All"], "params": { "includeExternalLinks": true } })),
-        ("table.importCsv link true", json!({ "command_id": "table.importCsv", "params": { "sheet_id": "m1", "csv": "A,B\n1,2\n", "link": true } })),
-        ("graph.exportSvg out", json!({ "command_id": "graph.exportSvg", "params": { "out": secret_csv.to_string_lossy() } })),
-        ("layout.insertImage file", json!({ "command_id": "layout.insertImage", "params": { "file": secret_csv.to_string_lossy() } })),
-    ] {
-        let err = dispatch_gui_action(&mut app, "ui.invoke_menu", invoke_params.clone())
-            .err()
-            .ok_or_else(|| format!("expected `{label}` to fail closed"))?;
-        if err.code != ErrorCode::GuiOnlyViolation {
-            return Err(format!("`{label}` expected GuiOnlyViolation, got {:?}: {err}", err.code));
-        }
-        let ctrl_resp = call_control(&mut app, &json!({ "id": label, "method": "ui.invoke_menu", "params": invoke_params }))?;
-        assert_control_error_code(&ctrl_resp, "gui_only_violation", &format!("control `{label}`"))?;
-    }
-
-    // Secret must never reach any DataSheet or ui.inspect snapshot.
-    let inspect = dispatch_gui_action(&mut app, "ui.inspect", json!({ "scope": "all" })).map_err(|err| format!("ui.inspect failed: {err}"))?;
-    if serde_json::to_string(&inspect).unwrap_or_default().contains("CANARY_SECRET_X1") {
-        return Err(String::from("canary secret leaked into ui.inspect"));
-    }
-
-    // Legitimate unconstrained `--gui-only` workflows keep working.
-    let recalc_ok = dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "path": ["Analyze", "Recalculate All"], "params": {} }))
-        .map_err(|err| format!("in-memory Recalculate All should succeed: {err}"))?;
-    if recalc_ok["invoked"] != json!(true) {
-        return Err(format!("expected invoked: true on in-memory recalc, got {recalc_ok}"));
-    }
-
-    let shot_b64 = dispatch_gui_action(&mut app, "ui.screenshot", json!({ "width_px": 160, "height_px": 120 }))
-        .map_err(|err| format!("in-memory screenshot failed: {err}"))?["data_base64"]
-        .as_str()
-        .ok_or_else(|| String::from("missing png b64"))?
-        .to_owned();
-    dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "layout.create", "params": { "sheet_id": "lay-1" } }))
-        .map_err(|err| format!("layout.create failed: {err}"))?;
-    dispatch_gui_action(
-        &mut app,
-        "ui.invoke_menu",
-        json!({ "command_id": "layout.insertImage", "params": { "sheet_id": "lay-1", "bytes_base64": shot_b64 } }),
-    )
-    .map_err(|err| format!("inline layout.insertImage bytes_base64 must still succeed: {err}"))?;
-    dispatch_gui_action(
-        &mut app,
-        "ui.invoke_menu",
-        json!({
-            "path": "File/Import/Tidy Long Table...",
-            "params": { "sheet_id": "tidy-1", "csv": "Group,Val\nA,1\nB,2\n", "group_col": "Group", "value_col": "Val", "target_kind": "Column" }
-        }),
-    )
-    .map_err(|err| format!("inline Tidy Long Table import must still succeed: {err}"))?;
-
     Ok(())
 }

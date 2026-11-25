@@ -25,7 +25,7 @@ use crate::egui_shell::FrameInspectEntryInput;
 use crate::egui_shell::app_modals::render_app_modal;
 use crate::egui_shell::center_stage::{CenterStageContext, render_center_stage};
 use crate::egui_shell::command_palette::render_command_palette;
-use crate::egui_shell::dialog_actions::{is_gui_only_blocked_menu_command, submit_active_dialog_ok};
+use crate::egui_shell::dialog_actions::submit_active_dialog_ok;
 use crate::egui_shell::fit_modal::{is_nonlinear_fit_dialog_active, render_fit_modal, render_hook_constant_modal};
 use crate::egui_shell::graph_modals::{is_graph_modal_active, render_graph_modal};
 use crate::egui_shell::import_wizard::render_import_or_convert_modal;
@@ -1736,7 +1736,6 @@ fn build_ui_tree_snapshot_inner(
         active_dialog,
         focus_widget_id,
         zoom: app.canvas_dialogs.effective_zoom_and_pan().0,
-        gui_only: app.is_gui_only(),
         undo_depth: app.session().undo_depth(),
         redo_depth: app.session().redo_depth(),
         dirty: app.session().is_dirty(),
@@ -2062,7 +2061,7 @@ fn ensure_egui_focus_if_needed(
 ///
 /// # Errors
 /// Returns [`EngineError`] on bad parameters, missing/disabled widgets, invalid actions, or
-/// blocked disk/OS actions under `--gui-only`.
+/// policy/path violations.
 pub(crate) fn dispatch_gui_action(app: &mut UiApp, method: &str, params: Value) -> Result<Value, EngineError> {
     require_params_object_or_null(&params, method).map_err(bad_input_err)?;
     match method {
@@ -2255,17 +2254,7 @@ fn dispatch_gui_screenshot(app: &mut UiApp, params: &Value) -> Result<Value, Eng
     };
     let dpi_u16 = u16::try_from(dpi).unwrap_or(144);
     let path_arg = opt_non_empty_str_param(params, &["path"]).map_err(bad_input_err)?;
-    let validated_path = if let Some(raw_path) = path_arg {
-        if app.is_gui_only() {
-            return Err(EngineError::with_code(
-                ErrorCode::GuiOnlyViolation,
-                "writing screenshots to disk via `ui.screenshot(path)` is blocked in --gui-only mode",
-            ));
-        }
-        Some(app.session().validate_host_write_path(raw_path)?)
-    } else {
-        None
-    };
+    let validated_path = if let Some(raw_path) = path_arg { Some(app.session().validate_host_write_path(raw_path)?) } else { None };
 
     let target = RenderTargetSpec { width_px, height_px, dpi: dpi_u16 };
     let img = app.render_egui_shell_rgba(target, region).map_err(|err| {
@@ -2295,15 +2284,16 @@ fn dispatch_gui_screenshot(app: &mut UiApp, params: &Value) -> Result<Value, Eng
     }))
 }
 
+fn human_path_only_err(message: impl Into<String>) -> EngineError {
+    EngineError::with_code(ErrorCode::Conflict, message).with_details(json!({ "code": "human_path_only_policy" }))
+}
+
 fn dispatch_gui_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
     let explicit_cmd = opt_non_empty_str_param(params, &["command_id", "command"]).map_err(bad_input_err)?;
     let menu_path = extract_menu_path_param(params)?;
     let has_explicit_params = params.get("params").is_some_and(|v| !v.is_null());
     if app.is_human_path_only() && has_explicit_params {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            "direct command parameter injection via `ui.invoke_menu(params)` is blocked in human-path-only mode",
-        ));
+        return Err(human_path_only_err("direct command parameter injection via `ui.invoke_menu(params)` is blocked in human-path-only mode"));
     }
     let resolved_cmd: String = if let Some(cmd) = explicit_cmd {
         cmd.to_owned()
@@ -2318,20 +2308,6 @@ fn dispatch_gui_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, En
         Some(v) if !v.is_null() => v.clone(),
         _ => contextual_command_params(app, command_id),
     };
-    if app.is_gui_only() {
-        if is_gui_only_blocked_menu_command(command_id) {
-            return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, format!("command `{command_id}` is blocked in --gui-only mode")));
-        }
-        if command_id == "ui.print.open" && cmd_params.get("submit_to_os").and_then(Value::as_bool) == Some(true) {
-            return Err(EngineError::with_code(
-                ErrorCode::GuiOnlyViolation,
-                "submitting print jobs directly to the OS queue is blocked under --gui-only",
-            ));
-        }
-        if !app.session().path_policy().is_constrained() && has_explicit_params {
-            curvebook_engine::enforce_unconstrained_gui_only_menu_params(Some(command_id), &cmd_params)?;
-        }
-    }
     if HybridCoexistenceArbiter::evaluate(app, false).modal_backdrop_active {
         return Err(EngineError::with_code(ErrorCode::Conflict, format!("cannot invoke menu command `{command_id}` while a modal dialog is open")));
     }
@@ -2670,7 +2646,7 @@ pub fn resolve_power_curve_hover_target(app: &mut UiApp, meta: &FrameInspectMeta
 fn dispatch_gui_pointer_gesture(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
     let parsed = parse_pointer_gesture_params(params, 0.0)?;
     if app.is_human_path_only() && (parsed.widget_id.is_some() || parsed.to_widget_id.is_some()) {
-        return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, "direct `ui.pointer_gesture(widget_id)` is blocked in human-path-only mode"));
+        return Err(human_path_only_err("direct `ui.pointer_gesture(widget_id)` is blocked in human-path-only mode"));
     }
 
     if parsed.kind == "click" {
@@ -2927,10 +2903,7 @@ fn dispatch_gui_type_text(app: &mut UiApp, params: &Value) -> Result<Value, Engi
         && let Some(wid) = parsed.widget_id
         && app.focus_widget_id.as_deref() != Some(wid)
     {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            format!("focus-jumping `ui.type_text(widget_id = {wid})` is blocked in human-path-only mode"),
-        ));
+        return Err(human_path_only_err(format!("focus-jumping `ui.type_text(widget_id = {wid})` is blocked in human-path-only mode")));
     }
 
     if let Some(wid) = parsed.widget_id {
@@ -3161,7 +3134,7 @@ pub fn execute_switch_tab_fallback(app: &mut UiApp, target: &ParsedSwitchTabTarg
 
 fn dispatch_gui_switch_tab(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
     if app.is_human_path_only() {
-        return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, "direct `ui.switch_tab` is blocked in human-path-only mode"));
+        return Err(human_path_only_err("direct `ui.switch_tab` is blocked in human-path-only mode"));
     }
     let parsed = parse_switch_tab_params(params)?;
     if matches!(parsed.target, ParsedSwitchTabTarget::Sheet(_)) {
@@ -3230,7 +3203,7 @@ pub fn parse_answer_dialog_params(params: &Value) -> Result<ParsedAnswerDialogPa
 /// `Ok(None)` so the caller executes the requested dialog button action.
 ///
 /// # Errors
-/// Returns [`EngineError`] on `--gui-only` violation, missing/mismatched dialog, or invalid fields.
+/// Returns [`EngineError`] on `human_path_only` policy conflict, missing/mismatched dialog, or invalid fields.
 pub fn prepare_answer_dialog_patch(
     app: &mut UiApp,
     views: &EguiShellViewState,
@@ -3238,7 +3211,7 @@ pub fn prepare_answer_dialog_patch(
     parsed: &ParsedAnswerDialogParams<'_>,
 ) -> Result<Option<Value>, EngineError> {
     if app.is_human_path_only() {
-        return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, "direct `ui.answer_dialog` is blocked in human-path-only mode"));
+        return Err(human_path_only_err("direct `ui.answer_dialog` is blocked in human-path-only mode"));
     }
     let decision = HybridCoexistenceArbiter::evaluate_with_views(app, views, host_close_dialog_open);
     if !decision.modal_backdrop_active && app.canvas_dialogs.active_dialog == ActiveDialog::None {
@@ -4432,8 +4405,9 @@ mod tests {
             json!({ "action": "drag", "x": 100.0, "y": 100.0, "to_widget_id": "nav.sheet.ds-1" }),
         )
         .err()
-        .ok_or_else(|| String::from("expected GuiOnlyViolation for to_widget_id under human_path_only"))?;
-        assert_eq!(to_wid_err.code, ErrorCode::GuiOnlyViolation, "got {to_wid_err:?}");
+        .ok_or_else(|| String::from("expected Conflict for to_widget_id under human_path_only"))?;
+        assert_eq!(to_wid_err.code, ErrorCode::Conflict, "got {to_wid_err:?}");
+        assert_eq!(to_wid_err.details, Some(json!({ "code": "human_path_only_policy" })));
         app.set_human_path_only(false);
 
         // 3. Short drags (7.5pt and 9.0pt) on canvas.layout_panel.0 genuinely translate bounds_pt.x.

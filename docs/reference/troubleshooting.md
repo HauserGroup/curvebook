@@ -65,7 +65,6 @@ To resolve or work around GPU driver incompatibilities:
 - **`path_escape` under `--workdir`:** All path parameters (`path`, `out`, `image_path`, stored `ImportLinkSpec` targets) must resolve strictly inside `--workdir` without `..` traversal or external symlinks. Pass paths relative to `--workdir` (e.g., `"study.curvebook"`, `"exports/figure.pdf"`).
 - **MCP client connection failures:** `curvebook-cli mcp` reserves `stdout` strictly for JSON-RPC 2.0 frames and prints human diagnostics to `stderr`. Never wrap `curvebook-cli mcp` in shell profiles that print banners to `stdout`. See [Automation: MCP](automation/mcp.md).
 - **`--control` binding errors:** `--control <port>` accepts `1..=65535` (port `0` is rejected) and binds strictly to `127.0.0.1`. Set `CURVEBOOK_CONTROL_TOKEN` in the environment instead of `--control-token` CLI flags.
-- **`gui_only_violation`:** When `--gui-only` is active, direct engine tools (`analyze.run`, `table.setCell`, `project.save`, etc.) are blocked by policy; drive interactions via `ui.*` / GUI action primitives.
 
 ### MCP client cannot connect {#mcp-connection}
 
@@ -106,8 +105,7 @@ Errors that appear after a successful connection:
 | Symptom | Cause and fix |
 |---|---|
 | Tool result with `code: "path_escape"` (`category: "policy"`) | `--workdir` is set and the requested path is outside it (absolute path elsewhere, `..`, or a symlink out). Move the file inside the workdir or widen `--workdir`. |
-| Tool result with `code: "gui_only_violation"` | The server was started with `--gui-only`, which exposes only the `gui` tools (`ui_*`); every other tool, and `resources/read`, is rejected. Remove `--gui-only` for engine, file, and export tools ([strict `--gui-only` policy](automation/mcp.md#gui-only)). |
-| Tool result with `code: "conflict"` when calling a `ui_*` tool | Default headless mode has no live window. Start with `--gui-only`, or attach with `--control-port` ([attachment modes](automation/mcp.md#attachment-modes-and-filesystem-policy)). |
+| Tool result with `code: "conflict"` when calling a `ui_*` tool | Default headless mode has no live window. Attach to a running desktop control listener with `--control-port` ([attachment modes](automation/mcp.md#attachment-modes-and-filesystem-policy)). |
 | Tool result with `code: "io_error"` and `failed to connect to desktop control port` | `--control-port` (or `CURVEBOOK_CONTROL_PORT`) is set but no `curvebook --control <port>` instance is listening on `127.0.0.1:<port>`. Start the desktop side first, or drop the flag. The server itself still starts; the error appears on each tool call. |
 | Tool result with `code: "bad_input"` and `invalid or missing control authentication token` | The attached desktop rejected the control authentication token (the raw control error `unauthorized` is mapped to MCP `bad_input`). Check `--control-token`, `CURVEBOOK_CONTROL_TOKEN`, and the per-user token file described in the [control protocol reference](automation/control-and-batch.md#loopback-desktop-control-protocol---control). Use the token for the running desktop instance; do not disable authentication. |
 | `usage error: invalid --control-port` / `invalid CURVEBOOK_CONTROL_PORT` | The port must be an integer in `1..=65535`. |
@@ -144,7 +142,6 @@ Every validation, format, policy, solver, and system error maps deterministicall
 | `solver_failed` | `Compute` | Non-convergence (`HitMaxIters`), `ZeroVariance`, singular design/covariance matrix, unbracketed implicit root, ODE divergence, or `WeightingScheme` zero denominator (`ImpossibleWeights`). |
 | `insufficient_data` | `Compute` | Empty input, too few non-excluded observations/events for `df`, or missing raw replicates (`RequiresRawReplicates`) when `MeanSdN`/`MeanSemN` subcolumns are supplied. |
 | `cancelled` | `Compute` | Operation aborted via MCP/engine cancellation token. |
-| `gui_only_violation` | `Policy` | Direct non-GUI mutation or filesystem bypass attempted while `--gui-only` policy is active. |
 | `internal_panic` | `Internal` | Unexpected invariant fault trapped cleanly at the `guard.rs` safety boundary without aborting the host process. |
 | `internal_error` | `Internal` | Unclassified internal dispatch or serialization error. |
 

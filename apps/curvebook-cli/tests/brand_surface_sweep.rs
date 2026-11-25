@@ -346,7 +346,7 @@ fn check_export_metadata_sweep(doc: &ProjectDocument, hits: &mut Vec<BrandHit>) 
 
 /// Sweep in-process UI strings across 16-locale `i18n`, tooltips, all 8 table archetypes,
 /// all 26 `ActiveDialog` states, all 7 `ActiveInspector` tabs, live 16-locale `egui_shell` renders,
-/// live MCP headless & `--gui-only` JSON-RPC surfaces, `CommandPalette`, engine/UI command catalogs,
+/// live MCP headless & GUI-hosted JSON-RPC surfaces, `CommandPalette`, engine/UI command catalogs,
 /// and SVG/PDF/HTML/manifest/window export metadata.
 pub fn check_ui_surfaces() -> Result<Vec<BrandHit>, String> {
     let mut hits = check_i18n_catalog();
@@ -375,8 +375,7 @@ struct BrandsGuiSessionHost {
 }
 
 impl BrandsGuiSessionHost {
-    fn new(mut app: UiApp, gui_only: bool) -> Self {
-        app.set_gui_only(gui_only);
+    fn new(app: UiApp) -> Self {
         Self { app }
     }
 }
@@ -390,14 +389,6 @@ impl GuiSessionHost for BrandsGuiSessionHost {
             obj.insert(String::from("target"), serde_json::Value::String(String::from("full_window")));
         }
         curvebook_ui_egui::dispatch_gui_action(&mut self.app, method, params)
-    }
-
-    fn set_gui_only(&mut self, gui_only: bool) {
-        self.app.set_gui_only(gui_only);
-    }
-
-    fn is_gui_only(&self) -> bool {
-        self.app.is_gui_only()
     }
 
     fn hosted_session(&self) -> Option<&Session> {
@@ -435,7 +426,7 @@ fn ensure_mcp_ok<'a>(label: &str, resp: &'a serde_json::Value) -> Result<&'a ser
 }
 
 /// Drive actual in-memory `curvebook-mcp` JSON-RPC 2.0 sessions (both default headless mode and
-/// strict `--gui-only` mode) over a populated 5-sheet `ProjectDocument`, scanning `initialize`,
+/// GUI-hosted mode) over a populated 5-sheet `ProjectDocument`, scanning `initialize`,
 /// `tools/list` (core + all progressive `CommandGroup`s + `gui`), `resources/list` + `resources/read`,
 /// `prompts/list` + `prompts/get`, and `tools/call` (`doc_inspect`, `render_preview`, `export`,
 /// `ui_inspect`, `ui_screenshot`).
@@ -446,7 +437,7 @@ pub fn check_mcp_surfaces() -> Result<Vec<BrandHit>, String> {
     session.recalculate_all().map_err(|e| format!("MCP sweep recalculate: {e}"))?;
 
     check_mcp_headless_mode(session.clone(), &mut hits)?;
-    check_mcp_gui_only_mode(session, &mut hits)?;
+    check_mcp_gui_host_mode(session, &mut hits)?;
     Ok(hits)
 }
 
@@ -492,7 +483,7 @@ fn check_mcp_headless_mode(session: Session, hits: &mut Vec<BrandHit>) -> Result
     ensure_mcp_ok("headless:command_list", &cmd_list)?;
     hits.extend(check_mcp_rpc_response("mcp:headless:command_list", "tools/call", Some("command_list"), &cmd_list));
 
-    check_mcp_resources_and_prompts(&mut state, "mcp:headless", false, hits)?;
+    check_mcp_resources_and_prompts(&mut state, "mcp:headless", hits)?;
     check_mcp_headless_previews_and_inspect(&mut state, hits)?;
     Ok(())
 }
@@ -526,47 +517,44 @@ fn check_mcp_headless_previews_and_inspect(state: &mut McpServerState, hits: &mu
     Ok(())
 }
 
-fn check_mcp_gui_only_mode(session: Session, hits: &mut Vec<BrandHit>) -> Result<(), String> {
+fn check_mcp_gui_host_mode(session: Session, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     let mut app = UiApp::from_session(session);
     app.sync_views();
-    let mut state = McpServerState::with_gui_host(Box::new(BrandsGuiSessionHost::new(app, true)));
+    let mut state = McpServerState::with_gui_host(Box::new(BrandsGuiSessionHost::new(app)));
 
     let init = send_mcp_rpc(
         &mut state,
         "initialize",
         serde_json::json!({ "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "xtask-brands-gui", "version": "0.1.0" } }),
     )?;
-    ensure_mcp_ok("gui_only:initialize", &init)?;
-    hits.extend(check_mcp_rpc_response("mcp:gui_only:initialize", "initialize", None, &init));
+    ensure_mcp_ok("gui_host:initialize", &init)?;
+    hits.extend(check_mcp_rpc_response("mcp:gui_host:initialize", "initialize", None, &init));
+
+    let enable =
+        send_mcp_rpc(&mut state, "tools/call", serde_json::json!({ "name": "enable_toolset", "arguments": { "group": "gui", "enabled": true } }))?;
+    ensure_mcp_ok("gui_host:enable_toolset", &enable)?;
 
     let gui_tools = send_mcp_rpc(&mut state, "tools/list", serde_json::json!({}))?;
-    let gui_res = ensure_mcp_ok("gui_only:tools/list", &gui_tools)?;
-    let gui_count = gui_res.get("tools").and_then(serde_json::Value::as_array).map_or(0, Vec::len);
-    if gui_count != 8 {
-        return Err(format!("expected 8 --gui-only MCP tools, got {gui_count}"));
-    }
-    hits.extend(check_mcp_rpc_response("mcp:gui_only:tools/list", "tools/list", None, &gui_tools));
+    ensure_mcp_ok("gui_host:tools/list", &gui_tools)?;
+    hits.extend(check_mcp_rpc_response("mcp:gui_host:tools/list", "tools/list", None, &gui_tools));
 
-    check_mcp_resources_and_prompts(&mut state, "mcp:gui_only", true, hits)?;
+    check_mcp_resources_and_prompts(&mut state, "mcp:gui_host", hits)?;
 
     let ui_ins = send_mcp_rpc(&mut state, "tools/call", serde_json::json!({ "name": "ui_inspect", "arguments": { "scope": "all" } }))?;
-    ensure_mcp_ok("gui_only:ui_inspect", &ui_ins)?;
-    hits.extend(check_mcp_rpc_response("mcp:gui_only:ui_inspect", "tools/call", Some("ui_inspect"), &ui_ins));
+    ensure_mcp_ok("gui_host:ui_inspect", &ui_ins)?;
+    hits.extend(check_mcp_rpc_response("mcp:gui_host:ui_inspect", "tools/call", Some("ui_inspect"), &ui_ins));
 
     let ui_shot = send_mcp_rpc(
         &mut state,
         "tools/call",
         serde_json::json!({ "name": "ui_screenshot", "arguments": { "target": "workspace", "width_px": 320, "height_px": 200, "dpi": 144 } }),
     )?;
-    ensure_mcp_ok("gui_only:ui_screenshot", &ui_shot)?;
-    hits.extend(check_mcp_rpc_response("mcp:gui_only:ui_screenshot", "tools/call", Some("ui_screenshot"), &ui_shot));
-
-    let blocked = send_mcp_rpc(&mut state, "tools/call", serde_json::json!({ "name": "doc_inspect", "arguments": {} }))?;
-    hits.extend(check_mcp_rpc_response("mcp:gui_only:blocked_doc_inspect", "tools/call", Some("doc_inspect"), &blocked));
+    ensure_mcp_ok("gui_host:ui_screenshot", &ui_shot)?;
+    hits.extend(check_mcp_rpc_response("mcp:gui_host:ui_screenshot", "tools/call", Some("ui_screenshot"), &ui_shot));
     Ok(())
 }
 
-fn check_mcp_resources_and_prompts(state: &mut McpServerState, prefix: &str, gui_only: bool, hits: &mut Vec<BrandHit>) -> Result<(), String> {
+fn check_mcp_resources_and_prompts(state: &mut McpServerState, prefix: &str, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     let res_list = send_mcp_rpc(state, "resources/list", serde_json::json!({}))?;
     let res_ok = ensure_mcp_ok(&format!("{prefix}:resources/list"), &res_list)?;
     hits.extend(check_mcp_rpc_response(&format!("{prefix}:resources/list"), "resources/list", None, &res_list));
@@ -578,18 +566,13 @@ fn check_mcp_resources_and_prompts(state: &mut McpServerState, prefix: &str, gui
         .flatten()
         .filter_map(|item| item.get("uri").and_then(serde_json::Value::as_str).map(str::to_owned))
         .collect();
-    if !gui_only && (!uris.iter().any(|u| u.starts_with("sheet://")) || !uris.iter().any(|u| u.starts_with("result://"))) {
-        return Err(String::from("expected both sheet:// and result:// resources in headless MCP sweep"));
+    if !uris.iter().any(|u| u.starts_with("sheet://")) || !uris.iter().any(|u| u.starts_with("result://")) {
+        return Err(String::from("expected both sheet:// and result:// resources in MCP sweep"));
     }
-    if gui_only {
-        let blocked_read = send_mcp_rpc(state, "resources/read", serde_json::json!({ "uri": "sheet://data-1" }))?;
-        hits.extend(check_mcp_rpc_response(&format!("{prefix}:resources/read:blocked"), "resources/read", None, &blocked_read));
-    } else {
-        for uri in &uris {
-            let read_resp = send_mcp_rpc(state, "resources/read", serde_json::json!({ "uri": uri }))?;
-            ensure_mcp_ok(&format!("{prefix}:resources/read:{uri}"), &read_resp)?;
-            hits.extend(check_mcp_rpc_response(&format!("{prefix}:resources/read:{uri}"), "resources/read", None, &read_resp));
-        }
+    for uri in &uris {
+        let read_resp = send_mcp_rpc(state, "resources/read", serde_json::json!({ "uri": uri }))?;
+        ensure_mcp_ok(&format!("{prefix}:resources/read:{uri}"), &read_resp)?;
+        hits.extend(check_mcp_rpc_response(&format!("{prefix}:resources/read:{uri}"), "resources/read", None, &read_resp));
     }
 
     let prompts_list = send_mcp_rpc(state, "prompts/list", serde_json::json!({}))?;
@@ -1350,14 +1333,6 @@ impl GuiSessionHost for TestGuiHost {
         curvebook_ui_egui::dispatch_gui_action(&mut self.app, method, params)
     }
 
-    fn set_gui_only(&mut self, gui_only: bool) {
-        self.app.set_gui_only(gui_only);
-    }
-
-    fn is_gui_only(&self) -> bool {
-        self.app.is_gui_only()
-    }
-
     fn hosted_session(&self) -> Option<&Session> {
         Some(self.app.session())
     }
@@ -1466,7 +1441,7 @@ fn decode_b64(b64: &str) -> Option<Vec<u8>> {
 }
 
 #[test]
-fn r021_mcp_jsonrpc_headless_and_gui_only_positive_and_negative_regression() -> Result<(), String> {
+fn r021_mcp_jsonrpc_headless_and_gui_host_positive_and_negative_regression() -> Result<(), String> {
     let mut doc = ProjectDocument::new("R021 MCP Sweep").map_err(|e| e.to_string())?;
     for (idx, fixture) in SAMPLE_FIXTURES.iter().enumerate() {
         let ds = instantiate_sample_fixture(fixture.id, format!("data-{}", idx + 1)).map_err(|e| e.to_string())?;
@@ -1565,29 +1540,29 @@ fn r021_mcp_jsonrpc_headless_and_gui_only_positive_and_negative_regression() -> 
     let svg_exp = rpc(&mut headless, "tools/call", serde_json::json!({ "name": "export", "arguments": { "format": "svg", "sheet_id": "graph-1" } }))?;
     check_mcp_json_strict("headless:export:svg", "tools/call", Some("export"), &svg_exp)?;
 
-    // 2. Positive strict --gui-only MCP JSON-RPC verification.
+    // 2. Positive GUI-hosted MCP JSON-RPC verification.
     let mut app = UiApp::from_session(session);
     app.sync_views();
-    app.set_gui_only(true);
     let mut gui_mcp = McpServerState::with_gui_host(Box::new(TestGuiHost { app }));
     let g_init = rpc(&mut gui_mcp, "initialize", serde_json::json!({ "protocolVersion": "2024-11-05" }))?;
-    check_mcp_json_strict("gui_only:initialize", "initialize", None, &g_init)?;
+    check_mcp_json_strict("gui_host:initialize", "initialize", None, &g_init)?;
+    let _ = rpc(&mut gui_mcp, "tools/call", serde_json::json!({ "name": "enable_toolset", "arguments": { "group": "gui", "enabled": true } }))?;
     let g_tools = rpc(&mut gui_mcp, "tools/list", serde_json::json!({}))?;
-    check_mcp_json_strict("gui_only:tools/list", "tools/list", None, &g_tools)?;
+    check_mcp_json_strict("gui_host:tools/list", "tools/list", None, &g_tools)?;
     let g_prompts = rpc(&mut gui_mcp, "prompts/list", serde_json::json!({}))?;
-    check_mcp_json_strict("gui_only:prompts/list", "prompts/list", None, &g_prompts)?;
+    check_mcp_json_strict("gui_host:prompts/list", "prompts/list", None, &g_prompts)?;
     for pname in &pnames {
         let gpget = rpc(&mut gui_mcp, "prompts/get", serde_json::json!({ "name": pname, "arguments": {} }))?;
-        check_mcp_json_strict(&format!("gui_only:prompts/get:{pname}"), "prompts/get", None, &gpget)?;
+        check_mcp_json_strict(&format!("gui_host:prompts/get:{pname}"), "prompts/get", None, &gpget)?;
     }
     let g_ins = rpc(&mut gui_mcp, "tools/call", serde_json::json!({ "name": "ui_inspect", "arguments": { "scope": "all" } }))?;
-    check_mcp_json_strict("gui_only:ui_inspect", "tools/call", Some("ui_inspect"), &g_ins)?;
+    check_mcp_json_strict("gui_host:ui_inspect", "tools/call", Some("ui_inspect"), &g_ins)?;
     let g_shot = rpc(
         &mut gui_mcp,
         "tools/call",
         serde_json::json!({ "name": "ui_screenshot", "arguments": { "target": "workspace", "width_px": 240, "height_px": 180, "dpi": 144 } }),
     )?;
-    check_mcp_json_strict("gui_only:ui_screenshot", "tools/call", Some("ui_screenshot"), &g_shot)?;
+    check_mcp_json_strict("gui_host:ui_screenshot", "tools/call", Some("ui_screenshot"), &g_shot)?;
 
     // 3. Negative regression probes proving contaminated MCP instructions, prompts, resources, and tool descriptions fail.
     let vendor_gp = join(&["Gr", "aph", "Pad"]);

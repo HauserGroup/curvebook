@@ -168,7 +168,6 @@ fn spawn_window_from_session(session: Session) -> Result<(DesktopHostRuntime, De
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
         new_instance: false,
-        gui_only: false,
         locale_override: None,
         theme_override: None,
         recovery_root: None,
@@ -900,7 +899,6 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
         new_instance: false,
-        gui_only: false,
         locale_override: None,
         theme_override: None,
         recovery_root: None,
@@ -1007,7 +1005,6 @@ fn r13_7_native_rfd_image_picker_inserts_png_on_graph_and_layout() -> Result<(),
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
         new_instance: false,
-        gui_only: false,
         locale_override: None,
         theme_override: None,
         recovery_root: None,

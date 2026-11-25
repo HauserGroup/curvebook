@@ -25,7 +25,6 @@ struct TopChromeHarnessState {
 impl TopChromeHarnessState {
     fn new(locale: &str, host_draws_menu_bar: bool) -> Self {
         let mut app = UiApp::new();
-        app.set_gui_only(true);
         app.host_draws_menu_bar = host_draws_menu_bar;
         assert_eq!(app.set_locale(locale), locale);
         Self { app, last_report: None, discard_next_frame: false, discard_passes: 0, settled_passes: 0, wheel_capture_count: 0 }

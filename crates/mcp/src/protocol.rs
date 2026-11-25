@@ -5,13 +5,14 @@
 
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 
+#[cfg(not(target_arch = "wasm32"))]
 use curvebook_doc::ErrorCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::SERVER_NAME;
 use crate::errors::{self, StructuredErrorPayload};
-use crate::prompts::{get_prompt_for_mode, list_prompts_for_mode};
+use crate::prompts::{get_prompt, list_prompts};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::resources::{ResourceContent, ResourceDescriptor};
 use crate::resources::{ResourceError, list_resource_templates, list_resources, read_resource};
@@ -33,18 +34,6 @@ pub const SERVER_INSTRUCTIONS: &str = concat!(
     ".",
     env!("CARGO_PKG_VERSION_MINOR"),
     "/automation/mcp.html",
-);
-
-/// Guidance string advertised during `initialize` when strict `--gui-only` policy is active.
-pub const GUI_ONLY_SERVER_INSTRUCTIONS: &str = concat!(
-    "CurveBook MCP server running under strict `--gui-only` policy. ",
-    "Only the 8 human-equivalent GUI tools are exposed (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`). ",
-    "Direct engine commands (`command_run`, `command_batch`, `enable_toolset`), `doc_inspect`, file shortcuts (`open_file`, `save_file`, `export`, `render_preview`), and `resources/read` are blocked with `gui_only_violation`. ",
-    "Reference docs: https://hausergroup.github.io/curvebook/manual/v",
-    env!("CARGO_PKG_VERSION_MAJOR"),
-    ".",
-    env!("CARGO_PKG_VERSION_MINOR"),
-    "/automation/mcp.html#gui-only",
 );
 
 /// Newer MCP protocol revision accepted when explicitly requested by a client.
@@ -166,21 +155,14 @@ pub fn run_stdio_with_state(state: &mut McpServerState) -> io::Result<()> {
 /// Run the MCP server on process stdin/stdout attached to a live desktop `--control <port>` loop.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_stdio_with_control_port(port: u16) -> Result<(), String> {
-    run_stdio_with_control_port_gui_only(port, false)
+    run_stdio_with_control_port_options(port, None)
 }
 
 /// Run the MCP server on process stdin/stdout attached to a live desktop `--control <port>` loop
-/// with explicit `--gui-only` policy state.
+/// with an optional `--control-token`.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run_stdio_with_control_port_gui_only(port: u16, gui_only: bool) -> Result<(), String> {
-    run_stdio_with_control_port_options(port, gui_only, None)
-}
-
-/// Run the MCP server on process stdin/stdout attached to a live desktop `--control <port>` loop
-/// with explicit `--gui-only` policy state and optional `--control-token`.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn run_stdio_with_control_port_options(port: u16, gui_only: bool, control_token: Option<&str>) -> Result<(), String> {
-    let mut state = McpServerState::with_control_port_and_gui_only(port, gui_only)?;
+pub fn run_stdio_with_control_port_options(port: u16, control_token: Option<&str>) -> Result<(), String> {
+    let mut state = McpServerState::with_control_port(port)?;
     if let Some(token) = control_token {
         state.set_control_token(Some(token))?;
     }
@@ -350,10 +332,10 @@ fn dispatch_method(req_id: Option<Value>, method: &str, params: Value, state: &m
         "tools/list" => handle_tools_list(id, &params, state),
         "tools/call" => handle_tools_call(id, params, state),
         "resources/list" => handle_resources_list(id, &params, state),
-        "resources/templates/list" => handle_resources_templates_list(id, &params, state),
+        "resources/templates/list" => handle_resources_templates_list(id, &params),
         "resources/read" => handle_resources_read(id, &params, state),
-        "prompts/list" => handle_prompts_list(id, &params, state),
-        "prompts/get" => handle_prompts_get(id, &params, state),
+        "prompts/list" => handle_prompts_list(id, &params),
+        "prompts/get" => handle_prompts_get(id, &params),
         _ => JsonRpcResponse::err(id, ERR_METHOD_NOT_FOUND, format!("method not found: {method}"), None),
     };
     let _ = state.set_active_cancel_token(prev_token);
@@ -375,8 +357,7 @@ fn is_notification_method(method: &str, is_notification: bool) -> bool {
 }
 
 fn rpc_error_from_payload(id: Value, payload: StructuredErrorPayload) -> JsonRpcResponse {
-    let code = if payload.code == ErrorCode::GuiOnlyViolation { ERR_INVALID_REQUEST } else { ERR_INTERNAL_ERROR };
-    JsonRpcResponse::err(id, code, payload.message.clone(), Some(payload.to_value()))
+    JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, payload.message.clone(), Some(payload.to_value()))
 }
 
 fn run_guarded_rpc<F>(id: Value, op: &str, f: F) -> JsonRpcResponse
@@ -393,12 +374,8 @@ fn handle_initialize(id: Value, params: &Value, state: &mut McpServerState) -> J
     if !params.is_object() {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "initialize params must be an object", None);
     }
-    if let Err(payload) = state.sync_remote_control_policy() {
-        return rpc_error_from_payload(id, payload);
-    }
     let requested = params.get("protocolVersion").and_then(Value::as_str);
     let negotiated = negotiate_protocol_version(requested);
-    let instructions = if state.is_gui_only() { GUI_ONLY_SERVER_INSTRUCTIONS } else { SERVER_INSTRUCTIONS };
     state.mark_initialized();
     JsonRpcResponse::ok(
         id,
@@ -420,7 +397,7 @@ fn handle_initialize(id: Value, params: &Value, state: &mut McpServerState) -> J
                 "name": SERVER_NAME,
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": instructions
+            "instructions": SERVER_INSTRUCTIONS
         }),
     )
 }
@@ -439,9 +416,6 @@ fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
 fn handle_tools_list(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
     if !params.is_object() {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "tools/list params must be an object", None);
-    }
-    if let Err(payload) = state.sync_remote_control_policy() {
-        return rpc_error_from_payload(id, payload);
     }
     JsonRpcResponse::ok(id, json!({ "tools": list_tools_for_state(state) }))
 }
@@ -495,12 +469,6 @@ fn handle_resources_list(id: Value, params: &Value, state: &mut McpServerState) 
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/list params must be an object", None);
     }
     run_guarded_rpc(id, "mcp.resources_list", |req_id| {
-        if let Err(payload) = state.sync_remote_control_policy() {
-            return Ok(rpc_error_from_payload(req_id.clone(), payload));
-        }
-        if state.is_gui_only() {
-            return Ok(JsonRpcResponse::ok(req_id.clone(), json!({ "resources": [] })));
-        }
         #[cfg(not(target_arch = "wasm32"))]
         if state.control_port().is_some() {
             return Ok(match list_live_resources(state) {
@@ -512,15 +480,11 @@ fn handle_resources_list(id: Value, params: &Value, state: &mut McpServerState) 
     })
 }
 
-fn handle_resources_templates_list(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
+fn handle_resources_templates_list(id: Value, params: &Value) -> JsonRpcResponse {
     if !params.is_object() {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/templates/list params must be an object", None);
     }
-    if let Err(payload) = state.sync_remote_control_policy() {
-        return rpc_error_from_payload(id, payload);
-    }
-    let templates = if state.is_gui_only() { Vec::new() } else { list_resource_templates() };
-    JsonRpcResponse::ok(id, json!({ "resourceTemplates": templates }))
+    JsonRpcResponse::ok(id, json!({ "resourceTemplates": list_resource_templates() }))
 }
 
 fn handle_resources_read(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
@@ -531,16 +495,6 @@ fn handle_resources_read(id: Value, params: &Value, state: &mut McpServerState) 
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/read requires a non-empty string \"uri\"", None);
     };
     run_guarded_rpc(id, "mcp.resources_read", |req_id| {
-        if let Err(payload) = state.sync_remote_control_policy() {
-            return Ok(rpc_error_from_payload(req_id.clone(), payload));
-        }
-        if state.is_gui_only() {
-            let payload = StructuredErrorPayload::new(ErrorCode::GuiOnlyViolation, "resources/read is forbidden under --gui-only policy")
-                .with_remediation("Inspect visible sheets via `ui_inspect` or `ui_screenshot` instead.")
-                .with_details(json!({ "uri": uri, "policy": "gui_only" }));
-            return Ok(JsonRpcResponse::err(req_id.clone(), ERR_INVALID_REQUEST, payload.message.clone(), Some(payload.to_value())));
-        }
-
         #[cfg(not(target_arch = "wasm32"))]
         if state.control_port().is_some() {
             return Ok(match read_live_resource(state, uri) {
@@ -697,17 +651,14 @@ fn map_live_resource_error(uri: &str, err: &StructuredErrorPayload) -> ResourceE
     }
 }
 
-fn handle_prompts_list(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
+fn handle_prompts_list(id: Value, params: &Value) -> JsonRpcResponse {
     if !params.is_object() {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "prompts/list params must be an object", None);
     }
-    if let Err(payload) = state.sync_remote_control_policy() {
-        return rpc_error_from_payload(id, payload);
-    }
-    JsonRpcResponse::ok(id, json!({ "prompts": list_prompts_for_mode(state.is_gui_only()) }))
+    JsonRpcResponse::ok(id, json!({ "prompts": list_prompts() }))
 }
 
-fn handle_prompts_get(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
+fn handle_prompts_get(id: Value, params: &Value) -> JsonRpcResponse {
     let Some(map) = params.as_object() else {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "prompts/get params must be an object", None);
     };
@@ -721,11 +672,8 @@ fn handle_prompts_get(id: Value, params: &Value, state: &mut McpServerState) -> 
             return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "prompts/get \"arguments\" must be an object", None);
         }
     };
-    if let Err(payload) = state.sync_remote_control_policy() {
-        return rpc_error_from_payload(id, payload);
-    }
 
-    match get_prompt_for_mode(name, &arguments, state.is_gui_only()) {
+    match get_prompt(name, &arguments) {
         Ok(result) => match serde_json::to_value(result) {
             Ok(val) => JsonRpcResponse::ok(id, val),
             Err(err) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, format!("failed to encode prompt result: {err}"), None),

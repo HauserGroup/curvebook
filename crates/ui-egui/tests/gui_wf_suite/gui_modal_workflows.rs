@@ -1,10 +1,9 @@
-//! End-to-end integration tests for strict `--gui-only` caller separation, all 8 interactive
-//! GUI actions (`ui.inspect` .. `ui.answer_dialog`), modal graying rules (`R1`–`R10`),
-//! the 4-stage Power & Sample Size wizard, multi-row grid selection + `Format Selected Points...`,
-//! and `ResultSheet` -> `Analyze...` downstream chaining (`R8.6` & `R8.7`).
+//! End-to-end integration tests for the 8 interactive GUI actions (`ui.inspect` ..
+//! `ui.answer_dialog`), modal graying rules (`R1`–`R10`), the 4-stage Power & Sample Size wizard,
+//! multi-row grid selection + `Format Selected Points...`, and `ResultSheet` -> `Analyze...`
+//! downstream chaining (`R8.6` & `R8.7`).
 
 use curvebook_doc::{AnalysisKind, CellCoord, CellValue, ErrorCode, GraphAnnotation, SheetId, SheetSection, TableArchetype, TableKind};
-use curvebook_ui_egui::control_io::handle_control_line;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::power_wizard::PowerWizardStage;
 use curvebook_ui_egui::{UiApp, dispatch_gui_action};
@@ -12,78 +11,13 @@ use serde_json::{Value, json};
 
 type TestRes = Result<(), String>;
 
-fn control_json(app: &mut UiApp, id: u64, method: &str, params: Value) -> Result<Value, String> {
-    let line = json!({ "id": id, "method": method, "params": params }).to_string();
-    let raw = handle_control_line(app, &line);
-    serde_json::from_str(&raw).map_err(|e| format!("parse control response: {e}"))
-}
-
-fn assert_control_error_code(resp: &Value, expected_code: &str, context: &str) {
-    assert_eq!(resp.get("ok").and_then(Value::as_bool), Some(false), "{context}: expected error response, got {resp}");
-    let code = resp.pointer("/error_detail/code").or_else(|| resp.pointer("/result/error/code")).and_then(Value::as_str);
-    assert_eq!(code, Some(expected_code), "{context}: expected code `{expected_code}`, got {resp}");
-}
-
 fn err_str(ctx: &str, err: impl std::fmt::Display) -> String {
     format!("{ctx}: {err}")
 }
 
 #[test]
-fn gui_only_blocks_direct_control_mutations_while_allowing_gui_and_reads() -> TestRes {
+fn eight_gui_actions_and_modal_guards_drive_live_ui() -> TestRes {
     let mut app = UiApp::new();
-    app.set_gui_only(true);
-    assert!(app.is_gui_only());
-
-    // Direct non-UI mutations over JSON-lines MUST fail with GuiOnlyViolation without mutating.
-    let initial_sheets = app.document().data_sheets.len();
-    let r1 = control_json(&mut app, 1, "engine.execute", json!({ "command_id": "sheet.createData", "params": { "kind": "xy", "title": "Bypass" } }))?;
-    assert_control_error_code(&r1, "gui_only_violation", "engine.execute under gui-only");
-
-    let r2 = control_json(&mut app, 2, "command.run", json!({ "command_id": "sheet.createData", "params": { "kind": "column" } }))?;
-    assert_control_error_code(&r2, "gui_only_violation", "command.run under gui-only");
-
-    let r3 =
-        control_json(&mut app, 3, "command.batch", json!({ "commands": [{ "command_id": "sheet.createData", "params": { "kind": "column" } }] }))?;
-    assert_control_error_code(&r3, "gui_only_violation", "command.batch under gui-only");
-
-    let r4 = control_json(&mut app, 4, "sheet.createData", json!({ "kind": "grouped", "title": "Direct" }))?;
-    assert_control_error_code(&r4, "gui_only_violation", "direct domain command under gui-only");
-
-    let r5 = control_json(&mut app, 5, "ui.layout.snap", json!({}))?;
-    assert_control_error_code(&r5, "gui_only_violation", "direct mutating ui.* call under gui-only");
-
-    let r6 = dispatch_gui_action(&mut app, "ui.screenshot", json!({ "target": "full_window", "path": "/tmp/forbidden.png" }));
-    assert_eq!(
-        r6.as_ref().err().map(|e| e.code),
-        Some(ErrorCode::GuiOnlyViolation),
-        "ui.screenshot disk write must be blocked under --gui-only: {r6:?}"
-    );
-    assert_eq!(app.document().data_sheets.len(), initial_sheets, "blocked control calls must not mutate doc");
-
-    // Read-only control RPCs remain available under --gui-only.
-    let ping = control_json(&mut app, 6, "ping", json!({}))?;
-    assert_eq!(ping.get("ok").and_then(Value::as_bool), Some(true));
-
-    let state = control_json(&mut app, 7, "ui.state", json!({}))?;
-    assert_eq!(state.pointer("/result/gui_only").and_then(Value::as_bool), Some(true));
-
-    let inspect_ctrl = control_json(&mut app, 8, "ui.inspect", json!({ "include_bounds": true }))?;
-    assert_eq!(inspect_ctrl.get("ok").and_then(Value::as_bool), Some(true));
-    assert_eq!(inspect_ctrl.pointer("/result/gui_only").and_then(Value::as_bool), Some(true));
-
-    // Re-enabling Caller::Control allows direct automation again when gui_only is toggled off.
-    app.set_gui_only(false);
-    assert!(!app.is_gui_only());
-    let ok_direct =
-        control_json(&mut app, 9, "engine.execute", json!({ "command_id": "sheet.createData", "params": { "kind": "xy", "title": "AllowedNow" } }))?;
-    assert_eq!(ok_direct.get("ok").and_then(Value::as_bool), Some(true));
-    Ok(())
-}
-
-#[test]
-fn eight_gui_actions_and_modal_guards_drive_live_ui_under_gui_only() -> TestRes {
-    let mut app = UiApp::new();
-    app.set_gui_only(true);
 
     // 1. Disabled menu item (no sheets yet -> Format Selected Points disabled) must refuse via Conflict.
     let disabled_menu = dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.formatPoints.open" }));
@@ -96,7 +30,6 @@ fn eight_gui_actions_and_modal_guards_drive_live_ui_under_gui_only() -> TestRes 
     // 3. ui.inspect verifies tree structure, bounds, and navigator entries.
     let snap = dispatch_gui_action(&mut app, "ui.inspect", json!({ "include_bounds": true })).map_err(|e| err_str("ui.inspect", e))?;
     assert_eq!(snap.get("active_sheet_id").and_then(Value::as_str), Some("col-1"));
-    assert_eq!(snap.get("gui_only").and_then(Value::as_bool), Some(true));
     let menus = snap.get("menus").and_then(Value::as_array).map_or(0, Vec::len);
     assert_eq!(menus, 8, "all 8 top-level menus present in ui.inspect");
 
@@ -155,9 +88,8 @@ fn eight_gui_actions_and_modal_guards_drive_live_ui_under_gui_only() -> TestRes 
 }
 
 #[test]
-fn power_wizard_four_stage_flow_under_gui_only_emits_linked_result_and_graph() -> TestRes {
+fn power_wizard_four_stage_flow_emits_linked_result_and_graph() -> TestRes {
     let mut app = UiApp::new();
-    app.set_gui_only(true);
 
     // Open via Analyze > Power and Sample Size... using array path form (`["Analyze", "Power and Sample Size..."]`).
     dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "path": ["Analyze", "Power and Sample Size..."] }))
@@ -202,7 +134,7 @@ fn power_wizard_four_stage_flow_under_gui_only_emits_linked_result_and_graph() -
     assert!(hovered.get("hover_n").and_then(Value::as_f64).is_some_and(|n| n > 0.0));
     assert!(hovered.get("hover_power").and_then(Value::as_f64).is_some_and(|p| (0.0..=1.0).contains(&p)));
 
-    // Stage 4 Create emits BOTH linked Power & Sample Size ResultSheet and GraphSheet under --gui-only!
+    // Stage 4 Create emits BOTH linked Power & Sample Size ResultSheet and GraphSheet!
     let created = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "create" })).map_err(|e| err_str("create", e))?;
     assert_eq!(created.get("created").and_then(Value::as_bool), Some(true));
     assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None);
@@ -219,7 +151,6 @@ fn power_wizard_four_stage_flow_under_gui_only_emits_linked_result_and_graph() -
 #[test]
 fn multi_row_selection_format_selected_points_and_result_sheet_chaining_work() -> TestRes {
     let mut app = UiApp::new();
-    app.set_gui_only(true);
 
     // 1. Create an XY sheet with auto graph + multivariate PCA table for ResultSheet chaining.
     app.execute_command("sheet.createData", json!({ "sheet_id": "xy-1", "kind": "xy", "cols": 2, "rows": 5, "auto_graph": true }))

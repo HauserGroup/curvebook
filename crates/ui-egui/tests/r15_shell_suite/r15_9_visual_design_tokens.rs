@@ -58,7 +58,6 @@ fn make_shell_driver(app: UiApp, width: f64, height: f64) -> EguiHumanPathDriver
 
 fn seed_xy_data_and_graph_app() -> UiApp {
     let mut app = UiApp::new();
-    app.set_gui_only(true);
     app.execute_command(
         "sheet.createData",
         json!({
@@ -287,7 +286,6 @@ fn modal_footers_follow_cancel_secondary_primary_order_and_render_cleanly() {
 
     // 4. Manage Variables modal: renders cleanly with zero parity violations.
     let mut app_mv = UiApp::new();
-    app_mv.set_gui_only(true);
     app_mv
         .execute_command(
             "sheet.createData",

@@ -3,8 +3,7 @@
 use std::io::Cursor;
 
 use curvebook_mcp::{
-    ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, McpServerState, ResourceTemplateDescriptor, call_tool, dispatch_json_value, list_resource_templates,
-    serve,
+    ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, McpServerState, ResourceTemplateDescriptor, dispatch_json_value, list_resource_templates, serve,
 };
 use serde_json::{Value, json};
 
@@ -42,7 +41,7 @@ fn assert_canonical_templates(reply: &Value) -> TestResult {
 }
 
 #[test]
-fn resources_templates_list_headless_normal_and_gui_only() -> TestResult {
+fn resources_templates_list_headless() -> TestResult {
     let mut normal = McpServerState::new();
     let reply = rpc(&mut normal, 1, "resources/templates/list", json!({}))?;
     assert_canonical_templates(&reply)?;
@@ -51,43 +50,19 @@ fn resources_templates_list_headless_normal_and_gui_only() -> TestResult {
     let omitted = dispatch_json_value(json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/templates/list" }), &mut normal)
         .ok_or_else(|| String::from("expected reply when params omitted"))?;
     assert_canonical_templates(&omitted)?;
-
-    let mut gui_only = McpServerState::new().with_gui_only(true);
-    let gui_reply = rpc(&mut gui_only, 3, "resources/templates/list", json!({}))?;
-    assert_eq!(gui_reply.pointer("/result/resourceTemplates"), Some(&json!([])));
     Ok(())
 }
 
 #[test]
-fn resources_templates_list_live_attach_normal_and_gui_only() -> TestResult {
+fn resources_templates_list_live_attach() -> TestResult {
     let mut live_normal = McpServerState::with_control_port(49601).map_err(|e| format!("with_control_port: {e}"))?.with_control_handler(
         |method, _params| match method {
-            "ping" => Ok(json!({ "pong": true, "gui_only": false })),
+            "ping" => Ok(json!({ "pong": true })),
             other => Err(format!("unexpected remote method {other}")),
         },
     );
     let normal_reply = rpc(&mut live_normal, 1, "resources/templates/list", json!({}))?;
     assert_canonical_templates(&normal_reply)?;
-
-    let mut live_remote_gui_only = McpServerState::with_control_port(49602).map_err(|e| format!("with_control_port: {e}"))?.with_control_handler(
-        |method, _params| match method {
-            "ping" => Ok(json!({ "pong": true, "gui_only": true })),
-            other => Err(format!("unexpected remote method {other}")),
-        },
-    );
-    let remote_gui_reply = rpc(&mut live_remote_gui_only, 2, "resources/templates/list", json!({}))?;
-    assert!(live_remote_gui_only.is_gui_only(), "should adopt remote --gui-only policy");
-    assert_eq!(remote_gui_reply.pointer("/result/resourceTemplates"), Some(&json!([])));
-
-    let mut live_mismatch = McpServerState::with_control_port_and_gui_only(49603, true)
-        .map_err(|e| format!("with_control_port_and_gui_only: {e}"))?
-        .with_control_handler(|method, _params| match method {
-            "ping" => Ok(json!({ "pong": true, "gui_only": false })),
-            other => Err(format!("unexpected remote method {other}")),
-        });
-    let mismatch_reply = rpc(&mut live_mismatch, 3, "resources/templates/list", json!({}))?;
-    assert_eq!(mismatch_reply.pointer("/error/code"), Some(&json!(ERR_INVALID_REQUEST)));
-    assert_eq!(mismatch_reply.pointer("/error/data/code"), Some(&json!("gui_only_violation")));
     Ok(())
 }
 
@@ -142,19 +117,5 @@ fn premature_notifications_initialized_does_not_break_initialize_handshake() -> 
     assert_eq!(strict_replies.get(1).and_then(|r| r.pointer("/result/protocolVersion")), Some(&json!("2024-11-05")));
     assert!(strict_replies.get(2).and_then(|r| r.pointer("/result/tools")).is_some_and(Value::is_array));
     assert_eq!(strict_replies.get(3).and_then(|r| r.pointer("/error/code")), Some(&json!(ERR_INVALID_REQUEST)));
-    Ok(())
-}
-
-#[test]
-fn ui_screenshot_path_under_gui_only_remediation_references_inline_image_png() -> TestResult {
-    let mut state = McpServerState::new().with_gui_only(true);
-    let result = call_tool(&mut state, "ui_screenshot", json!({ "path": "shot.png" }))
-        .map_err(|e| format!("expected structured gui_only_violation tool error: {e}"))?;
-    assert!(result.is_error, "ui_screenshot with path must fail under --gui-only");
-    let structured = result.structured_content.as_ref().ok_or_else(|| String::from("missing structured_content"))?;
-    assert_eq!(structured.get("code"), Some(&json!("gui_only_violation")));
-    let remediation = structured.get("remediation").and_then(Value::as_str).ok_or_else(|| format!("missing remediation: {structured}"))?;
-    assert!(remediation.contains("image/png"), "remediation should reference inline `image/png` content block, got: {remediation}");
-    assert!(!remediation.contains("data_base64"), "remediation must not reference `data_base64`, got: {remediation}");
     Ok(())
 }

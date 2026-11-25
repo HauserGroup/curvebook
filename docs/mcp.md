@@ -43,7 +43,7 @@ Create an existing folder for your data and exports (for example `mkdir -p /path
 ```
 
 - `curvebook-cli mcp` starts in **default headless mode**.
-- `--workdir` must name an existing directory; CurveBook resolves relative paths beneath it and blocks escapes (`path_escape`). Omit `--workdir` only when testing pure in-memory calculations from a terminal without disk I/O. (See [Example Configurations](#example-configurations) below for `--control-port` live-attach and `--gui-only` presets.)
+- `--workdir` must name an existing directory; CurveBook resolves relative paths beneath it and blocks escapes (`path_escape`). Omit `--workdir` only when testing pure in-memory calculations from a terminal without disk I/O. (See [Example Configurations](#example-configurations) below for `--control-port` live-attach presets.)
 
 ### 3. Verify the Connection
 
@@ -89,7 +89,7 @@ Framing, handshake, and protocol revisions are documented in the [MCP server ref
 
 - **Transport (`crates/mcp/src/protocol.rs`):** Default headless `curvebook-cli mcp` opens no network sockets; loopback TCP (`127.0.0.1`) is used only when `--control-port` or `CURVEBOOK_CONTROL_PORT` is supplied.
 - **Limits:** `MAX_REQUEST_BYTES = 16 MiB` (`MAX_DRAIN_BYTES = 64 MiB`), `MAX_HEADER_LINE_BYTES = 8 KiB`, `MAX_HEADER_COUNT = 32`, and `MAX_BATCH_LEN = 256`.
-- **Handshake & methods:** `initialize` emits `SERVER_INSTRUCTIONS` (or `GUI_ONLY_SERVER_INSTRUCTIONS` under `--gui-only`). Supported methods: `initialize`, `shutdown`, `notifications/initialized`, `notifications/cancelled`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, `resources/read`, `prompts/list`, and `prompts/get`. In single-threaded stdio mode, `notifications/cancelled` applies to queued/batched requests (pre-cancelling matching request IDs processed later in a JSON-RPC batch) and exposes cooperative cancellation via the in-process `CancellationRegistry`.
+- **Handshake & methods:** `initialize` emits `SERVER_INSTRUCTIONS`. Supported methods: `initialize`, `shutdown`, `notifications/initialized`, `notifications/cancelled`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, `resources/read`, `prompts/list`, and `prompts/get`. In single-threaded stdio mode, `notifications/cancelled` applies to queued/batched requests (pre-cancelling matching request IDs processed later in a JSON-RPC batch) and exposes cooperative cancellation via the in-process `CancellationRegistry`.
 
 ## Modes & Reach
 
@@ -97,14 +97,13 @@ The desktop application (`curvebook`) provides the declarative `egui 0.37` deskt
 
 | Mode | Reach |
 |---|---|
-| `curvebook-cli mcp` (default, headless) | Every registered engine command in `cmd::registry()` through `command_run`, `command_batch` (with `atomic: true` snapshot rollback), and per-command toolset tools, plus `doc_inspect`, `open_file`, `save_file`, `render_preview`, `export`, `sheet://` / `result://` resources, and guided prompts. UI-only `ui.*` commands report `"available": false`, `"requires_live_attach": true` in `command_list` and return `ErrorCode::Conflict` if called; the `gui` tools also return `Conflict` unless `--control-port` or `--gui-only` is active. |
-| `curvebook-cli mcp --control-port <port>` | Same toolset surface forwarded over `127.0.0.1:<port>` to a running `curvebook --control <port>` instance (headless by default, or `curvebook --control <port> --window` for a shared visible desktop window), enabling the synced `ui.*` UI commands and the `gui` tools against the live `UiApp` session. |
-| `curvebook-cli mcp --gui-only` (or `--control-port <port> --gui-only`) | Exposes strictly the `gui` tools, driving `UiApp` through the semantic agent harness over stdio JSON-RPC (`R7.3`). |
+| `curvebook-cli mcp` (default, headless) | Every registered engine command in `cmd::registry()` through `command_run`, `command_batch` (with `atomic: true` snapshot rollback), and per-command toolset tools, plus `doc_inspect`, `open_file`, `save_file`, `render_preview`, `export`, `sheet://` / `result://` resources, and guided prompts. UI-only `ui.*` commands report `"available": false`, `"requires_live_attach": true` in `command_list` and return `ErrorCode::Conflict` if called; the opt-in `gui` tools also return `Conflict` unless `--control-port` is active. |
+| `curvebook-cli mcp --control-port <port>` | Same toolset surface forwarded over `127.0.0.1:<port>` to a running `curvebook --control <port>` instance (headless by default, or `curvebook --control <port> --window` for a shared visible desktop window), enabling the synced `ui.*` UI commands and the opt-in `gui` tools against the live `UiApp` session. |
 
 ## Status & Current Limitations
 
-- **Verified stdio parity (`R7.3`):** Interactive workflow parity (including standalone *P*-value stack adjustment `stats.pvalueStack` and Compact Letter Display `graph.setCompactLetterDisplay`) is verified end to end over spawned `curvebook-cli mcp --gui-only` stdio JSON-RPC subprocesses, alongside headless `command_run` / `command_batch` / `open_file` / `save_file` / `export` / `render_preview`, `WorkdirGuard` path containment, and opt-in `curvebook --control <port> --window` shared desktop sessions.
-- **Desktop GUI & live-attach (`R10`, [`Beta known issues`](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues)):** The `curvebook` desktop application renders the declarative `egui 0.37` desktop workspace ([`evidence/user-interface.md`](evidence/user-interface.md)), and `curvebook --control <port> --window` attaches a visible desktop window synchronized with loopback control/MCP requests on the same live `UiApp` / `Session`. In parallel, the `gui` MCP toolset drives `UiApp` through the semantic harness (`crates/ui-egui/src/{inspect.rs, gui_actions.rs}`). Browser WebAssembly support (`curvebook-web`) is deferred to `1.0` ([`R0.28`](history/roadmap/r0.md#r028-rein-in-the-number-of-release-install-files), [`R11`](ROADMAP.md#r11-usable-browser-app)).
+- **Verified stdio parity (`R7.3`):** Headless `command_run` / `command_batch` / `open_file` / `save_file` / `export` / `render_preview`, `WorkdirGuard` path containment, standalone *P*-value stack adjustment (`stats.pvalueStack`), Compact Letter Display (`graph.setCompactLetterDisplay`), and opt-in `curvebook --control <port> --window` shared desktop sessions are verified end to end over spawned `curvebook-cli mcp` stdio JSON-RPC subprocesses.
+- **Desktop GUI & live-attach (`R10`, [`Beta known issues`](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues)):** The `curvebook` desktop application renders the declarative `egui 0.37` desktop workspace ([`evidence/user-interface.md`](evidence/user-interface.md)), and `curvebook --control <port> --window` attaches a visible desktop window synchronized with loopback control/MCP requests on the same live `UiApp` / `Session`. In parallel, the opt-in `gui` MCP toolset drives `UiApp` through the semantic harness (`crates/ui-egui/src/{inspect.rs, gui_actions.rs}`). Browser WebAssembly support (`curvebook-web`) is deferred to `1.0` ([`R0.28`](history/roadmap/r0.md#r028-rein-in-the-number-of-release-install-files), [`R11`](ROADMAP.md#r11-usable-browser-app)).
 - **Headless UI commands:** In default headless `curvebook-cli mcp`, desktop `ui.*` commands report `"available": false` and require `--control-port <port>` attached to a running `curvebook --control <port>` process.
 - **Live-attach `command_batch` rollback:** Both headless and `--control-port` live-attach modes support `"atomic": true` snapshot rollback; in `--control-port` live-attach mode, atomic `command_batch` delegates to the desktop host's atomic `command.batch` RPC (restoring the session and UI shell snapshot on failure; earlier filesystem writes cannot be unlinked and report `filesystem_side_effects_persisted: true`).
 - **Deferred QoL items:** `QOL-10`, `QOL-11`, `QOL-13`, and `QOL-15` remain deferred without scheduled milestones ([`qol-enhancements.md`](planning/qol-enhancements.md)).
@@ -112,18 +111,16 @@ The desktop application (`curvebook`) provides the declarative `egui 0.37` deskt
 ## CLI Flags & Advanced Configuration
 
 ```text
-curvebook-cli mcp [--control-port <1..=65535>] [--gui-only] [--workdir <dir>] [--control-token <token>]
+curvebook-cli mcp [--control-port <1..=65535>] [--workdir <dir>] [--control-token <token>]
 ```
 
 - Always use the **absolute path** to `curvebook-cli` in GUI MCP client configs so the host application does not depend on shell `PATH` or working-directory lookup.
-- `--workdir <dir>` canonicalizes an existing accessible directory via `WorkdirGuard` (`crates/platform/src/path_guard.rs`) and confines `open_file`, `save_file`, `export`, non-`--gui-only` `ui_screenshot` `path`, `ui_invoke_menu` `params`, recursive `PATH_PARAM_KEYS` inside `command_run` / `command_batch` (leaving inline `csv` text untouched), and stored `ExternalDelimitedFile` link refreshes during `project.recalculate`. Escapes (`..`, symlinks pointing outside, or external absolute paths) fail with `ErrorCode::PathEscape` (`"path_escape"`, `category: "policy"`). When `--gui-only --workdir <dir>` is passed, `InProcessUiGuiHost` also applies `ExternalPathPolicy::workdir` to the in-process `Session`.
+- `--workdir <dir>` canonicalizes an existing accessible directory via `WorkdirGuard` (`crates/platform/src/path_guard.rs`) and confines `open_file`, `save_file`, `export`, `ui_screenshot` `path`, `ui_invoke_menu` `params`, recursive `PATH_PARAM_KEYS` inside `command_run` / `command_batch` (leaving inline `csv` text untouched), and stored `ExternalDelimitedFile` link refreshes during `project.recalculate`. Escapes (`..`, symlinks pointing outside, or external absolute paths) fail with `ErrorCode::PathEscape` (`"path_escape"`, `category: "policy"`).
 - **`--workdir` and `--control-port` are mutually exclusive:** Combining `--workdir` with `--control-port` (or `CURVEBOOK_CONTROL_PORT`) fails immediately with exit code `2`, because `--workdir` cannot confine file operations executed inside an external desktop host process.
 
 ### Example Configurations
 
-The headless configuration with `--workdir` is shown in [Configure Your MCP Client](#2-configure-your-mcp-client). Two further presets:
-
-Live-attached to a shared visible desktop window (`curvebook --control 9123 --window`; omit `--workdir` because `--workdir` and `--control-port` / `CURVEBOOK_CONTROL_PORT` are mutually exclusive and exit with code `2` if combined):
+The headless configuration with `--workdir` is shown in [Configure Your MCP Client](#2-configure-your-mcp-client). For live attachment to a shared visible desktop window (`curvebook --control 9123 --window`; omit `--workdir` because `--workdir` and `--control-port` / `CURVEBOOK_CONTROL_PORT` are mutually exclusive and exit with code `2` if combined):
 
 ```json
 {
@@ -131,19 +128,6 @@ Live-attached to a shared visible desktop window (`curvebook --control 9123 --wi
     "curvebook": {
       "command": "/absolute/path/to/curvebook-cli",
       "args": ["mcp", "--control-port", "9123"]
-    }
-  }
-}
-```
-
-Strict `--gui-only` agent-harness mode (in-process `UiApp`):
-
-```json
-{
-  "mcpServers": {
-    "curvebook-gui": {
-      "command": "/absolute/path/to/curvebook-cli",
-      "args": ["mcp", "--gui-only", "--workdir", "/path/to/workspace"]
     }
   }
 }
@@ -171,44 +155,33 @@ Every handler executes inside `run_guarded` with structured error payloads (`cod
 - **Headless vs. shared visible window (`--window`):**
   - `curvebook --control <port>` (default, `--window` omitted) runs headless for scripts and CI automation.
   - `curvebook --control <port> --window` (also compatible with `CURVEBOOK_CONTROL_PORT=<port>`) opens a visible `eframe`/`egui` desktop window sharing the same live `UiApp` / `Session` and crash-recovery WAL journal between interactive window input and remote MCP/control requests (`127.0.0.1:<port>` loopback-only via `validate_loopback_addr`; cannot be combined with `--headless-once`).
-  - Add `--gui-only` (`curvebook --control <port> --window --gui-only`) to enforce `Caller::Control` `--gui-only` restrictions on the control socket while keeping the shared window live.
 - **Authentication:** Uses `--control-token <token>`, `CURVEBOOK_CONTROL_TOKEN`, or the per-UID `control-<port>.token` file located under `$CURVEBOOK_CONFIG_DIR`, platform config directories (`$HOME/Library/Application Support/CurveBook` on macOS, `$XDG_CONFIG_HOME/curvebook` / `$HOME/.config/curvebook` on Linux/BSD, `%APPDATA%\CurveBook` on Windows), or (when `HOME` is unset on Unix) a validated `0700` non-symlink `$XDG_RUNTIME_DIR/curvebook` or `$TMPDIR/curvebook-uid-<uid>` directory.
 - **Timeouts:** Loopback TCP connect uses a fixed 2 s timeout; per-request read/write I/O defaults to 30 s for standard RPCs and 120 s for heavy operations (`doc.export`, `command.batch`, `engine.execute`, `project.open`, `project.save`, `project.instantiateTemplate`, `table.import*`, `render.preview`, `render.pdf`, `render.svg`, `ui.screenshot`). Set `CURVEBOOK_CONTROL_IO_TIMEOUT_MS` (`100..=600_000` ms) to override the read/write I/O timeout.
 - **Routing:** When attached, `doc_inspect`, `open_file`, `save_file`, `render_preview`, `export`, `command_list`, `command_run`, `command_batch`, `resources/list`, and `resources/read` operate against the attached `curvebook --control` session rather than a disconnected local `Session`. `--workdir` and `--control-port` (`CURVEBOOK_CONTROL_PORT`) are mutually exclusive and exit with code `2` if combined, because `--workdir` cannot confine file operations executed inside a live-attached desktop host.
 
-## `gui` Toolset, `GuiSessionHost` & `--gui-only` Mode (`R8.6`–`R8.8`, `R7.3`)
+## `gui` Toolset & `GuiSessionHost` (`R8.6`, `R7.3`)
 
 Verified in `crates/mcp/src/{gui_tools.rs, tools.rs, protocol.rs}` and `apps/curvebook-cli/src/main.rs` (see [`gui-workflows.md`](gui-workflows.md)):
 
-### 1. Hosts & CLI Modes
+### 1. Hosts & Live Attachment
 
-- **`GuiSessionHost` (`crates/mcp/src/tools.rs`):** Trait (`call_gui`, `set_gui_only`, `is_gui_only`) implemented outside `crates/mcp` so MCP can drive a live `UiApp` without depending on `curvebook-ui-egui`. `McpServerState` routes all `8` `gui` tools either to an attached `GuiSessionHost` (`with_gui_host` / `set_gui_host`) or over loopback TCP via `--control-port <port>` (`with_control_port` / `with_control_port_and_gui_only`, `run_stdio_with_control_port` / `run_stdio_with_control_port_gui_only`). Calling a `gui` tool with neither returns `ErrorCode::Conflict`.
-- **`InProcessUiGuiHost` (`apps/curvebook-cli/src/main.rs`):** Wraps an in-process `UiApp` for `curvebook-cli mcp --gui-only` (propagating `ExternalPathPolicy::workdir` when `--workdir` is set), normalizing `"workspace"`/`"viewport"` screenshot targets to `"full_window"` and array menu `path`s into `"/"`-joined strings while preserving `"wheel"` gestures verbatim before delegating to `curvebook_ui_egui::dispatch_gui_action`.
-- **Two `--gui-only` launch modes:**
-  - `curvebook-cli mcp --gui-only` — in-process `UiApp` via `InProcessUiGuiHost` with `GuiOnlyPolicy::Strict`.
-  - `curvebook-cli mcp --control-port <N> --gui-only` — attaches over loopback `127.0.0.1:<N>` to a running `curvebook --control <N> --gui-only` instance (or `curvebook --control <N> --window --gui-only` for a visible shared desktop window).
+- **`GuiSessionHost` (`crates/mcp/src/tools.rs`):** Trait (`call_gui`, plus optional `hosted_session` / `hosted_session_mut` / `sync_after_session_mutation`) implemented outside `crates/mcp` so MCP can drive an embedded `UiApp` without depending on `curvebook-ui-egui`. `McpServerState` routes all `8` `gui` tools either to an attached `GuiSessionHost` (`with_gui_host` / `set_gui_host`) or over loopback TCP via `--control-port <port>` (`with_control_port`, `run_stdio_with_control_port`). Calling a `gui` tool with neither returns `ErrorCode::Conflict`.
+- **Live attachment:** Run `curvebook --control <N>` (or `curvebook --control <N> --window` for a visible shared desktop window) and connect with `curvebook-cli mcp --control-port <N>`, then call `enable_toolset` with `{ "group": "gui", "enabled": true }` to expose the `8` `gui` tools alongside the core tools.
 
 ### 2. The 8-Tool `gui` Surface (`GUI_TOOL_NAMES`)
 
-In normal mode, `enable_toolset` with `{ "group": "gui" }` (or attaching a `GuiSessionHost`) appends the `8` `gui` tools alongside the core tools above (and any enabled `CommandGroup` tools). Under `--gui-only`, `list_tools_for_state` shrinks `tools/list` strictly to these `8` tools:
+Calling `enable_toolset` with `{ "group": "gui" }` (or attaching a `GuiSessionHost`) appends the `8` `gui` tools alongside the core tools above (and any enabled `CommandGroup` tools):
 
 | MCP Tool | Key Inputs | Key Annotations / Behavior |
 |---|---|---|
 | `ui_inspect` | `scope` (`"all"`, `"workspace"`, `"dialog"`, `"grid"`, `"navigator"`, `"canvas"`, `"menus"`, `"toolbar"`, `"tabs"`), `include_bounds`, `metrics` (`{logical_width, logical_height, scale_factor}`; accepts `width_px`/`height_px` aliases) | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`; inspects the active sheet (use `ui_switch_tab` to activate another sheet) and returns `UiTreeSnapshot` text + structured JSON. |
-| `ui_screenshot` | `target` (`"full_window"`, `"workspace"`, `"viewport"`, `"canvas"`, `"dialog"`, default `"workspace"`), `width_px` (`64..=4096`), `height_px` (`64..=4096`), `dpi` (`72..=600`), optional `path` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: true`, `openWorldHint: true`; returns inline `image/png` block + metadata (`structuredContent` omits base64 duplication). Supplying `path` is rejected with `gui_only_violation` when `--gui-only` is active, and checked via `WorkdirGuard` otherwise. |
+| `ui_screenshot` | `target` (`"full_window"`, `"workspace"`, `"viewport"`, `"canvas"`, `"dialog"`, default `"workspace"`), `width_px` (`64..=4096`), `height_px` (`64..=4096`), `dpi` (`72..=600`), optional `path` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: true`, `openWorldHint: true`; returns inline `image/png` block + metadata (`structuredContent` omits base64 duplication). Optional `path` is checked via `WorkdirGuard` when configured. |
 | `ui_pointer_gesture` | `action` (`"click"`, `"double_click"`, `"right_click"`, `"drag"`, `"hover"`, `"wheel"`), `widget_id`/`target_id`, `x`/`y`, `to_widget_id`/`to_x`/`to_y`, `modifiers`, `delta_y`, `hover_fraction_x`, `hover_n`, `metrics` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (worst-case GUI dispatch effects). |
 | `ui_type_text` | `text`, `widget_id`, `clear_existing`, `commit_enter` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (worst-case text/paste effects); supports multi-cell TSV. |
 | `ui_press_key` | `key`, `modifiers` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (worst-case GUI dispatch effects); dispatches keystrokes/shortcuts (`Enter`, `Escape`, `Tab`, `Cmd/Ctrl+T`, etc.). |
 | `ui_invoke_menu` | `path` (string or string array), `command_id`, optional `params` (`WorkdirGuard`-sanitized) | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (worst-case GUI dispatch effects); fails with `Conflict` when item is disabled. |
 | `ui_switch_tab` | `tab`/`tab_id` (string or non-negative integer index), `sheet_id`, `widget_id` | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`; honors modal tab graying predicates; `sheet_id` alone selects a sheet. |
 | `ui_answer_dialog` | `action` (`ok`, `cancel`, `back`, `next`, `create`, `apply`, `preview`), `fields`/`values`/`patches`, `force_create_new`, `choice` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (worst-case modal dialog effects). |
-
-### 3. `--gui-only` Protocol Behavior
-
-- **`initialize`:** Advertises `GUI_ONLY_SERVER_INSTRUCTIONS` instead of `SERVER_INSTRUCTIONS`.
-- **Blocked tools:** Calling any non-`gui` tool (`command_run`, `command_batch`, `command_list`, `doc_inspect`, `open_file`, `save_file`, `export`, `render_preview`, `list_toolsets`, `enable_toolset`, dynamic command tools, or unknown tools) returns `isError: true` with `structuredContent.code == "gui_only_violation"` (`ErrorCode::GuiOnlyViolation`, `category: "policy"`). Calling `ui_screenshot` with `path` also returns `isError: true` with `gui_only_violation`.
-- **Resources:** `resources/list` returns `{"resources": []}`, `resources/templates/list` returns `{"resourceTemplates": []}`, and `resources/read` returns JSON-RPC error `-32600` (`ERR_INVALID_REQUEST`) with `data.code == "gui_only_violation"`.
-- **Contrast with raw `--control --gui-only` TCP:** On the direct loopback TCP socket (`curvebook --control <port> --gui-only`, [`control-protocol.md`](control-protocol.md)), read-only inspection (`ping`, `ui.state` / `state.snapshot`, `command.list`, `ui.inspect`, `ui.canvas.preflight`) remains allowed while `doc.inspect`, mutating/L5 calls, and disk-writing paths (`ui.screenshot` / `render.pdf` / `doc.export` with `path`) are rejected with `gui_only_violation`.
 
 ## UI Command Sync
 

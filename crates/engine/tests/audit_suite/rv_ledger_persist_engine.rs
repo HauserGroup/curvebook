@@ -1,10 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 
 use curvebook_doc::{CellCoord, ErrorCode, InfoSheet, ProjectDocument, SheetId};
-use curvebook_engine::cmd::{self, Caller, Effects};
-use curvebook_engine::{GuiOnlyPolicy, Session};
+use curvebook_engine::Session;
 use curvebook_format::recovery::JournalLimits;
 use curvebook_format::{CrashRecoveryJournal, DirectoryJournalBackend, LOCKFILE_NAME, MemoryJournalBackend, SNAPSHOT_FILE_NAME};
 use serde_json::{Value, json};
@@ -180,49 +178,6 @@ fn rv05_open_with_recovery_releases_lock_on_replay_or_snapshot_failure_and_suppo
     salvaged.close_journal_cleanly(salvaged_journal)?;
     assert!(!dir.path.join(LOCKFILE_NAME).exists(), "close_journal_cleanly releases curvebook.lock");
 
-    Ok(())
-}
-
-#[test]
-fn rv13_strict_gui_only_blocks_sheet_select_and_all_ui_state_mutations_for_non_ui_callers() -> Result<(), Box<dyn std::error::Error>> {
-    let mut session = Session::new();
-    session.execute("sheet.createData", json!({ "sheet_id": "d1", "title": "First", "archetype": "column", "cols": 2, "rows": 2 }))?;
-    session.execute("sheet.createData", json!({ "sheet_id": "d2", "title": "Second", "archetype": "column", "cols": 2, "rows": 2 }))?;
-    session.execute("sheet.select", json!({ "sheet_id": "d1" }))?;
-    assert_eq!(session.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("d1"));
-
-    session.set_gui_only(GuiOnlyPolicy::Strict);
-    let cancel = AtomicBool::new(false);
-
-    for caller in [Caller::Mcp, Caller::Control, Caller::Cli] {
-        let err = session
-            .execute_with_caller("sheet.select", json!({ "sheet_id": "d2" }), caller, &cancel)
-            .expect_err("sheet.select must be blocked under GuiOnlyPolicy::Strict for non-UI callers");
-        assert_eq!(err.code, ErrorCode::GuiOnlyViolation, "wrong error code for {caller:?}");
-        assert_eq!(session.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("d1"));
-    }
-
-    // `Caller::Ui` and `Caller::Replay` remain permitted to drive `sheet.select`.
-    session.execute_with_caller("sheet.select", json!({ "sheet_id": "d2" }), Caller::Ui, &cancel)?;
-    assert_eq!(session.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("d2"));
-    session.execute_with_caller("sheet.select", json!({ "sheet_id": "d1" }), Caller::Replay, &cancel)?;
-    assert_eq!(session.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("d1"));
-
-    // Registry-wide invariant: every command with CHANGES_UI_STATE (or any other non-inspection effect)
-    // is rejected with GuiOnlyViolation for Caller::Mcp and Caller::Control before parameter parsing.
-    let mut checked_ui_state_cmds = 0usize;
-    for spec in cmd::registry().specs() {
-        if spec.effects.contains(Effects::CHANGES_UI_STATE) {
-            checked_ui_state_cmds += 1;
-            for caller in [Caller::Mcp, Caller::Control] {
-                let err = session
-                    .execute_with_caller(spec.id, json!({}), caller, &cancel)
-                    .expect_err("CHANGES_UI_STATE command must be rejected under strict gui_only");
-                assert_eq!(err.code, ErrorCode::GuiOnlyViolation, "command `{}` must return GuiOnlyViolation", spec.id);
-            }
-        }
-    }
-    assert!(checked_ui_state_cmds >= 1, "registry must contain at least `sheet.select` with CHANGES_UI_STATE");
     Ok(())
 }
 

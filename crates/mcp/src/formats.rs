@@ -23,7 +23,7 @@
 //!    command parameter, and linked-file path must canonicalize strictly within `<dir>`; absolute
 //!    paths outside `<dir>`, `..` parent-directory traversals, and symlinks resolving outside
 //!    `<dir>` are rejected with `ErrorCode::PathEscape`. Untrusted or semi-trusted MCP clients
-//!    must always be launched with `--workdir <dir>` (or `--gui-only`).
+//!    must always be launched with `--workdir <dir>`.
 
 use std::path::{Path, PathBuf};
 

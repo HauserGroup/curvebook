@@ -297,13 +297,6 @@ pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) 
             patch_format_image(&mut app.canvas_dialogs.format_image, fields, &preset).map_err(bad_input)?;
         }
         ActiveDialog::Print { .. } => {
-            if map_opt_bool(fields, &["submit_to_os", "print.submit_to_os"])? == Some(true) && app.is_gui_only() {
-                return Err(EngineError::with_code(
-                    ErrorCode::GuiOnlyViolation,
-                    "submitting print jobs directly to the OS queue is blocked under --gui-only",
-                )
-                .with_remediation("Keep `submit_to_os` false under --gui-only to spool in-memory PDF safely."));
-            }
             patch_print(&mut app.canvas_dialogs.print, fields, &preset).map_err(bad_input)?;
         }
         ActiveDialog::Checkpoints => {

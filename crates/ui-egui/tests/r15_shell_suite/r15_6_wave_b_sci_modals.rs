@@ -36,8 +36,7 @@ struct WaveBDriverState {
 }
 
 impl WaveBDriverState {
-    fn new(mut app: UiApp) -> Self {
-        app.set_gui_only(true);
+    fn new(app: UiApp) -> Self {
         let views = app.egui_views.clone();
         Self { app, views, intents: PendingUiIntents::default(), last_intent_error: None }
     }

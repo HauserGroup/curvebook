@@ -132,7 +132,6 @@ fn r10_1_spike_analyze_and_edit_params_one_way_anova_human_path() {
 #[test]
 fn r10_2_human_path_only_blocks_synthetic_bypasses() {
     let mut app = build_three_group_column_app();
-    app.set_gui_only(true);
     app.set_human_path_only(true);
 
     let err_menu = dispatch_gui_action(
@@ -141,22 +140,26 @@ fn r10_2_human_path_only_blocks_synthetic_bypasses() {
         json!({ "command_id": "sheet.createData", "params": { "kind": "column", "cols": 3, "rows": 4 } }),
     )
     .expect_err("invoke_menu with semantic params must fail under human_path_only");
-    assert_eq!(err_menu.code, ErrorCode::GuiOnlyViolation);
+    assert_eq!(err_menu.code, ErrorCode::Conflict);
+    assert_eq!(err_menu.details, Some(json!({ "code": "human_path_only_policy" })));
 
     app.canvas_dialogs.open_analyze_dialog(&app.document().clone(), &SheetId::from("col-spike"));
     let err_dlg = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "entry_id": "stats.one_way_anova" } }))
         .expect_err("ui.answer_dialog must fail under human_path_only");
-    assert_eq!(err_dlg.code, ErrorCode::GuiOnlyViolation);
+    assert_eq!(err_dlg.code, ErrorCode::Conflict);
+    assert_eq!(err_dlg.details, Some(json!({ "code": "human_path_only_policy" })));
 
     let err_sem = dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.ok" }))
         .expect_err("semantic widget click shortcut must fail under human_path_only");
-    assert_eq!(err_sem.code, ErrorCode::GuiOnlyViolation);
+    assert_eq!(err_sem.code, ErrorCode::Conflict);
+    assert_eq!(err_sem.details, Some(json!({ "code": "human_path_only_policy" })));
 
     app.canvas_dialogs.close_dialog();
     app.focus_widget_id = Some(String::from("grid.cell.0.0.0"));
     let err_jump = dispatch_gui_action(&mut app, "ui.type_text", json!({ "widget_id": "grid.cell.1.1.0", "text": "42" }))
         .expect_err("focus-jumping ui.type_text must fail under human_path_only");
-    assert_eq!(err_jump.code, ErrorCode::GuiOnlyViolation);
+    assert_eq!(err_jump.code, ErrorCode::Conflict);
+    assert_eq!(err_jump.details, Some(json!({ "code": "human_path_only_policy" })));
 }
 
 #[test]

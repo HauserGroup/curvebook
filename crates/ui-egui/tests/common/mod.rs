@@ -35,14 +35,6 @@ pub fn assert_close_res(actual: f64, expected: f64, tol: f64, label: &str) -> Re
     Ok(())
 }
 
-/// Construct a fresh [`UiApp`] locked into `GuiOnlyPolicy::Strict`.
-#[must_use]
-pub fn new_strict_gui_app() -> UiApp {
-    let mut app = UiApp::new();
-    app.set_gui_only(true);
-    app
-}
-
 /// Default serialized [`ViewportMetrics`] payload for `ui.inspect` / `ui.screenshot` calls.
 #[must_use]
 pub fn default_metrics() -> Value {

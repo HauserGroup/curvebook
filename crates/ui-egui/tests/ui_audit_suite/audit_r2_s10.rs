@@ -12,7 +12,6 @@ use curvebook_ui_egui::egui_shell::driver::{EguiHumanPathDriver, TextBleedPolicy
 use curvebook_ui_egui::egui_shell::inspect_bridge::HybridCoexistenceArbiter;
 use curvebook_ui_egui::egui_shell::{EguiShellViewState, LayoutMetrics, PendingUiIntents, Tokens};
 use curvebook_ui_egui::interaction::InlineEditorTarget;
-use curvebook_ui_egui::menus::tooltips::menu_bar_tooltips;
 use curvebook_ui_egui::modal_predicates::evaluate_dialog_widget;
 use curvebook_ui_egui::power_wizard::PowerWizardStage;
 use curvebook_ui_egui::workspace_nav::ActiveWorkspacePane;
@@ -66,66 +65,17 @@ fn ok_doc_and_app() -> Result<(UiApp, SheetId, SheetId, SheetId, SheetId), Strin
 }
 
 #[test]
-fn r2_s10_01_04_gui_only_two_tier_policy_and_hidden_internal_menus() -> TestRes {
-    let (mut app, ds_id, _, _, _) = ok_doc_and_app()?;
-    app.set_gui_only(true);
+fn r2_s10_01_human_path_only_rejects_non_empty_invoke_menu_params() -> TestRes {
+    let (app, _, _, _, _) = ok_doc_and_app()?;
 
-    // Tier B (GuiOnlyPolicy::Strict): ui.screenshot with disk path rejected.
-    let shot_err = dispatch_gui_action(&mut app, "ui.screenshot", json!({ "path": "forbidden.png" }))
-        .err()
-        .ok_or_else(|| String::from("expected GuiOnlyViolation on ui.screenshot path"))?;
-    if shot_err.code != ErrorCode::GuiOnlyViolation {
-        return Err(format!("expected GuiOnlyViolation on screenshot path, got {:?}", shot_err.code));
-    }
-
-    // Tier B: blocked non-menu commands, direct cell mutation, OS helpers, and unconstrained paths.
-    for (cmd, params) in [
-        ("table.setCell", json!({ "sheet_id": ds_id.as_str(), "row": 0, "col": 0, "value": 99 })),
-        ("ui.screenshot", json!({})),
-        ("ui.event.dispatch", json!({ "event": { "kind": "text", "text": "x" } })),
-        ("ui.shortcut.set", json!({ "command_id": "edit.undo", "shortcut": "Cmd+Z" })),
-        ("ui.shortcut.reset", json!({})),
-        ("ui.brush.point", json!({ "sheet_id": ds_id.as_str(), "row": 0, "col": 0 })),
-        ("app.quit", json!({})),
-        ("ui.result.copyMethodsReport", json!({})),
-        ("file.print", json!({})),
-        ("ui.print.open", json!({ "submit_to_os": true })),
-        ("project.save", json!({ "path": "unconstrained.json" })),
-    ] {
-        let res = dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": cmd, "params": params }));
-        let err = res.err().ok_or_else(|| format!("expected `{cmd}` under ui.invoke_menu --gui-only to fail"))?;
-        if err.code != ErrorCode::GuiOnlyViolation {
-            return Err(format!("expected GuiOnlyViolation for `{cmd}`, got {:?}: {}", err.code, err.message()));
-        }
-    }
-
-    // menu_bar_tooltips hides internal non-menu commands under --gui-only.
-    let tips = menu_bar_tooltips(&app);
-    for hidden_id in ["ui.screenshot", "ui.event.dispatch", "ui.shortcut.set", "ui.shortcut.reset", "ui.brush.point", "app.quit"] {
-        if tips.iter().any(|sec| sec.items.iter().any(|t| t.command_id == hidden_id)) {
-            return Err(format!("menu_bar_tooltips leaked internal command `{hidden_id}` under --gui-only"));
-        }
-    }
-
-    // R2-S10-04: control port under --gui-only rejects doc.inspect, render.svg, render.pdf, app.quit,
-    // and ui.result.inspectDiagnostics.
-    for method in ["doc.inspect", "render.svg", "render.pdf", "app.quit", "ui.result.inspectDiagnostics"] {
-        let raw = handle_control_line(&mut app, &json!({ "id": 1, "method": method, "params": {} }).to_string());
-        let val: Value = serde_json::from_str(&raw).map_err(|e| format!("parse control reply: {e}"))?;
-        if val["ok"].as_bool() != Some(false) || val["error_detail"]["code"].as_str() != Some("gui_only_violation") {
-            return Err(format!("expected gui_only_violation on control `{method}`, got {val}"));
-        }
-    }
-
-    // Tier A (EguiWfHarness human_path_only): rejects non-empty params on ui.invoke_menu.
+    // EguiWfHarness `human_path_only` rejects non-empty params on `ui.invoke_menu`.
     let mut harness = crate::human_wf_common::EguiWfHarness::from_app(app, ViewportMetrics::default());
-    harness.app_mut().set_gui_only(true);
     harness.app_mut().set_human_path_only(true);
     let err = dispatch_gui_action(harness.app_mut(), "ui.invoke_menu", json!({ "command_id": "ui.analyze.open", "params": { "search": "anova" } }))
         .err()
         .ok_or_else(|| String::from("expected human_path_only to reject non-empty params"))?;
-    if err.code != ErrorCode::GuiOnlyViolation {
-        return Err(format!("expected GuiOnlyViolation for human_path_only params, got {:?}", err.code));
+    if err.code != ErrorCode::Conflict || err.details.as_ref().and_then(|d| d.get("code")) != Some(&json!("human_path_only_policy")) {
+        return Err(format!("expected Conflict(human_path_only_policy) for human_path_only params, got {:?} ({:?})", err.code, err.details));
     }
 
     Ok(())
@@ -642,22 +592,12 @@ fn r2_s10_10_13_14_15_17_18_line_arrow_formula_discontig_print_wizard_row_labels
         return Err(format!("expected distinct scene coordinates for row labels, got {text_ann_positions:?}"));
     }
 
-    // R2-S10-15: Print dialog reports spooled/submitted honestly and guards submit_to_os under --gui-only.
+    // R2-S10-15: Print dialog reports spooled/submitted honestly.
     app.open_print_dialog_for(Some(&gs_id));
     let pr = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "ok" })).map_err(|e| format!("print spool failed: {e}"))?;
     if pr["spooled"].as_bool() != Some(true) || pr["submitted_to_os"].as_bool() != Some(false) || pr["printed"].as_bool() != Some(false) {
         return Err(format!("unexpected default Print ok response: {pr}"));
     }
-    app.set_gui_only(true);
-    app.open_print_dialog_for(Some(&gs_id));
-    let submit_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "submit_to_os": true } }))
-        .err()
-        .ok_or_else(|| String::from("expected GuiOnlyViolation for print submit_to_os under --gui-only"))?;
-    if submit_err.code != ErrorCode::GuiOnlyViolation {
-        return Err(format!("expected GuiOnlyViolation on submit_to_os, got {:?}", submit_err.code));
-    }
-    app.canvas_dialogs.close_dialog();
-    app.set_gui_only(false);
 
     // R2-S10-17: PowerWizard switch_tab steps sequentially and fails when intermediate stage invalid.
     app.canvas_dialogs.open_power_wizard();

@@ -593,7 +593,7 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
         md_page(
             "automation/mcp.html",
             "MCP Server Reference",
-            "CurveBook Model Context Protocol server transports, core tools, toolsets, resources, prompts, and --gui-only policy.",
+            "CurveBook Model Context Protocol server transports, core tools, toolsets, resources, and prompts.",
             "automation",
             "docs/reference/automation/mcp.md",
             FallbackKind::MustExist,
@@ -758,10 +758,6 @@ fn glossary_seed_terms() -> &'static [(&'static str, &'static str)] {
         ("DataSheet", "Typed scientific grid belonging to one of the eight TableKind archetypes with optional non-destructive cell exclusions."),
         ("Exclusion", "Non-destructive cell mask retaining raw observations visually while omitting them from analyses and plotted summaries."),
         ("GraphSheet", "Scientific figure specification referencing upstream DataSheets and ResultSheets with axis scales and palettes."),
-        (
-            "GUI-only policy",
-            "Strict --gui-only enforcement restricting MCP and control clients exclusively to human-equivalent interactive GUI tools.",
-        ),
         ("Hook", "Live reference linking a parameter, threshold, baseline, or text placeholder to an upstream InfoSheet or ResultSheet value."),
         ("InfoSheet", "Structured experimental constants table paired with freeform Markdown laboratory notes."),
         ("LayoutSheet", "Multi-panel publication composition placing graphs, tables, and text annotations onto physical paper coordinates."),

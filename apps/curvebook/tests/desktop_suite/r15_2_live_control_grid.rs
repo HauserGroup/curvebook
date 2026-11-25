@@ -213,7 +213,6 @@ fn run_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<d
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: false,
         new_instance: false,
-        gui_only: false,
         locale_override: None,
         theme_override: None,
         recovery_root: None,

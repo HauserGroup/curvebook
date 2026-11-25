@@ -857,281 +857,12 @@ fn is_preview_only_convert(params: &serde_json::Value) -> bool {
     params.get("preview_only").and_then(serde_json::Value::as_bool) == Some(true)
 }
 
-/// Execution channel restriction for interactive vs. direct automation callers (`docs/gui-workflows.md` §1).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GuiOnlyPolicy {
-    /// Default mode: all callers (`Ui`, `Mcp`, `Control`, `Cli`, `Replay`) may invoke commands directly.
-    #[default]
-    Disabled,
-    /// Strict GUI-only mode: non-UI automation callers (`Mcp`, `Control`, `Cli`) may invoke only
-    /// strictly read-only inspection commands; direct domain mutations, computes, and file writes
-    /// return [`ErrorCode::GuiOnlyViolation`].
-    Strict,
-}
-
-fn is_strict_gui_only_allowed(spec: &cmd::CommandSpec, caller: Caller, params: &serde_json::Value) -> bool {
-    if !matches!(caller, Caller::Mcp | Caller::Control | Caller::Cli) {
-        return true;
-    }
-    if spec.id == "table.convertArchetype" && is_preview_only_convert(params) {
-        return true;
-    }
-    spec.effects.strict_gui_only_allowed()
-}
-
-const UNCONSTRAINED_GUI_ONLY_PATH_KEYS: [&str; 33] = [
-    "path",
-    "file",
-    "file_path",
-    "filePath",
-    "out",
-    "output",
-    "output_path",
-    "outputPath",
-    "in",
-    "input",
-    "input_path",
-    "inputPath",
-    "source_path",
-    "sourcePath",
-    "target_path",
-    "targetPath",
-    "destination_path",
-    "destinationPath",
-    "template_path",
-    "templatePath",
-    "project",
-    "project_path",
-    "projectPath",
-    "csv_path",
-    "csvPath",
-    "ttf_font",
-    "ttfFont",
-    "font_path",
-    "fontPath",
-    "unpacked_dir",
-    "unpackedDir",
-    "directory",
-    "dir",
-];
-
-fn document_has_external_links(doc: &ProjectDocument) -> bool {
-    doc.data_sheets
-        .iter()
-        .any(|ds| ds.linked_regions.iter().any(|region| matches!(region.spec.source, curvebook_doc::LinkSource::ExternalDelimitedFile { .. })))
-}
-
-/// Returns `true` when `val` recursively contains an `ExternalDelimitedFile` link object key.
-#[must_use]
-pub fn contains_external_delimited_link(val: &Value) -> bool {
-    match val {
-        Value::Object(map) => {
-            if map.keys().any(|k| k.eq_ignore_ascii_case("externaldelimitedfile") || k == "external_delimited_file") {
-                return true;
-            }
-            map.values().any(contains_external_delimited_link)
-        }
-        Value::Array(items) => items.iter().any(contains_external_delimited_link),
-        _ => false,
-    }
-}
-
-/// Return the first non-empty host filesystem path parameter key recursively present in `val`.
-#[must_use]
-pub fn find_host_path_param_key(val: &Value) -> Option<&'static str> {
-    match val {
-        Value::Object(map) => {
-            for &key in &UNCONSTRAINED_GUI_ONLY_PATH_KEYS {
-                if let Some(v) = map.get(key)
-                    && !v.is_null()
-                    && v.as_str().is_none_or(|s| !s.trim().is_empty())
-                {
-                    return Some(key);
-                }
-            }
-            map.values().find_map(find_host_path_param_key)
-        }
-        Value::Array(items) => items.iter().find_map(find_host_path_param_key),
-        _ => None,
-    }
-}
-
-fn has_non_empty_json_object(val: &Value) -> bool {
-    !val.is_null() && !val.as_object().is_some_and(serde_json::Map::is_empty)
-}
-
-fn has_non_false_flag(val: &Value, keys: &[&str]) -> bool {
-    val.as_object().is_some_and(|map| keys.iter().any(|&key| map.get(key).is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))))
-}
-
-fn is_unconstrained_archive_or_file_cmd(cmd_id: &str) -> bool {
-    matches!(
-        cmd_id,
-        "project.open"
-            | "file.open"
-            | "file.open_unpacked_dir"
-            | "project.instantiateTemplate"
-            | "table.importPrism"
-            | "table.importPzfx"
-            | "table.importXlsx"
-            | "project.save"
-            | "project.saveAs"
-            | "file.save"
-            | "file.save_as"
-    )
-}
-
-fn link_spec_allows_internal_only(extra_params: &Value) -> bool {
-    let Some(map) = extra_params.as_object() else {
-        return true;
-    };
-    for key in ["link_spec", "linkSpec"] {
-        if let Some(spec) = map.get(key)
-            && !spec.is_null()
-        {
-            let Some(source) = spec.get("source").and_then(Value::as_object) else {
-                return false;
-            };
-            let is_safe = source.contains_key("InternalSheet") || source.contains_key("Clipboard");
-            if !is_safe || contains_external_delimited_link(spec) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// Validate `extra_params` passed via menu invocation (`ui_invoke_menu` / `ui.invoke_menu`) when
-/// `--gui-only` is active without `--workdir` confinement.
-///
-/// # Errors
-/// Returns [`EngineError`] with [`ErrorCode::GuiOnlyViolation`] if `extra_params` injects host
-/// filesystem paths, external delimited-file links, archive/XML payloads, or external link refresh flags.
-pub fn enforce_unconstrained_gui_only_menu_params(cmd_id: Option<&str>, extra_params: &Value) -> Result<(), EngineError> {
-    if let Some(path_key) = find_host_path_param_key(extra_params) {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            format!("unconstrained host filesystem `{path_key}` parameter via `ui.invoke_menu` is blocked under --gui-only without --workdir"),
-        )
-        .with_remediation("Configure `--workdir` confinement or use in-memory workflows without host path parameters."));
-    }
-    if contains_external_delimited_link(extra_params) || (cmd_id == Some("table.pasteLink") && !link_spec_allows_internal_only(extra_params)) {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            "external delimited-file link parameters via `ui.invoke_menu` are blocked under --gui-only without --workdir",
-        )
-        .with_remediation("Use internal sheet links or configure `--workdir` confinement."));
-    }
-    if let Some(cid) = cmd_id
-        && is_unconstrained_archive_or_file_cmd(cid)
-        && has_non_empty_json_object(extra_params)
-    {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            format!("file/archive parameter injection on `{cid}` via `ui.invoke_menu` is blocked under --gui-only without --workdir"),
-        )
-        .with_remediation("Configure `--workdir` confinement or use visible interactive workspace controls without parameter overrides."));
-    }
-    if cmd_id == Some("project.recalculate") && has_non_false_flag(extra_params, &["include_external_links", "includeExternalLinks"]) {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            "external link recalculation (`include_external_links`) via `ui.invoke_menu` is blocked under --gui-only without --workdir",
-        )
-        .with_remediation("Configure `--workdir` confinement or trigger parameterless recalculation on in-memory sheets."));
-    }
-    if cmd_id.is_some_and(|c| matches!(c, "table.importCsv" | "table.importTidyLong")) && has_non_false_flag(extra_params, &["link"]) {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            "persistent file linking via `ui.invoke_menu` is blocked under --gui-only without --workdir",
-        )
-        .with_remediation("Import inline data without persistent file links, or configure `--workdir` confinement."));
-    }
-    Ok(())
-}
-
-fn has_inline_archive_bytes(params: &Value) -> bool {
-    params
-        .as_object()
-        .is_some_and(|map| ["bytes_base64", "bytesBase64", "archive_base64"].into_iter().any(|k| map.get(k).is_some_and(|v| !v.is_null())))
-}
-
-fn enforce_unconstrained_gui_only_recalculate(doc: &ProjectDocument, params: &mut Value) -> Result<(), EngineError> {
-    let mut explicit_vals = Vec::new();
-    if let Some(map) = params.as_object() {
-        for key in ["include_external_links", "includeExternalLinks"] {
-            if let Some(v) = map.get(key)
-                && !v.is_null()
-            {
-                let Some(b) = v.as_bool() else {
-                    return Err(EngineError::with_code(
-                        ErrorCode::GuiOnlyViolation,
-                        format!("invalid `{key}` value on `project.recalculate` under --gui-only without --workdir"),
-                    )
-                    .with_remediation("Omit `include_external_links` or pass `false`, or configure `--workdir`."));
-                };
-                explicit_vals.push(b);
-            }
-        }
-    }
-    if explicit_vals.len() > 1 && explicit_vals.windows(2).any(|w| matches!(w, [a, b] if a != b)) {
-        return Err(EngineError::with_code(
-            ErrorCode::BadInput,
-            "conflicting `include_external_links` alias values supplied for `project.recalculate`",
-        ));
-    }
-    let explicit = explicit_vals.first().copied();
-    if explicit == Some(true) || (explicit.is_none() && document_has_external_links(doc)) {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            "external delimited-file link recalculation is blocked under --gui-only without --workdir",
-        )
-        .with_remediation(
-            "Restart with `--workdir <dir>` to confine external link reads, or pass `include_external_links: false` for in-memory recalculation.",
-        ));
-    }
-    if params.is_null() {
-        *params = json!({ "include_external_links": false });
-    } else if let Some(map) = params.as_object_mut() {
-        map.remove("includeExternalLinks");
-        map.insert(String::from("include_external_links"), Value::Bool(false));
-    }
-    Ok(())
-}
-
-fn enforce_unconstrained_gui_only_session_rules(doc: &ProjectDocument, spec_id: &str, params: &mut Value) -> Result<(), EngineError> {
-    if spec_id == "project.recalculate" {
-        return enforce_unconstrained_gui_only_recalculate(doc, params);
-    }
-    if spec_id == "table.pasteLink"
-        && (contains_external_delimited_link(params) || find_host_path_param_key(params).is_some() || !link_spec_allows_internal_only(params))
-    {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            "external delimited-file links in `table.pasteLink` are blocked under --gui-only without --workdir",
-        )
-        .with_remediation("Link to an in-memory sheet via `source_sheet_id`, or configure `--workdir`."));
-    }
-    if matches!(spec_id, "table.importCsv" | "table.importTidyLong")
-        && params.get("link").is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))
-        && find_host_path_param_key(params).is_some()
-    {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            format!("persistent external file links in `{spec_id}` are blocked under --gui-only without --workdir"),
-        )
-        .with_remediation("Import inline data without persistent external links, or configure `--workdir`."));
-    }
-    Ok(())
-}
-
 /// Stateful project session owning undo/redo history, dirty tracking, and guarded command execution.
 #[derive(Debug, Clone)]
 pub struct Session {
     doc: ProjectDocument,
     file_path: Option<PathBuf>,
     dirty: bool,
-    gui_only: GuiOnlyPolicy,
     path_policy: ExternalPathPolicy,
     undo_stack: VecDeque<UndoEntry>,
     redo_stack: Vec<UndoEntry>,
@@ -1146,7 +877,6 @@ impl PartialEq for Session {
         self.doc == other.doc
             && self.file_path == other.file_path
             && self.dirty == other.dirty
-            && self.gui_only == other.gui_only
             && self.path_policy == other.path_policy
             && self.undo_stack == other.undo_stack
             && self.redo_stack == other.redo_stack
@@ -1486,7 +1216,6 @@ impl Session {
             doc: document,
             file_path: None,
             dirty: false,
-            gui_only: GuiOnlyPolicy::Disabled,
             path_policy: ExternalPathPolicy::Unconstrained,
             undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
@@ -1495,24 +1224,6 @@ impl Session {
             clean_epoch: 0,
             baseline_verified: empty_baseline,
         }
-    }
-
-    /// Return the active [`GuiOnlyPolicy`] restricting direct non-UI command execution.
-    #[must_use]
-    pub const fn gui_only(&self) -> GuiOnlyPolicy {
-        self.gui_only
-    }
-
-    /// Set the active [`GuiOnlyPolicy`] on this session.
-    pub fn set_gui_only(&mut self, policy: GuiOnlyPolicy) {
-        self.gui_only = policy;
-    }
-
-    /// Builder helper returning this session configured with `policy`.
-    #[must_use]
-    pub const fn with_gui_only(mut self, policy: GuiOnlyPolicy) -> Self {
-        self.gui_only = policy;
-        self
     }
 
     /// Active external filesystem path policy on this session.
@@ -1570,7 +1281,7 @@ impl Session {
         self.path_policy.write_atomic_bytes(raw_path, bytes)
     }
 
-    /// Execute an engine command explicitly on behalf of the GUI (`Caller::Ui`), bypassing `GuiOnlyPolicy::Strict`.
+    /// Execute an engine command explicitly on behalf of the GUI (`Caller::Ui`).
     ///
     /// # Errors
     /// Returns [`EngineError`] if the command fails validation, preconditions, or panics inside the guard boundary.
@@ -1781,17 +1492,6 @@ impl Session {
     where
         F: FnOnce(&Self, &CommandOutcome) -> Result<(), EngineError>,
     {
-        if self.gui_only == GuiOnlyPolicy::Strict && !is_strict_gui_only_allowed(spec, caller, &params) {
-            return Err(EngineError::with_code(
-                ErrorCode::GuiOnlyViolation,
-                format!("command `{}` cannot be executed directly by `{caller:?}` under strict gui_only policy", spec.id),
-            )
-            .with_remediation("Blocked by --gui-only: drive the interface through GUI actions instead of direct domain commands.")
-            .with_details(json!({ "command_id": spec.id, "caller": caller })));
-        }
-        if self.gui_only == GuiOnlyPolicy::Strict && !self.path_policy.is_constrained() {
-            enforce_unconstrained_gui_only_session_rules(&self.doc, spec.id, &mut params)?;
-        }
         if !(spec.enabled)(self) {
             return Err(EngineError::with_code(ErrorCode::Conflict, format!("command `{}` is currently disabled", spec.id))
                 .with_details(json!({ "command_id": spec.id })));
@@ -1954,7 +1654,6 @@ impl Session {
             || (matches!(spec.id, "table.importPrism" | "table.importPzfx" | "table.importXlsx")
                 && !params.get("merge").and_then(Value::as_bool).unwrap_or(false))
             || (spec.id == "project.open" && !opens_project_path);
-        let has_inline_bytes = has_inline_archive_bytes(&params);
         let may_modify_checkpoints = !self.baseline_verified || command_may_modify_checkpoints(spec.id);
         let before_cp_verified = self.baseline_verified;
         let before = self.doc.clone();
@@ -1976,24 +1675,6 @@ impl Session {
                         self.file_path = before_path;
                         self.dirty = before_dirty;
                         return Err(err.into());
-                    }
-                    if self.gui_only == GuiOnlyPolicy::Strict
-                        && !self.path_policy.is_constrained()
-                        && matches!(spec.id, "project.open" | "project.instantiateTemplate")
-                        && has_inline_bytes
-                        && document_has_external_links(&self.doc)
-                    {
-                        self.doc = before;
-                        self.file_path = before_path;
-                        self.dirty = before_dirty;
-                        return Err(EngineError::with_code(
-                            ErrorCode::GuiOnlyViolation,
-                            format!(
-                                "inline archive containing external delimited-file links is blocked for `{}` under --gui-only without --workdir",
-                                spec.id
-                            ),
-                        )
-                        .with_remediation("Configure `--workdir` confinement or remove external delimited-file links from the archive."));
                     }
                     if clears_file_path_on_mutate {
                         self.file_path = None;
@@ -2086,7 +1767,7 @@ mod tests {
     use curvebook_doc::{ErrorCode, SheetId};
     use serde_json::json;
 
-    use super::{Caller, EngineError, GuiOnlyPolicy, Session, cmd};
+    use super::{Caller, EngineError, Session, cmd};
 
     #[test]
     fn engine_error_formats_message() {
@@ -2117,54 +1798,6 @@ mod tests {
     }
 
     #[test]
-    fn gui_only_policy_blocks_non_ui_mutations_while_allowing_ui_and_inspection() {
-        let mut session = Session::new().with_gui_only(GuiOnlyPolicy::Strict);
-        assert_eq!(session.gui_only(), GuiOnlyPolicy::Strict);
-        let cancelled = AtomicBool::new(false);
-
-        for blocked_caller in [Caller::Mcp, Caller::Control, Caller::Cli] {
-            let err = session
-                .execute_with_caller("sheet.createData", json!({ "sheet_id": "d1" }), blocked_caller, &cancelled)
-                .expect_err("mutating command should fail in Strict mode");
-            assert_eq!(err.code, ErrorCode::GuiOnlyViolation);
-            assert!(err.remediation.as_deref().unwrap_or("").contains("Blocked by --gui-only"));
-
-            let inspect = session
-                .execute_with_caller("project.inspect", json!({}), blocked_caller, &cancelled)
-                .expect("read-only project inspection remains permitted");
-            assert!(!inspect.mutated);
-        }
-
-        let created = session
-            .execute_as_ui("sheet.createData", json!({ "sheet_id": "d1", "title": "UI Created", "graph_sheet_id": "g1" }))
-            .expect("UI caller always allowed");
-        assert!(created.mutated);
-
-        // UI-state-changing commands like `sheet.select` must also be rejected for non-UI callers in Strict mode,
-        // while remaining allowed for `Caller::Ui`.
-        for blocked_caller in [Caller::Mcp, Caller::Control, Caller::Cli] {
-            let select_err = session
-                .execute_with_caller("sheet.select", json!({ "sheet_id": "g1" }), blocked_caller, &cancelled)
-                .expect_err("sheet.select must fail for non-UI callers in Strict mode");
-            assert_eq!(select_err.code, ErrorCode::GuiOnlyViolation);
-        }
-        let ui_selected = session.execute_as_ui("sheet.select", json!({ "sheet_id": "g1" })).expect("UI caller may select sheet");
-        assert!(!ui_selected.mutated);
-
-        // Compute and export commands are also blocked for non-UI callers under Strict policy.
-        let compute_err = session
-            .execute_with_caller("analysis.run", json!({ "data_sheet_id": "d1", "kind": "descriptive_stats" }), Caller::Mcp, &cancelled)
-            .expect_err("direct analysis compute blocked for MCP");
-        assert_eq!(compute_err.code, ErrorCode::GuiOnlyViolation);
-
-        session.set_gui_only(GuiOnlyPolicy::Disabled);
-        assert_eq!(session.gui_only(), GuiOnlyPolicy::Disabled);
-        session
-            .execute_with_caller("table.setCell", json!({ "sheet_id": "d1", "row": 0, "col": 0, "value": 3.5 }), Caller::Cli, &cancelled)
-            .expect("Disabled policy allows Cli again");
-    }
-
-    #[test]
     fn host_write_helpers_enforce_reject_external_and_workdir_containment() {
         use std::path::Path;
 
@@ -2191,50 +1824,6 @@ mod tests {
         assert_eq!(std::fs::read(wd.join("nested/out.png")).expect("read written file"), b"png-bytes");
 
         let _ = std::fs::remove_dir_all(&wd);
-    }
-
-    #[test]
-    fn strict_gui_only_unconstrained_blocks_inline_external_links_and_external_recalc() {
-        use curvebook_doc::{CellCoord, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkSource, LinkedDataRegion, SheetCellRange};
-
-        let mut builder = Session::new();
-        builder.execute("sheet.createData", json!({ "sheet_id": "d1", "title": "Data", "kind": "xy" })).expect("create data sheet");
-        let mut doc = builder.document().clone();
-        doc.data_sheet_mut(&SheetId::new("d1")).expect("d1").linked_regions.push(LinkedDataRegion {
-            id: String::from("ext-1"),
-            spec: ImportLinkSpec {
-                source: LinkSource::ExternalDelimitedFile { path: String::from("/etc/passwd"), delimiter: ',', decimal_separator: '.' },
-                filter: ImportFilterSpec::default(),
-                placement: ImportPlacementSpec::default(),
-            },
-            target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
-            provenance_summary: String::from("external"),
-        });
-        let archive_bytes = curvebook_format::save_project_bytes(&doc).expect("save bytes");
-        let b64 = crate::cmd::helpers::encode_base64(&archive_bytes);
-
-        let mut session = Session::new().with_gui_only(GuiOnlyPolicy::Strict);
-        let open_err = session
-            .execute_as_ui("project.open", json!({ "bytes_base64": b64 }))
-            .expect_err("inline archive with external link blocked under unconstrained gui-only");
-        assert_eq!(open_err.code, ErrorCode::GuiOnlyViolation);
-        assert!(session.document().data_sheets.is_empty(), "failed open must roll back doc");
-
-        // Pre-loaded doc containing external link must still refuse implicit/explicit external recalc.
-        let mut preloaded = Session::from_document(doc).with_gui_only(GuiOnlyPolicy::Strict);
-        let exp_err = preloaded
-            .execute_as_ui("project.recalculate", json!({ "include_external_links": true }))
-            .expect_err("explicit external link recalc blocked");
-        assert_eq!(exp_err.code, ErrorCode::GuiOnlyViolation);
-        let imp_err = preloaded.execute_as_ui("project.recalculate", json!({})).expect_err("implicit external link recalc blocked");
-        assert_eq!(imp_err.code, ErrorCode::GuiOnlyViolation);
-        let safe_ok = preloaded.execute_as_ui("project.recalculate", json!({ "include_external_links": false }));
-        assert!(safe_ok.is_ok(), "explicit in-memory recalc remains allowed: {safe_ok:?}");
-
-        // Pure in-memory session allows Analyze/Recalculate All `{}` cleanly.
-        let mut pure_mem = Session::new().with_gui_only(GuiOnlyPolicy::Strict);
-        pure_mem.execute_as_ui("sheet.createData", json!({ "sheet_id": "m1", "kind": "Column" })).expect("create m1");
-        pure_mem.execute_as_ui("project.recalculate", json!({})).expect("in-memory recalc succeeds");
     }
 
     #[test]

@@ -29,7 +29,7 @@ Every built-in subcommand accepts `-h` / `--help` and follows deterministic sing
 - `export <in> (<out> | --out <out>) [--format <fmt>] [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]` — Export a specific table, graph, layout, or project to SVG, PDF, EMF, PNG, TIFF, CSV, TSV, JSON, `.curvebook`, or `.curvebook.d`.
 - `bench <file> [--json]` — Measure parse, recalculation, scene compilation, and export timings on a project file.
 - `perf [--json] [--require-release]` — Run synthetic performance budget checks.
-- `mcp [--control-port <port>] [--gui-only] [--workdir <dir>] [--control-token <token>]` — Start the stdio [MCP Server](mcp.md).
+- `mcp [--control-port <port>] [--workdir <dir>] [--control-token <token>]` — Start the stdio [MCP Server](mcp.md).
 
 Full argument, flag, default value, and option descriptions for every subcommand live in the generated [CLI Reference Registry](../registry/cli.html).
 

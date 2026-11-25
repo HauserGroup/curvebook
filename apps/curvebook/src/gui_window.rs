@@ -838,11 +838,14 @@ impl CurveBookNativeApp {
         let win_id = self.active_window_id();
         let is_human_path_only = self.runtime.window(win_id).is_ok_and(|w| w.app().is_human_path_only());
         if is_human_path_only && (target.widget_id.is_some() || target.to_widget_id.is_some()) {
-            return Self::send_live_engine_error(
+            return Self::send_live_engine_err_val(
                 deferred.req,
                 parsed.id,
-                curvebook_doc::ErrorCode::GuiOnlyViolation,
-                "direct `ui.pointer_gesture(widget_id)` is blocked in human-path-only mode",
+                curvebook_engine::EngineError::with_code(
+                    curvebook_doc::ErrorCode::Conflict,
+                    "direct `ui.pointer_gesture(widget_id)` is blocked in human-path-only mode",
+                )
+                .with_details(serde_json::json!({ "code": "human_path_only_policy" })),
             );
         }
 
@@ -1018,11 +1021,14 @@ impl CurveBookNativeApp {
             && let Some(ref wid) = widget_id
             && live_focus_wid.as_deref() != Some(wid.as_str())
         {
-            return Self::send_live_engine_error(
+            return Self::send_live_engine_err_val(
                 deferred.req,
                 parsed.id,
-                curvebook_doc::ErrorCode::GuiOnlyViolation,
-                format!("focus-jumping `ui.type_text(widget_id = {wid})` is blocked in human-path-only mode"),
+                curvebook_engine::EngineError::with_code(
+                    curvebook_doc::ErrorCode::Conflict,
+                    format!("focus-jumping `ui.type_text(widget_id = {wid})` is blocked in human-path-only mode"),
+                )
+                .with_details(serde_json::json!({ "code": "human_path_only_policy" })),
             );
         }
 
@@ -1130,11 +1136,14 @@ impl CurveBookNativeApp {
     ) -> LiveActionDispatch {
         let win_id = self.active_window_id();
         if self.runtime.window(win_id).is_ok_and(|w| w.app().is_human_path_only()) {
-            return Self::send_live_engine_error(
+            return Self::send_live_engine_err_val(
                 deferred.req,
                 parsed.id,
-                curvebook_doc::ErrorCode::GuiOnlyViolation,
-                "direct `ui.switch_tab` is blocked in human-path-only mode",
+                curvebook_engine::EngineError::with_code(
+                    curvebook_doc::ErrorCode::Conflict,
+                    "direct `ui.switch_tab` is blocked in human-path-only mode",
+                )
+                .with_details(serde_json::json!({ "code": "human_path_only_policy" })),
             );
         }
         let tab_params = match inspect_bridge::parse_switch_tab_params(&parsed.params) {
@@ -2637,7 +2646,6 @@ mod tests {
         let mut runtime = DesktopHostRuntime::new(DesktopHostConfig {
             in_window_menus: true,
             new_instance: true,
-            gui_only: false,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -3095,7 +3103,6 @@ mod tests {
         let mut runtime = DesktopHostRuntime::new(DesktopHostConfig {
             in_window_menus: true,
             new_instance: true,
-            gui_only: true,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -3355,7 +3362,6 @@ mod tests {
         let mut runtime = DesktopHostRuntime::new(DesktopHostConfig {
             in_window_menus: true,
             new_instance: true,
-            gui_only: true,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -3433,13 +3439,15 @@ mod tests {
         let blocked =
             send_ctrl(&mut app, br#"{"id":"h1","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"toolbar.analyze"}}"#.to_vec())?;
         assert_eq!(blocked.get("ok").and_then(serde_json::Value::as_bool), Some(false));
-        assert_eq!(blocked.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("gui_only_violation"));
+        assert_eq!(blocked.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("conflict"));
+        assert_eq!(blocked.pointer("/error_detail/details/code").and_then(serde_json::Value::as_str), Some("human_path_only_policy"));
         let blocked_to = send_ctrl(
             &mut app,
             br#"{"id":"h2","method":"ui.pointer_gesture","params":{"action":"drag","x":100.0,"y":100.0,"to_widget_id":"toolbar.analyze"}}"#.to_vec(),
         )?;
         assert_eq!(blocked_to.get("ok").and_then(serde_json::Value::as_bool), Some(false));
-        assert_eq!(blocked_to.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("gui_only_violation"));
+        assert_eq!(blocked_to.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("conflict"));
+        assert_eq!(blocked_to.pointer("/error_detail/details/code").and_then(serde_json::Value::as_str), Some("human_path_only_policy"));
         app.runtime_mut().window_mut(id)?.app_mut().set_human_path_only(false);
 
         // 2. Drag rejects missing destination (BadInput) and unknown to_widget_id (NotFound).
@@ -3606,7 +3614,6 @@ mod tests {
             let mut runtime = DesktopHostRuntime::new(DesktopHostConfig {
                 in_window_menus: true,
                 new_instance: true,
-                gui_only: false,
                 locale_override: None,
                 theme_override: None,
                 recovery_root: None,
@@ -3797,7 +3804,7 @@ mod tests {
             Some("GwTitle")
         );
 
-        // 3. Coordinate-only human-path (`human_path_only = true` / `gui_only = true`): no `widget_id` allowed.
+        // 3. Coordinate-only human-path (`human_path_only = true`): no `widget_id` allowed.
         {
             let doc = h.app.runtime().window(h.win_id)?.app().document().clone();
             assert!(h.app.runtime_mut().window_mut(h.win_id)?.app_mut().canvas_dialogs.open_edit_parameters(&doc, &tg_rs_id));
@@ -3806,11 +3813,12 @@ mod tests {
         }
         let blocked = h.send_ctrl(json!({ "id": "gob", "method": "ui.type_text", "params": { "widget_id": "edit.custom_title", "text": "Bad" } }))?;
         assert_eq!(blocked.get("ok").and_then(serde_json::Value::as_bool), Some(false));
-        assert_eq!(blocked.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("gui_only_violation"));
-        h.verify_two_enter_textbox_commit("edit.custom_title", "GuiOnlyGw", true)?;
+        assert_eq!(blocked.pointer("/error_detail/code").and_then(serde_json::Value::as_str), Some("conflict"));
+        assert_eq!(blocked.pointer("/error_detail/details/code").and_then(serde_json::Value::as_str), Some("human_path_only_policy"));
+        h.verify_two_enter_textbox_commit("edit.custom_title", "HumanPathGw", true)?;
         assert_eq!(
             h.app.runtime().window(h.win_id)?.app().document().result_sheet(&tg_rs_id).and_then(|rs| rs.analysis.custom_title.as_deref()),
-            Some("GuiOnlyGw")
+            Some("HumanPathGw")
         );
         h.app.runtime_mut().window_mut(h.win_id)?.app_mut().set_human_path_only(false);
 

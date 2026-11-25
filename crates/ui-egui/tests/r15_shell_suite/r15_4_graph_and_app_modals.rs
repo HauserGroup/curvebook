@@ -5,7 +5,7 @@
 //! - 3-schema `Format Graph` (`Series-Based`, `MV Channel & Layer`, `Matrix / Aggregated Heatmap`) + `unit_spinners` single-commit
 //! - `Format Axes` (`Frame & Origin`, `Categorical Axis Guard` warning + confirmation lock, `Additional Ticks / Thresholds` sub-modal)
 //! - Secondary graph & layout modals (`PairwiseComparisons`, `BubblePlotInspector`, `ApplyStyleFrom`, `FormatSelectedPoints`, `InsertModelEquation`, `PageLayoutComposer`)
-//! - Conditional `Export Figure / Layout` (`PDF`, `SVG`, `EMF` for Graph vs Layout, `PNG`, `TIFF`, DPI/unit gating), `Print` (`--gui-only` guard), `Unsaved Changes`, `Recovery`, `About`, `Find & Replace`
+//! - Conditional `Export Figure / Layout` (`PDF`, `SVG`, `EMF` for Graph vs Layout, `PNG`, `TIFF`, DPI/unit gating), `Print`, `Unsaved Changes`, `Recovery`, `About`, `Find & Replace`
 //! - 5-category `Preferences` (strictly 14 non-RTL `BETA_ACTIVE_LOCALES`, theme & UI scale spinner, conflict-checked `UI_COMMANDS` shortcut editor)
 //! - `14` Beta locales × `640×420` & `1440×600` non-overlap, `ZLayer::ModalBackdrop` outside capture, and AccessKit parity.
 
@@ -78,7 +78,6 @@ struct SeededFixture {
 
 fn seed_paired_column_and_graphs() -> Result<SeededFixture, Box<dyn std::error::Error>> {
     let mut app = UiApp::new();
-    app.set_gui_only(true);
 
     // 1. Paired Column Table & Categorical Column Graph
     let col_id = SheetId::try_new("col-paired")?;
@@ -137,7 +136,6 @@ fn seed_paired_column_and_graphs() -> Result<SeededFixture, Box<dyn std::error::
     doc.layout_sheets = vec![layout_sheet];
     doc.active_sheet_id = Some(col_gid.clone());
     *app.session_mut() = Session::from_document(doc);
-    app.set_gui_only(true);
     app.sync_views();
 
     Ok(SeededFixture { app, col_id, col_gid, mv_gid, hm_gid, layout_id })
@@ -391,7 +389,7 @@ fn export_conditional_formats_print_recovery_unsaved_and_find_replace() -> Resul
         assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
     }
 
-    // 2. Print under `--gui-only`
+    // 2. Print dialog
     {
         let mut app = base_app.clone();
         let doc = app.document().clone();
@@ -399,7 +397,7 @@ fn export_conditional_formats_print_recovery_unsaved_and_find_replace() -> Resul
         app.sync_views();
         let mut driver = make_driver(ModalTestState::new(app), ViewportMetrics::new(1440.0, 600.0, 1.0));
         let submit_os = driver.frame_meta().find_by_widget_id("print.submit_to_os").ok_or("missing print.submit_to_os")?;
-        assert!(!submit_os.enabled, "--gui-only must disable direct OS print spooling");
+        assert!(submit_os.enabled, "direct OS print spooling checkbox should be enabled");
         let bleed_off = driver.frame_meta().find_by_widget_id("print.bleed_pt").ok_or("missing print.bleed_pt")?;
         assert!(!bleed_off.enabled);
         driver.click_widget_id("print.crop_marks")?;

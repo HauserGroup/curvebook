@@ -507,7 +507,6 @@ fn fa_sec19_08_09_10_x1_06_unified_fixes() -> Result<(), Box<dyn std::error::Err
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
         new_instance: false,
-        gui_only: true,
         path_policy: policy.clone(),
         human_path_only: true,
         clipboard_adapter: Some(stub_clip),
@@ -517,13 +516,11 @@ fn fa_sec19_08_09_10_x1_06_unified_fixes() -> Result<(), Box<dyn std::error::Err
     assert_eq!(rt.window(wid)?.app().session().path_policy(), &policy);
     assert!(rt.window(wid)?.app().is_human_path_only());
     assert!(rt.window(wid)?.app().has_custom_clipboard_adapter());
-    assert!(rt.window(wid)?.app().is_gui_only());
 
     rt.dispatch(DesktopHostEvent::FileDropped { window_id: wid, path: archive_path.clone() })?;
     assert_eq!(rt.window(wid)?.app().session().path_policy(), &policy);
     assert!(rt.window(wid)?.app().is_human_path_only());
     assert!(rt.window(wid)?.app().has_custom_clipboard_adapter());
-    assert!(rt.window(wid)?.app().is_gui_only());
     let _ = std::fs::remove_file(&archive_path);
 
     // FA-SEC19-10: Localized app submenu labels & macOS sync gating under --in-window-menus.

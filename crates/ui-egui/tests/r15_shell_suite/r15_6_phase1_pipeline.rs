@@ -23,7 +23,6 @@ use serde_json::json;
 
 fn seed_data_and_graph_app() -> UiApp {
     let mut app = UiApp::new();
-    app.set_gui_only(true);
     let _ = app.execute_command(
         "sheet.createData",
         json!({
@@ -52,7 +51,6 @@ fn a1_partial_batch_error_still_syncs_views_updates_mutation_seq_and_surfaces_ba
     }
 
     let mut app = UiApp::new();
-    app.set_gui_only(true);
     app.execute_command(
         "sheet.createData",
         json!({ "sheet_id": "ds-a1", "title": "Batch Table", "kind": "column", "rows": 3, "cols": 2, "auto_graph": false }),
@@ -155,8 +153,7 @@ fn a2_discarded_pass_preserves_grid_tab_click_and_unit_spinner_transitions() -> 
         carried_intents: PendingUiIntents,
     }
 
-    let mut app = UiApp::new();
-    app.set_gui_only(true);
+    let app = UiApp::new();
     let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(
         DiscardedGridState { app, show_grid_tab: false, discard_count: 0, carried_intents: PendingUiIntents::new() },
         ViewportMetrics::new(640.0, 360.0, 1.0),

@@ -3,7 +3,7 @@
 //! Wave 1 (`R15.1` bullets 1, 4, 5 & `#13`) integration tests for the `curvebook` desktop host:
 //! - Phase 0 duplicate menu-bar suppression (`host_draws_menu_bar`) & surviving `egui::MenuBar`
 //! - `BETA_ACTIVE_LOCALES` (14 non-RTL) & `normalize_beta_gui_locale`
-//! - `--ui-backend=egui` / `CURVEBOOK_UI_BACKEND=egui` CLI & headless `--control` + `GuiOnlyPolicy::Strict`
+//! - `--ui-backend=egui` / `CURVEBOOK_UI_BACKEND=egui` CLI & headless `--control` live bridge
 //! - Host `Tokens::apply_to_ctx`, `Cmd/Ctrl +`/`-`/`0` `ui_scale` & `preferences.json` round-trip
 //! - `LiveControlBridge` + `GeometryStamp` post-resize / post-DPI barrier (`ui.screenshot` / `ui.inspect`)
 
@@ -76,7 +76,6 @@ fn desktop_menu_bar_sets_host_draws_flag_suppresses_canvas_duplicates_and_drives
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
         new_instance: false,
-        gui_only: false,
         locale_override: None,
         theme_override: None,
         recovery_root: None,
@@ -318,7 +317,7 @@ fn live_control_ui_screenshot_waits_for_post_resize_dpi_geometry_stamp_settlemen
 }
 
 #[test]
-fn cli_ui_backend_egui_env_override_gui_only_and_preferences_ui_scale() -> Result<(), Box<dyn std::error::Error>> {
+fn cli_ui_backend_egui_env_override_live_control_and_preferences_ui_scale() -> Result<(), Box<dyn std::error::Error>> {
     let bin = env!("CARGO_BIN_EXE_curvebook");
     let help = Command::new(bin).arg("--help").output()?;
     assert!(help.status.success());
@@ -346,13 +345,11 @@ fn cli_ui_backend_egui_env_override_gui_only_and_preferences_ui_scale() -> Resul
         .output()?;
     assert!(headless_ok.status.success(), "CURVEBOOK_UI_BACKEND=egui --headless-once failed: {}", String::from_utf8_lossy(&headless_ok.stderr));
 
-    // Verify GuiOnlyPolicy::Strict over live control channel (using TCP if sandbox permits,
-    // plus deterministic in-process LiveControlBridge verification).
+    // Verify live control channel via deterministic in-process LiveControlBridge.
     let auth = ControlAuth::generate()?;
     let (bridge, channel) = LiveControlBridge::new(auth.clone());
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
-        gui_only: true,
         initial_viewport: ViewportMetrics::new(800.0, 500.0, 1.0),
         ..DesktopHostConfig::default()
     });
@@ -367,10 +364,9 @@ fn cli_ui_backend_egui_env_override_gui_only_and_preferences_ui_scale() -> Resul
         let script = format!(
             "{{\"id\":\"0\",\"method\":\"auth\",\"params\":{{\"token\":\"{token}\"}}}}\n\
              {{\"id\":\"1\",\"method\":\"doc.inspect\"}}\n\
-             {{\"id\":\"2\",\"method\":\"ui.screenshot\",\"params\":{{\"path\":\"blocked.png\"}}}}\n\
-             {{\"id\":\"3\",\"method\":\"ui.inspect\",\"params\":{{}}}}\n\
-             {{\"id\":\"4\",\"method\":\"ui.screenshot\",\"params\":{{\"width_px\":400,\"height_px\":260,\"dpi\":96}}}}\n\
-             {{\"id\":\"5\",\"method\":\"ui.invoke_menu\",\"params\":{{\"command_id\":\"ui.theme.set\",\"params\":{{\"mode\":\"dark\"}}}}}}\n"
+             {{\"id\":\"2\",\"method\":\"ui.inspect\",\"params\":{{}}}}\n\
+             {{\"id\":\"3\",\"method\":\"ui.screenshot\",\"params\":{{\"width_px\":400,\"height_px\":260,\"dpi\":96}}}}\n\
+             {{\"id\":\"4\",\"method\":\"ui.invoke_menu\",\"params\":{{\"command_id\":\"ui.theme.set\",\"params\":{{\"mode\":\"dark\"}}}}}}\n"
         );
         let mut reader = BufReader::new(Cursor::new(script.into_bytes()));
         let mut out_bytes = Vec::new();
@@ -388,19 +384,17 @@ fn cli_ui_backend_egui_env_override_gui_only_and_preferences_ui_scale() -> Resul
 
     bridge.signal_shutdown();
     let replies = read_jsonl_outputs(&client.join().map_err(|_| "client thread panicked")??)?;
-    assert_eq!(replies.len(), 6, "expected 6 control replies, got {replies:?}");
+    assert_eq!(replies.len(), 5, "expected 5 control replies, got {replies:?}");
     assert_eq!(replies[0]["ok"], json!(true));
-    assert_eq!(replies[1]["ok"], json!(false));
-    assert_eq!(replies[1]["error_detail"]["code"], json!("gui_only_violation"));
-    assert_eq!(replies[2]["ok"], json!(false));
-    assert_eq!(replies[2]["error_detail"]["code"], json!("gui_only_violation"));
+    assert_eq!(replies[1]["ok"], json!(true));
+    assert_eq!(replies[2]["ok"], json!(true));
+    assert!(replies[2]["result"]["toolbar"].is_array());
     assert_eq!(replies[3]["ok"], json!(true));
-    assert!(replies[3]["result"]["toolbar"].is_array());
-    assert_eq!(replies[4]["ok"], json!(true));
-    assert_eq!(replies[4]["result"]["width_px"], json!(400));
-    assert_eq!(replies[4]["result"]["height_px"], json!(260));
-    let bin_shot = decode_base64(replies[4]["result"]["data_base64"].as_str().ok_or("missing data_base64")?)?;
+    assert_eq!(replies[3]["result"]["width_px"], json!(400));
+    assert_eq!(replies[3]["result"]["height_px"], json!(260));
+    let bin_shot = decode_base64(replies[3]["result"]["data_base64"].as_str().ok_or("missing data_base64")?)?;
     assert_eq!(png_dimensions(&bin_shot), Some((400, 260)));
+    assert_eq!(replies[4]["ok"], json!(true));
 
     // Unused `allocate_loopback_port` check when loopback binding is allowed outside sandbox.
     if let Ok(port) = allocate_loopback_port() {

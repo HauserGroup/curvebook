@@ -49,8 +49,7 @@ struct ShellDriverState {
 }
 
 impl ShellDriverState {
-    fn new(mut app: UiApp) -> Self {
-        app.set_gui_only(true);
+    fn new(app: UiApp) -> Self {
         Self {
             app,
             views: EguiShellViewState::default(),

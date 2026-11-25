@@ -46,7 +46,6 @@ options:
   --control <port>         listen on 127.0.0.1:<port> for authenticated JSON-lines automation (or CURVEBOOK_CONTROL_PORT; headless unless --window)
   --control-token <token>  bearer token for --control authentication (prefer CURVEBOOK_CONTROL_TOKEN on multi-user systems; CLI args are visible in ps)
   --window                 attach a visible desktop window to --control <port> or CURVEBOOK_CONTROL_PORT
-  --gui-only               restrict automation (--control) to interactive GUI actions only
   --ui-backend <name>      select UI backend (`egui` sole desktop backend; `legacy` is rejected; overrides CURVEBOOK_UI_BACKEND)
   --in-window-menus     render the menu bar inside the window on macOS
   --new-instance        open files in a separate application window
@@ -72,7 +71,6 @@ struct LaunchConfig {
     control_port: Option<u16>,
     control_token: Option<String>,
     window: bool,
-    gui_only: bool,
     in_window_menus: bool,
     new_instance: bool,
     headless_once: bool,
@@ -231,10 +229,6 @@ fn parse_args_with_env_and_backend(
             }
             "--window" => {
                 cfg.window = true;
-                i += 1;
-            }
-            "--gui-only" => {
-                cfg.gui_only = true;
                 i += 1;
             }
             "--ui-backend" => {
@@ -417,7 +411,6 @@ fn configure_window_preferences(app: &mut UiApp, app_paths: &AppPaths, cfg: &Lau
     if cfg.rulers {
         app.canvas_dialogs.rulers_visible = true;
     }
-    curvebook::configure_gui_only(app, cfg.gui_only);
     app.sync_views();
 }
 
@@ -467,7 +460,6 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
     let host_cfg = DesktopHostConfig {
         in_window_menus: cfg.in_window_menus,
         new_instance: cfg.new_instance,
-        gui_only: cfg.gui_only,
         locale_override: None,
         theme_override: None,
         recovery_root: recovery_root.clone(),
@@ -1241,7 +1233,6 @@ mod tests {
                 control_port: Some(9123),
                 control_token: None,
                 window: false,
-                gui_only: false,
                 in_window_menus: true,
                 new_instance: true,
                 headless_once: false,
@@ -1253,35 +1244,17 @@ mod tests {
             }))
         );
 
-        let gui_only_args = vec![String::from("--control"), String::from("9124"), String::from("--gui-only"), String::from("--headless-once")];
-        assert_eq!(
-            parse_args(&gui_only_args, None).ok(),
-            Some(CliAction::Launch(LaunchConfig {
-                control_port: Some(9124),
-                control_token: None,
-                window: false,
-                gui_only: true,
-                in_window_menus: false,
-                new_instance: false,
-                headless_once: true,
-                portable_dir: None,
-                ttf_font: None,
-                rulers: false,
-                event_script: None,
-                files: Vec::new(),
-            }))
-        );
-        assert!(super::USAGE.contains("--gui-only"));
+        assert!(!super::USAGE.contains("--gui-only"));
         assert!(super::USAGE.contains("--window"));
+        assert!(parse_args(&[String::from("--gui-only")], None).is_err());
 
-        let window_args = vec![String::from("--control"), String::from("9125"), String::from("--window"), String::from("--gui-only")];
+        let window_args = vec![String::from("--control"), String::from("9125"), String::from("--window")];
         assert_eq!(
             parse_args(&window_args, None).ok(),
             Some(CliAction::Launch(LaunchConfig {
                 control_port: Some(9125),
                 control_token: None,
                 window: true,
-                gui_only: true,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: false,
@@ -1312,7 +1285,6 @@ mod tests {
                 control_port: None,
                 control_token: None,
                 window: false,
-                gui_only: false,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: false,
@@ -2161,7 +2133,6 @@ mod tests {
         let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
             in_window_menus: true,
             new_instance: false,
-            gui_only: false,
             locale_override: None,
             theme_override: None,
             recovery_root: None,

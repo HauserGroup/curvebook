@@ -57,7 +57,6 @@ fn make_probe_driver(mut app: UiApp, locale: &str, ui_scale: f32, width: f64, he
 
 fn build_rich_project_app() -> UiApp {
     let mut app = UiApp::new();
-    app.set_gui_only(true);
     app.host_draws_menu_bar = false;
 
     app.execute_command(
@@ -196,9 +195,7 @@ fn workspace_views_pass_overlap_target_size_rank_and_region_budgets() {
                 cloned.execute_command("sheet.select", json!({ "sheet_id": sid })).unwrap();
                 cloned
             } else {
-                let mut fresh = UiApp::new();
-                fresh.set_gui_only(true);
-                fresh
+                UiApp::new()
             };
             let driver = make_probe_driver(app, locale, scale, w, h);
             let meta = driver.frame_meta();

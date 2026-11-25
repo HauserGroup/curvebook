@@ -27,7 +27,7 @@ CurveBook is written in pure Rust and dual-licensed under MIT OR Apache-2.0. It 
 - [Graphs & Page Layouts](https://hausergroup.github.io/curvebook/manual/latest/graphs.html): Graph types, compatible table archetypes, axis scales, error bars, colour palettes, and Page Layout rendering.
 - [Calculators & Quality-of-Life Tools](https://hausergroup.github.io/curvebook/manual/latest/qol.html): Scientific calculators, quick statistics, and workspace quality-of-life capabilities.
 - [Files, Import & Export](https://hausergroup.github.io/curvebook/manual/latest/files.html): CurveBook archives, unpacked .curvebook.d directories, templates, autosave recovery, and interchange formats.
-- [MCP Server Reference](https://hausergroup.github.io/curvebook/manual/latest/automation/mcp.html): CurveBook Model Context Protocol server transports, core tools, toolsets, resources, prompts, and --gui-only policy.
+- [MCP Server Reference](https://hausergroup.github.io/curvebook/manual/latest/automation/mcp.html): CurveBook Model Context Protocol server transports, core tools, toolsets, resources, and prompts.
 - [CLI Reference (curvebook-cli)](https://hausergroup.github.io/curvebook/manual/latest/automation/cli.html): Headless runner subcommands, schema-typed direct command flags, exit codes, and PDF/format flags.
 - [Control Protocol, Batch Format & Errors](https://hausergroup.github.io/curvebook/manual/latest/automation/control-and-batch.html): Loopback --control JSON-lines protocol, curvebook.batch.v1 manifests, run scripts, and engine error codes.
 - [Settings & Languages](https://hausergroup.github.io/curvebook/manual/latest/settings.html): Preferences JSON Schema keys, keyboard shortcut customization, interface locales, and locale formatting.

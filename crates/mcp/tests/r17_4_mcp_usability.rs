@@ -9,7 +9,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use curvebook_mcp::{ERR_INVALID_PARAMS, McpServerState, call_tool, list_prompts_for_mode, read_resource, serve};
+use curvebook_mcp::{ERR_INVALID_PARAMS, McpServerState, call_tool, list_prompts, read_resource, serve};
 use serde_json::{Value, json};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -321,9 +321,9 @@ fn actionable_error_hints_and_messy_csv_open_warnings() -> Result<(), String> {
         return Err(format!("disabled tool error missing actionable recovery hint: {msg}"));
     }
 
-    // Prompts in `--gui-only` remain free of headless tokens after prompt enrichment.
-    let gui_prompts = list_prompts_for_mode(true);
-    if gui_prompts.len() != 3 {
+    // Prompt catalog exposes all 3 built-in scientific prompts after prompt enrichment.
+    let prompts = list_prompts();
+    if prompts.len() != 3 {
         return Err(String::from("expected 3 prompts"));
     }
     Ok(())

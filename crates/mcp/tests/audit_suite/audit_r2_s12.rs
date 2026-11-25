@@ -1,49 +1,38 @@
 //! Permanent Round 2 (`R0.19`) Slice `S12` audit regression suite for `curvebook-mcp`.
 //!
 //! Covers:
-//! - `R2-S12-01`: `--control-port` `ping` handshake & bidirectional `--gui-only` policy enforcement.
-//! - `R2-S12-03`: `ui_invoke_menu` always supplies `params: {}` (never `null`/omitted) and blocks OS
-//!   subprocess helpers / `submit_to_os` under `--gui-only`.
+//! - `R2-S12-03`: `ui_invoke_menu` always supplies `params: {}` (never `null`/omitted).
 //! - `R2-S12-04`: `open_file` and `save_file` enforce `WorkdirGuard` before probing raw host paths
 //!   or inferring format from unguarded host directories.
 //! - `R2-S12-06`: Remove ignored `ui_inspect.sheet_id` and `ui_answer_dialog.dialog_id` schema drift.
 //! - `R2-S12-07`: `McpServerState::with_gui_host` shares the hosted `Session`, propagates changes via
 //!   `sync_after_session_mutation`, and wraps `resources/*` inside `run_guarded`.
-//! - `R2-S12-09`: `prompts/list` + `prompts/get` serve GUI-only workflows when `--gui-only` is active.
 use std::cell::RefCell;
 use std::fs;
-use std::io::{BufRead, BufReader, ErrorKind, Write};
-use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
-use std::thread;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, TableArchetype};
 use curvebook_engine::{EngineError, Session};
 use curvebook_format::{FormatRegistry, save_project_unpacked_dir};
-use curvebook_mcp::{
-    GUI_ONLY_SERVER_INSTRUCTIONS, GuiSessionHost, McpServerState, SERVER_INSTRUCTIONS, ToolCallError, call_tool, dispatch_json_value, list_gui_tools,
-    list_tools_for_state,
-};
+use curvebook_mcp::{GuiSessionHost, McpServerState, ToolCallError, call_tool, dispatch_json_value, list_gui_tools, list_tools_for_state};
 use serde_json::{Value, json};
 
-use super::common::{TempDir, loopback_required};
+use super::common::TempDir;
 
 type TestResult = Result<(), String>;
 
 #[derive(Default)]
 struct RecordingHostState {
-    gui_only: bool,
     calls: Vec<(String, Value)>,
 }
 
 struct RecordingHost(Rc<RefCell<RecordingHostState>>);
 
 impl RecordingHost {
-    fn new(gui_only: bool) -> (Self, Rc<RefCell<RecordingHostState>>) {
-        let state = Rc::new(RefCell::new(RecordingHostState { gui_only, calls: Vec::new() }));
+    fn new() -> (Self, Rc<RefCell<RecordingHostState>>) {
+        let state = Rc::new(RefCell::new(RecordingHostState { calls: Vec::new() }));
         (Self(Rc::clone(&state)), state)
     }
 }
@@ -54,44 +43,26 @@ impl GuiSessionHost for RecordingHost {
         guard.calls.push((method.to_owned(), params));
         Ok(json!({
             "method": method,
-            "gui_only": guard.gui_only,
         }))
-    }
-
-    fn set_gui_only(&mut self, gui_only: bool) {
-        self.0.borrow_mut().gui_only = gui_only;
-    }
-
-    fn is_gui_only(&self) -> bool {
-        self.0.borrow().gui_only
     }
 }
 
 struct OwnedSessionHost {
-    gui_only: bool,
     session: Session,
     sync_count: Arc<AtomicUsize>,
 }
 
 impl OwnedSessionHost {
-    fn new(gui_only: bool) -> (Self, Arc<AtomicUsize>) {
+    fn new() -> (Self, Arc<AtomicUsize>) {
         let sync_count = Arc::new(AtomicUsize::new(0));
-        (Self { gui_only, session: Session::new(), sync_count: Arc::clone(&sync_count) }, sync_count)
+        (Self { session: Session::new(), sync_count: Arc::clone(&sync_count) }, sync_count)
     }
 }
 
 impl GuiSessionHost for OwnedSessionHost {
     fn call_gui(&mut self, method: &str, _params: Value) -> Result<Value, EngineError> {
         let sheets: Vec<Value> = self.session.document().data_sheets.iter().map(|d| json!({ "sheet_id": d.id.as_str(), "title": d.title })).collect();
-        Ok(json!({ "method": method, "gui_only": self.gui_only, "navigator_sheets": sheets }))
-    }
-
-    fn set_gui_only(&mut self, gui_only: bool) {
-        self.gui_only = gui_only;
-    }
-
-    fn is_gui_only(&self) -> bool {
-        self.gui_only
+        Ok(json!({ "method": method, "navigator_sheets": sheets }))
     }
 
     fn hosted_session(&self) -> Option<&Session> {
@@ -112,150 +83,10 @@ fn rpc_ok(state: &mut McpServerState, id: i64, method: &str, params: Value) -> R
         .ok_or_else(|| format!("missing JSON-RPC reply for {method}"))
 }
 
-fn initialize_payload() -> Value {
-    json!({
-        "protocolVersion": "2025-03-26",
-        "capabilities": {},
-        "clientInfo": { "name": "audit-r2-s12", "version": "0.1.0" }
-    })
-}
-
 #[test]
-fn r2_s12_01_control_port_bidirectional_gui_only_handshake() -> TestResult {
-    // 1. Unlocked MCP (`gui_only = false`) attaches to remote host reporting `gui_only: true`.
-    let remote_calls = Arc::new(AtomicUsize::new(0));
-    let remote_calls_a = Arc::clone(&remote_calls);
-    let mut unlocked_client =
-        McpServerState::with_control_port(49401).map_err(|e| format!("with_control_port: {e}"))?.with_control_handler(move |method, _params| {
-            remote_calls_a.fetch_add(1, Ordering::Relaxed);
-            match method {
-                "ping" => Ok(json!({ "pong": true, "gui_only": true })),
-                "ui.inspect" => Ok(json!({ "gui_only": true, "scope": "all" })),
-                other => Err(format!("unexpected remote method {other}")),
-            }
-        });
-
-    let init = rpc_ok(&mut unlocked_client, 1, "initialize", initialize_payload())?;
-    assert_eq!(init["result"]["instructions"], json!(GUI_ONLY_SERVER_INSTRUCTIONS), "init did not adopt remote gui_only: {init}");
-    assert!(unlocked_client.is_gui_only());
-
-    let tools = rpc_ok(&mut unlocked_client, 2, "tools/list", json!({}))?;
-    let tool_arr = tools["result"]["tools"].as_array().ok_or_else(|| format!("missing tools array: {tools}"))?;
-    assert_eq!(tool_arr.len(), 8, "expected 8 GUI tools after adopting remote gui_only: {tools}");
-
-    for tool_name in ["doc_inspect", "open_file", "enable_toolset"] {
-        let res = call_tool(&mut unlocked_client, tool_name, json!({}))
-            .map_err(|e| format!("expected structured gui_only_violation for {tool_name}: {e}"))?;
-        assert!(res.is_error, "{tool_name} should error under adopted --gui-only");
-        let code = res.structured_content.as_ref().and_then(|v| v.get("code")).and_then(Value::as_str);
-        assert_eq!(code, Some("gui_only_violation"), "wrong error code for {tool_name}: {:?}", res.structured_content);
-    }
-
-    let rlist = rpc_ok(&mut unlocked_client, 3, "resources/list", json!({}))?;
-    assert_eq!(rlist["result"]["resources"], json!([]));
-    let rread = rpc_ok(&mut unlocked_client, 4, "resources/read", json!({ "uri": "sheet://d1" }))?;
-    assert!(rread.get("error").is_some(), "resources/read should fail under adopted --gui-only: {rread}");
-
-    // 2. Local `--gui-only` attaching to unlocked remote (`gui_only: false`) must fail closed.
-    let non_ping_called = Arc::new(AtomicBool::new(false));
-    let non_ping_flag = Arc::clone(&non_ping_called);
-    let mut locked_client = McpServerState::with_control_port_and_gui_only(49402, true)
-        .map_err(|e| format!("with_control_port_and_gui_only: {e}"))?
-        .with_control_handler(move |method, _params| {
-            if method != "ping" {
-                non_ping_flag.store(true, Ordering::Relaxed);
-            }
-            match method {
-                "ping" => Ok(json!({ "pong": true, "gui_only": false })),
-                _ => Ok(json!({})),
-            }
-        });
-
-    let init_err = rpc_ok(&mut locked_client, 10, "initialize", initialize_payload())?;
-    assert_eq!(init_err["error"]["data"]["code"], json!("gui_only_violation"), "expected mismatch error on initialize: {init_err}");
-    let list_err = rpc_ok(&mut locked_client, 11, "tools/list", json!({}))?;
-    assert_eq!(list_err["error"]["data"]["code"], json!("gui_only_violation"), "expected mismatch error on tools/list: {list_err}");
-    let call_err = call_tool(&mut locked_client, "ui_inspect", json!({})).map_err(|e| format!("ui_inspect call failed: {e}"))?;
-    assert!(call_err.is_error);
-    assert_eq!(call_err.structured_content.as_ref().and_then(|v| v.get("code")), Some(&json!("gui_only_violation")));
-    assert!(!non_ping_called.load(Ordering::Relaxed), "ui.inspect must never reach unlocked remote host");
-
-    // 3. Handshake failing / omitting boolean `gui_only` must fail closed.
-    let mut broken_ping = McpServerState::with_control_port(49403)
-        .map_err(|e| format!("with_control_port: {e}"))?
-        .with_control_handler(|_method, _params| Ok(json!({ "pong": true })));
-    let bad_init = rpc_ok(&mut broken_ping, 20, "initialize", initialize_payload())?;
-    assert!(bad_init.get("error").is_some(), "missing `gui_only` in ping must fail closed: {bad_init}");
-    let bad_doc = call_tool(&mut broken_ping, "doc_inspect", json!({})).map_err(|e| format!("doc_inspect failed: {e}"))?;
-    assert!(bad_doc.is_error);
-
-    let mut normal = McpServerState::new();
-    let init_normal = rpc_ok(&mut normal, 21, "initialize", initialize_payload())?;
-    assert_eq!(init_normal["result"]["instructions"], json!(SERVER_INSTRUCTIONS));
-    Ok(())
-}
-
-#[test]
-fn r2_s12_01_control_port_tcp_loopback_handshake_when_permitted() -> TestResult {
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(l) => l,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
-        Err(err) => return Err(format!("bind failed: {err}")),
-    };
-    let addr = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?;
-    let port = addr.port();
-    if let Err(err) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
-        if err.kind() == ErrorKind::PermissionDenied && !loopback_required() {
-            return Ok(());
-        }
-        return Err(format!("probe connect: {err}"));
-    }
-    let _ = listener.accept();
-
-    let (methods_tx, methods_rx) = mpsc::channel::<String>();
-    let server = thread::spawn(move || -> Result<(), String> {
-        for expected in 0..2 {
-            let (mut stream, _) = listener.accept().map_err(|e| format!("accept {expected}: {e}"))?;
-            let mut reader = BufReader::new(stream.try_clone().map_err(|e| format!("clone: {e}"))?);
-            let mut line = String::new();
-            reader.read_line(&mut line).map_err(|e| format!("read_line: {e}"))?;
-            let req: Value = serde_json::from_str(&line).map_err(|e| format!("json: {e}"))?;
-            let id = req["id"].as_str().unwrap_or("mcp-1");
-            let method = req["method"].as_str().unwrap_or("");
-            methods_tx.send(method.to_owned()).map_err(|e| format!("send: {e}"))?;
-            let resp = match method {
-                "ping" => json!({ "id": id, "ok": true, "result": { "pong": true, "gui_only": true } }),
-                "ui.inspect" => json!({ "id": id, "ok": true, "result": { "scope": "all", "gui_only": true } }),
-                _ => json!({ "id": id, "ok": false, "error": "unexpected method" }),
-            };
-            let wire = format!("{resp}\n");
-            stream.write_all(wire.as_bytes()).and_then(|()| stream.flush()).map_err(|e| format!("write: {e}"))?;
-        }
-        Ok(())
-    });
-
-    let mut attached = McpServerState::with_control_port(port).map_err(|e| format!("with_control_port: {e}"))?;
-    let init = rpc_ok(&mut attached, 1, "initialize", initialize_payload())?;
-    assert_eq!(init["result"]["instructions"], json!(GUI_ONLY_SERVER_INSTRUCTIONS));
-    assert!(attached.is_gui_only());
-
-    let doc_blocked = call_tool(&mut attached, "doc_inspect", json!({})).map_err(|e| format!("doc_inspect: {e}"))?;
-    assert!(doc_blocked.is_error);
-    assert_eq!(doc_blocked.structured_content.as_ref().and_then(|v| v.get("code")), Some(&json!("gui_only_violation")));
-
-    let insp = call_tool(&mut attached, "ui_inspect", json!({ "scope": "all" })).map_err(|e| format!("ui_inspect: {e}"))?;
-    assert!(!insp.is_error);
-    server.join().map_err(|_| String::from("server thread panicked"))??;
-
-    let observed: Vec<String> = methods_rx.iter().collect();
-    assert_eq!(observed, vec!["ping", "ui.inspect"]);
-    Ok(())
-}
-
-#[test]
-fn r2_s12_03_ui_invoke_menu_params_object_and_gui_only_subprocess_blocks() -> TestResult {
-    // 1. Omitted / null `params` must always be forwarded as `{}` (`Value::Object`).
-    let (host, shared) = RecordingHost::new(false);
+fn r2_s12_03_ui_invoke_menu_params_object() -> TestResult {
+    // Omitted / null `params` must always be forwarded as `{}` (`Value::Object`).
+    let (host, shared) = RecordingHost::new();
     let mut state = McpServerState::with_gui_host(Box::new(host));
 
     let res1 = call_tool(&mut state, "ui_invoke_menu", json!({ "path": ["File", "New Project"] })).map_err(|e| format!("invoke 1: {e}"))?;
@@ -267,32 +98,6 @@ fn r2_s12_03_ui_invoke_menu_params_object_and_gui_only_subprocess_blocks() -> Te
     assert_eq!(recorded.calls.len(), 2);
     assert_eq!(recorded.calls[0].1["params"], json!({}), "omitted params must serialize as empty JSON object");
     assert_eq!(recorded.calls[1].1["params"], json!({}), "null params must serialize as empty JSON object");
-    drop(recorded);
-
-    // 2. Under `--gui-only`, OS subprocess helpers & `submit_to_os` are blocked before reaching host.
-    state.set_gui_only(true);
-    shared.borrow_mut().calls.clear();
-
-    let blocked_cases = [
-        ("ui_invoke_menu", json!({ "command_id": "ui.result.copyMethodsReport" })),
-        ("ui_invoke_menu", json!({ "path": ["Analyze", "Copy Methods Report"] })),
-        ("ui_invoke_menu", json!({ "command_id": "file.print" })),
-        ("ui_invoke_menu", json!({ "command_id": "ui.print.open", "params": { "submit_to_os": true } })),
-        ("ui_invoke_menu", json!({ "command_id": "ui.screenshot", "params": { "path": "forbidden.png" } })),
-        ("ui_answer_dialog", json!({ "action": "ok", "fields": { "submit_to_os": true } })),
-    ];
-
-    for (tool, args) in blocked_cases {
-        let res = call_tool(&mut state, tool, args.clone()).map_err(|e| format!("blocked case {tool} failed: {e}"))?;
-        assert!(res.is_error, "expected gui_only_violation for {tool} {args}");
-        assert_eq!(
-            res.structured_content.as_ref().and_then(|v| v.get("code")),
-            Some(&json!("gui_only_violation")),
-            "wrong error code for {tool} {args}: {:?}",
-            res.structured_content
-        );
-    }
-    assert!(shared.borrow().calls.is_empty(), "blocked helpers must never invoke GuiSessionHost");
     Ok(())
 }
 
@@ -370,7 +175,7 @@ fn r2_s12_06_ui_inspect_and_ui_answer_dialog_drop_ignored_schema_drift() -> Test
     let answer_def = tools.iter().find(|t| t.name == "ui_answer_dialog").ok_or_else(|| String::from("missing ui_answer_dialog"))?;
     assert!(answer_def.input_schema["properties"].get("dialog_id").is_none(), "ui_answer_dialog must not advertise ignored `dialog_id`");
 
-    let (host, _) = RecordingHost::new(true);
+    let (host, _) = RecordingHost::new();
     let mut state = McpServerState::with_gui_host(Box::new(host));
 
     let err_inspect = call_tool(&mut state, "ui_inspect", json!({ "scope": "all", "sheet_id": "data-1" }));
@@ -384,10 +189,9 @@ fn r2_s12_06_ui_inspect_and_ui_answer_dialog_drop_ignored_schema_drift() -> Test
 #[test]
 fn r2_s12_07_hosted_session_shared_and_resources_guarded() -> TestResult {
     let dir = TempDir::new("hosted-session")?;
-    let (host, sync_count) = OwnedSessionHost::new(false);
+    let (host, sync_count) = OwnedSessionHost::new();
     let mut state = McpServerState::with_gui_host(Box::new(host));
     state.set_workdir(Some(&dir.path)).map_err(|e| format!("set_workdir: {e}"))?;
-    assert!(!state.is_gui_only());
     assert!(list_tools_for_state(&state).len() >= 18);
 
     // Mutate via core `command_run` and verify `hosted_session` + GUI host inspect + resources/* see it.
@@ -423,7 +227,7 @@ fn r2_s12_07_hosted_session_shared_and_resources_guarded() -> TestResult {
     // Live `--control-port` `resources/list` + `resources/read` routes through live snapshot rather than empty local session.
     let mut live = McpServerState::with_control_port(49404).map_err(|e| format!("with_control_port: {e}"))?.with_control_handler(
         |method, _params| match method {
-            "ping" => Ok(json!({ "pong": true, "gui_only": false })),
+            "ping" => Ok(json!({ "pong": true })),
             "doc.inspect" => Ok(json!({
                 "data_sheets": [{ "id": "live-1", "title": "Live Data", "table_kind": "Column", "rows": 2, "cols": 1 }],
                 "result_sheets": [],
@@ -438,34 +242,6 @@ fn r2_s12_07_hosted_session_shared_and_resources_guarded() -> TestResult {
     assert!(live_arr.iter().any(|r| r["uri"] == json!("sheet://live-1")), "live resources/list missed live-1: {live_list}");
     let live_read = rpc_ok(&mut live, 4, "resources/read", json!({ "uri": "sheet://live-1" }))?;
     assert!(live_read.get("error").is_none(), "live resources/read failed: {live_read}");
-    Ok(())
-}
-
-#[test]
-fn r2_s12_09_prompts_adapt_to_gui_only_mode() -> TestResult {
-    let (host, _) = RecordingHost::new(true);
-    let mut gui_state = McpServerState::with_gui_host(Box::new(host));
-    let listed = rpc_ok(&mut gui_state, 1, "prompts/list", json!({}))?;
-    let prompts = listed["result"]["prompts"].as_array().ok_or_else(|| format!("missing prompts array: {listed}"))?;
-    assert!(!prompts.is_empty());
-
-    let forbidden_tokens = ["doc_inspect", "enable_toolset", "command_run", "render_preview", "`export`", "sheet://", "result://"];
-    for prompt_entry in prompts {
-        let name = prompt_entry["name"].as_str().ok_or_else(|| String::from("prompt missing name"))?;
-        let got = rpc_ok(&mut gui_state, 2, "prompts/get", json!({ "name": name }))?;
-        let msgs = got["result"]["messages"].as_array().ok_or_else(|| format!("missing messages for {name}: {got}"))?;
-        let body = msgs.iter().filter_map(|m| m["content"]["text"].as_str()).collect::<Vec<_>>().join("\n");
-        for forbidden in forbidden_tokens {
-            assert!(!body.contains(forbidden), "gui_only prompt `{name}` emitted forbidden headless reference `{forbidden}`:\n{body}");
-        }
-        assert!(body.contains("ui_inspect") || body.contains("ui_invoke_menu"), "gui_only prompt `{name}` should reference GUI tools:\n{body}");
-    }
-
-    // Normal headless mode keeps headless workflow prompts.
-    let mut headless = McpServerState::new();
-    let got_headless = rpc_ok(&mut headless, 3, "prompts/get", json!({ "name": "dose_response_curve_fit" }))?;
-    let h_text = got_headless["result"]["messages"][0]["content"]["text"].as_str().unwrap_or("");
-    assert!(h_text.contains("doc_inspect") && h_text.contains("render_preview"), "headless prompt missing expected guidance: {h_text}");
     Ok(())
 }
 
@@ -515,10 +291,6 @@ fn audit_23_mcp_server_state_rejects_combining_control_port_and_workdir() -> Tes
     assert!(msg.contains("--workdir") && msg.contains("--control-port"), "unexpected error: {msg}");
     assert!(live_state.workdir_guard().is_none(), "failed set_workdir must not attach workdir_guard");
 
-    let mut gui_only_live = McpServerState::with_control_port_and_gui_only(49292, true)?;
-    assert!(gui_only_live.set_workdir(Some(&dir.path)).is_err());
-    assert!(gui_only_live.workdir_guard().is_none());
-
     // 2. Workdir configured first -> set_control_port(Some(..)) must fail without attaching control_port.
     let mut confined = McpServerState::with_workdir(&dir.path).map_err(|e| e.to_string())?;
     let err = confined.set_control_port(Some(49293)).expect_err("set_control_port must fail when workdir is active");
@@ -526,7 +298,7 @@ fn audit_23_mcp_server_state_rejects_combining_control_port_and_workdir() -> Tes
     assert_eq!(confined.control_port(), None);
 
     // 3. GuiSessionHost with WorkdirGuard -> set_control_port(Some(..)) must also fail.
-    let (host, _sync_count) = OwnedSessionHost::new(true);
+    let (host, _sync_count) = OwnedSessionHost::new();
     let mut hosted_state = McpServerState::with_gui_host(Box::new(host));
     hosted_state.set_workdir(Some(&dir.path)).map_err(|e| e.to_string())?;
     let host_err = hosted_state.set_control_port(Some(49294)).expect_err("set_control_port must fail on workdir-confined GuiSessionHost");

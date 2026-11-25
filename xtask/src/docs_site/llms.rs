@@ -89,7 +89,7 @@ pub const MANUAL_MARKDOWN_GUIDES: &[(&str, &str, &str, &str)] = &[
     (
         "automation/mcp.html",
         "MCP Server Reference",
-        "CurveBook Model Context Protocol server transports, core tools, toolsets, resources, prompts, and --gui-only policy.",
+        "CurveBook Model Context Protocol server transports, core tools, toolsets, resources, and prompts.",
         "docs/reference/automation/mcp.md",
     ),
     (

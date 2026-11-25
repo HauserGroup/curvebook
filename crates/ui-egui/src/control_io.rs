@@ -3,7 +3,6 @@
 
 pub mod host_routing;
 
-use std::fmt;
 use std::io::{self, BufRead, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::{SocketAddr, TcpListener};
@@ -49,126 +48,12 @@ pub const MAX_CONTROL_BATCH_STEPS: usize = 1_000;
 #[cfg(not(target_arch = "wasm32"))]
 pub const CONTROL_CLIENT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Number of random bytes encoded into an auto-generated control authentication token (256 bits).
-pub const CONTROL_AUTH_TOKEN_BYTES: usize = 32;
-
-/// Hard upper bound on accepted control token length in bytes.
-pub const MAX_CONTROL_TOKEN_BYTES: usize = 512;
+pub use curvebook_platform::{CONTROL_AUTH_TOKEN_BYTES, ControlAuth, MAX_CONTROL_TOKEN_BYTES};
 
 /// HTTP 403 response emitted immediately when an HTTP client hits the raw control socket.
 pub const CONTROL_HTTP_FORBIDDEN_RESPONSE: &str = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nForbidden\n";
 
 const HTTP_REQUEST_METHODS: &[&str] = &["POST", "GET", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT", "PRI"];
-
-/// Per-instance bearer secret enforcing authentication on local control sockets and streams.
-#[derive(Clone, PartialEq, Eq)]
-pub struct ControlAuth {
-    token: String,
-}
-
-impl fmt::Debug for ControlAuth {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ControlAuth([REDACTED])")
-    }
-}
-
-impl ControlAuth {
-    /// Generate a fresh 256-bit cryptographically random control authentication token.
-    ///
-    /// # Errors
-    /// Returns an I/O error if OS entropy cannot be read, or `Unsupported` on `wasm32`.
-    pub fn generate() -> io::Result<Self> {
-        let bytes = generate_entropy_bytes()?;
-        Ok(Self { token: encode_lower_hex(&bytes) })
-    }
-
-    /// Validate and wrap a caller-supplied control authentication token.
-    ///
-    /// # Errors
-    /// Returns a descriptive error when `token` is empty, contains whitespace or control
-    /// characters, or exceeds [`MAX_CONTROL_TOKEN_BYTES`].
-    pub fn from_token(token: impl Into<String>) -> Result<Self, String> {
-        let candidate = token.into();
-        if candidate.is_empty() {
-            return Err(String::from("control token must not be empty"));
-        }
-        if candidate.len() > MAX_CONTROL_TOKEN_BYTES {
-            return Err(format!("control token exceeds {MAX_CONTROL_TOKEN_BYTES} bytes"));
-        }
-        if candidate.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
-            return Err(String::from("control token must not contain whitespace or control characters"));
-        }
-        Ok(Self { token: candidate })
-    }
-
-    /// Borrow the raw secret token string for writing to a restricted local token file or client.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.token
-    }
-
-    /// Verify `candidate` against the secret token using constant-time byte comparison.
-    #[must_use]
-    pub fn verify(&self, candidate: &str) -> bool {
-        constant_time_eq(self.token.as_bytes(), candidate.as_bytes())
-    }
-}
-
-fn constant_time_eq(expected: &[u8], actual: &[u8]) -> bool {
-    let max_len = expected.len().max(actual.len());
-    let mut diff: u8 = u8::from(expected.len() != actual.len());
-    for idx in 0..max_len {
-        let a = expected.get(idx).copied().unwrap_or(0);
-        let b = actual.get(idx).copied().unwrap_or(0);
-        diff |= core::hint::black_box(a ^ b);
-    }
-    core::hint::black_box(diff) == 0
-}
-
-fn encode_lower_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
-#[cfg(unix)]
-fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open("/dev/urandom")?;
-    let mut buf = [0u8; CONTROL_AUTH_TOKEN_BYTES];
-    file.read_exact(&mut buf)?;
-    Ok(buf)
-}
-
-#[cfg(all(not(unix), not(target_arch = "wasm32")))]
-fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
-    use std::collections::hash_map::RandomState;
-    use std::hash::BuildHasher;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |dur| dur.as_nanos());
-    let pid = u64::from(std::process::id());
-    let mut buf = [0u8; CONTROL_AUTH_TOKEN_BYTES];
-    for (chunk_idx, chunk) in buf.chunks_exact_mut(8).enumerate() {
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let state = RandomState::new();
-        let mixed = state.hash_one((nanos, pid, seq, chunk_idx as u64, b"curvebook-control-auth"));
-        chunk.copy_from_slice(&mixed.to_le_bytes());
-    }
-    Ok(buf)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "OS entropy generation for TCP control auth tokens is unavailable on wasm32"))
-}
 
 fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
     let n = needle.as_bytes();
@@ -1060,8 +945,7 @@ pub fn handle_control_line_with_action(app: &mut UiApp, line: &str) -> (String, 
 /// Returns `Ok(None)` when `command_id` is not a front-end UI command so callers can delegate
 /// to engine command execution cleanly.
 ///
-/// Returns `true` when `method` is one of the 8 interactive GUI action entry points allowed
-/// under strict `--gui-only`.
+/// Returns `true` when `method` is one of the 8 interactive GUI action entry points.
 #[must_use]
 pub(crate) fn is_gui_action_method(method: &str) -> bool {
     matches!(
@@ -1079,14 +963,14 @@ pub(crate) fn is_gui_action_method(method: &str) -> bool {
 
 /// Dispatch one of the 8 interactive GUI actions (`ui.inspect`, `ui.screenshot`,
 /// `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`,
-/// `ui.answer_dialog`) against `app` for in-process callers (`curvebook-cli` MCP bridge, `R8.7`).
+/// `ui.answer_dialog`) against `app` for in-process or control-channel callers (`R8.7`).
 ///
 /// All workspace mutations invoked via these GUI interactions run as `Caller::Ui`.
 ///
 /// # Errors
 /// Returns a structured [`EngineError`] on invalid parameters, disabled UI controls/tabs/menus
-/// (`ErrorCode::Conflict`), missing widgets (`ErrorCode::NotFound`), or blocked disk writes under
-/// strict `--gui-only` (`ErrorCode::GuiOnlyViolation`).
+/// (`ErrorCode::Conflict`), missing widgets (`ErrorCode::NotFound`), or path policy violations
+/// (`ErrorCode::PathEscape`).
 pub fn dispatch_gui_action(app: &mut UiApp, method: &str, params: Value) -> Result<Value, EngineError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -1362,9 +1246,6 @@ fn dispatch_request_inner(
 ) -> (ControlResponse, ControlLoopAction) {
     let ControlRequest { id, method, params } = req;
     if method == "app.quit" {
-        if let Err(err) = reject_control_if_gui_only(app, "app.quit") {
-            return (ControlResponse::err_with_detail(id, err), ControlLoopAction::Continue);
-        }
         return (ControlResponse::ok(id, json!({ "quit": true })), ControlLoopAction::Quit);
     }
 
@@ -1376,13 +1257,11 @@ fn dispatch_request_inner(
                 "pong": true,
                 "bundled_fonts": crate::bundled_fonts_enabled(),
                 "version": env!("CARGO_PKG_VERSION"),
-                "gui_only": app.is_gui_only(),
             })),
             "command.list" => Ok(handle_command_list(app)),
             "command.run" => handle_command_run(app, &params, recorded.as_deref_mut()),
             "command.batch" => handle_command_batch(app, &params, recorded, rolled_back),
-            "doc.inspect" => reject_control_if_gui_only(app, "doc.inspect")
-                .and_then(|()| handle_doc_inspect(app.session().document(), app.session().is_dirty(), app.session().file_path(), &params)),
+            "doc.inspect" => handle_doc_inspect(app.session().document(), app.session().is_dirty(), app.session().file_path(), &params),
             "doc.export" => handle_doc_export(app, &params),
             "render.svg" => handle_render_svg(app, &params),
             "render.pdf" => handle_render_pdf(app, &params),
@@ -1435,10 +1314,6 @@ fn dispatch_gui_action_and_record(
     Ok(value)
 }
 
-fn is_control_readonly_ui_command(command_id: &str) -> bool {
-    command_id == "ui.canvas.preflight"
-}
-
 fn dispatch_command_by_id(
     app: &mut UiApp,
     command_id: &str,
@@ -1447,21 +1322,6 @@ fn dispatch_command_by_id(
 ) -> Result<Value, ControlCallError> {
     if is_gui_action_method(command_id) {
         return dispatch_gui_action_and_record(app, command_id, params, recorded);
-    }
-    if app.is_gui_only()
-        && !is_control_readonly_ui_command(command_id)
-        && (command_id.starts_with("ui.")
-            || command_id == "app.about"
-            || command_id == "app.feedback"
-            || command_id == "file.print"
-            || command_id == "analysis.updateParams")
-    {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            format!("direct `{command_id}` control request is blocked under --gui-only"),
-        )
-        .with_remediation("Interact via the 8 GUI actions (`ui.invoke_menu`, `ui.pointer_gesture`, `ui.press_key`, `ui.answer_dialog`).")
-        .into());
     }
     let seq_before = app.mutation_seq();
     if let Some(ui_value) = dispatch_ui_command_detailed(app, command_id, &params)? {
@@ -1833,7 +1693,6 @@ fn handle_ui_state(app: &mut UiApp) -> Value {
         "title": doc.title,
         "sheet_count": doc.total_sheet_count(),
         "dirty": app.session().is_dirty(),
-        "gui_only": app.is_gui_only(),
         "active_sheet_id": doc.active_sheet_id.as_ref().map(SheetId::as_str),
         "family_anchor_sheet_id": doc.family_anchor_sheet_id.as_ref().map(SheetId::as_str),
         "navigator_open": app.nav.navigator_open,
@@ -1880,7 +1739,6 @@ fn visual_sheet_title(doc: &ProjectDocument, sheet_id: &SheetId) -> String {
 }
 
 fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
-    reject_control_if_gui_only(app, "render.svg")?;
     require_params_object_or_null(params, "render.svg")?;
     let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
     let options = SvgExportOptions {
@@ -1903,7 +1761,6 @@ fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
 }
 
 fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
-    reject_control_if_gui_only(app, "render.pdf")?;
     require_params_object_or_null(params, "render.pdf")?;
     let opt_path = opt_str_param(params, &["path"])?.map(str::trim).filter(|p| !p.is_empty());
     if let Some(path) = opt_path {
@@ -1939,15 +1796,6 @@ fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
     }))
 }
 
-fn reject_control_if_gui_only(app: &UiApp, method: &str) -> Result<(), ControlCallError> {
-    if app.is_gui_only() {
-        return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, format!("direct `{method}` control request is blocked under --gui-only"))
-            .with_remediation("Inspect visible UI via GUI tools/screenshot or restart without --gui-only.")
-            .into());
-    }
-    Ok(())
-}
-
 fn opt_u32_bounded_param(params: &Value, key: &str, min: u32, max: u32) -> Result<Option<u32>, String> {
     let Some(raw) = opt_usize_param(params, &[key])? else {
         return Ok(None);
@@ -1977,7 +1825,6 @@ fn enforce_control_payload_budget(bytes_len: usize) -> Result<(), ControlCallErr
 }
 
 fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
-    reject_control_if_gui_only(app, "render.preview")?;
     require_params_object_or_null(params, "render.preview")?;
     let doc = app.document();
     let sheet_id = resolve_renderable_sheet_id(doc, params)?;
@@ -2023,7 +1870,6 @@ fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCa
 }
 
 fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
-    reject_control_if_gui_only(app, "doc.export")?;
     require_params_object_or_null(params, "doc.export")?;
     let raw_format =
         opt_non_empty_str_param(params, &["format"])?.ok_or_else(|| ControlCallError::from("doc.export requires a non-empty string 'format'"))?;
@@ -3262,9 +3108,6 @@ fn dispatch_ui_print_open(app: &mut UiApp, params: &Value) -> Result<Value, Stri
     let bleed_pt_opt = opt_finite_f64_param(params, &["bleed_pt"])?;
     let spool = opt_bool_param(params, &["spool"])?.unwrap_or(false);
     let submit = opt_bool_param(params, &["submit_to_os"])?.unwrap_or(false);
-    if app.is_gui_only() && submit {
-        return Err(String::from("submitting print jobs directly to the OS queue is blocked under --gui-only"));
-    }
 
     let active = app.session.document().active_sheet_id.clone();
     app.open_print_dialog_for(sheet_override.as_ref().or(active.as_ref()));
@@ -4522,7 +4365,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn doc_export_supports_emf_tsv_pdf_version_ttf_font_direct_path_and_gui_only_rejection() -> Result<(), Box<dyn std::error::Error>> {
+    fn doc_export_supports_emf_tsv_pdf_version_ttf_font_and_direct_path() -> Result<(), Box<dyn std::error::Error>> {
         use super::handle_control_line;
         use crate::UiApp;
 
@@ -4624,22 +4467,6 @@ mod tests {
             .to_string(),
         ))?;
         assert_eq!(bad_font_reply["ok"], serde_json::json!(false));
-
-        // 5. Under --gui-only, doc.export with path is blocked with gui_only_violation and does not touch disk.
-        let blocked_path = dir.join("blocked_gui_only.svg");
-        app.set_gui_only(true);
-        let gui_only_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
-            &mut app,
-            &serde_json::json!({
-                "id": "gui-only-export",
-                "method": "doc.export",
-                "params": { "format": "svg", "sheet_id": graph_id, "path": blocked_path.display().to_string() }
-            })
-            .to_string(),
-        ))?;
-        assert_eq!(gui_only_reply["ok"], serde_json::json!(false));
-        assert_eq!(gui_only_reply["error_detail"]["code"], serde_json::json!("gui_only_violation"));
-        assert!(!blocked_path.exists(), "gui-only blocked doc.export must not create file on disk");
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())

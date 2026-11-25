@@ -1622,8 +1622,6 @@ Single-call `initialize` request and response syntax:
 |---|---|---|
 | Headless stdio | `curvebook-cli mcp [--workdir <dir>]` | In-process `engine::Session` |
 | Live-attach stdio | `curvebook-cli mcp --control-port <port> [--control-token <token>]` | Forwarded over loopback `127.0.0.1:<port>` to running desktop `curvebook --control <port>` |
-| Strict GUI-only (in-process) | `curvebook-cli mcp --gui-only [--workdir <dir>]` | In-process `UiApp` exposing only the `gui` toolset |
-| Strict GUI-only (live-attach) | `curvebook-cli mcp --control-port <port> --gui-only` | Attached to a `--gui-only` desktop control listener |
 
 Pass `--workdir <dir>` to confine all filesystem reads, saves, exports, and external delimited-file links inside `<dir>` using canonicalized containment checks (`ErrorCode::PathEscape` if violated). `--workdir` and `--control-port` (including `CURVEBOOK_CONTROL_PORT`) are mutually exclusive and fail immediately with exit code `2`, because `--workdir` cannot confine file operations executed inside a live-attached desktop host process.
 
@@ -1661,18 +1659,14 @@ Exact schemas, annotations, and single-call JSON request/response examples for e
 
 ## Resources and Prompts
 
-- **Resources (`resources/list`, `resources/templates/list`, `resources/read`):** Exposes `sheet://<id>` (`application/json`) for every sheet in the active project, `result://<id>` (`application/json`) for computed `ResultSheet` outputs, and URI templates (`sheet://{id}`, `result://{id}`) via `resources/templates/list`. Disabled under `--gui-only` (`resources/list` and `resources/templates/list` return empty lists; `resources/read` fails with `gui_only_violation`).
-- **Prompts (`prompts/list`, `prompts/get`):** Built-in structured prompts (`dose_response_curve_fit`, `choose_two_group_test`, `publication_figure_checklist`) provide parameterised analysis checklists tailored to either standard mode or `--gui-only` mode.
+- **Resources (`resources/list`, `resources/templates/list`, `resources/read`):** Exposes `sheet://<id>` (`application/json`) for every sheet in the active project, `result://<id>` (`application/json`) for computed `ResultSheet` outputs, and URI templates (`sheet://{id}`, `result://{id}`) via `resources/templates/list`.
+- **Prompts (`prompts/list`, `prompts/get`):** Built-in structured prompts (`dose_response_curve_fit`, `choose_two_group_test`, `publication_figure_checklist`) provide parameterised scientific analysis checklists.
 
 Single-call `resources/read` syntax:
 
 ```json
 {"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"sheet://data-1"}}
 ```
-
-## Strict `--gui-only` Policy {#gui-only}
-
-Under `--gui-only` (`GuiOnlyPolicy::Strict`), `tools/list` exposes only the interactive `gui` toolset (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`). Calling `resources/read` returns JSON-RPC error `-32600` (`Invalid Request`) with `data.code: "gui_only_violation"`. Calling any non-`gui` tool (`command_run`, `command_batch`, `enable_toolset`, `doc_inspect`, `open_file`, `save_file`, `export`, `render_preview`) returns a `tools/call` result with `isError: true` and `structuredContent.code: "gui_only_violation"` (or JSON-RPC `-32600` if surfaced as a protocol-level error).
 
 ## Structured Error Payloads
 
@@ -1713,7 +1707,7 @@ Every built-in subcommand accepts `-h` / `--help` and follows deterministic sing
 - `export <in> (<out> | --out <out>) [--format <fmt>] [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]` — Export a specific table, graph, layout, or project to SVG, PDF, EMF, PNG, TIFF, CSV, TSV, JSON, `.curvebook`, or `.curvebook.d`.
 - `bench <file> [--json]` — Measure parse, recalculation, scene compilation, and export timings on a project file.
 - `perf [--json] [--require-release]` — Run synthetic performance budget checks.
-- `mcp [--control-port <port>] [--gui-only] [--workdir <dir>] [--control-token <token>]` — Start the stdio [MCP Server](mcp.md).
+- `mcp [--control-port <port>] [--workdir <dir>] [--control-token <token>]` — Start the stdio [MCP Server](mcp.md).
 
 Full argument, flag, default value, and option descriptions for every subcommand live in the generated [CLI Reference Registry](../registry/cli.html).
 
@@ -1750,7 +1744,7 @@ CurveBook supports three scriptable interfaces alongside MCP: a loopback JSON-li
 
 ## Loopback Desktop Control Protocol (`--control`)
 
-Launch the desktop GUI with `--control <port>` (optionally paired with `--gui-only` or `--control-token <token>`) to bind a loopback TCP JSON-lines listener on `127.0.0.1:<port>`. Non-loopback bindings are never opened.
+Launch the desktop GUI with `--control <port>` (optionally paired with `--window` or `--control-token <token>`) to bind a loopback TCP JSON-lines listener on `127.0.0.1:<port>`. Non-loopback bindings are never opened.
 
 - **Framing:** One UTF-8 JSON object per line terminated by `\n`, bounded by `MAX_CONTROL_LINE_BYTES` (`16 MiB`).
 - **Authentication:** Supply the bearer token via `"auth"` handshake or per-request `"token"` field (`--control-token`, `CURVEBOOK_CONTROL_TOKEN`, or the `control-<port>.token` file).
@@ -1767,8 +1761,6 @@ Single-call request and response syntax:
 ```
 
 Built-in control methods: `"auth"`, `"ping"`, `"command.list"`, `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`), `"app.quit"`, the interactive `ui.*` GUI actions (`ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`, `ui.answer_dialog`), plus any registered engine or `ui.*` command ID passed directly as `"method"`/`"op"`.
-
-When started with `--gui-only`, direct engine commands (`command.run`, `command.batch`, `engine.execute`), `doc.inspect`, `doc.export`, and `render.*` are rejected with `gui_only_violation` so external agents drive the desktop exclusively through the `ui.*` surface.
 
 ## Batch Manifest Format (`curvebook.batch.v1`) {#batch-manifest}
 
@@ -1913,7 +1905,6 @@ When enabled via `--control <port>` (or `CURVEBOOK_CONTROL_PORT`, `port` in `1..
 
 - Binds strictly to **`127.0.0.1:<port>`** (loopback interface only — never `0.0.0.0` or external NICs).
 - Authenticates JSON-lines commands with a constant-time bearer token (`CURVEBOOK_CONTROL_TOKEN` environment variable recommended; passing `--control-token` on the CLI exposes the secret in `ps` process listings and triggers a stderr warning).
-- Combining `--gui-only` blocks direct non-GUI engine mutations (`ErrorCode::GuiOnlyViolation`) so external automation drives only interactive GUI actions.
 
 ---
 
@@ -1944,7 +1935,7 @@ Security vulnerabilities, crash bugs, parser exploits, path-escape bypasses, or 
 
 - Untrusted `.curvebook`, `.cbtemplate`, `.csv`, `.pzfx`, or `.prism` archive/file parsing (bounded ZIP, XML, cell-count, and float-finite checks)
 - Path traversal or symlink escape across `--workdir` or unpacked `.curvebook.d/` saves
-- Loopback `--control` token validation and `--gui-only` enforcement
+- Loopback `--control` token validation and request framing limits
 - PDF / SVG / PNG / TIFF / EMF export integer/pixel/memory resource limits.
 
 ---
@@ -2018,7 +2009,6 @@ To resolve or work around GPU driver incompatibilities:
 - **`path_escape` under `--workdir`:** All path parameters (`path`, `out`, `image_path`, stored `ImportLinkSpec` targets) must resolve strictly inside `--workdir` without `..` traversal or external symlinks. Pass paths relative to `--workdir` (e.g., `"study.curvebook"`, `"exports/figure.pdf"`).
 - **MCP client connection failures:** `curvebook-cli mcp` reserves `stdout` strictly for JSON-RPC 2.0 frames and prints human diagnostics to `stderr`. Never wrap `curvebook-cli mcp` in shell profiles that print banners to `stdout`. See [Automation: MCP](automation/mcp.md).
 - **`--control` binding errors:** `--control <port>` accepts `1..=65535` (port `0` is rejected) and binds strictly to `127.0.0.1`. Set `CURVEBOOK_CONTROL_TOKEN` in the environment instead of `--control-token` CLI flags.
-- **`gui_only_violation`:** When `--gui-only` is active, direct engine tools (`analyze.run`, `table.setCell`, `project.save`, etc.) are blocked by policy; drive interactions via `ui.*` / GUI action primitives.
 
 ### MCP client cannot connect {#mcp-connection}
 
@@ -2059,8 +2049,7 @@ Errors that appear after a successful connection:
 | Symptom | Cause and fix |
 |---|---|
 | Tool result with `code: "path_escape"` (`category: "policy"`) | `--workdir` is set and the requested path is outside it (absolute path elsewhere, `..`, or a symlink out). Move the file inside the workdir or widen `--workdir`. |
-| Tool result with `code: "gui_only_violation"` | The server was started with `--gui-only`, which exposes only the `gui` tools (`ui_*`); every other tool, and `resources/read`, is rejected. Remove `--gui-only` for engine, file, and export tools ([strict `--gui-only` policy](automation/mcp.md#gui-only)). |
-| Tool result with `code: "conflict"` when calling a `ui_*` tool | Default headless mode has no live window. Start with `--gui-only`, or attach with `--control-port` ([attachment modes](automation/mcp.md#attachment-modes-and-filesystem-policy)). |
+| Tool result with `code: "conflict"` when calling a `ui_*` tool | Default headless mode has no live window. Attach to a running desktop control listener with `--control-port` ([attachment modes](automation/mcp.md#attachment-modes-and-filesystem-policy)). |
 | Tool result with `code: "io_error"` and `failed to connect to desktop control port` | `--control-port` (or `CURVEBOOK_CONTROL_PORT`) is set but no `curvebook --control <port>` instance is listening on `127.0.0.1:<port>`. Start the desktop side first, or drop the flag. The server itself still starts; the error appears on each tool call. |
 | Tool result with `code: "bad_input"` and `invalid or missing control authentication token` | The attached desktop rejected the control authentication token (the raw control error `unauthorized` is mapped to MCP `bad_input`). Check `--control-token`, `CURVEBOOK_CONTROL_TOKEN`, and the per-user token file described in the [control protocol reference](automation/control-and-batch.md#loopback-desktop-control-protocol---control). Use the token for the running desktop instance; do not disable authentication. |
 | `usage error: invalid --control-port` / `invalid CURVEBOOK_CONTROL_PORT` | The port must be an integer in `1..=65535`. |
@@ -2097,7 +2086,6 @@ Every validation, format, policy, solver, and system error maps deterministicall
 | `solver_failed` | `Compute` | Non-convergence (`HitMaxIters`), `ZeroVariance`, singular design/covariance matrix, unbracketed implicit root, ODE divergence, or `WeightingScheme` zero denominator (`ImpossibleWeights`). |
 | `insufficient_data` | `Compute` | Empty input, too few non-excluded observations/events for `df`, or missing raw replicates (`RequiresRawReplicates`) when `MeanSdN`/`MeanSemN` subcolumns are supplied. |
 | `cancelled` | `Compute` | Operation aborted via MCP/engine cancellation token. |
-| `gui_only_violation` | `Policy` | Direct non-GUI mutation or filesystem bypass attempted while `--gui-only` policy is active. |
 | `internal_panic` | `Internal` | Unexpected invariant fault trapped cleanly at the `guard.rs` safety boundary without aborting the host process. |
 | `internal_error` | `Internal` | Unclassified internal dispatch or serialization error. |
 

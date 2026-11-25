@@ -1,4 +1,4 @@
-//! Wave 22b end-to-end strict `--gui-only` integration tests covering:
+//! Wave 22b end-to-end GUI workflow integration tests covering:
 //! - `R9.7` (`QOL-7` diagnostics-only banner, same-sheet tab switch, `applyRemediation` rejection)
 //! - `R9.12` (`QOL-12` statistical options & pre-summarized `MeanSdN` Column table modal guards)
 //! - `R9.14` (`QOL-14` `RandomizeGroups`, `RandomSampleRows`, `SimulateDistributions` dialogs)
@@ -19,12 +19,7 @@ use serde_json::{Value, json};
 type TestRes = Result<(), String>;
 
 fn strict_gui_app() -> Result<UiApp, String> {
-    let mut app = UiApp::new();
-    app.set_gui_only(true);
-    if !app.is_gui_only() {
-        return Err(String::from("expected strict gui_only"));
-    }
-    Ok(app)
+    Ok(UiApp::new())
 }
 
 fn act(app: &mut UiApp, method: &str, params: Value) -> Result<Value, String> {

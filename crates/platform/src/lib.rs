@@ -7,6 +7,7 @@
 #![deny(clippy::indexing_slicing)]
 
 pub mod base64;
+pub mod control_auth;
 pub mod fs;
 pub mod path_guard;
 pub mod process;
@@ -16,6 +17,7 @@ pub mod sync;
 use std::fmt;
 
 pub use base64::Base64Error;
+pub use control_auth::{CONTROL_AUTH_TOKEN_BYTES, ControlAuth, MAX_CONTROL_TOKEN_BYTES};
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs::{read_regular_file_bytes, read_regular_file_bytes_if_exists, read_regular_file_utf8, sync_dir, write_atomic, write_atomic_with_hook};
 pub use path_guard::PATH_PARAM_KEYS;

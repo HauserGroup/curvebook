@@ -568,7 +568,6 @@ impl WebWorkspaceHost {
 
     fn install_session(&mut self, mut session: Session, tag: &str, warnings: Vec<String>, mark_clean: bool, preserve_virtual_workspace: bool) {
         session.set_path_policy(ExternalPathPolicy::RejectExternal);
-        session.set_gui_only(self.app.session().gui_only());
         if mark_clean {
             session.set_file_path(None, true);
         }

@@ -509,7 +509,7 @@ impl WorkflowRun {
         self.file_dialog.requests()
     }
 
-    /// Verify zero accumulated intent errors, zero background panics, strict `gui_only`/`human_path_only`
+    /// Verify zero accumulated intent errors, zero background panics, strict `human_path_only`
     /// compliance, and clean `egui` hit-box/scrollbar parity (useful for non-analysis I/O workflows).
     pub fn assert_shell_health(&mut self, label: &str) -> TestRes {
         self.assert_no_intent_errors(label)?;

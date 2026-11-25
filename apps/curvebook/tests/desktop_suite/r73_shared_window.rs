@@ -291,7 +291,6 @@ fn shared_live_window_human_and_control_edits_render_repaint_and_persist() -> Re
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
         new_instance: false,
-        gui_only: false,
         locale_override: None,
         theme_override: None,
         recovery_root: Some(recovery_dir.clone()),
@@ -493,7 +492,7 @@ fn shared_live_window_human_and_control_edits_render_repaint_and_persist() -> Re
 }
 
 #[test]
-fn shared_live_window_enforces_gui_only_and_shares_human_and_agent_state() -> Result<(), Box<dyn std::error::Error>> {
+fn shared_live_window_shares_human_and_agent_state() -> Result<(), Box<dyn std::error::Error>> {
     let Some((listener, addr)) = bind_loopback_probe_listener()? else {
         return Ok(());
     };
@@ -501,7 +500,6 @@ fn shared_live_window_enforces_gui_only_and_shares_human_and_agent_state() -> Re
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
         new_instance: false,
-        gui_only: true,
         locale_override: None,
         theme_override: None,
         recovery_root: None,
@@ -509,7 +507,7 @@ fn shared_live_window_enforces_gui_only_and_shares_human_and_agent_state() -> Re
         ..DesktopHostConfig::default()
     });
     let win_id = rt.open_window(None, viewport)?;
-    // Human toggles rulers in the live window while --gui-only is active.
+    // Human toggles rulers in the live window.
     rt.dispatch(DesktopHostEvent::MenuAction { window_id: win_id, command_id: String::from("ui.rulers.toggle") })?;
 
     let auth = ControlAuth::generate()?;
@@ -532,33 +530,12 @@ fn shared_live_window_enforces_gui_only_and_shares_human_and_agent_state() -> Re
         assert_eq!(auth_resp["ok"], json!(true));
 
         let ping = send_json_line(&mut w, &mut r, &json!({"id": "g1", "method": "ping"})).map_err(|e| e.to_string())?;
-        assert_eq!(ping["result"]["gui_only"], json!(true));
+        assert_eq!(ping["ok"], json!(true));
 
         let state = send_json_line(&mut w, &mut r, &json!({"id": "g2", "method": "ui.state"})).map_err(|e| e.to_string())?;
-        assert_eq!(state["result"]["gui_only"], json!(true));
         assert_eq!(state["result"]["rulers_visible"], json!(true));
 
-        // Direct non-GUI mutations and screenshot disk writes must be blocked with `gui_only_violation`.
-        for (idx, blocked_req) in [
-            json!({"id": "b1", "method": "engine.execute", "params": {"command_id": "sheet.createData", "params": {"kind": "xy"}}}),
-            json!({"id": "b2", "method": "command.run", "params": {"command": "sheet.createData", "params": {"kind": "xy"}}}),
-            json!({"id": "b3", "method": "command.batch", "params": {"commands": [{"command": "sheet.createData", "params": {"kind": "xy"}}]}}),
-            json!({"id": "b4", "method": "sheet.createData", "params": {"kind": "xy", "title": "Bypass"}}),
-            json!({"id": "b5", "method": "ui.theme.set", "params": {"mode": "dark"}}),
-            json!({"id": "b6", "method": "ui.screenshot", "params": {"path": "forbidden-gui-only.png"}}),
-            json!({"id": "b7", "method": "doc.inspect", "params": {}}),
-            json!({"id": "b8", "method": "render.svg", "params": {}}),
-            json!({"id": "b9", "method": "render.pdf", "params": {}}),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let resp = send_json_line(&mut w, &mut r, &blocked_req).map_err(|e| e.to_string())?;
-            assert_eq!(resp["ok"], json!(false), "blocked[{idx}] unexpectedly succeeded: {resp}");
-            assert_eq!(resp["error_detail"]["code"], json!("gui_only_violation"), "blocked[{idx}] wrong code: {resp}");
-        }
-
-        // Interactive GUI actions work on the shared live window under --gui-only.
+        // Interactive GUI actions work on the shared live window.
         let opened =
             send_json_line(&mut w, &mut r, &json!({"id": "g3", "method": "ui.invoke_menu", "params": {"path": "Analyze/Power and Sample Size..."}}))
                 .map_err(|e| e.to_string())?;
@@ -578,10 +555,8 @@ fn shared_live_window_enforces_gui_only_and_shares_human_and_agent_state() -> Re
         assert_eq!(shot["ok"], json!(true));
         assert!(shot["result"]["data_base64"].as_str().is_some_and(|b| b.starts_with("iVBORw0K")));
 
-        // Under --gui-only (`R2-S10-04`), `app.quit` is also rejected via control channel.
         let quit = send_json_line(&mut w, &mut r, &json!({"id": "g6", "method": "app.quit"})).map_err(|e| e.to_string())?;
-        assert_eq!(quit["ok"], json!(false), "app.quit must be blocked under --gui-only: {quit}");
-        assert_eq!(quit["error_detail"]["code"], json!("gui_only_violation"));
+        assert_eq!(quit["ok"], json!(true), "app.quit failed: {quit}");
         client_done_bg.store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     });
@@ -594,7 +569,7 @@ fn shared_live_window_enforces_gui_only_and_shares_human_and_agent_state() -> Re
         output.textures_delta.clear();
         std::thread::sleep(Duration::from_millis(5));
     }
-    client.join().map_err(|_| "gui-only client panicked")??;
+    client.join().map_err(|_| "live control client panicked")??;
 
     let live_ui = app.runtime().window(win_id)?.app();
     assert_eq!(live_ui.canvas_dialogs.active_dialog, ActiveDialog::None);
@@ -617,7 +592,6 @@ fn shared_live_window_wal_recovery_and_human_close_unblocks_server() -> Result<(
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
         new_instance: false,
-        gui_only: false,
         locale_override: None,
         theme_override: None,
         recovery_root: Some(recovery_dir.clone()),

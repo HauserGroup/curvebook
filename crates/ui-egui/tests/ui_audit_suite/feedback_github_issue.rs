@@ -190,7 +190,7 @@ fn oversized_feedback_truncates_url_cleanly_while_markdown_stays_complete() -> R
 }
 
 #[test]
-fn control_channel_dispatches_app_feedback_and_respects_gui_only() {
+fn control_channel_dispatches_app_feedback() {
     let mut app = UiApp::new();
     let resp_raw = handle_control_line(&mut app, &json!({ "id": "fb-1", "method": "app.feedback", "params": { "category": "feature" } }).to_string());
     let resp: Value = serde_json::from_str(&resp_raw).expect("valid JSON");
@@ -203,10 +203,4 @@ fn control_channel_dispatches_app_feedback_and_respects_gui_only() {
     let bad_raw = handle_control_line(&mut app, &json!({ "id": "fb-2", "method": "app.feedback", "params": { "category": "bogus" } }).to_string());
     let bad: Value = serde_json::from_str(&bad_raw).expect("valid JSON");
     assert_eq!(bad.get("ok").and_then(Value::as_bool), Some(false));
-
-    app.set_gui_only(true);
-    let blocked_raw = handle_control_line(&mut app, &json!({ "id": "fb-3", "method": "app.feedback", "params": {} }).to_string());
-    let blocked: Value = serde_json::from_str(&blocked_raw).expect("valid JSON");
-    assert_eq!(blocked.get("ok").and_then(Value::as_bool), Some(false));
-    assert_eq!(blocked.pointer("/error_detail/code").and_then(Value::as_str), Some("gui_only_violation"));
 }

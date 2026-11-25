@@ -311,7 +311,6 @@ fn human_path_edit_multiplicity_method_dropdown() -> Result<(), Box<dyn std::err
     let col = make_column_sheet("col-1", "Dose Cohort", 0.0)?;
     let doc = ProjectDocument { data_sheets: vec![col], active_sheet_id: Some(SheetId::new("col-1")), ..Default::default() };
     *app.session_mut() = Session::from_document(doc);
-    app.set_gui_only(true);
     let _ = app.execute_command(
         "analysis.run",
         json!({ "sheet_id": "res-anova", "source_sheet_id": "col-1", "kind": "one_way_anova", "multiplicity": "tukey" }),
@@ -416,7 +415,6 @@ fn human_path_split_selectors_grow_while_open() -> Result<(), Box<dyn std::error
         ProjectDocument { data_sheets: vec![col1], graph_sheets: vec![gs1], active_sheet_id: Some(SheetId::new("col-1")), ..Default::default() };
 
     let mut app = UiApp::from_session(Session::from_document(doc));
-    app.set_gui_only(true);
     app.split.enabled = true;
     app.split.primary_sheet_id = Some(SheetId::new("col-1"));
     app.split.secondary_sheet_id = Some(SheetId::new("g-1"));

@@ -123,7 +123,6 @@ fn seed_workspace() -> Result<SeededWorkspace, Box<dyn std::error::Error>> {
     doc.active_sheet_id = Some(info_id.clone());
 
     let mut app = UiApp::from_session(Session::from_document(doc));
-    app.set_gui_only(true);
     app.sync_views();
     Ok(SeededWorkspace { app, info_id, graph_id, heatmap_id })
 }

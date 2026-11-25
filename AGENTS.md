@@ -75,7 +75,6 @@ One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came 
 
 - **Engine command registry:** `crates/engine/src/cmd/mod.rs` owns the single typed `CommandSpec` registry (`106` commands across `9` `CommandGroup` categories in [`docs/commands.md`](docs/commands.md): `CommandGroup`, `Effects` bitflags including `MUTATES_DOCUMENT` / `READ_ONLY` / `IDEMPOTENT`, JSON Schema input specs, `enabled` predicates, and handlers with `serde_path_to_error` typed parameters), exposed via `cmd::registry()`. Whenever adding or editing an engine command, update its `CommandSpec` entry, tests, and regenerated [`docs/commands.md`](docs/commands.md) (`cargo xtask commands`) in one PR, conforming to [docs/command-ids.md](docs/command-ids.md).
 - **UI command registry:** UI-only actions use the typed `UiCommandSpec` struct slice `UI_COMMANDS` (`61` entries) in `crates/ui-egui/src/menus/ui_commands.rs`. `crates/mcp/src/ui_catalog.rs` is generated from `UI_COMMANDS` by `cargo xtask ui-commands`—never hand-edit `ui_catalog.rs`, and always check sync with `cargo xtask ui-commands --check`.
-- **Strict `--gui-only` channel lock:** Under `curvebook --control <port> --gui-only` or `curvebook-cli mcp [--control-port <p>] --gui-only` (`GuiOnlyPolicy::Strict` in `crates/engine/src/lib.rs`), direct `Caller::Control` / `Caller::Mcp` engine mutations, `doc_inspect`, `resources/read`, and disk-path `ui.screenshot` writes are rejected with `ErrorCode::GuiOnlyViolation` (`"gui_only_violation"`), while the 8 `gui` tools (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`) drive `UiApp` widgets that commit internally via `Caller::Ui`.
 
 ---
 
@@ -115,7 +114,7 @@ Read these before editing code:
   - Run `cargo xtask ci quick` before opening the PR. The project skill `.claude/skills/fix-issue/SKILL.md` walks an agent through these steps.
 
 ### Architecture Rules
-1. **Headless first:** All document/data/analysis/graph mutations execute through `curvebook-engine` (`Session::execute`), ensuring parity across GUI (`ui-egui` via `Caller::Ui`), CLI (`curvebook-cli`), MCP (`curvebook-mcp`), crash-recovery replay (`ops.journal`), and batch runs (`curvebook.batch.v1`). UI layers must never mutate `Project` directly. Under strict `--gui-only`, interactive MCP/control callers must drive `UiApp` widgets rather than calling direct `L5` engine mutation commands.
+1. **Headless first:** All document/data/analysis/graph mutations execute through `curvebook-engine` (`Session::execute`), ensuring parity across GUI (`ui-egui` via `Caller::Ui`), CLI (`curvebook-cli`), MCP (`curvebook-mcp`), crash-recovery replay (`ops.journal`), and batch runs (`curvebook.batch.v1`). UI layers must never mutate `Project` directly.
 2. **Extend through seams:** Register new commands, analyses, fit equations, file formats, cursors, locales, and schema steps through the canonical seams documented in [docs/extending.md](docs/extending.md).
 3. **Data over code:** Prefer declarative descriptor tables, schema definitions, and TOML/struct registries (`CommandSpec`, `UiCommandSpec`, `cursors.toml`, parametric model metadata, format descriptors) over copy-pasted match arms.
 4. **Structured results:** Commands, fits, statistical analyses, and imports return typed result structures and typed errors (`EngineError`, `DocError`, `FormatError`) rather than opaque strings.
@@ -163,7 +162,7 @@ cargo xtask pending
 cargo xtask wasm
 ```
 
-(Running `cargo xtask ci quick [--direct] [--base <git-ref>]` executes the fast pre-PR tier described above—use `--direct` for inner-loop iteration on foundational crates and omit it before opening a PR; running `cargo xtask ci` executes the full workspace CI bundle. For strict `--gui-only` MCP/control/UI workflow checks, run integration targets `gui_only_workflows`, `gui_w22b_qol_and_r9`, `gui_wf_foundations_and_data`, `gui_wf_group_comparisons_and_power`, `gui_wf_regression_contingency_multivariate`, `gui_wf_statistical_graphs`, `gui_wf_multivariable_and_transforms`, `gui_wf_clustering_glm_and_pharma`, and `gui_wf_advanced_statistical_graphs` in `curvebook-ui-egui`, `gui_only_surface` in `curvebook-mcp`, `mcp_gui_only_parity` in `curvebook-cli`, and `gui_only_wiring` in `curvebook`.)
+(Running `cargo xtask ci quick [--direct] [--base <git-ref>]` executes the fast pre-PR tier described above—use `--direct` for inner-loop iteration on foundational crates and omit it before opening a PR; running `cargo xtask ci` executes the full workspace CI bundle. For interactive MCP/control/UI workflow checks, run integration targets `gui_wf_suite` and `human_wf_suite` in `curvebook-ui-egui`, `mcp_suite` in `curvebook-mcp`, `cli_suite` in `curvebook-cli`, and `desktop_suite` in `curvebook`.)
 
 ### Parallel Agents
 When multiple agents work concurrently on the repository:

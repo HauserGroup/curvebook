@@ -1020,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn create_emits_linked_result_and_graph_under_gui_only() {
+    fn create_emits_linked_result_and_graph() {
         let mut doc = ProjectDocument::new("Power Plan").expect("doc");
         let ds = curvebook_doc::DataSheet::new(
             SheetId::try_new("data-base").expect("id"),
@@ -1032,10 +1032,9 @@ mod tests {
         .expect("ds");
         doc.add_data_sheet(ds).expect("add");
         let mut session = Session::from_document(doc);
-        session.set_gui_only(curvebook_engine::GuiOnlyPolicy::Strict);
 
         let mut wizard = PowerWizardState::default();
-        let created = wizard.execute_create(&mut session).expect("gui create succeeds even in gui_only");
+        let created = wizard.execute_create(&mut session).expect("gui create succeeds");
         assert!(session.document().result_sheet(&created.result_sheet_id).is_some());
         let graph_id = created.graph_sheet_id.expect("linked graph created");
         let graph = session.document().graph_sheet(&graph_id).expect("graph present");

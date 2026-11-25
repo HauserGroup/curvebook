@@ -22,7 +22,7 @@ use curvebook_doc::{
 use curvebook_fit::{DataPoint, EquationCategory, format_model_equation_tex, get_builtin_model, list_builtin_equations};
 use curvebook_format::registry::{FormatDescriptor, FormatKind, FormatRegistry};
 use curvebook_mcp::{
-    PromptDescriptor, ResourceDescriptor, ToolDefinition, list_gui_tools, list_prompts_for_mode, list_resources, list_tools, list_tools_for_group,
+    PromptDescriptor, ResourceDescriptor, ToolDefinition, list_gui_tools, list_prompts, list_resources, list_tools, list_tools_for_group,
 };
 use curvebook_palette::{ColormapId, PaletteId};
 use curvebook_stats::power::PowerTestFamily;
@@ -242,10 +242,8 @@ fn build_mcp_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> Reg
         gui_tools.len(),
         groups.len(),
     );
-    let _ = writeln!(
-        body,
-        "<p>See <a href=\"../automation/mcp.html\">MCP Server Reference</a> for transport framing and <code>--gui-only</code> policy details.</p>"
-    );
+    let _ =
+        writeln!(body, "<p>See <a href=\"../automation/mcp.html\">MCP Server Reference</a> for transport framing and live attachment details.</p>");
 
     push_heading(&mut toc, &mut body, 2, "core-tools", "Core MCP Tools");
     for tool in &core_tools {
@@ -280,12 +278,12 @@ fn build_mcp_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> Reg
     }
     let _ = writeln!(
         body,
-        "<div class=\"table-wrap\"><table>\n<thead><tr><th>URI Scheme</th><th>MIME Type</th><th>Sample Descriptor</th><th>Policy</th></tr></thead>\n<tbody>"
+        "<div class=\"table-wrap\"><table>\n<thead><tr><th>URI Scheme</th><th>MIME Type</th><th>Sample Descriptor</th></tr></thead>\n<tbody>"
     );
     for res in &sample_resources {
         let _ = writeln!(
             body,
-            "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{} — {}</td><td>Disabled under <code>--gui-only</code></td></tr>",
+            "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{} — {}</td></tr>",
             escape_html(&res.uri),
             escape_html(&res.mime_type),
             escape_html(&res.name),
@@ -294,24 +292,19 @@ fn build_mcp_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> Reg
     }
     let _ = writeln!(
         body,
-        "<tr><td><code>result://&lt;id&gt;</code></td><td><code>application/json</code></td><td>Serialized computed <code>ResultSheet</code> tabs and diagnostics</td><td>Disabled under <code>--gui-only</code></td></tr>"
+        "<tr><td><code>result://&lt;id&gt;</code></td><td><code>application/json</code></td><td>Serialized computed <code>ResultSheet</code> tabs and diagnostics</td></tr>"
     );
     body.push_str("</tbody>\n</table></div>\n");
 
     push_heading(&mut toc, &mut body, 2, "mcp-prompts", "Built-in Workflow Prompts");
-    let prompts_normal: Vec<PromptDescriptor> = list_prompts_for_mode(false);
-    let prompts_gui: Vec<PromptDescriptor> = list_prompts_for_mode(true);
-    for (idx, p) in prompts_normal.iter().enumerate() {
+    let prompts: Vec<PromptDescriptor> = list_prompts();
+    for p in &prompts {
         let anchor = format!("mcp-prompt-{}", p.name);
         expected.mcp_prompts.push(anchor.clone());
         az.push(AzEntry { term: p.name.clone(), category: String::from("MCP Prompt"), rel_href: format!("registry/mcp-tools.html#{anchor}") });
-        let gui_desc = prompts_gui.get(idx).map(|g| g.description.as_str()).unwrap_or("");
         let _ = writeln!(body, "<div class=\"entry-card\" id=\"{anchor}\" tabindex=\"-1\">");
         let _ = writeln!(body, "  <h4><code>{}</code></h4>", escape_html(&p.name));
-        let _ = writeln!(body, "  <p><strong>Standard mode:</strong> {}</p>", escape_html(&p.description));
-        if !gui_desc.is_empty() {
-            let _ = writeln!(body, "  <p><strong>GUI-only mode:</strong> {}</p>", escape_html(gui_desc));
-        }
+        let _ = writeln!(body, "  <p>{}</p>", escape_html(&p.description));
         if !p.arguments.is_empty() {
             body.push_str("  <ul>\n");
             for arg in &p.arguments {

@@ -41,8 +41,7 @@ struct Wave4DriverState {
 }
 
 impl Wave4DriverState {
-    fn new(mut app: UiApp) -> Self {
-        app.set_gui_only(true);
+    fn new(app: UiApp) -> Self {
         let views = app.egui_views.clone();
         Self { app, views, intents: PendingUiIntents::new(), outside_click_captured: false, outside_wheel_captured: false, dialog_rect_pt: None }
     }
@@ -78,7 +77,6 @@ fn make_result_sheet(id: SheetId, title: &str, src: SheetId, kind: AnalysisKind)
 
 fn seed_rich_project_app() -> Result<(UiApp, SheetId, SheetId, SheetId), Box<dyn std::error::Error>> {
     let mut app = UiApp::new();
-    app.set_gui_only(true);
 
     // 1. Column table (equal & rich values for t-test / ANOVA / descriptive / outliers)
     let col_id = SheetId::try_new("col-main")?;

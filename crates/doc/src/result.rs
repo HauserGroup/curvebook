@@ -24,7 +24,7 @@ pub enum ErrorCategory {
     Format,
     /// Operating-system filesystem or stream I/O failure.
     Io,
-    /// Security, sandbox, resource-budget, or `--gui-only` channel policy rejection.
+    /// Security, sandbox, or resource-budget policy rejection.
     Policy,
     /// Statistical, regression, or numerical solver failure (non-convergence, singular design, or insufficient observations).
     Compute,
@@ -90,8 +90,6 @@ pub enum ErrorCode {
     InsufficientData,
     /// Long-running computation or user workflow was explicitly cancelled (`"cancelled"`).
     Cancelled,
-    /// Direct non-GUI mutation or read attempted while strict `--gui-only` policy is active (`"gui_only_violation"`).
-    GuiOnlyViolation,
     /// Caught panic converted into a structured error at the `guard.rs` defence-in-depth boundary (`"internal_panic"`).
     InternalPanic,
     /// Fallback code for unclassified internal failures or unrecognized legacy error strings (`"internal_error"`).
@@ -100,7 +98,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Complete ordered list of all canonical [`ErrorCode`] variants.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 17] = [
         Self::BadInput,
         Self::NotFound,
         Self::AlreadyExists,
@@ -116,7 +114,6 @@ impl ErrorCode {
         Self::SolverFailed,
         Self::InsufficientData,
         Self::Cancelled,
-        Self::GuiOnlyViolation,
         Self::InternalPanic,
         Self::InternalError,
     ];
@@ -140,7 +137,6 @@ impl ErrorCode {
             Self::SolverFailed => "solver_failed",
             Self::InsufficientData => "insufficient_data",
             Self::Cancelled => "cancelled",
-            Self::GuiOnlyViolation => "gui_only_violation",
             Self::InternalPanic => "internal_panic",
             Self::InternalError => "internal_error",
         }
@@ -154,7 +150,7 @@ impl ErrorCode {
             Self::NotFound | Self::AlreadyExists | Self::Conflict | Self::FrozenSheet | Self::CycleDetected => ErrorCategory::State,
             Self::UnsupportedFormat | Self::UnsupportedVersion | Self::CorruptData => ErrorCategory::Format,
             Self::IoError => ErrorCategory::Io,
-            Self::PathEscape | Self::ResourceLimit | Self::GuiOnlyViolation => ErrorCategory::Policy,
+            Self::PathEscape | Self::ResourceLimit => ErrorCategory::Policy,
             Self::SolverFailed | Self::InsufficientData | Self::Cancelled => ErrorCategory::Compute,
             Self::InternalPanic | Self::InternalError => ErrorCategory::Internal,
         }
@@ -180,7 +176,6 @@ impl ErrorCode {
             "solver_failed" | "analysis_error" => Self::SolverFailed,
             "insufficient_data" => Self::InsufficientData,
             "cancelled" | "canceled" => Self::Cancelled,
-            "gui_only_violation" => Self::GuiOnlyViolation,
             "internal_panic" | "panic" => Self::InternalPanic,
             _ => Self::InternalError,
         }

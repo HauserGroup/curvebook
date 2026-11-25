@@ -127,7 +127,6 @@ pub struct UiTreeSnapshot {
     pub active_dialog: String,
     pub focus_widget_id: Option<String>,
     pub zoom: f64,
-    pub gui_only: bool,
     pub undo_depth: usize,
     pub redo_depth: usize,
     pub dirty: bool,

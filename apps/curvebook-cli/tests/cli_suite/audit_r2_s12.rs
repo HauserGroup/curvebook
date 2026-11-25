@@ -1,34 +1,24 @@
 //! Permanent Round 2 (`R0.19`) Slice `S12` audit regression suite for `curvebook-cli`.
 //!
 //! Covers:
-//! - `R2-S12-01`: `--control-port` CLI/MCP handshake & bidirectional `--gui-only` policy enforcement.
 //! - `R2-S12-02`: `is_unpacked_project_path`, `convert`, and `<cmd> --out` never classify `.` or
 //!   plain directories without `.curvebook.d` suffix as unpacked projects or delete `<dir>/sheets/`.
-//! - `R2-S12-03`: In-process `curvebook-cli mcp --gui-only` `ui_invoke_menu` works on parameterless
-//!   non-`ui.*` menu items without `expected object, got null` and blocks `ui.result.copyMethodsReport`.
 //! - `R2-S12-05`: `cmd_convert` fails closed on invalid `.cbtemplate` archive kind without falling back
 //!   to `open_archive_bytes`.
 //! - `R2-S12-07`: Hosted `UiApp` + `McpServerState::with_gui_host` shares a single `Session` & `resources/*`.
 //! - `R2-S12-08`: Direct CLI `PropKind::Integer` parses full `u64` seeds `> i64::MAX`,
 //!   `ensure_param_output_parents` ignores read-only commands, and `--out` export runs inside `run_guarded`.
-//! - `R2-S12-09`: In-process `--gui-only` MCP serves GUI-only prompts and preserves `"wheel"` action.
 use std::fs;
-use std::io::{BufReader, ErrorKind};
-use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Output};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
 
 use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, SheetId, TableArchetype};
 use curvebook_engine::{EngineError, Session};
 use curvebook_format::save_project_file;
-use curvebook_mcp::{GUI_ONLY_SERVER_INSTRUCTIONS, GuiSessionHost, McpServerState, call_tool, dispatch_json_value};
-use curvebook_ui_egui::{ControlAuth, UiApp, dispatch_gui_action, serve_control_stream_with_quit};
+use curvebook_mcp::{GuiSessionHost, McpServerState, call_tool, dispatch_json_value};
+use curvebook_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::{Value, json};
 
-use super::common::{CliHarness, McpChild, TempDir, loopback_required};
+use super::common::{CliHarness, TempDir};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -41,24 +31,14 @@ struct SharedUiAppHost {
 }
 
 impl SharedUiAppHost {
-    fn new(gui_only: bool) -> Self {
-        let mut app = UiApp::new();
-        app.set_gui_only(gui_only);
-        Self { app }
+    fn new() -> Self {
+        Self { app: UiApp::new() }
     }
 }
 
 impl GuiSessionHost for SharedUiAppHost {
     fn call_gui(&mut self, method: &str, params: Value) -> Result<Value, EngineError> {
         dispatch_gui_action(&mut self.app, method, params)
-    }
-
-    fn set_gui_only(&mut self, gui_only: bool) {
-        self.app.set_gui_only(gui_only);
-    }
-
-    fn is_gui_only(&self) -> bool {
-        self.app.is_gui_only()
     }
 
     fn hosted_session(&self) -> Option<&Session> {
@@ -72,97 +52,6 @@ impl GuiSessionHost for SharedUiAppHost {
     fn sync_after_session_mutation(&mut self) {
         self.app.sync_views();
     }
-}
-
-#[test]
-fn r2_s12_01_cli_control_port_handshake_enforces_gui_only_in_both_directions() -> TestResult {
-    use std::io::Cursor;
-
-    // In-process control stream test (works even inside strict sandbox without TCP loopback).
-    let token = "audit-r2-s12-token";
-    let auth = ControlAuth::from_token(token)?;
-    let mut locked_app = UiApp::new();
-    locked_app.set_gui_only(true);
-    let auth_clone = auth.clone();
-    let mut client = McpServerState::with_control_port(49410)?.with_control_token(token)?.with_control_handler(move |method, params| {
-        let auth_line =
-            serde_json::to_string(&json!({ "id": 0, "method": "auth", "params": { "token": auth_clone.as_str() } })).map_err(|e| e.to_string())?;
-        let req_line = serde_json::to_string(&json!({ "id": "mcp-1", "method": method, "params": params })).map_err(|e| e.to_string())?;
-        let input = format!("{auth_line}\n{req_line}\n");
-        let mut reader = BufReader::new(Cursor::new(input.as_bytes()));
-        let mut out = Vec::new();
-        let _ = serve_control_stream_with_quit(&mut locked_app, &mut reader, &mut out, &auth_clone).map_err(|e| e.to_string())?;
-        let text = String::from_utf8(out).map_err(|e| e.to_string())?;
-        let reply_line = text.lines().nth(1).ok_or_else(|| format!("missing control reply in `{text}`"))?;
-        let parsed: Value = serde_json::from_str(reply_line).map_err(|e| e.to_string())?;
-        if parsed["ok"] == json!(true) { Ok(parsed["result"].clone()) } else { Err(parsed["error"].as_str().unwrap_or("control error").to_owned()) }
-    });
-
-    let init = dispatch_json_value(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }), &mut client)
-        .ok_or("missing initialize reply")?;
-    assert_eq!(init["result"]["instructions"], json!(GUI_ONLY_SERVER_INSTRUCTIONS));
-    assert!(client.is_gui_only());
-
-    // Live TCP loopback binary test when loopback bind+connect is permitted in the active environment.
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(l) => l,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
-        Err(err) => return Err(err.into()),
-    };
-    let addr = listener.local_addr()?;
-    if let Err(err) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
-        if err.kind() == ErrorKind::PermissionDenied && !loopback_required() {
-            return Ok(());
-        }
-        return Err(err.into());
-    }
-    let _ = listener.accept();
-    listener.set_nonblocking(true)?;
-    let port = addr.port();
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_flag = Arc::clone(&stop);
-    let tcp_auth = ControlAuth::from_token(token)?;
-    let server = thread::spawn(move || -> Result<(), String> {
-        let mut app = UiApp::new();
-        app.set_gui_only(true);
-        loop {
-            if stop_flag.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-                    let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
-                    let mut reader = BufReader::new(stream);
-                    let quit = serve_control_stream_with_quit(&mut app, &mut reader, &mut writer, &tcp_auth).map_err(|e| e.to_string())?;
-                    if quit {
-                        return Ok(());
-                    }
-                }
-                Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(err) => return Err(err.to_string()),
-            }
-        }
-    });
-
-    // Spawn CLI MCP WITHOUT `--gui-only` pointing at the `--gui-only` desktop control port.
-    let port_str = port.to_string();
-    let mut attached = McpChild::spawn_piped(&["mcp", "--control-port", &port_str, "--control-token", token])?;
-    let tcp_init = attached.initialize()?;
-    assert_eq!(tcp_init["instructions"], json!(GUI_ONLY_SERVER_INSTRUCTIONS));
-    let listed = attached.request("tools/list", json!({}))?;
-    assert_eq!(listed["result"]["tools"].as_array().map(Vec::len), Some(8));
-    let id = attached.next_req_id();
-    let blocked = attached.call_tool_envelope(id, "doc_inspect", json!({}))?;
-    assert_eq!(blocked["result"]["isError"], json!(true));
-    assert_eq!(blocked["result"]["structuredContent"]["code"], json!("gui_only_violation"));
-
-    attached.finish()?;
-    stop.store(true, Ordering::Relaxed);
-    server.join().map_err(|_| "TCP server thread panicked")??;
-    Ok(())
 }
 
 #[test]
@@ -200,55 +89,6 @@ fn r2_s12_02_unpacked_dir_check_never_classifies_dot_or_plain_dirs() -> TestResu
 }
 
 #[test]
-fn r2_s12_03_and_09_in_process_gui_only_menu_prompts_and_wheel() -> TestResult {
-    let mut mcp = McpChild::spawn_piped(&["mcp", "--gui-only"])?;
-    let init = mcp.initialize()?;
-    assert_eq!(init["instructions"], json!(GUI_ONLY_SERVER_INSTRUCTIONS));
-
-    // Create a sheet first via `ui_invoke_menu` so standard non-`ui.*` menu items are enabled.
-    let id = mcp.next_req_id();
-    let new_sheet =
-        mcp.call_tool_envelope(id, "ui_invoke_menu", json!({ "command_id": "sheet.createData", "params": { "sheet_id": "m1", "kind": "Column" } }))?;
-    assert_ne!(new_sheet["result"]["isError"], json!(true), "sheet.createData failed: {new_sheet}");
-
-    // Standard non-`ui.*` zero-arg menu item WITHOUT `params` must pass root object `{}` (never null).
-    let id = mcp.next_req_id();
-    let recalc = mcp.call_tool_envelope(id, "ui_invoke_menu", json!({ "path": ["Analyze", "Recalculate All"] }))?;
-    assert_ne!(recalc["result"]["isError"], json!(true), "Recalculate All without params failed: {recalc}");
-
-    let id = mcp.next_req_id();
-    let undo = mcp.call_tool_envelope(id, "ui_invoke_menu", json!({ "path": ["Edit", "Undo"] }))?;
-    assert_ne!(undo["result"]["isError"], json!(true), "Edit > Undo without params failed: {undo}");
-
-    // OS clipboard helper blocked under `--gui-only`.
-    let id = mcp.next_req_id();
-    let copy_blocked = mcp.call_tool_envelope(id, "ui_invoke_menu", json!({ "command_id": "ui.result.copyMethodsReport" }))?;
-    assert_eq!(copy_blocked["result"]["isError"], json!(true));
-    assert_eq!(copy_blocked["result"]["structuredContent"]["code"], json!("gui_only_violation"));
-
-    // `prompts/list` + `prompts/get` never expose headless-only tools/resources under `--gui-only`.
-    let plist = mcp.request("prompts/list", json!({}))?;
-    let prompts = plist["result"]["prompts"].as_array().ok_or("prompts/list missing array")?;
-    for entry in prompts {
-        let name = entry["name"].as_str().ok_or("missing prompt name")?;
-        let got = mcp.request("prompts/get", json!({ "name": name }))?;
-        let text = got["result"]["messages"][0]["content"]["text"].as_str().unwrap_or("");
-        for forbidden in ["doc_inspect", "enable_toolset", "command_run", "render_preview", "sheet://", "result://"] {
-            assert!(!text.contains(forbidden), "CLI --gui-only prompt `{name}` contains `{forbidden}`:\n{text}");
-        }
-    }
-
-    // `ui_pointer_gesture { action: "wheel" }` returns `"action": "wheel"` matching `--control-port`.
-    let id = mcp.next_req_id();
-    let wheel = mcp.call_tool_envelope(id, "ui_pointer_gesture", json!({ "action": "wheel", "x": 200.0, "y": 200.0, "delta_y": -120.0 }))?;
-    assert_ne!(wheel["result"]["isError"], json!(true), "wheel failed: {wheel}");
-    assert_eq!(wheel["result"]["structuredContent"]["action"], json!("wheel"));
-
-    mcp.finish()?;
-    Ok(())
-}
-
-#[test]
 fn r2_s12_05_cmd_convert_fails_closed_on_wrong_cbtemplate_archive_kind() -> TestResult {
     let dir = TempDir::new("cbtemplate-kind")?;
     let mut doc = ProjectDocument::new("Archive With Data").map_err(|e| e.to_string())?;
@@ -271,7 +111,7 @@ fn r2_s12_05_cmd_convert_fails_closed_on_wrong_cbtemplate_archive_kind() -> Test
 #[test]
 fn r2_s12_07_shared_ui_app_host_and_cli_resources_parity() -> TestResult {
     let dir = TempDir::new("uiapp-host")?;
-    let mut state = McpServerState::with_gui_host(Box::new(SharedUiAppHost::new(false)));
+    let mut state = McpServerState::with_gui_host(Box::new(SharedUiAppHost::new()));
     state.set_workdir(Some(&dir.dir))?;
 
     let created =

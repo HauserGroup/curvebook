@@ -1,13 +1,12 @@
-//! Regression tests for post-audit delta findings `DA-06-01`, `DA-06-03`,
+//! Regression tests for post-audit delta findings `DA-06-03`,
 //! `DA-06-05`, `DA-06-06`, and `DA-06-07`.
 
 use curvebook_doc::SheetId;
+use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::control_io::handle_control_line;
 use curvebook_ui_egui::control_io::host_routing::{
     contextual_command_params, has_non_null_path_param, is_command_read_only, is_read_only_control_method,
 };
-use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::{Value, json};
 
 type TestRes = Result<(), String>;
@@ -16,12 +15,6 @@ fn control_json(app: &mut UiApp, id: u64, method: &str, params: Value) -> Result
     let line = json!({ "id": id, "method": method, "params": params }).to_string();
     let raw = handle_control_line(app, &line);
     serde_json::from_str(&raw).map_err(|err| format!("parse control response: {err}"))
-}
-
-fn assert_gui_only_violation(resp: &Value, context: &str) {
-    assert_eq!(resp.get("ok").and_then(Value::as_bool), Some(false), "{context}: expected error, got {resp}");
-    let code = resp.pointer("/error_detail/code").or_else(|| resp.pointer("/result/error/code")).and_then(Value::as_str);
-    assert_eq!(code, Some("gui_only_violation"), "{context}: expected gui_only_violation, got {resp}");
 }
 
 fn setup_column_and_result(app: &mut UiApp) -> Result<String, String> {
@@ -51,54 +44,6 @@ fn setup_column_and_result(app: &mut UiApp) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| format!("analysis.run payload missing result sheet id: {}", out.payload))
-}
-
-#[test]
-fn da_06_01_gui_only_blocks_analysis_update_params_with_empty_or_null_params() -> TestRes {
-    let mut app = UiApp::new();
-    let rs_id = setup_column_and_result(&mut app)?;
-    app.execute_command("sheet.select", json!({ "sheet_id": rs_id })).map_err(|err| format!("select result: {err}"))?;
-    app.set_gui_only(true);
-
-    // Direct calls with empty object or null params must fail with GuiOnlyViolation without opening dialog.
-    let direct_empty = control_json(&mut app, 1, "analysis.updateParams", json!({}))?;
-    assert_gui_only_violation(&direct_empty, "direct analysis.updateParams {}");
-    assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None);
-
-    let direct_null = control_json(&mut app, 2, "analysis.updateParams", Value::Null)?;
-    assert_gui_only_violation(&direct_null, "direct analysis.updateParams null");
-    assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None);
-
-    // command.run wrapper with empty/null params must also be blocked.
-    let run_empty = control_json(&mut app, 3, "command.run", json!({ "command": "analysis.updateParams", "params": {} }))?;
-    assert_gui_only_violation(&run_empty, "command.run analysis.updateParams {}");
-    assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None);
-
-    let run_null = control_json(&mut app, 4, "command.run", json!({ "command_id": "analysis.updateParams", "params": Value::Null }))?;
-    assert_gui_only_violation(&run_null, "command.run analysis.updateParams null");
-    assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None);
-
-    // Atomic and non-atomic command.batch must also be blocked.
-    let batch_atomic =
-        control_json(&mut app, 5, "command.batch", json!({ "atomic": true, "commands": [{ "command": "analysis.updateParams", "params": {} }] }))?;
-    assert_gui_only_violation(&batch_atomic, "atomic command.batch analysis.updateParams {}");
-    assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None);
-
-    let batch_non_atomic = control_json(
-        &mut app,
-        6,
-        "command.batch",
-        json!({ "atomic": false, "commands": [{ "command_id": "analysis.updateParams", "params": Value::Null }] }),
-    )?;
-    assert_gui_only_violation(&batch_non_atomic, "non-atomic command.batch analysis.updateParams null");
-    assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::None);
-
-    // Legitimate GUI action `ui.invoke_menu` with `analysis.updateParams` still opens the dialog.
-    let menu_ok = dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "analysis.updateParams" }))
-        .map_err(|err| format!("ui.invoke_menu analysis.updateParams should still work under --gui-only: {err}"))?;
-    assert_eq!(menu_ok.get("ui").and_then(Value::as_bool), Some(true));
-    assert!(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
-    Ok(())
 }
 
 #[test]

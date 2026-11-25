@@ -35,7 +35,6 @@ fn build_idle_app(doc: Option<ProjectDocument>) -> Result<(egui::Context, CurveB
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
         new_instance: true,
-        gui_only: false,
         initial_viewport: viewport,
         ..DesktopHostConfig::default()
     });

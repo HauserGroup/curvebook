@@ -30,7 +30,6 @@ When enabled via `--control <port>` (or `CURVEBOOK_CONTROL_PORT`, `port` in `1..
 
 - Binds strictly to **`127.0.0.1:<port>`** (loopback interface only — never `0.0.0.0` or external NICs).
 - Authenticates JSON-lines commands with a constant-time bearer token (`CURVEBOOK_CONTROL_TOKEN` environment variable recommended; passing `--control-token` on the CLI exposes the secret in `ps` process listings and triggers a stderr warning).
-- Combining `--gui-only` blocks direct non-GUI engine mutations (`ErrorCode::GuiOnlyViolation`) so external automation drives only interactive GUI actions.
 
 ---
 
@@ -61,5 +60,5 @@ Security vulnerabilities, crash bugs, parser exploits, path-escape bypasses, or 
 
 - Untrusted `.curvebook`, `.cbtemplate`, `.csv`, `.pzfx`, or `.prism` archive/file parsing (bounded ZIP, XML, cell-count, and float-finite checks)
 - Path traversal or symlink escape across `--workdir` or unpacked `.curvebook.d/` saves
-- Loopback `--control` token validation and `--gui-only` enforcement
+- Loopback `--control` token validation and request framing limits
 - PDF / SVG / PNG / TIFF / EMF export integer/pixel/memory resource limits.

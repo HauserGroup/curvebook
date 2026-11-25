@@ -14,7 +14,6 @@ mod r15_3_top_chrome;
 mod r15_3_welcome_nav;
 mod r15_4_graph_and_app_modals;
 mod r15_4_grids_and_ingestion;
-mod r15_4_gui_only_wf_egui;
 mod r15_4_r10_23_egui_gaps;
 mod r15_4_stats_fit_power;
 mod r15_6_phase1_pipeline;

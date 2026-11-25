@@ -4,7 +4,7 @@ CurveBook supports three scriptable interfaces alongside MCP: a loopback JSON-li
 
 ## Loopback Desktop Control Protocol (`--control`)
 
-Launch the desktop GUI with `--control <port>` (optionally paired with `--gui-only` or `--control-token <token>`) to bind a loopback TCP JSON-lines listener on `127.0.0.1:<port>`. Non-loopback bindings are never opened.
+Launch the desktop GUI with `--control <port>` (optionally paired with `--window` or `--control-token <token>`) to bind a loopback TCP JSON-lines listener on `127.0.0.1:<port>`. Non-loopback bindings are never opened.
 
 - **Framing:** One UTF-8 JSON object per line terminated by `\n`, bounded by `MAX_CONTROL_LINE_BYTES` (`16 MiB`).
 - **Authentication:** Supply the bearer token via `"auth"` handshake or per-request `"token"` field (`--control-token`, `CURVEBOOK_CONTROL_TOKEN`, or the `control-<port>.token` file).
@@ -21,8 +21,6 @@ Single-call request and response syntax:
 ```
 
 Built-in control methods: `"auth"`, `"ping"`, `"command.list"`, `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`), `"app.quit"`, the interactive `ui.*` GUI actions (`ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`, `ui.answer_dialog`), plus any registered engine or `ui.*` command ID passed directly as `"method"`/`"op"`.
-
-When started with `--gui-only`, direct engine commands (`command.run`, `command.batch`, `engine.execute`), `doc.inspect`, `doc.export`, and `render.*` are rejected with `gui_only_violation` so external agents drive the desktop exclusively through the `ui.*` surface.
 
 ## Batch Manifest Format (`curvebook.batch.v1`) {#batch-manifest}
 

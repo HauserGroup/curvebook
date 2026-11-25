@@ -26,11 +26,10 @@ curvebook-platform = { workspace = true }
 curvebook-render = { workspace = true }
 curvebook-svg = { workspace = true }
 curvebook-text = { workspace = true }
-curvebook-ui-egui = { workspace = true, features = ["bundled-fonts"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 curvebook-testkit = { workspace = true }
-curvebook-ui-egui = { workspace = true, features = ["test-support"] }
+curvebook-ui-egui = { workspace = true, features = ["bundled-fonts", "test-support"] }
 xtask = { path = "../../xtask", default-features = false }

@@ -71,7 +71,6 @@ fn in_window_menus_chrome_and_menu_action_vs_native_mode() -> Result<(), Box<dyn
     let mut in_window_rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
         new_instance: false,
-        gui_only: false,
         locale_override: Some(String::from("de")),
         theme_override: Some(String::from("dark")),
         recovery_root: None,
@@ -107,7 +106,6 @@ fn in_window_menus_chrome_and_menu_action_vs_native_mode() -> Result<(), Box<dyn
     let mut native_rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: false,
         new_instance: false,
-        gui_only: false,
         locale_override: None,
         theme_override: None,
         recovery_root: None,
@@ -135,7 +133,6 @@ fn new_instance_isolated_recovery_journals_and_prompt_unsaved_close_guard() -> R
     let cfg = DesktopHostConfig {
         in_window_menus: true,
         new_instance: true,
-        gui_only: false,
         locale_override: None,
         theme_override: None,
         recovery_root: Some(recovery_root.clone()),
@@ -616,7 +613,6 @@ fn file_dropped_pzfx_and_zip_archive_open_cleanly() -> Result<(), Box<dyn std::e
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
         new_instance: false,
-        gui_only: false,
         locale_override: None,
         theme_override: None,
         recovery_root: None,

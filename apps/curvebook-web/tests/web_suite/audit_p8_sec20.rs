@@ -461,9 +461,8 @@ fn fa_x1_02_enforces_caps_structural_limits_and_preserves_security_policies() ->
     });
     assert!(session.handle_event_json(&too_many_entries.to_string()).is_err());
 
-    // 2. Host byte caps and ExternalPathPolicy + gui_only preservation
+    // 2. Host byte caps and ExternalPathPolicy preservation
     let mut host = WebWorkspaceHost::new();
-    host.app_mut().set_gui_only(true);
     assert_eq!(*host.app().session().path_policy(), ExternalPathPolicy::RejectExternal);
 
     let oversized_json_doc = vec![b' '; MAX_ARCHIVE_FILE_BYTES + 1];
@@ -472,15 +471,13 @@ fn fa_x1_02_enforces_caps_structural_limits_and_preserves_security_policies() ->
     let oversized_csv = vec![b'a'; MAX_CSV_FILE_BYTES + 1];
     assert!(host.open_delimited_bytes(&oversized_csv, false, Some("Big"), None).is_err());
 
-    // open_delimited_bytes must preserve RejectExternal & gui_only
+    // open_delimited_bytes must preserve RejectExternal
     let _ = host.open_delimited_bytes(b"X,Y\n1,2\n3,4\n", false, Some("Preserved"), None)?;
-    assert!(host.app().is_gui_only());
     assert_eq!(*host.app().session().path_policy(), ExternalPathPolicy::RejectExternal);
 
-    // open_project_json_bytes must preserve RejectExternal & gui_only
+    // open_project_json_bytes must preserve RejectExternal
     let doc_json = serde_json::to_vec(host.app().document())?;
     let _ = host.open_project_json_bytes(&doc_json)?;
-    assert!(host.app().is_gui_only());
     assert_eq!(*host.app().session().path_policy(), ExternalPathPolicy::RejectExternal);
 
     // 3. index.html pre-read size & batch guards before arrayBuffer()

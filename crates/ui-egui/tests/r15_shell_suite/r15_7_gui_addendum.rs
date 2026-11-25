@@ -55,7 +55,6 @@ fn make_shell_driver(app: UiApp, width: f64, height: f64) -> EguiHumanPathDriver
 
 fn seed_xy_data_and_graph_app() -> Result<UiApp, String> {
     let mut app = UiApp::new();
-    app.set_gui_only(true);
     app.execute_command(
         "sheet.createData",
         json!({
@@ -363,7 +362,6 @@ fn r15_gui_31_checkpoints_modal_creates_restores_and_deletes_checkpoints() -> Re
 #[test]
 fn r15_gui_32_column_cell_right_click_cut_and_canvas_copy_image() -> Result<(), String> {
     let mut app = UiApp::new();
-    app.set_gui_only(true);
     app.execute_command("sheet.createData", json!({ "sheet_id": "ds-col", "title": "Column Data", "kind": "column", "cols": 2, "rows": 3 }))
         .map_err(|e| e.to_string())?;
     app.execute_command("table.setCells", json!({ "sheet_id": "ds-col", "rows": [[42.0, 55.0], [10.0, 20.0]] })).map_err(|e| e.to_string())?;

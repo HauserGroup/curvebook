@@ -5,7 +5,7 @@ use curvebook_doc::{
     FramePreset, GroupedArrangement, MathTransformPreset, MultiplicityMethod, MultivariatePlotMode, MultivariateSpec, OneWayMethod,
     ResidualCovariance, SheetId, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec,
 };
-use curvebook_engine::{EngineError, cmd};
+use curvebook_engine::EngineError;
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
@@ -27,24 +27,6 @@ fn disabled_err(reason: impl Into<String>) -> EngineError {
     EngineError::with_code(ErrorCode::Conflict, msg.clone())
         .with_remediation("Satisfy the control precondition or select a compatible mode/sheet first.")
         .with_details(json!({ "disabled": true, "disabled_reason": msg }))
-}
-
-pub(crate) fn is_gui_only_blocked_menu_command(cmd_id: &str) -> bool {
-    if matches!(
-        cmd_id,
-        "table.setCell"
-            | "ui.screenshot"
-            | "ui.event.dispatch"
-            | "ui.shortcut.set"
-            | "ui.shortcut.reset"
-            | "ui.brush.point"
-            | "app.quit"
-            | "ui.result.copyMethodsReport"
-            | "file.print"
-    ) {
-        return true;
-    }
-    cmd::registry().get(cmd_id).is_some_and(|spec| spec.menu_path.is_empty())
 }
 
 /// Apply a programmatic click/toggle to a dialog widget by `widget_id` (`F6`).
@@ -202,13 +184,6 @@ pub(crate) fn commit_active_dialog_action(app: &mut UiApp, action: &str, params:
                 }
                 ActiveDialog::Print { .. } => {
                     let submit = app.canvas_dialogs.print.submit_to_os;
-                    if submit && app.is_gui_only() {
-                        return Err(EngineError::with_code(
-                            ErrorCode::GuiOnlyViolation,
-                            "submitting print jobs directly to the OS queue is blocked under --gui-only",
-                        )
-                        .with_remediation("Uncheck `Submit to OS print queue` to spool in-memory PDF output safely."));
-                    }
                     let out = app.execute_print_dialog_spool(submit).map_err(bad_input)?;
                     app.canvas_dialogs.close_dialog();
                     Ok(json!({
@@ -426,13 +401,6 @@ fn commit_command_palette_action(app: &mut UiApp) -> Result<Value, EngineError> 
         .or_else(|| hits.first())
         .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, "no matching command in palette"))?
         .clone();
-    if app.is_gui_only() && is_gui_only_blocked_menu_command(selected.id) {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            format!("command palette execution of `{}` is blocked under --gui-only", selected.id),
-        )
-        .with_remediation("Select a parameterless menu/dialog command or toggle under --gui-only."));
-    }
     app.canvas_dialogs.close_dialog();
     if let Some(res) = dispatch_ui_command_as_ui(app, selected.id, &Value::Null)? {
         return Ok(json!({ "action": "ok", "command_id": selected.id, "result": res }));

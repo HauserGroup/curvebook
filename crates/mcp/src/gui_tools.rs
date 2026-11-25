@@ -19,7 +19,7 @@ use crate::tools::{
 };
 use crate::toolsets::ToolAnnotations;
 
-/// Ordered list of the 8 `gui` MCP tool names exposed when `--gui-only` or the `gui` toolset is active.
+/// Ordered list of the 8 `gui` MCP tool names exposed when the `gui` toolset is enabled.
 pub const GUI_TOOL_NAMES: [&str; 8] =
     ["ui_inspect", "ui_screenshot", "ui_pointer_gesture", "ui_type_text", "ui_press_key", "ui_invoke_menu", "ui_switch_tab", "ui_answer_dialog"];
 
@@ -207,7 +207,7 @@ fn def_ui_screenshot() -> ToolDefinition {
     ToolDefinition {
         name: String::from("ui_screenshot"),
         description: String::from(
-            "Capture a deterministic PNG screenshot of the live CurveBook UI, returning inline PNG image content alongside pixel/DPI metadata (or atomically writing/overwriting an optional host output path outside --gui-only).",
+            "Capture a deterministic PNG screenshot of the live CurveBook UI, returning inline PNG image content alongside pixel/DPI metadata (or atomically writing/overwriting an optional host output path).",
         ),
         input_schema: strict_schema::<UiScreenshotArgs>(),
         annotations: ToolAnnotations::from_effects(Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT)),
@@ -412,7 +412,7 @@ struct UiScreenshotArgs {
     /// Optional render DPI (72..=600).
     #[schemars(range(min = 72, max = 600))]
     dpi: Option<u32>,
-    /// Optional host output path (overwrites existing file; rejected with gui_only_violation when --gui-only is active).
+    /// Optional host output path (atomically overwrites existing file).
     path: Option<String>,
 }
 
@@ -437,15 +437,6 @@ fn handle_ui_screenshot(state: &mut McpServerState, args: &Map<String, Value>) -
         }
     }
     if let Some(raw_path) = trim_opt_non_empty(parsed.path, "path")? {
-        if state.is_gui_only() {
-            return Ok(errors::result_from_payload(
-                &StructuredErrorPayload::new(
-                    ErrorCode::GuiOnlyViolation,
-                    "direct filesystem writes via `ui_screenshot` `path` are blocked under --gui-only",
-                )
-                .with_remediation("Omit `path` and inspect the returned inline `image/png` content block instead."),
-            ));
-        }
         let resolved = match formats::resolve_mcp_path(state, &raw_path) {
             Ok(p) => p,
             Err(err) => return Ok(errors::result_from_engine_error(&err)),
@@ -662,16 +653,6 @@ fn handle_ui_invoke_menu(state: &mut McpServerState, args: &Map<String, Value>) 
     if let Err(err) = formats::sanitize_command_params(state, &mut extra) {
         return Ok(errors::result_from_engine_error(&err));
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    let has_workdir = state.workdir_guard().is_some();
-    #[cfg(target_arch = "wasm32")]
-    let has_workdir = false;
-    let path_constrained = has_workdir || state.session().path_policy().is_constrained();
-    if state.is_gui_only()
-        && let Some(blocked) = check_gui_only_menu_restriction(command_id.as_deref(), path.as_ref(), &extra, path_constrained)
-    {
-        return Ok(blocked);
-    }
 
     let mut params = Map::new();
     if let Some(p) = path {
@@ -744,14 +725,6 @@ fn handle_ui_answer_dialog(state: &mut McpServerState, args: &Map<String, Value>
         return Err(ToolCallError::InvalidParams(String::from(
             "ui_answer_dialog requires \"action\", \"fields\", \"values\", \"patches\", or \"choice\"",
         )));
-    }
-
-    if state.is_gui_only() {
-        for map_val in [&fields, &values, &patches].into_iter().flatten() {
-            if has_print_submit_to_os_true(map_val) {
-                return Ok(gui_only_subprocess_blocked("ui_answer_dialog.submit_to_os", "OS print spooler subprocess submission (`submit_to_os`)"));
-            }
-        }
     }
 
     let mut params = Map::new();
@@ -902,129 +875,6 @@ pub(crate) fn reject_unknown_args(tool_name: &str, args: &Map<String, Value>, al
         }
     }
     Ok(())
-}
-
-fn normalize_menu_token(raw: &str) -> String {
-    raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
-}
-
-fn menu_path_matches_tokens(path: Option<&Value>, candidates: &[&str]) -> bool {
-    let Some(val) = path else {
-        return false;
-    };
-    let joined = match val {
-        Value::String(s) => s.to_owned(),
-        Value::Array(items) => items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("/"),
-        _ => return false,
-    };
-    let normalized = normalize_menu_token(&joined);
-    candidates.iter().any(|c| normalized == *c)
-}
-
-fn has_print_submit_to_os_true(val: &Value) -> bool {
-    match val {
-        Value::Object(map) => {
-            if map.get("submit_to_os").and_then(Value::as_bool) == Some(true)
-                || map.get("print.submit_to_os").and_then(Value::as_bool) == Some(true)
-                || map.get("print").and_then(|v| v.get("submit_to_os")).and_then(Value::as_bool) == Some(true)
-            {
-                return true;
-            }
-            map.values().any(has_print_submit_to_os_true)
-        }
-        Value::Array(arr) => arr.iter().any(has_print_submit_to_os_true),
-        _ => false,
-    }
-}
-
-fn canonical_menu_command_from_path(path: Option<&Value>) -> Option<&'static str> {
-    const TOKEN_TO_CMD: [(&str, &str); 25] = [
-        ("fileopen", "project.open"),
-        ("open", "project.open"),
-        ("fileopenproject", "project.open"),
-        ("fileopenunpackeddir", "file.open_unpacked_dir"),
-        ("filenewfromtemplate", "project.instantiateTemplate"),
-        ("newfromtemplate", "project.instantiateTemplate"),
-        ("fileimportexternalarchive", "table.importPrism"),
-        ("importexternalarchive", "table.importPrism"),
-        ("fileimportxmlproject", "table.importPzfx"),
-        ("importxmlproject", "table.importPzfx"),
-        ("fileimportxlsxworkbook", "table.importXlsx"),
-        ("importxlsxworkbook", "table.importXlsx"),
-        ("fileimportexcelworkbook", "table.importXlsx"),
-        ("importexcelworkbook", "table.importXlsx"),
-        ("fileimportcsvortsv", "table.importCsv"),
-        ("importcsvortsv", "table.importCsv"),
-        ("fileimporttidylongtable", "table.importTidyLong"),
-        ("importtidylongtable", "table.importTidyLong"),
-        ("editpastelink", "table.pasteLink"),
-        ("pastelink", "table.pasteLink"),
-        ("analyzerecalculateall", "project.recalculate"),
-        ("recalculateall", "project.recalculate"),
-        ("recalculate", "project.recalculate"),
-        ("filesave", "project.save"),
-        ("filesaveas", "project.saveAs"),
-    ];
-    let norm = normalized_menu_path(path)?;
-    TOKEN_TO_CMD.iter().find_map(|(token, cmd)| (norm == *token).then_some(*cmd))
-}
-
-fn normalized_menu_path(path: Option<&Value>) -> Option<String> {
-    let joined = match path? {
-        Value::String(s) => s.to_owned(),
-        Value::Array(items) => items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("/"),
-        _ => return None,
-    };
-    Some(normalize_menu_token(&joined))
-}
-
-fn gui_only_subprocess_blocked(target: &str, helper_desc: &str) -> ToolCallResult {
-    let payload = StructuredErrorPayload::new(ErrorCode::GuiOnlyViolation, format!("{helper_desc} is forbidden under --gui-only policy"))
-        .with_remediation("Inspect content inside the window via `ui_inspect` or `ui_screenshot` without invoking host OS helpers.")
-        .with_details(json!({ "target": target, "policy": "gui_only" }));
-    errors::result_from_payload(&payload)
-}
-
-fn check_gui_only_menu_restriction(command_id: Option<&str>, path: Option<&Value>, extra: &Value, path_constrained: bool) -> Option<ToolCallResult> {
-    let is_copy_methods = command_id == Some("ui.result.copyMethodsReport")
-        || menu_path_matches_tokens(path, &["analyzecopymethodsreport", "analyzecopymethodsstatisticalreporting", "copymethodsreport"]);
-    if is_copy_methods {
-        return Some(gui_only_subprocess_blocked("ui.result.copyMethodsReport", "OS clipboard helper `ui.result.copyMethodsReport`"));
-    }
-
-    if command_id == Some("file.print") {
-        return Some(gui_only_subprocess_blocked("file.print", "OS print helper `file.print`"));
-    }
-
-    if let Some(cid) = command_id
-        && matches!(cid, "table.setCell" | "ui.event.dispatch" | "ui.shortcut.set" | "ui.shortcut.reset" | "ui.brush.point" | "app.quit")
-    {
-        return Some(gui_only_subprocess_blocked(cid, &format!("menu command `{cid}`")));
-    }
-    if menu_path_matches_tokens(path, &["graphbrushpoint", "brushpoint"]) {
-        return Some(gui_only_subprocess_blocked("ui.brush.point", "menu path `Brush Point`"));
-    }
-
-    let is_print_open = command_id == Some("ui.print.open") || menu_path_matches_tokens(path, &["fileprint", "print"]);
-    if is_print_open && has_print_submit_to_os_true(extra) {
-        return Some(gui_only_subprocess_blocked("ui.print.open", "OS print spooler subprocess submission (`submit_to_os`)"));
-    }
-
-    if command_id == Some("ui.screenshot") && extra.get("path").is_some_and(|v| !v.is_null()) {
-        return Some(gui_only_subprocess_blocked("ui.screenshot.path", "ui.screenshot disk `path` output via ui_invoke_menu"));
-    }
-
-    if path_constrained {
-        return None;
-    }
-
-    let path_cmd = canonical_menu_command_from_path(path);
-    for candidate in [command_id, path_cmd] {
-        if let Err(err) = curvebook_engine::enforce_unconstrained_gui_only_menu_params(candidate, extra) {
-            return Some(errors::result_from_engine_error(&err));
-        }
-    }
-    None
 }
 
 fn insert_opt_f64(map: &mut Map<String, Value>, key: &str, value: Option<f64>) {

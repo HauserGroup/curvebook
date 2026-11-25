@@ -150,7 +150,6 @@ fn seed_full_workspace_app() -> Result<UiApp, Box<dyn std::error::Error>> {
 
     // 4. ResultSheet (`res-anova`) with Pass/Warn/Violated checklist diagnostics & scalars, plus hooked NLR (`res-nlr`)
     let mut app = UiApp::from_session(Session::from_document(doc));
-    app.set_gui_only(true);
     let _ = app.execute_command(
         "analysis.run",
         json!({ "sheet_id": "res-anova", "source_sheet_id": "col-1", "kind": "one_way_anova", "multiplicity": "tukey" }),

@@ -1800,14 +1800,9 @@ fn render_print_modal(
             });
 
             ui.add_space(4.0);
-            let gui_only = app.is_gui_only();
-            let mut submit_os = pd.submit_to_os && !gui_only;
+            let mut submit_os = pd.submit_to_os;
             let direct_lbl = tr(locale, "print.direct_queue");
-            let os_chk = ui.add_enabled(!gui_only, egui::Checkbox::new(&mut submit_os, direct_lbl));
-            let os_reason = gui_only.then_some("Blocked under --gui-only: spool PDF cleanly in-memory");
-            if let Some(reason) = os_reason {
-                os_chk.clone().on_disabled_hover_text(reason);
-            }
+            let os_chk = ui.checkbox(&mut submit_os, direct_lbl);
             meta.record_response(
                 ui,
                 &os_chk,
@@ -1817,14 +1812,14 @@ fn render_print_modal(
                     label: direct_lbl,
                     command_id: None,
                     value: Some(Value::Bool(submit_os)),
-                    enabled: !gui_only,
-                    disabled_reason: os_reason,
+                    enabled: true,
+                    disabled_reason: None,
                     z_layer: ZLayer::ModalDialog,
                     ellipsized: false,
                     full_label: None,
                 },
             );
-            if os_chk.changed() && !gui_only {
+            if os_chk.changed() {
                 let mut next = pd;
                 next.submit_to_os = submit_os;
                 intents.push(UiIntent::UpdatePrintDialogState(Box::new(next)));

@@ -93,70 +93,7 @@ fn dispatch(args: &[String]) -> Result<(), CliError> {
 struct McpCliConfig {
     control_port: Option<u16>,
     control_token: Option<String>,
-    gui_only: bool,
     workdir: Option<PathBuf>,
-}
-
-/// In-process desktop UI host backing `curvebook-cli mcp --gui-only`.
-struct InProcessUiGuiHost {
-    app: curvebook_ui_egui::UiApp,
-}
-
-impl InProcessUiGuiHost {
-    fn new(gui_only: bool) -> Self {
-        let mut app = curvebook_ui_egui::UiApp::new();
-        app.set_gui_only(gui_only);
-        Self { app }
-    }
-}
-
-fn normalize_in_process_gui_params(method: &str, mut params: serde_json::Value) -> serde_json::Value {
-    if let Some(obj) = params.as_object_mut() {
-        match method {
-            "ui.screenshot" => {
-                if matches!(obj.get("target").and_then(serde_json::Value::as_str), Some("workspace" | "viewport")) {
-                    obj.insert(String::from("target"), serde_json::Value::String(String::from("full_window")));
-                }
-            }
-            "ui.invoke_menu" => {
-                if let Some(arr) = obj.get("path").and_then(serde_json::Value::as_array) {
-                    let segments: Vec<&str> = arr.iter().filter_map(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()).collect();
-                    if !segments.is_empty() {
-                        obj.insert(String::from("path"), serde_json::Value::String(segments.join("/")));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    params
-}
-
-impl curvebook_mcp::GuiSessionHost for InProcessUiGuiHost {
-    fn call_gui(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, curvebook_engine::EngineError> {
-        let normalized = normalize_in_process_gui_params(method, params);
-        curvebook_ui_egui::dispatch_gui_action(&mut self.app, method, normalized)
-    }
-
-    fn set_gui_only(&mut self, gui_only: bool) {
-        self.app.set_gui_only(gui_only);
-    }
-
-    fn is_gui_only(&self) -> bool {
-        self.app.is_gui_only()
-    }
-
-    fn hosted_session(&self) -> Option<&curvebook_engine::Session> {
-        Some(self.app.session())
-    }
-
-    fn hosted_session_mut(&mut self) -> Option<&mut curvebook_engine::Session> {
-        Some(self.app.session_mut())
-    }
-
-    fn sync_after_session_mutation(&mut self) {
-        self.app.sync_views();
-    }
 }
 
 fn run_mcp(args: &[String]) -> Result<(), CliError> {
@@ -165,22 +102,11 @@ fn run_mcp(args: &[String]) -> Result<(), CliError> {
     if let Some(ref workdir) = cfg.workdir {
         let _ = sandbox::WorkdirGuard::new(workdir)?;
     }
-    let mut state = match (cfg.control_port, cfg.gui_only) {
-        (Some(port), true) => curvebook_mcp::McpServerState::with_control_port_and_gui_only(port, true)
-            .map_err(|err| CliError::Runtime(format!("MCP stdio server failed: {err}")))?,
-        (Some(port), false) => {
+    let mut state = match cfg.control_port {
+        Some(port) => {
             curvebook_mcp::McpServerState::with_control_port(port).map_err(|err| CliError::Runtime(format!("MCP stdio server failed: {err}")))?
         }
-        (None, true) => {
-            let mut host = InProcessUiGuiHost::new(true);
-            if let Some(ref workdir) = cfg.workdir {
-                let policy = curvebook_engine::ExternalPathPolicy::workdir(workdir)
-                    .map_err(|err| CliError::Runtime(format!("MCP workdir setup failed: {err}")))?;
-                host.app.session_mut().set_path_policy(policy);
-            }
-            curvebook_mcp::McpServerState::with_gui_host(Box::new(host)).with_gui_only(true)
-        }
-        (None, false) => curvebook_mcp::McpServerState::new(),
+        None => curvebook_mcp::McpServerState::new(),
     };
     if let Some(ref token) = cfg.control_token {
         state.set_control_token(Some(token)).map_err(|err| CliError::Usage(format!("invalid --control-token: {err}")))?;
@@ -197,7 +123,7 @@ fn parse_mcp_args(args: &[String]) -> Result<McpCliConfig, CliError> {
 }
 
 fn parse_mcp_args_with_env(args: &[String], env_lookup: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Result<McpCliConfig, CliError> {
-    const MCP_USAGE: &str = "usage: curvebook-cli mcp [--control-port <1..=65535>] [--gui-only] [--workdir <dir>] [--control-token <token>]";
+    const MCP_USAGE: &str = "usage: curvebook-cli mcp [--control-port <1..=65535>] [--workdir <dir>] [--control-token <token>]";
     let mut cfg = McpCliConfig::default();
     let mut idx = 0usize;
     while idx < args.len() {
@@ -211,12 +137,12 @@ fn parse_mcp_args_with_env(args: &[String], env_lookup: &dyn Fn(&str) -> Option<
             let raw = args.get(idx).ok_or_else(|| CliError::Usage(String::from(MCP_USAGE)))?;
             cfg.control_port = Some(parse_control_port_value(raw)?);
         } else if let Some(raw) = arg.strip_prefix("--control-token=") {
-            let auth = curvebook_ui_egui::ControlAuth::from_token(raw).map_err(|err| CliError::Usage(format!("invalid --control-token: {err}")))?;
+            let auth = curvebook_platform::ControlAuth::from_token(raw).map_err(|err| CliError::Usage(format!("invalid --control-token: {err}")))?;
             cfg.control_token = Some(auth.as_str().to_owned());
         } else if arg == "--control-token" {
             idx += 1;
             let raw = args.get(idx).ok_or_else(|| CliError::Usage(String::from(MCP_USAGE)))?;
-            let auth = curvebook_ui_egui::ControlAuth::from_token(raw).map_err(|err| CliError::Usage(format!("invalid --control-token: {err}")))?;
+            let auth = curvebook_platform::ControlAuth::from_token(raw).map_err(|err| CliError::Usage(format!("invalid --control-token: {err}")))?;
             cfg.control_token = Some(auth.as_str().to_owned());
         } else if let Some(raw) = arg.strip_prefix("--workdir=") {
             if raw.trim().is_empty() {
@@ -230,8 +156,6 @@ fn parse_mcp_args_with_env(args: &[String], env_lookup: &dyn Fn(&str) -> Option<
                 return Err(CliError::Usage(String::from("--workdir requires a directory path")));
             }
             cfg.workdir = Some(PathBuf::from(raw));
-        } else if arg == "--gui-only" {
-            cfg.gui_only = true;
         } else {
             return Err(CliError::Usage(String::from(MCP_USAGE)));
         }
@@ -302,37 +226,24 @@ mod tests {
 
     #[test]
     fn mcp_control_port_validation_rejects_zero_overflow_and_unknown_flags() {
-        assert_eq!(parse_mcp_args(&[]).unwrap(), super::McpCliConfig { control_port: None, gui_only: false, workdir: None, control_token: None });
+        assert_eq!(parse_mcp_args(&[]).unwrap(), super::McpCliConfig { control_port: None, workdir: None, control_token: None });
         assert_eq!(
             parse_mcp_args(&[String::from("--control-port"), String::from("49152")]).unwrap(),
-            super::McpCliConfig { control_port: Some(49152), gui_only: false, workdir: None, control_token: None }
+            super::McpCliConfig { control_port: Some(49152), workdir: None, control_token: None }
         );
         assert_eq!(
             parse_mcp_args(&[String::from("--control-port=1")]).unwrap(),
-            super::McpCliConfig { control_port: Some(1), gui_only: false, workdir: None, control_token: None }
+            super::McpCliConfig { control_port: Some(1), workdir: None, control_token: None }
         );
         assert_eq!(
             parse_mcp_args(&[String::from("--control-port=65535")]).unwrap(),
-            super::McpCliConfig { control_port: Some(65535), gui_only: false, workdir: None, control_token: None }
-        );
-        assert_eq!(
-            parse_mcp_args(&[String::from("--gui-only")]).unwrap(),
-            super::McpCliConfig { control_port: None, gui_only: true, workdir: None, control_token: None }
-        );
-        assert_eq!(
-            parse_mcp_args(&[String::from("--control-port"), String::from("49152"), String::from("--gui-only")]).unwrap(),
-            super::McpCliConfig { control_port: Some(49152), gui_only: true, workdir: None, control_token: None }
-        );
-        assert_eq!(
-            parse_mcp_args(&[String::from("--gui-only"), String::from("--control-port=49153")]).unwrap(),
-            super::McpCliConfig { control_port: Some(49153), gui_only: true, workdir: None, control_token: None }
+            super::McpCliConfig { control_port: Some(65535), workdir: None, control_token: None }
         );
         assert_eq!(
             parse_mcp_args(&[String::from("--workdir"), String::from("/tmp/ws")]).unwrap(),
-            super::McpCliConfig { control_port: None, gui_only: false, workdir: Some(std::path::PathBuf::from("/tmp/ws")), control_token: None }
+            super::McpCliConfig { control_port: None, workdir: Some(std::path::PathBuf::from("/tmp/ws")), control_token: None }
         );
-        let combined_flags_err =
-            parse_mcp_args(&[String::from("--gui-only"), String::from("--workdir=/tmp/ws"), String::from("--control-port=49154")]).unwrap_err();
+        let combined_flags_err = parse_mcp_args(&[String::from("--workdir=/tmp/ws"), String::from("--control-port=49154")]).unwrap_err();
         assert!(matches!(combined_flags_err, CliError::Usage(ref msg) if msg.contains("--workdir") && msg.contains("--control-port")));
         let combined_env_err = super::parse_mcp_args_with_env(&[String::from("--workdir=/tmp/ws")], &|key| {
             if key == "CURVEBOOK_CONTROL_PORT" { Some(std::ffi::OsString::from("49154")) } else { None }
@@ -341,15 +252,15 @@ mod tests {
         assert!(matches!(combined_env_err, CliError::Usage(ref msg) if msg.contains("--workdir") && msg.contains("--control-port")));
         assert_eq!(
             parse_mcp_args(&[String::from("--control-token"), String::from("secret-tok")]).unwrap(),
-            super::McpCliConfig { control_port: None, gui_only: false, workdir: None, control_token: Some(String::from("secret-tok")) }
+            super::McpCliConfig { control_port: None, workdir: None, control_token: Some(String::from("secret-tok")) }
         );
         assert_eq!(
             parse_mcp_args(&[String::from("--control-port=49155"), String::from("--control-token=tok-2")]).unwrap(),
-            super::McpCliConfig { control_port: Some(49155), gui_only: false, workdir: None, control_token: Some(String::from("tok-2")) }
+            super::McpCliConfig { control_port: Some(49155), workdir: None, control_token: Some(String::from("tok-2")) }
         );
         let usage = super::cli_catalog::format_usage();
-        assert!(usage.contains("--gui-only"));
-        assert!(usage.contains("mcp [--control-port <port>] [--gui-only] [--workdir <dir>]"));
+        assert!(!usage.contains("--gui-only"));
+        assert!(usage.contains("mcp [--control-port <port>] [--workdir <dir>]"));
         assert!(usage.contains("--control-token <token>"));
         assert!(usage.contains(super::cli_catalog::CLI_DOCS_URL));
         for cmd in super::cli_catalog::CLI_COMMANDS {
@@ -373,6 +284,7 @@ mod tests {
             vec!["--control-token="],
             vec!["--control-token", "   "],
             vec!["--control-token", "has space"],
+            vec!["--gui-only"],
             vec!["--gui-only=true"],
             vec!["--unknown"],
             vec!["extra-arg"],
@@ -413,74 +325,6 @@ mod tests {
             .unwrap_err();
             assert!(matches!(err, CliError::Usage(_)), "expected Usage for `{bad}`, got {err:?}");
         }
-    }
-
-    #[test]
-    fn in_process_ui_gui_host_toggles_policy_and_dispatches_normalized_actions() {
-        use curvebook_mcp::GuiSessionHost;
-
-        let mut host = super::InProcessUiGuiHost::new(true);
-        assert!(host.is_gui_only());
-
-        let inspect = host.call_gui("ui.inspect", serde_json::json!({"scope": "all"})).unwrap();
-        assert_eq!(inspect["gui_only"], serde_json::json!(true));
-
-        let shot = host.call_gui("ui.screenshot", serde_json::json!({"target": "workspace"})).unwrap();
-        assert!(shot["width_px"].as_u64().is_some_and(|w| w > 0));
-        assert!(shot["height_px"].as_u64().is_some_and(|h| h > 0));
-        let png_b64 = shot["data_base64"].as_str().unwrap();
-        assert!(png_b64.starts_with("iVBORw0KGgo"));
-
-        host.set_gui_only(false);
-        assert!(!host.is_gui_only());
-        let inspect_relaxed = host.call_gui("ui.inspect", serde_json::json!({})).unwrap();
-        assert_eq!(inspect_relaxed["gui_only"], serde_json::json!(false));
-    }
-
-    #[test]
-    fn r2_s12_07_09_in_process_ui_gui_host_shares_session_and_preserves_wheel() -> Result<(), String> {
-        use curvebook_mcp::{McpServerState, call_tool, dispatch_json_value};
-        use serde_json::json;
-
-        let mut state = McpServerState::with_gui_host(Box::new(super::InProcessUiGuiHost::new(false)));
-        assert!(!state.is_gui_only());
-
-        // Core `command_run` mutates the hosted UiApp session and syncs views.
-        let created = call_tool(
-            &mut state,
-            "command_run",
-            json!({ "command_id": "sheet.createData", "params": { "sheet_id": "shared-s1", "kind": "Column" } }),
-        )
-        .map_err(|e| format!("command_run failed: {e}"))?;
-        assert!(!created.is_error);
-
-        let inspect = call_tool(&mut state, "ui_inspect", json!({ "scope": "navigator" })).map_err(|e| format!("ui_inspect failed: {e}"))?;
-        assert!(!inspect.is_error);
-        let nav_json = inspect.structured_content.ok_or_else(|| String::from("missing ui_inspect structured content"))?;
-        let sheets = nav_json["navigator_sheets"].as_array().ok_or_else(|| format!("missing navigator_sheets: {nav_json}"))?;
-        assert!(sheets.iter().any(|s| s["sheet_id"] == json!("shared-s1")), "shared-s1 missing from navigator: {nav_json}");
-
-        // `resources/list` and `resources/read` read the same hosted UiApp session.
-        let res_list = dispatch_json_value(json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": {} }), &mut state)
-            .ok_or_else(|| String::from("missing resources/list reply"))?;
-        let res_arr = res_list["result"]["resources"].as_array().ok_or_else(|| format!("missing resources array: {res_list}"))?;
-        assert!(res_arr.iter().any(|r| r["uri"] == json!("sheet://shared-s1")), "resources/list missed hosted sheet: {res_list}");
-
-        let res_read = dispatch_json_value(
-            json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": { "uri": "sheet://shared-s1" } }),
-            &mut state,
-        )
-        .ok_or_else(|| String::from("missing resources/read reply"))?;
-        assert!(res_read.get("error").is_none(), "resources/read error: {res_read}");
-        assert!(!res_read["result"]["contents"].as_array().is_none_or(Vec::is_empty));
-
-        // `wheel` action is preserved verbatim (`"wheel"`, not rewritten to `"scroll"`).
-        let wheel = call_tool(&mut state, "ui_pointer_gesture", json!({ "action": "wheel", "x": 200.0, "y": 200.0, "delta_y": -120.0 }))
-            .map_err(|e| format!("wheel gesture failed: {e}"))?;
-        assert!(!wheel.is_error, "wheel gesture errored: {:?}", wheel.structured_content);
-        let wheel_sc = wheel.structured_content.ok_or_else(|| String::from("missing wheel structured content"))?;
-        assert_eq!(wheel_sc["action"], json!("wheel"));
-        Ok(())
     }
 
     #[test]

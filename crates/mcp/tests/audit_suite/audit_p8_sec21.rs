@@ -16,14 +16,13 @@ use super::common::TempDir;
 type RecordedCalls = Arc<Mutex<Vec<(String, Value)>>>;
 
 struct RecordingGuiHost {
-    gui_only: bool,
     calls: RecordedCalls,
 }
 
 impl RecordingGuiHost {
     fn new() -> (Self, RecordedCalls) {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        (Self { gui_only: false, calls: Arc::clone(&calls) }, calls)
+        (Self { calls: Arc::clone(&calls) }, calls)
     }
 }
 
@@ -31,14 +30,6 @@ impl GuiSessionHost for RecordingGuiHost {
     fn call_gui(&mut self, method: &str, params: Value) -> Result<Value, EngineError> {
         self.calls.lock().expect("lock calls").push((method.to_string(), params));
         Ok(json!({ "ok": true, "method": method }))
-    }
-
-    fn set_gui_only(&mut self, gui_only: bool) {
-        self.gui_only = gui_only;
-    }
-
-    fn is_gui_only(&self) -> bool {
-        self.gui_only
     }
 }
 
@@ -91,7 +82,7 @@ fn fa_sec21_01_and_02_ui_metrics_schema_and_normalization() {
     }
 
     let (host, calls) = RecordingGuiHost::new();
-    let mut state = McpServerState::with_gui_host(Box::new(host)).with_gui_only(true);
+    let mut state = McpServerState::with_gui_host(Box::new(host));
 
     let gesture_px = call_tool(
         &mut state,
@@ -344,7 +335,7 @@ fn fa_sec21_04_live_report_import_uses_path_for_prism_and_pzfx() {
     let mut live_state = McpServerState::with_control_port(49777).expect("with_control_port").with_control_handler(move |method, params| {
         rec.lock().expect("lock").push((method.to_string(), params.clone()));
         match method {
-            "ping" => Ok(json!({ "pong": true, "gui_only": false })),
+            "ping" => Ok(json!({ "pong": true })),
             "engine.execute" => Ok(json!({
                 "command_id": params["command_id"],
                 "ok": true

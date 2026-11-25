@@ -87,9 +87,7 @@ fn assert_clean_parity(driver: &EguiHumanPathDriver<'_, ShellDriverState>, label
 }
 
 fn new_test_app() -> UiApp {
-    let mut app = UiApp::new();
-    app.set_gui_only(true);
-    app
+    UiApp::new()
 }
 
 fn create_pipeline_fixture_app() -> Result<UiApp, Box<dyn std::error::Error>> {

@@ -4,8 +4,8 @@
 //! Native `egui` Human-Path Acceptance Matrix (`WF-59`–`WF-65`, Shard 9, `R13.6`).
 //!
 //! Exercises workflows `WF-59` through `WF-65` on [`EguiHumanPathDriver`] via real pointer,
-//! wheel, drag, hover, keyboard, and IME events under `GuiOnlyPolicy::Strict` and
-//! `HumanPathOnly`, passing `14`-locale `gui-layout-spec.md` §9.4 parity and latency budgets.
+//! wheel, drag, hover, keyboard, and IME events under `HumanPathOnly`, passing
+//! `14`-locale `gui-layout-spec.md` §9.4 parity and latency budgets.
 
 use curvebook_chart::{ChartScene, ScenePrimitive, compile_graph, compile_layout};
 use curvebook_doc::{

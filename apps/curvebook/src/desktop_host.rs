@@ -140,8 +140,6 @@ pub struct DesktopMenuChromeState {
 pub struct DesktopHostConfig {
     pub in_window_menus: bool,
     pub new_instance: bool,
-    #[serde(default)]
-    pub gui_only: bool,
     pub locale_override: Option<String>,
     pub theme_override: Option<String>,
     pub recovery_root: Option<PathBuf>,
@@ -159,7 +157,6 @@ impl fmt::Debug for DesktopHostConfig {
         f.debug_struct("DesktopHostConfig")
             .field("in_window_menus", &self.in_window_menus)
             .field("new_instance", &self.new_instance)
-            .field("gui_only", &self.gui_only)
             .field("locale_override", &self.locale_override)
             .field("theme_override", &self.theme_override)
             .field("recovery_root", &self.recovery_root)
@@ -180,7 +177,6 @@ impl PartialEq for DesktopHostConfig {
         };
         self.in_window_menus == other.in_window_menus
             && self.new_instance == other.new_instance
-            && self.gui_only == other.gui_only
             && self.locale_override == other.locale_override
             && self.theme_override == other.theme_override
             && self.recovery_root == other.recovery_root
@@ -196,7 +192,6 @@ impl Default for DesktopHostConfig {
         Self {
             in_window_menus: false,
             new_instance: false,
-            gui_only: false,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -967,7 +962,6 @@ fn configure_app_overrides(app: &mut UiApp, cfg: &DesktopHostConfig) -> Result<(
         let mode = parse_theme_mode(theme_raw)?;
         app.set_theme_mode(mode);
     }
-    app.set_gui_only(cfg.gui_only);
     app.session_mut().set_path_policy(cfg.path_policy.clone());
     app.set_human_path_only(cfg.human_path_only);
     if let Some(adapter) = cfg.clipboard_adapter.as_ref() {

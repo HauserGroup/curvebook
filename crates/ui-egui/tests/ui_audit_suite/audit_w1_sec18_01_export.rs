@@ -23,7 +23,6 @@ struct ShellDriverState {
 
 fn seed_graph_and_layout_app() -> Result<UiApp, String> {
     let mut app = UiApp::new();
-    app.set_gui_only(true);
     app.execute_command(
         "sheet.createData",
         json!({

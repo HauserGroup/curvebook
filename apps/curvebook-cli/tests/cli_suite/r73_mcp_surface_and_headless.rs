@@ -1,22 +1,12 @@
-use std::io::{BufRead, BufReader, ErrorKind, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
-
 use curvebook_doc::{
     CellCoord, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange, SheetId,
 };
 use curvebook_engine::Session;
 use curvebook_format::{ZipWriter, save_project_file};
 use curvebook_svg::validate_svg_structure;
-use curvebook_ui_egui::UiApp;
 use serde_json::{Value, json};
 
-use super::common::{
-    McpChild, TempWorkdir, assert_approx, decode_base64, loopback_required, read_result_json, result_scalar_f64, result_tab, tab_cell_f64,
-};
+use super::common::{McpChild, TempWorkdir, assert_approx, decode_base64, read_result_json, result_scalar_f64, result_tab, tab_cell_f64};
 
 fn assert_structured_error_shape(err_sc: &Value, expected_code: &str, context: &str) -> Result<(), String> {
     if err_sc["code"] != json!(expected_code) {
@@ -34,7 +24,7 @@ fn assert_structured_error_shape(err_sc: &Value, expected_code: &str, context: &
     if err_sc.get("remediation").is_none() {
         return Err(format!("{context}: missing `remediation` field in {err_sc}"));
     }
-    if matches!(expected_code, "path_escape" | "gui_only_violation" | "conflict") && err_sc["remediation"].as_str().is_none_or(str::is_empty) {
+    if matches!(expected_code, "path_escape" | "conflict") && err_sc["remediation"].as_str().is_none_or(str::is_empty) {
         return Err(format!("{context}: expected non-empty remediation for `{expected_code}` in {err_sc}"));
     }
     if err_sc.get("details").is_none() {
@@ -44,38 +34,31 @@ fn assert_structured_error_shape(err_sc: &Value, expected_code: &str, context: &
 }
 
 #[test]
-fn r73_stdio_initialize_ping_ndjson_and_content_length_both_modes() -> Result<(), String> {
-    for gui_only in [false, true] {
-        let args: &[&str] = if gui_only { &["mcp", "--gui-only"] } else { &["mcp"] };
-        let mut child = McpChild::spawn(args)?;
-        let init = child.initialize()?;
-        if init["serverInfo"]["name"] != json!("curvebook") {
-            return Err(format!("unexpected serverInfo: {init}"));
-        }
-        if init["capabilities"]["tools"]["listChanged"] != json!(true) {
-            return Err(format!("expected tools.listChanged=true: {init}"));
-        }
-        if init["capabilities"]["resources"]["listChanged"] != json!(false) || init["capabilities"]["prompts"]["listChanged"] != json!(false) {
-            return Err(format!("unexpected resource/prompt capabilities: {init}"));
-        }
-        let instr = init["instructions"].as_str().ok_or("missing initialize instructions")?;
-        if gui_only {
-            if !instr.contains("--gui-only") || !instr.contains("ui_inspect") || !instr.contains("ui_screenshot") {
-                return Err(format!("--gui-only instructions missing GUI contract: {instr}"));
-            }
-        } else if !instr.contains("doc_inspect") || !instr.contains("list_toolsets") || !instr.contains("enable_toolset") {
-            return Err(format!("headless instructions missing workflow hints: {instr}"));
-        }
+fn r73_stdio_initialize_ping_ndjson_and_content_length() -> Result<(), String> {
+    let mut child = McpChild::spawn(&["mcp"])?;
+    let init = child.initialize()?;
+    if init["serverInfo"]["name"] != json!("curvebook") {
+        return Err(format!("unexpected serverInfo: {init}"));
+    }
+    if init["capabilities"]["tools"]["listChanged"] != json!(true) {
+        return Err(format!("expected tools.listChanged=true: {init}"));
+    }
+    if init["capabilities"]["resources"]["listChanged"] != json!(false) || init["capabilities"]["prompts"]["listChanged"] != json!(false) {
+        return Err(format!("unexpected resource/prompt capabilities: {init}"));
+    }
+    let instr = init["instructions"].as_str().ok_or("missing initialize instructions")?;
+    if !instr.contains("doc_inspect") || !instr.contains("list_toolsets") || !instr.contains("enable_toolset") {
+        return Err(format!("headless instructions missing workflow hints: {instr}"));
+    }
 
-        // Ping over Content-Length and raw NDJSON line framing on the same session.
-        let ping_cl = child.request("ping", json!({}))?;
-        if ping_cl["result"] != json!({}) {
-            return Err(format!("ping Content-Length mismatch: {ping_cl}"));
-        }
-        let ping_ndjson = child.request_ndjson("ping", json!({}))?;
-        if ping_ndjson["result"] != json!({}) {
-            return Err(format!("ping NDJSON mismatch: {ping_ndjson}"));
-        }
+    // Ping over Content-Length and raw NDJSON line framing on the same session.
+    let ping_cl = child.request("ping", json!({}))?;
+    if ping_cl["result"] != json!({}) {
+        return Err(format!("ping Content-Length mismatch: {ping_cl}"));
+    }
+    let ping_ndjson = child.request_ndjson("ping", json!({}))?;
+    if ping_ndjson["result"] != json!({}) {
+        return Err(format!("ping NDJSON mismatch: {ping_ndjson}"));
     }
     Ok(())
 }
@@ -512,225 +495,5 @@ fn r73_stdio_workdir_guard_and_structured_errors() -> Result<(), String> {
     let recalc_err =
         headless.call_tool_err("command_run", json!({ "command_id": "project.recalculate", "params": { "include_external_links": true } }))?;
     assert_structured_error_shape(&recalc_err, "path_escape", "stored external link escape")?;
-
-    // Strict --gui-only --workdir enforces WorkdirGuard on File/Save & graph.exportSvg too!
-    let mut gui = McpChild::spawn(&["mcp", "--gui-only", "--workdir", &wd_str])?;
-    gui.initialize()?;
-    gui.create_table(json!({ "sheet_id": "gui-wd-ds", "kind": "Column", "rows": 2, "cols": 2, "auto_graph": true, "graph_sheet_id": "gui-wd-g" }))?;
-    let gui_save_esc = gui.ui_invoke_err("project.save", json!({ "path": "../gui_escape.curvebook" }))?;
-    assert_structured_error_shape(&gui_save_esc, "path_escape", "--gui-only File/Save escape")?;
-    let gui_open_esc = gui.ui_invoke_err("project.open", json!({ "path": &outside_str }))?;
-    assert_structured_error_shape(&gui_open_esc, "path_escape", "--gui-only File/Open escape")?;
-    let gui_svg_esc = gui.ui_invoke_err("graph.exportSvg", json!({ "sheet_id": "gui-wd-g", "path": "../gui_escape.svg" }))?;
-    assert_structured_error_shape(&gui_svg_esc, "path_escape", "--gui-only exportSvg escape")?;
-
-    gui.ui_invoke_path(&["File", "Save"], json!({ "path": "inside_ok.curvebook" }))?;
-    if !wd.dir.join("inside_ok.curvebook").is_file() {
-        return Err("expected --gui-only --workdir File/Save inside workdir to write file".to_owned());
-    }
-    Ok(())
-}
-
-#[test]
-fn r73_stdio_strict_gui_only_rejections_and_control_port_parity() -> Result<(), String> {
-    let wd = TempWorkdir::new("r73_gui_reject")?;
-    let wd_str = wd.path_str();
-    let mut gui = McpChild::spawn(&["mcp", "--gui-only", "--workdir", &wd_str])?;
-    gui.initialize()?;
-
-    let tools_resp = gui.request("tools/list", json!({}))?;
-    let tools = tools_resp["result"]["tools"].as_array().ok_or("tools/list missing array")?;
-    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    if names
-        != [
-            "ui_inspect",
-            "ui_screenshot",
-            "ui_pointer_gesture",
-            "ui_type_text",
-            "ui_press_key",
-            "ui_invoke_menu",
-            "ui_switch_tab",
-            "ui_answer_dialog",
-        ]
-    {
-        return Err(format!("unexpected --gui-only tools/list: {names:?}"));
-    }
-
-    // Resources disabled in --gui-only
-    let res_list = gui.request("resources/list", json!({}))?;
-    if res_list["result"]["resources"] != json!([]) {
-        return Err(format!("expected empty resources/list in --gui-only: {res_list}"));
-    }
-    let res_read = gui.request("resources/read", json!({ "uri": "sheet://data-1" }))?;
-    if res_read["error"]["code"] != json!(-32600) || res_read["error"]["data"]["code"] != json!("gui_only_violation") {
-        return Err(format!("expected -32600 gui_only_violation for resources/read: {res_read}"));
-    }
-
-    // All direct L5 / inspection / toolset tools strictly rejected
-    for (tool, args) in [
-        ("doc_inspect", json!({})),
-        ("open_file", json!({ "path": "a.curvebook" })),
-        ("save_file", json!({ "path": "b.curvebook" })),
-        ("export", json!({ "format": "csv" })),
-        ("render_preview", json!({})),
-        ("command_run", json!({ "command_id": "sheet.createData", "params": { "kind": "Column" } })),
-        ("command_batch", json!({ "commands": [] })),
-        ("command_list", json!({})),
-        ("list_toolsets", json!({})),
-        ("enable_toolset", json!({ "toolset": "stats", "enabled": true })),
-        ("sheet_create_data", json!({ "kind": "Column" })),
-        ("stats_run", json!({ "sheet_id": "data-1" })),
-        ("fit_run", json!({ "sheet_id": "data-1" })),
-    ] {
-        let err = gui.call_tool_err(tool, args)?;
-        assert_structured_error_shape(&err, "gui_only_violation", &format!("--gui-only reject {tool}"))?;
-    }
-
-    // Disk ui_screenshot `path` strictly rejected with gui_only_violation and writes nothing to disk.
-    let shot_err = gui.call_tool_err("ui_screenshot", json!({ "target": "workspace", "path": "forbidden.png" }))?;
-    assert_structured_error_shape(&shot_err, "gui_only_violation", "--gui-only ui_screenshot path")?;
-    if wd.dir.join("forbidden.png").exists() {
-        return Err("ui_screenshot path wrote file under --gui-only".to_owned());
-    }
-
-    // Loopback `--control-port <N> --gui-only` attaches cleanly and rejects L5 / disk bypasses.
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(l) => l,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
-        Err(err) => return Err(format!("bind control TcpListener: {err}")),
-    };
-    let addr = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?;
-    let port = addr.port();
-    if let Err(err) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
-        if err.kind() == ErrorKind::PermissionDenied && !loopback_required() {
-            return Ok(());
-        }
-        return Err(format!("probe control connect: {err}"));
-    }
-    let _ = listener.accept();
-    listener.set_nonblocking(true).map_err(|e| format!("set_nonblocking: {e}"))?;
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_flag = Arc::clone(&stop);
-
-    let server_thread = thread::spawn(move || -> Result<(), String> {
-        let mut app = UiApp::new();
-        app.set_gui_only(true);
-        loop {
-            if stop_flag.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-            let stream = match listener.accept() {
-                Ok((s, _)) => s,
-                Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                Err(err) => return Err(err.to_string()),
-            };
-            stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-            let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
-            let reader = BufReader::new(stream);
-            for line_res in reader.lines() {
-                let line = line_res.map_err(|e| e.to_string())?;
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let reply = app.dispatch_control_line(&line);
-                writer.write_all(reply.as_bytes()).map_err(|e| e.to_string())?;
-                writer.write_all(b"\n").map_err(|e| e.to_string())?;
-                writer.flush().map_err(|e| e.to_string())?;
-            }
-        }
-    });
-
-    let port_str = port.to_string();
-    let mut attached = McpChild::spawn(&["mcp", "--control-port", &port_str, "--gui-only"])?;
-    attached.initialize()?;
-    let insp_raw = attached.call_tool_raw("ui_inspect", json!({ "scope": "all", "include_bounds": true }))?;
-    if !loopback_required()
-        && insp_raw["isError"] == json!(true)
-        && insp_raw["structuredContent"]["code"] == json!("io_error")
-        && insp_raw["structuredContent"]["message"].as_str().is_some_and(|m| m.contains("Operation not permitted") || m.contains("Permission denied"))
-    {
-        stop.store(true, Ordering::Relaxed);
-        drop(attached);
-        server_thread.join().map_err(|_| String::from("TCP server thread panicked"))??;
-        return Ok(());
-    }
-    if insp_raw["isError"] == json!(true) {
-        stop.store(true, Ordering::Relaxed);
-        let _ = server_thread.join();
-        return Err(format!("attached ui_inspect failed: {insp_raw}"));
-    }
-    let insp_text = insp_raw["content"][0]["text"].as_str().ok_or("missing attached ui_inspect text")?;
-    let insp: Value = serde_json::from_str(insp_text).map_err(|e| format!("parse attached inspect: {e}"))?;
-    if insp["gui_only"] != json!(true) {
-        return Err(format!("expected live-control gui_only=true, got {insp}"));
-    }
-
-    let shot = attached.ui_screenshot("full_window", 480, 320)?;
-    if shot.len() < 128 {
-        return Err("expected valid PNG bytes over --control-port --gui-only".to_owned());
-    }
-    attached.create_table(json!({ "sheet_id": "tcp-col", "kind": "Column", "rows": 3, "cols": 2 }))?;
-    attached.paste_tsv("tcp-col", 0, 0, 0, "10\t20\n12\t22\n14\t24")?;
-    let tcp_doc_err = attached.call_tool_err("doc_inspect", json!({}))?;
-    assert_structured_error_shape(&tcp_doc_err, "gui_only_violation", "TCP --gui-only doc_inspect")?;
-    let tcp_shot_err = attached.call_tool_err("ui_screenshot", json!({ "target": "workspace", "path": "tcp_forbidden.png" }))?;
-    assert_structured_error_shape(&tcp_shot_err, "gui_only_violation", "TCP --gui-only ui_screenshot path")?;
-
-    // Verify raw loopback TCP control protocol rejects mutating/L5 & disk writes while keeping read-only inspection.
-    {
-        let forbidden_shot = wd.dir.join("direct_tcp_forbidden.png");
-        let mut raw_sock = TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect direct TCP socket: {e}"))?;
-        let mut reader = BufReader::new(raw_sock.try_clone().map_err(|e| format!("clone tcp: {e}"))?);
-        let mut send_tcp = |req_id: &str, method: &str, params: Value| -> Result<Value, String> {
-            let line =
-                serde_json::to_string(&json!({ "id": req_id, "method": method, "params": params })).map_err(|e| format!("serialize tcp req: {e}"))?;
-            raw_sock.write_all(line.as_bytes()).map_err(|e| format!("write tcp: {e}"))?;
-            raw_sock.write_all(b"\n").map_err(|e| format!("write tcp nl: {e}"))?;
-            raw_sock.flush().map_err(|e| format!("flush tcp: {e}"))?;
-            let mut reply_line = String::new();
-            reader.read_line(&mut reply_line).map_err(|e| format!("read tcp reply: {e}"))?;
-            serde_json::from_str(&reply_line).map_err(|e| format!("parse tcp reply `{reply_line}`: {e}"))
-        };
-
-        for (req_id, method, params) in [
-            ("b1", "sheet.createData", json!({ "kind": "Column" })),
-            ("b2", "engine.execute", json!({ "command_id": "sheet.createData", "params": { "kind": "Column" } })),
-            ("b3", "command.run", json!({ "command_id": "sheet.createData", "params": { "kind": "Column" } })),
-            ("b4", "command.batch", json!({ "commands": [{ "command": "sheet.createData", "params": { "kind": "Column" } }] })),
-            ("b5", "ui.theme.set", json!({ "mode": "dark" })),
-            ("b6", "doc.export", json!({ "format": "csv" })),
-            ("b7", "render.preview", json!({})),
-            ("b8", "ui.screenshot", json!({ "target": "full_window", "path": forbidden_shot })),
-            ("b9", "doc.inspect", json!({})),
-            ("b10", "render.svg", json!({})),
-            ("b11", "render.pdf", json!({})),
-            ("b12", "app.quit", json!({})),
-        ] {
-            let reply = send_tcp(req_id, method, params)?;
-            if reply["ok"] != json!(false) || reply["error_detail"]["code"] != json!("gui_only_violation") {
-                return Err(format!("expected direct TCP `{method}` gui_only_violation, got {reply}"));
-            }
-        }
-        if forbidden_shot.exists() {
-            return Err("direct TCP ui.screenshot path wrote file under --gui-only".to_owned());
-        }
-
-        for (req_id, method, expect_gui_only) in [("r1", "ping", true), ("r2", "state.snapshot", true)] {
-            let reply = send_tcp(req_id, method, json!({}))?;
-            if reply["ok"] != json!(true) {
-                return Err(format!("expected read-only direct TCP `{method}` ok=true, got {reply}"));
-            }
-            if expect_gui_only && reply["result"]["gui_only"] != json!(true) {
-                return Err(format!("expected read-only direct TCP `{method}` gui_only=true, got {reply}"));
-            }
-        }
-    }
-
-    stop.store(true, Ordering::Relaxed);
-    drop(attached);
-    server_thread.join().map_err(|_| String::from("TCP server thread panicked"))??;
     Ok(())
 }

@@ -303,7 +303,6 @@ fn navigator_drag_reorder_info_sheet_and_canvas_title_inline_edit() {
     // 3) Select GraphSheet and update title / axis via `graph.setSpec` / `graph.setAxes` commands.
     harness.click("nav.chip.graphs").expect("graph chip");
     harness.click("nav.sheet.graph-xy").expect("select graph-xy");
-    harness.app_mut().set_gui_only(false);
     harness
         .app_mut()
         .execute_command("graph.setSpec", json!({ "sheet_id": "graph-xy", "spec": { "title": "Normalized Fluorescence" } }))
@@ -496,7 +495,6 @@ fn qol3_qol6_qol7_exclude_reason_report_and_remediation_sibling() {
     assert_eq!(harness.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("res-t"));
 
     let mut app = harness.driver.state().app.clone();
-    app.set_gui_only(false);
     let rem_err = curvebook_ui_egui::dispatch_ui_command(&mut app, "ui.result.applyRemediation", &json!({ "result_sheet_id": "res-t" }))
         .expect_err("QOL-7 diagnostics-only must reject applyRemediation");
     assert!(rem_err.contains("diagnostics_only_policy"));

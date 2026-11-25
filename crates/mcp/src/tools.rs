@@ -13,7 +13,7 @@ use curvebook_engine::cmd::{Caller, CommandGroup, Effects, registry};
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_engine::services::command_step_writes_filesystem;
 use curvebook_engine::services::{BatchCommandStep, inspect_project_summary, inspect_sheet_detail};
-use curvebook_engine::{CommandOutcome, EngineError, ExternalPathPolicy, GuiOnlyPolicy, Session};
+use curvebook_engine::{CommandOutcome, EngineError, ExternalPathPolicy, Session};
 use curvebook_platform::sync::{LockError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_platform::{PlatformError, WorkdirGuard};
@@ -157,12 +157,6 @@ pub trait GuiSessionHost {
     /// Execute a GUI control method (`ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, etc.).
     fn call_gui(&mut self, method: &str, params: Value) -> Result<Value, EngineError>;
 
-    /// Synchronize `--gui-only` restriction policy onto the hosted UI session.
-    fn set_gui_only(&mut self, gui_only: bool);
-
-    /// Return `true` when the hosted UI session enforces `--gui-only` mode.
-    fn is_gui_only(&self) -> bool;
-
     /// Optional shared backing [`Session`] when running alongside an in-process GUI app so core
     /// tools and MCP `resources/*` read and mutate the same document (`R2-S12-07`).
     fn hosted_session(&self) -> Option<&Session> {
@@ -191,13 +185,8 @@ pub struct McpServerState {
     #[cfg(not(target_arch = "wasm32"))]
     control_handler: Option<LiveControlHandler>,
     #[cfg(not(target_arch = "wasm32"))]
-    control_requested_gui_only: bool,
-    #[cfg(not(target_arch = "wasm32"))]
-    control_policy_synced: bool,
-    #[cfg(not(target_arch = "wasm32"))]
     workdir_guard: Option<WorkdirGuard>,
     gui_host: Option<Box<dyn GuiSessionHost>>,
-    gui_only: bool,
     gui_toolset_enabled: bool,
     enabled_toolsets: BTreeSet<CommandGroup>,
     pending_notifications: Vec<Value>,
@@ -216,11 +205,8 @@ impl fmt::Debug for McpServerState {
         s.field("control_port", &self.control_port)
             .field("has_control_token", &self.control_token.is_some())
             .field("has_control_handler", &self.control_handler.is_some())
-            .field("control_requested_gui_only", &self.control_requested_gui_only)
-            .field("control_policy_synced", &self.control_policy_synced)
             .field("workdir_guard", &self.workdir_guard);
         s.field("has_gui_host", &self.gui_host.is_some())
-            .field("gui_only", &self.gui_only)
             .field("gui_toolset_enabled", &self.gui_toolset_enabled)
             .field("enabled_toolsets", &self.enabled_toolsets)
             .field("pending_notifications_len", &self.pending_notifications.len())
@@ -248,7 +234,6 @@ impl McpServerState {
     /// Wrap an existing headless [`Session`].
     #[must_use]
     pub fn from_session(session: Session) -> Self {
-        let gui_only = session.gui_only() == GuiOnlyPolicy::Strict;
         #[cfg(not(target_arch = "wasm32"))]
         let workdir_guard = session.path_policy().workdir_guard().cloned();
         Self {
@@ -260,13 +245,8 @@ impl McpServerState {
             #[cfg(not(target_arch = "wasm32"))]
             control_handler: None,
             #[cfg(not(target_arch = "wasm32"))]
-            control_requested_gui_only: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            control_policy_synced: false,
-            #[cfg(not(target_arch = "wasm32"))]
             workdir_guard,
             gui_host: None,
-            gui_only,
             gui_toolset_enabled: false,
             enabled_toolsets: BTreeSet::new(),
             pending_notifications: Vec::new(),
@@ -293,19 +273,6 @@ impl McpServerState {
         Ok(state)
     }
 
-    /// Construct an MCP server state attached to a running desktop `--control <port>` with explicit
-    /// `--gui-only` policy state.
-    ///
-    /// Live-attached server states cannot subsequently enable `--workdir` confinement because
-    /// `--workdir` cannot confine file operations inside the external desktop host process.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_control_port_and_gui_only(port: u16, gui_only: bool) -> Result<Self, String> {
-        let mut state = Self::with_control_port(port)?;
-        state.control_requested_gui_only = gui_only;
-        state.apply_local_gui_only(gui_only);
-        Ok(state)
-    }
-
     /// Attach an in-process JSON-lines control dispatcher for sandboxed integration tests.
     #[doc(hidden)]
     #[cfg(not(target_arch = "wasm32"))]
@@ -314,7 +281,6 @@ impl McpServerState {
         F: FnMut(&str, Value) -> Result<Value, String> + Send + 'static,
     {
         self.control_handler = Some(Box::new(handler));
-        self.control_policy_synced = false;
         self
     }
 
@@ -332,21 +298,10 @@ impl McpServerState {
     /// Construct an MCP server state backed by an in-process [`GuiSessionHost`].
     #[must_use]
     pub fn with_gui_host(host: Box<dyn GuiSessionHost>) -> Self {
-        let gui_only = host.is_gui_only();
-        let mut session = Session::new();
-        session.set_gui_only(if gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled });
-        let mut state = Self::from_session(session);
+        let mut state = Self::from_session(Session::new());
         state.gui_host = Some(host);
-        state.gui_only = gui_only;
         state.sync_policies_to_hosted_session();
         state
-    }
-
-    /// Fluent builder to enable or disable strict `--gui-only` mode on this server state.
-    #[must_use]
-    pub fn with_gui_only(mut self, gui_only: bool) -> Self {
-        self.set_gui_only(gui_only);
-        self
     }
 
     /// Attach or clear a canonical [`WorkdirGuard`] confinement root on this server state.
@@ -395,15 +350,13 @@ impl McpServerState {
     }
 
     fn sync_policies_to_hosted_session(&mut self) {
-        let gui_policy = if self.gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled };
         let path_policy = self.effective_path_policy();
         if let Some(host) = self.gui_host.as_mut()
             && let Some(hosted) = host.hosted_session_mut()
+            && *hosted.path_policy() != path_policy
+            && path_policy != ExternalPathPolicy::Unconstrained
         {
-            hosted.set_gui_only(gui_policy);
-            if *hosted.path_policy() != path_policy && path_policy != ExternalPathPolicy::Unconstrained {
-                hosted.set_path_policy(path_policy);
-            }
+            hosted.set_path_policy(path_policy);
         }
     }
 
@@ -422,10 +375,8 @@ impl McpServerState {
     }
 
     /// Replace the active [`Session`] (or hosted `GuiSessionHost` session) while preserving
-    /// configured `--gui-only` and `--workdir` policies across `open_file` reloads and rollbacks.
+    /// configured `--workdir` policies across `open_file` reloads and rollbacks.
     pub(crate) fn install_session(&mut self, mut session: Session) {
-        let gui_policy = if self.gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled };
-        session.set_gui_only(gui_policy);
         let current_policy = self.effective_path_policy();
         if current_policy != ExternalPathPolicy::Unconstrained {
             session.set_path_policy(current_policy);
@@ -499,7 +450,6 @@ impl McpServerState {
             ));
         }
         self.control_port = port;
-        self.control_policy_synced = false;
         Ok(())
     }
 
@@ -521,7 +471,6 @@ impl McpServerState {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_control_token(&mut self, token: Option<&str>) -> Result<(), String> {
         self.control_token = token.map(live_control::validate_control_token).transpose()?;
-        self.control_policy_synced = false;
         Ok(())
     }
 
@@ -534,7 +483,7 @@ impl McpServerState {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn send_live_control_raw(&mut self, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
+    pub(crate) fn send_live_control(&mut self, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
         let Some(port) = self.control_port() else {
             return Err(StructuredErrorPayload::new(ErrorCode::Conflict, "live control request attempted without an attached --control-port"));
         };
@@ -553,43 +502,6 @@ impl McpServerState {
         }
         let token = self.resolved_control_token(port)?;
         live_control::send_control_detailed_with_token(port, token.as_deref(), method, params)
-    }
-
-    /// Synchronize `--gui-only` policy with an attached `--control-port` host via `ping`,
-    /// failing closed when the handshake fails or when local `--gui-only` cannot be enforced on an
-    /// unlocked remote host (`R2-S12-01`).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn sync_remote_control_policy(&mut self) -> Result<(), StructuredErrorPayload> {
-        if self.control_port.is_none() || self.control_policy_synced {
-            return Ok(());
-        }
-        let ping = self.send_live_control_raw("ping", json!({}))?;
-        let Some(remote_gui_only) = ping.get("gui_only").and_then(Value::as_bool) else {
-            return Err(StructuredErrorPayload::new(ErrorCode::Conflict, "remote control host `ping` response omitted boolean `gui_only` policy")
-                .with_remediation("Attach only to a CurveBook control server returning `gui_only` from `ping`."));
-        };
-        if self.control_requested_gui_only && !remote_gui_only {
-            return Err(StructuredErrorPayload::new(
-                ErrorCode::GuiOnlyViolation,
-                "cannot enforce `--gui-only` over `--control-port`: remote desktop host does not have `--gui-only` enabled",
-            )
-            .with_remediation("Restart the remote desktop host with `--gui-only` before attaching `curvebook-cli mcp --control-port ... --gui-only`.")
-            .with_details(json!({ "local_gui_only": true, "remote_gui_only": false })));
-        }
-        self.apply_local_gui_only(remote_gui_only);
-        self.control_policy_synced = true;
-        Ok(())
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn sync_remote_control_policy(&mut self) -> Result<(), StructuredErrorPayload> {
-        Ok(())
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn send_live_control(&mut self, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
-        self.sync_remote_control_policy()?;
-        self.send_live_control_raw(method, params)
     }
 
     /// Borrow the set of currently enabled per-command toolset groups.
@@ -688,19 +600,8 @@ impl McpServerState {
     }
 
     /// Attach or clear an in-process [`GuiSessionHost`].
-    ///
-    /// If `--gui-only` is already enabled on this state, it is propagated to the newly attached
-    /// host; conversely, if the attached host already enforces `--gui-only`, this state adopts it.
     pub fn set_gui_host(&mut self, host: Option<Box<dyn GuiSessionHost>>) {
-        self.gui_host = host.map(|mut h| {
-            if self.gui_only {
-                h.set_gui_only(true);
-            } else if h.is_gui_only() {
-                self.gui_only = true;
-                self.session.set_gui_only(GuiOnlyPolicy::Strict);
-            }
-            h
-        });
+        self.gui_host = host;
         self.sync_policies_to_hosted_session();
     }
 
@@ -721,36 +622,7 @@ impl McpServerState {
         self.gui_host.as_deref_mut()
     }
 
-    fn apply_local_gui_only(&mut self, gui_only: bool) {
-        self.gui_only = gui_only;
-        let policy = if gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled };
-        self.session.set_gui_only(policy);
-        if let Some(host) = self.gui_host.as_mut() {
-            host.set_gui_only(gui_only);
-            if let Some(hosted) = host.hosted_session_mut() {
-                hosted.set_gui_only(policy);
-            }
-        }
-    }
-
-    /// Enable or disable strict `--gui-only` enforcement, propagating to both `self.session` and
-    /// any attached [`GuiSessionHost`].
-    pub fn set_gui_only(&mut self, gui_only: bool) {
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.control_port.is_some() {
-            self.control_requested_gui_only = gui_only;
-            self.control_policy_synced = false;
-        }
-        self.apply_local_gui_only(gui_only);
-    }
-
-    /// Return `true` when `--gui-only` policy is active on this state, session, or GUI host.
-    #[must_use]
-    pub fn is_gui_only(&self) -> bool {
-        self.gui_only || self.session.gui_only() == GuiOnlyPolicy::Strict || self.gui_host.as_ref().is_some_and(|host| host.is_gui_only())
-    }
-
-    /// Return `true` when the progressive `gui` toolset has been explicitly enabled in normal mode.
+    /// Return `true` when the progressive `gui` toolset has been explicitly enabled.
     #[must_use]
     pub const fn is_gui_toolset_enabled(&self) -> bool {
         self.gui_toolset_enabled
@@ -1136,16 +1008,11 @@ pub fn list_tools() -> Vec<ToolDefinition> {
     ]
 }
 
-/// Return the exposed MCP tools for `state`.
-///
-/// Under `--gui-only` (`state.is_gui_only()`), this shrinks strictly to the 8 `gui` tools.
-/// In normal mode, returns the 10 core tools plus per-command tools for every enabled `CommandGroup`
-/// (and the 8 `gui` tools when enabled via `enable_toolset` or backed by a `GuiSessionHost`).
+/// Return the exposed MCP tools for `state`: the 10 core tools plus per-command tools for every
+/// enabled `CommandGroup` (and the 8 `gui` tools when enabled via `enable_toolset` or backed by a
+/// `GuiSessionHost`).
 #[must_use]
 pub fn list_tools_for_state(state: &McpServerState) -> Vec<ToolDefinition> {
-    if state.is_gui_only() {
-        return gui_tools::list_gui_tools();
-    }
     let mut tools = list_tools();
     for spec in registry().specs() {
         if state.is_toolset_enabled(spec.group) {
@@ -1189,16 +1056,8 @@ where
 fn dispatch_tool_inner(state: &mut McpServerState, name: &str, arguments: Value) -> Result<ToolCallResult, ToolCallError> {
     let args = arguments.as_object().ok_or_else(|| ToolCallError::InvalidParams(String::from("tool arguments must be an object")))?;
 
-    if let Err(payload) = state.sync_remote_control_policy() {
-        return Ok(errors::result_from_payload(&payload));
-    }
-
     if gui_tools::is_gui_tool_name(name) {
         return gui_tools::dispatch_gui_tool(state, name, args);
-    }
-
-    if state.is_gui_only() {
-        return Ok(gui_only_violation_result(name));
     }
 
     match name {
@@ -1223,19 +1082,6 @@ fn dispatch_tool_inner(state: &mut McpServerState, name: &str, arguments: Value)
     }
 }
 
-pub(crate) fn gui_only_violation_result(tool_name: &str) -> ToolCallResult {
-    let payload = StructuredErrorPayload::new(ErrorCode::GuiOnlyViolation, format!("tool '{tool_name}' is forbidden under --gui-only policy"))
-        .with_remediation(
-            "Under --gui-only mode, use only the 8 human-equivalent GUI tools: ui_inspect, ui_screenshot, ui_pointer_gesture, ui_type_text, ui_press_key, ui_invoke_menu, ui_switch_tab, ui_answer_dialog.",
-        )
-        .with_details(json!({
-            "tool": tool_name,
-            "policy": "gui_only",
-            "allowed_tools": gui_tools::GUI_TOOL_NAMES,
-        }));
-    errors::result_from_payload(&payload)
-}
-
 pub(crate) fn dispatch_gui_backend(state: &mut McpServerState, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
     if let Some(host) = state.gui_host.as_mut() {
         return host.call_gui(method, params).map_err(|err| StructuredErrorPayload::from_engine_error(&err));
@@ -1246,12 +1092,11 @@ pub(crate) fn dispatch_gui_backend(state: &mut McpServerState, method: &str, par
     }
     Err(StructuredErrorPayload::new(
         ErrorCode::Conflict,
-        format!("GUI tool method '{method}' requires an in-process GuiSessionHost (--gui-only) or --control-port <PORT>"),
+        format!("GUI tool method '{method}' requires an in-process GuiSessionHost or --control-port <PORT>"),
     )
-    .with_remediation("Attach an in-process GuiSessionHost (e.g. desktop `--gui-only` host) or pass `--control-port <PORT>` pointing to a running CurveBook window.")
+    .with_remediation("Attach an in-process GuiSessionHost or pass `--control-port <PORT>` pointing to a running CurveBook window.")
     .with_details(json!({
         "method": method,
-        "gui_only": state.is_gui_only(),
     })))
 }
 
@@ -1352,17 +1197,10 @@ fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> 
                 Err(payload) => return Ok(errors::result_from_payload(&payload)),
             };
             let mut merged = Map::new();
-            match state.send_live_control("doc.inspect", json!({})) {
-                Ok(Value::Object(doc_summary)) => {
-                    for (k, v) in doc_summary {
-                        merged.insert(k, v);
-                    }
+            if let Ok(Value::Object(doc_summary)) = state.send_live_control("doc.inspect", json!({})) {
+                for (k, v) in doc_summary {
+                    merged.insert(k, v);
                 }
-                Ok(_) => {}
-                Err(payload) if payload.code == ErrorCode::GuiOnlyViolation => {
-                    return Ok(errors::result_from_payload(&payload));
-                }
-                Err(_) => {}
             }
             merged.insert(String::from("mode"), Value::String(String::from("live_attach")));
             merged.insert(String::from("control_port"), json!(port));
@@ -3171,9 +3009,6 @@ mod live_control {
                 "Pass matching --control-token <token>, set CURVEBOOK_CONTROL_TOKEN, or verify control-<port>.token in the config directory.",
             );
         }
-        if lower.contains("gui_only_violation") || lower.contains("gui-only") || lower.contains("gui_only") {
-            return StructuredErrorPayload::new(ErrorCode::GuiOnlyViolation, msg);
-        }
         if lower.contains("disabled") || lower.contains("grayed") {
             return StructuredErrorPayload::new(ErrorCode::Conflict, msg);
         }
@@ -3470,15 +3305,15 @@ mod tests {
         let mut huge_cur = Cursor::new(huge.as_slice());
         assert!(super::live_control::send_control_on_io(&mut huge_cur, &mut outbound, "ping", json!({}), 64).is_err());
 
-        // Detailed error parsing preserves structured error_detail codes and disabled/gui_only heuristics.
+        // Detailed error parsing preserves structured error_detail codes and disabled heuristics.
         let mut outbound = Vec::new();
-        let mut gui_err = Cursor::new(
-            br#"{"id":"mcp-1","ok":false,"error":"blocked","error_detail":{"code":"gui_only_violation","category":"policy","message":"forbidden shortcut","retryable":false,"remediation":"Use visible UI","details":{"remote":true}}}"#.as_slice(),
+        let mut policy_err = Cursor::new(
+            br#"{"id":"mcp-1","ok":false,"error":"blocked","error_detail":{"code":"path_escape","category":"policy","message":"outside workdir","retryable":false,"remediation":"Use a path inside workdir","details":{"remote":true}}}"#.as_slice(),
         );
-        let parsed = super::live_control::send_control_envelope_on_io(&mut gui_err, &mut outbound, None, "ui.invoke_menu", json!({}), 4096)
+        let parsed = super::live_control::send_control_envelope_on_io(&mut policy_err, &mut outbound, None, "ui.invoke_menu", json!({}), 4096)
             .expect_err("structured detail err");
-        assert_eq!(parsed.code, curvebook_doc::ErrorCode::GuiOnlyViolation);
-        assert_eq!(parsed.remediation.as_deref(), Some("Use visible UI"));
+        assert_eq!(parsed.code, curvebook_doc::ErrorCode::PathEscape);
+        assert_eq!(parsed.remediation.as_deref(), Some("Use a path inside workdir"));
 
         let mut outbound = Vec::new();
         let mut disabled_err = Cursor::new(br#"{"id":"mcp-1","ok":false,"error":"control is disabled"}"#.as_slice());

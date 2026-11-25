@@ -721,18 +721,6 @@ impl UiApp {
         self.session.document()
     }
 
-    /// Return whether strict `--gui-only` enforcement is active on the underlying [`Session`].
-    #[must_use]
-    pub fn is_gui_only(&self) -> bool {
-        self.session.gui_only() == curvebook_engine::GuiOnlyPolicy::Strict
-    }
-
-    /// Enable or disable strict `--gui-only` enforcement on the underlying [`Session`].
-    pub fn set_gui_only(&mut self, gui_only: bool) {
-        let policy = if gui_only { curvebook_engine::GuiOnlyPolicy::Strict } else { curvebook_engine::GuiOnlyPolicy::Disabled };
-        self.session.set_gui_only(policy);
-    }
-
     /// Return whether `R10.2` human-path-only enforcement is active (`EguiHumanPathDriver` / parity tests).
     #[must_use]
     pub const fn is_human_path_only(&self) -> bool {
@@ -807,9 +795,9 @@ impl UiApp {
     /// Returns an error if URL validation fails or the configured opener returns an error.
     pub fn open_feedback_on_github(&mut self) -> Result<(BuiltFeedbackUrl, OsAdapterStatus), String> {
         let built = self.build_feedback_issue_url();
-        let status = if !self.url_opener.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
+        let status = if !self.url_opener.is_custom && self.is_human_path_only() {
             validate_github_issue_url(&built.url)?;
-            OsAdapterStatus::unavailable("os-browser", "browser launch disabled under gui_only without custom URL opener")
+            OsAdapterStatus::unavailable("os-browser", "browser launch disabled under human_path_only without custom URL opener")
         } else {
             self.url_opener.opener.open_external_url(&built.url)?
         };
@@ -913,36 +901,36 @@ impl UiApp {
     }
 
     pub(crate) fn write_clipboard_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
-        if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
-            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under gui_only without stub adapter"));
+        if !self.clipboard_adapter.is_custom && self.is_human_path_only() {
+            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under human_path_only without stub adapter"));
         }
         self.clipboard_adapter.adapter.write_text(text)
     }
 
     pub(crate) fn write_clipboard_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
-        if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
-            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under gui_only without stub adapter"));
+        if !self.clipboard_adapter.is_custom && self.is_human_path_only() {
+            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under human_path_only without stub adapter"));
         }
         self.clipboard_adapter.adapter.write_bundle(bundle)
     }
 
     pub(crate) fn write_slide_clipboard_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
-        if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
-            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under gui_only without stub adapter"));
+        if !self.clipboard_adapter.is_custom && self.is_human_path_only() {
+            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under human_path_only without stub adapter"));
         }
         self.clipboard_adapter.adapter.write_slide_bundle(bundle)
     }
 
     pub(crate) fn read_clipboard_text(&self) -> Result<OsAdapterStatus, String> {
-        if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
-            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under gui_only without stub adapter"));
+        if !self.clipboard_adapter.is_custom && self.is_human_path_only() {
+            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under human_path_only without stub adapter"));
         }
         self.clipboard_adapter.adapter.read_text()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn read_clipboard_image(&self) -> Result<Option<Vec<u8>>, String> {
-        if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
+        if !self.clipboard_adapter.is_custom && self.is_human_path_only() {
             return Ok(None);
         }
         self.clipboard_adapter.adapter.read_image_bytes()
@@ -1043,7 +1031,7 @@ impl UiApp {
         Ok(outcome)
     }
 
-    /// Execute an external control-protocol command (`Caller::Control`) respecting `--gui-only` locks.
+    /// Execute an external control-protocol command (`Caller::Control`).
     pub fn execute_control_command(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), &mut self.mutation_seq, command_id, |session| {
@@ -1361,10 +1349,8 @@ impl UiApp {
         if let Some(tracker) = self.batch_undo_log.as_mut() {
             tracker.capture_fallback_baseline_before(&self.session, true);
         }
-        let gui_only = self.session.gui_only();
         let path_policy = self.session.path_policy().clone();
         let mut next = Session::from_document(doc);
-        next.set_gui_only(gui_only);
         next.set_path_policy(path_policy);
         self.session = next;
         self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
@@ -1373,12 +1359,10 @@ impl UiApp {
     }
 
     /// Replace the active [`Session`] (e.g. when loading a dropped project into an existing
-    /// window) while preserving host security policies (`gui_only`, `path_policy`,
-    /// `human_path_only`), OS adapters (`clipboard_adapter`, `url_opener`, `egui_dispatch_hook`),
-    /// and user preferences (`theme`, `locale`, `shortcuts`, `host_draws_menu_bar`,
-    /// `rulers_visible`).
+    /// window) while preserving host security policies (`path_policy`, `human_path_only`), OS
+    /// adapters (`clipboard_adapter`, `url_opener`, `egui_dispatch_hook`), and user preferences
+    /// (`theme`, `locale`, `shortcuts`, `host_draws_menu_bar`, `rulers_visible`).
     pub fn replace_session_preserving_policies(&mut self, mut session: Session) {
-        session.set_gui_only(self.session.gui_only());
         session.set_path_policy(self.session.path_policy().clone());
 
         let rulers_visible = self.canvas_dialogs.rulers_visible;

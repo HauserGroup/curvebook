@@ -304,7 +304,7 @@ pub const CLI_COMMANDS: &[CliCommandSpec] = &[
     },
     CliCommandSpec {
         id: "mcp",
-        usage_line: "mcp [--control-port <port>] [--gui-only] [--workdir <dir>] [--control-token <token>]",
+        usage_line: "mcp [--control-port <port>] [--workdir <dir>] [--control-token <token>]",
         summary: "run the Model Context Protocol (MCP) server over stdio (`--workdir` and `--control-port` are mutually exclusive)",
         positionals: &[],
         flags: &[
@@ -314,13 +314,6 @@ pub const CLI_COMMANDS: &[CliCommandSpec] = &[
                 value_placeholder: Some("<port>"),
                 default_value: "CURVEBOOK_CONTROL_PORT env or headless",
                 description: "Attach over loopback `127.0.0.1:<port>` to a running `curvebook --control <port>` window (`1..=65535`; mutually exclusive with `--workdir`).",
-            },
-            CliFlagSpec {
-                long: "--gui-only",
-                short: None,
-                value_placeholder: None,
-                default_value: "false",
-                description: "Expose strictly the human-equivalent `gui` MCP tools (`GuiOnlyPolicy::Strict`).",
             },
             CliFlagSpec {
                 long: "--workdir",

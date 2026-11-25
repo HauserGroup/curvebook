@@ -60,7 +60,7 @@ pub struct PendingAllTablesExport {
 }
 
 impl WfShellState {
-    /// Wrap `app` for strict native `egui` GUI-only + human-path execution.
+    /// Wrap `app` for strict native `egui` human-path execution.
     #[must_use]
     pub fn new(app: UiApp) -> Self {
         Self::new_with_file_dialog(app, Arc::new(StubPlatformFileDialogAdapter::new()))
@@ -69,7 +69,6 @@ impl WfShellState {
     /// Wrap `app` with a caller-held [`StubPlatformFileDialogAdapter`] for native file-picker tests.
     #[must_use]
     pub fn new_with_file_dialog(mut app: UiApp, file_dialog: Arc<StubPlatformFileDialogAdapter>) -> Self {
-        app.set_gui_only(true);
         app.set_human_path_only(true);
         let views = app.egui_views.clone();
         Self {
@@ -112,7 +111,6 @@ impl EguiWfHarness {
         file_dialog: Arc<StubPlatformFileDialogAdapter>,
     ) -> Self {
         let mut app = UiApp::new();
-        app.set_gui_only(true);
         app.set_human_path_only(true);
         app.set_clipboard_adapter(clipboard);
         Self::from_app_with_file_dialog(app, metrics, file_dialog)
@@ -458,16 +456,16 @@ pub fn new_strict_egui_driver() -> EguiWfHarness {
 fn assert_bypass_blocked(label: &str, res: Result<serde_json::Value, curvebook_engine::EngineError>) -> TestRes {
     match res {
         Ok(val) => Err(format!("zero-shortcut compliance failed: `{label}` unexpectedly succeeded with {val}")),
-        Err(err) if err.code == ErrorCode::GuiOnlyViolation => Ok(()),
-        Err(err) => Err(format!("zero-shortcut compliance failed: `{label}` returned {:?} instead of GuiOnlyViolation", err.code)),
+        Err(err) if err.code == ErrorCode::Conflict && err.details == Some(json!({ "code": "human_path_only_policy" })) => Ok(()),
+        Err(err) => Err(format!(
+            "zero-shortcut compliance failed: `{label}` returned {:?} ({:?}) instead of Conflict(human_path_only_policy)",
+            err.code, err.details
+        )),
     }
 }
 
-/// Verify strict `gui_only` + `human_path_only` guard enforcement and `egui` hit-box/scrollbar parity.
+/// Verify strict `human_path_only` guard enforcement and `egui` hit-box/scrollbar parity.
 pub fn assert_zero_shortcut_compliance(h: &mut EguiWfHarness) -> TestRes {
-    if !h.app().is_gui_only() {
-        return Err(String::from("zero-shortcut compliance failed: UiApp::is_gui_only() is false"));
-    }
     if !h.app().is_human_path_only() {
         return Err(String::from("zero-shortcut compliance failed: UiApp::is_human_path_only() is false"));
     }

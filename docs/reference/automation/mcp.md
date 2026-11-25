@@ -31,8 +31,6 @@ Single-call `initialize` request and response syntax:
 |---|---|---|
 | Headless stdio | `curvebook-cli mcp [--workdir <dir>]` | In-process `engine::Session` |
 | Live-attach stdio | `curvebook-cli mcp --control-port <port> [--control-token <token>]` | Forwarded over loopback `127.0.0.1:<port>` to running desktop `curvebook --control <port>` |
-| Strict GUI-only (in-process) | `curvebook-cli mcp --gui-only [--workdir <dir>]` | In-process `UiApp` exposing only the `gui` toolset |
-| Strict GUI-only (live-attach) | `curvebook-cli mcp --control-port <port> --gui-only` | Attached to a `--gui-only` desktop control listener |
 
 Pass `--workdir <dir>` to confine all filesystem reads, saves, exports, and external delimited-file links inside `<dir>` using canonicalized containment checks (`ErrorCode::PathEscape` if violated). `--workdir` and `--control-port` (including `CURVEBOOK_CONTROL_PORT`) are mutually exclusive and fail immediately with exit code `2`, because `--workdir` cannot confine file operations executed inside a live-attached desktop host process.
 
@@ -70,18 +68,14 @@ Exact schemas, annotations, and single-call JSON request/response examples for e
 
 ## Resources and Prompts
 
-- **Resources (`resources/list`, `resources/templates/list`, `resources/read`):** Exposes `sheet://<id>` (`application/json`) for every sheet in the active project, `result://<id>` (`application/json`) for computed `ResultSheet` outputs, and URI templates (`sheet://{id}`, `result://{id}`) via `resources/templates/list`. Disabled under `--gui-only` (`resources/list` and `resources/templates/list` return empty lists; `resources/read` fails with `gui_only_violation`).
-- **Prompts (`prompts/list`, `prompts/get`):** Built-in structured prompts (`dose_response_curve_fit`, `choose_two_group_test`, `publication_figure_checklist`) provide parameterised analysis checklists tailored to either standard mode or `--gui-only` mode.
+- **Resources (`resources/list`, `resources/templates/list`, `resources/read`):** Exposes `sheet://<id>` (`application/json`) for every sheet in the active project, `result://<id>` (`application/json`) for computed `ResultSheet` outputs, and URI templates (`sheet://{id}`, `result://{id}`) via `resources/templates/list`.
+- **Prompts (`prompts/list`, `prompts/get`):** Built-in structured prompts (`dose_response_curve_fit`, `choose_two_group_test`, `publication_figure_checklist`) provide parameterised scientific analysis checklists.
 
 Single-call `resources/read` syntax:
 
 ```json
 {"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"sheet://data-1"}}
 ```
-
-## Strict `--gui-only` Policy {#gui-only}
-
-Under `--gui-only` (`GuiOnlyPolicy::Strict`), `tools/list` exposes only the interactive `gui` toolset (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`). Calling `resources/read` returns JSON-RPC error `-32600` (`Invalid Request`) with `data.code: "gui_only_violation"`. Calling any non-`gui` tool (`command_run`, `command_batch`, `enable_toolset`, `doc_inspect`, `open_file`, `save_file`, `export`, `render_preview`) returns a `tools/call` result with `isError: true` and `structuredContent.code: "gui_only_violation"` (or JSON-RPC `-32600` if surfaced as a protocol-level error).
 
 ## Structured Error Payloads
 

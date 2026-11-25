@@ -70,7 +70,6 @@ fn new_host_runtime(in_window_menus: bool, recovery_root: Option<PathBuf>) -> De
     DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus,
         new_instance: false,
-        gui_only: false,
         locale_override: Some(String::from("en")),
         theme_override: None,
         recovery_root,

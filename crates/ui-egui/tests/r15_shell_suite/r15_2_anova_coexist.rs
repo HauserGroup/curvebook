@@ -53,7 +53,6 @@ fn seed_column_anova_app(equal_replicates: bool) -> Result<(UiApp, SheetId), Box
     doc.data_sheets = vec![ds];
     doc.active_sheet_id = Some(sheet_id.clone());
     *app.session_mut() = Session::from_document(doc);
-    app.set_gui_only(true);
     app.sync_views();
     Ok((app, sheet_id))
 }

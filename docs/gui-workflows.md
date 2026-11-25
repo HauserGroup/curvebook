@@ -1,41 +1,35 @@
-# GUI-Only Agent Workflows & Surface Parity (`R8.6`–`R8.8`, `R9.17`, `R10.11`, `R13`)
+# Interactive GUI Workflows & Surface Parity (`R8.6`–`R8.7`, `R10`, `R13`)
 
-> Related specifications: [`evidence/user-interface.md`](evidence/user-interface.md), [`release/desktop-smoke-qa.md`](release/desktop-smoke-qa.md), [`mcp.md`](mcp.md), [`control-protocol.md`](control-protocol.md), [`statistics-implementation.md`](implementation/statistics-implementation.md), [`curve-fitting-implementation.md`](implementation/curve-fitting-implementation.md), [`graphing-and-layouts.md`](implementation/graphing-and-layouts.md), [`qol-enhancements.md`](planning/qol-enhancements.md) · Roadmap: [`ROADMAP.md`](ROADMAP.md#r8-desktop--webassembly-live-shell-localization--10-hardening) (`R8.6`–`R8.8`, `R9.17`, `R10.11`, [`R13`](history/roadmap/r13.md#r13-advanced-regression-diagnostics-composite-graphing-layout-objects--65-workflow-human-completion)) · Live metrics: [`STATUS.md`](STATUS.md)
+> Related specifications: [`evidence/user-interface.md`](evidence/user-interface.md), [`release/desktop-smoke-qa.md`](release/desktop-smoke-qa.md), [`mcp.md`](mcp.md), [`control-protocol.md`](control-protocol.md), [`statistics-implementation.md`](implementation/statistics-implementation.md), [`curve-fitting-implementation.md`](implementation/curve-fitting-implementation.md), [`graphing-and-layouts.md`](implementation/graphing-and-layouts.md), [`qol-enhancements.md`](planning/qol-enhancements.md) · Roadmap: [`ROADMAP.md`](ROADMAP.md#r8-desktop--webassembly-live-shell-localization--10-hardening) (`R8.6`–`R8.7`, `R10`, [`R13`](history/roadmap/r13.md#r13-advanced-regression-diagnostics-composite-graphing-layout-objects--65-workflow-human-completion)) · Live metrics: [`STATUS.md`](STATUS.md)
 
-This reference documents CurveBook's **strict `gui_only` execution contract**, the semantic UI inspection tree and 8-tool agent GUI surface (`R8.6`; `UI_COMMANDS` synced to `crates/mcp/src/ui_catalog.rs`, typed engine commands behind UI actions, and i18n strings — current totals in [`STATUS.md`](STATUS.md)), the 4-stage Power & Sample Size wizard, declarative modal graying predicates, grid-to-graph formatting and `ResultSheet` chaining (`R8.7`), the **28 agent-harness end-to-end workflows** (formerly "Core workflows"; `R8.8`, `WF-01`–`WF-28` across Shards 1–4), the **21 extended multivariable, clustering, GLM, survival & statistical-graphing `gui_only` workflows** (`R9.17` / `QOL-17`, `WF-29`–`WF-49` across Shards 5–7), and **Compact Letter Display** (`R10.11`, `WF-50`) — **50 implemented baseline strict `gui_only` and `EguiHumanPathDriver` workflows**, plus **15 implemented Beta-gated advanced regression, composite-graphing, embedded-object & layout workflows** (`R13`, `WF-51`–`WF-65` across Shards 8–9 in [§7](#7-extended-15-workflow-matrix-r13-wf-51-to-wf-65--gated-on-beta)).
+This reference documents CurveBook's semantic UI inspection tree and opt-in 8-tool `gui` MCP surface (`R8.6`; `UI_COMMANDS` synced to `crates/mcp/src/ui_catalog.rs`, typed engine commands behind UI actions, and i18n strings — current totals in [`STATUS.md`](STATUS.md)), the 4-stage Power & Sample Size wizard, declarative modal graying predicates, grid-to-graph formatting and `ResultSheet` chaining (`R8.7`), and the **65 five-stage `EguiHumanPathDriver` desktop workflows** (`WF-01`–`WF-50` baseline + `WF-51`–`WF-65` Beta-gated `R13` workflows in [§6](#6-human-path-status--blockers-r10) and [§7](#7-extended-15-workflow-matrix-r13-wf-51-to-wf-65--gated-on-beta)).
 
 > [!IMPORTANT]
-> **Agent-Harness (`gui_only`) Suite vs. `R10.2` Human-Path Acceptance:** Every `gui_wf_*` (`WF-01`–`WF-50`) shard listed in this document is an **agent-harness (`gui_only`)** test running through `dispatch_gui_action` (`HumanPathOnly` disabled) so structured agent invocations (`ui.invoke_menu` with JSON `params`, `ui.answer_dialog`, and direct `widget_id` dispatch) remain covered against the engine and dialog state machines. **Real human-path acceptance** (`App::set_human_path_only(true)` via `EguiHumanPathDriver` in `crates/ui-egui/src/egui_shell/driver.rs`) rejects those synthetic shortcuts with `ErrorCode::GuiOnlyViolation` and requires raw pointer coordinates, scroll wheel deltas, keyboard focus cycling (`Tab`/`Shift+Tab`), keystrokes, and IME preedit against rendered `egui 0.37` widgets inspected via AccessKit and `inspect_live_egui_snapshot` (the `R15.5` desktop cutover retired the legacy `LayoutTree` / `HumanPathDriver` pipeline). Phase 2 Core Infrastructure (`R10.1` One-Way ANOVA `AnalyzeSheet` + `EditAnalysisParameters` human-path spike, `R10.9` font-measured text, `R10.15` aspect-ratio viewport, `R10.16` reusable widgets/modals/scrollbars, `R10.2` parity gate, `R10.22` budgets) is verified in `crates/ui-egui/tests/r10_core_and_spike.rs`; `65 / 65 egui` five-stage human-path completion (`WF-01`–`WF-65`) and post-cutover QA (`R10.13`, `R10.24`) are tracked in [§6](#6-human-path-status--blockers-r10).
+> **Agent-Harness Surface vs. `R10.2` Human-Path Acceptance:** The 8 `ui.*` actions (`dispatch_gui_action`) expose semantic inspection and widget automation over `--control` / `GuiSessionHost`. Strict `--gui-only` mode, `ErrorCode::GuiOnlyViolation`, `InProcessUiGuiHost`, and the redundant `gui_wf_*` workflow shards were retired once `EguiHumanPathDriver` reached `65 / 65` five-stage human-path completion. **Real human-path acceptance** (`App::set_human_path_only(true)` via `EguiHumanPathDriver` in `crates/ui-egui/src/egui_shell/driver.rs`) rejects synthetic bypass shortcuts with `ErrorCode::Conflict` (`details.code: "human_path_only_policy"`) and requires raw pointer coordinates, scroll wheel deltas, keyboard focus cycling (`Tab`/`Shift+Tab`), keystrokes, and IME preedit against rendered `egui 0.37` widgets inspected via AccessKit and `inspect_live_egui_snapshot` (the `R15.5` desktop cutover retired the legacy `LayoutTree` / `HumanPathDriver` pipeline). Phase 2 Core Infrastructure (`R10.1` One-Way ANOVA `AnalyzeSheet` + `EditAnalysisParameters` human-path spike, `R10.9` font-measured text, `R10.15` aspect-ratio viewport, `R10.16` reusable widgets/modals/scrollbars, `R10.2` parity gate, `R10.22` budgets) is verified in `crates/ui-egui/tests/r10_perf_suite/r10_core_and_spike.rs`; `65 / 65 egui` five-stage human-path completion (`WF-01`–`WF-65`) and post-cutover QA (`R10.13`, `R10.24`) are tracked in [§6](#6-human-path-status--blockers-r10).
 
-> **Verification Status (`R8.6`–`R8.8`, `R9.7`, `R9.16`, `R9.17`, `R10.11` Implemented — agent harness):**
-> - **Workspace shell & inspection (`R8.6`, `R15`):** `UiApp` (`crates/ui-egui`), pure-Rust CPU `egui` RGBA/PNG rasterization (`render_egui_screenshot_rgba` / `render_egui_screenshot_png` in `crates/ui-egui/src/egui_shell/rasterizer.rs`), `UiTreeSnapshot` (`crates/ui-egui/src/inspect.rs`, projected from AccessKit + `egui` state via `inspect_live_egui_snapshot` in `crates/ui-egui/src/egui_shell/inspect_bridge.rs`, synced `UI_COMMANDS`), the 8 `ui.*` interactive GUI action handlers (`crates/ui-egui/src/gui_actions.rs`), `--control` JSONL loopback (`crates/ui-egui/src/control_io.rs`), `GuiOnlyPolicy` (`crates/engine/src/lib.rs`), `ErrorCode::GuiOnlyViolation` (`crates/doc/src/result.rs`), `GuiSessionHost` + the 8 `gui` MCP tools (`crates/mcp/src/{tools.rs, gui_tools.rs, protocol.rs}`), `InProcessUiGuiHost` (`apps/curvebook-cli/src/main.rs`), and `curvebook --gui-only` (`apps/curvebook/src/main.rs`).
+> **Verification Status (`R8.6`–`R8.7`, `R9.7`, `R9.16`, `R10.11`, `R10.25` Implemented):**
+> - **Workspace shell & inspection (`R8.6`, `R15`):** `UiApp` (`crates/ui-egui`), pure-Rust CPU `egui` RGBA/PNG rasterization (`render_egui_screenshot_rgba` / `render_egui_screenshot_png` in `crates/ui-egui/src/egui_shell/rasterizer.rs`), `UiTreeSnapshot` (`crates/ui-egui/src/inspect.rs`, projected from AccessKit + `egui` state via `inspect_live_egui_snapshot` in `crates/ui-egui/src/egui_shell/inspect_bridge.rs`, synced `UI_COMMANDS`), the 8 `ui.*` interactive GUI action handlers (`crates/ui-egui/src/gui_actions.rs`), `--control` JSONL loopback (`crates/ui-egui/src/control_io.rs`), and `GuiSessionHost` + the opt-in 8 `gui` MCP tools (`crates/mcp/src/{tools.rs, gui_tools.rs, protocol.rs}`).
 > - **Interactive wizards, predicates & chaining (`R8.7`):** 4-stage **Power & Sample Size** wizard (`crates/ui-egui/src/power_wizard.rs`, `crates/stats/src/power.rs`), 10 declarative modal enablement predicates `R1`–`R10` (`crates/ui-egui/src/modal_predicates.rs`), multi-row grid selection -> `FormatSelectedPoints` (`graph.formatSelectedPoints`, `PointStyleOverride`), and `ResultSheet` `Analyze...` chaining (`sheet.extractResultTab` + `ResultSheet::analyzable_data`).
-> - **50-workflow acceptance suite (`R8.8` Shards 1–4 + `R9.17` Shards 5–7 + `R10.11` `WF-50`):** `crates/ui-egui/tests/gui_wf_{foundations_and_data,group_comparisons_and_power,regression_contingency_multivariate,statistical_graphs,multivariable_and_transforms,clustering_glm_and_pharma,advanced_statistical_graphs}.rs`, `crates/ui-egui/tests/gui_wf_50_cld.rs`, `crates/ui-egui/tests/gui_only_workflows.rs`, `crates/ui-egui/tests/gui_w22b_qol_and_r9.rs`, `crates/mcp/tests/gui_only_surface.rs`, `apps/curvebook-cli/tests/mcp_gui_only_parity.rs`, and `apps/curvebook/tests/gui_only_wiring.rs`.
+> - **Retained GUI-action & live-attach integration suites:** `crates/ui-egui/tests/gui_wf_suite/gui_modal_workflows.rs`, `crates/ui-egui/tests/gui_wf_suite/gui_w22b_qol_and_r9.rs`, `crates/mcp/tests/mcp_suite/gui_tools_surface.rs`, and `apps/curvebook-cli/tests/cli_suite/mcp_live_attach_parity.rs`, alongside the `65 / 65` five-stage human-path suites in `crates/ui-egui/tests/human_wf_suite/`.
 
 ---
 
 **QOL-7 diagnostics-only alignment (implemented in Waves 20–22b):** `AssumptionDiagnosticBanner` (`crates/ui-egui/src/dialogs_canvas/`, `sanitize_diagnostics_only_text` in `crates/ui-egui/src/dialogs_r9.rs`) renders diagnostic facts and opens existing diagnostic detail tabs via `ui.result.inspectDiagnostics` (`mutated: false`), without test/transform recommendations, remediation buttons, or banner-triggered sibling analyses. Deprecated `ui.result.applyRemediation` returns `ErrorCode::Conflict` (`details.code: "diagnostics_only_policy"`, `mutated: false`). Independently choosing or switching analyses via `Cmd+T` (`EditAnalysisParameters`) or the normal analysis dialog remains supported ([`R9.7`](history/roadmap/r9.md#r97-inline-assumption-diagnostic-banners-diagnostics-only-qol-7)).
 
-## 1. Strict `gui_only` Execution Contract
+## 1. Interactive GUI Automation & Human-Path Contract
 
-Passing headless engine tests (`command_run` invoking `sheet.createData`, `table.setCell`, `stats.run`, or `fit.run`) proves `L1`–`L5` engine correctness, but does not prove that a researcher or GUI-bound agent can complete an analysis strictly through visible workspace controls (`L6`–`L7`).
+Passing headless engine tests (`command_run` invoking `sheet.createData`, `table.setCell`, `stats.run`, or `fit.run`) proves `L1`–`L5` engine correctness, while `EguiHumanPathDriver` (`human_wf_*`) proves a human can complete every workflow strictly through visible rendered `egui` controls (`L6`–`L7`).
 
-Under strict `--gui-only` mode (`curvebook-cli mcp --gui-only`, `curvebook-cli mcp --control-port <N> --gui-only`, and `curvebook --control <N> --gui-only`):
-
-1. **Permitted Observation Primitives (Read-Only Perception):**
+1. **Observation Primitives (`ui.inspect` / `ui.screenshot`):**
    - In-memory viewport PNG capture (`ui_screenshot` / `ui.screenshot`) and structured accessibility/layout snapshots (`ui_inspect` / `ui.inspect` returning `UiTreeSnapshot`).
    - Reading visible labels, formatted cell values, XY/Survival `grid.xcell.*` cells, `grid_selection` / `quick_stats`, `brushed_points`, widget `enabled` / `disabled_reason` predicates, `status_banner`, `Navigator` tree nodes, and modal tabs/controls/buttons.
-   - On desktop `--control --gui-only`, read-only inspection RPCs (`ping`, `ui.state` / `state.snapshot`, `command.list`, `ui.inspect`, `ui.canvas.preflight`) remain permitted (while `doc.inspect` is rejected with `ErrorCode::GuiOnlyViolation`); on MCP `--gui-only`, `doc_inspect`, `command_list`, `resources/read`, and non-GUI tools are all blocked with `ErrorCode::GuiOnlyViolation`, and `resources/list` returns `[]`.
-2. **Permitted Input Primitives (Human-Equivalent Actions):**
+2. **Input Primitives (`ui.pointer_gesture` / `ui.type_text` / `ui.press_key` / `ui.invoke_menu` / `ui.switch_tab` / `ui.answer_dialog`):**
    - Pointer gestures (`click`, `double_click`, `right_click`, `drag`, `hover`, `scroll` / `wheel`) resolved against visible `widget_id` targets (enforcing `node.enabled`) or viewport `(x, y)` coordinates, including `shift`/`meta` multi-row grid selection and `power.curve_hover`.
    - Keyboard and TSV text entry (`ui_type_text` / `ui_press_key` / `ui.type_text` / `ui.press_key`) supporting scalar cell values, TSV multi-cell blocks, `Enter`, `Escape`, `Cmd/Ctrl+T` (`EditAnalysisParameters` from active `ResultSheet`), and `ShortcutRegistry` combos.
    - Visible menu bar (`ui_invoke_menu` / `ui.invoke_menu`), tab (`ui_switch_tab` / `ui.switch_tab`), and modal/wizard control updates and footer buttons (`ui_answer_dialog` / `ui.answer_dialog`), each gated by its live enablement predicate.
-3. **Forbidden Shortcuts (Structurally Blocked by `GuiOnlyPolicy::Strict`):**
-   - **`ErrorCode::GuiOnlyViolation` (`"gui_only_violation"`, `ErrorCategory::Policy`):** Defined in `crates/doc/src/result.rs`.
-   - **Engine caller guard (`crates/engine/src/lib.rs`):** `is_strict_gui_only_allowed(spec, caller, params)` blocks `Caller::Mcp`, `Caller::Control`, and `Caller::Cli` from running any command unless it is read-only without `Effects::READS_FILESYSTEM`, or is `table.convertArchetype` with `preview_only` / `previewOnly` / `preview` / `dry_run` / `dryRun: true`.
-   - **MCP `--gui-only` lock (`crates/mcp/src/{tools.rs, protocol.rs}`):** `list_tools_for_state` exposes strictly the 8 `gui` tools (`GUI_TOOL_NAMES`), `initialize` emits `GUI_ONLY_SERVER_INSTRUCTIONS`, `resources/list` returns `[]`, `resources/read` fails with `-32600` (`"gui_only_violation"`), and any call to `command_run`, `command_batch`, `doc_inspect`, `open_file`, `save_file`, `export`, `render_preview`, `list_toolsets`, `enable_toolset`, or direct command tools returns `isError: true` with `structuredContent.code == "gui_only_violation"`.
-   - **Desktop `--control --gui-only` lock (`crates/ui-egui/src/control_io.rs`):** Direct `"command.run"`, `"command.batch"`, `"engine.execute"`, mutating domain commands (`Caller::Control`), and direct `"ui.*"` / `"app.about"` / `"file.print"` calls (other than the 8 interactive `ui.*` actions and read-only `"ui.canvas.preflight"`) return `"gui_only_violation"`. Passing a non-empty disk `path` to `"ui.screenshot"` or `"render.pdf"` under `--gui-only` also fails with `ErrorCode::GuiOnlyViolation`.
-   - **Internal UI execution (`Caller::Ui`):** Menu, shortcut, and modal handlers inside `UiApp` continue executing through `Session::execute` / `execute_as_ui` with `Caller::Ui`.
+3. **Human-Path Harness Guard (`HumanPathOnly`) & Internal UI Execution (`Caller::Ui`):**
+   - Test harnesses running `app.set_human_path_only(true)` reject synthetic widget/dialog shortcuts (`ui.answer_dialog`, non-empty `ui.invoke_menu` params, `widget_id` bypasses) with `ErrorCode::Conflict` (`details.code: "human_path_only_policy"`), requiring raw pointer/wheel/keyboard/IME events against drawn `egui` widgets.
+   - Menu, shortcut, and modal handlers inside `UiApp` execute through `Session::execute` / `execute_as_ui` with `Caller::Ui`.
 
 ---
 
@@ -46,7 +40,7 @@ Under strict `--gui-only` mode (`curvebook-cli mcp --gui-only`, `curvebook-cli m
 `inspect_ui_tree(app, scope, include_bounds)` computes a deterministic JSON snapshot from the live `UiApp`, attaching `ControlEnablement` (`enabled`, `disabled_reason`) from `crates/ui-egui/src/modal_predicates.rs` and optional `[x, y, width, height]` bounds from `WorkspaceLayoutMap`:
 
 - **Always-present shell & state fields on `UiTreeSnapshot`:**
-  - `active_sheet_id`, `active_sheet_kind`, `active_dialog` (`"none"`, `"power_and_sample_size"`, `"format_selected_points"`, `"analyze_sheet"`, `"edit_analysis_parameters"`, `"change_data_analyzed"`, `"import_reshape"`, `"convert_archetype"`, `"change_graph_type"`, `"format_graph"`, `"print"`, etc.), `focus_widget_id`, `zoom`, `gui_only`, `undo_depth`, `redo_depth`, `dirty`, `cursor_readout`, `grid_selection` (`GridSelectionSnapshot`: `active_cell`, `anchor_cell`, `selected_rows`, `selected_coords`, `selected_cells_count`, `quick_stats`), `brushed_points` (`Vec<BrushedPointSnapshot>`), `status_banner`, `context_menu_target`.
+  - `active_sheet_id`, `active_sheet_kind`, `active_dialog` (`"none"`, `"power_and_sample_size"`, `"format_selected_points"`, `"analyze_sheet"`, `"edit_analysis_parameters"`, `"change_data_analyzed"`, `"import_reshape"`, `"convert_archetype"`, `"change_graph_type"`, `"format_graph"`, `"print"`, etc.), `focus_widget_id`, `zoom`, `undo_depth`, `redo_depth`, `dirty`, `cursor_readout`, `grid_selection` (`GridSelectionSnapshot`: `active_cell`, `anchor_cell`, `selected_rows`, `selected_coords`, `selected_cells_count`, `quick_stats`), `brushed_points` (`Vec<BrushedPointSnapshot>`), `status_banner`, `context_menu_target`.
 - **Scoped optional subtrees** (`inspect_ui_tree` and the `ui_inspect` MCP schema both accept all 9 `scope` values: `["all", "workspace", "dialog", "grid", "navigator", "canvas", "menus", "toolbar", "tabs"]`):
   - `menus: Option<Vec<UiMenuSnapshot>>` — 8 localized top-level menus (`menu_key`, `title`, `bounds`, `items: Vec<UiWidgetNode>`).
   - `toolbar: Option<Vec<UiWidgetNode>>` — contextual toolbar buttons (`Analyze`, `Change Graph Type`, `Analysis Parameters`, `Export`, etc.).
@@ -58,12 +52,12 @@ Under strict `--gui-only` mode (`curvebook-cli mcp --gui-only`, `curvebook-cli m
 
 ### 2.2 Ergonomic 8-Tool `gui` MCP & JSON-Lines Surface (`crates/mcp/src/gui_tools.rs`, `crates/ui-egui/src/gui_actions.rs`)
 
-Both `InProcessUiGuiHost` (`curvebook-cli mcp --gui-only`) and loopback `--control` (`curvebook-cli mcp --control-port <N> [--gui-only]`) route the identical 8-tool surface:
+Both embedded `GuiSessionHost` integrations and loopback `--control` (`curvebook-cli mcp --control-port <N>`) route the identical 8-tool opt-in `gui` surface:
 
 | MCP Tool (`GUI_TOOL_NAMES`) | `--control` Action | Annotations / Effects | Implemented Behavior |
 |---|---|---|---|
 | `ui_inspect` | `ui.inspect` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false` (`IDEMPOTENT`) | Returns `UiTreeSnapshot` (`scope`, `include_bounds`, optional `metrics`; use `ui_switch_tab` to inspect another sheet). |
-| `ui_screenshot` | `ui.screenshot` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: true`, `openWorldHint: true` (`WRITES_FILESYSTEM \| IDEMPOTENT`) | Renders in-memory PNG (`width_px`/`height_px` `64..=4096`, `dpi` `72..=600`); MCP returns inline `image/png` block + metadata (or writes optional `path` outside `--gui-only`); both MCP and `--control` reject `path` under `--gui-only`. |
+| `ui_screenshot` | `ui.screenshot` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: true`, `openWorldHint: true` (`WRITES_FILESYSTEM \| IDEMPOTENT`) | Renders in-memory PNG (`width_px`/`height_px` `64..=4096`, `dpi` `72..=600`); MCP returns inline `image/png` block + metadata and optionally writes `path` subject to `WorkdirGuard` / `ExternalPathPolicy`. |
 | `ui_pointer_gesture` | `ui.pointer_gesture` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (`GUI_DISPATCH_WORST_CASE_EFFECTS`) | Dispatches `click`, `double_click`, `right_click`, `drag`, `hover`, `wheel` (`scroll` normalized to `"wheel"` by MCP) on `widget_id` (checking `node.enabled`) or `(x, y)` coordinates, incl. `power.curve_hover` and `shift`/`meta` multi-row grid selection. |
 | `ui_type_text` | `ui.type_text` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (`GUI_TYPE_TEXT_WORST_CASE_EFFECTS`) | Enters UTF-8 text or TSV blocks into modal fields, `InfoSheet` notes (`info.setNote`), or active grid cells (`grid.cell.*` -> `table.paste`/`table.setCell`, `grid.xcell.*` -> `table.setXCells`). |
 | `ui_press_key` | `ui.press_key` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (`GUI_DISPATCH_WORST_CASE_EFFECTS`) | Dispatches keystrokes & `ShortcutRegistry` combos (`Enter`, `Escape`, `Tab`, `Delete`, `Backspace`, `Cmd/Ctrl+T`, `Cmd/Ctrl+Z`, etc.). |
@@ -99,33 +93,31 @@ Modal and wizard widgets carry declarative `ControlEnablement { enabled, disable
 9. **`R9` — P-value formatting style -> Precision digits (`r9_pvalue_precision_spinner`):** Enables custom P-value precision digits only when `PValueFormat::Custom { .. }` is active (`WF-07`, `WF-16`, `WF-26`); paired with `evaluate_dialog_button` guarding invalid `confidence_percent`.
 10. **`R10` — PCA predictor checklist -> Leakage-safe `PCR` outcome picker (`r10_pcr_outcome_column`):** Excludes/grays out any column checked as a PCA predictor from the `Principal Component Regression` outcome selector so $Y$ cannot leak into principal components (`WF-23`, `WF-26`).
 
-> **Dialog Inspection Coverage Note:** `inspect.rs` and `gui_actions.rs` populate specialized structured controls for `PowerAndSampleSize`, `FormatSelectedPoints`, `AnalyzeSheet`, `EditAnalysisParameters`, `ImportReshape`, `ConvertArchetype`, `ChangeGraphType`, `FormatGraph`, `FormatAxes`, `PairwiseComparisons`, `BubblePlotInspector`, `ApplyStyleFrom`, `PageLayoutComposer`, `ExportFigure`, `RandomizeGroups`, `RandomSampleRows`, `SimulateDistributions`, `InsertModelEquation`, and `Print` (remaining helper/utility dialogs such as `ChangeDataAnalyzed`, `ExcludeWithReason`, `CommandPalette`, and `ResultViewer` map through `build_generic_dialog_nodes` alongside direct `ui.*` commands). These synthetic `inspect.rs` nodes back the agent-harness (`gui_only`) surface; live interactive modals are rendered natively by the `egui 0.37` desktop shell (`crates/ui-egui/src/egui_shell/`) and verified under `EguiHumanPathDriver` via AccessKit and `inspect_live_egui_snapshot`.
+> **Dialog Inspection Coverage Note:** `inspect.rs` and `gui_actions.rs` populate specialized structured controls for `PowerAndSampleSize`, `FormatSelectedPoints`, `AnalyzeSheet`, `EditAnalysisParameters`, `ImportReshape`, `ConvertArchetype`, `ChangeGraphType`, `FormatGraph`, `FormatAxes`, `PairwiseComparisons`, `BubblePlotInspector`, `ApplyStyleFrom`, `PageLayoutComposer`, `ExportFigure`, `RandomizeGroups`, `RandomSampleRows`, `SimulateDistributions`, `InsertModelEquation`, and `Print` (remaining helper/utility dialogs such as `ChangeDataAnalyzed`, `ExcludeWithReason`, `CommandPalette`, and `ResultViewer` map through `build_generic_dialog_nodes` alongside direct `ui.*` commands). These synthetic `inspect.rs` nodes back the agent-automation surface; live interactive modals are rendered natively by the `egui 0.37` desktop shell (`crates/ui-egui/src/egui_shell/`) and verified under `EguiHumanPathDriver` via AccessKit and `inspect_live_egui_snapshot`.
 
 ### 3.3 Chained Result-Table Pipelines & Grid-to-Graph Point Styling
 
 - **GUI `Analyze...` chaining on `ResultSheet` tabs (`crates/ui-egui/src/gui_actions.rs`, `crates/engine/src/cmd/sheet.rs`):**
   1. **Direct analyzable results:** `ResultSheet::analyzable_data: Option<DataSheet>` enables direct downstream analysis from `Transform`, `Normalize`, `PruneRows`, etc., when active in the Navigator (`WF-02`, `WF-05`, `WF-06`, `WF-23`).
-  2. **Automatic tabular extraction (`sheet.extractResultTab`):** Confirming `AnalyzeSheet` while a non-analyzable `ResultSheet` or switched sub-tab (e.g., `pca-loadings` or `pc_scores`) is active dispatches `sheet.extractResultTab` (`archetype: "auto"`, producing `Column` for purely numeric tabs or `MultipleVariables` when text/boolean cells are present) via `Caller::Ui` and launches the downstream analysis on the extracted `DataSheet` (`gui_only_workflows.rs`, `WF-05`).
+  2. **Automatic tabular extraction (`sheet.extractResultTab`):** Confirming `AnalyzeSheet` while a non-analyzable `ResultSheet` or switched sub-tab (e.g., `pca-loadings` or `pc_scores`) is active dispatches `sheet.extractResultTab` (`archetype: "auto"`, producing `Column` for purely numeric tabs or `MultipleVariables` when text/boolean cells are present) via `Caller::Ui` and launches the downstream analysis on the extracted `DataSheet` (`gui_modal_workflows.rs`, `WF-05`).
 - **Multi-row grid selection -> `Format Selected Points` (`ui.formatPoints.open`, `ActiveDialog::FormatSelectedPoints`, `graph.formatSelectedPoints`):**
   - `Shift+Click` and `Cmd/Meta+Click` on grid cells populate `grid.selected_rows` and sync `brushed_points`.
   - Invoking `Format › Selected Points...` (`ui.formatPoints.open`) and confirming `ui_answer_dialog` writes `PointStyleOverride` entries (`color`, `symbol`, `size_pt`, `border_width_pt`, `fill_color`, `fill_mode`, `hidden`) on `GraphSpec::point_overrides` (`crates/doc/src/graph.rs`) via `graph.formatSelectedPoints` (`mode`: `merge`, `replace`, `clear`) and optionally attaches row-label `GraphAnnotation::TextBox` callouts (`WF-01`, `WF-03`, `WF-22`).
 
 ---
 
-## 4. Canonical 28-Workflow `gui_only` Acceptance Matrix (`R8.8`)
+## 4. Canonical 28-Workflow Reference Matrix (`R8.8`, Superseded by `human_wf_*`)
 
-Every workflow test runs under `UiApp` with `app.set_gui_only(true)` (`GuiOnlyPolicy::Strict`) and drives all workspace interactions strictly through `dispatch_gui_action` (`ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`, `ui.answer_dialog`), alongside the supporting policy/protocol integration suites:
+The `WF-01`–`WF-28` scenarios below originated as semantic `dispatch_gui_action` tests and are now verified end to end through rendered `egui` controls by `crates/ui-egui/tests/human_wf_suite/` (`EguiHumanPathDriver`; see [§6.2](#62-per-shard-human-path-status)). The retained GUI-action / live-attach integration suites are:
 
-- `crates/ui-egui/tests/gui_only_workflows.rs` — core `--gui-only` lock, all 8 interactive actions, `PowerAndSampleSize` 4-stage flow, multi-row `FormatSelectedPoints`, and `ResultSheet` `Analyze...` chaining.
-- `crates/mcp/tests/gui_only_surface.rs` — MCP `--gui-only` tool-list shrink, `GUI_ONLY_SERVER_INSTRUCTIONS`, `gui_only_violation` enforcement, `GuiSessionHost` / `--control-port` routing, `enable_toolset("gui")`, and parameter validation.
-- `apps/curvebook-cli/tests/mcp_gui_only_parity.rs` — spawned `curvebook-cli mcp --gui-only` (`InProcessUiGuiHost`) and `curvebook-cli mcp --control-port <N> --gui-only` end-to-end tests.
-- `apps/curvebook/tests/gui_only_wiring.rs` — `curvebook --headless-once --gui-only` binary and multi-window `DesktopHostRuntime` enforcement.
+- `crates/ui-egui/tests/gui_wf_suite/gui_modal_workflows.rs` — all 8 interactive actions, `PowerAndSampleSize` 4-stage flow, multi-row `FormatSelectedPoints`, and `ResultSheet` `Analyze...` chaining.
+- `crates/ui-egui/tests/gui_wf_suite/gui_w22b_qol_and_r9.rs` — Wave 22b QoL & `R9` modal action tests.
+- `crates/mcp/tests/mcp_suite/gui_tools_surface.rs` — opt-in `enable_toolset("gui")`, `GuiSessionHost` / `--control-port` routing, and parameter validation for the 8 `gui` MCP tools.
+- `apps/curvebook-cli/tests/cli_suite/mcp_live_attach_parity.rs` — spawned `curvebook-cli mcp --control-port <N>` live-attach end-to-end tests and CLI rejection of removed `--gui-only`.
 
-### `gui_wf_*` Agent-Harness Shard Inventory (`WF-01`–`WF-50`, `HumanPathOnly = false`)
+### Historical `WF-01`–`WF-28` Reference Index (now gated by `human_wf_01_06`–`human_wf_25_31`)
 
-Each shard below runs with `app.set_gui_only(true)` and `app.is_human_path_only() == false` (agent-harness mode):
-
-### Shard 1 — `crates/ui-egui/tests/gui_wf_foundations_and_data.rs` (`WF-01`–`WF-06`, agent harness)
+### Shard 1 (`WF-01`–`WF-06`)
 
 | ID | Test Function | Key GUI Surfaces & Verified Pipeline |
 |---|---|---|
@@ -136,7 +128,7 @@ Each shard below runs with `app.set_gui_only(true)` and `app.is_human_path_only(
 | `WF-05` | `wf05_transform_pca_and_clustering_pipeline` | `Transform/PruneRows` -> `ResultSheet` `Analyze...` PCA -> `ui.switch_tab` (`pca-loadings`) -> chained Cluster Analysis (`K-means++` / `Ward.D2`). |
 | `WF-06` | `wf06_prune_descriptive_survival_chaining_and_reactive_recompute` | `PruneRows` -> chained Descriptive Statistics + Kaplan-Meier Survival, Multiple Imputation, and reactive recompute on source cell edit. |
 
-### Shard 2 — `crates/ui-egui/tests/gui_wf_group_comparisons_and_power.rs` (`WF-07`–`WF-15`)
+### Shard 2 (`WF-07`–`WF-15`)
 
 | ID | Test Function | Key GUI Surfaces & Verified Pipeline |
 |---|---|---|
@@ -150,7 +142,7 @@ Each shard below runs with `app.set_gui_only(true)` and `app.is_human_path_only(
 | `WF-14` | `wf14_friedman_and_apply_remediation_flow` | Friedman nonparametric RM-ANOVA, diagnostics-only `AssumptionDiagnosticBanner` (`ui.result.inspectDiagnostics`), deprecated `ui.result.applyRemediation` rejecting with `diagnostics_only_policy` (no sibling `ResultSheet` created), and explicit `Cmd+T` parameter switching. |
 | `WF-15` | `wf15_full_four_stage_power_and_sample_size_wizard` | Full 4-stage `PowerAndSampleSize` wizard navigation (`next`/`back`/`create`), Stage 4 curve hover, sensitivity table, and linked `ResultSheet` + `GraphSheet`. |
 
-### Shard 3 — `crates/ui-egui/tests/gui_wf_regression_contingency_multivariate.rs` (`WF-16`–`WF-23`)
+### Shard 3 (`WF-16`–`WF-23`)
 
 | ID | Test Function | Key GUI Surfaces & Verified Pipeline |
 |---|---|---|
@@ -163,7 +155,7 @@ Each shard below runs with `app.set_gui_only(true)` and `app.is_human_path_only(
 | `WF-22` | `wf22_multivariate_pca_clustering_glm_volcano_and_format_points` | Multivariate PCA, Hierarchical Clustering, Multiple Linear Regression / GLM, Multiple row *t*-tests + Volcano Plot + `Format Selected Points...`. |
 | `WF-23` | `wf23_stacked_superimposed_z_order_pcr_r10_and_result_analyze_chaining` | Grouped `Stacked` vs. `Superimposed` (`GroupedArrangement::Superimposed`) z-order, 2-hop `ResultSheet` `Analyze...` chaining, and leakage-safe PCR with `R10` modal guard. |
 
-### Shard 4 — `crates/ui-egui/tests/gui_wf_statistical_graphs.rs` (`WF-24`–`WF-28`)
+### Shard 4 (`WF-24`–`WF-28`)
 
 | ID | Test Function | Key GUI Surfaces & Verified Pipeline |
 |---|---|---|
@@ -175,14 +167,14 @@ Each shard below runs with `app.set_gui_only(true)` and `app.is_human_path_only(
 
 ---
 
-## 5. Extended 21-Workflow Multivariable, Clustering, GLM & Statistical-Graphing `gui_only` Matrix (`R9.17` / `QOL-17`, Implemented)
+## 5. Extended 21-Workflow Multivariable, Clustering, GLM & Statistical-Graphing Matrix (`R9.17` / `QOL-17`, Superseded by `human_wf_*`)
 
 > **Scope & Guardrail Alignment (`QOL-7`, `QOL-16`, `R9.17`):**
-> - Every workflow in `WF-29`–`WF-49` (`Shards 5–7`, implemented in Wave 23) runs under `UiApp` with `GuiOnlyPolicy::Strict` (`app.set_gui_only(true)`), constructing original synthetic datasets via `curvebook-testkit` and driving 100% of interactions through the 8 `ui.*` / `gui` perception and input primitives (`Section 2.2`), including at least one live upstream cell edit or `Cmd/Ctrl+E` exclusion check verifying immediate reactive DAG recomputation.
+> - Every workflow in `WF-29`–`WF-50` is now verified end to end through rendered `egui` controls by `crates/ui-egui/tests/human_wf_suite/` (`EguiHumanPathDriver`; see [§6.2](#62-per-shard-human-path-status)), including live upstream cell edits or `Cmd/Ctrl+E` exclusion checks verifying immediate reactive DAG recomputation.
 > - **Diagnostics-only adherence (`QOL-7` / `R9.7`):** Assumption and residual checks inspect diagnostic values and child plots only (`ui.result.inspectDiagnostics`) — never asserting test recommendations, remediation buttons, or banner-triggered sibling analyses.
-> - **Equations-only adherence (`QOL-16` / `R9.16`) & CLD (`R10.11`):** Pairwise significance assertions in `WF-49` verify equations-only live $\TeX$ best-fit model annotations (`GraphAnnotation::ModelEquation`, `ui.graph.insertModelEquation`) without extra fit-statistic callouts or CLD leakage. Separately, Compact Letter Display (`CLD`) is implemented under [`R10.11`](history/roadmap/r10.md#r1011-compact-letter-display-cld) using Piepho's (2004) insert-and-absorb + sweeping algorithm (`crates/stats/src/cld.rs`), rendered deterministically across RGBA, SVG, and `%PDF-1.7`, and verified by `WF-50` (`crates/ui-egui/tests/gui_wf_50_cld.rs`).
+> - **Equations-only adherence (`QOL-16` / `R9.16`) & CLD (`R10.11`):** Pairwise significance assertions in `WF-49` verify equations-only live $\TeX$ best-fit model annotations (`GraphAnnotation::ModelEquation`, `ui.graph.insertModelEquation`) without extra fit-statistic callouts or CLD leakage. Separately, Compact Letter Display (`CLD`) is implemented under [`R10.11`](history/roadmap/r10.md#r1011-compact-letter-display-cld) using Piepho's (2004) insert-and-absorb + sweeping algorithm (`crates/stats/src/cld.rs`), rendered deterministically across RGBA, SVG, and `%PDF-1.7`, and verified by `WF-50` (`human_wf_44_50::wf50_human_compact_letter_display_piepho_svg_pdf_rgba`).
 
-### Shard 5 — `crates/ui-egui/tests/gui_wf_multivariable_and_transforms.rs` (`WF-29`–`WF-36`)
+### Shard 5 (`WF-29`–`WF-36`)
 
 | ID | Test Function | Key GUI Surfaces & Verified Pipeline |
 |---|---|---|
@@ -195,7 +187,7 @@ Each shard below runs with `app.set_gui_only(true)` and `app.is_human_path_only(
 | `WF-35` | `wf35_direct_multiple_variables_kaplan_meier_survival` | Direct `Kaplan-Meier` survival estimation from a long-format `MultipleVariables` table (`Time`, `Status`, `Grouping` column role binding + unit-rescaled calculated column), omnibus Log-rank / Gehan–Breslow–Wilcoxon / trend tests, Holm–Šídák pairwise curve comparisons, and median survival reference line. |
 | `WF-36` | `wf36_direct_multiple_variables_4pl_dose_response` | Direct multi-series 4PL dose–response fitting from `MultipleVariables` combining formula-bar `Calculated Variables` (molar unit scaling, `% viability` normalization, `LOG10` concentration), `X`/`Y`/`Grouping` role assignment, `Bottom=0`/`Top=100` asymptote constraints, profile-likelihood $\text{IC}_{50}$ CIs, and residual plots. |
 
-### Shard 6 — `crates/ui-egui/tests/gui_wf_clustering_glm_and_pharma.rs` (`WF-37`–`WF-43`)
+### Shard 6 (`WF-37`–`WF-43`)
 
 | ID | Test Function | Key GUI Surfaces & Verified Pipeline |
 |---|---|---|
@@ -207,7 +199,7 @@ Each shard below runs with `app.set_gui_only(true)` and `app.is_human_path_only(
 | `WF-42` | `wf42_poisson_count_glm_rate_ratios_dispersion_and_vif` | Multivariable log-link `Poisson` count GLM on non-negative integer outcomes $Y \in \mathbb{Z}_{\ge 0}$, categorical reference levels, profile-likelihood `95%` CIs, incidence rate ratios $\exp(\beta)$, deviance/dispersion/pseudo-$R^2$ diagnostics, residual inspection, and `VIF` pruning. |
 | `WF-43` | `wf43_xy_serial_dilution_constrained_4pl_ic50_and_auc` | Serial dilution $\log_{10}(X)$ concentration transform on multi-replicate `XY` tables, unconstrained vs. `Bottom=0`/`Top=1` constrained 4PL variable-slope inhibition fitting resolving unbounded profile-likelihood intervals into exact $\text{IC}_{50}$ estimates, plus `AUC` viability integration. |
 
-### Shard 7 — `crates/ui-egui/tests/gui_wf_advanced_statistical_graphs.rs` (`WF-44`–`WF-49`)
+### Shard 7 (`WF-44`–`WF-49`)
 
 | ID | Test Function | Key GUI Surfaces & Verified Pipeline |
 |---|---|---|
@@ -218,7 +210,7 @@ Each shard below runs with `app.set_gui_only(true)` and `app.is_human_path_only(
 | `WF-48` | `wf48_multivariable_bubble_symbol_sizing_and_outlier_clamping` | `MultipleVariables` bubble symbol sizing across uniform sizes, proportional vs. bounded min–max continuous area scaling (with 3-point size legends), binary and ordinal categorical per-level sizing, discrete integer dot-plot layouts, and custom threshold outlier clamping vs. omission. |
 | `WF-49` | `wf49_live_tex_best_fit_equation_annotations_equations_only` | One-phase exponential decay and 3PL nonlinear regression fits with `95%` profile-likelihood confidence bands coupled to symbolic and live-substituted $\TeX$-subset best-fit model equation annotations (`R9.16` equations-only scope; Compact Letter Display and extra fit-statistic callouts excluded), verifying live coefficient refresh across RGBA, SVG, and `%PDF-1.7` on upstream `XY` edits. |
 
-### Compact Letter Display (`R10.11`) — `crates/ui-egui/tests/gui_wf_50_cld.rs` (`WF-50`)
+### Compact Letter Display (`R10.11`) (`WF-50`)
 
 | ID | Test Function | Key GUI Surfaces & Verified Pipeline |
 |---|---|---|
@@ -282,7 +274,7 @@ The human-path column is updated only from observed `R10.2` / `R10.26` human-pat
 
 Tracked under [`R13`](history/roadmap/r13.md#r13-advanced-regression-diagnostics-composite-graphing-layout-objects--65-workflow-human-completion) (`R13.1`–`R13.10` `done`) and **gated on Beta** (moved from `1.0` on 2026-11-20): **Beta** requires all `65` workflows to complete end to end through the drawn desktop GUI on `EguiHumanPathDriver` ([`R10.25`](history/roadmap/r10.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate)). Live browser parity and the recorded human or computer-use walkthroughs of these workflows stay **1.0** (`R11.9`, `R10.13`, `R11.10`). Engine and chart work landed in `R13.1`–`R13.5`, embedded images in `R13.7`, initial `egui` views in `R13.8`, missing `FormatGraph` & series/gap controls in `R13.10` + Wave B gap closures, and **complete `15 / 15`** five-stage `WorkflowRun` suites (`human_wf_51_58.rs`, `human_wf_59_65.rs`) in `R10.28c`.
 
-### Shard 8 — `crates/ui-egui/tests/{gui_wf_51_58,human_wf_51_58}.rs` (`WF-51`–`WF-58`, `complete 8 / 8`, Gate: Beta)
+### Shard 8 — `crates/ui-egui/tests/human_wf_suite/human_wf_51_58.rs` (`WF-51`–`WF-58`, `complete 8 / 8`, Gate: Beta)
 
 | ID | Verified Human-Path Function | Required `R13` Item(s) & 5-Stage GUI Pipeline |
 |---|---|---|
@@ -295,7 +287,7 @@ Tracked under [`R13`](history/roadmap/r13.md#r13-advanced-regression-diagnostics
 | `WF-57` | `wf57_human_layout_embedded_image_crop_rotate_and_non_exported_grid` | `R13.4`, `R13.6` — `2 × 2` `LayoutSheet` importing/pasting schematic `EmbeddedImage`, aspect-locked corner resize (`Shift` free-aspect), rotation handle, `Format Image` 4-edge crop & border, `View > Rulers` + `View > Canvas Grid` viewport toggle, and SVG/`%PDF-1.7`/PNG export verifying grid/ruler exclusion. |
 | `WF-58` | `wf58_human_result_slice_paste_table_transpose_borderless_reactive` | `R13.4`, `R13.6` — Drag-copy rectangular row/column slice from `Descriptive statistics` `ResultViewer` -> `Right-click > Paste Table` on `GraphSheet` -> `Format Embedded Table` (`0 pt` outer border/gridlines, `Transpose rows and columns`) and live update on upstream cell deletion. |
 
-### Shard 9 — `crates/ui-egui/tests/{gui_wf_59_65,human_wf_59_65}.rs` (`WF-59`–`WF-65`, `complete 7 / 7`, Gate: Beta)
+### Shard 9 — `crates/ui-egui/tests/human_wf_suite/human_wf_59_65.rs` (`WF-59`–`WF-65`, `complete 7 / 7`, Gate: Beta)
 
 | ID | Verified Human-Path Function | Required `R13` Item(s) & 5-Stage GUI Pipeline |
 |---|---|---|

@@ -1,5 +1,5 @@
-//! Integration tests for Wave 16 `--gui-only` policy enforcement, the 8-tool `gui` MCP
-//! surface, and `GuiSessionHost` / `--control-port` routing.
+//! Integration tests for the 8-tool progressive `gui` MCP surface and
+//! `GuiSessionHost` / `--control-port` routing.
 
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
@@ -9,10 +9,9 @@ use std::thread;
 use std::time::Duration;
 
 use curvebook_doc::ErrorCode;
-use curvebook_engine::{EngineError, GuiOnlyPolicy};
+use curvebook_engine::EngineError;
 use curvebook_mcp::{
-    ContentBlock, GUI_ONLY_SERVER_INSTRUCTIONS, GUI_TOOL_NAMES, GuiSessionHost, McpServerState, SERVER_INSTRUCTIONS, ToolCallError, call_tool,
-    list_tools, list_tools_for_state,
+    ContentBlock, GUI_TOOL_NAMES, GuiSessionHost, McpServerState, SERVER_INSTRUCTIONS, ToolCallError, call_tool, list_tools, list_tools_for_state,
 };
 use serde_json::{Value, json};
 
@@ -20,16 +19,14 @@ use super::common::{loopback_required, rpc_roundtrip};
 
 #[derive(Default)]
 struct MockGuiHost {
-    gui_only: bool,
     calls: Vec<(String, Value)>,
     next_error: Option<EngineError>,
     png_b64: String,
 }
 
 impl MockGuiHost {
-    fn new(gui_only: bool) -> Self {
+    fn new() -> Self {
         Self {
-            gui_only,
             calls: Vec::new(),
             next_error: None,
             // Minimal valid 1x1 transparent PNG encoded as base64.
@@ -61,14 +58,6 @@ impl GuiSessionHost for MockGuiHost {
             })),
         }
     }
-
-    fn set_gui_only(&mut self, gui_only: bool) {
-        self.gui_only = gui_only;
-    }
-
-    fn is_gui_only(&self) -> bool {
-        self.gui_only
-    }
 }
 
 /// Shared handle wrapper so tests can inspect recorded calls after moving the trait object into
@@ -78,8 +67,8 @@ struct SharedMockHost {
 }
 
 impl SharedMockHost {
-    fn new(gui_only: bool) -> (Self, Rc<RefCell<MockGuiHost>>) {
-        let rc = Rc::new(RefCell::new(MockGuiHost::new(gui_only)));
+    fn new() -> (Self, Rc<RefCell<MockGuiHost>>) {
+        let rc = Rc::new(RefCell::new(MockGuiHost::new()));
         (Self { inner: Rc::clone(&rc) }, rc)
     }
 }
@@ -88,132 +77,11 @@ impl GuiSessionHost for SharedMockHost {
     fn call_gui(&mut self, method: &str, params: Value) -> Result<Value, EngineError> {
         self.inner.borrow_mut().call_gui(method, params)
     }
-
-    fn set_gui_only(&mut self, gui_only: bool) {
-        self.inner.borrow_mut().set_gui_only(gui_only);
-    }
-
-    fn is_gui_only(&self) -> bool {
-        self.inner.borrow().is_gui_only()
-    }
-}
-
-#[test]
-fn gui_only_tools_list_shrinks_strictly_to_eight_gui_tools() {
-    let (host, _) = SharedMockHost::new(true);
-    let mut state = McpServerState::with_gui_host(Box::new(host));
-    assert!(state.is_gui_only());
-    assert_eq!(state.session().gui_only(), GuiOnlyPolicy::Strict);
-
-    // Enabling a CommandGroup beforehand must not leak tools once --gui-only is active.
-    let mut pre_enabled = McpServerState::new();
-    call_tool(&mut pre_enabled, "enable_toolset", json!({ "group": "sheet" })).expect("enable sheet");
-    pre_enabled.set_gui_only(true);
-    let shrunk_names: Vec<String> = list_tools_for_state(&pre_enabled).into_iter().map(|t| t.name).collect();
-    assert_eq!(shrunk_names, GUI_TOOL_NAMES);
-
-    let init = rpc_roundtrip(&mut state, 1, "initialize", json!({ "protocolVersion": "2024-11-05" })).expect("initialize");
-    assert_eq!(init["result"]["instructions"], json!(GUI_ONLY_SERVER_INSTRUCTIONS));
-
-    let list_reply = rpc_roundtrip(&mut state, 2, "tools/list", json!({})).expect("tools/list");
-    let wire_tools = list_reply["result"]["tools"].as_array().expect("tools array");
-    let wire_names: Vec<&str> = wire_tools.iter().map(|t| t["name"].as_str().expect("tool name")).collect();
-    assert_eq!(wire_names, GUI_TOOL_NAMES);
-
-    // Ensure annotations match worst-case Effects across all 8 GUI tools.
-    assert_eq!(
-        wire_tools[0]["annotations"],
-        json!({ "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false })
-    );
-    assert_eq!(
-        wire_tools[1]["annotations"],
-        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true })
-    );
-    assert_eq!(
-        wire_tools[2]["annotations"],
-        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
-    );
-    assert_eq!(
-        wire_tools[3]["annotations"],
-        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
-    );
-    assert_eq!(
-        wire_tools[4]["annotations"],
-        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
-    );
-    assert_eq!(
-        wire_tools[5]["annotations"],
-        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
-    );
-    assert_eq!(
-        wire_tools[6]["annotations"],
-        json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false })
-    );
-    assert_eq!(
-        wire_tools[7]["annotations"],
-        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
-    );
-
-    // resources/list is empty and resources/read is refused under --gui-only.
-    let res_list = rpc_roundtrip(&mut state, 3, "resources/list", json!({})).expect("resources/list");
-    assert_eq!(res_list["result"]["resources"], json!([]));
-
-    let res_read = rpc_roundtrip(&mut state, 4, "resources/read", json!({ "uri": "project://summary" })).expect("resources/read");
-    assert_eq!(res_read["error"]["data"]["code"], json!("gui_only_violation"));
-    assert_eq!(res_read["error"]["data"]["category"], json!("policy"));
-}
-
-#[test]
-fn gui_only_blocks_all_non_gui_tools_with_gui_only_violation() {
-    let (host, shared) = SharedMockHost::new(false);
-    let mut state = McpServerState::new().with_gui_only(true);
-    state.set_gui_host(Some(Box::new(host)));
-
-    // Policy propagates to both Session and newly attached GuiSessionHost.
-    assert_eq!(state.session().gui_only(), GuiOnlyPolicy::Strict);
-    assert!(shared.borrow().is_gui_only());
-
-    let blocked_calls = [
-        ("command_run", json!({ "command_id": "sheet.createData" })),
-        ("command_batch", json!({ "commands": [] })),
-        ("open_file", json!({ "path": "data.csv" })),
-        ("save_file", json!({ "path": "out.curvebook" })),
-        ("export", json!({ "format": "csv" })),
-        ("render_preview", json!({ "sheet_id": "graph-1" })),
-        ("doc_inspect", json!({})),
-        ("command_list", json!({})),
-        ("list_toolsets", json!({})),
-        ("enable_toolset", json!({ "group": "all" })),
-        ("sheet_create_data", json!({})),
-        ("stats_run", json!({})),
-        ("arbitrary_unknown_tool", json!({})),
-    ];
-
-    for (idx, (tool, args)) in blocked_calls.iter().enumerate() {
-        let direct = call_tool(&mut state, tool, args.clone()).expect("structured violation result");
-        assert!(direct.is_error, "expected is_error=true for {tool}");
-        let payload = direct.structured_content.as_ref().expect("structured error payload");
-        assert_eq!(payload["code"], json!("gui_only_violation"), "wrong code for {tool}");
-        assert_eq!(payload["category"], json!("policy"), "wrong category for {tool}");
-        assert_eq!(payload["details"]["tool"], json!(tool));
-
-        let wire = rpc_roundtrip(&mut state, i64::try_from(idx).unwrap() + 10, "tools/call", json!({ "name": tool, "arguments": args }))
-            .expect("rpc wire call");
-        assert_eq!(wire["result"]["isError"], json!(true));
-        assert_eq!(wire["result"]["structuredContent"]["code"], json!("gui_only_violation"));
-    }
-
-    assert!(shared.borrow().calls.is_empty(), "blocked calls must never reach GuiSessionHost");
-
-    // Verify disabling propagates cleanly as well.
-    state.set_gui_only(false);
-    assert_eq!(state.session().gui_only(), GuiOnlyPolicy::Disabled);
-    assert!(!shared.borrow().is_gui_only());
 }
 
 #[test]
 fn gui_tools_route_through_gui_session_host_including_png_screenshot_and_tsv() {
-    let (host, shared) = SharedMockHost::new(true);
+    let (host, shared) = SharedMockHost::new();
     let mut state = McpServerState::with_gui_host(Box::new(host));
 
     let inspect_res = call_tool(&mut state, "ui_inspect", json!({ "scope": "dialog", "include_bounds": true })).expect("ui_inspect");
@@ -318,7 +186,7 @@ fn gui_tools_route_through_gui_session_host_including_png_screenshot_and_tsv() {
 
 #[test]
 fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
-    let mut unattached = McpServerState::new().with_gui_only(true);
+    let mut unattached = McpServerState::new();
     let err = call_tool(&mut unattached, "ui_inspect", json!({ "scope": "all" })).expect("structured conflict");
     assert!(err.is_error);
     let payload = err.structured_content.expect("conflict payload");
@@ -331,7 +199,7 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
         Ok(l) => l,
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
             assert!(!loopback_required(), "FAIL-CLOSED loopback bind denied under CI/CURVEBOOK_REQUIRE_LOOPBACK: {err}");
-            let mut attached = McpServerState::with_control_port_and_gui_only(59999, true).expect("control port state");
+            let mut attached = McpServerState::with_control_port(59999).expect("control port state");
             let inspect = call_tool(&mut attached, "ui_inspect", json!({ "scope": "grid" })).expect("sandbox err");
             assert!(inspect.is_error);
             return;
@@ -347,7 +215,7 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
         }
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
             assert!(!loopback_required(), "FAIL-CLOSED loopback connect denied under CI/CURVEBOOK_REQUIRE_LOOPBACK: {err}");
-            let mut attached = McpServerState::with_control_port_and_gui_only(port, true).expect("control port state");
+            let mut attached = McpServerState::with_control_port(port).expect("control port state");
             let inspect = call_tool(&mut attached, "ui_inspect", json!({ "scope": "grid" })).expect("sandbox err");
             assert!(inspect.is_error);
             let detail = inspect.structured_content.expect("structured error");
@@ -358,9 +226,9 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
         Err(err) => panic!("unexpected loopback connect probe error: {err}"),
     }
 
-    // Spin up a loopback --control server handling initial `ping` handshake + three sequential requests.
+    // Spin up a loopback --control server handling three sequential requests.
     let server = thread::spawn(move || -> Result<(), String> {
-        for expected in 0..4 {
+        for expected in 0..3 {
             let (mut stream, _) = listener.accept().map_err(|e| format!("accept: {e}"))?;
             let mut line = String::new();
             let cloned = stream.try_clone().map_err(|e| format!("clone: {e}"))?;
@@ -370,15 +238,11 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
             let id = req["id"].as_str().ok_or_else(|| String::from("missing id"))?;
             let resp = match expected {
                 0 => {
-                    assert_eq!(req["method"], json!("ping"));
-                    json!({ "id": id, "ok": true, "result": { "pong": true, "gui_only": true } })
-                }
-                1 => {
                     assert_eq!(req["method"], json!("ui.inspect"));
                     assert_eq!(req["params"]["scope"], json!("grid"));
                     json!({ "id": id, "ok": true, "result": { "scope": "grid", "active_sheet": "data-1" } })
                 }
-                2 => {
+                1 => {
                     assert_eq!(req["method"], json!("ui.screenshot"));
                     json!({
                         "id": id,
@@ -395,13 +259,13 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
                     json!({
                         "id": id,
                         "ok": false,
-                        "error": "menu disabled under gui_only",
+                        "error": "menu command currently disabled",
                         "error_detail": {
-                            "code": "gui_only_violation",
-                            "category": "policy",
-                            "message": "direct shortcut rejected by remote host",
+                            "code": "conflict",
+                            "category": "state",
+                            "message": "menu item disabled by remote host",
                             "retryable": false,
-                            "remediation": "Use visible menu path instead.",
+                            "remediation": "Open a sheet first.",
                             "details": { "remote": true }
                         }
                     })
@@ -417,7 +281,7 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
         Ok(())
     });
 
-    let mut attached = McpServerState::with_control_port_and_gui_only(port, true).expect("control port state");
+    let mut attached = McpServerState::with_control_port(port).expect("control port state");
     let inspect = call_tool(&mut attached, "ui_inspect", json!({ "scope": "grid" })).expect("remote ui_inspect");
     assert!(!inspect.is_error);
     assert_eq!(inspect.structured_content.expect("inspect json")["active_sheet"], json!("data-1"));
@@ -429,8 +293,8 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
     let remote_err = call_tool(&mut attached, "ui_invoke_menu", json!({ "command_id": "file.open" })).expect("remote err");
     assert!(remote_err.is_error);
     let detail = remote_err.structured_content.expect("remote error detail");
-    assert_eq!(detail["code"], json!("gui_only_violation"));
-    assert_eq!(detail["remediation"], json!("Use visible menu path instead."));
+    assert_eq!(detail["code"], json!("conflict"));
+    assert_eq!(detail["remediation"], json!("Open a sheet first."));
 
     server.join().expect("control server thread").expect("control server io");
 }
@@ -438,7 +302,6 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
 #[test]
 fn normal_mode_preserves_defaults_and_supports_progressive_gui_toolset() {
     let mut state = McpServerState::new();
-    assert!(!state.is_gui_only());
     assert_eq!(list_tools_for_state(&state).len(), list_tools().len());
 
     let init = rpc_roundtrip(&mut state, 1, "initialize", json!({ "protocolVersion": "2024-11-05" })).expect("initialize");
@@ -460,10 +323,9 @@ fn normal_mode_preserves_defaults_and_supports_progressive_gui_toolset() {
     assert_eq!(disable_reply.structured_content.expect("disable json")["enabled_groups"], json!([]));
     assert_eq!(list_tools_for_state(&state).len(), 10);
 
-    // State constructed with GuiSessionHost (gui_only == false) exposes both core + gui tools.
-    let (host, _) = SharedMockHost::new(false);
+    // State constructed with GuiSessionHost exposes both core + gui tools.
+    let (host, _) = SharedMockHost::new();
     let mut hosted = McpServerState::with_gui_host(Box::new(host));
-    assert!(!hosted.is_gui_only());
     assert_eq!(list_tools_for_state(&hosted).len(), 18);
     assert!(!call_tool(&mut hosted, "doc_inspect", json!({})).expect("doc_inspect").is_error);
     assert!(!call_tool(&mut hosted, "ui_inspect", json!({})).expect("ui_inspect").is_error);
@@ -471,7 +333,7 @@ fn normal_mode_preserves_defaults_and_supports_progressive_gui_toolset() {
 
 #[test]
 fn gui_tools_parameter_validation_rejects_malformed_inputs() {
-    let (host, _) = SharedMockHost::new(true);
+    let (host, _) = SharedMockHost::new();
     let mut state = McpServerState::with_gui_host(Box::new(host));
 
     let bad_cases = [
@@ -496,8 +358,8 @@ fn gui_tools_parameter_validation_rejects_malformed_inputs() {
 }
 
 #[test]
-fn gui_tools_forward_extended_parameters_and_reject_screenshot_path_in_gui_only() {
-    let (host, shared) = SharedMockHost::new(true);
+fn gui_tools_forward_extended_parameters() {
+    let (host, shared) = SharedMockHost::new();
     let mut state = McpServerState::with_gui_host(Box::new(host));
 
     for scope in ["workspace", "toolbar", "tabs"] {
@@ -508,11 +370,6 @@ fn gui_tools_forward_extended_parameters_and_reject_screenshot_path_in_gui_only(
     let shot = call_tool(&mut state, "ui_screenshot", json!({ "target": "full_window", "width_px": 640, "height_px": 400 }))
         .expect("full_window screenshot");
     assert!(!shot.is_error);
-
-    let rejected = call_tool(&mut state, "ui_screenshot", json!({ "target": "workspace", "path": "blocked.png" }))
-        .expect("gui-only screenshot path error result");
-    assert!(rejected.is_error);
-    assert_eq!(rejected.structured_content.as_ref().and_then(|v| v.get("code")), Some(&json!("gui_only_violation")));
 
     call_tool(
         &mut state,
@@ -616,21 +473,15 @@ fn gui_tools_worst_case_annotations_cover_all_eight_tools() {
         assert!(ui_inspect_metrics.contains_key(key), "ui_inspect schema missing canonical ViewportMetrics key `{key}`");
     }
 
-    let mut gui_only_state = McpServerState::new().with_gui_only(true);
-    let gui_only_defs = list_tools_for_state(&gui_only_state);
-    assert_eq!(gui_only_defs.len(), GUI_TOOL_NAMES.len());
-
-    let wire_list = rpc_roundtrip(&mut gui_only_state, 10, "tools/list", json!({})).expect("tools/list");
-    let wire_tools = wire_list["result"]["tools"].as_array().expect("wire tools array");
-
     let mut enabled_state = McpServerState::new();
     call_tool(&mut enabled_state, "enable_toolset", json!({ "group": "gui" })).expect("enable gui toolset");
     let full_defs = list_tools_for_state(&enabled_state);
 
+    let wire_list = rpc_roundtrip(&mut enabled_state, 10, "tools/list", json!({})).expect("tools/list");
+    let wire_tools = wire_list["result"]["tools"].as_array().expect("wire tools array");
+
     for (idx, &(name, ro, destr, idemp, open_w)) in expected.iter().enumerate() {
         assert_eq!(gui_defs[idx].name, name);
-        assert_eq!(gui_only_defs[idx].name, name);
-        assert_eq!(wire_tools[idx]["name"], json!(name));
 
         let expected_json = json!({
             "readOnlyHint": ro,
@@ -639,10 +490,11 @@ fn gui_tools_worst_case_annotations_cover_all_eight_tools() {
             "openWorldHint": open_w,
         });
         assert_eq!(serde_json::to_value(gui_defs[idx].annotations).unwrap(), expected_json, "list_gui_tools annotation mismatch for {name}");
-        assert_eq!(serde_json::to_value(gui_only_defs[idx].annotations).unwrap(), expected_json, "gui-only list_tools_for_state mismatch for {name}");
-        assert_eq!(wire_tools[idx]["annotations"], expected_json, "wire tools/list mismatch for {name}");
 
         let exposed = full_defs.iter().find(|t| t.name == name).expect("enabled gui tool missing");
         assert_eq!(serde_json::to_value(exposed.annotations).unwrap(), expected_json, "enabled gui toolset mismatch for {name}");
+
+        let wire_tool = wire_tools.iter().find(|t| t["name"] == json!(name)).expect("wire gui tool missing");
+        assert_eq!(wire_tool["annotations"], expected_json, "wire tools/list mismatch for {name}");
     }
 }

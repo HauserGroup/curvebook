@@ -205,7 +205,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         id: "ui.screenshot",
         label: "Capture Workspace Screenshot PNG",
         shortcut: "",
-        params_doc: "{\"target\":\"optional full_window|workspace|viewport|canvas|dialog\",\"width_px\":\"optional 64..=4096 (default 1024)\",\"height_px\":\"optional 64..=4096 (default 640)\",\"dpi\":\"optional 72..=600 (default 144)\",\"path\":\"optional.png (blocked under --gui-only)\"}",
+        params_doc: "{\"target\":\"optional full_window|workspace|viewport|canvas|dialog\",\"width_px\":\"optional 64..=4096 (default 1024)\",\"height_px\":\"optional 64..=4096 (default 640)\",\"dpi\":\"optional 72..=600 (default 144)\",\"path\":\"optional.png\"}",
         summary: "Render the full compositor workspace layout to an RGBA PNG image.",
         beginner: "Captures the active panes, sheet view, and overlays at the requested pixel dimensions and DPI.",
         rank: ActionRank::Overflow,
