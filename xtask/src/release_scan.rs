@@ -25,13 +25,15 @@ usage: cargo xtask release-scan [--require-checksums | --no-checksums] [--expect
 
 Unpacks every release container in <assets-dir> (.zip, .tar.gz/.tgz, .deb, .rpm, .AppImage,
 .flatpak, .dmg on macOS, .msi on Windows) plus plain compliance files (SHA256SUMS.txt,
-THIRD-PARTY-LICENSES.html, *.zsync), verifies SHA-256 digests against SHA256SUMS.txt by default,
-optionally checks the exact R0.28 Beta asset set (--expect-beta-set <version>) and verifies
-cross-OS .dmg/.msi builds via native scan reports (--cross-os-reports <dir>), fails closed on
-unknown/unextractable formats, and runs brands + cleanroom + assets checks.";
+THIRD-PARTY-LICENSES.html, *.cdx.json, *.zsync), verifies SHA-256 digests against SHA256SUMS.txt
+by default, optionally checks the exact R0.28/R14.2 Beta asset set (--expect-beta-set <version>)
+and verifies cross-OS .dmg/.msi builds via native scan reports (--cross-os-reports <dir>), fails
+closed on unknown/unextractable formats or malformed CycloneDX SBOMs, and runs brands + cleanroom
++ assets (plus secrets on SBOMs) checks.";
 
 const CHECKSUMS_FILE: &str = "SHA256SUMS.txt";
 const LICENSES_HTML_FILE: &str = "THIRD-PARTY-LICENSES.html";
+const SBOM_EXT: &str = ".cdx.json";
 
 const SUBPROCESS_WALL_TIMEOUT: Duration = Duration::from_secs(180);
 const SUBPROCESS_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -65,6 +67,7 @@ pub(crate) struct ScanOptions {
 enum AssetKind {
     Checksums,
     HtmlCompliance,
+    Sbom,
     Zsync,
     Zip,
     TarGz,
@@ -81,6 +84,7 @@ impl AssetKind {
         match self {
             Self::Checksums => "checksums",
             Self::HtmlCompliance => "html",
+            Self::Sbom => "sbom",
             Self::Zsync => "zsync",
             Self::Zip => "zip",
             Self::TarGz => "tar.gz",
@@ -415,6 +419,7 @@ pub(crate) fn expected_beta_asset_names(version: &str) -> Vec<String> {
         format!("curvebook-{version}-linux-x86_64.AppImage"),
         format!("curvebook-{version}-linux-aarch64.AppImage"),
         format!("curvebook-{version}-freebsd-x86_64.tar.gz"),
+        format!("curvebook-{version}{SBOM_EXT}"),
         String::from(LICENSES_HTML_FILE),
         String::from(CHECKSUMS_FILE),
     ]
@@ -658,6 +663,9 @@ fn classify_asset_name(name: &str) -> Result<AssetKind, String> {
         return Ok(AssetKind::HtmlCompliance);
     }
     let lower = name.to_ascii_lowercase();
+    if lower.ends_with(SBOM_EXT) {
+        return Ok(AssetKind::Sbom);
+    }
     if lower.ends_with(".zsync") {
         return Ok(AssetKind::Zsync);
     }
@@ -788,6 +796,26 @@ fn scan_single_asset(
                 checked_assets: 0,
             })
         }
+        AssetKind::Sbom => {
+            let bytes = read_non_symlink_regular_bytes(&item.path, MAX_COMPLIANCE_TEXT_BYTES, &item.name)?;
+            let text = std::str::from_utf8(&bytes).map_err(|e| format!("`{}` is not valid UTF-8: {e}", item.name))?;
+            validate_cyclonedx_sbom_json(&item.name, text)?;
+            collect_compliance_hits(&item.name, text, &bytes, violations);
+            let mut secret_hits = Vec::new();
+            crate::secrets::scan_text(&item.name, text, &mut secret_hits);
+            for hit in secret_hits {
+                violations.push(format!("{}:{}: [secrets] {}", hit.location, hit.line, hit.kind));
+            }
+            Ok(ScannedAssetRecord {
+                name: item.name.clone(),
+                kind: item.kind.label(),
+                size_bytes: item.size_bytes,
+                sha256: item.sha256.clone(),
+                unpacked_files: 1,
+                nested_archive_entries: 0,
+                checked_assets: 0,
+            })
+        }
         AssetKind::Zsync => {
             let bytes = read_non_symlink_regular_bytes(&item.path, MAX_ZSYNC_BYTES, &item.name)?;
             let header = extract_zsync_header_utf8(&item.name, &bytes)?;
@@ -848,6 +876,34 @@ fn collect_compliance_hits(asset_name: &str, text: &str, raw_bytes: &[u8], viola
     }
 }
 
+fn validate_cyclonedx_sbom_json(asset_name: &str, text: &str) -> Result<(), String> {
+    let val: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("`{asset_name}`: invalid CycloneDX JSON: {e}"))?;
+    let Some(obj) = val.as_object() else {
+        return Err(format!("`{asset_name}`: CycloneDX SBOM root must be a JSON object"));
+    };
+    let bom_format = obj.get("bomFormat").and_then(serde_json::Value::as_str);
+    if bom_format != Some("CycloneDX") {
+        return Err(format!("`{asset_name}`: expected CycloneDX SBOM with `\"bomFormat\": \"CycloneDX\"`, found {bom_format:?}"));
+    }
+    let spec_version = obj.get("specVersion").and_then(serde_json::Value::as_str).map(str::trim).unwrap_or("");
+    if spec_version.is_empty() {
+        return Err(format!("`{asset_name}`: CycloneDX SBOM is missing non-empty `specVersion`"));
+    }
+    let Some(components) = obj.get("components").and_then(serde_json::Value::as_array) else {
+        return Err(format!("`{asset_name}`: CycloneDX SBOM is missing `components` array"));
+    };
+    if components.is_empty() {
+        return Err(format!("`{asset_name}`: CycloneDX SBOM has empty `components` array"));
+    }
+    for (idx, comp) in components.iter().enumerate() {
+        let has_name = comp.as_object().and_then(|c| c.get("name")).and_then(serde_json::Value::as_str).is_some_and(|n| !n.trim().is_empty());
+        if !has_name {
+            return Err(format!("`{asset_name}`: CycloneDX `components[{idx}]` is missing a non-empty string `name`"));
+        }
+    }
+    Ok(())
+}
+
 fn extract_zsync_header_utf8<'a>(asset_name: &str, bytes: &'a [u8]) -> Result<&'a str, String> {
     if let Ok(all_utf8) = std::str::from_utf8(bytes) {
         if all_utf8.trim().is_empty() {
@@ -883,7 +939,7 @@ fn unpack_container_asset(
         AssetKind::Flatpak => unpack_flatpak(tools, &item.name, &item.path, item_scratch, stage_dir),
         AssetKind::Dmg => unpack_dmg(tools, &item.name, &item.path, item_scratch, stage_dir, violations),
         AssetKind::Msi => unpack_msi(tools, &item.name, &item.path, stage_dir),
-        AssetKind::Checksums | AssetKind::HtmlCompliance | AssetKind::Zsync => Ok(()),
+        AssetKind::Checksums | AssetKind::HtmlCompliance | AssetKind::Sbom | AssetKind::Zsync => Ok(()),
     }
 }
 
@@ -2004,7 +2060,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn expect_beta_set_and_cross_os_reports_verify_exact_8_files_and_fail_closed() {
+    fn expect_beta_set_and_cross_os_reports_verify_exact_9_files_and_fail_closed() {
         let root = crate::workspace_root().unwrap();
         let scratch = ScratchDirGuard::new("beta-set").unwrap();
         let bin_dir = scratch.path.join("bin");
@@ -2028,6 +2084,19 @@ mod tests {
         let msi_arm64_bytes = b"CurveBook MSI arm64 fixture\n";
         let freebsd_tgz =
             build_minimal_clean_tar_gz("curvebook-0.1.0-beta.1-freebsd-x86_64/share/doc/curvebook/README.txt", b"CurveBook FreeBSD clean\n");
+        let sbom_json = serde_json::to_vec_pretty(&serde_json::json!({
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "version": 1,
+            "components": [
+                {
+                    "type": "library",
+                    "name": "serde",
+                    "version": "1.0.219"
+                }
+            ]
+        }))
+        .unwrap();
 
         std::fs::write(rel_dir.join(format!("curvebook-{ver}-macos-universal.dmg")), dmg_bytes).unwrap();
         std::fs::write(rel_dir.join(format!("curvebook-{ver}-windows-x64.msi")), msi_x64_bytes).unwrap();
@@ -2035,6 +2104,7 @@ mod tests {
         std::fs::write(rel_dir.join(format!("curvebook-{ver}-linux-x86_64.AppImage")), &appimage_bytes).unwrap();
         std::fs::write(rel_dir.join(format!("curvebook-{ver}-linux-aarch64.AppImage")), &appimage_bytes).unwrap();
         std::fs::write(rel_dir.join(format!("curvebook-{ver}-freebsd-x86_64.tar.gz")), &freebsd_tgz).unwrap();
+        std::fs::write(rel_dir.join(format!("curvebook-{ver}.cdx.json")), &sbom_json).unwrap();
         std::fs::write(rel_dir.join("THIRD-PARTY-LICENSES.html"), "<html><title>CurveBook</title><body>MIT OR Apache-2.0</body></html>\n").unwrap();
         write_checksums(&rel_dir);
 
@@ -2091,7 +2161,7 @@ mod tests {
         let linux_host_tools =
             ToolConfig { unsquashfs_bin: unsquashfs.to_string_lossy().into_owned(), allow_dmg: false, allow_msi: false, ..ToolConfig::default() };
 
-        // 1. Complete 8-file Beta set + matching cross-OS reports passes cleanly.
+        // 1. Complete 9-file Beta set (including CycloneDX SBOM) + matching cross-OS reports passes cleanly.
         let ok_opts = ScanOptions {
             assets_dir: rel_dir.clone(),
             checksum_mode: ChecksumMode::Required,
@@ -2100,8 +2170,9 @@ mod tests {
             cross_os_reports_dir: Some(reports_dir.clone()),
         };
         let report = scan_release_dir_with_tools(&root, &ok_opts, &linux_host_tools).unwrap();
-        assert_eq!(report.asset_count, 8);
+        assert_eq!(report.asset_count, 9);
         assert_eq!(report.host_os, std::env::consts::OS);
+        assert!(report.assets.iter().any(|a| a.name == format!("curvebook-{ver}.cdx.json") && a.kind == "sbom"));
 
         // 2. Without cross-os-reports, cross-OS .dmg / .msi STILL fails closed!
         let no_reports_opts = ScanOptions { cross_os_reports_dir: None, ..ok_opts.clone() };
@@ -2127,11 +2198,35 @@ mod tests {
         let bad_host_err = scan_release_dir_with_tools(&root, &ok_opts, &linux_host_tools).unwrap_err();
         assert!(bad_host_err.contains("host_os=macos"), "{bad_host_err}");
 
-        // 4. Extra dropped asset fails closed even if all 8 files are present.
+        // 4. Extra dropped asset fails closed even if all 9 files are present.
         std::fs::write(rel_dir.join(format!("curvebook-web-{ver}.zip")), b"PK\x05\x06").unwrap();
         write_checksums(&rel_dir);
         let extra_err = scan_release_dir_with_tools(&root, &ok_opts, &linux_host_tools).unwrap_err();
         assert!(extra_err.contains("unexpected extra file(s)") && extra_err.contains(&format!("curvebook-web-{ver}.zip")), "{extra_err}");
+    }
+
+    #[test]
+    fn cyclonedx_sbom_validator_accepts_valid_and_rejects_malformed() {
+        let valid =
+            r#"{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":[{"type":"library","name":"serde","version":"1.0.219"}]}"#;
+        assert!(super::validate_cyclonedx_sbom_json("curvebook-0.1.0.cdx.json", valid).is_ok());
+
+        for (case, payload, expected_needle) in [
+            ("not json", "not-json", "invalid CycloneDX JSON"),
+            ("non-object root", "[]", "must be a JSON object"),
+            ("wrong bomFormat", r#"{"bomFormat":"SPDX","specVersion":"2.3","components":[{"name":"serde"}]}"#, "bomFormat"),
+            ("missing specVersion", r#"{"bomFormat":"CycloneDX","components":[{"name":"serde"}]}"#, "specVersion"),
+            ("missing components", r#"{"bomFormat":"CycloneDX","specVersion":"1.5"}"#, "missing `components`"),
+            ("empty components", r#"{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}"#, "empty `components`"),
+            (
+                "nameless component",
+                r#"{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"type":"library","name":"   "}]}"#,
+                "components[0]",
+            ),
+        ] {
+            let err = super::validate_cyclonedx_sbom_json("curvebook-0.1.0.cdx.json", payload).unwrap_err();
+            assert!(err.contains(expected_needle), "case `{case}` error `{err}` did not contain `{expected_needle}`");
+        }
     }
 
     #[test]

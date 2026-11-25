@@ -14,7 +14,7 @@ Use the **Release** GitHub Actions workflow (`release.yml`); Alpha and Beta are 
    - **Checked (`true`, manual default):** builds an Alpha draft prerelease (`CurveBook Alpha v<version>`) using ad-hoc macOS signing without notarization and unsigned Windows `.msi` installers.
    - **Unchecked (`false`, or tag/branch push):** enforces **fail-closed Apple Developer ID signing and notarization** on macOS (`R8.10`). If any of `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, or `APPLE_TEAM_ID` is missing, the `macos` job stops with an error instead of falling back to ad-hoc output. Windows `.msi` installers remain **unsigned** for Beta until [`R8.11`](../ROADMAP.md#r811-windows-authenticode-signing-after-beta).
 4. **Nightly schedule & single rehearsal run (`R8.11`):** scheduled dry runs skip the `macos` and `publish` jobs, guard all Windows signing secrets (`github.event_name != 'schedule'`), and upload Actions artifacts only. Run a single integrated rehearsal dispatch (e.g. `v0.1.0-alpha.2` after changes land on `main`) rather than separate per-branch hosted dry runs.
-5. Every platform build job (`linux`, `macos`, `windows`, `freebsd`, and `web`) runs `cargo xtask release-scan` and uploads a `scan-report-*` artifact. The `publish` job depends on all build jobs passing, generates `SHA256SUMS.txt`, runs `release-scan --expect-beta-set "$ver" --cross-os-reports dist/scan-reports` to verify exact Beta asset parity and native scan records, creates keyless Sigstore build provenance attestations (`actions/attest-build-provenance`), verifies every file's attestation, and drafts the GitHub Release.
+5. The `licenses` job verifies crate licences (`cargo deny`, `cargo about`, `cargo xtask licenses`), generates `THIRD-PARTY-LICENSES.html`, and builds a deterministic CycloneDX 1.5 JSON SBOM (`curvebook-<version>.cdx.json`) via CI-only `cargo-cyclonedx` (`packaging/sbom.sh`, validated immediately with `cargo xtask release-scan --no-checksums sbom`). Every platform build job (`linux`, `macos`, `windows`, and `freebsd`) runs `cargo xtask release-scan` and uploads a `scan-report-*` artifact. The `publish` job depends on all build jobs passing, combines the installers, `THIRD-PARTY-LICENSES.html`, and `curvebook-<version>.cdx.json`, generates `SHA256SUMS.txt`, runs `release-scan --expect-beta-set "$ver" --cross-os-reports dist/scan-reports` to verify exact Beta asset parity and native scan records, creates keyless Sigstore build provenance attestations (`actions/attest-build-provenance`) for all files plus CycloneDX SBOM attestations (`actions/attest-sbom`) bound to the platform packages, verifies every file's attestations, and drafts the GitHub Release.
 6. After all jobs pass, review the draft release under **Releases**, paste the [Beta Release Notes Template](#beta-release-notes-template) for Beta cuts, and publish when ready. Draft assets require repository access; public distribution begins only when a maintainer publishes the reviewed release.
 
 Rerunning a version updates its existing draft and replaces matching assets. The workflow refuses to modify a release that is already published before creating any attestations.
@@ -73,7 +73,7 @@ Before tagging or publishing a release, verify both source invariants and packag
        --report dist/release-scan-publish.json \
        dist/release
      ```
-   - `release-scan` unpacks containers through bounded `curvebook-platform` subprocesses (`.zip`, `.tar.gz`/`.tgz`, `.AppImage`, `.dmg` on macOS, `.msi` on Windows, plus historical `.deb`/`.rpm`/`.flatpak`/`.zsync` for Alpha backfill), enforces zip-slip/tar-slip guards, fails closed on unknown or unextractable formats, checks `SHA256SUMS.txt`, and runs `brands`, `cleanroom`, and `assets` over every unpacked entry.
+   - `release-scan` unpacks containers through bounded `curvebook-platform` subprocesses (`.zip`, `.tar.gz`/`.tgz`, `.AppImage`, `.dmg` on macOS, `.msi` on Windows, plus historical `.deb`/`.rpm`/`.flatpak`/`.zsync` for Alpha backfill), validates CycloneDX SBOM JSON (`.cdx.json` with `"bomFormat": "CycloneDX"`, non-empty `specVersion` and `components`, plus `brands`, `cleanroom`, and `secrets` scans), enforces zip-slip/tar-slip guards, fails closed on unknown or unextractable formats, checks `SHA256SUMS.txt`, and runs `brands`, `cleanroom`, and `assets` over every unpacked entry.
    - Backfilling `v0.1.0-alpha.1` requires downloading its published assets from GitHub (see [alpha-branding-clearance.md](../history/release/alpha-branding-clearance.md#6-hosted-release-asset-scan-r026)).
 3. **Cross-platform packaging integrity scripts:**
    - Shared packaging metadata / brand hygiene check:
@@ -107,7 +107,7 @@ Beta releases ship one installer format per OS and one file per architecture (de
 | **Windows (`x64`, `arm64`)** | `curvebook-<version>-windows-x64.msi`, `curvebook-<version>-windows-arm64.msi` | `packaging/windows/package.ps1`, `curvebook.wxs`, `install-policy.wxi`, [`INSTALLATION.md`](../../packaging/windows/INSTALLATION.md) | Dual-scope WiX v5 MSI (`PerUser` default, optional `PerMachine`) with static MSVC CRT bundling `curvebook.exe` + `curvebook-cli.exe`. Ships **unsigned** for Beta until `R8.11`. `x86` and `-portable.zip` dropped (`R0.28`). |
 | **Linux (`x86_64`, `aarch64`)** | `curvebook-<version>-linux-x86_64.AppImage`, `curvebook-<version>-linux-aarch64.AppImage` | `packaging/linux/package.sh`, `apprun-test.sh` | Self-contained AppImage bundling `curvebook`, `curvebook-cli`, `.desktop`, AppStream metadata, MIME associations, and icons. `.AppImage.zsync`, `.deb`, `.rpm`, `.tar.gz`, and Flatpak/OCI dropped (`R0.28`). |
 | **FreeBSD (`x86_64`)** | `curvebook-<version>-freebsd-x86_64.tar.gz` | `packaging/freebsd/package.sh` | Tier 2 CLI-only tarball (`curvebook-cli` + MCP; no desktop GUI) built on FreeBSD VM and scanned on Ubuntu host. |
-| **Compliance & Checksums** | `THIRD-PARTY-LICENSES.html`, `SHA256SUMS.txt` | `cargo xtask licenses`, `sha256sum`, `actions/attest-build-provenance` | Every asset in the `R0.28` Beta asset set receives a keyless GitHub Sigstore build provenance attestation and is verified by `release-scan --expect-beta-set`. |
+| **Compliance, SBOM & Checksums** | `curvebook-<version>.cdx.json`, `THIRD-PARTY-LICENSES.html`, `SHA256SUMS.txt` | `packaging/sbom.sh` (`cargo-cyclonedx`), `cargo xtask licenses`, `sha256sum`, `actions/attest-build-provenance`, `actions/attest-sbom` | `curvebook-<version>.cdx.json` is a deterministic, path-normalized CycloneDX 1.5 JSON SBOM covering `curvebook` and `curvebook-cli` across all Cargo targets (`R14.2`, CI-only tool, never a workspace dependency). Every asset in the Beta set receives a keyless GitHub Sigstore build provenance attestation, the six platform packages also receive a CycloneDX SBOM attestation (`https://cyclonedx.org/bom`), and all files are verified by `release-scan --expect-beta-set`. |
 
 **Browser bundle (`curvebook-web`, deferred to `1.0`).** `curvebook-web-<version>.zip` is omitted from Beta GitHub Release assets (`R0.28`, [`R11`](../ROADMAP.md#r11-usable-browser-app)). Automatic WASM verification is paused in both CI and the release workflow. To verify a browser bundle on demand, build it with `./packaging/web/package.sh` and run `CURVEBOOK_REQUIRE_WEB_BUNDLE=1 cargo xtask web-bundle` to check the `R10.22` size budget.
 
@@ -133,21 +133,27 @@ Use this template when editing a drafted Beta GitHub Release (`v<version>`) befo
 - **Windows (`curvebook-<version>-windows-x64.msi`, `curvebook-<version>-windows-arm64.msi`):** Ships **unsigned** until `R8.11`; verify `SHA256SUMS.txt` and the GitHub Sigstore attestation before running.
 - **Linux (`curvebook-<version>-linux-x86_64.AppImage`, `curvebook-<version>-linux-aarch64.AppImage`):** Self-contained desktop + CLI downloads; verify via `SHA256SUMS.txt` and `gh attestation verify`.
 - **FreeBSD (`curvebook-<version>-freebsd-x86_64.tar.gz`):** Tier 2 CLI-only archive (`curvebook-cli` + MCP; no desktop GUI); verify via `SHA256SUMS.txt` and `gh attestation verify`.
-- **Notices & Checksums:** `THIRD-PARTY-LICENSES.html` and `SHA256SUMS.txt`.
+- **Notices, SBOM & Checksums:** `curvebook-<version>.cdx.json` (CycloneDX 1.5 SBOM), `THIRD-PARTY-LICENSES.html`, and `SHA256SUMS.txt`.
 ```
 
 ### Verifying Downloaded Release Artefacts
 
 User-facing verification steps live only in the [Get Started verification section](../reference/get-started.md#verifying-downloads), published as [Get Started](https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html). The `publish` job runs `gh attestation verify` on every file in the `R0.28` Beta asset set before upload and stops the release if any file fails.
 
-1. **Verify Sigstore build provenance** with the GitHub CLI (`gh`):
+1. **Verify Sigstore build provenance (and CycloneDX SBOM attestation)** with the GitHub CLI (`gh`):
    ```sh
    gh attestation verify <file> --repo HauserGroup/curvebook \
      --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml
    ```
+   To verify the CycloneDX SBOM attestation bound to a release package (`.dmg`, `.msi`, `.AppImage`, `.tar.gz`):
+   ```sh
+   gh attestation verify <package-file> --repo HauserGroup/curvebook \
+     --predicate-type https://cyclonedx.org/bom \
+     --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml
+   ```
    Without `--signer-workflow`, `gh` accepts an attestation signed by any workflow in the repository. A release built from a tag push also records the tag; check it with `--source-ref refs/tags/v<version>`. A manually dispatched run records the branch it ran from instead; for example, `v0.1.0-alpha.1` was built from `refs/heads/main`.
 
-   The `publish` job refuses to modify an already-published release before it attests anything, so a rerun cannot create attestations for rebuilt files that are never uploaded.
+   The `publish` job refuses to modify an already-published release before it attests anything, so a rerun cannot create attestations for rebuilt files that are never uploaded. To regenerate the CycloneDX SBOM locally (with `cargo-cyclonedx` installed out-of-tree), run `./packaging/sbom.sh sbom`.
 2. **Verify SHA-256 checksums** after downloading `SHA256SUMS.txt` alongside your release files:
    ```sh
    sha256sum -c SHA256SUMS.txt
@@ -212,7 +218,7 @@ Once the release build passes verification and is published:
    cargo xtask status
    cargo xtask pending
    ```
-4. Confirm release notes link only verified changes, `THIRD-PARTY-LICENSES.html` and `SHA256SUMS.txt` are published cleanly alongside installers, and open issues closed by `(R<m>.<n>)` PRs are updated.
+4. Confirm release notes link only verified changes, `curvebook-<version>.cdx.json`, `THIRD-PARTY-LICENSES.html`, and `SHA256SUMS.txt` are published cleanly alongside installers, and open issues closed by `(R<m>.<n>)` PRs are updated.
 5. Tell reporters their fix shipped. List the issues completed since the previous release tag and add a short comment to each naming the new release (for example *"Included in `v0.1.0-alpha.2`."*):
    ```sh
    gh issue list --state closed --search "reason:completed closed:>=<previous tag date, YYYY-MM-DD>" --limit 200

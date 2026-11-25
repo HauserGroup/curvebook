@@ -14,7 +14,7 @@ Every Beta release attaches one installer package per supported desktop platform
 | **Windows** | `curvebook-<version>-windows-x64.msi`<br>`curvebook-<version>-windows-arm64.msi` | Windows 10/11 (`x64` / `arm64`). Currently **unsigned** pending code signing (`R8.11`). Windows `x86` (32-bit) and `-portable.zip` are dropped; Microsoft Store MSIX (`R8.9`) is a separate Store channel alternative. |
 | **Linux** | `curvebook-<version>-linux-x86_64.AppImage`<br>`curvebook-<version>-linux-aarch64.AppImage` | Wayland / X11 desktop + bundled `curvebook-cli`. Requires FUSE v2 (`libfuse2`) or `--appimage-extract`. `.AppImage.zsync`, `.deb`, `.rpm`, `.tar.gz`, and Flatpak packages are omitted. |
 | **FreeBSD (Tier 2 · CLI)** | `curvebook-<version>-freebsd-x86_64.tar.gz` | Tier 2 CLI-only tarball for `x86_64` (`curvebook-cli` + local MCP; no desktop GUI). |
-| **Shared Verification & Attribution** | `SHA256SUMS.txt`<br>`THIRD-PARTY-LICENSES.html` | Published alongside every GitHub Release for checksum verification and dependency licence disclosure. |
+| **Shared Verification, SBOM & Attribution** | `SHA256SUMS.txt`<br>`curvebook-<version>.cdx.json`<br>`THIRD-PARTY-LICENSES.html` | Published alongside every GitHub Release for checksum verification, CycloneDX 1.5 dependency inventory (SBOM), and third-party licence disclosure. |
 
 > [!NOTE]
 > The browser WebAssembly bundle (`curvebook-web`) is deferred until CurveBook `1.0` (`R0.28`, `R11`) and is not published in Beta releases.
@@ -120,11 +120,20 @@ gh attestation verify SHA256SUMS.txt \
      (Get-FileHash $f -Algorithm SHA256).Hash -eq $expected.ToUpper()
      ```
 
-3. **Alternative — verify a downloaded installer directly via Sigstore:**
+3. **Alternative — verify a downloaded installer (and its CycloneDX SBOM attestation) directly via Sigstore:**
 
 ```sh
 gh attestation verify <downloaded-file> \
   --repo HauserGroup/curvebook \
+  --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml
+```
+
+To verify the signed CycloneDX 1.5 SBOM attestation attached to a downloaded installer or FreeBSD archive:
+
+```sh
+gh attestation verify <downloaded-file> \
+  --repo HauserGroup/curvebook \
+  --predicate-type https://cyclonedx.org/bom \
   --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml
 ```
 

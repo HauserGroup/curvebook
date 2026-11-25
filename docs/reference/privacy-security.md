@@ -36,7 +36,7 @@ When enabled via `--control <port>` (or `CURVEBOOK_CONTROL_PORT`, `port` in `1..
 ## GitHub Pages & GitHub Releases Policies {#pages-and-releases}
 
 - **GitHub Pages:** Serves static documentation (`docs/index.html`, `docs/privacy.html`, `docs/manual/`) directly via GitHub infrastructure with zero application tracking, zero analytics beacons, and strict zero-script rendering (`privacy.html` documents GitHub hosting metadata policies).
-- **GitHub Releases & Build Attestations:** Every Beta release package and `SHA256SUMS.txt` is published through GitHub Actions (`release-scan` security gate) and receives a keyless OIDC/Sigstore build provenance attestation (`actions/attest-build-provenance`, documented in [Releasing](../release/releasing.md)). Attestation calls run strictly inside CI workflows (`id-token: write`, `attestations: write`), adding zero network behavior to compiled CurveBook binaries.
+- **GitHub Releases & Build Attestations:** Every Beta release package, `curvebook-<version>.cdx.json` (CycloneDX 1.5 SBOM), `THIRD-PARTY-LICENSES.html`, and `SHA256SUMS.txt` is published through GitHub Actions (`release-scan` security gate) and receives a keyless OIDC/Sigstore build provenance attestation (`actions/attest-build-provenance`), while each platform package also receives a CycloneDX SBOM attestation (`actions/attest-sbom`, documented in [Releasing](../release/releasing.md)). Attestation calls run strictly inside CI workflows (`id-token: write`, `attestations: write`), adding zero network behavior to compiled CurveBook binaries.
 
 ---
 

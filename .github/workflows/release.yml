@@ -133,7 +133,7 @@ jobs:
           path: contributors/contributors.json
 
   licenses:
-    name: Generate third-party license report
+    name: Generate third-party licenses and CycloneDX SBOM
     needs: [git-sources]
     runs-on: ubuntu-latest
     steps:
@@ -147,7 +147,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.event_name != 'schedule' }}
-      - name: Install locked cargo-deny and cargo-about
+      - name: Install locked cargo-deny, cargo-about, and cargo-cyclonedx
         run: |
           set -euo pipefail
           if ! cargo deny --version 2>/dev/null | grep -Fx 'cargo-deny 0.20.2'; then
@@ -156,8 +156,12 @@ jobs:
           if ! cargo about --version 2>/dev/null | grep -Fx 'cargo-about 0.9.3'; then
             cargo install --locked cargo-about --version 0.9.3 --features cli
           fi
+          if ! cargo cyclonedx --version 2>/dev/null | grep -Fx 'cargo-cyclonedx-cyclonedx 0.5.10'; then
+            cargo install --locked cargo-cyclonedx --version 0.5.10
+          fi
           cargo deny --version
           cargo about --version
+          cargo cyclonedx --version
       - name: Verify licenses and generate THIRD-PARTY-LICENSES.html
         env:
           CI: "true"
@@ -168,10 +172,35 @@ jobs:
           cargo about generate about.hbs -o licenses/THIRD-PARTY-LICENSES.html
           cargo run --locked -p xtask -- licenses
           test -s licenses/THIRD-PARTY-LICENSES.html
+      - name: Generate and scan CycloneDX 1.5 SBOM
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          . ./packaging/env.sh
+          tag_ver=""
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
+            tag_ver="${GITHUB_REF_NAME#v}"
+          fi
+          ver="${INPUT_VERSION:-${tag_ver:-$VERSION}}"
+          if [ "$ver" != "$VERSION" ]; then
+            echo "error: resolved release version '$ver' disagrees with packaging/env.sh version '$VERSION'" >&2
+            exit 1
+          fi
+          CURVEBOOK_VERSION="$ver" ./packaging/sbom.sh sbom
+          test -s "sbom/curvebook-$ver.cdx.json"
+          cargo run --locked -p xtask -- release-scan --no-checksums sbom
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: third-party-licenses
           path: licenses/THIRD-PARTY-LICENSES.html
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cyclonedx-sbom
+          path: sbom/curvebook-*.cdx.json
+          if-no-files-found: error
 
   linux:
     name: Linux (${{ matrix.arch }})
@@ -565,6 +594,10 @@ jobs:
           path: dist/release
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: cyclonedx-sbom
+          path: dist/release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
           pattern: scan-report-*
           path: dist/scan-reports
           merge-multiple: true
@@ -605,7 +638,7 @@ jobs:
             --cross-os-reports dist/scan-reports \
             --report dist/release-scan-publish.json \
             dist/release
-          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+          printf 'tag=v%s\nversion=%s\n' "$ver" "$ver" >> "$GITHUB_OUTPUT"
           # SemVer pre-release versions (-alpha.N, -beta.N, -rc.N) are always GitHub prereleases.
           ./packaging/release-channel.sh "$ver" "${ALPHA_RELEASE:-}" >> "$GITHUB_OUTPUT"
       # Refuse before attesting, so a rerun against a published release never
@@ -624,10 +657,19 @@ jobs:
               exit 1
             fi
           fi
-      - name: Attest release artifacts and SHA256SUMS.txt
+      - name: Attest release artifacts, SBOM, and SHA256SUMS.txt
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: 'dist/release/*'
+      - name: Attest CycloneDX SBOM for release packages
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          sbom-path: dist/release/curvebook-${{ steps.release_meta.outputs.version }}.cdx.json
+          subject-path: |
+            dist/release/*.dmg
+            dist/release/*.msi
+            dist/release/*.AppImage
+            dist/release/*.tar.gz
       # Fail closed: before anything is uploaded, check every file with the same command
       # docs/reference/get-started.md#verifying-downloads gives users, pinned to this workflow and ref.
       # Retries cover the short delay before a new attestation can be looked up.
@@ -647,14 +689,36 @@ jobs:
                 verified=true
                 break
               fi
-              echo "attestation for $file not verified (attempt $attempt of 5)" >&2
+              echo "provenance attestation for $file not verified (attempt $attempt of 5)" >&2
               sleep 10
             done
             if [ "$verified" != true ]; then
-              echo "error: $file has no attestation from $workflow at $GITHUB_REF" >&2
+              echo "error: $file has no provenance attestation from $workflow at $GITHUB_REF" >&2
               exit 1
             fi
-            echo "verified: $file"
+            echo "verified provenance: $file"
+          done
+          shopt -s nullglob
+          sbom_subjects=(*.dmg *.msi *.AppImage *.tar.gz)
+          test "${#sbom_subjects[@]}" -gt 0
+          for file in "${sbom_subjects[@]}"; do
+            verified=false
+            for attempt in 1 2 3 4 5; do
+              if gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" \
+                --predicate-type https://cyclonedx.org/bom \
+                --signer-workflow "$workflow" --source-ref "$GITHUB_REF" \
+                --deny-self-hosted-runners >/dev/null; then
+                verified=true
+                break
+              fi
+              echo "SBOM attestation for $file not verified (attempt $attempt of 5)" >&2
+              sleep 10
+            done
+            if [ "$verified" != true ]; then
+              echo "error: $file has no CycloneDX SBOM attestation from $workflow at $GITHUB_REF" >&2
+              exit 1
+            fi
+            echo "verified SBOM attestation: $file"
           done
       - name: Create or update draft GitHub Release
         env:
@@ -698,4 +762,4 @@ jobs:
             gh release create "$tag" dist/release/* "${release_flags[@]}" --target "$GITHUB_SHA" --generate-notes
           fi
           url="$(gh release view "$tag" --json url --jq .url)"
-          printf '### Draft release\n\n[%s](%s)\n\nInstallers (macOS DMG, Windows MSI), Linux AppImage, FreeBSD CLI archive, licence disclosures, and SHA256SUMS.txt are attached under **Assets**. This draft is not publicly published.\n' "$title" "$url" >> "$GITHUB_STEP_SUMMARY"
+          printf '### Draft release\n\n[%s](%s)\n\nInstallers (macOS DMG, Windows MSI), Linux AppImage, FreeBSD CLI archive, CycloneDX SBOM, licence disclosures, and SHA256SUMS.txt are attached under **Assets**. This draft is not publicly published.\n' "$title" "$url" >> "$GITHUB_STEP_SUMMARY"

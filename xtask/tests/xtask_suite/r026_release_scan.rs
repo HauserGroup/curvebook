@@ -439,10 +439,35 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
 
     let assets = CleanFixtures::shared(&root)?;
 
-    // 1. Plain HTML compliance report
+    // 1. Plain HTML compliance report & CycloneDX SBOM
     fs::write(
         rel_dir.join("THIRD-PARTY-LICENSES.html"),
         "<!doctype html><html><head><meta name=\"generator\" content=\"cargo-about\"><title>CurveBook Third-Party Licenses</title></head><body><h1>SPDX License Report</h1><p>MIT OR Apache-2.0</p></body></html>\n",
+    )
+    .unwrap();
+    fs::write(
+        rel_dir.join("curvebook-0.1.0.cdx.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "version": 1,
+            "metadata": {
+                "component": {
+                    "type": "application",
+                    "name": "curvebook",
+                    "version": "0.1.0"
+                }
+            },
+            "components": [
+                {
+                    "type": "library",
+                    "name": "serde",
+                    "version": "1.0.219",
+                    "purl": "pkg:cargo/serde@1.0.219"
+                }
+            ]
+        }))
+        .unwrap(),
     )
     .unwrap();
 
@@ -483,7 +508,7 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
     fs::write(rel_dir.join("curvebook-0.1.0-linux-aarch64.deb"), gnu_deb).unwrap();
 
     // 5. `.rpm` built dynamically at test time when the host has `bsdtar`
-    let mut expected_assets = 7usize; // SHA256SUMS.txt + html + zip + tar.gz + 2 debs + zsync
+    let mut expected_assets = 8usize; // SHA256SUMS.txt + html + sbom + zip + tar.gz + 2 debs + zsync
     if host_can_unpack_rpm() {
         let rpm_bytes = build_synthetic_rpm(&[
             ("usr/bin/curvebook", b"\x7fELF_clean_rpm_stub"),
@@ -592,6 +617,25 @@ fn r026_planted_brand_tokens_inside_each_container_fail_closed_naming_container(
     )
     .unwrap();
 
+    // 8. Planted token inside CycloneDX SBOM (`.cdx.json`)
+    fs::write(
+        dir.join("curvebook-0.1.0.cdx.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "version": 1,
+            "components": [
+                {
+                    "type": "library",
+                    "name": "curvebook-helper",
+                    "description": format!("Imports {brand_gp} files")
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
     write_sha256sums_for_dir(&dir)?;
 
     let out = run_release_scan(&[dir.to_str().unwrap()])?;
@@ -606,6 +650,7 @@ fn r026_planted_brand_tokens_inside_each_container_fail_closed_naming_container(
     }
     assert!(stderr.contains("curvebook-0.1.0-linux-x86_64.AppImage.zsync"), "{stderr}");
     assert!(stderr.contains("THIRD-PARTY-LICENSES.html"), "{stderr}");
+    assert!(stderr.contains("curvebook-0.1.0.cdx.json"), "{stderr}");
     Ok(())
 }
 
@@ -909,5 +954,84 @@ fn r026_msi_scan_on_relative_dir_passes_absolute_paths_to_msiexec() -> Result<()
     assert!(!dirty_out.status.success(), "contaminated msi must fail closed");
     let stderr = String::from_utf8_lossy(&dirty_out.stderr);
     assert!(stderr.contains("curvebook-0.1.0-windows-x64.msi!PFiles/CurveBook/README.txt"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn r14_2_cyclonedx_sbom_schema_cleanroom_and_secret_scans_fail_closed() -> Result<(), String> {
+    let fx = TempDirGuard::new("r14-2-sbom")?;
+    let sbom_name = "curvebook-0.1.0-beta.1.cdx.json";
+
+    // 1. Malformed JSON, wrong bomFormat, and empty components all fail closed.
+    for (label, body, expected) in [
+        ("invalid-json", "{not valid json\n", "invalid CycloneDX JSON"),
+        ("wrong-format", "{\"bomFormat\":\"SPDX\",\"specVersion\":\"2.3\",\"components\":[{\"name\":\"serde\"}]}\n", "bomFormat"),
+        ("empty-components", "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.5\",\"components\":[]}\n", "empty `components`"),
+    ] {
+        let dir = fx.path.join(label);
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        fs::write(dir.join(sbom_name), body).map_err(|e| e.to_string())?;
+        write_sha256sums_for_dir(&dir)?;
+
+        let out = run_release_scan(&[dir.to_str().unwrap()])?;
+        assert!(!out.status.success(), "{label} must fail closed");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(sbom_name) && stderr.contains(expected), "{label}: {stderr}");
+    }
+
+    // 2. Valid CycloneDX JSON carrying a local runner home path or API token fails closed under `[secrets]`.
+    let leaked_path = join(&["path+file:///", "home/", "runner/work/curvebook/crates/math"]);
+    let leaked_token = join(&["ghp_", "AbCdEfGh123456"]);
+    for (label, needle_val) in [("home-path", leaked_path.as_str()), ("api-token", leaked_token.as_str())] {
+        let dir = fx.path.join(format!("secret-{label}"));
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let sbom = serde_json::to_vec_pretty(&serde_json::json!({
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "version": 1,
+            "components": [
+                {
+                    "type": "library",
+                    "name": "curvebook-math",
+                    "bom-ref": needle_val
+                }
+            ]
+        }))
+        .unwrap();
+        fs::write(dir.join(sbom_name), sbom).map_err(|e| e.to_string())?;
+        write_sha256sums_for_dir(&dir)?;
+
+        let out = run_release_scan(&[dir.to_str().unwrap()])?;
+        assert!(!out.status.success(), "SBOM secret leak `{label}` must fail closed");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(sbom_name) && stderr.contains("[secrets]"), "{label}: {stderr}");
+    }
+
+    // 3. Valid CycloneDX JSON carrying a cleanroom copyright marker fails closed under `[cleanroom]`.
+    {
+        let dir = fx.path.join("cleanroom-sbom");
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let vendor_dm = join(&["Dot", "mat", "ics"]);
+        let sbom = serde_json::to_vec_pretty(&serde_json::json!({
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "version": 1,
+            "components": [
+                {
+                    "type": "library",
+                    "name": "curvebook-doc",
+                    "copyright": format!("\u{00a9} 2025 {vendor_dm}")
+                }
+            ]
+        }))
+        .unwrap();
+        fs::write(dir.join(sbom_name), sbom).map_err(|e| e.to_string())?;
+        write_sha256sums_for_dir(&dir)?;
+
+        let out = run_release_scan(&[dir.to_str().unwrap()])?;
+        assert!(!out.status.success(), "SBOM cleanroom leak must fail closed");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(sbom_name) && stderr.contains("[cleanroom]"), "{stderr}");
+    }
     Ok(())
 }
