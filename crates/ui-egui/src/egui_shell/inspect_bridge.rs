@@ -283,7 +283,8 @@ fn classify_active_dialog_surface(app: &UiApp) -> HybridModalSurface {
         | ActiveDialog::Feedback
         | ActiveDialog::ImportWarnings
         | ActiveDialog::ImportProjectMode { .. }
-        | ActiveDialog::CsvExportOptions(_) => HybridModalSurface::EguiAppModal,
+        | ActiveDialog::CsvExportOptions(_)
+        | ActiveDialog::ExportAllTablesExistingFiles { .. } => HybridModalSurface::EguiAppModal,
         ActiveDialog::CommandPalette => HybridModalSurface::EguiCommandPalette,
         ActiveDialog::AnalyzeSheet { .. } => HybridModalSurface::EguiAnalyzeSheet,
         ActiveDialog::DuplicateAnalysisPrompt { .. } => HybridModalSurface::EguiDuplicateAnalysis,

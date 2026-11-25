@@ -758,7 +758,8 @@ pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument
         | ActiveDialog::Feedback
         | ActiveDialog::ImportWarnings
         | ActiveDialog::ImportProjectMode { .. }
-        | ActiveDialog::CsvExportOptions(_) => ControlEnablement::enabled(),
+        | ActiveDialog::CsvExportOptions(_)
+        | ActiveDialog::ExportAllTablesExistingFiles { .. } => ControlEnablement::enabled(),
         ActiveDialog::CreateGraph { .. } => {
             if matches!(norm.as_str(), "ok" | "apply") && dialogs.create_graph.commit_intent().is_none() {
                 ControlEnablement::disabled("Select a source data table first.")

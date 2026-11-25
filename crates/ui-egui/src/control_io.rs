@@ -3734,6 +3734,7 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::ImportWarnings => "ImportWarnings",
         ActiveDialog::ImportProjectMode { .. } => "ImportProjectMode",
         ActiveDialog::CsvExportOptions(_) => "CsvExportOptions",
+        ActiveDialog::ExportAllTablesExistingFiles { .. } => "ExportAllTablesExistingFiles",
     }
 }
 

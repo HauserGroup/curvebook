@@ -159,6 +159,14 @@ pub enum ActiveDialog {
         has_unsaved_changes: bool,
     },
     CsvExportOptions(CsvExportTargetKind),
+    /// Export All Data Tables found files with the planned names already in the chosen folder
+    /// and is waiting for the user to replace them, keep both, or cancel (`R10.29`).
+    ExportAllTablesExistingFiles {
+        /// Folder the user picked.
+        dir: String,
+        /// File names in `dir` that the export would replace.
+        existing_files: Vec<String>,
+    },
 }
 
 /// Editable draft state for the `Checkpoints` modal (`R15-GUI-31`).

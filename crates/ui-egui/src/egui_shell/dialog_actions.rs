@@ -254,6 +254,7 @@ pub(crate) fn commit_active_dialog_action(app: &mut UiApp, action: &str, params:
                 | ActiveDialog::ImportWarnings
                 | ActiveDialog::ImportProjectMode { .. }
                 | ActiveDialog::CsvExportOptions(_)
+                | ActiveDialog::ExportAllTablesExistingFiles { .. }
                 | ActiveDialog::None => {
                     if app.canvas_dialogs.active_dialog == ActiveDialog::ImportWarnings {
                         app.import_warnings.panel_open = false;

@@ -321,3 +321,79 @@ fn tsv_auto_delimiter_and_methods_report_extensions_and_export_all_tables() -> R
 
     Ok(())
 }
+
+#[test]
+fn export_all_tables_existing_file_is_never_replaced_without_asking() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new("cb-r10-29-export-existing")?;
+    let (mut rt, wid, adapter) = spawn_runtime(build_anova_session()?)?;
+    {
+        let win = rt.window_mut(wid)?;
+        let _ = win.execute_and_journal("sheet.createData", json!({ "title": "Second Table" }))?;
+    }
+    let out_dir = tmp.path().join("exports");
+    fs::create_dir_all(&out_dir)?;
+    let kept = out_dir.join("Enzyme Activity.csv");
+    let kept_bytes: &[u8] = b"earlier export the user edited by hand\n\xEF\xBB\xBFnot,regenerated\n";
+    fs::write(&kept, kept_bytes)?;
+    let second = out_dir.join("Second Table.csv");
+    let export_params = json!({ "delimiter": ",", "decimal_separator": "." });
+
+    // 1. The folder already holds one planned file: nothing at all is written and the prompt opens.
+    adapter.push_response("ui.export.allTablesCsv", Some(out_dir.clone()));
+    let prompt = rt.dispatch_native_file_command_with_params(wid, "ui.export.allTablesCsv", &export_params)?.expect("prompt outcome");
+    assert_eq!(prompt.action, "native_file_dialog.confirm_existing_files:ui.export.allTablesCsv");
+    assert_eq!(prompt.command_result.as_ref().and_then(|r| r.get("existing_files")), Some(&json!(["Enzyme Activity.csv"])));
+    assert!(matches!(
+        &rt.window(wid)?.app().canvas_dialogs.active_dialog,
+        ActiveDialog::ExportAllTablesExistingFiles { dir, existing_files }
+            if *dir == out_dir.to_string_lossy() && existing_files == &vec![String::from("Enzyme Activity.csv")]
+    ));
+    assert_eq!(fs::read(&kept)?, kept_bytes, "existing file must stay byte-for-byte intact while the prompt is open");
+    assert!(!second.exists(), "no file of the batch may be written before the user decides");
+
+    // 2. Cancel drops the batch; a later decision has nothing to resume and still writes nothing.
+    let cancelled = rt.dispatch_native_file_command_with_params(wid, "ui.export.allTablesCsv", &json!({ "on_existing": "cancel" }))?;
+    assert_eq!(cancelled.map(|o| o.action).as_deref(), Some("native_file_dialog.cancelled:ui.export.allTablesCsv"));
+    let stale = rt.dispatch_native_file_command_with_params(wid, "ui.export.allTablesCsv", &json!({ "on_existing": "replace" }));
+    assert!(stale.is_err(), "a decision with no paused batch must be rejected, got {stale:?}");
+    assert_eq!(fs::read(&kept)?, kept_bytes, "Cancel must leave the existing file intact");
+    assert!(!second.exists(), "Cancel must not write any file");
+
+    // 3. An unknown choice is rejected and keeps the batch paused.
+    adapter.push_response("ui.export.allTablesCsv", Some(out_dir.clone()));
+    let _ = rt.dispatch_native_file_command_with_params(wid, "ui.export.allTablesCsv", &export_params)?;
+    let bad = rt.dispatch_native_file_command_with_params(wid, "ui.export.allTablesCsv", &json!({ "on_existing": "overwrite_all" }));
+    assert!(bad.is_err(), "unknown on_existing choice must be rejected, got {bad:?}");
+
+    // 4. Keep Both: the existing file is untouched and the table goes to the next free numbered name.
+    let keep = rt
+        .dispatch_native_file_command_with_params(wid, "ui.export.allTablesCsv", &json!({ "on_existing": "keep_both" }))?
+        .expect("keep-both outcome");
+    assert_eq!(keep.action, "native_file_dialog.completed:ui.export.allTablesCsv");
+    assert_eq!(fs::read(&kept)?, kept_bytes, "Keep Both must leave the existing file byte-for-byte intact");
+    let copy = out_dir.join("Enzyme Activity-2.csv");
+    let copy_text = fs::read_to_string(&copy)?;
+    assert!(copy_text.contains("10.5"), "numbered copy must hold the exported table: {copy_text}");
+    assert!(second.exists(), "tables without a clash keep their plain names under Keep Both");
+
+    // 5. Replace overwrites exactly the planned names the prompt listed; earlier copies stay.
+    let copy_bytes = fs::read(&copy)?;
+    adapter.push_response("ui.export.allTablesCsv", Some(out_dir.clone()));
+    let prompt_again = rt.dispatch_native_file_command_with_params(wid, "ui.export.allTablesCsv", &export_params)?.expect("second prompt");
+    assert_eq!(prompt_again.command_result.as_ref().and_then(|r| r.get("existing_files")), Some(&json!(["Enzyme Activity.csv", "Second Table.csv"])));
+    let replaced =
+        rt.dispatch_native_file_command_with_params(wid, "ui.export.allTablesCsv", &json!({ "on_existing": "replace" }))?.expect("replace outcome");
+    assert_eq!(replaced.action, "native_file_dialog.completed:ui.export.allTablesCsv");
+    assert_eq!(fs::read(&kept)?, copy_bytes, "Replace must write the same export bytes over the listed file");
+    assert_eq!(fs::read(&copy)?, copy_bytes, "Replace must not touch files outside the planned names");
+    assert!(!out_dir.join("Enzyme Activity-3.csv").exists());
+
+    // 6. A folder with no clashes exports straight away, with no prompt.
+    let fresh_dir = tmp.path().join("fresh");
+    adapter.push_response("ui.export.allTablesCsv", Some(fresh_dir.clone()));
+    let fresh = rt.dispatch_native_file_command_with_params(wid, "ui.export.allTablesCsv", &export_params)?.expect("fresh outcome");
+    assert_eq!(fresh.action, "native_file_dialog.completed:ui.export.allTablesCsv");
+    assert!(fresh_dir.join("Enzyme Activity.csv").exists() && fresh_dir.join("Second Table.csv").exists());
+
+    Ok(())
+}

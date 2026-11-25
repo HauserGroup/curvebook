@@ -315,6 +315,7 @@ pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) 
         | ActiveDialog::ImportWarnings
         | ActiveDialog::ImportProjectMode { .. }
         | ActiveDialog::CsvExportOptions(_)
+        | ActiveDialog::ExportAllTablesExistingFiles { .. }
         | ActiveDialog::None => {
             if !fields.is_empty() {
                 return Err(bad_input("active dialog does not accept field patches"));

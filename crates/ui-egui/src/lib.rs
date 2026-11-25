@@ -891,6 +891,12 @@ impl UiApp {
         self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
     }
 
+    /// Open the existing-files prompt for Export All Data Tables before anything is written (`R10.29`).
+    pub fn open_export_all_tables_conflict_dialog(&mut self, dir: impl Into<String>, existing_files: Vec<String>) {
+        self.canvas_dialogs.active_dialog = ActiveDialog::ExportAllTablesExistingFiles { dir: dir.into(), existing_files };
+        self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
+    }
+
     /// Copy all recorded import warnings to the configured [`PlatformClipboardAdapter`].
     ///
     /// # Errors

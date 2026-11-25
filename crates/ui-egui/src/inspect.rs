@@ -319,6 +319,7 @@ pub(crate) fn active_dialog_slug(dialog: &ActiveDialog) -> String {
         ActiveDialog::ImportWarnings => String::from("import_warnings"),
         ActiveDialog::ImportProjectMode { .. } => String::from("import_project_mode"),
         ActiveDialog::CsvExportOptions(_) => String::from("csv_export_options"),
+        ActiveDialog::ExportAllTablesExistingFiles { .. } => String::from("export_all_tables_existing_files"),
     }
 }
 

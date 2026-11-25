@@ -318,6 +318,9 @@ pub fn render_app_modal(
             render_import_project_mode_modal(ctx, app, command_id, path, *has_unsaved_changes, tokens, meta, intents)
         }
         ActiveDialog::CsvExportOptions(target) => render_csv_export_options_modal(ctx, app, target, tokens, meta, intents),
+        ActiveDialog::ExportAllTablesExistingFiles { dir, existing_files } => {
+            render_export_all_tables_existing_files_modal(ctx, app, dir, existing_files, tokens, meta, intents)
+        }
         _ => AppModalFrameReport::default(),
     }
 }
@@ -2863,6 +2866,92 @@ fn render_import_project_mode_modal(
                         command_id: cmd_owned.clone(),
                         params: json!({ "path": path_owned.clone(), "merge": true }),
                     });
+                }
+            });
+        },
+    );
+
+    report_from_capture(capture)
+}
+
+// ============================================================================
+// 9b. Export All Data Tables: Existing Files Modal (R10.29)
+// ============================================================================
+
+/// Close the prompt and send the user's decision back to the desktop host, which holds the
+/// folder and export options for the paused batch.
+fn push_export_existing_files_choice(intents: &mut PendingUiIntents, choice: &str) {
+    intents.push(UiIntent::CloseAllModals);
+    intents.push(UiIntent::UiCommand { command_id: String::from("ui.export.allTablesCsv"), params: json!({ "on_existing": choice }) });
+}
+
+fn render_export_all_tables_existing_files_modal(
+    ctx: &Context,
+    app: &UiApp,
+    dir: &str,
+    existing_files: &[String],
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> AppModalFrameReport {
+    let locale = normalize_locale(&app.locale);
+    let title = tr(locale, "export.csv.existing_title");
+    let (inner_w, max_h, body_w) = modal_bounds(ctx, 500.0);
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        push_export_existing_files_choice(intents, "cancel");
+    }
+
+    let capture = show_scrolled_modal(
+        ctx,
+        meta,
+        ScrolledModalCfg {
+            tokens,
+            modal_id: egui::Id::unique(("egui_shell_app_modal", "dialog.export_existing_files")),
+            scroll_id: "app_modal.export_existing_files.scroll",
+            widget_id: "dialog.export_existing_files",
+            title,
+            inner_w,
+            max_h,
+            body_w,
+            body_max_h: (max_h - 116.0).max(110.0),
+            footer_separator: true,
+        },
+        intents,
+        |_, _, _| {},
+        |ui, meta, _| {
+            let dir_resp = ui.add(egui::Label::new(egui::RichText::new(dir).strong().color(tokens.text_primary)).wrap());
+            app_text(ui, &dir_resp, meta, "export_existing_files.dir", dir);
+            ui.add_space(6.0);
+
+            let body = tr(locale, "export.csv.existing_body");
+            let body_resp = ui.add(egui::Label::new(egui::RichText::new(body).color(tokens.text_primary)).wrap());
+            app_text(ui, &body_resp, meta, "export_existing_files.body", body);
+            ui.add_space(4.0);
+
+            for (idx, name) in existing_files.iter().enumerate() {
+                let resp = ui.add(egui::Label::new(egui::RichText::new(name).monospace().color(tokens.text_primary)).wrap());
+                app_text(ui, &resp, meta, &format!("export_existing_files.file.{idx}"), name);
+            }
+
+            ui.add_space(8.0);
+            let hint = tr(locale, "export.csv.existing_keep_hint");
+            let hint_resp = ui.add(egui::Label::new(egui::RichText::new(hint).color(tokens.text_muted)).wrap());
+            app_text(ui, &hint_resp, meta, "export_existing_files.hint", hint);
+        },
+        |ui, meta, intents| {
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(body_w);
+                let buttons = [
+                    ("modal.cancel", tr(locale, "btn.cancel"), false, "cancel"),
+                    ("export_existing_files.replace", tr(locale, "export.csv.existing_replace"), false, "replace"),
+                    ("export_existing_files.keep_both", tr(locale, "export.csv.existing_keep_both"), true, "keep_both"),
+                ];
+                for (widget_id, label, selected, choice) in buttons {
+                    let btn = AppBtn { widget_id, label, command_id: None, selected, enabled: true, disabled_reason: None };
+                    if app_button(ui, meta, btn, tokens).clicked() {
+                        push_export_existing_files_choice(intents, choice);
+                    }
                 }
             });
         },

@@ -98,6 +98,15 @@ fn assert_file_bytes_eq(label: &str, gui_path: &Path, ref_path: &Path) -> TestRe
     Ok(())
 }
 
+/// Run File › Export › Export All Data Tables… (comma, period) into `dir` through the GUI.
+fn reexport_all_tables_into(run: &mut WorkflowRun, dir: &Path) -> TestRes {
+    run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.allTablesCsv.open")?;
+    run.click("csv_export.delim.comma")?;
+    run.click("csv_export.decimal.period")?;
+    run.script_file_dialog_for("ui.export.allTablesCsv", Some(dir.to_path_buf()));
+    run.commit_modal_ok()
+}
+
 #[test]
 fn r10_30_human_pzfx_and_archive_import_warnings_and_live_edit() -> TestRes {
     let dir = temp_dir("import-warnings")?;
@@ -504,6 +513,57 @@ fn r10_30_human_anova_exports_and_all_tables_csv() -> TestRes {
             .map_err(|e| format!("oracle table.exportCsv for `{expected_file}` failed: {e}"))?;
         assert_file_bytes_eq(&format!("Export All Data Tables (`{expected_file}`)"), &gui_tbl_path, &ref_tbl_path)?;
     }
+
+    // --- Export 6b: exporting again into the same folder never replaces files without asking ---
+    // An earlier file the user changed by hand stands in for "work the user wants to keep".
+    let gui_dose = gui_all_tables_dir.join("Dose Groups.csv");
+    let gui_dose_copy = gui_all_tables_dir.join("Dose Groups-2.csv");
+    let gui_cohort_copy = gui_all_tables_dir.join("Secondary Cohort-2.csv");
+    let kept_bytes = b"earlier export the user edited by hand\n".to_vec();
+    fs::write(&gui_dose, &kept_bytes).map_err(|e| e.to_string())?;
+    let assert_kept = |stage: &str| -> TestRes {
+        let now = fs::read(&gui_dose).map_err(|e| format!("{stage}: failed to read `{}`: {e}", gui_dose.display()))?;
+        ensure(now == kept_bytes, format!("{stage}: existing `Dose Groups.csv` changed without the user choosing Replace"))
+    };
+
+    // The prompt opens before anything is written and lists every file that would be replaced.
+    reexport_all_tables_into(&mut run, &gui_all_tables_dir)?;
+    match run.active_dialog() {
+        ActiveDialog::ExportAllTablesExistingFiles { existing_files, .. } => {
+            let mut listed = existing_files.clone();
+            listed.sort();
+            ensure(
+                listed == vec![String::from("Dose Groups.csv"), String::from("Secondary Cohort.csv")],
+                format!("existing-files prompt must list both earlier exports, got {listed:?}"),
+            )?;
+        }
+        other => return Err(format!("expected ExportAllTablesExistingFiles prompt, got {other:?}")),
+    }
+    assert_kept("prompt open")?;
+    ensure(!gui_dose_copy.exists(), "no file may be written while the prompt is open")?;
+
+    // Cancel writes nothing.
+    run.click("modal.cancel")?;
+    ensure(matches!(run.active_dialog(), ActiveDialog::None), format!("Cancel must close the prompt, got {:?}", run.active_dialog()))?;
+    assert_kept("after Cancel")?;
+    ensure(!gui_dose_copy.exists() && !gui_cohort_copy.exists(), "Cancel must not write numbered copies")?;
+
+    // Keep Both leaves existing files byte-for-byte and writes numbered copies.
+    reexport_all_tables_into(&mut run, &gui_all_tables_dir)?;
+    run.click("export_existing_files.keep_both")?;
+    assert_kept("after Keep Both")?;
+    assert_file_bytes_eq("Keep Both (`Dose Groups-2.csv`)", &gui_dose_copy, &ref_all_tables_dir.join("Dose Groups.csv"))?;
+    assert_file_bytes_eq("Keep Both (`Secondary Cohort-2.csv`)", &gui_cohort_copy, &ref_all_tables_dir.join("Secondary Cohort.csv"))?;
+
+    // Replace overwrites the listed files only after the user chooses it.
+    reexport_all_tables_into(&mut run, &gui_all_tables_dir)?;
+    ensure(
+        matches!(run.active_dialog(), ActiveDialog::ExportAllTablesExistingFiles { .. }),
+        format!("expected the prompt again before Replace, got {:?}", run.active_dialog()),
+    )?;
+    run.click("export_existing_files.replace")?;
+    assert_file_bytes_eq("Replace (`Dose Groups.csv`)", &gui_dose, &ref_all_tables_dir.join("Dose Groups.csv"))?;
+    assert_file_bytes_eq("Replace keeps earlier copy (`Dose Groups-2.csv`)", &gui_dose_copy, &ref_all_tables_dir.join("Dose Groups.csv"))?;
 
     // Stage 5: Live-edit upstream ANOVA table cell and finish with full 14-locale + parity checks.
     run.live_edit(LiveEditTarget::sheet_grid_cell(anova_table_id, 0, 2, 0, "35.0"), LiveEditExpectation::scalar_changed(res_id, "F", None, 1.0))?;

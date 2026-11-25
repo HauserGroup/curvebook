@@ -47,6 +47,16 @@ pub struct WfShellState {
     pub last_intent_error: Option<String>,
     pub intent_errors: Vec<String>,
     pub recorded_outcomes: Vec<UiIntentOutcome>,
+    /// Export All Data Tables batch paused at the existing-files prompt (mirrors the desktop host).
+    pub pending_all_tables_export: Option<PendingAllTablesExport>,
+}
+
+/// Folder and options of an Export All Data Tables batch waiting for the user's existing-files choice.
+#[derive(Debug, Clone)]
+pub struct PendingAllTablesExport {
+    pub dir: PathBuf,
+    pub delimiter: String,
+    pub decimal_separator: String,
 }
 
 impl WfShellState {
@@ -71,6 +81,7 @@ impl WfShellState {
             last_intent_error: None,
             intent_errors: Vec::new(),
             recorded_outcomes: Vec::new(),
+            pending_all_tables_export: None,
         }
     }
 }
@@ -160,7 +171,13 @@ impl EguiWfHarness {
                         first_err = batch.first_error().map(ToString::to_string);
                     }
                     for (command_id, params) in host_commands {
-                        match execute_intercepted_host_file_command(&mut st.app, st.file_dialog.as_ref(), &command_id, &params) {
+                        match execute_intercepted_host_file_command(
+                            &mut st.app,
+                            st.file_dialog.as_ref(),
+                            &mut st.pending_all_tables_export,
+                            &command_id,
+                            &params,
+                        ) {
                             Ok(outcomes) => st.recorded_outcomes.extend(outcomes),
                             Err(err) => {
                                 if first_err.is_none() {
@@ -540,6 +557,67 @@ fn sanitize_export_table_stem(title: &str, fallback_id: &str) -> String {
     if trimmed.is_empty() { fallback_id.to_owned() } else { trimmed.to_owned() }
 }
 
+/// Mirror of the desktop host's Export All Data Tables batch: with `keep_both == None`, any planned
+/// file that already exists pauses the batch at the existing-files prompt before anything is written.
+fn export_all_tables_to_dir(
+    app: &mut UiApp,
+    pending_all_tables_export: &mut Option<PendingAllTablesExport>,
+    batch: PendingAllTablesExport,
+    keep_both: Option<bool>,
+) -> Result<Vec<UiIntentOutcome>, String> {
+    let sheets: Vec<(SheetId, String)> = app.document().data_sheets.iter().map(|ds| (ds.id.clone(), ds.title.clone())).collect();
+    if sheets.is_empty() {
+        return Err(String::from("no data tables available to export"));
+    }
+    std::fs::create_dir_all(&batch.dir).map_err(|err| format!("failed to prepare export folder `{}`: {err}", batch.dir.display()))?;
+    let ext = if batch.delimiter == "\t" { "tsv" } else { "csv" };
+    let avoid_existing = keep_both == Some(true);
+    let mut used_stems: HashSet<String> = HashSet::new();
+    let mut planned: Vec<(SheetId, PathBuf)> = Vec::with_capacity(sheets.len());
+    for (sheet_id, title) in sheets {
+        let base = sanitize_export_table_stem(&title, sheet_id.as_str());
+        let mut candidate = base.clone();
+        let mut suffix = 1usize;
+        loop {
+            let path = batch.dir.join(format!("{candidate}.{ext}"));
+            let free_on_disk = !avoid_existing || std::fs::symlink_metadata(&path).is_err();
+            if free_on_disk && used_stems.insert(candidate.to_ascii_lowercase()) {
+                planned.push((sheet_id, path));
+                break;
+            }
+            suffix = suffix.saturating_add(1);
+            candidate = format!("{base}-{suffix}");
+        }
+    }
+    if keep_both.is_none() {
+        let existing_files: Vec<String> = planned
+            .iter()
+            .filter(|(_, path)| std::fs::symlink_metadata(path).is_ok())
+            .filter_map(|(_, path)| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+            .collect();
+        if !existing_files.is_empty() {
+            app.open_export_all_tables_conflict_dialog(batch.dir.to_string_lossy().into_owned(), existing_files);
+            *pending_all_tables_export = Some(batch);
+            return Ok(Vec::new());
+        }
+    }
+    let mut outcomes = Vec::with_capacity(planned.len());
+    for (sheet_id, file_path) in planned {
+        let out = commit_single_engine_command(
+            app,
+            "table.exportCsv",
+            json!({
+                "sheet_id": sheet_id.as_str(),
+                "path": file_path.to_string_lossy(),
+                "delimiter": batch.delimiter,
+                "decimal_separator": batch.decimal_separator,
+            }),
+        )?;
+        outcomes.push(out);
+    }
+    Ok(outcomes)
+}
+
 #[derive(Clone, Copy)]
 enum HostExportTargetKind {
     TableOrResult,
@@ -618,6 +696,7 @@ fn build_host_export_params(command: &str, target_sheet_id: &SheetId, path: &Pat
 fn execute_intercepted_host_file_command(
     app: &mut UiApp,
     adapter: &dyn PlatformFileDialogAdapter,
+    pending_all_tables_export: &mut Option<PendingAllTablesExport>,
     command_id: &str,
     params: &Value,
 ) -> Result<Vec<UiIntentOutcome>, String> {
@@ -653,8 +732,23 @@ fn execute_intercepted_host_file_command(
             }
         }
         "ui.export.allTablesCsv" => {
-            let sheets: Vec<(SheetId, String)> = app.document().data_sheets.iter().map(|ds| (ds.id.clone(), ds.title.clone())).collect();
-            if sheets.is_empty() {
+            if let Some(choice) = params.get("on_existing").and_then(Value::as_str) {
+                let keep_both = match choice {
+                    "replace" => false,
+                    "keep_both" => true,
+                    "cancel" => {
+                        *pending_all_tables_export = None;
+                        return Ok(Vec::new());
+                    }
+                    other => return Err(format!("unknown `on_existing` choice `{other}`")),
+                };
+                let batch = pending_all_tables_export
+                    .take()
+                    .ok_or_else(|| String::from("no Export All Data Tables batch is waiting for a decision about existing files"))?;
+                return export_all_tables_to_dir(app, pending_all_tables_export, batch, Some(keep_both));
+            }
+            *pending_all_tables_export = None;
+            if app.document().data_sheets.is_empty() {
                 return Err(String::from("no data tables available to export"));
             }
             let req = NativeFileDialogRequest {
@@ -667,45 +761,10 @@ fn execute_intercepted_host_file_command(
             let Some(dir) = adapter.pick(&req)? else {
                 return Ok(Vec::new());
             };
-            std::fs::create_dir_all(&dir).map_err(|err| format!("failed to prepare export folder `{}`: {err}", dir.display()))?;
             let delimiter = params.get("delimiter").and_then(Value::as_str).unwrap_or(",").to_owned();
             let default_decimal = app.locale_preset.decimal_separator.to_string();
             let decimal_separator = params.get("decimal_separator").and_then(Value::as_str).map_or(default_decimal, ToOwned::to_owned);
-            let ext = if delimiter == "\t" { "tsv" } else { "csv" };
-            let mut used_stems: HashSet<String> = HashSet::new();
-            let mut planned: Vec<(SheetId, PathBuf)> = Vec::with_capacity(sheets.len());
-            for (sheet_id, title) in sheets {
-                let base = sanitize_export_table_stem(&title, sheet_id.as_str());
-                let stem = if used_stems.insert(base.to_ascii_lowercase()) {
-                    base
-                } else {
-                    let mut suffix = 2usize;
-                    loop {
-                        let candidate = format!("{base}-{suffix}");
-                        if used_stems.insert(candidate.to_ascii_lowercase()) {
-                            break candidate;
-                        }
-                        suffix = suffix.saturating_add(1);
-                    }
-                };
-                planned.push((sheet_id, dir.join(format!("{stem}.{ext}"))));
-            }
-            let mut outcomes = Vec::with_capacity(planned.len());
-            for (sheet_id, file_path) in planned {
-                let file_path_str = file_path.to_string_lossy().into_owned();
-                let out = commit_single_engine_command(
-                    app,
-                    "table.exportCsv",
-                    json!({
-                        "sheet_id": sheet_id.as_str(),
-                        "path": file_path_str,
-                        "delimiter": delimiter,
-                        "decimal_separator": decimal_separator,
-                    }),
-                )?;
-                outcomes.push(out);
-            }
-            Ok(outcomes)
+            export_all_tables_to_dir(app, pending_all_tables_export, PendingAllTablesExport { dir, delimiter, decimal_separator }, None)
         }
         "table.exportCsv" | "analysis.exportCsv" | "analysis.exportJson" | "result.generateReport" => {
             let (filter_label, extensions, default_name, target_kind): (&str, &[&str], &str, HostExportTargetKind) = match command_id {
