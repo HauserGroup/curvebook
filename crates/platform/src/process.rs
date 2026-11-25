@@ -39,6 +39,18 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default per-stream output cap (16 MiB) for [`ProcessCommand`].
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
+/// Windows `CreateProcess` flag (`CREATE_NEW_PROCESS_GROUP`) isolating child process-group signals.
+pub const WINDOWS_CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+/// Windows `CreateProcess` flag (`CREATE_NO_WINDOW`) preventing transient console windows for helper processes.
+pub const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Combined Windows `creation_flags` applied when spawning child processes.
+#[must_use]
+pub const fn windows_child_creation_flags() -> u32 {
+    WINDOWS_CREATE_NEW_PROCESS_GROUP | WINDOWS_CREATE_NO_WINDOW
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 const READER_CHUNK_BYTES: usize = 8192;
 
@@ -281,10 +293,7 @@ impl ProcessCommand {
         #[cfg(unix)]
         cmd.process_group(0);
         #[cfg(windows)]
-        {
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
-        }
+        cmd.creation_flags(windows_child_creation_flags());
         if let Some(dir) = &self.current_dir {
             cmd.current_dir(dir);
         }
@@ -632,7 +641,12 @@ fn kill_process_group(pgid: u32) {
     let taskkill_path = PathBuf::from(system_root.trim_end_matches(['\\', '/'])).join("System32").join("taskkill.exe");
     let pid_str = pgid.to_string();
     let mut cmd = Command::new(taskkill_path);
-    cmd.env_clear().args(["/PID", &pid_str, "/T", "/F"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.env_clear()
+        .args(["/PID", &pid_str, "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(WINDOWS_CREATE_NO_WINDOW);
     if let Ok(mut killer) = cmd.spawn() {
         let _ = killer.wait();
     }
@@ -960,6 +974,16 @@ mod tests {
     fn missing_binary_returns_program_not_found() {
         let err = ProcessCommand::new("curvebook-definitely-missing-binary-xyz-123").run().unwrap_err();
         assert_eq!(err, PlatformError::ProgramNotFound { program: String::from("curvebook-definitely-missing-binary-xyz-123") });
+    }
+
+    #[test]
+    fn windows_child_creation_flags_include_process_group_and_no_window() {
+        let flags = super::windows_child_creation_flags();
+        assert_eq!(super::WINDOWS_CREATE_NEW_PROCESS_GROUP, 0x0000_0200);
+        assert_eq!(super::WINDOWS_CREATE_NO_WINDOW, 0x0800_0000);
+        assert_ne!(flags & super::WINDOWS_CREATE_NEW_PROCESS_GROUP, 0);
+        assert_ne!(flags & super::WINDOWS_CREATE_NO_WINDOW, 0);
+        assert_eq!(flags, super::WINDOWS_CREATE_NEW_PROCESS_GROUP | super::WINDOWS_CREATE_NO_WINDOW);
     }
 
     #[cfg(unix)]

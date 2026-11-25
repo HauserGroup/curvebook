@@ -37,6 +37,27 @@ If running `.AppImage` fails with `dlopen(): error loading libfuse.so.2` or `App
 - **Missing CJK / RTL / Special Mathematical Glyphs:** Because CurveBook ships zero bundled font binaries in the repository, it relies on host OS TrueType/OpenType system fonts. On minimal Linux/FreeBSD desktops or headless servers lacking `NotoSansCJK` or `DejaVuSans`, install system fonts or point `CURVEBOOK_FONTS_DIR` to a folder of `.ttf`/`.otf` faces (or pass `--ttf-font <path>` to `curvebook`).
 - **Preflight warnings (`min_font_size`, `hairline_stroke`, `text_outside_canvas`):** Run `graph.preflightCheck` or switch [`CanvasResizeMode`](graphs.md#page-layouts) to `KeepTypographyPt` when shrinking canvases for narrow journal columns so labels stay $\ge 5.0\text{ pt}$ and strokes stay $\ge 0.25\text{ pt}$.
 
+### GPU & Graphics Initialization (macOS Metal / `wgpu`) {#gpu-graphics}
+
+The CurveBook desktop window renders through `eframe` and `wgpu` (Metal on macOS, DirectX 12/Vulkan on Windows, Vulkan/OpenGL on Linux). On older macOS releases, legacy Intel/AMD Macs without full native Metal support, virtualized desktops, or systems with outdated GPU drivers, startup or resizing may fail with a `wgpu` graphics initialization error (`RequestAdapterError`, `RequestDeviceError`, `CreateSurfaceError`, `NoSurfaceFormatsAvailable`) or a runtime `GPU device lost` / surface-lost diagnostic.
+
+To resolve or work around GPU driver incompatibilities:
+
+1. **Verify OS and GPU driver support:** On macOS, update to a supported macOS release with native Metal GPU acceleration (or enable host 3D/Metal acceleration in VM settings). On Windows and Linux, install current Vulkan, DirectX 12, or OpenGL graphics drivers.
+2. **Try a `wgpu` backend or adapter override from a terminal:**
+
+   ```sh
+   WGPU_BACKEND=gl curvebook
+   ```
+
+   You can also test `WGPU_BACKEND=metal` (macOS), `WGPU_BACKEND=vulkan`, or `WGPU_BACKEND=dx12` (Windows), or allow fallback/non-compliant adapters where available:
+
+   ```sh
+   WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1 curvebook
+   ```
+
+3. **Use CPU-only CLI / MCP mode as a fallback:** `curvebook-cli` and `curvebook-cli mcp` (as well as `curvebook --headless-once`) run all statistical analyses, curve fitting, and SVG/PDF/PNG/TIFF figure exports on the CPU without requiring a GPU or Metal driver.
+
 ---
 
 ## MCP, CLI & `--control` Automation {#mcp-and-cli}

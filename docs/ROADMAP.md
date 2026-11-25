@@ -198,13 +198,13 @@ RTL GUI locales (`ar`, `he`) are hidden in `Preferences` at Beta (`normalize_bet
 - [ ] Update [`docs/evidence/localization.md`](evidence/localization.md) and [`docs/reference/troubleshooting.md`](reference/troubleshooting.md) to reflect verified RTL desktop support.
 
 ### R8.13 Older-macOS Metal device-lost hardening & Windows console suppression
-Owner: open · Status: todo · Was: platform & GPU compatibility audit 2026-11-24 · Depends on: none · Gate: post-Beta · Est. note: 4–8 h
+Owner: open · Status: in progress · Was: platform & GPU compatibility audit 2026-11-24 · Depends on: none · Gate: post-Beta · Est. note: 4–8 h
 
 Two platform-boundary ergonomics and resilience gaps remain on older macOS GPUs (`wgpu-hal 30.0.2` Metal shader-version compatibility on legacy/OCLP hardware) and Windows child-process spawning.
 
-- [ ] Add `CREATE_NO_WINDOW` (`0x0800_0000`) alongside `CREATE_NEW_PROCESS_GROUP` (`0x0000_0200`) in `crates/platform/src/process.rs` (`#[cfg(windows)]`) so helper subprocesses spawned by the desktop app never flash console windows on Windows, and add a unit/compile check covering the creation flags.
-- [ ] Harden `apps/curvebook/src/gui_window.rs` to handle `wgpu` surface/device-lost or shader-compilation failures gracefully (clear native error dialog / structured stderr diagnostic instead of an opaque panic) and track the upstream `wgpu-hal` Metal shader-version fix when updating `wgpu`.
-- [ ] Document older-macOS / non-native Metal GPU compatibility and CPU-rasterizer fallback expectations in [`docs/troubleshooting.html`](troubleshooting.html) and [`docs/reference/troubleshooting.md`](reference/troubleshooting.md).
+- [x] Add `CREATE_NO_WINDOW` (`0x0800_0000`) alongside `CREATE_NEW_PROCESS_GROUP` (`0x0000_0200`) in `crates/platform/src/process.rs` (`#[cfg(windows)]`) so helper subprocesses spawned by the desktop app never flash console windows on Windows, and add a unit/compile check covering the creation flags. *(Done locally: `WINDOWS_CREATE_NO_WINDOW`, `windows_child_creation_flags()`, and `windows_child_creation_flags_include_process_group_and_no_window`.)*
+- [ ] Harden `apps/curvebook/src/gui_window.rs` to handle `wgpu` surface/device-lost or shader-compilation failures gracefully (clear native error dialog / structured stderr diagnostic instead of an opaque panic) and track the upstream `wgpu-hal` Metal shader-version fix when updating `wgpu`. *(`gui_window.rs` init/surface/device-lost diagnostics and native error dialogs landed locally; upstream `wgpu-hal` Metal shader-version update tracking remains open.)*
+- [x] Document older-macOS / non-native Metal GPU compatibility and CPU-rasterizer fallback expectations in [`docs/troubleshooting.html`](troubleshooting.html) and [`docs/reference/troubleshooting.md`](reference/troubleshooting.md). *(Done locally in [`docs/reference/troubleshooting.md#gpu-graphics`](reference/troubleshooting.md#gpu-graphics), mirrored into the generated manual pages via `docs-site`.)*
 
 ---
 

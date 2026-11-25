@@ -214,6 +214,8 @@ pub struct CurveBookNativeApp {
     pending_live_ever_wanted_kb: bool,
     last_egui_wants_kb: bool,
     menu_popup_was_open: bool,
+    pending_device_lost: Option<Arc<curvebook_platform::sync::Mutex<Option<String>>>>,
+    interactive_graphics_dialogs: bool,
     #[cfg(target_os = "macos")]
     mac_menu_host: crate::mac_menu::MacNativeMenuHost,
     #[cfg(target_os = "macos")]
@@ -277,6 +279,8 @@ impl CurveBookNativeApp {
             pending_live_ever_wanted_kb: false,
             last_egui_wants_kb: false,
             menu_popup_was_open: false,
+            pending_device_lost: None,
+            interactive_graphics_dialogs: false,
             #[cfg(target_os = "macos")]
             mac_menu_host: crate::mac_menu::MacNativeMenuHost::new(),
             #[cfg(target_os = "macos")]
@@ -320,6 +324,22 @@ impl CurveBookNativeApp {
     pub fn with_live_control(mut self, control: LiveControlChannel) -> Self {
         self.live_control = Some(control);
         self
+    }
+
+    fn with_device_lost_slot(mut self, slot: Arc<curvebook_platform::sync::Mutex<Option<String>>>, interactive_dialogs: bool) -> Self {
+        self.pending_device_lost = Some(slot);
+        self.interactive_graphics_dialogs = interactive_dialogs;
+        self
+    }
+
+    fn poll_pending_device_lost(&mut self) {
+        let diagnostic = self.pending_device_lost.as_ref().and_then(|slot| slot.lock().ok().and_then(|mut guard| guard.take()));
+        if let Some(msg) = diagnostic {
+            self.status_banner = Some(msg.clone());
+            if self.interactive_graphics_dialogs {
+                show_native_graphics_error_dialog("CurveBook Graphics Device Lost", &msg);
+            }
+        }
     }
 
     /// Borrow the underlying [`DesktopHostRuntime`].
@@ -1493,6 +1513,7 @@ impl CurveBookNativeApp {
     pub fn step_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.frame_seq = self.frame_seq.wrapping_add(1);
+        self.poll_pending_device_lost();
         let _ = self.poll_live_control(&ctx);
         let initial_window_id = self.active_window_id();
 
@@ -2407,6 +2428,136 @@ fn viewport_icon_for_launch() -> egui::IconData {
     app_icon()
 }
 
+const GRAPHICS_TROUBLESHOOTING_HINT: &str =
+    "See docs/reference/troubleshooting.md#gpu-graphics for GPU/Metal driver compatibility and fallback guidance.";
+
+fn format_graphics_init_diagnostic(stage: &str, detail: &str) -> String {
+    format!(
+        "CurveBook could not initialize GPU graphics ({stage}): {detail}\n\
+         Cause: Your system's GPU or graphics driver (such as older macOS / non-native Metal, virtualized GPUs, or incomplete Vulkan/DirectX 12 drivers) may not support the required wgpu features.\n\
+         Next steps:\n\
+         - Update your OS and GPU drivers (on macOS, ensure native Metal GPU support is available).\n\
+         - Try launching with an explicit backend override: WGPU_BACKEND=gl (or metal/vulkan/dx12) or WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1.\n\
+         - For headless analysis and figure export without a GPU, use `curvebook-cli` or `curvebook --headless-once`.\n\
+         {GRAPHICS_TROUBLESHOOTING_HINT}"
+    )
+}
+
+fn format_graphics_runtime_diagnostic(event: &str, detail: &str) -> String {
+    format!(
+        "CurveBook graphics runtime warning ({event}): {detail}\n\
+         This can occur on older macOS / non-native Metal GPUs, virtualized displays, or after a GPU driver reset.\n\
+         If the window becomes unresponsive, relaunch with WGPU_BACKEND=gl or WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1, or use `curvebook-cli`.\n\
+         {GRAPHICS_TROUBLESHOOTING_HINT}"
+    )
+}
+
+fn format_graphics_init_error(err: &eframe::Error) -> String {
+    match err {
+        eframe::Error::Wgpu(wgpu_err) => {
+            let stage = match wgpu_err {
+                eframe::egui_wgpu::WgpuError::RequestAdapterError(_) => "GPU adapter selection failed",
+                eframe::egui_wgpu::WgpuError::CustomNativeAdapterSelectionError(_) => "custom GPU adapter selection failed",
+                eframe::egui_wgpu::WgpuError::NoSurfaceFormatsAvailable => "no compatible GPU surface format found",
+                eframe::egui_wgpu::WgpuError::RequestDeviceError(_) => "GPU device creation failed",
+                eframe::egui_wgpu::WgpuError::CreateSurfaceError(_) => "GPU surface creation failed",
+                eframe::egui_wgpu::WgpuError::HandleError(_) => "native window handle unavailable for GPU surface",
+            };
+            format_graphics_init_diagnostic(stage, &wgpu_err.to_string())
+        }
+        eframe::Error::Winit(os_err) => format_graphics_init_diagnostic("native window creation failed", &os_err.to_string()),
+        eframe::Error::WinitEventLoop(loop_err) => format_graphics_init_diagnostic("window event loop initialization failed", &loop_err.to_string()),
+        eframe::Error::AppCreation(app_err) => format!("failed to start CurveBook desktop session: {app_err}"),
+    }
+}
+
+fn classify_wgpu_surface_status(
+    status: &eframe::egui_wgpu::wgpu::CurrentSurfaceTexture,
+) -> (eframe::egui_wgpu::SurfaceErrorAction, Option<&'static str>) {
+    use eframe::egui_wgpu::{SurfaceErrorAction, wgpu::CurrentSurfaceTexture};
+    match status {
+        CurrentSurfaceTexture::Outdated => (SurfaceErrorAction::Reconfigure, None),
+        CurrentSurfaceTexture::Occluded => (SurfaceErrorAction::SkipFrame, None),
+        CurrentSurfaceTexture::Lost => (SurfaceErrorAction::RecreateSurface, Some("GPU surface lost; attempting to recreate rendering surface")),
+        CurrentSurfaceTexture::Timeout => (SurfaceErrorAction::SkipFrame, Some("GPU surface frame acquisition timed out")),
+        CurrentSurfaceTexture::Validation => (SurfaceErrorAction::SkipFrame, Some("GPU surface validation error while acquiring frame")),
+        CurrentSurfaceTexture::Success(_) | CurrentSurfaceTexture::Suboptimal(_) => (SurfaceErrorAction::SkipFrame, None),
+    }
+}
+
+fn build_wgpu_configuration() -> eframe::egui_wgpu::WgpuConfiguration {
+    let logged_surface_diagnostic = Arc::new(AtomicBool::new(false));
+    eframe::egui_wgpu::WgpuConfiguration {
+        on_surface_status: Arc::new(move |status| {
+            let (action, detail) = classify_wgpu_surface_status(status);
+            if let Some(reason) = detail {
+                if !logged_surface_diagnostic.swap(true, Ordering::AcqRel) {
+                    eprintln!("{}", format_graphics_runtime_diagnostic("surface error", reason));
+                } else {
+                    eprintln!("curvebook graphics warning: {reason}");
+                }
+            }
+            action
+        }),
+        ..eframe::egui_wgpu::WgpuConfiguration::default()
+    }
+}
+
+fn should_show_native_error_dialog() -> bool {
+    let has_display = {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        {
+            true
+        }
+    };
+    has_display && std::env::var_os("CI").is_none()
+}
+
+fn show_native_graphics_error_dialog(title: &str, message: &str) {
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title(title)
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+fn install_wgpu_device_error_handlers(
+    render_state: &eframe::egui_wgpu::RenderState,
+    egui_ctx: egui::Context,
+    pending_device_lost: Arc<curvebook_platform::sync::Mutex<Option<String>>>,
+) {
+    let device_lost_reported = Arc::new(AtomicBool::new(false));
+    render_state.device.set_device_lost_callback(move |reason, message| {
+        if reason == eframe::egui_wgpu::wgpu::DeviceLostReason::Destroyed {
+            return;
+        }
+        let detail = if message.trim().is_empty() { format!("{reason:?}") } else { format!("{reason:?}: {message}") };
+        let diagnostic = format_graphics_runtime_diagnostic("GPU device lost", &detail);
+        eprintln!("{diagnostic}");
+        // Never invoke AppKit/OS dialogs from a background wgpu/Metal callback thread; queue onto the main UI thread instead.
+        if !device_lost_reported.swap(true, Ordering::AcqRel) {
+            if let Ok(mut slot) = pending_device_lost.lock() {
+                *slot = Some(diagnostic);
+            }
+            egui_ctx.request_repaint();
+        }
+    });
+
+    let uncaptured_error_reported = Arc::new(AtomicBool::new(false));
+    render_state.device.on_uncaptured_error(Arc::new(move |err| {
+        if !uncaptured_error_reported.swap(true, Ordering::AcqRel) {
+            eprintln!("{}", format_graphics_runtime_diagnostic("uncaptured GPU error", &err.to_string()));
+        } else {
+            eprintln!("curvebook graphics warning (uncaptured GPU error): {err}");
+        }
+    }));
+}
+
 /// Launch the interactive native desktop window while optionally attaching a [`LiveControlChannel`]
 /// so external `--control` automation and human window input share the same live `UiApp` session.
 ///
@@ -2418,6 +2569,7 @@ pub fn run_native_desktop_with_control(
     on_exit_cleanup: CleanupHook,
     control: Option<LiveControlChannel>,
 ) -> Result<(), String> {
+    let interactive_dialogs = control.is_none() && should_show_native_error_dialog();
     if control.is_none() {
         runtime.set_url_opener(std::sync::Arc::new(curvebook_ui_egui::SystemPlatformUrlOpener::live()));
     }
@@ -2434,6 +2586,7 @@ pub fn run_native_desktop_with_control(
             .with_inner_size([DEFAULT_WINDOW_WIDTH_PT, DEFAULT_WINDOW_HEIGHT_PT])
             .with_min_inner_size([MIN_WINDOW_WIDTH_PT, MIN_WINDOW_HEIGHT_PT])
             .with_title(initial_title),
+        wgpu_options: build_wgpu_configuration(),
         ..Default::default()
     };
 
@@ -2442,9 +2595,14 @@ pub fn run_native_desktop_with_control(
         "CurveBook",
         native_options,
         Box::new(move |cc| {
+            let pending_device_lost = Arc::new(curvebook_platform::sync::Mutex::new(None));
+            if let Some(ref render_state) = cc.wgpu_render_state {
+                install_wgpu_device_error_handlers(render_state, cc.egui_ctx.clone(), Arc::clone(&pending_device_lost));
+            }
             let fonts = build_egui_font_definitions(font_bytes.as_deref());
             cc.egui_ctx.set_fonts(fonts);
-            let mut app = CurveBookNativeApp::new(runtime, primary_window_id, Some(on_exit_cleanup));
+            let mut app = CurveBookNativeApp::new(runtime, primary_window_id, Some(on_exit_cleanup))
+                .with_device_lost_slot(pending_device_lost, interactive_dialogs);
             #[cfg(target_os = "macos")]
             app.attach_macos_menus_on_windowed_startup();
             if let Some(ctrl) = control {
@@ -2455,7 +2613,14 @@ pub fn run_native_desktop_with_control(
             Ok(Box::new(app))
         }),
     )
-    .map_err(|err| format!("failed to start native desktop window: {err}"))
+    .map_err(|err| {
+        let diagnostic = format_graphics_init_error(&err);
+        eprintln!("{diagnostic}");
+        if interactive_dialogs {
+            show_native_graphics_error_dialog("CurveBook Graphics Initialization Error", &diagnostic);
+        }
+        diagnostic
+    })
 }
 
 #[cfg(test)]
@@ -3659,5 +3824,51 @@ mod tests {
         });
         assert!(committed_r2.is_some_and(|v| (v - 0.95).abs() < 1e-9), "expected flag_r_squared_below == Some(0.95), got {committed_r2:?}");
         Ok(())
+    }
+
+    #[test]
+    fn graphics_init_and_runtime_diagnostics_include_actionable_gpu_metal_guidance() {
+        let surface_err = eframe::Error::Wgpu(eframe::egui_wgpu::WgpuError::NoSurfaceFormatsAvailable);
+        let msg = super::format_graphics_init_error(&surface_err);
+        assert!(msg.contains("no compatible GPU surface format found"), "msg: {msg}");
+        assert!(msg.contains("Metal"), "expected Metal compatibility guidance: {msg}");
+        assert!(msg.contains("WGPU_BACKEND"), "expected WGPU_BACKEND guidance: {msg}");
+        assert!(msg.contains("curvebook-cli"), "expected headless CLI fallback guidance: {msg}");
+        assert!(msg.contains("troubleshooting.md#gpu-graphics"), "expected troubleshooting link: {msg}");
+
+        let adapter_err = eframe::Error::Wgpu(eframe::egui_wgpu::WgpuError::CustomNativeAdapterSelectionError(String::from("no Metal adapter")));
+        let adapter_msg = super::format_graphics_init_error(&adapter_err);
+        assert!(adapter_msg.contains("no Metal adapter"), "msg: {adapter_msg}");
+        assert!(adapter_msg.contains("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1"), "msg: {adapter_msg}");
+
+        let lost_msg = super::format_graphics_runtime_diagnostic("GPU device lost", "Unknown: Metal device reset");
+        assert!(lost_msg.contains("GPU device lost"), "msg: {lost_msg}");
+        assert!(lost_msg.contains("Metal"), "msg: {lost_msg}");
+        assert!(lost_msg.contains("curvebook-cli"), "msg: {lost_msg}");
+    }
+
+    #[test]
+    fn classify_wgpu_surface_status_maps_recovery_actions_and_diagnostics() {
+        use eframe::egui_wgpu::{SurfaceErrorAction, wgpu::CurrentSurfaceTexture};
+
+        let (outdated_action, outdated_msg) = super::classify_wgpu_surface_status(&CurrentSurfaceTexture::Outdated);
+        assert!(matches!(outdated_action, SurfaceErrorAction::Reconfigure));
+        assert!(outdated_msg.is_none());
+
+        let (occluded_action, occluded_msg) = super::classify_wgpu_surface_status(&CurrentSurfaceTexture::Occluded);
+        assert!(matches!(occluded_action, SurfaceErrorAction::SkipFrame));
+        assert!(occluded_msg.is_none());
+
+        let (lost_action, lost_msg) = super::classify_wgpu_surface_status(&CurrentSurfaceTexture::Lost);
+        assert!(matches!(lost_action, SurfaceErrorAction::RecreateSurface));
+        assert!(lost_msg.is_some());
+
+        let (timeout_action, timeout_msg) = super::classify_wgpu_surface_status(&CurrentSurfaceTexture::Timeout);
+        assert!(matches!(timeout_action, SurfaceErrorAction::SkipFrame));
+        assert!(timeout_msg.is_some());
+
+        let (val_action, val_msg) = super::classify_wgpu_surface_status(&CurrentSurfaceTexture::Validation);
+        assert!(matches!(val_action, SurfaceErrorAction::SkipFrame));
+        assert!(val_msg.is_some());
     }
 }
