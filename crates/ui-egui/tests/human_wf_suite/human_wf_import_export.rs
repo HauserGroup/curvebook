@@ -3,13 +3,14 @@
 
 //! `R10.30` automated human-path import/export verification suite.
 //!
-//! Exercises `.pzfx` and `.prism` imports (including `R10.29` structured warnings,
+//! Exercises `.pzfx`, `.prism`, and `.xlsx` imports (including `R10.29` structured warnings,
 //! `ui.inspect` exposure, status-footer & menu reopen, replace-or-merge confirmation
-//! on dirty projects, and post-import live edits) alongside one-way ANOVA results
-//! exports (`CSV` all-tabs tidy, single-tab `;`/`,` European format, `.tsv` auto-tab,
-//! `JSON`, Markdown/LaTeX Methods Reports) and **Export All Data Tables…**, comparing
-//! every imported table and every exported file against a fresh headless
-//! `curvebook_engine::Session`.
+//! on dirty projects via **File › Import**, **File › Open…**, and the Command Palette, and
+//! post-import live edits) alongside one-way ANOVA table and results exports (`CSV Table`
+//! `,`/`.` + `.tsv` + `de` locale default `;`/`,`, `CSV Results` all-tabs tidy / single-tab
+//! `;`/`,` / `.tsv`, `JSON`, Markdown / Plain / LaTeX Methods Reports including via the
+//! Command Palette) and **Export All Data Tables…**, comparing every imported table and every
+//! exported file against a fresh headless `curvebook_engine::Session`.
 
 use std::fs;
 use std::path::Path;
@@ -71,6 +72,37 @@ fn build_archive_fixture_bytes() -> Result<Vec<u8>, String> {
     zw.finish().map_err(|e| format!("failed to build synthetic .prism zip: {e}"))
 }
 
+/// Build a self-authored `.xlsx` OOXML workbook fixture with one worksheet (`Xlsx Assay`) and one
+/// non-worksheet chartsheet tab so `ImportWarning`s are deterministically emitted without external-app files.
+fn build_xlsx_fixture_bytes() -> Result<Vec<u8>, String> {
+    let workbook = r#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Xlsx Assay" sheetId="1" r:id="rId1"/>
+    <sheet name="SkippedChart" sheetId="2" r:id="rId2"/>
+  </sheets>
+</workbook>"#;
+    let rels = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/>
+</Relationships>"#;
+    let sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>Dose</t></is></c><c r="B1" t="inlineStr"><is><t>Signal</t></is></c></row>
+    <row r="2"><c r="A2"><v>1</v></c><c r="B2"><v>12.5</v></c></row>
+    <row r="3"><c r="A3"><v>2</v></c><c r="B3"><v>24.5</v></c></row>
+    <row r="4"><c r="A4"><v>3</v></c><c r="B4"><v>36.5</v></c></row>
+  </sheetData>
+</worksheet>"#;
+    let mut zw = ZipWriter::new();
+    zw.add_file("xl/workbook.xml", workbook.as_bytes().to_vec()).map_err(|e| format!("failed to add xl/workbook.xml: {e}"))?;
+    zw.add_file("xl/_rels/workbook.xml.rels", rels.as_bytes().to_vec()).map_err(|e| format!("failed to add xl/_rels/workbook.xml.rels: {e}"))?;
+    zw.add_file("xl/worksheets/sheet1.xml", sheet.as_bytes().to_vec()).map_err(|e| format!("failed to add xl/worksheets/sheet1.xml: {e}"))?;
+    zw.finish().map_err(|e| format!("failed to build synthetic .xlsx zip: {e}"))
+}
+
 fn assert_datasheets_match(label: &str, gui_sheets: &[DataSheet], ref_sheets: &[DataSheet]) -> TestRes {
     ensure(gui_sheets.len() == ref_sheets.len(), format!("{label}: DataSheet count mismatch: gui={}, ref={}", gui_sheets.len(), ref_sheets.len()))?;
     for (idx, (g, r)) in gui_sheets.iter().zip(ref_sheets.iter()).enumerate() {
@@ -112,8 +144,10 @@ fn r10_30_human_pzfx_and_archive_import_warnings_and_live_edit() -> TestRes {
     let dir = temp_dir("import-warnings")?;
     let pzfx_path = dir.path().join("drug_assay.pzfx");
     let archive_path = dir.path().join("assay_bundle.prism");
+    let xlsx_path = dir.path().join("xlsx_assay.xlsx");
     fs::write(&pzfx_path, build_pzfx_fixture_bytes()).map_err(|e| e.to_string())?;
     fs::write(&archive_path, build_archive_fixture_bytes()?).map_err(|e| e.to_string())?;
+    fs::write(&xlsx_path, build_xlsx_fixture_bytes()?).map_err(|e| e.to_string())?;
 
     // --- 1A. .pzfx import from empty UiApp via File > Import ---
     {
@@ -236,6 +270,52 @@ fn r10_30_human_pzfx_and_archive_import_warnings_and_live_edit() -> TestRes {
         run.assert_shell_health("R10.30-ARCHIVE")?;
     }
 
+    // --- 1C. .xlsx import from empty UiApp via File > Import ---
+    {
+        let mut run = WorkflowRun::start("R10.30-XLSX");
+        run.script_file_dialog_for("table.importXlsx", Some(xlsx_path.clone()));
+        run.open_menu_and_click("menu.file", &["menu.file.import"], "menu.table.importXlsx")?;
+
+        let reqs = run.recorded_file_dialog_requests();
+        ensure(
+            reqs.iter().any(|r| r.command_id == "table.importXlsx" && r.kind == NativeFileDialogKind::OpenFile),
+            format!("R10.30-XLSX: expected OpenFile dialog request for table.importXlsx, got {reqs:?}"),
+        )?;
+
+        let mut oracle = Session::new();
+        oracle
+            .execute("table.importXlsx", json!({ "path": xlsx_path.to_string_lossy() }))
+            .map_err(|e| format!("R10.30-XLSX: headless oracle import failed: {e}"))?;
+        assert_datasheets_match("R10.30-XLSX", &run.document().data_sheets, &oracle.document().data_sheets)?;
+
+        ensure(
+            matches!(run.active_dialog(), ActiveDialog::ImportWarnings),
+            format!("R10.30-XLSX: expected ActiveDialog::ImportWarnings, got {:?}", run.active_dialog()),
+        )?;
+        let snap_open = inspect_ui_tree(run.app(), None, false);
+        let iw = snap_open.import_warnings.as_ref().ok_or("R10.30-XLSX: ui.inspect missing import_warnings")?;
+        ensure(iw.open && !iw.warnings.is_empty(), "R10.30-XLSX: expected open non-empty import_warnings in ui.inspect")?;
+        ensure(iw.command_id == "table.importXlsx", format!("R10.30-XLSX: expected command_id=table.importXlsx, got {:?}", iw.command_id))?;
+
+        run.click("modal.cancel")?;
+        ensure(matches!(run.active_dialog(), ActiveDialog::None), "R10.30-XLSX: expected modal closed")?;
+        run.click("status.import_warnings")?;
+        ensure(matches!(run.active_dialog(), ActiveDialog::ImportWarnings), "R10.30-XLSX: expected modal reopened via footer pill")?;
+        run.click("modal.cancel")?;
+
+        // Live-edit the imported worksheet's first Y cell.
+        let sheet_id = run.document().data_sheets.first().ok_or("R10.30-XLSX: missing imported sheet")?.id.clone();
+        run.select_sheet(&sheet_id)?;
+        run.enter_grid_cell(0, 0, 0, "88.5")?;
+        let edited_cell = run.document().data_sheet(&sheet_id).and_then(|ds| ds.cell(CellCoord::new(0, 0, 0))).map(|c| &c.value);
+        ensure(
+            matches!(edited_cell, Some(CellValue::Number(v)) if (v - 88.5).abs() < 1e-9),
+            format!("R10.30-XLSX: expected live-edited cell (0,0,0) to be 88.5, got {edited_cell:?}"),
+        )?;
+
+        run.assert_shell_health("R10.30-XLSX")?;
+    }
+
     Ok(())
 }
 
@@ -244,8 +324,10 @@ fn r10_30_human_import_replace_or_merge_on_dirty_project() -> TestRes {
     let dir = temp_dir("replace-merge")?;
     let pzfx_path = dir.path().join("merge_source.pzfx");
     let archive_path = dir.path().join("replace_source.prism");
+    let xlsx_path = dir.path().join("open_source.xlsx");
     fs::write(&pzfx_path, build_pzfx_fixture_bytes()).map_err(|e| e.to_string())?;
     fs::write(&archive_path, build_archive_fixture_bytes()?).map_err(|e| e.to_string())?;
+    fs::write(&xlsx_path, build_xlsx_fixture_bytes()?).map_err(|e| e.to_string())?;
 
     let mut run = WorkflowRun::start("R10.30-MERGE-REPLACE");
     let orig_id = run.create_table_via_welcome("welcome.arch.column", "Original Dirty Table", &[])?;
@@ -298,6 +380,48 @@ fn r10_30_human_import_replace_or_merge_on_dirty_project() -> TestRes {
         replaced_titles == vec!["Archive Assay"],
         format!("R10.30-MERGE-REPLACE: replace should retain only imported .prism sheet, got {replaced_titles:?}"),
     )?;
+
+    // 3. File > Open... on .xlsx onto occupied project prompts replace-or-merge; Cancel keeps sheets, Merge adds.
+    run.script_file_dialog_for("project.open", Some(xlsx_path.clone()));
+    run.open_menu_and_click("menu.file", &[], "menu.project.open")?;
+    match run.active_dialog() {
+        ActiveDialog::ImportProjectMode { command_id, .. } => {
+            ensure(command_id == "table.importXlsx", format!("File > Open (.xlsx) expected table.importXlsx prompt, got {command_id}"))?;
+        }
+        other => {
+            return Err(format!("R10.30-MERGE-REPLACE: expected ImportProjectMode on File > Open (.xlsx), got {other:?}"));
+        }
+    }
+    run.click("modal.cancel")?;
+    let after_cancel: Vec<&str> = run.document().data_sheets.iter().map(|s| s.title.as_str()).collect();
+    ensure(after_cancel == vec!["Archive Assay"], format!("Cancel on File > Open prompt must preserve sheets, got {after_cancel:?}"))?;
+
+    run.script_file_dialog_for("project.open", Some(xlsx_path));
+    run.open_menu_and_click("menu.file", &[], "menu.project.open")?;
+    run.click("import_project_mode.merge")?;
+    if matches!(run.active_dialog(), ActiveDialog::ImportWarnings) {
+        run.click("modal.cancel")?;
+    }
+    let after_open_merge: Vec<&str> = run.document().data_sheets.iter().map(|s| s.title.as_str()).collect();
+    ensure(
+        after_open_merge.contains(&"Archive Assay") && after_open_merge.contains(&"Xlsx Assay"),
+        format!("File > Open (.xlsx) + Merge should retain Archive Assay and add Xlsx Assay, got {after_open_merge:?}"),
+    )?;
+
+    // 4. Command Palette (`table.importPzfx`) routes through the native file picker + replace-or-merge prompt (not CSV Import Wizard).
+    run.script_file_dialog_for("table.importPzfx", Some(pzfx_path));
+    run.click("toolbar.command_palette")?;
+    run.replace_textbox("palette.query", "table.importPzfx")?;
+    run.click("palette.item.0")?;
+    match run.active_dialog() {
+        ActiveDialog::ImportProjectMode { command_id, .. } => {
+            ensure(command_id == "table.importPzfx", format!("Command Palette expected table.importPzfx prompt, got {command_id}"))?;
+        }
+        other => {
+            return Err(format!("Command Palette table.importPzfx must open ImportProjectMode (not CSV wizard), got {other:?}"));
+        }
+    }
+    run.click("modal.cancel")?;
 
     run.assert_shell_health("R10.30-MERGE-REPLACE")
 }
@@ -428,6 +552,82 @@ fn r10_30_human_anova_exports_and_all_tables_csv() -> TestRes {
         .map_err(|e| format!("oracle analysis.exportCsv (.tsv) failed: {e}"))?;
     assert_file_bytes_eq("CSV Results (.tsv auto-tab)", &gui_tsv, &ref_tsv)?;
 
+    // --- Export 3b: File > Export > CSV Table... (`table.exportCsv` as ,/. and .tsv) ---
+    run.select_sheet(&anova_table_id)?;
+    let gui_tbl_csv = dir.path().join("gui_dose_groups.csv");
+    let ref_tbl_csv = dir.path().join("ref_dose_groups.csv");
+    run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.tableCsv.open")?;
+    ensure(
+        matches!(run.active_dialog(), ActiveDialog::CsvExportOptions(CsvExportTargetKind::DataTable { .. })),
+        format!("expected CsvExportOptions(DataTable), got {:?}", run.active_dialog()),
+    )?;
+    ensure(
+        run.app().canvas_dialogs.csv_export.delimiter == ',' && run.app().canvas_dialogs.csv_export.decimal_separator == '.',
+        format!("en locale should default CSV Table options to ,/., got {:?}", run.app().canvas_dialogs.csv_export),
+    )?;
+    run.script_file_dialog_for("table.exportCsv", Some(gui_tbl_csv.clone()));
+    run.commit_modal_ok()?;
+    oracle
+        .execute(
+            "table.exportCsv",
+            json!({
+                "sheet_id": anova_table_id.as_str(),
+                "path": ref_tbl_csv.to_string_lossy(),
+                "delimiter": ",",
+                "decimal_separator": ".",
+            }),
+        )
+        .map_err(|e| format!("oracle table.exportCsv (,/. ) failed: {e}"))?;
+    assert_file_bytes_eq("CSV Table (,/. )", &gui_tbl_csv, &ref_tbl_csv)?;
+
+    let gui_tbl_tsv = dir.path().join("gui_dose_groups.tsv");
+    let ref_tbl_tsv = dir.path().join("ref_dose_groups.tsv");
+    run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.tableCsv.open")?;
+    run.script_file_dialog_for("table.exportCsv", Some(gui_tbl_tsv.clone()));
+    run.commit_modal_ok()?;
+    oracle
+        .execute(
+            "table.exportCsv",
+            json!({
+                "sheet_id": anova_table_id.as_str(),
+                "path": ref_tbl_tsv.to_string_lossy(),
+                "delimiter": "\t",
+                "decimal_separator": ".",
+            }),
+        )
+        .map_err(|e| format!("oracle table.exportCsv (.tsv) failed: {e}"))?;
+    assert_file_bytes_eq("CSV Table (.tsv auto-tab)", &gui_tbl_tsv, &ref_tbl_tsv)?;
+
+    // --- Export 3c: Locale-default CsvExportOptions in `de` locale defaults to `;` + `,` ---
+    let de_idx = curvebook_ui_egui::i18n::LOCALES.iter().position(|loc| *loc == "de").ok_or("missing `de` in LOCALES")?;
+    let en_idx = curvebook_ui_egui::i18n::LOCALES.iter().position(|loc| *loc == "en").ok_or("missing `en` in LOCALES")?;
+    run.open_menu_and_click("menu.view", &["menu.ui.locale.set"], &format!("popup.menu.ui.locale.set.opt.{de_idx}"))?;
+    ensure(run.app().locale == "de", format!("expected `de` locale after menu click, got {}", run.app().locale))?;
+    let gui_tbl_de = dir.path().join("gui_dose_groups_de.csv");
+    let ref_tbl_de = dir.path().join("ref_dose_groups_de.csv");
+    run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.tableCsv.open")?;
+    ensure(
+        run.app().canvas_dialogs.csv_export.delimiter == ';' && run.app().canvas_dialogs.csv_export.decimal_separator == ',',
+        format!("de locale must default CSV export options to ;/,, got {:?}", run.app().canvas_dialogs.csv_export),
+    )?;
+    run.script_file_dialog_for("table.exportCsv", Some(gui_tbl_de.clone()));
+    run.commit_modal_ok()?;
+    oracle
+        .execute(
+            "table.exportCsv",
+            json!({
+                "sheet_id": anova_table_id.as_str(),
+                "path": ref_tbl_de.to_string_lossy(),
+                "delimiter": ";",
+                "decimal_separator": ",",
+            }),
+        )
+        .map_err(|e| format!("oracle table.exportCsv (de ;/,) failed: {e}"))?;
+    assert_file_bytes_eq("CSV Table (de locale default ;/,)", &gui_tbl_de, &ref_tbl_de)?;
+    run.open_menu_and_click("menu.view", &["menu.ui.locale.set"], &format!("popup.menu.ui.locale.set.opt.{en_idx}"))?;
+    ensure(run.app().locale == "en", format!("expected `en` locale restored, got {}", run.app().locale))?;
+    run.select_sheet(&res_id)?;
+
     // --- Export 4: JSON Results... (`analysis.exportJson`) ---
     let gui_json = dir.path().join("gui_anova.json");
     let ref_json = dir.path().join("ref_anova.json");
@@ -476,6 +676,30 @@ fn r10_30_human_anova_exports_and_all_tables_csv() -> TestRes {
         )
         .map_err(|e| format!("oracle result.generateReport (.tex) failed: {e}"))?;
     assert_file_bytes_eq("Methods Report (.tex)", &gui_tex, &ref_tex)?;
+
+    let gui_txt = dir.path().join("methods_report.txt");
+    let ref_txt = dir.path().join("ref_methods_report.txt");
+    run.script_file_dialog_for("result.generateReport", Some(gui_txt.clone()));
+    run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.result.generateReport")?;
+    oracle
+        .execute(
+            "result.generateReport",
+            json!({
+                "result_sheet_id": res_id.as_str(),
+                "format": "plain",
+                "path": ref_txt.to_string_lossy(),
+            }),
+        )
+        .map_err(|e| format!("oracle result.generateReport (.txt) failed: {e}"))?;
+    assert_file_bytes_eq("Methods Report (.txt)", &gui_txt, &ref_txt)?;
+
+    // Command Palette `result.generateReport` must also infer `.tex` instead of forcing Markdown.
+    let palette_tex = dir.path().join("palette_methods_report.tex");
+    run.script_file_dialog_for("result.generateReport", Some(palette_tex.clone()));
+    run.click("toolbar.command_palette")?;
+    run.replace_textbox("palette.query", "result.generateReport")?;
+    run.click("palette.item.0")?;
+    assert_file_bytes_eq("Methods Report via Command Palette (.tex)", &palette_tex, &ref_tex)?;
 
     // --- Export 6: Export All Data Tables... (`ui.export.allTablesCsv` to a folder) ---
     let gui_all_tables_dir = dir.path().join("gui_all_tables");

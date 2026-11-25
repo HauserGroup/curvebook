@@ -298,3 +298,168 @@ fn export_all_tables_existing_file_is_never_replaced_without_asking() -> Result<
     assert!(fresh_dir.join("Enzyme Activity.csv").exists() && fresh_dir.join("Second Table.csv").exists());
     Ok(())
 }
+
+fn write_warning_xlsx(path: &Path, table_title: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let workbook = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="{table_title}" sheetId="1" r:id="rId1"/>
+    <sheet name="ChartTab" sheetId="2" r:id="rId2"/>
+  </sheets>
+</workbook>"#
+    );
+    let rels = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/>
+</Relationships>"#;
+    let sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>Dose</t></is></c><c r="B1" t="inlineStr"><is><t>Signal</t></is></c></row>
+    <row r="2"><c r="A2"><v>1</v></c><c r="B2"><v>12.5</v></c></row>
+    <row r="3"><c r="A3"><v>2</v></c><c r="B3"><v>24.5</v></c></row>
+  </sheetData>
+</worksheet>"#;
+    fs::write(
+        path,
+        build_zip_entries(&[("xl/workbook.xml", &workbook), ("xl/_rels/workbook.xml.rels", rels), ("xl/worksheets/sheet1.xml", sheet)])?,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn file_open_interchange_on_occupied_project_prompts_replace_or_merge() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDirGuard::new("cb-r10-29-file-open-prompt")?;
+    let (saved_project, other_project) = (tmp.child("existing.curvebook"), tmp.child("other.curvebook"));
+    let (incoming_pzfx, incoming_archive, incoming_xlsx) = (tmp.child("incoming.pzfx"), tmp.child("incoming.prism"), tmp.child("incoming.xlsx"));
+    write_pzfx(&incoming_pzfx, "Opened PZFX", true)?;
+    write_warning_zip_project(&incoming_archive, "Opened Archive")?;
+    write_warning_xlsx(&incoming_xlsx, "Opened XLSX")?;
+
+    let base_doc = build_col_doc("base-1", "Base Sheet", &[("A", &[7.0])])?;
+    save_project_file(&saved_project, &base_doc)?;
+    let other_doc = build_col_doc("other-1", "Other CurveBook", &[("A", &[1.0])])?;
+    save_project_file(&other_project, &other_doc)?;
+
+    // 1. Clean non-empty project: File > Open (.pzfx / .prism / .xlsx) prompts replace-or-merge.
+    for (open_cmd, path, expected_import_cmd, expected_title) in [
+        ("project.open", &incoming_pzfx, "table.importPzfx", "Opened PZFX"),
+        ("file.open", &incoming_archive, "table.importPrism", "Opened Archive"),
+        ("project.open", &incoming_xlsx, "table.importXlsx", "Opened XLSX"),
+    ] {
+        let mut session = Session::from_document(base_doc.clone());
+        session.set_file_path(Some(saved_project.clone()), true);
+        let (mut rt, wid, adapter) = spawn_runtime(session)?;
+        adapter.push_response(open_cmd, Some(path.clone()));
+
+        let out = rt.dispatch_native_file_command(wid, open_cmd)?.expect("handled");
+        assert_eq!(out.action, format!("native_file_dialog.confirm_import_mode:{expected_import_cmd}"));
+        assert!(out.opened_window_id.is_none());
+        assert_eq!(rt.window_count(), 1);
+        assert!(matches!(
+            &rt.window(wid)?.app().canvas_dialogs.active_dialog,
+            ActiveDialog::ImportProjectMode { command_id, path: p, has_unsaved_changes: false }
+                if command_id == expected_import_cmd && *p == path.to_string_lossy()
+        ));
+
+        // Merge preserves existing sheet and file_path, adds incoming sheet, and captures warnings.
+        let _ = rt.dispatch_native_file_command_with_params(wid, expected_import_cmd, &json!({ "path": path.to_string_lossy(), "merge": true }))?;
+        let win = rt.window(wid)?;
+        let titles: Vec<&str> = win.app().document().data_sheets.iter().map(|s| s.title.as_str()).collect();
+        assert!(titles.contains(&"Base Sheet") && titles.contains(&expected_title), "{expected_import_cmd}: {titles:?}");
+        assert_eq!(win.app().session().file_path(), Some(saved_project.as_path()));
+        assert!(!win.app().import_warnings.warnings.is_empty(), "{expected_import_cmd}: expected import warnings");
+    }
+
+    // 2. Dirty project + explicit path (Welcome Hub Open a File): prompts with has_unsaved_changes=true in-window.
+    {
+        let mut dirty = Session::from_document(base_doc.clone());
+        dirty.set_file_path(Some(saved_project.clone()), false);
+        let _ = dirty.execute("sheet.rename", json!({ "sheet_id": "base-1", "title": "Dirty Base" }))?;
+        let (mut rt, wid, _) = spawn_runtime(dirty)?;
+        let out =
+            rt.dispatch_native_file_command_with_params(wid, "project.open", &json!({ "path": incoming_pzfx.to_string_lossy() }))?.expect("prompted");
+        assert_eq!(out.action, "native_file_dialog.confirm_import_mode:table.importPzfx");
+        assert_eq!(rt.window_count(), 1, "dirty interchange File > Open must prompt in-window rather than silently spawning a new window");
+        assert!(matches!(
+            &rt.window(wid)?.app().canvas_dialogs.active_dialog,
+            ActiveDialog::ImportProjectMode { command_id, has_unsaved_changes: true, .. } if command_id == "table.importPzfx"
+        ));
+
+        let _ = rt.dispatch_native_file_command_with_params(
+            wid,
+            "table.importPzfx",
+            &json!({ "path": incoming_pzfx.to_string_lossy(), "merge": false }),
+        )?;
+        let win = rt.window(wid)?;
+        let titles: Vec<&str> = win.app().document().data_sheets.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, vec!["Opened PZFX"]);
+        assert_eq!(win.app().session().file_path(), None);
+    }
+
+    // 3. Empty window opens interchange file without prompting and still records warnings.
+    {
+        let (mut rt, wid, adapter) = spawn_runtime(Session::new())?;
+        adapter.push_response("project.open", Some(incoming_xlsx.clone()));
+        let out = rt.dispatch_native_file_command(wid, "project.open")?.expect("loaded");
+        assert_eq!(out.action, "file.dropped_loaded_in_window");
+        let win = rt.window(wid)?;
+        assert!(matches!(win.app().canvas_dialogs.active_dialog, ActiveDialog::ImportWarnings));
+        assert!(!win.app().import_warnings.warnings.is_empty());
+        assert_eq!(win.app().session().file_path(), None);
+    }
+
+    // 4. Non-interchange `.curvebook` file on clean occupied window still loads directly without prompt.
+    {
+        let mut session = Session::from_document(base_doc);
+        session.set_file_path(Some(saved_project), true);
+        let (mut rt, wid, adapter) = spawn_runtime(session)?;
+        adapter.push_response("project.open", Some(other_project.clone()));
+        let out = rt.dispatch_native_file_command(wid, "project.open")?.expect("loaded");
+        assert_eq!(out.action, "file.dropped_loaded_in_window");
+        let win = rt.window(wid)?;
+        assert!(matches!(win.app().canvas_dialogs.active_dialog, ActiveDialog::None));
+        assert_eq!(win.app().session().file_path(), Some(other_project.as_path()));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn csv_locale_default_and_command_palette_import_export_routing() -> Result<(), Box<dyn std::error::Error>> {
+    use curvebook::desktop_host::{DesktopCommandRoute, resolve_desktop_command_route};
+    use curvebook_ui_egui::dialogs_canvas::CsvExportOptionsState;
+
+    // 1. Comma decimal locales pair with semicolon delimiter; period locales pair with comma delimiter.
+    let mut opts = CsvExportOptionsState::default();
+    opts.reset_for_locale(',');
+    assert_eq!((opts.delimiter, opts.decimal_separator), (';', ','));
+    opts.reset_for_locale('.');
+    assert_eq!((opts.delimiter, opts.decimal_separator), (',', '.'));
+
+    // 2. Desktop route for `result.generateReport` omits hardcoded `format`, so `.tex` and `.txt` infer cleanly.
+    let tmp = TempDirGuard::new("cb-r10-29-palette-route")?;
+    let (mut rt, wid, adapter) = spawn_runtime(build_anova_session()?)?;
+    let route = resolve_desktop_command_route(rt.window(wid)?.app(), None, "result.generateReport")?;
+    let route_params = match route {
+        DesktopCommandRoute::EngineCommand { engine_command_id, params } => {
+            assert_eq!(engine_command_id, "result.generateReport");
+            assert!(params.get("format").is_none(), "route must not hardcode markdown format: {params}");
+            params
+        }
+        other => panic!("expected EngineCommand route for result.generateReport, got {other:?}"),
+    };
+    let (tex_path, txt_path) = (tmp.child("palette_report.tex"), tmp.child("palette_report.txt"));
+    adapter.push_response("result.generateReport", Some(tex_path.clone()));
+    adapter.push_response("result.generateReport", Some(txt_path.clone()));
+    let _ = rt.dispatch_native_file_command_with_params(wid, "result.generateReport", &route_params)?;
+    let _ = rt.dispatch_native_file_command_with_params(wid, "result.generateReport", &route_params)?;
+    let tex_text = fs::read_to_string(&tex_path)?;
+    let txt_text = fs::read_to_string(&txt_path)?;
+    assert!(tex_text.contains('\\'), "expected LaTeX output when routed with default params: {tex_text}");
+    assert!(!txt_text.trim().is_empty() && !txt_text.contains("\\section"), "expected plain text output: {txt_text}");
+
+    Ok(())
+}

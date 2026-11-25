@@ -923,12 +923,7 @@ fn resolve_palette_dialog_engine_route(doc: &ProjectDocument, command_id: &str) 
             is_live_link: true,
             target_sheet_id: resolve_data_sheet_id(doc),
         })),
-        "table.importXlsx" => Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenImportWizard {
-            origin: ImportOriginKind::XlsxWorkbook,
-            is_live_link: false,
-            target_sheet_id: resolve_data_sheet_id(doc),
-        })),
-        "table.importCsv" | "table.importPrism" | "table.importPzfx" => Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenImportWizard {
+        "table.importCsv" => Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenImportWizard {
             origin: ImportOriginKind::ExternalDelimitedFile,
             is_live_link: false,
             target_sheet_id: resolve_data_sheet_id(doc),
@@ -988,7 +983,7 @@ fn resolve_palette_sheet_engine_route(doc: &ProjectDocument, command_id: &str) -
         "analysis.exportJson" | "analysis.exportCsv" => eng(sheet_id_param(resolve_result_sheet_id(doc))),
         "result.generateReport" => {
             let params = match resolve_result_sheet_id(doc) {
-                Some(id) => json!({ "result_sheet_id": id.as_str(), "format": "markdown" }),
+                Some(id) => json!({ "result_sheet_id": id.as_str() }),
                 None => json!({}),
             };
             eng(params)

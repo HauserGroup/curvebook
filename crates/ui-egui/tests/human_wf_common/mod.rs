@@ -154,6 +154,9 @@ impl EguiWfHarness {
                             {
                                 host_commands.push((command_id.clone(), params.clone()));
                             }
+                            UiIntent::OpenProjectFile => {
+                                host_commands.push((String::from("project.open"), json!({})));
+                            }
                             _ => remaining.push(intent),
                         }
                     }
@@ -507,8 +510,19 @@ fn has_non_empty_path(params: &Value) -> bool {
 fn is_intercepted_host_file_command(command_id: &str, params: &Value) -> bool {
     match command_id {
         "table.importPrism" | "table.importPzfx" | "table.importXlsx" | "ui.export.allTablesCsv" => true,
-        "table.exportCsv" | "analysis.exportCsv" | "analysis.exportJson" | "result.generateReport" => !has_non_empty_path(params),
+        "project.open" | "file.open" | "table.exportCsv" | "analysis.exportCsv" | "analysis.exportJson" | "result.generateReport" => {
+            !has_non_empty_path(params)
+        }
         _ => false,
+    }
+}
+
+fn interchange_import_command_for_extension(path: &Path) -> Option<&'static str> {
+    match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("prism") => Some("table.importPrism"),
+        Some("pzfx") => Some("table.importPzfx"),
+        Some("xlsx") => Some("table.importXlsx"),
+        _ => None,
     }
 }
 
@@ -699,6 +713,28 @@ fn execute_intercepted_host_file_command(
     params: &Value,
 ) -> Result<Vec<UiIntentOutcome>, String> {
     match command_id {
+        "project.open" | "file.open" => {
+            let req = NativeFileDialogRequest {
+                command_id: command_id.to_owned(),
+                kind: NativeFileDialogKind::OpenFile,
+                filter_label: String::from("CurveBook / Data"),
+                extensions: ["curvebook", "cbtemplate", "prism", "pzfx", "xlsx", "csv", "tsv"].into_iter().map(str::to_owned).collect(),
+                default_file_name: None,
+            };
+            let Some(path) = adapter.pick(&req)? else {
+                return Ok(Vec::new());
+            };
+            if let Some(import_cmd) = interchange_import_command_for_extension(&path) {
+                if app.document().total_sheet_count() > 0 || app.session().is_dirty() {
+                    let has_unsaved = app.session().is_dirty();
+                    app.open_import_project_mode_dialog(import_cmd, path.to_string_lossy().into_owned(), has_unsaved);
+                    return Ok(Vec::new());
+                }
+                return execute_host_import_at_path(app, import_cmd, &path, false);
+            }
+            let out = commit_single_engine_command(app, "project.open", json!({ "path": path.to_string_lossy() }))?;
+            Ok(vec![out])
+        }
         "table.importPrism" | "table.importPzfx" | "table.importXlsx" => {
             if let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
                 let merge = params.get("merge").and_then(Value::as_bool).unwrap_or(false);

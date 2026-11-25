@@ -513,10 +513,28 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
     let mut h = NativeHarness::with_screen(CurveBookNativeApp::new(rt, wid, None), egui::vec2(1280.0, 820.0));
     h.settle(2);
 
-    for expected_title in ["Native Archive Sheet", "PZFX Imported Columns", "Archive Zip Kinetics", "extra"] {
+    // 2. Click File > Open... for .curvebook, .pzfx, .prism, and .csv.
+    // Opening `.pzfx` / `.prism` onto an occupied window prompts replace-or-merge (`R10.29`).
+    for (expected_title, ext, expects_import_prompt) in [
+        ("Native Archive Sheet", ".curvebook", false),
+        ("PZFX Imported Columns", ".pzfx", true),
+        ("Archive Zip Kinetics", ".prism", true),
+        ("extra", ".csv", false),
+    ] {
         h.open_menu_item("menu.file", None, "menu.project.open")?;
+        if expects_import_prompt {
+            let cur = h.app.runtime().focused_window_id().unwrap_or(wid);
+            assert!(
+                matches!(h.app.runtime().window(cur)?.app().canvas_dialogs.active_dialog, ActiveDialog::ImportProjectMode { .. }),
+                "expected replace-or-merge prompt on File > Open ({ext}) onto occupied window"
+            );
+            let _ = h.click_widget("import_project_mode.replace")?;
+        }
         let cur = h.app.runtime().focused_window_id().unwrap_or(wid);
-        assert!(h.app.runtime().window(cur)?.app().document().data_sheets.iter().any(|ds| ds.title == expected_title), "missing `{expected_title}`");
+        assert!(
+            h.app.runtime().window(cur)?.app().document().data_sheets.iter().any(|ds| ds.title == expected_title),
+            "missing `{expected_title}` after File > Open ({ext})"
+        );
     }
 
     // Add GraphSheet to enable exports, then test Save, direct Save, Save As, and Exports.

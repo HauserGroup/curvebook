@@ -78,7 +78,7 @@ Search volumes above are unmeasured. Check them in a keyword tool or Search Cons
 | Action | Status | Notes |
 |---|---|---|
 | Open `.pzfx` and `.prism` files and export tables to CSV (CLI route) | Done (`R12.8`) | [`open-pzfx-files.html`](../open-pzfx-files.html), checked by a CLI test |
-| Add the desktop route to the same page (File › Open, Add to current project, CSV export) | Blocked | Needs the `R10.29` GUI work and `R10.30` human-path tests |
+| Add the desktop route to the same page (File › Open, Add to current project, CSV export) | Ready | `R10.29` GUI work and `R10.30` human-path tests (`human_wf_import_export.rs`) are done |
 | Separate pages per search phrasing (".pzfx to CSV", ".prism to CSV", "what is kept and what is lost") | Ready | Only if Search Console shows the single page ranking for some phrasings and not others. Avoid near-duplicate pages |
 | View a `.pzfx` file in the browser, with nothing uploaded | Blocked | Needs a hosted browser app (`R11`). GitHub Pages cannot send the security headers the browser app requires |
 | A tutorial: `.prism` file to CSV | Blocked | First guide of the `R12.2` pilot; starts after Beta |

@@ -378,7 +378,7 @@ fn interchange_import_command_for_extension(path: &Path) -> Option<&'static str>
 /// changes. Returns `true` when the prompt was opened; the caller then waits for the user's answer,
 /// which re-enters the host as `command_id` with explicit `{ "path", "merge" }` params.
 ///
-/// Shared by File › Import and file drops so both use the same condition and prompt.
+/// Shared by File › Import, File › Open…, and file drops so all three use the same condition and prompt.
 fn open_import_mode_prompt_if_needed(win: &mut DesktopWindowSession, command_id: &str, path: &Path) -> bool {
     let has_unsaved = win.has_unsaved_changes();
     if win.app().document().total_sheet_count() == 0 && !has_unsaved {
@@ -1767,7 +1767,7 @@ impl DesktopHostRuntime {
         if matches!(command_id, "project.open" | "file.open")
             && let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
         {
-            return self.open_path_in_window(window_id, PathBuf::from(explicit_path)).map(Some);
+            return self.open_or_prompt_interchange_in_window(window_id, PathBuf::from(explicit_path)).map(Some);
         }
         if matches!(command_id, "table.importPrism" | "table.importPzfx" | "table.importXlsx")
             && let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
@@ -1784,7 +1784,7 @@ impl DesktopHostRuntime {
             let picked = (hook.0)(window_id);
             self.open_file_dialog_hook = Some(hook);
             if let Some(path) = picked? {
-                return self.open_path_in_window(window_id, path).map(Some);
+                return self.open_or_prompt_interchange_in_window(window_id, path).map(Some);
             }
             return Ok(Some(Self::cancelled_file_dialog_outcome(window_id, command_id)));
         }
@@ -1810,7 +1810,7 @@ impl DesktopHostRuntime {
                     default_file_name: None,
                 };
                 match adapter.pick(&req)? {
-                    Some(path) => self.open_path_in_window(window_id, path)?,
+                    Some(path) => self.open_or_prompt_interchange_in_window(window_id, path)?,
                     None => Self::cancelled_file_dialog_outcome(window_id, command_id),
                 }
             }
@@ -2750,10 +2750,33 @@ impl DesktopHostRuntime {
         self.open_path_in_window(window_id, path)
     }
 
+    /// Open `path` into `window_id`, prompting replace-or-merge first when `path` is a `.prism`,
+    /// `.pzfx`, or `.xlsx` interchange file and the window already has sheets or unsaved changes
+    /// (`R10.29`, matching `File › Import` and drag-and-drop).
+    fn open_or_prompt_interchange_in_window(&mut self, window_id: DesktopWindowId, path: PathBuf) -> Result<DesktopEventOutcome, String> {
+        if let Some(command_id) = interchange_import_command_for_extension(&path)
+            && !is_unpacked_project_target(&path)
+        {
+            let win = self.window_mut(window_id)?;
+            win.hovered_files.clear();
+            if open_import_mode_prompt_if_needed(win, command_id, &path) {
+                return Ok(DesktopEventOutcome {
+                    handled: true,
+                    action: format!("native_file_dialog.confirm_import_mode:{command_id}"),
+                    window_id: Some(window_id),
+                    command_id: Some(command_id.to_owned()),
+                    command_result: Some(json!({ "path": path.to_string_lossy(), "prompted": true })),
+                    ..Default::default()
+                });
+            }
+        }
+        self.open_path_in_window(window_id, path)
+    }
+
     /// Open or import `path` into `window_id` without an import-mode prompt: CSV/TSV become a new
     /// table, and projects, templates, and interchange files load in place (or in a new window when
-    /// the target has unsaved changes or `new_instance` is set). Used by File › Open and by drops
-    /// that need no prompt.
+    /// the target has unsaved changes or `new_instance` is set). Used by File › Open (for non-interchange
+    /// files or empty windows) and by drops that need no prompt.
     fn open_path_in_window(&mut self, window_id: DesktopWindowId, path: PathBuf) -> Result<DesktopEventOutcome, String> {
         {
             let win = self.window_mut(window_id)?;
@@ -3770,7 +3793,7 @@ fn resolve_analysis_export_graph_layout_info_route(
             let id = resolve_result_sheet_id(doc).ok_or_else(|| String::from("no result sheet available for `result.generateReport`"))?;
             Ok(Some(DesktopCommandRoute::EngineCommand {
                 engine_command_id: String::from("result.generateReport"),
-                params: json!({ "result_sheet_id": id.as_str(), "format": "markdown" }),
+                params: json!({ "result_sheet_id": id.as_str() }),
             }))
         }
         "export.svg" | "file.export_svg" | "export.pdf" | "file.export_pdf" | "export.png" | "file.export_png" | "export.tiff" => {

@@ -590,7 +590,7 @@ pub fn contextual_command_params(app: &UiApp, command_id: &str) -> Value {
         | "ui.result.copyMethodsReport"
         | "ui.result.inspectDiagnostics"
         | "ui.result.appendClusterColumn" => json!({ "sheet_id": result_str }),
-        "result.generateReport" => json!({ "result_sheet_id": result_str, "format": "markdown" }),
+        "result.generateReport" => json!({ "result_sheet_id": result_str }),
         "project.createCheckpoint" => json!({ "name": "Checkpoint" }),
         "ui.theme.set" => json!({ "mode": next_theme_mode_name(app.theme.mode) }),
         "ui.locale.set" => json!({ "locale": if app.locale == "en" { "de" } else { "en" } }),

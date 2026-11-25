@@ -271,11 +271,17 @@ impl Default for CsvExportOptionsState {
 }
 
 impl CsvExportOptionsState {
-    /// Reset options cleanly using the active locale's default decimal separator.
+    /// Reset options cleanly using the active locale's default decimal separator, pairing a comma
+    /// decimal separator with a semicolon delimiter (`CsvOptions::european_csv()`).
     pub fn reset_for_locale(&mut self, decimal_separator: char) {
         self.tab_id = None;
-        self.delimiter = ',';
-        self.decimal_separator = if decimal_separator == ',' { ',' } else { '.' };
+        if decimal_separator == ',' {
+            self.delimiter = ';';
+            self.decimal_separator = ',';
+        } else {
+            self.delimiter = ',';
+            self.decimal_separator = '.';
+        }
     }
 
     /// Normalize delimiter into the supported set `[',', ';', '\t']`.

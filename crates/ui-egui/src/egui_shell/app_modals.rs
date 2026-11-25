@@ -3103,6 +3103,9 @@ fn render_csv_export_options_modal(
                     let selected = opts.normalized_decimal_separator() == ch;
                     if app_tab(ui, meta, wid, lbl, selected, tokens).clicked() && !selected {
                         opts.decimal_separator = ch;
+                        if ch == ',' && opts.normalized_delimiter() == ',' {
+                            opts.delimiter = ';';
+                        }
                         *changed = true;
                     }
                 }
