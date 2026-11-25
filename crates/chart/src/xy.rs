@@ -1724,6 +1724,15 @@ fn resolve_fitted_overlay<'a>(
         warnings.push(ChartWarning::new("failed_regression_result", format!("regression result sheet '{}' failed: {message}", spec.result_sheet_id)));
         return None;
     }
+    if !matches!(res.status, ResultStatus::UpToDate) {
+        // Cached curve points describe the data before the pending recalculation; drawing them would
+        // present an outdated fit as current.
+        warnings.push(ChartWarning::new(
+            "pending_regression_result",
+            format!("regression result sheet '{}' is pending recalculation; fitted curve omitted", spec.result_sheet_id),
+        ));
+        return None;
+    }
     let Some(curve) = res.fitted_curves.iter().find(|fc| fc.data_set_index == series.data_set_index) else {
         warnings.push(ChartWarning::new(
             "missing_fitted_curve",

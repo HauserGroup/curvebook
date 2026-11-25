@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use curvebook_chart::ChartScene;
+use curvebook_chart::{ChartScene, ChartWarning};
 use curvebook_doc::{ErrorCode, ProjectDocument, SheetId};
 use curvebook_pdf::{PdfColorSpace, PdfExportOptions};
 use curvebook_render::TiffCompression;
@@ -27,6 +27,22 @@ const EXPORT_EFFECTS: Effects = Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOT
 #[must_use]
 pub fn specs() -> &'static [CommandSpec] {
     SPECS
+}
+
+/// Build a figure export outcome that states every scene warning, so an omitted fitted curve (failed,
+/// pending recalculation, or missing) is reported rather than leaving a figure that looks complete.
+///
+/// The warnings appear in the payload as `warnings: [{code, message}]` with `warnings_count`, and in
+/// [`CommandOutcome::warnings`] as `code: message` lines that the CLI, batch runner, and desktop show.
+fn figure_export_outcome(command_id: &str, message: &str, mut payload: Value, warnings: &[ChartWarning]) -> CommandOutcome {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(String::from("warnings_count"), json!(warnings.len()));
+        obj.insert(String::from("warnings"), Value::Array(warnings.iter().map(|w| json!({ "code": w.code, "message": w.message })).collect()));
+    }
+    let message = if warnings.is_empty() { message.to_owned() } else { format!("{message} with {} warning(s)", warnings.len()) };
+    let mut outcome = CommandOutcome::read_only(command_id, message, payload);
+    outcome.warnings = warnings.iter().map(|w| format!("{}: {}", w.code, w.message)).collect();
+    outcome
 }
 
 static SPECS: &[CommandSpec] = &command_specs!(
@@ -362,10 +378,10 @@ fn run_svg_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
     artifact.write_if_requested(&ctx.session.path_policy, params.path.as_deref())?;
     let width_pt = artifact.width_pt.unwrap_or(0.0);
     let height_pt = artifact.height_pt.unwrap_or(0.0);
-    let warnings_count = artifact.warnings_count;
+    let warnings = artifact.warnings.clone();
     let svg = artifact.into_utf8_string()?;
 
-    Ok(CommandOutcome::read_only(
+    Ok(figure_export_outcome(
         command_id,
         "exported SVG figure",
         json!({
@@ -373,10 +389,10 @@ fn run_svg_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
             "byte_len": svg.len(),
             "width_pt": width_pt,
             "height_pt": height_pt,
-            "warnings_count": warnings_count,
             "path": params.path,
             "svg": svg,
         }),
+        &warnings,
     ))
 }
 
@@ -431,7 +447,7 @@ fn run_pdf_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
     let artifact = export_document_artifact(ctx.session.document(), &req, Some(ctx.cancelled), command_id)?;
     artifact.write_if_requested(&ctx.session.path_policy, params.path.as_deref())?;
 
-    Ok(CommandOutcome::read_only(
+    Ok(figure_export_outcome(
         command_id,
         "exported PDF figure",
         json!({
@@ -444,6 +460,7 @@ fn run_pdf_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
             "path": params.path,
             "base64": encode_base64(&artifact.bytes),
         }),
+        &artifact.warnings,
     ))
 }
 
@@ -471,7 +488,7 @@ fn run_png_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
     artifact.write_if_requested(&ctx.session.path_policy, params.path.as_deref())?;
     let raster = artifact.raster.ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "PNG export missing raster metadata"))?;
 
-    Ok(CommandOutcome::read_only(
+    Ok(figure_export_outcome(
         command_id,
         "exported PNG figure",
         json!({
@@ -483,6 +500,7 @@ fn run_png_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
             "path": params.path,
             "base64": encode_base64(&artifact.bytes),
         }),
+        &artifact.warnings,
     ))
 }
 
@@ -515,7 +533,7 @@ fn run_export_tiff(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     artifact.write_if_requested(&ctx.session.path_policy, params.path.as_deref())?;
     let raster = artifact.raster.ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "TIFF export missing raster metadata"))?;
 
-    Ok(CommandOutcome::read_only(
+    Ok(figure_export_outcome(
         "export.tiff",
         "exported TIFF figure",
         json!({
@@ -528,6 +546,7 @@ fn run_export_tiff(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
             "path": params.path,
             "base64": encode_base64(&artifact.bytes),
         }),
+        &artifact.warnings,
     ))
 }
 
@@ -556,7 +575,7 @@ fn run_emf_with_kind(ctx: &mut Ctx<'_>, command_id: &str, kind: EmfSheetKind, ra
         .and_then(|slice| <[u8; 4]>::try_from(slice).ok())
         .map_or_else(String::new, |bytes| format!("0x{:08X}", u32::from_le_bytes(bytes)));
 
-    Ok(CommandOutcome::read_only(
+    Ok(figure_export_outcome(
         command_id,
         "exported EMF figure",
         json!({
@@ -569,6 +588,7 @@ fn run_emf_with_kind(ctx: &mut Ctx<'_>, command_id: &str, kind: EmfSheetKind, ra
             "path": params.path,
             "base64": encode_base64(&artifact.bytes),
         }),
+        &artifact.warnings,
     ))
 }
 

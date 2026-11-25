@@ -380,7 +380,7 @@ pub fn extract_fit_summary_entries(graph: &GraphSheet, doc: &ProjectDocument, ma
         let Some(res) = doc.result_sheet(&ov_spec.result_sheet_id) else {
             continue;
         };
-        if matches!(res.status, ResultStatus::Failed { .. }) {
+        if !matches!(res.status, ResultStatus::UpToDate) {
             continue;
         }
         let Some(curve) = res.fitted_curves.iter().find(|fc| fc.data_set_index == series.data_set_index) else {

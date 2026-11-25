@@ -2083,6 +2083,7 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
             "width_px": artifact.raster.map(|r| r.width_px),
             "height_px": artifact.raster.map(|r| r.height_px),
             "dpi": artifact.raster.map(|r| r.dpi),
+            "warnings": figure_warnings_json(&artifact.warnings),
         }));
     }
 
@@ -2096,7 +2097,13 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         "bytes_len": artifact.bytes.len(),
         "encoding": "base64",
         "data_base64": curvebook_platform::base64::encode(&artifact.bytes),
+        "warnings": figure_warnings_json(&artifact.warnings),
     }))
+}
+
+/// Serialize figure scene warnings as `[{code, message}]` for export responses.
+fn figure_warnings_json(warnings: &[curvebook_chart::ChartWarning]) -> Value {
+    Value::Array(warnings.iter().map(|w| json!({ "code": w.code, "message": w.message })).collect())
 }
 
 const SHEET_ID_KEYS: &[&str] = &["sheet_id", "sheetId"];

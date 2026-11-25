@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use curvebook_chart::{ChartScene, compile_graph, compile_layout};
+use curvebook_chart::{ChartScene, ChartWarning, compile_graph, compile_layout};
 use curvebook_doc::{DataSheet, ErrorCode, ProjectDocument, ResultSheet, SheetId};
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
 use curvebook_pdf::{
@@ -378,8 +378,8 @@ pub struct ExportedArtifact {
     pub width_pt: Option<f64>,
     /// Scene height in typographic points for single/first visual page exports.
     pub height_pt: Option<f64>,
-    /// Count of non-fatal scene compilation warnings.
-    pub warnings_count: usize,
+    /// Non-fatal scene compilation warnings, such as a fitted curve omitted because its fit failed or is pending.
+    pub warnings: Vec<ChartWarning>,
     /// Pixel metadata for raster exports (`Png` / `Tiff`).
     pub raster: Option<RasterMetadata>,
 }
@@ -991,7 +991,7 @@ fn export_pdf_artifact(
         }
         let w = page_refs.first().map(|s| s.width_pt);
         let h = page_refs.first().map(|s| s.height_pt);
-        let warnings_count = page_refs.iter().map(|s| s.warnings.len()).sum();
+        let warnings = page_refs.iter().flat_map(|s| s.warnings.iter().cloned()).collect();
         let bytes = render_pdf_page_refs(&page_refs, options)?;
         return Ok(ExportedArtifact {
             target_id: String::from("multi-page"),
@@ -999,7 +999,7 @@ fn export_pdf_artifact(
             page_count: page_refs.len(),
             width_pt: w,
             height_pt: h,
-            warnings_count,
+            warnings,
             raster: None,
         });
     }
@@ -1042,7 +1042,7 @@ fn export_pdf_artifact(
         }
         let w = scenes.first().map(|s| s.width_pt);
         let h = scenes.first().map(|s| s.height_pt);
-        let warnings_count = scenes.iter().map(|s| s.warnings.len()).sum();
+        let warnings = scenes.iter().flat_map(|s| s.warnings.iter().cloned()).collect();
         let bytes = render_pdf_pages(&scenes, &opts)?;
         return Ok(ExportedArtifact {
             target_id: String::from("all"),
@@ -1050,7 +1050,7 @@ fn export_pdf_artifact(
             page_count: scenes.len(),
             width_pt: w,
             height_pt: h,
-            warnings_count,
+            warnings,
             raster: None,
         });
     }
@@ -1064,7 +1064,7 @@ fn export_pdf_artifact(
         page_count: 1,
         width_pt: Some(scene.width_pt),
         height_pt: Some(scene.height_pt),
-        warnings_count: scene.warnings.len(),
+        warnings: scene.warnings.clone(),
         raster: None,
     })
 }
@@ -1169,7 +1169,15 @@ fn export_csv_artifact(
             (rs.id.as_str().to_owned(), text)
         }
     };
-    Ok(ExportedArtifact { target_id, bytes: csv_text.into_bytes(), page_count: 1, width_pt: None, height_pt: None, warnings_count: 0, raster: None })
+    Ok(ExportedArtifact {
+        target_id,
+        bytes: csv_text.into_bytes(),
+        page_count: 1,
+        width_pt: None,
+        height_pt: None,
+        warnings: Vec::new(),
+        raster: None,
+    })
 }
 
 fn serialize_json_bytes(value: &impl Serialize, pretty: bool) -> Result<Vec<u8>, EngineError> {
@@ -1201,7 +1209,7 @@ fn export_json_artifact(doc: &ProjectDocument, target: &ExportTarget, pretty: bo
     } else {
         (String::from("project"), serialize_json_bytes(doc, pretty)?)
     };
-    Ok(ExportedArtifact { target_id, bytes, page_count: 1, width_pt: None, height_pt: None, warnings_count: 0, raster: None })
+    Ok(ExportedArtifact { target_id, bytes, page_count: 1, width_pt: None, height_pt: None, warnings: Vec::new(), raster: None })
 }
 
 struct RasterExportParams {
@@ -1246,7 +1254,7 @@ fn export_raster_artifact(
         page_count: 1,
         width_pt: Some(scene.width_pt),
         height_pt: Some(scene.height_pt),
-        warnings_count: scene.warnings.len(),
+        warnings: scene.warnings.clone(),
         raster: Some(RasterMetadata { width_px: raster.width_px, height_px: raster.height_px, dpi: spec.dpi }),
     })
 }
@@ -1291,7 +1299,7 @@ fn export_emf_artifact(
         page_count: 1,
         width_pt: Some(scene.width_pt),
         height_pt: Some(scene.height_pt),
-        warnings_count: scene.warnings.len(),
+        warnings: scene.warnings.clone(),
         raster: None,
     })
 }
@@ -1322,7 +1330,7 @@ pub fn export_document_artifact(
                 page_count: 1,
                 width_pt: Some(scene.width_pt),
                 height_pt: Some(scene.height_pt),
-                warnings_count: scene.warnings.len(),
+                warnings: scene.warnings.clone(),
                 raster: None,
             })
         }

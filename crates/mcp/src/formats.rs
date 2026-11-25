@@ -1097,7 +1097,7 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
                 Ok(b) => b,
                 Err(err) => return Ok(errors::result_from_code(ErrorCode::InternalError, format!("invalid base64 from live doc.export: {err}"))),
             };
-            return write_atomic_export(&dest, format_str, &target_id, &bytes);
+            return attach_figure_warnings(write_atomic_export(&dest, format_str, &target_id, &bytes), remote.get("warnings"));
         }
         let Some(b64) = remote.get("data_base64").and_then(Value::as_str) else {
             return Ok(errors::result_from_code(ErrorCode::InternalError, "live doc.export response missing data_base64"));
@@ -1116,7 +1116,7 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
             }
             _ => None,
         };
-        return format_inline_export_result(format_str, &target_id, &bytes, raster_meta);
+        return attach_figure_warnings(format_inline_export_result(format_str, &target_id, &bytes, raster_meta), remote.get("warnings"));
     }
 
     if format == DocumentExportFormat::Pdf
@@ -1139,11 +1139,42 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
         Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
 
+    let warnings = Value::Array(artifact.warnings.iter().map(|w| json!({ "code": w.code, "message": w.message })).collect());
     if let Some(dest) = resolved_path {
-        return write_atomic_export(&dest, format_str, &artifact.target_id, &artifact.bytes);
+        return attach_figure_warnings(write_atomic_export(&dest, format_str, &artifact.target_id, &artifact.bytes), Some(&warnings));
     }
 
-    format_inline_export_result(format_str, &artifact.target_id, &artifact.bytes, artifact.raster)
+    attach_figure_warnings(format_inline_export_result(format_str, &artifact.target_id, &artifact.bytes, artifact.raster), Some(&warnings))
+}
+
+/// Report figure warnings (for example a fitted curve omitted because its fit failed or is pending
+/// recalculation) alongside an export result: as a `warnings` array in the structured content and as
+/// a trailing text block, so a client cannot mistake an incomplete figure for a complete one.
+fn attach_figure_warnings(result: Result<ToolCallResult, ToolCallError>, warnings: Option<&Value>) -> Result<ToolCallResult, ToolCallError> {
+    let mut result = result?;
+    let Some(Value::Array(items)) = warnings else {
+        return Ok(result);
+    };
+    if items.is_empty() || result.is_error {
+        return Ok(result);
+    }
+    let lines: Vec<String> = items
+        .iter()
+        .map(|w| {
+            let code = w.get("code").and_then(Value::as_str).unwrap_or("figure_warning");
+            let message = w.get("message").and_then(Value::as_str).unwrap_or_default();
+            format!("- {code}: {message}")
+        })
+        .collect();
+    result.content.push(ContentBlock::Text { text: format!("Figure warnings ({}):\n{}", items.len(), lines.join("\n")) });
+    match result.structured_content.as_mut() {
+        Some(Value::Object(obj)) => {
+            obj.insert(String::from("warnings"), Value::Array(items.clone()));
+        }
+        Some(_) => {}
+        None => result.structured_content = Some(json!({ "warnings": items })),
+    }
+    Ok(result)
 }
 
 fn write_atomic_export(dest: &Path, format: &str, target_id: &str, bytes: &[u8]) -> Result<ToolCallResult, ToolCallError> {

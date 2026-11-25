@@ -167,6 +167,7 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
                 "format": summary.format,
                 "sheet_id": summary.sheet_id,
                 "bytes_written": summary.bytes_written,
+                "figure_warnings": summary.warnings,
             }));
         }
 

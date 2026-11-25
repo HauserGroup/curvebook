@@ -73,6 +73,9 @@ pub struct ExportOutcomeSummary {
     pub format: &'static str,
     pub sheet_id: Option<String>,
     pub bytes_written: usize,
+    /// Figure warnings as `code: message` lines (for example a fitted curve omitted because its fit
+    /// failed or is pending recalculation); each is also printed to stderr.
+    pub warnings: Vec<String>,
 }
 
 struct ConvertArgs {
@@ -146,6 +149,7 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
                     "pdf_version": pdf_version_str(parsed.pdf_version),
                     "ttf_font_embedded": font_bytes.is_some(),
                     "warnings": loaded.warnings,
+                    "figure_warnings": summary.warnings,
                 })
             } else {
                 json!({
@@ -157,6 +161,7 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
                     "sheet_id": summary.sheet_id,
                     "bytes_written": summary.bytes_written,
                     "warnings": loaded.warnings,
+                    "figure_warnings": summary.warnings,
                 })
             };
             let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
@@ -297,6 +302,7 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
                 format: req.format.as_str(),
                 sheet_id: None,
                 bytes_written,
+                warnings: Vec::new(),
             });
         }
 
@@ -312,11 +318,16 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
         }
         write_atomic(req.out_path, &artifact.bytes)?;
 
+        let warnings: Vec<String> = artifact.warnings.iter().map(|w| format!("{}: {}", w.code, w.message)).collect();
+        for w in &warnings {
+            eprintln!("warning: {w}");
+        }
         Ok(ExportOutcomeSummary {
             out_path: req.out_path.to_string_lossy().into_owned(),
             format: req.format.as_str(),
             sheet_id,
             bytes_written: artifact.bytes.len(),
+            warnings,
         })
     })
 }
@@ -532,6 +543,57 @@ mod tests {
         let layout = LayoutSheet::new("layout-1", "Figure 1", layout_spec)?;
         doc.add_layout_sheet(layout)?;
         Ok(doc)
+    }
+
+    /// `R19.5`: a graph whose fit is pending recalculation exports without the cached curve and
+    /// `convert` reports the omission as a figure warning.
+    #[test]
+    fn export_reports_pending_fit_as_figure_warning() {
+        use curvebook_doc::{
+            AnalysisKind, AnalysisSpec, CurveSamplePoint, FittedCurveOverlay, NonlinearFitSpec, RegressionOverlaySpec, ResultSheet, ResultStatus,
+        };
+
+        let mut doc = build_sample_doc_with_graph_and_layout().unwrap();
+        let spec = AnalysisSpec::new("fit-1", "data-1", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("linear"))).unwrap();
+        let mut res = ResultSheet::new(spec).unwrap();
+        res.status = ResultStatus::Dirty;
+        let pt = |x: f64, y: f64| CurveSamplePoint { x, y, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None };
+        res.fitted_curves.push(FittedCurveOverlay {
+            data_set_index: 0,
+            equation_id: String::from("linear"),
+            converged: true,
+            ambiguous: false,
+            points: vec![pt(1.0, 2.5), pt(3.0, 7.5)],
+        });
+        doc.add_result_sheet(res).unwrap();
+        doc.graph_sheet_mut(&SheetId::new("graph-1")).unwrap().spec.series[0].regression_overlay = Some(RegressionOverlaySpec {
+            result_sheet_id: SheetId::new("fit-1"),
+            sample_segments: 20,
+            show_confidence_band: false,
+            show_prediction_band: false,
+            shaded_ribbon: false,
+        });
+
+        let dir = unique_temp_dir("pending-fit");
+        let out_path = dir.join("figure.svg");
+        let summary = super::export_from_document(&super::ExportRequest {
+            doc: &doc,
+            out_path: &out_path,
+            format: ExportFormat::Svg,
+            sheet: Some("graph-1"),
+            dpi: None,
+            pretty: true,
+            tab_index: None,
+            pdf_version: PdfVersion::default(),
+            embedded_truetype_font: None,
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            summary.warnings.iter().any(|w| w.starts_with("pending_regression_result: ")),
+            "expected a pending-fit figure warning, got {:?}",
+            summary.warnings
+        );
     }
 
     fn assert_emf_magic(bytes: &[u8]) {

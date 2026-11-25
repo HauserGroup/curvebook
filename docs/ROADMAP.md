@@ -742,6 +742,17 @@ The methods report said "all finite active observations were included" whenever 
 - [x] Test that the results checklist and the generated methods report give the same counts.
 - [ ] Follow-up: extend the same accounting to listwise-filtered ANOVA, regression, and survival analyses and to ignored non-numeric cells in unpaired analyses.
 
+### R19.5 Keep pending fits out of exported figures
+Owner: open · Status: in progress (XY pending-fit guard and engine/CLI/MCP/control export warnings landed locally; follow-ups open) · Was: reporting-accuracy review 2026-11-24 · Depends on: none · Gate: post-Beta · Est. note: 4–8 h
+
+The XY regression overlay skipped failed fits but would still draw cached curve points from a fit pending recalculation, while the equation box already showed "(Fit pending)". Figure exports reported only a warning count (and only for SVG), so an omitted or failed fit was easy to miss.
+
+- [x] Omit the regression overlay for a fit that is not up to date and emit a `pending_regression_result` chart warning.
+- [x] Return each figure warning (`code`, `message`) from the engine figure export commands (payload `warnings` and `CommandOutcome::warnings`), the control `doc.export` call, the MCP `export` tool, and CLI `convert` / batch exports.
+- [x] Test that a pending fit never yields an exported figure with the old curve, and that its warning reaches the engine, MCP, and CLI surfaces.
+- [ ] Follow-up: show figure export warnings to a person using the desktop export dialog (needs a human-path test).
+- [ ] Follow-up: apply the same up-to-date check to survival, ROC, and Bland–Altman curves read from result sheets.
+
 ---
 
 ## R20 Desktop GUI visual system & layout overhaul
