@@ -229,6 +229,8 @@ pub struct WelcomeHubEguiState {
     pub open_file_path_draft: String,
     pub open_file_request_count: u64,
     pub template_error: Option<String>,
+    /// Inline error from the last failed `Load Sample` attempt (cleared on any sample-mode change).
+    pub sample_error: Option<String>,
 }
 
 /// Per-frame layout report returned by [`render_welcome_hub`].
@@ -496,6 +498,7 @@ fn render_left_rail(
                 state.left_mode = WelcomeLeftMode::NewTableArchetype(arch);
                 state.schema.archetype = arch;
                 state.schema.selected_sample_index = 0;
+                state.sample_error = None;
                 if matches!(arch, WelcomeArchetypeChoice::PartsOfWhole) {
                     state.schema.cols = 1;
                 } else if state.schema.cols < 2 {
@@ -663,6 +666,9 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
     ui.add_space(6.0);
 
     let seg_w = ((content_w - 6.0) * 0.5).max(52.0);
+    let has_fixture = archetype_has_sample(arch);
+    let sample_enabled = enabled && has_fixture;
+    let sample_unavailable = tr(locale, "welcome.sample.unavailable");
     if rect_visible_in_clip(ui, Vec2::new(content_w, 24.0)) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -685,6 +691,7 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
             ) && enabled
             {
                 cx.state.schema.entry_mode_sample = false;
+                cx.state.sample_error = None;
             }
             if render_pill_button(
                 ui,
@@ -698,14 +705,15 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
                     label: tr(locale, "welcome.mode.sample"),
                     command_id: None,
                     selected: cx.state.schema.entry_mode_sample,
-                    enabled,
-                    disabled_reason: None,
+                    enabled: sample_enabled,
+                    disabled_reason: (!has_fixture).then_some(sample_unavailable),
                     z_layer,
                 },
-            ) && enabled
+            ) && sample_enabled
             {
                 cx.state.schema.entry_mode_sample = true;
                 cx.state.schema.selected_sample_index = 0;
+                cx.state.sample_error = None;
             }
         });
     } else {
@@ -716,12 +724,7 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
     if cx.state.schema.entry_mode_sample {
         let fixtures = matching_samples_for(arch);
         if fixtures.is_empty() {
-            render_plain_clipped_label(
-                ui,
-                "No tutorial fixture registered for this archetype.",
-                FontId::proportional(tokens.metrics.font_ui_small_pt),
-                tokens.text_muted,
-            );
+            render_plain_clipped_label(ui, sample_unavailable, FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
         } else {
             let sel_idx = cx.state.schema.selected_sample_index.min(fixtures.len() - 1);
             for (idx, fx) in fixtures.iter().enumerate() {
@@ -745,12 +748,33 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
                 ) && enabled
                 {
                     cx.state.schema.selected_sample_index = idx;
+                    cx.state.sample_error = None;
                 }
                 ui.add_space(2.0);
             }
             if let Some(chosen) = fixtures.get(sel_idx) {
                 render_plain_clipped_label(ui, chosen.summary, FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
             }
+        }
+        if let Some(err_msg) = cx.state.sample_error.as_deref() {
+            ui.add_space(4.0);
+            let err_resp = ui.add(egui::Label::new(egui::RichText::new(err_msg).small().color(tokens.link_red)).wrap());
+            cx.meta.record_response(
+                ui,
+                &err_resp,
+                FrameInspectEntryInput {
+                    widget_id: "welcome.sample.error",
+                    role: "text",
+                    label: err_msg,
+                    command_id: None,
+                    value: None,
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
         }
     } else {
         render_archetype_schema_controls(ui, cx, arch);
@@ -1606,9 +1630,16 @@ fn render_card_footer(ui: &mut egui::Ui, cx: &mut WelcomeFooterCtx<'_>) {
         }
 
         let (cta_id, cta_label, cta_cmd, cta_enabled, disabled_reason) = match state.left_mode {
-            WelcomeLeftMode::NewTableArchetype(_) => {
+            WelcomeLeftMode::NewTableArchetype(arch) => {
                 if state.schema.entry_mode_sample {
-                    ("welcome.btn.create", tr(locale, "welcome.btn.load_sample"), Some("sheet.createData"), enabled, None)
+                    let has_fixture = archetype_has_sample(arch);
+                    (
+                        "welcome.btn.create",
+                        tr(locale, "welcome.btn.load_sample"),
+                        Some("sheet.createData"),
+                        enabled && has_fixture,
+                        (!has_fixture).then(|| tr(locale, "welcome.sample.unavailable")),
+                    )
                 } else {
                     ("welcome.btn.create", tr(locale, "welcome.btn.create_table"), Some("sheet.createData"), enabled, None)
                 }
@@ -1658,7 +1689,13 @@ fn dispatch_welcome_primary_action(app: &UiApp, state: &mut WelcomeHubEguiState,
     match state.left_mode {
         WelcomeLeftMode::NewTableArchetype(arch) => {
             if state.schema.entry_mode_sample {
-                dispatch_sample_creation(app, arch, &state.schema, intents);
+                match dispatch_sample_creation(app, arch, &state.schema, intents) {
+                    Ok(()) => state.sample_error = None,
+                    Err(msg) => {
+                        state.sample_error = Some(msg);
+                        return;
+                    }
+                }
             } else {
                 let params = build_empty_create_params(arch, &state.schema, &app.locale);
                 intents.push_engine("sheet.createData", params);
@@ -2027,8 +2064,16 @@ fn subcolumn_mode_from_index(idx: usize, replicates: usize) -> SubcolumnMode {
     }
 }
 
+fn matching_samples_in(fixtures: &'static [SampleFixtureDescriptor], arch: WelcomeArchetypeChoice) -> Vec<&'static SampleFixtureDescriptor> {
+    fixtures.iter().filter(|f| f.kind == arch.table_kind()).collect()
+}
+
 fn matching_samples_for(arch: WelcomeArchetypeChoice) -> Vec<&'static SampleFixtureDescriptor> {
-    SAMPLE_FIXTURES.iter().filter(|f| f.kind == arch.table_kind()).collect()
+    matching_samples_in(SAMPLE_FIXTURES, arch)
+}
+
+fn archetype_has_sample(arch: WelcomeArchetypeChoice) -> bool {
+    !matching_samples_for(arch).is_empty()
 }
 
 /// Build an atomic [`UiIntent::EngineCommandGroup`] instantiating sample fixture `fixture_id`.
@@ -2096,15 +2141,36 @@ pub fn build_sample_creation_intent(
     Ok(UiIntent::EngineCommandGroup { commands })
 }
 
-fn dispatch_sample_creation(app: &UiApp, arch: WelcomeArchetypeChoice, schema: &WelcomeSchemaDraft, intents: &mut PendingUiIntents) {
-    let fixtures = matching_samples_for(arch);
+fn dispatch_sample_creation(
+    app: &UiApp,
+    arch: WelcomeArchetypeChoice,
+    schema: &WelcomeSchemaDraft,
+    intents: &mut PendingUiIntents,
+) -> Result<(), String> {
+    dispatch_sample_creation_from(app, SAMPLE_FIXTURES, arch, schema, intents)
+}
+
+/// Queue creation of the selected sample fixture drawn from `catalog`.
+///
+/// Never falls back to an empty table: an archetype with no fixture, or a fixture that fails to
+/// build, returns a localised error and queues nothing.
+fn dispatch_sample_creation_from(
+    app: &UiApp,
+    catalog: &'static [SampleFixtureDescriptor],
+    arch: WelcomeArchetypeChoice,
+    schema: &WelcomeSchemaDraft,
+    intents: &mut PendingUiIntents,
+) -> Result<(), String> {
+    let fixtures = matching_samples_in(catalog, arch);
     let Some(fx) = fixtures.get(schema.selected_sample_index.min(fixtures.len().saturating_sub(1))) else {
-        let params = build_empty_create_params(arch, schema, &app.locale);
-        intents.push_engine("sheet.createData", params);
-        return;
+        return Err(tr(&app.locale, "welcome.sample.unavailable").to_owned());
     };
-    if let Ok(intent) = build_sample_creation_intent(app, fx.id, Some(&schema.title), schema.auto_graph, schema.auto_info) {
-        intents.push(intent);
+    match build_sample_creation_intent(app, fx.id, Some(&schema.title), schema.auto_graph, schema.auto_info) {
+        Ok(intent) => {
+            intents.push(intent);
+            Ok(())
+        }
+        Err(err) => Err(format!("{} {err}", tr(&app.locale, "welcome.sample.load_failed"))),
     }
 }
 
@@ -2743,4 +2809,88 @@ fn render_clipped_text_label(
             skip_offscreen: true,
         },
     );
+}
+
+#[cfg(test)]
+mod sample_error_tests {
+    use super::*;
+
+    static NO_XY_FIXTURES: &[SampleFixtureDescriptor] = &[SampleFixtureDescriptor {
+        id: "unknown-fixture-id",
+        title: "Broken",
+        kind: TableKind::Column,
+        summary: "",
+        row_count: 1,
+        column_count: 1,
+        replicates: 1,
+    }];
+
+    static BROKEN_XY_FIXTURES: &[SampleFixtureDescriptor] = &[SampleFixtureDescriptor {
+        id: "no-such-fixture",
+        title: "Broken",
+        kind: TableKind::Xy,
+        summary: "",
+        row_count: 1,
+        column_count: 1,
+        replicates: 1,
+    }];
+
+    #[test]
+    fn archetype_without_fixture_cannot_dispatch_sample_creation() {
+        let app = UiApp::new();
+        let schema = WelcomeSchemaDraft { entry_mode_sample: true, ..Default::default() };
+        let mut intents = PendingUiIntents::default();
+        let res = dispatch_sample_creation_from(&app, NO_XY_FIXTURES, WelcomeArchetypeChoice::Xy, &schema, &mut intents);
+        assert_eq!(res, Err(tr(&app.locale, "welcome.sample.unavailable").to_owned()));
+        assert!(intents.intents().is_empty(), "no intent (e.g. empty sheet.createData) may be queued");
+        assert!(!tr(&app.locale, "welcome.sample.unavailable").is_empty());
+        assert_eq!(app.document().total_sheet_count(), 0);
+    }
+
+    #[test]
+    fn failing_fixture_build_returns_error_and_queues_nothing() {
+        let app = UiApp::new();
+        let mut state = WelcomeHubEguiState { left_mode: WelcomeLeftMode::NewTableArchetype(WelcomeArchetypeChoice::Xy), ..Default::default() };
+        state.schema.entry_mode_sample = true;
+        let mut intents = PendingUiIntents::default();
+        let res = dispatch_sample_creation_from(&app, BROKEN_XY_FIXTURES, WelcomeArchetypeChoice::Xy, &state.schema, &mut intents);
+        let msg = res.expect_err("unknown fixture must fail");
+        assert!(msg.starts_with(tr(&app.locale, "welcome.sample.load_failed")), "{msg}");
+        assert!(intents.intents().is_empty());
+    }
+
+    #[test]
+    fn primary_action_in_sample_mode_clears_stale_error_and_queues_group() {
+        let app = UiApp::new();
+        let mut state = WelcomeHubEguiState {
+            left_mode: WelcomeLeftMode::NewTableArchetype(WelcomeArchetypeChoice::Xy),
+            sample_error: Some(String::from("stale")),
+            ..Default::default()
+        };
+        state.schema.entry_mode_sample = true;
+        let mut intents = PendingUiIntents::default();
+        dispatch_welcome_primary_action(&app, &mut state, &mut intents);
+        assert_eq!(state.sample_error, None);
+        assert!(matches!(intents.intents().first(), Some(UiIntent::EngineCommandGroup { .. })));
+    }
+
+    #[test]
+    fn normal_sample_still_loads_for_every_archetype() {
+        let app = UiApp::new();
+        for arch in [
+            WelcomeArchetypeChoice::Xy,
+            WelcomeArchetypeChoice::Column,
+            WelcomeArchetypeChoice::Grouped,
+            WelcomeArchetypeChoice::Contingency,
+            WelcomeArchetypeChoice::Survival,
+            WelcomeArchetypeChoice::PartsOfWhole,
+            WelcomeArchetypeChoice::MultipleVariables,
+            WelcomeArchetypeChoice::Nested,
+        ] {
+            let schema = WelcomeSchemaDraft { entry_mode_sample: true, ..Default::default() };
+            let mut intents = PendingUiIntents::default();
+            assert_eq!(dispatch_sample_creation(&app, arch, &schema, &mut intents), Ok(()));
+            assert!(matches!(intents.intents().first(), Some(UiIntent::EngineCommandGroup { .. })));
+        }
+    }
 }

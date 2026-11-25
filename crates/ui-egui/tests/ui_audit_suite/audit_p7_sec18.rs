@@ -871,7 +871,7 @@ fn fa_sec18_17_close_all_clears_stale_state_and_spinner_ids_are_series_keyed() -
 #[test]
 fn fa_sec18_18_all_16_locales_modal_translations_and_partial_helpers_removed() -> TestRes {
     assert_eq!(LOCALES.len(), 16);
-    assert_eq!(catalog_len(), 789);
+    assert_eq!(catalog_len(), 791);
     assert!(missing_translations().is_empty());
 
     let sec18_sample_keys = [

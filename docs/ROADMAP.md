@@ -308,6 +308,7 @@ Completes workbench authoring and orientation capabilities that sit outside the 
 - [ ] **Sheet-lifecycle ergonomics:** add cascading auto-title rename propagation in `crates/engine/src/cmd/sheet.rs` (`run_sheet_rename` updates linked auto-titled `ResultSheet` and `GraphSheet` titles while preserving user-edited `custom_title`s), and replace hard `Conflict` rejection when deleting a `GraphSheet` embedded on a `LayoutSheet` with an unassigned placeholder frame on the layout.
 - [ ] **Direct Paste Transpose & interactive row sorting:** add a one-click `Edit › Paste Transpose` command/menu item (`table.pasteTranspose`) and interactive data-grid row sorting (`table.sortRows` + column-header/menu UI in `crates/ui-egui/src/egui_shell/data_grid/`).
 - [ ] Regenerate `crates/mcp/src/ui_catalog.rs` (`cargo xtask ui-commands`), add new UI strings across all `16` locales, and add `EguiHumanPathDriver` regression coverage.
+- [x] **Welcome Hub sample-load errors:** `Load Sample` no longer falls back to an empty table or drops build errors; an archetype without a fixture disables the sample mode pill and CTA with a localised reason, and a failing fixture build shows an inline `welcome.sample.error` message and keeps the hub open (`crates/ui-egui/src/egui_shell/welcome_hub.rs`).
 
 ### R10.33 Advanced Import/Paste Special live-link persistence & Export Figure options
 Owner: open · Status: todo · Was: import/export spec audit 2026-11-24 · Depends on: [`R10.29`](#r1029-desktop-import-and-export-gaps-beta-gate) · Gate: post-Beta · Est. note: 14–22 h

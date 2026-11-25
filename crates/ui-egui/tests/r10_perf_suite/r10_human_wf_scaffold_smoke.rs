@@ -36,7 +36,7 @@ fn typed_ui_intents_and_i18n_catalog_smoke() -> Result<(), String> {
     assert_eq!(app.grid.row_titles_collapsed_override, Some(true));
 
     assert!(EXTRA_SHARD_CATALOGS.is_empty());
-    assert_eq!(all_keys().count(), 789);
+    assert_eq!(all_keys().count(), 791);
     assert!(missing_translations().is_empty());
     for &locale in LOCALES {
         assert!(try_tr(locale, "menu.file").is_some(), "missing menu.file for `{locale}`");
