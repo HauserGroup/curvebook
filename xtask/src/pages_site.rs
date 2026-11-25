@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 
 use curvebook_platform::write_atomic;
 
+use crate::scan_util::{is_real_dir, is_regular_file, read_dir_paths_sorted, rel_slash};
+
 /// Published base URL of the GitHub Pages site.
 pub const SITE_BASE_URL: &str = "https://hausergroup.github.io/curvebook/";
 
@@ -228,22 +230,16 @@ fn publish_entries(root: &Path, manual_dir: Option<&Path>) -> Result<Vec<StagedE
         entries.insert((*rel).to_owned(), path);
     }
 
-    let mut manual_page_count = 0usize;
-    for snapshot in snapshot_dirs(&manual_root)? {
-        let mut snap_entries = BTreeMap::new();
-        collect_entries(&manual_root, &manual_root.join(&snapshot), "manual/", &mut snap_entries)?;
-        for (rel, src) in snap_entries {
-            if !SNAPSHOT_EXCLUDED_FILES.iter().any(|name| rel.rsplit('/').next() == Some(*name)) {
-                manual_page_count += 1;
-                entries.insert(rel, src);
-            }
-        }
-    }
+    let mut snap_roots: Vec<PathBuf> = snapshot_dirs(&manual_root)?.into_iter().map(|s| manual_root.join(s)).collect();
     let latest_dir = manual_root.join("latest");
     if is_real_dir(&latest_dir) && is_regular_file(&latest_dir.join("manifest.json")) {
-        let mut latest_entries = BTreeMap::new();
-        collect_entries(&manual_root, &latest_dir, "manual/", &mut latest_entries)?;
-        for (rel, src) in latest_entries {
+        snap_roots.push(latest_dir);
+    }
+    let mut manual_page_count = 0usize;
+    for snap_dir in snap_roots {
+        let mut snap_entries = BTreeMap::new();
+        collect_entries(&manual_root, &snap_dir, "manual/", &mut snap_entries)?;
+        for (rel, src) in snap_entries {
             if !SNAPSHOT_EXCLUDED_FILES.iter().any(|name| rel.rsplit('/').next() == Some(*name)) {
                 manual_page_count += 1;
                 entries.insert(rel, src);
@@ -349,28 +345,19 @@ fn stage_custom_domain_files(out_dir: &Path, site_base_url: &str, custom_domain:
     Ok(2)
 }
 
-fn is_regular_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
-}
-
-fn is_real_dir(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
-}
-
 /// `v<major>.<minor>` release-snapshot directories under a manual root that carry a `manifest.json`.
 fn snapshot_dirs(manual: &Path) -> Result<Vec<String>, String> {
     if !is_real_dir(manual) {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(manual).map_err(|e| format!("read_dir {}: {e}", manual.display()))? {
-        let entry = entry.map_err(|e| format!("dir entry under {}: {e}", manual.display()))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
+    for path in read_dir_paths_sorted(manual)? {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let is_versioned = name
             .strip_prefix('v')
             .and_then(|core| core.split_once('.'))
             .is_some_and(|(maj, min)| !maj.is_empty() && !min.is_empty() && maj.bytes().chain(min.bytes()).all(|b| b.is_ascii_digit()));
-        if is_versioned && entry.file_type().is_ok_and(|t| t.is_dir()) && is_regular_file(&entry.path().join("manifest.json")) {
+        if is_versioned && is_real_dir(&path) && is_regular_file(&path.join("manifest.json")) {
             out.push(name);
         }
     }
@@ -380,19 +367,15 @@ fn snapshot_dirs(manual: &Path) -> Result<Vec<String>, String> {
 
 /// Collect regular files below `dir` as `/`-separated site-relative paths; symlinks are refused.
 fn collect_entries(base: &Path, dir: &Path, site_prefix: &str, out: &mut BTreeMap<String, PathBuf>) -> Result<(), String> {
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
-        let entry = entry.map_err(|e| format!("dir entry under {}: {e}", dir.display()))?;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|e| format!("file type of {}: {e}", path.display()))?;
+    for path in read_dir_paths_sorted(dir)? {
+        let file_type = std::fs::symlink_metadata(&path).map_err(|e| format!("file type of {}: {e}", path.display()))?.file_type();
         if file_type.is_symlink() {
             return Err(format!("{}: symlinks are never published on Pages", path.display()));
         }
         if file_type.is_dir() {
             collect_entries(base, &path, site_prefix, out)?;
         } else if file_type.is_file() {
-            let rel = path.strip_prefix(base).map_err(|e| e.to_string())?;
-            let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-            out.insert(format!("{site_prefix}{}", parts.join("/")), path);
+            out.insert(format!("{site_prefix}{}", rel_slash(base, &path)?), path);
         }
     }
     Ok(())
@@ -461,74 +444,61 @@ fn resolve(from_rel: &str, target: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct TempRoot(std::path::PathBuf);
-
-    impl TempRoot {
-        fn new(label: &str) -> Self {
-            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-            Self(std::env::temp_dir().join(format!("cb-pages-site-{label}-{}-{nanos}", std::process::id())))
-        }
-
-        fn write(&self, rel: &str, body: &str) {
-            let path = self.0.join(rel);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, body).unwrap();
-        }
-    }
-
-    impl Drop for TempRoot {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::scan_util::test_support::TestDir;
 
     /// A minimal site with generated manual HTML in `target/docs-manual/` plus internal files Pages must not publish.
-    fn seed(label: &str) -> TempRoot {
-        let root = TempRoot::new(label);
-        root.write("docs/index.html", "<a href=\"open-pzfx-files.html#convert\">x</a><a href=\"faq.html\">faq</a><img src=\"images/a.png\"><a href=\"https://github.com/x\">gh</a><a href=\"#top\">t</a><a href=\"mailto:a@b.c\">m</a>");
-        root.write("docs/open-pzfx-files.html", "<a href=\"manual/latest/files.html\">f</a><link rel=\"stylesheet\" href=\"site.css\">");
-        root.write("docs/linux.html", "<a href=\"index.html\">h</a><a href=\"manual/latest/get-started.html\">gs</a>");
-        root.write("docs/faq.html", "<a href=\"index.html\">h</a><a href=\"manual/latest/index.html\">m</a>");
-        root.write("docs/privacy.html", "<a href=\"index.html\">h</a>");
-        root.write("docs/get-started.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/get-started.html\">");
-        root.write("docs/troubleshooting.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/troubleshooting.html#known-issues\">");
-        root.write("target/docs-manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">");
-        root.write("target/docs-manual/latest/manifest.json", "{}");
-        root.write("target/docs-manual/latest/index.html", "<a href=\"../../index.html\">home</a><a href=\"registry/formats.html\">r</a>");
-        root.write("target/docs-manual/latest/files.html", "<link href=\"../../site.css\">");
-        root.write("target/docs-manual/latest/get-started.html", "gs");
-        root.write("target/docs-manual/latest/troubleshooting.html", "ts");
-        root.write("target/docs-manual/latest/registry/formats.html", "<a href=\"../index.html\">up</a>");
-        root.write("target/docs-manual/v0.1/manifest.json", "{}");
-        root.write("target/docs-manual/v0.1/index.html", "<a href=\"../../index.html\">home</a><a href=\"registry/formats.html\">r</a>");
-        root.write("target/docs-manual/v0.1/files.html", "<link href=\"../../site.css\">");
-        root.write("target/docs-manual/v0.1/get-started.html", "gs");
-        root.write("target/docs-manual/v0.1/troubleshooting.html", "ts");
-        root.write("target/docs-manual/v0.1/registry/formats.html", "<a href=\"../index.html\">up</a>");
-        root.write("target/docs-manual/scratch/notes.html", "not a release snapshot");
-        root.write("docs/site.css", "body{}");
-        root.write(
-            "docs/404.html",
-            "<link rel=\"stylesheet\" href=\"/curvebook/site.css\"><a href=\"/curvebook/\">h</a><a href=\"/curvebook/manual/latest/index.html\">m</a>",
-        );
-        root.write("docs/images/a.png", "png");
-        root.write("target/docs-manual/_root/llms.txt", "# CurveBook\n");
-        root.write("target/docs-manual/_root/llms-full.txt", "# CurveBook Full\n");
-        root.write(
-            "target/docs-manual/_root/sitemap.xml",
-            "<urlset><url><loc>https://hausergroup.github.io/curvebook/</loc></url><url><loc>https://hausergroup.github.io/curvebook/faq.html</loc></url><url><loc>https://hausergroup.github.io/curvebook/manual/latest/files.html</loc></url></urlset>",
-        );
-        root.write("docs/ROADMAP.md", "internal");
-        root.write("docs/audit/report.md", "internal");
-        root.write("docs/schemas/preferences.schema.json", "{}");
+    fn seed(label: &str) -> TestDir {
+        let root = TestDir::new(&format!("pages-site-{label}"));
+        for (rel, body) in [
+            (
+                "docs/index.html",
+                "<a href=\"open-pzfx-files.html#convert\">x</a><a href=\"faq.html\">faq</a><img src=\"images/a.png\"><a href=\"https://github.com/x\">gh</a><a href=\"#top\">t</a><a href=\"mailto:a@b.c\">m</a>",
+            ),
+            ("docs/open-pzfx-files.html", "<a href=\"manual/latest/files.html\">f</a><link rel=\"stylesheet\" href=\"site.css\">"),
+            ("docs/linux.html", "<a href=\"index.html\">h</a><a href=\"manual/latest/get-started.html\">gs</a>"),
+            ("docs/faq.html", "<a href=\"index.html\">h</a><a href=\"manual/latest/index.html\">m</a>"),
+            ("docs/privacy.html", "<a href=\"index.html\">h</a>"),
+            ("docs/get-started.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/get-started.html\">"),
+            ("docs/troubleshooting.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/troubleshooting.html#known-issues\">"),
+            ("target/docs-manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">"),
+            ("target/docs-manual/scratch/notes.html", "not a release snapshot"),
+            ("docs/site.css", "body{}"),
+            (
+                "docs/404.html",
+                "<link rel=\"stylesheet\" href=\"/curvebook/site.css\"><a href=\"/curvebook/\">h</a><a href=\"/curvebook/manual/latest/index.html\">m</a>",
+            ),
+            ("docs/images/a.png", "png"),
+            ("target/docs-manual/_root/llms.txt", "# CurveBook\n"),
+            ("target/docs-manual/_root/llms-full.txt", "# CurveBook Full\n"),
+            (
+                "target/docs-manual/_root/sitemap.xml",
+                "<urlset><url><loc>https://hausergroup.github.io/curvebook/</loc></url><url><loc>https://hausergroup.github.io/curvebook/faq.html</loc></url><url><loc>https://hausergroup.github.io/curvebook/manual/latest/files.html</loc></url></urlset>",
+            ),
+            ("docs/ROADMAP.md", "internal"),
+            ("docs/audit/report.md", "internal"),
+            ("docs/schemas/preferences.schema.json", "{}"),
+        ] {
+            root.write(rel, body);
+        }
+        for snap in ["latest", "v0.1"] {
+            for (rel, body) in [
+                ("manifest.json", "{}"),
+                ("index.html", "<a href=\"../../index.html\">home</a><a href=\"registry/formats.html\">r</a>"),
+                ("files.html", "<link href=\"../../site.css\">"),
+                ("get-started.html", "gs"),
+                ("troubleshooting.html", "ts"),
+                ("registry/formats.html", "<a href=\"../index.html\">up</a>"),
+            ] {
+                root.write(&format!("target/docs-manual/{snap}/{rel}"), body);
+            }
+        }
         root
     }
 
     #[test]
     fn r12_9_publish_list_holds_only_site_files() {
         let root = seed("list");
-        let files = check_publish_set(&root.0).unwrap();
+        let files = check_publish_set(root.path()).unwrap();
         assert_eq!(
             files,
             [
@@ -563,19 +533,19 @@ mod tests {
     #[test]
     fn r12_9_stage_copies_the_list_and_refuses_unsafe_targets() {
         let root = seed("stage");
-        let out = root.0.join("_site");
-        assert_eq!(stage(&root.0, &out).unwrap(), 24);
+        let out = root.join("_site");
+        assert_eq!(stage(root.path(), &out).unwrap(), 24);
         assert_eq!(std::fs::read_to_string(out.join("manual/latest/registry/formats.html")).unwrap(), "<a href=\"../index.html\">up</a>");
         assert_eq!(std::fs::read_to_string(out.join("manual/v0.1/registry/formats.html")).unwrap(), "<a href=\"../index.html\">up</a>");
         assert!(out.join("faq.html").is_file() && out.join("llms.txt").is_file() && out.join("llms-full.txt").is_file());
         assert!(!out.join("ROADMAP.md").exists() && !out.join("audit").exists() && !out.join("schemas").exists());
         assert!(!out.join("manual/v0.1/manifest.json").exists() && !out.join("manual/latest/manifest.json").exists());
 
-        assert!(stage(&root.0, &out).unwrap_err().contains("must be empty"));
-        assert!(stage(&root.0, &root.0.join("docs/_site")).unwrap_err().contains("outside docs/"));
-        assert!(stage(&root.0, &root.0.join("target/docs-manual/_site")).unwrap_err().contains("outside manual directory"));
+        assert!(stage(root.path(), &out).unwrap_err().contains("must be empty"));
+        assert!(stage(root.path(), &root.join("docs/_site")).unwrap_err().contains("outside docs/"));
+        assert!(stage(root.path(), &root.join("target/docs-manual/_site")).unwrap_err().contains("outside manual directory"));
 
-        let custom_out = root.0.join("_custom");
+        let custom_out = root.join("_custom");
         std::fs::create_dir_all(&custom_out).unwrap();
         assert_eq!(stage_custom_domain_files(&custom_out, "https://curvebook.org/", Some("curvebook.org")).unwrap(), 2);
         assert_eq!(std::fs::read_to_string(custom_out.join("CNAME")).unwrap(), "curvebook.org\n");
@@ -585,79 +555,90 @@ mod tests {
     #[test]
     fn r12_10_stage_supports_explicit_manual_dir_and_fails_closed_when_unbuilt() {
         let root = seed("explicit-manual");
-        let moved = root.0.join("build/custom-manual");
+        let moved = root.join("build/custom-manual");
         std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
-        std::fs::rename(root.0.join("target/docs-manual"), &moved).unwrap();
+        std::fs::rename(root.join("target/docs-manual"), &moved).unwrap();
 
-        assert!(check_publish_set(&root.0).unwrap_err().contains("--build-manual"));
-        let files = check_publish_set_with_manual(&root.0, Some(&moved)).unwrap();
+        assert!(check_publish_set(root.path()).unwrap_err().contains("--build-manual"));
+        let files = check_publish_set_with_manual(root.path(), Some(&moved)).unwrap();
         assert_eq!(files.len(), 24);
-        assert!(files.contains(&String::from("manual/latest/index.html")));
-        assert!(files.contains(&String::from("manual/v0.1/index.html")));
+        assert!(files.contains(&String::from("manual/latest/index.html")) && files.contains(&String::from("manual/v0.1/index.html")));
 
-        let out = root.0.join("_staged");
-        assert_eq!(stage_with_manual(&root.0, Some(&moved), &out).unwrap(), 24);
-        assert!(out.join("manual/index.html").is_file());
-        assert!(out.join("manual/latest/files.html").is_file());
-        assert!(out.join("manual/v0.1/files.html").is_file());
+        let out = root.join("_staged");
+        assert_eq!(stage_with_manual(root.path(), Some(&moved), &out).unwrap(), 24);
+        assert!(
+            out.join("manual/index.html").is_file() && out.join("manual/latest/files.html").is_file() && out.join("manual/v0.1/files.html").is_file()
+        );
         assert!(!out.join("manual/scratch").exists());
-        assert!(stage_with_manual(&root.0, Some(&moved), &moved.join("_nested")).unwrap_err().contains("outside manual directory"));
+        assert!(stage_with_manual(root.path(), Some(&moved), &moved.join("_nested")).unwrap_err().contains("outside manual directory"));
 
         let parsed = parse_args(&[String::from("--manual-dir"), String::from("build/custom-manual"), String::from("_site")]).unwrap();
-        assert_eq!(parsed.manual_dir, Some(PathBuf::from("build/custom-manual")));
-        assert_eq!(parsed.action, StageAction::Stage(PathBuf::from("_site")));
+        assert_eq!(parsed, StageCli { manual_dir: Some(PathBuf::from("build/custom-manual")), action: StageAction::Stage(PathBuf::from("_site")) });
         let parsed_eq = parse_args(&[String::from("--check"), String::from("--manual-dir=build/custom-manual")]).unwrap();
-        assert_eq!(parsed_eq.manual_dir, Some(PathBuf::from("build/custom-manual")));
-        assert_eq!(parsed_eq.action, StageAction::Check);
+        assert_eq!(parsed_eq, StageCli { manual_dir: Some(PathBuf::from("build/custom-manual")), action: StageAction::Check });
     }
 
     #[test]
     fn r12_9_links_to_unpublished_files_fail_the_check() {
         let root = seed("links");
         root.write("docs/privacy.html", "<a href=\"ROADMAP.md\">roadmap</a><a href=\"../outside.html\">up</a>");
-        let err = check_publish_set(&root.0).unwrap_err();
-        assert!(err.contains("`ROADMAP.md` (ROADMAP.md), which is not published"), "{err}");
-        assert!(err.contains("`../outside.html`, which leaves the site root"), "{err}");
-
-        let root = seed("refresh");
-        root.write("docs/get-started.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/v0.2/get-started.html\">");
-        assert!(check_publish_set(&root.0).unwrap_err().contains("manual/v0.2/get-started.html"));
-
-        let root = seed("sitemap");
-        root.write(
-            "target/docs-manual/_root/sitemap.xml",
-            "<urlset><url><loc>https://hausergroup.github.io/curvebook/ROADMAP.md</loc></url></urlset>",
+        let err = check_publish_set(root.path()).unwrap_err();
+        assert!(
+            err.contains("`ROADMAP.md` (ROADMAP.md), which is not published") && err.contains("`../outside.html`, which leaves the site root"),
+            "{err}"
         );
-        assert!(check_publish_set(&root.0).unwrap_err().contains("sitemap.xml lists"));
+
+        for (label, rel, body, needle) in [
+            (
+                "refresh",
+                "docs/get-started.html",
+                "<meta http-equiv=\"refresh\" content=\"0; url=manual/v0.2/get-started.html\">",
+                "manual/v0.2/get-started.html",
+            ),
+            (
+                "sitemap",
+                "target/docs-manual/_root/sitemap.xml",
+                "<urlset><url><loc>https://hausergroup.github.io/curvebook/ROADMAP.md</loc></url></urlset>",
+                "sitemap.xml lists",
+            ),
+        ] {
+            let r = seed(label);
+            r.write(rel, body);
+            assert!(check_publish_set(r.path()).unwrap_err().contains(needle));
+        }
     }
 
     #[test]
     fn r12_9_markdown_and_symlinks_are_never_published() {
         let root = seed("md");
         root.write("docs/images/notes.md", "oops");
-        assert!(publish_list(&root.0).unwrap_err().contains("Markdown sources are never published"));
+        assert!(publish_list(root.path()).unwrap_err().contains("Markdown sources are never published"));
 
         #[cfg(unix)]
         {
             let root = seed("symlink");
-            std::os::unix::fs::symlink(root.0.join("docs/ROADMAP.md"), root.0.join("docs/images/link.png")).unwrap();
-            assert!(publish_list(&root.0).unwrap_err().contains("symlinks are never published"));
+            std::os::unix::fs::symlink(root.join("docs/ROADMAP.md"), root.join("docs/images/link.png")).unwrap();
+            assert!(publish_list(root.path()).unwrap_err().contains("symlinks are never published"));
         }
 
         let root = seed("missing");
-        std::fs::remove_file(root.0.join("docs/privacy.html")).unwrap();
-        assert!(publish_list(&root.0).unwrap_err().contains("docs/privacy.html is on the Pages publish list but missing"));
+        std::fs::remove_file(root.join("docs/privacy.html")).unwrap();
+        assert!(publish_list(root.path()).unwrap_err().contains("docs/privacy.html is on the Pages publish list but missing"));
     }
 
     #[test]
     fn r12_9_resolve_handles_relative_parent_and_root_paths() {
-        assert_eq!(resolve("manual/v0.1/registry/formats.html", "../index.html").as_deref(), Some("manual/v0.1/index.html"));
-        assert_eq!(resolve("manual/v0.1/index.html", "../../site.css").as_deref(), Some("site.css"));
-        assert_eq!(resolve("index.html", "manual/").as_deref(), Some("manual/index.html"));
-        assert_eq!(resolve("index.html", "../x.html"), None);
-        assert_eq!(resolve("index.html", "/ROADMAP.md"), None);
-        assert_eq!(resolve("404.html", "/curvebook/"), Some(String::from("index.html")));
-        assert_eq!(resolve("404.html", "/curvebook/site.css").as_deref(), Some("site.css"));
-        assert_eq!(resolve("404.html", "/other/site.css"), None);
+        for (from, target, expected) in [
+            ("manual/v0.1/registry/formats.html", "../index.html", Some("manual/v0.1/index.html")),
+            ("manual/v0.1/index.html", "../../site.css", Some("site.css")),
+            ("index.html", "manual/", Some("manual/index.html")),
+            ("index.html", "../x.html", None),
+            ("index.html", "/ROADMAP.md", None),
+            ("404.html", "/curvebook/", Some("index.html")),
+            ("404.html", "/curvebook/site.css", Some("site.css")),
+            ("404.html", "/other/site.css", None),
+        ] {
+            assert_eq!(resolve(from, target).as_deref(), expected, "resolve({from}, {target})");
+        }
     }
 }

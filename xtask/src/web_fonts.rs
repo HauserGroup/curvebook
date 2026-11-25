@@ -479,37 +479,24 @@ fn strip_html_comments(html: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use super::{
         MAX_WEB_RELEASE_ZIP_BYTES, check_web_bundle_readiness, check_web_bundle_readiness_with_env, parse_manifest, parse_require_web_bundle_env,
         validate_manifest_entries, verify_web_bundle_zip_bytes,
     };
-    use std::ffi::OsStr;
-    use std::path::{Path, PathBuf};
+    use crate::scan_util::test_support::TestDir;
 
-    fn temp_test_dir(label: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-xtask-webfonts-{label}-{}-{nanos}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        dir
-    }
-
-    fn write_minimal_web_workspace(root: &Path) {
-        std::fs::create_dir_all(root.join("crates/text")).unwrap();
-        std::fs::create_dir_all(root.join("apps/curvebook-web")).unwrap();
-        std::fs::create_dir_all(root.join("packaging/web")).unwrap();
-        std::fs::write(root.join("crates/text/web-fonts.txt"), "Inter/Inter-Regular.ttf\n").unwrap();
-        std::fs::write(
-            root.join("apps/curvebook-web/Trunk.toml"),
-            "[build]\npublic_url = \"./\"\nfilehash = true\ncommand_arguments = [\"xtask\", \"web-fonts\"]\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("apps/curvebook-web/index.html"),
-            "<meta content=\"default-src 'self'; style-src 'self'\"><link data-wasm-opt=\"z\">",
-        )
-        .unwrap();
-        std::fs::write(root.join("packaging/web/package.sh"), "trunk build --release --cargo-profile web-release\n").unwrap();
-        std::fs::write(root.join("Cargo.toml"), "[profile.web-release]\ninherits = \"release\"\nlto = \"fat\"\nstrip = \"symbols\"\n").unwrap();
+    fn write_minimal_web_workspace(root: &TestDir) {
+        for (rel, body) in [
+            ("crates/text/web-fonts.txt", "Inter/Inter-Regular.ttf\n"),
+            ("apps/curvebook-web/Trunk.toml", "[build]\npublic_url = \"./\"\nfilehash = true\ncommand_arguments = [\"xtask\", \"web-fonts\"]\n"),
+            ("apps/curvebook-web/index.html", "<meta content=\"default-src 'self'; style-src 'self'\"><link data-wasm-opt=\"z\">"),
+            ("packaging/web/package.sh", "trunk build --release --cargo-profile web-release\n"),
+            ("Cargo.toml", "[profile.web-release]\ninherits = \"release\"\nlto = \"fat\"\nstrip = \"symbols\"\n"),
+        ] {
+            root.write(rel, body);
+        }
     }
 
     #[test]
@@ -523,61 +510,48 @@ mod tests {
 
     #[test]
     fn verifies_web_bundle_zip_budget_bounds() {
-        let dir = temp_test_dir("budget");
-        let ok_zip = dir.join("curvebook-web-ok.zip");
+        let dir = TestDir::new("webfonts-budget");
         let mut ok_bytes = b"PK\x03\x04".to_vec();
         ok_bytes.resize(4096, 0);
-        std::fs::write(&ok_zip, &ok_bytes).unwrap();
-        assert_eq!(verify_web_bundle_zip_bytes(&ok_zip), Ok(4096));
+        dir.write_bytes("curvebook-web-ok.zip", &ok_bytes);
+        assert_eq!(verify_web_bundle_zip_bytes(&dir.join("curvebook-web-ok.zip")), Ok(4096));
 
-        let bad_magic = dir.join("bad.zip");
-        std::fs::write(&bad_magic, b"NOTZIP").unwrap();
-        assert!(verify_web_bundle_zip_bytes(&bad_magic).is_err());
+        dir.write_bytes("bad.zip", b"NOTZIP");
+        assert!(verify_web_bundle_zip_bytes(&dir.join("bad.zip")).is_err());
 
         let over_budget = dir.join("over.zip");
-        let file = std::fs::File::create(&over_budget).unwrap();
-        file.set_len(MAX_WEB_RELEASE_ZIP_BYTES + 1).unwrap();
+        std::fs::File::create(&over_budget).unwrap().set_len(MAX_WEB_RELEASE_ZIP_BYTES + 1).unwrap();
         assert!(verify_web_bundle_zip_bytes(&over_budget).is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn require_web_bundle_env_allows_missing_zip_when_unset_and_fails_closed_when_enabled() {
         assert!(!parse_require_web_bundle_env(None));
-        assert!(!parse_require_web_bundle_env(Some(OsStr::new(""))));
-        assert!(!parse_require_web_bundle_env(Some(OsStr::new("0"))));
-        assert!(!parse_require_web_bundle_env(Some(OsStr::new("false"))));
-        assert!(parse_require_web_bundle_env(Some(OsStr::new("1"))));
-        assert!(parse_require_web_bundle_env(Some(OsStr::new("true"))));
+        for falsy in ["", "0", "false"] {
+            assert!(!parse_require_web_bundle_env(Some(OsStr::new(falsy))));
+        }
+        for truthy in ["1", "true"] {
+            assert!(parse_require_web_bundle_env(Some(OsStr::new(truthy))));
+        }
 
-        let dir = temp_test_dir("require-bundle");
+        let dir = TestDir::new("webfonts-require");
         write_minimal_web_workspace(&dir);
 
-        // Unset / falsy skips missing zip cleanly after checking static readiness.
-        assert!(check_web_bundle_readiness_with_env(&dir, None).is_ok());
-        assert!(check_web_bundle_readiness_with_env(&dir, Some(OsStr::new("0"))).is_ok());
+        assert!(check_web_bundle_readiness_with_env(dir.path(), None).is_ok());
+        assert!(check_web_bundle_readiness_with_env(dir.path(), Some(OsStr::new("0"))).is_ok());
 
-        // CURVEBOOK_REQUIRE_WEB_BUNDLE=1 fails closed when dist/release/ has no web zip.
-        let missing_err = check_web_bundle_readiness_with_env(&dir, Some(OsStr::new("1"))).unwrap_err();
+        let missing_err = check_web_bundle_readiness_with_env(dir.path(), Some(OsStr::new("1"))).unwrap_err();
         assert!(missing_err.contains("CURVEBOOK_REQUIRE_WEB_BUNDLE"), "unexpected error: {missing_err}");
 
-        // Once a valid in-budget zip exists in dist/release/, CURVEBOOK_REQUIRE_WEB_BUNDLE=1 passes.
-        let rel_dir = dir.join("dist/release");
-        std::fs::create_dir_all(&rel_dir).unwrap();
-        let zip_path = rel_dir.join("curvebook-web-0.1.0-alpha.2.zip");
         let mut zip_bytes = b"PK\x03\x04".to_vec();
         zip_bytes.resize(2048, 0);
-        std::fs::write(&zip_path, &zip_bytes).unwrap();
-        assert!(check_web_bundle_readiness_with_env(&dir, Some(OsStr::new("1"))).is_ok());
+        dir.write_bytes("dist/release/curvebook-web-0.1.0-alpha.2.zip", &zip_bytes);
+        assert!(check_web_bundle_readiness_with_env(dir.path(), Some(OsStr::new("1"))).is_ok());
 
-        // Over-budget zip fails closed in both unset and CURVEBOOK_REQUIRE_WEB_BUNDLE=1 modes.
-        let file = std::fs::OpenOptions::new().write(true).open(&zip_path).unwrap();
-        file.set_len(MAX_WEB_RELEASE_ZIP_BYTES + 1).unwrap();
-        assert!(check_web_bundle_readiness_with_env(&dir, None).is_err());
-        assert!(check_web_bundle_readiness_with_env(&dir, Some(OsStr::new("1"))).is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let zip_path = dir.join("dist/release/curvebook-web-0.1.0-alpha.2.zip");
+        std::fs::OpenOptions::new().write(true).open(&zip_path).unwrap().set_len(MAX_WEB_RELEASE_ZIP_BYTES + 1).unwrap();
+        assert!(check_web_bundle_readiness_with_env(dir.path(), None).is_err());
+        assert!(check_web_bundle_readiness_with_env(dir.path(), Some(OsStr::new("1"))).is_err());
     }
 
     #[test]
@@ -593,10 +567,10 @@ mod tests {
             assert!(validate_manifest_entries(&[String::from(bad)]).is_err(), "expected rejection for {bad}");
         }
 
-        let dir = temp_test_dir("comments-csp");
+        let dir = TestDir::new("webfonts-csp");
         write_minimal_web_workspace(&dir);
-        std::fs::write(dir.join("apps/curvebook-web/Trunk.toml"), "# public_url = \"./\"\n# filehash = true\n# web-fonts\n[build]\n").unwrap();
-        assert!(check_web_bundle_readiness_with_env(&dir, None).is_err());
+        dir.write("apps/curvebook-web/Trunk.toml", "# public_url = \"./\"\n# filehash = true\n# web-fonts\n[build]\n");
+        assert!(check_web_bundle_readiness_with_env(dir.path(), None).is_err());
 
         let html = concat!(
             "<!DOCTYPE html><html><head>",
@@ -607,9 +581,7 @@ mod tests {
         assert_eq!(hashes.len(), 2);
         assert!(!rewritten.contains("'unsafe-inline'"));
         for h in &hashes {
-            assert!(h.starts_with("'sha256-") && h.ends_with('\''));
-            assert!(rewritten.contains(h));
+            assert!(h.starts_with("'sha256-") && h.ends_with('\'') && rewritten.contains(h));
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,6 +4,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::brands::is_plan_prism_path;
+use crate::scan_util::{collect_dist_files, format_error_list, has_ext_ci, is_zip_magic};
 use crate::text_decode::{decode_utf16, detect_bomless_utf16};
 use crate::zip_read::{ZipArchive, ZipLimits};
 
@@ -94,15 +96,10 @@ pub fn run(root: &Path) -> Result<(), String> {
         return Ok(());
     }
     let formatted: Vec<String> = hits.iter().map(|h| format!("{}:{}: matched `{}`", h.path, h.line, h.signature)).collect();
-    Err(format!("{} clean-room violation(s) found:\n  {}", hits.len(), formatted.join("\n  ")))
+    Err(format_error_list("clean-room violation(s) found", &formatted))
 }
 
 const MAX_DIST_SCAN_BYTES: usize = 256 * 1024 * 1024;
-
-fn is_reference_plan_prism_path(path: &str) -> bool {
-    let norm = path.replace('\\', "/");
-    norm == "plan/prism" || norm.starts_with("plan/prism/") || norm.contains("/plan/prism/") || norm.ends_with("/plan/prism")
-}
 
 #[must_use]
 pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
@@ -112,7 +109,7 @@ pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
         if should_skip(path) {
             continue;
         }
-        if is_reference_plan_prism_path(path) {
+        if is_plan_prism_path(path) {
             hits.push(CleanroomHit { path: path.clone(), line: 1, signature: "committed plan/prism reference directory" });
             continue;
         }
@@ -154,7 +151,7 @@ pub fn scan_dist_artefacts_with_stats(dist_dir: &Path) -> Result<(usize, usize, 
     let mut archive_entries = 0usize;
     let mut hits = Vec::new();
     for rel in rel_files {
-        if is_reference_plan_prism_path(&rel) {
+        if is_plan_prism_path(&rel) {
             hits.push(CleanroomHit { path: rel, line: 1, signature: "bundled plan/prism reference directory" });
             continue;
         }
@@ -167,19 +164,10 @@ pub fn scan_dist_artefacts_with_stats(dist_dir: &Path) -> Result<(usize, usize, 
     Ok((file_count, archive_entries, hits))
 }
 
-use crate::scan_util::collect_dist_files;
-
 fn should_skip(path: &str) -> bool {
     let norm = path.replace('\\', "/");
     let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
     trimmed == SELF
-}
-
-fn has_extension_ci(path: &str, exts: &[&str]) -> bool {
-    let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()) else {
-        return false;
-    };
-    exts.iter().any(|candidate| ext.eq_ignore_ascii_case(candidate))
 }
 
 fn scan_bytes_recursive(
@@ -190,10 +178,8 @@ fn scan_bytes_recursive(
     archive_entries: &mut usize,
     hits: &mut Vec<CleanroomHit>,
 ) {
-    let is_vendor_archive = has_extension_ci(display_path, &["prism", "pzf"]);
-    let is_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
-
-    if is_vendor_archive || is_zip {
+    let is_vendor_archive = has_ext_ci(Path::new(display_path), &["prism", "pzf"]);
+    if is_vendor_archive || is_zip_magic(bytes) {
         if depth >= MAX_ARCHIVE_DEPTH {
             hits.push(CleanroomHit { path: display_path.to_owned(), line: 1, signature: "nested archive depth exceeded" });
             return;
@@ -426,191 +412,125 @@ fn collect_spans(haystack: &str, needle: &str, left: Boundary, right: Boundary, 
 
 #[cfg(test)]
 mod tests {
-    use crate::zip_read::TestZipWriter as ZipWriter;
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
-
     use super::{run, scan, should_skip};
+    use crate::scan_util::test_support::{TestDir, to_utf16_bytes};
+    use crate::zip_read::TestZipWriter as ZipWriter;
 
-    fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cb-cleanroom-{}-{label}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zw = ZipWriter::new();
+        for &(name, body) in entries {
+            zw.add_file(name, body.to_vec()).unwrap();
+        }
+        zw.finish().unwrap()
     }
 
-    fn run_git(dir: &Path, args: &[&str]) {
-        let out = Command::new("git").current_dir(dir).args(args).output().unwrap();
-        assert!(out.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
-    }
-
-    fn to_utf16_bytes(s: &str, little_endian: bool, include_bom: bool) -> Vec<u8> {
-        let mut out = Vec::new();
-        if include_bom {
-            out.extend_from_slice(if little_endian { &[0xFF, 0xFE] } else { &[0xFE, 0xFF] });
-        }
-        for unit in s.encode_utf16() {
-            let bytes = if little_endian { unit.to_le_bytes() } else { unit.to_be_bytes() };
-            out.extend_from_slice(&bytes);
-        }
-        out
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(|&s| s.to_owned()).collect()
     }
 
     #[test]
     fn flags_vendor_xml_fixture_and_copyright() {
-        let dir = temp_dir("basic");
-        std::fs::write(dir.join("bad.xml"), "<?xml version=\"1.0\"?>\n<GraphPadPrismFile PrismXMLVersion=\"5.00\"/>\n").unwrap();
-        std::fs::write(dir.join("ok.rs"), "// Clean-room Rust implementation\n").unwrap();
-        let files = vec![String::from("bad.xml"), String::from("ok.rs")];
-        let hits = scan(&dir, &files);
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TestDir::new("cleanroom-basic");
+        dir.write("bad.xml", "<?xml version=\"1.0\"?>\n<GraphPadPrismFile PrismXMLVersion=\"5.00\"/>\n");
+        dir.write("ok.rs", "// Clean-room Rust implementation\n");
+        let hits = scan(dir.path(), &paths(&["bad.xml", "ok.rs"]));
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].path, "bad.xml");
-        assert_eq!(hits[0].line, 2);
+        assert_eq!((hits[0].path.as_str(), hits[0].line), ("bad.xml", 2));
     }
 
     #[test]
     fn flags_year_and_symbol_copyright_notices() {
-        let dir = temp_dir("notices");
-        std::fs::write(
-            dir.join("notices.xml"),
+        let dir = TestDir::new("cleanroom-notices");
+        dir.write(
+            "notices.xml",
             "<!-- Copyright (c) 2024 GraphPad Software, LLC. All rights reserved. -->\n\
              <!-- © 2024 Dotmatics. All rights reserved. -->\n\
              <!-- Copyright (c) 2020 GraphPad Example -->\n\
              <!-- Copyright (c) 2024\n\
                   GraphPad Software -->\n",
-        )
-        .unwrap();
-        let files = vec![String::from("notices.xml")];
-        let hits = scan(&dir, &files);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(hits.len(), 4, "{hits:?}");
-        assert_eq!(hits[0].line, 1);
-        assert_eq!(hits[1].line, 2);
-        assert_eq!(hits[2].line, 3);
-        assert_eq!(hits[3].line, 4);
+        );
+        let hits = scan(dir.path(), &paths(&["notices.xml"]));
+        let lines: Vec<usize> = hits.iter().map(|h| h.line).collect();
+        assert_eq!(lines, vec![1, 2, 3, 4], "{hits:?}");
     }
 
     #[test]
     fn flags_utf16_le_and_be_with_or_without_bom() {
-        let dir = temp_dir("utf16");
+        let dir = TestDir::new("cleanroom-utf16");
         let xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<GraphPadPrismFile PrismXMLVersion=\"5.00\"/>\n";
         let notice = "© 2024 Dotmatics. All rights reserved.\n";
-
-        std::fs::write(dir.join("le_bom.pzfx"), to_utf16_bytes(xml, true, true)).unwrap();
-        std::fs::write(dir.join("be_bom.pzfx"), to_utf16_bytes(xml, false, true)).unwrap();
-        std::fs::write(dir.join("le_nobom.pzfx"), to_utf16_bytes(notice, true, false)).unwrap();
-        std::fs::write(dir.join("be_nobom.pzfx"), to_utf16_bytes(notice, false, false)).unwrap();
-
-        let files = vec![String::from("le_bom.pzfx"), String::from("be_bom.pzfx"), String::from("le_nobom.pzfx"), String::from("be_nobom.pzfx")];
-        let hits = scan(&dir, &files);
-        let _ = std::fs::remove_dir_all(&dir);
+        for (name, text, le, bom) in [
+            ("le_bom.pzfx", xml, true, true),
+            ("be_bom.pzfx", xml, false, true),
+            ("le_nobom.pzfx", notice, true, false),
+            ("be_nobom.pzfx", notice, false, false),
+        ] {
+            dir.write_bytes(name, &to_utf16_bytes(text, le, bom));
+        }
+        let hits = scan(dir.path(), &paths(&["le_bom.pzfx", "be_bom.pzfx", "le_nobom.pzfx", "be_nobom.pzfx"]));
         assert_eq!(hits.len(), 4, "{hits:?}");
-        assert_eq!(hits[0].path, "le_bom.pzfx");
-        assert_eq!(hits[0].line, 2);
-        assert_eq!(hits[1].path, "be_bom.pzfx");
-        assert_eq!(hits[1].line, 2);
+        assert_eq!((hits[0].path.as_str(), hits[0].line), ("le_bom.pzfx", 2));
+        assert_eq!((hits[1].path.as_str(), hits[1].line), ("be_bom.pzfx", 2));
         assert_eq!(hits[2].path, "le_nobom.pzfx");
         assert_eq!(hits[3].path, "be_nobom.pzfx");
     }
 
     #[test]
     fn inspects_prism_and_pzf_archives_and_allows_clean_archives() {
-        let dir = temp_dir("archives");
+        let dir = TestDir::new("cleanroom-archives");
+        let utf16_xml = to_utf16_bytes("<GraphPadPrismFile PrismXMLVersion=\"5.0\"/>", true, true);
+        dir.write_bytes("vendor.prism", &zip_bytes(&[("manifest.json", br#"{"title":"Sample"}"#), ("data/project.pzfx", &utf16_xml)]));
+        dir.write_bytes("notice.pzf", &zip_bytes(&[("meta/license.txt", b"Copyright (c) 2024 GraphPad Software, LLC. All rights reserved.\n")]));
+        dir.write_bytes("opaque.pzf", b"LEGACY_BINARY_PZF_HEADER\x00\x01\x02\x03");
+        dir.write_bytes("clean.prism", &zip_bytes(&[("manifest.json", br#"{"title":"Clean Experiment"}"#), ("data/dose.csv", b"X,Y\n1,2\n")]));
 
-        let mut bad_zw = ZipWriter::new();
-        bad_zw.add_file("manifest.json", br#"{"title":"Sample"}"#.to_vec()).unwrap();
-        bad_zw.add_file("data/project.pzfx", to_utf16_bytes("<GraphPadPrismFile PrismXMLVersion=\"5.0\"/>", true, true)).unwrap();
-        std::fs::write(dir.join("vendor.prism"), bad_zw.finish().unwrap()).unwrap();
-
-        let mut notice_zw = ZipWriter::new();
-        notice_zw.add_file("meta/license.txt", b"Copyright (c) 2024 GraphPad Software, LLC. All rights reserved.\n".to_vec()).unwrap();
-        std::fs::write(dir.join("notice.pzf"), notice_zw.finish().unwrap()).unwrap();
-
-        std::fs::write(dir.join("opaque.pzf"), b"LEGACY_BINARY_PZF_HEADER\x00\x01\x02\x03").unwrap();
-
-        let mut clean_zw = ZipWriter::new();
-        clean_zw.add_file("manifest.json", br#"{"title":"Clean Experiment"}"#.to_vec()).unwrap();
-        clean_zw.add_file("data/dose.csv", b"X,Y\n1,2\n".to_vec()).unwrap();
-        std::fs::write(dir.join("clean.prism"), clean_zw.finish().unwrap()).unwrap();
-
-        let files = vec![String::from("vendor.prism"), String::from("notice.pzf"), String::from("opaque.pzf"), String::from("clean.prism")];
-        let hits = scan(&dir, &files);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(hits.len(), 3, "{hits:?}");
-        assert_eq!(hits[0].path, "vendor.prism!data/project.pzfx");
-        assert_eq!(hits[1].path, "notice.pzf!meta/license.txt");
-        assert_eq!(hits[2].path, "opaque.pzf");
+        let hits = scan(dir.path(), &paths(&["vendor.prism", "notice.pzf", "opaque.pzf", "clean.prism"]));
+        let hit_paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(hit_paths, vec!["vendor.prism!data/project.pzfx", "notice.pzf!meta/license.txt", "opaque.pzf"], "{hits:?}");
     }
 
     #[test]
     fn flags_audit_paths_and_ignores_benign_c_ident_or_plain_links() {
-        let dir = temp_dir("audit-and-benign");
-        std::fs::create_dir_all(dir.join("docs/audit/findings")).unwrap();
-        std::fs::write(
-            dir.join("docs/audit/findings/S13.md"),
-            "Copyright (c) 2024 GraphPad Software, LLC. All rights reserved.\n<GraphPadPrismFile/>\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("benign.rs"),
+        let dir = TestDir::new("cleanroom-audit-and-benign");
+        dir.write("docs/audit/findings/S13.md", "Copyright (c) 2024 GraphPad Software, LLC. All rights reserved.\n<GraphPadPrismFile/>\n");
+        dir.write(
+            "benign.rs",
             "const VENDOR: &str = \"graphpad\";\n// https://www.graphpad.com/guides/prism/latest/\nwhile let Some(c) = chars.next() {}\n",
-        )
-        .unwrap();
-        let files = vec![String::from("docs/audit/findings/S13.md"), String::from("benign.rs")];
-        let hits = scan(&dir, &files);
-        let _ = std::fs::remove_dir_all(&dir);
+        );
+        let hits = scan(dir.path(), &paths(&["docs/audit/findings/S13.md", "benign.rs"]));
         assert_eq!(hits.len(), 2, "{hits:?}");
         assert!(hits.iter().all(|h| h.path == "docs/audit/findings/S13.md"), "{hits:?}");
     }
 
     #[test]
     fn run_catches_non_ascii_utf16_and_zip_probes() {
-        let dir = temp_dir("git-e2e");
-        run_git(&dir, &["init"]);
-        std::fs::create_dir_all(dir.join("docs")).unwrap();
-        std::fs::write(dir.join("docs/clean.md"), "# Clean CurveBook note\n").unwrap();
-        assert!(run(&dir).is_ok());
+        let dir = TestDir::git_repo("cleanroom-git-e2e");
+        dir.write("docs/clean.md", "# Clean CurveBook note\n");
+        assert!(run(dir.path()).is_ok());
 
-        std::fs::create_dir_all(dir.join("fixtures")).unwrap();
-        std::fs::write(dir.join("fixtures/données.pzfx"), to_utf16_bytes("<GraphPadPrismFile PrismXMLVersion=\"5.0\"/>", true, true)).unwrap();
+        dir.write_bytes("fixtures/données.pzfx", &to_utf16_bytes("<GraphPadPrismFile PrismXMLVersion=\"5.0\"/>", true, true));
+        dir.write_bytes("fixtures/résumé.prism", &zip_bytes(&[("inner.xml", b"<!-- \xC2\xA9 2024 Dotmatics. All rights reserved. -->\n")]));
+        dir.run_git(&["add", "--", "docs", "fixtures"]);
 
-        let mut zw = ZipWriter::new();
-        zw.add_file("inner.xml", b"<!-- \xC2\xA9 2024 Dotmatics. All rights reserved. -->\n".to_vec()).unwrap();
-        std::fs::write(dir.join("fixtures/résumé.prism"), zw.finish().unwrap()).unwrap();
-
-        run_git(&dir, &["add", "--", "docs", "fixtures"]);
-        let err = run(&dir).unwrap_err();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(err.contains("fixtures/données.pzfx"), "{err}");
-        assert!(err.contains("fixtures/résumé.prism!inner.xml"), "{err}");
+        let err = run(dir.path()).unwrap_err();
+        assert!(err.contains("fixtures/données.pzfx") && err.contains("fixtures/résumé.prism!inner.xml"), "{err}");
     }
 
     #[test]
     fn flags_expanded_vendor_notices_creator_lines_and_dist_artefacts() {
-        let dir = temp_dir("expanded-vendors");
-        std::fs::create_dir_all(dir.join("bundle.app/Contents/Resources")).unwrap();
-        std::fs::write(
-            dir.join("bundle.app/Contents/Resources/report.txt"),
-            "© 2025 OriginLab Corporation. All rights reserved.\nExported from JMP 18\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("ok_copyright.txt"), "Copyright (c) 2026 CurveBook Contributors. Statistical curves library.\n").unwrap();
-        let hits = super::scan_dist_artefacts(&dir).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TestDir::new("cleanroom-expanded-vendors");
+        dir.write("bundle.app/Contents/Resources/report.txt", "© 2025 OriginLab Corporation. All rights reserved.\nExported from JMP 18\n");
+        dir.write("ok_copyright.txt", "Copyright (c) 2026 CurveBook Contributors. Statistical curves library.\n");
+        let hits = super::scan_dist_artefacts(dir.path()).unwrap();
         assert_eq!(hits.len(), 2, "{hits:?}");
-        assert_eq!(hits[0].path, "bundle.app/Contents/Resources/report.txt");
-        assert_eq!(hits[0].line, 1);
-        assert_eq!(hits[1].line, 2);
+        assert_eq!((hits[0].path.as_str(), hits[0].line, hits[1].line), ("bundle.app/Contents/Resources/report.txt", 1, 2));
     }
 
     #[test]
     fn flags_committed_plan_prism_directory() {
-        let dir = temp_dir("plan-prism");
-        std::fs::create_dir_all(dir.join("plan/prism")).unwrap();
-        std::fs::write(dir.join("plan/prism/frame01.jpg"), b"\xff\xd8\xff\xe0clean_jpg").unwrap();
-        let hits = scan(&dir, &[String::from("plan/prism/frame01.jpg")]);
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TestDir::new("cleanroom-plan-prism");
+        dir.write_bytes("plan/prism/frame01.jpg", b"\xff\xd8\xff\xe0clean_jpg");
+        let hits = scan(dir.path(), &paths(&["plan/prism/frame01.jpg"]));
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert!(hits[0].signature.contains("plan/prism"));
     }
@@ -626,84 +546,47 @@ mod tests {
 
     #[test]
     fn r15_1_provenance_permits_only_exact_upstream_url_inside_attributed_section() {
-        let dir = temp_dir("r15-cleanroom-provenance");
-        let attr_ok = "\
-# Attribution
+        let dir = TestDir::new("r15-cleanroom-provenance");
+        let attr_ok = "# Attribution\n\n## Attributed Source Code\n\nCurveBook adapts pure-egui widget helpers from VectorCraft (`https://github.com/storytold/vectorcraft`) at commit `deadbeef`.\nCopyright (c) 2026 VectorCraft contributors (upstream repository linked above).\n";
+        let notice_ok = "CurveBook\n\n## Attributed Source Code\n\nAdapted from VectorCraft (https://github.com/storytold/vectorcraft, commit abc):\nCopyright (c) 2026 VectorCraft contributors.\n";
+        dir.write("ATTRIBUTION.md", attr_ok);
+        dir.write("NOTICE", notice_ok);
+        dir.write("AGENTS.md", "Verify copyright, licence, and upstream notices for VectorCraft GUI source reuse.\n");
 
-## Attributed Source Code
-
-CurveBook adapts pure-egui widget helpers from VectorCraft (`https://github.com/storytold/vectorcraft`) at commit `deadbeef`.
-Copyright (c) 2026 VectorCraft contributors (upstream repository linked above).
-";
-        let notice_ok = "\
-CurveBook
-
-## Attributed Source Code
-
-Adapted from VectorCraft (https://github.com/storytold/vectorcraft, commit abc):
-Copyright (c) 2026 VectorCraft contributors.
-";
-        std::fs::write(dir.join("ATTRIBUTION.md"), attr_ok).unwrap();
-        std::fs::write(dir.join("NOTICE"), notice_ok).unwrap();
-        std::fs::write(dir.join("AGENTS.md"), "Verify copyright, licence, and upstream notices for VectorCraft GUI source reuse.\n").unwrap();
-
-        let ok_hits = scan(&dir, &[String::from("ATTRIBUTION.md"), String::from("NOTICE"), String::from("AGENTS.md")]);
+        let ok_hits = scan(dir.path(), &paths(&["ATTRIBUTION.md", "NOTICE", "AGENTS.md"]));
         assert!(ok_hits.is_empty(), "expected clean attribution/notice/policy files, got {ok_hits:?}");
+        assert!(super::scan_compliance_bytes("curvebook-web-0.1.0/NOTICE", notice_ok.as_bytes()).is_empty());
 
-        let packaged_hits = super::scan_compliance_bytes("curvebook-web-0.1.0/NOTICE", notice_ok.as_bytes());
-        assert!(packaged_hits.is_empty(), "expected clean packaged NOTICE, got {packaged_hits:?}");
-
-        std::fs::create_dir_all(dir.join("crates/ui-egui/src")).unwrap();
-        std::fs::write(dir.join("crates/ui-egui/src/bad_notice.rs"), "// Copyright (c) 2026 VectorCraft contributors\n").unwrap();
-        std::fs::write(dir.join("crates/ui-egui/src/bad_storytold.rs"), "// Copyright (c) 2026 storytold contributors\n").unwrap();
-        std::fs::write(dir.join("ATTRIBUTION.md"), "## Other\nCopyright (c) 2026 https://github.com/storytold/vectorcraft\n").unwrap();
-        std::fs::write(
-            dir.join("NOTICE"),
-            "## Attributed Source Code\nCopyright (c) 2026 Contributors https://github.com/storytold/vectorcraft/blob/main/lib.rs\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("AGENTS.md"), "Copyright (c) 2026 Storytold contributors\n").unwrap();
+        dir.write("crates/ui-egui/src/bad_notice.rs", "// Copyright (c) 2026 VectorCraft contributors\n");
+        dir.write("crates/ui-egui/src/bad_storytold.rs", "// Copyright (c) 2026 storytold contributors\n");
+        dir.write("ATTRIBUTION.md", "## Other\nCopyright (c) 2026 https://github.com/storytold/vectorcraft\n");
+        dir.write("NOTICE", "## Attributed Source Code\nCopyright (c) 2026 Contributors https://github.com/storytold/vectorcraft/blob/main/lib.rs\n");
+        dir.write("AGENTS.md", "Copyright (c) 2026 Storytold contributors\n");
 
         let bad_hits = scan(
-            &dir,
-            &[
-                String::from("crates/ui-egui/src/bad_notice.rs"),
-                String::from("crates/ui-egui/src/bad_storytold.rs"),
-                String::from("ATTRIBUTION.md"),
-                String::from("NOTICE"),
-                String::from("AGENTS.md"),
-            ],
+            dir.path(),
+            &paths(&["crates/ui-egui/src/bad_notice.rs", "crates/ui-egui/src/bad_storytold.rs", "ATTRIBUTION.md", "NOTICE", "AGENTS.md"]),
         );
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(bad_hits.len(), 5, "expected 5 cleanroom provenance hits, got {bad_hits:?}");
         assert!(bad_hits[0].signature.contains("vectorcraft"));
-        assert!(bad_hits[1].signature.contains("storytold"));
-        assert!(bad_hits[2].signature.contains("storytold"));
-        assert!(bad_hits[3].signature.contains("storytold"));
-        assert!(bad_hits[4].signature.contains("storytold"));
+        for hit in &bad_hits[1..] {
+            assert!(hit.signature.contains("storytold"), "{hit:?}");
+        }
     }
 
     #[test]
     fn sec22_fails_closed_on_nested_plan_prism_depth_exceeded_and_corrupt_zip() {
-        let dir = temp_dir("sec22-cr");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("dist/sub/plan/prism")).unwrap();
-        std::fs::write(dir.join("dist/sub/plan/prism/frame.txt"), b"x").unwrap();
+        let dir = TestDir::new("sec22-cr");
+        dir.write_bytes("dist/sub/plan/prism/frame.txt", b"x");
+        let inner = zip_bytes(&[("leaf.txt", b"ok")]);
+        let mid = zip_bytes(&[("inner.zip", &inner)]);
+        dir.write_bytes("dist/deep.zip", &zip_bytes(&[("mid.zip", &mid)]));
+        dir.write_bytes("dist/corrupt.zip", b"PK\x03\x04\x00\x00broken");
 
-        let mut inner = ZipWriter::new();
-        inner.add_file("leaf.txt", b"ok".to_vec()).unwrap();
-        let mut mid = ZipWriter::new();
-        mid.add_file("inner.zip", inner.finish().unwrap()).unwrap();
-        let mut top = ZipWriter::new();
-        top.add_file("mid.zip", mid.finish().unwrap()).unwrap();
-        std::fs::write(dir.join("dist/deep.zip"), top.finish().unwrap()).unwrap();
-        std::fs::write(dir.join("dist/corrupt.zip"), b"PK\x03\x04\x00\x00broken").unwrap();
-
-        let nested_hits = scan(&dir, &[String::from("vendor/plan/prism/ref.txt")]);
+        let nested_hits = scan(dir.path(), &paths(&["vendor/plan/prism/ref.txt"]));
         assert!(nested_hits.iter().any(|h| h.signature.contains("plan/prism")), "{nested_hits:?}");
 
         let dist_hits = super::scan_dist_artefacts(&dir.join("dist")).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(dist_hits.iter().any(|h| h.signature.contains("plan/prism")), "{dist_hits:?}");
         assert!(dist_hits.iter().any(|h| h.signature == "nested archive depth exceeded"), "{dist_hits:?}");
         assert!(dist_hits.iter().any(|h| h.signature == "uninspectable or corrupt archive"), "{dist_hits:?}");

@@ -305,38 +305,23 @@ fn contains_numeric_literal_token(s: &str) -> bool {
 }
 
 fn parse_numeric_literal(part: &str) -> Option<f64> {
-    let trimmed = part.trim();
-    let trimmed = trimmed.strip_prefix('-').or_else(|| trimmed.strip_prefix('+')).unwrap_or(trimmed).trim();
-    let trimmed = trimmed
-        .strip_suffix("_f32")
-        .or_else(|| trimmed.strip_suffix("f32"))
-        .or_else(|| trimmed.strip_suffix("_f64"))
-        .or_else(|| trimmed.strip_suffix("f64"))
-        .or_else(|| trimmed.strip_suffix("_u8"))
-        .or_else(|| trimmed.strip_suffix("u8"))
-        .or_else(|| trimmed.strip_suffix("_u16"))
-        .or_else(|| trimmed.strip_suffix("u16"))
-        .or_else(|| trimmed.strip_suffix("_u32"))
-        .or_else(|| trimmed.strip_suffix("u32"))
-        .or_else(|| trimmed.strip_suffix("_i32"))
-        .or_else(|| trimmed.strip_suffix("i32"))
-        .or_else(|| trimmed.strip_suffix("_usize"))
-        .or_else(|| trimmed.strip_suffix("usize"))
-        .unwrap_or(trimmed);
+    const SUFFIXES: &[&str] = &["_f32", "f32", "_f64", "f64", "_u8", "u8", "_u16", "u16", "_u32", "u32", "_i32", "i32", "_usize", "usize"];
+    let mut trimmed = part.trim();
+    trimmed = trimmed.strip_prefix('-').or_else(|| trimmed.strip_prefix('+')).unwrap_or(trimmed).trim();
+    for sfx in SUFFIXES {
+        if let Some(stem) = trimmed.strip_suffix(sfx) {
+            trimmed = stem;
+            break;
+        }
+    }
     if !trimmed.as_bytes().first().is_some_and(u8::is_ascii_digit) {
         return None;
     }
-    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
-        let clean: String = hex.chars().filter(|&c| c != '_').collect();
-        return u128::from_str_radix(&clean, 16).ok().map(|v| v as f64);
-    }
-    if let Some(bin) = trimmed.strip_prefix("0b").or_else(|| trimmed.strip_prefix("0B")) {
-        let clean: String = bin.chars().filter(|&c| c != '_').collect();
-        return u128::from_str_radix(&clean, 2).ok().map(|v| v as f64);
-    }
-    if let Some(oct) = trimmed.strip_prefix("0o").or_else(|| trimmed.strip_prefix("0O")) {
-        let clean: String = oct.chars().filter(|&c| c != '_').collect();
-        return u128::from_str_radix(&clean, 8).ok().map(|v| v as f64);
+    for (p_lo, p_hi, radix) in [("0x", "0X", 16), ("0b", "0B", 2), ("0o", "0O", 8)] {
+        if let Some(digits) = trimmed.strip_prefix(p_lo).or_else(|| trimmed.strip_prefix(p_hi)) {
+            let clean: String = digits.chars().filter(|&c| c != '_').collect();
+            return u128::from_str_radix(&clean, radix).ok().map(|v| v as f64);
+        }
     }
     let clean: String = trimmed.chars().filter(|&c| c != '_').collect();
     clean.parse::<f64>().ok()

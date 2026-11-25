@@ -4,7 +4,9 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use crate::scan_util::{format_error_list, has_ext_ci, is_real_dir, rel_slash_lossy, walk_file_paths};
 
 const STATUS_REL: &str = "docs/STATUS.md";
 const ROADMAP_REL: &str = "docs/ROADMAP.md";
@@ -81,6 +83,10 @@ impl std::fmt::Display for EvidenceViolation {
     }
 }
 
+fn push_ev(out: &mut Vec<EvidenceViolation>, path: &str, line: usize, reason: impl Into<String>) {
+    out.push(EvidenceViolation { path: path.to_owned(), line, reason: reason.into() });
+}
+
 /// Index of non-ignored `#[test]` function names collected from `crates/` and `apps/`.
 #[derive(Debug, Default, Clone)]
 pub struct WorkspaceTests {
@@ -146,12 +152,10 @@ pub fn run(root: &Path) -> Result<(), String> {
 
     let mut errors = Vec::new();
     if !duplicates.is_empty() {
-        let lines: Vec<String> = duplicates.iter().map(ToString::to_string).collect();
-        errors.push(format!("{} duplicate table key(s) found:\n  {}", duplicates.len(), lines.join("\n  ")));
+        errors.push(format_error_list("duplicate table key(s) found", &duplicates));
     }
     if !violations.is_empty() {
-        let lines: Vec<String> = violations.iter().map(ToString::to_string).collect();
-        errors.push(format!("{} missing/invalid [x] evidence violation(s):\n  {}", violations.len(), lines.join("\n  ")));
+        errors.push(format_error_list("missing/invalid [x] evidence violation(s)", &violations));
     }
     Err(errors.join("\n"))
 }
@@ -159,42 +163,25 @@ pub fn run(root: &Path) -> Result<(), String> {
 /// Collect all non-ignored `#[test]` functions from `crates/` and `apps/` under `root`.
 pub fn collect_workspace_tests(root: &Path) -> Result<WorkspaceTests, String> {
     let mut tests = WorkspaceTests::default();
+    let mut paths = Vec::new();
     for dir_name in ["crates", "apps"] {
         let base = root.join(dir_name);
-        if fs::symlink_metadata(&base).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
-            visit_rust_dir(&base, &mut tests)?;
+        if is_real_dir(&base) {
+            walk_file_paths(
+                &base,
+                &|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == "target" || n.starts_with('.')),
+                &|p| has_ext_ci(p, &["rs"]),
+                &mut paths,
+            )?;
         }
+    }
+    for path in paths {
+        let src = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let parent = if matches!(stem, "mod" | "lib" | "main") { path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) } else { None };
+        scan_tests_in_rust_source(stem, parent, &src, &mut tests);
     }
     Ok(tests)
-}
-
-fn visit_rust_dir(dir: &Path, out: &mut WorkspaceTests) -> Result<(), String> {
-    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    for entry_res in entries {
-        let entry = entry_res.map_err(|e| format!("{}: {e}", dir.display()))?;
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if ft.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if ft.is_dir() {
-            let skip = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == "target" || n.starts_with('.'));
-            if !skip {
-                visit_rust_dir(&path, out)?;
-            }
-            continue;
-        }
-        if ft.is_file() && path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            let src = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            let parent =
-                if matches!(stem, "mod" | "lib" | "main") { path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) } else { None };
-            scan_tests_in_rust_source(stem, parent, &src, out);
-        }
-    }
-    Ok(())
 }
 
 fn scan_tests_in_rust_source(stem: &str, parent_mod: Option<&str>, src: &str, out: &mut WorkspaceTests) {
@@ -908,59 +895,36 @@ fn has_concrete_manual_detail(after: &str) -> bool {
 /// and forbidden bypass/guard patterns (`R10.26`).
 pub fn scan_human_wf_completion(root: &Path) -> Result<(BTreeSet<u8>, Vec<EvidenceViolation>), String> {
     let tests_dir = root.join("crates/ui-egui/tests");
-    if !fs::symlink_metadata(&tests_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
+    if !is_real_dir(&tests_dir) {
         return Ok((BTreeSet::new(), Vec::new()));
     }
     let mut paths = Vec::new();
-    let entries = fs::read_dir(&tests_dir).map_err(|e| format!("{}: {e}", tests_dir.display()))?;
-    for entry_res in entries {
-        let entry = entry_res.map_err(|e| format!("{}: {e}", tests_dir.display()))?;
-        let Ok(ft) = entry.file_type() else {
+    for path in crate::scan_util::read_dir_paths_sorted(&tests_dir)? {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
             continue;
         };
-        if ft.is_symlink() {
+        if meta.file_type().is_symlink() {
             continue;
         }
-        let path = entry.path();
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if ft.is_file() && name.ends_with(".rs") && name.starts_with("human_wf_") {
+        if meta.is_file() && name.ends_with(".rs") && name.starts_with("human_wf_") {
             paths.push(path);
-        } else if ft.is_dir() && name.starts_with("human_wf_") && name != "human_wf_common" {
-            collect_rs_files_no_symlinks(&path, &mut paths)?;
+        } else if meta.is_dir() && name.starts_with("human_wf_") && name != "human_wf_common" {
+            walk_file_paths(&path, &|_| false, &|p| has_ext_ci(p, &["rs"]), &mut paths)?;
         }
     }
     paths.sort();
 
     let mut files = Vec::with_capacity(paths.len());
     for path in &paths {
-        let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+        let rel = rel_slash_lossy(root, path);
         let src = fs::read_to_string(path).map_err(|e| format!("{rel}: {e}"))?;
         files.push((rel, src));
     }
     let refs: Vec<(&str, &str)> = files.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
     Ok(analyze_human_wf_sources(&refs))
-}
-
-fn collect_rs_files_no_symlinks(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    for entry_res in entries {
-        let entry = entry_res.map_err(|e| format!("{}: {e}", dir.display()))?;
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if ft.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if ft.is_dir() {
-            collect_rs_files_no_symlinks(&path, out)?;
-        } else if ft.is_file() && path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// Analyze `(rel_path, rust_source)` pairs for `WF-NN` `WorkflowRun` five-stage completeness and forbidden bypasses.
@@ -1419,38 +1383,27 @@ fn validate_section62_completion_counts(
     if complete_claims.is_empty() && five_stage_claims.is_empty() {
         return;
     }
-
     let Some((start, end)) = parse_shard_wf_range(shard_cell) else {
-        violations.push(EvidenceViolation {
-            path: path.to_owned(),
-            line,
-            reason: format!("cannot resolve `WF` shard range for §6.2 row `{}`", shard_cell.trim()),
-        });
+        push_ev(violations, path, line, format!("cannot resolve `WF` shard range for §6.2 row `{}`", shard_cell.trim()));
         return;
     };
     let expected_m = usize::from(end - start + 1);
     let actual = count_complete_in_range(complete_wfs, start, end);
 
-    for (n, m) in complete_claims {
-        if m != expected_m || n != actual {
-            violations.push(EvidenceViolation {
-                path: path.to_owned(),
-                line,
-                reason: format!(
-                    "§6.2 row claims `complete {n} / {m}` for `WF-{start:02}`..`WF-{end:02}`, but statically counted `{actual} / {expected_m}` five-stage complete tests"
-                ),
-            });
-        }
-    }
-    for (n, m) in five_stage_claims {
-        if m != expected_m || n != actual {
-            violations.push(EvidenceViolation {
-                path: path.to_owned(),
-                line,
-                reason: format!(
-                    "§6.2 row claims `five-stage {n} / {m}` for `WF-{start:02}`..`WF-{end:02}`, but statically counted `{actual} / {expected_m}` five-stage complete tests (use `complete {actual} / {expected_m}`)"
-                ),
-            });
+    for (label, claims, hint) in
+        [("complete", complete_claims, String::new()), ("five-stage", five_stage_claims, format!(" (use `complete {actual} / {expected_m}`)"))]
+    {
+        for (n, m) in claims {
+            if m != expected_m || n != actual {
+                push_ev(
+                    violations,
+                    path,
+                    line,
+                    format!(
+                        "§6.2 row claims `{label} {n} / {m}` for `WF-{start:02}`..`WF-{end:02}`, but statically counted `{actual} / {expected_m}` five-stage complete tests{hint}"
+                    ),
+                );
+            }
         }
     }
 }
@@ -1473,11 +1426,9 @@ pub fn check_ui_parity_five_stage_claims(path: &str, ui_parity_md: &str, complet
         }
         let complete_fracs = parse_labeled_fraction(&lower, "complete");
         let five_stage_fracs = parse_labeled_fraction(&lower, "five-stage");
-        let mentions_five_stage = lower.contains("five-stage") || lower.contains("five stage") || !complete_fracs.is_empty();
-        if !mentions_five_stage {
+        if !(lower.contains("five-stage") || lower.contains("five stage") || !complete_fracs.is_empty()) {
             continue;
         }
-
         let (start, end) = if lower.contains("wf-01") && lower.contains("wf-50") {
             (1, 50)
         } else if lower.contains("wf-51") && lower.contains("wf-65") {
@@ -1496,428 +1447,17 @@ pub fn check_ui_parity_five_stage_claims(path: &str, ui_parity_md: &str, complet
         }
         let exceeds = if explicit_claims.is_empty() { actual < expected_m } else { explicit_claims.iter().any(|&n| n > actual) };
         if exceeds {
-            violations.push(EvidenceViolation {
-                path: path.to_owned(),
-                line: idx + 1,
-                reason: format!(
+            push_ev(
+                &mut violations,
+                path,
+                idx + 1,
+                format!(
                     "checked `[x]` item claims five-stage completion beyond counted `WorkflowRun` tests (`{actual}/{expected_m}` complete in `WF-{start:02}`..`WF-{end:02}`)"
                 ),
-            });
+            );
         }
     }
     violations
-}
-
-#[cfg(test)]
-mod evidence_tests {
-    use super::*;
-
-    #[test]
-    fn ui_parity_accepts_cited_human_test_manual_run_and_agent_harness_tag() {
-        let mut tests = WorkspaceTests::default();
-        tests.qualified.insert(String::from("desktop_host_loop::file_drop_human_path"));
-        tests.unqualified.insert(String::from("file_drop_human_path"));
-
-        let md = "\
-A checkbox `[x]` in prose is ignored.
-- [x] File drop — verified by `desktop_host_loop::file_drop_human_path`.
-- [x] Native Save — manual: 2026-11-16 macOS verified save dialog.
-- [x] *(agent harness)* Wizard suite (`gui_wf_foundations_and_data::wf01_t_test`, `--control`).
-- [ ] Pending dialog work (`dispatch_gui_action` only).
-";
-        let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", md, Some(&tests));
-        assert!(violations.is_empty(), "unexpected violations: {violations:?}");
-    }
-
-    #[test]
-    fn ui_parity_rejects_missing_evidence_on_checked_item() {
-        let md = "- [x] Interactive modal buttons work cleanly.\n";
-        let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", md, None);
-        assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].line, 1);
-        assert!(violations[0].reason.contains("missing passing human-path test"));
-    }
-
-    #[test]
-    fn ui_parity_rejects_unknown_test_name_when_workspace_indexed() {
-        let tests = WorkspaceTests::default();
-        let md = "- [x] Modal dialog — verified by `ui_tests::invented_nonexistent_test`.\n";
-        let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", md, Some(&tests));
-        assert_eq!(violations.len(), 1);
-        assert!(violations[0].reason.contains("invented_nonexistent_test"));
-    }
-
-    #[test]
-    fn ui_parity_rejects_agent_harness_only_evidence_for_human_item() {
-        let mut tests = WorkspaceTests::default();
-        tests.qualified.insert(String::from("gui_wf_foundations_and_data::wf01_one_sample_t_test"));
-        tests.unqualified.insert(String::from("wf01_one_sample_t_test"));
-        tests.qualified.insert(String::from("gui_wf_50_cld::wf50_compact_letter_display_piepho_reactive_svg_pdf_rgba"));
-        tests.unqualified.insert(String::from("wf50_compact_letter_display_piepho_reactive_svg_pdf_rgba"));
-        tests.qualified.insert(String::from("control_io::some_control_test"));
-        tests.unqualified.insert(String::from("some_control_test"));
-
-        let cases = [
-            "- [x] One-sample t-test dialog works (`gui_wf_foundations_and_data::wf01_one_sample_t_test`).\n",
-            "- [x] CLD dialog works (`gui_wf_50_cld::wf50_compact_letter_display_piepho_reactive_svg_pdf_rgba`).\n",
-            "- [x] Analyze wizard works (driven with `--control` and `--event-script`).\n",
-            "- [x] Result chaining works via `dispatch_gui_action` and `ui.invoke_menu`.\n",
-            "- [x] Pointer gestures work via `ui.pointer_gesture` and `ui_inspect`.\n",
-            "- [x] Control server handles inputs (`control_io::some_control_test`).\n",
-            "- [x] Replay works via `gui_only_workflows::eight_gui_actions_and_modal_guards_drive_live_ui_under_gui_only`.\n",
-        ];
-        for md in cases {
-            let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", md, Some(&tests));
-            assert_eq!(violations.len(), 1, "expected harness rejection for `{md}`, got {violations:?}");
-            assert!(violations[0].reason.contains("agent-harness"), "got `{}`", violations[0].reason);
-        }
-    }
-
-    #[test]
-    fn gui_workflows_human_path_accepts_zero_no_or_valid_evidence() {
-        let mut tests = WorkspaceTests::default();
-        tests.qualified.insert(String::from("r102_human_shards::r102_shard1_pass"));
-        tests.unqualified.insert(String::from("r102_shard1_pass"));
-
-        let md = "\
-### 6.2 Per-shard human-path status
-
-| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
-|---|---|---|---|---|
-| Shard 1 | Pass | `1 / 6` (`r102_human_shards::r102_shard1_pass`) | `B1` | None |
-| Shard 2 | Pass | `0 / 9` | `B1` | Static dialog |
-| Shard 3 | Pass | Pass (manual: 2026-11-16 desktop QA) | None | None |
-| `WF-50` | Pass | `0 / 1` | `B1` | Inert inspector |
-| **Total** | **50 / 50** | **`0 / 50`** | | |
-";
-        let violations = check_gui_workflows_human_path("docs/gui-workflows.md", md, Some(&tests));
-        assert!(violations.is_empty(), "unexpected violations: {violations:?}");
-    }
-
-    #[test]
-    fn gui_workflows_human_path_rejects_unbacked_pass_and_harness_only_claims() {
-        let mut tests = WorkspaceTests::default();
-        tests.qualified.insert(String::from("gui_wf_foundations_and_data::wf01_column_t_test"));
-
-        let md = "\
-### 6.2 Per-shard human-path status
-
-| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
-|---|---|---|---|---|
-| Shard 1 | Pass | `2 / 6` | None | None |
-| Shard 2 | Pass | Pass (`gui_wf_foundations_and_data::wf01_column_t_test`) | None | None |
-| Shard 3 | Pass | `1 / 8` (`--event-script`) | None | None |
-| Shard 4 | Pass | Yes (`dispatch_gui_action`) | None | None |
-";
-        let violations = check_gui_workflows_human_path("docs/gui-workflows.md", md, Some(&tests));
-        assert_eq!(violations.len(), 4, "expected 4 violations, got {violations:?}");
-        assert!(violations[0].reason.contains("missing passing human-path test"));
-        assert!(violations[1].reason.contains("agent-harness"));
-        assert!(violations[2].reason.contains("agent-harness"));
-        assert!(violations[3].reason.contains("agent-harness"));
-    }
-
-    #[test]
-    fn manual_run_rejects_negated_or_todo_mentions() {
-        let cases = [
-            "- [x] Native save — no manual run yet; manual: todo.\n",
-            "- [x] Native export — manual: planned.\n",
-            "- [x] Open dialog — manual walkthrough (pending 2026-11).\n",
-            "- [x] Open dialog — no manual (2026-11-16) yet.\n",
-            "- [x] Open dialog — manual (none recorded 2026).\n",
-            "- [x] Native save — no computer-use run yet; computer-use: todo.\n",
-            "- [x] Open dialog — computer-use walkthrough (pending 2026-11).\n",
-            "- [x] Open dialog — without computer-use (2026-11-18) verification.\n",
-        ];
-        for md in cases {
-            let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", md, None);
-            assert_eq!(violations.len(), 1, "expected rejection for `{md}`, got {violations:?}");
-        }
-    }
-
-    #[test]
-    fn computer_use_walkthrough_accepts_mouse_screen_run_and_rejects_harness_mix() {
-        let valid_md = "\
-- [x] Native Save — computer-use: 2026-11-18 macOS desktop mouse+screen QA.
-- [x] Native Print — computer-use walkthrough (2026-11-18 macOS + Safari).
-";
-        let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", valid_md, None);
-        assert!(violations.is_empty(), "unexpected violations: {violations:?}");
-
-        let harness_mixed = "- [x] Save dialog — computer-use: 2026-11-18 driven via `--control` and `ui.click`.\n";
-        let bad = check_ui_parity_evidence("docs/evidence/user-interface.md", harness_mixed, None);
-        assert_eq!(bad.len(), 1, "expected agent-harness rejection, got {bad:?}");
-        assert!(bad[0].reason.contains("agent-harness"), "got `{}`", bad[0].reason);
-    }
-
-    #[test]
-    fn ignored_test_is_not_indexed_as_passing_evidence() {
-        let src = "\
-#[test]
-#[ignore = \"not ready\"]
-fn skipped_human_test() {}
-
-#[test] #[ignore] fn single_line_skipped_test() {}
-
-#[ignore]
-fn non_test_ignored_helper() {}
-
-#[test] #[allow(dead_code)] fn one_line_active_test() {}
-
-#[test]
-fn active_human_test() {}
-";
-        let mut tests = WorkspaceTests::default();
-        scan_tests_in_rust_source("desktop_host_loop", None, src, &mut tests);
-        assert!(tests.contains_test("desktop_host_loop::active_human_test"));
-        assert!(tests.contains_test("desktop_host_loop::one_line_active_test"));
-        assert!(!tests.contains_test("desktop_host_loop::skipped_human_test"));
-        assert!(!tests.contains_test("desktop_host_loop::single_line_skipped_test"));
-    }
-
-    #[test]
-    fn r10_2_accepts_human_wf_and_rejects_gui_wf_and_non_human_wf_fns() {
-        let mut tests = WorkspaceTests::default();
-        for (qual, unqual) in [
-            ("human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason", "wf01_human_xy_dose_response_format_exclude_with_reason"),
-            ("human_wf_32_37::wf34_human_qpcr_ddct_calculated_variables_and_welch", "wf34_human_qpcr_ddct_calculated_variables_and_welch"),
-            ("gui_wf_foundations_and_data::wf01_one_sample_t_test", "wf01_one_sample_t_test"),
-            ("gui_wf_foundations_and_data::wf01_human_spoof", "wf01_human_spoof"),
-            ("other_suite::wf01_non_human_harness", "wf01_non_human_harness"),
-        ] {
-            tests.qualified.insert(String::from(qual));
-            tests.unqualified.insert(String::from(unqual));
-        }
-
-        let valid_md = "\
-- [x] WF-01 qualified (`human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason`).
-- [x] WF-01 unqualified (`wf01_human_xy_dose_response_format_exclude_with_reason`).
-";
-        let valid_parity = check_ui_parity_evidence("docs/evidence/user-interface.md", valid_md, Some(&tests));
-        assert!(valid_parity.is_empty(), "unexpected violations: {valid_parity:?}");
-
-        let valid_wf_table = "\
-### 6.2 Per-shard human-path status
-
-| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
-|---|---|---|---|---|
-| Shard 1 | Pass | `1 / 6` (`human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason`) | None | None |
-| Shard 6 | Pass | `1 / 6` (`wf34_human_qpcr_ddct_calculated_variables_and_welch`) | None | None |
-";
-        let valid_wf = check_gui_workflows_human_path("docs/gui-workflows.md", valid_wf_table, Some(&tests));
-        assert!(valid_wf.is_empty(), "unexpected violations: {valid_wf:?}");
-
-        for bad_line in [
-            "- [x] Bad harness (`gui_wf_foundations_and_data::wf01_one_sample_t_test`).\n",
-            "- [x] Bad spoof (`gui_wf_foundations_and_data::wf01_human_spoof`).\n",
-            "- [x] Bad non-human wf (`other_suite::wf01_non_human_harness`).\n",
-            "- [x] Bad unqualified (`wf01_one_sample_t_test`).\n",
-        ] {
-            let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", bad_line, Some(&tests));
-            assert_eq!(violations.len(), 1, "expected rejection for `{bad_line}`, got {violations:?}");
-            assert!(violations[0].reason.contains("agent-harness"), "got `{}`", violations[0].reason);
-        }
-
-        let bad_wf_table = "\
-### 6.2 Per-shard human-path status
-
-| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
-|---|---|---|---|---|
-| Shard 1 | Pass | Pass (`gui_wf_foundations_and_data::wf01_one_sample_t_test`) | None | None |
-| Shard 2 | Pass | Pass (`wf01_non_human_harness`) | None | None |
-";
-        let bad_wf = check_gui_workflows_human_path("docs/gui-workflows.md", bad_wf_table, Some(&tests));
-        assert_eq!(bad_wf.len(), 2, "expected 2 violations, got {bad_wf:?}");
-        assert!(bad_wf.iter().all(|v| v.reason.contains("agent-harness")), "got {bad_wf:?}");
-    }
-
-    #[test]
-    fn r15_1_accepts_egui_driver_with_real_test_and_enforces_per_backend_counts() {
-        let mut tests = WorkspaceTests::default();
-        tests.qualified.insert(String::from("r15_1_driver_and_i18n::r15_1_smoke_human_path"));
-        tests.unqualified.insert(String::from("r15_1_smoke_human_path"));
-        tests.qualified.insert(String::from("human_wf_01_06::wf01_egui_human_xy_dose_response"));
-        tests.unqualified.insert(String::from("wf01_egui_human_xy_dose_response"));
-        tests.qualified.insert(String::from("human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason"));
-        tests.unqualified.insert(String::from("wf01_human_xy_dose_response_format_exclude_with_reason"));
-
-        let valid_parity = "\
-- [x] EgUi slice — verified by `r15_1_driver_and_i18n::r15_1_smoke_human_path` using `EguiHumanPathDriver` and `egui_kittest`.
-- [x] Workflows — `50/50 legacy, 1/50 egui`, verified by `human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason` and `human_wf_01_06::wf01_egui_human_xy_dose_response`.
-- [ ] Pending egui port (`0/50 egui`, `50/50 legacy`).
-";
-        let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", valid_parity, Some(&tests));
-        assert!(violations.is_empty(), "unexpected violations: {violations:?}");
-
-        // Mentioning `EguiHumanPathDriver` or `egui_kittest` alone without a real passing test or manual run still fails (Pitfall #6).
-        let unbacked_driver = "- [x] Verified via `EguiHumanPathDriver` and `egui_kittest`.\n";
-        let unbacked_hits = check_ui_parity_evidence("docs/evidence/user-interface.md", unbacked_driver, Some(&tests));
-        assert_eq!(unbacked_hits.len(), 1, "{unbacked_hits:?}");
-        assert!(unbacked_hits[0].reason.contains("missing passing human-path test"));
-
-        // Per-backend counts in §6.2 accept both `0/6 legacy, 0/6 egui`, mixed backed counts, and reject unbacked non-zero `egui` or malformed fractions.
-        let valid_wf_table = "\
-### 6.2 Per-shard human-path status
-
-| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
-|---|---|---|---|---|
-| Shard 1 | Pass | `0/6 legacy, 0/6 egui` | None | Pending |
-| Shard 2 | Pass | `0/9 legacy, 1/9 egui` (`human_wf_01_06::wf01_egui_human_xy_dose_response`) | None | Partial |
-";
-        let ok_wf = check_gui_workflows_human_path("docs/gui-workflows.md", valid_wf_table, Some(&tests));
-        assert!(ok_wf.is_empty(), "unexpected dual-backend violations: {ok_wf:?}");
-
-        let bad_wf_table = "\
-### 6.2 Per-shard human-path status
-
-| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
-|---|---|---|---|---|
-| Shard 1 | Pass | `0/6 legacy, 2/6 egui` (`egui_kittest`) | None | Unbacked |
-| Shard 2 | Pass | `55/50 legacy, 0/50 egui` (`human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason`) | None | Out-of-bounds |
-| Shard 3 | Pass | `0/6 legacy, 1/6 egui` (`EguiHumanPathDriver` + `--control`) | None | Harness |
-";
-        let bad_wf = check_gui_workflows_human_path("docs/gui-workflows.md", bad_wf_table, Some(&tests));
-        assert_eq!(bad_wf.len(), 3, "expected 3 dual-backend violations, got {bad_wf:?}");
-        assert!(bad_wf[0].reason.contains("missing passing human-path test"));
-        assert!(bad_wf[1].reason.contains("invalid per-backend workflow count"));
-        assert!(bad_wf[2].reason.contains("agent-harness"));
-    }
-
-    #[test]
-    fn r15_4_backend_workflow_telemetry_enforces_consistency_and_backed_counts() {
-        let mut tests = WorkspaceTests::default();
-        for idx in 1..=65 {
-            let egui_name = format!("wf{idx:02}_human_example");
-            tests.unqualified.insert(egui_name.clone());
-            tests.qualified.insert(format!("human_wf_demo::{egui_name}"));
-        }
-
-        let valid_md = "\
-- [x] *(human path)* All 65 reference workflows — `65/65 egui`
-- [x] *(human path — `egui` backend, `R15.5`)* Native `egui` desktop shell (`65/65 egui`)
-";
-        let (telemetry, violations) = super::check_backend_workflow_telemetry("docs/evidence/user-interface.md", valid_md, &tests);
-        assert!(violations.is_empty(), "unexpected violations: {violations:?}");
-        assert_eq!(telemetry.legacy_claimed, 0);
-        assert_eq!(telemetry.egui_claimed, 65);
-        assert_eq!(telemetry.legacy_backed, 0);
-        assert_eq!(telemetry.egui_backed, 65);
-
-        let stale_legacy_md = "\
-- [x] *(human path)* All 65 reference workflows — `65/65 legacy, 65/65 egui`
-- [ ] *(human path — `egui` backend)* Overhaul (`2/65 egui` vs `65/65 legacy`)
-";
-        let (_bad_tel, bad_violations) = super::check_backend_workflow_telemetry("docs/evidence/user-interface.md", stale_legacy_md, &tests);
-        assert!(bad_violations.iter().any(|v| v.reason.contains("only `0/65`")), "{bad_violations:?}");
-        assert!(bad_violations.iter().any(|v| v.reason.contains("conflicting")), "{bad_violations:?}");
-    }
-
-    #[test]
-    fn r10_26_static_gate_rejects_seeded_guarded_missing_finish_and_mismatched_counts() {
-        let valid_src = r#"
-            #[test]
-            fn wf01_human_xy_demo() -> Result<(), String> {
-                let mut run = WorkflowRun::start("WF-01");
-                let _ = run.create_table_via_welcome("welcome.arch.xy", "Demo", &[])?;
-                run.finish()
-            }
-            #[test]
-            fn wf02_human_clip_demo() -> Result<(), String> {
-                let mut run = WorkflowRun::start_with_clipboard("WF-02", clip);
-                run.finish()
-            }
-        "#;
-        let (complete, lints) = super::analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", valid_src)]);
-        assert!(lints.is_empty(), "expected clean lints, got {lints:?}");
-        assert_eq!(complete.into_iter().collect::<Vec<_>>(), vec![1, 2]);
-
-        // 1. Seeded body + forbidden bypasses in a WorkflowRun test.
-        let seeded_src = r#"
-            #[test]
-            fn wf03_human_seeded() -> Result<(), String> {
-                let sess = Session::from_document(doc);
-                app.execute_command("sheet.select", json!({}));
-                let mut run = WorkflowRun::start("WF-03");
-                let _ = run.app_mut();
-                let _ = run.state_mut();
-                let _ = dispatch_gui_action(&mut app, "x", json!({}));
-                run.finish()
-            }
-        "#;
-        let (_c_seed, seed_lints) = super::analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", seeded_src)]);
-        assert_eq!(seed_lints.len(), 5, "expected 5 bypass violations, got {seed_lints:?}");
-
-        // 2. Guarded `find_by_widget_id(` inside `if` and `if let` conditions.
-        let guarded_src = r#"
-            #[test]
-            fn wf04_human_guarded_if() -> Result<(), String> {
-                let mut run = WorkflowRun::start("WF-04");
-                if run.frame_meta().find_by_widget_id("opt.btn").is_some() {
-                    run.click("opt.btn")?;
-                }
-                run.finish()
-            }
-            #[test]
-            fn wf05_human_guarded_if_let() -> Result<(), String> {
-                let mut run = WorkflowRun::start("WF-05");
-                if let Some(_n) = run.frame_meta().find_by_widget_id("opt.btn2") {
-                    run.click("opt.btn2")?;
-                }
-                run.finish()
-            }
-        "#;
-        let (_c_guard, guard_lints) = super::analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", guarded_src)]);
-        assert_eq!(guard_lints.len(), 2, "expected 2 guarded find_by_widget_id violations, got {guard_lints:?}");
-        assert!(guard_lints.iter().all(|v| v.reason.contains("find_by_widget_id(")));
-
-        // 3. Missing `.finish()` is NOT counted as complete.
-        let missing_finish_src = r#"
-            #[test]
-            fn wf01_human_no_finish() -> Result<(), String> {
-                let mut run = WorkflowRun::start("WF-01");
-                let _ = run.create_table_via_welcome("welcome.arch.xy", "Demo", &[])?;
-                Ok(())
-            }
-        "#;
-        let (c_no_fin, _lint_no_fin) = super::analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", missing_finish_src)]);
-        assert!(c_no_fin.is_empty(), "test missing .finish() must not count as complete: {c_no_fin:?}");
-
-        // 4. `complete N / M` mismatch in §6.2 + premature `[x]` five-stage claim in user-interface.md.
-        let mut tests = WorkspaceTests::default();
-        tests.qualified.insert(String::from("human_wf_01_06::wf01_human_xy_demo"));
-        tests.unqualified.insert(String::from("wf01_human_xy_demo"));
-        let mut one_complete = BTreeSet::new();
-        one_complete.insert(1);
-
-        let ok_62 = "\
-### 6.2 Per-shard human-path status
-
-| Shard / workflows | Agent harness | Human path | Blockers | Remaining gaps |
-|---|---|---|---|---|
-| Shard 1 (`WF-01`–`WF-06`) | Pass | complete `1 / 6` (`human_wf_01_06::wf01_human_xy_demo`) | None | None |
-";
-        assert!(
-            super::check_gui_workflows_human_path_with_completion("docs/gui-workflows.md", ok_62, Some(&tests), Some(&one_complete)).is_empty(),
-            "expected matching complete 1 / 6 row to pass"
-        );
-
-        let bad_62 = "\
-### 6.2 Per-shard human-path status
-
-| Shard / workflows | Agent harness | Human path | Blockers | Remaining gaps |
-|---|---|---|---|---|
-| Shard 1 (`WF-01`–`WF-06`) | Pass | complete `2 / 6` (`human_wf_01_06::wf01_human_xy_demo`) | None | None |
-";
-        let mismatch_violations =
-            super::check_gui_workflows_human_path_with_completion("docs/gui-workflows.md", bad_62, Some(&tests), Some(&c_no_fin));
-        assert_eq!(mismatch_violations.len(), 1, "{mismatch_violations:?}");
-        assert!(mismatch_violations[0].reason.contains("statically counted `0 / 6`"));
-
-        let bad_ui_claim = "- [x] *(human path)* Five-stage `WF-01`–`WF-50` complete (`human_wf_01_06::wf01_human_xy_demo`).\n";
-        let ui_claim_violations = super::check_ui_parity_five_stage_claims("docs/evidence/user-interface.md", bad_ui_claim, &one_complete);
-        assert_eq!(ui_claim_violations.len(), 1, "{ui_claim_violations:?}");
-        assert!(ui_claim_violations[0].reason.contains("1/50"));
-    }
 }
 
 /// Scan every Markdown table in `md`, returning `(table_count, duplicate_keys)`.
@@ -2079,11 +1619,7 @@ fn count_live_ui_commands(root: &Path) -> Option<usize> {
 fn check_status_structural_headings(status_md: &str, violations: &mut Vec<EvidenceViolation>) {
     for heading in ["## Verified Capabilities & Headline Numbers", "## Known Limits"] {
         if !status_md.lines().any(|l| l.trim() == heading) {
-            violations.push(EvidenceViolation {
-                path: String::from(STATUS_REL),
-                line: 1,
-                reason: format!("missing required section heading `{heading}`"),
-            });
+            push_ev(violations, STATUS_REL, 1, format!("missing required section heading `{heading}`"));
         }
     }
 }
@@ -2098,9 +1634,7 @@ fn check_status_headline_table(
     let engine_needle = live_engine.map(|n| n.to_string());
     let pkg_needle = format!("{live_pkgs}` packages");
     let pkg_plain = format!("{live_pkgs} packages");
-    let mut saw_engine_row = false;
-    let mut saw_ui_row = false;
-    let mut saw_platform_row = false;
+    let (mut saw_engine, mut saw_ui, mut saw_platform) = (false, false, false);
 
     for (idx, raw) in status_md.lines().enumerate() {
         let trimmed = raw.trim();
@@ -2113,51 +1647,32 @@ fn check_status_headline_table(
         let norm = normalize_key(&col1).replace('`', "");
         let line_no = idx + 1;
         if norm == "engine command registry" {
-            saw_engine_row = true;
-            if let Some(count) = live_engine
-                && let Some(ref needle) = engine_needle
+            saw_engine = true;
+            if let (Some(count), Some(needle)) = (live_engine, engine_needle.as_deref())
                 && !cell_contains_number(trimmed, needle)
             {
-                violations.push(EvidenceViolation {
-                    path: String::from(STATUS_REL),
-                    line: line_no,
-                    reason: format!("Engine command registry row does not report live count `{count}`"),
-                });
+                push_ev(violations, STATUS_REL, line_no, format!("Engine command registry row does not report live count `{count}`"));
             }
         } else if norm == "ui command catalog" {
-            saw_ui_row = true;
+            saw_ui = true;
             if let Some(ui_count) = live_ui
                 && !cell_contains_number(trimmed, &ui_count.to_string())
             {
-                violations.push(EvidenceViolation {
-                    path: String::from(STATUS_REL),
-                    line: line_no,
-                    reason: format!("UI command catalog row does not report live count `{ui_count}`"),
-                });
+                push_ev(violations, STATUS_REL, line_no, format!("UI command catalog row does not report live count `{ui_count}`"));
             }
         } else if norm.starts_with("platform, r0 alignment") {
-            saw_platform_row = true;
+            saw_platform = true;
             if !trimmed.contains(&pkg_needle) && !trimmed.contains(&pkg_plain) {
-                violations.push(EvidenceViolation {
-                    path: String::from(STATUS_REL),
-                    line: line_no,
-                    reason: format!("Platform/R0 row does not report live `{live_pkgs}` workspace packages"),
-                });
+                push_ev(violations, STATUS_REL, line_no, format!("Platform/R0 row does not report live `{live_pkgs}` workspace packages"));
             }
         }
     }
 
-    for (present, label) in [
-        (saw_engine_row, "Engine command registry"),
-        (saw_ui_row, "UI command catalog"),
-        (saw_platform_row, "Platform, `R0` alignment & Zero Telemetry"),
-    ] {
+    for (present, label) in
+        [(saw_engine, "Engine command registry"), (saw_ui, "UI command catalog"), (saw_platform, "Platform, `R0` alignment & Zero Telemetry")]
+    {
         if !present {
-            violations.push(EvidenceViolation {
-                path: String::from(STATUS_REL),
-                line: 1,
-                reason: format!("missing `{label}` row in Verified Capabilities table"),
-            });
+            push_ev(violations, STATUS_REL, 1, format!("missing `{label}` row in Verified Capabilities table"));
         }
     }
 }
@@ -2180,175 +1695,309 @@ fn cell_contains_number(row: &str, needle: &str) -> bool {
 }
 
 fn check_doc_count_parity(root: &Path, live_engine: Option<usize>, live_ui: Option<usize>, violations: &mut Vec<EvidenceViolation>) {
-    if let Some(engine_count) = live_engine {
-        let cmds_rel = "docs/commands.md";
-        if let Ok(cmds_doc) = fs::read_to_string(root.join(cmds_rel)) {
-            let expected = format!("Registered commands: {engine_count}");
-            if !cmds_doc.contains(&expected) {
-                violations.push(EvidenceViolation {
-                    path: String::from(cmds_rel),
-                    line: 1,
-                    reason: format!("expected `{expected}` matching live registry"),
-                });
-            }
+    if let Some(engine_count) = live_engine
+        && let Ok(cmds_doc) = fs::read_to_string(root.join("docs/commands.md"))
+    {
+        let expected = format!("Registered commands: {engine_count}");
+        if !cmds_doc.contains(&expected) {
+            push_ev(violations, "docs/commands.md", 1, format!("expected `{expected}` matching live registry"));
         }
     }
-
-    let agents_rel = "AGENTS.md";
-    if let Ok(agents_doc) = fs::read_to_string(root.join(agents_rel)) {
+    if let Ok(agents_doc) = fs::read_to_string(root.join("AGENTS.md")) {
         if let Some(engine_count) = live_engine {
-            let expected_engine = format!("`{engine_count}` commands");
-            if !agents_doc.contains(&expected_engine) {
-                violations.push(EvidenceViolation {
-                    path: String::from(agents_rel),
-                    line: 1,
-                    reason: format!("expected `{expected_engine}` matching live command registry"),
-                });
+            let expected = format!("`{engine_count}` commands");
+            if !agents_doc.contains(&expected) {
+                push_ev(violations, "AGENTS.md", 1, format!("expected `{expected}` matching live command registry"));
             }
         }
         if let Some(ui_count) = live_ui {
-            let expected_ui = format!("`{ui_count}` entries");
-            if !agents_doc.contains(&expected_ui) {
-                violations.push(EvidenceViolation {
-                    path: String::from(agents_rel),
-                    line: 1,
-                    reason: format!("expected `{expected_ui}` matching live `UI_COMMANDS` count"),
-                });
+            let expected = format!("`{ui_count}` entries");
+            if !agents_doc.contains(&expected) {
+                push_ev(violations, "AGENTS.md", 1, format!("expected `{expected}` matching live `UI_COMMANDS` count"));
             }
         }
     }
-
-    let proto_rel = "docs/control-protocol.md";
-    if let Ok(proto_doc) = fs::read_to_string(root.join(proto_rel))
-        && let Some(ui_count) = live_ui
-    {
+    if let (Some(ui_count), Ok(proto_doc)) = (live_ui, fs::read_to_string(root.join("docs/control-protocol.md"))) {
         let exact_ui = format!("`{ui_count}` synced `UI_COMMANDS`");
         if proto_doc.contains("`32` synced `UI_COMMANDS`") || (!proto_doc.contains("all synced `UI_COMMANDS`") && !proto_doc.contains(&exact_ui)) {
-            violations.push(EvidenceViolation {
-                path: String::from(proto_rel),
-                line: 1,
-                reason: format!("expected `all synced `UI_COMMANDS`` or `{exact_ui}` (found stale count)"),
-            });
+            push_ev(violations, "docs/control-protocol.md", 1, format!("expected `all synced `UI_COMMANDS`` or `{exact_ui}` (found stale count)"));
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DuplicateKey, check_markdown_tables};
+    use std::collections::BTreeSet;
+
+    use super::{
+        DuplicateKey, WorkspaceTests, analyze_human_wf_sources, check_backend_workflow_telemetry, check_gui_workflows_human_path,
+        check_gui_workflows_human_path_with_completion, check_live_status_metrics, check_markdown_tables, check_ui_parity_evidence,
+        check_ui_parity_five_stage_claims, scan_tests_in_rust_source,
+    };
+
+    fn mk_tests(qualified_names: &[&str]) -> WorkspaceTests {
+        let mut tests = WorkspaceTests::default();
+        for &q in qualified_names {
+            tests.qualified.insert(q.to_owned());
+            if let Some(unqual) = q.rsplit("::").next() {
+                tests.unqualified.insert(unqual.to_owned());
+            }
+        }
+        tests
+    }
+
+    fn sec62_md(rows: &[&str]) -> String {
+        let mut s = String::from(
+            "### 6.2 Per-shard human-path status\n\n| Shard / workflows | Agent harness | Human path | Blockers | Gaps |\n|---|---|---|---|---|\n",
+        );
+        for r in rows {
+            s.push_str(r);
+            s.push('\n');
+        }
+        s
+    }
 
     #[test]
-    fn fails_on_duplicate_first_column_key_within_single_table() {
-        let fixture = "\
-| Item | Status |
-|---|---|
-| `R0.3` | todo |
-| `R0.4` | done |
-| `R0.3` | conflict-duplicate |
-";
-        let (tables, dups) = check_markdown_tables("docs/ROADMAP.md", fixture);
+    fn ui_parity_and_manual_run_evidence_rules() {
+        let tests = mk_tests(&[
+            "desktop_host_loop::file_drop_human_path",
+            "gui_wf_foundations_and_data::wf01_one_sample_t_test",
+            "gui_wf_50_cld::wf50_compact_letter_display_piepho_reactive_svg_pdf_rgba",
+            "control_io::some_control_test",
+        ]);
+        let ok_md = "A checkbox `[x]` in prose is ignored.\n\
+            - [x] File drop — verified by `desktop_host_loop::file_drop_human_path`.\n\
+            - [x] Native Save — manual: 2026-11-16 macOS verified save dialog.\n\
+            - [x] Native Save — computer-use: 2026-11-18 macOS desktop mouse+screen QA.\n\
+            - [x] Native Print — computer-use walkthrough (2026-11-18 macOS + Safari).\n\
+            - [x] *(agent harness)* Wizard suite (`gui_wf_foundations_and_data::wf01_t_test`, `--control`).\n\
+            - [ ] Pending dialog work (`dispatch_gui_action` only).\n";
+        assert!(check_ui_parity_evidence("docs/evidence/user-interface.md", ok_md, Some(&tests)).is_empty());
+
+        let missing = check_ui_parity_evidence("docs/evidence/user-interface.md", "- [x] Interactive modal buttons work cleanly.\n", None);
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].line == 1 && missing[0].reason.contains("missing passing human-path test"));
+
+        let unknown = check_ui_parity_evidence(
+            "docs/evidence/user-interface.md",
+            "- [x] Modal dialog — verified by `ui_tests::invented_nonexistent_test`.\n",
+            Some(&WorkspaceTests::default()),
+        );
+        assert_eq!(unknown.len(), 1);
+        assert!(unknown[0].reason.contains("invented_nonexistent_test"));
+
+        for harness_line in [
+            "- [x] One-sample t-test dialog works (`gui_wf_foundations_and_data::wf01_one_sample_t_test`).\n",
+            "- [x] CLD dialog works (`gui_wf_50_cld::wf50_compact_letter_display_piepho_reactive_svg_pdf_rgba`).\n",
+            "- [x] Analyze wizard works (driven with `--control` and `--event-script`).\n",
+            "- [x] Result chaining works via `dispatch_gui_action` and `ui.invoke_menu`.\n",
+            "- [x] Pointer gestures work via `ui.pointer_gesture` and `ui_inspect`.\n",
+            "- [x] Control server handles inputs (`control_io::some_control_test`).\n",
+            "- [x] Replay works via `gui_only_workflows::eight_gui_actions_and_modal_guards_drive_live_ui_under_gui_only`.\n",
+            "- [x] Save dialog — computer-use: 2026-11-18 driven via `--control` and `ui.click`.\n",
+        ] {
+            let v = check_ui_parity_evidence("docs/evidence/user-interface.md", harness_line, Some(&tests));
+            assert_eq!(v.len(), 1, "{harness_line}: {v:?}");
+            assert!(v[0].reason.contains("agent-harness"), "{harness_line}: {}", v[0].reason);
+        }
+
+        for negated in [
+            "- [x] Native save — no manual run yet; manual: todo.\n",
+            "- [x] Native export — manual: planned.\n",
+            "- [x] Open dialog — manual walkthrough (pending 2026-11).\n",
+            "- [x] Open dialog — no manual (2026-11-16) yet.\n",
+            "- [x] Open dialog — manual (none recorded 2026).\n",
+            "- [x] Native save — no computer-use run yet; computer-use: todo.\n",
+            "- [x] Open dialog — computer-use walkthrough (pending 2026-11).\n",
+            "- [x] Open dialog — without computer-use (2026-11-18) verification.\n",
+        ] {
+            let v = check_ui_parity_evidence("docs/evidence/user-interface.md", negated, None);
+            assert_eq!(v.len(), 1, "{negated}: {v:?}");
+        }
+    }
+
+    #[test]
+    fn gui_workflows_section62_human_wf_and_backend_telemetry_rules() {
+        let tests = mk_tests(&[
+            "r102_human_shards::r102_shard1_pass",
+            "gui_wf_foundations_and_data::wf01_column_t_test",
+            "gui_wf_foundations_and_data::wf01_one_sample_t_test",
+            "gui_wf_foundations_and_data::wf01_human_spoof",
+            "other_suite::wf01_non_human_harness",
+            "human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason",
+            "human_wf_32_37::wf34_human_qpcr_ddct_calculated_variables_and_welch",
+            "r15_1_driver_and_i18n::r15_1_smoke_human_path",
+            "human_wf_01_06::wf01_egui_human_xy_dose_response",
+        ]);
+
+        let ok_table = sec62_md(&[
+            "| Shard 1 | Pass | `1 / 6` (`r102_human_shards::r102_shard1_pass`) | `B1` | None |",
+            "| Shard 2 | Pass | `0 / 9` | `B1` | Static dialog |",
+            "| Shard 3 | Pass | Pass (manual: 2026-11-16 desktop QA) | None | None |",
+            "| `WF-50` | Pass | `0 / 1` | `B1` | Inert inspector |",
+            "| Shard 1 | Pass | `1 / 6` (`human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason`) | None | None |",
+            "| Shard 6 | Pass | `1 / 6` (`wf34_human_qpcr_ddct_calculated_variables_and_welch`) | None | None |",
+            "| Shard 1 | Pass | `0/6 legacy, 0/6 egui` | None | Pending |",
+            "| Shard 2 | Pass | `0/9 legacy, 1/9 egui` (`human_wf_01_06::wf01_egui_human_xy_dose_response`) | None | Partial |",
+            "| **Total** | **50 / 50** | **`0 / 50`** | | |",
+        ]);
+        assert!(check_gui_workflows_human_path("docs/gui-workflows.md", &ok_table, Some(&tests)).is_empty());
+
+        let bad_table = sec62_md(&[
+            "| Shard 1 | Pass | `2 / 6` | None | None |",
+            "| Shard 2 | Pass | Pass (`gui_wf_foundations_and_data::wf01_column_t_test`) | None | None |",
+            "| Shard 3 | Pass | `1 / 8` (`--event-script`) | None | None |",
+            "| Shard 4 | Pass | Yes (`dispatch_gui_action`) | None | None |",
+            "| Shard 1 | Pass | Pass (`wf01_non_human_harness`) | None | None |",
+            "| Shard 1 | Pass | `0/6 legacy, 2/6 egui` (`egui_kittest`) | None | Unbacked |",
+            "| Shard 2 | Pass | `55/50 legacy, 0/50 egui` (`human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason`) | None | Bad |",
+            "| Shard 3 | Pass | `0/6 legacy, 1/6 egui` (`EguiHumanPathDriver` + `--control`) | None | Harness |",
+        ]);
+        let bad = check_gui_workflows_human_path("docs/gui-workflows.md", &bad_table, Some(&tests));
+        let expected_reasons = [
+            "missing passing human-path test",
+            "agent-harness",
+            "agent-harness",
+            "agent-harness",
+            "agent-harness",
+            "missing passing human-path test",
+            "invalid per-backend workflow count",
+            "agent-harness",
+        ];
+        assert_eq!(bad.len(), expected_reasons.len(), "{bad:?}");
+        for (v, needle) in bad.iter().zip(expected_reasons) {
+            assert!(v.reason.contains(needle), "expected `{needle}`, got `{}`", v.reason);
+        }
+
+        let valid_parity = "- [x] WF-01 qualified (`human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason`).\n\
+            - [x] WF-01 unqualified (`wf01_human_xy_dose_response_format_exclude_with_reason`).\n\
+            - [x] EgUi slice — verified by `r15_1_driver_and_i18n::r15_1_smoke_human_path` using `EguiHumanPathDriver` and `egui_kittest`.\n\
+            - [x] Workflows — `50/50 legacy, 1/50 egui`, verified by `human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason` and `human_wf_01_06::wf01_egui_human_xy_dose_response`.\n\
+            - [ ] Pending egui port (`0/50 egui`, `50/50 legacy`).\n";
+        assert!(check_ui_parity_evidence("docs/evidence/user-interface.md", valid_parity, Some(&tests)).is_empty());
+
+        for (line, needle) in [
+            ("- [x] Bad harness (`gui_wf_foundations_and_data::wf01_one_sample_t_test`).\n", "agent-harness"),
+            ("- [x] Bad spoof (`gui_wf_foundations_and_data::wf01_human_spoof`).\n", "agent-harness"),
+            ("- [x] Bad non-human wf (`other_suite::wf01_non_human_harness`).\n", "agent-harness"),
+            ("- [x] Bad unqualified (`wf01_one_sample_t_test`).\n", "agent-harness"),
+            ("- [x] Verified via `EguiHumanPathDriver` and `egui_kittest`.\n", "missing passing human-path test"),
+        ] {
+            let v = check_ui_parity_evidence("docs/evidence/user-interface.md", line, Some(&tests));
+            assert_eq!(v.len(), 1, "{line}: {v:?}");
+            assert!(v[0].reason.contains(needle), "{line}: {}", v[0].reason);
+        }
+
+        // R15.4 backend telemetry
+        let all_65_names: Vec<String> = (1..=65).map(|i| format!("human_wf_demo::wf{i:02}_human_example")).collect();
+        let refs: Vec<&str> = all_65_names.iter().map(String::as_str).collect();
+        let all_65 = mk_tests(&refs);
+        let (tel, v) = check_backend_workflow_telemetry(
+            "docs/evidence/user-interface.md",
+            "- [x] *(human path)* All 65 — `65/65 egui`\n- [x] *(human path — `egui`)* Shell (`65/65 egui`)\n",
+            &all_65,
+        );
+        assert!(
+            v.is_empty() && tel.legacy_claimed == 0 && tel.egui_claimed == 65 && tel.legacy_backed == 0 && tel.egui_backed == 65,
+            "{tel:?} {v:?}"
+        );
+        let (_, bad_v) = check_backend_workflow_telemetry(
+            "docs/evidence/user-interface.md",
+            "- [x] *(human path)* All 65 — `65/65 legacy, 65/65 egui`\n- [ ] *(human path — `egui`)* Overhaul (`2/65 egui` vs `65/65 legacy`)\n",
+            &all_65,
+        );
+        assert!(bad_v.iter().any(|x| x.reason.contains("only `0/65`")) && bad_v.iter().any(|x| x.reason.contains("conflicting")), "{bad_v:?}");
+    }
+
+    #[test]
+    fn r10_26_and_fa_sec23_04_static_wf_completion_and_test_scanner() {
+        let mut ignored = WorkspaceTests::default();
+        let scan_src = r###"
+            const CH: char = '\'';
+            /* #[test] fn fake_block_comment_test() {} */
+            const RAW: &str = r##"#[test] fn fake_raw_string_test() {}"##;
+            #[test] #[ignore = "not ready"] fn skipped_human_test() {}
+            #[test] #[ignore] fn single_line_skipped_test() {}
+            #[ignore] fn non_test_ignored_helper() {}
+            #[test] #[allow(dead_code)] fn one_line_active_test() {}
+            #[test] fn active_human_test() {}
+        "###;
+        scan_tests_in_rust_source("desktop_host_loop", None, scan_src, &mut ignored);
+        assert!(ignored.contains_test("desktop_host_loop::active_human_test") && ignored.contains_test("desktop_host_loop::one_line_active_test"));
+        for hidden in ["skipped_human_test", "single_line_skipped_test", "fake_block_comment_test", "fake_raw_string_test"] {
+            assert!(!ignored.unqualified.contains(hidden), "{hidden} should be excluded");
+        }
+
+        let valid_src = "#[test] fn wf01_human_xy_demo() -> Result<(), String> { let mut run = WorkflowRun::start(\"WF-01\"); run.finish() }\n\
+            #[test] fn wf02_human_clip_demo() -> Result<(), String> { let mut run = WorkflowRun::start_with_clipboard(\"WF-02\", clip); run.finish() }\n";
+        let (complete, lints) = analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", valid_src)]);
+        assert!(lints.is_empty() && complete.into_iter().collect::<Vec<_>>() == vec![1, 2]);
+
+        let seeded = "#[test] fn wf03_human_seeded() -> Result<(), String> { let s = Session::from_document(doc); app.execute_command(\"a\", ()); let mut run = WorkflowRun::start(\"WF-03\"); let _ = run.app_mut(); let _ = run.state_mut(); let _ = dispatch_gui_action(&mut app, \"x\", ()); run.finish() }";
+        assert_eq!(analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", seeded)]).1.len(), 5);
+
+        let guarded = "#[test] fn wf04_human_guarded_if() { let mut run = WorkflowRun::start(\"WF-04\"); if run.frame_meta().find_by_widget_id(\"a\").is_some() {} run.finish() }\n\
+            #[test] fn wf05_human_guarded_if_let() { let mut run = WorkflowRun::start(\"WF-05\"); if let Some(_) = run.frame_meta().find_by_widget_id(\"b\") {} run.finish() }";
+        let (_, guard_lints) = analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", guarded)]);
+        assert_eq!(guard_lints.len(), 2);
+        assert!(guard_lints.iter().all(|v| v.reason.contains("find_by_widget_id(")));
+
+        let no_finish = "#[test] fn wf01_human_no_finish() -> Result<(), String> { let mut run = WorkflowRun::start(\"WF-01\"); Ok(()) }";
+        let (c_no_fin, _) = analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", no_finish)]);
+        assert!(c_no_fin.is_empty());
+
+        let tests = mk_tests(&["human_wf_01_06::wf01_human_xy_demo"]);
+        let one_complete = BTreeSet::from([1u8]);
+        let ok_62 = sec62_md(&["| Shard 1 (`WF-01`–`WF-06`) | Pass | complete `1 / 6` (`human_wf_01_06::wf01_human_xy_demo`) | None | None |"]);
+        assert!(check_gui_workflows_human_path_with_completion("docs/gui-workflows.md", &ok_62, Some(&tests), Some(&one_complete)).is_empty());
+        let bad_62 = sec62_md(&["| Shard 1 (`WF-01`–`WF-06`) | Pass | complete `2 / 6` (`human_wf_01_06::wf01_human_xy_demo`) | None | None |"]);
+        let mis = check_gui_workflows_human_path_with_completion("docs/gui-workflows.md", &bad_62, Some(&tests), Some(&c_no_fin));
+        assert_eq!(mis.len(), 1);
+        assert!(mis[0].reason.contains("statically counted `0 / 6`"));
+
+        let bad_ui = check_ui_parity_five_stage_claims(
+            "docs/evidence/user-interface.md",
+            "- [x] *(human path)* Five-stage `WF-01`–`WF-50` complete (`human_wf_01_06::wf01_human_xy_demo`).\n",
+            &one_complete,
+        );
+        assert_eq!(bad_ui.len(), 1);
+        assert!(bad_ui[0].reason.contains("1/50"));
+
+        // FA-SEC23-04: mod tests, helper bypass, decoy .finish(), while/match find_by_widget_id guards.
+        let tricky = "fn sneaky_helper(app: &mut App) { let _ = app.app_mut(); }\n\
+            mod tests {\n  type Run = WorkflowRun;\n\
+              #[test] fn wf01_type_alias_bypass() { let mut run = Run::start(\"WF-01\"); let _ = dispatch_gui_action(&mut app, \"x\", ()); run.finish() }\n\
+              #[test] fn wf02_decoy_finish_and_while_guard() { let mut run = WorkflowRun::start(\"WF-02\"); while run.frame_meta().find_by_widget_id(\"x\").is_some() {} let other = Dummy; other.finish(); }\n\
+              #[test] fn wf03_match_guard() { let mut run = WorkflowRun::start(\"WF-03\"); match run.frame_meta().find_by_widget_id(\"y\") { Some(_) => {} None => {} } run.finish() }\n}";
+        let (tricky_c, tricky_l) = analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", tricky)]);
+        assert!(!tricky_c.contains(&2));
+        assert!(tricky_l.iter().any(|v| v.reason.contains("app_mut")));
+        assert!(tricky_l.iter().any(|v| v.reason.contains("dispatch_gui_action")));
+        assert!(tricky_l.iter().filter(|v| v.reason.contains("find_by_widget_id(")).count() >= 2);
+    }
+
+    #[test]
+    fn markdown_tables_and_live_status_metrics() {
+        let (tables, dups) =
+            check_markdown_tables("docs/ROADMAP.md", "| Item | Status |\n|---|---|\n| `R0.3` | todo |\n| `R0.4` | done |\n| `R0.3` | dup |\n");
         assert_eq!(tables, 1);
         assert_eq!(dups, vec![DuplicateKey { path: String::from("docs/ROADMAP.md"), line: 5, key: String::from("`R0.3`") }]);
-    }
 
-    #[test]
-    fn allows_same_key_in_separate_tables_and_ignores_fenced_tables() {
-        let fixture = "\
-| Key | Val |
-|---|---|
-| Alpha | 1 |
+        let (tables2, dups2) = check_markdown_tables(
+            "docs/STATUS.md",
+            "| Key | Val |\n|---|---|\n| Alpha | 1 |\n\n| Key | Val |\n|---|---|\n| **Alpha** | 2 |\n\n```markdown\n| Key | Val |\n|---|---|\n| Dup | a |\n| Dup | b |\n```\n",
+        );
+        assert!(tables2 == 2 && dups2.is_empty());
 
-| Key | Val |
-|---|---|
-| **Alpha** | 2 |
-
-```markdown
-| Key | Val |
-|---|---|
-| Dup | a |
-| Dup | b |
-```
-";
-        let (tables, dups) = check_markdown_tables("docs/STATUS.md", fixture);
-        assert_eq!(tables, 2);
-        assert!(dups.is_empty(), "{dups:?}");
-    }
-
-    #[test]
-    fn r2_s13_11_live_status_metrics_passes_real_repo_and_catches_stale_counts() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let status_md = std::fs::read_to_string(root.join("docs/STATUS.md")).unwrap();
-        let live_hits = super::check_live_status_metrics(root, &status_md);
-        assert!(live_hits.is_empty(), "real workspace live metric drift: {live_hits:?}");
-
-        let stale_status = status_md
+        assert!(check_live_status_metrics(root, &status_md).is_empty());
+        let stale = status_md
             .replace("`106`** typed `CommandSpec`", "`95`** typed `CommandSpec`")
             .replace("`61`** typed `UiCommandSpec`", "`32`** typed `UiCommandSpec`");
-        let stale_hits = super::check_live_status_metrics(root, &stale_status);
+        let stale_hits = check_live_status_metrics(root, &stale);
         #[cfg(feature = "docs-site")]
         assert!(stale_hits.iter().any(|v| v.reason.contains("Engine command registry")), "{stale_hits:?}");
         assert!(stale_hits.iter().any(|v| v.reason.contains("UI command catalog")), "{stale_hits:?}");
-    }
-
-    #[test]
-    fn fa_sec23_04_handles_comments_raw_strings_mod_tests_helpers_guards_and_decoy_finish() {
-        // 1. Commented/raw-string `#[test]` and escaped `'\''` char literals don't fool test collector.
-        let mut tests = super::WorkspaceTests::default();
-        let src = r###"
-            const CH: char = '\'';
-            /* #[test] fn fake_block_comment_test() {} */
-            const RAW: &str = r##"
-                #[test]
-                fn fake_raw_string_test() {}
-            "##;
-            #[test]
-            fn real_test_fn() {}
-        "###;
-        super::scan_tests_in_rust_source("sample", None, src, &mut tests);
-        assert!(tests.unqualified.contains("real_test_fn"));
-        assert!(!tests.unqualified.contains("fake_block_comment_test"));
-        assert!(!tests.unqualified.contains("fake_raw_string_test"));
-
-        // 2. `mod tests { ... }`, helper functions without `"WorkflowRun"` text, decoy `.finish()`,
-        //    and `while`/`match` `find_by_widget_id(` guards are caught strictly.
-        let tricky_wf = r#"
-            fn sneaky_helper(app: &mut App) {
-                let _ = app.app_mut();
-            }
-            mod tests {
-                type Run = WorkflowRun;
-                #[test]
-                fn wf01_type_alias_bypass() -> Result<(), String> {
-                    let mut run = Run::start("WF-01");
-                    let _ = dispatch_gui_action(&mut app, "x", ());
-                    run.finish()
-                }
-                #[test]
-                fn wf02_decoy_finish_and_while_guard() -> Result<(), String> {
-                    let mut run = WorkflowRun::start("WF-02");
-                    while run.frame_meta().find_by_widget_id("x").is_some() {}
-                    let other = Dummy;
-                    other.finish();
-                    Ok(())
-                }
-                #[test]
-                fn wf03_match_guard() -> Result<(), String> {
-                    let mut run = WorkflowRun::start("WF-03");
-                    match run.frame_meta().find_by_widget_id("y") {
-                        Some(_) => {}
-                        None => {}
-                    }
-                    run.finish()
-                }
-            }
-        "#;
-        let (complete, lints) = super::analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", tricky_wf)]);
-        assert!(!complete.contains(&2), "decoy other.finish() must NOT mark WF-02 complete: {complete:?}");
-        assert!(lints.iter().any(|v| v.reason.contains("app_mut")), "missing helper app_mut: {lints:?}");
-        assert!(lints.iter().any(|v| v.reason.contains("dispatch_gui_action")), "missing mod-nested type-alias bypass: {lints:?}");
-        assert!(
-            lints.iter().filter(|v| v.reason.contains("find_by_widget_id(")).count() >= 2,
-            "while and match find_by_widget_id guards must be flagged: {lints:?}"
-        );
     }
 }

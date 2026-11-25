@@ -214,17 +214,34 @@ fn run_xtask(cwd: &Path, args: &[&str]) -> Result<Output, String> {
         .map_err(|e| format!("run xtask {args:?}: {e}"))
 }
 
-fn collect_html_map(base: &Path, dir: &Path, out: &mut BTreeMap<String, String>) -> Result<(), String> {
-    let mut entries: Vec<_> = fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?.filter_map(Result::ok).collect();
-    entries.sort_by_key(|e| e.path());
-    for entry in entries {
-        let p = entry.path();
-        if p.is_dir() {
-            collect_html_map(base, &p, out)?;
-        } else if p.extension().and_then(|e| e.to_str()) == Some("html") {
-            let rel = p.strip_prefix(base).map_err(|e| e.to_string())?.to_string_lossy().replace('\\', "/");
-            let text = fs::read_to_string(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
-            out.insert(rel, text);
+fn run_xtask_ok(cwd: &Path, args: &[&str]) -> Result<Output, String> {
+    let out = run_xtask(cwd, args)?;
+    assert!(
+        out.status.success(),
+        "xtask {args:?} failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Ok(out)
+}
+
+fn run_xtask_fail(cwd: &Path, args: &[&str], needle: &str) -> Result<(), String> {
+    let out = run_xtask(cwd, args)?;
+    assert!(!out.status.success(), "expected xtask {args:?} to fail");
+    if !needle.is_empty() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(needle), "expected `{needle}` in stderr:\n{stderr}");
+    }
+    Ok(())
+}
+
+fn collect_html_map(base: &Path, out: &mut BTreeMap<String, String>) -> Result<(), String> {
+    let mut files = Vec::new();
+    collect_rel_files_recursive(base, base, &mut files)?;
+    for rel in files {
+        if rel.extension().and_then(|e| e.to_str()) == Some("html") {
+            let text = fs::read_to_string(base.join(&rel)).map_err(|e| format!("read {}: {e}", rel.display()))?;
+            out.insert(rel.to_string_lossy().replace('\\', "/"), text);
         }
     }
     Ok(())
@@ -236,35 +253,19 @@ fn docs_site_check_passes_and_output_is_deterministic() -> Result<(), String> {
     let out_a = WorkspaceScratchDir::new(&root, "det-a")?;
     let out_b = WorkspaceScratchDir::new(&root, "det-b")?;
 
-    let a_str = out_a.path.to_str().ok_or("non-utf8 path")?;
-    let b_str = out_b.path.to_str().ok_or("non-utf8 path")?;
+    run_xtask_ok(&root, &["docs-site", "--check", "--output", out_a.path.to_str().ok_or("non-utf8 path")?])?;
+    run_xtask_ok(&root, &["docs-site", "--output", out_b.path.to_str().ok_or("non-utf8 path")?])?;
 
-    let res_a = run_xtask(&root, &["docs-site", "--check", "--output", a_str])?;
-    assert!(
-        res_a.status.success(),
-        "docs-site --check failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&res_a.stdout),
-        String::from_utf8_lossy(&res_a.stderr)
-    );
-
-    let res_b = run_xtask(&root, &["docs-site", "--output", b_str])?;
-    assert!(res_b.status.success(), "second build failed: {}", String::from_utf8_lossy(&res_b.stderr));
-
-    let mut map_a = BTreeMap::new();
-    let mut map_b = BTreeMap::new();
-    collect_html_map(&out_a.path, &out_a.path, &mut map_a)?;
-    collect_html_map(&out_b.path, &out_b.path, &mut map_b)?;
+    let (mut map_a, mut map_b) = (BTreeMap::new(), BTreeMap::new());
+    collect_html_map(&out_a.path, &mut map_a)?;
+    collect_html_map(&out_b.path, &mut map_b)?;
 
     assert_eq!(map_a.keys().collect::<Vec<_>>(), map_b.keys().collect::<Vec<_>>());
     for (rel, html_a) in &map_a {
-        let html_b = map_b.get(rel).ok_or_else(|| format!("missing {rel}"))?;
-        assert_eq!(html_a, html_b, "non-deterministic HTML output for `{rel}`");
+        assert_eq!(html_a, map_b.get(rel).ok_or_else(|| format!("missing {rel}"))?, "non-deterministic HTML output for `{rel}`");
     }
 
-    // Spot-check critical Beta site map sections, registry content, direct GitHub contributor links, and CSP.
-    assert_beta_site_contents(&map_a)?;
-
-    Ok(())
+    assert_beta_site_contents(&map_a)
 }
 
 fn assert_beta_site_contents(map_a: &BTreeMap<String, String>) -> Result<(), String> {
@@ -364,17 +365,10 @@ fn docs_site_check_passes_without_r12_3_and_with_partial_analyses_md() -> Result
             fs::remove_file(&p).map_err(|e| format!("remove {}: {e}", p.display()))?;
         }
     }
-    let sync_absent = run_xtask(sim_root, &["docs-site", "--sitemap"])?;
-    assert!(sync_absent.status.success(), "docs-site --sitemap failed: {}", String::from_utf8_lossy(&sync_absent.stderr));
+    run_xtask_ok(sim_root, &["docs-site", "--sitemap"])?;
 
     let absent_out = WorkspaceScratchDir::new(&root, "absent-r12-3-out")?;
-    let absent_res = run_xtask(sim_root, &["docs-site", "--check", "--output", absent_out.path.to_str().ok_or("bad path")?])?;
-    assert!(
-        absent_res.status.success(),
-        "docs-site --check without R12.3 failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&absent_res.stdout),
-        String::from_utf8_lossy(&absent_res.stderr)
-    );
+    run_xtask_ok(sim_root, &["docs-site", "--check", "--output", absent_out.path.to_str().ok_or("bad path")?])?;
 
     let absent_az = fs::read_to_string(absent_out.path.join("az-index.html")).map_err(|e| e.to_string())?;
     assert!(absent_az.contains("registry/tables.html#analysis-kind-two-group-comparison"));
@@ -387,17 +381,10 @@ fn docs_site_check_passes_without_r12_3_and_with_partial_analyses_md() -> Result
         "# Statistical Analyses\n\n## Two-Group Comparison {#analysis-two-group-comparison}\n\nParametric and non-parametric two-group comparisons.\n",
     )
     .map_err(|e| e.to_string())?;
-    let sync_partial = run_xtask(sim_root, &["docs-site", "--sitemap"])?;
-    assert!(sync_partial.status.success(), "docs-site --sitemap failed: {}", String::from_utf8_lossy(&sync_partial.stderr));
+    run_xtask_ok(sim_root, &["docs-site", "--sitemap"])?;
 
     let partial_out = WorkspaceScratchDir::new(&root, "partial-r12-3-out")?;
-    let partial_res = run_xtask(sim_root, &["docs-site", "--check", "--output", partial_out.path.to_str().ok_or("bad path")?])?;
-    assert!(
-        partial_res.status.success(),
-        "docs-site --check with partial analyses.md failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&partial_res.stdout),
-        String::from_utf8_lossy(&partial_res.stderr)
-    );
+    run_xtask_ok(sim_root, &["docs-site", "--check", "--output", partial_out.path.to_str().ok_or("bad path")?])?;
 
     let partial_az = fs::read_to_string(partial_out.path.join("az-index.html")).map_err(|e| e.to_string())?;
     assert!(partial_az.contains("analyses.html#analysis-two-group-comparison"));
@@ -487,13 +474,7 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
     let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_owned();
 
     let manual_out = sim_root.join("target/docs-manual");
-    let rel_res = run_xtask(sim_root, &["docs-site", "--release", "0.1.0-alpha.2", "--check"])?;
-    assert!(
-        rel_res.status.success(),
-        "docs-site --release --check failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&rel_res.stdout),
-        String::from_utf8_lossy(&rel_res.stderr)
-    );
+    run_xtask_ok(sim_root, &["docs-site", "--release", "0.1.0-alpha.2", "--check"])?;
     assert!(!sim_root.join("docs/manual").exists(), "--release must write manual HTML into target/docs-manual, never docs/manual");
 
     let manifest_text = assert_release_snapshot_outputs(sim_root, &manual_out, &head_sha)?;
@@ -501,50 +482,51 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
 }
 
 fn assert_release_snapshot_outputs(sim_root: &Path, manual_out: &Path, head_sha: &str) -> Result<String, String> {
-    let snap_manifest = manual_out.join("v0.1/manifest.json");
-    let manifest_text = fs::read_to_string(&snap_manifest).map_err(|e| e.to_string())?;
+    let manifest_text = fs::read_to_string(manual_out.join("v0.1/manifest.json")).map_err(|e| e.to_string())?;
     let manifest_json: serde_json::Value = serde_json::from_str(&manifest_text).map_err(|e| e.to_string())?;
     assert_eq!(manifest_json["commit"], serde_json::json!(head_sha));
     assert_eq!(manifest_json["minor_dir"], serde_json::json!("v0.1"));
     assert_eq!(manifest_json["source"], serde_json::json!("release"));
+    assert_eq!(fs::read_to_string(manual_out.join("latest/manifest.json")).map_err(|e| e.to_string())?, manifest_text);
 
-    let latest_manifest_text = fs::read_to_string(manual_out.join("latest/manifest.json")).map_err(|e| e.to_string())?;
-    assert_eq!(latest_manifest_text, manifest_text);
-
-    let redirect_html = fs::read_to_string(manual_out.join("index.html")).map_err(|e| e.to_string())?;
-    assert!(redirect_html.contains("<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">"));
-    assert!(redirect_html.contains("href=\"v0.1/index.html\""));
-    assert!(!redirect_html.contains("<script"));
-
-    let gs_shim = fs::read_to_string(sim_root.join("docs/get-started.html")).map_err(|e| e.to_string())?;
-    assert!(gs_shim.contains("<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/get-started.html\">"));
-    assert!(gs_shim.contains("href=\"manual/latest/get-started.html\""));
-    assert!(!gs_shim.contains("<script"));
-
-    let ts_shim = fs::read_to_string(sim_root.join("docs/troubleshooting.html")).map_err(|e| e.to_string())?;
-    assert!(ts_shim.contains("<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/troubleshooting.html#known-issues\">"));
-    assert!(ts_shim.contains("href=\"manual/latest/troubleshooting.html#known-issues\""));
-    assert!(!ts_shim.contains("<script"));
+    for (path, refresh, href) in [
+        (manual_out.join("index.html"), "latest/index.html", "v0.1/index.html"),
+        (sim_root.join("docs/get-started.html"), "manual/latest/get-started.html", "manual/latest/get-started.html"),
+        (
+            sim_root.join("docs/troubleshooting.html"),
+            "manual/latest/troubleshooting.html#known-issues",
+            "manual/latest/troubleshooting.html#known-issues",
+        ),
+    ] {
+        let html = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        assert!(html.contains(&format!("<meta http-equiv=\"refresh\" content=\"0; url={refresh}\">")));
+        assert!(html.contains(&format!("href=\"{href}\"")));
+        assert!(!html.contains("<script"));
+    }
 
     let snap_home = fs::read_to_string(manual_out.join("v0.1/index.html")).map_err(|e| e.to_string())?;
-    assert!(snap_home.contains("Product Home</a>"));
-    assert!(snap_home.contains("Privacy Policy</a>"));
-    assert!(snap_home.contains("aria-current=\"page\""));
-    assert!(snap_home.contains("<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/manual/latest/index.html\">"));
-
-    let latest_home = fs::read_to_string(manual_out.join("latest/index.html")).map_err(|e| e.to_string())?;
-    assert_eq!(latest_home, snap_home);
+    for needle in [
+        "Product Home</a>",
+        "Privacy Policy</a>",
+        "aria-current=\"page\"",
+        "<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/manual/latest/index.html\">",
+    ] {
+        assert!(snap_home.contains(needle));
+    }
+    assert_eq!(fs::read_to_string(manual_out.join("latest/index.html")).map_err(|e| e.to_string())?, snap_home);
 
     let sitemap_xml = fs::read_to_string(manual_out.join("_root/sitemap.xml")).map_err(|e| e.to_string())?;
     assert!(sitemap_xml.contains("https://hausergroup.github.io/curvebook/manual/latest/index.html"));
     assert!(!sitemap_xml.contains("/manual/v0.1/"));
-    let llms_txt = fs::read_to_string(manual_out.join("_root/llms.txt")).map_err(|e| e.to_string())?;
-    assert!(llms_txt.contains("https://hausergroup.github.io/curvebook/manual/latest/index.html"));
-    let llms_full = fs::read_to_string(manual_out.join("_root/llms-full.txt")).map_err(|e| e.to_string())?;
-    assert!(llms_full.contains("## Quick Facts"));
-    assert!(!sim_root.join("docs/sitemap.xml").exists(), "sitemap.xml must stay out of docs/");
-    assert!(!sim_root.join("docs/llms.txt").exists(), "llms.txt must stay out of docs/");
-    assert!(!sim_root.join("docs/llms-full.txt").exists(), "llms-full.txt must stay out of docs/");
+    assert!(
+        fs::read_to_string(manual_out.join("_root/llms.txt"))
+            .map_err(|e| e.to_string())?
+            .contains("https://hausergroup.github.io/curvebook/manual/latest/index.html")
+    );
+    assert!(fs::read_to_string(manual_out.join("_root/llms-full.txt")).map_err(|e| e.to_string())?.contains("## Quick Facts"));
+    for absent in ["docs/sitemap.xml", "docs/llms.txt", "docs/llms-full.txt"] {
+        assert!(!sim_root.join(absent).exists(), "{absent} must stay out of docs/");
+    }
     Ok(manifest_text)
 }
 
@@ -555,38 +537,29 @@ fn assert_release_negative_gates_and_ci_stage(sim_root: &Path, manual_out: &Path
     let preview_str = preview_dir.to_str().ok_or("bad path")?;
 
     // Corrupting the manifest commit must make `--check --manual-dir` fail because it no longer matches tag `v0.1.0-alpha.2`.
-    let bad_manifest = manifest_text.replace(head_sha, "0000000000000000000000000000000000000000");
-    fs::write(&snap_manifest, bad_manifest).map_err(|e| e.to_string())?;
-    let fail_res = run_xtask(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str])?;
-    assert!(!fail_res.status.success(), "mismatched tag commit in manifest must fail --check");
-    assert!(String::from_utf8_lossy(&fail_res.stderr).contains("does not match release tag"));
+    fs::write(&snap_manifest, manifest_text.replace(head_sha, "0000000000000000000000000000000000000000")).map_err(|e| e.to_string())?;
+    run_xtask_fail(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str], "does not match release tag")?;
 
     // Restoring manifest and planting committed HTML under docs/manual/ must fail --check (R12.10).
     fs::write(&snap_manifest, manifest_text).map_err(|e| e.to_string())?;
     fs::create_dir_all(sim_root.join("docs/manual/latest")).map_err(|e| e.to_string())?;
     fs::write(sim_root.join("docs/manual/latest/index.html"), "<html></html>").map_err(|e| e.to_string())?;
-    let committed_html_res = run_xtask(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str])?;
-    assert!(!committed_html_res.status.success(), "committed HTML in docs/manual/ must fail --check");
-    assert!(String::from_utf8_lossy(&committed_html_res.stderr).contains("must not be committed under docs/manual/"));
+    run_xtask_fail(
+        sim_root,
+        &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str],
+        "must not be committed under docs/manual/",
+    )?;
     fs::remove_dir_all(sim_root.join("docs/manual")).map_err(|e| e.to_string())?;
 
     // Planting a committed generated root file under docs/ must also fail --check (R21.4).
     fs::write(sim_root.join("docs/llms-full.txt"), "# stale\n").map_err(|e| e.to_string())?;
-    let committed_llms_res = run_xtask(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str])?;
-    assert!(!committed_llms_res.status.success(), "committed docs/llms-full.txt must fail --check");
-    assert!(String::from_utf8_lossy(&committed_llms_res.stderr).contains("must not be committed under docs/"));
+    run_xtask_fail(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str], "must not be committed under docs/")?;
     fs::remove_file(sim_root.join("docs/llms-full.txt")).map_err(|e| e.to_string())?;
 
     // Exercise the exact Pages CI sequence: `--build-manual <dir> --check` followed by `pages-stage --manual-dir <dir> _site`.
     let ci_manual = sim_root.join("target/ci-manual");
     let ci_manual_str = ci_manual.to_str().ok_or("bad path")?;
-    let build_res = run_xtask(sim_root, &["docs-site", "--build-manual", ci_manual_str, "--check"])?;
-    assert!(
-        build_res.status.success(),
-        "docs-site --build-manual --check failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&build_res.stdout),
-        String::from_utf8_lossy(&build_res.stderr)
-    );
+    run_xtask_ok(sim_root, &["docs-site", "--build-manual", ci_manual_str, "--check"])?;
     let staged_site = sim_root.join("_site");
     let stage_res = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .current_dir(sim_root)
@@ -599,16 +572,14 @@ fn assert_release_negative_gates_and_ci_stage(sim_root: &Path, manual_out: &Path
         String::from_utf8_lossy(&stage_res.stdout),
         String::from_utf8_lossy(&stage_res.stderr)
     );
-    assert!(staged_site.join("index.html").is_file());
-    assert!(staged_site.join("manual/index.html").is_file());
-    assert!(staged_site.join("manual/latest/index.html").is_file());
-    assert!(staged_site.join("manual/v0.1/index.html").is_file());
-    assert!(staged_site.join("sitemap.xml").is_file());
-    assert!(staged_site.join("llms.txt").is_file());
-    assert!(staged_site.join("llms-full.txt").is_file());
-    assert!(!staged_site.join("manual/latest/manifest.json").exists());
-    assert!(!staged_site.join("manual/v0.1/manifest.json").exists());
-    assert!(!staged_site.join("ROADMAP.md").exists());
+    for present in
+        ["index.html", "manual/index.html", "manual/latest/index.html", "manual/v0.1/index.html", "sitemap.xml", "llms.txt", "llms-full.txt"]
+    {
+        assert!(staged_site.join(present).is_file(), "expected staged `{present}`");
+    }
+    for absent in ["manual/latest/manifest.json", "manual/v0.1/manifest.json", "ROADMAP.md"] {
+        assert!(!staged_site.join(absent).exists(), "unexpected staged `{absent}`");
+    }
 
     Ok(())
 }
@@ -640,17 +611,11 @@ fn docs_site_renders_math_callouts_figures_toc_and_rejects_leaks_and_broken_root
         {headings}"
     );
     fs::write(&qol_md, &test_md).map_err(|e| e.to_string())?;
-    let sync_qol = run_xtask(sim_root, &["docs-site", "--sitemap"])?;
-    assert!(sync_qol.status.success(), "docs-site --sitemap failed: {}", String::from_utf8_lossy(&sync_qol.stderr));
+    run_xtask_ok(sim_root, &["docs-site", "--sitemap"])?;
 
     let out_dir = WorkspaceScratchDir::new(&root, "math-callout-out")?;
-    let res = run_xtask(sim_root, &["docs-site", "--check", "--output", out_dir.path.to_str().ok_or("bad path")?])?;
-    assert!(
-        res.status.success(),
-        "docs-site --check failed on synthetic math/callout page:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&res.stdout),
-        String::from_utf8_lossy(&res.stderr)
-    );
+    let out_str = out_dir.path.to_str().ok_or("bad path")?;
+    run_xtask_ok(sim_root, &["docs-site", "--check", "--output", out_str])?;
 
     let qol_html = fs::read_to_string(out_dir.path.join("qol.html")).map_err(|e| e.to_string())?;
     for expected in [
@@ -682,33 +647,23 @@ fn docs_site_renders_math_callouts_figures_toc_and_rejects_leaks_and_broken_root
         qol_html.split_once("<h2 id=\"synthetic-callout-suite\" tabindex=\"-1\">").ok_or("missing synthetic callout suite heading")?;
     assert!(!synthetic_tail.contains("<em>"), "underscores inside math must not become <em>");
 
-    // 1. Negative test: raw leaked TeX outside <code> must fail --check.
-    fs::write(&qol_md, format!("{orig_qol}\n\nUnwrapped \\frac{{1}}{{2}} macro.\n")).map_err(|e| e.to_string())?;
-    let leak_tex_res = run_xtask(sim_root, &["docs-site", "--check", "--output", out_dir.path.to_str().ok_or("bad path")?])?;
-    assert!(!leak_tex_res.status.success(), "leaked raw TeX macro must fail --check");
-    assert!(String::from_utf8_lossy(&leak_tex_res.stderr).contains("unrendered TeX macro"));
-
-    // 2. Negative test: raw [!NOTE] outside blockquote/code must fail --check.
-    fs::write(&qol_md, format!("{orig_qol}\n\nPlain [!NOTE] outside blockquote.\n")).map_err(|e| e.to_string())?;
-    let leak_callout_res = run_xtask(sim_root, &["docs-site", "--check", "--output", out_dir.path.to_str().ok_or("bad path")?])?;
-    assert!(!leak_callout_res.status.success(), "leaked [!NOTE] marker must fail --check");
-    assert!(String::from_utf8_lossy(&leak_callout_res.stderr).contains("callout marker"));
+    // Negative tests: raw leaked TeX or callout markers outside code must fail --check.
+    for (leak, needle) in [("Unwrapped \\frac{1}{2} macro.", "unrendered TeX macro"), ("Plain [!NOTE] outside blockquote.", "callout marker")] {
+        fs::write(&qol_md, format!("{orig_qol}\n\n{leak}\n")).map_err(|e| e.to_string())?;
+        run_xtask_fail(sim_root, &["docs-site", "--check", "--output", out_str], needle)?;
+    }
 
     // Restore valid qol.md, then test check_root_pages catches broken root HTML and broken root shims.
     fs::write(&qol_md, &orig_qol).map_err(|e| e.to_string())?;
-    let sync_restore = run_xtask(sim_root, &["docs-site", "--sitemap"])?;
-    assert!(sync_restore.status.success(), "docs-site --sitemap failed: {}", String::from_utf8_lossy(&sync_restore.stderr));
+    run_xtask_ok(sim_root, &["docs-site", "--sitemap"])?;
     let root_index = sim_root.join("docs/index.html");
     let orig_root_index = fs::read_to_string(&root_index).map_err(|e| e.to_string())?;
     fs::write(&root_index, orig_root_index.replace("privacy.html", "does-not-exist.html")).map_err(|e| e.to_string())?;
-    let bad_root_res = run_xtask(sim_root, &["docs-site", "--check", "--output", out_dir.path.to_str().ok_or("bad path")?])?;
-    assert!(!bad_root_res.status.success(), "broken relative link in docs/index.html must fail --check");
-    assert!(String::from_utf8_lossy(&bad_root_res.stderr).contains("does-not-exist.html"));
+    run_xtask_fail(sim_root, &["docs-site", "--check", "--output", out_str], "does-not-exist.html")?;
 
     fs::write(&root_index, orig_root_index).map_err(|e| e.to_string())?;
     fs::write(sim_root.join("docs/get-started.html"), "<script>alert(1)</script>").map_err(|e| e.to_string())?;
-    let bad_shim_res = run_xtask(sim_root, &["docs-site", "--check", "--output", out_dir.path.to_str().ok_or("bad path")?])?;
-    assert!(!bad_shim_res.status.success(), "unsafe root redirect shim must fail check_root_pages");
+    run_xtask_fail(sim_root, &["docs-site", "--check", "--output", out_str], "")?;
 
     Ok(())
 }

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use super::sitemap::GeneratedSite;
 use super::template::STRICT_CSP;
+use crate::scan_util::{has_ext_ci, is_real_dir, is_regular_file, read_dir_paths_sorted, rel_slash_lossy, walk_file_paths, walk_rel_files};
 
 #[derive(Debug, Default)]
 struct PageFacts {
@@ -282,7 +283,7 @@ fn check_unrendered_markup(rel_path: &str, text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn find_tag_close(rest: &str) -> Option<usize> {
+pub(crate) fn find_tag_close(rest: &str) -> Option<usize> {
     let bytes = rest.as_bytes();
     let mut quote: Option<u8> = None;
     for (idx, &b) in bytes.iter().enumerate() {
@@ -299,7 +300,7 @@ fn find_tag_close(rest: &str) -> Option<usize> {
     None
 }
 
-fn parse_tag_attributes(trimmed_tag: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_tag_attributes(trimmed_tag: &str) -> Vec<(String, String)> {
     let mut attrs = Vec::new();
     let bytes = trimmed_tag.as_bytes();
     let mut i = bytes.iter().position(|b| b.is_ascii_whitespace()).unwrap_or(bytes.len());
@@ -379,47 +380,28 @@ fn unescape_attr(raw: &str) -> String {
 fn decode_html_entity(slice: &str) -> Option<(char, usize)> {
     let rest = slice.strip_prefix('&')?;
     if let Some(num) = rest.strip_prefix('#') {
-        if let Some(hex_tail) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
-            let digits_len = hex_tail.bytes().take_while(u8::is_ascii_hexdigit).count();
-            if digits_len == 0 {
-                return None;
-            }
-            let digits = hex_tail.get(..digits_len)?;
-            let trimmed_digits = digits.trim_start_matches('0');
-            let code = if trimmed_digits.is_empty() {
-                0u32
-            } else if trimmed_digits.len() > 8 {
-                return None;
-            } else {
-                u32::from_str_radix(trimmed_digits, 16).ok()?
-            };
-            let ch = char::from_u32(code).unwrap_or('\u{FFFD}');
-            let semi = usize::from(hex_tail.as_bytes().get(digits_len) == Some(&b';'));
-            return Some((ch, 3 + digits_len + semi));
-        }
-        let digits_len = num.bytes().take_while(u8::is_ascii_digit).count();
+        let (tail, radix, max_digits, prefix_len) =
+            if let Some(hex) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) { (hex, 16, 8, 3) } else { (num, 10, 10, 2) };
+        let digits_len = tail.bytes().take_while(|b| if radix == 16 { b.is_ascii_hexdigit() } else { b.is_ascii_digit() }).count();
         if digits_len == 0 {
             return None;
         }
-        let digits = num.get(..digits_len)?;
-        let trimmed_digits = digits.trim_start_matches('0');
-        let code = if trimmed_digits.is_empty() {
+        let trimmed = tail.get(..digits_len)?.trim_start_matches('0');
+        let code = if trimmed.is_empty() {
             0u32
-        } else if trimmed_digits.len() > 10 {
+        } else if trimmed.len() > max_digits {
             return None;
         } else {
-            trimmed_digits.parse::<u32>().ok()?
+            u32::from_str_radix(trimmed, radix).ok()?
         };
-        let ch = char::from_u32(code).unwrap_or('\u{FFFD}');
-        let semi = usize::from(num.as_bytes().get(digits_len) == Some(&b';'));
-        return Some((ch, 2 + digits_len + semi));
+        let semi = usize::from(tail.as_bytes().get(digits_len) == Some(&b';'));
+        return Some((char::from_u32(code).unwrap_or('\u{FFFD}'), prefix_len + digits_len + semi));
     }
     let semi_pos = rest.find(';')?;
     if semi_pos == 0 || semi_pos > 16 {
         return None;
     }
-    let name = rest.get(..semi_pos)?;
-    let ch = match name.to_ascii_lowercase().as_str() {
+    let ch = match rest.get(..semi_pos)?.to_ascii_lowercase().as_str() {
         "amp" => '&',
         "quot" => '"',
         "apos" => '\'',
@@ -430,7 +412,7 @@ fn decode_html_entity(slice: &str) -> Option<(char, usize)> {
         "newline" => '\n',
         _ => return None,
     };
-    Some((ch, 1 + semi_pos + 1))
+    Some((ch, semi_pos + 2))
 }
 
 fn normalize_scheme_prefix(raw: &str) -> String {
@@ -486,6 +468,26 @@ fn verify_target(
     verify_target_with_cache(root, out_dir, site, facts, from_rel, raw_ref, &mut extra_html_ids)
 }
 
+fn check_cached_html_fragment(
+    target_path: &Path,
+    cache_key: &str,
+    scan_label: &str,
+    frag: &str,
+    extra_html_ids: &mut BTreeMap<String, BTreeSet<String>>,
+    err_msg: impl FnOnce() -> String,
+) -> Result<(), String> {
+    if !extra_html_ids.contains_key(cache_key) {
+        let target_html = std::fs::read_to_string(target_path).map_err(|e| format!("read {}: {e}", target_path.display()))?;
+        let mut target_facts = PageFacts::default();
+        scan_html_tags(scan_label, &target_html, &mut target_facts)?;
+        extra_html_ids.insert(cache_key.to_owned(), target_facts.ids);
+    }
+    if extra_html_ids.get(cache_key).is_some_and(|ids| !ids.contains(frag)) {
+        return Err(err_msg());
+    }
+    Ok(())
+}
+
 fn verify_target_with_cache(
     root: &Path,
     out_dir: &Path,
@@ -495,16 +497,12 @@ fn verify_target_with_cache(
     raw_ref: &str,
     extra_html_ids: &mut BTreeMap<String, BTreeSet<String>>,
 ) -> Result<(), String> {
-    let (target_part, frag_part) = match raw_ref.split_once('#') {
-        Some((t, f)) => (t, Some(f)),
-        None => (raw_ref, None),
-    };
+    let (target_part, frag_part) = raw_ref.split_once('#').map_or((raw_ref, None), |(t, f)| (t, Some(f)));
     if target_part.is_empty() {
-        if let Some(frag) = frag_part {
-            let ids = &facts[from_rel].ids;
-            if !ids.contains(frag) {
-                return Err(format!("{from_rel}: broken same-page anchor `#{frag}`"));
-            }
+        if let Some(frag) = frag_part
+            && !facts[from_rel].ids.contains(frag)
+        {
+            return Err(format!("{from_rel}: broken same-page anchor `#{frag}`"));
         }
         return Ok(());
     }
@@ -517,7 +515,7 @@ fn verify_target_with_cache(
             return Err(format!("{from_rel}: relative target `{raw_ref}` escapes `docs/` root (`{resolved}`)"));
         }
         let docs_target = root.join("docs").join(docs_rel);
-        if !std::fs::symlink_metadata(&docs_target).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
+        if !is_regular_file(&docs_target) {
             return Err(format!("{from_rel}: broken parent-docs asset/page `{raw_ref}` -> `{}`", docs_target.display()));
         }
         if let Some(frag) = frag_part
@@ -525,17 +523,9 @@ fn verify_target_with_cache(
             && docs_rel.ends_with(".html")
         {
             let cache_key = format!("docs/{docs_rel}");
-            if !extra_html_ids.contains_key(&cache_key) {
-                let target_html = std::fs::read_to_string(&docs_target).map_err(|e| format!("read docs/{docs_rel}: {e}"))?;
-                let mut target_facts = PageFacts::default();
-                scan_html_tags(&cache_key, &target_html, &mut target_facts)?;
-                extra_html_ids.insert(cache_key.clone(), target_facts.ids);
-            }
-            if let Some(ids) = extra_html_ids.get(&cache_key)
-                && !ids.contains(frag)
-            {
-                return Err(format!("{from_rel}: broken parent-docs fragment `{raw_ref}` (missing `#{frag}` in `docs/{docs_rel}`)"));
-            }
+            check_cached_html_fragment(&docs_target, &cache_key, &cache_key, frag, extra_html_ids, || {
+                format!("{from_rel}: broken parent-docs fragment `{raw_ref}` (missing `#{frag}` in `docs/{docs_rel}`)")
+            })?;
         }
         return Ok(());
     }
@@ -553,8 +543,7 @@ fn verify_target_with_cache(
         return Ok(());
     }
 
-    let out_target = out_dir.join(&resolved);
-    if std::fs::symlink_metadata(&out_target).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
+    if is_regular_file(&out_dir.join(&resolved)) {
         return Ok(());
     }
 
@@ -672,11 +661,11 @@ pub fn parse_minor_dir_version(name: &str) -> Option<(u64, u64)> {
 /// Reject any generated `.html` files lingering under `docs/manual/` (`R12.10`).
 pub fn check_no_committed_manual_html(root: &Path) -> Result<(), String> {
     let manual_dir = root.join("docs/manual");
-    if !std::fs::symlink_metadata(&manual_dir).is_ok_and(|m| m.file_type().is_dir()) {
+    if !is_real_dir(&manual_dir) {
         return Ok(());
     }
     let mut html_files = Vec::new();
-    collect_html_rel_paths(&manual_dir, &manual_dir, &mut html_files)?;
+    walk_rel_files(&manual_dir, &manual_dir, &|_| false, &|p| has_ext_ci(p, &["html", "htm"]), &mut html_files)?;
     if html_files.is_empty() {
         return Ok(());
     }
@@ -691,13 +680,11 @@ pub fn check_no_committed_manual_html(root: &Path) -> Result<(), String> {
 
 /// Reject committed copies of CI-generated root site files under `docs/` (`R21.4`).
 pub fn check_no_committed_generated_site_files(root: &Path) -> Result<(), String> {
-    let mut found = Vec::new();
-    for rel in crate::pages_site::GENERATED_SITE_FILES {
-        let path = root.join("docs").join(rel);
-        if std::fs::symlink_metadata(&path).is_ok() {
-            found.push(format!("docs/{rel}"));
-        }
-    }
+    let found: Vec<String> = crate::pages_site::GENERATED_SITE_FILES
+        .iter()
+        .filter(|rel| std::fs::symlink_metadata(root.join("docs").join(rel)).is_ok())
+        .map(|rel| format!("docs/{rel}"))
+        .collect();
     if found.is_empty() {
         return Ok(());
     }
@@ -706,46 +693,20 @@ pub fn check_no_committed_generated_site_files(root: &Path) -> Result<(), String
         found.join(", ")
     ))
 }
-
-fn collect_html_rel_paths(base: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
-        let entry = entry.map_err(|e| format!("dir entry under {}: {e}", dir.display()))?;
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if ft.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if ft.is_dir() {
-            collect_html_rel_paths(base, &path, out)?;
-        } else if ft.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm")) {
-            let rel = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().replace('\\', "/");
-            out.push(rel);
-        }
-    }
-    Ok(())
-}
-
 /// Check ALL generated manual snapshots under `<manual_dir>/v*/manifest.json`, `<manual_dir>/latest/manifest.json`,
 /// and `<manual_dir>/index.html`.
 pub fn check_manual_snapshots(root: &Path, manual_dir: &Path) -> Result<(), String> {
-    if !std::fs::symlink_metadata(manual_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
+    if !is_real_dir(manual_dir) {
         return Err(format!("manual build directory `{}` does not exist (or is not a regular directory)", manual_dir.display()));
     }
-    let entries = std::fs::read_dir(manual_dir).map_err(|e| format!("read_dir {}: {e}", manual_dir.display()))?;
     let mut snapshots: Vec<((u64, u64), String)> = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("dir entry under {}: {e}", manual_dir.display()))?;
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if ft.is_symlink() || !ft.is_dir() {
+    for path in read_dir_paths_sorted(manual_dir)? {
+        if !is_real_dir(&path) {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if let Some(ver) = parse_minor_dir_version(&name)
-            && entry.path().join("manifest.json").is_file()
+            && path.join("manifest.json").is_file()
         {
             snapshots.push((ver, name));
         }
@@ -763,8 +724,7 @@ pub fn check_manual_snapshots(root: &Path, manual_dir: &Path) -> Result<(), Stri
         let version =
             manifest.get("version").and_then(serde_json::Value::as_str).ok_or_else(|| format!("{}: missing `version`", manifest_path.display()))?;
         let is_workspace_build = manifest.get("source").and_then(serde_json::Value::as_str) == Some("workspace");
-        let commit_val = manifest.get("commit");
-        let commit = match commit_val {
+        let commit = match manifest.get("commit") {
             Some(serde_json::Value::String(s)) => Some(s.as_str()),
             Some(serde_json::Value::Null) | None if is_workspace_build => None,
             _ => return Err(format!("{}: missing `commit`", manifest_path.display())),
@@ -790,7 +750,7 @@ pub fn check_manual_snapshots(root: &Path, manual_dir: &Path) -> Result<(), Stri
     }
 
     let latest_manifest_path = manual_dir.join("latest/manifest.json");
-    let expected_refresh = if std::fs::symlink_metadata(&latest_manifest_path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
+    let expected_refresh = if is_regular_file(&latest_manifest_path) {
         let latest_raw = std::fs::read_to_string(&latest_manifest_path).map_err(|e| format!("read {}: {e}", latest_manifest_path.display()))?;
         let newest_manifest_path = manual_dir.join(newest_dir).join("manifest.json");
         let newest_raw = std::fs::read_to_string(&newest_manifest_path).map_err(|e| format!("read {}: {e}", newest_manifest_path.display()))?;
@@ -828,8 +788,7 @@ pub fn check_root_pages(root: &Path, manual_dir: &Path) -> Result<(), String> {
     let optional =
         super::seo::LANDING_PAGES.iter().copied().filter(|p| !required.contains(p)).chain(["404.html", "get-started.html", "troubleshooting.html"]);
     for shim in optional {
-        let path = docs_dir.join(shim);
-        if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
+        if is_regular_file(&docs_dir.join(shim)) {
             pages_to_audit.push(shim);
         }
     }
@@ -838,8 +797,7 @@ pub fn check_root_pages(root: &Path, manual_dir: &Path) -> Result<(), String> {
     for rel in pages_to_audit {
         let full = if let Some(manual_rel) = rel.strip_prefix("manual/") { manual_dir.join(manual_rel) } else { docs_dir.join(rel) };
         let html = std::fs::read_to_string(&full).map_err(|e| format!("read {}: {e}", full.display()))?;
-        let facts = audit_single_html(&format!("docs/{rel}"), &html)?;
-        audited.insert(rel.to_owned(), facts);
+        audited.insert(rel.to_owned(), audit_single_html(&format!("docs/{rel}"), &html)?);
     }
 
     check_unique_meta_descriptions(audited.iter().map(|(k, v)| (k.as_str(), v)))?;
@@ -847,22 +805,17 @@ pub fn check_root_pages(root: &Path, manual_dir: &Path) -> Result<(), String> {
     let mut extra_html_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (rel, facts) in &audited {
         for raw_href in &facts.hrefs {
-            if is_external_url(raw_href) || is_mailto_url(raw_href) {
-                continue;
+            if !is_external_url(raw_href) && !is_mailto_url(raw_href) {
+                verify_docs_relative_target(&dirs, rel, raw_href, facts, &audited, &mut extra_html_ids)?;
             }
-            verify_docs_relative_target(&dirs, rel, raw_href, facts, &audited, &mut extra_html_ids)?;
         }
-        for raw_src in &facts.asset_srcs {
-            if is_external_url(raw_src) || is_forbidden_uri_scheme(raw_src) {
-                return Err(format!("docs/{rel}: external or forbidden asset URL `{raw_src}`"));
+        for (targets, kind) in [(&facts.asset_srcs, "asset URL"), (&facts.meta_refresh_targets, "`<meta http-equiv=\"refresh\">` target")] {
+            for raw in targets {
+                if is_external_url(raw) || is_forbidden_uri_scheme(raw) {
+                    return Err(format!("docs/{rel}: external or forbidden {kind} `{raw}`"));
+                }
+                verify_docs_relative_target(&dirs, rel, raw, facts, &audited, &mut extra_html_ids)?;
             }
-            verify_docs_relative_target(&dirs, rel, raw_src, facts, &audited, &mut extra_html_ids)?;
-        }
-        for raw_refresh in &facts.meta_refresh_targets {
-            if is_external_url(raw_refresh) || is_forbidden_uri_scheme(raw_refresh) {
-                return Err(format!("docs/{rel}: external or forbidden `<meta http-equiv=\"refresh\">` target `{raw_refresh}`"));
-            }
-            verify_docs_relative_target(&dirs, rel, raw_refresh, facts, &audited, &mut extra_html_ids)?;
         }
     }
     Ok(())
@@ -876,10 +829,7 @@ fn verify_docs_relative_target(
     audited: &BTreeMap<String, PageFacts>,
     extra_html_ids: &mut BTreeMap<String, BTreeSet<String>>,
 ) -> Result<(), String> {
-    let (target_part, frag_part) = match raw_ref.split_once('#') {
-        Some((t, f)) => (t, Some(f)),
-        None => (raw_ref, None),
-    };
+    let (target_part, frag_part) = raw_ref.split_once('#').map_or((raw_ref, None), |(t, f)| (t, Some(f)));
     if target_part.is_empty() {
         if let Some(frag) = frag_part
             && !frag.is_empty()
@@ -911,7 +861,7 @@ fn verify_docs_relative_target(
     } else {
         dirs.docs_dir.join(&resolved)
     };
-    if !std::fs::symlink_metadata(&target_path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
+    if !is_regular_file(&target_path) {
         return Err(format!("docs/{from_rel}: broken relative target `{raw_ref}` (missing `{}`)", target_path.display()));
     }
 
@@ -925,17 +875,9 @@ fn verify_docs_relative_target(
             }
             return Ok(());
         }
-        if !extra_html_ids.contains_key(&resolved) {
-            let target_html = std::fs::read_to_string(&target_path).map_err(|e| format!("read {}: {e}", target_path.display()))?;
-            let mut target_facts = PageFacts::default();
-            scan_html_tags(&format!("docs/{resolved}"), &target_html, &mut target_facts)?;
-            extra_html_ids.insert(resolved.clone(), target_facts.ids);
-        }
-        if let Some(ids) = extra_html_ids.get(&resolved)
-            && !ids.contains(frag)
-        {
-            return Err(format!("docs/{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `{resolved}`)"));
-        }
+        check_cached_html_fragment(&target_path, &resolved, &format!("docs/{resolved}"), frag, extra_html_ids, || {
+            format!("docs/{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `{resolved}`)")
+        })?;
     }
     Ok(())
 }
@@ -953,7 +895,7 @@ fn resolve_git_tag_commit(root: &Path, tag: &str) -> Result<Option<String>, Stri
         return Ok(None);
     }
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if sha.is_empty() { Ok(None) } else { Ok(Some(sha)) }
+    Ok((!sha.is_empty()).then_some(sha))
 }
 
 fn run_hygiene_scanners(root: &Path, out_dir: &Path, is_manual_build_dir: bool) -> Result<(), String> {
@@ -981,34 +923,14 @@ fn run_hygiene_scanners(root: &Path, out_dir: &Path, is_manual_build_dir: bool) 
     }
 
     let mut secret_hits = Vec::new();
-    scan_dir_secrets(out_dir, out_dir, &mut secret_hits)?;
+    let mut text_files = Vec::new();
+    walk_file_paths(out_dir, &|_| false, &|p| has_ext_ci(p, &["html", "htm", "css", "json", "txt", "xml"]), &mut text_files)?;
+    for path in text_files {
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        crate::secrets::scan_text(&rel_slash_lossy(out_dir, &path), &text, &mut secret_hits);
+    }
     if let Some(first) = secret_hits.first() {
         return Err(format!("secrets scanner found {} violation(s) in generated docs-site (first: {first})", secret_hits.len()));
-    }
-    Ok(())
-}
-
-fn scan_dir_secrets(base: &Path, dir: &Path, hits: &mut Vec<crate::secrets::SecretHit>) -> Result<(), String> {
-    let mut paths: Vec<_> =
-        std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?.filter_map(Result::ok).map(|e| e.path()).collect();
-    paths.sort();
-    for path in paths {
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if meta.file_type().is_symlink() {
-            continue;
-        }
-        if meta.file_type().is_dir() {
-            scan_dir_secrets(base, &path, hits)?;
-        } else if meta.file_type().is_file() {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if matches!(ext, "html" | "htm" | "css" | "json" | "txt" | "xml") {
-                let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-                let rel = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().replace('\\', "/");
-                crate::secrets::scan_text(&rel, &text, hits);
-            }
-        }
     }
     Ok(())
 }
@@ -1018,6 +940,7 @@ mod tests {
     use super::super::markdown::{IdentityResolver, TocHeading, render_markdown, render_math_html};
     use super::super::template::{PageSpec, SiteMeta, render_page, render_root_redirect_shim};
     use super::*;
+    use crate::scan_util::test_support::TestDir;
 
     fn test_meta() -> SiteMeta {
         SiteMeta {
@@ -1026,6 +949,24 @@ mod tests {
             release_date: Some(String::from("2026-11-18")),
             is_release_snapshot: false,
         }
+    }
+
+    fn render_test_page(rel_path: &str, title: &str, body_html: &str) -> String {
+        let meta = test_meta();
+        render_page(&PageSpec {
+            title,
+            description: title,
+            rel_path,
+            section_title: "Concepts",
+            section_rel_path: None,
+            h1: title,
+            toc_headings: &[],
+            body_html,
+            body_has_h1: false,
+            prev: None,
+            next: None,
+            meta: &meta,
+        })
     }
 
     #[test]
@@ -1039,21 +980,7 @@ mod tests {
 
     #[test]
     fn audit_html_rejects_scripts_forms_inline_styles_and_external_assets() {
-        let meta = test_meta();
-        let good = render_page(&PageSpec {
-            title: "Test",
-            description: "Desc",
-            rel_path: "index.html",
-            section_title: "Get started",
-            section_rel_path: None,
-            h1: "Test",
-            toc_headings: &[],
-            body_html: "<p>Clean body.</p>",
-            body_has_h1: false,
-            prev: None,
-            next: None,
-            meta: &meta,
-        });
+        let good = render_test_page("index.html", "Test", "<p>Clean body.</p>");
         assert!(audit_single_html("index.html", &good).is_ok());
 
         for bad_snippet in [
@@ -1065,8 +992,7 @@ mod tests {
             "<img src=\"https://evil.example/a.png\" alt=\"\">",
         ] {
             let poisoned = good.replace("<p>Clean body.</p>", bad_snippet);
-            let err = audit_single_html("bad.html", &poisoned).unwrap_err();
-            assert!(!err.is_empty());
+            assert!(!audit_single_html("bad.html", &poisoned).unwrap_err().is_empty());
         }
     }
 
@@ -1079,42 +1005,14 @@ mod tests {
             assert!(check_exclusions(&site).unwrap_err().contains("excluded"));
         }
 
-        let meta = test_meta();
-        let page_a = render_page(&PageSpec {
-            title: "A",
-            description: "A",
-            rel_path: "a.html",
-            section_title: "Concepts",
-            section_rel_path: None,
-            h1: "A",
-            toc_headings: &[],
-            body_html: "<p><a href=\"b.html#missing-frag\">broken</a></p>",
-            body_has_h1: false,
-            prev: None,
-            next: None,
-            meta: &meta,
-        });
-        let page_b = render_page(&PageSpec {
-            title: "B",
-            description: "B",
-            rel_path: "b.html",
-            section_title: "Concepts",
-            section_rel_path: None,
-            h1: "B",
-            toc_headings: &[],
-            body_html: "<h2 id=\"real-frag\">Real</h2>",
-            body_has_h1: false,
-            prev: None,
-            next: None,
-            meta: &meta,
-        });
-        let mut facts = BTreeMap::new();
-        facts.insert(String::from("a.html"), audit_single_html("a.html", &page_a).unwrap());
-        facts.insert(String::from("b.html"), audit_single_html("b.html", &page_b).unwrap());
-        let mut html_pages = BTreeMap::new();
-        html_pages.insert(String::from("a.html"), page_a);
-        html_pages.insert(String::from("b.html"), page_b);
-        let site2 = GeneratedSite { html_pages, expected_coverage: Default::default(), meta };
+        let page_a = render_test_page("a.html", "A", "<p><a href=\"b.html#missing-frag\">broken</a></p>");
+        let page_b = render_test_page("b.html", "B", "<h2 id=\"real-frag\">Real</h2>");
+        let facts = BTreeMap::from([
+            (String::from("a.html"), audit_single_html("a.html", &page_a).unwrap()),
+            (String::from("b.html"), audit_single_html("b.html", &page_b).unwrap()),
+        ]);
+        let html_pages = BTreeMap::from([(String::from("a.html"), page_a), (String::from("b.html"), page_b)]);
+        let site2 = GeneratedSite { html_pages, expected_coverage: Default::default(), meta: test_meta() };
         let err = verify_target(Path::new("."), Path::new("."), &site2, &facts, "a.html", "b.html#missing-frag").unwrap_err();
         assert!(err.contains("missing `#missing-frag`"), "unexpected err: {err}");
         assert!(verify_target(Path::new("."), Path::new("."), &site2, &facts, "a.html", "b.html#real-frag").is_ok());
@@ -1123,41 +1021,17 @@ mod tests {
 
     #[test]
     fn fa_sec23_08_unclosed_html_quote_or_comment_fails_and_all_snapshots_checked() {
-        let meta = test_meta();
-        let base = render_page(&PageSpec {
-            title: "T",
-            description: "T",
-            rel_path: "t.html",
-            section_title: "Concepts",
-            section_rel_path: None,
-            h1: "T",
-            toc_headings: &[],
-            body_html: "<p>Body</p>",
-            body_has_h1: false,
-            prev: None,
-            next: None,
-            meta: &meta,
-        });
+        let base = render_test_page("t.html", "T", "<p>Body</p>");
+        assert!(audit_single_html("t.html", &base.replace("<p>Body</p>", "<a title=\"unclosed><script>evil()</script>")).is_err());
+        assert!(audit_single_html("t.html", &base.replace("<p>Body</p>", "<!-- unclosed <script>evil()</script>")).is_err());
 
-        let unclosed_quote = base.replace("<p>Body</p>", "<a title=\"unclosed><script>evil()</script>");
-        assert!(audit_single_html("t.html", &unclosed_quote).is_err());
+        let dir = TestDir::new("docs-snapshots");
+        dir.write("target/docs-manual/v0.1/manifest.json", "{\"version\":\"0.1.0\",\"commit\":\"badsha\"}\n");
+        dir.write("target/docs-manual/v0.2/manifest.json", "{\"version\":\"0.2.0\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\"}\n");
+        dir.write("target/docs-manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=v0.2/index.html\">");
 
-        let unclosed_comment = base.replace("<p>Body</p>", "<!-- unclosed <script>evil()</script>");
-        assert!(audit_single_html("t.html", &unclosed_comment).is_err());
-
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-docs-snapshots-{}-{nanos}", std::process::id()));
-        let manual = dir.join("target/docs-manual");
-        std::fs::create_dir_all(manual.join("v0.1")).unwrap();
-        std::fs::create_dir_all(manual.join("v0.2")).unwrap();
-        std::fs::write(manual.join("v0.1/manifest.json"), "{\"version\":\"0.1.0\",\"commit\":\"badsha\"}\n").unwrap();
-        std::fs::write(manual.join("v0.2/manifest.json"), "{\"version\":\"0.2.0\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\"}\n")
-            .unwrap();
-        std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=v0.2/index.html\">").unwrap();
-
-        let err = check_manual_snapshots(&dir, &manual).unwrap_err();
+        let err = check_manual_snapshots(dir.path(), &dir.join("target/docs-manual")).unwrap_err();
         assert!(err.contains("v0.1"), "expected older corrupted v0.1 snapshot to fail, got {err}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1170,37 +1044,31 @@ Currency: \\$100 and \\$50, $100, $50, between $50 and $100, $50-$100, $100/$50.
 Shell vars: $HOME, $XDG_CONFIG_HOME, $TMPDIR, $PATH, $HOME/$PATH, $row and $index, $row/$index, `$row`, `$HOME`, `$\\frac{a}{b}`.\n\n\
 $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
 
-        let rendered = render_markdown(md, &IdentityResolver);
-        let html = &rendered.html;
-
-        assert!(html.contains("<span class=\"math\"><span class=\"math-text\">AIC</span><sub>c</sub>"), "AICc missing: {html}");
-        assert!(html.contains("<span class=\"math-frac\"><span class=\"math-num\">"), "fraction missing: {html}");
-        assert!(html.contains("√<span class=\"math-rad\">x</span>"), "sqrt missing: {html}");
-        assert!(html.contains("d\u{0304}") && html.contains("ε\u{0302}") && html.contains("ε\u{0303}"), "accents missing: {html}");
-        assert!(
-            html.contains("α")
-                && html.contains("χ")
-                && html.contains("Φ")
-                && html.contains("Ω")
-                && html.contains("≥")
-                && html.contains("≤")
-                && html.contains("±")
-                && html.contains("×")
-                && html.contains("·")
-                && html.contains("∈")
-                && html.contains("≠")
-                && html.contains("∞")
-                && html.contains("∝")
-                && html.contains("≈")
-                && html.contains("<span class=\"math-text\">arcsin</span>")
-                && html.contains("<span class=\"math-text\">TeX</span>"),
-            "symbols/functions missing: {html}"
-        );
-        assert!(!html.contains("<em>"), "underscores inside math must never produce <em>: {html}");
-        assert!(html.contains("<div class=\"math-block\"><span class=\"math\">χ<sup>2</sup>"), "block math missing: {html}");
-
-        // Currency, shell vars, and code spans must survive verbatim without becoming math spans.
-        for literal in [
+        let html = render_markdown(md, &IdentityResolver).html;
+        for expected in [
+            "<span class=\"math\"><span class=\"math-text\">AIC</span><sub>c</sub>",
+            "<span class=\"math-frac\"><span class=\"math-num\">",
+            "√<span class=\"math-rad\">x</span>",
+            "d\u{0304}",
+            "ε\u{0302}",
+            "ε\u{0303}",
+            "α",
+            "χ",
+            "Φ",
+            "Ω",
+            "≥",
+            "≤",
+            "±",
+            "×",
+            "·",
+            "∈",
+            "≠",
+            "∞",
+            "∝",
+            "≈",
+            "<span class=\"math-text\">arcsin</span>",
+            "<span class=\"math-text\">TeX</span>",
+            "<div class=\"math-block\"><span class=\"math\">χ<sup>2</sup>",
             "$100",
             "$50",
             "between $50 and $100",
@@ -1217,34 +1085,29 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
             "<code>$HOME</code>",
             "<code>$\\frac{a}{b}</code>",
         ] {
-            assert!(html.contains(literal), "expected `{literal}` preserved verbatim in: {html}");
+            assert!(html.contains(expected), "missing `{expected}` in: {html}");
         }
+        assert!(!html.contains("<em>"), "underscores inside math must never produce <em>: {html}");
 
         let standalone = render_math_html("\\frac{\\text{Top} - \\text{Bottom}}{1 + 10^{(\\log\\text{EC}_{50} - X) \\cdot \\text{HillSlope}}}");
-        assert!(standalone.starts_with("<span class=\"math\">"));
-        assert!(standalone.contains("<span class=\"math-frac\">"));
-        assert!(!standalone.contains("\\frac"));
-        assert!(!standalone.contains("\\text"));
+        assert!(standalone.starts_with("<span class=\"math\">") && standalone.contains("<span class=\"math-frac\">"));
+        assert!(!standalone.contains("\\frac") && !standalone.contains("\\text"));
     }
 
     #[test]
     fn markdown_callouts_figures_toc_and_audit_gates_work() {
-        let md = "\
-> [!NOTE]\n> First callout body.\n\n\
-> [!WARNING]\n> Watch out for $\\chi^2$.\n\n\
-![Workspace screenshot](images/workspace-split-fit.png)\n\n\
-> Regular blockquote.\n";
-
+        let md = "> [!NOTE]\n> First callout body.\n\n> [!WARNING]\n> Watch out for $\\chi^2$.\n\n![Workspace screenshot](images/workspace-split-fit.png)\n\n> Regular blockquote.\n";
         let rendered = render_markdown(md, &IdentityResolver);
-        assert!(rendered.html.contains("<div class=\"callout callout-note\" role=\"note\">\n<p class=\"callout-title\">Note</p>"));
-        assert!(rendered.html.contains("<div class=\"callout callout-warning\" role=\"note\">\n<p class=\"callout-title\">Warning</p>"));
-        assert!(rendered.html.contains("<blockquote>\n<p>Regular blockquote.</p>\n</blockquote>"));
-        assert!(rendered.html.contains(
-            "<figure class=\"doc-figure\"><img src=\"images/workspace-split-fit.png\" alt=\"Workspace screenshot\" loading=\"lazy\"><figcaption>Workspace screenshot</figcaption></figure>"
-        ));
+        for expected in [
+            "<div class=\"callout callout-note\" role=\"note\">\n<p class=\"callout-title\">Note</p>",
+            "<div class=\"callout callout-warning\" role=\"note\">\n<p class=\"callout-title\">Warning</p>",
+            "<blockquote>\n<p>Regular blockquote.</p>\n</blockquote>",
+            "<figure class=\"doc-figure\"><img src=\"images/workspace-split-fit.png\" alt=\"Workspace screenshot\" loading=\"lazy\"><figcaption>Workspace screenshot</figcaption></figure>",
+        ] {
+            assert!(rendered.html.contains(expected), "missing `{expected}`");
+        }
         assert!(!rendered.html.contains("[!NOTE]") && !rendered.html.contains("[!WARNING]"));
 
-        // Long TOC (> 8 headings) wraps in <details open class="toc">; short TOC uses <nav class="toc">.
         let meta = test_meta();
         let long_headings: Vec<TocHeading> = (1..=9).map(|n| TocHeading { level: 2, id: format!("h-{n}"), text: format!("Heading {n}") }).collect();
         let long_page = render_page(&PageSpec {
@@ -1265,119 +1128,90 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         assert!(long_page.contains("href=\"section-analyses.html\" aria-current=\"page\">Reference</a>"));
         assert!(audit_single_html("analyses.html", &long_page).is_ok());
 
-        // Leaked TeX or raw [!NOTE] outside <code> must fail audit_single_html, while inside <code> is allowed.
-        let leaked_tex = long_page.replace("<p>Body.</p>", "<p>Raw \\frac{1}{2}</p>");
-        assert!(audit_single_html("analyses.html", &leaked_tex).unwrap_err().contains("unrendered TeX macro"));
-        let leaked_callout = long_page.replace("<p>Body.</p>", "<p>[!CAUTION] oops</p>");
-        assert!(audit_single_html("analyses.html", &leaked_callout).unwrap_err().contains("callout marker"));
-        let code_tex = long_page.replace("<p>Body.</p>", "<p><code>\\frac{1}{2}</code> and <code>[!NOTE]</code></p>");
-        assert!(audit_single_html("analyses.html", &code_tex).is_ok());
+        assert!(
+            audit_single_html("analyses.html", &long_page.replace("<p>Body.</p>", "<p>Raw \\frac{1}{2}</p>"))
+                .unwrap_err()
+                .contains("unrendered TeX macro")
+        );
+        assert!(
+            audit_single_html("analyses.html", &long_page.replace("<p>Body.</p>", "<p>[!CAUTION] oops</p>")).unwrap_err().contains("callout marker")
+        );
+        assert!(
+            audit_single_html("analyses.html", &long_page.replace("<p>Body.</p>", "<p><code>\\frac{1}{2}</code> and <code>[!NOTE]</code></p>"))
+                .is_ok()
+        );
 
-        // Root redirect shim passes audit_single_html and check_root_pages against a separate manual build dir.
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let root_dir = std::env::temp_dir().join(format!("cb-docs-root-pages-{}-{nanos}", std::process::id()));
-        let docs = root_dir.join("docs");
-        let manual = root_dir.join("target/docs-manual");
-        std::fs::create_dir_all(docs.join("images")).unwrap();
-        std::fs::create_dir_all(manual.join("v0.1")).unwrap();
-        std::fs::create_dir_all(manual.join("latest")).unwrap();
-        std::fs::write(docs.join("site.css"), "body {}\n").unwrap();
-        std::fs::write(docs.join("images/curvebook.png"), b"png").unwrap();
-
+        let root_dir = TestDir::new("docs-root-pages");
+        root_dir.write("docs/site.css", "body {}\n");
+        root_dir.write_bytes("docs/images/curvebook.png", b"png");
         let shim_gs = render_root_redirect_shim("Get Started", "Get started redirect", "manual/v0.1/get-started.html", "v0.1.0");
         let shim_ts =
             render_root_redirect_shim("Troubleshooting", "Troubleshooting redirect", "manual/v0.1/troubleshooting.html#known-issues", "v0.1.0");
-        assert!(audit_single_html("docs/get-started.html", &shim_gs).is_ok());
-        assert!(audit_single_html("docs/troubleshooting.html", &shim_ts).is_ok());
+        assert!(audit_single_html("docs/get-started.html", &shim_gs).is_ok() && audit_single_html("docs/troubleshooting.html", &shim_ts).is_ok());
 
         let base_root_html = |title: &str, nav: &str| {
             format!(
                 "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"description\" content=\"{title} page description\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><title>{title}</title><link rel=\"icon\" href=\"images/curvebook.png\"><link rel=\"stylesheet\" href=\"site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>{title}</h1>{nav}</main></body></html>"
             )
         };
-        std::fs::write(docs.join("index.html"), base_root_html("Home", "<a href=\"privacy.html\">P</a><a href=\"manual/index.html\">M</a>")).unwrap();
-        std::fs::write(docs.join("open-pzfx-files.html"), base_root_html("Open files", "<a href=\"index.html\">H</a>")).unwrap();
-        std::fs::write(docs.join("linux.html"), base_root_html("Linux", "<a href=\"index.html\">H</a>")).unwrap();
-        std::fs::write(docs.join("faq.html"), base_root_html("FAQ", "<a href=\"index.html\">H</a>")).unwrap();
-        std::fs::write(docs.join("privacy.html"), base_root_html("Privacy", "<a href=\"index.html\">H</a>")).unwrap();
-        std::fs::write(
-            manual.join("index.html"),
-            format!(
-                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"description\" content=\"Manual redirect description\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\"><title>Manual</title><link rel=\"stylesheet\" href=\"../site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>Manual</h1><a href=\"v0.1/index.html\">v0.1</a></main></body></html>"
+        for (rel, body) in [
+            ("docs/index.html", base_root_html("Home", "<a href=\"privacy.html\">P</a><a href=\"manual/index.html\">M</a>")),
+            ("docs/open-pzfx-files.html", base_root_html("Open files", "<a href=\"index.html\">H</a>")),
+            ("docs/linux.html", base_root_html("Linux", "<a href=\"index.html\">H</a>")),
+            ("docs/faq.html", base_root_html("FAQ", "<a href=\"index.html\">H</a>")),
+            ("docs/privacy.html", base_root_html("Privacy", "<a href=\"index.html\">H</a>")),
+            (
+                "target/docs-manual/index.html",
+                format!(
+                    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"description\" content=\"Manual redirect description\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\"><title>Manual</title><link rel=\"stylesheet\" href=\"../site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>Manual</h1><a href=\"v0.1/index.html\">v0.1</a></main></body></html>"
+                ),
             ),
-        )
-        .unwrap();
-        std::fs::write(manual.join("latest/index.html"), "<main id=\"main\"><h1>Manual Latest</h1></main>").unwrap();
-        std::fs::write(manual.join("v0.1/index.html"), "<main id=\"main\"><h1>Manual</h1></main>").unwrap();
-        std::fs::write(manual.join("v0.1/get-started.html"), "<main id=\"main\"><h1>GS</h1></main>").unwrap();
-        std::fs::write(manual.join("v0.1/troubleshooting.html"), "<main id=\"main\"><h1>TS</h1><h2 id=\"known-issues\">KI</h2></main>").unwrap();
-        std::fs::write(docs.join("get-started.html"), &shim_gs).unwrap();
-        std::fs::write(docs.join("troubleshooting.html"), &shim_ts).unwrap();
+            ("target/docs-manual/latest/index.html", String::from("<main id=\"main\"><h1>Manual Latest</h1></main>")),
+            ("target/docs-manual/v0.1/index.html", String::from("<main id=\"main\"><h1>Manual</h1></main>")),
+            ("target/docs-manual/v0.1/get-started.html", String::from("<main id=\"main\"><h1>GS</h1></main>")),
+            ("target/docs-manual/v0.1/troubleshooting.html", String::from("<main id=\"main\"><h1>TS</h1><h2 id=\"known-issues\">KI</h2></main>")),
+            ("docs/get-started.html", shim_gs),
+            ("docs/troubleshooting.html", shim_ts),
+        ] {
+            root_dir.write(rel, &body);
+        }
+        let manual = root_dir.join("target/docs-manual");
+        assert_eq!(check_root_pages(root_dir.path(), &manual), Ok(()));
 
-        assert_eq!(check_root_pages(&root_dir, &manual), Ok(()));
-        // Duplicate meta description across root pages must fail check_root_pages.
-        let dup_privacy = base_root_html("Privacy", "<a href=\"index.html\">H</a>").replace("Privacy page description", "Home page description");
-        std::fs::write(docs.join("privacy.html"), dup_privacy).unwrap();
-        assert!(check_root_pages(&root_dir, &manual).unwrap_err().contains("duplicate `<meta name=\"description\">`"));
-        std::fs::write(docs.join("privacy.html"), base_root_html("Privacy", "<a href=\"index.html\">H</a>")).unwrap();
-        // Breaking a local link inside docs/index.html must fail check_root_pages.
-        std::fs::write(docs.join("index.html"), base_root_html("Home", "<a href=\"missing.html\">Broken</a>")).unwrap();
-        assert!(check_root_pages(&root_dir, &manual).unwrap_err().contains("missing.html"));
-        let _ = std::fs::remove_dir_all(&root_dir);
+        root_dir.write(
+            "docs/privacy.html",
+            &base_root_html("Privacy", "<a href=\"index.html\">H</a>").replace("Privacy page description", "Home page description"),
+        );
+        assert!(check_root_pages(root_dir.path(), &manual).unwrap_err().contains("duplicate `<meta name=\"description\">`"));
+        root_dir.write("docs/privacy.html", &base_root_html("Privacy", "<a href=\"index.html\">H</a>"));
+        root_dir.write("docs/index.html", &base_root_html("Home", "<a href=\"missing.html\">Broken</a>"));
+        assert!(check_root_pages(root_dir.path(), &manual).unwrap_err().contains("missing.html"));
     }
 
     #[test]
     fn da_03_04_empty_multiline_display_math_terminates_cleanly() {
-        let rendered1 = render_markdown("$$\n$$\n", &IdentityResolver);
-        assert!(rendered1.html.contains("$$"));
-
-        let rendered2 = render_markdown("$$\n   \n$$\nAfter\n", &IdentityResolver);
-        assert!(rendered2.html.contains("After"), "unexpected html: {}", rendered2.html);
+        assert!(render_markdown("$$\n$$\n", &IdentityResolver).html.contains("$$"));
+        assert!(render_markdown("$$\n   \n$$\nAfter\n", &IdentityResolver).html.contains("After"));
     }
 
     #[test]
     fn da_03_05_math_and_markdown_recursion_caps_complexity_and_blockquote_ids() {
-        // 1. Exponential O(2^(n/2)) hang regression on repeated incomplete \frac / \binom.
-        let frac_bomb = format!("${}$", "\\frac".repeat(80));
-        let rendered_frac = render_markdown(&frac_bomb, &IdentityResolver);
-        assert!(!rendered_frac.html.is_empty());
+        assert!(!render_markdown(&format!("${}$", "\\frac".repeat(80)), &IdentityResolver).html.is_empty());
+        assert!(!render_math_html(&"\\binom".repeat(80)).is_empty());
+        assert!(!render_math_html(&format!("{}x", "\\bar".repeat(500))).is_empty());
+        assert!(!render_math_html(&format!("{}x", "\\sqrt".repeat(500))).is_empty());
+        assert!(render_markdown(&format!("{}hi\n", "> ".repeat(200)), &IdentityResolver).html.contains("hi"));
 
-        let binom_bomb = "\\binom".repeat(80);
-        let rendered_binom = render_math_html(&binom_bomb);
-        assert!(!rendered_binom.is_empty());
-
-        // 2. Unbounded stack recursion in brace-free TeX macros & Markdown blocks/inlines.
-        let deep_bar = format!("{}x", "\\bar".repeat(500));
-        assert!(!render_math_html(&deep_bar).is_empty());
-        let deep_sqrt = format!("{}x", "\\sqrt".repeat(500));
-        assert!(!render_math_html(&deep_sqrt).is_empty());
-
-        let deep_quote = format!("{}hi\n", "> ".repeat(200));
-        assert!(render_markdown(&deep_quote, &IdentityResolver).html.contains("hi"));
-
-        let mut deep_list = String::new();
-        for depth in 0..200 {
-            deep_list.push_str(&"  ".repeat(depth));
-            deep_list.push_str("- item\n");
-        }
+        let deep_list: String = (0..200).map(|d| format!("{}- item\n", "  ".repeat(d))).collect();
         assert!(render_markdown(&deep_list, &IdentityResolver).html.contains("item"));
+        assert!(render_markdown(&format!("{}x{}", "*".repeat(200), "*".repeat(200)), &IdentityResolver).html.contains('x'));
+        assert!(render_markdown(&format!("{}x{}", "[".repeat(200), "](u)".repeat(200)), &IdentityResolver).html.contains('x'));
+        assert!(!render_markdown(&"*a ${b ".repeat(500), &IdentityResolver).html.is_empty());
 
-        let deep_inline = format!("{}x{}", "*".repeat(200), "*".repeat(200));
-        assert!(render_markdown(&deep_inline, &IdentityResolver).html.contains('x'));
-
-        let deep_links = format!("{}x{}", "[".repeat(200), "](u)".repeat(200));
-        assert!(render_markdown(&deep_links, &IdentityResolver).html.contains('x'));
-
-        // 3. Unclosed delimiter + `$` rescan complexity stays fast.
-        let unclosed_rescan = "*a ${b ".repeat(500);
-        assert!(!render_markdown(&unclosed_rescan, &IdentityResolver).html.is_empty());
-
-        // 4. Headings inside blockquotes/callouts share parent RenderCtx slug_counts so IDs stay unique.
-        let dup_md = "# Intro\n\n> # Intro\n\n> [!NOTE]\n> ## Intro\n";
-        let rendered_dup = render_markdown(dup_md, &IdentityResolver);
-        assert!(rendered_dup.html.contains("id=\"intro\""), "{}", rendered_dup.html);
-        assert!(rendered_dup.html.contains("id=\"intro-1\""), "{}", rendered_dup.html);
-        assert!(rendered_dup.html.contains("id=\"intro-2\""), "{}", rendered_dup.html);
+        let rendered_dup = render_markdown("# Intro\n\n> # Intro\n\n> [!NOTE]\n> ## Intro\n", &IdentityResolver);
+        for id in ["id=\"intro\"", "id=\"intro-1\"", "id=\"intro-2\""] {
+            assert!(rendered_dup.html.contains(id), "{}", rendered_dup.html);
+        }
         let meta = test_meta();
         let page = render_page(&PageSpec {
             title: "Dup",
@@ -1398,42 +1232,31 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
 
     #[test]
     fn r12_8_canonical_link_allows_only_the_published_site_url() {
-        let meta = test_meta();
-        let page = render_page(&PageSpec {
-            title: "Canon",
-            description: "Canon",
-            rel_path: "canon.html",
-            section_title: "Concepts",
-            section_rel_path: None,
-            h1: "Canon",
-            toc_headings: &[],
-            body_html: "<p>Body.</p>",
-            body_has_h1: false,
-            prev: None,
-            next: None,
-            meta: &meta,
-        });
+        let page = render_test_page("canon.html", "Canon", "<p>Body.</p>");
         let with_link = |tag: &str| page.replacen("</head>", &format!("{tag}</head>"), 1);
 
         let ok = audit_single_html("canon.html", &with_link("<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/canon.html\">"))
             .unwrap();
         assert!(!ok.hrefs.iter().any(|h| h.ends_with("/curvebook/canon.html")), "canonical URL must not enter the local link checker");
-        let off_site = audit_single_html("canon.html", &with_link("<link rel=\"canonical\" href=\"https://evil.example/canon.html\">"));
-        assert!(off_site.unwrap_err().contains("canonical link"));
-        // Any other external `<link href>` stays forbidden.
-        let stylesheet =
-            audit_single_html("canon.html", &with_link("<link rel=\"stylesheet\" href=\"https://hausergroup.github.io/curvebook/site.css\">"));
-        assert!(stylesheet.unwrap_err().contains("external asset URL"));
+        assert!(
+            audit_single_html("canon.html", &with_link("<link rel=\"canonical\" href=\"https://evil.example/canon.html\">"))
+                .unwrap_err()
+                .contains("canonical link")
+        );
+        assert!(
+            audit_single_html("canon.html", &with_link("<link rel=\"stylesheet\" href=\"https://hausergroup.github.io/curvebook/site.css\">"))
+                .unwrap_err()
+                .contains("external asset URL")
+        );
     }
 
     #[test]
     fn da_03_09_release_snapshot_parent_docs_rejects_traversal_symlinks_and_bad_fragments() {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-docs-da-03-09-{}-{nanos}", std::process::id()));
+        let dir = TestDir::new("docs-da-03-09");
         std::fs::create_dir_all(dir.join("docs/manual/v0.1")).unwrap();
-        std::fs::write(dir.join("README.md"), "# root\n").unwrap();
-        std::fs::write(dir.join("docs/index.html"), "<main id=\"main\"><h1>Home</h1></main>").unwrap();
-        std::fs::write(dir.join("docs/privacy.html"), "<main id=\"main\"><h1>Privacy</h1><h2 id=\"policy\">P</h2></main>").unwrap();
+        dir.write("README.md", "# root\n");
+        dir.write("docs/index.html", "<main id=\"main\"><h1>Home</h1></main>");
+        dir.write("docs/privacy.html", "<main id=\"main\"><h1>Privacy</h1><h2 id=\"policy\">P</h2></main>");
 
         let mut meta = test_meta();
         meta.is_release_snapshot = true;
@@ -1441,42 +1264,25 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         let facts = BTreeMap::new();
         let out_dir = dir.join("docs/manual/v0.1");
 
-        // Valid single-level parent-docs target and valid fragment pass.
-        assert!(verify_target(&dir, &out_dir, &site, &facts, "index.html", "../../privacy.html#policy").is_ok());
-        // Missing fragment in parent docs/ HTML must fail.
-        let frag_err = verify_target(&dir, &out_dir, &site, &facts, "index.html", "../../privacy.html#missing").unwrap_err();
-        assert!(frag_err.contains("missing `#missing`"), "{frag_err}");
-        // Escaping docs/ via repeated `../` must fail (not stripped repeatedly by trim_start_matches).
-        assert!(verify_target(&dir, &out_dir, &site, &facts, "index.html", "../../../README.md").is_err());
-        assert!(verify_target(&dir, &out_dir, &site, &facts, "index.html", "../../../../index.html").is_err());
+        assert!(verify_target(dir.path(), &out_dir, &site, &facts, "index.html", "../../privacy.html#policy").is_ok());
+        assert!(
+            verify_target(dir.path(), &out_dir, &site, &facts, "index.html", "../../privacy.html#missing")
+                .unwrap_err()
+                .contains("missing `#missing`")
+        );
+        assert!(verify_target(dir.path(), &out_dir, &site, &facts, "index.html", "../../../README.md").is_err());
+        assert!(verify_target(dir.path(), &out_dir, &site, &facts, "index.html", "../../../../index.html").is_err());
 
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(dir.join("README.md"), dir.join("docs/link.html")).unwrap();
-            assert!(verify_target(&dir, &out_dir, &site, &facts, "index.html", "../../link.html").is_err());
+            assert!(verify_target(dir.path(), &out_dir, &site, &facts, "index.html", "../../link.html").is_err());
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn da_03_10_uri_obfuscation_and_meta_refresh_are_rejected_everywhere() {
-        let meta = test_meta();
-        let good = render_page(&PageSpec {
-            title: "Sec",
-            description: "Sec",
-            rel_path: "index.html",
-            section_title: "Get started",
-            section_rel_path: None,
-            h1: "Sec",
-            toc_headings: &[],
-            body_html: "<p>Clean body.</p>",
-            body_has_h1: false,
-            prev: None,
-            next: None,
-            meta: &meta,
-        });
-
+        let good = render_test_page("index.html", "Sec", "<p>Clean body.</p>");
         for bad_snippet in [
             "<a href=\"&#x6a;avascript:alert(1)\">x</a>",
             "<a href=\"&#106;avascript:alert(1)\">x</a>",
@@ -1490,37 +1296,25 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
             "<meta http-equiv=\"refresh\" content=\"0; url=&#x6a;avascript:alert(1)\">",
             "<meta http-equiv=\"refresh\" content=\"0; url=data:text/html,hi\">",
         ] {
-            let poisoned = good.replace("<p>Clean body.</p>", bad_snippet);
-            assert!(audit_single_html("bad.html", &poisoned).is_err(), "expected `{bad_snippet}` to be rejected");
+            assert!(audit_single_html("bad.html", &good.replace("<p>Clean body.</p>", bad_snippet)).is_err(), "expected `{bad_snippet}` rejected");
         }
 
-        // Local meta-refresh to a missing page must fail check_internal_links_and_fragments.
         let local_missing_refresh = good.replace("<p>Clean body.</p>", "<meta http-equiv=\"refresh\" content=\"0; url=missing.html\">");
-        let page_facts = audit_single_html("index.html", &local_missing_refresh).unwrap();
-        let mut facts = BTreeMap::new();
-        facts.insert(String::from("index.html"), page_facts);
-        let mut html_pages = BTreeMap::new();
-        html_pages.insert(String::from("index.html"), local_missing_refresh);
-        let site = GeneratedSite { html_pages, expected_coverage: Default::default(), meta };
+        let facts = BTreeMap::from([(String::from("index.html"), audit_single_html("index.html", &local_missing_refresh).unwrap())]);
+        let html_pages = BTreeMap::from([(String::from("index.html"), local_missing_refresh)]);
+        let site = GeneratedSite { html_pages, expected_coverage: Default::default(), meta: test_meta() };
         assert!(check_internal_links_and_fragments(Path::new("."), Path::new("."), &site, &facts).is_err());
 
-        // External meta-refresh in root docs/index.html must fail check_root_pages.
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let root_dir = std::env::temp_dir().join(format!("cb-docs-da-03-10-{}-{nanos}", std::process::id()));
-        let docs = root_dir.join("docs");
-        let manual = root_dir.join("target/docs-manual");
-        std::fs::create_dir_all(&docs).unwrap();
-        std::fs::create_dir_all(&manual).unwrap();
+        let root_dir = TestDir::new("docs-da-03-10");
         let root_html = |extra: &str| {
             format!(
                 "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\">{extra}<title>T</title></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>T</h1></main></body></html>"
             )
         };
-        std::fs::write(docs.join("index.html"), root_html("<meta http-equiv=\"refresh\" content=\"0; url=https://evil.example/\">")).unwrap();
-        std::fs::write(docs.join("privacy.html"), root_html("")).unwrap();
-        std::fs::write(manual.join("index.html"), root_html("")).unwrap();
-        assert!(check_root_pages(&root_dir, &manual).is_err());
-        let _ = std::fs::remove_dir_all(&root_dir);
+        root_dir.write("docs/index.html", &root_html("<meta http-equiv=\"refresh\" content=\"0; url=https://evil.example/\">"));
+        root_dir.write("docs/privacy.html", &root_html(""));
+        root_dir.write("target/docs-manual/index.html", &root_html(""));
+        assert!(check_root_pages(root_dir.path(), &root_dir.join("target/docs-manual")).is_err());
     }
 
     #[test]
@@ -1541,44 +1335,37 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
             meta: &meta,
         });
         assert!(audit_single_html("analyses.html", &page).is_ok());
-        assert!(page.contains("<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/manual/latest/analyses.html\">"));
-        assert!(page.contains("<meta property=\"og:type\" content=\"article\">"));
-        assert!(page.contains("<meta property=\"og:site_name\" content=\"CurveBook\">"));
-        assert!(page.contains("<meta property=\"og:title\" content=\"Analyses — CurveBook Documentation\">"));
-        assert!(page.contains("<meta property=\"og:description\" content=\"Statistical analyses reference.\">"));
-        assert!(page.contains("<meta property=\"og:url\" content=\"https://hausergroup.github.io/curvebook/manual/latest/analyses.html\">"));
-        assert!(page.contains("<meta property=\"og:image\" content=\"https://hausergroup.github.io/curvebook/images/workspace-layout-dark.png\">"));
-        assert!(page.contains("<meta name=\"twitter:card\" content=\"summary_large_image\">"));
+        for expected in [
+            "<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/manual/latest/analyses.html\">",
+            "<meta property=\"og:type\" content=\"article\">",
+            "<meta property=\"og:site_name\" content=\"CurveBook\">",
+            "<meta property=\"og:title\" content=\"Analyses — CurveBook Documentation\">",
+            "<meta property=\"og:description\" content=\"Statistical analyses reference.\">",
+            "<meta property=\"og:url\" content=\"https://hausergroup.github.io/curvebook/manual/latest/analyses.html\">",
+            "<meta property=\"og:image\" content=\"https://hausergroup.github.io/curvebook/images/workspace-layout-dark.png\">",
+            "<meta name=\"twitter:card\" content=\"summary_large_image\">",
+        ] {
+            assert!(page.contains(expected), "missing `{expected}`");
+        }
         assert!(!page.contains("<script"));
 
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-docs-latest-{}-{nanos}", std::process::id()));
-        let manual = dir.join("target/docs-manual");
-        std::fs::create_dir_all(manual.join("v0.1")).unwrap();
-        std::fs::create_dir_all(manual.join("latest")).unwrap();
+        let dir = TestDir::new("docs-latest");
         let manifest = "{\"version\":\"0.1.0\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\"}\n";
-        std::fs::write(manual.join("v0.1/manifest.json"), manifest).unwrap();
-        std::fs::write(manual.join("latest/manifest.json"), manifest).unwrap();
-        std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">").unwrap();
-        assert!(check_no_committed_manual_html(&dir).is_ok());
-        assert!(check_manual_snapshots(&dir, &manual).is_ok());
+        dir.write("target/docs-manual/v0.1/manifest.json", manifest);
+        dir.write("target/docs-manual/latest/manifest.json", manifest);
+        dir.write("target/docs-manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">");
+        let manual = dir.join("target/docs-manual");
+        assert!(check_no_committed_manual_html(dir.path()).is_ok() && check_manual_snapshots(dir.path(), &manual).is_ok());
 
-        // Committed HTML under docs/manual/ must be rejected (R12.10).
-        std::fs::create_dir_all(dir.join("docs/manual/latest")).unwrap();
-        std::fs::write(dir.join("docs/manual/latest/index.html"), "<html></html>").unwrap();
-        assert!(check_no_committed_manual_html(&dir).unwrap_err().contains("must not be committed under docs/manual/"));
+        dir.write("docs/manual/latest/index.html", "<html></html>");
+        assert!(check_no_committed_manual_html(dir.path()).unwrap_err().contains("must not be committed under docs/manual/"));
         let _ = std::fs::remove_dir_all(dir.join("docs/manual"));
 
-        // Redirect pointing to v0.1 instead of latest must fail when latest/manifest.json exists.
-        std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\">").unwrap();
-        assert!(check_manual_snapshots(&dir, &manual).unwrap_err().contains("latest/index.html"));
+        dir.write("target/docs-manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\">");
+        assert!(check_manual_snapshots(dir.path(), &manual).unwrap_err().contains("latest/index.html"));
 
-        // Mismatched latest/manifest.json must fail.
-        std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">").unwrap();
-        std::fs::write(manual.join("latest/manifest.json"), "{\"version\":\"0.1.0\",\"commit\":\"ffffffffffffffffffffffffffffffffffffffff\"}\n")
-            .unwrap();
-        assert!(check_manual_snapshots(&dir, &manual).unwrap_err().contains("latest/manifest.json"));
-
-        let _ = std::fs::remove_dir_all(&dir);
+        dir.write("target/docs-manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">");
+        dir.write("target/docs-manual/latest/manifest.json", "{\"version\":\"0.1.0\",\"commit\":\"ffffffffffffffffffffffffffffffffffffffff\"}\n");
+        assert!(check_manual_snapshots(dir.path(), &manual).unwrap_err().contains("latest/manifest.json"));
     }
 }

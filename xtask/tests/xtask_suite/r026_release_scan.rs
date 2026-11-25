@@ -9,12 +9,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::common::{TempDirGuard, build_ustar_bytes, gzip_stored, run_release_scan, workspace_root, write_sha256sums_for_dir};
 use super::zip_helper::ZipWriter;
 
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 static CLEAN_FIXTURES: OnceLock<Result<CleanFixtures, String>> = OnceLock::new();
 
 struct CleanFixtures {
@@ -56,118 +54,8 @@ impl CleanFixtures {
     }
 }
 
-struct TempDirGuard {
-    path: PathBuf,
-}
-
-impl TempDirGuard {
-    fn new(label: &str) -> Result<Self, String> {
-        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let path = std::env::temp_dir().join(format!("cb-r026-test-{label}-{}-{nanos}-{seq}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).map_err(|e| format!("create_dir_all {}: {e}", path.display()))?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-fn workspace_root() -> Result<PathBuf, String> {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).ok_or_else(|| String::from("CARGO_MANIFEST_DIR has no parent"))
-}
-
 fn join(parts: &[&str]) -> String {
     parts.concat()
-}
-
-fn run_release_scan(args: &[&str]) -> Result<std::process::Output, String> {
-    let root = workspace_root()?;
-    Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .current_dir(root)
-        .arg("release-scan")
-        .args(args)
-        .output()
-        .map_err(|e| format!("run release-scan {args:?}: {e}"))
-}
-
-// ============================================================================
-// Minimal pure-Rust SHA-256 + RFC 1952 GZIP + USTAR + AR + RPM v3 fixture builders
-// ============================================================================
-
-fn sha256_hex(input: &[u8]) -> String {
-    curvebook_platform::sha256::sha256_hex(input)
-}
-
-fn crc32_ieee(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xedb8_8320u32 & mask);
-        }
-    }
-    !crc
-}
-
-/// Encode raw bytes as a valid RFC 1952 `.gz` stream using DEFLATE stored blocks (method 8, BTYPE=00).
-fn gzip_stored(raw: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(raw.len() + 32);
-    out.extend_from_slice(&[0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03]);
-    if raw.is_empty() {
-        out.extend_from_slice(&[0x01, 0x00, 0x00, 0xff, 0xff]);
-    } else {
-        let chunks: Vec<&[u8]> = raw.chunks(65_535).collect();
-        for (idx, chunk) in chunks.iter().enumerate() {
-            let bfinal = u8::from(idx + 1 == chunks.len());
-            let len = chunk.len() as u16;
-            let nlen = !len;
-            out.push(bfinal);
-            out.extend_from_slice(&len.to_le_bytes());
-            out.extend_from_slice(&nlen.to_le_bytes());
-            out.extend_from_slice(chunk);
-        }
-    }
-    out.extend_from_slice(&crc32_ieee(raw).to_le_bytes());
-    out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
-    out
-}
-
-/// Build a POSIX ustar `.tar` archive from `(path, bytes)` entries (allows arbitrary paths for tar-slip negative tests).
-fn build_ustar_bytes(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
-    let mut tar = Vec::new();
-    for &(name, data) in entries {
-        let mut hdr = [0u8; 512];
-        let name_bytes = name.as_bytes();
-        if name_bytes.len() > 100 {
-            return Err(format!("test tar path > 100 bytes: {name}"));
-        }
-        hdr[..name_bytes.len()].copy_from_slice(name_bytes);
-        hdr[100..108].copy_from_slice(b"0000644\0");
-        hdr[108..116].copy_from_slice(b"0000000\0");
-        hdr[116..124].copy_from_slice(b"0000000\0");
-        let size_octal = format!("{:011o}\0", data.len());
-        hdr[124..136].copy_from_slice(size_octal.as_bytes());
-        hdr[136..148].copy_from_slice(b"00000000000\0");
-        hdr[148..156].fill(b' ');
-        hdr[156] = b'0';
-        hdr[257..263].copy_from_slice(b"ustar\0");
-        hdr[263..265].copy_from_slice(b"00");
-        let chksum: u32 = hdr.iter().map(|&b| u32::from(b)).sum();
-        let chk_str = format!("{chksum:06o}\0 ");
-        hdr[148..156].copy_from_slice(chk_str.as_bytes());
-        tar.extend_from_slice(&hdr);
-        tar.extend_from_slice(data);
-        let pad = (512 - (data.len() % 512)) % 512;
-        tar.resize(tar.len() + pad, 0);
-    }
-    tar.resize(tar.len() + 1024, 0);
-    Ok(tar)
 }
 
 /// Build an `!<arch>\n` `.deb` archive in memory (`trailing_slash = true` for SVR4/GNU `ar`,
@@ -258,9 +146,7 @@ fn build_deb_via_host_ar_and_tar(scratch: &Path, deb_out: &Path, control_txt: &s
         return Ok(());
     }
 
-    let ctrl_tgz = gzip_stored(&build_ustar_bytes(&[("control", control_txt.as_bytes())])?);
-    let data_tgz = gzip_stored(&build_ustar_bytes(data_entries)?);
-    let deb_bytes = build_gnu_ar_deb(&[("debian-binary", b"2.0\n"), ("control.tar.gz", &ctrl_tgz), ("data.tar.gz", &data_tgz)])?;
+    let deb_bytes = build_pure_deb(control_txt, data_entries, true)?;
     fs::write(deb_out, deb_bytes).map_err(|e| e.to_string())
 }
 
@@ -331,72 +217,6 @@ fn append_newc_entry(out: &mut Vec<u8>, ino: u32, mode: u32, nlink: u32, name: &
     while !out.len().is_multiple_of(4) {
         out.push(0);
     }
-}
-
-/// Craft a minimal stored ZIP archive WITHOUT path sanitization so we can test zip-slip rejection!
-fn build_raw_stored_zip_unchecked(raw_name: &str, payload: &[u8]) -> Vec<u8> {
-    let crc = crc32_ieee(payload);
-    let len = payload.len() as u32;
-    let name_bytes = raw_name.as_bytes();
-    let name_len = name_bytes.len() as u16;
-    let mut out = Vec::new();
-    out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&0x0800u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0x0021u16.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&name_len.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(name_bytes);
-    out.extend_from_slice(payload);
-
-    let cd_offset = out.len() as u32;
-    out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-    out.extend_from_slice(&0x0314u16.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&0x0800u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0x0021u16.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&name_len.to_le_bytes());
-    out.extend_from_slice(&[0u8; 14]);
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(name_bytes);
-    let cd_size = (out.len() as u32) - cd_offset;
-
-    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&cd_size.to_le_bytes());
-    out.extend_from_slice(&cd_offset.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out
-}
-
-fn write_sha256sums_for_dir(dir: &Path) -> Result<(), String> {
-    let mut names = Vec::new();
-    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
-        let name = entry.map_err(|e| e.to_string())?.file_name().to_string_lossy().into_owned();
-        if name != "SHA256SUMS.txt" {
-            names.push(name);
-        }
-    }
-    names.sort();
-    let mut lines = String::new();
-    for name in names {
-        let bytes = fs::read(dir.join(&name)).map_err(|e| e.to_string())?;
-        lines.push_str(&format!("{}  {name}\n", sha256_hex(&bytes)));
-    }
-    fs::write(dir.join("SHA256SUMS.txt"), lines).map_err(|e| e.to_string())
 }
 
 /// The synthetic `.rpm` from [`build_synthetic_rpm`] has empty signature and main headers.
@@ -689,72 +509,65 @@ fn r026_planted_cleanroom_copyright_and_unattributed_assets_or_fonts_fail_closed
     Ok(())
 }
 
+fn assert_scan_fails_with(dir: &Path, needles: &[&str]) -> Result<(), String> {
+    let dir_str = dir.to_str().ok_or("non-utf8 path")?;
+    let out = run_release_scan(&[dir_str])?;
+    assert!(!out.status.success(), "expected release-scan to fail on {}", dir.display());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for &needle in needles {
+        assert!(stderr.contains(needle), "expected `{needle}` in stderr:\n{stderr}");
+    }
+    Ok(())
+}
+
+fn seed_single_and_fail(fx: &TempDirGuard, sub: &str, fname: &str, bytes: &[u8], needles: &[&str]) -> Result<(), String> {
+    let dir = fx.path.join(sub);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::write(dir.join(fname), bytes).map_err(|e| e.to_string())?;
+    write_sha256sums_for_dir(&dir)?;
+    assert_scan_fails_with(&dir, needles)
+}
+
 #[test]
 fn r026_sha256sums_tampered_missing_extra_and_absent_manifest_fail_closed() -> Result<(), String> {
     let fx = TempDirGuard::new("checksums")?;
-    let mut zw = ZipWriter::new();
-    zw.add_file("curvebook-cli/README.txt", b"Clean CurveBook CLI\n".to_vec()).unwrap();
-    let valid_zip = zw.finish().unwrap();
+    let valid_zip = ZipWriter::single("curvebook-cli/README.txt", b"Clean CurveBook CLI\n")?;
 
     // 1. Tampered byte after SHA256SUMS.txt generation -> fails closed
-    {
-        let dir = fx.path.join("tampered");
-        fs::create_dir_all(&dir).unwrap();
-        let zip_path = dir.join("curvebook-cli.zip");
-        fs::write(&zip_path, &valid_zip).unwrap();
-        write_sha256sums_for_dir(&dir)?;
-        let mut tampered = valid_zip.clone();
-        tampered[0] ^= 0xff;
-        fs::write(&zip_path, tampered).unwrap();
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        assert!(String::from_utf8_lossy(&out.stderr).contains("SHA-256 mismatch"), "{}", String::from_utf8_lossy(&out.stderr));
-    }
+    let tampered_dir = fx.path.join("tampered");
+    fs::create_dir_all(&tampered_dir).unwrap();
+    fs::write(tampered_dir.join("curvebook-cli.zip"), &valid_zip).unwrap();
+    write_sha256sums_for_dir(&tampered_dir)?;
+    let mut tampered = valid_zip.clone();
+    tampered[0] ^= 0xff;
+    fs::write(tampered_dir.join("curvebook-cli.zip"), tampered).unwrap();
+    assert_scan_fails_with(&tampered_dir, &["SHA-256 mismatch"])?;
 
     // 2. Sibling asset missing from SHA256SUMS.txt -> fails closed
-    {
-        let dir = fx.path.join("missing-entry");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("curvebook-a.zip"), &valid_zip).unwrap();
-        write_sha256sums_for_dir(&dir)?;
-        fs::write(dir.join("curvebook-b.zip"), &valid_zip).unwrap();
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-b.zip") && stderr.contains("missing from `SHA256SUMS.txt`"), "{stderr}");
-    }
+    let missing_dir = fx.path.join("missing-entry");
+    fs::create_dir_all(&missing_dir).unwrap();
+    fs::write(missing_dir.join("curvebook-a.zip"), &valid_zip).unwrap();
+    write_sha256sums_for_dir(&missing_dir)?;
+    fs::write(missing_dir.join("curvebook-b.zip"), &valid_zip).unwrap();
+    assert_scan_fails_with(&missing_dir, &["curvebook-b.zip", "missing from `SHA256SUMS.txt`"])?;
 
     // 3. Extra nonexistent entry in SHA256SUMS.txt -> fails closed
-    {
-        let dir = fx.path.join("extra-entry");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("curvebook-a.zip"), &valid_zip).unwrap();
-        write_sha256sums_for_dir(&dir)?;
-        let mut sums = fs::read_to_string(dir.join("SHA256SUMS.txt")).unwrap();
-        sums.push_str(&format!("{}  curvebook-ghost.zip\n", "0".repeat(64)));
-        fs::write(dir.join("SHA256SUMS.txt"), sums).unwrap();
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-ghost.zip") && stderr.contains("does not exist"), "{stderr}");
-    }
+    let extra_dir = fx.path.join("extra-entry");
+    fs::create_dir_all(&extra_dir).unwrap();
+    fs::write(extra_dir.join("curvebook-a.zip"), &valid_zip).unwrap();
+    write_sha256sums_for_dir(&extra_dir)?;
+    let mut sums = fs::read_to_string(extra_dir.join("SHA256SUMS.txt")).unwrap();
+    sums.push_str(&format!("{}  curvebook-ghost.zip\n", "0".repeat(64)));
+    fs::write(extra_dir.join("SHA256SUMS.txt"), sums).unwrap();
+    assert_scan_fails_with(&extra_dir, &["curvebook-ghost.zip", "does not exist"])?;
 
     // 4. Absent SHA256SUMS.txt fails by default, passes only with explicit `--no-checksums`
-    {
-        let dir = fx.path.join("absent-sums");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("curvebook-a.zip"), &valid_zip).unwrap();
-
-        let default_out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!default_out.status.success());
-        assert!(String::from_utf8_lossy(&default_out.stderr).contains("SHA256SUMS.txt"));
-
-        let opt_out = run_release_scan(&["--no-checksums", dir.to_str().unwrap()])?;
-        assert!(opt_out.status.success(), "{}", String::from_utf8_lossy(&opt_out.stderr));
-    }
+    let absent_dir = fx.path.join("absent-sums");
+    fs::create_dir_all(&absent_dir).unwrap();
+    fs::write(absent_dir.join("curvebook-a.zip"), &valid_zip).unwrap();
+    assert_scan_fails_with(&absent_dir, &["SHA256SUMS.txt"])?;
+    let opt_out = run_release_scan(&["--no-checksums", absent_dir.to_str().unwrap()])?;
+    assert!(opt_out.status.success(), "{}", String::from_utf8_lossy(&opt_out.stderr));
     Ok(())
 }
 
@@ -765,102 +578,38 @@ fn r026_unknown_extensions_empty_dir_path_traversal_and_unextractable_containers
     // 1. Empty directory
     let empty_dir = fx.path.join("empty");
     fs::create_dir_all(&empty_dir).unwrap();
-    let empty_out = run_release_scan(&[empty_dir.to_str().unwrap()])?;
-    assert!(!empty_out.status.success());
-    assert!(String::from_utf8_lossy(&empty_out.stderr).contains("empty"));
+    assert_scan_fails_with(&empty_dir, &["empty"])?;
 
     // 2. Unknown / unsupported asset extensions (.pkg, .exe, .rar)
     for unknown_name in ["curvebook-mystery.pkg", "curvebook-setup.exe", "curvebook-archive.rar"] {
-        let dir = fx.path.join(format!("unknown-{unknown_name}"));
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(unknown_name), b"opaque installer payload").unwrap();
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success(), "{unknown_name} must fail closed");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains(unknown_name) && stderr.contains("unsupported or unknown release asset format"), "{stderr}");
+        seed_single_and_fail(
+            &fx,
+            &format!("unknown-{unknown_name}"),
+            unknown_name,
+            b"opaque installer payload",
+            &[unknown_name, "unsupported or unknown release asset format"],
+        )?;
     }
 
-    // 3. Zip-slip (`../escape.txt`) inside `.zip`
-    {
-        let dir = fx.path.join("zip-slip");
-        fs::create_dir_all(&dir).unwrap();
-        let evil_zip = build_raw_stored_zip_unchecked("../escape.txt", b"escaped");
-        fs::write(dir.join("curvebook-slip.zip"), evil_zip).unwrap();
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        assert!(String::from_utf8_lossy(&out.stderr).contains("curvebook-slip.zip"));
-    }
-
-    // 4. Tar-slip (`../escape.txt`) inside `.tar.gz`
-    {
-        let dir = fx.path.join("tar-slip");
-        fs::create_dir_all(&dir).unwrap();
-        let evil_tgz = gzip_stored(&build_ustar_bytes(&[("../escape.txt", b"escaped")])?);
-        fs::write(dir.join("curvebook-slip.tar.gz"), evil_tgz).unwrap();
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-slip.tar.gz") && stderr.contains("../escape.txt"), "{stderr}");
-    }
-
-    // 5. `.deb` missing `data.tar.*` fails closed
-    {
-        let dir = fx.path.join("deb-no-data");
-        fs::create_dir_all(&dir).unwrap();
-        let ctrl_only = build_gnu_ar_deb(&[("debian-binary", b"2.0\n")])?;
-        fs::write(dir.join("curvebook-broken.deb"), ctrl_only).unwrap();
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        assert!(String::from_utf8_lossy(&out.stderr).contains("curvebook-broken.deb"));
-    }
-
-    // 6. Unextractable `.AppImage`, `.flatpak`, and cross-OS `.msi` / `.dmg` fail closed (never skipped)
-    for (fname, dummy_bytes) in [
-        ("curvebook-broken.AppImage", &b"\x7fELF_without_squashfs_superblock"[..]),
-        ("curvebook-broken.flatpak", &b"not-a-valid-ostree-flatpak-bundle"[..]),
+    // 3–6. Zip-slip, tar-slip, broken .deb, and unextractable .AppImage / .flatpak fail closed
+    let evil_zip = ZipWriter::single("../escape.txt", b"escaped")?;
+    let evil_tgz = gzip_stored(&build_ustar_bytes(&[("../escape.txt", b"escaped")])?);
+    let ctrl_only = build_gnu_ar_deb(&[("debian-binary", b"2.0\n")])?;
+    for (sub, fname, bytes, needles) in [
+        ("zip-slip", "curvebook-slip.zip", evil_zip.as_slice(), &["curvebook-slip.zip"][..]),
+        ("tar-slip", "curvebook-slip.tar.gz", evil_tgz.as_slice(), &["curvebook-slip.tar.gz", "../escape.txt"]),
+        ("deb-no-data", "curvebook-broken.deb", ctrl_only.as_slice(), &["curvebook-broken.deb"]),
+        ("broken-appimage", "curvebook-broken.AppImage", b"\x7fELF_without_squashfs_superblock".as_slice(), &["curvebook-broken.AppImage"]),
+        ("broken-flatpak", "curvebook-broken.flatpak", b"not-a-valid-ostree-flatpak-bundle".as_slice(), &["curvebook-broken.flatpak"]),
     ] {
-        let dir = fx.path.join(format!("broken-{fname}"));
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(fname), dummy_bytes).unwrap();
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success(), "{fname} must fail closed");
-        assert!(String::from_utf8_lossy(&out.stderr).contains(fname));
+        seed_single_and_fail(&fx, sub, fname, bytes, needles)?;
     }
 
     #[cfg(not(windows))]
-    {
-        let dir = fx.path.join("non-win-msi");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("curvebook-0.1.0-windows-x64.msi"), b"msi-placeholder").unwrap();
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        assert!(String::from_utf8_lossy(&out.stderr).contains("curvebook-0.1.0-windows-x64.msi"));
-    }
+    seed_single_and_fail(&fx, "non-win-msi", "curvebook-0.1.0-windows-x64.msi", b"msi-placeholder", &["curvebook-0.1.0-windows-x64.msi"])?;
 
     #[cfg(target_os = "macos")]
-    {
-        // Even on macOS, an invalid/unmountable `.dmg` (or when sandbox blocks IOKit diskimage attach) must fail closed.
-        let dir = fx.path.join("bad-dmg");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("curvebook-corrupt.dmg"), b"not-a-valid-udif-dmg").unwrap();
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        assert!(String::from_utf8_lossy(&out.stderr).contains("curvebook-corrupt.dmg"));
-    }
+    seed_single_and_fail(&fx, "bad-dmg", "curvebook-corrupt.dmg", b"not-a-valid-udif-dmg", &["curvebook-corrupt.dmg"])?;
     Ok(())
 }
 

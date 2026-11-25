@@ -14,10 +14,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use curvebook_doc::analysis::{ALL_ANALYSIS_DESCRIPTORS, descriptor_for_kind};
+use curvebook_doc::analysis::ALL_ANALYSIS_DESCRIPTORS;
 use curvebook_doc::{
-    AnalysisKind, AxisScale, DiagnosticPlotKind, ErrorCode, FitMethod, FramePreset, GraphKind, LogitDomain, ParameterScope, STANDARD_INFO_KEYS,
-    SubcolumnMode, TableKind, WeightingScheme,
+    AxisScale, DiagnosticPlotKind, ErrorCode, FitMethod, FramePreset, GraphKind, LogitDomain, ParameterScope, STANDARD_INFO_KEYS, SubcolumnMode,
+    TableKind, WeightingScheme,
 };
 use curvebook_fit::{DataPoint, EquationCategory, format_model_equation_tex, get_builtin_model, list_builtin_equations};
 use curvebook_format::registry::{FormatDescriptor, FormatKind, FormatRegistry};
@@ -42,8 +42,6 @@ pub struct RegistryPageSpec {
     pub title: String,
     pub description: String,
     pub rel_path: String,
-    pub section_title: &'static str,
-    pub section_rel_path: &'static str,
     pub h1: String,
     pub toc_headings: Vec<TocHeading>,
     pub body_html: String,
@@ -101,13 +99,7 @@ pub fn generate_registry_pages(root: &Path, defined_analysis_anchors: &BTreeSet<
     })
 }
 
-/// Canonical slug for any [`AnalysisKind`] matching `@r12-methods-ref`'s `{#analysis-<slug>}` contract.
-#[must_use]
-pub const fn analysis_kind_slug(kind: &AnalysisKind) -> &'static str {
-    descriptor_for_kind(kind).slug
-}
-
-/// All [`AnalysisKind`] metadata tuples `(slug, title, description)` sourced from
+/// All `AnalysisKind` metadata tuples `(slug, title, description)` sourced from
 /// [`ALL_ANALYSIS_DESCRIPTORS`].
 #[must_use]
 pub fn all_analysis_kinds_meta() -> Vec<(&'static str, &'static str, &'static str)> {
@@ -132,6 +124,29 @@ fn kebab_id(raw: &str) -> String {
 fn push_heading(toc: &mut Vec<TocHeading>, out: &mut String, level: u8, id: &str, text: &str) {
     toc.push(TocHeading { level, id: id.to_owned(), text: text.to_owned() });
     let _ = writeln!(out, "<h{level} id=\"{}\" tabindex=\"-1\">{}</h{level}>", escape_html(id), escape_html(text));
+}
+
+fn write_table(out: &mut String, headers: &[&str], rows: impl FnOnce(&mut String)) {
+    out.push_str("<div class=\"table-wrap\"><table>\n<thead><tr>");
+    for h in headers {
+        out.push_str("<th>");
+        out.push_str(h);
+        out.push_str("</th>");
+    }
+    out.push_str("</tr></thead>\n<tbody>\n");
+    rows(out);
+    out.push_str("</tbody>\n</table></div>\n");
+}
+
+fn reg_page(title: &str, description: &str, rel_path: &str, toc_headings: Vec<TocHeading>, body_html: String) -> RegistryPageSpec {
+    RegistryPageSpec {
+        title: title.to_owned(),
+        description: description.to_owned(),
+        rel_path: rel_path.to_owned(),
+        h1: title.to_owned(),
+        toc_headings,
+        body_html,
+    }
 }
 
 fn build_commands_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> RegistryPageSpec {
@@ -197,34 +212,35 @@ fn build_commands_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -
     }
 
     push_heading(&mut toc, &mut body, 2, "ui-commands", "Desktop UI Commands (UI_COMMANDS)");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>ID</th><th>Label</th><th>Shortcut</th><th>Params</th><th>Summary</th></tr></thead>\n<tbody>\n");
-    for ui in UI_COMMANDS {
-        let ui_anchor = format!("ui-cmd-{}", kebab_id(ui.id).replace('_', "-"));
-        expected.ui_commands.push(ui_anchor.clone());
-        az.push(AzEntry { term: ui.id.to_owned(), category: String::from("UI Command"), rel_href: format!("registry/commands.html#{ui_anchor}") });
-        let shortcut = if ui.shortcut.is_empty() { "—" } else { ui.shortcut };
-        let _ = writeln!(
-            body,
-            "<tr id=\"{ui_anchor}\" tabindex=\"-1\"><td><code>{}</code></td><td>{}</td><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
-            escape_html(ui.id),
-            escape_html(ui.label),
-            escape_html(shortcut),
-            escape_html(ui.params_doc),
-            escape_html(ui.summary),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["ID", "Label", "Shortcut", "Params", "Summary"], |body| {
+        for ui in UI_COMMANDS {
+            let ui_anchor = format!("ui-cmd-{}", kebab_id(ui.id).replace('_', "-"));
+            expected.ui_commands.push(ui_anchor.clone());
+            az.push(AzEntry {
+                term: ui.id.to_owned(),
+                category: String::from("UI Command"),
+                rel_href: format!("registry/commands.html#{ui_anchor}"),
+            });
+            let shortcut = if ui.shortcut.is_empty() { "—" } else { ui.shortcut };
+            let _ = writeln!(
+                body,
+                "<tr id=\"{ui_anchor}\" tabindex=\"-1\"><td><code>{}</code></td><td>{}</td><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
+                escape_html(ui.id),
+                escape_html(ui.label),
+                escape_html(shortcut),
+                escape_html(ui.params_doc),
+                escape_html(ui.summary),
+            );
+        }
+    });
 
-    RegistryPageSpec {
-        title: String::from("Engine & UI Command Registry"),
-        description: String::from("Complete registry of CurveBook engine commands, JSON input schemas, effect masks, and UI commands."),
-        rel_path: String::from("registry/commands.html"),
-        section_title: "Automation",
-        section_rel_path: "section-automation.html",
-        h1: String::from("Engine & UI Command Registry"),
-        toc_headings: toc,
-        body_html: body,
-    }
+    reg_page(
+        "Engine & UI Command Registry",
+        "Complete registry of CurveBook engine commands, JSON input schemas, effect masks, and UI commands.",
+        "registry/commands.html",
+        toc,
+        body,
+    )
 }
 
 fn build_mcp_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> RegistryPageSpec {
@@ -276,25 +292,22 @@ fn build_mcp_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> Reg
         }
         sample_resources = list_resources(&sample_doc);
     }
-    let _ = writeln!(
-        body,
-        "<div class=\"table-wrap\"><table>\n<thead><tr><th>URI Scheme</th><th>MIME Type</th><th>Sample Descriptor</th></tr></thead>\n<tbody>"
-    );
-    for res in &sample_resources {
+    write_table(&mut body, &["URI Scheme", "MIME Type", "Sample Descriptor"], |body| {
+        for res in &sample_resources {
+            let _ = writeln!(
+                body,
+                "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{} — {}</td></tr>",
+                escape_html(&res.uri),
+                escape_html(&res.mime_type),
+                escape_html(&res.name),
+                escape_html(&res.description),
+            );
+        }
         let _ = writeln!(
             body,
-            "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{} — {}</td></tr>",
-            escape_html(&res.uri),
-            escape_html(&res.mime_type),
-            escape_html(&res.name),
-            escape_html(&res.description),
+            "<tr><td><code>result://&lt;id&gt;</code></td><td><code>application/json</code></td><td>Serialized computed <code>ResultSheet</code> tabs and diagnostics</td></tr>"
         );
-    }
-    let _ = writeln!(
-        body,
-        "<tr><td><code>result://&lt;id&gt;</code></td><td><code>application/json</code></td><td>Serialized computed <code>ResultSheet</code> tabs and diagnostics</td></tr>"
-    );
-    body.push_str("</tbody>\n</table></div>\n");
+    });
 
     push_heading(&mut toc, &mut body, 2, "mcp-prompts", "Built-in Workflow Prompts");
     let prompts: Vec<PromptDescriptor> = list_prompts();
@@ -313,29 +326,19 @@ fn build_mcp_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> Reg
             }
             body.push_str("  </ul>\n");
         }
-        let req = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "prompts/get",
-            "params": { "name": p.name }
-        });
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "prompts/get", "params": { "name": p.name } });
         let req_str = serde_json::to_string(&req).unwrap_or_else(|_| String::from("{}"));
         let _ = writeln!(body, "  <pre><code class=\"language-json\">{}</code></pre>", escape_html(&req_str));
         let _ = writeln!(body, "</div>");
     }
 
-    RegistryPageSpec {
-        title: String::from("MCP Tools, Toolsets, Resources & Prompts"),
-        description: String::from(
-            "Machine-generated schemas, tool annotations, single-call JSON examples, resources, and prompts for CurveBook MCP.",
-        ),
-        rel_path: String::from("registry/mcp-tools.html"),
-        section_title: "Automation",
-        section_rel_path: "section-automation.html",
-        h1: String::from("MCP Tools, Toolsets, Resources & Prompts"),
-        toc_headings: toc,
-        body_html: body,
-    }
+    reg_page(
+        "MCP Tools, Toolsets, Resources & Prompts",
+        "Machine-generated schemas, tool annotations, single-call JSON examples, resources, and prompts for CurveBook MCP.",
+        "registry/mcp-tools.html",
+        toc,
+        body,
+    )
 }
 
 fn render_mcp_tool_card(tool: &ToolDefinition, az_category: &str, az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage, body: &mut String) {
@@ -459,21 +462,18 @@ fn build_cli_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> Reg
         writeln!(body, "<p>See <a href=\"../automation/cli.html\">CLI Reference</a> for direct command flag mapping rules and error envelopes.</p>");
 
     push_heading(&mut toc, &mut body, 2, "cli-global-flags", "Global Options");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Flags</th><th>Default</th><th>Description</th></tr></thead>\n<tbody>\n");
-    for opt in cli_catalog::CLI_GLOBAL_FLAGS {
-        let label = match opt.short {
-            Some(short) => format!("{short}, {}", opt.long),
-            None => opt.long.to_owned(),
-        };
-        let _ = writeln!(
-            body,
-            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
-            escape_html(&label),
-            escape_inline_backticks(opt.default_value),
-            escape_inline_backticks(opt.description),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Flags", "Default", "Description"], |body| {
+        for opt in cli_catalog::CLI_GLOBAL_FLAGS {
+            let label = opt.short.map_or_else(|| opt.long.to_owned(), |s| format!("{s}, {}", opt.long));
+            let _ = writeln!(
+                body,
+                "<tr><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+                escape_html(&label),
+                escape_inline_backticks(opt.default_value),
+                escape_inline_backticks(opt.description),
+            );
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "cli-subcommands", "Subcommands");
     for cmd in cli_catalog::CLI_COMMANDS {
@@ -489,67 +489,59 @@ fn build_cli_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> Reg
         let _ = writeln!(body, "  <p>{}</p>", escape_inline_backticks(cmd.summary));
         let _ = writeln!(body, "  <pre><code class=\"language-sh\">curvebook-cli {}</code></pre>", escape_html(cmd.usage_line));
         if !cmd.positionals.is_empty() {
-            body.push_str(
-                "<div class=\"table-wrap\"><table>\n<thead><tr><th>Argument</th><th>Required</th><th>Description</th></tr></thead>\n<tbody>\n",
-            );
-            for pos in cmd.positionals {
-                let req = if pos.required { "required" } else { "optional" };
-                let _ = writeln!(
-                    body,
-                    "<tr><td><code>{}</code></td><td>{req}</td><td>{}</td></tr>",
-                    escape_html(pos.syntax),
-                    escape_inline_backticks(pos.description),
-                );
-            }
-            body.push_str("</tbody>\n</table></div>\n");
+            write_table(&mut body, &["Argument", "Required", "Description"], |body| {
+                for pos in cmd.positionals {
+                    let req = if pos.required { "required" } else { "optional" };
+                    let _ = writeln!(
+                        body,
+                        "<tr><td><code>{}</code></td><td>{req}</td><td>{}</td></tr>",
+                        escape_html(pos.syntax),
+                        escape_inline_backticks(pos.description),
+                    );
+                }
+            });
         }
         if !cmd.flags.is_empty() {
-            body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>\n<tbody>\n");
-            for flag in cmd.flags {
-                let mut label = match flag.short {
-                    Some(short) => format!("{short}, {}", flag.long),
-                    None => flag.long.to_owned(),
-                };
-                if let Some(ph) = flag.value_placeholder {
-                    label.push(' ');
-                    label.push_str(ph);
+            write_table(&mut body, &["Flag", "Default", "Description"], |body| {
+                for flag in cmd.flags {
+                    let mut label = flag.short.map_or_else(|| flag.long.to_owned(), |s| format!("{s}, {}", flag.long));
+                    if let Some(ph) = flag.value_placeholder {
+                        label.push(' ');
+                        label.push_str(ph);
+                    }
+                    let _ = writeln!(
+                        body,
+                        "<tr><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+                        escape_html(&label),
+                        escape_inline_backticks(flag.default_value),
+                        escape_inline_backticks(flag.description),
+                    );
                 }
-                let _ = writeln!(
-                    body,
-                    "<tr><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
-                    escape_html(&label),
-                    escape_inline_backticks(flag.default_value),
-                    escape_inline_backticks(flag.description),
-                );
-            }
-            body.push_str("</tbody>\n</table></div>\n");
+            });
         }
         let _ = writeln!(body, "</div>");
     }
 
     push_heading(&mut toc, &mut body, 2, "cli-exit-codes", "Exit Codes");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Code</th><th>Constant</th><th>Condition</th></tr></thead>\n<tbody>\n");
-    for ec in cli_catalog::CLI_EXIT_CODES {
-        let _ = writeln!(
-            body,
-            "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
-            ec.code,
-            escape_html(ec.name),
-            escape_inline_backticks(ec.meaning),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Code", "Constant", "Condition"], |body| {
+        for ec in cli_catalog::CLI_EXIT_CODES {
+            let _ = writeln!(
+                body,
+                "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
+                ec.code,
+                escape_html(ec.name),
+                escape_inline_backticks(ec.meaning),
+            );
+        }
+    });
 
-    RegistryPageSpec {
-        title: String::from("CLI Subcommands & Flags Registry"),
-        description: String::from("Generated subcommand usage, flags, defaults, and exit codes for curvebook-cli."),
-        rel_path: String::from("registry/cli.html"),
-        section_title: "Automation",
-        section_rel_path: "section-automation.html",
-        h1: String::from("CLI Subcommands & Flags Registry"),
-        toc_headings: toc,
-        body_html: body,
-    }
+    reg_page(
+        "CLI Subcommands & Flags Registry",
+        "Generated subcommand usage, flags, defaults, and exit codes for curvebook-cli.",
+        "registry/cli.html",
+        toc,
+        body,
+    )
 }
 
 fn equation_category_label(cat: EquationCategory) -> (&'static str, &'static str) {
@@ -704,11 +696,11 @@ fn build_equations_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) 
             "Two-stage Cauchy robust fit + Benjamini–Hochberg FDR outlier masking followed by OLS/weighted refit.",
         ),
     ];
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>FitMethod</th><th>Key</th><th>Description</th></tr></thead>\n<tbody>\n");
-    for (_, key, desc) in methods {
-        let _ = writeln!(body, "<tr><td><code>{key}</code></td><td><code>FitMethod::{key}</code></td><td>{}</td></tr>", escape_html(desc));
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["FitMethod", "Key", "Description"], |body| {
+        for (_, key, desc) in methods {
+            let _ = writeln!(body, "<tr><td><code>{key}</code></td><td><code>FitMethod::{key}</code></td><td>{}</td></tr>", escape_html(desc));
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "weighting-schemes", "Weighting Schemes & Parameter Scopes");
     let weights = [
@@ -720,11 +712,11 @@ fn build_equations_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) 
         (WeightingScheme::InverseX2, "inverse_x2", "1 / X^2 inverse squared predictor weighting."),
         (WeightingScheme::ObservedSd, "observed_sd", "Empirical replicate variance weighting 1 / SD_i^2."),
     ];
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>WeightingScheme</th><th>Formula / Rule</th></tr></thead>\n<tbody>\n");
-    for (_, key, desc) in weights {
-        let _ = writeln!(body, "<tr><td><code>{key}</code></td><td>{}</td></tr>", escape_html(desc));
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["WeightingScheme", "Formula / Rule"], |body| {
+        for (_, key, desc) in weights {
+            let _ = writeln!(body, "<tr><td><code>{key}</code></td><td>{}</td></tr>", escape_html(desc));
+        }
+    });
 
     let scopes = [
         (ParameterScope::Local, "local", "Estimate independently per dataset."),
@@ -741,22 +733,19 @@ fn build_equations_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) 
         (ParameterScope::PerDatasetConstant(Vec::new()), "per_dataset_constant", "Fix per-dataset constants while leaving unlisted datasets free."),
         (ParameterScope::ColumnTitleConstant, "column_title_constant", "Fix per dataset from the numeric token in each column header."),
     ];
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>ParameterScope</th><th>Behavior</th></tr></thead>\n<tbody>\n");
-    for (_, key, desc) in scopes {
-        let _ = writeln!(body, "<tr><td><code>{key}</code></td><td>{}</td></tr>", escape_html(desc));
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["ParameterScope", "Behavior"], |body| {
+        for (_, key, desc) in scopes {
+            let _ = writeln!(body, "<tr><td><code>{key}</code></td><td>{}</td></tr>", escape_html(desc));
+        }
+    });
 
-    RegistryPageSpec {
-        title: String::from("Parametric Equations & Fitting Registry"),
-        description: String::from("Complete built-in curve fitting equations, formulas, parameter bounds, fitting methods, and weighting schemes."),
-        rel_path: String::from("registry/equations.html"),
-        section_title: "Curve fitting",
-        section_rel_path: "section-fitting.html",
-        h1: String::from("Parametric Equations & Fitting Registry"),
-        toc_headings: toc,
-        body_html: body,
-    }
+    reg_page(
+        "Parametric Equations & Fitting Registry",
+        "Complete built-in curve fitting equations, formulas, parameter bounds, fitting methods, and weighting schemes.",
+        "registry/equations.html",
+        toc,
+        body,
+    )
 }
 
 fn table_kind_slug(kind: TableKind) -> &'static str {
@@ -798,84 +787,79 @@ fn build_tables_page(defined_analysis_anchors: &BTreeSet<String>, az: &mut Vec<A
         (SubcolumnMode::UpperLowerLimits, "upper_lower_limits", "Pre-summarized Mean, LowerLimit, UpperLimit"),
         (SubcolumnMode::MedianIqr, "median_iqr", "Pre-summarized Median, Q1, Q3"),
     ];
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Kind ID</th><th>Display Label</th><th>Supported Subcolumn Modes</th></tr></thead>\n<tbody>\n");
-    for kind in TableKind::ALL {
-        let slug = table_kind_slug(kind);
-        let anchor = format!("table-{slug}");
-        expected.table_kinds.push(anchor.clone());
-        az.push(AzEntry {
-            term: format!("{} table", kind.label()),
-            category: String::from("Table Archetype"),
-            rel_href: format!("registry/tables.html#{anchor}"),
-        });
-        let allowed: Vec<&str> = submodes.iter().filter(|(m, _, _)| kind.allows_subcolumn_mode(*m)).map(|(_, id, _)| *id).collect();
-        let _ = writeln!(
-            body,
-            "<tr id=\"{anchor}\" tabindex=\"-1\"><td><code>{slug}</code></td><td>{}</td><td>{}</td></tr>",
-            escape_html(kind.label()),
-            escape_html(&allowed.join(", ")),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Kind ID", "Display Label", "Supported Subcolumn Modes"], |body| {
+        for kind in TableKind::ALL {
+            let slug = table_kind_slug(kind);
+            let anchor = format!("table-{slug}");
+            expected.table_kinds.push(anchor.clone());
+            az.push(AzEntry {
+                term: format!("{} table", kind.label()),
+                category: String::from("Table Archetype"),
+                rel_href: format!("registry/tables.html#{anchor}"),
+            });
+            let allowed: Vec<&str> = submodes.iter().filter(|(m, _, _)| kind.allows_subcolumn_mode(*m)).map(|(_, id, _)| *id).collect();
+            let _ = writeln!(
+                body,
+                "<tr id=\"{anchor}\" tabindex=\"-1\"><td><code>{slug}</code></td><td>{}</td><td>{}</td></tr>",
+                escape_html(kind.label()),
+                escape_html(&allowed.join(", ")),
+            );
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "subcolumn-modes", "Subcolumn Modes (SubcolumnMode)");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Mode</th><th>Subcolumns</th><th>Pre-summarized</th><th>Parametric Moments</th><th>Headers</th></tr></thead>\n<tbody>\n");
-    for (mode, id, _desc) in submodes {
-        let _ = writeln!(
-            body,
-            "<tr id=\"subcolumn-{id}\" tabindex=\"-1\"><td><code>{id}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-            mode.subcolumn_count(),
-            mode.is_pre_summarized(),
-            mode.supports_parametric_moments(),
-            escape_html(&mode.subcolumn_labels().join(", ")),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Mode", "Subcolumns", "Pre-summarized", "Parametric Moments", "Headers"], |body| {
+        for (mode, id, _desc) in submodes {
+            let _ = writeln!(
+                body,
+                "<tr id=\"subcolumn-{id}\" tabindex=\"-1\"><td><code>{id}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                mode.subcolumn_count(),
+                mode.is_pre_summarized(),
+                mode.supports_parametric_moments(),
+                escape_html(&mode.subcolumn_labels().join(", ")),
+            );
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "analysis-kinds", "Analysis Kinds (AnalysisKind)");
-    body.push_str(
-        "<div class=\"table-wrap\"><table>\n<thead><tr><th>Analysis Kind</th><th>Reference Link</th><th>Scope Summary</th></tr></thead>\n<tbody>\n",
-    );
-    for (slug, title, summary) in analysis_meta {
-        let reg_anchor = format!("analysis-kind-{slug}");
-        let doc_anchor = format!("analysis-{slug}");
-        let has_methods_anchor = defined_analysis_anchors.contains(&doc_anchor);
-        let az_href = if has_methods_anchor { format!("analyses.html#{doc_anchor}") } else { format!("registry/tables.html#{reg_anchor}") };
-        let cell_href = if has_methods_anchor { format!("../analyses.html#{doc_anchor}") } else { format!("#{reg_anchor}") };
-        expected.analysis_kinds.push((*slug).to_owned());
-        az.push(AzEntry { term: (*title).to_owned(), category: String::from("Analysis Kind"), rel_href: az_href });
-        let _ = writeln!(
-            body,
-            "<tr id=\"{reg_anchor}\" tabindex=\"-1\"><td><code>{slug}</code></td><td><a href=\"{cell_href}\">{}</a></td><td>{}</td></tr>",
-            escape_html(title),
-            escape_html(summary),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Analysis Kind", "Reference Link", "Scope Summary"], |body| {
+        for (slug, title, summary) in analysis_meta {
+            let reg_anchor = format!("analysis-kind-{slug}");
+            let doc_anchor = format!("analysis-{slug}");
+            let has_methods_anchor = defined_analysis_anchors.contains(&doc_anchor);
+            let az_href = if has_methods_anchor { format!("analyses.html#{doc_anchor}") } else { format!("registry/tables.html#{reg_anchor}") };
+            let cell_href = if has_methods_anchor { format!("../analyses.html#{doc_anchor}") } else { format!("#{reg_anchor}") };
+            expected.analysis_kinds.push((*slug).to_owned());
+            az.push(AzEntry { term: (*title).to_owned(), category: String::from("Analysis Kind"), rel_href: az_href });
+            let _ = writeln!(
+                body,
+                "<tr id=\"{reg_anchor}\" tabindex=\"-1\"><td><code>{slug}</code></td><td><a href=\"{cell_href}\">{}</a></td><td>{}</td></tr>",
+                escape_html(title),
+                escape_html(summary),
+            );
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "analysis-catalog", "Interactive Analysis Catalog Entries");
-    body.push_str(
-        "<div class=\"table-wrap\"><table>\n<thead><tr><th>Catalog ID</th><th>Label</th><th>Category</th><th>Summary</th></tr></thead>\n<tbody>\n",
-    );
-    for item in ANALYSIS_CATALOG {
-        let cat_label = item.category.label();
-        let _ = writeln!(
-            body,
-            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
-            escape_html(item.id),
-            escape_html(item.label),
-            escape_html(cat_label),
-            escape_html(item.summary),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Catalog ID", "Label", "Category", "Summary"], |body| {
+        for item in ANALYSIS_CATALOG {
+            let _ = writeln!(
+                body,
+                "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                escape_html(item.id),
+                escape_html(item.label),
+                escape_html(item.category.label()),
+                escape_html(item.summary),
+            );
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "power-families", "Statistical Power Test Families");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Family</th><th>Default Standardized Effect Size</th></tr></thead>\n<tbody>\n");
-    for fam in PowerTestFamily::ALL {
-        let _ = writeln!(body, "<tr><td>{}</td><td><code>{}</code></td></tr>", escape_html(fam.label()), escape_html(fam.default_effect_label()),);
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Family", "Default Standardized Effect Size"], |body| {
+        for fam in PowerTestFamily::ALL {
+            let _ = writeln!(body, "<tr><td>{}</td><td><code>{}</code></td></tr>", escape_html(fam.label()), escape_html(fam.default_effect_label()));
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "info-keys", "Standard Info Sheet Keys");
     body.push_str("<ul>\n");
@@ -885,33 +869,30 @@ fn build_tables_page(defined_analysis_anchors: &BTreeSet<String>, az: &mut Vec<A
     body.push_str("</ul>\n");
 
     push_heading(&mut toc, &mut body, 2, "error-codes", "Engine Error Codes (ErrorCode)");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Code</th><th>Category</th></tr></thead>\n<tbody>\n");
-    for code in ErrorCode::ALL {
-        let code_id = format!("error-{}", code.as_str());
-        az.push(AzEntry {
-            term: code.as_str().to_owned(),
-            category: format!("ErrorCode ({})", code.category().as_str()),
-            rel_href: format!("registry/tables.html#{code_id}"),
-        });
-        let _ = writeln!(
-            body,
-            "<tr id=\"{code_id}\" tabindex=\"-1\"><td><code>{}</code></td><td><code>{}</code></td></tr>",
-            escape_html(code.as_str()),
-            escape_html(code.category().as_str()),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Code", "Category"], |body| {
+        for code in ErrorCode::ALL {
+            let code_id = format!("error-{}", code.as_str());
+            az.push(AzEntry {
+                term: code.as_str().to_owned(),
+                category: format!("ErrorCode ({})", code.category().as_str()),
+                rel_href: format!("registry/tables.html#{code_id}"),
+            });
+            let _ = writeln!(
+                body,
+                "<tr id=\"{code_id}\" tabindex=\"-1\"><td><code>{}</code></td><td><code>{}</code></td></tr>",
+                escape_html(code.as_str()),
+                escape_html(code.category().as_str()),
+            );
+        }
+    });
 
-    RegistryPageSpec {
-        title: String::from("Tables, Analyses & Error Codes Registry"),
-        description: String::from("Registry of CurveBook table archetypes, subcolumn modes, analysis kinds, info keys, and error codes."),
-        rel_path: String::from("registry/tables.html"),
-        section_title: "Data tables & formulas",
-        section_rel_path: "section-tables.html",
-        h1: String::from("Tables, Analyses & Error Codes Registry"),
-        toc_headings: toc,
-        body_html: body,
-    }
+    reg_page(
+        "Tables, Analyses & Error Codes Registry",
+        "Registry of CurveBook table archetypes, subcolumn modes, analysis kinds, info keys, and error codes.",
+        "registry/tables.html",
+        toc,
+        body,
+    )
 }
 
 fn graph_kind_entries() -> Vec<(&'static str, &'static str, &'static str)> {
@@ -1014,41 +995,41 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
     );
 
     push_heading(&mut toc, &mut body, 2, "graph-kinds", "Graph Kinds & Diagnostic Plots");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Slug</th><th>Graph Kind</th><th>Description</th></tr></thead>\n<tbody>\n");
-    for (slug, label, desc) in kinds {
-        let anchor = format!("graph-{slug}");
-        expected.graph_kinds.push(anchor.clone());
-        az.push(AzEntry { term: (*label).to_owned(), category: String::from("Graph Kind"), rel_href: format!("registry/graphs.html#{anchor}") });
-        let _ = writeln!(
-            body,
-            "<tr id=\"{anchor}\" tabindex=\"-1\"><td><code>{slug}</code></td><td>{}</td><td>{}</td></tr>",
-            escape_html(label),
-            escape_html(desc),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Slug", "Graph Kind", "Description"], |body| {
+        for (slug, label, desc) in kinds {
+            let anchor = format!("graph-{slug}");
+            expected.graph_kinds.push(anchor.clone());
+            az.push(AzEntry { term: (*label).to_owned(), category: String::from("Graph Kind"), rel_href: format!("registry/graphs.html#{anchor}") });
+            let _ = writeln!(
+                body,
+                "<tr id=\"{anchor}\" tabindex=\"-1\"><td><code>{slug}</code></td><td>{}</td><td>{}</td></tr>",
+                escape_html(label),
+                escape_html(desc),
+            );
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "graph-type-options", "Graph Type Chooser Options (GRAPH_TYPE_OPTIONS)");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Option ID</th><th>Label</th><th>Compatible Tables</th><th>Summary</th></tr></thead>\n<tbody>\n");
-    for opt in GRAPH_TYPE_OPTIONS {
-        let anchor = format!("graph-option-{}", kebab_id(opt.id));
-        expected.graph_options.push(anchor.clone());
-        az.push(AzEntry {
-            term: opt.label.to_owned(),
-            category: String::from("Graph Style Option"),
-            rel_href: format!("registry/graphs.html#{anchor}"),
-        });
-        let tables: Vec<&str> = opt.compatible_tables.iter().map(|t| t.label()).collect();
-        let _ = writeln!(
-            body,
-            "<tr id=\"{anchor}\" tabindex=\"-1\"><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
-            escape_html(opt.id),
-            escape_html(opt.label),
-            escape_html(&tables.join(", ")),
-            escape_html(opt.subtitle),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Option ID", "Label", "Compatible Tables", "Summary"], |body| {
+        for opt in GRAPH_TYPE_OPTIONS {
+            let anchor = format!("graph-option-{}", kebab_id(opt.id));
+            expected.graph_options.push(anchor.clone());
+            az.push(AzEntry {
+                term: opt.label.to_owned(),
+                category: String::from("Graph Style Option"),
+                rel_href: format!("registry/graphs.html#{anchor}"),
+            });
+            let tables: Vec<&str> = opt.compatible_tables.iter().map(|t| t.label()).collect();
+            let _ = writeln!(
+                body,
+                "<tr id=\"{anchor}\" tabindex=\"-1\"><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                escape_html(opt.id),
+                escape_html(opt.label),
+                escape_html(&tables.join(", ")),
+                escape_html(opt.subtitle),
+            );
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "frame-presets", "Axis Frame Presets (FramePreset)");
     let frames = [
@@ -1058,11 +1039,11 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
         (FramePreset::DualYSecondaryRight, "dual-y-secondary-right", "Left primary Y axis paired with an independent right Y2 axis."),
         (FramePreset::OriginCrossing, "origin-crossing", "Axes intersecting directly at data coordinate (0, 0)."),
     ];
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Preset</th><th>Geometry</th></tr></thead>\n<tbody>\n");
-    for (_, id, desc) in frames {
-        let _ = writeln!(body, "<tr id=\"frame-{id}\" tabindex=\"-1\"><td><code>{id}</code></td><td>{}</td></tr>", escape_html(desc));
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Preset", "Geometry"], |body| {
+        for (_, id, desc) in frames {
+            let _ = writeln!(body, "<tr id=\"frame-{id}\" tabindex=\"-1\"><td><code>{id}</code></td><td>{}</td></tr>", escape_html(desc));
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "axis-scales", "Axis Scale Bijections (AxisScale)");
     let scales = [
@@ -1075,38 +1056,38 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
         (AxisScale::Probit, "probit", "Normal probability quantile transform over u in (0, 100)."),
         (AxisScale::Reciprocal, "reciprocal", "Reciprocal 1 / u over nonzero finite u."),
     ];
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Scale</th><th>Domain &amp; Transform</th></tr></thead>\n<tbody>\n");
-    for (_, id, desc) in scales {
-        let _ = writeln!(body, "<tr id=\"scale-{id}\" tabindex=\"-1\"><td><code>{id}</code></td><td>{}</td></tr>", escape_html(desc));
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Scale", "Domain &amp; Transform"], |body| {
+        for (_, id, desc) in scales {
+            let _ = writeln!(body, "<tr id=\"scale-{id}\" tabindex=\"-1\"><td><code>{id}</code></td><td>{}</td></tr>", escape_html(desc));
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "palettes", "Qualitative Colour Palettes (PaletteId)");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Palette</th><th>Swatches (Hex)</th></tr></thead>\n<tbody>\n");
-    for pal in PaletteId::ALL {
-        let hexes: Vec<String> = pal.swatches().iter().map(|c| format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)).collect();
-        let id = format!("palette-{}", kebab_id(pal.label()));
-        let _ = writeln!(
-            body,
-            "<tr id=\"{id}\" tabindex=\"-1\"><td>{}</td><td><code>{}</code></td></tr>",
-            escape_html(pal.label()),
-            escape_html(&hexes.join(" ")),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Palette", "Swatches (Hex)"], |body| {
+        for pal in PaletteId::ALL {
+            let hexes: Vec<String> = pal.swatches().iter().map(|c| format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)).collect();
+            let id = format!("palette-{}", kebab_id(pal.label()));
+            let _ = writeln!(
+                body,
+                "<tr id=\"{id}\" tabindex=\"-1\"><td>{}</td><td><code>{}</code></td></tr>",
+                escape_html(pal.label()),
+                escape_html(&hexes.join(" ")),
+            );
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "colormaps", "Continuous Perceptual Colormaps (ColormapId)");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Colormap</th><th>Control Stops</th></tr></thead>\n<tbody>\n");
-    for cm in ColormapId::ALL {
-        let id = format!("colormap-{}", kebab_id(cm.label()));
-        let _ = writeln!(
-            body,
-            "<tr id=\"{id}\" tabindex=\"-1\"><td>{}</td><td>{} uniform Oklab stops</td></tr>",
-            escape_html(cm.label()),
-            cm.stops().len(),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Colormap", "Control Stops"], |body| {
+        for cm in ColormapId::ALL {
+            let id = format!("colormap-{}", kebab_id(cm.label()));
+            let _ = writeln!(
+                body,
+                "<tr id=\"{id}\" tabindex=\"-1\"><td>{}</td><td>{} uniform Oklab stops</td></tr>",
+                escape_html(cm.label()),
+                cm.stops().len(),
+            );
+        }
+    });
 
     push_heading(&mut toc, &mut body, 2, "graph-layout-features", "Graphing, Annotation & Page Layout Capabilities");
     body.push_str(
@@ -1147,16 +1128,13 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
     }
     body.push_str("</ul>\n");
 
-    RegistryPageSpec {
-        title: String::from("Graphs, Scales & Palettes Registry"),
-        description: String::from("Registry of CurveBook graph kinds, style presets, axis scales, qualitative palettes, and colormaps."),
-        rel_path: String::from("registry/graphs.html"),
-        section_title: "Graphs & Page Layouts",
-        section_rel_path: "section-graphs.html",
-        h1: String::from("Graphs, Scales & Palettes Registry"),
-        toc_headings: toc,
-        body_html: body,
-    }
+    reg_page(
+        "Graphs, Scales & Palettes Registry",
+        "Registry of CurveBook graph kinds, style presets, axis scales, qualitative palettes, and colormaps.",
+        "registry/graphs.html",
+        toc,
+        body,
+    )
 }
 
 fn format_kind_label(kind: FormatKind) -> &'static str {
@@ -1204,24 +1182,28 @@ fn build_formats_page(root: &Path, az: &mut Vec<AzEntry>, expected: &mut Expecte
     );
 
     push_heading(&mut toc, &mut body, 2, "formats", "Registered Import & Export Formats");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Format ID</th><th>Label</th><th>Extensions</th><th>Category</th><th>Import</th><th>Export</th></tr></thead>\n<tbody>\n");
-    for desc in &merged {
-        let anchor = format!("format-{}", kebab_id(desc.id));
-        expected.formats.push(anchor.clone());
-        az.push(AzEntry { term: desc.label.to_owned(), category: String::from("File Format"), rel_href: format!("registry/formats.html#{anchor}") });
-        let exts: Vec<String> = desc.extensions.iter().map(|e| format!(".{e}")).collect();
-        let can_in = if import_ids.contains(desc.id) { "yes" } else { "no" };
-        let can_out = if export_ids.contains(desc.id) { "yes" } else { "no" };
-        let _ = writeln!(
-            body,
-            "<tr id=\"{anchor}\" tabindex=\"-1\"><td><code>{}</code></td><td>{}</td><td><code>{}</code></td><td>{}</td><td>{can_in}</td><td>{can_out}</td></tr>",
-            escape_html(desc.id),
-            escape_html(desc.label),
-            escape_html(&exts.join(", ")),
-            escape_html(format_kind_label(desc.kind)),
-        );
-    }
-    body.push_str("</tbody>\n</table></div>\n");
+    write_table(&mut body, &["Format ID", "Label", "Extensions", "Category", "Import", "Export"], |body| {
+        for desc in &merged {
+            let anchor = format!("format-{}", kebab_id(desc.id));
+            expected.formats.push(anchor.clone());
+            az.push(AzEntry {
+                term: desc.label.to_owned(),
+                category: String::from("File Format"),
+                rel_href: format!("registry/formats.html#{anchor}"),
+            });
+            let exts: Vec<String> = desc.extensions.iter().map(|e| format!(".{e}")).collect();
+            let can_in = if import_ids.contains(desc.id) { "yes" } else { "no" };
+            let can_out = if export_ids.contains(desc.id) { "yes" } else { "no" };
+            let _ = writeln!(
+                body,
+                "<tr id=\"{anchor}\" tabindex=\"-1\"><td><code>{}</code></td><td>{}</td><td><code>{}</code></td><td>{}</td><td>{can_in}</td><td>{can_out}</td></tr>",
+                escape_html(desc.id),
+                escape_html(desc.label),
+                escape_html(&exts.join(", ")),
+                escape_html(format_kind_label(desc.kind)),
+            );
+        }
+    });
 
     let schema_files = [
         ("preferences.schema.json", "schema-preferences", "Preferences File Schema", Some("pref-")),
@@ -1241,28 +1223,27 @@ fn build_formats_page(root: &Path, az: &mut Vec<AzEntry>, expected: &mut Expecte
         }
 
         if let Some(props) = val.get("properties").and_then(serde_json::Value::as_object) {
-            body.push_str(
-                "<div class=\"table-wrap\"><table>\n<thead><tr><th>Property Key</th><th>Schema Type / Details</th></tr></thead>\n<tbody>\n",
-            );
-            for (key, prop_val) in props {
-                let row_id = if let Some(prefix) = key_prefix {
-                    let pid = format!("{prefix}{}", github_slug(key));
-                    if file_name == "preferences.schema.json" {
-                        expected.preference_keys.push(pid.clone());
-                        az.push(AzEntry {
-                            term: format!("preference: {key}"),
-                            category: String::from("Setting Key"),
-                            rel_href: format!("registry/formats.html#{pid}"),
-                        });
-                    }
-                    format!(" id=\"{}\" tabindex=\"-1\"", escape_html(&pid))
-                } else {
-                    String::new()
-                };
-                let compact = serde_json::to_string(prop_val).unwrap_or_else(|_| String::from("{}"));
-                let _ = writeln!(body, "<tr{row_id}><td><code>{}</code></td><td><code>{}</code></td></tr>", escape_html(key), escape_html(&compact));
-            }
-            body.push_str("</tbody>\n</table></div>\n");
+            write_table(&mut body, &["Property Key", "Schema Type / Details"], |body| {
+                for (key, prop_val) in props {
+                    let row_id = if let Some(prefix) = key_prefix {
+                        let pid = format!("{prefix}{}", github_slug(key));
+                        if file_name == "preferences.schema.json" {
+                            expected.preference_keys.push(pid.clone());
+                            az.push(AzEntry {
+                                term: format!("preference: {key}"),
+                                category: String::from("Setting Key"),
+                                rel_href: format!("registry/formats.html#{pid}"),
+                            });
+                        }
+                        format!(" id=\"{}\" tabindex=\"-1\"", escape_html(&pid))
+                    } else {
+                        String::new()
+                    };
+                    let compact = serde_json::to_string(prop_val).unwrap_or_else(|_| String::from("{}"));
+                    let _ =
+                        writeln!(body, "<tr{row_id}><td><code>{}</code></td><td><code>{}</code></td></tr>", escape_html(key), escape_html(&compact));
+                }
+            });
         }
         let pretty = serde_json::to_string_pretty(&val).unwrap_or(raw);
         let _ = writeln!(body, "<pre><code class=\"language-json\">{}</code></pre>", escape_html(&pretty));
@@ -1283,18 +1264,13 @@ fn build_formats_page(root: &Path, az: &mut Vec<AzEntry>, expected: &mut Expecte
     }
     body.push_str("</p>\n");
 
-    Ok(RegistryPageSpec {
-        title: String::from("Formats, Schemas & Locales Registry"),
-        description: String::from(
-            "Registered import/export file formats, JSON Schemas (preferences, batch-v1, document, archive, journal), and supported locales.",
-        ),
-        rel_path: String::from("registry/formats.html"),
-        section_title: "Files, import & export",
-        section_rel_path: "section-files.html",
-        h1: String::from("Formats, Schemas & Locales Registry"),
-        toc_headings: toc,
-        body_html: body,
-    })
+    Ok(reg_page(
+        "Formats, Schemas & Locales Registry",
+        "Registered import/export file formats, JSON Schemas (preferences, batch-v1, document, archive, journal), and supported locales.",
+        "registry/formats.html",
+        toc,
+        body,
+    ))
 }
 
 #[cfg(test)]

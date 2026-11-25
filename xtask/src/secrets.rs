@@ -5,6 +5,8 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::scan_util::{format_error_list, lower_ext};
+
 const PEM_BEGIN_PREFIX: &str = concat!("-----", "BEGIN ");
 const PEM_PRIVATE_KEY_SUFFIX: &str = concat!("PRIVATE ", "KEY-----");
 
@@ -139,8 +141,7 @@ fn run_history(root: &Path) -> Result<(), String> {
 }
 
 fn format_err(hits: &[SecretHit]) -> Result<(), String> {
-    let lines: Vec<String> = hits.iter().map(ToString::to_string).collect();
-    Err(format!("{} potential secret or local home-path exposure(s) found:\n  {}", hits.len(), lines.join("\n  ")))
+    Err(format_error_list("potential secret or local home-path exposure(s) found", hits))
 }
 
 /// Scan `files` relative to `root`, decoding UTF-8/UTF-16 and skipping true binary blobs.
@@ -165,54 +166,55 @@ pub fn scan_repo(root: &Path, files: &[String]) -> Vec<SecretHit> {
     hits
 }
 
+const BINARY_EXTS: &[&str] = &[
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "webp",
+    "bmp",
+    "ico",
+    "icns",
+    "cur",
+    "pdf",
+    "zip",
+    "gz",
+    "tgz",
+    "zst",
+    "xz",
+    "tar",
+    "ttf",
+    "otf",
+    "woff",
+    "woff2",
+    "eot",
+    "wasm",
+    "exe",
+    "dll",
+    "so",
+    "dylib",
+    "a",
+    "lib",
+    "rlib",
+    "rmeta",
+    "pdb",
+    "sqlite",
+    "db",
+    "bin",
+    "wav",
+    "mp3",
+    "mp4",
+    "ogg",
+    "flac",
+    "curvebook",
+    "cbtemplate",
+    "pzfx",
+    "pzf",
+];
+
 fn is_likely_binary_file(path: &str, bytes: &[u8]) -> bool {
-    let ext = Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-    if matches!(
-        ext.as_str(),
-        "png"
-            | "jpg"
-            | "jpeg"
-            | "gif"
-            | "webp"
-            | "bmp"
-            | "ico"
-            | "icns"
-            | "cur"
-            | "pdf"
-            | "zip"
-            | "gz"
-            | "tgz"
-            | "zst"
-            | "xz"
-            | "tar"
-            | "ttf"
-            | "otf"
-            | "woff"
-            | "woff2"
-            | "eot"
-            | "wasm"
-            | "exe"
-            | "dll"
-            | "so"
-            | "dylib"
-            | "a"
-            | "lib"
-            | "rlib"
-            | "rmeta"
-            | "pdb"
-            | "sqlite"
-            | "db"
-            | "bin"
-            | "wav"
-            | "mp3"
-            | "mp4"
-            | "ogg"
-            | "flac"
-            | "curvebook"
-            | "cbtemplate"
-            | "pzfx"
-            | "pzf"
-    ) {
+    let ext = lower_ext(path);
+    if BINARY_EXTS.contains(&ext.as_str()) {
         return true;
     }
     [
@@ -360,42 +362,6 @@ fn unescape_git_quoted_path(escaped: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
             match bytes[i + 1] {
-                b'a' => {
-                    out.push(0x07);
-                    i += 2;
-                }
-                b'b' => {
-                    out.push(0x08);
-                    i += 2;
-                }
-                b't' => {
-                    out.push(b'\t');
-                    i += 2;
-                }
-                b'n' => {
-                    out.push(b'\n');
-                    i += 2;
-                }
-                b'v' => {
-                    out.push(0x0b);
-                    i += 2;
-                }
-                b'f' => {
-                    out.push(0x0c);
-                    i += 2;
-                }
-                b'r' => {
-                    out.push(b'\r');
-                    i += 2;
-                }
-                b'"' => {
-                    out.push(b'"');
-                    i += 2;
-                }
-                b'\\' => {
-                    out.push(b'\\');
-                    i += 2;
-                }
                 b'0'..=b'7' if i + 3 < bytes.len() && bytes[i + 2].is_ascii_digit() && bytes[i + 3].is_ascii_digit() => {
                     if let Ok(oct) = std::str::from_utf8(&bytes[i + 1..i + 4])
                         && let Ok(val) = u8::from_str_radix(oct, 8)
@@ -407,8 +373,17 @@ fn unescape_git_quoted_path(escaped: &str) -> String {
                     out.push(bytes[i]);
                     i += 1;
                 }
-                other => {
-                    out.push(other);
+                esc => {
+                    out.push(match esc {
+                        b'a' => 0x07,
+                        b'b' => 0x08,
+                        b't' => b'\t',
+                        b'n' => b'\n',
+                        b'v' => 0x0b,
+                        b'f' => 0x0c,
+                        b'r' => b'\r',
+                        other => other,
+                    });
                     i += 2;
                 }
             }
@@ -847,15 +822,10 @@ let token = raw.trim();
     #[test]
     fn scans_utf16_repo_files_and_does_not_confuse_added_plus_plus_lines_with_diff_headers() {
         let fake_sk = concat!("sk-", "test", "abcdef12");
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("cb-xtask-sec22-secrets-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let utf16_payload: Vec<u8> = format!("key = \"{fake_sk}\"\n").encode_utf16().flat_map(u16::to_le_bytes).collect();
-        std::fs::write(dir.join("utf16.txt"), utf16_payload).unwrap();
-        let hits = super::scan_repo(&dir, &[String::from("utf16.txt")]);
+        let dir = crate::scan_util::test_support::TestDir::new("sec22-secrets");
+        dir.write_bytes("utf16.txt", &crate::scan_util::test_support::to_utf16_bytes(&format!("key = \"{fake_sk}\"\n"), true, false));
+        let hits = super::scan_repo(dir.path(), &[String::from("utf16.txt")]);
         assert_eq!(hits.len(), 1, "UTF-16LE repo file must be scanned: {hits:?}");
-        let _ = std::fs::remove_dir_all(&dir);
 
         let diff = format!(
             "commit abcdef1234567890\n\

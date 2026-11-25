@@ -316,6 +316,16 @@ fn downscale_rgba_lanczos3(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h
 #[cfg(test)]
 mod tests {
     use super::{Options, escape_xml, manifest, stage, validate_executable, validate_version};
+    use crate::scan_util::test_support::TestDir;
+
+    fn dummy_pe(machine: u16) -> Vec<u8> {
+        let mut pe = vec![0; 128];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c..0x40].copy_from_slice(&64u32.to_le_bytes());
+        pe[64..68].copy_from_slice(b"PE\0\0");
+        pe[68..70].copy_from_slice(&machine.to_le_bytes());
+        pe
+    }
 
     #[test]
     fn rejects_store_versions_that_cannot_be_submitted() {
@@ -333,11 +343,7 @@ mod tests {
             assert!(Options::parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err());
         }
         assert!(validate_executable(&[], 0x8664).is_err());
-        let mut pe = vec![0; 128];
-        pe[..2].copy_from_slice(b"MZ");
-        pe[0x3c..0x40].copy_from_slice(&64u32.to_le_bytes());
-        pe[64..68].copy_from_slice(b"PE\0\0");
-        pe[68..70].copy_from_slice(&0x8664u16.to_le_bytes());
+        let mut pe = dummy_pe(0x8664);
         validate_executable(&pe, 0x8664).unwrap();
         assert!(validate_executable(&pe, 0xaa64).is_err());
         pe[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -347,47 +353,35 @@ mod tests {
     #[test]
     fn stages_only_package_payload_with_correct_identity_and_logo_sizes() {
         let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let temp = std::env::temp_dir().join(format!("cb-msix-test-{}", std::process::id()));
-        std::fs::create_dir_all(&temp).unwrap();
-        let result = (|| {
-            let root = temp.join("repo");
-            std::fs::create_dir_all(root.join("assets/app-icon")).unwrap();
-            std::fs::create_dir_all(root.join("licenses")).unwrap();
-            std::fs::copy(source_root.join("assets/app-icon/curvebook-1024.png"), root.join("assets/app-icon/curvebook-1024.png")).unwrap();
-            for name in ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ASSETS.md", "ATTRIBUTION.md"] {
-                std::fs::copy(source_root.join(name), root.join(name)).unwrap();
-            }
-            std::fs::write(root.join("licenses/THIRD-PARTY-LICENSES.html"), "<p>Package staging test fixture</p>").unwrap();
-            let binary_dir = temp.join("binaries");
-            std::fs::create_dir_all(&binary_dir).unwrap();
-            let mut pe = vec![0; 128];
-            pe[..2].copy_from_slice(b"MZ");
-            pe[0x3c..0x40].copy_from_slice(&64u32.to_le_bytes());
-            pe[64..68].copy_from_slice(b"PE\0\0");
-            pe[68..70].copy_from_slice(&0x8664u16.to_le_bytes());
-            for name in ["curvebook.exe", "curvebook-cli.exe", "should-not-ship.pfx"] {
-                std::fs::write(binary_dir.join(name), &pe).unwrap();
-            }
-            let options = Options { arch: "x64".into(), version: "1.0.2.0".into() };
-            let payload = temp.join("payload");
-            stage(&root, &payload, &binary_dir, &options)?;
-            let xml = manifest(&options)?;
-            assert!(xml.contains("Name=\"JakobSture.CurveBook\""));
-            assert!(xml.contains("Publisher=\"CN=8373FC7D-82BB-4F48-BE69-7A5260B5630A\""));
-            assert!(xml.contains("<PublisherDisplayName>Jakob Sture</PublisherDisplayName>"));
-            assert!(!xml.contains('@'));
-            assert!(xml.contains("Alias=\"curvebook-cli.exe\""));
-            assert!(!payload.join("should-not-ship.pfx").exists());
-            for (name, expected) in [("StoreLogo.png", 50), ("Square150x150Logo.png", 150), ("Square44x44Logo.png", 44)] {
-                let file = std::fs::File::open(payload.join("Assets").join(name)).unwrap();
-                let reader = png::Decoder::new(std::io::BufReader::new(file)).read_info().unwrap();
-                let info = reader.info();
-                assert_eq!((info.width, info.height), (expected, expected));
-            }
-            assert_eq!(escape_xml("<&\"'>"), "&lt;&amp;&quot;&apos;&gt;");
-            Ok::<(), String>(())
-        })();
-        std::fs::remove_dir_all(&temp).unwrap();
-        result.unwrap();
+        let temp = TestDir::new("msix-stage");
+        let root = temp.join("repo");
+        std::fs::create_dir_all(root.join("assets/app-icon")).unwrap();
+        for rel in ["assets/app-icon/curvebook-1024.png", "LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ASSETS.md", "ATTRIBUTION.md"] {
+            std::fs::copy(source_root.join(rel), root.join(rel)).unwrap();
+        }
+        temp.write("repo/licenses/THIRD-PARTY-LICENSES.html", "<p>Package staging test fixture</p>");
+        let pe = dummy_pe(0x8664);
+        for name in ["curvebook.exe", "curvebook-cli.exe", "should-not-ship.pfx"] {
+            temp.write_bytes(&format!("binaries/{name}"), &pe);
+        }
+        let options = Options { arch: "x64".into(), version: "1.0.2.0".into() };
+        let payload = temp.join("payload");
+        stage(&root, &payload, &temp.join("binaries"), &options).unwrap();
+        let xml = manifest(&options).unwrap();
+        for needle in [
+            "Name=\"JakobSture.CurveBook\"",
+            "Publisher=\"CN=8373FC7D-82BB-4F48-BE69-7A5260B5630A\"",
+            "<PublisherDisplayName>Jakob Sture</PublisherDisplayName>",
+            "Alias=\"curvebook-cli.exe\"",
+        ] {
+            assert!(xml.contains(needle), "missing {needle}");
+        }
+        assert!(!xml.contains('@') && !payload.join("should-not-ship.pfx").exists());
+        for (name, expected) in [("StoreLogo.png", 50), ("Square150x150Logo.png", 150), ("Square44x44Logo.png", 44)] {
+            let file = std::fs::File::open(payload.join("Assets").join(name)).unwrap();
+            let info = png::Decoder::new(std::io::BufReader::new(file)).read_info().unwrap().info().clone();
+            assert_eq!((info.width, info.height), (expected, expected));
+        }
+        assert_eq!(escape_xml("<&\"'>"), "&lt;&amp;&quot;&apos;&gt;");
     }
 }

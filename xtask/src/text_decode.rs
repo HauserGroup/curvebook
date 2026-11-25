@@ -158,6 +158,9 @@ fn decode_entity_body(body: &str) -> Option<char> {
         "quest" => Some('?'),
         "equals" => Some('='),
         "nbsp" => Some(' '),
+        "hellip" => Some('…'),
+        "mdash" => Some('—'),
+        "ndash" => Some('–'),
         _ => None,
     }
 }

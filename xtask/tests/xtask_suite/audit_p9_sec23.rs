@@ -2,100 +2,12 @@
 //! `FA-X3-03`, and `FA-X3-05`).
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "docs-site")]
+use std::path::Path;
 
-static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
-
-struct ScratchDir {
-    path: PathBuf,
-}
-
-impl ScratchDir {
-    fn new(label: &str) -> Result<Self, String> {
-        let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let path = std::env::temp_dir().join(format!("cb-audit-p9-sec23-{label}-{}-{nanos}-{seq}", std::process::id()));
-        fs::create_dir_all(&path).map_err(|e| format!("create_dir_all {}: {e}", path.display()))?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-fn workspace_root() -> Result<PathBuf, String> {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).ok_or_else(|| String::from("CARGO_MANIFEST_DIR has no parent"))
-}
-
-fn run_xtask(cwd: &Path, args: &[&str], extra_env: &[(&str, Option<&str>)]) -> Result<Output, String> {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_xtask"));
-    cmd.current_dir(cwd).args(args);
-    for &(k, v) in extra_env {
-        match v {
-            Some(val) => {
-                cmd.env(k, val);
-            }
-            None => {
-                cmd.env_remove(k);
-            }
-        }
-    }
-    cmd.output().map_err(|e| format!("run xtask {args:?}: {e}"))
-}
-
+use super::common::{TempDirGuard as ScratchDir, run_xtask_in as run_xtask, workspace_root};
 #[cfg(unix)]
-fn build_ustar_header(path: &str, typeflag: u8, size: usize, linkname: &str) -> [u8; 512] {
-    let mut hdr = [0u8; 512];
-    let p_bytes = path.as_bytes();
-    let p_len = p_bytes.len().min(100);
-    hdr[..p_len].copy_from_slice(&p_bytes[..p_len]);
-    hdr[100..108].copy_from_slice(b"0000644\0");
-    hdr[108..116].copy_from_slice(b"0000000\0");
-    hdr[116..124].copy_from_slice(b"0000000\0");
-    hdr[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
-    hdr[136..148].copy_from_slice(b"00000000000\0");
-    hdr[148..156].fill(b' ');
-    hdr[156] = typeflag;
-    let l_bytes = linkname.as_bytes();
-    let l_len = l_bytes.len().min(100);
-    hdr[157..157 + l_len].copy_from_slice(&l_bytes[..l_len]);
-    hdr[257..263].copy_from_slice(b"ustar\0");
-    hdr[263..265].copy_from_slice(b"00");
-    let chksum: u32 = hdr.iter().map(|&b| u32::from(b)).sum();
-    hdr[148..156].copy_from_slice(format!("{chksum:06o}\0 ").as_bytes());
-    hdr
-}
-
-#[cfg(unix)]
-fn gzip_stored(data: &[u8]) -> Vec<u8> {
-    let mut gz = vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03];
-    let chunks: Vec<&[u8]> = if data.is_empty() { vec![&[]] } else { data.chunks(65_535).collect() };
-    for (idx, chunk) in chunks.iter().enumerate() {
-        let is_last = u8::from(idx + 1 == chunks.len());
-        let len = chunk.len() as u16;
-        let nlen = !len;
-        gz.push(is_last);
-        gz.extend_from_slice(&len.to_le_bytes());
-        gz.extend_from_slice(&nlen.to_le_bytes());
-        gz.extend_from_slice(chunk);
-    }
-    let mut crc = 0xffff_ffffu32;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xedb8_8320u32 & mask);
-        }
-    }
-    gz.extend_from_slice(&(!crc).to_le_bytes());
-    gz.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    gz
-}
+use super::common::{build_ustar_header, gzip_stored};
 
 #[cfg(unix)]
 #[test]
@@ -107,11 +19,11 @@ fn fa_sec23_01_release_scan_rejects_tar_symlink_hardlink_and_never_executes_elf_
     let sym_dir = fx.path.join("sym-tar");
     fs::create_dir_all(&sym_dir).map_err(|e| e.to_string())?;
     let mut tar_sym = Vec::new();
-    tar_sym.extend_from_slice(&build_ustar_header("usr/bin/curvebook", b'0', 5, ""));
+    tar_sym.extend_from_slice(&build_ustar_header("usr/bin/curvebook", b'0', 5, "")?);
     let mut payload = b"clean".to_vec();
     payload.resize(512, 0);
     tar_sym.extend_from_slice(&payload);
-    tar_sym.extend_from_slice(&build_ustar_header("usr/bin/link", b'2', 0, "/etc/passwd"));
+    tar_sym.extend_from_slice(&build_ustar_header("usr/bin/link", b'2', 0, "/etc/passwd")?);
     tar_sym.resize(tar_sym.len() + 1024, 0);
     let sym_tgz = gzip_stored(&tar_sym);
     fs::write(sym_dir.join("curvebook-0.1.0-linux-x86_64.tar.gz"), &sym_tgz).map_err(|e| e.to_string())?;
@@ -127,9 +39,9 @@ fn fa_sec23_01_release_scan_rejects_tar_symlink_hardlink_and_never_executes_elf_
     let hard_dir = fx.path.join("hard-tar");
     fs::create_dir_all(&hard_dir).map_err(|e| e.to_string())?;
     let mut tar_hard = Vec::new();
-    tar_hard.extend_from_slice(&build_ustar_header("usr/bin/curvebook", b'0', 5, ""));
+    tar_hard.extend_from_slice(&build_ustar_header("usr/bin/curvebook", b'0', 5, "")?);
     tar_hard.extend_from_slice(&payload);
-    tar_hard.extend_from_slice(&build_ustar_header("usr/bin/hard", b'1', 0, "/etc/passwd"));
+    tar_hard.extend_from_slice(&build_ustar_header("usr/bin/hard", b'1', 0, "/etc/passwd")?);
     tar_hard.resize(tar_hard.len() + 1024, 0);
     let hard_tgz = gzip_stored(&tar_hard);
     fs::write(hard_dir.join("curvebook-0.1.0-linux-x86_64.tar.gz"), &hard_tgz).map_err(|e| e.to_string())?;

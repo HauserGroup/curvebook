@@ -16,14 +16,12 @@ use std::path::Path;
 use curvebook_platform::write_atomic;
 
 use super::llms::{build_llms_full_txt, build_llms_txt};
-use super::verify::parse_minor_dir_version;
+use super::verify::{find_tag_close, parse_minor_dir_version, parse_tag_attributes};
+use crate::scan_util::{is_real_dir, is_regular_file, read_dir_paths_sorted, walk_rel_files};
 
 /// The published base URL, optional custom domain, and landing pages live with the Pages publish
 /// list (`R12.9`, `R12.10`), which builds without the `full-gates` feature.
 pub use crate::pages_site::{CUSTOM_DOMAIN, LANDING_PAGES, SITE_BASE_URL};
-
-/// Repository-relative path of the generated sitemap.
-pub const SITEMAP_REL_PATH: &str = "docs/sitemap.xml";
 
 /// Repository-relative path of the generated custom 404 page.
 pub const NOT_FOUND_REL_PATH: &str = "docs/404.html";
@@ -45,19 +43,6 @@ pub fn manual_canonical_url(rel_path: &str) -> String {
 #[must_use]
 pub fn canonical_link_tag(docs_rel: &str) -> String {
     format!("<link rel=\"canonical\" href=\"{}\">", published_url(docs_rel))
-}
-
-/// Render a GitHub Pages `CNAME` file for a custom domain.
-#[must_use]
-pub fn build_cname(domain: &str) -> String {
-    format!("{}\n", domain.trim())
-}
-
-/// Render `robots.txt` pointing crawlers at the site's `sitemap.xml`.
-#[must_use]
-pub fn build_robots_txt(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    format!("User-agent: *\nAllow: /\n\nSitemap: {trimmed}/sitemap.xml\n")
 }
 
 /// Validate consistency between `SITE_BASE_URL` and `CUSTOM_DOMAIN`.
@@ -113,11 +98,11 @@ pub fn build_sitemap_with_manual(root: &Path, manual_dir: Option<&Path>) -> Resu
         Some(dir) => Some(dir.to_path_buf()),
         None => {
             let default_dir = crate::pages_site::default_manual_dir(root);
-            if std::fs::symlink_metadata(&default_dir).is_ok_and(|m| m.file_type().is_dir()) {
+            if is_real_dir(&default_dir) {
                 Some(default_dir)
             } else {
                 let legacy_dir = root.join("docs/manual");
-                std::fs::symlink_metadata(&legacy_dir).is_ok_and(|m| m.file_type().is_dir()).then_some(legacy_dir)
+                is_real_dir(&legacy_dir).then_some(legacy_dir)
             }
         }
     };
@@ -130,7 +115,7 @@ pub fn build_sitemap_with_manual(root: &Path, manual_dir: Option<&Path>) -> Resu
         if let Some(snapshot) = snapshot_sub {
             let snap_root = manual_root.join(&snapshot);
             let mut snap_pages = Vec::new();
-            collect_html_files(&snap_root, &snap_root, &mut snap_pages)?;
+            walk_rel_files(&snap_root, &snap_root, &|_| false, &|p| p.extension().is_some_and(|e| e == "html"), &mut snap_pages)?;
             return build_sitemap_for_manual_pages(root, &snapshot, &snap_pages);
         }
         if manual_dir.is_some() {
@@ -138,11 +123,6 @@ pub fn build_sitemap_with_manual(root: &Path, manual_dir: Option<&Path>) -> Resu
         }
     }
     build_sitemap_for_manual_pages(root, "latest", &[])
-}
-
-/// Render `docs/sitemap.xml` from `docs/` and the default manual build directory under `root`.
-pub fn build_sitemap(root: &Path) -> Result<String, String> {
-    build_sitemap_with_manual(root, None)
 }
 
 /// Regenerate `sitemap.xml` inside `out_dir` (e.g. `<manual_dir>/_root/`) using `manual_dir`.
@@ -161,13 +141,6 @@ pub fn write_not_found_page(root: &Path) -> Result<(), String> {
     write_atomic(&path, html.as_bytes()).map_err(|e| format!("write {NOT_FOUND_REL_PATH}: {e}"))
 }
 
-/// `--check` gate: the committed `404.html` and build-directory `sitemap.xml` / `llms*.txt` match
-/// the published content byte-for-byte, and every landing page declares its canonical link and Open
-/// Graph / Twitter Card metadata.
-pub fn check_search_metadata(root: &Path) -> Result<(), String> {
-    check_search_metadata_with_manual(root, None)
-}
-
 /// `--check` gate validating `<manual_dir>/_root/{sitemap.xml,llms.txt,llms-full.txt}`, committed
 /// `docs/404.html`, and landing-page canonical/Open Graph metadata.
 pub fn check_search_metadata_with_manual(root: &Path, manual_dir: Option<&Path>) -> Result<(), String> {
@@ -176,12 +149,17 @@ pub fn check_search_metadata_with_manual(root: &Path, manual_dir: Option<&Path>)
     let resolved_manual = manual_dir.map(Path::to_path_buf).unwrap_or_else(|| crate::pages_site::default_manual_dir(root));
     let generated_root = resolved_manual.join(crate::pages_site::MANUAL_ROOT_SUBDIR);
 
-    let expected_sitemap = build_sitemap_with_manual(root, manual_dir)?;
-    let sitemap_path = generated_root.join("sitemap.xml");
-    let generated_sitemap = std::fs::read_to_string(&sitemap_path)
-        .map_err(|e| format!("read {}: {e} (run `cargo run -p xtask --features docs-site -- docs-site --build-manual`)", sitemap_path.display()))?;
-    if generated_sitemap != expected_sitemap {
-        return Err(format!("{} is out of date with the published pages; rebuild with `docs-site --build-manual`", sitemap_path.display()));
+    for (name, expected, reason) in [
+        ("sitemap.xml", build_sitemap_with_manual(root, manual_dir)?, "is out of date with the published pages"),
+        ("llms.txt", build_llms_txt(root)?, "is out of date"),
+        ("llms-full.txt", build_llms_full_txt(root)?, "is out of date"),
+    ] {
+        let path = generated_root.join(name);
+        let actual = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read {}: {e} (run `cargo run -p xtask --features docs-site -- docs-site --build-manual`)", path.display()))?;
+        if actual != expected {
+            return Err(format!("{} {reason}; rebuild with `docs-site --build-manual`", path.display()));
+        }
     }
 
     let expected_404 = super::template::render_not_found_page(crate::pages_site::site_base_path());
@@ -189,22 +167,6 @@ pub fn check_search_metadata_with_manual(root: &Path, manual_dir: Option<&Path>)
         .map_err(|e| format!("read {NOT_FOUND_REL_PATH}: {e} (run `cargo xtask docs-site --sitemap`)"))?;
     if committed_404 != expected_404 {
         return Err(format!("{NOT_FOUND_REL_PATH} is out of date; run `cargo xtask docs-site --sitemap`"));
-    }
-
-    let expected_llms = build_llms_txt(root)?;
-    let llms_path = generated_root.join("llms.txt");
-    let generated_llms = std::fs::read_to_string(&llms_path)
-        .map_err(|e| format!("read {}: {e} (run `cargo run -p xtask --features docs-site -- docs-site --build-manual`)", llms_path.display()))?;
-    if generated_llms != expected_llms {
-        return Err(format!("{} is out of date; rebuild with `docs-site --build-manual`", llms_path.display()));
-    }
-
-    let expected_llms_full = build_llms_full_txt(root)?;
-    let llms_full_path = generated_root.join("llms-full.txt");
-    let generated_llms_full = std::fs::read_to_string(&llms_full_path)
-        .map_err(|e| format!("read {}: {e} (run `cargo run -p xtask --features docs-site -- docs-site --build-manual`)", llms_full_path.display()))?;
-    if generated_llms_full != expected_llms_full {
-        return Err(format!("{} is out of date; rebuild with `docs-site --build-manual`", llms_full_path.display()));
     }
 
     for page in LANDING_PAGES {
@@ -262,7 +224,7 @@ fn extract_meta_map(html: &str) -> BTreeMap<String, String> {
             rest = after_close;
             continue;
         }
-        let Some(tag_end) = find_tag_end(after_lt) else {
+        let Some(tag_end) = find_tag_close(after_lt) else {
             break;
         };
         let (tag_body, tail) = after_lt.split_at(tag_end);
@@ -273,10 +235,9 @@ fn extract_meta_map(html: &str) -> BTreeMap<String, String> {
         if !tag_name.eq_ignore_ascii_case("meta") {
             continue;
         }
-        let attrs = parse_meta_attrs(trimmed);
         let mut key: Option<String> = None;
         let mut content: Option<String> = None;
-        for (k, v) in attrs {
+        for (k, v) in parse_tag_attributes(trimmed) {
             if k.eq_ignore_ascii_case("property") || k.eq_ignore_ascii_case("name") {
                 key = Some(v.to_ascii_lowercase());
             } else if k.eq_ignore_ascii_case("content") {
@@ -290,93 +251,19 @@ fn extract_meta_map(html: &str) -> BTreeMap<String, String> {
     map
 }
 
-fn find_tag_end(rest: &str) -> Option<usize> {
-    let mut quote: Option<u8> = None;
-    for (idx, &b) in rest.as_bytes().iter().enumerate() {
-        if let Some(q) = quote {
-            if b == q {
-                quote = None;
-            }
-        } else if b == b'"' || b == b'\'' {
-            quote = Some(b);
-        } else if b == b'>' {
-            return Some(idx);
-        }
-    }
-    None
-}
-
-fn parse_meta_attrs(trimmed_tag: &str) -> Vec<(String, String)> {
-    let mut attrs = Vec::new();
-    let bytes = trimmed_tag.as_bytes();
-    let mut i = bytes.iter().position(u8::is_ascii_whitespace).unwrap_or(bytes.len());
-    while i < bytes.len() {
-        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
-            i += 1;
-        }
-        if i >= bytes.len() {
-            break;
-        }
-        let k_start = i;
-        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' && bytes[i] != b'/' {
-            i += 1;
-        }
-        let key = trimmed_tag.get(k_start..i).unwrap_or("").to_owned();
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= bytes.len() || bytes[i] != b'=' {
-            continue;
-        }
-        i += 1;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        let val = if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
-            let q = bytes[i];
-            i += 1;
-            let v_start = i;
-            while i < bytes.len() && bytes[i] != q {
-                i += 1;
-            }
-            let raw = trimmed_tag.get(v_start..i).unwrap_or("").to_owned();
-            if i < bytes.len() {
-                i += 1;
-            }
-            raw
-        } else {
-            let v_start = i;
-            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            trimmed_tag.get(v_start..i).unwrap_or("").to_owned()
-        };
-        attrs.push((key, val));
-    }
-    attrs
-}
-
-fn is_regular_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
-}
-
 /// Newest `docs/manual/v<major>.<minor>/` directory that carries a release `manifest.json`.
 fn newest_snapshot_dir(manual_dir: &Path) -> Result<Option<String>, String> {
-    if !std::fs::symlink_metadata(manual_dir).is_ok_and(|m| m.file_type().is_dir()) {
+    if !is_real_dir(manual_dir) {
         return Ok(None);
     }
     let mut best: Option<((u64, u64), String)> = None;
-    for entry in std::fs::read_dir(manual_dir).map_err(|e| format!("read_dir {}: {e}", manual_dir.display()))? {
-        let entry = entry.map_err(|e| format!("dir entry under docs/manual: {e}"))?;
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if !ft.is_dir() {
+    for path in read_dir_paths_sorted(manual_dir)? {
+        if !is_real_dir(&path) {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if let Some(ver) = parse_minor_dir_version(&name)
-            && is_regular_file(&entry.path().join("manifest.json"))
+            && is_regular_file(&path.join("manifest.json"))
             && best.as_ref().is_none_or(|(b, _)| ver > *b)
         {
             best = Some((ver, name));
@@ -385,64 +272,25 @@ fn newest_snapshot_dir(manual_dir: &Path) -> Result<Option<String>, String> {
     Ok(best.map(|(_, name)| name))
 }
 
-/// Collect `/`-separated `.html` paths below `base`, skipping symlinks.
-fn collect_html_files(base: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
-        let entry = entry.map_err(|e| format!("dir entry under {}: {e}", dir.display()))?;
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        let path = entry.path();
-        if ft.is_dir() {
-            collect_html_files(base, &path, out)?;
-        } else if ft.is_file() && path.extension().is_some_and(|e| e == "html") {
-            let rel = path.strip_prefix(base).map_err(|e| e.to_string())?;
-            let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-            out.push(parts.join("/"));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::llms::write_llms_files_into;
     use super::*;
-
-    fn temp_root(label: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        std::env::temp_dir().join(format!("cb-docs-seo-{label}-{}-{nanos}", std::process::id()))
-    }
-
-    fn write(root: &Path, rel: &str, body: &str) {
-        let path = root.join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(path, body).unwrap();
-    }
+    use crate::scan_util::test_support::TestDir;
 
     fn valid_landing_html(page: &str) -> String {
         let url = published_url(page);
         let img = format!("{SITE_BASE_URL}images/workspace-split-fit.png");
         format!(
-            "<html><head>\
-             {}\
-             <meta property=\"og:type\" content=\"website\">\
-             <meta property=\"og:title\" content=\"CurveBook\">\
-             <meta property=\"og:description\" content=\"CurveBook biostatistics.\">\
-             <meta property=\"og:url\" content=\"{url}\">\
-             <meta property=\"og:image\" content=\"{img}\">\
-             <meta name=\"twitter:card\" content=\"summary_large_image\">\
-             </head></html>",
+            "<html><head>{}<meta property=\"og:type\" content=\"website\"><meta property=\"og:title\" content=\"CurveBook\"><meta property=\"og:description\" content=\"CurveBook biostatistics.\"><meta property=\"og:url\" content=\"{url}\"><meta property=\"og:image\" content=\"{img}\"><meta name=\"twitter:card\" content=\"summary_large_image\"></head></html>",
             canonical_link_tag(page),
         )
     }
 
-    fn seed_landing_pages(root: &Path) {
-        write(root, "docs/images/workspace-split-fit.png", "png");
+    fn seed_landing_pages(root: &TestDir) {
+        root.write("docs/images/workspace-split-fit.png", "png");
         for page in LANDING_PAGES {
-            write(root, &format!("docs/{page}"), &valid_landing_html(page));
+            root.write(&format!("docs/{page}"), &valid_landing_html(page));
         }
     }
 
@@ -453,28 +301,31 @@ mod tests {
         assert!(validate_site_config(SITE_BASE_URL, Some("curvebook.org")).is_err());
         assert!(validate_site_config("https://curvebook.org/", Some("https://curvebook.org")).is_err());
         assert!(validate_site_config("http://curvebook.org/", None).is_err());
-        assert_eq!(build_cname(" curvebook.org "), "curvebook.org\n");
-        assert_eq!(build_robots_txt("https://curvebook.org/"), "User-agent: *\nAllow: /\n\nSitemap: https://curvebook.org/sitemap.xml\n");
         assert_eq!(manual_canonical_url("analyses.html"), "https://hausergroup.github.io/curvebook/manual/latest/analyses.html");
     }
 
     #[test]
     fn sitemap_prefers_latest_and_falls_back_to_newest_versioned_snapshot() {
-        let root = temp_root("newest");
+        let root = TestDir::new("docs-seo-newest");
         seed_landing_pages(&root);
-        write(&root, "docs/get-started.html", "shim");
-        write(&root, "target/docs-manual/index.html", "redirect");
-        write(&root, "target/docs-manual/v0.1/manifest.json", "{}");
-        write(&root, "target/docs-manual/v0.1/index.html", "old");
-        write(&root, "target/docs-manual/v0.2/manifest.json", "{}");
-        write(&root, "target/docs-manual/v0.2/index.html", "new");
-        write(&root, "target/docs-manual/v0.2/registry/formats.html", "new");
-        write(&root, "target/docs-manual/v0.3/index.html", "no manifest, so not a release snapshot");
-
-        let xml = build_sitemap(&root).unwrap();
-        let locs: Vec<&str> = xml.lines().filter_map(|l| l.trim().strip_prefix("<url><loc>")?.strip_suffix("</loc></url>")).collect();
+        for (rel, body) in [
+            ("docs/get-started.html", "shim"),
+            ("target/docs-manual/index.html", "redirect"),
+            ("target/docs-manual/v0.1/manifest.json", "{}"),
+            ("target/docs-manual/v0.1/index.html", "old"),
+            ("target/docs-manual/v0.2/manifest.json", "{}"),
+            ("target/docs-manual/v0.2/index.html", "new"),
+            ("target/docs-manual/v0.2/registry/formats.html", "new"),
+            ("target/docs-manual/v0.3/index.html", "no manifest"),
+        ] {
+            root.write(rel, body);
+        }
+        let extract_locs = |xml: &str| -> Vec<String> {
+            xml.lines().filter_map(|l| l.trim().strip_prefix("<url><loc>")?.strip_suffix("</loc></url>").map(str::to_owned)).collect()
+        };
+        let xml = build_sitemap_with_manual(root.path(), None).unwrap();
         assert_eq!(
-            locs,
+            extract_locs(&xml),
             [
                 "https://hausergroup.github.io/curvebook/",
                 "https://hausergroup.github.io/curvebook/open-pzfx-files.html",
@@ -487,14 +338,11 @@ mod tests {
         );
         assert!(!xml.contains("lastmod"), "sitemap must stay deterministic");
 
-        // Adding target/docs-manual/latest/ switches sitemap indexing to /manual/latest/.
-        write(&root, "target/docs-manual/latest/manifest.json", "{}");
-        write(&root, "target/docs-manual/latest/index.html", "latest");
-        write(&root, "target/docs-manual/latest/registry/formats.html", "latest");
-        let latest_xml = build_sitemap(&root).unwrap();
-        let latest_locs: Vec<&str> = latest_xml.lines().filter_map(|l| l.trim().strip_prefix("<url><loc>")?.strip_suffix("</loc></url>")).collect();
+        root.write("target/docs-manual/latest/manifest.json", "{}");
+        root.write("target/docs-manual/latest/index.html", "latest");
+        root.write("target/docs-manual/latest/registry/formats.html", "latest");
         assert_eq!(
-            latest_locs,
+            extract_locs(&build_sitemap_with_manual(root.path(), None).unwrap()),
             [
                 "https://hausergroup.github.io/curvebook/",
                 "https://hausergroup.github.io/curvebook/open-pzfx-files.html",
@@ -507,64 +355,47 @@ mod tests {
         );
 
         let generated_root = root.join("target/docs-manual/_root");
-        write_sitemap_into(&root, None, &generated_root).unwrap();
-        write_not_found_page(&root).unwrap();
-        write_llms_files_into(&root, &generated_root).unwrap();
-        assert!(check_search_metadata(&root).is_ok());
+        write_sitemap_into(root.path(), None, &generated_root).unwrap();
+        write_not_found_page(root.path()).unwrap();
+        write_llms_files_into(root.path(), &generated_root).unwrap();
+        assert!(check_search_metadata_with_manual(root.path(), None).is_ok());
 
-        // A new snapshot page makes the generated sitemap stale.
-        write(&root, "target/docs-manual/latest/glossary.html", "new");
-        assert!(check_search_metadata(&root).unwrap_err().contains("--build-manual"));
+        root.write("target/docs-manual/latest/glossary.html", "new");
+        assert!(check_search_metadata_with_manual(root.path(), None).unwrap_err().contains("--build-manual"));
 
-        // Regenerate sitemap, then stale 404.html and llms.txt must fail check_search_metadata.
-        write_sitemap_into(&root, None, &generated_root).unwrap();
-        write(&root, NOT_FOUND_REL_PATH, "stale 404\n");
-        assert!(check_search_metadata(&root).unwrap_err().contains("docs/404.html"));
-        write_not_found_page(&root).unwrap();
-        write(&root, "target/docs-manual/_root/llms.txt", "stale\n");
-        assert!(check_search_metadata(&root).unwrap_err().contains("llms.txt"));
-
-        let _ = std::fs::remove_dir_all(&root);
+        write_sitemap_into(root.path(), None, &generated_root).unwrap();
+        root.write(NOT_FOUND_REL_PATH, "stale 404\n");
+        assert!(check_search_metadata_with_manual(root.path(), None).unwrap_err().contains("docs/404.html"));
+        write_not_found_page(root.path()).unwrap();
+        root.write("target/docs-manual/_root/llms.txt", "stale\n");
+        assert!(check_search_metadata_with_manual(root.path(), None).unwrap_err().contains("llms.txt"));
     }
 
     #[test]
     fn landing_pages_validate_canonical_and_open_graph_metadata() {
-        let root = temp_root("canonical");
+        let root = TestDir::new("docs-seo-canonical");
         seed_landing_pages(&root);
         let generated_root = root.join("target/docs-manual/_root");
-        write_sitemap_into(&root, None, &generated_root).unwrap();
-        write_not_found_page(&root).unwrap();
-        write_llms_files_into(&root, &generated_root).unwrap();
-        assert!(check_search_metadata(&root).is_ok());
+        write_sitemap_into(root.path(), None, &generated_root).unwrap();
+        write_not_found_page(root.path()).unwrap();
+        write_llms_files_into(root.path(), &generated_root).unwrap();
+        assert!(check_search_metadata_with_manual(root.path(), None).is_ok());
 
-        // Wrong canonical URL.
-        write(&root, "docs/privacy.html", "<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/\">");
-        assert!(check_search_metadata(&root).unwrap_err().contains("docs/privacy.html"));
-
-        // Duplicate canonical link.
-        let doubled = format!("{0}{0}", canonical_link_tag("privacy.html"));
-        write(&root, "docs/privacy.html", &doubled);
-        assert!(check_search_metadata(&root).unwrap_err().contains("exactly one"));
-
-        // Mismatched og:url.
-        let bad_og_url = valid_landing_html("privacy.html").replace("privacy.html\"", "index.html\"");
-        // Keep canonical valid, break only og:url.
-        let bad_og_url = bad_og_url.replacen("index.html\"", "privacy.html\"", 1);
-        write(&root, "docs/privacy.html", &bad_og_url);
-        assert!(check_search_metadata(&root).unwrap_err().contains("og:url"));
-
-        // Missing og:image file under docs/images/.
-        let bad_og_img = valid_landing_html("privacy.html").replace("workspace-split-fit.png", "does-not-exist.png");
-        write(&root, "docs/privacy.html", &bad_og_img);
-        assert!(check_search_metadata(&root).unwrap_err().contains("og:image"));
-
-        // Missing twitter:card.
-        let no_twitter = valid_landing_html("privacy.html").replace("twitter:card", "other:card");
-        write(&root, "docs/privacy.html", &no_twitter);
-        assert!(check_search_metadata(&root).unwrap_err().contains("twitter:card"));
+        let base_privacy = valid_landing_html("privacy.html");
+        let bad_og_url = base_privacy.replace("privacy.html\"", "index.html\"").replacen("index.html\"", "privacy.html\"", 1);
+        for (html, needle) in [
+            (String::from("<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/\">"), "docs/privacy.html"),
+            (format!("{0}{0}", canonical_link_tag("privacy.html")), "exactly one"),
+            (bad_og_url, "og:url"),
+            (base_privacy.replace("workspace-split-fit.png", "does-not-exist.png"), "og:image"),
+            (base_privacy.replace("twitter:card", "other:card"), "twitter:card"),
+        ] {
+            root.write("docs/privacy.html", &html);
+            let err = check_search_metadata_with_manual(root.path(), None).unwrap_err();
+            assert!(err.contains(needle), "expected `{needle}` in `{err}`");
+        }
 
         std::fs::remove_file(root.join("docs/privacy.html")).unwrap();
-        assert!(build_sitemap(&root).unwrap_err().contains("LANDING_PAGES"));
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(build_sitemap_with_manual(root.path(), None).unwrap_err().contains("LANDING_PAGES"));
     }
 }

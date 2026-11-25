@@ -6,8 +6,6 @@
 //! `curvebook-doc`, `curvebook-palette`, `curvebook-format`, `docs/schemas/*.schema.json`)
 //! into a deterministic, script-free Classic coral HTML manual.
 
-#![allow(dead_code)]
-
 pub mod llms;
 pub mod markdown;
 pub mod registries;
@@ -16,12 +14,12 @@ pub mod sitemap;
 pub mod template;
 pub mod verify;
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use curvebook_platform::write_atomic;
 
+use crate::scan_util::{is_real_dir, is_regular_file, read_dir_paths_sorted, walk_rel_files};
 use sitemap::{GeneratedSite, assemble_site};
 use template::{SiteMeta, render_release_redirect_index, render_root_redirect_shim};
 use verify::{parse_minor_dir_version, verify_manual_build, verify_site};
@@ -105,67 +103,68 @@ pub fn run_check(root: &Path) -> Result<(), String> {
 fn parse_args(args: &[String]) -> Result<CliOptions, String> {
     let mut opts = CliOptions::default();
     let mut idx = 0usize;
+    let take_next = |idx: &mut usize, msg: &str| -> Result<&str, String> {
+        *idx += 1;
+        args.get(*idx).map(String::as_str).ok_or_else(|| format!("{msg}\n{USAGE}"))
+    };
     while idx < args.len() {
         let arg = args[idx].as_str();
-        if arg == "--check" {
-            opts.check = true;
-        } else if arg == "--sitemap" {
-            opts.sitemap = true;
-        } else if arg == "--refresh-screenshots" {
-            opts.refresh_screenshots = true;
-        } else if let Some(val) = arg.strip_prefix("--build-manual=") {
-            if val.trim().is_empty() || opts.manual_dir.is_some() {
-                return Err(format!("--build-manual= requires a single directory path\n{USAGE}"));
-            }
-            opts.build_manual = true;
-            opts.manual_dir = Some(PathBuf::from(val));
-        } else if arg == "--build-manual" {
-            opts.build_manual = true;
-            if let Some(next) = args.get(idx + 1)
-                && !next.is_empty()
-                && !next.starts_with('-')
-            {
-                if opts.manual_dir.is_some() {
-                    return Err(format!("duplicate manual directory argument\n{USAGE}"));
+        match arg {
+            "--check" => opts.check = true,
+            "--sitemap" => opts.sitemap = true,
+            "--refresh-screenshots" => opts.refresh_screenshots = true,
+            "--build-manual" => {
+                opts.build_manual = true;
+                if let Some(next) = args.get(idx + 1).filter(|v| !v.is_empty() && !v.starts_with('-')) {
+                    if opts.manual_dir.is_some() {
+                        return Err(format!("duplicate manual directory argument\n{USAGE}"));
+                    }
+                    opts.manual_dir = Some(PathBuf::from(next));
+                    idx += 1;
                 }
-                opts.manual_dir = Some(PathBuf::from(next));
-                idx += 1;
             }
-        } else if let Some(val) = arg.strip_prefix("--manual-dir=") {
-            if val.trim().is_empty() || opts.manual_dir.is_some() {
-                return Err(format!("--manual-dir= requires a single directory path\n{USAGE}"));
+            "--manual-dir" => {
+                let val = take_next(&mut idx, "--manual-dir requires a directory path")?;
+                if val.is_empty() || val.starts_with('-') {
+                    return Err(format!("--manual-dir requires a directory path\n{USAGE}"));
+                }
+                if opts.manual_dir.is_some() {
+                    return Err(format!("duplicate `--manual-dir` argument\n{USAGE}"));
+                }
+                opts.manual_dir = Some(PathBuf::from(val));
             }
-            opts.manual_dir = Some(PathBuf::from(val));
-        } else if arg == "--manual-dir" {
-            idx += 1;
-            let val = args
-                .get(idx)
-                .filter(|v| !v.is_empty() && !v.starts_with('-'))
-                .ok_or_else(|| format!("--manual-dir requires a directory path\n{USAGE}"))?;
-            if opts.manual_dir.is_some() {
-                return Err(format!("duplicate `--manual-dir` argument\n{USAGE}"));
+            "--output" => opts.output = Some(PathBuf::from(take_next(&mut idx, "--output requires a directory path")?)),
+            "--release" => opts.release = Some(take_next(&mut idx, "--release requires a semantic version")?.to_owned()),
+            _ if arg.starts_with("--build-manual=") => {
+                let val = arg.trim_start_matches("--build-manual=");
+                if val.trim().is_empty() || opts.manual_dir.is_some() {
+                    return Err(format!("--build-manual= requires a single directory path\n{USAGE}"));
+                }
+                opts.build_manual = true;
+                opts.manual_dir = Some(PathBuf::from(val));
             }
-            opts.manual_dir = Some(PathBuf::from(val));
-        } else if let Some(val) = arg.strip_prefix("--output=") {
-            if val.trim().is_empty() {
-                return Err(format!("--output= requires a directory path\n{USAGE}"));
+            _ if arg.starts_with("--manual-dir=") => {
+                let val = arg.trim_start_matches("--manual-dir=");
+                if val.trim().is_empty() || opts.manual_dir.is_some() {
+                    return Err(format!("--manual-dir= requires a single directory path\n{USAGE}"));
+                }
+                opts.manual_dir = Some(PathBuf::from(val));
             }
-            opts.output = Some(PathBuf::from(val));
-        } else if arg == "--output" {
-            idx += 1;
-            let val = args.get(idx).ok_or_else(|| format!("--output requires a directory path\n{USAGE}"))?;
-            opts.output = Some(PathBuf::from(val));
-        } else if let Some(val) = arg.strip_prefix("--release=") {
-            if val.trim().is_empty() {
-                return Err(format!("--release= requires a semantic version\n{USAGE}"));
+            _ if arg.starts_with("--output=") => {
+                let val = arg.trim_start_matches("--output=");
+                if val.trim().is_empty() {
+                    return Err(format!("--output= requires a directory path\n{USAGE}"));
+                }
+                opts.output = Some(PathBuf::from(val));
             }
-            opts.release = Some(val.to_owned());
-        } else if arg == "--release" {
-            idx += 1;
-            let val = args.get(idx).ok_or_else(|| format!("--release requires a semantic version\n{USAGE}"))?;
-            opts.release = Some(val.to_owned());
-        } else {
-            return Err(format!("unknown argument `{arg}`\n{USAGE}"));
+            _ if arg.starts_with("--release=") => {
+                let val = arg.trim_start_matches("--release=");
+                if val.trim().is_empty() {
+                    return Err(format!("--release= requires a semantic version\n{USAGE}"));
+                }
+                opts.release = Some(val.to_owned());
+            }
+            _ => return Err(format!("unknown argument `{arg}`\n{USAGE}")),
         }
         idx += 1;
     }
@@ -411,16 +410,12 @@ pub fn format_minor_dir(ver: &str) -> Result<String, String> {
 
 fn collect_snapshot_dirs(manual_dir: &Path) -> Result<Vec<String>, String> {
     let mut dirs: Vec<((u64, u64), String)> = Vec::new();
-    if std::fs::symlink_metadata(manual_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
-        for entry in std::fs::read_dir(manual_dir).map_err(|e| format!("read_dir {}: {e}", manual_dir.display()))? {
-            let entry = entry.map_err(|e| format!("dir entry under docs/manual: {e}"))?;
-            let Ok(ft) = entry.file_type() else {
-                continue;
-            };
-            if ft.is_symlink() || !ft.is_dir() {
+    if is_real_dir(manual_dir) {
+        for path in read_dir_paths_sorted(manual_dir)? {
+            if !is_real_dir(&path) {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             if let Some(ver) = parse_minor_dir_version(&name) {
                 dirs.push((ver, name));
             }
@@ -432,23 +427,16 @@ fn collect_snapshot_dirs(manual_dir: &Path) -> Result<Vec<String>, String> {
 
 fn write_preview_site(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Result<(), String> {
     write_html_tree(out_dir, site)?;
-
     let css_src = root.join("docs/site.css");
     let css_dst = out_dir.join("site.css");
     std::fs::copy(&css_src, &css_dst).map_err(|e| format!("copy {} -> {}: {e}", css_src.display(), css_dst.display()))?;
 
     let img_src_dir = root.join("docs/images");
     let img_dst_dir = out_dir.join("images");
-    if std::fs::symlink_metadata(&img_src_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
+    if is_real_dir(&img_src_dir) {
         std::fs::create_dir_all(&img_dst_dir).map_err(|e| format!("create {}: {e}", img_dst_dir.display()))?;
-        let mut entries: Vec<_> = std::fs::read_dir(&img_src_dir)
-            .map_err(|e| format!("read_dir {}: {e}", img_src_dir.display()))?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .collect();
-        entries.sort();
-        for src in entries {
-            if std::fs::symlink_metadata(&src).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file())
+        for src in read_dir_paths_sorted(&img_src_dir)? {
+            if is_regular_file(&src)
                 && let Some(name) = src.file_name()
             {
                 let dst = img_dst_dir.join(name);
@@ -461,8 +449,8 @@ fn write_preview_site(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Resu
 
 fn write_html_tree(out_dir: &Path, site: &GeneratedSite) -> Result<(), String> {
     if out_dir.exists() {
-        let mut existing = BTreeSet::new();
-        collect_rel_files(out_dir, out_dir, &mut existing)?;
+        let mut existing = Vec::new();
+        walk_rel_files(out_dir, out_dir, &|_| false, &|_| true, &mut existing)?;
         for old_rel in existing {
             if old_rel.ends_with(".html") || old_rel == "site.css" || old_rel == "manifest.json" || old_rel.starts_with("images/") {
                 let _ = std::fs::remove_file(out_dir.join(&old_rel));
@@ -480,53 +468,21 @@ fn write_html_tree(out_dir: &Path, site: &GeneratedSite) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_rel_files(base: &Path, dir: &Path, out: &mut BTreeSet<String>) -> Result<(), String> {
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
-        let entry = entry.map_err(|e| format!("dir entry {}: {e}", dir.display()))?;
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if ft.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if ft.is_dir() {
-            collect_rel_files(base, &path, out)?;
-        } else if ft.is_file()
-            && let Ok(rel) = path.strip_prefix(base)
-        {
-            out.insert(rel.to_string_lossy().replace('\\', "/"));
-        }
-    }
-    Ok(())
+fn git_head_query(root: &Path, args: &[&str]) -> Option<String> {
+    let out = crate::dev_tool_command("git")
+        .current_dir(root)
+        .args(args)
+        .wall_timeout(Duration::from_secs(30))
+        .idle_timeout(Duration::from_secs(10))
+        .run()
+        .ok()?;
+    out.success.then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|s| !s.is_empty())
 }
 
 fn git_head_sha(root: &Path) -> Option<String> {
-    let out = crate::dev_tool_command("git")
-        .current_dir(root)
-        .args(["rev-parse", "HEAD"])
-        .wall_timeout(Duration::from_secs(30))
-        .idle_timeout(Duration::from_secs(10))
-        .run()
-        .ok()?;
-    if !out.success {
-        return None;
-    }
-    let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if sha.len() == 40 { Some(sha) } else { None }
+    git_head_query(root, &["rev-parse", "HEAD"]).filter(|s| s.len() == 40)
 }
 
 fn git_head_date(root: &Path) -> Option<String> {
-    let out = crate::dev_tool_command("git")
-        .current_dir(root)
-        .args(["show", "-s", "--format=%cs", "HEAD"])
-        .wall_timeout(Duration::from_secs(30))
-        .idle_timeout(Duration::from_secs(10))
-        .run()
-        .ok()?;
-    if !out.success {
-        return None;
-    }
-    let date = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if date.is_empty() { None } else { Some(date) }
+    git_head_query(root, &["show", "-s", "--format=%cs", "HEAD"])
 }

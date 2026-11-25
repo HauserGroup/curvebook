@@ -2,34 +2,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-struct TempDirGuard {
-    path: PathBuf,
-}
-
-impl TempDirGuard {
-    fn new(label: &str) -> Result<Self, String> {
-        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let path = std::env::temp_dir().join(format!("cb-audit-r2-s13-{label}-{}-{nanos}-{seq}", std::process::id()));
-        fs::create_dir_all(&path).map_err(|e| format!("create_dir_all {}: {e}", path.display()))?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-fn workspace_root() -> Result<PathBuf, String> {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).ok_or_else(|| String::from("CARGO_MANIFEST_DIR has no parent"))
-}
+use super::common::{TempDirGuard, run_xtask, workspace_root};
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     for entry in fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
@@ -41,23 +17,6 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn run_xtask(args: &[&str], extra_env: &[(&str, Option<&str>)]) -> Result<std::process::Output, String> {
-    let root = workspace_root()?;
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_xtask"));
-    cmd.current_dir(root).args(args);
-    for &(k, v) in extra_env {
-        match v {
-            Some(val) => {
-                cmd.env(k, val);
-            }
-            None => {
-                cmd.env_remove(k);
-            }
-        }
-    }
-    cmd.output().map_err(|e| format!("run xtask {args:?}: {e}"))
 }
 
 #[test]

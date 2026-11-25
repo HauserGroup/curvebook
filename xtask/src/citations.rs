@@ -10,12 +10,13 @@
 //! allow-listed with a stated reason, and stale/nonexistent allow-list paths fail closed.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::rust_lex::{
     count_newlines, find_char_literal_span, find_raw_string_span, is_cfg_test_only, is_ident_byte, skip_block_comment_end, skip_line_comment_end,
     skip_quoted_string_end,
 };
+use crate::scan_util::{format_error_list, is_real_dir, walk_rel_files};
 
 /// Crate source directories governed by the `D1` rule-1 literature-citation gate.
 pub const NUMERICAL_SRC_DIRS: &[&str] = &["crates/math/src", "crates/stats/src", "crates/fit/src", "crates/transform/src"];
@@ -229,8 +230,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         );
         return Ok(());
     }
-    let formatted: Vec<String> = violations.iter().map(ToString::to_string).collect();
-    Err(format!("{} D1 citation violation(s) found:\n  {}", violations.len(), formatted.join("\n  ")))
+    Err(format_error_list("D1 citation violation(s) found", &violations))
 }
 
 /// Validate `allowlist` and scan every `.rs` module under `src_dirs` inside `root`.
@@ -246,7 +246,7 @@ pub fn check_workspace_with_allowlist(
 
     for &src_rel in src_dirs {
         let dir = root.join(src_rel);
-        if !std::fs::symlink_metadata(&dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
+        if !is_real_dir(&dir) {
             violations.push(CitationViolation {
                 path: src_rel.to_owned(),
                 line: 1,
@@ -255,7 +255,13 @@ pub fn check_workspace_with_allowlist(
             continue;
         }
         let mut rs_files = Vec::new();
-        collect_rs_files(root, &dir, &mut rs_files)?;
+        walk_rel_files(
+            root,
+            &dir,
+            &|p| p.file_name().is_some_and(|n| n == "tests"),
+            &|p| p.extension().is_some_and(|e| e == "rs") && p.file_name().is_none_or(|n| n != "tests.rs"),
+            &mut rs_files,
+        )?;
         rs_files.sort();
         if rs_files.is_empty() {
             violations.push(CitationViolation {
@@ -335,33 +341,6 @@ fn validate_allowlist<'a>(
         }
     }
     map
-}
-
-fn collect_rs_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
-        paths.push(entry.path());
-    }
-    paths.sort();
-    for path in paths {
-        let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        if meta.is_dir() {
-            if name == "tests" {
-                continue;
-            }
-            collect_rs_files(root, &path, out)?;
-        } else if meta.is_file() && path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            if name == "tests.rs" {
-                continue;
-            }
-            let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
-            out.push(rel);
-        }
-    }
-    Ok(())
 }
 
 /// Per-module scan outcome produced by [`scan_module_source`].
@@ -938,13 +917,11 @@ fn lex_ident(source: &str, start: usize, line: usize, tokens: &mut Vec<Token>) -
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::{ALLOWLIST, AllowlistedModule, NUMERICAL_SRC_DIRS, check_workspace_with_allowlist, cites_published_reference, scan_module_source};
+    use crate::scan_util::test_support::TestDir;
 
-    fn make_temp_workspace(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cb-xtask-citations-{tag}-{}-{nanos}", std::process::id()));
+    fn make_temp_workspace(tag: &str) -> TestDir {
+        let dir = TestDir::new(&format!("citations-{tag}"));
         for rel in NUMERICAL_SRC_DIRS {
             std::fs::create_dir_all(dir.join(rel)).unwrap();
         }
@@ -1070,14 +1047,13 @@ mod tests {
     #[test]
     fn allowlisted_plumbing_module_passes_and_nonexistent_or_empty_reason_allowlist_fails() {
         let ws = make_temp_workspace("allowlist");
-        std::fs::write(ws.join("crates/math/src/lib.rs"), "//! Plumbing root.\npub fn axis_helper(x: f64) -> f64 { x }\n").unwrap();
-        std::fs::write(ws.join("crates/stats/src/anova.rs"), "//! Reference: Satterthwaite (1946).\npub fn run_anova() -> f64 { 1.0 }\n").unwrap();
-        std::fs::write(ws.join("crates/fit/src/solver.rs"), "//! Reference: Marquardt (1963).\npub fn solve() -> f64 { 1.0 }\n").unwrap();
-        std::fs::write(ws.join("crates/transform/src/curve.rs"), "//! Reference: Savitzky & Golay (1964).\npub fn smooth() -> f64 { 1.0 }\n")
-            .unwrap();
+        ws.write("crates/math/src/lib.rs", "//! Plumbing root.\npub fn axis_helper(x: f64) -> f64 { x }\n");
+        ws.write("crates/stats/src/anova.rs", "//! Reference: Satterthwaite (1946).\npub fn run_anova() -> f64 { 1.0 }\n");
+        ws.write("crates/fit/src/solver.rs", "//! Reference: Marquardt (1963).\npub fn solve() -> f64 { 1.0 }\n");
+        ws.write("crates/transform/src/curve.rs", "//! Reference: Savitzky & Golay (1964).\npub fn smooth() -> f64 { 1.0 }\n");
 
         let valid_allow = [AllowlistedModule { path: "crates/math/src/lib.rs", reason: "Crate-root plumbing without statistical routines" }];
-        let (stats, violations) = check_workspace_with_allowlist(&ws, NUMERICAL_SRC_DIRS, &valid_allow).unwrap();
+        let (stats, violations) = check_workspace_with_allowlist(ws.path(), NUMERICAL_SRC_DIRS, &valid_allow).unwrap();
         assert!(violations.is_empty(), "expected clean pass, got {violations:?}");
         assert_eq!(stats.allowlisted_modules, 1);
         assert_eq!(stats.cited_modules, 3);
@@ -1087,17 +1063,15 @@ mod tests {
             AllowlistedModule { path: "crates/math/src/lib.rs", reason: "Plumbing" },
             AllowlistedModule { path: "crates/math/src/ghost.rs", reason: "Removed module" },
         ];
-        let (_, stale_violations) = check_workspace_with_allowlist(&ws, NUMERICAL_SRC_DIRS, &stale_allow).unwrap();
+        let (_, stale_violations) = check_workspace_with_allowlist(ws.path(), NUMERICAL_SRC_DIRS, &stale_allow).unwrap();
         assert_eq!(stale_violations.len(), 1);
         assert!(stale_violations[0].detail.contains("ghost.rs"));
 
         // Blank allow-list reason must also fail closed.
         let blank_reason = [AllowlistedModule { path: "crates/math/src/lib.rs", reason: "   " }];
-        let (_, reason_violations) = check_workspace_with_allowlist(&ws, NUMERICAL_SRC_DIRS, &blank_reason).unwrap();
+        let (_, reason_violations) = check_workspace_with_allowlist(ws.path(), NUMERICAL_SRC_DIRS, &blank_reason).unwrap();
         assert_eq!(reason_violations.len(), 1);
         assert!(reason_violations[0].detail.contains("reason"));
-
-        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

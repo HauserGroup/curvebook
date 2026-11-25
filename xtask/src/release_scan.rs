@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::scan_util::{has_ext_ci, read_dir_paths_sorted, rel_slash};
 use crate::zip_read::{ZipArchive, ZipLimits};
 use curvebook_platform::process::ProcessCommand;
 use curvebook_platform::{PlatformError, read_regular_file_bytes, write_atomic};
@@ -326,6 +327,14 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn set_unique_flag<T>(slot: &mut Option<T>, flag: &str, value: T) -> Result<(), String> {
+    if slot.is_some() {
+        return Err(format!("duplicate `{flag}` argument\n\n{USAGE}"));
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
 fn parse_args(args: &[String]) -> Result<ScanOptions, String> {
     let mut assets_dir: Option<PathBuf> = None;
     let mut saw_require = false;
@@ -335,8 +344,7 @@ fn parse_args(args: &[String]) -> Result<ScanOptions, String> {
     let mut cross_os_reports_dir: Option<PathBuf> = None;
 
     let mut idx = 0usize;
-    while idx < args.len() {
-        let arg = args[idx].as_str();
+    while let Some(arg) = args.get(idx).map(String::as_str) {
         match arg {
             "--require-checksums" => {
                 saw_require = true;
@@ -347,32 +355,19 @@ fn parse_args(args: &[String]) -> Result<ScanOptions, String> {
                 idx += 1;
             }
             "--report" => {
-                let val = take_flag_value(args, idx, "--report")?;
-                if report_path.is_some() {
-                    return Err(format!("duplicate `--report` argument\n\n{USAGE}"));
-                }
-                report_path = Some(PathBuf::from(val));
+                set_unique_flag(&mut report_path, "--report", PathBuf::from(take_flag_value(args, idx, "--report")?))?;
                 idx += 2;
             }
             "--expect-beta-set" => {
-                let val = take_flag_value(args, idx, "--expect-beta-set")?;
-                if expect_beta_set.is_some() {
-                    return Err(format!("duplicate `--expect-beta-set` argument\n\n{USAGE}"));
-                }
-                expect_beta_set = Some(normalize_release_version(val)?);
+                let ver = normalize_release_version(take_flag_value(args, idx, "--expect-beta-set")?)?;
+                set_unique_flag(&mut expect_beta_set, "--expect-beta-set", ver)?;
                 idx += 2;
             }
             "--cross-os-reports" => {
-                let val = take_flag_value(args, idx, "--cross-os-reports")?;
-                if cross_os_reports_dir.is_some() {
-                    return Err(format!("duplicate `--cross-os-reports` argument\n\n{USAGE}"));
-                }
-                cross_os_reports_dir = Some(PathBuf::from(val));
+                set_unique_flag(&mut cross_os_reports_dir, "--cross-os-reports", PathBuf::from(take_flag_value(args, idx, "--cross-os-reports")?))?;
                 idx += 2;
             }
-            other if other.starts_with('-') => {
-                return Err(format!("unknown release-scan flag `{other}`\n\n{USAGE}"));
-            }
+            other if other.starts_with('-') => return Err(format!("unknown release-scan flag `{other}`\n\n{USAGE}")),
             positional => {
                 if assets_dir.is_some() {
                     return Err(format!("unexpected extra argument `{positional}`\n\n{USAGE}"));
@@ -389,9 +384,7 @@ fn parse_args(args: &[String]) -> Result<ScanOptions, String> {
     if expect_beta_set.is_some() && saw_no_checksums {
         return Err(format!("`--expect-beta-set` requires `{CHECKSUMS_FILE}` verification (cannot combine with `--no-checksums`)\n\n{USAGE}"));
     }
-    let Some(assets_dir) = assets_dir else {
-        return Err(USAGE.to_owned());
-    };
+    let assets_dir = assets_dir.ok_or_else(|| USAGE.to_owned())?;
     let checksum_mode = if saw_no_checksums { ChecksumMode::Disabled } else { ChecksumMode::Required };
     Ok(ScanOptions { assets_dir, checksum_mode, report_path, expect_beta_set, cross_os_reports_dir })
 }
@@ -466,14 +459,7 @@ impl CrossOsReportCatalog {
         if !meta.is_dir() {
             return Err(format!("`--cross-os-reports` path `{}` is not a directory", dir.display()));
         }
-        let mut paths = Vec::new();
-        for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir `{}`: {e}", dir.display()))? {
-            let path = entry.map_err(|e| format!("entry in `{}`: {e}", dir.display()))?.path();
-            if path.is_file() && path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("json")) {
-                paths.push(path);
-            }
-        }
-        paths.sort();
+        let paths: Vec<PathBuf> = read_dir_paths_sorted(dir)?.into_iter().filter(|p| p.is_file() && has_ext_ci(p, &["json"])).collect();
         if paths.is_empty() {
             return Err(format!("`--cross-os-reports` directory `{}` contains no `.json` reports", dir.display()));
         }
@@ -514,39 +500,42 @@ fn parse_cross_os_report_file(path: &Path, out: &mut Vec<CrossOsVerifiedRecord>)
     if val.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         return Err(format!("cross-OS report `{}` is not marked `ok: true`", path.display()));
     }
-    let Some(host_os) = val.get("host_os").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()) else {
-        return Err(format!("cross-OS report `{}` missing `host_os`", path.display()));
-    };
-    let Some(assets) = val.get("assets").and_then(serde_json::Value::as_array) else {
-        return Err(format!("cross-OS report `{}` missing `assets` array", path.display()));
-    };
+    let host_os = val
+        .get("host_os")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("cross-OS report `{}` missing `host_os`", path.display()))?;
+    let assets = val
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("cross-OS report `{}` missing `assets` array", path.display()))?;
     for entry in assets {
-        let Some(name) = entry.get("name").and_then(serde_json::Value::as_str) else {
-            return Err(format!("cross-OS report `{}` has asset entry missing `name`", path.display()));
+        let name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("cross-OS report `{}` has asset entry missing `name`", path.display()))?;
+        let req_str = |k: &str| {
+            entry
+                .get(k)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| format!("cross-OS report `{}` asset `{name}` missing `{k}`", path.display()))
         };
-        let Some(kind) = entry.get("kind").and_then(serde_json::Value::as_str) else {
-            return Err(format!("cross-OS report `{}` asset `{name}` missing `kind`", path.display()));
+        let req_u64 = |k: &str| {
+            entry
+                .get(k)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| format!("cross-OS report `{}` asset `{name}` missing `{k}`", path.display()))
         };
-        let Some(size_bytes) = entry.get("size_bytes").and_then(serde_json::Value::as_u64) else {
-            return Err(format!("cross-OS report `{}` asset `{name}` missing `size_bytes`", path.display()));
-        };
-        let Some(sha256) = entry.get("sha256").and_then(serde_json::Value::as_str) else {
-            return Err(format!("cross-OS report `{}` asset `{name}` missing `sha256`", path.display()));
-        };
-        let Some(unpacked_files) = entry.get("unpacked_files").and_then(serde_json::Value::as_u64) else {
-            return Err(format!("cross-OS report `{}` asset `{name}` missing `unpacked_files`", path.display()));
-        };
-        let nested_archive_entries = entry.get("nested_archive_entries").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        let checked_assets = entry.get("checked_assets").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let opt_usize = |k: &str| usize::try_from(entry.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0)).unwrap_or(usize::MAX);
         out.push(CrossOsVerifiedRecord {
             host_os: host_os.to_owned(),
             name: name.to_owned(),
-            kind: kind.to_owned(),
-            size_bytes,
-            sha256: sha256.to_ascii_lowercase(),
-            unpacked_files: usize::try_from(unpacked_files).unwrap_or(usize::MAX),
-            nested_archive_entries: usize::try_from(nested_archive_entries).unwrap_or(usize::MAX),
-            checked_assets: usize::try_from(checked_assets).unwrap_or(usize::MAX),
+            kind: req_str("kind")?.to_owned(),
+            size_bytes: req_u64("size_bytes")?,
+            sha256: req_str("sha256")?.to_ascii_lowercase(),
+            unpacked_files: usize::try_from(req_u64("unpacked_files")?).unwrap_or(usize::MAX),
+            nested_archive_entries: opt_usize("nested_archive_entries"),
+            checked_assets: opt_usize("checked_assets"),
         });
     }
     Ok(())
@@ -611,13 +600,7 @@ pub(crate) fn scan_release_dir_with_tools(root: &Path, options: &ScanOptions, to
 }
 
 fn discover_release_assets(assets_dir: &Path) -> Result<Vec<DiscoveredAsset>, String> {
-    let entries = std::fs::read_dir(assets_dir).map_err(|e| format!("read_dir `{}`: {e}", assets_dir.display()))?;
-    let mut paths = Vec::new();
-    for entry in entries {
-        paths.push(entry.map_err(|e| format!("entry in `{}`: {e}", assets_dir.display()))?.path());
-    }
-    paths.sort();
-
+    let paths = read_dir_paths_sorted(assets_dir)?;
     if paths.is_empty() {
         return Err(format!("release assets directory `{}` is empty", assets_dir.display()));
     }
@@ -662,38 +645,24 @@ fn classify_asset_name(name: &str) -> Result<AssetKind, String> {
     if name == LICENSES_HTML_FILE {
         return Ok(AssetKind::HtmlCompliance);
     }
+    const SUFFIXES: &[(&str, AssetKind)] = &[
+        (SBOM_EXT, AssetKind::Sbom),
+        (".zsync", AssetKind::Zsync),
+        (".tar.gz", AssetKind::TarGz),
+        (".tgz", AssetKind::TarGz),
+        (".zip", AssetKind::Zip),
+        (".deb", AssetKind::Deb),
+        (".rpm", AssetKind::Rpm),
+        (".appimage", AssetKind::AppImage),
+        (".flatpak", AssetKind::Flatpak),
+        (".dmg", AssetKind::Dmg),
+        (".msi", AssetKind::Msi),
+    ];
     let lower = name.to_ascii_lowercase();
-    if lower.ends_with(SBOM_EXT) {
-        return Ok(AssetKind::Sbom);
-    }
-    if lower.ends_with(".zsync") {
-        return Ok(AssetKind::Zsync);
-    }
-    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
-        return Ok(AssetKind::TarGz);
-    }
-    if lower.ends_with(".zip") {
-        return Ok(AssetKind::Zip);
-    }
-    if lower.ends_with(".deb") {
-        return Ok(AssetKind::Deb);
-    }
-    if lower.ends_with(".rpm") {
-        return Ok(AssetKind::Rpm);
-    }
-    if lower.ends_with(".appimage") {
-        return Ok(AssetKind::AppImage);
-    }
-    if lower.ends_with(".flatpak") {
-        return Ok(AssetKind::Flatpak);
-    }
-    if lower.ends_with(".dmg") {
-        return Ok(AssetKind::Dmg);
-    }
-    if lower.ends_with(".msi") {
-        return Ok(AssetKind::Msi);
-    }
-    Err(format!("unsupported or unknown release asset format `{name}` (failing closed)"))
+    SUFFIXES
+        .iter()
+        .find_map(|&(suffix, kind)| lower.ends_with(suffix).then_some(kind))
+        .ok_or_else(|| format!("unsupported or unknown release asset format `{name}` (failing closed)"))
 }
 
 fn verify_checksum_manifest(assets_dir: &Path, discovered: &[DiscoveredAsset]) -> Result<(), String> {
@@ -781,20 +750,21 @@ fn scan_single_asset(
     item_scratch: &Path,
     violations: &mut Vec<String>,
 ) -> Result<ScannedAssetRecord, String> {
+    let compliance_record = || ScannedAssetRecord {
+        name: item.name.clone(),
+        kind: item.kind.label(),
+        size_bytes: item.size_bytes,
+        sha256: item.sha256.clone(),
+        unpacked_files: 1,
+        nested_archive_entries: 0,
+        checked_assets: 0,
+    };
     match item.kind {
         AssetKind::Checksums | AssetKind::HtmlCompliance => {
             let bytes = read_non_symlink_regular_bytes(&item.path, MAX_COMPLIANCE_TEXT_BYTES, &item.name)?;
             let text = std::str::from_utf8(&bytes).map_err(|e| format!("`{}` is not valid UTF-8: {e}", item.name))?;
             collect_compliance_hits(&item.name, text, &bytes, violations);
-            Ok(ScannedAssetRecord {
-                name: item.name.clone(),
-                kind: item.kind.label(),
-                size_bytes: item.size_bytes,
-                sha256: item.sha256.clone(),
-                unpacked_files: 1,
-                nested_archive_entries: 0,
-                checked_assets: 0,
-            })
+            Ok(compliance_record())
         }
         AssetKind::Sbom => {
             let bytes = read_non_symlink_regular_bytes(&item.path, MAX_COMPLIANCE_TEXT_BYTES, &item.name)?;
@@ -820,45 +790,22 @@ fn scan_single_asset(
             let bytes = read_non_symlink_regular_bytes(&item.path, MAX_ZSYNC_BYTES, &item.name)?;
             let header = extract_zsync_header_utf8(&item.name, &bytes)?;
             collect_compliance_hits(&item.name, header, &bytes, violations);
-            Ok(ScannedAssetRecord {
-                name: item.name.clone(),
-                kind: item.kind.label(),
-                size_bytes: item.size_bytes,
-                sha256: item.sha256.clone(),
-                unpacked_files: 1,
-                nested_archive_entries: 0,
-                checked_assets: 0,
-            })
-        }
-        AssetKind::Dmg if !tools.allow_dmg => {
-            if let Some(reports) = cross_os_reports {
-                return reports.match_native_asset("macos", item).ok_or_else(|| {
-                    format!(
-                        "`{}`: missing matching verified macOS native scan report (`host_os=macos`, exact size/sha256, `unpacked_files > 0`)",
-                        item.name
-                    )
-                });
-            }
-            let stage_dir = item_scratch.join("unpacked");
-            std::fs::create_dir_all(&stage_dir).map_err(|e| format!("create unpacked dir for `{}`: {e}", item.name))?;
-            unpack_container_asset(tools, item, item_scratch, &stage_dir, violations)?;
-            scan_unpacked_tree(asset_catalog, item, &stage_dir, violations)
-        }
-        AssetKind::Msi if !tools.allow_msi => {
-            if let Some(reports) = cross_os_reports {
-                return reports.match_native_asset("windows", item).ok_or_else(|| {
-                    format!(
-                        "`{}`: missing matching verified Windows native scan report (`host_os=windows`, exact size/sha256, `unpacked_files > 0`)",
-                        item.name
-                    )
-                });
-            }
-            let stage_dir = item_scratch.join("unpacked");
-            std::fs::create_dir_all(&stage_dir).map_err(|e| format!("create unpacked dir for `{}`: {e}", item.name))?;
-            unpack_container_asset(tools, item, item_scratch, &stage_dir, violations)?;
-            scan_unpacked_tree(asset_catalog, item, &stage_dir, violations)
+            Ok(compliance_record())
         }
         _ => {
+            let cross_os_host = match item.kind {
+                AssetKind::Dmg if !tools.allow_dmg => Some(("macos", "macOS")),
+                AssetKind::Msi if !tools.allow_msi => Some(("windows", "Windows")),
+                _ => None,
+            };
+            if let (Some((host_id, host_label)), Some(reports)) = (cross_os_host, cross_os_reports) {
+                return reports.match_native_asset(host_id, item).ok_or_else(|| {
+                    format!(
+                        "`{}`: missing matching verified {host_label} native scan report (`host_os={host_id}`, exact size/sha256, `unpacked_files > 0`)",
+                        item.name
+                    )
+                });
+            }
             let stage_dir = item_scratch.join("unpacked");
             std::fs::create_dir_all(&stage_dir).map_err(|e| format!("create unpacked dir for `{}`: {e}", item.name))?;
             unpack_container_asset(tools, item, item_scratch, &stage_dir, violations)?;
@@ -981,26 +928,25 @@ fn scan_unpacked_tree(
     })
 }
 
-fn scan_tree_symlinks(asset_name: &str, root: &Path, dir: &Path, violations: &mut Vec<String>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
-    let mut paths = Vec::new();
-    for entry in entries {
-        paths.push(entry.map_err(|e| format!("dir entry under {}: {e}", dir.display()))?.path());
+fn scan_symlink_entry(asset_name: &str, rel_norm: &str, path: &Path, violations: &mut Vec<String>) -> Result<(), String> {
+    let target = std::fs::read_link(path).map_err(|e| format!("read_link `{asset_name}!{rel_norm}`: {e}"))?;
+    let target_str = target.to_string_lossy();
+    let src = format!("{asset_name}!{rel_norm}");
+    for hit in crate::brands::scan_dist_label(&src, rel_norm) {
+        violations.push(format!("{}:{}: [brands] `{}`", hit.path, hit.line, hit.brand));
     }
-    paths.sort();
-    for path in paths {
+    for hit in crate::brands::scan_dist_label(&src, &target_str) {
+        violations.push(format!("{}:{}: [brands] symlink target `{}`", hit.path, hit.line, hit.brand));
+    }
+    Ok(())
+}
+
+fn scan_tree_symlinks(asset_name: &str, root: &Path, dir: &Path, violations: &mut Vec<String>) -> Result<(), String> {
+    for path in read_dir_paths_sorted(dir)? {
         let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
         if meta.file_type().is_symlink() {
-            let rel = path.strip_prefix(root).map_err(|e| format!("strip prefix {}: {e}", path.display()))?.to_string_lossy().replace('\\', "/");
-            let target = std::fs::read_link(&path).map_err(|e| format!("read_link `{asset_name}!{rel}`: {e}"))?;
-            let target_str = target.to_string_lossy();
-            let src = format!("{asset_name}!{rel}");
-            for hit in crate::brands::scan_dist_label(&src, &rel) {
-                violations.push(format!("{}:{}: [brands] `{}`", hit.path, hit.line, hit.brand));
-            }
-            for hit in crate::brands::scan_dist_label(&src, &target_str) {
-                violations.push(format!("{}:{}: [brands] symlink target `{}`", hit.path, hit.line, hit.brand));
-            }
+            let rel = rel_slash(root, &path)?;
+            scan_symlink_entry(asset_name, &rel, &path, violations)?;
         } else if meta.is_dir() {
             scan_tree_symlinks(asset_name, root, &path, violations)?;
         }
@@ -1409,27 +1355,12 @@ fn copy_mounted_tree_no_symlinks(
     dest_root: &Path,
     violations: &mut Vec<String>,
 ) -> Result<(), String> {
-    let entries = std::fs::read_dir(current_dir).map_err(|e| format!("read mounted `{asset_name}` dir {}: {e}", current_dir.display()))?;
-    let mut paths = Vec::new();
-    for entry in entries {
-        paths.push(entry.map_err(|e| format!("mounted `{asset_name}` entry: {e}"))?.path());
-    }
-    paths.sort();
-
-    for path in paths {
+    for path in read_dir_paths_sorted(current_dir)? {
         let rel = path.strip_prefix(mount_root).map_err(|e| format!("strip mount prefix {}: {e}", path.display()))?;
         let rel_norm = rel.to_string_lossy().replace('\\', "/");
         let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat mounted `{asset_name}!{rel_norm}`: {e}"))?;
         if meta.file_type().is_symlink() {
-            let target = std::fs::read_link(&path).map_err(|e| format!("read_link `{asset_name}!{rel_norm}`: {e}"))?;
-            let target_str = target.to_string_lossy();
-            let src = format!("{asset_name}!{rel_norm}");
-            for hit in crate::brands::scan_dist_label(&src, &rel_norm) {
-                violations.push(format!("{}:{}: [brands] `{}`", hit.path, hit.line, hit.brand));
-            }
-            for hit in crate::brands::scan_dist_label(&src, &target_str) {
-                violations.push(format!("{}:{}: [brands] symlink target `{}`", hit.path, hit.line, hit.brand));
-            }
+            scan_symlink_entry(asset_name, &rel_norm, &path, violations)?;
         } else if meta.is_dir() {
             std::fs::create_dir_all(dest_root.join(rel)).map_err(|e| format!("mkdir `{asset_name}!{rel_norm}`: {e}"))?;
             copy_mounted_tree_no_symlinks(asset_name, mount_root, &path, dest_root, violations)?;
@@ -2018,44 +1949,43 @@ mod tests {
     fn build_minimal_clean_tar_gz(entry_path: &str, data: &[u8]) -> Vec<u8> {
         let mut tar = Vec::new();
         let mut hdr = [0u8; 512];
-        let name_bytes = entry_path.as_bytes();
-        hdr[..name_bytes.len()].copy_from_slice(name_bytes);
+        hdr[..entry_path.len()].copy_from_slice(entry_path.as_bytes());
         hdr[100..108].copy_from_slice(b"0000644\0");
         hdr[108..116].copy_from_slice(b"0000000\0");
         hdr[116..124].copy_from_slice(b"0000000\0");
-        let size_octal = format!("{:011o}\0", data.len());
-        hdr[124..136].copy_from_slice(size_octal.as_bytes());
+        hdr[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
         hdr[136..148].copy_from_slice(b"00000000000\0");
         hdr[148..156].fill(b' ');
         hdr[156] = b'0';
-        hdr[257..263].copy_from_slice(b"ustar\0");
-        hdr[263..265].copy_from_slice(b"00");
+        hdr[257..265].copy_from_slice(b"ustar\x0000");
         let chksum: u32 = hdr.iter().map(|&b| u32::from(b)).sum();
         hdr[148..156].copy_from_slice(format!("{chksum:06o}\0 ").as_bytes());
         tar.extend_from_slice(&hdr);
         tar.extend_from_slice(data);
-        let pad = (512 - (data.len() % 512)) % 512;
-        tar.resize(tar.len() + pad, 0);
-        tar.resize(tar.len() + 1024, 0);
+        tar.resize(tar.len() + ((512 - (data.len() % 512)) % 512) + 1024, 0);
 
-        let mut gz = vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03];
+        let mut gz = vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x01];
         let len = tar.len() as u16;
-        let nlen = !len;
-        gz.push(1);
         gz.extend_from_slice(&len.to_le_bytes());
-        gz.extend_from_slice(&nlen.to_le_bytes());
+        gz.extend_from_slice(&(!len).to_le_bytes());
         gz.extend_from_slice(&tar);
-        let mut crc = 0xffff_ffffu32;
-        for &b in &tar {
-            crc ^= u32::from(b);
-            for _ in 0..8 {
-                let mask = (crc & 1).wrapping_neg();
-                crc = (crc >> 1) ^ (0xedb8_8320u32 & mask);
-            }
-        }
-        gz.extend_from_slice(&(!crc).to_le_bytes());
+        gz.extend_from_slice(&crc32fast::hash(&tar).to_le_bytes());
         gz.extend_from_slice(&(tar.len() as u32).to_le_bytes());
         gz
+    }
+
+    #[cfg(unix)]
+    fn write_cross_os_report(path: &Path, host_os: &str, entries: &[(&str, &str, &[u8], usize)]) {
+        let assets: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|&(name, kind, bytes, unpacked)| {
+                serde_json::json!({
+                    "name": name, "kind": kind, "size_bytes": bytes.len(), "sha256": sha256_hex(bytes),
+                    "unpacked_files": unpacked, "nested_archive_entries": 0, "checked_assets": 1
+                })
+            })
+            .collect();
+        std::fs::write(path, serde_json::to_vec_pretty(&serde_json::json!({"ok": true, "host_os": host_os, "assets": assets})).unwrap()).unwrap();
     }
 
     #[cfg(unix)]
@@ -2065,100 +1995,55 @@ mod tests {
         let scratch = ScratchDirGuard::new("beta-set").unwrap();
         let bin_dir = scratch.path.join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
-
         let unsquashfs = write_exec_script(
             &bin_dir,
             "unsquashfs",
-            "#!/bin/sh\nset -eu\ndest=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -no-progress) shift ;;\n    -o) shift 2 ;;\n    -d) dest=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nmkdir -p \"$dest/usr/share/doc/curvebook\"\nprintf 'CurveBook clean AppImage\\n' > \"$dest/usr/share/doc/curvebook/README.txt\"\n",
+            "#!/bin/sh\nset -eu\ndest=\"\"\nwhile [ $# -gt 0 ]; do case \"$1\" in -no-progress) shift ;; -o) shift 2 ;; -d) dest=\"$2\"; shift 2 ;; *) shift ;; esac; done\nmkdir -p \"$dest/usr/share/doc/curvebook\"\nprintf 'CurveBook clean AppImage\\n' > \"$dest/usr/share/doc/curvebook/README.txt\"\n",
         );
 
         let ver = "0.1.0-beta.1";
         let rel_dir = scratch.path.join("release");
         std::fs::create_dir_all(&rel_dir).unwrap();
-
         let mut appimage_bytes = vec![0x7f, b'E', b'L', b'F'];
         appimage_bytes.resize(512, 0);
         appimage_bytes.extend_from_slice(&build_squashfs_v4_superblock(131_072, 17, 1));
-        let dmg_bytes = b"CurveBook DMG fixture\n";
-        let msi_x64_bytes = b"CurveBook MSI x64 fixture\n";
-        let msi_arm64_bytes = b"CurveBook MSI arm64 fixture\n";
+        let (dmg_b, x64_b, arm_b) = (b"CurveBook DMG fixture\n", b"CurveBook MSI x64 fixture\n", b"CurveBook MSI arm64 fixture\n");
         let freebsd_tgz =
             build_minimal_clean_tar_gz("curvebook-0.1.0-beta.1-freebsd-x86_64/share/doc/curvebook/README.txt", b"CurveBook FreeBSD clean\n");
         let sbom_json = serde_json::to_vec_pretty(&serde_json::json!({
             "bomFormat": "CycloneDX",
             "specVersion": "1.5",
             "version": 1,
-            "components": [
-                {
-                    "type": "library",
-                    "name": "serde",
-                    "version": "1.0.219"
-                }
-            ]
+            "components": [{ "type": "library", "name": "serde", "version": "1.0.219" }]
         }))
         .unwrap();
-
-        std::fs::write(rel_dir.join(format!("curvebook-{ver}-macos-universal.dmg")), dmg_bytes).unwrap();
-        std::fs::write(rel_dir.join(format!("curvebook-{ver}-windows-x64.msi")), msi_x64_bytes).unwrap();
-        std::fs::write(rel_dir.join(format!("curvebook-{ver}-windows-arm64.msi")), msi_arm64_bytes).unwrap();
-        std::fs::write(rel_dir.join(format!("curvebook-{ver}-linux-x86_64.AppImage")), &appimage_bytes).unwrap();
-        std::fs::write(rel_dir.join(format!("curvebook-{ver}-linux-aarch64.AppImage")), &appimage_bytes).unwrap();
-        std::fs::write(rel_dir.join(format!("curvebook-{ver}-freebsd-x86_64.tar.gz")), &freebsd_tgz).unwrap();
-        std::fs::write(rel_dir.join(format!("curvebook-{ver}.cdx.json")), &sbom_json).unwrap();
-        std::fs::write(rel_dir.join("THIRD-PARTY-LICENSES.html"), "<html><title>CurveBook</title><body>MIT OR Apache-2.0</body></html>\n").unwrap();
+        let dmg_name = format!("curvebook-{ver}-macos-universal.dmg");
+        let x64_name = format!("curvebook-{ver}-windows-x64.msi");
+        let arm_name = format!("curvebook-{ver}-windows-arm64.msi");
+        for (name, bytes) in [
+            (dmg_name.as_str(), &dmg_b[..]),
+            (x64_name.as_str(), &x64_b[..]),
+            (arm_name.as_str(), &arm_b[..]),
+            (&format!("curvebook-{ver}-linux-x86_64.AppImage"), &appimage_bytes[..]),
+            (&format!("curvebook-{ver}-linux-aarch64.AppImage"), &appimage_bytes[..]),
+            (&format!("curvebook-{ver}-freebsd-x86_64.tar.gz"), &freebsd_tgz[..]),
+            (&format!("curvebook-{ver}.cdx.json"), &sbom_json[..]),
+            ("THIRD-PARTY-LICENSES.html", b"<html><title>CurveBook</title><body>MIT OR Apache-2.0</body></html>\n"),
+        ] {
+            std::fs::write(rel_dir.join(name), bytes).unwrap();
+        }
         write_checksums(&rel_dir);
 
         let reports_dir = scratch.path.join("reports");
         std::fs::create_dir_all(&reports_dir).unwrap();
-        std::fs::write(
-            reports_dir.join("scan-report-macos.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "ok": true,
-                "host_os": "macos",
-                "assets": [{
-                    "name": format!("curvebook-{ver}-macos-universal.dmg"),
-                    "kind": "dmg",
-                    "size_bytes": dmg_bytes.len(),
-                    "sha256": sha256_hex(dmg_bytes),
-                    "unpacked_files": 4,
-                    "nested_archive_entries": 0,
-                    "checked_assets": 1
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        std::fs::write(
-            reports_dir.join("scan-report-windows.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "ok": true,
-                "host_os": "windows",
-                "assets": [
-                    {
-                        "name": format!("curvebook-{ver}-windows-x64.msi"),
-                        "kind": "msi",
-                        "size_bytes": msi_x64_bytes.len(),
-                        "sha256": sha256_hex(msi_x64_bytes),
-                        "unpacked_files": 5,
-                        "nested_archive_entries": 0,
-                        "checked_assets": 1
-                    },
-                    {
-                        "name": format!("curvebook-{ver}-windows-arm64.msi"),
-                        "kind": "msi",
-                        "size_bytes": msi_arm64_bytes.len(),
-                        "sha256": sha256_hex(msi_arm64_bytes),
-                        "unpacked_files": 5,
-                        "nested_archive_entries": 0,
-                        "checked_assets": 1
-                    }
-                ]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        write_cross_os_report(&reports_dir.join("scan-report-macos.json"), "macos", &[(&dmg_name, "dmg", dmg_b, 4)]);
+        write_cross_os_report(
+            &reports_dir.join("scan-report-windows.json"),
+            "windows",
+            &[(&x64_name, "msi", x64_b, 5), (&arm_name, "msi", arm_b, 5)],
+        );
 
-        let linux_host_tools =
+        let linux_tools =
             ToolConfig { unsquashfs_bin: unsquashfs.to_string_lossy().into_owned(), allow_dmg: false, allow_msi: false, ..ToolConfig::default() };
 
         // 1. Complete 9-file Beta set (including CycloneDX SBOM) + matching cross-OS reports passes cleanly.
@@ -2169,40 +2054,21 @@ mod tests {
             expect_beta_set: Some(ver.to_owned()),
             cross_os_reports_dir: Some(reports_dir.clone()),
         };
-        let report = scan_release_dir_with_tools(&root, &ok_opts, &linux_host_tools).unwrap();
-        assert_eq!(report.asset_count, 9);
-        assert_eq!(report.host_os, std::env::consts::OS);
+        let report = scan_release_dir_with_tools(&root, &ok_opts, &linux_tools).unwrap();
+        assert_eq!((report.asset_count, report.host_os.as_str()), (9, std::env::consts::OS));
         assert!(report.assets.iter().any(|a| a.name == format!("curvebook-{ver}.cdx.json") && a.kind == "sbom"));
 
-        // 2. Without cross-os-reports, cross-OS .dmg / .msi STILL fails closed!
-        let no_reports_opts = ScanOptions { cross_os_reports_dir: None, ..ok_opts.clone() };
-        assert!(scan_release_dir_with_tools(&root, &no_reports_opts, &linux_host_tools).is_err());
+        assert!(scan_release_dir_with_tools(&root, &ScanOptions { cross_os_reports_dir: None, ..ok_opts.clone() }, &linux_tools).is_err());
 
-        // 3. Forged wrong host_os or mismatched sha256 in cross-OS report fails closed!
-        std::fs::write(
-            reports_dir.join("scan-report-macos.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "ok": true,
-                "host_os": "linux",
-                "assets": [{
-                    "name": format!("curvebook-{ver}-macos-universal.dmg"),
-                    "kind": "dmg",
-                    "size_bytes": dmg_bytes.len(),
-                    "sha256": sha256_hex(dmg_bytes),
-                    "unpacked_files": 4
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let bad_host_err = scan_release_dir_with_tools(&root, &ok_opts, &linux_host_tools).unwrap_err();
-        assert!(bad_host_err.contains("host_os=macos"), "{bad_host_err}");
+        write_cross_os_report(&reports_dir.join("scan-report-macos.json"), "linux", &[(&dmg_name, "dmg", dmg_b, 4)]);
+        let bad_host = scan_release_dir_with_tools(&root, &ok_opts, &linux_tools).unwrap_err();
+        assert!(bad_host.contains("host_os=macos"), "{bad_host}");
 
         // 4. Extra dropped asset fails closed even if all 9 files are present.
         std::fs::write(rel_dir.join(format!("curvebook-web-{ver}.zip")), b"PK\x05\x06").unwrap();
         write_checksums(&rel_dir);
-        let extra_err = scan_release_dir_with_tools(&root, &ok_opts, &linux_host_tools).unwrap_err();
-        assert!(extra_err.contains("unexpected extra file(s)") && extra_err.contains(&format!("curvebook-web-{ver}.zip")), "{extra_err}");
+        let extra = scan_release_dir_with_tools(&root, &ok_opts, &linux_tools).unwrap_err();
+        assert!(extra.contains("unexpected extra file(s)") && extra.contains(&format!("curvebook-web-{ver}.zip")), "{extra}");
     }
 
     #[test]

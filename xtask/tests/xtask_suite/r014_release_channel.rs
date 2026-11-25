@@ -3,11 +3,8 @@
 //! never publish a candidate as the repository's "Latest" release.
 
 use std::fs;
-use std::path::{Path, PathBuf};
 
-fn workspace_root() -> Result<PathBuf, String> {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).ok_or_else(|| String::from("CARGO_MANIFEST_DIR has no parent"))
-}
+use super::common::workspace_root;
 
 #[cfg(unix)]
 fn classify(args: &[&str]) -> Result<std::process::Output, String> {

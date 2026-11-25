@@ -5,54 +5,8 @@
 //! checks stay clean on this test file itself.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-static SEQ: AtomicU64 = AtomicU64::new(0);
-
-struct TempDirGuard {
-    path: PathBuf,
-}
-
-impl TempDirGuard {
-    fn new(label: &str) -> Result<Self, String> {
-        let id = SEQ.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let path = std::env::temp_dir().join(format!("cb-p9-sec22-{label}-{}-{nanos}-{id}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).map_err(|e| format!("create_dir_all {}: {e}", path.display()))?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-fn workspace_root() -> Result<PathBuf, String> {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).ok_or_else(|| String::from("CARGO_MANIFEST_DIR has no workspace parent"))
-}
-
-fn run_xtask(args: &[&str], envs: &[(&str, Option<&str>)]) -> Result<Output, String> {
-    let root = workspace_root()?;
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_xtask"));
-    cmd.current_dir(root).args(args);
-    for &(k, v) in envs {
-        match v {
-            Some(val) => {
-                cmd.env(k, val);
-            }
-            None => {
-                cmd.env_remove(k);
-            }
-        }
-    }
-    cmd.output().map_err(|e| format!("run xtask {args:?}: {e}"))
-}
+use super::common::{TempDirGuard, run_xtask, workspace_root};
 
 #[test]
 fn fa_x3_06_secrets_prints_workspace_tracked_plus_untracked_count_and_passes() -> Result<(), String> {

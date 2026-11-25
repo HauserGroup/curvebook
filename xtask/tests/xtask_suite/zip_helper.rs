@@ -18,6 +18,12 @@ impl ZipWriter {
         Ok(())
     }
 
+    pub fn single(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
+        let mut zw = Self::new();
+        zw.add_file(name, bytes.to_vec())?;
+        zw.finish()
+    }
+
     pub fn finish(self) -> Result<Vec<u8>, String> {
         let mut out = Vec::new();
         let mut cd = Vec::new();

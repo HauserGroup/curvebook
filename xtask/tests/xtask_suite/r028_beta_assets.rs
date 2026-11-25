@@ -4,47 +4,10 @@
 //! and `R14.2` Part A (release CycloneDX SBOM generation, scanning, and attestation).
 
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-struct TempDirGuard {
-    path: PathBuf,
-}
-
-impl TempDirGuard {
-    fn new(label: &str) -> Result<Self, String> {
-        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let path = std::env::temp_dir().join(format!("cb-r028-test-{label}-{}-{nanos}-{seq}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).map_err(|e| format!("create_dir_all {}: {e}", path.display()))?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-fn workspace_root() -> Result<PathBuf, String> {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).ok_or_else(|| String::from("CARGO_MANIFEST_DIR has no parent"))
-}
-
-fn run_release_scan(args: &[&str]) -> Result<std::process::Output, String> {
-    let root = workspace_root()?;
-    Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .current_dir(root)
-        .arg("release-scan")
-        .args(args)
-        .output()
-        .map_err(|e| format!("run release-scan {args:?}: {e}"))
-}
+use super::common::{TempDirGuard, run_release_scan, workspace_root};
 
 #[test]
 fn r028_expect_beta_set_rejects_missing_extra_and_invalid_cli_flags() -> Result<(), String> {

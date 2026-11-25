@@ -4,8 +4,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::rust_lex::{ExtractedLiteral, RustLexer, push_char_with_line};
-use crate::text_decode::{decode_utf8_or_utf16, decode_utf16};
+use crate::rust_lex::{ExtractedLiteral, RustLexer, count_newlines, push_char_with_line};
+use crate::scan_util::{collect_dist_files, is_zip_magic, lower_ext};
+use crate::text_decode::{decode_utf8_or_utf16, decode_utf16, decode_xml_html_entities};
 use crate::zip_read::{ZipArchive, ZipLimits};
 
 /// Competitor vendor and product names checked on ASCII token boundaries (including CamelCase / snake_case / kebab-case splits).
@@ -230,39 +231,66 @@ pub fn scan_repo_checked(root: &Path, files: &[String]) -> Result<Vec<BrandHit>,
     Ok(hits)
 }
 
-fn scan_repo_file_bytes(path: &str, bytes: &[u8], hits: &mut Vec<BrandHit>, scan_errors: &mut Vec<String>) {
-    let ext_lower = Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-    if ext_lower == "png" {
+pub(crate) fn is_plan_prism_path(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
+    trimmed == PLAN_PRISM_SCOPE || trimmed.starts_with("plan/prism/") || trimmed.contains("/plan/prism/") || trimmed.ends_with("/plan/prism")
+}
+
+pub(crate) fn is_forbidden_bundled_dir(rel: &str) -> bool {
+    let norm = rel.replace('\\', "/");
+    let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
+    trimmed == "docs/audit"
+        || trimmed.starts_with(AUDIT_PREFIX)
+        || trimmed.contains("/docs/audit/")
+        || trimmed.ends_with("/docs/audit")
+        || trimmed == "docs/history/audit"
+        || trimmed.starts_with(HISTORY_AUDIT_PREFIX)
+        || trimmed.contains("/docs/history/audit/")
+        || trimmed.ends_with("/docs/history/audit")
+        || is_plan_prism_path(trimmed)
+}
+
+fn try_scan_binary_metadata(path: &str, ext: &str, bytes: &[u8], sniff_magic: bool, hits: &mut Vec<BrandHit>) -> Result<bool, String> {
+    if ext == "png" || (sniff_magic && bytes.starts_with(b"\x89PNG\r\n\x1a\n")) {
         hits.extend(check_png_metadata(path, bytes));
-        return;
+        return Ok(true);
     }
-    if matches!(ext_lower.as_str(), "ico" | "icns") {
+    if matches!(ext, "ico" | "icns") {
         hits.extend(check_icon_container_metadata(path, bytes));
-        return;
+        return Ok(true);
     }
-    if ext_lower == "gif" {
+    if ext == "gif" || (sniff_magic && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"))) {
         hits.extend(check_gif_metadata(path, bytes));
-        return;
+        return Ok(true);
     }
-    if ext_lower == "pdf" || bytes.starts_with(b"%PDF-") {
+    if ext == "pdf" || bytes.starts_with(b"%PDF-") {
         hits.extend(check_pdf_metadata(path, bytes));
-        return;
+        return Ok(true);
     }
-    if ext_lower == "svgz" || (bytes.starts_with(&[0x1F, 0x8B]) && is_binary_asset_ext(path)) {
-        match inflate_gzip_bounded(bytes) {
-            Ok(raw) => match decode_text_file(path, &raw) {
-                Ok(DecodedFile::Text(svg)) => {
-                    scan_svg(path, &svg, hits);
-                    hits.extend(check_svg_metadata(path, &svg));
-                }
-                _ => scan_errors.push(format!("cannot scan {path}: .svgz payload is not valid UTF-8/UTF-16 SVG text")),
-            },
-            Err(()) => scan_errors.push(format!("cannot scan {path}: corrupt or oversized .svgz gzip payload")),
+    if ext == "svgz" || (bytes.starts_with(&[0x1F, 0x8B]) && is_binary_asset_ext(path)) {
+        let raw = inflate_gzip_bounded(bytes).map_err(|()| format!("cannot scan {path}: corrupt or oversized .svgz gzip payload"))?;
+        let DecodedFile::Text(svg) = decode_text_file(path, &raw)? else {
+            return Err(format!("cannot scan {path}: .svgz payload is not valid UTF-8/UTF-16 SVG text"));
+        };
+        scan_svg(path, &svg, hits);
+        hits.extend(check_svg_metadata(path, &svg));
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn scan_repo_file_bytes(path: &str, bytes: &[u8], hits: &mut Vec<BrandHit>, scan_errors: &mut Vec<String>) {
+    let ext_lower = lower_ext(path);
+    match try_scan_binary_metadata(path, &ext_lower, bytes, false, hits) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(err) => {
+            scan_errors.push(err);
+            return;
         }
-        return;
     }
-    let is_pk_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
-    if is_pk_zip || matches!(ext_lower.as_str(), "zip" | "curvebook" | "cbtemplate") {
+    if is_zip_magic(bytes) || matches!(ext_lower.as_str(), "zip" | "curvebook" | "cbtemplate") {
         let mut stats = DistScanStats::default();
         if let Err(err) = scan_dist_bytes(path, bytes, 0, &mut stats, hits) {
             scan_errors.push(err);
@@ -287,8 +315,7 @@ fn scan_tracked_path_name(path: &str, out: &mut Vec<BrandHit>) {
     if is_crates_or_apps_path(&norm) {
         collect_line_words(path, 1, &norm, &[ADAPTED_UPSTREAM_BRAND], PrismPolicy::Strict, out);
     }
-    let allow_prism_module = norm == "crates/format/src/prism.rs";
-    let path_policy = if allow_prism_module { PrismPolicy::AllowExactBarePrism } else { PrismPolicy::Strict };
+    let path_policy = if norm == "crates/format/src/prism.rs" { PrismPolicy::AllowExactBarePrism } else { PrismPolicy::Strict };
     collect_line_words(path, 1, &norm, BRANDS, path_policy, out);
     dedup_tail_hits(out, start_idx);
 }
@@ -749,7 +776,7 @@ impl SvgState {
             if self.in_comment {
                 if bytes.get(i..i + 3) == Some(b"-->") {
                     chunks.push(SvgChunk {
-                        text: decode_xml_or_html_entities(line.get(span_start..i).unwrap_or("")),
+                        text: decode_xml_html_entities(line.get(span_start..i).unwrap_or("")),
                         is_meta_text: false,
                         prev_word: None,
                     });
@@ -766,7 +793,7 @@ impl SvgState {
                     let tag_chunk = line.get(span_start..=i).unwrap_or("");
                     self.tag_buf.push_str(tag_chunk);
                     self.apply_completed_tag();
-                    chunks.push(SvgChunk { text: decode_xml_or_html_entities(tag_chunk), is_meta_text: false, prev_word: None });
+                    chunks.push(SvgChunk { text: decode_xml_html_entities(tag_chunk), is_meta_text: false, prev_word: None });
                     i += 1;
                     span_start = i;
                 } else {
@@ -797,7 +824,7 @@ impl SvgState {
             if !self.in_comment && !self.in_tag {
                 self.push_text_chunk(line, span_start, line.len(), &mut chunks);
             } else {
-                chunks.push(SvgChunk { text: decode_xml_or_html_entities(tail), is_meta_text: false, prev_word: None });
+                chunks.push(SvgChunk { text: decode_xml_html_entities(tail), is_meta_text: false, prev_word: None });
             }
         }
         chunks
@@ -807,7 +834,7 @@ impl SvgState {
         if start >= end {
             return;
         }
-        let decoded = decode_xml_or_html_entities(line.get(start..end).unwrap_or(""));
+        let decoded = decode_xml_html_entities(line.get(start..end).unwrap_or(""));
         let prev_word = if self.in_meta { self.prev_meta_word.clone() } else { None };
         let is_meta = self.in_meta;
         if is_meta && !decoded.trim().is_empty() {
@@ -1009,9 +1036,12 @@ impl<'a> TomlScanner<'a> {
         }
     }
 
-    fn skip_comment(&mut self) {
+    fn skip_to_eol(&mut self, consume_nl: bool) {
         while let Some(b) = self.peek() {
             if b == b'\n' {
+                if consume_nl {
+                    self.advance_one();
+                }
                 break;
             }
             self.pos += 1;
@@ -1024,15 +1054,9 @@ impl<'a> TomlScanner<'a> {
                 b' ' | b'\t' | b'\r' | b'\n' => {
                     self.advance_one();
                 }
-                b'#' => self.skip_comment(),
+                b'#' => self.skip_to_eol(false),
                 _ => break,
             }
-        }
-    }
-
-    fn skip_inline_ws(&mut self) {
-        while matches!(self.peek(), Some(b' ' | b'\t' | b'\r')) {
-            self.pos += 1;
         }
     }
 
@@ -1046,16 +1070,12 @@ impl<'a> TomlScanner<'a> {
                 self.pos += 1;
             }
         }
-        while let Some(b) = self.advance_one() {
-            if b == b'\n' {
-                break;
-            }
-        }
+        self.skip_to_eol(true);
         self.in_workspace_section = segments.len() == 1 && segments[0] == "workspace";
         self.in_metadata_section = is_metadata_table_segments(&segments);
         if self.in_metadata_section {
             for lit in &key_lits {
-                self.check_literal(lit, false);
+                self.check_literal(lit);
             }
         }
     }
@@ -1063,61 +1083,47 @@ impl<'a> TomlScanner<'a> {
     fn read_statement(&mut self) {
         let (segments, key_lits) = self.read_dotted_key(false);
         if self.peek() != Some(b'=') {
-            if let Some(b) = self.peek() {
-                if b == b'\n' {
-                    self.advance_one();
-                } else {
-                    while let Some(next) = self.advance_one() {
-                        if next == b'\n' {
-                            break;
-                        }
-                    }
-                }
-            }
+            self.skip_to_eol(true);
             return;
         }
-        self.pos += 1; // '='
+        self.pos += 1;
         let is_meta = self.in_metadata_section || is_metadata_key_segments(&segments, self.in_workspace_section);
         if is_meta {
             for lit in &key_lits {
-                self.check_literal(lit, false);
+                self.check_literal(lit);
             }
         }
-        self.scan_value(is_meta, false);
+        self.scan_value(is_meta);
     }
 
     fn read_dotted_key(&mut self, in_header: bool) -> (Vec<String>, Vec<ExtractedLiteral>) {
         let mut segments = Vec::new();
         let mut lits = Vec::new();
         while let Some(b) = self.peek() {
-            match b {
+            let lit = match b {
                 b'\n' | b'#' => break,
                 b']' if in_header => break,
                 b'=' if !in_header => break,
-                b'.' | b' ' | b'\t' | b'\r' => self.pos += 1,
-                b'"' => {
-                    let lit = self.read_basic_single_string();
-                    segments.push(lit.text.clone());
-                    lits.push(lit);
+                b'.' | b' ' | b'\t' | b'\r' => {
+                    self.pos += 1;
+                    continue;
                 }
-                b'\'' => {
-                    let lit = self.read_literal_single_string();
-                    segments.push(lit.text.clone());
-                    lits.push(lit);
-                }
+                b'"' | b'\'' => self.read_string(b, false),
                 _ => {
-                    let lit = self.read_bare_token();
-                    if !lit.text.is_empty() {
-                        segments.push(lit.text.clone());
-                        lits.push(lit);
+                    let tok = self.read_bare_token();
+                    if tok.text.is_empty() {
+                        continue;
                     }
+                    tok
                 }
-            }
+            };
+            segments.push(lit.text.clone());
+            lits.push(lit);
         }
         (segments, lits)
     }
 
-    fn scan_value(&mut self, is_meta: bool, stmt_prev_allow: bool) {
+    fn scan_value(&mut self, is_meta: bool) {
         let mut depth = 0usize;
         while let Some(b) = self.peek() {
             match b {
@@ -1128,7 +1134,7 @@ impl<'a> TomlScanner<'a> {
                         break;
                     }
                 }
-                b'#' => self.skip_comment(),
+                b'#' => self.skip_to_eol(false),
                 b'[' | b'{' => {
                     depth += 1;
                     self.pos += 1;
@@ -1137,30 +1143,17 @@ impl<'a> TomlScanner<'a> {
                     depth = depth.saturating_sub(1);
                     self.pos += 1;
                 }
-                b'"' => {
-                    let lit = if self.bytes.get(self.pos..self.pos + 3) == Some(b"\"\"\"") {
-                        self.read_basic_multiline_string()
-                    } else {
-                        self.read_basic_single_string()
-                    };
+                b'"' | b'\'' => {
+                    let multiline = self.bytes.get(self.pos..self.pos + 3) == Some(&[b, b, b]);
+                    let lit = self.read_string(b, multiline);
                     if is_meta {
-                        self.check_literal(&lit, stmt_prev_allow);
-                    }
-                }
-                b'\'' => {
-                    let lit = if self.bytes.get(self.pos..self.pos + 3) == Some(b"'''") {
-                        self.read_literal_multiline_string()
-                    } else {
-                        self.read_literal_single_string()
-                    };
-                    if is_meta {
-                        self.check_literal(&lit, stmt_prev_allow);
+                        self.check_literal(&lit);
                     }
                 }
                 _ => {
                     let lit = self.read_bare_token();
                     if is_meta && !lit.text.is_empty() {
-                        self.check_literal(&lit, stmt_prev_allow);
+                        self.check_literal(&lit);
                     }
                 }
             }
@@ -1184,76 +1177,31 @@ impl<'a> TomlScanner<'a> {
         ExtractedLiteral { text, byte_lines, start_line, end_line: self.line, quote_start: 0, quote_end: 0 }
     }
 
-    fn read_basic_single_string(&mut self) -> ExtractedLiteral {
+    fn read_string(&mut self, quote: u8, multiline: bool) -> ExtractedLiteral {
         let start_line = self.line;
-        self.pos += 1; // '"'
+        let is_basic = quote == b'"';
+        let delim = [quote, quote, quote];
+        self.pos += if multiline { 3 } else { 1 };
+        if multiline {
+            self.trim_opening_newline();
+        }
         let mut text = String::new();
         let mut byte_lines = Vec::new();
         while let Some(b) = self.peek() {
-            if b == b'"' {
+            if multiline {
+                if self.bytes.get(self.pos..self.pos + 3) == Some(&delim) {
+                    self.consume_closing_triple(quote, &mut text, &mut byte_lines);
+                    break;
+                }
+            } else if b == quote {
                 self.pos += 1;
                 break;
-            }
-            if b == b'\n' {
+            } else if b == b'\n' {
                 break;
             }
-            if b == b'\\' {
-                self.read_toml_escape(&mut text, &mut byte_lines, false);
+            if is_basic && b == b'\\' {
+                self.read_toml_escape(&mut text, &mut byte_lines, multiline);
                 continue;
-            }
-            self.push_next_char(&mut text, &mut byte_lines);
-        }
-        ExtractedLiteral { text, byte_lines, start_line, end_line: self.line, quote_start: 0, quote_end: 0 }
-    }
-
-    fn read_basic_multiline_string(&mut self) -> ExtractedLiteral {
-        let start_line = self.line;
-        self.pos += 3; // "\"\"\""
-        self.trim_opening_newline();
-        let mut text = String::new();
-        let mut byte_lines = Vec::new();
-        while let Some(b) = self.peek() {
-            if self.bytes.get(self.pos..self.pos + 3) == Some(b"\"\"\"") {
-                self.consume_closing_triple(b'"', &mut text, &mut byte_lines);
-                break;
-            }
-            if b == b'\\' {
-                self.read_toml_escape(&mut text, &mut byte_lines, true);
-                continue;
-            }
-            self.push_next_char(&mut text, &mut byte_lines);
-        }
-        ExtractedLiteral { text, byte_lines, start_line, end_line: self.line, quote_start: 0, quote_end: 0 }
-    }
-
-    fn read_literal_single_string(&mut self) -> ExtractedLiteral {
-        let start_line = self.line;
-        self.pos += 1; // '\''
-        let mut text = String::new();
-        let mut byte_lines = Vec::new();
-        while let Some(b) = self.peek() {
-            if b == b'\'' {
-                self.pos += 1;
-                break;
-            }
-            if b == b'\n' {
-                break;
-            }
-            self.push_next_char(&mut text, &mut byte_lines);
-        }
-        ExtractedLiteral { text, byte_lines, start_line, end_line: self.line, quote_start: 0, quote_end: 0 }
-    }
-
-    fn read_literal_multiline_string(&mut self) -> ExtractedLiteral {
-        let start_line = self.line;
-        self.pos += 3; // "'''"
-        self.trim_opening_newline();
-        let mut text = String::new();
-        let mut byte_lines = Vec::new();
-        while self.pos < self.bytes.len() {
-            if self.bytes.get(self.pos..self.pos + 3) == Some(b"'''") {
-                self.consume_closing_triple(b'\'', &mut text, &mut byte_lines);
-                break;
             }
             self.push_next_char(&mut text, &mut byte_lines);
         }
@@ -1275,9 +1223,8 @@ impl<'a> TomlScanner<'a> {
         while self.bytes.get(self.pos + run) == Some(&quote) && run < 5 {
             run += 1;
         }
-        let extra = run.saturating_sub(3);
         let line = self.line;
-        for _ in 0..extra {
+        for _ in 0..run.saturating_sub(3) {
             push_char_with_line(text, byte_lines, char::from(quote), line);
         }
         self.pos += run;
@@ -1285,16 +1232,14 @@ impl<'a> TomlScanner<'a> {
 
     fn read_toml_escape(&mut self, text: &mut String, byte_lines: &mut Vec<usize>, multiline: bool) {
         let esc_line = self.line;
-        self.pos += 1; // '\\'
+        self.pos += 1;
         let Some(next) = self.peek() else {
             return;
         };
         if multiline && is_line_ending_backslash(self.bytes, self.pos) {
-            self.skip_inline_ws();
-            if self.peek() == Some(b'\n') {
+            while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
                 self.advance_one();
             }
-            self.skip_multiline_ws();
             return;
         }
         self.advance_one();
@@ -1312,12 +1257,6 @@ impl<'a> TomlScanner<'a> {
         }
     }
 
-    fn skip_multiline_ws(&mut self) {
-        while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
-            self.advance_one();
-        }
-    }
-
     fn push_unicode_escape(&mut self, text: &mut String, byte_lines: &mut Vec<usize>, digits: usize, line: usize) {
         if let Some(hex) = self.src.get(self.pos..self.pos + digits)
             && let Ok(code) = u32::from_str_radix(hex, 16)
@@ -1328,7 +1267,7 @@ impl<'a> TomlScanner<'a> {
         }
     }
 
-    fn check_literal(&mut self, lit: &ExtractedLiteral, _stmt_prev_allow: bool) {
+    fn check_literal(&mut self, lit: &ExtractedLiteral) {
         collect_literal_words(self.path, lit, BRANDS, PrismPolicy::Strict, &mut self.seen, self.out);
     }
 }
@@ -2166,51 +2105,6 @@ where
     out
 }
 
-/// Scan all registered 16-locale `i18n::CATALOG` translations and locale display names.
-fn decode_xml_or_html_entities(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some((before, after_amp)) = rest.split_once('&') {
-        out.push_str(before);
-        if let Some((entity, tail)) = after_amp.split_once(';')
-            && entity.len() <= 12
-            && let Some(decoded) = decode_named_or_numeric_entity(entity)
-        {
-            out.push(decoded);
-            rest = tail;
-            continue;
-        }
-        out.push('&');
-        rest = after_amp;
-    }
-    out.push_str(rest);
-    out
-}
-
-fn decode_named_or_numeric_entity(entity: &str) -> Option<char> {
-    match entity {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        "nbsp" => Some(' '),
-        "colon" => Some(':'),
-        "sol" => Some('/'),
-        "period" => Some('.'),
-        "quest" => Some('?'),
-        "equals" => Some('='),
-        "hellip" => Some('…'),
-        "mdash" => Some('—'),
-        "ndash" => Some('–'),
-        _ => {
-            let num = entity.strip_prefix('#')?;
-            let code = if let Some(hex) = num.strip_prefix(['x', 'X']) { u32::from_str_radix(hex, 16).ok()? } else { num.parse::<u32>().ok()? };
-            char::from_u32(code)
-        }
-    }
-}
-
 fn extract_tag_name(raw_tag_inner: &str) -> (bool, bool, &str) {
     let trimmed = raw_tag_inner.trim();
     let is_close = trimmed.starts_with('/');
@@ -2221,55 +2115,53 @@ fn extract_tag_name(raw_tag_inner: &str) -> (bool, bool, &str) {
     (is_close, self_closing, local_name)
 }
 
-fn count_newlines(s: &str) -> usize {
-    s.bytes().filter(|&b| b == b'\n').count()
-}
-
 fn scan_xml_text_fragment(source: &str, start_line: usize, raw: &str, policy: PrismPolicy<'_>, out: &mut Vec<BrandHit>) {
-    let decoded = decode_xml_or_html_entities(raw);
+    let decoded = decode_xml_html_entities(raw);
     for (offset, line_text) in decoded.lines().enumerate() {
         check_single_string_with_extra(source, start_line + offset, line_text, policy, true, out);
     }
+}
+
+fn consume_delimited_span<'a>(doc: &'a str, pos: usize, open: &str, close: &str) -> Option<(&'a str, usize)> {
+    let rest = doc.get(pos..)?;
+    let after = rest.strip_prefix(open)?;
+    let body_start = pos + open.len();
+    let (body, end) = match rest.find(close) {
+        Some(rel) => (doc.get(body_start..(pos + rel).max(body_start)).unwrap_or(""), pos + rel + close.len()),
+        None => (after, doc.len()),
+    };
+    Some((body, end))
+}
+
+fn next_markup_text_chunk<'a>(doc: &'a str, pos: usize, rest: &'a str) -> (&'a str, usize) {
+    let next_lt = rest.find('<').map_or(doc.len(), |rel| pos + if rel == 0 { rest.chars().next().map_or(1, char::len_utf8) } else { rel });
+    (doc.get(pos..next_lt).unwrap_or(""), next_lt)
 }
 
 /// Inspect rendered SVG export metadata (`<title>`, `<desc>`, `<metadata>`) and text elements
 /// strictly against external brands and suite names.
 #[must_use]
 pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
-    let mut out = Vec::new();
-    let mut line = 1usize;
-    let mut pos = 0usize;
-    let mut meta_depth = 0usize;
-    let mut skip_depth = 0usize;
-    let mut text_depth = 0usize;
-    let mut active_start_line = 1usize;
+    let (mut out, mut line, mut pos, mut active_depth, mut skip_depth, mut active_start_line) = (Vec::new(), 1usize, 0usize, 0usize, 0usize, 1usize);
     let mut buf = String::new();
 
     while let Some(rest) = svg.get(pos..) {
         if rest.is_empty() {
             break;
         }
-        if let Some(after) = rest.strip_prefix("<!--") {
-            let (comment_body, end) = match after.split_once("-->") {
-                Some((body, _)) => (body, pos + 4 + body.len() + 3),
-                None => (after, svg.len()),
-            };
-            if !comment_body.trim().is_empty() {
-                scan_xml_text_fragment(source, line, comment_body, PrismPolicy::Strict, &mut out);
+        if let Some((body, end)) = consume_delimited_span(svg, pos, "<!--", "-->") {
+            if !body.trim().is_empty() {
+                scan_xml_text_fragment(source, line, body, PrismPolicy::Strict, &mut out);
             }
-            line += count_newlines(svg.get(pos..end).unwrap_or(rest));
+            line += count_newlines(svg.get(pos..end).unwrap_or(rest).as_bytes());
             pos = end;
             continue;
         }
-        if let Some(after) = rest.strip_prefix("<![CDATA[") {
-            let (cdata_body, end) = match after.split_once("]]>") {
-                Some((body, _)) => (body, pos + 9 + body.len() + 3),
-                None => (after, svg.len()),
-            };
-            if skip_depth == 0 && (meta_depth > 0 || text_depth > 0) {
-                buf.push_str(cdata_body);
+        if let Some((body, end)) = consume_delimited_span(svg, pos, "<![CDATA[", "]]>") {
+            if skip_depth == 0 && active_depth > 0 {
+                buf.push_str(body);
             }
-            line += count_newlines(svg.get(pos..end).unwrap_or(rest));
+            line += count_newlines(svg.get(pos..end).unwrap_or(rest).as_bytes());
             pos = end;
             continue;
         }
@@ -2280,61 +2172,45 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
             let raw_inner = rest.get(1..gt_rel).unwrap_or("");
             let (is_close, self_closing, name) = extract_tag_name(raw_inner);
             let lower = name.to_ascii_lowercase();
-            let is_meta_tag = matches!(lower.as_str(), "title" | "desc" | "metadata");
-            let is_text_tag = matches!(lower.as_str(), "text" | "tspan" | "textpath");
-            let is_skip_tag = matches!(lower.as_str(), "style" | "image");
+            let is_active = matches!(lower.as_str(), "title" | "desc" | "metadata" | "text" | "tspan" | "textpath");
+            let is_skip = matches!(lower.as_str(), "style" | "image");
 
-            if !is_close && !is_skip_tag {
+            if !is_close && !is_skip {
                 scan_svg_tag_attributes(source, line, raw_inner, &mut out);
             }
             if is_close {
-                if is_skip_tag {
+                if is_skip {
                     skip_depth = skip_depth.saturating_sub(1);
-                } else if is_meta_tag {
-                    meta_depth = meta_depth.saturating_sub(1);
-                    if meta_depth == 0 && text_depth == 0 && !buf.trim().is_empty() {
-                        scan_xml_text_fragment(source, active_start_line, &buf, PrismPolicy::Strict, &mut out);
-                        buf.clear();
-                    }
-                } else if is_text_tag {
-                    text_depth = text_depth.saturating_sub(1);
-                    if meta_depth == 0 && text_depth == 0 && !buf.trim().is_empty() {
+                } else if is_active {
+                    active_depth = active_depth.saturating_sub(1);
+                    if active_depth == 0 && !buf.trim().is_empty() {
                         scan_xml_text_fragment(source, active_start_line, &buf, PrismPolicy::Strict, &mut out);
                         buf.clear();
                     }
                 }
             } else if !self_closing {
-                if is_skip_tag {
+                if is_skip {
                     skip_depth += 1;
-                } else if is_meta_tag {
-                    if meta_depth == 0 && text_depth == 0 {
+                } else if is_active {
+                    if active_depth == 0 {
                         active_start_line = line;
                         buf.clear();
                     }
-                    meta_depth += 1;
-                } else if is_text_tag {
-                    if meta_depth == 0 && text_depth == 0 {
-                        active_start_line = line;
-                        buf.clear();
-                    }
-                    text_depth += 1;
+                    active_depth += 1;
                 }
             }
-            line += count_newlines(svg.get(pos..tag_end).unwrap_or(""));
+            line += count_newlines(svg.get(pos..tag_end).unwrap_or("").as_bytes());
             pos = tag_end;
             continue;
         }
-        let next_lt = rest.find('<').map_or(svg.len(), |rel| {
-            let step = if rel == 0 { rest.chars().next().map_or(1, char::len_utf8) } else { rel };
-            pos + step
-        });
-        if skip_depth == 0 && (meta_depth > 0 || text_depth > 0) {
+        let (chunk, next_lt) = next_markup_text_chunk(svg, pos, rest);
+        if skip_depth == 0 && active_depth > 0 {
             if buf.is_empty() {
                 active_start_line = line;
             }
-            buf.push_str(svg.get(pos..next_lt).unwrap_or(""));
+            buf.push_str(chunk);
         }
-        line += count_newlines(svg.get(pos..next_lt).unwrap_or(""));
+        line += count_newlines(chunk.as_bytes());
         pos = next_lt;
     }
 
@@ -2580,7 +2456,7 @@ fn extract_html_attr(raw_tag_inner: &str, attr_name: &str) -> Option<String> {
             if let Some(inner) = val_src.strip_prefix(q)
                 && let Some((val, _)) = inner.split_once(q)
             {
-                return Some(decode_xml_or_html_entities(val));
+                return Some(decode_xml_html_entities(val));
             }
         }
         search = end;
@@ -2592,28 +2468,17 @@ fn extract_html_attr(raw_tag_inner: &str, attr_name: &str) -> Option<String> {
 /// embedded `<svg>` metadata, and visible DOM text) for external brand or suite mentions.
 #[must_use]
 pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
-    let mut out = Vec::new();
-    let mut line = 1usize;
-    let mut pos = 0usize;
-    let mut strict_depth = 0usize;
-    let mut in_script_or_style = false;
-    let mut text_start_line = 1usize;
+    let (mut out, mut line, mut pos, mut strict_depth, mut in_script_or_style, mut text_start_line) =
+        (Vec::new(), 1usize, 0usize, 0usize, false, 1usize);
     let mut buf = String::new();
 
     while let Some(rest) = html.get(pos..) {
         if rest.is_empty() {
             break;
         }
-        if let Some(after) = rest.strip_prefix("<!--") {
-            let (comment_inner, end) = match rest.find("-->") {
-                Some(rel) => {
-                    let close_pos = pos + rel;
-                    (html.get(pos + 4..close_pos.max(pos + 4)).unwrap_or(""), close_pos + 3)
-                }
-                None => (after, html.len()),
-            };
+        if let Some((comment_inner, end)) = consume_delimited_span(html, pos, "<!--", "-->") {
             flush_html_text(source, line, comment_inner, true, &mut out);
-            line += count_newlines(html.get(pos..end).unwrap_or(rest));
+            line += count_newlines(html.get(pos..end).unwrap_or(rest).as_bytes());
             pos = end;
             continue;
         }
@@ -2624,12 +2489,12 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
             if chunk_end > pos {
                 let chunk = html.get(pos..chunk_end).unwrap_or("");
                 flush_html_text(source, line, chunk, false, &mut out);
-                line += count_newlines(chunk);
+                line += count_newlines(chunk.as_bytes());
             }
             if let Some(rel) = close_pos {
                 let tag_start = pos + rel;
                 let gt_end = html.get(tag_start..).and_then(|s| s.find('>')).map_or(html.len(), |g| tag_start + g + 1);
-                line += count_newlines(html.get(tag_start..gt_end).unwrap_or(""));
+                line += count_newlines(html.get(tag_start..gt_end).unwrap_or("").as_bytes());
                 pos = gt_end;
                 in_script_or_style = false;
             } else {
@@ -2648,21 +2513,16 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
             let raw_inner = rest.get(1..gt_rel).unwrap_or("");
             let (is_close, self_closing, name) = extract_tag_name(raw_inner);
             let lower = name.to_ascii_lowercase();
-            let tag_line = line;
 
             if matches!(lower.as_str(), "script" | "style") {
                 if !is_close && !self_closing {
                     in_script_or_style = true;
                 }
             } else if !is_close {
-                if lower == "meta"
-                    && let Some(content) = extract_html_attr(raw_inner, "content")
-                {
-                    check_single_string_with_extra(source, tag_line, &content, PrismPolicy::Strict, true, &mut out);
-                }
-                for attr in ["aria-label", "alt", "title"] {
+                let attrs: &[&str] = if lower == "meta" { &["content", "aria-label", "alt", "title"] } else { &["aria-label", "alt", "title"] };
+                for attr in attrs {
                     if let Some(val) = extract_html_attr(raw_inner, attr) {
-                        check_single_string_with_extra(source, tag_line, &val, PrismPolicy::Strict, true, &mut out);
+                        check_single_string_with_extra(source, line, &val, PrismPolicy::Strict, true, &mut out);
                     }
                 }
                 if matches!(lower.as_str(), "title" | "desc" | "metadata") {
@@ -2671,20 +2531,16 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
             } else if matches!(lower.as_str(), "title" | "desc" | "metadata") {
                 strict_depth = strict_depth.saturating_sub(1);
             }
-            line += count_newlines(html.get(pos..tag_end).unwrap_or(""));
+            line += count_newlines(html.get(pos..tag_end).unwrap_or("").as_bytes());
             pos = tag_end;
             continue;
         }
-        let next_lt = rest.find('<').map_or(html.len(), |rel| {
-            let step = if rel == 0 { rest.chars().next().map_or(1, char::len_utf8) } else { rel };
-            pos + step
-        });
+        let (text_chunk, next_lt) = next_markup_text_chunk(html, pos, rest);
         if buf.is_empty() {
             text_start_line = line;
         }
-        let text_chunk = html.get(pos..next_lt).unwrap_or("");
         buf.push_str(text_chunk);
-        line += count_newlines(text_chunk);
+        line += count_newlines(text_chunk.as_bytes());
         pos = next_lt;
     }
 
@@ -2695,7 +2551,7 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
 }
 
 fn flush_html_text(source: &str, start_line: usize, raw: &str, strict: bool, out: &mut Vec<BrandHit>) {
-    let decoded = decode_xml_or_html_entities(raw);
+    let decoded = decode_xml_html_entities(raw);
     let gen_docs = !strict && is_generated_docs_html_path(source);
     for (offset, line_text) in decoded.lines().enumerate() {
         let masked_opt = if gen_docs { mask_generated_docs_html_tokens(source, line_text) } else { None };
@@ -3176,26 +3032,23 @@ pub fn scan_dist_artefacts_with_stats(dist_dir: &Path) -> Result<(DistScanStats,
     Ok((stats, hits))
 }
 
-use crate::scan_util::collect_dist_files;
-
 const MAX_DIST_FILE_BYTES: usize = 256 * 1024 * 1024;
 
+fn scan_strict_label_words(source: &str, text: &str, include_adapted: bool, hits: &mut Vec<BrandHit>) {
+    collect_line_words(source, 1, text, SUITE_BRANDS, PrismPolicy::Strict, hits);
+    if include_adapted {
+        collect_line_words(source, 1, text, &[ADAPTED_UPSTREAM_BRAND], PrismPolicy::Strict, hits);
+    }
+    collect_line_words(source, 1, text, BRANDS, PrismPolicy::Strict, hits);
+    collect_line_words(source, 1, text, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, hits);
+}
+
 fn scan_dist_path_and_file(dist_dir: &Path, rel: &str, stats: &mut DistScanStats, hits: &mut Vec<BrandHit>) -> Result<(), String> {
-    if rel.starts_with(AUDIT_PREFIX)
-        || rel.contains("/docs/audit/")
-        || rel.starts_with(HISTORY_AUDIT_PREFIX)
-        || rel.contains("/docs/history/audit/")
-        || rel == PLAN_PRISM_SCOPE
-        || rel.starts_with("plan/prism/")
-        || rel.contains("/plan/prism/")
-    {
+    if is_forbidden_bundled_dir(rel) {
         hits.push(BrandHit { path: rel.to_owned(), line: 1, brand: "prism" });
         return Ok(());
     }
-    collect_line_words(rel, 1, rel, SUITE_BRANDS, PrismPolicy::Strict, hits);
-    collect_line_words(rel, 1, rel, &[ADAPTED_UPSTREAM_BRAND], PrismPolicy::Strict, hits);
-    collect_line_words(rel, 1, rel, BRANDS, PrismPolicy::Strict, hits);
-    collect_line_words(rel, 1, rel, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, hits);
+    scan_strict_label_words(rel, rel, true, hits);
     let bytes = curvebook_platform::fs::read_regular_file_bytes(&dist_dir.join(rel), MAX_DIST_FILE_BYTES)
         .map_err(|e| format!("read dist file {rel}: {e}"))?;
     scan_dist_bytes(rel, &bytes, 0, stats, hits)
@@ -3208,62 +3061,53 @@ fn is_macos_stapled_ticket(display_path: &str, bytes: &[u8]) -> bool {
         return false;
     }
     let header_window = &bytes[8..bytes.len().min(64)];
-    let has_der_cms = header_window.windows(4).any(|w| w[0] == 0x30 && w[1] == 0x82 && (w[2] != 0 || w[3] != 0));
-    if !has_der_cms {
+    if !header_window.windows(4).any(|w| w[0] == 0x30 && w[1] == 0x82 && (w[2] != 0 || w[3] != 0)) {
         return false;
     }
-
     let norm = display_path.replace('\\', "/");
     let inner_path = if let Some((outer, inner)) = norm.split_once('!') {
-        if inner.contains('!') {
-            return false;
-        }
         let outer_lower = outer.to_ascii_lowercase();
-        if !outer_lower.ends_with(".dmg") || outer_lower == ".dmg" || outer_lower.ends_with("/.dmg") {
+        if inner.contains('!') || !outer_lower.ends_with(".dmg") || outer_lower == ".dmg" || outer_lower.ends_with("/.dmg") {
             return false;
         }
         inner
     } else {
         norm.as_str()
     };
-
     let segs: Vec<&str> = inner_path.split('/').filter(|s| !s.is_empty()).collect();
-    if segs.len() < 3 || segs.contains(&"..") {
-        return false;
-    }
     let n = segs.len();
-    if segs[n - 1] != "CodeResources" || segs[n - 2] != "Contents" {
-        return false;
-    }
-    segs[n - 3].strip_suffix(".app").is_some_and(|stem| !stem.is_empty() && stem != "." && stem != "..")
+    n >= 3
+        && !segs.contains(&"..")
+        && segs[n - 1] == "CodeResources"
+        && segs[n - 2] == "Contents"
+        && segs[n - 3].strip_suffix(".app").is_some_and(|stem| !stem.is_empty() && stem != "." && stem != "..")
 }
 
 fn is_native_binary_blob(display_path: &str, bytes: &[u8]) -> bool {
-    let ext = Path::new(display_path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-    if matches!(ext.as_str(), "exe" | "dll" | "so" | "dylib" | "wasm" | "deb" | "rpm" | "dmg" | "msi" | "appimage" | "zsync" | "a" | "lib") {
-        return true;
-    }
-    if is_macos_stapled_ticket(display_path, bytes) {
-        return true;
-    }
-    bytes.starts_with(b"\x7FELF")
-        || bytes.starts_with(b"\x00asm")
-        || bytes.starts_with(b"MZ")
-        || bytes.starts_with(b"!<arch>\n")
-        || bytes.starts_with(b"\xED\xAB\xEE\xDB")
-        || bytes.starts_with(b"\xFE\xED\xFA\xCE")
-        || bytes.starts_with(b"\xFE\xED\xFA\xCF")
-        || bytes.starts_with(b"\xCE\xFA\xED\xFE")
-        || bytes.starts_with(b"\xCF\xFA\xED\xFE")
-        || bytes.starts_with(b"\xCA\xFE\xBA\xBE")
-        || bytes.starts_with(b"\xBE\xBA\xFE\xCA")
+    let ext = lower_ext(display_path);
+    matches!(ext.as_str(), "exe" | "dll" | "so" | "dylib" | "wasm" | "deb" | "rpm" | "dmg" | "msi" | "appimage" | "zsync" | "a" | "lib")
+        || is_macos_stapled_ticket(display_path, bytes)
+        || [
+            &b"\x7FELF"[..],
+            b"\x00asm",
+            b"MZ",
+            b"!<arch>\n",
+            b"\xED\xAB\xEE\xDB",
+            b"\xFE\xED\xFA\xCE",
+            b"\xFE\xED\xFA\xCF",
+            b"\xCE\xFA\xED\xFE",
+            b"\xCF\xFA\xED\xFE",
+            b"\xCA\xFE\xBA\xBE",
+            b"\xBE\xBA\xFE\xCA",
+        ]
+        .iter()
+        .any(|sig| bytes.starts_with(sig))
 }
 
 fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut DistScanStats, hits: &mut Vec<BrandHit>) -> Result<(), String> {
-    let ext = Path::new(display_path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    let ext = lower_ext(display_path);
     let lower_path = display_path.to_ascii_lowercase();
-    let is_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
-    if is_zip {
+    if is_zip_magic(bytes) {
         if depth >= 2 {
             return Err(format!("{display_path}: nested archive depth exceeded (max depth 2)"));
         }
@@ -3272,49 +3116,18 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut D
         for (name, entry_bytes) in zip.iter() {
             stats.archive_entries += 1;
             let entry_path = format!("{display_path}!{name}");
-            collect_line_words(&entry_path, 1, name, SUITE_BRANDS, PrismPolicy::Strict, hits);
-            collect_line_words(&entry_path, 1, name, &[ADAPTED_UPSTREAM_BRAND], PrismPolicy::Strict, hits);
-            collect_line_words(&entry_path, 1, name, BRANDS, PrismPolicy::Strict, hits);
-            collect_line_words(&entry_path, 1, name, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, hits);
+            scan_strict_label_words(&entry_path, name, true, hits);
             scan_dist_bytes(&entry_path, entry_bytes, depth + 1, stats, hits)?;
         }
         return Ok(());
     }
-    if ext == "png" || bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        hits.extend(check_png_metadata(display_path, bytes));
-        return Ok(());
-    }
-    if matches!(ext.as_str(), "ico" | "icns") {
-        hits.extend(check_icon_container_metadata(display_path, bytes));
-        return Ok(());
-    }
-    if ext == "gif" || bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        hits.extend(check_gif_metadata(display_path, bytes));
-        return Ok(());
-    }
-    if ext == "pdf" || bytes.starts_with(b"%PDF-") {
-        hits.extend(check_pdf_metadata(display_path, bytes));
-        return Ok(());
-    }
-    if ext == "svgz" || (bytes.starts_with(&[0x1F, 0x8B]) && is_binary_asset_ext(display_path)) {
-        let raw = inflate_gzip_bounded(bytes).map_err(|()| format!("{display_path}: corrupt or oversized .svgz gzip payload"))?;
-        let text = match decode_text_file(display_path, &raw)? {
-            DecodedFile::Text(s) => s,
-            DecodedFile::BinaryAsset => return Err(format!("{display_path}: undecodable .svgz SVG text")),
-        };
-        scan_svg(display_path, &text, hits);
-        hits.extend(check_svg_metadata(display_path, &text));
+    if try_scan_binary_metadata(display_path, &ext, bytes, true, hits)? {
         return Ok(());
     }
     let text = match decode_text_file(display_path, bytes) {
         Ok(DecodedFile::Text(s)) => s,
         Ok(DecodedFile::BinaryAsset) => return Ok(()),
-        Err(err) => {
-            if is_native_binary_blob(display_path, bytes) {
-                return Ok(());
-            }
-            return Err(err);
-        }
+        Err(err) => return if is_native_binary_blob(display_path, bytes) { Ok(()) } else { Err(err) },
     };
     if ext == "json" {
         hits.extend(check_manifest_metadata(display_path, &text));
@@ -3346,10 +3159,7 @@ fn is_mime_package_xml(path: &str) -> bool {
 #[must_use]
 pub(crate) fn scan_dist_label(source: &str, label: &str) -> Vec<BrandHit> {
     let mut hits = Vec::new();
-    collect_line_words(source, 1, label, SUITE_BRANDS, PrismPolicy::Strict, &mut hits);
-    collect_line_words(source, 1, label, &[ADAPTED_UPSTREAM_BRAND], PrismPolicy::Strict, &mut hits);
-    collect_line_words(source, 1, label, BRANDS, PrismPolicy::Strict, &mut hits);
-    collect_line_words(source, 1, label, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, &mut hits);
+    scan_strict_label_words(source, label, true, &mut hits);
     dedup_tail_hits(&mut hits, 0);
     hits
 }
@@ -3362,8 +3172,7 @@ pub(crate) fn scan_compliance_text(display_path: &str, text: &str) -> Vec<BrandH
     let from = hits.len();
     scan_suite_lines_with_scope(display_path, text, true, &mut hits);
     scan_plain_lines_no_waiver(display_path, text, &mut hits);
-    let ext = Path::new(display_path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-    if matches!(ext.as_str(), "html" | "htm") {
+    if matches!(lower_ext(display_path).as_str(), "html" | "htm") {
         hits.extend(check_html_metadata(display_path, text));
     }
     dedup_tail_hits(&mut hits, from);
@@ -3398,9 +3207,7 @@ fn check_generated_docs_dir(dir: &Path, display_prefix: &str) -> Result<Vec<Bran
     for rel in rel_files {
         let display_path = format!("{display_prefix}/{rel}");
         stats.files += 1;
-        collect_line_words(&display_path, 1, &rel, SUITE_BRANDS, PrismPolicy::Strict, &mut hits);
-        collect_line_words(&display_path, 1, &rel, BRANDS, PrismPolicy::Strict, &mut hits);
-        collect_line_words(&display_path, 1, &rel, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, &mut hits);
+        scan_strict_label_words(&display_path, &rel, false, &mut hits);
         let bytes = curvebook_platform::fs::read_regular_file_bytes(&dir.join(&rel), MAX_DIST_FILE_BYTES)
             .map_err(|e| format!("read docs-site file {rel}: {e}"))?;
         scan_dist_bytes(&display_path, &bytes, 0, &mut stats, &mut hits)?;
@@ -3412,8 +3219,36 @@ fn check_generated_docs_dir(dir: &Path, display_prefix: &str) -> Result<Vec<Bran
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use super::{
+        BrandHit, check_html_metadata, check_i18n_catalog_entries, check_labeled_text_runs, check_manifest_metadata, check_pdf_metadata,
+        check_svg_metadata, check_text_runs, check_text_runs_strict, check_window_title, run, scan_file, scan_repo_checked, skip_path,
+    };
+    use crate::scan_util::test_support::{TestDir, to_utf16_bytes};
+
+    fn hit(path: &str, line: usize, brand: &'static str) -> BrandHit {
+        BrandHit { path: path.to_owned(), line, brand }
+    }
+
+    fn scan(path: &str, text: &str) -> Vec<BrandHit> {
+        let mut hits = Vec::new();
+        scan_file(path, text, &mut hits);
+        hits
+    }
+
+    fn hits_for(path: &str, expected: &[(usize, &'static str)]) -> Vec<BrandHit> {
+        expected.iter().map(|&(line, brand)| hit(path, line, brand)).collect()
+    }
+
+    fn build_test_png_with_chunk(chunk_type: &[u8; 4], chunk_data: &[u8]) -> Vec<u8> {
+        let mut png = Vec::from(&b"\x89PNG\r\n\x1a\n"[..]);
+        for (ctype, data) in [(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0][..]), (chunk_type, chunk_data), (b"IEND", &[][..])] {
+            png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            png.extend_from_slice(ctype);
+            png.extend_from_slice(data);
+            png.extend_from_slice(&0u32.to_be_bytes());
+        }
+        png
+    }
 
     #[test]
     fn r15_1_provenance_permits_only_exact_upstream_url_inside_attributed_source_section() {
@@ -3422,29 +3257,30 @@ mod tests {
         let vc_title = ["Vec", "tor", "Cra", "ft"].concat();
         let exact_url = format!("https://github.com/{story}/{vc}");
 
-        let mut ok_attr = Vec::new();
-        let attr_body =
-            format!("# Attribution\n\n## Attributed Source Code\n\nAdapted helpers from {vc_title} (`{exact_url}`) at commit `deadbeef`.\n");
-        super::scan_file("ATTRIBUTION.md", &attr_body, &mut ok_attr);
-        assert!(ok_attr.is_empty(), "expected clean ATTRIBUTION.md, got {ok_attr:?}");
-
-        let mut ok_notice = Vec::new();
-        let notice_body = format!(
-            "CurveBook\n\n## Attributed Source Code\n\nFrom {vc_title} ({exact_url}, commit abc).\nCopyright (c) 2026 {vc_title} contributors.\n"
+        for (path, body) in [
+            (
+                "ATTRIBUTION.md",
+                format!("# Attribution\n\n## Attributed Source Code\n\nAdapted helpers from {vc_title} (`{exact_url}`) at commit `deadbeef`.\n"),
+            ),
+            (
+                "NOTICE",
+                format!(
+                    "CurveBook\n\n## Attributed Source Code\n\nFrom {vc_title} ({exact_url}, commit abc).\nCopyright (c) 2026 {vc_title} contributors.\n"
+                ),
+            ),
+            ("AGENTS.md", format!("Attributed {vc_title} GUI source reuse rules.\n")),
+        ] {
+            let hits = scan(path, &body);
+            assert!(hits.is_empty(), "expected clean {path}, got {hits:?}");
+        }
+        let mut pkg_hits = Vec::new();
+        super::scan_suite_lines_with_scope(
+            "curvebook-web-0.1.0/NOTICE",
+            &format!("## Attributed Source Code\nFrom {vc_title} ({exact_url}).\n"),
+            true,
+            &mut pkg_hits,
         );
-        super::scan_file("NOTICE", &notice_body, &mut ok_notice);
-        assert!(ok_notice.is_empty(), "expected clean NOTICE, got {ok_notice:?}");
-
-        let mut ok_packaged_notice = Vec::new();
-        let pkg_notice_body = format!("## Attributed Source Code\nFrom {vc_title} ({exact_url}).\n");
-        super::scan_suite_lines_with_scope("curvebook-web-0.1.0/NOTICE", &pkg_notice_body, true, &mut ok_packaged_notice);
-        assert!(ok_packaged_notice.is_empty(), "expected clean packaged NOTICE, got {ok_packaged_notice:?}");
-
-        // Legal policy docs may mention the adapted upstream name but never the org or URL.
-        let mut ok_policy = Vec::new();
-        let policy_body = format!("Attributed {vc_title} GUI source reuse rules.\n");
-        super::scan_file("AGENTS.md", &policy_body, &mut ok_policy);
-        assert!(ok_policy.is_empty(), "expected preserved AGENTS.md policy, got {ok_policy:?}");
+        assert!(pkg_hits.is_empty(), "{pkg_hits:?}");
 
         for (path, bad_body) in [
             ("ATTRIBUTION.md", format!("## Other Section\n{exact_url}\n")),
@@ -3459,8 +3295,7 @@ mod tests {
             ("AGENTS.md", format!("Do not link {exact_url} here.\n")),
             ("docs/ATTRIBUTION.md", format!("## Attributed Source Code\n{exact_url}\n")),
         ] {
-            let mut hits = Vec::new();
-            super::scan_file(path, &bad_body, &mut hits);
+            let hits = scan(path, &bad_body);
             assert!(hits.iter().any(|h| h.brand == "storytold"), "expected storytold rejection for {path}: {bad_body:?}, got {hits:?}");
         }
     }
@@ -3475,371 +3310,140 @@ mod tests {
             ("apps/curvebook/src/gui_window.rs", format!("const HELP: &str = \"{vc}\";\n")),
             ("apps/curvebook-web/index.html", format!("<title>CurveBook {vc_title}</title>\n")),
         ] {
-            let mut hits = Vec::new();
-            super::scan_file(path, &body, &mut hits);
+            let hits = scan(path, &body);
             assert!(hits.iter().any(|h| h.brand == "vectorcraft"), "expected vectorcraft rejection for {path}, got {hits:?}");
         }
-
         let mut path_hits = Vec::new();
         super::scan_tracked_path_name(&format!("crates/ui-egui/src/{vc}_panel.rs"), &mut path_hits);
         assert!(path_hits.iter().any(|h| h.brand == "vectorcraft"), "{path_hits:?}");
-
-        let ui_hits = super::check_text_runs("ui_label", [format!("Exported with {vc_title}")]);
-        assert!(ui_hits.iter().any(|h| h.brand == "vectorcraft"), "{ui_hits:?}");
+        assert!(check_text_runs("ui_label", [format!("Exported with {vc_title}")]).iter().any(|h| h.brand == "vectorcraft"));
     }
 
-    use super::{
-        BrandHit, check_html_metadata, check_i18n_catalog_entries, check_labeled_text_runs, check_manifest_metadata, check_pdf_metadata,
-        check_svg_metadata, check_text_runs, check_text_runs_strict, check_window_title, run, scan_file, scan_repo_checked, skip_path,
-    };
-
-    fn temp_dir(label: &str) -> PathBuf {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("cb-brands-{}-{label}-{stamp}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn to_utf16_bytes(s: &str, little_endian: bool, include_bom: bool) -> Vec<u8> {
-        let mut out = Vec::new();
-        if include_bom {
-            out.extend_from_slice(if little_endian { &[0xFF, 0xFE] } else { &[0xFE, 0xFF] });
+    #[test]
+    fn scans_rust_sources_comments_literals_cfg_test_escapes_and_prism_boundaries() {
+        type ExpectedHit = (usize, &'static str);
+        let cases: &[(&str, &str, &[ExpectedHit])] = &[
+            (
+                "crates/ui-egui/src/lib.rs",
+                "// GraphPad comment is also caught\npub const LABEL: &str = \"Import GraphPad table\";\npub const NO_WAIVER: &str = \"Import OriginPro table\"; // brand-ok\npub fn instantiate() -> &'static str { \"instantiate\" }\npub struct PrismStyle;\n#[cfg(test)]\nmod tests {\n    const T: &str = \"SPSS fixture\";\n}\n",
+                &[(1, "graphpad"), (2, "graphpad"), (3, "originpro"), (5, "prism"), (8, "spss")],
+            ),
+            (
+                "apps/curvebook/src/main.rs",
+                "#[cfg(test)]\nfn test_only_helper() {\n    let _ = \"SPSS fixture }; // brace inside string\";\n}\n\npub fn shipped_error() -> &'static str {\n    let q = '\"';\n    let _ = q;\n    \"GraphPad-compatible: unknown option\"\n}\n\n#[cfg(all(test, unix))]\nfn unix_test_helper() {\n    let _ = \"Minitab\";\n}\n\n#[cfg(not(test))]\npub const PROD: &str = \"Dotmatics\";\n",
+                &[(3, "spss"), (9, "graphpad"), (14, "minitab"), (18, "dotmatics")],
+            ),
+            (
+                "crates/format/src/lib.rs",
+                "pub const CONT: &str = \"Import from \\\n    GraphPad table\";\npub const SPLIT: &str = \"Import Graph\\\nPad table\";\npub const ESC_NL: &str = \"line1\\nOriginPro\";\npub const RAW: &str = r#\"hello\nMinitab\"#;\npub const NO_WAIVER: &str = \"Import from \\\n    SigmaPlot table\"; // brand-ok\n",
+                &[(2, "graphpad"), (3, "graphpad"), (5, "originpro"), (7, "minitab"), (9, "sigmaplot")],
+            ),
+            (
+                "crates/format/src/registry.rs",
+                "\npub fn ext_match(ext: &str) -> &'static str {\n    match ext {\n        \"prism\" | \"pzfx\" => \"project.prism\",\n        _ => \"other\",\n    }\n}\npub const MSG_OK: &str = \"Import *.prism or table.importPrism files\";\npub const MSG_BRAND: &str = \"Import .prism or Prism project\";\npub const LABEL_BAD: &str = \"Prism Archive\";\npub const DOMAIN_BAD: &str = \"https://www.prism.com/download\";\npub const LABEL_NO_WAIVER: &str = \"Prism Archive\"; // brand-ok\n#[cfg(test)]\nmod tests {\n    const TEST_FIXTURE: &str = \"GraphPad study\";\n}\n",
+                &[(9, "prism"), (10, "prism"), (11, "prism"), (12, "prism"), (15, "graphpad")],
+            ),
+            (
+                "crates/ui-egui/src/dialogs_canvas.rs",
+                "\npub fn dialog_strings() {\n    let ok = (\"CurveBook\", \"curvebook\", \"approved-seven-pane\", \"curvebook-win95-2508\", \"Import (*.curvebook, *.pzfx, *.prism)\");\n    let bad_bare = \"prism\";\n    let ok_sentence = \"Switch to .prism for layout\";\n    let bad_vendor = \"GraphPad\";\n    let bad_suite = \"ArtCraft\";\n    let bad_cap = \"Prism\";\n    let _ = (ok, bad_bare, ok_sentence, bad_vendor, bad_suite, bad_cap);\n}\n",
+                &[(7, "artcraft"), (4, "prism"), (6, "graphpad"), (8, "prism")],
+            ),
+            (
+                "apps/curvebook-web/src/lib.rs",
+                "\npub fn detect_ext(ext: Option<&str>) -> &'static str {\n    match ext { Some(\"prism\") => \"external\", _ => \"native\" }\n}\npub fn add_filters(d: Dummy) { d.add_filter(\"Supported\", &[\"curvebook\", \"pzfx\", \"prism\"]); }\npub fn status_line() -> &'static str { \"prism\" }\n",
+                &[(6, "prism")],
+            ),
+            (
+                "crates/ui-egui/src/theme.rs",
+                "\npub struct PrismStyle { pub like_prism: bool }\npub fn graphpad_theme() {}\npub fn xlstatHelper() {}\npub fn StatisticaExport() {}\npub fn statistical_analysis() {}\npub fn origin_pro_preset() {}\n",
+                &[(2, "prism"), (3, "graphpad"), (4, "xlstat"), (5, "statistica"), (7, "originpro")],
+            ),
+            (
+                "crates/ui-egui/src/i18n.rs",
+                "\nen: \"Copy methods and statistics report\",\nit: \"Copia report metodi e statistica\",\nde: \"Statistica kopieren\",\nit: \"Copia Statistica report\",\n",
+                &[(4, "statistica"), (5, "statistica")],
+            ),
+            (
+                "crates/fit/src/dsl.rs",
+                "struct Compile { jmp_end: usize }\nconst BAD: &str = \"jmp\";\nfn JmpImporter() {}\n",
+                &[(2, "jmp"), (3, "jmp")],
+            ),
+        ];
+        for &(path, src, expected) in cases {
+            assert_eq!(scan(path, src), hits_for(path, expected), "case {path}");
         }
-        for unit in s.encode_utf16() {
-            let bytes = if little_endian { unit.to_le_bytes() } else { unit.to_be_bytes() };
-            out.extend_from_slice(&bytes);
+    }
+
+    #[test]
+    fn scans_non_rust_files_disclaimers_svg_desktop_toml_and_issue_templates() {
+        assert_eq!(
+            scan(
+                "packaging/linux/org.curvebook.CurveBook.desktop",
+                "[Desktop Entry]\nName=CurveBook\nMimeType=application/vnd.curvebook.project;application/x-prism-project;application/x-prism-xml;\n# Compatibility: brand-ok\nKeywords=biostatistics;regression;GraphPad;prism;\n"
+            ),
+            hits_for("packaging/linux/org.curvebook.CurveBook.desktop", &[(5, "graphpad"), (5, "prism")])
+        );
+        assert_eq!(
+            scan("docs/release/releasing.md", "Installs under Programs\\ArtCraft\\CurveBook or https://getartcraft.com\n"),
+            hits_for("docs/release/releasing.md", &[(1, "artcraft"), (1, "getartcraft")])
+        );
+
+        // README disclaimers (allowed only with marker and allowed names).
+        for ok in ["Not affiliated with ArtCraft. <!-- brand-ok -->\n", "Not affiliated with Dotmatics or GraphPad Software. <!-- brand-ok -->\n"] {
+            assert!(scan("README.md", ok).is_empty(), "{ok}");
         }
-        out
-    }
-
-    #[test]
-    fn flags_rust_comments_identifiers_literals_and_cfg_test_without_waivers() {
-        let mut hits = Vec::new();
-        let src = "\
-// GraphPad comment is also caught
-pub const LABEL: &str = \"Import GraphPad table\";
-pub const NO_WAIVER: &str = \"Import OriginPro table\"; // brand-ok
-pub fn instantiate() -> &'static str { \"instantiate\" }
-pub struct PrismStyle;
-#[cfg(test)]
-mod tests {
-    const T: &str = \"SPSS fixture\";
-}
-";
-        scan_file("crates/ui-egui/src/lib.rs", src, &mut hits);
-        assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("crates/ui-egui/src/lib.rs"), line: 1, brand: "graphpad" },
-                BrandHit { path: String::from("crates/ui-egui/src/lib.rs"), line: 2, brand: "graphpad" },
-                BrandHit { path: String::from("crates/ui-egui/src/lib.rs"), line: 3, brand: "originpro" },
-                BrandHit { path: String::from("crates/ui-egui/src/lib.rs"), line: 5, brand: "prism" },
-                BrandHit { path: String::from("crates/ui-egui/src/lib.rs"), line: 8, brand: "spss" },
-            ]
-        );
-    }
-
-    #[test]
-    fn cfg_test_items_and_prod_code_are_both_scanned() {
-        let mut hits = Vec::new();
-        let src = "\
-#[cfg(test)]
-fn test_only_helper() {
-    let _ = \"SPSS fixture }; // brace inside string\";
-}
-
-pub fn shipped_error() -> &'static str {
-    let q = '\"';
-    let _ = q;
-    \"GraphPad-compatible: unknown option\"
-}
-
-#[cfg(all(test, unix))]
-fn unix_test_helper() {
-    let _ = \"Minitab\";
-}
-
-#[cfg(not(test))]
-pub const PROD: &str = \"Dotmatics\";
-";
-        scan_file("apps/curvebook/src/main.rs", src, &mut hits);
-        assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("apps/curvebook/src/main.rs"), line: 3, brand: "spss" },
-                BrandHit { path: String::from("apps/curvebook/src/main.rs"), line: 9, brand: "graphpad" },
-                BrandHit { path: String::from("apps/curvebook/src/main.rs"), line: 14, brand: "minitab" },
-                BrandHit { path: String::from("apps/curvebook/src/main.rs"), line: 18, brand: "dotmatics" },
-            ]
-        );
-    }
-
-    #[test]
-    fn flags_multiline_string_literals_continuations_and_raw_strings() {
-        let mut hits = Vec::new();
-        let src = "\
-pub const CONT: &str = \"Import from \\
-    GraphPad table\";
-pub const SPLIT: &str = \"Import Graph\\
-Pad table\";
-pub const ESC_NL: &str = \"line1\\nOriginPro\";
-pub const RAW: &str = r#\"hello
-Minitab\"#;
-pub const NO_WAIVER: &str = \"Import from \\
-    SigmaPlot table\"; // brand-ok
-";
-        scan_file("crates/format/src/lib.rs", src, &mut hits);
-        assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("crates/format/src/lib.rs"), line: 2, brand: "graphpad" },
-                BrandHit { path: String::from("crates/format/src/lib.rs"), line: 3, brand: "graphpad" },
-                BrandHit { path: String::from("crates/format/src/lib.rs"), line: 5, brand: "originpro" },
-                BrandHit { path: String::from("crates/format/src/lib.rs"), line: 7, brand: "minitab" },
-                BrandHit { path: String::from("crates/format/src/lib.rs"), line: 9, brand: "sigmaplot" },
-            ]
-        );
-    }
-
-    #[test]
-    fn decodes_utf16_files_scans_png_metadata_and_fails_on_non_utf8_text() {
-        let dir = temp_dir("encoding");
-        std::fs::create_dir_all(dir.join("packaging/windows")).unwrap();
-        std::fs::create_dir_all(dir.join("packaging/linux")).unwrap();
-        std::fs::create_dir_all(dir.join("assets")).unwrap();
-
-        std::fs::write(dir.join("packaging/windows/app.rc"), to_utf16_bytes("VALUE \"Product\", \"GraphPad\"\n", true, true)).unwrap();
-        std::fs::write(dir.join("packaging/windows/clean.rc"), to_utf16_bytes("VALUE \"Product\", \"CurveBook\"\n", false, true)).unwrap();
-        std::fs::write(dir.join("assets/icon.png"), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xFF]).unwrap();
-
-        let files = vec![String::from("packaging/windows/app.rc"), String::from("packaging/windows/clean.rc"), String::from("assets/icon.png")];
-        let hits = scan_repo_checked(&dir, &files).unwrap();
-        assert_eq!(hits, vec![BrandHit { path: String::from("packaging/windows/app.rc"), line: 1, brand: "graphpad" }]);
-
-        // Non-UTF-8 Latin-1 byte in a packaging file must fail rather than be silently skipped.
-        std::fs::write(dir.join("packaging/linux/latin1.desktop"), b"[Desktop Entry]\nComment=\xa9 CurveBook\n").unwrap();
-        let err = scan_repo_checked(&dir, &[String::from("packaging/linux/latin1.desktop")]).unwrap_err();
-        assert!(err.contains("cannot scan packaging/linux/latin1.desktop"), "{err}");
-
-        // Verify git-backed run also rejects non-UTF-8 text cleanly if tested directly via scan_repo_checked.
-        let _ = run;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn desktop_entry_allows_mime_types_and_rejects_keywords_or_waivers() {
-        let mut hits = Vec::new();
-        let desktop = "\
-[Desktop Entry]
-Name=CurveBook
-MimeType=application/vnd.curvebook.project;application/x-prism-project;application/x-prism-xml;
-# Compatibility search term: brand-ok
-Keywords=biostatistics;regression;GraphPad;prism;
-";
-        scan_file("packaging/linux/org.curvebook.CurveBook.desktop", desktop, &mut hits);
-        assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("packaging/linux/org.curvebook.CurveBook.desktop"), line: 5, brand: "graphpad" },
-                BrandHit { path: String::from("packaging/linux/org.curvebook.CurveBook.desktop"), line: 5, brand: "prism" },
-            ]
-        );
-    }
-
-    #[test]
-    fn flags_artcraft_suite_references_in_docs_and_workflows() {
-        let mut hits = Vec::new();
-        scan_file("docs/release/releasing.md", "Installs under Programs\\ArtCraft\\CurveBook or https://getartcraft.com\n", &mut hits);
-        assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("docs/release/releasing.md"), line: 1, brand: "artcraft" },
-                BrandHit { path: String::from("docs/release/releasing.md"), line: 1, brand: "getartcraft" },
-            ]
-        );
-    }
-
-    #[test]
-    fn readme_disclaimer_line_with_marker_may_name_the_suite() {
-        let mut hits = Vec::new();
-        scan_file("README.md", "Not affiliated with ArtCraft. <!-- brand-ok -->\n", &mut hits);
-        assert!(hits.is_empty(), "{hits:?}");
-    }
-
-    #[test]
-    fn readme_disclaimer_line_with_marker_may_name_disclaimed_vendors() {
-        let mut hits = Vec::new();
-        scan_file("README.md", "Not affiliated with Dotmatics or GraphPad Software. <!-- brand-ok -->\n", &mut hits);
-        assert!(hits.is_empty(), "{hits:?}");
-
-        // Packaged README.md inside dist/ bundles is also allowed when marked.
         let mut dist_hits = Vec::new();
-        let mut stats = super::DistScanStats::default();
         super::scan_dist_bytes(
             "curvebook-0.1.0-linux-x86_64/README.md",
             b"Not affiliated with Dotmatics or GraphPad Software. <!-- brand-ok -->\n",
             0,
-            &mut stats,
+            &mut super::DistScanStats::default(),
             &mut dist_hits,
         )
         .unwrap();
         assert!(dist_hits.is_empty(), "{dist_hits:?}");
-    }
 
-    #[test]
-    fn vendor_disclaimer_exemption_is_limited_to_marked_readme_lines_and_allowed_vendors() {
-        let mut hits = Vec::new();
-        // No marker: still flagged in the README.
-        scan_file("README.md", "Not affiliated with Dotmatics or GraphPad.\n", &mut hits);
-        // Marker in any other file: still flagged.
-        scan_file("docs/release/releasing.md", "Not affiliated with Dotmatics or GraphPad. <!-- brand-ok -->\n", &mut hits);
-        // Marked README line: non-exempt competitor products remain flagged.
-        scan_file("README.md", "Not affiliated with OriginPro or SPSS. <!-- brand-ok -->\n", &mut hits);
-        assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("README.md"), line: 1, brand: "graphpad" },
-                BrandHit { path: String::from("README.md"), line: 1, brand: "dotmatics" },
-                BrandHit { path: String::from("docs/release/releasing.md"), line: 1, brand: "graphpad" },
-                BrandHit { path: String::from("docs/release/releasing.md"), line: 1, brand: "dotmatics" },
-                BrandHit { path: String::from("README.md"), line: 1, brand: "spss" },
-                BrandHit { path: String::from("README.md"), line: 1, brand: "originpro" },
-            ]
-        );
-    }
-
-    #[test]
-    fn suite_disclaimer_exemption_is_limited_to_marked_readme_lines_and_the_suite_name() {
-        let mut hits = Vec::new();
-        // No marker: still flagged in the README.
-        scan_file("README.md", "Part of ArtCraft.\n", &mut hits);
-        // Marker in any other file: still flagged.
-        scan_file("docs/release/releasing.md", "Not affiliated with ArtCraft. <!-- brand-ok -->\n", &mut hits);
-        // Marked README line: suite infrastructure is still flagged.
-        scan_file("README.md", "See https://getartcraft.com and craft-ui. <!-- brand-ok -->\n", &mut hits);
-        assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("README.md"), line: 1, brand: "artcraft" },
-                BrandHit { path: String::from("docs/release/releasing.md"), line: 1, brand: "artcraft" },
-                BrandHit { path: String::from("README.md"), line: 1, brand: "getartcraft" },
-                BrandHit { path: String::from("README.md"), line: 1, brand: "craft-ui" },
-            ]
-        );
-    }
-
-    #[test]
-    fn flags_unmarked_prism_mentions_while_allowing_extensions_and_format_tokens() {
-        let mut hits = Vec::new();
-        let rust_src = r#"
-pub fn ext_match(ext: &str) -> &'static str {
-    match ext {
-        "prism" | "pzfx" => "project.prism",
-        _ => "other",
-    }
-}
-pub const MSG_OK: &str = "Import *.prism or table.importPrism files";
-pub const MSG_BRAND: &str = "Import .prism or Prism project";
-pub const LABEL_BAD: &str = "Prism Archive";
-pub const DOMAIN_BAD: &str = "https://www.prism.com/download";
-pub const LABEL_NO_WAIVER: &str = "Prism Archive"; // brand-ok
-#[cfg(test)]
-mod tests {
-    const TEST_FIXTURE: &str = "GraphPad study";
-}
-"#;
-        scan_file("crates/format/src/registry.rs", rust_src, &mut hits);
-        assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("crates/format/src/registry.rs"), line: 9, brand: "prism" },
-                BrandHit { path: String::from("crates/format/src/registry.rs"), line: 10, brand: "prism" },
-                BrandHit { path: String::from("crates/format/src/registry.rs"), line: 11, brand: "prism" },
-                BrandHit { path: String::from("crates/format/src/registry.rs"), line: 12, brand: "prism" },
-                BrandHit { path: String::from("crates/format/src/registry.rs"), line: 15, brand: "graphpad" },
-            ]
-        );
-    }
-
-    #[test]
-    fn svg_allows_optical_prism_metadata_and_flags_non_optical_uses() {
-        let mut hits = Vec::new();
-        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg">
-  <title>CurveBook icon — Mole holding a refractive prism</title>
-  <desc>Clean geometric vector icon holding a glowing triangular optical
-  prism dispersing light into a spectrum.</desc>
-  <title>Prism Scientific Studio</title>
-  <text x="0" y="10">optical prism</text>
-  <!-- Compatibility icon label: brand-ok -->
-  <title>Prism Archive</title>
-</svg>
-"#;
-        scan_file("assets/app-icon/curvebook.svg", svg, &mut hits);
-        assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("assets/app-icon/curvebook.svg"), line: 5, brand: "prism" },
-                BrandHit { path: String::from("assets/app-icon/curvebook.svg"), line: 6, brand: "prism" },
-                BrandHit { path: String::from("assets/app-icon/curvebook.svg"), line: 8, brand: "prism" },
-            ]
-        );
-    }
-
-    #[test]
-    fn scans_github_issue_templates_and_apps_non_rust_files() {
-        let mut hits = Vec::new();
-        let template = "\
-name: Numerical discrepancy
-body:
-  - type: markdown
-    attributes:
-      value: |
-        Do not attach screenshots from Prism or OriginPro.
-        Export `.prism` cleanly instead.
-        # brand-ok compatibility mention: Prism
-";
-        scan_file(".github/ISSUE_TEMPLATE/numerical_result.yml", template, &mut hits);
-
-        let html = "\
-<!doctype html>
-<html>
-  <head><title>CurveBook</title></head>
-  <body>
-    <input accept=\".curvebook,.cbtemplate,.prism,.pzfx\">
-    <p>Drop a Prism file here.</p>
-    <p>Drop a Prism file here.</p> <!-- brand-ok -->
-  </body>
-</html>
-";
-        scan_file("apps/curvebook-web/index.html", html, &mut hits);
-
-        let web_rs = "\
-#[cfg(test)]
-mod tests {
-    const FIXTURE: &str = \"Prism\";
-}
-pub fn prod_format() -> &'static str { \"prism\" }
-";
-        scan_file("apps/curvebook-web/src/lib.rs", web_rs, &mut hits);
+        for (path, line, expected) in [
+            ("README.md", "Not affiliated with Dotmatics or GraphPad.\n", &[(1, "graphpad"), (1, "dotmatics")][..]),
+            ("docs/release/releasing.md", "Not affiliated with Dotmatics or GraphPad. <!-- brand-ok -->\n", &[(1, "graphpad"), (1, "dotmatics")]),
+            ("README.md", "Not affiliated with OriginPro or SPSS. <!-- brand-ok -->\n", &[(1, "spss"), (1, "originpro")]),
+            ("README.md", "Part of ArtCraft.\n", &[(1, "artcraft")]),
+            ("docs/release/releasing.md", "Not affiliated with ArtCraft. <!-- brand-ok -->\n", &[(1, "artcraft")]),
+            ("README.md", "See https://getartcraft.com and craft-ui. <!-- brand-ok -->\n", &[(1, "getartcraft"), (1, "craft-ui")]),
+        ] {
+            assert_eq!(scan(path, line), hits_for(path, expected), "{path}: {line}");
+        }
 
         assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from(".github/ISSUE_TEMPLATE/numerical_result.yml"), line: 6, brand: "prism" },
-                BrandHit { path: String::from(".github/ISSUE_TEMPLATE/numerical_result.yml"), line: 6, brand: "originpro" },
-                BrandHit { path: String::from(".github/ISSUE_TEMPLATE/numerical_result.yml"), line: 8, brand: "prism" },
-                BrandHit { path: String::from("apps/curvebook-web/index.html"), line: 6, brand: "prism" },
-                BrandHit { path: String::from("apps/curvebook-web/index.html"), line: 7, brand: "prism" },
-                BrandHit { path: String::from("apps/curvebook-web/src/lib.rs"), line: 3, brand: "prism" },
-                BrandHit { path: String::from("apps/curvebook-web/src/lib.rs"), line: 5, brand: "prism" },
-            ]
+            scan(
+                "assets/app-icon/curvebook.svg",
+                "<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <title>CurveBook icon — Mole holding a refractive prism</title>\n  <desc>Clean geometric vector icon holding a glowing triangular optical\n  prism dispersing light into a spectrum.</desc>\n  <title>Prism Scientific Studio</title>\n  <text x=\"0\" y=\"10\">optical prism</text>\n  <!-- Compatibility icon label: brand-ok -->\n  <title>Prism Archive</title>\n</svg>\n"
+            ),
+            hits_for("assets/app-icon/curvebook.svg", &[(5, "prism"), (6, "prism"), (8, "prism")])
         );
-    }
 
-    #[test]
-    fn scans_cargo_toml_multiline_descriptions_keywords_categories_and_metadata() {
-        let mut hits = Vec::new();
+        assert_eq!(
+            scan(
+                ".github/ISSUE_TEMPLATE/numerical_result.yml",
+                "name: Numerical discrepancy\nbody:\n  - type: markdown\n    attributes:\n      value: |\n        Do not attach screenshots from Prism or OriginPro.\n        Export `.prism` cleanly instead.\n        # brand-ok compatibility mention: Prism\n"
+            ),
+            hits_for(".github/ISSUE_TEMPLATE/numerical_result.yml", &[(6, "prism"), (6, "originpro"), (8, "prism")])
+        );
+        assert_eq!(
+            scan(
+                "apps/curvebook-web/index.html",
+                "<!doctype html>\n<html>\n  <head><title>CurveBook</title></head>\n  <body>\n    <input accept=\".curvebook,.cbtemplate,.prism,.pzfx\">\n    <p>Drop a Prism file here.</p>\n    <p>Drop a Prism file here.</p> <!-- brand-ok -->\n  </body>\n</html>\n"
+            ),
+            hits_for("apps/curvebook-web/index.html", &[(6, "prism"), (7, "prism")])
+        );
+        assert_eq!(
+            scan(
+                "apps/curvebook-web/src/lib.rs",
+                "#[cfg(test)]\nmod tests {\n    const FIXTURE: &str = \"Prism\";\n}\npub fn prod_format() -> &'static str { \"prism\" }\n"
+            ),
+            hits_for("apps/curvebook-web/src/lib.rs", &[(3, "prism"), (5, "prism")])
+        );
+
         let toml = r#"
 package.metadata.tool = "SPSS"
 
@@ -3885,817 +3489,462 @@ package = { description = "Prism workspace" }
 # Ignored dependency comment mentioning GraphPad and Prism
 serde = "1"
 "#;
-        scan_file("crates/demo/Cargo.toml", toml, &mut hits);
         assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 2, brand: "spss" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 8, brand: "graphpad" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 9, brand: "prism" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 12, brand: "prism" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 13, brand: "originpro" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 15, brand: "prism" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 18, brand: "prism" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 21, brand: "prism" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 25, brand: "jmp" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 27, brand: "prism" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 33, brand: "minitab" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 37, brand: "systat" },
-                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 40, brand: "prism" },
-            ]
+            scan("crates/demo/Cargo.toml", toml),
+            hits_for(
+                "crates/demo/Cargo.toml",
+                &[
+                    (2, "spss"),
+                    (8, "graphpad"),
+                    (9, "prism"),
+                    (12, "prism"),
+                    (13, "originpro"),
+                    (15, "prism"),
+                    (18, "prism"),
+                    (21, "prism"),
+                    (25, "jmp"),
+                    (27, "prism"),
+                    (33, "minitab"),
+                    (37, "systat"),
+                    (40, "prism"),
+                ]
+            )
         );
     }
 
     #[test]
-    fn tightened_ui_and_app_literal_prism_policy() {
-        let mut hits = Vec::new();
-        let ui_rs = r#"
-pub fn dialog_strings() {
-    let ok_brand = "CurveBook";
-    let ok_slug = "curvebook";
-    let ok_art = "approved-seven-pane";
-    let ok_win95 = "curvebook-win95-2508";
-    let ok_filter = "Import (*.curvebook, *.pzfx, *.prism)";
-    let _ = (ok_brand, ok_slug, ok_art, ok_win95, ok_filter);
+    fn decodes_utf16_files_validates_paths_and_fails_on_non_utf8_text() {
+        let dir = TestDir::new("brands-encoding");
+        dir.write_bytes("packaging/windows/app.rc", &to_utf16_bytes("VALUE \"Product\", \"GraphPad\"\n", true, true));
+        dir.write_bytes("packaging/windows/clean.rc", &to_utf16_bytes("VALUE \"Product\", \"CurveBook\"\n", false, true));
+        dir.write_bytes("assets/icon.png", &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xFF]);
+        dir.write("crates/format/src/prism.rs", "// clean .prism module\n");
+        dir.write("crates/engine/tests/bad_guard_leak.rs", "const LEAK: &str = \"Import from Prism\";\n");
+        dir.write("crates/ui-egui/src/PrismStyle.rs", "pub struct Clean;\n");
 
-    let bad_bare = "prism";
-    let ok_sentence = "Switch to .prism for layout";
-    let bad_vendor = "GraphPad";
-    let bad_suite = "ArtCraft";
-    let bad_cap = "Prism";
-    let _ = (bad_bare, ok_sentence, bad_vendor, bad_suite, bad_cap);
-}
-"#;
-        scan_file("crates/ui-egui/src/dialogs_canvas.rs", ui_rs, &mut hits);
-
-        let app_rs = r#"
-pub fn detect_ext(ext: Option<&str>) -> &'static str {
-    match ext {
-        Some("prism") => "external",
-        _ => "native",
-    }
-}
-pub fn add_filters(dialog: DummyDialog) {
-    dialog.add_filter("Supported files", &["curvebook", "pzfx", "prism"]);
-}
-pub fn status_line() -> &'static str {
-    "prism"
-}
-"#;
-        scan_file("apps/curvebook-web/src/lib.rs", app_rs, &mut hits);
-
+        let files: Vec<String> = [
+            "packaging/windows/app.rc",
+            "packaging/windows/clean.rc",
+            "assets/icon.png",
+            "crates/format/src/prism.rs",
+            "crates/engine/tests/bad_guard_leak.rs",
+            "crates/ui-egui/src/PrismStyle.rs",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         assert_eq!(
-            hits,
+            scan_repo_checked(dir.path(), &files).unwrap(),
             vec![
-                BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 13, brand: "artcraft" },
-                BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 10, brand: "prism" },
-                BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 12, brand: "graphpad" },
-                BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 14, brand: "prism" },
-                BrandHit { path: String::from("apps/curvebook-web/src/lib.rs"), line: 12, brand: "prism" },
+                hit("packaging/windows/app.rc", 1, "graphpad"),
+                hit("crates/engine/tests/bad_guard_leak.rs", 1, "prism"),
+                hit("crates/ui-egui/src/PrismStyle.rs", 1, "prism"),
             ]
         );
+
+        dir.write_bytes("packaging/linux/latin1.desktop", b"[Desktop Entry]\nComment=\xa9 CurveBook\n");
+        let err = scan_repo_checked(dir.path(), &[String::from("packaging/linux/latin1.desktop")]).unwrap_err();
+        assert!(err.contains("cannot scan packaging/linux/latin1.desktop"), "{err}");
+        let _ = run;
     }
 
     #[test]
-    fn checks_16_locale_i18n_catalog_and_entries() {
-        let entries = [
-            ("menu.file.open", "en", "CurveBook Project"),
-            ("dialog.open.file_filter", "de", "Data files (*.curvebook, *.pzfx, *.prism)"),
-            ("menu.help.about", "fr", "Built for GraphPad users"),
-            ("cmd.table.importPrism", "ja", "Prism からインポート"),
-            ("toolbar.export", "ar", "Export prism archive"),
-            ("dialog.open.file_filter", "es", "Prism files (*.prism)"),
-            ("inspector.title", "ko", "ArtCraft Inspector"),
-        ];
-        let hits = check_i18n_catalog_entries(entries);
+    fn checks_i18n_text_runs_exports_window_title_and_binary_metadata() {
         assert_eq!(
-            hits,
+            check_i18n_catalog_entries([
+                ("menu.file.open", "en", "CurveBook Project"),
+                ("dialog.open.file_filter", "de", "Data files (*.curvebook, *.pzfx, *.prism)"),
+                ("menu.help.about", "fr", "Built for GraphPad users"),
+                ("cmd.table.importPrism", "ja", "Prism からインポート"),
+                ("toolbar.export", "ar", "Export prism archive"),
+                ("dialog.open.file_filter", "es", "Prism files (*.prism)"),
+                ("inspector.title", "ko", "ArtCraft Inspector"),
+            ]),
             vec![
-                BrandHit { path: String::from("i18n:fr:menu.help.about"), line: 1, brand: "graphpad" },
-                BrandHit { path: String::from("i18n:ja:cmd.table.importPrism"), line: 1, brand: "prism" },
-                BrandHit { path: String::from("i18n:ar:toolbar.export"), line: 1, brand: "prism" },
-                BrandHit { path: String::from("i18n:es:dialog.open.file_filter"), line: 1, brand: "prism" },
-                BrandHit { path: String::from("i18n:ko:inspector.title"), line: 1, brand: "artcraft" },
-            ]
-        );
-    }
-
-    #[test]
-    fn checks_text_runs_and_labeled_text_runs() {
-        let runs = [
-            "CurveBook 1.0",
-            "approved-seven-pane",
-            "Import .pzfx / .prism archive",
-            "Welcome to prism",
-            "Powered by OriginPro and GraphPad",
-            "Open Prism workspace",
-        ];
-        assert_eq!(
-            check_text_runs("layout_tree", runs),
-            vec![
-                BrandHit { path: String::from("layout_tree"), line: 4, brand: "prism" },
-                BrandHit { path: String::from("layout_tree"), line: 5, brand: "graphpad" },
-                BrandHit { path: String::from("layout_tree"), line: 5, brand: "originpro" },
-                BrandHit { path: String::from("layout_tree"), line: 6, brand: "prism" },
+                hit("i18n:fr:menu.help.about", 1, "graphpad"),
+                hit("i18n:ja:cmd.table.importPrism", 1, "prism"),
+                hit("i18n:ar:toolbar.export", 1, "prism"),
+                hit("i18n:es:dialog.open.file_filter", 1, "prism"),
+                hit("i18n:ko:inspector.title", 1, "artcraft"),
             ]
         );
 
+        assert_eq!(
+            check_text_runs(
+                "layout_tree",
+                [
+                    "CurveBook 1.0",
+                    "approved-seven-pane",
+                    "Import .pzfx / .prism archive",
+                    "Welcome to prism",
+                    "Powered by OriginPro and GraphPad",
+                    "Open Prism workspace"
+                ]
+            ),
+            hits_for("layout_tree", &[(4, "prism"), (5, "graphpad"), (5, "originpro"), (6, "prism")])
+        );
         assert_eq!(
             check_text_runs_strict("window_labels", ["CurveBook", "Import .prism archive", "Import Prism archive"]),
-            vec![BrandHit { path: String::from("window_labels"), line: 3, brand: "prism" }]
+            vec![hit("window_labels", 3, "prism")]
         );
-
-        let labeled =
-            [("node#1", "CurveBook Canvas"), ("node#2", "File formats: *.pzfx, *.prism"), ("node#3", "Open in OriginPro"), ("node#4", "prism mode")];
         assert_eq!(
-            check_labeled_text_runs(labeled),
-            vec![
-                BrandHit { path: String::from("node#3"), line: 3, brand: "originpro" },
-                BrandHit { path: String::from("node#4"), line: 4, brand: "prism" },
-            ]
+            check_labeled_text_runs([
+                ("node#1", "CurveBook Canvas"),
+                ("node#2", "File formats: *.pzfx, *.prism"),
+                ("node#3", "Open in OriginPro"),
+                ("node#4", "prism mode"),
+            ]),
+            vec![hit("node#3", 3, "originpro"), hit("node#4", 4, "prism")]
         );
-    }
 
-    #[test]
-    fn checks_export_and_window_metadata() {
-        let clean_svg = r#"<svg><title>CurveBook Chart</title><desc>Dose curve</desc><metadata>CurveBook</metadata><text>Group A</text></svg>"#;
-        assert_eq!(check_svg_metadata("clean.svg", clean_svg), Vec::new());
-
-        let dirty_svg =
-            "<svg>\n<title>Prism &amp; OriginPro</title>\n<desc>prism plot</desc>\n<metadata><author>GraphPad</author></metadata>\n</svg>";
+        assert!(
+            check_svg_metadata(
+                "clean.svg",
+                r#"<svg><title>CurveBook Chart</title><desc>Dose curve</desc><metadata>CurveBook</metadata><text>Group A</text></svg>"#
+            )
+            .is_empty()
+        );
         assert_eq!(
-            check_svg_metadata("dirty.svg", dirty_svg),
-            vec![
-                BrandHit { path: String::from("dirty.svg"), line: 2, brand: "prism" },
-                BrandHit { path: String::from("dirty.svg"), line: 2, brand: "originpro" },
-                BrandHit { path: String::from("dirty.svg"), line: 3, brand: "prism" },
-                BrandHit { path: String::from("dirty.svg"), line: 4, brand: "graphpad" },
-            ]
+            check_svg_metadata(
+                "dirty.svg",
+                "<svg>\n<title>Prism &amp; OriginPro</title>\n<desc>prism plot</desc>\n<metadata><author>GraphPad</author></metadata>\n</svg>"
+            ),
+            hits_for("dirty.svg", &[(2, "prism"), (2, "originpro"), (3, "prism"), (4, "graphpad")])
         );
 
-        let clean_pdf = b"%PDF-1.4\n1 0 obj\n<< /Title (CurveBook) /Creator (CurveBook) /Producer (CurveBook) >>\nendobj\n";
-        assert_eq!(check_pdf_metadata("clean.pdf", clean_pdf), Vec::new());
-
-        // UTF-16BE BOM + "GraphPad" = FEFF 0047 0072 0061 0070 0068 0050 0061 0064
-        let dirty_pdf = b"%PDF-1.4\n1 0 obj\n<< /Creator (Prism) /Producer (ArtCraft) /Title <FEFF00470072006100700068005000610064> >>\nendobj\n";
+        assert!(
+            check_pdf_metadata("clean.pdf", b"%PDF-1.4\n1 0 obj\n<< /Title (CurveBook) /Creator (CurveBook) /Producer (CurveBook) >>\nendobj\n")
+                .is_empty()
+        );
         assert_eq!(
-            check_pdf_metadata("dirty.pdf", dirty_pdf),
-            vec![
-                BrandHit { path: String::from("dirty.pdf"), line: 3, brand: "prism" },
-                BrandHit { path: String::from("dirty.pdf"), line: 3, brand: "artcraft" },
-                BrandHit { path: String::from("dirty.pdf"), line: 3, brand: "graphpad" },
-            ]
+            check_pdf_metadata(
+                "dirty.pdf",
+                b"%PDF-1.4\n1 0 obj\n<< /Creator (Prism) /Producer (ArtCraft) /Title <FEFF00470072006100700068005000610064> >>\nendobj\n"
+            ),
+            hits_for("dirty.pdf", &[(3, "prism"), (3, "artcraft"), (3, "graphpad")])
         );
 
-        let clean_html = "<!doctype html>\n<html>\n<head><title>CurveBook</title><meta name=\"generator\" content=\"CurveBook\"></head>\n<body><input accept=\".curvebook,.cbtemplate,.prism,.pzfx\"></body>\n</html>";
-        assert_eq!(check_html_metadata("clean.html", clean_html), Vec::new());
-
-        let dirty_html = "<html>\n<head><title>Prism</title><meta name=\"author\" content=\"OriginLab\"></head>\n<body aria-label=\"GraphPad workspace\"></body>\n</html>";
+        assert!(check_html_metadata("clean.html", "<!doctype html>\n<html>\n<head><title>CurveBook</title><meta name=\"generator\" content=\"CurveBook\"></head>\n<body><input accept=\".curvebook,.cbtemplate,.prism,.pzfx\"></body>\n</html>").is_empty());
         assert_eq!(
-            check_html_metadata("dirty.html", dirty_html),
-            vec![
-                BrandHit { path: String::from("dirty.html"), line: 2, brand: "prism" },
-                BrandHit { path: String::from("dirty.html"), line: 2, brand: "originlab" },
-                BrandHit { path: String::from("dirty.html"), line: 3, brand: "graphpad" },
-            ]
+            check_html_metadata(
+                "dirty.html",
+                "<html>\n<head><title>Prism</title><meta name=\"author\" content=\"OriginLab\"></head>\n<body aria-label=\"GraphPad workspace\"></body>\n</html>"
+            ),
+            hits_for("dirty.html", &[(2, "prism"), (2, "originlab"), (3, "graphpad")])
         );
 
-        let clean_manifest = r#"{"app":"CurveBook","schema_version":1,"title":"Dose-Response Study"}"#;
-        assert_eq!(check_manifest_metadata("manifest.json", clean_manifest), Vec::new());
-        let dirty_manifest = r#"{"app":"CurveBook","format":".prism","generator":"Prism","vendor":"GraphPad"}"#;
+        assert!(check_manifest_metadata("manifest.json", r#"{"app":"CurveBook","schema_version":1,"title":"Dose-Response Study"}"#).is_empty());
         assert_eq!(
-            check_manifest_metadata("manifest.json", dirty_manifest),
-            vec![
-                BrandHit { path: String::from("manifest.json"), line: 3, brand: "prism" },
-                BrandHit { path: String::from("manifest.json"), line: 4, brand: "graphpad" },
-            ]
+            check_manifest_metadata("manifest.json", r#"{"app":"CurveBook","format":".prism","generator":"Prism","vendor":"GraphPad"}"#),
+            hits_for("manifest.json", &[(3, "prism"), (4, "graphpad")])
         );
 
-        assert_eq!(check_window_title("desktop_host", "CurveBook — Study 1"), Vec::new());
+        assert!(check_window_title("desktop_host", "CurveBook — Study 1").is_empty());
+        assert_eq!(check_window_title("desktop_host", "CurveBook (prism)"), vec![hit("desktop_host", 1, "prism")]);
+
+        // PNG tEXt / iTXt / zTXt + dist bundle
         assert_eq!(
-            check_window_title("desktop_host", "CurveBook (prism)"),
-            vec![BrandHit { path: String::from("desktop_host"), line: 1, brand: "prism" }]
+            super::check_png_metadata("icon.png", &build_test_png_with_chunk(b"tEXt", b"svg:title\x00   LumenCraft logo")),
+            vec![hit("icon.png", 2, "lumencraft")]
         );
-    }
-
-    #[test]
-    fn detects_compound_camel_snake_kebab_brands_without_false_statistical_hits() {
-        let mut hits = Vec::new();
-        let src = r#"
-pub struct PrismStyle { pub like_prism: bool }
-pub fn graphpad_theme() {}
-pub fn xlstatHelper() {}
-pub fn StatisticaExport() {}
-pub fn statistical_analysis() {}
-pub fn origin_pro_preset() {}
-"#;
-        scan_file("crates/ui-egui/src/theme.rs", src, &mut hits);
         assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("crates/ui-egui/src/theme.rs"), line: 2, brand: "prism" },
-                BrandHit { path: String::from("crates/ui-egui/src/theme.rs"), line: 3, brand: "graphpad" },
-                BrandHit { path: String::from("crates/ui-egui/src/theme.rs"), line: 4, brand: "xlstat" },
-                BrandHit { path: String::from("crates/ui-egui/src/theme.rs"), line: 5, brand: "statistica" },
-                BrandHit { path: String::from("crates/ui-egui/src/theme.rs"), line: 7, brand: "originpro" },
-            ]
+            super::check_png_metadata("icon2.png", &build_test_png_with_chunk(b"iTXt", b"Description\x00\x00\x00en\x00\x00Built with OriginPro")),
+            vec![hit("icon2.png", 2, "originpro")]
         );
-    }
-
-    #[test]
-    fn italian_statistica_and_dsl_jmp_rules_are_narrowly_scoped() {
-        let mut i18n_hits = Vec::new();
-        let i18n_src = r#"
-en: "Copy methods and statistics report",
-it: "Copia report metodi e statistica",
-de: "Statistica kopieren",
-it: "Copia Statistica report",
-"#;
-        scan_file("crates/ui-egui/src/i18n.rs", i18n_src, &mut i18n_hits);
-        assert_eq!(
-            i18n_hits,
-            vec![
-                BrandHit { path: String::from("crates/ui-egui/src/i18n.rs"), line: 4, brand: "statistica" },
-                BrandHit { path: String::from("crates/ui-egui/src/i18n.rs"), line: 5, brand: "statistica" },
-            ]
-        );
-
-        let mut dsl_hits = Vec::new();
-        scan_file("crates/fit/src/dsl.rs", "struct Compile { jmp_end: usize }\nconst BAD: &str = \"jmp\";\nfn JmpImporter() {}\n", &mut dsl_hits);
-        assert_eq!(
-            dsl_hits,
-            vec![
-                BrandHit { path: String::from("crates/fit/src/dsl.rs"), line: 2, brand: "jmp" },
-                BrandHit { path: String::from("crates/fit/src/dsl.rs"), line: 3, brand: "jmp" },
-            ]
-        );
-    }
-
-    #[test]
-    fn validates_tracked_paths_and_rejects_blind_test_directory_skips() {
-        let dir = temp_dir("path-and-test-scan");
-        std::fs::create_dir_all(dir.join("crates/format/src")).unwrap();
-        std::fs::create_dir_all(dir.join("crates/engine/tests")).unwrap();
-        std::fs::create_dir_all(dir.join("crates/ui-egui/src")).unwrap();
-        std::fs::write(dir.join("crates/format/src/prism.rs"), "// clean .prism module\n").unwrap();
-        std::fs::write(dir.join("crates/engine/tests/bad_guard_leak.rs"), "const LEAK: &str = \"Import from Prism\";\n").unwrap();
-        std::fs::write(dir.join("crates/ui-egui/src/PrismStyle.rs"), "pub struct Clean;\n").unwrap();
-
-        let files = vec![
-            String::from("crates/format/src/prism.rs"),
-            String::from("crates/engine/tests/bad_guard_leak.rs"),
-            String::from("crates/ui-egui/src/PrismStyle.rs"),
-        ];
-        let hits = scan_repo_checked(&dir, &files).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(
-            hits,
-            vec![
-                BrandHit { path: String::from("crates/engine/tests/bad_guard_leak.rs"), line: 1, brand: "prism" },
-                BrandHit { path: String::from("crates/ui-egui/src/PrismStyle.rs"), line: 1, brand: "prism" },
-            ]
-        );
-    }
-
-    fn build_test_png_with_chunk(chunk_type: &[u8; 4], chunk_data: &[u8]) -> Vec<u8> {
-        let mut png = Vec::from(&b"\x89PNG\r\n\x1a\n"[..]);
-        let ihdr_data = [0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0];
-        png.extend_from_slice(&(ihdr_data.len() as u32).to_be_bytes());
-        png.extend_from_slice(b"IHDR");
-        png.extend_from_slice(&ihdr_data);
-        png.extend_from_slice(&0u32.to_be_bytes());
-
-        png.extend_from_slice(&(chunk_data.len() as u32).to_be_bytes());
-        png.extend_from_slice(chunk_type);
-        png.extend_from_slice(chunk_data);
-        png.extend_from_slice(&0u32.to_be_bytes());
-
-        png.extend_from_slice(&0u32.to_be_bytes());
-        png.extend_from_slice(b"IEND");
-        png.extend_from_slice(&0u32.to_be_bytes());
-        png
-    }
-
-    #[test]
-    fn scans_png_text_itxt_ztxt_and_dist_artefact_bundles() {
-        let dirty_text_png = build_test_png_with_chunk(b"tEXt", b"svg:title\x00   LumenCraft logo");
-        assert_eq!(
-            super::check_png_metadata("icon.png", &dirty_text_png),
-            vec![BrandHit { path: String::from("icon.png"), line: 2, brand: "lumencraft" }]
-        );
-
-        let dirty_itxt_png = build_test_png_with_chunk(b"iTXt", b"Description\x00\x00\x00en\x00\x00Built with OriginPro");
-        assert_eq!(
-            super::check_png_metadata("icon2.png", &dirty_itxt_png),
-            vec![BrandHit { path: String::from("icon2.png"), line: 2, brand: "originpro" }]
-        );
-
-        // Stored-block zlib payload inside zTXt chunk (deflate stored block: CMF=0x78 FLG=0x9c, BFINAL=1 BTYPE=0, LEN=9, NLEN=!9)
         let payload = b"Prism Art";
-        let mut ztxt = Vec::from(&b"Comment\x00\x00"[..]);
-        ztxt.extend_from_slice(&[0x78, 0x9c, 0x01]);
         let len = payload.len() as u16;
+        let mut ztxt = Vec::from(&b"Comment\x00\x00\x78\x9c\x01"[..]);
         ztxt.extend_from_slice(&len.to_le_bytes());
         ztxt.extend_from_slice(&(!len).to_le_bytes());
         ztxt.extend_from_slice(payload);
         ztxt.extend_from_slice(&[0, 0, 0, 1]);
-        let dirty_ztxt_png = build_test_png_with_chunk(b"zTXt", &ztxt);
-        assert_eq!(
-            super::check_png_metadata("icon3.png", &dirty_ztxt_png),
-            vec![BrandHit { path: String::from("icon3.png"), line: 2, brand: "prism" }]
-        );
-
+        assert_eq!(super::check_png_metadata("icon3.png", &build_test_png_with_chunk(b"zTXt", &ztxt)), vec![hit("icon3.png", 2, "prism")]);
         let clean_png = build_test_png_with_chunk(b"tEXt", b"svg:title\x00CurveBook seven-pane logo");
-        assert_eq!(super::check_png_metadata("clean.png", &clean_png), Vec::new());
+        assert!(super::check_png_metadata("clean.png", &clean_png).is_empty());
 
-        let dist = temp_dir("dist-bundle");
-        std::fs::create_dir_all(dist.join("CurveBook.app/Contents/Resources")).unwrap();
-        std::fs::create_dir_all(dist.join("web")).unwrap();
-        std::fs::write(dist.join("CurveBook.app/Contents/Info.plist"), "<dict><key>CFBundleName</key><string>CurveBook</string></dict>\n").unwrap();
-        std::fs::write(dist.join("CurveBook.app/Contents/Resources/app.png"), &clean_png).unwrap();
-        std::fs::write(dist.join("web/index.html"), "<title>CurveBook</title><input accept=\".curvebook,.pzfx,.prism\">\n").unwrap();
-        assert_eq!(super::scan_dist_artefacts(&dist).unwrap(), Vec::new());
+        let dist = TestDir::new("brands-dist");
+        dist.write("CurveBook.app/Contents/Info.plist", "<dict><key>CFBundleName</key><string>CurveBook</string></dict>\n");
+        dist.write_bytes("CurveBook.app/Contents/Resources/app.png", &clean_png);
+        dist.write("web/index.html", "<title>CurveBook</title><input accept=\".curvebook,.pzfx,.prism\">\n");
+        assert!(super::scan_dist_artefacts(dist.path()).unwrap().is_empty());
+        dist.write("docs/audit/leaked.md", "leak");
+        dist.write("web/PrismStyle.css", "/* Prism theme */");
+        let bad = super::scan_dist_artefacts(dist.path()).unwrap();
+        assert!(bad.iter().any(|h| h.path == "docs/audit/leaked.md"), "{bad:?}");
+        assert!(bad.iter().any(|h| h.path == "web/PrismStyle.css" && h.brand == "prism"), "{bad:?}");
 
-        std::fs::create_dir_all(dist.join("docs/audit")).unwrap();
-        std::fs::write(dist.join("docs/audit/leaked.md"), "leak").unwrap();
-        std::fs::write(dist.join("web/PrismStyle.css"), "/* Prism theme */").unwrap();
-        let bad_hits = super::scan_dist_artefacts(&dist).unwrap();
-        let _ = std::fs::remove_dir_all(&dist);
-        assert!(bad_hits.iter().any(|h| h.path == "docs/audit/leaked.md"), "{bad_hits:?}");
-        assert!(bad_hits.iter().any(|h| h.path == "web/PrismStyle.css" && h.brand == "prism"), "{bad_hits:?}");
+        // ICNS & GIF metadata
+        let mk_icns = |body: &[u8]| {
+            let chunk_len = (8 + body.len()) as u32;
+            let mut v = Vec::from(&b"icns"[..]);
+            v.extend_from_slice(&(8 + chunk_len).to_be_bytes());
+            v.extend_from_slice(b"info");
+            v.extend_from_slice(&chunk_len.to_be_bytes());
+            v.extend_from_slice(body);
+            v
+        };
+        assert!(super::check_icon_container_metadata("clean.icns", &mk_icns(b"bplist00icon_assetcatalog")).is_empty());
+        let icns_hits = super::check_icon_container_metadata("dirty.icns", &mk_icns(b"bplist00 LumenCraft OriginPro icon"));
+        assert!(icns_hits.iter().any(|h| h.brand == "lumencraft") && icns_hits.iter().any(|h| h.brand == "originpro"), "{icns_hits:?}");
+
+        let mut clean_gif = Vec::from(&b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x21\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00\x3b"[..]);
+        assert!(super::check_gif_metadata("clean.gif", &clean_gif).is_empty());
+        clean_gif.truncate(13);
+        let comment = b"Created in GraphPad";
+        clean_gif.extend_from_slice(&[0x21, 0xfe, comment.len() as u8]);
+        clean_gif.extend_from_slice(comment);
+        clean_gif.extend_from_slice(&[0x00, 0x3b]);
+        assert_eq!(super::check_gif_metadata("dirty.gif", &clean_gif), vec![hit("dirty.gif#gif_ext1", 1, "graphpad")]);
     }
 
     #[test]
     fn r021_repo_run_positive_and_negative_regression_suite() {
-        let write_f = |root: &PathBuf, rel: &str, bytes: &[u8]| {
-            let full = root.join(rel);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(full, bytes).unwrap();
-        };
-        let init_git = |root: &PathBuf| {
-            let init = std::process::Command::new("git").current_dir(root).args(["init"]).output().unwrap();
-            assert!(init.status.success());
-            let add = std::process::Command::new("git").current_dir(root).args(["add", "--all"]).output().unwrap();
-            assert!(add.status.success());
-        };
-
-        // 1. Positive clean minimal repo exercising ALL narrow boundaries at once.
-        let pos = temp_dir("r021-pos");
+        let pos = TestDir::git_repo("r021-pos");
         let clean_png = build_test_png_with_chunk(b"tEXt", b"svg:title\x00CurveBook seven-pane logo");
-        write_f(&pos, "ASSETS.md", b"# Asset attribution\n\n| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/icon.png` | CurveBook contributors | Original artwork | MIT | app icon |\n");
-        write_f(&pos, "ATTRIBUTION.md", b"# Third-party attributions\n");
-        write_f(&pos, "NOTICE", b"CurveBook Contributors\n");
-        write_f(&pos, "AGENTS.md", b"# AGENTS\n- **Scope:** Existing local `plan/prism/` frames.\n");
-        write_f(&pos, "README.md", b"# CurveBook\nNot affiliated with ArtCraft. <!-- brand-ok -->\n");
-        write_f(&pos, "assets/icon.png", &clean_png);
-        write_f(&pos, "crates/format/src/prism.rs", b"pub fn ext_filter() -> &'static str { \"*.prism\" }\n");
-        write_f(&pos, "crates/format/src/pzfx.rs", b"pub const ROOT: &str = \"<PrismFile></PrismFile>\";\n");
-        write_f(
-            &pos,
-            "crates/ui-egui/src/import_dialog.rs",
-            b"pub const CMD: &str = \"table.importPrism\";\npub const FILTER: &str = \"Import (*.curvebook, *.pzfx, *.prism)\";\n",
-        );
-        write_f(&pos, "crates/ui-egui/src/i18n.rs", b"it: \"Copia report metodi e statistica\",\n");
-        write_f(&pos, "crates/fit/src/dsl.rs", b"pub struct Op { jmp_end: usize }\n");
-        write_f(&pos, "packaging/macos/Info.plist.in", b"<dict>\n  <key>CFBundleTypeName</key>\n  <string>External Scientific Project (.prism, .pzfx)</string>\n  <key>CFBundleTypeExtensions</key>\n  <array>\n    <string>prism</string>\n  </array>\n</dict>\n");
-        write_f(&pos, "packaging/linux/org.curvebook.CurveBook.mime.xml", b"<mime-info>\n<mime-type type=\"application/x-prism-project\">\n<comment>External Project (.prism)</comment>\n<glob pattern=\"*.prism\"/>\n</mime-type>\n</mime-info>\n");
-        write_f(&pos, "packaging/linux/org.curvebook.CurveBook.desktop", b"[Desktop Entry]\nName=CurveBook\nMimeType=application/vnd.curvebook.project;application/x-prism-project;application/x-prism-xml;\nKeywords=biostatistics;fitting;\n");
-        write_f(&pos, "packaging/web/index.html", b"<!doctype html><title>CurveBook</title><input accept=\".prism,.pzfx\">");
-        init_git(&pos);
-        // `run` would also repeat the root-independent live UI sweep that `cargo xtask brands`
-        // already gates; this fixture only exercises the narrow path/content boundaries.
-        let pos_files = crate::repo_files(&pos).unwrap();
-        assert_eq!(super::scan_tree(&pos, &pos_files).map(|(hits, _)| hits), Ok(Vec::new()));
-        assert_eq!(crate::cleanroom::run(&pos), Ok(()));
-        assert_eq!(crate::assets::run(&pos), Ok(()));
-        let _ = std::fs::remove_dir_all(&pos);
-
-        // 2. Negative leak probes across source, identifiers, waivers, tests, docs, paths, and dist
-        // (uses file + path + web/dist artefact scanning directly so 12 probes finish in milliseconds).
-        // Each probe lists its own few files instead of initialising a git repository per probe.
-        let scan_repo_and_dist = |root: &PathBuf, files: &[&str]| -> Result<Vec<BrandHit>, String> {
-            let files: Vec<String> = files.iter().map(|&f| f.to_owned()).collect();
-            super::scan_tree(root, &files).map(|(hits, _)| hits)
-        };
-        for (name, rel, content) in [
-            ("title", "crates/ui-egui/src/title.rs", b"pub const T: &str = \"Prism Studio\";\n".as_slice()),
-            ("camel", "crates/ui-egui/src/style.rs", b"pub struct PrismStyle;\n".as_slice()),
-            ("snake", "crates/ui-egui/src/compat.rs", b"pub fn like_prism() {}\n".as_slice()),
-            ("vendor_snake", "crates/ui-egui/src/theme.rs", b"pub fn graphpad_theme() {}\n".as_slice()),
-            ("waiver_blocked", "crates/engine/src/help.rs", b"pub const H: &str = \"Import GraphPad\"; // brand-ok\n".as_slice()),
-            ("cfg_test_leak", "crates/engine/src/mod.rs", b"#[cfg(test)] mod t { const X: &str = \"Prism Archive\"; }\n".as_slice()),
-            ("tests_leak", "crates/engine/tests/leak.rs", b"const X: &str = \"OriginPro import\";\n".as_slice()),
-            ("docs_md_leak", "docs/guide.md", b"# Guide\nExport from Prism 11.\n".as_slice()),
-            ("path_leak", "crates/ui-egui/src/PrismStyle.rs", b"pub struct X;\n".as_slice()),
-            ("xlstat_leak", "crates/fit/src/helper.rs", b"pub fn XlStatHelper() {}\n".as_slice()),
-            ("statistica_cap", "crates/ui-egui/src/label.rs", b"pub const L: &str = \"StatisticaReport\";\n".as_slice()),
-            ("dist_leak", "packaging/web/bad.html", b"<!doctype html><title>Prism</title>".as_slice()),
+        for (rel, content) in [
+            (
+                "ASSETS.md",
+                "# Asset attribution\n\n| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/icon.png` | CurveBook contributors | Original artwork | MIT | app icon |\n",
+            ),
+            ("ATTRIBUTION.md", "# Third-party attributions\n"),
+            ("NOTICE", "CurveBook Contributors\n"),
+            ("AGENTS.md", "# AGENTS\n- **Scope:** Existing local `plan/prism/` frames.\n"),
+            ("README.md", "# CurveBook\nNot affiliated with ArtCraft. <!-- brand-ok -->\n"),
+            ("crates/format/src/prism.rs", "pub fn ext_filter() -> &'static str { \"*.prism\" }\n"),
+            ("crates/format/src/pzfx.rs", "pub const ROOT: &str = \"<PrismFile></PrismFile>\";\n"),
+            (
+                "crates/ui-egui/src/import_dialog.rs",
+                "pub const CMD: &str = \"table.importPrism\";\npub const FILTER: &str = \"Import (*.curvebook, *.pzfx, *.prism)\";\n",
+            ),
+            ("crates/ui-egui/src/i18n.rs", "it: \"Copia report metodi e statistica\",\n"),
+            ("crates/fit/src/dsl.rs", "pub struct Op { jmp_end: usize }\n"),
+            (
+                "packaging/macos/Info.plist.in",
+                "<dict>\n  <key>CFBundleTypeName</key>\n  <string>External Scientific Project (.prism, .pzfx)</string>\n  <key>CFBundleTypeExtensions</key>\n  <array>\n    <string>prism</string>\n  </array>\n</dict>\n",
+            ),
+            (
+                "packaging/linux/org.curvebook.CurveBook.mime.xml",
+                "<mime-info>\n<mime-type type=\"application/x-prism-project\">\n<comment>External Project (.prism)</comment>\n<glob pattern=\"*.prism\"/>\n</mime-type>\n</mime-info>\n",
+            ),
+            (
+                "packaging/linux/org.curvebook.CurveBook.desktop",
+                "[Desktop Entry]\nName=CurveBook\nMimeType=application/vnd.curvebook.project;application/x-prism-project;application/x-prism-xml;\nKeywords=biostatistics;fitting;\n",
+            ),
+            ("packaging/web/index.html", "<!doctype html><title>CurveBook</title><input accept=\".prism,.pzfx\">"),
         ] {
-            let neg = temp_dir(&format!("r021-neg-{name}"));
-            write_f(&neg, "ASSETS.md", b"# Asset attribution\n\n| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n");
-            write_f(&neg, "ATTRIBUTION.md", b"# Attributions\n");
-            write_f(&neg, "NOTICE", b"CurveBook Contributors\n");
-            write_f(&neg, rel, content);
-            let hits = scan_repo_and_dist(&neg, &["ASSETS.md", "ATTRIBUTION.md", "NOTICE", rel]).unwrap();
-            let _ = std::fs::remove_dir_all(&neg);
+            pos.write(rel, content);
+        }
+        pos.write_bytes("assets/icon.png", &clean_png);
+        pos.git_add_all();
+        let pos_files = crate::repo_files(pos.path()).unwrap();
+        assert_eq!(super::scan_tree(pos.path(), &pos_files).map(|(hits, _)| hits), Ok(Vec::new()));
+        assert_eq!(crate::cleanroom::run(pos.path()), Ok(()));
+        assert_eq!(crate::assets::run(pos.path()), Ok(()));
+
+        for (name, rel, content) in [
+            ("title", "crates/ui-egui/src/title.rs", "pub const T: &str = \"Prism Studio\";\n"),
+            ("camel", "crates/ui-egui/src/style.rs", "pub struct PrismStyle;\n"),
+            ("snake", "crates/ui-egui/src/compat.rs", "pub fn like_prism() {}\n"),
+            ("vendor_snake", "crates/ui-egui/src/theme.rs", "pub fn graphpad_theme() {}\n"),
+            ("waiver_blocked", "crates/engine/src/help.rs", "pub const H: &str = \"Import GraphPad\"; // brand-ok\n"),
+            ("cfg_test_leak", "crates/engine/src/mod.rs", "#[cfg(test)] mod t { const X: &str = \"Prism Archive\"; }\n"),
+            ("tests_leak", "crates/engine/tests/leak.rs", "const X: &str = \"OriginPro import\";\n"),
+            ("docs_md_leak", "docs/guide.md", "# Guide\nExport from Prism 11.\n"),
+            ("path_leak", "crates/ui-egui/src/PrismStyle.rs", "pub struct X;\n"),
+            ("xlstat_leak", "crates/fit/src/helper.rs", "pub fn XlStatHelper() {}\n"),
+            ("statistica_cap", "crates/ui-egui/src/label.rs", "pub const L: &str = \"StatisticaReport\";\n"),
+            ("dist_leak", "packaging/web/bad.html", "<!doctype html><title>Prism</title>"),
+        ] {
+            let neg = TestDir::new(&format!("r021-neg-{name}"));
+            neg.write("ASSETS.md", "# Asset attribution\n\n| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n");
+            neg.write("ATTRIBUTION.md", "# Attributions\n");
+            neg.write("NOTICE", "CurveBook Contributors\n");
+            neg.write(rel, content);
+            let files: Vec<String> = ["ASSETS.md", "ATTRIBUTION.md", "NOTICE", rel].into_iter().map(String::from).collect();
+            let (hits, _) = super::scan_tree(neg.path(), &files).unwrap();
             assert!(!hits.is_empty(), "negative probe `{name}` (`{rel}`) returned 0 brand hits");
         }
     }
 
     #[test]
     fn mcp_rpc_validator_enforces_narrow_open_file_boundary_and_rejects_contaminated_surfaces() {
-        let clean_init = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "serverInfo": { "name": "curvebook", "version": "0.1.0" },
-                "instructions": "CurveBook MCP server for scientific tables, statistical analysis, and publication figures."
-            }
-        });
-        assert_eq!(super::check_mcp_rpc_response("init", "initialize", None, &clean_init), Vec::new());
+        let clean_init = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"curvebook","version":"0.1.0"},"instructions":"CurveBook MCP server for scientific tables."}});
+        assert!(super::check_mcp_rpc_response("init", "initialize", None, &clean_init).is_empty());
 
-        let dirty_init = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "serverInfo": { "name": "lumencraft-mcp", "version": "0.1.0" },
-                "instructions": "Compatible with GraphPad Prism workflows."
-            }
-        });
+        let dirty_init = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"lumencraft-mcp","version":"0.1.0"},"instructions":"Compatible with GraphPad Prism workflows."}});
         let init_hits = super::check_mcp_rpc_response("init", "initialize", None, &dirty_init);
-        assert!(init_hits.iter().any(|h| h.brand == "lumencraft"), "{init_hits:?}");
-        assert!(init_hits.iter().any(|h| h.brand == "graphpad"), "{init_hits:?}");
-        assert!(init_hits.iter().any(|h| h.brand == "prism"), "{init_hits:?}");
+        for b in ["lumencraft", "graphpad", "prism"] {
+            assert!(init_hits.iter().any(|h| h.brand == b), "{b} missing in {init_hits:?}");
+        }
 
-        let clean_tools = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "result": {
-                "tools": [
-                    {
-                        "name": "open_file",
-                        "description": "Open or import a .curvebook, .cbtemplate, .prism, .pzfx, or .csv file.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "format": { "type": "string", "enum": ["curvebook", "prism", "pzfx", "csv"] },
-                                "title": { "type": "string", "description": "Optional sheet title." }
-                            }
-                        }
-                    },
-                    {
-                        "name": "table_import_prism",
-                        "description": "[table.importPrism] Import External Archive — Import an external ZIP-based project archive.",
-                        "inputSchema": { "type": "object" }
-                    }
-                ]
-            }
-        });
-        assert_eq!(super::check_mcp_rpc_response("tools", "tools/list", None, &clean_tools), Vec::new());
+        let clean_tools = serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"tools":[
+            {"name":"open_file","description":"Open or import a .curvebook, .cbtemplate, .prism, .pzfx, or .csv file.","inputSchema":{"type":"object","properties":{"format":{"type":"string","enum":["curvebook","prism","pzfx","csv"]},"title":{"type":"string","description":"Optional sheet title."}}}},
+            {"name":"table_import_prism","description":"[table.importPrism] Import External Archive — Import an external ZIP-based project archive.","inputSchema":{"type":"object"}}
+        ]}});
+        assert!(super::check_mcp_rpc_response("tools", "tools/list", None, &clean_tools).is_empty());
 
-        let dirty_tools = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "result": {
-                "tools": [
-                    {
-                        "name": "open_file",
-                        "description": "Open a GraphPad Prism (.prism) project.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "title": { "type": "string", "description": "Optional .prism project title." }
-                            }
-                        }
-                    },
-                    {
-                        "name": "doc_inspect",
-                        "description": "Inspect .prism or OriginPro sheets.",
-                        "inputSchema": { "type": "object" }
-                    }
-                ]
-            }
-        });
+        let dirty_tools = serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"tools":[
+            {"name":"open_file","description":"Open a GraphPad Prism (.prism) project.","inputSchema":{"type":"object","properties":{"title":{"type":"string","description":"Optional .prism project title."}}}},
+            {"name":"doc_inspect","description":"Inspect .prism or OriginPro sheets.","inputSchema":{"type":"object"}}
+        ]}});
         let tool_hits = super::check_mcp_rpc_response("tools", "tools/list", None, &dirty_tools);
-        assert!(tool_hits.iter().any(|h| h.brand == "graphpad"), "{tool_hits:?}");
-        assert!(tool_hits.iter().any(|h| h.brand == "originpro"), "{tool_hits:?}");
-        // Only the bare product name is a hit; the `.prism`-only descriptions name a file format (`R12.8`).
+        assert!(tool_hits.iter().any(|h| h.brand == "graphpad") && tool_hits.iter().any(|h| h.brand == "originpro"));
         assert_eq!(tool_hits.iter().filter(|h| h.brand == "prism").count(), 1, "{tool_hits:?}");
 
-        let dirty_prompt = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "result": {
-                "description": "ArtCraft workflow",
-                "messages": [{ "role": "user", "content": { "type": "text", "text": "Run ANOVA like Minitab or Prism." } }]
-            }
-        });
+        let dirty_prompt = serde_json::json!({"jsonrpc":"2.0","id":3,"result":{"description":"ArtCraft workflow","messages":[{"role":"user","content":{"type":"text","text":"Run ANOVA like Minitab or Prism."}}]}});
         let prompt_hits = super::check_mcp_rpc_response("prompt", "prompts/get", None, &dirty_prompt);
-        assert!(prompt_hits.iter().any(|h| h.brand == "artcraft"), "{prompt_hits:?}");
-        assert!(prompt_hits.iter().any(|h| h.brand == "minitab"), "{prompt_hits:?}");
-        assert!(prompt_hits.iter().any(|h| h.brand == "prism"), "{prompt_hits:?}");
+        for b in ["artcraft", "minitab", "prism"] {
+            assert!(prompt_hits.iter().any(|h| h.brand == b), "{b} missing in {prompt_hits:?}");
+        }
 
-        let dirty_resource = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 4,
-            "result": {
-                "contents": [{ "uri": "sheet://data-1", "mimeType": "application/json", "text": "{\"title\":\"SPSS Cohort\",\"legacy\":\"LumenCraft\"}" }]
-            }
-        });
-        let res_hits = super::check_mcp_rpc_response("res", "resources/read", None, &dirty_resource);
-        assert!(res_hits.iter().any(|h| h.brand == "spss"), "{res_hits:?}");
-        assert!(res_hits.iter().any(|h| h.brand == "lumencraft"), "{res_hits:?}");
+        let dirty_res = serde_json::json!({"jsonrpc":"2.0","id":4,"result":{"contents":[{"uri":"sheet://data-1","mimeType":"application/json","text":"{\"title\":\"SPSS Cohort\",\"legacy\":\"LumenCraft\"}"}]}});
+        let res_hits = super::check_mcp_rpc_response("res", "resources/read", None, &dirty_res);
+        assert!(res_hits.iter().any(|h| h.brand == "spss") && res_hits.iter().any(|h| h.brand == "lumencraft"));
 
-        let dirty_png = build_test_png_with_chunk(b"tEXt", b"svg:title\x00LumenCraft preview");
-        let b64_png = encode_b64_test(&dirty_png);
-        let dirty_preview = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 5,
-            "result": {
-                "content": [
-                    { "type": "image", "mimeType": "image/png", "data": b64_png },
-                    { "type": "text", "text": "{\"title\":\"Clean\"}" }
-                ],
-                "isError": false
-            }
-        });
-        let prev_hits = super::check_mcp_rpc_response("preview", "tools/call", Some("render_preview"), &dirty_preview);
-        assert_eq!(prev_hits, vec![BrandHit { path: String::from("preview:/result/content/0/data#png"), line: 2, brand: "lumencraft" }]);
+        let b64_png = curvebook_platform::base64::encode(&build_test_png_with_chunk(b"tEXt", b"svg:title\x00LumenCraft preview"));
+        let dirty_preview = serde_json::json!({"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"image","mimeType":"image/png","data":b64_png},{"type":"text","text":"{\"title\":\"Clean\"}"}],"isError":false}});
+        assert_eq!(
+            super::check_mcp_rpc_response("preview", "tools/call", Some("render_preview"), &dirty_preview),
+            vec![hit("preview:/result/content/0/data#png", 2, "lumencraft")]
+        );
 
-        let dirty_svg_export = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 6,
-            "result": {
-                "content": [{ "type": "text", "text": "<svg xmlns=\"http://www.w3.org/2000/svg\"><title>Prism Plot</title></svg>" }],
-                "isError": false
-            }
-        });
-        let svg_hits = super::check_mcp_rpc_response("export", "tools/call", Some("export"), &dirty_svg_export);
-        assert!(svg_hits.iter().any(|h| h.brand == "prism"), "{svg_hits:?}");
+        let dirty_svg = serde_json::json!({"jsonrpc":"2.0","id":6,"result":{"content":[{"type":"text","text":"<svg xmlns=\"http://www.w3.org/2000/svg\"><title>Prism Plot</title></svg>"}],"isError":false}});
+        assert!(super::check_mcp_rpc_response("export", "tools/call", Some("export"), &dirty_svg).iter().any(|h| h.brand == "prism"));
     }
 
     #[test]
-    fn r12_8_lowercase_dot_prism_extension_is_allowed_on_strict_surfaces() {
-        let page = |title: &str| {
-            format!("<html><head><title>{title}</title><meta name=\"description\" content=\"{title}\"></head><body><h1>{title}</h1></body></html>")
+    fn r12_8_dot_prism_generated_docs_and_audit_skip_boundaries() {
+        let prism_hits = |title: &str| {
+            let html = format!(
+                "<html><head><title>{title}</title><meta name=\"description\" content=\"{title}\"></head><body><h1>{title}</h1></body></html>"
+            );
+            check_html_metadata("docs/page.html", &html).into_iter().filter(|h| h.brand == "prism").count()
         };
-        let prism_hits = |html: &str| super::check_html_metadata("docs/page.html", html).into_iter().filter(|h| h.brand == "prism").count();
-
-        assert_eq!(prism_hits(&page("Open .pzfx and .prism files")), 0);
-        assert_eq!(prism_hits(&page("Filter *.prism or experiment.prism")), 0);
-        assert_eq!(prism_hits(&page("Download https://example.com/files/experiment.prism")), 0);
-        // The product name, a capitalised extension, a domain, and a URL host stay flagged.
-        assert!(prism_hits(&page("Open Prism files")) > 0);
-        assert!(prism_hits(&page("Open .Prism files")) > 0);
-        assert!(prism_hits(&page("See example.prism.com")) > 0);
-        assert!(prism_hits(&page("See https://example.prism/download")) > 0);
-        assert!(prism_hits(&page("See http://example.prism")) > 0);
-
+        for ok in ["Open .pzfx and .prism files", "Filter *.prism or experiment.prism", "Download https://example.com/files/experiment.prism"] {
+            assert_eq!(prism_hits(ok), 0, "{ok}");
+        }
+        for bad in
+            ["Open Prism files", "Open .Prism files", "See example.prism.com", "See https://example.prism/download", "See http://example.prism"]
+        {
+            assert!(prism_hits(bad) > 0, "{bad}");
+        }
         let mut hits = Vec::new();
         super::collect_line_words("docs/page.html", 1, "Export .prism tables", &["prism"], super::PrismPolicy::Strict, &mut hits);
-        assert!(hits.is_empty(), "{hits:?}");
+        assert!(hits.is_empty());
         super::collect_line_words("docs/page.html", 1, "Export prism tables", &["prism"], super::PrismPolicy::Strict, &mut hits);
-        assert_eq!(hits.len(), 1, "{hits:?}");
-    }
+        assert_eq!(hits.len(), 1);
 
-    #[test]
-    fn scans_icns_info_plist_and_gif_comment_extensions() {
-        let mut clean_icns = Vec::from(&b"icns"[..]);
-        let info_body = b"bplist00icon_assetcatalog";
-        let info_len = (8 + info_body.len()) as u32;
-        clean_icns.extend_from_slice(&(8 + info_len).to_be_bytes());
-        clean_icns.extend_from_slice(b"info");
-        clean_icns.extend_from_slice(&info_len.to_be_bytes());
-        clean_icns.extend_from_slice(info_body);
-        assert_eq!(super::check_icon_container_metadata("clean.icns", &clean_icns), Vec::new());
-
-        let mut dirty_icns = Vec::from(&b"icns"[..]);
-        let bad_body = b"bplist00 LumenCraft OriginPro icon";
-        let bad_len = (8 + bad_body.len()) as u32;
-        dirty_icns.extend_from_slice(&(8 + bad_len).to_be_bytes());
-        dirty_icns.extend_from_slice(b"info");
-        dirty_icns.extend_from_slice(&bad_len.to_be_bytes());
-        dirty_icns.extend_from_slice(bad_body);
-        let icns_hits = super::check_icon_container_metadata("dirty.icns", &dirty_icns);
-        assert!(icns_hits.iter().any(|h| h.brand == "lumencraft"), "{icns_hits:?}");
-        assert!(icns_hits.iter().any(|h| h.brand == "originpro"), "{icns_hits:?}");
-
-        // Minimal GIF89a (1x1, no GCT) with clean NETSCAPE2.0 vs dirty Comment Extension (0x21 0xFE).
-        let mut clean_gif = Vec::from(&b"GIF89a\x01\x00\x01\x00\x00\x00\x00"[..]);
-        clean_gif.extend_from_slice(b"\x21\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00\x3b");
-        assert_eq!(super::check_gif_metadata("clean.gif", &clean_gif), Vec::new());
-
-        let mut dirty_gif = Vec::from(&b"GIF89a\x01\x00\x01\x00\x00\x00\x00"[..]);
-        let comment = b"Created in GraphPad";
-        dirty_gif.extend_from_slice(&[0x21, 0xfe, comment.len() as u8]);
-        dirty_gif.extend_from_slice(comment);
-        dirty_gif.extend_from_slice(&[0x00, 0x3b]);
-        assert_eq!(
-            super::check_gif_metadata("dirty.gif", &dirty_gif),
-            vec![BrandHit { path: String::from("dirty.gif#gif_ext1"), line: 1, brand: "graphpad" }]
-        );
-    }
-
-    fn encode_b64_test(bytes: &[u8]) -> String {
-        const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-        let mut idx = 0usize;
-        while idx < bytes.len() {
-            let b0 = bytes[idx];
-            let b1 = bytes.get(idx + 1).copied().unwrap_or(0);
-            let b2 = bytes.get(idx + 2).copied().unwrap_or(0);
-            out.push(char::from(TABLE[usize::from(b0 >> 2)]));
-            out.push(char::from(TABLE[usize::from(((b0 & 0x03) << 4) | (b1 >> 4))]));
-            if idx + 1 < bytes.len() {
-                out.push(char::from(TABLE[usize::from(((b1 & 0x0f) << 2) | (b2 >> 6))]));
-            } else {
-                out.push('=');
-            }
-            if idx + 2 < bytes.len() {
-                out.push(char::from(TABLE[usize::from(b2 & 0x3f)]));
-            } else {
-                out.push('=');
-            }
-            idx += 3;
-        }
-        out
-    }
-
-    #[test]
-    fn generated_docs_html_allows_exact_format_tokens_and_rejects_brand_prose() {
-        let mut ok_hits = Vec::new();
-        let ok_html = "\
-<!doctype html><html><body>\
-<p>Supports <code>table.importPrism</code> and <code>&quot;prism&quot;</code> for <code>.prism</code> files (<a href=\"https://github.com/HauserGroup/curvebook/blob/main/crates/format/src/prism.rs\">source</a>).</p>\
-<p>Anchor <a href=\"#mcp-tool-table_import_prism\">tool</a> and <a href=\"#format-prism\">format</a>.</p>\
-</body></html>\n";
+        let ok_html = "<!doctype html><html><body><p>Supports <code>table.importPrism</code> and <code>&quot;prism&quot;</code> for <code>.prism</code> files (<a href=\"https://github.com/HauserGroup/curvebook/blob/main/crates/format/src/prism.rs\">source</a>).</p><p>Anchor <a href=\"#mcp-tool-table_import_prism\">tool</a> and <a href=\"#format-prism\">format</a>.</p></body></html>\n";
         for gen_path in [
             "docs-site/manual/v0.1/registry/formats.html",
             "docs-site/manual/latest/registry/formats.html",
             "target/docs-manual/latest/registry/formats.html",
         ] {
-            scan_file(gen_path, ok_html, &mut ok_hits);
-            ok_hits.extend(check_html_metadata(gen_path, ok_html));
+            assert!(scan(gen_path, ok_html).is_empty() && check_html_metadata(gen_path, ok_html).is_empty(), "{gen_path}");
         }
-        assert!(ok_hits.is_empty(), "unexpected hits in generated docs HTML: {ok_hits:?}");
-
-        let mut agents_hits = Vec::new();
         let agents_html = "<p>Scope: crates/format/src/lib.rs (<code>plan/prism/</code> reference notes)</p>\n";
-        scan_file("docs-site/manual/v0.1/contribute/agents.html", agents_html, &mut agents_hits);
-        agents_hits.extend(check_html_metadata("docs-site/manual/v0.1/contribute/agents.html", agents_html));
-        assert!(agents_hits.is_empty(), "unexpected hits in contribute/agents.html: {agents_hits:?}");
-
-        let mut bad_gen_hits = Vec::new();
-        scan_file("docs-site/manual/v0.1/files.html", "<p>Matches GraphPad Prism output with PrismStyle headers.</p>\n", &mut bad_gen_hits);
-        assert!(bad_gen_hits.iter().any(|h| h.brand == "graphpad"), "{bad_gen_hits:?}");
-        assert!(bad_gen_hits.iter().any(|h| h.brand == "prism"), "{bad_gen_hits:?}");
-
+        assert!(scan("docs-site/manual/v0.1/contribute/agents.html", agents_html).is_empty());
+        assert!(check_html_metadata("docs-site/manual/v0.1/contribute/agents.html", agents_html).is_empty());
+        let bad_gen = scan("docs-site/manual/v0.1/files.html", "<p>Matches GraphPad Prism output with PrismStyle headers.</p>\n");
+        assert!(bad_gen.iter().any(|h| h.brand == "graphpad") && bad_gen.iter().any(|h| h.brand == "prism"));
         for strict_path in ["docs-site/manual/index.html", "target/docs-manual/index.html", "docs/manual/v0.1/registry/formats.html"] {
-            let mut strict_hits = Vec::new();
-            scan_file(strict_path, "<p>table.importPrism</p>\n", &mut strict_hits);
-            assert!(strict_hits.iter().any(|h| h.brand == "prism"), "{strict_path} must stay strict: {strict_hits:?}");
+            assert!(scan(strict_path, "<p>table.importPrism</p>\n").iter().any(|h| h.brand == "prism"), "{strict_path}");
         }
-    }
 
-    #[test]
-    fn audit_dirs_are_not_skipped_in_working_tree_scans() {
-        assert!(!skip_path("docs/audit/README.md"));
-        assert!(!skip_path("docs/history/audit/findings/r1/S02.md"));
-        assert!(!skip_path("./docs/history/audit"));
-        assert!(!skip_path("docs/history/roadmap/r0.md"));
-        assert!(!skip_path("docs/evidence/overview.md"));
+        for p in [
+            "docs/audit/README.md",
+            "docs/history/audit/findings/r1/S02.md",
+            "./docs/history/audit",
+            "docs/history/roadmap/r0.md",
+            "docs/evidence/overview.md",
+        ] {
+            assert!(!skip_path(p), "{p}");
+        }
         assert!(skip_path("xtask/src/brands.rs"));
     }
 
     #[test]
-    fn sec22_catches_rust_escapes_svg_comments_textpath_data_uris_pdf_case_and_dist_bypasses() {
-        let dir = temp_dir("sec22-brands");
-        std::fs::create_dir_all(dir.join("crates/core/src")).unwrap();
-        std::fs::create_dir_all(dir.join("assets/ui")).unwrap();
-        std::fs::create_dir_all(dir.join("packaging/macos")).unwrap();
+    fn sec22_escapes_svg_comments_dist_and_macos_stapled_ticket_guards() {
+        let dir = TestDir::new("brands-sec22");
+        dir.write("crates/core/src/esc.rs", "pub fn a() -> &'static str { \"\\x47raph\\u{0050}ad\" }\npub fn b() -> &'static str { \"\\x61rtcraft\" }\npub fn c() -> &'static str { \"\\x76ectorcraft\" }\n");
+        dir.write("assets/ui/sneaky.svg", "<svg xmlns=\"http://www.w3.org/2000/svg\">\n<!-- OriginPro comment -->\n<g aria-label=\"Graph&#80;ad\"><textPath>Minitab</textPath></g>\n<image href=\"data:image/svg+xml;charset=utf-8;base64,PHN2Zz48dGl0bGU+U3lzdGF0PC90aXRsZT48L3N2Zz4=\"/>\n</svg>\n");
+        dir.write("packaging/macos/INFO.PLIST", "<string>GraphPad</string>\n");
+        dir.write("ASSETS.md", "| Asset | Author |\n|---|---|\n| `a` | Prism optical curve |\n");
 
-        std::fs::write(
-            dir.join("crates/core/src/esc.rs"),
-            "pub fn a() -> &'static str { \"\\x47raph\\u{0050}ad\" }\n\
-             pub fn b() -> &'static str { \"\\x61rtcraft\" }\n\
-             pub fn c() -> &'static str { \"\\x76ectorcraft\" }\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("assets/ui/sneaky.svg"),
-            "<svg xmlns=\"http://www.w3.org/2000/svg\">\n\
-               <!-- OriginPro comment -->\n\
-               <g aria-label=\"Graph&#80;ad\"><textPath>Minitab</textPath></g>\n\
-               <image href=\"data:image/svg+xml;charset=utf-8;base64,PHN2Zz48dGl0bGU+U3lzdGF0PC90aXRsZT48L3N2Zz4=\"/>\n\
-             </svg>\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("packaging/macos/INFO.PLIST"), "<string>GraphPad</string>\n").unwrap();
-        std::fs::write(dir.join("ASSETS.md"), "| Asset | Author |\n|---|---|\n| `a` | Prism optical curve |\n").unwrap();
-
-        let repo_hits = scan_repo_checked(
-            &dir,
-            &[
-                String::from("crates/core/src/esc.rs"),
-                String::from("assets/ui/sneaky.svg"),
-                String::from("packaging/macos/INFO.PLIST"),
-                String::from("ASSETS.md"),
-            ],
-        )
-        .unwrap();
-        assert!(repo_hits.iter().any(|h| h.path.ends_with("esc.rs") && h.brand == "graphpad"), "{repo_hits:?}");
-        assert!(repo_hits.iter().any(|h| h.path.ends_with("esc.rs") && h.brand == "artcraft"), "{repo_hits:?}");
-        assert!(repo_hits.iter().any(|h| h.path.ends_with("esc.rs") && h.brand == "vectorcraft"), "{repo_hits:?}");
-        assert!(repo_hits.iter().any(|h| h.path.ends_with("sneaky.svg") && h.brand == "originpro"), "{repo_hits:?}");
-        assert!(repo_hits.iter().any(|h| h.path.ends_with("sneaky.svg") && h.brand == "graphpad"), "{repo_hits:?}");
-        assert!(repo_hits.iter().any(|h| h.path.ends_with("sneaky.svg") && h.brand == "minitab"), "{repo_hits:?}");
-        assert!(repo_hits.iter().any(|h| h.path.ends_with("sneaky.svg") && h.brand == "systat"), "{repo_hits:?}");
-        assert!(repo_hits.iter().any(|h| h.path.ends_with("INFO.PLIST") && h.brand == "graphpad"), "{repo_hits:?}");
-        assert!(repo_hits.iter().any(|h| h.path == "ASSETS.md" && h.brand == "prism"), "{repo_hits:?}");
+        let files: Vec<String> =
+            ["crates/core/src/esc.rs", "assets/ui/sneaky.svg", "packaging/macos/INFO.PLIST", "ASSETS.md"].into_iter().map(String::from).collect();
+        let repo_hits = scan_repo_checked(dir.path(), &files).unwrap();
+        for (suffix, brand) in [
+            ("esc.rs", "graphpad"),
+            ("esc.rs", "artcraft"),
+            ("esc.rs", "vectorcraft"),
+            ("sneaky.svg", "originpro"),
+            ("sneaky.svg", "graphpad"),
+            ("sneaky.svg", "minitab"),
+            ("sneaky.svg", "systat"),
+            ("INFO.PLIST", "graphpad"),
+            ("ASSETS.md", "prism"),
+        ] {
+            assert!(repo_hits.iter().any(|h| h.path.ends_with(suffix) && h.brand == brand), "missing ({suffix}, {brand}) in {repo_hits:?}");
+        }
 
         let svg_meta = check_svg_metadata("meta.svg", "<svg><!-- SigmaPlot --><text><textPath>Graph&#80;ad</textPath></text></svg>");
-        assert!(svg_meta.iter().any(|h| h.brand == "sigmaplot"), "{svg_meta:?}");
-        assert!(svg_meta.iter().any(|h| h.brand == "graphpad"), "{svg_meta:?}");
+        assert!(svg_meta.iter().any(|h| h.brand == "sigmaplot") && svg_meta.iter().any(|h| h.brand == "graphpad"));
         for degenerate in ["<!--><g/>", "<!---><g/>", "<!----><g/>", "<!-->"] {
             assert!(check_svg_metadata("degenerate.svg", degenerate).is_empty());
             let mut hits = Vec::new();
             super::scan_svg("degenerate.svg", degenerate, &mut hits);
-            assert!(hits.is_empty(), "degenerate SVG comment `{degenerate}` produced {hits:?}");
+            assert!(hits.is_empty(), "{degenerate}: {hits:?}");
         }
 
-        let dist_vc = dir.join("dist-vc");
-        std::fs::create_dir_all(&dist_vc).unwrap();
-        std::fs::write(dist_vc.join("curvebook"), b"\x7FELF\xFF\xFEclean_elf_stub").unwrap();
-        std::fs::write(dist_vc.join("notes.txt"), b"Powered by VectorCraft.\n").unwrap();
-        let vc_hits = super::scan_dist_artefacts(&dist_vc).unwrap();
-        assert!(vc_hits.iter().any(|h| h.brand == "vectorcraft"), "{vc_hits:?}");
+        let dist_vc = TestDir::new("dist-vc");
+        dist_vc.write_bytes("curvebook", b"\x7FELF\xFF\xFEclean_elf_stub");
+        dist_vc.write_bytes("notes.txt", b"Powered by VectorCraft.\n");
+        assert!(super::scan_dist_artefacts(dist_vc.path()).unwrap().iter().any(|h| h.brand == "vectorcraft"));
 
-        let dist_bad = dir.join("dist-bad");
-        std::fs::create_dir_all(&dist_bad).unwrap();
-        std::fs::write(dist_bad.join("index.html"), b"\xFF\xFE\x00\xD8broken").unwrap();
-        assert!(super::scan_dist_artefacts(&dist_bad).is_ok());
-        std::fs::write(dist_bad.join("index.html"), b"\xFFbad-utf8").unwrap();
-        assert!(super::scan_dist_artefacts(&dist_bad).is_err());
+        let dist_bad = TestDir::new("dist-bad");
+        dist_bad.write_bytes("index.html", b"\xFF\xFE\x00\xD8broken");
+        assert!(super::scan_dist_artefacts(dist_bad.path()).is_ok());
+        dist_bad.write_bytes("index.html", b"\xFFbad-utf8");
+        assert!(super::scan_dist_artefacts(dist_bad.path()).is_err());
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn dist_scan_allows_macos_stapled_notarization_ticket_coderesources_only() {
-        let dir = temp_dir("macos-stapled-coderesources");
-        let app_contents = dir.join("CurveBook.app/Contents");
-        std::fs::create_dir_all(app_contents.join("Resources")).unwrap();
-
-        // Apple `xcrun stapler staple` writes a binary ticket prefixed with `s8ch` to Contents/CodeResources.
-        let ticket_bytes = b"s8ch\x01\x00\x00\x00\x30\x82\x01\x02\xFF\xFEnotarization-ticket";
-        std::fs::write(app_contents.join("CodeResources"), ticket_bytes).unwrap();
-        assert!(super::scan_dist_artefacts(&dir).unwrap().is_empty());
-
-        // Non-ticket binary bytes at Contents/CodeResources must still fail closed.
-        std::fs::write(app_contents.join("CodeResources"), b"\xFF\x00not-a-stapled-ticket").unwrap();
-        assert!(super::scan_dist_artefacts(&dir).is_err());
-
-        // Restore valid ticket and verify `s8ch` magic alone does not waive arbitrary paths.
-        std::fs::write(app_contents.join("CodeResources"), ticket_bytes).unwrap();
-        std::fs::write(app_contents.join("Resources/bogus.txt"), ticket_bytes).unwrap();
-        assert!(super::scan_dist_artefacts(&dir).is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn da_03_02_macos_stapled_ticket_rejects_archives_empty_stem_oversized_and_missing_der() {
+        // Apple stapled ticket guards (DA-03-02).
         let valid_ticket = b"s8ch\x01\x00\x00\x00\x30\x82\x01\x02\xFF\xFEnotarization-ticket";
-        assert!(super::is_macos_stapled_ticket("CurveBook.app/Contents/CodeResources", valid_ticket));
-        assert!(super::is_macos_stapled_ticket("macos/CurveBook.app/Contents/CodeResources", valid_ticket));
-        assert!(super::is_macos_stapled_ticket("CurveBook.dmg!CurveBook.app/Contents/CodeResources", valid_ticket));
+        let ticket_dir = TestDir::new("macos-ticket");
+        ticket_dir.write_bytes("CurveBook.app/Contents/CodeResources", valid_ticket);
+        assert!(super::scan_dist_artefacts(ticket_dir.path()).unwrap().is_empty());
+        ticket_dir.write_bytes("CurveBook.app/Contents/CodeResources", b"\xFF\x00not-a-stapled-ticket");
+        assert!(super::scan_dist_artefacts(ticket_dir.path()).is_err());
+        ticket_dir.write_bytes("CurveBook.app/Contents/CodeResources", valid_ticket);
+        ticket_dir.write_bytes("CurveBook.app/Contents/Resources/bogus.txt", valid_ticket);
+        assert!(super::scan_dist_artefacts(ticket_dir.path()).is_err());
 
-        // Empty `.app` stem must be rejected.
-        assert!(!super::is_macos_stapled_ticket(".app/Contents/CodeResources", valid_ticket));
-        assert!(!super::is_macos_stapled_ticket("foo/.app/Contents/CodeResources", valid_ticket));
-
-        // Nested `.curvebook`, `.cbtemplate`, `.zip`, and multi-archive `!` contexts must be rejected.
-        assert!(!super::is_macos_stapled_ticket("project.curvebook!CurveBook.app/Contents/CodeResources", valid_ticket));
-        assert!(!super::is_macos_stapled_ticket("template.cbtemplate!CurveBook.app/Contents/CodeResources", valid_ticket));
-        assert!(!super::is_macos_stapled_ticket("archive.zip!CurveBook.app/Contents/CodeResources", valid_ticket));
-        assert!(!super::is_macos_stapled_ticket("a.dmg!b.zip!CurveBook.app/Contents/CodeResources", valid_ticket));
-
-        // `s8ch` without a DER CMS `0x30 0x82` envelope must be rejected.
-        let fake_payload = b"s8ch\xFFnot-a-der-cms-envelope";
-        assert!(!super::is_macos_stapled_ticket("CurveBook.app/Contents/CodeResources", fake_payload));
-
-        // Oversized (> 1 MiB) payloads must be rejected even with `s8ch` + DER prefix.
+        for ok_path in [
+            "CurveBook.app/Contents/CodeResources",
+            "macos/CurveBook.app/Contents/CodeResources",
+            "CurveBook.dmg!CurveBook.app/Contents/CodeResources",
+        ] {
+            assert!(super::is_macos_stapled_ticket(ok_path, valid_ticket), "{ok_path}");
+        }
+        for bad_path in [
+            ".app/Contents/CodeResources",
+            "foo/.app/Contents/CodeResources",
+            "project.curvebook!CurveBook.app/Contents/CodeResources",
+            "template.cbtemplate!CurveBook.app/Contents/CodeResources",
+            "archive.zip!CurveBook.app/Contents/CodeResources",
+            "a.dmg!b.zip!CurveBook.app/Contents/CodeResources",
+        ] {
+            assert!(!super::is_macos_stapled_ticket(bad_path, valid_ticket), "{bad_path}");
+        }
+        assert!(!super::is_macos_stapled_ticket("CurveBook.app/Contents/CodeResources", b"s8ch\xFFnot-a-der-cms-envelope"));
         let mut oversized = valid_ticket.to_vec();
         oversized.resize(super::MAX_MACOS_STAPLED_TICKET_BYTES + 1, 0xAB);
         assert!(!super::is_macos_stapled_ticket("CurveBook.app/Contents/CodeResources", &oversized));
 
-        // End-to-end: a `.curvebook` archive containing a `CurveBook.app/Contents/CodeResources` binary entry must fail closed.
-        let dir = temp_dir("macos-ticket-zip-bypass");
+        let zip_dir = TestDir::new("macos-ticket-zip");
         let mut zip = crate::zip_read::TestZipWriter::new();
         zip.add_file("CurveBook.app/Contents/CodeResources", valid_ticket.to_vec()).unwrap();
-        std::fs::write(dir.join("project.curvebook"), zip.finish().unwrap()).unwrap();
-        assert!(super::scan_dist_artefacts(&dir).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
+        zip_dir.write_bytes("project.curvebook", &zip.finish().unwrap());
+        assert!(super::scan_dist_artefacts(zip_dir.path()).is_err());
     }
 }

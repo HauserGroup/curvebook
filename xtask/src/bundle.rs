@@ -191,15 +191,10 @@ fn set_executable(_path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{adhoc_codesign_and_verify, render_info_plist, validate_info_plist};
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
-    fn unique_temp_dir(label: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("curvebook-xtask-bundle-{label}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use super::{adhoc_codesign_and_verify, render_info_plist, validate_info_plist};
+    use crate::scan_util::test_support::TestDir;
 
     #[test]
     fn substitutes_version_and_sha_placeholders() {
@@ -211,29 +206,19 @@ mod tests {
     fn validate_info_plist_accepts_rendered_template_and_rejects_broken_or_unrendered() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let tpl = std::fs::read_to_string(root.join("packaging/macos/Info.plist.in")).unwrap();
-        let dir = unique_temp_dir("plist");
+        let dir = TestDir::new("bundle-plist");
 
-        let valid_path = dir.join("ValidInfo.plist");
-        std::fs::write(&valid_path, render_info_plist(&tpl, "0.1.0", "deadbeef1")).unwrap();
-        validate_info_plist(&valid_path).expect("rendered Info.plist.in must pass plutil validation");
+        dir.write("ValidInfo.plist", &render_info_plist(&tpl, "0.1.0", "deadbeef1"));
+        validate_info_plist(&dir.join("ValidInfo.plist")).expect("rendered Info.plist.in must pass plutil validation");
 
-        let unrendered_path = dir.join("UnrenderedInfo.plist");
-        std::fs::write(&unrendered_path, &tpl).unwrap();
-        let err = validate_info_plist(&unrendered_path).expect_err("unsubstituted placeholders must fail");
-        assert!(err.contains("@VERSION@"));
+        dir.write("UnrenderedInfo.plist", &tpl);
+        assert!(validate_info_plist(&dir.join("UnrenderedInfo.plist")).expect_err("unsubstituted placeholders must fail").contains("@VERSION@"));
 
         if cfg!(target_os = "macos") {
-            let malformed_path = dir.join("MalformedInfo.plist");
-            std::fs::write(&malformed_path, "<?xml version=\"1.0\"?><plist><dict><key>Broken</plist>").unwrap();
-            let err = validate_info_plist(&malformed_path).expect_err("malformed XML plist must fail plutil -lint");
-            assert!(err.contains("plutil -lint"), "unexpected error: {err}");
-
-            let missing_app = dir.join("Missing.app");
-            let sign_err = adhoc_codesign_and_verify(&missing_app).expect_err("missing app must fail codesign");
-            assert!(sign_err.contains("codesign"), "unexpected sign error: {sign_err}");
+            dir.write("MalformedInfo.plist", "<?xml version=\"1.0\"?><plist><dict><key>Broken</plist>");
+            assert!(validate_info_plist(&dir.join("MalformedInfo.plist")).expect_err("malformed XML plist must fail").contains("plutil -lint"));
+            assert!(adhoc_codesign_and_verify(&dir.join("Missing.app")).expect_err("missing app must fail codesign").contains("codesign"));
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

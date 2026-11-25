@@ -11,6 +11,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::rust_lex::{blank_comments_and_literals, is_ident_byte, strip_cfg_test_items, strip_non_prod_rust};
+use crate::scan_util::{has_ext_ci, next_ident_pattern_match, walk_rel_files};
 
 /// Where a workspace crate sits in the dependency graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -505,13 +506,9 @@ pub const ALLOWED_UI_IO_BASELINE: &[&str] = &[];
 const RAW_PROCESS_PATTERNS: &[&str] =
     &["std::process::Command::new", "std::process::Command", "process::Command::new", "process::Command", "std::process::*"];
 
-const UI_IO_PATTERNS: &[&str] = &[
+const UI_IO_SHARED_PATHS: &[&str] = &[
     "std::fs::write",
     "fs::write",
-    "std::fs::File::create_new",
-    "File::create_new",
-    "std::fs::File::create",
-    "File::create",
     "std::fs::remove_file",
     "fs::remove_file",
     "std::fs::remove_dir_all",
@@ -537,13 +534,16 @@ const UI_IO_PATTERNS: &[&str] = &[
     "fs::copy",
     "std::fs::rename",
     "fs::rename",
-    "OpenOptions",
+    "std::fs::*",
     "std::process::Command",
     "process::Command",
-    "Command::new",
     "std::process::*",
-    "std::fs::*",
 ];
+
+const UI_IO_EXTRA_EXPR_PATTERNS: &[&str] =
+    &["std::fs::File::create_new", "File::create_new", "std::fs::File::create", "File::create", "OpenOptions", "Command::new"];
+
+const UI_IO_EXTRA_USE_PATHS: &[&str] = &["std::fs::File", "fs::File", "std::fs::OpenOptions", "fs::OpenOptions"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HygieneViolation {
@@ -563,7 +563,7 @@ impl std::fmt::Display for HygieneViolation {
 #[must_use]
 pub fn check_source_hygiene(root: &Path) -> Vec<HygieneViolation> {
     let mut files = Vec::new();
-    collect_rs_files(root, root, &mut files);
+    collect_rs_files(root, &mut files);
     files.sort();
 
     let mut violations = Vec::new();
@@ -578,59 +578,23 @@ pub fn check_source_hygiene(root: &Path) -> Vec<HygieneViolation> {
         };
         let prod = strip_non_prod_rust(&src);
         if !exempt_process && !ALLOWED_RAW_PROCESS_BASELINE.contains(&rel.as_str()) {
-            scan_patterns(&rel, &prod, "raw-process", RAW_PROCESS_PATTERNS, &mut violations);
+            scan_patterns(&rel, &prod, "raw-process", &[RAW_PROCESS_PATTERNS], &mut violations);
             scan_use_statements(
                 &rel,
                 &prod,
                 "raw-process",
-                &["std::process::Command", "process::Command", "std::process::*"],
+                &[&["std::process::Command", "process::Command", "std::process::*"]],
                 &["std::process", "process"],
                 &mut violations,
             );
         }
         if in_ui_src && !ALLOWED_UI_IO_BASELINE.contains(&rel.as_str()) {
-            scan_patterns(&rel, &prod, "ui-raw-io", UI_IO_PATTERNS, &mut violations);
+            scan_patterns(&rel, &prod, "ui-raw-io", &[UI_IO_SHARED_PATHS, UI_IO_EXTRA_EXPR_PATTERNS], &mut violations);
             scan_use_statements(
                 &rel,
                 &prod,
                 "ui-raw-io",
-                &[
-                    "std::fs::write",
-                    "fs::write",
-                    "std::fs::File",
-                    "fs::File",
-                    "std::fs::OpenOptions",
-                    "fs::OpenOptions",
-                    "std::fs::remove_file",
-                    "fs::remove_file",
-                    "std::fs::remove_dir_all",
-                    "fs::remove_dir_all",
-                    "std::fs::remove_dir",
-                    "fs::remove_dir",
-                    "std::fs::create_dir_all",
-                    "fs::create_dir_all",
-                    "std::fs::create_dir",
-                    "fs::create_dir",
-                    "std::fs::set_permissions",
-                    "fs::set_permissions",
-                    "std::fs::hard_link",
-                    "fs::hard_link",
-                    "std::os::unix::fs::symlink",
-                    "os::unix::fs::symlink",
-                    "unix::fs::symlink",
-                    "std::os::windows::fs::symlink_file",
-                    "std::os::windows::fs::symlink_dir",
-                    "windows::fs::symlink_file",
-                    "windows::fs::symlink_dir",
-                    "std::fs::copy",
-                    "fs::copy",
-                    "std::fs::rename",
-                    "fs::rename",
-                    "std::fs::*",
-                    "std::process::Command",
-                    "process::Command",
-                    "std::process::*",
-                ],
+                &[UI_IO_SHARED_PATHS, UI_IO_EXTRA_USE_PATHS],
                 &["std::fs", "fs", "std::os::unix::fs", "os::unix::fs", "unix::fs", "std::os::windows::fs", "std::process", "process"],
                 &mut violations,
             );
@@ -739,7 +703,7 @@ fn require_indexing_slicing_deny(root: &Path, rel: &str, violations: &mut Vec<Hy
 
 fn check_lint_allow_escapes(root: &Path, violations: &mut Vec<HygieneViolation>) {
     let mut files = Vec::new();
-    collect_rs_files(root, root, &mut files);
+    collect_rs_files(root, &mut files);
     files.sort();
     for rel in files {
         let in_strict_src = is_strict_src_path(&rel);
@@ -796,29 +760,14 @@ fn first_matching_line(src: &str, needle: &str) -> Option<usize> {
     src.lines().enumerate().find(|(_, line)| line.contains(needle)).map(|(idx, _)| idx + 1)
 }
 
-fn collect_rs_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if ft.is_dir() {
-            if name_str == "target" || name_str == "dist" || name_str == "corpus" || name_str.starts_with('.') {
-                continue;
-            }
-            collect_rs_files(root, &path, out);
-        } else if ft.is_file()
-            && path.extension().and_then(|e| e.to_str()) == Some("rs")
-            && let Ok(rel) = path.strip_prefix(root)
-        {
-            out.push(rel.to_string_lossy().replace('\\', "/"));
-        }
-    }
+fn collect_rs_files(root: &Path, out: &mut Vec<String>) {
+    let _ = walk_rel_files(
+        root,
+        root,
+        &|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|s| matches!(s, "target" | "dist" | "corpus") || s.starts_with('.')),
+        &|p| has_ext_ci(p, &["rs"]),
+        out,
+    );
 }
 
 fn is_exempt_process_path(rel: &str) -> bool {
@@ -869,11 +818,12 @@ pub(crate) fn collapse_colon_whitespace(src: &str) -> (String, Vec<usize>) {
     (out, lines)
 }
 
-fn scan_patterns(rel: &str, prod_src: &str, rule: &'static str, patterns: &[&'static str], out: &mut Vec<HygieneViolation>) {
+fn scan_patterns(rel: &str, prod_src: &str, rule: &'static str, pattern_groups: &[&[&'static str]], out: &mut Vec<HygieneViolation>) {
     let (compact, line_of_byte) = collapse_colon_whitespace(prod_src);
+    let patterns: Vec<&'static str> = pattern_groups.iter().flat_map(|g| g.iter().copied()).collect();
     let mut pos = 0usize;
     while pos < compact.len() {
-        if let Some((hit_pos, pat)) = next_pattern_match(&compact, pos, patterns) {
+        if let Some((hit_pos, pat)) = next_ident_pattern_match(&compact, pos, &patterns) {
             let line = line_of_byte.get(hit_pos).copied().unwrap_or(1);
             out.push(HygieneViolation { path: rel.to_owned(), line, rule, pattern: pat });
             pos = hit_pos + pat.len();
@@ -881,32 +831,6 @@ fn scan_patterns(rel: &str, prod_src: &str, rule: &'static str, patterns: &[&'st
             break;
         }
     }
-}
-
-fn next_pattern_match(line: &str, from: usize, patterns: &[&'static str]) -> Option<(usize, &'static str)> {
-    let bytes = line.as_bytes();
-    let mut best: Option<(usize, &'static str)> = None;
-    for &pat in patterns {
-        let mut search = from;
-        while let Some(rel) = line.get(search..).and_then(|s| s.find(pat)) {
-            let pos = search + rel;
-            let end = pos + pat.len();
-            let left_ok = pos == 0 || !is_ident_byte(bytes[pos - 1]);
-            let right_ok = end == bytes.len() || !is_ident_byte(bytes[end]);
-            if left_ok && right_ok {
-                let replace = match best {
-                    None => true,
-                    Some((best_pos, best_pat)) => pos < best_pos || (pos == best_pos && pat.len() > best_pat.len()),
-                };
-                if replace {
-                    best = Some((pos, pat));
-                }
-                break;
-            }
-            search = pos + line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
-        }
-    }
-    best
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -919,7 +843,7 @@ fn scan_use_statements(
     rel: &str,
     prod_src: &str,
     rule: &'static str,
-    banned_paths: &[&'static str],
+    banned_path_groups: &[&[&'static str]],
     banned_module_aliases: &[&'static str],
     out: &mut Vec<HygieneViolation>,
 ) {
@@ -928,7 +852,7 @@ fn scan_use_statements(
         expand_use_tree_items("", &stmt, &mut expanded);
         for item in expanded {
             let norm = item.path.strip_prefix("::").unwrap_or(&item.path);
-            for &pat in banned_paths {
+            for &pat in banned_path_groups.iter().flat_map(|g| g.iter()) {
                 if norm == pat {
                     out.push(HygieneViolation { path: rel.to_owned(), line, rule, pattern: pat });
                 }
@@ -1065,8 +989,10 @@ mod tests {
         ALLOWED_RAW_PROCESS_BASELINE, ALLOWED_UI_IO_BASELINE, Class, Crate, Dep, DepKind, TABLE, Violation, check, check_lint_policy,
         check_source_hygiene, classify, from_metadata, scan_patch_sections,
     };
-    fn parse(s: &str) -> Result<serde_json::Value, serde_json::Error> {
-        serde_json::from_str(s)
+    use crate::scan_util::test_support::TestDir;
+
+    fn parse(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).unwrap()
     }
 
     fn c(name: &str, deps: &[(&str, DepKind, bool)]) -> Crate {
@@ -1074,219 +1000,113 @@ mod tests {
     }
 
     #[test]
-    fn clean_downward_graph_passes() {
-        let g = [
+    fn layering_graph_ui_isolation_testkit_suite_and_metadata_rules() {
+        assert_eq!(TABLE.len(), 22);
+        assert_eq!(classify("curvebook-platform"), Some(Class::Layer(0)));
+        assert!(ALLOWED_RAW_PROCESS_BASELINE.is_empty() && ALLOWED_UI_IO_BASELINE.is_empty());
+
+        let clean = [
             c("curvebook-math", &[]),
             c("curvebook-palette", &[("curvebook-math", DepKind::Normal, true)]),
             c("curvebook-doc", &[("curvebook-math", DepKind::Normal, true)]),
             c("curvebook-stats", &[("curvebook-doc", DepKind::Normal, true)]),
             c("curvebook-chart", &[("curvebook-stats", DepKind::Normal, true)]),
             c("curvebook-engine", &[("curvebook-chart", DepKind::Normal, true), ("curvebook-testkit", DepKind::Dev, true)]),
-            c("curvebook-ui-egui", &[("curvebook-engine", DepKind::Normal, true), ("egui", DepKind::Normal, false)]),
+            c(
+                "curvebook-ui-egui",
+                &[("curvebook-engine", DepKind::Normal, true), ("egui", DepKind::Normal, false), ("egui-winit", DepKind::Normal, false)],
+            ),
             c("curvebook-cli", &[("curvebook-mcp", DepKind::Normal, true)]),
+            c("curvebook", &[("curvebook-testkit", DepKind::Dev, true)]),
+            c("xtask", &[("curvebook-testkit", DepKind::Normal, true)]),
         ];
-        assert!(check(&g).is_empty(), "{:?}", check(&g));
-    }
+        assert!(check(&clean).is_empty(), "{:?}", check(&clean));
 
-    #[test]
-    fn upward_and_sideways_dependencies_are_flagged() {
-        let up = check(&[c("curvebook-doc", &[("curvebook-engine", DepKind::Normal, true)])]);
-        assert!(matches!(up[..], [Violation::Upward { from: 1, to: 5, .. }]));
+        assert!(matches!(
+            check(&[c("curvebook-doc", &[("curvebook-engine", DepKind::Normal, true)])])[..],
+            [Violation::Upward { from: 1, to: 5, .. }]
+        ));
+        assert!(matches!(
+            check(&[c("curvebook-stats", &[("curvebook-fit", DepKind::Normal, true)])])[..],
+            [Violation::Upward { from: 2, to: 2, .. }]
+        ));
+        assert!(matches!(
+            check(&[c("curvebook-stats", &[("curvebook-testkit", DepKind::Normal, true)])])[..],
+            [Violation::TestkitAsNormalDep { .. }]
+        ));
+        assert!(matches!(check(&[c("curvebook", &[("curvebook-testkit", DepKind::Normal, true)])])[..], [Violation::TestkitAsNormalDep { .. }]));
+        assert!(matches!(check(&[c("curvebook-cli", &[("curvebook-testkit", DepKind::Build, true)])])[..], [Violation::TestkitAsNormalDep { .. }]));
+        assert!(matches!(check(&[c("curvebook-ui-egui", &[("craft-ui", DepKind::Normal, false)])])[..], [Violation::SuiteCrate { .. }]));
+        assert!(matches!(check(&[c("curvebook", &[("craft-update", DepKind::Normal, false)])])[..], [Violation::SuiteCrate { .. }]));
 
-        let side = check(&[c("curvebook-stats", &[("curvebook-fit", DepKind::Normal, true)])]);
-        assert!(matches!(side[..], [Violation::Upward { from: 2, to: 2, .. }]));
-    }
-
-    #[test]
-    fn ui_crates_below_l6_and_testkit_normal_deps_are_flagged() {
-        let ui = check(&[c("curvebook-engine", &[("egui", DepKind::Normal, false)])]);
-        assert!(matches!(ui[..], [Violation::UiBelowL6 { layer: 5, .. }]));
-
-        let tk = check(&[c("curvebook-stats", &[("curvebook-testkit", DepKind::Normal, true)])]);
-        assert!(matches!(tk[..], [Violation::TestkitAsNormalDep { .. }]));
-
-        let suite_ui = check(&[c("curvebook-ui-egui", &[("craft-ui", DepKind::Normal, false)])]);
-        assert!(matches!(suite_ui[..], [Violation::SuiteCrate { .. }]));
-
-        let suite_app = check(&[c("curvebook", &[("craft-update", DepKind::Normal, false)])]);
-        assert!(matches!(suite_app[..], [Violation::SuiteCrate { .. }]));
-    }
-
-    #[test]
-    fn metadata_parsing_round_trip() {
-        let meta = parse(
-            r#"{"packages":[
-                {"name":"curvebook-doc","dependencies":[
-                    {"name":"curvebook-math","kind":null,"path":"/x/crates/math"},
-                    {"name":"curvebook-testkit","kind":"dev","path":"/x/crates/testkit"}]},
-                {"name":"curvebook-math","dependencies":[]}
-            ]}"#,
-        )
-        .unwrap();
-        let g = from_metadata(&meta).unwrap();
-        assert_eq!(g.len(), 2);
-        assert!(check(&g).is_empty());
-    }
-
-    #[test]
-    fn ui_crate_family_and_vendored_path_deps_below_l6_are_flagged() {
         for ui_dep in
             ["egui", "egui_extras", "epaint", "epaint_default_fonts", "emath", "ecolor", "eframe", "winit", "rfd", "wgpu", "wgpu-core", "bevy_math"]
         {
             let hits = check(&[c("curvebook-engine", &[(ui_dep, DepKind::Build, true)])]);
-            assert!(matches!(hits[..], [Violation::UiBelowL6 { layer: 5, .. }]), "expected UiBelowL6 for {ui_dep}, got {hits:?}");
+            assert!(matches!(hits[..], [Violation::UiBelowL6 { layer: 5, .. }]), "{ui_dep}: {hits:?}");
         }
-        // L6 crates may depend on UI crates.
-        assert!(check(&[c("curvebook-ui-egui", &[("egui-winit", DepKind::Normal, false)])]).is_empty());
-
-        // Vendored path dependency in metadata JSON has a `"path"` field without making it a workspace crate,
-        // and UI checks still flag it below L6 (e.g., `egui = { path = "/x/vendor/egui" }`).
-        let meta = parse(
-            r#"{"packages":[
-                {"name":"curvebook-fit","id":"fit 0.1.0","dependencies":[
-                    {"name":"egui","kind":null,"path":"/x/vendor/egui"}
-                ]}
-            ],"workspace_members":["fit 0.1.0"]}"#,
-        )
-        .unwrap();
-        let g = from_metadata(&meta).unwrap();
-        let hits = check(&g);
-        assert!(matches!(hits[..], [Violation::UiBelowL6 { layer: 2, .. }]), "got {hits:?}");
     }
 
     #[test]
-    fn resolved_metadata_catches_transitive_ui_and_skips_dev_testkit_propagation() {
-        let meta = parse(
-            r#"{
-                "packages": [
-                    {"name":"curvebook-math","id":"math 0.1.0","dependencies":[]},
-                    {"name":"curvebook-doc","id":"doc 0.1.0","dependencies":[]},
-                    {"name":"curvebook-stats","id":"stats 0.1.0","dependencies":[]},
-                    {"name":"curvebook-testkit","id":"testkit 0.1.0","dependencies":[]},
-                    {"name":"helper-crate","id":"helper 0.1.0","dependencies":[]},
-                    {"name":"winit","id":"winit 0.30.0","dependencies":[]}
-                ],
-                "workspace_members": ["math 0.1.0", "doc 0.1.0", "stats 0.1.0", "testkit 0.1.0"],
-                "resolve": {
-                    "nodes": [
-                        {
-                            "id": "math 0.1.0",
-                            "deps": [
-                                {"pkg": "testkit 0.1.0", "dep_kinds": [{"kind": "dev"}]}
-                            ]
-                        },
-                        {
-                            "id": "testkit 0.1.0",
-                            "deps": [
-                                {"pkg": "doc 0.1.0", "dep_kinds": [{"kind": null}]}
-                            ]
-                        },
-                        {"id": "doc 0.1.0", "deps": []},
-                        {
-                            "id": "stats 0.1.0",
-                            "deps": [
-                                {"pkg": "helper 0.1.0", "dep_kinds": [{"kind": null}]}
-                            ]
-                        },
-                        {
-                            "id": "helper 0.1.0",
-                            "deps": [
-                                {"pkg": "winit 0.30.0", "dep_kinds": [{"kind": null}]}
-                            ]
-                        },
-                        {"id": "winit 0.30.0", "deps": []}
-                    ]
-                }
-            }"#,
-        )
-        .unwrap();
-        let g = from_metadata(&meta).unwrap();
-        let hits = check(&g);
-        assert_eq!(hits.len(), 1, "expected only transitive stats->winit violation, got {hits:?}");
-        assert!(matches!(&hits[0], Violation::UiBelowL6 { krate, dep, layer: 2 } if krate == "curvebook-stats" && dep == "winit"));
-    }
+    fn metadata_resolution_and_patch_section_rules() {
+        // Metadata parsing: basic round-trip, vendored path dep, and transitive UI via resolved graph.
+        let basic = from_metadata(&parse(r#"{"packages":[{"name":"curvebook-doc","dependencies":[{"name":"curvebook-math","kind":null,"path":"/x/crates/math"},{"name":"curvebook-testkit","kind":"dev","path":"/x/crates/testkit"}]},{"name":"curvebook-math","dependencies":[]}]}"#)).unwrap();
+        assert_eq!(basic.len(), 2);
+        assert!(check(&basic).is_empty());
 
-    #[test]
-    fn exempt_apps_forbid_testkit_as_normal_dep_except_xtask() {
-        let app_hit = check(&[c("curvebook", &[("curvebook-testkit", DepKind::Normal, true)])]);
-        assert!(matches!(app_hit[..], [Violation::TestkitAsNormalDep { .. }]), "got {app_hit:?}");
+        let vendored = from_metadata(&parse(r#"{"packages":[{"name":"curvebook-fit","id":"fit 0.1.0","dependencies":[{"name":"egui","kind":null,"path":"/x/vendor/egui"}]}],"workspace_members":["fit 0.1.0"]}"#)).unwrap();
+        assert!(matches!(check(&vendored)[..], [Violation::UiBelowL6 { layer: 2, .. }]));
 
-        let cli_hit = check(&[c("curvebook-cli", &[("curvebook-testkit", DepKind::Build, true)])]);
-        assert!(matches!(cli_hit[..], [Violation::TestkitAsNormalDep { .. }]), "got {cli_hit:?}");
+        let resolved = from_metadata(&parse(r#"{"packages":[{"name":"curvebook-math","id":"math 0.1.0","dependencies":[]},{"name":"curvebook-doc","id":"doc 0.1.0","dependencies":[]},{"name":"curvebook-stats","id":"stats 0.1.0","dependencies":[]},{"name":"curvebook-testkit","id":"testkit 0.1.0","dependencies":[]},{"name":"helper-crate","id":"helper 0.1.0","dependencies":[]},{"name":"winit","id":"winit 0.30.0","dependencies":[]}],"workspace_members":["math 0.1.0","doc 0.1.0","stats 0.1.0","testkit 0.1.0"],"resolve":{"nodes":[{"id":"math 0.1.0","deps":[{"pkg":"testkit 0.1.0","dep_kinds":[{"kind":"dev"}]}]},{"id":"testkit 0.1.0","deps":[{"pkg":"doc 0.1.0","dep_kinds":[{"kind":null}]}]},{"id":"doc 0.1.0","deps":[]},{"id":"stats 0.1.0","deps":[{"pkg":"helper 0.1.0","dep_kinds":[{"kind":null}]}]},{"id":"helper 0.1.0","deps":[{"pkg":"winit 0.30.0","dep_kinds":[{"kind":null}]}]},{"id":"winit 0.30.0","deps":[]}]}}"#)).unwrap();
+        let res_hits = check(&resolved);
+        assert_eq!(res_hits.len(), 1, "{res_hits:?}");
+        assert!(matches!(&res_hits[0], Violation::UiBelowL6 { krate, dep, layer: 2 } if krate == "curvebook-stats" && dep == "winit"));
 
-        assert!(check(&[c("curvebook", &[("curvebook-testkit", DepKind::Dev, true)])]).is_empty());
-        assert!(check(&[c("xtask", &[("curvebook-testkit", DepKind::Normal, true)])]).is_empty());
-    }
+        let ext_tk = from_metadata(&parse(r#"{"packages":[{"id":"engine 0.1.0","name":"curvebook-engine","dependencies":[]},{"id":"ext-tk 1.0.0","name":"curvebook-testkit","dependencies":[]},{"id":"egui 0.31.0","name":"egui","dependencies":[]}],"workspace_members":["engine 0.1.0"],"resolve":{"nodes":[{"id":"engine 0.1.0","deps":[{"pkg":"ext-tk 1.0.0","dep_kinds":[{"kind":null}]}]},{"id":"ext-tk 1.0.0","deps":[{"pkg":"egui 0.31.0","dep_kinds":[{"kind":null}]}]},{"id":"egui 0.31.0","deps":[]}]}}"#)).unwrap();
+        assert!(check(&ext_tk).iter().any(|v| matches!(v, Violation::UiBelowL6 { dep, .. } if dep == "egui")));
 
-    #[test]
-    fn scan_patch_sections_flags_suite_crates_in_patch_and_replace() {
-        let toml = r#"
-[workspace]
-members = ["crates/math"]
-
-[patch.crates-io]
-craft-core = { path = "vendor/craft-core" }
-
-[replace]
-"craft_ui:0.1.0" = { path = "vendor/craft_ui" }
-
-[workspace.dependencies]
-serde = "1"
-"#;
-        let hits = scan_patch_sections(toml);
         assert_eq!(
-            hits,
+            scan_patch_sections(
+                "[workspace]\nmembers = [\"crates/math\"]\n[patch.crates-io]\ncraft-core = { path = \"vendor/craft-core\" }\n[replace]\n\"craft_ui:0.1.0\" = { path = \"vendor/craft_ui\" }\n[workspace.dependencies]\nserde = \"1\"\n"
+            ),
             vec![
                 Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: String::from("craft-core") },
                 Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: String::from("craft_ui") },
             ]
         );
+        assert_eq!(
+            scan_patch_sections("[patch.crates-io.craft-ui]\npath = \"../x\"\n[patch.\"https://example.com\".alias]\npackage = \"craft-update\"\n")
+                .len(),
+            2
+        );
         assert!(scan_patch_sections("[workspace.dependencies]\nserde = \"1\"\n").is_empty());
     }
 
     #[test]
-    fn table_registers_all_22_workspace_crates_including_platform() {
-        assert_eq!(TABLE.len(), 22);
-        assert_eq!(classify("curvebook-platform"), Some(Class::Layer(0)));
-        assert!(ALLOWED_RAW_PROCESS_BASELINE.is_empty());
-        assert!(ALLOWED_UI_IO_BASELINE.is_empty());
-    }
-
-    #[test]
-    fn source_hygiene_flags_raw_command_and_ui_io_but_allows_cfg_test_and_platform() {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let root = std::env::temp_dir().join(format!("curvebook-xtask-hygiene-{}-{nanos}", std::process::id()));
-        let write_rel = |rel: &str, content: &str| {
-            let p = root.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, content).unwrap();
-        };
-
-        write_rel("crates/engine/src/bad.rs", "pub fn f() {\n    let _ = std::process::Command::new(\"sh\");\n}\n");
-        write_rel(
-            "crates/engine/src/mid_cfg.rs",
-            "#[cfg(test)]\nmod tests {\n    fn t() { let _ = std::process::Command::new(\"sh\"); }\n}\npub fn ok() -> &'static str { \"std::process::Command::new\" }\n",
-        );
-        write_rel(
-            "crates/engine/src/after_cfg.rs",
-            "#[cfg(test)]\nuse std::process::Command;\npub fn bad() { let _ = process::Command::new(\"ls\"); }\n",
-        );
-        write_rel("crates/platform/src/process.rs", "pub fn ok() { let _ = std::process::Command::new(\"sh\"); }\n");
-        write_rel("crates/engine/tests/it.rs", "fn t() { let _ = std::process::Command::new(\"sh\"); }\n");
-        write_rel("crates/engine/src/foo_test.rs", "fn t() { let _ = std::process::Command::new(\"sh\"); }\n");
-        write_rel(
-            "crates/ui-egui/src/bad_io.rs",
-            "pub fn w() {\n    let _ = std::fs::write(\"a\", b\"b\");\n    let _ = File::create(\"c\");\n    let _ = OpenOptions::new();\n}\n",
-        );
-        write_rel(
-            "crates/ui-egui/src/ok_platform.rs",
-            "pub fn ok() {\n    let _ = curvebook_platform::fs::write_atomic(std::path::Path::new(\"a\"), b\"b\");\n    let _ = curvebook_platform::ProcessCommand::new(\"pbcopy\");\n}\n",
-        );
-
-        let hits = check_source_hygiene(&root);
-        let _ = std::fs::remove_dir_all(&root);
-
-        let summary: Vec<String> = hits.iter().map(ToString::to_string).collect();
+    fn source_hygiene_and_lint_policy_regression_suite() {
+        let dir = TestDir::new("layers-hygiene");
+        for (rel, content) in [
+            ("crates/engine/src/bad.rs", "pub fn f() {\n    let _ = std::process::Command::new(\"sh\");\n}\n"),
+            (
+                "crates/engine/src/mid_cfg.rs",
+                "#[cfg(test)]\nmod tests {\n    fn t() { let _ = std::process::Command::new(\"sh\"); }\n}\npub fn ok() -> &'static str { \"std::process::Command::new\" }\n",
+            ),
+            ("crates/engine/src/after_cfg.rs", "#[cfg(test)]\nuse std::process::Command;\npub fn bad() { let _ = process::Command::new(\"ls\"); }\n"),
+            ("crates/platform/src/process.rs", "pub fn ok() { let _ = std::process::Command::new(\"sh\"); }\n"),
+            ("crates/engine/tests/it.rs", "fn t() { let _ = std::process::Command::new(\"sh\"); }\n"),
+            ("crates/engine/src/foo_test.rs", "fn t() { let _ = std::process::Command::new(\"sh\"); }\n"),
+            (
+                "crates/ui-egui/src/bad_io.rs",
+                "pub fn w() {\n    let _ = std::fs::write(\"a\", b\"b\");\n    let _ = File::create(\"c\");\n    let _ = OpenOptions::new();\n}\n",
+            ),
+            (
+                "crates/ui-egui/src/ok_platform.rs",
+                "pub fn ok() {\n    let _ = curvebook_platform::fs::write_atomic(std::path::Path::new(\"a\"), b\"b\");\n    let _ = curvebook_platform::ProcessCommand::new(\"pbcopy\");\n}\n",
+            ),
+        ] {
+            dir.write(rel, content);
+        }
+        let summary: Vec<String> = check_source_hygiene(dir.path()).iter().map(ToString::to_string).collect();
         assert_eq!(
             summary,
             vec![
@@ -1297,129 +1117,72 @@ serde = "1"
                 "crates/ui-egui/src/bad_io.rs:4: [ui-raw-io] forbidden `OpenOptions`",
             ]
         );
-    }
 
-    #[test]
-    fn r2_s13_06_cfg_not_test_not_masked_and_braced_command_imports_caught() {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let root = std::env::temp_dir().join(format!("cb-xtask-r2-s13-06-{}-{nanos}", std::process::id()));
-        let write_rel = |rel: &str, content: &str| {
-            let p = root.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, content).unwrap();
-        };
-
-        write_rel(
-            "crates/engine/src/guarded.rs",
-            "#[cfg(all(unix, not(test)))]\npub fn prod_only() { let _ = std::process::Command::new(\"sh\"); }\n\
-             #[cfg(all(feature = \"latest\"))]\npub fn feat() { let _ = std::process::Command::new(\"ls\"); }\n",
-        );
-        write_rel("crates/engine/src/braced.rs", "use std::process::{ Command as Proc };\npub fn run() { let _ = Proc::new(\"sh\"); }\n");
-        write_rel("crates/format/src/glob_proc.rs", "use std::process::*;\npub fn run() {}\n");
-        write_rel(
-            "crates/ui-egui/src/extra_io.rs",
-            "use std::fs::{File, write, OpenOptions};\npub fn ops() { let _ = File::create_new(\"a\"); let _ = std::fs::remove_file(\"b\"); }\n",
-        );
-        write_rel(
-            "crates/engine/src/real_test_only.rs",
-            "#[cfg(all(unix, test))]\nmod t { fn f() { let _ = std::process::Command::new(\"sh\"); } }\n",
-        );
-
-        let hits = check_source_hygiene(&root);
-        let _ = std::fs::remove_dir_all(&root);
-
-        assert!(hits.iter().any(|h| h.path == "crates/engine/src/guarded.rs" && h.line == 2 && h.rule == "raw-process"), "{hits:?}");
-        assert!(hits.iter().any(|h| h.path == "crates/engine/src/guarded.rs" && h.line == 4 && h.rule == "raw-process"), "{hits:?}");
-        assert!(hits.iter().any(|h| h.path == "crates/engine/src/braced.rs" && h.rule == "raw-process"), "{hits:?}");
-        assert!(hits.iter().any(|h| h.path == "crates/format/src/glob_proc.rs" && h.rule == "raw-process"), "{hits:?}");
-        assert!(hits.iter().any(|h| h.path == "crates/ui-egui/src/extra_io.rs" && h.pattern == "File::create_new"), "{hits:?}");
-        assert!(hits.iter().any(|h| h.path == "crates/ui-egui/src/extra_io.rs" && h.pattern == "std::fs::remove_file"), "{hits:?}");
-        assert!(hits.iter().any(|h| h.path == "crates/ui-egui/src/extra_io.rs" && h.pattern == "std::fs::write"), "{hits:?}");
-        assert!(!hits.iter().any(|h| h.path == "crates/engine/src/real_test_only.rs"), "{hits:?}");
-    }
-
-    #[test]
-    fn sec22_catches_patch_subtable_aliases_multiline_paths_and_dir_perm_link_ops() {
-        let patch_sub =
-            scan_patch_sections("[patch.crates-io.craft-ui]\npath = \"../x\"\n[patch.\"https://example.com\".alias]\npackage = \"craft-update\"\n");
-        assert_eq!(patch_sub.len(), 2, "{patch_sub:?}");
-
-        let meta = parse(
-            r#"{
-                "packages": [
-                    {"id": "engine 0.1.0", "name": "curvebook-engine", "dependencies": []},
-                    {"id": "ext-tk 1.0.0", "name": "curvebook-testkit", "dependencies": []},
-                    {"id": "egui 0.31.0", "name": "egui", "dependencies": []}
-                ],
-                "workspace_members": ["engine 0.1.0"],
-                "resolve": {
-                    "nodes": [
-                        {"id": "engine 0.1.0", "deps": [{"pkg": "ext-tk 1.0.0", "dep_kinds": [{"kind": null}]}]},
-                        {"id": "ext-tk 1.0.0", "deps": [{"pkg": "egui 0.31.0", "dep_kinds": [{"kind": null}]}]},
-                        {"id": "egui 0.31.0", "deps": []}
-                    ]
-                }
-            }"#,
-        )
-        .unwrap();
-        let g = from_metadata(&meta).unwrap();
-        let dep_hits = check(&g);
-        assert!(dep_hits.iter().any(|v| matches!(v, Violation::UiBelowL6 { dep, .. } if dep == "egui")), "{dep_hits:?}");
-
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let root = std::env::temp_dir().join(format!("cb-xtask-sec22-layers-{}-{nanos}", std::process::id()));
-        let write_rel = |rel: &str, content: &str| {
-            let p = root.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, content).unwrap();
-        };
-        write_rel(
-            "crates/engine/src/mod_alias.rs",
-            "use std::process as proc;\npub fn f() { let _ = std\n    ::process\n    ::Command::new(\"ls\"); }\n",
-        );
-        write_rel(
-            "crates/ui-egui/src/dir_ops.rs",
-            "use std::fs as disk;\npub fn f(p: &std::path::Path) {\n    let _ = std\n        ::fs\n        ::create_dir_all(p);\n    let _ = fs::remove_dir(p);\n    let _ = std::fs::remove_dir_all(p);\n    let _ = std::fs::hard_link(p, p);\n    let _ = std::os::unix::fs::symlink(p, p);\n}\n",
-        );
-        let hits = check_source_hygiene(&root);
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(hits.iter().any(|h| h.path.ends_with("mod_alias.rs") && h.pattern == "std::process"), "{hits:?}");
-        assert!(hits.iter().any(|h| h.path.ends_with("mod_alias.rs") && h.pattern == "std::process::Command::new"), "{hits:?}");
-        for expected in
-            ["std::fs", "std::fs::create_dir_all", "fs::remove_dir", "std::fs::remove_dir_all", "std::fs::hard_link", "std::os::unix::fs::symlink"]
-        {
-            assert!(hits.iter().any(|h| h.path.ends_with("dir_ops.rs") && h.pattern == expected), "missing `{expected}` in {hits:?}");
+        let dir2 = TestDir::new("layers-r2-sec22");
+        for (rel, content) in [
+            (
+                "crates/engine/src/guarded.rs",
+                "#[cfg(all(unix, not(test)))]\npub fn prod_only() { let _ = std::process::Command::new(\"sh\"); }\n#[cfg(all(feature = \"latest\"))]\npub fn feat() { let _ = std::process::Command::new(\"ls\"); }\n",
+            ),
+            ("crates/engine/src/braced.rs", "use std::process::{ Command as Proc };\npub fn run() { let _ = Proc::new(\"sh\"); }\n"),
+            ("crates/format/src/glob_proc.rs", "use std::process::*;\npub fn run() {}\n"),
+            (
+                "crates/ui-egui/src/extra_io.rs",
+                "use std::fs::{File, write, OpenOptions};\npub fn ops() { let _ = File::create_new(\"a\"); let _ = std::fs::remove_file(\"b\"); }\n",
+            ),
+            ("crates/engine/src/real_test_only.rs", "#[cfg(all(unix, test))]\nmod t { fn f() { let _ = std::process::Command::new(\"sh\"); } }\n"),
+            ("crates/engine/src/mod_alias.rs", "use std::process as proc;\npub fn f() { let _ = std\n    ::process\n    ::Command::new(\"ls\"); }\n"),
+            (
+                "crates/ui-egui/src/dir_ops.rs",
+                "use std::fs as disk;\npub fn f(p: &std::path::Path) {\n    let _ = std\n        ::fs\n        ::create_dir_all(p);\n    let _ = fs::remove_dir(p);\n    let _ = std::fs::remove_dir_all(p);\n    let _ = std::fs::hard_link(p, p);\n    let _ = std::os::unix::fs::symlink(p, p);\n}\n",
+            ),
+        ] {
+            dir2.write(rel, content);
         }
-    }
+        let hits = check_source_hygiene(dir2.path());
+        assert!(!hits.iter().any(|h| h.path == "crates/engine/src/real_test_only.rs"), "{hits:?}");
+        for (suffix, pat) in [
+            ("guarded.rs", "std::process::Command::new"),
+            ("braced.rs", "std::process::Command"),
+            ("glob_proc.rs", "std::process::*"),
+            ("extra_io.rs", "File::create_new"),
+            ("extra_io.rs", "std::fs::remove_file"),
+            ("extra_io.rs", "std::fs::write"),
+            ("mod_alias.rs", "std::process"),
+            ("mod_alias.rs", "std::process::Command::new"),
+            ("dir_ops.rs", "std::fs"),
+            ("dir_ops.rs", "std::fs::create_dir_all"),
+            ("dir_ops.rs", "fs::remove_dir"),
+            ("dir_ops.rs", "std::fs::remove_dir_all"),
+            ("dir_ops.rs", "std::fs::hard_link"),
+            ("dir_ops.rs", "std::os::unix::fs::symlink"),
+        ] {
+            assert!(hits.iter().any(|h| h.path.ends_with(suffix) && h.pattern == pat), "missing ({suffix}, {pat}) in {hits:?}");
+        }
 
-    #[test]
-    fn lint_policy_passes_on_workspace_and_catches_violations() {
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let real_hits = check_lint_policy(workspace_root);
-        assert!(real_hits.is_empty(), "expected clean lint policy on workspace root: {real_hits:?}");
+        let ws = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        assert!(check_lint_policy(ws).is_empty());
 
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let root = std::env::temp_dir().join(format!("cb-xtask-lint-policy-{}-{nanos}", std::process::id()));
-        let write_rel = |rel: &str, content: &str| {
-            let p = root.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, content).unwrap();
-        };
-
-        write_rel("Cargo.toml", "[workspace.lints.clippy]\nunwrap_used = \"deny\"\n");
-        write_rel("crates/platform/src/lib.rs", "#![forbid(unsafe_code)]\n");
-        write_rel("crates/format/src/lib.rs", "#![forbid(unsafe_code)]\n#![deny(clippy::indexing_slicing)]\n");
-        write_rel("crates/format/src/bad.rs", "#![allow(clippy::string_slice)]\npub fn f() {}\n");
-        write_rel("crates/format/src/bad_idx.rs", "#![allow(clippy::indexing_slicing)]\npub fn g() {}\n");
-        write_rel("crates/stats/src/lib.rs", "#![allow(clippy::indexing_slicing)]\npub fn ok() {}\n");
-
-        let hits = check_lint_policy(&root);
-        let _ = std::fs::remove_dir_all(&root);
-
-        assert!(hits.iter().any(|h| h.path == "Cargo.toml" && h.rule == "lint-policy"), "{hits:?}");
-        assert!(hits.iter().any(|h| h.path == "crates/platform/src/lib.rs" && h.pattern == "#![deny(clippy::indexing_slicing)]"), "{hits:?}");
-        assert!(hits.iter().any(|h| h.path == "crates/format/src/bad.rs" && h.pattern == "allow(clippy::string_slice)"), "{hits:?}");
-        assert!(hits.iter().any(|h| h.path == "crates/format/src/bad_idx.rs" && h.pattern == "allow(clippy::indexing_slicing)"), "{hits:?}");
-        assert!(!hits.iter().any(|h| h.path == "crates/stats/src/lib.rs"), "{hits:?}");
+        let lint_dir = TestDir::new("layers-lint-policy");
+        for (rel, content) in [
+            ("Cargo.toml", "[workspace.lints.clippy]\nunwrap_used = \"deny\"\n"),
+            ("crates/platform/src/lib.rs", "#![forbid(unsafe_code)]\n"),
+            ("crates/format/src/lib.rs", "#![forbid(unsafe_code)]\n#![deny(clippy::indexing_slicing)]\n"),
+            ("crates/format/src/bad.rs", "#![allow(clippy::string_slice)]\npub fn f() {}\n"),
+            ("crates/format/src/bad_idx.rs", "#![allow(clippy::indexing_slicing)]\npub fn g() {}\n"),
+            ("crates/stats/src/lib.rs", "#![allow(clippy::indexing_slicing)]\npub fn ok() {}\n"),
+        ] {
+            lint_dir.write(rel, content);
+        }
+        let lint_hits = check_lint_policy(lint_dir.path());
+        assert!(!lint_hits.iter().any(|h| h.path == "crates/stats/src/lib.rs"), "{lint_hits:?}");
+        for (path, pat) in [
+            ("Cargo.toml", "string_slice = \"deny\""),
+            ("crates/platform/src/lib.rs", "#![deny(clippy::indexing_slicing)]"),
+            ("crates/format/src/bad.rs", "allow(clippy::string_slice)"),
+            ("crates/format/src/bad_idx.rs", "allow(clippy::indexing_slicing)"),
+        ] {
+            assert!(lint_hits.iter().any(|h| h.path == path && h.pattern == pat), "missing ({path}, {pat}) in {lint_hits:?}");
+        }
     }
 }

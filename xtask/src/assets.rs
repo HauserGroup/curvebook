@@ -5,6 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use crate::brands::{is_forbidden_bundled_dir, is_plan_prism_path};
+use crate::scan_util::{collect_dist_files, format_error_list, is_zip_magic, lower_ext};
 use crate::zip_read::{ZipArchive, ZipLimits};
 
 const FONT_EXT: &[&str] = &["ttf", "otf", "ttc", "woff", "woff2", "eot", "pfb"];
@@ -139,10 +141,6 @@ struct AssetRow {
     source: String,
     licence_tokens: Vec<String>,
     notes: String,
-}
-
-fn lower_ext(path: &str) -> String {
-    Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default()
 }
 
 #[must_use]
@@ -440,7 +438,7 @@ fn parse_valid_rows_lenient(assets_md: &str) -> std::collections::BTreeSet<Strin
 pub fn verify_assets(files: &[String], assets_md: &str, attribution_md: &str) -> Result<usize, String> {
     let fonts: Vec<&str> = files.iter().map(String::as_str).filter(|f| is_font_file(f)).collect();
     if !fonts.is_empty() {
-        return Err(format!("{} committed font file(s) forbidden by zero-bundled-fonts policy:\n  {}", fonts.len(), fonts.join("\n  ")));
+        return Err(format_error_list("committed font file(s) forbidden by zero-bundled-fonts policy", &fonts));
     }
 
     let asset_rows = parse_attribution_table(assets_md, "ASSETS.md")?;
@@ -477,7 +475,7 @@ pub fn verify_assets(files: &[String], assets_md: &str, attribution_md: &str) ->
 
     errors.sort();
     errors.dedup();
-    if errors.is_empty() { Ok(asset_count) } else { Err(format!("{} asset attribution error(s):\n  {}", errors.len(), errors.join("\n  "))) }
+    if errors.is_empty() { Ok(asset_count) } else { Err(format_error_list("asset attribution error(s)", &errors)) }
 }
 
 fn check_document_prose(doc_name: &str, text: &str, allow_packaged: bool) -> Result<(), String> {
@@ -519,8 +517,8 @@ fn verify_asset_binaries(root: &Path, files: &[String], errors: &mut Vec<String>
             errors.push(format!("{path}: unreadable or oversized asset file"));
             continue;
         };
-        if is_archive || bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
-            if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") || ext == "zip" || ext == "curvebook" || ext == "cbtemplate" {
+        if is_archive || is_zip_magic(&bytes) {
+            if is_zip_magic(&bytes) || matches!(ext.as_str(), "zip" | "curvebook" | "cbtemplate") {
                 scan_repo_zip_for_fonts(path, &bytes, 0, errors);
             }
             continue;
@@ -540,7 +538,7 @@ fn scan_repo_zip_for_fonts(display_path: &str, bytes: &[u8], depth: usize, error
                 let nested = format!("{display_path}!{name}");
                 if is_font_file(name) {
                     errors.push(format!("{nested}: bundled font file forbidden by zero-bundled-fonts policy"));
-                } else if entry_bytes.starts_with(b"PK\x03\x04") || entry_bytes.starts_with(b"PK\x05\x06") {
+                } else if is_zip_magic(entry_bytes) {
                     scan_repo_zip_for_fonts(&nested, entry_bytes, depth + 1, errors);
                 }
             }
@@ -559,8 +557,7 @@ pub fn verify_repo_provenance(root: &Path, files: &[String], assets_md: &str, at
     let mut errors = Vec::new();
 
     for path in files {
-        let norm = path.replace('\\', "/");
-        if norm == "plan/prism" || norm.starts_with("plan/prism/") {
+        if is_plan_prism_path(path) {
             errors.push(format!("{path}: committed `plan/prism` reference directory is forbidden"));
         }
     }
@@ -592,7 +589,7 @@ pub fn verify_repo_provenance(root: &Path, files: &[String], assets_md: &str, at
 
     errors.sort();
     errors.dedup();
-    if errors.is_empty() { Ok(count) } else { Err(format!("{} asset provenance error(s):\n  {}", errors.len(), errors.join("\n  "))) }
+    if errors.is_empty() { Ok(count) } else { Err(format_error_list("asset provenance error(s)", &errors)) }
 }
 
 pub fn run(root: &Path) -> Result<(), String> {
@@ -670,21 +667,6 @@ pub(crate) fn scan_dist_artefacts(catalog: &RepoAssetCatalog, dist_dir: &Path) -
     Ok((state.checked_assets, state.violations))
 }
 
-use crate::scan_util::collect_dist_files;
-
-fn is_forbidden_bundled_dir(rel: &str) -> bool {
-    let norm = rel.replace('\\', "/");
-    norm == "plan/prism"
-        || norm.starts_with("plan/prism/")
-        || norm.contains("/plan/prism/")
-        || norm == "docs/audit"
-        || norm.starts_with("docs/audit/")
-        || norm.contains("/docs/audit/")
-        || norm == "docs/history/audit"
-        || norm.starts_with("docs/history/audit/")
-        || norm.contains("/docs/history/audit/")
-}
-
 struct DistAssetScanState<'a> {
     catalog: &'a RepoAssetCatalog,
     dist_dir: &'a Path,
@@ -712,8 +694,7 @@ fn scan_dist_asset_bytes(state: &mut DistAssetScanState<'_>, display_path: &str,
         }
     }
 
-    let is_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
-    if is_zip {
+    if is_zip_magic(bytes) {
         if depth >= 2 {
             state.violations.push(format!("{display_path}: nested archive depth exceeded (max depth 2)"));
             return;
@@ -827,6 +808,13 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{is_asset, is_font_file, is_forbidden_bundled_dir, is_original_only_visual_asset, missing, verify_assets};
+    use crate::scan_util::test_support::TestDir;
+
+    fn zip_single(name: &str, body: &[u8]) -> Vec<u8> {
+        let mut zw = crate::zip_read::TestZipWriter::new();
+        zw.add_file(name, body.to_vec()).unwrap();
+        zw.finish().unwrap()
+    }
 
     #[test]
     fn detects_unattributed_assets() {
@@ -835,21 +823,14 @@ mod tests {
         let md = "| `assets/app-icon/curvebook.svg` | CurveBook contributors | original | MIT OR Apache-2.0 |";
         assert_eq!(missing(&files, md), vec![String::from("docs/images/plot.png")]);
         assert!(!is_asset("crates/stats/src/lib.rs"));
-        assert!(is_asset("examples/dose.curvebook"));
-        assert!(is_asset("examples/dose.cbtemplate"));
+        assert!(is_asset("examples/dose.curvebook") && is_asset("examples/dose.cbtemplate"));
     }
 
     #[test]
     fn rejects_proprietary_or_placeholder_rows_and_prose_mentions() {
         let files = vec![String::from("assets/plain.png"), String::from("assets/prose.png")];
-        let md = "\
-See also `assets/prose.png` in prose.
-| Asset | Author | Source | Licence | Notes |
-|---|---|---|---|---|
-| `assets/plain.png` | unknown | copied from a vendor web page | Proprietary, all rights reserved | bad |
-";
-        let miss = missing(&files, md);
-        assert_eq!(miss, vec![String::from("assets/plain.png"), String::from("assets/prose.png")]);
+        let md = "See also `assets/prose.png` in prose.\n| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/plain.png` | unknown | copied from a vendor web page | Proprietary, all rights reserved | bad |\n";
+        assert_eq!(missing(&files, md), vec![String::from("assets/plain.png"), String::from("assets/prose.png")]);
         let err = verify_assets(&files, md, "").unwrap_err();
         assert!(err.contains("assets/plain.png"), "{err}");
     }
@@ -868,15 +849,12 @@ See also `assets/prose.png` in prose.
             "fonts/Face.eot",
             "fonts/Face.pfb",
         ] {
-            assert!(is_asset(path), "expected is_asset({path}) to be true");
+            assert!(is_asset(path), "expected is_asset({path})");
         }
-
         for font in ["fonts/a.ttf", "fonts/b.otf", "fonts/c.ttc", "fonts/d.woff", "fonts/e.woff2", "fonts/f.eot", "fonts/g.pfb"] {
             assert!(is_font_file(font), "expected is_font_file({font})");
-            let files = vec![font.to_owned()];
-            let md = format!("| `{font}` | Some Foundry | local | OFL-1.1 |\n");
-            let attr = format!("| `{font}` | Some Foundry | local | OFL-1.1 |\n");
-            let err = verify_assets(&files, &md, &attr).unwrap_err();
+            let row = format!("| `{font}` | Some Foundry | local | OFL-1.1 |\n");
+            let err = verify_assets(&[font.to_owned()], &row, &row).unwrap_err();
             assert!(err.contains("committed font file"), "expected font ban error for {font}, got: {err}");
         }
     }
@@ -884,20 +862,11 @@ See also `assets/prose.png` in prose.
     #[test]
     fn enforces_attribution_md_for_third_party_and_cc_by_assets_while_allowing_curvebook_assets() {
         let files = vec![String::from("assets/mole.png"), String::from("assets/third.svg")];
-        let assets_ok = "\
-| Asset | Author | Source | Licence | Notes |
-|---|---|---|---|---|
-| `assets/mole.png` | CurveBook contributors | Original artwork | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) | ok |
-| `assets/third.svg` | Upstream Icon Set | https://example.org/icon | CC-BY-4.0 | third-party |
-";
+        let assets_ok = "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/mole.png` | CurveBook contributors | Original artwork | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) | ok |\n| `assets/third.svg` | Upstream Icon Set | https://example.org/icon | CC-BY-4.0 | third-party |\n";
         let err = verify_assets(&files, assets_ok, "").unwrap_err();
         assert!(err.contains("ATTRIBUTION.md") && err.contains("assets/third.svg"), "{err}");
 
-        let attr_ok = "\
-| Asset | Author | Source | SPDX license | Notes |
-|---|---|---|---|---|
-| `assets/third.svg` | Upstream Icon Set | https://example.org/icon | CC-BY-4.0 | attributed |
-";
+        let attr_ok = "| Asset | Author | Source | SPDX license | Notes |\n|---|---|---|---|---|\n| `assets/third.svg` | Upstream Icon Set | https://example.org/icon | CC-BY-4.0 | attributed |\n";
         assert_eq!(verify_assets(&files, assets_ok, attr_ok).unwrap(), 2);
     }
 
@@ -932,38 +901,42 @@ See also `assets/prose.png` in prose.
 ";
         assert_eq!(verify_assets(&good_files, good_md, "").unwrap(), 4);
 
-        // Reject third-party icon / external URL even if listed in ATTRIBUTION.md.
-        let third_party_files = vec![String::from("assets/ui/icons/save.svg")];
-        let third_party_md = "| `assets/ui/icons/save.svg` | Upstream Icon Set | https://example.org/save.svg | CC-BY-4.0 | imported |\n";
-        let third_party_attr = "| `assets/ui/icons/save.svg` | Upstream Icon Set | https://example.org/save.svg | CC-BY-4.0 | imported |\n";
-        let err_third = verify_assets(&third_party_files, third_party_md, third_party_attr).unwrap_err();
-        assert!(err_third.contains("CurveBook authorship"), "{err_third}");
-
-        // Reject reference frame / derived vendor wording.
-        let ref_files = vec![String::from("docs/images/frame.png")];
-        let ref_md = "| `docs/images/frame.png` | CurveBook contributors | Derived from reference frame 12 | MIT OR Apache-2.0 | screenshot |\n";
-        let err_ref = verify_assets(&ref_files, ref_md, "").unwrap_err();
-        assert!(err_ref.contains("non-original provenance phrase"), "{err_ref}");
-
-        // Reject non-original ambiguous source on a UI thumbnail.
-        let vague_files = vec![String::from("assets/thumbnails/card.png")];
-        let vague_md = "| `assets/thumbnails/card.png` | CurveBook contributors | Exported raster image | MIT OR Apache-2.0 | card |\n";
-        let err_vague = verify_assets(&vague_files, vague_md, "").unwrap_err();
-        assert!(err_vague.contains("original CurveBook provenance"), "{err_vague}");
-
-        // Reject dangling and circular provenance chains.
-        let bad_chain_files = vec![String::from("assets/ui/a.png"), String::from("assets/ui/b.png")];
-        let cycle_md = "\
-| `assets/ui/a.png` | CurveBook contributors | Rendered from `assets/ui/b.png` | MIT OR Apache-2.0 | a |
-| `assets/ui/b.png` | CurveBook contributors | Rendered from `assets/ui/a.png` | MIT OR Apache-2.0 | b |
-";
-        let err_cycle = verify_assets(&bad_chain_files, cycle_md, "").unwrap_err();
-        assert!(err_cycle.contains("circular asset provenance chain"), "{err_cycle}");
-
-        let dangling_files = vec![String::from("assets/ui/orphan.png")];
-        let dangling_md = "| `assets/ui/orphan.png` | CurveBook contributors | Rendered from `assets/ui/missing.svg` | MIT OR Apache-2.0 | x |\n";
-        let err_dangling = verify_assets(&dangling_files, dangling_md, "").unwrap_err();
-        assert!(err_dangling.contains("missing from ASSETS.md"), "{err_dangling}");
+        for (files, md, attr, needle) in [
+            (
+                vec!["assets/ui/icons/save.svg"],
+                "| `assets/ui/icons/save.svg` | Upstream Icon Set | https://example.org/save.svg | CC-BY-4.0 | imported |\n",
+                "| `assets/ui/icons/save.svg` | Upstream Icon Set | https://example.org/save.svg | CC-BY-4.0 | imported |\n",
+                "CurveBook authorship",
+            ),
+            (
+                vec!["docs/images/frame.png"],
+                "| `docs/images/frame.png` | CurveBook contributors | Derived from reference frame 12 | MIT OR Apache-2.0 | screenshot |\n",
+                "",
+                "non-original provenance phrase",
+            ),
+            (
+                vec!["assets/thumbnails/card.png"],
+                "| `assets/thumbnails/card.png` | CurveBook contributors | Exported raster image | MIT OR Apache-2.0 | card |\n",
+                "",
+                "original CurveBook provenance",
+            ),
+            (
+                vec!["assets/ui/a.png", "assets/ui/b.png"],
+                "| `assets/ui/a.png` | CurveBook contributors | Rendered from `assets/ui/b.png` | MIT OR Apache-2.0 | a |\n| `assets/ui/b.png` | CurveBook contributors | Rendered from `assets/ui/a.png` | MIT OR Apache-2.0 | b |\n",
+                "",
+                "circular asset provenance chain",
+            ),
+            (
+                vec!["assets/ui/orphan.png"],
+                "| `assets/ui/orphan.png` | CurveBook contributors | Rendered from `assets/ui/missing.svg` | MIT OR Apache-2.0 | x |\n",
+                "",
+                "missing from ASSETS.md",
+            ),
+        ] {
+            let owned: Vec<String> = files.into_iter().map(str::to_owned).collect();
+            let err = verify_assets(&owned, md, attr).unwrap_err();
+            assert!(err.contains(needle), "expected `{needle}` in `{err}`");
+        }
     }
 
     #[test]
@@ -971,50 +944,40 @@ See also `assets/prose.png` in prose.
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
         let assets_md = std::fs::read_to_string(root.join("ASSETS.md")).unwrap();
         let attr_md = std::fs::read_to_string(root.join("ATTRIBUTION.md")).unwrap();
-        let files = vec![
-            String::from("assets/app-icon/source/approved-mole.png"),
-            String::from("assets/app-icon/source/approved-seven-pane.png"),
-            String::from("assets/app-icon/source/seven-pane-win95-1254.png"),
-            String::from("assets/app-icon/curvebook-win95-2508.png"),
-            String::from("assets/app-icon/curvebook.svg"),
-            String::from("docs/images/workspace-split-fit.png"),
-            String::from("docs/images/workspace-layout-dark.png"),
-        ];
+        let files: Vec<String> = [
+            "assets/app-icon/source/approved-mole.png",
+            "assets/app-icon/source/approved-seven-pane.png",
+            "assets/app-icon/source/seven-pane-win95-1254.png",
+            "assets/app-icon/curvebook-win95-2508.png",
+            "assets/app-icon/curvebook.svg",
+            "docs/images/workspace-split-fit.png",
+            "docs/images/workspace-layout-dark.png",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         assert_eq!(verify_assets(&files, &assets_md, &attr_md).unwrap(), 7);
     }
 
     #[test]
     fn repo_provenance_rejects_orphan_rows_contaminated_notice_and_plan_prism_paths() {
-        let root = std::env::temp_dir().join(format!("cb-assets-prov-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("assets/ui")).unwrap();
-        std::fs::write(root.join("assets/ui/icon.svg"), "<svg><title>CurveBook icon</title></svg>").unwrap();
-
+        let root = TestDir::new("assets-prov");
+        root.write("assets/ui/icon.svg", "<svg><title>CurveBook icon</title></svg>");
         let files = vec![String::from("assets/ui/icon.svg")];
-        let assets_ok = "\
-| Asset | Author | Source | Licence | Notes |
-|---|---|---|---|---|
-| `assets/ui/icon.svg` | CurveBook contributors | Original SVG icon drawn for CurveBook | MIT OR Apache-2.0 | UI icon |
-";
-        assert_eq!(super::verify_repo_provenance(&root, &files, assets_ok, "", "CurveBook contributors").unwrap(), 1);
+        let assets_ok = "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/ui/icon.svg` | CurveBook contributors | Original SVG icon drawn for CurveBook | MIT OR Apache-2.0 | UI icon |\n";
+        assert_eq!(super::verify_repo_provenance(root.path(), &files, assets_ok, "", "CurveBook contributors").unwrap(), 1);
 
-        let err_notice = super::verify_repo_provenance(&root, &files, assets_ok, "", "Derived from GraphPad artwork").unwrap_err();
+        let err_notice = super::verify_repo_provenance(root.path(), &files, assets_ok, "", "Derived from GraphPad artwork").unwrap_err();
         assert!(err_notice.contains("NOTICE") && err_notice.contains("graphpad"), "{err_notice}");
 
         let assets_orphan = format!("{assets_ok}| `assets/ui/ghost.svg` | CurveBook contributors | Original SVG | MIT | orphan |\n");
-        let err_orphan = super::verify_repo_provenance(&root, &files, &assets_orphan, "", "CurveBook contributors").unwrap_err();
-        assert!(err_orphan.contains("orphan"), "{err_orphan}");
+        assert!(super::verify_repo_provenance(root.path(), &files, &assets_orphan, "", "CurveBook contributors").unwrap_err().contains("orphan"));
 
-        let mut files_plan = files.clone();
-        files_plan.push(String::from("plan/prism/frame01.jpg"));
-        let err_plan = super::verify_repo_provenance(&root, &files_plan, assets_ok, "", "CurveBook contributors").unwrap_err();
-        assert!(err_plan.contains("plan/prism"), "{err_plan}");
+        let files_plan = vec![String::from("assets/ui/icon.svg"), String::from("plan/prism/frame01.jpg")];
+        assert!(super::verify_repo_provenance(root.path(), &files_plan, assets_ok, "", "CurveBook contributors").unwrap_err().contains("plan/prism"));
 
-        std::fs::write(root.join("assets/ui/icon.svg"), "<svg><title>OriginPro icon</title></svg>").unwrap();
-        let err_svg = super::verify_repo_provenance(&root, &files, assets_ok, "", "CurveBook contributors").unwrap_err();
-        assert!(err_svg.contains("originpro"), "{err_svg}");
-
-        let _ = std::fs::remove_dir_all(&root);
+        root.write("assets/ui/icon.svg", "<svg><title>OriginPro icon</title></svg>");
+        assert!(super::verify_repo_provenance(root.path(), &files, assets_ok, "", "CurveBook contributors").unwrap_err().contains("originpro"));
     }
 
     #[test]
@@ -1057,38 +1020,24 @@ See also `assets/prose.png` in prose.
         assert!(is_asset("ASSETS/APP-ICON/ICON.PNG"));
         assert!(is_original_only_visual_asset("ASSETS/APP-ICON/ICON.PNG"));
 
-        let root = std::env::temp_dir().join(format!("cb-assets-sec22-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("assets/ui")).unwrap();
-
-        let mut zw = crate::zip_read::TestZipWriter::new();
-        zw.add_file("fonts/Sneaky.ttf", b"font".to_vec()).unwrap();
-        std::fs::write(root.join("assets/ui/bundle.zip"), zw.finish().unwrap()).unwrap();
-        let files = vec![String::from("assets/ui/bundle.zip")];
-        let assets_md =
+        let root = TestDir::new("assets-sec22");
+        root.write_bytes("assets/ui/bundle.zip", &zip_single("fonts/Sneaky.ttf", b"font"));
+        let zip_md =
             "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/ui/bundle.zip` | CurveBook | Original | MIT | z |\n";
-        let err_zip = super::verify_repo_provenance(&root, &files, assets_md, "", "CurveBook").unwrap_err();
+        let err_zip = super::verify_repo_provenance(root.path(), &[String::from("assets/ui/bundle.zip")], zip_md, "", "CurveBook").unwrap_err();
         assert!(err_zip.contains("Sneaky.ttf"), "{err_zip}");
 
-        std::fs::write(root.join("assets/ui/report.pdf"), b"%PDF-1.4\n1 0 obj\n<< /Creator (GraphPad Prism) >>\nendobj\n").unwrap();
-        let pdf_files = vec![String::from("assets/ui/report.pdf")];
+        root.write_bytes("assets/ui/report.pdf", b"%PDF-1.4\n1 0 obj\n<< /Creator (GraphPad Prism) >>\nendobj\n");
         let pdf_md =
             "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/ui/report.pdf` | CurveBook | Original | MIT | p |\n";
-        let err_pdf = super::verify_repo_provenance(&root, &pdf_files, pdf_md, "", "CurveBook").unwrap_err();
+        let err_pdf = super::verify_repo_provenance(root.path(), &[String::from("assets/ui/report.pdf")], pdf_md, "", "CurveBook").unwrap_err();
         assert!(err_pdf.contains("graphpad") || err_pdf.contains("prism"), "{err_pdf}");
 
-        let dist = root.join("dist");
-        std::fs::create_dir_all(&dist).unwrap();
-        let mut lvl2 = crate::zip_read::TestZipWriter::new();
-        lvl2.add_file("ok.txt", b"clean".to_vec()).unwrap();
-        let mut lvl1 = crate::zip_read::TestZipWriter::new();
-        lvl1.add_file("inner.zip", lvl2.finish().unwrap()).unwrap();
-        let mut outer = crate::zip_read::TestZipWriter::new();
-        outer.add_file("mid.zip", lvl1.finish().unwrap()).unwrap();
-        std::fs::write(dist.join("deep.zip"), outer.finish().unwrap()).unwrap();
+        let lvl2 = zip_single("ok.txt", b"clean");
+        let lvl1 = zip_single("inner.zip", &lvl2);
+        root.write_bytes("dist/deep.zip", &zip_single("mid.zip", &lvl1));
         let cat = super::RepoAssetCatalog { allowed_sha256: std::collections::BTreeSet::new() };
-        let (_, dist_errs) = super::scan_dist_artefacts(&cat, &dist).unwrap();
-        let _ = std::fs::remove_dir_all(&root);
+        let (_, dist_errs) = super::scan_dist_artefacts(&cat, &root.join("dist")).unwrap();
         assert!(dist_errs.iter().any(|e| e.contains("nested archive depth")), "{dist_errs:?}");
     }
 }

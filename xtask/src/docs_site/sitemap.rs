@@ -7,6 +7,7 @@ use std::path::Path;
 use super::markdown::{LinkResolver, TocHeading, escape_html, github_slug, render_markdown};
 use super::registries::{AzEntry, ExpectedCoverage, RegistryBundle, RegistryPageSpec, all_analysis_kinds_meta, generate_registry_pages};
 use super::template::{NavLink, PageSpec, SiteMeta, rel_href, render_page};
+use crate::scan_util::{is_real_dir, is_regular_file};
 
 const GITHUB_REPO_BASE: &str = "https://github.com/HauserGroup/curvebook";
 
@@ -148,6 +149,199 @@ const CONTRIBUTOR_GITHUB_GUIDES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Single source of truth for hand-written user reference guides shared by `sitemap.rs` and `llms.rs`.
+pub(crate) struct GuideDescriptor {
+    pub(crate) rel_path: &'static str,
+    pub(crate) title: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) section_id: &'static str,
+    pub(crate) repo_path: &'static str,
+    fallback_kind: FallbackKind,
+}
+
+const fn guide(
+    rel_path: &'static str,
+    title: &'static str,
+    description: &'static str,
+    section_id: &'static str,
+    repo_path: &'static str,
+    fallback_kind: FallbackKind,
+) -> GuideDescriptor {
+    GuideDescriptor { rel_path, title, description, section_id, repo_path, fallback_kind }
+}
+
+pub(crate) const MANUAL_GUIDES: &[GuideDescriptor] = &[
+    guide(
+        "get-started.html",
+        "Get Started",
+        "System requirements, installing CurveBook, verifying checksums/attestations, and font configuration.",
+        "get-started",
+        "docs/reference/get-started.md",
+        FallbackKind::Generic {
+            lead: "Interface-neutral installation, verification, font discovery (`CURVEBOOK_FONTS_DIR`), and initial setup reference.",
+            target_registry: Some(("Format & Package Reference", "registry/formats.html")),
+        },
+    ),
+    guide(
+        "desktop-gui.html",
+        "Desktop GUI Overview",
+        "Overview of desktop welcome workflow, sheets, analyses, graphs, saving, and exporting.",
+        "get-started",
+        "docs/reference/desktop-gui.md",
+        FallbackKind::Generic {
+            lead: "Overview of the desktop application layout and entry points paired with the typed UI command catalog.",
+            target_registry: Some(("UI Command Catalog", "registry/commands.html#ui-commands")),
+        },
+    ),
+    guide(
+        "mcp-for-beginners.html",
+        "MCP Setup for Beginners",
+        "Configure an MCP client to connect to CurveBook and verify the connection.",
+        "get-started",
+        "docs/mcp-for-beginners.md",
+        FallbackKind::MustExist,
+    ),
+    guide(
+        "concepts.html",
+        "Concepts & Reactive Pipeline",
+        "Project structure, five sheet types, reactive recalculation pipeline, exclusions, checkpoints, and undo.",
+        "concepts",
+        "docs/reference/concepts.md",
+        FallbackKind::Generic {
+            lead: "Core CurveBook workspace concepts: projects, linked Data/Info/Result/Graph/Layout sheets, exclusions, hooks, and undo.",
+            target_registry: Some(("Table & Analysis Registry", "registry/tables.html")),
+        },
+    ),
+    guide(
+        "tables.html",
+        "Data Tables, Formulas & Transforms",
+        "Table archetypes, replicate subcolumn modes, Calculated Variables formula language, and data transforms.",
+        "tables",
+        "docs/reference/tables.md",
+        FallbackKind::Generic {
+            lead: "Reference for all eight TableKind archetypes, SubcolumnMode layouts, formula operators, and linked data transforms.",
+            target_registry: Some(("Table Archetypes & Subcolumn Registry", "registry/tables.html#table-archetypes")),
+        },
+    ),
+    guide(
+        "analyses.html",
+        "Statistical Analyses Reference",
+        "Complete interface-neutral reference for every CurveBook statistical analysis kind, options, diagnostics, and citations.",
+        "analyses",
+        "docs/reference/analyses.md",
+        FallbackKind::Analyses,
+    ),
+    guide(
+        "fitting.html",
+        "Curve Fitting Reference",
+        "Nonlinear regression methods, equation library, weighting, robust/ROUT fitting, bands, custom DSL, and ODE models.",
+        "fitting",
+        "docs/reference/fitting.md",
+        FallbackKind::Generic {
+            lead: "Interface-neutral reference for trust-region LM fitting, Poisson deviance, Cauchy/ROUT regression, global sharing, and custom equation DSL.",
+            target_registry: Some(("Parametric Equations & Fitting Registry", "registry/equations.html")),
+        },
+    ),
+    guide(
+        "graphs.html",
+        "Graphs & Page Layouts",
+        "Graph types, compatible table archetypes, axis scales, error bars, colour palettes, and Page Layout rendering.",
+        "graphs",
+        "docs/reference/graphs.md",
+        FallbackKind::Generic {
+            lead: "Reference for scientific graph families, axis scale bijections, frame presets, perceptual colormaps, and Page Layouts.",
+            target_registry: Some(("Graphs, Scales & Palettes Registry", "registry/graphs.html")),
+        },
+    ),
+    guide(
+        "qol.html",
+        "Calculators & Quality-of-Life Tools",
+        "Scientific calculators, quick statistics, and workspace quality-of-life capabilities.",
+        "qol",
+        "docs/reference/qol.md",
+        FallbackKind::Generic {
+            lead: "Capability reference for built-in scientific calculators, batch inspection, cloning pipelines, and workspace tools.",
+            target_registry: Some(("UI & Engine Commands", "registry/commands.html")),
+        },
+    ),
+    guide(
+        "files.html",
+        "Files, Import & Export",
+        "CurveBook archives, unpacked .curvebook.d directories, templates, autosave recovery, and interchange formats.",
+        "files",
+        "docs/reference/files.md",
+        FallbackKind::Generic {
+            lead: "Reference for .curvebook archives, unpacked .curvebook.d directories, .cbtemplate templates, and registered import/export formats.",
+            target_registry: Some(("Formats & Schemas Registry", "registry/formats.html")),
+        },
+    ),
+    guide(
+        "automation/mcp.html",
+        "MCP Server Reference",
+        "CurveBook Model Context Protocol server transports, core tools, toolsets, resources, and prompts.",
+        "automation",
+        "docs/reference/automation/mcp.md",
+        FallbackKind::MustExist,
+    ),
+    guide(
+        "automation/cli.html",
+        "CLI Reference (curvebook-cli)",
+        "Headless runner subcommands, schema-typed direct command flags, exit codes, and PDF/format flags.",
+        "automation",
+        "docs/reference/automation/cli.md",
+        FallbackKind::MustExist,
+    ),
+    guide(
+        "automation/control-and-batch.html",
+        "Control Protocol, Batch Format & Errors",
+        "Loopback --control JSON-lines protocol, curvebook.batch.v1 manifests, run scripts, and engine error codes.",
+        "automation",
+        "docs/reference/automation/control-and-batch.md",
+        FallbackKind::MustExist,
+    ),
+    guide(
+        "settings.html",
+        "Settings & Languages",
+        "Preferences JSON Schema keys, keyboard shortcut customization, interface locales, and locale formatting.",
+        "settings",
+        "docs/reference/settings.md",
+        FallbackKind::Generic {
+            lead: "Reference for user preferences keys, keybinding overrides, and compiled interface locale tags.",
+            target_registry: Some(("Preferences Schema & Locales Registry", "registry/formats.html#schema-preferences")),
+        },
+    ),
+    guide(
+        "privacy-security.html",
+        "Privacy, Licences & Security",
+        "Zero-telemetry local execution, loopback control rules, dual licensing, and vulnerability reporting.",
+        "privacy-security",
+        "docs/reference/privacy-security.md",
+        FallbackKind::Generic {
+            lead: "CurveBook runs strictly locally with zero outbound telemetry, loopback-only control sockets, and dual MIT OR Apache-2.0 licensing.",
+            target_registry: None,
+        },
+    ),
+    guide(
+        "troubleshooting.html",
+        "Troubleshooting & Known Issues",
+        "Common install, font discovery, MCP transport, archive recovery, and solver diagnostics.",
+        "troubleshooting",
+        "docs/reference/troubleshooting.md",
+        FallbackKind::Generic {
+            lead: "Diagnostic guide for font setup, MCP stdio/control attachment, archive version guards, and numerical error codes.",
+            target_registry: Some(("Engine Error Codes", "registry/tables.html#error-codes")),
+        },
+    ),
+    guide(
+        "glossary.html",
+        "Glossary",
+        "Definitions of core CurveBook scientific, data-model, and automation terms.",
+        "glossary",
+        "docs/reference/glossary.md",
+        FallbackKind::Glossary,
+    ),
+];
+
 enum PageSource {
     Markdown { repo_path: &'static str, fallback_kind: FallbackKind },
     PreRendered { h1: String, toc: Vec<TocHeading>, body_html: String },
@@ -183,62 +377,36 @@ impl LinkResolver for RepoLinkResolver<'_> {
         if raw_href.starts_with('#') || raw_href.starts_with("http://") || raw_href.starts_with("https://") || raw_href.starts_with("mailto:") {
             return raw_href.to_owned();
         }
-        let (target_part, frag_part) = match raw_href.split_once('#') {
-            Some((t, f)) => (t, Some(f)),
-            None => (raw_href, None),
-        };
+        let (target_part, frag_part) = raw_href.split_once('#').map_or((raw_href, None), |(t, f)| (t, Some(f)));
         if target_part.is_empty() {
-            return frag_part.map(|f| format!("#{f}")).unwrap_or_default();
+            return frag_suffix(frag_part);
         }
 
         let clean_target = target_part.trim_end_matches('/');
-        if clean_target.starts_with("registry/") && clean_target.ends_with(".html") {
-            let mut href = rel_href(self.current_site_rel, clean_target);
-            if let Some(f) = frag_part {
-                href.push('#');
-                href.push_str(f);
-            }
-            return href;
-        }
-        if clean_target.starts_with("../registry/") && clean_target.ends_with(".html") {
+        if clean_target.ends_with(".html") && (clean_target.starts_with("registry/") || clean_target.starts_with("../registry/")) {
             let suffix = clean_target.trim_start_matches("../");
-            let mut href = rel_href(self.current_site_rel, suffix);
-            if let Some(f) = frag_part {
-                href.push('#');
-                href.push_str(f);
-            }
-            return href;
+            return format!("{}{}", rel_href(self.current_site_rel, suffix), frag_suffix(frag_part));
         }
 
         let source_dir = Path::new(self.source_repo_rel).parent().unwrap_or_else(|| Path::new(""));
         let normalized = normalize_repo_rel(source_dir, target_part);
 
         if let Some(mapped_site_rel) = self.known_site_targets.get(normalized.as_str()) {
-            let mut href = rel_href(self.current_site_rel, mapped_site_rel);
-            if let Some(f) = frag_part {
-                href.push('#');
-                href.push_str(f);
-            } else if let Some(default_frag) = default_schema_fragment(&normalized) {
-                href.push_str(default_frag);
-            }
-            return href;
+            let frag = frag_part.map(|f| format!("#{f}")).or_else(|| default_schema_fragment(&normalized).map(str::to_owned)).unwrap_or_default();
+            return format!("{}{frag}", rel_href(self.current_site_rel, mapped_site_rel));
         }
 
-        if normalized == "docs/index.html" {
-            return if self.meta.is_release_snapshot {
-                let assets = super::template::asset_prefix(self.current_site_rel, true);
-                format!("{assets}index.html{}", frag_suffix(frag_part))
+        if let Some((snap_rel, preview_rel)) = match normalized.as_str() {
+            "docs/index.html" => Some(("index.html", "index.html")),
+            "docs/privacy.html" => Some(("privacy.html", "privacy-security.html")),
+            _ => None,
+        } {
+            let base = if self.meta.is_release_snapshot {
+                format!("{}{snap_rel}", super::template::asset_prefix(self.current_site_rel, true))
             } else {
-                format!("{}{}", rel_href(self.current_site_rel, "index.html"), frag_suffix(frag_part))
+                rel_href(self.current_site_rel, preview_rel)
             };
-        }
-        if normalized == "docs/privacy.html" {
-            return if self.meta.is_release_snapshot {
-                let assets = super::template::asset_prefix(self.current_site_rel, true);
-                format!("{assets}privacy.html{}", frag_suffix(frag_part))
-            } else {
-                format!("{}{}", rel_href(self.current_site_rel, "privacy-security.html"), frag_suffix(frag_part))
-            };
+            return format!("{base}{}", frag_suffix(frag_part));
         }
         if let Some(img_name) = normalized.strip_prefix("docs/images/") {
             let assets = super::template::asset_prefix(self.current_site_rel, self.meta.is_release_snapshot);
@@ -252,9 +420,7 @@ impl LinkResolver for RepoLinkResolver<'_> {
                 .borrow_mut()
                 .push(format!("{}: broken relative link `{raw_href}` (resolved repo path `{trimmed}` does not exist)", self.source_repo_rel));
         }
-        let is_dir = target_part.ends_with('/')
-            || std::fs::symlink_metadata(&target_path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir());
-        let kind = if is_dir { "tree" } else { "blob" };
+        let kind = if target_part.ends_with('/') || is_real_dir(&target_path) { "tree" } else { "blob" };
         format!("{GITHUB_REPO_BASE}/{kind}/main/{trimmed}{}", frag_suffix(frag_part))
     }
 
@@ -266,20 +432,17 @@ impl LinkResolver for RepoLinkResolver<'_> {
         let normalized = normalize_repo_rel(source_dir, raw_src);
         let assets = super::template::asset_prefix(self.current_site_rel, self.meta.is_release_snapshot);
         if let Some(img_name) = normalized.strip_prefix("docs/images/") {
-            let candidate = self.repo_root.join("docs/images").join(img_name);
-            if std::fs::symlink_metadata(&candidate).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
-                return format!("{assets}images/{img_name}");
+            if !is_regular_file(&self.repo_root.join("docs/images").join(img_name)) {
+                self.broken_links
+                    .borrow_mut()
+                    .push(format!("{}: missing image asset `{raw_src}` (resolved repo path `{normalized}` does not exist)", self.source_repo_rel));
             }
-            self.broken_links
-                .borrow_mut()
-                .push(format!("{}: missing image asset `{raw_src}` (resolved repo path `{normalized}` does not exist)", self.source_repo_rel));
             return format!("{assets}images/{img_name}");
         }
-        if let Some(file_name) = Path::new(&normalized).file_name().and_then(|n| n.to_str()) {
-            let candidate = self.repo_root.join("docs/images").join(file_name);
-            if std::fs::symlink_metadata(&candidate).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
-                return format!("{assets}images/{file_name}");
-            }
+        if let Some(file_name) = Path::new(&normalized).file_name().and_then(|n| n.to_str())
+            && is_regular_file(&self.repo_root.join("docs/images").join(file_name))
+        {
+            return format!("{assets}images/{file_name}");
         }
         self.broken_links
             .borrow_mut()
@@ -337,32 +500,17 @@ fn push_segments(path: &str, parts: &mut Vec<String>) {
 }
 
 fn build_known_site_targets() -> BTreeMap<&'static str, &'static str> {
-    let mut map = BTreeMap::new();
-    map.insert("docs/reference/get-started.md", "get-started.html");
-    map.insert("docs/reference/desktop-gui.md", "desktop-gui.html");
-    map.insert("docs/reference/concepts.md", "concepts.html");
-    map.insert("docs/reference/tables.md", "tables.html");
-    map.insert("docs/reference/analyses.md", "analyses.html");
-    map.insert("docs/reference/fitting.md", "fitting.html");
-    map.insert("docs/reference/graphs.md", "graphs.html");
-    map.insert("docs/reference/qol.md", "qol.html");
-    map.insert("docs/reference/files.md", "files.html");
-    map.insert("docs/reference/settings.md", "settings.html");
-    map.insert("docs/reference/privacy-security.md", "privacy-security.html");
-    map.insert("docs/reference/troubleshooting.md", "troubleshooting.html");
-    map.insert("docs/reference/glossary.md", "glossary.html");
-    map.insert("docs/reference/automation/mcp.md", "automation/mcp.html");
-    map.insert("docs/reference/automation/cli.md", "automation/cli.html");
-    map.insert("docs/reference/automation/control-and-batch.md", "automation/control-and-batch.html");
-    map.insert("docs/mcp-for-beginners.md", "mcp-for-beginners.html");
-    map.insert("docs/mcp.md", "automation/mcp.html");
-    map.insert("docs/control-protocol.md", "automation/control-and-batch.html");
-    map.insert("docs/commands.md", "registry/commands.html");
-    map.insert("docs/schemas/preferences.schema.json", "registry/formats.html");
-    map.insert("docs/schemas/batch-v1.schema.json", "registry/formats.html");
-    map.insert("docs/schemas/document.schema.json", "registry/formats.html");
-    map.insert("docs/schemas/archive-manifest.schema.json", "registry/formats.html");
-    map.insert("docs/schemas/journal-record.schema.json", "registry/formats.html");
+    let mut map: BTreeMap<&'static str, &'static str> = MANUAL_GUIDES.iter().map(|g| (g.repo_path, g.rel_path)).collect();
+    map.extend([
+        ("docs/mcp.md", "automation/mcp.html"),
+        ("docs/control-protocol.md", "automation/control-and-batch.html"),
+        ("docs/commands.md", "registry/commands.html"),
+        ("docs/schemas/preferences.schema.json", "registry/formats.html"),
+        ("docs/schemas/batch-v1.schema.json", "registry/formats.html"),
+        ("docs/schemas/document.schema.json", "registry/formats.html"),
+        ("docs/schemas/archive-manifest.schema.json", "registry/formats.html"),
+        ("docs/schemas/journal-record.schema.json", "registry/formats.html"),
+    ]);
     map
 }
 
@@ -399,15 +547,9 @@ pub fn assemble_site(root: &Path, meta: SiteMeta) -> Result<GeneratedSite, Strin
         let children = by_section.remove(sec.id).unwrap_or_default();
         let child_refs: Vec<&PageItem> = children.iter().collect();
         ordered.push(build_section_index_page(sec, &child_refs));
+        ordered.extend(children);
         if sec.id == "glossary" {
-            for p in children {
-                ordered.push(p);
-            }
             ordered.push(build_az_index_page(&az_entries));
-        } else {
-            for p in children {
-                ordered.push(p);
-            }
         }
     }
 
@@ -418,22 +560,8 @@ pub fn assemble_site(root: &Path, meta: SiteMeta) -> Result<GeneratedSite, Strin
         let sec = section_by_id(item.section_id);
         let prev = idx.checked_sub(1).and_then(|i| nav_links.get(i));
         let next = nav_links.get(idx + 1);
-
-        let html = match &item.source {
-            PageSource::PreRendered { h1, toc, body_html } => render_page(&PageSpec {
-                title: &item.title,
-                description: &item.description,
-                rel_path: &item.rel_path,
-                section_title: sec.map_or("Manual", |s| s.title),
-                section_rel_path: sec.map(|s| s.index_rel_path),
-                h1,
-                toc_headings: toc,
-                body_html,
-                body_has_h1: false,
-                prev,
-                next,
-                meta: &meta,
-            }),
+        let (title, h1, toc, body_html, body_has_h1) = match &item.source {
+            PageSource::PreRendered { h1, toc, body_html } => (item.title.clone(), h1.clone(), toc.clone(), body_html.clone(), false),
             PageSource::Markdown { repo_path, fallback_kind } => {
                 let full_path = root.join(repo_path);
                 let rendered = if full_path.is_file() {
@@ -447,32 +575,32 @@ pub fn assemble_site(root: &Path, meta: SiteMeta) -> Result<GeneratedSite, Strin
                         broken_links: std::cell::RefCell::new(Vec::new()),
                     };
                     let out = render_markdown(&md_src, &resolver);
-                    let broken = resolver.broken_links.into_inner();
-                    if let Some(first) = broken.first() {
-                        return Err(first.clone());
+                    if let Some(first) = resolver.broken_links.into_inner().into_iter().next() {
+                        return Err(first);
                     }
                     out
                 } else {
                     render_fallback_page(*fallback_kind, &item.rel_path)?
                 };
                 let has_h1 = rendered.title.is_some();
-                let page_title = rendered.title.as_deref().unwrap_or(&item.title);
-                render_page(&PageSpec {
-                    title: page_title,
-                    description: &item.description,
-                    rel_path: &item.rel_path,
-                    section_title: sec.map_or("Manual", |s| s.title),
-                    section_rel_path: sec.map(|s| s.index_rel_path),
-                    h1: page_title,
-                    toc_headings: &rendered.headings,
-                    body_html: &rendered.html,
-                    body_has_h1: has_h1,
-                    prev,
-                    next,
-                    meta: &meta,
-                })
+                let page_title = rendered.title.unwrap_or_else(|| item.title.clone());
+                (page_title.clone(), page_title, rendered.headings, rendered.html, has_h1)
             }
         };
+        let html = render_page(&PageSpec {
+            title: &title,
+            description: &item.description,
+            rel_path: &item.rel_path,
+            section_title: sec.map_or("Manual", |s| s.title),
+            section_rel_path: sec.map(|s| s.index_rel_path),
+            h1: &h1,
+            toc_headings: &toc,
+            body_html: &body_html,
+            body_has_h1,
+            prev,
+            next,
+            meta: &meta,
+        });
         html_pages.insert(item.rel_path.clone(), html);
     }
 
@@ -485,177 +613,16 @@ fn section_by_id(id: &str) -> Option<&'static SectionDef> {
 
 fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem> {
     let mut reg_map: BTreeMap<String, RegistryPageSpec> = registry_pages.into_iter().map(|p| (p.rel_path.clone(), p)).collect();
-    let mut items = vec![
-        md_page(
-            "get-started.html",
-            "Get Started",
-            "System requirements, installing CurveBook, verifying checksums/attestations, and font configuration.",
-            "get-started",
-            "docs/reference/get-started.md",
-            FallbackKind::Generic {
-                lead: "Interface-neutral installation, verification, font discovery (`CURVEBOOK_FONTS_DIR`), and initial setup reference.",
-                target_registry: Some(("Format & Package Reference", "registry/formats.html")),
-            },
-        ),
-        md_page(
-            "desktop-gui.html",
-            "Desktop GUI Overview",
-            "Overview of desktop welcome workflow, sheets, analyses, graphs, saving, and exporting.",
-            "get-started",
-            "docs/reference/desktop-gui.md",
-            FallbackKind::Generic {
-                lead: "Overview of the desktop application layout and entry points paired with the typed UI command catalog.",
-                target_registry: Some(("UI Command Catalog", "registry/commands.html#ui-commands")),
-            },
-        ),
-        md_page(
-            "mcp-for-beginners.html",
-            "MCP Setup for Beginners",
-            "Configure an MCP client to connect to CurveBook and verify the connection.",
-            "get-started",
-            "docs/mcp-for-beginners.md",
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "concepts.html",
-            "Concepts & Reactive Pipeline",
-            "Project structure, five sheet types, reactive recalculation pipeline, exclusions, checkpoints, and undo.",
-            "concepts",
-            "docs/reference/concepts.md",
-            FallbackKind::Generic {
-                lead: "Core CurveBook workspace concepts: projects, linked Data/Info/Result/Graph/Layout sheets, exclusions, hooks, and undo.",
-                target_registry: Some(("Table & Analysis Registry", "registry/tables.html")),
-            },
-        ),
-        md_page(
-            "tables.html",
-            "Data Tables, Formulas & Transforms",
-            "Table archetypes, replicate subcolumn modes, Calculated Variables formula language, and data transforms.",
-            "tables",
-            "docs/reference/tables.md",
-            FallbackKind::Generic {
-                lead: "Reference for all eight TableKind archetypes, SubcolumnMode layouts, formula operators, and linked data transforms.",
-                target_registry: Some(("Table Archetypes & Subcolumn Registry", "registry/tables.html#table-archetypes")),
-            },
-        ),
-        md_page(
-            "analyses.html",
-            "Statistical Analyses Reference",
-            "Complete interface-neutral reference for every CurveBook statistical analysis kind, options, diagnostics, and citations.",
-            "analyses",
-            "docs/reference/analyses.md",
-            FallbackKind::Analyses,
-        ),
-        md_page(
-            "fitting.html",
-            "Curve Fitting Reference",
-            "Nonlinear regression methods, equation library, weighting, robust/ROUT fitting, bands, custom DSL, and ODE models.",
-            "fitting",
-            "docs/reference/fitting.md",
-            FallbackKind::Generic {
-                lead: "Interface-neutral reference for trust-region LM fitting, Poisson deviance, Cauchy/ROUT regression, global sharing, and custom equation DSL.",
-                target_registry: Some(("Parametric Equations & Fitting Registry", "registry/equations.html")),
-            },
-        ),
-        md_page(
-            "graphs.html",
-            "Graphs & Page Layouts",
-            "Graph types, compatible table archetypes, axis scales, error bars, colour palettes, and Page Layout rendering.",
-            "graphs",
-            "docs/reference/graphs.md",
-            FallbackKind::Generic {
-                lead: "Reference for scientific graph families, axis scale bijections, frame presets, perceptual colormaps, and Page Layouts.",
-                target_registry: Some(("Graphs, Scales & Palettes Registry", "registry/graphs.html")),
-            },
-        ),
-        md_page(
-            "qol.html",
-            "Calculators & Quality-of-Life Tools",
-            "Scientific calculators, quick statistics, and workspace quality-of-life capabilities.",
-            "qol",
-            "docs/reference/qol.md",
-            FallbackKind::Generic {
-                lead: "Capability reference for built-in scientific calculators, batch inspection, cloning pipelines, and workspace tools.",
-                target_registry: Some(("UI & Engine Commands", "registry/commands.html")),
-            },
-        ),
-        md_page(
-            "files.html",
-            "Files, Import & Export",
-            "CurveBook archives, unpacked .curvebook.d directories, templates, autosave recovery, and interchange formats.",
-            "files",
-            "docs/reference/files.md",
-            FallbackKind::Generic {
-                lead: "Reference for .curvebook archives, unpacked .curvebook.d directories, .cbtemplate templates, and registered import/export formats.",
-                target_registry: Some(("Formats & Schemas Registry", "registry/formats.html")),
-            },
-        ),
-        md_page(
-            "automation/mcp.html",
-            "MCP Server Reference",
-            "CurveBook Model Context Protocol server transports, core tools, toolsets, resources, and prompts.",
-            "automation",
-            "docs/reference/automation/mcp.md",
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "automation/cli.html",
-            "CLI Reference (curvebook-cli)",
-            "Headless runner subcommands, schema-typed direct command flags, exit codes, and PDF/format flags.",
-            "automation",
-            "docs/reference/automation/cli.md",
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "automation/control-and-batch.html",
-            "Control Protocol, Batch Format & Errors",
-            "Loopback --control JSON-lines protocol, curvebook.batch.v1 manifests, run scripts, and engine error codes.",
-            "automation",
-            "docs/reference/automation/control-and-batch.md",
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "settings.html",
-            "Settings & Languages",
-            "Preferences JSON Schema keys, keyboard shortcut customization, interface locales, and locale formatting.",
-            "settings",
-            "docs/reference/settings.md",
-            FallbackKind::Generic {
-                lead: "Reference for user preferences keys, keybinding overrides, and compiled interface locale tags.",
-                target_registry: Some(("Preferences Schema & Locales Registry", "registry/formats.html#schema-preferences")),
-            },
-        ),
-        md_page(
-            "privacy-security.html",
-            "Privacy, Licences & Security",
-            "Zero-telemetry local execution, loopback control rules, dual licensing, and vulnerability reporting.",
-            "privacy-security",
-            "docs/reference/privacy-security.md",
-            FallbackKind::Generic {
-                lead: "CurveBook runs strictly locally with zero outbound telemetry, loopback-only control sockets, and dual MIT OR Apache-2.0 licensing.",
-                target_registry: None,
-            },
-        ),
-        md_page(
-            "troubleshooting.html",
-            "Troubleshooting & Known Issues",
-            "Common install, font discovery, MCP transport, archive recovery, and solver diagnostics.",
-            "troubleshooting",
-            "docs/reference/troubleshooting.md",
-            FallbackKind::Generic {
-                lead: "Diagnostic guide for font setup, MCP stdio/control attachment, archive version guards, and numerical error codes.",
-                target_registry: Some(("Engine Error Codes", "registry/tables.html#error-codes")),
-            },
-        ),
-        md_page(
-            "glossary.html",
-            "Glossary",
-            "Definitions of core CurveBook scientific, data-model, and automation terms.",
-            "glossary",
-            "docs/reference/glossary.md",
-            FallbackKind::Glossary,
-        ),
-    ];
+    let mut items: Vec<PageItem> = MANUAL_GUIDES
+        .iter()
+        .map(|g| PageItem {
+            rel_path: g.rel_path.to_owned(),
+            title: g.title.to_owned(),
+            description: g.description.to_owned(),
+            section_id: g.section_id,
+            source: PageSource::Markdown { repo_path: g.repo_path, fallback_kind: g.fallback_kind },
+        })
+        .collect();
 
     for (reg_path, section_id) in [
         ("registry/tables.html", "tables"),
@@ -677,23 +644,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
         }
     }
     items
-}
-
-fn md_page(
-    rel_path: &str,
-    title: &str,
-    description: &str,
-    section_id: &'static str,
-    repo_path: &'static str,
-    fallback_kind: FallbackKind,
-) -> PageItem {
-    PageItem {
-        rel_path: rel_path.to_owned(),
-        title: title.to_owned(),
-        description: description.to_owned(),
-        section_id,
-        source: PageSource::Markdown { repo_path, fallback_kind },
-    }
 }
 
 fn render_fallback_page(kind: FallbackKind, current_rel: &str) -> Result<super::markdown::RenderedMarkdown, String> {
