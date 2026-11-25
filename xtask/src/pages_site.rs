@@ -1,21 +1,23 @@
-//! The set of files the GitHub Pages site publishes (`R12.9`) and `cargo xtask pages-stage`.
+//! The set of files the GitHub Pages site publishes (`R12.9`, `R12.10`) and `cargo xtask pages-stage`.
 //!
-//! Pages deploys only the files listed here, copied out of `docs/` by `pages-stage`, so the
-//! repository's internal Markdown (roadmap, audits, planning, evidence, reference sources, and
-//! schemas) is never served next to the site. The list is:
+//! Pages deploys only the files listed here, combining committed site assets under `docs/` with
+//! generated manual HTML built into a build directory (default `target/docs-manual/`, or
+//! `--manual-dir <dir>`), so internal Markdown (roadmap, audits, planning, evidence, reference
+//! sources, and schemas) is never served next to the site and generated manual HTML stays out of
+//! git. The published set is:
 //!
 //! - the hand-written landing pages in [`LANDING_PAGES`] and the redirect pages in [`REDIRECT_PAGES`];
-//! - every file of every release snapshot under `docs/manual/v<major>.<minor>/` except its
-//!   `manifest.json`;
+//! - every file of `manual/latest/` and every active versioned snapshot under
+//!   `manual/v<major>.<minor>/` from the manual build directory, except their `manifest.json`;
 //! - the shared [`SITE_FILES`] and every file under the [`SITE_DIRS`].
 //!
-//! Every published HTML page may link only to published files: [`check_publish_set`] fails on a
-//! local `href`, `src`, or meta-refresh target that the list does not contain, and on any
-//! `docs/sitemap.xml` URL outside the list. This module needs no `full-gates` dependency, so the
-//! deploy workflow can build `xtask` with `--no-default-features`.
+//! Every published HTML page may link only to published files: [`check_publish_set_with_manual`]
+//! fails on a local `href`, `src`, or meta-refresh target that the list does not contain, and on
+//! any `docs/sitemap.xml` URL outside the list. This module needs no `docs-site` feature
+//! dependency, so it continues to build with `--no-default-features`.
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use curvebook_platform::write_atomic;
 
@@ -48,79 +50,219 @@ pub const SITE_DIRS: &[&str] = &["images"];
 /// Release-snapshot files that stay in the repository but are not published.
 const SNAPSHOT_EXCLUDED_FILES: &[&str] = &["manifest.json"];
 
-const USAGE: &str = "usage: cargo xtask pages-stage <output-dir> | --list | --check";
+/// Default build directory holding CI/local generated manual HTML (`index.html`, `latest/`, `v<major>.<minor>/`).
+#[must_use]
+pub fn default_manual_dir(root: &Path) -> PathBuf {
+    root.join("target/docs-manual")
+}
 
-/// `cargo xtask pages-stage <output-dir> | --list | --check`.
+const USAGE: &str = "usage: cargo xtask pages-stage [--manual-dir <dir>] (<output-dir> | --list | --check)";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StageAction {
+    List,
+    Check,
+    Help,
+    Stage(PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StageCli {
+    manual_dir: Option<PathBuf>,
+    action: StageAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StagedEntry {
+    site_rel: String,
+    source_path: PathBuf,
+}
+
+/// `cargo xtask pages-stage [--manual-dir <dir>] (<output-dir> | --list | --check)`.
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
-    match args {
-        [flag] if flag == "--list" => {
-            for rel in check_publish_set(root)? {
+    let cli = parse_args(args)?;
+    let manual_dir = cli.manual_dir.as_deref();
+    match cli.action {
+        StageAction::Help => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        StageAction::List => {
+            for rel in check_publish_set_with_manual(root, manual_dir)? {
                 println!("{rel}");
             }
             Ok(())
         }
-        [flag] if flag == "--check" => {
-            let files = check_publish_set(root)?;
+        StageAction::Check => {
+            let files = check_publish_set_with_manual(root, manual_dir)?;
             println!("pages-stage: {} published files, every local link resolves inside the published set", files.len());
             Ok(())
         }
-        [flag] if flag == "-h" || flag == "--help" => {
-            println!("{USAGE}");
-            Ok(())
-        }
-        [out] if !out.starts_with('-') => {
-            let out_dir = if Path::new(out).is_absolute() { Path::new(out).to_path_buf() } else { root.join(out) };
-            let count = stage(root, &out_dir)?;
+        StageAction::Stage(out) => {
+            let out_dir = if out.is_absolute() { out } else { root.join(out) };
+            let count = stage_with_manual(root, manual_dir, &out_dir)?;
             println!("pages-stage: staged {count} files into {}", out_dir.display());
             Ok(())
         }
-        _ => Err(String::from(USAGE)),
     }
 }
 
-/// Every published file, as a sorted `/`-separated path relative to `docs/`.
+fn parse_args(args: &[String]) -> Result<StageCli, String> {
+    let mut manual_dir: Option<PathBuf> = None;
+    let mut action: Option<StageAction> = None;
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if arg == "-h" || arg == "--help" {
+            return Ok(StageCli { manual_dir: None, action: StageAction::Help });
+        }
+        if let Some(val) = arg.strip_prefix("--manual-dir=") {
+            if val.trim().is_empty() || manual_dir.is_some() {
+                return Err(String::from(USAGE));
+            }
+            manual_dir = Some(PathBuf::from(val));
+        } else if arg == "--manual-dir" {
+            idx += 1;
+            let val = args.get(idx).filter(|v| !v.is_empty() && !v.starts_with('-')).ok_or_else(|| String::from(USAGE))?;
+            if manual_dir.is_some() {
+                return Err(String::from(USAGE));
+            }
+            manual_dir = Some(PathBuf::from(val));
+        } else {
+            let next_action = if arg == "--list" {
+                StageAction::List
+            } else if arg == "--check" {
+                StageAction::Check
+            } else if !arg.starts_with('-') {
+                StageAction::Stage(PathBuf::from(arg))
+            } else {
+                return Err(String::from(USAGE));
+            };
+            if action.is_some() {
+                return Err(String::from(USAGE));
+            }
+            action = Some(next_action);
+        }
+        idx += 1;
+    }
+    let action = action.ok_or_else(|| String::from(USAGE))?;
+    Ok(StageCli { manual_dir, action })
+}
+
+/// Resolve the directory containing generated manual HTML (`index.html`, `latest/`, `v<major>.<minor>/`).
+pub fn resolve_manual_dir(root: &Path, manual_dir: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(explicit) = manual_dir {
+        let resolved = if explicit.is_absolute() { explicit.to_path_buf() } else { root.join(explicit) };
+        if !is_real_dir(&resolved) {
+            return Err(format!("manual directory `{}` does not exist (or is not a regular directory)", resolved.display()));
+        }
+        if !is_regular_file(&resolved.join("index.html")) {
+            return Err(format!("manual directory `{}` is missing `index.html`", resolved.display()));
+        }
+        return Ok(resolved);
+    }
+
+    let default_dir = default_manual_dir(root);
+    if is_real_dir(&default_dir) && is_regular_file(&default_dir.join("index.html")) {
+        return Ok(default_dir);
+    }
+
+    let legacy_dir = root.join("docs/manual");
+    if is_real_dir(&legacy_dir) && is_regular_file(&legacy_dir.join("index.html")) {
+        return Ok(legacy_dir);
+    }
+
+    Err(format!(
+        "manual HTML is not built (checked `{}` and `docs/manual`); run `cargo run -p xtask --features docs-site -- docs-site --build-manual` first or pass `--manual-dir <dir>`",
+        default_dir.display()
+    ))
+}
+
+/// Every published file, as a sorted `/`-separated path relative to the site root.
+#[cfg(test)]
 pub fn publish_list(root: &Path) -> Result<Vec<String>, String> {
+    Ok(publish_entries(root, None)?.into_iter().map(|e| e.site_rel).collect())
+}
+
+fn publish_entries(root: &Path, manual_dir: Option<&Path>) -> Result<Vec<StagedEntry>, String> {
     let docs = root.join("docs");
-    let mut out = BTreeSet::new();
+    let mut entries: BTreeMap<String, PathBuf> = BTreeMap::new();
     for rel in LANDING_PAGES.iter().chain(REDIRECT_PAGES).chain(SITE_FILES) {
-        if !is_regular_file(&docs.join(rel)) {
+        if *rel == "manual/index.html" {
+            continue;
+        }
+        let path = docs.join(rel);
+        if !is_regular_file(&path) {
             return Err(format!("docs/{rel} is on the Pages publish list but missing (or not a regular file)"));
         }
-        out.insert((*rel).to_owned());
+        entries.insert((*rel).to_owned(), path);
     }
     for dir in SITE_DIRS {
-        collect_files(&docs, &docs.join(dir), &mut out)?;
+        collect_entries(&docs, &docs.join(dir), "", &mut entries)?;
     }
-    for snapshot in snapshot_dirs(&docs.join("manual"))? {
-        let mut files = BTreeSet::new();
-        collect_files(&docs, &docs.join("manual").join(&snapshot), &mut files)?;
-        out.extend(files.into_iter().filter(|rel| !SNAPSHOT_EXCLUDED_FILES.iter().any(|name| rel.rsplit('/').next() == Some(*name))));
+
+    let manual_root = resolve_manual_dir(root, manual_dir)?;
+    let manual_index = manual_root.join("index.html");
+    if !is_regular_file(&manual_index) {
+        return Err(format!("{}/index.html is on the Pages publish list but missing (or not a regular file)", manual_root.display()));
     }
-    let latest_dir = docs.join("manual/latest");
-    if std::fs::symlink_metadata(&latest_dir).is_ok_and(|m| m.file_type().is_dir()) && is_regular_file(&latest_dir.join("manifest.json")) {
-        let mut files = BTreeSet::new();
-        collect_files(&docs, &latest_dir, &mut files)?;
-        out.extend(files.into_iter().filter(|rel| !SNAPSHOT_EXCLUDED_FILES.iter().any(|name| rel.rsplit('/').next() == Some(*name))));
+    entries.insert(String::from("manual/index.html"), manual_index);
+
+    let mut manual_page_count = 0usize;
+    for snapshot in snapshot_dirs(&manual_root)? {
+        let mut snap_entries = BTreeMap::new();
+        collect_entries(&manual_root, &manual_root.join(&snapshot), "manual/", &mut snap_entries)?;
+        for (rel, src) in snap_entries {
+            if !SNAPSHOT_EXCLUDED_FILES.iter().any(|name| rel.rsplit('/').next() == Some(*name)) {
+                manual_page_count += 1;
+                entries.insert(rel, src);
+            }
+        }
     }
-    if let Some(md) = out.iter().find(|rel| rel.ends_with(".md")) {
-        return Err(format!("docs/{md}: Markdown sources are never published on Pages"));
+    let latest_dir = manual_root.join("latest");
+    if is_real_dir(&latest_dir) && is_regular_file(&latest_dir.join("manifest.json")) {
+        let mut latest_entries = BTreeMap::new();
+        collect_entries(&manual_root, &latest_dir, "manual/", &mut latest_entries)?;
+        for (rel, src) in latest_entries {
+            if !SNAPSHOT_EXCLUDED_FILES.iter().any(|name| rel.rsplit('/').next() == Some(*name)) {
+                manual_page_count += 1;
+                entries.insert(rel, src);
+            }
+        }
     }
-    Ok(out.into_iter().collect())
+    if manual_page_count == 0 {
+        return Err(format!("manual directory `{}` contains no snapshot pages (`latest/` or `v<major>.<minor>/`)", manual_root.display()));
+    }
+    if let Some(md) = entries.keys().find(|rel| rel.ends_with(".md")) {
+        return Err(format!("{md}: Markdown sources are never published on Pages"));
+    }
+    Ok(entries.into_iter().map(|(site_rel, source_path)| StagedEntry { site_rel, source_path }).collect())
 }
 
 /// Build the publish list and check that published pages and the sitemap reference only published files.
+#[cfg(test)]
 pub fn check_publish_set(root: &Path) -> Result<Vec<String>, String> {
-    let files = publish_list(root)?;
-    let published: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+    check_publish_set_with_manual(root, None)
+}
+
+/// Build the publish list using `manual_dir` (or default) and verify every local link and sitemap entry.
+pub fn check_publish_set_with_manual(root: &Path, manual_dir: Option<&Path>) -> Result<Vec<String>, String> {
+    Ok(check_publish_entries(root, manual_dir)?.into_iter().map(|e| e.site_rel).collect())
+}
+
+fn check_publish_entries(root: &Path, manual_dir: Option<&Path>) -> Result<Vec<StagedEntry>, String> {
+    let entries = publish_entries(root, manual_dir)?;
+    let published: BTreeSet<&str> = entries.iter().map(|e| e.site_rel.as_str()).collect();
     let docs = root.join("docs");
     let mut problems = Vec::new();
-    for rel in files.iter().filter(|rel| rel.ends_with(".html")) {
-        let html = std::fs::read_to_string(docs.join(rel)).map_err(|e| format!("read docs/{rel}: {e}"))?;
+    for entry in entries.iter().filter(|e| e.site_rel.ends_with(".html")) {
+        let rel = entry.site_rel.as_str();
+        let html = std::fs::read_to_string(&entry.source_path).map_err(|e| format!("read {}: {e}", entry.source_path.display()))?;
         for target in local_references(&html) {
             match resolve(rel, &target) {
                 Some(resolved) if published.contains(resolved.as_str()) => {}
-                Some(resolved) => problems.push(format!("docs/{rel} links to `{target}` (docs/{resolved}), which is not published")),
-                None => problems.push(format!("docs/{rel} links to `{target}`, which leaves the site root")),
+                Some(resolved) => problems.push(format!("{rel} links to `{target}` ({resolved}), which is not published")),
+                None => problems.push(format!("{rel} links to `{target}`, which leaves the site root")),
             }
         }
     }
@@ -135,14 +277,24 @@ pub fn check_publish_set(root: &Path) -> Result<Vec<String>, String> {
             problems.push(format!("docs/sitemap.xml lists `{loc}`, which is not published"));
         }
     }
-    if problems.is_empty() { Ok(files) } else { Err(format!("Pages publish set has {} problem(s):\n  {}", problems.len(), problems.join("\n  "))) }
+    if problems.is_empty() { Ok(entries) } else { Err(format!("Pages publish set has {} problem(s):\n  {}", problems.len(), problems.join("\n  "))) }
 }
 
 /// Copy the checked publish set into `out_dir`, which must be absent or empty and outside `docs/`.
+#[cfg(test)]
 pub fn stage(root: &Path, out_dir: &Path) -> Result<usize, String> {
+    stage_with_manual(root, None, out_dir)
+}
+
+/// Copy the checked publish set (combining `docs/` and `manual_dir`) into `out_dir`.
+pub fn stage_with_manual(root: &Path, manual_dir: Option<&Path>, out_dir: &Path) -> Result<usize, String> {
     let docs = root.join("docs");
     if out_dir.starts_with(&docs) {
         return Err(format!("staging directory {} must be outside docs/", out_dir.display()));
+    }
+    let resolved_manual = resolve_manual_dir(root, manual_dir)?;
+    if out_dir.starts_with(&resolved_manual) {
+        return Err(format!("staging directory {} must be outside manual directory {}", out_dir.display(), resolved_manual.display()));
     }
     if std::fs::symlink_metadata(out_dir).is_ok() {
         let mut entries = std::fs::read_dir(out_dir).map_err(|e| format!("read_dir {}: {e}", out_dir.display()))?;
@@ -150,17 +302,17 @@ pub fn stage(root: &Path, out_dir: &Path) -> Result<usize, String> {
             return Err(format!("staging directory {} must be empty", out_dir.display()));
         }
     }
-    let files = check_publish_set(root)?;
-    for rel in &files {
-        let bytes = std::fs::read(docs.join(rel)).map_err(|e| format!("read docs/{rel}: {e}"))?;
-        let dst = out_dir.join(rel);
+    let entries = check_publish_entries(root, Some(&resolved_manual))?;
+    for entry in &entries {
+        let bytes = std::fs::read(&entry.source_path).map_err(|e| format!("read {}: {e}", entry.source_path.display()))?;
+        let dst = out_dir.join(&entry.site_rel);
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
         write_atomic(&dst, &bytes).map_err(|e| format!("write {}: {e}", dst.display()))?;
     }
     let extra = stage_custom_domain_files(out_dir, SITE_BASE_URL, CUSTOM_DOMAIN)?;
-    Ok(files.len() + extra)
+    Ok(entries.len() + extra)
 }
 
 fn stage_custom_domain_files(out_dir: &Path, site_base_url: &str, custom_domain: Option<&str>) -> Result<usize, String> {
@@ -180,14 +332,18 @@ fn is_regular_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
 }
 
-/// `v<major>.<minor>` release-snapshot directories under `docs/manual/` that carry a `manifest.json`.
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
+}
+
+/// `v<major>.<minor>` release-snapshot directories under a manual root that carry a `manifest.json`.
 fn snapshot_dirs(manual: &Path) -> Result<Vec<String>, String> {
-    if !std::fs::symlink_metadata(manual).is_ok_and(|m| m.file_type().is_dir()) {
+    if !is_real_dir(manual) {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
     for entry in std::fs::read_dir(manual).map_err(|e| format!("read_dir {}: {e}", manual.display()))? {
-        let entry = entry.map_err(|e| format!("dir entry under docs/manual: {e}"))?;
+        let entry = entry.map_err(|e| format!("dir entry under {}: {e}", manual.display()))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_versioned = name
             .strip_prefix('v')
@@ -201,8 +357,8 @@ fn snapshot_dirs(manual: &Path) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Collect regular files below `dir` as `/`-separated paths relative to `docs`; symlinks are refused.
-fn collect_files(docs: &Path, dir: &Path, out: &mut BTreeSet<String>) -> Result<(), String> {
+/// Collect regular files below `dir` as `/`-separated site-relative paths; symlinks are refused.
+fn collect_entries(base: &Path, dir: &Path, site_prefix: &str, out: &mut BTreeMap<String, PathBuf>) -> Result<(), String> {
     for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| format!("dir entry under {}: {e}", dir.display()))?;
         let path = entry.path();
@@ -211,11 +367,11 @@ fn collect_files(docs: &Path, dir: &Path, out: &mut BTreeSet<String>) -> Result<
             return Err(format!("{}: symlinks are never published on Pages", path.display()));
         }
         if file_type.is_dir() {
-            collect_files(docs, &path, out)?;
+            collect_entries(base, &path, site_prefix, out)?;
         } else if file_type.is_file() {
-            let rel = path.strip_prefix(docs).map_err(|e| e.to_string())?;
+            let rel = path.strip_prefix(base).map_err(|e| e.to_string())?;
             let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-            out.insert(parts.join("/"));
+            out.insert(format!("{site_prefix}{}", parts.join("/")), path);
         }
     }
     Ok(())
@@ -306,7 +462,7 @@ mod tests {
         }
     }
 
-    /// A minimal site plus the internal files Pages must not publish.
+    /// A minimal site with generated manual HTML in `target/docs-manual/` plus internal files Pages must not publish.
     fn seed(label: &str) -> TempRoot {
         let root = TempRoot::new(label);
         root.write("docs/index.html", "<a href=\"open-pzfx-files.html#convert\">x</a><a href=\"faq.html\">faq</a><img src=\"images/a.png\"><a href=\"https://github.com/x\">gh</a><a href=\"#top\">t</a><a href=\"mailto:a@b.c\">m</a>");
@@ -316,19 +472,20 @@ mod tests {
         root.write("docs/privacy.html", "<a href=\"index.html\">h</a>");
         root.write("docs/get-started.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/get-started.html\">");
         root.write("docs/troubleshooting.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/troubleshooting.html#known-issues\">");
-        root.write("docs/manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">");
-        root.write("docs/manual/latest/manifest.json", "{}");
-        root.write("docs/manual/latest/index.html", "<a href=\"../../index.html\">home</a><a href=\"registry/formats.html\">r</a>");
-        root.write("docs/manual/latest/files.html", "<link href=\"../../site.css\">");
-        root.write("docs/manual/latest/get-started.html", "gs");
-        root.write("docs/manual/latest/troubleshooting.html", "ts");
-        root.write("docs/manual/latest/registry/formats.html", "<a href=\"../index.html\">up</a>");
-        root.write("docs/manual/v0.1/manifest.json", "{}");
-        root.write("docs/manual/v0.1/index.html", "<a href=\"../../index.html\">home</a><a href=\"registry/formats.html\">r</a>");
-        root.write("docs/manual/v0.1/files.html", "<link href=\"../../site.css\">");
-        root.write("docs/manual/v0.1/get-started.html", "gs");
-        root.write("docs/manual/v0.1/troubleshooting.html", "ts");
-        root.write("docs/manual/v0.1/registry/formats.html", "<a href=\"../index.html\">up</a>");
+        root.write("target/docs-manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">");
+        root.write("target/docs-manual/latest/manifest.json", "{}");
+        root.write("target/docs-manual/latest/index.html", "<a href=\"../../index.html\">home</a><a href=\"registry/formats.html\">r</a>");
+        root.write("target/docs-manual/latest/files.html", "<link href=\"../../site.css\">");
+        root.write("target/docs-manual/latest/get-started.html", "gs");
+        root.write("target/docs-manual/latest/troubleshooting.html", "ts");
+        root.write("target/docs-manual/latest/registry/formats.html", "<a href=\"../index.html\">up</a>");
+        root.write("target/docs-manual/v0.1/manifest.json", "{}");
+        root.write("target/docs-manual/v0.1/index.html", "<a href=\"../../index.html\">home</a><a href=\"registry/formats.html\">r</a>");
+        root.write("target/docs-manual/v0.1/files.html", "<link href=\"../../site.css\">");
+        root.write("target/docs-manual/v0.1/get-started.html", "gs");
+        root.write("target/docs-manual/v0.1/troubleshooting.html", "ts");
+        root.write("target/docs-manual/v0.1/registry/formats.html", "<a href=\"../index.html\">up</a>");
+        root.write("target/docs-manual/scratch/notes.html", "not a release snapshot");
         root.write("docs/site.css", "body{}");
         root.write(
             "docs/404.html",
@@ -344,7 +501,6 @@ mod tests {
         root.write("docs/ROADMAP.md", "internal");
         root.write("docs/audit/report.md", "internal");
         root.write("docs/schemas/preferences.schema.json", "{}");
-        root.write("docs/manual/scratch/notes.html", "not a release snapshot");
         root
     }
 
@@ -396,6 +552,7 @@ mod tests {
 
         assert!(stage(&root.0, &out).unwrap_err().contains("must be empty"));
         assert!(stage(&root.0, &root.0.join("docs/_site")).unwrap_err().contains("outside docs/"));
+        assert!(stage(&root.0, &root.0.join("target/docs-manual/_site")).unwrap_err().contains("outside manual directory"));
 
         let custom_out = root.0.join("_custom");
         std::fs::create_dir_all(&custom_out).unwrap();
@@ -405,11 +562,40 @@ mod tests {
     }
 
     #[test]
+    fn r12_10_stage_supports_explicit_manual_dir_and_fails_closed_when_unbuilt() {
+        let root = seed("explicit-manual");
+        let moved = root.0.join("build/custom-manual");
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(root.0.join("target/docs-manual"), &moved).unwrap();
+
+        assert!(check_publish_set(&root.0).unwrap_err().contains("--build-manual"));
+        let files = check_publish_set_with_manual(&root.0, Some(&moved)).unwrap();
+        assert_eq!(files.len(), 24);
+        assert!(files.contains(&String::from("manual/latest/index.html")));
+        assert!(files.contains(&String::from("manual/v0.1/index.html")));
+
+        let out = root.0.join("_staged");
+        assert_eq!(stage_with_manual(&root.0, Some(&moved), &out).unwrap(), 24);
+        assert!(out.join("manual/index.html").is_file());
+        assert!(out.join("manual/latest/files.html").is_file());
+        assert!(out.join("manual/v0.1/files.html").is_file());
+        assert!(!out.join("manual/scratch").exists());
+        assert!(stage_with_manual(&root.0, Some(&moved), &moved.join("_nested")).unwrap_err().contains("outside manual directory"));
+
+        let parsed = parse_args(&[String::from("--manual-dir"), String::from("build/custom-manual"), String::from("_site")]).unwrap();
+        assert_eq!(parsed.manual_dir, Some(PathBuf::from("build/custom-manual")));
+        assert_eq!(parsed.action, StageAction::Stage(PathBuf::from("_site")));
+        let parsed_eq = parse_args(&[String::from("--check"), String::from("--manual-dir=build/custom-manual")]).unwrap();
+        assert_eq!(parsed_eq.manual_dir, Some(PathBuf::from("build/custom-manual")));
+        assert_eq!(parsed_eq.action, StageAction::Check);
+    }
+
+    #[test]
     fn r12_9_links_to_unpublished_files_fail_the_check() {
         let root = seed("links");
         root.write("docs/privacy.html", "<a href=\"ROADMAP.md\">roadmap</a><a href=\"../outside.html\">up</a>");
         let err = check_publish_set(&root.0).unwrap_err();
-        assert!(err.contains("`ROADMAP.md` (docs/ROADMAP.md), which is not published"), "{err}");
+        assert!(err.contains("`ROADMAP.md` (ROADMAP.md), which is not published"), "{err}");
         assert!(err.contains("`../outside.html`, which leaves the site root"), "{err}");
 
         let root = seed("refresh");

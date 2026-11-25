@@ -18,26 +18,28 @@ pub mod verify;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use curvebook_platform::write_atomic;
 
 use sitemap::{GeneratedSite, assemble_site};
 use template::{SiteMeta, render_release_redirect_index, render_root_redirect_shim};
-use verify::{parse_minor_dir_version, verify_site};
+use verify::{parse_minor_dir_version, verify_manual_build, verify_site};
 
-const USAGE: &str = "usage: cargo xtask docs-site [--check] [--output <dir>] [--release <ver> [--refresh-screenshots]] [--sitemap]";
+const USAGE: &str = "usage: cargo xtask docs-site [--check] [--output <dir>] [--build-manual [<dir>]] [--manual-dir <dir>] [--release <ver> [--refresh-screenshots]] [--sitemap]";
 
 #[derive(Debug, Default)]
 struct CliOptions {
     check: bool,
     output: Option<PathBuf>,
+    build_manual: bool,
+    manual_dir: Option<PathBuf>,
     release: Option<String>,
     refresh_screenshots: bool,
     sitemap: bool,
 }
 
-/// CLI entrypoint for `cargo xtask docs-site [--check] [--output <dir>] [--release <ver> [--refresh-screenshots]] [--sitemap]`.
+/// CLI entrypoint for `cargo xtask docs-site`.
 pub fn run_cli(root: &Path, args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
@@ -47,43 +49,46 @@ pub fn run_cli(root: &Path, args: &[String]) -> Result<(), String> {
     let root = root_buf.as_path();
     let opts = parse_args(args)?;
     if opts.sitemap {
-        if opts.check || opts.output.is_some() || opts.release.is_some() || opts.refresh_screenshots {
+        if opts.check || opts.output.is_some() || opts.build_manual || opts.manual_dir.is_some() || opts.release.is_some() || opts.refresh_screenshots
+        {
             return Err(format!("`--sitemap` cannot be combined with other options\n{USAGE}"));
         }
-        let count = seo::write_sitemap(root)?;
-        seo::write_not_found_page(root)?;
-        llms::write_llms_files(root)?;
-        println!(
-            "docs-site: wrote {} ({count} URLs), {}, {}, and {}",
-            seo::SITEMAP_REL_PATH,
-            seo::NOT_FOUND_REL_PATH,
-            llms::LLMS_TXT_REL_PATH,
-            llms::LLMS_FULL_TXT_REL_PATH
-        );
-        return Ok(());
+        return run_sitemap_sync(root);
     }
     if let Some(ref version) = opts.release {
-        if opts.output.is_some() {
-            return Err(format!("`--release` and `--output` are mutually exclusive\n{USAGE}"));
+        if opts.build_manual {
+            return Err(format!("`--release` and `--build-manual` are mutually exclusive\n{USAGE}"));
+        }
+        if opts.output.is_some() && opts.manual_dir.is_some() {
+            return Err(format!("specify only one of `--output` or `--manual-dir` with `--release`\n{USAGE}"));
         }
         if opts.refresh_screenshots {
             crate::screenshots::run(root, &[])?;
         }
-        return run_release_snapshot(root, version, opts.check);
+        let manual_dir = resolve_opt_path(root, opts.manual_dir.or(opts.output)).unwrap_or_else(|| default_manual_dir(root));
+        return run_release_snapshot(root, version, &manual_dir, opts.check);
     }
     if opts.refresh_screenshots {
         return Err(format!("`--refresh-screenshots` requires `--release <ver>`\n{USAGE}"));
     }
-    let out_dir = opts.output.unwrap_or_else(|| default_output_dir(root));
+    if opts.build_manual {
+        if opts.output.is_some() && opts.manual_dir.is_some() {
+            return Err(format!("specify only one of `--build-manual <dir>`, `--manual-dir <dir>`, or `--output <dir>`\n{USAGE}"));
+        }
+        let manual_dir = resolve_opt_path(root, opts.manual_dir.or(opts.output)).unwrap_or_else(|| default_manual_dir(root));
+        return run_build_manual(root, &manual_dir, opts.check);
+    }
+
+    let custom_output = opts.output.is_some();
+    let out_dir = resolve_opt_path(root, opts.output).unwrap_or_else(|| default_output_dir(root));
     if opts.check {
-        run_check_into(root, &out_dir)
+        let explicit_manual = resolve_opt_path(root, opts.manual_dir);
+        run_check_into(root, &out_dir, explicit_manual.as_deref(), custom_output)
     } else {
-        let meta = SiteMeta {
-            version_label: format!("v{} (local preview)", env!("CARGO_PKG_VERSION")),
-            commit_sha: git_head_sha(root),
-            release_date: git_head_date(root),
-            is_release_snapshot: false,
-        };
+        if opts.manual_dir.is_some() {
+            return Err(format!("`--manual-dir` requires `--check`, `--build-manual`, or `--release`\n{USAGE}"));
+        }
+        let meta = preview_meta(root);
         let site = assemble_site(root, meta)?;
         write_preview_site(root, &out_dir, &site)?;
         println!("docs-site: generated {} HTML pages into {}", site.html_pages.len(), out_dir.display());
@@ -94,7 +99,7 @@ pub fn run_cli(root: &Path, args: &[String]) -> Result<(), String> {
 /// Gate entrypoint called from `cargo xtask ci` (`policy` stage).
 pub fn run_check(root: &Path) -> Result<(), String> {
     let out_dir = default_output_dir(root);
-    run_check_into(root, &out_dir)
+    run_check_into(root, &out_dir, None, false)
 }
 
 fn parse_args(args: &[String]) -> Result<CliOptions, String> {
@@ -108,6 +113,39 @@ fn parse_args(args: &[String]) -> Result<CliOptions, String> {
             opts.sitemap = true;
         } else if arg == "--refresh-screenshots" {
             opts.refresh_screenshots = true;
+        } else if let Some(val) = arg.strip_prefix("--build-manual=") {
+            if val.trim().is_empty() || opts.manual_dir.is_some() {
+                return Err(format!("--build-manual= requires a single directory path\n{USAGE}"));
+            }
+            opts.build_manual = true;
+            opts.manual_dir = Some(PathBuf::from(val));
+        } else if arg == "--build-manual" {
+            opts.build_manual = true;
+            if let Some(next) = args.get(idx + 1)
+                && !next.is_empty()
+                && !next.starts_with('-')
+            {
+                if opts.manual_dir.is_some() {
+                    return Err(format!("duplicate manual directory argument\n{USAGE}"));
+                }
+                opts.manual_dir = Some(PathBuf::from(next));
+                idx += 1;
+            }
+        } else if let Some(val) = arg.strip_prefix("--manual-dir=") {
+            if val.trim().is_empty() || opts.manual_dir.is_some() {
+                return Err(format!("--manual-dir= requires a single directory path\n{USAGE}"));
+            }
+            opts.manual_dir = Some(PathBuf::from(val));
+        } else if arg == "--manual-dir" {
+            idx += 1;
+            let val = args
+                .get(idx)
+                .filter(|v| !v.is_empty() && !v.starts_with('-'))
+                .ok_or_else(|| format!("--manual-dir requires a directory path\n{USAGE}"))?;
+            if opts.manual_dir.is_some() {
+                return Err(format!("duplicate `--manual-dir` argument\n{USAGE}"));
+            }
+            opts.manual_dir = Some(PathBuf::from(val));
         } else if let Some(val) = arg.strip_prefix("--output=") {
             if val.trim().is_empty() {
                 return Err(format!("--output= requires a directory path\n{USAGE}"));
@@ -134,25 +172,96 @@ fn parse_args(args: &[String]) -> Result<CliOptions, String> {
     Ok(opts)
 }
 
+fn resolve_opt_path(root: &Path, opt: Option<PathBuf>) -> Option<PathBuf> {
+    opt.map(|p| if p.is_absolute() { p } else { root.join(p) })
+}
+
 fn default_output_dir(root: &Path) -> PathBuf {
     root.join("target/docs-site")
 }
 
-fn run_check_into(root: &Path, out_dir: &Path) -> Result<(), String> {
-    let meta = SiteMeta {
-        version_label: format!("v{} (local preview)", env!("CARGO_PKG_VERSION")),
+fn default_manual_dir(root: &Path) -> PathBuf {
+    crate::pages_site::default_manual_dir(root)
+}
+
+fn workspace_version(root: &Path) -> String {
+    std::fs::read_to_string(root.join("Cargo.toml"))
+        .ok()
+        .and_then(|toml| crate::version::read_workspace_version(&toml).ok())
+        .unwrap_or_else(|| String::from(env!("CARGO_PKG_VERSION")))
+}
+
+fn preview_meta(root: &Path) -> SiteMeta {
+    SiteMeta {
+        version_label: format!("v{} (local preview)", workspace_version(root)),
         commit_sha: git_head_sha(root),
         release_date: git_head_date(root),
         is_release_snapshot: false,
-    };
-    let site_a = assemble_site(root, meta.clone())?;
-    let site_b = assemble_site(root, meta)?;
+    }
+}
+
+fn reject_committed_manual_dir(root: &Path, manual_dir: &Path) -> Result<(), String> {
+    let forbidden = root.join("docs/manual");
+    if manual_dir == forbidden || manual_dir.starts_with(&forbidden) {
+        return Err(format!(
+            "refusing to write generated manual HTML into `{}` (R12.10 keeps manual HTML in a build directory outside docs/manual/)",
+            manual_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+struct TempDirCleanup(Option<PathBuf>);
+
+impl Drop for TempDirCleanup {
+    fn drop(&mut self) {
+        if let Some(ref dir) = self.0 {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+fn run_sitemap_sync(root: &Path) -> Result<(), String> {
+    let site = assemble_site(root, preview_meta(root))?;
+    let manual_pages: Vec<String> = site.html_pages.keys().cloned().collect();
+    let count = seo::write_sitemap_for_manual_pages(root, "latest", &manual_pages)?;
+    seo::write_not_found_page(root)?;
+    llms::write_llms_files(root)?;
+    println!(
+        "docs-site: wrote {} ({count} URLs), {}, {}, and {}",
+        seo::SITEMAP_REL_PATH,
+        seo::NOT_FOUND_REL_PATH,
+        llms::LLMS_TXT_REL_PATH,
+        llms::LLMS_FULL_TXT_REL_PATH
+    );
+    Ok(())
+}
+
+fn run_check_into(root: &Path, out_dir: &Path, explicit_manual_dir: Option<&Path>, custom_output: bool) -> Result<(), String> {
+    let p_meta = preview_meta(root);
+    let site_a = assemble_site(root, p_meta.clone())?;
+    let site_b = assemble_site(root, p_meta)?;
     if site_a.html_pages != site_b.html_pages {
         return Err(String::from("docs-site generation is non-deterministic across consecutive passes"));
     }
 
     write_preview_site(root, out_dir, &site_a)?;
-    verify_site(root, out_dir, &site_a)?;
+
+    if let Some(manual_dir) = explicit_manual_dir {
+        verify_site(root, out_dir, &site_a, manual_dir, None)?;
+    } else {
+        let (manual_dir, _cleanup) = if custom_output {
+            let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+            let dir = root.join("target").join(format!(".docs-manual-check-{}-{nanos}", std::process::id()));
+            (dir.clone(), TempDirCleanup(Some(dir)))
+        } else {
+            (default_manual_dir(root), TempDirCleanup(None))
+        };
+        let version = workspace_version(root);
+        let manual_site = build_manual_into(root, &version, &manual_dir, "workspace", false, true)?;
+        verify_site(root, out_dir, &site_a, &manual_dir, Some(&manual_site))?;
+    }
+
     println!(
         "docs-site: verified {} pages, 100% registry coverage, zero broken links/fragments, CSP/privacy, determinism, and compliance gates",
         site_a.html_pages.len()
@@ -160,27 +269,93 @@ fn run_check_into(root: &Path, out_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn run_release_snapshot(root: &Path, version_raw: &str, check_after: bool) -> Result<(), String> {
+fn run_build_manual(root: &Path, manual_dir: &Path, check_after: bool) -> Result<(), String> {
+    let version = workspace_version(root);
+    let site = build_manual_into(root, &version, manual_dir, "workspace", false, check_after)?;
+    if check_after {
+        verify_manual_build(root, manual_dir, &site)?;
+    }
+    println!("docs-site: built manual HTML v{version} ({} pages) into {}", site.html_pages.len(), manual_dir.display());
+    Ok(())
+}
+
+fn run_release_snapshot(root: &Path, version_raw: &str, manual_dir: &Path, check_after: bool) -> Result<(), String> {
+    let clean_ver = version_raw.trim().trim_start_matches('v');
+    let site = build_manual_into(root, clean_ver, manual_dir, "release", true, check_after)?;
+    let ver_label = format!("v{clean_ver}");
+
+    let get_started_target = "manual/latest/get-started.html";
+    let get_started_shim = render_root_redirect_shim(
+        "Get Started & Installation",
+        "Redirecting to CurveBook Get Started & Installation in the reference manual.",
+        get_started_target,
+        &ver_label,
+    );
+    write_atomic(&root.join("docs/get-started.html"), get_started_shim.as_bytes()).map_err(|e| format!("write docs/get-started.html: {e}"))?;
+
+    let troubleshooting_target = "manual/latest/troubleshooting.html#known-issues";
+    let troubleshooting_shim = render_root_redirect_shim(
+        "Troubleshooting & Known Issues",
+        "Redirecting to CurveBook Troubleshooting & Known Issues in the reference manual.",
+        troubleshooting_target,
+        &ver_label,
+    );
+    write_atomic(&root.join("docs/troubleshooting.html"), troubleshooting_shim.as_bytes())
+        .map_err(|e| format!("write docs/troubleshooting.html: {e}"))?;
+    seo::write_sitemap_with_manual(root, Some(manual_dir))?;
+    seo::write_not_found_page(root)?;
+    llms::write_llms_files(root)?;
+
+    if check_after {
+        verify_manual_build(root, manual_dir, &site)?;
+    }
+    println!(
+        "docs-site: wrote release manual v{clean_ver} ({} pages) into {} and refreshed committed root metadata",
+        site.html_pages.len(),
+        manual_dir.display()
+    );
+    Ok(())
+}
+
+fn build_manual_into(
+    root: &Path,
+    version_raw: &str,
+    manual_dir: &Path,
+    source_kind: &str,
+    require_git_commit: bool,
+    check_determinism: bool,
+) -> Result<GeneratedSite, String> {
+    reject_committed_manual_dir(root, manual_dir)?;
     let clean_ver = version_raw.trim().trim_start_matches('v');
     let minor_dir = format_minor_dir(clean_ver)?;
-    let commit = git_head_sha(root).ok_or_else(|| String::from("cannot determine git HEAD commit SHA for --release manifest"))?;
+    let commit = git_head_sha(root);
+    if require_git_commit && commit.is_none() {
+        return Err(String::from("cannot determine git HEAD commit SHA for --release manifest"));
+    }
     let release_date = git_head_date(root);
 
     let meta = SiteMeta {
         version_label: format!("v{clean_ver}"),
-        commit_sha: Some(commit.clone()),
+        commit_sha: commit.clone(),
         release_date: release_date.clone(),
         is_release_snapshot: true,
     };
-    let site = assemble_site(root, meta)?;
+    let site = assemble_site(root, meta.clone())?;
+    if check_determinism {
+        let second = assemble_site(root, meta)?;
+        if site.html_pages != second.html_pages {
+            return Err(String::from("docs-site manual generation is non-deterministic across consecutive passes"));
+        }
+    }
 
-    let snap_dir = root.join("docs/manual").join(&minor_dir);
+    let snap_dir = manual_dir.join(&minor_dir);
     write_html_tree(&snap_dir, &site)?;
 
     let manifest = serde_json::json!({
         "schema": "curvebook.docs.manifest.v1",
         "version": clean_ver,
         "minor_dir": minor_dir,
+        "source": source_kind,
         "commit": commit,
         "release_date": release_date,
         "page_count": site.html_pages.len(),
@@ -204,44 +379,18 @@ fn run_release_snapshot(root: &Path, version_raw: &str, check_after: bool) -> Re
     let manifest_path = snap_dir.join("manifest.json");
     write_atomic(&manifest_path, manifest_bytes.as_bytes()).map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
 
-    let latest_dir = root.join("docs/manual/latest");
+    let latest_dir = manual_dir.join("latest");
     write_html_tree(&latest_dir, &site)?;
     let latest_manifest_path = latest_dir.join("manifest.json");
     write_atomic(&latest_manifest_path, manifest_bytes.as_bytes()).map_err(|e| format!("write {}: {e}", latest_manifest_path.display()))?;
 
-    let versions = collect_snapshot_dirs(&root.join("docs/manual"))?;
+    let versions = collect_snapshot_dirs(manual_dir)?;
     let ver_label = format!("v{clean_ver}");
     let redirect_html = render_release_redirect_index("latest", &ver_label, &versions);
-    let redirect_path = root.join("docs/manual/index.html");
-    write_atomic(&redirect_path, redirect_html.as_bytes()).map_err(|e| format!("write docs/manual/index.html: {e}"))?;
+    let redirect_path = manual_dir.join("index.html");
+    write_atomic(&redirect_path, redirect_html.as_bytes()).map_err(|e| format!("write {}: {e}", redirect_path.display()))?;
 
-    let get_started_target = "manual/latest/get-started.html";
-    let get_started_shim = render_root_redirect_shim(
-        "Get Started & Installation",
-        "Redirecting to CurveBook Get Started & Installation in the reference manual.",
-        get_started_target,
-        &ver_label,
-    );
-    write_atomic(&root.join("docs/get-started.html"), get_started_shim.as_bytes()).map_err(|e| format!("write docs/get-started.html: {e}"))?;
-
-    let troubleshooting_target = "manual/latest/troubleshooting.html#known-issues";
-    let troubleshooting_shim = render_root_redirect_shim(
-        "Troubleshooting & Known Issues",
-        "Redirecting to CurveBook Troubleshooting & Known Issues in the reference manual.",
-        troubleshooting_target,
-        &ver_label,
-    );
-    write_atomic(&root.join("docs/troubleshooting.html"), troubleshooting_shim.as_bytes())
-        .map_err(|e| format!("write docs/troubleshooting.html: {e}"))?;
-    seo::write_sitemap(root)?;
-    seo::write_not_found_page(root)?;
-    llms::write_llms_files(root)?;
-
-    if check_after {
-        verify_site(root, &snap_dir, &site)?;
-    }
-    println!("docs-site: wrote release snapshot v{clean_ver} ({} pages) into {}", site.html_pages.len(), snap_dir.display());
-    Ok(())
+    Ok(site)
 }
 
 /// Convert `"0.1.0-alpha.2"` or `"1.2"` into `"v0.1"` / `"v1.2"`.

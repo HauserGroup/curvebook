@@ -202,7 +202,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run policy stage
-        run: cargo run --locked -p xtask -- ci policy
+        run: cargo run --locked -p xtask --features docs-site -- ci policy
 
   gate:
     # Keep the existing required-check name while requiring every stage to succeed.

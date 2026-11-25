@@ -80,6 +80,6 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 | `release/` | Release and website procedures |
 | `audit/` | The reusable code-audit playbook |
 | `history/` | Frozen records (see above) |
-| `schemas/`, `images/`, `manual/` | Generated schemas, attributed screenshots, and documentation-site snapshots |
+| `schemas/`, `images/` | Generated schemas and attributed screenshots (manual HTML is generated in CI into `target/docs-manual/` by `.github/workflows/pages.yml`) |
 
 Add new guides to this index and update every repository link when moving a document. Regenerate command references and schemas through their `cargo xtask` commands.

@@ -17,9 +17,30 @@ struct PageFacts {
     meta_descriptions: Vec<String>,
 }
 
-/// Verify all generated pages, links, fragments, CSP/privacy invariants, registry coverage,
-/// snapshot manifests, and security/brand/cleanroom/asset scanners.
-pub fn verify_site(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Result<(), String> {
+/// Verify generated preview pages, optional generated manual pages, snapshot manifests in
+/// `manual_dir`, committed root pages, search metadata, Pages publish set, and hygiene scanners.
+pub fn verify_site(
+    root: &Path,
+    preview_out_dir: &Path,
+    preview_site: &GeneratedSite,
+    manual_dir: &Path,
+    manual_site: Option<&GeneratedSite>,
+) -> Result<(), String> {
+    verify_generated_pages(root, preview_out_dir, preview_site)?;
+    run_hygiene_scanners(root, preview_out_dir, false)?;
+    if let Some(site) = manual_site {
+        verify_generated_pages(root, &manual_dir.join("latest"), site)?;
+    }
+    verify_workspace_and_manual(root, manual_dir)
+}
+
+/// Verify a generated deployable manual tree in `manual_dir` (CI `--build-manual --check` or `--release --check`).
+pub fn verify_manual_build(root: &Path, manual_dir: &Path, manual_site: &GeneratedSite) -> Result<(), String> {
+    verify_generated_pages(root, &manual_dir.join("latest"), manual_site)?;
+    verify_workspace_and_manual(root, manual_dir)
+}
+
+fn verify_generated_pages(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Result<(), String> {
     check_exclusions(site)?;
 
     let mut facts: BTreeMap<String, PageFacts> = BTreeMap::new();
@@ -30,13 +51,16 @@ pub fn verify_site(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Result<
 
     check_unique_meta_descriptions(facts.iter().map(|(k, v)| (k.as_str(), v)))?;
     check_internal_links_and_fragments(root, out_dir, site, &facts)?;
-    check_registry_coverage(&facts, site)?;
-    check_committed_snapshots(root)?;
-    check_root_pages(root)?;
-    super::seo::check_search_metadata(root)?;
-    crate::pages_site::check_publish_set(root)?;
-    run_hygiene_scanners(root, out_dir)?;
-    Ok(())
+    check_registry_coverage(&facts, site)
+}
+
+fn verify_workspace_and_manual(root: &Path, manual_dir: &Path) -> Result<(), String> {
+    check_no_committed_manual_html(root)?;
+    check_manual_snapshots(root, manual_dir)?;
+    check_root_pages(root, manual_dir)?;
+    super::seo::check_search_metadata_with_manual(root, Some(manual_dir))?;
+    crate::pages_site::check_publish_set_with_manual(root, Some(manual_dir))?;
+    run_hygiene_scanners(root, manual_dir, true)
 }
 
 fn check_unique_meta_descriptions<'a>(pages: impl IntoIterator<Item = (&'a str, &'a PageFacts)>) -> Result<(), String> {
@@ -644,16 +668,56 @@ pub fn parse_minor_dir_version(name: &str) -> Option<(u64, u64)> {
     Some((maj.parse().ok()?, min.parse().ok()?))
 }
 
-/// Check ALL committed release snapshots under `docs/manual/v*/manifest.json`.
-pub fn check_committed_snapshots(root: &Path) -> Result<(), String> {
+/// Reject any generated `.html` files lingering under `docs/manual/` (`R12.10`).
+pub fn check_no_committed_manual_html(root: &Path) -> Result<(), String> {
     let manual_dir = root.join("docs/manual");
-    if !std::fs::symlink_metadata(&manual_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
+    if !std::fs::symlink_metadata(&manual_dir).is_ok_and(|m| m.file_type().is_dir()) {
         return Ok(());
     }
-    let entries = std::fs::read_dir(&manual_dir).map_err(|e| format!("read_dir {}: {e}", manual_dir.display()))?;
+    let mut html_files = Vec::new();
+    collect_html_rel_paths(&manual_dir, &manual_dir, &mut html_files)?;
+    if html_files.is_empty() {
+        return Ok(());
+    }
+    html_files.sort();
+    let preview: Vec<&str> = html_files.iter().take(5).map(String::as_str).collect();
+    Err(format!(
+        "docs/manual/ contains {} HTML file(s) (e.g. {}); manual HTML is generated into a build directory in CI (R12.10) and must not be committed under docs/manual/",
+        html_files.len(),
+        preview.join(", ")
+    ))
+}
+
+fn collect_html_rel_paths(base: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("dir entry under {}: {e}", dir.display()))?;
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if ft.is_dir() {
+            collect_html_rel_paths(base, &path, out)?;
+        } else if ft.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm")) {
+            let rel = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            out.push(rel);
+        }
+    }
+    Ok(())
+}
+
+/// Check ALL generated manual snapshots under `<manual_dir>/v*/manifest.json`, `<manual_dir>/latest/manifest.json`,
+/// and `<manual_dir>/index.html`.
+pub fn check_manual_snapshots(root: &Path, manual_dir: &Path) -> Result<(), String> {
+    if !std::fs::symlink_metadata(manual_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
+        return Err(format!("manual build directory `{}` does not exist (or is not a regular directory)", manual_dir.display()));
+    }
+    let entries = std::fs::read_dir(manual_dir).map_err(|e| format!("read_dir {}: {e}", manual_dir.display()))?;
     let mut snapshots: Vec<((u64, u64), String)> = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|e| format!("dir entry under docs/manual: {e}"))?;
+        let entry = entry.map_err(|e| format!("dir entry under {}: {e}", manual_dir.display()))?;
         let Ok(ft) = entry.file_type() else {
             continue;
         };
@@ -669,7 +733,7 @@ pub fn check_committed_snapshots(root: &Path) -> Result<(), String> {
     }
     snapshots.sort_by_key(|(v, _)| *v);
     let Some((_, newest_dir)) = snapshots.last() else {
-        return Ok(());
+        return Err(format!("manual build directory `{}` contains no `v<major>.<minor>/manifest.json` snapshot", manual_dir.display()));
     };
 
     for (_, snap_dir) in &snapshots {
@@ -679,21 +743,29 @@ pub fn check_committed_snapshots(root: &Path) -> Result<(), String> {
 
         let version =
             manifest.get("version").and_then(serde_json::Value::as_str).ok_or_else(|| format!("{}: missing `version`", manifest_path.display()))?;
-        let commit =
-            manifest.get("commit").and_then(serde_json::Value::as_str).ok_or_else(|| format!("{}: missing `commit`", manifest_path.display()))?;
-        if commit.len() != 40 || !commit.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-            return Err(format!("{}: `commit` `{commit}` must be a 40-hex SHA", manifest_path.display()));
-        }
-
-        // If a release tag for `version` already exists in git, verify the manifest commit matches the tag commit.
-        for tag_candidate in [format!("v{version}"), version.to_owned()] {
-            if let Some(tag_sha) = resolve_git_tag_commit(root, &tag_candidate)?
-                && tag_sha != commit
-            {
-                return Err(format!(
-                    "{}: manifest commit `{commit}` does not match release tag `{tag_candidate}` commit `{tag_sha}`",
-                    manifest_path.display()
-                ));
+        let is_workspace_build = manifest.get("source").and_then(serde_json::Value::as_str) == Some("workspace");
+        let commit_val = manifest.get("commit");
+        let commit = match commit_val {
+            Some(serde_json::Value::String(s)) => Some(s.as_str()),
+            Some(serde_json::Value::Null) | None if is_workspace_build => None,
+            _ => return Err(format!("{}: missing `commit`", manifest_path.display())),
+        };
+        if let Some(sha) = commit {
+            if sha.len() != 40 || !sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+                return Err(format!("{}: `commit` `{sha}` must be a 40-hex SHA", manifest_path.display()));
+            }
+            // For frozen release snapshots, verify the manifest commit matches any matching release tag.
+            if !is_workspace_build {
+                for tag_candidate in [format!("v{version}"), version.to_owned()] {
+                    if let Some(tag_sha) = resolve_git_tag_commit(root, &tag_candidate)?
+                        && tag_sha != sha
+                    {
+                        return Err(format!(
+                            "{}: manifest commit `{sha}` does not match release tag `{tag_candidate}` commit `{tag_sha}`",
+                            manifest_path.display()
+                        ));
+                    }
+                }
             }
         }
     }
@@ -704,27 +776,34 @@ pub fn check_committed_snapshots(root: &Path) -> Result<(), String> {
         let newest_manifest_path = manual_dir.join(newest_dir).join("manifest.json");
         let newest_raw = std::fs::read_to_string(&newest_manifest_path).map_err(|e| format!("read {}: {e}", newest_manifest_path.display()))?;
         if latest_raw != newest_raw {
-            return Err(format!("docs/manual/latest/manifest.json does not match newest snapshot docs/manual/{newest_dir}/manifest.json"));
+            return Err(format!("{} does not match newest snapshot {}", latest_manifest_path.display(), newest_manifest_path.display()));
         }
         String::from("latest/index.html")
     } else {
         format!("{newest_dir}/index.html")
     };
 
-    let index_html = std::fs::read_to_string(manual_dir.join("index.html")).map_err(|e| format!("read docs/manual/index.html: {e}"))?;
+    let index_path = manual_dir.join("index.html");
+    let index_html = std::fs::read_to_string(&index_path).map_err(|e| format!("read {}: {e}", index_path.display()))?;
     if !index_html.contains("http-equiv=\"refresh\"") || !index_html.contains(&expected_refresh) {
-        return Err(format!("docs/manual/index.html must redirect via meta-refresh to `{expected_refresh}`"));
+        return Err(format!("{} must redirect via meta-refresh to `{expected_refresh}`", index_path.display()));
     }
     Ok(())
 }
 
-/// Audit root GitHub Pages HTML files (`docs/index.html`, `docs/privacy.html`, `docs/manual/index.html`, the other
-/// hand-written `seo::LANDING_PAGES`,
-/// and any existing root redirect shims `docs/get-started.html`, `docs/troubleshooting.html`) for
+struct RootPageDirs<'a> {
+    docs_dir: &'a Path,
+    manual_dir: &'a Path,
+}
+
+/// Audit root GitHub Pages HTML files (`docs/index.html`, `docs/privacy.html`, the other
+/// hand-written `seo::LANDING_PAGES`, generated `<manual_dir>/index.html`, and any existing root
+/// redirect shims `docs/get-started.html`, `docs/troubleshooting.html`, `docs/404.html`) for
 /// strict CSP, `no-referrer`, accessibility structure, zero scripts/forms/inline styles/external
-/// assets, and valid local relative targets under `docs/`.
-pub fn check_root_pages(root: &Path) -> Result<(), String> {
+/// assets, and valid local relative targets resolving into `docs/` or `manual_dir`.
+pub fn check_root_pages(root: &Path, manual_dir: &Path) -> Result<(), String> {
     let docs_dir = root.join("docs");
+    let dirs = RootPageDirs { docs_dir: &docs_dir, manual_dir };
     let required = ["index.html", "privacy.html", "manual/index.html"];
     let mut pages_to_audit: Vec<&str> = required.to_vec();
     let optional =
@@ -738,8 +817,8 @@ pub fn check_root_pages(root: &Path) -> Result<(), String> {
 
     let mut audited: BTreeMap<String, PageFacts> = BTreeMap::new();
     for rel in pages_to_audit {
-        let full = docs_dir.join(rel);
-        let html = std::fs::read_to_string(&full).map_err(|e| format!("read docs/{rel}: {e}"))?;
+        let full = if let Some(manual_rel) = rel.strip_prefix("manual/") { manual_dir.join(manual_rel) } else { docs_dir.join(rel) };
+        let html = std::fs::read_to_string(&full).map_err(|e| format!("read {}: {e}", full.display()))?;
         let facts = audit_single_html(&format!("docs/{rel}"), &html)?;
         audited.insert(rel.to_owned(), facts);
     }
@@ -752,26 +831,26 @@ pub fn check_root_pages(root: &Path) -> Result<(), String> {
             if is_external_url(raw_href) || is_mailto_url(raw_href) {
                 continue;
             }
-            verify_docs_relative_target(&docs_dir, rel, raw_href, facts, &audited, &mut extra_html_ids)?;
+            verify_docs_relative_target(&dirs, rel, raw_href, facts, &audited, &mut extra_html_ids)?;
         }
         for raw_src in &facts.asset_srcs {
             if is_external_url(raw_src) || is_forbidden_uri_scheme(raw_src) {
                 return Err(format!("docs/{rel}: external or forbidden asset URL `{raw_src}`"));
             }
-            verify_docs_relative_target(&docs_dir, rel, raw_src, facts, &audited, &mut extra_html_ids)?;
+            verify_docs_relative_target(&dirs, rel, raw_src, facts, &audited, &mut extra_html_ids)?;
         }
         for raw_refresh in &facts.meta_refresh_targets {
             if is_external_url(raw_refresh) || is_forbidden_uri_scheme(raw_refresh) {
                 return Err(format!("docs/{rel}: external or forbidden `<meta http-equiv=\"refresh\">` target `{raw_refresh}`"));
             }
-            verify_docs_relative_target(&docs_dir, rel, raw_refresh, facts, &audited, &mut extra_html_ids)?;
+            verify_docs_relative_target(&dirs, rel, raw_refresh, facts, &audited, &mut extra_html_ids)?;
         }
     }
     Ok(())
 }
 
 fn verify_docs_relative_target(
-    docs_dir: &Path,
+    dirs: &RootPageDirs<'_>,
     from_rel: &str,
     raw_ref: &str,
     from_facts: &PageFacts,
@@ -806,9 +885,10 @@ fn verify_docs_relative_target(
     if resolved.starts_with("..") {
         return Err(format!("docs/{from_rel}: relative target `{raw_ref}` escapes `docs/` root (`{resolved}`)"));
     }
-    let target_path = docs_dir.join(&resolved);
+    let target_path =
+        if let Some(manual_rel) = resolved.strip_prefix("manual/") { dirs.manual_dir.join(manual_rel) } else { dirs.docs_dir.join(&resolved) };
     if !std::fs::symlink_metadata(&target_path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
-        return Err(format!("docs/{from_rel}: broken relative target `{raw_ref}` (missing `docs/{resolved}`)"));
+        return Err(format!("docs/{from_rel}: broken relative target `{raw_ref}` (missing `{}`)", target_path.display()));
     }
 
     if let Some(frag) = frag_part
@@ -822,7 +902,7 @@ fn verify_docs_relative_target(
             return Ok(());
         }
         if !extra_html_ids.contains_key(&resolved) {
-            let target_html = std::fs::read_to_string(&target_path).map_err(|e| format!("read docs/{resolved}: {e}"))?;
+            let target_html = std::fs::read_to_string(&target_path).map_err(|e| format!("read {}: {e}", target_path.display()))?;
             let mut target_facts = PageFacts::default();
             scan_html_tags(&format!("docs/{resolved}"), &target_html, &mut target_facts)?;
             extra_html_ids.insert(resolved.clone(), target_facts.ids);
@@ -830,7 +910,7 @@ fn verify_docs_relative_target(
         if let Some(ids) = extra_html_ids.get(&resolved)
             && !ids.contains(frag)
         {
-            return Err(format!("docs/{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `docs/{resolved}`)"));
+            return Err(format!("docs/{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `{resolved}`)"));
         }
     }
     Ok(())
@@ -852,8 +932,8 @@ fn resolve_git_tag_commit(root: &Path, tag: &str) -> Result<Option<String>, Stri
     if sha.is_empty() { Ok(None) } else { Ok(Some(sha)) }
 }
 
-fn run_hygiene_scanners(root: &Path, out_dir: &Path) -> Result<(), String> {
-    let brand_hits = crate::brands::check_docs_site_dir(out_dir)?;
+fn run_hygiene_scanners(root: &Path, out_dir: &Path, is_manual_build_dir: bool) -> Result<(), String> {
+    let brand_hits = if is_manual_build_dir { crate::brands::check_manual_build_dir(out_dir)? } else { crate::brands::check_docs_site_dir(out_dir)? };
     if !brand_hits.is_empty() {
         let preview: Vec<String> = brand_hits.iter().take(20).map(|h| format!("{}:{}: `{}`", h.path, h.line, h.brand)).collect();
         return Err(format!("brands scanner found {} violation(s) in generated docs-site: {}", brand_hits.len(), preview.join("; ")));
@@ -1043,7 +1123,7 @@ mod tests {
 
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         let dir = std::env::temp_dir().join(format!("cb-docs-snapshots-{}-{nanos}", std::process::id()));
-        let manual = dir.join("docs/manual");
+        let manual = dir.join("target/docs-manual");
         std::fs::create_dir_all(manual.join("v0.1")).unwrap();
         std::fs::create_dir_all(manual.join("v0.2")).unwrap();
         std::fs::write(manual.join("v0.1/manifest.json"), "{\"version\":\"0.1.0\",\"commit\":\"badsha\"}\n").unwrap();
@@ -1051,7 +1131,7 @@ mod tests {
             .unwrap();
         std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=v0.2/index.html\">").unwrap();
 
-        let err = check_committed_snapshots(&dir).unwrap_err();
+        let err = check_manual_snapshots(&dir, &manual).unwrap_err();
         assert!(err.contains("v0.1"), "expected older corrupted v0.1 snapshot to fail, got {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1169,12 +1249,14 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         let code_tex = long_page.replace("<p>Body.</p>", "<p><code>\\frac{1}{2}</code> and <code>[!NOTE]</code></p>");
         assert!(audit_single_html("analyses.html", &code_tex).is_ok());
 
-        // Root redirect shim passes audit_single_html and check_root_pages.
+        // Root redirect shim passes audit_single_html and check_root_pages against a separate manual build dir.
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         let root_dir = std::env::temp_dir().join(format!("cb-docs-root-pages-{}-{nanos}", std::process::id()));
         let docs = root_dir.join("docs");
+        let manual = root_dir.join("target/docs-manual");
         std::fs::create_dir_all(docs.join("images")).unwrap();
-        std::fs::create_dir_all(docs.join("manual/v0.1")).unwrap();
+        std::fs::create_dir_all(manual.join("v0.1")).unwrap();
+        std::fs::create_dir_all(manual.join("latest")).unwrap();
         std::fs::write(docs.join("site.css"), "body {}\n").unwrap();
         std::fs::write(docs.join("images/curvebook.png"), b"png").unwrap();
 
@@ -1190,29 +1272,33 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
             )
         };
         std::fs::write(docs.join("index.html"), base_root_html("Home", "<a href=\"privacy.html\">P</a><a href=\"manual/index.html\">M</a>")).unwrap();
+        std::fs::write(docs.join("open-pzfx-files.html"), base_root_html("Open files", "<a href=\"index.html\">H</a>")).unwrap();
+        std::fs::write(docs.join("linux.html"), base_root_html("Linux", "<a href=\"index.html\">H</a>")).unwrap();
+        std::fs::write(docs.join("faq.html"), base_root_html("FAQ", "<a href=\"index.html\">H</a>")).unwrap();
         std::fs::write(docs.join("privacy.html"), base_root_html("Privacy", "<a href=\"index.html\">H</a>")).unwrap();
         std::fs::write(
-            docs.join("manual/index.html"),
+            manual.join("index.html"),
             format!(
                 "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"description\" content=\"Manual redirect description\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\"><title>Manual</title><link rel=\"stylesheet\" href=\"../site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>Manual</h1><a href=\"v0.1/index.html\">v0.1</a></main></body></html>"
             ),
         )
         .unwrap();
-        std::fs::write(docs.join("manual/v0.1/index.html"), "<main id=\"main\"><h1>Manual</h1></main>").unwrap();
-        std::fs::write(docs.join("manual/v0.1/get-started.html"), "<main id=\"main\"><h1>GS</h1></main>").unwrap();
-        std::fs::write(docs.join("manual/v0.1/troubleshooting.html"), "<main id=\"main\"><h1>TS</h1><h2 id=\"known-issues\">KI</h2></main>").unwrap();
+        std::fs::write(manual.join("latest/index.html"), "<main id=\"main\"><h1>Manual Latest</h1></main>").unwrap();
+        std::fs::write(manual.join("v0.1/index.html"), "<main id=\"main\"><h1>Manual</h1></main>").unwrap();
+        std::fs::write(manual.join("v0.1/get-started.html"), "<main id=\"main\"><h1>GS</h1></main>").unwrap();
+        std::fs::write(manual.join("v0.1/troubleshooting.html"), "<main id=\"main\"><h1>TS</h1><h2 id=\"known-issues\">KI</h2></main>").unwrap();
         std::fs::write(docs.join("get-started.html"), &shim_gs).unwrap();
         std::fs::write(docs.join("troubleshooting.html"), &shim_ts).unwrap();
 
-        assert!(check_root_pages(&root_dir).is_ok());
+        assert_eq!(check_root_pages(&root_dir, &manual), Ok(()));
         // Duplicate meta description across root pages must fail check_root_pages.
         let dup_privacy = base_root_html("Privacy", "<a href=\"index.html\">H</a>").replace("Privacy page description", "Home page description");
         std::fs::write(docs.join("privacy.html"), dup_privacy).unwrap();
-        assert!(check_root_pages(&root_dir).unwrap_err().contains("duplicate `<meta name=\"description\">`"));
+        assert!(check_root_pages(&root_dir, &manual).unwrap_err().contains("duplicate `<meta name=\"description\">`"));
         std::fs::write(docs.join("privacy.html"), base_root_html("Privacy", "<a href=\"index.html\">H</a>")).unwrap();
         // Breaking a local link inside docs/index.html must fail check_root_pages.
         std::fs::write(docs.join("index.html"), base_root_html("Home", "<a href=\"missing.html\">Broken</a>")).unwrap();
-        assert!(check_root_pages(&root_dir).unwrap_err().contains("missing.html"));
+        assert!(check_root_pages(&root_dir, &manual).unwrap_err().contains("missing.html"));
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 
@@ -1398,7 +1484,9 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         let root_dir = std::env::temp_dir().join(format!("cb-docs-da-03-10-{}-{nanos}", std::process::id()));
         let docs = root_dir.join("docs");
-        std::fs::create_dir_all(docs.join("manual")).unwrap();
+        let manual = root_dir.join("target/docs-manual");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::create_dir_all(&manual).unwrap();
         let root_html = |extra: &str| {
             format!(
                 "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\">{extra}<title>T</title></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>T</h1></main></body></html>"
@@ -1406,8 +1494,8 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         };
         std::fs::write(docs.join("index.html"), root_html("<meta http-equiv=\"refresh\" content=\"0; url=https://evil.example/\">")).unwrap();
         std::fs::write(docs.join("privacy.html"), root_html("")).unwrap();
-        std::fs::write(docs.join("manual/index.html"), root_html("")).unwrap();
-        assert!(check_root_pages(&root_dir).is_err());
+        std::fs::write(manual.join("index.html"), root_html("")).unwrap();
+        assert!(check_root_pages(&root_dir, &manual).is_err());
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 
@@ -1441,24 +1529,31 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
 
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         let dir = std::env::temp_dir().join(format!("cb-docs-latest-{}-{nanos}", std::process::id()));
-        let manual = dir.join("docs/manual");
+        let manual = dir.join("target/docs-manual");
         std::fs::create_dir_all(manual.join("v0.1")).unwrap();
         std::fs::create_dir_all(manual.join("latest")).unwrap();
         let manifest = "{\"version\":\"0.1.0\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\"}\n";
         std::fs::write(manual.join("v0.1/manifest.json"), manifest).unwrap();
         std::fs::write(manual.join("latest/manifest.json"), manifest).unwrap();
         std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">").unwrap();
-        assert!(check_committed_snapshots(&dir).is_ok());
+        assert!(check_no_committed_manual_html(&dir).is_ok());
+        assert!(check_manual_snapshots(&dir, &manual).is_ok());
+
+        // Committed HTML under docs/manual/ must be rejected (R12.10).
+        std::fs::create_dir_all(dir.join("docs/manual/latest")).unwrap();
+        std::fs::write(dir.join("docs/manual/latest/index.html"), "<html></html>").unwrap();
+        assert!(check_no_committed_manual_html(&dir).unwrap_err().contains("must not be committed under docs/manual/"));
+        let _ = std::fs::remove_dir_all(dir.join("docs/manual"));
 
         // Redirect pointing to v0.1 instead of latest must fail when latest/manifest.json exists.
         std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\">").unwrap();
-        assert!(check_committed_snapshots(&dir).unwrap_err().contains("latest/index.html"));
+        assert!(check_manual_snapshots(&dir, &manual).unwrap_err().contains("latest/index.html"));
 
         // Mismatched latest/manifest.json must fail.
         std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">").unwrap();
         std::fs::write(manual.join("latest/manifest.json"), "{\"version\":\"0.1.0\",\"commit\":\"ffffffffffffffffffffffffffffffffffffffff\"}\n")
             .unwrap();
-        assert!(check_committed_snapshots(&dir).unwrap_err().contains("latest/manifest.json"));
+        assert!(check_manual_snapshots(&dir, &manual).unwrap_err().contains("latest/manifest.json"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

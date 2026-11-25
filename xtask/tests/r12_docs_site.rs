@@ -92,7 +92,7 @@ fn collect_docs_subset(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String
             if !matches!(name, "STATUS.md" | "gui-workflows.md") {
                 out.push(Path::new("docs").join(name));
             }
-        } else if p.is_dir() && matches!(name, "images" | "schemas" | "release" | "manual" | "reference") {
+        } else if p.is_dir() && matches!(name, "images" | "schemas" | "release" | "reference") {
             collect_rel_files_recursive(root, &p, out)?;
         }
     }
@@ -486,6 +486,7 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
     let head_out = Command::new("git").current_dir(sim_root).args(["rev-parse", "HEAD"]).output().map_err(|e| e.to_string())?;
     let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_owned();
 
+    let manual_out = sim_root.join("target/docs-manual");
     let rel_res = run_xtask(sim_root, &["docs-site", "--release", "0.1.0-alpha.2", "--check"])?;
     assert!(
         rel_res.status.success(),
@@ -493,17 +494,24 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
         String::from_utf8_lossy(&rel_res.stdout),
         String::from_utf8_lossy(&rel_res.stderr)
     );
+    assert!(!sim_root.join("docs/manual").exists(), "--release must write manual HTML into target/docs-manual, never docs/manual");
 
-    let snap_manifest = sim_root.join("docs/manual/v0.1/manifest.json");
+    let manifest_text = assert_release_snapshot_outputs(sim_root, &manual_out, &head_sha)?;
+    assert_release_negative_gates_and_ci_stage(sim_root, &manual_out, &head_sha, &manifest_text)
+}
+
+fn assert_release_snapshot_outputs(sim_root: &Path, manual_out: &Path, head_sha: &str) -> Result<String, String> {
+    let snap_manifest = manual_out.join("v0.1/manifest.json");
     let manifest_text = fs::read_to_string(&snap_manifest).map_err(|e| e.to_string())?;
     let manifest_json: serde_json::Value = serde_json::from_str(&manifest_text).map_err(|e| e.to_string())?;
     assert_eq!(manifest_json["commit"], serde_json::json!(head_sha));
     assert_eq!(manifest_json["minor_dir"], serde_json::json!("v0.1"));
+    assert_eq!(manifest_json["source"], serde_json::json!("release"));
 
-    let latest_manifest_text = fs::read_to_string(sim_root.join("docs/manual/latest/manifest.json")).map_err(|e| e.to_string())?;
+    let latest_manifest_text = fs::read_to_string(manual_out.join("latest/manifest.json")).map_err(|e| e.to_string())?;
     assert_eq!(latest_manifest_text, manifest_text);
 
-    let redirect_html = fs::read_to_string(sim_root.join("docs/manual/index.html")).map_err(|e| e.to_string())?;
+    let redirect_html = fs::read_to_string(manual_out.join("index.html")).map_err(|e| e.to_string())?;
     assert!(redirect_html.contains("<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">"));
     assert!(redirect_html.contains("href=\"v0.1/index.html\""));
     assert!(!redirect_html.contains("<script"));
@@ -518,13 +526,13 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
     assert!(ts_shim.contains("href=\"manual/latest/troubleshooting.html#known-issues\""));
     assert!(!ts_shim.contains("<script"));
 
-    let snap_home = fs::read_to_string(sim_root.join("docs/manual/v0.1/index.html")).map_err(|e| e.to_string())?;
+    let snap_home = fs::read_to_string(manual_out.join("v0.1/index.html")).map_err(|e| e.to_string())?;
     assert!(snap_home.contains("Product Home</a>"));
     assert!(snap_home.contains("Privacy Policy</a>"));
     assert!(snap_home.contains("aria-current=\"page\""));
     assert!(snap_home.contains("<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/manual/latest/index.html\">"));
 
-    let latest_home = fs::read_to_string(sim_root.join("docs/manual/latest/index.html")).map_err(|e| e.to_string())?;
+    let latest_home = fs::read_to_string(manual_out.join("latest/index.html")).map_err(|e| e.to_string())?;
     assert_eq!(latest_home, snap_home);
 
     let sitemap_xml = fs::read_to_string(sim_root.join("docs/sitemap.xml")).map_err(|e| e.to_string())?;
@@ -534,14 +542,61 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
     assert!(llms_txt.contains("https://hausergroup.github.io/curvebook/manual/latest/index.html"));
     let llms_full = fs::read_to_string(sim_root.join("docs/llms-full.txt")).map_err(|e| e.to_string())?;
     assert!(llms_full.contains("## Quick Facts"));
+    Ok(manifest_text)
+}
 
-    // Corrupting the manifest commit must make `--check` fail because it no longer matches tag `v0.1.0-alpha.2`.
-    let bad_manifest = manifest_text.replace(&head_sha, "0000000000000000000000000000000000000000");
-    fs::write(&snap_manifest, bad_manifest).map_err(|e| e.to_string())?;
+fn assert_release_negative_gates_and_ci_stage(sim_root: &Path, manual_out: &Path, head_sha: &str, manifest_text: &str) -> Result<(), String> {
+    let snap_manifest = manual_out.join("v0.1/manifest.json");
     let preview_dir = sim_root.join("target/docs-site-check");
-    let fail_res = run_xtask(sim_root, &["docs-site", "--check", "--output", preview_dir.to_str().ok_or("bad path")?])?;
+    let manual_str = manual_out.to_str().ok_or("bad path")?;
+    let preview_str = preview_dir.to_str().ok_or("bad path")?;
+
+    // Corrupting the manifest commit must make `--check --manual-dir` fail because it no longer matches tag `v0.1.0-alpha.2`.
+    let bad_manifest = manifest_text.replace(head_sha, "0000000000000000000000000000000000000000");
+    fs::write(&snap_manifest, bad_manifest).map_err(|e| e.to_string())?;
+    let fail_res = run_xtask(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str])?;
     assert!(!fail_res.status.success(), "mismatched tag commit in manifest must fail --check");
     assert!(String::from_utf8_lossy(&fail_res.stderr).contains("does not match release tag"));
+
+    // Restoring manifest and planting committed HTML under docs/manual/ must fail --check (R12.10).
+    fs::write(&snap_manifest, manifest_text).map_err(|e| e.to_string())?;
+    fs::create_dir_all(sim_root.join("docs/manual/latest")).map_err(|e| e.to_string())?;
+    fs::write(sim_root.join("docs/manual/latest/index.html"), "<html></html>").map_err(|e| e.to_string())?;
+    let committed_html_res = run_xtask(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str])?;
+    assert!(!committed_html_res.status.success(), "committed HTML in docs/manual/ must fail --check");
+    assert!(String::from_utf8_lossy(&committed_html_res.stderr).contains("must not be committed under docs/manual/"));
+    fs::remove_dir_all(sim_root.join("docs/manual")).map_err(|e| e.to_string())?;
+
+    // Exercise the exact Pages CI sequence: `--build-manual <dir> --check` followed by `pages-stage --manual-dir <dir> _site`.
+    let ci_manual = sim_root.join("target/ci-manual");
+    let ci_manual_str = ci_manual.to_str().ok_or("bad path")?;
+    let build_res = run_xtask(sim_root, &["docs-site", "--build-manual", ci_manual_str, "--check"])?;
+    assert!(
+        build_res.status.success(),
+        "docs-site --build-manual --check failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&build_res.stdout),
+        String::from_utf8_lossy(&build_res.stderr)
+    );
+    let staged_site = sim_root.join("_site");
+    let stage_res = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .current_dir(sim_root)
+        .args(["pages-stage", "--manual-dir", ci_manual_str, staged_site.to_str().ok_or("bad path")?])
+        .output()
+        .map_err(|e| format!("run pages-stage: {e}"))?;
+    assert!(
+        stage_res.status.success(),
+        "pages-stage --manual-dir failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&stage_res.stdout),
+        String::from_utf8_lossy(&stage_res.stderr)
+    );
+    assert!(staged_site.join("index.html").is_file());
+    assert!(staged_site.join("manual/index.html").is_file());
+    assert!(staged_site.join("manual/latest/index.html").is_file());
+    assert!(staged_site.join("manual/v0.1/index.html").is_file());
+    assert!(staged_site.join("sitemap.xml").is_file());
+    assert!(!staged_site.join("manual/latest/manifest.json").exists());
+    assert!(!staged_site.join("manual/v0.1/manifest.json").exists());
+    assert!(!staged_site.join("ROADMAP.md").exists());
 
     Ok(())
 }

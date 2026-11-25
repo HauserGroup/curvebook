@@ -53,7 +53,7 @@ cache behavior, per-test timeouts, and scoped `cargo xtask ci <stage>` commands.
 | Verify numerical `D1` literature citations | `cargo xtask citations` |
 | Verify tool cursor catalog sync (`cursors.toml`) | `cargo xtask cursors` |
 | Enforce OKLab/OKLCH design-token literal ratchet | `cargo xtask design-tokens` |
-| Build or verify the offline reference manual (`--check`) | `cargo xtask docs-site [--check]` |
+| Build or verify the offline reference manual (`--check`, `--build-manual`) | `cargo run -p xtask --features docs-site -- docs-site [--check]` |
 | Check translation coverage | `cargo xtask i18n-report` |
 | Sync desktop UI commands to MCP catalog | `cargo xtask ui-commands` |
 | Verify offline corpus & NIST StRD suites (`--fetch` to download) | `cargo xtask corpus` |

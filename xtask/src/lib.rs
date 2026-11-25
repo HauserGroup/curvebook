@@ -68,9 +68,9 @@ commands:
   ui-commands [--check] sync (or verify) crates/mcp/src/ui_catalog.rs from crates/ui-egui
   commands [--check]    regenerate (or verify) docs/commands.md from curvebook-engine
   schemas [--check]     regenerate (or verify) docs/schemas/*.schema.json from curvebook-format
-  docs-site [--check] [--output <dir>] [--release <ver>]
+  docs-site [--check] [--output <dir>] [--build-manual [<dir>]] [--manual-dir <dir>] [--release <ver>] [--sitemap]
                         build (or verify) the static GitHub Pages documentation site (requires `--features docs-site`)
-  pages-stage <dir> | --list | --check
+  pages-stage [--manual-dir <dir>] (<dir> | --list | --check)
                         copy only the published Pages site files into <dir> (or list / verify them)
   wasm                  check + clippy (-D warnings) wasm32 targets, trunk web-release build, and web bundle readiness
   web-bundle            verify web bundle readiness and R10.22 zip size budget (CURVEBOOK_REQUIRE_WEB_BUNDLE=1 requires zip)

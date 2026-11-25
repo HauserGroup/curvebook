@@ -1,13 +1,22 @@
-# Publish the documentation site (R12.9). Only the files on the publish list in
-# xtask/src/pages_site.rs are deployed, so internal Markdown under docs/ (roadmap, audits,
-# planning, evidence, reference sources, schemas) is never served on Pages.
+# Publish the documentation site (R12.9, R12.10). Manual HTML (`manual/index.html`,
+# `manual/latest/`, and active versioned snapshots) is generated in CI into a build directory
+# before `pages-stage`, and only the files on the publish list in `xtask/src/pages_site.rs` are
+# deployed, so neither internal Markdown under `docs/` nor committed manual HTML lives on Pages
+# or in `main`.
 # Requires Settings -> Pages -> Source: GitHub Actions (see docs/release/github-pages.md).
 name: Pages
 
 on:
   push:
     branches: [main]
-    paths: ["docs/**", "xtask/**", ".github/workflows/pages.yml"]
+    paths:
+      - "docs/**"
+      - "xtask/**"
+      - "crates/**"
+      - "apps/curvebook-cli/src/cli_catalog.rs"
+      - "Cargo.toml"
+      - ".github/workflows/pages.yml"
+      - ".github/actions/ci-setup/**"
   workflow_dispatch:
 
 permissions:
@@ -24,9 +33,9 @@ env:
 
 jobs:
   build:
-    name: Stage the published site
+    name: Build and stage the published site
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -34,8 +43,10 @@ jobs:
       - uses: ./.github/actions/ci-setup
         with:
           install-gui-libs: 'false'
-      - name: Copy only the published files
-        run: cargo run --locked -p xtask --no-default-features -- pages-stage _site
+      - name: Build and verify manual HTML
+        run: cargo run --locked -p xtask --features docs-site -- docs-site --build-manual target/docs-manual --check
+      - name: Stage only the published files
+        run: cargo run --locked -p xtask --features docs-site -- pages-stage --manual-dir target/docs-manual _site
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: _site

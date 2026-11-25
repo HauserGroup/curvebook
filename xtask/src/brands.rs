@@ -545,10 +545,10 @@ fn scan_cargo_toml(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 fn is_generated_docs_html_path(path: &str) -> bool {
     let norm = path.replace('\\', "/");
     let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
-    ((trimmed.starts_with("docs/manual/v") || trimmed.starts_with("docs/manual/latest/")) && trimmed != "docs/manual/index.html")
-        || trimmed == "docs/llms-full.txt"
-        || trimmed.starts_with("docs-site/")
+    trimmed == "docs/llms-full.txt"
+        || (trimmed.starts_with("docs-site/") && trimmed != "docs-site/manual/index.html")
         || trimmed.starts_with("target/docs-site/")
+        || (trimmed.starts_with("target/docs-manual/") && trimmed != "target/docs-manual/index.html")
 }
 
 fn mask_generated_docs_html_tokens(path: &str, line: &str) -> Option<String> {
@@ -3381,6 +3381,19 @@ pub(crate) fn scan_compliance_text(display_path: &str, text: &str) -> Vec<BrandH
 /// format-boundary policy while keeping `PrismPolicy::Strict` on non-HTML text and suite brands.
 #[cfg(feature = "docs-site")]
 pub fn check_docs_site_dir(dir: &Path) -> Result<Vec<BrandHit>, String> {
+    check_generated_docs_dir(dir, "docs-site")
+}
+
+/// Scan a generated manual build directory (`index.html`, `latest/`, `v<major>.<minor>/`) under
+/// `docs-site/manual/...` so redirect `index.html` stays strict while manual pages get the narrow
+/// generated-HTML format-boundary policy (`R12.10`).
+#[cfg(feature = "docs-site")]
+pub fn check_manual_build_dir(dir: &Path) -> Result<Vec<BrandHit>, String> {
+    check_generated_docs_dir(dir, "docs-site/manual")
+}
+
+#[cfg(feature = "docs-site")]
+fn check_generated_docs_dir(dir: &Path, display_prefix: &str) -> Result<Vec<BrandHit>, String> {
     if !dir.exists() {
         return Err(format!("docs-site directory `{}` does not exist", dir.display()));
     }
@@ -3390,7 +3403,7 @@ pub fn check_docs_site_dir(dir: &Path) -> Result<Vec<BrandHit>, String> {
     let mut stats = DistScanStats::default();
     let mut hits = Vec::new();
     for rel in rel_files {
-        let display_path = format!("docs-site/{rel}");
+        let display_path = format!("{display_prefix}/{rel}");
         stats.files += 1;
         collect_line_words(&display_path, 1, &rel, SUITE_BRANDS, PrismPolicy::Strict, &mut hits);
         collect_line_words(&display_path, 1, &rel, BRANDS, PrismPolicy::Strict, &mut hits);
@@ -4524,24 +4537,32 @@ it: "Copia Statistica report",
 <p>Supports <code>table.importPrism</code> and <code>&quot;prism&quot;</code> for <code>.prism</code> files (<a href=\"https://github.com/HauserGroup/curvebook/blob/main/crates/format/src/prism.rs\">source</a>).</p>\
 <p>Anchor <a href=\"#mcp-tool-table_import_prism\">tool</a> and <a href=\"#format-prism\">format</a>.</p>\
 </body></html>\n";
-        scan_file("docs/manual/v0.1/registry/formats.html", ok_html, &mut ok_hits);
-        ok_hits.extend(check_html_metadata("docs/manual/v0.1/registry/formats.html", ok_html));
+        for gen_path in [
+            "docs-site/manual/v0.1/registry/formats.html",
+            "docs-site/manual/latest/registry/formats.html",
+            "target/docs-manual/latest/registry/formats.html",
+        ] {
+            scan_file(gen_path, ok_html, &mut ok_hits);
+            ok_hits.extend(check_html_metadata(gen_path, ok_html));
+        }
         assert!(ok_hits.is_empty(), "unexpected hits in generated docs HTML: {ok_hits:?}");
 
         let mut agents_hits = Vec::new();
         let agents_html = "<p>Scope: crates/format/src/lib.rs (<code>plan/prism/</code> reference notes)</p>\n";
-        scan_file("docs/manual/v0.1/contribute/agents.html", agents_html, &mut agents_hits);
-        agents_hits.extend(check_html_metadata("docs/manual/v0.1/contribute/agents.html", agents_html));
+        scan_file("docs-site/manual/v0.1/contribute/agents.html", agents_html, &mut agents_hits);
+        agents_hits.extend(check_html_metadata("docs-site/manual/v0.1/contribute/agents.html", agents_html));
         assert!(agents_hits.is_empty(), "unexpected hits in contribute/agents.html: {agents_hits:?}");
 
         let mut bad_gen_hits = Vec::new();
-        scan_file("docs/manual/v0.1/files.html", "<p>Matches GraphPad Prism output with PrismStyle headers.</p>\n", &mut bad_gen_hits);
+        scan_file("docs-site/manual/v0.1/files.html", "<p>Matches GraphPad Prism output with PrismStyle headers.</p>\n", &mut bad_gen_hits);
         assert!(bad_gen_hits.iter().any(|h| h.brand == "graphpad"), "{bad_gen_hits:?}");
         assert!(bad_gen_hits.iter().any(|h| h.brand == "prism"), "{bad_gen_hits:?}");
 
-        let mut stub_hits = Vec::new();
-        scan_file("docs/manual/index.html", "<p>table.importPrism</p>\n", &mut stub_hits);
-        assert!(stub_hits.iter().any(|h| h.brand == "prism"), "stub index.html must stay strict: {stub_hits:?}");
+        for strict_path in ["docs-site/manual/index.html", "target/docs-manual/index.html", "docs/manual/v0.1/registry/formats.html"] {
+            let mut strict_hits = Vec::new();
+            scan_file(strict_path, "<p>table.importPrism</p>\n", &mut strict_hits);
+            assert!(strict_hits.iter().any(|h| h.brand == "prism"), "{strict_path} must stay strict: {strict_hits:?}");
+        }
     }
 
     #[test]

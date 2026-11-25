@@ -3,12 +3,12 @@
 //! and single-switch custom-domain helpers.
 //!
 //! The sitemap lists the hand-written top-level pages in [`LANDING_PAGES`] plus every page of
-//! `docs/manual/latest/` (when `docs/manual/latest/manifest.json` exists, falling back to the
-//! newest committed `docs/manual/v<major>.<minor>/` snapshot otherwise). Redirect shims
-//! (`docs/get-started.html`, `docs/troubleshooting.html`, `docs/manual/index.html`) and older
-//! snapshots are left out so search engines index one canonical copy of each page. The output
-//! carries no `<lastmod>` dates, so it is a pure function of the committed page set and `--check`
-//! can compare it byte for byte.
+//! `manual/latest/` (read from the generated manual build directory or the assembled manual page
+//! list, falling back to the newest `v<major>.<minor>/` snapshot when `latest/manifest.json` is
+//! absent). Redirect shims (`docs/get-started.html`, `docs/troubleshooting.html`,
+//! `manual/index.html`) and versioned snapshots are left out so search engines index one canonical
+//! copy of each page. The output carries no `<lastmod>` dates, so it is a pure function of the
+//! published page set and `--check` can compare it byte for byte.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -78,8 +78,8 @@ pub fn validate_site_config(site_base_url: &str, custom_domain: Option<&str>) ->
     Ok(())
 }
 
-/// Render `docs/sitemap.xml` from the committed `docs/` tree under `root`.
-pub fn build_sitemap(root: &Path) -> Result<String, String> {
+/// Render `docs/sitemap.xml` from `LANDING_PAGES` plus the supplied manual page paths under `manual/<snapshot_sub>/`.
+pub fn build_sitemap_for_manual_pages(root: &Path, snapshot_sub: &str, manual_rel_pages: &[String]) -> Result<String, String> {
     let docs_dir = root.join("docs");
     let mut rel_paths: Vec<String> = Vec::new();
     for page in LANDING_PAGES {
@@ -88,16 +88,10 @@ pub fn build_sitemap(root: &Path) -> Result<String, String> {
         }
         rel_paths.push((*page).to_owned());
     }
-    let manual_dir = docs_dir.join("manual");
-    let snapshot_sub =
-        if is_regular_file(&manual_dir.join("latest/manifest.json")) { Some(String::from("latest")) } else { newest_snapshot_dir(&manual_dir)? };
-    if let Some(snapshot) = snapshot_sub {
-        let snap_root = manual_dir.join(&snapshot);
-        let mut snap_pages = Vec::new();
-        collect_html_files(&snap_root, &snap_root, &mut snap_pages)?;
-        snap_pages.sort();
-        rel_paths.extend(snap_pages.into_iter().map(|p| format!("manual/{snapshot}/{p}")));
-    }
+    let mut snap_pages: Vec<String> = manual_rel_pages.iter().filter(|p| p.ends_with(".html")).cloned().collect();
+    snap_pages.sort();
+    snap_pages.dedup();
+    rel_paths.extend(snap_pages.into_iter().map(|p| format!("manual/{snapshot_sub}/{p}")));
 
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
     for rel in &rel_paths {
@@ -112,12 +106,64 @@ pub fn build_sitemap(root: &Path) -> Result<String, String> {
     Ok(out)
 }
 
-/// Regenerate `docs/sitemap.xml` (`cargo xtask docs-site --sitemap`, and after `--release`).
-pub fn write_sitemap(root: &Path) -> Result<usize, String> {
-    let xml = build_sitemap(root)?;
+/// Render `docs/sitemap.xml` from `LANDING_PAGES` plus generated manual pages under `manual_dir`
+/// (or default `target/docs-manual`, falling back to `docs/manual` when absent).
+pub fn build_sitemap_with_manual(root: &Path, manual_dir: Option<&Path>) -> Result<String, String> {
+    let resolved_manual = match manual_dir {
+        Some(dir) => Some(dir.to_path_buf()),
+        None => {
+            let default_dir = crate::pages_site::default_manual_dir(root);
+            if std::fs::symlink_metadata(&default_dir).is_ok_and(|m| m.file_type().is_dir()) {
+                Some(default_dir)
+            } else {
+                let legacy_dir = root.join("docs/manual");
+                std::fs::symlink_metadata(&legacy_dir).is_ok_and(|m| m.file_type().is_dir()).then_some(legacy_dir)
+            }
+        }
+    };
+    if let Some(manual_root) = resolved_manual {
+        let snapshot_sub = if is_regular_file(&manual_root.join("latest/manifest.json")) {
+            Some(String::from("latest"))
+        } else {
+            newest_snapshot_dir(&manual_root)?
+        };
+        if let Some(snapshot) = snapshot_sub {
+            let snap_root = manual_root.join(&snapshot);
+            let mut snap_pages = Vec::new();
+            collect_html_files(&snap_root, &snap_root, &mut snap_pages)?;
+            return build_sitemap_for_manual_pages(root, &snapshot, &snap_pages);
+        }
+        if manual_dir.is_some() {
+            return Err(format!("manual directory `{}` has no `latest/` or `v<major>.<minor>/` snapshot for sitemap", manual_root.display()));
+        }
+    }
+    build_sitemap_for_manual_pages(root, "latest", &[])
+}
+
+/// Render `docs/sitemap.xml` from `docs/` and the default manual build directory under `root`.
+pub fn build_sitemap(root: &Path) -> Result<String, String> {
+    build_sitemap_with_manual(root, None)
+}
+
+/// Regenerate `docs/sitemap.xml` from an explicit manual page list (`--sitemap`).
+pub fn write_sitemap_for_manual_pages(root: &Path, snapshot_sub: &str, manual_rel_pages: &[String]) -> Result<usize, String> {
+    let xml = build_sitemap_for_manual_pages(root, snapshot_sub, manual_rel_pages)?;
     let path = root.join(SITEMAP_REL_PATH);
     write_atomic(&path, xml.as_bytes()).map_err(|e| format!("write {SITEMAP_REL_PATH}: {e}"))?;
     Ok(xml.matches("<url>").count())
+}
+
+/// Regenerate `docs/sitemap.xml` using `manual_dir` (or default).
+pub fn write_sitemap_with_manual(root: &Path, manual_dir: Option<&Path>) -> Result<usize, String> {
+    let xml = build_sitemap_with_manual(root, manual_dir)?;
+    let path = root.join(SITEMAP_REL_PATH);
+    write_atomic(&path, xml.as_bytes()).map_err(|e| format!("write {SITEMAP_REL_PATH}: {e}"))?;
+    Ok(xml.matches("<url>").count())
+}
+
+/// Regenerate `docs/sitemap.xml` (`cargo xtask docs-site --sitemap`, and after `--release`).
+pub fn write_sitemap(root: &Path) -> Result<usize, String> {
+    write_sitemap_with_manual(root, None)
 }
 
 /// Regenerate `docs/404.html` (`cargo xtask docs-site --sitemap`, and after `--release`).
@@ -130,9 +176,14 @@ pub fn write_not_found_page(root: &Path) -> Result<(), String> {
 /// `--check` gate: the committed sitemap, `404.html`, and `llms*.txt` match the published content byte-for-byte,
 /// and every landing page declares its canonical link and Open Graph / Twitter Card metadata.
 pub fn check_search_metadata(root: &Path) -> Result<(), String> {
+    check_search_metadata_with_manual(root, None)
+}
+
+/// `--check` gate validating `docs/sitemap.xml` against `manual_dir` (or default).
+pub fn check_search_metadata_with_manual(root: &Path, manual_dir: Option<&Path>) -> Result<(), String> {
     validate_site_config(SITE_BASE_URL, CUSTOM_DOMAIN)?;
 
-    let expected_sitemap = build_sitemap(root)?;
+    let expected_sitemap = build_sitemap_with_manual(root, manual_dir)?;
     let committed_sitemap = std::fs::read_to_string(root.join(SITEMAP_REL_PATH))
         .map_err(|e| format!("read {SITEMAP_REL_PATH}: {e} (run `cargo xtask docs-site --sitemap`)"))?;
     if committed_sitemap != expected_sitemap {
@@ -416,13 +467,13 @@ mod tests {
         let root = temp_root("newest");
         seed_landing_pages(&root);
         write(&root, "docs/get-started.html", "shim");
-        write(&root, "docs/manual/index.html", "redirect");
-        write(&root, "docs/manual/v0.1/manifest.json", "{}");
-        write(&root, "docs/manual/v0.1/index.html", "old");
-        write(&root, "docs/manual/v0.2/manifest.json", "{}");
-        write(&root, "docs/manual/v0.2/index.html", "new");
-        write(&root, "docs/manual/v0.2/registry/formats.html", "new");
-        write(&root, "docs/manual/v0.3/index.html", "no manifest, so not a release snapshot");
+        write(&root, "target/docs-manual/index.html", "redirect");
+        write(&root, "target/docs-manual/v0.1/manifest.json", "{}");
+        write(&root, "target/docs-manual/v0.1/index.html", "old");
+        write(&root, "target/docs-manual/v0.2/manifest.json", "{}");
+        write(&root, "target/docs-manual/v0.2/index.html", "new");
+        write(&root, "target/docs-manual/v0.2/registry/formats.html", "new");
+        write(&root, "target/docs-manual/v0.3/index.html", "no manifest, so not a release snapshot");
 
         let xml = build_sitemap(&root).unwrap();
         let locs: Vec<&str> = xml.lines().filter_map(|l| l.trim().strip_prefix("<url><loc>")?.strip_suffix("</loc></url>")).collect();
@@ -440,10 +491,10 @@ mod tests {
         );
         assert!(!xml.contains("lastmod"), "sitemap must stay deterministic");
 
-        // Adding docs/manual/latest/ switches sitemap indexing to /manual/latest/.
-        write(&root, "docs/manual/latest/manifest.json", "{}");
-        write(&root, "docs/manual/latest/index.html", "latest");
-        write(&root, "docs/manual/latest/registry/formats.html", "latest");
+        // Adding target/docs-manual/latest/ switches sitemap indexing to /manual/latest/.
+        write(&root, "target/docs-manual/latest/manifest.json", "{}");
+        write(&root, "target/docs-manual/latest/index.html", "latest");
+        write(&root, "target/docs-manual/latest/registry/formats.html", "latest");
         let latest_xml = build_sitemap(&root).unwrap();
         let latest_locs: Vec<&str> = latest_xml.lines().filter_map(|l| l.trim().strip_prefix("<url><loc>")?.strip_suffix("</loc></url>")).collect();
         assert_eq!(
@@ -465,7 +516,7 @@ mod tests {
         assert!(check_search_metadata(&root).is_ok());
 
         // A new snapshot page makes the committed sitemap stale.
-        write(&root, "docs/manual/latest/glossary.html", "new");
+        write(&root, "target/docs-manual/latest/glossary.html", "new");
         assert!(check_search_metadata(&root).unwrap_err().contains("--sitemap"));
 
         // Regenerate sitemap, then stale 404.html and llms.txt must fail check_search_metadata.
