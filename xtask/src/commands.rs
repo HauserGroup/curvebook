@@ -47,9 +47,7 @@ pub fn run(root: &Path, check: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn normalize_newlines(s: &str) -> String {
-    s.replace("\r\n", "\n")
-}
+use crate::scan_util::normalize_newlines;
 
 #[cfg(test)]
 mod tests {

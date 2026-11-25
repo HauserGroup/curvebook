@@ -88,9 +88,7 @@ fn check_no_unexpected_schema_files(dir: &Path, expected_names: &BTreeSet<String
     Ok(())
 }
 
-fn normalize_newlines(s: &str) -> String {
-    s.replace("\r\n", "\n")
-}
+use crate::scan_util::normalize_newlines;
 
 #[cfg(test)]
 mod tests {

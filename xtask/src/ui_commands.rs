@@ -84,9 +84,7 @@ fn rustfmt(root: &Path, code: &str) -> Result<String, String> {
     String::from_utf8(out.stdout).map_err(|e| format!("rustfmt utf-8: {e}"))
 }
 
-fn normalize_newlines(s: &str) -> String {
-    s.replace("\r\n", "\n")
-}
+use crate::scan_util::normalize_newlines;
 
 #[cfg(test)]
 mod tests {

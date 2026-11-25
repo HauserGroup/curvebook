@@ -7,7 +7,7 @@ use curvebook_doc::{
 use curvebook_palette::{ColormapId, PaletteId, Rgba8};
 use serde_json::{Map, Value, json};
 
-use super::engine::{insert_nested_field, merge_struct_json};
+use super::engine::{FieldKind, FieldRule, insert_nested_field, merge_struct_json, try_apply_rule};
 use super::value_parsers::{
     norm_key, parse_axis_scale_str, parse_axis_thresholds_value, parse_bool_field, parse_bracket_label_mode, parse_bracket_style_str,
     parse_break_ornament_str, parse_cld_ordering_str, parse_colormap_id_str, parse_equation_display_mode_str, parse_error_bar_metric_str,
@@ -299,6 +299,33 @@ pub fn patch_format_graph(state: &mut FormatGraphState, fields: &Map<String, Val
 }
 
 fn normalize_extended_format_graph_field(key: &str, val: &Value, preset: &LocalePreset, patch: &mut Map<String, Value>) -> Result<(), String> {
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["show_raw_data", "format_graph.show_raw_data"], "show_raw_data", FieldKind::Bool),
+        FieldRule::new(&["show_fitted_curve", "format_graph.show_fitted_curve"], "show_fitted_curve", FieldKind::Bool),
+        FieldRule::new(
+            &["apply_all_data_sets", "apply_all", "format_graph.apply_all_data_sets", "format_graph.apply_globally"],
+            "apply_all_data_sets",
+            FieldKind::Bool,
+        ),
+        FieldRule::with_dirty(&["show_symbols", "format_graph.show_symbols"], "show_symbols", FieldKind::Bool, "show_symbols_dirty"),
+        FieldRule::with_dirty(&["bind_to_right_y2", "format_graph.bind_to_right_y2"], "bind_to_right_y2", FieldKind::Bool, "bind_to_right_y2_dirty"),
+        FieldRule::with_dirty(&["offset_x_data", "format_graph.offset_x_data"], "offset_x_data", FieldKind::FiniteF64, "offset_x_data_dirty"),
+        FieldRule::with_dirty(
+            &["bar_border_width_pt", "border_width_pt", "format_graph.bar_border_width_pt"],
+            "bar_border_width_pt",
+            FieldKind::NonNegF64,
+            "bar_border_width_dirty",
+        ),
+        FieldRule::with_dirty(
+            &["forest_show_pooled_diamond", "format_graph.forest_show_pooled_diamond"],
+            "forest_show_pooled_diamond",
+            FieldKind::Bool,
+            "forest_show_pooled_diamond_dirty",
+        ),
+    ];
+    if try_apply_rule(key, val, RULES, preset, patch)? {
+        return Ok(());
+    }
     match key {
         "series_alpha_pct" | "alpha_pct" | "alpha" | "format_graph.alpha" => {
             let raw = parse_finite_f64_with_locale(val, key, preset)?;
@@ -307,15 +334,6 @@ fn normalize_extended_format_graph_field(key: &str, val: &Value, preset: &Locale
             let clamped = pct.round().clamp(0.0, 100.0) as u8;
             patch.insert(String::from("series_alpha_pct"), json!(clamped));
             patch.insert(String::from("alpha_dirty"), json!(true));
-        }
-        "show_raw_data" | "format_graph.show_raw_data" => {
-            patch.insert(String::from("show_raw_data"), json!(parse_bool_field(val, "show_raw_data")?));
-        }
-        "show_fitted_curve" | "format_graph.show_fitted_curve" => {
-            patch.insert(String::from("show_fitted_curve"), json!(parse_bool_field(val, "show_fitted_curve")?));
-        }
-        "apply_all_data_sets" | "apply_all" | "format_graph.apply_all_data_sets" | "format_graph.apply_globally" => {
-            patch.insert(String::from("apply_all_data_sets"), json!(parse_bool_field(val, "apply_all_data_sets")?));
         }
         "paper_fill" | "format_graph.paper_fill" => {
             let pf = parse_paper_fill_patch(val)?;
@@ -336,10 +354,6 @@ fn normalize_extended_format_graph_field(key: &str, val: &Value, preset: &Locale
             patch.insert(String::from("orientation"), serde_json::to_value(orient).map_err(|e| e.to_string())?);
             patch.insert(String::from("orientation_dirty"), json!(true));
         }
-        "show_symbols" | "format_graph.show_symbols" => {
-            patch.insert(String::from("show_symbols"), json!(parse_bool_field(val, "show_symbols")?));
-            patch.insert(String::from("show_symbols_dirty"), json!(true));
-        }
         "replicate_lines" | "format_graph.replicate_lines" => {
             let mode = match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
                 Some("summary_center" | "summary") => ReplicateLineMode::SummaryCenter,
@@ -350,27 +364,6 @@ fn normalize_extended_format_graph_field(key: &str, val: &Value, preset: &Locale
             };
             patch.insert(String::from("replicate_lines"), serde_json::to_value(mode).map_err(|e| e.to_string())?);
             patch.insert(String::from("replicate_lines_dirty"), json!(true));
-        }
-        "bind_to_right_y2" | "format_graph.bind_to_right_y2" => {
-            patch.insert(String::from("bind_to_right_y2"), json!(parse_bool_field(val, "bind_to_right_y2")?));
-            patch.insert(String::from("bind_to_right_y2_dirty"), json!(true));
-        }
-        "offset_x_data" | "format_graph.offset_x_data" => {
-            let parsed = parse_finite_f64_with_locale(val, "offset_x_data", preset)?;
-            patch.insert(String::from("offset_x_data"), json!(parsed));
-            patch.insert(String::from("offset_x_data_dirty"), json!(true));
-        }
-        "bar_border_width_pt" | "border_width_pt" | "format_graph.bar_border_width_pt" => {
-            let parsed = parse_finite_f64_with_locale(val, "bar_border_width_pt", preset)?;
-            if parsed < 0.0 {
-                return Err(String::from("`bar_border_width_pt` must be >= 0.0"));
-            }
-            patch.insert(String::from("bar_border_width_pt"), json!(parsed));
-            patch.insert(String::from("bar_border_width_dirty"), json!(true));
-        }
-        "forest_show_pooled_diamond" | "format_graph.forest_show_pooled_diamond" => {
-            patch.insert(String::from("forest_show_pooled_diamond"), json!(parse_bool_field(val, "forest_show_pooled_diamond")?));
-            patch.insert(String::from("forest_show_pooled_diamond_dirty"), json!(true));
         }
         other => return Err(format!("unknown Format Graph field `{other}`")),
     }
@@ -772,25 +765,21 @@ pub fn patch_export_figure(state: &mut ExportFigureState, fields: &Map<String, V
 }
 
 pub fn patch_create_graph(state: &mut CreateGraphDialogState, fields: &Map<String, Value>) -> Result<(), String> {
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["data_sheet_id", "source_sheet_id", "create_graph.source_sheet_id"], "source_sheet_id", FieldKind::Str),
+        FieldRule::new(&["one_per_data_set", "create_graph.one_per_data_set"], "one_per_data_set", FieldKind::Bool),
+        FieldRule::new(&["y_axis_title", "create_graph.y_axis_title"], "y_axis_title", FieldKind::Str),
+        FieldRule::new(&["title", "graph_title", "create_graph.title"], "graph_title", FieldKind::Str),
+    ];
+    let preset = LocalePreset::default();
     let mut patch = Map::new();
     for (key, val) in fields {
+        if try_apply_rule(key, val, RULES, &preset, &mut patch)? {
+            continue;
+        }
         match key.as_str() {
-            "data_sheet_id" | "source_sheet_id" | "create_graph.source_sheet_id" => {
-                let s = parse_str_field(val, "source_sheet_id")?;
-                patch.insert(String::from("source_sheet_id"), json!(s));
-            }
             "kind" | "kind_slug" | "create_graph.kind" => {
-                let s = parse_str_field(val, "kind")?.trim().to_ascii_lowercase();
-                patch.insert(String::from("kind_slug"), json!(s));
-            }
-            "one_per_data_set" | "create_graph.one_per_data_set" => {
-                patch.insert(String::from("one_per_data_set"), json!(parse_bool_field(val, "one_per_data_set")?));
-            }
-            "y_axis_title" | "create_graph.y_axis_title" => {
-                patch.insert(String::from("y_axis_title"), json!(parse_str_field(val, "y_axis_title")?));
-            }
-            "title" | "graph_title" | "create_graph.title" => {
-                patch.insert(String::from("graph_title"), json!(parse_str_field(val, "title")?));
+                patch.insert(String::from("kind_slug"), json!(parse_str_field(val, "kind")?.trim().to_ascii_lowercase()));
             }
             other => return Err(format!("unknown CreateGraph field `{other}`")),
         }
@@ -838,25 +827,18 @@ pub fn patch_format_embedded_table(
     fields: &Map<String, Value>,
     preset: &LocalePreset,
 ) -> Result<(), String> {
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["show_column_titles", "embedded_table.show_column_titles"], "style.show_column_titles", FieldKind::Bool),
+        FieldRule::new(&["show_row_titles", "embedded_table.show_row_titles"], "style.show_row_titles", FieldKind::Bool),
+        FieldRule::new(&["transpose", "embedded_table.transpose"], "style.transpose", FieldKind::Bool),
+        FieldRule::new(&["bold_headers", "embedded_table.bold_headers"], "style.bold_headers", FieldKind::Bool),
+    ];
     let mut patch = Map::new();
     for (key, val) in fields {
+        if try_apply_rule(key, val, RULES, preset, &mut patch)? {
+            continue;
+        }
         match key.as_str() {
-            "show_column_titles" | "embedded_table.show_column_titles" => {
-                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
-                insert_nested_field(&mut patch, "style", "show_column_titles", json!(b));
-            }
-            "show_row_titles" | "embedded_table.show_row_titles" => {
-                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
-                insert_nested_field(&mut patch, "style", "show_row_titles", json!(b));
-            }
-            "transpose" | "embedded_table.transpose" => {
-                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
-                insert_nested_field(&mut patch, "style", "transpose", json!(b));
-            }
-            "bold_headers" | "embedded_table.bold_headers" => {
-                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
-                insert_nested_field(&mut patch, "style", "bold_headers", json!(b));
-            }
             "font_size_pt" | "embedded_table.font_size" => {
                 let f = parse_finite_f64_with_locale(val, key, preset)?;
                 if f <= 0.0 || f > 72.0 {
@@ -864,19 +846,13 @@ pub fn patch_format_embedded_table(
                 }
                 insert_nested_field(&mut patch, "style", "font_size_pt", json!(f));
             }
-            "outer_border_width_pt" | "embedded_table.outer_border_width_pt" => {
+            "outer_border_width_pt" | "embedded_table.outer_border_width_pt" | "gridline_width_pt" | "embedded_table.gridline_width_pt" => {
                 let f = parse_finite_f64_with_locale(val, key, preset)?;
                 if !(0.0..=12.0).contains(&f) {
                     return Err(format!("`{key}` must be in [0, 12]"));
                 }
-                insert_nested_field(&mut patch, "style", "outer_border_width_pt", json!(f));
-            }
-            "gridline_width_pt" | "embedded_table.gridline_width_pt" => {
-                let f = parse_finite_f64_with_locale(val, key, preset)?;
-                if !(0.0..=12.0).contains(&f) {
-                    return Err(format!("`{key}` must be in [0, 12]"));
-                }
-                insert_nested_field(&mut patch, "style", "gridline_width_pt", json!(f));
+                let field = if key.contains("gridline") { "gridline_width_pt" } else { "outer_border_width_pt" };
+                insert_nested_field(&mut patch, "style", field, json!(f));
             }
             "border_color" | "embedded_table.border_color" => {
                 let c = parse_threshold_color(val, key)?;
@@ -893,6 +869,14 @@ pub fn patch_format_embedded_table(
 }
 
 pub fn patch_format_image(state: &mut FormatImageDialogState, fields: &Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["lock_aspect_ratio", "format_image.lock_aspect_ratio"], "lock_aspect_ratio", FieldKind::Bool),
+        FieldRule::new(&["rotation_deg", "format_image.rotation_deg"], "rotation_deg", FieldKind::FiniteF64),
+        FieldRule::new(&["crop_left_pt", "format_image.crop.left"], "crop.left_pt", FieldKind::NonNegF64),
+        FieldRule::new(&["crop_right_pt", "format_image.crop.right"], "crop.right_pt", FieldKind::NonNegF64),
+        FieldRule::new(&["crop_top_pt", "format_image.crop.top"], "crop.top_pt", FieldKind::NonNegF64),
+        FieldRule::new(&["crop_bottom_pt", "format_image.crop.bottom"], "crop.bottom_pt", FieldKind::NonNegF64),
+    ];
     let mut patch = Map::new();
     let mut new_w: Option<f64> = None;
     let mut new_h: Option<f64> = None;
@@ -900,6 +884,9 @@ pub fn patch_format_image(state: &mut FormatImageDialogState, fields: &Map<Strin
     let mut touched_border_attr = false;
 
     for (key, val) in fields {
+        if try_apply_rule(key, val, RULES, preset, &mut patch)? {
+            continue;
+        }
         match key.as_str() {
             "width_pt" | "format_image.width_pt" => {
                 let w = parse_finite_f64_with_locale(val, key, preset)?;
@@ -917,28 +904,8 @@ pub fn patch_format_image(state: &mut FormatImageDialogState, fields: &Map<Strin
                 insert_nested_field(&mut patch, "bounds_pt", "height", json!(h));
                 new_h = Some(h);
             }
-            "lock_aspect_ratio" | "format_image.lock_aspect_ratio" => {
-                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
-                patch.insert(String::from("lock_aspect_ratio"), json!(b));
-            }
-            "rotation_deg" | "format_image.rotation_deg" => {
-                let deg = parse_finite_f64_with_locale(val, key, preset)?;
-                patch.insert(String::from("rotation_deg"), json!(deg));
-            }
-            "crop_left_pt" | "format_image.crop.left" => {
-                insert_nested_field(&mut patch, "crop", "left_pt", json!(parse_nonneg_f64(val, key, preset)?));
-            }
-            "crop_right_pt" | "format_image.crop.right" => {
-                insert_nested_field(&mut patch, "crop", "right_pt", json!(parse_nonneg_f64(val, key, preset)?));
-            }
-            "crop_top_pt" | "format_image.crop.top" => {
-                insert_nested_field(&mut patch, "crop", "top_pt", json!(parse_nonneg_f64(val, key, preset)?));
-            }
-            "crop_bottom_pt" | "format_image.crop.bottom" => {
-                insert_nested_field(&mut patch, "crop", "bottom_pt", json!(parse_nonneg_f64(val, key, preset)?));
-            }
             "border_enabled" | "format_image.border.enabled" => {
-                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                let b = parse_bool_field(val, key)?;
                 explicit_border_enabled = Some(b);
                 patch.insert(String::from("border_enabled"), json!(b));
             }
@@ -976,56 +943,29 @@ pub fn patch_format_image(state: &mut FormatImageDialogState, fields: &Map<Strin
 }
 
 pub fn patch_format_selected_points(state: &mut FormatSelectedPointsState, fields: &Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
-    let opt_patch_str = |val: &Value, key: &str| -> Result<Option<String>, String> {
-        match val {
-            Value::Null => Ok(None),
-            Value::String(s) => Ok(Some(s.clone())),
-            _ => Err(format!("`{key}` must be a string or null")),
-        }
-    };
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["color", "symbol_color", "format_points.color"], "color", FieldKind::OptStr),
+        FieldRule::new(&["fill_color", "format_points.fill_color"], "fill_color", FieldKind::OptStr),
+        FieldRule::new(&["symbol", "shape", "symbol_shape", "format_points.symbol"], "symbol", FieldKind::OptStr),
+        FieldRule::new(&["size_pt", "format_points.size_pt"], "size_pt", FieldKind::OptFiniteF64),
+        FieldRule::new(&["border_width_pt", "stroke_width_pt", "format_points.border_width_pt"], "border_width_pt", FieldKind::OptFiniteF64),
+        FieldRule::new(&["fill_mode", "format_points.fill_mode"], "fill_mode", FieldKind::OptStr),
+        FieldRule::new(&["hidden", "format_points.hidden", "fmt_pts.hidden"], "hidden", FieldKind::OptBool),
+        FieldRule::new(&["show_row_labels", "format_points.show_row_labels"], "show_row_labels", FieldKind::Bool),
+        FieldRule::new(&["clear", "clear_overrides", "format_points.clear"], "clear_overrides", FieldKind::Bool),
+    ];
     let mut patch = Map::new();
     let mut next_targets: Option<Vec<(usize, usize, Option<usize>)>> = None;
 
     for (key, val) in fields {
+        if try_apply_rule(key, val, RULES, preset, &mut patch)? {
+            continue;
+        }
         match key.as_str() {
             "points" | "selected_points" => {
                 if !val.is_null() {
                     next_targets = Some(crate::control_io::parse_selected_points_with_subcols(val, key)?);
                 }
-            }
-            "color" | "symbol_color" | "format_points.color" => {
-                patch.insert(String::from("color"), json!(opt_patch_str(val, key)?));
-            }
-            "fill_color" | "format_points.fill_color" => {
-                patch.insert(String::from("fill_color"), json!(opt_patch_str(val, key)?));
-            }
-            "symbol" | "shape" | "symbol_shape" | "format_points.symbol" => {
-                patch.insert(String::from("symbol"), json!(opt_patch_str(val, key)?));
-            }
-            "size_pt" | "format_points.size_pt" => {
-                patch.insert(String::from("size_pt"), json!(parse_opt_finite_f64_with_locale(val, key, preset)?));
-            }
-            "border_width_pt" | "stroke_width_pt" | "format_points.border_width_pt" => {
-                patch.insert(String::from("border_width_pt"), json!(parse_opt_finite_f64_with_locale(val, key, preset)?));
-            }
-            "fill_mode" | "format_points.fill_mode" => {
-                patch.insert(String::from("fill_mode"), json!(opt_patch_str(val, key)?));
-            }
-            "hidden" | "format_points.hidden" | "fmt_pts.hidden" => {
-                let h = match val {
-                    Value::Null => None,
-                    Value::Bool(b) => Some(*b),
-                    _ => return Err(format!("`{key}` must be a boolean or null")),
-                };
-                patch.insert(String::from("hidden"), json!(h));
-            }
-            "show_row_labels" | "format_points.show_row_labels" => {
-                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be a boolean"))?;
-                patch.insert(String::from("show_row_labels"), json!(b));
-            }
-            "clear" | "clear_overrides" | "format_points.clear" => {
-                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be a boolean"))?;
-                patch.insert(String::from("clear_overrides"), json!(b));
             }
             other => return Err(format!("unknown Format Selected Points field `{other}`")),
         }

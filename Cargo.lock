@@ -793,6 +793,7 @@ dependencies = [
  "curvebook-ui-egui",
  "serde",
  "serde_json",
+ "xtask",
 ]
 
 [[package]]

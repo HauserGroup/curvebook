@@ -15,27 +15,10 @@ use curvebook_testkit::r13_datasets::{
 };
 use serde_json::{Value, json};
 
-use super::common::{McpChild, TempWorkdir, decode_base64, encode_base64, read_result_json, result_tab, save_and_verify_headless};
-
-fn ensure(cond: bool, msg: impl Into<String>) -> Result<(), String> {
-    if cond { Ok(()) } else { Err(msg.into()) }
-}
-
-fn export_graph_svg(gui: &mut McpChild, sheet_id: &str) -> Result<String, String> {
-    let out = gui.ui_invoke("graph.exportSvg", json!({ "sheet_id": sheet_id }))?;
-    let svg = out.pointer("/payload/svg").and_then(Value::as_str).ok_or_else(|| format!("missing SVG payload for `{sheet_id}`: {out}"))?.to_owned();
-    validate_svg_structure(&svg).map_err(|e| format!("invalid SVG for `{sheet_id}`: {e}"))?;
-    Ok(svg)
-}
-
-fn export_figure_svg(gui: &mut McpChild, sheet_id: &str) -> Result<String, String> {
-    gui.ui_invoke("ui.export.figure.open", json!({ "sheet_id": sheet_id }))?;
-    let out = gui.ui_answer_ok(json!({ "format": "svg" }))?;
-    let svg =
-        out.pointer("/payload/svg").and_then(Value::as_str).ok_or_else(|| format!("missing figure SVG payload for `{sheet_id}`: {out}"))?.to_owned();
-    validate_svg_structure(&svg).map_err(|e| format!("invalid figure SVG for `{sheet_id}`: {e}"))?;
-    Ok(svg)
-}
+use super::common::{
+    McpChild, TempWorkdir, decode_base64, encode_base64, ensure, export_figure_svg, export_graph_svg, read_result_json, result_tab,
+    save_and_verify_headless,
+};
 
 #[test]
 fn r73_gui_only_wf51_to_wf58_r13_regression_survival_batch_and_objects() -> Result<(), String> {

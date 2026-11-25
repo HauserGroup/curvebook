@@ -33,3 +33,4 @@ serde_json = { workspace = true }
 [dev-dependencies]
 curvebook-testkit = { workspace = true }
 curvebook-ui-egui = { workspace = true, features = ["test-support"] }
+xtask = { path = "../../xtask", default-features = false }

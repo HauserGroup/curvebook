@@ -222,7 +222,9 @@ fn r2_s13_08_09_10_11_xtask_cli_gates_and_ci_falsiness() {
     assert!(agents.contains("cargo xtask workflows"));
 
     let main_rs = fs::read_to_string(root.join("xtask/src/main.rs")).unwrap();
-    assert!(main_rs.contains("ci::run(&root, rest)"), "the dispatcher must execute the staged CI module");
+    assert!(main_rs.contains("xtask::run_cli()"), "main.rs must delegate to xtask::run_cli()");
+    let lib_rs = fs::read_to_string(root.join("xtask/src/lib.rs")).unwrap();
+    assert!(lib_rs.contains("ci::run(&root, rest)"), "the dispatcher must execute the staged CI module");
     // Every other gate must read `CI` through `workflows::is_ci_env()`, never directly.
     let mut sources = Vec::new();
     collect_rs_files(&root.join("xtask/src"), &mut sources).unwrap();

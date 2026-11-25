@@ -4,12 +4,11 @@ use curvebook_doc::SheetId;
 use curvebook_stats::power::{PowerSolveTarget, PowerTestFamily};
 use serde_json::{Map, Value, json};
 
-use super::engine::{insert_nested_field, merge_struct_json};
+use super::engine::{FieldKind, FieldRule, apply_rules_strict, insert_nested_field, merge_struct_json, try_apply_rule};
 use super::graph_layout::convert_target_kind_from_val;
 use super::value_parsers::{
-    norm_key, parse_bool_field, parse_equation_display_mode_str, parse_f64_list_with_locale, parse_finite_f64_with_locale,
-    parse_opt_finite_f64_with_locale, parse_opt_nonempty_string, parse_opt_usize_min, parse_plate_values_json, parse_plate_values_text,
-    parse_positive_usize_arg, parse_str_field, parse_table_kind_str, parse_u64_val, parse_usize_list, parse_usize_min,
+    norm_key, parse_bool_field, parse_equation_display_mode_str, parse_f64_list_with_locale, parse_finite_f64_with_locale, parse_plate_values_json,
+    parse_plate_values_text, parse_positive_usize_arg, parse_str_field, parse_table_kind_str, parse_u64_val, parse_usize_list, parse_usize_min,
 };
 use crate::dialogs_canvas::{
     CheckpointsDialogState, CommandPaletteState, ConstantHookPickerState, ConvertArchetypeDialogState, ExcludeWithReasonDialogState, PrintDialogState,
@@ -117,80 +116,38 @@ pub fn patch_convert_archetype(state: &mut ConvertArchetypeDialogState, fields: 
 }
 
 pub fn patch_exclude_with_reason(state: &mut ExcludeWithReasonDialogState, fields: &Map<String, Value>) -> Result<(), String> {
-    let mut patch = Map::new();
-    for (key, val) in fields {
-        match key.as_str() {
-            "reason_tag" | "exclude.reason_tag" => {
-                let tag = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
-                patch.insert(String::from("reason_tag"), json!(tag));
-            }
-            "note" | "exclude.note" => {
-                let note = if val.is_null() { "" } else { val.as_str().ok_or_else(|| format!("`{key}` must be a string"))? };
-                patch.insert(String::from("note"), json!(note));
-            }
-            other => return Err(format!("unknown ExcludeWithReason field `{other}`")),
-        }
-    }
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["reason_tag", "exclude.reason_tag"], "reason_tag", FieldKind::Str),
+        FieldRule::new(&["note", "exclude.note"], "note", FieldKind::StrOrNullEmpty),
+    ];
+    let patch = apply_rules_strict(fields, RULES, &LocalePreset::default(), "ExcludeWithReason")?;
     merge_struct_json(state, &patch, &[])
 }
 
 pub fn patch_command_palette(state: &mut CommandPaletteState, fields: &Map<String, Value>) -> Result<(), String> {
-    let mut patch = Map::new();
-    for (key, val) in fields {
-        match key.as_str() {
-            "query" | "palette.query" => {
-                let q = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
-                patch.insert(String::from("query"), json!(q));
-            }
-            "selected_index" | "palette.selected_index" => {
-                let raw = val.as_u64().ok_or_else(|| format!("`{key}` must be a non-negative integer"))?;
-                let idx = usize::try_from(raw).map_err(|_| format!("`{key}` exceeds usize"))?;
-                patch.insert(String::from("selected_index"), json!(idx));
-            }
-            other => return Err(format!("unknown CommandPalette field `{other}`")),
-        }
-    }
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["query", "palette.query"], "query", FieldKind::Str),
+        FieldRule::new(&["selected_index", "palette.selected_index"], "selected_index", FieldKind::UsizeMin(0)),
+    ];
+    let patch = apply_rules_strict(fields, RULES, &LocalePreset::default(), "CommandPalette")?;
     merge_struct_json(state, &patch, &[])
 }
 
 pub fn patch_hook_picker(state: &mut ConstantHookPickerState, fields: &Map<String, Value>) -> Result<(), String> {
-    let mut patch = Map::new();
-    for (key, val) in fields {
-        match key.as_str() {
-            "search_query" | "hook.search_query" | "hook.search_input" => {
-                let q = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
-                patch.insert(String::from("search_query"), json!(q));
-            }
-            "selected_index" | "hook.selected_index" => {
-                let idx = if val.is_null() {
-                    None
-                } else {
-                    let raw = val.as_u64().ok_or_else(|| format!("`{key}` must be a non-negative integer"))?;
-                    Some(usize::try_from(raw).map_err(|_| format!("`{key}` exceeds usize"))?)
-                };
-                patch.insert(String::from("selected_index"), json!(idx));
-            }
-            other => return Err(format!("unknown ConstantHookPicker field `{other}`")),
-        }
-    }
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["search_query", "hook.search_query", "hook.search_input"], "search_query", FieldKind::Str),
+        FieldRule::new(&["selected_index", "hook.selected_index"], "selected_index", FieldKind::OptUsizeMin(0)),
+    ];
+    let patch = apply_rules_strict(fields, RULES, &LocalePreset::default(), "ConstantHookPicker")?;
     merge_struct_json(state, &patch, &[])
 }
 
 pub fn patch_checkpoints(state: &mut CheckpointsDialogState, fields: &Map<String, Value>) -> Result<(), String> {
-    let mut patch = Map::new();
-    for (key, val) in fields {
-        match key.as_str() {
-            "name" | "checkpoints.name" => {
-                let s = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
-                patch.insert(String::from("name_draft"), json!(s));
-            }
-            "note" | "checkpoints.note" => {
-                let s = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
-                patch.insert(String::from("note_draft"), json!(s));
-            }
-            other => return Err(format!("unknown checkpoints field `{other}`")),
-        }
-    }
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["name", "checkpoints.name"], "name_draft", FieldKind::Str),
+        FieldRule::new(&["note", "checkpoints.note"], "note_draft", FieldKind::Str),
+    ];
+    let patch = apply_rules_strict(fields, RULES, &LocalePreset::default(), "checkpoints")?;
     merge_struct_json(state, &patch, &[])
 }
 
@@ -296,32 +253,21 @@ fn parse_randomize_groups_val(val: &Value) -> Result<Vec<(String, usize)>, Strin
 }
 
 pub fn patch_random_sample_rows(state: &mut RandomSampleRowsDialogState, fields: &Map<String, Value>) -> Result<(), String> {
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["source_sheet_id", "sample.source_sheet_id"], "source_sheet_id", FieldKind::StrTrimNonEmpty),
+        FieldRule::new(&["sample_size", "sample.sample_size", "rand_sample.n.val"], "sample_size", FieldKind::UsizeMin(1)),
+        FieldRule::new(&["seed", "sample.seed"], "seed", FieldKind::U64),
+        FieldRule::new(&["stratify_column", "sample.stratify_column"], "stratify_column", FieldKind::OptUsizeMin(0)),
+        FieldRule::new(&["proportional_allocation", "sample.proportional_allocation"], "proportional_allocation", FieldKind::Bool),
+        FieldRule::new(&["title", "sample.title"], "title", FieldKind::StrTrimNonEmpty),
+    ];
+    let preset = LocalePreset::default();
     let mut patch = Map::new();
     for (key, val) in fields {
+        if try_apply_rule(key, val, RULES, &preset, &mut patch)? {
+            continue;
+        }
         match key.as_str() {
-            "source_sheet_id" | "sample.source_sheet_id" => {
-                if let Some(s) = val.as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                    patch.insert(String::from("source_sheet_id"), json!(s));
-                }
-            }
-            "sample_size" | "sample.sample_size" | "rand_sample.n.val" => {
-                patch.insert(String::from("sample_size"), json!(parse_usize_min(val, key, 1)?));
-            }
-            "seed" | "sample.seed" => {
-                patch.insert(String::from("seed"), json!(parse_u64_val(val, key)?));
-            }
-            "stratify_column" | "sample.stratify_column" => {
-                patch.insert(String::from("stratify_column"), json!(parse_opt_usize_min(val, key, 0)?));
-            }
-            "proportional_allocation" | "sample.proportional_allocation" => {
-                patch.insert(String::from("proportional_allocation"), json!(parse_bool_field(val, "proportional_allocation")?));
-            }
-            "title" | "sample.title" => {
-                let raw = parse_str_field(val, "title")?.trim();
-                if !raw.is_empty() {
-                    patch.insert(String::from("title"), json!(raw));
-                }
-            }
             "info_sheet_id" | "target_info_sheet_id" | "sample.info_sheet_id" => {
                 let tid = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(SheetId::from);
                 patch.insert(String::from("target_info_sheet_id"), serde_json::to_value(tid).map_err(|e| e.to_string())?);
@@ -337,6 +283,29 @@ pub fn patch_simulate_distributions(
     fields: &Map<String, Value>,
     preset: &LocalePreset,
 ) -> Result<(), String> {
+    const TOP_RULES: &[FieldRule] = &[
+        FieldRule::new(&["n_rows", "row_count", "rows", "simulate.n_rows"], "n_rows", FieldKind::UsizeMin(1)),
+        FieldRule::new(&["seed", "simulate.seed"], "seed", FieldKind::U64),
+        FieldRule::new(
+            &["use_multiple_variables", "multiple_variables", "simulate.use_multiple_variables"],
+            "use_multiple_variables",
+            FieldKind::Bool,
+        ),
+        FieldRule::new(&["title", "simulate.title"], "title", FieldKind::StrTrimNonEmpty),
+    ];
+    const COL0_RULES: &[FieldRule] = &[
+        FieldRule::new(&["column_name", "simulate.column_name"], "name", FieldKind::StrTrimNonEmpty),
+        FieldRule::new(&["min", "simulate.min"], "min", FieldKind::FiniteF64),
+        FieldRule::new(&["max", "simulate.max"], "max", FieldKind::FiniteF64),
+        FieldRule::new(&["mean", "simulate.mean"], "mean", FieldKind::FiniteF64),
+        FieldRule::new(&["sd", "simulate.sd"], "sd", FieldKind::FiniteF64),
+        FieldRule::new(&["mean_log", "simulate.mean_log"], "mean_log", FieldKind::FiniteF64),
+        FieldRule::new(&["sd_log", "simulate.sd_log"], "sd_log", FieldKind::FiniteF64),
+        FieldRule::new(&["trials", "simulate.trials"], "trials", FieldKind::U64),
+        FieldRule::new(&["p", "simulate.p"], "p", FieldKind::FiniteF64),
+        FieldRule::new(&["lambda", "simulate.lambda"], "lambda", FieldKind::FiniteF64),
+        FieldRule::new(&["rate", "simulate.rate"], "rate", FieldKind::FiniteF64),
+    ];
     let mut working = state.clone();
     if working.columns.is_empty() {
         working.columns.push(SimulatedDistColumnDraft::default());
@@ -345,22 +314,10 @@ pub fn patch_simulate_distributions(
     let mut col0_patch = Map::new();
 
     for (key, val) in fields {
+        if try_apply_rule(key, val, TOP_RULES, preset, &mut patch)? || try_apply_rule(key, val, COL0_RULES, preset, &mut col0_patch)? {
+            continue;
+        }
         match key.as_str() {
-            "n_rows" | "row_count" | "rows" | "simulate.n_rows" => {
-                patch.insert(String::from("n_rows"), json!(parse_usize_min(val, key, 1)?));
-            }
-            "seed" | "simulate.seed" => {
-                patch.insert(String::from("seed"), json!(parse_u64_val(val, key)?));
-            }
-            "use_multiple_variables" | "multiple_variables" | "simulate.use_multiple_variables" => {
-                patch.insert(String::from("use_multiple_variables"), json!(parse_bool_field(val, "use_multiple_variables")?));
-            }
-            "title" | "simulate.title" => {
-                let raw = parse_str_field(val, "title")?.trim();
-                if !raw.is_empty() {
-                    patch.insert(String::from("title"), json!(raw));
-                }
-            }
             "columns" | "simulate.columns" => {
                 let arr = val.as_array().ok_or_else(|| String::from("`columns` must be an array"))?;
                 if arr.is_empty() {
@@ -373,57 +330,19 @@ pub fn patch_simulate_distributions(
                     let mut col_map = normalize_sim_column_object(obj, preset, true)?;
                     if let Some(params_val) = obj.get("params") {
                         let params = params_val.as_object().ok_or_else(|| String::from("`params` must be an object"))?;
-                        let sub = normalize_sim_column_object(params, preset, false)?;
-                        col_map.extend(sub);
+                        col_map.extend(normalize_sim_column_object(params, preset, false)?);
                     }
                     if let Some(params) = obj.get("distribution").and_then(Value::as_object) {
-                        let sub = normalize_sim_column_object(params, preset, false)?;
-                        col_map.extend(sub);
+                        col_map.extend(normalize_sim_column_object(params, preset, false)?);
                     }
                     merge_struct_json(&mut col, &col_map, &[])?;
                     parsed.push(col);
                 }
                 patch.insert(String::from("columns"), serde_json::to_value(parsed).map_err(|e| e.to_string())?);
             }
-            "column_name" | "simulate.column_name" => {
-                let s = parse_str_field(val, "column_name")?.trim();
-                if !s.is_empty() {
-                    col0_patch.insert(String::from("name"), json!(s));
-                }
-            }
             "distribution" | "simulate.distribution" => {
                 let d = SimDistKind::from_str(parse_str_field(val, "distribution")?)?;
                 col0_patch.insert(String::from("distribution"), serde_json::to_value(d).map_err(|e| e.to_string())?);
-            }
-            "min" | "simulate.min" => {
-                col0_patch.insert(String::from("min"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "max" | "simulate.max" => {
-                col0_patch.insert(String::from("max"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "mean" | "simulate.mean" => {
-                col0_patch.insert(String::from("mean"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "sd" | "simulate.sd" => {
-                col0_patch.insert(String::from("sd"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "mean_log" | "simulate.mean_log" => {
-                col0_patch.insert(String::from("mean_log"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "sd_log" | "simulate.sd_log" => {
-                col0_patch.insert(String::from("sd_log"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "trials" | "simulate.trials" => {
-                col0_patch.insert(String::from("trials"), json!(parse_u64_val(val, key)?));
-            }
-            "p" | "simulate.p" => {
-                col0_patch.insert(String::from("p"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "lambda" | "simulate.lambda" => {
-                col0_patch.insert(String::from("lambda"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "rate" | "simulate.rate" => {
-                col0_patch.insert(String::from("rate"), json!(parse_finite_f64_with_locale(val, key, preset)?));
             }
             other => return Err(format!("unknown Simulate Distributions field `{other}`")),
         }
@@ -440,6 +359,18 @@ pub fn patch_simulate_distributions(
 }
 
 fn normalize_sim_column_object(obj: &Map<String, Value>, preset: &LocalePreset, allow_params: bool) -> Result<Map<String, Value>, String> {
+    const COL_RULES: &[FieldRule] = &[
+        FieldRule::new(&["min"], "min", FieldKind::FiniteF64),
+        FieldRule::new(&["max"], "max", FieldKind::FiniteF64),
+        FieldRule::new(&["mean", "mu"], "mean", FieldKind::FiniteF64),
+        FieldRule::new(&["sd", "std", "sigma"], "sd", FieldKind::FiniteF64),
+        FieldRule::new(&["mean_log", "meanlog"], "mean_log", FieldKind::FiniteF64),
+        FieldRule::new(&["sd_log", "sdlog"], "sd_log", FieldKind::FiniteF64),
+        FieldRule::new(&["trials", "n"], "trials", FieldKind::U64),
+        FieldRule::new(&["p", "prob", "probability"], "p", FieldKind::FiniteF64),
+        FieldRule::new(&["lambda"], "lambda", FieldKind::FiniteF64),
+        FieldRule::new(&["rate"], "rate", FieldKind::FiniteF64),
+    ];
     let mut out = Map::new();
     if let Some(name) = obj.get("name").or_else(|| obj.get("title")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
         out.insert(String::from("name"), json!(name));
@@ -451,42 +382,15 @@ fn normalize_sim_column_object(obj: &Map<String, Value>, preset: &LocalePreset, 
         out.insert(String::from("distribution"), serde_json::to_value(kind).map_err(|e| e.to_string())?);
     }
     for (field, val) in obj {
+        if try_apply_rule(field, val, COL_RULES, preset, &mut out)? {
+            continue;
+        }
         match field.as_str() {
             "name" | "title" | "distribution" | "kind" => {}
             "params" if allow_params => {
                 if !val.is_object() {
                     return Err(String::from("`params` must be an object"));
                 }
-            }
-            "min" => {
-                out.insert(String::from("min"), json!(parse_finite_f64_with_locale(val, field, preset)?));
-            }
-            "max" => {
-                out.insert(String::from("max"), json!(parse_finite_f64_with_locale(val, field, preset)?));
-            }
-            "mean" | "mu" => {
-                out.insert(String::from("mean"), json!(parse_finite_f64_with_locale(val, field, preset)?));
-            }
-            "sd" | "std" | "sigma" => {
-                out.insert(String::from("sd"), json!(parse_finite_f64_with_locale(val, field, preset)?));
-            }
-            "mean_log" | "meanlog" => {
-                out.insert(String::from("mean_log"), json!(parse_finite_f64_with_locale(val, field, preset)?));
-            }
-            "sd_log" | "sdlog" => {
-                out.insert(String::from("sd_log"), json!(parse_finite_f64_with_locale(val, field, preset)?));
-            }
-            "trials" | "n" => {
-                out.insert(String::from("trials"), json!(parse_u64_val(val, field)?));
-            }
-            "p" | "prob" | "probability" => {
-                out.insert(String::from("p"), json!(parse_finite_f64_with_locale(val, field, preset)?));
-            }
-            "lambda" => {
-                out.insert(String::from("lambda"), json!(parse_finite_f64_with_locale(val, field, preset)?));
-            }
-            "rate" => {
-                out.insert(String::from("rate"), json!(parse_finite_f64_with_locale(val, field, preset)?));
             }
             other => return Err(format!("unknown simulated column field `{other}`")),
         }
@@ -579,24 +483,27 @@ pub fn patch_import_reshape(state: &mut ImportReshapeState, fields: &Map<String,
         }
     }
 
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["title", "import.title", "import_paste.input.title", "sheet_title"], "title", FieldKind::Str),
+        FieldRule::new(&["x_title", "import.x_title"], "x_title", FieldKind::Str),
+        FieldRule::new(&["subtract_blank_mean", "import.subtract_blank_mean"], "subtract_blank_mean", FieldKind::Bool),
+        FieldRule::new(&["tidy_csv", "csv", "import.tidy_csv", "import.csv"], "tidy_csv", FieldKind::Str),
+        FieldRule::new(&["x_col", "import.x_col"], "x_col", FieldKind::OptNonEmptyStr),
+        FieldRule::new(&["group_col", "import.group_col"], "group_col", FieldKind::Str),
+        FieldRule::new(&["replicate_col", "import.replicate_col"], "replicate_col", FieldKind::OptNonEmptyStr),
+        FieldRule::new(&["value_col", "import.value_col"], "value_col", FieldKind::Str),
+        FieldRule::new(&["excluded_col", "import.excluded_col"], "excluded_col", FieldKind::OptNonEmptyStr),
+    ];
+
     for (key, val) in fields {
+        if try_apply_rule(key, val, RULES, &effective_preset, &mut patch)? {
+            continue;
+        }
         match key.as_str() {
             "mode" | "import.mode" | "reshape_mode" | "decimal_separator" | "decimal_sep" | "import.decimal_separator" => {}
-            "title" | "import.title" | "import_paste.input.title" | "sheet_title" => {
-                patch.insert(String::from("title"), json!(parse_str_field(val, "title")?));
-            }
             "target_kind" | "import.target_kind" => {
                 let tk = parse_table_kind_str(parse_str_field(val, "target_kind")?)?;
                 patch.insert(String::from("target_kind"), serde_json::to_value(tk).map_err(|e| e.to_string())?);
-            }
-            "x_title" | "import.x_title" => {
-                patch.insert(String::from("x_title"), json!(parse_str_field(val, "x_title")?));
-            }
-            "subtract_blank_mean" | "import.subtract_blank_mean" => {
-                patch.insert(String::from("subtract_blank_mean"), json!(parse_bool_field(val, "subtract_blank_mean")?));
-            }
-            "tidy_csv" | "csv" | "import.tidy_csv" | "import.csv" => {
-                patch.insert(String::from("tidy_csv"), json!(parse_str_field(val, "tidy_csv")?));
             }
             "data" | "text" | "import.data" => {
                 let s = parse_str_field(val, "data")?;
@@ -624,21 +531,6 @@ pub fn patch_import_reshape(state: &mut ImportReshapeState, fields: &Map<String,
                     _ => s.chars().next().ok_or_else(|| String::from("`delimiter` cannot be empty"))?,
                 };
                 patch.insert(String::from("tidy_delimiter"), json!(delim));
-            }
-            "x_col" | "import.x_col" => {
-                patch.insert(String::from("x_col"), json!(parse_opt_nonempty_string(val, key)?));
-            }
-            "group_col" | "import.group_col" => {
-                patch.insert(String::from("group_col"), json!(parse_str_field(val, "group_col")?));
-            }
-            "replicate_col" | "import.replicate_col" => {
-                patch.insert(String::from("replicate_col"), json!(parse_opt_nonempty_string(val, key)?));
-            }
-            "value_col" | "import.value_col" => {
-                patch.insert(String::from("value_col"), json!(parse_str_field(val, "value_col")?));
-            }
-            "excluded_col" | "import.excluded_col" => {
-                patch.insert(String::from("excluded_col"), json!(parse_opt_nonempty_string(val, key)?));
             }
             other => return Err(format!("unknown Import Reshape field `{other}`")),
         }
@@ -671,6 +563,28 @@ fn parse_wizard_power_solve_target_str(raw: &str) -> Result<PowerSolveTarget, St
 }
 
 pub fn patch_power_wizard(state: &mut PowerWizardState, fields: &Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["standardized_effect", "power.standardized_effect", "effect_size", "d"], "standardized_effect", FieldKind::FiniteF64),
+        FieldRule::new(&["mean_diff", "power.mean_diff"], "mean_diff", FieldKind::FiniteF64),
+        FieldRule::new(&["sd", "sigma", "power.sd"], "sd", FieldKind::FiniteF64),
+        FieldRule::new(&["sd_group2", "power.sd_group2"], "sd_group2", FieldKind::OptFiniteF64),
+        FieldRule::new(&["within_pair_correlation", "r", "power.within_pair_correlation"], "within_pair_correlation", FieldKind::FiniteF64),
+        FieldRule::new(&["paired_sd_diff", "sigma_d", "power.paired_sd_diff"], "paired_sd_diff", FieldKind::FiniteF64),
+        FieldRule::new(&["p1", "power.p1"], "p1", FieldKind::FiniteF64),
+        FieldRule::new(&["p2", "power.p2"], "p2", FieldKind::FiniteF64),
+        FieldRule::new(&["r_squared", "power.r_squared"], "r_squared", FieldKind::FiniteF64),
+        FieldRule::new(&["beta1", "power.beta1"], "beta1", FieldKind::FiniteF64),
+        FieldRule::new(&["sigma_x", "power.sigma_x"], "sigma_x", FieldKind::FiniteF64),
+        FieldRule::new(&["sigma_eps", "power.sigma_eps"], "sigma_eps", FieldKind::FiniteF64),
+        FieldRule::new(&["one_sided_greater", "power.one_sided_greater"], "one_sided_greater", FieldKind::Bool),
+        FieldRule::new(&["alpha", "power.alpha", "power.sidebar.alpha"], "alpha", FieldKind::FiniteF64),
+        FieldRule::new(&["target_power", "power", "power.target_power"], "target_power", FieldKind::FiniteF64),
+        FieldRule::new(&["sample_size", "n", "power.sample_size"], "sample_size", FieldKind::FiniteF64),
+        FieldRule::new(&["sample_size_group2", "n2", "power.sample_size_group2"], "sample_size_group2", FieldKind::OptFiniteF64),
+        FieldRule::new(&["allocation_ratio", "power.allocation_ratio"], "allocation_ratio", FieldKind::FiniteF64),
+        FieldRule::new(&["chi_square_df", "df", "power.chi_square_df"], "chi_square_df", FieldKind::FiniteF64),
+        FieldRule::new(&["continuity_correction", "power.continuity_correction"], "continuity_correction", FieldKind::Bool),
+    ];
     let mut working = state.clone();
     if let Some(fam_val) = fields.get("family").or_else(|| fields.get("power.family")) {
         let fam = parse_wizard_power_family_str(parse_str_field(fam_val, "family")?)?;
@@ -683,6 +597,9 @@ pub fn patch_power_wizard(state: &mut PowerWizardState, fields: &Map<String, Val
     let active_family = working.family;
 
     for (key, val) in fields {
+        if try_apply_rule(key, val, RULES, preset, &mut patch)? {
+            continue;
+        }
         match key.as_str() {
             "family" | "power.family" => {}
             "stage" | "power.stage" => target_stage = Some(parse_power_stage(val)?),
@@ -694,27 +611,8 @@ pub fn patch_power_wizard(state: &mut PowerWizardState, fields: &Map<String, Val
                 let em = parse_power_effect_mode(parse_str_field(val, "effect_mode")?)?;
                 patch.insert(String::from("effect_mode"), serde_json::to_value(em).map_err(|e| e.to_string())?);
             }
-            "standardized_effect" | "power.standardized_effect" | "effect_size" | "d" => {
-                patch.insert(String::from("standardized_effect"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "mean_diff" | "power.mean_diff" => {
-                patch.insert(String::from("mean_diff"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "sd" | "sigma" | "power.sd" => {
-                patch.insert(String::from("sd"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "sd_group2" | "power.sd_group2" => {
-                patch.insert(String::from("sd_group2"), json!(parse_opt_finite_f64_with_locale(val, key, preset)?));
-            }
-            "within_pair_correlation" | "r" | "power.within_pair_correlation" => {
-                patch.insert(String::from("within_pair_correlation"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "paired_sd_diff" | "sigma_d" | "power.paired_sd_diff" => {
-                patch.insert(String::from("paired_sd_diff"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
             "anova_groups" | "num_groups" | "k" | "power.anova_groups" => {
-                let k = parse_positive_usize_arg(val, key, preset)?;
-                patch.insert(String::from("anova_groups"), json!(k.max(2)));
+                patch.insert(String::from("anova_groups"), json!(parse_positive_usize_arg(val, key, preset)?.max(2)));
             }
             "group_means" | "power.group_means" => {
                 let parsed = parse_f64_list_with_locale(val, "group_means", preset)?;
@@ -724,40 +622,19 @@ pub fn patch_power_wizard(state: &mut PowerWizardState, fields: &Map<String, Val
                 patch.insert(String::from("anova_groups"), json!(parsed.len()));
                 patch.insert(String::from("group_means"), json!(parsed));
             }
-            "p1" | "power.p1" => {
-                patch.insert(String::from("p1"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "p2" | "power.p2" => {
-                patch.insert(String::from("p2"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "r_squared" | "power.r_squared" => {
-                patch.insert(String::from("r_squared"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "beta1" | "power.beta1" => {
-                patch.insert(String::from("beta1"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "sigma_x" | "power.sigma_x" => {
-                patch.insert(String::from("sigma_x"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "sigma_eps" | "power.sigma_eps" => {
-                patch.insert(String::from("sigma_eps"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
             "two_tailed" | "power.two_tailed" => {
-                let two = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
+                let two = parse_bool_field(val, key)?;
                 if !two && !active_family.supports_one_sided() {
                     return Err(format!("{} only supports two-tailed tests", active_family.label()));
                 }
                 patch.insert(String::from("two_tailed"), json!(two));
             }
             "one_sided" | "power.one_sided" => {
-                let one = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
+                let one = parse_bool_field(val, key)?;
                 if one && !active_family.supports_one_sided() {
                     return Err(format!("{} only supports two-tailed tests", active_family.label()));
                 }
                 patch.insert(String::from("two_tailed"), json!(!one));
-            }
-            "one_sided_greater" | "power.one_sided_greater" => {
-                patch.insert(String::from("one_sided_greater"), json!(val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?));
             }
             "tail_mode" | "power.tail_mode" => {
                 let raw = parse_str_field(val, "tail_mode")?;
@@ -782,30 +659,7 @@ pub fn patch_power_wizard(state: &mut PowerWizardState, fields: &Map<String, Val
                     _ => return Err(format!("unknown tail mode `{raw}`")),
                 }
             }
-            "alpha" | "power.alpha" | "power.sidebar.alpha" => {
-                patch.insert(String::from("alpha"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "target_power" | "power" | "power.target_power" => {
-                patch.insert(String::from("target_power"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "sample_size" | "n" | "power.sample_size" => {
-                patch.insert(String::from("sample_size"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "sample_size_group2" | "n2" | "power.sample_size_group2" => {
-                patch.insert(String::from("sample_size_group2"), json!(parse_opt_finite_f64_with_locale(val, key, preset)?));
-            }
-            "allocation_ratio" | "power.allocation_ratio" => {
-                patch.insert(String::from("allocation_ratio"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "chi_square_df" | "df" | "power.chi_square_df" => {
-                patch.insert(String::from("chi_square_df"), json!(parse_finite_f64_with_locale(val, key, preset)?));
-            }
-            "continuity_correction" | "power.continuity_correction" => {
-                patch.insert(String::from("continuity_correction"), json!(val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?));
-            }
-            "hover_n" | "power.hover_n" => {
-                hover_actions.push(PowerHoverAction::AtN(parse_finite_f64_with_locale(val, key, preset)?));
-            }
+            "hover_n" | "power.hover_n" => hover_actions.push(PowerHoverAction::AtN(parse_finite_f64_with_locale(val, key, preset)?)),
             "hover_fraction_x" | "power.hover_fraction_x" => {
                 hover_actions.push(PowerHoverAction::AtFraction(parse_finite_f64_with_locale(val, key, preset)?));
             }

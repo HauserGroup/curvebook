@@ -506,6 +506,14 @@ Pages currently serves every file under `docs/` from `main`, so internal Markdow
 - [x] **Docs:** [`github-pages.md`](release/github-pages.md) describes the publish list, the Actions source, and the one-time switch-over. *(Done 2026-11-24 in [`github-pages.md`](release/github-pages.md#what-pages-publishes-r129).)*
 - [x] **Switch-over:** a maintainer sets **Settings → Pages → Source** to **GitHub Actions**, runs the workflow, checks that site pages return 200 and internal files such as `/ROADMAP.md` return 404, then removes `docs/.nojekyll` and the `R12.1` note that Pages publishes from `main` `/docs` ([steps](release/github-pages.md#what-pages-publishes-r129)). *(Done 2026-11-24: switched to GitHub Actions, removed `docs/.nojekyll`, and updated the `R12.1` note.)*
 
+### R12.10 Generate manual HTML purely in CI
+Owner: open · Status: todo · Was: LOC cleanup audit 2026-11-24 · Est. note: 4–8 h · Depends on: `R12.9` · Gate: none
+
+Committed manual HTML snapshots (`docs/manual/*.html`, ~68k lines) add substantial generated-file noise to repository diffs and LOC metrics now that `R12.9` deploys GitHub Pages from GitHub Actions.
+
+- [ ] Build the manual HTML (`docs/manual/latest/` and any active versioned snapshots) inside `.github/workflows/pages.yml` before `cargo xtask pages-stage`, and untrack generated `docs/manual/*.html` from `main`.
+- [ ] Update `xtask/src/docs_site/verify.rs`, `xtask/src/pages_site.rs`, and `xtask/src/brands.rs` so local/CI checks validate generated output in a build directory rather than requiring committed HTML snapshots in `docs/manual/`.
+
 ---
 
 ## R14 Releases & distribution

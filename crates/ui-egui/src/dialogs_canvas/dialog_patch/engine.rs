@@ -1,8 +1,14 @@
-//! Core transactional `serde_json` object-merge primitives for dialog state patching.
+//! Core transactional `serde_json` object-merge primitives and declarative field-rule helpers for dialog state patching.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
+
+use super::value_parsers::{
+    parse_bool_field, parse_finite_f64_with_locale, parse_nonneg_f64, parse_opt_finite_f64_with_locale, parse_opt_nonempty_string,
+    parse_opt_usize_min, parse_str_field, parse_u64_val, parse_usize_min,
+};
+use crate::i18n::LocalePreset;
 
 /// Merge a pre-normalized JSON object `patch` into `target` via
 /// `serde_json::to_value` -> recursive/atomic map merge -> `serde_json::from_value`.
@@ -55,4 +61,107 @@ pub(super) fn insert_nested_field(root: &mut Map<String, Value>, outer: &str, in
         obj.insert(inner.to_owned(), val);
         *entry = Value::Object(obj);
     }
+}
+
+pub(super) fn insert_target_field(root: &mut Map<String, Value>, target: &str, val: Value) {
+    if let Some((outer, inner)) = target.split_once('.') {
+        insert_nested_field(root, outer, inner, val);
+    } else {
+        root.insert(target.to_owned(), val);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum FieldKind {
+    Bool,
+    OptBool,
+    Str,
+    OptStr,
+    StrOrNullEmpty,
+    StrTrimNonEmpty,
+    OptNonEmptyStr,
+    FiniteF64,
+    OptFiniteF64,
+    NonNegF64,
+    UsizeMin(usize),
+    OptUsizeMin(usize),
+    U64,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct FieldRule {
+    pub aliases: &'static [&'static str],
+    pub target: &'static str,
+    pub kind: FieldKind,
+    pub dirty_flag: Option<&'static str>,
+}
+
+impl FieldRule {
+    pub(super) const fn new(aliases: &'static [&'static str], target: &'static str, kind: FieldKind) -> Self {
+        Self { aliases, target, kind, dirty_flag: None }
+    }
+
+    pub(super) const fn with_dirty(aliases: &'static [&'static str], target: &'static str, kind: FieldKind, dirty: &'static str) -> Self {
+        Self { aliases, target, kind, dirty_flag: Some(dirty) }
+    }
+}
+
+pub(super) fn try_apply_rule(
+    key: &str,
+    val: &Value,
+    rules: &[FieldRule],
+    preset: &LocalePreset,
+    patch: &mut Map<String, Value>,
+) -> Result<bool, String> {
+    let Some(rule) = rules.iter().find(|r| r.aliases.contains(&key)) else {
+        return Ok(false);
+    };
+    let parsed: Option<Value> = match rule.kind {
+        FieldKind::Bool => Some(json!(parse_bool_field(val, key)?)),
+        FieldKind::OptBool => Some(json!(match val {
+            Value::Null => None,
+            Value::Bool(b) => Some(*b),
+            _ => return Err(format!("`{key}` must be a boolean or null")),
+        })),
+        FieldKind::Str => Some(json!(parse_str_field(val, key)?)),
+        FieldKind::OptStr => Some(json!(match val {
+            Value::Null => None,
+            Value::String(s) => Some(s.as_str()),
+            _ => return Err(format!("`{key}` must be a string or null")),
+        })),
+        FieldKind::StrOrNullEmpty => Some(json!(if val.is_null() { "" } else { parse_str_field(val, key)? })),
+        FieldKind::StrTrimNonEmpty => {
+            let s = parse_str_field(val, key)?.trim();
+            (!s.is_empty()).then(|| json!(s))
+        }
+        FieldKind::OptNonEmptyStr => Some(json!(parse_opt_nonempty_string(val, key)?)),
+        FieldKind::FiniteF64 => Some(json!(parse_finite_f64_with_locale(val, key, preset)?)),
+        FieldKind::OptFiniteF64 => Some(json!(parse_opt_finite_f64_with_locale(val, key, preset)?)),
+        FieldKind::NonNegF64 => Some(json!(parse_nonneg_f64(val, key, preset)?)),
+        FieldKind::UsizeMin(min) => Some(json!(parse_usize_min(val, key, min)?)),
+        FieldKind::OptUsizeMin(min) => Some(json!(parse_opt_usize_min(val, key, min)?)),
+        FieldKind::U64 => Some(json!(parse_u64_val(val, key)?)),
+    };
+    if let Some(v) = parsed {
+        insert_target_field(patch, rule.target, v);
+        if let Some(flag) = rule.dirty_flag {
+            patch.insert(flag.to_owned(), json!(true));
+        }
+    }
+    Ok(true)
+}
+
+pub(super) fn apply_rules_strict(
+    fields: &Map<String, Value>,
+    rules: &[FieldRule],
+    preset: &LocalePreset,
+    dialog_name: &str,
+) -> Result<Map<String, Value>, String> {
+    let mut patch = Map::new();
+    for (key, val) in fields {
+        if !try_apply_rule(key, val, rules, preset, &mut patch)? {
+            return Err(format!("unknown {dialog_name} field `{key}`"));
+        }
+    }
+    Ok(patch)
 }

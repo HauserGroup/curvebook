@@ -1,23 +1,12 @@
 use super::common::{
-    McpChild, TempWorkdir, assert_approx, decode_base64, find_node, read_result_json, result_scalar_f64, result_tab, save_and_verify_headless,
-    tab_cell_f64,
+    McpChild, TempWorkdir, assert_approx, assert_widget_enabled as common_assert_widget_enabled, decode_base64, read_result_json, result_scalar_f64,
+    result_tab, save_and_verify_headless, tab_cell_f64,
 };
 use curvebook_svg::validate_svg_structure;
 use serde_json::{Value, json};
 
 fn assert_widget_enabled(snap: &Value, wid: &str, expected: bool) -> Result<(), String> {
-    let dialog = snap.get("dialog");
-    let node = dialog
-        .and_then(|d| d.get("controls"))
-        .and_then(|v| find_node(v, wid))
-        .or_else(|| dialog.and_then(|d| d.get("tabs")).and_then(|v| find_node(v, wid)))
-        .or_else(|| dialog.and_then(|d| d.get("buttons")).and_then(|v| find_node(v, wid)))
-        .ok_or_else(|| format!("missing dialog widget `{wid}` in {snap}"))?;
-    let actual = node.get("enabled").and_then(Value::as_bool).unwrap_or(false);
-    if actual != expected {
-        return Err(format!("widget `{wid}` expected enabled={expected}, got {node}"));
-    }
-    Ok(())
+    common_assert_widget_enabled(snap, wid, expected, false)
 }
 
 #[test]

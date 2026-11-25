@@ -8,7 +8,7 @@ use curvebook_doc::{
 };
 use serde_json::{Map, Value, json};
 
-use super::engine::merge_struct_json;
+use super::engine::{FieldKind, FieldRule, merge_struct_json, try_apply_rule};
 use super::r9_misc::{parse_power_family_for_spec, parse_power_solve_target_for_spec, power_tail_mode_from_bool};
 use super::value_parsers::{
     apply_transform_formula_str, norm_key, parse_baseline_operation_str, parse_bool_field, parse_ci_method_choice, parse_cluster_distance_str,
@@ -324,24 +324,6 @@ fn normalize_analyze_extended(
             let agg = parse_subcolumn_aggregation_val(val)?;
             patch.insert(String::from("descriptive_aggregation"), serde_json::to_value(agg).map_err(|e| e.to_string())?);
         }
-        "mv_group_column" | "analyze.mv_group_column" | "analyze.km.mv_group_column" => {
-            patch.insert(String::from("mv_group_column"), json!(parse_opt_usize_min(val, key, 0)?));
-        }
-        "mv_response_column" | "analyze.mv_response_column" => {
-            patch.insert(String::from("mv_response_column"), json!(parse_opt_usize_min(val, key, 0)?));
-        }
-        "sample_size" | "analyze.sample.sample_size" => {
-            patch.insert(String::from("sample_size"), json!(parse_usize_min(val, key, 1)?));
-        }
-        "seed" | "sample_seed" | "analyze.sample.seed" => {
-            patch.insert(String::from("sample_seed"), json!(parse_u64_val(val, key)?));
-        }
-        "stratify_column" | "analyze.sample.stratify_column" => {
-            patch.insert(String::from("sample_stratify_column"), json!(parse_opt_usize_min(val, key, 0)?));
-        }
-        "proportional_allocation" | "analyze.sample.proportional_allocation" => {
-            patch.insert(String::from("sample_proportional"), json!(parse_bool_field(val, "proportional_allocation")?));
-        }
         other => return Err(format!("unknown Analyze field `{other}`")),
     }
     Ok(())
@@ -431,6 +413,41 @@ fn normalize_analyze_two_group_contingency(
 }
 
 fn normalize_analyze_mv_glm_cox_km(key: &str, val: &Value, patch: &mut Map<String, Value>) -> Result<bool, String> {
+    const RULES: &[FieldRule] = &[
+        FieldRule::new(&["k_means_k", "k", "analyze.cluster.k_means_k"], "cluster_k_means_k", FieldKind::OptUsizeMin(1)),
+        FieldRule::new(&["k_sweep_max", "analyze.cluster.k_sweep_max"], "cluster_k_sweep_max", FieldKind::OptUsizeMin(2)),
+        FieldRule::new(&["standardize", "pca_standardize", "analyze.pca.standardize"], "pca_standardize", FieldKind::Bool),
+        FieldRule::new(&["spearman_rank", "analyze.corr.spearman_rank", "analyze.correlation.spearman_rank"], "corr_spearman_rank", FieldKind::Bool),
+        FieldRule::new(&["imputations_m", "m", "analyze.mi.imputations_m", "analyze.imputation.m"], "imputation_m", FieldKind::UsizeMin(1)),
+        FieldRule::new(&["compute_vif", "analyze.glm.compute_vif"], "glm_compute_vif", FieldKind::Bool),
+        FieldRule::new(
+            &["trend_test", "km_trend_test", "analyze.km.trend_test", "log_rank_for_trend", "analyze.km.log_rank_for_trend"],
+            "km_trend_test",
+            FieldKind::Bool,
+        ),
+        FieldRule::new(&["mv_time_column", "km_mv_time_column", "analyze.km.mv_time_column"], "km_mv_time_column", FieldKind::OptUsizeMin(0)),
+        FieldRule::new(&["mv_status_column", "km_mv_status_column", "analyze.km.mv_status_column"], "km_mv_status_column", FieldKind::OptUsizeMin(0)),
+        FieldRule::new(
+            &["log_rank_mantel_cox", "km_log_rank_mantel_cox", "analyze.km.log_rank_mantel_cox"],
+            "km_log_rank_mantel_cox",
+            FieldKind::Bool,
+        ),
+        FieldRule::new(
+            &["gehan_breslow_wilcoxon", "km_gehan_breslow_wilcoxon", "analyze.km.gehan_breslow_wilcoxon"],
+            "km_gehan_breslow_wilcoxon",
+            FieldKind::Bool,
+        ),
+        FieldRule::new(&["mv_y_column", "analyze.fit.mv_y_column"], "mv_y_column", FieldKind::OptUsizeMin(0)),
+        FieldRule::new(&["mv_group_column", "analyze.mv_group_column", "analyze.km.mv_group_column"], "mv_group_column", FieldKind::OptUsizeMin(0)),
+        FieldRule::new(&["mv_response_column", "analyze.mv_response_column"], "mv_response_column", FieldKind::OptUsizeMin(0)),
+        FieldRule::new(&["sample_size", "analyze.sample.sample_size"], "sample_size", FieldKind::UsizeMin(1)),
+        FieldRule::new(&["seed", "sample_seed", "analyze.sample.seed"], "sample_seed", FieldKind::U64),
+        FieldRule::new(&["stratify_column", "analyze.sample.stratify_column"], "sample_stratify_column", FieldKind::OptUsizeMin(0)),
+        FieldRule::new(&["proportional_allocation", "analyze.sample.proportional_allocation"], "sample_proportional", FieldKind::Bool),
+    ];
+    if try_apply_rule(key, val, RULES, &LocalePreset::default(), patch)? {
+        return Ok(true);
+    }
     match key {
         "distance" | "cluster_distance" | "analyze.cluster.distance" => {
             let cd = parse_cluster_distance_str(parse_str_field(val, "distance")?)?;
@@ -440,33 +457,14 @@ fn normalize_analyze_mv_glm_cox_km(key: &str, val: &Value, patch: &mut Map<Strin
             let cl = parse_cluster_linkage_str(parse_str_field(val, "linkage")?)?;
             patch.insert(String::from("cluster_linkage"), serde_json::to_value(cl).map_err(|e| e.to_string())?);
         }
-        "k_means_k" | "k" | "analyze.cluster.k_means_k" => {
-            patch.insert(String::from("cluster_k_means_k"), json!(parse_opt_usize_min(val, key, 1)?));
-        }
-        "k_sweep_max" | "analyze.cluster.k_sweep_max" => {
-            patch.insert(String::from("cluster_k_sweep_max"), json!(parse_opt_usize_min(val, key, 2)?));
-        }
-        "standardize" | "pca_standardize" | "analyze.pca.standardize" => {
-            patch.insert(String::from("pca_standardize"), json!(parse_bool_field(val, "standardize")?));
-        }
-        "spearman_rank" | "analyze.corr.spearman_rank" | "analyze.correlation.spearman_rank" => {
-            patch.insert(String::from("corr_spearman_rank"), json!(parse_bool_field(val, "spearman_rank")?));
-        }
-        "imputations_m" | "m" | "analyze.mi.imputations_m" | "analyze.imputation.m" => {
-            patch.insert(String::from("imputation_m"), json!(parse_usize_min(val, key, 1)?));
-        }
         "family" | "glm_family" | "analyze.glm.family" => {
             let gf = parse_glm_family_str(parse_str_field(val, "glm_family")?)?;
             patch.insert(String::from("glm_family"), serde_json::to_value(gf).map_err(|e| e.to_string())?);
         }
         "reference_levels" | "analyze.reference_levels" => {
-            let refs = parse_reference_levels(val)?;
-            let rv = serde_json::to_value(refs).map_err(|e| e.to_string())?;
+            let rv = serde_json::to_value(parse_reference_levels(val)?).map_err(|e| e.to_string())?;
             patch.insert(String::from("glm_reference_levels"), rv.clone());
             patch.insert(String::from("cox_reference_levels"), rv);
-        }
-        "compute_vif" | "analyze.glm.compute_vif" => {
-            patch.insert(String::from("glm_compute_vif"), json!(parse_bool_field(val, "compute_vif")?));
         }
         "time_column" | "cox_time_column" | "analyze.cox.time_column" => {
             patch.insert(String::from("cox_time_column"), json!(Some(parse_usize_min(val, key, 0)?)));
@@ -481,21 +479,6 @@ fn normalize_analyze_mv_glm_cox_km(key: &str, val: &Value, patch: &mut Map<Strin
             let tm = parse_cox_tie_method_str(parse_str_field(val, "tie_method")?)?;
             patch.insert(String::from("cox_tie_method"), serde_json::to_value(tm).map_err(|e| e.to_string())?);
         }
-        "trend_test" | "km_trend_test" | "analyze.km.trend_test" | "log_rank_for_trend" | "analyze.km.log_rank_for_trend" => {
-            patch.insert(String::from("km_trend_test"), json!(parse_bool_field(val, "trend_test")?));
-        }
-        "mv_time_column" | "km_mv_time_column" | "analyze.km.mv_time_column" => {
-            patch.insert(String::from("km_mv_time_column"), json!(parse_opt_usize_min(val, key, 0)?));
-        }
-        "mv_status_column" | "km_mv_status_column" | "analyze.km.mv_status_column" => {
-            patch.insert(String::from("km_mv_status_column"), json!(parse_opt_usize_min(val, key, 0)?));
-        }
-        "log_rank_mantel_cox" | "km_log_rank_mantel_cox" | "analyze.km.log_rank_mantel_cox" => {
-            patch.insert(String::from("km_log_rank_mantel_cox"), json!(parse_bool_field(val, "log_rank_mantel_cox")?));
-        }
-        "gehan_breslow_wilcoxon" | "km_gehan_breslow_wilcoxon" | "analyze.km.gehan_breslow_wilcoxon" => {
-            patch.insert(String::from("km_gehan_breslow_wilcoxon"), json!(parse_bool_field(val, "gehan_breslow_wilcoxon")?));
-        }
         "km_multiplicity_method" | "analyze.km.multiplicity_method" => {
             let mm = parse_multiplicity_method_name(parse_str_field(val, "multiplicity_method")?, 0)?;
             patch.insert(String::from("km_multiplicity_method"), serde_json::to_value(mm).map_err(|e| e.to_string())?);
@@ -505,14 +488,10 @@ fn normalize_analyze_mv_glm_cox_km(key: &str, val: &Value, patch: &mut Map<Strin
             patch.insert(String::from("custom_dsl"), json!(dsl));
         }
         "parameter_rules" | "analyze.fit.parameter_rules" => {
-            let pr = parse_parameter_rules(val)?;
-            patch.insert(String::from("parameter_rules"), serde_json::to_value(pr).map_err(|e| e.to_string())?);
+            patch.insert(String::from("parameter_rules"), serde_json::to_value(parse_parameter_rules(val)?).map_err(|e| e.to_string())?);
         }
         "mv_x_columns" | "analyze.fit.mv_x_columns" => {
             patch.insert(String::from("mv_x_columns"), json!(parse_usize_list(val, key)?));
-        }
-        "mv_y_column" | "analyze.fit.mv_y_column" => {
-            patch.insert(String::from("mv_y_column"), json!(parse_opt_usize_min(val, key, 0)?));
         }
         "mv_group_columns" | "analyze.fit.mv_group_columns" => {
             patch.insert(String::from("mv_group_columns"), json!(parse_usize_list(val, key)?));

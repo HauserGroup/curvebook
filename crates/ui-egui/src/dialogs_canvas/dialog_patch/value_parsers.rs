@@ -23,6 +23,17 @@ pub(super) fn norm_key(raw: &str) -> String {
     raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
 }
 
+macro_rules! norm_enum_parser {
+    ($fn_name:ident, $ty:ty, $err_label:literal, $( $($pat:literal)|+ => $expr:expr ),+ $(,)?) => {
+        pub(super) fn $fn_name(raw: &str) -> Result<$ty, String> {
+            match norm_key(raw).as_str() {
+                $( $($pat)|+ => Ok($expr), )+
+                _ => Err(format!(concat!("unknown ", $err_label, " `{}`"), raw)),
+            }
+        }
+    };
+}
+
 pub(super) fn parse_bool_field(val: &Value, field: &str) -> Result<bool, String> {
     val.as_bool().ok_or_else(|| format!("`{field}` must be boolean"))
 }
@@ -253,28 +264,22 @@ pub(super) fn parse_one_way_method_str(raw: &str, saved_gg: bool) -> Result<OneW
     }
 }
 
-pub(super) fn parse_power_family_str(raw: &str) -> Result<PowerTestFamily, String> {
-    match norm_key(raw).as_str() {
-        "unpairedt" | "twosampleunpairedt" | "independentt" | "twosamplet" => Ok(PowerTestFamily::TwoSampleUnpairedT),
-        "pairedt" | "twosamplepairedt" | "dependentt" => Ok(PowerTestFamily::TwoSamplePairedT),
-        "onesamplet" | "singlesamplet" => Ok(PowerTestFamily::OneSampleT),
-        "onewayanova" | "anova" => Ok(PowerTestFamily::OneWayAnova),
-        "twoproportions" | "proportions" => Ok(PowerTestFamily::TwoProportions),
-        "correlation" | "pearsoncorrelation" => Ok(PowerTestFamily::Correlation),
-        "chisquare" | "chi2" => Ok(PowerTestFamily::ChiSquare),
-        "simplelinearregression" | "linearregression" | "regression" | "simplelinear" => Ok(PowerTestFamily::SimpleLinearRegression),
-        _ => Err(format!("unknown power test family `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_power_family_str, PowerTestFamily, "power test family",
+    "unpairedt" | "twosampleunpairedt" | "independentt" | "twosamplet" => PowerTestFamily::TwoSampleUnpairedT,
+    "pairedt" | "twosamplepairedt" | "dependentt" => PowerTestFamily::TwoSamplePairedT,
+    "onesamplet" | "singlesamplet" => PowerTestFamily::OneSampleT,
+    "onewayanova" | "anova" => PowerTestFamily::OneWayAnova,
+    "twoproportions" | "proportions" => PowerTestFamily::TwoProportions,
+    "correlation" | "pearsoncorrelation" => PowerTestFamily::Correlation,
+    "chisquare" | "chi2" => PowerTestFamily::ChiSquare,
+    "simplelinearregression" | "linearregression" | "regression" | "simplelinear" => PowerTestFamily::SimpleLinearRegression,
+);
 
-pub(super) fn parse_power_solve_target_str(raw: &str) -> Result<PowerSolveTarget, String> {
-    match norm_key(raw).as_str() {
-        "samplesize" | "n" => Ok(PowerSolveTarget::SampleSize),
-        "power" => Ok(PowerSolveTarget::Power),
-        "detectableeffect" | "effect" | "mde" => Ok(PowerSolveTarget::DetectableEffect),
-        _ => Err(format!("unknown power solve target `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_power_solve_target_str, PowerSolveTarget, "power solve target",
+    "samplesize" | "n" => PowerSolveTarget::SampleSize,
+    "power" => PowerSolveTarget::Power,
+    "detectableeffect" | "effect" | "mde" => PowerSolveTarget::DetectableEffect,
+);
 
 pub(super) fn parse_multiplicity_method_name(raw: &str, control_col: usize) -> Result<MultiplicityMethod, String> {
     match norm_key(raw).as_str() {
@@ -353,60 +358,45 @@ pub(super) fn parse_subcolumn_aggregation_val(val: &Value) -> Result<SubcolumnAg
     }
 }
 
-pub(super) fn parse_baseline_operation_str(raw: &str) -> Result<BaselineOperation, String> {
-    match norm_key(raw).as_str() {
-        "difference" | "subtract" => Ok(BaselineOperation::Difference),
-        "ratio" | "divide" => Ok(BaselineOperation::Ratio),
-        "percentchange" | "pctchange" | "percent" => Ok(BaselineOperation::PercentChange),
-        "fractionalchange" | "fraction" => Ok(BaselineOperation::FractionalChange),
-        _ => Err(format!("unknown baseline operation `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_baseline_operation_str, BaselineOperation, "baseline operation",
+    "difference" | "subtract" => BaselineOperation::Difference,
+    "ratio" | "divide" => BaselineOperation::Ratio,
+    "percentchange" | "pctchange" | "percent" => BaselineOperation::PercentChange,
+    "fractionalchange" | "fraction" => BaselineOperation::FractionalChange,
+);
 
-pub(super) fn parse_grouped_arrangement_str(raw: &str) -> Result<GroupedArrangement, String> {
-    match norm_key(raw).as_str() {
-        "interleaved" | "sidebyside" => Ok(GroupedArrangement::Interleaved),
-        "stacked" => Ok(GroupedArrangement::Stacked),
-        "superimposed" | "overlaid" | "overlay" => Ok(GroupedArrangement::Superimposed),
-        _ => Err(format!("unknown grouped_arrangement `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_grouped_arrangement_str, GroupedArrangement, "grouped_arrangement",
+    "interleaved" | "sidebyside" => GroupedArrangement::Interleaved,
+    "stacked" => GroupedArrangement::Stacked,
+    "superimposed" | "overlaid" | "overlay" => GroupedArrangement::Superimposed,
+);
 
-pub(super) fn parse_graph_kind_str(raw: &str) -> Result<GraphKind, String> {
-    match norm_key(raw).as_str() {
-        "xy" | "scatter" | "scatterline" => Ok(GraphKind::Xy),
-        "column" | "col" => Ok(GraphKind::Column),
-        "grouped" => Ok(GraphKind::Grouped),
-        "contingency" => Ok(GraphKind::Contingency),
-        "partsofwhole" | "parts" | "donut" | "pie" => Ok(GraphKind::PartsOfWhole),
-        "survival" | "km" | "kaplanmeier" => Ok(GraphKind::Survival),
-        "multiplevariables" | "multivariate" | "bubble" => Ok(GraphKind::MultipleVariables),
-        _ => Err(format!("unknown graph_kind `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_graph_kind_str, GraphKind, "graph_kind",
+    "xy" | "scatter" | "scatterline" => GraphKind::Xy,
+    "column" | "col" => GraphKind::Column,
+    "grouped" => GraphKind::Grouped,
+    "contingency" => GraphKind::Contingency,
+    "partsofwhole" | "parts" | "donut" | "pie" => GraphKind::PartsOfWhole,
+    "survival" | "km" | "kaplanmeier" => GraphKind::Survival,
+    "multiplevariables" | "multivariate" | "bubble" => GraphKind::MultipleVariables,
+);
 
-pub(super) fn parse_palette_str(raw: &str) -> Result<PaletteId, String> {
-    match norm_key(raw).as_str() {
-        "okabeito" | "default" => Ok(PaletteId::OkabeIto),
-        "paultolbright" | "bright" => Ok(PaletteId::PaulTolBright),
-        "paultolmuted" | "muted" => Ok(PaletteId::PaulTolMuted),
-        "paultolhighcontrast" | "highcontrast" => Ok(PaletteId::PaulTolHighContrast),
-        "paultolvibrant" | "vibrant" => Ok(PaletteId::PaulTolVibrant),
-        "monochromeprint" | "monochrome" | "grayscale" | "greyscale" => Ok(PaletteId::MonochromePrint),
-        _ => Err(format!("unknown palette `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_palette_str, PaletteId, "palette",
+    "okabeito" | "default" => PaletteId::OkabeIto,
+    "paultolbright" | "bright" => PaletteId::PaulTolBright,
+    "paultolmuted" | "muted" => PaletteId::PaulTolMuted,
+    "paultolhighcontrast" | "highcontrast" => PaletteId::PaulTolHighContrast,
+    "paultolvibrant" | "vibrant" => PaletteId::PaulTolVibrant,
+    "monochromeprint" | "monochrome" | "grayscale" | "greyscale" => PaletteId::MonochromePrint,
+);
 
-pub(super) fn parse_frame_preset_str(raw: &str) -> Result<FramePreset, String> {
-    match norm_key(raw).as_str() {
-        "openl" | "lframe" => Ok(FramePreset::OpenL),
-        "offsetrangetufte" | "offset" | "tufte" => Ok(FramePreset::OffsetRangeTufte),
-        "plainboxed" | "boxed" | "plain" => Ok(FramePreset::PlainBoxed),
-        "dualysecondaryright" | "dualy" => Ok(FramePreset::DualYSecondaryRight),
-        "origincrossing" | "origin" => Ok(FramePreset::OriginCrossing),
-        _ => Err(format!("unknown frame_preset `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_frame_preset_str, FramePreset, "frame_preset",
+    "openl" | "lframe" => FramePreset::OpenL,
+    "offsetrangetufte" | "offset" | "tufte" => FramePreset::OffsetRangeTufte,
+    "plainboxed" | "boxed" | "plain" => FramePreset::PlainBoxed,
+    "dualysecondaryright" | "dualy" => FramePreset::DualYSecondaryRight,
+    "origincrossing" | "origin" => FramePreset::OriginCrossing,
+);
 
 pub(super) fn parse_math_preset_opt(val: &Value) -> Result<Option<MathTransformPreset>, String> {
     if val.is_null() {
@@ -479,72 +469,51 @@ pub(super) fn apply_transform_formula_str(
     Ok(())
 }
 
-pub(super) fn parse_cluster_distance_str(raw: &str) -> Result<ClusterDistance, String> {
-    match norm_key(raw).as_str() {
-        "euclidean" | "l2" => Ok(ClusterDistance::Euclidean),
-        "manhattan" | "cityblock" | "l1" => Ok(ClusterDistance::Manhattan),
-        "pearson" | "correlation" => Ok(ClusterDistance::Pearson),
-        "cosine" => Ok(ClusterDistance::Cosine),
-        _ => Err(format!("unknown cluster distance `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_cluster_distance_str, ClusterDistance, "cluster distance",
+    "euclidean" | "l2" => ClusterDistance::Euclidean,
+    "manhattan" | "cityblock" | "l1" => ClusterDistance::Manhattan,
+    "pearson" | "correlation" => ClusterDistance::Pearson,
+    "cosine" => ClusterDistance::Cosine,
+);
 
-pub(super) fn parse_cluster_linkage_str(raw: &str) -> Result<ClusterLinkage, String> {
-    match norm_key(raw).as_str() {
-        "ward" | "wardd2" => Ok(ClusterLinkage::Ward),
-        "complete" => Ok(ClusterLinkage::Complete),
-        "single" => Ok(ClusterLinkage::Single),
-        "upgma" | "average" => Ok(ClusterLinkage::Upgma),
-        "wpgma" | "mcquitty" => Ok(ClusterLinkage::Wpgma),
-        "centroid" => Ok(ClusterLinkage::Centroid),
-        "median" => Ok(ClusterLinkage::Median),
-        _ => Err(format!("unknown cluster linkage `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_cluster_linkage_str, ClusterLinkage, "cluster linkage",
+    "ward" | "wardd2" => ClusterLinkage::Ward,
+    "complete" => ClusterLinkage::Complete,
+    "single" => ClusterLinkage::Single,
+    "upgma" | "average" => ClusterLinkage::Upgma,
+    "wpgma" | "mcquitty" => ClusterLinkage::Wpgma,
+    "centroid" => ClusterLinkage::Centroid,
+    "median" => ClusterLinkage::Median,
+);
 
-pub(super) fn parse_glm_family_str(raw: &str) -> Result<GlmFamily, String> {
-    match norm_key(raw).as_str() {
-        "linear" | "gaussian" | "ols" => Ok(GlmFamily::Linear),
-        "logistic" | "binomial" | "logit" => Ok(GlmFamily::Logistic),
-        "poisson" | "loglinear" => Ok(GlmFamily::Poisson),
-        _ => Err(format!("unknown GLM family `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_glm_family_str, GlmFamily, "GLM family",
+    "linear" | "gaussian" | "ols" => GlmFamily::Linear,
+    "logistic" | "binomial" | "logit" => GlmFamily::Logistic,
+    "poisson" | "loglinear" => GlmFamily::Poisson,
+);
 
-pub(super) fn parse_cox_tie_method_str(raw: &str) -> Result<CoxTieMethod, String> {
-    match norm_key(raw).as_str() {
-        "breslow" => Ok(CoxTieMethod::Breslow),
-        "efron" => Ok(CoxTieMethod::Efron),
-        "exact" => Ok(CoxTieMethod::Exact),
-        _ => Err(format!("unknown Cox tie method `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_cox_tie_method_str, CoxTieMethod, "Cox tie method",
+    "breslow" => CoxTieMethod::Breslow,
+    "efron" => CoxTieMethod::Efron,
+    "exact" => CoxTieMethod::Exact,
+);
 
-pub(super) fn parse_ss_type_str(raw: &str) -> Result<SumOfSquaresType, String> {
-    match norm_key(raw).as_str() {
-        "typei" | "type1" | "i" | "1" | "sequential" => Ok(SumOfSquaresType::TypeI),
-        "typeiii" | "type3" | "iii" | "3" => Ok(SumOfSquaresType::TypeIII),
-        _ => Err(format!("unknown sum-of-squares type `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_ss_type_str, SumOfSquaresType, "sum-of-squares type",
+    "typei" | "type1" | "i" | "1" | "sequential" => SumOfSquaresType::TypeI,
+    "typeiii" | "type3" | "iii" | "3" => SumOfSquaresType::TypeIII,
+);
 
-pub(super) fn parse_rm_design_str(raw: &str) -> Result<RepeatedMeasuresDesign, String> {
-    match norm_key(raw).as_str() {
-        "none" | "nomatching" => Ok(RepeatedMeasuresDesign::None),
-        "rowfactormatched" | "row" | "rowfactor" => Ok(RepeatedMeasuresDesign::RowFactorMatched),
-        "columnfactormatched" | "column" | "col" | "columnfactor" => Ok(RepeatedMeasuresDesign::ColumnFactorMatched),
-        "bothfactorsmatched" | "both" => Ok(RepeatedMeasuresDesign::BothFactorsMatched),
-        _ => Err(format!("unknown repeated measures design `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_rm_design_str, RepeatedMeasuresDesign, "repeated measures design",
+    "none" | "nomatching" => RepeatedMeasuresDesign::None,
+    "rowfactormatched" | "row" | "rowfactor" => RepeatedMeasuresDesign::RowFactorMatched,
+    "columnfactormatched" | "column" | "col" | "columnfactor" => RepeatedMeasuresDesign::ColumnFactorMatched,
+    "bothfactorsmatched" | "both" => RepeatedMeasuresDesign::BothFactorsMatched,
+);
 
-pub(super) fn parse_residual_covariance_str(raw: &str) -> Result<ResidualCovariance, String> {
-    match norm_key(raw).as_str() {
-        "compoundsymmetry" | "cs" | "randomintercept" => Ok(ResidualCovariance::CompoundSymmetry),
-        "unstructured" | "un" | "general" => Ok(ResidualCovariance::Unstructured),
-        _ => Err(format!("unknown residual covariance structure `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_residual_covariance_str, ResidualCovariance, "residual covariance structure",
+    "compoundsymmetry" | "cs" | "randomintercept" => ResidualCovariance::CompoundSymmetry,
+    "unstructured" | "un" | "general" => ResidualCovariance::Unstructured,
+);
 
 pub(super) fn parse_weighting_scheme(val: &Value) -> Result<WeightingScheme, String> {
     if let Ok(direct) = serde_json::from_value::<WeightingScheme>(val.clone()) {
@@ -777,54 +746,39 @@ pub(super) fn parse_bracket_label_mode(val: &Value) -> Result<BracketLabelMode, 
     }
 }
 
-pub(super) fn parse_pairwise_display_mode_str(raw: &str) -> Result<PairwiseDisplayMode, String> {
-    match norm_key(raw).as_str() {
-        "bracketsonly" | "brackets" => Ok(PairwiseDisplayMode::BracketsOnly),
-        "compactletterdisplayonly" | "cldonly" | "cld" | "lettersonly" | "letters" => Ok(PairwiseDisplayMode::CompactLetterDisplayOnly),
-        "bracketsandcompactletterdisplay" | "bracketsandcld" | "both" => Ok(PairwiseDisplayMode::BracketsAndCompactLetterDisplay),
-        _ => Err(format!("unknown pairwise display mode `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_pairwise_display_mode_str, PairwiseDisplayMode, "pairwise display mode",
+    "bracketsonly" | "brackets" => PairwiseDisplayMode::BracketsOnly,
+    "compactletterdisplayonly" | "cldonly" | "cld" | "lettersonly" | "letters" => PairwiseDisplayMode::CompactLetterDisplayOnly,
+    "bracketsandcompactletterdisplay" | "bracketsandcld" | "both" => PairwiseDisplayMode::BracketsAndCompactLetterDisplay,
+);
 
-pub(super) fn parse_cld_ordering_str(raw: &str) -> Result<CldOrdering, String> {
-    match norm_key(raw).as_str() {
-        "descendingmean" | "descending" | "desc" | "highestfirst" => Ok(CldOrdering::DescendingMean),
-        "ascendingmean" | "ascending" | "asc" | "lowestfirst" => Ok(CldOrdering::AscendingMean),
-        _ => Err(format!("unknown CLD ordering `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_cld_ordering_str, CldOrdering, "CLD ordering",
+    "descendingmean" | "descending" | "desc" | "highestfirst" => CldOrdering::DescendingMean,
+    "ascendingmean" | "ascending" | "asc" | "lowestfirst" => CldOrdering::AscendingMean,
+);
 
-pub(super) fn parse_colormap_id_str(raw: &str) -> Result<ColormapId, String> {
-    match norm_key(raw).as_str() {
-        "viridis" => Ok(ColormapId::Viridis),
-        "cividis" => Ok(ColormapId::Cividis),
-        "plasma" => Ok(ColormapId::Plasma),
-        "divergingbluered" | "bluered" => Ok(ColormapId::DivergingBlueRed),
-        "grayscale" | "gray" => Ok(ColormapId::Grayscale),
-        _ => Err(format!("unknown colormap `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_colormap_id_str, ColormapId, "colormap",
+    "viridis" => ColormapId::Viridis,
+    "cividis" => ColormapId::Cividis,
+    "plasma" => ColormapId::Plasma,
+    "divergingbluered" | "bluered" => ColormapId::DivergingBlueRed,
+    "grayscale" | "gray" => ColormapId::Grayscale,
+);
 
 pub(super) fn parse_journal_preset_str(raw: &str) -> Result<JournalWidthPreset, String> {
     JournalWidthPreset::from_canonical_name(&norm_key(raw)).ok_or_else(|| format!("unknown journal preset `{raw}`"))
 }
 
-pub(super) fn parse_page_orientation_str(raw: &str) -> Result<PageOrientation, String> {
-    match norm_key(raw).as_str() {
-        "portrait" => Ok(PageOrientation::Portrait),
-        "landscape" => Ok(PageOrientation::Landscape),
-        _ => Err(format!("unknown page orientation `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_page_orientation_str, PageOrientation, "page orientation",
+    "portrait" => PageOrientation::Portrait,
+    "landscape" => PageOrientation::Landscape,
+);
 
-pub(super) fn parse_panel_badge_style_str(raw: &str) -> Result<PanelBadgeStyle, String> {
-    match norm_key(raw).as_str() {
-        "uppercaseletters" | "uppercase" | "abc" => Ok(PanelBadgeStyle::UpperCaseLetters),
-        "lowercaseletters" | "lowercase" => Ok(PanelBadgeStyle::LowerCaseLetters),
-        "none" => Ok(PanelBadgeStyle::None),
-        _ => Err(format!("unknown panel badge style `{raw}`")),
-    }
-}
+norm_enum_parser!(parse_panel_badge_style_str, PanelBadgeStyle, "panel badge style",
+    "uppercaseletters" | "uppercase" | "abc" => PanelBadgeStyle::UpperCaseLetters,
+    "lowercaseletters" | "lowercase" => PanelBadgeStyle::LowerCaseLetters,
+    "none" => PanelBadgeStyle::None,
+);
 
 pub(super) fn parse_export_format(val: &Value) -> Result<ExportFigureFormat, String> {
     if let Ok(direct) = serde_json::from_value::<ExportFigureFormat>(val.clone()) {

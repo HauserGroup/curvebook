@@ -1633,7 +1633,6 @@ enum PrismPolicy<'a> {
         allow_it_statistica: bool,
         allow_test_container_op: bool,
     },
-    #[cfg(test)]
     UiTextRun {
         allow_it_statistica: bool,
         allow_palette_cmd_id: bool,
@@ -1802,7 +1801,6 @@ fn is_statistica_match_exempt(raw: &str, policy: PrismPolicy<'_>, pos: usize, en
     match policy {
         PrismPolicy::RustComment { allow_it_statistica } => allow_it_statistica,
         PrismPolicy::UiOrAppRustLiteral { allow_it_statistica, .. } => allow_it_statistica,
-        #[cfg(test)]
         PrismPolicy::UiTextRun { allow_it_statistica, .. } => allow_it_statistica,
         _ => false,
     }
@@ -1836,7 +1834,6 @@ fn is_prism_match_exempt(raw: &str, lower: &str, pos: usize, end: usize, policy:
                 || (allow_pzfx_xml && is_xml_prism_tag)
                 || (allow_test_container_op && raw.as_bytes().get(pos..end) == Some(b"prism"))
         }
-        #[cfg(test)]
         PrismPolicy::UiTextRun { allow_palette_cmd_id, .. } => allow_palette_cmd_id && is_cmd_prism,
         PrismPolicy::SvgTitleOrDesc { prev_word } => is_preceded_by_optical_modifier(lower.get(..pos).unwrap_or(""), prev_word),
     }
@@ -2106,10 +2103,15 @@ fn check_single_string(path: &str, line: usize, text: &str, prism_policy: PrismP
     check_single_string_with_extra(path, line, text, prism_policy, false, out);
 }
 
+/// Scan a single UI/egui/AccessKit text run under `PrismPolicy::UiTextRun`.
+pub fn check_ui_text_run(path: &str, line: usize, text: &str, allow_it_statistica: bool, allow_palette_cmd_id: bool, out: &mut Vec<BrandHit>) {
+    let policy = PrismPolicy::UiTextRun { allow_it_statistica, allow_palette_cmd_id };
+    check_single_string(path, line, text, policy, out);
+}
+
 /// Scan arbitrary UI, `egui_shell`, AccessKit, or tooltip `&str` slices for external
 /// brands and suite names. Allows `.prism` / `*.prism` only inside explicit import/export
 /// file-type descriptions.
-#[cfg(test)]
 #[must_use]
 pub fn check_text_runs<I, S>(source: &str, runs: I) -> Vec<BrandHit>
 where
@@ -2125,7 +2127,6 @@ where
 }
 
 /// Strictly scan text runs, rejecting every external brand, suite name, and non-extension `"prism"` mention.
-#[cfg(test)]
 #[must_use]
 pub fn check_text_runs_strict<I, S>(source: &str, runs: I) -> Vec<BrandHit>
 where
@@ -2141,7 +2142,6 @@ where
 
 /// Scan `(label, text)` pairs (for example `(node.id, node.a11y.label)` or `(key, text)`),
 /// tagging each hit with `label`.
-#[cfg(test)]
 #[must_use]
 pub fn check_labeled_text_runs<'a, I>(runs: I) -> Vec<BrandHit>
 where
@@ -2159,7 +2159,6 @@ where
 ///
 /// Rejects non-extension `"prism"` mentions everywhere, and permits lowercase Italian
 /// `"statistica"` only inside `locale == "it"`.
-#[cfg(test)]
 #[must_use]
 pub fn check_i18n_catalog_entries<'a, I>(entries: I) -> Vec<BrandHit>
 where
@@ -2748,7 +2747,6 @@ fn visit_json_strings(source: &str, val: &serde_json::Value, idx_hint: usize, ou
 }
 
 /// Inspect a desktop or browser window title string strictly.
-#[cfg(test)]
 #[must_use]
 pub fn check_window_title(source: &str, title: &str) -> Vec<BrandHit> {
     let mut out = Vec::new();
@@ -2756,7 +2754,6 @@ pub fn check_window_title(source: &str, title: &str) -> Vec<BrandHit> {
     out
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy)]
 struct McpScanCtx<'a> {
     source: &'a str,
@@ -2769,7 +2766,6 @@ struct McpScanCtx<'a> {
 /// `resources/list`, `resources/read`, `prompts/list`, `prompts/get`) for prohibited vendor,
 /// product, retired-suite, or pre-rename tokens while preserving the narrow `.prism`/`.pzfx`
 /// file-format boundary on `open_file` and `table_import_prism` / `table.importPrism`.
-#[cfg(test)]
 #[must_use]
 pub fn check_mcp_rpc_response(source: &str, method: &str, called_tool: Option<&str>, response: &serde_json::Value) -> Vec<BrandHit> {
     let mut out = Vec::new();
@@ -2778,7 +2774,6 @@ pub fn check_mcp_rpc_response(source: &str, method: &str, called_tool: Option<&s
     out
 }
 
-#[cfg(test)]
 fn scan_mcp_json_value(ctx: McpScanCtx<'_>, ptr: &str, val: &serde_json::Value, out: &mut Vec<BrandHit>) {
     match val {
         serde_json::Value::Object(map) => scan_mcp_json_object(ctx, ptr, map, out),
@@ -2792,7 +2787,6 @@ fn scan_mcp_json_value(ctx: McpScanCtx<'_>, ptr: &str, val: &serde_json::Value, 
     }
 }
 
-#[cfg(test)]
 fn scan_mcp_json_object(ctx: McpScanCtx<'_>, ptr: &str, map: &serde_json::Map<String, serde_json::Value>, out: &mut Vec<BrandHit>) {
     if ctx.method == "tools/call"
         && map.get("type").and_then(serde_json::Value::as_str) == Some("image")
@@ -2814,7 +2808,6 @@ fn scan_mcp_json_object(ctx: McpScanCtx<'_>, ptr: &str, map: &serde_json::Map<St
     }
 }
 
-#[cfg(test)]
 fn scan_mcp_inline_png_block(source: &str, ptr: &str, map: &serde_json::Map<String, serde_json::Value>, out: &mut Vec<BrandHit>) {
     let block_src = format!("{source}:{ptr}");
     for (idx, k) in map.keys().enumerate() {
@@ -2827,7 +2820,6 @@ fn scan_mcp_inline_png_block(source: &str, ptr: &str, map: &serde_json::Map<Stri
     }
 }
 
-#[cfg(test)]
 fn is_top_tool_field_ptr(ptr: &str, field: &str) -> bool {
     let Some(rest) = ptr.strip_prefix("/result/tools/") else {
         return false;
@@ -2838,7 +2830,6 @@ fn is_top_tool_field_ptr(ptr: &str, field: &str) -> bool {
     !idx_seg.is_empty() && idx_seg.bytes().all(|b| b.is_ascii_digit()) && tail == field
 }
 
-#[cfg(test)]
 fn scan_mcp_leaf_string(ctx: McpScanCtx<'_>, ptr: &str, text: &str, out: &mut Vec<BrandHit>) {
     if (ctx.method == "tools/call" || ctx.method == "resources/read") && ptr.ends_with("/text") {
         let trimmed = text.trim_start();
@@ -2871,7 +2862,6 @@ fn scan_mcp_leaf_string(ctx: McpScanCtx<'_>, ptr: &str, text: &str, out: &mut Ve
     check_single_string_with_extra(&full_source, 1, text, policy, true, out);
 }
 
-#[cfg(test)]
 fn is_exact_canonical_mcp_import_name(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> bool {
     if text != "table_import_prism" {
         return false;
@@ -2884,7 +2874,6 @@ fn is_exact_canonical_mcp_import_name(ctx: McpScanCtx<'_>, ptr: &str, text: &str
         && (ptr.ends_with("/name") || ptr.ends_with("/mcp_tool"))
 }
 
-#[cfg(test)]
 fn mcp_leaf_prism_policy<'a>(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> PrismPolicy<'a> {
     if ctx.method == "tools/list" {
         if ctx.entry_tool_name == Some("open_file") {
@@ -3194,27 +3183,7 @@ pub fn scan_dist_artefacts_with_stats(dist_dir: &Path) -> Result<(DistScanStats,
     Ok((stats, hits))
 }
 
-fn collect_dist_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
-    let mut paths = Vec::new();
-    for entry in entries {
-        paths.push(entry.map_err(|e| format!("dir entry under {}: {e}", dir.display()))?.path());
-    }
-    paths.sort();
-    for path in paths {
-        let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
-        if meta.file_type().is_symlink() {
-            continue;
-        }
-        if meta.is_dir() {
-            collect_dist_files(root, &path, out)?;
-        } else if meta.is_file() {
-            let rel = path.strip_prefix(root).map_err(|e| format!("strip prefix {}: {e}", path.display()))?;
-            out.push(rel.to_string_lossy().replace('\\', "/"));
-        }
-    }
-    Ok(())
-}
+use crate::scan_util::collect_dist_files;
 
 const MAX_DIST_FILE_BYTES: usize = 256 * 1024 * 1024;
 

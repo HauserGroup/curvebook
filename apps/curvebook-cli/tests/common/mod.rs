@@ -820,3 +820,41 @@ pub fn extract_result_cell_f64(cell: &Value) -> Option<f64> {
         .or_else(|| cell.get("Number").and_then(|n| n.get("value")).and_then(Value::as_f64))
         .or_else(|| cell.get("PValue").and_then(|p| p.get("raw")).and_then(Value::as_f64))
 }
+
+pub fn ensure(cond: bool, msg: impl Into<String>) -> Result<(), String> {
+    if cond { Ok(()) } else { Err(msg.into()) }
+}
+
+pub fn assert_widget_enabled(snap: &Value, wid: &str, expected: bool, require_reason: bool) -> Result<(), String> {
+    let dialog = snap.get("dialog");
+    let node = dialog
+        .and_then(|d| d.get("controls"))
+        .and_then(|v| find_node(v, wid))
+        .or_else(|| dialog.and_then(|d| d.get("tabs")).and_then(|v| find_node(v, wid)))
+        .or_else(|| dialog.and_then(|d| d.get("buttons")).and_then(|v| find_node(v, wid)))
+        .ok_or_else(|| format!("missing dialog widget `{wid}` in {snap}"))?;
+    let actual = node.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    if actual != expected {
+        return Err(format!("widget `{wid}` expected enabled={expected}, got {node}"));
+    }
+    if require_reason && !expected && node.get("disabled_reason").and_then(Value::as_str).is_none_or(str::is_empty) {
+        return Err(format!("disabled widget `{wid}` missing disabled_reason: {node}"));
+    }
+    Ok(())
+}
+
+pub fn export_graph_svg(gui: &mut McpChild, sheet_id: &str) -> Result<String, String> {
+    let out = gui.ui_invoke("graph.exportSvg", json!({ "sheet_id": sheet_id }))?;
+    let svg = out.pointer("/payload/svg").and_then(Value::as_str).ok_or_else(|| format!("missing SVG payload for `{sheet_id}`: {out}"))?.to_owned();
+    curvebook_svg::validate_svg_structure(&svg).map_err(|e| format!("invalid SVG for `{sheet_id}`: {e}"))?;
+    Ok(svg)
+}
+
+pub fn export_figure_svg(gui: &mut McpChild, sheet_id: &str) -> Result<String, String> {
+    gui.ui_invoke("ui.export.figure.open", json!({ "sheet_id": sheet_id }))?;
+    let out = gui.ui_answer_ok(json!({ "format": "svg" }))?;
+    let svg =
+        out.pointer("/payload/svg").and_then(Value::as_str).ok_or_else(|| format!("missing figure SVG payload for `{sheet_id}`: {out}"))?.to_owned();
+    curvebook_svg::validate_svg_structure(&svg).map_err(|e| format!("invalid figure SVG for `{sheet_id}`: {e}"))?;
+    Ok(svg)
+}
