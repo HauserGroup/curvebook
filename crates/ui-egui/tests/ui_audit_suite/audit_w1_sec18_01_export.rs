@@ -200,6 +200,28 @@ fn export_figure_modal_queues_host_routed_commands_for_all_formats_and_sheets() 
         assert_eq!(cmd, "graph.exportEmf");
         assert!(is_desktop_host_routed_command(&cmd));
         assert_eq!(params, json!({ "sheet_id": "gs-exp" }));
+
+        // Transparent canvas background: propagates to SVG, PNG, TIFF, and never to EMF/PDF.
+        driver.click_widget_id("export.fmt.png")?;
+        driver.click_widget_id("export.transparent_bg")?;
+        for (fmt_wid, expected_cmd, expect_transparent) in [
+            ("export.fmt.png", "graph.exportPng", true),
+            ("export.fmt.svg", "graph.exportSvg", true),
+            ("export.fmt.tiff_deflate", "export.tiff", true),
+            ("export.fmt.emf", "graph.exportEmf", false),
+            ("export.fmt.pdf", "graph.exportPdf", false),
+        ] {
+            driver.click_widget_id(fmt_wid)?;
+            let mut app = driver.state().app.clone();
+            let mut views = driver.state().views.clone();
+            let (cmd, params, _) = capture_export_ok_intent(&mut app, &mut views)?;
+            assert_eq!(cmd, expected_cmd);
+            if expect_transparent {
+                assert_eq!(params.get("transparent_bg"), Some(&json!(true)), "`{cmd}` must receive transparent_bg=true");
+            } else {
+                assert_eq!(params.get("transparent_bg"), None, "`{cmd}` must not receive transparent_bg");
+            }
+        }
     }
 
     // 2. LayoutSheet exports route via `export.{pdf,svg,png,tiff}` and `layout.exportEmf`.

@@ -1886,6 +1886,7 @@ fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
     let options = SvgExportOptions {
         pretty: opt_bool_param(params, &["pretty"])?.unwrap_or(true),
         outline_text: opt_bool_param(params, &["outline_text"])?.unwrap_or(false),
+        transparent_bg: opt_bool_param(params, &["transparent_bg"])?.unwrap_or(false),
         ..SvgExportOptions::default()
     };
     let artifact = export_document_artifact(
@@ -1995,6 +1996,7 @@ fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCa
                 height_px,
                 dpi: Some(dpi),
                 sizing: RasterSizingPolicy::CapToLimits { default_dpi: DEFAULT_PREVIEW_DPI },
+                transparent_bg: false,
             },
         },
         None,
@@ -2056,6 +2058,7 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
     spec.height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
     spec.tiff_compression =
         opt_non_empty_str_param(params, &["tiff_compression"])?.map(parse_tiff_compression).transpose()?.unwrap_or(TiffCompression::Lzw);
+    spec.transparent_bg = opt_bool_param(params, &["transparent_bg"])?.unwrap_or(false);
     spec.embedded_ttf_font = if format == DocumentExportFormat::Pdf {
         opt_ttf_font.map(|raw| load_validated_ttf_font(app.session().path_policy(), raw)).transpose()?
     } else {

@@ -1997,11 +1997,11 @@ impl DesktopHostRuntime {
     fn allowed_native_export_keys(command: &str) -> &'static [&'static str] {
         match command {
             "export.svg" | "graph.exportSvg" => {
-                &["pretty", "include_xml_declaration", "include_metadata", "embed_fonts", "precision", "outline_text"]
+                &["pretty", "include_xml_declaration", "include_metadata", "embed_fonts", "precision", "outline_text", "transparent_bg"]
             }
             "export.pdf" | "graph.exportPdf" => &["color_space", "compress_streams", "title", "outline_text", "sheet_ids"],
-            "export.png" | "graph.exportPng" => &["width_px", "height_px", "dpi"],
-            "export.tiff" => &["width_px", "height_px", "dpi", "compression"],
+            "export.png" | "graph.exportPng" => &["width_px", "height_px", "dpi", "transparent_bg"],
+            "export.tiff" => &["width_px", "height_px", "dpi", "compression", "transparent_bg"],
             "table.exportCsv" => &["delimiter", "decimal_separator"],
             "analysis.exportJson" => &["pretty"],
             "analysis.exportCsv" => &["tab_id", "tab_index", "delimiter", "decimal_separator"],

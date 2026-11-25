@@ -443,6 +443,7 @@ fn da02_04_capped_raster_export_bounds_and_zero_validation() {
                     height_px: h,
                     dpi: Some(300),
                     sizing: RasterSizingPolicy::CapToLimits { default_dpi: 150 },
+                    transparent_bg: false,
                 },
             },
             None,
@@ -464,7 +465,13 @@ fn da02_04_capped_raster_export_bounds_and_zero_validation() {
             session.document(),
             &ExportArtifactRequest {
                 target: ExportTarget::Explicit(graph_id.clone()),
-                format: ExportArtifactFormat::Png { width_px: w, height_px: h, dpi, sizing: RasterSizingPolicy::CapToLimits { default_dpi } },
+                format: ExportArtifactFormat::Png {
+                    width_px: w,
+                    height_px: h,
+                    dpi,
+                    sizing: RasterSizingPolicy::CapToLimits { default_dpi },
+                    transparent_bg: false,
+                },
             },
             None,
             "test.da02_04.zero",

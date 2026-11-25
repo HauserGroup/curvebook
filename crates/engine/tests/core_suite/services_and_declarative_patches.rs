@@ -201,7 +201,13 @@ fn export_service_guards_failed_results_caps_rasters_and_exports_all_graphs_pdf(
         session.document(),
         &ExportArtifactRequest {
             target: ExportTarget::Explicit(graph_id.clone()),
-            format: ExportArtifactFormat::Png { width_px: None, height_px: None, dpi: Some(3000), sizing: RasterSizingPolicy::StrictLimits },
+            format: ExportArtifactFormat::Png {
+                width_px: None,
+                height_px: None,
+                dpi: Some(3000),
+                sizing: RasterSizingPolicy::StrictLimits,
+                transparent_bg: false,
+            },
         },
         None,
         "test.png.strict",
@@ -220,6 +226,7 @@ fn export_service_guards_failed_results_caps_rasters_and_exports_all_graphs_pdf(
                 height_px: None,
                 dpi: Some(3000),
                 sizing: RasterSizingPolicy::CapToLimits { default_dpi: 150 },
+                transparent_bg: false,
             },
         },
         None,

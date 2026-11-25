@@ -179,6 +179,7 @@ fn svg_exports_are_byte_identical_for_2d_math_model_equations_and_rich_text() ->
                     embed_fonts: false,
                     outline_text,
                     precision: 3,
+                    transparent_bg: false,
                 };
                 let svg_1 = render_svg(scene, &opts)?;
                 let svg_2 = render_svg(scene, &opts)?;

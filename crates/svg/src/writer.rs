@@ -31,11 +31,21 @@ pub struct SvgExportOptions {
     #[serde(default)]
     pub outline_text: bool,
     pub precision: u8,
+    #[serde(default)]
+    pub transparent_bg: bool,
 }
 
 impl Default for SvgExportOptions {
     fn default() -> Self {
-        Self { pretty: true, include_xml_declaration: false, include_metadata: true, embed_fonts: false, outline_text: false, precision: 3 }
+        Self {
+            pretty: true,
+            include_xml_declaration: false,
+            include_metadata: true,
+            embed_fonts: false,
+            outline_text: false,
+            precision: 3,
+            transparent_bg: false,
+        }
     }
 }
 
@@ -150,6 +160,15 @@ pub fn render_svg(scene: &ChartScene, options: &SvgExportOptions) -> Result<Stri
     render_svg_with_bundled_fonts(scene, options, BUNDLED_FONTS)
 }
 
+fn is_matching_full_bg_rect(scene: &ChartScene, bg: Rgba8) -> bool {
+    let expected_bg_path = Path2D::rect(RectPt::new(0.0, 0.0, scene.width_pt, scene.height_pt));
+    matches!(
+        scene.primitives.first(),
+        Some(ScenePrimitive::Path { path, fill: Some(fill), stroke: None, clip: None })
+            if fill.color == bg && *path == expected_bg_path
+    )
+}
+
 fn render_svg_with_bundled_fonts(scene: &ChartScene, options: &SvgExportOptions, bundled_fonts: &[(&str, &[u8])]) -> Result<String, SvgError> {
     if !scene.width_pt.is_finite() || !scene.height_pt.is_finite() || scene.width_pt <= 0.0 || scene.height_pt <= 0.0 {
         return Err(SvgError::InvalidScene { message: String::from("scene dimensions must be finite and positive") });
@@ -159,7 +178,9 @@ fn render_svg_with_bundled_fonts(scene: &ChartScene, options: &SvgExportOptions,
     let h = format_scalar(scene.height_pt, prec)?;
 
     let mut ctx = SvgRenderCtx::new(options, bundled_fonts, prec);
-    for prim in &scene.primitives {
+    let skip_first_bg = options.transparent_bg && scene.background.is_some_and(|bg| is_matching_full_bg_rect(scene, bg));
+    let start_idx = usize::from(skip_first_bg);
+    for prim in scene.primitives.iter().skip(start_idx) {
         match prim {
             ScenePrimitive::Path { path, fill, stroke, clip } => {
                 if !path.is_empty() {
@@ -1251,5 +1272,31 @@ mod tests {
         let plain_svg = render_svg_with_bundled_fonts(&scene, &no_embed, synthetic_fonts).expect("render without font embed");
         assert!(!plain_svg.contains("@font-face"));
         assert!(!plain_svg.contains("Plot]]"));
+    }
+
+    #[test]
+    fn transparent_bg_omits_sheet_background_and_preserves_foreground() {
+        use curvebook_chart::{ChartScene, FillPaint, Path2D, RectPt, ScenePrimitive};
+        use curvebook_palette::Rgba8;
+
+        use crate::{SvgExportOptions, render_svg, validate_svg_structure};
+
+        let mut scene = ChartScene::new("svg-trans", "Transparent SVG", 200.0, 120.0, Some(Rgba8::WHITE));
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::rect(RectPt::new(20.0, 20.0, 60.0, 40.0)),
+            fill: Some(FillPaint::solid(Rgba8::rgb(12, 90, 180))),
+            stroke: None,
+            clip: None,
+        });
+
+        let opaque = render_svg(&scene, &SvgExportOptions { transparent_bg: false, ..SvgExportOptions::default() }).expect("opaque svg");
+        validate_svg_structure(&opaque).expect("opaque svg valid");
+        assert!(opaque.contains("fill=\"#FFFFFF\""), "opaque SVG must include white sheet background: {opaque}");
+        assert!(opaque.contains("fill=\"#0C5AB4\""), "opaque SVG must include foreground path: {opaque}");
+
+        let transparent = render_svg(&scene, &SvgExportOptions { transparent_bg: true, ..SvgExportOptions::default() }).expect("transparent svg");
+        validate_svg_structure(&transparent).expect("transparent svg valid");
+        assert!(!transparent.contains("fill=\"#FFFFFF\""), "transparent SVG must omit opaque white background: {transparent}");
+        assert!(transparent.contains("fill=\"#0C5AB4\""), "transparent SVG must preserve foreground path: {transparent}");
     }
 }

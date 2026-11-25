@@ -1306,7 +1306,13 @@ fn export_figure_command_and_params(
     match ef.format {
         ExportFigureFormat::Svg => {
             let cmd = if is_layout { "export.svg" } else { "graph.exportSvg" };
-            (cmd, json!({ "sheet_id": sheet_id.as_str() }))
+            let mut params = json!({ "sheet_id": sheet_id.as_str() });
+            if ef.transparent_bg
+                && let Some(obj) = params.as_object_mut()
+            {
+                obj.insert(String::from("transparent_bg"), json!(true));
+            }
+            (cmd, params)
         }
         ExportFigureFormat::Pdf => {
             let cmd = if is_layout { "export.pdf" } else { "graph.exportPdf" };
@@ -1315,15 +1321,18 @@ fn export_figure_command_and_params(
         }
         ExportFigureFormat::Png => {
             let cmd = if is_layout { "export.png" } else { "graph.exportPng" };
-            (
-                cmd,
-                json!({
-                    "sheet_id": sheet_id.as_str(),
-                    "width_px": ef.width_px,
-                    "height_px": ef.height_px,
-                    "dpi": ef.dpi,
-                }),
-            )
+            let mut params = json!({
+                "sheet_id": sheet_id.as_str(),
+                "width_px": ef.width_px,
+                "height_px": ef.height_px,
+                "dpi": ef.dpi,
+            });
+            if ef.transparent_bg
+                && let Some(obj) = params.as_object_mut()
+            {
+                obj.insert(String::from("transparent_bg"), json!(true));
+            }
+            (cmd, params)
         }
         ExportFigureFormat::Tiff(compression) => {
             let comp = match compression {
@@ -1331,16 +1340,19 @@ fn export_figure_command_and_params(
                 TiffCompression::Lzw => "lzw",
                 TiffCompression::None => "none",
             };
-            (
-                "export.tiff",
-                json!({
-                    "sheet_id": sheet_id.as_str(),
-                    "width_px": ef.width_px,
-                    "height_px": ef.height_px,
-                    "dpi": ef.dpi,
-                    "compression": comp,
-                }),
-            )
+            let mut params = json!({
+                "sheet_id": sheet_id.as_str(),
+                "width_px": ef.width_px,
+                "height_px": ef.height_px,
+                "dpi": ef.dpi,
+                "compression": comp,
+            });
+            if ef.transparent_bg
+                && let Some(obj) = params.as_object_mut()
+            {
+                obj.insert(String::from("transparent_bg"), json!(true));
+            }
+            ("export.tiff", params)
         }
     }
 }
@@ -1566,9 +1578,6 @@ fn render_export_body(
         let mut next = ef.clone();
         next.transparent_bg = !next.transparent_bg;
         intents.push(UiIntent::UpdateExportFigureState(Box::new(next)));
-    }
-    if transparent {
-        ui.label(egui::RichText::new("Note: exported files preserve the sheet canvas background.").small().weak());
     }
 
     ui.add_space(4.0);

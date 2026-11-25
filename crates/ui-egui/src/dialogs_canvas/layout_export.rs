@@ -191,27 +191,45 @@ impl ExportFigureState {
     #[must_use]
     pub fn commit_intent(&self, sheet_id: &SheetId) -> ToolCommandIntent {
         match self.format {
-            ExportFigureFormat::Svg => ToolCommandIntent::new("graph.exportSvg", json!({ "sheet_id": sheet_id.as_str() })),
+            ExportFigureFormat::Svg => {
+                let mut params = json!({ "sheet_id": sheet_id.as_str() });
+                if self.transparent_bg
+                    && let Some(obj) = params.as_object_mut()
+                {
+                    obj.insert(String::from("transparent_bg"), json!(true));
+                }
+                ToolCommandIntent::new("graph.exportSvg", params)
+            }
             ExportFigureFormat::Pdf => ToolCommandIntent::new("graph.exportPdf", json!({ "sheet_id": sheet_id.as_str() })),
-            ExportFigureFormat::Png => ToolCommandIntent::new(
-                "graph.exportPng",
-                json!({
+            ExportFigureFormat::Png => {
+                let mut params = json!({
                     "sheet_id": sheet_id.as_str(),
                     "width_px": self.width_px.max(16),
                     "height_px": self.height_px.max(16),
                     "dpi": self.dpi.max(72),
-                }),
-            ),
-            ExportFigureFormat::Tiff(compression) => ToolCommandIntent::new(
-                "export.tiff",
-                json!({
+                });
+                if self.transparent_bg
+                    && let Some(obj) = params.as_object_mut()
+                {
+                    obj.insert(String::from("transparent_bg"), json!(true));
+                }
+                ToolCommandIntent::new("graph.exportPng", params)
+            }
+            ExportFigureFormat::Tiff(compression) => {
+                let mut params = json!({
                     "sheet_id": sheet_id.as_str(),
                     "width_px": self.width_px.max(16),
                     "height_px": self.height_px.max(16),
                     "dpi": self.dpi.max(72),
                     "compression": format!("{compression:?}"),
-                }),
-            ),
+                });
+                if self.transparent_bg
+                    && let Some(obj) = params.as_object_mut()
+                {
+                    obj.insert(String::from("transparent_bg"), json!(true));
+                }
+                ToolCommandIntent::new("export.tiff", params)
+            }
         }
     }
 }

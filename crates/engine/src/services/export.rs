@@ -10,7 +10,10 @@ use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_
 use curvebook_pdf::{
     MAX_PDF_PAGES, MAX_PDF_TOTAL_PRIMITIVES, PdfColorSpace, PdfExportOptions, PdfVersion, render_pdf, render_pdf_page_refs, render_pdf_pages,
 };
-use curvebook_render::{MAX_RASTER_DIM_PX, MAX_RASTER_PIXELS, RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff, render_scene};
+use curvebook_render::{
+    MAX_RASTER_DIM_PX, MAX_RASTER_PIXELS, RenderOptions, RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff,
+    render_scene_with_options,
+};
 use curvebook_svg::{SvgExportOptions, render_svg};
 use curvebook_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use serde::{Deserialize, Serialize};
@@ -167,6 +170,8 @@ pub struct ExportOptionsSpec {
     pub tiff_compression: TiffCompression,
     /// Raster sizing policy (`StrictLimits` vs `CapToLimits`).
     pub sizing: RasterSizingPolicy,
+    /// Use a transparent (`alpha = 0`) sheet canvas background for SVG, PNG, and TIFF exports.
+    pub transparent_bg: bool,
     /// Optional EMF sheet-kind restriction.
     pub emf_require_kind: Option<EmfSheetKind>,
 }
@@ -197,6 +202,7 @@ impl ExportOptionsSpec {
             dpi: None,
             tiff_compression: TiffCompression::Lzw,
             sizing: RasterSizingPolicy::CapToLimits { default_dpi: DEFAULT_PREVIEW_DPI },
+            transparent_bg: false,
             emf_require_kind: None,
         }
     }
@@ -220,7 +226,12 @@ impl ExportOptionsSpec {
         let default_target = ExportTarget::AutoOrExplicit(self.sheet_id.clone());
         let (target, artifact_format) = match self.format {
             DocumentExportFormat::Svg => {
-                let mut options = SvgExportOptions { pretty: self.pretty, outline_text: self.svg_outline_text, ..SvgExportOptions::default() };
+                let mut options = SvgExportOptions {
+                    pretty: self.pretty,
+                    outline_text: self.svg_outline_text,
+                    transparent_bg: self.transparent_bg,
+                    ..SvgExportOptions::default()
+                };
                 if let Some(p) = self.svg_precision {
                     options.precision = p;
                 }
@@ -242,9 +253,16 @@ impl ExportOptionsSpec {
                 },
             ),
             DocumentExportFormat::Emf => (default_target, ExportArtifactFormat::Emf { require_kind: self.emf_require_kind }),
-            DocumentExportFormat::Png => {
-                (default_target, ExportArtifactFormat::Png { width_px: self.width_px, height_px: self.height_px, dpi: self.dpi, sizing: self.sizing })
-            }
+            DocumentExportFormat::Png => (
+                default_target,
+                ExportArtifactFormat::Png {
+                    width_px: self.width_px,
+                    height_px: self.height_px,
+                    dpi: self.dpi,
+                    sizing: self.sizing,
+                    transparent_bg: self.transparent_bg,
+                },
+            ),
             DocumentExportFormat::Tiff => (
                 default_target,
                 ExportArtifactFormat::Tiff {
@@ -253,6 +271,7 @@ impl ExportOptionsSpec {
                     dpi: self.dpi,
                     compression: self.tiff_compression,
                     sizing: self.sizing,
+                    transparent_bg: self.transparent_bg,
                 },
             ),
             DocumentExportFormat::Csv => (
@@ -308,6 +327,8 @@ pub enum ExportArtifactFormat {
         dpi: Option<u16>,
         /// Dimension/pixel-budget handling policy.
         sizing: RasterSizingPolicy,
+        /// Use a transparent (`alpha = 0`) sheet canvas background when `true`.
+        transparent_bg: bool,
     },
     /// Raster TIFF export of a graph or layout sheet.
     Tiff {
@@ -321,6 +342,8 @@ pub enum ExportArtifactFormat {
         compression: TiffCompression,
         /// Dimension/pixel-budget handling policy.
         sizing: RasterSizingPolicy,
+        /// Use a transparent (`alpha = 0`) sheet canvas background when `true`.
+        transparent_bg: bool,
     },
     /// Windows Enhanced Metafile (EMF) export of a graph or layout sheet.
     Emf {
@@ -1218,6 +1241,7 @@ struct RasterExportParams {
     dpi: Option<u16>,
     sizing: RasterSizingPolicy,
     tiff_compression: Option<TiffCompression>,
+    transparent_bg: bool,
 }
 
 fn export_raster_artifact(
@@ -1243,7 +1267,7 @@ fn export_raster_artifact(
             RenderTargetSpec::from_scene_capped(&scene, params.width_px, params.height_px, eff_dpi)
         }
     };
-    let raster = render_scene(&scene, spec)?;
+    let raster = render_scene_with_options(&scene, spec, RenderOptions { transparent_bg: params.transparent_bg })?;
     let bytes = match params.tiff_compression {
         Some(compression) => encode_tiff(&raster, compression)?,
         None => encode_png(&raster)?,
@@ -1337,17 +1361,31 @@ pub fn export_document_artifact(
         ExportArtifactFormat::Pdf { options, all_graphs, sheet_ids } => {
             export_pdf_artifact(doc, &request.target, options, *all_graphs, sheet_ids.as_deref(), cancelled, context)
         }
-        ExportArtifactFormat::Png { width_px, height_px, dpi, sizing } => export_raster_artifact(
+        ExportArtifactFormat::Png { width_px, height_px, dpi, sizing, transparent_bg } => export_raster_artifact(
             doc,
             &request.target,
-            RasterExportParams { width_px: *width_px, height_px: *height_px, dpi: *dpi, sizing: *sizing, tiff_compression: None },
+            RasterExportParams {
+                width_px: *width_px,
+                height_px: *height_px,
+                dpi: *dpi,
+                sizing: *sizing,
+                tiff_compression: None,
+                transparent_bg: *transparent_bg,
+            },
             cancelled,
             context,
         ),
-        ExportArtifactFormat::Tiff { width_px, height_px, dpi, compression, sizing } => export_raster_artifact(
+        ExportArtifactFormat::Tiff { width_px, height_px, dpi, compression, sizing, transparent_bg } => export_raster_artifact(
             doc,
             &request.target,
-            RasterExportParams { width_px: *width_px, height_px: *height_px, dpi: *dpi, sizing: *sizing, tiff_compression: Some(*compression) },
+            RasterExportParams {
+                width_px: *width_px,
+                height_px: *height_px,
+                dpi: *dpi,
+                sizing: *sizing,
+                tiff_compression: Some(*compression),
+                transparent_bg: *transparent_bg,
+            },
             cancelled,
             context,
         ),

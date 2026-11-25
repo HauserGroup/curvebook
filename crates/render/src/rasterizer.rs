@@ -411,11 +411,28 @@ impl std::fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
+/// Additional rasterization options for [`render_scene_with_options`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct RenderOptions {
+    /// When `true`, omit the sheet canvas background fill and initialize the RGBA target with
+    /// fully transparent (`alpha = 0`) pixels while preserving all foreground/plot primitives.
+    #[serde(default)]
+    pub transparent_bg: bool,
+}
+
 /// Rasterize a [`ChartScene`] onto a deterministic RGBA buffer matching `target`.
 ///
 /// # Errors
 /// Returns [`RenderError::InvalidTarget`] when `target` or scene bounds are invalid.
 pub fn render_scene(scene: &ChartScene, target: RenderTargetSpec) -> Result<RasterImage, RenderError> {
+    render_scene_with_options(scene, target, RenderOptions::default())
+}
+
+/// Rasterize `scene` into an RGBA pixel buffer using explicit [`RenderOptions`].
+///
+/// # Errors
+/// Returns [`RenderError::InvalidTarget`] when `target` or scene bounds are invalid.
+pub fn render_scene_with_options(scene: &ChartScene, target: RenderTargetSpec, options: RenderOptions) -> Result<RasterImage, RenderError> {
     if !scene.width_pt.is_finite() || !scene.height_pt.is_finite() || scene.width_pt <= 0.0 || scene.height_pt <= 0.0 {
         return Err(RenderError::InvalidTarget { message: String::from("scene dimensions must be finite and positive") });
     }
@@ -426,9 +443,15 @@ pub fn render_scene(scene: &ChartScene, target: RenderTargetSpec) -> Result<Rast
     }
     let stroke_scale = (sx * sy).sqrt();
 
-    let initial_bg = initial_background_fill(scene);
+    let (initial_bg, skip_first_bg) = if options.transparent_bg {
+        let skip = scene.background.is_some_and(|bg| is_matching_full_bg_rect(scene, bg));
+        (Rgba8::TRANSPARENT, skip)
+    } else {
+        let bg = initial_background_fill(scene);
+        let skip = bg.a == u8::MAX && is_matching_full_bg_rect(scene, bg);
+        (bg, skip)
+    };
     let canvas_opaque = initial_bg.a == u8::MAX;
-    let skip_first_bg = canvas_opaque && is_matching_full_bg_rect(scene, initial_bg);
     let mut img = RasterImage::new(target.width_px, target.height_px, target.dpi, initial_bg)?;
     let canvas_clip = ClipRectPx::from_canvas(target.width_px, target.height_px);
     let mut clip_stack = vec![canvas_clip];

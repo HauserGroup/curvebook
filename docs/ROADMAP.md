@@ -311,13 +311,13 @@ Completes workbench authoring and orientation capabilities that sit outside the 
 - [x] **Welcome Hub sample-load errors:** `Load Sample` no longer falls back to an empty table or drops build errors; an archetype without a fixture disables the sample mode pill and CTA with a localised reason, and a failing fixture build shows an inline `welcome.sample.error` message and keeps the hub open (`crates/ui-egui/src/egui_shell/welcome_hub.rs`).
 
 ### R10.33 Advanced Import/Paste Special live-link persistence & Export Figure options
-Owner: open · Status: todo · Was: import/export spec audit 2026-11-24 · Depends on: [`R10.29`](#r1029-desktop-import-and-export-gaps-beta-gate) · Gate: post-Beta · Est. note: 14–22 h
+Owner: open · Status: in progress · Was: import/export spec audit 2026-11-24 · Depends on: [`R10.29`](#r1029-desktop-import-and-export-gaps-beta-gate) · Gate: post-Beta · Est. note: 14–22 h
 
 Extends `Import & Paste Special` live-linking and the `Export Figure` dialog to cover the remaining filter/placement persistence and raster/color-space options.
 
 - [ ] Persist `missing_sentinels`, `filter_pattern`, `ByRows` (`values_per_row` + `wrap_after_rows` for 96/384-well plate reshapes), and `ByColumns` stacking in `ImportFilterSpec` / `ImportPlacementSpec` (`crates/doc/src/links.rs`, `crates/transform/src/import.rs`) so block/plate reshapes work on live-linked imports as well as static pastes.
 - [ ] Add `skipRowsUntil`, `skipRowsAfter`, `skipEveryRowWhere` (row omission vs exclusion), `decimateCols`, `renameTableMode` (`imported_filename` / `fromSourceRow1Based`), `<Info>...</Info>` / `<Notes>...</Notes>` tag and explicit row-range extraction in `ImportWizard` (`crates/ui-egui/src/egui_shell/import_wizard.rs`), and optional OS file-watcher refresh (`autoUpdateOnChange`) for `LinkSource::ExternalDelimitedFile`.
-- [ ] Complete `Export Figure` options (`crates/ui-egui/src/egui_shell/app_modals.rs`, `crates/render/`): true alpha-channel transparent canvas background export, `Grayscale` and `1-bit Monochrome` color spaces, `JPG` and `BMP` raster output options, `Save as default`, and `Open folder after export`.
+- [ ] Complete `Export Figure` options (`crates/ui-egui/src/egui_shell/app_modals.rs`, `crates/render/`): true alpha-channel transparent canvas background export, `Grayscale` and `1-bit Monochrome` color spaces, `JPG` and `BMP` raster output options, `Save as default`, and `Open folder after export`. *(True alpha-channel `transparent_bg` export for SVG/PNG/TIFF landed locally across `curvebook-svg`, `curvebook-render`, `curvebook-engine`, `ExportFigure` modal, and desktop native export routing; `Grayscale` / `1-bit Monochrome`, `JPG` / `BMP`, `Save as default`, and `Open folder after export` remain open.)*
 ---
 
 ## R11 Usable browser app

@@ -254,6 +254,8 @@ struct ExportSvgParams {
     precision: Option<u8>,
     /// Convert glyphs into vector outline paths.
     outline_text: Option<bool>,
+    /// Omit opaque sheet canvas background fill for transparent SVG export.
+    transparent_bg: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -299,6 +301,8 @@ struct ExportPngParams {
     #[serde(default, deserialize_with = "de_opt_u16")]
     #[schemars(range(min = 1))]
     dpi: Option<u16>,
+    /// Use transparent alpha=0 sheet canvas background.
+    transparent_bg: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -324,6 +328,8 @@ struct ExportTiffParams {
     dpi: Option<u16>,
     /// TIFF compression codec (`none`, `lzw`, `deflate`).
     compression: Option<String>,
+    /// Use transparent alpha=0 sheet canvas background.
+    transparent_bg: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -371,6 +377,9 @@ fn run_svg_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
     }
     if let Some(ot) = params.outline_text {
         opts.outline_text = ot;
+    }
+    if let Some(tb) = params.transparent_bg {
+        opts.transparent_bg = tb;
     }
 
     let req = ExportArtifactRequest { target: ExportTarget::Explicit(id.clone()), format: ExportArtifactFormat::Svg { options: opts } };
@@ -482,6 +491,7 @@ fn run_png_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
             height_px: params.height_px,
             dpi: params.dpi,
             sizing: RasterSizingPolicy::StrictLimits,
+            transparent_bg: params.transparent_bg.unwrap_or(false),
         },
     };
     let artifact = export_document_artifact(ctx.session.document(), &req, Some(ctx.cancelled), command_id)?;
@@ -527,6 +537,7 @@ fn run_export_tiff(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
             dpi: params.dpi,
             compression,
             sizing: RasterSizingPolicy::StrictLimits,
+            transparent_bg: params.transparent_bg.unwrap_or(false),
         },
     };
     let artifact = export_document_artifact(ctx.session.document(), &req, Some(ctx.cancelled), "export.tiff")?;
@@ -799,5 +810,70 @@ mod tests {
             .execute("graph.exportPng", json!({ "sheet_id": "g1", "dpi": 5000 }))
             .expect_err("graph.exportPng oversized DPI must return ResourceLimit");
         assert_eq!(err_graph_dpi.code, ErrorCode::ResourceLimit);
+    }
+
+    fn tiff_first_pixel_rgba(tiff_bytes: &[u8]) -> [u8; 4] {
+        let ifd_off = u32::from_le_bytes(tiff_bytes[4..8].try_into().unwrap()) as usize;
+        let count = u16::from_le_bytes(tiff_bytes[ifd_off..ifd_off + 2].try_into().unwrap()) as usize;
+        let mut strip_off = 0usize;
+        for i in 0..count {
+            let e = ifd_off + 2 + i * 12;
+            let tag = u16::from_le_bytes(tiff_bytes[e..e + 2].try_into().unwrap());
+            if tag == 273 {
+                strip_off = u32::from_le_bytes(tiff_bytes[e + 8..e + 12].try_into().unwrap()) as usize;
+            }
+        }
+        [tiff_bytes[strip_off], tiff_bytes[strip_off + 1], tiff_bytes[strip_off + 2], tiff_bytes[strip_off + 3]]
+    }
+
+    #[test]
+    fn transparent_bg_command_flag_works_for_png_tiff_and_svg() {
+        let doc = doc_with_graph_and_layout();
+        let mut session = Session::from_document(doc);
+
+        // SVG: default (opaque) includes white paper fill; transparent_bg=true omits full-canvas background rect.
+        let svg_opaque = session.execute("graph.exportSvg", json!({ "sheet_id": "g1" })).expect("opaque svg");
+        let svg_opaque_str = svg_opaque.payload["svg"].as_str().expect("opaque svg str");
+        let svg_trans = session.execute("graph.exportSvg", json!({ "sheet_id": "g1", "transparent_bg": true })).expect("transparent svg");
+        let svg_trans_str = svg_trans.payload["svg"].as_str().expect("transparent svg str");
+        assert!(
+            svg_opaque_str.contains("d=\"M0.000 0.000 L360.000 0.000 L360.000 260.000 L0.000 260.000 Z\" fill=\"#FFFFFF\""),
+            "opaque SVG must include white paper fill: {svg_opaque_str}"
+        );
+        assert!(
+            !svg_trans_str.contains("d=\"M0.000 0.000 L360.000 0.000 L360.000 260.000 L0.000 260.000 Z\" fill=\"#FFFFFF\""),
+            "transparent SVG must omit full-canvas white paper fill: {svg_trans_str}"
+        );
+
+        // TIFF (uncompressed): corner pixel alpha == 255 when opaque, alpha == 0 when transparent_bg=true.
+        let tiff_opaque = session
+            .execute("export.tiff", json!({ "sheet_id": "g1", "width_px": 180, "height_px": 130, "dpi": 72, "compression": "none" }))
+            .expect("opaque tiff");
+        let tiff_opaque_bytes =
+            crate::cmd::helpers::decode_base64(tiff_opaque.payload["base64"].as_str().expect("base64")).expect("decode opaque tiff");
+        assert_eq!(tiff_first_pixel_rgba(&tiff_opaque_bytes)[3], 255, "opaque TIFF corner alpha must be 255");
+
+        let tiff_trans = session
+            .execute(
+                "export.tiff",
+                json!({ "sheet_id": "g1", "width_px": 180, "height_px": 130, "dpi": 72, "compression": "none", "transparent_bg": true }),
+            )
+            .expect("transparent tiff");
+        let tiff_trans_bytes =
+            crate::cmd::helpers::decode_base64(tiff_trans.payload["base64"].as_str().expect("base64")).expect("decode transparent tiff");
+        assert_eq!(tiff_first_pixel_rgba(&tiff_trans_bytes), [0, 0, 0, 0], "transparent TIFF corner pixel must have alpha=0");
+
+        // PNG: opaque vs transparent_bg=true differ in encoded payload and both have valid PNG headers.
+        let png_opaque = session
+            .execute("graph.exportPng", json!({ "sheet_id": "g1", "width_px": 180, "height_px": 130, "dpi": 72, "transparent_bg": false }))
+            .expect("opaque png");
+        let png_trans = session
+            .execute("graph.exportPng", json!({ "sheet_id": "g1", "width_px": 180, "height_px": 130, "dpi": 72, "transparent_bg": true }))
+            .expect("transparent png");
+        let png_opaque_bytes = crate::cmd::helpers::decode_base64(png_opaque.payload["base64"].as_str().expect("base64")).expect("decode opaque png");
+        let png_trans_bytes = crate::cmd::helpers::decode_base64(png_trans.payload["base64"].as_str().expect("base64")).expect("decode trans png");
+        assert!(png_opaque_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(png_trans_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_ne!(png_opaque_bytes, png_trans_bytes, "transparent_bg=true PNG must differ from opaque PNG");
     }
 }

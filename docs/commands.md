@@ -819,7 +819,7 @@ Registered commands: 106
 - **Menu:** `File/Export/PNG...`
 - **Summary:** Rasterize a graph or layout sheet to a PNG image at the requested pixel dimensions or DPI.
 - **Beginner note:** Renders a graph or layout to a high-DPI PNG image, returning base64 bytes and optionally saving to disk.
-- **Parameters:** `dpi` (integer|null), `height_px` (integer|null), `path` (string|null), `sheet_id*` (string), `width_px` (integer|null)
+- **Parameters:** `dpi` (integer|null), `height_px` (integer|null), `path` (string|null), `sheet_id*` (string), `transparent_bg` (boolean|null), `width_px` (integer|null)
 
 ### `export.svg` — Export SVG
 
@@ -827,7 +827,7 @@ Registered commands: 106
 - **Menu:** `File/Export/SVG...`
 - **Summary:** Render a graph or layout sheet to scalable vector graphics (SVG) and optionally write it atomically to disk.
 - **Beginner note:** Exports the selected graph or layout as crisp SVG text, optionally saving it to a file path.
-- **Parameters:** `embed_fonts` (boolean|null), `include_metadata` (boolean|null), `include_xml_declaration` (boolean|null), `outline_text` (boolean|null), `path` (string|null), `precision` (integer|null), `pretty` (boolean|null), `sheet_id*` (string)
+- **Parameters:** `embed_fonts` (boolean|null), `include_metadata` (boolean|null), `include_xml_declaration` (boolean|null), `outline_text` (boolean|null), `path` (string|null), `precision` (integer|null), `pretty` (boolean|null), `sheet_id*` (string), `transparent_bg` (boolean|null)
 
 ### `export.tiff` — Export TIFF
 
@@ -835,7 +835,7 @@ Registered commands: 106
 - **Menu:** `File/Export/TIFF...`
 - **Summary:** Rasterize a graph or layout sheet to a TIFF image with selectable compression (`none`, `lzw`, `deflate`).
 - **Beginner note:** Renders a publication TIFF image at custom DPI or resolution with lossless compression.
-- **Parameters:** `compression` (string|null), `dpi` (integer|null), `height_px` (integer|null), `path` (string|null), `sheet_id*` (string), `width_px` (integer|null)
+- **Parameters:** `compression` (string|null), `dpi` (integer|null), `height_px` (integer|null), `path` (string|null), `sheet_id*` (string), `transparent_bg` (boolean|null), `width_px` (integer|null)
 
 ### `graph.exportEmf` — Export Graph EMF
 
@@ -859,7 +859,7 @@ Registered commands: 106
 - **Menu:** `File/Export/PNG`
 - **Summary:** Export a graph sheet to a raster PNG image.
 - **Beginner note:** Exports the active graph to a PNG bitmap at configurable DPI and size.
-- **Parameters:** `dpi` (integer|null), `height_px` (integer|null), `path` (string|null), `sheet_id*` (string), `width_px` (integer|null)
+- **Parameters:** `dpi` (integer|null), `height_px` (integer|null), `path` (string|null), `sheet_id*` (string), `transparent_bg` (boolean|null), `width_px` (integer|null)
 
 ### `graph.exportSvg` — Export Graph SVG
 
@@ -867,7 +867,7 @@ Registered commands: 106
 - **Menu:** `File/Export/SVG`
 - **Summary:** Export a graph sheet to SVG using the unified SVG renderer.
 - **Beginner note:** Exports the active graph to vector SVG format.
-- **Parameters:** `embed_fonts` (boolean|null), `include_metadata` (boolean|null), `include_xml_declaration` (boolean|null), `outline_text` (boolean|null), `path` (string|null), `precision` (integer|null), `pretty` (boolean|null), `sheet_id*` (string)
+- **Parameters:** `embed_fonts` (boolean|null), `include_metadata` (boolean|null), `include_xml_declaration` (boolean|null), `outline_text` (boolean|null), `path` (string|null), `precision` (integer|null), `pretty` (boolean|null), `sheet_id*` (string), `transparent_bg` (boolean|null)
 
 ### `layout.exportEmf` — Export Layout EMF
 

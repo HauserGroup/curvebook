@@ -758,6 +758,9 @@ pub fn patch_export_figure(state: &mut ExportFigureState, fields: &Map<String, V
                 let d = u16::try_from(parse_usize_min(val, key, 72)?.clamp(72, 2400)).unwrap_or(600);
                 patch.insert(String::from("dpi"), json!(d));
             }
+            "transparent_bg" | "export.transparent_bg" => {
+                patch.insert(String::from("transparent_bg"), json!(parse_bool_field(val, key)?));
+            }
             other => return Err(format!("unknown Export Figure field `{other}`")),
         }
     }
