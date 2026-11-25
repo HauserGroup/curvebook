@@ -40,7 +40,7 @@ In a scientific workstation, chromatic saturation belongs to experimental curves
    - the transient `2 pt` keyboard focus ring (`focus_ring`).
    - Accent colour is **not** used on static spreadsheet column headers (`X`, `Y1`), inline `+ New…` creation rows, passive pane labels, or permanent full-pane border cages around blank canvas or table space.
 3. **`[Implemented]` Never colour alone:** error, warning, stale, excluded-cell, and broken-link states always combine colour with a distinct icon, stroke pattern, typography style, or text label.
-4. **Decoupled figure styling:** exported chart palettes (`crates/palette`) and publication figure typography, inset placement, and axis autoranging (`crates/chart`, tracked independently in [`R20.5`](ROADMAP.md#r205-chart-fit-summary-readability-inset-layout--axis-autoranging)) remain decoupled from UI chrome tokens.
+4. **Decoupled figure styling:** exported chart palettes (`crates/palette`) and publication figure typography, inset placement, and axis autoranging (`crates/chart`, tracked independently in [`R20.5`](history/roadmap/r20.md#r205-chart-fit-summary-readability-inset-layout--axis-autoranging)) remain decoupled from UI chrome tokens.
 
 ---
 

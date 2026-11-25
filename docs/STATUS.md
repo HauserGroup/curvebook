@@ -1,6 +1,6 @@
 # CurveBook Status
 
-> **Updated:** 2026-11-24 · **Docs index:** [`README.md`](README.md) · **Roadmap:** [`ROADMAP.md`](ROADMAP.md) · **Parity overview:** [`evidence/overview.md`](evidence/overview.md)
+> **Updated:** 2026-11-25 · **Docs index:** [`README.md`](README.md) · **Roadmap:** [`ROADMAP.md`](ROADMAP.md) · **Parity overview:** [`evidence/overview.md`](evidence/overview.md)
 
 This document summarizes what works in CurveBook today, the checks that verify it, and the honest limits of the current workspace. Every Markdown table below uses unique Column 1 keys (`cargo xtask status`). To avoid stale prose numbers ([`CONTRIBUTING.md`](../CONTRIBUTING.md)), volatile file, line, test, and catalog-key counts are inspected on demand via `cargo xtask stats --exact` and `cargo xtask i18n-report`. Historical wave logs live in [`history/roadmap.md`](history/roadmap.md).
 

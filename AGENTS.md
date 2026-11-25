@@ -164,7 +164,7 @@ cargo xtask pending
 cargo xtask wasm
 ```
 
-(Running `cargo xtask ci quick [--direct] [--base <git-ref>]` executes the fast pre-PR tier described above—use `--direct` for inner-loop iteration on foundational crates and omit it before opening a PR; running `cargo xtask ci` executes the full workspace CI bundle. For interactive MCP/control/UI workflow checks, run integration targets `gui_wf_suite` and `human_wf_suite` in `curvebook-ui-egui`, `mcp_suite` in `curvebook-mcp`, `cli_suite` in `curvebook-cli`, and `desktop_suite` in `curvebook`.)
+(Running `cargo xtask ci quick [--direct] [--base <git-ref>]` executes the fast pre-PR tier described above—use `--direct` for inner-loop iteration on foundational crates and omit it before opening a PR; running `cargo xtask ci` executes the full workspace CI bundle. For interactive MCP/control/UI workflow checks, run integration targets `human_wf_suite` in `curvebook-ui-egui`, `mcp_suite` in `curvebook-mcp`, `cli_suite` in `curvebook-cli`, and `desktop_suite` in `curvebook`.)
 
 ### Parallel Agents
 When multiple agents work concurrently on the repository:

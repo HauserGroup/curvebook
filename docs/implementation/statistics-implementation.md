@@ -126,7 +126,7 @@ All multiplicity engines operate cleanly on contrast vectors $c_j^\top \hat{\bet
 
 ## 5. Contingency, Survival, ROC & Multivariate Analysis
 
-### 5.1 Contingency Tables (`crates/stats/src/categorical.rs`)
+### 5.1 Contingency Tables (`crates/stats/src/categorical/`)
 - $2 \times 2$ and $R \times C$ Pearson $\chi^2$ (with optional Yates continuity correction on $2 \times 2$), likelihood-ratio $G^2$, Fisher's exact test ($2 \times 2$ hypergeometric tail sum via log-factorials; Freeman–Halton network/Monte Carlo extension for $R \times C$), **Barnard's unconditional exact test** (`BarnardExact`: $2 \times 2$ nuisance-parameter grid supremum over $p \in [0, 1]$), Cochran–Armitage linear trend test on $2 \times C$, and McNemar's paired test.
 - **Exact & score confidence intervals:**
   - **Odds Ratio:** **Baptista–Pike** mid-*p* / exact hypergeometric interval (preferable to Woolf logit when cells are small or zero; Haldane–Anscombe $+0.5$ fallback noted when needed).

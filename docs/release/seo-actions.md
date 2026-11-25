@@ -1,6 +1,6 @@
 # Search discoverability: possible actions
 
-This is a catalogue of actions that could help people find CurveBook through search engines. It lists options, not commitments. Claimed work lives in [`ROADMAP.md`](../ROADMAP.md) (search work so far: [`R12.8`](../ROADMAP.md#r128-search-discoverability-for-the-pages-site) and [`R12.9`](../ROADMAP.md#r129-publish-only-the-site-on-pages)); before starting an action here, add or claim a roadmap item for it. How the site is built, checked, and published is described in [`github-pages.md`](github-pages.md).
+This is a catalogue of actions that could help people find CurveBook through search engines. It lists options, not commitments. Claimed work lives in [`ROADMAP.md`](../ROADMAP.md) (search work so far: [`R12.8`](../ROADMAP.md#r128-search-discoverability-for-the-pages-site) and [`R12.9`](../history/roadmap/r12.md#r129-publish-only-the-site-on-pages)); before starting an action here, add or claim a roadmap item for it. How the site is built, checked, and published is described in [`github-pages.md`](github-pages.md).
 
 Recorded 2026-11-24. Statuses below go stale; check the roadmap before relying on them.
 
