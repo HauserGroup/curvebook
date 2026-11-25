@@ -10,143 +10,95 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellCoord, ChecklistStatus, CiBound, DataSheet, FitFlagRules, FitMethod, IdentifiabilityMode,
-    ModelComparisonMethod, ModelComparisonQuestion, NonlinearFitSpec, ResultCell, ResultStatus, ResultTab, SubcolumnMode, TableArchetype,
-    XColumnMode, XyTable, format_significant_digits,
+    Cell, CellCoord, ChecklistStatus, CiBound, DataSheet, FitFlagRules, FitMethod, IdentifiabilityMode, ModelComparisonMethod,
+    ModelComparisonQuestion, NonlinearFitSpec, ResultCell, ResultStatus, SubcolumnMode, TableArchetype, XColumnMode, XyTable,
+    format_significant_digits,
 };
 use curvebook_fit::{
-    CompiledDslModel, DataPoint, DatasetSeries, FitIdentifiability, HookContext, ModelComparisonOutcome, ParameterNote, SolverConfig,
-    assemble_objective_hessian, compare_models_question, evaluate_fit_flags, execute_analysis, fit_nonlinear, get_builtin_model,
-    greedy_hessian_reduction, hessian_condition_number, hessian_kappa_threshold,
+    DatasetSeries, FitIdentifiability, HookContext, ModelComparisonOutcome, NonlinearFitResult, ParameterNote, SolverConfig,
+    assemble_objective_hessian, compare_models_question, evaluate_fit_flags, get_builtin_model, greedy_hessian_reduction, hessian_condition_number,
+    hessian_kappa_threshold,
 };
 use curvebook_math::linalg::DenseMatrix;
+use curvebook_testkit::assert_close;
 
-fn assert_close(actual: f64, expected: f64, tol: f64, label: &str) {
-    assert!(
-        actual.is_finite() && (actual - expected).abs() <= tol,
-        "{label}: expected {expected:.12} (+/- {tol:.2e}), got {actual:.12} (diff = {:.3e})",
-        (actual - expected).abs()
-    );
-}
-
-fn find_tab<'a>(sheet: &'a curvebook_doc::ResultSheet, id: &str) -> &'a ResultTab {
-    sheet.tabs.iter().find(|t| t.id == id).unwrap_or_else(|| panic!("missing result tab `{id}`"))
-}
-
-fn row_index(tab: &ResultTab, label: &str) -> usize {
-    tab.row_labels.iter().position(|l| l == label).unwrap_or_else(|| panic!("missing row `{label}` in `{}`; got {:?}", tab.id, tab.row_labels))
-}
+use common::{
+    cell_num, cfg_fast, dsl_compile, exec_nl, find_param, find_tab, fit_default, fit_with, nl_fast, series_xy, tab_row, xy_sheet, xy_sheet_single,
+};
 
 #[test]
 fn r18_2_greedy_hessian_identifiability_and_three_modes_r_oracle() {
-    // R 4.5.2 oracle from r18_2_identifiability_compare.R §1:
-    // Y = A*X + B + C*(1e-6 * X^2), X = 0..11
+    // R 4.5.2 oracle from r18_2_identifiability_compare.R §1: Y = A*X + B + C*(1e-6 * X^2), X = 0..11
     let xs: Vec<f64> = (0..12).map(f64::from).collect();
     let noise = [0.02, -0.015, 0.01, -0.025, 0.015, -0.01, 0.02, -0.02, 0.005, -0.015, 0.025, -0.01];
     let ys: Vec<f64> = xs.iter().zip(noise).map(|(&x, e)| 1.5 + 2.5 * x + e).collect();
 
     assert_close(hessian_kappa_threshold(), 6.710_886_4e8, 1e-2, "10 / sqrt(eps_mach)");
 
-    // Verify Hessian assembly & greedy condition-number reduction directly against R SVD oracle.
-    let mut j_data = Vec::with_capacity(xs.len() * 3);
-    for &x in &xs {
-        j_data.push(x);
-        j_data.push(1.0);
-        j_data.push(1e-6 * x * x);
-    }
-    let j_mat = DenseMatrix::from_row_major(xs.len(), 3, j_data).unwrap();
-    let h = assemble_objective_hessian(&j_mat, false).unwrap();
-    let kappa_full = hessian_condition_number(&h).unwrap();
-    assert_close(kappa_full / 3.856_137_345_783e11, 1.0, 1e-6, "kappa(H_full) relative");
+    let j_data: Vec<f64> = xs.iter().flat_map(|&x| [x, 1.0, 1e-6 * x * x]).collect();
+    let h = assemble_objective_hessian(&DenseMatrix::from_row_major(xs.len(), 3, j_data).unwrap(), false).unwrap();
+    assert_close(hessian_condition_number(&h).unwrap() / 3.856_137_345_783e11, 1.0, 1e-6, "kappa(H_full) relative");
 
     let red = greedy_hessian_reduction(&h, hessian_kappa_threshold()).unwrap();
     assert_eq!(red.unstable_indices, vec![2], "greedy reduction must drop C (index 2)");
     assert_eq!(red.stable_indices, vec![0, 1], "A and B must remain well-conditioned");
     assert_close(red.final_kappa, 154.359_488_982_3, 1e-6, "kappa(H_-3)");
 
-    // Run end-to-end nonlinear fit with IdentifiabilityMode::IdentifyUnstableParameters.
-    let dsl = "Y = A*X + B + C*0.000001*X*X\n# Inits: A=2.0, B=1.0, C=0.0";
-    let mut xy = XyTable::new(SubcolumnMode::Single, 1, xs.len()).unwrap();
-    for (r, (&x, &y)) in xs.iter().zip(ys.iter()).enumerate() {
-        xy.set_x_cell(r, Cell::number(x)).unwrap();
-        xy.data_sets[0].cells[r][0] = Cell::number(y);
-    }
-    let sheet = DataSheet::new("xy-hess", "Ill-Conditioned Quadratic", TableArchetype::Xy(xy)).unwrap();
+    let sheet = xy_sheet_single("xy-hess", "Ill-Conditioned Quadratic", "A", &xs, &ys);
 
     // 1) IdentifyUnstableParameters + Wald (show_standard_errors defaults true)
-    let mut nl_u = NonlinearFitSpec::new("ill_cond");
-    nl_u.custom_dsl = Some(dsl.to_owned());
-    nl_u.profile_likelihood_ci = false;
+    let mut nl_u = nl_fast("ill_cond");
+    nl_u.custom_dsl = Some("Y = A*X + B + C*0.000001*X*X\n# Inits: A=2.0, B=1.0, C=0.0".to_owned());
     nl_u.identifiability_mode = Some(IdentifiabilityMode::IdentifyUnstableParameters);
-    let res_u =
-        execute_analysis(&AnalysisSpec::new("fit-u", "xy-hess", AnalysisKind::NonlinearRegression(nl_u)).unwrap(), &sheet, &HookContext::default())
-            .unwrap();
+    let res_u = exec_nl(&sheet, nl_u);
     assert_eq!(res_u.status, ResultStatus::UpToDate);
-    let tab_u = find_tab(&res_u, "nonlinear_parameters");
-    assert_eq!(tab_u.column_headers, vec!["Best-fit value", "Std. Error", "Confidence Interval", "Dependency", "Hougaard |g1|"]);
-
-    // A and B retain valid finite SEs matching R reduced-subspace oracle, while C displays "Unstable".
-    let r_a = row_index(tab_u, "A");
-    let r_b = row_index(tab_u, "B");
-    let r_c = row_index(tab_u, "C (Unstable)");
-    let ResultCell::Number { value: se_a, .. } = tab_u.rows[r_a][1] else {
-        panic!("expected finite SE for A, got {:?}", tab_u.rows[r_a][1]);
-    };
-    let ResultCell::Number { value: se_b, .. } = tab_u.rows[r_b][1] else {
-        panic!("expected finite SE for B, got {:?}", tab_u.rows[r_b][1]);
-    };
-    assert_close(se_a, 0.001_618_038_989_177, 1e-6, "reduced-subspace SE(A)");
-    assert_close(se_b, 0.010_506_876_265_378, 1e-6, "reduced-subspace SE(B)");
-    assert!(matches!(tab_u.rows[r_a][2], ResultCell::ConfidenceInterval { lower: CiBound::Finite(_), upper: CiBound::Finite(_) }));
-    assert!(matches!(tab_u.rows[r_b][2], ResultCell::ConfidenceInterval { lower: CiBound::Finite(_), upper: CiBound::Finite(_) }));
-    assert_eq!(tab_u.rows[r_c][0], ResultCell::Text("Unstable".to_owned()));
-    assert_eq!(tab_u.rows[r_c][1], ResultCell::Text("Unstable".to_owned()));
-    assert_eq!(tab_u.rows[r_c][2], ResultCell::Text("Unstable".to_owned()));
+    assert_eq!(
+        find_tab(&res_u, "nonlinear_parameters").column_headers,
+        vec!["Best-fit value", "Std. Error", "Confidence Interval", "Dependency", "Hougaard |g1|"]
+    );
+    let (row_a, row_b, row_c) = (
+        tab_row(&res_u, "nonlinear_parameters", "A"),
+        tab_row(&res_u, "nonlinear_parameters", "B"),
+        tab_row(&res_u, "nonlinear_parameters", "C (Unstable)"),
+    );
+    assert_close(cell_num(&row_a[1]), 0.001_618_038_989_177, 1e-6, "reduced-subspace SE(A)");
+    assert_close(cell_num(&row_b[1]), 0.010_506_876_265_378, 1e-6, "reduced-subspace SE(B)");
+    assert!(matches!(row_a[2], ResultCell::ConfidenceInterval { lower: CiBound::Finite(_), upper: CiBound::Finite(_) }));
+    assert!(matches!(row_b[2], ResultCell::ConfidenceInterval { lower: CiBound::Finite(_), upper: CiBound::Finite(_) }));
+    assert_eq!(
+        &row_c[0..3],
+        &[ResultCell::Text("Unstable".to_owned()), ResultCell::Text("Unstable".to_owned()), ResultCell::Text("Unstable".to_owned())]
+    );
 
     // 2) Profile-likelihood CI omits Std. Error column by default, and opt-in restores it.
     let mut nl_prof = NonlinearFitSpec::new("straight_line");
     nl_prof.profile_likelihood_ci = true;
-    let res_prof = execute_analysis(
-        &AnalysisSpec::new("fit-prof", "xy-hess", AnalysisKind::NonlinearRegression(nl_prof.clone())).unwrap(),
-        &sheet,
-        &HookContext::default(),
-    )
-    .unwrap();
-    let tab_prof = find_tab(&res_prof, "nonlinear_parameters");
-    assert_eq!(tab_prof.column_headers, vec!["Best-fit value", "Confidence Interval", "Dependency", "Hougaard |g1|"]);
-
+    assert_eq!(
+        find_tab(&exec_nl(&sheet, nl_prof.clone()), "nonlinear_parameters").column_headers,
+        vec!["Best-fit value", "Confidence Interval", "Dependency", "Hougaard |g1|"]
+    );
     nl_prof.show_standard_errors = Some(true);
-    let res_prof_se = execute_analysis(
-        &AnalysisSpec::new("fit-prof-se", "xy-hess", AnalysisKind::NonlinearRegression(nl_prof)).unwrap(),
-        &sheet,
-        &HookContext::default(),
-    )
-    .unwrap();
-    let tab_prof_se = find_tab(&res_prof_se, "nonlinear_parameters");
-    assert_eq!(tab_prof_se.column_headers, vec!["Best-fit value", "Std. Error", "Confidence Interval", "Dependency", "Hougaard |g1|"]);
+    assert_eq!(
+        find_tab(&exec_nl(&sheet, nl_prof), "nonlinear_parameters").column_headers,
+        vec!["Best-fit value", "Std. Error", "Confidence Interval", "Dependency", "Hougaard |g1|"]
+    );
 
     // 3) IdentifyAmbiguousFits vs ReportAll on rank-deficient dead parameter C*0.
-    let dead_model = CompiledDslModel::compile("dead_c", "Y = A*X + B + C*0\n# Inits: A=2.0, B=1.0, C=1.0").unwrap();
-    let ds = DatasetSeries {
-        data_set_index: 0,
-        label: "Dead".to_owned(),
-        points: xs.iter().zip(ys.iter()).map(|(&x, &y)| DataPoint::xy(x, y)).collect(),
-        unknowns_y: Vec::new(),
-        unknowns_x: Vec::new(),
-        is_pre_summarized: false,
-        column_title_value: None,
-    };
-    let cfg_amb =
-        SolverConfig { identifiability_mode: Some(IdentifiabilityMode::IdentifyAmbiguousFits), compute_profile_ci: false, ..SolverConfig::default() };
-    let fit_amb = fit_nonlinear(&dead_model, std::slice::from_ref(&ds), &HookContext::default(), &cfg_amb).unwrap();
+    let dead_model = dsl_compile("Y = A*X + B + C*0\n# Inits: A=2.0, B=1.0, C=1.0");
+    let ds = series_xy(0, "Dead", &xs, &ys);
+    let fit_amb = fit_with(
+        &dead_model,
+        std::slice::from_ref(&ds),
+        &SolverConfig { identifiability_mode: Some(IdentifiabilityMode::IdentifyAmbiguousFits), ..cfg_fast() },
+    );
     assert!(matches!(fit_amb.identifiability, FitIdentifiability::Ambiguous { .. }));
-    let c_amb = fit_amb.parameters.iter().find(|p| p.name == "C").unwrap();
-    assert!(c_amb.notes.contains(&ParameterNote::Ambiguous));
-    assert!(!c_amb.notes.contains(&ParameterNote::Unstable));
+    let c_amb = find_param(&fit_amb, "C");
+    assert!(c_amb.notes.contains(&ParameterNote::Ambiguous) && !c_amb.notes.contains(&ParameterNote::Unstable));
 
-    let cfg_all = SolverConfig { identifiability_mode: Some(IdentifiabilityMode::ReportAll), compute_profile_ci: false, ..SolverConfig::default() };
-    let fit_all = fit_nonlinear(&dead_model, &[ds], &HookContext::default(), &cfg_all).unwrap();
+    let fit_all = fit_with(&dead_model, &[ds], &SolverConfig { identifiability_mode: Some(IdentifiabilityMode::ReportAll), ..cfg_fast() });
     assert_eq!(fit_all.identifiability, FitIdentifiability::NotAssessed);
     assert!(fit_all.parameters.iter().all(|p| !p.notes.contains(&ParameterNote::Ambiguous) && !p.notes.contains(&ParameterNote::Unstable)));
 }
@@ -159,151 +111,101 @@ fn r18_2_four_model_comparison_questions_and_prefer_well_defined_r_oracle() {
     let e_b = [-0.3, 0.4, -0.2, 0.3, -0.4, 0.2, -0.1, 0.3, -0.2];
     let y_a: Vec<f64> = x_dr.iter().zip(e_a).map(|(&x, e)| 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.8)) + e).collect();
     let y_b: Vec<f64> = x_dr.iter().zip(e_b).map(|(&x, e)| 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-5.8 - x) * 1.8)) + e).collect();
-
-    let ds_a = DatasetSeries {
-        data_set_index: 0,
-        label: "A".to_owned(),
-        points: x_dr.iter().zip(y_a.iter()).map(|(&x, &y)| DataPoint::xy(x, y)).collect(),
-        unknowns_y: Vec::new(),
-        unknowns_x: Vec::new(),
-        is_pre_summarized: false,
-        column_title_value: None,
-    };
-    let ds_b = DatasetSeries {
-        data_set_index: 1,
-        label: "B".to_owned(),
-        points: x_dr.iter().zip(y_b.iter()).map(|(&x, &y)| DataPoint::xy(x, y)).collect(),
-        unknowns_y: Vec::new(),
-        unknowns_x: Vec::new(),
-        is_pre_summarized: false,
-        column_title_value: None,
-    };
+    let (ds_a, ds_b) = (series_xy(0, "A", &x_dr, &y_a), series_xy(1, "B", &x_dr, &y_b));
 
     let model_4pl = get_builtin_model("log_agonist_vs_response_4pl").unwrap();
-    let cfg = SolverConfig { compute_profile_ci: false, ..SolverConfig::default() };
-    let primary_a = fit_nonlinear(model_4pl.as_ref(), std::slice::from_ref(&ds_a), &HookContext::default(), &cfg).unwrap();
+    let cfg = cfg_fast();
+    let primary_a = fit_with(model_4pl.as_ref(), std::slice::from_ref(&ds_a), &cfg);
+    let both = [ds_a.clone(), ds_b];
+    let primary_ab = fit_with(model_4pl.as_ref(), &both, &cfg);
 
-    // Q1: AlternativeEquation (4PL vs 3PL) — Extra-SS F and AICc
-    let q1_f = compare_models_question(
-        model_4pl.as_ref(),
-        &primary_a,
-        std::slice::from_ref(&ds_a),
-        &HookContext::default(),
-        &cfg,
-        ModelComparisonMethod::ExtraSumOfSquaresF,
-        &ModelComparisonQuestion::AlternativeEquation { alternative_equation_id: "log_agonist_vs_response_3pl".to_owned() },
-        false,
-        None,
-    )
-    .unwrap();
-    let ModelComparisonOutcome::ExtraSumOfSquaresF(f1) = q1_f.outcome else {
-        panic!("expected ExtraSumOfSquaresF");
+    let run_q = |fit: &NonlinearFitResult, ds: &[DatasetSeries], method, q: ModelComparisonQuestion, prefer, flags| {
+        compare_models_question(model_4pl.as_ref(), fit, ds, &HookContext::default(), &cfg, method, &q, prefer, flags).unwrap()
     };
-    assert_eq!((f1.df_num, f1.df_den), (1, 5));
-    assert_close(f1.f_stat, 1_386.763_729_277_045, 1e-4, "Q1 Extra-SS F");
-    assert_close(f1.p_value, 2.629_953_764_477e-7, 1e-9, "Q1 p-value");
-    assert!(f1.preferred_complex_model);
 
-    let q1_aicc = compare_models_question(
-        model_4pl.as_ref(),
+    // Q1, Q4, Q2, Q3 Extra-SS F oracles
+    let f_cases = [
+        (
+            "Q1 Extra-SS F",
+            &primary_a,
+            std::slice::from_ref(&ds_a),
+            ModelComparisonQuestion::AlternativeEquation { alternative_equation_id: "log_agonist_vs_response_3pl".to_owned() },
+            (1, 5),
+            (1_386.763_729_277_045, 1e-4),
+            (2.629_953_764_477e-7, 1e-9),
+            true,
+        ),
+        (
+            "Q4 HillSlope=1.0",
+            &primary_a,
+            std::slice::from_ref(&ds_a),
+            ModelComparisonQuestion::ParameterEqualsTheoretical { param: "HillSlope".to_owned(), theoretical_value: 1.0 },
+            (1, 5),
+            (1_386.763_729_277_045, 1e-4),
+            (2.629_953_764_477e-7, 1e-9),
+            true,
+        ),
+        (
+            "Q2 Shared HillSlope",
+            &primary_ab,
+            &both[..],
+            ModelComparisonQuestion::ParameterInvarianceAcrossDatasets { shared_params: vec!["HillSlope".to_owned()] },
+            (1, 10),
+            (0.141_831_592_899, 1e-4),
+            (0.714_334_660_235_4, 1e-4),
+            false,
+        ),
+        (
+            "Q3 Global vs Separate",
+            &primary_ab,
+            &both[..],
+            ModelComparisonQuestion::SingleGlobalCurveVsSeparate,
+            (4, 10),
+            (3_901.601_175_770_808, 5e-3),
+            (6.456_752_817_460e-16, 1e-12),
+            true,
+        ),
+    ];
+    for (lbl, fit, ds, q, dfs, (f_exp, f_tol), (p_exp, p_tol), pref_complex) in f_cases {
+        let ModelComparisonOutcome::ExtraSumOfSquaresF(f) = run_q(fit, ds, ModelComparisonMethod::ExtraSumOfSquaresF, q, false, None).outcome else {
+            panic!("{lbl}: expected ExtraSumOfSquaresF");
+        };
+        assert_eq!((f.df_num, f.df_den), dfs, "{lbl} df");
+        assert_close(f.f_stat, f_exp, f_tol, &format!("{lbl} F"));
+        assert_close(f.p_value, p_exp, p_tol, &format!("{lbl} p"));
+        assert_eq!(f.preferred_complex_model, pref_complex, "{lbl} preferred_complex_model");
+    }
+
+    // Q1 AICc oracle
+    let ModelComparisonOutcome::Aicc(a1) = run_q(
         &primary_a,
         std::slice::from_ref(&ds_a),
-        &HookContext::default(),
-        &cfg,
         ModelComparisonMethod::Aicc,
-        &ModelComparisonQuestion::AlternativeEquation { alternative_equation_id: "log_agonist_vs_response_3pl".to_owned() },
+        ModelComparisonQuestion::AlternativeEquation { alternative_equation_id: "log_agonist_vs_response_3pl".to_owned() },
         false,
         None,
     )
-    .unwrap();
-    let ModelComparisonOutcome::Aicc(a1) = q1_aicc.outcome else {
+    .outcome
+    else {
         panic!("expected Aicc");
     };
     assert_close(a1.aicc_a, 8.819_225_714_849, 1e-5, "Q1 AICc 4PL");
     assert_close(a1.aicc_b, 47.479_228_328_899, 1e-5, "Q1 AICc 3PL");
     assert_close(a1.delta_aicc, 38.660_002_614_050, 1e-5, "Q1 delta AICc");
 
-    // Q4: ParameterEqualsTheoretical (HillSlope = 1.0 vs free) — exact match to 4PL vs 3PL!
-    let q4 = compare_models_question(
-        model_4pl.as_ref(),
-        &primary_a,
-        std::slice::from_ref(&ds_a),
-        &HookContext::default(),
-        &cfg,
-        ModelComparisonMethod::ExtraSumOfSquaresF,
-        &ModelComparisonQuestion::ParameterEqualsTheoretical { param: "HillSlope".to_owned(), theoretical_value: 1.0 },
-        false,
-        None,
-    )
-    .unwrap();
-    let ModelComparisonOutcome::ExtraSumOfSquaresF(f4) = q4.outcome else {
-        panic!("expected ExtraSumOfSquaresF for Q4");
-    };
-    assert_eq!((f4.df_num, f4.df_den), (1, 5));
-    assert_close(f4.f_stat, 1_386.763_729_277_045, 1e-4, "Q4 HillSlope=1.0 F");
-    assert_close(f4.p_value, 2.629_953_764_477e-7, 1e-9, "Q4 HillSlope=1.0 p");
-
-    // Q2: ParameterInvarianceAcrossDatasets (shared HillSlope across A & B)
-    let both = [ds_a.clone(), ds_b.clone()];
-    let primary_ab = fit_nonlinear(model_4pl.as_ref(), &both, &HookContext::default(), &cfg).unwrap();
-    let q2 = compare_models_question(
-        model_4pl.as_ref(),
-        &primary_ab,
-        &both,
-        &HookContext::default(),
-        &cfg,
-        ModelComparisonMethod::ExtraSumOfSquaresF,
-        &ModelComparisonQuestion::ParameterInvarianceAcrossDatasets { shared_params: vec!["HillSlope".to_owned()] },
-        false,
-        None,
-    )
-    .unwrap();
-    let ModelComparisonOutcome::ExtraSumOfSquaresF(f2) = q2.outcome else {
-        panic!("expected ExtraSumOfSquaresF for Q2");
-    };
-    assert_eq!((f2.df_num, f2.df_den), (1, 10));
-    assert_close(f2.f_stat, 0.141_831_592_899, 1e-4, "Q2 Shared HillSlope F");
-    assert_close(f2.p_value, 0.714_334_660_235_4, 1e-4, "Q2 Shared HillSlope p");
-    assert!(!f2.preferred_complex_model, "shared HillSlope null must be preferred");
-
-    // Q3: SingleGlobalCurveVsSeparate (one global curve vs separate curves across A & B)
-    let q3 = compare_models_question(
-        model_4pl.as_ref(),
-        &primary_ab,
-        &both,
-        &HookContext::default(),
-        &cfg,
-        ModelComparisonMethod::ExtraSumOfSquaresF,
-        &ModelComparisonQuestion::SingleGlobalCurveVsSeparate,
-        false,
-        None,
-    )
-    .unwrap();
-    let ModelComparisonOutcome::ExtraSumOfSquaresF(f3) = q3.outcome else {
-        panic!("expected ExtraSumOfSquaresF for Q3");
-    };
-    assert_eq!((f3.df_num, f3.df_den), (4, 10));
-    assert_close(f3.f_stat, 3_901.601_175_770_808, 5e-3, "Q3 Global vs Separate F");
-    assert_close(f3.p_value, 6.456_752_817_460e-16, 1e-12, "Q3 Global vs Separate p");
-    assert!(f3.preferred_complex_model, "separate curves must be preferred");
-
-    // Pre-check `prefer_well_defined_fit`: when primary is clean (R^2 > 0.99) and alternative (3PL)
-    // is Flagged under `min_r_squared = 0.99`, select primary immediately without F/LRT/AICc!
+    // Pre-check `prefer_well_defined_fit`
     let strict_flags = FitFlagRules { min_r_squared: Some(0.99), ..FitFlagRules::default() };
-    let pre = compare_models_question(
-        model_4pl.as_ref(),
+    let ModelComparisonOutcome::PreferredWellDefinedFit { preferred_is_primary, rejection_reasons, .. } = run_q(
         &primary_a,
         std::slice::from_ref(&ds_a),
-        &HookContext::default(),
-        &cfg,
         ModelComparisonMethod::ExtraSumOfSquaresF,
-        &ModelComparisonQuestion::AlternativeEquation { alternative_equation_id: "log_agonist_vs_response_3pl".to_owned() },
+        ModelComparisonQuestion::AlternativeEquation { alternative_equation_id: "log_agonist_vs_response_3pl".to_owned() },
         true,
         Some(&strict_flags),
     )
-    .unwrap();
-    let ModelComparisonOutcome::PreferredWellDefinedFit { preferred_is_primary, rejection_reasons, .. } = pre.outcome else {
-        panic!("expected PreferredWellDefinedFit pre-check, got {:?}", pre.outcome);
+    .outcome
+    else {
+        panic!("expected PreferredWellDefinedFit pre-check");
     };
     assert!(preferred_is_primary, "clean 4PL fit must be preferred over Flagged 3PL fit");
     assert!(rejection_reasons.iter().any(|r| r.contains("Flagged")));
@@ -311,21 +213,13 @@ fn r18_2_four_model_comparison_questions_and_prefer_well_defined_r_oracle() {
 
 #[test]
 fn r18_2_fit_flag_rules_all_six_criteria() {
-    // Build a noisy 10-point linear dataset with an outlier to exercise all 6 FitFlagRules.
     let xs = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
     let ys = [1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 50.0];
-    let mut xy = XyTable::new(SubcolumnMode::Single, 1, xs.len()).unwrap();
-    for (r, (&x, &y)) in xs.iter().zip(ys.iter()).enumerate() {
-        xy.set_x_cell(r, Cell::number(x)).unwrap();
-        xy.data_sets[0].cells[r][0] = Cell::number(y);
-    }
-    let sheet = DataSheet::new("xy-flags", "Flagged Fit", TableArchetype::Xy(xy)).unwrap();
+    let sheet = xy_sheet_single("xy-flags", "Flagged Fit", "A", &xs, &ys);
 
-    // Test 1: ROUT outlier count + R^2 + N + dependency + normality + runs/LOF rules.
-    let mut nl = NonlinearFitSpec::new("straight_line");
+    let mut nl = nl_fast("straight_line");
     nl.method = FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 };
     nl.normality_of_residuals = true;
-    nl.profile_likelihood_ci = false;
     nl.fit_flag_rules = Some(FitFlagRules {
         min_r_squared: Some(0.9999),
         min_observations: Some(12),
@@ -335,110 +229,67 @@ fn r18_2_fit_flag_rules_all_six_criteria() {
         max_rout_outliers: Some(0),
         exclude_flagged_from_summary: false,
     });
-    let res = execute_analysis(
-        &AnalysisSpec::new("fit-flags", "xy-flags", AnalysisKind::NonlinearRegression(nl)).unwrap(),
-        &sheet,
-        &HookContext::default(),
-    )
-    .unwrap();
-    let gof = find_tab(&res, "nonlinear_gof");
-    let flag_row = row_index(gof, "Fit quality flag");
-    assert_eq!(gof.rows[flag_row][0], ResultCell::Text("Flagged".to_owned()));
+    let res = exec_nl(&sheet, nl);
+    assert_eq!(tab_row(&res, "nonlinear_gof", "Fit quality flag")[0], ResultCell::Text("Flagged".to_owned()));
     assert!(res.checklist.iter().any(|c| c.assumption == "Fit quality (Flagged)" && c.status == ChecklistStatus::Warn));
 
-    // Also verify `evaluate_fit_flags` on a clean fit returns `flagged == false`.
     let clean_ys: Vec<f64> = xs.iter().map(|&x| 1.0 + 2.0 * x).collect();
-    let clean_ds = DatasetSeries {
-        data_set_index: 0,
-        label: "Clean".to_owned(),
-        points: xs.iter().zip(clean_ys.iter()).map(|(&x, &y)| DataPoint::xy(x, y)).collect(),
-        unknowns_y: Vec::new(),
-        unknowns_x: Vec::new(),
-        is_pre_summarized: false,
-        column_title_value: None,
-    };
-    let model = get_builtin_model("straight_line").unwrap();
-    let clean_fit = fit_nonlinear(model.as_ref(), &[clean_ds], &HookContext::default(), &SolverConfig::default()).unwrap();
-    let pass_rules = FitFlagRules {
-        min_r_squared: Some(0.95),
-        min_observations: Some(5),
-        max_dependency: Some(0.999),
-        min_normality_p: Some(0.05),
-        min_runs_or_lof_p: Some(0.05),
-        max_rout_outliers: Some(1),
-        exclude_flagged_from_summary: false,
-    };
-    let outcome = evaluate_fit_flags(&clean_fit, &pass_rules);
+    let clean_fit = fit_default(get_builtin_model("straight_line").unwrap().as_ref(), &[series_xy(0, "Clean", &xs, &clean_ys)]);
+    let outcome = evaluate_fit_flags(
+        &clean_fit,
+        &FitFlagRules {
+            min_r_squared: Some(0.95),
+            min_observations: Some(5),
+            max_dependency: Some(0.999),
+            min_normality_p: Some(0.05),
+            min_runs_or_lof_p: Some(0.05),
+            max_rout_outliers: Some(1),
+            exclude_flagged_from_summary: false,
+        },
+    );
     assert!(!outcome.flagged, "clean fit should not be flagged: {:?}", outcome.reasons);
 }
 
 #[test]
 fn r18_2_parameter_summary_and_significant_digits_r_oracle() {
-    // R 4.5.2 oracle from r18_2_identifiability_compare.R §3:
-    // One-phase association across 3 datasets titled "1", "2", "4" ([L] = 1, 2, 4).
-    let t_kin = [0.0, 1.0, 2.0, 4.0, 8.0, 12.0, 20.0];
+    // R 4.5.2 oracle from r18_2_identifiability_compare.R §3
+    let t_kin: [f64; 7] = [0.0, 1.0, 2.0, 4.0, 8.0, 12.0, 20.0];
     let e_kin = [0.1, -0.15, 0.08, -0.12, 0.09, -0.05, 0.05];
-    let concs = [1.0, 2.0, 4.0];
+    let concs: [f64; 3] = [1.0, 2.0, 4.0];
     let expected_k = [0.179_486_622_245_069, 0.259_246_309_003_703, 0.418_734_145_939_683];
 
-    let mut xy = XyTable::new(SubcolumnMode::Single, 3, t_kin.len()).unwrap();
-    for (c, &conc) in concs.iter().enumerate() {
-        xy.data_sets[c].title = format!("{conc}");
-        let k_true = 0.10 + 0.08 * conc;
-        for (r, (&t, &e)) in t_kin.iter().zip(e_kin.iter()).enumerate() {
-            xy.set_x_cell(r, Cell::number(t)).unwrap();
-            let y = 5.0 + 95.0 * (1.0 - (-k_true * t).exp()) + e;
-            xy.data_sets[c].cells[r][0] = Cell::number(y);
-        }
-    }
-    let sheet = DataSheet::new("xy-kin", "Association Kinetics", TableArchetype::Xy(xy)).unwrap();
-    let mut nl = NonlinearFitSpec::new("one_phase_association");
-    nl.profile_likelihood_ci = false;
+    let ys: Vec<Vec<f64>> =
+        concs.iter().map(|&c| t_kin.iter().zip(e_kin).map(|(&t, e)| 5.0 + 95.0 * (1.0 - (-(0.10 + 0.08 * c) * t).exp()) + e).collect()).collect();
+    let sheet = xy_sheet("xy-kin", "Association Kinetics", &t_kin, &[("1", &ys[0]), ("2", &ys[1]), ("4", &ys[2])]);
+
+    let mut nl = nl_fast("one_phase_association");
     nl.summary_parameter = Some("K".to_owned());
     nl.output_significant_digits = Some(4);
-    let res =
-        execute_analysis(&AnalysisSpec::new("fit-kin", "xy-kin", AnalysisKind::NonlinearRegression(nl)).unwrap(), &sheet, &HookContext::default())
-            .unwrap();
+    let res = exec_nl(&sheet, nl);
     assert_eq!(res.status, ResultStatus::UpToDate);
 
     let sum_tab = find_tab(&res, "nonlinear_parameter_summary");
     assert_eq!(sum_tab.rows.len(), 3);
-    for (idx, (&conc, &exp_k)) in concs.iter().zip(expected_k.iter()).enumerate() {
-        let ResultCell::Number { value: x_val, .. } = sum_tab.rows[idx][0] else {
-            panic!("expected numeric X column title at row {idx}");
-        };
-        let ResultCell::Number { value: k_val, .. } = sum_tab.rows[idx][1] else {
-            panic!("expected numeric K estimate at row {idx}");
-        };
-        assert_close(x_val, conc, 1e-12, "summary X [L]");
-        assert_close(k_val, exp_k, 1e-6, "summary K vs R nls");
-    }
-
-    // Companion analyzable_data must be an XyTable ready for secondary regression or XY graph!
-    let Some(analyzable) = &res.analyzable_data else {
-        panic!("expected analyzable_data for summary_parameter");
-    };
-    let TableArchetype::Xy(sum_xy) = &analyzable.archetype else {
+    let TableArchetype::Xy(sum_xy) = &res.analyzable_data.as_ref().expect("expected analyzable_data").archetype else {
         panic!("expected XyTable analyzable_data for numeric column-title summary");
     };
-    for (idx, (&conc, &exp_k)) in concs.iter().zip(expected_k.iter()).enumerate() {
+    for (idx, (&conc, &exp_k)) in concs.iter().zip(&expected_k).enumerate() {
+        assert_close(cell_num(&sum_tab.rows[idx][0]), conc, 1e-12, "summary X [L]");
+        assert_close(cell_num(&sum_tab.rows[idx][1]), exp_k, 1e-6, "summary K vs R nls");
         assert_close(sum_xy.x_cells[idx][0].active_number().unwrap(), conc, 1e-12, "analyzable X");
         assert_close(sum_xy.data_sets[0].cells[idx][0].active_number().unwrap(), exp_k, 1e-6, "analyzable K");
     }
 
-    // Verify `format_significant_digits` helper directly.
-    assert_eq!(format_significant_digits(0.179_486_6, 4), "0.1795");
-    assert_eq!(format_significant_digits(9.999, 3), "10.0");
-    assert_eq!(format_significant_digits(0.0, 3), "0.00");
-    assert_eq!(format_significant_digits(1.2345e-6, 3), "1.23e-6");
+    for (val, sig, exp) in [(0.179_486_6, 4, "0.1795"), (9.999, 3, "10.0"), (0.0, 3, "0.00"), (1.2345e-6, 3, "1.23e-6")] {
+        assert_eq!(format_significant_digits(val, sig), exp);
+    }
 }
 
 #[test]
 fn r18_2_dual_interpolated_tabs_analyzable_data_and_antilog_r_oracle() {
-    // R 4.5.2 oracle from r18_2_identifiability_compare.R §4:
-    // Linear log10-X standard curve Y = 3 + 2*X, RawReplicates(2) unknown row Y = [6.0, 8.0]
-    let xy = XyTable::new(SubcolumnMode::RawReplicates(2), 1, 6).unwrap();
-    let mut sheet = DataSheet::new("xy-std", "Log-X Standard Curve", TableArchetype::Xy(xy)).unwrap();
+    // R 4.5.2 oracle from r18_2_identifiability_compare.R §4
+    let mut sheet =
+        DataSheet::new("xy-std", "Log-X Standard Curve", TableArchetype::Xy(XyTable::new(SubcolumnMode::RawReplicates(2), 1, 6).unwrap())).unwrap();
     for r in 0..5 {
         let x = r as f64;
         sheet.set_x_or_time_cell(r, 0, Cell::number(x)).unwrap();
@@ -448,20 +299,14 @@ fn r18_2_dual_interpolated_tabs_analyzable_data_and_antilog_r_oracle() {
     sheet.set_cell(CellCoord::new(5, 0, 0), Cell::number(6.0)).unwrap();
     sheet.set_cell(CellCoord::new(5, 0, 1), Cell::number(8.0)).unwrap();
 
-    let mut nl = NonlinearFitSpec::new("straight_line");
+    let mut nl = nl_fast("straight_line");
     nl.interpolate_unknowns = true;
-    nl.profile_likelihood_ci = false;
-    let res =
-        execute_analysis(&AnalysisSpec::new("fit-std", "xy-std", AnalysisKind::NonlinearRegression(nl)).unwrap(), &sheet, &HookContext::default())
-            .unwrap();
+    let res = exec_nl(&sheet, nl);
     assert_eq!(res.status, ResultStatus::UpToDate);
     assert!(res.tabs.iter().any(|t| t.title == "Interpolated Mean X"));
     assert!(res.tabs.iter().any(|t| t.title == "Interpolated Replicates"));
 
-    // Verify `analyzable_data` exposes [estimate, ci_lower, ci_upper] via UpperLowerLimits on X
-    // so downstream `10^X` antilog converts estimates and CI endpoints cleanly.
-    let analyzable = res.analyzable_data.as_ref().expect("dual interpolated tabs must populate analyzable_data");
-    let TableArchetype::Xy(ixy) = &analyzable.archetype else {
+    let TableArchetype::Xy(ixy) = &res.analyzable_data.as_ref().expect("dual interpolated tabs must populate analyzable_data").archetype else {
         panic!("expected XyTable for interpolated analyzable_data");
     };
     assert_eq!(ixy.x_mode, XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::UpperLowerLimits });
@@ -473,11 +318,8 @@ fn r18_2_dual_interpolated_tabs_analyzable_data_and_antilog_r_oracle() {
         ("Rep2", 316.227_766_016_838_f64, 247.852_015_958_646_f64, 408.341_418_644_155_f64),
     ];
     for (r, &(lbl, exp_est, exp_lo, exp_hi)) in oracles.iter().enumerate() {
-        let est_10 = 10.0_f64.powf(ixy.x_cells[r][0].active_number().unwrap());
-        let lo_10 = 10.0_f64.powf(ixy.x_cells[r][1].active_number().unwrap());
-        let hi_10 = 10.0_f64.powf(ixy.x_cells[r][2].active_number().unwrap());
-        assert_close(est_10, exp_est, 1e-6, &format!("{lbl} 10^X"));
-        assert_close(lo_10, exp_lo, 5e-2, &format!("{lbl} 10^CI_lo"));
-        assert_close(hi_10, exp_hi, 5e-2, &format!("{lbl} 10^CI_hi"));
+        assert_close(10.0_f64.powf(ixy.x_cells[r][0].active_number().unwrap()), exp_est, 1e-6, &format!("{lbl} 10^X"));
+        assert_close(10.0_f64.powf(ixy.x_cells[r][1].active_number().unwrap()), exp_lo, 5e-2, &format!("{lbl} 10^CI_lo"));
+        assert_close(10.0_f64.powf(ixy.x_cells[r][2].active_number().unwrap()), exp_hi, 5e-2, &format!("{lbl} 10^CI_hi"));
     }
 }

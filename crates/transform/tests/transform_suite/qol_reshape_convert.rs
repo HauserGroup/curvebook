@@ -1,602 +1,412 @@
 use curvebook_doc::{
-    Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, FloatingNote, GroupedTable,
-    MultipleVariablesTable, RectPt, SheetId, SubcolumnMode, TableArchetype, TableKind, VariableRole, XColumnMode, XyTable,
+    CellCoord, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, FloatingNote, GroupedTable, RectPt, SheetId, SubcolumnMode,
+    TableArchetype, TableKind, VariableRole, XColumnMode, XyTable,
 };
 use curvebook_transform::{
     PlateGeometry, PlateMapTemplate, PlateWellRole, TargetArchetypeKind, TidyColumnMapping, TransformError, convert_datasheet_archetype,
     map_plate_to_datasheet, pivot_tidy_long_to_datasheet, preview_datasheet_conversion,
 };
 
-fn raw_number(cell: &Cell) -> Option<f64> {
-    match cell.value {
-        CellValue::Number(v) => Some(v),
-        _ => None,
-    }
-}
+use crate::common::{
+    add_excl, as_col, as_contingency, as_grouped, as_mv, as_xy, assert_lossy_convert, col_nums, col_sheet, empty, excl, excl_note, grouped_sheet,
+    mv_sheet_inferred, mv_sheet_roles, num, raw_number, sheet, str_rows, str_vec, txt,
+};
 
 #[test]
 fn qol1_column_grouped_roundtrip_preserves_metadata_exclusions_and_notes() {
-    let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::PairedRepeatedMeasures, SubcolumnMode::Single, 3, 4).expect("column");
-    col.row_titles = vec!["Baseline".into(), "1h".into(), "4h".into(), "24h".into()];
-    col.data_sets[0].title = "Vehicle".into();
-    col.data_sets[1].title = "LowDose".into();
-    col.data_sets[2].title = "HighDose".into();
-    for r in 0..4 {
-        for c in 0..3 {
-            col.data_sets[c].cells[r][0] = Cell::number((r * 10 + c + 1) as f64);
+    let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::PairedRepeatedMeasures, SubcolumnMode::Single, 3, 4).unwrap();
+    col.row_titles = str_vec(&["Baseline", "1h", "4h", "24h"]);
+    for (c, t) in ["Vehicle", "LowDose", "HighDose"].into_iter().enumerate() {
+        col.data_sets[c].title = t.into();
+        for r in 0..4 {
+            col.data_sets[c].cells[r][0] = num((r * 10 + c + 1) as f64);
         }
     }
+    let mut s = DataSheet::new("sheet-col-grp", "Kinetic Response", TableArchetype::Column(col)).unwrap();
+    s.info_sheet_id = Some(SheetId::new("info-study-42"));
+    s.color_tag = Some(FloatingNote::DEFAULT_FILL);
+    s.floating_notes.push(FloatingNote::new("note-1", RectPt::new(10.0, 20.0, 120.0, 60.0), "Sample kinetic plate"));
+    add_excl(&mut s, CellCoord::new(2, 1, 0), "bubble", "Optical bubble at 4h LowDose");
 
-    let mut sheet = DataSheet::new("sheet-col-grp", "Kinetic Response", TableArchetype::Column(col)).expect("sheet");
-    sheet.info_sheet_id = Some(SheetId::new("info-study-42"));
-    sheet.color_tag = Some(FloatingNote::DEFAULT_FILL);
-    sheet.floating_notes.push(FloatingNote::new("note-1", RectPt::new(10.0, 20.0, 120.0, 60.0), "Sample kinetic plate"));
-    sheet.set_excluded_with_reason(CellCoord::new(2, 1, 0), "bubble", "Optical bubble at 4h LowDose", "2026-11-14T08:00:00Z").expect("exclude");
+    let preview = preview_datasheet_conversion(&s, TargetArchetypeKind::Grouped).unwrap();
+    assert_eq!(
+        (preview.source_kind, preview.target_kind, preview.lossy, preview.dropped_cells, preview.preserved_exclusions),
+        (TableKind::Column, TargetArchetypeKind::Grouped, false, 0, 1)
+    );
 
-    let preview = preview_datasheet_conversion(&sheet, TargetArchetypeKind::Grouped).expect("preview");
-    assert_eq!(preview.source_kind, TableKind::Column);
-    assert_eq!(preview.target_kind, TargetArchetypeKind::Grouped);
-    assert!(!preview.lossy);
-    assert_eq!(preview.dropped_cells, 0);
-    assert_eq!(preview.preserved_exclusions, 1);
-
-    let (grouped_sheet, conv_preview) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::Grouped, false).expect("col->grouped");
-    assert!(!conv_preview.lossy);
-    assert_eq!(grouped_sheet.id, SheetId::new("sheet-col-grp"));
-    assert_eq!(grouped_sheet.title, "Kinetic Response");
-    assert_eq!(grouped_sheet.info_sheet_id, sheet.info_sheet_id);
-    assert_eq!(grouped_sheet.color_tag, sheet.color_tag);
-    assert_eq!(grouped_sheet.floating_notes, sheet.floating_notes);
+    let (grouped_sheet, conv_prev) = convert_datasheet_archetype(&s, TargetArchetypeKind::Grouped, false).unwrap();
+    assert!(!conv_prev.lossy);
+    assert_eq!(
+        (&grouped_sheet.id, grouped_sheet.title.as_str(), &grouped_sheet.info_sheet_id, &grouped_sheet.color_tag, &grouped_sheet.floating_notes),
+        (&SheetId::new("sheet-col-grp"), "Kinetic Response", &s.info_sheet_id, &s.color_tag, &s.floating_notes)
+    );
     assert_eq!(grouped_sheet.exclusion_notes.len(), 1);
-    assert_eq!(grouped_sheet.exclusion_notes[0].coord, CellCoord::new(2, 1, 0));
-    assert_eq!(grouped_sheet.exclusion_notes[0].reason_tag, "bubble");
-    assert!(grouped_sheet.cell(CellCoord::new(2, 1, 0)).expect("cell").excluded);
+    assert_eq!((grouped_sheet.exclusion_notes[0].coord, grouped_sheet.exclusion_notes[0].reason_tag.as_str()), (CellCoord::new(2, 1, 0), "bubble"));
+    assert!(grouped_sheet.cell(CellCoord::new(2, 1, 0)).unwrap().excluded);
 
-    let (back_col, back_preview) = convert_datasheet_archetype(&grouped_sheet, TargetArchetypeKind::Column, false).expect("grouped->col");
-    assert!(!back_preview.lossy);
-    assert_eq!(back_col.exclusion_notes, sheet.exclusion_notes);
-    assert_eq!(back_col.cell(CellCoord::new(2, 1, 0)).expect("cell"), sheet.cell(CellCoord::new(2, 1, 0)).expect("orig"));
+    let (back_col, back_prev) = convert_datasheet_archetype(&grouped_sheet, TargetArchetypeKind::Column, false).unwrap();
+    assert!(!back_prev.lossy);
+    assert_eq!(back_col.exclusion_notes, s.exclusion_notes);
+    assert_eq!(back_col.cell(CellCoord::new(2, 1, 0)).unwrap(), s.cell(CellCoord::new(2, 1, 0)).unwrap());
 }
 
 #[test]
 fn qol1_grouped_replicates_to_column_flattens_and_remaps_exclusion_note() {
-    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 3).expect("grouped");
-    grp.row_titles = vec!["1nM".into(), "10nM".into(), "100nM".into()];
-    grp.data_sets[0].title = "WT".into();
-    grp.data_sets[1].title = "KO".into();
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 3).unwrap();
+    grp.row_titles = str_vec(&["1nM", "10nM", "100nM"]);
+    (grp.data_sets[0].title, grp.data_sets[1].title) = ("WT".into(), "KO".into());
     for r in 0..3 {
         for c in 0..2 {
             for s in 0..2 {
-                grp.data_sets[c].cells[r][s] = Cell::number((r * 100 + c * 10 + s + 1) as f64);
+                grp.data_sets[c].cells[r][s] = num((r * 100 + c * 10 + s + 1) as f64);
             }
         }
     }
+    let mut s = sheet("grp-reps", TableArchetype::Grouped(grp));
+    add_excl(&mut s, CellCoord::new(1, 1, 1), "outlier", "KO 10nM rep2 pipetting error");
 
-    let mut sheet = DataSheet::new("grp-reps", "Replicate Assay", TableArchetype::Grouped(grp)).expect("sheet");
-    sheet.set_excluded_with_reason(CellCoord::new(1, 1, 1), "outlier", "KO 10nM rep2 pipetting error", "2026-11-14T09:00:00Z").expect("exclude");
-
-    let (col_sheet, preview) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::Column, false).expect("grouped->col");
-    assert!(!preview.lossy);
-    assert_eq!(preview.preserved_exclusions, 1);
-
-    let TableArchetype::Column(col_tbl) = &col_sheet.archetype else {
-        panic!("expected Column archetype");
-    };
-    assert_eq!(col_tbl.data_sets.len(), 6);
-    assert_eq!(col_tbl.data_sets[4].title, "KO - 10nM");
+    let (col_sheet, preview) = convert_datasheet_archetype(&s, TargetArchetypeKind::Column, false).unwrap();
+    assert!(!preview.lossy && preview.preserved_exclusions == 1);
+    let col_tbl = as_col(&col_sheet);
+    assert_eq!((col_tbl.data_sets.len(), col_tbl.data_sets[4].title.as_str()), (6, "KO - 10nM"));
     assert_eq!(col_sheet.exclusion_notes.len(), 1);
-    let remapped_coord = col_sheet.exclusion_notes[0].coord;
-    assert_eq!(remapped_coord, CellCoord::new(1, 4, 0));
-    let remapped_cell = col_sheet.cell(remapped_coord).expect("remapped cell");
-    assert!(remapped_cell.excluded);
-    assert_eq!(raw_number(remapped_cell), Some(112.0));
+    let coord = col_sheet.exclusion_notes[0].coord;
+    assert_eq!(coord, CellCoord::new(1, 4, 0));
+    let cell = col_sheet.cell(coord).unwrap();
+    assert!(cell.excluded && raw_number(cell) == Some(112.0));
 }
 
 #[test]
 fn qol1_column_xy_bidirectional_and_exclusion_coord_remap() {
-    let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single, 3, 3).expect("column");
-    col.data_sets[0].title = "Conc_uM".into();
-    col.data_sets[1].title = "Control".into();
-    col.data_sets[2].title = "Treated".into();
-    for (r, x) in [0.1, 1.0, 10.0].into_iter().enumerate() {
-        col.data_sets[0].cells[r][0] = Cell::number(x);
-        col.data_sets[1].cells[r][0] = Cell::number(100.0 - x * 2.0);
-        col.data_sets[2].cells[r][0] = Cell::number(95.0 - x * 6.0);
-    }
+    let mut s = col_nums("col-xy-1", &[("Conc_uM", &[0.1, 1.0, 10.0]), ("Control", &[99.8, 98.0, 80.0]), ("Treated", &[94.4, 89.0, 35.0])]);
+    add_excl(&mut s, CellCoord::new(2, 2, 0), "precipitation", "Compound precipitated at 10 uM");
 
-    let mut sheet = DataSheet::new("col-xy-1", "DoseCurve", TableArchetype::Column(col)).expect("sheet");
-    sheet
-        .set_excluded_with_reason(CellCoord::new(2, 2, 0), "precipitation", "Compound precipitated at 10 uM", "2026-11-14T09:10:00Z")
-        .expect("exclude");
-
-    let (xy_sheet, xy_prev) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::Xy, false).expect("col->xy");
-    assert!(!xy_prev.lossy);
-    assert_eq!(xy_prev.preserved_exclusions, 1);
-
-    let TableArchetype::Xy(xy) = &xy_sheet.archetype else {
-        panic!("expected Xy");
-    };
-    assert_eq!(xy.x_title, "Conc_uM");
-    assert_eq!(xy.data_sets.len(), 2);
-    assert_eq!(xy_sheet.exclusion_notes.len(), 1);
+    let (xy_sheet, xy_prev) = convert_datasheet_archetype(&s, TargetArchetypeKind::Xy, false).unwrap();
+    assert!(!xy_prev.lossy && xy_prev.preserved_exclusions == 1);
+    let xy = as_xy(&xy_sheet);
+    assert_eq!((xy.x_title.as_str(), xy.data_sets.len(), xy_sheet.exclusion_notes.len()), ("Conc_uM", 2, 1));
     assert_eq!(xy_sheet.exclusion_notes[0].coord, CellCoord::new(2, 1, 0));
-    assert!(xy_sheet.cell(CellCoord::new(2, 1, 0)).expect("y cell").excluded);
+    assert!(xy_sheet.cell(CellCoord::new(2, 1, 0)).unwrap().excluded);
 
-    let (col_back, back_prev) = convert_datasheet_archetype(&xy_sheet, TargetArchetypeKind::Column, false).expect("xy->col");
-    assert!(!back_prev.lossy);
-    assert_eq!(col_back.exclusion_notes.len(), 1);
+    let (col_back, back_prev) = convert_datasheet_archetype(&xy_sheet, TargetArchetypeKind::Column, false).unwrap();
+    assert!(!back_prev.lossy && col_back.exclusion_notes.len() == 1);
     assert_eq!(col_back.exclusion_notes[0].coord, CellCoord::new(2, 2, 0));
-    assert!(col_back.cell(CellCoord::new(2, 2, 0)).expect("col cell").excluded);
+    assert!(col_back.cell(CellCoord::new(2, 2, 0)).unwrap().excluded);
 
-    // Single-column Column -> Xy synthesizes X cleanly
-    let mut single_col = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single, 1, 3).expect("single");
-    single_col.data_sets[0].title = "Signal".into();
-    for r in 0..3 {
-        single_col.data_sets[0].cells[r][0] = Cell::number((r + 1) as f64 * 5.0);
-    }
-    let single_sheet = DataSheet::new("single-col", "Single", TableArchetype::Column(single_col)).expect("sheet");
-    let (single_xy, single_prev) = convert_datasheet_archetype(&single_sheet, TargetArchetypeKind::Xy, false).expect("single->xy");
-    assert!(!single_prev.lossy);
-    let TableArchetype::Xy(sxy) = &single_xy.archetype else {
-        panic!("expected Xy");
-    };
-    assert_eq!(sxy.x_cells[0][0].active_number(), Some(1.0));
-    assert_eq!(sxy.data_sets[0].cells[2][0].active_number(), Some(15.0));
+    // Single-column Column -> Xy synthesizes X cleanly.
+    let single = col_nums("single-col", &[("Signal", &[5.0, 10.0, 15.0])]);
+    let (single_xy, sp) = convert_datasheet_archetype(&single, TargetArchetypeKind::Xy, false).unwrap();
+    assert!(!sp.lossy);
+    let sxy = as_xy(&single_xy);
+    assert_eq!((sxy.x_cells[0][0].active_number(), sxy.data_sets[0].cells[2][0].active_number()), (Some(1.0), Some(15.0)));
 }
 
 #[test]
 fn qol1_grouped_and_xy_with_multiple_variables_roundtrip_and_remap_notes() {
-    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).expect("grouped");
-    grp.row_factor_title = "Media".into();
-    grp.column_factor_title = "Genotype".into();
-    grp.row_titles = vec!["DMEM".into(), "RPMI".into()];
-    grp.data_sets[0].title = "Control".into();
-    grp.data_sets[1].title = "Mutant".into();
-    grp.data_sets[0].cells[0][0] = Cell::number(11.0);
-    grp.data_sets[0].cells[0][1] = Cell::number(12.0);
-    grp.data_sets[0].cells[1][0] = Cell::number(21.0);
-    grp.data_sets[1].cells[0][0] = Cell::number(31.0);
-    grp.data_sets[1].cells[1][0] = Cell::number(41.0);
-    grp.data_sets[1].cells[1][1] = Cell::number(42.0);
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).unwrap();
+    (grp.row_factor_title, grp.column_factor_title) = ("Media".into(), "Genotype".into());
+    grp.row_titles = str_vec(&["DMEM", "RPMI"]);
+    (grp.data_sets[0].title, grp.data_sets[1].title) = ("Control".into(), "Mutant".into());
+    grp.data_sets[0].cells = vec![vec![num(11.0), num(12.0)], vec![num(21.0), empty()]];
+    grp.data_sets[1].cells = vec![vec![num(31.0), empty()], vec![num(41.0), num(42.0)]];
+    let mut grp_s = sheet("grp-mv", TableArchetype::Grouped(grp));
+    add_excl(&mut grp_s, CellCoord::new(1, 1, 1), "qc", "RPMI Mutant rep 2 contaminated");
 
-    let mut grp_sheet = DataSheet::new("grp-mv", "Media x Genotype", TableArchetype::Grouped(grp)).expect("sheet");
-    grp_sheet.set_excluded_with_reason(CellCoord::new(1, 1, 1), "qc", "RPMI Mutant rep 2 contaminated", "2026-11-14T09:15:00Z").expect("exclude");
+    let (mv_s, mv_p) = convert_datasheet_archetype(&grp_s, TargetArchetypeKind::MultipleVariables, false).unwrap();
+    assert!(!mv_p.lossy && mv_p.preserved_exclusions == 1 && mv_s.exclusion_notes.len() == 1);
+    let mv_c = mv_s.cell(mv_s.exclusion_notes[0].coord).unwrap();
+    assert!(mv_c.excluded && raw_number(mv_c) == Some(42.0));
 
-    let (mv_sheet, mv_prev) = convert_datasheet_archetype(&grp_sheet, TargetArchetypeKind::MultipleVariables, false).expect("grp->mv");
-    assert!(!mv_prev.lossy);
-    assert_eq!(mv_prev.preserved_exclusions, 1);
-    assert_eq!(mv_sheet.exclusion_notes.len(), 1);
-    let mv_excl_coord = mv_sheet.exclusion_notes[0].coord;
-    let mv_excl_cell = mv_sheet.cell(mv_excl_coord).expect("mv cell");
-    assert!(mv_excl_cell.excluded);
-    assert_eq!(raw_number(mv_excl_cell), Some(42.0));
+    let (grp_back, bp) = convert_datasheet_archetype(&mv_s, TargetArchetypeKind::Grouped, false).unwrap();
+    assert!(!bp.lossy && grp_back.exclusion_notes.len() == 1);
+    let bc = grp_back.cell(grp_back.exclusion_notes[0].coord).unwrap();
+    assert!(bc.excluded && raw_number(bc) == Some(42.0));
 
-    let (grp_back, back_prev) = convert_datasheet_archetype(&mv_sheet, TargetArchetypeKind::Grouped, false).expect("mv->grp");
-    assert!(!back_prev.lossy);
-    assert_eq!(grp_back.exclusion_notes.len(), 1);
-    let back_coord = grp_back.exclusion_notes[0].coord;
-    let back_cell = grp_back.cell(back_coord).expect("back cell");
-    assert!(back_cell.excluded);
-    assert_eq!(raw_number(back_cell), Some(42.0));
-
-    // Xy <-> MultipleVariables round-trip
+    // Xy <-> MultipleVariables round-trip.
     let mut xy =
-        XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::RawReplicates(2), 1, 3).expect("xy");
-    xy.x_title = "Time_min".into();
-    xy.data_sets[0].title = "Fluorescence".into();
+        XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::RawReplicates(2), 1, 3).unwrap();
+    (xy.x_title, xy.data_sets[0].title) = ("Time_min".into(), "Fluorescence".into());
     for (r, t) in [0.0, 5.0, 10.0].into_iter().enumerate() {
-        xy.x_cells[r][0] = Cell::number(t);
-        xy.data_sets[0].cells[r][0] = Cell::number(100.0 + t);
-        xy.data_sets[0].cells[r][1] = Cell::number(102.0 + t);
+        xy.x_cells[r][0] = num(t);
+        xy.data_sets[0].cells[r] = vec![num(100.0 + t), num(102.0 + t)];
     }
-    let mut xy_sheet = DataSheet::new("xy-mv", "Fluorescence Trace", TableArchetype::Xy(xy)).expect("sheet");
-    xy_sheet
-        .set_excluded_with_reason(CellCoord::new(1, 0, 1), "spike", "Detector saturation at 5 min rep 2", "2026-11-14T09:20:00Z")
-        .expect("exclude");
+    let mut xy_s = sheet("xy-mv", TableArchetype::Xy(xy));
+    add_excl(&mut xy_s, CellCoord::new(1, 0, 1), "spike", "Detector saturation at 5 min rep 2");
 
-    let (xy_to_mv, p1) = convert_datasheet_archetype(&xy_sheet, TargetArchetypeKind::MultipleVariables, false).expect("xy->mv");
-    assert!(!p1.lossy);
-    assert_eq!(xy_to_mv.exclusion_notes.len(), 1);
-    let mv_c = xy_to_mv.exclusion_notes[0].coord;
-    let mv_c_cell = xy_to_mv.cell(mv_c).expect("mv cell");
-    assert_eq!(raw_number(mv_c_cell), Some(107.0));
-    assert!(mv_c_cell.excluded);
+    let (xy_to_mv, p1) = convert_datasheet_archetype(&xy_s, TargetArchetypeKind::MultipleVariables, false).unwrap();
+    assert!(!p1.lossy && xy_to_mv.exclusion_notes.len() == 1);
+    let mc = xy_to_mv.cell(xy_to_mv.exclusion_notes[0].coord).unwrap();
+    assert!(mc.excluded && raw_number(mc) == Some(107.0));
 
-    let (mv_to_xy, p2) = convert_datasheet_archetype(&xy_to_mv, TargetArchetypeKind::Xy, false).expect("mv->xy");
-    assert!(!p2.lossy);
-    assert_eq!(mv_to_xy.exclusion_notes.len(), 1);
-    assert_eq!(mv_to_xy.exclusion_notes[0].coord, CellCoord::new(1, 0, 1));
-    let xy_c_cell = mv_to_xy.cell(CellCoord::new(1, 0, 1)).expect("xy cell");
-    assert_eq!(raw_number(xy_c_cell), Some(107.0));
-    assert!(xy_c_cell.excluded);
+    let (mv_to_xy, p2) = convert_datasheet_archetype(&xy_to_mv, TargetArchetypeKind::Xy, false).unwrap();
+    assert!(!p2.lossy && mv_to_xy.exclusion_notes.len() == 1 && mv_to_xy.exclusion_notes[0].coord == CellCoord::new(1, 0, 1));
+    let xc = mv_to_xy.cell(CellCoord::new(1, 0, 1)).unwrap();
+    assert!(xc.excluded && raw_number(xc) == Some(107.0));
 }
 
 #[test]
 fn qol1_lossy_guard_and_unsupported_archetype() {
-    // Column with text inside column 0 -> Xy is lossy (text X cannot become numeric X)
-    let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single, 2, 2).expect("col");
-    col.data_sets[0].title = "LabelX".into();
-    col.data_sets[1].title = "Measure".into();
-    col.data_sets[0].cells[0][0] = Cell::text("Alpha");
-    col.data_sets[0].cells[1][0] = Cell::text("Beta");
-    col.data_sets[1].cells[0][0] = Cell::number(5.0);
-    col.data_sets[1].cells[1][0] = Cell::number(9.0);
-    let col_sheet = DataSheet::new("lossy-col", "Lossy", TableArchetype::Column(col)).expect("sheet");
+    let col_s = col_sheet("lossy-col", &[("LabelX", &[txt("Alpha"), txt("Beta")]), ("Measure", &[num(5.0), num(9.0)])]);
+    let (forced, fp) = assert_lossy_convert(&col_s, TargetArchetypeKind::Xy);
+    assert_eq!((fp.dropped_cells, forced.kind(), fp.warnings.is_empty()), (2, TableKind::Xy, false));
 
-    let preview = preview_datasheet_conversion(&col_sheet, TargetArchetypeKind::Xy).expect("preview");
-    assert!(preview.lossy);
-    assert_eq!(preview.dropped_cells, 2);
-    assert!(!preview.warnings.is_empty());
+    let mv_s = mv_sheet_inferred(
+        "lossy-mv",
+        &[
+            ("Factor1", &[txt("Row"), txt("Row")]),
+            ("Factor2", &[txt("Col"), txt("Col")]),
+            ("Factor3", &[txt("Extra"), txt("Extra")]),
+            ("MeasureA", &[num(1.0), num(2.0)]),
+            ("MeasureB", &[num(10.0), num(11.0)]),
+        ],
+    );
+    let (_, mv_fp) = assert_lossy_convert(&mv_s, TargetArchetypeKind::Grouped);
+    assert!(mv_fp.dropped_cells > 0);
 
-    let err = convert_datasheet_archetype(&col_sheet, TargetArchetypeKind::Xy, false).expect_err("must refuse lossy");
-    assert!(matches!(err, TransformError::InvalidSpec { .. }));
-
-    let (forced, forced_prev) = convert_datasheet_archetype(&col_sheet, TargetArchetypeKind::Xy, true).expect("allow lossy");
-    assert!(forced_prev.lossy);
-    assert_eq!(forced.kind(), TableKind::Xy);
-
-    // MultipleVariables with extra factor/numeric columns -> Grouped lossy guard
-    let mut mv = MultipleVariablesTable::new(5, 2).expect("mv");
-    for (i, title) in ["Factor1", "Factor2", "Factor3", "MeasureA", "MeasureB"].iter().enumerate() {
-        mv.variables[i].title = (*title).into();
-    }
-    for r in 0..2 {
-        mv.variables[0].cells[r] = Cell::text("Row");
-        mv.variables[1].cells[r] = Cell::text("Col");
-        mv.variables[2].cells[r] = Cell::text("Extra");
-        mv.variables[3].cells[r] = Cell::number((r + 1) as f64);
-        mv.variables[4].cells[r] = Cell::number((r + 10) as f64);
-    }
-    for v in &mut mv.variables {
-        v.refresh_inferred_role();
-    }
-    let mv_sheet = DataSheet::new("lossy-mv", "WideMV", TableArchetype::MultipleVariables(mv)).expect("mv sheet");
-    let mv_err = convert_datasheet_archetype(&mv_sheet, TargetArchetypeKind::Grouped, false).expect_err("must refuse lossy MV");
-    assert!(matches!(mv_err, TransformError::InvalidSpec { .. }));
-    let (_, mv_forced) = convert_datasheet_archetype(&mv_sheet, TargetArchetypeKind::Grouped, true).expect("allow lossy MV");
-    assert!(mv_forced.lossy);
-    assert!(mv_forced.dropped_cells > 0);
-
-    // Unsupported source archetype -> IncompatibleTable
-    let cont = ContingencyTable::new(2, 2).expect("cont");
-    let cont_sheet = DataSheet::new("cont", "Contingency", TableArchetype::Contingency(cont)).expect("sheet");
-    let compat_err = convert_datasheet_archetype(&cont_sheet, TargetArchetypeKind::Xy, true).expect_err("unsupported");
-    assert!(matches!(compat_err, TransformError::IncompatibleTable { kind: TableKind::Contingency, .. }));
+    let cont_s = sheet("cont", TableArchetype::Contingency(ContingencyTable::new(2, 2).unwrap()));
+    assert!(matches!(
+        convert_datasheet_archetype(&cont_s, TargetArchetypeKind::Xy, true),
+        Err(TransformError::IncompatibleTable { kind: TableKind::Contingency, .. })
+    ));
 }
 
 #[test]
 fn qol2_plate_96_ic50_to_xy_blank_subtraction_excluded_and_cbtemplate_roundtrip() {
-    let mut template = PlateMapTemplate::new("96-Well IC50", PlateGeometry::Wells96, "Concentration_nM").expect("template");
+    let mut tpl = PlateMapTemplate::new("96-Well IC50", PlateGeometry::Wells96, "Concentration_nM").unwrap();
     let mut values = vec![None; PlateGeometry::Wells96.well_count()];
 
-    // Row A: Blank (cols 0..4), PositiveControl (cols 4..6), Excluded spiked wells (cols 6..8)
-    let blanks = [100.0, 102.0, 98.0, 100.0];
-    for (c, v) in blanks.into_iter().enumerate() {
-        template.set_well(0, c, PlateWellRole::Blank).expect("blank");
-        values[PlateGeometry::Wells96.well_index(0, c).expect("idx")] = Some(v);
-    }
-    for (offset, v) in [1200.0, 1220.0].into_iter().enumerate() {
-        let c = 4 + offset;
-        template.set_well(0, c, PlateWellRole::PositiveControl).expect("pos ctrl");
-        values[PlateGeometry::Wells96.well_index(0, c).expect("idx")] = Some(v);
-    }
-    for (offset, v) in [99_999.0, -500.0].into_iter().enumerate() {
-        let c = 6 + offset;
-        template.set_well(0, c, PlateWellRole::Excluded).expect("excluded");
-        values[PlateGeometry::Wells96.well_index(0, c).expect("idx")] = Some(v);
+    for (c, v, role) in [
+        (0, 100.0, PlateWellRole::Blank),
+        (1, 102.0, PlateWellRole::Blank),
+        (2, 98.0, PlateWellRole::Blank),
+        (3, 100.0, PlateWellRole::Blank),
+        (4, 1200.0, PlateWellRole::PositiveControl),
+        (5, 1220.0, PlateWellRole::PositiveControl),
+        (6, 99_999.0, PlateWellRole::Excluded),
+        (7, -500.0, PlateWellRole::Excluded),
+    ] {
+        tpl.set_well(0, c, role).unwrap();
+        values[PlateGeometry::Wells96.well_index(0, c).unwrap()] = Some(v);
     }
 
-    // 2 compounds across 8 dilutions (cols 0..8), 2 replicates each:
-    // Compound-A in rows B, C; Compound-B in rows D, E.
     let concs = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10_000.0];
     for (col, &conc) in concs.iter().enumerate() {
         for rep in 0..2 {
-            let row_a = 1 + rep;
-            template
-                .set_well(row_a, col, PlateWellRole::Treatment { group_name: "Compound-A".into(), dilution_x: conc, replicate: rep + 1 })
-                .expect("set A");
-            values[PlateGeometry::Wells96.well_index(row_a, col).expect("idx")] = Some(1000.0 - (col as f64) * 90.0 + (rep as f64) * 4.0);
-
-            let row_b = 3 + rep;
-            template
-                .set_well(row_b, col, PlateWellRole::Treatment { group_name: "Compound-B".into(), dilution_x: conc, replicate: rep + 1 })
-                .expect("set B");
-            values[PlateGeometry::Wells96.well_index(row_b, col).expect("idx")] = Some(950.0 - (col as f64) * 75.0 + (rep as f64) * 6.0);
+            for (base_r, name, y0, step, rep_step) in [(1, "Compound-A", 1000.0, 90.0, 4.0), (3, "Compound-B", 950.0, 75.0, 6.0)] {
+                tpl.set_well(base_r + rep, col, PlateWellRole::Treatment { group_name: name.into(), dilution_x: conc, replicate: rep + 1 }).unwrap();
+                values[PlateGeometry::Wells96.well_index(base_r + rep, col).unwrap()] = Some(y0 - (col as f64) * step + (rep as f64) * rep_step);
+            }
         }
     }
 
-    // `.cbtemplate` JSON round-trip
-    let json = template.to_cbtemplate_json().expect("to json");
-    let reloaded = PlateMapTemplate::from_cbtemplate_json(&json).expect("from json");
-    assert_eq!(reloaded, template);
+    let reloaded = PlateMapTemplate::from_cbtemplate_json(&tpl.to_cbtemplate_json().unwrap()).unwrap();
+    assert_eq!(reloaded, tpl);
 
-    let xy_sheet = map_plate_to_datasheet("IC50 Screen", PlateGeometry::Wells96, &values, &reloaded, TargetArchetypeKind::Xy, true).expect("map Xy");
-    let TableArchetype::Xy(xy) = &xy_sheet.archetype else {
-        panic!("expected Xy");
-    };
-    assert_eq!(xy.x_title, "Concentration_nM");
-    assert_eq!(xy.data_sets.len(), 2);
-    assert_eq!(xy.data_sets[0].title, "Compound-A");
-    assert_eq!(xy.data_sets[1].title, "Compound-B");
-    assert_eq!(xy.y_subcolumn_mode, SubcolumnMode::RawReplicates(2));
-    assert_eq!(xy.x_cells.len(), 8);
-    // Blank mean = 100.0 even with Excluded well = 99999.0; Compound-A row 0 rep 1 = 1000.0 - 100.0 = 900.0
-    assert!((xy.data_sets[0].cells[0][0].active_number().expect("y") - 900.0).abs() < 1e-10);
-    assert!((xy.data_sets[0].cells[0][1].active_number().expect("y") - 904.0).abs() < 1e-10);
-    // QC floating note records blank mean and excluded wells without corrupting curves
-    assert!(!xy_sheet.floating_notes.is_empty());
+    let xy_sheet = map_plate_to_datasheet("IC50 Screen", PlateGeometry::Wells96, &values, &reloaded, TargetArchetypeKind::Xy, true).unwrap();
+    let xy = as_xy(&xy_sheet);
+    assert_eq!(
+        (xy.x_title.as_str(), xy.data_sets.len(), xy.y_subcolumn_mode, xy.x_cells.len()),
+        ("Concentration_nM", 2, SubcolumnMode::RawReplicates(2), 8)
+    );
+    assert_eq!((xy.data_sets[0].title.as_str(), xy.data_sets[1].title.as_str()), ("Compound-A", "Compound-B"));
+    assert!((xy.data_sets[0].cells[0][0].active_number().unwrap() - 900.0).abs() < 1e-10);
+    assert!((xy.data_sets[0].cells[0][1].active_number().unwrap() - 904.0).abs() < 1e-10);
     let qc_body = &xy_sheet.floating_notes[0].body_markdown;
-    assert!(qc_body.contains("Blank mean subtracted: 100"));
-    assert!(qc_body.contains("A07=99999"));
+    assert!(qc_body.contains("Blank mean subtracted: 100") && qc_body.contains("A07=99999"));
 
-    // Column projection preserves Excluded wells as Cell::excluded_number + CellExclusionNote
-    let col_sheet =
-        map_plate_to_datasheet("IC50 Column", PlateGeometry::Wells96, &values, &reloaded, TargetArchetypeKind::Column, true).expect("map Column");
+    let col_sheet = map_plate_to_datasheet("IC50 Column", PlateGeometry::Wells96, &values, &reloaded, TargetArchetypeKind::Column, true).unwrap();
     assert!(col_sheet.exclusion_notes.iter().any(|n| n.note.contains("A07")));
-    let TableArchetype::Column(col_tbl) = &col_sheet.archetype else {
-        panic!("expected Column");
-    };
-    let excl_col = col_tbl.data_sets.iter().find(|ds| ds.title == "Excluded").expect("Excluded col");
-    assert!(excl_col.cells[0][0].excluded);
-    assert_eq!(raw_number(&excl_col.cells[0][0]), Some(99_999.0));
+    let excl_col = as_col(&col_sheet).data_sets.iter().find(|ds| ds.title == "Excluded").unwrap();
+    assert!(excl_col.cells[0][0].excluded && raw_number(&excl_col.cells[0][0]) == Some(99_999.0));
 }
 
 #[test]
 fn qol2_plate_384_dimensions_grouped_and_multiple_variables() {
-    assert_eq!(PlateGeometry::Wells384.rows(), 16);
-    assert_eq!(PlateGeometry::Wells384.cols(), 24);
-    assert_eq!(PlateGeometry::Wells384.well_count(), 384);
-    assert_eq!(PlateGeometry::Wells384.well_label(15, 23).expect("P24"), "P24");
+    let g = PlateGeometry::Wells384;
+    assert_eq!((g.rows(), g.cols(), g.well_count(), g.well_label(15, 23).unwrap().as_str()), (16, 24, 384, "P24"));
 
-    let mut template = PlateMapTemplate::new("384 Assay", PlateGeometry::Wells384, "Dose").expect("384 template");
+    let mut tpl = PlateMapTemplate::new("384 Assay", PlateGeometry::Wells384, "Dose").unwrap();
     let mut values = vec![Some(10.0); 384];
-
     for c in 0..4 {
-        template.set_well(0, c, PlateWellRole::Blank).expect("blank");
-        values[PlateGeometry::Wells384.well_index(0, c).expect("idx")] = Some(5.0);
+        tpl.set_well(0, c, PlateWellRole::Blank).unwrap();
+        values[PlateGeometry::Wells384.well_index(0, c).unwrap()] = Some(5.0);
     }
-    template.set_well(15, 23, PlateWellRole::Excluded).expect("P24 excluded");
-    values[PlateGeometry::Wells384.well_index(15, 23).expect("idx")] = Some(777.0);
-
+    tpl.set_well(15, 23, PlateWellRole::Excluded).unwrap();
+    values[PlateGeometry::Wells384.well_index(15, 23).unwrap()] = Some(777.0);
     for (r, conc) in [1.0, 10.0, 100.0].into_iter().enumerate() {
-        let plate_r = 1 + r;
         for rep in 0..3 {
-            template
-                .set_well(plate_r, rep, PlateWellRole::Treatment { group_name: "Lead-1".into(), dilution_x: conc, replicate: rep + 1 })
-                .expect("lead");
-            values[PlateGeometry::Wells384.well_index(plate_r, rep).expect("idx")] = Some(50.0 + (r * 10 + rep) as f64);
+            tpl.set_well(1 + r, rep, PlateWellRole::Treatment { group_name: "Lead-1".into(), dilution_x: conc, replicate: rep + 1 }).unwrap();
+            values[PlateGeometry::Wells384.well_index(1 + r, rep).unwrap()] = Some(50.0 + (r * 10 + rep) as f64);
         }
     }
 
-    let mv_sheet = map_plate_to_datasheet("384 Long", PlateGeometry::Wells384, &values, &template, TargetArchetypeKind::MultipleVariables, true)
-        .expect("384 MV");
-    let TableArchetype::MultipleVariables(mv) = &mv_sheet.archetype else {
-        panic!("expected MultipleVariables");
-    };
-    assert_eq!(mv.variables.len(), 8);
-    assert_eq!(mv.variables[0].cells.len(), 384);
-    assert_eq!(mv.variables[0].cells[383].active_text(), Some("P24"));
-    assert!(mv.variables[7].cells[383].excluded);
-    assert!(mv_sheet.exclusion_notes.iter().any(|n| n.coord == CellCoord::new(383, 7, 0)));
+    let mv_sheet = map_plate_to_datasheet("384 Long", PlateGeometry::Wells384, &values, &tpl, TargetArchetypeKind::MultipleVariables, true).unwrap();
+    let mv = as_mv(&mv_sheet);
+    assert_eq!((mv.variables.len(), mv.variables[0].cells.len(), mv.variables[0].cells[383].active_text()), (8, 384, Some("P24")));
+    assert!(mv.variables[7].cells[383].excluded && mv_sheet.exclusion_notes.iter().any(|n| n.coord == CellCoord::new(383, 7, 0)));
 
-    let grp_sheet =
-        map_plate_to_datasheet("384 Grouped", PlateGeometry::Wells384, &values, &template, TargetArchetypeKind::Grouped, true).expect("384 Grouped");
-    let TableArchetype::Grouped(grp) = &grp_sheet.archetype else {
-        panic!("expected Grouped");
-    };
-    assert_eq!(grp.subcolumn_mode, SubcolumnMode::RawReplicates(3));
-    assert_eq!(grp.data_sets[0].title, "Lead-1");
-    assert_eq!(grp.row_titles, vec!["1", "10", "100"]);
-    // 50.0 - blank_mean(5.0) = 45.0
-    assert_eq!(grp.data_sets[0].cells[0][0].active_number(), Some(45.0));
+    let grp_sheet = map_plate_to_datasheet("384 Grouped", PlateGeometry::Wells384, &values, &tpl, TargetArchetypeKind::Grouped, true).unwrap();
+    let grp = as_grouped(&grp_sheet);
+    assert_eq!(
+        (grp.subcolumn_mode, grp.data_sets[0].title.as_str(), grp.row_titles.as_slice(), grp.data_sets[0].cells[0][0].active_number()),
+        (SubcolumnMode::RawReplicates(3), "Lead-1", str_vec(&["1", "10", "100"]).as_slice(), Some(45.0))
+    );
 }
 
 #[test]
 fn qol2_tidy_long_pivots_column_grouped_xy_with_decimal_comma_and_exclusions() {
-    let headers = vec!["Condition".into(), "Dose".into(), "Rep".into(), "Signal".into(), "Flag".into()];
-    let rows = vec![
-        vec!["Ctrl".into(), "0,5".into(), "1".into(), "12,5".into(), "false".into()],
-        vec!["Ctrl".into(), "0,5".into(), "2".into(), "13,25*".into(), "".into()],
-        vec!["Ctrl".into(), "2,0".into(), "1".into(), "20,0".into(), "0".into()],
-        vec!["Drug".into(), "0,5".into(), "1".into(), "8,5".into(), "true".into()],
-        vec!["Drug".into(), "0,5".into(), "2".into(), "9,0".into(), "no".into()],
-        vec!["Drug".into(), "2,0".into(), "1".into(), "4,75".into(), "hemolyzed".into()],
-    ];
+    let headers = str_vec(&["Condition", "Dose", "Rep", "Signal", "Flag"]);
+    let rows = str_rows(&[
+        &["Ctrl", "0,5", "1", "12,5", "false"],
+        &["Ctrl", "0,5", "2", "13,25*", ""],
+        &["Ctrl", "2,0", "1", "20,0", "0"],
+        &["Drug", "0,5", "1", "8,5", "true"],
+        &["Drug", "0,5", "2", "9,0", "no"],
+        &["Drug", "2,0", "1", "4,75", "hemolyzed"],
+    ]);
     let mapping = TidyColumnMapping { x_col: Some(1), group_col: 0, replicate_col: Some(2), value_col: 3, excluded_col: Some(4) };
 
-    // Column pivot
-    let col_sheet = pivot_tidy_long_to_datasheet("Tidy Col", &headers, &rows, &mapping, TargetArchetypeKind::Column, ',').expect("tidy->col");
-    let TableArchetype::Column(col_tbl) = &col_sheet.archetype else {
-        panic!("expected Column");
-    };
-    assert_eq!(col_tbl.data_sets.len(), 2);
-    assert_eq!(col_tbl.data_sets[0].cells[0][0].active_number(), Some(12.5));
-    assert!(col_tbl.data_sets[0].cells[1][0].excluded);
-    assert_eq!(raw_number(&col_tbl.data_sets[0].cells[1][0]), Some(13.25));
-    assert!(col_tbl.data_sets[1].cells[0][0].excluded);
-    assert!(col_tbl.data_sets[1].cells[2][0].excluded);
+    let col_sheet = pivot_tidy_long_to_datasheet("Tidy Col", &headers, &rows, &mapping, TargetArchetypeKind::Column, ',').unwrap();
+    let col = as_col(&col_sheet);
+    assert_eq!(
+        (col.data_sets.len(), col.data_sets[0].cells[0][0].active_number(), raw_number(&col.data_sets[0].cells[1][0])),
+        (2, Some(12.5), Some(13.25))
+    );
+    assert!(col.data_sets[0].cells[1][0].excluded && col.data_sets[1].cells[0][0].excluded && col.data_sets[1].cells[2][0].excluded);
     assert_eq!(col_sheet.exclusion_notes.len(), 3);
     assert!(col_sheet.exclusion_notes.iter().any(|n| n.note == "hemolyzed"));
 
-    // Grouped pivot with replicate subcolumns
-    let grp_sheet = pivot_tidy_long_to_datasheet("Tidy Grouped", &headers, &rows, &mapping, TargetArchetypeKind::Grouped, ',').expect("tidy->grp");
-    let TableArchetype::Grouped(grp_tbl) = &grp_sheet.archetype else {
-        panic!("expected Grouped");
-    };
-    assert_eq!(grp_tbl.subcolumn_mode, SubcolumnMode::RawReplicates(2));
-    assert_eq!(grp_tbl.row_titles, vec!["0,5", "2,0"]);
-    assert_eq!(grp_tbl.data_sets[0].title, "Ctrl");
-    assert_eq!(grp_tbl.data_sets[1].title, "Drug");
-    assert_eq!(grp_tbl.data_sets[0].cells[0][0].active_number(), Some(12.5));
-    assert!(grp_tbl.data_sets[0].cells[0][1].excluded);
-    assert_eq!(raw_number(&grp_tbl.data_sets[0].cells[0][1]), Some(13.25));
-    assert_eq!(grp_tbl.data_sets[1].cells[0][1].active_number(), Some(9.0));
-    assert_eq!(grp_sheet.exclusion_notes.len(), 3);
+    let grp_sheet = pivot_tidy_long_to_datasheet("Tidy Grouped", &headers, &rows, &mapping, TargetArchetypeKind::Grouped, ',').unwrap();
+    let grp = as_grouped(&grp_sheet);
+    assert_eq!(
+        (grp.subcolumn_mode, grp.row_titles.as_slice(), grp.data_sets[0].title.as_str(), grp.data_sets[1].title.as_str()),
+        (SubcolumnMode::RawReplicates(2), str_vec(&["0,5", "2,0"]).as_slice(), "Ctrl", "Drug")
+    );
+    assert_eq!(
+        (grp.data_sets[0].cells[0][0].active_number(), raw_number(&grp.data_sets[0].cells[0][1]), grp.data_sets[1].cells[0][1].active_number()),
+        (Some(12.5), Some(13.25), Some(9.0))
+    );
+    assert!(grp.data_sets[0].cells[0][1].excluded && grp_sheet.exclusion_notes.len() == 3);
 
-    // Xy pivot with numeric X + replicate subcolumns
-    let xy_sheet = pivot_tidy_long_to_datasheet("Tidy XY", &headers, &rows, &mapping, TargetArchetypeKind::Xy, ',').expect("tidy->xy");
-    let TableArchetype::Xy(xy_tbl) = &xy_sheet.archetype else {
-        panic!("expected Xy");
-    };
-    assert_eq!(xy_tbl.x_title, "Dose");
-    assert_eq!(xy_tbl.x_cells[0][0].active_number(), Some(0.5));
-    assert_eq!(xy_tbl.x_cells[1][0].active_number(), Some(2.0));
-    assert_eq!(xy_tbl.data_sets[0].cells[0][0].active_number(), Some(12.5));
-    assert!(xy_tbl.data_sets[1].cells[1][0].excluded);
-    assert_eq!(xy_sheet.exclusion_notes.len(), 3);
+    let xy_sheet = pivot_tidy_long_to_datasheet("Tidy XY", &headers, &rows, &mapping, TargetArchetypeKind::Xy, ',').unwrap();
+    let xy = as_xy(&xy_sheet);
+    assert_eq!(
+        (xy.x_title.as_str(), xy.x_cells[0][0].active_number(), xy.x_cells[1][0].active_number(), xy.data_sets[0].cells[0][0].active_number()),
+        ("Dose", Some(0.5), Some(2.0), Some(12.5))
+    );
+    assert!(xy.data_sets[1].cells[1][0].excluded && xy_sheet.exclusion_notes.len() == 3);
 }
 
 #[test]
 fn qol2_tidy_long_ragged_and_missing_inputs_do_not_panic() {
-    let headers = vec!["Group".into(), "X".into(), "Value".into()];
-    let ragged_rows = vec![
-        vec![],
-        vec!["   ".into()],
-        vec!["GroupA".into()],
-        vec!["GroupA".into(), "1.0".into(), "10.0".into()],
-        vec!["GroupA".into(), "".into(), "20.0".into()],
-        vec!["GroupA".into(), "2.0".into(), "NA".into()],
-        vec!["GroupB".into(), "1.0".into(), "15.5".into()],
-        vec!["GroupB".into(), "2.0".into()],
-    ];
+    let headers = str_vec(&["Group", "X", "Value"]);
+    let ragged = str_rows(&[
+        &[],
+        &["   "],
+        &["GroupA"],
+        &["GroupA", "1.0", "10.0"],
+        &["GroupA", "", "20.0"],
+        &["GroupA", "2.0", "NA"],
+        &["GroupB", "1.0", "15.5"],
+        &["GroupB", "2.0"],
+    ]);
     let mapping = TidyColumnMapping { x_col: Some(1), group_col: 0, replicate_col: None, value_col: 2, excluded_col: None };
 
-    let col = pivot_tidy_long_to_datasheet("Ragged Col", &headers, &ragged_rows, &mapping, TargetArchetypeKind::Column, '.').expect("ragged column");
-    assert_eq!(col.kind(), TableKind::Column);
+    assert_eq!(
+        pivot_tidy_long_to_datasheet("Ragged Col", &headers, &ragged, &mapping, TargetArchetypeKind::Column, '.').unwrap().kind(),
+        TableKind::Column
+    );
+    assert_eq!(
+        pivot_tidy_long_to_datasheet("Ragged Grouped", &headers, &ragged, &mapping, TargetArchetypeKind::Grouped, '.').unwrap().kind(),
+        TableKind::Grouped
+    );
+    let xy_sheet = pivot_tidy_long_to_datasheet("Ragged XY", &headers, &ragged, &mapping, TargetArchetypeKind::Xy, '.').unwrap();
+    let xy = as_xy(&xy_sheet);
+    assert_eq!((xy.x_cells.len(), xy.data_sets[0].cells[0][0].active_number(), xy.data_sets[0].cells[1][0].is_empty()), (2, Some(10.0), true));
 
-    let grp =
-        pivot_tidy_long_to_datasheet("Ragged Grouped", &headers, &ragged_rows, &mapping, TargetArchetypeKind::Grouped, '.').expect("ragged grouped");
-    assert_eq!(grp.kind(), TableKind::Grouped);
-
-    let xy = pivot_tidy_long_to_datasheet("Ragged XY", &headers, &ragged_rows, &mapping, TargetArchetypeKind::Xy, '.').expect("ragged xy");
-    let TableArchetype::Xy(xy_tbl) = &xy.archetype else {
-        panic!("expected Xy");
-    };
-    assert_eq!(xy_tbl.x_cells.len(), 2);
-    assert_eq!(xy_tbl.data_sets[0].cells[0][0].active_number(), Some(10.0));
-    assert!(xy_tbl.data_sets[0].cells[1][0].is_empty());
-
-    // Pivoting to Xy without x_col returns InvalidSpec cleanly
     let no_x = TidyColumnMapping { x_col: None, group_col: 0, replicate_col: None, value_col: 2, excluded_col: None };
-    let err = pivot_tidy_long_to_datasheet("Missing XCol", &headers, &ragged_rows, &no_x, TargetArchetypeKind::Xy, '.').expect_err("requires x_col");
-    assert!(matches!(err, TransformError::InvalidSpec { .. }));
+    assert!(matches!(
+        pivot_tidy_long_to_datasheet("Missing XCol", &headers, &ragged, &no_x, TargetArchetypeKind::Xy, '.'),
+        Err(TransformError::InvalidSpec { .. })
+    ));
 }
 
 #[test]
 fn qol1_column_and_grouped_to_contingency_preserve_labels_and_exclusions() {
-    let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single, 2, 2).expect("col");
-    col.data_sets[0].title = "Exposed".into();
-    col.data_sets[1].title = "Unexposed".into();
-    col.row_titles = vec!["Outcome+".into(), "Outcome-".into()];
-    col.data_sets[0].cells[0][0] = Cell::number(18.0);
-    col.data_sets[0].cells[1][0] = Cell::number(7.0);
-    col.data_sets[1].cells[0][0] = Cell::number(4.0);
-    col.data_sets[1].cells[1][0] = Cell { value: CellValue::Number(21.0), excluded: true };
-    let mut col_sheet = DataSheet::new("col-cnt", "Counts", TableArchetype::Column(col)).expect("sheet");
-    col_sheet.exclusion_notes.push(CellExclusionNote {
-        coord: CellCoord::new(1, 1, 0),
-        reason_tag: "Audit".into(),
-        note: "Pending recount".into(),
-        timestamp_utc: "2026-01-01T00:00:00Z".into(),
-    });
+    let mut col_s = col_sheet("col-cnt", &[("Exposed", &[num(18.0), num(7.0)]), ("Unexposed", &[num(4.0), excl(21.0)])]);
+    crate::common::as_col_mut(&mut col_s).row_titles = str_vec(&["Outcome+", "Outcome-"]);
+    col_s.exclusion_notes.push(excl_note(CellCoord::new(1, 1, 0), "Audit", "Pending recount"));
 
-    let prev = preview_datasheet_conversion(&col_sheet, TargetArchetypeKind::Contingency).expect("preview");
-    assert!(!prev.lossy);
-    assert_eq!(prev.target_kind, TargetArchetypeKind::Contingency);
-    assert_eq!(prev.preserved_cells, 4);
-    assert_eq!(prev.preserved_exclusions, 1);
+    let prev = preview_datasheet_conversion(&col_s, TargetArchetypeKind::Contingency).unwrap();
+    assert_eq!((prev.lossy, prev.target_kind, prev.preserved_cells, prev.preserved_exclusions), (false, TargetArchetypeKind::Contingency, 4, 1));
+    let (cont_s, conv_prev) = convert_datasheet_archetype(&col_s, TargetArchetypeKind::Contingency, false).unwrap();
+    assert!(!conv_prev.lossy && cont_s.kind() == TableKind::Contingency && cont_s.exclusion_notes.len() == 1);
+    let cont = as_contingency(&cont_s);
+    assert_eq!(
+        (cont.row_titles.as_slice(), cont.data_sets[0].title.as_str(), cont.data_sets[1].title.as_str()),
+        (str_vec(&["Outcome+", "Outcome-"]).as_slice(), "Exposed", "Unexposed")
+    );
+    assert_eq!((cont.count_at(0, 0).unwrap(), cont.count_at(1, 1).unwrap()), (Some(18), None));
 
-    let (cont_sheet, conv_prev) = convert_datasheet_archetype(&col_sheet, TargetArchetypeKind::Contingency, false).expect("col->cont");
-    assert!(!conv_prev.lossy);
-    assert_eq!(cont_sheet.kind(), TableKind::Contingency);
-    assert_eq!(cont_sheet.exclusion_notes.len(), 1);
-    let TableArchetype::Contingency(cont) = &cont_sheet.archetype else {
-        panic!("expected Contingency");
-    };
-    assert_eq!(cont.row_titles, vec!["Outcome+", "Outcome-"]);
-    assert_eq!(cont.data_sets[0].title, "Exposed");
-    assert_eq!(cont.data_sets[1].title, "Unexposed");
-    assert_eq!(cont.count_at(0, 0).unwrap(), Some(18));
-    assert_eq!(cont.count_at(1, 1).unwrap(), None);
-
-    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).expect("grp");
-    grp.row_factor_title = "Response".into();
-    grp.column_factor_title = "Arm".into();
-    grp.row_titles = vec!["Responder".into(), "NonResponder".into()];
-    grp.data_sets[0].title = "Drug".into();
-    grp.data_sets[1].title = "Placebo".into();
-    grp.data_sets[0].cells[0] = vec![Cell::number(12.0), Cell::number(99.0)];
-    grp.data_sets[0].cells[1] = vec![Cell::number(8.0), Cell::empty()];
-    grp.data_sets[1].cells[0] = vec![Cell::number(5.0), Cell::empty()];
-    grp.data_sets[1].cells[1] = vec![Cell::number(15.0), Cell::empty()];
-    let grp_sheet = DataSheet::new("grp-cnt", "Grouped", TableArchetype::Grouped(grp)).expect("grp");
-    assert!(matches!(convert_datasheet_archetype(&grp_sheet, TargetArchetypeKind::Contingency, false), Err(TransformError::InvalidSpec { .. })));
-    let (grp_cont, grp_prev) = convert_datasheet_archetype(&grp_sheet, TargetArchetypeKind::Contingency, true).expect("grp->cont");
-    assert!(grp_prev.lossy);
+    let mut grp_s = grouped_sheet(
+        "grp-cnt",
+        SubcolumnMode::RawReplicates(2),
+        &["Responder", "NonResponder"],
+        &[("Drug", &[&[num(12.0), num(99.0)], &[num(8.0), empty()]]), ("Placebo", &[&[num(5.0), empty()], &[num(15.0), empty()]])],
+    );
+    if let TableArchetype::Grouped(g) = &mut grp_s.archetype {
+        (g.row_factor_title, g.column_factor_title) = ("Response".into(), "Arm".into());
+    }
+    let (grp_cont, grp_prev) = assert_lossy_convert(&grp_s, TargetArchetypeKind::Contingency);
     assert_eq!(grp_prev.dropped_cells, 1);
-    let TableArchetype::Contingency(g_cont) = &grp_cont.archetype else {
-        panic!("expected Contingency");
-    };
-    assert_eq!(g_cont.row_factor_title, "Response");
-    assert_eq!(g_cont.column_factor_title, "Arm");
-    assert_eq!(g_cont.count_at(0, 0).unwrap(), Some(12));
+    let g_cont = as_contingency(&grp_cont);
+    assert_eq!(
+        (g_cont.row_factor_title.as_str(), g_cont.column_factor_title.as_str(), g_cont.count_at(0, 0).unwrap()),
+        ("Response", "Arm", Some(12))
+    );
 }
 
 #[test]
 fn qol1_mv_to_contingency_and_invalid_count_rejection() {
-    let mut mv_counts = MultipleVariablesTable::new(3, 2).expect("mv counts");
-    mv_counts.variables[0].title = "Genotype".into();
-    mv_counts.variables[0].role = VariableRole::Label;
-    mv_counts.variables[0].role_inferred = false;
-    mv_counts.variables[1].title = "Cases".into();
-    mv_counts.variables[2].title = "Controls".into();
-    mv_counts.variables[0].cells = vec![Cell::text("WildType"), Cell::text("Mutant")];
-    mv_counts.variables[1].cells = vec![Cell::number(10.0), Cell::number(25.0)];
-    mv_counts.variables[2].cells = vec![Cell::number(30.0), Cell::number(15.0)];
-    let mv_counts_sheet = DataSheet::new("mv-counts", "MVCounts", TableArchetype::MultipleVariables(mv_counts)).expect("sheet");
-    let (mv_cont_sheet, mv_prev) = convert_datasheet_archetype(&mv_counts_sheet, TargetArchetypeKind::Contingency, false).expect("mv->cont");
+    let mv_counts = mv_sheet_roles(
+        "mv-counts",
+        &[
+            ("Genotype", VariableRole::Label, &[txt("WildType"), txt("Mutant")]),
+            ("Cases", VariableRole::Continuous, &[num(10.0), num(25.0)]),
+            ("Controls", VariableRole::Continuous, &[num(30.0), num(15.0)]),
+        ],
+    );
+    let (mv_cont_s, mv_prev) = convert_datasheet_archetype(&mv_counts, TargetArchetypeKind::Contingency, false).unwrap();
     assert!(!mv_prev.lossy);
-    let TableArchetype::Contingency(mv_cont) = &mv_cont_sheet.archetype else {
-        panic!("expected Contingency");
-    };
-    assert_eq!(mv_cont.row_factor_title, "Genotype");
-    assert_eq!(mv_cont.row_titles, vec!["WildType", "Mutant"]);
-    assert_eq!(mv_cont.data_sets[0].title, "Cases");
-    assert_eq!(mv_cont.data_sets[1].title, "Controls");
-    assert_eq!(mv_cont.count_at(1, 0).unwrap(), Some(25));
+    let mv_cont = as_contingency(&mv_cont_s);
+    assert_eq!((mv_cont.row_factor_title.as_str(), mv_cont.row_titles.as_slice()), ("Genotype", str_vec(&["WildType", "Mutant"]).as_slice()));
+    assert_eq!(
+        (mv_cont.data_sets[0].title.as_str(), mv_cont.data_sets[1].title.as_str(), mv_cont.count_at(1, 0).unwrap()),
+        ("Cases", "Controls", Some(25))
+    );
 
-    let mut mv_cat = MultipleVariablesTable::new(2, 4).expect("mv cat");
-    mv_cat.variables[0].title = "Treatment".into();
-    mv_cat.variables[0].role = VariableRole::Categorical;
-    mv_cat.variables[0].role_inferred = false;
-    mv_cat.variables[1].title = "Status".into();
-    mv_cat.variables[1].role = VariableRole::Categorical;
-    mv_cat.variables[1].role_inferred = false;
-    for (r, (t, s)) in [("Drug", "Cured"), ("Drug", "Cured"), ("Drug", "Relapse"), ("Ctrl", "Relapse")].into_iter().enumerate() {
-        mv_cat.variables[0].cells[r] = Cell::text(t);
-        mv_cat.variables[1].cells[r] = Cell::text(s);
-    }
-    let mv_cat_sheet = DataSheet::new("mv-cat", "MVCat", TableArchetype::MultipleVariables(mv_cat)).expect("sheet");
-    let (xt_sheet, xt_prev) = convert_datasheet_archetype(&mv_cat_sheet, TargetArchetypeKind::Contingency, false).expect("mv cat->cont");
+    let mv_cat = mv_sheet_roles(
+        "mv-cat",
+        &[
+            ("Treatment", VariableRole::Categorical, &[txt("Drug"), txt("Drug"), txt("Drug"), txt("Ctrl")]),
+            ("Status", VariableRole::Categorical, &[txt("Cured"), txt("Cured"), txt("Relapse"), txt("Relapse")]),
+        ],
+    );
+    let (xt_s, xt_prev) = convert_datasheet_archetype(&mv_cat, TargetArchetypeKind::Contingency, false).unwrap();
     assert!(!xt_prev.lossy);
-    let TableArchetype::Contingency(xt) = &xt_sheet.archetype else {
-        panic!("expected Contingency");
-    };
-    assert_eq!(xt.row_titles, vec!["Drug", "Ctrl"]);
-    assert_eq!(xt.data_sets[0].title, "Cured");
-    assert_eq!(xt.data_sets[1].title, "Relapse");
-    assert_eq!(xt.count_at(0, 0).unwrap(), Some(2));
-    assert_eq!(xt.count_at(1, 0).unwrap(), Some(0));
+    let xt = as_contingency(&xt_s);
+    assert_eq!(
+        (xt.row_titles.as_slice(), xt.data_sets[0].title.as_str(), xt.data_sets[1].title.as_str()),
+        (str_vec(&["Drug", "Ctrl"]).as_slice(), "Cured", "Relapse")
+    );
+    assert_eq!((xt.count_at(0, 0).unwrap(), xt.count_at(1, 0).unwrap()), (Some(2), Some(0)));
 
-    for bad in [Cell::number(-1.0), Cell::number(2.5), Cell::text("bad")] {
-        let mut bad_col = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single, 2, 2).expect("bad");
-        bad_col.data_sets[0].cells[0][0] = Cell::number(5.0);
-        bad_col.data_sets[0].cells[1][0] = bad;
-        bad_col.data_sets[1].cells[0][0] = Cell::number(3.0);
-        bad_col.data_sets[1].cells[1][0] = Cell::number(4.0);
-        let bad_sheet = DataSheet::new("bad", "Bad", TableArchetype::Column(bad_col)).expect("sheet");
-        let err = preview_datasheet_conversion(&bad_sheet, TargetArchetypeKind::Contingency).expect_err("must reject invalid count");
-        assert!(matches!(err, TransformError::Doc(DocError::InvalidCellValue { archetype: TableKind::Contingency, .. })));
+    for bad in [num(-1.0), num(2.5), txt("bad")] {
+        let bad_s = col_sheet("bad", &[("A", &[num(5.0), bad]), ("B", &[num(3.0), num(4.0)])]);
+        assert!(matches!(
+            preview_datasheet_conversion(&bad_s, TargetArchetypeKind::Contingency),
+            Err(TransformError::Doc(DocError::InvalidCellValue { archetype: TableKind::Contingency, .. }))
+        ));
     }
 }
 
@@ -611,19 +421,19 @@ fn qol2_cbtemplate_json_float_roundtrip_and_guards() {
         std::f64::consts::PI,
         std::f64::consts::E,
         f64::MIN_POSITIVE,
-        f64::from_bits(1), // smallest positive subnormal
+        f64::from_bits(1),
         1e-300_f64,
         -1.234_567_890_123_456_7e-17_f64,
         9_007_199_254_740_993.0_f64,
         f64::MAX,
         f64::MIN,
     ];
-    let mut tpl = PlateMapTemplate::new("Float Roundtrip", PlateGeometry::Wells96, "Conc").expect("tpl");
+    let mut tpl = PlateMapTemplate::new("Float Roundtrip", PlateGeometry::Wells96, "Conc").unwrap();
     for (idx, &val) in exact_floats.iter().enumerate() {
-        tpl.set_well(idx / 12, idx % 12, PlateWellRole::Treatment { group_name: format!("G{idx}"), dilution_x: val, replicate: idx }).expect("set");
+        tpl.set_well(idx / 12, idx % 12, PlateWellRole::Treatment { group_name: format!("G{idx}"), dilution_x: val, replicate: idx }).unwrap();
     }
-    let json = tpl.to_cbtemplate_json().expect("serialize");
-    let parsed = PlateMapTemplate::from_cbtemplate_json(&json).expect("deserialize");
+    let json = tpl.to_cbtemplate_json().unwrap();
+    let parsed = PlateMapTemplate::from_cbtemplate_json(&json).unwrap();
     assert_eq!(parsed, tpl);
     for (a, b) in parsed.wells.iter().zip(tpl.wells.iter()) {
         if let (PlateWellRole::Treatment { dilution_x: xa, .. }, PlateWellRole::Treatment { dilution_x: xb, .. }) = (a, b)
@@ -633,60 +443,40 @@ fn qol2_cbtemplate_json_float_roundtrip_and_guards() {
         }
     }
 
-    // Non-finite float rejected on serialize
-    let mut nan_tpl = PlateMapTemplate::new("NaN", PlateGeometry::Wells96, "X").expect("tpl");
+    let mut nan_tpl = PlateMapTemplate::new("NaN", PlateGeometry::Wells96, "X").unwrap();
     nan_tpl.wells[0] = PlateWellRole::Treatment { group_name: String::from("Bad"), dilution_x: f64::NAN, replicate: 0 };
     assert!(matches!(nan_tpl.to_cbtemplate_json(), Err(TransformError::InvalidInput { .. })));
-
-    // Trailing content rejected
-    let trailing = format!("{json} {{}}");
-    assert!(matches!(PlateMapTemplate::from_cbtemplate_json(&trailing), Err(TransformError::InvalidInput { .. })));
-
-    // Deeply nested JSON rejected cleanly without stack overflow
-    let deep = format!("{}{}", "[".repeat(256), "]".repeat(256));
-    assert!(matches!(PlateMapTemplate::from_cbtemplate_json(&deep), Err(TransformError::InvalidInput { .. })));
+    assert!(matches!(PlateMapTemplate::from_cbtemplate_json(&format!("{json} {{}}")), Err(TransformError::InvalidInput { .. })));
+    assert!(matches!(
+        PlateMapTemplate::from_cbtemplate_json(&format!("{}{}", "[".repeat(256), "]".repeat(256))),
+        Err(TransformError::InvalidInput { .. })
+    ));
 }
 
 #[test]
 fn qol1_mv_summary_to_grouped_ignores_blank_trailing_rows_without_marking_lossy() {
-    // DA-01-06 regression: blank trailing rows (skipped == 0) must not mark summary pivot lossy.
-    let mut mv = MultipleVariablesTable::new(5, 3).expect("mv summary");
-    mv.variables[0].title = "Dose".into();
-    mv.variables[0].role = VariableRole::Categorical;
-    mv.variables[0].role_inferred = false;
-    mv.variables[1].title = "Arm".into();
-    mv.variables[1].role = VariableRole::Categorical;
-    mv.variables[1].role_inferred = false;
-    mv.variables[2].title = "Mean".into();
-    mv.variables[3].title = "SD".into();
-    mv.variables[4].title = "N".into();
-
-    mv.variables[0].cells = vec![Cell::text("Low"), Cell::text("High"), Cell::empty()];
-    mv.variables[1].cells = vec![Cell::text("Drug"), Cell::text("Drug"), Cell::empty()];
-    mv.variables[2].cells = vec![Cell::number(10.0), Cell::number(20.0), Cell::empty()];
-    mv.variables[3].cells = vec![Cell::number(1.5), Cell::number(2.5), Cell::empty()];
-    mv.variables[4].cells = vec![Cell::number(5.0), Cell::number(6.0), Cell::empty()];
-
-    let sheet = DataSheet::new("mv-sum", "MVSummary", TableArchetype::MultipleVariables(mv)).expect("sheet");
-    let (converted, prev) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::Grouped, false).expect("lossless summary pivot");
-    assert!(!prev.lossy);
-    assert_eq!(prev.dropped_cells, 0);
-    let TableArchetype::Grouped(grp) = &converted.archetype else {
-        panic!("expected Grouped");
-    };
-    assert_eq!(grp.subcolumn_mode, SubcolumnMode::MeanSdN);
-    assert_eq!(grp.row_titles, vec!["Low", "High"]);
-    assert_eq!(grp.data_sets.len(), 1);
-    assert_eq!(grp.data_sets[0].title, "Drug");
+    // DA-01-06 regression: blank trailing rows must not mark summary pivot lossy.
+    let s = mv_sheet_roles(
+        "mv-sum",
+        &[
+            ("Dose", VariableRole::Categorical, &[txt("Low"), txt("High"), empty()]),
+            ("Arm", VariableRole::Categorical, &[txt("Drug"), txt("Drug"), empty()]),
+            ("Mean", VariableRole::Continuous, &[num(10.0), num(20.0), empty()]),
+            ("SD", VariableRole::Continuous, &[num(1.5), num(2.5), empty()]),
+            ("N", VariableRole::Continuous, &[num(5.0), num(6.0), empty()]),
+        ],
+    );
+    let (converted, prev) = convert_datasheet_archetype(&s, TargetArchetypeKind::Grouped, false).unwrap();
+    assert!(!prev.lossy && prev.dropped_cells == 0);
+    let grp = as_grouped(&converted);
+    assert_eq!(
+        (grp.subcolumn_mode, grp.row_titles.as_slice(), grp.data_sets.len(), grp.data_sets[0].title.as_str()),
+        (SubcolumnMode::MeanSdN, str_vec(&["Low", "High"]).as_slice(), 1, "Drug")
+    );
 
     // Conversely, a row missing a factor token with an occupied summary cell IS genuinely lossy.
-    let TableArchetype::MultipleVariables(mut mv_lossy) = sheet.archetype else {
-        panic!("expected MultipleVariables");
-    };
-    mv_lossy.variables[2].cells[2] = Cell::number(99.0);
-    let lossy_sheet = DataSheet::new("mv-sum-lossy", "MVSummaryLossy", TableArchetype::MultipleVariables(mv_lossy)).expect("lossy sheet");
-    assert!(matches!(convert_datasheet_archetype(&lossy_sheet, TargetArchetypeKind::Grouped, false), Err(TransformError::InvalidSpec { .. })));
-    let (_, lossy_prev) = convert_datasheet_archetype(&lossy_sheet, TargetArchetypeKind::Grouped, true).expect("lossy allowed");
-    assert!(lossy_prev.lossy);
+    let mut lossy_s = s;
+    crate::common::as_mv_mut(&mut lossy_s).variables[2].cells[2] = num(99.0);
+    let (_, lossy_prev) = assert_lossy_convert(&lossy_s, TargetArchetypeKind::Grouped);
     assert_eq!(lossy_prev.dropped_cells, 1);
 }

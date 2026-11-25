@@ -1,379 +1,189 @@
+use crate::common::{
+    RawZipEntry, build_archive_zip_from_value, build_raw_zip, build_zip_entries, col_sheet, make_import_link_spec, raw_datasheet,
+    result_sheet_with_kind, sample_dose_project, xy_sheet,
+};
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, CURRENT_SCHEMA_VERSION, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet,
-    DocError, FloatingNote, GraphSheet, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind,
-    JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LinkBorderColor, LinkSource, LinkedDataRegion, MAX_SUBCOLUMNS, MAX_TITLE_BYTES,
-    MultipleVariablesTable, NestedTable, NonlinearFitSpec, OneWayAnovaSpec, ParameterRule, ParameterScope, PartsOfWholeTable, PlacementMode,
-    ProjectDocument, RectPt, ResultScalarEntry, ResultSheet, ResultStatus, SequenceProgression, SheetCellRange, SheetId, SourceCellId, SubcolumnMode,
-    SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
+    AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, FactorialAnovaSpec,
+    GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind, LinearRegressionSpec, LinkBorderColor, LinkSource,
+    LinkedDataRegion, MAX_SUBCOLUMNS, MAX_TITLE_BYTES, MixedModelDfMethod, MultipleVariablesTable, NestedAnalysisSpec, NestedTable, NonlinearFitSpec,
+    OneWayAnovaSpec, PartsOfWholeTable, PlacementMode, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultStatus,
+    SequenceProgression, SheetCellRange, SheetId, SourceCellId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
 };
 use curvebook_format::{
-    ArchiveKind, CsvOptions, FormatError, ImportBaselineAdjustment, ZipLimits, ZipWriter, apply_csv_import_link, export_datasheet_to_csv,
-    filter_delimited_text, import_csv_to_datasheet, instantiate_template_bytes, open_archive_bytes, open_project_bytes, open_template_bytes,
-    parse_cell_token, parse_delimited_records, rearrange_and_baseline_grid, save_project_bytes, save_template_bytes, validate_project_document,
+    ArchiveKind, CsvOptions, FormatError, ImportBaselineAdjustment, ZipArchive, ZipLimits, ZipWriter, apply_csv_import_link, export_datasheet_to_csv,
+    filter_delimited_text, import_csv_to_datasheet, instantiate_template_bytes, migrate_document_json, open_archive_bytes,
+    open_archive_bytes_with_limits, open_project_bytes, open_template_bytes, parse_cell_token, parse_delimited_records, rearrange_and_baseline_grid,
+    save_project_bytes, save_template_bytes, validate_project_document,
 };
-
-fn build_sample_project() -> Result<ProjectDocument, FormatError> {
-    let mut doc = ProjectDocument::new("Dose Response Assay")?;
-
-    let mut info = InfoSheet::new_preseeded("info-1", "Assay Metadata")?;
-    info.set_constant("HotNM", ConstantValue::Number(2.5), Some(String::from("nM")))?;
-    info.notes_markdown = String::from("Room temperature incubation 30 min.");
-    doc.add_info_sheet(info)?;
-
-    let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 2, 3)?;
-    xy.x_title = String::from("Log[Agonist]");
-    if let [ds0, ds1] = xy.data_sets.as_mut_slice() {
-        ds0.title = String::from("Wildtype");
-        ds1.title = String::from("Mutant");
-        if let [r0, r1, ..] = ds0.cells.as_mut_slice() {
-            *r0 = vec![Cell::number(10.5), Cell::excluded_number(99.9)];
-            *r1 = vec![Cell::number(48.2), Cell::number(51.0)];
-        }
-        if let Some(r0) = ds1.cells.first_mut() {
-            *r0 = vec![Cell::number(12.0), Cell::number(11.4)];
-        }
-    }
-    for (r, x) in [-9.0, -8.0, -7.0].iter().enumerate() {
-        xy.set_x_cell(r, Cell::number(*x))?;
-    }
-    let mut ds = DataSheet::new("data-xy", "Binding Curve", TableArchetype::Xy(xy))?;
-    ds.info_sheet_id = Some(SheetId::new("info-1"));
-    ds.floating_notes.push(FloatingNote::new("note-1", RectPt::new(10.0, 10.0, 120.0, 50.0), "Outlier flagged"));
-    doc.add_data_sheet(ds.clone())?;
-
-    let mut fit = NonlinearFitSpec::new("four_pl");
-    fit.parameter_rules.push(ParameterRule {
-        name: String::from("HotNM"),
-        scope: ParameterScope::HookedConstant(curvebook_doc::HookSource::InfoConstant {
-            info_sheet_id: Some(SheetId::new("info-1")),
-            constant_name: String::from("HotNM"),
-        }),
-        initial_override: None,
-        lower_bound: Some(0.0),
-        upper_bound: None,
-    });
-    let spec = AnalysisSpec::new("fit-1", "data-xy", AnalysisKind::NonlinearRegression(fit))?;
-    let mut res = ResultSheet::new(spec)?;
-    res.status = ResultStatus::UpToDate;
-    res.scalars.push(ResultScalarEntry { key: String::from("EC50"), data_set_index: Some(0), value: 1.25e-8, units: Some(String::from("M")) });
-    doc.add_result_sheet(res)?;
-
-    let gsheet = GraphSheet::new_uninitialized_for_data("graph-1", &ds)?;
-    doc.add_graph_sheet(gsheet)?;
-
-    let mut lspec = LayoutSpec::from_preset(JournalWidthPreset::SingleColumn85Mm);
-    lspec.items.push(LayoutItem::LiveGraph {
-        id: String::from("panel-a"),
-        graph_sheet_id: SheetId::new("graph-1"),
-        bounds_pt: RectPt::new(12.0, 12.0, 200.0, 150.0),
-        scale_percent: 100.0,
-        badge_override: None,
-    });
-    doc.add_layout_sheet(LayoutSheet::new("layout-1", "Figure 1", lspec)?)?;
-    Ok(doc)
-}
+use serde_json::{Value, json};
 
 #[test]
 fn curvebook_archive_is_deterministic_and_round_trips() {
-    let doc = build_sample_project().unwrap();
+    let doc = sample_dose_project();
     let bytes1 = save_project_bytes(&doc).unwrap();
-    let bytes2 = save_project_bytes(&doc).unwrap();
-    assert_eq!(bytes1, bytes2);
-
-    let (kind, decoded) = open_archive_bytes(&bytes1).unwrap();
-    assert_eq!(kind, ArchiveKind::Project);
-    assert_eq!(decoded, doc);
-
-    // Template loader rejects project kind cleanly.
+    assert_eq!(bytes1, save_project_bytes(&doc).unwrap());
+    assert_eq!(open_archive_bytes(&bytes1).unwrap(), (ArchiveKind::Project, doc));
     assert!(matches!(open_template_bytes(&bytes1), Err(FormatError::InvalidArchiveKind { expected: "template", found: "project" })));
 }
 
 #[test]
 fn cbtemplate_strips_raw_cells_and_cached_results_while_preserving_schemas() {
-    let doc = build_sample_project().unwrap();
+    let doc = sample_dose_project();
     let tmpl_bytes = save_template_bytes(&doc).unwrap();
     assert!(matches!(open_project_bytes(&tmpl_bytes), Err(FormatError::InvalidArchiveKind { expected: "project", found: "template" })));
 
     let tmpl = open_template_bytes(&tmpl_bytes).unwrap();
-    let TableArchetype::Xy(xy) = &tmpl.data_sheets[0].archetype else {
-        panic!("expected XY table");
-    };
-    assert_eq!(xy.x_title, "Log[Agonist]");
-    assert_eq!(xy.data_sets[0].title, "Wildtype");
-    assert!(xy.x_cells[0][0].is_empty());
-    assert!(xy.data_sets[0].cell(0, 0).unwrap().is_empty());
-    assert_eq!(tmpl.result_sheets[0].status, ResultStatus::Dirty);
-    assert!(tmpl.result_sheets[0].scalars.is_empty());
+    let TableArchetype::Xy(xy) = &tmpl.data_sheets[0].archetype else { panic!("expected XY table") };
+    assert_eq!((xy.x_title.as_str(), xy.data_sets[0].title.as_str()), ("Log[Agonist]", "Wildtype"));
+    assert!(xy.x_cells[0][0].is_empty() && xy.data_sets[0].cell(0, 0).unwrap().is_empty());
+    assert!(tmpl.result_sheets[0].status == ResultStatus::Dirty && tmpl.result_sheets[0].scalars.is_empty());
     assert_eq!(tmpl.info_sheets[0].get_constant("HotNM").unwrap().value.as_finite_f64(), Some(2.5));
-    assert_eq!(tmpl.graph_sheets.len(), 1);
-    assert_eq!(tmpl.layout_sheets.len(), 1);
+    assert_eq!((tmpl.graph_sheets.len(), tmpl.layout_sheets.len()), (1, 1));
 
     let inst = instantiate_template_bytes(&tmpl_bytes, Some("Replicate Run #2")).unwrap();
-    assert_eq!(inst.title, "Replicate Run #2");
-    assert_eq!(inst.result_sheets[0].status, ResultStatus::Dirty);
+    assert_eq!((inst.title.as_str(), &inst.result_sheets[0].status), ("Replicate Run #2", &ResultStatus::Dirty));
 }
 
 #[test]
 fn archive_detects_crc_corruption_and_missing_entries() {
-    let doc = build_sample_project().unwrap();
-    let mut writer = ZipWriter::new();
+    let doc = sample_dose_project();
     let doc_bytes = serde_json::to_vec(&doc).unwrap();
-    writer.add_file("document.json", doc_bytes.clone()).unwrap();
-    let bad_manifest = serde_json::json!({
-        "format": "curvebook-archive",
-        "schema_version": CURRENT_SCHEMA_VERSION,
-        "kind": "Project",
-        "title": doc.title,
-        "document_crc32": crc32fast::hash(&doc_bytes) ^ 0xFFFF_FFFF,
-        "sheets": []
+    let bad_manifest = json!({
+        "format": "curvebook-archive", "schema_version": CURRENT_SCHEMA_VERSION, "kind": "Project",
+        "title": doc.title, "document_crc32": crc32fast::hash(&doc_bytes) ^ 0xFFFF_FFFF, "sheets": []
     });
-    writer.add_file("manifest.json", serde_json::to_vec(&bad_manifest).unwrap()).unwrap();
-    let corrupt_zip = writer.finish().unwrap();
+    let corrupt_zip = build_zip_entries(&[("document.json", &doc_bytes), ("manifest.json", &serde_json::to_vec(&bad_manifest).unwrap())]);
     assert!(matches!(open_project_bytes(&corrupt_zip), Err(FormatError::CorruptCrc { .. })));
-
-    // Missing manifest.json
-    let mut no_manifest = ZipWriter::new();
-    no_manifest.add_file("document.json", doc_bytes).unwrap();
-    let missing_zip = no_manifest.finish().unwrap();
-    assert!(matches!(open_project_bytes(&missing_zip), Err(FormatError::MissingArchiveEntry { .. })));
+    assert!(matches!(open_project_bytes(&build_zip_entries(&[("document.json", &doc_bytes)])), Err(FormatError::MissingArchiveEntry { .. })));
 }
 
 #[test]
 fn zip_rejects_path_traversal_duplicates_and_zip_bombs() {
     let mut w = ZipWriter::new();
-    assert!(matches!(w.add_file("../escape.txt", b"x".to_vec()), Err(FormatError::UnsafePath { .. })));
-    assert!(matches!(w.add_file("/abs/path.txt", b"x".to_vec()), Err(FormatError::UnsafePath { .. })));
-    assert!(matches!(w.add_file("dir\\win.txt", b"x".to_vec()), Err(FormatError::UnsafePath { .. })));
+    for bad in ["../escape.txt", "/abs/path.txt", "dir\\win.txt"] {
+        assert!(matches!(w.add_file(bad, b"x".to_vec()), Err(FormatError::UnsafePath { .. })), "{bad}");
+    }
     w.add_file("a.txt", b"1".to_vec()).unwrap();
     assert!(matches!(w.add_file("a.txt", b"2".to_vec()), Err(FormatError::DuplicateEntry { .. })));
 
-    // Zip bomb check via custom small limits on valid archive
-    let doc = build_sample_project().unwrap();
-    let bytes = save_project_bytes(&doc).unwrap();
-    let tiny_limits = ZipLimits { max_entries: 1, max_total_uncompressed_bytes: 1024 * 1024, max_entry_uncompressed_bytes: 1024 * 1024 };
-    assert!(matches!(curvebook_format::open_archive_bytes_with_limits(&bytes, tiny_limits), Err(FormatError::ZipBomb { .. })));
-
-    let tiny_bytes_limits = ZipLimits { max_entries: 100, max_total_uncompressed_bytes: 64, max_entry_uncompressed_bytes: 64 };
-    assert!(matches!(curvebook_format::open_archive_bytes_with_limits(&bytes, tiny_bytes_limits), Err(FormatError::ZipBomb { .. })));
+    let bytes = save_project_bytes(&sample_dose_project()).unwrap();
+    for limits in [
+        ZipLimits { max_entries: 1, max_total_uncompressed_bytes: 1024 * 1024, max_entry_uncompressed_bytes: 1024 * 1024 },
+        ZipLimits { max_entries: 100, max_total_uncompressed_bytes: 64, max_entry_uncompressed_bytes: 64 },
+    ] {
+        assert!(matches!(open_archive_bytes_with_limits(&bytes, limits), Err(FormatError::ZipBomb { .. })));
+    }
 }
 
 #[test]
 fn schema_migration_v0_to_v1_and_future_version_rejection() {
-    let v0_doc = serde_json::json!({
-        "schema_version": 0,
-        "title": "Legacy Study",
-        "data_sheets": [],
-        "info_sheets": [],
-        "result_sheets": [],
-        "graph_sheets": [],
-        "layout_sheets": []
-    });
-    let doc_bytes = serde_json::to_vec(&v0_doc).unwrap();
-    let manifest = serde_json::json!({
-        "format": "curvebook-archive",
-        "schema_version": 0,
-        "kind": "Project",
-        "title": "Legacy Study",
-        "document_crc32": crc32fast::hash(&doc_bytes),
-        "sheets": []
-    });
-    let mut w = ZipWriter::new();
-    w.add_file("document.json", doc_bytes).unwrap();
-    w.add_file("manifest.json", serde_json::to_vec(&manifest).unwrap()).unwrap();
-    let migrated = open_project_bytes(&w.finish().unwrap()).unwrap();
-    assert_eq!(migrated.title, "Legacy Study");
-    assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+    let v0_doc = json!({ "schema_version": 0, "title": "Legacy Study", "data_sheets": [], "info_sheets": [], "result_sheets": [], "graph_sheets": [], "layout_sheets": [] });
+    let migrated = open_project_bytes(&build_archive_zip_from_value(&v0_doc, 0)).unwrap();
+    assert_eq!((migrated.title.as_str(), migrated.schema_version), ("Legacy Study", CURRENT_SCHEMA_VERSION));
 
-    // Future schema version rejected cleanly
-    let future_doc = serde_json::json!({
-        "schema_version": CURRENT_SCHEMA_VERSION + 5,
-        "title": "Future Study",
-        "data_sheets": [],
-        "info_sheets": [],
-        "result_sheets": [],
-        "graph_sheets": [],
-        "layout_sheets": [],
-        "active_sheet_id": null,
-        "family_anchor_sheet_id": null
-    });
-    let f_bytes = serde_json::to_vec(&future_doc).unwrap();
-    let f_manifest = serde_json::json!({
-        "format": "curvebook-archive",
-        "schema_version": CURRENT_SCHEMA_VERSION + 5,
-        "kind": "Project",
-        "title": "Future Study",
-        "document_crc32": crc32fast::hash(&f_bytes),
-        "sheets": []
-    });
-    let mut w2 = ZipWriter::new();
-    w2.add_file("document.json", f_bytes).unwrap();
-    w2.add_file("manifest.json", serde_json::to_vec(&f_manifest).unwrap()).unwrap();
-    assert!(matches!(open_project_bytes(&w2.finish().unwrap()), Err(FormatError::UnsupportedSchemaVersion { .. })));
+    let fut = CURRENT_SCHEMA_VERSION + 5;
+    let future_doc = json!({ "schema_version": fut, "title": "Future Study", "data_sheets": [], "info_sheets": [], "result_sheets": [], "graph_sheets": [], "layout_sheets": [], "active_sheet_id": null, "family_anchor_sheet_id": null });
+    assert!(matches!(open_project_bytes(&build_archive_zip_from_value(&future_doc, fut)), Err(FormatError::UnsupportedSchemaVersion { .. })));
 
-    // V1 document with a legacy FactorialAnova missing `residual_covariance` migrates cleanly to V2 (`CompoundSymmetry`).
-    let mut legacy_src = ProjectDocument::new("V1 RM Study").unwrap();
-    let v1_grouped = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).unwrap();
-    let v1_ds = DataSheet::new("data-1", "Grouped Data", TableArchetype::Grouped(v1_grouped)).unwrap();
-    legacy_src.add_data_sheet(v1_ds).unwrap();
-    let v1_fac = curvebook_doc::FactorialAnovaSpec {
-        repeated_measures: curvebook_doc::RepeatedMeasuresDesign::ColumnFactorMatched,
-        ..curvebook_doc::FactorialAnovaSpec::default()
-    };
-    let v1_analysis = AnalysisSpec::new("res-rm-1", "data-1", AnalysisKind::FactorialAnova(v1_fac)).unwrap();
-    let v1_res = ResultSheet::new(v1_analysis).unwrap();
-    legacy_src.add_result_sheet(v1_res).unwrap();
-    let mut v1_doc = serde_json::to_value(&legacy_src).unwrap();
-    v1_doc["schema_version"] = serde_json::json!(1_u32);
+    // V1 legacy FactorialAnova missing `residual_covariance`.
+    let mut v1_src = ProjectDocument::new("V1 RM Study").unwrap();
+    v1_src
+        .add_data_sheet(
+            DataSheet::new("data-1", "Grouped Data", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).unwrap()))
+                .unwrap(),
+        )
+        .unwrap();
+    let v1_fac = FactorialAnovaSpec { repeated_measures: RepeatedMeasuresDesign::ColumnFactorMatched, ..Default::default() };
+    v1_src.add_result_sheet(result_sheet_with_kind("res-rm-1", "data-1", AnalysisKind::FactorialAnova(v1_fac))).unwrap();
+    let mut v1_doc = serde_json::to_value(&v1_src).unwrap();
+    v1_doc["schema_version"] = json!(1_u32);
     v1_doc["result_sheets"][0]["analysis"]["kind"]["FactorialAnova"].as_object_mut().unwrap().remove("residual_covariance");
 
-    let v1_bytes = serde_json::to_vec(&v1_doc).unwrap();
-    let v1_manifest = serde_json::json!({
-        "format": "curvebook-archive",
-        "schema_version": 1,
-        "kind": "Project",
-        "title": "V1 RM Study",
-        "document_crc32": crc32fast::hash(&v1_bytes),
-        "sheets": []
-    });
-    let mut w3 = ZipWriter::new();
-    w3.add_file("document.json", v1_bytes).unwrap();
-    w3.add_file("manifest.json", serde_json::to_vec(&v1_manifest).unwrap()).unwrap();
-    let migrated_v1 = open_project_bytes(&w3.finish().unwrap()).unwrap();
-    assert_eq!(migrated_v1.schema_version, CURRENT_SCHEMA_VERSION);
-    assert_eq!(migrated_v1.result_sheets.len(), 1);
-    assert!(
-        matches!(
-            &migrated_v1.result_sheets[0].analysis.kind,
-            AnalysisKind::FactorialAnova(spec) if spec.residual_covariance == curvebook_doc::ResidualCovariance::CompoundSymmetry
-                && spec.df_method == curvebook_doc::MixedModelDfMethod::KenwardRoger
-                && !spec.mixed_effects_reml
-        ),
-        "expected CompoundSymmetry + KenwardRoger default after v1->v3 migration, got {:?}",
-        migrated_v1.result_sheets[0].analysis.kind
-    );
+    let mig_v1 = open_project_bytes(&build_archive_zip_from_value(&v1_doc, 1)).unwrap();
+    assert_eq!((mig_v1.schema_version, mig_v1.result_sheets.len()), (CURRENT_SCHEMA_VERSION, 1));
+    assert!(matches!(
+        &mig_v1.result_sheets[0].analysis.kind,
+        AnalysisKind::FactorialAnova(s) if s.residual_covariance == ResidualCovariance::CompoundSymmetry && s.df_method == MixedModelDfMethod::KenwardRoger && !s.mixed_effects_reml
+    ));
 
-    // V2 document missing `df_method` / `mixed_effects_reml` on OneWayAnova, FactorialAnova,
-    // and NestedComparison migrates cleanly to V3 with `KenwardRoger` default.
+    // V2 missing `df_method` / `mixed_effects_reml` across OneWayAnova, FactorialAnova, NestedComparison.
     let mut v2_src = ProjectDocument::new("V2 RM Study").unwrap();
-    let v2_col = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 3, 4).unwrap();
-    v2_src.add_data_sheet(DataSheet::new("data-col", "RM Column", TableArchetype::Column(v2_col)).unwrap()).unwrap();
-    let v2_grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).unwrap();
-    v2_src.add_data_sheet(DataSheet::new("data-grp", "RM Grouped", TableArchetype::Grouped(v2_grp)).unwrap()).unwrap();
-    let v2_nst = NestedTable::new(2, 2, 2).unwrap();
-    v2_src.add_data_sheet(DataSheet::new("data-nst", "Nested", TableArchetype::Nested(v2_nst)).unwrap()).unwrap();
-
     v2_src
-        .add_result_sheet(
-            ResultSheet::new(AnalysisSpec::new("res-ow", "data-col", AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).unwrap()).unwrap(),
-        )
-        .unwrap();
-    v2_src
-        .add_result_sheet(
-            ResultSheet::new(
-                AnalysisSpec::new("res-fac", "data-grp", AnalysisKind::FactorialAnova(curvebook_doc::FactorialAnovaSpec::default())).unwrap(),
+        .add_data_sheet(
+            DataSheet::new(
+                "data-col",
+                "RM Column",
+                TableArchetype::Column(ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 3, 4).unwrap()),
             )
             .unwrap(),
         )
         .unwrap();
     v2_src
-        .add_result_sheet(
-            ResultSheet::new(
-                AnalysisSpec::new("res-nst", "data-nst", AnalysisKind::NestedComparison(curvebook_doc::NestedAnalysisSpec::default())).unwrap(),
-            )
-            .unwrap(),
+        .add_data_sheet(
+            DataSheet::new("data-grp", "RM Grouped", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).unwrap()))
+                .unwrap(),
         )
         .unwrap();
-
+    v2_src.add_data_sheet(DataSheet::new("data-nst", "Nested", TableArchetype::Nested(NestedTable::new(2, 2, 2).unwrap())).unwrap()).unwrap();
+    for (id, src, kind) in [
+        ("res-ow", "data-col", AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())),
+        ("res-fac", "data-grp", AnalysisKind::FactorialAnova(FactorialAnovaSpec::default())),
+        ("res-nst", "data-nst", AnalysisKind::NestedComparison(NestedAnalysisSpec::default())),
+    ] {
+        v2_src.add_result_sheet(result_sheet_with_kind(id, src, kind)).unwrap();
+    }
     let mut v2_doc = serde_json::to_value(&v2_src).unwrap();
-    v2_doc["schema_version"] = serde_json::json!(2_u32);
-    for key in ["df_method", "mixed_effects_reml", "residual_covariance"] {
-        v2_doc["result_sheets"][0]["analysis"]["kind"]["OneWayAnova"].as_object_mut().unwrap().remove(key);
+    v2_doc["schema_version"] = json!(2_u32);
+    for (idx, variant, keys) in [
+        (0, "OneWayAnova", &["df_method", "mixed_effects_reml", "residual_covariance"][..]),
+        (1, "FactorialAnova", &["df_method", "mixed_effects_reml"][..]),
+        (2, "NestedComparison", &["df_method"][..]),
+    ] {
+        let obj = v2_doc["result_sheets"][idx]["analysis"]["kind"][variant].as_object_mut().unwrap();
+        for k in keys {
+            obj.remove(*k);
+        }
     }
-    for key in ["df_method", "mixed_effects_reml"] {
-        v2_doc["result_sheets"][1]["analysis"]["kind"]["FactorialAnova"].as_object_mut().unwrap().remove(key);
-    }
-    v2_doc["result_sheets"][2]["analysis"]["kind"]["NestedComparison"].as_object_mut().unwrap().remove("df_method");
-
-    let v2_bytes = serde_json::to_vec(&v2_doc).unwrap();
-    let v2_manifest = serde_json::json!({
-        "format": "curvebook-archive",
-        "schema_version": 2,
-        "kind": "Project",
-        "title": "V2 RM Study",
-        "document_crc32": crc32fast::hash(&v2_bytes),
-        "sheets": []
-    });
-    let mut w4 = ZipWriter::new();
-    w4.add_file("document.json", v2_bytes).unwrap();
-    w4.add_file("manifest.json", serde_json::to_vec(&v2_manifest).unwrap()).unwrap();
-    let migrated_v2 = open_project_bytes(&w4.finish().unwrap()).unwrap();
-    assert_eq!(migrated_v2.schema_version, CURRENT_SCHEMA_VERSION);
-    assert!(matches!(
-        &migrated_v2.result_sheets[0].analysis.kind,
-        AnalysisKind::OneWayAnova(spec)
-            if spec.df_method == curvebook_doc::MixedModelDfMethod::KenwardRoger
-                && !spec.mixed_effects_reml
-                && spec.residual_covariance == curvebook_doc::ResidualCovariance::CompoundSymmetry
-    ));
-    assert!(matches!(
-        &migrated_v2.result_sheets[1].analysis.kind,
-        AnalysisKind::FactorialAnova(spec)
-            if spec.df_method == curvebook_doc::MixedModelDfMethod::KenwardRoger && !spec.mixed_effects_reml
-    ));
-    assert!(matches!(
-        &migrated_v2.result_sheets[2].analysis.kind,
-        AnalysisKind::NestedComparison(spec) if spec.df_method == curvebook_doc::MixedModelDfMethod::KenwardRoger
-    ));
+    let mig_v2 = open_project_bytes(&build_archive_zip_from_value(&v2_doc, 2)).unwrap();
+    assert_eq!(mig_v2.schema_version, CURRENT_SCHEMA_VERSION);
+    assert!(
+        matches!(&mig_v2.result_sheets[0].analysis.kind, AnalysisKind::OneWayAnova(s) if s.df_method == MixedModelDfMethod::KenwardRoger && !s.mixed_effects_reml && s.residual_covariance == ResidualCovariance::CompoundSymmetry)
+    );
+    assert!(
+        matches!(&mig_v2.result_sheets[1].analysis.kind, AnalysisKind::FactorialAnova(s) if s.df_method == MixedModelDfMethod::KenwardRoger && !s.mixed_effects_reml)
+    );
+    assert!(matches!(&mig_v2.result_sheets[2].analysis.kind, AnalysisKind::NestedComparison(s) if s.df_method == MixedModelDfMethod::KenwardRoger));
 }
 
 #[test]
 fn detects_circular_hook_and_import_link_cycles_and_bounds() {
+    let make_link = |id: &str, target: &str| LinkedDataRegion {
+        id: String::from(id),
+        spec: ImportLinkSpec {
+            source: LinkSource::InternalSheet {
+                sheet_id: SheetId::new(target),
+                kind: InternalLinkKind::DataSheet,
+                tab_id: None,
+                range: SheetCellRange::default(),
+            },
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec::default(),
+        },
+        target_range: SheetCellRange::default(),
+        provenance_summary: format!("{target}->{id}"),
+    };
     let mut doc = ProjectDocument::new("Cycle Test").unwrap();
-    let mut ds_a =
-        DataSheet::new("data-a", "A", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).unwrap())).unwrap();
-    let mut ds_b =
-        DataSheet::new("data-b", "B", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).unwrap())).unwrap();
-    ds_a.linked_regions.push(LinkedDataRegion {
-        id: String::from("l-ab"),
-        spec: ImportLinkSpec {
-            source: LinkSource::InternalSheet {
-                sheet_id: SheetId::new("data-b"),
-                kind: InternalLinkKind::DataSheet,
-                tab_id: None,
-                range: SheetCellRange::default(),
-            },
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec::default(),
-        },
-        target_range: SheetCellRange::default(),
-        provenance_summary: String::from("B->A"),
-    });
-    ds_b.linked_regions.push(LinkedDataRegion {
-        id: String::from("l-ba"),
-        spec: ImportLinkSpec {
-            source: LinkSource::InternalSheet {
-                sheet_id: SheetId::new("data-a"),
-                kind: InternalLinkKind::DataSheet,
-                tab_id: None,
-                range: SheetCellRange::default(),
-            },
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec::default(),
-        },
-        target_range: SheetCellRange::default(),
-        provenance_summary: String::from("A->B"),
-    });
+    let (mut ds_a, mut ds_b) = (col_sheet("data-a", 1, 2), col_sheet("data-b", 1, 2));
+    ds_a.linked_regions.push(make_link("l-ab", "data-b"));
+    ds_b.linked_regions.push(make_link("l-ba", "data-a"));
     doc.add_data_sheet(ds_a).unwrap();
     doc.add_data_sheet(ds_b).unwrap();
     assert!(matches!(save_project_bytes(&doc), Err(FormatError::DependencyCycle { .. })));
 
-    // Self-referential ResultSheet cycle
     let mut doc2 = ProjectDocument::new("Self Loop").unwrap();
-    let res = ResultSheet::new(AnalysisSpec::new("res-1", "res-1", AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).unwrap()).unwrap();
-    doc2.add_result_sheet(res).unwrap();
+    doc2.add_result_sheet(result_sheet_with_kind("res-1", "res-1", AnalysisKind::OneWayAnova(OneWayAnovaSpec::default()))).unwrap();
     assert!(matches!(save_project_bytes(&doc2), Err(FormatError::DependencyCycle { .. })));
 
-    // Non-finite float & oversized title bounds
     let mut doc3 = ProjectDocument::new("Bounds").unwrap();
     let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap();
     col.data_sets[0].cells[0][0].value = CellValue::Number(f64::NAN);
@@ -389,47 +199,53 @@ fn detects_circular_hook_and_import_link_cycles_and_bounds() {
 fn csv_rfc4180_regional_sentinels_and_exclusions() {
     let csv = "\u{FEFF}\"Group, A\";\"Group \"\"B\"\"\"\r\n1,234;45,6*\r\nNA;*\r\nNULL;.\r\n\"line1\nline2\";*7,5\r";
     let detected = CsvOptions::detect(csv);
-    assert_eq!(detected.delimiter, ';');
-    assert_eq!(detected.decimal_separator, ',');
+    assert_eq!((detected.delimiter, detected.decimal_separator), (';', ','));
 
-    let mut opts = CsvOptions::european_csv();
-    opts.thousands_separator = Some('.');
+    let opts = CsvOptions { thousands_separator: Some('.'), ..CsvOptions::european_csv() };
     let records = parse_delimited_records(csv, &opts).unwrap();
-    assert_eq!(records.len(), 5);
-    assert_eq!(records[0], vec!["Group, A", "Group \"B\""]);
-    assert_eq!(records[4][0], "line1\nline2");
+    assert_eq!(
+        (records.len(), &records[0], records[4][0].as_str()),
+        (5, &vec![String::from("Group, A"), String::from("Group \"B\"")], "line1\nline2")
+    );
 
-    assert_eq!(parse_cell_token("1.234,5", &opts), Cell::number(1234.5));
-    assert_eq!(parse_cell_token("45,6*", &opts), Cell::excluded_number(45.6));
-    assert_eq!(parse_cell_token("*", &opts), Cell { value: CellValue::Empty, excluded: true });
-    assert_eq!(parse_cell_token("NA", &opts), Cell::empty());
-    assert_eq!(parse_cell_token("NULL", &opts), Cell::empty());
-    assert_eq!(parse_cell_token(".", &opts), Cell::empty());
+    for (tok, expected) in [
+        ("1.234,5", Cell::number(1234.5)),
+        ("45,6*", Cell::excluded_number(45.6)),
+        ("*", Cell { value: CellValue::Empty, excluded: true }),
+        ("NA", Cell::empty()),
+        ("NULL", Cell::empty()),
+        (".", Cell::empty()),
+    ] {
+        assert_eq!(parse_cell_token(tok, &opts), expected, "token={tok:?}");
+    }
 
     let sheet = import_csv_to_datasheet("csv-1", "Regional Import", csv, TableKind::Column, SubcolumnMode::Single, &opts).unwrap();
-    let round_csv = export_datasheet_to_csv(&sheet, &opts).unwrap();
-    let reimported = import_csv_to_datasheet("csv-2", "Regional Import", &round_csv, TableKind::Column, SubcolumnMode::Single, &opts).unwrap();
-    assert_eq!(sheet.archetype, reimported.archetype);
+    let re = import_csv_to_datasheet(
+        "csv-2",
+        "Regional Import",
+        &export_datasheet_to_csv(&sheet, &opts).unwrap(),
+        TableKind::Column,
+        SubcolumnMode::Single,
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(sheet.archetype, re.archetype);
 }
 
 #[test]
 fn multi_stage_import_link_pipeline_filter_transpose_baseline_and_freeze() {
-    let raw_csv = "Dose,RespA,RespB\n0,10,20\n1,15,25*\n2,20,30\n3,25,35\n";
     let filter = ImportFilterSpec {
         row_window: Some((0, 3)),
         col_window: Some((1, 2)),
         decimate_every_k: Some(2),
-        unstack_group_column: None,
         parse_asterisk_exclusions: true,
-        baseline: None,
-        exclude_row_predicate: None,
+        ..Default::default()
     };
-    let filtered = filter_delimited_text(raw_csv, ',', '.', true, &filter).unwrap();
-    // Rows 0 and 2 kept: [[10, 20], [20, 30]]
-    assert_eq!(filtered.headers, vec!["RespA", "RespB"]);
-    assert_eq!(filtered.cells.len(), 2);
-    assert_eq!(filtered.cells[0][0].active_number(), Some(10.0));
-    assert_eq!(filtered.cells[1][1].active_number(), Some(30.0));
+    let filtered = filter_delimited_text("Dose,RespA,RespB\n0,10,20\n1,15,25*\n2,20,30\n3,25,35\n", ',', '.', true, &filter).unwrap();
+    assert_eq!(
+        (&filtered.headers, filtered.cells.len(), filtered.cells[0][0].active_number(), filtered.cells[1][1].active_number()),
+        (&vec![String::from("RespA"), String::from("RespB")], 2, Some(10.0), Some(30.0))
+    );
 
     let placement = ImportPlacementSpec {
         mode: PlacementMode::Overwrite,
@@ -439,23 +255,10 @@ fn multi_stage_import_link_pipeline_filter_transpose_baseline_and_freeze() {
         transpose: true,
     };
     let adjusted = rearrange_and_baseline_grid(&filtered.cells, &placement, ImportBaselineAdjustment::SubtractFirstRow);
-    // Transposed: [[10, 20], [20, 30]] -> SubtractFirstRow: [[0, 0], [10, 10]]
-    assert_eq!(adjusted[0][0].active_number(), Some(0.0));
-    assert_eq!(adjusted[1][1].active_number(), Some(10.0));
+    assert_eq!((adjusted[0][0].active_number(), adjusted[1][1].active_number()), (Some(0.0), Some(10.0)));
 
-    let col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 2).unwrap();
-    let mut target = DataSheet::new("tgt-1", "Linked Target", TableArchetype::Column(col)).unwrap();
-    let spec = ImportLinkSpec {
-        source: LinkSource::ExternalDelimitedFile { path: String::from("assay.csv"), delimiter: ',', decimal_separator: '.' },
-        filter: ImportFilterSpec::default(),
-        placement: ImportPlacementSpec {
-            mode: PlacementMode::Overwrite,
-            anchor: CellCoord::new(0, 0, 0),
-            propagate_title_header: true,
-            skip_contiguous_blanks: false,
-            transpose: false,
-        },
-    };
+    let mut target = col_sheet("tgt-1", 2, 2);
+    let spec = make_import_link_spec(PlacementMode::Overwrite, CellCoord::new(0, 0, 0), true);
     let range = apply_csv_import_link(
         &mut target,
         "ColA,ColB\n10,20\n15,25*\n",
@@ -466,22 +269,28 @@ fn multi_stage_import_link_pipeline_filter_transpose_baseline_and_freeze() {
         "From assay.csv",
     )
     .unwrap();
-    assert_eq!(range.start, CellCoord::new(0, 0, 0));
-    assert_eq!(range.end, CellCoord::new(1, 1, 0));
-    assert_eq!(target.linked_regions[0].border_color(), Some(LinkBorderColor::Charcoal));
-    assert_eq!(target.cell(CellCoord::new(1, 0, 0)).unwrap().active_number(), Some(5.0));
-    assert!(target.cell(CellCoord::new(1, 1, 0)).unwrap().excluded);
+    assert_eq!(
+        (range.start, range.end, target.linked_regions[0].border_color()),
+        (CellCoord::new(0, 0, 0), CellCoord::new(1, 1, 0), Some(LinkBorderColor::Charcoal))
+    );
+    assert_eq!(
+        (target.cell(CellCoord::new(1, 0, 0)).unwrap().active_number(), target.cell(CellCoord::new(1, 1, 0)).unwrap().excluded),
+        (Some(5.0), true)
+    );
 
-    // Unstack long-to-wide test
-    let long_csv = "Group,Value\nCtrl,10\nTreat,20\nCtrl,12\nTreat,24*\n";
-    let unstack_filter = ImportFilterSpec { unstack_group_column: Some(0), ..ImportFilterSpec::default() };
-    let unstacked = filter_delimited_text(long_csv, ',', '.', true, &unstack_filter).unwrap();
-    assert_eq!(unstacked.headers, vec!["Ctrl", "Treat"]);
-    assert_eq!(unstacked.cells[0][0].active_number(), Some(10.0));
-    assert_eq!(unstacked.cells[1][0].active_number(), Some(12.0));
-    assert!(unstacked.cells[1][1].excluded);
+    let unstacked = filter_delimited_text(
+        "Group,Value\nCtrl,10\nTreat,20\nCtrl,12\nTreat,24*\n",
+        ',',
+        '.',
+        true,
+        &ImportFilterSpec { unstack_group_column: Some(0), ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(
+        (&unstacked.headers, unstacked.cells[0][0].active_number(), unstacked.cells[1][0].active_number(), unstacked.cells[1][1].excluded),
+        (&vec![String::from("Ctrl"), String::from("Treat")], Some(10.0), Some(12.0), true)
+    );
 
-    // Frozen target rejects import link
     target.frozen = true;
     assert!(matches!(
         apply_csv_import_link(&mut target, "A\n1\n", &spec, true, ImportBaselineAdjustment::None, "lnk-2", "Blocked"),
@@ -491,308 +300,188 @@ fn multi_stage_import_link_pipeline_filter_transpose_baseline_and_freeze() {
 
 #[test]
 fn forged_zip_header_inflating_past_budget_is_blocked_as_zip_bomb() {
-    use std::io::Write;
     let payload = vec![b'A'; 4096];
-    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
-    enc.write_all(&payload).unwrap();
-    let deflated = enc.finish().unwrap();
-    let crc = crc32fast::hash(&payload);
-
-    // Craft a ZIP claiming uncompressed_size = 16 while stream inflates to 4096 bytes.
-    let name = b"bomb.txt";
-    let mut out = Vec::new();
-    out.extend_from_slice(&0x0403_4b50_u32.to_le_bytes());
-    out.extend_from_slice(&20_u16.to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-    out.extend_from_slice(&8_u16.to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-    out.extend_from_slice(&0x0021_u16.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(deflated.len() as u32).to_le_bytes());
-    out.extend_from_slice(&16_u32.to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-    out.extend_from_slice(name);
-    out.extend_from_slice(&deflated);
-
-    let cd_offset = out.len() as u32;
-    out.extend_from_slice(&0x0201_4b50_u32.to_le_bytes());
-    out.extend_from_slice(&0x0314_u16.to_le_bytes());
-    out.extend_from_slice(&20_u16.to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-    out.extend_from_slice(&8_u16.to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-    out.extend_from_slice(&0x0021_u16.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(deflated.len() as u32).to_le_bytes());
-    out.extend_from_slice(&16_u32.to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-    out.extend_from_slice(&0_u32.to_le_bytes());
-    out.extend_from_slice(&0_u32.to_le_bytes());
-    out.extend_from_slice(name);
-    let cd_size = (out.len() as u32) - cd_offset;
-
-    out.extend_from_slice(&0x0605_4b50_u32.to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-    out.extend_from_slice(&1_u16.to_le_bytes());
-    out.extend_from_slice(&1_u16.to_le_bytes());
-    out.extend_from_slice(&cd_size.to_le_bytes());
-    out.extend_from_slice(&cd_offset.to_le_bytes());
-    out.extend_from_slice(&0_u16.to_le_bytes());
-
+    let mut entry = RawZipEntry::deflated(b"bomb.txt", &payload);
+    entry.declared_uncompressed = Some(16);
     let limits = ZipLimits { max_entries: 16, max_total_uncompressed_bytes: 512, max_entry_uncompressed_bytes: 512 };
-    assert!(matches!(curvebook_format::ZipArchive::from_bytes_with_limits(&out, limits), Err(FormatError::ZipBomb { .. })));
+    assert!(matches!(ZipArchive::from_bytes_with_limits(&build_raw_zip(&[entry], b""), limits), Err(FormatError::ZipBomb { .. })));
 }
 
 #[test]
 fn tsv_and_csv_round_trip_multiple_archetypes() {
     let tsv_opts = CsvOptions::tsv();
-    let xy_tsv = "Conc\tResp:Y1\tResp:Y2\n1\t10.5\t11.0\n10\t52.3*\t54.1\n";
-    let xy_sheet = import_csv_to_datasheet("xy-1", "XY TSV", xy_tsv, TableKind::Xy, SubcolumnMode::RawReplicates(2), &tsv_opts).unwrap();
-    assert_eq!(xy_sheet.cell(CellCoord::new(1, 0, 0)).unwrap().active_number(), None);
-    assert!(xy_sheet.cell(CellCoord::new(1, 0, 0)).unwrap().excluded);
-    let exported = export_datasheet_to_csv(&xy_sheet, &tsv_opts).unwrap();
-    let reimported = import_csv_to_datasheet("xy-2", "XY TSV", &exported, TableKind::Xy, SubcolumnMode::RawReplicates(2), &tsv_opts).unwrap();
-    assert_eq!(xy_sheet.archetype, reimported.archetype);
+    let xy_sheet = import_csv_to_datasheet(
+        "xy-1",
+        "XY TSV",
+        "Conc\tResp:Y1\tResp:Y2\n1\t10.5\t11.0\n10\t52.3*\t54.1\n",
+        TableKind::Xy,
+        SubcolumnMode::RawReplicates(2),
+        &tsv_opts,
+    )
+    .unwrap();
+    let c = xy_sheet.cell(CellCoord::new(1, 0, 0)).unwrap();
+    assert!(c.active_number().is_none() && c.excluded);
+    let xy_back = import_csv_to_datasheet(
+        "xy-2",
+        "XY TSV",
+        &export_datasheet_to_csv(&xy_sheet, &tsv_opts).unwrap(),
+        TableKind::Xy,
+        SubcolumnMode::RawReplicates(2),
+        &tsv_opts,
+    )
+    .unwrap();
+    assert_eq!(xy_sheet.archetype, xy_back.archetype);
 
-    let mv_csv = "Subject,Dose,Outcome\nS1,10,Responder\nS2,20,NonResponder\n";
-    let mv_sheet =
-        import_csv_to_datasheet("mv-1", "Cohort", mv_csv, TableKind::MultipleVariables, SubcolumnMode::Single, &CsvOptions::csv()).unwrap();
-    let mv_out = export_datasheet_to_csv(&mv_sheet, &CsvOptions::csv()).unwrap();
-    let mv_back =
-        import_csv_to_datasheet("mv-2", "Cohort", &mv_out, TableKind::MultipleVariables, SubcolumnMode::Single, &CsvOptions::csv()).unwrap();
+    let mv_sheet = import_csv_to_datasheet(
+        "mv-1",
+        "Cohort",
+        "Subject,Dose,Outcome\nS1,10,Responder\nS2,20,NonResponder\n",
+        TableKind::MultipleVariables,
+        SubcolumnMode::Single,
+        &CsvOptions::csv(),
+    )
+    .unwrap();
+    let mv_back = import_csv_to_datasheet(
+        "mv-2",
+        "Cohort",
+        &export_datasheet_to_csv(&mv_sheet, &CsvOptions::csv()).unwrap(),
+        TableKind::MultipleVariables,
+        SubcolumnMode::Single,
+        &CsvOptions::csv(),
+    )
+    .unwrap();
     assert_eq!(mv_sheet.archetype, mv_back.archetype);
-}
-
-fn raw_datasheet(id: &str, archetype: TableArchetype) -> DataSheet {
-    DataSheet {
-        id: SheetId::new(id),
-        title: format!("Sheet {id}"),
-        archetype,
-        frozen: false,
-        info_sheet_id: None,
-        linked_regions: Vec::new(),
-        floating_notes: Vec::new(),
-        color_tag: None,
-        exclusion_notes: Vec::new(),
-    }
-}
-
-fn wrap_project_zip(doc_json: &serde_json::Value) -> Result<Vec<u8>, FormatError> {
-    let doc_bytes = serde_json::to_vec(doc_json)?;
-    let manifest = serde_json::json!({
-        "format": "curvebook-archive",
-        "schema_version": CURRENT_SCHEMA_VERSION,
-        "kind": "Project",
-        "title": "Forged",
-        "document_crc32": crc32fast::hash(&doc_bytes),
-        "sheets": []
-    });
-    let mut w = ZipWriter::new();
-    w.add_file("document.json", doc_bytes)?;
-    w.add_file("manifest.json", serde_json::to_vec(&manifest)?)?;
-    w.finish()
 }
 
 #[test]
 fn r1_s05_01_archive_validation_and_open_reject_ragged_and_disallowed_tables() {
-    let mut mv = MultipleVariablesTable::new(2, 4).expect("mv");
+    let mut mv = MultipleVariablesTable::new(2, 4).unwrap();
     mv.variables[1].cells.truncate(2);
-    let mut doc = ProjectDocument::new("Ragged").expect("doc");
-    doc.data_sheets.push(raw_datasheet("mv-1", TableArchetype::MultipleVariables(mv)));
-    assert!(matches!(validate_project_document(&doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
-
-    let mut xy = XyTable::new(SubcolumnMode::Single, 2, 1).expect("xy");
+    let mut xy = XyTable::new(SubcolumnMode::Single, 2, 1).unwrap();
     xy.data_sets[1].cells.push(vec![Cell::number(3.0)]);
-    let mut xy_doc = ProjectDocument::new("RaggedXY").expect("doc");
-    xy_doc.data_sheets.push(raw_datasheet("xy-1", TableArchetype::Xy(xy)));
-    assert!(matches!(validate_project_document(&xy_doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
-
-    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 1, 2).expect("grp");
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 1, 2).unwrap();
     grp.data_sets[0].cells[1].pop();
-    let mut grp_doc = ProjectDocument::new("RaggedGrp").expect("doc");
-    grp_doc.data_sheets.push(raw_datasheet("grp-1", TableArchetype::Grouped(grp)));
-    assert!(matches!(validate_project_document(&grp_doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
-
-    let mut nested = NestedTable::new(1, 2, 2).expect("nested");
+    let mut nested = NestedTable::new(1, 2, 2).unwrap();
     nested.groups[0].cells[0].pop();
-    let mut nest_doc = ProjectDocument::new("RaggedNest").expect("doc");
-    nest_doc.data_sheets.push(raw_datasheet("nest-1", TableArchetype::Nested(nested)));
-    assert!(matches!(validate_project_document(&nest_doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
-
-    let mut surv = SurvivalTable::new(1, 2).expect("surv");
+    let mut surv = SurvivalTable::new(1, 2).unwrap();
     surv.times.pop();
-    let mut surv_doc = ProjectDocument::new("RaggedSurv").expect("doc");
-    surv_doc.data_sheets.push(raw_datasheet("surv-1", TableArchetype::Survival(surv)));
-    assert!(matches!(validate_project_document(&surv_doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
-
-    let mut pow = PartsOfWholeTable::new(1, 2).expect("pow");
+    let mut pow = PartsOfWholeTable::new(1, 2).unwrap();
     pow.slice_labels.pop();
-    let mut pow_doc = ProjectDocument::new("RaggedPow").expect("doc");
-    pow_doc.data_sheets.push(raw_datasheet("pow-1", TableArchetype::PartsOfWhole(pow)));
-    assert!(matches!(validate_project_document(&pow_doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
-
-    let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).expect("col");
+    let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).unwrap();
     col.subcolumn_mode = SubcolumnMode::RawReplicates(3);
-    let mut col_doc = ProjectDocument::new("BadColMode").expect("doc");
-    col_doc.data_sheets.push(raw_datasheet("col-1", TableArchetype::Column(col)));
-    assert!(matches!(validate_project_document(&col_doc), Err(FormatError::Doc(DocError::IncompatibleSubcolumnMode { .. }))));
+    let mut xy_nan = XyTable::new(SubcolumnMode::Single, 1, 2).unwrap();
+    xy_nan.x_mode = XColumnMode::GeneratedSequence { start: f64::NAN, step: 1.0, progression: SequenceProgression::Arithmetic };
 
-    let mut xy_nan_seq = XyTable::new(SubcolumnMode::Single, 1, 2).expect("xy");
-    xy_nan_seq.x_mode = XColumnMode::GeneratedSequence { start: f64::NAN, step: 1.0, progression: SequenceProgression::Arithmetic };
-    let mut seq_doc = ProjectDocument::new("NanSeq").expect("doc");
-    seq_doc.data_sheets.push(raw_datasheet("seq-1", TableArchetype::Xy(xy_nan_seq)));
-    assert!(matches!(validate_project_document(&seq_doc), Err(FormatError::NonFiniteFloat { .. })));
+    type CheckErr = fn(&Result<(), FormatError>) -> bool;
+    for (label, arch, check) in [
+        ("mv", TableArchetype::MultipleVariables(mv), (|r| matches!(r, Err(FormatError::Doc(DocError::InvalidCellValue { .. })))) as CheckErr),
+        ("xy", TableArchetype::Xy(xy), |r| matches!(r, Err(FormatError::Doc(DocError::InvalidCellValue { .. })))),
+        ("grp", TableArchetype::Grouped(grp), |r| matches!(r, Err(FormatError::Doc(DocError::InvalidCellValue { .. })))),
+        ("nest", TableArchetype::Nested(nested), |r| matches!(r, Err(FormatError::Doc(DocError::InvalidCellValue { .. })))),
+        ("surv", TableArchetype::Survival(surv), |r| matches!(r, Err(FormatError::Doc(DocError::InvalidCellValue { .. })))),
+        ("pow", TableArchetype::PartsOfWhole(pow), |r| matches!(r, Err(FormatError::Doc(DocError::InvalidCellValue { .. })))),
+        ("col_mode", TableArchetype::Column(col), |r| matches!(r, Err(FormatError::Doc(DocError::IncompatibleSubcolumnMode { .. })))),
+        ("xy_nan_seq", TableArchetype::Xy(xy_nan), |r| matches!(r, Err(FormatError::NonFiniteFloat { .. }))),
+    ] {
+        let mut doc = ProjectDocument::new(label).unwrap();
+        doc.data_sheets.push(raw_datasheet(label, arch));
+        assert!(check(&validate_project_document(&doc)), "{label}");
+    }
 
-    // Crafted archive JSON with ragged MultipleVariables must be rejected by open_project_bytes.
-    let forged_mv_bytes = wrap_project_zip(&serde_json::json!({
-        "schema_version": CURRENT_SCHEMA_VERSION,
-        "title": "Forged",
-        "data_sheets": [{
-            "id": "d1",
-            "title": "MV",
-            "archetype": {
-                "MultipleVariables": {
-                    "row_titles": ["a", "b"],
-                    "row_titles_expanded": false,
-                    "variables": [
-                        { "title": "Y", "role": "Continuous", "source": "Entered", "cells": [{"value":"Empty","excluded":false}, {"value":"Empty","excluded":false}], "category_order": null },
-                        { "title": "G", "role": "Categorical", "source": "Entered", "cells": [{"value":"Empty","excluded":false}], "category_order": null }
-                    ]
-                }
-            }
-        }],
-        "info_sheets": [],
-        "result_sheets": [],
-        "graph_sheets": [],
-        "layout_sheets": []
-    }))
-    .expect("wrap mv zip");
-    assert!(open_project_bytes(&forged_mv_bytes).is_err());
+    let forged_mv = json!({
+        "schema_version": CURRENT_SCHEMA_VERSION, "title": "Forged",
+        "data_sheets": [{ "id": "d1", "title": "MV", "archetype": { "MultipleVariables": {
+            "row_titles": ["a", "b"], "row_titles_expanded": false,
+            "variables": [
+                { "title": "Y", "role": "Continuous", "source": "Entered", "cells": [{"value":"Empty","excluded":false}, {"value":"Empty","excluded":false}], "category_order": null },
+                { "title": "G", "role": "Categorical", "source": "Entered", "cells": [{"value":"Empty","excluded":false}], "category_order": null }
+            ]
+        }}}],
+        "info_sheets": [], "result_sheets": [], "graph_sheets": [], "layout_sheets": []
+    });
+    assert!(open_project_bytes(&build_archive_zip_from_value(&forged_mv, CURRENT_SCHEMA_VERSION)).is_err());
 }
 
 #[test]
 fn r1_s05_03_x_column_mode_rejected_by_archive_csv_export_and_placement() {
+    let spec = make_import_link_spec(PlacementMode::Overwrite, CellCoord::new(0, 0, 0), false);
     for bad_sub in [0_usize, MAX_SUBCOLUMNS + 1, usize::MAX] {
-        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 2).expect("xy");
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 2).unwrap();
         xy.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(bad_sub) };
         let mut sheet = raw_datasheet("xy-bad-x", TableArchetype::Xy(xy));
-
-        let mut doc = ProjectDocument::new("BadXMode").expect("doc");
+        let mut doc = ProjectDocument::new("BadXMode").unwrap();
         doc.data_sheets.push(sheet.clone());
         assert!(matches!(validate_project_document(&doc), Err(FormatError::Doc(_))));
         assert!(matches!(export_datasheet_to_csv(&sheet, &CsvOptions::csv()), Err(FormatError::Doc(_))));
-
-        let spec = ImportLinkSpec {
-            source: LinkSource::ExternalDelimitedFile { path: String::from("x.csv"), delimiter: ',', decimal_separator: '.' },
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec::default(),
-        };
         assert!(matches!(
             apply_csv_import_link(&mut sheet, "X,Y\n1,2\n3,4\n", &spec, true, ImportBaselineAdjustment::None, "lnk", "test"),
             Err(FormatError::Doc(_))
         ));
     }
 
-    // Archive JSON containing RawReplicates(usize::MAX) in x_mode is rejected cleanly on open_project_bytes.
-    let forged_xmode_bytes = wrap_project_zip(&serde_json::json!({
-        "schema_version": CURRENT_SCHEMA_VERSION,
-        "title": "ForgedX",
-        "data_sheets": [{
-            "id": "xy1",
-            "title": "XY",
-            "archetype": {
-                "Xy": {
-                    "x_title": "X",
-                    "x_mode": { "Numbers": { "subcolumn_mode": { "RawReplicates": usize::MAX } } },
-                    "y_subcolumn_mode": "Single",
-                    "row_titles": ["", ""],
-                    "row_titles_expanded": false,
-                    "x_cells": [[{"value":"Empty","excluded":false}], [{"value":"Empty","excluded":false}]],
-                    "data_sets": [{ "title": "A", "cells": [[{"value":"Empty","excluded":false}], [{"value":"Empty","excluded":false}]] }]
-                }
-            }
-        }],
-        "info_sheets": [],
-        "result_sheets": [],
-        "graph_sheets": [],
-        "layout_sheets": []
-    }))
-    .expect("wrap xmode zip");
-    assert!(open_project_bytes(&forged_xmode_bytes).is_err());
+    let forged_xmode = json!({
+        "schema_version": CURRENT_SCHEMA_VERSION, "title": "ForgedX",
+        "data_sheets": [{ "id": "xy1", "title": "XY", "archetype": { "Xy": {
+            "x_title": "X", "x_mode": { "Numbers": { "subcolumn_mode": { "RawReplicates": usize::MAX } } },
+            "y_subcolumn_mode": "Single", "row_titles": ["", ""], "row_titles_expanded": false,
+            "x_cells": [[{"value":"Empty","excluded":false}], [{"value":"Empty","excluded":false}]],
+            "data_sets": [{ "title": "A", "cells": [[{"value":"Empty","excluded":false}], [{"value":"Empty","excluded":false}]] }]
+        }}}],
+        "info_sheets": [], "result_sheets": [], "graph_sheets": [], "layout_sheets": []
+    });
+    assert!(open_project_bytes(&build_archive_zip_from_value(&forged_xmode, CURRENT_SCHEMA_VERSION)).is_err());
+}
+
+fn migrate_doc_from(doc: &ProjectDocument, from_ver: u32, patch_legacy: impl FnOnce(&mut Value)) -> ProjectDocument {
+    let mut legacy = serde_json::to_value(doc).unwrap();
+    legacy["schema_version"] = json!(from_ver);
+    patch_legacy(&mut legacy);
+    let migrated: ProjectDocument = serde_json::from_value(migrate_document_json(legacy, from_ver).unwrap()).unwrap();
+    assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+    migrated
 }
 
 #[test]
 fn linear_fit_range_schema_migrates_v3_and_round_trips() {
     let mut doc = ProjectDocument::new("Linear Regression").unwrap();
-    let xy = XyTable::new(SubcolumnMode::Single, 1, 3).unwrap();
-    doc.add_data_sheet(DataSheet::new("xy", "Observations", TableArchetype::Xy(xy)).unwrap()).unwrap();
-    let kind = AnalysisKind::LinearRegression(curvebook_doc::LinearRegressionSpec::default());
-    doc.add_result_sheet(ResultSheet::new(AnalysisSpec::new("linear", "xy", kind).unwrap()).unwrap()).unwrap();
-    let mut legacy = serde_json::to_value(&doc).unwrap();
-    legacy["schema_version"] = serde_json::json!(3);
-    let migrated = curvebook_format::migrate_document_json(legacy, 3).unwrap();
-    let mut migrated: ProjectDocument = serde_json::from_value(migrated).unwrap();
-    assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
-    let AnalysisKind::LinearRegression(spec) = &mut migrated.result_sheets[0].analysis.kind else {
-        panic!("expected a migrated linear fit");
-    };
-    assert_eq!(*spec, curvebook_doc::LinearRegressionSpec::default());
-    spec.x_range_filter = Some((Some(10.0), None));
-    spec.plot_x_max = Some(20.0);
-    spec.plot_segments = Some(12);
+    doc.add_data_sheet(xy_sheet("xy", SubcolumnMode::Single, 1, 3)).unwrap();
+    doc.add_result_sheet(result_sheet_with_kind("linear", "xy", AnalysisKind::LinearRegression(LinearRegressionSpec::default()))).unwrap();
+    let mut migrated = migrate_doc_from(&doc, 3, |_| {});
+    let AnalysisKind::LinearRegression(spec) = &mut migrated.result_sheets[0].analysis.kind else { panic!("expected linear fit") };
+    assert_eq!(*spec, LinearRegressionSpec::default());
+    (spec.x_range_filter, spec.plot_x_max, spec.plot_segments) = (Some((Some(10.0), None)), Some(20.0), Some(12));
     let expected = *spec;
-
-    let bytes = save_project_bytes(&migrated).unwrap();
-    let reopened = open_project_bytes(&bytes).unwrap();
-    assert_eq!(reopened.result_sheets[0].analysis.kind, AnalysisKind::LinearRegression(expected));
+    assert_eq!(
+        open_project_bytes(&save_project_bytes(&migrated).unwrap()).unwrap().result_sheets[0].analysis.kind,
+        AnalysisKind::LinearRegression(expected)
+    );
 }
 
 #[test]
 fn nonlinear_fit_diagnostics_migrate_v4_and_round_trip() {
     let mut doc = ProjectDocument::new("Dose Response").unwrap();
-    let xy = XyTable::new(SubcolumnMode::Single, 1, 4).unwrap();
-    doc.add_data_sheet(DataSheet::new("xy", "Observations", TableArchetype::Xy(xy)).unwrap()).unwrap();
-    let kind = AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("straight_line"));
-    doc.add_result_sheet(ResultSheet::new(AnalysisSpec::new("fit", "xy", kind).unwrap()).unwrap()).unwrap();
-    let mut legacy = serde_json::to_value(&doc).unwrap();
-    legacy["schema_version"] = serde_json::json!(4);
-    legacy["result_sheets"][0]["analysis"]["kind"]["NonlinearRegression"].as_object_mut().unwrap().remove("identify_unstable_parameters");
-
-    let migrated = curvebook_format::migrate_document_json(legacy, 4).unwrap();
-    let mut migrated: ProjectDocument = serde_json::from_value(migrated).unwrap();
-    assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
-    let AnalysisKind::NonlinearRegression(spec) = &mut migrated.result_sheets[0].analysis.kind else {
-        panic!("expected a migrated nonlinear fit");
-    };
-    assert!(!spec.identify_unstable_parameters);
-    assert!(spec.flag_r_squared_below.is_none());
-    spec.identify_unstable_parameters = true;
-    spec.flag_r_squared_below = Some(0.92);
+    doc.add_data_sheet(xy_sheet("xy", SubcolumnMode::Single, 1, 4)).unwrap();
+    doc.add_result_sheet(result_sheet_with_kind("fit", "xy", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("straight_line")))).unwrap();
+    let mut migrated = migrate_doc_from(&doc, 4, |v| {
+        v["result_sheets"][0]["analysis"]["kind"]["NonlinearRegression"].as_object_mut().unwrap().remove("identify_unstable_parameters");
+    });
+    let AnalysisKind::NonlinearRegression(spec) = &mut migrated.result_sheets[0].analysis.kind else { panic!("expected nonlinear fit") };
+    assert!(!spec.identify_unstable_parameters && spec.flag_r_squared_below.is_none());
+    (spec.identify_unstable_parameters, spec.flag_r_squared_below) = (true, Some(0.92));
     let expected = spec.clone();
-
-    let reopened = open_project_bytes(&save_project_bytes(&migrated).unwrap()).unwrap();
-    assert_eq!(reopened.result_sheets[0].analysis.kind, AnalysisKind::NonlinearRegression(expected));
+    assert_eq!(
+        open_project_bytes(&save_project_bytes(&migrated).unwrap()).unwrap().result_sheets[0].analysis.kind,
+        AnalysisKind::NonlinearRegression(expected)
+    );
 }
 
 #[test]
 fn rout_outlier_cells_migrate_v5_and_round_trip() {
-    let mut doc = build_sample_project().unwrap();
-    let mut legacy = serde_json::to_value(&doc).unwrap();
-    legacy["schema_version"] = serde_json::json!(5);
-    assert!(legacy["result_sheets"][0].get("eliminated_outliers").is_none());
-    let migrated = curvebook_format::migrate_document_json(legacy, 5).unwrap();
-    let migrated: ProjectDocument = serde_json::from_value(migrated).unwrap();
-    assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+    let mut doc = sample_dose_project();
+    let migrated = migrate_doc_from(&doc, 5, |v| assert!(v["result_sheets"][0].get("eliminated_outliers").is_none()));
     assert!(migrated.result_sheets[0].eliminated_outliers.is_empty());
 
     let source = SourceCellId { sheet_id: SheetId::new("data-xy"), row: 1, col: 0, subcol: 1 };
     doc.result_sheets[0].eliminated_outliers.push(source.clone());
-    let reopened = open_project_bytes(&save_project_bytes(&doc).unwrap()).unwrap();
-    assert_eq!(reopened.result_sheets[0].eliminated_outliers, [source]);
+    assert_eq!(open_project_bytes(&save_project_bytes(&doc).unwrap()).unwrap().result_sheets[0].eliminated_outliers, [source]);
 }

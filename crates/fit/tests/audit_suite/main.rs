@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "../common/mod.rs"]
+pub(crate) mod common;
+
 mod audit_dsl_fixes;
 mod audit_p3_sec07;
 mod audit_p3_sec08;

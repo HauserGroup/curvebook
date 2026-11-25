@@ -3,12 +3,14 @@
 //! least squares (Savitzky & Golay 1964, Gorry 1990) and Cleveland (1979) LOWESS.
 //! Reproduce the smoothing values with `reference/curve_smoothing.R`.
 
-use curvebook_doc::{Cell, CellCoord, DataSheet, SubcolumnMode, TableArchetype, XyTable};
+use curvebook_doc::SubcolumnMode;
 use curvebook_testkit::assert_approx_eq;
 use curvebook_transform::{
     AucOptions, AucResult, DerivativeOrder, SmoothMethod, TransformError, compute_auc, compute_auc_with_se, compute_sheet_auc, differentiate_xy,
     integrate_xy, smooth_xy,
 };
+
+use crate::common::{Xy3Col, xy_3sub, xy_3sub_clean, xy_single};
 
 // Geometry is exact for piecewise-linear curves. The allowance covers binary64 rounding of
 // crossing coordinates and sums over a few short segments.
@@ -48,35 +50,34 @@ fn irregular_auc_matches_triangle_areas_crossings_and_independent_se() {
 
 #[test]
 fn sheet_auc_excludes_summary_row_and_converts_sd_to_se() {
-    let rows = [
-        (0.0, 0.0, 0.25, 4.0, false),
-        (2.0, 5.0, 0.75, 9.0, false),
-        (3.0, 100.0, 0.01, 4.0, true),
-        (5.0, 1.0, 2.0, 16.0, false),
-        (9.0, 4.0, 1.875, 25.0, false),
-    ];
-    let xy = XyTable::new(SubcolumnMode::MeanSdN, 1, rows.len()).unwrap();
-    let mut sheet = DataSheet::new("auc-oracle", "AUC oracle", TableArchetype::Xy(xy)).unwrap();
-    for (row, (x, mean, sd, n, excluded)) in rows.into_iter().enumerate() {
-        sheet.set_x_or_time_cell(row, 0, Cell::number(x)).unwrap();
-        sheet.set_cell(CellCoord::new(row, 0, 0), Cell { excluded, ..Cell::number(mean) }).unwrap();
-        sheet.set_cell(CellCoord::new(row, 0, 1), Cell::number(sd)).unwrap();
-        sheet.set_cell(CellCoord::new(row, 0, 2), Cell::number(n)).unwrap();
-    }
-
+    let s = xy_3sub(
+        "auc-oracle",
+        SubcolumnMode::MeanSdN,
+        &[0.0, 2.0, 3.0, 5.0, 9.0],
+        &[Xy3Col {
+            title: "A",
+            triples: &[
+                [Some(0.0), Some(0.25), Some(4.0)],
+                [Some(5.0), Some(0.75), Some(9.0)],
+                [Some(100.0), Some(0.01), Some(4.0)],
+                [Some(1.0), Some(2.0), Some(16.0)],
+                [Some(4.0), Some(1.875), Some(25.0)],
+            ],
+            excl_primary: &[false, false, true, false, false],
+        }],
+    );
     // SD/sqrt(N) gives the four independent SEs used in the analytical reference.
-    let result = compute_sheet_auc(&sheet, 0, &AucOptions { baseline: 2.0, ..AucOptions::default() }).unwrap();
+    let result = compute_sheet_auc(&s, 0, &AucOptions { baseline: 2.0, ..AucOptions::default() }).unwrap();
     assert_irregular_auc(&result);
 }
 
-fn assert_smoothed<const N: usize>(points: &[(f64, f64); N], method: SmoothMethod, expected: [f64; N]) -> Result<(), TransformError> {
-    let actual = smooth_xy(points, method)?;
+fn assert_smoothed<const N: usize>(points: &[(f64, f64); N], method: SmoothMethod, expected: [f64; N]) {
+    let actual = smooth_xy(points, method).unwrap();
     assert_eq!(actual.len(), N);
     for ((&(actual_x, actual_y), &(x, _)), expected_y) in actual.iter().zip(points).zip(expected) {
         assert_eq!(actual_x.to_bits(), x.to_bits(), "{method:?} output coordinate");
         assert_approx_eq(actual_y, expected_y, SMOOTH_ABS_TOL, 0.0, &format!("{method:?} at x={x}"));
     }
-    Ok(())
 }
 
 #[test]
@@ -133,7 +134,7 @@ fn irregular_savitzky_golay_matches_local_cubic_regression_at_every_point() {
             ],
         ),
     ] {
-        assert_smoothed(&points, method, expected).unwrap();
+        assert_smoothed(&points, method, expected);
     }
 }
 
@@ -154,7 +155,6 @@ fn lowess_matches_local_robust_regression_with_an_outlier() {
         (17.0, 13.0),
         (20.0, 17.0),
     ];
-    // Eight neighbors under both CurveBook's rounding and the reference's truncation.
     let span = 0.65;
     for (robustness_iters, expected) in [
         (
@@ -194,24 +194,20 @@ fn lowess_matches_local_robust_regression_with_an_outlier() {
             ],
         ),
     ] {
-        assert_smoothed(&points, SmoothMethod::Lowess { span, robustness_iters }, expected).unwrap();
+        assert_smoothed(&points, SmoothMethod::Lowess { span, robustness_iters }, expected);
     }
 }
 
 #[test]
 fn auc_central_only_meanlowhigh_order_independent_ties_and_total_area() {
-    // 1. MeanLowHigh uses central subcolumn 0 only (ignoring +/-Error subcolumns 1..3),
-    //    and reports total_area = positive_area + negative_area.
-    let mut xy_lh = XyTable::new(SubcolumnMode::MeanLowHigh, 1, 3).unwrap();
-    for (r, (x, m, lo, hi)) in [(0.0, 0.0, 99.0, 200.0), (2.0, 4.0, 100.0, 500.0), (4.0, 0.0, 50.0, 75.0)].into_iter().enumerate() {
-        xy_lh.set_x_cell(r, Cell::number(x)).unwrap();
-        xy_lh.data_sets[0].cells[r] = vec![Cell::number(m), Cell::number(lo), Cell::number(hi)];
-    }
-    let sheet_lh = DataSheet::new("xy-lh-auc", "LH AUC", TableArchetype::Xy(xy_lh)).unwrap();
+    // 1. MeanLowHigh uses central subcolumn 0 only and reports total_area = positive_area + negative_area.
+    let sheet_lh = xy_3sub_clean(
+        "xy-lh-auc",
+        SubcolumnMode::MeanLowHigh,
+        &[0.0, 2.0, 4.0],
+        &[("A", &[[Some(0.0), Some(99.0), Some(200.0)], [Some(4.0), Some(100.0), Some(500.0)], [Some(0.0), Some(50.0), Some(75.0)]])],
+    );
     let auc_lh = compute_sheet_auc(&sheet_lh, 0, &AucOptions { baseline: 2.0, ..AucOptions::default() }).unwrap();
-    // Curve goes (0,0) -> (2,4) -> (4,0) vs baseline=2: crossings at X=1 and X=3.
-    // Positive triangle: base 2 (1..3), height 2 -> area = 2.0.
-    // Negative triangles: two triangles of base 1 and height 2 -> area = 1.0 + 1.0 = 2.0.
     assert_approx_eq(auc_lh.positive_area, 2.0, AUC_ABS_TOL, 0.0, "lh pos area");
     assert_approx_eq(auc_lh.negative_area, 2.0, AUC_ABS_TOL, 0.0, "lh neg area");
     assert_approx_eq(auc_lh.net_area, 0.0, AUC_ABS_TOL, 0.0, "lh net area");
@@ -219,11 +215,8 @@ fn auc_central_only_meanlowhigh_order_independent_ties_and_total_area() {
     assert_eq!(auc_lh.standard_error, None);
 
     // 2. Tied X values collapse order-independently across raw points, SE points, and XY sheets.
-    let pts_a = [(0.0, 0.0), (1.0, 2.0), (1.0, 10.0), (3.0, 0.0)];
-    let pts_b = [(3.0, 0.0), (1.0, 10.0), (1.0, 2.0), (0.0, 0.0)];
-    let res_a = compute_auc(&pts_a, &AucOptions::default()).unwrap();
-    let res_b = compute_auc(&pts_b, &AucOptions::default()).unwrap();
-    // Collapsed knot at X=1 has Y=6.0 -> area = 0.5*1*6 + 0.5*2*6 = 9.0.
+    let res_a = compute_auc(&[(0.0, 0.0), (1.0, 2.0), (1.0, 10.0), (3.0, 0.0)], &AucOptions::default()).unwrap();
+    let res_b = compute_auc(&[(3.0, 0.0), (1.0, 10.0), (1.0, 2.0), (0.0, 0.0)], &AucOptions::default()).unwrap();
     assert_approx_eq(res_a.total_area, 9.0, AUC_ABS_TOL, 0.0, "tied auc order A");
     assert_approx_eq(res_b.total_area, 9.0, AUC_ABS_TOL, 0.0, "tied auc order B");
     assert_approx_eq(res_a.positive_area, res_b.positive_area, AUC_ABS_TOL, 0.0, "tied auc pos symmetry");
@@ -233,15 +226,8 @@ fn auc_central_only_meanlowhigh_order_independent_ties_and_total_area() {
     assert_approx_eq(se_a.total_area, 9.0, AUC_ABS_TOL, 0.0, "tied se auc");
     assert_approx_eq(se_a.standard_error.unwrap(), se_b.standard_error.unwrap(), AUC_ABS_TOL, 0.0, "tied se symmetry");
 
-    // Raw XyTable with tied X rows matches collapsed replicate mean identically regardless of order.
-    let mut xy_tied = XyTable::new(SubcolumnMode::Single, 1, 4).unwrap();
-    for (r, &(x, y)) in pts_b.iter().enumerate() {
-        xy_tied.set_x_cell(r, Cell::number(x)).unwrap();
-        xy_tied.data_sets[0].cells[r][0] = Cell::number(y);
-    }
-    let tied_sheet = DataSheet::new("xy-tied", "Tied XY", TableArchetype::Xy(xy_tied)).unwrap();
-    let sheet_auc = compute_sheet_auc(&tied_sheet, 0, &AucOptions::default()).unwrap();
-    assert_approx_eq(sheet_auc.total_area, 9.0, AUC_ABS_TOL, 0.0, "sheet tied auc");
+    let tied_sheet = xy_single("xy-tied", &[3.0, 1.0, 1.0, 0.0], &[&[0.0, 10.0, 2.0, 0.0]]);
+    assert_approx_eq(compute_sheet_auc(&tied_sheet, 0, &AucOptions::default()).unwrap().total_area, 9.0, AUC_ABS_TOL, 0.0, "sheet tied auc");
 
     // 3. Only 1 distinct finite X rejects cleanly rather than emitting 0.
     assert!(matches!(compute_auc(&[(1.0, 2.0), (1.0, 10.0)], &AucOptions::default()), Err(TransformError::InvalidInput { .. })));
@@ -249,15 +235,10 @@ fn auc_central_only_meanlowhigh_order_independent_ties_and_total_area() {
 
 #[test]
 fn savitzky_golay_nanoscale_non_uniform_uses_relative_grid_tolerance() {
-    // Abscissas on 1e-9 scale are strictly non-uniform (step changes from 1e-9 to 40e-9),
-    // so relative tolerance classifies them non-uniform and Vandermonde SG reproduces y = a*x + b exactly.
     let xs_nm = [0.0_f64, 1.0, 2.0, 10.0, 50.0, 60.0, 70.0, 80.0, 90.0];
-    let slope = 2.5e9_f64;
-    let intercept = 1.5_f64;
-    let pts: Vec<(f64, f64)> = xs_nm.iter().map(|&nm| (nm * 1e-9, slope * (nm * 1e-9) + intercept)).collect();
+    let pts: Vec<(f64, f64)> = xs_nm.iter().map(|&nm| (nm * 1e-9, 2.5e9 * (nm * 1e-9) + 1.5)).collect();
     for method in [SmoothMethod::SavitzkyGolay5, SmoothMethod::SavitzkyGolay7, SmoothMethod::SavitzkyGolay9] {
-        let smoothed = smooth_xy(&pts, method).unwrap();
-        for ((x, y_exp), (sx, sy)) in pts.iter().zip(smoothed.iter()) {
+        for ((x, y_exp), (sx, sy)) in pts.iter().zip(smooth_xy(&pts, method).unwrap().iter()) {
             assert_approx_eq(*sx, *x, 1e-24, 0.0, "nanoscale x preserved");
             assert_approx_eq(*sy, *y_exp, 1e-9, 1e-11, &format!("{method:?} nanoscale linear exactness"));
         }
@@ -267,22 +248,16 @@ fn savitzky_golay_nanoscale_non_uniform_uses_relative_grid_tolerance() {
 #[test]
 fn curve_transforms_reject_non_finite_inf_and_nan_inputs() {
     for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-        // Non-finite X or Y coordinates must reject cleanly across AUC, smoothing, derivative, and integral.
-        for pts in [vec![(0.0, 1.0), (bad, 2.0), (3.0, 4.0)], vec![(0.0, 1.0), (1.0, bad), (3.0, 4.0)]] {
+        for pts in [[(0.0, 1.0), (bad, 2.0), (3.0, 4.0)], [(0.0, 1.0), (1.0, bad), (3.0, 4.0)]] {
             assert!(matches!(compute_auc(&pts, &AucOptions::default()), Err(TransformError::InvalidInput { .. })), "AUC bad={bad:?}");
             for method in
                 [SmoothMethod::SavitzkyGolay5, SmoothMethod::MovingAverage { window: 3 }, SmoothMethod::Lowess { span: 0.7, robustness_iters: 1 }]
             {
                 assert!(matches!(smooth_xy(&pts, method), Err(TransformError::InvalidInput { .. })), "{method:?} bad={bad:?}");
             }
-            assert!(
-                matches!(differentiate_xy(&pts, DerivativeOrder::First), Err(TransformError::InvalidInput { .. })),
-                "differentiate_xy bad={bad:?}"
-            );
-            assert!(matches!(integrate_xy(&pts, 0.0), Err(TransformError::InvalidInput { .. })), "integrate_xy bad={bad:?}");
+            assert!(matches!(differentiate_xy(&pts, DerivativeOrder::First), Err(TransformError::InvalidInput { .. })), "diff bad={bad:?}");
+            assert!(matches!(integrate_xy(&pts, 0.0), Err(TransformError::InvalidInput { .. })), "integrate bad={bad:?}");
         }
-
-        // Non-finite SE in compute_auc_with_se and non-finite options in AUC / integration must reject cleanly.
         assert!(
             matches!(
                 compute_auc_with_se(&[(0.0, 1.0, 0.1), (1.0, 2.0, bad), (2.0, 3.0, 0.2)], &AucOptions::default()),
@@ -290,27 +265,13 @@ fn curve_transforms_reject_non_finite_inf_and_nan_inputs() {
             ),
             "AUC SE bad={bad:?}"
         );
-        assert!(
-            matches!(
-                compute_auc(&[(0.0, 1.0), (2.0, 3.0)], &AucOptions { baseline: bad, ..AucOptions::default() }),
-                Err(TransformError::InvalidSpec { .. })
-            ),
-            "AUC baseline bad={bad:?}"
-        );
-        assert!(
-            matches!(
-                compute_auc(&[(0.0, 1.0), (2.0, 3.0)], &AucOptions { min_peak_height: bad, ..AucOptions::default() }),
-                Err(TransformError::InvalidSpec { .. })
-            ),
-            "AUC min_peak_height bad={bad:?}"
-        );
-        assert!(
-            matches!(
-                compute_auc(&[(0.0, 1.0), (2.0, 3.0)], &AucOptions { min_area_fraction: bad, ..AucOptions::default() }),
-                Err(TransformError::InvalidSpec { .. })
-            ),
-            "AUC min_area_fraction bad={bad:?}"
-        );
-        assert!(matches!(integrate_xy(&[(0.0, 1.0), (2.0, 3.0)], bad), Err(TransformError::InvalidSpec { .. })), "integrate_xy baseline bad={bad:?}");
+        for bad_opt in [
+            AucOptions { baseline: bad, ..AucOptions::default() },
+            AucOptions { min_peak_height: bad, ..AucOptions::default() },
+            AucOptions { min_area_fraction: bad, ..AucOptions::default() },
+        ] {
+            assert!(matches!(compute_auc(&[(0.0, 1.0), (2.0, 3.0)], &bad_opt), Err(TransformError::InvalidSpec { .. })), "AUC opt bad={bad:?}");
+        }
+        assert!(matches!(integrate_xy(&[(0.0, 1.0), (2.0, 3.0)], bad), Err(TransformError::InvalidSpec { .. })), "integrate baseline bad={bad:?}");
     }
 }

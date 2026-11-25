@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "../common/mod.rs"]
+pub(crate) mod common;
+
 mod d1_custom_equations;
 mod d1_edge_matrix;
 mod d1_fit_uncertainty;

@@ -2,845 +2,559 @@
 
 use std::fs;
 
-use crate::common::TempDirGuard;
+use crate::common::{TempDirGuard, build_zip_entries, callout_item, open_dir_journal, param_rule, pzfx_doc, result_sheet_with_kind, xy_sheet};
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, CURRENT_SCHEMA_VERSION, Cell, CellValue, ConstantValue, FitMethod, GraphSheet, HookSource, InfoSheet, LayoutItem,
-    LayoutSheet, LayoutSpec, NonlinearFitSpec, NormalizeAnchor, ParameterRule, ParameterScope, ProjectDocument, ResultSheet, SheetId, SubcolumnMode,
-    TableArchetype, TransformAnalysisSpec, VariableRole, WeightingScheme,
+    AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellValue, ConstantValue, FitMethod, GraphSheet, HookSource, InfoSheet, LayoutSheet, LayoutSpec,
+    NonlinearFitSpec, NormalizeAnchor, ParameterScope, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, TransformAnalysisSpec, VariableRole,
+    WeightingScheme,
 };
 use curvebook_format::{
     CrashRecoveryJournal, CsvOptions, DirectoryJournalBackend, FormatError, JOURNAL_FILE_NAME, JournalBackend, JournalLockLease, JournalOpRecord,
-    LOCKFILE_NAME, MemoryJournalBackend, SNAPSHOT_FILE_NAME, ZipWriter, detect_dependency_cycles, export_datasheet_to_csv, import_prism_bytes,
-    import_pzfx_str, migrate_document_json, open_project_bytes, sanitize_circular_hooks, save_project_bytes, validate_project_document,
+    LOCKFILE_NAME, MemoryJournalBackend, SNAPSHOT_FILE_NAME, detect_dependency_cycles, export_datasheet_to_csv, import_prism_bytes, import_pzfx_str,
+    migrate_document_json, open_project_bytes, sanitize_circular_hooks, save_project_bytes, validate_project_document,
 };
+use serde_json::json;
 
 #[test]
 fn directory_journal_clean_close_checkpoint_and_reopen() {
-    let dir = TempDirGuard::new("clean-close").expect("create temp dir");
-    let backend = DirectoryJournalBackend::open_dir(dir.path()).expect("open recovery dir");
+    let dir = TempDirGuard::new("clean-close").unwrap();
+    let (mut journal, report) = open_dir_journal(dir.path(), "session-alpha", 10_000, 1_000).unwrap();
+    assert!(
+        report.snapshot.is_none()
+            && report.recovered_commands.is_empty()
+            && report.discarded_corrupt_tail_lines == 0
+            && report.recovered_from_stale_lock.is_none()
+    );
+    assert!(report.active_lease.owner_id == "session-alpha" && dir.child(LOCKFILE_NAME).exists());
 
-    let (mut journal, report) = CrashRecoveryJournal::open_or_recover(backend, "session-alpha", 10_000, 1_000).expect("open clean journal");
-    assert!(report.snapshot.is_none());
-    assert!(report.recovered_commands.is_empty());
-    assert_eq!(report.discarded_corrupt_tail_lines, 0);
-    assert!(report.recovered_from_stale_lock.is_none());
-    assert_eq!(report.active_lease.owner_id, "session-alpha");
-    assert!(dir.path().join(LOCKFILE_NAME).exists());
+    assert_eq!(
+        (
+            journal.record_command(json!({ "op": "set_cell", "row": 0, "col": 0, "val": 12.5 })).unwrap(),
+            journal.record_command(json!({ "op": "set_cell", "row": 1, "col": 0, "val": 25.0 })).unwrap()
+        ),
+        (1, 2)
+    );
+    assert!(dir.child(JOURNAL_FILE_NAME).exists());
 
-    let seq1 = journal.record_command(serde_json::json!({ "op": "set_cell", "row": 0, "col": 0, "val": 12.5 })).expect("record cmd 1");
-    let seq2 = journal.record_command(serde_json::json!({ "op": "set_cell", "row": 1, "col": 0, "val": 25.0 })).expect("record cmd 2");
-    assert_eq!((seq1, seq2), (1, 2));
-    assert!(dir.path().join(JOURNAL_FILE_NAME).exists());
+    journal.checkpoint(b"SNAPSHOT-CHECKPOINT-1").unwrap();
+    assert_eq!(
+        (fs::read(dir.child(SNAPSHOT_FILE_NAME)).unwrap().as_slice(), dir.child(JOURNAL_FILE_NAME).exists()),
+        (b"SNAPSHOT-CHECKPOINT-1".as_slice(), false)
+    );
 
-    journal.checkpoint(b"SNAPSHOT-CHECKPOINT-1").expect("checkpoint");
-    assert_eq!(fs::read(dir.path().join(SNAPSHOT_FILE_NAME)).expect("snapshot bytes"), b"SNAPSHOT-CHECKPOINT-1");
-    assert!(!dir.path().join(JOURNAL_FILE_NAME).exists());
+    assert_eq!(journal.record_command(json!({ "op": "rename_sheet", "title": "Assay" })).unwrap(), 3);
+    assert!(dir.child(JOURNAL_FILE_NAME).exists());
 
-    let seq3 = journal.record_command(serde_json::json!({ "op": "rename_sheet", "title": "Assay" })).expect("record cmd 3");
-    assert_eq!(seq3, 3);
-    assert!(dir.path().join(JOURNAL_FILE_NAME).exists());
+    let backend_after = journal.close_cleanly(b"SNAPSHOT-FINAL").unwrap();
+    assert!(!dir.child(JOURNAL_FILE_NAME).exists() && !dir.child(LOCKFILE_NAME).exists());
+    assert_eq!(backend_after.read_snapshot().unwrap().as_deref(), Some(b"SNAPSHOT-FINAL".as_slice()));
 
-    let backend_after = journal.close_cleanly(b"SNAPSHOT-FINAL").expect("close cleanly");
-    assert!(!dir.path().join(JOURNAL_FILE_NAME).exists());
-    assert!(!dir.path().join(LOCKFILE_NAME).exists());
-    assert_eq!(backend_after.read_snapshot().expect("read snapshot").as_deref(), Some(b"SNAPSHOT-FINAL".as_slice()));
-
-    let (reopened, reopen_report) = CrashRecoveryJournal::open_or_recover(backend_after, "session-beta", 10_000, 2_000).expect("reopen clean");
-    assert_eq!(reopen_report.snapshot.as_deref(), Some(b"SNAPSHOT-FINAL".as_slice()));
-    assert!(reopen_report.recovered_commands.is_empty());
-    assert_eq!(reopen_report.discarded_corrupt_tail_lines, 0);
-    assert!(reopen_report.recovered_from_stale_lock.is_none());
-    assert_eq!(reopened.next_seq(), 1);
-    let _ = reopened.close_cleanly(b"SNAPSHOT-FINAL").expect("close reopened");
+    let (reopened, rep) = CrashRecoveryJournal::open_or_recover(backend_after, "session-beta", 10_000, 2_000).unwrap();
+    assert!(
+        rep.snapshot.as_deref() == Some(b"SNAPSHOT-FINAL".as_slice())
+            && rep.recovered_commands.is_empty()
+            && rep.discarded_corrupt_tail_lines == 0
+            && rep.recovered_from_stale_lock.is_none()
+            && reopened.next_seq() == 1
+    );
+    let _ = reopened.close_cleanly(b"SNAPSHOT-FINAL").unwrap();
 }
 
 #[test]
 fn directory_journal_recovers_stale_lock_and_truncates_torn_tail_without_crashing() {
-    let dir = TempDirGuard::new("crash-torn-tail").expect("create temp dir");
-    let backend = DirectoryJournalBackend::open_dir(dir.path()).expect("open dir");
+    let dir = TempDirGuard::new("crash-torn-tail").unwrap();
+    let (mut journal, _) = open_dir_journal(dir.path(), "writer-1", 5_000, 10_000).unwrap();
+    journal.checkpoint(b"BASELINE-DOC-V1").unwrap();
 
-    let (mut journal, _) = CrashRecoveryJournal::open_or_recover(backend, "writer-1", 5_000, 10_000).expect("open writer-1");
-    journal.checkpoint(b"BASELINE-DOC-V1").expect("checkpoint baseline");
-
-    let cmd1 = serde_json::json!({ "op": "insert_row", "sheet": "d1", "row": 0 });
-    let cmd2 = serde_json::json!({ "op": "edit_cell", "sheet": "d1", "row": 0, "val": 3.25 });
-    journal.record_command(cmd1.clone()).expect("cmd1");
-    journal.record_command(cmd2.clone()).expect("cmd2");
-    journal.renew_lease(11_000).expect("renew lease");
+    let (cmd1, cmd2) = (json!({ "op": "insert_row", "sheet": "d1", "row": 0 }), json!({ "op": "edit_cell", "sheet": "d1", "row": 0, "val": 3.25 }));
+    journal.record_command(cmd1.clone()).unwrap();
+    journal.record_command(cmd2.clone()).unwrap();
+    journal.renew_lease(11_000).unwrap();
     assert_eq!(journal.lease().expires_epoch_ms(), 16_000);
-
-    // Crash without close_cleanly, then append a torn incomplete JSON tail line (including invalid UTF-8 bytes).
     drop(journal);
-    let mut raw = fs::read(dir.path().join(JOURNAL_FILE_NAME)).expect("read ops.journal");
+
+    let mut raw = fs::read(dir.child(JOURNAL_FILE_NAME)).unwrap();
     raw.extend_from_slice(b"{\"seq\":3,\"crc32\":123456,\"command_json\":{\"op\":\"partial\"");
     raw.push(0xFF);
-    fs::write(dir.path().join(JOURNAL_FILE_NAME), &raw).expect("write torn tail");
+    fs::write(dir.child(JOURNAL_FILE_NAME), &raw).unwrap();
+    assert!(open_dir_journal(dir.path(), "writer-2", 5_000, 15_999).is_err());
 
-    // While lease is still active (now = 15_999 < 16_000), another writer must be rejected cleanly.
-    let active_contention =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("open dir"), "writer-2", 5_000, 15_999);
-    assert!(active_contention.is_err());
+    let (mut recovered, rep) = open_dir_journal(dir.path(), "writer-2", 5_000, 16_000).unwrap();
+    assert_eq!(
+        (rep.snapshot.as_deref(), &rep.recovered_commands, &rep.recovered_seqs, rep.discarded_corrupt_tail_lines),
+        (Some(b"BASELINE-DOC-V1".as_slice()), &vec![cmd1.clone(), cmd2.clone()], &vec![1, 2], 1)
+    );
+    assert_eq!(
+        (rep.recovered_from_stale_lock, rep.active_lease.owner_id.as_str(), recovered.next_seq()),
+        (Some(JournalLockLease::new("writer-1", 11_000, 5_000).unwrap()), "writer-2", 3)
+    );
 
-    // Once lease expires (now = 16_000), writer-2 evicts stale lock, loads baseline, replays cmd1+cmd2, and drops torn tail.
-    let (mut recovered, report) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("open dir"), "writer-2", 5_000, 16_000)
-            .expect("recover stale lock");
-
-    assert_eq!(report.snapshot.as_deref(), Some(b"BASELINE-DOC-V1".as_slice()));
-    assert_eq!(report.recovered_commands, vec![cmd1.clone(), cmd2.clone()]);
-    assert_eq!(report.recovered_seqs, vec![1, 2]);
-    assert_eq!(report.discarded_corrupt_tail_lines, 1);
-    assert_eq!(report.recovered_from_stale_lock, Some(JournalLockLease::new("writer-1", 11_000, 5_000).expect("expected lease")));
-    assert_eq!(report.active_lease.owner_id, "writer-2");
-    assert_eq!(recovered.next_seq(), 3);
-
-    // New commands append cleanly after the truncated tail line.
-    let cmd3 = serde_json::json!({ "op": "post_recovery_edit", "ok": true });
-    let seq3 = recovered.record_command(cmd3.clone()).expect("append cmd3");
-    assert_eq!(seq3, 3);
+    let cmd3 = json!({ "op": "post_recovery_edit", "ok": true });
+    assert_eq!(recovered.record_command(cmd3.clone()).unwrap(), 3);
     drop(recovered);
 
-    let (reopened_again, report2) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("open dir"), "writer-3", 5_000, 22_000)
-            .expect("reopen cleanly");
-    assert_eq!(report2.recovered_commands, vec![cmd1, cmd2, cmd3]);
-    assert_eq!(report2.discarded_corrupt_tail_lines, 0);
-    let _ = reopened_again.close_cleanly(b"DONE").expect("close");
+    let (reopened_again, rep2) = open_dir_journal(dir.path(), "writer-3", 5_000, 22_000).unwrap();
+    assert_eq!((rep2.recovered_commands, rep2.discarded_corrupt_tail_lines), (vec![cmd1, cmd2, cmd3], 0));
+    let _ = reopened_again.close_cleanly(b"DONE").unwrap();
 }
 
 #[test]
 fn directory_journal_detects_mid_journal_crc_corruption_without_leaving_phantom_lock() {
-    let dir = TempDirGuard::new("crc-corrupt").expect("create temp dir");
-    let backend = DirectoryJournalBackend::open_dir(dir.path()).expect("open dir");
-    let (mut journal, _) = CrashRecoveryJournal::open_or_recover(backend, "w1", 1_000, 0).expect("open");
-    journal.record_command(serde_json::json!({ "step": 1, "val": 10 })).expect("cmd 1");
-    journal.record_command(serde_json::json!({ "step": 2, "val": 20 })).expect("cmd 2");
+    let dir = TempDirGuard::new("crc-corrupt").unwrap();
+    let (mut journal, _) = open_dir_journal(dir.path(), "w1", 1_000, 0).unwrap();
+    journal.record_command(json!({ "step": 1, "val": 10 })).unwrap();
+    journal.record_command(json!({ "step": 2, "val": 20 })).unwrap();
     drop(journal);
 
-    // Flip step 1 payload while leaving its old CRC32 intact (mid-journal tampering, NOT torn tail).
-    let text = fs::read_to_string(dir.path().join(JOURNAL_FILE_NAME)).expect("read journal");
+    let text = fs::read_to_string(dir.child(JOURNAL_FILE_NAME)).unwrap();
     let tampered = text.replacen("\"val\":10", "\"val\":99", 1);
     assert_ne!(text, tampered);
-    fs::write(dir.path().join(JOURNAL_FILE_NAME), tampered).expect("write tampered");
+    fs::write(dir.child(JOURNAL_FILE_NAME), tampered).unwrap();
 
-    let err = CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("open"), "w2", 1_000, 5_000)
-        .expect_err("mid-journal CRC mismatch must fail");
-    assert!(matches!(err, FormatError::CorruptCrc { .. }));
-    assert!(!dir.path().join(LOCKFILE_NAME).exists());
+    assert!(matches!(open_dir_journal(dir.path(), "w2", 1_000, 5_000), Err(FormatError::CorruptCrc { .. })));
+    assert!(!dir.child(LOCKFILE_NAME).exists());
 }
 
 #[test]
 fn memory_journal_backend_web_storage_json_snapshot_and_recovery_parity() {
-    let lease = JournalLockLease::new("browser-tab-1", 1_000, 4_000).expect("lease");
-    assert_eq!(lease.expires_epoch_ms(), 5_000);
-    assert!(!lease.is_stale(4_999));
-    assert!(lease.can_recover(5_000));
+    let lease = JournalLockLease::new("browser-tab-1", 1_000, 4_000).unwrap();
+    assert_eq!((lease.expires_epoch_ms(), lease.is_stale(4_999), lease.can_recover(5_000)), (5_000, false, true));
 
-    let (mut journal, _) = CrashRecoveryJournal::open_or_recover(MemoryJournalBackend::new(), "browser-tab-1", 4_000, 1_000).expect("open memory");
-    journal.checkpoint(b"WEB-SNAPSHOT-V1").expect("checkpoint");
-    let c1 = serde_json::json!({ "action": "add_point", "x": 1.0, "y": 2.5 });
-    let c2 = serde_json::json!({ "action": "exclude_cell", "row": 0, "col": 1 });
-    journal.record_command(c1.clone()).expect("c1");
-    journal.record_command(c2.clone()).expect("c2");
+    let (mut journal, _) = CrashRecoveryJournal::open_or_recover(MemoryJournalBackend::new(), "browser-tab-1", 4_000, 1_000).unwrap();
+    journal.checkpoint(b"WEB-SNAPSHOT-V1").unwrap();
+    let (c1, c2) = (json!({ "action": "add_point", "x": 1.0, "y": 2.5 }), json!({ "action": "exclude_cell", "row": 0, "col": 1 }));
+    journal.record_command(c1.clone()).unwrap();
+    journal.record_command(c2.clone()).unwrap();
 
-    // Simulate browser tab crash leaving a truncated NDJSON tail in localStorage.
-    let mut crashed_backend = journal.abandon();
-    crashed_backend.append_raw_journal_bytes(b"{\"seq\":3,\"crc32\":42\n");
-    let stored_json = crashed_backend.to_web_storage_json().expect("export web storage json");
+    let mut crashed = journal.abandon();
+    crashed.append_raw_journal_bytes(b"{\"seq\":3,\"crc32\":42\n");
+    let restored = MemoryJournalBackend::from_web_storage_json(&crashed.to_web_storage_json().unwrap()).unwrap();
+    assert_eq!(restored.snapshot_bytes(), Some(b"WEB-SNAPSHOT-V1".as_slice()));
+    assert!(CrashRecoveryJournal::open_or_recover(restored.clone(), "browser-tab-2", 4_000, 4_999).is_err());
 
-    let restored_backend = MemoryJournalBackend::from_web_storage_json(&stored_json).expect("import web storage json");
-    assert_eq!(restored_backend.snapshot_bytes(), Some(b"WEB-SNAPSHOT-V1".as_slice()));
+    let (reopened, rep) = CrashRecoveryJournal::open_or_recover(restored, "browser-tab-2", 4_000, 5_000).unwrap();
+    assert_eq!(
+        (
+            rep.snapshot.as_deref(),
+            rep.recovered_commands,
+            rep.discarded_corrupt_tail_lines,
+            rep.recovered_from_stale_lock.as_ref().map(|l| l.owner_id.as_str())
+        ),
+        (Some(b"WEB-SNAPSHOT-V1".as_slice()), vec![c1, c2], 1, Some("browser-tab-1"))
+    );
+    assert_eq!(JournalOpRecord::new(1, json!({"ok": true})).unwrap().verify_crc(), Ok(()));
 
-    // Non-expired lease blocks concurrent tab-2.
-    let blocked = CrashRecoveryJournal::open_or_recover(restored_backend.clone(), "browser-tab-2", 4_000, 4_999);
-    assert!(blocked.is_err());
-
-    // After TTL expires, tab-2 recovers cleanly.
-    let (reopened, report) = CrashRecoveryJournal::open_or_recover(restored_backend, "browser-tab-2", 4_000, 5_000).expect("recover web storage");
-    assert_eq!(report.snapshot.as_deref(), Some(b"WEB-SNAPSHOT-V1".as_slice()));
-    assert_eq!(report.recovered_commands, vec![c1, c2]);
-    assert_eq!(report.discarded_corrupt_tail_lines, 1);
-    assert_eq!(report.recovered_from_stale_lock.as_ref().map(|l| l.owner_id.as_str()), Some("browser-tab-1"));
-    assert_eq!(JournalOpRecord::new(1, serde_json::json!({"ok": true})).expect("record").verify_crc(), Ok(()));
-
-    let finalized = reopened.close_cleanly(b"WEB-FINAL").expect("close cleanly");
-    assert!(finalized.lock_lease().is_none());
-    assert!(finalized.journal_bytes().is_empty());
-    let final_json = finalized.to_web_storage_json().expect("export final web json");
-    let reloaded = MemoryJournalBackend::from_web_storage_json(&final_json).expect("reload final");
-    assert_eq!(reloaded.snapshot_bytes(), Some(b"WEB-FINAL".as_slice()));
+    let fin = reopened.close_cleanly(b"WEB-FINAL").unwrap();
+    assert!(fin.lock_lease().is_none() && fin.journal_bytes().is_empty());
+    assert_eq!(
+        MemoryJournalBackend::from_web_storage_json(&fin.to_web_storage_json().unwrap()).unwrap().snapshot_bytes(),
+        Some(b"WEB-FINAL".as_slice())
+    );
 }
 
 #[test]
 fn migrate_document_json_fills_backwards_compatible_fields_and_rejects_future_schemas() {
-    let legacy_v0 = serde_json::json!({
+    let legacy_v0 = json!({
         "title": "Legacy Study",
-        "data_sheets": [
-            {
-                "id": "d1",
-                "title": "Dose",
-                "archetype": {
-                    "Column": {
-                        "design_hint": "UnpairedReplicates",
-                        "subcolumn_mode": "Single",
-                        "row_titles": [],
-                        "row_titles_expanded": false,
-                        "data_sets": [{ "title": "Ctrl", "cells": [[{"value": {"Number": 1.0}, "excluded": false}]] }]
-                    }
-                }
-            }
-        ],
-        "result_sheets": [
-            {
-                "id": "r1",
-                "analysis": {
-                    "id": "a1",
-                    "source_sheet_id": "d1",
-                    "selected_data_sets": [],
-                    "auto_title": "Nonlinear fit",
-                    "custom_title": null,
-                    "confidence_level": 0.95,
-                    "p_value_format": "FourDecimal",
-                    "kind": {
-                        "NonlinearRegression": {
-                            "equation_id": "sigmoidal-4pl",
-                            "custom_dsl": null,
-                            "method": "LeastSquares",
-                            "weighting": "None",
-                            "parameter_rules": [],
-                            "profile_likelihood_ci": false,
-                            "comparison": null,
-                            "confidence_bands": true,
-                            "prediction_bands": false,
-                            "interpolate_unknowns": false,
-                            "replicates_lack_of_fit_test": false,
-                            "normality_of_residuals": false,
-                            "max_iters": 200
-                        }
-                    }
-                },
-                "status": "UpToDate",
-                "tabs": [],
-                "scalars": [],
-                "pairwise_comparisons": [],
-                "fitted_curves": [],
-                "analyzable_data": null
-            }
-        ]
+        "data_sheets": [{ "id": "d1", "title": "Dose", "archetype": { "Column": { "design_hint": "UnpairedReplicates", "subcolumn_mode": "Single", "row_titles": [], "row_titles_expanded": false, "data_sets": [{ "title": "Ctrl", "cells": [[{"value": {"Number": 1.0}, "excluded": false}]] }] } } }],
+        "result_sheets": [{
+            "id": "r1",
+            "analysis": {
+                "id": "a1", "source_sheet_id": "d1", "selected_data_sets": [], "auto_title": "Nonlinear fit", "custom_title": null, "confidence_level": 0.95, "p_value_format": "FourDecimal",
+                "kind": { "NonlinearRegression": { "equation_id": "sigmoidal-4pl", "custom_dsl": null, "method": "LeastSquares", "weighting": "None", "parameter_rules": [], "profile_likelihood_ci": false, "comparison": null, "confidence_bands": true, "prediction_bands": false, "interpolate_unknowns": false, "replicates_lack_of_fit_test": false, "normality_of_residuals": false, "max_iters": 200 } }
+            },
+            "status": "UpToDate", "tabs": [], "scalars": [], "pairwise_comparisons": [], "fitted_curves": [], "analyzable_data": null
+        }]
     });
+    let migrated_val = migrate_document_json(legacy_v0, 0).unwrap();
+    assert_eq!(migrated_val["schema_version"].as_u64(), Some(u64::from(CURRENT_SCHEMA_VERSION)));
+    assert!(
+        migrated_val["data_sheets"][0].get("floating_notes").is_some()
+            && migrated_val["result_sheets"][0]["analysis"]["kind"]["NonlinearRegression"].get("emit_residuals_tab").is_some()
+    );
 
-    let migrated_val = migrate_document_json(legacy_v0, 0).expect("migrate v0");
-    assert_eq!(migrated_val.get("schema_version").and_then(serde_json::Value::as_u64), Some(u64::from(CURRENT_SCHEMA_VERSION)));
-    assert!(migrated_val["data_sheets"][0].get("floating_notes").is_some());
-    assert!(migrated_val["result_sheets"][0]["analysis"]["kind"]["NonlinearRegression"].get("emit_residuals_tab").is_some());
-
-    let doc: ProjectDocument = serde_json::from_value(migrated_val).expect("deserialize migrated v0");
-    validate_project_document(&doc).expect("validated migrated doc");
-    assert_eq!(doc.schema_version, CURRENT_SCHEMA_VERSION);
-    assert_eq!(doc.data_sheets.len(), 1);
-    assert_eq!(doc.result_sheets.len(), 1);
-
-    let future_err = migrate_document_json(serde_json::json!({"schema_version": CURRENT_SCHEMA_VERSION + 1}), CURRENT_SCHEMA_VERSION + 1)
-        .expect_err("future major schema version must fail");
-    assert!(matches!(future_err, FormatError::UnsupportedSchemaVersion { .. }));
+    let doc: ProjectDocument = serde_json::from_value(migrated_val).unwrap();
+    validate_project_document(&doc).unwrap();
+    assert_eq!((doc.schema_version, doc.data_sheets.len(), doc.result_sheets.len()), (CURRENT_SCHEMA_VERSION, 1, 1));
+    assert!(matches!(
+        migrate_document_json(json!({"schema_version": CURRENT_SCHEMA_VERSION + 1}), CURRENT_SCHEMA_VERSION + 1),
+        Err(FormatError::UnsupportedSchemaVersion { .. })
+    ));
 }
 
 #[test]
 fn sanitize_circular_hooks_breaks_cycles_while_preserving_valid_hooks() {
-    let mut doc = ProjectDocument::new("Hook Cycle Recovery").expect("doc");
-    let info = InfoSheet::new_preseeded("info-1", "Assay Info").expect("info");
-    doc.add_info_sheet(info).expect("add info");
+    let mut doc = ProjectDocument::new("Hook Cycle Recovery").unwrap();
+    doc.add_info_sheet(InfoSheet::new_preseeded("info-1", "Assay Info").unwrap()).unwrap();
+    doc.add_data_sheet(xy_sheet("data-1", SubcolumnMode::Single, 1, 2)).unwrap();
 
-    let ds =
-        curvebook_doc::DataSheet::new("data-1", "Raw", TableArchetype::Xy(curvebook_doc::XyTable::new(SubcolumnMode::Single, 1, 2).expect("xy")))
-            .expect("ds");
-    doc.add_data_sheet(ds).expect("add ds");
-
-    // 1. Self-referential HookSource on res-self + valid acyclic HookSource referencing info-1.
     let mut fit_self = NonlinearFitSpec::new("sigmoidal-4pl");
-    fit_self.method = FitMethod::LeastSquares;
-    fit_self.weighting = WeightingScheme::None;
-    fit_self.parameter_rules.push(ParameterRule {
-        name: String::from("Top"),
-        scope: ParameterScope::HookedConstant(HookSource::ResultScalar {
-            result_sheet_id: SheetId::new("res-self"),
-            parameter_key: String::from("Top"),
+    (fit_self.method, fit_self.weighting) = (FitMethod::LeastSquares, WeightingScheme::None);
+    fit_self.parameter_rules.extend([
+        param_rule(
+            "Top",
+            ParameterScope::HookedConstant(HookSource::ResultScalar {
+                result_sheet_id: SheetId::new("res-self"),
+                parameter_key: String::from("Top"),
+                data_set_index: None,
+            }),
+        ),
+        param_rule(
+            "Bottom",
+            ParameterScope::HookedConstant(HookSource::InfoConstant {
+                info_sheet_id: Some(SheetId::new("info-1")),
+                constant_name: String::from("Km"),
+            }),
+        ),
+    ]);
+    doc.add_result_sheet(result_sheet_with_kind("res-self", "data-1", AnalysisKind::NonlinearRegression(fit_self))).unwrap();
+
+    let norm = |zero_anchor| {
+        AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
+            zero_anchor,
+            hundred_anchor: NormalizeAnchor::ColumnMax,
+            output_percent: true,
+            per_data_set: false,
+        })
+    };
+    doc.add_result_sheet(result_sheet_with_kind("res-a", "res-b", norm(NormalizeAnchor::ColumnMin))).unwrap();
+    doc.add_result_sheet(result_sheet_with_kind(
+        "res-b",
+        "data-1",
+        norm(NormalizeAnchor::Hooked(HookSource::ResultScalar {
+            result_sheet_id: SheetId::new("res-a"),
+            parameter_key: String::from("Slope"),
             data_set_index: None,
-        }),
-        initial_override: None,
-        lower_bound: None,
-        upper_bound: None,
-    });
-    fit_self.parameter_rules.push(ParameterRule {
-        name: String::from("Bottom"),
-        scope: ParameterScope::HookedConstant(HookSource::InfoConstant {
-            info_sheet_id: Some(SheetId::new("info-1")),
-            constant_name: String::from("Km"),
-        }),
-        initial_override: None,
-        lower_bound: None,
-        upper_bound: None,
-    });
-    let res_self =
-        ResultSheet::new(AnalysisSpec::new("res-self", "data-1", AnalysisKind::NonlinearRegression(fit_self)).expect("spec")).expect("res");
-    doc.add_result_sheet(res_self).expect("add res-self");
+        })),
+    ))
+    .unwrap();
 
-    // 2. Mutual cycle: res-a analyzes res-b, and res-b hooks Normalize anchor back to res-a.
-    let res_a = ResultSheet::new(
-        AnalysisSpec::new(
-            "res-a",
-            "res-b",
-            AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
-                zero_anchor: NormalizeAnchor::ColumnMin,
-                hundred_anchor: NormalizeAnchor::ColumnMax,
-                output_percent: true,
-                per_data_set: false,
-            }),
-        )
-        .expect("spec a"),
-    )
-    .expect("res a");
-    let res_b = ResultSheet::new(
-        AnalysisSpec::new(
-            "res-b",
-            "data-1",
-            AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
-                zero_anchor: NormalizeAnchor::Hooked(HookSource::ResultScalar {
-                    result_sheet_id: SheetId::new("res-a"),
-                    parameter_key: String::from("Slope"),
-                    data_set_index: None,
-                }),
-                hundred_anchor: NormalizeAnchor::ColumnMax,
-                output_percent: true,
-                per_data_set: false,
-            }),
-        )
-        .expect("spec b"),
-    )
-    .expect("res b");
-    doc.add_result_sheet(res_a).expect("add res-a");
-    doc.add_result_sheet(res_b).expect("add res-b");
-
-    // 3. Inline graph/layout hooks are non-cyclic unless referenced in a cycle; test graph self/cycle edge cleanup too.
-    let mut gs = GraphSheet::new_uninitialized_for_data("graph-1", doc.data_sheet(&SheetId::new("data-1")).expect("ds")).expect("gs");
+    let mut gs = GraphSheet::new_uninitialized_for_data("graph-1", doc.data_sheet(&SheetId::new("data-1")).unwrap()).unwrap();
     gs.spec.title = String::from("Response ({{result:res-self:Bottom}})");
-    doc.add_graph_sheet(gs).expect("add graph");
+    doc.add_graph_sheet(gs).unwrap();
     let mut layout_spec = LayoutSpec::default();
-    layout_spec.items.push(LayoutItem::TextCallout {
-        id: String::from("callout-1"),
-        markdown: String::from("Notes: {{info:info-1:Km}}"),
-        bounds_pt: curvebook_doc::RectPt::new(10.0, 10.0, 100.0, 40.0),
-        font_size_pt: 11.0,
-    });
-    doc.add_layout_sheet(LayoutSheet::new("layout-1", "Fig 1", layout_spec).expect("ls")).expect("add layout");
+    layout_spec.items.push(callout_item("callout-1", "Notes: {{info:info-1:Km}}"));
+    doc.add_layout_sheet(LayoutSheet::new("layout-1", "Fig 1", layout_spec).unwrap()).unwrap();
 
     assert!(matches!(detect_dependency_cycles(&doc), Err(FormatError::DependencyCycle { .. })));
+    assert_eq!(sanitize_circular_hooks(&mut doc).len(), 2);
+    detect_dependency_cycles(&doc).unwrap();
 
-    let diagnostics = sanitize_circular_hooks(&mut doc);
-    assert_eq!(diagnostics.len(), 2, "expected 2 broken hook cycles, got {diagnostics:?}");
-    detect_dependency_cycles(&doc).expect("dependency graph must be acyclic after sanitization");
-
-    // Verify valid InfoConstant hook on Bottom was preserved while cyclic Top hook became Local.
-    let AnalysisKind::NonlinearRegression(ref cleaned_fit) = doc.result_sheet(&SheetId::new("res-self")).expect("res-self").analysis.kind else {
-        panic!("expected NonlinearRegression");
+    let AnalysisKind::NonlinearRegression(ref cleaned) = doc.result_sheet(&SheetId::new("res-self")).unwrap().analysis.kind else {
+        panic!("expected NonlinearRegression")
     };
-    assert_eq!(cleaned_fit.parameter_rules[0].scope, ParameterScope::Local);
-    assert!(matches!(cleaned_fit.parameter_rules[1].scope, ParameterScope::HookedConstant(HookSource::InfoConstant { .. })));
-
-    let roundtrip_bytes = save_project_bytes(&doc).expect("save sanitized doc");
-    let reopened = open_project_bytes(&roundtrip_bytes).expect("reopen sanitized doc");
-    assert_eq!(reopened.title, "Hook Cycle Recovery");
+    assert!(
+        cleaned.parameter_rules[0].scope == ParameterScope::Local
+            && matches!(cleaned.parameter_rules[1].scope, ParameterScope::HookedConstant(HookSource::InfoConstant { .. }))
+    );
+    assert_eq!(open_project_bytes(&save_project_bytes(&doc).unwrap()).unwrap().title, "Hook Cycle Recovery");
 }
 
 #[test]
 fn cleanroom_pzfx_and_prism_edge_archetypes_entities_info_and_exclusions_roundtrip() {
-    let pzfx = r#"<?xml version="1.0" encoding="UTF-8"?>
-<PrismFile SchemaVersion="2">
-  <Title>Cleanroom Edge Parity (&alpha;-Assay)</Title>
-  <InfoSequence>
-    <Info ID="info-main">
-      <Title>Assay Metadata</Title>
-      <Constant><Name>K<Sub>m</Sub></Name><Value>2.5</Value><Units>&mu;M</Units></Constant>
-      <Constant Name="&Delta;G" Value="-14.2" Units="kJ/mol"/>
-      <Constant><Name>Vehicle</Name><Value>10<Sup>-6</Sup> M &alpha;-Toxin</Value></Constant>
-      <Notes>Incubated at 37&deg;C &plusmn; 0.5&deg;C in 5% CO<Sub>2</Sub>.</Notes>
-    </Info>
-  </InfoSequence>
+    let pzfx = pzfx_doc(
+        r#"<Title>Cleanroom Edge Parity (&alpha;-Assay)</Title>
+  <InfoSequence><Info ID="info-main"><Title>Assay Metadata</Title>
+    <Constant><Name>K<Sub>m</Sub></Name><Value>2.5</Value><Units>&mu;M</Units></Constant>
+    <Constant Name="&Delta;G" Value="-14.2" Units="kJ/mol"/>
+    <Constant><Name>Vehicle</Name><Value>10<Sup>-6</Sup> M &alpha;-Toxin</Value></Constant>
+    <Notes>Incubated at 37&deg;C &plusmn; 0.5&deg;C in 5% CO<Sub>2</Sub>.</Notes>
+  </Info></InfoSequence>
   <TableSequence>
-    <Table ID="tbl-nested" TableType="Nested">
-      <Title>Tissue CO<Sub>2</Sub> Nested (&mu;g/mL)</Title>
-      <RowTitlesColumn><Subcolumn><d>Rep &alpha;</d><d>Rep &beta;</d></Subcolumn></RowTitlesColumn>
-      <YColumn>
-        <Title>WT</Title>
-        <Subcolumn><Title>WT:1</Title><d>1.1</d><d Excluded="1">1.2</d></Subcolumn>
-        <Subcolumn><Title>WT:2</Title><d Excluded="1">9.9</d><d>1.4</d></Subcolumn>
-      </YColumn>
-      <YColumn>
-        <Title>KO</Title>
-        <Subcolumn><Title>KO:1</Title><d Excluded="1"/><d>2.2</d></Subcolumn>
-        <Subcolumn><Title>KO:2</Title><d>2.3</d><d Excluded="1">2.4</d></Subcolumn>
-      </YColumn>
-    </Table>
-    <Table ID="tbl-surv" TableType="Survival">
-      <Title>Survival Curve (&tau; &le; 30d)</Title>
-      <RowTitlesColumn><Subcolumn><d>Subject 1</d><d>Subject 2</d><d>Subject 3</d></Subcolumn></RowTitlesColumn>
-      <XColumn><Title>Time (days)</Title><Subcolumn><d>5</d><d Excluded="1">10</d><d Excluded="1">15</d></Subcolumn></XColumn>
-      <YColumn><Title>Cohort &alpha;</Title><Subcolumn><d>1</d><d Excluded="1">0</d><d Excluded="1"/></Subcolumn></YColumn>
-      <YColumn><Title>Cohort &beta;</Title><Subcolumn><d>1</d><d>1</d><d>0</d></Subcolumn></YColumn>
-    </Table>
-    <Table ID="tbl-mv" TableType="MultipleVariables">
-      <Title>Cohort Variables (10<Sup>-6</Sup> M)</Title>
-      <RowTitlesColumn><Subcolumn><d>P1</d><d>P2</d><d>P3</d></Subcolumn></RowTitlesColumn>
-      <YColumn><Title>Arm</Title><Subcolumn><d>&alpha;-Arm</d><d>&beta;-Arm</d><d>&alpha;-Arm</d></Subcolumn></YColumn>
-      <YColumn><Title>IC<Sub>50</Sub></Title><Subcolumn><d>12.5</d><d Excluded="1">99.0</d><d Excluded="1"/></Subcolumn></YColumn>
-    </Table>
-    <Table ID="tbl-cont" TableType="Contingency">
-      <Title>Responder Matrix</Title>
-      <RowTitlesColumn><Subcolumn><d>Exposed</d><d>Control</d></Subcolumn></RowTitlesColumn>
-      <YColumn><Title>Positive</Title><Subcolumn><d>18</d><d>4</d></Subcolumn></YColumn>
-      <YColumn><Title>Negative</Title><Subcolumn><d Excluded="1">2</d><d>16</d></Subcolumn></YColumn>
-    </Table>
-    <Table ID="tbl-pow" TableType="PartsOfWhole">
-      <Title>Lineage Fractions (&Sigma;)</Title>
-      <RowTitlesColumn><Subcolumn><d>CD4+</d><d>CD8+</d><d>B-cell</d></Subcolumn></RowTitlesColumn>
-      <YColumn><Title>Percent</Title><Subcolumn><d>45</d><d Excluded="1">35</d><d>20</d></Subcolumn></YColumn>
-    </Table>
-  </TableSequence>
-</PrismFile>"#;
-
-    let report = import_pzfx_str(pzfx).expect("import cleanroom pzfx");
-    let doc = &report.document;
-    verify_cleanroom_pzfx_edge_contents(doc);
-
-    // Round-trip through .curvebook archive bytes
-    let saved = save_project_bytes(doc).expect("save curvebook bytes");
-    let reopened = open_project_bytes(&saved).expect("open curvebook bytes");
-    assert_eq!(&reopened, doc);
-
-    // Export all 5 sheets to CSV and pack into a clean-room .prism ZIP container, then re-import and compare!
-    verify_prism_zip_roundtrip(doc, pzfx);
-}
-
-fn verify_cleanroom_pzfx_edge_contents(doc: &ProjectDocument) {
-    assert_eq!(doc.title, "Cleanroom Edge Parity (α-Assay)");
-    assert_eq!(doc.info_sheets.len(), 1);
-    assert_eq!(doc.data_sheets.len(), 5);
-    let info0 = doc.info_sheets.first().expect("expected 1 info sheet");
-    let (ds0, ds_rest) = doc.data_sheets.split_first().expect("expected 5 data sheets");
-    verify_edge_info_and_nested(info0, ds0);
-    verify_edge_survival_mv_contingency_pow(ds_rest);
-}
-
-fn verify_edge_info_and_nested(info: &InfoSheet, nested_sheet: &curvebook_doc::DataSheet) {
-    assert_eq!(info.get_constant("Km").and_then(|c| c.units.as_deref()), Some("μM"));
-    assert_eq!(info.get_constant("ΔG").and_then(|c| c.value.as_finite_f64()), Some(-14.2));
-    assert_eq!(info.get_constant("Vehicle").map(|c| &c.value), Some(&ConstantValue::Text(String::from("10-6 M α-Toxin"))));
-    assert_eq!(info.notes_markdown, "Incubated at 37°C ± 0.5°C in 5% CO2.");
-
-    assert_eq!(nested_sheet.title, "Tissue CO2 Nested (μg/mL)");
-    let TableArchetype::Nested(ref nested) = nested_sheet.archetype else {
-        panic!("expected Nested");
-    };
-    assert_eq!(nested.row_titles, vec!["Rep α", "Rep β"]);
-    assert_eq!(nested.groups.len(), 2);
-    let [g0, g1] = nested.groups.as_slice() else {
-        panic!("expected 2 nested groups");
-    };
-    assert_eq!(g0.biological_unit_count(), 2);
-    assert_eq!(g0.subcolumn_titles, vec!["WT:1", "WT:2"]);
-    assert_eq!(g0.cells.first().and_then(|r| r.get(1)), Some(&Cell { value: CellValue::Number(9.9), excluded: true }));
-    assert_eq!(g0.cells.get(1).and_then(|r| r.first()), Some(&Cell { value: CellValue::Number(1.2), excluded: true }));
-    assert_eq!(g1.cells.first().and_then(|r| r.first()), Some(&Cell { value: CellValue::Empty, excluded: true }));
-    assert_eq!(g1.cells.get(1).and_then(|r| r.get(1)), Some(&Cell { value: CellValue::Number(2.4), excluded: true }));
-}
-
-fn verify_edge_survival_mv_contingency_pow(sheets: &[curvebook_doc::DataSheet]) {
-    let [surv_sheet, mv_sheet, cont_sheet, pow_sheet] = sheets else {
-        panic!("expected 4 trailing sheets");
-    };
-    let TableArchetype::Survival(ref surv) = surv_sheet.archetype else {
-        panic!("expected Survival");
-    };
-    assert_eq!(surv_sheet.title, "Survival Curve (τ ≤ 30d)");
-    assert_eq!(surv.times.get(1), Some(&Cell { value: CellValue::Number(10.0), excluded: true }));
-    assert_eq!(surv.times.get(2), Some(&Cell { value: CellValue::Number(15.0), excluded: true }));
-    let cohort0 = surv.cohorts.first().expect("expected survival cohort 0");
-    assert_eq!(cohort0.cells.get(1).and_then(|r| r.first()), Some(&Cell { value: CellValue::Number(0.0), excluded: true }));
-    assert_eq!(cohort0.cells.get(2).and_then(|r| r.first()), Some(&Cell { value: CellValue::Empty, excluded: true }));
-
-    let TableArchetype::MultipleVariables(ref mv) = mv_sheet.archetype else {
-        panic!("expected MultipleVariables");
-    };
-    let [var0, var1, ..] = mv.variables.as_slice() else {
-        panic!("expected at least 2 variables");
-    };
-    assert_eq!(var0.role, VariableRole::Categorical);
-    assert_eq!(var1.role, VariableRole::Continuous);
-    assert_eq!(var1.title, "IC50");
-    assert!(var1.cells.get(1).is_some_and(|c| c.excluded));
-    assert!(var1.cells.get(2).is_some_and(|c| c.excluded));
-
-    let TableArchetype::Contingency(ref cont) = cont_sheet.archetype else {
-        panic!("expected Contingency");
-    };
-    assert_eq!(cont.row_titles, vec!["Exposed", "Control"]);
+    <Table ID="tbl-nested" TableType="Nested"><Title>Tissue CO<Sub>2</Sub> Nested (&mu;g/mL)</Title><RowTitlesColumn><Subcolumn><d>Rep &alpha;</d><d>Rep &beta;</d></Subcolumn></RowTitlesColumn><YColumn><Title>WT</Title><Subcolumn><Title>WT:1</Title><d>1.1</d><d Excluded="1">1.2</d></Subcolumn><Subcolumn><Title>WT:2</Title><d Excluded="1">9.9</d><d>1.4</d></Subcolumn></YColumn><YColumn><Title>KO</Title><Subcolumn><Title>KO:1</Title><d Excluded="1"/><d>2.2</d></Subcolumn><Subcolumn><Title>KO:2</Title><d>2.3</d><d Excluded="1">2.4</d></Subcolumn></YColumn></Table>
+    <Table ID="tbl-surv" TableType="Survival"><Title>Survival Curve (&tau; &le; 30d)</Title><RowTitlesColumn><Subcolumn><d>Subject 1</d><d>Subject 2</d><d>Subject 3</d></Subcolumn></RowTitlesColumn><XColumn><Title>Time (days)</Title><Subcolumn><d>5</d><d Excluded="1">10</d><d Excluded="1">15</d></Subcolumn></XColumn><YColumn><Title>Cohort &alpha;</Title><Subcolumn><d>1</d><d Excluded="1">0</d><d Excluded="1"/></Subcolumn></YColumn><YColumn><Title>Cohort &beta;</Title><Subcolumn><d>1</d><d>1</d><d>0</d></Subcolumn></YColumn></Table>
+    <Table ID="tbl-mv" TableType="MultipleVariables"><Title>Cohort Variables (10<Sup>-6</Sup> M)</Title><RowTitlesColumn><Subcolumn><d>P1</d><d>P2</d><d>P3</d></Subcolumn></RowTitlesColumn><YColumn><Title>Arm</Title><Subcolumn><d>&alpha;-Arm</d><d>&beta;-Arm</d><d>&alpha;-Arm</d></Subcolumn></YColumn><YColumn><Title>IC<Sub>50</Sub></Title><Subcolumn><d>12.5</d><d Excluded="1">99.0</d><d Excluded="1"/></Subcolumn></YColumn></Table>
+    <Table ID="tbl-cont" TableType="Contingency"><Title>Responder Matrix</Title><RowTitlesColumn><Subcolumn><d>Exposed</d><d>Control</d></Subcolumn></RowTitlesColumn><YColumn><Title>Positive</Title><Subcolumn><d>18</d><d>4</d></Subcolumn></YColumn><YColumn><Title>Negative</Title><Subcolumn><d Excluded="1">2</d><d>16</d></Subcolumn></YColumn></Table>
+    <Table ID="tbl-pow" TableType="PartsOfWhole"><Title>Lineage Fractions (&Sigma;)</Title><RowTitlesColumn><Subcolumn><d>CD4+</d><d>CD8+</d><d>B-cell</d></Subcolumn></RowTitlesColumn><YColumn><Title>Percent</Title><Subcolumn><d>45</d><d Excluded="1">35</d><d>20</d></Subcolumn></YColumn></Table>
+  </TableSequence>"#,
+    );
+    let doc = import_pzfx_str(&pzfx).unwrap().document;
+    let info = &doc.info_sheets[0];
+    assert_eq!((doc.title.as_str(), doc.info_sheets.len(), doc.data_sheets.len()), ("Cleanroom Edge Parity (α-Assay)", 1, 5));
     assert_eq!(
-        cont.data_sets.get(1).and_then(|ds| ds.cells.first()).and_then(|r| r.first()),
-        Some(&Cell { value: CellValue::Number(2.0), excluded: true })
+        (
+            info.get_constant("Km").and_then(|c| c.units.as_deref()),
+            info.get_constant("ΔG").and_then(|c| c.value.as_finite_f64()),
+            info.get_constant("Vehicle").map(|c| &c.value),
+            info.notes_markdown.as_str()
+        ),
+        (Some("μM"), Some(-14.2), Some(&ConstantValue::Text(String::from("10-6 M α-Toxin"))), "Incubated at 37°C ± 0.5°C in 5% CO2.")
     );
 
-    let TableArchetype::PartsOfWhole(ref pow) = pow_sheet.archetype else {
-        panic!("expected PartsOfWhole");
-    };
-    assert_eq!(pow.slice_labels, vec!["CD4+", "CD8+", "B-cell"]);
+    let TableArchetype::Nested(ref n) = doc.data_sheets[0].archetype else { panic!("expected Nested") };
     assert_eq!(
-        pow.data_sets.first().and_then(|ds| ds.cells.get(1)).and_then(|r| r.first()),
-        Some(&Cell { value: CellValue::Number(35.0), excluded: true })
+        (doc.data_sheets[0].title.as_str(), &n.row_titles, n.groups.len(), n.groups[0].biological_unit_count(), &n.groups[0].subcolumn_titles),
+        ("Tissue CO2 Nested (μg/mL)", &vec![String::from("Rep α"), String::from("Rep β")], 2, 2, &vec![String::from("WT:1"), String::from("WT:2")])
     );
-}
+    assert_eq!(
+        (&n.groups[0].cells[0][1], &n.groups[0].cells[1][0], &n.groups[1].cells[0][0], &n.groups[1].cells[1][1]),
+        (&Cell::excluded_number(9.9), &Cell::excluded_number(1.2), &Cell { value: CellValue::Empty, excluded: true }, &Cell::excluded_number(2.4))
+    );
 
-fn verify_prism_zip_roundtrip(doc: &ProjectDocument, pzfx: &str) {
-    let info = doc.info_sheets.first().expect("expected info sheet");
-    let [ds0, ds1, ds2, ds3, ds4] = doc.data_sheets.as_slice() else {
-        panic!("expected 5 data sheets");
-    };
-    let csv_opts = CsvOptions::csv();
-    let mut prism_zip = ZipWriter::new();
-    let sheet_specs = [
-        ("tbl-nested", ds0, "Nested", "sheets/01_nested.csv"),
-        ("tbl-surv", ds1, "Survival", "sheets/02_survival.csv"),
-        ("tbl-mv", ds2, "MultipleVariables", "sheets/03_multivar.csv"),
-        ("tbl-cont", ds3, "Contingency", "sheets/04_contingency.csv"),
-        ("tbl-pow", ds4, "PartsOfWhole", "sheets/05_pow.csv"),
+    let TableArchetype::Survival(ref s) = doc.data_sheets[1].archetype else { panic!("expected Survival") };
+    assert_eq!(
+        (doc.data_sheets[1].title.as_str(), &s.times[1], &s.times[2], &s.cohorts[0].cells[1][0], &s.cohorts[0].cells[2][0]),
+        (
+            "Survival Curve (τ ≤ 30d)",
+            &Cell::excluded_number(10.0),
+            &Cell::excluded_number(15.0),
+            &Cell::excluded_number(0.0),
+            &Cell { value: CellValue::Empty, excluded: true }
+        )
+    );
+
+    let TableArchetype::MultipleVariables(ref mv) = doc.data_sheets[2].archetype else { panic!("expected MV") };
+    assert_eq!(
+        (
+            mv.variables[0].role,
+            mv.variables[1].role,
+            mv.variables[1].title.as_str(),
+            mv.variables[1].cells[1].excluded,
+            mv.variables[1].cells[2].excluded
+        ),
+        (VariableRole::Categorical, VariableRole::Continuous, "IC50", true, true)
+    );
+
+    let TableArchetype::Contingency(ref cont) = doc.data_sheets[3].archetype else { panic!("expected Contingency") };
+    assert_eq!(
+        (&cont.row_titles, &cont.data_sets[1].cells[0][0]),
+        (&vec![String::from("Exposed"), String::from("Control")], &Cell::excluded_number(2.0))
+    );
+
+    let TableArchetype::PartsOfWhole(ref pow) = doc.data_sheets[4].archetype else { panic!("expected PoW") };
+    assert_eq!(
+        (&pow.slice_labels, &pow.data_sets[0].cells[1][0]),
+        (&vec![String::from("CD4+"), String::from("CD8+"), String::from("B-cell")], &Cell::excluded_number(35.0))
+    );
+
+    assert_eq!(open_project_bytes(&save_project_bytes(&doc).unwrap()).unwrap(), doc);
+
+    let specs = [
+        ("tbl-nested", &doc.data_sheets[0], "Nested", "sheets/01_nested.csv"),
+        ("tbl-surv", &doc.data_sheets[1], "Survival", "sheets/02_survival.csv"),
+        ("tbl-mv", &doc.data_sheets[2], "MultipleVariables", "sheets/03_multivar.csv"),
+        ("tbl-cont", &doc.data_sheets[3], "Contingency", "sheets/04_contingency.csv"),
+        ("tbl-pow", &doc.data_sheets[4], "PartsOfWhole", "sheets/05_pow.csv"),
     ];
-    let mut manifest_sheets = Vec::new();
-    for (id, sheet, kind_str, csv_path) in sheet_specs {
-        let csv_text = export_datasheet_to_csv(sheet, &csv_opts).expect("export csv");
-        prism_zip.add_file(csv_path, csv_text.into_bytes()).expect("add csv to prism");
-        manifest_sheets.push(serde_json::json!({
-            "id": id,
-            "title": sheet.title,
-            "kind": kind_str,
-            "csv_path": csv_path
-        }));
-    }
-    let prism_manifest = serde_json::json!({
+    let csv_blobs: Vec<(&str, Vec<u8>)> =
+        specs.iter().map(|&(_, s, _, p)| (p, export_datasheet_to_csv(s, &CsvOptions::csv()).unwrap().into_bytes())).collect();
+    let manifest_bytes = serde_json::to_vec(&json!({
         "title": doc.title,
-        "sheets": manifest_sheets,
-        "info_sheets": [
-            {
-                "id": "info-main",
-                "title": info.title,
-                "notes": info.notes_markdown,
-                "constants": {
-                    "Km": { "value": 2.5, "units": "μM" },
-                    "ΔG": { "value": -14.2, "units": "kJ/mol" },
-                    "Vehicle": "10-6 M α-Toxin"
-                }
-            }
-        ]
-    });
-    prism_zip.add_file("manifest.json", serde_json::to_vec(&prism_manifest).expect("manifest json")).expect("add manifest");
-    let prism_bytes = prism_zip.finish().expect("finish prism zip");
-
-    let prism_report = import_prism_bytes(&prism_bytes).expect("import .prism");
-    assert_eq!(prism_report.document.title, doc.title);
-    assert_eq!(prism_report.document.data_sheets.len(), 5);
-    assert_eq!(prism_report.document.info_sheets.len(), 1);
-    let roundtrip_info = prism_report.document.info_sheets.first().expect("expected roundtrip info sheet");
-    assert_eq!(roundtrip_info.get_constant("Km").and_then(|c| c.units.as_deref()), Some("μM"));
-    assert_eq!(roundtrip_info.notes_markdown, info.notes_markdown);
-
-    for (actual, expected) in prism_report.document.data_sheets.iter().zip(doc.data_sheets.iter()) {
-        assert_eq!(actual.kind(), expected.kind());
-        assert_eq!(actual.archetype, expected.archetype);
+        "sheets": specs.iter().map(|&(id, s, k, p)| json!({ "id": id, "title": s.title, "kind": k, "csv_path": p })).collect::<Vec<_>>(),
+        "info_sheets": [{ "id": "info-main", "title": info.title, "notes": info.notes_markdown, "constants": { "Km": { "value": 2.5, "units": "μM" }, "ΔG": { "value": -14.2, "units": "kJ/mol" }, "Vehicle": "10-6 M α-Toxin" } }]
+    })).unwrap();
+    let mut entries: Vec<(&str, &[u8])> = csv_blobs.iter().map(|(p, b)| (*p, b.as_slice())).collect();
+    entries.push(("manifest.json", &manifest_bytes));
+    let imported = import_prism_bytes(&build_zip_entries(&entries)).unwrap().document;
+    assert_eq!(
+        (
+            imported.title.as_str(),
+            imported.data_sheets.len(),
+            imported.info_sheets.len(),
+            imported.info_sheets[0].get_constant("Km").and_then(|c| c.units.as_deref()),
+            imported.info_sheets[0].notes_markdown.as_str()
+        ),
+        (doc.title.as_str(), 5, 1, Some("μM"), info.notes_markdown.as_str())
+    );
+    for (a, b) in imported.data_sheets.iter().zip(&doc.data_sheets) {
+        assert_eq!((a.kind(), &a.archetype), (b.kind(), &b.archetype));
     }
 
-    // Also confirm a `.prism` containing an embedded `.pzfx` file imports cleanly.
-    let mut pzfx_prism_zip = ZipWriter::new();
-    pzfx_prism_zip.add_file("data/embedded.pzfx", pzfx.as_bytes().to_vec()).expect("add pzfx inside prism");
-    let pzfx_prism_report = import_prism_bytes(&pzfx_prism_zip.finish().expect("zip")).expect("import pzfx inside prism");
-    assert_eq!(pzfx_prism_report.document.data_sheets.len(), 5);
-    assert_eq!(pzfx_prism_report.document.info_sheets.len(), 1);
+    let pzfx_prism = import_prism_bytes(&build_zip_entries(&[("data/embedded.pzfx", pzfx.as_bytes())])).unwrap().document;
+    assert_eq!((pzfx_prism.data_sheets.len(), pzfx_prism.info_sheets.len()), (5, 1));
 }
 
 #[test]
 fn r1_s06_02_snapshot_covered_seq_prevents_double_apply_across_mid_checkpoint_crash_and_legacy_fail_clear() {
-    struct FailClearBackend {
-        inner: MemoryJournalBackend,
-    }
-
+    struct FailClearBackend(MemoryJournalBackend);
     impl JournalBackend for FailClearBackend {
-        fn acquire_lease(&mut self, lease: &JournalLockLease, now_epoch_ms: u64) -> Result<Option<JournalLockLease>, FormatError> {
-            self.inner.acquire_lease(lease, now_epoch_ms)
+        fn acquire_lease(&mut self, l: &JournalLockLease, t: u64) -> Result<Option<JournalLockLease>, FormatError> {
+            self.0.acquire_lease(l, t)
         }
-
-        fn renew_lease(&mut self, lease: &JournalLockLease, now_epoch_ms: u64) -> Result<(), FormatError> {
-            self.inner.renew_lease(lease, now_epoch_ms)
+        fn renew_lease(&mut self, l: &JournalLockLease, t: u64) -> Result<(), FormatError> {
+            self.0.renew_lease(l, t)
         }
-
-        fn release_lease(&mut self, owner_id: &str) -> Result<(), FormatError> {
-            self.inner.release_lease(owner_id)
+        fn release_lease(&mut self, o: &str) -> Result<(), FormatError> {
+            self.0.release_lease(o)
         }
-
         fn read_lease(&self) -> Result<Option<JournalLockLease>, FormatError> {
-            self.inner.read_lease()
+            self.0.read_lease()
         }
-
-        fn write_snapshot_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
-            self.inner.write_snapshot_atomic(bytes)
+        fn write_snapshot_atomic(&mut self, b: &[u8]) -> Result<(), FormatError> {
+            self.0.write_snapshot_atomic(b)
         }
-
         fn read_snapshot(&self) -> Result<Option<Vec<u8>>, FormatError> {
-            self.inner.read_snapshot()
+            self.0.read_snapshot()
         }
-
-        fn append_journal_line(&mut self, ndjson_line: &str) -> Result<(), FormatError> {
-            self.inner.append_journal_line(ndjson_line)
+        fn append_journal_line(&mut self, s: &str) -> Result<(), FormatError> {
+            self.0.append_journal_line(s)
         }
-
         fn read_journal_bytes(&self) -> Result<Vec<u8>, FormatError> {
-            self.inner.read_journal_bytes()
+            self.0.read_journal_bytes()
         }
-
-        fn replace_journal_bytes_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
-            self.inner.replace_journal_bytes_atomic(bytes)
+        fn replace_journal_bytes_atomic(&mut self, b: &[u8]) -> Result<(), FormatError> {
+            self.0.replace_journal_bytes_atomic(b)
         }
-
         fn clear_journal(&mut self) -> Result<(), FormatError> {
             Err(FormatError::Io(String::from("simulated clear_journal failure")))
         }
     }
 
-    // 1. Legacy JournalBackend override (only original 10 methods) where clear_journal fails mid-checkpoint.
-    let (mut legacy_journal, _) =
-        CrashRecoveryJournal::open_or_recover(FailClearBackend { inner: MemoryJournalBackend::new() }, "legacy-1", 2_000, 1_000)
-            .expect("open legacy backend");
-    let seq1 = legacy_journal.record_command(serde_json::json!({ "op": "inc", "delta": 1 })).expect("seq1");
-    let seq2 = legacy_journal.record_command(serde_json::json!({ "op": "inc", "delta": 2 })).expect("seq2");
-    assert_eq!((seq1, seq2), (1, 2));
-    assert!(legacy_journal.checkpoint(b"SNAPSHOT-SEQ-2").is_err(), "FailClear must error on clear_journal");
-    let crashed_legacy = legacy_journal.abandon();
-    let (reopened_legacy, legacy_report) =
-        CrashRecoveryJournal::open_or_recover(crashed_legacy, "legacy-2", 2_000, 4_000).expect("recover after FailClear");
-    assert_eq!(legacy_report.snapshot.as_deref(), Some(b"SNAPSHOT-SEQ-2".as_slice()));
-    assert_eq!(legacy_report.snapshot_covered_seq, Some(2));
-    assert!(legacy_report.recovered_commands.is_empty(), "seq <= covered_seq must not double-apply");
-    assert!(reopened_legacy.next_seq() >= 3);
+    let (mut legacy, _) = CrashRecoveryJournal::open_or_recover(FailClearBackend(MemoryJournalBackend::new()), "legacy-1", 2_000, 1_000).unwrap();
+    assert_eq!(
+        (legacy.record_command(json!({"op":"inc","delta":1})).unwrap(), legacy.record_command(json!({"op":"inc","delta":2})).unwrap()),
+        (1, 2)
+    );
+    assert!(legacy.checkpoint(b"SNAPSHOT-SEQ-2").is_err());
+    let (reopened_legacy, leg_rep) = CrashRecoveryJournal::open_or_recover(legacy.abandon(), "legacy-2", 2_000, 4_000).unwrap();
+    assert!(
+        leg_rep.snapshot.as_deref() == Some(b"SNAPSHOT-SEQ-2".as_slice())
+            && leg_rep.snapshot_covered_seq == Some(2)
+            && leg_rep.recovered_commands.is_empty()
+            && reopened_legacy.next_seq() >= 3
+    );
 
-    // 2. Native DirectoryJournalBackend: atomic snapshot + covered_seq survives crash before clear_journal
-    //    and mid-promotion (when pending sidecar matches new snapshot while old meta sidecar still exists).
-    let dir = TempDirGuard::new("s06-02-covered-seq").expect("create temp dir");
-    let (mut dir_journal, _) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("dir"), "dir-1", 2_000, 1_000)
-            .expect("open dir journal");
-    dir_journal.record_command(serde_json::json!({ "op": "c1" })).expect("dir c1");
-    dir_journal.record_command(serde_json::json!({ "op": "c2" })).expect("dir c2");
-    // Simulate crash right after snapshot promotion before ops.journal clear by writing snapshot+meta with covered_seq=2.
-    dir_journal.backend_mut().write_snapshot_with_seq(b"DIR-SNAP-2", 2).expect("write snapshot with seq");
-    let seq3 = dir_journal.record_command(serde_json::json!({ "op": "c3" })).expect("dir c3");
-    assert_eq!(seq3, 3);
-    drop(dir_journal.abandon());
+    let dir = TempDirGuard::new("s06-02-covered-seq").unwrap();
+    let (mut dir_j, _) = open_dir_journal(dir.path(), "dir-1", 2_000, 1_000).unwrap();
+    dir_j.record_command(json!({ "op": "c1" })).unwrap();
+    dir_j.record_command(json!({ "op": "c2" })).unwrap();
+    dir_j.backend_mut().write_snapshot_with_seq(b"DIR-SNAP-2", 2).unwrap();
+    assert_eq!(dir_j.record_command(json!({ "op": "c3" })).unwrap(), 3);
+    drop(dir_j.abandon());
 
-    let (dir_reopened, dir_report) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("reopen dir"), "dir-2", 2_000, 4_000)
-            .expect("recover dir journal");
-    assert_eq!(dir_report.snapshot.as_deref(), Some(b"DIR-SNAP-2".as_slice()));
-    assert_eq!(dir_report.snapshot_covered_seq, Some(2));
-    assert_eq!(dir_report.recovered_seqs, vec![3]);
-    assert_eq!(dir_report.recovered_commands, vec![serde_json::json!({ "op": "c3" })]);
+    let (dir_reopened, dir_rep) = open_dir_journal(dir.path(), "dir-2", 2_000, 4_000).unwrap();
+    assert_eq!(
+        (dir_rep.snapshot.as_deref(), dir_rep.snapshot_covered_seq, dir_rep.recovered_seqs, dir_rep.recovered_commands),
+        (Some(b"DIR-SNAP-2".as_slice()), Some(2), vec![3], vec![json!({ "op": "c3" })])
+    );
 
-    // Also simulate interrupted pending meta promotion cleanly resolved against snapshot checksum.
-    let crashed_after_meta = dir_reopened.abandon();
-    fs::write(dir.path().join(SNAPSHOT_FILE_NAME), b"DIR-SNAP-3").expect("write snap3");
+    let crashed_meta = dir_reopened.abandon();
+    fs::write(dir.child(SNAPSHOT_FILE_NAME), b"DIR-SNAP-3").unwrap();
     fs::write(
-        dir.path().join("snapshot.meta.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "format_version": 1,
-            "covered_seq": 1,
-            "snapshot_crc32": 0,
-            "snapshot_len": 1
-        }))
-        .expect("old meta"),
+        dir.child("snapshot.meta.json"),
+        serde_json::to_vec(&json!({ "format_version": 1, "covered_seq": 1, "snapshot_crc32": 0, "snapshot_len": 1 })).unwrap(),
     )
-    .expect("write stale meta");
+    .unwrap();
     fs::write(
-        dir.path().join("snapshot.pending.meta.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "format_version": 1,
-            "covered_seq": 3,
-            "snapshot_crc32": crc32fast::hash(b"DIR-SNAP-3"),
-            "snapshot_len": b"DIR-SNAP-3".len()
-        }))
-        .expect("pending meta"),
+        dir.child("snapshot.pending.meta.json"),
+        serde_json::to_vec(
+            &json!({ "format_version": 1, "covered_seq": 3, "snapshot_crc32": crc32fast::hash(b"DIR-SNAP-3"), "snapshot_len": b"DIR-SNAP-3".len() }),
+        )
+        .unwrap(),
     )
-    .expect("write pending meta");
-    let (dir_pending_reopened, pending_report) =
-        CrashRecoveryJournal::open_or_recover(crashed_after_meta, "dir-3", 2_000, 7_000).expect("recover pending meta");
-    assert_eq!(pending_report.snapshot_covered_seq, Some(3));
-    assert!(pending_report.recovered_commands.is_empty());
+    .unwrap();
+    let (dir_pending, pending_rep) = CrashRecoveryJournal::open_or_recover(crashed_meta, "dir-3", 2_000, 7_000).unwrap();
+    assert!(pending_rep.snapshot_covered_seq == Some(3) && pending_rep.recovered_commands.is_empty());
 
-    // After clean close, fresh session resets next_seq=1 and covered_seq is cleared so new seq=1 is not skipped.
-    let clean_backend = dir_pending_reopened.close_cleanly(b"DIR-FINAL").expect("clean close");
-    let (mut fresh_journal, fresh_report) = CrashRecoveryJournal::open_or_recover(clean_backend, "dir-4", 2_000, 8_000).expect("fresh open");
-    assert_eq!(fresh_journal.next_seq(), 1);
-    assert_eq!(fresh_report.snapshot_covered_seq, None);
-    let fresh_seq = fresh_journal.record_command(serde_json::json!({ "op": "fresh-after-clean-close" })).expect("fresh seq1");
-    assert_eq!(fresh_seq, 1);
-    drop(fresh_journal.abandon());
-
-    let (_, after_fresh_crash) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("open"), "dir-5", 2_000, 12_000)
-            .expect("recover fresh seq1");
-    assert_eq!(after_fresh_crash.recovered_seqs, vec![1]);
+    let (mut fresh_j, fresh_rep) =
+        CrashRecoveryJournal::open_or_recover(dir_pending.close_cleanly(b"DIR-FINAL").unwrap(), "dir-4", 2_000, 8_000).unwrap();
+    assert!(
+        fresh_j.next_seq() == 1
+            && fresh_rep.snapshot_covered_seq.is_none()
+            && fresh_j.record_command(json!({ "op": "fresh-after-clean-close" })).unwrap() == 1
+    );
+    drop(fresh_j.abandon());
+    assert_eq!(open_dir_journal(dir.path(), "dir-5", 2_000, 12_000).unwrap().1.recovered_seqs, vec![1]);
 }
 
 #[test]
 fn r1_s06_03_interior_corrupt_and_short_write_lines_are_quarantined_with_warnings() {
-    // 1. MemoryJournalBackend: torn interior write without trailing '\n' + later records + bad tail.
-    let (mut mem_journal, _) = CrashRecoveryJournal::open_or_recover(MemoryJournalBackend::new(), "mem-1", 3_000, 1_000).expect("open mem");
-    let cmd1 = serde_json::json!({ "step": 1 });
-    let cmd2 = serde_json::json!({ "step": 2 });
-    let cmd3 = serde_json::json!({ "step": 3 });
-    mem_journal.record_command(cmd1.clone()).expect("cmd1");
-    // Simulate torn short write lacking '\n' right in the middle of ops.journal.
-    mem_journal.backend_mut().append_raw_journal_bytes(b"{\"format_version\":1,\"seq\":99");
-    // Subsequent record_command must NOT glue onto the torn prefix line.
-    mem_journal.record_command(cmd2.clone()).expect("cmd2");
-    mem_journal.record_command(cmd3.clone()).expect("cmd3");
-    // Also inject an invalid-UTF-8 corrupt tail.
-    mem_journal.backend_mut().append_raw_journal_bytes(b"\xff\xfe{\"truncated\":");
+    let (cmd1, cmd2, cmd3) = (json!({ "step": 1 }), json!({ "step": 2 }), json!({ "step": 3 }));
 
-    let crashed_mem = mem_journal.abandon();
-    let (mem_recovered, mem_report) =
-        CrashRecoveryJournal::open_or_recover(crashed_mem, "mem-2", 3_000, 5_000).expect("interior corruption must recover intact commands");
-    assert_eq!(mem_report.recovered_commands, vec![cmd1.clone(), cmd2.clone(), cmd3.clone()]);
-    assert_eq!(mem_report.recovered_seqs, vec![1, 2, 3]);
-    assert_eq!(mem_report.discarded_corrupt_interior_lines, 1);
-    assert_eq!(mem_report.discarded_corrupt_tail_lines, 1);
-    assert_eq!(mem_report.total_discarded_corrupt_lines(), 2);
-    assert_eq!(mem_report.warnings.len(), 2);
-    assert_eq!(mem_report.warnings[0].kind, "corrupt_interior_line");
-    assert_eq!(mem_report.warnings[1].kind, "corrupt_tail_line");
-    drop(mem_recovered.abandon());
+    let (mut mem_j, _) = CrashRecoveryJournal::open_or_recover(MemoryJournalBackend::new(), "mem-1", 3_000, 1_000).unwrap();
+    mem_j.record_command(cmd1.clone()).unwrap();
+    mem_j.backend_mut().append_raw_journal_bytes(b"{\"format_version\":1,\"seq\":99");
+    mem_j.record_command(cmd2.clone()).unwrap();
+    mem_j.record_command(cmd3.clone()).unwrap();
+    mem_j.backend_mut().append_raw_journal_bytes(b"\xff\xfe{\"truncated\":");
 
-    // Subsequent open on rewritten journal observes 0 warnings.
-    let unused_dir = TempDirGuard::new("unused").expect("create temp dir");
-    let (_, clean_mem_report) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(unused_dir.path()).expect("dir"), "x", 1, 1).expect("empty");
-    assert!(clean_mem_report.warnings.is_empty());
+    let (mem_rec, mem_rep) = CrashRecoveryJournal::open_or_recover(mem_j.abandon(), "mem-2", 3_000, 5_000).unwrap();
+    assert_eq!((&mem_rep.recovered_commands, &mem_rep.recovered_seqs), (&vec![cmd1.clone(), cmd2.clone(), cmd3.clone()], &vec![1, 2, 3]));
+    assert_eq!((mem_rep.discarded_corrupt_interior_lines, mem_rep.discarded_corrupt_tail_lines, mem_rep.total_discarded_corrupt_lines()), (1, 1, 2));
+    assert_eq!(
+        (mem_rep.warnings.len(), mem_rep.warnings[0].kind.as_str(), mem_rep.warnings[1].kind.as_str()),
+        (2, "corrupt_interior_line", "corrupt_tail_line")
+    );
+    drop(mem_rec.abandon());
 
-    // 2. DirectoryJournalBackend: interior partial JSON + valid later writes on real disk.
-    let dir = TempDirGuard::new("s06-03-dir-interior").expect("create temp dir");
-    let (mut dir_journal, _) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("dir"), "d1", 2_000, 1_000).expect("open dir");
-    dir_journal.record_command(cmd1.clone()).expect("d cmd1");
+    let unused_dir = TempDirGuard::new("unused").unwrap();
+    assert!(open_dir_journal(unused_dir.path(), "x", 1, 1).unwrap().1.warnings.is_empty());
+
+    let dir = TempDirGuard::new("s06-03-dir-interior").unwrap();
+    let (mut dir_j, _) = open_dir_journal(dir.path(), "d1", 2_000, 1_000).unwrap();
+    dir_j.record_command(cmd1.clone()).unwrap();
     {
         use std::io::Write;
-        let mut f = fs::OpenOptions::new().append(true).open(dir.path().join(JOURNAL_FILE_NAME)).expect("open raw ops.journal");
-        f.write_all(b"{\"format_version\":1,\"seq\":2,\"partial").expect("write short partial");
-        f.sync_data().expect("sync partial");
+        let mut f = fs::OpenOptions::new().append(true).open(dir.child(JOURNAL_FILE_NAME)).unwrap();
+        f.write_all(b"{\"format_version\":1,\"seq\":2,\"partial").unwrap();
+        f.sync_data().unwrap();
     }
-    dir_journal.record_command(cmd2.clone()).expect("d cmd2 after partial");
-    dir_journal.record_command(cmd3.clone()).expect("d cmd3");
-    drop(dir_journal.abandon());
+    dir_j.record_command(cmd2.clone()).unwrap();
+    dir_j.record_command(cmd3.clone()).unwrap();
+    drop(dir_j.abandon());
 
-    let (reopened_dir, dir_report) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("dir"), "d2", 2_000, 4_000)
-            .expect("recover dir interior");
-    assert_eq!(dir_report.recovered_commands, vec![cmd1, cmd2, cmd3]);
-    assert_eq!(dir_report.recovered_seqs, vec![1, 2, 3]);
-    assert_eq!(dir_report.discarded_corrupt_interior_lines, 1);
-    assert_eq!(dir_report.warnings.len(), 1);
-    assert_eq!(dir_report.warnings[0].kind, "corrupt_interior_line");
-    let rewritten_backend = reopened_dir.close_cleanly(b"DONE").expect("close cleanly");
-    assert!(rewritten_backend.journal_bytes_or_empty().is_empty());
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-trait DirBackendBytesExt {
-    fn journal_bytes_or_empty(&self) -> Vec<u8>;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl DirBackendBytesExt for DirectoryJournalBackend {
-    fn journal_bytes_or_empty(&self) -> Vec<u8> {
-        self.read_journal_bytes().unwrap_or_default()
-    }
+    let (reopened_dir, dir_rep) = open_dir_journal(dir.path(), "d2", 2_000, 4_000).unwrap();
+    assert_eq!(
+        (
+            dir_rep.recovered_commands,
+            dir_rep.recovered_seqs,
+            dir_rep.discarded_corrupt_interior_lines,
+            dir_rep.warnings.len(),
+            dir_rep.warnings[0].kind.as_str()
+        ),
+        (vec![cmd1, cmd2, cmd3], vec![1, 2, 3], 1, 1, "corrupt_interior_line")
+    );
+    assert!(reopened_dir.close_cleanly(b"DONE").unwrap().read_journal_bytes().unwrap_or_default().is_empty());
 }
 
 #[test]
 fn r1_s11_02_dead_local_pid_lock_reclaimed_without_waiting_ttl() {
     use curvebook_format::recovery::{is_dead_local_owner, is_lease_reclaimable};
 
-    // Synthetic non-PID owner IDs and live current PID must NOT be classified as dead.
-    assert!(!is_dead_local_owner("writer-1"));
-    assert!(!is_dead_local_owner("curvebook-pid-0"));
     let self_owner = format!("curvebook-pid-{}", std::process::id());
-    assert!(!is_dead_local_owner(&self_owner));
+    assert!(!is_dead_local_owner("writer-1") && !is_dead_local_owner("curvebook-pid-0") && !is_dead_local_owner(&self_owner));
 
-    let dir_live = TempDirGuard::new("s11-02-live-pid").expect("create temp dir");
-    let (live_journal, _) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir_live.path()).expect("dir"), &self_owner, 300_000, 1_000_000)
-            .expect("acquire self lock");
-    let err = CrashRecoveryJournal::open_or_recover(
-        DirectoryJournalBackend::open_dir(dir_live.path()).expect("dir"),
-        format!("{self_owner}-win-2"),
-        300_000,
-        1_000_050,
-    )
-    .expect_err("live same-host PID with fresh TTL must still block concurrent writer");
-    assert!(err.to_string().contains("actively held"));
-    drop(live_journal.abandon());
+    let dir_live = TempDirGuard::new("s11-02-live-pid").unwrap();
+    let (live_j, _) = open_dir_journal(dir_live.path(), &self_owner, 300_000, 1_000_000).unwrap();
+    assert!(open_dir_journal(dir_live.path(), &format!("{self_owner}-win-2"), 300_000, 1_000_050).unwrap_err().to_string().contains("actively held"));
+    drop(live_j.abandon());
 
     #[cfg(unix)]
     {
         let dead_owner = "curvebook-pid-999999999";
-        assert!(is_dead_local_owner(dead_owner), "nonexistent PID must be detected cleanly without unsafe");
-        let dir_dead = TempDirGuard::new("s11-02-dead-pid").expect("create temp dir");
-        let (mut crashed, _) =
-            CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir_dead.path()).expect("dir"), dead_owner, 300_000, 1_000_000)
-                .expect("acquire dead pid lock");
-        crashed.record_command(serde_json::json!({ "op": "edit" })).expect("record command");
+        assert!(is_dead_local_owner(dead_owner));
+        let dir_dead = TempDirGuard::new("s11-02-dead-pid").unwrap();
+        let (mut crashed, _) = open_dir_journal(dir_dead.path(), dead_owner, 300_000, 1_000_000).unwrap();
+        crashed.record_command(json!({ "op": "edit" })).unwrap();
         let stale_lease = crashed.lease().clone();
-        assert!(!stale_lease.is_stale(1_000_050), "TTL should not be expired yet");
-        assert!(is_lease_reclaimable(&stale_lease, 1_000_050));
+        assert!(!stale_lease.is_stale(1_000_050) && is_lease_reclaimable(&stale_lease, 1_000_050));
         drop(crashed.abandon());
 
-        let (reclaimed, report) =
-            CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir_dead.path()).expect("dir"), &self_owner, 300_000, 1_000_050)
-                .expect("dead PID lock must be reclaimed immediately before TTL expires");
-        assert_eq!(report.recovered_from_stale_lock.as_ref().map(|l| l.owner_id.as_str()), Some(dead_owner));
-        assert_eq!(report.recovered_commands, vec![serde_json::json!({ "op": "edit" })]);
+        let (reclaimed, rep) = open_dir_journal(dir_dead.path(), &self_owner, 300_000, 1_000_050).unwrap();
+        assert_eq!(
+            (rep.recovered_from_stale_lock.as_ref().map(|l| l.owner_id.as_str()), rep.recovered_commands),
+            (Some(dead_owner), vec![json!({ "op": "edit" })])
+        );
         let _ = reclaimed.close_cleanly(b"RECLAIMED");
     }
 }
 
 #[test]
 fn r1_s11_03_stale_owner_cannot_clobber_active_owner_snapshot_or_journal() {
-    let dir = TempDirGuard::new("s11-03-clobber").expect("create temp dir");
-    let (mut owner_a, _) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("dir"), "owner-A", 1_000, 1_000).expect("open A");
-    owner_a.record_command(serde_json::json!({ "from": "A" })).expect("record A");
+    let dir = TempDirGuard::new("s11-03-clobber").unwrap();
+    let (mut owner_a, _) = open_dir_journal(dir.path(), "owner-A", 1_000, 1_000).unwrap();
+    owner_a.record_command(json!({ "from": "A" })).unwrap();
 
-    // TTL expires and owner B legitimately takes over the recovery directory.
-    let (mut owner_b, _) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("dir"), "owner-B", 5_000, 5_000).expect("open B");
-    owner_b.checkpoint(b"LIVE-SNAPSHOT-B").expect("checkpoint B");
-    owner_b.record_command(serde_json::json!({ "from": "B" })).expect("record B");
+    let (mut owner_b, _) = open_dir_journal(dir.path(), "owner-B", 5_000, 5_000).unwrap();
+    owner_b.checkpoint(b"LIVE-SNAPSHOT-B").unwrap();
+    owner_b.record_command(json!({ "from": "B" })).unwrap();
 
-    // Stale owner A wakes up and attempts both checkpoint() and close_cleanly(); neither may touch B's files.
-    let ck_err = owner_a.checkpoint(b"STALE-A-CLOBBER").expect_err("stale owner checkpoint must fail");
-    assert!(ck_err.to_string().contains("owned by `owner-B`"));
-    assert_eq!(fs::read(dir.path().join(SNAPSHOT_FILE_NAME)).expect("read B snap"), b"LIVE-SNAPSHOT-B");
+    assert!(owner_a.checkpoint(b"STALE-A-CLOBBER").unwrap_err().to_string().contains("owned by `owner-B`"));
+    assert_eq!(fs::read(dir.child(SNAPSHOT_FILE_NAME)).unwrap(), b"LIVE-SNAPSHOT-B");
+    assert!(owner_a.close_cleanly(b"STALE-A-CLOSE").unwrap_err().to_string().contains("owned by `owner-B`"));
+    assert_eq!(fs::read(dir.child(SNAPSHOT_FILE_NAME)).unwrap(), b"LIVE-SNAPSHOT-B");
+    assert_eq!(DirectoryJournalBackend::open_dir(dir.path()).unwrap().read_lease().unwrap().unwrap().owner_id, "owner-B");
 
-    let close_err = owner_a.close_cleanly(b"STALE-A-CLOSE").expect_err("stale owner close_cleanly must fail");
-    assert!(close_err.to_string().contains("owned by `owner-B`"));
-    assert_eq!(fs::read(dir.path().join(SNAPSHOT_FILE_NAME)).expect("B snap intact after stale close"), b"LIVE-SNAPSHOT-B");
-    let live_lease = DirectoryJournalBackend::open_dir(dir.path()).expect("dir").read_lease().expect("read lease").expect("B lease present");
-    assert_eq!(live_lease.owner_id, "owner-B");
-    let (_, post_b_check) =
-        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(dir.path()).expect("dir"), "owner-C", 5_000, 20_000).expect("open C");
-    assert_eq!(post_b_check.snapshot.as_deref(), Some(b"LIVE-SNAPSHOT-B".as_slice()));
-    assert_eq!(post_b_check.recovered_commands, vec![serde_json::json!({ "from": "B" })]);
+    let (_, post_b) = open_dir_journal(dir.path(), "owner-C", 5_000, 20_000).unwrap();
+    assert_eq!((post_b.snapshot.as_deref(), post_b.recovered_commands), (Some(b"LIVE-SNAPSHOT-B".as_slice()), vec![json!({ "from": "B" })]));
 }

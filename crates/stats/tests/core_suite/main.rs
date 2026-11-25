@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "../common/mod.rs"]
+mod common;
+
 mod d1_edge_matrix;
 mod d1_poisson_cox_result_sheets;
 mod d1_reference_oracles;

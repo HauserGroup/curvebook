@@ -2,55 +2,38 @@
 //! stack VM evaluator, implicit root solver, RK45 ODE integrator, and nonlinear fitter.
 #![forbid(unsafe_code)]
 
-use curvebook_doc::{FitMethod, ParameterRule, ParameterScope, WeightingScheme};
+use curvebook_doc::{FitMethod, WeightingScheme};
 use curvebook_fit::{
     CompiledDslModel, DataPoint, DatasetSeries, DslEquationKind, HookContext, ParametricModel, SolverConfig, fit_nonlinear, integrate_rk45,
     replicates_lack_of_fit,
 };
 use proptest::prelude::{BoxedStrategy, Just, ProptestConfig, Strategy, any, prop_assert, prop_assert_eq, prop_oneof, proptest};
+use proptest::sample::select;
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::time::{Duration, Instant};
 
-fn make_series(idx: usize, label: &str, xs: &[f64], ys: &[f64]) -> DatasetSeries {
-    let points = xs
-        .iter()
-        .zip(ys.iter())
-        .enumerate()
-        .map(|(row, (&x, &y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: idx, row })
-        .collect();
-    DatasetSeries {
-        data_set_index: idx,
-        label: label.to_owned(),
-        points,
-        unknowns_y: Vec::new(),
-        unknowns_x: Vec::new(),
-        is_pre_summarized: false,
-        column_title_value: None,
-    }
-}
+use crate::common::{cfg_fast, dsl_compile, rule_const, rule_local_bounds, rule_shared, series_from_pts, series_xy};
 
-fn adversarial_f64_values() -> Vec<f64> {
-    vec![
-        0.0,
-        -0.0,
-        1.0,
-        -1.0,
-        0.5,
-        FRAC_PI_2,
-        PI,
-        1e-12,
-        -1e-12,
-        1e-300,
-        -1e-300,
-        1e12,
-        -1e12,
-        1e300,
-        -1e300,
-        f64::NAN,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-    ]
-}
+const ADVERSARIAL_F64S: [f64; 18] = [
+    0.0,
+    -0.0,
+    1.0,
+    -1.0,
+    0.5,
+    FRAC_PI_2,
+    PI,
+    1e-12,
+    -1e-12,
+    1e-300,
+    -1e-300,
+    1e12,
+    -1e12,
+    1e300,
+    -1e300,
+    f64::NAN,
+    f64::INFINITY,
+    f64::NEG_INFINITY,
+];
 
 fn assert_eval_bounded_and_clean(model: &CompiledDslModel, x: &[f64], params: &[f64], ds_idx: usize, budget: Duration, ctx: &str) {
     let t0 = Instant::now();
@@ -76,8 +59,7 @@ fn compile_and_exercise(source: &str, budget: Duration) -> Result<CompiledDslMod
     let _guess = model.initial_guess(&sample_pts);
     let _bounds = model.default_bounds();
 
-    let hostiles = [0.0, -0.0, 1.0, -1.0, 1e-10, 1e12, f64::NAN, f64::INFINITY];
-    for &xv in &hostiles {
+    for xv in [0.0, -0.0, 1.0, -1.0, 1e-10, 1e12, f64::NAN, f64::INFINITY] {
         let mut params = vec![1.0_f64; p_count];
         assert_eval_bounded_and_clean(&model, &[xv], &params, 0, budget, source);
         if p_count > 0 {
@@ -103,12 +85,8 @@ fn check_fit_clean(model: &dyn ParametricModel, datasets: &[DatasetSeries], cfg:
             assert!(p.estimate.is_finite(), "non-finite fitted parameter `{}` = {} for `{ctx}`", p.name, p.estimate);
         }
         for ds in &fit.datasets {
-            for &pv in &ds.params {
-                assert!(pv.is_finite(), "non-finite dataset param {pv} for `{ctx}`");
-            }
-            for &yh in &ds.y_hat {
-                assert!(yh.is_finite(), "non-finite y_hat {yh} for `{ctx}`");
-            }
+            assert!(ds.params.iter().all(|v| v.is_finite()), "non-finite dataset param for `{ctx}`");
+            assert!(ds.y_hat.iter().all(|v| v.is_finite()), "non-finite y_hat for `{ctx}`");
         }
     }
 }
@@ -119,19 +97,16 @@ fn check_fit_clean(model: &dyn ParametricModel, datasets: &[DatasetSeries], cfg:
 
 #[test]
 fn empty_whitespace_comment_and_huge_equations_return_cleanly() {
-    let empty_cases = [
+    for case in [
         "",
         "   \n\t\r\n  ",
         "# pure comment\n// slash comment\n; semicolon comment",
         "# initial: a=1, b=NAN\n# t0=INF\n",
         "<A>   \n<B> # just comment",
-    ];
-    for case in empty_cases {
-        let res = CompiledDslModel::compile("empty", case);
-        assert!(res.is_err(), "expected empty equation Err for `{case:?}`");
+    ] {
+        assert!(CompiledDslModel::compile("empty", case).is_err(), "expected empty equation Err for `{case:?}`");
     }
 
-    // Huge expressions, long identifiers, long numeric literals, many locals.
     let huge_sum = format!("Y = {}", std::iter::repeat_n("1", 5_000).collect::<Vec<_>>().join(" + "));
     let huge_ident = format!("Y = {}", "a".repeat(200_000));
     let huge_number = format!("Y = {} + X", "9".repeat(100_000));
@@ -150,13 +125,15 @@ fn empty_whitespace_comment_and_huge_equations_return_cleanly() {
 fn deeply_nested_parens_and_long_chains_do_not_overflow_stack() {
     let budget = Duration::from_secs(2);
     for depth in [16, 64, 128, 512, 2_000, 10_000] {
-        let parens = format!("Y = {}X{}", "(".repeat(depth), ")".repeat(depth));
-        let unary_neg = format!("Y = {}X", "-".repeat(depth));
-        let unary_not = format!("Y = {}X", "!".repeat(depth));
-        let right_pow = format!("Y = {}X", "2 ^ ".repeat(depth));
-        let nested_if = format!("Y = {}X{}", "IF(X > 0, ".repeat(depth.min(2_500)), ", 0)".repeat(depth.min(2_500)));
-
-        for src in [&parens, &unary_neg, &unary_not, &right_pow, &nested_if] {
+        let d_if = depth.min(2_500);
+        let cases = [
+            format!("Y = {}X{}", "(".repeat(depth), ")".repeat(depth)),
+            format!("Y = {}X", "-".repeat(depth)),
+            format!("Y = {}X", "!".repeat(depth)),
+            format!("Y = {}X", "2 ^ ".repeat(depth)),
+            format!("Y = {}X{}", "IF(X > 0, ".repeat(d_if), ", 0)".repeat(d_if)),
+        ];
+        for src in &cases {
             let _ = compile_and_exercise(src, budget);
         }
     }
@@ -183,8 +160,7 @@ fn huge_dataset_prefix_ranges_and_malformed_prefixes_do_not_oom_or_hang() {
     for src in prefixes {
         let t0 = Instant::now();
         let res = CompiledDslModel::compile("prefix", src);
-        let elapsed = t0.elapsed();
-        assert!(elapsed <= budget, "prefix `{src}` took {elapsed:?} > {budget:?}");
+        assert!(t0.elapsed() <= budget, "prefix `{src}` exceeded {budget:?}");
         if let Ok(model) = res {
             assert_eval_bounded_and_clean(&model, &[1.0], &[1.0; 4], 0, budget, src);
         }
@@ -194,10 +170,7 @@ fn huge_dataset_prefix_ranges_and_malformed_prefixes_do_not_oom_or_hang() {
 #[test]
 fn vm_domain_errors_and_overflow_semantics() {
     let budget = Duration::from_millis(250);
-
-    // Specific expected semantic checks.
-    let zero_pow_zero = CompiledDslModel::compile("z0", "Y = 0 ^ 0").expect("0^0 compiles");
-    assert_eq!(zero_pow_zero.eval(&[0.0], &[], 0), Some(1.0));
+    assert_eq!(dsl_compile("Y = 0 ^ 0").eval(&[0.0], &[], 0), Some(1.0));
 
     for none_src in [
         "Y = 1 / 0",
@@ -216,12 +189,10 @@ fn vm_domain_errors_and_overflow_semantics() {
         "Y = y0(-1)",
         "Y = k0(0)",
     ] {
-        let m = CompiledDslModel::compile("dom", none_src).expect("domain expr compiles");
-        assert_eq!(m.eval(&[1.0], &[], 0), None, "expected None for `{none_src}`");
+        assert_eq!(dsl_compile(none_src).eval(&[1.0], &[], 0), None, "expected None for `{none_src}`");
     }
 
-    let trig_sing = CompiledDslModel::compile("tan_pi_2", "Y = tan(PI / 2)").expect("tan compiles");
-    assert_eval_bounded_and_clean(&trig_sing, &[0.0], &[], 0, budget, "tan(PI/2)");
+    assert_eval_bounded_and_clean(&dsl_compile("Y = tan(PI / 2)"), &[0.0], &[], 0, budget, "tan(PI/2)");
 
     let domain_exprs = [
         "Y = X / (X - X)",
@@ -250,16 +221,14 @@ fn vm_domain_errors_and_overflow_semantics() {
         "Y = hypot(X, 1e300)",
         "Y = atan2(X, X)",
     ];
-    let vals = adversarial_f64_values();
     for src in domain_exprs {
-        let m = CompiledDslModel::compile("dom_all", src).expect("compiles");
-        for &xv in &vals {
+        let m = dsl_compile(src);
+        for xv in ADVERSARIAL_F64S {
             assert_eval_bounded_and_clean(&m, &[xv], &[], 0, budget, src);
         }
     }
 
-    // Intermediate overflows and IEEE special arithmetic folded inside subexpressions.
-    let intermediate_overflows = [
+    for src in [
         "Y = exp(1000) / exp(1000)",
         "Y = (1e300 * 1e300) - (1e300 * 1e300)",
         "Y = 1 / exp(1e9)",
@@ -270,17 +239,15 @@ fn vm_domain_errors_and_overflow_semantics() {
         "Y = IF(NAN > 0, 1, 2)",
         "Y = (0.0 ^ -1.0)",
         "Y = (-0.0) ^ (-1.0)",
-    ];
-    for src in intermediate_overflows {
-        let m = CompiledDslModel::compile("interm", src).expect("compiles");
-        assert_eval_bounded_and_clean(&m, &[1.0], &[], 0, budget, src);
+    ] {
+        assert_eval_bounded_and_clean(&dsl_compile(src), &[1.0], &[], 0, budget, src);
     }
 }
 
 #[test]
 fn malformed_syntax_and_token_edge_cases() {
     let budget = Duration::from_millis(250);
-    let malformed = [
+    for src in [
         "Y = (((X",
         "Y = X)))",
         "Y = IF((1, 2)",
@@ -306,8 +273,7 @@ fn malformed_syntax_and_token_edge_cases() {
         "dY/dX = -Y",
         "X = Y",
         "X1 = 5\nY = X1 + X2",
-    ];
-    for src in malformed {
+    ] {
         let _ = compile_and_exercise(src, budget);
     }
 }
@@ -317,13 +283,11 @@ fn clamp_nan_bounds_and_bessel_order_extremes_do_not_panic_or_hang() {
     let budget = Duration::from_millis(300);
 
     for src in ["Y = clamp(X, NAN, NAN)", "Y = clamp(X, INF - INF, 1)", "Y = clamp(X, 1, NAN)", "Y = clamp(NAN, 0, 1)", "Y = clamp(X, a, b)"] {
-        let m = CompiledDslModel::compile("clamp_nan", src).expect("clamp compiles");
+        let m = dsl_compile(src);
         let n_p = m.param_count();
-        for &xv in &[0.0, 1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let p_nan = vec![f64::NAN; n_p];
-            let p_inf = vec![f64::INFINITY; n_p];
-            assert_eval_bounded_and_clean(&m, &[xv], &p_nan, 0, budget, src);
-            assert_eval_bounded_and_clean(&m, &[xv], &p_inf, 0, budget, src);
+        for xv in [0.0, 1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eval_bounded_and_clean(&m, &[xv], &vec![f64::NAN; n_p], 0, budget, src);
+            assert_eval_bounded_and_clean(&m, &[xv], &vec![f64::INFINITY; n_p], 0, budget, src);
         }
     }
 
@@ -341,13 +305,13 @@ fn clamp_nan_bounds_and_bessel_order_extremes_do_not_panic_or_hang() {
         "Y = jn(n, X)",
         "Y = yn(n, X)",
     ] {
-        let m = CompiledDslModel::compile("bessel_ext", src).expect("bessel compiles");
+        let m = dsl_compile(src);
         let n_p = m.param_count();
-        for &order in &[-1e15, -2_147_483_648.0, 0.0, 100_001.0, 1e12, f64::NAN, f64::INFINITY] {
+        for order in [-1e15, -2_147_483_648.0, 0.0, 100_001.0, 1e12, f64::NAN, f64::INFINITY] {
             let params = vec![order; n_p];
-            assert_eval_bounded_and_clean(&m, &[1.5], &params, 0, budget, src);
-            assert_eval_bounded_and_clean(&m, &[0.0], &params, 0, budget, src);
-            assert_eval_bounded_and_clean(&m, &[-2.5], &params, 0, budget, src);
+            for xv in [1.5, 0.0, -2.5] {
+                assert_eval_bounded_and_clean(&m, &[xv], &params, 0, budget, src);
+            }
         }
     }
 }
@@ -355,21 +319,18 @@ fn clamp_nan_bounds_and_bessel_order_extremes_do_not_panic_or_hang() {
 #[test]
 fn unbound_shadowed_cyclic_and_multi_predictor_identifiers() {
     let budget = Duration::from_millis(250);
-    let cases = [
-        // Self-referential / mutually cyclic locals & mixed case builtins
+    for src in [
         "a = a + 1\nY = a * X",
         "a = b + 1\nb = a + 1\nY = a + b + X",
         "Y = x + X1 + x2 + X99999999999999999999 + pI + e + InF + NaN + dS + DaTaSeT + unbound_p",
         "<A> k = 1\n<B> Y = k * X",
         "k = X * p\nk = k + 1\nY = k",
         "# initial: p=NAN, q=INF\nY = p * X + q",
-    ];
-    for src in cases {
+    ] {
         let _ = compile_and_exercise(src, budget);
     }
 
-    // Dataset selector scoping verification.
-    let m = CompiledDslModel::compile("ds", "<A> Y = a * X\n<B> Y = b * X1 + c * X2").expect("multi-dataset compiles");
+    let m = dsl_compile("<A> Y = a * X\n<B> Y = b * X1 + c * X2");
     assert!(m.param_count() >= 3);
     assert_eval_bounded_and_clean(&m, &[2.0, 3.0], &[1.0; 3], 0, budget, "ds0");
     assert_eval_bounded_and_clean(&m, &[2.0, 3.0], &[1.0; 3], 1, budget, "ds1");
@@ -379,9 +340,7 @@ fn unbound_shadowed_cyclic_and_multi_predictor_identifiers() {
 #[test]
 fn rk45_small_span_non_finite_and_stiff_ode_edge_cases() {
     let budget = Duration::from_millis(500);
-
-    // Direct integrate_rk45 edge cases (tiny span < 1e-8, NaN/Inf endpoints & y0, blowup, stiff).
-    let direct_cases: [(f64, f64, f64); 11] = [
+    for (t0, t_end, y0) in [
         (0.0, 0.0, 1.0),
         (0.0, 1e-10, 1.0),
         (1.0, 1.0 + 1e-12, 2.0),
@@ -393,28 +352,19 @@ fn rk45_small_span_non_finite_and_stiff_ode_edge_cases() {
         (0.0, f64::INFINITY, 1.0),
         (f64::NEG_INFINITY, 0.0, 1.0),
         (0.0, 1.0, f64::INFINITY),
-    ];
-    for (t0, t_end, y0) in direct_cases {
+    ] {
         let start = Instant::now();
         let out = integrate_rk45(t0, t_end, y0, |_t, y| Some(-y));
         assert!(start.elapsed() <= budget, "rk45 hung on ({t0}, {t_end}, {y0})");
-        if let Some(v) = out {
-            assert!(v.is_finite(), "rk45 returned non-finite Some({v}) on ({t0}, {t_end}, {y0})");
-        }
+        assert!(out.is_none_or(f64::is_finite), "rk45 non-finite {out:?} on ({t0}, {t_end}, {y0})");
     }
 
-    // Stiff, finite-time blowup, and domain-failing RHS in direct integrate_rk45.
-    let stiff = integrate_rk45(0.0, 5.0, 1.0, |_t, y| Some(-1e5 * y));
-    if let Some(v) = stiff {
-        assert!(v.is_finite());
-    }
-    let blowup = integrate_rk45(0.0, 5.0, 2.0, |_t, y| Some(y * y));
-    assert!(blowup.is_none() || blowup.is_some_and(f64::is_finite));
-    let domain_none = integrate_rk45(0.0, 1.0, 1.0, |t, y| if t > 0.3 { None } else { Some(y) });
-    assert_eq!(domain_none, None);
+    assert!(integrate_rk45(0.0, 5.0, 1.0, |_t, y| Some(-1e5 * y)).is_none_or(f64::is_finite));
+    assert!(integrate_rk45(0.0, 5.0, 2.0, |_t, y| Some(y * y)).is_none_or(f64::is_finite));
+    assert_eq!(integrate_rk45(0.0, 1.0, 1.0, |t, y| if t > 0.3 { None } else { Some(y) }), None);
 
-    // Via DSL ODE parser + evaluator.
-    let ode_sources = [
+    let probe_xs = [0.0, 1e-10, -1e-10, 0.5, 2.0, f64::NAN, f64::INFINITY];
+    for src in [
         "Y0 = y0\ndY/dX = -k * Y",
         "Y(nan) = 1\ndY/dX = -Y",
         "Y(inf) = 1\ndY/dX = -Y",
@@ -423,14 +373,12 @@ fn rk45_small_span_non_finite_and_stiff_ode_edge_cases() {
         "Y0 = 0\ndY/dX = -1e5 * (Y - 1)",
         "Y0 = 1\nD(Y, X) = IF(X < 0.5, -100 * Y, Y / X)",
         "Y(1) = a\ndY/dT = 50 * cos(50 * T) - Y",
-    ];
-    let probe_xs = [0.0, 1e-10, -1e-10, 0.5, 2.0, f64::NAN, f64::INFINITY];
-    for src in ode_sources {
+    ] {
         let t0 = Instant::now();
         if let Ok(model) = CompiledDslModel::compile("ode_edge", src) {
             assert_eq!(model.kind(), DslEquationKind::OdeFirstOrder);
             let params = vec![1.0; model.param_count()];
-            for &xv in &probe_xs {
+            for xv in probe_xs {
                 assert_eval_bounded_and_clean(&model, &[xv], &params, 0, budget, src);
             }
         }
@@ -440,63 +388,38 @@ fn rk45_small_span_non_finite_and_stiff_ode_edge_cases() {
 
 #[test]
 fn replicates_lack_of_fit_extreme_n_does_not_overflow() {
-    let hostile_ns = [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1e30, -5.0, 0.0, 1.0, 1.5, 2.0];
-    let mut pts = Vec::new();
-    for (i, &n_val) in hostile_ns.iter().enumerate() {
-        pts.push(DataPoint {
-            x: vec![1.0 + (i % 2) as f64],
-            y: 2.0 + i as f64,
-            sd: Some(0.5),
-            n: Some(n_val),
-            explicit_weight: None,
-            source_subcolumn: 0,
-            data_set_index: 0,
-            row: i,
-        });
-    }
+    let pts: Vec<DataPoint> = [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1e30, -5.0, 0.0, 1.0, 1.5, 2.0]
+        .iter()
+        .enumerate()
+        .map(|(row, &n_val)| DataPoint { sd: Some(0.5), n: Some(n_val), row, ..DataPoint::xy(1.0 + (row % 2) as f64, 2.0 + row as f64) })
+        .collect();
     let _ = replicates_lack_of_fit(&pts, 4.0, 4);
 
-    // Also probe via fit_nonlinear with compute_lack_of_fit enabled.
-    let model = CompiledDslModel::compile("lin", "Y = a * X + b").expect("linear compiles");
-    let ds = DatasetSeries {
-        data_set_index: 0,
-        label: "A".to_owned(),
-        points: pts,
-        unknowns_y: Vec::new(),
-        unknowns_x: Vec::new(),
-        is_pre_summarized: true,
-        column_title_value: None,
-    };
-    let cfg = SolverConfig {
-        compute_lack_of_fit: true,
-        max_iters: 40,
-        compute_profile_ci: false,
-        compute_hougaard: false,
-        compute_bands: false,
-        ..SolverConfig::default()
-    };
+    let model = dsl_compile("Y = a * X + b");
+    let mut ds = series_from_pts(0, "A", pts);
+    ds.is_pre_summarized = true;
+    let cfg = SolverConfig { compute_lack_of_fit: true, max_iters: 40, ..cfg_fast() };
     check_fit_clean(&model, &[ds], &cfg, Duration::from_secs(2), "lack_of_fit_extreme_n");
 }
 
 #[test]
 fn hostile_fit_inputs_initial_guesses_and_weights() {
-    let lin = CompiledDslModel::compile("lin", "Y = a * X + b").expect("lin compiles");
-    let exp_m = CompiledDslModel::compile("exp", "Y = A * exp(-k * X)").expect("exp compiles");
-    let imp_m = CompiledDslModel::compile("imp", "Y + 0.1 * Y^3 = a * X + b").expect("imp compiles");
+    let lin = dsl_compile("Y = a * X + b");
+    let exp_m = dsl_compile("Y = A * exp(-k * X)");
+    let imp_m = dsl_compile("Y + 0.1 * Y^3 = a * X + b");
     assert_eq!(imp_m.kind(), DslEquationKind::Implicit);
-    let unsolv_imp = CompiledDslModel::compile("imp_unsolv", "Y^2 + a^2 + 1 = X * 0").expect("compiles");
-    let stiff_ode = CompiledDslModel::compile("ode_stiff", "Y0 = A0\ndY/dX = -k * (Y - C)").expect("ode compiles");
+    let unsolv_imp = dsl_compile("Y^2 + a^2 + 1 = X * 0");
+    let stiff_ode = dsl_compile("Y0 = A0\ndY/dX = -k * (Y - C)");
 
     let degenerate_datasets = [
-        ("empty", make_series(0, "empty", &[], &[])),
-        ("single", make_series(0, "single", &[1.0], &[2.0])),
-        ("dup_x", make_series(0, "dup_x", &[2.0; 6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
-        ("const_y", make_series(0, "const_y", &[0.0, 1.0, 2.0, 3.0, 4.0], &[5.0; 5])),
-        ("zero_y", make_series(0, "zero_y", &[0.0, 1.0, 2.0, 3.0, 4.0], &[0.0; 5])),
-        ("huge_y", make_series(0, "huge_y", &[0.0, 1.0, 2.0, 3.0], &[1e150, 2e150, 3e150, 4e150])),
-        ("nan_inf_y", make_series(0, "nan_y", &[0.0, 1.0, f64::NAN, 3.0], &[1.0, f64::INFINITY, 2.0, 3.0])),
+        ("empty", series_xy(0, "empty", &[], &[])),
+        ("single", series_xy(0, "single", &[1.0], &[2.0])),
+        ("dup_x", series_xy(0, "dup_x", &[2.0; 6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+        ("const_y", series_xy(0, "const_y", &[0.0, 1.0, 2.0, 3.0, 4.0], &[5.0; 5])),
+        ("zero_y", series_xy(0, "zero_y", &[0.0, 1.0, 2.0, 3.0, 4.0], &[0.0; 5])),
+        ("huge_y", series_xy(0, "huge_y", &[0.0, 1.0, 2.0, 3.0], &[1e150, 2e150, 3e150, 4e150])),
+        ("nan_inf_y", series_xy(0, "nan_y", &[0.0, 1.0, f64::NAN, 3.0], &[1.0, f64::INFINITY, 2.0, 3.0])),
     ];
-
     let methods =
         [FitMethod::LeastSquares, FitMethod::PoissonDeviance, FitMethod::RobustCauchy, FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 }];
     let weightings = [
@@ -508,119 +431,53 @@ fn hostile_fit_inputs_initial_guesses_and_weights() {
         WeightingScheme::InverseX2,
         WeightingScheme::ObservedSd,
     ];
-    let hostile_overrides = [None, Some(0.0), Some(-1e12), Some(1e300), Some(f64::NAN), Some(f64::INFINITY)];
 
     for (ds_name, ds) in &degenerate_datasets {
         for &method in &methods {
             for &weighting in &weightings {
-                let cfg = SolverConfig {
-                    method,
-                    weighting,
-                    max_iters: 30,
-                    compute_profile_ci: false,
-                    compute_hougaard: false,
-                    compute_bands: false,
-                    compute_runs_test: false,
-                    use_simplex_warm_start: true,
-                    ..SolverConfig::default()
-                };
+                let cfg = SolverConfig { method, weighting, max_iters: 30, use_simplex_warm_start: true, ..cfg_fast() };
                 check_fit_clean(&lin, std::slice::from_ref(ds), &cfg, Duration::from_secs(2), &format!("lin/{ds_name}/{method:?}/{weighting:?}"));
             }
         }
     }
 
-    for &init_ovr in &hostile_overrides {
-        let rules = vec![
-            ParameterRule {
-                name: "a".to_owned(),
-                scope: ParameterScope::Local,
-                initial_override: init_ovr,
-                lower_bound: Some(10.0),
-                upper_bound: Some(5.0), // deliberately inverted bounds
-            },
-            ParameterRule {
-                name: "A".to_owned(),
-                scope: ParameterScope::Local,
-                initial_override: init_ovr,
-                lower_bound: Some(f64::NAN),
-                upper_bound: Some(1e6),
-            },
-            ParameterRule {
-                name: "k".to_owned(),
-                scope: ParameterScope::Constant(init_ovr.unwrap_or(1.0)),
-                initial_override: None,
-                lower_bound: None,
-                upper_bound: None,
-            },
-        ];
+    let normal_ds = series_xy(0, "normal", &[0.0, 1.0, 2.0, 3.0, 4.0], &[1.0, 2.0, 3.0, 4.0, 5.0]);
+    for init_ovr in [None, Some(0.0), Some(-1e12), Some(1e300), Some(f64::NAN), Some(f64::INFINITY)] {
         let cfg = SolverConfig {
-            parameter_rules: rules,
+            parameter_rules: vec![
+                rule_local_bounds("a", init_ovr, Some(10.0), Some(5.0)), // deliberately inverted bounds
+                rule_local_bounds("A", init_ovr, Some(f64::NAN), Some(1e6)),
+                rule_const("k", init_ovr.unwrap_or(1.0)),
+            ],
             max_iters: 30,
             compute_profile_ci: true,
-            compute_hougaard: false,
-            compute_bands: false,
-            ..SolverConfig::default()
+            ..cfg_fast()
         };
-        let ds = make_series(0, "normal", &[0.0, 1.0, 2.0, 3.0, 4.0], &[1.0, 2.0, 3.0, 4.0, 5.0]);
         for m in [&lin as &dyn ParametricModel, &exp_m, &imp_m, &unsolv_imp] {
-            check_fit_clean(m, std::slice::from_ref(&ds), &cfg, Duration::from_secs(2), &format!("override/{}/init={init_ovr:?}", m.id()));
+            check_fit_clean(m, std::slice::from_ref(&normal_ds), &cfg, Duration::from_secs(2), &format!("override/{}/init={init_ovr:?}", m.id()));
         }
     }
 
-    // Hostile stiff ODE fit must stay bounded in time and never panic.
-    let ode_ds = make_series(0, "stiff", &[0.0, 0.2, 0.5, 1.0, 2.0], &[10.0, 1.0, 1.0, 1.0, 1.0]);
+    let ode_ds = series_xy(0, "stiff", &[0.0, 0.2, 0.5, 1.0, 2.0], &[10.0, 1.0, 1.0, 1.0, 1.0]);
     let ode_cfg = SolverConfig {
-        parameter_rules: vec![ParameterRule {
-            name: "k".to_owned(),
-            scope: ParameterScope::Local,
-            initial_override: Some(1e5),
-            lower_bound: Some(0.0),
-            upper_bound: Some(1e7),
-        }],
+        parameter_rules: vec![rule_local_bounds("k", Some(1e5), Some(0.0), Some(1e7))],
         max_iters: 25,
-        compute_profile_ci: false,
-        compute_hougaard: false,
-        compute_bands: false,
-        compute_runs_test: false,
         use_simplex_warm_start: false,
-        ..SolverConfig::default()
+        ..cfg_fast()
     };
     check_fit_clean(&stiff_ode, &[ode_ds], &ode_cfg, Duration::from_secs(4), "stiff_ode_fit");
 
-    // Exercise degenerate datasets directly on implicit and ODE models too.
-    let degen_cfg = SolverConfig {
-        max_iters: 25,
-        compute_profile_ci: false,
-        compute_hougaard: false,
-        compute_bands: false,
-        compute_runs_test: false,
-        use_simplex_warm_start: false,
-        ..SolverConfig::default()
-    };
+    let degen_cfg = SolverConfig { max_iters: 25, use_simplex_warm_start: false, ..cfg_fast() };
     for (ds_name, ds) in &degenerate_datasets {
         for m in [&imp_m as &dyn ParametricModel, &unsolv_imp, &stiff_ode] {
             check_fit_clean(m, std::slice::from_ref(ds), &degen_cfg, Duration::from_secs(3), &format!("degen/{}/{ds_name}", m.id()));
         }
     }
 
-    // Multi-dataset global-vs-local sharing with one degenerate dataset and custom DSL prefixes.
-    let multi_ds_model = CompiledDslModel::compile("multi", "<A> Y = a * X + b\n<B> Y = a * X + c").expect("multi compiles");
-    let ds_a = make_series(0, "A", &[0.0, 1.0, 2.0, 3.0], &[1.0, 3.0, 5.0, 7.0]);
-    let ds_b = make_series(1, "B", &[2.0; 4], &[4.0; 4]);
-    let multi_cfg = SolverConfig {
-        parameter_rules: vec![ParameterRule {
-            name: "a".to_owned(),
-            scope: ParameterScope::SharedGlobal,
-            initial_override: None,
-            lower_bound: None,
-            upper_bound: None,
-        }],
-        max_iters: 30,
-        compute_profile_ci: true,
-        compute_hougaard: false,
-        compute_bands: false,
-        ..SolverConfig::default()
-    };
+    let multi_ds_model = dsl_compile("<A> Y = a * X + b\n<B> Y = a * X + c");
+    let ds_a = series_xy(0, "A", &[0.0, 1.0, 2.0, 3.0], &[1.0, 3.0, 5.0, 7.0]);
+    let ds_b = series_xy(1, "B", &[2.0; 4], &[4.0; 4]);
+    let multi_cfg = SolverConfig { parameter_rules: vec![rule_shared("a")], max_iters: 30, compute_profile_ci: true, ..cfg_fast() };
     check_fit_clean(&multi_ds_model, &[ds_a, ds_b], &multi_cfg, Duration::from_secs(2), "multi_ds_shared_degen");
 }
 
@@ -629,243 +486,120 @@ fn hostile_fit_inputs_initial_guesses_and_weights() {
 // ============================================================================
 
 fn arb_expr_strategy() -> BoxedStrategy<String> {
-    let leaf = prop_oneof![
-        Just("X".to_owned()),
-        Just("X1".to_owned()),
-        Just("X2".to_owned()),
-        Just("T".to_owned()),
-        Just("DS".to_owned()),
-        Just("PI".to_owned()),
-        Just("E".to_owned()),
-        Just("INF".to_owned()),
-        Just("NAN".to_owned()),
-        Just("0".to_owned()),
-        Just("-0".to_owned()),
-        Just("1e308".to_owned()),
-        Just("1e-308".to_owned()),
-        Just("a".to_owned()),
-        Just("b".to_owned()),
-        Just("n".to_owned()),
-        Just("unbound_var".to_owned()),
-        (-1e6_f64..1e6_f64).prop_map(|v| format!("{v:.4}")),
-    ];
+    let static_leaves = select(vec!["X", "X1", "X2", "T", "DS", "PI", "E", "INF", "NAN", "0", "-0", "1e308", "1e-308", "a", "b", "n", "unbound_var"])
+        .prop_map(str::to_owned);
+    let leaf = prop_oneof![17 => static_leaves, 1 => (-1e6_f64..1e6_f64).prop_map(|v| format!("{v:.4}"))];
 
-    let unary_fns = prop_oneof![
-        Just("abs"),
-        Just("sqrt"),
-        Just("cbrt"),
-        Just("exp"),
-        Just("exp10"),
-        Just("ln"),
-        Just("log10"),
-        Just("log2"),
-        Just("sin"),
-        Just("cos"),
-        Just("tan"),
-        Just("asin"),
-        Just("acos"),
-        Just("atan"),
-        Just("sinh"),
-        Just("cosh"),
-        Just("tanh"),
-        Just("asinh"),
-        Just("acosh"),
-        Just("atanh"),
-        Just("floor"),
-        Just("ceil"),
-        Just("round"),
-        Just("trunc"),
-        Just("sign"),
-        Just("erf"),
-        Just("erfc"),
-        Just("normcdf"),
-        Just("probit"),
-        Just("gamma"),
-        Just("lngamma"),
-        Just("digamma"),
-        Just("j0"),
-        Just("j1"),
-        Just("y0"),
-        Just("y1"),
-        Just("i0"),
-        Just("i1"),
-        Just("k0"),
-        Just("k1"),
-    ];
-
-    let bin_ops = prop_oneof![
-        Just("+"),
-        Just("-"),
-        Just("*"),
-        Just("/"),
-        Just("%"),
-        Just("^"),
-        Just("**"),
-        Just("<"),
-        Just("<="),
-        Just(">"),
-        Just(">="),
-        Just("=="),
-        Just("!="),
-        Just("AND"),
-        Just("OR"),
-    ];
-
-    let bin_fns = prop_oneof![Just("min"), Just("max"), Just("atan2"), Just("hypot"), Just("pow"), Just("beta"), Just("jn"), Just("yn"),];
+    let unary_fns = select(vec![
+        "abs", "sqrt", "cbrt", "exp", "exp10", "ln", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh",
+        "acosh", "atanh", "floor", "ceil", "round", "trunc", "sign", "erf", "erfc", "normcdf", "probit", "gamma", "lngamma", "digamma", "j0", "j1",
+        "y0", "y1", "i0", "i1", "k0", "k1",
+    ]);
+    let bin_ops = select(vec!["+", "-", "*", "/", "%", "^", "**", "<", "<=", ">", ">=", "==", "!=", "AND", "OR"]);
+    let bin_fns = select(vec!["min", "max", "atan2", "hypot", "pow", "beta", "jn", "yn"]);
 
     leaf.prop_recursive(4, 32, 4, move |inner| {
         prop_oneof![
-            3 => (inner.clone(), bin_ops.clone(), inner.clone())
-                .prop_map(|(l, op, r)| format!("({l} {op} {r})")),
+            3 => (inner.clone(), bin_ops.clone(), inner.clone()).prop_map(|(l, op, r)| format!("({l} {op} {r})")),
             2 => (unary_fns.clone(), inner.clone()).prop_map(|(f, a)| format!("{f}({a})")),
             1 => (inner.clone(),).prop_map(|(a,)| format!("-({a})")),
             1 => (inner.clone(),).prop_map(|(a,)| format!("NOT ({a})")),
-            1 => (bin_fns.clone(), inner.clone(), inner.clone())
-                .prop_map(|(f, a, b)| format!("{f}({a}, {b})")),
-            1 => (inner.clone(), inner.clone(), inner.clone())
-                .prop_map(|(a, b, c)| format!("clamp({a}, {b}, {c})")),
-            1 => (inner.clone(), inner.clone(), inner.clone())
-                .prop_map(|(a, b, c)| format!("IF({a} > 0, {b}, {c})")),
-            1 => (inner.clone(), inner.clone(), inner.clone())
-                .prop_map(|(a, b, c)| format!("hyp1f1({a}, {b}, {c})")),
-            1 => (inner.clone(), inner.clone(), inner.clone())
-                .prop_map(|(a, b, c)| format!("confluent_u({a}, {b}, {c})")),
-            1 => (inner.clone(), inner.clone(), inner.clone(), inner)
-                .prop_map(|(a, b, c, d)| format!("hyp2f1({a}, {b}, {c}, {d})")),
+            1 => (bin_fns.clone(), inner.clone(), inner.clone()).prop_map(|(f, a, b)| format!("{f}({a}, {b})")),
+            1 => (inner.clone(), inner.clone(), inner.clone()).prop_map(|(a, b, c)| format!("clamp({a}, {b}, {c})")),
+            1 => (inner.clone(), inner.clone(), inner.clone()).prop_map(|(a, b, c)| format!("IF({a} > 0, {b}, {c})")),
+            1 => (inner.clone(), inner.clone(), inner.clone()).prop_map(|(a, b, c)| format!("hyp1f1({a}, {b}, {c})")),
+            1 => (inner.clone(), inner.clone(), inner.clone()).prop_map(|(a, b, c)| format!("confluent_u({a}, {b}, {c})")),
+            1 => (inner.clone(), inner.clone(), inner.clone(), inner).prop_map(|(a, b, c, d)| format!("hyp2f1({a}, {b}, {c}, {d})")),
         ]
     })
     .boxed()
 }
 
 fn arb_fuzzy_token_string() -> BoxedStrategy<String> {
+    let static_tokens = select(vec![
+        "Y",
+        "X",
+        "dY/dX",
+        "D(Y, X)",
+        "Y0",
+        "Y(0)",
+        "=",
+        "==",
+        "!=",
+        "<>",
+        "+",
+        "-",
+        "*",
+        "/",
+        "%",
+        "^",
+        "**",
+        "(",
+        ")",
+        ",",
+        "\n",
+        "<A>",
+        "<~B>",
+        "<0:2>",
+        "<0:1000000000>",
+        "IF",
+        "AND",
+        "OR",
+        "NOT",
+        "clamp",
+        "jn",
+        "exp",
+        "ln",
+        "NAN",
+        "INF",
+        "0",
+        "1e9",
+        "# initial: a=1\n",
+        "; comment\n",
+        "$$",
+        "λ",
+        "\0",
+    ])
+    .prop_map(str::to_owned);
+    let ascii_chars = select(vec![
+        'A', 'Z', 'a', 'b', 'x', 'y', '0', '9', '_', '<', '>', '(', ')', '+', '-', '*', '/', '^', '!', '=', '.', ';', '#', ':', ',', ' ', '\n', '\t',
+    ]);
     let tokens = prop_oneof![
-        Just("Y".to_owned()),
-        Just("X".to_owned()),
-        Just("dY/dX".to_owned()),
-        Just("D(Y, X)".to_owned()),
-        Just("Y0".to_owned()),
-        Just("Y(0)".to_owned()),
-        Just("=".to_owned()),
-        Just("==".to_owned()),
-        Just("!=".to_owned()),
-        Just("<>".to_owned()),
-        Just("+".to_owned()),
-        Just("-".to_owned()),
-        Just("*".to_owned()),
-        Just("/".to_owned()),
-        Just("%".to_owned()),
-        Just("^".to_owned()),
-        Just("**".to_owned()),
-        Just("(".to_owned()),
-        Just(")".to_owned()),
-        Just(",".to_owned()),
-        Just("\n".to_owned()),
-        Just("<A>".to_owned()),
-        Just("<~B>".to_owned()),
-        Just("<0:2>".to_owned()),
-        Just("<0:1000000000>".to_owned()),
-        Just("IF".to_owned()),
-        Just("AND".to_owned()),
-        Just("OR".to_owned()),
-        Just("NOT".to_owned()),
-        Just("clamp".to_owned()),
-        Just("jn".to_owned()),
-        Just("exp".to_owned()),
-        Just("ln".to_owned()),
-        Just("NAN".to_owned()),
-        Just("INF".to_owned()),
-        Just("0".to_owned()),
-        Just("1e9".to_owned()),
-        Just("# initial: a=1\n".to_owned()),
-        Just("; comment\n".to_owned()),
-        Just("$$".to_owned()),
-        Just("λ".to_owned()),
-        Just("\0".to_owned()),
-        proptest::collection::vec(any::<char>(), 1..=12).prop_map(|chars| chars.into_iter().collect::<String>()),
-        proptest::collection::vec(
-            proptest::sample::select(vec![
-                'A', 'Z', 'a', 'b', 'x', 'y', '0', '9', '_', '<', '>', '(', ')', '+', '-', '*', '/', '^', '!', '=', '.', ';', '#', ':', ',', ' ',
-                '\n', '\t',
-            ]),
-            1..=12,
-        )
-        .prop_map(|chars| chars.into_iter().collect::<String>()),
+        42 => static_tokens,
+        1 => proptest::collection::vec(any::<char>(), 1..=12).prop_map(|cs| cs.into_iter().collect::<String>()),
+        1 => proptest::collection::vec(ascii_chars, 1..=12).prop_map(|cs| cs.into_iter().collect::<String>()),
     ];
     proptest::collection::vec(tokens, 0..32).prop_map(|parts| parts.join(" ")).boxed()
 }
 
 fn arb_hostile_f64() -> BoxedStrategy<f64> {
-    prop_oneof![
-        Just(0.0),
-        Just(-0.0),
-        Just(1.0),
-        Just(-1.0),
-        Just(1e-12),
-        Just(-1e-12),
-        Just(1e12),
-        Just(-1e12),
-        Just(1e150),
-        Just(-1e150),
-        Just(f64::NAN),
-        Just(f64::INFINITY),
-        Just(f64::NEG_INFINITY),
-        -1e4_f64..1e4_f64,
-    ]
-    .boxed()
+    let specials = select(vec![0.0, -0.0, 1.0, -1.0, 1e-12, -1e-12, 1e12, -1e12, 1e150, -1e150, f64::NAN, f64::INFINITY, f64::NEG_INFINITY]);
+    prop_oneof![13 => specials, 1 => -1e4_f64..1e4_f64].boxed()
 }
 
 fn arb_hostile_dataset() -> BoxedStrategy<DatasetSeries> {
-    let mode = 0..5_usize;
-    let vals = proptest::collection::vec(arb_hostile_f64(), 0..10);
-    (mode, vals)
+    (0..5_usize, proptest::collection::vec(arb_hostile_f64(), 0..10))
         .prop_map(|(kind, ys)| {
             let points: Vec<DataPoint> = match kind {
-                // Normal/arbitrary spacing with potential NaN/Inf.
                 0 => ys.iter().enumerate().map(|(i, &y)| DataPoint::xy(i as f64 * 0.5, y)).collect(),
-                // All duplicate X values.
-                1 => ys
-                    .iter()
-                    .enumerate()
-                    .map(|(row, &y)| DataPoint {
-                        x: vec![2.5],
-                        y,
-                        sd: Some(0.1),
-                        n: Some(2.0),
-                        explicit_weight: None,
-                        source_subcolumn: 0,
-                        data_set_index: 0,
-                        row,
-                    })
-                    .collect(),
-                // Constant Y vector.
+                1 => ys.iter().enumerate().map(|(row, &y)| DataPoint { sd: Some(0.1), n: Some(2.0), row, ..DataPoint::xy(2.5, y) }).collect(),
                 2 => ys.iter().enumerate().map(|(i, _)| DataPoint::xy(i as f64 + 1.0, 3.25)).collect(),
-                // All-zero Y vector and X=0 point.
                 3 => ys.iter().enumerate().map(|(i, _)| DataPoint::xy(i as f64, 0.0)).collect(),
-                // Non-finite sd/n/explicit_weight mixtures.
                 _ => ys
                     .iter()
                     .enumerate()
                     .map(|(row, &y)| DataPoint {
-                        x: vec![y * 0.1],
-                        y,
                         sd: Some(if row % 2 == 0 { 0.5 } else { f64::NAN }),
                         n: Some(if row % 3 == 0 { f64::INFINITY } else { 3.0 }),
                         explicit_weight: if row % 4 == 0 { Some(-1.0) } else { None },
-                        source_subcolumn: 0,
-                        data_set_index: 0,
                         row,
+                        ..DataPoint::xy(y * 0.1, y)
                     })
                     .collect(),
             };
-            DatasetSeries {
-                data_set_index: 0,
-                label: "fuzz_ds".to_owned(),
-                points,
-                unknowns_y: Vec::new(),
-                unknowns_x: Vec::new(),
-                is_pre_summarized: kind == 1 || kind == 4,
-                column_title_value: None,
-            }
+            let mut ds = series_from_pts(0, "fuzz_ds", points);
+            ds.is_pre_summarized = kind == 1 || kind == 4;
+            ds
         })
         .boxed()
 }
@@ -888,7 +622,7 @@ proptest! {
         e2 in arb_expr_strategy(),
         with_local in any::<bool>(),
         cyclic_local in any::<bool>(),
-        with_prefix in prop_oneof![Just(""), Just("<A> "), Just("<~B> "), Just("<0:3> ")],
+        with_prefix in select(vec!["", "<A> ", "<~B> ", "<0:3> "]),
     ) {
         let src = if with_local {
             let rhs_local = if cyclic_local { format!("{e1} + loc") } else { e1 };
@@ -904,10 +638,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
-    fn fuzz_deep_nesting_and_long_chains(
-        depth in 1_usize..4_096,
-        variant in 0..4_usize,
-    ) {
+    fn fuzz_deep_nesting_and_long_chains(depth in 1_usize..4_096, variant in 0..4_usize) {
         let src = match variant {
             0 => format!("Y = {}X{}", "(".repeat(depth), ")".repeat(depth)),
             1 => format!("Y = {}X", "-".repeat(depth)),
@@ -929,27 +660,13 @@ proptest! {
         p0 in arb_hostile_f64(),
         p1 in arb_hostile_f64(),
     ) {
-        let lhs = match lhs_kind {
-            0 => "Y + a * Y^3",
-            1 => "sin(Y) + b * Y",
-            2 => "exp(Y) - Y^2",
-            _ => "IF(Y > a, Y^2, Y - 1)",
-        };
+        let lhs = ["Y + a * Y^3", "sin(Y) + b * Y", "exp(Y) - Y^2", "IF(Y > a, Y^2, Y - 1)"][lhs_kind];
         let src = format!("{lhs} = {rhs_expr}");
         let t0 = Instant::now();
         if let Ok(model) = CompiledDslModel::compile("imp_fuzz", &src) {
             prop_assert!(t0.elapsed() <= Duration::from_secs(1));
-            let params: Vec<f64> = (0..model.param_count())
-                .map(|i| if i % 2 == 0 { p0 } else { p1 })
-                .collect();
-            assert_eval_bounded_and_clean(
-                &model,
-                &[xv],
-                &params,
-                0,
-                Duration::from_millis(500),
-                &src,
-            );
+            let params: Vec<f64> = (0..model.param_count()).map(|i| if i % 2 == 0 { p0 } else { p1 }).collect();
+            assert_eval_bounded_and_clean(&model, &[xv], &params, 0, Duration::from_millis(500), &src);
         }
     }
 
@@ -968,7 +685,6 @@ proptest! {
             3 => (f64::NAN, t0_base + 1.0),
             _ => (0.0, f64::INFINITY),
         };
-
         let start = Instant::now();
         let out = integrate_rk45(t0, t_end, y0, |t, y| {
             let v = match rhs_kind {
@@ -978,35 +694,17 @@ proptest! {
                 3 => if y > 0.0 { -1e4 * y } else { 1e4 * y },
                 _ => y / t,
             };
-            if v.is_finite() { Some(v) } else { None }
+            v.is_finite().then_some(v)
         });
         prop_assert!(start.elapsed() <= Duration::from_millis(750));
-        if let Some(v) = out {
-            prop_assert!(v.is_finite());
-        }
+        prop_assert!(out.is_none_or(f64::is_finite));
 
-        // Also compile and evaluate a DSL ODE equation using Y(t0) = y0.
-        let ode_rhs = match rhs_kind {
-            0 => "-k * Y",
-            1 => "Y^2 + k",
-            2 => "k * cos(20 * X) - Y",
-            3 => "IF(Y > 0, -1e4 * Y, 1e4 * Y)",
-            _ => "Y / X",
-        };
+        let ode_rhs = ["-k * Y", "Y^2 + k", "k * cos(20 * X) - Y", "IF(Y > 0, -1e4 * Y, 1e4 * Y)", "Y / X"][rhs_kind];
         let src = format!("Y({t0}) = a\ndY/dX = {ode_rhs}");
         if let Ok(model) = CompiledDslModel::compile("ode_fuzz", &src) {
             prop_assert_eq!(model.kind(), DslEquationKind::OdeFirstOrder);
-            let params: Vec<f64> = (0..model.param_count())
-                .map(|i| if i == 0 { y0 } else { k })
-                .collect();
-            assert_eval_bounded_and_clean(
-                &model,
-                &[t_end],
-                &params,
-                0,
-                Duration::from_millis(750),
-                &src,
-            );
+            let params: Vec<f64> = (0..model.param_count()).map(|i| if i == 0 { y0 } else { k }).collect();
+            assert_eval_bounded_and_clean(&model, &[t_end], &params, 0, Duration::from_millis(750), &src);
         }
     }
 }
@@ -1020,52 +718,37 @@ proptest! {
         ds in arb_hostile_dataset(),
         method_kind in 0..4_usize,
         weight_kind in 0..7_usize,
-        init_ovr in prop_oneof![Just(None), Just(Some(0.0)), Just(Some(-1e10)), Just(Some(f64::NAN)), Just(Some(f64::INFINITY))],
-        lb in prop_oneof![Just(None), Just(Some(-10.0)), Just(Some(100.0)), Just(Some(f64::NAN))],
-        ub in prop_oneof![Just(None), Just(Some(5.0)), Just(Some(f64::INFINITY))],
+        init_ovr in select(vec![None, Some(0.0), Some(-1e10), Some(f64::NAN), Some(f64::INFINITY)]),
+        lb in select(vec![None, Some(-10.0), Some(100.0), Some(f64::NAN)]),
+        ub in select(vec![None, Some(5.0), Some(f64::INFINITY)]),
         ci in any::<bool>(),
     ) {
-        let src = match eq_kind {
-            0 => "Y = a * X + b",
-            1 => "Y = a * exp(-b * X)",
-            2 => "Y + 0.05 * Y^3 = a * X + b",
-            _ => "Y0 = a\ndY/dX = -b * Y",
-        };
-        let model = CompiledDslModel::compile("fit_fuzz", src).expect("fixed model compiles");
-        let method = match method_kind {
-            0 => FitMethod::LeastSquares,
-            1 => FitMethod::PoissonDeviance,
-            2 => FitMethod::RobustCauchy,
-            _ => FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 },
-        };
-        let weighting = match weight_kind {
-            0 => WeightingScheme::None,
-            1 => WeightingScheme::RelativeSquare,
-            2 => WeightingScheme::Relative,
-            3 => WeightingScheme::GeneralPowerY(2.0),
-            4 => WeightingScheme::InverseX,
-            5 => WeightingScheme::InverseX2,
-            _ => WeightingScheme::ObservedSd,
-        };
-        let rules = vec![ParameterRule {
-            name: "a".to_owned(),
-            scope: ParameterScope::Local,
-            initial_override: init_ovr,
-            lower_bound: lb,
-            upper_bound: ub,
-        }];
+        let src = ["Y = a * X + b", "Y = a * exp(-b * X)", "Y + 0.05 * Y^3 = a * X + b", "Y0 = a\ndY/dX = -b * Y"][eq_kind];
+        let model = dsl_compile(src);
+        let method = [
+            FitMethod::LeastSquares,
+            FitMethod::PoissonDeviance,
+            FitMethod::RobustCauchy,
+            FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 },
+        ][method_kind];
+        let weighting = [
+            WeightingScheme::None,
+            WeightingScheme::RelativeSquare,
+            WeightingScheme::Relative,
+            WeightingScheme::GeneralPowerY(2.0),
+            WeightingScheme::InverseX,
+            WeightingScheme::InverseX2,
+            WeightingScheme::ObservedSd,
+        ][weight_kind];
         let cfg = SolverConfig {
             method,
             weighting,
-            parameter_rules: rules,
+            parameter_rules: vec![rule_local_bounds("a", init_ovr, lb, ub)],
             max_iters: 35,
             compute_profile_ci: ci && eq_kind != 3,
-            compute_hougaard: false,
-            compute_bands: false,
-            compute_runs_test: false,
             compute_lack_of_fit: true,
             use_simplex_warm_start: eq_kind != 3,
-            ..SolverConfig::default()
+            ..cfg_fast()
         };
         check_fit_clean(&model, &[ds], &cfg, Duration::from_secs(4), src);
     }
