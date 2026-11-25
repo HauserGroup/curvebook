@@ -61,6 +61,8 @@ Do not advertise **full feature parity** as achieved or embed mutable feature, t
 
 The clean-room statement refers to developing CurveBook without using commercial statistical or graphing applications, inspecting their internals, or copying their proprietary code/assets, in accordance with [`AGENTS.md`](../../AGENTS.md). Retain the explicit **License:** (`MIT OR Apache-2.0`), clean-room disclosure, zero-telemetry + GitHub Pages IP-log privacy notice, and source code link in the footer.
 
+All user-facing documentation on the site (landing pages, FAQ, manual reference pages, guides, and tutorials) should prefer `".pzfx files"` and `".prism files"` naming where appropriate rather than opaque euphemisms such as `"External Archive"` or `"XML Project"`. Lowercase `.prism` and `.pzfx` extensions (`.prism files`, `.pzfx files`, `*.prism`) are specifically allowed over clean-room and branding principles (`AGENTS.md` §1; enforced by `cargo xtask brands`), while bare or capitalised competitor product names, vendor documentation prose/screenshots, and vendor-generated sample files remain disallowed.
+
 ### Visual tokens
 
 | Role | CSS token | Color | Verified WCAG 2.2 contrast |

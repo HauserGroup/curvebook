@@ -48,7 +48,7 @@ Follow the existing seams below whenever adding a capability. Every user-facing 
 ### `Importer` / `Exporter` format
 
 - **Where:** `crates/format/src/registry.rs` (`Importer` / `Exporter` traits, `FormatDescriptor`, `FormatRegistry::default_registry()`), parser modules such as `crates/format/src/{pzfx,prism,csv,export}.rs`; consumers `apps/curvebook-cli/src/cmd_convert.rs`, `apps/curvebook/src/desktop_host.rs`, `crates/mcp/src/formats.rs`
-- **How:** Implement `Importer` / `Exporter` cleanly (no panics or unchecked indexing on adversarial/malformed inputs; document format assumptions neutrally in clean-room terms) with a `FormatDescriptor` (`id`, `label`, `extensions`, `kind`). Register it in `FormatRegistry::default_registry()` so CLI, desktop host, and MCP pick it up. Use `curvebook-platform` atomic writes for file outputs. Add round-trip and malformed-input tests (see `crates/format/tests/versioned_and_seams.rs`).
+- **How:** Implement `Importer` / `Exporter` cleanly (no panics or unchecked indexing on adversarial/malformed inputs; document format assumptions neutrally in clean-room terms) with a `FormatDescriptor` (`id`, `label`, `extensions`, `kind`). Lowercase `".pzfx files"` and `".prism files"` naming is specifically allowed over clean-room and branding principles (`AGENTS.md` §1; `cargo xtask brands`) and should be preferred in user-facing labels and documentation where appropriate (keep bare/capitalised competitor product names and vendor-authored fixtures out). Register it in `FormatRegistry::default_registry()` so CLI, desktop host, and MCP pick it up. Use `curvebook-platform` atomic writes for file outputs. Add round-trip and malformed-input tests (see `crates/format/tests/versioned_and_seams.rs`).
 
 ### Locale / UI string
 
