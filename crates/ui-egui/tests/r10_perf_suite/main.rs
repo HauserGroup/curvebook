@@ -22,3 +22,4 @@ mod r10_w7_r36_rm_reml;
 mod r13_10_format_graph_controls;
 mod r13_8_desktop_views_p1;
 mod r13_8_desktop_views_p2;
+mod suite_helpers;

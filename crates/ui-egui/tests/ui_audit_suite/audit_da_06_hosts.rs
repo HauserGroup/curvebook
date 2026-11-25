@@ -1,124 +1,94 @@
-//! Regression tests for post-audit delta findings `DA-06-03`,
-//! `DA-06-05`, `DA-06-06`, and `DA-06-07`.
+//! Regression tests for post-audit delta findings `DA-06-03`, `DA-06-05`, `DA-06-06`, and `DA-06-07`.
 
 use curvebook_doc::SheetId;
 use curvebook_ui_egui::UiApp;
-use curvebook_ui_egui::control_io::handle_control_line;
 use curvebook_ui_egui::control_io::host_routing::{
     contextual_command_params, has_non_null_path_param, is_command_read_only, is_read_only_control_method,
 };
 use serde_json::{Value, json};
 
-type TestRes = Result<(), String>;
+use crate::common::{TestRes, call_control};
+use crate::helpers::exec;
 
 fn control_json(app: &mut UiApp, id: u64, method: &str, params: Value) -> Result<Value, String> {
-    let line = json!({ "id": id, "method": method, "params": params }).to_string();
-    let raw = handle_control_line(app, &line);
-    serde_json::from_str(&raw).map_err(|err| format!("parse control response: {err}"))
-}
-
-fn setup_column_and_result(app: &mut UiApp) -> Result<String, String> {
-    app.execute_command("sheet.createData", json!({ "sheet_id": "ds-1", "kind": "column", "cols": 2, "rows": 4, "auto_graph": true }))
-        .map_err(|err| format!("createData: {err}"))?;
-    app.execute_command(
-        "table.setCells",
-        json!({
-            "sheet_id": "ds-1",
-            "edits": [
-                { "row": 0, "col": 0, "value": 10.0 },
-                { "row": 1, "col": 0, "value": 12.0 },
-                { "row": 2, "col": 0, "value": 14.0 },
-                { "row": 0, "col": 1, "value": 20.0 },
-                { "row": 1, "col": 1, "value": 22.0 },
-                { "row": 2, "col": 1, "value": 25.0 }
-            ]
-        }),
-    )
-    .map_err(|err| format!("setCells: {err}"))?;
-    let out = app
-        .execute_command("analysis.run", json!({ "source_sheet_id": "ds-1", "kind": "descriptive_stats" }))
-        .map_err(|err| format!("analysis.run: {err}"))?;
-    out.payload
-        .get("sheet_id")
-        .or_else(|| out.payload.get("result_sheet_id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| format!("analysis.run payload missing result sheet id: {}", out.payload))
+    call_control(app, &json!({ "id": id, "method": method, "params": params }))
 }
 
 #[test]
 fn da_06_03_read_only_control_gates_disk_writing_exports_and_output_path() {
-    // doc.export and render.pdf are conditionally read-only (only when no path param is given).
-    assert!(!is_read_only_control_method("doc.export"));
-    assert!(!is_read_only_control_method("render.pdf"));
-    assert!(is_read_only_control_method("ping"));
-    assert!(is_read_only_control_method("doc.inspect"));
-    assert!(is_read_only_control_method("render.svg"));
-    assert!(is_read_only_control_method("render.preview"));
+    for (method, expected) in
+        [("doc.export", false), ("render.pdf", false), ("ping", true), ("doc.inspect", true), ("render.svg", true), ("render.preview", true)]
+    {
+        assert_eq!(is_read_only_control_method(method), expected, "method={method}");
+    }
 
-    // Path detection includes output_path and outputPath and ignores null shadowing.
-    assert!(!has_non_null_path_param(&json!({ "format": "csv" })));
-    assert!(!has_non_null_path_param(&json!({ "path": Value::Null, "output_path": Value::Null })));
-    assert!(has_non_null_path_param(&json!({ "path": "out.csv" })));
-    assert!(has_non_null_path_param(&json!({ "file_path": "out.csv" })));
-    assert!(has_non_null_path_param(&json!({ "filePath": "out.csv" })));
-    assert!(has_non_null_path_param(&json!({ "output_path": "out.csv" })));
-    assert!(has_non_null_path_param(&json!({ "outputPath": "out.csv" })));
-    assert!(has_non_null_path_param(&json!({ "path": Value::Null, "output_path": "out.csv" })));
+    for (params, expected) in [
+        (json!({ "format": "csv" }), false),
+        (json!({ "path": Value::Null, "output_path": Value::Null }), false),
+        (json!({ "path": "out.csv" }), true),
+        (json!({ "file_path": "out.csv" }), true),
+        (json!({ "filePath": "out.csv" }), true),
+        (json!({ "output_path": "out.csv" }), true),
+        (json!({ "outputPath": "out.csv" }), true),
+        (json!({ "path": Value::Null, "output_path": "out.csv" }), true),
+    ] {
+        assert_eq!(has_non_null_path_param(&params), expected, "params={params}");
+    }
 
-    // Pathless doc.export and render.pdf remain read-only; path-bearing variants are rejected.
-    assert!(is_command_read_only("doc.export", Some(&json!({ "format": "csv" }))));
-    assert!(!is_command_read_only("doc.export", Some(&json!({ "format": "csv", "path": "a.csv" }))));
-    assert!(!is_command_read_only("doc.export", Some(&json!({ "format": "csv", "output_path": "a.csv" }))));
-    assert!(!is_command_read_only("doc.export", Some(&json!({ "format": "csv", "outputPath": "a.csv" }))));
-    assert!(!is_command_read_only("doc.export", Some(&json!({ "format": "csv", "path": Value::Null, "output_path": "a.csv" }))));
-
-    assert!(is_command_read_only("render.pdf", Some(&json!({ "all": false }))));
-    assert!(!is_command_read_only("render.pdf", Some(&json!({ "path": "out.pdf" }))));
-    assert!(!is_command_read_only("render.pdf", Some(&json!({ "output_path": "out.pdf" }))));
-
-    // Nested command.run and command.batch honor the same path gate.
-    assert!(is_command_read_only("command.run", Some(&json!({ "command": "doc.export", "params": { "format": "tsv" } }))));
-    assert!(!is_command_read_only("command.run", Some(&json!({ "command": "doc.export", "params": { "format": "tsv", "output_path": "out.tsv" } }))));
-    assert!(!is_command_read_only("command.batch", Some(&json!({ "commands": [{ "command": "render.pdf", "params": { "path": "out.pdf" } }] }))));
+    for (cmd, params, expected) in [
+        ("doc.export", json!({ "format": "csv" }), true),
+        ("doc.export", json!({ "format": "csv", "path": "a.csv" }), false),
+        ("doc.export", json!({ "format": "csv", "output_path": "a.csv" }), false),
+        ("doc.export", json!({ "format": "csv", "outputPath": "a.csv" }), false),
+        ("doc.export", json!({ "format": "csv", "path": Value::Null, "output_path": "a.csv" }), false),
+        ("render.pdf", json!({ "all": false }), true),
+        ("render.pdf", json!({ "path": "out.pdf" }), false),
+        ("render.pdf", json!({ "output_path": "out.pdf" }), false),
+        ("command.run", json!({ "command": "doc.export", "params": { "format": "tsv" } }), true),
+        ("command.run", json!({ "command": "doc.export", "params": { "format": "tsv", "output_path": "out.tsv" } }), false),
+        ("command.batch", json!({ "commands": [{ "command": "render.pdf", "params": { "path": "out.pdf" } }] }), false),
+    ] {
+        assert_eq!(is_command_read_only(cmd, Some(&params)), expected, "cmd={cmd} params={params}");
+    }
 }
 
 #[test]
 fn da_06_05_doc_export_csv_tsv_on_non_tabular_active_sheet_prefers_first_result_sheet() -> TestRes {
     let mut app = UiApp::new();
-    let rs_id = setup_column_and_result(&mut app)?;
-    let graph_id = app.document().graph_sheets.first().map(|g| g.id.as_str().to_owned()).ok_or_else(|| String::from("expected auto graph sheet"))?;
+    exec(&mut app, "sheet.createData", json!({ "sheet_id": "ds-1", "kind": "column", "cols": 2, "rows": 4, "auto_graph": true }))?;
+    exec(&mut app, "table.paste", json!({ "sheet_id": "ds-1", "start_row": 0, "start_col": 0, "text": "10\t20\n12\t22\n14\t25" }))?;
+    let out = exec(&mut app, "analysis.run", json!({ "source_sheet_id": "ds-1", "kind": "descriptive_stats" }))?;
+    let rs_id = out
+        .payload
+        .get("sheet_id")
+        .or_else(|| out.payload.get("result_sheet_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("missing result sheet id: {}", out.payload))?;
+    let graph_id = app.document().graph_sheets.first().map(|g| g.id.as_str().to_owned()).ok_or("expected auto graph")?;
 
-    // Active sheet is a non-tabular GraphSheet: omitting sheet_id/tab_id must fall back to first ResultSheet.
-    app.execute_command("sheet.select", json!({ "sheet_id": graph_id })).map_err(|err| format!("select graph: {err}"))?;
+    // Active GraphSheet with ResultSheet present prefers first ResultSheet; active DataSheet exports itself.
+    exec(&mut app, "sheet.select", json!({ "sheet_id": graph_id }))?;
     assert_eq!(app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some(graph_id.as_str()));
-
-    for fmt in ["csv", "tsv"] {
-        let resp = control_json(&mut app, 10, "doc.export", json!({ "format": fmt }))?;
-        assert_eq!(resp.get("ok").and_then(Value::as_bool), Some(true), "doc.export({fmt}) failed: {resp}");
-        assert_eq!(
-            resp.pointer("/result/sheet_id").and_then(Value::as_str),
-            Some(rs_id.as_str()),
-            "doc.export({fmt}) on active GraphSheet must prefer first ResultSheet like headless MCP: {resp}"
-        );
+    for (id, fmt, target) in [(10, "csv", rs_id.as_str()), (11, "tsv", rs_id.as_str())] {
+        let resp = control_json(&mut app, id, "doc.export", json!({ "format": fmt }))?;
+        assert_eq!(resp["ok"], json!(true), "doc.export({fmt}): {resp}");
+        assert_eq!(resp.pointer("/result/sheet_id").and_then(Value::as_str), Some(target));
     }
 
-    // Active sheet is a DataSheet: omitting sheet_id/tab_id must still export that active DataSheet.
-    app.execute_command("sheet.select", json!({ "sheet_id": "ds-1" })).map_err(|err| format!("select ds-1: {err}"))?;
-    let ds_resp = control_json(&mut app, 11, "doc.export", json!({ "format": "csv" }))?;
-    assert_eq!(ds_resp.get("ok").and_then(Value::as_bool), Some(true), "doc.export(csv) on DataSheet failed: {ds_resp}");
+    exec(&mut app, "sheet.select", json!({ "sheet_id": "ds-1" }))?;
+    let ds_resp = control_json(&mut app, 12, "doc.export", json!({ "format": "csv" }))?;
+    assert_eq!(ds_resp["ok"], json!(true));
     assert_eq!(ds_resp.pointer("/result/sheet_id").and_then(Value::as_str), Some("ds-1"));
 
-    // Active sheet is a GraphSheet with NO ResultSheets: must still fall back to DataSheet cleanly.
+    // Active GraphSheet with no ResultSheets falls back to DataSheet cleanly.
     let mut app_no_res = UiApp::new();
-    app_no_res
-        .execute_command("sheet.createData", json!({ "sheet_id": "ds-only", "kind": "column", "cols": 1, "rows": 2, "auto_graph": true }))
-        .map_err(|err| format!("createData: {err}"))?;
-    let g_only = app_no_res.document().graph_sheets.first().map(|g| g.id.as_str().to_owned()).ok_or_else(|| String::from("expected auto graph"))?;
-    app_no_res.execute_command("sheet.select", json!({ "sheet_id": g_only })).map_err(|err| format!("select graph: {err}"))?;
-    let fallback_resp = control_json(&mut app_no_res, 12, "doc.export", json!({ "format": "csv" }))?;
-    assert_eq!(fallback_resp.get("ok").and_then(Value::as_bool), Some(true), "fallback export failed: {fallback_resp}");
-    assert_eq!(fallback_resp.pointer("/result/sheet_id").and_then(Value::as_str), Some("ds-only"));
+    exec(&mut app_no_res, "sheet.createData", json!({ "sheet_id": "ds-only", "kind": "column", "cols": 1, "rows": 2, "auto_graph": true }))?;
+    let g_only = app_no_res.document().graph_sheets.first().map(|g| g.id.as_str().to_owned()).ok_or("expected auto graph")?;
+    exec(&mut app_no_res, "sheet.select", json!({ "sheet_id": g_only }))?;
+    let fb = control_json(&mut app_no_res, 13, "doc.export", json!({ "format": "csv" }))?;
+    assert_eq!(fb["ok"], json!(true));
+    assert_eq!(fb.pointer("/result/sheet_id").and_then(Value::as_str), Some("ds-only"));
     Ok(())
 }
 
@@ -128,26 +98,20 @@ fn da_06_06_contextual_params_for_create_checkpoint_uses_name_and_succeeds() -> 
     let params = contextual_command_params(&app, "project.createCheckpoint");
     assert_eq!(params.get("name").and_then(Value::as_str), Some("Checkpoint"));
     assert!(params.get("label").is_none(), "retired `label` key must not be emitted: {params}");
-
-    let out = app.execute_command("project.createCheckpoint", params).map_err(|err| format!("project.createCheckpoint failed: {err}"))?;
+    let out = exec(&mut app, "project.createCheckpoint", params)?;
     assert!(out.mutated);
     assert_eq!(app.document().checkpoints.len(), 1);
-    assert_eq!(app.document().checkpoints.first().map(|c| c.name.as_str()), Some("Checkpoint"));
+    assert_eq!(app.document().checkpoints[0].name, "Checkpoint");
     Ok(())
 }
 
 #[test]
 fn da_06_07_manual_fallback_atomic_batch_collapses_into_single_undo_entry() -> TestRes {
     let mut app = UiApp::new();
-    app.execute_command("sheet.createData", json!({ "sheet_id": "ds-base", "kind": "column", "cols": 1, "rows": 2, "auto_graph": false }))
-        .map_err(|err| format!("seed data sheet: {err}"))?;
-
-    let initial_undo = app.session().undo_depth();
-    let initial_sheets = app.document().data_sheets.len();
+    exec(&mut app, "sheet.createData", json!({ "sheet_id": "ds-base", "kind": "column", "cols": 1, "rows": 2, "auto_graph": false }))?;
+    let (initial_undo, initial_sheets) = (app.session().undo_depth(), app.document().data_sheets.len());
     assert_eq!(initial_sheets, 1);
 
-    // Mix a UI command (`ui.rulers.toggle`) with multiple engine mutations so `command.batch(atomic: true)`
-    // takes the manual fallback path rather than `try_execute_pure_engine_atomic_batch`.
     let resp = control_json(
         &mut app,
         20,
@@ -162,18 +126,13 @@ fn da_06_07_manual_fallback_atomic_batch_collapses_into_single_undo_entry() -> T
             ]
         }),
     )?;
-    assert_eq!(resp.get("ok").and_then(Value::as_bool), Some(true), "mixed atomic batch failed: {resp}");
+    assert_eq!(resp["ok"], json!(true), "mixed atomic batch failed: {resp}");
     assert_eq!(app.document().data_sheets.len(), 3);
-    assert_eq!(
-        app.session().undo_depth(),
-        initial_undo + 1,
-        "manual-fallback atomic batch must collapse all 3 document mutations into exactly 1 undo entry"
-    );
+    assert_eq!(app.session().undo_depth(), initial_undo + 1);
 
-    // One single edit.undo must revert ALL steps from the batch.
     let undo_resp = control_json(&mut app, 21, "edit.undo", json!({}))?;
-    assert_eq!(undo_resp.get("ok").and_then(Value::as_bool), Some(true), "edit.undo failed: {undo_resp}");
-    assert_eq!(app.document().data_sheets.len(), initial_sheets, "single undo must revert all sheets created in atomic batch");
+    assert_eq!(undo_resp["ok"], json!(true));
+    assert_eq!(app.document().data_sheets.len(), initial_sheets);
     assert!(app.document().data_sheet(&SheetId::new("ds-m1")).is_none());
     assert!(app.document().data_sheet(&SheetId::new("ds-m2")).is_none());
     assert_eq!(app.session().undo_depth(), initial_undo);

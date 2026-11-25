@@ -1,25 +1,19 @@
 #![forbid(unsafe_code)]
-//! `R10.23` Beta desktop GUI human-path tests migrated cleanly onto native `egui`:
-//! - Bullet 2 (**Shortcuts**): `Cmd/Ctrl+Z` undo, `Cmd/Ctrl+Shift+Z` redo, and Navigator
-//!   (`Cmd/Ctrl+Shift+N`), Inspector (`Cmd/Ctrl+Shift+I`), and Family (`Cmd/Ctrl+Shift+F`) pane
-//!   toggles driven strictly by raw `egui` key events through [`EguiHumanPathDriver`].
-//! - Bullet 4 (**Graph and layout copy**): `Cmd/Ctrl+C` key events on a rendered [`GraphSheet`]
-//!   and on a rendered [`LayoutSheet`] placing the `R5.4` multi-flavor vector [`ClipboardBundle`]
-//!   (`%PDF-1.7`, `SVG`, `HTML`, `PNG`, `EMF`) through a stubbed [`PlatformClipboardAdapter`].
-//! - Bullet 7 (**Translations at Beta — language picker**): `View > Language` picker labelling all
-//!   15 non-English UI locales as `[Draft]` translations while keeping `"English (en)"` unmarked,
-//!   plus fontless embedded-fallback verification without OS host fonts.
+//! `R10.23` Beta desktop GUI human-path tests on native `egui`:
+//! undo/redo & pane-toggle shortcuts, vector clipboard bundles, language picker `[Draft]` labels,
+//! fontless embedded-fallback verification, and `R17.2` Copy for Slides.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use curvebook_platform::sync::RwLock;
-
+use crate::common::{PNG_SIGNATURE, ShellTestState, TestRes, assert_clean_parity, cell_number, ensure, seed_xy_doc, widget_rect};
+use crate::human_wf_common::{EguiWfHarness, assert_input_to_paint_budget, assert_zero_shortcut_compliance, default_viewport};
+use crate::suite_helpers::{add_init_graph, new_shell_app};
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellCoord, DataSheet, DescriptiveSpec, GraphKind, GraphSheet, InfoConstant, InfoSheet, LayoutItem, LayoutSheet,
-    LayoutSpec, ProjectDocument, RectPt, ResultSheet, SheetId, SubcolumnMode, TableArchetype, XyTable,
+    AnalysisKind, AnalysisSpec, DescriptiveSpec, GraphKind, InfoConstant, InfoSheet, LayoutItem, LayoutSheet, LayoutSpec, RectPt, ResultSheet,
+    SheetId,
 };
-use curvebook_engine::Session;
+use curvebook_platform::sync::RwLock;
 use curvebook_ui_egui::egui_shell::Tokens;
 use curvebook_ui_egui::egui_shell::driver::{EguiHumanPathDriver, TextBleedPolicy};
 use curvebook_ui_egui::egui_shell::fonts::{FontDiscoveryConfig, build_egui_font_definitions_with_config};
@@ -34,219 +28,140 @@ use egui::{Key, Modifiers};
 use serde_json::json;
 
 fn build_r10_23_workspace() -> Result<UiApp, String> {
-    let mut doc = ProjectDocument::new("R10.23 Shortcuts & Vector Copy").map_err(|e| e.to_string())?;
-
+    let (mut doc, xy_id) = seed_xy_doc(
+        "R10.23 Shortcuts & Vector Copy",
+        "xy-1",
+        "Dose Response",
+        "X",
+        &[1.0, 2.0, 3.0, 4.0, 5.0],
+        &[("Control", &[15.0, 20.0, 25.0, 30.0, 35.0]), ("Compound A", &[20.5, 29.0, 37.5, 46.0, 54.5])],
+    )?;
     let mut info = InfoSheet::new_preseeded("info-1", "Assay Conditions").map_err(|e| e.to_string())?;
-    info.constants
-        .push(InfoConstant::new("Temperature_C", curvebook_doc::ConstantValue::Number(25.0), Some(String::from("C"))).map_err(|e| e.to_string())?);
-    info.notes_markdown = String::from("Buffer equilibrated prior to measurement.");
+    info.constants.push(InfoConstant::new("Temperature_C", curvebook_doc::ConstantValue::Number(25.0), Some("C".into())).map_err(|e| e.to_string())?);
+    info.notes_markdown = "Buffer equilibrated prior to measurement.".into();
     doc.add_info_sheet(info).map_err(|e| e.to_string())?;
-
-    let mut xy = XyTable::new(SubcolumnMode::Single, 2, 5).map_err(|e| e.to_string())?;
-    xy.data_sets[0].title = String::from("Control");
-    xy.data_sets[1].title = String::from("Compound A");
-    for r in 0..5 {
-        let x = f64::from(u32::try_from(r + 1).unwrap_or(1));
-        xy.set_x_cell(r, Cell::number(x)).map_err(|e| e.to_string())?;
-        xy.data_sets[0].cells[r][0] = Cell::number(10.0 + x * 5.0);
-        xy.data_sets[1].cells[r][0] = Cell::number(12.0 + x * 8.5);
+    if let Some(ds) = doc.data_sheet_mut(&xy_id) {
+        ds.info_sheet_id = Some(SheetId::from("info-1"));
     }
-    let mut ds = DataSheet::new("xy-1", "Dose Response", TableArchetype::Xy(xy)).map_err(|e| e.to_string())?;
-    ds.info_sheet_id = Some(SheetId::from("info-1"));
-    doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
-
     let spec = AnalysisSpec::new("res-1", "xy-1", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).map_err(|e| e.to_string())?;
     let mut rs = ResultSheet::new(spec).map_err(|e| e.to_string())?;
-    rs.analysis.set_custom_title(Some(String::from("Descriptive Summary"))).map_err(|e| e.to_string())?;
+    rs.analysis.set_custom_title(Some("Descriptive Summary".into())).map_err(|e| e.to_string())?;
     doc.add_result_sheet(rs).map_err(|e| e.to_string())?;
 
-    let ds_ref = doc.data_sheet(&SheetId::from("xy-1")).ok_or_else(|| String::from("missing xy-1"))?.clone();
-    let mut gs = GraphSheet::new_uninitialized_for_data("graph-1", &ds_ref).map_err(|e| e.to_string())?;
-    gs.title = String::from("Dose Response Curve");
-    gs.initialized = true;
-    gs.spec.kind = GraphKind::Xy;
-    gs.spec.title = String::from("Dose Response Curve");
-    gs.spec.x_axis.title = String::from("Concentration (uM)");
-    gs.spec.y_axis.title = String::from("Response (%)");
-    doc.add_graph_sheet(gs).map_err(|e| e.to_string())?;
-
+    let gid = add_init_graph(&mut doc, &xy_id, "graph-1", GraphKind::Xy)?;
+    if let Some(gs) = doc.graph_sheet_mut(&gid) {
+        gs.title = "Dose Response Curve".into();
+        gs.spec.title = "Dose Response Curve".into();
+        gs.spec.x_axis.title = "Concentration (uM)".into();
+        gs.spec.y_axis.title = "Response (%)".into();
+    }
     let mut lspec = LayoutSpec::default();
     lspec.items.push(LayoutItem::LiveGraph {
-        id: String::from("panel-a"),
-        graph_sheet_id: SheetId::from("graph-1"),
+        id: "panel-a".into(),
+        graph_sheet_id: gid,
         bounds_pt: RectPt::new(24.0, 32.0, 320.0, 220.0),
         scale_percent: 100.0,
-        badge_override: Some(String::from("A")),
+        badge_override: Some("A".into()),
     });
     lspec.items.push(LayoutItem::TextCallout {
-        id: String::from("callout-1"),
+        id: "callout-1".into(),
         bounds_pt: RectPt::new(360.0, 48.0, 160.0, 64.0),
-        markdown: String::from("Composite publication figure panel"),
+        markdown: "Composite publication figure panel".into(),
         font_size_pt: 11.0,
     });
-    let ls = LayoutSheet::new("layout-1", "Composite Figure 1", lspec).map_err(|e| e.to_string())?;
-    doc.add_layout_sheet(ls).map_err(|e| e.to_string())?;
-
-    doc.select_in_navigator(&SheetId::from("xy-1")).map_err(|e| e.to_string())?;
-    let mut app = UiApp::from_session(Session::from_document(doc));
-    app.nav.welcome.open = false;
-    app.sync_views();
-    Ok(app)
+    doc.add_layout_sheet(LayoutSheet::new("layout-1", "Composite Figure 1", lspec).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    doc.select_in_navigator(&xy_id).map_err(|e| e.to_string())?;
+    Ok(new_shell_app(doc))
 }
 
 fn cell_y0_value(app: &UiApp) -> Option<f64> {
-    app.document().data_sheet(&SheetId::from("xy-1")).and_then(|ds| ds.cell(CellCoord::new(0, 0, 0))).and_then(Cell::active_number)
+    app.document().data_sheet(&SheetId::from("xy-1")).and_then(|ds| cell_number(ds, 0, 0))
 }
 
-fn assert_valid_vector_bundle(bundle: &ClipboardBundle, label: &str) -> Result<(), String> {
-    if !bundle.pdf_bytes.starts_with(b"%PDF-1.7") {
-        return Err(format!("{label}: expected `%PDF-1.7` header, got {:?}", bundle.pdf_bytes.get(..12)));
-    }
-    if !bundle.pdf_bytes.windows(5).any(|w| w == b"%%EOF") {
-        return Err(format!("{label}: PDF payload missing `%%EOF` trailer"));
-    }
-    if bundle.pdf_bytes.len() <= 256 {
-        return Err(format!("{label}: PDF payload unexpectedly tiny ({} bytes)", bundle.pdf_bytes.len()));
-    }
-    if !bundle.svg.contains("<svg") || !bundle.svg.contains("</svg>") {
-        return Err(format!("{label}: SVG payload missing `<svg>...</svg>` root"));
-    }
-    let has_vector_geom =
-        bundle.svg.contains("<path") || bundle.svg.contains("<rect") || bundle.svg.contains("<line") || bundle.svg.contains("<text");
-    if !has_vector_geom {
-        return Err(format!("{label}: SVG payload contains no vector geometry"));
-    }
-    if bundle.html.is_empty() {
-        return Err(format!("{label}: HTML clipboard fragment should be populated"));
-    }
-    if !bundle.png_bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bundle.png_bytes.len() <= 256 {
-        return Err(format!("{label}: invalid PNG fallback inside ClipboardBundle"));
-    }
-    if let Some(ref emf) = bundle.emf_bytes
-        && emf.len() < 88
-    {
-        return Err(format!("{label}: EMF payload unexpectedly small ({} bytes)", emf.len()));
-    }
-    Ok(())
+fn assert_valid_vector_bundle(bundle: &ClipboardBundle, label: &str) -> TestRes {
+    ensure(
+        bundle.pdf_bytes.starts_with(b"%PDF-1.7") && bundle.pdf_bytes.windows(5).any(|w| w == b"%%EOF") && bundle.pdf_bytes.len() > 256,
+        format!("{label}: invalid PDF"),
+    )?;
+    let has_geom = ["<path", "<rect", "<line", "<text"].iter().any(|t| bundle.svg.contains(t));
+    ensure(bundle.svg.contains("<svg") && bundle.svg.contains("</svg>") && has_geom, format!("{label}: invalid SVG"))?;
+    ensure(!bundle.html.is_empty(), format!("{label}: empty HTML"))?;
+    ensure(bundle.png_bytes.starts_with(PNG_SIGNATURE) && bundle.png_bytes.len() > 256, format!("{label}: invalid PNG"))?;
+    ensure(bundle.emf_bytes.as_ref().is_none_or(|emf| emf.len() >= 88), format!("{label}: tiny EMF"))
 }
 
 #[test]
-fn r10_23_undo_redo_shortcuts_cmd_and_ctrl_human_path() -> Result<(), String> {
-    let app = build_r10_23_workspace()?;
-    let mut harness = crate::human_wf_common::EguiWfHarness::from_app(app, crate::human_wf_common::default_viewport());
-    crate::human_wf_common::assert_zero_shortcut_compliance(&mut harness)?;
+fn r10_23_undo_redo_shortcuts_cmd_and_ctrl_human_path() -> TestRes {
+    let mut h = EguiWfHarness::from_app(build_r10_23_workspace()?, default_viewport());
+    assert_zero_shortcut_compliance(&mut h)?;
+    assert!((cell_y0_value(h.app()).ok_or("missing (0,0,0)")? - 15.0).abs() < 1e-9 && h.app().document().data_sheets.len() == 1);
+    let initial_png = h.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
 
-    let initial_val = cell_y0_value(harness.app()).ok_or_else(|| String::from("missing initial cell (0,0,0)"))?;
-    assert!((initial_val - 15.0).abs() < 1e-9);
-    assert_eq!(harness.app().document().data_sheets.len(), 1);
-    let initial_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+    h.type_replace_cell("grid.cell.0.0.0", "87.5")?;
+    assert_eq!(cell_y0_value(h.app()), Some(87.5));
+    let edited_png = h.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+    assert_ne!(edited_png, initial_png);
 
-    // 1. Double-click visible cell `grid.cell.0.0.0`, replace value with `87.5`, and press `Enter` to commit.
-    let cell_pos = harness
-        .driver
-        .frame_meta()
-        .find_by_widget_id("grid.cell.0.0.0")
-        .map(|e| e.clipped_rect.center())
-        .ok_or_else(|| String::from("missing grid.cell.0.0.0"))?;
-    harness.driver.click_at(cell_pos)?;
-    harness.driver.click_at(cell_pos)?;
-    for _ in 0..8 {
-        harness.driver.press_key("Backspace", KeyModifiers::default())?;
+    h.click("menu.data")?;
+    h.click("menu.sheet.duplicate")?;
+    assert_eq!(h.app().document().data_sheets.len(), 2);
+
+    // Round-trip both `Cmd` and `Ctrl` undo/redo pairs.
+    for (base_mod, check_png) in [(Modifiers::COMMAND, true), (Modifiers::CTRL, false)] {
+        h.driver.press_egui_key(Key::Z, base_mod);
+        assert_eq!((h.app().document().data_sheets.len(), cell_y0_value(h.app())), (1, Some(87.5)));
+        h.driver.press_egui_key(Key::Z, base_mod);
+        assert_eq!(cell_y0_value(h.app()), Some(15.0));
+        if check_png {
+            assert_ne!(h.screenshot_png(ScreenshotRegionTarget::FullWindow)?, edited_png);
+        }
+        h.driver.press_egui_key(Key::Z, base_mod | Modifiers::SHIFT);
+        assert_eq!(cell_y0_value(h.app()), Some(87.5));
+        h.driver.press_egui_key(Key::Z, base_mod | Modifiers::SHIFT);
+        assert_eq!(h.app().document().data_sheets.len(), 2);
     }
-    harness.driver.type_text("87.5")?;
-    harness.driver.press_key("Enter", KeyModifiers::default())?;
-    assert_eq!(cell_y0_value(harness.app()), Some(87.5));
-    let edited_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
-    assert_ne!(edited_png, initial_png, "committed cell edit must update rendered egui screenshot");
-
-    // 2. Duplicate DataSheet via drawn Data > Duplicate Sheet menu item (`data_sheets.len() == 2`).
-    harness.click("menu.data")?;
-    harness.click("menu.sheet.duplicate")?;
-    assert_eq!(harness.app().document().data_sheets.len(), 2);
-
-    // 3. `Cmd+Z` twice via raw egui keys: reverts duplication, then reverts cell edit.
-    harness.driver.press_egui_key(Key::Z, Modifiers::COMMAND);
-    assert_eq!(harness.app().document().data_sheets.len(), 1, "first Cmd+Z must undo sheet duplication");
-    assert_eq!(cell_y0_value(harness.app()), Some(87.5));
-
-    harness.driver.press_egui_key(Key::Z, Modifiers::COMMAND);
-    assert_eq!(cell_y0_value(harness.app()), Some(15.0), "second Cmd+Z must restore cell (0,0,0) to 15.0");
-    let undone_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
-    assert_ne!(undone_png, edited_png, "Cmd+Z undo must repaint cell back from 87.5");
-
-    // 4. `Cmd+Shift+Z` twice: redoes cell edit, then redoes sheet duplication.
-    harness.driver.press_egui_key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
-    assert_eq!(cell_y0_value(harness.app()), Some(87.5), "first Cmd+Shift+Z must redo cell edit");
-    harness.driver.press_egui_key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
-    assert_eq!(harness.app().document().data_sheets.len(), 2, "second Cmd+Shift+Z must redo sheet duplication");
-
-    // 5. `Ctrl+Z` and `Ctrl+Shift+Z` round-trip both edits cleanly.
-    harness.driver.press_egui_key(Key::Z, Modifiers::CTRL);
-    assert_eq!(harness.app().document().data_sheets.len(), 1, "first Ctrl+Z must undo duplication");
-    harness.driver.press_egui_key(Key::Z, Modifiers::CTRL);
-    assert_eq!(cell_y0_value(harness.app()), Some(15.0), "second Ctrl+Z must undo cell edit");
-
-    harness.driver.press_egui_key(Key::Z, Modifiers::CTRL | Modifiers::SHIFT);
-    assert_eq!(cell_y0_value(harness.app()), Some(87.5), "first Ctrl+Shift+Z must redo cell edit");
-    harness.driver.press_egui_key(Key::Z, Modifiers::CTRL | Modifiers::SHIFT);
-    assert_eq!(harness.app().document().data_sheets.len(), 2, "second Ctrl+Shift+Z must redo duplication");
-
-    crate::human_wf_common::assert_zero_shortcut_compliance(&mut harness)?;
-    crate::human_wf_common::assert_input_to_paint_budget(&harness, 50.0)?;
-    Ok(())
+    assert_zero_shortcut_compliance(&mut h)?;
+    assert_input_to_paint_budget(&h, 50.0)
 }
 
 #[test]
-fn r10_23_pane_toggle_shortcuts_navigator_inspector_family_human_path() -> Result<(), String> {
-    let app = build_r10_23_workspace()?;
-    let mut harness = crate::human_wf_common::EguiWfHarness::from_app(app, ViewportMetrics::new(1440.0, 900.0, 1.0));
+fn r10_23_pane_toggle_shortcuts_navigator_inspector_family_human_path() -> TestRes {
+    let mut h = EguiWfHarness::from_app(build_r10_23_workspace()?, ViewportMetrics::new(1440.0, 900.0, 1.0));
+    h.click("nav.chip.graphs")?;
+    h.click("nav.sheet.graph-1")?;
+    assert_eq!(h.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("graph-1"));
+    assert!(h.driver.frame_meta().find_by_widget_id("nav.search_input").is_some());
+    assert!(h.driver.frame_meta().entries.iter().any(|e| e.widget_id.starts_with("inspector.")));
 
-    harness.click("nav.chip.graphs")?;
-    harness.click("nav.sheet.graph-1")?;
-    assert_eq!(harness.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("graph-1"));
-    assert!(harness.driver.frame_meta().find_by_widget_id("nav.search_input").is_some());
-    assert!(harness.driver.frame_meta().entries.iter().any(|e| e.widget_id.starts_with("inspector.")));
+    let (cmd_s, ctrl_s) = (Modifiers::COMMAND | Modifiers::SHIFT, Modifiers::CTRL | Modifiers::SHIFT);
+    let open_png = h.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
 
-    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-    let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
-    let open_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+    h.driver.press_egui_key(Key::N, cmd_s);
+    assert!(h.driver.state().views.leading_collapsed_rail && h.driver.frame_meta().find_by_widget_id("nav.search_input").is_none());
+    assert_ne!(h.screenshot_png(ScreenshotRegionTarget::FullWindow)?, open_png);
+    h.driver.press_egui_key(Key::N, ctrl_s);
+    assert!(!h.driver.state().views.leading_collapsed_rail && h.driver.frame_meta().find_by_widget_id("nav.search_input").is_some());
 
-    // Navigator shortcut (`Cmd+Shift+N` -> rail, `Ctrl+Shift+N` -> expanded).
-    harness.driver.press_egui_key(Key::N, cmd_shift);
-    assert!(harness.driver.state().views.leading_collapsed_rail, "Cmd+Shift+N must collapse Leading Dock");
-    assert!(harness.driver.frame_meta().find_by_widget_id("nav.search_input").is_none());
-    assert_ne!(harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?, open_png);
+    h.driver.press_egui_key(Key::I, cmd_s);
+    assert!(h.driver.state().views.trailing_collapsed_rail && h.screenshot_png(ScreenshotRegionTarget::FullWindow)? != open_png);
+    h.driver.press_egui_key(Key::I, ctrl_s);
+    assert!(!h.driver.state().views.trailing_collapsed_rail);
 
-    harness.driver.press_egui_key(Key::N, ctrl_shift);
-    assert!(!harness.driver.state().views.leading_collapsed_rail, "Ctrl+Shift+N must expand Leading Dock");
-    assert!(harness.driver.frame_meta().find_by_widget_id("nav.search_input").is_some());
-
-    // Inspector shortcut (`Cmd+Shift+I` -> rail, `Ctrl+Shift+I` -> expanded).
-    harness.driver.press_egui_key(Key::I, cmd_shift);
-    assert!(harness.driver.state().views.trailing_collapsed_rail, "Cmd+Shift+I must collapse Trailing Studio");
-    assert_ne!(harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?, open_png);
-
-    harness.driver.press_egui_key(Key::I, ctrl_shift);
-    assert!(!harness.driver.state().views.trailing_collapsed_rail, "Ctrl+Shift+I must expand Trailing Studio");
-
-    // Family shortcut (`Cmd+Shift+F` / `Ctrl+Shift+F`).
-    assert!(harness.app().family_open);
-    harness.driver.press_egui_key(Key::F, cmd_shift);
-    assert!(!harness.app().family_open, "Cmd+Shift+F must collapse Family pane");
-    harness.driver.press_egui_key(Key::F, ctrl_shift);
-    assert!(harness.app().family_open, "Ctrl+Shift+F must restore Family pane");
+    assert!(h.app().family_open);
+    h.driver.press_egui_key(Key::F, cmd_s);
+    assert!(!h.app().family_open);
+    h.driver.press_egui_key(Key::F, ctrl_s);
+    assert!(h.app().family_open);
 
     // Arabic (`ar`) @ 1.5x HiDPI toggle parity.
-    assert_eq!(harness.app_mut().set_locale("ar"), "ar");
-    harness.driver.set_viewport(ViewportMetrics::new(1440.0, 900.0, 1.5));
-    harness.driver.press_egui_key(Key::N, cmd_shift);
-    harness.driver.press_egui_key(Key::I, cmd_shift);
-    harness.assert_parity_and_layout("ar closed panes 1.5x")?;
-    harness.driver.press_egui_key(Key::N, ctrl_shift);
-    harness.driver.press_egui_key(Key::I, ctrl_shift);
-    harness.assert_parity_and_layout("ar restored panes 1.5x")?;
-    crate::human_wf_common::assert_input_to_paint_budget(&harness, 50.0)?;
-    Ok(())
+    assert_eq!(h.app_mut().set_locale("ar"), "ar");
+    h.driver.set_viewport(ViewportMetrics::new(1440.0, 900.0, 1.5));
+    for (mods, lbl) in [(cmd_s, "ar closed panes 1.5x"), (ctrl_s, "ar restored panes 1.5x")] {
+        h.driver.press_egui_key(Key::N, mods);
+        h.driver.press_egui_key(Key::I, mods);
+        h.assert_parity_and_layout(lbl)?;
+    }
+    assert_input_to_paint_budget(&h, 50.0)
 }
 
 #[derive(Debug, Default)]
@@ -254,181 +169,129 @@ struct CustomBundleCaptureAdapter {
     captured: RwLock<Vec<ClipboardBundle>>,
 }
 
+impl CustomBundleCaptureAdapter {
+    fn ok_status(detail: &str) -> OsAdapterStatus {
+        OsAdapterStatus {
+            available: true,
+            availability: OsAdapterAvailability::Submitted,
+            backend: "custom-test-stub".into(),
+            detail: detail.into(),
+            text: None,
+            job_id: None,
+        }
+    }
+}
+
 impl PlatformClipboardAdapter for CustomBundleCaptureAdapter {
     fn write_text(&self, _text: &str) -> Result<OsAdapterStatus, String> {
-        Ok(OsAdapterStatus {
-            available: true,
-            availability: OsAdapterAvailability::Submitted,
-            backend: String::from("custom-test-stub"),
-            detail: String::from("text captured"),
-            text: None,
-            job_id: None,
-        })
+        Ok(Self::ok_status("text captured"))
     }
-
     fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
-        let mut guard = self.captured.write_or_recover().map_err(|err| err.to_string())?;
-        guard.push(bundle.clone());
-        Ok(OsAdapterStatus {
-            available: true,
-            availability: OsAdapterAvailability::Submitted,
-            backend: String::from("custom-test-stub"),
-            detail: String::from("bundle captured"),
-            text: None,
-            job_id: None,
-        })
+        self.captured.write_or_recover().map_err(|e| e.to_string())?.push(bundle.clone());
+        Ok(Self::ok_status("bundle captured"))
     }
 }
 
 #[test]
-fn r10_23_graph_and_layout_cmd_ctrl_c_vector_clipboard_bundle_human_path() -> Result<(), String> {
+fn r10_23_graph_and_layout_cmd_ctrl_c_vector_clipboard_bundle_human_path() -> TestRes {
     let mut app = build_r10_23_workspace()?;
     let clip_stub = Arc::new(StubPlatformClipboardAdapter::new());
     app.set_clipboard_adapter(clip_stub.clone());
-    let mut harness = crate::human_wf_common::EguiWfHarness::from_app(app, crate::human_wf_common::default_viewport());
+    let mut h = EguiWfHarness::from_app(app, default_viewport());
 
-    // 1. Select `graph-1` and press `Cmd+C` & `Ctrl+C`.
-    harness.click("nav.chip.graphs")?;
-    harness.click("nav.sheet.graph-1")?;
-    assert_eq!(harness.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("graph-1"));
-    let graph_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+    h.click("nav.chip.graphs")?;
+    h.click("nav.sheet.graph-1")?;
+    assert_eq!(h.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("graph-1"));
+    let graph_png = h.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+    h.driver.press_egui_key(Key::C, Modifiers::COMMAND);
+    h.driver.press_egui_key(Key::C, Modifiers::CTRL);
+    let g_bundles = clip_stub.captured_bundles();
+    assert_eq!(g_bundles.len(), 2);
+    assert_valid_vector_bundle(&g_bundles[0], "GraphSheet Cmd+C")?;
+    assert_eq!((&g_bundles[1].pdf_bytes, &g_bundles[1].svg), (&g_bundles[0].pdf_bytes, &g_bundles[0].svg));
 
-    harness.driver.press_egui_key(Key::C, Modifiers::COMMAND);
-    harness.driver.press_egui_key(Key::C, Modifiers::CTRL);
-    let bundles_after_graph = clip_stub.captured_bundles();
-    assert_eq!(bundles_after_graph.len(), 2, "expected 2 captured ClipboardBundles after Cmd+C & Ctrl+C on GraphSheet");
-    let graph_bundle = &bundles_after_graph[0];
-    assert_valid_vector_bundle(graph_bundle, "GraphSheet Cmd+C")?;
-    assert_eq!(&bundles_after_graph[1].pdf_bytes, &graph_bundle.pdf_bytes);
-    assert_eq!(&bundles_after_graph[1].svg, &graph_bundle.svg);
-
-    // 2. Select `layout-1` and press `Cmd+C` & `Ctrl+C`.
-    harness.click("nav.chip.layouts")?;
-    harness.click("nav.sheet.layout-1")?;
-    assert_eq!(harness.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("layout-1"));
-    let layout_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
-    assert_ne!(layout_png, graph_png, "LayoutSheet frame must differ visually from GraphSheet frame");
-
-    harness.driver.press_egui_key(Key::C, Modifiers::COMMAND);
-    harness.driver.press_egui_key(Key::C, Modifiers::CTRL);
-    let all_bundles = clip_stub.captured_bundles();
-    assert_eq!(all_bundles.len(), 4, "expected 4 captured bundles total (2 GraphSheet + 2 LayoutSheet)");
-    let layout_bundle = &all_bundles[2];
-    assert_valid_vector_bundle(layout_bundle, "LayoutSheet Cmd+C")?;
-    assert_ne!(layout_bundle.pdf_bytes, graph_bundle.pdf_bytes);
-    assert_ne!(layout_bundle.svg, graph_bundle.svg);
+    h.click("nav.chip.layouts")?;
+    h.click("nav.sheet.layout-1")?;
+    assert_eq!(h.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("layout-1"));
+    assert_ne!(h.screenshot_png(ScreenshotRegionTarget::FullWindow)?, graph_png);
+    h.driver.press_egui_key(Key::C, Modifiers::COMMAND);
+    h.driver.press_egui_key(Key::C, Modifiers::CTRL);
+    let all = clip_stub.captured_bundles();
+    assert_eq!(all.len(), 4);
+    assert_valid_vector_bundle(&all[2], "LayoutSheet Cmd+C")?;
     assert!(
-        layout_bundle.svg.contains("Composite publication figure panel"),
-        "LayoutSheet vector SVG must include rendered LayoutSheet callout text"
+        all[2].pdf_bytes != g_bundles[0].pdf_bytes && all[2].svg != g_bundles[0].svg && all[2].svg.contains("Composite publication figure panel")
     );
-    assert_eq!(&all_bundles[3].pdf_bytes, &layout_bundle.pdf_bytes);
+    assert_eq!(all[3].pdf_bytes, all[2].pdf_bytes);
 
-    // 3. Verify caller-supplied custom `PlatformClipboardAdapter` works at `2.0x` HiDPI (`288` DPI).
-    let custom_adapter = Arc::new(CustomBundleCaptureAdapter::default());
+    // Custom PlatformClipboardAdapter at 2.0x HiDPI (288 DPI).
+    let custom = Arc::new(CustomBundleCaptureAdapter::default());
     let mut custom_app = build_r10_23_workspace()?;
-    custom_app.set_clipboard_adapter(Arc::clone(&custom_adapter) as Arc<dyn PlatformClipboardAdapter>);
-    let mut custom_harness = crate::human_wf_common::EguiWfHarness::from_app(custom_app, ViewportMetrics::new(1280.0, 800.0, 2.0));
-    custom_harness.click("nav.chip.layouts")?;
-    custom_harness.click("nav.sheet.layout-1")?;
-    custom_harness.driver.press_egui_key(Key::C, Modifiers::COMMAND);
-    let custom_captured = custom_adapter.captured.read_or_recover().map_err(|err| err.to_string())?;
-    assert_eq!(custom_captured.len(), 1);
-    assert_eq!(custom_captured[0].dpi, 288, "2.0x HiDPI viewport should encode 288 DPI raster fallback");
-    assert_valid_vector_bundle(&custom_captured[0], "HiDPI 2.0x LayoutSheet Cmd+C")?;
-    drop(custom_captured);
-
-    crate::human_wf_common::assert_input_to_paint_budget(&harness, 50.0)?;
-    Ok(())
+    custom_app.set_clipboard_adapter(Arc::clone(&custom) as Arc<dyn PlatformClipboardAdapter>);
+    let mut ch = EguiWfHarness::from_app(custom_app, ViewportMetrics::new(1280.0, 800.0, 2.0));
+    ch.click("nav.chip.layouts")?;
+    ch.click("nav.sheet.layout-1")?;
+    ch.driver.press_egui_key(Key::C, Modifiers::COMMAND);
+    let cap = custom.captured.read_or_recover().map_err(|e| e.to_string())?;
+    assert_eq!((cap.len(), cap[0].dpi), (1, 288));
+    assert_valid_vector_bundle(&cap[0], "HiDPI 2.0x LayoutSheet Cmd+C")?;
+    drop(cap);
+    assert_input_to_paint_budget(&h, 50.0)
 }
 
 #[test]
-fn r10_23_language_picker_marks_15_non_english_locales_as_draft_human_path() -> Result<(), String> {
-    let app = build_r10_23_workspace()?;
-    let mut harness = crate::human_wf_common::EguiWfHarness::from_app(app, crate::human_wf_common::default_viewport());
-    let initial_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+fn r10_23_language_picker_marks_15_non_english_locales_as_draft_human_path() -> TestRes {
+    let mut h = EguiWfHarness::from_app(build_r10_23_workspace()?, default_viewport());
+    let initial_png = h.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+    let open_lang_menu = |h: &mut EguiWfHarness| -> TestRes {
+        h.click("menu.view")?;
+        h.driver.hover_at(h.widget_center("menu.ui.locale.set")?)
+    };
 
-    harness.click("menu.view")?;
-    let lang_pos = harness
-        .driver
-        .frame_meta()
-        .find_by_widget_id("menu.ui.locale.set")
-        .map(|e| e.clipped_rect.center())
-        .ok_or_else(|| String::from("missing menu.ui.locale.set"))?;
-    harness.driver.hover_at(lang_pos)?;
-
+    open_lang_menu(&mut h)?;
     let mut seen_labels = BTreeMap::<usize, String>::new();
     for step in 0..=4 {
-        for (idx, _loc) in LOCALES.iter().enumerate() {
-            let opt_id = format!("popup.menu.ui.locale.set.opt.{idx}");
-            if let Some(entry) = harness.driver.frame_meta().find_by_widget_id(&opt_id) {
+        for idx in 0..LOCALES.len() {
+            if let Some(entry) = h.driver.frame_meta().find_by_widget_id(&format!("popup.menu.ui.locale.set.opt.{idx}")) {
                 seen_labels.insert(idx, entry.label.clone());
             }
         }
         if seen_labels.len() == LOCALES.len() || step == 4 {
             break;
         }
-        let popup_pos = harness
-            .driver
-            .frame_meta()
-            .find_by_widget_id("popup.menu.ui.locale.set")
-            .map(|e| e.clipped_rect.center())
-            .ok_or_else(|| String::from("missing popup.menu.ui.locale.set"))?;
-        harness.driver.wheel_at(popup_pos, egui::vec2(0.0, -160.0))?;
+        let pos = h.widget_center("popup.menu.ui.locale.set")?;
+        h.driver.wheel_at(pos, egui::vec2(0.0, -160.0))?;
     }
-    assert_eq!(seen_labels.len(), 16, "all 16 locale options must be reachable by wheel scroll: {seen_labels:?}");
-    assert_eq!(seen_labels.get(&0).map(String::as_str), Some("English (en)"));
-    assert!(!is_draft_translation_locale("en"));
+    assert_eq!((seen_labels.len(), seen_labels.get(&0).map(String::as_str), is_draft_translation_locale("en")), (16, Some("English (en)"), false));
     for (idx, &loc) in LOCALES.iter().enumerate().skip(1) {
-        assert!(is_draft_translation_locale(loc));
         let expected = format!("{} ({loc}) [Draft]", locale_display_name(loc));
-        assert_eq!(locale_picker_label(loc), expected);
-        assert_eq!(seen_labels.get(&idx), Some(&expected));
+        assert!(is_draft_translation_locale(loc) && locale_picker_label(loc) == expected && seen_labels.get(&idx) == Some(&expected));
     }
 
-    // Select Arabic (`ar`, index 14), verify locale change & repaint, then switch back to `en`.
-    harness.click("popup.menu.ui.locale.set.opt.14")?;
-    assert_eq!(harness.app().locale, "ar");
-    let rtl_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
-    assert_ne!(rtl_png, initial_png, "selecting `ar` must repaint workspace");
+    h.click("popup.menu.ui.locale.set.opt.14")?;
+    assert_eq!(h.app().locale, "ar");
+    assert_ne!(h.screenshot_png(ScreenshotRegionTarget::FullWindow)?, initial_png);
 
-    harness.click("menu.view")?;
-    let lang_pos2 = harness
-        .driver
-        .frame_meta()
-        .find_by_widget_id("menu.ui.locale.set")
-        .map(|e| e.clipped_rect.center())
-        .ok_or_else(|| String::from("missing menu.ui.locale.set on reopen"))?;
-    harness.driver.hover_at(lang_pos2)?;
+    open_lang_menu(&mut h)?;
     for _ in 0..=4 {
-        if harness.driver.frame_meta().find_by_widget_id("popup.menu.ui.locale.set.opt.0").is_some() {
+        if h.driver.frame_meta().find_by_widget_id("popup.menu.ui.locale.set.opt.0").is_some() {
             break;
         }
-        let popup_pos2 = harness
-            .driver
-            .frame_meta()
-            .find_by_widget_id("popup.menu.ui.locale.set")
-            .map(|e| e.clipped_rect.center())
-            .ok_or_else(|| String::from("missing popup.menu.ui.locale.set on reopen"))?;
-        harness.driver.wheel_at(popup_pos2, egui::vec2(0.0, 200.0))?;
+        let pos = h.widget_center("popup.menu.ui.locale.set")?;
+        h.driver.wheel_at(pos, egui::vec2(0.0, 200.0))?;
     }
-    harness.click("popup.menu.ui.locale.set.opt.0")?;
-    assert_eq!(harness.app().locale, "en");
-    crate::human_wf_common::assert_input_to_paint_budget(&harness, 50.0)?;
-    Ok(())
+    h.click("popup.menu.ui.locale.set.opt.0")?;
+    assert_eq!(h.app().locale, "en");
+    assert_input_to_paint_budget(&h, 50.0)
 }
 
 #[test]
-fn r10_23_fontless_embedded_fallback_scenarios_pass_without_host_fonts() -> Result<(), String> {
+fn r10_23_fontless_embedded_fallback_scenarios_pass_without_host_fonts() -> TestRes {
     let book = FontBook::with_embedded_fallback();
-    assert!(
-        book.face_names().iter().all(|name| !name.starts_with("/System/Library") && !name.starts_with("/usr/share/fonts")),
-        "embedded fallback must not load OS host fonts: {:?}",
-        book.face_names()
-    );
+    assert!(book.face_names().iter().all(|n| !n.starts_with("/System/Library") && !n.starts_with("/usr/share/fonts")));
     let cleanroom_fonts =
         build_egui_font_definitions_with_config(&FontDiscoveryConfig { fonts_dir: None, include_os_fonts: false, include_bundled_fonts: false });
-    assert!(cleanroom_fonts.report.cleanroom_sans_loaded, "cleanroom sans fallback font must load without OS/bundled fonts");
-    assert!(cleanroom_fonts.report.symbol_fallback_loaded, "symbol fallback font must load without OS/bundled fonts");
+    assert!(cleanroom_fonts.report.cleanroom_sans_loaded && cleanroom_fonts.report.symbol_fallback_loaded);
 
     for (locale, mode, scale) in [("en", UiThemeMode::Light, 1.0), ("de", UiThemeMode::Dark, 2.0), ("ar", UiThemeMode::HighContrast, 3.0)] {
         let mut app = build_r10_23_workspace()?;
@@ -436,93 +299,76 @@ fn r10_23_fontless_embedded_fallback_scenarios_pass_without_host_fonts() -> Resu
         app.set_theme_mode(mode);
         let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
         let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(
-            crate::human_wf_common::WfShellState::new(app),
+            ShellTestState::new(app),
             ViewportMetrics::new(1280.0, 800.0, scale),
             tokens,
             cleanroom_fonts.definitions.clone(),
             |ui, meta, st| {
-                let rep = render_egui_shell_frame(ui, &st.app, &mut st.views, meta, &mut st.intents);
-                st.dialog_rect_pt = rep.regions.dialog_rect_pt;
+                st.dialog_rect_pt = render_egui_shell_frame(ui, &st.app, &mut st.views, meta, &mut st.intents).regions.dialog_rect_pt;
             },
         );
         driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
         driver.run_settled();
-        let parity = driver.verify_pixel_to_hit_box_parity();
-        assert!(parity.is_clean(), "fontless parity failed ({locale}, {mode:?}, {scale}x): {:?}", parity.violations);
-        let overlaps = driver.check_scrollbar_non_overlap();
-        assert!(overlaps.is_empty(), "fontless scrollbar overlap ({locale}, {mode:?}, {scale}x): {overlaps:?}");
-
+        assert_clean_parity(&driver, &format!("fontless ({locale}, {mode:?}, {scale}x)"))?;
         let (png, _, _) = driver
             .state_mut()
             .app
             .render_egui_shell_screenshot_png(RenderTargetSpec { width_px: 640, height_px: 420, dpi: 96 }, ScreenshotRegionTarget::FullWindow)
             .map_err(|e| e.to_string())?;
-        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n") && png.len() > 256);
+        assert!(png.starts_with(PNG_SIGNATURE) && png.len() > 256);
     }
     Ok(())
 }
 
 #[test]
-fn r17_2_copy_for_slides_shortcut_context_menu_and_dispatch_ui_command() -> Result<(), String> {
+fn r17_2_copy_for_slides_shortcut_context_menu_and_dispatch_ui_command() -> TestRes {
     let mut app = build_r10_23_workspace()?;
     let clip_stub = Arc::new(StubPlatformClipboardAdapter::new());
     app.set_clipboard_adapter(clip_stub.clone());
-    let mut harness = crate::human_wf_common::EguiWfHarness::from_app(app, crate::human_wf_common::default_viewport());
+    let mut h = EguiWfHarness::from_app(app, default_viewport());
 
-    // 1. Select `graph-1` (checking interactive repaint budget before heavyweight 300 DPI export) and trigger Cmd+Shift+C / Ctrl+Shift+C.
-    harness.click("nav.chip.graphs")?;
-    harness.click("nav.sheet.graph-1")?;
-    crate::human_wf_common::assert_input_to_paint_budget(&harness, 50.0)?;
-    let cmd_shift = Modifiers { command: true, shift: true, ..Modifiers::NONE };
-    let ctrl_shift = Modifiers { ctrl: true, shift: true, ..Modifiers::NONE };
-    harness.driver.press_egui_key(Key::C, cmd_shift);
-    harness.driver.press_egui_key(Key::C, ctrl_shift);
-    let slides_after_keys = clip_stub.captured_slide_bundles();
-    assert_eq!(slides_after_keys.len(), 2, "expected 2 slide bundles from Cmd+Shift+C & Ctrl+Shift+C");
-    assert_eq!(slides_after_keys[0].dpi, 300);
-    assert!(slides_after_keys[0].tiff_bytes.as_deref().is_some_and(|b| b.starts_with(b"II*\0")));
-    assert!(slides_after_keys[0].html.contains("<img src=\"data:image/png;base64,"));
-    assert_valid_vector_bundle(&slides_after_keys[0], "GraphSheet Cmd+Shift+C")?;
-    assert_eq!(harness.app().interaction.last_clipboard_text, None, "Copy for Slides must omit raw <svg> plain text");
+    h.click("nav.chip.graphs")?;
+    h.click("nav.sheet.graph-1")?;
+    assert_input_to_paint_budget(&h, 50.0)?;
+    h.driver.press_egui_key(Key::C, Modifiers::COMMAND | Modifiers::SHIFT);
+    h.driver.press_egui_key(Key::C, Modifiers::CTRL | Modifiers::SHIFT);
+    let slides = clip_stub.captured_slide_bundles();
+    assert_eq!((slides.len(), slides[0].dpi), (2, 300));
+    assert!(slides[0].tiff_bytes.as_deref().is_some_and(|b| b.starts_with(b"II*\0")));
+    assert!(slides[0].html.contains("<img src=\"data:image/png;base64,"));
+    assert_valid_vector_bundle(&slides[0], "GraphSheet Cmd+Shift+C")?;
+    assert_eq!(h.app().interaction.last_clipboard_text, None);
 
-    // 2. Right-click GraphSheet canvas -> click `canvas.graph_ctx.copy_for_slides`.
-    let canvas_rect = harness.driver.frame_meta().find_by_widget_id("canvas.viewport").map(|n| n.clipped_rect).ok_or("missing canvas.viewport")?;
-    harness.driver.click_at_button(canvas_rect.center(), PointerButton::Secondary, KeyModifiers::default())?;
-    assert!(
-        harness.driver.frame_meta().find_by_widget_id("canvas.graph_ctx.copy_for_slides").is_some(),
-        "expected Copy for Slides & Documents in GraphSheet context menu"
-    );
-    harness.click("canvas.graph_ctx.copy_for_slides")?;
+    for (chip, sheet, ctx_wid) in [
+        (None, None, "canvas.graph_ctx.copy_for_slides"),
+        (Some("nav.chip.layouts"), Some("nav.sheet.layout-1"), "canvas.layout_ctx.copy_for_slides"),
+    ] {
+        if let (Some(c), Some(s)) = (chip, sheet) {
+            h.click(c)?;
+            h.click(s)?;
+        }
+        let rect = widget_rect(&h.driver, "canvas.viewport")?;
+        h.driver.click_at_button(rect.center(), PointerButton::Secondary, KeyModifiers::default())?;
+        h.click(ctx_wid)?;
+    }
+    let slides_ctx = clip_stub.captured_slide_bundles();
+    assert_eq!((slides_ctx.len(), slides_ctx[3].dpi), (4, 300));
+    assert!(slides_ctx[3].svg.contains("Composite publication figure panel"));
 
-    // 3. Switch to `layout-1`, right-click canvas -> click `canvas.layout_ctx.copy_for_slides`.
-    harness.click("nav.chip.layouts")?;
-    harness.click("nav.sheet.layout-1")?;
-    let layout_rect =
-        harness.driver.frame_meta().find_by_widget_id("canvas.viewport").map(|n| n.clipped_rect).ok_or("missing layout canvas.viewport")?;
-    harness.driver.click_at_button(layout_rect.center(), PointerButton::Secondary, KeyModifiers::default())?;
-    assert!(
-        harness.driver.frame_meta().find_by_widget_id("canvas.layout_ctx.copy_for_slides").is_some(),
-        "expected Copy for Slides & Documents in LayoutSheet context menu"
-    );
-    harness.click("canvas.layout_ctx.copy_for_slides")?;
-
-    let slides_after_ctx = clip_stub.captured_slide_bundles();
-    assert_eq!(slides_after_ctx.len(), 4);
-    assert_eq!(slides_after_ctx[3].dpi, 300);
-    assert!(slides_after_ctx[3].svg.contains("Composite publication figure panel"));
-
-    // 4. Verify programmatic UI command `ui.clipboard.copyForSlides` with custom DPI (600 DPI).
+    // Programmatic `ui.clipboard.copyForSlides` with custom 600 DPI.
     let mut direct_app = build_r10_23_workspace()?;
     let direct_stub = Arc::new(StubPlatformClipboardAdapter::new());
     direct_app.set_clipboard_adapter(direct_stub.clone());
     let val = dispatch_ui_command(&mut direct_app, "ui.clipboard.copyForSlides", &json!({ "sheet_id": "layout-1", "dpi": 600 }))
         .map_err(|e| e.to_string())?
         .ok_or("ui.clipboard.copyForSlides not registered")?;
-    assert_eq!(val.get("dpi").and_then(serde_json::Value::as_u64), Some(600));
-    assert_eq!(val.get("omits_plain_text_svg").and_then(serde_json::Value::as_bool), Some(true));
-    assert_eq!(direct_stub.captured_slide_bundles().len(), 1);
-    assert_eq!(direct_stub.captured_slide_bundles()[0].dpi, 600);
-    assert_eq!(direct_app.interaction.last_clipboard_text, None);
-
+    assert_eq!(
+        (val.get("dpi").and_then(serde_json::Value::as_u64), val.get("omits_plain_text_svg").and_then(serde_json::Value::as_bool)),
+        (Some(600), Some(true))
+    );
+    assert_eq!(
+        (direct_stub.captured_slide_bundles().len(), direct_stub.captured_slide_bundles()[0].dpi, direct_app.interaction.last_clipboard_text),
+        (1, 600, None)
+    );
     Ok(())
 }

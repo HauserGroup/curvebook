@@ -5,36 +5,23 @@
 use std::sync::Arc;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellCoord, ContingencySpec, ContingencyTable, DataSheet, ProjectDocument, ResultSheet, SheetId, SubcolumnMode,
-    TableArchetype, XyTable,
+    AnalysisKind, AnalysisSpec, ContingencySpec, ContingencyTable, DataSheet, ProjectDocument, ResultSheet, SheetId, TableArchetype,
 };
 use curvebook_engine::Session;
-use curvebook_ui_egui::control_io::dispatch_gui_action;
 use curvebook_ui_egui::egui_shell::welcome_hub::build_sample_creation_intent;
 use curvebook_ui_egui::egui_shell::{ContingencyCiTarget, PendingUiIntents, StatParamsIntent, UiIntent};
 use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
-use curvebook_ui_egui::{KeyModifiers, UiApp, UiInputEvent, ViewportMetrics, dispatch_ui_event, inspect_ui_tree};
+use curvebook_ui_egui::{KeyModifiers, UiApp, inspect_ui_tree};
 use serde_json::json;
 
-type TestRes = Result<(), String>;
-
-fn find_widget(snap: &curvebook_ui_egui::inspect::UiTreeSnapshot, id: &str) -> Option<curvebook_ui_egui::inspect::UiWidgetNode> {
-    snap.find_widget(id)
-}
+use crate::common::{TestRes, cell_number, key_down, seed_xy_doc};
+use crate::helpers::{exec, gui};
 
 #[test]
 fn fa_sec13_14_xy_spill_paste_collapses_into_single_undo_entry() -> TestRes {
-    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 4).map_err(|e| format!("{e}"))?;
-    xy.set_x_cell(0, Cell::number(1.0)).map_err(|e| format!("{e}"))?;
-    xy.data_sets[0].cells[0][0] = Cell::number(10.0);
-    let ds = DataSheet::new("xy-1", "Assay", TableArchetype::Xy(xy)).map_err(|e| format!("{e}"))?;
-    let mut doc = ProjectDocument::new("Atomic X+Y Paste").map_err(|e| format!("{e}"))?;
-    doc.add_data_sheet(ds).map_err(|e| format!("{e}"))?;
-    doc.active_sheet_id = Some(SheetId::from("xy-1"));
-
+    let (doc, sid) = seed_xy_doc("Atomic X+Y Paste", "xy-1", "Assay", "X", &[1.0, 0.0, 0.0, 0.0], &[("Y", &[10.0])])?;
     let mut app = UiApp::from_session(Session::from_document(doc));
-    let before_doc = app.document().clone();
-    let before_undo = app.session().undo_depth();
+    let (before_doc, before_undo) = (app.document().clone(), app.session().undo_depth());
 
     let stub = Arc::new(StubPlatformClipboardAdapter::new());
     stub.seed_text("2.0\t20.0\n3.0\t30.0");
@@ -42,16 +29,14 @@ fn fa_sec13_14_xy_spill_paste_collapses_into_single_undo_entry() -> TestRes {
     app.focus_widget_id = Some(String::from("grid.cell"));
     app.grid.select_x_cell_sync(1, 0);
 
-    let paste_ev = UiInputEvent::KeyDown { key: String::from("v"), modifiers: KeyModifiers { meta: true, ..KeyModifiers::default() } };
-    dispatch_ui_event(&mut app, paste_ev, ViewportMetrics::default()).map_err(|e| format!("paste: {e}"))?;
+    key_down(&mut app, "v", KeyModifiers { meta: true, ..Default::default() }).map_err(|e| format!("paste: {e}"))?;
+    assert_eq!(app.session().undo_depth(), before_undo + 1, "X+Y spill paste must create 1 undo step");
+    let ds = app.document().data_sheet(&sid).ok_or("missing xy-1")?;
+    assert_eq!(ds.x_or_time_cell(2, 0).and_then(|c| c.value.finite_f64()), Some(3.0));
+    assert_eq!(cell_number(ds, 2, 0), Some(30.0));
 
-    assert_eq!(app.session().undo_depth(), before_undo + 1, "X+Y spill paste must create exactly 1 undo step");
-    let ds_after = app.document().data_sheet(&SheetId::from("xy-1")).ok_or_else(|| String::from("missing xy-1"))?;
-    assert_eq!(ds_after.x_or_time_cell(2, 0).and_then(|c| c.value.finite_f64()), Some(3.0));
-    assert_eq!(ds_after.cell(CellCoord::new(2, 0, 0)).and_then(|c| c.value.finite_f64()), Some(30.0));
-
-    app.execute_command("edit.undo", json!({})).map_err(|e| format!("undo: {e}"))?;
-    assert_eq!(app.document(), &before_doc, "a single edit.undo must revert BOTH X and Y pasted values");
+    exec(&mut app, "edit.undo", json!({}))?;
+    assert_eq!(app.document(), &before_doc, "single undo must revert both X and Y");
     assert_eq!(app.session().undo_depth(), before_undo);
     Ok(())
 }
@@ -59,33 +44,28 @@ fn fa_sec13_14_xy_spill_paste_collapses_into_single_undo_entry() -> TestRes {
 #[test]
 fn fa_sec14_11_power_wizard_create_collapses_into_single_undo_entry() -> TestRes {
     let mut app = UiApp::new();
-    let before_doc = app.document().clone();
-    let before_undo = app.session().undo_depth();
+    let (before_doc, before_undo) = (app.document().clone(), app.session().undo_depth());
 
-    dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.powerWizard.open" })).map_err(|e| format!("open power wizard: {e}"))?;
-    for step in 0..3 {
-        let _ = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "next" }))
-            .map_err(|e| format!("advance power wizard stage {step}: {e}"))?;
+    gui(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.powerWizard.open" }))?;
+    for _ in 0..3 {
+        gui(&mut app, "ui.answer_dialog", json!({ "action": "next" }))?;
     }
-    app.canvas_dialogs.power_wizard.recalculate().map_err(|e| format!("recalc: {e}"))?;
-    let _ = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "create" })).map_err(|e| format!("power create: {e}"))?;
+    app.canvas_dialogs.power_wizard.recalculate().map_err(|e| e.to_string())?;
+    gui(&mut app, "ui.answer_dialog", json!({ "action": "create" }))?;
+    assert_eq!(app.session().undo_depth(), before_undo + 1);
+    assert!(!app.document().data_sheets.is_empty() && !app.document().result_sheets.is_empty());
 
-    assert_eq!(app.session().undo_depth(), before_undo + 1, "Power Wizard create must push exactly 1 undo step");
-    assert!(!app.document().data_sheets.is_empty());
-    assert!(!app.document().result_sheets.is_empty());
-
-    app.execute_command("edit.undo", json!({})).map_err(|e| format!("undo: {e}"))?;
-    assert_eq!(app.document(), &before_doc, "one edit.undo must revert all Power Wizard Data/Info/Graph/Result sheets");
+    exec(&mut app, "edit.undo", json!({}))?;
+    assert_eq!(app.document(), &before_doc);
     assert_eq!(app.session().undo_depth(), before_undo);
 
-    // Direct PowerWizardState::execute_create on Session must also push a single undo entry.
     let mut session = Session::new();
     let base_depth = session.undo_depth();
     let mut wizard = curvebook_ui_egui::power_wizard::PowerWizardState::default();
-    wizard.recalculate().map_err(|e| format!("direct recalc: {e}"))?;
-    wizard.execute_create(&mut session).map_err(|e| format!("direct create: {e}"))?;
+    wizard.recalculate().map_err(|e| e.to_string())?;
+    wizard.execute_create(&mut session).map_err(|e| e.to_string())?;
     assert_eq!(session.undo_depth(), base_depth + 1);
-    session.undo().map_err(|e| format!("direct undo: {e}"))?;
+    session.undo().map_err(|e| e.to_string())?;
     assert_eq!(session.document().total_sheet_count(), 0);
     Ok(())
 }
@@ -93,61 +73,46 @@ fn fa_sec14_11_power_wizard_create_collapses_into_single_undo_entry() -> TestRes
 #[test]
 fn fa_sec15_11_welcome_sample_create_collapses_into_single_undo_entry() -> TestRes {
     let mut app = UiApp::new();
-    let before_doc = app.document().clone();
-    let before_undo = app.session().undo_depth();
+    let (before_doc, before_undo) = (app.document().clone(), app.session().undo_depth());
 
-    let intent = build_sample_creation_intent(&app, "dose-response-4pl", None, false, false)?;
     let mut intents = PendingUiIntents::new();
-    intents.push(intent);
+    intents.push(build_sample_creation_intent(&app, "dose-response-4pl", None, false, false)?);
     let batch = intents.commit_all_if_settled(&mut app, false);
     assert_eq!(batch.results.len(), 1);
-    assert!(batch.results.first().is_some_and(Result::is_ok), "sample creation failed: {:?}", batch.results);
-
-    assert_eq!(app.session().undo_depth(), before_undo + 1, "welcome sample instantiation must push 1 undo step");
+    assert!(batch.results[0].is_ok(), "sample creation failed: {:?}", batch.results);
+    assert_eq!(app.session().undo_depth(), before_undo + 1);
     assert_eq!(app.document().data_sheets.len(), 1);
 
-    app.execute_command("edit.undo", json!({})).map_err(|e| format!("undo: {e}"))?;
-    assert_eq!(app.document(), &before_doc, "one edit.undo must remove the sample sheet and its populated cells/links");
+    exec(&mut app, "edit.undo", json!({}))?;
+    assert_eq!(app.document(), &before_doc);
     assert_eq!(app.session().undo_depth(), before_undo);
     Ok(())
 }
 
 #[test]
 fn fa_sec13_11_live_egui_shell_enables_newcombe_wilson_when_odds_ratio_active() -> TestRes {
-    let mut doc = ProjectDocument::new("Live Contingency Parity").map_err(|e| format!("{e}"))?;
-    let ds = DataSheet::new("cont-1", "2x2", TableArchetype::Contingency(ContingencyTable::new(2, 2).map_err(|e| format!("{e}"))?))
-        .map_err(|e| format!("{e}"))?;
-    doc.add_data_sheet(ds).map_err(|e| format!("{e}"))?;
-    let cont = ContingencySpec { compute_odds_and_risk_ratios: true, ..ContingencySpec::default() };
-    let spec = AnalysisSpec::new("res-cont", "cont-1", AnalysisKind::Contingency(cont)).map_err(|e| format!("{e}"))?;
-    doc.add_result_sheet(ResultSheet::new(spec).map_err(|e| format!("{e}"))?).map_err(|e| format!("{e}"))?;
+    let mut doc = ProjectDocument::new("Live Contingency Parity").map_err(|e| e.to_string())?;
+    let ds = DataSheet::new("cont-1", "2x2", TableArchetype::Contingency(ContingencyTable::new(2, 2).map_err(|e| e.to_string())?))
+        .map_err(|e| e.to_string())?;
+    doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+    let cont = ContingencySpec { compute_odds_and_risk_ratios: true, ..Default::default() };
+    let spec = AnalysisSpec::new("res-cont", "cont-1", AnalysisKind::Contingency(cont)).map_err(|e| e.to_string())?;
+    doc.add_result_sheet(ResultSheet::new(spec).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
 
     let mut app = UiApp::from_session(Session::from_document(doc));
     app.canvas_dialogs.open_edit_parameters(&app.document().clone(), &SheetId::from("res-cont"));
 
-    // Immediately on reopen (`compute_odds_and_risk_ratios=true`), live `egui_shell` and
-    // `StatParamsIntent` must enable Newcombe-Wilson (`FA-SEC13-11` + `edit_params.rs:206`).
-    let tree = inspect_ui_tree(&app, Some("dialog"), false);
-    let node = find_widget(&tree, "edit.contingency.ci.newcombe_wilson")
-        .ok_or_else(|| String::from("missing edit.contingency.ci.newcombe_wilson in live egui dialog tree"))?;
-    assert!(node.enabled, "live egui_shell must enable Newcombe-Wilson on reopen when compute_odds_and_risk_ratios=true: {node:?}");
-
-    let mut intents = PendingUiIntents::new();
-    intents.push(UiIntent::StatParams(StatParamsIntent::CycleContingencyCi { which: ContingencyCiTarget::AttributableRisk }));
-    let batch = intents.commit_all_if_settled(&mut app, false);
-    assert!(batch.results.first().is_some_and(Result::is_ok), "CycleContingencyCi(AttributableRisk) failed: {:?}", batch.results);
-
-    // Explicitly unchecking `attributable_risk` disables Newcombe-Wilson consistently across both surfaces (`R6`).
-    let _ = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "edit.contingency.attributable_risk": false } }))
-        .map_err(|e| format!("patch attributable_risk off: {e}"))?;
-    let tree_off = inspect_ui_tree(&app, Some("dialog"), false);
-    let node_off = find_widget(&tree_off, "edit.contingency.ci.newcombe_wilson")
-        .ok_or_else(|| String::from("missing edit.contingency.ci.newcombe_wilson after uncheck"))?;
-    assert!(!node_off.enabled, "live egui_shell must disable Newcombe-Wilson when attributable_risk=false: {node_off:?}");
-
-    let mut intents_off = PendingUiIntents::new();
-    intents_off.push(UiIntent::StatParams(StatParamsIntent::CycleContingencyCi { which: ContingencyCiTarget::AttributableRisk }));
-    let batch_off = intents_off.commit_all_if_settled(&mut app, false);
-    assert!(batch_off.results.first().is_some_and(Result::is_err), "StatParamsIntent must disable Newcombe-Wilson when attributable_risk=false");
+    for (disable_ar, expect_enabled) in [(false, true), (true, false)] {
+        if disable_ar {
+            gui(&mut app, "ui.answer_dialog", json!({ "fields": { "edit.contingency.attributable_risk": false } }))?;
+        }
+        let tree = inspect_ui_tree(&app, Some("dialog"), false);
+        let node = tree.find_widget("edit.contingency.ci.newcombe_wilson").ok_or("missing edit.contingency.ci.newcombe_wilson")?;
+        assert_eq!(node.enabled, expect_enabled, "disable_ar={disable_ar}: {node:?}");
+        let mut intents = PendingUiIntents::new();
+        intents.push(UiIntent::StatParams(StatParamsIntent::CycleContingencyCi { which: ContingencyCiTarget::AttributableRisk }));
+        let batch = intents.commit_all_if_settled(&mut app, false);
+        assert_eq!(batch.results.first().is_some_and(Result::is_ok), expect_enabled, "StatParamsIntent disable_ar={disable_ar}");
+    }
     Ok(())
 }

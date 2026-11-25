@@ -13,6 +13,8 @@ use curvebook_ui_egui::theme::{UiThemeMode, UiThemeSpec};
 use egui::{Key, Modifiers};
 use serde_json::json;
 
+use crate::common::{TestRes, assert_clean_parity};
+
 struct TopChromeHarnessState {
     app: UiApp,
     last_report: Option<ShellAboutFrameReport>,
@@ -44,7 +46,6 @@ fn render_top_chrome_harness(ui: &mut egui::Ui, meta: &mut FrameInspectMeta, sta
         state.wheel_capture_count += 1;
     }
     state.last_report = Some(report);
-
     let will_discard = ui.ctx().will_discard();
     if will_discard {
         state.discard_passes += 1;
@@ -54,73 +55,50 @@ fn render_top_chrome_harness(ui: &mut egui::Ui, meta: &mut FrameInspectMeta, sta
     let _ = intents.commit_if_settled(&mut state.app, will_discard);
 }
 
+fn make_top_driver(state: TopChromeHarnessState, metrics: ViewportMetrics, locale: &str) -> EguiHumanPathDriver<'static, TopChromeHarnessState> {
+    let tokens = Tokens::from_theme_spec(&UiThemeSpec::for_mode(UiThemeMode::Light), locale);
+    let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(state, metrics, tokens, build_driver_font_definitions(), render_top_chrome_harness);
+    driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+    driver
+}
+
+fn seed_xy_graph(state: &mut TopChromeHarnessState, ds: &str, gs: &str, rows: usize) -> TestRes {
+    state
+        .app
+        .execute_command("sheet.createData", json!({ "sheet_id": ds, "title": "Assay Data", "kind": "xy", "cols": 3, "rows": rows }))
+        .map_err(|e| e.to_string())?;
+    state.app.execute_command("graph.create", json!({ "sheet_id": gs, "data_sheet_id": ds, "title": "Dose Curve" })).map_err(|e| e.to_string())?;
+    let _ = state.app.execute_command("sheet.select", json!({ "sheet_id": ds }));
+    Ok(())
+}
+
+fn assert_tier_heights(driver: &EguiHumanPathDriver<'_, TopChromeHarnessState>, label: &str) -> TestRes {
+    let rep = driver.state().last_report.as_ref().ok_or_else(|| format!("{label}: missing report"))?;
+    let t1 = rep.tier1_rect_pt.ok_or_else(|| format!("{label}: missing tier1"))?;
+    let t2 = rep.tier2_rect_pt.ok_or_else(|| format!("{label}: missing tier2"))?;
+    assert!((t1.height() - 32.0).abs() <= 1.0 && (t2.height() - 38.0).abs() <= 1.0, "{label}: t1={}, t2={}", t1.height(), t2.height());
+    Ok(())
+}
+
 #[test]
-fn top_chrome_all_14_beta_locales_zero_bleed_640x420_and_1440x600() -> Result<(), String> {
+fn top_chrome_all_14_beta_locales_zero_bleed_640x420_and_1440x600() -> TestRes {
     for &locale in &BETA_LOCALE_CODES {
         for &host_draws_menu_bar in &[false, true] {
             let mut state = TopChromeHarnessState::new(locale, host_draws_menu_bar);
-            state
-                .app
-                .execute_command(
-                    "sheet.createData",
-                    json!({ "sheet_id": "ds-1", "title": "Concentration Response", "kind": "xy", "cols": 3, "rows": 8 }),
-                )
-                .map_err(|e| format!("{locale}: createData failed: {e}"))?;
-            state
-                .app
-                .execute_command("graph.create", json!({ "sheet_id": "gs-1", "data_sheet_id": "ds-1", "title": "Dose Curve" }))
-                .map_err(|e| format!("{locale}: graph.create failed: {e}"))?;
-            let _ = state.app.execute_command("sheet.select", json!({ "sheet_id": "ds-1" }));
+            seed_xy_graph(&mut state, "ds-1", "gs-1", 8)?;
+            let mut driver = make_top_driver(state, ViewportMetrics::new(1440.0, 600.0, 1.0), locale);
 
-            let tokens = Tokens::from_theme_spec(&UiThemeSpec::for_mode(UiThemeMode::Light), locale);
-            let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(
-                state,
-                ViewportMetrics::new(1440.0, 600.0, 1.0),
-                tokens,
-                build_driver_font_definitions(),
-                render_top_chrome_harness,
-            );
-            driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+            assert_clean_parity(&driver, &format!("{locale} host_menu={host_draws_menu_bar} 1440x600"))?;
+            assert_tier_heights(&driver, &format!("{locale} wide"))?;
+            assert!(driver.frame_meta().find_by_widget_id("toolbar.command_palette").is_some());
+            assert!(driver.frame_meta().find_by_widget_id("toolbar.preset").is_none());
 
-            let wide_report = driver.verify_pixel_to_hit_box_parity();
-            assert!(
-                wide_report.is_clean(),
-                "locale `{locale}` (host_draws_menu_bar={host_draws_menu_bar}) 1440x600 parity/bleed failed: {:?}",
-                wide_report.violations
-            );
-            assert!(driver.check_scrollbar_non_overlap().is_empty(), "locale `{locale}` 1440x600 scrollbar overlap");
-            let wide_shell = driver.state().last_report.as_ref().ok_or("missing wide report")?;
-            let wide_t1 = wide_shell.tier1_rect_pt.ok_or("missing wide tier1 rect")?;
-            let wide_t2 = wide_shell.tier2_rect_pt.ok_or("missing wide tier2 rect")?;
-            assert!((wide_t1.height() - 32.0).abs() <= 1.0, "tier1 height should be 32pt, got {}", wide_t1.height());
-            assert!((wide_t2.height() - 38.0).abs() <= 1.0, "tier2 height should be 38pt, got {}", wide_t2.height());
-            assert!(driver.frame_meta().find_by_widget_id("toolbar.command_palette").is_some(), "{locale} wide must show Cmd+K field");
-            assert!(driver.frame_meta().find_by_widget_id("toolbar.preset").is_none(), "{locale} wide must not show Preset switcher on main bar");
-
-            // Narrow responsive breakpoint 640x420 @ 1.5x HiDPI: must collapse gracefully with zero bleed/wrapping.
             driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.5));
-            let compact_report = driver.verify_pixel_to_hit_box_parity();
-            assert!(
-                compact_report.is_clean(),
-                "locale `{locale}` (host_draws_menu_bar={host_draws_menu_bar}) 640x420@1.5x parity/bleed failed: {:?}",
-                compact_report.violations
-            );
-            assert!(driver.check_scrollbar_non_overlap().is_empty(), "locale `{locale}` 640x420 scrollbar overlap");
-
-            let compact_shell = driver.state().last_report.as_ref().ok_or("missing compact report")?;
-            let compact_t1 = compact_shell.tier1_rect_pt.ok_or("missing compact tier1 rect")?;
-            let compact_t2 = compact_shell.tier2_rect_pt.ok_or("missing compact tier2 rect")?;
-            assert!((compact_t1.height() - 32.0).abs() <= 1.0, "compact tier1 must stay single-row 32pt, got {}", compact_t1.height());
-            assert!((compact_t2.height() - 38.0).abs() <= 1.0, "compact tier2 must stay single-row 38pt, got {}", compact_t2.height());
-
+            assert_clean_parity(&driver, &format!("{locale} host_menu={host_draws_menu_bar} 640x420@1.5x"))?;
+            assert_tier_heights(&driver, &format!("{locale} compact"))?;
             for entry in &driver.frame_meta().entries {
                 if entry.widget_id.starts_with("toolbar.") || entry.widget_id.starts_with("menu.") {
-                    assert!(
-                        entry.clipped_rect.right() <= 640.5,
-                        "locale `{locale}` widget `{}` overflowed 640pt right edge: {:?}",
-                        entry.widget_id,
-                        entry.clipped_rect
-                    );
+                    assert!(entry.clipped_rect.right() <= 640.5, "{locale} `{}` overflowed: {:?}", entry.widget_id, entry.clipped_rect);
                 }
             }
         }
@@ -129,18 +107,12 @@ fn top_chrome_all_14_beta_locales_zero_bleed_640x420_and_1440x600() -> Result<()
 }
 
 #[test]
-fn top_chrome_tier2_adaptive_strips_all_sheet_contexts_and_overflow_menu() -> Result<(), String> {
-    let state = TopChromeHarnessState::new("en", true);
-    let mut driver = EguiHumanPathDriver::new(state, ViewportMetrics::new(1280.0, 720.0, 1.0), render_top_chrome_harness);
-    driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+fn top_chrome_tier2_adaptive_strips_all_sheet_contexts_and_overflow_menu() -> TestRes {
+    let mut driver = make_top_driver(TopChromeHarnessState::new("en", true), ViewportMetrics::new(1280.0, 720.0, 1.0), "en");
 
-    // 1. EmptyWorkspace context
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.new").is_some());
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.open").is_some());
-    let empty_analyze = driver.frame_meta().find_by_widget_id("toolbar.analyze").ok_or("missing disabled analyze in EmptyWorkspace")?;
-    assert!(!empty_analyze.enabled);
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.new").is_some() && driver.frame_meta().find_by_widget_id("toolbar.open").is_some());
+    assert!(!driver.frame_meta().find_by_widget_id("toolbar.analyze").ok_or("missing toolbar.analyze")?.enabled);
 
-    // 2. Structured DataSheet (`Column`)
     driver
         .state_mut()
         .app
@@ -162,112 +134,82 @@ fn top_chrome_tier2_adaptive_strips_all_sheet_contexts_and_overflow_menu() -> Re
     assert!(driver.frame_meta().find_by_widget_id("toolbar.analyze").is_some_and(|e| e.enabled));
     assert!(driver.frame_meta().find_by_widget_id("toolbar.new_graph").is_some_and(|e| e.enabled));
 
-    // 3. MultipleVariables DataSheet
     driver
         .state_mut()
         .app
         .execute_command("sheet.createData", json!({ "sheet_id": "ds-mv", "title": "Cohort MV", "kind": "multiple_variables", "cols": 3, "rows": 4 }))
         .map_err(|e| e.to_string())?;
     driver.run_settled();
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.formula_bar").is_some(), "MV table must surface Formula Bar quick-run");
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.randomize_groups").is_some());
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.sample_rows").is_some());
+    for wid in ["toolbar.formula_bar", "toolbar.randomize_groups", "toolbar.sample_rows"] {
+        assert!(driver.frame_meta().find_by_widget_id(wid).is_some(), "missing MV `{wid}`");
+    }
 
-    // 4. ResultSheet context
     let rs_out = driver
         .state_mut()
         .app
         .execute_command("analysis.run", json!({ "source_sheet_id": "ds-col", "kind": "one_way_anova" }))
         .map_err(|e| e.to_string())?;
-    let rs_id = rs_out.payload["sheet_id"].as_str().ok_or("missing analysis result sheet_id")?.to_owned();
+    let rs_id = rs_out.payload["sheet_id"].as_str().ok_or("missing result sheet_id")?.to_owned();
     driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": rs_id })).map_err(|e| e.to_string())?;
     driver.run_settled();
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.edit_params").is_some_and(|e| e.enabled), "ResultSheet must enable Edit Parameters");
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.change_data").is_some_and(|e| e.enabled));
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.methods_report").is_some_and(|e| e.enabled));
+    for wid in ["toolbar.edit_params", "toolbar.change_data", "toolbar.methods_report"] {
+        assert!(driver.frame_meta().find_by_widget_id(wid).is_some_and(|e| e.enabled), "ResultSheet `{wid}` disabled");
+    }
 
-    // 5. GraphSheet context
     driver.state_mut().app.execute_command("graph.create", json!({ "sheet_id": "gs-col", "data_sheet_id": "ds-col" })).map_err(|e| e.to_string())?;
     driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "gs-col" })).map_err(|e| e.to_string())?;
     driver.run_settled();
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.graph_type").is_some());
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.axes").is_some());
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.format_graph").is_some());
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.export_svg").is_some());
+    for wid in ["toolbar.graph_type", "toolbar.axes", "toolbar.format_graph", "toolbar.export_svg"] {
+        assert!(driver.frame_meta().find_by_widget_id(wid).is_some(), "GraphSheet missing `{wid}`");
+    }
 
-    verify_info_layout_and_overflow(&mut driver)
-}
-
-fn verify_info_layout_and_overflow(driver: &mut EguiHumanPathDriver<'_, TopChromeHarnessState>) -> Result<(), String> {
-    // 6. InfoSheet & LayoutSheet contexts (including `toolbar.new_graph` -> `graph.create` & constant click).
     if let Some(info_id) = driver.state().app.document().info_sheets.first().map(|s| s.id.as_str().to_owned()) {
         let _ = driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": info_id }));
         driver.run_settled();
-        let add_const = driver.frame_meta().find_by_widget_id("toolbar.info_add_constant").ok_or("InfoSheet must surface + Constant")?;
-        assert!(add_const.enabled);
-        let new_graph_entry = driver.frame_meta().find_by_widget_id("toolbar.new_graph").ok_or("InfoSheet must surface toolbar.new_graph")?;
-        assert_eq!(new_graph_entry.command_id.as_deref(), Some("graph.create"));
-        assert!(new_graph_entry.enabled);
+        assert!(driver.frame_meta().find_by_widget_id("toolbar.info_add_constant").is_some_and(|e| e.enabled));
+        let ng = driver.frame_meta().find_by_widget_id("toolbar.new_graph").ok_or("InfoSheet toolbar.new_graph")?;
+        assert!(ng.command_id.as_deref() == Some("graph.create") && ng.enabled);
         let graphs_before = driver.state().app.document().graph_sheets.len();
         driver.click_widget_id("toolbar.new_graph")?;
-        assert_eq!(driver.state().app.document().graph_sheets.len(), graphs_before + 1, "InfoSheet toolbar.new_graph click must create GraphSheet");
+        assert_eq!(driver.state().app.document().graph_sheets.len(), graphs_before + 1);
         let _ = driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": info_id }));
         driver.run_settled();
         driver.click_widget_id("toolbar.info_add_constant")?;
     }
+
     driver.state_mut().app.execute_command("layout.create", json!({ "sheet_id": "ls-1", "title": "Figure 1" })).map_err(|e| e.to_string())?;
     driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "ls-1" })).map_err(|e| e.to_string())?;
     driver.run_settled();
-    let composer_btn = driver.frame_meta().find_by_widget_id("toolbar.layout_composer").ok_or("LayoutSheet must surface Layout Composer")?;
+    let composer_btn = driver.frame_meta().find_by_widget_id("toolbar.layout_composer").ok_or("LayoutSheet composer")?;
     assert_eq!(composer_btn.command_id.as_deref(), Some("ui.layout.composer.open"));
     assert_eq!(composer_btn.label, curvebook_ui_egui::tr("en", "cmd.ui.layout.composer.open"));
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.rulers").is_some());
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.canvas_preset").is_some());
+    assert!(
+        driver.frame_meta().find_by_widget_id("toolbar.rulers").is_some() && driver.frame_meta().find_by_widget_id("toolbar.canvas_preset").is_some()
+    );
 
-    // Compact 640x420 Tier 2 overflows gracefully into `⋯` (`toolbar.overflow`) and exposes interactive `ZLayer::DropdownMenu` popup items.
     driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.0));
     let _ = driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "ds-mv" }));
     driver.run_settled();
     if driver.frame_meta().find_by_widget_id("toolbar.overflow").is_some() {
         driver.click_widget_id("toolbar.overflow")?;
-        let ov_item = driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").ok_or("clicking `⋯` must open overflow popup items")?;
-        assert_eq!(ov_item.z_layer, ZLayer::DropdownMenu);
+        assert_eq!(driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").ok_or("overflow popup")?.z_layer, ZLayer::DropdownMenu);
     }
-
-    // Duplicate Tier 2 `sheet.tab.*` tabs are retired in R20.3 (single-owner Navigator browsing).
     assert!(driver.frame_meta().find_by_widget_id("sheet.tab.ds-col").is_none());
-
     Ok(())
 }
 
 #[test]
-fn top_chrome_split_presets_and_workspace_presets() -> Result<(), String> {
+fn top_chrome_split_presets_and_workspace_presets() -> TestRes {
     let mut state = TopChromeHarnessState::new("en", false);
-    state
-        .app
-        .execute_command("sheet.createData", json!({ "sheet_id": "ds-s1", "title": "Assay Data", "kind": "xy", "cols": 2, "rows": 5 }))
-        .map_err(|e| e.to_string())?;
-    state
-        .app
-        .execute_command("graph.create", json!({ "sheet_id": "gs-s1", "data_sheet_id": "ds-s1", "title": "Assay Curve" }))
-        .map_err(|e| e.to_string())?;
+    seed_xy_graph(&mut state, "ds-s1", "gs-s1", 5)?;
+    let mut driver = make_top_driver(state, ViewportMetrics::new(1440.0, 600.0, 1.0), "en");
 
-    let mut driver = EguiHumanPathDriver::new(state, ViewportMetrics::new(1440.0, 600.0, 1.0), render_top_chrome_harness);
-    driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
-
-    // 1. Workspace Preset Switcher lives in View -> Workspace Preset (not on the main Tier 1 bar).
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.preset").is_none(), "workspace preset switcher must not appear on main Tier 1 bar");
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.preset").is_none());
     driver.click_widget_id("menu.view")?;
     driver.hover_widget_id("menu.ui.workspacePreset.set")?;
-    for wid in [
-        "popup.menu.ui.workspacePreset.set.opt.default",
-        "popup.menu.ui.workspacePreset.set.opt.data_prep",
-        "popup.menu.ui.workspacePreset.set.opt.modeling",
-        "popup.menu.ui.workspacePreset.set.opt.publication",
-        "popup.menu.ui.workspacePreset.set.opt.compact",
-    ] {
-        let entry = driver.frame_meta().find_by_widget_id(wid).ok_or_else(|| format!("View -> Workspace Preset submenu missing `{wid}`"))?;
-        assert_eq!(entry.z_layer, ZLayer::DropdownMenu);
+    for opt in ["default", "data_prep", "modeling", "publication", "compact"] {
+        let wid = format!("popup.menu.ui.workspacePreset.set.opt.{opt}");
+        assert_eq!(driver.frame_meta().find_by_widget_id(&wid).ok_or_else(|| format!("missing `{wid}`"))?.z_layer, ZLayer::DropdownMenu);
     }
     driver.click_widget_id("popup.menu.ui.workspacePreset.set.opt.publication")?;
     assert_eq!(driver.state().app.egui_views.workspace_preset, WorkspacePreset::Publication);
@@ -277,13 +219,11 @@ fn top_chrome_split_presets_and_workspace_presets() -> Result<(), String> {
     driver.click_widget_id("popup.menu.ui.workspacePreset.set.opt.compact")?;
     assert_eq!(driver.state().app.egui_views.workspace_preset, WorkspacePreset::Compact);
 
-    // 2. Split Preset Selector (`Data + Graph`, `Swap Panes`, `Single Pane`, plus `Cmd+\`).
     driver.click_widget_id("toolbar.split")?;
-    let dg_entry = driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").ok_or("missing toolbar.split.preset.data_graph")?;
-    assert!(dg_entry.enabled);
-    assert_eq!(dg_entry.z_layer, ZLayer::DropdownMenu);
+    let dg = driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").ok_or("missing data_graph")?;
+    assert!(dg.enabled && dg.z_layer == ZLayer::DropdownMenu);
     driver.click_widget_id("toolbar.split.preset.data_graph")?;
-    assert!(driver.state().app.split.enabled, "Data + Graph preset must enable split view");
+    assert!(driver.state().app.split.enabled);
     assert_eq!(driver.state().app.split.primary_sheet_id.as_ref().map(|s| s.as_str()), Some("ds-s1"));
     assert_eq!(driver.state().app.split.secondary_sheet_id.as_ref().map(|s| s.as_str()), Some("gs-s1"));
 
@@ -292,55 +232,40 @@ fn top_chrome_split_presets_and_workspace_presets() -> Result<(), String> {
     assert_eq!(driver.state().app.split.primary_sheet_id.as_ref().map(|s| s.as_str()), Some("gs-s1"));
     assert_eq!(driver.state().app.split.secondary_sheet_id.as_ref().map(|s| s.as_str()), Some("ds-s1"));
 
-    // Shortcut `Cmd+\` toggles split off and back on.
     let cmd_mod = Modifiers { command: true, mac_cmd: true, ..Modifiers::NONE };
     driver.press_egui_key(Key::Backslash, cmd_mod);
     assert!(!driver.state().app.split.enabled);
     driver.press_egui_key(Key::Backslash, cmd_mod);
     assert!(driver.state().app.split.enabled);
-
     Ok(())
 }
 
 #[test]
-fn command_palette_keyboard_nav_fuzzy_search_backdrop_capture_and_discard_guard() -> Result<(), String> {
-    let state = TopChromeHarnessState::new("en", true);
-    let mut driver = EguiHumanPathDriver::new(state, ViewportMetrics::new(640.0, 420.0, 1.0), render_top_chrome_harness);
-    driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+fn command_palette_keyboard_nav_fuzzy_search_backdrop_capture_and_discard_guard() -> TestRes {
+    let mut driver = make_top_driver(TopChromeHarnessState::new("en", true), ViewportMetrics::new(640.0, 420.0, 1.0), "en");
 
-    // Open Command Palette via `Cmd/Ctrl+K`.
     let cmd_mod = Modifiers { command: true, mac_cmd: true, ..Modifiers::NONE };
     driver.press_egui_key(Key::K, cmd_mod);
     assert!(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette));
-
-    let parity_640 = driver.verify_pixel_to_hit_box_parity();
-    assert!(parity_640.is_clean(), "Command Palette 640x420 parity failed: {:?}", parity_640.violations);
-    assert!(driver.check_scrollbar_non_overlap().is_empty(), "Command Palette ScrollBar overlapped rows");
+    assert_clean_parity(&driver, "Command Palette 640x420")?;
 
     let backdrop = driver.frame_meta().find_by_widget_id("modal.backdrop").ok_or("missing modal.backdrop")?;
     assert_eq!(backdrop.z_layer, ZLayer::ModalBackdrop);
     assert!((backdrop.clipped_rect.width() - 640.0).abs() <= 1.0 && (backdrop.clipped_rect.height() - 420.0).abs() <= 1.0);
-
     let dialog = driver.frame_meta().find_by_widget_id("palette.dialog").ok_or("missing palette.dialog")?;
-    assert_eq!(dialog.z_layer, ZLayer::ModalDialog);
-    assert!(dialog.clipped_rect.bottom() <= 420.0, "Command Palette must stay inside 640x420 viewport: {:?}", dialog.clipped_rect);
+    assert!(dialog.z_layer == ZLayer::ModalDialog && dialog.clipped_rect.bottom() <= 420.0);
 
-    // Outside scroll wheel is captured cleanly by Command Palette backdrop.
     let wheel_before = driver.state().wheel_capture_count;
     driver.wheel_at(egui::pos2(12.0, 210.0), egui::vec2(0.0, -40.0))?;
-    assert!(driver.state().wheel_capture_count > wheel_before, "outside wheel must be captured when Command Palette is open");
+    assert!(driver.state().wheel_capture_count > wheel_before);
 
-    // Disabled rows report contextual reason cleanly.
     driver.type_text("Change Analysis Parameters")?;
-    let disabled_item = driver.frame_meta().find_by_widget_id("palette.item.0").ok_or("missing filtered palette.item.0")?;
-    assert!(!disabled_item.enabled);
-    assert_eq!(disabled_item.disabled_reason.as_deref(), Some("Open a ResultSheet first"));
+    let disabled_item = driver.frame_meta().find_by_widget_id("palette.item.0").ok_or("missing palette.item.0")?;
+    assert!(!disabled_item.enabled && disabled_item.disabled_reason.as_deref() == Some("Open a ResultSheet first"));
 
-    // Outside click on backdrop dismisses palette cleanly.
     driver.click_at(egui::pos2(12.0, 210.0))?;
     assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
 
-    // Reopen at 1440x600 via clicking search pill, filter, navigate with Arrow keys, execute once on multi-pass `will_discard`.
     driver.set_viewport(ViewportMetrics::new(1440.0, 600.0, 1.0));
     driver.click_widget_id("toolbar.command_palette")?;
     assert!(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette));
@@ -348,62 +273,43 @@ fn command_palette_keyboard_nav_fuzzy_search_backdrop_capture_and_discard_guard(
     driver.type_text("New")?;
     let before_down = driver.state().app.egui_views.command_palette.selected_index;
     driver.press_egui_key(Key::ArrowDown, Modifiers::NONE);
-    let after_down = driver.state().app.egui_views.command_palette.selected_index;
-    assert_ne!(before_down, after_down, "ArrowDown must advance Command Palette selection index");
+    assert_ne!(driver.state().app.egui_views.command_palette.selected_index, before_down);
     driver.press_egui_key(Key::ArrowUp, Modifiers::NONE);
-    assert_eq!(driver.state().app.egui_views.command_palette.selected_index, before_down, "ArrowUp must return selection index");
+    assert_eq!(driver.state().app.egui_views.command_palette.selected_index, before_down);
 
-    // Guard check under simulated `ctx.request_discard()`: discarded pass must NOT mutate or carry over;
-    // subsequent settled Enter executes strictly once.
     driver.state_mut().app.egui_views.command_palette.query = String::from("New Data Table");
     driver.run_settled();
     driver.state_mut().discard_next_frame = true;
     driver.state_mut().discard_passes = 0;
     driver.state_mut().settled_passes = 0;
-    let sheets_before = driver.state().app.document().data_sheets.len();
-    let undo_before = driver.state().app.session().undo_depth();
+    let (sheets_before, undo_before) = (driver.state().app.document().data_sheets.len(), driver.state().app.session().undo_depth());
     driver.press_egui_key(Key::Enter, Modifiers::NONE);
-    assert!(driver.state().discard_passes >= 1, "expected discard pass to execute");
-    assert_eq!(driver.state().app.document().data_sheets.len(), sheets_before, "discarded pass must not mutate");
-    assert_eq!(driver.state().app.session().undo_depth(), undo_before, "discarded pass must not push undo");
+    assert!(driver.state().discard_passes >= 1);
+    assert_eq!((driver.state().app.document().data_sheets.len(), driver.state().app.session().undo_depth()), (sheets_before, undo_before));
 
     driver.run_settled();
-    assert_eq!(driver.state().app.document().data_sheets.len(), sheets_before, "discarded intent must never replay");
+    assert_eq!(driver.state().app.document().data_sheets.len(), sheets_before);
 
     driver.press_egui_key(Key::Enter, Modifiers::NONE);
-    assert_eq!(driver.state().app.document().data_sheets.len(), sheets_before + 1, "settled Command Palette Enter must commit once");
-    assert_eq!(driver.state().app.session().undo_depth(), undo_before + 1, "settled Command Palette Enter must push single undo");
-
+    assert_eq!((driver.state().app.document().data_sheets.len(), driver.state().app.session().undo_depth()), (sheets_before + 1, undo_before + 1));
     Ok(())
 }
 
 #[test]
-fn da_05_06_top_chrome_popups_dismiss_on_escape() -> Result<(), String> {
+fn da_05_06_top_chrome_popups_dismiss_on_escape() -> TestRes {
     let mut state = TopChromeHarnessState::new("en", true);
-    state
-        .app
-        .execute_command("sheet.createData", json!({ "sheet_id": "ds-esc", "title": "Assay", "kind": "xy", "cols": 2, "rows": 4 }))
-        .map_err(|e| e.to_string())?;
-    state
-        .app
-        .execute_command("graph.create", json!({ "sheet_id": "gs-esc", "data_sheet_id": "ds-esc", "title": "Curve" }))
-        .map_err(|e| e.to_string())?;
+    seed_xy_graph(&mut state, "ds-esc", "gs-esc", 4)?;
+    let mut driver = make_top_driver(state, ViewportMetrics::new(1440.0, 600.0, 1.0), "en");
 
-    let mut driver = EguiHumanPathDriver::new(state, ViewportMetrics::new(1440.0, 600.0, 1.0), render_top_chrome_harness);
-    driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
-
-    // 1. Split preset popup dismisses on Escape.
     driver.click_widget_id("toolbar.split")?;
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").is_some(), "split popup should be open");
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").is_some());
     driver.press_egui_key(Key::Escape, Modifiers::NONE);
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").is_none(), "Escape must dismiss split preset popup");
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").is_none());
 
-    // 2. Tier2 overflow popup dismisses on Escape (narrow viewport forces overflow button).
     driver.set_viewport(ViewportMetrics::new(420.0, 420.0, 1.0));
     driver.click_widget_id("toolbar.overflow")?;
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").is_some(), "tier2 overflow popup should be open");
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").is_some());
     driver.press_egui_key(Key::Escape, Modifiers::NONE);
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").is_none(), "Escape must dismiss tier2 overflow popup");
-
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").is_none());
     Ok(())
 }
