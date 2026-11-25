@@ -272,7 +272,7 @@ pub struct TrailingStudioFrameReport {
 }
 
 /// Resolve the active [`StudioContextSurface`] strictly from live document sheet & brushing state,
-/// respecting Split Comparison's explicit [`SplitWorkspaceState::effective_inspector_target`] (`R20.3`).
+/// respecting Split Comparison's explicit [`crate::dialogs_canvas::SplitWorkspaceState::effective_inspector_target`] (`R20.3`).
 #[must_use]
 pub fn resolve_studio_surface(app: &UiApp) -> StudioContextSurface {
     let doc = app.document();

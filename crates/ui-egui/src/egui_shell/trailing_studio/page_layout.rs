@@ -582,6 +582,7 @@ fn render_selected_panel_bounds_controls(
     let enabled = ctx_in.enabled;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+        let vis_clip = if meta.viewport_rect.is_positive() { ui.clip_rect().intersect(meta.viewport_rect) } else { ui.clip_rect() };
         ui.label("W:");
         let mut w_pt = bounds.width;
         let w_sized = ui
@@ -590,22 +591,24 @@ fn render_selected_panel_bounds_controls(
             })
             .inner;
         w_sized.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Width (pt)"));
-        meta.record_response(
-            ui,
-            &w_sized,
-            crate::egui_shell::FrameInspectEntryInput {
-                widget_id: "inspector.layout.panel.width_pt",
-                role: "spinbutton",
-                label: "Panel Width (pt)",
-                command_id: Some("layout.setSpec"),
-                value: Some(json!({ "width_pt": w_pt, "panel_index": target_panel_idx })),
-                enabled,
-                disabled_reason: None,
-                z_layer: crate::inspect::ZLayer::Workspace,
-                ellipsized: false,
-                full_label: None,
-            },
-        );
+        if w_sized.rect.intersect(vis_clip).is_positive() && w_sized.interact_rect.intersect(vis_clip).is_positive() {
+            meta.record_response(
+                ui,
+                &w_sized,
+                crate::egui_shell::FrameInspectEntryInput {
+                    widget_id: "inspector.layout.panel.width_pt",
+                    role: "spinbutton",
+                    label: "Panel Width (pt)",
+                    command_id: Some("layout.setSpec"),
+                    value: Some(json!({ "width_pt": w_pt, "panel_index": target_panel_idx })),
+                    enabled,
+                    disabled_reason: None,
+                    z_layer: crate::inspect::ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+        }
         if w_sized.changed() && enabled {
             let mut next_items = ls.spec.items.clone();
             if let Some(it) = next_items.get_mut(target_panel_idx)
@@ -624,22 +627,24 @@ fn render_selected_panel_bounds_controls(
             })
             .inner;
         h_sized.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Height (pt)"));
-        meta.record_response(
-            ui,
-            &h_sized,
-            crate::egui_shell::FrameInspectEntryInput {
-                widget_id: "inspector.layout.panel.height_pt",
-                role: "spinbutton",
-                label: "Panel Height (pt)",
-                command_id: Some("layout.setSpec"),
-                value: Some(json!({ "height_pt": h_pt, "panel_index": target_panel_idx })),
-                enabled,
-                disabled_reason: None,
-                z_layer: crate::inspect::ZLayer::Workspace,
-                ellipsized: false,
-                full_label: None,
-            },
-        );
+        if h_sized.rect.intersect(vis_clip).is_positive() && h_sized.interact_rect.intersect(vis_clip).is_positive() {
+            meta.record_response(
+                ui,
+                &h_sized,
+                crate::egui_shell::FrameInspectEntryInput {
+                    widget_id: "inspector.layout.panel.height_pt",
+                    role: "spinbutton",
+                    label: "Panel Height (pt)",
+                    command_id: Some("layout.setSpec"),
+                    value: Some(json!({ "height_pt": h_pt, "panel_index": target_panel_idx })),
+                    enabled,
+                    disabled_reason: None,
+                    z_layer: crate::inspect::ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+        }
         if h_sized.changed() && enabled {
             let mut next_items = ls.spec.items.clone();
             if let Some(it) = next_items.get_mut(target_panel_idx)

@@ -3447,7 +3447,7 @@ pub fn grid_tr(locale: &str, key: &str, fallback: &'static str) -> &'static str 
     crate::i18n::try_tr(canonical, key).or_else(|| crate::i18n::try_tr("en", key)).unwrap_or(fallback)
 }
 
-/// Return the [`LinkedDataRegion`](curvebook_doc::LinkedDataRegion) containing domain cell `(row, col)`, if any.
+/// Return the [`LinkedDataRegion`] containing domain cell `(row, col)`, if any.
 #[must_use]
 pub fn linked_region_for_cell(ds: &DataSheet, row: usize, col: usize) -> Option<&curvebook_doc::LinkedDataRegion> {
     ds.linked_regions.iter().find(|region| {
@@ -3458,7 +3458,7 @@ pub fn linked_region_for_cell(ds: &DataSheet, row: usize, col: usize) -> Option<
     })
 }
 
-/// Block direct typing when the active grid cell sits inside a frozen sheet or [`LinkedDataRegion`](curvebook_doc::LinkedDataRegion).
+/// Block direct typing when the active grid cell sits inside a frozen sheet or [`LinkedDataRegion`].
 #[must_use]
 pub fn handle_grid_text_input(app: &crate::UiApp, text: &str) -> crate::interaction::UiEventOutcome {
     if text.is_empty() {
