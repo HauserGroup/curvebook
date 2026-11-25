@@ -456,7 +456,8 @@ fn nist_strd_eckerle4_and_rat43_through_cli() -> GateResult {
                     "sheet_id": "eck_fit",
                     "equation_id": "nist_eckerle4",
                     "weighting": "none",
-                    "confidence_percent": 95.0
+                    "confidence_percent": 95.0,
+                    "show_standard_errors": true
                 }
             }),
             json!({ "cmd": "analysis.exportJson", "params": { "sheet_id": "eck_fit", "path": "eckerle4_fit.json", "pretty": true } }),
@@ -500,7 +501,8 @@ fn nist_strd_eckerle4_and_rat43_through_cli() -> GateResult {
                     "sheet_id": "rat_fit",
                     "equation_id": "nist_rat43",
                     "weighting": "none",
-                    "parameter_rules": rat_rules
+                    "parameter_rules": rat_rules,
+                    "show_standard_errors": true
                 }
             }),
             json!({ "cmd": "analysis.exportJson", "params": { "sheet_id": "rat_fit", "path": "rat43_fit.json", "pretty": true } }),
