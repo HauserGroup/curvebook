@@ -50,7 +50,7 @@ Before tagging or publishing a release, verify both source invariants and packag
      cargo xtask licenses
      ```
      This verifies crates offline against [docs/licences.md](../licences.md) (`deny.toml`), and runs `cargo deny check licenses` when installed (mandatory when `CI=true`); add `--html` to write `THIRD-PARTY-LICENSES.html`.
-   - Verify the offline documentation site (`docs-site`), and when cutting a release, refresh screenshots, root redirect shims, `404.html`, `sitemap.xml`, and `llms*.txt`, and verify the generated manual build in `target/docs-manual/` (manual HTML itself is built purely in CI by `.github/workflows/pages.yml` and is not committed under `docs/manual/`):
+   - Verify the offline documentation site (`docs-site`), and when cutting a release, refresh screenshots, root redirect shims, and `404.html`, and verify the generated manual plus `_root/{sitemap.xml,llms.txt,llms-full.txt}` build in `target/docs-manual/` (manual HTML and SEO/LLM outputs are built purely in CI by `.github/workflows/pages.yml` and are not committed under `docs/`):
      ```sh
      cargo run -p xtask --features docs-site -- docs-site --check
      cargo run -p xtask --features docs-site -- docs-site --release <version> --refresh-screenshots --check

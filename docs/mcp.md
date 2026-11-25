@@ -6,30 +6,19 @@
 
 > Related specifications: [`commands.md`](commands.md), [`gui-workflows.md`](gui-workflows.md), [`control-protocol.md`](control-protocol.md), [`scripting-and-automation.md`](implementation/scripting-and-automation.md) · Beginner guide: [`mcp-for-beginners.md`](mcp-for-beginners.md) · Project overview: [`README.md`](../README.md) · Live test & command counts: [`STATUS.md`](STATUS.md)
 
-## Quick Start: Build, Configure & Verify
+## Building & Running from Source
 
-The **Model Context Protocol (MCP)** lets an AI assistant or script talk to CurveBook's statistical and graphing engine over standard input/output (stdio) using structured JSON messages.
-
-Key terms in this guide:
-- **stdio:** Your MCP client launches `curvebook-cli mcp` as a local subprocess and exchanges JSON messages through its standard input and output streams—no background daemon or open network port is started.
-- **Headless mode:** Runs calculations, file imports, and figure exports directly in memory with no GUI window (the default for `curvebook-cli mcp`).
-- **`--workdir`:** Sandboxes all file reads, saves, and exports inside one chosen folder on disk so paths outside it or using `..` are rejected.
-
-### 1. Build or Run the Server
-
-If you installed a release package, `curvebook-cli` is included alongside the desktop app (see the [Get Started guide](https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html) for per-platform paths).
-
-To build the standalone release binary from a source checkout (recommended for MCP clients):
+To build the standalone release binary from a checkout:
 
 ```sh
 cargo build --release -p curvebook-cli
 ```
 
-This creates `./target/release/curvebook-cli` (`.\target\release\curvebook-cli.exe` on Windows). You can also install onto `PATH` with `cargo install --path apps/curvebook-cli` (verify with `which curvebook-cli`), or run directly from a repository checkout without a separate build step via `cargo run -q -p curvebook-cli -- mcp`.
+This creates `./target/release/curvebook-cli` (`.\target\release\curvebook-cli.exe` on Windows). You can also install onto `PATH` via `cargo install --path apps/curvebook-cli` or run directly via `cargo run -q -p curvebook-cli -- mcp`.
 
-### 2. Configure Your MCP Client
+### MCP Client Presets
 
-Create an existing folder for your data and exports (for example `mkdir -p /path/to/your/data-folder`), then point your MCP client to the **full absolute path** of `curvebook-cli` so it does not rely on shell `PATH` or working-directory lookup:
+Always pass the **absolute path** to `curvebook-cli` and an existing `--workdir` folder so file I/O is confined by `WorkdirGuard`:
 
 ```json
 {
@@ -42,46 +31,33 @@ Create an existing folder for your data and exports (for example `mkdir -p /path
 }
 ```
 
-- `curvebook-cli mcp` starts in **default headless mode**.
-- `--workdir` must name an existing directory; CurveBook resolves relative paths beneath it and blocks escapes (`path_escape`). Omit `--workdir` only when testing pure in-memory calculations from a terminal without disk I/O. (See [Example Configurations](#example-configurations) below for `--control-port` live-attach presets.)
+For live attachment to a shared visible desktop window (`curvebook --control 9123 --window`; omit `--workdir` because `--workdir` and `--control-port` / `CURVEBOOK_CONTROL_PORT` are mutually exclusive and exit with code `2`):
 
-### 3. Verify the Connection
-
-Send `initialize`, `notifications/initialized`, `ping`, and `tools/list` as newline-delimited JSON-RPC requests over stdin (one JSON object per line; CurveBook also auto-detects standard `Content-Length` MCP framing):
-
-```sh
-./target/release/curvebook-cli mcp <<'EOF'
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"quickstart","version":"0.1"}}}
-{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"ping"}
-{"jsonrpc":"2.0","id":3,"method":"tools/list"}
-EOF
+```json
+{
+  "mcpServers": {
+    "curvebook": {
+      "command": "/absolute/path/to/curvebook-cli",
+      "args": ["mcp", "--control-port", "9123"]
+    }
+  }
+}
 ```
 
-Expected output (three JSON lines on stdout; `notifications/initialized` produces no reply):
-1. Line 1 (`"id":1`): `"protocolVersion":"2024-11-05"` and `"serverInfo":{"name":"curvebook","version":"<package version>"}`.
-2. Line 2 (`"id":2`): exact pong `{"id":2,"jsonrpc":"2.0","result":{}}`.
-3. Line 3 (`"id":3`): `"tools"` array containing the default core tools: `doc_inspect`, `open_file`, `save_file`, `command_list`, `command_run`, `command_batch`, `render_preview`, `export`, `list_toolsets`, and `enable_toolset`.
+### Quick Smoke Check (stdio JSON-RPC)
 
-### 4. End-to-End Example (Welch's *t*-test)
-
-Create a two-group table (`Control`: `10, 11, 12`; `Treated`: `20, 22, 24`) and run an unpaired Welch's *t*-test in one all-or-nothing (`"atomic": true`) `command_batch` call:
+Send newline-delimited JSON-RPC over stdin (CurveBook also auto-detects `Content-Length` framing) to verify `initialize`, `ping`, `tools/list`, or an atomic Welch's *t*-test `command_batch`:
 
 ```sh
 ./target/release/curvebook-cli mcp <<'EOF'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"command_batch","arguments":{"atomic":true,"commands":[{"command_id":"sheet.createData","params":{"sheet_id":"assay","kind":"Column","rows":3,"cols":2}},{"command_id":"table.setTitles","params":{"sheet_id":"assay","titles":["Control","Treated"]}},{"command_id":"table.paste","params":{"sheet_id":"assay","start_row":0,"start_col":0,"text":"10\t20\n11\t22\n12\t24"}},{"command_id":"stats.run","params":{"source_sheet_id":"assay","sheet_id":"ttest","kind":"welch_t"}}]}}}
+{"jsonrpc":"2.0","id":2,"method":"ping"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"command_batch","arguments":{"atomic":true,"commands":[{"command_id":"sheet.createData","params":{"sheet_id":"assay","kind":"Column","rows":3,"cols":2}},{"command_id":"table.setTitles","params":{"sheet_id":"assay","titles":["Control","Treated"]}},{"command_id":"table.paste","params":{"sheet_id":"assay","start_row":0,"start_col":0,"text":"10\t20\n11\t22\n12\t24"}},{"command_id":"stats.run","params":{"source_sheet_id":"assay","sheet_id":"ttest","kind":"welch_t"}}]}}}
 EOF
 ```
 
-Expected output:
-1. Line 1 (`"id":1`): `initialize` response (`"serverInfo":{"name":"curvebook","version":"<package version>"}`).
-2. Line 2 (`"id":2`): `tools/call` response with `"isError":false` whose final `stats.run` step (`"index":3`) reports `"message":"ran Welch's t test"`, `"status":"UpToDate"`, and these exact scalar results:
-   - `"t"`: `-8.520563361656317`
-   - `"PValue"`: `0.0036599555836826485`
-   - `"CohensD"`: `-6.957010852370434`
-   - `"HedgesG"`: `-5.550891548444351`
+Expected: `ping` returns `{}` and the `stats.run` step (`"index":3`) reports `"status":"UpToDate"` with `"t": -8.520563361656317` and `"PValue": 0.0036599555836826485`.
 
 ## Protocol & Wire Framing
 
@@ -108,46 +84,15 @@ The desktop application (`curvebook`) provides the declarative `egui 0.37` deskt
 - **Live-attach `command_batch` rollback:** Both headless and `--control-port` live-attach modes support `"atomic": true` snapshot rollback; in `--control-port` live-attach mode, atomic `command_batch` delegates to the desktop host's atomic `command.batch` RPC (restoring the session and UI shell snapshot on failure; earlier filesystem writes cannot be unlinked and report `filesystem_side_effects_persisted: true`).
 - **Deferred QoL items:** `QOL-10`, `QOL-11`, `QOL-13`, and `QOL-15` remain deferred without scheduled milestones ([`qol-enhancements.md`](planning/qol-enhancements.md)).
 
-## CLI Flags & Advanced Configuration
+## CLI Flags, `WorkdirGuard` & Live-Attach Routing
 
 ```text
 curvebook-cli mcp [--control-port <1..=65535>] [--workdir <dir>] [--control-token <token>]
 ```
 
-- Always use the **absolute path** to `curvebook-cli` in GUI MCP client configs so the host application does not depend on shell `PATH` or working-directory lookup.
-- `--workdir <dir>` canonicalizes an existing accessible directory via `WorkdirGuard` (`crates/platform/src/path_guard.rs`) and confines `open_file`, `save_file`, `export`, `ui_screenshot` `path`, `ui_invoke_menu` `params`, recursive `PATH_PARAM_KEYS` inside `command_run` / `command_batch` (leaving inline `csv` text untouched), and stored `ExternalDelimitedFile` link refreshes during `project.recalculate`. Escapes (`..`, symlinks pointing outside, or external absolute paths) fail with `ErrorCode::PathEscape` (`"path_escape"`, `category: "policy"`).
-- **`--workdir` and `--control-port` are mutually exclusive:** Combining `--workdir` with `--control-port` (or `CURVEBOOK_CONTROL_PORT`) fails immediately with exit code `2`, because `--workdir` cannot confine file operations executed inside an external desktop host process.
-
-### Example Configurations
-
-The headless configuration with `--workdir` is shown in [Configure Your MCP Client](#2-configure-your-mcp-client). For live attachment to a shared visible desktop window (`curvebook --control 9123 --window`; omit `--workdir` because `--workdir` and `--control-port` / `CURVEBOOK_CONTROL_PORT` are mutually exclusive and exit with code `2` if combined):
-
-```json
-{
-  "mcpServers": {
-    "curvebook": {
-      "command": "/absolute/path/to/curvebook-cli",
-      "args": ["mcp", "--control-port", "9123"]
-    }
-  }
-}
-```
-
-## Troubleshooting the connection
-
-Connection problems (paths, `PATH`, `"type": "stdio"`, clean stdout, and the errors that appear after connecting) are covered once, on the published [troubleshooting page](reference/troubleshooting.md#mcp-connection).
-
-## Shipped Surface (`R7.1`, `R0.13`, `R7.3`)
-
-Every handler executes inside `run_guarded` with structured error payloads (`code`, `category`, `message`, `retryable`, `remediation`, `details`), `Effects`-derived MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), and optional `WorkdirGuard` path containment:
-
-| Surface | Purpose |
-|---|---|
-| `doc_inspect` / `open_file` / `save_file` | Inspect project sheets (`Data`, `Info`, `Analyses`, `Graphs`, `Layouts`) or live `--control` snapshots (selecting per-sheet detail when `sheet_id` is given, with optional `include_cells` previews), open `.curvebook` / `.curvebook.d` / `.cbtemplate` / `.prism` / `.pzfx` / `.csv` / `.tsv`, and atomically save `.curvebook`, `.curvebook.d`, or `.cbtemplate` projects — forwarding to the attached session when `--control-port` is configured. |
-| `command_list` / `command_run` / `command_batch` | Discover and execute typed engine commands ([`commands.md`](commands.md)) plus the synced UI commands (`crates/mcp/src/ui_catalog.rs`), up to `1024` steps per `command_batch` with optional `atomic: true` rollback. `command_list` reports `"live_attached"`, `"mode"` (`"live_attach"` vs `"headless"`), and per-command `"available"` (`ui.*` commands report `"available": false`, `"requires_live_attach": true` when headless). During the one-release parameter-deprecation window (`R16.5`), calls supplying retired `x-deprecated-aliases` parameter keys continue to succeed and return `"warnings": [...]` on `command_run` payloads and affected `command_batch` step entries (canonical `snake_case` calls omit `"warnings"`). |
-| `list_toolsets` / `enable_toolset` | Progressively enable or disable per-command MCP tools grouped by `CommandGroup` (`project`, `edit`, `sheet`, `table`, `info`, `analysis`, `graph`, `layout`, `export`, or `"all"`), plus the `"gui"` toolset (`8` `GUI Automation` tools), emitting `notifications/tools/list_changed` whenever the active set changes. |
-| `render_preview` / `export` | Compile and rasterize any `GraphSheet` or `LayoutSheet` to inline PNG preview bytes, or export `SVG` / `PDF` (`%PDF-1.7`, configurable `pdf_version` and optional `ttf_font` embedding) / `EMF` / `PNG` / `TIFF` (`none` / `deflate` / `lzw`) / `CSV` / `TSV` / `JSON` inline or atomically to disk. For CSV/TSV exports on a `ResultSheet`, supplying `tab_id` defaults `tidy` to `false` so the requested tab exports directly, while explicit `tidy: true` + `tab_id` fails with `InvalidParams`. |
-| MCP Resources & Prompts | Read `sheet://<id>` and `result://<id>` resources (from the attached desktop session when `--control-port` is set, or the local session in headless mode) and guided workflow prompts (`dose_response_curve_fit`, `choose_two_group_test`, `publication_figure_checklist`). |
+- `--workdir <dir>` canonicalizes an existing accessible directory via `WorkdirGuard` (`crates/platform/src/path_guard.rs`) and confines `open_file`, `save_file`, `export`, `ui_screenshot` `path`, `ui_invoke_menu` `params`, recursive `PATH_PARAM_KEYS` inside `command_run` / `command_batch` (leaving inline `csv` text untouched), and stored `ExternalDelimitedFile` link refreshes during `project.recalculate`. Escapes fail with `ErrorCode::PathEscape` (`"path_escape"`, `category: "policy"`).
+- **`--workdir` and `--control-port` are mutually exclusive:** combining them exits with code `2`, because `--workdir` cannot confine file operations executed inside an external desktop host process.
+- Connection troubleshooting lives once on the published [troubleshooting page](reference/troubleshooting.md#mcp-connection); full tool/resource/prompt tables live in [MCP server reference](reference/automation/mcp.md).
 
 ### Live-Attach & Shared-Window Mode (`--control-port` / `--window`)
 

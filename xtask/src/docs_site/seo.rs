@@ -15,7 +15,7 @@ use std::path::Path;
 
 use curvebook_platform::write_atomic;
 
-use super::llms::{LLMS_FULL_TXT_REL_PATH, LLMS_TXT_REL_PATH, build_llms_full_txt, build_llms_txt};
+use super::llms::{build_llms_full_txt, build_llms_txt};
 use super::verify::parse_minor_dir_version;
 
 /// The published base URL, optional custom domain, and landing pages live with the Pages publish
@@ -145,25 +145,13 @@ pub fn build_sitemap(root: &Path) -> Result<String, String> {
     build_sitemap_with_manual(root, None)
 }
 
-/// Regenerate `docs/sitemap.xml` from an explicit manual page list (`--sitemap`).
-pub fn write_sitemap_for_manual_pages(root: &Path, snapshot_sub: &str, manual_rel_pages: &[String]) -> Result<usize, String> {
-    let xml = build_sitemap_for_manual_pages(root, snapshot_sub, manual_rel_pages)?;
-    let path = root.join(SITEMAP_REL_PATH);
-    write_atomic(&path, xml.as_bytes()).map_err(|e| format!("write {SITEMAP_REL_PATH}: {e}"))?;
-    Ok(xml.matches("<url>").count())
-}
-
-/// Regenerate `docs/sitemap.xml` using `manual_dir` (or default).
-pub fn write_sitemap_with_manual(root: &Path, manual_dir: Option<&Path>) -> Result<usize, String> {
+/// Regenerate `sitemap.xml` inside `out_dir` (e.g. `<manual_dir>/_root/`) using `manual_dir`.
+pub fn write_sitemap_into(root: &Path, manual_dir: Option<&Path>, out_dir: &Path) -> Result<usize, String> {
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
     let xml = build_sitemap_with_manual(root, manual_dir)?;
-    let path = root.join(SITEMAP_REL_PATH);
-    write_atomic(&path, xml.as_bytes()).map_err(|e| format!("write {SITEMAP_REL_PATH}: {e}"))?;
+    let path = out_dir.join("sitemap.xml");
+    write_atomic(&path, xml.as_bytes()).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(xml.matches("<url>").count())
-}
-
-/// Regenerate `docs/sitemap.xml` (`cargo xtask docs-site --sitemap`, and after `--release`).
-pub fn write_sitemap(root: &Path) -> Result<usize, String> {
-    write_sitemap_with_manual(root, None)
 }
 
 /// Regenerate `docs/404.html` (`cargo xtask docs-site --sitemap`, and after `--release`).
@@ -173,21 +161,27 @@ pub fn write_not_found_page(root: &Path) -> Result<(), String> {
     write_atomic(&path, html.as_bytes()).map_err(|e| format!("write {NOT_FOUND_REL_PATH}: {e}"))
 }
 
-/// `--check` gate: the committed sitemap, `404.html`, and `llms*.txt` match the published content byte-for-byte,
-/// and every landing page declares its canonical link and Open Graph / Twitter Card metadata.
+/// `--check` gate: the committed `404.html` and build-directory `sitemap.xml` / `llms*.txt` match
+/// the published content byte-for-byte, and every landing page declares its canonical link and Open
+/// Graph / Twitter Card metadata.
 pub fn check_search_metadata(root: &Path) -> Result<(), String> {
     check_search_metadata_with_manual(root, None)
 }
 
-/// `--check` gate validating `docs/sitemap.xml` against `manual_dir` (or default).
+/// `--check` gate validating `<manual_dir>/_root/{sitemap.xml,llms.txt,llms-full.txt}`, committed
+/// `docs/404.html`, and landing-page canonical/Open Graph metadata.
 pub fn check_search_metadata_with_manual(root: &Path, manual_dir: Option<&Path>) -> Result<(), String> {
     validate_site_config(SITE_BASE_URL, CUSTOM_DOMAIN)?;
 
+    let resolved_manual = manual_dir.map(Path::to_path_buf).unwrap_or_else(|| crate::pages_site::default_manual_dir(root));
+    let generated_root = resolved_manual.join(crate::pages_site::MANUAL_ROOT_SUBDIR);
+
     let expected_sitemap = build_sitemap_with_manual(root, manual_dir)?;
-    let committed_sitemap = std::fs::read_to_string(root.join(SITEMAP_REL_PATH))
-        .map_err(|e| format!("read {SITEMAP_REL_PATH}: {e} (run `cargo xtask docs-site --sitemap`)"))?;
-    if committed_sitemap != expected_sitemap {
-        return Err(format!("{SITEMAP_REL_PATH} is out of date with the published pages; run `cargo xtask docs-site --sitemap`"));
+    let sitemap_path = generated_root.join("sitemap.xml");
+    let generated_sitemap = std::fs::read_to_string(&sitemap_path)
+        .map_err(|e| format!("read {}: {e} (run `cargo run -p xtask --features docs-site -- docs-site --build-manual`)", sitemap_path.display()))?;
+    if generated_sitemap != expected_sitemap {
+        return Err(format!("{} is out of date with the published pages; rebuild with `docs-site --build-manual`", sitemap_path.display()));
     }
 
     let expected_404 = super::template::render_not_found_page(crate::pages_site::site_base_path());
@@ -198,17 +192,19 @@ pub fn check_search_metadata_with_manual(root: &Path, manual_dir: Option<&Path>)
     }
 
     let expected_llms = build_llms_txt(root)?;
-    let committed_llms = std::fs::read_to_string(root.join(LLMS_TXT_REL_PATH))
-        .map_err(|e| format!("read {LLMS_TXT_REL_PATH}: {e} (run `cargo xtask docs-site --sitemap`)"))?;
-    if committed_llms != expected_llms {
-        return Err(format!("{LLMS_TXT_REL_PATH} is out of date; run `cargo xtask docs-site --sitemap`"));
+    let llms_path = generated_root.join("llms.txt");
+    let generated_llms = std::fs::read_to_string(&llms_path)
+        .map_err(|e| format!("read {}: {e} (run `cargo run -p xtask --features docs-site -- docs-site --build-manual`)", llms_path.display()))?;
+    if generated_llms != expected_llms {
+        return Err(format!("{} is out of date; rebuild with `docs-site --build-manual`", llms_path.display()));
     }
 
     let expected_llms_full = build_llms_full_txt(root)?;
-    let committed_llms_full = std::fs::read_to_string(root.join(LLMS_FULL_TXT_REL_PATH))
-        .map_err(|e| format!("read {LLMS_FULL_TXT_REL_PATH}: {e} (run `cargo xtask docs-site --sitemap`)"))?;
-    if committed_llms_full != expected_llms_full {
-        return Err(format!("{LLMS_FULL_TXT_REL_PATH} is out of date; run `cargo xtask docs-site --sitemap`"));
+    let llms_full_path = generated_root.join("llms-full.txt");
+    let generated_llms_full = std::fs::read_to_string(&llms_full_path)
+        .map_err(|e| format!("read {}: {e} (run `cargo run -p xtask --features docs-site -- docs-site --build-manual`)", llms_full_path.display()))?;
+    if generated_llms_full != expected_llms_full {
+        return Err(format!("{} is out of date; rebuild with `docs-site --build-manual`", llms_full_path.display()));
     }
 
     for page in LANDING_PAGES {
@@ -410,7 +406,7 @@ fn collect_html_files(base: &Path, dir: &Path, out: &mut Vec<String>) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::super::llms::write_llms_files;
+    use super::super::llms::write_llms_files_into;
     use super::*;
 
     fn temp_root(label: &str) -> std::path::PathBuf {
@@ -510,21 +506,22 @@ mod tests {
             ]
         );
 
-        write_sitemap(&root).unwrap();
+        let generated_root = root.join("target/docs-manual/_root");
+        write_sitemap_into(&root, None, &generated_root).unwrap();
         write_not_found_page(&root).unwrap();
-        write_llms_files(&root).unwrap();
+        write_llms_files_into(&root, &generated_root).unwrap();
         assert!(check_search_metadata(&root).is_ok());
 
-        // A new snapshot page makes the committed sitemap stale.
+        // A new snapshot page makes the generated sitemap stale.
         write(&root, "target/docs-manual/latest/glossary.html", "new");
-        assert!(check_search_metadata(&root).unwrap_err().contains("--sitemap"));
+        assert!(check_search_metadata(&root).unwrap_err().contains("--build-manual"));
 
         // Regenerate sitemap, then stale 404.html and llms.txt must fail check_search_metadata.
-        write_sitemap(&root).unwrap();
+        write_sitemap_into(&root, None, &generated_root).unwrap();
         write(&root, NOT_FOUND_REL_PATH, "stale 404\n");
         assert!(check_search_metadata(&root).unwrap_err().contains("docs/404.html"));
         write_not_found_page(&root).unwrap();
-        write(&root, LLMS_TXT_REL_PATH, "stale\n");
+        write(&root, "target/docs-manual/_root/llms.txt", "stale\n");
         assert!(check_search_metadata(&root).unwrap_err().contains("llms.txt"));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -534,9 +531,10 @@ mod tests {
     fn landing_pages_validate_canonical_and_open_graph_metadata() {
         let root = temp_root("canonical");
         seed_landing_pages(&root);
-        write_sitemap(&root).unwrap();
+        let generated_root = root.join("target/docs-manual/_root");
+        write_sitemap_into(&root, None, &generated_root).unwrap();
         write_not_found_page(&root).unwrap();
-        write_llms_files(&root).unwrap();
+        write_llms_files_into(&root, &generated_root).unwrap();
         assert!(check_search_metadata(&root).is_ok());
 
         // Wrong canonical URL.

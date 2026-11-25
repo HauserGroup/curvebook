@@ -535,13 +535,16 @@ fn assert_release_snapshot_outputs(sim_root: &Path, manual_out: &Path, head_sha:
     let latest_home = fs::read_to_string(manual_out.join("latest/index.html")).map_err(|e| e.to_string())?;
     assert_eq!(latest_home, snap_home);
 
-    let sitemap_xml = fs::read_to_string(sim_root.join("docs/sitemap.xml")).map_err(|e| e.to_string())?;
+    let sitemap_xml = fs::read_to_string(manual_out.join("_root/sitemap.xml")).map_err(|e| e.to_string())?;
     assert!(sitemap_xml.contains("https://hausergroup.github.io/curvebook/manual/latest/index.html"));
     assert!(!sitemap_xml.contains("/manual/v0.1/"));
-    let llms_txt = fs::read_to_string(sim_root.join("docs/llms.txt")).map_err(|e| e.to_string())?;
+    let llms_txt = fs::read_to_string(manual_out.join("_root/llms.txt")).map_err(|e| e.to_string())?;
     assert!(llms_txt.contains("https://hausergroup.github.io/curvebook/manual/latest/index.html"));
-    let llms_full = fs::read_to_string(sim_root.join("docs/llms-full.txt")).map_err(|e| e.to_string())?;
+    let llms_full = fs::read_to_string(manual_out.join("_root/llms-full.txt")).map_err(|e| e.to_string())?;
     assert!(llms_full.contains("## Quick Facts"));
+    assert!(!sim_root.join("docs/sitemap.xml").exists(), "sitemap.xml must stay out of docs/");
+    assert!(!sim_root.join("docs/llms.txt").exists(), "llms.txt must stay out of docs/");
+    assert!(!sim_root.join("docs/llms-full.txt").exists(), "llms-full.txt must stay out of docs/");
     Ok(manifest_text)
 }
 
@@ -566,6 +569,13 @@ fn assert_release_negative_gates_and_ci_stage(sim_root: &Path, manual_out: &Path
     assert!(!committed_html_res.status.success(), "committed HTML in docs/manual/ must fail --check");
     assert!(String::from_utf8_lossy(&committed_html_res.stderr).contains("must not be committed under docs/manual/"));
     fs::remove_dir_all(sim_root.join("docs/manual")).map_err(|e| e.to_string())?;
+
+    // Planting a committed generated root file under docs/ must also fail --check (R21.4).
+    fs::write(sim_root.join("docs/llms-full.txt"), "# stale\n").map_err(|e| e.to_string())?;
+    let committed_llms_res = run_xtask(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str])?;
+    assert!(!committed_llms_res.status.success(), "committed docs/llms-full.txt must fail --check");
+    assert!(String::from_utf8_lossy(&committed_llms_res.stderr).contains("must not be committed under docs/"));
+    fs::remove_file(sim_root.join("docs/llms-full.txt")).map_err(|e| e.to_string())?;
 
     // Exercise the exact Pages CI sequence: `--build-manual <dir> --check` followed by `pages-stage --manual-dir <dir> _site`.
     let ci_manual = sim_root.join("target/ci-manual");
@@ -594,6 +604,8 @@ fn assert_release_negative_gates_and_ci_stage(sim_root: &Path, manual_out: &Path
     assert!(staged_site.join("manual/latest/index.html").is_file());
     assert!(staged_site.join("manual/v0.1/index.html").is_file());
     assert!(staged_site.join("sitemap.xml").is_file());
+    assert!(staged_site.join("llms.txt").is_file());
+    assert!(staged_site.join("llms-full.txt").is_file());
     assert!(!staged_site.join("manual/latest/manifest.json").exists());
     assert!(!staged_site.join("manual/v0.1/manifest.json").exists());
     assert!(!staged_site.join("ROADMAP.md").exists());

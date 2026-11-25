@@ -570,7 +570,7 @@ pub struct RegionBudgets {
 
 impl RegionBudgets {
     /// Canonical per-region control-count ceilings anchored to measured workspace and dialog views
-    /// (`docs/planning/ui-overlap-and-target-size-audit.md` F5).
+    /// (`R15.10` F5 non-overlap gate).
     pub const CANONICAL: Self =
         Self { top_chrome: 24, navigator: 38, center_stage: 24, inspector: 38, status_footer: 14, dropdown_menu: 16, modal_dialog: 44 };
 

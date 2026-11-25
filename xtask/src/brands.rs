@@ -68,13 +68,12 @@ const ATTRIBUTED_REPO_PLACEHOLDER: &str = "upstream-attributed-repo";
 
 const ALLOW_MARKER: &str = "brand-ok";
 
-/// Intentional audit-archive waiver: read-only audit reports under `docs/audit/` and
-/// `docs/history/audit/` document prior findings verbatim and are skipped only in working-tree
-/// scans (`skip_path`), never when scanning `dist/` bundles (`scan_dist_path_and_file`).
+/// Legacy audit-directory prefixes kept strictly to reject accidental inclusion in `dist/` bundles
+/// (`scan_dist_path_and_file`). Historical audit transcripts were retired from the working tree in `R21.4`.
 const AUDIT_PREFIX: &str = "docs/audit/";
 
-/// Archived audit rounds moved under `docs/history/` (`R0.31`); same intentional read-only
-/// working-tree waiver as `AUDIT_PREFIX` (`scan_dist_path_and_file` still rejects if bundled).
+/// Archived audit-history prefix kept strictly to reject accidental inclusion in `dist/` bundles
+/// (`scan_dist_path_and_file`).
 const HISTORY_AUDIT_PREFIX: &str = "docs/history/audit/";
 
 /// Xtask gate implementation modules that intentionally embed the scanner definitions and unit probes.
@@ -312,15 +311,10 @@ fn decode_text_file(path: &str, bytes: &[u8]) -> Result<DecodedFile, String> {
     }
 }
 
-// Intentional working-tree audit waiver: see AUDIT_PREFIX / HISTORY_AUDIT_PREFIX above.
 fn skip_path(path: &str) -> bool {
     let norm = path.replace('\\', "/");
     let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
-    trimmed == "docs/audit"
-        || trimmed.starts_with(AUDIT_PREFIX)
-        || trimmed == "docs/history/audit"
-        || trimmed.starts_with(HISTORY_AUDIT_PREFIX)
-        || SELF_SCANNER_PATHS.contains(&trimmed)
+    SELF_SCANNER_PATHS.contains(&trimmed)
 }
 
 fn scan_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
@@ -545,8 +539,7 @@ fn scan_cargo_toml(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 fn is_generated_docs_html_path(path: &str) -> bool {
     let norm = path.replace('\\', "/");
     let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
-    trimmed == "docs/llms-full.txt"
-        || (trimmed.starts_with("docs-site/") && trimmed != "docs-site/manual/index.html")
+    (trimmed.starts_with("docs-site/") && trimmed != "docs-site/manual/index.html")
         || trimmed.starts_with("target/docs-site/")
         || (trimmed.starts_with("target/docs-manual/") && trimmed != "target/docs-manual/index.html")
 }
@@ -4566,12 +4559,13 @@ it: "Copia Statistica report",
     }
 
     #[test]
-    fn archived_audit_history_is_skipped_like_live_audit_dir() {
-        assert!(skip_path("docs/audit/README.md"));
-        assert!(skip_path("docs/history/audit/findings/r1/S02.md"));
-        assert!(skip_path("./docs/history/audit"));
+    fn audit_dirs_are_not_skipped_in_working_tree_scans() {
+        assert!(!skip_path("docs/audit/README.md"));
+        assert!(!skip_path("docs/history/audit/findings/r1/S02.md"));
+        assert!(!skip_path("./docs/history/audit"));
         assert!(!skip_path("docs/history/roadmap/r0.md"));
         assert!(!skip_path("docs/evidence/overview.md"));
+        assert!(skip_path("xtask/src/brands.rs"));
     }
 
     #[test]

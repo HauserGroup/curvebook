@@ -60,7 +60,7 @@ Only permissive, compatible crate licences are allowed in Cargo dependencies:
 Copyleft (`GPL-*`, `AGPL-*`, `LGPL-*`) is strictly forbidden. See [docs/licences.md](docs/licences.md) for asset licences, `deny.toml`, `about.toml`, `THIRD-PARTY-LICENSES.html`, `ATTRIBUTION.md`, and `NOTICE`.
 
 ### Contributor Credits & Security
-Never delete, truncate, or omit contributor attributions in [docs/contributors.md](docs/contributors.md), `ATTRIBUTION.md`, or `NOTICE` (`cargo xtask contributors` keeps contributor records synced). Report or handle vulnerability details strictly per [SECURITY.md](SECURITY.md).
+Never delete, truncate, or omit contributor attributions in [`contributors/`](contributors/), [CONTRIBUTING.md](CONTRIBUTING.md#6-licensing-attribution--security), `ATTRIBUTION.md`, or `NOTICE` (`cargo xtask contributors` keeps contributor records synced). Report or handle vulnerability details strictly per [SECURITY.md](SECURITY.md).
 
 ### Zero Telemetry (`xtask telemetry`)
 1. **Strict zero-telemetry & zero-egress architecture.** Never add analytics, crash reporters, telemetry SDKs, auto-updaters, or HTTP client crates anywhere in Cargo manifests or `Cargo.lock`, and never introduce `fetch(`, `XMLHttpRequest`, `navigator.sendBeacon`, `WebSocket`, or external origins in `apps/curvebook-web/` or `packaging/web/`.

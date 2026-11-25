@@ -56,6 +56,7 @@ fn verify_generated_pages(root: &Path, out_dir: &Path, site: &GeneratedSite) -> 
 
 fn verify_workspace_and_manual(root: &Path, manual_dir: &Path) -> Result<(), String> {
     check_no_committed_manual_html(root)?;
+    check_no_committed_generated_site_files(root)?;
     check_manual_snapshots(root, manual_dir)?;
     check_root_pages(root, manual_dir)?;
     super::seo::check_search_metadata_with_manual(root, Some(manual_dir))?;
@@ -688,6 +689,24 @@ pub fn check_no_committed_manual_html(root: &Path) -> Result<(), String> {
     ))
 }
 
+/// Reject committed copies of CI-generated root site files under `docs/` (`R21.4`).
+pub fn check_no_committed_generated_site_files(root: &Path) -> Result<(), String> {
+    let mut found = Vec::new();
+    for rel in crate::pages_site::GENERATED_SITE_FILES {
+        let path = root.join("docs").join(rel);
+        if std::fs::symlink_metadata(&path).is_ok() {
+            found.push(format!("docs/{rel}"));
+        }
+    }
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "generated site file(s) {} must not be committed under docs/ (R21.4 generates them into target/docs-manual/_root/ during CI)",
+        found.join(", ")
+    ))
+}
+
 fn collect_html_rel_paths(base: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
     for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| format!("dir entry under {}: {e}", dir.display()))?;
@@ -885,8 +904,13 @@ fn verify_docs_relative_target(
     if resolved.starts_with("..") {
         return Err(format!("docs/{from_rel}: relative target `{raw_ref}` escapes `docs/` root (`{resolved}`)"));
     }
-    let target_path =
-        if let Some(manual_rel) = resolved.strip_prefix("manual/") { dirs.manual_dir.join(manual_rel) } else { dirs.docs_dir.join(&resolved) };
+    let target_path = if let Some(manual_rel) = resolved.strip_prefix("manual/") {
+        dirs.manual_dir.join(manual_rel)
+    } else if crate::pages_site::GENERATED_SITE_FILES.contains(&resolved.as_str()) {
+        dirs.manual_dir.join(crate::pages_site::MANUAL_ROOT_SUBDIR).join(&resolved)
+    } else {
+        dirs.docs_dir.join(&resolved)
+    };
     if !std::fs::symlink_metadata(&target_path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
         return Err(format!("docs/{from_rel}: broken relative target `{raw_ref}` (missing `{}`)", target_path.display()));
     }
@@ -979,7 +1003,7 @@ fn scan_dir_secrets(base: &Path, dir: &Path, hits: &mut Vec<crate::secrets::Secr
             scan_dir_secrets(base, &path, hits)?;
         } else if meta.file_type().is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if matches!(ext, "html" | "htm" | "css" | "json") {
+            if matches!(ext, "html" | "htm" | "css" | "json" | "txt" | "xml") {
                 let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
                 let rel = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().replace('\\', "/");
                 crate::secrets::scan_text(&rel, &text, hits);

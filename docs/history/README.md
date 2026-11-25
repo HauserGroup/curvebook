@@ -6,11 +6,8 @@ Files in this folder keep the counts, branch names, and wording they had when th
 
 | Record | Contents |
 |---|---|
-| [`roadmap.md`](roadmap.md) and [`roadmap/`](roadmap/) | Progress log and completed roadmap items, one file per milestone (`r0.md`–`r10.md`, `r12.md`, `r13.md`, `r15.md`, `r16.md`). Active items stay in [`ROADMAP.md`](../ROADMAP.md). |
-| [`legacy-ids-and-defects.md`](legacy-ids-and-defects.md) | Mapping of legacy `G1`–`G14`, `Slice 0`, `S1`, `S2`, and `M0`–`M8+` IDs onto roadmap items, plus the `#known-defects` table used to deduplicate audit findings. |
-| [`status-alpha.md`](status-alpha.md) | Alpha launch notes and superseded pre-Beta workspace/packaging verification runs moved out of [`STATUS.md`](../STATUS.md). |
-| [`audit/`](audit/) | Finished code-audit rounds: Round 1/Round 2 findings, the R0–R9 review ledger, the R15 GUI & maintainability audits, the 65-workflow GUI completion audit, the 2026-11-22 full 26-section audit (`334/334`), and the 2026-11-23 delta audit (`43/43`). The reusable playbook stays in [`docs/audit/`](../audit/README.md). Like `docs/audit/`, this folder is exempt from the `brands` and `cleanroom` scans and must never be bundled into release artefacts. |
-| [`release/`](release/) | Alpha release records: the Alpha known issues and release notes, and the Alpha branding clearance. Current known issues are on the published [troubleshooting page](../reference/troubleshooting.md#known-issues). |
-| [`r15-r16-implementation-plan.md`](r15-r16-implementation-plan.md) | Archived wave plan combining `R15.6` post-cutover GUI audit remediation, `R16.12`–`R16.18` maintainability workstreams, and `R16.7`–`R16.11` GUI module splits. |
-| [`r16-gui-maintainability-scope.md`](r16-gui-maintainability-scope.md) | Archived scope record for extending `R16` to GUI module splits (`R16.7`–`R16.9`, `R16.11`) and `R15` branch ref cleanup (`R16.10`). |
-| [`gui-workflow-completion-plan.md`](gui-workflow-completion-plan.md) | Archived execution plan for `R10.25`–`R10.28` five-stage GUI workflow completion. |
+| [`roadmap.md`](roadmap.md) and [`roadmap/`](roadmap/) | Progress log and completed roadmap items, one file per milestone (`r0.md`–`r10.md`, `r12.md`, `r13.md`, `r15.md`, `r16.md`, `r20.md`). Active items stay in [`ROADMAP.md`](../ROADMAP.md). |
+| [`legacy-ids-and-defects.md`](legacy-ids-and-defects.md) | Mapping of legacy `G1`–`G14`, `Slice 0`, `S1`, `S2`, and `M0`–`M8+` IDs onto roadmap items, plus the closed `#known-defects` summary. |
+| [`release/`](release/) | Alpha release records (known issues, branding clearance) and dated GitHub Pages verification logs. Current known issues are on the published [troubleshooting page](../reference/troubleshooting.md#known-issues). |
+
+*(Closed historical audit transcripts and superseded wave plans were retired from `HEAD` under `R21.4` and remain preserved in git history.)*

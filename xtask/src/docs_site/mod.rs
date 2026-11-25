@@ -222,17 +222,15 @@ impl Drop for TempDirCleanup {
 }
 
 fn run_sitemap_sync(root: &Path) -> Result<(), String> {
-    let site = assemble_site(root, preview_meta(root))?;
-    let manual_pages: Vec<String> = site.html_pages.keys().cloned().collect();
-    let count = seo::write_sitemap_for_manual_pages(root, "latest", &manual_pages)?;
     seo::write_not_found_page(root)?;
-    llms::write_llms_files(root)?;
+    let manual_dir = default_manual_dir(root);
+    let version = workspace_version(root);
+    let site = build_manual_into(root, &version, &manual_dir, "workspace", false, false)?;
     println!(
-        "docs-site: wrote {} ({count} URLs), {}, {}, and {}",
-        seo::SITEMAP_REL_PATH,
+        "docs-site: wrote {} and refreshed {} manual pages + _root/{{sitemap.xml,llms.txt,llms-full.txt}} in {}",
         seo::NOT_FOUND_REL_PATH,
-        llms::LLMS_TXT_REL_PATH,
-        llms::LLMS_FULL_TXT_REL_PATH
+        site.html_pages.len(),
+        manual_dir.display()
     );
     Ok(())
 }
@@ -302,15 +300,13 @@ fn run_release_snapshot(root: &Path, version_raw: &str, manual_dir: &Path, check
     );
     write_atomic(&root.join("docs/troubleshooting.html"), troubleshooting_shim.as_bytes())
         .map_err(|e| format!("write docs/troubleshooting.html: {e}"))?;
-    seo::write_sitemap_with_manual(root, Some(manual_dir))?;
     seo::write_not_found_page(root)?;
-    llms::write_llms_files(root)?;
 
     if check_after {
         verify_manual_build(root, manual_dir, &site)?;
     }
     println!(
-        "docs-site: wrote release manual v{clean_ver} ({} pages) into {} and refreshed committed root metadata",
+        "docs-site: wrote release manual v{clean_ver} ({} pages) and _root/{{sitemap.xml,llms.txt,llms-full.txt}} into {} and refreshed committed root shims",
         site.html_pages.len(),
         manual_dir.display()
     );
@@ -389,6 +385,17 @@ fn build_manual_into(
     let redirect_html = render_release_redirect_index("latest", &ver_label, &versions);
     let redirect_path = manual_dir.join("index.html");
     write_atomic(&redirect_path, redirect_html.as_bytes()).map_err(|e| format!("write {}: {e}", redirect_path.display()))?;
+
+    let generated_root = manual_dir.join(crate::pages_site::MANUAL_ROOT_SUBDIR);
+    seo::write_sitemap_into(root, Some(manual_dir), &generated_root)?;
+    llms::write_llms_files_into(root, &generated_root)?;
+    if check_determinism {
+        let llms_full_a = llms::build_llms_full_txt(root)?;
+        let llms_full_b = llms::build_llms_full_txt(root)?;
+        if llms_full_a != llms_full_b {
+            return Err(String::from("docs-site llms-full.txt generation is non-deterministic across consecutive passes"));
+        }
+    }
 
     Ok(site)
 }

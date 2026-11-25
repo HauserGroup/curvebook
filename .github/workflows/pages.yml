@@ -1,8 +1,8 @@
-# Publish the documentation site (R12.9, R12.10). Manual HTML (`manual/index.html`,
-# `manual/latest/`, and active versioned snapshots) is generated in CI into a build directory
-# before `pages-stage`, and only the files on the publish list in `xtask/src/pages_site.rs` are
-# deployed, so neither internal Markdown under `docs/` nor committed manual HTML lives on Pages
-# or in `main`.
+# Publish the documentation site (R12.9, R12.10, R21.4). Manual HTML (`manual/index.html`,
+# `manual/latest/`, and active versioned snapshots) plus generated root metadata (`sitemap.xml`,
+# `llms.txt`, `llms-full.txt`) are generated in CI into a build directory before `pages-stage`, and
+# only the files on the publish list in `xtask/src/pages_site.rs` are deployed, so neither internal
+# Markdown under `docs/` nor generated manual/SEO outputs live on `main`.
 # Requires Settings -> Pages -> Source: GitHub Actions (see docs/release/github-pages.md).
 name: Pages
 

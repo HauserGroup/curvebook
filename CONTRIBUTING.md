@@ -100,5 +100,7 @@ AI assistants working in this repository must read [AGENTS.md](AGENTS.md) and [C
 ## 6. Licensing, Attribution & Security
 
 - **Contributions:** All contributions are licensed under **`MIT OR Apache-2.0`** ([Cargo.toml](Cargo.toml)); see [docs/licences.md](docs/licences.md) for dependency and asset rules.
-- **Contributor credits:** Never omit or remove existing credits in [docs/contributors.md](docs/contributors.md), [ATTRIBUTION.md](ATTRIBUTION.md), or [NOTICE](NOTICE).
+- **Contributor credits:** Never omit or remove existing credits in [`contributors/`](contributors/), [ATTRIBUTION.md](ATTRIBUTION.md), or [NOTICE](NOTICE). CurveBook builds its in-app **About -> Contributors** credit list from two tracked files:
+  - [`contributors/people.toml`](contributors/people.toml): optional opt-in display overrides keyed by GitHub login (`real_name`, `display_name`, or `unlisted = true`). Never add another person's real name without their explicit consent via pull request.
+  - [`contributors/contributors.json`](contributors/contributors.json): machine-generated contributor roster refreshed via `cargo xtask contributors` (run automatically by `.github/workflows/release.yml` prior to release builds).
 - **Security issues:** Report vulnerabilities privately according to [SECURITY.md](SECURITY.md)—do not open public issues with exploit details.

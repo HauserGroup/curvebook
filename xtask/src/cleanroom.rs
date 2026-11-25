@@ -8,8 +8,6 @@ use crate::text_decode::{decode_utf16, detect_bomless_utf16};
 use crate::zip_read::{ZipArchive, ZipLimits};
 
 const SELF: &str = "xtask/src/cleanroom.rs";
-const AUDIT_DIR_PREFIX: &str = "docs/audit/";
-const HISTORY_AUDIT_DIR_PREFIX: &str = "docs/history/audit/";
 const MAX_SAME_LINE_GAP: usize = 120;
 const MAX_ADJACENT_LINE_GAP: usize = 80;
 const MAX_ARCHIVE_DEPTH: usize = 2;
@@ -171,17 +169,10 @@ pub fn scan_dist_artefacts_with_stats(dist_dir: &Path) -> Result<(usize, usize, 
 
 use crate::scan_util::collect_dist_files;
 
-// Intentional historical audit-archive waiver: committed/untracked audit reports under
-// `docs/audit/` and `docs/history/audit/` document prior findings verbatim and are skipped only
-// during working-tree scans (`scan`), never during `dist/` bundle scans.
 fn should_skip(path: &str) -> bool {
     let norm = path.replace('\\', "/");
     let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
     trimmed == SELF
-        || trimmed == "docs/audit"
-        || trimmed.starts_with(AUDIT_DIR_PREFIX)
-        || trimmed == "docs/history/audit"
-        || trimmed.starts_with(HISTORY_AUDIT_DIR_PREFIX)
 }
 
 fn has_extension_ci(path: &str, exts: &[&str]) -> bool {
@@ -553,8 +544,8 @@ mod tests {
     }
 
     #[test]
-    fn skips_audit_docs_and_ignores_benign_c_ident_or_plain_links() {
-        let dir = temp_dir("skip-and-benign");
+    fn flags_audit_paths_and_ignores_benign_c_ident_or_plain_links() {
+        let dir = temp_dir("audit-and-benign");
         std::fs::create_dir_all(dir.join("docs/audit/findings")).unwrap();
         std::fs::write(
             dir.join("docs/audit/findings/S13.md"),
@@ -569,19 +560,16 @@ mod tests {
         let files = vec![String::from("docs/audit/findings/S13.md"), String::from("benign.rs")];
         let hits = scan(&dir, &files);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(hits.is_empty(), "{hits:?}");
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(hits.iter().all(|h| h.path == "docs/audit/findings/S13.md"), "{hits:?}");
     }
 
     #[test]
-    fn run_catches_non_ascii_utf16_and_zip_probes_while_allowing_audit_docs() {
+    fn run_catches_non_ascii_utf16_and_zip_probes() {
         let dir = temp_dir("git-e2e");
         run_git(&dir, &["init"]);
-        std::fs::create_dir_all(dir.join("docs/audit/findings")).unwrap();
-        std::fs::write(
-            dir.join("docs/audit/findings/S13.md"),
-            "Copyright (c) 2024 GraphPad Software, LLC. All rights reserved.\n<GraphPadPrismFile/>\n",
-        )
-        .unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/clean.md"), "# Clean CurveBook note\n").unwrap();
         assert!(run(&dir).is_ok());
 
         std::fs::create_dir_all(dir.join("fixtures")).unwrap();
@@ -628,11 +616,12 @@ mod tests {
     }
 
     #[test]
-    fn archived_audit_history_is_skipped_like_live_audit_dir() {
-        assert!(should_skip("docs/audit/workflow.md"));
-        assert!(should_skip("docs/history/audit/round2-post-ebcc622.md"));
+    fn audit_dirs_are_not_skipped_after_r21_4_retirement() {
+        assert!(!should_skip("docs/audit/workflow.md"));
+        assert!(!should_skip("docs/history/audit/round2-post-ebcc622.md"));
         assert!(!should_skip("docs/history/roadmap.md"));
         assert!(!should_skip("docs/evidence/statistics.md"));
+        assert!(should_skip("xtask/src/cleanroom.rs"));
     }
 
     #[test]

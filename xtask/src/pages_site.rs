@@ -1,19 +1,20 @@
-//! The set of files the GitHub Pages site publishes (`R12.9`, `R12.10`) and `cargo xtask pages-stage`.
+//! The set of files the GitHub Pages site publishes (`R12.9`, `R12.10`, `R21.4`) and `cargo xtask pages-stage`.
 //!
 //! Pages deploys only the files listed here, combining committed site assets under `docs/` with
-//! generated manual HTML built into a build directory (default `target/docs-manual/`, or
-//! `--manual-dir <dir>`), so internal Markdown (roadmap, audits, planning, evidence, reference
-//! sources, and schemas) is never served next to the site and generated manual HTML stays out of
-//! git. The published set is:
+//! generated manual HTML and generated root metadata (`sitemap.xml`, `llms.txt`, `llms-full.txt`)
+//! built into a build directory (default `target/docs-manual/`, or `--manual-dir <dir>`), so
+//! internal Markdown (roadmap, planning, evidence, reference sources, and schemas) is never
+//! served next to the site and generated outputs stay out of git. The published set is:
 //!
 //! - the hand-written landing pages in [`LANDING_PAGES`] and the redirect pages in [`REDIRECT_PAGES`];
 //! - every file of `manual/latest/` and every active versioned snapshot under
 //!   `manual/v<major>.<minor>/` from the manual build directory, except their `manifest.json`;
-//! - the shared [`SITE_FILES`] and every file under the [`SITE_DIRS`].
+//! - the committed [`COMMITTED_SITE_FILES`], the generated [`GENERATED_SITE_FILES`] under
+//!   `<manual_dir>/_root/`, and every file under the [`SITE_DIRS`].
 //!
 //! Every published HTML page may link only to published files: [`check_publish_set_with_manual`]
 //! fails on a local `href`, `src`, or meta-refresh target that the list does not contain, and on
-//! any `docs/sitemap.xml` URL outside the list. This module needs no `docs-site` feature
+//! any `sitemap.xml` URL outside the list. This module needs no `docs-site` feature
 //! dependency, so it continues to build with `--no-default-features`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,8 +35,15 @@ pub const LANDING_PAGES: &[&str] = &["index.html", "open-pzfx-files.html", "linu
 /// Published redirect pages that forward to the newest release snapshot (left out of the sitemap).
 pub const REDIRECT_PAGES: &[&str] = &["get-started.html", "troubleshooting.html", "manual/index.html"];
 
-/// Other individual published files, relative to `docs/`.
-pub const SITE_FILES: &[&str] = &["404.html", "site.css", "sitemap.xml", "llms.txt", "llms-full.txt"];
+/// Committed individual published files, relative to `docs/`.
+pub const COMMITTED_SITE_FILES: &[&str] = &["404.html", "site.css"];
+
+/// Generated root files written into `<manual_dir>/_root/` by `docs-site --build-manual` (`R21.4`)
+/// and staged to the root of `_site/` (never committed under `docs/`).
+pub const GENERATED_SITE_FILES: &[&str] = &["sitemap.xml", "llms.txt", "llms-full.txt"];
+
+/// Subdirectory inside `<manual_dir>` holding [`GENERATED_SITE_FILES`].
+pub const MANUAL_ROOT_SUBDIR: &str = "_root";
 
 /// Path prefix of [`SITE_BASE_URL`] (e.g. `"/curvebook/"` on `github.io`, `"/"` on a custom domain).
 #[must_use]
@@ -187,7 +195,7 @@ pub fn publish_list(root: &Path) -> Result<Vec<String>, String> {
 fn publish_entries(root: &Path, manual_dir: Option<&Path>) -> Result<Vec<StagedEntry>, String> {
     let docs = root.join("docs");
     let mut entries: BTreeMap<String, PathBuf> = BTreeMap::new();
-    for rel in LANDING_PAGES.iter().chain(REDIRECT_PAGES).chain(SITE_FILES) {
+    for rel in LANDING_PAGES.iter().chain(REDIRECT_PAGES).chain(COMMITTED_SITE_FILES) {
         if *rel == "manual/index.html" {
             continue;
         }
@@ -207,6 +215,18 @@ fn publish_entries(root: &Path, manual_dir: Option<&Path>) -> Result<Vec<StagedE
         return Err(format!("{}/index.html is on the Pages publish list but missing (or not a regular file)", manual_root.display()));
     }
     entries.insert(String::from("manual/index.html"), manual_index);
+
+    let generated_root = manual_root.join(MANUAL_ROOT_SUBDIR);
+    for rel in GENERATED_SITE_FILES {
+        let path = generated_root.join(rel);
+        if !is_regular_file(&path) {
+            return Err(format!(
+                "{}/{MANUAL_ROOT_SUBDIR}/{rel} is on the Pages publish list but missing (run `cargo run -p xtask --features docs-site -- docs-site --build-manual` first)",
+                manual_root.display()
+            ));
+        }
+        entries.insert((*rel).to_owned(), path);
+    }
 
     let mut manual_page_count = 0usize;
     for snapshot in snapshot_dirs(&manual_root)? {
@@ -253,7 +273,6 @@ pub fn check_publish_set_with_manual(root: &Path, manual_dir: Option<&Path>) -> 
 fn check_publish_entries(root: &Path, manual_dir: Option<&Path>) -> Result<Vec<StagedEntry>, String> {
     let entries = publish_entries(root, manual_dir)?;
     let published: BTreeSet<&str> = entries.iter().map(|e| e.site_rel.as_str()).collect();
-    let docs = root.join("docs");
     let mut problems = Vec::new();
     for entry in entries.iter().filter(|e| e.site_rel.ends_with(".html")) {
         let rel = entry.site_rel.as_str();
@@ -266,15 +285,17 @@ fn check_publish_entries(root: &Path, manual_dir: Option<&Path>) -> Result<Vec<S
             }
         }
     }
-    let sitemap = std::fs::read_to_string(docs.join("sitemap.xml")).map_err(|e| format!("read docs/sitemap.xml: {e}"))?;
+    let sitemap_entry =
+        entries.iter().find(|e| e.site_rel == "sitemap.xml").ok_or_else(|| String::from("sitemap.xml missing from Pages publish list"))?;
+    let sitemap = std::fs::read_to_string(&sitemap_entry.source_path).map_err(|e| format!("read {}: {e}", sitemap_entry.source_path.display()))?;
     for loc in sitemap.split("<loc>").skip(1).filter_map(|chunk| chunk.split("</loc>").next()) {
         let Some(rel) = loc.strip_prefix(SITE_BASE_URL) else {
-            problems.push(format!("docs/sitemap.xml lists `{loc}` outside `{SITE_BASE_URL}`"));
+            problems.push(format!("sitemap.xml lists `{loc}` outside `{SITE_BASE_URL}`"));
             continue;
         };
         let rel = if rel.is_empty() { "index.html" } else { rel };
         if !published.contains(rel) {
-            problems.push(format!("docs/sitemap.xml lists `{loc}`, which is not published"));
+            problems.push(format!("sitemap.xml lists `{loc}`, which is not published"));
         }
     }
     if problems.is_empty() { Ok(entries) } else { Err(format!("Pages publish set has {} problem(s):\n  {}", problems.len(), problems.join("\n  "))) }
@@ -492,10 +513,10 @@ mod tests {
             "<link rel=\"stylesheet\" href=\"/curvebook/site.css\"><a href=\"/curvebook/\">h</a><a href=\"/curvebook/manual/latest/index.html\">m</a>",
         );
         root.write("docs/images/a.png", "png");
-        root.write("docs/llms.txt", "# CurveBook\n");
-        root.write("docs/llms-full.txt", "# CurveBook Full\n");
+        root.write("target/docs-manual/_root/llms.txt", "# CurveBook\n");
+        root.write("target/docs-manual/_root/llms-full.txt", "# CurveBook Full\n");
         root.write(
-            "docs/sitemap.xml",
+            "target/docs-manual/_root/sitemap.xml",
             "<urlset><url><loc>https://hausergroup.github.io/curvebook/</loc></url><url><loc>https://hausergroup.github.io/curvebook/faq.html</loc></url><url><loc>https://hausergroup.github.io/curvebook/manual/latest/files.html</loc></url></urlset>",
         );
         root.write("docs/ROADMAP.md", "internal");
@@ -603,7 +624,10 @@ mod tests {
         assert!(check_publish_set(&root.0).unwrap_err().contains("manual/v0.2/get-started.html"));
 
         let root = seed("sitemap");
-        root.write("docs/sitemap.xml", "<urlset><url><loc>https://hausergroup.github.io/curvebook/ROADMAP.md</loc></url></urlset>");
+        root.write(
+            "target/docs-manual/_root/sitemap.xml",
+            "<urlset><url><loc>https://hausergroup.github.io/curvebook/ROADMAP.md</loc></url></urlset>",
+        );
         assert!(check_publish_set(&root.0).unwrap_err().contains("sitemap.xml lists"));
     }
 

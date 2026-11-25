@@ -32,7 +32,7 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 | [File formats](file-formats.md) and [schemas](schemas/) | Persisted formats, versions, and migrations; generated JSON schemas (`cargo xtask schemas`) |
 | [MCP server internals](mcp.md) and [control protocol specification](control-protocol.md) | Source builds, client presets, and implementation detail behind the published automation reference |
 | [Localization](localization.md) | Catalog entries, locales, fallback, fonts, and translation review |
-| [Licences](licences.md) and [contributor credits](contributors.md) | Dependency and asset licence policy; how contributors are credited |
+| [Licences](licences.md) | Dependency and asset licence policy (contributor credits live in [CONTRIBUTING.md](../CONTRIBUTING.md#6-licensing-attribution--security)) |
 | Implementation specifications | [Data tables and transforms](implementation/data-tables-and-transforms.md), [statistics](implementation/statistics-implementation.md), [curve fitting](implementation/curve-fitting-implementation.md), [graphing and layouts](implementation/graphing-and-layouts.md), and [scripting and automation](implementation/scripting-and-automation.md) |
 
 ## Planning, status & evidence
@@ -46,12 +46,10 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 | Curve fitting | [Curve-fitting evidence](evidence/curve-fitting.md) |
 | Graphing | [Graphing evidence](evidence/graphing.md) |
 | Interchange | [File-format evidence](evidence/file-formats.md) |
-| User interface | [User-interface evidence](evidence/user-interface.md), [GUI workflows](gui-workflows.md), [GUI layout specification](planning/gui-layout-spec.md), and [overlap, target-size & clutter audit](planning/ui-overlap-and-target-size-audit.md) |
+| User interface | [User-interface evidence](evidence/user-interface.md), [GUI workflows](gui-workflows.md), and [GUI layout specification](planning/gui-layout-spec.md) |
 | Platforms | [Platform evidence](evidence/platforms.md) |
 | Localization | [Localization evidence](evidence/localization.md) |
 | Quality of life | [Quality-of-life enhancements](planning/qol-enhancements.md) and [calculator reference](planning/calculators-and-quick-stats.md) |
-| Numerical oracles | Scope notes for independent `D1` reference tests: [curve transforms](planning/oracle-curve-transforms.md), [distribution tails](planning/oracle-distribution-tails.md), [non-NIST fitting](planning/oracle-non-nist-fitting.md), [fit uncertainty](planning/oracle-fit-uncertainty.md), [custom equations](planning/oracle-custom-equations.md), [normalization](planning/oracle-normalization.md), [randomization](planning/oracle-randomization.md), and [Poisson & Cox regression](planning/oracle-poisson-cox-regression.md) |
-| Code audits | [Audit playbook](audit/README.md), [workflow](audit/workflow.md), [slices](audit/slices.md), and [work log](audit/work-log.md) |
 
 ## Releases & the website
 
@@ -66,7 +64,7 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 
 ## History
 
-[`history/`](history/README.md) holds frozen records: completed roadmap items, legacy ID mappings and known defects, finished audit rounds, Alpha release records, and superseded status snapshots. Do not update their numbers; current facts belong in `ROADMAP.md` and `STATUS.md`.
+[`history/`](history/README.md) holds frozen records: completed roadmap items, legacy ID mappings, Alpha release records, and Pages verification logs. Do not update their numbers; current facts belong in `ROADMAP.md` and `STATUS.md`.
 
 ## Directory conventions
 
@@ -76,10 +74,9 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 | `reference/` | User documentation rendered to the documentation site |
 | `implementation/` | Domain implementation specifications |
 | `evidence/` | Capability evidence checklists |
-| `planning/` | Active plans, deferred scope, and oracle scope notes |
+| `planning/` | Active specifications and deferred scope (`gui-layout-spec.md`, `qol-enhancements.md`, `calculators-and-quick-stats.md`) |
 | `release/` | Release and website procedures |
-| `audit/` | The reusable code-audit playbook |
 | `history/` | Frozen records (see above) |
-| `schemas/`, `images/` | Generated schemas and attributed screenshots (manual HTML is generated in CI into `target/docs-manual/` by `.github/workflows/pages.yml`) |
+| `schemas/`, `images/` | Generated schemas and attributed screenshots (manual HTML and `_root/{sitemap.xml,llms.txt,llms-full.txt}` are generated in CI into `target/docs-manual/` by `.github/workflows/pages.yml`) |
 
 Add new guides to this index and update every repository link when moving a document. Regenerate command references and schemas through their `cargo xtask` commands.

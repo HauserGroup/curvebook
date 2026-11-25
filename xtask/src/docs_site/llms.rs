@@ -293,12 +293,15 @@ fn strip_internal_doc_links(md: &str) -> String {
     out
 }
 
-/// Regenerate both `docs/llms.txt` and `docs/llms-full.txt` atomically.
-pub fn write_llms_files(root: &Path) -> Result<(), String> {
+/// Regenerate both `llms.txt` and `llms-full.txt` atomically inside `out_dir` (e.g. `<manual_dir>/_root/`).
+pub fn write_llms_files_into(root: &Path, out_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
     let llms = build_llms_txt(root)?;
-    write_atomic(&root.join(LLMS_TXT_REL_PATH), llms.as_bytes()).map_err(|e| format!("write {LLMS_TXT_REL_PATH}: {e}"))?;
+    let llms_path = out_dir.join("llms.txt");
+    write_atomic(&llms_path, llms.as_bytes()).map_err(|e| format!("write {}: {e}", llms_path.display()))?;
     let llms_full = build_llms_full_txt(root)?;
-    write_atomic(&root.join(LLMS_FULL_TXT_REL_PATH), llms_full.as_bytes()).map_err(|e| format!("write {LLMS_FULL_TXT_REL_PATH}: {e}"))?;
+    let llms_full_path = out_dir.join("llms-full.txt");
+    write_atomic(&llms_full_path, llms_full.as_bytes()).map_err(|e| format!("write {}: {e}", llms_full_path.display()))?;
     Ok(())
 }
 

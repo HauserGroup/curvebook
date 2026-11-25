@@ -43,7 +43,7 @@
 
 ## Known defects
 
-> Reference table retained after Round 1 audit closure (`Stages 1–5` complete on `audit/r1-local-2` and merged into `main`; referenced from [`docs/audit/README.md`](../audit/README.md)). All 6 pre-audit Waves 5–6 defects below (`G8`, `G11`, `G2`, etc.) and all 156 unique Stage 1 Round 1 survivors (plus duplicate `R1-S07-02`) are fixed with regression tests; see [`docs/history/audit/round1-progress.md`](audit/round1-progress.md#stage-25-remediation-closure) and [`docs/STATUS.md`](../STATUS.md) for verified suite outputs.
+> Reference table retained after Round 1 audit closure (`Stages 1–5` complete on `audit/r1-local-2` and merged into `main`). All 6 pre-audit Waves 5–6 defects below (`G8`, `G11`, `G2`, etc.) and all 156 unique Stage 1 Round 1 survivors (plus duplicate `R1-S07-02`) are fixed with regression tests; detailed Round 1 transcripts are preserved in git history, and verified suite outputs live in [`docs/STATUS.md`](../STATUS.md).
 
 | Legacy ID | Location | Defect Summary | Wave 5–6 Fix & Regression Coverage | Roadmap ID |
 |---|---|---|---|---|
@@ -56,10 +56,10 @@
 
 ### Round 1 audit survivors on `main` (`fda1cc0`)
 
-> **Stage 2–5 Remediation Closure (merged into `main` via `833e98d`, `4a88c84`):** All **156 unique surviving findings** (`32` `S1`, `60` `S2`, `58` `S3`, `6` `S4`), duplicate `R1-S07-02` (closed via the shared engine path policy for `R1-S12-01` and `R1-X1-04`), the 5 `S3` title-only items in [`docs/history/audit/findings/r1/S02.md`](audit/findings/r1/S02.md#additional-findings-titles-only), and cross-referenced twin pairs (`R1-S06-12` <-> `R1-S04-06`, `R1-S04-01` <-> `R1-S05-01`) are **fixed and regression-tested on `main`** (Stage 2 cross-cutting `05c87be` / `1423eee`, Stage 3A silent-stats/core-fit `9c20a85`, Stage 3B remaining `S1` `981a73f`, Stage 4A `S2` `32bf7c5`, Stage 4B `S3` `dd7241c5`, Stage 4C `S4` `d18ef1e1` merging `e0aa5241`, `4ccd4fd1`, `70173106`, `d47179fd`, `7502d626`). Stage 5 external reproducer sweeps across `S01`–`S12`, `X1`, and `X2` confirmed `0` genuine live defects (`R1-S13-*` verified clean-room from [`docs/history/audit/findings/r1/S13.md`](audit/findings/r1/S13.md)).
+> **Stage 2–5 Remediation Closure (merged into `main` via `833e98d`, `4a88c84`):** All **156 unique surviving findings** (`32` `S1`, `60` `S2`, `58` `S3`, `6` `S4`), duplicate `R1-S07-02` (closed via the shared engine path policy for `R1-S12-01` and `R1-X1-04`), the 5 `S3` title-only items from Round 1 `S02`, and cross-referenced twin pairs (`R1-S06-12` <-> `R1-S04-06`, `R1-S04-01` <-> `R1-S05-01`) are **fixed and regression-tested on `main`** (Stage 2 cross-cutting `05c87be` / `1423eee`, Stage 3A silent-stats/core-fit `9c20a85`, Stage 3B remaining `S1` `981a73f`, Stage 4A `S2` `32bf7c5`, Stage 4B `S3` `dd7241c5`, Stage 4C `S4` `d18ef1e1` merging `e0aa5241`, `4ccd4fd1`, `70173106`, `d47179fd`, `7502d626`). Stage 5 external reproducer sweeps across `S01`–`S12`, `X1`, and `X2` confirmed `0` genuine live defects (`R1-S13-*` verified clean-room).
 >
-> To avoid maintaining duplicate copies of closed historical tables, the full 156-item Round 1 index, per-slice breakdown, and partial-mitigation notes live exclusively in [`docs/history/audit/round1-progress.md`](audit/round1-progress.md#confirmed-and-plausible-findings) and [`docs/audit/findings/r1/`](audit/findings/r1/).
+> Closed Round 1/Round 2 transcripts (`docs/history/audit/`) were retired from `HEAD` under `R21.4` and remain preserved verbatim in git history.
 
 ### Round 2 delta audit
 
-The Round 2 delta audit ([`audit/round2-post-ebcc622.md`](audit/round2-post-ebcc622.md), per-slice reports in [`audit/findings/r2/`](audit/findings/r2/)) recorded `149` surviving items. All of them were remediated under [`R0.19`](roadmap/r0.md#r019-round-2-delta-code-audit-remediation-ebcc622fda1cc0), so no open table is kept here.
+The Round 2 delta audit (`round2-post-ebcc622.md` and per-slice reports, archived in git history) recorded `149` surviving items. All of them were remediated under [`R0.19`](roadmap/r0.md#r019-round-2-delta-code-audit-remediation-ebcc622fda1cc0), so no open table is kept here.
