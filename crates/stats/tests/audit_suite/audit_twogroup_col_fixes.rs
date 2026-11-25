@@ -17,9 +17,10 @@
 //! - `#104`: Bland–Altman percent mode rejects non-positive and non-finite pair averages
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, BlandAltmanSpec, Cell, ChecklistStatus, ColumnDesignHint, ColumnTable, DataSheet, DescriptiveSpec, GroupedTable,
-    MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, OutlierSpec, PValueFormat, ResultCell, ResultSheet,
-    ResultTab, SheetId, SubcolumnAggregation, SubcolumnMode, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XyTable,
+    AnalysisKind, AnalysisSpec, BlandAltmanSpec, Cell, ChecklistStatus, CiBound, ColumnDesignHint, ColumnTable, DataSheet, DescriptiveSpec,
+    GroupedTable, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, OutlierSpec, PValueFormat, ResultCell,
+    ResultSheet, ResultTab, SheetId, SubcolumnAggregation, SubcolumnMode, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole,
+    XyTable,
 };
 use curvebook_math::{ConfidenceLevel, MathError};
 use curvebook_stats::column::{anderson_darling, one_sample_wilcoxon, summarize_column};
@@ -552,6 +553,64 @@ fn audit_68_custom_percentiles_type7_consistent_and_emitted() {
     assert!(tab75.row_labels.iter().any(|l| l == "75% Percentile"));
     assert!(tab75.row_labels.iter().any(|l| l == "25% Percentile (Type 7)"));
     assert!(tab75.row_labels.iter().any(|l| l == "75% Percentile (Type 7)"));
+}
+
+#[test]
+fn descriptive_tab_emits_geometric_harmonic_quadratic_mean_cis() {
+    let pos = [10.0, 12.0, 14.0, 16.0, 18.0];
+    let non_pos = [-2.0, 0.0, 3.0, 5.0, 7.0];
+    let single = [42.0];
+
+    let direct_pos = summarize_column("Pos", &pos, 0, ConfidenceLevel::DEFAULT_95, None).unwrap();
+    let direct_non_pos = summarize_column("NonPos", &non_pos, 0, ConfidenceLevel::DEFAULT_95, None).unwrap();
+    let (gm_lo, gm_hi) = direct_pos.geometric_mean_ci.expect("positive geometric mean CI");
+    let (hm_lo, hm_hi) = direct_pos.harmonic_mean_ci.expect("positive harmonic mean CI");
+    let (qm_lo, qm_hi) = direct_pos.quadratic_mean_ci.expect("positive quadratic mean CI");
+    let (np_qm_lo, np_qm_hi) = direct_non_pos.quadratic_mean_ci.expect("non-positive quadratic mean CI");
+
+    let sheet = col_sheet("Generalized Mean CIs", &[("Pos", &pos), ("NonPos", &non_pos), ("Single", &single)]);
+    let spec = AnalysisSpec::new("desc-gen-ci", sheet.id.clone(), AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).unwrap();
+    let res = run_analysis(&sheet, &spec).unwrap();
+    let tab = find_tab(&res, "desc-summary");
+
+    // Positive column: all three CI rows are populated and match summarize_column().
+    match row_cell(tab, "95% CI of Geometric mean", 0) {
+        ResultCell::ConfidenceInterval { lower: CiBound::Finite(lower), upper: CiBound::Finite(upper) } => {
+            assert_close(*lower, gm_lo, 1e-12);
+            assert_close(*upper, gm_hi, 1e-12);
+        }
+        other => panic!("expected ConfidenceInterval for Geometric mean CI, got {other:?}"),
+    }
+    match row_cell(tab, "95% CI of Harmonic mean", 0) {
+        ResultCell::ConfidenceInterval { lower: CiBound::Finite(lower), upper: CiBound::Finite(upper) } => {
+            assert_close(*lower, hm_lo, 1e-12);
+            assert_close(*upper, hm_hi, 1e-12);
+        }
+        other => panic!("expected ConfidenceInterval for Harmonic mean CI, got {other:?}"),
+    }
+    match row_cell(tab, "95% CI of Quadratic mean (RMS)", 0) {
+        ResultCell::ConfidenceInterval { lower: CiBound::Finite(lower), upper: CiBound::Finite(upper) } => {
+            assert_close(*lower, qm_lo, 1e-12);
+            assert_close(*upper, qm_hi, 1e-12);
+        }
+        other => panic!("expected ConfidenceInterval for Quadratic mean CI, got {other:?}"),
+    }
+
+    // Non-positive column: geometric & harmonic CIs are Empty due to domain guards, quadratic CI is populated.
+    assert_eq!(row_cell(tab, "95% CI of Geometric mean", 1), &ResultCell::Empty);
+    assert_eq!(row_cell(tab, "95% CI of Harmonic mean", 1), &ResultCell::Empty);
+    match row_cell(tab, "95% CI of Quadratic mean (RMS)", 1) {
+        ResultCell::ConfidenceInterval { lower: CiBound::Finite(lower), upper: CiBound::Finite(upper) } => {
+            assert_close(*lower, np_qm_lo, 1e-12);
+            assert_close(*upper, np_qm_hi, 1e-12);
+        }
+        other => panic!("expected ConfidenceInterval for NonPos Quadratic mean CI, got {other:?}"),
+    }
+
+    // Single-observation column: all three CIs require n >= 2 and emit Empty.
+    assert_eq!(row_cell(tab, "95% CI of Geometric mean", 2), &ResultCell::Empty);
+    assert_eq!(row_cell(tab, "95% CI of Harmonic mean", 2), &ResultCell::Empty);
+    assert_eq!(row_cell(tab, "95% CI of Quadratic mean (RMS)", 2), &ResultCell::Empty);
 }
 
 #[test]

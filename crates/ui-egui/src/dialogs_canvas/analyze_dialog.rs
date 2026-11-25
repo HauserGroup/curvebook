@@ -251,6 +251,8 @@ pub struct AnalyzeDialogState {
     #[serde(default)]
     pub descriptive_aggregation: SubcolumnAggregation,
     #[serde(default)]
+    pub descriptive_custom_upper_percentile: Option<f64>,
+    #[serde(default)]
     pub pvalue_stack_method: PValueStackMethod,
     #[serde(default = "default_pvalue_stack_threshold")]
     pub pvalue_stack_threshold: f64,
@@ -397,6 +399,7 @@ impl Default for AnalyzeDialogState {
             sample_stratify_column: None,
             sample_proportional: true,
             descriptive_aggregation: SubcolumnAggregation::RowMeans,
+            descriptive_custom_upper_percentile: None,
             pvalue_stack_method: PValueStackMethod::default(),
             pvalue_stack_threshold: default_pvalue_stack_threshold(),
             pvalue_stack_column: None,
@@ -625,7 +628,10 @@ impl AnalyzeDialogState {
                     OutlierSpec::Rout { fdr_q_percent: self.outlier_fdr_q_percent }
                 };
             }
-            AnalysisKind::DescriptiveStats(desc) => desc.aggregation = self.descriptive_aggregation,
+            AnalysisKind::DescriptiveStats(desc) => {
+                desc.aggregation = self.descriptive_aggregation;
+                desc.custom_upper_percentile = self.descriptive_custom_upper_percentile;
+            }
             AnalysisKind::TwoGroupComparison(tg) => {
                 if let Some(m) = self.two_group_method {
                     tg.method = m;

@@ -243,6 +243,46 @@ pub(super) fn render_misc_stats_design(
                 }
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
+            let custom_pct_enabled = d.custom_upper_percentile.is_some();
+            if render_modal_checkbox(
+                ui,
+                tokens,
+                meta,
+                "edit.desc.custom_pct_toggle",
+                "Compute custom symmetric percentiles (100 - P, P)",
+                custom_pct_enabled,
+                &ControlEnablement::enabled(),
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+                    ds.custom_upper_percentile = if custom_pct_enabled { None } else { Some(90.0) };
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+            if let Some(p_hi) = d.custom_upper_percentile {
+                let sid = spec.source_sheet_id.as_str();
+                ui.horizontal_wrapped(|ui| {
+                    if let Some(new_p) = render_linear_numeric_input(
+                        ui,
+                        meta,
+                        ("edit_desc_custom_pct", sid),
+                        "edit.desc.custom_pct",
+                        "Upper percentile P (50 < P < 100)",
+                        p_hi,
+                        true,
+                    ) && new_p > 50.0
+                        && new_p < 100.0
+                    {
+                        let mut next = spec.clone();
+                        if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+                            ds.custom_upper_percentile = Some(new_p);
+                        }
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                    }
+                    let p_lo = ((100.0 - p_hi) * 1e6).round() / 1e6;
+                    ui.label(egui::RichText::new(format!("({p_lo}% & {p_hi}%, Type 7)")).small().color(tokens.text_muted));
+                });
+            }
             render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
         }
         AnalysisKind::OutlierDetection(out) => {

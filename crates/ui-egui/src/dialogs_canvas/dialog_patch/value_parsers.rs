@@ -106,6 +106,16 @@ pub(super) fn parse_pos_f64(val: &Value, key: &str, preset: &LocalePreset) -> Re
     Ok(v)
 }
 
+pub(super) fn parse_opt_upper_percentile(val: &Value, key: &str, preset: &LocalePreset) -> Result<Option<f64>, String> {
+    let Some(p) = parse_opt_finite_f64_with_locale(val, key, preset)? else {
+        return Ok(None);
+    };
+    if !(50.0 < p && p < 100.0) {
+        return Err(format!("`{key}` ({p}) must lie strictly in (50, 100)"));
+    }
+    Ok(Some(p))
+}
+
 pub(super) fn parse_nonneg_f64(val: &Value, key: &str, preset: &LocalePreset) -> Result<f64, String> {
     let f = parse_finite_f64_with_locale(val, key, preset)?;
     if f < 0.0 {

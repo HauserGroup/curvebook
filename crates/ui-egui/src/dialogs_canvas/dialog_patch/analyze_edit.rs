@@ -14,11 +14,11 @@ use super::value_parsers::{
     apply_transform_formula_str, norm_key, parse_baseline_operation_str, parse_bool_field, parse_ci_method_choice, parse_cluster_distance_str,
     parse_cluster_linkage_str, parse_contingency_method_name, parse_cox_tie_method_str, parse_df_method_str, parse_error_prop_value,
     parse_f64_list_with_locale, parse_finite_f64_with_locale, parse_fit_method, parse_glm_family_str, parse_kappa_weighting, parse_math_preset_opt,
-    parse_multiplicity_method_name, parse_one_way_method_str, parse_open_unit_f64, parse_opt_finite_f64_with_locale, parse_opt_usize_min,
-    parse_outlier_alpha, parse_outlier_fdr_q_percent, parse_outlier_method_str, parse_parameter_rules, parse_pos_f64, parse_pvalue_stack_method_val,
-    parse_reference_levels, parse_residual_covariance_str, parse_rm_design_str, parse_ss_type_str, parse_str_field, parse_subcolumn_aggregation_val,
-    parse_table_kind_str, parse_two_group_method_str, parse_u64_val, parse_usize_list, parse_usize_min, parse_weighting_scheme,
-    post_hoc_method_for_widget_key,
+    parse_multiplicity_method_name, parse_one_way_method_str, parse_open_unit_f64, parse_opt_finite_f64_with_locale, parse_opt_upper_percentile,
+    parse_opt_usize_min, parse_outlier_alpha, parse_outlier_fdr_q_percent, parse_outlier_method_str, parse_parameter_rules, parse_pos_f64,
+    parse_pvalue_stack_method_val, parse_reference_levels, parse_residual_covariance_str, parse_rm_design_str, parse_ss_type_str, parse_str_field,
+    parse_subcolumn_aggregation_val, parse_table_kind_str, parse_two_group_method_str, parse_u64_val, parse_usize_list, parse_usize_min,
+    parse_weighting_scheme, post_hoc_method_for_widget_key,
 };
 use crate::dialogs_canvas::edit_params::{check_pcr_target_leakage, draft_forces_reml_mode, two_group_is_gaussian, two_group_is_paired};
 use crate::dialogs_canvas::{AnalyzeDialogState, EditAnalysisParametersState};
@@ -323,6 +323,10 @@ fn normalize_analyze_extended(
         "descriptive_subcolumn_agg" | "subcolumn_agg" | "analyze.descriptive.subcolumn_agg" => {
             let agg = parse_subcolumn_aggregation_val(val)?;
             patch.insert(String::from("descriptive_aggregation"), serde_json::to_value(agg).map_err(|e| e.to_string())?);
+        }
+        "custom_upper_percentile" | "analyze.descriptive.custom_upper_percentile" => {
+            let pct = parse_opt_upper_percentile(val, key, preset)?;
+            patch.insert(String::from("descriptive_custom_upper_percentile"), json!(pct));
         }
         other => return Err(format!("unknown Analyze field `{other}`")),
     }
@@ -966,6 +970,10 @@ fn apply_edit_draft_kind_field(working: &mut EditAnalysisParametersState, key: &
         AnalysisKind::DescriptiveStats(desc) => match key {
             "descriptive_subcolumn_agg" | "subcolumn_agg" | "edit.descriptive.subcolumn_agg" => {
                 desc.aggregation = parse_subcolumn_aggregation_val(val)?;
+                Ok(true)
+            }
+            "custom_upper_percentile" | "edit.desc.custom_pct" | "edit.descriptive.custom_upper_percentile" => {
+                desc.custom_upper_percentile = parse_opt_upper_percentile(val, key, preset)?;
                 Ok(true)
             }
             _ => Ok(false),

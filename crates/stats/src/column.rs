@@ -1928,8 +1928,11 @@ fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel
         .row("Coefficient of variation (%)", summaries.iter().map(|s| opt_num_cell(s.cv_percent)))
         .row("Geometric mean", summaries.iter().map(|s| opt_num_cell(s.geometric_mean)))
         .row("Geometric SD factor", summaries.iter().map(|s| opt_num_cell(s.geometric_sd_factor)))
+        .row(format!("{pct}% CI of Geometric mean"), summaries.iter().map(|s| opt_ci_cell(s.geometric_mean_ci)))
         .row("Harmonic mean", summaries.iter().map(|s| opt_num_cell(s.harmonic_mean)))
+        .row(format!("{pct}% CI of Harmonic mean"), summaries.iter().map(|s| opt_ci_cell(s.harmonic_mean_ci)))
         .row("Quadratic mean (RMS)", summaries.iter().map(|s| num_cell(s.quadratic_mean)))
+        .row(format!("{pct}% CI of Quadratic mean (RMS)"), summaries.iter().map(|s| opt_ci_cell(s.quadratic_mean_ci)))
         .row("Skewness", summaries.iter().map(|s| opt_num_cell(s.skewness)))
         .row("Excess kurtosis", summaries.iter().map(|s| opt_num_cell(s.excess_kurtosis)))
         .row("Sum", summaries.iter().map(|s| num_cell(s.sum)));

@@ -720,10 +720,10 @@ A formula cell saved without a stored result (common in workbooks written by scr
 Post-Beta analytical, fitting, and `D1` oracle-coverage expansions surfaced by the specification and literature-usage audit. *(Note: `R18` Wave 1 extended equations, DSL built-ins, and linear/Deming extensions landed on 2026-11-23 and were folded into `R4`.)*
 
 ### R19.1 Descriptive statistics result/UI parity & nonlinear identifiability formatting
-Owner: open · Status: todo · Was: statistics & fitting spec audit 2026-11-24 · Depends on: none · Gate: post-Beta · Est. note: 8–14 h
+Owner: open · Status: in progress · Was: statistics & fitting spec audit 2026-11-24 · Depends on: none · Gate: post-Beta · Est. note: 8–14 h
 
-- [ ] Emit the already-computed `geometric_mean_ci`, `harmonic_mean_ci`, and `quadratic_mean_ci` rows in `build_descriptive_tab()` (`crates/stats/src/column.rs`) and add regression tests verifying their presence in `ResultTab`.
-- [ ] Expose `custom_upper_percentile` in the `egui_shell` Descriptive Statistics modal (`crates/ui-egui/src/egui_shell/stats_modals/nested_misc.rs`), align its percentile interpolation with Hyndman–Fan Type 6 (or make Type 6 the default matching standard quartiles), and add per-metric visibility toggles, `significant_digits`, and `save_as_default` to `DescriptiveSpec` and the modal.
+- [x] Emit the already-computed `geometric_mean_ci`, `harmonic_mean_ci`, and `quadratic_mean_ci` rows in `build_descriptive_tab()` (`crates/stats/src/column.rs`) and add regression tests verifying their presence in `ResultTab`. *(Done locally: `descriptive_tab_emits_geometric_harmonic_quadratic_mean_cis`.)*
+- [ ] Expose `custom_upper_percentile` in the `egui_shell` Descriptive Statistics modal (`crates/ui-egui/src/egui_shell/stats_modals/nested_misc.rs`), align its percentile interpolation with Hyndman–Fan Type 6 (or make Type 6 the default matching standard quartiles), and add per-metric visibility toggles, `significant_digits`, and `save_as_default` to `DescriptiveSpec` and the modal. *(`custom_upper_percentile` modal controls and `AnalyzeDialogState`/`dialog_patch` wiring landed locally with `descriptive_custom_percentile_ui`; Type 6 alignment, per-metric visibility toggles, `significant_digits`, and `save_as_default` remain open.)*
 - [ ] Review `NonlinearFitSpec::identify_unstable_parameters` default (`crates/doc/src/analysis.rs`, `crates/fit/src/solver/fit.rs`) and format ambiguous parameter estimates with a `~` prefix and `"Very wide"` / open CI bounds in fit result tables when identifiability flags an unstable parameter.
 
 ### R19.2 High-usage statistical analyses & graph families
