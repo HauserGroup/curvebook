@@ -26,6 +26,8 @@ const DEFAULT_SHARED_STRINGS_PATH: &str = "xl/sharedStrings.xml";
 const MAX_SHARED_STRINGS: usize = 2_000_000;
 const MAX_MERGED_RANGES_PER_SHEET: usize = 65_536;
 const MAX_SHEET_ID_SUFFIX_HEADROOM: usize = 16;
+/// Example coordinates listed in the warning for formula cells without a stored result.
+const MAX_UNCACHED_FORMULA_EXAMPLES: usize = 5;
 
 /// Metadata describing one worksheet entry inside an `.xlsx` workbook.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -121,6 +123,10 @@ struct ParsedWorksheet {
     max_col: Option<usize>,
     merges: Vec<MergeRange>,
     formula_cells: usize,
+    /// Formula cells without a stored result (`<f>` and no `<v>` or inline string), imported as empty.
+    uncached_formula_cells: usize,
+    /// First [`MAX_UNCACHED_FORMULA_EXAMPLES`] coordinates of `uncached_formula_cells`.
+    uncached_formula_examples: Vec<String>,
     error_cells: Vec<(String, String)>,
     coerced_numeric_cells: Vec<String>,
 }
@@ -787,6 +793,14 @@ fn commit_cell(state: ActiveCellState, shared_strings: &[String], offset: usize,
         ws.formula_cells = ws.formula_cells.saturating_add(1);
     }
     if !state.saw_value && !state.saw_inline {
+        // A formula without a stored result is not a blank cell: the workbook was saved without
+        // calculating it (common for files written by scripts). Record it so the import can say so.
+        if state.has_formula {
+            ws.uncached_formula_cells = ws.uncached_formula_cells.saturating_add(1);
+            if ws.uncached_formula_examples.len() < MAX_UNCACHED_FORMULA_EXAMPLES {
+                ws.uncached_formula_examples.push(state.coord_label);
+            }
+        }
         return Ok(());
     }
 
@@ -1007,11 +1021,26 @@ fn decode_ooxml_escapes(raw: &str) -> String {
 }
 
 fn emit_worksheet_warnings(sheet_name: &str, ws: &ParsedWorksheet, header_rows: usize, warnings: &mut Vec<ImportWarning>) {
-    if ws.formula_cells > 0 {
+    let cached_formula_cells = ws.formula_cells.saturating_sub(ws.uncached_formula_cells);
+    if cached_formula_cells > 0 {
         warnings.push(ImportWarning::new(
             ImportWarningKind::CoercedValue,
             sheet_name,
-            format!("worksheet `{sheet_name}` contained {} formula cell(s); imported cached values", ws.formula_cells),
+            format!("worksheet `{sheet_name}` contained {cached_formula_cells} formula cell(s); imported their stored results"),
+        ));
+    }
+    if ws.uncached_formula_cells > 0 {
+        let more = if ws.uncached_formula_cells > ws.uncached_formula_examples.len() { ", ..." } else { "" };
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::MissingCachedValue,
+            sheet_name,
+            format!(
+                "worksheet `{sheet_name}` contained {} formula cell(s) without a stored result (first: {}{more}); \
+                 they were imported as empty cells. Open the workbook in a spreadsheet application, recalculate, \
+                 save it, and import again.",
+                ws.uncached_formula_cells,
+                ws.uncached_formula_examples.join(", ")
+            ),
         ));
     }
     if !ws.error_cells.is_empty() {

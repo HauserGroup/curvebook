@@ -697,6 +697,14 @@ Opening existing lab files cleanly is a primary adoption path. Real-world `.pzfx
 - [x] Add minimized clean-room regression fixtures in `crates/format/tests/r17_5_legacy_import_hardening.rs`, `crates/engine/tests/r17_5_import_warning_propagation.rs`, and `apps/curvebook-cli/tests/r17_5_cli_warnings.rs` (`cargo xtask ci` and `cargo xtask cleanroom` pass).
 - [ ] Exercise the importer externally against a corpus of real-world proprietary third-party `.pzfx` and `.prism` files (keeping proprietary files strictly out of the repository per `cargo xtask cleanroom`) and triage any remaining corpus quirks.
 
+### R17.6 Report `.xlsx` formulas without stored results
+Owner: open · Status: done locally (hosted CI open) · Was: reporting-accuracy review 2026-11-24 · Depends on: none · Gate: post-Beta · Est. note: 2–4 h
+
+A formula cell saved without a stored result (common in workbooks written by scripts) was imported as an empty cell, while the worksheet warning said that cached values were imported. A silently empty cell changes `n` in every analysis that reads it.
+
+- [x] Count formula cells without a stored result separately and report them as a `MissingCachedValue` import warning naming the worksheet, the count, up to five example coordinates, and a prompt to recalculate and save the workbook before importing again; the existing warning now counts only formulas whose stored results were imported.
+- [x] Test a worksheet with both cached and uncached (plain and shared) formulas in `crates/format/tests/r17_6_xlsx_uncached_formulas.rs`.
+
 ---
 
 ## R19 Statistical, fitting & `D1` oracle breadth

@@ -117,6 +117,8 @@ pub enum ImportWarningKind {
     TruncatedMetadata,
     CoercedValue,
     MissingMetadata,
+    /// A spreadsheet formula cell had no stored result, so it was imported as an empty cell.
+    MissingCachedValue,
 }
 
 /// Non-fatal compatibility note emitted during `.pzfx` or `.prism` project import.
