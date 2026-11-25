@@ -1,0 +1,17 @@
+# Builds crates/engine/tests/fixtures/r14_6/alpha1-upgrade.curvebook with the v0.1.0-alpha.1 CLI (R14.6).
+# Rebuild only from the Alpha.1 tag; a file saved by any later build defeats the purpose of the fixture:
+#   git worktree add --detach ../.cb-worktrees/alpha1-build v0.1.0-alpha.1
+#   (cd ../.cb-worktrees/alpha1-build && CARGO_TARGET_DIR=/tmp/cb-alpha1 cargo build -p curvebook-cli)
+#   cd crates/engine/tests/fixtures/r14_6 && /tmp/cb-alpha1/debug/curvebook-cli run make-alpha1-project.ndjson --workdir .
+# Data are invented round numbers: three groups for a one-way ANOVA, and a sigmoid near
+# bottom 0, top 100, logEC50 -6.5, Hill slope 1 with small hand-picked offsets for a 4PL fit.
+{"cmd": "sheet.createData", "params": {"sheet_id": "col1", "title": "Group response", "kind": "column", "cols": 3, "rows": 4}}
+{"cmd": "table.setCells", "params": {"sheet_id": "col1", "edits": [{"row": 0, "col": 0, "value": 9.0}, {"row": 1, "col": 0, "value": 10.0}, {"row": 2, "col": 0, "value": 11.0}, {"row": 3, "col": 0, "value": 10.0}, {"row": 0, "col": 1, "value": 13.0}, {"row": 1, "col": 1, "value": 14.0}, {"row": 2, "col": 1, "value": 15.0}, {"row": 3, "col": 1, "value": 14.0}, {"row": 0, "col": 2, "value": 21.0}, {"row": 1, "col": 2, "value": 22.0}, {"row": 2, "col": 2, "value": 23.0}, {"row": 3, "col": 2, "value": 22.0}]}}
+{"cmd": "stats.run", "params": {"sheet_id": "res-anova", "source_sheet_id": "col1", "kind": "one_way_anova"}}
+{"cmd": "graph.create", "params": {"sheet_id": "g-col", "data_sheet_id": "col1", "kind": "column"}}
+{"cmd": "sheet.createData", "params": {"sheet_id": "xy1", "title": "Dose response", "kind": "xy", "cols": 1, "rows": 6}}
+{"cmd": "table.setXCells", "params": {"sheet_id": "xy1", "values": [-9.0, -8.0, -7.0, -6.0, -5.0, -4.0]}}
+{"cmd": "table.setCells", "params": {"sheet_id": "xy1", "edits": [{"row": 0, "col": 0, "value": 0.8}, {"row": 1, "col": 0, "value": 2.6}, {"row": 2, "col": 0, "value": 25.1}, {"row": 3, "col": 0, "value": 74.9}, {"row": 4, "col": 0, "value": 97.4}, {"row": 5, "col": 0, "value": 99.2}]}}
+{"cmd": "fit.run", "params": {"sheet_id": "res-fit", "source_sheet_id": "xy1", "kind": "nonlinear"}}
+{"cmd": "graph.create", "params": {"sheet_id": "g-xy", "data_sheet_id": "xy1", "kind": "xy"}}
+{"cmd": "project.save", "params": {"path": "alpha1-upgrade.curvebook"}}
