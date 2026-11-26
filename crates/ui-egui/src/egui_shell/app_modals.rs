@@ -1966,6 +1966,7 @@ pub(crate) fn render_about_modal(
             ui.add_space(8.0);
             ui.add(egui::Label::new("Copyright © 2026 CurveBook Contributors").wrap());
             ui.add(egui::Label::new("Licensed under MIT OR Apache-2.0.").wrap());
+            ui.add(egui::Label::new("Developed by the Hauser Group · hausergroup.org").wrap());
             ui.add(
                 egui::Label::new(
                     egui::RichText::new("See NOTICE and ATTRIBUTION.md in the distribution for third-party licenses and clean-room notices.")
