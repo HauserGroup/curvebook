@@ -22,30 +22,31 @@ Neither `curvebook-ui-egui`, `curvebook-svg`, nor `curvebook-pdf` ever computes 
 Creating a new `DataSheet` automatically provisions a paired `GraphSheet` (`initialized: false`). On the user's first visit to an uninitialized `GraphSheet` (or via `Change › Graph Type…`), the visual family gallery presents live schematic thumbnails filtered to the upstream `TableArchetype` and `ColumnDesignHint`. Each `GraphSpec` binds one or more data series and configures composable Graphical Data Objects:
 
 1. **XY Graphs:**
-   - Scatter symbols (circle, square, triangle, inverted triangle, diamond, cross, plus, open/filled/semi-filled, per-point size/color overrides),
-   - Connecting lines (point-to-point, staircase, Akima/monotonic cubic spline) and area-under-curve fills (to $Y = 0$, baseline constant, or between two curves),
+   - Scatter symbols (circle, square, triangle, inverted triangle, diamond, cross, plus, open/filled/semi-filled, per-point size/color/alpha overrides, plus distinct ROUT outlier cross markers from `ResultSheet::eliminated_outliers`),
+   - Connecting lines (point-to-point, staircase, Akima/monotonic cubic spline, and longitudinal **Spaghetti Plots** via `ReplicateLineMode::IndividualReplicateTrajectories`) and area-under-curve fills (to $Y = 0$ or a baseline constant),
    - Vertical and horizontal error bars (SD, SEM, $95\%$ CI, interquartile range, range, or explicit subcolumns; solid or **dashed/dotted line styles** per series; optional end caps; one-sided upper/lower or symmetric),
-   - Smooth overlaid regression curves ($256$–$1024$ adaptive segments in axis space so log-X sigmoids stay smooth) + shaded or dashed confidence and prediction ribbons.
+   - Composite dual-Y `BarWithReplicates` series on XY graphs with horizontal/vertical coordinate nudging (`SeriesOffsetSpec { x_data, x_pt, y_pt }`, `bar_width_override_pt`),
+   - Smooth overlaid regression curves ($256$–$1024$ adaptive segments in axis space so log-X sigmoids stay smooth) + shaded or dashed confidence and prediction ribbons, with decoupled `show_raw_data` vs. regression-overlay visibility so subset-fit columns can plot curves without duplicate scatter points.
 2. **Column & Grouped Graphs:**
    - Mean/median bar + error bar,
    - Individual replicate scatter overlay (deterministic symmetric beeswarm / compact-letter-free jitter so points never overlap randomly across redraws),
    - Aligned dot plot with mean/median + error crossbar,
    - **Box-and-whisker** (Tukey $1.5 \times \text{IQR}$ with outlier points, min-to-max, $10\text{–}90\%$, $5\text{–}95\%$, $2.5\text{–}97.5\%$, or $1\text{–}99\%$ whiskers),
    - **Violin plot** (Gaussian kernel density estimate clipped to observed `[min, max]` or extended, overlaid median/quartile dashed rules, optional truncated half-violin + points),
-   - Before–after paired subject lines (default when `ColumnDesignHint::PairedRepeatedMeasures`), stacked bars, and interaction plots,
+   - Before–after paired subject lines (default when `ColumnDesignHint::PairedRepeatedMeasures`), stacked bars, interaction plots, and **`CartesianOrientation::Horizontal`** back-to-back stacked **Population Pyramids** (paired with `TickLabelFormat::AbsoluteDecimal` unsigned tick labels),
    - **`Grouped` visual factor mapping (`Columns = Color/Legend`, `Rows = X-Axis Position`):**
      - `Interleaved` bars/symbols cluster series at each Row factor $r$ along the X-axis (defaulting X tick labels to `Row titles`), comparing Column series side-by-side within each row.
      - `Separated` bars/symbols render all rows of Column $A$ as Block 1 followed by all rows of Column $B$ as Block 2 (defaulting X tick labels to `Column titles`, or switchable to `Row titles` / `Row numbers` in `Format Axes` while numeric range bounds stay disabled on categorical axes). Swapping which factor controls series color vs. cluster grouping is achieved cleanly via `Transpose`.
 3. **Contingency & Parts-of-Whole Graphs:**
    - Interleaved/stacked count or percentage bars, $100\%$ stacked fraction bar, pie, ring/donut (with center total callout), and $10 \times 10$ unit/waffle grid.
 4. **Survival Graphs:**
-   - Kaplan–Meier right-continuous step curves, vertical/cross censored-observation tick marks, shaded/dashed asymmetrical Greenwood $95\%$ CI bands, and an axis-aligned **Number at Risk** table rendered directly beneath major X-axis ticks.
+   - Kaplan–Meier curves supporting `SurvivalDisplayMetric::{PercentSurvival, PercentCumulativeEvent, FractionSurvival}`, `Staircase` vs. `PointToPoint` rendering, vertical/cross censored-observation tick marks, shaded/dashed asymmetrical Greenwood `SE` / `95% CI` bands, and an axis-aligned **Number at Risk** table rendered directly beneath major X-axis ticks (including 100%-censored arms and blank spacer rows).
 5. **Multiple Variables & Diagnostic Graphs:**
    - **Five-channel Multivariate & Bubble Scatter:** Maps up to five independent columns simultaneously to `X`, `Y`, `Color` (discrete categorical palette or continuous perceptual ramp + colorbar), `Size` (continuous area scaling or ordered discrete step radii), and point `Label` text, with non-modal `Apply` live preview, optional group **convex hulls**, and **confidence ellipses**,
    - **Categorical $\times$ continuous GDOs directly from `MultipleVariables` sheets** (bars, box-and-whisker, violin, column scatter, summary symbols & connecting lines) honoring independent graph-level categorical ordering,
-   - **Heatmaps** (grouped cell means/medians or correlation matrix $r/\rho$ with continuous perceptual colorbar and optional cell value labels),
+   - **Heatmaps** (grouped cell means/medians or correlation matrix $r/\rho$ with continuous perceptual colorbar, optional cell value labels, configurable row/column title modes, and `0° / 45° / 90°` vertical column labels with dynamic `measure_text_pt` margin reservation),
    - **Volcano plots** ($-\log_{10} p$ or $-\log_{10} q$ vs. difference / $\log_2$ fold change with horizontal FDR/alpha threshold and vertical effect-size thresholds),
-   - **Bland–Altman** bias + $95\%$ limits-of-agreement plots, **ROC** curves with identity diagonal, and **Forest / parameter-CI** plots.
+   - **Bland–Altman** bias + $95\%$ limits-of-agreement plots, **ROC** curves with identity diagonal, and **Forest / parameter-CI** plots (ingesting both analysis outputs and `Grouped`/`Column` `UpperLowerLimits` / `MeanLowHigh` study tables with configurable `forest_show_pooled_diamond` and reference gridlines).
 
 ---
 
@@ -66,8 +67,8 @@ An axis may split into $1$, $2$, or $3$ segments (`Vec<AxisSegment>`), each owni
 Data series and fitted curves clip cleanly per segment without drawing spurious diagonal strokes across the gap unless explicitly requested.
 
 ### 3.3 Framing, Ticks & Scientific Typography (`crates/text`)
-- **Frame presets:** Open L-axes (default), offset/Tufte range frame, plain boxed, four-axis with secondary right-Y (`Y2`), or origin-crossing axes ($X=0, Y=0$).
-- **Tick formatting:** Decimal, power-of-10 superscript ($10^{-6}$), scientific (`1e-6`), antilog (`0.001, 0.01, 0.1, 1, 10`), engineering SI prefixes, or custom text/categorical labels at $0^\circ, 45^\circ, 90^\circ$.
+- **Frame presets & transparent overlays:** Open L-axes (default), offset/Tufte range frame, plain boxed, four-axis with secondary right-Y (`Y2`), or origin-crossing axes ($X=0, Y=0$), plus `TickDirection::{Outside, Inside, Both, None}`, `show_tick_labels`, and transparent `paper_fill` for superposed layout overlays (`R13.5`).
+- **Tick formatting:** Decimal, `AbsoluteDecimal` (unsigned symmetric labels for population pyramids), power-of-10 superscript ($10^{-6}$), scientific (`1e-6`), antilog (`0.001, 0.01, 0.1, 1, 10`), engineering SI prefixes, or custom text/categorical labels at $0^\circ, 45^\circ, 90^\circ$.
 - **Rich scientific text spans:** `curvebook-text` parses lightweight markup for subscripts (`EC_{50}`), superscripts (`cm^{-2}`), italic mathematical symbols, Greek letters, and live hooked constants (`R^2 = {{result:fit-1:r2}}`) into positioned glyph runs shared identically across GPU, SVG, and PDF.
 
 ---
@@ -82,18 +83,18 @@ Data series and fitted curves clip cleanly per segment without drawing spurious 
 
 ---
 
-## 5. Consistent Styling ("Wand / Clone Style") & Palettes
+## 5. Consistent Styling ("Apply Graph Style / Clone Style") & Palettes
 
 - **Perceptual, accessible palettes (`crates/palette`):** Ships original, license-clean scientific schemes (Okabe–Ito colorblind-safe, Paul Tol Bright/Muted/High-Contrast, Viridis, Cividis, Plasma, Monochrome journal print grays) plus live Deuteranopia / Protanopia / Tritanopia preview matrices (`AGENTS.md`: zero vendor colour schemes copied).
-- **Style cloning (`graph.applyStyleFrom`):** Copies visual appearance tokens (palette, fonts, axis frame/thickness, symbol shapes, error-bar cap width, background) from a reference graph onto one or multiple target graphs in a single undoable command without altering target data bindings.
+- **Batch creation & style cloning (`graph.create`, `graph.applyStyleFrom`):** `graph.create` supports `one_per_data_set` batch creation (checking `MAX_SHEETS_PER_PROJECT` upfront); `graph.applyStyleFrom` copies visual appearance tokens (palette, fonts, axis frame/thickness, symbol shapes, error-bar cap width, background) from a reference graph onto one or multiple target graphs (`target_sheet_ids`) in a single undoable command without altering target data bindings.
 
 ---
 
 ## 6. Multi-Panel Page Layouts & Publication Export
 
-A `LayoutSheet` arranges multiple live `GraphSheet` panels, live embedded `DataSheet` / `ResultSheet` tables, legends, and rich-text callouts onto physical publication pages (editing or excluding an upstream cell refreshes all placed graphs and embedded table cells reactively):
+A `LayoutSheet` arranges multiple live `GraphSheet` panels, rectangular-slice transposable live embedded `DataSheet` / `ResultSheet` tables (`EmbeddedResultTable` / `LayoutItem::LiveTable`, `edit.pasteResultTable`), embedded raster images (`EmbeddedImage` / `ProjectImageAsset` supporting PNG/JPEG/TIFF with 4-edge crop, rotation, and border controls; SVG image import omitted per permissive-licence policy), legends, and rich-text callouts onto physical publication pages (editing or excluding an upstream cell refreshes all placed graphs and embedded table cells reactively):
 - **Physical dimensions & journal presets:** Exact width $\times$ height in `mm`, `cm`, `in`, or `pt` (including single-column `85 mm` / `89 mm`, 1.5-column `120 mm` / `136 mm`, and double-column `174 mm` / `183 mm` journal widths).
-- **Grid & alignment guides:** Configurable row $\times$ column layout templates, baseline alignment across adjacent Y axes (aligning plot-area origins even when Y-tick label widths differ!), and automatic panel badges (`A`, `B`, `C`, … or `a`, `b`, `c`).
+- **Grid, alignment, scale equalization & z-order:** Configurable row $\times$ column layout templates, non-exported `View › Canvas Grid` overlay, baseline alignment across adjacent Y axes (aligning plot-area origins even when Y-tick label widths differ!), inner plot-scale equalization (`layout.equalizeScaling`), panel z-order control (`layout.reorderPanel` for foreground insets and superposed overlays), and automatic panel badges (`A`, `B`, `C`, … or `a`, `b`, `c`).
 - **Export targets:**
   - **SVG (`crates/svg`):** Crisp vector paths, optional editable `<text>` vs. outlined glyph paths, non-scaling hairlines avoided, deterministic attribute ordering.
   - **PDF 1.7 / 1.4 (`crates/pdf`):** Direct `%PDF-1.7` default vector writer (`--pdf-version 1.4|1.7`), `FlateDecode` streams, optional SFNT TrueType `/FontFile2` embedding (when supplied via `--ttf-font` or `CURVEBOOK_FONTS_DIR`), Adobe Core-14 Helvetica/Symbol selectable text + outlined vector glyph-path fallback (with `BUNDLED_FONTS` optional/empty via `--no-default-features`), BiDi RTL reordering, sRGB / print CMYK / Grayscale colour spaces, exact `MediaBox` / `TrimBox` / `BleedBox`, and 20-byte `xref`. *(External-viewer PDF QA under `G5` is done; see [`R5`](../history/roadmap/r5.md).)*

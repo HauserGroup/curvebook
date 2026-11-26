@@ -18,7 +18,7 @@ Minimizes the weighted sum of squared residuals:
 $$SS_w(\theta) = w_1 (y_1 - \hat{y}_1)^2 + w_2 (y_2 - \hat{y}_2)^2 + ... + w_N (y_N - \hat{y}_N)^2$$
 
 - **Core optimizer:** Uses trust-region Levenberg–Marquardt (Levenberg 1944; Marquardt 1963; Moré 1978 / MINPACK-1 `lmder`) with column-scaled QR decomposition on the augmented Jacobian $[J; \sqrt{\lambda} D]$. Steps accept at $\rho \ge 10^{-4}$, contract in $[0.1, 0.5]$, expand up to $\text{max}(\delta, 2 |D p|)$, and project active faces onto box bounds.
-- **Tolerances & budgets:** Relative residual reduction `ftol = 1e-15`, parameter step `xtol = 1e-14`, projected gradient cosine `gtol = 1e-13`, and stall threshold `stall_gtol = 1e-4`. Default `max_iters` is `1000` (hard cap 50,000).
+- **Tolerances & budgets:** Relative residual reduction `ftol = 1e-15`, parameter step `xtol = 1e-14`, projected gradient cosine `gtol = 1e-13`, and stall threshold `stall_gtol = 1e-4` (with `convergence_strictness` presets `Default`, `Quick`, `Medium`, and `Strict`). Default `max_iters` is `1000` (hard cap 50,000). Replicate subcolumns can enter as `IndividualReplicates` (default) or unweighted row means (`RowMeansOnly` via `replicate_fit_mode`).
 - **Warm start & rescue:** When `use_simplex_warm_start` is `true` (default), bounded Nelder–Mead simplex search (Nelder & Mead 1965; Lagarias et al. 1998) locates an initial basin or rescues stalled and non-finite starts.
 - **Jacobians:** Built-in models use analytical derivatives $df / d\theta_j$ where available. Other models (including all custom DSL equations) use central finite differences $h = 10^{-6} \cdot \text{max}(|\theta_j|, 1)$, switching to interior one-sided differences $h = 1.5 \times 10^{-8} \cdot \text{max}(|\theta_j|, 1)$ at active bounds (Nocedal & Wright 2006).
 
@@ -40,7 +40,7 @@ Outlier-resistant Lorentzian M-estimator minimizing the logarithmic loss (Motuls
 
 $$L(\theta) = \ln(1 + (r_1 / \text{RSDR})^2) + ... + \ln(1 + (r_N / \text{RSDR})^2)$$
 
-Cauchy IRLS optimizes around the Robust Standard Deviation of Residuals (`RSDR`), computed from the $68.27\text{th}$ percentile of weighted residual magnitudes scaled by $\sqrt{N / (N - K_{\text{free}})}$. Observations stay in the dataset without binary deletion.
+Cauchy IRLS optimizes around the Robust Standard Deviation of Residuals (`RSDR`), computed from the $68.27\text{th}$ percentile of weighted residual magnitudes scaled by $N / (N - K_{\text{free}})$. Observations stay in the dataset without binary deletion.
 
 > [!IMPORTANT]
 > Under `robust_cauchy`, parametric standard errors, confidence intervals, parameter dependency, Hougaard skewness, residual SD ($S_{y.x}$), $\text{AIC}_c$, $\text{BIC}$, studentized residuals, replicate lack-of-fit tests, and confidence/prediction bands are **intentionally suppressed** (reported as empty cells or open intervals). Standard Gaussian linearization covariance is invalid under non-quadratic Cauchy loss; best-fit parameters, unweighted $R^2$, and `RSDR` remain reported. Use `rout_outlier_elimination` when you need parametric inference on clean inliers.
@@ -53,7 +53,7 @@ Implements the three-stage ROUT procedure (Motulsky & Brown 2006):
 2. **FDR screening over extreme tail:** Evaluates two-sided Student-$t$ $P$ values against `RSDR` ($t_i = |r_{w,i}| / \text{RSDR}$) and applies Benjamini–Hochberg (1995) step-up FDR control **only** across the top 30% of observations furthest from the curve (`start = floor(0.70 * N)`). The remaining lower ~70% of residuals are never tested (`q_value = 1.0`, `is_outlier = false`).
 3. **Least-squares refit:** Re-optimizes retained inliers with ordinary or weighted least squares, seeded from the robust Cauchy parameters.
 
-- **FDR threshold:** `fdr_q_percent` is specified in percentage points (default `1.0` for $Q = 1\%$) and must satisfy $0 < Q \le 50$ in nonlinear regression (compare [univariate column outlier detection](analyses.md#analysis-outlier-detection), which allows $(0, 100]$).
+- **FDR threshold & modes:** `fdr_q_percent` is specified in percentage points (default `1.0` for $Q = 1\%$) and must satisfy $0 < Q \le 50$ in nonlinear regression (compare [univariate column outlier detection](analyses.md#analysis-outlier-detection), which allows $(0, 100]$). `outlier_handling` selects `Eliminate`, `IdentifyAndCountOnly` (reports flagged points without removing them from the least-squares fit), or `None`; `emit_cleaned_data_tab` emits an analyzable cleaned data tab with flagged outliers omitted.
 - **Insufficient inliers:** If ROUT excludes too many points to retain residual degrees of freedom, the solver returns `InsufficientData` or a non-converged warning. Detected outlier coordinates and $q$-values appear in the diagnostics tab without mutating the source [data table](concepts.md#cell-exclusions).
 
 ### Optimizer status outcomes
@@ -68,7 +68,7 @@ Implements the three-stage ROUT procedure (Motulsky & Brown 2006):
 
 ## Weighting schemes & replicate summary moments {#weighting-and-moments}
 
-The `weighting` option scales residuals before least-squares, Cauchy, and ROUT fitting. It is ignored by `poisson_deviance`, and explicit cell-level weights take precedence when attached. See also [Parametric Equations Registry: Weighting Schemes](registry/equations.html#weighting-schemes).
+The `weighting` option scales residuals before least-squares, Cauchy, and ROUT fitting (`weighting_source` chooses static `ObservedY` weights or IRLS curve-height `PredictedY` weights for response-dependent schemes). It is ignored by `poisson_deviance`, and explicit cell-level weights take precedence when attached. See also [Parametric Equations Registry: Weighting Schemes](registry/equations.html#weighting-schemes).
 
 | Canonical key | Formula | Error model & guard |
 | :--- | :--- | :--- |
@@ -139,7 +139,7 @@ Variance-inflation collinearity per free parameter is reported via Bates & Watts
 $$R_j^2 = 1 - \frac{1}{(J^T J)_{jj} \cdot [(J^T J)^{-1}]_{jj}}$$
 
 - `Dependency > 0.99` emits a collinearity warning on the parameter and diagnostic checklist.
-- A fit is marked `Ambiguous` (with affected parameters flagged `Unstable`) when rank-revealing QR detects rank deficiency or $R_j^2 > 0.9999$. It also triggers when profile-likelihood intervals return open bounds on unidentifiable asymptotes or EC50 plateaus (such as sparse dose-response curves; Sebaugh 2011).
+- `identifiability_mode` selects three-way reporting: `IdentifyUnstableParameters` (greedy Hessian condition-number reduction marking unstable parameters), `IdentifyAmbiguousFits` (rank deficiency, $R_j^2 > 0.9999$, or open profile-likelihood bounds), or `ReportAll`. `show_standard_errors` overrides default SE visibility (omitted by default under asymmetric profile-likelihood CIs and shown under symmetric Wald CIs), and `fit_flag_rules` evaluates automated batch quality flags ($R^2$, $N$, dependency, residual normality, runs/lack-of-fit, and outlier count).
 
 ### Residual diagnostics, range filters & threshold alerts
 
@@ -201,21 +201,21 @@ Equations are newline-delimited statements organized into optional `[Equation]` 
 - **Local helper variables:** `span = Top - Bottom` before the target `Y = ...` line.
 - **Conditional branching:** `IF(cond, then_expr, else_expr)`.
 - **Dataset-specific lines (`<A>`, `<B>`, `<A:C>`, `<2>`):** Prefix lines with angle-bracket column letters (`A`–`Z`, …), 1-based dataset indices, or ranges to apply distinct expressions or parameter assignments across datasets in a shared fit. Unscoped free identifiers become optimizable parameters; dataset-scoped assignments restrict parameters to those datasets.
-- **Initial-value rules (`[InitialValues]`):** Supply deterministic starting formulas using summary tokens computed from active `(X, Y)` points: `YMIN`, `YMAX`, `XMIN`, `XMAX`, `XATYMIN`, `XATYMAX`, `XMID`, `YMEAN`, `YMEDIAN`, `XMEAN`, `XMEDIAN`, `YAT0`, `SLOPE`, and related tokens.
+- **Initial-value rules (`[InitialValues]`):** Supply deterministic starting formulas using 21 dataset summary tokens computed from active `(X, Y)` points and numeric column titles: `YMIN`, `YMAX`, `XMIN`, `XMAX`, `XMID`, `YMID`, `XATYMIN`, `XATYMAX`, `XATY50`, `XATYMID`, `YATXMIN`, `YATXMID`, `YATXMAX`, `SPAN`, `SIGN`, `INITIALVALUE`, `MEANCOLUMNTITLE`, `LOGMEANCOLUMNTITLE`, `SLOPEATXMIN`, `SLOPEATXMID`, and `SLOPEATXMAX`.
 - **Derived scalar transforms (`[Transforms]`):** Post-fit algebraic expressions (such as `EC50 = 10^LogEC50`) evaluated at converged estimates and reported in `derived_scalars` and summary tabs.
-- **Built-in constants & predictors:** Predictor `X` (or `T` for ODE time axis; multi-predictor `X0`, `X1`, …), response `Y`, and constants `PI`, `E`, `LN2`, `LN10`, `LOG10E`, `LOG2E`, `SQRT2`, `PHI`.
+- **Built-in constants & predictors:** Predictor `X` (or `T` for ODE time axis; multi-predictor `X1`, `X2`, …), response `Y`, dataset index `DS`/`DATASET`, and constants `PI`, `E`, `LN2`, `LN10`, `SQRT2`, `INF`, `NAN`.
 
 ### Built-in DSL functions
 
 | Category | Supported identifiers (case-insensitive) |
 | :--- | :--- |
-| Elementary & arithmetic | `abs`, `sqrt`, `cbrt`, `exp`, `exp10`, `ln` (`loge`), `log` (`log10`), `log2`, `pow(a,b)`, `hypot(a,b)`, `min(a,b)`, `max(a,b)`, `clamp(x,lo,hi)` |
-| Rounding & sign | `floor`, `ceil`, `round`, `trunc`, `sign` (`sgn`) |
+| Elementary & arithmetic | `abs`, `sqrt`, `cbrt`, `sqr`, `exp`, `exp10`, `ln` (`loge`), `log` (`log10`), `log2`, `pow(a,b)`, `mod(x,y)`, `hypot(a,b)`, `min(a,b,...)`, `max(a,b,...)`, `clamp(x,lo,hi)`, `fact(n)`, `perc(x)`, `deg(rad)`, `rad(deg)`, `is_defined(x)` |
+| Rounding & sign | `floor`, `ceil`, `round`, `trunc` (`int`), `sign` (`sgn`) |
 | Trigonometric & inverse | `sin`, `cos`, `tan`, `asin`, `acos`, `atan` (`arctan`), `atan2(y,x)` |
 | Hyperbolic & inverse | `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh` |
-| Error & normal | `erf`, `erfc`, `normcdf` (`phi`), `norminv` (`probit`) |
-| Gamma, Beta & Bessel | `gamma`, `lngamma` (`lgamma`), `beta(a,b)`, `digamma` (`psi`), `besselj0` (`j0`), `besselj1` (`j1`), `besseljn` (`jn`), `bessely0` (`y0`), `bessely1` (`y1`), `besselyn` (`yn`), `besseli0` (`i0`), `besseli1` (`i1`), `besselk0` (`k0`), `besselk1` (`k1`) |
-| Hypergeometric | `hyp1f1` (`m(a,b,z)`), `hyp2f1(a,b,c,z)`, `confluent_u` (`u(a,b,z)`) |
+| Error, normal & probability | `erf`, `erfc`, `logit(p)`, `probit(p)`, `normcdf` (`zdist`), `normpdf` (`zpdf`), `norminv` (`zinv`), 3-arg `normdist(x,mean,sd)` / `norminv(p,mean,sd)` / `normpdf(x,mean,sd)`, `tdist(t,df)` / `tinv(p,df)` / `tpdf(t,df)`, `fdist(f,df1,df2)` / `finv(p,df1,df2)` / `fpdf(f,df1,df2)`, `chidist(x2,df)` / `chisqc(x2,df)` / `chiinv(p,df)`, `binomial(k,n,p)` |
+| Gamma, Beta & Bessel | `gamma`, `lngamma` (`gammaln`, `lgamma`), `beta(a,b)`, `ibeta(a,b,x)`, `igamma(a,x)`, `igammac(a,x)`, `digamma` (`psi`), `besselj0`, `besselj1`, `besseljn`, `bessely0`, `bessely1`, `besselyn`, `besseli0`, `besseli1`, `besseli(n,x)`, `besselk0`, `besselk1`, `besselk(n,x)` |
+| Hypergeometric | `hyp1f1` (`hypgeometricm`), `hyp2f1` (`hypgeometricf`), `confluent_u` (`hypgeometricu`) |
 
 ### Implicit equations (`LHS = RHS`)
 

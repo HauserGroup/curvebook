@@ -260,7 +260,7 @@ Command lines have OS length limits (notably on Windows) and some launchers mang
 
 **Children of the windowed app must not open console windows.**
 On Windows each console subprocess started from a GUI process flashes a window unless told not to.
-*In CurveBook:* `ProcessCommand::spawn_child` sets `CREATE_NEW_PROCESS_GROUP` on Windows but not `CREATE_NO_WINDOW`, and the desktop app starts `powershell` for clipboard, printer, and viewer integration (`crates/ui-egui/src/os_integration.rs`); check the desktop app, not only the CLI, after adding a Windows subprocess.
+*In CurveBook:* `ProcessCommand::spawn_child` and the Windows process-tree killer in `crates/platform/src/process.rs` set `WINDOWS_CREATE_NEW_PROCESS_GROUP | WINDOWS_CREATE_NO_WINDOW` (`0x0800_0000`, landed in `R8.13`), covering the desktop app's `powershell` helpers for clipboard, printer, and viewer integration (`crates/ui-egui/src/os_integration.rs`); preserve `CREATE_NO_WINDOW` and check the desktop app, not only the CLI, after adding any new Windows subprocess path.
 
 **"Not found" from spawn does not always mean the program is missing.**
 The same error is returned when a script's interpreter is missing.

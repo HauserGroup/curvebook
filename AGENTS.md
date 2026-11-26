@@ -41,7 +41,7 @@ For concrete extension checklists, common past mistakes, and subsystem details, 
 
 ### Assets & Zero Bundled Fonts (`xtask assets`)
 1. **Every asset needs attribution.** Every image, icon, SVG, cursor, sample file, or third-party data file in the repository must have a row in [ASSETS.md](ASSETS.md) (and an entry in [ATTRIBUTION.md](ATTRIBUTION.md) when third-party), verified by `cargo xtask assets`.
-2. **Zero bundled font files.** Do not commit `.ttf`, `.otf`, `.woff`, or `.woff2` files into the repository (`cargo xtask assets` fails if any font binaries are tracked). Native builds discover system fonts dynamically (overridable with `CURVEBOOK_FONTS_DIR`), and optional `bundled-fonts` builds for local web/dev testing use untracked local fetches (`cargo xtask web-fonts`).
+2. **Zero bundled font files.** Do not commit `.ttf`, `.otf`, `.woff`, or `.woff2` files into the repository (`cargo xtask assets` fails if any font binaries are tracked). Native builds discover system fonts dynamically (overridable via `CURVEBOOK_FONTS_DIR`), and optional `bundled-fonts` / web builds stage untracked local SIL OFL fonts from `CURVEBOOK_FONTS_DIR` (`crates/text/build.rs`, `cargo xtask web-fonts`; never network fetches).
 
 ### CurveBook Never Crashes
 1. **No panicking paths in shipped code.** Workspace `[lints.clippy]` in [Cargo.toml](Cargo.toml) denies:
@@ -75,7 +75,7 @@ Never delete, truncate, or omit contributor attributions in [`contributors/`](co
 
 One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came from describing an unimplemented command table before it landed and deserializing raw positional tuples. Keep docs and generated files synchronized with the landed typed registries:
 
-- **Engine command registry:** `crates/engine/src/cmd/mod.rs` owns the single typed `CommandSpec` registry (`106` commands across `9` `CommandGroup` categories in [`docs/commands.md`](docs/commands.md): `CommandGroup`, `Effects` bitflags including `MUTATES_DOCUMENT` / `READ_ONLY` / `IDEMPOTENT`, JSON Schema input specs, `enabled` predicates, and handlers with `serde_path_to_error` typed parameters), exposed via `cmd::registry()`. Whenever adding or editing an engine command, update its `CommandSpec` entry, tests, and regenerated [`docs/commands.md`](docs/commands.md) (`cargo xtask commands`) in one PR, conforming to [docs/command-ids.md](docs/command-ids.md).
+- **Engine command registry:** `crates/engine/src/cmd/mod.rs` owns the single typed `CommandSpec` registry (`106` commands across `9` `CommandGroup` categories in [`docs/commands.md`](docs/commands.md): `CommandGroup`, `Effects` bitflags including `NONE` / `MUTATES_DOCUMENT` / `IDEMPOTENT` with `Effects::read_only_hint()`, JSON Schema input specs, `enabled` predicates, and handlers with `serde_path_to_error` typed parameters), exposed via `cmd::registry()`. Whenever adding or editing an engine command, update its `CommandSpec` entry, tests, and regenerated [`docs/commands.md`](docs/commands.md) (`cargo xtask commands`) in one PR, conforming to [docs/command-ids.md](docs/command-ids.md).
 - **UI command registry:** UI-only actions use the typed `UiCommandSpec` struct slice `UI_COMMANDS` (`61` entries) in `crates/ui-egui/src/menus/ui_commands.rs`. `crates/mcp/src/ui_catalog.rs` is generated from `UI_COMMANDS` by `cargo xtask ui-commands`—never hand-edit `ui_catalog.rs`, and always check sync with `cargo xtask ui-commands --check`.
 
 ---

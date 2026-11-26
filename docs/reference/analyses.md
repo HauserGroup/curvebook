@@ -45,13 +45,13 @@ Computes column sample size, location, dispersion, quantiles, geometric summarie
 
 - **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `stats.run` with `descriptive_stats` (canonical), `descriptive`, or `column_stats`.
 - **Options & defaults:**
-  - `aggregation`: `row_means` (default, collapses replicate subcolumns by row mean first) or `pooled_grand_sample` (pools all active replicates).
+  - `aggregation`: `RowMeans` (default, collapses replicate subcolumns by row mean first), `PerSubcolumn` (computes an independent summary per replicate subcolumn), or `PooledGrandSample` (pools all active replicates).
   - `custom_upper_percentile`: optional $p_{\text{hi}} \in [50.0, 100.0)$ reporting $(100 - p_{\text{hi}}, p_{\text{hi}})$ Hyndman–Fan Type-7 quantiles (default unset).
   - `run_normality_battery`: boolean (default `true`).
   - `hypothetical_value`: optional finite $\mu_0$ triggering one-sample Student *t* and Wilcoxon signed-rank tests (default unset).
 - **Reported outputs:**
-  - **Descriptive Summary** (`desc-summary` or `desc-pooled`): $N$, Minimum, 25% Percentile, Median, 75% Percentile, Maximum, Range, Mean, Std. Deviation, Std. Error of Mean, `conf%` CI of Mean, `conf%` CI of SD ($\chi^2$ normal-theory interval), exact/interpolated binomial CI of Median, %CV, Geometric Mean and Geometric SD Factor (when all values $> 0$), Harmonic Mean (when valid), Skewness ($G_1$), Excess Kurtosis ($G_2$), and lag-1 autocorrelation ($r_1$).
-  - **Diagnostics** (`normality`): Shapiro–Wilk $W$ ($3 \le n \le 5000$), D'Agostino–Pearson $K^2$ ($n \ge 8$), Anderson–Darling $A^{2*}$ ($n \ge 5$), and Lilliefors Kolmogorov–Smirnov $D$ ($n \ge 5$) on both raw data and $\ln(Y)$ when strictly positive.
+  - **Descriptive Summary** (`desc-summary` or `desc-pooled`): $N$, Minimum, 25% Percentile, Median, 75% Percentile, Maximum, Interquartile Range (IQR), Range, Sum, Mean, Std. Deviation, Std. Error of Mean, `conf%` CI of Mean, `conf%` CI of SD ($\chi^2$ normal-theory interval), exact/interpolated binomial CI of Median, %CV, Geometric Mean, Geometric SD Factor, and CI of Geometric Mean (when all values $> 0$), Harmonic Mean and CI (when valid), Quadratic Mean (RMS) and CI, Skewness ($G_1$), Excess Kurtosis ($G_2$), and lag-1 autocorrelation ($r_1$).
+  - **Diagnostics** (`normality`): Shapiro–Wilk $W$ ($3 \le n \le 5000$), D'Agostino–Pearson $K^2$ ($n \ge 8$), Anderson–Darling $A^{2*}$ ($n \ge 8$), and Lilliefors Kolmogorov–Smirnov $D$ ($n \ge 5$) on both raw data and $\ln(Y)$ when strictly positive.
   - **Normal Q–Q** (`normal-qq`): Blom (1958) plotting positions $p_i = (i - 3/8)/(n + 1/4)$ and expected normal or lognormal $z$ quantiles.
   - **Summary** (`one-sample`): When `hypothetical_value` is set, one-sample *t*-test ($t, \text{df}, P$) and Wilcoxon signed-rank test ($W, P$, Pratt 1959 zero handling and Hodges–Lehmann pseudomedian/CI).
 - **Diagnostic checks:** Reports Shapiro–Wilk normality status per column (pass if $P > \alpha$, warn if $P \le \alpha$) and logs any ignored non-numeric text cells.
@@ -349,7 +349,7 @@ Combines exploratory multivariate analysis, correlation matrices, clustering, su
 - **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `stats.run` with `pca` (canonical), `principal_components`, `correlation`, `correlation_matrix`, `clustering`, `kmeans`, `multiple_imputation`, `stats.multiple_imputation`, or `mice`.
 - **Options & defaults:**
   - **PCA / PCR:** `standardize` (`true` for correlation PCA, `false` for covariance PCA), `parallel_analysis_seed` (optional seed for Horn 1965 retention cutoffs), and `pcr_outcome_column` (optional target enabling supervised PCR).
-  - **Correlation matrix:** `spearman_rank` (`false` for Pearson $r$, `true` for Spearman $\rho$). Standalone Kendall $\tau_b$ is also supported.
+  - **Correlation matrix:** `spearman_rank` (`false` for Pearson $r$, `true` for Spearman $\rho$).
   - **Clustering:** `distance` (`euclidean`, `manhattan`, `cosine`, `pearson_correlation_dissimilarity`), `linkage` (`single`, `complete`, `average` UPGMA, `weighted` WPGMA, `centroid` UPGMC, `median` WPGMC, `ward_d2` Murtagh–Legendre Ward criterion), `k_means_k` (optional $k \ge 2$ `k-means++`), and `k_sweep_max` (optional candidate-$k$ WCSS and silhouette sweep).
   - **Multiple imputation:** `imputations_m` (2 to 50), `max_iters` (1 to 100), `seed`, `response_column`, and `predictor_columns` (MICE Predictive Mean Matching pooled via Rubin 1987 and Barnard–Rubin 1999 degrees of freedom).
 - **Reported outputs:**
@@ -371,8 +371,9 @@ Fits ordinary least-squares simple linear regression $Y = \beta_0 + \beta_1 X$ (
 
 - **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `fit.run` with `linear` (canonical), `simple_linear`, `linear_regression`, `deming`, or `deming_regression`.
 - **Options & defaults:**
-  - `deming_model_ii`: boolean (default `false`; uses orthogonal variance ratio $\lambda = 1.0$ with leave-one-out jackknife SEs).
-  - `force_through_origin`: boolean (default `false`; fixes $\beta_0 = 0$, $\text{df} = n - 1$).
+  - `deming_model_ii`: boolean (default `false`); `deming_error` configures the Model II error variance model (`EqualError` for orthogonal $\lambda = 1.0$, `{"StandardDeviations": {"sd_x": ..., "sd_y": ...}}`, or `{"VarianceRatio": {"lambda": ...}}`, with leave-one-out jackknife SEs).
+  - `force_through_origin`: boolean (default `false`; fixes $\beta_0 = 0$, $\text{df} = n - 1$), generalized by `fixed_point`: optional `[x0, y0]` constraining $Y - y_0 = \beta_1 (X - x_0)$.
+  - `standard_addition`: boolean (default `false`; reports unknown concentration $-\hat{X}_{\text{int}}$ with negated Fieller limits) and `extend_line_to_x_intercept`: boolean (default `false`; extends the plotted regression line to $Y = 0$).
   - `confidence_bands` and `prediction_bands`: booleans enabling Working–Hotelling / Student-*t* curve bands.
   - `interpolate_unknowns`: boolean enabling forward ($X$ to $Y$) prediction and exact Fieller inverse calibration ($Y$ to $X$).
   - `x_range_filter`: optional inclusive `[x_min, x_max]` predictor filter (`plot_x_min`, `plot_x_max`, and `plot_segments`, default `100`, max `10,000`).
@@ -380,7 +381,7 @@ Fits ordinary least-squares simple linear regression $Y = \beta_0 + \beta_1 X$ (
   - **Summary:** Slope, Intercept, $1/\text{slope}$, $X$-intercept, SEs, `conf%` CIs, $R^2$, Pearson $r$, $S_{y.x}$, $\text{RSS}$, $F$, *P*, Wald–Wolfowitz runs test along $X$, and replicate lack-of-fit *F* test.
   - **Model Comparison:** ANCOVA slope homogeneity and elevation comparisons across multiple datasets.
   - **Interpolated Unknowns:** `Interpolated X` and `Interpolated Y` predictions, plus curve bands.
-- **Diagnostic checks:** Notes orthogonal Deming $\lambda = 1.0$ assumptions, runs-test nonlinearity, replicate lack-of-fit, and range-filter exclusions.
+- **Diagnostic checks:** Notes Deming error-variance ($\lambda$) assumptions, runs-test nonlinearity, replicate lack-of-fit, and range-filter exclusions.
 - **Edge cases & limits:**
   - Fails with insufficient data when $n \le 2$ (or $n < 1$ when forced through the origin with nonzero $X$ variance).
   - Rejects non-finite points, zero $X$ variance, and pre-summarized inputs needing raw pairs.
@@ -398,10 +399,10 @@ Fits built-in models ([Parametric Equations Registry](registry/equations.html)) 
 - **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `fit.run` with `nonlinear` (canonical), `nonlinear_regression`, `curve_fit`, `fit`, `custom_equation`, `custom_dsl`, or any built-in equation ID directly as `kind` (for example `log_agonist_vs_response_4pl`, `michaelis_menten`).
 - **Options & defaults:**
   - Model: `equation_id` and `custom_dsl`.
-  - Objective & weights: `method` (`least_squares` default, `poisson_deviance`, `robust_cauchy`, `rout_outlier_elimination`), `fdr_q_percent` (default `1.0`, bounded to $(0, 50]$), and `weighting` (`none` default, `relative_square`, `relative`, `general_power_y` + `weighting_power`, `inverse_x`, `inverse_x2`, `observed_sd`).
-  - Constraints & solver: `parameter_rules` (`scope`: `local`, `shared_global`, `constant`, `hooked_constant`, `per_dataset_constant`, `column_title_constant`, plus `initial_override`, `lower_bound`, `upper_bound`), `max_iters` (default `1000`, hard cap `50,000`), `x_range_filter`, `y_range_filter`, `plot_function_only`, `plot_x_min`, and `plot_x_max`.
-  - Uncertainty & diagnostics: `profile_likelihood_ci` (`true` default), `identify_unstable_parameters`, `flag_r_squared_below`, `confidence_bands`, `prediction_bands`, `interpolate_unknowns`, `replicates_lack_of_fit_test`, `normality_of_residuals`, `homoscedasticity_test`, `emit_residuals_tab`, and `emit_covariance_tab`.
-  - Model comparison: `comparison` (`extra_sum_of_squares_f`, `aicc`, `likelihood_ratio_test`), `alternative_equation_id`, and `shared_parameter_comparison`.
+  - Objective & weights: `method` (`least_squares` default, `poisson_deviance`, `robust_cauchy`, `rout_outlier_elimination`), `outlier_handling` (`None`, `IdentifyAndCountOnly`, `Eliminate`), `emit_cleaned_data_tab`, `fdr_q_percent` (default `1.0`, bounded to $(0, 50]$), `weighting` (`none` default, `relative_square`, `relative`, `general_power_y` + `weighting_power`, `inverse_x`, `inverse_x2`, `observed_sd`), and `weighting_source` (`ObservedY` vs. `PredictedY` curve-height IRLS).
+  - Constraints & solver: `parameter_rules` (`scope`: `local`, `shared_global`, `constant`, `hooked_constant`, `per_dataset_constant`, `column_title_constant`, plus `initial_override`, `lower_bound`, `upper_bound`), `replicate_fit_mode` (`IndividualReplicates` vs. `RowMeansOnly`), `convergence_strictness` (`Default`, `Quick`, `Medium`, `Strict`), `max_iters` (default `1000`, hard cap `50,000`), `mv_y_columns` (multi-response Multiple Variables fitting), `x_range_filter`, `y_range_filter`, `plot_function_only`, `plot_x_min`, and `plot_x_max`.
+  - Uncertainty, output & diagnostics: `profile_likelihood_ci` (`true` default), `show_standard_errors`, `identify_unstable_parameters`, `identifiability_mode` (`IdentifyUnstableParameters`, `IdentifyAmbiguousFits`, `ReportAll`), `flag_r_squared_below`, `fit_flag_rules`, `summary_parameter`, `create_summary_graph`, `output_significant_digits`, `confidence_bands`, `prediction_bands`, `interpolate_unknowns`, `replicates_lack_of_fit_test`, `normality_of_residuals`, `homoscedasticity_test`, `emit_residuals_tab`, and `emit_covariance_tab`.
+  - Model comparison: `comparison` (`extra_sum_of_squares_f`, `aicc`, `likelihood_ratio_test`), `comparison_question` (`AlternativeEquation`, `ParameterInvarianceAcrossDatasets`, `SingleGlobalCurveVsSeparate`, `ParameterEqualsTheoretical`), `comparison_method`, `prefer_well_defined_fit`, `alternative_equation_id`, and `shared_parameter_comparison`.
 - **Reported outputs:**
   - **Parameters and CIs:** estimates, SEs, Venzon–Moolgavkar profile or Wald CIs (including open bounds), dependency $R^2_j$, Hougaard $|g_1|$, parameter notes, and derived scalars such as `EC50`, `t_half`, and `Span`.
   - **Summary:** $N$, $K_{\text{free}}$, df, unweighted $R^2$, `rss`, `weighted_ss`, $S_{y.x}$ or `RSDR`, $\text{AIC}_c$, $\text{BIC}$, runs test, replicates lack-of-fit, residual normality tests, and Spearman homoscedasticity.
@@ -444,7 +445,7 @@ Computes prospective or post-hoc sample sizes ($n_1, n_2, N$), achieved power ($
   - `solve_target`: `sample_size` (default), `power`, or `detectable_effect`.
   - `tail_mode`: `two_sided`, `one_sided_greater`, or `one_sided_less` (one-sided tests are disallowed on non-directional `one_way_anova` and `chi_square`).
   - `alpha` in $(0, 1)$ (default `0.05`); `target_power` in $(0, 1)$ (for `sample_size` or `detectable_effect`); `sample_size`, `sample_size_group2`, and `allocation_ratio` ($k = n_2 / n_1 > 0$).
-  - `effect` (standardized `d`, `d_z`, `f`, `h`, `w`, `r`, `r_squared`, `f_squared`, or raw means + SD, proportions $p_1, p_2$, or regression slope + $\sigma_x, \sigma_\varepsilon$), `num_groups` ($\ge 2$ for ANOVA), `chi_square_df`, `two_proportions_mode` (`pooled_null_unpooled_alt`, `unpooled`, `cohens_h` + `continuity_correction`), `correlation_method` (`fisher_z`, `pwr_hybrid`, `exact_conditional_t`), and optional `info_sheet_id`.
+  - `effect` (standardized `d`, `d_z`, `f`, `h`, `w`, `r`, `r_squared`, `f_squared`, or raw means + SD, proportions $p_1, p_2$, or regression slope + $\sigma_x, \sigma_\varepsilon$), `num_groups` ($\ge 2$ for ANOVA), `chi_square_df`, `two_proportions_mode` (`PooledNullUnpooledAlt`, `Unpooled`, `CohensH` + `continuity_correction`), `correlation_method` (`FisherZ`, `FisherZWithTCrit`, `ExactTTransform`, `ConditionalSlopeT`), and optional `info_sheet_id`.
 - **Reported outputs:**
   - **Summary** (`power-summary`): family, solve target, tail mode, $\alpha$, target power, standardized and raw effects, integer $n_1, n_2, N_{\text{total}}$, `achieved_power`, `continuous_n`, `power_at_continuous_n`, denominator df, critical cutoff, noncentrality $\lambda$, and implied metrics ($p_2$, Cohen's $h$, $R^2$).
   - **Multiple Comparisons** (`power-sensitivity`): $(\alpha, 1 - \beta, \text{effect})$ sensitivity grid.

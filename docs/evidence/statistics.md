@@ -27,7 +27,7 @@
 
 ## One-Way, Factorial, Multifactor ($N$-Way), Nested & Mixed-Effects Models
 - [x] Ordinary one-way ANOVA + Brown–Forsythe and Bartlett variance-homogeneity tests
-- [x] Brown–Forsythe and Welch one-way ANOVA (unequal SDs, including lognormal mode)
+- [x] Brown–Forsythe and Welch one-way ANOVA (unequal SDs)
 - [x] Repeated-measures one-way ANOVA with Geisser–Greenhouse $\hat{\varepsilon}$ and Huynh–Feldt $\tilde{\varepsilon}$ sphericity corrections
 - [x] Kruskal–Wallis nonparametric one-way test and Friedman nonparametric repeated-measures test
 - [x] Ordinary & repeated-measures Two-Way factorial ANOVA (balanced & unbalanced Type I / Type III SS)
@@ -53,7 +53,7 @@
 - [x] Contingency CIs & effect sizes: Relative Risk (Koopman score CI with Wave 5 `G8` `Option<f64>` `None`/open-bound reporting when bracketing or finiteness fails), Odds Ratio (Baptista–Pike CI), sensitivity/specificity/PPV/NPV (Wilson & Clopper–Pearson CIs), NNT, and $\phi$ / Cramér's $V$ with CIs
 - [x] Kaplan–Meier survival (from `Survival` and `MultipleVariables` tables) with asymmetrical $\log(-\log)$ Greenwood CIs, median survival, and number-at-risk table *(verified on both `Survival` and `MultipleVariables` via `mv_time_column` / `mv_status_column` / `mv_group_column`)*
 - [x] Log-rank (Mantel–Cox), Gehan–Breslow–Wilcoxon, trend log-rank, multiplicity-adjusted pairwise curve comparisons, and Mantel–Haenszel / log-rank hazard ratios
-- [x] Cox proportional hazards regression (Breslow & Efron ties, Schoenfeld residuals, `ResultTabKind::BaselineSurvival` & `ResultTabKind::LogMinusLog` tabs verified end-to-end)
+- [x] Cox proportional hazards regression (Breslow, Efron & Exact ties, Schoenfeld residuals, `ResultTabKind::BaselineSurvival` & `ResultTabKind::LogMinusLog` tabs verified end-to-end)
 - [x] Pearson $r$ and Spearman $\rho$ correlation matrices (fast $O(N \log N)$ tie-safe Spearman on large `MultipleVariables` tables)
 - [x] Bland–Altman method-comparison bias & $95\%$ limits of agreement *(`AnalysisKind::BlandAltman` `ResultSheet` + `DiagnosticPlotKind::BlandAltman` verified end-to-end)*
 - [x] Passing–Bablok method-comparison regression (`AnalysisKind::PassingBablok`) with intercept CI and CUSUM linearity check

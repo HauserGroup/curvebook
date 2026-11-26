@@ -62,7 +62,7 @@ For reproducible laboratory pipelines (e.g. processing 96-well / 384-well dose�
 | Scientist Workflow | CurveBook Mechanism |
 |---|---|
 | Repeat yesterday's analysis & graph on a new experiment | `File › New From Template…` (`project.instantiateTemplate`, `.cbtemplate`) or `sheet.clonePipeline` ("Clone Pipeline" / "Clone Family") |
-| Restyle 12 graphs in a manuscript to match Figure 1A | `graph.applyStyleFrom` ("Apply Graph Style / Wand") across selected graph IDs |
+| Restyle 12 graphs in a manuscript to match Figure 1A | `graph.applyStyleFrom` ("Apply Graph Style / Clone Style") across selected graph IDs |
 | Fit 200 compound plates and export $\text{IC}_{50}$ + $95\%$ profile CIs to CSV | `curvebook-cli batch` applying a `.cbtemplate` over plate CSVs $\to$ tidy `csv` result tables + multi-page `pdf` |
 | Inspect, fit, diagnose & plot interactively from an AI research assistant | `curvebook-cli mcp` (`doc_inspect`, `command_batch`, `render_preview`, `export`) |
 | Drive a running CurveBook session from external lab instrumentation | `curvebook --control 7979` over `127.0.0.1` loopback JSONL ([`control-protocol.md`](../control-protocol.md)) |

@@ -5,8 +5,9 @@
 //! - **NIST StRD (`corpus/nist-strd` & `curvebook-testkit`):** Univariate (`univ`, 9 files +
 //!   5 offline stiff benchmarks), One-Way ANOVA (`anova`, 11 files + offline stiff benchmarks),
 //!   and Linear Least-Squares (`lls`, 11 files + offline stiff benchmarks).
-//! - **Published analytical literature:** Royston (1995) AS R94 `n = 25` lognormal Shapiro-Wilk
-//!   benchmark (`W = 0.83467, p = 0.000914`), Zar *Biostatistical Analysis* ANOVA/Dunn/Friedman,
+//! - **Published analytical literature:** Royston (1992, 1995) AS R94 Shapiro-Wilk algorithm
+//!   (verified below against R 4.5.2 skewed `n = 25` `W = 0.81195` and `n = 3..5` benchmarks),
+//!   Zar *Biostatistical Analysis* ANOVA/Dunn/Friedman,
 //!   Dunnett (1955/1964), Benjamini, Krieger & Yekutieli (2006) two-stage adaptive FDR,
 //!   Motulsky & Brown (2006) ROUT, Baptista & Pike (1977), Koopman (1984), Newcombe (1998),
 //!   DeLong et al. (1988), Hanley & McNeil (1982), Brookmeyer & Crowley (1982).

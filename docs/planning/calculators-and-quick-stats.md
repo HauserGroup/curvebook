@@ -15,7 +15,7 @@ Active scope covers categorical/continuous table-analysis completions (`R9.12`),
 Calculator-specific design rules below apply only if deferred work is explicitly resumed; the described calculator modules and commands are proposed seams, not implementation claims.
 
 1. **Zero Archive-Schema Churn for Instant Calculators:**
-   - Summary-input statistical calculators, probability tail/quantile evaluators, clinical Bayes calculators, two-mean error propagation, and wet-lab chemistry/radiochemistry tools execute as **stateless, read-only engine queries** (proposed: a new `CommandGroup::Calculator` with `READ_ONLY` effects in a new `crates/engine/src/cmd/calc.rs`; neither exists today).
+   - Summary-input statistical calculators, probability tail/quantile evaluators, clinical Bayes calculators, two-mean error propagation, and wet-lab chemistry/radiochemistry tools execute as **stateless, read-only engine queries** (proposed: a new `CommandGroup::Calculator` with `Effects::NONE` [`read_only_hint() == true`] in a new `crates/engine/src/cmd/calc.rs`; neither exists today).
    - Opening or running an instant calculator mutates zero sheets, consumes zero undo slots, and leaves `.curvebook` / `.curvebook.d/` archive schemas (`crates/format/src/versioned.rs`) untouched unless the user explicitly invokes *Insert Result into Info Sheet* or *Create Dilution / Randomization Data Sheet*.
 2. **Additive `#[serde(default)]` Table & Graph Extensions:**
    - New variants and optional fields on `ContingencyMethod`, `ContingencySpec`, `DescriptiveSummary`, `TransformAnalysisSpec`, and `GraphSpec` serialize with `#[serde(default, skip_serializing_if = "...")]`, preserving 100% forward/backward compatibility with existing `.curvebook` projects and batch scripts.

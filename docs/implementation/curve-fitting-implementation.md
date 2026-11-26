@@ -3,7 +3,7 @@
 Governing specification for `crates/fit` (`L2`). Parity checklist: [`evidence/curve-fitting.md`](../evidence/curve-fitting.md).
 
 Primary literature & numerical references (exact optimization, profile CIs, outliers, mechanistic pharmacology/kinetics, GLMs & splines):
-- **Oracle benchmarks:** NIST Statistical Reference Datasets (StRD), Nonlinear Regression ([`crates/fit/tests/d1_nist_and_pharma_oracles.rs`](../../crates/fit/tests/d1_nist_and_pharma_oracles.rs)).
+- **Oracle benchmarks:** NIST Statistical Reference Datasets (StRD), Nonlinear Regression ([`crates/fit/tests/core_suite/d1_nist_and_pharma_oracles.rs`](../../crates/fit/tests/core_suite/d1_nist_and_pharma_oracles.rs)).
 - **Solver, IRLS weighting, model comparison & profile-likelihood CIs:** Moré (1978) *Lect. Notes Math.* 630:105–116 (`10.1007/BFb0067700`); Venzon & Moolgavkar (1988) *Appl. Stat.* 37:87–94 (`10.2307/2347496`); Bates & Watts (1988) *Nonlinear Regression Analysis and Its Applications*; Seber & Wild (1989) *Nonlinear Regression*; Carroll & Ruppert (1988) *Transformation and Weighting in Regression*; Burnham & Anderson (2002) *Model Selection and Multimodel Inference*; Motulsky & Christopoulos (2004) *Fitting Models to Biological Data Using Linear and Nonlinear Regression*.
 - **Robust regression & ROUT:** Motulsky & Brown (2006) *BMC Bioinformatics* 7:123 (`10.1186/1471-2105-7-123`).
 - **Dose–response, operational models, allostery & binding/enzyme kinetics:** Gaddum (1937) *J. Physiol.* 89:7P–9P; Arunlakshana & Schild (1959) *Br. J. Pharmacol.* 14:48–58 (`10.1111/j.1476-5381.1959.tb00928.x`); Colquhoun (2007) *Trends Pharmacol. Sci.* 28:608–614 (`10.1016/j.tips.2007.09.011`); Black & Leff (1983) *Proc. R. Soc. Lond. B* 220:141–162 (`10.1098/rspb.1983.0093`); Motulsky & Mahan (1984) *Mol. Pharmacol.* 25:1–9; Swillens (1995) *Mol. Pharmacol.* 47:1197–1203; Christopoulos & Kenakin (2002) *Pharmacol. Rev.* 54:323–374 (`10.1124/pr.54.2.323`); Gottschalk & Dunn (2005) *Anal. Biochem.* 343:54–65 (`10.1016/j.ab.2005.04.035`); Liao & Liu (2009) *J. Chemom.* 23:248–253 (`10.1002/cem.1218`); Sebaugh (2011) *Pharm. Stat.* 10:128–134 (`10.1002/pst.426`); Morrison (1969) *Biochim. Biophys. Acta* 185:269–286 (`10.1016/0005-2744(69)90420-3`); Cheng & Prusoff (1973) *Biochem. Pharmacol.* 22:3099–3108 (`10.1016/0006-2952(73)90196-2`).
@@ -25,11 +25,11 @@ Given observations $(x_i, y_i)$ for $i = 1, \dots, N$ across $D \ge 1$ data sets
    - `Relative` ($1/Y$): $w_i = 1 / |y_i|$ (Poisson-like variance using observed $Y$),
    - `GeneralPowerY(k)`: $w_i = 1 / |y_i|^k$,
    - `InverseX` / `InverseX2`: $w_i = 1 / |x_i|$ or $1 / x_i^2$,
-   - `ObservedSd` ($1/\text{SD}^2$): weights replicate group $g$ by $1 / s_g^2$ when $n_g \ge 2$.
+   - `ObservedSd` ($1/\text{SD}^2$): weights each pre-summarized `(Mean, SD, n)` row by $1 / \text{SD}_i^2$ when finite $\text{SD}_i > 0$ (returns `FitError::ImpossibleWeights` if pre-summarized SDs are absent or non-positive).
 2. **Poisson Regression (IRLS / Deviance minimization for count data $y_i \ge 0$):**
    Minimizes Poisson deviance $G^2(\theta) = 2 \sum_{i=1}^N \big[ y_i \ln(y_i / \hat{y}_i) - (y_i - \hat{y}_i) \big]$ (with $0 \ln 0 = 0$) where $\hat{y}_i = f(x_i; \theta) > 0$.
 3. **Robust Nonlinear Regression (Lorentzian / Cauchy $t_1$ distribution):**
-   Targets the heavy-tailed Cauchy objective (Motulsky & Brown 2006), implemented as iteratively reweighted least squares (`fit_cauchy_irls` in `crates/fit/src/solver/irls.rs`, Cauchy weights $1/(1 + z_i^2)$ with $z_i = |r_i| / \text{RSDR}$, up to 15 reweighting passes):
+   Targets the heavy-tailed Cauchy objective (Motulsky & Brown 2006), implemented as iteratively reweighted least squares (`fit_cauchy_irls` in `crates/fit/src/solver/irls.rs`, Cauchy weights $1/(1 + z_i^2)$ with $z_i = |r_i| / \text{RSDR}$, up to `config.max_iters.clamp(1, 60)` reweighting passes):
    $$\mathcal{L}_{\text{Cauchy}}(\theta, s) = \sum_{i=1}^N \ln\!\left(1 + \frac{w_i (y_i - f(x_i; \theta))^2}{s^2}\right)$$
    where scale $s$ is updated iteratively from the $68.27\text{th}$ percentile of weighted absolute residuals ($\text{RSDR}$). Pure Robust mode (`FitMethod::RobustCauchy`) requires raw replicates (`FitError::RequiresRawReplicates` on pre-summarized data) and suppresses least-squares inference (`InferenceAvailability::NotApplicableInRobustMode`, [`R4.5`](../history/roadmap/r4.md#r45-suppress-least-squares-inference-in-pure-robust-fit-mode): omits parameter SEs/CIs, covariance matrices, confidence/prediction bands, and *F*/LRT/$\text{AIC}_c$ comparisons while preserving best-fit estimates, `RSDR`, residuals, and point interpolation). Robust mode serves both for outlier-resistant curve estimation and as Stage 1 of **ROUT** automatic outlier elimination ($Q$ default $1\%$).
 
@@ -53,10 +53,10 @@ Across $D$ data sets (`A`, `B`, …), each model parameter $p \in \{1, \dots, P\
 
 The global Jacobian stacks dataset blocks into one dense matrix whose shared columns are filled for every data set and whose local columns are block-diagonal, minimizing $\text{SS}_{\text{global}} = \sum_{d=1}^D \text{SS}_d$ with $\text{df} = N_{\text{total}} - K_{\text{free}}$.
 
-### 1.4 Planned Solver, Weighting & Method Extensions *(target specification — not yet implemented)*
+### 1.4 Curve-Predicted Weighting, Outlier Modes, Replicate Policies & Multi-Response Assignment *(implemented in `R18.1`)*
 
 1. **Curve-predicted IRLS weighting (`PredictedY`, Carroll & Ruppert 1988; Motulsky & Christopoulos 2004):**
-   - Current `RelativeSquare`, `Relative`, and `GeneralPowerY(k)` weight by observed $y_i$. Target default for response-dependent weighting computes weights from the **fitted curve height** $\hat{y}_i = f(x_i; \theta)$ via Iteratively Reweighted Least Squares (IRLS), eliminating downward bias on noisy low observations and avoiding `ImpossibleWeights` when a noisy observation equals $y_i = 0$ while $\hat{y}_i > 0$:
+   - Alongside observed-$y_i$ weighting (`ObservedY`), curve-predicted IRLS weighting (`PredictedY`) computes weights from the **fitted curve height** $\hat{y}_i = f(x_i; \theta)$ via Iteratively Reweighted Least Squares (IRLS), eliminating downward bias on noisy low observations and avoiding `ImpossibleWeights` when a noisy observation equals $y_i = 0$ while $\hat{y}_i > 0$:
      1. Run one unweighted ($w_i = 1$) Levenberg–Marquardt fit from $\theta_0$ so inaccurate starting values do not blow up initial weights.
      2. Evaluate $\hat{y}_i^{(m)} = f(x_i; \hat{\theta}^{(m)})$ across all active observations and form fixed weights $w_i^{(m)} = 1 / |\hat{y}_i^{(m)}|^k$ ($k = 2$ for $1/Y^2$, $k = 1$ for $1/|Y|$, or arbitrary $k$; return `FitStatus::ImpossibleWeights` if $\hat{y}_i^{(m)} = 0$).
      3. Re-optimize $\theta^{(m+1)} = \arg\min_\theta \sum_i w_i^{(m)} (y_i - f(x_i; \theta))^2$ holding $w_i^{(m)}$ fixed during the inner LM loop, then refresh $w_i^{(m+1)}$ from $\hat{y}_i^{(m+1)}$ until relative change in weighted $\text{SS}$ stabilizes within convergence tolerance.
@@ -107,7 +107,7 @@ $$\text{SS}_{\text{crit}} = \text{SS}(\hat{\theta}) \left(1 + \frac{F_{1, \text{
   $$\text{AIC}_c = N \ln\!\left(\frac{\text{SS}}{N}\right) + 2K + \frac{2K(K+1)}{N - K - 1}, \qquad w_{\text{Akaike}, m} = \frac{e^{-\frac{1}{2}\Delta_m}}{\sum_j e^{-\frac{1}{2}\Delta_j}}$$
 - **Residual diagnostics:** Replicates test for lack of fit, runs test, Spearman homoscedasticity test, D'Agostino–Pearson / Shapiro–Wilk / Anderson–Darling / Lilliefors KS normality of residuals, and residual plots.
 
-### 2.5 Planned Identifiability, Model-Comparison, Output & Quality-Flag Extensions *(target specification — [`R13.1`](../history/roadmap/r13.md#r131-domain-restricted-regression-fit-identifiability-replicate-unknown-interpolation--outlier-overlays) items done)*
+### 2.5 Identifiability, Model-Comparison, Output & Quality-Flag Extensions *(implemented in [`R13.1`](../history/roadmap/r13.md#r131-domain-restricted-regression-fit-identifiability-replicate-unknown-interpolation--outlier-overlays) & `R18.2`)*
 
 1. **Three-way parameter identifiability & greedy Hessian reduction (`IdentifiabilityMode`):**
    - Support three user-selectable modes on the `Confidence` tab:
@@ -139,8 +139,8 @@ Every built-in model implements `ParametricModel` (`crates/fit/src/library/mod.r
 - **Stimulation / Inhibition (`X = log10[C]` unnormalized & `[0, 100]` normalized; linear `X = [C]` unnormalized):**
   - 3PL (`HillSlope = ±1`): $Y = \text{Bottom} + \frac{\text{Top} - \text{Bottom}}{1 + 10^{(\log \text{EC}_{50} - X)}}$ (inhibition: $10^{(X - \log \text{IC}_{50})}$; linear `X = [C]`: $\text{EC}_{50}/X$ and $X/\text{IC}_{50}$).
   - 4PL Variable Slope: $Y = \text{Bottom} + \frac{\text{Top} - \text{Bottom}}{1 + 10^{(\log \text{EC}_{50} - X) \cdot \text{HillSlope}}}$.
-- **Special Dose–Response (`X = log10[C]` built-ins in `pharma.rs`; linear `X = [C]` counterparts & additional mechanistic forms in §3.5):**
-  - **Asymmetrical 5PL (`log_agonist_vs_response_5pl`):** $Y = \text{Bottom} + \frac{\text{Top} - \text{Bottom}}{\left(1 + 10^{(\log X_b - X) \cdot \text{HillSlope}}\right)^S}$ where $\log X_b = \log \text{EC}_{50} + \frac{1}{\text{HillSlope}}\log_{10}(2^{1/S} - 1)$ ($S > 0$).
+- **Special Dose–Response (`X = log10[C]` and linear `X = [C]` built-ins in `pharma.rs`; extended mechanistic forms in §3.5):**
+  - **Asymmetrical 5PL (`log_agonist_vs_response_5pl` & `agonist_vs_response_5pl`):** `log_agonist_vs_response_5pl` parameterizes `LogXb` directly in $Y = \text{Bottom} + \frac{\text{Top} - \text{Bottom}}{\left(1 + 10^{(\log X_b - X) \cdot \text{HillSlope}}\right)^S}$ and derives $\log \text{EC}_{50} = \log X_b - \frac{1}{\text{HillSlope}}\log_{10}(2^{1/S} - 1)$ ($S > 0$); linear-concentration `agonist_vs_response_5pl` parameterizes `EC50` directly (§3.5).
   - **Biphasic (`biphasic_dose_response`)** (two saturating phases with fraction $F \in (0,1)$) and **Bell-shaped (`bell_shaped_dose_response`)** ($\text{Plateau}_1 \to \text{Dip} \to \text{Plateau}_2$).
   - **Black–Leff Operational Model — Partial Agonist (`operational_model_agonist`):** fits `Basal`, `Emax`, `LogKA`, `LogTau`, `n` across full + partial agonists via global fitting while avoiding overflow on $\log \tau$.
   - **Gaddum/Schild $\text{EC}_{50}$ shift (`ec50_shift_gaddum_schild`)** (fitting $\text{p}A_2$ and `SchildSlope`) and **Allosteric $\text{EC}_{50}$ shift (`allosteric_ec50_shift`)** (ternary complex cooperativity $\alpha$).
@@ -160,9 +160,9 @@ Every built-in model implements `ParametricModel` (`crates/fit/src/library/mod.r
 ### 3.4 Exponentials, Lines, Polynomials, Peaks, Waves, Growth & Radiobiology
 - **Exponential:** One-/two-/three-phase decay, one-phase association, plateau followed by one-phase decay/association, and exponential growth ($Y = Y_0 e^{kX}$, doubling time $\ln 2 / k$).
 - **Lines & Polynomials:** Straight line (plus Deming Model II regression in `crates/fit/src/linear.rs`), line through origin, segmental linear ($X_0$ breakpoint), smooth hyperbolic hinge, semi-log/log-log/probit lines, power law ($Y = a X^b$), logarithmic curve, and centered & ordinary polynomials (`centered_poly_1..6`, `polynomial_2..6`).
-- **Gaussian, Sine & Growth:** Gaussian (`gaussian`, `gaussian_baseline`), Log-Gaussian (`log_gaussian`), Cumulative Gaussian, sum of two Gaussians, Lorentzian, Weibull peak, sine and damped sine waves (each parameterized with `Baseline`) and sinc wave, Exponential plateau, Logistic growth (reporting inflection point $\frac{1}{k}\ln\!\left(\frac{Y_M - Y_0}{Y_0}\right)$), Gompertz growth, Beta growth-and-decline, and Linear–Quadratic surviving-fraction cell-survival ($S(D) = e^{-(\alpha D + \beta D^2)}$, `linear_quadratic_survival`).
+- **Gaussian, Sine & Growth:** Gaussian (`gaussian`, `gaussian_baseline`), Log-Gaussian (`log_gaussian`), Cumulative Gaussian, sum of two Gaussians, Lorentzian, Weibull peak, sine and damped sine waves (each parameterized with `Baseline`) and sinc wave, Exponential plateau, Logistic growth, Gompertz growth, Beta growth-and-decline, and Linear–Quadratic surviving-fraction cell-survival ($S(D) = e^{-(\alpha D + \beta D^2)}$, `linear_quadratic_survival`).
 
-### 3.5 Planned Built-In Equation Library Additions *(target specification — not yet registered in `PHARMA_EQUATION_IDS` / `CURVE_EQUATION_IDS`)*
+### 3.5 Extended Built-In Equation Library *(implemented in `R18.3`, registered in `PHARMA_EQUATION_IDS` / `CURVE_EQUATION_IDS`)*
 
 1. **Linear-Concentration (`X = [C] > 0`) Normalized Dose–Response:**
    - `agonist_vs_response_normalized`: $Y = \frac{100 X}{\text{EC}_{50} + X}$ (reports derived $\log_{10}\text{EC}_{50}$),
@@ -175,7 +175,7 @@ Every built-in model implements `ParametricModel` (`crates/fit/src/library/mod.r
      $$Y = \text{Basal} + \frac{\text{EffectMax} - \text{Basal}}{1 + \left(\frac{K_A + [A]}{\tau_d [A]}\right)^n}$$
    - **Competitive Gaddum/Schild with Unity Slope (`ec50_shift_gaddum_schild_unity_log` & `_conc`; Arunlakshana & Schild 1959; Colquhoun 2007):** Constrains `SchildSlope = 1` so $\text{p}A_2 = \text{p}K_B = -\log_{10} K_B$ directly estimates competitive antagonist equilibrium dissociation affinity across dataset column-title concentrations $[B]_d$:
      $$\log_{10}\text{EC}_{50,d} = \log_{10}\text{EC}_{50,\text{ctrl}} + \log_{10}\!\left(1 + \frac{[B]_d}{10^{-\text{p}K_B}}\right)$$
-     Derived $K_B = 10^{-\text{p}K_B}$ reverses lower/upper confidence-limit ordering upon sign negation.
+     Derived scalar `KB` ($K_B = 10^{-\text{p}K_B}$) is reported as a point transform via `DerivedScalar` (derived-scalar CI propagation is not yet implemented; reverse lower/upper bounds when transforming $\text{p}K_B$ CI limits).
    - **Parallel Dose–Response Potency Fold-Shift (`ec50_shift_ratio_log` & `ec50_shift_ratio_conc`):** Shares `Bottom`, `Top`, and `HillSlope`; dataset `<A>` uses $\text{EC}_{50,\text{ctrl}}$ ($\log_{10}\text{EC}_{50,\text{ctrl}}$) and datasets `<~A>` use $\text{EC}_{50,\text{ctrl}} \cdot \text{EC}_{50\text{Ratio}}$ ($\log_{10}\text{EC}_{50,\text{ctrl}} + \log_{10}\text{EC}_{50\text{Ratio}}$), enabling a direct 1-df test against null $\text{EC}_{50\text{Ratio}} = 1$.
 3. **Receptor Binding Additions:**
    - **One-site total saturation accounting for ligand depletion (`one_site_total_ligand_depletion`; Swillens 1995):** Fits total bound radioligand $Y$ (`cpm`) vs. total added radioligand $X$ (`cpm`) without separate nonspecific-binding wells, holding specific radioactivity `SpecAct` (`cpm/fmol`) and assay volume `Vol` (`mL`) constant with $K_{d,\text{cpm}} = K_{d,\text{nM}} \cdot \text{Vol} \cdot 1000 \cdot \text{SpecAct}$:
@@ -215,11 +215,11 @@ Every built-in model implements `ParametricModel` (`crates/fit/src/library/mod.r
   - **Dependent variable & ODE IC syntax:** `Y` (dependent variable on RHS / implicit equations / ODEs), `Y0` and `Y(t0)` (ODE initial condition LHS; non-ODE `Y0 = ...` acts as an ordinary local variable).
   - **Dataset index:** `DS`, `DATASET` (0-based dataset index).
   - **Built-in mathematical constants & special literals:** `E` ($e$), `PI` ($\pi$), `LN2` ($\ln 2$), `LN10` ($\ln 10$), `SQRT2` ($\sqrt{2}$), `INF` ($+\infty$), `NAN` (NaN; propagates as domain failure).
-  - **`[InitialValues]` summary statistics (inside `[InitialValues]` rules only):** `YMIN`, `YMAX`, `XMIN`, `XMAX`, `XMID`, `YMID`, `XATYMIN`, `XATYMAX`, `XATY50`, `SPAN`, `SIGN`.
+  - **`[InitialValues]` summary statistics (21 tokens in `INIT_STAT_NAMES`, inside `[InitialValues]` rules only):** `YMIN`, `YMAX`, `XMIN`, `XMAX`, `XMID`, `YMID`, `XATYMIN`, `XATYMAX`, `XATY50`, `XATYMID`, `YATXMIN`, `YATXMID`, `YATXMAX`, `SPAN`, `SIGN`, `INITIALVALUE`, `MEANCOLUMNTITLE`, `LOGMEANCOLUMNTITLE`, `SLOPEATXMIN`, `SLOPEATXMID`, `SLOPEATXMAX`.
   - **Non-canonical casing:** Using lowercase/mixed-case variants of reserved constants/aliases (`e`, `Pi`, `nan`, `ds`) resolves to the built-in symbol and records `DslWarningKind::NonCanonicalReservedCase`.
 - **Built-in scalar mathematical & special-function library** (`BuiltinFn` in `crates/fit/src/dsl/ast.rs`; overlaps the in-table formula functions in Section 4 of [`data-tables-and-transforms.md`](data-tables-and-transforms.md)): elementary/trig/hyperbolic functions, `erf`/`erfc`, `normcdf`/`norminv`, Bessel (`besselj0`, `besselj1`, `besseljn`, `bessely0`, `bessely1`, `besselyn`, `besseli0`, `besseli1`, `besselk0`, `besselk1`), gamma/beta/digamma (`gamma`, `lngamma`, `beta`, `digamma`/`psi`), and hypergeometric functions (`hyp1f1`, `hyp2f1`, `confluent_u`).
 
-### 4.1 Planned Custom-Equation Built-In Function Additions *(target specification — backed by `curvebook-math` primitives)*
+### 4.1 Extended Custom-Equation Built-In Functions *(implemented in `R18.4`, backed by `curvebook-math` primitives)*
 
 Expose the remaining probability, special, and unit-conversion functions in `crates/fit/src/dsl/` (`BuiltinFn` in `ast.rs`, name resolution in `compile.rs`, evaluation in `vm.rs`):
 - **Regularized incomplete beta & gamma:** `ibeta(a, b, x)` ($I_x(a,b)$), `igamma(a, x)` ($P(a,x)$), `igammac(a, x)` ($Q(a,x)$),
@@ -231,7 +231,7 @@ Expose the remaining probability, special, and unit-conversion functions in `cra
   - Binomial upper cumulative tail: `binomial(k, n, p)` $= \sum_{j = \lceil k \rceil}^{n} \binom{n}{j} p^j (1 - p)^{n - j}$,
 - **Algebraic helpers & special-function aliases:** `fact(n)` ($n!$ for non-negative integers), `logit(p)` $= \ln(p/(1-p))$ for $p \in (0,1)$, `probit(p)` $= 5 + \Phi^{-1}(p)$, `perc(x)` $= x / 100$, `deg(rad)`, `rad(deg)`, `sqr(x)` $= x^2$, `int(x)` (truncate toward zero), `sgn(x)`, infix/function `mod(x, y)`, `is_defined(x)` (non-blank/finite predicate for multivariable rows), general integer-order modified Bessel `besseli(n, x)` / `besselk(n, x)`, and canonical aliases `gammaln` ($\equiv$ `lngamma`), `hypgeometricm` ($\equiv$ `hyp1f1`), `hypgeometricu` ($\equiv$ `confluent_u`), and `hypgeometricf` ($\equiv$ `hyp2f1`).
 
-### 4.2 Planned User-Defined `[InitialValues]` Rule Grammar *(target specification)*
+### 4.2 User-Defined `[InitialValues]` Rule Grammar *(implemented in `R18.4`)*
 
 Allow user-defined equations to store reusable data-driven starting-value rules of the form `multiplier * Basis` (or `multiplier / Basis`), evaluated independently per dataset unless overridden manually:
 - **Literal constant:** `c * (InitialValue)` (data-independent starting estimate $c$),
@@ -249,15 +249,15 @@ Allow user-defined equations to store reusable data-driven starting-value rules 
 
 ### 5.1 Simple Linear Regression, Fixed-Point Constraints & Standard Addition (`crates/fit/src/linear.rs`)
 - **Implemented core:** OLS slope & $Y$-intercept ($Y = \beta_0 + \beta_1 X$) or forced-origin regression ($Y = \beta_1 X$), $R^2$, residual SD $s_{y \cdot x}$, slope $\ne 0$ *F*/*t* test, Working–Hotelling / Student-*t* confidence & prediction bands, runs test, ANCOVA multi-dataset slope & intercept comparison (`compare_linear_lines`), bidirectional unknown interpolation (`Y` from `X` and exact quadratic Fieller `X` from `Y` calibration & mean-response intervals, `R4.6`), and domain-restricted fitting (`x_range_filter` & `[plot_x_min, plot_x_max]`, `R13.1`).
-- **Planned extensions *(target specification)*:**
+- **Fixed-point constraint & Standard Addition *(implemented in `R18.5`)*:**
   1. **Arbitrary fixed-point constraint `(X0, Y0)`:** Fit $Y - Y_0 = \beta_1 (X - X_0)$ ($\text{df} = N - 1$), generalizing `force_through_origin` $(0, 0)$.
   2. **$X$-intercept Fieller interval & Standard Addition Method:** Always report $\hat{X}_{\text{int}} = -\hat{\beta}_0 / \hat{\beta}_1$ with exact Fieller (1940) confidence limits (emitting `InverseIntervalSet` unbounded/exclusive regions when slope is not significantly non-zero). For matrix-effect-corrected **Standard Addition** assays (known spike concentrations $X \ge 0$ added to constant unknown matrix), $|\hat{X}_{\text{int}}| = -\hat{X}_{\text{int}}$ estimates unknown sample concentration with negated, order-swapped Fieller limits $[-U_{X_{\text{int}}}, -L_{X_{\text{int}}}]$, paired with an option to extend the plotted regression line down to $X = \hat{X}_{\text{int}}$ ($Y = 0$).
 
 ### 5.2 Deming (Model II) Errors-in-Variables Regression (`Deming 1943`; `Linnet 1990, 1993`)
 - **Implemented core (`crates/fit/src/linear.rs`):** Closed-form orthogonal ($\lambda = 1$) and general variance-ratio ($\lambda = \sigma_X^2 / \sigma_Y^2$, `R4.6`) Deming slope and intercepts with delete-1 jackknife SEs, *t*-based CIs, and zero-slope hypothesis test; omits $R^2$ by design because vertical explained-variance fraction is undefined when both $X$ and $Y$ carry measurement error.
-- **Planned document/UI wiring *(target specification)*:** Persist unequal error parameters (`DemingErrorSpec`: `EqualError` $\lambda = 1$, explicit `(sd_x, sd_y)` computing $\lambda = \text{SD}_X^2 / \text{SD}_Y^2$, or direct `variance_ratio_lambda`) on `LinearRegressionSpec` in `crates/doc/src/analysis.rs` (which currently exposes only boolean `deming_model_ii`), plus a duplicate-pair repeatability helper $\hat{\sigma}_{\text{err}} = \sqrt{\frac{1}{2m}\sum_{j=1}^m d_j^2}$ from $m$ duplicate sample pairs.
+- **Document & UI wiring *(implemented in `R18.5`)*:** Persists unequal error parameters (`DemingErrorSpec`: `EqualError` $\lambda = 1$, `StandardDeviations { sd_x, sd_y }` computing $\lambda = \text{SD}_X^2 / \text{SD}_Y^2$, or `VarianceRatio { lambda }`) on `LinearRegressionSpec` in `crates/doc/src/analysis.rs`, plus a duplicate-pair repeatability helper $\hat{\sigma}_{\text{err}} = \sqrt{\frac{1}{2m}\sum_{j=1}^m d_j^2}$ from $m$ duplicate sample pairs.
 
-### 5.3 Planned Standalone XY Simple Logistic Regression *(target specification — `Hosmer, Lemeshow & Sturdivant 2013`; `Tjur 2009`)*
+### 5.3 Standalone XY Simple Logistic Regression *(implemented in `R18.6` — `Hosmer, Lemeshow & Sturdivant 2013`; `Tjur 2009`)*
 Provide a dedicated `SimpleLogisticRegression` analysis directly on single-subcolumn `XY` tables where $Y_i \in \{0, 1\}$ (rejecting non-binary $Y$ values with a structured `StatsError` / `FitError`):
 - **Model & MLE:** $\ln\!\left(\frac{P(Y=1 \mid X)}{1 - P(Y=1 \mid X)}\right) = \beta_0 + \beta_1 X$ solved by Newton–Raphson / Fisher scoring IRLS.
 - **Reported parameters & intervals:** $\hat{\beta}_0, \hat{\beta}_1$, odds ratios $e^{\hat{\beta}_0}, e^{\hat{\beta}_1}$, **`X at 50%`** ($X_{50} = -\hat{\beta}_0 / \hat{\beta}_1$ where $P = 0.5$), asymptotic SEs, and asymmetrical profile-likelihood CIs (including propagated odds-ratio and $X_{50}$ intervals).
@@ -269,7 +269,7 @@ Provide a dedicated `SimpleLogisticRegression` analysis directly on single-subco
   - Sigmoid probability curve overlay evaluated across auto or user-specified `[plot_x_min, plot_x_max]`,
   - Explicit detection and plain-language reporting of **perfect separation**, **quasi-perfect separation**, and collinearity (`Heinze & Schemper 2002`) rather than diverging parameter estimates.
 
-### 5.4 Planned Multivariable Linear, Poisson & Logistic GLM Extensions *(target specification — cross-referenced with [`statistics-implementation.md`](statistics-implementation.md#53-roc-curves-method-comparison-multiple-regression-imputation-pca--clustering))*
+### 5.4 Planned Multivariable Linear, Poisson & Logistic GLM Extensions *(target specification — not yet implemented; cross-referenced with [`statistics-implementation.md`](statistics-implementation.md#53-roc-curves-method-comparison-multiple-regression-power-auc-imputation-pca--clustering))*
 Extend `GlmSpec` (`crates/doc/src/analysis.rs` & `crates/stats/src/regression.rs`) beyond main-effect `predictor_columns`, `reference_levels`, and `compute_vif`:
 1. **Model formula terms & intercept control:** Explicit two-way ($A \times B$) and three-way ($A \times B \times C$) interaction terms, polynomial powers ($X^2, X^3$), predictor transforms, and `include_intercept: bool` (with documented adjusted-$R^2$ / null-deviance conventions when the intercept is omitted).
 2. **Nested GLM comparison:** Compare full vs. reduced `GlmSpec` models on identical complete-case rows via Extra-SS *F*-test (linear), deviance likelihood-ratio $\chi^2$ test (logistic & Poisson), and $\Delta\text{AIC}_c$.
@@ -279,9 +279,9 @@ Extend `GlmSpec` (`crates/doc/src/analysis.rs` & `crates/stats/src/regression.rs
 
 ---
 
-## 6. Planned Model-Free Curve Fitting (`Spline / LOWESS`) & Theoretical Distribution Plotting *(target specification)*
+## 6. Model-Free Curve Fitting (`Spline / LOWESS`) & Planned Theoretical Distribution Plotting
 
-### 6.1 Dedicated XY `FitSplineLowess` Analysis (`crates/transform/src/curve.rs` & `crates/doc/src/analysis.rs`)
+### 6.1 Dedicated XY `FitSplineLowess` Analysis *(implemented in `R18.7` — `crates/transform/src/curve.rs` & `crates/doc/src/analysis.rs`)*
 Expose a first-class model-free curve-fitting analysis on `XY` tables producing both a smooth `FittedCurveOverlay` (`segment_count` polyline vertices) and optional standard-curve interpolation:
 1. **Natural Cubic Spline (`de Boor 1978`):** $C^2$ piecewise cubic polynomial passing through every distinct sorted knot $(x_g, \bar{y}_g)$ with zero second derivatives at endpoints ($S''(x_1) = S''(x_G) = 0$).
 2. **Akima Subspline (`Akima 1970`):** $C^1$ piecewise cubic interpolation computing local nodal slopes from five-point secant differences $m_i = \frac{|d_{i+1} - d_i| d_{i-1} + |d_{i-1} - d_{i-2}| d_i}{|d_{i+1} - d_i| + |d_{i-1} - d_{i-2}|}$ to suppress Runge/overshoot oscillations around sharp transitions.
@@ -290,7 +290,7 @@ Expose a first-class model-free curve-fitting analysis on `XY` tables producing 
 5. **Dense Point-to-Point Curve:** Piecewise linear interpolation in data space resampled onto `segment_count` $(X, Y)$ points (distinct from straight graph-space segment connectors when rendered on logarithmic axes), enabling AUC integration or piecewise-linear standard-curve lookup.
 6. **Curve XY Output & Nonparametric Standard-Curve Interpolation:** Optional `emit_curve_coordinates_tab: bool` outputting the sampled $(X, Y)$ table, and optional `interpolate_unknowns: bool` solving $S(x) = y_{\text{unk}}$ across spline/Akima/LOWESS/point-to-point segments for unpaired `(blank X, Y)` rows (and evaluating $S(x_{\text{unk}})$ for `(X, blank Y)` rows).
 
-### 6.2 Theoretical Curve Families & Probability Distribution Plotting (`Plot a function`)
+### 6.2 Planned Theoretical Curve Families & Probability Distribution Plotting (`Plot a function`, target specification)
 Support generating one or more theoretical curve columns without an input `DataSheet` over $[X_{\min}, X_{\max}]$ (`linear` or `log` grid spacing, configurable point/step count):
 - **Dataset-conditional tail-shading families:** Multi-dataset DSL expressions (`<A> Y = pdf(X)`, `<B> Y = IF(X <= -c, pdf(X), 0)`, `<C> Y = IF(X >= c, pdf(X), 0)`) combined with Info-sheet `HookedConstant` parameters ($\nu_1, \nu_2, \lambda, n, p$, critical cutoff $c$) so editing a parameter on an `InfoSheet` reactively updates shaded one- or two-tailed $z$, Student $t$, Snedecor $F$, and $\chi^2$ density graphs.
 - **Discrete probability mass functions:** Integer-step evaluation ($\Delta X = 1$ over $X = 0, 1, \dots, M$) for $\text{Binomial}(n, p)$ and $\text{Poisson}(\lambda)$ renderable as superimposed bar/spike charts with highlighted tail regions.
