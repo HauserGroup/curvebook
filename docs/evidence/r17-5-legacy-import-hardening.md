@@ -9,7 +9,7 @@ This record documents the clean-room audit, dialect hardening fixes, structured 
 - Legacy XML project importer: `crates/format/src/pzfx.rs`.
 - Legacy ZIP archive container importer: `.prism` archive parser module inside `crates/format` (`table.importPrism` backend).
 - Command & CLI consumers: `crates/engine/src/cmd/table/import.rs` (`table.importPzfx`, `table.importPrism`) and `apps/curvebook-cli/src/cmd_convert.rs` (`curvebook convert` / `export` / `info`).
-- Clean-room regression suites: [`r17_5_legacy_import_hardening.rs`](../../crates/format/tests/r17_5_legacy_import_hardening.rs) and [`r17_5_import_warning_propagation.rs`](../../crates/engine/tests/r17_5_import_warning_propagation.rs).
+- Clean-room regression suites: [`r17_5_legacy_import_hardening.rs`](../../crates/format/tests/format_suite/r17_5_legacy_import_hardening.rs) and [`r17_5_import_warning_propagation.rs`](../../crates/engine/tests/core_suite/r17_5_import_warning_propagation.rs).
 
 ## 2. Catalogued `.pzfx` XML Quirks & Hardening
 

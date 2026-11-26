@@ -10,7 +10,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-mod common;
+use super::common;
 
 use curvebook_doc::{
     Cell, CellCoord, ChecklistStatus, CiBound, DataSheet, FitFlagRules, FitMethod, IdentifiabilityMode, ModelComparisonMethod,

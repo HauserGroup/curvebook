@@ -15,7 +15,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::excessive_precision, clippy::too_many_arguments)]
 
-mod common;
+use super::common;
 
 use curvebook_doc::{CiBound, ParameterRule};
 use curvebook_fit::library::pharma::kb_ci_from_pkb_ci;

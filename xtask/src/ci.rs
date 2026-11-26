@@ -21,7 +21,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         [] => run_all(root),
         [stage, rest @ ..] if stage == "quick" => crate::ci_quick::run(root, rest),
         [stage] if matches!(stage.as_str(), "build" | "wasm") || HOSTED_STAGES.contains(&stage.as_str()) => run_stage(root, stage),
-        _ => Err(format!("usage: cargo xtask ci [quick [--direct] [--base <git-ref>]|build|{}|wasm]", HOSTED_STAGES.join("|"))),
+        _ => Err(format!("usage: cargo xtask ci [quick [--direct|--transitive] [--base <git-ref>]|build|{}|wasm]", HOSTED_STAGES.join("|"))),
     }
 }
 

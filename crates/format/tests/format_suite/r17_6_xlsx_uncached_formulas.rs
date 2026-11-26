@@ -2,7 +2,7 @@
 //! blank cell or as an imported cached value.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-mod common;
+use super::common;
 
 use common::xlsx_single_sheet_zip;
 use curvebook_format::{ImportWarning, ImportWarningKind, import_xlsx_bytes};

@@ -4,8 +4,7 @@
 //! Targeted Wave 2 modal remediation integration tests covering `AUD-10-01`..`56`,
 //! modal halves of `AUD-13` (`02`, `15`, `16`, `17`), and `EXT-01`.
 
-#[path = "common/mod.rs"]
-mod common;
+use super::common;
 
 use std::sync::Arc;
 

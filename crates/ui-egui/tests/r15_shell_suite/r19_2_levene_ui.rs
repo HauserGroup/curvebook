@@ -3,8 +3,7 @@
 
 //! Focused `EguiHumanPathDriver` tests for the R19.2 standalone Levene / Brown–Forsythe variance test.
 
-#[path = "common/mod.rs"]
-mod common;
+use super::common;
 
 use curvebook_doc::{AnalysisKind, ColumnDesignHint, LeveneCenter, LeveneTestSpec, SheetId, TableKind};
 use curvebook_engine::Session;

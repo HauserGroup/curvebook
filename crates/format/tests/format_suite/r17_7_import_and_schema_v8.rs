@@ -11,7 +11,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::indexing_slicing)]
 
-mod common;
+use super::common;
 
 use std::error::Error;
 use std::path::Path;

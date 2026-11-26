@@ -4,8 +4,7 @@
 //! UI tests for `DescriptiveSpec::custom_upper_percentile` in the `egui_shell` Descriptive
 //! Statistics modal and `AnalyzeDialogState` / `dialog_patch` wiring.
 
-#[path = "common/mod.rs"]
-mod common;
+use super::common;
 
 use common::{ShellTestState, make_shell_driver_with_state, seed_column_doc, set_textbox};
 use curvebook_doc::{AnalysisKind, ColumnDesignHint, DescriptiveSpec, SheetId};

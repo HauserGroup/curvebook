@@ -13,10 +13,8 @@
 //! 5. `ImportWizard` multi-block CSV split + comma-padded preamble extraction via
 //!    `curvebook_format::extract_preamble_info`.
 
-#[path = "common/mod.rs"]
-mod common;
-#[path = "human_wf_common/mod.rs"]
-mod human_wf_common;
+use super::common;
+use super::human_wf_common;
 
 use std::fs;
 use std::path::{Path, PathBuf};

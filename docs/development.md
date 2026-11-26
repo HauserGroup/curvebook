@@ -8,7 +8,7 @@
   - Run `rustc --version` and `cargo --version` (and `rustup show active-toolchain`) inside the repository to confirm rustup's proxy selects `1.99.1` (or newer) for both the compiler and Cargo.
   - **macOS Homebrew note:** If both Homebrew `rust` and `rustup` are installed, `/opt/homebrew/bin/{cargo,rustc}` link directly to Homebrew's formula and bypass `rust-toolchain.toml` and `+<toolchain>` selection. Prepend `rustup`'s proxy bin directory (`export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`) ahead of `/opt/homebrew/bin` so `rust-toolchain.toml` takes effect.
 - Optional tools:
-  - [`cargo-nextest`](https://nexte.st/) — used automatically by `cargo xtask test` when installed; falls back to `cargo test`.
+  - [`cargo-nextest`](https://nexte.st/) — used automatically by `cargo xtask test` and `cargo xtask ci quick` when installed on `PATH` or in `$CARGO_HOME/bin` (`$HOME/.cargo/bin`); falls back to `cargo test`.
   - `wasm32-unknown-unknown` target — for `cargo xtask wasm`; plus [`trunk`](https://trunkrs.dev/) for browser builds in `apps/curvebook-web`.
   - [`actionlint`](https://github.com/rhysd/actionlint) + [`shellcheck`](https://www.shellcheck.net/) — for `cargo xtask workflows`.
   - [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install --locked cargo-llvm-cov`) + the `llvm-tools-preview` rustup component — for `cargo xtask coverage` ([Coverage reports](#coverage-reports)).
@@ -42,7 +42,7 @@ cache behavior, per-test timeouts, and scoped `cargo xtask ci <stage>` commands.
 
 | Task | Command |
 |---|---|
-| Run the fast pre-PR tier (policy + changed crates and dependents; add `--direct` for inner-loop work on foundational crates) | `cargo xtask ci quick [--direct]` |
+| Run the fast pre-PR tier (policy + reverse-dep Clippy + direct-crate tests; `--direct` for inner-loop lint+tests, `--transitive` for rdep tests) | `cargo xtask ci quick [--direct\|--transitive]` |
 | Run the default CI gates locally | `cargo xtask ci` |
 | Run the opt-in WASM checks locally | `cargo xtask ci wasm` |
 | Run unit, integration & doctests | `cargo xtask test` |
@@ -121,7 +121,8 @@ To isolate configuration for test or agent runs, pass `--portable-dir <dir>` (or
 
 ## Tests & numerical verification
 
-- `cargo xtask test` runs workspace unit and integration tests (`cargo nextest run` when installed, else `cargo test --workspace --lib --bins --tests`) followed by workspace doctests (`cargo test --workspace --doc`).
+- `cargo xtask test` runs workspace unit and integration tests (`cargo nextest run` when installed on `PATH` or in `$CARGO_HOME/bin`, else `cargo test --workspace --lib --bins --tests`) followed by workspace doctests (`cargo test --workspace --doc`).
+- **One general integration test binary per crate:** Add new integration tests as submodules inside each crate's single general integration suite (`tests/<crate>_suite/main.rs` or `tests/core_suite/main.rs`) rather than adding new top-level `tests/*.rs` binaries (`cargo xtask layers` enforces this; dedicated binaries are reserved for `PERFORMANCE_FILTER`, `nist_strd`, `.config/nextest.toml` isolated suites, `install_fonts`, and feature-gated suites). See [`AGENTS.md`](../AGENTS.md) › Testing Discipline.
 - Every statistical test (`crates/stats`) and regression model (`crates/fit`) must carry analytical unit tests, certified reference-dataset tests (NIST StRD) with explicit relative/ULP tolerances in `curvebook-testkit`, and property tests covering degenerate inputs.
 - `cargo xtask citations` (`R0.30`, included in `cargo xtask ci policy`) enforces [`AGENTS.md`](../AGENTS.md) `D1` rule 1 across `crates/math`, `crates/stats`, `crates/fit`, and `crates/transform`: every non-test `.rs` module defining a public routine (`pub fn`) fails closed unless either its `//!` module header or each routine's `///` doc comment cites a published reference (author + year, DOI, ISBN, NIST DLMF, Abramowitz & Stegun, or NIST StRD). Modules that hold only error types, re-exports, formatting, expression syntax/DAG plumbing, or structural table-reshaping helpers are explicitly allow-listed with a stated reason in `xtask/src/citations.rs`, and nonexistent allow-list paths fail closed.
 

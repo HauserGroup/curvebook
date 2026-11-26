@@ -14,7 +14,7 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-mod common;
+use super::common;
 
 use std::fs;
 
@@ -24,8 +24,8 @@ use curvebook_engine::{ExternalPathPolicy, Session};
 use curvebook_format::ZipArchive;
 use serde_json::{Value, json};
 
-const ALPHA1_PROJECT: &[u8] = include_bytes!("fixtures/r14_6/alpha1-upgrade.curvebook");
-const ALPHA1_SCRIPT: &str = include_str!("fixtures/r14_6/make-alpha1-project.ndjson");
+const ALPHA1_PROJECT: &[u8] = include_bytes!("../fixtures/r14_6/alpha1-upgrade.curvebook");
+const ALPHA1_SCRIPT: &str = include_str!("../fixtures/r14_6/make-alpha1-project.ndjson");
 
 // The upgrade test only means something while the current schema is newer than Alpha.1's v2.
 const _: () = assert!(CURRENT_SCHEMA_VERSION > 2);

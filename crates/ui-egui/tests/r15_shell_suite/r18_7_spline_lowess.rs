@@ -3,8 +3,7 @@
 
 //! Targeted `EguiHumanPathDriver` integration test for R18.7 `FitSplineLowess`.
 
-#[path = "common/mod.rs"]
-mod common;
+use super::common;
 
 use curvebook_doc::{
     AnalysisKind, Cell, ChecklistStatus, DataSheet, LowessPreset, ProjectDocument, ResultStatus, ResultTabKind, SheetId, SplineLowessMethod,

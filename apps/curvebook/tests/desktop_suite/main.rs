@@ -16,3 +16,4 @@ mod r17_1_drop_import_prompt;
 mod r17_3_idle_repaint;
 mod r73_shared_window;
 mod recovery_wiring;
+mod rem_hosts;

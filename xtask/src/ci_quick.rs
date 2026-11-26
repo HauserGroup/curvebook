@@ -1,8 +1,16 @@
 //! `cargo xtask ci quick`: the fast local tier of the CI gates.
 //!
-//! Runs every policy gate, then Clippy and the non-performance nextest suite for only the
-//! workspace packages a change touches plus the workspace packages that depend on them
-//! (or, with `--direct`, only the directly modified packages).
+//! Runs every policy gate, then:
+//! - By default: runs Clippy (`--all-targets -D warnings`) across directly modified packages and
+//!   their workspace reverse dependents (catching downstream compile/lint regressions), and runs
+//!   the non-performance nextest suite for **directly modified packages only** (leaving full
+//!   transitive test fan-out to hosted CI on the pull request).
+//! - With `--direct`: restricts both Clippy and tests to directly modified packages for inner-loop
+//!   iteration.
+//! - With `--transitive`: runs both Clippy and tests across directly modified packages and their
+//!   workspace reverse dependents (omitting `xtask` tests when `xtask` is only pulled in
+//!   transitively), for local verification of shared wire/schema/API contract changes.
+//!
 //! Changes are measured against the merge base with `main` (or `--base <ref>`), including
 //! staged, unstaged, and untracked files. Edits to workspace-wide build inputs (the root
 //! manifest, lockfile, toolchain, or lint configuration) select the whole workspace.
@@ -93,10 +101,21 @@ pub struct QuickPlan {
     pub include_i18n: bool,
 }
 
+/// Package-selection mode for `cargo xtask ci quick`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeMode {
+    /// Default pre-PR tier: Clippy all-targets on direct + reverse dependents, tests on direct packages only.
+    Default,
+    /// `--direct`: Clippy and tests on directly modified packages only.
+    Direct,
+    /// `--transitive`: Clippy and tests on direct + reverse dependents (omitting transitive `xtask` tests).
+    Transitive,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QuickArgs {
     base: Option<String>,
-    direct: bool,
+    mode: ScopeMode,
 }
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
@@ -110,8 +129,8 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let meta = cargo_metadata_resolved(root)?;
     let dirs = package_dirs(&meta)?;
     let graph = layers::from_metadata(&meta)?;
-    let quick_plan = plan(&changed, &dirs, &graph, parsed.direct);
-    print_plan(&base, changed.len(), parsed.direct, &quick_plan);
+    let quick_plan = plan(&changed, &dirs, &graph, parsed.mode);
+    print_plan(&base, changed.len(), parsed.mode, &quick_plan);
 
     println!("ci quick: starting policy");
     ci::policy(root, quick_plan.include_i18n)?;
@@ -141,17 +160,23 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
 }
 
 fn parse_args(args: &[String]) -> Result<QuickArgs, String> {
-    const USAGE: &str = "usage: cargo xtask ci quick [--direct] [--base <git-ref>]";
+    const USAGE: &str = "usage: cargo xtask ci quick [--direct|--transitive] [--base <git-ref>]";
     let mut base: Option<String> = None;
-    let mut direct = false;
+    let mut mode: Option<ScopeMode> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--direct" => {
-                if direct {
+                if mode.is_some() {
                     return Err(String::from(USAGE));
                 }
-                direct = true;
+                mode = Some(ScopeMode::Direct);
+            }
+            "--transitive" => {
+                if mode.is_some() {
+                    return Err(String::from(USAGE));
+                }
+                mode = Some(ScopeMode::Transitive);
             }
             "--base" => {
                 if base.is_some() {
@@ -168,7 +193,7 @@ fn parse_args(args: &[String]) -> Result<QuickArgs, String> {
             _ => return Err(String::from(USAGE)),
         }
     }
-    Ok(QuickArgs { base, direct })
+    Ok(QuickArgs { base, mode: mode.unwrap_or(ScopeMode::Default) })
 }
 
 fn test_args(root: &Path, scope: &[String]) -> Vec<String> {
@@ -185,9 +210,13 @@ fn test_args(root: &Path, scope: &[String]) -> Vec<String> {
     }
 }
 
-fn print_plan(base: &str, changed: usize, direct_only: bool, quick_plan: &QuickPlan) {
-    let mode = if direct_only { " (direct only)" } else { "" };
-    println!("ci quick{mode}: {changed} changed file(s) relative to {base}");
+fn print_plan(base: &str, changed: usize, mode: ScopeMode, quick_plan: &QuickPlan) {
+    let mode_label = match mode {
+        ScopeMode::Default => "",
+        ScopeMode::Direct => " (direct only)",
+        ScopeMode::Transitive => " (transitive tests)",
+    };
+    println!("ci quick{mode_label}: {changed} changed file(s) relative to {base}");
     if quick_plan.workspace_wide {
         println!("ci quick: a workspace-wide build input changed; linting and testing --workspace");
         return;
@@ -204,6 +233,9 @@ fn print_plan(base: &str, changed: usize, direct_only: bool, quick_plan: &QuickP
         match &quick_plan.test_selection {
             Selection::Workspace => println!("ci quick: test packages: --workspace"),
             Selection::Packages(set) => println!("ci quick: test packages: {}", set.iter().cloned().collect::<Vec<_>>().join(", ")),
+        }
+        if mode == ScopeMode::Default {
+            println!("ci quick: transitive reverse-dependent tests left to hosted CI (pass --transitive to run locally)");
         }
     }
     if !quick_plan.include_i18n {
@@ -291,11 +323,14 @@ fn collapse_selection(selected: BTreeSet<String>, graph: &[Crate]) -> Selection 
 /// workspace dependency graph.
 ///
 /// - Workspace-wide inputs select `--workspace` for lint + tests and enable `i18n-report`.
-/// - Otherwise, `direct_packages` tracks directly modified packages; when `direct_only` is
-///   false, lint selection closes over workspace reverse dependencies (normal, dev, and build).
+/// - `ScopeMode::Default`: `lint_selection` closes over workspace reverse dependencies (normal,
+///   dev, and build) while `test_selection` stays scoped to `direct_packages`.
+/// - `ScopeMode::Direct`: both `lint_selection` and `test_selection` stay scoped to
+///   `direct_packages`.
+/// - `ScopeMode::Transitive`: both `lint_selection` and `test_selection` close over workspace
+///   reverse dependencies, omitting `xtask` from `test_selection` when only pulled in transitively.
 /// - `include_i18n` is true only on workspace-wide edits or direct edits to `curvebook-ui-egui`.
-/// - `xtask` is omitted from `test_selection` when only pulled in as a transitive dependent.
-pub fn plan(changed: &[String], dirs: &[(String, String)], graph: &[Crate], direct_only: bool) -> QuickPlan {
+pub fn plan(changed: &[String], dirs: &[(String, String)], graph: &[Crate], mode: ScopeMode) -> QuickPlan {
     let workspace_wide = changed.iter().any(|path| is_workspace_wide(path));
     let direct_packages: BTreeSet<String> = changed.iter().filter_map(|path| owning_package(path, dirs)).map(str::to_owned).collect();
     if workspace_wide {
@@ -309,30 +344,36 @@ pub fn plan(changed: &[String], dirs: &[(String, String)], graph: &[Crate], dire
     }
 
     let include_i18n = direct_packages.contains(I18N_PACKAGE);
-    let mut selected = direct_packages.clone();
-    if !direct_only {
+    let mut lint_packages = direct_packages.clone();
+    if mode != ScopeMode::Direct {
         loop {
-            let before = selected.len();
+            let before = lint_packages.len();
             for krate in graph {
-                if !selected.contains(&krate.name) && krate.deps.iter().any(|dep| dep.workspace && selected.contains(&dep.name)) {
-                    selected.insert(krate.name.clone());
+                if !lint_packages.contains(&krate.name) && krate.deps.iter().any(|dep| dep.workspace && lint_packages.contains(&dep.name)) {
+                    lint_packages.insert(krate.name.clone());
                 }
             }
-            if selected.len() == before {
+            if lint_packages.len() == before {
                 break;
             }
         }
     }
 
-    let mut test_packages = selected.clone();
-    if !direct_packages.contains(XTASK_PACKAGE) {
-        test_packages.remove(XTASK_PACKAGE);
-    }
+    let test_packages = match mode {
+        ScopeMode::Default | ScopeMode::Direct => direct_packages.clone(),
+        ScopeMode::Transitive => {
+            let mut set = lint_packages.clone();
+            if !direct_packages.contains(XTASK_PACKAGE) {
+                set.remove(XTASK_PACKAGE);
+            }
+            set
+        }
+    };
 
     QuickPlan {
         workspace_wide: false,
         direct_packages,
-        lint_selection: collapse_selection(selected, graph),
+        lint_selection: collapse_selection(lint_packages, graph),
         test_selection: collapse_selection(test_packages, graph),
         include_i18n,
     }
@@ -342,11 +383,11 @@ pub fn plan(changed: &[String], dirs: &[(String, String)], graph: &[Crate], dire
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{QuickArgs, Selection, package_dirs, parse_args, plan};
+    use super::{QuickArgs, ScopeMode, Selection, package_dirs, parse_args, plan};
     use crate::layers::{self, Crate, Dep, DepKind};
 
     fn select(changed: &[String], dirs: &[(String, String)], graph: &[Crate]) -> Selection {
-        plan(changed, dirs, graph, false).lint_selection
+        plan(changed, dirs, graph, ScopeMode::Default).lint_selection
     }
 
     fn dirs() -> Vec<(String, String)> {
@@ -439,75 +480,90 @@ mod tests {
     }
 
     #[test]
-    fn base_and_direct_argument_parsing() {
-        assert_eq!(parse_args(&[]), Ok(QuickArgs { base: None, direct: false }));
-        assert_eq!(parse_args(&[String::from("--direct")]), Ok(QuickArgs { base: None, direct: true }));
+    fn base_direct_and_transitive_argument_parsing() {
+        assert_eq!(parse_args(&[]), Ok(QuickArgs { base: None, mode: ScopeMode::Default }));
+        assert_eq!(parse_args(&[String::from("--direct")]), Ok(QuickArgs { base: None, mode: ScopeMode::Direct }));
+        assert_eq!(parse_args(&[String::from("--transitive")]), Ok(QuickArgs { base: None, mode: ScopeMode::Transitive }));
         assert_eq!(
             parse_args(&[String::from("--base"), String::from("HEAD~2")]),
-            Ok(QuickArgs { base: Some(String::from("HEAD~2")), direct: false })
+            Ok(QuickArgs { base: Some(String::from("HEAD~2")), mode: ScopeMode::Default })
         );
         assert_eq!(
             parse_args(&[String::from("--direct"), String::from("--base"), String::from("HEAD~2")]),
-            Ok(QuickArgs { base: Some(String::from("HEAD~2")), direct: true })
+            Ok(QuickArgs { base: Some(String::from("HEAD~2")), mode: ScopeMode::Direct })
         );
         assert_eq!(
-            parse_args(&[String::from("--base"), String::from("HEAD~2"), String::from("--direct")]),
-            Ok(QuickArgs { base: Some(String::from("HEAD~2")), direct: true })
+            parse_args(&[String::from("--base"), String::from("HEAD~2"), String::from("--transitive")]),
+            Ok(QuickArgs { base: Some(String::from("HEAD~2")), mode: ScopeMode::Transitive })
         );
         assert!(parse_args(&[String::from("--base")]).is_err());
         assert!(parse_args(&[String::from("--base"), String::from("--direct")]).is_err());
         assert!(parse_args(&[String::from("--base"), String::from("--workspace")]).is_err());
         assert!(parse_args(&[String::from("--direct"), String::from("--direct")]).is_err());
+        assert!(parse_args(&[String::from("--direct"), String::from("--transitive")]).is_err());
+        assert!(parse_args(&[String::from("--transitive"), String::from("--direct")]).is_err());
         assert!(parse_args(&[String::from("--base"), String::from("HEAD~1"), String::from("--base"), String::from("HEAD~2")]).is_err());
         assert!(parse_args(&[String::from("--fast")]).is_err());
     }
 
     #[test]
     fn i18n_report_requires_direct_ui_touch_or_workspace_wide_input() {
-        let math_plan = plan(&files(&["crates/math/src/lib.rs"]), &dirs(), &graph(), false);
+        let math_plan = plan(&files(&["crates/math/src/lib.rs"]), &dirs(), &graph(), ScopeMode::Default);
         assert!(!math_plan.include_i18n, "transitive UI pull from math edit must skip i18n-report");
 
-        let ui_plan = plan(&files(&["crates/ui-egui/src/i18n.rs"]), &dirs(), &graph(), false);
+        let ui_plan = plan(&files(&["crates/ui-egui/src/i18n.rs"]), &dirs(), &graph(), ScopeMode::Default);
         assert!(ui_plan.include_i18n, "direct curvebook-ui-egui edit must enable i18n-report");
 
-        let root_manifest_plan = plan(&files(&["Cargo.toml"]), &dirs(), &graph(), false);
+        let root_manifest_plan = plan(&files(&["Cargo.toml"]), &dirs(), &graph(), ScopeMode::Default);
         assert!(root_manifest_plan.include_i18n, "workspace-wide input must enable i18n-report");
     }
 
     #[test]
-    fn xtask_tests_are_omitted_on_transitive_pull_and_included_on_direct_or_workspace_wide_change() {
-        let math_plan = plan(&files(&["crates/math/src/lib.rs"]), &dirs(), &graph(), false);
+    fn default_mode_lints_reverse_dependents_and_tests_direct_packages_only() {
+        let math_plan = plan(&files(&["crates/math/src/lib.rs"]), &dirs(), &graph(), ScopeMode::Default);
         assert_eq!(math_plan.lint_selection, Selection::Workspace);
-        assert_eq!(math_plan.test_selection, set(&["curvebook-math", "curvebook-stats", "curvebook-ui-egui"]));
+        assert_eq!(math_plan.test_selection, set(&["curvebook-math"]));
 
-        let stats_plan = plan(&files(&["crates/stats/src/anova.rs"]), &dirs(), &graph(), false);
+        let stats_plan = plan(&files(&["crates/stats/src/anova.rs"]), &dirs(), &graph(), ScopeMode::Default);
         assert_eq!(stats_plan.lint_selection, set(&["curvebook-stats", "curvebook-ui-egui", "xtask"]));
-        assert_eq!(stats_plan.test_selection, set(&["curvebook-stats", "curvebook-ui-egui"]));
+        assert_eq!(stats_plan.test_selection, set(&["curvebook-stats"]));
 
-        let xtask_plan = plan(&files(&["xtask/src/ci.rs"]), &dirs(), &graph(), false);
+        let xtask_plan = plan(&files(&["xtask/src/ci.rs"]), &dirs(), &graph(), ScopeMode::Default);
         assert_eq!(xtask_plan.lint_selection, set(&["xtask"]));
         assert_eq!(xtask_plan.test_selection, set(&["xtask"]));
 
-        let mixed_plan = plan(&files(&["crates/stats/src/anova.rs", "xtask/src/ci.rs"]), &dirs(), &graph(), false);
-        assert_eq!(mixed_plan.test_selection, set(&["curvebook-stats", "curvebook-ui-egui", "xtask"]));
-
-        let wide_plan = plan(&files(&["Cargo.toml"]), &dirs(), &graph(), false);
+        let wide_plan = plan(&files(&["Cargo.toml"]), &dirs(), &graph(), ScopeMode::Default);
+        assert_eq!(wide_plan.lint_selection, Selection::Workspace);
         assert_eq!(wide_plan.test_selection, Selection::Workspace);
     }
 
     #[test]
+    fn transitive_mode_tests_reverse_dependents_and_omits_transitive_xtask() {
+        let math_plan = plan(&files(&["crates/math/src/lib.rs"]), &dirs(), &graph(), ScopeMode::Transitive);
+        assert_eq!(math_plan.lint_selection, Selection::Workspace);
+        assert_eq!(math_plan.test_selection, set(&["curvebook-math", "curvebook-stats", "curvebook-ui-egui"]));
+
+        let stats_plan = plan(&files(&["crates/stats/src/anova.rs"]), &dirs(), &graph(), ScopeMode::Transitive);
+        assert_eq!(stats_plan.lint_selection, set(&["curvebook-stats", "curvebook-ui-egui", "xtask"]));
+        assert_eq!(stats_plan.test_selection, set(&["curvebook-stats", "curvebook-ui-egui"]));
+
+        let mixed_plan = plan(&files(&["crates/stats/src/anova.rs", "xtask/src/ci.rs"]), &dirs(), &graph(), ScopeMode::Transitive);
+        assert_eq!(mixed_plan.test_selection, set(&["curvebook-stats", "curvebook-ui-egui", "xtask"]));
+    }
+
+    #[test]
     fn direct_flag_restricts_selection_to_directly_modified_crates_except_workspace_wide_inputs() {
-        let math_direct = plan(&files(&["crates/math/src/lib.rs"]), &dirs(), &graph(), true);
+        let math_direct = plan(&files(&["crates/math/src/lib.rs"]), &dirs(), &graph(), ScopeMode::Direct);
         assert_eq!(math_direct.lint_selection, set(&["curvebook-math"]));
         assert_eq!(math_direct.test_selection, set(&["curvebook-math"]));
         assert!(!math_direct.include_i18n);
 
-        let ui_direct = plan(&files(&["crates/ui-egui/src/i18n.rs"]), &dirs(), &graph(), true);
+        let ui_direct = plan(&files(&["crates/ui-egui/src/i18n.rs"]), &dirs(), &graph(), ScopeMode::Direct);
         assert_eq!(ui_direct.lint_selection, set(&["curvebook-ui-egui"]));
         assert_eq!(ui_direct.test_selection, set(&["curvebook-ui-egui"]));
         assert!(ui_direct.include_i18n);
 
-        let wide_direct = plan(&files(&["Cargo.toml"]), &dirs(), &graph(), true);
+        let wide_direct = plan(&files(&["Cargo.toml"]), &dirs(), &graph(), ScopeMode::Direct);
         assert_eq!(wide_direct.lint_selection, Selection::Workspace);
         assert_eq!(wide_direct.test_selection, Selection::Workspace);
         assert!(wide_direct.include_i18n);

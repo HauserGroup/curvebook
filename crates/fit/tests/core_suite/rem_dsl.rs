@@ -20,7 +20,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::excessive_precision)]
 
-mod common;
+use super::common;
 
 use std::time::Instant;
 

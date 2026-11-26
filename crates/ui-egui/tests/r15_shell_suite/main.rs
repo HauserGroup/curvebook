@@ -3,7 +3,32 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+#[path = "../human_wf_common/mod.rs"]
+mod human_wf_common;
 
+mod audit_da_06_hosts;
+mod audit_p6_atomic_undo;
+mod audit_p6_sec13;
+mod audit_p6_sec14;
+mod audit_p6_sec15;
+mod audit_p7_sec16;
+mod audit_p7_sec17;
+mod audit_p7_sec18;
+mod audit_p8_web_vws;
+mod audit_r1_s4b_ui;
+mod audit_r1_s4c_s10_09;
+mod audit_r2_s10;
+mod audit_w1_sec13_01;
+mod audit_w1_sec18_01_export;
+mod audit_w1_sec18_modals;
+mod cjk_rtl_hidpi_desktop_qa;
+mod control_auth_and_panic;
+mod descriptive_custom_percentile_ui;
+mod dialogs_canvas;
+mod feedback_github_issue;
+mod helpers;
+mod i18n_theme;
+mod interaction_hidpi_qol;
 mod r15_1_driver_and_i18n;
 mod r15_1_host_inspect_raster;
 mod r15_2_anova_coexist;
@@ -27,4 +52,13 @@ mod r15_9_visual_design_tokens;
 mod r16_19_growable_dropdown;
 mod r17_1_xlsx_and_paste;
 mod r17_3_kittest_idle;
+mod r17_7_plate_auc_gui;
 mod r18_5_linear_deming;
+mod r18_7_spline_lowess;
+mod r19_2_levene_ui;
+mod rem_ui_core;
+mod rem_ui_modals;
+mod rem_ui_views;
+mod rv_ledger_third_pass_ui;
+mod ui_parity_ux;
+mod zz_overlap_probe;

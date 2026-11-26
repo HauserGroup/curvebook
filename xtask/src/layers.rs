@@ -621,6 +621,119 @@ pub fn check_source_hygiene(root: &Path) -> Vec<HygieneViolation> {
     violations
 }
 
+/// Dedicated non-general integration test binaries required by `ci.rs`, `.config/nextest.toml`,
+/// `corpus.rs`, or `required-features` Cargo gates.
+const SPECIAL_INTEGRATION_BINARIES: &[(&str, &str)] = &[
+    // `cargo xtask corpus` runs NIST StRD suites with `CURVEBOOK_REQUIRE_CORPUS=1`.
+    ("crates/math", "nist_strd"),
+    ("crates/stats", "nist_strd"),
+    ("crates/fit", "nist_strd"),
+    // `.config/nextest.toml` isolates OS pasteboard and loopback child-process suites.
+    ("apps/curvebook", "control_loopback"),
+    ("apps/curvebook", "desktop_host_loop"),
+    ("crates/ui-egui", "macos_clipboard_live"),
+    // `ci features` runs `--no-default-features --test install_fonts` directly.
+    ("crates/ui-egui", "install_fonts"),
+    // `xtask/Cargo.toml` gates `r12_docs_site` behind `required-features = ["docs-site"]`.
+    ("xtask", "r12_docs_site"),
+];
+
+fn is_special_integration_binary(pkg_rel: &str, target_name: &str) -> bool {
+    // Matches `PERFORMANCE_FILTER` in `xtask/src/ci.rs`.
+    target_name.starts_with("r10_")
+        || target_name.starts_with("human_wf_")
+        || target_name.contains("perf")
+        || target_name == "r15_2_anova_and_1m_bench"
+        || SPECIAL_INTEGRATION_BINARIES.contains(&(pkg_rel, target_name))
+}
+
+fn collect_workspace_package_dirs(root: &Path) -> Vec<String> {
+    let mut pkg_dirs = Vec::new();
+    for group in ["crates", "apps"] {
+        let group_dir = root.join(group);
+        let Ok(meta) = std::fs::symlink_metadata(&group_dir) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        let Ok(entries) = read_dir_paths_sorted(&group_dir) else {
+            continue;
+        };
+        for path in entries {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir())
+            {
+                pkg_dirs.push(format!("{group}/{name}"));
+            }
+        }
+    }
+    if std::fs::symlink_metadata(root.join("xtask")).is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir()) {
+        pkg_dirs.push(String::from("xtask"));
+    }
+    pkg_dirs
+}
+
+fn scan_pkg_integration_binaries(root: &Path, pkg_rel: &str, violations: &mut Vec<HygieneViolation>) {
+    let tests_dir = root.join(pkg_rel).join("tests");
+    if !std::fs::symlink_metadata(&tests_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir()) {
+        return;
+    }
+    let Ok(entries) = read_dir_paths_sorted(&tests_dir) else {
+        return;
+    };
+    // `(is_top_level_file, rel_path)` so multi-file `tests/<suite>/main.rs` targets sort first
+    // and any newly added top-level `tests/<extra>.rs` file is flagged as the extra binary.
+    let mut general_bins: Vec<(bool, String)> = Vec::new();
+    for entry in entries {
+        let Ok(emeta) = std::fs::symlink_metadata(&entry) else {
+            continue;
+        };
+        let Some(fname) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if emeta.file_type().is_symlink() {
+            continue;
+        }
+        if emeta.is_file() {
+            if let Some(stem) = fname.strip_suffix(".rs")
+                && !is_special_integration_binary(pkg_rel, stem)
+            {
+                general_bins.push((true, format!("{pkg_rel}/tests/{fname}")));
+            }
+        } else if emeta.is_dir() && entry.join("main.rs").is_file() && !is_special_integration_binary(pkg_rel, fname) {
+            general_bins.push((false, format!("{pkg_rel}/tests/{fname}/main.rs")));
+        }
+    }
+    general_bins.sort();
+    for (_, extra_rel) in general_bins.into_iter().skip(1) {
+        violations.push(HygieneViolation {
+            path: extra_rel,
+            line: 1,
+            rule: "test-binary-sprawl",
+            pattern: "extra general integration test binary (add as a submodule of this crate's single integration suite)",
+        });
+    }
+}
+
+/// Enforce at most one general integration test binary per workspace package (`AGENTS.md` › Testing).
+///
+/// Dedicated binaries required by `PERFORMANCE_FILTER`, `cargo xtask corpus`, `.config/nextest.toml`,
+/// `ci features`, or `required-features` remain exempt; every other integration test must live as a
+/// submodule inside the crate's single integration suite to avoid per-file `rustc` + linker overhead.
+#[must_use]
+pub fn check_integration_test_binaries(root: &Path) -> Vec<HygieneViolation> {
+    let mut violations = Vec::new();
+    for pkg_rel in collect_workspace_package_dirs(root) {
+        scan_pkg_integration_binaries(root, &pkg_rel, &mut violations);
+    }
+    violations.sort_by(|a, b| {
+        a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)).then_with(|| a.rule.cmp(b.rule)).then_with(|| a.pattern.cmp(b.pattern))
+    });
+    violations.dedup();
+    violations
+}
+
 const LEGACY_INDEXING_ALLOWLIST: &[&str] =
     &["crates/stats", "crates/fit", "crates/transform", "crates/chart", "crates/text", "crates/ui-egui", "crates/testkit", "xtask"];
 
@@ -1384,5 +1497,42 @@ mod tests {
                 "top-level symlinked crates/ must fail closed: {sym_hits:?}"
             );
         }
+    }
+
+    #[test]
+    fn integration_test_binary_guard_allows_one_general_suite_plus_special_binaries() {
+        let dir = TestDir::new("layers-test-bins");
+        for rel in [
+            "crates/engine/tests/core_suite/main.rs",
+            "crates/engine/tests/common/mod.rs",
+            "crates/stats/tests/core_suite/main.rs",
+            "crates/stats/tests/nist_strd.rs",
+            "crates/ui-egui/tests/r15_shell_suite/main.rs",
+            "crates/ui-egui/tests/human_wf_suite/main.rs",
+            "crates/ui-egui/tests/r10_perf_suite/main.rs",
+            "crates/ui-egui/tests/r15_2_anova_and_1m_bench.rs",
+            "crates/ui-egui/tests/install_fonts.rs",
+            "crates/ui-egui/tests/macos_clipboard_live.rs",
+            "apps/curvebook/tests/desktop_suite/main.rs",
+            "apps/curvebook/tests/desktop_perf_suite/main.rs",
+            "apps/curvebook/tests/control_loopback.rs",
+            "apps/curvebook/tests/desktop_host_loop.rs",
+            "xtask/tests/xtask_suite/main.rs",
+            "xtask/tests/r12_docs_site.rs",
+        ] {
+            dir.write(rel, "fn main() {}\n");
+        }
+        assert!(super::check_integration_test_binaries(dir.path()).is_empty());
+
+        dir.write("crates/engine/tests/r22_extra_feature.rs", "#[test] fn t() {}\n");
+        dir.write("crates/stats/tests/zz_extra_suite/main.rs", "#[test] fn t() {}\n");
+        let hits = super::check_integration_test_binaries(dir.path());
+        assert_eq!(
+            hits.iter().map(|h| (h.path.as_str(), h.rule)).collect::<Vec<_>>(),
+            vec![
+                ("crates/engine/tests/r22_extra_feature.rs", "test-binary-sprawl"),
+                ("crates/stats/tests/zz_extra_suite/main.rs", "test-binary-sprawl"),
+            ]
+        );
     }
 }

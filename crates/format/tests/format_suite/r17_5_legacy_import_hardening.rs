@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
-mod common;
+use super::common;
 
 use common::{build_zip_entries, pzfx_tables};
 use curvebook_doc::{

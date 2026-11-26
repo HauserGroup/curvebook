@@ -54,7 +54,7 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
    - Windows icons -> `cargo xtask ico`
 4. **Pull request title & merge policy:** PRs are **squash-merged**. Use a plain-English PR title **ending with `(R<m>.<n>)`**, for example:
    `Use atomic temp-and-rename saves via curvebook-platform (R0.10)`
-5. **Before you finish:** Fill out [.github/pull_request_template.md](.github/pull_request_template.md) honestly and pass `cargo xtask ci quick` (which runs every policy gate below plus Clippy and tests for changed packages and their workspace dependents):
+5. **Before you finish:** Fill out [.github/pull_request_template.md](.github/pull_request_template.md) honestly and pass `cargo xtask ci quick` (which runs every policy gate below, Clippy across changed packages and their workspace reverse dependents, and tests for directly modified packages; pass `--transitive` when verifying cross-crate API/wire changes locally):
    ```sh
    cargo fmt --all -- --check
    cargo clippy --workspace --all-targets -- -D warnings
@@ -76,7 +76,7 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
    cargo xtask status
    cargo xtask pending
    ```
-   Or run `cargo xtask ci quick` for the policy gates plus Clippy and tests of the crates your branch changed and their dependents; hosted CI runs the full `cargo xtask ci` stages on every pull request.
+   Or run `cargo xtask ci quick` for the policy gates, reverse-dependent Clippy, and direct-crate tests (with `--direct` for inner-loop iteration or `--transitive` for local reverse-dependent tests); hosted CI runs the full `cargo xtask ci` stages on every pull request.
 
 ### Fixing a reported bug
 

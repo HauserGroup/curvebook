@@ -22,7 +22,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-mod common;
+use super::common;
 
 use curvebook_doc::ParameterScope;
 use curvebook_fit::library::curves::CURVE_EQUATION_IDS;

@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp, clippy::panic)]
 
-mod common;
+use super::common;
 
 use std::path::Path;
 

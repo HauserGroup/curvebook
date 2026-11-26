@@ -9,7 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::excessive_precision)]
 
-mod common;
+use super::common;
 
 use curvebook_fit::{DataPoint, FitStatus, ParametricModel};
 use curvebook_testkit::assert_approx_eq;

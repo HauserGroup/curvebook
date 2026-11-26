@@ -38,6 +38,7 @@ mod web_fonts;
 mod workflows;
 mod zip_read;
 
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -48,7 +49,8 @@ usage: cargo xtask <command> [args...]
 
 commands:
   ci [stage]            run default gates or build/policy/lint/tests/doctests/features/performance/wasm
-  ci quick [--base <ref>] policy gates + clippy/tests for packages changed since main and their dependents
+  ci quick [--direct|--transitive] [--base <ref>]
+                        policy gates + reverse-dep clippy + direct-crate tests (use --transitive for rdep tests)
   test [args...]        run workspace test suite (uses cargo-nextest when installed, else cargo test)
   layers                verify L0..L7 dependency rules, UI-crate isolation, and source hygiene
   secrets [--history]   scan repo (or git history additions) for API tokens, private keys, and local paths
@@ -273,6 +275,7 @@ fn cmd_layers(root: &Path) -> Result<(), String> {
     violations.extend(layers::check_manifest_patches(root));
     let mut hygiene = layers::check_source_hygiene(root);
     hygiene.extend(layers::check_lint_policy(root));
+    hygiene.extend(layers::check_integration_test_binaries(root));
     if violations.is_empty() && hygiene.is_empty() {
         println!("layers: all {} workspace packages satisfy L0..L7 dependency rules and source hygiene", graph.len());
         return Ok(());
@@ -406,6 +409,42 @@ fn has_trunk() -> bool {
     Command::new("trunk").arg("--version").output().is_ok_and(|o| o.status.success())
 }
 
+fn cargo_home_bin_dir(cargo_home: Option<&OsStr>, home: Option<&OsStr>, userprofile: Option<&OsStr>) -> Option<PathBuf> {
+    if let Some(ch) = cargo_home.filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(ch).join("bin"));
+    }
+    home.filter(|v| !v.is_empty()).or_else(|| userprofile.filter(|v| !v.is_empty())).map(|h| PathBuf::from(h).join(".cargo").join("bin"))
+}
+
+fn append_dir_to_path_if_missing(current_path: Option<&OsStr>, extra_dir: &Path) -> Option<OsString> {
+    let mut dirs: Vec<PathBuf> = current_path.map(std::env::split_paths).into_iter().flatten().collect();
+    if dirs.iter().any(|dir| dir == extra_dir) {
+        return None;
+    }
+    dirs.push(extra_dir.to_path_buf());
+    std::env::join_paths(dirs).ok()
+}
+
+fn cargo_path_with_fallback() -> Option<OsString> {
+    let cargo_home = std::env::var_os("CARGO_HOME");
+    let home = std::env::var_os("HOME");
+    let userprofile = std::env::var_os("USERPROFILE");
+    let bin_dir = cargo_home_bin_dir(cargo_home.as_deref(), home.as_deref(), userprofile.as_deref())?;
+    if !bin_dir.is_dir() {
+        return None;
+    }
+    let current = std::env::var_os("PATH");
+    append_dir_to_path_if_missing(current.as_deref(), &bin_dir)
+}
+
+fn cargo_command() -> Command {
+    let mut cmd = Command::new("cargo");
+    if let Some(path) = cargo_path_with_fallback() {
+        cmd.env("PATH", path);
+    }
+    cmd
+}
+
 fn run_cargo_strs(root: &Path, args: &[&str]) -> Result<(), String> {
     let owned: Vec<String> = args.iter().map(|&s| s.to_owned()).collect();
     run_cargo(root, &owned)
@@ -413,7 +452,7 @@ fn run_cargo_strs(root: &Path, args: &[&str]) -> Result<(), String> {
 
 fn run_cargo(root: &Path, args: &[String]) -> Result<(), String> {
     println!("+ cargo {}", args.join(" "));
-    let status = Command::new("cargo").current_dir(root).args(args).status().map_err(|e| format!("cargo {}: {e}", args.join(" ")))?;
+    let status = cargo_command().current_dir(root).args(args).status().map_err(|e| format!("cargo {}: {e}", args.join(" ")))?;
     if !status.success() {
         return Err(format!("`cargo {}` failed with {status}", args.join(" ")));
     }
@@ -421,7 +460,7 @@ fn run_cargo(root: &Path, args: &[String]) -> Result<(), String> {
 }
 
 fn has_cargo_nextest() -> bool {
-    Command::new("cargo").args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success())
+    cargo_command().args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success())
 }
 
 /// Build a bounded `ProcessCommand` for a local developer/CI tool (`cargo`, `rustc`, `rustfmt`,
@@ -466,6 +505,11 @@ pub(crate) fn dev_tool_command(program: &str) -> curvebook_platform::process::Pr
         {
             cmd = cmd.env(*key, val);
         }
+    }
+    if program == "cargo"
+        && let Some(path) = cargo_path_with_fallback().and_then(|p| p.into_string().ok())
+    {
+        cmd = cmd.env("PATH", path);
     }
     cmd
 }
@@ -554,6 +598,29 @@ mod tests {
         let out = super::dev_tool_command("rustfmt").arg("--version").run().expect("rustfmt on host PATH should execute");
         assert!(out.success, "rustfmt --version failed: {}", String::from_utf8_lossy(&out.stderr));
         assert!(String::from_utf8_lossy(&out.stdout).contains("rustfmt"));
+    }
+
+    #[test]
+    fn cargo_bin_fallback_appends_cargo_home_without_overriding_existing_path() {
+        use std::ffi::OsStr;
+        use std::path::{Path, PathBuf};
+
+        assert_eq!(
+            super::cargo_home_bin_dir(Some(OsStr::new("/custom/cargo")), Some(OsStr::new("/opt/dev-profile")), None),
+            Some(PathBuf::from("/custom/cargo/bin"))
+        );
+        assert_eq!(
+            super::cargo_home_bin_dir(Some(OsStr::new("")), Some(OsStr::new("/opt/dev-profile")), None),
+            Some(PathBuf::from("/opt/dev-profile/.cargo/bin"))
+        );
+        assert_eq!(super::cargo_home_bin_dir(None, None, Some(OsStr::new("D:\\dev-profile"))), Some(PathBuf::from("D:\\dev-profile/.cargo/bin")));
+        assert_eq!(super::cargo_home_bin_dir(None, None, None), None);
+
+        let existing = std::env::join_paths([Path::new("/usr/local/bin"), Path::new("/usr/bin")]).unwrap();
+        let updated = super::append_dir_to_path_if_missing(Some(existing.as_os_str()), Path::new("/opt/dev-profile/.cargo/bin")).unwrap();
+        let parts: Vec<PathBuf> = std::env::split_paths(&updated).collect();
+        assert_eq!(parts, vec![PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin"), PathBuf::from("/opt/dev-profile/.cargo/bin")]);
+        assert!(super::append_dir_to_path_if_missing(Some(updated.as_os_str()), Path::new("/opt/dev-profile/.cargo/bin")).is_none());
     }
 
     #[test]

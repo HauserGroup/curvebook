@@ -13,7 +13,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-mod common;
+use super::common;
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CiBound, DataSheet, DemingErrorSpec, FitFlagRules, FitMethod, IdentifiabilityMode,

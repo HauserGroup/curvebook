@@ -4,7 +4,7 @@
 //! `Excluded="1"` preservation, thousands-separator disambiguation, and import warnings
 //! when malformed or conflicting numeric-looking cells fall back to text.
 
-mod common;
+use super::common;
 
 use common::{pzfx_doc, pzfx_tables};
 use curvebook_doc::{Cell, CellValue, ConstantValue, SubcolumnMode, TableArchetype};
