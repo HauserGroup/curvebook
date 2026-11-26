@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 use curvebook_doc::{
     AnalysisKind, CURRENT_SCHEMA_VERSION, CellExclusionNote, CloneDataSheetOptions, DataSheet, DocError, FittedCurveOverlay, FloatingNote,
     GraphAnnotation, HookSource, ImageMimeKind, LayoutItem, LinkedDataRegion, MAX_IMAGE_ASSET_BYTES, MAX_PROJECT_IMAGE_ASSETS, MAX_ROWS,
-    MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT, NormalizeAnchor, ParameterScope, ProjectDocument, ResultStatus, ResultTab, SheetId, SheetSection,
-    SourceCellId, TableArchetype, TransformAnalysisSpec, extract_template_hooks, is_valid_asset_id, validate_project_cells, validate_title,
+    MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT, NormalizeAnchor, ParameterScope, PlateCellOrigin, ProjectDocument, ResultStatus, ResultTab, SheetId,
+    SheetSection, SourceCellId, TableArchetype, TransformAnalysisSpec, extract_template_hooks, is_valid_asset_id, validate_project_cells,
+    validate_title,
 };
 
 use crate::csv::{CsvOptions, export_datasheet_to_csv};
@@ -1212,6 +1213,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for LegacyDataSheetSeed<'_> {
                 let mut floating_notes: Option<Vec<FloatingNote>> = None;
                 let mut color_tag: Option<Option<curvebook_palette::Rgba8>> = None;
                 let mut exclusion_notes: Option<Vec<CellExclusionNote>> = None;
+                let mut plate_well_origins: Option<Vec<PlateCellOrigin>> = None;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -1235,6 +1237,11 @@ impl<'de> serde::de::DeserializeSeed<'de> for LegacyDataSheetSeed<'_> {
                             exclusion_notes =
                                 Some(map.next_value_seed(BoundedTypedSeed::<Vec<CellExclusionNote>>::new(self.0, MAX_SHEET_CELLS, max_total))?);
                         }
+                        "plate_well_origins" => {
+                            let max_total = MAX_SHEET_CELLS.saturating_mul(2);
+                            plate_well_origins =
+                                Some(map.next_value_seed(BoundedTypedSeed::<Vec<PlateCellOrigin>>::new(self.0, MAX_SHEET_CELLS, max_total))?);
+                        }
                         _ => {
                             self.0.dom_budget.charge(0, key.len().saturating_add(64)).map_err(serde::de::Error::custom)?;
                             let _ = map.next_value_seed(BoundedValueSeed(&mut self.0.dom_budget))?;
@@ -1252,6 +1259,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for LegacyDataSheetSeed<'_> {
                     floating_notes: floating_notes.unwrap_or_default(),
                     color_tag: color_tag.unwrap_or(None),
                     exclusion_notes: exclusion_notes.unwrap_or_default(),
+                    plate_well_origins: plate_well_origins.unwrap_or_default(),
                 };
                 sheet.validate().map_err(serde::de::Error::custom)?;
                 sheet.validate_finite_metadata().map_err(serde::de::Error::custom)?;
@@ -2710,6 +2718,7 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
         clean.floating_notes = notes;
         clean.linked_regions = linked;
         clean.exclusion_notes.clear();
+        clean.plate_well_origins.clear();
         *ds = clean;
     }
     for res in &mut out.result_sheets {
@@ -2749,6 +2758,7 @@ const MIGRATION_STEPS: &[VersionStep] = &[
     VersionStep { from_version: 4, apply: migrate_v4_to_v5 },
     VersionStep { from_version: 5, apply: migrate_v5_to_v6 },
     VersionStep { from_version: 6, apply: migrate_v6_to_v7 },
+    VersionStep { from_version: 7, apply: migrate_v7_to_v8 },
 ];
 
 const _: () = assert!(MIGRATION_STEPS.len() == CURRENT_SCHEMA_VERSION as usize);
@@ -2809,6 +2819,16 @@ fn migrate_v5_to_v6(value: &mut serde_json::Value) -> Result<(), FormatError> {
 
 fn migrate_v6_to_v7(value: &mut serde_json::Value) -> Result<(), FormatError> {
     migrate_result_sheet_step(value, 7);
+    Ok(())
+}
+
+fn migrate_v7_to_v8(value: &mut serde_json::Value) -> Result<(), FormatError> {
+    migrate_result_sheet_step(value, 8);
+    if let Some(data_sheets) = value.get_mut("data_sheets").and_then(serde_json::Value::as_array_mut) {
+        for ds in data_sheets {
+            backfill_data_sheet_defaults(ds);
+        }
+    }
     Ok(())
 }
 
@@ -2891,6 +2911,7 @@ fn backfill_data_sheet_defaults(ds: &mut serde_json::Value) {
     obj.entry(String::from("linked_regions")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
     obj.entry(String::from("floating_notes")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
     obj.entry(String::from("exclusion_notes")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    obj.entry(String::from("plate_well_origins")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
     obj.entry(String::from("color_tag")).or_insert(serde_json::Value::Null);
 }
 

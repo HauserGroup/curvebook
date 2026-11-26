@@ -1212,7 +1212,17 @@ fn render_footer_center_readout(
     {
         let stats = compute_cached_quick_stats(app, &mut views.quick_stats_cache).clone();
         report.quick_stats_shown = stats.n > 0 || stats.selected_cells > 0;
-        let text = stats.format_telemetry(locale);
+        let mut text = stats.format_telemetry(locale);
+        let active_ds = doc
+            .active_sheet_id
+            .as_ref()
+            .and_then(|sid| doc.data_sheet(sid).or_else(|| doc.result_sheet(sid).and_then(|r| r.analyzable_data.as_ref())));
+        if let (Some(ds), Some(active_coord)) = (active_ds, app.grid.tool.active)
+            && let Some(well) = ds.plate_well_origin(CellCoord::from(active_coord))
+        {
+            let prefix = tr_or_fallback(locale, "grid.tooltip.source_well", "Source well");
+            text = format!("{text}  ·  {prefix}: {well}");
+        }
         report.computed_quick_stats = Some(stats.clone());
         let resp = draw_footer_summary_label(
             ui,

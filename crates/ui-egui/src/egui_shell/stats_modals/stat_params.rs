@@ -295,6 +295,20 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
         AnalysisKind::FitSplineLowess(sp) => {
             (String::from("Parameters: Fit Spline / LOWESS Curve"), format!("{} ({} vertices)", sp.method.label(), sp.segment_count))
         }
+        AnalysisKind::AreaUnderCurve(auc) => {
+            let base = match auc.baseline {
+                curvebook_doc::AucBaseline::Fixed { value } => format!("Baseline = {value}"),
+                curvebook_doc::AucBaseline::FirstPoint => String::from("Baseline = First Point"),
+            };
+            let window = match (auc.x_min, auc.x_max) {
+                (Some(lo), Some(hi)) => format!("X in [{lo}, {hi}]"),
+                (Some(lo), None) => format!("X >= {lo}"),
+                (None, Some(hi)) => format!("X <= {hi}"),
+                (None, None) => String::from("Full X range"),
+            };
+            let se = if auc.independent_time_points { ", Bailer SE (indep.)" } else { "" };
+            (String::from("Parameters: Area Under the Curve (AUC)"), format!("{base}, {window}{se}"))
+        }
         AnalysisKind::LeveneTest(lt) => {
             (String::from("Parameters: Levene / Brown-Forsythe Variance Test"), format!("{} (α={alpha:.3})", lt.center.method_label()))
         }

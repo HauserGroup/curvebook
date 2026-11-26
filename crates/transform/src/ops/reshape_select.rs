@@ -6,9 +6,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use curvebook_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DerivedColumnFormula,
-    DocError, GroupedTable, InfoSheet, MAX_SHEET_CELLS, MultipleVariablesTable, NestedTable, PartsOfWholeTable, ReplicateStacking, ResultCell,
-    SheetId, SubcolumnMode, SummarizedPoint, SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource, XColumnMode,
-    XyTable, default_column_label, transpose_cell_grid, validate_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells, validate_title,
+    DocError, GroupedTable, InfoSheet, MAX_SHEET_CELLS, MultipleVariablesTable, NestedTable, PartsOfWholeTable, PlateCellOrigin, ReplicateStacking,
+    ResultCell, SheetId, SubcolumnMode, SummarizedPoint, SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource,
+    XColumnMode, XyTable, default_column_label, transpose_cell_grid, validate_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells,
+    validate_title,
 };
 use curvebook_math::sum;
 
@@ -65,6 +66,8 @@ pub fn execute_transpose(source: &DataSheet, swap_titles: bool, ctx: &TransformC
     let mut out = DataSheet::new(id, title, archetype)?;
     out.exclusion_notes = remap_transposed_exclusion_notes(source);
     out.prune_stale_exclusion_notes();
+    out.plate_well_origins = remap_transposed_plate_well_origins(source);
+    out.prune_stale_plate_well_origins();
     out.archetype.validate()?;
 
     let summary_tab = build_summary_tab(
@@ -128,6 +131,48 @@ fn remap_transposed_exclusion_notes(source: &DataSheet) -> Vec<CellExclusionNote
         })
         .collect();
     out.sort_by_key(|n| n.coord);
+    out
+}
+
+fn remap_transposed_plate_well_origins(source: &DataSheet) -> Vec<PlateCellOrigin> {
+    if source.plate_well_origins.is_empty() {
+        return Vec::new();
+    }
+    let xy_rep_stride = match &source.archetype {
+        TableArchetype::Xy(t) => match t.y_subcolumn_mode {
+            SubcolumnMode::RawReplicates(n) if n >= 2 => Some(n),
+            _ => None,
+        },
+        _ => None,
+    };
+    let primary_only = matches!(
+        &source.archetype,
+        TableArchetype::Xy(t)
+            if matches!(t.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr)
+    );
+
+    let mut out: Vec<PlateCellOrigin> = source
+        .plate_well_origins
+        .iter()
+        .filter_map(|origin| {
+            let new_coord = if let Some(stride) = xy_rep_stride {
+                if origin.coord.subcol >= stride {
+                    return None;
+                }
+                CellCoord::new(origin.coord.col * stride + origin.coord.subcol, origin.coord.row, 0)
+            } else if primary_only {
+                if origin.coord.subcol != 0 {
+                    return None;
+                }
+                CellCoord::new(origin.coord.col, origin.coord.row, 0)
+            } else {
+                CellCoord::new(origin.coord.col, origin.coord.row, origin.coord.subcol)
+            };
+            Some(PlateCellOrigin { coord: new_coord, well: origin.well.clone() })
+        })
+        .collect();
+    out.sort_by_key(|o| o.coord);
+    out.dedup_by_key(|o| o.coord);
     out
 }
 
@@ -446,6 +491,8 @@ pub fn execute_prune(source: &DataSheet, method: PruneMethod, ctx: &TransformCon
             snapshot_calculated_variables(&mut out.archetype);
             out.exclusion_notes = crate::randomize::remap_exclusion_notes(&out.exclusion_notes, &idxs);
             out.prune_stale_exclusion_notes();
+            out.plate_well_origins = crate::randomize::remap_plate_well_origins(&out.plate_well_origins, &idxs);
+            out.prune_stale_plate_well_origins();
             (idxs.len(), Vec::new())
         }
         PruneMethod::LogarithmicSpacing { target_points } => {
@@ -457,6 +504,8 @@ pub fn execute_prune(source: &DataSheet, method: PruneMethod, ctx: &TransformCon
             snapshot_calculated_variables(&mut out.archetype);
             out.exclusion_notes = crate::randomize::remap_exclusion_notes(&out.exclusion_notes, &idxs);
             out.prune_stale_exclusion_notes();
+            out.plate_well_origins = crate::randomize::remap_plate_well_origins(&out.plate_well_origins, &idxs);
+            out.prune_stale_plate_well_origins();
             (idxs.len(), Vec::new())
         }
         PruneMethod::AverageBins(k) => {
@@ -465,6 +514,7 @@ pub fn execute_prune(source: &DataSheet, method: PruneMethod, ctx: &TransformCon
             }
             let res = average_bins_archetype(&mut out.archetype, k)?;
             remap_binned_exclusion_notes(&mut out, k);
+            out.plate_well_origins.clear();
             res
         }
         PruneMethod::MinMaxBins(k) => {
@@ -476,6 +526,8 @@ pub fn execute_prune(source: &DataSheet, method: PruneMethod, ctx: &TransformCon
             snapshot_calculated_variables(&mut out.archetype);
             out.exclusion_notes = crate::randomize::remap_exclusion_notes(&out.exclusion_notes, &idxs);
             out.prune_stale_exclusion_notes();
+            out.plate_well_origins = crate::randomize::remap_plate_well_origins(&out.plate_well_origins, &idxs);
+            out.prune_stale_plate_well_origins();
             (idxs.len(), Vec::new())
         }
     };
@@ -1090,6 +1142,7 @@ pub fn execute_select_with_derived(
     if predicate_needs_derived {
         for (title, expr) in &parsed_derived {
             let col_idx = apply_derived_column(&mut working, title, expr, ctx.primary_info_sheet())?;
+            working.plate_well_origins.retain(|o| o.coord.col != col_idx);
             if !output_cols.contains(&col_idx) {
                 output_cols.push(col_idx);
             }
@@ -1102,6 +1155,8 @@ pub fn execute_select_with_derived(
         try_retain_rows(&mut working.archetype, &kept_indices)?;
         working.exclusion_notes = crate::randomize::remap_exclusion_notes(&working.exclusion_notes, &kept_indices);
         working.prune_stale_exclusion_notes();
+        working.plate_well_origins = crate::randomize::remap_plate_well_origins(&working.plate_well_origins, &kept_indices);
+        working.prune_stale_plate_well_origins();
     } else {
         let mut keep_mask = vec![true; row_count];
         for rule in rules {
@@ -1111,8 +1166,11 @@ pub fn execute_select_with_derived(
         try_retain_rows(&mut working.archetype, &kept_indices)?;
         working.exclusion_notes = crate::randomize::remap_exclusion_notes(&working.exclusion_notes, &kept_indices);
         working.prune_stale_exclusion_notes();
+        working.plate_well_origins = crate::randomize::remap_plate_well_origins(&working.plate_well_origins, &kept_indices);
+        working.prune_stale_plate_well_origins();
         for (title, expr) in &parsed_derived {
             let col_idx = apply_derived_column(&mut working, title, expr, ctx.primary_info_sheet())?;
+            working.plate_well_origins.retain(|o| o.coord.col != col_idx);
             if !output_cols.contains(&col_idx) {
                 output_cols.push(col_idx);
             }
@@ -1121,14 +1179,17 @@ pub fn execute_select_with_derived(
 
     let (id, title) = ctx.derived_ids(source, "select", "Selected");
     let mut warnings = Vec::new();
-    let (projected, projected_notes) = if working.kind() == target_archetype {
-        let remapped_notes = if !ctx.selected_data_sets.is_empty() || !parsed_derived.is_empty() {
+    let (projected, projected_notes, projected_origins) = if working.kind() == target_archetype {
+        let (remapped_notes, remapped_origins) = if !ctx.selected_data_sets.is_empty() || !parsed_derived.is_empty() {
             retain_columns(&mut working.archetype, &output_cols)?;
-            remap_selected_column_notes(&working.exclusion_notes, &output_cols, false)
+            (
+                remap_selected_column_notes(&working.exclusion_notes, &output_cols, false),
+                remap_selected_column_origins(&working.plate_well_origins, &output_cols, false),
+            )
         } else {
-            working.exclusion_notes.clone()
+            (working.exclusion_notes.clone(), working.plate_well_origins.clone())
         };
-        (working.archetype, remapped_notes)
+        (working.archetype, remapped_notes, remapped_origins)
     } else {
         let y_subs = match &working.archetype {
             TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
@@ -1164,11 +1225,14 @@ pub fn execute_select_with_derived(
             ProjectedAxisShift::None
         };
         let remapped_notes = remap_projected_column_notes(&working.exclusion_notes, &output_cols, axis_shift, target_archetype, &mut warnings);
-        (project_archetype(&working.archetype, target_archetype, &output_cols, include_axis)?, remapped_notes)
+        let remapped_origins = remap_projected_column_origins(&working.plate_well_origins, &output_cols, axis_shift);
+        (project_archetype(&working.archetype, target_archetype, &output_cols, include_axis)?, remapped_notes, remapped_origins)
     };
     let mut out = DataSheet::new(id, title, projected)?;
     out.exclusion_notes = projected_notes;
     out.prune_stale_exclusion_notes();
+    out.plate_well_origins = projected_origins;
+    out.prune_stale_plate_well_origins();
 
     let mut summary_rows = vec![
         ("Original rows", ResultCell::Number { value: row_count as f64, prefix: None, units: None }),
@@ -1305,6 +1369,41 @@ fn predicate_depends_on_derived(rules: &[SelectRule], source_arch: &TableArchety
             })
         })
     })
+}
+
+fn remap_selected_column_origins(origins: &[PlateCellOrigin], selected_cols: &[usize], primary_only: bool) -> Vec<PlateCellOrigin> {
+    if origins.is_empty() {
+        return Vec::new();
+    }
+    let col_map: HashMap<usize, usize> = selected_cols.iter().enumerate().map(|(new_c, &old_c)| (old_c, new_c)).collect();
+    let mut out: Vec<PlateCellOrigin> = origins
+        .iter()
+        .filter_map(|origin| {
+            if primary_only && origin.coord.subcol != 0 {
+                return None;
+            }
+            col_map
+                .get(&origin.coord.col)
+                .map(|&new_col| PlateCellOrigin { coord: CellCoord::new(origin.coord.row, new_col, origin.coord.subcol), well: origin.well.clone() })
+        })
+        .collect();
+    out.sort_by_key(|o| o.coord);
+    out.dedup_by_key(|o| o.coord);
+    out
+}
+
+fn remap_projected_column_origins(origins: &[PlateCellOrigin], selected_cols: &[usize], shift: ProjectedAxisShift) -> Vec<PlateCellOrigin> {
+    match shift {
+        ProjectedAxisShift::None => remap_selected_column_origins(origins, selected_cols, true),
+        ProjectedAxisShift::PrependExternalAxis => {
+            let mut shifted = remap_selected_column_origins(origins, selected_cols, true);
+            for origin in &mut shifted {
+                origin.coord.col += 1;
+            }
+            shifted
+        }
+        ProjectedAxisShift::ConsumeFirstColumnAsAxis => remap_selected_column_origins(origins, selected_cols.get(1..).unwrap_or(&[]), true),
+    }
 }
 
 fn find_matching_column_title(titles: &[&str], target: &str) -> Option<usize> {

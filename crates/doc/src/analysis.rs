@@ -625,6 +625,63 @@ impl LeveneCenter {
     }
 }
 
+/// Reference baseline policy for [`AreaUnderCurveSpec`] (`R17.7` / `R19.2`).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum AucBaseline {
+    /// Constant horizontal reference *Y* baseline (default `0.0`).
+    Fixed {
+        /// Finite baseline *Y* value.
+        value: f64,
+    },
+    /// Use each series's *Y* value at the start of its active integration window
+    /// (`x_min`, linearly interpolated if between sampled knots; first finite point when `x_min` is omitted).
+    FirstPoint,
+}
+
+impl Default for AucBaseline {
+    fn default() -> Self {
+        Self::Fixed { value: 0.0 }
+    }
+}
+
+/// Standalone trapezoidal Area Under the Curve (AUC) and peak-detection specification (`R17.7` / `R19.2`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AreaUnderCurveSpec {
+    /// Horizontal reference baseline (default [`AucBaseline::Fixed`] at `0.0`).
+    #[serde(default)]
+    pub baseline: AucBaseline,
+    /// Optional lower *X* integration bound (linearly interpolated when falling between sampled knots).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_min: Option<f64>,
+    /// Optional upper *X* integration bound (linearly interpolated when falling between sampled knots).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_max: Option<f64>,
+    /// Whether replicate time-point means come from independent cohorts/subjects (Bailer 1988).
+    /// Default `false`: leaves `NetAreaSe` blank on longitudinal / repeated-measures assays.
+    #[serde(default)]
+    pub independent_time_points: bool,
+    /// Minimum peak height above baseline required to retain a peak (default `0.0`).
+    #[serde(default)]
+    pub min_peak_height: f64,
+    /// Minimum fraction of positive area in `[0.0, 1.0]` required to retain a peak (default `0.0`).
+    #[serde(default)]
+    pub min_area_fraction: f64,
+}
+
+impl Default for AreaUnderCurveSpec {
+    fn default() -> Self {
+        Self {
+            baseline: AucBaseline::default(),
+            x_min: None,
+            x_max: None,
+            independent_time_points: false,
+            min_peak_height: 0.0,
+            min_area_fraction: 0.0,
+        }
+    }
+}
+
 /// Standalone Levene / Brown–Forsythe homogeneity-of-variance test over the selected columns of a
 /// raw-replicate `Column` or `MultipleVariables` table (`R19.2`).
 ///
@@ -2703,6 +2760,8 @@ pub enum AnalysisKind {
     SimpleLogisticRegression(SimpleLogisticSpec),
     /// Standalone Levene (mean-centered) or Brown–Forsythe (median-centered) homogeneity-of-variance test ([`LeveneTestSpec`]).
     LeveneTest(LeveneTestSpec),
+    /// Standalone trapezoidal Area Under the Curve (AUC) and peak detection on `XY` tables ([`AreaUnderCurveSpec`]).
+    AreaUnderCurve(AreaUnderCurveSpec),
 }
 
 impl AnalysisKind {
@@ -2805,6 +2864,7 @@ impl AnalysisKind {
                 LeveneCenter::Mean => String::from("Levene's test (mean)"),
                 LeveneCenter::Median => String::from("Brown-Forsythe test (median)"),
             },
+            Self::AreaUnderCurve(_) => String::from("Area under the curve"),
         }
     }
 
@@ -3179,7 +3239,7 @@ mod r18_5_linear_spec_tests {
 
     #[test]
     fn linear_regression_spec_backward_compat_and_deming_error_spec() {
-        assert_eq!(CURRENT_SCHEMA_VERSION, 7);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 8);
 
         let legacy_json = r#"{
             "deming_model_ii": false,

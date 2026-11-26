@@ -106,6 +106,7 @@ pub(super) fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
     validate_project_cell_budget_after_change(doc, Some(&sheet_id), converted.archetype.allocated_cell_slots())?;
     preserve_mappable_incoming_links(&old_ds, &mut converted, &impact.col_plan);
     converted.prune_stale_exclusion_notes();
+    converted.prune_stale_plate_well_origins();
     if let Some(slot) = doc.data_sheets.get_mut(idx) {
         *slot = converted;
     }
@@ -1029,7 +1030,8 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
         | AnalysisKind::FitSplineLowess(_)
         | AnalysisKind::PowerAnalysis(_)
         | AnalysisKind::SimpleLogisticRegression(_)
-        | AnalysisKind::LeveneTest(_) => {}
+        | AnalysisKind::LeveneTest(_)
+        | AnalysisKind::AreaUnderCurve(_) => {}
     }
 }
 

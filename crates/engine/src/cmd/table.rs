@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 
 use curvebook_doc::{
-    AnalysisKind, BaselineOperation, Cell, CellCoord, CellExclusionNote, CellValue, DataSetColumn, DataSheet, GraphKind, GraphSpec, ImportFilterSpec,
-    ImportLinkSpec, ImportPlacementSpec, LevelOrderKind, LevelOrderSpec, LinkSource, MAX_PROJECT_CELLS, MAX_SHEET_CELLS, MultipleVariablesTable,
-    NestedGroupColumn, NestedTable, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SubcolumnMode, SurvivalAnalysisSpec,
-    TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource, format_linked_paste_tsv_cell,
-    validate_project_cells, validate_rows, validate_title,
+    AnalysisKind, BaselineOperation, Cell, CellCoord, CellExclusionNote, CellValue, ColumnEqualsFilter, DataSetColumn, DataSheet, GraphKind,
+    GraphSpec, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LevelOrderKind, LevelOrderSpec, LinkSource, MAX_PROJECT_CELLS, MAX_SHEET_CELLS,
+    MultipleVariablesTable, NestedGroupColumn, NestedTable, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SubcolumnMode,
+    SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource,
+    format_linked_paste_tsv_cell, validate_project_cells, validate_rows, validate_title,
 };
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, try_export_result_sheet_tidy_csv};
 use curvebook_transform::{
@@ -700,21 +700,31 @@ fn parse_import_filter_val(val: Option<&Value>) -> Result<ImportFilterSpec, Engi
         return Ok(parsed);
     }
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct FilterObj {
         row_start: Option<usize>,
         row_end: Option<usize>,
         col_start: Option<usize>,
         col_end: Option<usize>,
+        row_window: Option<(usize, usize)>,
+        col_window: Option<(usize, usize)>,
         decimate_every_k: Option<usize>,
         unstack_group_column: Option<usize>,
         parse_asterisk_exclusions: Option<bool>,
+        baseline: Option<(usize, BaselineOperation)>,
+        exclude_row_predicate: Option<String>,
+        row_match: Option<ColumnEqualsFilterSchema>,
     }
     let obj: FilterObj = deserialize_strict(v, "/filter")?;
     let mut filter = ImportFilterSpec::default();
-    if obj.row_start.is_some() || obj.row_end.is_some() {
+    if let Some(rw) = obj.row_window {
+        filter.row_window = Some(rw);
+    } else if obj.row_start.is_some() || obj.row_end.is_some() {
         filter.row_window = Some((obj.row_start.unwrap_or(0), obj.row_end.unwrap_or(usize::MAX)));
     }
-    if obj.col_start.is_some() || obj.col_end.is_some() {
+    if let Some(cw) = obj.col_window {
+        filter.col_window = Some(cw);
+    } else if obj.col_start.is_some() || obj.col_end.is_some() {
         filter.col_window = Some((obj.col_start.unwrap_or(0), obj.col_end.unwrap_or(usize::MAX)));
     }
     if let Some(k) = obj.decimate_every_k {
@@ -722,6 +732,9 @@ fn parse_import_filter_val(val: Option<&Value>) -> Result<ImportFilterSpec, Engi
     }
     filter.unstack_group_column = obj.unstack_group_column;
     filter.parse_asterisk_exclusions = obj.parse_asterisk_exclusions.unwrap_or(true);
+    filter.baseline = obj.baseline;
+    filter.exclude_row_predicate = obj.exclude_row_predicate;
+    filter.row_match = obj.row_match.map(ColumnEqualsFilterSchema::into_doc);
     Ok(filter)
 }
 
@@ -761,6 +774,23 @@ fn resolve_baseline_adjustment(baseline: Option<BaselineInput>) -> Result<Option
 // Schema Reusable Types
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ColumnEqualsFilterSchema {
+    /// Zero-based column index whose trimmed text value is matched.
+    pub(super) column: usize,
+    /// Exact trimmed text value required to retain a row.
+    pub(super) equals: String,
+    /// Remove the matched discriminator column from the output table (default true).
+    pub(super) drop_column: Option<bool>,
+}
+
+impl ColumnEqualsFilterSchema {
+    pub(super) fn into_doc(self) -> ColumnEqualsFilter {
+        ColumnEqualsFilter { column: self.column, equals: self.equals, drop_column: self.drop_column.unwrap_or(true) }
+    }
+}
+
 #[derive(Debug, JsonSchema)]
 #[allow(dead_code)]
 #[serde(deny_unknown_fields)]
@@ -788,6 +818,8 @@ pub(super) struct ImportFilterSchema {
     baseline: Option<Value>,
     /// Optional row-level exclusion predicate formula.
     exclude_row_predicate: Option<String>,
+    /// Optional exact trimmed text-equality row filter targeting one zero-based column.
+    row_match: Option<ColumnEqualsFilterSchema>,
 }
 
 pub(super) fn validate_project_cell_budget(doc: &ProjectDocument) -> Result<(), EngineError> {
@@ -2324,11 +2356,13 @@ fn apply_paste_payload(
     if !has_calc_mv && ds.linked_regions.is_empty() && !needs_budget_stage {
         let report = apply_import_link_pipeline(ds, spec, payload, opts, None)?;
         ds.prune_stale_exclusion_notes();
+        ds.prune_stale_plate_well_origins();
         return Ok(report);
     }
     let mut staged = ds.clone();
     let report = apply_import_link_pipeline(&mut staged, spec, payload, opts, None)?;
     staged.prune_stale_exclusion_notes();
+    staged.prune_stale_plate_well_origins();
     validate_project_cells(other_project_cells, staged.archetype.allocated_cell_slots())?;
     if has_calc_mv {
         ensure_mv_edit_preserves_calculated(ds, &staged, report.cols_placed, report.target_range)?;
@@ -3023,8 +3057,10 @@ fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
         if let Some(var) = mv.variables.get_mut(col_idx) {
             var.set_calculated_formula(&p.formula);
         }
+        ds.plate_well_origins.retain(|o| o.coord.col != col_idx);
 
         evaluate_data_sheet_calculated_variables(ds, info_snapshot.as_ref())?;
+        ds.prune_stale_plate_well_origins();
         Ok(col_idx)
     })?;
     Ok(CommandOutcome::mutated(

@@ -838,6 +838,37 @@ pub(super) fn paint_exclusion_corner_marker(ui: &Ui, cell_rect: Rect, clipped: R
     ui.painter().with_clip_rect(clipped).add(egui::Shape::convex_polygon(tri, tag_color, Stroke::NONE));
 }
 
+/// Format the hover tooltip for a data cell combining elided text, microplate source well origin
+/// (`Source well: <well>`), exclusion reason note, and contingency validation hint (`R17.7`).
+#[must_use]
+pub(super) fn format_data_cell_hover_tooltip(
+    ds: &DataSheet,
+    coord: GridCellCoord,
+    excluded: bool,
+    contingency_invalid: bool,
+    elided_text: Option<&str>,
+    locale: &str,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(full) = elided_text
+        && !full.is_empty()
+    {
+        parts.push(full.to_owned());
+    }
+    if let Some(well) = ds.plate_well_origin(CellCoord::from(coord)) {
+        let prefix = crate::i18n::tr_or_fallback(locale, "grid.tooltip.source_well", "Source well");
+        parts.push(format!("{prefix}: {well}"));
+    }
+    if excluded {
+        let tip = crate::grid_view::GridViewState::cell_exclusion_tooltip(ds, coord)
+            .unwrap_or_else(|| crate::i18n::tr_or_fallback(locale, "w5.grid_core.excluded_cell", "Excluded cell").to_owned());
+        parts.push(tip);
+    } else if contingency_invalid {
+        parts.push(String::from("Contingency counts should be non-negative integers"));
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 pub(super) fn pending_commit_key(sheet_id: &SheetId) -> Id {
     Id::unique(("column_grid_pending_commit", sheet_id.as_str()))
 }

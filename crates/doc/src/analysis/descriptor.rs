@@ -58,11 +58,13 @@ pub enum AnalysisKindId {
     FitSplineLowess = 20,
     /// Standalone Levene / Brown–Forsythe homogeneity-of-variance test ([`AnalysisKind::LeveneTest`]).
     LeveneTest = 21,
+    /// Standalone trapezoidal Area Under the Curve (AUC) analysis ([`AnalysisKind::AreaUnderCurve`]).
+    AreaUnderCurve = 22,
 }
 
 impl AnalysisKindId {
     /// Complete ordered list of every [`AnalysisKindId`] discriminant.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Transform,
         Self::DescriptiveStats,
         Self::OutlierDetection,
@@ -85,6 +87,7 @@ impl AnalysisKindId {
         Self::SimpleLogisticRegression,
         Self::FitSplineLowess,
         Self::LeveneTest,
+        Self::AreaUnderCurve,
     ];
 
     /// Total number of [`AnalysisKind`] variants registered in [`ALL_ANALYSIS_DESCRIPTORS`].
@@ -119,6 +122,7 @@ impl AnalysisKindId {
             AnalysisKind::SimpleLogisticRegression(_) => Self::SimpleLogisticRegression,
             AnalysisKind::FitSplineLowess(_) => Self::FitSplineLowess,
             AnalysisKind::LeveneTest(_) => Self::LeveneTest,
+            AnalysisKind::AreaUnderCurve(_) => Self::AreaUnderCurve,
         }
     }
 
@@ -151,6 +155,7 @@ impl AnalysisKindId {
             Self::SimpleLogisticRegression => &ALL_ANALYSIS_DESCRIPTORS[19],
             Self::FitSplineLowess => &ALL_ANALYSIS_DESCRIPTORS[20],
             Self::LeveneTest => &ALL_ANALYSIS_DESCRIPTORS[21],
+            Self::AreaUnderCurve => &ALL_ANALYSIS_DESCRIPTORS[22],
         }
     }
 
@@ -1182,6 +1187,28 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: true,
         ui_catalog_ids: &["stats.levene"],
         docs_anchor: "analysis-levene-test",
+    },
+    AnalysisKindDescriptor {
+        id: AnalysisKindId::AreaUnderCurve,
+        slug: "area-under-curve",
+        serde_variant: "AreaUnderCurve",
+        title: "Area Under the Curve (AUC)",
+        short_label: "Area Under Curve",
+        description: "Trapezoidal integration (Yeh & Kwan 1978) with optional partial-window interpolation, peak detection, and design-gated Bailer (1988) net-area SE.",
+        domain: AnalysisDomainKind::Transform,
+        recompute_strategy: AnalysisRecomputeStrategy::Transform,
+        ui_category: AnalysisUiCategory::XyAndRegression,
+        compatible_table_kinds: XY_ONLY,
+        has_method_specific_table_rules: false,
+        canonical_shorthand: "auc",
+        shorthands: &["auc", "area_under_curve", "transform.auc"],
+        accepts_equation_id_shorthand: false,
+        canonical_param_keys: &["baseline", "x_min", "x_max", "independent_time_points", "min_peak_height", "min_area_fraction"],
+        supports_multiplicity: false,
+        supports_info_hooks: false,
+        auto_selects_mv_numeric_columns: false,
+        ui_catalog_ids: &["transform.auc"],
+        docs_anchor: "analysis-area-under-curve",
     },
 ];
 

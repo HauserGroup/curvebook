@@ -108,11 +108,17 @@ mod tests {
     fn committed_schema_files_match_expected_set() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root");
         let schemas_dir = root.join("docs/schemas");
-        let expected_files: BTreeSet<String> =
-            ["archive-manifest.schema.json", "batch-v1.schema.json", "document.schema.json", "journal-record.schema.json", "preferences.schema.json"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect();
+        let expected_files: BTreeSet<String> = [
+            "archive-manifest.schema.json",
+            "batch-v1.schema.json",
+            "document.schema.json",
+            "journal-record.schema.json",
+            "plate-map.schema.json",
+            "preferences.schema.json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         for name in &expected_files {
             assert!(schemas_dir.join(name).is_file(), "missing schema file {}", schemas_dir.join(name).display());
         }

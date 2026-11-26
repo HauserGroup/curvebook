@@ -7,17 +7,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use curvebook_doc::error::MAX_SHEET_ID_BYTES;
 use curvebook_doc::{
-    Cell, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DocError, GroupedTable, MAX_DATA_SETS,
-    MAX_PROJECT_CELLS, MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, MAX_TITLE_BYTES, MultipleVariablesTable, NestedGroupColumn, NestedTable,
-    PartsOfWholeTable, ProjectDocument, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable, validate_data_sets,
-    validate_rows, validate_subcolumns, validate_title,
+    Cell, CellValue, ColumnDesignHint, ColumnEqualsFilter, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DocError, GroupedTable,
+    MAX_DATA_SETS, MAX_PROJECT_CELLS, MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, MAX_TITLE_BYTES, MultipleVariablesTable, NestedGroupColumn,
+    NestedTable, PartsOfWholeTable, ProjectDocument, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
+    validate_data_sets, validate_rows, validate_subcolumns, validate_title,
 };
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use crate::archive::{MAX_ARCHIVE_FILE_BYTES, validate_project_document};
-use crate::csv::{MAX_IMPORT_CELLS, collapse_merged_header_rows, detect_xy_x_subcolumn_header};
+use crate::csv::{MAX_IMPORT_CELLS, collapse_merged_header_rows, detect_xy_x_subcolumn_header, make_deterministic_split_id};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
+use crate::preamble::{build_preamble_info_sheet, extract_preamble_info};
 use crate::xml::{MAX_XML_BYTES, MAX_XML_DEPTH, XmlLimits, decode_xml_entities, parse_xml_with_limits};
 use crate::zip::{ZipArchive, ZipLimits, sanitize_zip_path};
 
@@ -57,6 +58,24 @@ pub struct XlsxImportOptions {
     pub subcolumn_mode: SubcolumnMode,
     pub include_hidden: bool,
     pub title: Option<String>,
+    /// Optional A1 rectangle (e.g. `"B4:M11"`). Requires selecting a single worksheet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_range: Option<String>,
+    /// Leading rows skipped before `header_rows` (relative to `cell_range` when set).
+    #[serde(default)]
+    pub skip_rows: usize,
+    /// When `true`, expand exact OOXML `<mergeCell>` ranges across body rows before cropping/slicing (default `false`).
+    #[serde(default)]
+    pub fill_merged_cells: bool,
+    /// Split data rows into one sheet per distinct trimmed value in this zero-based column (mutually exclusive with `row_match`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_by_column: Option<usize>,
+    /// Keep only data rows matching one trimmed value in a discriminator column (mutually exclusive with `split_by_column`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_match: Option<ColumnEqualsFilter>,
+    /// When `true` and `skip_rows > 0`, save skipped `Key: Value` rows & notes into one shared linked `InfoSheet` (default `false`).
+    #[serde(default)]
+    pub extract_preamble_info: bool,
 }
 
 impl Default for XlsxImportOptions {
@@ -71,6 +90,12 @@ impl Default for XlsxImportOptions {
             subcolumn_mode: SubcolumnMode::Single,
             include_hidden: false,
             title: None,
+            cell_range: None,
+            skip_rows: 0,
+            fill_merged_cells: false,
+            split_by_column: None,
+            row_match: None,
+            extract_preamble_info: false,
         }
     }
 }
@@ -176,6 +201,13 @@ pub fn import_xlsx_bytes_with_options(bytes: &[u8], opts: &XlsxImportOptions) ->
         }
     }
 
+    if opts.split_by_column.is_some() && opts.row_match.is_some() {
+        return Err(FormatError::InvalidPipeline {
+            reason: String::from("cannot combine `split_by_column` and `row_match` in the same .xlsx import"),
+        });
+    }
+    let parsed_range = opts.cell_range.as_deref().map(parse_a1_cell_range).transpose()?;
+
     let archive = ZipArchive::from_bytes_with_limits(bytes, ZipLimits::default())?;
     let mut manifest = parse_workbook_manifest(&archive)?;
     let mut warnings = std::mem::take(&mut manifest.warnings);
@@ -185,6 +217,14 @@ pub fn import_xlsx_bytes_with_options(bytes: &[u8], opts: &XlsxImportOptions) ->
     }
 
     let selected = select_target_sheets(&manifest.sheets, opts, &mut warnings)?;
+    if parsed_range.is_some() && selected.len() > 1 {
+        return Err(FormatError::InvalidPipeline {
+            reason: format!(
+                "`cell_range` requires importing a single worksheet, but {} worksheets were selected; specify `sheets` or `sheet_indices`",
+                selected.len()
+            ),
+        });
+    }
     if selected.len() > MAX_SHEETS_PER_PROJECT {
         return Err(FormatError::Doc(DocError::TooManySheets { count: selected.len(), max: MAX_SHEETS_PER_PROJECT }));
     }
@@ -209,18 +249,54 @@ pub fn import_xlsx_bytes_with_options(bytes: &[u8], opts: &XlsxImportOptions) ->
         };
         let ws_xml = decode_xml_entry(ws_bytes, &sheet_info.path)?;
         let mut parsed = parse_worksheet_xml(&ws_xml, &shared_strings, &mut cumulative_text_bytes)?;
-        emit_worksheet_warnings(&sheet_info.name, &parsed, effective_header_rows, &mut warnings);
-
-        let sheet_id = make_unique_sheet_id(&sheet_info.name, sheet_info.index, &mut used_ids);
-        let sheet_title = clamp_title(if sheet_info.name.trim().is_empty() { "Sheet" } else { sheet_info.name.trim() }, "worksheet", &mut warnings);
-        let ds = build_datasheet_from_worksheet(sheet_id, sheet_title, &mut parsed, opts, effective_header_rows, &mut cumulative_text_bytes)?;
-        cumulative_cells = cumulative_cells
-            .checked_add(ds.archetype.allocated_cell_slots())
-            .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("workbook cell count overflow") })?;
-        if cumulative_cells > MAX_PROJECT_CELLS {
-            return Err(FormatError::Doc(DocError::TooManyCells { count: cumulative_cells, max: MAX_PROJECT_CELLS }));
+        emit_worksheet_warnings(&sheet_info.name, &parsed, effective_header_rows, opts.fill_merged_cells, &mut warnings);
+        if opts.fill_merged_cells {
+            expand_merged_cells(&mut parsed, &mut cumulative_text_bytes)?;
         }
-        doc.add_data_sheet(ds)?;
+
+        let sheet_title = clamp_title(if sheet_info.name.trim().is_empty() { "Sheet" } else { sheet_info.name.trim() }, "worksheet", &mut warnings);
+        let built = build_datasheets_from_worksheet(
+            sheet_info,
+            &sheet_title,
+            &mut parsed,
+            opts,
+            parsed_range,
+            effective_header_rows,
+            &mut used_ids,
+            &mut cumulative_text_bytes,
+            &mut warnings,
+        )?;
+        let mut emitted_ids = Vec::with_capacity(built.sheets.len());
+        let shared_info_id = built.info_sheet.as_ref().map(|info| info.id.clone());
+        for mut ds in built.sheets {
+            if let Some(ref info_id) = shared_info_id {
+                ds.info_sheet_id = Some(info_id.clone());
+            }
+            if doc.total_sheet_count() >= MAX_SHEETS_PER_PROJECT {
+                return Err(FormatError::Doc(DocError::TooManySheets {
+                    count: doc.total_sheet_count().saturating_add(1),
+                    max: MAX_SHEETS_PER_PROJECT,
+                }));
+            }
+            cumulative_cells = cumulative_cells
+                .checked_add(ds.archetype.allocated_cell_slots())
+                .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("workbook cell count overflow") })?;
+            if cumulative_cells > MAX_PROJECT_CELLS {
+                return Err(FormatError::Doc(DocError::TooManyCells { count: cumulative_cells, max: MAX_PROJECT_CELLS }));
+            }
+            emitted_ids.push(ds.id.clone());
+            doc.add_data_sheet(ds)?;
+        }
+        if let Some(mut info) = built.info_sheet {
+            if doc.total_sheet_count() >= MAX_SHEETS_PER_PROJECT {
+                return Err(FormatError::Doc(DocError::TooManySheets {
+                    count: doc.total_sheet_count().saturating_add(1),
+                    max: MAX_SHEETS_PER_PROJECT,
+                }));
+            }
+            info.linked_data_sheets = emitted_ids;
+            doc.add_info_sheet(info)?;
+        }
     }
 
     doc.active_sheet_id = doc.data_sheets.first().map(|s| s.id.clone());
@@ -1123,7 +1199,7 @@ fn decode_ooxml_escapes(raw: &str) -> String {
     out
 }
 
-fn emit_worksheet_warnings(sheet_name: &str, ws: &ParsedWorksheet, header_rows: usize, warnings: &mut Vec<ImportWarning>) {
+fn emit_worksheet_warnings(sheet_name: &str, ws: &ParsedWorksheet, header_rows: usize, fill_merged_cells: bool, warnings: &mut Vec<ImportWarning>) {
     let cached_formula_cells = ws.formula_cells.saturating_sub(ws.uncached_formula_cells);
     if cached_formula_cells > 0 {
         warnings.push(ImportWarning::new(
@@ -1164,66 +1240,300 @@ fn emit_worksheet_warnings(sheet_name: &str, ws: &ParsedWorksheet, header_rows: 
     }
     let body_merges = ws.merges.iter().filter(|m| m.r2 >= header_rows).count();
     if body_merges > 0 {
-        warnings.push(ImportWarning::new(
-            ImportWarningKind::IgnoredSection,
-            sheet_name,
-            format!("worksheet `{sheet_name}` had {body_merges} merged range(s) in data rows; kept top-left cell values"),
-        ));
+        if fill_merged_cells {
+            warnings.push(ImportWarning::new(
+                ImportWarningKind::CoercedValue,
+                sheet_name,
+                format!("worksheet `{sheet_name}` expanded {body_merges} merged range(s) in data rows from their top-left cell values"),
+            ));
+        } else {
+            warnings.push(ImportWarning::new(
+                ImportWarningKind::IgnoredSection,
+                sheet_name,
+                format!("worksheet `{sheet_name}` had {body_merges} merged range(s) in data rows; kept top-left cell values"),
+            ));
+        }
     }
 }
 
-fn build_datasheet_from_worksheet(
-    sheet_id: SheetId,
-    title: String,
+struct WorksheetBuildOutput {
+    sheets: Vec<DataSheet>,
+    info_sheet: Option<curvebook_doc::InfoSheet>,
+}
+
+fn parse_a1_cell_range(raw: &str) -> Result<MergeRange, FormatError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FormatError::InvalidPipeline { reason: String::from("`cell_range` cannot be empty") });
+    }
+    let (start_raw, end_raw) = trimmed.split_once(':').unwrap_or((trimmed, trimmed));
+    let (c1, Some(r1)) = parse_cell_ref(start_raw.trim(), 0)? else {
+        return Err(FormatError::InvalidPipeline {
+            reason: format!("invalid `cell_range` start reference `{start_raw}` (expected A1 notation like `B4:M11`)"),
+        });
+    };
+    let (c2, Some(r2)) = parse_cell_ref(end_raw.trim(), 0)? else {
+        return Err(FormatError::InvalidPipeline {
+            reason: format!("invalid `cell_range` end reference `{end_raw}` (expected A1 notation like `B4:M11`)"),
+        });
+    };
+    let mr = MergeRange { r1: r1.min(r2), c1: c1.min(c2), r2: r1.max(r2), c2: c1.max(c2) };
+    let rows = mr.r2 - mr.r1 + 1;
+    let cols = mr.c2 - mr.c1 + 1;
+    validate_rows(rows)?;
+    let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS).saturating_add(4);
+    if cols > max_cols {
+        return Err(FormatError::Doc(DocError::TooManyDataSets { count: cols, max: MAX_DATA_SETS }));
+    }
+    let cells = rows.checked_mul(cols).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("`cell_range` dimensions overflow") })?;
+    if cells > MAX_IMPORT_CELLS {
+        return Err(FormatError::Doc(DocError::TooManyCells { count: cells, max: MAX_IMPORT_CELLS }));
+    }
+    Ok(mr)
+}
+
+fn expand_merged_cells(ws: &mut ParsedWorksheet, cumulative_text_bytes: &mut usize) -> Result<(), FormatError> {
+    let merges = ws.merges.clone();
+    let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS).saturating_add(4);
+    let mut added = 0_usize;
+    for m in merges {
+        let Some(anchor) = ws.cells.get(&(m.r1, m.c1)).cloned() else {
+            continue;
+        };
+        if anchor.is_empty() {
+            continue;
+        }
+        if m.r2 >= MAX_ROWS {
+            return Err(FormatError::Doc(DocError::TooManyRows { count: m.r2 + 1, max: MAX_ROWS }));
+        }
+        if m.c2 >= max_cols {
+            return Err(FormatError::Doc(DocError::TooManyDataSets { count: m.c2 + 1, max: MAX_DATA_SETS }));
+        }
+        let span_r = m.r2.saturating_sub(m.r1).saturating_add(1);
+        let span_c = m.c2.saturating_sub(m.c1).saturating_add(1);
+        let span_cells = span_r
+            .checked_mul(span_c)
+            .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("merged cell range dimensions overflow") })?;
+        added = added.saturating_add(span_cells);
+        if added > MAX_IMPORT_CELLS {
+            return Err(FormatError::Doc(DocError::TooManyCells { count: added, max: MAX_IMPORT_CELLS }));
+        }
+        let text_len = match &anchor.value {
+            CellValue::Text(s) => s.len(),
+            CellValue::Empty | CellValue::Number(_) => 0,
+        };
+        for r in m.r1..=m.r2 {
+            for c in m.c1..=m.c2 {
+                if (r, c) == (m.r1, m.c1) || ws.cells.contains_key(&(r, c)) {
+                    continue;
+                }
+                if text_len > 0 {
+                    reserve_text_bytes(cumulative_text_bytes, text_len, "expanded merged cells")?;
+                }
+                ws.cells.insert((r, c), anchor.clone());
+            }
+        }
+        ws.max_row = Some(ws.max_row.map_or(m.r2, |cur| cur.max(m.r2)));
+        ws.max_col = Some(ws.max_col.map_or(m.c2, |cur| cur.max(m.c2)));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_datasheets_from_worksheet(
+    sheet_info: &XlsxSheetInfo,
+    sheet_title: &str,
     ws: &mut ParsedWorksheet,
     opts: &XlsxImportOptions,
+    parsed_range: Option<MergeRange>,
     effective_header_rows: usize,
+    used_ids: &mut HashSet<String>,
     cumulative_text_bytes: &mut usize,
-) -> Result<DataSheet, FormatError> {
-    let Some(max_row) = ws.max_row else {
-        let kind = opts.table_kind.unwrap_or(TableKind::Column);
-        let sub_mode = effective_subcolumn_mode(kind, opts.subcolumn_mode);
-        let ds_count = usize::from(!matches!(kind, TableKind::Xy | TableKind::Survival));
-        return create_empty_datasheet(sheet_id, title, kind, sub_mode, ds_count);
-    };
-    let Some(max_col) = ws.max_col else {
-        let kind = opts.table_kind.unwrap_or(TableKind::Column);
-        let sub_mode = effective_subcolumn_mode(kind, opts.subcolumn_mode);
-        return create_empty_datasheet(sheet_id, title, kind, sub_mode, 1);
+    warnings: &mut Vec<ImportWarning>,
+) -> Result<WorksheetBuildOutput, FormatError> {
+    let (row_lo, col_lo, total_rows, total_cols) = if let Some(mr) = parsed_range {
+        (mr.r1, mr.c1, mr.r2 - mr.r1 + 1, mr.c2 - mr.c1 + 1)
+    } else {
+        let Some(max_row) = ws.max_row else {
+            let sheet_id = make_unique_sheet_id(&sheet_info.name, sheet_info.index, used_ids);
+            let kind = opts.table_kind.unwrap_or(TableKind::Column);
+            let sub_mode = effective_subcolumn_mode(kind, opts.subcolumn_mode);
+            let ds_count = usize::from(!matches!(kind, TableKind::Xy | TableKind::Survival));
+            return Ok(WorksheetBuildOutput {
+                sheets: vec![create_empty_datasheet(sheet_id, sheet_title.to_owned(), kind, sub_mode, ds_count)?],
+                info_sheet: None,
+            });
+        };
+        let Some(max_col) = ws.max_col else {
+            let sheet_id = make_unique_sheet_id(&sheet_info.name, sheet_info.index, used_ids);
+            let kind = opts.table_kind.unwrap_or(TableKind::Column);
+            let sub_mode = effective_subcolumn_mode(kind, opts.subcolumn_mode);
+            return Ok(WorksheetBuildOutput {
+                sheets: vec![create_empty_datasheet(sheet_id, sheet_title.to_owned(), kind, sub_mode, 1)?],
+                info_sheet: None,
+            });
+        };
+        let rows = max_row.checked_add(1).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("worksheet row dimension overflow") })?;
+        let cols =
+            max_col.checked_add(1).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("worksheet column dimension overflow") })?;
+        (0_usize, 0_usize, rows, cols)
     };
 
-    let total_rows =
-        max_row.checked_add(1).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("worksheet row dimension overflow") })?;
-    let total_cols =
-        max_col.checked_add(1).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("worksheet column dimension overflow") })?;
     let total_grid_cells =
         total_rows.checked_mul(total_cols).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("worksheet dimensions overflow") })?;
     if total_grid_cells > MAX_IMPORT_CELLS {
         return Err(FormatError::Doc(DocError::TooManyCells { count: total_grid_cells, max: MAX_IMPORT_CELLS }));
     }
 
-    let header_count = effective_header_rows.min(total_rows);
-    let headers = extract_xlsx_headers(ws, header_count, total_cols, cumulative_text_bytes)?;
-    let data_row_count = total_rows.saturating_sub(header_count);
+    let skipped = opts.skip_rows.min(total_rows);
+    let info_sheet = if opts.extract_preamble_info && skipped > 0 {
+        let mut raw_skipped = Vec::with_capacity(skipped);
+        for r_rel in 0..skipped {
+            let r_abs = row_lo + r_rel;
+            let mut row_strs = Vec::with_capacity(total_cols);
+            for c_rel in 0..total_cols {
+                let c_abs = col_lo + c_rel;
+                row_strs.push(ws.cells.get(&(r_abs, c_abs)).map(bounded_header_text).unwrap_or_default());
+            }
+            raw_skipped.push(row_strs);
+        }
+        let preamble = extract_preamble_info(&raw_skipped, '.');
+        if preamble.is_empty() {
+            None
+        } else {
+            let info_id = make_unique_sheet_id(&format!("{}-info", sheet_info.name), sheet_info.index, used_ids);
+            let info_title = clamp_title(&format!("{sheet_title} — Info"), "info sheet", warnings);
+            build_preamble_info_sheet(info_id, info_title, &preamble, Vec::new())?
+        }
+    } else {
+        None
+    };
+
+    let remaining_rows = total_rows.saturating_sub(skipped);
+    let header_count = effective_header_rows.min(remaining_rows);
+    let headers = extract_xlsx_headers_window(ws, row_lo + skipped, col_lo, header_count, total_cols, cumulative_text_bytes)?;
+    let data_start_rel = skipped + header_count;
+    let data_row_count = total_rows.saturating_sub(data_start_rel);
     validate_rows(data_row_count)?;
 
     let mut data_rows: Vec<Vec<Cell>> = Vec::with_capacity(data_row_count);
-    for r in header_count..total_rows {
+    for r_rel in data_start_rel..total_rows {
+        let r_abs = row_lo + r_rel;
         let mut row_cells = Vec::with_capacity(total_cols);
-        for c in 0..total_cols {
-            row_cells.push(ws.cells.remove(&(r, c)).unwrap_or_else(Cell::empty));
+        for c_rel in 0..total_cols {
+            let c_abs = col_lo + c_rel;
+            row_cells.push(ws.cells.remove(&(r_abs, c_abs)).unwrap_or_else(Cell::empty));
         }
         data_rows.push(row_cells);
     }
 
-    let target_kind = opts.table_kind.unwrap_or_else(|| infer_xlsx_table_kind(&data_rows, total_cols, opts));
+    if let Some(disc_col) = opts.split_by_column {
+        if disc_col >= total_cols {
+            return Err(FormatError::InvalidPipeline {
+                reason: format!("`split_by_column` index {disc_col} is out of bounds for {total_cols}-column worksheet `{}`", sheet_info.name),
+            });
+        }
+        let mut block_order: Vec<String> = Vec::new();
+        let mut block_rows_map: HashMap<String, Vec<Vec<Cell>>> = HashMap::new();
+        let mut unlabeled_rows = 0_usize;
+        for mut row in data_rows {
+            if row.iter().all(|c| cell_as_label(c).is_empty()) {
+                continue;
+            }
+            let key = row.get(disc_col).map(cell_as_label).unwrap_or_default();
+            if key.is_empty() {
+                unlabeled_rows = unlabeled_rows.saturating_add(1);
+                continue;
+            }
+            if disc_col < row.len() {
+                row.remove(disc_col);
+            }
+            if !block_rows_map.contains_key(&key) {
+                block_order.push(key.clone());
+            }
+            block_rows_map.entry(key).or_default().push(row);
+        }
+        if unlabeled_rows > 0 {
+            warnings.push(ImportWarning::new(
+                ImportWarningKind::IgnoredSection,
+                &sheet_info.name,
+                format!("skipped {unlabeled_rows} non-empty row(s) with an empty value in `split_by_column` {disc_col}"),
+            ));
+        }
+        if block_order.is_empty() {
+            return Err(FormatError::InvalidPipeline {
+                reason: format!("`split_by_column` {disc_col} produced no non-empty blocks in worksheet `{}`", sheet_info.name),
+            });
+        }
+        let mut split_headers = headers;
+        if disc_col < split_headers.len() {
+            split_headers.remove(disc_col);
+        }
+        let eff_cols = total_cols.saturating_sub(1);
+        let base_slug = sheet_base_slug(&sheet_info.name, sheet_info.index);
+        let mut sheets = Vec::with_capacity(block_order.len());
+        for block_label in block_order {
+            let block_rows = block_rows_map.remove(&block_label).unwrap_or_default();
+            let block_id = make_deterministic_split_id(&base_slug, &block_label, used_ids);
+            let block_title = clamp_title(&format!("{sheet_title} — {block_label}"), "worksheet", warnings);
+            let ds = finalize_xlsx_datasheet(block_id, block_title, &split_headers, &block_rows, eff_cols, opts)?;
+            sheets.push(ds);
+        }
+        return Ok(WorksheetBuildOutput { sheets, info_sheet });
+    }
+
+    let (eff_headers, eff_rows, eff_cols) = if let Some(ref rm) = opts.row_match {
+        if rm.column >= total_cols {
+            return Err(FormatError::InvalidPipeline {
+                reason: format!("`row_match.column` index {} is out of bounds for {total_cols}-column worksheet `{}`", rm.column, sheet_info.name),
+            });
+        }
+        let needle = rm.equals.trim();
+        let mut kept_rows = Vec::new();
+        for mut row in data_rows {
+            let matches = row.get(rm.column).is_some_and(|cell| cell_as_label(cell) == needle);
+            if !matches {
+                continue;
+            }
+            if rm.drop_column && rm.column < row.len() {
+                row.remove(rm.column);
+            }
+            kept_rows.push(row);
+        }
+        let mut h = headers;
+        let cols_out = if rm.drop_column {
+            if rm.column < h.len() {
+                h.remove(rm.column);
+            }
+            total_cols.saturating_sub(1)
+        } else {
+            total_cols
+        };
+        (h, kept_rows, cols_out)
+    } else {
+        (headers, data_rows, total_cols)
+    };
+
+    let sheet_id = make_unique_sheet_id(&sheet_info.name, sheet_info.index, used_ids);
+    let ds = finalize_xlsx_datasheet(sheet_id, sheet_title.to_owned(), &eff_headers, &eff_rows, eff_cols, opts)?;
+    Ok(WorksheetBuildOutput { sheets: vec![ds], info_sheet })
+}
+
+fn finalize_xlsx_datasheet(
+    sheet_id: SheetId,
+    title: String,
+    headers: &[String],
+    data_rows: &[Vec<Cell>],
+    total_cols: usize,
+    opts: &XlsxImportOptions,
+) -> Result<DataSheet, FormatError> {
+    let target_kind = opts.table_kind.unwrap_or_else(|| infer_xlsx_table_kind(data_rows, total_cols, opts));
     let subcolumn_mode = effective_subcolumn_mode(target_kind, opts.subcolumn_mode);
     subcolumn_mode.validate()?;
     if !target_kind.allows_subcolumn_mode(subcolumn_mode) {
         return Err(FormatError::Doc(DocError::IncompatibleSubcolumnMode { archetype: target_kind, mode: subcolumn_mode }));
     }
-
-    assemble_datasheet(sheet_id, title, target_kind, subcolumn_mode, opts.has_row_titles, &headers, &data_rows, total_cols)
+    assemble_datasheet(sheet_id, title, target_kind, subcolumn_mode, opts.has_row_titles, headers, data_rows, total_cols)
 }
 
 fn create_empty_datasheet(
@@ -1236,8 +1546,10 @@ fn create_empty_datasheet(
     assemble_datasheet(sheet_id, title, kind, sub_mode, false, &[], &[], ds_count)
 }
 
-fn extract_xlsx_headers(
+fn extract_xlsx_headers_window(
     ws: &ParsedWorksheet,
+    row_lo: usize,
+    col_lo: usize,
     header_count: usize,
     total_cols: usize,
     cumulative_text_bytes: &mut usize,
@@ -1245,12 +1557,16 @@ fn extract_xlsx_headers(
     if header_count == 0 {
         return Ok(Vec::new());
     }
+    let row_hi = row_lo.saturating_add(header_count);
+    let col_hi = col_lo.saturating_add(total_cols);
     let mut raw_rows = vec![vec![String::new(); total_cols]; header_count];
-    for r in 0..header_count {
-        for c in 0..total_cols {
-            if let Some(cell) = ws.cells.get(&(r, c))
-                && let Some(row_vec) = raw_rows.get_mut(r)
-                && let Some(slot) = row_vec.get_mut(c)
+    for r_rel in 0..header_count {
+        let r_abs = row_lo + r_rel;
+        for c_rel in 0..total_cols {
+            let c_abs = col_lo + c_rel;
+            if let Some(cell) = ws.cells.get(&(r_abs, c_abs))
+                && let Some(row_vec) = raw_rows.get_mut(r_rel)
+                && let Some(slot) = row_vec.get_mut(c_rel)
             {
                 let text = bounded_header_text(cell);
                 reserve_text_bytes(cumulative_text_bytes, text.len(), "workbook headers")?;
@@ -1261,25 +1577,28 @@ fn extract_xlsx_headers(
     let max_header_merge_cells = header_count.saturating_mul(total_cols).min(MAX_IMPORT_CELLS);
     let mut merge_cells_visited = 0_usize;
     for merge in &ws.merges {
-        if merge.r1 >= header_count || merge.c1 >= total_cols {
+        if merge.r2 < row_lo || merge.r1 >= row_hi || merge.c2 < col_lo || merge.c1 >= col_hi {
             continue;
         }
-        let r_end = merge.r2.min(header_count.saturating_sub(1));
-        let c_end = merge.c2.min(total_cols.saturating_sub(1));
-        let span = (r_end - merge.r1 + 1).saturating_mul(c_end - merge.c1 + 1);
+        let r_start = merge.r1.max(row_lo);
+        let r_end = merge.r2.min(row_hi.saturating_sub(1));
+        let c_start = merge.c1.max(col_lo);
+        let c_end = merge.c2.min(col_hi.saturating_sub(1));
+        let span = (r_end - r_start + 1).saturating_mul(c_end - c_start + 1);
         merge_cells_visited = merge_cells_visited.saturating_add(span);
         if merge_cells_visited > max_header_merge_cells {
             return Err(FormatError::ZipBomb { reason: String::from("overlapping worksheet header mergeCell ranges exceed grid area") });
         }
-        let anchor_is_empty = raw_rows.get(merge.r1).and_then(|row| row.get(merge.c1)).is_none_or(|s| s.trim().is_empty());
-        if anchor_is_empty {
+        let anchor_val = ws.cells.get(&(merge.r1, merge.c1)).map(bounded_header_text).unwrap_or_default();
+        if anchor_val.trim().is_empty() {
             continue;
         }
-        let anchor_val = raw_rows.get(merge.r1).and_then(|row| row.get(merge.c1)).cloned().unwrap_or_default();
-        for r in merge.r1..=r_end {
-            for c in merge.c1..=c_end {
-                if let Some(row_vec) = raw_rows.get_mut(r)
-                    && let Some(slot) = row_vec.get_mut(c)
+        for r_abs in r_start..=r_end {
+            for c_abs in c_start..=c_end {
+                let r_rel = r_abs - row_lo;
+                let c_rel = c_abs - col_lo;
+                if let Some(row_vec) = raw_rows.get_mut(r_rel)
+                    && let Some(slot) = row_vec.get_mut(c_rel)
                     && slot.trim().is_empty()
                 {
                     reserve_text_bytes(cumulative_text_bytes, anchor_val.len(), "workbook headers")?;
@@ -1607,7 +1926,7 @@ fn truncate_utf8_to_bytes(s: &str, max_bytes: usize) -> &str {
     s.get(..end).unwrap_or("")
 }
 
-fn make_unique_sheet_id(raw_name: &str, index: usize, used: &mut HashSet<String>) -> SheetId {
+fn sheet_base_slug(raw_name: &str, index: usize) -> String {
     let fallback = format!("xlsx-{}", index + 1);
     let mut slug = String::with_capacity(raw_name.len());
     let mut prev_dash = false;
@@ -1626,10 +1945,13 @@ fn make_unique_sheet_id(raw_name: &str, index: usize, used: &mut HashSet<String>
     let trimmed = slug.trim_matches('-');
     let max_len = MAX_SHEET_ID_BYTES.saturating_sub(MAX_SHEET_ID_SUFFIX_HEADROOM);
     let base_raw = truncate_utf8_to_bytes(trimmed, max_len).trim_end_matches('-');
-    let base = if base_raw.is_empty() || SheetId::try_new(base_raw).is_err() { fallback.as_str() } else { base_raw };
+    if base_raw.is_empty() || SheetId::try_new(base_raw).is_err() { fallback } else { base_raw.to_owned() }
+}
 
-    if used.insert(base.to_owned())
-        && let Ok(id) = SheetId::try_new(base)
+fn make_unique_sheet_id(raw_name: &str, index: usize, used: &mut HashSet<String>) -> SheetId {
+    let base = sheet_base_slug(raw_name, index);
+    if used.insert(base.clone())
+        && let Ok(id) = SheetId::try_new(&base)
     {
         return id;
     }

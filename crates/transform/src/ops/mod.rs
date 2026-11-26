@@ -257,8 +257,8 @@ pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: 
     }
 }
 
-/// Execute an [`AnalysisSpec`] whose kind is [`AnalysisKind::Transform`] or
-/// [`AnalysisKind::FitSplineLowess`] and populate a [`ResultSheet`].
+/// Execute an [`AnalysisSpec`] whose kind is [`AnalysisKind::Transform`],
+/// [`AnalysisKind::FitSplineLowess`], or [`AnalysisKind::AreaUnderCurve`] and populate a [`ResultSheet`].
 pub fn execute_analysis_transform(source: &DataSheet, analysis: &AnalysisSpec, ctx: &TransformContext<'_>) -> Result<ResultSheet, TransformError> {
     match &analysis.kind {
         AnalysisKind::Transform(spec) => {
@@ -270,8 +270,9 @@ pub fn execute_analysis_transform(source: &DataSheet, analysis: &AnalysisSpec, c
             output.into_result_sheet(analysis.clone())
         }
         AnalysisKind::FitSplineLowess(spec) => crate::spline::execute_spline_lowess(source, analysis, spec),
+        AnalysisKind::AreaUnderCurve(spec) => crate::curve::execute_area_under_curve(source, analysis, spec),
         _ => Err(TransformError::InvalidSpec {
-            message: format!("analysis `{}` is not a Transform or FitSplineLowess specification", analysis.effective_title()),
+            message: format!("analysis `{}` is not a Transform, FitSplineLowess, or AreaUnderCurve specification", analysis.effective_title()),
         }),
     }
 }

@@ -39,6 +39,9 @@
             {
               "additionalProperties": false,
               "properties": {
+                "AreaUnderCurve": {
+                  "type": "object"
+                },
                 "BlandAltman": {
                   "type": "object"
                 },
@@ -322,6 +325,12 @@
         "linked_regions": {
           "items": {
             "$ref": "#/$defs/LinkedDataRegion"
+          },
+          "type": "array"
+        },
+        "plate_well_origins": {
+          "items": {
+            "$ref": "#/$defs/PlateCellOrigin"
           },
           "type": "array"
         },
@@ -1033,6 +1042,26 @@
         "significant"
       ],
       "title": "PairwiseComparisonRecord",
+      "type": "object"
+    },
+    "PlateCellOrigin": {
+      "additionalProperties": false,
+      "properties": {
+        "coord": {
+          "$ref": "#/$defs/CellCoord"
+        },
+        "well": {
+          "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "coord",
+        "well"
+      ],
+      "title": "PlateCellOrigin",
       "type": "object"
     },
     "PowerAnalysisSpec": {
@@ -1996,7 +2025,7 @@
       "type": "array"
     },
     "schema_version": {
-      "maximum": 7,
+      "maximum": 8,
       "minimum": 1,
       "type": "integer"
     },

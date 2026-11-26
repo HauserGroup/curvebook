@@ -3,15 +3,15 @@
 use std::collections::HashSet;
 
 use curvebook_doc::{
-    AnalysisDomainKind, AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, CellValue, ChecklistStatus, ClusterDistance, ClusterLinkage,
-    ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError, ErrorCode, ErrorPropagationMode,
-    FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, GraphSheet, HookSource, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec,
-    MAX_SHEETS_PER_PROJECT, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod,
-    MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
-    PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerTailMode,
-    ProjectDocument, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimpleLogisticSpec, SimulationNoise,
-    SplineLowessMethod, SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod,
-    TwoGroupSpec, VariableColumn, VariableRole, XyTable,
+    AnalysisDomainKind, AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, BaselineOperation, BlandAltmanSpec, CellValue, ChecklistStatus,
+    ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError,
+    ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, GraphSheet, HookSource, KappaWeighting, LeveneCenter,
+    LeveneTestSpec, LinearRegressionSpec, MAX_SHEETS_PER_PROJECT, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec,
+    MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
+    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec,
+    PowerEffectSpec, PowerOneSidedDirection, PowerTailMode, ProjectDocument, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec,
+    SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod, SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype,
+    TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XyTable,
 };
 use curvebook_fit::{get_builtin_model, list_builtin_equations, resolve_model_from_spec, suggested_default_dose_response_equation};
 use curvebook_format::{CsvOptions, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
@@ -1809,7 +1809,41 @@ fn validate_analysis_spec_semantics(spec: &AnalysisSpec) -> Result<(), EngineErr
             }
         }
         AnalysisKind::FitSplineLowess(sp) => validate_spline_lowess_spec_semantics(sp)?,
+        AnalysisKind::AreaUnderCurve(auc) => validate_area_under_curve_spec_semantics(auc)?,
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_area_under_curve_spec_semantics(auc: &AreaUnderCurveSpec) -> Result<(), EngineError> {
+    if let AucBaseline::Fixed { value } = auc.baseline
+        && !value.is_finite()
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`baseline` value must be finite"));
+    }
+    if let Some(lo) = auc.x_min
+        && !lo.is_finite()
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`x_min` must be finite"));
+    }
+    if let Some(hi) = auc.x_max
+        && !hi.is_finite()
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`x_max` must be finite"));
+    }
+    if let (Some(lo), Some(hi)) = (auc.x_min, auc.x_max)
+        && hi <= lo
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("`x_min` ({lo}) must be strictly less than `x_max` ({hi})")));
+    }
+    if !auc.min_peak_height.is_finite() || auc.min_peak_height < 0.0 {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("`min_peak_height` ({}) must be finite and >= 0", auc.min_peak_height)));
+    }
+    if !auc.min_area_fraction.is_finite() || !(0.0..=1.0).contains(&auc.min_area_fraction) {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("`min_area_fraction` ({}) must be finite and in [0, 1]", auc.min_area_fraction),
+        ));
     }
     Ok(())
 }
@@ -2281,6 +2315,9 @@ fn is_key_allowed_for_kind(kind: &AnalysisKind, key: &str, mode: KeyValidationMo
                 | "emit_curve_coordinates_tab"
                 | "interpolate_unknowns"
         ),
+        AnalysisKind::AreaUnderCurve(_) => {
+            matches!(key, "baseline" | "x_min" | "x_max" | "independent_time_points" | "min_peak_height" | "min_area_fraction")
+        }
         AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => is_key_allowed_for_fit(kind, key, mode.allow_ui_update_compat()),
         _ => is_key_allowed_for_stats(kind, key, mode.allow_ui_update_compat()),
     }
@@ -2481,9 +2518,11 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
             matches!(key, "emit_row_classification" | "confidence_bands" | "classification_cutoff" | "plot_x_min" | "plot_x_max" | "plot_segments")
         }
         AnalysisKind::LeveneTest(_) => key == "center",
-        AnalysisKind::Transform(_) | AnalysisKind::FitSplineLowess(_) | AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {
-            false
-        }
+        AnalysisKind::Transform(_)
+        | AnalysisKind::FitSplineLowess(_)
+        | AnalysisKind::AreaUnderCurve(_)
+        | AnalysisKind::LinearRegression(_)
+        | AnalysisKind::NonlinearRegression(_) => false,
     }
 }
 
@@ -2719,6 +2758,9 @@ fn resolve_transform_shorthand(name: &str) -> Option<AnalysisKind> {
         "point_to_point" => {
             return Some(AnalysisKind::FitSplineLowess(SplineLowessSpec { method: SplineLowessMethod::PointToPoint, ..SplineLowessSpec::default() }));
         }
+        "auc" | "area_under_curve" | "transform.auc" => {
+            return Some(AnalysisKind::AreaUnderCurve(AreaUnderCurveSpec::default()));
+        }
         _ => return None,
     };
     Some(AnalysisKind::Transform(tr))
@@ -2944,6 +2986,9 @@ fn suggest_analysis_kinds(raw: &str) -> Vec<String> {
         "smoothing_spline",
         "lowess",
         "point_to_point",
+        "auc",
+        "area_under_curve",
+        "transform.auc",
     ];
     let eqs = list_builtin_equations();
     let all_candidates = KNOWN_SHORTHANDS.iter().copied().chain(eqs.iter().map(|eq| eq.id.as_str()));
@@ -2984,6 +3029,7 @@ fn is_omitted_optional_field(kind: &AnalysisKind, key: &str) -> bool {
             "fixed_point" | "plot_x_min" | "plot_x_max" | "plot_segments" | "standard_addition" | "extend_line_to_x_intercept" | "deming_error"
         ),
         AnalysisKind::FitSplineLowess(_) => matches!(key, "smoothing_knots" | "smoothing_df" | "lowess_fraction" | "plot_x_min" | "plot_x_max"),
+        AnalysisKind::AreaUnderCurve(_) => matches!(key, "x_min" | "x_max"),
         AnalysisKind::NonlinearRegression(_) => matches!(
             key,
             "flag_r_squared_below"
@@ -3040,6 +3086,8 @@ const NULLABLE_KIND_FIELDS: &[&str] = &[
     "smoothing_knots",
     "smoothing_df",
     "lowess_fraction",
+    "x_min",
+    "x_max",
 ];
 
 const STRICT_NON_NULL_USIZE_FIELDS: &[&str] = &[
@@ -3207,6 +3255,13 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
         AnalysisKind::FitSplineLowess(spec) => {
             apply_enum_field(norm, "method", &mut spec.method, "spline/LOWESS `method`")?;
             apply_enum_field(norm, "lowess_preset", &mut spec.lowess_preset, "LOWESS `lowess_preset`")?;
+        }
+        AnalysisKind::AreaUnderCurve(spec) => {
+            if let Some(b_val) = norm.get("baseline")
+                && !b_val.is_null()
+            {
+                spec.baseline = parse_auc_baseline_value(b_val)?;
+            }
         }
         AnalysisKind::PowerAnalysis(spec) => {
             apply_enum_field(norm, "family", &mut spec.family, "power test `family`")?;
@@ -3463,7 +3518,62 @@ const CUSTOM_HANDLED_PATCH_KEYS: &[&str] = &[
     "parameters",
     "target_archetype",
     "derived_columns",
+    "baseline",
 ];
+
+fn parse_auc_baseline_value(val: &Value) -> Result<AucBaseline, EngineError> {
+    if let Some(num) = val.as_f64() {
+        if !num.is_finite() {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "AUC `baseline` value must be finite"));
+        }
+        return Ok(AucBaseline::Fixed { value: num });
+    }
+    if let Some(raw) = val.as_str() {
+        let norm: String = raw.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+        return match norm.as_str() {
+            "firstpoint" => Ok(AucBaseline::FirstPoint),
+            _ => Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("unknown AUC `baseline` string `{raw}` (expected a finite number, `first_point`, or `{{mode, value?}}`)"),
+            )),
+        };
+    }
+    if let Some(obj) = val.as_object() {
+        if obj.contains_key("mode") {
+            let parsed: AucBaseline = deserialize_strict(val, "/baseline")?;
+            if let AucBaseline::Fixed { value } = parsed
+                && !value.is_finite()
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "AUC `baseline` value must be finite"));
+            }
+            return Ok(parsed);
+        }
+        if obj.len() == 1
+            && let Some(fixed_val) = obj.get("Fixed")
+        {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct LegacyFixedBaseline {
+                value: f64,
+            }
+            let fixed: LegacyFixedBaseline = deserialize_strict(fixed_val, "/baseline/Fixed")?;
+            if !fixed.value.is_finite() {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "AUC `baseline` value must be finite"));
+            }
+            return Ok(AucBaseline::Fixed { value: fixed.value });
+        }
+        if obj.len() == 1
+            && let Some(fp_val) = obj.get("FirstPoint")
+            && (fp_val.is_null() || fp_val.as_object().is_some_and(Map::is_empty))
+        {
+            return Ok(AucBaseline::FirstPoint);
+        }
+    }
+    Err(EngineError::with_code(
+        ErrorCode::BadInput,
+        "invalid AUC `baseline`: expected a finite number, `\"first_point\"`, `{\"mode\": \"fixed\", \"value\": <f64>}`, or `{\"mode\": \"first_point\"}`",
+    ))
+}
 
 fn parse_derived_column_assignment(raw: &str) -> Result<DerivedColumnFormula, EngineError> {
     let Some((lhs, rhs)) = raw.split_once('=') else {
@@ -3572,7 +3682,8 @@ fn patch_analysis_kind_fields(kind: &mut AnalysisKind, patch: &Value) -> Result<
             }
             let is_nullable = NULLABLE_KIND_FIELDS.contains(&ks)
                 && !matches!(kind, AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { .. }) if ks == "sample_size")
-                && !matches!(kind, AnalysisKind::GeneralizedLinearModel(_) if ks == "response_column");
+                && !matches!(kind, AnalysisKind::GeneralizedLinearModel(_) if ks == "response_column")
+                && !matches!(kind, AnalysisKind::Transform(TransformAnalysisSpec::Simulate { .. }) if matches!(ks, "x_min" | "x_max"));
             if v.is_null() {
                 if !is_nullable {
                     if STRICT_NON_NULL_USIZE_FIELDS.contains(&ks) {

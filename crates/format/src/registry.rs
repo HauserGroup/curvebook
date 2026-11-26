@@ -356,6 +356,9 @@ const DESC_PROJECT_DIR: FormatDescriptor =
     FormatDescriptor { id: "curvebook.d", label: "CurveBook Unpacked Project", extensions: &["curvebook.d"], kind: FormatKind::ProjectDir };
 const DESC_TEMPLATE: FormatDescriptor =
     FormatDescriptor { id: "cbtemplate", label: "CurveBook Template", extensions: &["cbtemplate"], kind: FormatKind::Template };
+/// Static format descriptor for versioned `.cbplate` microplate layout files (`R17.7`).
+pub const DESC_PLATE_MAP: FormatDescriptor =
+    FormatDescriptor { id: "cbplate", label: "CurveBook Plate Map Layout", extensions: &["cbplate"], kind: FormatKind::Template };
 const DESC_PRISM: FormatDescriptor =
     FormatDescriptor { id: "prism", label: "External Project Archive (.prism)", extensions: &["prism"], kind: FormatKind::ForeignProject };
 const DESC_PZFX: FormatDescriptor =

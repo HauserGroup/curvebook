@@ -32,6 +32,7 @@ pub mod info;
 pub mod layout;
 pub mod links;
 pub mod param_spellings;
+pub mod plate;
 pub mod project;
 pub mod result;
 pub mod result_builder;
@@ -39,16 +40,16 @@ pub mod schema;
 
 pub use analysis::{
     ALL_ANALYSIS_DESCRIPTORS, AnalysisDomainKind, AnalysisKind, AnalysisKindDescriptor, AnalysisKindId, AnalysisRecomputeStrategy, AnalysisSpec,
-    AnalysisUiCategory, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ColumnTitleHookError, ContingencyMethod,
-    ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, DemingErrorSpec, DerivedColumnFormula, DescriptiveSpec,
-    ErrorPropagationMode, FactorialAnovaSpec, FitFlagRules, FitMethod, GlmFamily, GlmSpec, IdentifiabilityMode, KappaWeighting, LeveneCenter,
-    LeveneTestSpec, LinearRegressionSpec, LowessPreset, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion,
-    ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
-    NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule,
-    ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily,
-    RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, RocCiMethod, RocSpec, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod,
-    SplineLowessSpec, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
-    TwoProportionsMethod, WeightingScheme, WeightingSource, all_analysis_descriptors, default_analysis_kind_id_for_table,
+    AnalysisUiCategory, AreaUnderCurveSpec, AucBaseline, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ColumnTitleHookError,
+    ContingencyMethod, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, DemingErrorSpec, DerivedColumnFormula,
+    DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitFlagRules, FitMethod, GlmFamily, GlmSpec, IdentifiabilityMode, KappaWeighting,
+    LeveneCenter, LeveneTestSpec, LinearRegressionSpec, LowessPreset, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod,
+    ModelComparisonQuestion, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
+    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec,
+    ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode,
+    PowerTestFamily, RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, RocCiMethod, RocSpec, SimpleLogisticSpec, SimulationNoise,
+    SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod,
+    TwoGroupSpec, TwoProportionsMethod, WeightingScheme, WeightingSource, all_analysis_descriptors, default_analysis_kind_id_for_table,
     descriptor_by_serde_variant, descriptor_by_shorthand, descriptor_by_slug, descriptor_by_ui_catalog_id, descriptor_for_id, descriptor_for_kind,
     parse_column_title_numeric_hook, resolve_analysis_descriptor,
 };
@@ -89,9 +90,10 @@ pub use layout::{
     PanelBadgeStyle, PhysicalUnit,
 };
 pub use links::{
-    CellExclusionNote, CloneDataSheetOptions, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind, LinkBorderColor,
-    LinkSource, LinkedDataRegion, PlacementMode, SheetCellRange, transpose_cell_grid,
+    CellExclusionNote, CloneDataSheetOptions, ColumnEqualsFilter, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind,
+    LinkBorderColor, LinkSource, LinkedDataRegion, PlacementMode, PlateCellOrigin, SheetCellRange, transpose_cell_grid,
 };
+pub use plate::{MAX_PLATE_WELLS, PlateGeometry, PlateWellRole};
 pub use project::{NamedCheckpoint, ProjectDocument, SheetFolderKind};
 pub use result::{
     ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, ErrorCategory, ErrorCode, FittedCurveOverlay, PairedObservationAccounting,

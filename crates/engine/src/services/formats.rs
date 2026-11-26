@@ -210,6 +210,21 @@ pub fn load_project_from_path_with_xlsx_sheets(
     allow_delimited: bool,
     xlsx_sheets: Option<&[String]>,
 ) -> Result<(LoadedProject, usize), EngineError> {
+    let opts = xlsx_sheets.map(|sheets| XlsxImportOptions { sheet_names: Some(sheets.to_vec()), ..XlsxImportOptions::default() });
+    load_project_from_path_with_xlsx_options(path, allow_delimited, opts.as_ref())
+}
+
+/// Load a [`ProjectDocument`] from a regular file or unpacked `.curvebook.d` directory, optionally
+/// passing explicit [`XlsxImportOptions`] for `.xlsx` workbooks.
+///
+/// # Errors
+/// Returns [`EngineError`] if reading, regular-file validation, size caps, or format decoding fail,
+/// or if a delimited CSV/TSV file is passed with `allow_delimited == false`.
+pub fn load_project_from_path_with_xlsx_options(
+    path: &Path,
+    allow_delimited: bool,
+    xlsx_options: Option<&XlsxImportOptions>,
+) -> Result<(LoadedProject, usize), EngineError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         if is_unpacked_project_path(path) {
@@ -226,12 +241,12 @@ pub fn load_project_from_path_with_xlsx_sheets(
         }
         let limit = FormatRegistry::default_registry().importer_for_path(path).map_or(MAX_ARCHIVE_FILE_BYTES, |importer| importer.max_input_bytes());
         let bytes = read_regular_file_for_import(path, limit)?;
-        let loaded = load_project_from_bytes_with_xlsx_sheets(path, &bytes, allow_delimited, xlsx_sheets)?;
+        let loaded = load_project_from_bytes_with_xlsx_options(path, &bytes, allow_delimited, xlsx_options)?;
         Ok((loaded, bytes.len()))
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = (path, allow_delimited, xlsx_sheets);
+        let _ = (path, allow_delimited, xlsx_options);
         Err(EngineError::with_code(ErrorCode::UnsupportedFormat, "filesystem project loading is not supported on wasm32"))
     }
 }
@@ -243,7 +258,7 @@ pub fn load_project_from_path_with_xlsx_sheets(
 /// Returns [`EngineError`] if decoding/validation fails or if delimited input is passed with
 /// `allow_delimited == false`.
 pub fn load_project_from_bytes(path_hint: &Path, bytes: &[u8], allow_delimited: bool) -> Result<LoadedProject, EngineError> {
-    load_project_from_bytes_with_xlsx_sheets(path_hint, bytes, allow_delimited, None)
+    load_project_from_bytes_with_xlsx_options(path_hint, bytes, allow_delimited, None)
 }
 
 /// Load a [`ProjectDocument`] from bytes, optionally restricting `.xlsx` imports to specific
@@ -258,10 +273,26 @@ pub fn load_project_from_bytes_with_xlsx_sheets(
     allow_delimited: bool,
     xlsx_sheets: Option<&[String]>,
 ) -> Result<LoadedProject, EngineError> {
+    let opts = xlsx_sheets.map(|sheets| XlsxImportOptions { sheet_names: Some(sheets.to_vec()), ..XlsxImportOptions::default() });
+    load_project_from_bytes_with_xlsx_options(path_hint, bytes, allow_delimited, opts.as_ref())
+}
+
+/// Load a [`ProjectDocument`] from bytes, optionally passing explicit [`XlsxImportOptions`] for
+/// `.xlsx` workbooks.
+///
+/// # Errors
+/// Returns [`EngineError`] if decoding/validation fails or if delimited input is passed with
+/// `allow_delimited == false`.
+pub fn load_project_from_bytes_with_xlsx_options(
+    path_hint: &Path,
+    bytes: &[u8],
+    allow_delimited: bool,
+    xlsx_options: Option<&XlsxImportOptions>,
+) -> Result<LoadedProject, EngineError> {
     let registry = FormatRegistry::default_registry();
     if let Some(importer) = registry.importer_for_path(path_hint) {
         let desc = importer.descriptor();
-        return import_with_registered_adapter(importer, desc.id, desc.kind, path_hint, bytes, allow_delimited, xlsx_sheets);
+        return import_with_registered_adapter(importer, desc.id, desc.kind, path_hint, bytes, allow_delimited, xlsx_options);
     }
     let ext = path_hint.extension().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase);
     if ext.as_deref() == Some("json") {
@@ -277,7 +308,7 @@ fn import_with_registered_adapter(
     path_hint: &Path,
     bytes: &[u8],
     allow_delimited: bool,
-    xlsx_sheets: Option<&[String]>,
+    xlsx_options: Option<&XlsxImportOptions>,
 ) -> Result<LoadedProject, EngineError> {
     match kind {
         FormatKind::Template => {
@@ -305,10 +336,13 @@ fn import_with_registered_adapter(
         FormatKind::ForeignProject => {
             let mut opts = ImportOptions::default();
             if format_tag == "xlsx"
-                && let Some(sheets) = xlsx_sheets
+                && let Some(raw_xopts) = xlsx_options
             {
-                let stem = path_hint.file_stem().and_then(std::ffi::OsStr::to_str).map(str::to_owned);
-                opts.xlsx = Some(XlsxImportOptions { sheet_names: Some(sheets.to_vec()), title: stem, ..XlsxImportOptions::default() });
+                let mut xopts = raw_xopts.clone();
+                if xopts.title.is_none() {
+                    xopts.title = path_hint.file_stem().and_then(std::ffi::OsStr::to_str).map(str::to_owned);
+                }
+                opts.xlsx = Some(xopts);
             }
             match importer.import_bytes(bytes, &opts)? {
                 ImportPayload::Report(report) => Ok(load_import_report(report, format_tag)),

@@ -2,10 +2,11 @@
 
 use curvebook_doc::schema::{
     DRAFT_2020_12_SCHEMA_URI, JsonSchema, SchemaNode, SchemaType, SchemaTypeSpec, array_schema, bool_schema, const_string_schema, enum_schema,
-    integer_schema, map_schema, nullable_schema, object_schema, one_of_schema, project_document_schema, ref_schema, string_schema,
+    integer_schema, map_schema, nullable_schema, number_schema, object_schema, one_of_schema, project_document_schema, ref_schema, string_schema,
 };
-use curvebook_doc::{CURRENT_SCHEMA_VERSION, MAX_IMAGE_ASSET_BYTES, MAX_TITLE_BYTES, SheetId};
+use curvebook_doc::{CURRENT_SCHEMA_VERSION, MAX_IMAGE_ASSET_BYTES, MAX_PLATE_WELLS, MAX_TITLE_BYTES, SheetId};
 
+use crate::plate::CURRENT_PLATE_MAP_VERSION;
 use crate::recovery::{CURRENT_JOURNAL_VERSION, CURRENT_LOCK_VERSION};
 use crate::versioned::{BATCH_SCHEMA_V1, CURRENT_PREFERENCES_VERSION};
 
@@ -13,6 +14,7 @@ const ARCHIVE_MANIFEST_SCHEMA_ID: &str = "https://github.com/HauserGroup/curvebo
 const BATCH_V1_SCHEMA_ID: &str = "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/batch-v1.schema.json";
 const PREFERENCES_SCHEMA_ID: &str = "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/preferences.schema.json";
 const JOURNAL_RECORD_SCHEMA_ID: &str = "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/journal-record.schema.json";
+const PLATE_MAP_SCHEMA_ID: &str = "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/plate-map.schema.json";
 
 fn to_json_value(node: &SchemaNode) -> serde_json::Value {
     serde_json::to_value(node).unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
@@ -377,7 +379,46 @@ pub fn journal_record_schema() -> serde_json::Value {
     value
 }
 
-/// Return all five persisted file format JSON Schemas paired with their canonical filenames.
+/// Draft 2020-12 JSON Schema for versioned `.cbplate` microplate layout files (`PlateMapFile`).
+pub fn plate_map_schema() -> serde_json::Value {
+    let treatment_payload = object_schema(
+        vec![
+            ("group_name", string_schema().with_min_length(1).with_max_length(MAX_TITLE_BYTES as u64)),
+            ("dilution_x", number_schema()),
+            ("replicate", integer_schema().with_minimum_i64(0)),
+        ],
+        &["group_name", "dilution_x", "replicate"],
+        false,
+    );
+    let well_role = one_of_schema(vec![
+        const_string_schema("Blank"),
+        const_string_schema("PositiveControl"),
+        const_string_schema("Excluded"),
+        object_schema(vec![("Treatment", treatment_payload)], &["Treatment"], false),
+    ])
+    .with_title("PlateWellRole");
+
+    let node = object_schema(
+        vec![
+            ("format_version", integer_schema().with_minimum_i64(1).with_maximum_i64(i64::from(CURRENT_PLATE_MAP_VERSION))),
+            ("name", string_schema().with_min_length(1).with_max_length(MAX_TITLE_BYTES as u64)),
+            ("geometry", enum_schema(&["Wells96", "Wells384"])),
+            ("x_title", string_schema().with_max_length(MAX_TITLE_BYTES as u64)),
+            ("wells", SchemaNode { min_items: Some(96), max_items: Some(MAX_PLATE_WELLS as u64), ..array_schema(ref_schema("PlateWellRole")) }),
+        ],
+        &["format_version", "name", "geometry", "x_title", "wells"],
+        false,
+    )
+    .with_schema_uri(DRAFT_2020_12_SCHEMA_URI)
+    .with_id(PLATE_MAP_SCHEMA_ID)
+    .with_title("PlateMapFile")
+    .with_description("Draft 2020-12 schema for versioned CurveBook .cbplate microplate layout files.")
+    .with_def("PlateWellRole", well_role);
+
+    to_json_value(&node)
+}
+
+/// Return all persisted file format JSON Schemas paired with their canonical filenames.
 pub fn all_persisted_schemas() -> Vec<(&'static str, serde_json::Value)> {
     vec![
         ("archive-manifest.schema.json", archive_manifest_schema()),
@@ -385,6 +426,7 @@ pub fn all_persisted_schemas() -> Vec<(&'static str, serde_json::Value)> {
         ("batch-v1.schema.json", batch_v1_schema()),
         ("preferences.schema.json", preferences_schema()),
         ("journal-record.schema.json", journal_record_schema()),
+        ("plate-map.schema.json", plate_map_schema()),
     ]
 }
 

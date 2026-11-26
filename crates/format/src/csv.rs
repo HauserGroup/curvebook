@@ -1,18 +1,20 @@
 //! RFC-4180 CSV/TSV parser & writer, typed `DataSheet` import/export, and multi-stage
 //! `ImportLinkSpec` pipeline (`filter -> rearrange/transpose -> baseline -> exclude/*`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use curvebook_doc::error::{MAX_SHEET_ID_BYTES, MAX_TITLE_BYTES};
 use curvebook_doc::{
     BaselineOperation, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DelimitedScanError,
-    DelimitedScanOptions, DelimitedVisitorError, DocError, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkedDataRegion,
-    MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable, PlacementMode,
-    SheetCellRange, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableColumn, XColumnMode, XyTable, default_column_label,
-    infer_number_separators, parse_import_number, scan_delimited, transpose_cell_grid, validate_cell_grid, validate_data_sets, validate_rows,
-    validate_subcolumns, validate_title,
+    DelimitedScanOptions, DelimitedVisitorError, DocError, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet,
+    LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable,
+    PlacementMode, SheetCellRange, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableColumn, XColumnMode, XyTable,
+    default_column_label, infer_number_separators, parse_import_number, scan_delimited, transpose_cell_grid, validate_cell_grid, validate_data_sets,
+    validate_rows, validate_subcolumns, validate_title,
 };
 
-use crate::error::FormatError;
+use crate::error::{FormatError, ImportWarning, ImportWarningKind};
+use crate::preamble::{build_preamble_info_sheet, extract_preamble_info};
 
 /// Maximum dense `Cell` entries allocated by delimited table import, filtering, or growth.
 pub const MAX_IMPORT_CELLS: usize = 10_000_000;
@@ -995,6 +997,309 @@ pub fn import_csv_to_datasheet_with_x_mode(
     import_csv_to_datasheet_with_budget_and_x_mode(id, title, input, target_kind, subcolumn_mode, x_subcolumn_mode, opts, MAX_IMPORT_CELLS)
 }
 
+/// Result of importing delimited text with windowing, column-equality filtering, multi-block
+/// splitting, and optional preamble metadata extraction (`R17.7`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CsvMultiImportResult {
+    /// Emitted typed [`DataSheet`]s (one per block when `split_by_column` is set, else one sheet).
+    pub sheets: Vec<DataSheet>,
+    /// Optional shared [`InfoSheet`] populated from skipped preamble rows when `extract_preamble_info` is true.
+    pub info_sheet: Option<InfoSheet>,
+    /// Non-fatal import warnings (for example partial rows with an empty split discriminator).
+    pub warnings: Vec<ImportWarning>,
+}
+
+/// Import delimited CSV/TSV text into one or more typed [`DataSheet`]s honoring [`ImportFilterSpec`]
+/// windowing (`row_window`, `col_window`, `row_match`, `decimate_every_k`), optional
+/// `split_by_column`, and optional `extract_preamble_info` (`R17.7`).
+#[allow(clippy::too_many_arguments)]
+pub fn import_csv_sheets_with_filter(
+    base_id: impl Into<SheetId>,
+    base_title: impl Into<String>,
+    input: &str,
+    target_kind: TableKind,
+    subcolumn_mode: SubcolumnMode,
+    opts: &CsvOptions,
+    filter: &ImportFilterSpec,
+    split_by_column: Option<usize>,
+    extract_preamble_info_flag: bool,
+) -> Result<CsvMultiImportResult, FormatError> {
+    if split_by_column.is_some() && filter.row_match.is_some() {
+        return Err(FormatError::InvalidPipeline {
+            reason: String::from("cannot combine `split_by_column` and `filter.row_match` in the same CSV import"),
+        });
+    }
+    subcolumn_mode.validate()?;
+    if !target_kind.allows_subcolumn_mode(subcolumn_mode) {
+        return Err(FormatError::Doc(DocError::IncompatibleSubcolumnMode { archetype: target_kind, mode: subcolumn_mode }));
+    }
+
+    let base_id = base_id.into();
+    let base_title = base_title.into();
+    let mut parse_opts = opts.clone();
+    parse_opts.parse_asterisk_exclusions = filter.parse_asterisk_exclusions;
+    let prefix_cols = usize::from(parse_opts.has_row_titles)
+        + usize::from(
+            matches!(target_kind, TableKind::Xy | TableKind::Survival)
+                || (matches!(target_kind, TableKind::PartsOfWhole) && !parse_opts.has_row_titles),
+        );
+    let data_col_limit = if matches!(target_kind, TableKind::Nested) {
+        MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS)
+    } else {
+        MAX_DATA_SETS.saturating_mul(subcolumn_mode.subcolumn_count())
+    };
+    let max_cols = prefix_cols.saturating_add(data_col_limit).saturating_add(usize::from(split_by_column.is_some() || filter.row_match.is_some()));
+    let header_slack = parse_opts.header_rows.saturating_mul(max_cols).min(65_536);
+    let max_fields =
+        MAX_IMPORT_CELLS.saturating_add(MAX_IMPORT_CELLS.min(MAX_ROWS).saturating_mul(prefix_cols)).saturating_add(header_slack).max(4_096);
+    let records = parse_delimited_records_with_quotes_and_limits(input, &parse_opts, max_cols, max_fields)?;
+
+    let (r_start, r_end_opt) = match filter.row_window {
+        Some((s, e)) if e < s => return Err(FormatError::InvalidPipeline { reason: String::from("row_window end < start") }),
+        Some((s, e)) => (s.min(records.len()), Some(e)),
+        None => (0, None),
+    };
+
+    let mut warnings = Vec::new();
+    let mut used_ids: HashSet<String> = HashSet::new();
+    let info_sheet = if extract_preamble_info_flag && r_start > 0 {
+        let skipped_rows: Vec<Vec<String>> =
+            records.get(..r_start).unwrap_or(&[]).iter().map(|row| row.iter().map(|f| f.text.clone()).collect()).collect();
+        let preamble = extract_preamble_info(&skipped_rows, parse_opts.decimal_separator);
+        if preamble.is_empty() {
+            None
+        } else {
+            let info_id = make_deterministic_split_id(base_id.as_str(), "info", &mut used_ids);
+            let info_title = clamp_csv_title(&format!("{base_title} — Info"));
+            build_preamble_info_sheet(info_id, info_title, &preamble, Vec::new())?
+        }
+    } else {
+        None
+    };
+
+    let after_start = match r_end_opt {
+        Some(e) => {
+            let inclusive_end = e.min(records.len().saturating_sub(1));
+            if r_start >= records.len() || inclusive_end < r_start { &[][..] } else { records.get(r_start..=inclusive_end).unwrap_or(&[]) }
+        }
+        None => records.get(r_start..).unwrap_or(&[]),
+    };
+
+    let max_raw_cols = after_start.iter().map(Vec::len).max().unwrap_or(0);
+    let (c_start, c_end_opt) = match filter.col_window {
+        Some((s, e)) if e < s => return Err(FormatError::InvalidPipeline { reason: String::from("col_window end < start") }),
+        Some((s, e)) => (s, Some(e.min(max_raw_cols.saturating_sub(1)))),
+        None => (0, None),
+    };
+    let windowed_records: Vec<Vec<ParsedCsvField>> = if c_start == 0 && c_end_opt.is_none() {
+        after_start.to_vec()
+    } else if max_raw_cols == 0 || c_start >= max_raw_cols {
+        Vec::new()
+    } else {
+        let c_end = c_end_opt.unwrap_or_else(|| max_raw_cols.saturating_sub(1));
+        after_start
+            .iter()
+            .map(|row| (c_start..=c_end).map(|c| row.get(c).cloned().unwrap_or(ParsedCsvField { text: String::new(), quoted: false })).collect())
+            .collect()
+    };
+
+    let header_count = parse_opts.header_rows.min(windowed_records.len());
+    let headers = collapse_delimited_headers(windowed_records.get(..header_count).unwrap_or(&[]));
+    let raw_data_rows = windowed_records.get(header_count..).unwrap_or(&[]);
+
+    let step = match filter.decimate_every_k {
+        Some(0) => return Err(FormatError::InvalidPipeline { reason: String::from("decimate_every_k must be >= 1") }),
+        Some(k) => k,
+        None => 1,
+    };
+    let total_cols = headers.len().max(raw_data_rows.iter().map(Vec::len).max().unwrap_or(0));
+
+    if let Some(raw_disc_col) = split_by_column {
+        let disc_col = raw_disc_col
+            .checked_sub(c_start)
+            .ok_or_else(|| FormatError::InvalidPipeline { reason: format!("`split_by_column` index {raw_disc_col} lies outside `col_window`") })?;
+        if disc_col >= total_cols {
+            return Err(FormatError::InvalidPipeline {
+                reason: format!("`split_by_column` index {raw_disc_col} is out of bounds for {total_cols}-column delimited input"),
+            });
+        }
+        let mut block_order: Vec<String> = Vec::new();
+        let mut block_map: HashMap<String, Vec<Vec<ParsedCsvField>>> = HashMap::new();
+        let mut unlabeled = 0_usize;
+        for orig_row in raw_data_rows {
+            if orig_row.iter().all(|f| f.text.trim().is_empty()) {
+                continue;
+            }
+            let key = orig_row.get(disc_col).map(|f| f.text.trim().to_owned()).unwrap_or_default();
+            if key.is_empty() {
+                unlabeled = unlabeled.saturating_add(1);
+                continue;
+            }
+            let mut row = orig_row.clone();
+            if disc_col < row.len() {
+                row.remove(disc_col);
+            }
+            if !block_map.contains_key(&key) {
+                block_order.push(key.clone());
+            }
+            block_map.entry(key).or_default().push(row);
+        }
+        if unlabeled > 0 {
+            warnings.push(ImportWarning::new(
+                ImportWarningKind::IgnoredSection,
+                base_title.as_str(),
+                format!("skipped {unlabeled} non-empty row(s) with an empty value in `split_by_column` {raw_disc_col}"),
+            ));
+        }
+        if block_order.is_empty() {
+            return Err(FormatError::InvalidPipeline { reason: format!("`split_by_column` {raw_disc_col} produced no non-empty blocks") });
+        }
+        let mut split_headers = headers;
+        if disc_col < split_headers.len() {
+            split_headers.remove(disc_col);
+        }
+        let mut sheets = Vec::with_capacity(block_order.len());
+        let mut linked_ids = Vec::with_capacity(block_order.len());
+        for block_key in block_order {
+            let block_rows: Vec<Vec<ParsedCsvField>> = block_map.remove(&block_key).unwrap_or_default().into_iter().step_by(step).collect();
+            let sheet_id = make_deterministic_split_id(base_id.as_str(), &block_key, &mut used_ids);
+            let title = clamp_csv_title(&format!("{base_title} — {block_key}"));
+            let mut ds = build_datasheet_from_parsed_csv(
+                sheet_id.clone(),
+                title,
+                &split_headers,
+                &block_rows,
+                header_count,
+                target_kind,
+                subcolumn_mode,
+                None,
+                &parse_opts,
+                MAX_IMPORT_CELLS,
+            )?;
+            if let Some(ref info) = info_sheet {
+                ds.info_sheet_id = Some(info.id.clone());
+            }
+            linked_ids.push(sheet_id);
+            sheets.push(ds);
+        }
+        let final_info = info_sheet.map(|mut info| {
+            info.linked_data_sheets = linked_ids;
+            info
+        });
+        return Ok(CsvMultiImportResult { sheets, info_sheet: final_info, warnings });
+    }
+
+    let (eff_headers, eff_rows) = if let Some(ref rm) = filter.row_match {
+        let rel_col = rm
+            .column
+            .checked_sub(c_start)
+            .ok_or_else(|| FormatError::InvalidPipeline { reason: format!("`row_match.column` index {} lies outside `col_window`", rm.column) })?;
+        if rel_col >= total_cols {
+            return Err(FormatError::InvalidPipeline {
+                reason: format!("`row_match.column` index {} is out of bounds for {total_cols}-column delimited input", rm.column),
+            });
+        }
+        let needle = rm.equals.trim();
+        let mut kept = Vec::new();
+        for orig_row in raw_data_rows {
+            if orig_row.get(rel_col).is_some_and(|f| f.text.trim() == needle) {
+                let mut row = orig_row.clone();
+                if rm.drop_column && rel_col < row.len() {
+                    row.remove(rel_col);
+                }
+                kept.push(row);
+            }
+        }
+        let decimated: Vec<Vec<ParsedCsvField>> = kept.into_iter().step_by(step).collect();
+        let mut h = headers;
+        if rm.drop_column && rel_col < h.len() {
+            h.remove(rel_col);
+        }
+        (h, decimated)
+    } else {
+        let decimated: Vec<Vec<ParsedCsvField>> = raw_data_rows.iter().step_by(step).cloned().collect();
+        (headers, decimated)
+    };
+
+    let mut ds = build_datasheet_from_parsed_csv(
+        base_id.clone(),
+        base_title,
+        &eff_headers,
+        &eff_rows,
+        header_count,
+        target_kind,
+        subcolumn_mode,
+        None,
+        &parse_opts,
+        MAX_IMPORT_CELLS,
+    )?;
+    let final_info = info_sheet.map(|mut info| {
+        ds.info_sheet_id = Some(info.id.clone());
+        info.linked_data_sheets = vec![base_id];
+        info
+    });
+    Ok(CsvMultiImportResult { sheets: vec![ds], info_sheet: final_info, warnings })
+}
+
+fn truncate_csv_utf8_to_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = 0_usize;
+    for (idx, ch) in s.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    s.get(..end).unwrap_or("")
+}
+
+fn clamp_csv_title(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.len() <= MAX_TITLE_BYTES && validate_title(trimmed).is_ok() {
+        return trimmed.to_owned();
+    }
+    let clipped = truncate_csv_utf8_to_bytes(trimmed, MAX_TITLE_BYTES.saturating_sub(3));
+    format!("{clipped}...")
+}
+
+pub(crate) fn make_deterministic_split_id(base_id: &str, block_label: &str, used: &mut HashSet<String>) -> SheetId {
+    let mut block_slug = String::with_capacity(block_label.len());
+    let mut prev_sep = false;
+    for ch in block_label.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            block_slug.push(ch.to_ascii_lowercase());
+            prev_sep = false;
+        } else if !prev_sep && !block_slug.is_empty() {
+            block_slug.push('_');
+            prev_sep = true;
+        }
+    }
+    let clean_block = block_slug.trim_matches('_');
+    let clean_base = base_id.trim();
+    let raw_stem = if clean_block.is_empty() { format!("{clean_base}_block") } else { format!("{clean_base}_{clean_block}") };
+    let max_stem = MAX_SHEET_ID_BYTES.saturating_sub(16);
+    let stem_trimmed = truncate_csv_utf8_to_bytes(&raw_stem, max_stem).trim_end_matches('_');
+    let base = if stem_trimmed.is_empty() || SheetId::try_new(stem_trimmed).is_err() { "csv_block" } else { stem_trimmed };
+    if used.insert(base.to_owned())
+        && let Ok(id) = SheetId::try_new(base)
+    {
+        return id;
+    }
+    let mut n = 2_usize;
+    loop {
+        let candidate = format!("{base}_{n}");
+        if used.insert(candidate.clone())
+            && let Ok(id) = SheetId::try_new(&candidate)
+        {
+            return id;
+        }
+        n = n.saturating_add(1);
+    }
+}
+
 /// Import delimited CSV/TSV text into a typed [`DataSheet`] bounded by `max_cells`.
 pub(crate) fn import_csv_to_datasheet_with_budget(
     id: impl Into<SheetId>,
@@ -1049,6 +1354,33 @@ fn import_csv_to_datasheet_with_budget_and_x_mode(
     let header_count = opts.header_rows.min(records.len());
     let headers = collapse_delimited_headers(records.get(..header_count).unwrap_or(&[]));
     let data_rows = records.get(header_count..).unwrap_or(&[]);
+    build_datasheet_from_parsed_csv(
+        id.into(),
+        title.into(),
+        &headers,
+        data_rows,
+        header_count,
+        target_kind,
+        subcolumn_mode,
+        explicit_x_subcolumn_mode,
+        opts,
+        max_cells,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_datasheet_from_parsed_csv(
+    id: SheetId,
+    title: String,
+    headers: &[ParsedCsvField],
+    data_rows: &[Vec<ParsedCsvField>],
+    header_count: usize,
+    target_kind: TableKind,
+    subcolumn_mode: SubcolumnMode,
+    explicit_x_subcolumn_mode: Option<SubcolumnMode>,
+    opts: &CsvOptions,
+    max_cells: usize,
+) -> Result<DataSheet, FormatError> {
     let row_count = data_rows.len();
     validate_rows(row_count)?;
 
@@ -1089,7 +1421,7 @@ fn import_csv_to_datasheet_with_budget_and_x_mode(
                     }
                 }
             }
-            populate_datasets(&mut xy.data_sets, data_rows, &headers, col_offset, subs, opts)?;
+            populate_datasets(&mut xy.data_sets, data_rows, headers, col_offset, subs, opts)?;
             TableArchetype::Xy(xy)
         }
         TableKind::Column => {
@@ -1101,7 +1433,7 @@ fn import_csv_to_datasheet_with_budget_and_x_mode(
             let mut col = ColumnTable::new_with_subcolumns(hint, subcolumn_mode, ds_count, row_count)?;
             assign_row_titles(&mut col.row_titles, data_rows, has_row_titles);
             col.row_titles_expanded = opts.has_row_titles;
-            populate_datasets(&mut col.data_sets, data_rows, &headers, col_offset, subs, opts)?;
+            populate_datasets(&mut col.data_sets, data_rows, headers, col_offset, subs, opts)?;
             TableArchetype::Column(col)
         }
         TableKind::Grouped => {
@@ -1111,7 +1443,7 @@ fn import_csv_to_datasheet_with_budget_and_x_mode(
             validate_csv_cell_budget(row_count, ds_count, subs, 0, err_line, max_cells)?;
             let mut grp = GroupedTable::new(subcolumn_mode, ds_count, row_count)?;
             assign_row_titles(&mut grp.row_titles, data_rows, has_row_titles);
-            populate_datasets(&mut grp.data_sets, data_rows, &headers, col_offset, subs, opts)?;
+            populate_datasets(&mut grp.data_sets, data_rows, headers, col_offset, subs, opts)?;
             TableArchetype::Grouped(grp)
         }
         TableKind::Contingency => {
@@ -1120,7 +1452,7 @@ fn import_csv_to_datasheet_with_budget_and_x_mode(
             validate_csv_cell_budget(row_count, ds_count, 1, 0, err_line, max_cells)?;
             let mut cont = ContingencyTable::new(ds_count, row_count)?;
             assign_row_titles(&mut cont.row_titles, data_rows, has_row_titles);
-            populate_datasets(&mut cont.data_sets, data_rows, &headers, col_offset, 1, opts)?;
+            populate_datasets(&mut cont.data_sets, data_rows, headers, col_offset, 1, opts)?;
             TableArchetype::Contingency(cont)
         }
         TableKind::Survival => {
@@ -1146,7 +1478,7 @@ fn import_csv_to_datasheet_with_budget_and_x_mode(
                     *slot = parse_csv_field_cell(tok, opts);
                 }
             }
-            populate_datasets(&mut surv.cohorts, data_rows, &headers, col_offset, 1, opts)?;
+            populate_datasets(&mut surv.cohorts, data_rows, headers, col_offset, 1, opts)?;
             TableArchetype::Survival(surv)
         }
         TableKind::PartsOfWhole => {
@@ -1163,7 +1495,7 @@ fn import_csv_to_datasheet_with_budget_and_x_mode(
             } else if !opts.has_row_titles {
                 pow.slice_labels = data_rows.iter().map(|r| r.get(label_col).map(|f| f.text.clone()).unwrap_or_default()).collect();
             }
-            populate_datasets(&mut pow.data_sets, data_rows, &headers, col_offset, 1, opts)?;
+            populate_datasets(&mut pow.data_sets, data_rows, headers, col_offset, 1, opts)?;
             TableArchetype::PartsOfWhole(pow)
         }
         TableKind::MultipleVariables => {
@@ -1190,7 +1522,7 @@ fn import_csv_to_datasheet_with_budget_and_x_mode(
             TableArchetype::MultipleVariables(mv)
         }
         TableKind::Nested => import_csv_nested_table(&CsvNestedContext {
-            headers: &headers,
+            headers,
             data_rows,
             col_offset,
             row_count,
@@ -1202,7 +1534,7 @@ fn import_csv_to_datasheet_with_budget_and_x_mode(
         })?,
     };
 
-    Ok(DataSheet::new(id.into(), title, arch)?)
+    Ok(DataSheet::new(id, title, arch)?)
 }
 
 struct CsvNestedContext<'a> {
@@ -1595,22 +1927,62 @@ pub fn filter_delimited_text(
     let mut headers = Vec::new();
     let mut cells = Vec::new();
     if max_cols > 0 && c_start < max_cols {
-        let kept_cols = c_end - c_start + 1;
-        let kept_rows = sliced_rows.len().div_ceil(step);
-        check_pipeline_cell_budget(kept_rows.checked_mul(kept_cols), "filtered")?;
         for c in c_start..=c_end {
             headers.push(raw_headers.get(c).cloned().unwrap_or_else(|| default_column_label(c)));
         }
-        for (idx, row) in sliced_rows.iter().enumerate() {
-            if idx % step != 0 {
+    }
+
+    let row_match_ctx = if let Some(ref rm) = filter.row_match {
+        let rel_col = rm
+            .column
+            .checked_sub(c_start)
+            .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("row_match.column outside col_window") })?;
+        if rel_col >= headers.len() {
+            return Err(FormatError::InvalidPipeline { reason: String::from("row_match.column out of range") });
+        }
+        Some((rel_col, rm.equals.trim(), rm.drop_column))
+    } else {
+        None
+    };
+
+    if max_cols > 0 && c_start < max_cols {
+        let kept_cols = c_end - c_start + 1;
+        let drop_abs_col = row_match_ctx.and_then(|(rel_col, _, drop)| drop.then_some(c_start + rel_col));
+        let out_cols = if drop_abs_col.is_some() { kept_cols.saturating_sub(1) } else { kept_cols };
+        if row_match_ctx.is_none() {
+            let kept_rows = sliced_rows.len().div_ceil(step);
+            check_pipeline_cell_budget(kept_rows.checked_mul(out_cols), "filtered")?;
+        }
+        let mut matched_idx = 0_usize;
+        for row in sliced_rows {
+            if let Some((rel_col, needle, _)) = row_match_ctx {
+                let disc_cell = row.get(c_start + rel_col).map_or_else(Cell::empty, |tok| parse_csv_field_cell(tok, &parse_opts));
+                if !cell_matches_trimmed(&disc_cell, needle) {
+                    continue;
+                }
+            }
+            let emit = matched_idx.is_multiple_of(step);
+            matched_idx = matched_idx.saturating_add(1);
+            if !emit {
                 continue;
             }
-            let mut parsed_row = Vec::with_capacity(kept_cols);
+            if row_match_ctx.is_some() {
+                check_pipeline_cell_budget(cells.len().saturating_add(1).checked_mul(out_cols), "filtered")?;
+            }
+            let mut parsed_row = Vec::with_capacity(out_cols);
             for c in c_start..=c_end {
+                if drop_abs_col == Some(c) {
+                    continue;
+                }
                 let cell = row.get(c).map_or_else(Cell::empty, |tok| parse_csv_field_cell(tok, &parse_opts));
                 parsed_row.push(cell);
             }
             cells.push(parsed_row);
+        }
+        if let Some((rel_col, _, true)) = row_match_ctx
+            && rel_col < headers.len()
+        {
+            headers.remove(rel_col);
         }
     }
 
@@ -1667,6 +2039,17 @@ fn apply_filter_baseline(grid: &mut [Vec<Cell>], base_col: usize, op: BaselineOp
         }
     }
     Ok(())
+}
+
+fn cell_matches_trimmed(cell: &Cell, needle: &str) -> bool {
+    match &cell.value {
+        CellValue::Text(s) => s.trim() == needle,
+        CellValue::Number(v) => {
+            let clean = if *v == 0.0 { 0.0 } else { *v };
+            format!("{clean}") == needle
+        }
+        CellValue::Empty => needle.is_empty(),
+    }
 }
 
 fn check_pipeline_cell_budget(total_cells: Option<usize>, stage: &str) -> Result<(), FormatError> {

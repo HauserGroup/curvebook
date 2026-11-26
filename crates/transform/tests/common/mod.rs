@@ -105,6 +105,7 @@ pub fn raw_sheet(id: &str, archetype: TableArchetype) -> DataSheet {
         floating_notes: Vec::new(),
         color_tag: None,
         exclusion_notes: Vec::new(),
+        plate_well_origins: Vec::new(),
     }
 }
 

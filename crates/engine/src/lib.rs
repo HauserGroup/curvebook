@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use curvebook_chart::{ChartError, ChartScene};
-use curvebook_doc::{Cell, CellCoord, CellExclusionNote, DocError, ProjectDocument, SheetId, SummaryPointError, TableArchetype, VariableRole};
+use curvebook_doc::{
+    Cell, CellCoord, CellExclusionNote, DocError, PlateCellOrigin, ProjectDocument, SheetId, SummaryPointError, TableArchetype, VariableRole,
+};
 pub use curvebook_doc::{ErrorCategory, ErrorCode, RemediationKind};
 use curvebook_fit::FitError;
 #[cfg(not(target_arch = "wasm32"))]
@@ -731,6 +733,7 @@ struct SingleCellDelta {
     cell: Cell,
     mv_role: Option<VariableRole>,
     exclusion_notes: Option<Vec<CellExclusionNote>>,
+    plate_well_origins: Option<Vec<PlateCellOrigin>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -816,6 +819,10 @@ impl UndoEntry {
                 if let Some(prev_notes) = delta.exclusion_notes.take() {
                     let old_notes = std::mem::replace(&mut ds.exclusion_notes, prev_notes);
                     delta.exclusion_notes = Some(old_notes);
+                }
+                if let Some(prev_origins) = delta.plate_well_origins.take() {
+                    let old_origins = std::mem::replace(&mut ds.plate_well_origins, prev_origins);
+                    delta.plate_well_origins = Some(old_origins);
                 }
                 let current_path = std::mem::replace(file_path, inner.file_path.take());
                 inner.file_path = current_path;
@@ -1697,6 +1704,12 @@ impl Session {
                 } else {
                     None
                 };
+                let prev_plate_well_origins =
+                    if prev_cell.value != fast.cell.value && ds.plate_well_origins.iter().any(|entry| entry.coord == fast.coord) {
+                        Some(ds.plate_well_origins.clone())
+                    } else {
+                        None
+                    };
                 if let Err(err) = ds.set_cell(fast.coord, fast.cell) {
                     return Err(err.into());
                 }
@@ -1715,6 +1728,9 @@ impl Session {
                         if let Some(notes) = prev_exclusion_notes {
                             ds_mut.exclusion_notes = notes;
                         }
+                        if let Some(origins) = prev_plate_well_origins {
+                            ds_mut.plate_well_origins = origins;
+                        }
                     }
                     self.dirty = before_dirty;
                     return Err(hook_err);
@@ -1725,6 +1741,7 @@ impl Session {
                     cell: prev_cell,
                     mv_role: prev_mv_role,
                     exclusion_notes: prev_exclusion_notes,
+                    plate_well_origins: prev_plate_well_origins,
                 };
                 self.push_undo_entry(UndoEntry::from_cell_delta(delta, self.file_path.clone(), cell_slots, checkpoint_bytes, true));
                 self.redo_stack.clear();
@@ -1921,7 +1938,8 @@ mod tests {
     #[test]
     fn fast_set_cell_delta_preserves_mv_role_exclusion_notes_and_rollback() {
         use curvebook_doc::{
-            Cell, CellCoord, CellExclusionNote, CellValue, DataSheet, MultipleVariablesTable, ProjectDocument, TableArchetype, VariableRole,
+            Cell, CellCoord, CellExclusionNote, CellValue, DataSheet, MultipleVariablesTable, PlateCellOrigin, ProjectDocument, TableArchetype,
+            VariableRole,
         };
 
         let mut mv = MultipleVariablesTable::new(1, 3).expect("mv table");
@@ -1934,6 +1952,9 @@ mod tests {
             if let Some(slot) = var.cells.get_mut(1) {
                 *slot = Cell::number(20.0);
             }
+            if let Some(slot) = var.cells.get_mut(2) {
+                *slot = Cell::number(30.0);
+            }
         }
         let mut ds = DataSheet::new(SheetId::from("mv-1"), "MV", TableArchetype::MultipleVariables(mv)).expect("mv sheet");
         ds.exclusion_notes.push(CellExclusionNote {
@@ -1942,6 +1963,8 @@ mod tests {
             note: String::from("pipetting outlier"),
             timestamp_utc: String::from("unix:1"),
         });
+        ds.plate_well_origins.push(PlateCellOrigin { coord: CellCoord::new(0, 0, 0), well: String::from("A01") });
+        ds.plate_well_origins.push(PlateCellOrigin { coord: CellCoord::new(2, 0, 0), well: String::from("G12") });
         let mut doc = ProjectDocument::default();
         doc.add_data_sheet(ds).expect("add mv");
         let mut session = Session::from_document(doc);
@@ -1949,20 +1972,22 @@ mod tests {
         // First mutation validates document cleanly and primes `baseline_verified`.
         session.execute("table.setCell", json!({ "sheet_id": "mv-1", "row": 1, "col": 0, "value": 25.0 })).expect("first edit");
 
-        // Second mutation uses O(1) cell delta fast path: replaces excluded cell with text, updating MV role + exclusion notes.
+        // Second mutation uses O(1) cell delta fast path: replaces excluded cell with text, updating MV role, exclusion notes, and plate origin.
         session
             .execute("table.setCell", json!({ "sheet_id": "mv-1", "row": 0, "col": 0, "value": "Control", "excluded": false }))
             .expect("fast text edit");
 
         let ds_after = session.document().data_sheet(&SheetId::from("mv-1")).expect("mv-1");
         assert!(ds_after.exclusion_notes.is_empty(), "clearing excluded flag must clear exclusion note");
+        assert_eq!(ds_after.plate_well_origin(CellCoord::new(0, 0, 0)), None, "overwriting cell value must clear plate well origin");
+        assert_eq!(ds_after.plate_well_origin(CellCoord::new(2, 0, 0)), Some("G12"), "unrelated plate well origin must remain intact");
         let mv_after = match &ds_after.archetype {
             TableArchetype::MultipleVariables(t) => t,
             other => panic!("unexpected archetype: {other:?}"),
         };
         assert_eq!(mv_after.variables.first().map(|v| v.role), Some(VariableRole::Categorical));
 
-        // Failing post-commit hook on fast path must roll back cell, MV role, notes, and dirty state.
+        // Failing post-commit hook on fast path must roll back cell, MV role, notes, plate origin, and dirty state.
         let snapshot_before_fail = session.clone();
         let cancel = AtomicBool::new(false);
         let _err = session
@@ -1975,11 +2000,17 @@ mod tests {
             )
             .expect_err("forced hook error");
         assert_eq!(session, snapshot_before_fail);
+        assert_eq!(
+            session.document().data_sheet(&SheetId::from("mv-1")).expect("mv-1").plate_well_origin(CellCoord::new(2, 0, 0)),
+            Some("G12"),
+            "failed commit hook must restore plate_well_origins"
+        );
 
-        // Undo and redo must faithfully restore excluded value, exclusion note, and inferred Continuous role.
+        // Undo and redo must faithfully restore excluded value, exclusion note, plate well origin, and inferred Continuous role.
         assert!(session.undo().expect("undo text edit"));
         let ds_undone = session.document().data_sheet(&SheetId::from("mv-1")).expect("mv-1 undone");
         assert_eq!(ds_undone.exclusion_notes.len(), 1);
+        assert_eq!(ds_undone.plate_well_origin(CellCoord::new(0, 0, 0)), Some("A01"), "undo must restore cleared plate well origin");
         assert_eq!(ds_undone.cell(CellCoord::new(0, 0, 0)), Some(&Cell::excluded_number(10.0)));
         if let TableArchetype::MultipleVariables(t) = &ds_undone.archetype {
             assert_eq!(t.variables.first().map(|v| v.role), Some(VariableRole::Continuous));
@@ -1988,6 +2019,7 @@ mod tests {
         assert!(session.redo().expect("redo text edit"));
         let ds_redone = session.document().data_sheet(&SheetId::from("mv-1")).expect("mv-1 redone");
         assert!(ds_redone.exclusion_notes.is_empty());
+        assert_eq!(ds_redone.plate_well_origin(CellCoord::new(0, 0, 0)), None, "redo must re-clear plate well origin");
         assert_eq!(ds_redone.cell(CellCoord::new(0, 0, 0)), Some(&Cell { value: CellValue::Text(String::from("Control")), excluded: false }));
     }
 }

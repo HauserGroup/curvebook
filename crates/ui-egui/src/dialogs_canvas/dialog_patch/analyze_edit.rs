@@ -2,10 +2,10 @@
 //! `AnalyzeDialogState` and `EditAnalysisParametersState`.
 
 use curvebook_doc::{
-    AnalysisKind, BlandAltmanSpec, ContingencyMethod, ContingencySpec, DemingErrorSpec, FactorialAnovaSpec, FitFlagRules, FitMethod, GlmSpec,
-    IdentifiabilityMode, KappaWeighting, LinearRegressionSpec, ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec,
-    MultipleRowTestsSpec, MultiplicityMethod, MultivariateSpec, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat,
-    PassingBablokSpec, RepeatedMeasuresDesign, ResidualCovariance, RocCiMethod, RocSpec, SimpleLogisticSpec, SurvivalAnalysisSpec,
+    AnalysisKind, AreaUnderCurveSpec, AucBaseline, BlandAltmanSpec, ContingencyMethod, ContingencySpec, DemingErrorSpec, FactorialAnovaSpec,
+    FitFlagRules, FitMethod, GlmSpec, IdentifiabilityMode, KappaWeighting, LinearRegressionSpec, ModelComparisonMethod, ModelComparisonQuestion,
+    ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultivariateSpec, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
+    PValueFormat, PassingBablokSpec, RepeatedMeasuresDesign, ResidualCovariance, RocCiMethod, RocSpec, SimpleLogisticSpec, SurvivalAnalysisSpec,
     TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
 };
 use serde_json::{Map, Value, json};
@@ -1066,6 +1066,7 @@ fn apply_edit_draft_kind_field(working: &mut EditAnalysisParametersState, key: &
             _ => Ok(false),
         },
         AnalysisKind::FitSplineLowess(sp) => patch_spline_lowess_spec(key, val, preset, sp),
+        AnalysisKind::AreaUnderCurve(auc) => patch_area_under_curve_spec(key, val, preset, auc),
         AnalysisKind::Multivariate(mv) => patch_multivariate_spec(key, val, mv),
         AnalysisKind::GeneralizedLinearModel(glm) => patch_glm_spec(key, val, glm),
         AnalysisKind::Survival(surv) => patch_survival_spec(key, val, ctrl, surv),
@@ -1984,6 +1985,73 @@ fn patch_spline_lowess_spec(key: &str, val: &Value, preset: &LocalePreset, sp: &
         }
         "interpolate_unknowns" | "edit.spline.interpolate_unknowns" => {
             sp.interpolate_unknowns = parse_bool_field(val, key)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn patch_area_under_curve_spec(key: &str, val: &Value, preset: &LocalePreset, auc: &mut AreaUnderCurveSpec) -> Result<bool, String> {
+    match key {
+        "baseline" | "edit.auc.baseline" => {
+            if let Some(s) = val.as_str() {
+                if matches!(norm_key(s).as_str(), "firstpoint" | "first") {
+                    auc.baseline = AucBaseline::FirstPoint;
+                } else {
+                    let value = parse_finite_f64_with_locale(val, key, preset)?;
+                    auc.baseline = AucBaseline::Fixed { value };
+                }
+            } else if val.is_object() {
+                let parsed: AucBaseline = serde_json::from_value(val.clone()).map_err(|e| format!("invalid AUC `baseline`: {e}"))?;
+                if let AucBaseline::Fixed { value } = parsed
+                    && !value.is_finite()
+                {
+                    return Err(String::from("AUC `baseline` value must be finite"));
+                }
+                auc.baseline = parsed;
+            } else {
+                let value = parse_finite_f64_with_locale(val, key, preset)?;
+                auc.baseline = AucBaseline::Fixed { value };
+            }
+        }
+        "baseline_mode" | "edit.auc.baseline_mode" => {
+            let raw = parse_str_field(val, key)?;
+            match norm_key(raw).as_str() {
+                "firstpoint" | "first" => auc.baseline = AucBaseline::FirstPoint,
+                "fixed" | "constant" => {
+                    if !matches!(auc.baseline, AucBaseline::Fixed { .. }) {
+                        auc.baseline = AucBaseline::Fixed { value: 0.0 };
+                    }
+                }
+                _ => return Err(format!("unknown AUC baseline_mode `{raw}`")),
+            }
+        }
+        "baseline_value" | "edit.auc.baseline_value" | "edit.auc.baseline.value" => {
+            let value = parse_finite_f64_with_locale(val, key, preset)?;
+            auc.baseline = AucBaseline::Fixed { value };
+        }
+        "x_min" | "edit.auc.x_min" => {
+            auc.x_min = parse_opt_finite_f64_with_locale(val, key, preset)?;
+        }
+        "x_max" | "edit.auc.x_max" => {
+            auc.x_max = parse_opt_finite_f64_with_locale(val, key, preset)?;
+        }
+        "independent_time_points" | "edit.auc.independent_time_points" => {
+            auc.independent_time_points = parse_bool_field(val, "independent_time_points")?;
+        }
+        "min_peak_height" | "edit.auc.min_peak_height" => {
+            let v = parse_finite_f64_with_locale(val, key, preset)?;
+            if v < 0.0 {
+                return Err(format!("`min_peak_height` ({v}) must be >= 0"));
+            }
+            auc.min_peak_height = v;
+        }
+        "min_area_fraction" | "edit.auc.min_area_fraction" => {
+            let v = parse_finite_f64_with_locale(val, key, preset)?;
+            if !(0.0..=1.0).contains(&v) {
+                return Err(format!("`min_area_fraction` ({v}) must be within 0.0..=1.0"));
+            }
+            auc.min_area_fraction = v;
         }
         _ => return Ok(false),
     }

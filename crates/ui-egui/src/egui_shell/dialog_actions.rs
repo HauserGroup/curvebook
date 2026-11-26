@@ -167,6 +167,20 @@ fn commit_import_wizard_action(app: &mut UiApp) -> Result<Value, EngineError> {
             json!({ "action": "ok", "command_id": "table.importXlsx", "closed": true, "mutated": outcome.mutated, "payload": outcome.payload }),
         );
     }
+    if matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile)
+        && !app.grid.import_wizard.is_live_link
+        && app.grid.import_wizard.split_by_column.is_some()
+    {
+        let Some(params) = app.grid.import_wizard.build_csv_import_params("Imported Data") else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "enter delimited text or a CSV file path before splitting by column"));
+        };
+        let outcome = app.execute_command("table.importCsv", params)?;
+        app.egui_views.import_wizard.pending_commit = None;
+        app.grid.import_wizard.open = false;
+        return Ok(
+            json!({ "action": "ok", "command_id": "table.importCsv", "closed": true, "mutated": outcome.mutated, "payload": outcome.payload }),
+        );
+    }
 
     let pending_meta = app.egui_views.import_wizard.pending_commit.clone().unwrap_or_default();
     let result = app.execute_atomic_group(|app| {
@@ -193,18 +207,10 @@ fn commit_import_wizard_action(app: &mut UiApp) -> Result<Value, EngineError> {
                     && app.grid.import_wizard.raw_clipboard_text.trim().is_empty()
                     && !app.grid.import_wizard.external_file_path.trim().is_empty()
                 {
-                    let delim =
-                        if app.grid.import_wizard.delimiter == '\0' { String::from("\t") } else { app.grid.import_wizard.delimiter.to_string() };
-                    let dec = if app.grid.import_wizard.decimal_separator == ',' { "," } else { "." };
-                    let outcome = app.execute_command(
-                        "table.importCsv",
-                        json!({
-                            "title": "Imported Data",
-                            "path": app.grid.import_wizard.external_file_path,
-                            "delimiter": delim,
-                            "decimal_separator": dec,
-                        }),
-                    )?;
+                    let Some(params) = app.grid.import_wizard.build_csv_import_params("Imported Data") else {
+                        return Err(EngineError::with_code(ErrorCode::BadInput, "choose a CSV file path before importing"));
+                    };
+                    let outcome = app.execute_command("table.importCsv", params)?;
                     let created_id = outcome
                         .payload
                         .get("sheet_id")

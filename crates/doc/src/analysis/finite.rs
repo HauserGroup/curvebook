@@ -5,8 +5,8 @@
 //! `curvebook-format` can reject a document with a precise location.
 
 use super::{
-    AnalysisKind, AnalysisSpec, DemingErrorSpec, FitMethod, MathTransformPreset, NonlinearFitSpec, NormalizeAnchor, OutlierSpec, ParameterScope,
-    SimulationNoise, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, WeightingScheme,
+    AnalysisKind, AnalysisSpec, AucBaseline, DemingErrorSpec, FitMethod, MathTransformPreset, NonlinearFitSpec, NormalizeAnchor, OutlierSpec,
+    ParameterScope, SimulationNoise, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, WeightingScheme,
 };
 
 /// `Some(path())` when `value` is `NaN` or infinite.
@@ -103,6 +103,14 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
         AnalysisKind::SimpleLogisticRegression(sl) => non_finite(sl.classification_cutoff, at("classification_cutoff"))
             .or_else(|| non_finite_opt(sl.plot_x_min, at("plot_x_min")))
             .or_else(|| non_finite_opt(sl.plot_x_max, at("plot_x_max"))),
+        AnalysisKind::AreaUnderCurve(auc) => match auc.baseline {
+            AucBaseline::Fixed { value } => non_finite(value, at("baseline")),
+            AucBaseline::FirstPoint => None,
+        }
+        .or_else(|| non_finite_opt(auc.x_min, at("x_min")))
+        .or_else(|| non_finite_opt(auc.x_max, at("x_max")))
+        .or_else(|| non_finite(auc.min_peak_height, at("min_peak_height")))
+        .or_else(|| non_finite(auc.min_area_fraction, at("min_area_fraction"))),
     }
 }
 

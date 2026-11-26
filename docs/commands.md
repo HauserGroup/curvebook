@@ -287,7 +287,7 @@ Registered commands: 106
 - **Menu:** `File/Import/CSV or TSV...`
 - **Summary:** Import CSV or TSV data from a file path or inline text into a new or existing data table.
 - **Beginner note:** Create a new data table or populate an existing one from a CSV or TSV file.
-- **Parameters:** `anchor` (any), `archetype` (string|null), `csv` (string|null), `decimal_separator` (string|null), `delimiter` (string|null), `filter` (any), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `link` (boolean|null), `mode` (string|null), `normalize_decimal` (boolean|null), `path` (string|null), `propagate_title_header` (boolean|null), `replace` (boolean|null), `replicates` (integer|null), `sheet_id` (string|null), `skip_contiguous_blanks` (boolean|null), `start_col` (integer|null), `start_row` (integer|null), `start_subcol` (integer|null), `subcolumn_mode` (any), `title` (string|null), `transpose` (boolean|null)
+- **Parameters:** `anchor` (any), `archetype` (string|null), `csv` (string|null), `decimal_separator` (string|null), `delimiter` (string|null), `extract_preamble_info` (boolean|null), `filter` (any), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `link` (boolean|null), `mode` (string|null), `normalize_decimal` (boolean|null), `path` (string|null), `propagate_title_header` (boolean|null), `replace` (boolean|null), `replicates` (integer|null), `sheet_id` (string|null), `skip_contiguous_blanks` (boolean|null), `split_by_column` (integer|null), `start_col` (integer|null), `start_row` (integer|null), `start_subcol` (integer|null), `subcolumn_mode` (any), `title` (string|null), `transpose` (boolean|null)
 
 ### `table.importPlateMap` — Import Plate Map
 
@@ -295,7 +295,7 @@ Registered commands: 106
 - **Menu:** `File/Import/Plate Map...`
 - **Summary:** Map 96-well or 384-well microplate readings and well roles into a structured data sheet.
 - **Beginner note:** Import 96-well or 384-well plate measurements using a plate template or role map.
-- **Parameters:** `geometry` (any), `roles` (array|null), `sheet_id` (string|null), `subtract_blank_mean` (boolean|null), `target_kind` (string|null), `template` (any), `template_name` (string|null), `title` (string|null), `values*` (any), `x_title` (string|null)
+- **Parameters:** `blank_labels` (array|null), `geometry` (any), `label_grid` (array|null), `layout_sheet_id` (string|null), `positive_control_labels` (array|null), `roles` (array|null), `sheet_id` (string|null), `source` (any), `subtract_blank_mean` (boolean|null), `target_kind` (string|null), `template` (any), `template_name` (string|null), `title` (string|null), `values` (any), `x_grid` (array|null), `x_grid_sheet_id` (string|null), `x_title` (string|null)
 
 ### `table.importPrism` — Import External Archive
 
@@ -327,7 +327,7 @@ Registered commands: 106
 - **Menu:** `File/Import/XLSX Workbook...`
 - **Summary:** Import one or more worksheets (or list available sheets) from an .xlsx workbook file, base64, or byte array.
 - **Beginner note:** Open or merge worksheets from a spreadsheet workbook (.xlsx) into the project.
-- **Parameters:** `archetype` (string|null), `bytes` (array|null), `bytes_base64` (string|null), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `include_hidden` (boolean|null), `list_sheets` (boolean|null), `merge` (boolean|null), `path` (string|null), `sheet_indices` (array|null), `sheets` (array|null), `subcolumn_mode` (any), `title` (string|null)
+- **Parameters:** `archetype` (string|null), `bytes` (array|null), `bytes_base64` (string|null), `cell_range` (string|null), `extract_preamble_info` (boolean|null), `fill_merged_cells` (boolean|null), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `include_hidden` (boolean|null), `list_sheets` (boolean|null), `merge` (boolean|null), `path` (string|null), `row_match` (any), `sheet_indices` (array|null), `sheets` (array|null), `skip_rows` (integer|null), `split_by_column` (integer|null), `subcolumn_mode` (any), `title` (string|null)
 
 ### `table.paste` — Paste Special
 

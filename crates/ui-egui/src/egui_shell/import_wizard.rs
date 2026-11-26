@@ -4,16 +4,17 @@
 
 use std::collections::BTreeMap;
 
-use curvebook_doc::{Cell, CellCoord, CellValue, CiBound, LinkBorderColor, PlacementMode, ResultCell, TableKind, infer_number_separators};
-use curvebook_format::{CsvOptions, collapse_merged_header_rows, parse_delimited_records, write_delimited_records};
+use curvebook_doc::{
+    Cell, CellCoord, CellValue, CiBound, ColumnEqualsFilter, ConstantValue, LinkBorderColor, PlacementMode, ResultCell, TableKind,
+    infer_number_separators,
+};
+use curvebook_format::{CsvOptions, collapse_merged_header_rows, extract_preamble_info, parse_delimited_records, write_delimited_records};
 use egui::{Align, Context, Key, Layout, Modifiers, Rect, RichText, Stroke, Ui, vec2};
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
 use crate::dialogs_canvas::ActiveDialog;
-use crate::grid_view::{
-    ImportOriginKind, ImportPasteWizardState, ImportReshapeMode, ImportWizardStage, format_cell_display, parse_localized_number_input,
-};
+use crate::grid_view::{ImportOriginKind, ImportPasteWizardState, ImportReshapeMode, ImportWizardStage, format_cell_display};
 use crate::i18n::tr;
 use crate::inspect::ZLayer;
 
@@ -84,6 +85,50 @@ pub enum WizardBlockReshape {
     Plate384,
 }
 
+/// Column split / row-match mode in Stage 3 of `ImportWizard` (`R17.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum WizardColumnSplitMode {
+    #[default]
+    None,
+    SplitByColumn,
+    MatchColumnValue,
+}
+
+/// Sub-tab inside the `ImportReshape` microplate dialog (`R17.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PlateSubTab {
+    #[default]
+    Values,
+    Layout,
+    GridsIo,
+}
+
+/// Role selected in the interactive Plate Layout toolbar (`R17.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PlateAssignRoleKind {
+    #[default]
+    Treatment,
+    Blank,
+    PositiveControl,
+    Excluded,
+}
+
+/// Direction for **Fill Dilution Series** across a selected well rectangle (`R17.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PlateDilutionAxis {
+    #[default]
+    AlongRows,
+    AlongCols,
+}
+
+/// Progression formula for **Fill Dilution Series** (`R17.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PlateDilutionScale {
+    #[default]
+    Linear,
+    Multiplicative,
+}
+
 /// User-saved default preset for the 5-stage `Import & Paste Special` wizard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportWizardSavedPreset {
@@ -103,6 +148,12 @@ pub struct ImportWizardSavedPreset {
     pub record_in_info_sheet: bool,
     pub extract_info_metadata: bool,
     pub add_floating_note: bool,
+    pub xlsx_skip_rows_draft: String,
+    pub xlsx_fill_merged_cells: bool,
+    pub split_filter_mode: WizardColumnSplitMode,
+    pub split_filter_col_draft: String,
+    pub row_match_equals_draft: String,
+    pub row_match_drop_column: bool,
 }
 
 /// Prepared metadata carried from `import_wizard` into atomic commit (`AUD-10-21`).
@@ -130,6 +181,11 @@ pub struct ImportWizardEguiState {
     pub filter_predicate_draft: String,
     pub decimate_draft: String,
     pub block_reshape: WizardBlockReshape,
+    pub xlsx_skip_rows_draft: String,
+    pub split_filter_mode: WizardColumnSplitMode,
+    pub split_filter_col_draft: String,
+    pub row_match_equals_draft: String,
+    pub row_match_drop_column: bool,
     pub plate_values_draft: String,
     pub reshape_title_draft: String,
     pub reshape_x_title_draft: String,
@@ -139,6 +195,28 @@ pub struct ImportWizardEguiState {
     pub reshape_replicate_col_draft: String,
     pub reshape_excluded_col_draft: String,
     pub reshape_tidy_csv_draft: String,
+    pub plate_subtab: PlateSubTab,
+    pub plate_sel_anchor: Option<(usize, usize)>,
+    pub plate_sel_focus: Option<(usize, usize)>,
+    pub plate_dragging: bool,
+    pub plate_assign_role: PlateAssignRoleKind,
+    pub plate_group_draft: String,
+    pub plate_const_x_draft: String,
+    pub plate_dilution_axis: PlateDilutionAxis,
+    pub plate_dilution_scale: PlateDilutionScale,
+    pub plate_dilution_start_draft: String,
+    pub plate_dilution_step_draft: String,
+    pub plate_label_grid_draft: String,
+    pub plate_x_grid_draft: String,
+    pub plate_blank_labels_draft: String,
+    pub plate_pos_ctrl_labels_draft: String,
+    pub plate_cbplate_path_draft: String,
+    pub plate_source_row_draft: String,
+    pub plate_source_xmin_draft: String,
+    pub plate_source_xmax_draft: String,
+    pub plate_source_val_col_draft: String,
+    pub plate_layout_sheet_draft: Option<String>,
+    pub plate_x_grid_sheet_draft: Option<String>,
     pub saved_preset: Option<ImportWizardSavedPreset>,
     pub preset_saved_feedback: bool,
     pub initialized_for_open: bool,
@@ -209,8 +287,10 @@ pub fn render_import_or_convert_modal(
     };
 
     let vp = ctx.content_rect();
-    let dlg_w = (vp.width() - 24.0).clamp(320.0, 680.0);
-    let dlg_h = (vp.height() - 24.0).clamp(240.0, 520.0);
+    let is_plate_reshape = is_reshape && app.grid.import_reshape.mode != ImportReshapeMode::TidyLongPivot;
+    let (max_w, max_h) = if is_plate_reshape { (820.0, 620.0) } else { (680.0, 520.0) };
+    let dlg_w = (vp.width() - 24.0).clamp(320.0, max_w);
+    let dlg_h = (vp.height() - 24.0).clamp(240.0, max_h);
 
     let wants_kb_before = ctx.egui_wants_keyboard_input();
     let modal_resp = egui::Modal::new(egui::Id::unique(("egui_shell_import_modal", widget_id))).backdrop_color(tokens.scrim).show(ctx, |ui| {
@@ -280,9 +360,9 @@ fn sync_drafts_from_app(app: &UiApp, state: &mut ImportWizardEguiState) -> (Impo
         wiz.raw_clipboard_text.clone()
     };
     state.row_start_draft = wiz.filter.row_window.map_or_else(String::new, |(a, _)| a.to_string());
-    state.row_end_draft = wiz.filter.row_window.map_or_else(String::new, |(_, b)| b.to_string());
+    state.row_end_draft = wiz.filter.row_window.and_then(|(_, b)| (b < usize::MAX / 4).then(|| b.to_string())).unwrap_or_default();
     state.col_start_draft = wiz.filter.col_window.map_or_else(String::new, |(a, _)| a.to_string());
-    state.col_end_draft = wiz.filter.col_window.map_or_else(String::new, |(_, b)| b.to_string());
+    state.col_end_draft = wiz.filter.col_window.and_then(|(_, b)| (b < usize::MAX / 4).then(|| b.to_string())).unwrap_or_default();
     state.decimate_draft = wiz.filter.decimate_every_k.map_or_else(String::new, |k| k.to_string());
 
     if let Some(preset) = state.saved_preset.clone() {
@@ -294,6 +374,11 @@ fn sync_drafts_from_app(app: &UiApp, state: &mut ImportWizardEguiState) -> (Impo
         state.plate_rows_per_dataset_draft = preset.plate_rows_per_dataset_draft;
         state.extract_info_metadata = preset.extract_info_metadata;
         state.add_floating_note = preset.add_floating_note;
+        state.xlsx_skip_rows_draft = preset.xlsx_skip_rows_draft;
+        state.split_filter_mode = preset.split_filter_mode;
+        state.split_filter_col_draft = preset.split_filter_col_draft;
+        state.row_match_equals_draft = preset.row_match_equals_draft;
+        state.row_match_drop_column = preset.row_match_drop_column;
         wiz.delimiter = preset.delimiter;
         wiz.decimal_separator = preset.decimal_separator;
         wiz.placement.propagate_title_header = preset.propagate_title_header;
@@ -302,6 +387,10 @@ fn sync_drafts_from_app(app: &UiApp, state: &mut ImportWizardEguiState) -> (Impo
         wiz.placement.transpose = preset.transpose;
         wiz.placement.skip_contiguous_blanks = preset.skip_contiguous_blanks;
         wiz.record_in_info_sheet = preset.record_in_info_sheet;
+        wiz.extract_preamble_info = preset.extract_info_metadata;
+        wiz.xlsx_skip_rows = state.xlsx_skip_rows_draft.trim().parse::<usize>().unwrap_or(0);
+        wiz.xlsx_fill_merged_cells = preset.xlsx_fill_merged_cells;
+        sync_column_split_from_drafts(&mut wiz, state);
         wiz_dirty = true;
     } else {
         state.missing_tokens_draft = String::from("NA, NaN, .");
@@ -310,8 +399,25 @@ fn sync_drafts_from_app(app: &UiApp, state: &mut ImportWizardEguiState) -> (Impo
         state.plate_rows_per_dataset_draft = String::from("8");
         state.filter_predicate_draft.clear();
         state.block_reshape = WizardBlockReshape::None;
-        state.extract_info_metadata = false;
+        state.extract_info_metadata = wiz.extract_preamble_info;
         state.add_floating_note = false;
+        state.xlsx_skip_rows_draft = if wiz.xlsx_skip_rows > 0 { wiz.xlsx_skip_rows.to_string() } else { String::new() };
+        if let Some(col) = wiz.split_by_column {
+            state.split_filter_mode = WizardColumnSplitMode::SplitByColumn;
+            state.split_filter_col_draft = col.to_string();
+            state.row_match_equals_draft.clear();
+            state.row_match_drop_column = true;
+        } else if let Some(rm) = &wiz.filter.row_match {
+            state.split_filter_mode = WizardColumnSplitMode::MatchColumnValue;
+            state.split_filter_col_draft = rm.column.to_string();
+            state.row_match_equals_draft = rm.equals.clone();
+            state.row_match_drop_column = rm.drop_column;
+        } else {
+            state.split_filter_mode = WizardColumnSplitMode::None;
+            state.split_filter_col_draft = String::from("0");
+            state.row_match_equals_draft.clear();
+            state.row_match_drop_column = true;
+        }
     }
 
     let ir = &app.grid.import_reshape;
@@ -325,6 +431,32 @@ fn sync_drafts_from_app(app: &UiApp, state: &mut ImportWizardEguiState) -> (Impo
     state.reshape_tidy_csv_draft = ir.tidy_csv.clone();
     state.plate_values_draft =
         ir.plate_values.iter().map(|v| v.map_or_else(|| String::from("NA"), |n| format!("{n}"))).collect::<Vec<_>>().join(", ");
+    state.plate_subtab = PlateSubTab::Values;
+    state.plate_sel_anchor = Some((0, 0));
+    state.plate_sel_focus = Some((0, 0));
+    state.plate_dragging = false;
+    state.plate_assign_role = PlateAssignRoleKind::Treatment;
+    if state.plate_group_draft.is_empty() {
+        state.plate_group_draft = String::from("Sample");
+    }
+    if state.plate_const_x_draft.is_empty() {
+        state.plate_const_x_draft = String::from("0");
+    }
+    if state.plate_dilution_start_draft.is_empty() {
+        state.plate_dilution_start_draft = String::from("-6");
+    }
+    if state.plate_dilution_step_draft.is_empty() {
+        state.plate_dilution_step_draft = String::from("-1");
+    }
+    state.plate_blank_labels_draft = ir.plate_blank_labels.join(", ");
+    state.plate_pos_ctrl_labels_draft = ir.plate_positive_control_labels.join(", ");
+    state.plate_cbplate_path_draft = ir.plate_template_path.clone();
+    state.plate_source_row_draft = ir.plate_source_row_index.to_string();
+    state.plate_source_xmin_draft = ir.plate_source_x_min.map_or_else(String::new, |v| format!("{v}"));
+    state.plate_source_xmax_draft = ir.plate_source_x_max.map_or_else(String::new, |v| format!("{v}"));
+    state.plate_source_val_col_draft = ir.plate_source_value_column.clone();
+    state.plate_layout_sheet_draft = ir.plate_layout_sheet_id.clone();
+    state.plate_x_grid_sheet_draft = ir.plate_x_grid_sheet_id.clone();
     (wiz, wiz_dirty)
 }
 
@@ -456,7 +588,7 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
             ui.label(RichText::new("External host file paths are disabled by the active security policy.").color(tokens.error).small());
         }
     } else if wiz.origin_kind == ImportOriginKind::XlsxWorkbook {
-        if render_source_xlsx_controls(ui, wiz, path_policy, tokens, meta, avail_w) {
+        if render_source_xlsx_controls(ui, wiz, state, path_policy, tokens, meta, avail_w) {
             dirty = true;
         }
     } else if wiz.origin_kind == ImportOriginKind::InternalDataSheet {
@@ -743,6 +875,7 @@ fn validate_regular_xlsx_file(path: &std::path::Path) -> Result<(), String> {
 fn render_source_xlsx_controls(
     ui: &mut Ui,
     wiz: &mut ImportPasteWizardState,
+    state: &mut ImportWizardEguiState,
     path_policy: &curvebook_engine::ExternalPathPolicy,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
@@ -750,6 +883,7 @@ fn render_source_xlsx_controls(
 ) -> bool {
     let mut dirty = false;
     let external_paths_allowed = !matches!(path_policy, curvebook_engine::ExternalPathPolicy::RejectExternal);
+    let locale = tokens.locale;
     ui.horizontal_wrapped(|row| {
         row.label("Workbook Path:");
         let pr = row.add_enabled(
@@ -818,6 +952,60 @@ fn render_source_xlsx_controls(
             FrameInspectEntryInput::modal("import_wizard.xlsx.merge", "checkbox", "Merge XLSX Worksheets", Some(wiz.xlsx_merge.to_string()), true),
         );
         if r_merge.changed() {
+            dirty = true;
+        }
+    });
+
+    ui.horizontal_wrapped(|row| {
+        row.label(tr(locale, "import.xlsx.cell_range"));
+        let cr = row.add(egui::TextEdit::singleline(&mut wiz.xlsx_cell_range).hint_text("B4:M11").desired_width(104.0));
+        meta.record_modal_response(
+            row,
+            &cr,
+            FrameInspectEntryInput::modal(
+                "import_wizard.xlsx.cell_range",
+                "textbox",
+                tr(locale, "import.xlsx.cell_range"),
+                Some(wiz.xlsx_cell_range.clone()),
+                true,
+            ),
+        );
+        if cr.changed() {
+            wiz.xlsx_error = None;
+            dirty = true;
+        }
+
+        row.label(tr(locale, "import.xlsx.skip_rows"));
+        let sr = row.add(egui::TextEdit::singleline(&mut state.xlsx_skip_rows_draft).hint_text("0").desired_width(56.0));
+        meta.record_modal_response(
+            row,
+            &sr,
+            FrameInspectEntryInput::modal(
+                "import_wizard.xlsx.skip_rows",
+                "textbox",
+                tr(locale, "import.xlsx.skip_rows"),
+                Some(state.xlsx_skip_rows_draft.clone()),
+                true,
+            ),
+        );
+        if sr.changed() {
+            wiz.xlsx_skip_rows = state.xlsx_skip_rows_draft.trim().parse::<usize>().unwrap_or(0);
+            dirty = true;
+        }
+
+        let fm = row.checkbox(&mut wiz.xlsx_fill_merged_cells, tr(locale, "import.xlsx.fill_merged"));
+        meta.record_modal_response(
+            row,
+            &fm,
+            FrameInspectEntryInput::modal(
+                "import_wizard.xlsx.fill_merged_cells",
+                "checkbox",
+                tr(locale, "import.xlsx.fill_merged"),
+                Some(wiz.xlsx_fill_merged_cells.to_string()),
+                true,
+            ),
+        );
+        if fm.changed() {
             dirty = true;
         }
     });
@@ -905,6 +1093,16 @@ fn render_step_preview(
         &sr,
         FrameInspectEntryInput::modal("import_paste.preview.summary", "label", &summary, Some(summary.clone()), true),
     );
+    if prepared.split_blocks.len() > 1 {
+        let joined = prepared.split_blocks.join(", ");
+        let blk_msg = format!("Split into {} sheets: {joined}", prepared.split_blocks.len());
+        let br = ui.label(RichText::new(&blk_msg).small().color(tokens.accent));
+        meta.record_modal_response(
+            ui,
+            &br,
+            FrameInspectEntryInput::modal("import_paste.preview.split_blocks", "label", &blk_msg, Some(blk_msg.clone()), true),
+        );
+    }
     ui.add_space(6.0);
 
     render_preview_grid_table(ui, app, preview, tokens);
@@ -1092,6 +1290,85 @@ fn render_step_filter_unstack(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
         );
     }
 
+    let locale = tokens.locale;
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|row| {
+        row.label(tr(locale, "import.col_split.label"));
+        for (mode, wid, key) in [
+            (WizardColumnSplitMode::None, "import_paste.col_split.none", "import.col_split.none"),
+            (WizardColumnSplitMode::SplitByColumn, "import_paste.col_split.split", "import.col_split.split"),
+            (WizardColumnSplitMode::MatchColumnValue, "import_paste.col_split.match", "import.col_split.match"),
+        ] {
+            let active = state.split_filter_mode == mode;
+            let lbl = tr(locale, key);
+            let r = choice_pill(row, tokens, lbl, active, true);
+            meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(wid, "radio", lbl, Some(active.to_string()), true));
+            if r.clicked() {
+                state.split_filter_mode = mode;
+                sync_column_split_from_drafts(wiz, state);
+                dirty = true;
+            }
+        }
+    });
+
+    if state.split_filter_mode != WizardColumnSplitMode::None {
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|row| {
+            row.label(tr(locale, "import.col_split.col"));
+            let col_ed = row.add(egui::TextEdit::singleline(&mut state.split_filter_col_draft).hint_text("0").desired_width(52.0));
+            meta.record_modal_response(
+                row,
+                &col_ed,
+                FrameInspectEntryInput::modal(
+                    "import_paste.input.split_col",
+                    "textbox",
+                    tr(locale, "import.col_split.col"),
+                    Some(state.split_filter_col_draft.clone()),
+                    true,
+                ),
+            );
+            if col_ed.changed() {
+                sync_column_split_from_drafts(wiz, state);
+                dirty = true;
+            }
+            if state.split_filter_mode == WizardColumnSplitMode::MatchColumnValue {
+                row.label(tr(locale, "import.col_split.equals"));
+                let eq_ed = row.add(egui::TextEdit::singleline(&mut state.row_match_equals_draft).hint_text("Value").desired_width(124.0));
+                meta.record_modal_response(
+                    row,
+                    &eq_ed,
+                    FrameInspectEntryInput::modal(
+                        "import_paste.input.row_match_equals",
+                        "textbox",
+                        tr(locale, "import.col_split.equals"),
+                        Some(state.row_match_equals_draft.clone()),
+                        true,
+                    ),
+                );
+                if eq_ed.changed() {
+                    sync_column_split_from_drafts(wiz, state);
+                    dirty = true;
+                }
+                let drp = row.checkbox(&mut state.row_match_drop_column, tr(locale, "import.col_split.drop"));
+                meta.record_modal_response(
+                    row,
+                    &drp,
+                    FrameInspectEntryInput::modal(
+                        "import_paste.opt.row_match_drop",
+                        "checkbox",
+                        tr(locale, "import.col_split.drop"),
+                        Some(state.row_match_drop_column.to_string()),
+                        true,
+                    ),
+                );
+                if drp.changed() {
+                    sync_column_split_from_drafts(wiz, state);
+                    dirty = true;
+                }
+            }
+        });
+    }
+
     if dirty {
         state.preset_saved_feedback = false;
         cx.wiz_dirty = true;
@@ -1104,6 +1381,11 @@ fn render_step_filter_unstack(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
     }
     if let Some(warn) = &prepared.unstack_warning {
         ui.label(RichText::new(warn).color(tokens.accent).small());
+    }
+    if prepared.split_blocks.len() > 1 {
+        let joined = prepared.split_blocks.join(", ");
+        ui.label(RichText::new(format!("Split into {} sheets: {joined}", prepared.split_blocks.len())).small().color(tokens.accent));
+        ui.add_space(2.0);
     }
     render_preview_grid_table(ui, app, &prepared.grid, tokens);
 }
@@ -1328,7 +1610,8 @@ fn render_step_metadata(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
         ),
     );
     if ext_chk.changed() {
-        state.preset_saved_feedback = false;
+        wiz.extract_preamble_info = state.extract_info_metadata;
+        dirty = true;
     }
 
     let note_chk = ui.checkbox(&mut state.add_floating_note, "Append import summary note to InfoSheet");
@@ -1465,7 +1748,13 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                     patch_import_reshape_field(intents, "title", Value::String(state.reshape_title_draft.clone()));
                 }
                 row.label("X Title:");
-                let xr = row.add(egui::TextEdit::singleline(&mut state.reshape_x_title_draft).hint_text("X column title").desired_width(110.0));
+                let x_title_id = egui::Id::unique("import_paste.input.x_title");
+                if !row.ctx().memory(|m| m.has_focus(x_title_id)) && state.reshape_x_title_draft != cx.app.grid.import_reshape.x_title {
+                    state.reshape_x_title_draft = cx.app.grid.import_reshape.x_title.clone();
+                }
+                let xr = row.add(
+                    egui::TextEdit::singleline(&mut state.reshape_x_title_draft).id(x_title_id).hint_text("X column title").desired_width(110.0),
+                );
                 meta.record_modal_response(
                     row,
                     &xr,
@@ -1560,34 +1849,7 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                     patch_import_reshape_field(intents, "tidy_csv", Value::String(state.reshape_tidy_csv_draft.clone()));
                 }
             } else {
-                let is_384 = ir.mode == ImportReshapeMode::Plate384;
-                let expected = if is_384 { 384 } else { 96 };
-                body.label(format!("Expected well count: {expected} (currently {} parsed values)", ir.plate_values.len()));
-                let pr = body.add(
-                    egui::TextEdit::multiline(&mut state.plate_values_draft)
-                        .hint_text("Paste well numbers…")
-                        .desired_rows(4)
-                        .desired_width((avail_w - 28.0).clamp(180.0, 520.0)),
-                );
-                meta.record_modal_response(
-                    body,
-                    &pr,
-                    FrameInspectEntryInput::modal(
-                        "import_paste.input.plate_values",
-                        "textbox",
-                        "Plate Values",
-                        Some(state.plate_values_draft.clone()),
-                        true,
-                    ),
-                );
-                if pr.changed() {
-                    let mut f = Map::new();
-                    f.insert(String::from("plate_values"), Value::String(state.plate_values_draft.clone()));
-                    if ir.plate_roles.len() != expected {
-                        f.insert(String::from("plate_roles"), Value::Array(default_plate_roles(is_384, ir.subtract_blank_mean)));
-                    }
-                    intents.push(UiIntent::PatchActiveDialog { fields: f });
-                }
+                super::plate_editor::render_plate_map_reshape_section(body, app, state, tokens, meta, intents, avail_w);
             }
         },
     );
@@ -1749,6 +2011,12 @@ fn save_wizard_preset(state: &mut ImportWizardEguiState, wiz: &ImportPasteWizard
         record_in_info_sheet: wiz.record_in_info_sheet,
         extract_info_metadata: state.extract_info_metadata,
         add_floating_note: state.add_floating_note,
+        xlsx_skip_rows_draft: state.xlsx_skip_rows_draft.clone(),
+        xlsx_fill_merged_cells: wiz.xlsx_fill_merged_cells,
+        split_filter_mode: state.split_filter_mode,
+        split_filter_col_draft: state.split_filter_col_draft.clone(),
+        row_match_equals_draft: state.row_match_equals_draft.clone(),
+        row_match_drop_column: state.row_match_drop_column,
     });
     state.preset_saved_feedback = true;
 }
@@ -1772,6 +2040,11 @@ fn reset_wizard_defaults(state: &mut ImportWizardEguiState, wiz: &mut ImportPast
     state.unstack_value_column = None;
     state.unstack_error = None;
     state.pending_commit = None;
+    state.xlsx_skip_rows_draft.clear();
+    state.split_filter_mode = WizardColumnSplitMode::None;
+    state.split_filter_col_draft = String::from("0");
+    state.row_match_equals_draft.clear();
+    state.row_match_drop_column = true;
     *wiz = ImportPasteWizardState {
         open: true,
         stage: state.active_step.sync_backend_stage(),
@@ -1781,12 +2054,35 @@ fn reset_wizard_defaults(state: &mut ImportWizardEguiState, wiz: &mut ImportPast
     };
 }
 
+fn sync_column_split_from_drafts(wiz: &mut ImportPasteWizardState, state: &ImportWizardEguiState) {
+    let col = state.split_filter_col_draft.trim().parse::<usize>().unwrap_or(0);
+    match state.split_filter_mode {
+        WizardColumnSplitMode::None => {
+            wiz.split_by_column = None;
+            wiz.filter.row_match = None;
+        }
+        WizardColumnSplitMode::SplitByColumn => {
+            wiz.split_by_column = Some(col);
+            wiz.filter.row_match = None;
+        }
+        WizardColumnSplitMode::MatchColumnValue => {
+            wiz.split_by_column = None;
+            let eq = state.row_match_equals_draft.trim();
+            wiz.filter.row_match =
+                (!eq.is_empty()).then(|| ColumnEqualsFilter { column: col, equals: eq.to_owned(), drop_column: state.row_match_drop_column });
+        }
+    }
+}
+
 fn sync_wizard_filter_from_drafts(wiz: &mut ImportPasteWizardState, state: &ImportWizardEguiState) {
     wiz.filter.row_window = parse_opt_window(&state.row_start_draft, &state.row_end_draft);
     if wiz.filter.unstack_group_column.is_none() {
         wiz.filter.col_window = parse_opt_window(&state.col_start_draft, &state.col_end_draft);
     }
     wiz.filter.decimate_every_k = state.decimate_draft.trim().parse::<usize>().ok().filter(|&k| k >= 1);
+    wiz.xlsx_skip_rows = state.xlsx_skip_rows_draft.trim().parse::<usize>().unwrap_or(0);
+    wiz.extract_preamble_info = state.extract_info_metadata;
+    sync_column_split_from_drafts(wiz, state);
     if !state.raw_source_draft.is_empty() {
         wiz.raw_clipboard_text = state.raw_source_draft.clone();
     }
@@ -1802,6 +2098,30 @@ fn commit_wizard_import(cx: &mut ImportModalCtx<'_>) {
         cx.wiz_dirty = false;
         return;
     }
+
+    let is_live_link = cx.wiz.is_live_link && cx.wiz.origin_kind != ImportOriginKind::Clipboard;
+    let is_split_csv = matches!(cx.wiz.origin_kind, ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile)
+        && !is_live_link
+        && cx.wiz.split_by_column.is_some();
+    if is_split_csv {
+        let mut commit_wiz = cx.wiz.clone();
+        if !commit_wiz.raw_clipboard_text.is_empty() {
+            commit_wiz.raw_clipboard_text = normalize_source_text(&commit_wiz.raw_clipboard_text, &cx.state.encoding_name);
+            if commit_wiz.extract_preamble_info && commit_wiz.filter.row_window.is_none() {
+                let delim = if commit_wiz.delimiter == '\0' { '\t' } else { commit_wiz.delimiter };
+                let leading = count_leading_preamble_rows(&commit_wiz.raw_clipboard_text, delim, commit_wiz.decimal_separator);
+                if leading > 0 {
+                    commit_wiz.filter.row_window = Some((leading, usize::MAX / 2));
+                }
+            }
+        }
+        cx.state.pending_commit = None;
+        cx.intents.push(UiIntent::UpdateImportWizard(Box::new(commit_wiz)));
+        cx.intents.push(UiIntent::DialogButtonAction { action: String::from("__import_wizard_commit") });
+        cx.wiz_dirty = false;
+        return;
+    }
+
     let doc = cx.app.document();
     let prepared = prepare_wizard_import_data(cx.app, &cx.wiz, cx.state, false);
     if let Some(err) = prepared.unstack_error {
@@ -1812,7 +2132,6 @@ fn commit_wizard_import(cx: &mut ImportModalCtx<'_>) {
     let row_count = prepared.grid.len();
     let col_count = prepared.grid.iter().map(Vec::len).max().unwrap_or(0);
 
-    let is_live_link = cx.wiz.is_live_link && cx.wiz.origin_kind != ImportOriginKind::Clipboard;
     let is_empty_file_import = doc.data_sheets.is_empty()
         && cx.wiz.origin_kind == ImportOriginKind::ExternalDelimitedFile
         && !cx.wiz.is_live_link
@@ -1832,6 +2151,8 @@ fn commit_wizard_import(cx: &mut ImportModalCtx<'_>) {
         commit_wiz.filter.col_window = None;
         commit_wiz.filter.decimate_every_k = None;
         commit_wiz.filter.unstack_group_column = None;
+        commit_wiz.filter.row_match = None;
+        commit_wiz.split_by_column = None;
         commit_wiz.placement.transpose = false;
         commit_wiz.placement.skip_contiguous_blanks = false;
     }
@@ -1839,6 +2160,9 @@ fn commit_wizard_import(cx: &mut ImportModalCtx<'_>) {
     let extracted_kv_json: Vec<(String, String)> =
         prepared.extracted_kv.into_iter().filter_map(|(k, v)| serde_json::to_string(&v).ok().map(|s| (k, s))).collect();
     let mut note_parts = Vec::new();
+    if !prepared.extracted_notes.trim().is_empty() {
+        note_parts.push(prepared.extracted_notes.trim().to_owned());
+    }
     if !is_live_link && cx.wiz.record_in_info_sheet && !cx.wiz.provenance_note.trim().is_empty() {
         note_parts.push(cx.wiz.provenance_note.trim().to_owned());
     }
@@ -1861,14 +2185,21 @@ fn commit_wizard_import(cx: &mut ImportModalCtx<'_>) {
 }
 
 fn parse_opt_window(start_s: &str, end_s: &str) -> Option<(usize, usize)> {
-    let a = start_s.trim().parse::<usize>().ok()?;
-    let b = end_s.trim().parse::<usize>().ok()?;
-    (a <= b).then_some((a, b))
+    let a = start_s.trim().parse::<usize>().ok();
+    let b = end_s.trim().parse::<usize>().ok();
+    match (a, b) {
+        (Some(s), Some(e)) => (s <= e).then_some((s, e)),
+        (Some(s), None) => Some((s, usize::MAX / 2)),
+        (None, Some(e)) => Some((0, e)),
+        (None, None) => None,
+    }
 }
 
 struct PreparedWizardImport {
     grid: Vec<Vec<Cell>>,
     extracted_kv: Vec<(String, Value)>,
+    extracted_notes: String,
+    split_blocks: Vec<String>,
     unstack_warning: Option<String>,
     unstack_error: Option<String>,
 }
@@ -1894,76 +2225,73 @@ fn normalize_source_text(raw: &str, encoding_name: &str) -> String {
     text
 }
 
-fn parse_kv_constant_value(raw_val: &str, preset: &crate::i18n::LocalePreset) -> Value {
-    let trimmed = raw_val.trim();
-    if let Some(n) = parse_localized_number_input(trimmed, preset).filter(|v| v.is_finite()) {
-        json!(n)
-    } else if let Ok(n) = trimmed.parse::<f64>()
-        && n.is_finite()
-    {
-        json!(n)
-    } else {
-        json!(trimmed)
+fn constant_value_to_json(val: &ConstantValue) -> Value {
+    match val {
+        ConstantValue::Empty => Value::Null,
+        ConstantValue::Number(v) if v.is_finite() => json!(v),
+        ConstantValue::Number(_) => Value::Null,
+        ConstantValue::Text(s) | ConstantValue::Date(s) => Value::String(s.clone()),
     }
 }
 
-fn try_parse_kv_line(raw_line: &str, delimiter: char, allow_unprefixed: bool) -> Option<(String, String)> {
-    let trimmed = raw_line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let is_comment = trimmed.starts_with('#') || trimmed.starts_with("//");
-    if !is_comment && (!allow_unprefixed || (delimiter != ' ' && trimmed.contains(delimiter))) {
-        return None;
-    }
-    let body = trimmed.trim_start_matches('#').trim_start_matches('/').trim();
-    let sep_pos = match (body.find(':'), body.find('=')) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }?;
-    let (Some(raw_key), Some(raw_val)) = (body.get(..sep_pos), body.get(sep_pos + 1..)) else {
-        return None;
+fn parse_raw_delimited_records(src: &str, delim: char, decimal_sep: char) -> Vec<Vec<String>> {
+    let opts = CsvOptions {
+        delimiter: delim,
+        quote_char: '"',
+        decimal_separator: decimal_sep,
+        thousands_separator: None,
+        header_rows: 0,
+        has_row_titles: false,
+        parse_asterisk_exclusions: false,
+        missing_sentinels: Vec::new(),
     };
-    let key = raw_key.trim();
-    let val = raw_val.trim();
-    if key.is_empty() || key.len() > 64 || val.is_empty() || body.contains("://") {
-        return None;
-    }
-    let first_ch = key.chars().next()?;
-    if first_ch.is_ascii_digit() || first_ch == '-' || first_ch == '+' {
-        return None;
-    }
-    Some((key.to_owned(), val.to_owned()))
+    parse_delimited_records(src, &opts).unwrap_or_else(|_| src.split('\n').map(|line| line.split(delim).map(str::to_owned).collect()).collect())
 }
 
-fn split_leading_kv_metadata(
-    text: &str,
-    delimiter: char,
-    extract_enabled: bool,
-    preset: &crate::i18n::LocalePreset,
-) -> (String, Vec<(String, Value)>) {
-    if !extract_enabled {
-        return (text.to_owned(), Vec::new());
-    }
-    let mut remaining_lines = Vec::new();
-    let mut kv_pairs = Vec::new();
-    let mut in_leading_block = true;
-    for line in text.split('\n') {
-        if in_leading_block {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Some((k, v)) = try_parse_kv_line(line, delimiter, true) {
-                kv_pairs.push((k, parse_kv_constant_value(&v, preset)));
-                continue;
-            }
-            in_leading_block = false;
+fn count_leading_preamble_rows(src: &str, delim: char, decimal_sep: char) -> usize {
+    let records = parse_raw_delimited_records(src, delim, decimal_sep);
+    let mut count = 0usize;
+    for row in &records {
+        let all_empty = row.iter().all(|c| c.trim().is_empty());
+        if all_empty || !extract_preamble_info(std::slice::from_ref(row), decimal_sep).constants.is_empty() {
+            count += 1;
+        } else {
+            break;
         }
-        remaining_lines.push(line);
     }
-    (remaining_lines.join("\n"), kv_pairs)
+    count
+}
+
+fn extract_delimited_preamble(
+    records: &mut Vec<Vec<String>>,
+    row_window_start: usize,
+    extract_enabled: bool,
+    decimal_sep: char,
+) -> (Vec<(String, Value)>, String) {
+    if !extract_enabled || records.is_empty() {
+        return (Vec::new(), String::new());
+    }
+    let preamble = if row_window_start > 0 {
+        let n = row_window_start.min(records.len());
+        extract_preamble_info(records.get(..n).unwrap_or(&[]), decimal_sep)
+    } else {
+        let mut peeled = 0usize;
+        for row in records.iter() {
+            let all_empty = row.iter().all(|c| c.trim().is_empty());
+            if all_empty || !extract_preamble_info(std::slice::from_ref(row), decimal_sep).constants.is_empty() {
+                peeled += 1;
+            } else {
+                break;
+            }
+        }
+        let info = extract_preamble_info(records.get(..peeled).unwrap_or(&[]), decimal_sep);
+        if peeled > 0 {
+            records.drain(..peeled);
+        }
+        info
+    };
+    let kvs = preamble.constants.into_iter().map(|(k, v)| (k, constant_value_to_json(&v))).collect();
+    (kvs, preamble.notes_markdown)
 }
 
 const MAX_PREVIEW_PARSE_ROWS: usize = 512;
@@ -1977,6 +2305,8 @@ fn resolve_unstack_value_col(group_col: usize, explicit: Option<usize>) -> usize
 fn prepare_wizard_import_data(app: &UiApp, wiz: &ImportPasteWizardState, state: &ImportWizardEguiState, preview_cap: bool) -> PreparedWizardImport {
     let missing_tokens: Vec<&str> = state.missing_tokens_draft.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
     let mut extracted_kv = Vec::new();
+    let mut extracted_notes = String::new();
+    let mut split_blocks = Vec::new();
     if wiz.origin_kind == ImportOriginKind::XlsxWorkbook {
         let mut grid = wiz.preview_grid(Some(app.document()));
         if !missing_tokens.is_empty() {
@@ -1990,46 +2320,39 @@ fn prepare_wizard_import_data(app: &UiApp, wiz: &ImportPasteWizardState, state: 
                 }
             }
         }
-        return PreparedWizardImport { grid, extracted_kv, unstack_warning: None, unstack_error: None };
+        if wiz.split_by_column.is_some() {
+            split_blocks = wiz.preview_xlsx_sheet_titles().unwrap_or_default();
+        }
+        return PreparedWizardImport { grid, extracted_kv, extracted_notes, split_blocks, unstack_warning: None, unstack_error: None };
     }
     let mut grid = match wiz.origin_kind {
         ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile => {
             let src_raw = if !state.raw_source_draft.is_empty() { state.raw_source_draft.as_str() } else { wiz.raw_clipboard_text.as_str() };
             let normalized = normalize_source_text(src_raw, &state.encoding_name);
             let delim = if wiz.delimiter == '\0' { '\t' } else { wiz.delimiter };
-            let (table_src, kvs) = split_leading_kv_metadata(&normalized, delim, state.extract_info_metadata, &app.locale_preset);
+            let mut records = parse_raw_delimited_records(&normalized, delim, wiz.decimal_separator);
+            let row_start = wiz.filter.row_window.map_or(0, |(s, _)| s);
+            let (kvs, notes) = extract_delimited_preamble(&mut records, row_start, state.extract_info_metadata, wiz.decimal_separator);
             extracted_kv = kvs;
-            parse_delimited_wizard_grid(&table_src, delim, wiz, &missing_tokens, preview_cap)
+            extracted_notes = notes;
+            build_wizard_grid_from_records(records, delim, wiz, &missing_tokens, preview_cap)
         }
         ImportOriginKind::InternalDataSheet => read_internal_data_sheet_grid(app, wiz, &missing_tokens, preview_cap),
         ImportOriginKind::InternalResultSheet => read_internal_result_sheet_grid(app, wiz, &missing_tokens, preview_cap),
         ImportOriginKind::XlsxWorkbook => Vec::new(),
     };
 
-    let (unstack_warning, unstack_error) = apply_wizard_grid_transforms(&mut grid, app, wiz, state, preview_cap);
-    PreparedWizardImport { grid, extracted_kv, unstack_warning, unstack_error }
+    let (unstack_warning, unstack_error) = apply_wizard_grid_transforms(&mut grid, &mut split_blocks, app, wiz, state, preview_cap);
+    PreparedWizardImport { grid, extracted_kv, extracted_notes, split_blocks, unstack_warning, unstack_error }
 }
 
-fn parse_delimited_wizard_grid(
-    table_src: &str,
+fn build_wizard_grid_from_records(
+    mut records: Vec<Vec<String>>,
     delim: char,
     wiz: &ImportPasteWizardState,
     missing_tokens: &[&str],
     preview_cap: bool,
 ) -> Vec<Vec<Cell>> {
-    let opts = CsvOptions {
-        delimiter: delim,
-        quote_char: '"',
-        decimal_separator: wiz.decimal_separator,
-        thousands_separator: None,
-        header_rows: wiz.header_rows,
-        has_row_titles: false,
-        parse_asterisk_exclusions: wiz.filter.parse_asterisk_exclusions,
-        missing_sentinels: Vec::new(),
-    };
-    let mut records = parse_delimited_records(table_src, &opts).unwrap_or_else(|_| {
-        table_src.split('\n').filter(|line| !line.trim().is_empty()).map(|line| line.split(delim).map(str::to_owned).collect()).collect()
-    });
     records.retain(|row| row.iter().any(|cell| !cell.trim().is_empty()));
     let hdr_n = if wiz.header_rows > 1 && records.len() >= wiz.header_rows { wiz.header_rows } else { 0 };
     let collapsed_hdr = records.get(..hdr_n).filter(|_| hdr_n > 1).map(collapse_merged_header_rows);
@@ -2170,6 +2493,7 @@ fn read_internal_result_sheet_grid(app: &UiApp, wiz: &ImportPasteWizardState, mi
 
 fn apply_wizard_grid_transforms(
     grid: &mut Vec<Vec<Cell>>,
+    split_blocks: &mut Vec<String>,
     app: &UiApp,
     wiz: &ImportPasteWizardState,
     state: &ImportWizardEguiState,
@@ -2187,6 +2511,62 @@ fn apply_wizard_grid_transforms(
         } else {
             grid.clear();
         }
+    }
+    let has_hdr = wiz.header_rows > 0 || wiz.placement.propagate_title_header;
+    if let Some(scol) = wiz.split_by_column {
+        let body_start = usize::from(has_hdr && !grid.is_empty());
+        let mut first_label: Option<String> = None;
+        for row in grid.iter().skip(body_start) {
+            let lbl = row.get(scol).map(|c| format_cell_display(c, &app.locale_preset)).unwrap_or_default();
+            let trimmed = lbl.trim();
+            if !trimmed.is_empty() && !split_blocks.iter().any(|b| b == trimmed) {
+                if first_label.is_none() {
+                    first_label = Some(trimmed.to_owned());
+                }
+                split_blocks.push(trimmed.to_owned());
+            }
+        }
+        if let Some(target_lbl) = first_label {
+            let mut next = Vec::new();
+            for (idx, mut row) in std::mem::take(grid).into_iter().enumerate() {
+                if idx < body_start {
+                    if scol < row.len() {
+                        row.remove(scol);
+                    }
+                    next.push(row);
+                } else {
+                    let lbl = row.get(scol).map(|c| format_cell_display(c, &app.locale_preset)).unwrap_or_default();
+                    if lbl.trim() == target_lbl {
+                        if scol < row.len() {
+                            row.remove(scol);
+                        }
+                        next.push(row);
+                    }
+                }
+            }
+            *grid = next;
+        }
+    } else if let Some(rm) = &wiz.filter.row_match {
+        let body_start = usize::from(has_hdr && !grid.is_empty());
+        let target = rm.equals.trim();
+        let mut next = Vec::new();
+        for (idx, mut row) in std::mem::take(grid).into_iter().enumerate() {
+            if idx < body_start {
+                if rm.drop_column && rm.column < row.len() {
+                    row.remove(rm.column);
+                }
+                next.push(row);
+            } else {
+                let val = row.get(rm.column).map(|c| format_cell_display(c, &app.locale_preset)).unwrap_or_default();
+                if val.trim() == target {
+                    if rm.drop_column && rm.column < row.len() {
+                        row.remove(rm.column);
+                    }
+                    next.push(row);
+                }
+            }
+        }
+        *grid = next;
     }
     if let Some(gcol) = wiz.filter.unstack_group_column {
         let skip_header = wiz.header_rows >= 1 || wiz.placement.propagate_title_header;

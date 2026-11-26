@@ -12,6 +12,8 @@ pub mod csv;
 pub mod error;
 pub mod export;
 pub mod image_asset;
+pub mod plate;
+pub mod preamble;
 pub mod prism;
 pub mod pzfx;
 pub mod recovery;
@@ -30,9 +32,10 @@ pub use archive::{
     save_template_bytes, save_template_file, strip_project_data_for_template, validate_project_document, validate_project_document_skip_checkpoints,
 };
 pub use csv::{
-    CsvOptions, FilteredDelimitedGrid, ImportBaselineAdjustment, MAX_CSV_FILE_BYTES, apply_csv_import_link, collapse_merged_header_rows,
-    decode_delimited_text_bytes, export_datasheet_to_csv, filter_delimited_text, format_cell_token, format_csv_field, import_csv_to_datasheet,
-    import_csv_to_datasheet_with_x_mode, parse_cell_token, parse_delimited_records, rearrange_and_baseline_grid, write_delimited_records,
+    CsvMultiImportResult, CsvOptions, FilteredDelimitedGrid, ImportBaselineAdjustment, MAX_CSV_FILE_BYTES, apply_csv_import_link,
+    collapse_merged_header_rows, decode_delimited_text_bytes, export_datasheet_to_csv, filter_delimited_text, format_cell_token, format_csv_field,
+    import_csv_sheets_with_filter, import_csv_to_datasheet, import_csv_to_datasheet_with_x_mode, parse_cell_token, parse_delimited_records,
+    rearrange_and_baseline_grid, write_delimited_records,
 };
 pub use error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 pub use export::{
@@ -40,6 +43,11 @@ pub use export::{
     try_export_result_sheet_tidy_csv, try_export_result_tab_csv,
 };
 pub use image_asset::{ingest_image_asset, validate_image_asset};
+pub use plate::{
+    CURRENT_PLATE_MAP_VERSION, MAX_PLATE_MAP_FILE_BYTES, PLATE_MAP_EXTENSION, PlateMapFile, load_cbplate_file, parse_cbplate_json, save_cbplate_file,
+    serialize_cbplate_json,
+};
+pub use preamble::{PreambleInfo, build_preamble_info_sheet, extract_preamble_info, parse_preamble_constant_value, try_parse_preamble_kv};
 pub use prism::{import_prism_bytes, import_prism_bytes_with_limits};
 pub use pzfx::{import_pzfx_bytes, import_pzfx_str};
 #[cfg(not(target_arch = "wasm32"))]
@@ -48,8 +56,12 @@ pub use recovery::{
     CURRENT_JOURNAL_VERSION, CURRENT_LOCK_VERSION, CrashRecoveryJournal, JOURNAL_FILE_NAME, JournalBackend, JournalLockLease, JournalOpRecord,
     JournalRecoveryWarning, LOCKFILE_NAME, MemoryJournalBackend, RecoveryReport, SNAPSHOT_FILE_NAME, compute_record_crc32,
 };
-pub use registry::{ExportOptions, ExportSource, Exporter, FormatDescriptor, FormatKind, FormatRegistry, ImportOptions, ImportPayload, Importer};
-pub use schemas::{all_persisted_schemas, archive_manifest_schema, batch_v1_schema, document_schema, journal_record_schema, preferences_schema};
+pub use registry::{
+    DESC_PLATE_MAP, ExportOptions, ExportSource, Exporter, FormatDescriptor, FormatKind, FormatRegistry, ImportOptions, ImportPayload, Importer,
+};
+pub use schemas::{
+    all_persisted_schemas, archive_manifest_schema, batch_v1_schema, document_schema, journal_record_schema, plate_map_schema, preferences_schema,
+};
 pub use versioned::{
     BATCH_SCHEMA_V1, CURRENT_PREFERENCES_VERSION, MAX_PREFERENCES_FILE_BYTES, PreferencesFile, VersionStep, load_preferences_file,
     normalize_batch_manifest_v1, normalize_batch_manifest_v1_with_warnings, normalize_command_params_in_place, parse_preferences_json,

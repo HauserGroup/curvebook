@@ -377,6 +377,7 @@ fn build_import_options(path: &Path, format_id: &str, args: &Map<String, Value>)
             subcolumn_mode,
             include_hidden: false,
             title: Some(explicit_title.unwrap_or_else(|| stem.to_owned())),
+            ..XlsxImportOptions::default()
         })
     } else {
         None
@@ -559,6 +560,24 @@ fn attach_xlsx_command_params(map: &mut Map<String, Value>, xopts: &XlsxImportOp
         && let Ok(val) = serde_json::to_value(xopts.subcolumn_mode)
     {
         map.insert(String::from("subcolumn_mode"), val);
+    }
+    if let Some(ref cell_range) = xopts.cell_range {
+        map.insert(String::from("cell_range"), json!(cell_range));
+    }
+    if xopts.skip_rows > 0 {
+        map.insert(String::from("skip_rows"), json!(xopts.skip_rows));
+    }
+    if xopts.fill_merged_cells {
+        map.insert(String::from("fill_merged_cells"), json!(true));
+    }
+    if let Some(split_col) = xopts.split_by_column {
+        map.insert(String::from("split_by_column"), json!(split_col));
+    }
+    if let Some(ref rm) = xopts.row_match {
+        map.insert(String::from("row_match"), json!({ "column": rm.column, "equals": rm.equals, "drop_column": rm.drop_column }));
+    }
+    if xopts.extract_preamble_info {
+        map.insert(String::from("extract_preamble_info"), json!(true));
     }
 }
 
@@ -1536,5 +1555,29 @@ mod tests {
         let oversized = vec![0x55_u8; MAX_LIVE_INLINE_ARCHIVE_BYTES + 1];
         let err = build_live_report_import_params(None, Some(&oversized), "xlsx", &opts, false).expect_err("oversized inline fallback must fail");
         assert_eq!(err.code, ErrorCode::ResourceLimit);
+    }
+
+    #[test]
+    fn attach_xlsx_command_params_forwards_r17_7_options() {
+        use curvebook_doc::ColumnEqualsFilter;
+        use curvebook_format::XlsxImportOptions;
+
+        let xopts = XlsxImportOptions {
+            cell_range: Some(String::from("B4:M11")),
+            skip_rows: 3,
+            fill_merged_cells: true,
+            split_by_column: Some(0),
+            row_match: Some(ColumnEqualsFilter { column: 1, equals: String::from("ChA"), drop_column: false }),
+            extract_preamble_info: true,
+            ..XlsxImportOptions::default()
+        };
+        let opts = ImportOptions { xlsx: Some(xopts), ..ImportOptions::default() };
+        let params = build_live_report_import_params(Some(Path::new("/study/kinetic.xlsx")), None, "xlsx", &opts, true).expect("live xlsx params");
+        assert_eq!(params["cell_range"], "B4:M11");
+        assert_eq!(params["skip_rows"], 3);
+        assert_eq!(params["fill_merged_cells"], true);
+        assert_eq!(params["split_by_column"], 0);
+        assert_eq!(params["row_match"], json!({ "column": 1, "equals": "ChA", "drop_column": false }));
+        assert_eq!(params["extract_preamble_info"], true);
     }
 }

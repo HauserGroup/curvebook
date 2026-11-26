@@ -8,10 +8,10 @@ use curvebook_doc::analysis::{
     resolve_analysis_descriptor,
 };
 use curvebook_doc::{
-    AnalysisKind, BlandAltmanSpec, ContingencyMethod, ContingencySpec, DescriptiveSpec, FactorialAnovaSpec, GlmFamily, GlmSpec, KappaWeighting,
-    LeveneTestSpec, LinearRegressionSpec, MultipleRowTestsSpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, OneWayAnovaSpec, OutlierSpec,
-    PValueStackSpec, PassingBablokSpec, PowerAnalysisSpec, RocSpec, SimpleLogisticSpec, SplineLowessSpec, SurvivalAnalysisSpec, TableKind,
-    TransformAnalysisSpec, TwoGroupSpec,
+    AnalysisKind, AreaUnderCurveSpec, BlandAltmanSpec, ContingencyMethod, ContingencySpec, DescriptiveSpec, FactorialAnovaSpec, GlmFamily, GlmSpec,
+    KappaWeighting, LeveneTestSpec, LinearRegressionSpec, MultipleRowTestsSpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
+    OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, PowerAnalysisSpec, RocSpec, SimpleLogisticSpec, SplineLowessSpec,
+    SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
 };
 
 fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
@@ -56,6 +56,7 @@ fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
         (AnalysisKindId::SimpleLogisticRegression, AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default())),
         (AnalysisKindId::FitSplineLowess, AnalysisKind::FitSplineLowess(SplineLowessSpec::default())),
         (AnalysisKindId::LeveneTest, AnalysisKind::LeveneTest(LeveneTestSpec::default())),
+        (AnalysisKindId::AreaUnderCurve, AnalysisKind::AreaUnderCurve(AreaUnderCurveSpec::default())),
     ]
 }
 

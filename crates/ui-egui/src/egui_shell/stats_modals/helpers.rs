@@ -542,6 +542,9 @@ pub(super) fn method_reference_text(spec: &curvebook_doc::AnalysisSpec) -> &'sta
         AnalysisKind::Multivariate(_) => {
             "Jolliffe (2002) SVD PCA, Horn (1965) parallel analysis, Ward/UPGMA hierarchical + k-means++ clustering, and Rubin (1987) MICE pooling."
         }
+        AnalysisKind::AreaUnderCurve(_) => {
+            "Trapezoidal partial-AUC with linear boundary interpolation (Yeh & Kwan 1978) and exact knot-weighted independent-cohort SE (Bailer 1988)."
+        }
         _ => "Exact peer-reviewed CurveBook statistical reference equations and confidence limits evaluated at the active alpha level.",
     }
 }

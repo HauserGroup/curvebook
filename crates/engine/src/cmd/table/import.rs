@@ -5,17 +5,20 @@
 use std::collections::{HashMap, HashSet};
 
 use curvebook_doc::{
-    CellCoord, DataSheet, DocError, ImportLinkSpec, InfoSheet, InternalLinkKind, LinkSource, MAX_PROJECT_IMAGE_ASSETS, MAX_SHEETS_PER_PROJECT,
-    PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableArchetype, VariableSource,
-    validate_project_cells, validate_title,
+    CellCoord, DataSheet, DocError, FloatingNote, ImportLinkSpec, InfoSheet, InternalLinkKind, LinkSource, MAX_PROJECT_IMAGE_ASSETS,
+    MAX_SHEETS_PER_PROJECT, PlacementMode, ProjectDocument, RectPt, ResultSheet, ResultStatus, SheetCellRange, SheetId, SheetSection, SubcolumnMode,
+    TableArchetype, VariableSource, validate_project_cells, validate_title,
 };
 use curvebook_format::{
-    CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, XlsxImportOptions, import_csv_to_datasheet, import_prism_bytes,
-    import_pzfx_bytes, import_pzfx_str, import_xlsx_bytes_with_options, list_xlsx_sheets, parse_delimited_records,
+    CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, XlsxImportOptions, import_csv_sheets_with_filter, import_csv_to_datasheet,
+    import_prism_bytes, import_pzfx_bytes, import_pzfx_str, import_xlsx_bytes_with_options, list_xlsx_sheets, parse_cbplate_json,
+    parse_delimited_records,
 };
 use curvebook_transform::{
-    ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload, PlateGeometry, PlateMapTemplate, PlateWellRole, TargetArchetypeKind,
-    TidyColumnMapping, apply_import_link_pipeline, map_plate_to_datasheet, pivot_tidy_long_to_datasheet,
+    ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload, PlateGeometry, PlateGridBuildOptions, PlateKineticReducer, PlateMapTemplate,
+    PlateSourceExtraction, PlateWellMatchMode, PlateWellRole, TargetArchetypeKind, TidyColumnMapping, apply_import_link_pipeline,
+    build_plate_template_from_grids, extract_plate_grid_from_datasheet, extract_plate_values_from_analyzable_sheet,
+    extract_plate_x_grid_from_datasheet, map_plate_to_datasheet_with_origins, pivot_tidy_long_to_datasheet,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -24,15 +27,15 @@ use serde_json::{Map, Value, json};
 use crate::{CommandOutcome, EngineError, ErrorCode, ExternalPathPolicy, dag};
 
 use super::{
-    BaselineInput, CellRangeInput, ImportFilterSchema, PlacementFields, ensure_mv_edit_preserves_calculated, ensure_range_outside_linked_regions,
-    parse_import_filter_val, parse_table_kind, parse_target_archetype_kind, resolve_baseline_adjustment, resolve_decimal_char, resolve_delimiter,
-    resolve_subcolumn_mode, validate_project_cell_budget, validate_project_cell_budget_after_change,
+    BaselineInput, CellRangeInput, ColumnEqualsFilterSchema, ImportFilterSchema, PlacementFields, ensure_mv_edit_preserves_calculated,
+    ensure_range_outside_linked_regions, parse_import_filter_val, parse_table_kind, parse_target_archetype_kind, resolve_baseline_adjustment,
+    resolve_decimal_char, resolve_delimiter, resolve_subcolumn_mode, validate_project_cell_budget, validate_project_cell_budget_after_change,
 };
 use crate::cmd::Ctx;
 use crate::cmd::helpers::{
     column_subcolumn_count, decode_base64, ensure_sheet_not_frozen, locate_target_and_info_indices, next_unique_sheet_id,
     next_unique_sheet_id_excluding, parse_sheet_id, prune_shortened_series_overrides, remap_analysis_hooks, remap_data_sheet_links,
-    remap_graph_spec_references, remap_layout_spec_references, remap_sheet_id, require_data_sheet, select_result_tab,
+    remap_graph_spec_references, remap_layout_spec_references, remap_sheet_id, require_analyzable_data_sheet, require_data_sheet, select_result_tab,
     shift_point_overrides_on_insert_rows, snapshot_active_series_lengths, sync_info_linked_data_sheets,
 };
 use crate::cmd::params::{command_schema, deserialize_strict, parse_params};
@@ -93,6 +96,7 @@ pub(super) fn run_import_pipeline(
         }
     };
     target_ds.prune_stale_exclusion_notes();
+    target_ds.prune_stale_plate_well_origins();
     Ok(report)
 }
 
@@ -456,6 +460,10 @@ pub(super) struct ImportCsvParams {
     pub(super) filter: Option<Value>,
     /// When importing from `path` into an existing sheet, keep a live file link.
     pub(super) link: Option<bool>,
+    /// Split data rows into one sheet per distinct trimmed value in this zero-based column (new non-linked imports only; mutually exclusive with `filter.row_match`).
+    pub(super) split_by_column: Option<usize>,
+    /// Save skipped leading preamble `Key: Value` rows and plain-text notes into one shared linked InfoSheet (default false).
+    pub(super) extract_preamble_info: Option<bool>,
     #[serde(flatten)]
     pub(super) placement: PlacementFields,
 }
@@ -471,15 +479,17 @@ pub(super) fn build_csv_options(delimiter: char, decimal_separator: char) -> Csv
     opts
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn import_into_existing_sheet(
     doc: &mut ProjectDocument,
     id: &SheetId,
     p: &ImportCsvParams,
+    filter: &curvebook_doc::ImportFilterSpec,
     text: String,
     csv_opts: &CsvOptions,
     subcolumn_mode: SubcolumnMode,
     policy: &ExternalPathPolicy,
-) -> Result<Option<SheetId>, EngineError> {
+) -> Result<(Option<SheetId>, Vec<String>), EngineError> {
     let delimiter = csv_opts.delimiter;
     let decimal_separator = csv_opts.decimal_separator;
     let (info_id, cur_title, cur_kind, existing_rows_before) = {
@@ -493,15 +503,43 @@ pub(super) fn import_into_existing_sheet(
             Some(k) => parse_table_kind(k)?,
             None => cur_kind,
         };
-        let mut imported = import_csv_to_datasheet(id.clone(), title, &text, kind, subcolumn_mode, csv_opts)?;
+        let extract_preamble = p.extract_preamble_info.unwrap_or(false);
+        let (mut imported, created_info, warnings) = if p.filter.is_some() || extract_preamble {
+            let mut multi = import_csv_sheets_with_filter(id.clone(), title, &text, kind, subcolumn_mode, csv_opts, filter, None, extract_preamble)?;
+            let ds = multi.sheets.pop().ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "CSV import returned no sheets"))?;
+            let warns: Vec<String> = multi.warnings.iter().map(format_import_warning_text).collect();
+            (ds, multi.info_sheet, warns)
+        } else {
+            let ds = import_csv_to_datasheet(id.clone(), title, &text, kind, subcolumn_mode, csv_opts)?;
+            (ds, None, Vec::new())
+        };
         validate_project_cell_budget_after_change(doc, Some(id), imported.archetype.allocated_cell_slots())?;
-        imported.info_sheet_id = info_id;
+        let new_info_id = if let Some(mut info) = created_info {
+            let next_count = doc.total_sheet_count().saturating_add(1);
+            if next_count > MAX_SHEETS_PER_PROJECT {
+                return Err(EngineError::from(DocError::TooManySheets { count: next_count, max: MAX_SHEETS_PER_PROJECT }));
+            }
+            let mut reserved = collect_all_sheet_ids(doc);
+            if reserved.contains(info.id.as_str()) {
+                info.id = next_collision_free_sheet_id(&info.id, &mut reserved)?;
+            }
+            let added_info_id = info.id.clone();
+            info.linked_data_sheets = vec![id.clone()];
+            imported.info_sheet_id = Some(added_info_id.clone());
+            doc.add_info_sheet(info)?;
+            Some(added_info_id)
+        } else {
+            imported.info_sheet_id = info_id;
+            None
+        };
         if let Some(slot) = doc.data_sheet_mut(id) {
             *slot = imported;
         }
-        return Ok(None);
+        if new_info_id.is_some() {
+            sync_info_linked_data_sheets(doc, &HashSet::new());
+        }
+        return Ok((new_info_id, warnings));
     }
-    let filter = parse_import_filter_val(p.filter.as_ref())?;
     let placement = p.placement.to_placement_spec(false)?;
     let keep_link = p.link.unwrap_or(false);
     let mut source = match p.path.as_deref() {
@@ -509,7 +547,7 @@ pub(super) fn import_into_existing_sheet(
         _ => LinkSource::Clipboard,
     };
     policy.normalize_stored_link_source(&mut source)?;
-    let link_spec = ImportLinkSpec { source, filter, placement };
+    let link_spec = ImportLinkSpec { source, filter: filter.clone(), placement };
     let (target_idx, info_idx) = locate_target_and_info_indices(doc, id, info_id.as_ref())?;
     let existing_link_ids: HashSet<String> =
         doc.data_sheets.get(target_idx).map(|d| d.linked_regions.iter().map(|r| r.id.clone()).collect()).unwrap_or_default();
@@ -598,7 +636,7 @@ pub(super) fn import_into_existing_sheet(
     if link_spec.placement.mode == PlacementMode::InsertRows && link_spec.placement.anchor.row < existing_rows_before && report.rows_placed > 0 {
         shift_point_overrides_on_insert_rows(doc, id, link_spec.placement.anchor.row, report.rows_placed);
     }
-    Ok(info_idx.and(info_id))
+    Ok((info_idx.and(info_id), Vec::new()))
 }
 
 pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -606,12 +644,31 @@ pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
     if let Some(ref title) = p.title {
         validate_title(title)?;
     }
+    let filter = parse_import_filter_val(p.filter.as_ref())?;
     let policy = ctx.session.path_policy.clone();
     let doc = &mut ctx.session.doc;
     let id = match p.sheet_id.as_deref() {
         Some(raw_id) => parse_sheet_id(raw_id)?,
         None => next_unique_sheet_id(doc, "data")?,
     };
+    let targets_existing = doc.data_sheet(&id).is_some();
+    if p.split_by_column.is_some() {
+        if targets_existing || p.link == Some(true) {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "`split_by_column` cannot be used when targeting an existing sheet or with `link: true`",
+            )
+            .with_remediation("Use `filter.row_match` to import one matching block into an existing or linked sheet, or target a new unlinked sheet to split all blocks."));
+        }
+        if filter.row_match.is_some() {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "cannot combine `split_by_column` and `filter.row_match` in the same `table.importCsv` call",
+            )
+            .with_remediation("Use `split_by_column` to split into one sheet per block, or `filter.row_match` to keep a single block."));
+        }
+    }
+
     let text = if let Some(inline) = &p.csv {
         check_inline_payload_len(inline.len(), MAX_CSV_FILE_BYTES, "CSV")?;
         inline.clone()
@@ -639,40 +696,121 @@ pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
     }
     let subcolumn_mode = resolve_subcolumn_mode(p.subcolumn_mode.as_ref(), p.replicates.unwrap_or(1))?;
 
-    let mut dirty_seeds = vec![id.clone()];
-    let before_active = if doc.data_sheet(&id).is_some() {
+    let mut dirty_seeds: Vec<SheetId> = Vec::new();
+    let mut imported_sheet_ids: Vec<String> = Vec::new();
+    let mut created_info_sheet_id: Option<SheetId> = None;
+    let mut import_warnings: Vec<String> = Vec::new();
+    let (primary_id, primary_title, before_active) = if targets_existing {
         let before = snapshot_active_series_lengths(doc, &id);
-        if let Some(updated_info) = import_into_existing_sheet(doc, &id, &p, text, &csv_opts, subcolumn_mode, &policy)? {
-            dirty_seeds.push(updated_info);
+        dirty_seeds.push(id.clone());
+        let (updated_info, warns) = import_into_existing_sheet(doc, &id, &p, &filter, text, &csv_opts, subcolumn_mode, &policy)?;
+        import_warnings.extend(warns);
+        if let Some(info_id) = updated_info {
+            dirty_seeds.push(info_id.clone());
+            if p.replace.unwrap_or(false) {
+                created_info_sheet_id = Some(info_id);
+            }
         }
-        Some(before)
+        let title = doc.data_sheet(&id).map(|d| d.title.clone()).unwrap_or_default();
+        imported_sheet_ids.push(id.as_str().to_owned());
+        (id.clone(), title, Some(before))
     } else {
         let title = p.title.as_deref().unwrap_or("Imported CSV");
         let kind = parse_table_kind(p.archetype.as_deref().unwrap_or("xy"))?;
-        let imported = import_csv_to_datasheet(id.clone(), title, &text, kind, subcolumn_mode, &csv_opts)?;
-        doc.add_data_sheet(imported)?;
-        None
+        let mut multi = import_csv_sheets_with_filter(
+            id.clone(),
+            title,
+            &text,
+            kind,
+            subcolumn_mode,
+            &csv_opts,
+            &filter,
+            p.split_by_column,
+            p.extract_preamble_info.unwrap_or(false),
+        )?;
+        let added_sheet_count = multi.sheets.len().saturating_add(usize::from(multi.info_sheet.is_some()));
+        let total_sheets = doc.total_sheet_count().saturating_add(added_sheet_count);
+        if total_sheets > MAX_SHEETS_PER_PROJECT {
+            return Err(EngineError::from(DocError::TooManySheets { count: total_sheets, max: MAX_SHEETS_PER_PROJECT }));
+        }
+        let existing_cells = doc.total_allocated_cells()?;
+        let added_cells = multi.sheets.iter().try_fold(0_usize, |acc, ds| {
+            let slots = ds.archetype.allocated_cell_slots();
+            validate_project_cells(acc, slots)?;
+            Ok::<usize, EngineError>(acc.saturating_add(slots))
+        })?;
+        validate_project_cells(existing_cells, added_cells)?;
+
+        let mut reserved = collect_all_sheet_ids(doc);
+        let preserve_explicit_single_id = p.split_by_column.is_none() && p.sheet_id.is_some();
+        for ds in &mut multi.sheets {
+            if !preserve_explicit_single_id {
+                if reserved.contains(ds.id.as_str()) {
+                    ds.id = next_collision_free_sheet_id(&ds.id, &mut reserved)?;
+                } else {
+                    reserved.insert(ds.id.as_str().to_owned());
+                }
+            } else {
+                reserved.insert(ds.id.as_str().to_owned());
+            }
+        }
+        let final_sheet_ids: Vec<SheetId> = multi.sheets.iter().map(|s| s.id.clone()).collect();
+        if let Some(ref mut info) = multi.info_sheet {
+            if reserved.contains(info.id.as_str()) {
+                info.id = next_collision_free_sheet_id(&info.id, &mut reserved)?;
+            } else {
+                reserved.insert(info.id.as_str().to_owned());
+            }
+            info.linked_data_sheets = final_sheet_ids.clone();
+            for ds in &mut multi.sheets {
+                ds.info_sheet_id = Some(info.id.clone());
+            }
+            created_info_sheet_id = Some(info.id.clone());
+        }
+        let primary = multi
+            .sheets
+            .first()
+            .map(|s| (s.id.clone(), s.title.clone()))
+            .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "CSV import produced no data sheets"))?;
+        for ds in multi.sheets {
+            dirty_seeds.push(ds.id.clone());
+            imported_sheet_ids.push(ds.id.as_str().to_owned());
+            doc.add_data_sheet(ds)?;
+        }
+        if let Some(info) = multi.info_sheet {
+            dirty_seeds.push(info.id.clone());
+            doc.add_info_sheet(info)?;
+            sync_info_linked_data_sheets(doc, &HashSet::new());
+        }
+        import_warnings.extend(multi.warnings.iter().map(format_import_warning_text));
+        (primary.0, primary.1, None)
     };
 
     let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, None, Some(ctx.cancelled))?;
     if let Some(before) = before_active.as_deref() {
-        prune_shortened_series_overrides(doc, &id, before);
+        prune_shortened_series_overrides(doc, &primary_id, before);
     }
     let message = match recalc.failure_note() {
         Some(note) => format!("imported CSV into data sheet{note}"),
         None => String::from("imported CSV into data sheet"),
     };
-    Ok(CommandOutcome::mutated(
-        "table.importCsv",
-        message,
-        json!({
-            "sheet_id": id.as_str(),
-            "recalculated_sheets": recalc.recalculated_sheets,
-            "refreshed_links": recalc.refreshed_links,
-            "failed_count": recalc.failed_result_sheets.len(),
-            "failed_result_sheets": recalc.failed_json(),
-        }),
-    ))
+    let mut payload = json!({
+        "sheet_id": primary_id.as_str(),
+        "title": primary_title,
+        "imported_sheet_ids": imported_sheet_ids,
+        "recalculated_sheets": recalc.recalculated_sheets,
+        "refreshed_links": recalc.refreshed_links,
+        "failed_count": recalc.failed_result_sheets.len(),
+        "failed_result_sheets": recalc.failed_json(),
+    });
+    if let Some(ref info_id) = created_info_sheet_id
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert(String::from("info_sheet_id"), json!(info_id.as_str()));
+    }
+    let mut outcome = CommandOutcome::mutated("table.importCsv", message, payload);
+    outcome.warnings = import_warnings;
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -960,6 +1098,19 @@ pub(super) struct ImportXlsxParams {
     pub(super) merge: Option<bool>,
     /// Optional project title override (defaults to the workbook filename stem when omitted).
     pub(super) title: Option<String>,
+    /// Optional A1 cell rectangle (e.g. `"B4:M11"`). Requires selecting a single worksheet.
+    #[schemars(length(min = 1))]
+    pub(super) cell_range: Option<String>,
+    /// Leading rows skipped before `header_rows` (relative to `cell_range` when set; default 0).
+    pub(super) skip_rows: Option<usize>,
+    /// Expand exact OOXML `<mergeCell>` top-left values across body rows before cropping/slicing (default false).
+    pub(super) fill_merged_cells: Option<bool>,
+    /// Split data rows into one sheet per distinct trimmed value in this zero-based column (mutually exclusive with `row_match`).
+    pub(super) split_by_column: Option<usize>,
+    /// Retain only data rows matching one trimmed value in a zero-based discriminator column (mutually exclusive with `split_by_column`).
+    pub(super) row_match: Option<ColumnEqualsFilterSchema>,
+    /// When true and `skip_rows > 0`, store skipped preamble `Key: Value` rows and notes in one shared linked InfoSheet (default false).
+    pub(super) extract_preamble_info: Option<bool>,
 }
 
 pub(super) fn run_import_xlsx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -1017,31 +1168,44 @@ pub(super) fn run_import_xlsx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         subcolumn_mode,
         include_hidden: p.include_hidden.unwrap_or(false),
         title,
+        cell_range: p.cell_range,
+        skip_rows: p.skip_rows.unwrap_or(0),
+        fill_merged_cells: p.fill_merged_cells.unwrap_or(false),
+        split_by_column: p.split_by_column,
+        row_match: p.row_match.map(ColumnEqualsFilterSchema::into_doc),
+        extract_preamble_info: p.extract_preamble_info.unwrap_or(false),
     };
 
     let report = import_xlsx_bytes_with_options(&bytes, &opts)?;
     let doc = &mut ctx.session.doc;
-    let imported_ids: Vec<String> = if p.merge.unwrap_or(false) {
+    let (imported_ids, info_sheet_id): (Vec<String>, Option<String>) = if p.merge.unwrap_or(false) {
         let before_count = doc.data_sheets.len();
+        let before_info_count = doc.info_sheets.len();
         merge_imported_document(doc, report.document)?;
-        doc.data_sheets.iter().skip(before_count).map(|s| s.id.as_str().to_owned()).collect()
+        let data_ids = doc.data_sheets.iter().skip(before_count).map(|s| s.id.as_str().to_owned()).collect();
+        let info_id = doc.info_sheets.get(before_info_count).map(|s| s.id.as_str().to_owned());
+        (data_ids, info_id)
     } else {
         validate_project_cells(0, report.document.total_allocated_cells()?)?;
-        let ids = report.document.data_sheets.iter().map(|s| s.id.as_str().to_owned()).collect();
+        let data_ids = report.document.data_sheets.iter().map(|s| s.id.as_str().to_owned()).collect();
+        let info_id = report.document.info_sheets.first().map(|s| s.id.as_str().to_owned());
         *doc = report.document;
-        ids
+        (data_ids, info_id)
     };
     sync_info_linked_data_sheets(doc, &HashSet::new());
-    let mut outcome = CommandOutcome::mutated(
-        "table.importXlsx",
-        format!("imported {} worksheet(s) from .xlsx workbook", imported_ids.len()),
-        json!({
-            "title": doc.title,
-            "sheet_count": doc.total_sheet_count(),
-            "imported_sheet_ids": imported_ids,
-            "warnings": report.warnings,
-        }),
-    );
+    let mut payload = json!({
+        "title": doc.title,
+        "sheet_count": doc.total_sheet_count(),
+        "imported_sheet_ids": imported_ids,
+        "warnings": report.warnings,
+    });
+    if let Some(ref info_id) = info_sheet_id
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert(String::from("info_sheet_id"), json!(info_id));
+    }
+    let mut outcome =
+        CommandOutcome::mutated("table.importXlsx", format!("imported {} worksheet(s) from .xlsx workbook", imported_ids.len()), payload);
     outcome.warnings = report.warnings.iter().map(format_import_warning_text).collect();
     Ok(outcome)
 }
@@ -1139,6 +1303,56 @@ impl PlateValuesInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(super) struct PlateXWindowMeanInput {
+    /// Inclusive lower X bound (finite, <= `x_max`).
+    pub(super) x_min: f64,
+    /// Inclusive upper X bound (finite, >= `x_min`).
+    pub(super) x_max: f64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PlateReducerInput {
+    /// Minimum active numeric reading across each well column.
+    Min,
+    /// Maximum active numeric reading across each well column.
+    Max,
+    /// Active numeric reading at zero-based row index.
+    RowIndex(usize),
+    /// Arithmetic mean of active numeric readings whose X lies in `[x_min, x_max]` (inclusive).
+    XWindowMean(PlateXWindowMeanInput),
+}
+
+impl PlateReducerInput {
+    fn into_transform(self) -> (PlateKineticReducer, String) {
+        match self {
+            Self::Min => (PlateKineticReducer::Min, String::from("min")),
+            Self::Max => (PlateKineticReducer::Max, String::from("max")),
+            Self::RowIndex(idx) => (PlateKineticReducer::RowIndex(idx), format!("row_index({idx})")),
+            Self::XWindowMean(win) => {
+                (PlateKineticReducer::XWindowMean { x_min: win.x_min, x_max: win.x_max }, format!("x_window_mean([{}, {}])", win.x_min, win.x_max))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PlateSourceInput {
+    /// Upstream DataSheet or UpToDate analyzable ResultSheet ID supplying per-well values.
+    #[schemars(length(min = 1))]
+    pub(super) sheet_id: String,
+    /// Column header supplying per-well values when each row is a well (e.g. `"Net Area"`). Mutually exclusive with `reducer`.
+    #[schemars(length(min = 1))]
+    pub(super) value_column: Option<String>,
+    /// Kinetic reducer collapsing each well column into one reading (`"min"`, `"max"`, `{"row_index": n}`, `{"x_window_mean": {"x_min": a, "x_max": b}}`). Mutually exclusive with `value_column`.
+    pub(super) reducer: Option<PlateReducerInput>,
+    /// Well matching strategy: `"by_well_id"` (default) or `"positional"`.
+    pub(super) match_wells: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ImportPlateMapParams {
     /// Optional target sheet ID.
     #[schemars(length(min = 1))]
@@ -1149,13 +1363,29 @@ pub(super) struct ImportPlateMapParams {
     #[serde(default)]
     #[schemars(schema_with = "plate_geometry_schema")]
     pub(super) geometry: Option<PlateGeometryInput>,
-    /// Flat (96/384) or 2D (8x12 / 16x24) plate readings array of finite numbers or nulls.
-    pub(super) values: PlateValuesInput,
-    /// PlateMapTemplate object or `.cbtemplate` JSON string.
+    /// Flat (96/384) or 2D (8x12 / 16x24) plate readings array of finite numbers or nulls. Mutually exclusive with `source`.
+    pub(super) values: Option<PlateValuesInput>,
+    /// Upstream analyzable DataSheet or UpToDate ResultSheet source supplying per-well values. Mutually exclusive with `values`.
+    pub(super) source: Option<PlateSourceInput>,
+    /// PlateMapTemplate object or `.cbplate` v1 / legacy JSON string. Mutually exclusive with `label_grid` / `layout_sheet_id`.
     pub(super) template: Option<Value>,
-    /// Array of per-well role definitions.
+    /// Array of per-well role definitions. Mutually exclusive with `label_grid` / `layout_sheet_id`.
     pub(super) roles: Option<Vec<Value>>,
-    /// Template name when building from `roles`.
+    /// Strict 8x12 or 16x24 literal text label grid (null/empty = Excluded). Mutually exclusive with `template`, `roles`, and `layout_sheet_id`.
+    pub(super) label_grid: Option<Vec<Vec<Option<String>>>>,
+    /// DataSheet (or UpToDate analyzable ResultSheet) whose data cells form a strict 8x12 or 16x24 label grid. Mutually exclusive with `template`, `roles`, and `label_grid`.
+    #[schemars(length(min = 1))]
+    pub(super) layout_sheet_id: Option<String>,
+    /// Optional strict 8x12 or 16x24 numeric X / concentration grid paired with `label_grid` or `layout_sheet_id`. Mutually exclusive with `x_grid_sheet_id`.
+    pub(super) x_grid: Option<Vec<Vec<Option<f64>>>>,
+    /// Optional DataSheet (or UpToDate analyzable ResultSheet) whose data cells form a strict 8x12 or 16x24 numeric X grid. Mutually exclusive with `x_grid`.
+    #[schemars(length(min = 1))]
+    pub(super) x_grid_sheet_id: Option<String>,
+    /// Case-insensitive trimmed labels treated as Blank wells when building from `label_grid` / `layout_sheet_id`.
+    pub(super) blank_labels: Option<Vec<String>>,
+    /// Case-insensitive trimmed labels treated as PositiveControl wells when building from `label_grid` / `layout_sheet_id`.
+    pub(super) positive_control_labels: Option<Vec<String>>,
+    /// Template name when building from `roles`, `label_grid`, or `layout_sheet_id`.
     pub(super) template_name: Option<String>,
     /// X/concentration axis title (default `Concentration`).
     pub(super) x_title: Option<String>,
@@ -1206,7 +1436,17 @@ pub(super) fn parse_plate_well_role(val: &Value) -> Result<PlateWellRole, Engine
     Ok(PlateWellRole::Treatment { group_name, dilution_x, replicate: obj.replicate.unwrap_or(1) })
 }
 
+fn parse_cbplate_value_to_template(raw: &str) -> Result<PlateMapTemplate, EngineError> {
+    let file = parse_cbplate_json(raw)?;
+    PlateMapTemplate::from_wells(file.name, file.geometry, file.x_title, file.wells).map_err(EngineError::from)
+}
+
 pub(super) fn parse_plate_template_obj(val: &Value, default_name: &str) -> Result<PlateMapTemplate, EngineError> {
+    if val.as_object().is_some_and(|obj| obj.contains_key("format_version")) {
+        let raw = serde_json::to_string(val)
+            .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid plate `template` object: {err}")))?;
+        return parse_cbplate_value_to_template(&raw);
+    }
     if let Ok(tpl) = serde_json::from_value::<PlateMapTemplate>(val.clone()) {
         tpl.validate()?;
         return Ok(tpl);
@@ -1227,26 +1467,141 @@ pub(super) fn parse_plate_template_obj(val: &Value, default_name: &str) -> Resul
         .map_err(EngineError::from)
 }
 
-pub(super) fn resolve_plate_template(p: &ImportPlateMapParams, default_name: &str) -> Result<(PlateGeometry, PlateMapTemplate), EngineError> {
+fn require_fresh_analyzable_data_sheet<'a>(doc: &'a ProjectDocument, id: &SheetId) -> Result<&'a DataSheet, EngineError> {
+    if let Some(res) = doc.result_sheet(id)
+        && res.status != ResultStatus::UpToDate
+    {
+        return Err(EngineError::with_code(
+            ErrorCode::Conflict,
+            format!("source result sheet `{id}` has status {:?}; recalculate so it is UpToDate before mapping plate values", res.status),
+        )
+        .with_remediation("Run `project.recalculate` before invoking `table.importPlateMap` on a ResultSheet.")
+        .with_details(json!({ "sheet_id": id.as_str(), "status": format!("{:?}", res.status) })));
+    }
+    require_analyzable_data_sheet(doc, id)
+}
+
+fn parse_plate_match_mode(raw: Option<&str>) -> Result<PlateWellMatchMode, EngineError> {
+    let Some(s) = raw else {
+        return Ok(PlateWellMatchMode::ByWellId);
+    };
+    let norm: String = s.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    match norm.as_str() {
+        "bywellid" | "wellid" => Ok(PlateWellMatchMode::ByWellId),
+        "positional" | "position" | "sequential" => Ok(PlateWellMatchMode::Positional),
+        _ => Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("unknown `source.match_wells` mode `{s}` (expected `by_well_id` or `positional`)"),
+        )),
+    }
+}
+
+pub(super) fn resolve_plate_template_with_doc(
+    doc: &ProjectDocument,
+    p: &ImportPlateMapParams,
+    default_name: &str,
+    target_kind: TargetArchetypeKind,
+) -> Result<(PlateGeometry, PlateMapTemplate, Vec<String>), EngineError> {
+    let has_legacy = p.template.is_some() || p.roles.is_some();
+    let has_grid = p.label_grid.is_some() || p.layout_sheet_id.is_some();
+    if has_legacy && has_grid {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            "cannot combine `template`/`roles` with `label_grid`/`layout_sheet_id` in `table.importPlateMap`",
+        ));
+    }
+    if p.label_grid.is_some() && p.layout_sheet_id.is_some() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "cannot specify both `label_grid` and `layout_sheet_id`"));
+    }
+    if p.x_grid.is_some() && p.x_grid_sheet_id.is_some() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "cannot specify both `x_grid` and `x_grid_sheet_id`"));
+    }
+    let has_grid_aux = p.x_grid.is_some() || p.x_grid_sheet_id.is_some() || p.blank_labels.is_some() || p.positive_control_labels.is_some();
+    if has_legacy && has_grid_aux {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            "`x_grid`, `x_grid_sheet_id`, `blank_labels`, and `positive_control_labels` can only be used with `label_grid` or `layout_sheet_id`",
+        ));
+    }
+
     let geom_override = p.geometry.as_ref().map(PlateGeometryInput::resolve).transpose()?;
+    if has_grid {
+        let label_grid: Vec<Vec<String>> = if let Some(raw_grid) = &p.label_grid {
+            raw_grid.iter().map(|row| row.iter().map(|cell| cell.clone().unwrap_or_default()).collect()).collect()
+        } else if let Some(layout_id_raw) = p.layout_sheet_id.as_deref() {
+            let layout_id = parse_sheet_id(layout_id_raw)?;
+            let layout_sheet = require_fresh_analyzable_data_sheet(doc, &layout_id)?;
+            let (_, extracted) = extract_plate_grid_from_datasheet(layout_sheet)?;
+            extracted
+        } else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "missing `label_grid` or `layout_sheet_id`"));
+        };
+
+        let x_grid: Option<Vec<Vec<Option<f64>>>> = if let Some(raw_xg) = &p.x_grid {
+            Some(raw_xg.clone())
+        } else if let Some(x_id_raw) = p.x_grid_sheet_id.as_deref() {
+            let x_id = parse_sheet_id(x_id_raw)?;
+            let x_sheet = require_fresh_analyzable_data_sheet(doc, &x_id)?;
+            let (_, extracted) = extract_plate_x_grid_from_datasheet(x_sheet)?;
+            Some(extracted)
+        } else {
+            None
+        };
+
+        let opts = PlateGridBuildOptions {
+            name: p.template_name.as_deref().unwrap_or(default_name).to_owned(),
+            x_title: p.x_title.as_deref().unwrap_or("Concentration").to_owned(),
+            blank_labels: p.blank_labels.clone().unwrap_or_default(),
+            positive_control_labels: p.positive_control_labels.clone().unwrap_or_default(),
+            target_kind,
+        };
+        let (tpl, warnings) = build_plate_template_from_grids(&label_grid, x_grid.as_deref(), &opts)?;
+        if let Some(explicit_geom) = geom_override
+            && explicit_geom != tpl.geometry
+        {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("explicit `geometry` ({explicit_geom:?}) does not match label grid geometry ({:?})", tpl.geometry),
+            ));
+        }
+        return Ok((tpl.geometry, tpl, warnings));
+    }
+
     if let Some(tpl_val) = &p.template {
         let tpl = if let Some(json_str) = tpl_val.as_str() {
-            PlateMapTemplate::from_cbtemplate_json(json_str)?
+            parse_cbplate_value_to_template(json_str)?
         } else {
             parse_plate_template_obj(tpl_val, default_name)?
         };
         let geometry = geom_override.unwrap_or(tpl.geometry);
-        return Ok((geometry, tpl));
+        return Ok((geometry, tpl, Vec::new()));
     }
-    let geometry = geom_override
-        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "table.importPlateMap requires `geometry` when `template` is omitted"))?;
-    let roles_arr =
-        p.roles.as_ref().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "table.importPlateMap requires `template` or `roles`"))?;
-    let wells: Vec<PlateWellRole> = roles_arr.iter().map(parse_plate_well_role).collect::<Result<_, _>>()?;
-    let tpl_name = p.template_name.as_deref().unwrap_or(default_name);
-    let x_title = p.x_title.as_deref().unwrap_or("Concentration");
-    let tpl = PlateMapTemplate::from_wells(tpl_name, geometry, x_title, wells)?;
-    Ok((geometry, tpl))
+    if let Some(roles_arr) = &p.roles {
+        let geometry = geom_override
+            .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "table.importPlateMap requires `geometry` when `template` is omitted"))?;
+        let wells: Vec<PlateWellRole> = roles_arr.iter().map(parse_plate_well_role).collect::<Result<_, _>>()?;
+        let tpl_name = p.template_name.as_deref().unwrap_or(default_name);
+        let x_title = p.x_title.as_deref().unwrap_or("Concentration");
+        let tpl = PlateMapTemplate::from_wells(tpl_name, geometry, x_title, wells)?;
+        return Ok((geometry, tpl, Vec::new()));
+    }
+
+    Err(EngineError::with_code(ErrorCode::BadInput, "table.importPlateMap requires one of `template`, `roles`, `label_grid`, or `layout_sheet_id`"))
+}
+
+fn append_plate_source_floating_note(sheet: &mut DataSheet, provenance_line: &str) {
+    if let Some(note) = sheet.floating_notes.first_mut() {
+        if !note.body_markdown.is_empty() {
+            note.body_markdown.push('\n');
+        }
+        note.body_markdown.push_str(provenance_line);
+    } else {
+        sheet.floating_notes.push(FloatingNote::new(
+            format!("{}-plate-source", sheet.id.as_str()),
+            RectPt::new(12.0, 12.0, 260.0, 72.0),
+            provenance_line.to_owned(),
+        ));
+    }
 }
 
 pub(super) fn assign_and_add_imported_sheet(
@@ -1272,18 +1627,73 @@ pub(super) fn run_import_plate_map(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comm
     let p: ImportPlateMapParams = parse_params(&command_schema::<ImportPlateMapParams>(), raw)?;
     let title = p.title.as_deref().unwrap_or("Plate Data");
     validate_title(title)?;
-    let (geometry, template) = resolve_plate_template(&p, title)?;
-    let values = p.values.into_flat_checked(geometry)?;
     let target_kind = match p.target_kind.as_deref() {
         Some(raw_kind) => parse_target_archetype_kind(raw_kind)?,
         None => TargetArchetypeKind::Grouped,
     };
-    let subtract_blank_mean = p.subtract_blank_mean.unwrap_or(false);
-    let imported = map_plate_to_datasheet(title, geometry, &values, &template, target_kind, subtract_blank_mean)?;
-    let doc = &mut ctx.session.doc;
-    let (sheet_id, sheet_title, rows, cols) = assign_and_add_imported_sheet(doc, imported, p.sheet_id.as_deref())?;
+    if p.values.is_some() && p.source.is_some() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "table.importPlateMap cannot specify both `values` and `source`"));
+    }
+    if p.values.is_none() && p.source.is_none() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "table.importPlateMap requires either `values` or `source`"));
+    }
 
-    Ok(CommandOutcome::mutated(
+    let (geometry, template, grid_warnings) = resolve_plate_template_with_doc(&ctx.session.doc, &p, title, target_kind)?;
+    let (values, source_warnings, source_provenance): (Vec<Option<f64>>, Vec<String>, Option<String>) = if let Some(raw_vals) = p.values {
+        (raw_vals.into_flat_checked(geometry)?, Vec::new(), None)
+    } else if let Some(src) = p.source {
+        if src.value_column.is_some() && src.reducer.is_some() {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "table.importPlateMap `source` cannot specify both `value_column` and `reducer`",
+            ));
+        }
+        let (extraction, extractor_desc) = match (src.value_column, src.reducer) {
+            (Some(col), None) => (PlateSourceExtraction::WellPerRow { value_column: col.clone() }, format!("value_column `{col}`")),
+            (None, Some(red)) => {
+                let (reducer, desc) = red.into_transform();
+                (PlateSourceExtraction::WellPerColumn { reducer }, format!("reducer `{desc}`"))
+            }
+            _ => {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "table.importPlateMap `source` requires either `value_column` or `reducer`"));
+            }
+        };
+        let match_mode = parse_plate_match_mode(src.match_wells.as_deref())?;
+        let source_id = parse_sheet_id(&src.sheet_id)?;
+        let source_sheet = require_fresh_analyzable_data_sheet(&ctx.session.doc, &source_id)?;
+        let extracted = extract_plate_values_from_analyzable_sheet(source_sheet, geometry, &extraction, match_mode)?;
+        let provenance = format!("Static plate snapshot from `{}` ({extractor_desc})", source_id.as_str());
+        (extracted.values, extracted.warnings, Some(provenance))
+    } else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "table.importPlateMap requires either `values` or `source`"));
+    };
+
+    let subtract_blank_mean = p.subtract_blank_mean.unwrap_or(false);
+    let mut mapped = map_plate_to_datasheet_with_origins(title, geometry, &values, &template, target_kind, subtract_blank_mean)?;
+    if let Some(ref provenance) = source_provenance {
+        append_plate_source_floating_note(&mut mapped.sheet, provenance);
+    }
+
+    let mut all_warnings = grid_warnings;
+    all_warnings.extend(source_warnings);
+    all_warnings.extend(mapped.warnings);
+    let well_cell_map: Vec<Value> = mapped
+        .well_cell_map
+        .iter()
+        .map(|entry| {
+            json!({
+                "well": entry.well,
+                "row": entry.coord.row,
+                "col": entry.coord.col,
+                "subcol": entry.coord.subcol,
+            })
+        })
+        .collect();
+
+    let doc = &mut ctx.session.doc;
+    let (sheet_id, sheet_title, rows, cols) = assign_and_add_imported_sheet(doc, mapped.sheet, p.sheet_id.as_deref())?;
+
+    let mut outcome = CommandOutcome::mutated(
         "table.importPlateMap",
         format!("imported plate map into `{}`", sheet_id.as_str()),
         json!({
@@ -1294,8 +1704,12 @@ pub(super) fn run_import_plate_map(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comm
             "subtract_blank_mean": subtract_blank_mean,
             "rows": rows,
             "cols": cols,
+            "well_cell_map": well_cell_map,
+            "warnings": all_warnings,
         }),
-    ))
+    );
+    outcome.warnings = all_warnings;
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------

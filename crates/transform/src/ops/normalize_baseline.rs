@@ -77,7 +77,8 @@ pub fn execute_normalize(
             let h = resolve_anchor(source, hundred_anchor, &[c], ctx)?;
             validate_anchor_span(z, h, Some(c))?;
             let swapped = apply_linear_norm_column(&mut out.archetype, c, z, h, scale, &mut warnings);
-            all_swapped.extend(swapped.into_iter().map(|r| (r, c)));
+            all_swapped.extend(swapped.iter().copied().map(|r| (r, c)));
+            crate::randomize::remap_swapped_error_origins(&mut out.plate_well_origins, &swapped, c);
             scalars.push(ResultScalarEntry { key: String::from("ZeroAnchor"), data_set_index: Some(c), value: z, units: None });
             scalars.push(ResultScalarEntry { key: String::from("HundredAnchor"), data_set_index: Some(c), value: h, units: None });
         }
@@ -87,7 +88,8 @@ pub fn execute_normalize(
         validate_anchor_span(z, h, None)?;
         for &c in &selected {
             let swapped = apply_linear_norm_column(&mut out.archetype, c, z, h, scale, &mut warnings);
-            all_swapped.extend(swapped.into_iter().map(|r| (r, c)));
+            all_swapped.extend(swapped.iter().copied().map(|r| (r, c)));
+            crate::randomize::remap_swapped_error_origins(&mut out.plate_well_origins, &swapped, c);
         }
         scalars.push(ResultScalarEntry { key: String::from("ZeroAnchor"), data_set_index: None, value: z, units: None });
         scalars.push(ResultScalarEntry { key: String::from("HundredAnchor"), data_set_index: None, value: h, units: None });
@@ -95,6 +97,7 @@ pub fn execute_normalize(
     remap_swapped_error_notes_batch(&mut out.exclusion_notes, &all_swapped);
     snapshot_calculated_variables(&mut out.archetype);
 
+    out.prune_stale_plate_well_origins();
     if let TableArchetype::Contingency(t) = &out.archetype {
         t.validate_counts()?;
     }
@@ -169,11 +172,13 @@ pub fn execute_remove_baseline_kind(
     for (idx_pos, &col) in selected.iter().enumerate() {
         let base_rows = &per_col_baselines[idx_pos];
         let swapped = apply_baseline_to_column(&mut out.archetype, col, base_rows, operation, &mut warnings);
-        all_swapped.extend(swapped.into_iter().map(|r| (r, col)));
+        all_swapped.extend(swapped.iter().copied().map(|r| (r, col)));
+        crate::randomize::remap_swapped_error_origins(&mut out.plate_well_origins, &swapped, col);
     }
     remap_swapped_error_notes_batch(&mut out.exclusion_notes, &all_swapped);
     snapshot_calculated_variables(&mut out.archetype);
 
+    out.prune_stale_plate_well_origins();
     if let TableArchetype::Contingency(t) = &out.archetype {
         t.validate_counts()?;
     }

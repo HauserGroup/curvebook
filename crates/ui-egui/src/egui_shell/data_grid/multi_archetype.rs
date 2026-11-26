@@ -11,8 +11,7 @@ use egui::{Align, Color32, CornerRadius, FontId, Id, Order, Rect, Response, Sens
 use serde_json::json;
 
 use crate::UiApp;
-use crate::grid_view::GridViewState;
-use crate::grid_view::{grid_tr, linked_region_for_cell};
+use crate::grid_view::linked_region_for_cell;
 use crate::inspect::ZLayer;
 
 use super::super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
@@ -848,20 +847,28 @@ fn handle_multi_data_cell_interactions(
     let app = mctx.app;
     let ds = mctx.ds;
     if !dbuf.blocked && resp.hovered() {
-        if flags.excluded {
-            let tip = GridViewState::cell_exclusion_tooltip(ds, coord)
-                .unwrap_or_else(|| grid_tr(mctx.locale, "w5.grid_core.excluded_cell", "Excluded cell").to_owned());
-            let full_tip = if flags.elided && !dbuf.text_buf.is_empty() { format!("{}\n{tip}", dbuf.text_buf) } else { tip };
+        let elided_text = (flags.elided && !dbuf.text_buf.is_empty()).then_some(dbuf.text_buf.as_str());
+        if let Some(full_tip) =
+            super::shared::format_data_cell_hover_tooltip(ds, coord, flags.excluded, flags.contingency_invalid, elided_text, mctx.locale)
+        {
             let _ = resp.clone().on_hover_text(full_tip);
-        } else if flags.contingency_invalid {
-            let _ = resp.clone().on_hover_text("Contingency counts should be non-negative integers");
-        } else if flags.elided && !dbuf.text_buf.is_empty() {
-            let _ = resp.clone().on_hover_text(dbuf.text_buf.as_str());
         }
     }
 
     if dbuf.record_meta {
         let inspect_text = if flags.excluded && !dbuf.text_buf.is_empty() { format!("{}*", dbuf.text_buf) } else { dbuf.text_buf.clone() };
+        let source_well = ds.plate_well_origin(CellCoord::from(coord));
+        let mut cell_val = json!({
+            "row": coord.row,
+            "col": coord.col,
+            "subcol": coord.subcol,
+            "text": inspect_text,
+            "excluded": flags.excluded,
+            "selected": flags.is_selected,
+        });
+        if let (Some(well), Some(obj)) = (source_well, cell_val.as_object_mut()) {
+            obj.insert(String::from("source_well"), json!(well));
+        }
         fstate.meta.record_response(
             body_ui,
             resp,
@@ -870,14 +877,7 @@ fn handle_multi_data_cell_interactions(
                 role: "gridcell",
                 label: dbuf.acc_buf,
                 command_id: Some("table.setCell"),
-                value: Some(json!({
-                    "row": coord.row,
-                    "col": coord.col,
-                    "subcol": coord.subcol,
-                    "text": inspect_text,
-                    "excluded": flags.excluded,
-                    "selected": flags.is_selected,
-                })),
+                value: Some(cell_val),
                 enabled: flags.editable,
                 disabled_reason: if dbuf.blocked {
                     Some("modal dialog is active")

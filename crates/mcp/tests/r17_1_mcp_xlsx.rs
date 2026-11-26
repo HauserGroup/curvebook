@@ -131,3 +131,49 @@ fn mcp_open_file_and_table_import_xlsx_enumerate_and_select_sheets() -> Result<(
     assert_eq!(state.session().document().data_sheets.len(), 2);
     Ok(())
 }
+
+#[test]
+fn mcp_table_import_xlsx_forwards_r17_7_options_and_preamble_info() -> Result<(), String> {
+    let dir = TempDir::new("cb_r17_7_mcp_xlsx")?;
+    let xlsx_path = dir.0.join("kinetic.xlsx");
+
+    let workbook = r#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Kinetic" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"#;
+    let wb_rels = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#;
+    let s1 = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+  <row r="1"><c r="A1" t="inlineStr"><is><t>Assay: Dual Read</t></is></c></row>
+  <row r="2"><c r="A2" t="inlineStr"><is><t>Channel</t></is></c><c r="B2" t="inlineStr"><is><t>Time</t></is></c><c r="C2" t="inlineStr"><is><t>A01</t></is></c></row>
+  <row r="3"><c r="A3" t="inlineStr"><is><t>ChA</t></is></c><c r="B3"><v>0</v></c><c r="C3"><v>5</v></c></row>
+  <row r="4"><c r="A4" t="inlineStr"><is><t>ChA</t></is></c><c r="B4"><v>10</v></c><c r="C4"><v>15</v></c></row>
+  <row r="5"><c r="A5" t="inlineStr"><is><t>ChB</t></is></c><c r="B5"><v>0</v></c><c r="C5"><v>2</v></c></row>
+  <row r="6"><c r="A6" t="inlineStr"><is><t>ChB</t></is></c><c r="B6"><v>10</v></c><c r="C6"><v>4</v></c></row>
+</sheetData></worksheet>"#;
+
+    let bytes = build_xlsx_zip(&[("xl/workbook.xml", workbook), ("xl/_rels/workbook.xml.rels", wb_rels), ("xl/worksheets/sheet1.xml", s1)]);
+    fs::write(&xlsx_path, &bytes).map_err(|e| format!("write xlsx: {e}"))?;
+
+    let mut state = McpServerState::new();
+    let _ = call_json(&mut state, "enable_toolset", json!({ "group": "table" }))?;
+    let imp_res = call_json(
+        &mut state,
+        "table_import_xlsx",
+        json!({
+            "path": xlsx_path.display().to_string(),
+            "skip_rows": 1,
+            "split_by_column": 0,
+            "extract_preamble_info": true,
+        }),
+    )?;
+    assert_eq!(imp_res["command_id"], "table.importXlsx");
+    assert_eq!(imp_res["mutated"], true);
+    assert_eq!(state.session().document().data_sheets.len(), 2);
+    assert_eq!(state.session().document().info_sheets.len(), 1);
+    assert!(imp_res["payload"]["info_sheet_id"].as_str().is_some());
+    Ok(())
+}

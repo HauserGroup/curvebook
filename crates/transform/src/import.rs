@@ -476,6 +476,31 @@ fn apply_stage2_filter(
         *header_row = grid.remove(0);
     }
 
+    if let Some(ref row_match) = filter.row_match {
+        let max_width = grid.iter().map(Vec::len).max().unwrap_or(0);
+        if !grid.is_empty() && row_match.column >= max_width {
+            return Err(TransformError::InvalidSpec {
+                message: format!("row_match.column {} out of bounds for grid with {max_width} column(s)", row_match.column),
+            });
+        }
+        let needle = row_match.equals.trim();
+        let mut kept = Vec::with_capacity(grid.len());
+        for mut row in grid {
+            let matches = row.get(row_match.column).is_some_and(|cell| cell_display_trimmed(cell) == needle);
+            if !matches {
+                continue;
+            }
+            if row_match.drop_column && row_match.column < row.len() {
+                row.remove(row_match.column);
+            }
+            kept.push(row);
+        }
+        grid = kept;
+        if row_match.drop_column && row_match.column < header_row.len() {
+            header_row.remove(row_match.column);
+        }
+    }
+
     if let Some(k) = filter.decimate_every_k {
         if k == 0 {
             return Err(TransformError::InvalidSpec { message: String::from("decimate_every_k must be >= 1") });
@@ -504,6 +529,17 @@ fn apply_stage2_filter(
     }
 
     Ok(grid)
+}
+
+fn cell_display_trimmed(cell: &Cell) -> String {
+    match &cell.value {
+        CellValue::Text(s) => s.trim().to_owned(),
+        CellValue::Number(v) if v.is_finite() => {
+            let norm = if *v == 0.0 { 0.0 } else { *v };
+            format!("{norm}")
+        }
+        CellValue::Empty | CellValue::Number(_) => String::new(),
+    }
 }
 
 fn unstack_grid_by_group(grid: &[Vec<Cell>], group_col: usize) -> Result<(Vec<Vec<Cell>>, Vec<Cell>), TransformError> {
@@ -728,8 +764,11 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
     if mode == PlacementMode::InsertRows && start_row < existing_rows {
         target.shift_rows_down(start_row, grid.len(), existing_rows);
         target.exclusion_notes.sort_by_key(|n| n.coord);
+        target.plate_well_origins.sort_by_key(|o| o.coord);
     }
 
+    let track_origins = !target.plate_well_origins.is_empty();
+    let mut overwritten_coords = BTreeSet::new();
     let mut end_col_sub = (start_col, anchor.subcol);
     for (dr, row_cells) in grid.iter().enumerate() {
         let r = start_row + dr;
@@ -747,11 +786,17 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
             let coord = CellCoord::new(r, col, subcol);
             if let Some(slot) = target.archetype.data_cell_mut(coord) {
                 *slot = cell.clone();
+                if track_origins {
+                    overwritten_coords.insert(coord);
+                }
                 if (col, subcol) > end_col_sub {
                     end_col_sub = (col, subcol);
                 }
             }
         }
+    }
+    if !overwritten_coords.is_empty() {
+        target.plate_well_origins.retain(|o| !overwritten_coords.contains(&o.coord));
     }
 
     if max_row_width > 0
@@ -764,6 +809,7 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
         }
     }
     target.prune_stale_exclusion_notes();
+    target.prune_stale_plate_well_origins();
 
     Ok(SheetCellRange::new(
         CellCoord::new(start_row, start_col, anchor.subcol),

@@ -1016,6 +1016,7 @@ fn refresh_single_region(
 
     let report = pipe_res.map_err(|err| EngineError::new(format!("linked region `{}` refresh on sheet `{}` failed: {err}", region.id, target.id)))?;
     target.prune_stale_exclusion_notes();
+    target.prune_stale_plate_well_origins();
     if let ResolvedRefreshSource::InternalData { sheet, propagate_titles: true } = resolved {
         propagate_internal_source_titles(target, &refresh_spec, report.target_range.start.col, sheet);
     } else if let ResolvedRefreshSource::InternalResult(src_rs) = resolved

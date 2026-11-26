@@ -101,7 +101,7 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         AnalysisKind::RocCurve(r) => roc::run_roc_analysis(sheet, spec, r),
         AnalysisKind::GeneralizedLinearModel(g) => regression::run_glm_analysis(sheet, spec, g),
         AnalysisKind::Multivariate(m) => multivariate::run_multivariate_analysis(sheet, spec, m),
-        AnalysisKind::Transform(_) | AnalysisKind::FitSplineLowess(_) => {
+        AnalysisKind::Transform(_) | AnalysisKind::FitSplineLowess(_) | AnalysisKind::AreaUnderCurve(_) => {
             Err(StatsError::IncompatibleTable { analysis: "transform (handled by curvebook-transform)", actual: sheet.archetype.kind() })
         }
         AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {

@@ -1,4 +1,4 @@
-#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
 use std::fs::{self, File};
 use std::io::{Cursor, Write};
@@ -390,6 +390,7 @@ pub fn raw_datasheet(id: &str, archetype: TableArchetype) -> DataSheet {
         floating_notes: Vec::new(),
         color_tag: None,
         exclusion_notes: Vec::new(),
+        plate_well_origins: Vec::new(),
     }
 }
 

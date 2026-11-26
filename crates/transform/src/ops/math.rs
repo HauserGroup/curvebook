@@ -367,8 +367,12 @@ pub fn execute_math_transform(
             &mut warnings,
         )?;
         remap_swapped_error_notes_batch(&mut out.exclusion_notes, &swapped);
+        for &(row, col) in &swapped {
+            crate::randomize::remap_swapped_error_origins(&mut out.plate_well_origins, &[row], col);
+        }
     }
 
+    out.prune_stale_plate_well_origins();
     out.validate()?;
     let summary_tab = build_summary_tab(
         "Math transform summary",

@@ -376,6 +376,9 @@ pub(super) fn render_misc_stats_design(
         AnalysisKind::FitSplineLowess(sp) => {
             render_spline_lowess_design(ui, doc, spec, sp, tokens, meta, intents);
         }
+        AnalysisKind::AreaUnderCurve(auc) => {
+            render_area_under_curve_design(ui, app, state, spec, auc, tokens, meta, intents);
+        }
         AnalysisKind::PassingBablok(pb) => {
             render_section_title(ui, tokens, "Method Comparison Columns (X Reference vs Y Candidate)");
             let titles = column_titles_for_draft(doc, Some(&spec.source_sheet_id));
@@ -600,8 +603,10 @@ fn render_outlier_design(
 #[derive(Clone, Copy)]
 enum NumericBounds {
     AnyFinite,
+    NonNegative,
     Positive,
     OpenRange(f64, f64),
+    ClosedRange(f64, f64),
 }
 
 struct NumericInputSpec<'a> {
@@ -628,6 +633,13 @@ fn validate_numeric_draft(raw: &str, locale_preset: &LocalePreset, bounds: Numer
     };
     match bounds {
         NumericBounds::AnyFinite => Ok(parsed),
+        NumericBounds::NonNegative => {
+            if parsed >= 0.0 {
+                Ok(parsed)
+            } else {
+                Err(format!("{label}: value must be >= 0."))
+            }
+        }
         NumericBounds::Positive => {
             if parsed > 0.0 {
                 Ok(parsed)
@@ -640,6 +652,13 @@ fn validate_numeric_draft(raw: &str, locale_preset: &LocalePreset, bounds: Numer
                 Ok(parsed)
             } else {
                 Err(format!("{label}: value must be strictly between {lo} and {hi}."))
+            }
+        }
+        NumericBounds::ClosedRange(lo, hi) => {
+            if parsed >= lo && parsed <= hi {
+                Ok(parsed)
+            } else {
+                Err(format!("{label}: value must be between {lo} and {hi}."))
             }
         }
     }
@@ -661,7 +680,7 @@ fn render_linear_numeric_input(
     if !input.label.is_empty() {
         ui.label(input.label);
     }
-    let resp = ui.add_sized(Vec2::new(72.0, 22.0), TextEdit::singleline(&mut draft).id(key));
+    let resp = ui.add_sized(Vec2::new(72.0, 24.0), TextEdit::singleline(&mut draft).id(key));
     record_widget(
         ui,
         meta,
@@ -1318,6 +1337,197 @@ fn render_spline_lowess_design(
         }
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
+    ui.add_space(4.0);
+    render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
+}
+
+fn render_optional_numeric_input(
+    ui: &mut Ui,
+    meta: &mut FrameInspectMeta,
+    salt: (&str, &str),
+    widget_id: &str,
+    label: &str,
+    hint: &str,
+    current: Option<f64>,
+) -> Option<Option<f64>> {
+    let key = Id::unique(salt);
+    let mut draft: String = ui.ctx().data(|d| d.get_temp(key)).unwrap_or_else(|| current.map_or_else(String::new, |v| format!("{v}")));
+    let mut updated = None;
+    if !label.is_empty() {
+        ui.label(label);
+    }
+    let resp = ui.add(TextEdit::singleline(&mut draft).id(key).hint_text(hint).desired_width(82.0));
+    record_widget(ui, meta, &resp, widget_id, "textbox", label, None, Some(serde_json::json!(draft)), true, None, ZLayer::ModalDialog, false, None);
+    if resp.changed() {
+        ui.ctx().data_mut(|d| d.insert_temp(key, draft.clone()));
+        let trimmed = draft.trim();
+        if trimmed.is_empty() {
+            updated = Some(None);
+        } else if let Ok(parsed) = trimmed.replace(',', ".").parse::<f64>()
+            && parsed.is_finite()
+        {
+            updated = Some(Some(parsed));
+        }
+    } else if !resp.has_focus() {
+        let canonical = current.map_or_else(String::new, |v| format!("{v}"));
+        if draft != canonical {
+            ui.ctx().data_mut(|d| d.insert_temp(key, canonical));
+        }
+    }
+    updated
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_area_under_curve_design(
+    ui: &mut Ui,
+    app: &UiApp,
+    state: &mut StatsModalsEguiState,
+    spec: &curvebook_doc::AnalysisSpec,
+    auc: &curvebook_doc::AreaUnderCurveSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    use curvebook_doc::AucBaseline;
+
+    let doc = app.document();
+    let locale = tokens.locale;
+    let sid = spec.source_sheet_id.as_str();
+
+    render_section_title(ui, tokens, tr(locale, "auc.section.baseline"));
+    let is_fixed = matches!(auc.baseline, AucBaseline::Fixed { .. });
+    if render_modal_radio(ui, tokens, meta, "edit.auc.baseline.fixed", tr(locale, "auc.baseline.fixed"), is_fixed, &ControlEnablement::enabled()) {
+        let mut next = spec.clone();
+        if let AnalysisKind::AreaUnderCurve(a) = &mut next.kind
+            && !matches!(a.baseline, AucBaseline::Fixed { .. })
+        {
+            a.baseline = AucBaseline::Fixed { value: 0.0 };
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    if render_modal_radio(
+        ui,
+        tokens,
+        meta,
+        "edit.auc.baseline.first_point",
+        tr(locale, "auc.baseline.first_point"),
+        !is_fixed,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::AreaUnderCurve(a) = &mut next.kind {
+            a.baseline = AucBaseline::FirstPoint;
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    if let AucBaseline::Fixed { value } = auc.baseline {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(new_val) = render_linear_numeric_input(
+                ui,
+                state,
+                &app.locale_preset,
+                meta,
+                NumericInputSpec {
+                    salt: ("edit_auc_baseline_val", sid),
+                    widget_id: "edit.auc.baseline.value",
+                    label: tr(locale, "auc.baseline.value"),
+                    current: value,
+                    bounds: NumericBounds::AnyFinite,
+                },
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::AreaUnderCurve(a) = &mut next.kind {
+                    a.baseline = AucBaseline::Fixed { value: new_val };
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+        });
+    }
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, tr(locale, "auc.section.bounds"));
+    ui.horizontal_wrapped(|ui| {
+        if let Some(new_min) =
+            render_optional_numeric_input(ui, meta, ("edit_auc_x_min", sid), "edit.auc.x_min", tr(locale, "auc.x_min"), "auto", auc.x_min)
+        {
+            let mut next = spec.clone();
+            if let AnalysisKind::AreaUnderCurve(a) = &mut next.kind {
+                a.x_min = new_min;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+        if let Some(new_max) =
+            render_optional_numeric_input(ui, meta, ("edit_auc_x_max", sid), "edit.auc.x_max", tr(locale, "auc.x_max"), "auto", auc.x_max)
+        {
+            let mut next = spec.clone();
+            if let AnalysisKind::AreaUnderCurve(a) = &mut next.kind {
+                a.x_max = new_max;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    });
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, tr(locale, "auc.section.se_peaks"));
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.auc.independent_time_points",
+        tr(locale, "auc.independent_time_points"),
+        auc.independent_time_points,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::AreaUnderCurve(a) = &mut next.kind {
+            a.independent_time_points = !auc.independent_time_points;
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    ui.label(egui::RichText::new(tr(locale, "auc.independent_time_points.hint")).small().color(tokens.text_muted));
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        if let Some(new_h) = render_linear_numeric_input(
+            ui,
+            state,
+            &app.locale_preset,
+            meta,
+            NumericInputSpec {
+                salt: ("edit_auc_min_peak_height", sid),
+                widget_id: "edit.auc.min_peak_height",
+                label: tr(locale, "auc.min_peak_height"),
+                current: auc.min_peak_height,
+                bounds: NumericBounds::NonNegative,
+            },
+        ) {
+            let mut next = spec.clone();
+            if let AnalysisKind::AreaUnderCurve(a) = &mut next.kind {
+                a.min_peak_height = new_h;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+        if let Some(new_f) = render_linear_numeric_input(
+            ui,
+            state,
+            &app.locale_preset,
+            meta,
+            NumericInputSpec {
+                salt: ("edit_auc_min_area_frac", sid),
+                widget_id: "edit.auc.min_area_fraction",
+                label: tr(locale, "auc.min_area_fraction"),
+                current: auc.min_area_fraction,
+                bounds: NumericBounds::ClosedRange(0.0, 1.0),
+            },
+        ) {
+            let mut next = spec.clone();
+            if let AnalysisKind::AreaUnderCurve(a) = &mut next.kind {
+                a.min_area_fraction = new_f;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    });
+
     ui.add_space(4.0);
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }

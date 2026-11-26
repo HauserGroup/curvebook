@@ -7,10 +7,10 @@
 use std::fmt::Write as _;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ChecklistItem, ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage,
-    ContingencyMethod, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, DataSheet, DescriptiveSpec,
-    ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, IdentifiabilityMode, KappaWeighting, LeveneCenter,
-    LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion,
+    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, BaselineOperation, BlandAltmanSpec, ChecklistItem, ChecklistStatus, CiBound,
+    ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, DataSheet,
+    DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, IdentifiabilityMode, KappaWeighting,
+    LeveneCenter, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion,
     ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
     NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec,
     PairedObservationAccounting, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection,
@@ -322,6 +322,7 @@ fn describe_analysis_kind(doc: &ProjectDocument, spec: &AnalysisSpec, res: &Resu
         AnalysisKind::LinearRegression(s) => describe_linear_regression(s),
         AnalysisKind::NonlinearRegression(s) => describe_nonlinear_regression(s, res),
         AnalysisKind::FitSplineLowess(s) => describe_spline_lowess(s),
+        AnalysisKind::AreaUnderCurve(s) => describe_area_under_curve(s),
         AnalysisKind::DescriptiveStats(s) => describe_descriptive(s),
         AnalysisKind::OutlierDetection(s) => describe_outlier_detection(s),
         AnalysisKind::Transform(s) => describe_transform(s),
@@ -1304,6 +1305,55 @@ fn describe_spline_lowess(s: &SplineLowessSpec) -> Vec<ReportBlock> {
         ));
     }
     vec![ReportBlock::Paragraph(vec![plain(format!("{method_text} {}", extras.join(" ")))])]
+}
+
+fn describe_area_under_curve(s: &AreaUnderCurveSpec) -> Vec<ReportBlock> {
+    let baseline_text = match s.baseline {
+        AucBaseline::Fixed { value } => format!("a fixed horizontal reference baseline at Y = {}", format_exact_float(value)),
+        AucBaseline::FirstPoint => String::from(
+            "a per-series first-point baseline evaluated at the start of the active integration window (linearly interpolated when clipped)",
+        ),
+    };
+    let window_text = match (s.x_min, s.x_max) {
+        (Some(lo), Some(hi)) => format!(
+            "partial integration window [{}, {}] with exact linear interpolation at clipped boundaries",
+            format_exact_float(lo),
+            format_exact_float(hi)
+        ),
+        (Some(lo), None) => format!(
+            "one-sided integration window starting at X = {} (linearly interpolated when between sampled knots) through each series's final finite X",
+            format_exact_float(lo)
+        ),
+        (None, Some(hi)) => format!(
+            "one-sided integration window from each series's first finite X through X = {} (linearly interpolated when between sampled knots)",
+            format_exact_float(hi)
+        ),
+        (None, None) => String::from("the full observed finite X span of each series"),
+    };
+    let se_text = if s.independent_time_points {
+        String::from(
+            "Because independent time-point cohorts/subjects were declared, analytical Bailer (1988) standard errors of signed net AUC (NetAreaSe) were computed from exact linear-functional knot weights whenever every contributing knot carried a finite point SE (n >= 2).",
+        )
+    } else {
+        String::from(
+            "Bailer (1988) net-area standard errors were omitted (independent_time_points = false), because longitudinal/repeated-measures time points violate the independence assumption and omitting within-subject/well covariance can bias SE in either direction.",
+        )
+    };
+    let mut peak_filters = Vec::new();
+    if s.min_peak_height > 0.0 {
+        peak_filters.push(format!("minimum height above baseline >= {}", format_exact_float(s.min_peak_height)));
+    }
+    if s.min_area_fraction > 0.0 {
+        peak_filters.push(format!("minimum positive area fraction >= {}", format_exact_float(s.min_area_fraction)));
+    }
+    let peak_text = if peak_filters.is_empty() {
+        String::from("All baseline-crossing peaks within the effective integration window were retained.")
+    } else {
+        format!("Peaks within the effective integration window were filtered by {}.", peak_filters.join(" and "))
+    };
+    vec![ReportBlock::Paragraph(vec![plain(format!(
+        "Area under the curve (AUC) was computed by the linear trapezoidal rule (Yeh & Kwan 1978) over {window_text}, using {baseline_text} and linear bridging across interior missing or excluded observations. {se_text} {peak_text}"
+    ))])]
 }
 
 fn describe_linear_regression(s: &LinearRegressionSpec) -> Vec<ReportBlock> {

@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use curvebook_doc::{ErrorCode, ProjectDocument};
+use curvebook_doc::{ColumnEqualsFilter, ErrorCode, ProjectDocument};
 use curvebook_engine::EngineError;
 use curvebook_engine::services::{
     self, DEFAULT_EXPORT_DPI, DocumentExportFormat, ExportArtifactRequest, ExportOptionsSpec, ExportTarget, RasterSizingPolicy,
@@ -11,6 +11,7 @@ use curvebook_engine::services::{
 };
 pub use curvebook_engine::services::{LoadedProject, is_unpacked_project_path, pdf_version_str};
 pub(crate) use curvebook_engine::services::{MAX_RASTER_DPI, MIN_RASTER_DPI};
+use curvebook_format::XlsxImportOptions;
 use curvebook_format::registry::{ExportOptions, ExportSource, FormatRegistry};
 use curvebook_pdf::PdfVersion;
 use curvebook_platform::fs::write_atomic;
@@ -84,10 +85,46 @@ struct ConvertArgs {
     format: Option<ExportFormat>,
     sheet: Option<String>,
     xlsx_sheets: Option<Vec<String>>,
+    xlsx_range: Option<String>,
+    xlsx_skip_rows: Option<usize>,
+    xlsx_fill_merged: bool,
+    xlsx_split_by_column: Option<usize>,
+    xlsx_row_match: Option<ColumnEqualsFilter>,
+    xlsx_extract_preamble: bool,
+    xlsx_no_header: bool,
     dpi: Option<u16>,
     pdf_version: PdfVersion,
     ttf_font: Option<String>,
     json: bool,
+}
+
+impl ConvertArgs {
+    fn build_xlsx_options(&self) -> Option<XlsxImportOptions> {
+        let any_xlsx = self.xlsx_sheets.is_some()
+            || self.xlsx_range.is_some()
+            || self.xlsx_skip_rows.is_some()
+            || self.xlsx_fill_merged
+            || self.xlsx_split_by_column.is_some()
+            || self.xlsx_row_match.is_some()
+            || self.xlsx_extract_preamble
+            || self.xlsx_no_header;
+        if !any_xlsx {
+            return None;
+        }
+        let has_header = !self.xlsx_no_header;
+        Some(XlsxImportOptions {
+            sheet_names: self.xlsx_sheets.clone(),
+            has_header,
+            header_rows: usize::from(has_header),
+            cell_range: self.xlsx_range.clone(),
+            skip_rows: self.xlsx_skip_rows.unwrap_or(0),
+            fill_merged_cells: self.xlsx_fill_merged,
+            split_by_column: self.xlsx_split_by_column,
+            row_match: self.xlsx_row_match.clone(),
+            extract_preamble_info: self.xlsx_extract_preamble,
+            ..XlsxImportOptions::default()
+        })
+    }
 }
 
 /// Execute `curvebook-cli convert <in> <out> [--sheet <id>] [--format <fmt>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]`.
@@ -118,7 +155,8 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
         let out_path = Path::new(&parsed.output_path);
         let font_bytes = parsed.ttf_font.as_deref().map(Path::new).map(load_validated_ttf_font).transpose()?;
 
-        let (loaded, _input_bytes) = load_project_from_path_with_xlsx_sheets(in_path, true, parsed.xlsx_sheets.as_deref())?;
+        let xlsx_options = parsed.build_xlsx_options();
+        let (loaded, _input_bytes) = load_project_from_path_with_xlsx_options(in_path, true, xlsx_options.as_ref())?;
         let format = match parsed.format {
             Some(fmt) => fmt,
             None => detect_export_format_from_path(out_path)?,
@@ -269,12 +307,23 @@ pub fn load_project_from_path(path: &Path, allow_delimited: bool) -> Result<(Loa
 
 /// Load a [`ProjectDocument`] from a file path or unpacked `.curvebook.d` directory, optionally
 /// restricting `.xlsx` imports to specific worksheet tab names.
+#[allow(dead_code)]
 pub fn load_project_from_path_with_xlsx_sheets(
     path: &Path,
     allow_delimited: bool,
     xlsx_sheets: Option<&[String]>,
 ) -> Result<(LoadedProject, usize), CliError> {
     services::load_project_from_path_with_xlsx_sheets(path, allow_delimited, xlsx_sheets).map_err(|err| map_project_load_error(path, err))
+}
+
+/// Load a [`ProjectDocument`] from a file path or unpacked `.curvebook.d` directory, optionally
+/// forwarding full [`XlsxImportOptions`] for `.xlsx` workbooks.
+pub fn load_project_from_path_with_xlsx_options(
+    path: &Path,
+    allow_delimited: bool,
+    xlsx_options: Option<&XlsxImportOptions>,
+) -> Result<(LoadedProject, usize), CliError> {
+    services::load_project_from_path_with_xlsx_options(path, allow_delimited, xlsx_options).map_err(|err| map_project_load_error(path, err))
 }
 
 /// Write an exported sheet or whole document to `req.out_path` using atomic writes and [`FormatRegistry`].
@@ -393,6 +442,13 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
     let mut format = None;
     let mut sheet = None;
     let mut xlsx_sheets = None;
+    let mut xlsx_range = None;
+    let mut xlsx_skip_rows = None;
+    let mut xlsx_fill_merged = false;
+    let mut xlsx_split_by_column = None;
+    let mut xlsx_row_match = None;
+    let mut xlsx_extract_preamble = false;
+    let mut xlsx_no_header = false;
     let mut dpi = None;
     let mut pdf_version = PdfVersion::Pdf17;
     let mut ttf_font = None;
@@ -405,6 +461,15 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
         };
         if arg == "--json" {
             json = true;
+            idx += 1;
+        } else if arg == "--xlsx-fill-merged" {
+            xlsx_fill_merged = true;
+            idx += 1;
+        } else if arg == "--xlsx-extract-preamble" {
+            xlsx_extract_preamble = true;
+            idx += 1;
+        } else if arg == "--xlsx-no-header" {
+            xlsx_no_header = true;
             idx += 1;
         } else if let Some(val) = consume_flag_opt(args, &mut idx, "--out", "--out requires an output file path")? {
             explicit_out = Some(val);
@@ -420,6 +485,35 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
                 return Err(CliError::Usage(String::from("--xlsx-sheets requires at least one non-empty sheet name")));
             }
             xlsx_sheets = Some(parsed_names);
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--xlsx-range", "--xlsx-range requires an A1 range such as B4:M11")? {
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                return Err(CliError::Usage(String::from("--xlsx-range requires a non-empty A1 range")));
+            }
+            xlsx_range = Some(trimmed.to_owned());
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--xlsx-skip-rows", "--xlsx-skip-rows requires a non-negative integer")? {
+            let n = val
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| CliError::Usage(format!("invalid --xlsx-skip-rows `{val}` (expected a non-negative integer)")))?;
+            xlsx_skip_rows = Some(n);
+        } else if let Some(val) =
+            consume_flag_opt(args, &mut idx, "--xlsx-split-by-column", "--xlsx-split-by-column requires a zero-based column index")?
+        {
+            let col = val
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| CliError::Usage(format!("invalid --xlsx-split-by-column `{val}` (expected a non-negative integer)")))?;
+            xlsx_split_by_column = Some(col);
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--xlsx-row-match", "--xlsx-row-match requires `<col>=<value>`")? {
+            let Some((col_raw, eq_raw)) = val.split_once('=') else {
+                return Err(CliError::Usage(format!("invalid --xlsx-row-match `{val}` (expected `<col>=<value>`)")));
+            };
+            let column = col_raw
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| CliError::Usage(format!("invalid --xlsx-row-match column `{col_raw}` (expected a non-negative integer)")))?;
+            xlsx_row_match = Some(ColumnEqualsFilter::new(column, eq_raw.trim()));
         } else if let Some(val) = consume_flag_opt(args, &mut idx, "--dpi", "--dpi requires an integer in 18..=2400")? {
             dpi = Some(parse_dpi_value(&val)?);
         } else if let Some(val) = consume_flag_opt(args, &mut idx, "--pdf-version", "--pdf-version requires `1.4` or `1.7`")? {
@@ -438,7 +532,24 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
     }
 
     let (input_path, output_path) = resolve_io_positionals(&mut positionals, explicit_out, cmd_name)?;
-    Ok(ConvertArgs { input_path, output_path, format, sheet, xlsx_sheets, dpi, pdf_version, ttf_font, json })
+    Ok(ConvertArgs {
+        input_path,
+        output_path,
+        format,
+        sheet,
+        xlsx_sheets,
+        xlsx_range,
+        xlsx_skip_rows,
+        xlsx_fill_merged,
+        xlsx_split_by_column,
+        xlsx_row_match,
+        xlsx_extract_preamble,
+        xlsx_no_header,
+        dpi,
+        pdf_version,
+        ttf_font,
+        json,
+    })
 }
 
 fn resolve_io_positionals(positionals: &mut Vec<String>, explicit_out: Option<String>, cmd_name: &str) -> Result<(String, String), CliError> {

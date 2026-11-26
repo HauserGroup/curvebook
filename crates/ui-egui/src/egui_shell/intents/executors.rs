@@ -433,6 +433,10 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::PasteClipboardIntoImportReshape
         | UiIntent::CommitImportWizard { .. }
         | UiIntent::CloseImportWizard
+        | UiIntent::SavePlateMapFile { .. }
+        | UiIntent::LoadPlateMapFile { .. }
+        | UiIntent::LoadPlateLayoutFromSheet { .. }
+        | UiIntent::ApplyPlateGridsText { .. }
         | UiIntent::OpenTransformModal { .. }
         | UiIntent::CloseTransformModal
         | UiIntent::GridCopySelection
@@ -724,6 +728,19 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
                 }
                 return Ok(UiIntentOutcome::Engine { command_id: String::from("table.importXlsx"), outcome });
             }
+            if matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile)
+                && !app.grid.import_wizard.is_live_link
+                && app.grid.import_wizard.split_by_column.is_some()
+            {
+                let Some(params) = app.grid.import_wizard.build_csv_import_params("Imported Data") else {
+                    return Err(EngineError::with_code(ErrorCode::BadInput, "enter delimited text or a CSV file path before splitting by column"));
+                };
+                let outcome = app.execute_session_ui_cmd("table.importCsv", params)?;
+                if close_after {
+                    app.grid.import_wizard.open = false;
+                }
+                return Ok(UiIntentOutcome::Engine { command_id: String::from("table.importCsv"), outcome });
+            }
             let doc = app.session.document();
             let existing_target = app
                 .grid
@@ -748,17 +765,10 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
                 && app.grid.import_wizard.raw_clipboard_text.trim().is_empty()
                 && !app.grid.import_wizard.external_file_path.trim().is_empty()
             {
-                let delim = if app.grid.import_wizard.delimiter == '\0' { String::from("\t") } else { app.grid.import_wizard.delimiter.to_string() };
-                let dec = if app.grid.import_wizard.decimal_separator == ',' { "," } else { "." };
-                let outcome = app.execute_session_ui_cmd(
-                    "table.importCsv",
-                    serde_json::json!({
-                        "title": "Imported Data",
-                        "path": app.grid.import_wizard.external_file_path,
-                        "delimiter": delim,
-                        "decimal_separator": dec,
-                    }),
-                )?;
+                let Some(params) = app.grid.import_wizard.build_csv_import_params("Imported Data") else {
+                    return Err(EngineError::with_code(ErrorCode::BadInput, "choose a CSV file path before importing"));
+                };
+                let outcome = app.execute_session_ui_cmd("table.importCsv", params)?;
                 if close_after {
                     app.grid.import_wizard.open = false;
                 }
@@ -802,6 +812,14 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         UiIntent::CloseImportWizard => {
             app.grid.import_wizard.open = false;
             Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SavePlateMapFile { path } => execute_save_plate_map_file(app, &path),
+        UiIntent::LoadPlateMapFile { path } => execute_load_plate_map_file(app, &path),
+        UiIntent::LoadPlateLayoutFromSheet { layout_sheet_id, x_grid_sheet_id, blank_labels, positive_control_labels } => {
+            execute_load_plate_layout_from_sheet(app, &layout_sheet_id, x_grid_sheet_id.as_ref(), blank_labels, positive_control_labels)
+        }
+        UiIntent::ApplyPlateGridsText { label_grid_text, x_grid_text, blank_labels, positive_control_labels } => {
+            execute_apply_plate_grids_text(app, &label_grid_text, &x_grid_text, blank_labels, positive_control_labels)
         }
         UiIntent::OpenTransformModal { sheet_id, kind } => {
             app.egui_views.transform_modals.open_kind = Some(kind);
@@ -1442,5 +1460,250 @@ fn step_history_intent(app: &mut UiApp, forward: bool) -> Result<UiIntentOutcome
         let outcome = app.execute_session_ui_cmd("sheet.select", serde_json::json!({ "sheet_id": sheet_id.as_str() }))?;
         return Ok(UiIntentOutcome::Engine { command_id: String::from("sheet.select"), outcome });
     }
+    Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn execute_save_plate_map_file(app: &mut UiApp, raw_path: &str) -> Result<UiIntentOutcome, EngineError> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        app.grid.import_reshape.plate_status_message = Some(String::from("Enter a .cbplate file path before saving."));
+        return Err(EngineError::with_code(ErrorCode::BadInput, "enter a .cbplate file path before saving"));
+    }
+    let mut path = std::path::PathBuf::from(trimmed);
+    let has_ext = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(curvebook_format::PLATE_MAP_EXTENSION));
+    if !has_ext {
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("plate_layout");
+        path.set_file_name(format!("{file_name}.{}", curvebook_format::PLATE_MAP_EXTENSION));
+    }
+
+    let geom = if app.grid.import_reshape.mode == crate::grid_view::ImportReshapeMode::Plate384 {
+        curvebook_doc::PlateGeometry::Wells384
+    } else {
+        curvebook_doc::PlateGeometry::Wells96
+    };
+    let roles = super::super::plate_editor::materialize_plate_roles(&app.grid.import_reshape.plate_roles, geom);
+    let name =
+        if app.grid.import_reshape.title.trim().is_empty() { String::from("Plate Layout") } else { app.grid.import_reshape.title.trim().to_owned() };
+    let x_title = if app.grid.import_reshape.x_title.trim().is_empty() {
+        String::from("Concentration")
+    } else {
+        app.grid.import_reshape.x_title.trim().to_owned()
+    };
+    let file = curvebook_format::PlateMapFile::new(name, geom, x_title, roles).map_err(|err| {
+        let msg = err.to_string();
+        app.grid.import_reshape.plate_status_message = Some(format!("Save failed: {msg}"));
+        EngineError::with_code(ErrorCode::BadInput, msg)
+    })?;
+    curvebook_format::save_cbplate_file(&path, &file, true).map_err(|err| {
+        let msg = err.to_string();
+        app.grid.import_reshape.plate_status_message = Some(format!("Save failed: {msg}"));
+        EngineError::with_code(ErrorCode::Conflict, msg)
+    })?;
+    let path_str = path.to_string_lossy().into_owned();
+    app.grid.import_reshape.plate_template_path = path_str.clone();
+    app.grid.import_reshape.plate_status_message = Some(format!("Saved .cbplate ({} wells): {path_str}", file.wells.len()));
+    app.egui_views.import_wizard.plate_cbplate_path_draft = path_str;
+    Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn execute_load_plate_map_file(app: &mut UiApp, raw_path: &str) -> Result<UiIntentOutcome, EngineError> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        app.grid.import_reshape.plate_status_message = Some(String::from("Enter a .cbplate file path before loading."));
+        return Err(EngineError::with_code(ErrorCode::BadInput, "enter a .cbplate file path before loading"));
+    }
+    let file = curvebook_format::load_cbplate_file(std::path::Path::new(trimmed)).map_err(|err| {
+        let msg = err.to_string();
+        app.grid.import_reshape.plate_status_message = Some(format!("Load failed: {msg}"));
+        EngineError::with_code(ErrorCode::BadInput, msg)
+    })?;
+    app.grid.import_reshape.mode = match file.geometry {
+        curvebook_doc::PlateGeometry::Wells96 => crate::grid_view::ImportReshapeMode::Plate96,
+        curvebook_doc::PlateGeometry::Wells384 => crate::grid_view::ImportReshapeMode::Plate384,
+    };
+    app.grid.import_reshape.x_title = file.x_title.clone();
+    app.grid.import_reshape.plate_roles = file.wells.iter().map(super::super::plate_editor::role_to_json).collect();
+    app.grid.import_reshape.plate_layout_source = crate::grid_view::PlateLayoutSourceMode::InteractiveGrid;
+    app.grid.import_reshape.plate_template_path = trimmed.to_owned();
+    app.grid.import_reshape.plate_status_message = Some(format!("Loaded .cbplate `{}` ({} wells)", file.name, file.wells.len()));
+    app.egui_views.import_wizard.reshape_x_title_draft = file.x_title;
+    app.egui_views.import_wizard.plate_cbplate_path_draft = trimmed.to_owned();
+    app.egui_views.import_wizard.plate_subtab = import_wizard::PlateSubTab::Layout;
+    Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn execute_load_plate_layout_from_sheet(
+    app: &mut UiApp,
+    layout_sheet_id: &SheetId,
+    x_grid_sheet_id: Option<&SheetId>,
+    blank_labels: Vec<String>,
+    positive_control_labels: Vec<String>,
+) -> Result<UiIntentOutcome, EngineError> {
+    let doc = app.session.document();
+    let Some(layout_sheet) = doc.data_sheet(layout_sheet_id).or_else(|| doc.result_sheet(layout_sheet_id).and_then(|r| r.analyzable_data.as_ref()))
+    else {
+        let msg = format!("plate layout sheet `{}` not found", layout_sheet_id.as_str());
+        app.grid.import_reshape.plate_status_message = Some(msg.clone());
+        return Err(EngineError::with_code(ErrorCode::BadInput, msg));
+    };
+    let (_, label_grid) = curvebook_transform::extract_plate_grid_from_datasheet(layout_sheet).map_err(|err| {
+        let msg = err.to_string();
+        app.grid.import_reshape.plate_status_message = Some(msg.clone());
+        EngineError::with_code(ErrorCode::BadInput, msg)
+    })?;
+    let x_grid = if let Some(xid) = x_grid_sheet_id {
+        let Some(x_sheet) = doc.data_sheet(xid).or_else(|| doc.result_sheet(xid).and_then(|r| r.analyzable_data.as_ref())) else {
+            let msg = format!("plate X-grid sheet `{}` not found", xid.as_str());
+            app.grid.import_reshape.plate_status_message = Some(msg.clone());
+            return Err(EngineError::with_code(ErrorCode::BadInput, msg));
+        };
+        let (_, xg) = curvebook_transform::extract_plate_x_grid_from_datasheet(x_sheet).map_err(|err| {
+            let msg = err.to_string();
+            app.grid.import_reshape.plate_status_message = Some(msg.clone());
+            EngineError::with_code(ErrorCode::BadInput, msg)
+        })?;
+        Some(xg)
+    } else {
+        None
+    };
+
+    let name =
+        if app.grid.import_reshape.title.trim().is_empty() { String::from("Plate Layout") } else { app.grid.import_reshape.title.trim().to_owned() };
+    let x_title = if app.grid.import_reshape.x_title.trim().is_empty() {
+        String::from("Concentration")
+    } else {
+        app.grid.import_reshape.x_title.trim().to_owned()
+    };
+    let opts = curvebook_transform::PlateGridBuildOptions {
+        name,
+        x_title,
+        blank_labels: blank_labels.clone(),
+        positive_control_labels: positive_control_labels.clone(),
+        target_kind: super::super::plate_editor::to_target_archetype_kind(app.grid.import_reshape.target_kind),
+    };
+    let (template, warnings) = curvebook_transform::build_plate_template_from_grids(&label_grid, x_grid.as_deref(), &opts).map_err(|err| {
+        let msg = err.to_string();
+        app.grid.import_reshape.plate_status_message = Some(msg.clone());
+        EngineError::with_code(ErrorCode::BadInput, msg)
+    })?;
+
+    app.grid.import_reshape.mode = match template.geometry {
+        curvebook_doc::PlateGeometry::Wells96 => crate::grid_view::ImportReshapeMode::Plate96,
+        curvebook_doc::PlateGeometry::Wells384 => crate::grid_view::ImportReshapeMode::Plate384,
+    };
+    app.grid.import_reshape.plate_roles = template.wells.iter().map(super::super::plate_editor::role_to_json).collect();
+    app.grid.import_reshape.plate_layout_source = crate::grid_view::PlateLayoutSourceMode::InteractiveGrid;
+    app.grid.import_reshape.plate_layout_sheet_id = Some(layout_sheet_id.as_str().to_owned());
+    app.grid.import_reshape.plate_x_grid_sheet_id = x_grid_sheet_id.map(|id| id.as_str().to_owned());
+    app.grid.import_reshape.plate_blank_labels = blank_labels;
+    app.grid.import_reshape.plate_positive_control_labels = positive_control_labels;
+    let mut status = format!("Loaded {}×{} layout from sheet", template.geometry.rows(), template.geometry.cols());
+    if let Some(first_warn) = warnings.first() {
+        status.push_str(&format!(" ({first_warn})"));
+    }
+    app.grid.import_reshape.plate_status_message = Some(status);
+    app.egui_views.import_wizard.plate_subtab = import_wizard::PlateSubTab::Layout;
+    Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn parse_plate_text_matrix(raw: &str, decimal_separator: char) -> Vec<Vec<String>> {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let non_empty_lines: Vec<&str> = normalized.split('\n').filter(|l| !l.trim().is_empty()).collect();
+    if non_empty_lines.is_empty() {
+        return Vec::new();
+    }
+    let delim = if non_empty_lines.iter().any(|l| l.contains('\t')) {
+        '\t'
+    } else if decimal_separator == ',' && non_empty_lines.iter().any(|l| l.contains(';')) {
+        ';'
+    } else if non_empty_lines.iter().any(|l| l.contains(',')) {
+        ','
+    } else if non_empty_lines.iter().any(|l| l.contains(';')) {
+        ';'
+    } else {
+        '\t'
+    };
+    let opts = curvebook_format::CsvOptions {
+        delimiter: delim,
+        quote_char: '"',
+        decimal_separator,
+        thousands_separator: None,
+        header_rows: 0,
+        has_row_titles: false,
+        parse_asterisk_exclusions: false,
+        missing_sentinels: Vec::new(),
+    };
+    let joined = non_empty_lines.join("\n");
+    curvebook_format::parse_delimited_records(&joined, &opts)
+        .unwrap_or_else(|_| non_empty_lines.iter().map(|line| line.split(delim).map(|s| s.trim().to_owned()).collect()).collect())
+}
+
+fn execute_apply_plate_grids_text(
+    app: &mut UiApp,
+    label_grid_text: &str,
+    x_grid_text: &str,
+    blank_labels: Vec<String>,
+    positive_control_labels: Vec<String>,
+) -> Result<UiIntentOutcome, EngineError> {
+    let dec = app.locale_preset.decimal_separator;
+    let label_grid = parse_plate_text_matrix(label_grid_text, dec);
+    let x_grid = if x_grid_text.trim().is_empty() {
+        None
+    } else {
+        let raw_x = parse_plate_text_matrix(x_grid_text, dec);
+        let parsed: Vec<Vec<Option<f64>>> = raw_x
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|tok| {
+                        let t = tok.trim();
+                        if t.is_empty() {
+                            None
+                        } else {
+                            crate::grid_view::parse_localized_number_input(t, &app.locale_preset)
+                                .or_else(|| t.replace(',', ".").parse::<f64>().ok())
+                                .filter(|v| v.is_finite())
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        Some(parsed)
+    };
+
+    let name =
+        if app.grid.import_reshape.title.trim().is_empty() { String::from("Plate Layout") } else { app.grid.import_reshape.title.trim().to_owned() };
+    let x_title = if app.grid.import_reshape.x_title.trim().is_empty() {
+        String::from("Concentration")
+    } else {
+        app.grid.import_reshape.x_title.trim().to_owned()
+    };
+    let opts = curvebook_transform::PlateGridBuildOptions {
+        name,
+        x_title,
+        blank_labels: blank_labels.clone(),
+        positive_control_labels: positive_control_labels.clone(),
+        target_kind: super::super::plate_editor::to_target_archetype_kind(app.grid.import_reshape.target_kind),
+    };
+    let (template, warnings) = curvebook_transform::build_plate_template_from_grids(&label_grid, x_grid.as_deref(), &opts).map_err(|err| {
+        let msg = err.to_string();
+        app.grid.import_reshape.plate_status_message = Some(msg.clone());
+        EngineError::with_code(ErrorCode::BadInput, msg)
+    })?;
+
+    app.grid.import_reshape.mode = match template.geometry {
+        curvebook_doc::PlateGeometry::Wells96 => crate::grid_view::ImportReshapeMode::Plate96,
+        curvebook_doc::PlateGeometry::Wells384 => crate::grid_view::ImportReshapeMode::Plate384,
+    };
+    app.grid.import_reshape.plate_roles = template.wells.iter().map(super::super::plate_editor::role_to_json).collect();
+    app.grid.import_reshape.plate_layout_source = crate::grid_view::PlateLayoutSourceMode::InteractiveGrid;
+    app.grid.import_reshape.plate_blank_labels = blank_labels;
+    app.grid.import_reshape.plate_positive_control_labels = positive_control_labels;
+    let mut status = format!("Applied {}×{} pasted plate grid", template.geometry.rows(), template.geometry.cols());
+    if let Some(first_warn) = warnings.first() {
+        status.push_str(&format!(" ({first_warn})"));
+    }
+    app.grid.import_reshape.plate_status_message = Some(status);
+    app.egui_views.import_wizard.plate_subtab = import_wizard::PlateSubTab::Layout;
     Ok(UiIntentOutcome::ShellUpdated)
 }

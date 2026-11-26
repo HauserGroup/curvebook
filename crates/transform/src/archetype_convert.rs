@@ -9,8 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use curvebook_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DocError, GroupedTable,
-    MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, MultipleVariablesTable, SequenceProgression, SubcolumnMode, TableArchetype, TableKind, VariableColumn,
-    VariableRole, VariableSource, XColumnMode, XyTable, default_column_label, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
+    MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, MultipleVariablesTable, PlateCellOrigin, SequenceProgression, SubcolumnMode, TableArchetype, TableKind,
+    VariableColumn, VariableRole, VariableSource, XColumnMode, XyTable, default_column_label, validate_data_sets, validate_rows, validate_subcolumns,
+    validate_title,
 };
 
 use crate::error::TransformError;
@@ -396,6 +397,15 @@ fn assemble_datasheet(
             source.linked_regions.len()
         ));
     }
+
+    for origin in &source.plate_well_origins {
+        if let Some(&new_coord) = acc.coord_map.get(&origin.coord) {
+            out.plate_well_origins.push(PlateCellOrigin { coord: new_coord, well: origin.well.clone() });
+        }
+    }
+    out.plate_well_origins.sort_by_key(|o| o.coord);
+    out.plate_well_origins.dedup_by_key(|o| o.coord);
+    out.prune_stale_plate_well_origins();
 
     let preserved_exclusions = count_archetype_cells(&out.archetype, |c| c.excluded);
     let lossy = acc.dropped > 0 || dropped_notes > 0 || acc.schema_lossy;

@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 use curvebook_doc::error::MAX_SHEET_ID_BYTES;
 use curvebook_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, MAX_TITLE_BYTES, MultipleVariablesTable,
-    SheetId, TableArchetype, VariableRole, validate_data_sets, validate_rows, validate_title,
+    PlateCellOrigin, SheetId, TableArchetype, VariableRole, validate_data_sets, validate_rows, validate_title,
 };
 use curvebook_math::{
     DeterministicRng,
@@ -312,6 +312,8 @@ pub fn random_sample_rows(source: &DataSheet, config: &RowSampleConfig) -> Resul
     try_retain_rows(&mut out.archetype, &selected)?;
     snapshot_calculated_variables(&mut out.archetype);
     out.exclusion_notes = remap_exclusion_notes(&source.exclusion_notes, &selected);
+    out.plate_well_origins = remap_plate_well_origins(&source.plate_well_origins, &selected);
+    out.prune_stale_plate_well_origins();
     out.validate()?;
     Ok(out)
 }
@@ -826,6 +828,43 @@ pub(crate) fn remap_exclusion_notes(notes: &[CellExclusionNote], selected_rows: 
         .collect();
     remapped.sort_by_key(|n| n.coord);
     remapped
+}
+
+pub(crate) fn remap_plate_well_origins(origins: &[PlateCellOrigin], kept_rows: &[usize]) -> Vec<PlateCellOrigin> {
+    if origins.is_empty() {
+        return Vec::new();
+    }
+    let mut old_to_new: HashMap<usize, usize> = HashMap::with_capacity(kept_rows.len());
+    for (new_row, &old_row) in kept_rows.iter().enumerate() {
+        old_to_new.insert(old_row, new_row);
+    }
+    let mut remapped: Vec<PlateCellOrigin> = origins
+        .iter()
+        .filter_map(|origin| {
+            old_to_new
+                .get(&origin.coord.row)
+                .map(|&new_row| PlateCellOrigin { coord: CellCoord::new(new_row, origin.coord.col, origin.coord.subcol), well: origin.well.clone() })
+        })
+        .collect();
+    remapped.sort_by_key(|o| o.coord);
+    remapped.dedup_by_key(|o| o.coord);
+    remapped
+}
+
+pub(crate) fn remap_swapped_error_origins(origins: &mut [PlateCellOrigin], swapped_rows: &[usize], col: usize) {
+    if origins.is_empty() || swapped_rows.is_empty() {
+        return;
+    }
+    let mut changed = false;
+    for origin in origins.iter_mut() {
+        if origin.coord.col == col && (origin.coord.subcol == 1 || origin.coord.subcol == 2) && swapped_rows.contains(&origin.coord.row) {
+            origin.coord.subcol = if origin.coord.subcol == 1 { 2 } else { 1 };
+            changed = true;
+        }
+    }
+    if changed {
+        origins.sort_by_key(|o| o.coord);
+    }
 }
 
 fn validate_simulation_config(config: &DistributionSimulationConfig) -> Result<(), TransformError> {
@@ -1726,6 +1765,7 @@ mod tests {
             floating_notes: Vec::new(),
             color_tag: None,
             exclusion_notes: Vec::new(),
+            plate_well_origins: Vec::new(),
         };
         let cfg =
             RowSampleConfig { seed: 1, sample_size: 2, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None };

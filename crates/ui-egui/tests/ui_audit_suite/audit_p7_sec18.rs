@@ -652,7 +652,7 @@ fn fa_sec18_17_close_all_clears_stale_state_and_spinner_ids_are_series_keyed() -
 
 #[test]
 fn fa_sec18_18_all_16_locales_modal_translations_and_partial_helpers_removed() -> TestRes {
-    assert_eq!((LOCALES.len(), catalog_len(), missing_translations().is_empty()), (16, 796, true));
+    assert_eq!((LOCALES.len(), catalog_len(), missing_translations().is_empty()), (16, 870, true));
     for key in [
         "prefs.title",
         "prefs.cat.shortcuts",

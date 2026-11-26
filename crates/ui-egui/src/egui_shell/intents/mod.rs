@@ -83,95 +83,269 @@ pub enum StatParamsIntent {
 /// User intent captured during an `egui` pass and deferred until `!ctx.will_discard()` settles.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiIntent {
-    EngineCommand { command_id: String, params: serde_json::Value },
-    EngineCommandGroup { commands: Vec<(String, serde_json::Value)> },
-    UiCommand { command_id: String, params: serde_json::Value },
+    EngineCommand {
+        command_id: String,
+        params: serde_json::Value,
+    },
+    EngineCommandGroup {
+        commands: Vec<(String, serde_json::Value)>,
+    },
+    UiCommand {
+        command_id: String,
+        params: serde_json::Value,
+    },
     SetTheme(UiThemeMode),
     SetLocale(String),
     SetUiScale(f32),
-    SelectGridCell { coord: curvebook_tools::GridCellCoord },
-    ExtendGridSelection { coord: curvebook_tools::GridCellCoord },
-    ToggleGridCell { coord: curvebook_tools::GridCellCoord },
-    GridNavigate { dir: MoveDirection, extend: bool, jump: bool },
-    SetRowTitlesCollapsed { collapsed: bool },
-    DialogWidgetClick { widget_id: String },
-    DialogButtonAction { action: String },
-    SetTextFieldBuffer { widget_id: String, text: String },
+    SelectGridCell {
+        coord: curvebook_tools::GridCellCoord,
+    },
+    ExtendGridSelection {
+        coord: curvebook_tools::GridCellCoord,
+    },
+    ToggleGridCell {
+        coord: curvebook_tools::GridCellCoord,
+    },
+    GridNavigate {
+        dir: MoveDirection,
+        extend: bool,
+        jump: bool,
+    },
+    SetRowTitlesCollapsed {
+        collapsed: bool,
+    },
+    DialogWidgetClick {
+        widget_id: String,
+    },
+    DialogButtonAction {
+        action: String,
+    },
+    SetTextFieldBuffer {
+        widget_id: String,
+        text: String,
+    },
     OpenProjectFile,
-    CopyResultTable { sheet_id: SheetId, force_full: bool },
-    SetFloatingNotePosition { sheet_id: SheetId, note_id: String, pos_pt: [f64; 2] },
-    ToggleFloatingNoteCollapsed { sheet_id: SheetId, note_id: String },
+    CopyResultTable {
+        sheet_id: SheetId,
+        force_full: bool,
+    },
+    SetFloatingNotePosition {
+        sheet_id: SheetId,
+        note_id: String,
+        pos_pt: [f64; 2],
+    },
+    ToggleFloatingNoteCollapsed {
+        sheet_id: SheetId,
+        note_id: String,
+    },
     ClearHookPickerSearch,
     AnalyzePicker(AnalyzePickerIntent),
     StatParams(StatParamsIntent),
-    SelectResultTab { index: usize },
-    SetActiveInspector { inspector: ActiveInspector },
-    SetFocusPane { pane: ActiveWorkspacePane },
-    SetCanvasZoom { zoom: f64 },
-    ToggleNavigatorSection { section: SheetSection },
-    SetNavigatorSearch { query: String },
-    SetNavigatorNesting { mode: NavigatorNestingMode },
-    SetSplitRatio { ratio: f64 },
+    SelectResultTab {
+        index: usize,
+    },
+    SetActiveInspector {
+        inspector: ActiveInspector,
+    },
+    SetFocusPane {
+        pane: ActiveWorkspacePane,
+    },
+    SetCanvasZoom {
+        zoom: f64,
+    },
+    ToggleNavigatorSection {
+        section: SheetSection,
+    },
+    SetNavigatorSearch {
+        query: String,
+    },
+    SetNavigatorNesting {
+        mode: NavigatorNestingMode,
+    },
+    SetSplitRatio {
+        ratio: f64,
+    },
     ToggleInspectorPin,
-    SwitchInspectorTarget { sheet_id: SheetId },
-    SetPreviewFilter { filter: CanvasPreviewFilter },
-    SetPaletteOpen { open: bool },
+    SwitchInspectorTarget {
+        sheet_id: SheetId,
+    },
+    SetPreviewFilter {
+        filter: CanvasPreviewFilter,
+    },
+    SetPaletteOpen {
+        open: bool,
+    },
     OpenCheckpointsDialog,
-    SetLauncherOpen { open: bool },
-    ApplyWorkspacePreset { preset: WorkspacePreset },
-    SyncLeadingWidth { width_pt: f32 },
-    SyncTrailingWidth { width_pt: f32 },
+    SetLauncherOpen {
+        open: bool,
+    },
+    ApplyWorkspacePreset {
+        preset: WorkspacePreset,
+    },
+    SyncLeadingWidth {
+        width_pt: f32,
+    },
+    SyncTrailingWidth {
+        width_pt: f32,
+    },
     ToggleLeadingCollapsedRail,
     ToggleTrailingCollapsedRail,
     HistoryBack,
     HistoryForward,
-    DismissDiagnosticBanner { sheet_id: SheetId },
-    OpenRetargetDialog { result_sheet_id: SheetId, target_data_sheet_id: Option<SheetId> },
-    BrushPoint { sheet_id: SheetId, coord: curvebook_tools::GridCellCoord },
-    AddBrushedPoint { sheet_id: SheetId, coord: curvebook_tools::GridCellCoord },
+    DismissDiagnosticBanner {
+        sheet_id: SheetId,
+    },
+    OpenRetargetDialog {
+        result_sheet_id: SheetId,
+        target_data_sheet_id: Option<SheetId>,
+    },
+    BrushPoint {
+        sheet_id: SheetId,
+        coord: curvebook_tools::GridCellCoord,
+    },
+    AddBrushedPoint {
+        sheet_id: SheetId,
+        coord: curvebook_tools::GridCellCoord,
+    },
     ClearBrush,
-    PatchActiveDialog { fields: serde_json::Map<String, serde_json::Value> },
-    CommitDialogAction { action: String },
+    PatchActiveDialog {
+        fields: serde_json::Map<String, serde_json::Value>,
+    },
+    CommitDialogAction {
+        action: String,
+    },
     CloseAllModals,
-    OpenManageVariables { sheet_id: SheetId, column: Option<usize> },
-    SelectManageVarColumn { sheet_id: SheetId, column: usize },
-    StageManageVarRecode { from: String, to: String },
+    OpenManageVariables {
+        sheet_id: SheetId,
+        column: Option<usize>,
+    },
+    SelectManageVarColumn {
+        sheet_id: SheetId,
+        column: usize,
+    },
+    StageManageVarRecode {
+        from: String,
+        to: String,
+    },
     ClearManageVarRecodes,
-    ApplyManageVarRecodes { sheet_id: SheetId },
-    ApplyManageVarOrder { sheet_id: SheetId, column: usize, order: LevelOrderSpec, reference_level: Option<String> },
+    ApplyManageVarRecodes {
+        sheet_id: SheetId,
+    },
+    ApplyManageVarOrder {
+        sheet_id: SheetId,
+        column: usize,
+        order: LevelOrderSpec,
+        reference_level: Option<String>,
+    },
     CloseManageVariables,
-    CancelManageVariables { revert_steps: usize },
-    OpenImportWizard { origin: ImportOriginKind, is_live_link: bool, target_sheet_id: Option<SheetId> },
+    CancelManageVariables {
+        revert_steps: usize,
+    },
+    OpenImportWizard {
+        origin: ImportOriginKind,
+        is_live_link: bool,
+        target_sheet_id: Option<SheetId>,
+    },
     UpdateImportWizard(Box<ImportPasteWizardState>),
     PasteClipboardIntoImportReshape,
-    CommitImportWizard { close_after: bool },
+    CommitImportWizard {
+        close_after: bool,
+    },
     CloseImportWizard,
-    OpenTransformModal { sheet_id: SheetId, kind: transform_modals::TransformModalKind },
+    SavePlateMapFile {
+        path: String,
+    },
+    LoadPlateMapFile {
+        path: String,
+    },
+    LoadPlateLayoutFromSheet {
+        layout_sheet_id: SheetId,
+        x_grid_sheet_id: Option<SheetId>,
+        blank_labels: Vec<String>,
+        positive_control_labels: Vec<String>,
+    },
+    ApplyPlateGridsText {
+        label_grid_text: String,
+        x_grid_text: String,
+        blank_labels: Vec<String>,
+        positive_control_labels: Vec<String>,
+    },
+    OpenTransformModal {
+        sheet_id: SheetId,
+        kind: transform_modals::TransformModalKind,
+    },
     CloseTransformModal,
     GridCopySelection,
     GridCutSelection,
-    GridPasteFromClipboard { start_coord: Option<curvebook_tools::GridCellCoord> },
-    PasteXCellText { sheet_id: SheetId, x_row: usize, x_subcol: usize, text: String },
-    WorkspaceCopy { dpi: u16 },
-    WorkspaceCopyForSlides { dpi: u16 },
-    SyncResultSelection { sheet_id: SheetId, tab_index: usize, anchor: (usize, usize), focus: (usize, usize) },
-    CanvasPaste { target_sheet_id: SheetId, anchor_pt: Option<[f64; 2]> },
-    PasteImageFromClipboard { target_sheet_id: SheetId, anchor_pt: Option<[f64; 2]> },
-    SetAnalyzeQuery { query: String },
-    SelectAnalyzeEntry { entry_id: String, clear_duplicate_prompt: bool },
-    ToggleAnalyzeDataset { col_index: usize },
-    SetAnalyzeSelectedDatasets { cols: Vec<usize> },
-    SetEditParamsDraft { spec: Box<curvebook_doc::AnalysisSpec> },
-    SetEditParamsActiveTab { tab: String },
-    SetEditParamsPairedOrMatched { paired: bool },
-    SetEditParamsConfidence { level: ConfidenceLevel },
+    GridPasteFromClipboard {
+        start_coord: Option<curvebook_tools::GridCellCoord>,
+    },
+    PasteXCellText {
+        sheet_id: SheetId,
+        x_row: usize,
+        x_subcol: usize,
+        text: String,
+    },
+    WorkspaceCopy {
+        dpi: u16,
+    },
+    WorkspaceCopyForSlides {
+        dpi: u16,
+    },
+    SyncResultSelection {
+        sheet_id: SheetId,
+        tab_index: usize,
+        anchor: (usize, usize),
+        focus: (usize, usize),
+    },
+    CanvasPaste {
+        target_sheet_id: SheetId,
+        anchor_pt: Option<[f64; 2]>,
+    },
+    PasteImageFromClipboard {
+        target_sheet_id: SheetId,
+        anchor_pt: Option<[f64; 2]>,
+    },
+    SetAnalyzeQuery {
+        query: String,
+    },
+    SelectAnalyzeEntry {
+        entry_id: String,
+        clear_duplicate_prompt: bool,
+    },
+    ToggleAnalyzeDataset {
+        col_index: usize,
+    },
+    SetAnalyzeSelectedDatasets {
+        cols: Vec<usize>,
+    },
+    SetEditParamsDraft {
+        spec: Box<curvebook_doc::AnalysisSpec>,
+    },
+    SetEditParamsActiveTab {
+        tab: String,
+    },
+    SetEditParamsPairedOrMatched {
+        paired: bool,
+    },
+    SetEditParamsConfidence {
+        level: ConfidenceLevel,
+    },
     SaveEditParamsAsDefault,
-    SelectRetargetSource { target_data_sheet_id: SheetId },
-    ResolveDuplicateAnalysis { modify_existing_id: Option<SheetId> },
-    SelectHookConstant { index: Option<usize> },
+    SelectRetargetSource {
+        target_data_sheet_id: SheetId,
+    },
+    ResolveDuplicateAnalysis {
+        modify_existing_id: Option<SheetId>,
+    },
+    SelectHookConstant {
+        index: Option<usize>,
+    },
     UnlinkHookConstant,
     UpdatePowerWizardState(Box<PowerWizardState>),
-    CommitPowerWizard { action: String },
+    CommitPowerWizard {
+        action: String,
+    },
     UpdateChangeGraphTypeState(Box<ChangeGraphTypeState>),
     UpdateFormatGraphState(Box<FormatGraphState>),
     UpdateFormatAxesState(Box<FormatAxesState>),
@@ -188,32 +362,70 @@ pub enum UiIntent {
     UpdateRandomizeGroupsState(Box<RandomizeGroupsDialogState>),
     UpdateRandomSampleRowsState(Box<RandomSampleRowsDialogState>),
     UpdateSimulateDistributionsState(Box<SimulateDistributionsDialogState>),
-    SetGallerySelection { sheet_ids: Vec<SheetId> },
-    OpenPreferences { category: Option<app_modals::PreferencesCategory> },
-    ClosePreferences { save: bool },
-    SetShortcutBinding { command_id: String, combo: String },
-    ResetShortcutBinding { command_id: Option<String> },
+    SetGallerySelection {
+        sheet_ids: Vec<SheetId>,
+    },
+    OpenPreferences {
+        category: Option<app_modals::PreferencesCategory>,
+    },
+    ClosePreferences {
+        save: bool,
+    },
+    SetShortcutBinding {
+        command_id: String,
+        combo: String,
+    },
+    ResetShortcutBinding {
+        command_id: Option<String>,
+    },
     UpdatePreferencesDraft(Box<app_modals::PreferencesModalState>),
-    ResolveUnsavedChanges { action: app_modals::UnsavedCloseAction },
-    OpenFindReplace { initial_query: Option<String> },
+    ResolveUnsavedChanges {
+        action: app_modals::UnsavedCloseAction,
+    },
+    OpenFindReplace {
+        initial_query: Option<String>,
+    },
     CloseFindReplace,
-    ExecuteFindReplace { replace_all: bool, find_query: String, replace_with: String, match_case: bool, match_entire_cell: bool },
+    ExecuteFindReplace {
+        replace_all: bool,
+        find_query: String,
+        replace_with: String,
+        match_case: bool,
+        match_entire_cell: bool,
+    },
     UpdateFeedbackDraft(Box<crate::feedback::FeedbackDraft>),
     OpenFeedbackOnGitHub,
     CopyFeedbackMarkdown,
     ResetFeedbackDraft,
     CopyImportWarnings,
     UpdateCsvExportOptions(Box<crate::dialogs_canvas::CsvExportOptionsState>),
-    SetFormulaBarInput { text: String },
+    SetFormulaBarInput {
+        text: String,
+    },
     CommitFormulaBar,
     CancelFormulaBar,
     AcceptFormulaBarCompletion,
-    CanvasPinchZoom { scale_delta: f64, anchor_pt: [f64; 2] },
-    CanvasPanDelta { delta_x: f64, delta_y: f64 },
-    OpenPaletteWithQuery { query: String },
-    OpenAnalyzeWithCatalog { catalog_id: String },
-    OpenFitWithEquation { equation_id: String },
-    JumpToDataColumn { sheet_id: SheetId, col: usize },
+    CanvasPinchZoom {
+        scale_delta: f64,
+        anchor_pt: [f64; 2],
+    },
+    CanvasPanDelta {
+        delta_x: f64,
+        delta_y: f64,
+    },
+    OpenPaletteWithQuery {
+        query: String,
+    },
+    OpenAnalyzeWithCatalog {
+        catalog_id: String,
+    },
+    OpenFitWithEquation {
+        equation_id: String,
+    },
+    JumpToDataColumn {
+        sheet_id: SheetId,
+        col: usize,
+    },
     OpenSheetFind,
     CloseSheetFind,
     RecordSearchRecent(Box<crate::search_engine::UnifiedSearchItem>),

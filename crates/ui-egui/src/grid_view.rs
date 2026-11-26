@@ -694,7 +694,46 @@ pub enum ImportReshapeMode {
     TidyLongPivot,
 }
 
-/// Interactive state for Plate Map (`96` / `384`-well) and Tidy Long Pivot import reshaping (`QOL-2`).
+/// Source mode for microplate well readings inside [`ImportReshapeState`] (`R17.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum PlateValuesSourceMode {
+    #[default]
+    PasteGrid,
+    ExistingSheet,
+}
+
+/// Value-extraction or kinetic reducer strategy for sheet-backed microplate imports (`R17.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum PlateSourceReducerKind {
+    #[default]
+    ValueColumn,
+    RowIndex,
+    XWindowMean,
+    Min,
+    Max,
+}
+
+/// Strategy for matching rows/columns of a source sheet to physical plate wells (`R17.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum PlateMatchWellsKind {
+    #[default]
+    ByWellId,
+    Positional,
+}
+
+/// Source mode for plate well roles inside [`ImportReshapeState`] (`R17.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum PlateLayoutSourceMode {
+    #[default]
+    InteractiveGrid,
+    LayoutSheet,
+}
+
+fn default_plate_source_value_column() -> String {
+    String::from("Net Area")
+}
+
+/// Interactive state for Plate Map (`96` / `384`-well) and Tidy Long Pivot import reshaping (`QOL-2` / `R17.7`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImportReshapeState {
     pub open: bool,
@@ -713,6 +752,36 @@ pub struct ImportReshapeState {
     pub replicate_col: Option<String>,
     pub value_col: String,
     pub excluded_col: Option<String>,
+    #[serde(default)]
+    pub plate_values_source: PlateValuesSourceMode,
+    #[serde(default)]
+    pub plate_source_sheet_id: Option<String>,
+    #[serde(default)]
+    pub plate_source_reducer: PlateSourceReducerKind,
+    #[serde(default = "default_plate_source_value_column")]
+    pub plate_source_value_column: String,
+    #[serde(default)]
+    pub plate_source_row_index: usize,
+    #[serde(default)]
+    pub plate_source_x_min: Option<f64>,
+    #[serde(default)]
+    pub plate_source_x_max: Option<f64>,
+    #[serde(default)]
+    pub plate_match_wells: PlateMatchWellsKind,
+    #[serde(default)]
+    pub plate_layout_source: PlateLayoutSourceMode,
+    #[serde(default)]
+    pub plate_layout_sheet_id: Option<String>,
+    #[serde(default)]
+    pub plate_x_grid_sheet_id: Option<String>,
+    #[serde(default)]
+    pub plate_blank_labels: Vec<String>,
+    #[serde(default)]
+    pub plate_positive_control_labels: Vec<String>,
+    #[serde(default)]
+    pub plate_template_path: String,
+    #[serde(default)]
+    pub plate_status_message: Option<String>,
 }
 
 impl Default for ImportReshapeState {
@@ -734,6 +803,21 @@ impl Default for ImportReshapeState {
             replicate_col: None,
             value_col: String::from("Value"),
             excluded_col: None,
+            plate_values_source: PlateValuesSourceMode::PasteGrid,
+            plate_source_sheet_id: None,
+            plate_source_reducer: PlateSourceReducerKind::ValueColumn,
+            plate_source_value_column: default_plate_source_value_column(),
+            plate_source_row_index: 0,
+            plate_source_x_min: None,
+            plate_source_x_max: None,
+            plate_match_wells: PlateMatchWellsKind::ByWellId,
+            plate_layout_source: PlateLayoutSourceMode::InteractiveGrid,
+            plate_layout_sheet_id: None,
+            plate_x_grid_sheet_id: None,
+            plate_blank_labels: Vec::new(),
+            plate_positive_control_labels: Vec::new(),
+            plate_template_path: String::new(),
+            plate_status_message: None,
         }
     }
 }
@@ -753,24 +837,97 @@ impl ImportReshapeState {
                     ImportReshapeMode::Plate384 => ("Wells384", 384usize),
                     ImportReshapeMode::TidyLongPivot => ("Wells96", 96usize),
                 };
-                if self.plate_values.len() != expected_wells {
-                    return Err(format!("expected {expected_wells} well values for {geom_label}, got {}", self.plate_values.len()));
+                let mut params = serde_json::Map::new();
+                params.insert(String::from("title"), json!(title));
+                params.insert(String::from("geometry"), json!(geom_label));
+                params.insert(String::from("x_title"), json!(self.x_title));
+                params.insert(String::from("target_kind"), json!(target_kind));
+                params.insert(String::from("subtract_blank_mean"), json!(self.subtract_blank_mean));
+
+                match self.plate_values_source {
+                    PlateValuesSourceMode::PasteGrid => {
+                        if self.plate_values.len() != expected_wells {
+                            return Err(format!("expected {expected_wells} well values for {geom_label}, got {}", self.plate_values.len()));
+                        }
+                        params.insert(String::from("values"), json!(self.plate_values));
+                    }
+                    PlateValuesSourceMode::ExistingSheet => {
+                        let sheet_id = self
+                            .plate_source_sheet_id
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| String::from("select an existing Data or AUC Result sheet first"))?;
+                        let mut src = serde_json::Map::new();
+                        src.insert(String::from("sheet_id"), json!(sheet_id));
+                        let match_wire = match self.plate_match_wells {
+                            PlateMatchWellsKind::ByWellId => "by_well_id",
+                            PlateMatchWellsKind::Positional => "positional",
+                        };
+                        src.insert(String::from("match_wells"), json!(match_wire));
+                        match self.plate_source_reducer {
+                            PlateSourceReducerKind::ValueColumn => {
+                                let vc = self.plate_source_value_column.trim();
+                                if vc.is_empty() {
+                                    return Err(String::from("enter a value column name (for example `Net Area`)"));
+                                }
+                                src.insert(String::from("value_column"), json!(vc));
+                            }
+                            PlateSourceReducerKind::RowIndex => {
+                                src.insert(String::from("reducer"), json!({ "row_index": self.plate_source_row_index }));
+                            }
+                            PlateSourceReducerKind::XWindowMean => {
+                                let lo = self
+                                    .plate_source_x_min
+                                    .filter(|v| v.is_finite())
+                                    .ok_or_else(|| String::from("X window mean requires a finite X min"))?;
+                                let hi = self
+                                    .plate_source_x_max
+                                    .filter(|v| v.is_finite())
+                                    .ok_or_else(|| String::from("X window mean requires a finite X max"))?;
+                                if lo > hi {
+                                    return Err(format!("X window mean requires X min ({lo}) <= X max ({hi})"));
+                                }
+                                src.insert(String::from("reducer"), json!({ "x_window_mean": { "x_min": lo, "x_max": hi } }));
+                            }
+                            PlateSourceReducerKind::Min => {
+                                src.insert(String::from("reducer"), json!("min"));
+                            }
+                            PlateSourceReducerKind::Max => {
+                                src.insert(String::from("reducer"), json!("max"));
+                            }
+                        }
+                        params.insert(String::from("source"), Value::Object(src));
+                    }
                 }
-                if self.plate_roles.len() != expected_wells {
-                    return Err(format!("expected {expected_wells} well roles for {geom_label}, got {}", self.plate_roles.len()));
+
+                match self.plate_layout_source {
+                    PlateLayoutSourceMode::InteractiveGrid => {
+                        if self.plate_roles.len() != expected_wells {
+                            return Err(format!("expected {expected_wells} well roles for {geom_label}, got {}", self.plate_roles.len()));
+                        }
+                        params.insert(String::from("roles"), json!(self.plate_roles));
+                    }
+                    PlateLayoutSourceMode::LayoutSheet => {
+                        let layout_id = self
+                            .plate_layout_sheet_id
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| String::from("select a layout sheet first"))?;
+                        params.insert(String::from("layout_sheet_id"), json!(layout_id));
+                        if let Some(x_id) = self.plate_x_grid_sheet_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                            params.insert(String::from("x_grid_sheet_id"), json!(x_id));
+                        }
+                        if !self.plate_blank_labels.is_empty() {
+                            params.insert(String::from("blank_labels"), json!(self.plate_blank_labels));
+                        }
+                        if !self.plate_positive_control_labels.is_empty() {
+                            params.insert(String::from("positive_control_labels"), json!(self.plate_positive_control_labels));
+                        }
+                    }
                 }
-                Ok(ToolCommandIntent::new(
-                    "table.importPlateMap",
-                    json!({
-                        "title": title,
-                        "geometry": geom_label,
-                        "values": self.plate_values,
-                        "roles": self.plate_roles,
-                        "x_title": self.x_title,
-                        "target_kind": target_kind,
-                        "subtract_blank_mean": self.subtract_blank_mean,
-                    }),
-                ))
+                Ok(ToolCommandIntent::new("table.importPlateMap", Value::Object(params)))
             }
             ImportReshapeMode::TidyLongPivot => {
                 if self.tidy_csv.trim().is_empty() {
@@ -861,6 +1018,21 @@ pub struct ImportPasteWizardState {
     pub path_policy: curvebook_engine::ExternalPathPolicy,
     #[serde(skip)]
     pub xlsx_loaded_from_path: bool,
+    /// Optional A1 rectangle crop for single-worksheet `.xlsx` imports (e.g. `"B4:M11"`).
+    #[serde(default)]
+    pub xlsx_cell_range: String,
+    /// Number of leading rows skipped before headers in `.xlsx` imports.
+    #[serde(default)]
+    pub xlsx_skip_rows: usize,
+    /// When `true`, expand exact OOXML `<mergeCell>` ranges across body rows in `.xlsx` imports.
+    #[serde(default)]
+    pub xlsx_fill_merged_cells: bool,
+    /// Optional zero-based discriminator column splitting data rows into one sheet per distinct value (`R17.7`).
+    #[serde(default)]
+    pub split_by_column: Option<usize>,
+    /// When `true`, extract skipped leading preamble `Key: Value` rows & notes into one shared `InfoSheet` (`R17.7`).
+    #[serde(default)]
+    pub extract_preamble_info: bool,
 }
 
 impl Default for ImportPasteWizardState {
@@ -891,6 +1063,11 @@ impl Default for ImportPasteWizardState {
             xlsx_error: None,
             path_policy: curvebook_engine::ExternalPathPolicy::Unconstrained,
             xlsx_loaded_from_path: false,
+            xlsx_cell_range: String::new(),
+            xlsx_skip_rows: 0,
+            xlsx_fill_merged_cells: false,
+            split_by_column: None,
+            extract_preamble_info: false,
         }
     }
 }
@@ -1032,28 +1209,104 @@ impl ImportPasteWizardState {
         map.insert(String::from("has_row_titles"), json!(self.xlsx_has_row_titles));
         map.insert(String::from("include_hidden"), json!(true));
         map.insert(String::from("merge"), json!(self.xlsx_merge));
+        let range_trimmed = self.xlsx_cell_range.trim();
+        if !range_trimmed.is_empty() {
+            map.insert(String::from("cell_range"), json!(range_trimmed));
+        }
+        if self.xlsx_skip_rows > 0 {
+            map.insert(String::from("skip_rows"), json!(self.xlsx_skip_rows));
+        }
+        if self.xlsx_fill_merged_cells {
+            map.insert(String::from("fill_merged_cells"), json!(true));
+        }
+        if let Some(col) = self.split_by_column {
+            map.insert(String::from("split_by_column"), json!(col));
+        } else if let Some(rm) = &self.filter.row_match {
+            map.insert(
+                String::from("row_match"),
+                json!({
+                    "column": rm.column,
+                    "equals": rm.equals,
+                    "drop_column": rm.drop_column,
+                }),
+            );
+        }
+        if self.extract_preamble_info {
+            map.insert(String::from("extract_preamble_info"), json!(true));
+        }
         Some(Value::Object(map))
     }
 
-    fn preview_xlsx_grid(&self) -> Vec<Vec<Cell>> {
-        let Some(b64) = self.xlsx_bytes_base64.as_deref() else {
-            return Vec::new();
-        };
-        let Ok(bytes) = curvebook_platform::base64::decode_capped(b64, curvebook_format::MAX_ARCHIVE_FILE_BYTES) else {
-            return Vec::new();
-        };
+    /// Build `table.importCsv` engine parameters for multi-block `split_by_column` or new-sheet delimited imports.
+    #[must_use]
+    pub fn build_csv_import_params(&self, default_title: &str) -> Option<Value> {
+        let mut map = serde_json::Map::new();
+        if !self.raw_clipboard_text.trim().is_empty() {
+            map.insert(String::from("csv"), json!(self.raw_clipboard_text));
+        } else {
+            let path = self.external_file_path.trim();
+            if path.is_empty() {
+                return None;
+            }
+            map.insert(String::from("path"), json!(path));
+        }
+        let delim = if self.delimiter == '\0' { String::from("\t") } else { self.delimiter.to_string() };
+        let dec = if self.decimal_separator == ',' { "," } else { "." };
+        let header_rows = self.header_rows;
+        map.insert(String::from("title"), json!(default_title));
+        map.insert(String::from("delimiter"), json!(delim));
+        map.insert(String::from("decimal_separator"), json!(dec));
+        map.insert(String::from("has_header"), json!(header_rows > 0 || self.placement.propagate_title_header));
+        map.insert(String::from("header_rows"), json!(header_rows));
+        map.insert(String::from("filter"), json!(self.filter));
+        if let Some(col) = self.split_by_column {
+            map.insert(String::from("split_by_column"), json!(col));
+        }
+        if self.extract_preamble_info {
+            map.insert(String::from("extract_preamble_info"), json!(true));
+        }
+        Some(Value::Object(map))
+    }
+
+    fn build_xlsx_preview_options(&self) -> Option<(Vec<u8>, XlsxImportOptions)> {
+        let b64 = self.xlsx_bytes_base64.as_deref()?;
+        let bytes = curvebook_platform::base64::decode_capped(b64, curvebook_format::MAX_ARCHIVE_FILE_BYTES).ok()?;
         let selected = (!self.xlsx_sheets.is_empty()).then(|| self.selected_xlsx_sheet_names());
         if selected.as_ref().is_some_and(Vec::is_empty) {
-            return Vec::new();
+            return None;
         }
         let header_rows = self.header_rows;
+        let cell_range = (!self.xlsx_cell_range.trim().is_empty()).then(|| self.xlsx_cell_range.trim().to_owned());
+        let row_match = if self.split_by_column.is_some() { None } else { self.filter.row_match.clone() };
         let opts = XlsxImportOptions {
             sheet_names: selected,
             has_header: header_rows > 0 || self.placement.propagate_title_header,
             header_rows,
             has_row_titles: self.xlsx_has_row_titles,
             include_hidden: true,
+            cell_range,
+            skip_rows: self.xlsx_skip_rows,
+            fill_merged_cells: self.xlsx_fill_merged_cells,
+            split_by_column: self.split_by_column,
+            row_match,
+            extract_preamble_info: self.extract_preamble_info,
             ..XlsxImportOptions::default()
+        };
+        Some((bytes, opts))
+    }
+
+    /// Return emitted worksheet/block titles for `.xlsx` live preview feedback.
+    pub fn preview_xlsx_sheet_titles(&self) -> Result<Vec<String>, String> {
+        let Some((bytes, opts)) = self.build_xlsx_preview_options() else {
+            return Ok(Vec::new());
+        };
+        let report = import_xlsx_bytes_with_options(&bytes, &opts).map_err(|e| e.to_string())?;
+        Ok(report.document.data_sheets.iter().map(|ds| ds.title.clone()).collect())
+    }
+
+    fn preview_xlsx_grid(&self) -> Vec<Vec<Cell>> {
+        let Some((bytes, opts)) = self.build_xlsx_preview_options() else {
+            return Vec::new();
         };
         let Ok(report) = import_xlsx_bytes_with_options(&bytes, &opts) else {
             return Vec::new();
@@ -1202,7 +1455,13 @@ impl ImportPasteWizardState {
                 }
                 out_rows
             }
-            ImportOriginKind::XlsxWorkbook => self.preview_xlsx_grid(),
+            ImportOriginKind::XlsxWorkbook => {
+                let mut xgrid = self.preview_xlsx_grid();
+                if self.placement.transpose {
+                    xgrid = curvebook_doc::transpose_cell_grid(&xgrid);
+                }
+                return xgrid;
+            }
             ImportOriginKind::InternalDataSheet => doc
                 .and_then(|d| self.source_sheet_id.as_ref().and_then(|id| d.data_sheet(id)))
                 .map(|ds| ds.extract_cell_grid(self.source_range))
@@ -1217,6 +1476,35 @@ impl ImportPasteWizardState {
             } else {
                 grid.clear();
             }
+        }
+        if let Some(rm) = &self.filter.row_match {
+            let target = rm.equals.trim();
+            let header_n = self.header_rows.min(grid.len());
+            let mut filtered = Vec::with_capacity(grid.len());
+            for (r_idx, mut row) in grid.into_iter().enumerate() {
+                if r_idx < header_n {
+                    if rm.drop_column && rm.column < row.len() {
+                        row.remove(rm.column);
+                    }
+                    filtered.push(row);
+                    continue;
+                }
+                let matched = row.get(rm.column).is_some_and(|cell| {
+                    let s = match &cell.value {
+                        CellValue::Empty => String::new(),
+                        CellValue::Number(v) => format!("{v}"),
+                        CellValue::Text(t) => t.clone(),
+                    };
+                    s.trim() == target
+                });
+                if matched {
+                    if rm.drop_column && rm.column < row.len() {
+                        row.remove(rm.column);
+                    }
+                    filtered.push(row);
+                }
+            }
+            grid = filtered;
         }
         if let Some((c0, c1)) = self.filter.col_window {
             for row in &mut grid {
@@ -1440,6 +1728,20 @@ impl GridViewState {
             }
             (true, None) => Some(String::from("Excluded from analyses")),
             (false, None) => None,
+        }
+    }
+
+    /// Format the combined hover tooltip for `coord` on `sheet`, including microplate source well
+    /// provenance (`Source well: <well>`) alongside any exclusion note (`QOL-3` / `R17.7`).
+    #[must_use]
+    pub fn cell_hover_tooltip(sheet: &DataSheet, coord: GridCellCoord) -> Option<String> {
+        let origin = sheet.plate_well_origin(CellCoord::from(coord));
+        let excl = Self::cell_exclusion_tooltip(sheet, coord);
+        match (origin, excl) {
+            (Some(well), Some(note)) => Some(format!("Source well: {well}\n{note}")),
+            (Some(well), None) => Some(format!("Source well: {well}")),
+            (None, Some(note)) => Some(note),
+            (None, None) => None,
         }
     }
 

@@ -1,12 +1,14 @@
 //! Provenance-tracked `LinkedDataRegion` live links, four-stage `ImportLinkSpec` pipeline, and
 //! [`DataSheet`] (with `frozen: bool` mutation guards) (`docs/implementation/data-tables-and-transforms.md` §1.4 & §6).
 
+use std::collections::BTreeSet;
+
 use curvebook_palette::Rgba8;
 
 use crate::TableKind;
 use crate::analysis::BaselineOperation;
 use crate::archetypes::{CellCoord, TableArchetype, default_column_label};
-use crate::cell::{Cell, SubcolumnMode};
+use crate::cell::{Cell, CellValue, SubcolumnMode};
 use crate::error::{DocError, MAX_SUBCOLUMNS, validate_cell_grid, validate_subcolumns, validate_title};
 use crate::ids::{FloatingNote, SheetId};
 
@@ -102,8 +104,32 @@ impl LinkSource {
     }
 }
 
+const fn default_column_equals_drop() -> bool {
+    true
+}
+
+/// Exact trimmed text-equality row filter targeting one zero-based column in a raw source table (`R17.7`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ColumnEqualsFilter {
+    /// Zero-based column index in the raw source grid whose cell text is compared.
+    pub column: usize,
+    /// Exact text matched after leading/trailing whitespace trimming.
+    pub equals: String,
+    /// When `true` (default), removes `column` from the filtered output grid.
+    #[serde(default = "default_column_equals_drop")]
+    pub drop_column: bool,
+}
+
+impl ColumnEqualsFilter {
+    /// Construct a [`ColumnEqualsFilter`] matching trimmed `equals` in `column` and dropping `column`.
+    #[must_use]
+    pub fn new(column: usize, equals: impl Into<String>) -> Self {
+        Self { column, equals: equals.into(), drop_column: true }
+    }
+}
+
 /// Stage 2 of [`ImportLinkSpec`]: slicing, periodic decimation, unstacking, `*` exclusion parsing,
-/// baseline normalization, and row-exclusion predicates.
+/// baseline normalization, column-equality row matching, and row-exclusion predicates.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImportFilterSpec {
     /// Optional inclusive `(start_row, end_row)` zero-based row slice applied to the source grid; `None` keeps all rows.
@@ -122,6 +148,9 @@ pub struct ImportFilterSpec {
     /// Optional row-level exclusion predicate formula (rows evaluating true have all cells marked `excluded = true`); `None` applies no predicate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_row_predicate: Option<String>,
+    /// Optional exact trimmed text-equality filter keeping only rows matching one value in a discriminator column (`R17.7`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_match: Option<ColumnEqualsFilter>,
 }
 
 impl Default for ImportFilterSpec {
@@ -134,6 +163,7 @@ impl Default for ImportFilterSpec {
             parse_asterisk_exclusions: true,
             baseline: None,
             exclude_row_predicate: None,
+            row_match: None,
         }
     }
 }
@@ -213,6 +243,15 @@ pub struct CellExclusionNote {
     pub timestamp_utc: String,
 }
 
+/// Provenance mapping one cell coordinate on a [`DataSheet`] back to its source microplate well (`R17.7`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlateCellOrigin {
+    /// Zero-based `(row, col, subcol)` coordinate on the owning [`DataSheet`].
+    pub coord: CellCoord,
+    /// Canonical microplate well identifier (for example `"A01"` or `"G12"`).
+    pub well: String,
+}
+
 /// Project data-table sheet pairing metadata, freeze state, live linked regions, and floating notes
 /// with one of the eight [`TableArchetype`] schemas (`docs/implementation/data-tables-and-transforms.md` §1).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -237,6 +276,9 @@ pub struct DataSheet {
     /// Sorted audit log of exclusion justifications for cells currently marked `excluded == true`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclusion_notes: Vec<CellExclusionNote>,
+    /// Sorted well-origin provenance records mapping cells created by microplate import back to physical well IDs (`R17.7`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plate_well_origins: Vec<PlateCellOrigin>,
 }
 
 #[derive(serde::Deserialize)]
@@ -251,6 +293,8 @@ struct RawDataSheet {
     color_tag: Option<Rgba8>,
     #[serde(default)]
     exclusion_notes: Vec<CellExclusionNote>,
+    #[serde(default)]
+    plate_well_origins: Vec<PlateCellOrigin>,
 }
 
 impl<'de> serde::Deserialize<'de> for DataSheet {
@@ -269,6 +313,7 @@ impl<'de> serde::Deserialize<'de> for DataSheet {
             floating_notes: raw.floating_notes,
             color_tag: raw.color_tag,
             exclusion_notes: raw.exclusion_notes,
+            plate_well_origins: raw.plate_well_origins,
         };
         sheet.validate().map_err(serde::de::Error::custom)?;
         sheet.validate_finite_metadata().map_err(serde::de::Error::custom)?;
@@ -291,12 +336,13 @@ impl DataSheet {
             floating_notes: Vec::new(),
             color_tag: None,
             exclusion_notes: Vec::new(),
+            plate_well_origins: Vec::new(),
         };
         sheet.validate()?;
         Ok(sheet)
     }
 
-    /// Validate identifier bounds, title bounds, table archetype invariants, and floating notes.
+    /// Validate identifier bounds, title bounds, table archetype invariants, plate well origins, and floating notes.
     pub fn validate(&self) -> Result<(), DocError> {
         self.id.validate_non_empty_bounded()?;
         validate_title(&self.title)?;
@@ -309,6 +355,21 @@ impl DataSheet {
             }
         }
         self.archetype.validate()?;
+        if !self.plate_well_origins.is_empty() {
+            let mut seen = BTreeSet::new();
+            for origin in &self.plate_well_origins {
+                if origin.well.trim().is_empty() {
+                    return Err(DocError::EmptyIdentifier);
+                }
+                validate_title(&origin.well)?;
+                if self.archetype.data_cell(origin.coord).is_none() {
+                    return Err(DocError::CellOutOfBounds { row: origin.coord.row, col: origin.coord.col, subcol: origin.coord.subcol });
+                }
+                if !seen.insert(origin.coord) {
+                    return Err(DocError::InvalidIdentifier { reason: "duplicate plate well origin coordinate" });
+                }
+            }
+        }
         for note in &self.floating_notes {
             note.validate_id()?;
         }
@@ -367,15 +428,19 @@ impl DataSheet {
     }
 
     /// Mutate a data cell at `coord` (enforces freeze state and bounds; refreshes inferred role on
-    /// `MultipleVariables` columns).
+    /// `MultipleVariables` columns; clears any stale [`PlateCellOrigin`] when the cell value changes).
     pub fn set_cell(&mut self, coord: CellCoord, cell: Cell) -> Result<(), DocError> {
         self.ensure_mutable()?;
         let Some(slot) = self.archetype.data_cell_mut(coord) else {
             return Err(DocError::CellOutOfBounds { row: coord.row, col: coord.col, subcol: coord.subcol });
         };
+        let value_changed = slot.value != cell.value;
         *slot = cell;
         if !slot.excluded {
             self.exclusion_notes.retain(|entry| entry.coord != coord);
+        }
+        if value_changed && !self.plate_well_origins.is_empty() {
+            self.plate_well_origins.retain(|entry| entry.coord != coord);
         }
         if let TableArchetype::MultipleVariables(mv) = &mut self.archetype
             && let Some(var) = mv.variables.get_mut(coord.col)
@@ -433,6 +498,23 @@ impl DataSheet {
     /// Remove any `exclusion_notes` entry whose target cell is missing or no longer excluded.
     pub fn prune_stale_exclusion_notes(&mut self) {
         self.exclusion_notes.retain(|entry| self.archetype.data_cell(entry.coord).is_some_and(|c| c.excluded));
+    }
+
+    /// Look up the source microplate well ID mapped to `coord`, if any (`R17.7`).
+    #[must_use]
+    pub fn plate_well_origin(&self, coord: CellCoord) -> Option<&str> {
+        self.plate_well_origins.iter().find(|entry| entry.coord == coord).map(|entry| entry.well.as_str())
+    }
+
+    /// Remove any `plate_well_origins` entry whose target cell is out of bounds or empty, preserving
+    /// origins attached to excluded numeric/text cells (`R17.7`).
+    pub fn prune_stale_plate_well_origins(&mut self) {
+        if self.plate_well_origins.is_empty() {
+            return;
+        }
+        self.plate_well_origins.retain(|entry| self.archetype.data_cell(entry.coord).is_some_and(|c| !matches!(c.value, CellValue::Empty)));
+        self.plate_well_origins.sort_by_key(|entry| entry.coord);
+        self.plate_well_origins.dedup_by_key(|entry| entry.coord);
     }
 
     /// Read an independent `X` (`Xy`) or elapsed-time (`Survival`, `subcol == 0`) cell.
@@ -514,6 +596,11 @@ impl DataSheet {
                 note.coord.row = note.coord.row.saturating_add(insert_rows);
             }
         }
+        for origin in &mut self.plate_well_origins {
+            if origin.coord.row >= start_row {
+                origin.coord.row = origin.coord.row.saturating_add(insert_rows);
+            }
+        }
         for region in &mut self.linked_regions {
             if region.target_range.start.row >= start_row {
                 region.target_range.start.row = region.target_range.start.row.saturating_add(insert_rows);
@@ -587,6 +674,11 @@ impl DataSheet {
         cloned.floating_notes.clear();
         apply_clone_options(&mut cloned.archetype, opts)?;
         cloned.prune_stale_exclusion_notes();
+        if opts.clear_y_values {
+            cloned.plate_well_origins.clear();
+        } else {
+            cloned.prune_stale_plate_well_origins();
+        }
         cloned.validate()?;
         Ok(cloned)
     }

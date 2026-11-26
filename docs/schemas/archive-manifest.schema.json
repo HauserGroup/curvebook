@@ -127,7 +127,7 @@
       "type": "string"
     },
     "schema_version": {
-      "maximum": 7,
+      "maximum": 8,
       "minimum": 0,
       "type": "integer"
     },

@@ -718,6 +718,11 @@ fn cell_exclusion_note_schema() -> SchemaNode {
     .with_title("CellExclusionNote")
 }
 
+fn plate_cell_origin_schema() -> SchemaNode {
+    object_schema(vec![("coord", ref_schema("CellCoord")), ("well", title_string_schema().with_min_length(1))], &["coord", "well"], false)
+        .with_title("PlateCellOrigin")
+}
+
 fn linked_data_region_schema() -> SchemaNode {
     let range = object_schema(vec![("start", ref_schema("CellCoord")), ("end", ref_schema("CellCoord"))], &["start", "end"], false);
     let link_spec = SchemaNode { schema_type: Some(SchemaTypeSpec::Single(SchemaType::Object)), ..SchemaNode::default() };
@@ -975,6 +980,7 @@ fn data_sheet_schema() -> SchemaNode {
             ("floating_notes", array_schema(ref_schema("FloatingNote"))),
             ("color_tag", nullable_schema(ref_schema("Rgba8"))),
             ("exclusion_notes", array_schema(ref_schema("CellExclusionNote"))),
+            ("plate_well_origins", array_schema(ref_schema("PlateCellOrigin"))),
         ],
         &["id", "title", "archetype", "frozen", "info_sheet_id", "linked_regions", "floating_notes", "color_tag"],
         false,
@@ -1155,6 +1161,7 @@ pub fn project_document_schema() -> SchemaNode {
     .with_def("FloatingNote", floating_note_schema())
     .with_def("CellCoord", cell_coord_schema())
     .with_def("CellExclusionNote", cell_exclusion_note_schema())
+    .with_def("PlateCellOrigin", plate_cell_origin_schema())
     .with_def("LinkedDataRegion", linked_data_region_schema())
     .with_def("TableArchetype", table_archetype_schema())
     .with_def("InfoConstant", info_constant_schema())

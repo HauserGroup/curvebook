@@ -238,11 +238,18 @@ fn format_registry_lookup_and_roundtrips() {
 }
 
 #[test]
-fn persisted_schemas_cover_all_five_draft_2020_12_formats() {
+fn persisted_schemas_cover_all_six_draft_2020_12_formats() {
     let schemas = all_persisted_schemas();
     assert_eq!(
         schemas.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
-        vec!["archive-manifest.schema.json", "document.schema.json", "batch-v1.schema.json", "preferences.schema.json", "journal-record.schema.json"]
+        vec![
+            "archive-manifest.schema.json",
+            "document.schema.json",
+            "batch-v1.schema.json",
+            "preferences.schema.json",
+            "journal-record.schema.json",
+            "plate-map.schema.json",
+        ]
     );
     for (name, schema) in &schemas {
         let obj = schema.as_object().unwrap();
@@ -263,6 +270,11 @@ fn persisted_schemas_cover_all_five_draft_2020_12_formats() {
             && journal["$defs"].get("JournalOpRecord").is_some()
             && journal["$defs"].get("JournalLockLease").is_some()
     );
+    let plate_map = find("plate-map.schema.json");
+    assert_eq!(plate_map["properties"]["format_version"]["maximum"], json!(1));
+    assert_eq!(plate_map["properties"]["wells"]["minItems"], json!(96));
+    assert_eq!(plate_map["properties"]["wells"]["maxItems"], json!(384));
+    assert!(plate_map["$defs"].get("PlateWellRole").is_some());
 }
 
 fn synthesize_legacy_archive_zip(doc: &ProjectDocument, kind: &str) -> Vec<u8> {

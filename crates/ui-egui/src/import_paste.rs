@@ -325,6 +325,7 @@ fn build_filter_spec(state: &ImportPasteState) -> ImportFilterSpec {
         parse_asterisk_exclusions: state.parse_asterisk_exclusions,
         baseline: None,
         exclude_row_predicate: None,
+        row_match: None,
     }
 }
 

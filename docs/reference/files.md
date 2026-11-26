@@ -31,7 +31,7 @@ CurveBook also supports reading and writing unpacked, Git-friendly project direc
 
 ### `.cbtemplate` Reusable Templates {#cbtemplate}
 
-Saving a template (`project.saveTemplate` -> `.cbtemplate`, `ArchiveKind::Template`) calls `strip_project_data_for_template`, which clears project-specific raw table cell observations and cached computed `ResultSheet` tab numbers while preserving:
+Saving a template (`project.saveTemplate` -> `.cbtemplate`, `ArchiveKind::Template`) calls `strip_project_data_for_template`, which clears project-specific raw table cell observations, `exclusion_notes`, `plate_well_origins`, and cached computed `ResultSheet` tab numbers while preserving:
 
 - Table archetypes, column headers, subcolumn layouts, and `=` Calculated Variable formulas
 - `InfoSheet` constants (`HookSource` targets)
@@ -39,9 +39,13 @@ Saving a template (`project.saveTemplate` -> `.cbtemplate`, `ArchiveKind::Templa
 
 Instantiating (`project.instantiateTemplate`) creates a fresh independent project ready for incoming data.
 
+### `.cbplate` Microplate Layouts {#cbplate}
+
+Reusable 96-well (`8×12`) and 384-well (`16×24`) microplate role assignments persist as single-extension **`.cbplate`** UTF-8 JSON (`PlateMapFile`, `CURRENT_PLATE_MAP_VERSION = 1`, `docs/schemas/plate-map.schema.json`), distinct from `.cbtemplate` ZIP project templates and `.json` result exports. Legacy unversioned plate JSON migrates cleanly (`v0 -> v1`); files declaring `format_version > 1` are refused cleanly on load and never overwritten on save, and all writes go through atomic temp-file write + rename (`curvebook_platform::fs::write_atomic`).
+
 ### Complete-Workspace Sharing vs. Linked Data {#sharing}
 
-A `.curvebook` archive embeds all `DataSheet` values, exclusion notes, `InfoSheet` constants, `ResultSheet` outputs, `GraphSheet`s, and `LayoutSheet`s inside a single self-contained file for collaborator sharing. Projects referencing external disk imports via `ImportLinkSpec` retain provenance metadata; headless/MCP opens under `--workdir` reject stored external link escapes outside the allowed workspace root.
+A `.curvebook` archive embeds all `DataSheet` values, exclusion notes, `plate_well_origins`, `InfoSheet` constants, `ResultSheet` outputs, `GraphSheet`s, and `LayoutSheet`s inside a single self-contained file for collaborator sharing. Projects referencing external disk imports via `ImportLinkSpec` retain provenance metadata; headless/MCP opens under `--workdir` reject stored external link escapes outside the allowed workspace root.
 
 ---
 
@@ -49,11 +53,12 @@ A `.curvebook` archive embeds all `DataSheet` values, exclusion notes, `InfoShee
 
 | Format / Record | Current Version Constant | Migration & Safety Rule |
 |---|---:|---|
-| Project / Template (`document.json`, `manifest.json`) | `CURRENT_SCHEMA_VERSION = 7` | Migrations (`migrate_document_json`, `VersionStep`) automatically upgrade schemas `0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7`. Files with `schema_version > CURRENT_SCHEMA_VERSION` fail on open with `UnsupportedSchemaVersion` (`unsupported_version`). |
+| Project / Template (`document.json`, `manifest.json`) | `CURRENT_SCHEMA_VERSION = 8` | Migrations (`migrate_document_json`, `VersionStep`) automatically upgrade schemas `0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8`. Files with `schema_version > CURRENT_SCHEMA_VERSION` fail on open with `UnsupportedSchemaVersion` (`unsupported_version`). |
+| Plate Map Layout (`.cbplate`) | `CURRENT_PLATE_MAP_VERSION = 1` | Migrates legacy unversioned `v0 -> v1` in memory; `format_version > 1` fails cleanly with `UnsupportedSchemaVersion` on load and refuses overwrite on save. |
 | User Preferences (`preferences.json`) | `CURRENT_PREFERENCES_VERSION = 1` | Unknown extension fields preserved via `additionalProperties`; `version > 1` triggers warning/refusal without silent overwrite. |
 | Recovery WAL (`ops.journal` & `curvebook.lock`) | `CURRENT_JOURNAL_VERSION = 2`<br>`CURRENT_LOCK_VERSION = 1` | Strict NDJSON line validation, per-record CRC-32 checking, and CRC-verified `v1` to `v2` upgrade in memory before replay. |
 
-**Forward-Overwrite Guard:** Before writing to an existing `.curvebook`, `.cbtemplate`, or `.curvebook.d/` target (`save_project_file`, `save_template_file`, `save_project_unpacked_dir`), CurveBook inspects the existing target's metadata on disk and **refuses to overwrite** any file or directory carrying `schema_version > CURRENT_SCHEMA_VERSION`, leaving newer collaborator files intact byte-for-byte.
+**Forward-Overwrite Guard:** Before writing to an existing `.curvebook`, `.cbtemplate`, `.curvebook.d/`, or `.cbplate` target (`save_project_file`, `save_template_file`, `save_project_unpacked_dir`, `save_cbplate_file`), CurveBook inspects the existing target's metadata on disk and **refuses to overwrite** any file or directory carrying a schema version greater than the running binary's maximum supported version, leaving newer collaborator files intact byte-for-byte.
 
 ---
 

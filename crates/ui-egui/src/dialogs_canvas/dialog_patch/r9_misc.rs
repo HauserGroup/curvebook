@@ -17,7 +17,9 @@ use crate::dialogs_r9::{
     InsertModelEquationDialogState, RandomSampleRowsDialogState, RandomizationSchemeKind, RandomizeGroupsDialogState, SimDistKind,
     SimulateDistributionsDialogState, SimulatedDistColumnDraft,
 };
-use crate::grid_view::{ImportReshapeMode, ImportReshapeState};
+use crate::grid_view::{
+    ImportReshapeMode, ImportReshapeState, PlateLayoutSourceMode, PlateMatchWellsKind, PlateSourceReducerKind, PlateValuesSourceMode,
+};
 use crate::i18n::LocalePreset;
 use crate::power_wizard::{PowerEffectInputMode, PowerWizardStage, PowerWizardState};
 
@@ -570,6 +572,35 @@ pub fn patch_import_reshape(state: &mut ImportReshapeState, fields: &Map<String,
         FieldRule::new(&["replicate_col", "import.replicate_col"], "replicate_col", FieldKind::OptNonEmptyStr),
         FieldRule::new(&["value_col", "import.value_col"], "value_col", FieldKind::Str),
         FieldRule::new(&["excluded_col", "import.excluded_col"], "excluded_col", FieldKind::OptNonEmptyStr),
+        FieldRule::new(
+            &["plate_source_sheet_id", "source_sheet_id", "import.plate_source_sheet_id"],
+            "plate_source_sheet_id",
+            FieldKind::OptNonEmptyStr,
+        ),
+        FieldRule::new(
+            &["plate_source_value_column", "source_value_column", "import.plate_source_value_column"],
+            "plate_source_value_column",
+            FieldKind::Str,
+        ),
+        FieldRule::new(
+            &["plate_source_row_index", "source_row_index", "import.plate_source_row_index"],
+            "plate_source_row_index",
+            FieldKind::UsizeMin(0),
+        ),
+        FieldRule::new(&["plate_source_x_min", "source_x_min", "import.plate_source_x_min"], "plate_source_x_min", FieldKind::OptFiniteF64),
+        FieldRule::new(&["plate_source_x_max", "source_x_max", "import.plate_source_x_max"], "plate_source_x_max", FieldKind::OptFiniteF64),
+        FieldRule::new(
+            &["plate_layout_sheet_id", "layout_sheet_id", "import.plate_layout_sheet_id"],
+            "plate_layout_sheet_id",
+            FieldKind::OptNonEmptyStr,
+        ),
+        FieldRule::new(
+            &["plate_x_grid_sheet_id", "x_grid_sheet_id", "import.plate_x_grid_sheet_id"],
+            "plate_x_grid_sheet_id",
+            FieldKind::OptNonEmptyStr,
+        ),
+        FieldRule::new(&["plate_template_path", "import.plate_template_path"], "plate_template_path", FieldKind::Str),
+        FieldRule::new(&["plate_status_message", "import.plate_status_message"], "plate_status_message", FieldKind::OptNonEmptyStr),
     ];
 
     for (key, val) in fields {
@@ -598,6 +629,53 @@ pub fn patch_import_reshape(state: &mut ImportReshapeState, fields: &Map<String,
                 let arr = val.as_array().ok_or_else(|| String::from("`plate_roles` must be an array"))?;
                 patch.insert(String::from("plate_roles"), Value::Array(arr.clone()));
             }
+            "plate_values_source" | "values_source" | "import.plate_values_source" => {
+                let raw = parse_str_field(val, key)?;
+                let mode = match norm_key(raw).as_str() {
+                    "pastegrid" | "paste" | "grid" => PlateValuesSourceMode::PasteGrid,
+                    "existingsheet" | "sheet" | "auc" | "result" => PlateValuesSourceMode::ExistingSheet,
+                    _ => return Err(format!("unsupported `plate_values_source` `{raw}`")),
+                };
+                patch.insert(String::from("plate_values_source"), serde_json::to_value(mode).map_err(|e| e.to_string())?);
+            }
+            "plate_source_reducer" | "source_reducer" | "import.plate_source_reducer" => {
+                let raw = parse_str_field(val, key)?;
+                let red = match norm_key(raw).as_str() {
+                    "valuecolumn" | "column" | "wellperrow" => PlateSourceReducerKind::ValueColumn,
+                    "rowindex" | "row" => PlateSourceReducerKind::RowIndex,
+                    "xwindowmean" | "windowmean" | "window" => PlateSourceReducerKind::XWindowMean,
+                    "min" => PlateSourceReducerKind::Min,
+                    "max" => PlateSourceReducerKind::Max,
+                    _ => return Err(format!("unsupported `plate_source_reducer` `{raw}`")),
+                };
+                patch.insert(String::from("plate_source_reducer"), serde_json::to_value(red).map_err(|e| e.to_string())?);
+            }
+            "plate_match_wells" | "match_wells" | "import.plate_match_wells" => {
+                let raw = parse_str_field(val, key)?;
+                let mw = match norm_key(raw).as_str() {
+                    "bywellid" | "wellid" | "id" => PlateMatchWellsKind::ByWellId,
+                    "positional" | "position" => PlateMatchWellsKind::Positional,
+                    _ => return Err(format!("unsupported `plate_match_wells` `{raw}`")),
+                };
+                patch.insert(String::from("plate_match_wells"), serde_json::to_value(mw).map_err(|e| e.to_string())?);
+            }
+            "plate_layout_source" | "layout_source" | "import.plate_layout_source" => {
+                let raw = parse_str_field(val, key)?;
+                let ls = match norm_key(raw).as_str() {
+                    "interactivegrid" | "interactive" | "grid" | "roles" => PlateLayoutSourceMode::InteractiveGrid,
+                    "layoutsheet" | "sheet" => PlateLayoutSourceMode::LayoutSheet,
+                    _ => return Err(format!("unsupported `plate_layout_source` `{raw}`")),
+                };
+                patch.insert(String::from("plate_layout_source"), serde_json::to_value(ls).map_err(|e| e.to_string())?);
+            }
+            "plate_blank_labels" | "blank_labels" | "import.plate_blank_labels" => {
+                let labels = parse_plate_label_list(val)?;
+                patch.insert(String::from("plate_blank_labels"), json!(labels));
+            }
+            "plate_positive_control_labels" | "positive_control_labels" | "import.plate_positive_control_labels" => {
+                let labels = parse_plate_label_list(val)?;
+                patch.insert(String::from("plate_positive_control_labels"), json!(labels));
+            }
             "tidy_delimiter" | "delimiter" | "import.delimiter" => {
                 let s = parse_str_field(val, "delimiter")?;
                 let delim = match s.trim().to_ascii_lowercase().as_str() {
@@ -614,6 +692,26 @@ pub fn patch_import_reshape(state: &mut ImportReshapeState, fields: &Map<String,
     }
 
     merge_struct_json(state, &patch, &[])
+}
+
+fn parse_plate_label_list(val: &Value) -> Result<Vec<String>, String> {
+    if val.is_null() {
+        return Ok(Vec::new());
+    }
+    if let Some(arr) = val.as_array() {
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr {
+            let s = item.as_str().ok_or_else(|| String::from("plate label list items must be strings"))?.trim();
+            if !s.is_empty() {
+                out.push(s.to_owned());
+            }
+        }
+        return Ok(out);
+    }
+    if let Some(s) = val.as_str() {
+        return Ok(s.split([',', ';', '\n']).map(str::trim).filter(|t| !t.is_empty()).map(ToOwned::to_owned).collect());
+    }
+    Err(String::from("plate label list must be an array, string, or null"))
 }
 
 fn parse_wizard_power_family_str(raw: &str) -> Result<PowerTestFamily, String> {

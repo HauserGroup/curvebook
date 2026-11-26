@@ -35,7 +35,7 @@ fn patch_ep(app: &mut UiApp, val: Value) -> TestRes {
 
 #[test]
 fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
-    assert_eq!((UI_COMMANDS.len(), catalog_len()), (61, 796));
+    assert_eq!((UI_COMMANDS.len(), catalog_len()), (61, 870));
     assert!(UI_COMMANDS.iter().any(|c| c.id == "ui.editParams.open" && c.shortcut == "Cmd+T"));
     let ep_i18n = CATALOG.iter().find(|e| e.key == "cmd.ui.editParams.open").ok_or("missing cmd.ui.editParams.open")?;
     assert_eq!(ep_i18n.translations.len(), LOCALES.len());

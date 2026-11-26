@@ -171,6 +171,7 @@ fn qol1_lossy_guard_and_unsupported_archetype() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn qol2_plate_96_ic50_to_xy_blank_subtraction_excluded_and_cbtemplate_roundtrip() {
     let mut tpl = PlateMapTemplate::new("96-Well IC50", PlateGeometry::Wells96, "Concentration_nM").unwrap();
     let mut values = vec![None; PlateGeometry::Wells96.well_count()];
@@ -411,6 +412,7 @@ fn qol1_mv_to_contingency_and_invalid_count_rejection() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn qol2_cbtemplate_json_float_roundtrip_and_guards() {
     let exact_floats = [
         0.0_f64,

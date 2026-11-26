@@ -52,7 +52,12 @@ pub use ops::{
     execute_math_transform, execute_normalize, execute_prune, execute_remove_baseline, execute_remove_baseline_kind, execute_select,
     execute_select_with_derived, execute_transform, execute_transpose,
 };
-pub use plate_and_tidy::{PlateGeometry, PlateMapTemplate, PlateWellRole, TidyColumnMapping, map_plate_to_datasheet, pivot_tidy_long_to_datasheet};
+pub use plate_and_tidy::{
+    ExtractedPlateValues, PlateGeometry, PlateGridBuildOptions, PlateKineticReducer, PlateMapOutput, PlateMapTemplate, PlateSourceExtraction,
+    PlateWellCellEntry, PlateWellMatchMode, PlateWellRole, PlateXGrid, TidyColumnMapping, build_plate_template_from_grids,
+    extract_plate_grid_from_datasheet, extract_plate_values_from_analyzable_sheet, extract_plate_x_grid_from_datasheet, map_plate_to_datasheet,
+    map_plate_to_datasheet_with_origins, pivot_tidy_long_to_datasheet,
+};
 pub use randomize::{
     AllocationScheme, DistributionSimulationConfig, GroupAllocationWeight, RandomizationOutput, RowSampleConfig, SimulatedColumnSpec,
     SimulatedDistribution, SubjectRandomizationConfig, random_sample_rows, randomize_subjects_to_groups, sample_row_indices,

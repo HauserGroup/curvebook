@@ -1,10 +1,10 @@
 //! Static searchable `Analyze...` catalog, categories, and default [`AnalysisKind`] mapping.
 
 use curvebook_doc::{
-    AnalysisKind, BaselineOperation, BlandAltmanSpec, ContingencySpec, CoxTieMethod, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec,
-    GlmFamily, GlmSpec, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec,
-    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, RocSpec,
-    SimpleLogisticSpec, SplineLowessSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
+    AnalysisKind, AreaUnderCurveSpec, BaselineOperation, BlandAltmanSpec, ContingencySpec, CoxTieMethod, DescriptiveSpec, ErrorPropagationMode,
+    FactorialAnovaSpec, GlmFamily, GlmSpec, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec,
+    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec,
+    RocSpec, SimpleLogisticSpec, SplineLowessSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
 };
 
 use serde::{Deserialize, Serialize};
@@ -110,6 +110,13 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         category: AnalysisCategory::Transform,
         keywords: "sample random stratified subset rows seed reproducible",
         summary: "Draw a reproducible simple or stratified random sample of rows.",
+    },
+    AnalysisCatalogItem {
+        id: "transform.auc",
+        label: "Area Under the Curve (AUC)",
+        category: AnalysisCategory::Transform,
+        keywords: "auc area under curve trapezoid baseline peak kinetic partial bailer integral",
+        summary: "Trapezoidal positive, negative, net, and total area under XY curves with peak detection.",
     },
     AnalysisCatalogItem {
         id: "stats.descriptive",
@@ -335,6 +342,7 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             stratify_column: None,
             proportional_allocation: true,
         })),
+        "transform.auc" => Some(AnalysisKind::AreaUnderCurve(AreaUnderCurveSpec::default())),
         "stats.descriptive" => Some(AnalysisKind::DescriptiveStats(DescriptiveSpec::default())),
         "stats.outliers" => Some(AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: 1.0 })),
         "stats.two_group" => Some(AnalysisKind::TwoGroupComparison(TwoGroupSpec::default())),

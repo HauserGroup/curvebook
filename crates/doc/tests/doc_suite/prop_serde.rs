@@ -183,6 +183,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
                     parse_asterisk_exclusions: true,
                     baseline: None,
                     exclude_row_predicate: None,
+                    row_match: None,
                 },
                 placement: ImportPlacementSpec {
                     mode: PlacementMode::Overwrite,

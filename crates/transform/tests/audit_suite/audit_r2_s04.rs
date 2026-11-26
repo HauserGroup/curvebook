@@ -301,6 +301,7 @@ fn r2_s04_07_mv_wide_pivot_cell_budgets() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn r2_s04_08_title_length_validation_across_plate_tidy_and_convert() {
     let over = "A".repeat(MAX_TITLE_BYTES + 1);
     let is_too_long = |err: TransformError| matches!(err, TransformError::Doc(DocError::TitleTooLong { .. }));
@@ -504,6 +505,7 @@ fn r2_s04_12_execute_select_clears_calculated_role_on_snapshot() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn r2_s04_13_plate_arm_collision_and_template_empty_name_json_guards() {
     let mut tpl = PlateMapTemplate::new("Collision Plate", PlateGeometry::Wells96, "Conc").unwrap();
     for (c, role) in [

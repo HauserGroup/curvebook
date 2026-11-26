@@ -20,7 +20,7 @@ use curvebook_doc::{
     TableKind, WeightingScheme,
 };
 use curvebook_fit::{DataPoint, EquationCategory, format_model_equation_tex, get_builtin_model, list_builtin_equations};
-use curvebook_format::registry::{FormatDescriptor, FormatKind, FormatRegistry};
+use curvebook_format::registry::{DESC_PLATE_MAP, FormatDescriptor, FormatKind, FormatRegistry};
 use curvebook_mcp::{
     PromptDescriptor, ResourceDescriptor, ToolDefinition, list_gui_tools, list_prompts, list_resources, list_tools, list_tools_for_group,
 };
@@ -1256,12 +1256,17 @@ fn build_formats_page(root: &Path, az: &mut Vec<AzEntry>, expected: &mut Expecte
             merged.push(desc);
         }
     }
+    if seen.insert(DESC_PLATE_MAP.id) {
+        import_ids.insert(DESC_PLATE_MAP.id);
+        export_ids.insert(DESC_PLATE_MAP.id);
+        merged.push(DESC_PLATE_MAP);
+    }
 
     let mut toc = Vec::new();
     let mut body = String::with_capacity(24_576);
     let _ = writeln!(
         body,
-        "<p class=\"lead\">Import/export format descriptors compiled from <code>FormatRegistry::default_registry()</code> (<strong>{}</strong> formats) alongside persisted JSON Schemas and supported UI locales.</p>",
+        "<p class=\"lead\">Import/export format descriptors compiled from <code>FormatRegistry::default_registry()</code> and <code>DESC_PLATE_MAP</code> (<strong>{}</strong> formats) alongside persisted JSON Schemas and supported UI locales.</p>",
         merged.len(),
     );
 
@@ -1278,13 +1283,14 @@ fn build_formats_page(root: &Path, az: &mut Vec<AzEntry>, expected: &mut Expecte
             let exts: Vec<String> = desc.extensions.iter().map(|e| format!(".{e}")).collect();
             let can_in = if import_ids.contains(desc.id) { "yes" } else { "no" };
             let can_out = if export_ids.contains(desc.id) { "yes" } else { "no" };
+            let kind_label = if desc.id == DESC_PLATE_MAP.id { "Plate Map Layout" } else { format_kind_label(desc.kind) };
             let _ = writeln!(
                 body,
                 "<tr id=\"{anchor}\" tabindex=\"-1\"><td><code>{}</code></td><td>{}</td><td><code>{}</code></td><td>{}</td><td>{can_in}</td><td>{can_out}</td></tr>",
                 escape_html(desc.id),
                 escape_html(desc.label),
                 escape_html(&exts.join(", ")),
-                escape_html(format_kind_label(desc.kind)),
+                escape_html(kind_label),
             );
         }
     });
@@ -1295,6 +1301,7 @@ fn build_formats_page(root: &Path, az: &mut Vec<AzEntry>, expected: &mut Expecte
         ("document.schema.json", "schema-document", "Project Document Schema", None),
         ("archive-manifest.schema.json", "schema-archive-manifest", "Archive Manifest Schema", None),
         ("journal-record.schema.json", "schema-journal-record", "Autosave Journal Record Schema", None),
+        ("plate-map.schema.json", "schema-plate-map", "Plate Map Layout Schema (.cbplate)", None),
     ];
 
     for (file_name, anchor, title, key_prefix) in schema_files {
@@ -1350,7 +1357,7 @@ fn build_formats_page(root: &Path, az: &mut Vec<AzEntry>, expected: &mut Expecte
 
     Ok(reg_page(
         "Formats, Schemas & Locales Registry",
-        "Registered import/export file formats, JSON Schemas (preferences, batch-v1, document, archive, journal), and supported locales.",
+        "Registered import/export file formats, JSON Schemas (preferences, batch-v1, document, archive, journal, plate-map), and supported locales.",
         "registry/formats.html",
         toc,
         body,

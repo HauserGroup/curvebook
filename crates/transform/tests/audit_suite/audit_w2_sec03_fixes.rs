@@ -227,6 +227,7 @@ fn fa_sec03_07_normalize_wide_span_simulate_wide_bounds_and_cv_warnings() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn fa_sec03_08_json_parser_linear_on_large_non_ascii_template() {
     let label = "µg_αβγ_".repeat(16);
     let wells =

@@ -1,0 +1,97 @@
+{
+  "$defs": {
+    "PlateWellRole": {
+      "oneOf": [
+        {
+          "const": "Blank",
+          "type": "string"
+        },
+        {
+          "const": "PositiveControl",
+          "type": "string"
+        },
+        {
+          "const": "Excluded",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Treatment": {
+              "additionalProperties": false,
+              "properties": {
+                "dilution_x": {
+                  "type": "number"
+                },
+                "group_name": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "replicate": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "group_name",
+                "dilution_x",
+                "replicate"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Treatment"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "PlateWellRole"
+    }
+  },
+  "$id": "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/plate-map.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Draft 2020-12 schema for versioned CurveBook .cbplate microplate layout files.",
+  "properties": {
+    "format_version": {
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "geometry": {
+      "enum": [
+        "Wells96",
+        "Wells384"
+      ],
+      "type": "string"
+    },
+    "name": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    },
+    "wells": {
+      "items": {
+        "$ref": "#/$defs/PlateWellRole"
+      },
+      "maxItems": 384,
+      "minItems": 96,
+      "type": "array"
+    },
+    "x_title": {
+      "maxLength": 4096,
+      "type": "string"
+    }
+  },
+  "required": [
+    "format_version",
+    "name",
+    "geometry",
+    "x_title",
+    "wells"
+  ],
+  "title": "PlateMapFile",
+  "type": "object"
+}
