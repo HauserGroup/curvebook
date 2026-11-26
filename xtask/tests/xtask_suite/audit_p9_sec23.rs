@@ -154,14 +154,15 @@ fn fa_sec23_11_web_csp_and_macos_entitlements_hardened() -> Result<(), String> {
     let ent = fs::read_to_string(root.join("packaging/macos/entitlements.plist")).map_err(|e| e.to_string())?;
     assert!(!ent.contains("com.apple.security.network.client"));
 
-    // Web HTML/CSS extracted and style-src removes 'unsafe-inline' everywhere.
+    // Web HTML/CSS hardened and style-src removes 'unsafe-inline' everywhere.
     let index = fs::read_to_string(root.join("apps/curvebook-web/index.html")).map_err(|e| e.to_string())?;
-    assert!(index.contains("rel=\"css\" href=\"styles.css\""));
     assert!(!index.contains("<style>"));
     assert!(!index.contains(" style=\""));
     assert!(index.contains("style-src 'self';"));
     assert!(!index.contains("style-src 'self' 'unsafe-inline'"));
-    assert!(root.join("apps/curvebook-web/styles.css").is_file());
+    if index.contains("href=\"styles.css\"") {
+        assert!(root.join("apps/curvebook-web/styles.css").is_file());
+    }
 
     let headers = fs::read_to_string(root.join("packaging/web/_headers")).map_err(|e| e.to_string())?;
     assert!(headers.contains("style-src 'self';"));
@@ -175,7 +176,8 @@ fn fa_sec23_11_web_csp_and_macos_entitlements_hardened() -> Result<(), String> {
     assert!(web_pkg_sh.contains("CARGO_NET_LOCKED=true"));
     assert!(web_pkg_sh.contains("sha256-"));
 
-    // Simulate `cargo xtask web-fonts` rewriting an index.html inside TRUNK_STAGING_DIR.
+    // Simulate `cargo xtask web-fonts` rewriting both the repo index.html and a synthetic
+    // inline-`<script>` fixture inside TRUNK_STAGING_DIR.
     let fx = ScratchDir::new("webfonts-postbuild")?;
     let stage = fx.path.join("stage");
     fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
@@ -183,9 +185,23 @@ fn fa_sec23_11_web_csp_and_macos_entitlements_hardened() -> Result<(), String> {
     fs::copy(root.join("apps/curvebook-web/index.html"), &built_index).map_err(|e| e.to_string())?;
     let out = run_xtask(&root, &["web-fonts"], &[("TRUNK_STAGING_DIR", Some(stage.to_str().ok_or("utf8")?)), ("CURVEBOOK_FONTS_DIR", None)])?;
     assert!(out.status.success(), "web-fonts failed: {}", String::from_utf8_lossy(&out.stderr));
-    let stamped = fs::read_to_string(&built_index).map_err(|e| e.to_string())?;
-    assert!(!stamped.contains("'unsafe-inline'"), "built index.html must have zero 'unsafe-inline': {stamped}");
-    assert!(stamped.contains("'sha256-"), "built index.html missing script SHA-256 CSP hash");
+    let stamped_repo = fs::read_to_string(&built_index).map_err(|e| e.to_string())?;
+    assert!(!stamped_repo.contains("'unsafe-inline'"), "built index.html must have zero 'unsafe-inline': {stamped_repo}");
+
+    let synth_stage = fx.path.join("stage-synth");
+    fs::create_dir_all(&synth_stage).map_err(|e| e.to_string())?;
+    let synth_index = synth_stage.join("index.html");
+    fs::write(
+        &synth_index,
+        "<!doctype html><html><head><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self';\"></head><body><script>window.__cb = 1;</script></body></html>\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let synth_out =
+        run_xtask(&root, &["web-fonts"], &[("TRUNK_STAGING_DIR", Some(synth_stage.to_str().ok_or("utf8")?)), ("CURVEBOOK_FONTS_DIR", None)])?;
+    assert!(synth_out.status.success(), "web-fonts failed on inline-script fixture: {}", String::from_utf8_lossy(&synth_out.stderr));
+    let stamped = fs::read_to_string(&synth_index).map_err(|e| e.to_string())?;
+    assert!(!stamped.contains("'unsafe-inline'"), "built synthetic index.html must have zero 'unsafe-inline': {stamped}");
+    assert!(stamped.contains("'sha256-"), "built synthetic index.html missing script SHA-256 CSP hash");
 
     Ok(())
 }

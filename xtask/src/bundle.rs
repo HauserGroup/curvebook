@@ -15,31 +15,25 @@ pub fn run(root: &Path) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Err(String::from("macOS .app bundling requires macOS (plutil + codesign)"));
     }
-    let cargo_toml = std::fs::read_to_string(root.join("Cargo.toml")).map_err(|e| format!("Cargo.toml: {e}"))?;
-    let version = crate::version::read_workspace_version(&cargo_toml)?;
+    let version = crate::version::read_workspace_version(&std::fs::read_to_string(root.join("Cargo.toml")).map_err(|e| format!("Cargo.toml: {e}"))?)?;
     let sha = git_short_sha(root);
-
     build_release_binaries(root, &sha)?;
-
-    let dist_dir = root.join("dist");
-    let app_dir = dist_dir.join("CurveBook.app");
+    let (dist_dir, app_dir) = (root.join("dist"), root.join("dist/CurveBook.app"));
     if app_dir.exists() {
         std::fs::remove_dir_all(&app_dir).map_err(|e| format!("clean {}: {e}", app_dir.display()))?;
     }
-
     if let Err(err) = assemble_validate_and_sign(root, &app_dir, &version, &sha) {
         let _ = std::fs::remove_dir_all(&app_dir);
         let _ = std::fs::remove_dir(&dist_dir);
         return Err(err);
     }
-
     println!("bundle: assembled, validated, and signed {} (v{version}, {sha})", app_dir.display());
     Ok(())
 }
 
 fn build_release_binaries(root: &Path, sha: &str) -> Result<(), String> {
     let mut args = vec!["build", "--locked", "--release"];
-    if std::env::var("CARGO_NET_OFFLINE").is_ok_and(|val| val == "true" || val == "1") {
+    if std::env::var("CARGO_NET_OFFLINE").is_ok_and(|v| v == "true" || v == "1") {
         args.push("--offline");
     }
     args.extend(["-p", "curvebook", "-p", "curvebook-cli"]);
@@ -57,86 +51,58 @@ fn build_release_binaries(root: &Path, sha: &str) -> Result<(), String> {
     if !out.stderr.is_empty() {
         eprint!("{}", String::from_utf8_lossy(&out.stderr));
     }
-    if !out.success {
-        return Err(String::from("release build failed"));
-    }
-    Ok(())
+    if out.success { Ok(()) } else { Err(String::from("release build failed")) }
 }
 
 fn assemble_validate_and_sign(root: &Path, app_dir: &Path, version: &str, sha: &str) -> Result<(), String> {
-    let contents = app_dir.join("Contents");
-    let macos_dir = contents.join("MacOS");
-    let res_dir = contents.join("Resources");
-    std::fs::create_dir_all(&macos_dir).map_err(|e| format!("mkdir {}: {e}", macos_dir.display()))?;
-    std::fs::create_dir_all(&res_dir).map_err(|e| format!("mkdir {}: {e}", res_dir.display()))?;
-
+    let (contents, macos_dir, res_dir) = (app_dir.join("Contents"), app_dir.join("Contents/MacOS"), app_dir.join("Contents/Resources"));
+    for d in [&macos_dir, &res_dir] {
+        std::fs::create_dir_all(d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
+    }
     let plist_tpl = std::fs::read_to_string(root.join(PLIST_IN)).map_err(|e| format!("{PLIST_IN}: {e}"))?;
-    let plist = render_info_plist(&plist_tpl, version, sha);
     let plist_path = contents.join("Info.plist");
-    write_atomic(&plist_path, plist.as_bytes()).map_err(|e| format!("write Info.plist: {e}"))?;
+    write_atomic(&plist_path, render_info_plist(&plist_tpl, version, sha).as_bytes()).map_err(|e| format!("write Info.plist: {e}"))?;
     validate_info_plist(&plist_path)?;
-
-    let release_dir = resolve_target_dir(root).join("release");
+    let release_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map_or_else(|| root.join("target"), |p| if p.is_absolute() { p } else { root.join(p) })
+        .join("release");
     for bin in ["curvebook", "curvebook-cli"] {
-        let src = release_dir.join(bin);
-        let dst = macos_dir.join(bin);
+        let (src, dst) = (release_dir.join(bin), macos_dir.join(bin));
         std::fs::copy(&src, &dst).map_err(|e| format!("copy {}: {e}", src.display()))?;
         set_executable(&dst)?;
     }
-
-    let icns = root.join(ICON_ICNS);
-    std::fs::copy(&icns, res_dir.join("curvebook.icns")).map_err(|e| format!("copy {ICON_ICNS}: {e}"))?;
+    std::fs::copy(root.join(ICON_ICNS), res_dir.join("curvebook.icns")).map_err(|e| format!("copy {ICON_ICNS}: {e}"))?;
     copy_bundle_legal_docs(root, &res_dir)?;
-
-    adhoc_codesign_and_verify(app_dir)?;
-    Ok(())
+    adhoc_codesign_and_verify(app_dir)
 }
 
 fn copy_bundle_legal_docs(root: &Path, res_dir: &Path) -> Result<(), String> {
-    const REQUIRED_DOCS: &[&str] = &["LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ATTRIBUTION.md", "ASSETS.md"];
-    const OPTIONAL_DOCS: &[&str] = &["README.md", "LICENSE", "COPYRIGHT"];
-
-    for doc in REQUIRED_DOCS {
+    for doc in ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ATTRIBUTION.md", "ASSETS.md"] {
         let src = root.join(doc);
         if !crate::scan_util::is_regular_file(&src) {
             return Err(format!("missing required legal/attribution file `{doc}` in {}", root.display()));
         }
         std::fs::copy(&src, res_dir.join(doc)).map_err(|e| format!("copy {doc}: {e}"))?;
     }
-    for doc in OPTIONAL_DOCS {
+    for doc in ["README.md", "LICENSE", "COPYRIGHT"] {
         let src = root.join(doc);
         if crate::scan_util::is_regular_file(&src) {
             std::fs::copy(&src, res_dir.join(doc)).map_err(|e| format!("copy {doc}: {e}"))?;
         }
     }
-    let mut copied_third_party = false;
-    for rel in ["THIRD-PARTY-LICENSES.html", "licenses/THIRD-PARTY-LICENSES.html"] {
-        let src = root.join(rel);
-        if crate::scan_util::is_regular_file(&src) {
-            std::fs::copy(&src, res_dir.join("THIRD-PARTY-LICENSES.html")).map_err(|e| format!("copy {rel}: {e}"))?;
-            copied_third_party = true;
-            break;
-        }
-    }
-    if !copied_third_party {
-        return Err(String::from(
+    if let Some(rel) =
+        ["THIRD-PARTY-LICENSES.html", "licenses/THIRD-PARTY-LICENSES.html"].into_iter().find(|r| crate::scan_util::is_regular_file(&root.join(r)))
+    {
+        std::fs::copy(root.join(rel), res_dir.join("THIRD-PARTY-LICENSES.html")).map_err(|e| format!("copy {rel}: {e}"))?;
+        Ok(())
+    } else {
+        Err(String::from(
             "missing required `THIRD-PARTY-LICENSES.html` (or `licenses/THIRD-PARTY-LICENSES.html`); run `cargo xtask licenses --html` first",
-        ));
-    }
-    Ok(())
-}
-
-fn resolve_target_dir(root: &Path) -> PathBuf {
-    match std::env::var_os("CARGO_TARGET_DIR") {
-        Some(raw) => {
-            let path = PathBuf::from(raw);
-            if path.is_absolute() { path } else { root.join(path) }
-        }
-        None => root.join("target"),
+        ))
     }
 }
 
-/// Validate a generated `Info.plist` file (unsubstituted placeholders + `/usr/bin/plutil -lint` on macOS).
 pub fn validate_info_plist(plist_path: &Path) -> Result<(), String> {
     let content = std::fs::read_to_string(plist_path).map_err(|e| format!("read {}: {e}", plist_path.display()))?;
     for token in ["@VERSION@", "@SHORT_VERSION@", "@BUILD_SHA@"] {
@@ -150,14 +116,12 @@ pub fn validate_info_plist(plist_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Ad-hoc codesign a macOS `.app` bundle and verify the resulting signature strictly.
 pub fn adhoc_codesign_and_verify(app_dir: &Path) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Ok(());
     }
     run_macos_tool(CODESIGN_BIN, &["--force", "--deep", "--sign", "-"], app_dir, "ad-hoc codesign")?;
-    run_macos_tool(CODESIGN_BIN, &["--verify", "--strict", "--deep"], app_dir, "codesign --verify")?;
-    Ok(())
+    run_macos_tool(CODESIGN_BIN, &["--verify", "--strict", "--deep"], app_dir, "codesign --verify")
 }
 
 fn run_macos_tool(tool: &str, args: &[&str], target: &Path, label: &str) -> Result<(), String> {
@@ -174,9 +138,12 @@ fn run_macos_tool(tool: &str, args: &[&str], target: &Path, label: &str) -> Resu
         .map_err(|e| format!("{label} failed to launch `{tool}` for {}: {e}", target.display()))?;
     if !output.success {
         let code = output.status_code.map_or_else(|| String::from("signal"), |c| c.to_string());
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(format!("{label} failed for `{}` (exit {code}): stdout=`{stdout}` stderr=`{stderr}`", target.display()));
+        return Err(format!(
+            "{label} failed for `{}` (exit {code}): stdout=`{}` stderr=`{}`",
+            target.display(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
     Ok(())
 }
@@ -218,50 +185,33 @@ fn set_executable(_path: &Path) -> Result<(), String> {
 mod tests {
     use std::path::Path;
 
-    use super::{adhoc_codesign_and_verify, render_info_plist, validate_info_plist};
+    use super::{adhoc_codesign_and_verify, copy_bundle_legal_docs, render_info_plist, validate_info_plist};
     use crate::scan_util::test_support::TestDir;
 
     #[test]
-    fn substitutes_version_and_sha_placeholders() {
-        let rendered = render_info_plist("<string>@VERSION@/@SHORT_VERSION@ (@BUILD_SHA@)</string>", "0.1.0-rc.1", "abc1234");
-        assert_eq!(rendered, "<string>0.1.0-rc.1/0.1.0 (abc1234)</string>");
-    }
-
-    #[test]
-    fn validate_info_plist_accepts_rendered_template_and_rejects_broken_or_unrendered() {
+    fn plist_validation_packaging_metadata_and_legal_docs_bundle_guards() {
+        assert_eq!(
+            render_info_plist("<string>@VERSION@/@SHORT_VERSION@ (@BUILD_SHA@)</string>", "0.1.0-rc.1", "abc1234"),
+            "<string>0.1.0-rc.1/0.1.0 (abc1234)</string>"
+        );
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let tpl = std::fs::read_to_string(root.join("packaging/macos/Info.plist.in")).unwrap();
-        let dir = TestDir::new("bundle-plist");
-
+        let dir = TestDir::new("bundle-checks");
         dir.write("ValidInfo.plist", &render_info_plist(&tpl, "0.1.0", "deadbeef1"));
-        validate_info_plist(&dir.join("ValidInfo.plist")).expect("rendered Info.plist.in must pass plutil validation");
-
+        validate_info_plist(&dir.join("ValidInfo.plist")).unwrap();
         dir.write("UnrenderedInfo.plist", &tpl);
-        assert!(validate_info_plist(&dir.join("UnrenderedInfo.plist")).expect_err("unsubstituted placeholders must fail").contains("@VERSION@"));
-
+        assert!(validate_info_plist(&dir.join("UnrenderedInfo.plist")).unwrap_err().contains("@VERSION@"));
         if cfg!(target_os = "macos") {
             dir.write("MalformedInfo.plist", "<?xml version=\"1.0\"?><plist><dict><key>Broken</plist>");
-            assert!(validate_info_plist(&dir.join("MalformedInfo.plist")).expect_err("malformed XML plist must fail").contains("plutil -lint"));
-            assert!(adhoc_codesign_and_verify(&dir.join("Missing.app")).expect_err("missing app must fail codesign").contains("codesign"));
+            assert!(validate_info_plist(&dir.join("MalformedInfo.plist")).unwrap_err().contains("plutil -lint"));
+            assert!(adhoc_codesign_and_verify(&dir.join("Missing.app")).unwrap_err().contains("codesign"));
         }
-    }
 
-    #[test]
-    fn packaging_metadata_is_consistent_and_free_of_sibling_leftovers() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let plist = std::fs::read_to_string(root.join("packaging/macos/Info.plist.in")).unwrap();
-        assert!(plist.contains("org.curvebook.CurveBook"));
-        assert!(plist.contains("curvebook"));
-        assert!(plist.contains("cbtemplate"));
-
+        assert!(tpl.contains("org.curvebook.CurveBook") && tpl.contains("curvebook") && tpl.contains("cbtemplate"));
         let desktop = std::fs::read_to_string(root.join("packaging/linux/org.curvebook.CurveBook.desktop")).unwrap();
-        assert!(desktop.contains("Categories=Science;Math;"));
-        assert!(desktop.contains("application/vnd.curvebook.project"));
-
+        assert!(desktop.contains("Categories=Science;Math;") && desktop.contains("application/vnd.curvebook.project"));
         let mime = std::fs::read_to_string(root.join("packaging/linux/org.curvebook.CurveBook.mime.xml")).unwrap();
-        assert!(mime.contains("*.curvebook"));
-        assert!(mime.contains("*.cbtemplate"));
-
+        assert!(mime.contains("*.curvebook") && mime.contains("*.cbtemplate"));
         for rel in [
             "packaging/macos/Info.plist.in",
             "packaging/linux/org.curvebook.CurveBook.desktop",
@@ -276,28 +226,17 @@ mod tests {
                 assert!(!content.contains(leftover), "{rel} contains leftover `{leftover}`");
             }
         }
-    }
 
-    #[test]
-    fn aud_12_40_copy_bundle_legal_docs_fails_closed_when_required_license_or_notice_missing() {
-        let dir = TestDir::new("bundle-legal");
         let res_dir = dir.join("Resources");
         std::fs::create_dir_all(&res_dir).unwrap();
         for f in ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ATTRIBUTION.md", "ASSETS.md"] {
             dir.write(f, "ok\n");
         }
-        // Missing THIRD-PARTY-LICENSES.html must fail closed.
-        let err = super::copy_bundle_legal_docs(dir.path(), &res_dir).unwrap_err();
-        assert!(err.contains("THIRD-PARTY-LICENSES.html"), "{err}");
-
+        assert!(copy_bundle_legal_docs(dir.path(), &res_dir).unwrap_err().contains("THIRD-PARTY-LICENSES.html"));
         dir.write("licenses/THIRD-PARTY-LICENSES.html", "<html>ok</html>\n");
-        super::copy_bundle_legal_docs(dir.path(), &res_dir).unwrap();
-        assert!(res_dir.join("THIRD-PARTY-LICENSES.html").is_file());
-        assert!(res_dir.join("LICENSE-MIT").is_file());
-
-        // Missing NOTICE must fail closed.
+        copy_bundle_legal_docs(dir.path(), &res_dir).unwrap();
+        assert!(res_dir.join("THIRD-PARTY-LICENSES.html").is_file() && res_dir.join("LICENSE-MIT").is_file());
         std::fs::remove_file(dir.join("NOTICE")).unwrap();
-        let err_notice = super::copy_bundle_legal_docs(dir.path(), &res_dir).unwrap_err();
-        assert!(err_notice.contains("NOTICE"), "{err_notice}");
+        assert!(copy_bundle_legal_docs(dir.path(), &res_dir).unwrap_err().contains("NOTICE"));
     }
 }

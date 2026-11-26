@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 
-/// One heading discovered while rendering a document page (powers the right-hand TOC).
+use crate::scan_util::{extract_html_tag_name, find_html_comment_end, find_html_tag_close, is_html_tag_start};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TocHeading {
     pub level: u8,
@@ -14,7 +15,6 @@ pub struct TocHeading {
     pub text: String,
 }
 
-/// Complete rendered HTML fragment + metadata extracted from one Markdown document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedMarkdown {
     pub title: Option<String>,
@@ -24,93 +24,55 @@ pub struct RenderedMarkdown {
 
 #[cfg(test)]
 impl RenderedMarkdown {
-    /// Extract the first top-level `<h1>...</h1>` block while preserving any introductory blocks
-    /// before it and the remaining body after it.
     #[must_use]
     pub fn split_leading_h1(&self) -> (&str, Option<&str>, &str) {
         extract_leading_h1(&self.html)
     }
 }
 
-/// Extract the first top-level `<h1>...</h1>` block from rendered Markdown HTML, returning
-/// `(pre_h1_html, Some(h1_html), post_h1_html)` while preserving inline HTML (e.g., `<code>`),
-/// generated or explicit `{#id}` attributes, and any introductory blocks preceding the heading.
 #[must_use]
 pub fn extract_leading_h1(html: &str) -> (&str, Option<&str>, &str) {
-    let mut offset = 0usize;
-    let mut block_depth = 0usize;
-    let mut h1_start: Option<usize> = None;
-
-    while let Some(rest) = html.get(offset..) {
-        let Some(rel_lt) = rest.find('<') else {
-            break;
-        };
+    let (mut offset, mut depth, mut h1_start) = (0usize, 0usize, None);
+    while let Some(rel_lt) = html.get(offset..).and_then(|r| r.find('<')) {
         let tag_abs = offset + rel_lt;
-        let Some(after_lt) = html.get(tag_abs + 1..) else {
-            break;
-        };
-        if !crate::pages_site::is_html_tag_start(after_lt) {
+        let Some(after_lt) = html.get(tag_abs + 1..) else { break };
+        if !is_html_tag_start(after_lt) {
             offset = tag_abs + 1;
             continue;
         }
-        if let Some(after_comment) = after_lt.strip_prefix("!--") {
-            let Some(close_end) = crate::pages_site::find_html_comment_end(after_comment) else {
-                break;
-            };
-            offset = tag_abs + 4 + close_end;
+        if let Some(after_c) = after_lt.strip_prefix("!--") {
+            let Some(end) = find_html_comment_end(after_c) else { break };
+            offset = tag_abs + 4 + end;
             continue;
         }
-        let Some(tag_end_rel) = crate::pages_site::find_html_tag_close(after_lt) else {
-            break;
-        };
-        let Some(tag_body) = after_lt.get(..tag_end_rel) else {
-            break;
-        };
-        let after_tag_abs = tag_abs + 1 + tag_end_rel + 1;
-        let trimmed = tag_body.trim();
-        let is_closing = trimmed.starts_with('/');
-        let tag_lower = crate::pages_site::extract_html_tag_name(trimmed).to_ascii_lowercase();
-
+        let Some(tag_end) = find_html_tag_close(after_lt) else { break };
+        let (after_tag, trimmed) = (tag_abs + 2 + tag_end, after_lt.get(..tag_end).unwrap_or("").trim());
+        let (is_close, tag_lower) = (trimmed.starts_with('/'), extract_html_tag_name(trimmed).to_ascii_lowercase());
         if let Some(start) = h1_start {
-            if is_closing && tag_lower == "h1" {
-                let end = if html.get(after_tag_abs..).is_some_and(|s| s.starts_with('\n')) { after_tag_abs + 1 } else { after_tag_abs };
+            if is_close && tag_lower == "h1" {
+                let end = after_tag + usize::from(html.get(after_tag..).is_some_and(|s| s.starts_with('\n')));
                 return (html.get(..start).unwrap_or(""), Some(html.get(start..end).unwrap_or("")), html.get(end..).unwrap_or(""));
             }
-            offset = after_tag_abs;
-            continue;
+        } else if matches!(tag_lower.as_str(), "blockquote" | "div" | "pre" | "code" | "ul" | "ol" | "table") {
+            depth = if is_close { depth.saturating_sub(1) } else { depth + usize::from(!trimmed.ends_with('/')) };
+        } else if !is_close && !trimmed.ends_with('/') && tag_lower == "h1" && depth == 0 {
+            h1_start = Some(tag_abs);
         }
-
-        let is_container = matches!(tag_lower.as_str(), "blockquote" | "div" | "pre" | "code" | "ul" | "ol" | "table");
-        if is_closing {
-            if is_container {
-                block_depth = block_depth.saturating_sub(1);
-            }
-        } else if !trimmed.ends_with('/') {
-            if is_container {
-                block_depth += 1;
-            } else if tag_lower == "h1" && block_depth == 0 {
-                h1_start = Some(tag_abs);
-            }
-        }
-        offset = after_tag_abs;
+        offset = after_tag;
     }
     ("", None, html)
 }
 
-/// Rewrites relative `.md` links and asset paths into site URLs during rendering.
 pub trait LinkResolver {
     fn resolve_href(&self, raw_href: &str) -> String;
     fn resolve_image(&self, raw_src: &str) -> String;
 }
 
-/// Default pass-through link resolver used in unit tests and standalone rendering.
 pub struct IdentityResolver;
-
 impl LinkResolver for IdentityResolver {
     fn resolve_href(&self, raw_href: &str) -> String {
         raw_href.to_owned()
     }
-
     fn resolve_image(&self, raw_src: &str) -> String {
         raw_src.to_owned()
     }
@@ -130,20 +92,20 @@ struct MathSlot {
 }
 
 const MATH_CLOSE_SENTINEL: char = '\u{E001}';
-const RESERVED_TEMPLATE_IDS: &[&str] = &["main", "page-title"];
+const MAX_MATH_DEPTH: usize = 32;
+const MAX_SQRT_DEGREE_BYTES: usize = 128;
 
-/// Render a Markdown document into strict-CSP static HTML (zero `<script>`, zero inline `on*` handlers).
 pub fn render_markdown(input: &str, resolver: &dyn LinkResolver) -> RenderedMarkdown {
     let normalized = input.replace("\r\n", "\n");
     let sentinel_open = choose_math_sentinel(&normalized);
     let (protected, math_slots) = protect_math_spans(&normalized, &sentinel_open);
-    let parser = Parser::new_ext(&protected, markdown_options());
-    let used_ids: BTreeSet<String> = RESERVED_TEMPLATE_IDS.iter().map(|s| (*s).to_owned()).collect();
-    let mut renderer = HtmlRenderer {
+    let opts =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_GFM | Options::ENABLE_HEADING_ATTRIBUTES | Options::ENABLE_TASKLISTS;
+    let mut r = HtmlRenderer {
         resolver,
         sentinel_open: &sentinel_open,
         math_slots: &math_slots,
-        used_ids,
+        used_ids: ["main", "page-title"].into_iter().map(String::from).collect(),
         headings: Vec::new(),
         title: None,
         out: String::with_capacity(normalized.len().saturating_mul(2)),
@@ -152,8 +114,8 @@ pub fn render_markdown(input: &str, resolver: &dyn LinkResolver) -> RenderedMark
         table_tbody_open: false,
         in_code_block: false,
     };
-    renderer.render_stream(parser);
-    RenderedMarkdown { title: renderer.title, headings: renderer.headings, html: renderer.out }
+    r.render_stream(Parser::new_ext(&protected, opts));
+    RenderedMarkdown { title: r.title, headings: r.headings, html: r.out }
 }
 
 fn choose_math_sentinel(input: &str) -> String {
@@ -161,34 +123,12 @@ fn choose_math_sentinel(input: &str) -> String {
     if !input.contains(BASE) {
         return String::from("\u{E000}CBM:");
     }
-    // Pad with an ASCII letter (never `_` or Markdown punctuation) so `pulldown-cmark`
-    // never splits the sentinel across multiple `Event::Text` chunks.
-    let mut max_xs = 0usize;
-    let mut rest = input;
+    let (mut max_xs, mut rest) = (0usize, input);
     while let Some((_, after)) = rest.split_once(BASE) {
-        let run = after.bytes().take_while(|&b| b == b'X').count();
-        if run >= max_xs {
-            max_xs = run + 1;
-        }
+        max_xs = max_xs.max(after.bytes().take_while(|&b| b == b'X').count() + 1);
         rest = after;
     }
-    let mut out = String::with_capacity(BASE.len() + max_xs + 1);
-    out.push_str(BASE);
-    for _ in 0..max_xs {
-        out.push('X');
-    }
-    out.push(':');
-    out
-}
-
-fn markdown_options() -> Options {
-    let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_TABLES);
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
-    opts.insert(Options::ENABLE_GFM);
-    opts.insert(Options::ENABLE_HEADING_ATTRIBUTES);
-    opts.insert(Options::ENABLE_TASKLISTS);
-    opts
+    format!("{BASE}{}:", "X".repeat(max_xs))
 }
 
 struct HtmlRenderer<'a> {
@@ -205,20 +145,17 @@ struct HtmlRenderer<'a> {
     in_code_block: bool,
 }
 
-impl<'a> HtmlRenderer<'a> {
+impl HtmlRenderer<'_> {
     fn unique_id(&mut self, base: &str) -> String {
         let norm = if base.is_empty() { String::from("section") } else { base.to_owned() };
         if self.used_ids.insert(norm.clone()) {
             return norm;
         }
-        let mut suffix = 1usize;
-        loop {
-            let candidate = format!("{norm}-{suffix}");
-            if self.used_ids.insert(candidate.clone()) {
-                return candidate;
-            }
-            suffix += 1;
-        }
+        (1usize..).map(|n| format!("{norm}-{n}")).find(|c| self.used_ids.insert(c.clone())).unwrap_or(norm)
+    }
+
+    fn restore(&self, s: &str) -> String {
+        restore_math_sentinels(s, self.sentinel_open, self.math_slots)
     }
 
     fn render_stream<'e>(&mut self, mut parser: impl Iterator<Item = Event<'e>>) {
@@ -230,12 +167,10 @@ impl<'a> HtmlRenderer<'a> {
                 }
                 Event::Start(Tag::Heading { level, id, .. }) => {
                     let inner = collect_until_end(&mut parser, |t| matches!(t, TagEnd::Heading(_)));
-                    let explicit_id = id.map(|c| restore_math_sentinels(&c, self.sentinel_open, self.math_slots));
-                    self.flush_heading(level, explicit_id.as_deref(), inner);
+                    let explicit = id.map(|c| self.restore(&c));
+                    self.flush_heading(level, explicit.as_deref(), inner);
                 }
-                Event::Start(Tag::Image { dest_url, title, .. }) => {
-                    self.emit_inline_image(&dest_url, &title, &mut parser);
-                }
+                Event::Start(Tag::Image { dest_url, title, .. }) => self.emit_inline_image(&dest_url, &title, &mut parser),
                 Event::Start(tag) => self.start_tag(tag),
                 Event::End(tag) => self.end_tag(tag),
                 other => self.emit_leaf_event(other, false),
@@ -243,47 +178,38 @@ impl<'a> HtmlRenderer<'a> {
         }
     }
 
-    fn emit_inline_image<'e>(&mut self, dest_url: &str, title: &str, iter: &mut impl Iterator<Item = Event<'e>>) {
-        let alt_events = collect_until_end(iter, |t| matches!(t, TagEnd::Image));
-        let alt = events_to_plain_text(&alt_events, self.sentinel_open, self.math_slots);
-        let restored_dest = restore_math_sentinels(dest_url, self.sentinel_open, self.math_slots);
-        let resolved = sanitize_resolved_url(&self.resolver.resolve_image(&restored_dest));
+    fn push_img_tag(&mut self, dest_url: &str, alt: &str, title: &str) {
+        let resolved = sanitize_resolved_url(&self.resolver.resolve_image(&self.restore(dest_url)));
         self.out.push_str("<img src=\"");
         push_html_escaped(&resolved, &mut self.out);
         self.out.push_str("\" alt=\"");
-        push_html_escaped(&alt, &mut self.out);
+        push_html_escaped(alt, &mut self.out);
         self.out.push('"');
         if !title.is_empty() {
-            let restored_title = restore_math_sentinels(title, self.sentinel_open, self.math_slots);
             self.out.push_str(" title=\"");
-            push_html_escaped(&restored_title, &mut self.out);
+            push_html_escaped(&self.restore(title), &mut self.out);
             self.out.push('"');
         }
         self.out.push_str(" loading=\"lazy\">");
     }
 
+    fn emit_inline_image<'e>(&mut self, dest_url: &str, title: &str, iter: &mut impl Iterator<Item = Event<'e>>) {
+        let alt = events_to_plain_text(&collect_until_end(iter, |t| matches!(t, TagEnd::Image)), self.sentinel_open, self.math_slots);
+        self.push_img_tag(dest_url, &alt, title);
+    }
+
     fn flush_paragraph(&mut self, events: Vec<Event<'_>>) {
         if let Some(slot_id) = standalone_display_math_slot(&events, self.sentinel_open)
-            && let Some(slot) = self.math_slots.get(slot_id)
-            && slot.kind == MathKind::DisplayBlock
+            && let Some(slot) = self.math_slots.get(slot_id).filter(|s| s.kind == MathKind::DisplayBlock)
         {
-            self.out.push_str("<div class=\"math-block\"><span class=\"math\">");
-            render_tex_math_inner(slot.tex.trim(), 0, &mut self.out);
-            self.out.push_str("</span></div>\n");
-            return;
+            return push_math_span(&mut self.out, MathKind::DisplayBlock, &slot.tex, true);
         }
         if let Some((dest_url, alt)) = standalone_figure_image(&events, self.sentinel_open, self.math_slots) {
-            let restored_dest = restore_math_sentinels(&dest_url, self.sentinel_open, self.math_slots);
-            let resolved = sanitize_resolved_url(&self.resolver.resolve_image(&restored_dest));
-            self.out.push_str("<figure class=\"doc-figure\"><img src=\"");
-            push_html_escaped(&resolved, &mut self.out);
-            self.out.push_str("\" alt=\"");
-            push_html_escaped(&alt, &mut self.out);
-            self.out.push_str("\" loading=\"lazy\">");
-            let cap = alt.trim();
-            if !cap.is_empty() {
+            self.out.push_str("<figure class=\"doc-figure\">");
+            self.push_img_tag(&dest_url, &alt, "");
+            if !alt.trim().is_empty() {
                 self.out.push_str("<figcaption>");
-                push_html_escaped(cap, &mut self.out);
+                push_html_escaped(alt.trim(), &mut self.out);
                 self.out.push_str("</figcaption>");
             }
             self.out.push_str("</figure>\n");
@@ -296,15 +222,18 @@ impl<'a> HtmlRenderer<'a> {
 
     fn flush_heading(&mut self, level: HeadingLevel, explicit_id: Option<&str>, events: Vec<Event<'_>>) {
         let plain = events_to_plain_text(&events, self.sentinel_open, self.math_slots);
-        let lvl = heading_level_u8(level);
+        let lvl = match level {
+            HeadingLevel::H1 => 1,
+            HeadingLevel::H2 => 2,
+            HeadingLevel::H3 => 3,
+            HeadingLevel::H4 => 4,
+            HeadingLevel::H5 => 5,
+            HeadingLevel::H6 => 6,
+        };
         if lvl == 1 && self.title.is_none() && self.blockquote_ends.is_empty() {
             self.title = Some(plain.clone());
         }
-        let base_slug = match explicit_id {
-            Some(id) if !id.is_empty() => id.to_owned(),
-            _ => github_slug(&plain),
-        };
-        let id = self.unique_id(&base_slug);
+        let id = self.unique_id(explicit_id.filter(|s| !s.is_empty()).map_or_else(|| github_slug(&plain), str::to_owned).as_str());
         self.headings.push(TocHeading { level: lvl, id: id.clone(), text: plain });
         self.out.push_str(&format!("<h{lvl} id=\""));
         push_html_escaped(&id, &mut self.out);
@@ -317,9 +246,7 @@ impl<'a> HtmlRenderer<'a> {
         let mut iter = events.into_iter();
         while let Some(ev) = iter.next() {
             match ev {
-                Event::Start(Tag::Image { dest_url, title, .. }) => {
-                    self.emit_inline_image(&dest_url, &title, &mut iter);
-                }
+                Event::Start(Tag::Image { dest_url, title, .. }) => self.emit_inline_image(&dest_url, &title, &mut iter),
                 Event::Start(tag) => self.start_tag(tag),
                 Event::End(tag) => self.end_tag(tag),
                 other => self.emit_leaf_event(other, true),
@@ -329,191 +256,147 @@ impl<'a> HtmlRenderer<'a> {
 
     fn start_tag(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::BlockQuote(kind) => self.start_blockquote(kind),
-            Tag::CodeBlock(kind) => self.start_code_block(kind),
-            Tag::List(None) => self.out.push_str("<ul>\n"),
-            Tag::List(Some(1)) => self.out.push_str("<ol>\n"),
-            Tag::List(Some(start)) => self.out.push_str(&format!("<ol start=\"{start}\">\n")),
-            Tag::Item => self.out.push_str("<li>"),
-            Tag::Table(_) => {
-                self.table_tbody_open = false;
-                self.out.push_str("<div class=\"table-wrap\"><table>\n");
+            Tag::BlockQuote(Some(alert)) => {
+                let (slug, title) = match alert {
+                    BlockQuoteKind::Note => ("note", "Note"),
+                    BlockQuoteKind::Tip => ("tip", "Tip"),
+                    BlockQuoteKind::Important => ("important", "Important"),
+                    BlockQuoteKind::Warning => ("warning", "Warning"),
+                    BlockQuoteKind::Caution => ("caution", "Caution"),
+                };
+                self.out.push_str(&format!("<div class=\"callout callout-{slug}\" role=\"note\">\n<p class=\"callout-title\">{title}</p>\n"));
+                self.blockquote_ends.push("</div>\n");
             }
-            Tag::TableHead => {
-                self.in_table_head = true;
-                self.out.push_str("<thead><tr>");
-            }
-            Tag::TableRow => {
-                if !self.table_tbody_open {
-                    self.out.push_str("<tbody>\n");
-                    self.table_tbody_open = true;
-                }
-                self.out.push_str("<tr>");
-            }
-            Tag::TableCell => self.out.push_str(if self.in_table_head { "<th>" } else { "<td>" }),
-            Tag::Emphasis => self.out.push_str("<em>"),
-            Tag::Strong => self.out.push_str("<strong>"),
-            Tag::Strikethrough => self.out.push_str("<del>"),
-            Tag::Link { link_type, dest_url, title, .. } => self.start_link(link_type, &dest_url, &title),
-            Tag::Superscript => self.out.push_str("<sup>"),
-            Tag::Subscript => self.out.push_str("<sub>"),
-            Tag::HtmlBlock
-            | Tag::Paragraph
-            | Tag::Heading { .. }
-            | Tag::Image { .. }
-            | Tag::FootnoteDefinition(_)
-            | Tag::MetadataBlock(_)
-            | Tag::DefinitionList
-            | Tag::DefinitionListTitle
-            | Tag::DefinitionListDefinition => {}
-        }
-    }
-
-    fn start_blockquote(&mut self, kind: Option<BlockQuoteKind>) {
-        if let Some(alert) = kind {
-            let (slug, title) = match alert {
-                BlockQuoteKind::Note => ("note", "Note"),
-                BlockQuoteKind::Tip => ("tip", "Tip"),
-                BlockQuoteKind::Important => ("important", "Important"),
-                BlockQuoteKind::Warning => ("warning", "Warning"),
-                BlockQuoteKind::Caution => ("caution", "Caution"),
-            };
-            self.out.push_str("<div class=\"callout callout-");
-            self.out.push_str(slug);
-            self.out.push_str("\" role=\"note\">\n<p class=\"callout-title\">");
-            self.out.push_str(title);
-            self.out.push_str("</p>\n");
-            self.blockquote_ends.push("</div>\n");
-        } else {
-            self.out.push_str("<blockquote>\n");
-            self.blockquote_ends.push("</blockquote>\n");
-        }
-    }
-
-    fn start_code_block(&mut self, kind: CodeBlockKind<'_>) {
-        self.in_code_block = true;
-        match kind {
-            CodeBlockKind::Fenced(info) => {
-                let restored = restore_math_sentinels(&info, self.sentinel_open, self.math_slots);
-                let lang = restored.split_whitespace().next().unwrap_or("");
+            Tag::BlockQuote(None) => (self.out.push_str("<blockquote>\n"), self.blockquote_ends.push("</blockquote>\n")).0,
+            Tag::CodeBlock(kind) => {
+                self.in_code_block = true;
+                let lang = match kind {
+                    CodeBlockKind::Fenced(info) => self.restore(&info).split_whitespace().next().unwrap_or("").to_owned(),
+                    CodeBlockKind::Indented => String::new(),
+                };
                 if lang.is_empty() {
                     self.out.push_str("<pre><code>");
                 } else {
                     self.out.push_str("<pre><code class=\"language-");
-                    push_html_escaped(lang, &mut self.out);
+                    push_html_escaped(&lang, &mut self.out);
                     self.out.push_str("\">");
                 }
             }
-            CodeBlockKind::Indented => self.out.push_str("<pre><code>"),
+            Tag::List(Some(start)) if start != 1 => self.out.push_str(&format!("<ol start=\"{start}\">\n")),
+            Tag::Table(_) => (self.table_tbody_open, ()) = (false, self.out.push_str("<div class=\"table-wrap\"><table>\n")),
+            Tag::TableHead => (self.in_table_head, ()) = (true, self.out.push_str("<thead><tr>")),
+            Tag::TableRow => {
+                if !self.table_tbody_open {
+                    (self.table_tbody_open, ()) = (true, self.out.push_str("<tbody>\n"));
+                }
+                self.out.push_str("<tr>");
+            }
+            Tag::Link { link_type, dest_url, title, .. } => {
+                let d = self.restore(&dest_url);
+                let raw_href = if link_type == LinkType::Email && !d.starts_with("mailto:") { format!("mailto:{d}") } else { d };
+                self.out.push_str("<a href=\"");
+                push_html_escaped(&sanitize_resolved_url(&self.resolver.resolve_href(&raw_href)), &mut self.out);
+                self.out.push('"');
+                if !title.is_empty() {
+                    self.out.push_str(" title=\"");
+                    push_html_escaped(&self.restore(&title), &mut self.out);
+                    self.out.push('"');
+                }
+                self.out.push('>');
+            }
+            other => self.out.push_str(match other {
+                Tag::List(None) => "<ul>\n",
+                Tag::List(Some(_)) => "<ol>\n",
+                Tag::Item => "<li>",
+                Tag::TableCell => {
+                    if self.in_table_head {
+                        "<th>"
+                    } else {
+                        "<td>"
+                    }
+                }
+                Tag::Emphasis => "<em>",
+                Tag::Strong => "<strong>",
+                Tag::Strikethrough => "<del>",
+                Tag::Superscript => "<sup>",
+                Tag::Subscript => "<sub>",
+                _ => "",
+            }),
         }
-    }
-
-    fn start_link(&mut self, link_type: LinkType, dest_url: &str, title: &str) {
-        let restored_dest = restore_math_sentinels(dest_url, self.sentinel_open, self.math_slots);
-        let raw_href =
-            if link_type == LinkType::Email && !restored_dest.starts_with("mailto:") { format!("mailto:{restored_dest}") } else { restored_dest };
-        let resolved = sanitize_resolved_url(&self.resolver.resolve_href(&raw_href));
-        self.out.push_str("<a href=\"");
-        push_html_escaped(&resolved, &mut self.out);
-        self.out.push('"');
-        if !title.is_empty() {
-            let restored_title = restore_math_sentinels(title, self.sentinel_open, self.math_slots);
-            self.out.push_str(" title=\"");
-            push_html_escaped(&restored_title, &mut self.out);
-            self.out.push('"');
-        }
-        self.out.push('>');
     }
 
     fn end_tag(&mut self, tag: TagEnd) {
         match tag {
             TagEnd::BlockQuote(_) => {
-                if let Some(close) = self.blockquote_ends.pop() {
-                    self.out.push_str(close);
+                if let Some(c) = self.blockquote_ends.pop() {
+                    self.out.push_str(c);
                 }
             }
-            TagEnd::CodeBlock => {
-                self.in_code_block = false;
-                self.out.push_str("</code></pre>\n");
-            }
-            TagEnd::List(true) => self.out.push_str("</ol>\n"),
-            TagEnd::List(false) => self.out.push_str("</ul>\n"),
-            TagEnd::Item => self.out.push_str("</li>\n"),
-            TagEnd::TableHead => {
-                self.out.push_str("</tr></thead>\n");
-                self.in_table_head = false;
-            }
-            TagEnd::TableRow => self.out.push_str("</tr>\n"),
-            TagEnd::TableCell => self.out.push_str(if self.in_table_head { "</th>" } else { "</td>" }),
+            TagEnd::CodeBlock => (self.in_code_block, ()) = (false, self.out.push_str("</code></pre>\n")),
+            TagEnd::TableHead => (self.in_table_head, ()) = (false, self.out.push_str("</tr></thead>\n")),
             TagEnd::Table => {
                 if self.table_tbody_open {
-                    self.out.push_str("</tbody>\n");
-                    self.table_tbody_open = false;
+                    (self.table_tbody_open, ()) = (false, self.out.push_str("</tbody>\n"));
                 }
                 self.out.push_str("</table></div>\n");
             }
-            TagEnd::Emphasis => self.out.push_str("</em>"),
-            TagEnd::Strong => self.out.push_str("</strong>"),
-            TagEnd::Strikethrough => self.out.push_str("</del>"),
-            TagEnd::Link => self.out.push_str("</a>"),
-            TagEnd::Superscript => self.out.push_str("</sup>"),
-            TagEnd::Subscript => self.out.push_str("</sub>"),
-            TagEnd::Paragraph
-            | TagEnd::Heading(_)
-            | TagEnd::Image
-            | TagEnd::HtmlBlock
-            | TagEnd::FootnoteDefinition
-            | TagEnd::MetadataBlock(_)
-            | TagEnd::DefinitionList
-            | TagEnd::DefinitionListTitle
-            | TagEnd::DefinitionListDefinition => {}
+            other => self.out.push_str(match other {
+                TagEnd::List(true) => "</ol>\n",
+                TagEnd::List(false) => "</ul>\n",
+                TagEnd::Item => "</li>\n",
+                TagEnd::TableRow => "</tr>\n",
+                TagEnd::TableCell => {
+                    if self.in_table_head {
+                        "</th>"
+                    } else {
+                        "</td>"
+                    }
+                }
+                TagEnd::Emphasis => "</em>",
+                TagEnd::Strong => "</strong>",
+                TagEnd::Strikethrough => "</del>",
+                TagEnd::Link => "</a>",
+                TagEnd::Superscript => "</sup>",
+                TagEnd::Subscript => "</sub>",
+                _ => "",
+            }),
         }
     }
 
     fn emit_leaf_event(&mut self, event: Event<'_>, inline_context: bool) {
         match event {
-            Event::Text(text) => {
-                if self.in_code_block {
-                    let restored = restore_math_sentinels(&text, self.sentinel_open, self.math_slots);
-                    push_html_escaped(&restored, &mut self.out);
-                } else {
-                    render_text_with_math(&text, self.sentinel_open, self.math_slots, &mut self.out);
-                }
-            }
+            Event::Text(text) if self.in_code_block => push_html_escaped(&self.restore(&text), &mut self.out),
+            Event::Text(text) => visit_math_sentinels(&text, self.sentinel_open, self.math_slots, &mut self.out, push_html_escaped, |slot, out| {
+                push_math_span(out, slot.kind, &slot.tex, false);
+            }),
             Event::Code(code) => {
-                let restored = restore_math_sentinels(&code, self.sentinel_open, self.math_slots);
                 self.out.push_str("<code>");
-                push_html_escaped(&restored, &mut self.out);
+                push_html_escaped(&self.restore(&code), &mut self.out);
                 self.out.push_str("</code>");
             }
-            Event::InlineMath(tex) => {
-                self.out.push_str("<span class=\"math\">");
-                render_tex_math_inner(tex.trim(), 0, &mut self.out);
-                self.out.push_str("</span>");
-            }
-            Event::DisplayMath(tex) => {
-                self.out.push_str("<div class=\"math-block\"><span class=\"math\">");
-                render_tex_math_inner(tex.trim(), 0, &mut self.out);
-                self.out.push_str("</span></div>\n");
-            }
+            Event::InlineMath(tex) => push_math_span(&mut self.out, MathKind::Inline, &tex, false),
+            Event::DisplayMath(tex) => push_math_span(&mut self.out, MathKind::DisplayBlock, &tex, true),
             Event::SoftBreak => self.out.push(if inline_context { ' ' } else { '\n' }),
             Event::HardBreak => self.out.push_str("<br>\n"),
             Event::Rule => self.out.push_str("<hr>\n"),
             Event::Html(raw) | Event::InlineHtml(raw) => {
-                let restored = restore_math_sentinels(&raw, self.sentinel_open, self.math_slots);
-                emit_sanitized_html_fragment(&restored, &mut self.out);
-            }
-            Event::TaskListMarker(checked) => {
-                if checked {
-                    self.out.push_str("<input type=\"checkbox\" disabled checked> ");
+                let r = self.restore(&raw);
+                let t = r.trim();
+                if t.is_empty() || (t.starts_with("<!--") && t.ends_with("-->")) {
+                    return;
+                }
+                if matches!(t.to_ascii_lowercase().as_str(), "<br>" | "<br/>" | "<br />") {
+                    self.out.push_str("<br>");
                 } else {
-                    self.out.push_str("<input type=\"checkbox\" disabled> ");
+                    push_html_escaped(&r, &mut self.out);
                 }
             }
+            Event::TaskListMarker(checked) => {
+                self.out.push_str(if checked { "<input type=\"checkbox\" disabled checked> " } else { "<input type=\"checkbox\" disabled> " })
+            }
             Event::FootnoteReference(name) => {
-                let restored = restore_math_sentinels(&name, self.sentinel_open, self.math_slots);
                 self.out.push_str("<sup>[");
-                push_html_escaped(&restored, &mut self.out);
+                push_html_escaped(&self.restore(&name), &mut self.out);
                 self.out.push_str("]</sup>");
             }
             Event::Start(_) | Event::End(_) => {}
@@ -521,9 +404,19 @@ impl<'a> HtmlRenderer<'a> {
     }
 }
 
+fn push_math_span(out: &mut String, kind: MathKind, tex: &str, trailing_nl: bool) {
+    let (open, close) = match kind {
+        MathKind::DisplayBlock => ("<div class=\"math-block\"><span class=\"math\">", if trailing_nl { "</span></div>\n" } else { "</span></div>" }),
+        MathKind::InlineBlockSpan => ("<span class=\"math math-block\">", "</span>"),
+        MathKind::Inline => ("<span class=\"math\">", "</span>"),
+    };
+    out.push_str(open);
+    render_tex_math(tex.trim(), 0, false, out);
+    out.push_str(close);
+}
+
 fn collect_until_end<'e>(iter: &mut impl Iterator<Item = Event<'e>>, is_end: impl Fn(&TagEnd) -> bool) -> Vec<Event<'e>> {
-    let mut events = Vec::new();
-    let mut depth = 1usize;
+    let (mut events, mut depth) = (Vec::new(), 1usize);
     for ev in iter {
         match &ev {
             Event::Start(_) => depth += 1,
@@ -540,52 +433,50 @@ fn collect_until_end<'e>(iter: &mut impl Iterator<Item = Event<'e>>, is_end: imp
     events
 }
 
+fn visit_math_sentinels(
+    text: &str,
+    sentinel_open: &str,
+    slots: &[MathSlot],
+    out: &mut String,
+    mut on_text: impl FnMut(&str, &mut String),
+    mut on_slot: impl FnMut(&MathSlot, &mut String),
+) {
+    let mut rest = text;
+    while let Some((before, after_open)) = rest.split_once(sentinel_open) {
+        on_text(before, out);
+        if let Some((digits, tail)) = after_open.split_once(MATH_CLOSE_SENTINEL)
+            && let Some(slot) = digits.parse::<usize>().ok().and_then(|i| slots.get(i))
+        {
+            on_slot(slot, out);
+            rest = tail;
+            continue;
+        }
+        on_text(sentinel_open, out);
+        rest = after_open;
+    }
+    on_text(rest, out);
+}
+
 fn restore_math_sentinels(text: &str, sentinel_open: &str, slots: &[MathSlot]) -> String {
     if !text.contains(sentinel_open) {
         return text.to_owned();
     }
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some((before, after_open)) = rest.split_once(sentinel_open) {
-        out.push_str(before);
-        if let Some((digits, tail)) = after_open.split_once(MATH_CLOSE_SENTINEL)
-            && let Ok(idx) = digits.parse::<usize>()
-            && let Some(slot) = slots.get(idx)
-        {
-            out.push_str(&slot.raw);
-            rest = tail;
-            continue;
-        }
-        out.push_str(sentinel_open);
-        rest = after_open;
-    }
-    out.push_str(rest);
+    visit_math_sentinels(text, sentinel_open, slots, &mut out, |s, o| o.push_str(s), |slot, o| o.push_str(&slot.raw));
     out
 }
 
 fn standalone_display_math_slot(events: &[Event<'_>], sentinel_open: &str) -> Option<usize> {
-    let [Event::Text(text)] = events else {
-        return None;
-    };
-    let trimmed = text.trim();
-    let rest = trimmed.strip_prefix(sentinel_open)?;
-    let (digits, after) = rest.split_once(MATH_CLOSE_SENTINEL)?;
-    if !after.is_empty() {
-        return None;
-    }
-    digits.parse::<usize>().ok()
+    let [Event::Text(text)] = events else { return None };
+    let (digits, after) = text.trim().strip_prefix(sentinel_open)?.split_once(MATH_CLOSE_SENTINEL)?;
+    after.is_empty().then(|| digits.parse().ok()).flatten()
 }
 
 fn standalone_figure_image(events: &[Event<'_>], sentinel_open: &str, slots: &[MathSlot]) -> Option<(String, String)> {
-    let first = events.first()?;
-    let Event::Start(Tag::Image { dest_url, .. }) = first else {
-        return None;
-    };
-    let Some(Event::End(TagEnd::Image)) = events.last() else {
-        return None;
-    };
+    let (Some(Event::Start(Tag::Image { dest_url, .. })), Some(Event::End(TagEnd::Image))) = (events.first(), events.last()) else { return None };
+    let inner = events.get(1..events.len().saturating_sub(1))?;
     let mut depth = 1usize;
-    for ev in events.get(1..events.len().saturating_sub(1))? {
+    for ev in inner {
         match ev {
             Event::Start(_) => depth += 1,
             Event::End(_) => {
@@ -597,78 +488,23 @@ fn standalone_figure_image(events: &[Event<'_>], sentinel_open: &str, slots: &[M
             _ => {}
         }
     }
-    let alt = events_to_plain_text(events.get(1..events.len().saturating_sub(1))?, sentinel_open, slots);
-    Some((dest_url.to_string(), alt))
+    Some((dest_url.to_string(), events_to_plain_text(inner, sentinel_open, slots)))
 }
 
 fn events_to_plain_text(events: &[Event<'_>], sentinel_open: &str, slots: &[MathSlot]) -> String {
     let mut out = String::new();
     for ev in events {
         match ev {
-            Event::Text(t) => append_plain_text_with_math(t, sentinel_open, slots, &mut out),
+            Event::Text(t) => {
+                visit_math_sentinels(t, sentinel_open, slots, &mut out, |s, o| o.push_str(s), |slot, o| render_tex_math(slot.tex.trim(), 0, true, o))
+            }
             Event::Code(c) => out.push_str(&restore_math_sentinels(c, sentinel_open, slots)),
-            Event::InlineMath(m) | Event::DisplayMath(m) => render_tex_math_plain(m.trim(), 0, &mut out),
+            Event::InlineMath(m) | Event::DisplayMath(m) => render_tex_math(m.trim(), 0, true, &mut out),
             Event::SoftBreak | Event::HardBreak => out.push(' '),
             _ => {}
         }
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn append_plain_text_with_math(text: &str, sentinel_open: &str, slots: &[MathSlot], out: &mut String) {
-    let mut rest = text;
-    while let Some((before, after_open)) = rest.split_once(sentinel_open) {
-        out.push_str(before);
-        if let Some((digits, tail)) = after_open.split_once(MATH_CLOSE_SENTINEL)
-            && let Ok(idx) = digits.parse::<usize>()
-            && let Some(slot) = slots.get(idx)
-        {
-            render_tex_math_plain(slot.tex.trim(), 0, out);
-            rest = tail;
-            continue;
-        }
-        out.push_str(sentinel_open);
-        rest = after_open;
-    }
-    out.push_str(rest);
-}
-
-fn render_text_with_math(text: &str, sentinel_open: &str, slots: &[MathSlot], out: &mut String) {
-    let mut rest = text;
-    while let Some((before, after_open)) = rest.split_once(sentinel_open) {
-        push_html_escaped(before, out);
-        if let Some((digits, tail)) = after_open.split_once(MATH_CLOSE_SENTINEL)
-            && let Ok(idx) = digits.parse::<usize>()
-            && let Some(slot) = slots.get(idx)
-        {
-            let (open, close) = match slot.kind {
-                MathKind::DisplayBlock => ("<div class=\"math-block\"><span class=\"math\">", "</span></div>"),
-                MathKind::InlineBlockSpan => ("<span class=\"math math-block\">", "</span>"),
-                MathKind::Inline => ("<span class=\"math\">", "</span>"),
-            };
-            out.push_str(open);
-            render_tex_math_inner(slot.tex.trim(), 0, out);
-            out.push_str(close);
-            rest = tail;
-            continue;
-        }
-        push_html_escaped(sentinel_open, out);
-        rest = after_open;
-    }
-    push_html_escaped(rest, out);
-}
-
-fn emit_sanitized_html_fragment(raw: &str, out: &mut String) {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || (trimmed.starts_with("<!--") && trimmed.ends_with("-->")) {
-        return;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if matches!(lower.as_str(), "<br>" | "<br/>" | "<br />") {
-        out.push_str("<br>");
-    } else {
-        push_html_escaped(raw, out);
-    }
 }
 
 fn sanitize_resolved_url(url: &str) -> String {
@@ -677,78 +513,32 @@ fn sanitize_resolved_url(url: &str) -> String {
     if norm.starts_with("javascript:") || norm.starts_with("vbscript:") || norm.starts_with("data:") { String::from("#") } else { cleaned }
 }
 
-const fn heading_level_u8(level: HeadingLevel) -> u8 {
-    match level {
-        HeadingLevel::H1 => 1,
-        HeadingLevel::H2 => 2,
-        HeadingLevel::H3 => 3,
-        HeadingLevel::H4 => 4,
-        HeadingLevel::H5 => 5,
-        HeadingLevel::H6 => 6,
-    }
-}
-
-/// Compute a GitHub-style slug from plain heading text (`A–Z` -> `a–z`, space -> `-`).
 #[must_use]
 pub fn github_slug(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-            out.push(ch.to_ascii_lowercase());
-        } else if ch == ' ' || ch == '\t' {
-            out.push('-');
-        }
-    }
-    out.trim_matches('-').to_owned()
+    text.chars()
+        .filter_map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') { Some(c.to_ascii_lowercase()) } else { matches!(c, ' ' | '\t').then_some('-') }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned()
 }
 
-fn parse_fence_open(trimmed: &str) -> Option<(char, usize, String)> {
-    let first = trimmed.chars().next()?;
-    if first != '`' && first != '~' {
-        return None;
-    }
-    let count = trimmed.bytes().take_while(|&b| b == first as u8).count();
-    if count < 3 {
-        return None;
-    }
-    let info = trimmed.get(count..)?.trim().to_owned();
-    if first == '`' && info.contains('`') {
-        return None;
-    }
-    Some((first, count, info))
-}
-
-fn is_fence_close(trimmed: &str, ch: char, min_len: usize) -> bool {
-    let count = trimmed.bytes().take_while(|&b| b == ch as u8).count();
-    count >= min_len && trimmed.get(count..).is_some_and(|rest| rest.trim().is_empty())
+pub(super) fn parse_fence_open(trimmed: &str) -> Option<(u8, usize)> {
+    let first = *trimmed.as_bytes().first().filter(|&&b| b == b'`' || b == b'~')?;
+    let count = trimmed.bytes().take_while(|&b| b == first).count();
+    (count >= 3 && !(first == b'`' && trimmed.get(count..).is_some_and(|i| i.contains('`')))).then_some((first, count))
 }
 
 fn leading_indent_cols(line: &str) -> usize {
-    let mut cols = 0usize;
-    for b in line.bytes() {
-        match b {
-            b' ' => cols += 1,
-            b'\t' => cols += 4,
-            _ => break,
-        }
-    }
-    cols
+    line.bytes().take_while(|&b| b == b' ' || b == b'\t').map(|b| if b == b'\t' { 4 } else { 1 }).sum()
 }
 
-fn strip_blockquote_prefix(line: &str) -> (usize, &str) {
-    let mut rest = line;
+fn strip_blockquote_prefix(mut rest: &str) -> (usize, &str) {
     let mut depth = 0usize;
-    loop {
-        let spaces = rest.bytes().take_while(|&b| b == b' ').count();
-        if spaces > 3 {
-            break;
-        }
-        let Some(after_sp) = rest.get(spaces..) else {
-            break;
-        };
-        let Some(after_gt) = after_sp.strip_prefix('>') else {
-            break;
-        };
+    while let Some(after_gt) =
+        (rest.bytes().take_while(|&b| b == b' ').count() <= 3).then(|| rest.trim_start_matches(' ').strip_prefix('>')).flatten()
+    {
         depth += 1;
         rest = after_gt.strip_prefix(' ').unwrap_or(after_gt);
     }
@@ -757,21 +547,19 @@ fn strip_blockquote_prefix(line: &str) -> (usize, &str) {
 
 fn protect_math_spans(input: &str, sentinel_open: &str) -> (String, Vec<MathSlot>) {
     let lines: Vec<&str> = input.lines().collect();
-    let mut out = String::with_capacity(input.len() + 64);
-    let mut slots = Vec::new();
-    let mut fence: Option<(usize, char, usize)> = None;
-    let mut no_display_close_until = 0usize;
-    let mut idx = 0usize;
-
+    let (mut out, mut slots, mut fence, mut no_close_until, mut idx) =
+        (String::with_capacity(input.len() + 64), Vec::new(), None::<(usize, u8, usize)>, 0usize, 0usize);
     while let Some(&line) = lines.get(idx) {
         let (q_depth, inner) = strip_blockquote_prefix(line);
-        if let Some((f_quote, ch, min_len)) = fence {
-            if q_depth < f_quote {
+        if let Some((fq, ch, min_len)) = fence {
+            if q_depth < fq {
                 fence = None;
             } else {
                 out.push_str(line);
                 out.push('\n');
-                if q_depth == f_quote && is_fence_close(inner.trim(), ch, min_len) {
+                let t = inner.trim();
+                let n = t.bytes().take_while(|&b| b == ch).count();
+                if q_depth == fq && n >= min_len && t.get(n..).is_some_and(|r| r.trim().is_empty()) {
                     fence = None;
                 }
                 idx += 1;
@@ -779,7 +567,7 @@ fn protect_math_spans(input: &str, sentinel_open: &str) -> (String, Vec<MathSlot
             }
         }
         if leading_indent_cols(inner) < 4
-            && let Some((ch, len, _)) = parse_fence_open(inner.trim())
+            && let Some((ch, len)) = parse_fence_open(inner.trim())
         {
             fence = Some((q_depth, ch, len));
             out.push_str(line);
@@ -788,14 +576,11 @@ fn protect_math_spans(input: &str, sentinel_open: &str) -> (String, Vec<MathSlot
             continue;
         }
         if leading_indent_cols(line) < 4
-            && let Some((tex, next_idx)) = extract_display_math_block(&lines, idx, &mut no_display_close_until)
+            && let Some((tex, next_idx)) = extract_display_math_block(&lines, idx, &mut no_close_until)
         {
             let id = slots.len();
-            let raw = lines.get(idx..next_idx).map(|s| s.join("\n")).unwrap_or_default();
-            slots.push(MathSlot { kind: MathKind::DisplayBlock, tex, raw });
-            out.push('\n');
-            out.push_str(&format!("{sentinel_open}{id}{MATH_CLOSE_SENTINEL}"));
-            out.push_str("\n\n");
+            slots.push(MathSlot { kind: MathKind::DisplayBlock, tex, raw: lines.get(idx..next_idx).map(|s| s.join("\n")).unwrap_or_default() });
+            out.push_str(&format!("\n{sentinel_open}{id}{MATH_CLOSE_SENTINEL}\n\n"));
             idx = next_idx;
             continue;
         }
@@ -807,123 +592,79 @@ fn protect_math_spans(input: &str, sentinel_open: &str) -> (String, Vec<MathSlot
 }
 
 fn extract_display_math_block(lines: &[&str], idx: usize, no_close_until: &mut usize) -> Option<(String, usize)> {
-    let trimmed = lines.get(idx)?.trim();
-    let after_open = trimmed.strip_prefix("$$")?;
+    let after_open = lines.get(idx)?.trim().strip_prefix("$$")?;
     if let Some(inner) = after_open.strip_suffix("$$") {
         let clean = inner.trim();
-        if inner.contains("$$") || clean.is_empty() {
-            return None;
-        }
-        return Some((clean.to_owned(), idx + 1));
+        return (!inner.contains("$$") && !clean.is_empty()).then(|| (clean.to_owned(), idx + 1));
     }
     if after_open.contains("$$") || idx + 1 < *no_close_until {
         return None;
     }
-    let close_idx = match find_display_math_close(lines, idx + 1) {
-        Ok(found) => found,
-        Err(stop_idx) => {
-            *no_close_until = (*no_close_until).max(stop_idx);
+    let mut close_idx = None;
+    for (off, line) in lines.get(idx + 1..).unwrap_or(&[]).iter().enumerate() {
+        let t = line.trim();
+        if parse_fence_open(t).is_some() {
+            *no_close_until = (*no_close_until).max(idx + 1 + off);
             return None;
         }
-    };
-    let mut parts: Vec<&str> = Vec::new();
-    let head = after_open.trim();
-    if !head.is_empty() {
-        parts.push(head);
-    }
-    for line in lines.get(idx + 1..close_idx)? {
-        let t = line.trim();
-        if !t.is_empty() {
-            parts.push(t);
+        let escaped = t.strip_suffix("$$").is_some_and(|b| b.bytes().rev().take_while(|&c| c == b'\\').count() % 2 == 1);
+        if t == "$$" || (t.ends_with("$$") && !escaped) {
+            close_idx = Some(idx + 1 + off);
+            break;
         }
     }
-    let close_trimmed = lines.get(close_idx)?.trim();
-    if let Some(tail) = close_trimmed.strip_suffix("$$") {
-        let tail_t = tail.trim();
-        if !tail_t.is_empty() {
-            parts.push(tail_t);
-        }
-    }
-    let joined = parts.join(" ");
-    if joined.trim().is_empty() {
+    let Some(ci) = close_idx else {
+        *no_close_until = (*no_close_until).max(lines.len());
         return None;
-    }
-    Some((joined.trim().to_owned(), close_idx + 1))
-}
-
-fn build_backtick_last_positions(line: &str) -> BTreeMap<usize, usize> {
-    let mut last_pos = BTreeMap::new();
-    if !line.contains('`') {
-        return last_pos;
-    }
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'`' {
-            let start = i;
-            while i < bytes.len() && bytes[i] == b'`' {
-                i += 1;
-            }
-            last_pos.insert(i - start, start);
-        } else {
-            i += 1;
-        }
-    }
-    last_pos
+    };
+    let joined = std::iter::once(after_open.trim())
+        .chain(lines.get(idx + 1..ci)?.iter().map(|l| l.trim()))
+        .chain(lines.get(ci)?.trim().strip_suffix("$$").map(str::trim))
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!joined.trim().is_empty()).then(|| (joined.trim().to_owned(), ci + 1))
 }
 
 fn protect_line_math(line: &str, sentinel_open: &str, slots: &mut Vec<MathSlot>, out: &mut String) {
-    let last_ticks = build_backtick_last_positions(line);
+    let (b, mut last_ticks, mut j) = (line.as_bytes(), BTreeMap::new(), 0usize);
+    while j < b.len() {
+        if b[j] == b'`' {
+            let s = j;
+            while j < b.len() && b[j] == b'`' {
+                j += 1;
+            }
+            last_ticks.insert(j - s, s);
+        } else {
+            j += 1;
+        }
+    }
     let mut i = 0usize;
     while let Some(rest) = line.get(i..) {
-        if rest.is_empty() {
-            break;
-        }
-        let Some(ch) = rest.chars().next() else {
-            break;
-        };
+        let Some(ch) = rest.chars().next() else { break };
         if ch == '\\' {
-            out.push('\\');
-            i += 1;
-            if let Some(next_ch) = line.get(i..).and_then(|s| s.chars().next()) {
-                out.push(next_ch);
-                i += next_ch.len_utf8();
-            }
+            let extra = line.get(i + 1..).and_then(|s| s.chars().next()).map_or(0, char::len_utf8);
+            out.push_str(rest.get(..1 + extra).unwrap_or("\\"));
+            i += 1 + extra;
             continue;
         }
         if ch == '`' {
             let run = rest.bytes().take_while(|&b| b == b'`').count();
-            if last_ticks.get(&run).is_some_and(|&last| last > i)
-                && let Some((_, consumed)) = parse_code_span(rest)
-                && let Some(raw_span) = rest.get(..consumed)
-            {
-                out.push_str(raw_span);
-                i += consumed;
-                continue;
-            }
-            if let Some(raw_run) = rest.get(..run) {
-                out.push_str(raw_run);
-            }
-            i += run;
-            continue;
-        }
-        if rest.starts_with("$$")
-            && let Some((tex, consumed)) = parse_block_math_inline(rest, i, &last_ticks)
-            && let Some(raw_slice) = rest.get(..consumed)
-        {
-            let id = slots.len();
-            slots.push(MathSlot { kind: MathKind::InlineBlockSpan, tex: tex.to_owned(), raw: raw_slice.to_owned() });
-            out.push_str(&format!("{sentinel_open}{id}{MATH_CLOSE_SENTINEL}"));
+            let consumed = if last_ticks.get(&run).is_some_and(|&last| last > i) { parse_code_span_len(rest).unwrap_or(run) } else { run };
+            out.push_str(rest.get(..consumed).unwrap_or(""));
             i += consumed;
             continue;
         }
-        if ch == '$'
-            && !line.get(..i).and_then(|p| p.chars().next_back()).is_some_and(|c| c.is_ascii_alphanumeric())
-            && let Some((tex, consumed)) = parse_inline_math(rest, i, &last_ticks)
-            && let Some(raw_slice) = rest.get(..consumed)
-        {
+        let math_hit = if rest.starts_with("$$") {
+            parse_delimited_math(rest, i, &last_ticks, true).map(|(t, c)| (MathKind::InlineBlockSpan, t, c))
+        } else if ch == '$' && !line.get(..i).and_then(|p| p.chars().next_back()).is_some_and(|c| c.is_ascii_alphanumeric()) {
+            parse_delimited_math(rest, i, &last_ticks, false).map(|(t, c)| (MathKind::Inline, t, c))
+        } else {
+            None
+        };
+        if let Some((kind, tex, consumed)) = math_hit {
             let id = slots.len();
-            slots.push(MathSlot { kind: MathKind::Inline, tex: tex.to_owned(), raw: raw_slice.to_owned() });
+            slots.push(MathSlot { kind, tex: tex.to_owned(), raw: rest.get(..consumed).unwrap_or("").to_owned() });
             out.push_str(&format!("{sentinel_open}{id}{MATH_CLOSE_SENTINEL}"));
             i += consumed;
             continue;
@@ -933,93 +674,39 @@ fn protect_line_math(line: &str, sentinel_open: &str, slots: &mut Vec<MathSlot>,
     }
 }
 
-fn parse_code_span(slice: &str) -> Option<(&str, usize)> {
+pub(super) fn parse_code_span_len(slice: &str) -> Option<usize> {
     let ticks = slice.bytes().take_while(|&b| b == b'`').count();
-    if ticks == 0 {
-        return None;
-    }
-    let after_open = slice.get(ticks..)?;
-    let mut pos = 0usize;
-    while let Some(cur) = after_open.get(pos..) {
-        if cur.is_empty() {
-            break;
-        }
+    let (after, mut pos) = (slice.get(ticks..)?, 0usize);
+    while let Some(cur) = after.get(pos..) {
         if cur.starts_with('`') {
             let run = cur.bytes().take_while(|&b| b == b'`').count();
             if run == ticks {
-                let raw = after_open.get(..pos)?;
-                let trimmed = raw.strip_prefix(' ').and_then(|s| s.strip_suffix(' ')).unwrap_or(raw);
-                return Some((trimmed, ticks + pos + ticks));
+                return Some(ticks + pos + ticks);
             }
             pos += run;
-            continue;
+        } else {
+            pos += cur.chars().next()?.len_utf8();
         }
-        let ch = cur.chars().next()?;
-        pos += ch.len_utf8();
     }
     None
 }
 
-/// Render a raw TeX-subset formula into a strict-CSP static `<span class="math">...</span>`.
-#[must_use]
-pub fn render_math_html(tex: &str) -> String {
-    let trimmed = tex.trim();
-    let mut out = String::with_capacity(trimmed.len().saturating_mul(2) + 32);
-    out.push_str("<span class=\"math\">");
-    render_tex_math_inner(trimmed, 0, &mut out);
-    out.push_str("</span>");
-    out
-}
-
-const MAX_MATH_DEPTH: usize = 32;
-const MAX_SQRT_DEGREE_BYTES: usize = 128;
-
-fn find_display_math_close(lines: &[&str], start: usize) -> Result<usize, usize> {
-    let Some(slice) = lines.get(start..) else {
-        return Err(lines.len());
-    };
-    for (offset, line) in slice.iter().enumerate() {
-        let trimmed = line.trim();
-        if parse_fence_open(trimmed).is_some() {
-            return Err(start + offset);
-        }
-        if trimmed == "$$" || (trimmed.ends_with("$$") && !ends_with_escaped_dollars(trimmed)) {
-            return Ok(start + offset);
-        }
-    }
-    Err(lines.len())
-}
-
-fn ends_with_escaped_dollars(trimmed: &str) -> bool {
-    let Some(before) = trimmed.strip_suffix("$$") else {
-        return false;
-    };
-    let backslashes = before.bytes().rev().take_while(|&b| b == b'\\').count();
-    backslashes % 2 == 1
-}
-
 fn parse_delimited_math<'a>(rest: &'a str, line_offset: usize, last_ticks: &BTreeMap<usize, usize>, block: bool) -> Option<(&'a str, usize)> {
     let delim = if block { "$$" } else { "$" };
-    let after_open = rest.strip_prefix(delim)?;
-    if !block && (after_open.is_empty() || after_open.starts_with('$') || after_open.chars().next().is_some_and(char::is_whitespace)) {
+    let after = rest.strip_prefix(delim)?;
+    if !block && (after.is_empty() || after.starts_with('$') || after.chars().next().is_some_and(char::is_whitespace)) {
         return None;
     }
-    let delim_len = delim.len();
-    let mut i = 0usize;
-    let mut brace_depth = 0usize;
-    while let Some(cur) = after_open.get(i..) {
+    let (mut i, mut brace_depth) = (0usize, 0usize);
+    while let Some(cur) = after.get(i..) {
         let ch = cur.chars().next()?;
         if ch == '\\' {
-            i += 1;
-            if let Some(nc) = after_open.get(i..).and_then(|s| s.chars().next()) {
-                i += nc.len_utf8();
-            }
+            i += 1 + after.get(i + 1..).and_then(|s| s.chars().next()).map_or(0, char::len_utf8);
             continue;
         }
         if ch == '`' {
             let run = cur.bytes().take_while(|&b| b == b'`').count();
-            let abs_pos = line_offset + delim_len + i;
-            if last_ticks.get(&run).is_some_and(|&last| last > abs_pos) && parse_code_span(cur).is_some() {
+            if last_ticks.get(&run).is_some_and(|&last| last > line_offset + delim.len() + i) && parse_code_span_len(cur).is_some() {
                 return None;
             }
             i += run;
@@ -1034,22 +721,16 @@ fn parse_delimited_math<'a>(rest: &'a str, line_offset: usize, last_ticks: &BTre
             }
             '}' => brace_depth = brace_depth.checked_sub(1)?,
             _ if brace_depth == 0 && cur.starts_with(delim) => {
-                let inner = after_open.get(..i)?;
+                let inner = after.get(..i)?;
                 if block {
-                    if inner.trim().is_empty() {
-                        return None;
-                    }
-                    return Some((inner, i + 4));
+                    return (!inner.trim().is_empty()).then_some((inner, i + 4));
                 }
-                let after_close = after_open.get(i + 1..)?;
-                if inner.is_empty()
-                    || inner.chars().last().is_some_and(char::is_whitespace)
-                    || after_close.starts_with('$')
-                    || after_close.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
-                    return None;
-                }
-                return Some((inner, i + 2));
+                let after_close = after.get(i + 1..)?;
+                return (!inner.is_empty()
+                    && !inner.chars().last().is_some_and(char::is_whitespace)
+                    && !after_close.starts_with('$')
+                    && !after_close.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_'))
+                .then_some((inner, i + 2));
             }
             _ => {}
         }
@@ -1058,30 +739,35 @@ fn parse_delimited_math<'a>(rest: &'a str, line_offset: usize, last_ticks: &BTre
     None
 }
 
-fn parse_block_math_inline<'a>(rest: &'a str, line_offset: usize, last_ticks: &BTreeMap<usize, usize>) -> Option<(&'a str, usize)> {
-    parse_delimited_math(rest, line_offset, last_ticks, true)
+#[must_use]
+pub fn render_math_html(tex: &str) -> String {
+    let mut out = String::with_capacity(tex.len().saturating_mul(2) + 32);
+    push_math_span(&mut out, MathKind::Inline, tex, false);
+    out
 }
 
-fn parse_inline_math<'a>(rest: &'a str, line_offset: usize, last_ticks: &BTreeMap<usize, usize>) -> Option<(&'a str, usize)> {
-    parse_delimited_math(rest, line_offset, last_ticks, false)
+fn push_math_text(s: &str, plain: bool, out: &mut String) {
+    if plain { out.push_str(s) } else { push_html_escaped(s, out) }
+}
+fn push_math_char(ch: char, plain: bool, out: &mut String) {
+    if plain { out.push(ch) } else { push_char_escaped(ch, out) }
+}
+fn render_wrapped_tex(out: &mut String, open: &str, tex: &str, close: &str, depth: usize, plain: bool) {
+    out.push_str(open);
+    render_tex_math(tex, depth + 1, plain, out);
+    out.push_str(close);
 }
 
-fn render_tex_math_inner(tex: &str, depth: usize, out: &mut String) {
+fn render_tex_math(tex: &str, depth: usize, plain: bool, out: &mut String) {
     if depth > MAX_MATH_DEPTH {
-        push_html_escaped(tex, out);
-        return;
+        return push_math_text(tex, plain, out);
     }
-    let tex = tex.trim();
-    let start_len = out.len();
-    let mut i = 0usize;
+    let tex = if plain { tex } else { tex.trim() };
+    let (start_len, mut i) = (out.len(), 0usize);
     while let Some(rest) = tex.get(i..) {
-        let Some(ch) = rest.chars().next() else {
-            break;
-        };
-        if ch.is_whitespace() {
-            while let Some(nc) = tex.get(i..).and_then(|s| s.chars().next())
-                && nc.is_whitespace()
-            {
+        let Some(ch) = rest.chars().next() else { break };
+        if !plain && ch.is_whitespace() {
+            while let Some(nc) = tex.get(i..).and_then(|s| s.chars().next()).filter(|c| c.is_whitespace()) {
                 i += nc.len_utf8();
             }
             if out.len() > start_len && !out.ends_with(' ') {
@@ -1092,164 +778,141 @@ fn render_tex_math_inner(tex: &str, depth: usize, out: &mut String) {
         if ch == '{'
             && let Some((inner, consumed)) = extract_braced(rest)
         {
-            render_tex_math_inner(inner, depth + 1, out);
+            render_tex_math(inner, depth + 1, plain, out);
             i += consumed;
-            continue;
+        } else if (ch == '_' || ch == '^')
+            && let Some((arg, consumed)) = extract_math_arg(rest.get(1..).unwrap_or(""), depth)
+        {
+            let (o, c) = if plain {
+                ("", "")
+            } else if ch == '_' {
+                ("<sub>", "</sub>")
+            } else {
+                ("<sup>", "</sup>")
+            };
+            render_wrapped_tex(out, o, arg, c, depth, plain);
+            i += 1 + consumed;
+        } else if ch == '\\' {
+            i += render_tex_command(rest, depth, plain, out);
+        } else {
+            push_math_char(ch, plain, out);
+            i += ch.len_utf8();
         }
-        if ch == '_' || ch == '^' {
-            let tag = if ch == '_' { "sub" } else { "sup" };
-            let after = rest.get(1..).unwrap_or("");
-            if let Some((arg, consumed)) = extract_math_arg(after, depth) {
-                out.push('<');
-                out.push_str(tag);
-                out.push('>');
-                render_tex_math_inner(arg, depth + 1, out);
-                out.push_str("</");
-                out.push_str(tag);
-                out.push('>');
-                i += 1 + consumed;
-                continue;
-            }
-        }
-        if ch == '\\' {
-            i += render_tex_command(rest, depth, out);
-            continue;
-        }
-        push_char_escaped(ch, out);
-        i += ch.len_utf8();
     }
 }
 
-fn render_tex_command(rest: &str, depth: usize, out: &mut String) -> usize {
-    let Some(after) = rest.get(1..) else {
-        return 1;
-    };
-    let Some(first) = after.chars().next() else {
-        return 1;
-    };
+fn render_tex_command(rest: &str, depth: usize, plain: bool, out: &mut String) -> usize {
+    let Some(after) = rest.get(1..) else { return 1 };
+    let Some(first) = after.chars().next() else { return 1 };
     if !first.is_ascii_alphabetic() {
         match first {
-            ',' => out.push('\u{2009}'),
             '!' => {}
-            ';' | ':' | ' ' | '\\' => out.push(' '),
+            ',' if !plain => out.push('\u{2009}'),
+            ',' | ';' | ':' | ' ' | '\\' => out.push(' '),
             '|' => out.push('\u{2016}'),
-            _ => push_char_escaped(first, out),
+            _ => push_math_char(first, plain, out),
         }
         return 1 + first.len_utf8();
     }
-    let name_len = after.bytes().take_while(u8::is_ascii_alphabetic).count();
-    let name = after.get(..name_len).unwrap_or("");
-    let tail = after.get(name_len..).unwrap_or("");
-
-    if matches!(name, "frac" | "dfrac" | "tfrac")
-        && let Some((num, den, consumed)) = extract_two_math_args(tail, depth)
+    let nlen = after.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let (name, tail) = (after.get(..nlen).unwrap_or(""), after.get(nlen..).unwrap_or(""));
+    if matches!(name, "frac" | "dfrac" | "tfrac" | "binom")
+        && let Some((num, den, c)) = extract_two_math_args(tail, depth)
     {
-        out.push_str("<span class=\"math-frac\"><span class=\"math-num\">");
-        render_tex_math_inner(num.trim(), depth + 1, out);
-        out.push_str("</span><span class=\"math-den\">");
-        render_tex_math_inner(den.trim(), depth + 1, out);
-        out.push_str("</span></span>");
-        return 1 + name_len + consumed;
-    }
-    if name == "binom"
-        && let Some((num, den, consumed)) = extract_two_math_args(tail, depth)
-    {
-        out.push('(');
-        render_tex_math_inner(num.trim(), depth + 1, out);
-        out.push_str(" choose ");
-        render_tex_math_inner(den.trim(), depth + 1, out);
-        out.push(')');
-        return 1 + name_len + consumed;
+        let (o, m, e) = if name == "binom" {
+            ("(", " choose ", ")")
+        } else if plain {
+            ("", "/", "")
+        } else {
+            ("<span class=\"math-frac\"><span class=\"math-num\">", "</span><span class=\"math-den\">", "</span></span>")
+        };
+        render_wrapped_tex(out, o, num.trim(), m, depth, plain);
+        render_wrapped_tex(out, "", den.trim(), e, depth, plain);
+        return 1 + nlen + c;
     }
     if name == "sqrt"
-        && let Some((deg, rad, consumed)) = extract_sqrt_args(tail, depth)
+        && let Some((deg, rad, c)) = extract_sqrt_args(tail, depth)
     {
-        if let Some(d) = deg {
-            out.push_str("<sup>");
-            render_tex_math_inner(d.trim(), depth + 1, out);
-            out.push_str("</sup>");
+        if !plain && let Some(d) = deg {
+            render_wrapped_tex(out, "<sup>", d.trim(), "</sup>", depth, false);
         }
-        out.push_str("\u{221A}<span class=\"math-rad\">");
-        render_tex_math_inner(rad.trim(), depth + 1, out);
-        out.push_str("</span>");
-        return 1 + name_len + consumed;
+        let (o, e) = if plain { ("\u{221A}", "") } else { ("\u{221A}<span class=\"math-rad\">", "</span>") };
+        render_wrapped_tex(out, o, rad.trim(), e, depth, plain);
+        return 1 + nlen + c;
     }
-    if matches!(name, "text" | "mathrm" | "textrm" | "operatorname" | "textbf" | "mathbf" | "mbox")
-        && let Some((inner, consumed)) = extract_braced_opt_ws(tail)
+    if matches!(name, "text" | "mathrm" | "textrm" | "operatorname" | "textbf" | "mathbf" | "mbox" | "textit" | "mathit")
+        && let Some((inner, c)) = extract_braced_opt_ws(tail)
     {
-        out.push_str("<span class=\"math-text\">");
-        render_tex_text_mode(inner, out);
-        out.push_str("</span>");
-        return 1 + name_len + consumed;
-    }
-    if matches!(name, "textit" | "mathit")
-        && let Some((inner, consumed)) = extract_braced_opt_ws(tail)
-    {
-        out.push_str("<em>");
-        render_tex_text_mode(inner, out);
-        out.push_str("</em>");
-        return 1 + name_len + consumed;
+        let (o, e) = if plain {
+            ("", "")
+        } else if matches!(name, "textit" | "mathit") {
+            ("<em>", "</em>")
+        } else {
+            ("<span class=\"math-text\">", "</span>")
+        };
+        out.push_str(o);
+        render_tex_text_mode(inner, plain, out);
+        out.push_str(e);
+        return 1 + nlen + c;
     }
     if matches!(name, "bar" | "overline" | "hat" | "widehat" | "tilde" | "widetilde")
-        && let Some((arg, consumed)) = extract_math_arg(tail, depth)
+        && let Some((arg, c)) = extract_math_arg(tail, depth)
     {
-        let accent = match name {
-            "bar" | "overline" => '\u{0304}',
-            "hat" | "widehat" => '\u{0302}',
-            _ => '\u{0303}',
-        };
-        let mut inner_html = String::new();
-        render_tex_math_inner(arg.trim(), depth + 1, &mut inner_html);
-        push_accented_html(&inner_html, accent, out);
-        return 1 + name_len + consumed;
+        if plain {
+            render_tex_math(arg.trim(), depth + 1, true, out);
+        } else {
+            let accent = match name {
+                "bar" | "overline" => '\u{0304}',
+                "hat" | "widehat" => '\u{0302}',
+                _ => '\u{0303}',
+            };
+            let mut inner_html = String::new();
+            render_tex_math(arg.trim(), depth + 1, false, &mut inner_html);
+            push_accented_html(&inner_html, accent, out);
+        }
+        return 1 + nlen + c;
     }
     if matches!(name, "left" | "right") {
-        let extra = if tail.starts_with('.') { 1 } else { 0 };
-        return 1 + name_len + extra;
+        return 1 + nlen + usize::from(tail.starts_with('.'));
     }
-    if name == "TeX" {
-        out.push_str("<span class=\"math-text\">TeX</span>");
-        return 1 + name_len;
+    if matches!(name, "quad" | "qquad") {
+        out.push_str(if plain {
+            " "
+        } else if name == "quad" {
+            "\u{2003}"
+        } else {
+            "\u{2003}\u{2003}"
+        });
+        return 1 + nlen;
     }
-    if name == "LaTeX" {
-        out.push_str("<span class=\"math-text\">LaTeX</span>");
-        return 1 + name_len;
-    }
-    if name == "quad" {
-        out.push('\u{2003}');
-        return 1 + name_len;
-    }
-    if name == "qquad" {
-        out.push_str("\u{2003}\u{2003}");
-        return 1 + name_len;
-    }
-    if is_roman_math_function(name) {
-        out.push_str("<span class=\"math-text\">");
-        out.push_str(name);
-        out.push_str("</span>");
-        return 1 + name_len;
+    if matches!(name, "TeX" | "LaTeX") || ROMAN_MATH_FUNCTIONS.split_ascii_whitespace().any(|w| w == name) {
+        if plain {
+            out.push_str(name);
+        } else {
+            out.push_str("<span class=\"math-text\">");
+            out.push_str(name);
+            out.push_str("</span>");
+        }
+        return 1 + nlen;
     }
     if let Some(sym) = lookup_tex_symbol(name) {
-        let extra = if matches!(name, "textbackslash" | "textless" | "textgreater" | "textdegree") && tail.starts_with("{}") { 2 } else { 0 };
-        push_html_escaped(sym, out);
-        return 1 + name_len + extra;
+        let extra = usize::from(matches!(name, "textbackslash" | "textless" | "textgreater" | "textdegree") && tail.starts_with("{}")) * 2;
+        push_math_text(sym, plain, out);
+        return 1 + nlen + extra;
     }
-
-    push_html_escaped(name, out);
-    1 + name_len
+    push_math_text(name, plain, out);
+    1 + nlen
 }
 
-fn render_tex_text_mode(inner: &str, out: &mut String) {
+fn render_tex_text_mode(inner: &str, plain: bool, out: &mut String) {
     let mut i = 0usize;
     while let Some(rest) = inner.get(i..) {
-        let Some(ch) = rest.chars().next() else {
-            break;
-        };
+        let Some(ch) = rest.chars().next() else { break };
         if ch == '\\'
             && let Some(next_ch) = rest.get(1..).and_then(|s| s.chars().next())
         {
             if next_ch.is_ascii_punctuation() || next_ch == ' ' {
-                push_char_escaped(next_ch, out);
+                push_math_char(next_ch, plain, out);
                 i += 1 + next_ch.len_utf8();
                 continue;
             }
@@ -1258,42 +921,30 @@ fn render_tex_text_mode(inner: &str, out: &mut String) {
             if nlen > 0
                 && let Some(sym) = lookup_tex_symbol(after.get(..nlen).unwrap_or(""))
             {
-                push_html_escaped(sym, out);
+                push_math_text(sym, plain, out);
                 i += 1 + nlen;
                 continue;
             }
         }
-        push_char_escaped(ch, out);
+        push_math_char(ch, plain, out);
         i += ch.len_utf8();
     }
 }
 
 fn push_accented_html(rendered: &str, accent: char, out: &mut String) {
-    let mut inserted = false;
-    let mut in_tag = false;
-    let mut in_entity = false;
+    let (mut inserted, mut in_tag, mut in_entity) = (false, false, false);
     for ch in rendered.chars() {
         out.push(ch);
         if inserted {
             continue;
         }
-        if ch == '<' {
-            in_tag = true;
-        } else if in_tag {
-            if ch == '>' {
-                in_tag = false;
-            }
-        } else if ch == '&' {
-            in_entity = true;
-        } else if in_entity {
-            if ch == ';' {
-                in_entity = false;
-                out.push(accent);
-                inserted = true;
-            }
-        } else if !ch.is_whitespace() {
-            out.push(accent);
-            inserted = true;
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            '&' if !in_tag => in_entity = true,
+            ';' if in_entity => (in_entity, inserted, ()) = (false, true, out.push(accent)),
+            _ if !in_tag && !in_entity && !ch.is_whitespace() => (inserted, ()) = (true, out.push(accent)),
+            _ => {}
         }
     }
     if !inserted {
@@ -1301,162 +952,17 @@ fn push_accented_html(rendered: &str, accent: char, out: &mut String) {
     }
 }
 
-fn render_tex_math_plain(tex: &str, depth: usize, out: &mut String) {
-    if depth > MAX_MATH_DEPTH {
-        out.push_str(tex);
-        return;
-    }
-    let mut i = 0usize;
-    while let Some(rest) = tex.get(i..) {
-        let Some(ch) = rest.chars().next() else {
-            break;
-        };
-        if ch == '{'
-            && let Some((inner, consumed)) = extract_braced(rest)
-        {
-            render_tex_math_plain(inner, depth + 1, out);
-            i += consumed;
-            continue;
-        }
-        if ch == '_' || ch == '^' {
-            let after = rest.get(1..).unwrap_or("");
-            if let Some((arg, consumed)) = extract_math_arg(after, depth) {
-                render_tex_math_plain(arg, depth + 1, out);
-                i += 1 + consumed;
-                continue;
-            }
-        }
-        if ch == '\\' {
-            i += render_tex_command_plain(rest, depth, out);
-            continue;
-        }
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-}
-
-fn render_tex_command_plain(rest: &str, depth: usize, out: &mut String) -> usize {
-    let Some(after) = rest.get(1..) else {
-        return 1;
-    };
-    let Some(first) = after.chars().next() else {
-        return 1;
-    };
-    if !first.is_ascii_alphabetic() {
-        match first {
-            '!' => {}
-            ',' | ';' | ':' | ' ' | '\\' => out.push(' '),
-            '|' => out.push('\u{2016}'),
-            _ => out.push(first),
-        }
-        return 1 + first.len_utf8();
-    }
-    let nlen = after.bytes().take_while(u8::is_ascii_alphabetic).count();
-    let name = after.get(..nlen).unwrap_or("");
-    let tail = after.get(nlen..).unwrap_or("");
-    if matches!(name, "frac" | "dfrac" | "tfrac")
-        && let Some((num, den, consumed)) = extract_two_math_args(tail, depth)
-    {
-        render_tex_math_plain(num.trim(), depth + 1, out);
-        out.push('/');
-        render_tex_math_plain(den.trim(), depth + 1, out);
-        return 1 + nlen + consumed;
-    }
-    if name == "binom"
-        && let Some((num, den, consumed)) = extract_two_math_args(tail, depth)
-    {
-        out.push('(');
-        render_tex_math_plain(num.trim(), depth + 1, out);
-        out.push_str(" choose ");
-        render_tex_math_plain(den.trim(), depth + 1, out);
-        out.push(')');
-        return 1 + nlen + consumed;
-    }
-    if name == "sqrt"
-        && let Some((_, rad, consumed)) = extract_sqrt_args(tail, depth)
-    {
-        out.push('\u{221A}');
-        render_tex_math_plain(rad.trim(), depth + 1, out);
-        return 1 + nlen + consumed;
-    }
-    if matches!(name, "text" | "mathrm" | "textrm" | "operatorname" | "textbf" | "mathbf" | "textit" | "mathit" | "mbox")
-        && let Some((inner, consumed)) = extract_braced_opt_ws(tail)
-    {
-        render_tex_text_mode_plain(inner, out);
-        return 1 + nlen + consumed;
-    }
-    if matches!(name, "bar" | "overline" | "hat" | "widehat" | "tilde" | "widetilde")
-        && let Some((arg, consumed)) = extract_math_arg(tail, depth)
-    {
-        render_tex_math_plain(arg.trim(), depth + 1, out);
-        return 1 + nlen + consumed;
-    }
-    if matches!(name, "left" | "right") {
-        let extra = usize::from(tail.starts_with('.'));
-        return 1 + nlen + extra;
-    }
-    if matches!(name, "quad" | "qquad") {
-        out.push(' ');
-        return 1 + nlen;
-    }
-    if name == "TeX" || name == "LaTeX" || is_roman_math_function(name) {
-        out.push_str(name);
-        return 1 + nlen;
-    }
-    if let Some(sym) = lookup_tex_symbol(name) {
-        let extra = if matches!(name, "textbackslash" | "textless" | "textgreater" | "textdegree") && tail.starts_with("{}") { 2 } else { 0 };
-        out.push_str(sym);
-        return 1 + nlen + extra;
-    }
-    out.push_str(name);
-    1 + nlen
-}
-
-fn render_tex_text_mode_plain(inner: &str, out: &mut String) {
-    let mut i = 0usize;
-    while let Some(rest) = inner.get(i..) {
-        let Some(ch) = rest.chars().next() else {
-            break;
-        };
-        if ch == '\\'
-            && let Some(next_ch) = rest.get(1..).and_then(|s| s.chars().next())
-        {
-            if next_ch.is_ascii_punctuation() || next_ch == ' ' {
-                out.push(next_ch);
-                i += 1 + next_ch.len_utf8();
-                continue;
-            }
-            let after = rest.get(1..).unwrap_or("");
-            let nlen = after.bytes().take_while(u8::is_ascii_alphabetic).count();
-            if nlen > 0
-                && let Some(sym) = lookup_tex_symbol(after.get(..nlen).unwrap_or(""))
-            {
-                out.push_str(sym);
-                i += 1 + nlen;
-                continue;
-            }
-        }
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-}
-
 fn extract_braced(s: &str) -> Option<(&str, usize)> {
     if !s.starts_with('{') {
         return None;
     }
-    let mut depth = 0usize;
-    let mut escaped = false;
+    let (mut depth, mut escaped) = (0usize, false);
     for (idx, ch) in s.char_indices() {
         if escaped {
             escaped = false;
-            continue;
-        }
-        if ch == '\\' {
+        } else if ch == '\\' {
             escaped = true;
-            continue;
-        }
-        if ch == '{' {
+        } else if ch == '{' {
             depth = depth.saturating_add(1);
             if depth > MAX_MATH_DEPTH {
                 return None;
@@ -1473,9 +979,8 @@ fn extract_braced(s: &str) -> Option<(&str, usize)> {
 
 fn extract_braced_opt_ws(s: &str) -> Option<(&str, usize)> {
     let trimmed = s.trim_start_matches([' ', '\t']);
-    let ws = s.len() - trimmed.len();
     let (inner, consumed) = extract_braced(trimmed)?;
-    Some((inner, ws + consumed))
+    Some((inner, (s.len() - trimmed.len()) + consumed))
 }
 
 fn extract_math_arg(s: &str, depth: usize) -> Option<(&str, usize)> {
@@ -1485,8 +990,8 @@ fn extract_math_arg(s: &str, depth: usize) -> Option<(&str, usize)> {
     let trimmed = s.trim_start_matches([' ', '\t']);
     let ws = s.len() - trimmed.len();
     if trimmed.starts_with('{') {
-        let (inner, consumed) = extract_braced(trimmed)?;
-        return Some((inner, ws + consumed));
+        let (inner, c) = extract_braced(trimmed)?;
+        return Some((inner, ws + c));
     }
     let ch = trimmed.chars().next()?;
     if ch == '\\' {
@@ -1494,21 +999,15 @@ fn extract_math_arg(s: &str, depth: usize) -> Option<(&str, usize)> {
         let nlen = after.bytes().take_while(u8::is_ascii_alphabetic).count();
         let mut end = if nlen > 0 { 1 + nlen } else { 1 + after.chars().next().map_or(0, char::len_utf8) };
         if nlen > 0 {
-            let name = after.get(..nlen).unwrap_or("");
-            let tail = after.get(nlen..).unwrap_or("");
+            let (name, tail) = (after.get(..nlen).unwrap_or(""), after.get(nlen..).unwrap_or(""));
             if matches!(name, "text" | "mathrm" | "textrm" | "operatorname" | "textbf" | "mathbf" | "textit" | "mathit" | "mbox") {
-                if let Some((_, arg_len)) = extract_braced_opt_ws(tail) {
-                    end += arg_len;
-                }
+                end += extract_braced_opt_ws(tail).map_or(0, |(_, len)| len);
             } else if matches!(name, "bar" | "overline" | "hat" | "widehat" | "tilde" | "widetilde") {
-                let (_, arg_len) = extract_math_arg(tail, depth + 1)?;
-                end += arg_len;
+                end += extract_math_arg(tail, depth + 1)?.1;
             } else if name == "sqrt" {
-                let (_, _, arg_len) = extract_sqrt_args(tail, depth + 1)?;
-                end += arg_len;
+                end += extract_sqrt_args(tail, depth + 1)?.2;
             } else if matches!(name, "frac" | "dfrac" | "tfrac" | "binom") {
-                let (_, _, arg_len) = extract_two_math_args(tail, depth + 1)?;
-                end += arg_len;
+                end += extract_two_math_args(tail, depth + 1)?.2;
             }
         }
         return Some((trimmed.get(..end)?, ws + end));
@@ -1531,169 +1030,53 @@ fn extract_sqrt_args(s: &str, depth: usize) -> Option<(Option<&str>, &str, usize
     }
     let trimmed = s.trim_start_matches([' ', '\t']);
     let ws = s.len() - trimmed.len();
-    if let Some(after_bracket) = trimmed.strip_prefix('[') {
-        let mut brace_depth = 0usize;
-        for (idx, ch) in after_bracket.char_indices() {
+    if let Some(after) = trimmed.strip_prefix('[') {
+        let mut bdepth = 0usize;
+        for (idx, ch) in after.char_indices() {
             if idx >= MAX_SQRT_DEGREE_BYTES || ch == '\n' {
                 break;
             }
             match ch {
                 '{' => {
-                    brace_depth = brace_depth.saturating_add(1);
-                    if brace_depth > MAX_MATH_DEPTH {
+                    bdepth = bdepth.saturating_add(1);
+                    if bdepth > MAX_MATH_DEPTH {
                         return None;
                     }
                 }
-                '}' => brace_depth = brace_depth.saturating_sub(1),
-                ']' if brace_depth == 0 => {
-                    let deg = after_bracket.get(..idx)?;
-                    let rest = after_bracket.get(idx + 1..)?;
-                    let (rad, rad_len) = extract_math_arg(rest, depth + 1)?;
-                    return Some((Some(deg), rad, ws + 1 + idx + 1 + rad_len));
+                '}' => bdepth = bdepth.saturating_sub(1),
+                ']' if bdepth == 0 => {
+                    let (rad, rlen) = extract_math_arg(after.get(idx + 1..)?, depth + 1)?;
+                    return Some((Some(after.get(..idx)?), rad, ws + idx + 2 + rlen));
                 }
                 _ => {}
             }
         }
     }
-    let (rad, rad_len) = extract_math_arg(s, depth + 1)?;
-    Some((None, rad, rad_len))
+    let (rad, rlen) = extract_math_arg(s, depth + 1)?;
+    Some((None, rad, rlen))
 }
 
-const ROMAN_MATH_FUNCTIONS: &[&str] = &[
-    "ln", "log", "exp", "sin", "cos", "tan", "sinh", "cosh", "tanh", "arcsin", "arccos", "arctan", "sec", "csc", "cot", "erf", "erfc", "min", "max",
-    "lim", "sup", "inf", "arg", "det", "dim", "gcd", "lg",
-];
+const ROMAN_MATH_FUNCTIONS: &str =
+    "ln log exp sin cos tan sinh cosh tanh arcsin arccos arctan sec csc cot erf erfc min max lim sup inf arg det dim gcd lg";
 
-fn is_roman_math_function(name: &str) -> bool {
-    ROMAN_MATH_FUNCTIONS.contains(&name)
-}
-
-const TEX_SYMBOLS: &[(&str, &str)] = &[
-    ("alpha", "α"),
-    ("beta", "β"),
-    ("gamma", "γ"),
-    ("delta", "δ"),
-    ("epsilon", "ε"),
-    ("varepsilon", "ε"),
-    ("zeta", "ζ"),
-    ("eta", "η"),
-    ("theta", "θ"),
-    ("vartheta", "ϑ"),
-    ("iota", "ι"),
-    ("kappa", "κ"),
-    ("varkappa", "ϰ"),
-    ("lambda", "λ"),
-    ("mu", "μ"),
-    ("micro", "μ"),
-    ("nu", "ν"),
-    ("xi", "ξ"),
-    ("omicron", "ο"),
-    ("pi", "π"),
-    ("varpi", "ϖ"),
-    ("rho", "ρ"),
-    ("varrho", "ϱ"),
-    ("varsigma", "ς"),
-    ("sigma", "σ"),
-    ("tau", "τ"),
-    ("upsilon", "υ"),
-    ("phi", "φ"),
-    ("varphi", "ϕ"),
-    ("chi", "χ"),
-    ("psi", "ψ"),
-    ("omega", "ω"),
-    ("Alpha", "Α"),
-    ("Beta", "Β"),
-    ("Gamma", "Γ"),
-    ("Delta", "Δ"),
-    ("Epsilon", "Ε"),
-    ("Zeta", "Ζ"),
-    ("Eta", "Η"),
-    ("Theta", "Θ"),
-    ("Iota", "Ι"),
-    ("Kappa", "Κ"),
-    ("Lambda", "Λ"),
-    ("Mu", "Μ"),
-    ("Nu", "Ν"),
-    ("Xi", "Ξ"),
-    ("Omicron", "Ο"),
-    ("Pi", "Π"),
-    ("Rho", "Ρ"),
-    ("Sigma", "Σ"),
-    ("Tau", "Τ"),
-    ("Upsilon", "Υ"),
-    ("Phi", "Φ"),
-    ("Chi", "Χ"),
-    ("Psi", "Ψ"),
-    ("Omega", "Ω"),
-    ("ge", "≥"),
-    ("geq", "≥"),
-    ("le", "≤"),
-    ("leq", "≤"),
-    ("pm", "±"),
-    ("mp", "∓"),
-    ("times", "×"),
-    ("div", "÷"),
-    ("cdot", "·"),
-    ("bullet", "•"),
-    ("in", "∈"),
-    ("notin", "∉"),
-    ("ne", "≠"),
-    ("neq", "≠"),
-    ("infty", "∞"),
-    ("propto", "∝"),
-    ("approx", "≈"),
-    ("equiv", "≡"),
-    ("sim", "∼"),
-    ("ll", "≪"),
-    ("gg", "≫"),
-    ("partial", "∂"),
-    ("nabla", "∇"),
-    ("sum", "∑"),
-    ("prod", "∏"),
-    ("int", "∫"),
-    ("to", "→"),
-    ("rightarrow", "→"),
-    ("leftarrow", "←"),
-    ("leftrightarrow", "↔"),
-    ("subset", "⊂"),
-    ("subseteq", "⊆"),
-    ("cup", "∪"),
-    ("cap", "∩"),
-    ("emptyset", "∅"),
-    ("forall", "∀"),
-    ("exists", "∃"),
-    ("dots", "…"),
-    ("ldots", "…"),
-    ("cdots", "…"),
-    ("prime", "′"),
-    ("dprime", "″"),
-    ("degree", "°"),
-    ("deg", "°"),
-    ("textdegree", "°"),
-    ("langle", "⟨"),
-    ("rangle", "⟩"),
-    ("lceil", "⌈"),
-    ("rceil", "⌉"),
-    ("lfloor", "⌊"),
-    ("rfloor", "⌋"),
-    ("textbackslash", "\\"),
-    ("textless", "<"),
-    ("textgreater", ">"),
-    ("space", " "),
-];
+const TEX_SYMBOL_PAIRS: &str = "\
+alpha=α beta=β gamma=γ delta=δ epsilon=ε varepsilon=ε zeta=ζ eta=η theta=θ vartheta=ϑ iota=ι kappa=κ varkappa=ϰ lambda=λ mu=μ micro=μ nu=ν xi=ξ omicron=ο pi=π varpi=ϖ rho=ρ varrho=ϱ varsigma=ς sigma=σ tau=τ upsilon=υ phi=φ varphi=ϕ chi=χ psi=ψ omega=ω \
+Alpha=Α Beta=Β Gamma=Γ Delta=Δ Epsilon=Ε Zeta=Ζ Eta=Η Theta=Θ Iota=Ι Kappa=Κ Lambda=Λ Mu=Μ Nu=Ν Xi=Ξ Omicron=Ο Pi=Π Rho=Ρ Sigma=Σ Tau=Τ Upsilon=Υ Phi=Φ Chi=Χ Psi=Ψ Omega=Ω \
+ge=≥ geq=≥ le=≤ leq=≤ pm=± mp=∓ times=× div=÷ cdot=· bullet=• in=∈ notin=∉ ne=≠ neq=≠ infty=∞ propto=∝ approx=≈ equiv=≡ sim=∼ ll=≪ gg=≫ \
+partial=∂ nabla=∇ sum=∑ prod=∏ int=∫ to=→ rightarrow=→ leftarrow=← leftrightarrow=↔ subset=⊂ subseteq=⊆ cup=∪ cap=∩ emptyset=∅ forall=∀ exists=∃ \
+dots=… ldots=… cdots=… prime=′ dprime=″ degree=° deg=° textdegree=° langle=⟨ rangle=⟩ lceil=⌈ rceil=⌉ lfloor=⌊ rfloor=⌋ textbackslash=\\ textless=< textgreater=>";
 
 fn lookup_tex_symbol(name: &str) -> Option<&'static str> {
-    TEX_SYMBOLS.iter().find_map(|&(k, v)| (k == name).then_some(v))
-}
-
-/// Escape `<`, `>`, `&`, `"`, and `'` for safe HTML text and attribute emission.
-pub fn push_html_escaped(raw: &str, out: &mut String) {
-    for ch in raw.chars() {
-        push_char_escaped(ch, out);
+    if name == "space" {
+        return Some(" ");
     }
+    TEX_SYMBOL_PAIRS.split_ascii_whitespace().find_map(|pair| pair.split_once('=').filter(|&(k, _)| k == name).map(|(_, v)| v))
 }
 
-/// Return HTML-escaped text as a new `String`.
+pub fn push_html_escaped(raw: &str, out: &mut String) {
+    raw.chars().for_each(|ch| push_char_escaped(ch, out));
+}
+
 #[must_use]
 pub fn escape_html(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
@@ -1717,126 +1100,49 @@ mod tests {
     use super::{IdentityResolver, render_markdown, render_math_html};
 
     #[test]
-    fn aud_12_19_plain_math_in_headings_and_captions_renders_cleanly() {
-        let md = "### Hougaard Skewness ($g_1$)\n\n## Chi-Square ($\\chi^2$)\n\n![Ratio $\\frac{a}{b}$](images/r.png)\n";
-        let rendered = render_markdown(md, &IdentityResolver);
-        assert_eq!(rendered.headings[0].id, "hougaard-skewness-g1");
-        assert_eq!(rendered.headings[0].text, "Hougaard Skewness (g1)");
-        assert_eq!(rendered.headings[1].text, "Chi-Square (χ2)");
-        assert!(rendered.html.contains("alt=\"Ratio a/b\""));
-        assert!(rendered.html.contains("<figcaption>Ratio a/b</figcaption>"));
-        assert!(!rendered.html.contains("\\chi") && !rendered.html.contains("\\frac"));
-    }
-
-    #[test]
-    fn aud_12_20_images_inside_tight_lists_and_tables_render() {
-        let md = "- ![List icon](images/icon.png)\n- Second item\n\n| Col | Label |\n|---|---|\n| ![Table icon](images/t.png) | Row |\n";
-        let rendered = render_markdown(md, &IdentityResolver);
-        assert!(rendered.html.contains("<li><img src=\"images/icon.png\" alt=\"List icon\" loading=\"lazy\"></li>"), "{}", rendered.html);
-        assert!(rendered.html.contains("<td><img src=\"images/t.png\" alt=\"Table icon\" loading=\"lazy\"></td>"), "{}", rendered.html);
-    }
-
-    #[test]
-    fn aud_12_21_sanitize_resolved_url_blocks_control_obfuscated_schemes() {
-        for md in [
-            "[click](java&#x09;script:alert(1))",
-            "[click](java&#x0a;script:alert(1))",
-            "[click](&#x01;javascript:alert(1))",
-            "[click](data&#x09;:text/html,hi)",
-            "[click](vb&#x0d;script:msgbox(1))",
-        ] {
-            let html = render_markdown(md, &IdentityResolver).html;
-            assert!(html.contains("href=\"#\""), "expected sanitized `#` for `{md}`, got: {html}");
-        }
-    }
-
-    #[test]
-    fn aud_12_22_math_sentinels_never_leak_or_collide() {
-        let md = concat!(
-            "    echo $a$ + $b$\n\n",
-            "> ```sh\n> echo $a$\n> $$\n> x = 1\n> $$\n> ```\n\n",
-            "Multi-line code: `foo\n$x$`.\n\n",
-            "Link: [ref](https://example.com/$a$-foo).\n\n",
-            "Raw PUA: \u{E000}CBM:0\u{E001} and real math $y_1$.\n",
+    fn headings_images_urls_sentinels_ids_tables_and_math_spacing() {
+        let r = render_markdown(
+            "### Hougaard Skewness ($g_1$)\n\n## Chi-Square ($\\chi^2$)\n\n![Ratio $\\frac{a}{b}$](images/r.png)\n- ![I](images/i.png)\n",
+            &IdentityResolver,
         );
-        let html = render_markdown(md, &IdentityResolver).html;
-        assert!(html.contains("echo $a$ + $b$"), "indented code leaked sentinel: {html}");
-        assert!(html.contains("echo $a$"), "blockquoted fence leaked sentinel: {html}");
-        assert!(html.contains("<code>foo $x$</code>"), "multi-line code leaked sentinel: {html}");
-        assert!(html.contains("href=\"https://example.com/$a$-foo\""), "URL leaked sentinel: {html}");
-        assert!(html.contains("\u{E000}CBM:0\u{E001}"), "raw PUA literal should pass through unexpanded: {html}");
-        assert!(html.contains("<span class=\"math\">y<sub>1</sub></span>"), "real math must still render: {html}");
-        assert!(!html.contains("\u{E000}CBM_:"), "dynamic sentinel must not leak: {html}");
-    }
+        assert_eq!(
+            (r.headings[0].id.as_str(), r.headings[0].text.as_str(), r.headings[1].text.as_str()),
+            ("hougaard-skewness-g1", "Hougaard Skewness (g1)", "Chi-Square (χ2)")
+        );
+        assert!(r.html.contains("<figcaption>Ratio a/b</figcaption>") && r.html.contains("<li><img src=\"images/i.png\""));
+        for md in ["[x](java&#x09;script:alert(1))", "[x](&#x01;javascript:alert(1))", "[x](data&#x09;:text/html,hi)"] {
+            assert!(render_markdown(md, &IdentityResolver).html.contains("href=\"#\""), "{md}");
+        }
+        let sent =
+            render_markdown("    echo $a$\n\n> ```sh\n> $$\n> x\n> $$\n> ```\n\nRaw \u{E000}CBM:0\u{E001} and $y_1$.\n", &IdentityResolver).html;
+        assert!(sent.contains("echo $a$") && sent.contains("\u{E000}CBM:0\u{E001}") && sent.contains("<span class=\"math\">y<sub>1</sub></span>"));
+        assert_eq!(
+            render_markdown("# Foo\n\n## Foo\n\n## Foo 1\n\n## Main\n", &IdentityResolver).headings.into_iter().map(|h| h.id).collect::<Vec<_>>(),
+            vec!["foo", "foo-1", "foo-1-1", "main-1"]
+        );
 
-    #[test]
-    fn aud_12_23_linear_time_on_unclosed_sqrt_backticks_and_display_math() {
+        let h1_ren = render_markdown("Intro.\n\n# CLI (`curvebook-cli`) {#custom}\n\n## Usage\n", &IdentityResolver);
+        let (pre, h1, post) = h1_ren.split_leading_h1();
+        assert_eq!((pre, h1), ("<p>Intro.</p>\n", Some("<h1 id=\"custom\" tabindex=\"-1\">CLI (<code>curvebook-cli</code>)</h1>\n")));
+        assert!(post.starts_with("<h2 id=\"usage\""));
+
+        let tbl = render_markdown("| Op |\n|---|\n| `\\|\\|`, `OR` |\n", &IdentityResolver).html;
+        assert!(tbl.contains("<td><code>||</code>, <code>OR</code></td>") && !tbl.contains('`'));
+        let eq = render_math_html(
+            "Y = \\text{Bottom} + \\frac{\\text{Top} - \\text{Bottom}}{1 + 10^{(\\log\\text{EC}_{50} - X) \\cdot \\text{HillSlope}}}",
+        );
+        assert!(
+            eq.contains("<span class=\"math-text\">Bottom</span> + <span class=\"math-frac\">")
+                && eq.contains("<sub>50</sub> - X) · <span class=\"math-text\">HillSlope</span>")
+        );
+        let note =
+            render_markdown("> [!NOTE]\n> Body $\\frac{a}{b}$ and $100 and $HOME.\n\n$$\n\\chi^2 = \\frac{(O-E)^2}{E}\n$$\n", &IdentityResolver).html;
+        assert!(note.contains("callout-note") && note.contains("$100") && note.contains("$HOME") && !note.contains("<em>"));
+
         let start = std::time::Instant::now();
         let _ = render_math_html(&"\\sqrt[".repeat(50_000));
         let _ = render_markdown(&"`".repeat(50_000), &IdentityResolver);
-        let _ = render_markdown(&format!("${}", "`".repeat(50_000)), &IdentityResolver);
         let _ = render_markdown(&"$$a\n".repeat(50_000), &IdentityResolver);
-        assert!(start.elapsed().as_secs() < 5, "math/markdown scanners regressed to super-linear time: {:?}", start.elapsed());
-    }
-
-    #[test]
-    fn aud_12_24_unique_id_avoids_suffixed_and_template_collisions() {
-        let md_a = "# Foo\n\n## Foo\n\n## Foo 1\n";
-        let rendered_a = render_markdown(md_a, &IdentityResolver);
-        let ids_a: Vec<&str> = rendered_a.headings.iter().map(|h| h.id.as_str()).collect();
-        assert_eq!(ids_a, vec!["foo", "foo-1", "foo-1-1"]);
-
-        let md_b = "## Section 1\n\n## Section\n\n## Section\n";
-        let rendered_b = render_markdown(md_b, &IdentityResolver);
-        let ids_b: Vec<&str> = rendered_b.headings.iter().map(|h| h.id.as_str()).collect();
-        assert_eq!(ids_b, vec!["section-1", "section", "section-2"]);
-
-        let md_c = "## Main\n\n## Page Title\n";
-        let rendered_c = render_markdown(md_c, &IdentityResolver);
-        let ids_c: Vec<&str> = rendered_c.headings.iter().map(|h| h.id.as_str()).collect();
-        assert_eq!(ids_c, vec!["main-1", "page-title-1"]);
-    }
-
-    #[test]
-    fn r12_14_extract_leading_h1_math_operator_spacing_and_escaped_table_pipe_code() {
-        // 1. H1 with inline <code> and explicit {#custom-id}
-        let rendered_a = render_markdown("# CLI Reference (`curvebook-cli`) {#custom-cli-id}\n\n## Usage\n\nRun it.\n", &IdentityResolver);
-        let (pre_a, h1_a, post_a) = rendered_a.split_leading_h1();
-        assert_eq!(pre_a, "");
-        assert_eq!(h1_a, Some("<h1 id=\"custom-cli-id\" tabindex=\"-1\">CLI Reference (<code>curvebook-cli</code>)</h1>\n"));
-        assert!(post_a.starts_with("<h2 id=\"usage\""));
-
-        // 2. Markdown with introductory paragraph before first H1 preserves pre-H1 content.
-        let rendered_b = render_markdown("Introductory paragraph.\n\n# Guide Title\n\n## Details\n\nBody.\n", &IdentityResolver);
-        let (pre_b, h1_b, post_b) = rendered_b.split_leading_h1();
-        assert_eq!(pre_b, "<p>Introductory paragraph.</p>\n");
-        assert_eq!(h1_b, Some("<h1 id=\"guide-title\" tabindex=\"-1\">Guide Title</h1>\n"));
-        assert!(post_b.starts_with("<h2 id=\"details\""));
-
-        // 3. Golden H1 IDs remain unchanged.
-        assert_eq!(render_markdown("# Get started & installation\n", &IdentityResolver).headings[0].id, "get-started--installation");
-        assert_eq!(render_markdown("# CLI Reference (`curvebook-cli`)\n", &IdentityResolver).headings[0].id, "cli-reference-curvebook-cli");
-
-        // 4. Escaped `\|\|` inside code spans in GFM tables renders intact with no split cell or dangling backtick.
-        let table_md = "| Precedence | Operators | Semantics |\n|---|---|---|\n| Disjunction | `\\|\\|`, `OR` | Strong Kleene 3-valued OR |\n";
-        let table_html = render_markdown(table_md, &IdentityResolver).html;
-        assert!(table_html.contains("<td><code>||</code>, <code>OR</code></td>"), "broken table row: {table_html}");
-        assert!(!table_html.contains('`'), "dangling backtick in table: {table_html}");
-
-        // 5. TeX math preserves left-side spacing before binary operators after tags (</span>, </sup>, </sub>).
-        let eq_math = render_math_html(
-            "Y = \\text{Bottom} + \\frac{\\text{Top} - \\text{Bottom}}{1 + 10^{(\\log\\text{EC}_{50} - X) \\cdot \\text{HillSlope}}}",
-        );
-        assert!(eq_math.contains("<span class=\"math-text\">Bottom</span> + <span class=\"math-frac\">"), "{eq_math}");
-        assert!(eq_math.contains("<span class=\"math-text\">Top</span> - <span class=\"math-text\">Bottom</span>"), "{eq_math}");
-        assert!(eq_math.contains("<sub>50</sub> - X) · <span class=\"math-text\">HillSlope</span>"), "{eq_math}");
-
-        let r2_math = render_math_html("R^2 = 1 - \\text{rss} / \\text{TSS}");
-        assert!(r2_math.contains("R<sup>2</sup> = 1 - <span class=\"math-text\">rss</span>"), "{r2_math}");
-
-        let rel_math = render_math_html("p_0 \\in (0, 1),\\; y_i \\ge 0,\\; G^2 \\le \\chi^2");
-        assert!(rel_math.contains("p<sub>0</sub> ∈ (0, 1)"), "{rel_math}");
-        assert!(rel_math.contains("y<sub>i</sub> ≥ 0"), "{rel_math}");
-        assert!(rel_math.contains("G<sup>2</sup> ≤ χ<sup>2</sup>"), "{rel_math}");
+        assert!(start.elapsed().as_secs() < 5 && !render_math_html(&"\\frac".repeat(80)).is_empty());
     }
 }

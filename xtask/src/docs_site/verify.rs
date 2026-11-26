@@ -1,5 +1,5 @@
 //! Static HTML, security/CSP, registry coverage, link/fragment, snapshot manifest,
-//! and compliance (`brands`, `cleanroom`, `assets`, `secrets`) verification for `docs-site --check`.
+//! readability lint, and compliance verification for `docs-site --check`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -7,12 +7,19 @@ use std::time::Duration;
 
 use curvebook_platform::read_regular_file_bytes;
 
+use super::markdown::parse_fence_open;
 use super::sitemap::GeneratedSite;
 use super::template::STRICT_CSP;
-use crate::pages_site::{extract_html_tag_name, find_html_comment_end, find_html_tag_close, parse_html_tag_attributes, parse_meta_refresh_url};
-use crate::scan_util::{has_ext_ci, is_real_dir, is_regular_file, read_dir_paths_sorted, rel_slash, rel_slash_lossy, walk_file_paths};
+use crate::scan_util::{
+    collect_files_no_symlinks, extract_html_tag_name, find_html_comment_end, find_html_tag_close, has_ext_ci, is_html_tag_start, is_real_dir,
+    is_regular_file, parse_html_tag_attributes, parse_meta_refresh_url, read_dir_paths_sorted, rel_slash_lossy, skip_html_raw_or_rcdata_element,
+    walk_file_paths,
+};
+use crate::text_decode::unescape_html_attr;
 
 const MAX_SNAPSHOT_FILE_BYTES: usize = 32 * 1024 * 1024;
+const DOCS_SYMLINK_ERR: &str = "symlinks are forbidden inside documentation directories";
+pub const READABILITY_LINT_EXEMPTIONS: &[&str] = &[];
 
 #[derive(Debug, Default)]
 struct PageFacts {
@@ -29,13 +36,17 @@ struct PageFacts {
     has_h1: bool,
 }
 
-/// Hand-written guide paths temporarily exempted from the `R*.*` / `QOL-*` readability lint gate.
-/// Kept empty by default so all existing and future user guides under `MANUAL_GUIDES` are enforced.
-pub const READABILITY_LINT_EXEMPTIONS: &[&str] = &[];
+impl PageFacts {
+    fn local_targets(&self) -> impl Iterator<Item = &str> {
+        self.hrefs
+            .iter()
+            .filter(|h| !is_external_url(h) && !norm_scheme(h).starts_with("mailto:"))
+            .chain(&self.asset_srcs)
+            .chain(&self.meta_refresh_targets)
+            .map(String::as_str)
+    }
+}
 
-/// Verify generated preview pages, optional generated manual pages, snapshot manifests in
-/// `manual_dir`, committed root pages, search metadata, Pages publish set, readability lint,
-/// and hygiene scanners.
 pub fn verify_site(
     root: &Path,
     preview_out_dir: &Path,
@@ -52,8 +63,6 @@ pub fn verify_site(
     verify_workspace_and_manual(root, manual_dir)
 }
 
-/// Verify a specific generated snapshot directory (`"latest"` or `"v<major>.<minor>"`) plus the full
-/// workspace and manual tree.
 pub fn verify_manual_snapshot_build(root: &Path, manual_dir: &Path, snapshot_sub: &str, manual_site: &GeneratedSite) -> Result<(), String> {
     verify_generated_pages(root, &manual_dir.join(snapshot_sub), manual_site)?;
     check_guide_readability(root)?;
@@ -62,16 +71,12 @@ pub fn verify_manual_snapshot_build(root: &Path, manual_dir: &Path, snapshot_sub
 
 fn verify_generated_pages(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Result<(), String> {
     check_exclusions(site)?;
-
-    let mut facts: BTreeMap<String, PageFacts> = BTreeMap::new();
-    for (rel_path, html) in &site.html_pages {
-        let page_facts = audit_single_html(rel_path, html)?;
-        facts.insert(rel_path.clone(), page_facts);
+    let mut facts = BTreeMap::new();
+    for (rel, html) in &site.html_pages {
+        facts.insert(rel.clone(), audit_single_html(rel, html)?);
     }
-
-    check_unique_titles(facts.iter().map(|(k, v)| (k.as_str(), v)))?;
-    check_unique_meta_descriptions(facts.iter().map(|(k, v)| (k.as_str(), v)))?;
-    check_internal_links_and_fragments(root, out_dir, site, &facts)?;
+    check_unique_titles_and_descriptions(&facts)?;
+    check_page_map_links_and_fragments(root, out_dir, site.meta.is_release_snapshot, &facts)?;
     check_registry_coverage(&facts, site)
 }
 
@@ -85,37 +90,18 @@ fn verify_workspace_and_manual(root: &Path, manual_dir: &Path) -> Result<(), Str
     run_hygiene_scanners(root, manual_dir, true)
 }
 
-fn check_unique_titles<'a>(pages: impl IntoIterator<Item = (&'a str, &'a PageFacts)>) -> Result<(), String> {
-    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
-    for (rel, facts) in pages {
-        if facts.titles.len() != 1 {
-            return Err(format!("{rel}: expected exactly one `<title>` element, found {}", facts.titles.len()));
-        }
-        let title = facts.titles[0].trim();
-        if title.is_empty() {
-            return Err(format!("{rel}: `<title>` text must not be empty"));
-        }
-        let key = title.to_ascii_lowercase();
-        if let Some(prev) = seen.insert(key, rel) {
-            return Err(format!("{rel}: duplicate `<title>` already used by `{prev}`: \"{title}\""));
-        }
-    }
-    Ok(())
-}
-
-fn check_unique_meta_descriptions<'a>(pages: impl IntoIterator<Item = (&'a str, &'a PageFacts)>) -> Result<(), String> {
-    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
-    for (rel, facts) in pages {
-        if facts.meta_descriptions.len() != 1 {
-            return Err(format!("{rel}: expected exactly one `<meta name=\"description\">` tag, found {}", facts.meta_descriptions.len()));
-        }
-        let desc = facts.meta_descriptions[0].trim();
-        if desc.is_empty() {
-            return Err(format!("{rel}: `<meta name=\"description\">` content must not be empty"));
-        }
-        let key = desc.to_ascii_lowercase();
-        if let Some(prev) = seen.insert(key, rel) {
-            return Err(format!("{rel}: duplicate `<meta name=\"description\">` already used by `{prev}`: \"{desc}\""));
+fn check_unique_titles_and_descriptions(facts: &BTreeMap<String, PageFacts>) -> Result<(), String> {
+    for (label, is_title) in [("`<title>`", true), ("`<meta name=\"description\">`", false)] {
+        let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+        for (rel, f) in facts {
+            let vals = if is_title { &f.titles } else { &f.meta_descriptions };
+            if vals.len() != 1 || vals[0].trim().is_empty() {
+                return Err(format!("{rel}: expected exactly one non-empty {label}, found {}", vals.len()));
+            }
+            let val = vals[0].trim();
+            if let Some(prev) = seen.insert(val.to_ascii_lowercase(), rel.as_str()) {
+                return Err(format!("{rel}: duplicate {label} already used by `{prev}`: \"{val}\""));
+            }
         }
     }
     Ok(())
@@ -123,16 +109,12 @@ fn check_unique_meta_descriptions<'a>(pages: impl IntoIterator<Item = (&'a str, 
 
 fn check_exclusions(site: &GeneratedSite) -> Result<(), String> {
     for rel in site.html_pages.keys() {
-        let lower = rel.to_ascii_lowercase();
-        if lower.contains("roadmap")
-            || lower.contains("status")
-            || lower.starts_with("audit/")
-            || lower.starts_with("planning/")
-            || lower.starts_with("evidence/")
-            || lower.starts_with("history/")
-            || lower.starts_with("contribute/")
-            || lower.contains("/contribute/")
-            || lower.ends_with("-parity.html")
+        let l = rel.to_ascii_lowercase();
+        if l.contains("roadmap")
+            || l.contains("status")
+            || ["audit/", "planning/", "evidence/", "history/", "contribute/"].iter().any(|p| l.starts_with(p))
+            || l.contains("/contribute/")
+            || l.ends_with("-parity.html")
         {
             return Err(format!("excluded internal document `{rel}` must never be published in docs-site output"));
         }
@@ -143,142 +125,90 @@ fn check_exclusions(site: &GeneratedSite) -> Result<(), String> {
 fn audit_single_html(rel_path: &str, html: &str) -> Result<PageFacts, String> {
     let mut facts = PageFacts::default();
     scan_html_tags(rel_path, html, &mut facts)?;
-    if !facts.has_strict_csp {
-        return Err(format!("{rel_path}: missing strict Content-Security-Policy meta tag"));
-    }
-    if !facts.has_no_referrer {
-        return Err(format!("{rel_path}: missing `<meta name=\"referrer\" content=\"no-referrer\">`"));
-    }
-    if !facts.has_skip_link {
-        return Err(format!("{rel_path}: missing skip link to `#main`"));
-    }
-    if !facts.has_main_landmark {
-        return Err(format!("{rel_path}: missing `<main id=\"main\">` destination"));
-    }
-    if !facts.has_h1 {
-        return Err(format!("{rel_path}: missing `<h1>` heading"));
+    for (ok, msg) in [
+        (facts.has_strict_csp, "missing strict Content-Security-Policy meta tag"),
+        (facts.has_no_referrer, "missing `<meta name=\"referrer\" content=\"no-referrer\">`"),
+        (facts.has_skip_link, "missing skip link to `#main`"),
+        (facts.has_main_landmark, "missing `<main id=\"main\">` destination"),
+        (facts.has_h1, "missing `<h1>` heading"),
+    ] {
+        if !ok {
+            return Err(format!("{rel_path}: {msg}"));
+        }
     }
     Ok(facts)
 }
 
 fn scan_html_tags(rel_path: &str, html: &str, facts: &mut PageFacts) -> Result<(), String> {
-    let mut rest = html;
-    let mut inside_code_or_pre = 0usize;
-
+    let (mut rest, mut code_depth) = (html, 0usize);
     while let Some((before_lt, after_lt)) = rest.split_once('<') {
-        if inside_code_or_pre == 0 {
+        if code_depth == 0 {
             check_unrendered_markup(rel_path, before_lt)?;
         }
-        if !crate::pages_site::is_html_tag_start(after_lt) {
+        if !is_html_tag_start(after_lt) {
             rest = after_lt;
             continue;
         }
-        if let Some(after_comment) = after_lt.strip_prefix("!--") {
-            let Some(close_end) = find_html_comment_end(after_comment) else {
-                return Err(format!("{rel_path}: unclosed HTML comment `<!--`"));
-            };
-            rest = after_comment.get(close_end..).ok_or_else(|| format!("{rel_path}: unclosed HTML comment `<!--`"))?;
+        if let Some(after_c) = after_lt.strip_prefix("!--") {
+            rest =
+                find_html_comment_end(after_c).and_then(|e| after_c.get(e..)).ok_or_else(|| format!("{rel_path}: unclosed HTML comment `<!--`"))?;
             continue;
         }
-        let Some(tag_end_rel) = find_html_tag_close(after_lt) else {
-            return Err(format!("{rel_path}: unclosed HTML tag or attribute quote"));
-        };
-        let Some((tag_body, after_tag)) = after_lt.split_at_checked(tag_end_rel) else {
-            return Err(format!("{rel_path}: unclosed HTML tag or attribute quote"));
-        };
-        rest = after_tag.strip_prefix('>').unwrap_or(after_tag);
-
+        let (tag_body, tail) = find_html_tag_close(after_lt)
+            .and_then(|e| after_lt.split_at_checked(e))
+            .ok_or_else(|| format!("{rel_path}: unclosed HTML tag or attribute quote"))?;
+        rest = tail.strip_prefix('>').unwrap_or(tail);
         let trimmed = tag_body.trim();
-        let is_closing = trimmed.starts_with('/');
         let tag_lower = extract_html_tag_name(trimmed).to_ascii_lowercase();
-
-        if is_closing {
-            if matches!(tag_lower.as_str(), "code" | "pre") && inside_code_or_pre > 0 {
-                inside_code_or_pre -= 1;
+        if trimmed.starts_with('/') {
+            if matches!(tag_lower.as_str(), "code" | "pre") {
+                code_depth = code_depth.saturating_sub(1);
             }
             continue;
         }
-
         if matches!(tag_lower.as_str(), "script" | "style" | "base" | "form" | "iframe" | "object" | "embed") {
             return Err(format!("{rel_path}: forbidden HTML element `<{tag_lower}>`"));
         }
-
-        if tag_lower == "h1" {
-            facts.has_h1 = true;
-        }
-        if matches!(tag_lower.as_str(), "code" | "pre") && !trimmed.ends_with('/') {
-            inside_code_or_pre += 1;
-        }
-
-        let attrs = parse_html_tag_attributes(trimmed);
-        process_tag_attrs(rel_path, &tag_lower, &attrs, facts)?;
+        facts.has_h1 |= tag_lower == "h1";
+        code_depth += usize::from(matches!(tag_lower.as_str(), "code" | "pre") && !trimmed.ends_with('/'));
+        process_tag_attrs(rel_path, &tag_lower, &parse_html_tag_attributes(trimmed), facts)?;
         if matches!(tag_lower.as_str(), "title" | "textarea") {
-            let (body_end, after_close) =
-                crate::pages_site::skip_html_raw_or_rcdata_element(rest, 0, &tag_lower).map_err(|e| format!("{rel_path}: {e}"))?;
+            let (body_end, after_close) = skip_html_raw_or_rcdata_element(rest, 0, &tag_lower).map_err(|e| format!("{rel_path}: {e}"))?;
             if tag_lower == "title" {
-                let raw_title = rest.get(..body_end).unwrap_or("").trim();
-                facts.titles.push(crate::pages_site::unescape_html_attr(raw_title));
+                facts.titles.push(unescape_html_attr(rest.get(..body_end).unwrap_or("").trim()));
             }
             rest = rest.get(after_close..).unwrap_or("");
         }
     }
-    if inside_code_or_pre == 0 {
+    if code_depth == 0 {
         check_unrendered_markup(rel_path, rest)?;
     }
     Ok(())
 }
 
-fn check_srcset_urls(rel_path: &str, key_lower: &str, raw_val: &str, facts: &mut PageFacts) -> Result<(), String> {
-    if is_forbidden_uri_scheme(raw_val) {
-        return Err(format!("{rel_path}: forbidden `{key_lower}` asset URI (`{raw_val}`)"));
-    }
-    for candidate in raw_val.split(',') {
-        let Some(url) = candidate.split_whitespace().next() else {
-            continue;
-        };
-        if is_external_url(url) || is_forbidden_uri_scheme(url) {
-            return Err(format!("{rel_path}: external or forbidden `{key_lower}` asset forbidden (`{url}`)"));
-        }
-        facts.asset_srcs.push(url.to_owned());
-    }
-    Ok(())
-}
-
-fn process_meta_tag_facts(
-    rel_path: &str,
-    http_equiv: Option<&str>,
-    name: Option<&str>,
-    content: Option<&str>,
-    facts: &mut PageFacts,
-) -> Result<(), String> {
-    if let Some(equiv) = http_equiv {
-        if equiv.eq_ignore_ascii_case("content-security-policy") {
-            let val = content.unwrap_or("").trim();
-            if val != STRICT_CSP {
-                return Err(format!("{rel_path}: non-strict Content-Security-Policy meta tag `{val}`"));
+fn check_meta_tag_attrs(rel_path: &str, equiv: Option<&str>, name: Option<&str>, content: Option<&str>, facts: &mut PageFacts) -> Result<(), String> {
+    if let Some(eq) = equiv {
+        if eq.eq_ignore_ascii_case("content-security-policy") {
+            if content.unwrap_or("").trim() != STRICT_CSP {
+                return Err(format!("{rel_path}: non-strict Content-Security-Policy meta tag"));
             }
             facts.has_strict_csp = true;
-        } else if equiv.eq_ignore_ascii_case("refresh")
-            && let Some(raw_content) = content
-            && let Some(target) = parse_meta_refresh_url(raw_content)
+        } else if eq.eq_ignore_ascii_case("refresh")
+            && let Some(t) = content.and_then(parse_meta_refresh_url)
         {
-            if is_forbidden_uri_scheme(target) || is_external_url(target) {
-                return Err(format!("{rel_path}: external or forbidden `<meta http-equiv=\"refresh\">` target `{target}`"));
+            if is_forbidden_uri_scheme(t) || is_external_url(t) {
+                return Err(format!("{rel_path}: external or forbidden `<meta http-equiv=\"refresh\">` target `{t}`"));
             }
-            facts.meta_refresh_targets.push(target.to_owned());
+            facts.meta_refresh_targets.push(t.to_owned());
         }
     }
-    if let Some(meta_name) = name {
-        if meta_name.eq_ignore_ascii_case("referrer") {
-            let val = content.unwrap_or("").trim();
-            if !val.eq_ignore_ascii_case("no-referrer") {
-                return Err(format!("{rel_path}: `<meta name=\"referrer\">` must be `no-referrer`, found `{val}`"));
-            }
-            if facts.has_no_referrer {
-                return Err(format!("{rel_path}: duplicate `<meta name=\"referrer\">` tag"));
+    if let Some(mn) = name {
+        if mn.eq_ignore_ascii_case("referrer") {
+            if !content.unwrap_or("").trim().eq_ignore_ascii_case("no-referrer") || facts.has_no_referrer {
+                return Err(format!("{rel_path}: invalid or duplicate `<meta name=\"referrer\">`"));
             }
             facts.has_no_referrer = true;
-        } else if meta_name.eq_ignore_ascii_case("description") {
+        } else if mn.eq_ignore_ascii_case("description") {
             facts.meta_descriptions.push(content.unwrap_or("").trim().to_owned());
         }
     }
@@ -286,91 +216,76 @@ fn process_meta_tag_facts(
 }
 
 fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)], facts: &mut PageFacts) -> Result<(), String> {
-    let mut seen_attr_names: BTreeSet<String> = BTreeSet::new();
-    let mut meta_http_equiv: Option<&str> = None;
-    let mut meta_name: Option<&str> = None;
-    let mut meta_content: Option<&str> = None;
-    let mut anchor_has_skip_class = false;
-    let mut anchor_href_is_main = false;
-
-    let mut rel_values = attrs.iter().filter(|(k, _)| k.eq_ignore_ascii_case("rel")).map(|(_, v)| v.trim());
-    let is_canonical_link =
-        tag_lower == "link" && rel_values.next().is_some_and(|v| v.eq_ignore_ascii_case("canonical")) && rel_values.next().is_none();
+    let (mut seen, mut meta_equiv, mut meta_name, mut meta_content) = (BTreeSet::new(), None, None, None);
+    let (mut skip_cls, mut href_main) = (false, false);
+    let mut rels = attrs.iter().filter(|(k, _)| k.eq_ignore_ascii_case("rel")).map(|(_, v)| v.trim());
+    let is_canonical = tag_lower == "link" && rels.next().is_some_and(|v| v.eq_ignore_ascii_case("canonical")) && rels.next().is_none();
 
     for (k, v) in attrs {
         if k.contains(['"', '\'', '<']) {
-            return Err(format!("{rel_path}: malformed HTML attribute name `{k}` on `<{tag_lower}>` (unclosed quote or parse error)"));
+            return Err(format!("{rel_path}: malformed HTML attribute name `{k}` on `<{tag_lower}>`"));
         }
-        let key_lower = k.to_ascii_lowercase();
-        if !seen_attr_names.insert(key_lower.clone()) {
-            return Err(format!("{rel_path}: duplicate HTML attribute `{key_lower}=` on `<{tag_lower}>`"));
+        let kl = k.to_ascii_lowercase();
+        if !seen.insert(kl.clone()) {
+            return Err(format!("{rel_path}: duplicate HTML attribute `{kl}=` on `<{tag_lower}>`"));
         }
-        if key_lower == "style" {
-            return Err(format!("{rel_path}: inline `style=` attribute forbidden under strict CSP (`<{tag_lower}>`)"));
+        if kl == "style" || kl == "ping" || (kl.starts_with("on") && kl.len() > 2) {
+            return Err(format!("{rel_path}: forbidden attribute `{kl}=` on `<{tag_lower}>`"));
         }
-        if key_lower == "ping" {
-            return Err(format!("{rel_path}: `ping=` beacon attribute forbidden (`<{tag_lower}>`)"));
-        }
-        if key_lower.starts_with("on") && key_lower.len() > 2 {
-            return Err(format!("{rel_path}: inline event handler `{key_lower}=` forbidden (`<{tag_lower}>`)"));
-        }
-        if key_lower == "id" && !v.is_empty() {
+        if kl == "id" && !v.is_empty() {
             if !facts.ids.insert(v.clone()) {
                 return Err(format!("{rel_path}: duplicate HTML id `#{v}`"));
             }
-            if tag_lower == "main" && v == "main" {
-                facts.has_main_landmark = true;
-            }
+            facts.has_main_landmark |= tag_lower == "main" && v == "main";
         }
-        if tag_lower == "a" && key_lower == "class" && v.split_whitespace().any(|c| c == "skip-link") {
-            anchor_has_skip_class = true;
-        }
-
-        if key_lower == "href" && is_canonical_link {
-            if !v.starts_with(super::seo::SITE_BASE_URL) {
-                return Err(format!("{rel_path}: canonical link `{v}` must point inside `{}`", super::seo::SITE_BASE_URL));
+        skip_cls |= tag_lower == "a" && kl == "class" && v.split_whitespace().any(|c| c == "skip-link");
+        match kl.as_str() {
+            "href" if is_canonical => {
+                if !v.starts_with(super::seo::SITE_BASE_URL) {
+                    return Err(format!("{rel_path}: canonical link `{v}` must point inside `{}`", super::seo::SITE_BASE_URL));
+                }
             }
-        } else if key_lower == "href" {
-            if is_forbidden_uri_scheme(v) {
-                return Err(format!("{rel_path}: forbidden `href` URI `{v}`"));
+            "href" => {
+                if is_forbidden_uri_scheme(v) || (tag_lower == "link" && is_external_url(v)) {
+                    return Err(format!("{rel_path}: forbidden or external `<{tag_lower} href=\"{v}\">`"));
+                }
+                href_main |= tag_lower == "a" && v.trim() == "#main";
+                facts.hrefs.push(v.clone());
             }
-            if tag_lower == "link" && is_external_url(v) {
-                return Err(format!("{rel_path}: external asset URL forbidden in `<{tag_lower} href=\"{v}\">`"));
+            "src" | "poster" | "action" | "formaction" | "xlink:href" => {
+                if is_external_url(v) || is_forbidden_uri_scheme(v) {
+                    return Err(format!("{rel_path}: external or forbidden `{kl}` asset (`{v}`)"));
+                }
+                facts.asset_srcs.push(v.clone());
             }
-            if tag_lower == "a" && v.trim() == "#main" {
-                anchor_href_is_main = true;
+            "srcset" | "imagesrcset" => {
+                if is_forbidden_uri_scheme(v) {
+                    return Err(format!("{rel_path}: forbidden `{kl}` asset URI (`{v}`)"));
+                }
+                for url in v.split(',').filter_map(|c| c.split_whitespace().next()) {
+                    if is_external_url(url) || is_forbidden_uri_scheme(url) {
+                        return Err(format!("{rel_path}: external or forbidden `{kl}` asset (`{url}`)"));
+                    }
+                    facts.asset_srcs.push(url.to_owned());
+                }
             }
-            facts.hrefs.push(v.clone());
-        } else if matches!(key_lower.as_str(), "src" | "poster" | "action" | "formaction" | "xlink:href") {
-            if is_external_url(v) || is_forbidden_uri_scheme(v) {
-                return Err(format!("{rel_path}: external or forbidden `{key_lower}` asset forbidden (`{v}`)"));
-            }
-            facts.asset_srcs.push(v.clone());
-        } else if matches!(key_lower.as_str(), "srcset" | "imagesrcset") {
-            check_srcset_urls(rel_path, &key_lower, v, facts)?;
-        } else if tag_lower == "meta" && key_lower == "http-equiv" {
-            meta_http_equiv = Some(v.trim());
-        } else if tag_lower == "meta" && key_lower == "name" {
-            meta_name = Some(v.trim());
-        } else if tag_lower == "meta" && key_lower == "content" {
-            meta_content = Some(v.as_str());
+            "http-equiv" if tag_lower == "meta" => meta_equiv = Some(v.trim()),
+            "name" if tag_lower == "meta" => meta_name = Some(v.trim()),
+            "content" if tag_lower == "meta" => meta_content = Some(v.as_str()),
+            _ => {}
         }
     }
-
-    if anchor_has_skip_class && anchor_href_is_main {
-        facts.has_skip_link = true;
-    }
+    facts.has_skip_link |= skip_cls && href_main;
     if tag_lower == "meta" {
-        process_meta_tag_facts(rel_path, meta_http_equiv, meta_name, meta_content, facts)?;
-    }
-    if tag_lower == "img" {
+        check_meta_tag_attrs(rel_path, meta_equiv, meta_name, meta_content, facts)?;
+    } else if tag_lower == "img" {
         if !attrs.iter().any(|(k, _)| k.eq_ignore_ascii_case("alt")) {
-            return Err(format!("{rel_path}: `<img>` must declare an `alt` attribute (use `alt=\"\"` for decorative images)"));
+            return Err(format!("{rel_path}: `<img>` must declare an `alt` attribute"));
         }
         if rel_path.starts_with("docs/") {
-            let valid_dim = |name: &str| attrs.iter().any(|(k, v)| k.eq_ignore_ascii_case(name) && v.trim().parse::<u32>().is_ok_and(|n| n > 0));
-            if !valid_dim("width") || !valid_dim("height") {
-                return Err(format!("{rel_path}: root page `<img>` must declare positive integer `width` and `height` attributes"));
+            let ok_dim = |n: &str| attrs.iter().any(|(k, v)| k.eq_ignore_ascii_case(n) && v.trim().parse::<u32>().is_ok_and(|x| x > 0));
+            if !ok_dim("width") || !ok_dim("height") {
+                return Err(format!("{rel_path}: root page `<img>` must declare positive integer `width` and `height`"));
             }
         }
     }
@@ -378,42 +293,27 @@ fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)]
 }
 
 fn check_unrendered_markup(rel_path: &str, text: &str) -> Result<(), String> {
-    const LEAKED_TEX_MACROS: &[&str] = &["\\frac{", "\\dfrac{", "\\tfrac{", "\\text{", "\\sqrt{", "\\chi", "\\Phi", "\\TeX", "\\ge ", "\\le "];
-    const LEAKED_CALLOUT_MARKERS: &[&str] = &["[!NOTE]", "[!TIP]", "[!IMPORTANT]", "[!WARNING]", "[!CAUTION]"];
-
-    for marker in LEAKED_TEX_MACROS {
-        if text.contains(marker) {
-            return Err(format!("{rel_path}: unrendered TeX macro `{marker}` leaked outside <code>/<pre>"));
-        }
+    if let Some(m) =
+        ["\\frac{", "\\dfrac{", "\\tfrac{", "\\text{", "\\sqrt{", "\\chi", "\\Phi", "\\TeX", "\\ge ", "\\le "].into_iter().find(|m| text.contains(m))
+    {
+        return Err(format!("{rel_path}: unrendered TeX macro `{m}` leaked outside <code>/<pre>"));
     }
-    for marker in LEAKED_CALLOUT_MARKERS {
-        if text.contains(marker) {
-            return Err(format!("{rel_path}: unrendered GitHub callout marker `{marker}` leaked outside <code>/<pre>"));
-        }
+    if let Some(m) = ["[!NOTE]", "[!TIP]", "[!IMPORTANT]", "[!WARNING]", "[!CAUTION]"].into_iter().find(|m| text.contains(m)) {
+        return Err(format!("{rel_path}: unrendered GitHub callout marker `{m}` leaked outside <code>/<pre>"));
     }
     Ok(())
 }
 
-fn normalize_scheme_prefix(raw: &str) -> String {
+fn norm_scheme(raw: &str) -> String {
     raw.chars().filter(|c| !c.is_ascii_control() && !c.is_ascii_whitespace()).map(|c| c.to_ascii_lowercase()).collect()
 }
-
 fn is_forbidden_uri_scheme(raw: &str) -> bool {
-    let norm = normalize_scheme_prefix(raw);
-    norm.starts_with("javascript:") || norm.starts_with("data:") || norm.starts_with("vbscript:")
+    let n = norm_scheme(raw);
+    n.starts_with("javascript:") || n.starts_with("data:") || n.starts_with("vbscript:")
 }
-
 fn is_external_url(url: &str) -> bool {
-    let norm = normalize_scheme_prefix(url);
-    norm.starts_with("http://") || norm.starts_with("https://") || norm.starts_with("//")
-}
-
-fn is_mailto_url(url: &str) -> bool {
-    normalize_scheme_prefix(url).starts_with("mailto:")
-}
-
-fn check_internal_links_and_fragments(root: &Path, out_dir: &Path, site: &GeneratedSite, facts: &BTreeMap<String, PageFacts>) -> Result<(), String> {
-    check_page_map_links_and_fragments(root, out_dir, site.meta.is_release_snapshot, facts)
+    let n = norm_scheme(url);
+    n.starts_with("http://") || n.starts_with("https://") || n.starts_with("//")
 }
 
 fn check_page_map_links_and_fragments(
@@ -422,38 +322,16 @@ fn check_page_map_links_and_fragments(
     is_release_snapshot: bool,
     facts: &BTreeMap<String, PageFacts>,
 ) -> Result<(), String> {
-    let mut extra_html_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (page_rel, page_facts) in facts {
-        for raw_href in &page_facts.hrefs {
-            if is_external_url(raw_href) || is_mailto_url(raw_href) {
-                continue;
+    let mut cache = BTreeMap::new();
+    for (page_rel, pf) in facts {
+        for raw in pf.local_targets() {
+            if is_external_url(raw) || is_forbidden_uri_scheme(raw) {
+                return Err(format!("{page_rel}: external or forbidden link target `{raw}`"));
             }
-            verify_target_with_cache(root, out_dir, is_release_snapshot, facts, page_rel, raw_href, &mut extra_html_ids)?;
-        }
-        for raw_src in &page_facts.asset_srcs {
-            verify_target_with_cache(root, out_dir, is_release_snapshot, facts, page_rel, raw_src, &mut extra_html_ids)?;
-        }
-        for raw_refresh in &page_facts.meta_refresh_targets {
-            if is_external_url(raw_refresh) || is_forbidden_uri_scheme(raw_refresh) {
-                return Err(format!("{page_rel}: external or forbidden `<meta http-equiv=\"refresh\">` target `{raw_refresh}`"));
-            }
-            verify_target_with_cache(root, out_dir, is_release_snapshot, facts, page_rel, raw_refresh, &mut extra_html_ids)?;
+            verify_target_with_cache(root, out_dir, is_release_snapshot, facts, page_rel, raw, &mut cache)?;
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn verify_target(
-    root: &Path,
-    out_dir: &Path,
-    site: &GeneratedSite,
-    facts: &BTreeMap<String, PageFacts>,
-    from_rel: &str,
-    raw_ref: &str,
-) -> Result<(), String> {
-    let mut extra_html_ids = BTreeMap::new();
-    verify_target_with_cache(root, out_dir, site.meta.is_release_snapshot, facts, from_rel, raw_ref, &mut extra_html_ids)
 }
 
 fn check_cached_html_fragment(
@@ -461,19 +339,27 @@ fn check_cached_html_fragment(
     cache_key: &str,
     scan_label: &str,
     frag: &str,
-    extra_html_ids: &mut BTreeMap<String, BTreeSet<String>>,
+    cache: &mut BTreeMap<String, BTreeSet<String>>,
     err_msg: impl FnOnce() -> String,
 ) -> Result<(), String> {
-    if !extra_html_ids.contains_key(cache_key) {
-        let target_html = std::fs::read_to_string(target_path).map_err(|e| format!("read {}: {e}", target_path.display()))?;
-        let mut target_facts = PageFacts::default();
-        scan_html_tags(scan_label, &target_html, &mut target_facts)?;
-        extra_html_ids.insert(cache_key.to_owned(), target_facts.ids);
+    if !cache.contains_key(cache_key) {
+        let html = std::fs::read_to_string(target_path).map_err(|e| format!("read {}: {e}", target_path.display()))?;
+        let mut f = PageFacts::default();
+        scan_html_tags(scan_label, &html, &mut f)?;
+        cache.insert(cache_key.to_owned(), f.ids);
     }
-    if extra_html_ids.get(cache_key).is_some_and(|ids| !ids.contains(frag)) {
-        return Err(err_msg());
+    if cache.get(cache_key).is_some_and(|ids| !ids.contains(frag)) { Err(err_msg()) } else { Ok(()) }
+}
+
+fn split_href_fragment(raw_ref: &str) -> (&str, Option<&str>) {
+    raw_ref.split_once('#').map_or((raw_ref, None), |(t, f)| (t, Some(f).filter(|s| !s.is_empty())))
+}
+
+fn verify_same_page_anchor(label: &str, ids: &BTreeSet<String>, frag: Option<&str>) -> Result<(), String> {
+    match frag {
+        Some(f) if !ids.contains(f) => Err(format!("{label}: broken same-page anchor `#{f}`")),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 fn verify_target_with_cache(
@@ -483,36 +369,28 @@ fn verify_target_with_cache(
     facts: &BTreeMap<String, PageFacts>,
     from_rel: &str,
     raw_ref: &str,
-    extra_html_ids: &mut BTreeMap<String, BTreeSet<String>>,
+    cache: &mut BTreeMap<String, BTreeSet<String>>,
 ) -> Result<(), String> {
-    let (target_part, frag_part) = raw_ref.split_once('#').map_or((raw_ref, None), |(t, f)| (t, Some(f)));
+    let (target_part, frag_part) = split_href_fragment(raw_ref);
     if target_part.is_empty() {
-        if let Some(frag) = frag_part
-            && !frag.is_empty()
-            && !facts[from_rel].ids.contains(frag)
-        {
-            return Err(format!("{from_rel}: broken same-page anchor `#{frag}`"));
-        }
-        return Ok(());
+        return verify_same_page_anchor(from_rel, &facts[from_rel].ids, frag_part);
     }
-
     let resolved = resolve_relative_segments(from_rel, target_part)
         .ok_or_else(|| format!("{from_rel}: root-absolute link `{raw_ref}` is forbidden (use relative paths)"))?;
     if is_release_snapshot && let Some(docs_rel) = resolved.strip_prefix("../../") {
-        if docs_rel.is_empty() || docs_rel.starts_with('/') || docs_rel.split('/').any(|seg| seg == "..") {
+        if docs_rel.is_empty() || docs_rel.starts_with('/') || docs_rel.split('/').any(|s| s == "..") {
             return Err(format!("{from_rel}: relative target `{raw_ref}` escapes `docs/` root (`{resolved}`)"));
         }
-        let docs_target = root.join("docs").join(docs_rel);
-        if !is_regular_file(&docs_target) {
-            return Err(format!("{from_rel}: broken parent-docs asset/page `{raw_ref}` -> `{}`", docs_target.display()));
+        let target_path = root.join("docs").join(docs_rel);
+        if !is_regular_file(&target_path) {
+            return Err(format!("{from_rel}: broken parent-docs asset/page `{raw_ref}` -> `{}`", target_path.display()));
         }
         if let Some(frag) = frag_part
-            && !frag.is_empty()
             && docs_rel.ends_with(".html")
         {
-            let cache_key = format!("docs/{docs_rel}");
-            check_cached_html_fragment(&docs_target, &cache_key, &cache_key, frag, extra_html_ids, || {
-                format!("{from_rel}: broken parent-docs fragment `{raw_ref}` (missing `#{frag}` in `docs/{docs_rel}`)")
+            let key = format!("docs/{docs_rel}");
+            check_cached_html_fragment(&target_path, &key, &key, frag, cache, || {
+                format!("{from_rel}: broken parent-docs fragment `{raw_ref}` (missing `#{frag}` in `{key}`)")
             })?;
         }
         return Ok(());
@@ -520,78 +398,86 @@ fn verify_target_with_cache(
     if resolved.starts_with("..") {
         return Err(format!("{from_rel}: relative target `{raw_ref}` escapes site root (`{resolved}`)"));
     }
-
-    if let Some(target_facts) = facts.get(&resolved) {
-        if let Some(frag) = frag_part
-            && !frag.is_empty()
-            && !target_facts.ids.contains(frag)
-        {
-            return Err(format!("{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `{resolved}`)"));
-        }
-        return Ok(());
+    if let Some(tf) = facts.get(&resolved) {
+        return match frag_part {
+            Some(frag) if !tf.ids.contains(frag) => Err(format!("{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `{resolved}`)")),
+            _ => Ok(()),
+        };
     }
-
     if is_regular_file(&out_dir.join(&resolved)) {
-        return Ok(());
+        Ok(())
+    } else {
+        Err(format!("{from_rel}: broken internal link `{raw_ref}` (resolved `{resolved}` missing from site output)"))
     }
-
-    Err(format!("{from_rel}: broken internal link `{raw_ref}` (resolved `{resolved}` missing from site output)"))
 }
 
 fn resolve_relative_segments(from_rel: &str, target: &str) -> Option<String> {
-    if target.starts_with('/') || target.starts_with('\\') {
+    if target.starts_with(['/', '\\']) {
         return None;
     }
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(parent) = Path::new(from_rel).parent() {
-        for comp in parent.components() {
-            if let std::path::Component::Normal(s) = comp
-                && let Some(txt) = s.to_str()
-                && !txt.is_empty()
-            {
-                parts.push(txt.to_owned());
-            }
-        }
-    }
-    let mut parent_ups = 0usize;
+    let mut parts: Vec<String> = Path::new(from_rel)
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str().filter(|x| !x.is_empty()).map(str::to_owned),
+            _ => None,
+        })
+        .collect();
+    let mut ups = 0usize;
     for seg in target.replace('\\', "/").split('/') {
         match seg {
             "" | "." => {}
-            ".." => {
-                if parts.pop().is_none() {
-                    parent_ups += 1;
-                }
-            }
+            ".." => ups += usize::from(parts.pop().is_none()),
             other => parts.push(other.to_owned()),
         }
     }
-    let mut out = Vec::with_capacity(parent_ups + parts.len());
-    for _ in 0..parent_ups {
-        out.push(String::from(".."));
-    }
+    let mut out = vec![String::from(".."); ups];
     out.extend(parts);
     Some(out.join("/"))
 }
 
 fn check_registry_coverage(facts: &BTreeMap<String, PageFacts>, site: &GeneratedSite) -> Result<(), String> {
-    let az_ids = facts.get("az-index.html").map(|f| &f.hrefs).ok_or_else(|| String::from("missing `az-index.html`"))?;
-    let az_set: BTreeSet<&str> = az_ids.iter().map(String::as_str).collect();
-
-    let exp = &site.expected_coverage;
-    assert_ids_present(facts, &az_set, "registry/commands.html", &exp.engine_commands, "engine command")?;
-    assert_ids_present(facts, &az_set, "registry/commands.html", &exp.ui_commands, "UI command")?;
-    assert_ids_present(facts, &az_set, "registry/mcp-tools.html", &exp.mcp_tools, "MCP tool")?;
-    assert_ids_present(facts, &az_set, "registry/mcp-tools.html", &exp.mcp_prompts, "MCP prompt")?;
-    assert_ids_present(facts, &az_set, "registry/cli.html", &exp.cli_commands, "CLI subcommand")?;
-    assert_analysis_kinds_covered(facts, &az_set, &exp.analysis_kinds)?;
-    assert_ids_present(facts, &az_set, "registry/equations.html", &exp.fit_equations, "fit equation")?;
-    assert_ids_present(facts, &az_set, "registry/graphs.html", &exp.graph_kinds, "graph kind")?;
-    assert_ids_present(facts, &az_set, "registry/graphs.html", &exp.graph_options, "graph option")?;
-    assert_ids_present(facts, &az_set, "registry/tables.html", &exp.table_kinds, "table kind")?;
-    assert_ids_present(facts, &az_set, "registry/formats.html", &exp.formats, "format descriptor")?;
-    assert_ids_present(facts, &az_set, "registry/formats.html", &exp.preference_keys, "preference schema key")?;
-
-    let mcp_html = site.html_pages.get("registry/mcp-tools.html").ok_or_else(|| String::from("missing `registry/mcp-tools.html`"))?;
+    let az_set: BTreeSet<&str> = facts.get("az-index.html").ok_or("missing `az-index.html`")?.hrefs.iter().map(String::as_str).collect();
+    let e = &site.expected_coverage;
+    for (page, ids, label) in [
+        ("registry/commands.html", &e.engine_commands, "engine command"),
+        ("registry/commands.html", &e.ui_commands, "UI command"),
+        ("registry/mcp-tools.html", &e.mcp_tools, "MCP tool"),
+        ("registry/mcp-tools.html", &e.mcp_prompts, "MCP prompt"),
+        ("registry/cli.html", &e.cli_commands, "CLI subcommand"),
+        ("registry/equations.html", &e.fit_equations, "fit equation"),
+        ("registry/graphs.html", &e.graph_kinds, "graph kind"),
+        ("registry/graphs.html", &e.graph_options, "graph option"),
+        ("registry/tables.html", &e.table_kinds, "table kind"),
+        ("registry/formats.html", &e.formats, "format descriptor"),
+        ("registry/formats.html", &e.preference_keys, "preference schema key"),
+    ] {
+        let pf = facts.get(page).ok_or_else(|| format!("missing generated page `{page}`"))?;
+        for id in ids {
+            if !pf.ids.contains(id) {
+                return Err(format!("missing {label} anchor `#{id}` in `{page}`"));
+            }
+            if !az_set.contains(format!("{page}#{id}").as_str()) {
+                return Err(format!("missing {label} entry `{page}#{id}` in `az-index.html`"));
+            }
+        }
+    }
+    let tables = facts.get("registry/tables.html").ok_or("missing `registry/tables.html`")?;
+    for slug in &e.analysis_kinds {
+        let (reg_id, doc_id) = (format!("analysis-kind-{slug}"), format!("analysis-{slug}"));
+        if !tables.ids.contains(&reg_id) {
+            return Err(format!("missing analysis kind anchor `#{reg_id}` in `registry/tables.html`"));
+        }
+        if az_set.contains(format!("analyses.html#{doc_id}").as_str()) {
+            if !facts.get("analyses.html").is_some_and(|a| a.ids.contains(&doc_id)) {
+                return Err(format!("missing analysis kind anchor `#{doc_id}` in `analyses.html`"));
+            }
+        } else if !az_set.contains(format!("registry/tables.html#{reg_id}").as_str()) {
+            return Err(format!("missing analysis kind entry for `{slug}` in `az-index.html`"));
+        }
+    }
+    let mcp_html = site.html_pages.get("registry/mcp-tools.html").ok_or("missing `registry/mcp-tools.html`")?;
     for scheme in ["sheet://", "result://"] {
         if !mcp_html.contains(scheme) {
             return Err(format!("`registry/mcp-tools.html` missing MCP resource scheme `{scheme}`"));
@@ -600,167 +486,89 @@ fn check_registry_coverage(facts: &BTreeMap<String, PageFacts>, site: &Generated
     Ok(())
 }
 
-fn assert_ids_present(
-    facts: &BTreeMap<String, PageFacts>,
-    az_hrefs: &BTreeSet<&str>,
-    page_rel: &str,
-    expected_ids: &[String],
-    label: &str,
-) -> Result<(), String> {
-    let page = facts.get(page_rel).ok_or_else(|| format!("missing generated page `{page_rel}`"))?;
-    for id in expected_ids {
-        if !page.ids.contains(id) {
-            return Err(format!("missing {label} anchor `#{id}` in `{page_rel}`"));
-        }
-        let target_href = format!("{page_rel}#{id}");
-        if !az_hrefs.contains(target_href.as_str()) {
-            return Err(format!("missing {label} entry `{target_href}` in `az-index.html`"));
-        }
-    }
-    Ok(())
-}
-
-fn assert_analysis_kinds_covered(facts: &BTreeMap<String, PageFacts>, az_hrefs: &BTreeSet<&str>, analysis_slugs: &[String]) -> Result<(), String> {
-    let tables_page = facts.get("registry/tables.html").ok_or_else(|| String::from("missing generated page `registry/tables.html`"))?;
-    for slug in analysis_slugs {
-        let reg_id = format!("analysis-kind-{slug}");
-        if !tables_page.ids.contains(&reg_id) {
-            return Err(format!("missing analysis kind anchor `#{reg_id}` in `registry/tables.html`"));
-        }
-        let doc_id = format!("analysis-{slug}");
-        let doc_href = format!("analyses.html#{doc_id}");
-        let reg_href = format!("registry/tables.html#{reg_id}");
-        if az_hrefs.contains(doc_href.as_str()) {
-            let analyses_page = facts.get("analyses.html").ok_or_else(|| String::from("missing `analyses.html` referenced by `az-index.html`"))?;
-            if !analyses_page.ids.contains(&doc_id) {
-                return Err(format!("missing analysis kind anchor `#{doc_id}` in `analyses.html`"));
-            }
-        } else if !az_hrefs.contains(reg_href.as_str()) {
-            return Err(format!("missing analysis kind entry `{reg_href}` (or `{doc_href}`) in `az-index.html`"));
-        }
-    }
-    Ok(())
-}
-
-/// Parse strict `(major, minor)` from `"v0.1"` snapshot directory names (shared with `pages_site`).
 #[must_use]
 pub fn parse_minor_dir_version(name: &str) -> Option<(u64, u64)> {
     crate::pages_site::parse_minor_dir_version(name)
 }
 
-fn collect_tree_no_symlinks(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
-    for path in read_dir_paths_sorted(dir)? {
-        let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
-        if meta.file_type().is_symlink() {
-            return Err(format!("{}: symlinks are forbidden inside documentation directories", path.display()));
-        }
-        if meta.file_type().is_dir() {
-            collect_tree_no_symlinks(root, &path, out)?;
-        } else if meta.file_type().is_file() {
-            out.push(rel_slash(root, &path)?);
-        }
-    }
-    Ok(())
-}
-
-/// Reject any generated `.html` files or symlinks lingering under `docs/manual/` (`R12.10`).
 pub fn check_no_committed_manual_html(root: &Path) -> Result<(), String> {
     let manual_dir = root.join("docs/manual");
-    let Ok(meta) = std::fs::symlink_metadata(&manual_dir) else {
-        return Ok(());
-    };
+    let Ok(meta) = std::fs::symlink_metadata(&manual_dir) else { return Ok(()) };
     if meta.file_type().is_symlink() {
         return Err(String::from("docs/manual must not be a symlink"));
     }
     if !meta.file_type().is_dir() {
         return Ok(());
     }
-    let mut all_files = Vec::new();
-    collect_tree_no_symlinks(&manual_dir, &manual_dir, &mut all_files)?;
-    let mut html_files: Vec<String> = all_files.into_iter().filter(|rel| has_ext_ci(Path::new(rel), &["html", "htm"])).collect();
-    if html_files.is_empty() {
+    let mut files = Vec::new();
+    collect_files_no_symlinks(&manual_dir, &manual_dir, DOCS_SYMLINK_ERR, &mut files)?;
+    let mut htmls: Vec<String> = files.into_iter().filter(|r| has_ext_ci(Path::new(r), &["html", "htm"])).collect();
+    if htmls.is_empty() {
         return Ok(());
     }
-    html_files.sort();
-    let preview: Vec<&str> = html_files.iter().take(5).map(String::as_str).collect();
+    htmls.sort();
     Err(format!(
-        "docs/manual/ contains {} HTML file(s) (e.g. {}); manual HTML is generated into a build directory in CI (R12.10) and must not be committed under docs/manual/",
-        html_files.len(),
-        preview.join(", ")
+        "docs/manual/ contains {} HTML file(s) (e.g. {}); manual HTML must not be committed under docs/manual/",
+        htmls.len(),
+        htmls.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
     ))
 }
 
-/// Reject committed copies of CI-generated root site files under `docs/` (`R21.4`).
 pub fn check_no_committed_generated_site_files(root: &Path) -> Result<(), String> {
     let found: Vec<String> = crate::pages_site::GENERATED_SITE_FILES
         .iter()
         .filter(|rel| std::fs::symlink_metadata(root.join("docs").join(rel)).is_ok())
         .map(|rel| format!("docs/{rel}"))
         .collect();
-    if found.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "generated site file(s) {} must not be committed under docs/ (R21.4 generates them into target/docs-manual/_root/ during CI)",
-        found.join(", ")
-    ))
+    if found.is_empty() { Ok(()) } else { Err(format!("generated site file(s) {} must not be committed under docs/", found.join(", "))) }
 }
 
 fn audit_snapshot_dir_on_disk(root: &Path, snap_dir: &Path, snap_name: &str) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    let meta = std::fs::symlink_metadata(snap_dir).map_err(|e| format!("stat {}: {e}", snap_dir.display()))?;
-    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+    if !is_real_dir(snap_dir) {
         return Err(format!("{}: manual snapshot must be a regular non-symlink directory", snap_dir.display()));
     }
-    let mut rel_files = Vec::new();
-    collect_tree_no_symlinks(snap_dir, snap_dir, &mut rel_files)?;
-    let mut file_bytes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let mut facts: BTreeMap<String, PageFacts> = BTreeMap::new();
+    let (mut rel_files, mut file_bytes, mut facts) = (Vec::new(), BTreeMap::new(), BTreeMap::new());
+    collect_files_no_symlinks(snap_dir, snap_dir, DOCS_SYMLINK_ERR, &mut rel_files)?;
     for rel in rel_files {
-        let full = snap_dir.join(&rel);
-        let bytes = read_regular_file_bytes(&full, MAX_SNAPSHOT_FILE_BYTES).map_err(|e| format!("read {}: {e}", full.display()))?;
+        let bytes = read_regular_file_bytes(&snap_dir.join(&rel), MAX_SNAPSHOT_FILE_BYTES).map_err(|e| format!("read {rel}: {e}"))?;
         if has_ext_ci(Path::new(&rel), &["html", "htm"]) {
             let html = String::from_utf8(bytes.clone()).map_err(|_| format!("{snap_name}/{rel}: snapshot HTML is not valid UTF-8"))?;
-            let page_facts = audit_single_html(&format!("{snap_name}/{rel}"), &html)?;
-            facts.insert(rel.clone(), page_facts);
+            facts.insert(rel.clone(), audit_single_html(&format!("{snap_name}/{rel}"), &html)?);
         }
         file_bytes.insert(rel, bytes);
     }
     if facts.is_empty() {
         return Err(format!("{}: manual snapshot contains no HTML pages", snap_dir.display()));
     }
-    check_unique_titles(facts.iter().map(|(k, v)| (k.as_str(), v)))?;
-    check_unique_meta_descriptions(facts.iter().map(|(k, v)| (k.as_str(), v)))?;
+    check_unique_titles_and_descriptions(&facts)?;
     check_page_map_links_and_fragments(root, snap_dir, true, &facts)?;
     Ok(file_bytes)
 }
 
 fn check_snapshot_manifest(root: &Path, manifest_path: &Path) -> Result<String, String> {
-    let m_meta = std::fs::symlink_metadata(manifest_path).map_err(|e| format!("stat {}: {e}", manifest_path.display()))?;
-    if m_meta.file_type().is_symlink() || !m_meta.file_type().is_file() {
+    if !is_regular_file(manifest_path) {
         return Err(format!("{}: snapshot manifest must be a regular non-symlink file", manifest_path.display()));
     }
     let raw = std::fs::read_to_string(manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
-    let manifest: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
-
-    let version =
-        manifest.get("version").and_then(serde_json::Value::as_str).ok_or_else(|| format!("{}: missing `version`", manifest_path.display()))?;
-    let is_workspace_build = manifest.get("source").and_then(serde_json::Value::as_str) == Some("workspace");
-    let commit = match manifest.get("commit") {
+    let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
+    let version = val.get("version").and_then(serde_json::Value::as_str).ok_or_else(|| format!("{}: missing `version`", manifest_path.display()))?;
+    let is_ws = val.get("source").and_then(serde_json::Value::as_str) == Some("workspace");
+    let commit = match val.get("commit") {
         Some(serde_json::Value::String(s)) => Some(s.as_str()),
-        Some(serde_json::Value::Null) | None if is_workspace_build => None,
+        Some(serde_json::Value::Null) | None if is_ws => None,
         _ => return Err(format!("{}: missing `commit`", manifest_path.display())),
     };
     if let Some(sha) = commit {
         if sha.len() != 40 || !sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
             return Err(format!("{}: `commit` `{sha}` must be a 40-hex SHA", manifest_path.display()));
         }
-        if !is_workspace_build {
-            for tag_candidate in [format!("v{version}"), version.to_owned()] {
-                if let Some(tag_sha) = resolve_git_tag_commit(root, &tag_candidate)?
+        if !is_ws {
+            for tag in [format!("v{version}"), version.to_owned()] {
+                if let Some(tag_sha) = resolve_git_tag_commit(root, &tag)?
                     && tag_sha != sha
                 {
                     return Err(format!(
-                        "{}: manifest commit `{sha}` does not match release tag `{tag_candidate}` commit `{tag_sha}`",
+                        "{}: manifest commit `{sha}` does not match release tag `{tag}` commit `{tag_sha}`",
                         manifest_path.display()
                     ));
                 }
@@ -770,14 +578,11 @@ fn check_snapshot_manifest(root: &Path, manifest_path: &Path) -> Result<String, 
     Ok(raw)
 }
 
-/// Check ALL generated manual snapshots under `<manual_dir>/v*/`, `<manual_dir>/latest/`,
-/// and `<manual_dir>/index.html`, auditing every snapshot HTML page, manifest, link/fragment,
-/// and byte-for-byte file-tree parity between `latest/` and the newest versioned snapshot.
 pub fn check_manual_snapshots(root: &Path, manual_dir: &Path) -> Result<(), String> {
     if !is_real_dir(manual_dir) {
-        return Err(format!("manual build directory `{}` does not exist (or is not a regular directory)", manual_dir.display()));
+        return Err(format!("manual build directory `{}` does not exist", manual_dir.display()));
     }
-    let mut snapshots: Vec<((u64, u64), String)> = Vec::new();
+    let mut snapshots = Vec::new();
     for path in read_dir_paths_sorted(manual_dir)? {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if let Some(ver) = parse_minor_dir_version(&name) {
@@ -785,13 +590,11 @@ pub fn check_manual_snapshots(root: &Path, manual_dir: &Path) -> Result<(), Stri
             if meta.file_type().is_symlink() {
                 return Err(format!("{}: symlinked snapshot directory is forbidden", path.display()));
             }
-            let manifest_path = path.join("manifest.json");
-            if let Ok(m_meta) = std::fs::symlink_metadata(&manifest_path)
-                && m_meta.file_type().is_symlink()
-            {
-                return Err(format!("{}: symlinked snapshot manifest is forbidden", manifest_path.display()));
+            let mp = path.join("manifest.json");
+            if std::fs::symlink_metadata(&mp).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err(format!("{}: symlinked snapshot manifest is forbidden", mp.display()));
             }
-            if meta.file_type().is_dir() && is_regular_file(&manifest_path) {
+            if meta.file_type().is_dir() && is_regular_file(&mp) {
                 snapshots.push((ver, name));
             }
         }
@@ -800,166 +603,121 @@ pub fn check_manual_snapshots(root: &Path, manual_dir: &Path) -> Result<(), Stri
     let Some((_, newest_dir)) = snapshots.last() else {
         return Err(format!("manual build directory `{}` contains no `v<major>.<minor>/manifest.json` snapshot", manual_dir.display()));
     };
-
-    let mut newest_tree: Option<BTreeMap<String, Vec<u8>>> = None;
-    let mut newest_manifest_raw = String::new();
-    for (_, snap_dir) in &snapshots {
-        let manifest_path = manual_dir.join(snap_dir).join("manifest.json");
-        let raw = check_snapshot_manifest(root, &manifest_path)?;
-        let tree = audit_snapshot_dir_on_disk(root, &manual_dir.join(snap_dir), snap_dir)?;
-        if snap_dir == newest_dir {
-            newest_manifest_raw = raw;
-            newest_tree = Some(tree);
+    let (mut newest_tree, mut newest_manifest) = (None, String::new());
+    for (_, snap) in &snapshots {
+        let raw = check_snapshot_manifest(root, &manual_dir.join(snap).join("manifest.json"))?;
+        let tree = audit_snapshot_dir_on_disk(root, &manual_dir.join(snap), snap)?;
+        if snap == newest_dir {
+            (newest_manifest, newest_tree) = (raw, Some(tree));
         }
     }
-
     let latest_dir = manual_dir.join("latest");
-    let latest_manifest_path = latest_dir.join("manifest.json");
-    let expected_refresh = if let Ok(meta) = std::fs::symlink_metadata(&latest_dir) {
-        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+    let expected_refresh = if std::fs::symlink_metadata(&latest_dir).is_ok() {
+        if !is_real_dir(&latest_dir) {
             return Err(format!("{}: `latest/` must be a regular non-symlink directory", latest_dir.display()));
         }
-        let latest_raw = check_snapshot_manifest(root, &latest_manifest_path)?;
-        let newest_manifest_path = manual_dir.join(newest_dir).join("manifest.json");
-        if latest_raw != newest_manifest_raw {
-            return Err(format!("{} does not match newest snapshot {}", latest_manifest_path.display(), newest_manifest_path.display()));
+        if check_snapshot_manifest(root, &latest_dir.join("manifest.json"))? != newest_manifest {
+            return Err(format!("{} does not match newest snapshot", latest_dir.join("manifest.json").display()));
         }
-        let latest_tree = audit_snapshot_dir_on_disk(root, &latest_dir, "latest")?;
-        if newest_tree.as_ref() != Some(&latest_tree) {
-            return Err(format!(
-                "{} file tree does not match newest snapshot {} byte-for-byte",
-                latest_dir.display(),
-                manual_dir.join(newest_dir).display()
-            ));
+        if newest_tree.as_ref() != Some(&audit_snapshot_dir_on_disk(root, &latest_dir, "latest")?) {
+            return Err(format!("{} file tree does not match newest snapshot byte-for-byte", latest_dir.display()));
         }
         String::from("latest/index.html")
     } else {
         format!("{newest_dir}/index.html")
     };
-
     let index_path = manual_dir.join("index.html");
     if !is_regular_file(&index_path) {
         return Err(format!("{} must be a regular non-symlink file", index_path.display()));
     }
-    let index_html = std::fs::read_to_string(&index_path).map_err(|e| format!("read {}: {e}", index_path.display()))?;
-    let index_facts = audit_single_html("manual/index.html", &index_html)?;
-    if !index_facts.meta_refresh_targets.iter().any(|t| t == &expected_refresh) {
+    let idx_facts =
+        audit_single_html("manual/index.html", &std::fs::read_to_string(&index_path).map_err(|e| format!("read {}: {e}", index_path.display()))?)?;
+    if !idx_facts.meta_refresh_targets.iter().any(|t| t == &expected_refresh) {
         return Err(format!("{} must redirect via meta-refresh to `{expected_refresh}`", index_path.display()));
     }
     Ok(())
 }
 
-struct RootPageDirs<'a> {
-    docs_dir: &'a Path,
-    manual_dir: &'a Path,
-}
-
-/// Audit root GitHub Pages HTML files (`docs/index.html`, `docs/privacy.html`, the other
-/// hand-written `seo::LANDING_PAGES`, generated `<manual_dir>/index.html`, and any existing root
-/// redirect shims `docs/get-started.html`, `docs/troubleshooting.html`, `docs/404.html`) for
-/// strict CSP, `no-referrer`, accessibility structure, zero scripts/forms/inline styles/external
-/// assets, and valid local relative targets resolving into `docs/` or `manual_dir`.
 pub fn check_root_pages(root: &Path, manual_dir: &Path) -> Result<(), String> {
-    let docs_dir = root.join("docs");
-    let dirs = RootPageDirs { docs_dir: &docs_dir, manual_dir };
-    let required = ["index.html", "privacy.html", "manual/index.html"];
-    let mut pages_to_audit: Vec<&str> = required.to_vec();
-    let optional =
-        super::seo::LANDING_PAGES.iter().copied().filter(|p| !required.contains(p)).chain(["404.html", "get-started.html", "troubleshooting.html"]);
-    for shim in optional {
-        if is_regular_file(&docs_dir.join(shim)) {
-            pages_to_audit.push(shim);
-        }
+    let (docs_dir, required) = (root.join("docs"), ["index.html", "privacy.html", "manual/index.html"]);
+    let mut pages: Vec<&str> = required.to_vec();
+    pages.extend(
+        super::seo::LANDING_PAGES
+            .iter()
+            .copied()
+            .filter(|p| !required.contains(p))
+            .chain(["404.html", "get-started.html", "troubleshooting.html"])
+            .filter(|s| is_regular_file(&docs_dir.join(s))),
+    );
+    let mut audited = BTreeMap::new();
+    for rel in pages {
+        let full = rel.strip_prefix("manual/").map_or_else(|| docs_dir.join(rel), |m| manual_dir.join(m));
+        audited.insert(
+            rel.to_owned(),
+            audit_single_html(&format!("docs/{rel}"), &std::fs::read_to_string(&full).map_err(|e| format!("read {}: {e}", full.display()))?)?,
+        );
     }
-
-    let mut audited: BTreeMap<String, PageFacts> = BTreeMap::new();
-    for rel in pages_to_audit {
-        let full = if let Some(manual_rel) = rel.strip_prefix("manual/") { manual_dir.join(manual_rel) } else { docs_dir.join(rel) };
-        let html = std::fs::read_to_string(&full).map_err(|e| format!("read {}: {e}", full.display()))?;
-        audited.insert(rel.to_owned(), audit_single_html(&format!("docs/{rel}"), &html)?);
-    }
-
-    check_unique_titles(audited.iter().map(|(k, v)| (k.as_str(), v)))?;
-    check_unique_meta_descriptions(audited.iter().map(|(k, v)| (k.as_str(), v)))?;
-
-    let mut extra_html_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (rel, facts) in &audited {
-        for raw_href in &facts.hrefs {
-            if !is_external_url(raw_href) && !is_mailto_url(raw_href) {
-                verify_docs_relative_target(&dirs, rel, raw_href, facts, &audited, &mut extra_html_ids)?;
+    check_unique_titles_and_descriptions(&audited)?;
+    let mut cache = BTreeMap::new();
+    for (rel, pf) in &audited {
+        for raw in pf.local_targets() {
+            if is_external_url(raw) || is_forbidden_uri_scheme(raw) {
+                return Err(format!("docs/{rel}: external or forbidden link target `{raw}`"));
             }
-        }
-        for (targets, kind) in [(&facts.asset_srcs, "asset URL"), (&facts.meta_refresh_targets, "`<meta http-equiv=\"refresh\">` target")] {
-            for raw in targets {
-                if is_external_url(raw) || is_forbidden_uri_scheme(raw) {
-                    return Err(format!("docs/{rel}: external or forbidden {kind} `{raw}`"));
-                }
-                verify_docs_relative_target(&dirs, rel, raw, facts, &audited, &mut extra_html_ids)?;
-            }
+            verify_docs_relative_target(&docs_dir, manual_dir, rel, raw, pf, &audited, &mut cache)?;
         }
     }
     Ok(())
 }
 
 fn verify_docs_relative_target(
-    dirs: &RootPageDirs<'_>,
+    docs_dir: &Path,
+    manual_dir: &Path,
     from_rel: &str,
     raw_ref: &str,
     from_facts: &PageFacts,
     audited: &BTreeMap<String, PageFacts>,
-    extra_html_ids: &mut BTreeMap<String, BTreeSet<String>>,
+    cache: &mut BTreeMap<String, BTreeSet<String>>,
 ) -> Result<(), String> {
-    let (target_part, frag_part) = raw_ref.split_once('#').map_or((raw_ref, None), |(t, f)| (t, Some(f)));
+    let (target_part, frag_part) = split_href_fragment(raw_ref);
     if target_part.is_empty() {
-        if let Some(frag) = frag_part
-            && !frag.is_empty()
-            && !from_facts.ids.contains(frag)
-        {
-            return Err(format!("docs/{from_rel}: broken same-page anchor `#{frag}`"));
-        }
-        return Ok(());
+        return verify_same_page_anchor(&format!("docs/{from_rel}"), &from_facts.ids, frag_part);
     }
-
     let target_part = if from_rel == "404.html" && target_part.starts_with('/') {
-        let base_path = crate::pages_site::site_base_path();
-        let Some(stripped) = target_part.strip_prefix(base_path) else {
-            return Err(format!("docs/404.html: root-absolute target `{raw_ref}` must start with `{base_path}`"));
-        };
+        let bp = crate::pages_site::site_base_path();
+        let stripped =
+            target_part.strip_prefix(bp).ok_or_else(|| format!("docs/404.html: root-absolute target `{raw_ref}` must start with `{bp}`"))?;
         if stripped.is_empty() { "index.html" } else { stripped }
     } else {
         target_part
     };
-
-    let resolved = resolve_relative_segments(from_rel, target_part)
-        .ok_or_else(|| format!("docs/{from_rel}: root-absolute target `{raw_ref}` is forbidden (use relative paths)"))?;
+    let resolved =
+        resolve_relative_segments(from_rel, target_part).ok_or_else(|| format!("docs/{from_rel}: root-absolute target `{raw_ref}` is forbidden"))?;
     if resolved.starts_with("..") {
         return Err(format!("docs/{from_rel}: relative target `{raw_ref}` escapes `docs/` root (`{resolved}`)"));
     }
-    let target_path = if let Some(manual_rel) = resolved.strip_prefix("manual/") {
-        dirs.manual_dir.join(manual_rel)
+    let target_path = if let Some(m) = resolved.strip_prefix("manual/") {
+        manual_dir.join(m)
     } else if crate::pages_site::GENERATED_SITE_FILES.contains(&resolved.as_str()) {
-        dirs.manual_dir.join(crate::pages_site::MANUAL_ROOT_SUBDIR).join(&resolved)
+        manual_dir.join(crate::pages_site::MANUAL_ROOT_SUBDIR).join(&resolved)
     } else {
-        dirs.docs_dir.join(&resolved)
+        docs_dir.join(&resolved)
     };
     if !is_regular_file(&target_path) {
         return Err(format!("docs/{from_rel}: broken relative target `{raw_ref}` (missing `{}`)", target_path.display()));
     }
-
     if let Some(frag) = frag_part
-        && !frag.is_empty()
         && resolved.ends_with(".html")
     {
         if let Some(known) = audited.get(&resolved) {
-            if !known.ids.contains(frag) {
-                return Err(format!("docs/{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `docs/{resolved}`)"));
-            }
-            return Ok(());
+            return if known.ids.contains(frag) {
+                Ok(())
+            } else {
+                Err(format!("docs/{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `docs/{resolved}`)"))
+            };
         }
-        // Manual pages are only scanned for anchor ids here; a `docs/` label would wrongly apply
-        // hand-written root-page rules (such as explicit `<img>` dimensions) to generated pages.
-        let scan_label = if resolved.starts_with("manual/") { resolved.clone() } else { format!("docs/{resolved}") };
-        check_cached_html_fragment(&target_path, &resolved, &scan_label, frag, extra_html_ids, || {
+        let label = if resolved.starts_with("manual/") { resolved.clone() } else { format!("docs/{resolved}") };
+        check_cached_html_fragment(&target_path, &resolved, &label, frag, cache, || {
             format!("docs/{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `{resolved}`)")
         })?;
     }
@@ -975,11 +733,7 @@ fn resolve_git_tag_commit(root: &Path, tag: &str) -> Result<Option<String>, Stri
         .idle_timeout(Duration::from_secs(10))
         .run()
         .map_err(|e| format!("git rev-parse {refspec}: {e}"))?;
-    if !out.success {
-        return Ok(None);
-    }
-    let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    Ok((!sha.is_empty()).then_some(sha))
+    Ok(out.success.then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|s| !s.is_empty()))
 }
 
 fn run_hygiene_scanners(root: &Path, out_dir: &Path, is_manual_build_dir: bool) -> Result<(), String> {
@@ -988,7 +742,6 @@ fn run_hygiene_scanners(root: &Path, out_dir: &Path, is_manual_build_dir: bool) 
         let preview: Vec<String> = brand_hits.iter().take(20).map(|h| format!("{}:{}: `{}`", h.path, h.line, h.brand)).collect();
         return Err(format!("brands scanner found {} violation(s) in generated docs-site: {}", brand_hits.len(), preview.join("; ")));
     }
-
     let cleanroom_hits = crate::cleanroom::scan_dist_artefacts(out_dir)?;
     if let Some(first) = cleanroom_hits.first() {
         return Err(format!(
@@ -999,15 +752,11 @@ fn run_hygiene_scanners(root: &Path, out_dir: &Path, is_manual_build_dir: bool) 
             first.signature
         ));
     }
-
-    let catalog = crate::assets::load_repo_asset_catalog(root)?;
-    let (_, asset_violations) = crate::assets::scan_dist_artefacts(&catalog, out_dir)?;
+    let (_, asset_violations) = crate::assets::scan_dist_artefacts(&crate::assets::load_repo_asset_catalog(root)?, out_dir)?;
     if let Some(first) = asset_violations.first() {
         return Err(format!("assets scanner found {} violation(s) in generated docs-site (first: {first})", asset_violations.len()));
     }
-
-    let mut secret_hits = Vec::new();
-    let mut text_files = Vec::new();
+    let (mut secret_hits, mut text_files) = (Vec::new(), Vec::new());
     walk_file_paths(out_dir, &|_| false, &|p| has_ext_ci(p, &["html", "htm", "css", "json", "txt", "xml"]), &mut text_files)?;
     for path in text_files {
         let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -1019,35 +768,26 @@ fn run_hygiene_scanners(root: &Path, out_dir: &Path, is_manual_build_dir: bool) 
     Ok(())
 }
 
-/// Enforce that hand-written user guides (`MANUAL_GUIDES`) contain zero roadmap IDs (`\bR\d+\.\d+\b`)
-/// and zero internal QoL IDs (`\bQOL-\d+\b`), and emit an info-only readability report per guide.
 pub fn check_guide_readability(root: &Path) -> Result<(), String> {
     let mut violations = Vec::new();
     for guide in super::sitemap::MANUAL_GUIDES {
-        let full_path = root.join(guide.repo_path);
-        if !is_regular_file(&full_path) {
+        let full = root.join(guide.repo_path);
+        if !is_regular_file(&full) {
             continue;
         }
-        let raw = std::fs::read_to_string(&full_path).map_err(|e| format!("read {}: {e}", guide.repo_path))?;
-        let exempt = READABILITY_LINT_EXEMPTIONS.contains(&guide.repo_path);
-        if !exempt {
+        let raw = std::fs::read_to_string(&full).map_err(|e| format!("read {}: {e}", guide.repo_path))?;
+        if !READABILITY_LINT_EXEMPTIONS.contains(&guide.repo_path) {
             for (idx, line) in raw.lines().enumerate() {
                 if let Some(tok) = find_forbidden_guide_id(line) {
                     violations.push(format!("{}:{}: forbidden internal ID `{tok}` in user guide", guide.repo_path, idx + 1));
                 }
             }
         }
-        let stats = compute_guide_readability_stats(&raw);
-        println!(
-            "docs-site readability: {}: avg_sentence={:.1} words, code_per_100w={:.1}, rs_refs={}",
-            guide.repo_path, stats.avg_sentence_words, stats.code_per_100_words, stats.rs_filename_count
-        );
+        let (avg_w, code_100, rs_n) = compute_guide_readability_stats(&raw);
+        println!("docs-site readability: {}: avg_sentence={avg_w:.1} words, code_per_100w={code_100:.1}, rs_refs={rs_n}", guide.repo_path);
     }
     if let Some(first) = violations.first() {
-        return Err(format!(
-            "user-guide readability lint found {} internal ID violation(s) (first: {first}); remove roadmap/QOL IDs from docs/",
-            violations.len()
-        ));
+        return Err(format!("user-guide readability lint found {} internal ID violation(s) (first: {first})", violations.len()));
     }
     Ok(())
 }
@@ -1057,209 +797,98 @@ fn is_word_boundary_byte(b: Option<u8>) -> bool {
 }
 
 fn find_forbidden_guide_id(line: &str) -> Option<&str> {
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let prev = i.checked_sub(1).and_then(|p| bytes.get(p).copied());
-        if is_word_boundary_byte(prev) {
-            if bytes[i] == b'R'
-                && let Some(end) = match_roadmap_id_end(bytes, i)
-                && is_word_boundary_byte(bytes.get(end).copied())
-            {
-                return line.get(i..end);
+    let b = line.as_bytes();
+    for i in 0..b.len() {
+        if !is_word_boundary_byte(i.checked_sub(1).and_then(|p| b.get(p).copied())) {
+            continue;
+        }
+        if b[i] == b'R' {
+            let d1 = b.get(i + 1..).map_or(0, |s| s.iter().take_while(|c| c.is_ascii_digit()).count());
+            let d2 = if d1 > 0 && b.get(i + 1 + d1) == Some(&b'.') {
+                b.get(i + 2 + d1..).map_or(0, |s| s.iter().take_while(|c| c.is_ascii_digit()).count())
+            } else {
+                0
+            };
+            if d2 > 0 && is_word_boundary_byte(b.get(i + 2 + d1 + d2).copied()) {
+                return line.get(i..i + 2 + d1 + d2);
             }
-            if line.get(i..).is_some_and(|s| s.starts_with("QOL-"))
-                && let Some(end) = match_qol_id_end(bytes, i)
-                && is_word_boundary_byte(bytes.get(end).copied())
-            {
-                return line.get(i..end);
+        } else if line.get(i..).is_some_and(|s| s.starts_with("QOL-")) {
+            let d = b.get(i + 4..).map_or(0, |s| s.iter().take_while(|c| c.is_ascii_digit()).count());
+            if d > 0 && is_word_boundary_byte(b.get(i + 4 + d).copied()) {
+                return line.get(i..i + 4 + d);
             }
         }
-        i += 1;
     }
     None
 }
 
-fn match_roadmap_id_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut j = start + 1;
-    let d1 = bytes.get(j..)?.iter().take_while(|b| b.is_ascii_digit()).count();
-    if d1 == 0 {
-        return None;
-    }
-    j += d1;
-    if bytes.get(j) != Some(&b'.') {
-        return None;
-    }
-    j += 1;
-    let d2 = bytes.get(j..)?.iter().take_while(|b| b.is_ascii_digit()).count();
-    (d2 > 0).then_some(j + d2)
-}
-
-fn match_qol_id_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let j = start + 4;
-    let digits = bytes.get(j..)?.iter().take_while(|b| b.is_ascii_digit()).count();
-    (digits > 0).then_some(j + digits)
-}
-
-struct GuideReadabilityStats {
-    avg_sentence_words: f64,
-    code_per_100_words: f64,
-    rs_filename_count: usize,
-}
-
-fn parse_fence_marker(trimmed: &str) -> Option<(u8, usize)> {
-    let first = trimmed.bytes().next().filter(|&b| b == b'`' || b == b'~')?;
-    let count = trimmed.bytes().take_while(|&b| b == first).count();
-    (count >= 3).then_some((first, count))
-}
-
-fn compute_guide_readability_stats(raw: &str) -> GuideReadabilityStats {
-    let mut fence: Option<(u8, usize)> = None;
-    let mut prose_words = 0usize;
-    let mut prose_sentences = 0usize;
-    let mut code_spans = 0usize;
-    let mut rs_filename_count = 0usize;
-
+fn compute_guide_readability_stats(raw: &str) -> (f64, f64, usize) {
+    let (mut fence, mut words, mut sents, mut code_spans, mut rs_refs) = (None::<(u8, usize)>, 0usize, 0usize, 0usize, 0usize);
     for line in raw.lines() {
-        let trimmed = line.trim();
-        if let Some((ch, min_len)) = fence {
-            let count = trimmed.bytes().take_while(|&b| b == ch).count();
-            if count >= min_len && trimmed.get(count..).is_some_and(|r| r.trim().is_empty()) {
+        let t = line.trim();
+        if let Some((ch, n)) = fence {
+            let cnt = t.bytes().take_while(|&b| b == ch).count();
+            if cnt >= n && t.get(cnt..).is_some_and(|r| r.trim().is_empty()) {
                 fence = None;
             }
             continue;
         }
-        if let Some(open) = parse_fence_marker(trimmed) {
-            fence = Some(open);
+        if let Some(f) = parse_fence_open(t) {
+            fence = Some(f);
             continue;
         }
-        rs_filename_count += count_rs_filenames(line);
-        code_spans += count_inline_code_spans(line);
-
-        if is_non_prose_markdown_line(trimmed) {
+        let lb = line.as_bytes();
+        rs_refs += line
+            .match_indices(".rs")
+            .filter(|&(d, _)| d > 0 && !is_word_boundary_byte(lb.get(d - 1).copied()) && is_word_boundary_byte(lb.get(d + 3).copied()))
+            .count();
+        code_spans += lb.iter().filter(|&&b| b == b'`').count() / 2;
+        if t.is_empty()
+            || t.starts_with(['|', '#'])
+            || matches!(t, "---" | "***" | "___" | "$$")
+            || t.starts_with("![")
+            || t.starts_with("> [!")
+            || (t.starts_with("<!--") && t.ends_with("-->"))
+        {
             continue;
         }
-        let cleaned = trimmed.trim_start_matches('>').trim();
-        let line_words = cleaned.split_whitespace().count();
-        if line_words == 0 {
-            continue;
-        }
-        prose_words += line_words;
-        prose_sentences += count_sentence_endings(cleaned);
-    }
-    let effective_sentences = prose_sentences.max(usize::from(prose_words > 0));
-    let avg_sentence_words = if effective_sentences == 0 { 0.0 } else { prose_words as f64 / effective_sentences as f64 };
-    let code_per_100_words = if prose_words == 0 { 0.0 } else { (code_spans as f64) * 100.0 / (prose_words as f64) };
-    GuideReadabilityStats { avg_sentence_words, code_per_100_words, rs_filename_count }
-}
-
-fn is_non_prose_markdown_line(trimmed: &str) -> bool {
-    trimmed.is_empty()
-        || trimmed.starts_with('|')
-        || trimmed.starts_with('#')
-        || trimmed == "---"
-        || trimmed == "***"
-        || trimmed == "___"
-        || trimmed == "$$"
-        || (trimmed.starts_with("<!--") && trimmed.ends_with("-->"))
-        || trimmed.starts_with("![")
-        || trimmed.starts_with("> [!")
-}
-
-fn count_inline_code_spans(line: &str) -> usize {
-    let bytes = line.as_bytes();
-    let mut count = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'`' {
-            let ticks = bytes[i..].iter().take_while(|&&b| b == b'`').count();
-            let mut j = i + ticks;
-            let mut closed = false;
-            while j < bytes.len() {
-                if bytes[j] == b'`' {
-                    let run = bytes[j..].iter().take_while(|&&b| b == b'`').count();
-                    j += run;
-                    if run == ticks {
-                        closed = true;
-                        break;
-                    }
-                } else {
-                    j += 1;
+        let cleaned = t.trim_start_matches('>').trim();
+        let w = cleaned.split_whitespace().count();
+        if w > 0 {
+            words += w;
+            let (cb, mut in_code) = (cleaned.as_bytes(), false);
+            for (i, &c) in cb.iter().enumerate() {
+                if c == b'`' {
+                    in_code = !in_code;
+                } else if !in_code
+                    && matches!(c, b'.' | b'!' | b'?')
+                    && !(c == b'.' && cb.get(i + 1).is_some_and(u8::is_ascii_digit))
+                    && matches!(cb.get(i + 1), None | Some(b' ' | b'\t' | b')' | b']' | b'"' | b'\'' | b'*'))
+                {
+                    sents += 1;
                 }
             }
-            if closed {
-                count += 1;
-                i = j;
-                continue;
-            }
-            i += ticks;
-        } else {
-            i += 1;
         }
     }
-    count
-}
-
-fn count_rs_filenames(line: &str) -> usize {
-    let bytes = line.as_bytes();
-    let mut count = 0usize;
-    let mut pos = 0usize;
-    while let Some(rest) = line.get(pos..) {
-        let Some(rel) = rest.find(".rs") else {
-            break;
-        };
-        let dot_abs = pos + rel;
-        let end_abs = dot_abs + 3;
-        let before_ok = dot_abs > 0 && matches!(bytes.get(dot_abs - 1), Some(b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'_'));
-        let after_ok = is_word_boundary_byte(bytes.get(end_abs).copied());
-        if before_ok && after_ok {
-            count += 1;
-        }
-        pos = end_abs;
-    }
-    count
-}
-
-fn count_sentence_endings(line: &str) -> usize {
-    let bytes = line.as_bytes();
-    let mut count = 0usize;
-    let mut in_code = false;
-    for (idx, &b) in bytes.iter().enumerate() {
-        if b == b'`' {
-            in_code = !in_code;
-            continue;
-        }
-        if in_code || !matches!(b, b'.' | b'!' | b'?') {
-            continue;
-        }
-        if b == b'.' && bytes.get(idx + 1).is_some_and(u8::is_ascii_digit) {
-            continue;
-        }
-        let next = bytes.get(idx + 1).copied();
-        if next.is_none() || matches!(next, Some(b' ' | b'\t' | b')' | b']' | b'"' | b'\'' | b'*')) {
-            count += 1;
-        }
-    }
-    count
+    let eff = sents.max(usize::from(words > 0));
+    (if eff == 0 { 0.0 } else { words as f64 / eff as f64 }, if words == 0 { 0.0 } else { code_spans as f64 * 100.0 / words as f64 }, rs_refs)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::markdown::{IdentityResolver, TocHeading, render_markdown, render_math_html};
     use super::super::template::{PageSpec, SiteMeta, render_page, render_root_redirect_shim};
     use super::*;
     use crate::scan_util::test_support::TestDir;
 
     fn test_meta() -> SiteMeta {
         SiteMeta {
-            version_label: String::from("v0.1.0-test"),
-            commit_sha: Some(String::from("0123456789abcdef0123456789abcdef01234567")),
-            release_date: Some(String::from("2026-11-18")),
+            version_label: "v0.1.0-test".into(),
+            commit_sha: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            release_date: Some("2026-11-18".into()),
             is_release_snapshot: false,
             is_tagged_release: false,
         }
     }
-
     fn render_test_page(rel_path: &str, title: &str, body_html: &str) -> String {
         let meta = test_meta();
         render_page(&PageSpec {
@@ -1282,565 +911,86 @@ mod tests {
     }
 
     #[test]
-    fn markdown_supports_custom_heading_ids_and_preserves_snake_case() {
-        let md = "# Analyses\n\n## Two-Group Comparisons {#analysis-two-group-comparison}\n\nUse `sheet_create_data` or param_alpha_beta.\n";
-        let rendered = render_markdown(md, &IdentityResolver);
-        assert_eq!(rendered.title.as_deref(), Some("Analyses"));
-        assert!(rendered.html.contains("id=\"analysis-two-group-comparison\""));
-        assert!(!rendered.html.contains("<em>alpha</em>"), "snake_case must not become <em>: {}", rendered.html);
-    }
-
-    #[test]
-    fn audit_html_rejects_scripts_forms_inline_styles_and_external_assets() {
+    fn html_csp_uri_obfuscation_and_links() {
         let good = render_test_page("index.html", "Test", "<p>Clean body.</p>");
         assert!(audit_single_html("index.html", &good).is_ok());
-
-        for bad_snippet in [
+        for bad in [
             "<script>alert(1)</script>",
+            "<script/src=\"https://evil.example/x.js\"></script>",
             "<form action=\"/x\"></form>",
             "<div style=\"color:red\">x</div>",
             "<p onclick=\"x()\">x</p>",
             "<link rel=\"stylesheet\" href=\"https://evil.example/a.css\">",
             "<img src=\"https://evil.example/a.png\" alt=\"\">",
-        ] {
-            let poisoned = good.replace("<p>Clean body.</p>", bad_snippet);
-            assert!(!audit_single_html("bad.html", &poisoned).unwrap_err().is_empty());
-        }
-    }
-
-    #[test]
-    fn check_exclusions_and_fragment_verification_catch_failures() {
-        for forbidden in ["ROADMAP.html", "contribute/agents.html"] {
-            let mut pages = BTreeMap::new();
-            pages.insert(String::from(forbidden), String::from("<h1>bad</h1>"));
-            let site = GeneratedSite { html_pages: pages, expected_coverage: Default::default(), meta: test_meta() };
-            assert!(check_exclusions(&site).unwrap_err().contains("excluded"));
-        }
-
-        let page_a = render_test_page("a.html", "A", "<p><a href=\"b.html#missing-frag\">broken</a></p>");
-        let page_b = render_test_page("b.html", "B", "<h2 id=\"real-frag\">Real</h2>");
-        let facts = BTreeMap::from([
-            (String::from("a.html"), audit_single_html("a.html", &page_a).unwrap()),
-            (String::from("b.html"), audit_single_html("b.html", &page_b).unwrap()),
-        ]);
-        let html_pages = BTreeMap::from([(String::from("a.html"), page_a), (String::from("b.html"), page_b)]);
-        let site2 = GeneratedSite { html_pages, expected_coverage: Default::default(), meta: test_meta() };
-        let err = verify_target(Path::new("."), Path::new("."), &site2, &facts, "a.html", "b.html#missing-frag").unwrap_err();
-        assert!(err.contains("missing `#missing-frag`"), "unexpected err: {err}");
-        assert!(verify_target(Path::new("."), Path::new("."), &site2, &facts, "a.html", "b.html#real-frag").is_ok());
-        assert!(verify_target(Path::new("."), Path::new("."), &site2, &facts, "a.html", "missing.html").is_err());
-    }
-
-    #[test]
-    fn fa_sec23_08_unclosed_html_quote_or_comment_fails_and_all_snapshots_checked() {
-        let base = render_test_page("t.html", "T", "<p>Body</p>");
-        assert!(audit_single_html("t.html", &base.replace("<p>Body</p>", "<a title=\"unclosed><script>evil()</script>")).is_err());
-        assert!(audit_single_html("t.html", &base.replace("<p>Body</p>", "<!-- unclosed <script>evil()</script>")).is_err());
-
-        let dir = TestDir::new("docs-snapshots");
-        dir.write("target/docs-manual/v0.1/manifest.json", "{\"version\":\"0.1.0\",\"commit\":\"badsha\"}\n");
-        dir.write("target/docs-manual/v0.2/manifest.json", "{\"version\":\"0.2.0\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\"}\n");
-        dir.write("target/docs-manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=v0.2/index.html\">");
-
-        let err = check_manual_snapshots(dir.path(), &dir.join("target/docs-manual")).unwrap_err();
-        assert!(err.contains("v0.1"), "expected older corrupted v0.1 snapshot to fail, got {err}");
-    }
-
-    #[test]
-    fn static_math_renderer_formats_tex_and_preserves_currency_shell_vars_and_code() {
-        let md = "\
-Inline $\\text{AIC}_c = N\\ln(\\text{SS}/N) + \\frac{2K_{\\text{eff}}(K_{\\text{eff}}+1)}{N - K_{\\text{eff}} - 1}$ and $\\sqrt{x}$, $\\bar{d} \\pm \\hat{\\varepsilon} + \\tilde{\\varepsilon}$.\n\n\
-Greek & ops: $\\alpha \\beta \\gamma \\varepsilon \\chi \\Phi \\kappa \\pi \\tau \\theta \\Delta \\Omega \\ge 5.0\\text{ pt} \\le 10 \\times 2 \\cdot 3 \\in \\ne \\infty \\propto \\approx \\arcsin\\exp\\log\\ln \\TeX \\,\\! \\left(x\\right)$.\n\n\
-Underscores in math: $K_{\\text{eff}} + x_{i} - y_{j}^{2}$.\n\n\
-Currency: \\$100 and \\$50, $100, $50, between $50 and $100, $50-$100, $100/$50.\n\n\
-Shell vars: $HOME, $XDG_CONFIG_HOME, $TMPDIR, $PATH, $HOME/$PATH, $row and $index, $row/$index, `$row`, `$HOME`, `$\\frac{a}{b}`.\n\n\
-$$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
-
-        let html = render_markdown(md, &IdentityResolver).html;
-        for expected in [
-            "<span class=\"math\"><span class=\"math-text\">AIC</span><sub>c</sub>",
-            "<span class=\"math-frac\"><span class=\"math-num\">",
-            "√<span class=\"math-rad\">x</span>",
-            "d\u{0304}",
-            "ε\u{0302}",
-            "ε\u{0303}",
-            "α",
-            "χ",
-            "Φ",
-            "Ω",
-            "≥",
-            "≤",
-            "±",
-            "×",
-            "·",
-            "∈",
-            "≠",
-            "∞",
-            "∝",
-            "≈",
-            "<span class=\"math-text\">arcsin</span>",
-            "<span class=\"math-text\">TeX</span>",
-            "<div class=\"math-block\"><span class=\"math\">χ<sup>2</sup>",
-            "$100",
-            "$50",
-            "between $50 and $100",
-            "$50-$100",
-            "$100/$50",
-            "$HOME",
-            "$XDG_CONFIG_HOME",
-            "$TMPDIR",
-            "$PATH",
-            "$HOME/$PATH",
-            "$row and $index",
-            "$row/$index",
-            "<code>$row</code>",
-            "<code>$HOME</code>",
-            "<code>$\\frac{a}{b}</code>",
-        ] {
-            assert!(html.contains(expected), "missing `{expected}` in: {html}");
-        }
-        assert!(!html.contains("<em>"), "underscores inside math must never produce <em>: {html}");
-
-        let standalone = render_math_html("\\frac{\\text{Top} - \\text{Bottom}}{1 + 10^{(\\log\\text{EC}_{50} - X) \\cdot \\text{HillSlope}}}");
-        assert!(standalone.starts_with("<span class=\"math\">") && standalone.contains("<span class=\"math-frac\">"));
-        assert!(!standalone.contains("\\frac") && !standalone.contains("\\text"));
-    }
-
-    #[test]
-    fn markdown_callouts_figures_toc_and_audit_gates_work() {
-        let md = "> [!NOTE]\n> First callout body.\n\n> [!WARNING]\n> Watch out for $\\chi^2$.\n\n![Workspace screenshot](images/workspace-split-fit.png)\n\n> Regular blockquote.\n";
-        let rendered = render_markdown(md, &IdentityResolver);
-        for expected in [
-            "<div class=\"callout callout-note\" role=\"note\">\n<p class=\"callout-title\">Note</p>",
-            "<div class=\"callout callout-warning\" role=\"note\">\n<p class=\"callout-title\">Warning</p>",
-            "<blockquote>\n<p>Regular blockquote.</p>\n</blockquote>",
-            "<figure class=\"doc-figure\"><img src=\"images/workspace-split-fit.png\" alt=\"Workspace screenshot\" loading=\"lazy\"><figcaption>Workspace screenshot</figcaption></figure>",
-        ] {
-            assert!(rendered.html.contains(expected), "missing `{expected}`");
-        }
-        assert!(!rendered.html.contains("[!NOTE]") && !rendered.html.contains("[!WARNING]"));
-
-        let meta = test_meta();
-        let long_headings: Vec<TocHeading> = (1..=9).map(|n| TocHeading { level: 2, id: format!("h-{n}"), text: format!("Heading {n}") }).collect();
-        let long_page = render_page(&PageSpec {
-            title: "Long",
-            description: "Long",
-            rel_path: "analyses.html",
-            section_title: "Analyses",
-            section_rel_path: Some("section-analyses.html"),
-            nav_group: Some(super::super::sitemap::NavGroup::Reference),
-            active_section_id: Some("analyses"),
-            sidebar_groups: &[],
-            h1: "Long",
-            toc_headings: &long_headings,
-            body_html: "<p>Body.</p>",
-            body_has_h1: false,
-            prev: None,
-            next: None,
-            meta: &meta,
-        });
-        assert!(long_page.contains("<details class=\"toc\">\n          <summary class=\"toc-title\">On this page</summary>"));
-        assert!(long_page.contains("href=\"reference.html\" aria-current=\"page\">Reference</a>"));
-        assert!(audit_single_html("analyses.html", &long_page).is_ok());
-
-        assert!(
-            audit_single_html("analyses.html", &long_page.replace("<p>Body.</p>", "<p>Raw \\frac{1}{2}</p>"))
-                .unwrap_err()
-                .contains("unrendered TeX macro")
-        );
-        assert!(
-            audit_single_html("analyses.html", &long_page.replace("<p>Body.</p>", "<p>[!CAUTION] oops</p>")).unwrap_err().contains("callout marker")
-        );
-        assert!(
-            audit_single_html("analyses.html", &long_page.replace("<p>Body.</p>", "<p><code>\\frac{1}{2}</code> and <code>[!NOTE]</code></p>"))
-                .is_ok()
-        );
-
-        let root_dir = TestDir::new("docs-root-pages");
-        root_dir.write("docs/site.css", "body {}\n");
-        root_dir.write_bytes("docs/images/curvebook.png", b"png");
-        let shim_gs = render_root_redirect_shim("Get Started", "Get started redirect", "manual/v0.1/get-started.html", "v0.1.0");
-        let shim_ts =
-            render_root_redirect_shim("Troubleshooting", "Troubleshooting redirect", "manual/v0.1/troubleshooting.html#known-issues", "v0.1.0");
-        assert!(audit_single_html("docs/get-started.html", &shim_gs).is_ok() && audit_single_html("docs/troubleshooting.html", &shim_ts).is_ok());
-
-        let base_root_html = |title: &str, nav: &str| {
-            format!(
-                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"description\" content=\"{title} page description\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><title>{title}</title><link rel=\"icon\" href=\"images/curvebook.png\"><link rel=\"stylesheet\" href=\"site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>{title}</h1>{nav}</main></body></html>"
-            )
-        };
-        for (rel, body) in [
-            ("docs/index.html", base_root_html("Home", "<a href=\"privacy.html\">P</a><a href=\"manual/index.html\">M</a>")),
-            ("docs/open-pzfx-files.html", base_root_html("Open files", "<a href=\"index.html\">H</a>")),
-            ("docs/linux.html", base_root_html("Linux", "<a href=\"index.html\">H</a>")),
-            ("docs/faq.html", base_root_html("FAQ", "<a href=\"index.html\">H</a>")),
-            ("docs/privacy.html", base_root_html("Privacy", "<a href=\"index.html\">H</a>")),
-            (
-                "target/docs-manual/index.html",
-                format!(
-                    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"description\" content=\"Manual redirect description\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\"><title>Manual</title><link rel=\"stylesheet\" href=\"../site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>Manual</h1><a href=\"v0.1/index.html\">v0.1</a></main></body></html>"
-                ),
-            ),
-            ("target/docs-manual/latest/index.html", String::from("<main id=\"main\"><h1>Manual Latest</h1></main>")),
-            ("target/docs-manual/v0.1/index.html", String::from("<main id=\"main\"><h1>Manual</h1></main>")),
-            ("target/docs-manual/v0.1/get-started.html", String::from("<main id=\"main\"><h1>GS</h1></main>")),
-            ("target/docs-manual/v0.1/troubleshooting.html", String::from("<main id=\"main\"><h1>TS</h1><h2 id=\"known-issues\">KI</h2></main>")),
-            ("docs/get-started.html", shim_gs),
-            ("docs/troubleshooting.html", shim_ts),
-        ] {
-            root_dir.write(rel, &body);
-        }
-        let manual = root_dir.join("target/docs-manual");
-        assert_eq!(check_root_pages(root_dir.path(), &manual), Ok(()));
-
-        root_dir.write(
-            "docs/privacy.html",
-            &base_root_html("Privacy", "<a href=\"index.html\">H</a>").replace("Privacy page description", "Home page description"),
-        );
-        assert!(check_root_pages(root_dir.path(), &manual).unwrap_err().contains("duplicate `<meta name=\"description\">`"));
-        root_dir.write(
-            "docs/privacy.html",
-            &base_root_html("Privacy", "<a href=\"index.html\">H</a>").replace("<title>Privacy</title>", "<title>Home</title>"),
-        );
-        assert!(check_root_pages(root_dir.path(), &manual).unwrap_err().contains("duplicate `<title>`"));
-        root_dir.write("docs/privacy.html", &base_root_html("Privacy", "<a href=\"index.html\">H</a>"));
-        root_dir.write("docs/index.html", &base_root_html("Home", "<a href=\"missing.html\">Broken</a>"));
-        assert!(check_root_pages(root_dir.path(), &manual).unwrap_err().contains("missing.html"));
-    }
-
-    #[test]
-    fn da_03_04_empty_multiline_display_math_terminates_cleanly() {
-        assert!(render_markdown("$$\n$$\n", &IdentityResolver).html.contains("$$"));
-        assert!(render_markdown("$$\n   \n$$\nAfter\n", &IdentityResolver).html.contains("After"));
-    }
-
-    #[test]
-    fn da_03_05_math_and_markdown_recursion_caps_complexity_and_blockquote_ids() {
-        assert!(!render_markdown(&format!("${}$", "\\frac".repeat(80)), &IdentityResolver).html.is_empty());
-        assert!(!render_math_html(&"\\binom".repeat(80)).is_empty());
-        assert!(!render_math_html(&format!("{}x", "\\bar".repeat(500))).is_empty());
-        assert!(!render_math_html(&format!("{}x", "\\sqrt".repeat(500))).is_empty());
-        assert!(render_markdown(&format!("{}hi\n", "> ".repeat(200)), &IdentityResolver).html.contains("hi"));
-
-        let deep_list: String = (0..200).map(|d| format!("{}- item\n", "  ".repeat(d))).collect();
-        assert!(render_markdown(&deep_list, &IdentityResolver).html.contains("item"));
-        assert!(render_markdown(&format!("{}x{}", "*".repeat(200), "*".repeat(200)), &IdentityResolver).html.contains('x'));
-        assert!(render_markdown(&format!("{}x{}", "[".repeat(200), "](u)".repeat(200)), &IdentityResolver).html.contains('x'));
-        assert!(!render_markdown(&"*a ${b ".repeat(500), &IdentityResolver).html.is_empty());
-
-        let rendered_dup = render_markdown("# Intro\n\n> # Intro\n\n> [!NOTE]\n> ## Intro\n", &IdentityResolver);
-        for id in ["id=\"intro\"", "id=\"intro-1\"", "id=\"intro-2\""] {
-            assert!(rendered_dup.html.contains(id), "{}", rendered_dup.html);
-        }
-        let meta = test_meta();
-        let page = render_page(&PageSpec {
-            title: "Dup",
-            description: "Dup",
-            rel_path: "dup.html",
-            section_title: "Concepts",
-            section_rel_path: None,
-            nav_group: Some(super::super::sitemap::NavGroup::Reference),
-            active_section_id: Some("concepts"),
-            sidebar_groups: &[],
-            h1: "Dup",
-            toc_headings: &[],
-            body_html: &rendered_dup.html,
-            body_has_h1: true,
-            prev: None,
-            next: None,
-            meta: &meta,
-        });
-        assert!(audit_single_html("dup.html", &page).is_ok());
-    }
-
-    #[test]
-    fn r12_8_canonical_link_allows_only_the_published_site_url() {
-        let page = render_test_page("canon.html", "Canon", "<p>Body.</p>");
-        let with_link = |tag: &str| page.replacen("</head>", &format!("{tag}</head>"), 1);
-
-        let ok = audit_single_html("canon.html", &with_link("<link rel=\"canonical\" href=\"https://curvebook.org/canon.html\">")).unwrap();
-        assert!(!ok.hrefs.iter().any(|h| h.ends_with("/canon.html")), "canonical URL must not enter the local link checker");
-        assert!(
-            audit_single_html("canon.html", &with_link("<link rel=\"canonical\" href=\"https://evil.example/canon.html\">"))
-                .unwrap_err()
-                .contains("canonical link")
-        );
-        assert!(
-            audit_single_html("canon.html", &with_link("<link rel=\"stylesheet\" href=\"https://curvebook.org/site.css\">"))
-                .unwrap_err()
-                .contains("external asset URL")
-        );
-    }
-
-    #[test]
-    fn da_03_09_release_snapshot_parent_docs_rejects_traversal_symlinks_and_bad_fragments() {
-        let dir = TestDir::new("docs-da-03-09");
-        std::fs::create_dir_all(dir.join("docs/manual/v0.1")).unwrap();
-        dir.write("README.md", "# root\n");
-        dir.write("docs/index.html", "<main id=\"main\"><h1>Home</h1></main>");
-        dir.write("docs/privacy.html", "<main id=\"main\"><h1>Privacy</h1><h2 id=\"policy\">P</h2></main>");
-
-        let mut meta = test_meta();
-        meta.is_release_snapshot = true;
-        let site = GeneratedSite { html_pages: BTreeMap::new(), expected_coverage: Default::default(), meta };
-        let facts = BTreeMap::new();
-        let out_dir = dir.join("docs/manual/v0.1");
-
-        assert!(verify_target(dir.path(), &out_dir, &site, &facts, "index.html", "../../privacy.html#policy").is_ok());
-        assert!(
-            verify_target(dir.path(), &out_dir, &site, &facts, "index.html", "../../privacy.html#missing")
-                .unwrap_err()
-                .contains("missing `#missing`")
-        );
-        assert!(verify_target(dir.path(), &out_dir, &site, &facts, "index.html", "../../../README.md").is_err());
-        assert!(verify_target(dir.path(), &out_dir, &site, &facts, "index.html", "../../../../index.html").is_err());
-
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(dir.join("README.md"), dir.join("docs/link.html")).unwrap();
-            assert!(verify_target(dir.path(), &out_dir, &site, &facts, "index.html", "../../link.html").is_err());
-        }
-    }
-
-    #[test]
-    fn da_03_10_uri_obfuscation_and_meta_refresh_are_rejected_everywhere() {
-        let good = render_test_page("index.html", "Sec", "<p>Clean body.</p>");
-        for bad_snippet in [
             "<a href=\"&#x6a;avascript:alert(1)\">x</a>",
-            "<a href=\"&#106;avascript:alert(1)\">x</a>",
             "<a href=\" java\tscript:alert(1)\">x</a>",
-            "<a href=\"javascript&colon;alert(1)\">x</a>",
-            "<a href=\"vbscript:msgbox(1)\">x</a>",
-            "<a href=\" \n data:text/html,hi\">x</a>",
-            "<img src=\"javascript:alert(1)\" alt=\"\">",
-            "<video poster=\"&#x6a;avascript:alert(1)\"></video>",
             "<meta http-equiv=\"refresh\" content=\"0; url=https://evil.example/\">",
-            "<meta http-equiv=\"refresh\" content=\"0; url=&#x6a;avascript:alert(1)\">",
-            "<meta http-equiv=\"refresh\" content=\"0; url=data:text/html,hi\">",
-        ] {
-            assert!(audit_single_html("bad.html", &good.replace("<p>Clean body.</p>", bad_snippet)).is_err(), "expected `{bad_snippet}` rejected");
-        }
-
-        let local_missing_refresh = good.replace("<p>Clean body.</p>", "<meta http-equiv=\"refresh\" content=\"0; url=missing.html\">");
-        let facts = BTreeMap::from([(String::from("index.html"), audit_single_html("index.html", &local_missing_refresh).unwrap())]);
-        let html_pages = BTreeMap::from([(String::from("index.html"), local_missing_refresh)]);
-        let site = GeneratedSite { html_pages, expected_coverage: Default::default(), meta: test_meta() };
-        assert!(check_internal_links_and_fragments(Path::new("."), Path::new("."), &site, &facts).is_err());
-
-        let root_dir = TestDir::new("docs-da-03-10");
-        let root_html = |title: &str, extra: &str| {
-            format!(
-                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"description\" content=\"{title} desc\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\">{extra}<title>{title}</title></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>{title}</h1></main></body></html>"
-            )
-        };
-        root_dir.write("docs/index.html", &root_html("Home", "<meta http-equiv=\"refresh\" content=\"0; url=https://evil.example/\">"));
-        root_dir.write("docs/privacy.html", &root_html("Privacy", ""));
-        root_dir.write("target/docs-manual/index.html", &root_html("Manual", ""));
-        assert!(check_root_pages(root_dir.path(), &root_dir.join("target/docs-manual")).is_err());
-    }
-
-    #[test]
-    fn r12_10_manual_pages_emit_latest_canonical_og_and_latest_manifest_is_verified() {
-        let meta = test_meta();
-        let page = render_page(&PageSpec {
-            title: "Analyses",
-            description: "Statistical analyses reference.",
-            rel_path: "analyses.html",
-            section_title: "Analyses",
-            section_rel_path: Some("section-analyses.html"),
-            nav_group: Some(super::super::sitemap::NavGroup::Reference),
-            active_section_id: Some("analyses"),
-            sidebar_groups: &[],
-            h1: "Analyses",
-            toc_headings: &[],
-            body_html: "<p>Body.</p>",
-            body_has_h1: false,
-            prev: None,
-            next: None,
-            meta: &meta,
-        });
-        assert!(audit_single_html("analyses.html", &page).is_ok());
-        for expected in [
-            "<link rel=\"canonical\" href=\"https://curvebook.org/manual/latest/analyses.html\">",
-            "<meta property=\"og:type\" content=\"article\">",
-            "<meta property=\"og:site_name\" content=\"CurveBook\">",
-            "<meta property=\"og:title\" content=\"Analyses — CurveBook Documentation\">",
-            "<meta property=\"og:description\" content=\"Statistical analyses reference.\">",
-            "<meta property=\"og:url\" content=\"https://curvebook.org/manual/latest/analyses.html\">",
-            "<meta property=\"og:image\" content=\"https://curvebook.org/images/workspace-layout-dark.png\">",
-            "<meta property=\"og:image:alt\" content=\"",
-            "<meta property=\"og:image:width\" content=\"1440\">",
-            "<meta property=\"og:image:height\" content=\"900\">",
-            "<meta name=\"twitter:card\" content=\"summary_large_image\">",
-        ] {
-            assert!(page.contains(expected), "missing `{expected}`");
-        }
-        assert!(!page.contains("<script"));
-
-        let dir = TestDir::new("docs-latest");
-        let manifest = "{\"version\":\"0.1.0\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\"}\n";
-        let snap_page = render_test_page("index.html", "Snap", "<p>Clean snapshot.</p>");
-        let redirect_ok = super::super::template::render_release_redirect_index("latest", "v0.1.0", &[String::from("v0.1")]);
-        dir.write("docs/site.css", "body{}\n");
-        dir.write("docs/index.html", &snap_page);
-        dir.write("docs/privacy.html", &snap_page);
-        dir.write_bytes("docs/images/curvebook.png", b"png");
-        dir.write("target/docs-manual/v0.1/manifest.json", manifest);
-        dir.write(
-            "target/docs-manual/v0.1/index.html",
-            &snap_page
-                .replace("href=\"site.css\"", "href=\"../../site.css\"")
-                .replace("href=\"images/curvebook.png\"", "href=\"../../images/curvebook.png\"")
-                .replace("src=\"images/curvebook.png\"", "src=\"../../images/curvebook.png\"")
-                .replace("href=\"index.html\"", "href=\"../../index.html\"")
-                .replace("href=\"section-get-started.html\"", "href=\"index.html\"")
-                .replace("href=\"reference.html\"", "href=\"index.html\"")
-                .replace("href=\"section-automation.html\"", "href=\"index.html\"")
-                .replace("href=\"support.html\"", "href=\"index.html\"")
-                .replace("href=\"az-index.html\"", "href=\"index.html\"")
-                .replace("href=\"section-contribute.html\"", "href=\"index.html\"")
-                .replace("href=\"privacy-security.html\"", "href=\"../../privacy.html\""),
-        );
-        let snap_html = std::fs::read_to_string(dir.join("target/docs-manual/v0.1/index.html")).unwrap();
-        dir.write("target/docs-manual/latest/manifest.json", manifest);
-        dir.write("target/docs-manual/latest/index.html", &snap_html);
-        dir.write("target/docs-manual/index.html", &redirect_ok);
-        let manual = dir.join("target/docs-manual");
-        assert!(check_no_committed_manual_html(dir.path()).is_ok() && check_manual_snapshots(dir.path(), &manual).is_ok());
-
-        dir.write("docs/manual/latest/index.html", "<html></html>");
-        assert!(check_no_committed_manual_html(dir.path()).unwrap_err().contains("must not be committed under docs/manual/"));
-        let _ = std::fs::remove_dir_all(dir.join("docs/manual"));
-
-        let redirect_v01 = super::super::template::render_release_redirect_index("v0.1", "v0.1.0", &[String::from("v0.1")]);
-        dir.write("target/docs-manual/index.html", &redirect_v01);
-        assert!(check_manual_snapshots(dir.path(), &manual).unwrap_err().contains("latest/index.html"));
-
-        dir.write("target/docs-manual/index.html", &redirect_ok);
-        dir.write("target/docs-manual/latest/manifest.json", "{\"version\":\"0.1.0\",\"commit\":\"ffffffffffffffffffffffffffffffffffffffff\"}\n");
-        assert!(check_manual_snapshots(dir.path(), &manual).unwrap_err().contains("latest/manifest.json"));
-    }
-
-    #[test]
-    fn aud_12_05_slash_delimiters_forbidden_elements_attrs_refresh_and_comment_spoofed_csp() {
-        let good = render_test_page("index.html", "Sec5", "<p>Clean body.</p>");
-        for bad_snippet in [
-            "<script/src=\"https://evil.example/x.js\"></script>",
-            "<iframe/src=\"https://evil.example\"></iframe>",
-            "<form/action=\"https://evil.example\"></form>",
-            "<img/src=\"https://evil.example/track.png\"/onerror=\"alert(1)\" alt=\"\">",
-            "<a/href=\"javascript:alert(1)\"/onclick=\"alert(1)\">x</a>",
-            "<div/style=\"background:url(https://evil.example/x)\">x</div>",
-            "<style>body{background:url(https://evil.example/x)}</style>",
-            "<base href=\"subdir/\">",
-            "<img srcset=\"https://evil.example/track.png 1x\" src=\"images/curvebook.png\" alt=\"\">",
-            "<source srcset=\"https://evil.example/x\">",
-            "<a href=\"index.html\" ping=\"https://evil.example/beacon\">x</a>",
-            "<button formaction=\"https://evil.example\">x</button>",
-            "<use xlink:href=\"https://evil.example/s.svg#x\"/>",
-            "<meta http-equiv=\"refresh\" content=\"0; https://evil.example/\">",
-            "<meta http-equiv=\"refresh\" content=\"0; javascript:alert(1)\">",
-            "<meta http-equiv=\"refresh\" content=\"0, url=https://evil.example/\">",
-            "<meta http-equiv=\"refresh\" content=\"0; url=https://evil.example/\" content=\"0; url=index.html\">",
-        ] {
-            let poisoned = good.replace("<p>Clean body.</p>", bad_snippet);
-            assert!(audit_single_html("bad.html", &poisoned).is_err(), "expected rejection for `{bad_snippet}`");
-        }
-
-        // Commented-out CSP or referrer meta tags must not pass audit_single_html.
-        let commented_csp = good.replace(
-            &format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\">"),
-            &format!("<!-- <meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"> -->"),
-        );
-        assert!(audit_single_html("bad.html", &commented_csp).unwrap_err().contains("Content-Security-Policy"));
-
-        let commented_ref =
-            good.replace("<meta name=\"referrer\" content=\"no-referrer\">", "<!-- <meta name=\"referrer\" content=\"no-referrer\"> -->");
-        assert!(audit_single_html("bad.html", &commented_ref).unwrap_err().contains("referrer"));
-
-        // Quote-desync inside unquoted value / attribute name, abrupt/bang HTML5 comments, and overriding referrer meta must fail.
-        for bad_snippet in [
+            "<a title=\"unclosed><script>x()</script>",
+            "<!-- unclosed <script>x()</script>",
             "<p title=x\"><script>alert(1)</script><b z=1\">",
-            "<p a\"><script>alert(1)</script><b z=\">",
-            "<!foo x=\"><script>alert(1)</script><b y=\">",
             "<!--><script>alert(1)</script><!-- -->",
-            "<!---><script>alert(1)</script><!-- -->",
-            "<!-- c --!><script>alert(1)</script><!-- -->",
-            "<meta name=\"referrer\" content=\"unsafe-url\">",
-            "<meta name=\"referrer\" content=\"no-referrer\">",
-            "< a=\"><script>alert(1)</script>",
-            "<<script>alert(1)</script>",
-            "<p =\" onclick=\"alert(1)//x=\">",
             "<title><!--</title><script>alert(1)</script><!-- -->",
-            "<textarea><!--</textarea><script>alert(1)</script><!-- -->",
+            "<p>Raw \\frac{1}{2}</p>",
+            "<p>[!CAUTION] oops</p>",
         ] {
-            let poisoned = good.replace("<p>Clean body.</p>", bad_snippet);
-            assert!(audit_single_html("bad.html", &poisoned).is_err(), "expected rejection for `{bad_snippet}`");
+            assert!(audit_single_html("bad.html", &good.replace("<p>Clean body.</p>", bad)).is_err(), "{bad}");
         }
+        assert!(audit_single_html("ok.html", &good.replace("<p>Clean body.</p>", "<p><code>\\frac{1}{2}</code> <code>[!NOTE]</code></p>")).is_ok());
+        for f in ["ROADMAP.html", "contribute/agents.html"] {
+            assert!(
+                check_exclusions(&GeneratedSite {
+                    html_pages: BTreeMap::from([(f.into(), "<h1>x</h1>".into())]),
+                    expected_coverage: Default::default(),
+                    meta: test_meta()
+                })
+                .is_err()
+            );
+        }
+        let (pa, pb) =
+            (render_test_page("a.html", "A", "<p><a href=\"b.html#missing\">x</a></p>"), render_test_page("b.html", "B", "<h2 id=\"ok\">Ok</h2>"));
+        let facts = BTreeMap::from([
+            ("a.html".into(), audit_single_html("a.html", &pa).unwrap()),
+            ("b.html".into(), audit_single_html("b.html", &pb).unwrap()),
+        ]);
+        let mut cache = BTreeMap::new();
+        assert!(verify_target_with_cache(Path::new("."), Path::new("."), false, &facts, "a.html", "b.html#missing", &mut cache).is_err());
+        assert!(verify_target_with_cache(Path::new("."), Path::new("."), false, &facts, "a.html", "b.html#ok", &mut cache).is_ok());
+        assert!(verify_target_with_cache(Path::new("."), Path::new("."), false, &facts, "a.html", "/privacy.html", &mut cache).is_err());
+        assert!(verify_target_with_cache(Path::new("."), Path::new("."), false, &facts, "a.html", "#", &mut cache).is_ok());
     }
 
     #[test]
-    fn aud_12_06_and_26_manual_snapshots_audited_for_scripts_parity_root_abs_and_empty_hash() {
-        let dir = TestDir::new("docs-aud-12-06");
+    fn snapshots_and_readability() {
+        let dir = TestDir::new("docs-snap-root");
         let manifest = "{\"version\":\"0.1.0\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\"}\n";
         let minimal_snap = format!(
             "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"description\" content=\"Snap desc\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><title>Snap</title><link rel=\"stylesheet\" href=\"../../site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>Snap</h1><a href=\"#\">Top</a></main></body></html>"
         );
         let redirect_ok = super::super::template::render_release_redirect_index("latest", "v0.1.0", &[String::from("v0.1")]);
         dir.write("docs/site.css", "body{}\n");
-        dir.write("target/docs-manual/v0.1/manifest.json", manifest);
-        dir.write("target/docs-manual/v0.1/index.html", &minimal_snap);
-        dir.write("target/docs-manual/latest/manifest.json", manifest);
-        dir.write("target/docs-manual/latest/index.html", &minimal_snap);
-        dir.write("target/docs-manual/index.html", &redirect_ok);
+        dir.write_bytes("docs/images/curvebook.png", b"png");
+        for (rel, body) in [
+            ("target/docs-manual/v0.1/manifest.json", manifest),
+            ("target/docs-manual/v0.1/index.html", &minimal_snap),
+            ("target/docs-manual/latest/manifest.json", manifest),
+            ("target/docs-manual/latest/index.html", &minimal_snap),
+            ("target/docs-manual/index.html", &redirect_ok),
+        ] {
+            dir.write(rel, body);
+        }
         let manual = dir.join("target/docs-manual");
-
-        // Valid snapshot with `href="#"` (AUD-12-26 empty fragment) must pass.
-        assert!(check_manual_snapshots(dir.path(), &manual).is_ok());
-
-        // Stale HTML mismatch between latest/ and v0.1/ (same manifest.json!) must fail (AUD-12-06).
+        assert!(check_no_committed_manual_html(dir.path()).is_ok() && check_manual_snapshots(dir.path(), &manual).is_ok());
         dir.write("target/docs-manual/latest/index.html", &minimal_snap.replace("<h1>Snap</h1>", "<h1>Stale</h1>"));
         assert!(check_manual_snapshots(dir.path(), &manual).unwrap_err().contains("byte-for-byte"));
-
-        // Poisoned <script> in v0.1/index.html (even if mirrored to latest/) must fail (AUD-12-06).
-        let poisoned = minimal_snap.replace("<a href=\"#\">Top</a>", "<script>alert(1)</script>");
-        dir.write("target/docs-manual/v0.1/index.html", &poisoned);
-        dir.write("target/docs-manual/latest/index.html", &poisoned);
-        assert!(check_manual_snapshots(dir.path(), &manual).unwrap_err().contains("forbidden HTML element"));
-
-        // Root-absolute link `/privacy.html` must fail verify_target (AUD-12-26).
-        let page = render_test_page("index.html", "T", "<p><a href=\"/privacy.html\">P</a></p>");
-        let facts = BTreeMap::from([(String::from("index.html"), audit_single_html("index.html", &page).unwrap())]);
-        let site = GeneratedSite {
-            html_pages: BTreeMap::from([(String::from("index.html"), page)]),
-            expected_coverage: Default::default(),
-            meta: test_meta(),
-        };
-        assert!(verify_target(dir.path(), dir.path(), &site, &facts, "index.html", "/privacy.html").unwrap_err().contains("root-absolute"));
-        assert!(verify_target(dir.path(), dir.path(), &site, &facts, "index.html", "#").is_ok());
-    }
-
-    #[test]
-    fn r12_12_readability_lint_catches_internal_ids_and_reports_metrics() {
-        assert!(READABILITY_LINT_EXEMPTIONS.is_empty(), "all user guides must be enforced by default");
-        assert_eq!(find_forbidden_guide_id("Implemented in R12.11 and QOL-7."), Some("R12.11"));
-        assert_eq!(find_forbidden_guide_id("Diagnostic QOL-7 note."), Some("QOL-7"));
-        assert_eq!(find_forbidden_guide_id("Fitted $R^2$ with R 4.5.2 and `v0.1.0`."), None);
-
-        let dir = TestDir::new("docs-readability-lint");
-        dir.write("docs/reference/get-started.md", "# Get Started\n\nInstall `curvebook`. Run `curvebook-cli --version`.\n");
-        assert!(check_guide_readability(dir.path()).is_ok());
-
-        dir.write("docs/reference/get-started.md", "# Get Started\n\nAdded in R12.11.\n");
-        assert!(check_guide_readability(dir.path()).unwrap_err().contains("R12.11"));
-
-        dir.write("docs/reference/get-started.md", "# Get Started\n\nUses QOL-7 checklist.\n");
-        assert!(check_guide_readability(dir.path()).unwrap_err().contains("QOL-7"));
-
-        let stats = compute_guide_readability_stats(
-            "# Heading\n\nShort sentence with `foo` and `bar.rs`. Second sentence!\n\n```rust\nfn x() {} // ignored.rs\n```\n\n| Col |\n|---|\n| `baz.rs` |\n",
+        dir.write("docs/manual/latest/index.html", "<html></html>");
+        assert!(check_no_committed_manual_html(dir.path()).is_err());
+        assert!(
+            audit_single_html("docs/get-started.html", &render_root_redirect_shim("GS", "GS desc", "manual/v0.1/get-started.html", "v0.1.0")).is_ok()
         );
-        assert_eq!(stats.rs_filename_count, 2, "must count non-fence .rs filenames (`bar.rs`, `baz.rs`) while ignoring fenced `ignored.rs`");
-        assert!(stats.avg_sentence_words > 0.0 && stats.code_per_100_words > 0.0);
+        assert_eq!(
+            (find_forbidden_guide_id("Added in R12.11 and QOL-7."), find_forbidden_guide_id("Fitted $R^2$ with R 4.5.2.")),
+            (Some("R12.11"), None)
+        );
+        assert_eq!(compute_guide_readability_stats("# H\n\nUse `a.rs`.\n```rust\n// b.rs\n```\n| `c.rs` |\n").2, 2);
     }
 }

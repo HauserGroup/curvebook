@@ -18,8 +18,7 @@ struct Options {
 
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
-        let mut arch = None;
-        let mut version = None;
+        let (mut arch, mut version) = (None, None);
         let (pairs, remainder) = args.as_chunks::<2>();
         for [key, value] in pairs {
             match key.as_str() {
@@ -49,10 +48,10 @@ impl Options {
 
 fn validate_version(version: &str) -> Result<(), String> {
     let parts: Vec<&str> = version.split('.').collect();
-    let numbers: Result<Vec<u16>, _> = parts.iter().map(|part| part.parse::<u16>()).collect();
+    let numbers: Result<Vec<u16>, _> = parts.iter().map(|p| p.parse::<u16>()).collect();
     if parts.len() != 4
-        || parts.iter().any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) || (part.len() > 1 && part.starts_with('0')))
-        || !numbers.is_ok_and(|values| values.first().is_some_and(|v| *v > 0) && values.last() == Some(&0))
+        || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) || (p.len() > 1 && p.starts_with('0')))
+        || !numbers.is_ok_and(|v| v.first().is_some_and(|n| *n > 0) && v.last() == Some(&0))
     {
         return Err(String::from(
             "Store version must be A.B.C.0: four integers in 0..=65535, A >= 1, no leading zeros; increase it for each Store update",
@@ -84,11 +83,9 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn copy(source: &Path, destination: &Path) -> Result<(), String> {
-    let bytes = std::fs::read(source).map_err(|e| format!("read {}: {e}", source.display()))?;
-    write(destination, &bytes)
+    write(destination, &std::fs::read(source).map_err(|e| format!("read {}: {e}", source.display()))?)
 }
 
-/// Reject wrong-architecture or truncated inputs before invoking SDK packaging tools.
 fn validate_executable(bytes: &[u8], machine: u16) -> Result<(), String> {
     let offset = bytes.get(0x3c..0x40).and_then(|b| <[u8; 4]>::try_from(b).ok()).map(u32::from_le_bytes);
     let pe = offset.and_then(|n| usize::try_from(n).ok()).and_then(|n| bytes.get(n..)).ok_or("missing PE header")?;
@@ -108,14 +105,10 @@ fn stage(root: &Path, directory: &Path, binary_dir: &Path, options: &Options) ->
         validate_executable(&bytes, options.target()?.1).map_err(|e| format!("{}: {e}", path.display()))?;
         write(&directory.join(name), &bytes)?;
     }
-    // Render package-size raster variants from the existing attributed raster icon.
-    // No SVG tools, new source artwork, or bundled fonts are involved.
     let icon_bytes = std::fs::read(root.join("assets/app-icon/curvebook-1024.png")).map_err(|e| format!("read icon: {e}"))?;
     let (src_w, src_h, src_rgba) = decode_png_rgba8(&icon_bytes)?;
     for (name, size) in [("StoreLogo.png", 50), ("Square150x150Logo.png", 150), ("Square44x44Logo.png", 44)] {
-        let resized = downscale_rgba_lanczos3(&src_rgba, src_w, src_h, size, size)?;
-        let encoded = encode_png_rgba8(size, size, &resized)?;
-        write(&assets.join(name), &encoded)?;
+        write(&assets.join(name), &encode_png_rgba8(size, size, &downscale_rgba_lanczos3(&src_rgba, src_w, src_h, size, size)?)?)?;
     }
     for name in ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ASSETS.md", "ATTRIBUTION.md"] {
         copy(&root.join(name), &directory.join(name))?;
@@ -124,42 +117,21 @@ fn stage(root: &Path, directory: &Path, binary_dir: &Path, options: &Options) ->
     write(&directory.join("AppxManifest.xml"), manifest(options)?.as_bytes())
 }
 
-fn target_dir(root: &Path) -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).map_or_else(|| root.join("target"), |p| if p.is_absolute() { p } else { root.join(p) })
-}
-
 fn makeappx() -> Result<PathBuf, String> {
-    let program_files =
-        std::env::var_os("ProgramFiles(x86)").ok_or("missing ProgramFiles(x86); run this command on Windows with the Windows SDK installed")?;
-    let bin = PathBuf::from(program_files).join("Windows Kits/10/bin");
-    let entries = std::fs::read_dir(&bin).map_err(|e| format!("read {}: {e}", bin.display()))?;
+    let pf = std::env::var_os("ProgramFiles(x86)").ok_or("missing ProgramFiles(x86); run this command on Windows with the Windows SDK installed")?;
+    let bin = PathBuf::from(pf).join("Windows Kits/10/bin");
     let mut tools = Vec::new();
-    for entry in entries {
+    for entry in std::fs::read_dir(&bin).map_err(|e| format!("read {}: {e}", bin.display()))? {
         let entry = entry.map_err(|e| format!("SDK directory: {e}"))?;
-        let version: Result<Vec<u32>, _> = entry.file_name().to_string_lossy().split('.').map(str::parse).collect();
         let path = entry.path().join("x64/MakeAppx.exe");
-        if let Ok(version) = version
+        if let Ok(ver) = entry.file_name().to_string_lossy().split('.').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>()
             && path.is_file()
         {
-            tools.push((version, path));
+            tools.push((ver, path));
         }
     }
     tools.sort_by(|a, b| a.0.cmp(&b.0));
-    tools.pop().map(|(_, path)| path).ok_or_else(|| format!("MakeAppx.exe not found under {}", bin.display()))
-}
-
-fn pack(tool: &Path, staging: &Path, package: &Path) -> Result<(), String> {
-    let output = ProcessCommand::new(tool.to_string_lossy())
-        .args(["pack", "/d", &staging.to_string_lossy(), "/p", &package.to_string_lossy(), "/o"])
-        .wall_timeout(Duration::from_secs(300))
-        .idle_timeout(Duration::from_secs(300))
-        .run()
-        .map_err(|e| format!("MakeAppx pack: {e}"))?;
-    println!("{}", String::from_utf8_lossy(&output.stdout));
-    if !output.success {
-        return Err(format!("MakeAppx pack failed ({:?}): {}", output.status_code, String::from_utf8_lossy(&output.stderr)));
-    }
-    Ok(())
+    tools.pop().map(|(_, p)| p).ok_or_else(|| format!("MakeAppx.exe not found under {}", bin.display()))
 }
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
@@ -168,18 +140,27 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         return Err(String::from("MSIX packaging requires Windows SDK tools; use the Windows Store package GitHub workflow"));
     }
     let tool = makeappx()?;
-    let cargo_toml = std::fs::read_to_string(root.join("Cargo.toml")).map_err(|e| format!("Cargo.toml: {e}"))?;
-    let version = crate::version::read_workspace_version(&cargo_toml)?;
+    let version = crate::version::read_workspace_version(&std::fs::read_to_string(root.join("Cargo.toml")).map_err(|e| format!("Cargo.toml: {e}"))?)?;
     let output_dir = root.join("dist/msix");
     std::fs::create_dir_all(&output_dir).map_err(|e| format!("create output directory: {e}"))?;
     let scratch = output_dir.join(format!(".stage-{}-{}", options.arch, std::process::id()));
     std::fs::create_dir(&scratch).map_err(|e| format!("create {}: {e}", scratch.display()))?;
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map_or_else(|| root.join("target"), |p| if p.is_absolute() { p } else { root.join(p) });
     let result = (|| {
-        let payload = scratch.join("payload");
-        let binaries = target_dir(root).join(options.target()?.0).join("release");
-        stage(root, &payload, &binaries, &options)?;
-        let packed = scratch.join("submission.msix");
-        pack(&tool, &payload, &packed)?;
+        let (payload, packed) = (scratch.join("payload"), scratch.join("submission.msix"));
+        stage(root, &payload, &target_dir.join(options.target()?.0).join("release"), &options)?;
+        let out = ProcessCommand::new(tool.to_string_lossy())
+            .args(["pack", "/d", &payload.to_string_lossy(), "/p", &packed.to_string_lossy(), "/o"])
+            .wall_timeout(Duration::from_secs(300))
+            .idle_timeout(Duration::from_secs(300))
+            .run()
+            .map_err(|e| format!("MakeAppx pack: {e}"))?;
+        println!("{}", String::from_utf8_lossy(&out.stdout));
+        if !out.success {
+            return Err(format!("MakeAppx pack failed ({:?}): {}", out.status_code, String::from_utf8_lossy(&out.stderr)));
+        }
         let name = format!("curvebook-{version}-windows-{}-store.msix", options.arch);
         copy(&packed, &output_dir.join(&name))?;
         copy(&payload.join("AppxManifest.xml"), &output_dir.join(format!("AppxManifest-{}.xml", options.arch)))?;
@@ -190,16 +171,14 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         );
         Ok(())
     })();
-    let cleanup = std::fs::remove_dir_all(&scratch).map_err(|e| format!("remove MSIX staging: {e}"));
-    result.and(cleanup)
+    result.and(std::fs::remove_dir_all(&scratch).map_err(|e| format!("remove MSIX staging: {e}")))
 }
 
 fn decode_png_rgba8(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().map_err(|e| format!("decode icon header: {e}"))?;
-    let buf_size = reader.output_buffer_size().ok_or_else(|| String::from("icon buffer size overflow"))?;
-    let mut raw = vec![0u8; buf_size];
+    let mut raw = vec![0u8; reader.output_buffer_size().ok_or_else(|| String::from("icon buffer size overflow"))?];
     let info = reader.next_frame(&mut raw).map_err(|e| format!("decode icon pixels: {e}"))?;
     let src = raw.get(..info.buffer_size()).ok_or_else(|| String::from("decoded pixel frame out of bounds"))?;
     let rgba = match info.color_type {
@@ -214,99 +193,81 @@ fn decode_png_rgba8(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
 
 fn encode_png_rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    let mut encoder = png::Encoder::new(&mut out, width, height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().map_err(|e| format!("encode icon header: {e}"))?;
-    writer.write_image_data(rgba).map_err(|e| format!("encode icon pixels: {e}"))?;
-    writer.finish().map_err(|e| format!("finish icon png: {e}"))?;
+    let mut enc = png::Encoder::new(&mut out, width, height);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut w = enc.write_header().map_err(|e| format!("encode icon header: {e}"))?;
+    w.write_image_data(rgba).map_err(|e| format!("encode icon pixels: {e}"))?;
+    w.finish().map_err(|e| format!("finish icon png: {e}"))?;
     Ok(out)
 }
 
 fn lanczos3(x: f64) -> f64 {
     let ax = x.abs();
     if ax < 1e-12 {
-        return 1.0;
+        1.0
+    } else if ax >= 3.0 {
+        0.0
+    } else {
+        let px = std::f64::consts::PI * ax;
+        (px.sin() / px) * ((px / 3.0).sin() / (px / 3.0))
     }
-    if ax >= 3.0 {
-        return 0.0;
-    }
-    let pi_x = std::f64::consts::PI * ax;
-    (pi_x.sin() / pi_x) * ((pi_x / 3.0).sin() / (pi_x / 3.0))
 }
 
 fn downscale_rgba_lanczos3(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Result<Vec<u8>, String> {
     let (sw, sh, dw, dh) = (src_w as usize, src_h as usize, dst_w as usize, dst_h as usize);
-    let expected_len = sw.checked_mul(sh).and_then(|p| p.checked_mul(4)).ok_or_else(|| String::from("source dimensions overflow"))?;
-    if src.len() != expected_len || sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+    let exp = sw.checked_mul(sh).and_then(|p| p.checked_mul(4)).ok_or_else(|| String::from("source dimensions overflow"))?;
+    if src.len() != exp || sw == 0 || sh == 0 || dw == 0 || dh == 0 {
         return Err(String::from("invalid icon dimensions for resize"));
     }
-    let sx_ratio = sw as f64 / dw as f64;
-    let sy_ratio = sh as f64 / dh as f64;
-    let sup_x = 3.0 * sx_ratio.max(1.0);
-    let sup_y = 3.0 * sy_ratio.max(1.0);
-    let inv_sx = sx_ratio.max(1.0).recip();
-    let inv_sy = sy_ratio.max(1.0).recip();
-
+    let (sx_r, sy_r) = (sw as f64 / dw as f64, sh as f64 / dh as f64);
+    let (sup_x, sup_y, inv_sx, inv_sy) = (3.0 * sx_r.max(1.0), 3.0 * sy_r.max(1.0), sx_r.max(1.0).recip(), sy_r.max(1.0).recip());
     let mut horiz = vec![0.0_f64; dw * sh * 4];
     for y in 0..sh {
         for x in 0..dw {
-            let center = (x as f64 + 0.5) * sx_ratio - 0.5;
-            let lo = (center - sup_x).floor().max(0.0) as usize;
-            let hi = ((center + sup_x).ceil() as isize).min(sw as isize - 1).max(0) as usize;
-            let (mut r, mut g, mut b, mut a, mut wsum) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            let center = (x as f64 + 0.5) * sx_r - 0.5;
+            let (lo, hi) = ((center - sup_x).floor().max(0.0) as usize, ((center + sup_x).ceil() as isize).min(sw as isize - 1).max(0) as usize);
+            let (mut acc, mut wsum) = ([0.0; 4], 0.0);
             for ix in lo..=hi {
                 let w = lanczos3((ix as f64 - center) * inv_sx);
-                let base = (y * sw + ix) * 4;
-                let px = src.get(base..base + 4).ok_or_else(|| String::from("source pixel out of bounds"))?;
-                let pa = f64::from(*px.get(3).unwrap_or(&0)) / 255.0;
-                r += f64::from(*px.first().unwrap_or(&0)) * pa * w;
-                g += f64::from(*px.get(1).unwrap_or(&0)) * pa * w;
-                b += f64::from(*px.get(2).unwrap_or(&0)) * pa * w;
-                a += pa * w;
+                let px = src.get((y * sw + ix) * 4..(y * sw + ix) * 4 + 4).ok_or_else(|| String::from("source pixel out of bounds"))?;
+                let pa = f64::from(px[3]) / 255.0;
+                for c in 0..3 {
+                    acc[c] += f64::from(px[c]) * pa * w;
+                }
+                acc[3] += pa * w;
                 wsum += w;
             }
-            let out_base = (y * dw + x) * 4;
             if wsum.abs() > 1e-12
-                && let Some(dst) = horiz.get_mut(out_base..out_base + 4)
-                && let [dr, dg, db, da] = dst
+                && let Some(dst) = horiz.get_mut((y * dw + x) * 4..(y * dw + x) * 4 + 4)
             {
-                *dr = r / wsum;
-                *dg = g / wsum;
-                *db = b / wsum;
-                *da = a / wsum;
+                for c in 0..4 {
+                    dst[c] = acc[c] / wsum;
+                }
             }
         }
     }
-
     let mut out = vec![0u8; dw * dh * 4];
     for y in 0..dh {
-        let center = (y as f64 + 0.5) * sy_ratio - 0.5;
-        let lo = (center - sup_y).floor().max(0.0) as usize;
-        let hi = ((center + sup_y).ceil() as isize).min(sh as isize - 1).max(0) as usize;
+        let center = (y as f64 + 0.5) * sy_r - 0.5;
+        let (lo, hi) = ((center - sup_y).floor().max(0.0) as usize, ((center + sup_y).ceil() as isize).min(sh as isize - 1).max(0) as usize);
         for x in 0..dw {
-            let (mut r, mut g, mut b, mut a, mut wsum) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            let (mut acc, mut wsum) = ([0.0; 4], 0.0);
             for iy in lo..=hi {
                 let w = lanczos3((iy as f64 - center) * inv_sy);
-                let base = (iy * dw + x) * 4;
-                let px = horiz.get(base..base + 4).ok_or_else(|| String::from("intermediate pixel out of bounds"))?;
-                r += *px.first().unwrap_or(&0.0) * w;
-                g += *px.get(1).unwrap_or(&0.0) * w;
-                b += *px.get(2).unwrap_or(&0.0) * w;
-                a += *px.get(3).unwrap_or(&0.0) * w;
+                let px = horiz.get((iy * dw + x) * 4..(iy * dw + x) * 4 + 4).ok_or_else(|| String::from("intermediate pixel out of bounds"))?;
+                for c in 0..4 {
+                    acc[c] += px[c] * w;
+                }
                 wsum += w;
             }
-            let out_base = (y * dw + x) * 4;
-            if let Some(dst) = out.get_mut(out_base..out_base + 4)
-                && let [dr, dg, db, da] = dst
-            {
+            if let Some(dst) = out.get_mut((y * dw + x) * 4..(y * dw + x) * 4 + 4) {
                 let norm = if wsum.abs() > 1e-12 { wsum } else { 1.0 };
-                let alpha = (a / norm).clamp(0.0, 1.0);
-                let unpremul = |v: f64| -> u8 { if alpha > 1e-6 { ((v / norm / alpha).clamp(0.0, 255.0)).round() as u8 } else { 0 } };
-                *dr = unpremul(r);
-                *dg = unpremul(g);
-                *db = unpremul(b);
-                *da = (alpha * 255.0).clamp(0.0, 255.0).round() as u8;
+                let alpha = (acc[3] / norm).clamp(0.0, 1.0);
+                for c in 0..3 {
+                    dst[c] = if alpha > 1e-6 { ((acc[c] / norm / alpha).clamp(0.0, 255.0)).round() as u8 } else { 0 };
+                }
+                dst[3] = (alpha * 255.0).clamp(0.0, 255.0).round() as u8;
             }
         }
     }
@@ -328,44 +289,33 @@ mod tests {
     }
 
     #[test]
-    fn rejects_store_versions_that_cannot_be_submitted() {
+    fn validates_store_versions_args_pe_and_stages_package_payload() {
         for bad in ["0.1.0.0", "1.0.0.1", "1.0.0-alpha.2", "1.0.0", "65536.0.0.0", "01.0.0.0", "+1.0.0.0", "1.0.0.0/other"] {
-            assert!(validate_version(bad).is_err(), "accepted {bad}");
+            assert!(validate_version(bad).is_err(), "{bad}");
         }
         for good in ["1.0.2.0", "1.0.3.0", "65535.65535.65535.0"] {
             validate_version(good).unwrap();
         }
-    }
-
-    #[test]
-    fn rejects_invalid_arguments_and_pe_architectures() {
         for args in [vec![], vec!["--arch", "x64"], vec!["--arch", "x64", "--package-version", "1.0.2.0", "--arch", "arm64"]] {
             assert!(Options::parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err());
         }
-        assert!(validate_executable(&[], 0x8664).is_err());
         let mut pe = dummy_pe(0x8664);
-        validate_executable(&pe, 0x8664).unwrap();
-        assert!(validate_executable(&pe, 0xaa64).is_err());
+        assert!(validate_executable(&[], 0x8664).is_err() && validate_executable(&pe, 0x8664).is_ok() && validate_executable(&pe, 0xaa64).is_err());
         pe[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(validate_executable(&pe, 0x8664).is_err());
-    }
 
-    #[test]
-    fn stages_only_package_payload_with_correct_identity_and_logo_sizes() {
-        let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let temp = TestDir::new("msix-stage");
+        let (source_root, temp) = (std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap(), TestDir::new("msix-stage"));
         let root = temp.join("repo");
         std::fs::create_dir_all(root.join("assets/app-icon")).unwrap();
         for rel in ["assets/app-icon/curvebook-1024.png", "LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ASSETS.md", "ATTRIBUTION.md"] {
             std::fs::copy(source_root.join(rel), root.join(rel)).unwrap();
         }
         temp.write("repo/licenses/THIRD-PARTY-LICENSES.html", "<p>Package staging test fixture</p>");
-        let pe = dummy_pe(0x8664);
+        let valid_pe = dummy_pe(0x8664);
         for name in ["curvebook.exe", "curvebook-cli.exe", "should-not-ship.pfx"] {
-            temp.write_bytes(&format!("binaries/{name}"), &pe);
+            temp.write_bytes(&format!("binaries/{name}"), &valid_pe);
         }
-        let options = Options { arch: "x64".into(), version: "1.0.2.0".into() };
-        let payload = temp.join("payload");
+        let (options, payload) = (Options { arch: "x64".into(), version: "1.0.2.0".into() }, temp.join("payload"));
         stage(&root, &payload, &temp.join("binaries"), &options).unwrap();
         let xml = manifest(&options).unwrap();
         for needle in [
@@ -377,10 +327,13 @@ mod tests {
             assert!(xml.contains(needle), "missing {needle}");
         }
         assert!(!xml.contains('@') && !payload.join("should-not-ship.pfx").exists());
-        for (name, expected) in [("StoreLogo.png", 50), ("Square150x150Logo.png", 150), ("Square44x44Logo.png", 44)] {
-            let file = std::fs::File::open(payload.join("Assets").join(name)).unwrap();
-            let info = png::Decoder::new(std::io::BufReader::new(file)).read_info().unwrap().info().clone();
-            assert_eq!((info.width, info.height), (expected, expected));
+        for (name, exp) in [("StoreLogo.png", 50), ("Square150x150Logo.png", 150), ("Square44x44Logo.png", 44)] {
+            let info = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(payload.join("Assets").join(name)).unwrap()))
+                .read_info()
+                .unwrap()
+                .info()
+                .clone();
+            assert_eq!((info.width, info.height), (exp, exp));
         }
         assert_eq!(escape_xml("<&\"'>"), "&lt;&amp;&quot;&apos;&gt;");
     }

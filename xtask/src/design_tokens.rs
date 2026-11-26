@@ -1,96 +1,29 @@
 //! `cargo xtask design-tokens`: ratcheting gate on raw colour constructors and raw size pairs
 //! inside `crates/ui-egui/src/` (`docs/design-language.md` §5).
-//!
-//! Ensures UI widgets read colours and measurements from `Tokens` and `LayoutMetrics` rather than
-//! scattering ad-hoc RGB triples and pixel pairs across views and modals:
-//! - `crates/ui-egui/src/egui_shell/tokens.rs` (`Tokens`) must contain **zero** raw colour literals
-//!   (all UI colours derive from `ThemeSeeds` in `crates/ui-egui/src/theme.rs`).
-//! - Canonical token/seed definitions (`theme.rs`), procedural vector brand/icon art (`brand.rs`),
-//!   CPU screenshot encoding (`rasterizer.rs`), test driver (`driver.rs`), and test modules are exempt.
-//! - Legitimate geometric/canvas calculations may opt out on a single line with a documented
-//!   `// design-token-exempt: <reason>` comment (bare `// design-token-exempt` without a reason fails).
-//! - Total non-exempt raw colours and raw numeric size pairs across `crates/ui-egui/src/` may
-//!   only stay equal or fall over time.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use crate::rust_lex::{RustLexer, blank_comments_and_literals, is_ident_byte, mask_cfg_test_items};
+use crate::rust_lex::{RustLexer, blank_comments_and_literals, find_matching_delim, is_ident_byte, mask_cfg_test_items};
 
-/// Maximum non-exempt raw colour constructors permitted across `crates/ui-egui/src/`.
-/// Lower this ceiling whenever raw colour call sites are migrated onto `Tokens`.
-///
-/// Updated from `39` to `55` under `AUD-12-27` after expanding detection to cover
-/// `Color32::from_black_alpha`, `from_white_alpha`, `from_rgb_additive`,
-/// `from_rgba_unmultiplied_const`, `from_hex`, named `Color32` color constants, `Rgba8 { .. }`
-/// struct literals, and whitespace-separated calls (16 previously uncounted live sites in
-/// `crates/ui-egui/src/`).
 pub const MAX_RAW_COLORS: usize = 55;
-
-/// Maximum non-exempt raw numeric size pairs (`vec2(...)`, `Vec2::new(...)`, `Vec2::splat(...)`,
-/// `Vec2 { .. }`) permitted across `crates/ui-egui/src/`. Lower this ceiling whenever raw widget
-/// sizes are migrated onto `LayoutMetrics`.
-///
-/// Tightened from `236` to `232` (exact live count after `AUD-12-27` expanded detection to cover
-/// `Vec2::splat`, `Vec2 { .. }`, parenthesized expressions, and `as <ty>` casts).
 pub const MAX_RAW_SIZE_PAIRS: usize = 232;
 
 const UI_SRC_PREFIX: &str = "crates/ui-egui/src/";
 const TOKENS_MOD_REL: &str = "crates/ui-egui/src/egui_shell/tokens.rs";
 const EXEMPT_MARKER: &str = concat!("design-token-", "exempt:");
 const BARE_EXEMPT_MARKER: &str = concat!("design-token-", "exempt");
+const EXEMPT_FILES: &str = "crates/ui-egui/src/theme.rs crates/ui-egui/src/egui_shell/brand.rs crates/ui-egui/src/egui_shell/rasterizer.rs crates/ui-egui/src/egui_shell/driver.rs";
+const COLOR32_CTORS: &str = "from_rgb from_rgba_unmultiplied from_rgba_premultiplied from_gray from_black_alpha from_white_alpha from_rgb_additive from_rgba_unmultiplied_const from_hex";
+const COLOR32_CONSTS: &str = "WHITE BLACK RED GREEN BLUE YELLOW CYAN MAGENTA GRAY LIGHT_GRAY DARK_GRAY LIGHT_RED DARK_RED LIGHT_GREEN DARK_GREEN LIGHT_BLUE DARK_BLUE LIGHT_YELLOW GOLD BROWN KHAKI ORANGE PURPLE PLACEHOLDER";
+const RGBA8_CTORS: &str = "rgb rgba";
+const VEC2_CTORS: &str = "new splat";
 
-const EXEMPT_FILES: &[&str] = &[
-    "crates/ui-egui/src/theme.rs",
-    "crates/ui-egui/src/egui_shell/brand.rs",
-    "crates/ui-egui/src/egui_shell/rasterizer.rs",
-    "crates/ui-egui/src/egui_shell/driver.rs",
-];
+fn has_word(list: &str, needle: &str) -> bool {
+    list.split_ascii_whitespace().any(|w| w == needle)
+}
 
-const COLOR32_CONSTRUCTORS: &[&str] = &[
-    "from_rgb",
-    "from_rgba_unmultiplied",
-    "from_rgba_premultiplied",
-    "from_gray",
-    "from_black_alpha",
-    "from_white_alpha",
-    "from_rgb_additive",
-    "from_rgba_unmultiplied_const",
-    "from_hex",
-];
-
-const COLOR32_NAMED_CONSTANTS: &[&str] = &[
-    "WHITE",
-    "BLACK",
-    "RED",
-    "GREEN",
-    "BLUE",
-    "YELLOW",
-    "CYAN",
-    "MAGENTA",
-    "GRAY",
-    "LIGHT_GRAY",
-    "DARK_GRAY",
-    "LIGHT_RED",
-    "DARK_RED",
-    "LIGHT_GREEN",
-    "DARK_GREEN",
-    "LIGHT_BLUE",
-    "DARK_BLUE",
-    "LIGHT_YELLOW",
-    "GOLD",
-    "BROWN",
-    "KHAKI",
-    "ORANGE",
-    "PURPLE",
-    "PLACEHOLDER",
-];
-
-const RGBA8_CONSTRUCTORS: &[&str] = &["rgb", "rgba"];
-const VEC2_CONSTRUCTORS: &[&str] = &["new", "splat"];
-
-/// Summary of raw colour and raw size-pair counts across `crates/ui-egui/src/`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DesignTokenScanReport {
     pub raw_colors: usize,
@@ -101,24 +34,22 @@ pub struct DesignTokenScanReport {
     pub invalid_exemptions: Vec<String>,
 }
 
-/// Entry point for `cargo xtask design-tokens [--verbose]`.
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let verbose = match args {
         [] => false,
         [flag] if flag == "--verbose" => true,
         _ => return Err(String::from("usage: cargo xtask design-tokens [--verbose]")),
     };
-    let files = crate::repo_files(root)?;
     let mut sources = Vec::new();
-    for rel in files {
+    for rel in crate::repo_files(root)? {
         if rel.starts_with(UI_SRC_PREFIX) && rel.ends_with(".rs") {
-            let content = fs::read_to_string(root.join(&rel)).map_err(|e| format!("read {rel}: {e}"))?;
-            sources.push((rel, content));
+            sources.push((rel.clone(), fs::read_to_string(root.join(&rel)).map_err(|e| format!("read {rel}: {e}"))?));
         }
     }
     let report = scan_sources(&sources);
     if verbose {
-        print_breakdown(&report);
+        report.per_file_colors.iter().for_each(|(f, n)| println!("  raw-color  {n:>4}  {f}"));
+        report.per_file_sizes.iter().for_each(|(f, n)| println!("  raw-size   {n:>4}  {f}"));
     }
     enforce_ceilings(&report, MAX_RAW_COLORS, MAX_RAW_SIZE_PAIRS)?;
     println!(
@@ -128,37 +59,24 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn print_breakdown(report: &DesignTokenScanReport) {
-    for (file, count) in &report.per_file_colors {
-        println!("  raw-color  {count:>4}  {file}");
-    }
-    for (file, count) in &report.per_file_sizes {
-        println!("  raw-size   {count:>4}  {file}");
-    }
-}
-
-/// Scan `(relative_path, source_text)` pairs and return [`DesignTokenScanReport`].
 #[must_use]
 pub fn scan_sources(sources: &[(String, String)]) -> DesignTokenScanReport {
     let mut report = DesignTokenScanReport::default();
     for (rel, content) in sources {
-        if is_test_file(rel) || EXEMPT_FILES.contains(&rel.as_str()) {
+        if rel.ends_with("/tests.rs") || rel.contains("/tests/") || has_word(EXEMPT_FILES, rel) {
             continue;
         }
         let blanked = blank_comments_and_literals(content);
-        let mut prod_code_bytes = blanked.as_bytes().to_vec();
-        let mut raw_prod_bytes = content.as_bytes().to_vec();
-        mask_cfg_test_items(blanked.as_bytes(), &mut [&mut prod_code_bytes, &mut raw_prod_bytes]);
-        let prod_code = String::from_utf8(prod_code_bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-        let raw_prod = String::from_utf8(raw_prod_bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-
+        let (mut prod_bytes, mut raw_bytes) = (blanked.as_bytes().to_vec(), content.as_bytes().to_vec());
+        mask_cfg_test_items(blanked.as_bytes(), &mut [&mut prod_bytes, &mut raw_bytes]);
+        let prod_code = String::from_utf8(prod_bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+        let raw_prod = String::from_utf8(raw_bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
         let exempt_lines = collect_exemption_lines(rel, &raw_prod, &mut report.invalid_exemptions);
-        let line_starts = compute_line_starts(&prod_code);
-        let is_tokens_mod = rel == TOKENS_MOD_REL;
-
-        let (file_colors, tokens_mod_colors) = count_color_calls(&prod_code, &raw_prod, &line_starts, &exempt_lines, is_tokens_mod);
-        let file_sizes = count_raw_size_calls(&prod_code, &line_starts, &exempt_lines);
-
+        let line_starts: Vec<usize> =
+            std::iter::once(0).chain(prod_code.as_bytes().iter().enumerate().filter_map(|(i, &b)| (b == b'\n').then_some(i + 1))).collect();
+        let toks = tokenize_blanked_code(&prod_code);
+        let (file_colors, tokens_mod_colors) = count_color_calls(&prod_code, &raw_prod, &toks, &line_starts, &exempt_lines, rel == TOKENS_MOD_REL);
+        let file_sizes = count_raw_size_calls(&prod_code, &toks, &line_starts, &exempt_lines);
         report.tokens_mod_raw_colors += tokens_mod_colors;
         if file_colors > 0 {
             report.raw_colors += file_colors;
@@ -172,88 +90,50 @@ pub fn scan_sources(sources: &[(String, String)]) -> DesignTokenScanReport {
     report
 }
 
-/// Verify [`DesignTokenScanReport`] against tracked ceilings and token-file rules.
 pub fn enforce_ceilings(report: &DesignTokenScanReport, max_colors: usize, max_sizes: usize) -> Result<(), String> {
+    let fmt_map = |m: &BTreeMap<String, usize>| m.iter().map(|(f, n)| format!("  {n:>4}  {f}")).collect::<Vec<_>>().join("\n");
     let mut errors = Vec::new();
     if !report.invalid_exemptions.is_empty() {
         errors.push(format!("malformed design-token exemption comment(s):\n  {}", report.invalid_exemptions.join("\n  ")));
     }
     if report.tokens_mod_raw_colors > 0 {
-        errors.push(format!(
-            "`{TOKENS_MOD_REL}` contains {} raw colour literal(s); derive `Tokens` colours from `ThemeSeeds` in `crates/ui-egui/src/theme.rs` instead",
-            report.tokens_mod_raw_colors
-        ));
+        errors.push(format!("`{TOKENS_MOD_REL}` contains {} raw colour literal(s); derive `Tokens` colours from `ThemeSeeds` in `crates/ui-egui/src/theme.rs` instead", report.tokens_mod_raw_colors));
     }
     if report.raw_colors > max_colors {
-        let top = format_map(&report.per_file_colors);
-        errors.push(format!(
-            "raw UI colour count {} exceeds ceiling {max_colors}; use `Tokens` fields (or document canvas math with `// {EXEMPT_MARKER} <reason>`):\n{top}",
-            report.raw_colors
-        ));
+        errors.push(format!("raw UI colour count {} exceeds ceiling {max_colors}; use `Tokens` fields (or document canvas math with `// {EXEMPT_MARKER} <reason>`):\n{}", report.raw_colors, fmt_map(&report.per_file_colors)));
     }
     if report.raw_size_pairs > max_sizes {
-        let top = format_map(&report.per_file_sizes);
-        errors.push(format!(
-            "raw UI size-pair count {} exceeds ceiling {max_sizes}; use `LayoutMetrics` tokens (or document canvas geometry with `// {EXEMPT_MARKER} <reason>`):\n{top}",
-            report.raw_size_pairs
-        ));
+        errors.push(format!("raw UI size-pair count {} exceeds ceiling {max_sizes}; use `LayoutMetrics` tokens (or document canvas geometry with `// {EXEMPT_MARKER} <reason>`):\n{}", report.raw_size_pairs, fmt_map(&report.per_file_sizes)));
     }
     if errors.is_empty() { Ok(()) } else { Err(errors.join("\n\n")) }
 }
 
-fn format_map(map: &BTreeMap<String, usize>) -> String {
-    map.iter().map(|(f, n)| format!("  {n:>4}  {f}")).collect::<Vec<_>>().join("\n")
-}
-
-fn is_test_file(rel: &str) -> bool {
-    rel.ends_with("/tests.rs") || rel.contains("/tests/")
-}
-
 fn collect_exemption_lines(rel: &str, raw_prod: &str, invalid_exemptions: &mut Vec<String>) -> BTreeSet<usize> {
-    let mut exempt_lines = BTreeSet::new();
-    let mut lex = RustLexer::new(raw_prod);
+    let (mut exempt, mut lex) = (BTreeSet::new(), RustLexer::new(raw_prod));
     while !lex.is_eof() {
-        if let Some((line_no, comment_text)) = lex.try_read_comment() {
-            if let Some((_, tail)) = comment_text.split_once(EXEMPT_MARKER) {
-                let reason = tail.trim();
-                if reason.is_empty() {
+        if let Some((line_no, text)) = lex.try_read_comment() {
+            if let Some((_, tail)) = text.split_once(EXEMPT_MARKER) {
+                if tail.trim().is_empty() {
                     invalid_exemptions.push(format!("{rel}:{line_no}: `{EXEMPT_MARKER}` requires a non-empty reason"));
                 } else {
-                    exempt_lines.insert(line_no);
+                    exempt.insert(line_no);
                 }
-            } else if comment_text.contains(BARE_EXEMPT_MARKER) {
+            } else if text.contains(BARE_EXEMPT_MARKER) {
                 invalid_exemptions.push(format!("{rel}:{line_no}: use `{EXEMPT_MARKER} <reason>` with an explicit justification"));
             }
-            continue;
-        }
-        if lex.try_read_raw_string().is_some() || lex.try_skip_char_literal() || lex.try_read_quoted_string().is_some() {
-            continue;
-        }
-        lex.advance_one();
-    }
-    exempt_lines
-}
-
-fn compute_line_starts(src: &str) -> Vec<usize> {
-    let mut starts = vec![0usize];
-    for (idx, &b) in src.as_bytes().iter().enumerate() {
-        if b == b'\n' {
-            starts.push(idx + 1);
+        } else if lex.try_read_raw_string().is_none() && !lex.try_skip_char_literal() && lex.try_read_quoted_string().is_none() {
+            lex.advance_one();
         }
     }
-    starts
+    exempt
 }
 
-fn line_of_offset(line_starts: &[usize], offset: usize) -> usize {
-    line_starts.partition_point(|&s| s <= offset)
-}
-
-fn is_call_exempt(exempt_lines: &BTreeSet<usize>, start_line: usize, end_line: usize) -> bool {
-    exempt_lines.range(start_line..=end_line).next().is_some()
+fn is_call_exempt(line_starts: &[usize], exempt_lines: &BTreeSet<usize>, start_off: usize, end_off: usize) -> bool {
+    exempt_lines.range(line_starts.partition_point(|&o| o <= start_off)..=line_starts.partition_point(|&o| o <= end_off)).next().is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CodeTokKind<'a> {
+enum TokKind<'a> {
     Ident(&'a str),
     ColonColon,
     LParen,
@@ -263,328 +143,212 @@ enum CodeTokKind<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct CodeTok<'a> {
-    kind: CodeTokKind<'a>,
+struct Tok<'a> {
+    kind: TokKind<'a>,
     start: usize,
     end: usize,
 }
 
-fn tokenize_blanked_code(code: &str) -> Vec<CodeTok<'_>> {
-    let bytes = code.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b.is_ascii_whitespace() {
+fn tokenize_blanked_code(code: &str) -> Vec<Tok<'_>> {
+    let (b, mut out, mut i) = (code.as_bytes(), Vec::new(), 0usize);
+    while i < b.len() {
+        if b[i].is_ascii_whitespace() {
             i += 1;
-        } else if b.is_ascii_alphabetic() || b == b'_' {
+        } else if b[i].is_ascii_alphabetic() || b[i] == b'_' {
             let start = i;
             i += 1;
-            while i < bytes.len() && is_ident_byte(bytes[i]) {
+            while i < b.len() && is_ident_byte(b[i]) {
                 i += 1;
             }
             if let Some(ident) = code.get(start..i) {
-                out.push(CodeTok { kind: CodeTokKind::Ident(ident), start, end: i });
+                out.push(Tok { kind: TokKind::Ident(ident), start, end: i });
             }
-        } else if b == b':' && bytes.get(i + 1) == Some(&b':') {
-            out.push(CodeTok { kind: CodeTokKind::ColonColon, start: i, end: i + 2 });
+        } else if b.get(i..i + 2) == Some(b"::") {
+            out.push(Tok { kind: TokKind::ColonColon, start: i, end: i + 2 });
             i += 2;
         } else {
-            let kind = match b {
-                b'(' => CodeTokKind::LParen,
-                b'{' => CodeTokKind::LBrace,
-                b'.' => CodeTokKind::Dot,
-                _ => CodeTokKind::Other,
+            let kind = match b[i] {
+                b'(' => TokKind::LParen,
+                b'{' => TokKind::LBrace,
+                b'.' => TokKind::Dot,
+                _ => TokKind::Other,
             };
             let step = code.get(i..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
-            out.push(CodeTok { kind, start: i, end: i + step });
+            out.push(Tok { kind, start: i, end: i + step });
             i += step;
         }
     }
     out
 }
 
-fn record_color_hit(exempt: bool, is_tokens_mod: bool, has_literal_arg: bool, regular_count: &mut usize, tokens_mod_count: &mut usize) {
-    if is_tokens_mod {
-        // `TOKENS_MOD_REL` forbids all raw colour literals even with an exemption comment;
-        // only non-literal type-conversion bridges (e.g. `Rgba8 <-> Color32`) with an
-        // explicit `design-token-exempt: <reason>` comment are permitted.
-        if !exempt || has_literal_arg {
-            *tokens_mod_count += 1;
-        }
-    } else if !exempt {
-        *regular_count += 1;
-    }
+fn balanced_body(code: &str, open_pos: usize, open: u8, close: u8) -> Option<(&str, usize)> {
+    let end = find_matching_delim(code.as_bytes(), open_pos, open, close)?;
+    Some((code.get(open_pos + 1..end)?, end))
 }
 
-fn count_color_calls(code: &str, raw_prod: &str, line_starts: &[usize], exempt_lines: &BTreeSet<usize>, is_tokens_mod: bool) -> (usize, usize) {
-    let toks = tokenize_blanked_code(code);
-    let mut regular_count = 0usize;
-    let mut tokens_mod_count = 0usize;
-    let mut i = 0usize;
+fn count_color_calls(
+    code: &str,
+    raw_prod: &str,
+    toks: &[Tok<'_>],
+    line_starts: &[usize],
+    exempt_lines: &BTreeSet<usize>,
+    is_tokens_mod: bool,
+) -> (usize, usize) {
+    let (mut regular, mut tokens_mod, mut i) = (0usize, 0usize, 0usize);
+    let mut record = |exempt: bool, has_literal: bool| {
+        if is_tokens_mod {
+            tokens_mod += usize::from(!exempt || has_literal);
+        } else if !exempt {
+            regular += 1;
+        }
+    };
     while i < toks.len() {
-        let CodeTokKind::Ident(head) = toks[i].kind else {
+        let TokKind::Ident(head) = toks[i].kind else {
             i += 1;
             continue;
         };
         if (head == "Color32" || head == "Rgba8")
-            && matches!(toks.get(i + 1).map(|t| t.kind), Some(CodeTokKind::ColonColon))
-            && let Some(CodeTok { kind: CodeTokKind::Ident(member), end: member_end, .. }) = toks.get(i + 2).copied()
+            && matches!(toks.get(i + 1).map(|t| t.kind), Some(TokKind::ColonColon))
+            && let Some(Tok { kind: TokKind::Ident(member), end: member_end, .. }) = toks.get(i + 2).copied()
         {
-            let is_ctor = (head == "Color32" && COLOR32_CONSTRUCTORS.contains(&member)) || (head == "Rgba8" && RGBA8_CONSTRUCTORS.contains(&member));
-            if is_ctor && let Some(CodeTok { kind: CodeTokKind::LParen, end: args_start, .. }) = toks.get(i + 3).copied() {
-                let args_opt = code.get(args_start..).and_then(|t| extract_balanced_delim_with_end(t, '(', ')'));
-                let start_line = line_of_offset(line_starts, toks[i].start);
-                let end_line = args_opt.map_or(start_line, |(_, close_rel)| line_of_offset(line_starts, args_start + close_rel));
-                let exempt = is_call_exempt(exempt_lines, start_line, end_line);
-                let has_literal_arg = args_opt.is_none_or(|(args, close_rel)| {
-                    contains_numeric_literal_token(args)
-                        || raw_prod.get(args_start..args_start + close_rel).is_some_and(|raw_args| raw_args.contains('"'))
-                });
-                record_color_hit(exempt, is_tokens_mod, has_literal_arg, &mut regular_count, &mut tokens_mod_count);
+            let is_ctor = (head == "Color32" && has_word(COLOR32_CTORS, member)) || (head == "Rgba8" && has_word(RGBA8_CTORS, member));
+            if is_ctor && let Some(Tok { kind: TokKind::LParen, start: open_pos, .. }) = toks.get(i + 3).copied() {
+                let body_opt = balanced_body(code, open_pos, b'(', b')');
+                let has_lit =
+                    body_opt.is_none_or(|(args, end)| has_numeric_token(args) || raw_prod.get(open_pos + 1..end).is_some_and(|r| r.contains('"')));
+                record(is_call_exempt(line_starts, exempt_lines, toks[i].start, body_opt.map_or(toks[i].start, |(_, e)| e)), has_lit);
                 i += 4;
                 continue;
             }
-            if head == "Color32" && COLOR32_NAMED_CONSTANTS.contains(&member) {
-                let start_line = line_of_offset(line_starts, toks[i].start);
-                let end_line = line_of_offset(line_starts, member_end.saturating_sub(1));
-                let exempt = is_call_exempt(exempt_lines, start_line, end_line);
-                record_color_hit(exempt, is_tokens_mod, true, &mut regular_count, &mut tokens_mod_count);
+            if head == "Color32" && has_word(COLOR32_CONSTS, member) {
+                record(is_call_exempt(line_starts, exempt_lines, toks[i].start, member_end.saturating_sub(1)), true);
                 i += 3;
                 continue;
             }
         } else if head == "Rgba8"
-            && let Some(CodeTok { kind: CodeTokKind::LBrace, end: body_start, .. }) = toks.get(i + 1).copied()
+            && let Some(Tok { kind: TokKind::LBrace, start: open_pos, .. }) = toks.get(i + 1).copied()
         {
-            let body_opt = code.get(body_start..).and_then(|t| extract_balanced_delim_with_end(t, '{', '}'));
-            let start_line = line_of_offset(line_starts, toks[i].start);
-            let end_line = body_opt.map_or(start_line, |(_, close_rel)| line_of_offset(line_starts, body_start + close_rel));
-            let exempt = is_call_exempt(exempt_lines, start_line, end_line);
-            let has_literal_arg = body_opt.is_none_or(|(body, _)| contains_numeric_literal_token(body));
-            record_color_hit(exempt, is_tokens_mod, has_literal_arg, &mut regular_count, &mut tokens_mod_count);
+            let body_opt = balanced_body(code, open_pos, b'{', b'}');
+            record(
+                is_call_exempt(line_starts, exempt_lines, toks[i].start, body_opt.map_or(toks[i].start, |(_, e)| e)),
+                body_opt.is_none_or(|(b, _)| has_numeric_token(b)),
+            );
             i += 2;
             continue;
         }
         i += 1;
     }
-    (regular_count, tokens_mod_count)
+    (regular, tokens_mod)
 }
 
-fn count_raw_size_calls(code: &str, line_starts: &[usize], exempt_lines: &BTreeSet<usize>) -> usize {
-    let toks = tokenize_blanked_code(code);
-    let mut count = 0usize;
-    let mut i = 0usize;
+fn count_raw_size_calls(code: &str, toks: &[Tok<'_>], line_starts: &[usize], exempt_lines: &BTreeSet<usize>) -> usize {
+    let (mut count, mut i) = (0usize, 0usize);
     while i < toks.len() {
-        let CodeTokKind::Ident(head) = toks[i].kind else {
+        let TokKind::Ident(head) = toks[i].kind else {
             i += 1;
             continue;
         };
-        let prev_is_dot = i > 0 && toks[i - 1].kind == CodeTokKind::Dot;
-        if head == "Vec2"
-            && matches!(toks.get(i + 1).map(|t| t.kind), Some(CodeTokKind::ColonColon))
-            && let Some(CodeTok { kind: CodeTokKind::Ident(member), .. }) = toks.get(i + 2).copied()
-            && VEC2_CONSTRUCTORS.contains(&member)
-            && let Some(CodeTok { kind: CodeTokKind::LParen, end: args_start, .. }) = toks.get(i + 3).copied()
+        let (delim, open_pos, is_struct, step) = if head == "Vec2"
+            && matches!(toks.get(i + 1).map(|t| t.kind), Some(TokKind::ColonColon))
+            && matches!(toks.get(i + 2).map(|t| t.kind), Some(TokKind::Ident(m)) if has_word(VEC2_CTORS, m))
+            && let Some(Tok { kind: TokKind::LParen, start, .. }) = toks.get(i + 3).copied()
         {
-            if let Some((args, close_rel)) = code.get(args_start..).and_then(|t| extract_balanced_delim_with_end(t, '(', ')')) {
-                let start_line = line_of_offset(line_starts, toks[i].start);
-                let end_line = line_of_offset(line_starts, args_start + close_rel);
-                if !is_call_exempt(exempt_lines, start_line, end_line) && args_contain_nonzero_numeric_literal(args) {
-                    count += 1;
-                }
-            }
-            i += 4;
-            continue;
-        }
-        if head == "Vec2"
-            && let Some(CodeTok { kind: CodeTokKind::LBrace, end: body_start, .. }) = toks.get(i + 1).copied()
+            ((b'(', b')'), start, false, 4)
+        } else if head == "Vec2"
+            && let Some(Tok { kind: TokKind::LBrace, start, .. }) = toks.get(i + 1).copied()
         {
-            if let Some((body, close_rel)) = code.get(body_start..).and_then(|t| extract_balanced_delim_with_end(t, '{', '}')) {
-                let start_line = line_of_offset(line_starts, toks[i].start);
-                let end_line = line_of_offset(line_starts, body_start + close_rel);
-                if !is_call_exempt(exempt_lines, start_line, end_line) && struct_fields_contain_nonzero_numeric_literal(body) {
-                    count += 1;
-                }
-            }
-            i += 2;
-            continue;
-        }
-        if head == "vec2"
-            && !prev_is_dot
-            && let Some(CodeTok { kind: CodeTokKind::LParen, end: args_start, .. }) = toks.get(i + 1).copied()
+            ((b'{', b'}'), start, true, 2)
+        } else if head == "vec2"
+            && !(i > 0 && toks[i - 1].kind == TokKind::Dot)
+            && let Some(Tok { kind: TokKind::LParen, start, .. }) = toks.get(i + 1).copied()
         {
-            if let Some((args, close_rel)) = code.get(args_start..).and_then(|t| extract_balanced_delim_with_end(t, '(', ')')) {
-                let start_line = line_of_offset(line_starts, toks[i].start);
-                let end_line = line_of_offset(line_starts, args_start + close_rel);
-                if !is_call_exempt(exempt_lines, start_line, end_line) && args_contain_nonzero_numeric_literal(args) {
-                    count += 1;
-                }
-            }
-            i += 2;
+            ((b'(', b')'), start, false, 2)
+        } else {
+            i += 1;
             continue;
+        };
+        if let Some((body, end)) = balanced_body(code, open_pos, delim.0, delim.1)
+            && !is_call_exempt(line_starts, exempt_lines, toks[i].start, end)
+            && has_nonzero_literal(body, is_struct)
+        {
+            count += 1;
         }
-        i += 1;
+        i += step;
     }
     count
 }
 
-fn extract_balanced_delim_with_end(tail: &str, open: char, close: char) -> Option<(&str, usize)> {
-    let mut depth = 1usize;
-    for (idx, ch) in tail.char_indices() {
-        if ch == open {
-            depth += 1;
-        } else if ch == close {
-            depth -= 1;
-            if depth == 0 {
-                return tail.get(..idx).map(|args| (args, idx));
-            }
-        }
-    }
-    None
+fn has_numeric_token(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.iter().enumerate().any(|(i, &c)| c.is_ascii_digit() && !(i > 0 && is_ident_byte(b[i - 1])))
 }
 
-fn contains_numeric_literal_token(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b.is_ascii_digit() {
-            let prev_ident = i > 0 && is_ident_byte(bytes[i - 1]);
-            if !prev_ident {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn strip_wrapping_parens(s: &str) -> Option<&str> {
-    let inner = s.strip_prefix('(')?.strip_suffix(')')?;
-    let mut depth = 0usize;
-    for ch in inner.chars() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                if depth == 0 {
-                    return None;
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
-    }
-    (depth == 0).then_some(inner)
+fn strip_outer_parens(s: &str) -> Option<&str> {
+    (s.starts_with('(') && find_matching_delim(s.as_bytes(), 0, b'(', b')') == Some(s.len() - 1)).then(|| s.get(1..s.len() - 1)).flatten()
 }
 
 fn strip_trailing_as_cast(s: &str) -> Option<&str> {
-    let bytes = s.as_bytes();
-    let mut depth = 0usize;
-    let mut last_as = None;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
+    let (b, mut depth, mut last_as) = (s.as_bytes(), 0usize, None);
+    for (i, &c) in b.iter().enumerate() {
+        match c {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth = depth.saturating_sub(1),
             b'a' if depth == 0
-                && bytes.get(i + 1) == Some(&b's')
-                && (i == 0 || !is_ident_byte(bytes[i - 1]))
-                && bytes.get(i + 2).is_none_or(|&b| !is_ident_byte(b)) =>
+                && b.get(i + 1) == Some(&b's')
+                && (i == 0 || !is_ident_byte(b[i - 1]))
+                && b.get(i + 2).is_none_or(|&n| !is_ident_byte(n)) =>
             {
-                last_as = Some(i);
+                last_as = Some(i)
             }
             _ => {}
         }
-        i += 1;
     }
     let pos = last_as?;
     let rhs = s.get(pos + 2..)?.trim();
-    if rhs.is_empty() || !rhs.bytes().all(is_ident_byte) {
-        return None;
-    }
-    Some(s.get(..pos)?.trim())
+    (!rhs.is_empty() && rhs.bytes().all(is_ident_byte)).then(|| s.get(..pos).map(str::trim)).flatten()
 }
 
 fn parse_numeric_literal(part: &str) -> Option<f64> {
-    const SUFFIXES: &[&str] = &["_f32", "f32", "_f64", "f64", "_u8", "u8", "_u16", "u16", "_u32", "u32", "_i32", "i32", "_usize", "usize"];
-    let mut trimmed = part.trim();
-    loop {
-        let prev = trimmed;
-        if let Some(inner) = strip_wrapping_parens(trimmed) {
-            trimmed = inner.trim();
-        } else if let Some(lhs) = strip_trailing_as_cast(trimmed) {
-            trimmed = lhs.trim();
-        } else if let Some(rest) = trimmed.strip_prefix('-').or_else(|| trimmed.strip_prefix('+')) {
-            trimmed = rest.trim();
-        }
-        if trimmed == prev {
-            break;
-        }
+    const SUFFIXES: &str = "_f32 f32 _f64 f64 _u8 u8 _u16 u16 _u32 u32 _i32 i32 _usize usize";
+    let mut t = part.trim();
+    while let Some(inner) = strip_outer_parens(t).or_else(|| strip_trailing_as_cast(t)).or_else(|| t.strip_prefix(['-', '+'])) {
+        t = inner.trim();
     }
-    for sfx in SUFFIXES {
-        if let Some(stem) = trimmed.strip_suffix(sfx) {
-            trimmed = stem;
-            break;
-        }
+    if let Some(stem) = SUFFIXES.split_ascii_whitespace().find_map(|sfx| t.strip_suffix(sfx)) {
+        t = stem;
     }
-    if !trimmed.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+    if !t.as_bytes().first().is_some_and(u8::is_ascii_digit) {
         return None;
     }
-    for (p_lo, p_hi, radix) in [("0x", "0X", 16), ("0b", "0B", 2), ("0o", "0O", 8)] {
-        if let Some(digits) = trimmed.strip_prefix(p_lo).or_else(|| trimmed.strip_prefix(p_hi)) {
-            let clean: String = digits.chars().filter(|&c| c != '_').collect();
-            return u128::from_str_radix(&clean, radix).ok().map(|v| v as f64);
+    for (lo, hi, radix) in [("0x", "0X", 16), ("0b", "0B", 2), ("0o", "0O", 8)] {
+        if let Some(d) = t.strip_prefix(lo).or_else(|| t.strip_prefix(hi)) {
+            return u128::from_str_radix(&d.replace('_', ""), radix).ok().map(|v| v as f64);
         }
     }
-    let clean: String = trimmed.chars().filter(|&c| c != '_').collect();
-    clean.parse::<f64>().ok()
+    t.replace('_', "").parse::<f64>().ok()
 }
 
-fn args_contain_nonzero_numeric_literal(args: &str) -> bool {
-    for part in split_top_level_commas(args) {
-        if let Some(val) = parse_numeric_literal(part)
-            && val.abs() > 0.0
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn struct_fields_contain_nonzero_numeric_literal(body: &str) -> bool {
-    for part in split_top_level_commas(body) {
-        let trimmed = part.trim();
-        if trimmed.is_empty() || trimmed.starts_with("..") {
-            continue;
-        }
-        let expr = trimmed.split_once(':').map_or(trimmed, |(_, rhs)| rhs);
-        if let Some(val) = parse_numeric_literal(expr)
-            && val.abs() > 0.0
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn split_top_level_commas(s: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    for (idx, ch) in s.char_indices() {
+fn has_nonzero_literal(body: &str, is_struct: bool) -> bool {
+    let (mut depth, mut start) = (0usize, 0usize);
+    let check_seg = |seg: &str| {
+        let t = seg.trim();
+        !(is_struct && (t.is_empty() || t.starts_with("..")))
+            && parse_numeric_literal(if is_struct { t.split_once(':').map_or(t, |(_, r)| r) } else { t }).is_some_and(|v| v.abs() > 0.0)
+    };
+    for (idx, ch) in body.char_indices() {
         match ch {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
-                if let Some(seg) = s.get(start..idx) {
-                    parts.push(seg);
+                if body.get(start..idx).is_some_and(check_seg) {
+                    return true;
                 }
                 start = idx + 1;
             }
             _ => {}
         }
     }
-    if let Some(tail) = s.get(start..) {
-        parts.push(tail);
-    }
-    parts
+    body.get(start..).is_some_and(check_seg)
 }
 
 #[cfg(test)]
@@ -592,124 +356,41 @@ mod tests {
     use super::{TOKENS_MOD_REL, enforce_ceilings, scan_sources};
 
     #[test]
-    fn counts_raw_colors_and_literal_sizes_while_preserving_token_calls_and_tests() {
-        let widget_code = format!(
-            "{}\n{}\n{}\n{}\n{}\n#[cfg(test)]\nmod tests {{\n    fn t() {{ let _ = {}(1, 2, 3); let _ = {}(9.0, 9.0); }}\n}}\n",
-            concat!("let bad_c = Color32::", "from_rgb(10, 20, 30);"),
-            concat!("let bad_sz = egui::vec", "2(14.0, 28.0);"),
-            concat!("let ok_tok = egui::vec", "2(tokens.metrics.space_md, tokens.metrics.min_toolbar_target_pt);"),
-            concat!("let ok_zero = Vec2::", "new(0.0, 0.0);"),
-            concat!("let ok_exempt = Color32::", "from_rgb(1, 2, 3); // design-token-", "exempt: canvas crosshair tint"),
-            concat!("Color32::", "from_rgb"),
-            concat!("vec", "2"),
+    fn counts_raw_colors_sizes_exemptions_tokens_mod_and_rust_lex_forms() {
+        let widget = concat!(
+            "#[cfg(test)]\nmod tests;\npub fn w() {\n  /* Color32::from_rgb(1, 2, 3); vec2(9.0, 9.0); */\n  let _q = '\"';\n",
+            "  let _c1 = Color32 :: from_rgb (10, 20, 30);\n  let _c2 = Color32::from_black_alpha(32);\n  let _c3 = Color32::from_hex(\"#123456\");\n",
+            "  let _c4 = Color32::WHITE;\n  let _c5 = Rgba8 { r: 10, g: 20, b: 30, a: 255 };\n  let _ok_t = Color32::TRANSPARENT;\n",
+            "  let _ok_ex = Color32::from_rgb(1, 2, 3); // design-token-",
+            "exempt: crosshair\n",
+            "  let _s1 = egui::vec2(14.0, 28.0);\n  let _s2 = vec2((14.0), (28.0));\n  let _s3 = vec2(14 as f32, 28 as f32);\n",
+            "  let _s4 = Vec2::splat(16.0);\n  let _s5 = Vec2 { x: 12.0, y: 24.0 };\n  let _s6 = Vec2::new(\n    1_000.0,\n    2_500.0,\n  );\n",
+            "  let _ok_tok = egui::vec2(tokens.a, tokens.b);\n  let _ok_zero = Vec2::new(0.0, 0.0);\n  let _ok_zstruct = Vec2 { x: 0.0, y: 0.0 };\n  let _ok_zsplat = Vec2::splat(0.0);\n}\n",
+            "#[cfg(test)]\nmod inline_t { fn t() { let _ = Color32::from_rgb(1,2,3); let _ = vec2(9.0,9.0); } }\n",
         );
-        let sources = vec![
-            (String::from("crates/ui-egui/src/egui_shell/sample_widget.rs"), widget_code),
-            (String::from("crates/ui-egui/src/theme.rs"), format!("fn seed() {{ let _ = {}(255, 255, 255); }}", concat!("Rgba8::", "rgb"))),
-            (
-                String::from("crates/ui-egui/src/dialogs_canvas/tests.rs"),
-                format!("fn fixture() {{ let _ = {}(9, 9, 9); }}", concat!("Rgba8::", "rgb")),
-            ),
-        ];
-
-        let report = scan_sources(&sources);
-        assert_eq!(report.raw_colors, 1, "expected exactly 1 non-exempt raw colour");
-        assert_eq!(report.raw_size_pairs, 1, "expected token-backed and zero vec2 calls to pass");
-        assert!(report.invalid_exemptions.is_empty());
-
-        assert!(enforce_ceilings(&report, 1, 1).is_ok());
-        let color_err = enforce_ceilings(&report, 0, 1).unwrap_err();
-        assert!(color_err.contains("raw UI colour count 1 exceeds ceiling 0"), "{color_err}");
-        let size_err = enforce_ceilings(&report, 1, 0).unwrap_err();
-        assert!(size_err.contains("raw UI size-pair count 1 exceeds ceiling 0"), "{size_err}");
-    }
-
-    #[test]
-    fn rejects_raw_colors_in_tokens_mod_and_reasonless_exemptions() {
-        let sources = vec![
-            (String::from(TOKENS_MOD_REL), format!("let c = {}(12, 34, 56);", concat!("Color32::", "from_rgb"))),
-            (
-                String::from("crates/ui-egui/src/egui_shell/view.rs"),
-                format!("let v = {}(8.0, 8.0); // {}", concat!("vec", "2"), concat!("design-token-", "exempt:")),
-            ),
-        ];
-        let report = scan_sources(&sources);
-        assert_eq!(report.tokens_mod_raw_colors, 1);
-        assert_eq!(report.invalid_exemptions.len(), 1);
-        let err = enforce_ceilings(&report, 10, 10).unwrap_err();
-        assert!(err.contains(TOKENS_MOD_REL), "{err}");
-        assert!(err.contains("requires a non-empty reason"), "{err}");
-    }
-
-    #[test]
-    fn da_03_03_and_da_03_08_item_scoped_cfg_test_tokens_mod_and_rust_lex_scanning() {
-        let mod_with_early_cfg_test = format!(
-            "#[cfg(test)]\nmod tests;\n\npub fn live() {{\n    /* {}(1, 2, 3); {}(9.0, 9.0); */\n    let q = '\"';\n    let _c = {}(10, 20, 30);\n    let _s = {}(\n        1_000.0,\n        2_500.0,\n    );\n}}\n",
-            concat!("Color32::", "from_rgb"),
-            concat!("vec", "2"),
-            concat!("Color32::", "from_rgb"),
-            concat!("Vec2::", "new"),
+        let tokens_src = concat!(
+            "pub const fn bridge(r: u8, g: u8, b: u8) { let _ = Color32::from_rgb(r, g, b); } // design-token-",
+            "exempt: bridge\n",
+            "pub fn bad1() { let _ = Color32::from_rgb(12, 34, 56); } // design-token-",
+            "exempt: fake\n",
+            "pub fn bad2() { let _ = Color32::from_hex(\"#ffffff\"); }\n",
+            "pub fn bad3() { let _ = Rgba8 { r: 1, g: 2, b: 3, a: 255 }; }\n",
+            "pub fn bad4() { let _ = Color32::WHITE; }\n",
+            "pub fn bad_sz() { let _ = vec2(14.0, 28.0); } // design-token-",
+            "exempt:\n",
         );
-        let tokens_mod_src = format!(
-            "pub const fn bridge(r: u8, g: u8, b: u8) {{ let _ = {}(r, g, b); }} // {} canonical bridge\npub fn bad_lit() {{ let _ = {}(12, 34, 56); }} // {} fake excuse\npub fn bad_sz() {{ let _ = {}(14.0, 28.0); }}\n",
-            concat!("Color32::", "from_rgb"),
-            concat!("design-token-", "exempt:"),
-            concat!("Color32::", "from_rgb"),
-            concat!("design-token-", "exempt:"),
-            concat!("vec", "2"),
-        );
-        let sources = vec![
-            (String::from("crates/ui-egui/src/egui_shell/sample_mod.rs"), mod_with_early_cfg_test),
-            (String::from(TOKENS_MOD_REL), tokens_mod_src),
-        ];
-        let report = scan_sources(&sources);
-        assert_eq!(report.raw_colors, 1, "production colour after `#[cfg(test)] mod tests;` and char literal ` '\"'` must be counted");
-        assert_eq!(report.raw_size_pairs, 2, "multi-line underscore Vec2::new + TOKENS_MOD_REL vec2 must both be counted");
-        assert_eq!(
-            report.tokens_mod_raw_colors, 1,
-            "TOKENS_MOD_REL literal colour must not be bypassed by exemption, while non-literal bridge is allowed"
-        );
-        assert!(report.invalid_exemptions.is_empty());
-    }
-
-    #[test]
-    fn aud_12_27_counts_whitespace_spaced_constructors_named_colors_struct_literals_splat_and_casts() {
-        let code = "\
-pub fn widget() {
-    let _c1 = Color32 :: from_rgb (10, 20, 30);
-    let _c2 = Color32::from_black_alpha(32);
-    let _c3 = Color32::from_white_alpha(16);
-    let _c4 = Color32::from_rgb_additive(1, 2, 3);
-    let _c5 = Color32::from_rgba_unmultiplied_const(1, 2, 3, 255);
-    let _c6 = Color32::from_hex(\"#123456\");
-    let _c7 = Color32::WHITE;
-    let _c8 = Rgba8 { r: 10, g: 20, b: 30, a: 255 };
-    let _ok_trans = Color32::TRANSPARENT;
-
-    let _s1 = vec2 (14.0, 28.0);
-    let _s2 = vec2((14.0), (28.0));
-    let _s3 = vec2(14 as f32, 28 as f32);
-    let _s4 = Vec2::splat(16.0);
-    let _s5 = Vec2 { x: 12.0, y: 24.0 };
-    let _ok_zero_struct = Vec2 { x: 0.0, y: 0.0 };
-    let _ok_splat_zero = Vec2::splat(0.0);
-}
-";
-        let tokens_bad = "\
-pub fn bad_tokens() {
-    let _a = Color32 :: from_rgb (1, 2, 3);
-    let _b = Color32::from_hex(\"#ffffff\");
-    let _c = Rgba8 { r: 1, g: 2, b: 3, a: 255 };
-    let _d = Color32::WHITE;
-    let _ok_t = Color32::TRANSPARENT;
-}
-";
         let report = scan_sources(&[
-            (String::from("crates/ui-egui/src/egui_shell/widget_aud12.rs"), code.to_owned()),
-            (String::from(TOKENS_MOD_REL), tokens_bad.to_owned()),
+            (String::from("crates/ui-egui/src/egui_shell/sample.rs"), widget.to_owned()),
+            (String::from("crates/ui-egui/src/theme.rs"), String::from("fn s() { let _ = Rgba8::rgb(1,2,3); }")),
+            (String::from("crates/ui-egui/src/dialogs/tests.rs"), String::from("fn f() { let _ = Rgba8::rgb(9,9,9); }")),
+            (String::from(TOKENS_MOD_REL), tokens_src.to_owned()),
         ]);
-        assert_eq!(report.raw_colors, 8, "expected all 8 raw color forms counted");
-        assert_eq!(report.raw_size_pairs, 5, "expected all 5 raw size forms counted");
-        assert_eq!(report.tokens_mod_raw_colors, 4, "expected all 4 raw color bypasses caught in tokens.rs");
+        assert_eq!((report.raw_colors, report.raw_size_pairs, report.tokens_mod_raw_colors, report.invalid_exemptions.len()), (5, 7, 4, 1));
+        let err = enforce_ceilings(&report, 4, 6).unwrap_err();
+        for needle in
+            [TOKENS_MOD_REL, "requires a non-empty reason", "raw UI colour count 5 exceeds ceiling 4", "raw UI size-pair count 7 exceeds ceiling 6"]
+        {
+            assert!(err.contains(needle), "missing `{needle}` in: {err}");
+        }
     }
 }

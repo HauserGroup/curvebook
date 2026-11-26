@@ -6,16 +6,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::scan_util::strip_toml_comment;
+use crate::scan_util::{TomlEntry, TomlVal, parse_toml_entries};
 
 const USAGE: &str = "usage: cargo xtask licenses [--check | --html [path]]";
-const CARGO_LICENSE_WALL_TIMEOUT: Duration = Duration::from_secs(900);
-const CARGO_LICENSE_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
+const CARGO_LICENSE_TIMEOUT: Duration = Duration::from_secs(900);
 
 fn parse_args(root: &Path, args: &[String]) -> Result<Option<Option<PathBuf>>, String> {
-    let mut html_out: Option<PathBuf> = None;
-    let mut saw_check = false;
-    let mut idx = 0usize;
+    let (mut html_out, mut saw_check, mut idx) = (None, false, 0usize);
     while let Some(arg) = args.get(idx).map(String::as_str) {
         match arg {
             "--check" => {
@@ -26,23 +23,19 @@ fn parse_args(root: &Path, args: &[String]) -> Result<Option<Option<PathBuf>>, S
                 if html_out.is_some() {
                     return Err(format!("duplicate `--html` flag\n{USAGE}"));
                 }
-                let target = match args.get(idx + 1).map(String::as_str) {
+                html_out = Some(match args.get(idx + 1).map(String::as_str) {
                     None => {
                         idx += 1;
                         root.join("licenses/THIRD-PARTY-LICENSES.html")
                     }
-                    Some(next) if next.starts_with('-') => {
-                        return Err(format!("unexpected flag `{next}` after `--html` (expected output path)\n{USAGE}"));
-                    }
-                    Some(next) if next.trim().is_empty() => {
-                        return Err(format!("empty output path after `--html`\n{USAGE}"));
+                    Some(next) if next.starts_with('-') || next.trim().is_empty() => {
+                        return Err(format!("invalid output path `{next}` after `--html`\n{USAGE}"));
                     }
                     Some(next) => {
                         idx += 2;
                         PathBuf::from(next)
                     }
-                };
-                html_out = Some(target);
+                });
             }
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -58,41 +51,32 @@ fn parse_args(root: &Path, args: &[String]) -> Result<Option<Option<PathBuf>>, S
 }
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
-    let Some(html_out) = parse_args(root, args)? else {
-        return Ok(());
-    };
-
+    let Some(html_out) = parse_args(root, args)? else { return Ok(()) };
     let allow = check_allowlist_parity(root)?;
     println!("licenses: deny.toml <-> about.toml allowlist parity verified ({} SPDX identifiers)", allow.len());
-
     if let Some(out_path) = html_out {
         return run_cargo_about_html(root, &out_path);
     }
-
     let out = crate::dev_tool_command("cargo")
         .current_dir(root)
         .args(["deny", "check", "licenses"])
-        .wall_timeout(CARGO_LICENSE_WALL_TIMEOUT)
-        .idle_timeout(CARGO_LICENSE_IDLE_TIMEOUT)
-        .run();
-    match out {
-        Ok(res) if res.success => {
-            if !res.stdout.is_empty() {
-                print!("{}", String::from_utf8_lossy(&res.stdout));
-            }
-            println!("licenses: `cargo deny check licenses` passed");
-            Ok(())
+        .wall_timeout(CARGO_LICENSE_TIMEOUT)
+        .idle_timeout(CARGO_LICENSE_TIMEOUT)
+        .run()
+        .map_err(|e| format!("failed running `cargo deny check licenses`: {e}"))?;
+    if out.success {
+        if !out.stdout.is_empty() {
+            print!("{}", String::from_utf8_lossy(&out.stdout));
         }
-        Ok(res) => {
-            let stderr = String::from_utf8_lossy(&res.stderr);
-            if !crate::workflows::is_ci_env() && stderr.contains("no such command: `deny`") {
-                eprintln!("licenses: warning: `cargo-deny` not installed locally; skipping external check");
-                return Ok(());
-            }
-            Err(format!("`cargo deny check licenses` failed ({:?}):\n{}", res.status_code, stderr.trim()))
-        }
-        Err(err) => Err(format!("failed running `cargo deny check licenses`: {err}")),
+        println!("licenses: `cargo deny check licenses` passed");
+        return Ok(());
     }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !crate::workflows::is_ci_env() && stderr.contains("no such command: `deny`") {
+        eprintln!("licenses: warning: `cargo-deny` not installed locally; skipping external check");
+        return Ok(());
+    }
+    Err(format!("`cargo deny check licenses` failed ({:?}):\n{}", out.status_code, stderr.trim()))
 }
 
 fn run_cargo_about_html(root: &Path, out_path: &Path) -> Result<(), String> {
@@ -104,8 +88,8 @@ fn run_cargo_about_html(root: &Path, out_path: &Path) -> Result<(), String> {
     let res = crate::dev_tool_command("cargo")
         .current_dir(root)
         .args(["about", "generate", "about.hbs", "-o", out_str])
-        .wall_timeout(CARGO_LICENSE_WALL_TIMEOUT)
-        .idle_timeout(CARGO_LICENSE_IDLE_TIMEOUT)
+        .wall_timeout(CARGO_LICENSE_TIMEOUT)
+        .idle_timeout(CARGO_LICENSE_TIMEOUT)
         .run()
         .map_err(|e| format!("failed running `cargo about generate`: {e}"))?;
     if !res.success {
@@ -129,124 +113,27 @@ fn check_allowlist_parity(root: &Path) -> Result<BTreeSet<String>, String> {
 }
 
 fn parse_toml_string_array(raw: &str, expected_section: Option<&str>, key: &str) -> Result<BTreeSet<String>, String> {
-    let mut current_section: Option<String> = None;
-    let mut in_array = false;
-    let mut found = false;
-    let mut items = BTreeSet::new();
-
-    for line in raw.lines() {
-        let clean = strip_toml_comment(line).trim();
-        if clean.is_empty() {
-            continue;
-        }
-        if !in_array {
-            if let Some(sec) = parse_toml_section_header(clean) {
-                current_section = Some(sec);
-                continue;
+    let target: Vec<&str> = expected_section.into_iter().chain(std::iter::once(key)).collect();
+    let mut found = None;
+    for entry in parse_toml_entries(raw) {
+        if let TomlEntry::Leaf { path, value, .. } = entry
+            && path.iter().map(String::as_str).collect::<Vec<_>>() == target
+        {
+            if found.is_some() {
+                return Err(format!("duplicate `{key}` key in TOML section {expected_section:?}"));
             }
-            if current_section.as_deref() != expected_section {
-                continue;
+            let TomlVal::Array(elems) = value else {
+                return Err(format!("expected `[` opening array for `{key}`"));
+            };
+            let mut items = BTreeSet::new();
+            for elem in elems {
+                let TomlVal::Str(s) = elem else { return Err(format!("unexpected non-string element in `{key}` array")) };
+                items.insert(s);
             }
-            if let Some((lhs, rhs)) = clean.split_once('=')
-                && lhs.trim() == key
-            {
-                if found {
-                    return Err(format!("duplicate `{key}` key in TOML section {expected_section:?}"));
-                }
-                let rhs = rhs.trim();
-                let Some(after_open) = rhs.strip_prefix('[') else {
-                    return Err(format!("expected `[` opening array for `{key}`"));
-                };
-                in_array = true;
-                if collect_toml_array_slice(after_open, &mut items)? {
-                    in_array = false;
-                    found = true;
-                }
-            }
-        } else if collect_toml_array_slice(clean, &mut items)? {
-            in_array = false;
-            found = true;
+            found = Some(items);
         }
     }
-    if in_array {
-        return Err(format!("unclosed `{key} = [...]` TOML array"));
-    }
-    if !found {
-        return Err(format!("missing `{key} = [...]` TOML array in section {expected_section:?}"));
-    }
-    Ok(items)
-}
-
-fn parse_toml_section_header(clean: &str) -> Option<String> {
-    if clean.starts_with("[[") && clean.ends_with("]]") {
-        let inner = clean.get(2..clean.len().saturating_sub(2))?.trim();
-        return Some(format!("[[{inner}]]"));
-    }
-    if clean.starts_with('[') && clean.ends_with(']') {
-        let inner = clean.get(1..clean.len().saturating_sub(1))?.trim();
-        return Some(inner.to_owned());
-    }
-    None
-}
-
-/// Parse single- and double-quoted TOML string elements up to an unquoted `]`.
-/// Returns `Ok(true)` if the closing `]` was encountered on this line.
-fn collect_toml_array_slice(slice: &str, out: &mut BTreeSet<String>) -> Result<bool, String> {
-    let bytes = slice.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b.is_ascii_whitespace() || b == b',' {
-            i += 1;
-        } else if b == b']' {
-            return Ok(true);
-        } else if b == b'"' {
-            let (val, next_i) = read_double_quoted(slice, i)?;
-            out.insert(val);
-            i = next_i;
-        } else if b == b'\'' {
-            let (val, next_i) = read_single_quoted(slice, i)?;
-            out.insert(val);
-            i = next_i;
-        } else {
-            return Err(format!("unexpected token in TOML string array near `{}`", slice.get(i..).unwrap_or("")));
-        }
-    }
-    Ok(false)
-}
-
-fn read_double_quoted(slice: &str, start: usize) -> Result<(String, usize), String> {
-    let mut out = String::new();
-    let mut escaped = false;
-    for (rel, ch) in slice.get(start + 1..).unwrap_or("").char_indices() {
-        if escaped {
-            match ch {
-                '"' => out.push('"'),
-                '\\' => out.push('\\'),
-                'n' => out.push('\n'),
-                'r' => out.push('\r'),
-                't' => out.push('\t'),
-                other => out.push(other),
-            }
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '"' {
-            return Ok((out, start + 1 + rel + 1));
-        } else {
-            out.push(ch);
-        }
-    }
-    Err(String::from("unterminated double-quoted TOML string in license array"))
-}
-
-fn read_single_quoted(slice: &str, start: usize) -> Result<(String, usize), String> {
-    let tail = slice.get(start + 1..).unwrap_or("");
-    let Some(rel) = tail.find('\'') else {
-        return Err(String::from("unterminated single-quoted TOML string in license array"));
-    };
-    let val = tail.get(..rel).unwrap_or("").to_owned();
-    Ok((val, start + 1 + rel + 1))
+    found.ok_or_else(|| format!("missing `{key} = [...]` TOML array in section {expected_section:?}"))
 }
 
 #[cfg(test)]
@@ -256,37 +143,22 @@ mod tests {
     use super::{check_allowlist_parity, parse_args, parse_toml_string_array};
 
     #[test]
-    fn deny_and_about_allowlists_match_on_workspace() {
+    fn allowlist_parity_toml_sections_and_cli_flags() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root");
         let allow = check_allowlist_parity(root).expect("allowlist parity");
         assert!(allow.contains("MIT") && allow.contains("Apache-2.0"), "{allow:?}");
-    }
 
-    #[test]
-    fn aud_12_35_tracks_toml_sections_single_quoted_strings_and_rejects_flag_after_html() {
-        let deny = "\
-[bans]
-allow = [\"decoy-crate\"]
-
-[licenses]
-allow = [
-    \"MIT\", # inline comment
-    'Apache-2.0',
-    'GPL-3.0-only', # literal single-quoted SPDX id with # inside comment
-]
-";
+        let deny = "[bans]\nallow = [\"decoy\"]\n[licenses]\nallow = [\n  \"MIT\", # c\n  'Apache-2.0',\n  'GPL-3.0-only',\n]\n";
         let parsed = parse_toml_string_array(deny, Some("licenses"), "allow").unwrap();
-        assert!(parsed.contains("MIT") && parsed.contains("Apache-2.0") && parsed.contains("GPL-3.0-only"));
-        assert!(!parsed.contains("decoy-crate"), "must not read `[bans].allow`");
+        assert!(parsed.contains("MIT") && parsed.contains("Apache-2.0") && parsed.contains("GPL-3.0-only") && !parsed.contains("decoy"));
 
         let about = "accepted = [\n  \"MIT\",\n  'Apache-2.0',\n]\n[other]\naccepted = [\"Decoy\"]\n";
         let about_parsed = parse_toml_string_array(about, None, "accepted").unwrap();
         assert_eq!(about_parsed.len(), 2);
         assert!(!about_parsed.contains("Decoy"));
 
-        let root = Path::new(".");
-        assert!(parse_args(root, &[String::from("--html"), String::from("--check")]).is_err());
-        assert!(parse_args(root, &[String::from("--check"), String::from("--html")]).is_err());
-        assert!(parse_args(root, &[String::from("--html"), String::from("out.html")]).unwrap().flatten().is_some());
+        assert!(parse_args(Path::new("."), &[String::from("--html"), String::from("--check")]).is_err());
+        assert!(parse_args(Path::new("."), &[String::from("--check"), String::from("--html")]).is_err());
+        assert!(parse_args(Path::new("."), &[String::from("--html"), String::from("out.html")]).unwrap().flatten().is_some());
     }
 }

@@ -166,13 +166,10 @@ fn cmd_docs_site(_root: &Path, _rest: &[String]) -> Result<(), String> {
 }
 
 pub(crate) fn resolve_target_dir_from_env(root: &Path) -> PathBuf {
-    match std::env::var_os("CARGO_TARGET_DIR") {
-        Some(raw) if !raw.is_empty() => {
-            let path = PathBuf::from(raw);
-            if path.is_absolute() { path } else { root.join(path) }
-        }
-        _ => root.join("target"),
-    }
+    std::env::var_os("CARGO_TARGET_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .map_or_else(|| root.join("target"), |p| if p.is_absolute() { p } else { root.join(p) })
 }
 
 pub(crate) fn run_workspace_example(root: &Path, package: &str, example: &str, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -212,11 +209,9 @@ pub(crate) fn repo_files(root: &Path) -> Result<Vec<String>, String> {
     let listed = git_ls_files_nul(root, &["-c", "core.quotePath=false", "ls-files", "-z", "--cached", "--others", "--exclude-standard"])?;
     let deleted: std::collections::HashSet<String> =
         git_ls_files_nul(root, &["-c", "core.quotePath=false", "ls-files", "-z", "--deleted"])?.into_iter().collect();
-
     let mut files: Vec<String> = listed.into_iter().filter(|p| !deleted.contains(p)).collect();
     files.sort();
     files.dedup();
-
     for path in &files {
         let full = root.join(path);
         let meta = std::fs::symlink_metadata(&full).map_err(|e| format!("repo file `{path}` is not accessible: {e}"))?;
@@ -233,19 +228,23 @@ fn git_ls_files_nul(root: &Path, args: &[&str]) -> Result<Vec<String>, String> {
     if !out.status.success() {
         return Err(format!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr)));
     }
-    let mut paths = Vec::new();
-    for raw in out.stdout.split(|&b| b == 0) {
-        if raw.is_empty() {
-            continue;
-        }
-        let path = std::str::from_utf8(raw).map_err(|e| format!("git ls-files utf-8: {e}"))?;
-        paths.push(path.to_owned());
-    }
-    Ok(paths)
+    out.stdout
+        .split(|&b| b == 0)
+        .filter(|r| !r.is_empty())
+        .map(|r| std::str::from_utf8(r).map(str::to_owned).map_err(|e| format!("git ls-files utf-8: {e}")))
+        .collect()
 }
 
-fn run_cargo_metadata(root: &Path, args: &[&str]) -> Result<serde_json::Value, String> {
-    let out = Command::new("cargo").current_dir(root).args(args).output().map_err(|e| format!("cargo metadata: {e}"))?;
+fn run_cargo_metadata(root: &Path, no_deps: bool) -> Result<serde_json::Value, String> {
+    let mut args = vec!["metadata"];
+    if root.join("Cargo.lock").is_file() {
+        args.push("--locked");
+    }
+    args.extend(["--format-version", "1"]);
+    if no_deps {
+        args.push("--no-deps");
+    }
+    let out = Command::new("cargo").current_dir(root).args(&args).output().map_err(|e| format!("cargo metadata: {e}"))?;
     if !out.status.success() {
         return Err(format!("cargo metadata failed: {}", String::from_utf8_lossy(&out.stderr)));
     }
@@ -253,24 +252,14 @@ fn run_cargo_metadata(root: &Path, args: &[&str]) -> Result<serde_json::Value, S
 }
 
 pub(crate) fn cargo_metadata(root: &Path) -> Result<serde_json::Value, String> {
-    if root.join("Cargo.lock").is_file() {
-        run_cargo_metadata(root, &["metadata", "--locked", "--format-version", "1", "--no-deps"])
-    } else {
-        run_cargo_metadata(root, &["metadata", "--format-version", "1", "--no-deps"])
-    }
+    run_cargo_metadata(root, true)
 }
-
 pub(crate) fn cargo_metadata_resolved(root: &Path) -> Result<serde_json::Value, String> {
-    if root.join("Cargo.lock").is_file() {
-        run_cargo_metadata(root, &["metadata", "--locked", "--format-version", "1"])
-    } else {
-        run_cargo_metadata(root, &["metadata", "--format-version", "1"])
-    }
+    run_cargo_metadata(root, false)
 }
 
 fn cmd_layers(root: &Path) -> Result<(), String> {
-    let meta = cargo_metadata_resolved(root)?;
-    let graph = layers::from_metadata(&meta)?;
+    let graph = layers::from_metadata(&cargo_metadata_resolved(root)?)?;
     let mut violations = layers::check(&graph);
     violations.extend(layers::check_manifest_patches(root));
     let mut hygiene = layers::check_source_hygiene(root);
@@ -280,23 +269,19 @@ fn cmd_layers(root: &Path) -> Result<(), String> {
         println!("layers: all {} workspace packages satisfy L0..L7 dependency rules and source hygiene", graph.len());
         return Ok(());
     }
-    let mut lines: Vec<String> = violations.iter().map(ToString::to_string).collect();
-    lines.extend(hygiene.iter().map(ToString::to_string));
+    let lines: Vec<String> = violations.iter().map(ToString::to_string).chain(hygiene.iter().map(ToString::to_string)).collect();
     Err(scan_util::format_error_list("layer/hygiene violation(s)", &lines))
 }
 
 fn cmd_test(root: &Path, extra: &[String]) -> Result<(), String> {
     let use_nextest = has_cargo_nextest();
-    if use_nextest {
-        let mut args =
-            vec![String::from("nextest"), String::from("run"), String::from("--locked"), String::from("--workspace"), String::from("--all-targets")];
-        args.extend_from_slice(extra);
-        run_cargo(root, &args)?;
-    } else {
-        let mut args = vec![String::from("test"), String::from("--locked"), String::from("--workspace"), String::from("--all-targets")];
-        args.extend_from_slice(extra);
-        run_cargo(root, &args)?;
-    }
+    let mut args: Vec<String> = (if use_nextest { &["nextest", "run"][..] } else { &["test"] })
+        .iter()
+        .chain(&["--locked", "--workspace", "--all-targets"])
+        .map(|&s| s.to_owned())
+        .collect();
+    args.extend_from_slice(extra);
+    run_cargo(root, &args)?;
     if extra.is_empty() {
         run_cargo(root, &ci::docs_site_test_args(use_nextest))?;
     }
@@ -313,42 +298,24 @@ fn cmd_i18n_report(root: &Path) -> Result<(), String> {
     if !out.status.success() {
         return Err(format!("cargo i18n-report failed with {}", out.status));
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    verify_exact_single_test_passed(&stdout, TEST_PATH)
+    verify_exact_single_test_passed(&String::from_utf8_lossy(&out.stdout), TEST_PATH)
 }
 
 fn verify_exact_single_test_passed(stdout: &str, test_name: &str) -> Result<(), String> {
     let summary = stdout
         .lines()
-        .find_map(|line| line.trim().strip_prefix("test result: ok."))
+        .find_map(|l| l.trim().strip_prefix("test result: ok."))
         .ok_or_else(|| format!("i18n-report: expected `test result: ok.` summary for `{test_name}`"))?;
-
-    let mut passed: Option<usize> = None;
-    let mut failed: Option<usize> = None;
-    let mut ignored: Option<usize> = None;
-    for part in summary.split(';') {
-        let p = part.trim();
-        if let Some(num) = p.strip_suffix(" passed") {
-            passed = num.trim().parse::<usize>().ok();
-        } else if let Some(num) = p.strip_suffix(" failed") {
-            failed = num.trim().parse::<usize>().ok();
-        } else if let Some(num) = p.strip_suffix(" ignored") {
-            ignored = num.trim().parse::<usize>().ok();
-        }
-    }
-
-    if passed != Some(1) || failed != Some(0) || ignored != Some(0) {
+    let parse_k = |sfx: &str| summary.split(';').find_map(|p| p.trim().strip_suffix(sfx)?.trim().parse::<usize>().ok());
+    if (parse_k(" passed"), parse_k(" failed"), parse_k(" ignored")) != (Some(1), Some(0), Some(0)) {
         return Err(format!(
             "i18n-report: expected exact single passing test for `{test_name}` (1 passed; 0 failed; 0 ignored), got `{}`",
             summary.trim()
         ));
     }
-
-    let test_prefix = format!("test {test_name} ...");
-    if !stdout.lines().any(|line| line.trim_start().starts_with(&test_prefix)) {
+    if !stdout.lines().any(|l| l.trim_start().starts_with(&format!("test {test_name} ..."))) {
         return Err(format!("i18n-report: output did not execute `{test_name}`"));
     }
-
     Ok(())
 }
 
@@ -368,7 +335,7 @@ fn cmd_wasm(root: &Path) -> Result<(), String> {
 fn run_trunk_web_release_if_available(root: &Path) -> Result<(), String> {
     let require_trunk = workflows::parse_ci_env_value(std::env::var_os("CURVEBOOK_REQUIRE_TRUNK").as_deref())
         || web_fonts::parse_require_web_bundle_env(std::env::var_os("CURVEBOOK_REQUIRE_WEB_BUNDLE").as_deref());
-    if !has_trunk() {
+    if !Command::new("trunk").arg("--version").output().is_ok_and(|o| o.status.success()) {
         if require_trunk {
             return Err(String::from(
                 "`trunk` is not installed in PATH (required when CURVEBOOK_REQUIRE_TRUNK=1 or CURVEBOOK_REQUIRE_WEB_BUNDLE=1 is set)",
@@ -377,15 +344,12 @@ fn run_trunk_web_release_if_available(root: &Path) -> Result<(), String> {
         println!("wasm: `trunk` not found in PATH; skipping `trunk build --cargo-profile web-release` (set CURVEBOOK_REQUIRE_TRUNK=1 to require it)");
         return Ok(());
     }
-
-    let target_dir = resolve_target_dir_from_env(root);
-    let dist_dir = target_dir.join("wasm-trunk-dist");
+    let dist_dir = resolve_target_dir_from_env(root).join("wasm-trunk-dist");
     std::fs::create_dir_all(&dist_dir).map_err(|e| format!("mkdir {}: {e}", dist_dir.display()))?;
     let dist_arg = dist_dir.to_string_lossy().into_owned();
-    let web_dir = root.join("apps/curvebook-web");
     println!("+ (cd apps/curvebook-web && trunk build --dist {dist_arg} --cargo-profile web-release)");
     let status = Command::new("trunk")
-        .current_dir(&web_dir)
+        .current_dir(root.join("apps/curvebook-web"))
         .args(["build", "--dist", &dist_arg, "--cargo-profile", "web-release"])
         .status()
         .map_err(|e| format!("trunk build: {e}"))?;
@@ -395,18 +359,14 @@ fn run_trunk_web_release_if_available(root: &Path) -> Result<(), String> {
     if !dist_dir.join("index.html").is_file() {
         return Err(format!("trunk build succeeded, but `{}/index.html` is missing", dist_dir.display()));
     }
-    let has_wasm = std::fs::read_dir(&dist_dir)
+    if !std::fs::read_dir(&dist_dir)
         .map_err(|e| format!("read {}: {e}", dist_dir.display()))?
         .flatten()
-        .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("wasm"));
-    if !has_wasm {
+        .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("wasm"))
+    {
         return Err(format!("trunk build succeeded, but `{}` contains no `.wasm` binary", dist_dir.display()));
     }
     Ok(())
-}
-
-fn has_trunk() -> bool {
-    Command::new("trunk").arg("--version").output().is_ok_and(|o| o.status.success())
 }
 
 fn cargo_home_bin_dir(cargo_home: Option<&OsStr>, home: Option<&OsStr>, userprofile: Option<&OsStr>) -> Option<PathBuf> {
@@ -426,15 +386,9 @@ fn append_dir_to_path_if_missing(current_path: Option<&OsStr>, extra_dir: &Path)
 }
 
 fn cargo_path_with_fallback() -> Option<OsString> {
-    let cargo_home = std::env::var_os("CARGO_HOME");
-    let home = std::env::var_os("HOME");
-    let userprofile = std::env::var_os("USERPROFILE");
-    let bin_dir = cargo_home_bin_dir(cargo_home.as_deref(), home.as_deref(), userprofile.as_deref())?;
-    if !bin_dir.is_dir() {
-        return None;
-    }
-    let current = std::env::var_os("PATH");
-    append_dir_to_path_if_missing(current.as_deref(), &bin_dir)
+    let (ch, h, up) = (std::env::var_os("CARGO_HOME"), std::env::var_os("HOME"), std::env::var_os("USERPROFILE"));
+    let bin_dir = cargo_home_bin_dir(ch.as_deref(), h.as_deref(), up.as_deref())?;
+    bin_dir.is_dir().then(|| append_dir_to_path_if_missing(std::env::var_os("PATH").as_deref(), &bin_dir)).flatten()
 }
 
 fn cargo_command() -> Command {
@@ -446,64 +400,27 @@ fn cargo_command() -> Command {
 }
 
 fn run_cargo_strs(root: &Path, args: &[&str]) -> Result<(), String> {
-    let owned: Vec<String> = args.iter().map(|&s| s.to_owned()).collect();
-    run_cargo(root, &owned)
+    run_cargo(root, &args.iter().map(|&s| s.to_owned()).collect::<Vec<_>>())
 }
 
 fn run_cargo(root: &Path, args: &[String]) -> Result<(), String> {
     println!("+ cargo {}", args.join(" "));
     let status = cargo_command().current_dir(root).args(args).status().map_err(|e| format!("cargo {}: {e}", args.join(" ")))?;
-    if !status.success() {
-        return Err(format!("`cargo {}` failed with {status}", args.join(" ")));
-    }
-    Ok(())
+    if status.success() { Ok(()) } else { Err(format!("`cargo {}` failed with {status}", args.join(" "))) }
 }
 
 fn has_cargo_nextest() -> bool {
     cargo_command().args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success())
 }
 
-/// Build a bounded `ProcessCommand` for a local developer/CI tool (`cargo`, `rustc`, `rustfmt`,
-/// `git`, `curl`) while preserving the ambient toolchain environment (`PATH`, `CARGO_*`,
-/// `RUSTUP_*`, compiler/linker/proxy vars) that `ProcessCommand` strips by default for shipped
-/// desktop apps.
 pub(crate) fn dev_tool_command(program: &str) -> curvebook_platform::process::ProcessCommand {
-    const FORWARD_ENV_KEYS: &[&str] = &[
-        "PATH",
-        "PATHEXT",
-        "CARGO",
-        "CARGO_HOME",
-        "CARGO_TARGET_DIR",
-        "CARGO_NET_OFFLINE",
-        "RUSTUP_HOME",
-        "RUSTUP_TOOLCHAIN",
-        "RUSTC",
-        "RUSTC_WRAPPER",
-        "RUSTFMT",
-        "RUSTFLAGS",
-        "RUSTDOCFLAGS",
-        "LLVM_COV",
-        "LLVM_PROFDATA",
-        "CC",
-        "CXX",
-        "AR",
-        "SDKROOT",
-        "DEVELOPER_DIR",
-        "MACOSX_DEPLOYMENT_TARGET",
-        "CI",
-        "GITHUB_ACTIONS",
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "NO_PROXY",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-    ];
+    const FORWARD_ENV_KEYS: &str = "PATH PATHEXT CARGO CARGO_HOME CARGO_TARGET_DIR CARGO_NET_OFFLINE RUSTUP_HOME RUSTUP_TOOLCHAIN RUSTC RUSTC_WRAPPER RUSTFMT RUSTFLAGS RUSTDOCFLAGS LLVM_COV LLVM_PROFDATA CC CXX AR SDKROOT DEVELOPER_DIR MACOSX_DEPLOYMENT_TARGET CI GITHUB_ACTIONS HTTPS_PROXY HTTP_PROXY NO_PROXY SSL_CERT_FILE SSL_CERT_DIR";
     let mut cmd = curvebook_platform::process::ProcessCommand::new(program);
-    for key in FORWARD_ENV_KEYS {
+    for key in FORWARD_ENV_KEYS.split_ascii_whitespace() {
         if let Ok(val) = std::env::var(key)
             && !val.is_empty()
         {
-            cmd = cmd.env(*key, val);
+            cmd = cmd.env(key, val);
         }
     }
     if program == "cargo"
@@ -516,119 +433,86 @@ pub(crate) fn dev_tool_command(program: &str) -> curvebook_platform::process::Pr
 
 #[cfg(test)]
 mod tests {
-    use super::{repo_files, verify_exact_single_test_passed};
+    use super::*;
     use crate::scan_util::test_support::TestDir;
 
     #[test]
-    fn repo_files_preserves_non_ascii_and_quoted_paths() {
+    fn repo_files_handles_non_ascii_deleted_and_unreadable() {
         let dir = TestDir::git_repo("main-non-ascii");
         for rel in ["assets/logó.png", "assets/a\"b.png", "crates/format/tests/fixtures/données.pzfx"] {
             dir.write(rel, "fixture");
         }
         dir.run_git(&["add", "--", "assets", "crates"]);
         dir.write("packaging/linux/résumé.desktop", "[Desktop Entry]\n");
-
         assert_eq!(
             repo_files(dir.path()).unwrap(),
-            vec![
-                String::from("assets/a\"b.png"),
-                String::from("assets/logó.png"),
-                String::from("crates/format/tests/fixtures/données.pzfx"),
-                String::from("packaging/linux/résumé.desktop"),
-            ]
+            vec!["assets/a\"b.png", "assets/logó.png", "crates/format/tests/fixtures/données.pzfx", "packaging/linux/résumé.desktop"]
         );
-    }
 
-    #[test]
-    fn repo_files_skips_deleted_tracked_files_without_failing() {
-        let dir = TestDir::git_repo("main-deleted");
-        dir.write("kept.txt", "ok");
-        dir.write("removed.txt", "gone");
-        dir.run_git(&["add", "--", "kept.txt", "removed.txt"]);
-        dir.run_git(&["commit", "-m", "initial"]);
+        let del = TestDir::git_repo("main-deleted");
+        del.write("kept.txt", "ok");
+        del.write("removed.txt", "gone");
+        del.run_git(&["add", "--", "kept.txt", "removed.txt"]);
+        del.run_git(&["commit", "-m", "initial"]);
+        std::fs::remove_file(del.join("removed.txt")).unwrap();
+        assert_eq!(repo_files(del.path()).unwrap(), vec!["kept.txt"]);
 
-        std::fs::remove_file(dir.join("removed.txt")).unwrap();
-        assert_eq!(repo_files(dir.path()).unwrap(), vec![String::from("kept.txt")]);
-    }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            let s = TestDir::git_repo("main-symlink");
+            symlink("/nonexistent/target", s.join("broken.txt")).unwrap();
+            s.run_git(&["add", "--", "broken.txt"]);
+            assert!(repo_files(s.path()).is_err());
 
-    #[cfg(unix)]
-    #[test]
-    fn repo_files_rejects_broken_symlink_and_unreadable_file() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let dir_sym = TestDir::git_repo("main-symlink");
-        symlink("/nonexistent/target", dir_sym.join("broken.txt")).unwrap();
-        dir_sym.run_git(&["add", "--", "broken.txt"]);
-        let sym_res = repo_files(dir_sym.path());
-        assert!(sym_res.is_err(), "expected broken symlink to fail repo_files: {sym_res:?}");
-
-        let dir_perm = TestDir::git_repo("main-unreadable");
-        let secret = dir_perm.write("unreadable.txt", "data");
-        dir_perm.run_git(&["add", "--", "unreadable.txt"]);
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let perm_res = repo_files(dir_perm.path());
-        let _ = std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644));
-        assert!(perm_res.is_err(), "expected unreadable file to fail repo_files: {perm_res:?}");
-    }
-
-    #[test]
-    fn i18n_report_requires_exact_single_passing_test() {
-        const TEST: &str = "i18n::tests::untranslated_report";
-        let valid = "running 1 test\ntest i18n::tests::untranslated_report ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
-        assert!(verify_exact_single_test_passed(valid, TEST).is_ok());
-
-        // Even with --nocapture output before `ok`, `test <name> ...` line and `1 passed; 0 failed; 0 ignored;` still pass.
-        let nocapture = "running 1 test\nreport line 1\ntest i18n::tests::untranslated_report ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
-        assert!(verify_exact_single_test_passed(nocapture, TEST).is_ok());
-
-        for bad in [
-            "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
-            "running 11 tests\ntest i18n::tests::untranslated_report ... ok\n\ntest result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
-            "running 1 test\ntest i18n::tests::untranslated_report ... ignored\n\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out\n",
-            "running 1 test\ntest other::test ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
-            "running 1 test\ntest i18n::tests::untranslated_report ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;\n",
-        ] {
-            let res = verify_exact_single_test_passed(bad, TEST);
-            assert!(res.is_err(), "expected failure for output: {bad}");
+            let p = TestDir::git_repo("main-unreadable");
+            let secret = p.write("unreadable.txt", "data");
+            p.run_git(&["add", "--", "unreadable.txt"]);
+            std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let res = repo_files(p.path());
+            let _ = std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644));
+            assert!(res.is_err());
         }
     }
 
     #[test]
-    fn dev_tool_command_runs_host_rustfmt() {
-        let out = super::dev_tool_command("rustfmt").arg("--version").run().expect("rustfmt on host PATH should execute");
-        assert!(out.success, "rustfmt --version failed: {}", String::from_utf8_lossy(&out.stderr));
-        assert!(String::from_utf8_lossy(&out.stdout).contains("rustfmt"));
-    }
-
-    #[test]
-    fn cargo_bin_fallback_appends_cargo_home_without_overriding_existing_path() {
-        use std::ffi::OsStr;
-        use std::path::{Path, PathBuf};
-
+    fn i18n_report_parse_single_flag_dev_tool_and_cargo_path_fallback() {
+        const TEST: &str = "i18n::tests::untranslated_report";
+        for ok in [
+            "running 1 test\ntest i18n::tests::untranslated_report ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            "running 1 test\nreport\ntest i18n::tests::untranslated_report ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n",
+        ] {
+            assert!(verify_exact_single_test_passed(ok, TEST).is_ok());
+        }
+        for bad in [
+            "test result: ok. 0 passed; 0 failed; 0 ignored;\n",
+            "test i18n::tests::untranslated_report ... ok\ntest result: ok. 11 passed; 0 failed; 0 ignored;\n",
+            "test i18n::tests::untranslated_report ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored;\n",
+            "test other::test ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n",
+            "test i18n::tests::untranslated_report ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;\n",
+        ] {
+            assert!(verify_exact_single_test_passed(bad, TEST).is_err(), "{bad}");
+        }
+        let out = dev_tool_command("rustfmt").arg("--version").run().expect("rustfmt on host PATH should execute");
+        assert!(out.success && String::from_utf8_lossy(&out.stdout).contains("rustfmt"));
         assert_eq!(
-            super::cargo_home_bin_dir(Some(OsStr::new("/custom/cargo")), Some(OsStr::new("/opt/dev-profile")), None),
+            cargo_home_bin_dir(Some(OsStr::new("/custom/cargo")), Some(OsStr::new("/opt/dev")), None),
             Some(PathBuf::from("/custom/cargo/bin"))
         );
-        assert_eq!(
-            super::cargo_home_bin_dir(Some(OsStr::new("")), Some(OsStr::new("/opt/dev-profile")), None),
-            Some(PathBuf::from("/opt/dev-profile/.cargo/bin"))
-        );
-        assert_eq!(super::cargo_home_bin_dir(None, None, Some(OsStr::new("D:\\dev-profile"))), Some(PathBuf::from("D:\\dev-profile/.cargo/bin")));
-        assert_eq!(super::cargo_home_bin_dir(None, None, None), None);
-
+        assert_eq!(cargo_home_bin_dir(Some(OsStr::new("")), Some(OsStr::new("/opt/dev")), None), Some(PathBuf::from("/opt/dev/.cargo/bin")));
+        assert_eq!(cargo_home_bin_dir(None, None, Some(OsStr::new("D:\\dev"))), Some(PathBuf::from("D:\\dev/.cargo/bin")));
+        assert_eq!(cargo_home_bin_dir(None, None, None), None);
         let existing = std::env::join_paths([Path::new("/usr/local/bin"), Path::new("/usr/bin")]).unwrap();
-        let updated = super::append_dir_to_path_if_missing(Some(existing.as_os_str()), Path::new("/opt/dev-profile/.cargo/bin")).unwrap();
-        let parts: Vec<PathBuf> = std::env::split_paths(&updated).collect();
-        assert_eq!(parts, vec![PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin"), PathBuf::from("/opt/dev-profile/.cargo/bin")]);
-        assert!(super::append_dir_to_path_if_missing(Some(updated.as_os_str()), Path::new("/opt/dev-profile/.cargo/bin")).is_none());
-    }
-
-    #[test]
-    fn aud_12_50_parse_single_flag_rejects_typos_and_extra_args() {
-        assert_eq!(super::parse_single_flag(&[], "--check", "usage"), Ok(false));
-        assert_eq!(super::parse_single_flag(&[String::from("--check")], "--check", "usage"), Ok(true));
-        assert!(super::parse_single_flag(&[String::from("--chck")], "--check", "usage").is_err());
-        assert!(super::parse_single_flag(&[String::from("--check"), String::from("--check")], "--check", "usage").is_err());
-        assert!(super::parse_single_flag(&[String::from("--exact"), String::from("extra")], "--exact", "usage").is_err());
+        let updated = append_dir_to_path_if_missing(Some(existing.as_os_str()), Path::new("/opt/dev/.cargo/bin")).unwrap();
+        assert_eq!(
+            std::env::split_paths(&updated).collect::<Vec<_>>(),
+            vec![PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin"), PathBuf::from("/opt/dev/.cargo/bin")]
+        );
+        assert!(append_dir_to_path_if_missing(Some(updated.as_os_str()), Path::new("/opt/dev/.cargo/bin")).is_none());
+        assert_eq!((parse_single_flag(&[], "--check", "u"), parse_single_flag(&["--check".into()], "--check", "u")), (Ok(false), Ok(true)));
+        assert!(
+            parse_single_flag(&["--chck".into()], "--check", "u").is_err()
+                && parse_single_flag(&["--check".into(), "--check".into()], "--check", "u").is_err()
+        );
     }
 }

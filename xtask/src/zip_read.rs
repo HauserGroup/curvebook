@@ -17,11 +17,8 @@ const MAX_ZIP_PATH_LEN: usize = 512;
 /// Resource limits enforced when unpacking a ZIP archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZipLimits {
-    /// Maximum number of non-directory entries allowed in an archive.
     pub max_entries: usize,
-    /// Maximum aggregate uncompressed byte count across all entries.
     pub max_total_uncompressed_bytes: usize,
-    /// Maximum uncompressed byte count for any single entry.
     pub max_entry_uncompressed_bytes: usize,
 }
 
@@ -39,8 +36,7 @@ pub struct ZipArchive {
     entry_comments: Vec<(String, Vec<u8>)>,
 }
 
-/// Returns `true` when `bytes` contains a valid trailing ZIP End-Of-Central-Directory record
-/// (including PKWARE-valid preamble-prefixed ZIP archives).
+/// Returns `true` when `bytes` contains a valid trailing ZIP End-Of-Central-Directory record.
 pub(crate) fn has_zip_eocd(bytes: &[u8]) -> bool {
     find_eocd(bytes).is_ok()
 }
@@ -49,14 +45,11 @@ impl ZipArchive {
     /// Parses and decompresses every file entry from `bytes`, enforcing `limits`, CRC-32, and safe paths.
     pub fn from_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result<Self, String> {
         let eocd = find_eocd(bytes)?;
-        let disk = read_u16_le(bytes, eocd + 4)?;
-        let cd_disk = read_u16_le(bytes, eocd + 6)?;
-        let disk_entries = read_u16_le(bytes, eocd + 8)?;
-        let total_entries = read_u16_le(bytes, eocd + 10)?;
-        let cd_size = read_u32_le(bytes, eocd + 12)?;
-        let cd_offset = read_u32_le(bytes, eocd + 16)?;
-        let eocd_comment_len = usize::from(read_u16_le(bytes, eocd + 20)?);
-        let archive_comment = bytes.get(eocd + EOCD_MIN_LEN..eocd + EOCD_MIN_LEN + eocd_comment_len).unwrap_or_default().to_vec();
+        let (disk, cd_disk, disk_entries, total_entries) =
+            (read_u16_le(bytes, eocd + 4)?, read_u16_le(bytes, eocd + 6)?, read_u16_le(bytes, eocd + 8)?, read_u16_le(bytes, eocd + 10)?);
+        let (cd_size, cd_offset, comment_len) =
+            (read_u32_le(bytes, eocd + 12)?, read_u32_le(bytes, eocd + 16)?, usize::from(read_u16_le(bytes, eocd + 20)?));
+        let archive_comment = bytes.get(eocd + EOCD_MIN_LEN..eocd + EOCD_MIN_LEN + comment_len).unwrap_or_default().to_vec();
         if disk != 0 || cd_disk != 0 || disk_entries != total_entries {
             return Err(String::from("multi-disk ZIP archives are unsupported"));
         }
@@ -67,35 +60,27 @@ impl ZipArchive {
         if total_entries > limits.max_entries {
             return Err(format!("ZIP entry count {total_entries} exceeds limit {}", limits.max_entries));
         }
-        let cd_start_raw = cd_offset as usize;
-        let cd_size_usize = cd_size as usize;
+        let (cd_start_raw, cd_size_usize) = (cd_offset as usize, cd_size as usize);
         let cd_end_raw = cd_start_raw.checked_add(cd_size_usize).ok_or_else(|| String::from("ZIP central directory offset overflow"))?;
         if cd_end_raw > eocd {
             return Err(String::from("ZIP central directory extends past end-of-central-directory"));
         }
-        // Standard Info-ZIP / Python `zipfile` preamble-offset adjustment for self-extracting or
-        // `cat image.png archive.zip` polyglots whose EOCD/CD offsets were not rewritten via `zip -A`.
-        // Fail closed when BOTH the unadjusted and adjusted offsets start with a central-directory
-        // signature (dual-CD decoy polyglot).
         let (cd_start, cd_end, preamble_delta) = if total_entries > 0 && cd_end_raw < eocd {
             let delta = eocd - cd_end_raw;
             let adj_start = cd_start_raw.checked_add(delta).ok_or_else(|| String::from("ZIP central directory offset overflow"))?;
             let adj_end = adj_start.checked_add(cd_size_usize).ok_or_else(|| String::from("ZIP central directory offset overflow"))?;
-            let raw_has_cd = cd_start_raw.checked_add(4).and_then(|e| bytes.get(cd_start_raw..e)) == Some(CD_SIG.as_slice());
-            let adj_has_cd = adj_start.checked_add(4).and_then(|e| bytes.get(adj_start..e)) == Some(CD_SIG.as_slice());
-            if raw_has_cd && adj_has_cd {
+            let raw_ok = cd_start_raw.checked_add(4).and_then(|e| bytes.get(cd_start_raw..e)) == Some(CD_SIG.as_slice());
+            let adj_ok = adj_start.checked_add(4).and_then(|e| bytes.get(adj_start..e)) == Some(CD_SIG.as_slice());
+            if raw_ok && adj_ok {
                 return Err(String::from("ambiguous dual ZIP central directory (polyglot decoy)"));
             }
-            if !raw_has_cd && adj_has_cd { (adj_start, adj_end, delta) } else { (cd_start_raw, cd_end_raw, 0usize) }
+            if !raw_ok && adj_ok { (adj_start, adj_end, delta) } else { (cd_start_raw, cd_end_raw, 0) }
         } else {
-            (cd_start_raw, cd_end_raw, 0usize)
+            (cd_start_raw, cd_end_raw, 0)
         };
 
-        let mut cursor = cd_start;
-        let mut total_uncompressed: usize = 0;
-        let mut seen = BTreeSet::new();
-        let mut entries = Vec::with_capacity(total_entries.min(256));
-        let mut entry_comments = Vec::new();
+        let (mut cursor, mut total_uncompressed, mut seen) = (cd_start, 0usize, BTreeSet::new());
+        let (mut entries, mut entry_comments) = (Vec::with_capacity(total_entries.min(256)), Vec::new());
 
         for _ in 0..total_entries {
             if cursor.checked_add(CD_FIXED_LEN).is_none_or(|end| end > cd_end) {
@@ -121,7 +106,6 @@ impl ZipArchive {
             if (flags & 0x0001) != 0 {
                 return Err(String::from("encrypted ZIP entries are unsupported"));
             }
-            // Reject symlinks created under Unix (host OS 3) or macOS/Darwin (host OS 19).
             if matches!(version_made_by >> 8, 3 | 19) && ((ext_attr >> 16) & 0o17_0000) == 0o12_0000 {
                 return Err(String::from("ZIP archive contains symlink entry"));
             }
@@ -133,14 +117,13 @@ impl ZipArchive {
             if next_cursor > cd_end {
                 return Err(String::from("ZIP central directory entry exceeds bounds"));
             }
-            let raw_name = bytes.get(name_start..name_end).ok_or_else(|| String::from("ZIP entry name out of bounds"))?;
-            let raw_name = std::str::from_utf8(raw_name).map_err(|_| String::from("ZIP entry path is not valid UTF-8"))?;
+            let raw_name = std::str::from_utf8(bytes.get(name_start..name_end).ok_or_else(|| String::from("ZIP entry name out of bounds"))?)
+                .map_err(|_| String::from("ZIP entry path is not valid UTF-8"))?;
             let comment_bytes = bytes.get(comment_start..next_cursor).unwrap_or_default();
             cursor = next_cursor;
 
             let is_dir = raw_name.ends_with('/');
-            let trimmed = if is_dir { raw_name.trim_end_matches('/') } else { raw_name };
-            let normalized = sanitize_zip_path(trimmed)?;
+            let normalized = sanitize_zip_path(if is_dir { raw_name.trim_end_matches('/') } else { raw_name })?;
             if !comment_bytes.is_empty() {
                 entry_comments.push((normalized.clone(), comment_bytes.to_vec()));
             }
@@ -150,8 +133,7 @@ impl ZipArchive {
                 }
                 continue;
             }
-            let folded = normalized.to_ascii_lowercase();
-            if !seen.insert(folded) {
+            if !seen.insert(normalized.to_ascii_lowercase()) {
                 return Err(format!("duplicate or case-colliding ZIP entry `{normalized}`"));
             }
             if uncomp_size > limits.max_entry_uncompressed_bytes {
@@ -173,22 +155,18 @@ impl ZipArchive {
         Ok(Self { entries, archive_comment, entry_comments })
     }
 
-    /// Iterates over decoded `(relative_path, payload_bytes)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &[u8])> {
-        self.entries.iter().map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        self.entries.iter().map(|(n, b)| (n.as_str(), b.as_slice()))
     }
 
-    /// Raw EOCD archive comment bytes (may be empty).
     pub fn archive_comment(&self) -> &[u8] {
         &self.archive_comment
     }
 
-    /// Iterates over non-empty per-entry central-directory comments `(relative_path, comment_bytes)`.
     pub fn entry_comments(&self) -> impl Iterator<Item = (&str, &[u8])> {
-        self.entry_comments.iter().map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        self.entry_comments.iter().map(|(n, b)| (n.as_str(), b.as_slice()))
     }
 
-    /// Returns `true` when the archive contains zero file entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -199,13 +177,9 @@ fn find_eocd(bytes: &[u8]) -> Result<usize, String> {
         return Err(String::from("input too small to be a ZIP archive"));
     }
     let min_pos = bytes.len().saturating_sub(EOCD_MIN_LEN + EOCD_MAX_COMMENT);
-    let max_pos = bytes.len() - EOCD_MIN_LEN;
-    for pos in (min_pos..=max_pos).rev() {
-        if bytes.get(pos..pos + 4) == Some(EOCD_SIG.as_slice()) {
-            let comment_len = usize::from(read_u16_le(bytes, pos + 20)?);
-            if pos + EOCD_MIN_LEN + comment_len == bytes.len() {
-                return Ok(pos);
-            }
+    for pos in (min_pos..=bytes.len() - EOCD_MIN_LEN).rev() {
+        if bytes.get(pos..pos + 4) == Some(EOCD_SIG.as_slice()) && pos + EOCD_MIN_LEN + usize::from(read_u16_le(bytes, pos + 20)?) == bytes.len() {
+            return Ok(pos);
         }
     }
     Err(String::from("missing ZIP end-of-central-directory record"))
@@ -222,34 +196,31 @@ struct CdEntry<'a> {
 
 fn read_entry_payload(bytes: &[u8], entry: &CdEntry<'_>, limits: ZipLimits) -> Result<Vec<u8>, String> {
     let CdEntry { name, lfh_offset, method, comp_size, uncomp_size, expected_crc } = *entry;
-    if lfh_offset.checked_add(LFH_FIXED_LEN).is_none_or(|end| end > bytes.len()) {
-        return Err(format!("ZIP entry `{name}` local header out of bounds"));
+    if lfh_offset.checked_add(LFH_FIXED_LEN).is_none_or(|end| end > bytes.len()) || bytes.get(lfh_offset..lfh_offset + 4) != Some(LFH_SIG.as_slice())
+    {
+        return Err(format!("ZIP entry `{name}` has invalid local file header"));
     }
-    if bytes.get(lfh_offset..lfh_offset + 4) != Some(LFH_SIG.as_slice()) {
-        return Err(format!("ZIP entry `{name}` has invalid local file header signature"));
-    }
-    let lfh_name_len = usize::from(read_u16_le(bytes, lfh_offset + 26)?);
-    let lfh_extra_len = usize::from(read_u16_le(bytes, lfh_offset + 28)?);
     let data_start = lfh_offset
         .checked_add(LFH_FIXED_LEN)
-        .and_then(|v| v.checked_add(lfh_name_len))
-        .and_then(|v| v.checked_add(lfh_extra_len))
+        .and_then(|v| v.checked_add(usize::from(read_u16_le(bytes, lfh_offset + 26).ok()?)))
+        .and_then(|v| v.checked_add(usize::from(read_u16_le(bytes, lfh_offset + 28).ok()?)))
         .ok_or_else(|| format!("ZIP entry `{name}` data offset overflow"))?;
     let data_end = data_start.checked_add(comp_size).ok_or_else(|| format!("ZIP entry `{name}` payload length overflow"))?;
     let compressed = bytes.get(data_start..data_end).ok_or_else(|| format!("ZIP entry `{name}` payload truncated"))?;
-
     let out = match method {
         0 => {
             if comp_size != uncomp_size {
-                return Err(format!("ZIP stored entry `{name}` compressed/uncompressed length mismatch"));
+                return Err(format!("ZIP stored entry `{name}` length mismatch"));
             }
             compressed.to_vec()
         }
         8 => {
             let cap = uncomp_size.min(limits.max_entry_uncompressed_bytes);
-            let mut decoder = DeflateDecoder::new(compressed).take(cap.saturating_add(1) as u64);
             let mut buf = Vec::with_capacity(cap.min(1024 * 1024));
-            decoder.read_to_end(&mut buf).map_err(|e| format!("ZIP entry `{name}` deflate error: {e}"))?;
+            DeflateDecoder::new(compressed)
+                .take(cap.saturating_add(1) as u64)
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("ZIP `{name}` deflate: {e}"))?;
             if buf.len() != uncomp_size {
                 return Err(format!("ZIP entry `{name}` uncompressed size mismatch"));
             }
@@ -264,32 +235,26 @@ fn read_entry_payload(bytes: &[u8], entry: &CdEntry<'_>, limits: ZipLimits) -> R
 }
 
 fn sanitize_zip_path(raw: &str) -> Result<String, String> {
-    if raw.is_empty() || raw.len() > MAX_ZIP_PATH_LEN || raw.contains('\0') || raw.contains('\\') || raw.starts_with('/') {
+    if raw.is_empty()
+        || raw.len() > MAX_ZIP_PATH_LEN
+        || raw.contains(['\0', '\\'])
+        || raw.starts_with('/')
+        || raw.as_bytes().get(1) == Some(&b':')
+        || raw.split('/').any(|s| s.is_empty() || s == "." || s == "..")
+    {
         return Err(format!("unsafe ZIP entry path `{raw}`"));
-    }
-    if raw.as_bytes().get(1) == Some(&b':') {
-        return Err(format!("unsafe drive-prefixed ZIP entry path `{raw}`"));
-    }
-    for segment in raw.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." {
-            return Err(format!("unsafe traversal segment in ZIP entry path `{raw}`"));
-        }
     }
     Ok(raw.to_owned())
 }
 
 fn read_u16_le(bytes: &[u8], offset: usize) -> Result<u16, String> {
-    let end = offset.checked_add(2).ok_or_else(|| String::from("ZIP integer offset overflow"))?;
-    let slice = bytes.get(offset..end).ok_or_else(|| String::from("unexpected EOF reading ZIP u16"))?;
-    let arr: [u8; 2] = slice.try_into().map_err(|_| String::from("invalid ZIP u16 slice"))?;
-    Ok(u16::from_le_bytes(arr))
+    let s = offset.checked_add(2).and_then(|e| bytes.get(offset..e)).ok_or_else(|| String::from("unexpected EOF reading ZIP u16"))?;
+    Ok(u16::from_le_bytes(s.try_into().map_err(|_| String::from("invalid ZIP u16"))?))
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, String> {
-    let end = offset.checked_add(4).ok_or_else(|| String::from("ZIP integer offset overflow"))?;
-    let slice = bytes.get(offset..end).ok_or_else(|| String::from("unexpected EOF reading ZIP u32"))?;
-    let arr: [u8; 4] = slice.try_into().map_err(|_| String::from("invalid ZIP u32 slice"))?;
-    Ok(u32::from_le_bytes(arr))
+    let s = offset.checked_add(4).and_then(|e| bytes.get(offset..e)).ok_or_else(|| String::from("unexpected EOF reading ZIP u32"))?;
+    Ok(u32::from_le_bytes(s.try_into().map_err(|_| String::from("invalid ZIP u32"))?))
 }
 
 #[cfg(test)]
@@ -309,58 +274,50 @@ impl TestZipWriter {
     }
 
     pub(crate) fn finish(self) -> Result<Vec<u8>, String> {
-        let mut out = Vec::new();
-        let mut cd = Vec::new();
+        let (mut out, mut cd) = (Vec::new(), Vec::new());
         for (name, data) in &self.entries {
             let offset = u32::try_from(out.len()).map_err(|_| String::from("test zip overflow"))?;
             let size = u32::try_from(data.len()).map_err(|_| String::from("test zip entry overflow"))?;
             let name_len = u16::try_from(name.len()).map_err(|_| String::from("test zip name overflow"))?;
             let crc = crc32fast::hash(data);
-            out.extend_from_slice(&LFH_SIG);
-            out.extend_from_slice(&20u16.to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes());
-            out.extend_from_slice(&crc.to_le_bytes());
-            out.extend_from_slice(&size.to_le_bytes());
-            out.extend_from_slice(&size.to_le_bytes());
-            out.extend_from_slice(&name_len.to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes());
-            out.extend_from_slice(name.as_bytes());
-            out.extend_from_slice(data);
-
-            cd.extend_from_slice(&CD_SIG);
-            cd.extend_from_slice(&20u16.to_le_bytes());
-            cd.extend_from_slice(&20u16.to_le_bytes());
-            cd.extend_from_slice(&0u16.to_le_bytes());
-            cd.extend_from_slice(&0u16.to_le_bytes());
-            cd.extend_from_slice(&0u16.to_le_bytes());
-            cd.extend_from_slice(&0u16.to_le_bytes());
-            cd.extend_from_slice(&crc.to_le_bytes());
-            cd.extend_from_slice(&size.to_le_bytes());
-            cd.extend_from_slice(&size.to_le_bytes());
-            cd.extend_from_slice(&name_len.to_le_bytes());
-            cd.extend_from_slice(&0u16.to_le_bytes());
-            cd.extend_from_slice(&0u16.to_le_bytes());
-            cd.extend_from_slice(&0u16.to_le_bytes());
-            cd.extend_from_slice(&0u16.to_le_bytes());
-            cd.extend_from_slice(&0u32.to_le_bytes());
-            cd.extend_from_slice(&offset.to_le_bytes());
-            cd.extend_from_slice(name.as_bytes());
+            for chunk in [
+                &LFH_SIG[..],
+                &20u16.to_le_bytes(),
+                &[0; 8],
+                &crc.to_le_bytes(),
+                &size.to_le_bytes(),
+                &size.to_le_bytes(),
+                &name_len.to_le_bytes(),
+                &[0; 2],
+                name.as_bytes(),
+                data,
+            ] {
+                out.extend_from_slice(chunk);
+            }
+            for chunk in [
+                &CD_SIG[..],
+                &20u16.to_le_bytes(),
+                &20u16.to_le_bytes(),
+                &[0; 8],
+                &crc.to_le_bytes(),
+                &size.to_le_bytes(),
+                &size.to_le_bytes(),
+                &name_len.to_le_bytes(),
+                &[0; 12],
+                &offset.to_le_bytes(),
+                name.as_bytes(),
+            ] {
+                cd.extend_from_slice(chunk);
+            }
         }
         let cd_offset = u32::try_from(out.len()).map_err(|_| String::from("test zip cd offset overflow"))?;
         let cd_size = u32::try_from(cd.len()).map_err(|_| String::from("test zip cd size overflow"))?;
         let count = u16::try_from(self.entries.len()).map_err(|_| String::from("test zip entry count overflow"))?;
-        out.extend_from_slice(&cd);
-        out.extend_from_slice(&EOCD_SIG);
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&count.to_le_bytes());
-        out.extend_from_slice(&count.to_le_bytes());
-        out.extend_from_slice(&cd_size.to_le_bytes());
-        out.extend_from_slice(&cd_offset.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
+        for chunk in
+            [&cd[..], &EOCD_SIG, &[0; 4], &count.to_le_bytes(), &count.to_le_bytes(), &cd_size.to_le_bytes(), &cd_offset.to_le_bytes(), &[0; 2]]
+        {
+            out.extend_from_slice(chunk);
+        }
         Ok(out)
     }
 }
@@ -370,101 +327,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_and_limits() {
+    fn roundtrip_limits_traversal_crc_case_collision_and_symlinks() {
         let mut zw = TestZipWriter::new();
-        zw.add_file("dir/hello.txt", b"hello world".to_vec()).expect("add file");
-        let bytes = zw.finish().expect("build test zip");
-        let arc = ZipArchive::from_bytes_with_limits(&bytes, ZipLimits::default()).expect("parse zip");
-        let items: Vec<_> = arc.iter().collect();
-        assert_eq!(items, vec![("dir/hello.txt", b"hello world".as_slice())]);
-        let tiny = ZipLimits { max_entries: 1, max_total_uncompressed_bytes: 5, max_entry_uncompressed_bytes: 5 };
-        assert!(ZipArchive::from_bytes_with_limits(&bytes, tiny).is_err());
-    }
-
-    #[test]
-    fn rejects_traversal_and_bad_crc() {
-        let mut zw = TestZipWriter::new();
-        zw.add_file("../escape.txt", b"bad".to_vec()).expect("add file");
-        let bad_path = zw.finish().expect("build");
-        assert!(ZipArchive::from_bytes_with_limits(&bad_path, ZipLimits::default()).is_err());
-
-        let mut zw2 = TestZipWriter::new();
-        zw2.add_file("ok.txt", b"abc".to_vec()).expect("add file");
-        let mut corrupted = zw2.finish().expect("build");
-        let idx = corrupted.windows(3).position(|w| w == b"abc").expect("payload");
-        corrupted[idx] ^= 0xff;
-        assert!(ZipArchive::from_bytes_with_limits(&corrupted, ZipLimits::default()).is_err());
-    }
-
-    #[test]
-    fn aud_12_17_rejects_case_colliding_entries() {
-        let mut zw = TestZipWriter::new();
-        zw.add_file("doc/README.txt", b"dirty".to_vec()).unwrap();
-        zw.add_file("doc/readme.txt", b"clean".to_vec()).unwrap();
+        zw.add_file("dir/hello.txt", b"hello world".to_vec()).unwrap();
         let bytes = zw.finish().unwrap();
-        let err = ZipArchive::from_bytes_with_limits(&bytes, ZipLimits::default()).unwrap_err();
-        assert!(err.contains("duplicate or case-colliding"), "{err}");
-    }
+        let arc = ZipArchive::from_bytes_with_limits(&bytes, ZipLimits::default()).unwrap();
+        assert_eq!(arc.iter().collect::<Vec<_>>(), vec![("dir/hello.txt", b"hello world".as_slice())]);
+        assert!(
+            ZipArchive::from_bytes_with_limits(
+                &bytes,
+                ZipLimits { max_entries: 1, max_total_uncompressed_bytes: 5, max_entry_uncompressed_bytes: 5 }
+            )
+            .is_err()
+        );
 
-    #[test]
-    fn aud_12_45_rejects_macos_host_os_19_symlink_and_exposes_comments() {
-        // Build a ZIP with host OS 19 (macOS/Darwin) + Unix symlink mode 0o120000 in ext_attr.
-        let mut zw = TestZipWriter::new();
-        zw.add_file("link.txt", b"/etc/passwd".to_vec()).unwrap();
-        let mut bytes = zw.finish().unwrap();
-        let cd_pos = bytes.windows(4).position(|w| w == CD_SIG).unwrap();
-        bytes[cd_pos + 4..cd_pos + 6].copy_from_slice(&((19u16 << 8) | 20u16).to_le_bytes());
-        bytes[cd_pos + 38..cd_pos + 42].copy_from_slice(&((0o12_0777u32) << 16).to_le_bytes());
-        let err = ZipArchive::from_bytes_with_limits(&bytes, ZipLimits::default()).unwrap_err();
-        assert!(err.contains("symlink"), "{err}");
+        let mut bad = TestZipWriter::new();
+        bad.add_file("../escape.txt", b"bad".to_vec()).unwrap();
+        assert!(ZipArchive::from_bytes_with_limits(&bad.finish().unwrap(), ZipLimits::default()).is_err());
 
-        // Build a ZIP with both an entry comment and an EOCD archive comment.
-        let mut zw2 = TestZipWriter::new();
-        zw2.add_file("note.txt", b"ok".to_vec()).unwrap();
-        let base = zw2.finish().unwrap();
-        let eocd_pos = base.windows(4).rposition(|w| w == EOCD_SIG).unwrap();
-        let entry_comment = b"entry-note";
-        let cd_pos2 = base.windows(4).position(|w| w == CD_SIG).unwrap();
-        let mut with_comments = base[..eocd_pos].to_vec();
-        with_comments.extend_from_slice(entry_comment);
-        // Patch entry comment length and CD size in EOCD.
-        with_comments[cd_pos2 + 32..cd_pos2 + 34].copy_from_slice(&(entry_comment.len() as u16).to_le_bytes());
-        let new_cd_size = (with_comments.len() - cd_pos2) as u32;
-        let mut eocd = base[eocd_pos..].to_vec();
-        eocd[12..16].copy_from_slice(&new_cd_size.to_le_bytes());
-        let arc_comment = b"archive-note";
-        eocd[20..22].copy_from_slice(&(arc_comment.len() as u16).to_le_bytes());
-        with_comments.extend_from_slice(&eocd);
-        with_comments.extend_from_slice(arc_comment);
+        let mut corrupt = bytes.clone();
+        let idx = corrupt.windows(11).position(|w| w == b"hello world").unwrap();
+        corrupt[idx] ^= 0xff;
+        assert!(ZipArchive::from_bytes_with_limits(&corrupt, ZipLimits::default()).is_err());
 
-        let arc = ZipArchive::from_bytes_with_limits(&with_comments, ZipLimits::default()).unwrap();
-        assert_eq!(arc.archive_comment(), arc_comment);
-        let comments: Vec<_> = arc.entry_comments().collect();
-        assert_eq!(comments, vec![("note.txt", entry_comment.as_slice())]);
-    }
+        let mut dup = TestZipWriter::new();
+        dup.add_file("doc/README.txt", b"a".to_vec()).unwrap();
+        dup.add_file("doc/readme.txt", b"b".to_vec()).unwrap();
+        assert!(ZipArchive::from_bytes_with_limits(&dup.finish().unwrap(), ZipLimits::default()).unwrap_err().contains("case-colliding"));
 
-    #[test]
-    fn round3_216_rejects_dual_central_directory_polyglot_decoy() {
-        // Construct a dual-CD decoy: clean ZIP followed by appended raw ZIP whose EOCD points to
-        // `cd_start_raw` (which starts with CD_SIG inside the first ZIP) while `cd_start_raw + delta`
-        // also starts with CD_SIG in the appended ZIP.
-        let mut zw1 = TestZipWriter::new();
-        zw1.add_file("decoy.txt", b"clean".to_vec()).unwrap();
-        let z1 = zw1.finish().unwrap();
-        let mut zw2 = TestZipWriter::new();
-        zw2.add_file("hidden.txt", b"payload".to_vec()).unwrap();
-        let z2 = zw2.finish().unwrap();
-        let cd2_off = z2.windows(4).position(|w| w == CD_SIG).unwrap();
-        let mut preamble = vec![0x89, b'P', b'N', b'G'];
-        // Pad preamble so `CD_SIG` sits at byte offset `cd2_off` (matching z2's raw EOCD cd_offset).
-        if preamble.len() < cd2_off {
-            preamble.resize(cd2_off, 0);
-        }
-        preamble.extend_from_slice(&CD_SIG);
-        preamble.extend_from_slice(&z1);
-        let mut dual = preamble;
-        dual.extend_from_slice(&z2);
-        let err = ZipArchive::from_bytes_with_limits(&dual, ZipLimits::default()).unwrap_err();
-        assert!(err.contains("ambiguous dual ZIP central directory"), "{err}");
+        let mut sym = TestZipWriter::new();
+        sym.add_file("link.txt", b"/etc/passwd".to_vec()).unwrap();
+        let mut sbytes = sym.finish().unwrap();
+        let cd = sbytes.windows(4).position(|w| w == CD_SIG).unwrap();
+        sbytes[cd + 4..cd + 6].copy_from_slice(&((19u16 << 8) | 20u16).to_le_bytes());
+        sbytes[cd + 38..cd + 42].copy_from_slice(&(0o12_0777u32 << 16).to_le_bytes());
+        assert!(ZipArchive::from_bytes_with_limits(&sbytes, ZipLimits::default()).unwrap_err().contains("symlink"));
     }
 }

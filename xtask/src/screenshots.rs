@@ -1,13 +1,4 @@
 //! Deterministic workspace screenshot generation and offline PNG integrity check (`R0.14`).
-//!
-//! `cargo xtask screenshots` invokes the clean-room `curvebook-ui-egui` `doc_screenshots`
-//! example to regenerate `docs/images/workspace-*.png` and `docs/images/specimen-*.png`.
-//! `cargo xtask screenshots --check` runs purely in-process (no nested Cargo build) and verifies:
-//! - both PNG files exist and start with the 8-byte PNG signature,
-//! - the leading `IHDR` chunk decodes to exact `1440x900` (`>= 1280x800`) RGBA output,
-//! - every PNG chunk passes IEEE 802.3 CRC-32 validation cleanly through `IEND`,
-//! - total `IDAT` payload size is non-trivial (`>= 1024` bytes), and
-//! - both files are attributed in `ASSETS.md`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,10 +37,8 @@ pub struct PngSummary {
     pub chunk_count: usize,
 }
 
-/// Entry point for `cargo xtask screenshots [--check]`.
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
-    let check_only = parse_args(args)?;
-    if check_only { verify_existing(root) } else { generate_and_verify(root) }
+    if parse_args(args)? { verify_existing(root) } else { generate_and_verify(root) }
 }
 
 fn parse_args(args: &[String]) -> Result<bool, String> {
@@ -61,25 +50,19 @@ fn parse_args(args: &[String]) -> Result<bool, String> {
     }
 }
 
-fn nested_target_dir(root: &Path) -> PathBuf {
-    match std::env::var_os("CARGO_TARGET_DIR") {
+fn generate_and_verify(root: &Path) -> Result<(), String> {
+    let out_dir = root.join("docs/images");
+    fs::create_dir_all(&out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
+    let nested_target = match std::env::var_os("CARGO_TARGET_DIR") {
         Some(dir) if !dir.is_empty() => {
             let p = PathBuf::from(dir);
             if p.is_absolute() { p } else { root.join(p) }.join("doc-screenshots-nested")
         }
-        _ => root.join("target").join("doc-screenshots-nested"),
-    }
-}
-
-fn generate_and_verify(root: &Path) -> Result<(), String> {
-    let out_dir = root.join("docs/images");
-    fs::create_dir_all(&out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
-
-    let nested_target = nested_target_dir(root);
+        _ => root.join("target/doc-screenshots-nested"),
+    };
     let nested_str = nested_target.to_str().ok_or_else(|| format!("non-UTF-8 path {}", nested_target.display()))?;
     let args = ["run", "--offline", "--locked", "--quiet", "-p", "curvebook-ui-egui", "--example", "doc_screenshots", "--", "docs/images"];
     println!("+ CARGO_TARGET_DIR={} cargo {}", nested_target.display(), args.join(" "));
-
     let out = crate::dev_tool_command("cargo")
         .current_dir(root)
         .env("CARGO_TARGET_DIR", nested_str)
@@ -97,86 +80,66 @@ fn generate_and_verify(root: &Path) -> Result<(), String> {
     if !out.success {
         return Err(format!("doc_screenshots example failed with exit code {:?}", out.status_code));
     }
-
     verify_existing(root)
 }
 
-fn read_non_symlink_png_bytes(path: &Path, label: &str) -> Result<Vec<u8>, String> {
-    let meta = fs::symlink_metadata(path).map_err(|e| format!("missing or unreadable `{label}`: {e}"))?;
+fn verify_doc_image(root: &Path, assets_md: &str, rel: &str, max_bytes: usize, dims: (u32, u32), min_idat: usize, kind: &str) -> Result<(), String> {
+    let path = root.join(rel);
+    let meta = fs::symlink_metadata(&path).map_err(|e| format!("missing or unreadable `{rel}`: {e}"))?;
     if meta.file_type().is_symlink() || !meta.file_type().is_file() {
-        return Err(format!("`{label}` must be a regular non-symlink PNG file"));
+        return Err(format!("`{rel}` must be a regular non-symlink PNG file"));
     }
     if meta.len() > u64::try_from(MAX_DOC_PNG_BYTES).unwrap_or(u64::MAX) {
-        return Err(format!("`{label}` size {} exceeds {MAX_DOC_PNG_BYTES} bytes", meta.len()));
+        return Err(format!("`{rel}` size {} exceeds {MAX_DOC_PNG_BYTES} bytes", meta.len()));
     }
-    read_regular_file_bytes(path, MAX_DOC_PNG_BYTES).map_err(|e| format!("read `{label}`: {e}"))
+    let bytes = read_regular_file_bytes(&path, MAX_DOC_PNG_BYTES).map_err(|e| format!("read `{rel}`: {e}"))?;
+    if bytes.len() > max_bytes {
+        return Err(format!("`{rel}` size {} bytes exceeds {kind} budget ({max_bytes} bytes)", bytes.len()));
+    }
+    let s = validate_png_bytes_with_bounds(rel, &bytes, Some(dims), min_idat)?;
+    ensure_asset_listed(rel, assets_md)?;
+    println!(
+        "screenshots: {rel} OK ({}x{}, color_type={}, idat={} B, chunks={}, crc32={:#010x})",
+        s.width,
+        s.height,
+        s.color_type,
+        s.idat_bytes,
+        s.chunk_count,
+        crc32_ieee(&bytes)
+    );
+    Ok(())
 }
 
 fn verify_existing(root: &Path) -> Result<(), String> {
     let assets_path = root.join("ASSETS.md");
-    let assets_bytes = read_regular_file_bytes(&assets_path, MAX_ASSETS_MD_BYTES).map_err(|e| format!("read {}: {e}", assets_path.display()))?;
-    let assets_md = String::from_utf8(assets_bytes).map_err(|_| format!("{} is not valid UTF-8", assets_path.display()))?;
-
+    let assets_md =
+        String::from_utf8(read_regular_file_bytes(&assets_path, MAX_ASSETS_MD_BYTES).map_err(|e| format!("read {}: {e}", assets_path.display()))?)
+            .map_err(|_| format!("{} is not valid UTF-8", assets_path.display()))?;
     for rel in SCREENSHOT_REL_PATHS {
-        let abs = root.join(rel);
-        let bytes = read_non_symlink_png_bytes(&abs, rel)?;
-        if bytes.len() > MAX_SCREENSHOT_BYTES {
-            return Err(format!("`{rel}` size {} bytes exceeds screenshot budget ({MAX_SCREENSHOT_BYTES} bytes)", bytes.len()));
-        }
-        let summary = validate_png_bytes(rel, &bytes)?;
-        ensure_asset_listed(rel, &assets_md)?;
-        println!(
-            "screenshots: {rel} OK ({}x{}, color_type={}, idat={} B, chunks={}, crc32={:#010x})",
-            summary.width,
-            summary.height,
-            summary.color_type,
-            summary.idat_bytes,
-            summary.chunk_count,
-            crc32_ieee(&bytes)
-        );
+        verify_doc_image(root, &assets_md, rel, MAX_SCREENSHOT_BYTES, (EXPECTED_WIDTH, EXPECTED_HEIGHT), MIN_IDAT_BYTES, "screenshot")?;
     }
-
-    for &(rel, (exp_w, exp_h), min_idat) in EXTRA_DOC_IMAGES {
-        let abs = root.join(rel);
-        let bytes = read_non_symlink_png_bytes(&abs, rel)?;
-        if bytes.len() > MAX_ICON_BYTES {
-            return Err(format!("`{rel}` size {} bytes exceeds icon budget ({MAX_ICON_BYTES} bytes)", bytes.len()));
-        }
-        let summary = validate_png_bytes_with_bounds(rel, &bytes, Some((exp_w, exp_h)), min_idat)?;
-        ensure_asset_listed(rel, &assets_md)?;
-        println!(
-            "screenshots: {rel} OK ({}x{}, color_type={}, idat={} B, chunks={}, crc32={:#010x})",
-            summary.width,
-            summary.height,
-            summary.color_type,
-            summary.idat_bytes,
-            summary.chunk_count,
-            crc32_ieee(&bytes)
-        );
+    for &(rel, dims, min_idat) in EXTRA_DOC_IMAGES {
+        verify_doc_image(root, &assets_md, rel, MAX_ICON_BYTES, dims, min_idat, "icon")?;
     }
     Ok(())
 }
 
 fn ensure_asset_listed(rel: &str, assets_md: &str) -> Result<(), String> {
     let found = assets_md.lines().any(|raw| {
-        let Some(inner) = raw.trim().strip_prefix('|').and_then(|s| s.strip_suffix('|')) else {
-            return false;
-        };
-        let Some(first_cell) = inner.split('|').next() else {
-            return false;
-        };
-        let asset = first_cell.trim().trim_matches('`').trim();
-        asset == rel
+        raw.trim()
+            .strip_prefix('|')
+            .and_then(|s| s.strip_suffix('|'))
+            .and_then(|i| i.split('|').next())
+            .is_some_and(|c| c.trim().trim_matches('`').trim() == rel)
     });
     if found { Ok(()) } else { Err(format!("ASSETS.md is missing attribution table row for `{rel}`")) }
 }
 
-/// Validate a 1440x900 8-bit RGBA PNG payload (`R0.14`).
-pub fn validate_png_bytes(label: &str, bytes: &[u8]) -> Result<PngSummary, String> {
+#[cfg(test)]
+fn validate_png_bytes(label: &str, bytes: &[u8]) -> Result<PngSummary, String> {
     validate_png_bytes_with_bounds(label, bytes, Some((EXPECTED_WIDTH, EXPECTED_HEIGHT)), MIN_IDAT_BYTES)
 }
 
-/// Validate any 8-bit RGBA PNG payload against optional exact `(width, height)` bounds and minimum `IDAT` bytes.
 pub fn validate_png_bytes_with_bounds(
     label: &str,
     bytes: &[u8],
@@ -186,32 +149,22 @@ pub fn validate_png_bytes_with_bounds(
     if !bytes.starts_with(PNG_SIGNATURE) {
         return Err(format!("{label}: invalid PNG signature"));
     }
-
-    let mut pos = PNG_SIGNATURE.len();
-    let mut ihdr: Option<(u32, u32, u8)> = None;
-    let mut idat_bytes = 0usize;
-    let mut chunk_count = 0usize;
-    let mut saw_iend = false;
-
+    let (mut pos, mut ihdr, mut idat_bytes, mut chunk_count, mut saw_iend) = (PNG_SIGNATURE.len(), None, 0usize, 0usize, false);
     while pos < bytes.len() {
-        let header = bytes.get(pos..pos + 8).ok_or_else(|| format!("{label}: truncated PNG chunk header at offset {pos}"))?;
-        let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
-        let kind = [header[4], header[5], header[6], header[7]];
+        let hdr = bytes.get(pos..pos + 8).ok_or_else(|| format!("{label}: truncated PNG chunk header at offset {pos}"))?;
+        let (length, kind) = (u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize, [hdr[4], hdr[5], hdr[6], hdr[7]]);
         pos += 8;
-
         let data_end = pos.checked_add(length).ok_or_else(|| format!("{label}: chunk length overflow"))?;
         let crc_end = data_end.checked_add(4).ok_or_else(|| format!("{label}: chunk CRC overflow"))?;
         let data = bytes.get(pos..data_end).ok_or_else(|| format!("{label}: truncated chunk data"))?;
-        let crc_slice = bytes.get(data_end..crc_end).ok_or_else(|| format!("{label}: truncated chunk CRC"))?;
-        let stored_crc = u32::from_be_bytes([crc_slice[0], crc_slice[1], crc_slice[2], crc_slice[3]]);
-        let computed_crc = png_chunk_crc32(kind, data);
-        if stored_crc != computed_crc {
+        let crc_s = bytes.get(data_end..crc_end).ok_or_else(|| format!("{label}: truncated chunk CRC"))?;
+        let (stored, computed) = (u32::from_be_bytes([crc_s[0], crc_s[1], crc_s[2], crc_s[3]]), png_chunk_crc32(kind, data));
+        if stored != computed {
             return Err(format!(
-                "{label}: CRC-32 mismatch in `{}` chunk (stored {stored_crc:#010x}, computed {computed_crc:#010x})",
+                "{label}: CRC-32 mismatch in `{}` chunk (stored {stored:#010x}, computed {computed:#010x})",
                 String::from_utf8_lossy(&kind)
             ));
         }
-
         if chunk_count == 0 {
             ihdr = Some(parse_ihdr_with_bounds(label, kind, data, expected_dims)?);
         } else if &kind == b"IDAT" {
@@ -220,25 +173,18 @@ pub fn validate_png_bytes_with_bounds(
             if !data.is_empty() {
                 return Err(format!("{label}: non-empty IEND chunk ({} B)", data.len()));
             }
-            saw_iend = true;
-            pos = crc_end;
-            chunk_count += 1;
+            (saw_iend, pos, chunk_count) = (true, crc_end, chunk_count + 1);
             break;
         }
-
-        pos = crc_end;
-        chunk_count += 1;
+        (pos, chunk_count) = (crc_end, chunk_count + 1);
     }
-
     if !saw_iend || pos != bytes.len() {
         return Err(format!("{label}: missing or non-terminal IEND chunk (pos={pos}, total={})", bytes.len()));
     }
-
     let (width, height, color_type) = ihdr.ok_or_else(|| format!("{label}: missing IHDR chunk"))?;
     if idat_bytes < min_idat_bytes {
         return Err(format!("{label}: IDAT payload too small ({idat_bytes} B < {min_idat_bytes} B)"));
     }
-
     Ok(PngSummary { width, height, color_type, idat_bytes, chunk_count })
 }
 
@@ -246,27 +192,24 @@ fn parse_ihdr_with_bounds(label: &str, kind: [u8; 4], data: &[u8], expected_dims
     if &kind != b"IHDR" || data.len() != 13 {
         return Err(format!("{label}: first PNG chunk must be 13-byte IHDR"));
     }
-    let width = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-    let height = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-    let bit_depth = data[8];
-    let color_type = data[9];
-    if let Some((exp_w, exp_h)) = expected_dims {
-        if (exp_w, exp_h) == (EXPECTED_WIDTH, EXPECTED_HEIGHT) && (width < MIN_WIDTH || height < MIN_HEIGHT) {
-            return Err(format!("{label}: dimensions {width}x{height} below minimum {MIN_WIDTH}x{MIN_HEIGHT}"));
+    let (w, h, bd, ct) =
+        (u32::from_be_bytes([data[0], data[1], data[2], data[3]]), u32::from_be_bytes([data[4], data[5], data[6], data[7]]), data[8], data[9]);
+    if let Some((ew, eh)) = expected_dims {
+        if (ew, eh) == (EXPECTED_WIDTH, EXPECTED_HEIGHT) && (w < MIN_WIDTH || h < MIN_HEIGHT) {
+            return Err(format!("{label}: dimensions {w}x{h} below minimum {MIN_WIDTH}x{MIN_HEIGHT}"));
         }
-        if width != exp_w || height != exp_h {
-            return Err(format!("{label}: dimensions {width}x{height} != expected {exp_w}x{exp_h}"));
+        if w != ew || h != eh {
+            return Err(format!("{label}: dimensions {w}x{h} != expected {ew}x{eh}"));
         }
-    } else if width == 0 || height == 0 {
-        return Err(format!("{label}: non-positive PNG dimensions {width}x{height}"));
+    } else if w == 0 || h == 0 {
+        return Err(format!("{label}: non-positive PNG dimensions {w}x{h}"));
     }
-    if bit_depth != 8 || color_type != 6 {
-        return Err(format!("{label}: expected 8-bit RGBA (color_type=6), got bit_depth={bit_depth}, color_type={color_type}"));
+    if bd != 8 || ct != 6 {
+        return Err(format!("{label}: expected 8-bit RGBA (color_type=6), got bit_depth={bd}, color_type={ct}"));
     }
-    Ok((width, height, color_type))
+    Ok((w, h, ct))
 }
 
-/// Compute IEEE 802.3 CRC-32 over raw PNG bytes.
 #[must_use]
 pub fn crc32_ieee(bytes: &[u8]) -> u32 {
     crc32fast::hash(bytes)
@@ -274,135 +217,84 @@ pub fn crc32_ieee(bytes: &[u8]) -> u32 {
 
 #[must_use]
 pub fn png_chunk_crc32(kind: [u8; 4], data: &[u8]) -> u32 {
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&kind);
-    hasher.update(data);
-    hasher.finalize()
+    let mut h = crc32fast::Hasher::new();
+    h.update(&kind);
+    h.update(data);
+    h.finalize()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        EXPECTED_HEIGHT, EXPECTED_WIDTH, PNG_SIGNATURE, SCREENSHOT_REL_PATHS, crc32_ieee, parse_args, png_chunk_crc32, validate_png_bytes,
-        validate_png_bytes_with_bounds, verify_existing,
-    };
+    use super::*;
     use crate::scan_util::test_support::TestDir;
 
     fn make_chunk(kind: [u8; 4], payload: &[u8]) -> Vec<u8> {
-        let len = payload.len() as u32;
-        let crc = png_chunk_crc32(kind, payload);
         let mut out = Vec::with_capacity(12 + payload.len());
-        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         out.extend_from_slice(&kind);
         out.extend_from_slice(payload);
-        out.extend_from_slice(&crc.to_be_bytes());
+        out.extend_from_slice(&png_chunk_crc32(kind, payload).to_be_bytes());
         out
     }
 
-    fn make_synthetic_png(width: u32, height: u32, color_type: u8, idat_len: usize) -> Vec<u8> {
-        let mut png = PNG_SIGNATURE.to_vec();
+    fn make_png(w: u32, h: u32, ct: u8, idat_len: usize) -> Vec<u8> {
         let mut ihdr = Vec::with_capacity(13);
-        ihdr.extend_from_slice(&width.to_be_bytes());
-        ihdr.extend_from_slice(&height.to_be_bytes());
-        ihdr.push(8);
-        ihdr.push(color_type);
-        ihdr.extend_from_slice(&[0, 0, 0]);
-        png.extend_from_slice(&make_chunk(*b"IHDR", &ihdr));
-        png.extend_from_slice(&make_chunk(*b"IDAT", &vec![0x5Au8; idat_len]));
-        png.extend_from_slice(&make_chunk(*b"IEND", &[]));
-        png
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, ct, 0, 0, 0]);
+        [PNG_SIGNATURE.as_slice(), &make_chunk(*b"IHDR", &ihdr), &make_chunk(*b"IDAT", &vec![0x5Au8; idat_len]), &make_chunk(*b"IEND", &[])].concat()
     }
 
     #[test]
-    fn accepts_valid_1440x900_rgba_png() {
-        let bytes = make_synthetic_png(EXPECTED_WIDTH, EXPECTED_HEIGHT, 6, 2048);
-        let res = validate_png_bytes("sample.png", &bytes);
-        assert!(res.is_ok(), "{res:?}");
-        if let Ok(summary) = res {
-            assert_eq!(summary.width, 1440);
-            assert_eq!(summary.height, 900);
-            assert_eq!(summary.idat_bytes, 2048);
-            assert_eq!(summary.chunk_count, 3);
+    fn validates_pngs_cli_assets_table_symlinks_and_repo_screenshots() {
+        assert_eq!((crc32_ieee(b"123456789"), png_chunk_crc32(*b"IEND", &[])), (0xCBF4_3926, 0xAE42_6082));
+        assert_eq!(
+            validate_png_bytes("ok.png", &make_png(EXPECTED_WIDTH, EXPECTED_HEIGHT, 6, 2048)).unwrap(),
+            PngSummary { width: 1440, height: 900, color_type: 6, idat_bytes: 2048, chunk_count: 3 }
+        );
+        assert!(validate_png_bytes_with_bounds("c.png", &make_png(1280, 800, 6, 1024), Some((1280, 800)), 512).is_ok());
+        assert!(verify_existing(&crate::workspace_root().unwrap()).is_ok());
+        let mut bad_crc = make_png(EXPECTED_WIDTH, EXPECTED_HEIGHT, 6, 2048);
+        *bad_crc.last_mut().unwrap() ^= 0xFF;
+        for bad in [
+            b"NOTAPNG!".as_slice(),
+            &make_png(800, 600, 6, 2048),
+            &make_png(1280, 800, 6, 2048),
+            &make_png(EXPECTED_WIDTH, EXPECTED_HEIGHT, 6, 64),
+            &bad_crc,
+        ] {
+            assert!(validate_png_bytes("bad", bad).is_err());
         }
-
-        let custom = make_synthetic_png(1280, 800, 6, 1024);
-        let custom_res = validate_png_bytes_with_bounds("custom.png", &custom, Some((1280, 800)), 512);
-        assert!(custom_res.is_ok(), "{custom_res:?}");
-    }
-
-    #[test]
-    fn verifies_repo_doc_screenshots_against_assets() {
-        let root = crate::workspace_root().unwrap();
-        assert!(verify_existing(&root).is_ok());
-    }
-
-    #[test]
-    fn rejects_bad_magic_crc_small_dims_and_tiny_idat() {
-        let bad_magic = b"NOTAPNG!";
-        assert!(validate_png_bytes("bad-magic", bad_magic).is_err());
-
-        let small = make_synthetic_png(800, 600, 6, 2048);
-        assert!(validate_png_bytes("small", &small).is_err());
-
-        let wrong_exact = make_synthetic_png(1280, 800, 6, 2048);
-        assert!(validate_png_bytes("wrong-exact", &wrong_exact).is_err());
-
-        let tiny_idat = make_synthetic_png(EXPECTED_WIDTH, EXPECTED_HEIGHT, 6, 64);
-        assert!(validate_png_bytes("tiny-idat", &tiny_idat).is_err());
-
-        let mut bad_crc = make_synthetic_png(EXPECTED_WIDTH, EXPECTED_HEIGHT, 6, 2048);
-        if let Some(last) = bad_crc.last_mut() {
-            *last ^= 0xFF;
-        }
-        assert!(validate_png_bytes("bad-crc", &bad_crc).is_err());
-    }
-
-    #[test]
-    fn parses_screenshots_cli_flags() {
-        assert_eq!(parse_args(&[]), Ok(false));
-        assert_eq!(parse_args(&[String::from("--check")]), Ok(true));
-        assert!(parse_args(&[String::from("--bogus")]).is_err());
-        assert!(parse_args(&[String::from("--check"), String::from("extra")]).is_err());
-    }
-
-    #[test]
-    fn fa_sec23_13_ensure_asset_listed_requires_table_row_not_prose() {
-        let prose_only = "|\nMentioning `docs/images/workspace-split-fit.png` in prose is not a table row.\n";
-        assert!(super::ensure_asset_listed("docs/images/workspace-split-fit.png", prose_only).is_err());
-        assert!(super::ensure_asset_listed("docs/images/workspace-split-fit.png", "|").is_err());
-        let row = "| `docs/images/workspace-split-fit.png` | CurveBook | Generated | MIT OR Apache-2.0 | Light |\n";
-        assert!(super::ensure_asset_listed("docs/images/workspace-split-fit.png", row).is_ok());
-    }
-
-    #[test]
-    fn aud_12_43_and_52_extra_doc_icon_required_non_symlink_and_crc32fast_matches_ieee() {
-        assert_eq!(crc32_ieee(b"123456789"), 0xCBF4_3926);
-        assert_eq!(png_chunk_crc32(*b"IEND", &[]), 0xAE42_6082);
+        assert_eq!((parse_args(&[]), parse_args(&[String::from("--check")])), (Ok(false), Ok(true)));
+        assert!(parse_args(&[String::from("--bogus")]).is_err() && parse_args(&[String::from("--check"), String::from("extra")]).is_err());
+        assert!(
+            ensure_asset_listed("docs/images/workspace-split-fit.png", "|\nMentioning `docs/images/workspace-split-fit.png` in prose.\n").is_err()
+        );
+        assert!(
+            ensure_asset_listed(
+                "docs/images/workspace-split-fit.png",
+                "| `docs/images/workspace-split-fit.png` | CurveBook | Generated | MIT OR Apache-2.0 | Light |\n"
+            )
+            .is_ok()
+        );
 
         let dir = TestDir::new("screenshots-aud-12-43");
-        let valid_shot = make_synthetic_png(EXPECTED_WIDTH, EXPECTED_HEIGHT, 6, 2048);
-        let valid_icon = make_synthetic_png(128, 128, 6, 128);
+        let (shot, icon) = (make_png(EXPECTED_WIDTH, EXPECTED_HEIGHT, 6, 2048), make_png(128, 128, 6, 128));
         let mut assets = String::from("| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n");
         for rel in SCREENSHOT_REL_PATHS {
-            dir.write_bytes(rel, &valid_shot);
+            dir.write_bytes(rel, &shot);
             assets.push_str(&format!("| `{rel}` | CurveBook | Generated | MIT OR Apache-2.0 | ok |\n"));
         }
         assets.push_str("| `docs/images/curvebook.png` | CurveBook | Generated | MIT OR Apache-2.0 | icon |\n");
         dir.write("ASSETS.md", &assets);
-
-        // Missing docs/images/curvebook.png must fail closed instead of silently skipping.
         assert!(verify_existing(dir.path()).unwrap_err().contains("curvebook.png"));
-
-        // Broken symlink at docs/images/curvebook.png must also fail closed.
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink("/nonexistent/curvebook.png", dir.join("docs/images/curvebook.png")).unwrap();
             assert!(verify_existing(dir.path()).unwrap_err().contains("non-symlink"));
             std::fs::remove_file(dir.join("docs/images/curvebook.png")).unwrap();
         }
-
-        // Regular valid icon passes.
-        dir.write_bytes("docs/images/curvebook.png", &valid_icon);
+        dir.write_bytes("docs/images/curvebook.png", &icon);
         assert!(verify_existing(dir.path()).is_ok());
     }
 }

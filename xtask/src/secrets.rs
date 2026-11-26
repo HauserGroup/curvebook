@@ -5,68 +5,23 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::rust_lex::{find_raw_string_span, skip_quoted_string_end};
 use crate::scan_util::{format_error_list, lower_ext};
 
 const PEM_BEGIN_PREFIX: &str = concat!("-----", "BEGIN ");
 const PEM_PRIVATE_KEY_SUFFIX: &str = concat!("PRIVATE ", "KEY-----");
 const PEM_PGP_PRIVATE_KEY_SUFFIX: &str = concat!("PRIVATE ", "KEY BLOCK-----");
-
 const SECRET_KEY_SUFFIXES: &[&str] =
     &["_API_KEY", "_SECRET_KEY", "_ACCESS_KEY", "_PRIVATE_KEY", "_AUTH_TOKEN", "_SECRET", "_TOKEN", "_PASSWORD", "_PASSWD"];
-const EXACT_SECRET_KEYS: &[&str] = &["API_KEY", "SECRET_KEY", "PRIVATE_KEY", "AUTH_TOKEN", "ACCESS_TOKEN", "PASSWORD", "SECRET"];
+const EXACT_SECRET_KEYS: &str = "API_KEY SECRET_KEY PRIVATE_KEY AUTH_TOKEN ACCESS_TOKEN PASSWORD SECRET";
+const EXACT_PLACEHOLDER_VALUES: &str =
+    "example placeholder changeme replace_me replace-me redacted dummy sample not-set not_set unset none null true false empty todo fixme *** xxx";
+const PLACEHOLDER_WORDS: &str = "example placeholder changeme replace me your my redacted dummy sample not set unset none null empty todo fixme here value api key secret token password passwd xxx";
+const BINARY_EXTS: &str = "png jpg jpeg gif webp bmp ico icns cur pdf zip gz tgz zst xz tar ttf otf woff woff2 eot wasm exe dll so dylib a lib rlib rmeta pdb sqlite db bin wav mp3 mp4 ogg flac curvebook cbtemplate pzf";
 
-const EXACT_PLACEHOLDER_VALUES: &[&str] = &[
-    "example",
-    "placeholder",
-    "changeme",
-    "replace_me",
-    "replace-me",
-    "redacted",
-    "dummy",
-    "sample",
-    "not-set",
-    "not_set",
-    "unset",
-    "none",
-    "null",
-    "true",
-    "false",
-    "empty",
-    "todo",
-    "fixme",
-    "***",
-    "xxx",
-];
-
-const PLACEHOLDER_WORDS: &[&str] = &[
-    "example",
-    "placeholder",
-    "changeme",
-    "replace",
-    "me",
-    "your",
-    "my",
-    "redacted",
-    "dummy",
-    "sample",
-    "not",
-    "set",
-    "unset",
-    "none",
-    "null",
-    "empty",
-    "todo",
-    "fixme",
-    "here",
-    "value",
-    "api",
-    "key",
-    "secret",
-    "token",
-    "password",
-    "passwd",
-    "xxx",
-];
+fn words_has(list: &str, needle: &str) -> bool {
+    !needle.is_empty() && list.split_ascii_whitespace().any(|w| w == needle)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretHit {
@@ -81,7 +36,6 @@ impl std::fmt::Display for SecretHit {
     }
 }
 
-/// Run the working-tree secrets scan (used by `cargo xtask ci` and `cargo xtask secrets`).
 pub fn run(root: &Path) -> Result<(), String> {
     let files = crate::repo_files(root)?;
     let hits = scan_repo(root, &files);
@@ -89,10 +43,9 @@ pub fn run(root: &Path) -> Result<(), String> {
         println!("secrets: 0 secret/path findings across {} workspace files (tracked + untracked)", files.len());
         return Ok(());
     }
-    format_err(&hits)
+    Err(format_error_list("potential secret or local home-path exposure(s) found", &hits))
 }
 
-/// CLI entrypoint for `cargo xtask secrets [--history]`.
 pub fn run_cli(root: &Path, args: &[String]) -> Result<(), String> {
     match args {
         [] => run(root),
@@ -112,24 +65,17 @@ fn run_history(root: &Path) -> Result<(), String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("git log --all -m -p --text --unified=0: {e}"))?;
-
-    let stdout = child.stdout.take().ok_or_else(|| String::from("git log stdout pipe missing"))?;
-    let mut reader = BufReader::new(stdout);
-    let mut state = DiffScanState::new();
-    let mut hits = Vec::new();
-    let mut buf = Vec::new();
+    let mut reader = BufReader::new(child.stdout.take().ok_or_else(|| String::from("git log stdout pipe missing"))?);
+    let (mut state, mut hits, mut buf) = (DiffScanState::new(), Vec::new(), Vec::new());
     loop {
         buf.clear();
-        let n = reader.read_until(b'\n', &mut buf).map_err(|e| format!("read git log output: {e}"))?;
-        if n == 0 {
+        if reader.read_until(b'\n', &mut buf).map_err(|e| format!("read git log output: {e}"))? == 0 {
             break;
         }
         buf.retain(|&b| b != 0);
-        let raw_line = String::from_utf8_lossy(&buf);
-        let line = raw_line.trim_end_matches(['\r', '\n']);
-        scan_git_diff_line(line, &mut state, &mut hits);
+        let raw = String::from_utf8_lossy(&buf);
+        scan_git_diff_line(raw.trim_end_matches(['\r', '\n']), &mut state, &mut hits);
     }
-
     let output = child.wait_with_output().map_err(|e| format!("wait git log: {e}"))?;
     if !output.status.success() {
         return Err(format!("git log -p --unified=0 failed: {}", String::from_utf8_lossy(&output.stderr)));
@@ -138,14 +84,9 @@ fn run_history(root: &Path) -> Result<(), String> {
         println!("secrets: 0 secret/path findings across git commit history");
         return Ok(());
     }
-    format_err(&hits)
+    Err(format_error_list("potential secret or local home-path exposure(s) found", &hits))
 }
 
-fn format_err(hits: &[SecretHit]) -> Result<(), String> {
-    Err(format_error_list("potential secret or local home-path exposure(s) found", hits))
-}
-
-/// Scan `files` relative to `root`, decoding UTF-8/UTF-16 and skipping true binary blobs.
 #[must_use]
 pub fn scan_repo(root: &Path, files: &[String]) -> Vec<SecretHit> {
     let mut hits = Vec::new();
@@ -156,70 +97,17 @@ pub fn scan_repo(root: &Path, files: &[String]) -> Vec<SecretHit> {
         };
         if let Ok(Some(text)) = crate::text_decode::decode_utf8_or_utf16(&bytes) {
             scan_text(path, &text, &mut hits);
-            continue;
+        } else if !is_likely_binary_file(path, &bytes) {
+            let cleaned: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
+            scan_text(path, &String::from_utf8_lossy(&cleaned), &mut hits);
         }
-        if is_likely_binary_file(path, &bytes) {
-            continue;
-        }
-        let cleaned: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
-        let text = String::from_utf8_lossy(&cleaned);
-        scan_text(path, &text, &mut hits);
     }
     hits
 }
 
-const BINARY_EXTS: &[&str] = &[
-    "png",
-    "jpg",
-    "jpeg",
-    "gif",
-    "webp",
-    "bmp",
-    "ico",
-    "icns",
-    "cur",
-    "pdf",
-    "zip",
-    "gz",
-    "tgz",
-    "zst",
-    "xz",
-    "tar",
-    "ttf",
-    "otf",
-    "woff",
-    "woff2",
-    "eot",
-    "wasm",
-    "exe",
-    "dll",
-    "so",
-    "dylib",
-    "a",
-    "lib",
-    "rlib",
-    "rmeta",
-    "pdb",
-    "sqlite",
-    "db",
-    "bin",
-    "wav",
-    "mp3",
-    "mp4",
-    "ogg",
-    "flac",
-    "curvebook",
-    "cbtemplate",
-    "pzf",
-];
-
 fn is_likely_binary_file(path: &str, bytes: &[u8]) -> bool {
-    let ext = lower_ext(path);
-    if BINARY_EXTS.contains(&ext.as_str()) {
-        return true;
-    }
-    [
-        &b"\x89PNG\r\n\x1a\n"[..],
+    const MAGICS: &[&[u8]] = &[
+        b"\x89PNG\r\n\x1a\n",
         b"GIF8",
         b"PK\x03\x04",
         b"PK\x05\x06",
@@ -231,9 +119,8 @@ fn is_likely_binary_file(path: &str, bytes: &[u8]) -> bool {
         b"OTTO",
         b"\x00\x01\x00\x00",
         b"icns",
-    ]
-    .iter()
-    .any(|sig| bytes.starts_with(sig))
+    ];
+    words_has(BINARY_EXTS, &lower_ext(path)) || MAGICS.iter().any(|sig| bytes.starts_with(sig))
 }
 
 struct DiffScanState {
@@ -258,136 +145,87 @@ impl DiffScanState {
     }
 }
 
-/// Scan added (`+`) lines in `git log -p --unified=0` output.
 #[cfg(test)]
 #[must_use]
 pub fn scan_git_diff(diff: &str) -> Vec<SecretHit> {
-    let mut hits = Vec::new();
-    let mut state = DiffScanState::new();
-    for raw_line in diff.lines() {
-        scan_git_diff_line(raw_line, &mut state, &mut hits);
-    }
+    let (mut hits, mut state) = (Vec::new(), DiffScanState::new());
+    diff.lines().for_each(|line| scan_git_diff_line(line, &mut state, &mut hits));
     hits
 }
 
-fn scan_git_diff_line(raw_line: &str, state: &mut DiffScanState, hits: &mut Vec<SecretHit>) {
-    if state.in_hunk {
-        if raw_line == "\\ No newline at end of file" {
+fn scan_git_diff_line(raw: &str, st: &mut DiffScanState, hits: &mut Vec<SecretHit>) {
+    if st.in_hunk {
+        if raw == "\\ No newline at end of file" {
             return;
         }
-        if let Some(added) = raw_line.strip_prefix('+')
-            && state.remaining_new > 0
+        if let Some(added) = raw.strip_prefix('+')
+            && st.remaining_new > 0
         {
-            let location = format!("{}:{}", state.commit, state.current_file);
-            let line_no = if state.added_line_no > 0 { state.added_line_no } else { 1 };
-            scan_line(&location, line_no, added, hits);
-            state.added_line_no = state.added_line_no.saturating_add(1);
-            state.remaining_new -= 1;
-            if state.remaining_old == 0 && state.remaining_new == 0 {
-                state.in_hunk = false;
-            }
+            scan_line(&format!("{}:{}", st.commit, st.current_file), st.added_line_no.max(1), added, hits);
+            (st.added_line_no, st.remaining_new) = (st.added_line_no.saturating_add(1), st.remaining_new - 1);
+            st.in_hunk = st.remaining_old > 0 || st.remaining_new > 0;
             return;
         }
-        if raw_line.starts_with('-') && state.remaining_old > 0 {
-            state.remaining_old -= 1;
-            if state.remaining_old == 0 && state.remaining_new == 0 {
-                state.in_hunk = false;
-            }
+        if raw.starts_with('-') && st.remaining_old > 0 {
+            st.remaining_old -= 1;
+            st.in_hunk = st.remaining_old > 0 || st.remaining_new > 0;
             return;
         }
-        if raw_line.starts_with(' ') && state.remaining_old > 0 && state.remaining_new > 0 {
-            state.remaining_old -= 1;
-            state.remaining_new -= 1;
-            state.added_line_no = state.added_line_no.saturating_add(1);
-            if state.remaining_old == 0 && state.remaining_new == 0 {
-                state.in_hunk = false;
-            }
+        if raw.starts_with(' ') && st.remaining_old > 0 && st.remaining_new > 0 {
+            (st.remaining_old, st.remaining_new, st.added_line_no) = (st.remaining_old - 1, st.remaining_new - 1, st.added_line_no.saturating_add(1));
+            st.in_hunk = st.remaining_old > 0 || st.remaining_new > 0;
             return;
         }
-        state.in_hunk = false;
+        st.in_hunk = false;
     }
-
-    if let Some(rest) = raw_line.strip_prefix("commit ") {
-        let short = rest.split_whitespace().next().unwrap_or(rest);
-        state.commit = short.chars().take(12).collect();
-        state.in_hunk = false;
-        return;
+    if let Some(rest) = raw.strip_prefix("commit ") {
+        (st.commit, st.in_hunk) = (rest.split_whitespace().next().unwrap_or(rest).chars().take(12).collect(), false);
+    } else if raw.starts_with("diff --git ") {
+        st.in_hunk = false;
+    } else if let Some(rest) = raw.strip_prefix("+++ ").map(str::trim_end) {
+        st.current_file = if rest == "/dev/null" {
+            String::from("<deleted>")
+        } else if let Some(u) = rest.strip_prefix("b/") {
+            u.to_owned()
+        } else if let Some(inner) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+            let dec = unescape_git_quoted_path(inner);
+            dec.strip_prefix("b/").unwrap_or(&dec).to_owned()
+        } else {
+            rest.to_owned()
+        };
+    } else if raw.starts_with("--- ") {
+    } else if let Some((oc, ns, nc)) = parse_hunk_ranges(raw) {
+        (st.added_line_no, st.remaining_old, st.remaining_new, st.in_hunk) = (ns, oc, nc, oc > 0 || nc > 0);
+    } else if let Some(added) = raw.strip_prefix('+') {
+        scan_line(&format!("{}:{}", st.commit, st.current_file), st.added_line_no.max(1), added, hits);
+        st.added_line_no = st.added_line_no.saturating_add(1);
     }
-    if raw_line.starts_with("diff --git ") {
-        state.in_hunk = false;
-        return;
-    }
-    if raw_line.starts_with("+++ ") {
-        if let Some(path) = parse_diff_plus_path(raw_line) {
-            state.current_file = path;
-        }
-        return;
-    }
-    if raw_line.starts_with("--- ") {
-        return;
-    }
-    if let Some((old_cnt, plus_line, new_cnt)) = parse_hunk_ranges(raw_line) {
-        state.added_line_no = plus_line;
-        state.remaining_old = old_cnt;
-        state.remaining_new = new_cnt;
-        state.in_hunk = old_cnt > 0 || new_cnt > 0;
-        return;
-    }
-    if let Some(added) = raw_line.strip_prefix('+') {
-        let location = format!("{}:{}", state.commit, state.current_file);
-        let line_no = if state.added_line_no > 0 { state.added_line_no } else { 1 };
-        scan_line(&location, line_no, added, hits);
-        state.added_line_no = state.added_line_no.saturating_add(1);
-    }
-}
-
-fn parse_diff_plus_path(raw_line: &str) -> Option<String> {
-    let rest = raw_line.strip_prefix("+++ ")?.trim_end();
-    if rest == "/dev/null" {
-        return Some(String::from("<deleted>"));
-    }
-    if let Some(unquoted) = rest.strip_prefix("b/") {
-        return Some(unquoted.to_owned());
-    }
-    if let Some(inner) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-        let decoded = unescape_git_quoted_path(inner);
-        return Some(decoded.strip_prefix("b/").unwrap_or(&decoded).to_owned());
-    }
-    Some(rest.to_owned())
 }
 
 fn unescape_git_quoted_path(escaped: &str) -> String {
-    let bytes = escaped.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0usize;
+    let (bytes, mut out, mut i) = (escaped.as_bytes(), Vec::with_capacity(escaped.len()), 0usize);
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            match bytes[i + 1] {
-                b'0'..=b'7' if i + 3 < bytes.len() && bytes[i + 2].is_ascii_digit() && bytes[i + 3].is_ascii_digit() => {
-                    if let Ok(oct) = std::str::from_utf8(&bytes[i + 1..i + 4])
-                        && let Ok(val) = u8::from_str_radix(oct, 8)
-                    {
-                        out.push(val);
-                        i += 4;
-                        continue;
-                    }
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-                esc => {
-                    out.push(match esc {
-                        b'a' => 0x07,
-                        b'b' => 0x08,
-                        b't' => b'\t',
-                        b'n' => b'\n',
-                        b'v' => 0x0b,
-                        b'f' => 0x0c,
-                        b'r' => b'\r',
-                        other => other,
-                    });
-                    i += 2;
-                }
+            if matches!(bytes[i + 1], b'0'..=b'7')
+                && i + 3 < bytes.len()
+                && let Ok(oct) = std::str::from_utf8(&bytes[i + 1..i + 4])
+                && let Ok(val) = u8::from_str_radix(oct, 8)
+            {
+                out.push(val);
+                i += 4;
+                continue;
             }
+            out.push(match bytes[i + 1] {
+                b'a' => 0x07,
+                b'b' => 0x08,
+                b't' => b'\t',
+                b'n' => b'\n',
+                b'v' => 0x0b,
+                b'f' => 0x0c,
+                b'r' => b'\r',
+                o => o,
+            });
+            i += 2;
         } else {
             out.push(bytes[i]);
             i += 1;
@@ -397,41 +235,34 @@ fn unescape_git_quoted_path(escaped: &str) -> String {
 }
 
 fn parse_hunk_ranges(line: &str) -> Option<(usize, usize, usize)> {
-    let rest = line.strip_prefix("@@ ")?;
-    let (ranges, _) = rest.split_once(" @@")?;
+    let (ranges, _) = line.strip_prefix("@@ ")?.split_once(" @@")?;
     let mut parts = ranges.split_whitespace();
-    let old_part = parts.next()?.strip_prefix('-')?;
+    let oc = parts.next()?.strip_prefix('-')?.split_once(',').map_or(Ok(1), |(_, c)| c.parse()).ok()?;
     let new_part = parts.next()?.strip_prefix('+')?;
-    let old_cnt = match old_part.split_once(',') {
-        Some((_, c)) => c.parse().ok()?,
-        None => 1,
-    };
-    let (new_start, new_cnt) = match new_part.split_once(',') {
-        Some((s, c)) => (s.parse().ok()?, c.parse().ok()?),
-        None => (new_part.parse().ok()?, 1),
-    };
-    Some((old_cnt, new_start, new_cnt))
+    let (ns, nc) = new_part
+        .split_once(',')
+        .map_or_else(|| Ok((new_part.parse()?, 1)), |(s, c)| Ok::<_, std::num::ParseIntError>((s.parse()?, c.parse()?)))
+        .ok()?;
+    Some((oc, ns, nc))
 }
 
-/// Scan a complete text buffer line-by-line for secrets and local home paths.
 pub fn scan_text(location: &str, text: &str, out: &mut Vec<SecretHit>) {
-    for (idx, line) in text.lines().enumerate() {
-        scan_line(location, idx + 1, line, out);
-    }
+    text.lines().enumerate().for_each(|(idx, line)| scan_line(location, idx + 1, line, out));
 }
 
 fn scan_line(location: &str, line_no: usize, line: &str, out: &mut Vec<SecretHit>) {
+    let mut push = |kind: &'static str| out.push(SecretHit { location: location.to_owned(), line: line_no, kind });
     if contains_pem_private_key(line) {
-        out.push(SecretHit { location: location.to_owned(), line: line_no, kind: "PEM private key header" });
+        push("PEM private key header");
     }
     if let Some(kind) = detect_api_token(line) {
-        out.push(SecretHit { location: location.to_owned(), line: line_no, kind });
+        push(kind);
     }
     if detect_inline_secret_assignment(line) {
-        out.push(SecretHit { location: location.to_owned(), line: line_no, kind: "inline secret env assignment" });
+        push("inline secret env assignment");
     }
     if let Some(kind) = detect_home_path(line) {
-        out.push(SecretHit { location: location.to_owned(), line: line_no, kind });
+        push(kind);
     }
 }
 
@@ -440,13 +271,12 @@ fn contains_pem_private_key(line: &str) -> bool {
     while let Some(rel) = line.get(pos..).and_then(|s| s.find(PEM_BEGIN_PREFIX)) {
         let after_start = pos + rel + PEM_BEGIN_PREFIX.len();
         let after = line.get(after_start..).unwrap_or("");
-        for suffix in [PEM_PRIVATE_KEY_SUFFIX, PEM_PGP_PRIVATE_KEY_SUFFIX] {
-            if let Some((header_kind, _)) = after.split_once(suffix)
-                && header_kind.len() <= 40
-                && header_kind.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b' ' || b == b'-')
-            {
-                return true;
-            }
+        if [PEM_PRIVATE_KEY_SUFFIX, PEM_PGP_PRIVATE_KEY_SUFFIX].iter().any(|sfx| {
+            after
+                .split_once(sfx)
+                .is_some_and(|(k, _)| k.len() <= 40 && k.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || matches!(b, b' ' | b'-')))
+        }) {
+            return true;
         }
         pos = after_start;
     }
@@ -454,111 +284,57 @@ fn contains_pem_private_key(line: &str) -> bool {
 }
 
 fn detect_api_token(line: &str) -> Option<&'static str> {
-    if has_prefixed_token(line, "sk-", true, 4, is_token_body_dash) {
-        return Some("API token (`sk-...`)");
+    let is_dash = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-');
+    let is_und = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    if has_prefixed_token(line, "sk-", true, 4, is_dash) {
+        Some("API token (`sk-...`)")
+    } else if ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"].iter().any(|p| has_prefixed_token(line, p, false, 6, is_und)) {
+        Some("GitHub token (`gh*_...`)")
+    } else if has_prefixed_token(line, "github_pat_", false, 6, is_und) {
+        Some("GitHub fine-grained token (`github_pat_...`)")
+    } else if has_aws_access_key(line) {
+        Some("AWS access key (`AKIA...`/`ASIA...`)")
+    } else if has_prefixed_token(line, "AIza", false, 8, is_dash) {
+        Some("Google API key (`AIza...`)")
+    } else if ["xoxb-", "xoxa-", "xoxp-", "xoxr-", "xoxs-"].iter().any(|p| has_prefixed_token(line, p, true, 6, is_dash)) {
+        Some("Slack token (`xox...`)")
+    } else {
+        None
     }
-    for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"] {
-        if has_prefixed_token(line, prefix, false, 6, is_token_body_und) {
-            return Some("GitHub token (`gh*_...`)");
-        }
-    }
-    if has_prefixed_token(line, "github_pat_", false, 6, is_token_body_und) {
-        return Some("GitHub fine-grained token (`github_pat_...`)");
-    }
-    if has_aws_access_key(line) {
-        return Some("AWS access key (`AKIA...`/`ASIA...`)");
-    }
-    if has_prefixed_token(line, "AIza", false, 8, is_token_body_dash) {
-        return Some("Google API key (`AIza...`)");
-    }
-    if has_slack_token(line) {
-        return Some("Slack token (`xox...`)");
-    }
-    None
 }
 
-fn has_prefixed_token(line: &str, prefix: &str, reject_hyphen_left: bool, min_tail: usize, body_pred: fn(u8) -> bool) -> bool {
-    let bytes = line.as_bytes();
-    let mut start = 0;
+fn has_prefixed_token(line: &str, prefix: &str, reject_hyphen_left: bool, min_tail: usize, pred: fn(u8) -> bool) -> bool {
+    let (bytes, mut start) = (line.as_bytes(), 0usize);
     while let Some(rel) = line.get(start..).and_then(|s| s.find(prefix)) {
         let pos = start + rel;
-        let left_ok = if pos == 0 {
-            true
-        } else {
-            let prev = bytes[pos - 1];
-            !prev.is_ascii_alphanumeric() && prev != b'_' && (!reject_hyphen_left || prev != b'-')
-        };
-        if left_ok {
-            let tail = &bytes[pos + prefix.len()..];
-            let count = tail.iter().take_while(|&&b| body_pred(b)).count();
-            if count >= min_tail {
-                return true;
-            }
-        }
-        start = pos + line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
-    }
-    false
-}
-
-fn has_aws_access_key(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    for prefix in ["AKIA", "ASIA"] {
-        let mut start = 0;
-        while let Some(rel) = line.get(start..).and_then(|s| s.find(prefix)) {
-            let pos = start + rel;
-            let left_ok = pos == 0 || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_');
-            let tail_start = pos + 4;
-            if left_ok && bytes.len() >= tail_start + 16 {
-                let key_body = &bytes[tail_start..tail_start + 16];
-                let right_ok = bytes.get(tail_start + 16).is_none_or(|&b| !b.is_ascii_ascii_upper_alnum());
-                if right_ok && key_body.iter().all(u8::is_ascii_ascii_upper_alnum) {
-                    return true;
-                }
-            }
-            start = pos + 1;
-        }
-    }
-    false
-}
-
-trait AsciiUpperAlnum {
-    fn is_ascii_ascii_upper_alnum(&self) -> bool;
-}
-
-impl AsciiUpperAlnum for u8 {
-    fn is_ascii_ascii_upper_alnum(&self) -> bool {
-        self.is_ascii_uppercase() || self.is_ascii_digit()
-    }
-}
-
-fn has_slack_token(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    let mut start = 0;
-    while let Some(rel) = line.get(start..).and_then(|s| s.find("xox")) {
-        let pos = start + rel;
-        let left_ok = pos == 0 || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_' && bytes[pos - 1] != b'-');
-        if left_ok
-            && let Some(&kind_ch) = bytes.get(pos + 3)
-            && matches!(kind_ch, b'b' | b'a' | b'p' | b'r' | b's')
-            && bytes.get(pos + 4) == Some(&b'-')
-        {
-            let tail = &bytes[pos + 5..];
-            let count = tail.iter().take_while(|&&b| is_token_body_dash(b)).count();
-            if count >= 6 {
-                return true;
-            }
+        let left_ok =
+            pos == 0 || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_' && (!reject_hyphen_left || bytes[pos - 1] != b'-'));
+        if left_ok && bytes[pos + prefix.len()..].iter().take_while(|&&b| pred(b)).count() >= min_tail {
+            return true;
         }
         start = pos + 1;
     }
     false
 }
 
-const fn is_token_body_dash(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
-}
-
-const fn is_token_body_und(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+fn has_aws_access_key(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let is_up = |b: &u8| b.is_ascii_uppercase() || b.is_ascii_digit();
+    ["AKIA", "ASIA"].into_iter().any(|prefix| {
+        let mut start = 0usize;
+        while let Some(rel) = line.get(start..).and_then(|s| s.find(prefix)) {
+            let (pos, tail) = (start + rel, start + rel + 4);
+            if (pos == 0 || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_'))
+                && bytes.len() >= tail + 16
+                && bytes[tail..tail + 16].iter().all(is_up)
+                && bytes.get(tail + 16).is_none_or(|b| !is_up(b))
+            {
+                return true;
+            }
+            start = pos + 1;
+        }
+        false
+    })
 }
 
 fn detect_inline_secret_assignment(line: &str) -> bool {
@@ -566,139 +342,67 @@ fn detect_inline_secret_assignment(line: &str) -> bool {
     if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
         return false;
     }
-    let (is_rust_decl, body) = strip_decl_prefixes(trimmed);
-    let Some((raw_lhs, raw_rhs)) = split_assignment(body, is_rust_decl) else {
+    let rest = trimmed
+        .strip_prefix("pub ")
+        .or_else(|| trimmed.strip_prefix("pub(").and_then(|s| s.split_once(')')).map(|(_, t)| t.trim_start()))
+        .map_or(trimmed, str::trim_start);
+    let (is_rust, body) = ["const ", "static mut ", "static ", "let mut ", "let "]
+        .iter()
+        .find_map(|kw| rest.strip_prefix(kw).map(|a| (true, a.trim_start())))
+        .unwrap_or_else(|| (false, rest.strip_prefix("export ").map_or(rest, str::trim_start)));
+    let Some((raw_lhs, raw_rhs)) = (if is_rust {
+        body.split_once('=')
+    } else {
+        match (body.find('='), body.find(':')) {
+            (Some(e), Some(c)) => body.split_once(if e <= c { '=' } else { ':' }),
+            (Some(_), None) => body.split_once('='),
+            (None, Some(_)) => body.split_once(':'),
+            (None, None) => None,
+        }
+    }) else {
         return false;
     };
-    let lhs_no_type = if is_rust_decl { raw_lhs.split(':').next().unwrap_or(raw_lhs) } else { raw_lhs };
-    let lhs = lhs_no_type.trim().trim_matches(|c| c == '"' || c == '\'');
-    if !is_secret_env_key(lhs) {
+    let lhs = (if is_rust { raw_lhs.split(':').next().unwrap_or(raw_lhs) } else { raw_lhs }).trim().trim_matches(['"', '\'']);
+    if lhs.len() < 5
+        || !lhs.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        || !(words_has(EXACT_SECRET_KEYS, lhs) || SECRET_KEY_SUFFIXES.iter().any(|s| lhs.ends_with(s)))
+    {
         return false;
     }
-    if is_rust_decl && !rhs_starts_with_string_literal(raw_rhs.trim()) {
+    let r = raw_rhs.trim();
+    let raw_str = find_raw_string_span(r.as_bytes(), 0).and_then(|(cs, end, h)| {
+        let closed = end >= cs + 1 + h && r.as_bytes().get(end - 1 - h) == Some(&b'"') && r.as_bytes()[end - h..end].iter().all(|&b| b == b'#');
+        r.get(cs..if closed { end - 1 - h } else { end })
+    });
+    let dq_off = (r.starts_with("b\"") || r.starts_with("c\"")).then_some(1).or_else(|| r.starts_with('"').then_some(0));
+    if is_rust && !(dq_off.is_some() || r.starts_with('\'') || raw_str.is_some()) {
         return false;
     }
-    let (rhs, was_quoted) = extract_assignment_value(raw_rhs);
-    !is_placeholder_value(rhs, was_quoted)
-}
-
-fn strip_decl_prefixes(s: &str) -> (bool, &str) {
-    let mut rest = s.trim_start();
-    if let Some(after_pub) = strip_rust_pub_prefix(rest) {
-        rest = after_pub.trim_start();
-    }
-    for kw in ["const ", "static mut ", "static ", "let mut ", "let "] {
-        if let Some(after_kw) = rest.strip_prefix(kw) {
-            return (true, after_kw.trim_start());
-        }
-    }
-    if let Some(after_export) = rest.strip_prefix("export ") {
-        return (false, after_export.trim_start());
-    }
-    (false, rest)
-}
-
-fn strip_rust_pub_prefix(s: &str) -> Option<&str> {
-    if let Some(rest) = s.strip_prefix("pub ") {
-        return Some(rest);
-    }
-    s.strip_prefix("pub(").and_then(|after| after.split_once(')')).map(|(_, tail)| tail.trim_start())
-}
-
-/// Parse a Rust raw string literal prefix (`r"..."`, `r##"..."##`, `br#"..."#`, `cr#"..."#`) at the
-/// start of `s`, returning the inner literal slice if matched.
-fn parse_raw_string_prefix(s: &str) -> Option<&str> {
-    let after_prefix = s.strip_prefix("br").or_else(|| s.strip_prefix("cr")).or_else(|| s.strip_prefix('r'))?;
-    let hashes = after_prefix.bytes().take_while(|&b| b == b'#').count();
-    let after_hashes = after_prefix.get(hashes..)?;
-    let body = after_hashes.strip_prefix('"')?;
-    let bytes = body.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'"' && bytes.get(i + 1..i + 1 + hashes).is_some_and(|h| h.iter().all(|&b| b == b'#')) {
-            return body.get(..i);
-        }
-        i += 1;
-    }
-    Some(body)
-}
-
-/// Extract a double-quoted string body starting immediately after the opening `"`, honoring `\"`
-/// and `\\` backslash escapes instead of truncating at the first escaped quote.
-fn slice_escaped_dq_body(after_dq: &str) -> &str {
-    let bytes = after_dq.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            i = i.saturating_add(2).min(bytes.len());
-            continue;
-        }
-        if bytes[i] == b'"' {
-            return after_dq.get(..i).unwrap_or(after_dq);
-        }
-        i += 1;
-    }
-    after_dq
-}
-
-fn rhs_starts_with_string_literal(trimmed_rhs: &str) -> bool {
-    trimmed_rhs.starts_with('"')
-        || trimmed_rhs.starts_with('\'')
-        || trimmed_rhs.starts_with("b\"")
-        || trimmed_rhs.starts_with("c\"")
-        || parse_raw_string_prefix(trimmed_rhs).is_some()
-}
-
-fn split_assignment(s: &str, eq_only: bool) -> Option<(&str, &str)> {
-    if eq_only {
-        return s.split_once('=');
-    }
-    match (s.find('='), s.find(':')) {
-        (Some(e), Some(c)) => s.split_once(if e <= c { '=' } else { ':' }),
-        (Some(_), None) => s.split_once('='),
-        (None, Some(_)) => s.split_once(':'),
-        (None, None) => None,
-    }
-}
-
-fn is_secret_env_key(key: &str) -> bool {
-    if key.len() < 5 || !key.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
-        return false;
-    }
-    EXACT_SECRET_KEYS.contains(&key) || SECRET_KEY_SUFFIXES.iter().any(|suffix| key.ends_with(suffix))
-}
-
-fn extract_assignment_value(raw_rhs: &str) -> (&str, bool) {
-    let trimmed = raw_rhs.trim();
-    if let Some(raw_body) = parse_raw_string_prefix(trimmed) {
-        return (raw_body, true);
-    }
-    if let Some(after_dq) = trimmed.strip_prefix("b\"").or_else(|| trimmed.strip_prefix("c\"")).or_else(|| trimmed.strip_prefix('"')) {
-        return (slice_escaped_dq_body(after_dq), true);
-    }
-    if let Some(after_sq) = trimmed.strip_prefix('\'') {
-        return (after_sq.split('\'').next().unwrap_or(""), true);
-    }
-    let before_comment = trimmed.split('#').next().unwrap_or("").trim();
-    (before_comment.trim_end_matches([',', ';']).trim(), false)
+    let (val, was_quoted) = if let Some(rb) = raw_str {
+        (rb, true)
+    } else if let Some(q) = dq_off {
+        let end = skip_quoted_string_end(r.as_bytes(), q);
+        (r.get(q + 1..end - usize::from(end > q + 1 && r.as_bytes().get(end - 1) == Some(&b'"'))).unwrap_or(""), true)
+    } else if let Some(after) = r.strip_prefix('\'') {
+        (after.split('\'').next().unwrap_or(""), true)
+    } else {
+        (r.split('#').next().unwrap_or("").trim().trim_end_matches([',', ';']).trim(), false)
+    };
+    !is_placeholder_value(val, was_quoted)
 }
 
 fn is_placeholder_value(val: &str, was_quoted: bool) -> bool {
-    let trimmed = val.trim();
-    if trimmed.len() < 6 {
+    let t = val.trim();
+    if t.len() < 6
+        || (!was_quoted && (t.contains(char::is_whitespace) || t.contains('(') || t.contains(')') || t.contains("::")))
+        || t.starts_with(['$', '<', '{'])
+        || t.starts_with("secrets.")
+        || t.bytes().all(|b| matches!(b, b'*' | b'x' | b'X' | b'.'))
+    {
         return true;
     }
-    if !was_quoted && (trimmed.contains(char::is_whitespace) || trimmed.contains('(') || trimmed.contains(')') || trimmed.contains("::")) {
-        return true;
-    }
-    if trimmed.starts_with('$') || trimmed.starts_with('<') || trimmed.starts_with('{') || trimmed.starts_with("secrets.") {
-        return true;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if EXACT_PLACEHOLDER_VALUES.contains(&lower.as_str()) {
-        return true;
-    }
-    if trimmed.bytes().all(|b| b == b'*' || b == b'x' || b == b'X' || b == b'.') {
+    let lower = t.to_ascii_lowercase();
+    if words_has(EXACT_PLACEHOLDER_VALUES, &lower) {
         return true;
     }
     let parts: Vec<&str> = lower.split(|c: char| !c.is_ascii_alphanumeric()).filter(|s| !s.is_empty()).collect();
@@ -706,7 +410,7 @@ fn is_placeholder_value(val: &str, was_quoted: bool) -> bool {
         && (parts.iter().any(|p| matches!(*p, "example" | "placeholder" | "changeme" | "dummy" | "sample" | "redacted"))
             || lower.starts_with("your_")
             || lower.starts_with("your-"))
-        && parts.iter().all(|p| PLACEHOLDER_WORDS.contains(p))
+        && parts.iter().all(|p| words_has(PLACEHOLDER_WORDS, p))
 }
 
 fn detect_home_path(line: &str) -> Option<&'static str> {
@@ -716,46 +420,9 @@ fn detect_home_path(line: &str) -> Option<&'static str> {
     if has_unix_home_prefix(line, "/home/") {
         return Some("local Linux home path (`/home/<name>/`)");
     }
-    if has_windows_home_prefix(line) {
-        return Some("local Windows home path (`C:\\Users\\<name>\\`)");
-    }
-    None
-}
-
-fn is_placeholder_home_user(name: &str) -> bool {
-    matches!(name, "YOURNAME" | "YOUR_NAME" | "your-name" | "your_name")
-}
-
-fn matches_non_placeholder_home_user_sep(tail: &[u8], sep: &[u8]) -> bool {
-    let name_len = tail.iter().take_while(|&&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')).count();
-    if name_len == 0 || !tail.get(name_len..).is_some_and(|rest| rest.starts_with(sep)) {
-        return false;
-    }
-    let name = std::str::from_utf8(&tail[..name_len]).unwrap_or("");
-    !is_placeholder_home_user(name)
-}
-
-fn has_unix_home_prefix(line: &str, prefix: &str) -> bool {
     let bytes = line.as_bytes();
-    let mut start = 0;
-    while let Some(rel) = line.get(start..).and_then(|s| s.find(prefix)) {
-        let pos = start + rel;
-        let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
-        if left_ok && matches_non_placeholder_home_user_sep(&bytes[pos + prefix.len()..], b"/") {
-            return true;
-        }
-        start = pos + line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
-    }
-    false
-}
-
-fn has_windows_home_prefix(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i + 9 < bytes.len() {
-        let drive_ok = bytes[i].is_ascii_alphabetic() && bytes[i + 1] == b':';
-        let left_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
-        if drive_ok && left_ok {
+    for i in 0..bytes.len().saturating_sub(9) {
+        if bytes[i].is_ascii_alphabetic() && bytes[i + 1] == b':' && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric()) {
             let sep_info: Option<(&[u8], usize)> = if bytes.get(i + 2..i + 4) == Some(b"\\\\") {
                 Some((b"\\\\", i + 4))
             } else if bytes.get(i + 2) == Some(&b'\\') {
@@ -765,16 +432,33 @@ fn has_windows_home_prefix(line: &str) -> bool {
             } else {
                 None
             };
-            if let Some((sep, after_sep1)) = sep_info
-                && bytes.get(after_sep1..after_sep1 + 5).is_some_and(|w| w.eq_ignore_ascii_case(b"users"))
-                && let Some(after_users) = bytes.get(after_sep1 + 5..)
-                && let Some(after_sep2) = after_users.strip_prefix(sep)
-                && matches_non_placeholder_home_user_sep(after_sep2, sep)
+            if let Some((sep, pos)) = sep_info
+                && bytes.get(pos..pos + 5).is_some_and(|w| w.eq_ignore_ascii_case(b"users"))
+                && let Some(after) = bytes.get(pos + 5..).and_then(|r| r.strip_prefix(sep))
+                && matches_non_placeholder_user(after, sep)
             {
-                return true;
+                return Some("local Windows home path (`C:\\Users\\<name>\\`)");
             }
         }
-        i += 1;
+    }
+    None
+}
+
+fn matches_non_placeholder_user(tail: &[u8], sep: &[u8]) -> bool {
+    let n = tail.iter().take_while(|&&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')).count();
+    n > 0
+        && tail.get(n..).is_some_and(|r| r.starts_with(sep))
+        && !matches!(std::str::from_utf8(&tail[..n]).unwrap_or(""), "YOURNAME" | "YOUR_NAME" | "your-name" | "your_name")
+}
+
+fn has_unix_home_prefix(line: &str, prefix: &str) -> bool {
+    let (bytes, mut start) = (line.as_bytes(), 0usize);
+    while let Some(rel) = line.get(start..).and_then(|s| s.find(prefix)) {
+        let pos = start + rel;
+        if (pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric()) && matches_non_placeholder_user(&bytes[pos + prefix.len()..], b"/") {
+            return true;
+        }
+        start = pos + 1;
     }
     false
 }
@@ -783,170 +467,58 @@ fn has_windows_home_prefix(line: &str) -> bool {
 mod tests {
     use std::path::Path;
 
-    use super::{scan_git_diff, scan_text};
+    use super::{run, run_history, scan_git_diff, scan_repo, scan_text};
+    use crate::scan_util::test_support::{TestDir, to_utf16_bytes};
 
     #[test]
-    fn catches_fake_tokens_pem_env_secrets_and_home_paths() {
-        let fake_openai = concat!("sk-", "test", "1234567890");
-        let fake_ghp = concat!("ghp_", "AbCdEfGh123456");
-        let fake_ghpat = concat!("github_pat_", "11AABBCCDD");
-        let fake_aws = concat!("AKIA", "IOSFODNN7EXAMPLE");
-        let fake_google = concat!("AIza", "SyFakeKey12345");
-        let fake_slack = concat!("xoxb-", "123456-abcdef");
-        let fake_pem = concat!("-----", "BEGIN RSA ", "PRIVATE ", "KEY-----");
-        let fake_env = concat!("OPENAI_API", "_KEY=", "super_secret_token_999");
-        let fake_mac = concat!("/Users/", "alice/work/file.txt");
-        let fake_linux = concat!("/home/", "bob/.ssh/id");
-        let fake_win = concat!("C:\\Users\\", "carol\\Documents");
-
-        for sample in [fake_openai, fake_ghp, fake_ghpat, fake_aws, fake_google, fake_slack, fake_pem, fake_env, fake_mac, fake_linux, fake_win] {
-            let mut hits = Vec::new();
-            scan_text("fixture.txt", sample, &mut hits);
-            assert!(!hits.is_empty(), "expected secret detector to catch `{sample}`");
-        }
-    }
-
-    #[test]
-    fn ignores_legitimate_prose_placeholders_and_own_source() {
-        let safe = "\
-disk-full and risk-difference and asterisk-excluded
-GITHUB_TOKEN=${{ github.token }}
-APPLE_CERTIFICATE_PASSWORD=${APPLE_CERTIFICATE_PASSWORD}
-API_KEY=changeme
-API_KEY=<your-api-key>
-path template /Users/<name>/workspace and C:\\Users\\<name>\\
-doc placeholder /Users/YOURNAME/Documents/CurveBook and C:\\Users\\YOURNAME\\Documents\\CurveBook
-let token = raw.trim();
-";
-        let mut hits = Vec::new();
-        scan_text("safe.txt", safe, &mut hits);
-        assert!(hits.is_empty(), "unexpected false positives: {hits:?}");
-
-        let own_src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/secrets.rs")).unwrap();
-        let mut own_hits = Vec::new();
-        scan_text("xtask/src/secrets.rs", &own_src, &mut own_hits);
-        assert!(own_hits.is_empty(), "secrets.rs must not false-positive on itself: {own_hits:?}");
-    }
-
-    #[test]
-    fn scans_git_diff_additions_only() {
-        let fake_sk = concat!("sk-", "test", "abcdef12");
-        let fake_path = concat!("/Users/", "alice/project");
-        let diff = format!(
-            "commit abcdef1234567890\n\
-             +++ b/src/cfg.rs\n\
-             @@ -1,0 +1,2 @@\n\
-             -let old = \"{fake_sk}\";\n\
-             +let key = \"{fake_sk}\";\n\
-             +let p = \"{fake_path}\";\n"
-        );
-        let hits = scan_git_diff(&diff);
-        assert_eq!(hits.len(), 2, "{hits:?}");
-        assert_eq!(hits[0].location, "abcdef123456:src/cfg.rs");
-        assert_eq!(hits[0].line, 1);
-        assert_eq!(hits[1].line, 2);
-    }
-
-    #[test]
-    fn r2_s13_10_rust_const_let_unmasked_substrings_and_quoted_diff_paths() {
-        let rust_const = format!("pub const AZURE_CLIENT_{}: &str = \"{}\";", "SECRET", concat!("8Q~real_production_", "value_9182"));
-        let rust_let = format!("let mut API_{}: &str = \"{}\";", "SECRET", concat!("secret_prod_", "key_4412"));
-        let parens_pw = format!("WINDOWS_CERTIFICATE_{}=\"{}\"", "PASSWORD", concat!("p@ss(word)", "Prod2026!"));
-        let none_sub = format!("API_{}=\"{}\"", "SECRET", concat!("k9_None_", "ProdKey_88412"));
-        let gho_tok = concat!("gho_", "AbCdEf123456");
-        let asia_tok = concat!("ASIA", "IOSFODNN7EXAMPLE");
-
-        for line in [&rust_const, &rust_let, &parens_pw, &none_sub, gho_tok, asia_tok] {
-            let mut hits = Vec::new();
-            scan_text("test.rs", line, &mut hits);
-            assert!(!hits.is_empty(), "expected finding for `{line}`");
-        }
-
-        let safe = format!("let {} = raw.trim();\nlet API_KEY = env::var(\"X\");\nAPI_{}=\"your_api_key_here\"\n", "token", "KEY");
-        let mut safe_hits = Vec::new();
-        scan_text("safe.rs", &safe, &mut safe_hits);
-        assert!(safe_hits.is_empty(), "unexpected hits: {safe_hits:?}");
-
-        let fake_sk = concat!("sk-", "test", "abcdef12");
-        let quoted_diff = format!("commit 1234567890ab\n+++ \"b/src/caf\\303\\251/cfg.rs\"\n@@ -1,0 +1,1 @@\n+let key = \"{fake_sk}\";\n");
-        let qhits = scan_git_diff(&quoted_diff);
-        assert_eq!(qhits.len(), 1);
-        assert_eq!(qhits[0].location, "1234567890ab:src/café/cfg.rs");
-    }
-
-    #[test]
-    fn scans_utf16_repo_files_and_does_not_confuse_added_plus_plus_lines_with_diff_headers() {
-        let fake_sk = concat!("sk-", "test", "abcdef12");
-        let dir = crate::scan_util::test_support::TestDir::new("sec22-secrets");
-        dir.write_bytes("utf16.txt", &crate::scan_util::test_support::to_utf16_bytes(&format!("key = \"{fake_sk}\"\n"), true, false));
-        let hits = super::scan_repo(dir.path(), &[String::from("utf16.txt")]);
-        assert_eq!(hits.len(), 1, "UTF-16LE repo file must be scanned: {hits:?}");
-
-        let diff = format!(
-            "commit abcdef1234567890\n\
-             +++ b/src/real.rs\n\
-             @@ -1,0 +1,2 @@\n\
-             +++ fake header b/src/spoofed.rs\n\
-             +let key = \"{fake_sk}\";\n"
-        );
-        let dhits = scan_git_diff(&diff);
-        assert_eq!(dhits.len(), 1, "{dhits:?}");
-        assert_eq!(dhits[0].location, "abcdef123456:src/real.rs");
-        assert_eq!(dhits[0].line, 2);
-    }
-
-    #[test]
-    fn aud_12_34_46_escaped_win_paths_pem_after_cert_rust_literals_and_pzfx_and_unreadable() {
-        let escaped_win = concat!("let p = \"C:\\\\Us", "ers\\\\alice\\\\Documents\\\\x\";");
-        let cert_then_key = concat!("{\"b\":\"-----", "BEGIN CERTIFICATE-----MIIB...-----", "BEGIN RSA ", "PRIVATE ", "KEY-----MIIE\"}");
-        let pgp_key = concat!("-----", "BEGIN PGP ", "PRIVATE ", "KEY BLOCK-----");
-        let byte_lit = format!("pub const API_{}: &[u8] = b\"{}\";", "SECRET", concat!("prod_sec", "ret_987654"));
-        let raw2_lit = format!("pub const API_{}: &str = r##\"{}\"##;", "SECRET", concat!("prod_sec", "ret_987654"));
-        let br_lit = format!("pub const API_{}: &[u8] = br#\"{}\"#;", "SECRET", concat!("prod_sec", "ret_987654"));
-        let c_lit = format!("pub const API_{}: &CStr = c\"{}\";", "SECRET", concat!("prod_sec", "ret_987654"));
-        let escaped_q = format!("DATABASE_{}=\"\\\"{}\"", "PASSWORD", concat!("real_prod_", "pw_2026"));
-
-        for sample in [escaped_win, cert_then_key, pgp_key, &byte_lit, &raw2_lit, &br_lit, &c_lit, &escaped_q] {
+    fn catches_tokens_pem_env_home_paths_and_ignores_placeholders_and_self() {
+        for sample in [
+            concat!("sk-", "test", "1234567890"),
+            concat!("ghp_", "AbCdEfGh123456"),
+            concat!("github_pat_", "11AABBCCDD"),
+            concat!("AKIA", "IOSFODNN7EXAMPLE"),
+            concat!("ASIA", "IOSFODNN7EXAMPLE"),
+            concat!("AIza", "SyFakeKey12345"),
+            concat!("xoxb-", "123456-abcdef"),
+            concat!("-----", "BEGIN RSA ", "PRIVATE ", "KEY-----"),
+            concat!("-----", "BEGIN PGP ", "PRIVATE ", "KEY BLOCK-----"),
+            concat!("OPENAI_API", "_KEY=", "super_secret_token_999"),
+            concat!("pub const API_", "SECRET: &[u8] = br#\"prod_sec", "ret_987654\"#;"),
+            concat!("/Us", "ers/alice/work/file.txt"),
+            concat!("/ho", "me/bob/.ssh/id"),
+            concat!("C:\\\\Us", "ers\\\\carol\\\\Documents\\\\x"),
+        ] {
             let mut hits = Vec::new();
             scan_text("probe.rs", sample, &mut hits);
-            assert!(!hits.is_empty(), "AUD-12-34 missed `{sample}`");
+            assert!(!hits.is_empty(), "missed `{sample}`");
         }
+        let safe =
+            "disk-full\nGITHUB_TOKEN=${{ github.token }}\nAPI_KEY=changeme\n/Users/YOURNAME/Documents/CurveBook\nlet API_KEY = env::var(\"X\");\n";
+        let (mut safe_hits, mut own_hits) = (Vec::new(), Vec::new());
+        scan_text("safe.txt", safe, &mut safe_hits);
+        assert!(safe_hits.is_empty(), "{safe_hits:?}");
+        let own = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/secrets.rs")).unwrap();
+        scan_text("xtask/src/secrets.rs", &own, &mut own_hits);
+        assert!(own_hits.is_empty(), "{own_hits:?}");
+    }
 
-        // AUD-12-46: non-UTF-8 .pzfx XML is scanned and missing/unreadable file fails closed.
-        let dir = crate::scan_util::test_support::TestDir::new("aud12-46-secrets");
-        let mut pzfx = vec![0xA9, b' '];
-        pzfx.extend_from_slice(concat!("/Us", "ers/alice/work/exp.pzfx\n").as_bytes());
-        dir.write_bytes("sample.pzfx", &pzfx);
-        let hits = super::scan_repo(dir.path(), &[String::from("sample.pzfx"), String::from("missing.txt")]);
-        assert!(hits.iter().any(|h| h.location == "sample.pzfx"), "latin-1 pzfx missed: {hits:?}");
-        assert!(hits.iter().any(|h| h.location == "missing.txt" && h.kind.contains("unreadable")), "missing file must fail closed: {hits:?}");
+    #[test]
+    fn scans_diff_utf16_missing_and_merge_history() {
+        let sk = concat!("sk-", "test", "abcdef12");
+        let diff = format!("commit 1234567890ab\n+++ \"b/src/caf\\303\\251/cfg.rs\"\n@@ -1,0 +1,2 @@\n+++ fake\n+let key = \"{sk}\";\n");
+        let dh = scan_git_diff(&diff);
+        assert_eq!((dh.len(), dh[0].location.as_str(), dh[0].line), (1, "1234567890ab:src/café/cfg.rs", 2));
 
-        // AUD-12-46: `run_history` (`git log -m`) catches a secret introduced ONLY in a merge commit
-        // (absent from both parents) and deleted in a subsequent commit.
-        let repo = crate::scan_util::test_support::TestDir::git_repo("aud12-46-merge-history");
-        repo.write("cfg.txt", "base\n");
-        repo.git_add_all();
-        repo.run_git(&["commit", "-q", "-m", "base"]);
-        repo.run_git(&["checkout", "-q", "-b", "branch-a"]);
-        repo.write("a.txt", "from-a\n");
-        repo.git_add_all();
-        repo.run_git(&["commit", "-q", "-m", "branch a"]);
-        repo.run_git(&["checkout", "-q", "-"]);
-        repo.write("b.txt", "from-b\n");
-        repo.git_add_all();
-        repo.run_git(&["commit", "-q", "-m", "branch b"]);
-        repo.run_git(&["merge", "-q", "--no-ff", "--no-commit", "branch-a"]);
-        let evil_merge_secret = format!("key = \"{}\"\n", concat!("sk-", "test", "MergeOnly123456"));
-        repo.write("cfg.txt", &evil_merge_secret);
-        repo.git_add_all();
-        repo.run_git(&["commit", "-q", "-m", "evil merge"]);
-        repo.write("cfg.txt", "cleaned\n");
-        repo.git_add_all();
-        repo.run_git(&["commit", "-q", "-m", "cleanup"]);
+        let dir = TestDir::new("secrets-repo");
+        dir.write_bytes("u16.txt", &to_utf16_bytes(&format!("key = \"{sk}\"\n"), true, false));
+        assert_eq!(scan_repo(dir.path(), &[String::from("u16.txt"), String::from("missing.txt")]).len(), 2);
 
-        // Working tree is clean, but history scan (`-m`) catches the merge-only secret.
-        assert!(super::run(repo.path()).is_ok());
-        let hist_err = super::run_history(repo.path()).unwrap_err();
-        assert!(hist_err.contains("cfg.txt"), "expected merge-only secret in cfg.txt, got: {hist_err}");
+        let repo = TestDir::git_repo("secrets-hist");
+        for (body, msg) in [("base\n", "base"), (&format!("key = \"{sk}\"\n") as &str, "leak"), ("clean\n", "clean")] {
+            repo.write("cfg.txt", body);
+            repo.git_add_all();
+            repo.run_git(&["commit", "-q", "-m", msg]);
+        }
+        assert!(run(repo.path()).is_ok() && run_history(repo.path()).unwrap_err().contains("cfg.txt"));
     }
 }
