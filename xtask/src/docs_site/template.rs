@@ -225,7 +225,7 @@ fn render_manual_footer(spec: &PageSpec<'_>, root: &str, assets: &str, out: &mut
     if spec.meta.is_release_snapshot {
         out.push_str("        <a href=\"");
         push_html_escaped(assets, out);
-        out.push_str("index.html\">Product site</a>\n");
+        out.push_str("index.html\">Home</a>\n");
     }
     out.push_str("        <a href=\"https://github.com/HauserGroup/curvebook\">Source code &amp; credits <span aria-hidden=\"true\">↗</span></a>\n");
     if let Some(sha) = &spec.meta.commit_sha {
@@ -327,7 +327,9 @@ fn active_nav_target(spec: &PageSpec<'_>) -> &'static str {
 
 fn render_header(spec: &PageSpec<'_>, root: &str, assets: &str, out: &mut String) {
     out.push_str("    <header class=\"site-header\">\n      <div class=\"header-inner\">\n        <a class=\"wordmark\" href=\"");
-    push_html_escaped(root, out);
+    // Published snapshots sit two levels below the site home, so the logo always returns there;
+    // a local preview build has no site home beside it and falls back to the manual home.
+    push_html_escaped(if spec.meta.is_release_snapshot { assets } else { root }, out);
     out.push_str("index.html\">\n          <img src=\"");
     push_html_escaped(assets, out);
     out.push_str("images/curvebook.png\" width=\"32\" height=\"32\" alt=\"\">\n          <span>CurveBook <span class=\"wordmark-sub\">Manual</span></span>\n        </a>\n        <nav class=\"site-nav\" aria-label=\"Manual navigation\">\n");
@@ -352,7 +354,7 @@ fn render_header(spec: &PageSpec<'_>, root: &str, assets: &str, out: &mut String
     if spec.meta.is_release_snapshot {
         out.push_str("        <a class=\"header-utility\" href=\"");
         push_html_escaped(assets, out);
-        out.push_str("index.html\">Product site</a>\n");
+        out.push_str("index.html\">Home</a>\n");
     }
     out.push_str("      </div>\n    </header>\n");
 }
@@ -637,7 +639,7 @@ pub fn render_not_found_page(base_path: &str) -> String {
     push_html_escaped(base_path, &mut out);
     out.push_str("\">CurveBook Home</a>\n          <a class=\"button secondary\" href=\"");
     push_html_escaped(base_path, &mut out);
-    out.push_str("manual/latest/index.html\">Read the Manual <span aria-hidden=\"true\">→</span></a>\n        </div>\n        <h2>Helpful links</h2>\n        <ul>\n");
+    out.push_str("manual/latest/get-started.html\">Get started <span aria-hidden=\"true\">→</span></a>\n        </div>\n        <h2>Helpful links</h2>\n        <ul>\n");
     for (rel, link_html, desc) in [
         ("manual/latest/get-started.html", "Get Started &amp; Installation", "installers, checksums, and first run."),
         ("open-pzfx-files.html", "Open <code>.pzfx</code> and <code>.prism</code> files", "inspect tables and export to CSV."),
@@ -808,6 +810,7 @@ mod tests {
         assert!(h1_c_pos < toc_c_pos && toc_c_pos < h2_c_pos);
         assert!(!page_c.contains("<details open"), "long TOC must be collapsed by default");
         assert!(page_c.contains("Documents v0.1.0 · 2026-11-26"));
-        assert!(page_c.contains("class=\"header-utility\" href=\"../../../index.html\">Product site</a>"));
+        assert!(page_c.contains("class=\"header-utility\" href=\"../../../index.html\">Home</a>"));
+        assert!(page_c.contains("class=\"wordmark\" href=\"../../../index.html\""), "release logo must link to the site home");
     }
 }

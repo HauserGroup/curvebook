@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="48" height="48" viewBox="0 0 48 48">
+  <title>Group comparison</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path d="M10 0 L38 0 C43.523 0 48 4.477 48 10 L48 38 C48 43.523 43.523 48 38 48 L10 48 C4.477 48 0 43.523 0 38 L0 10 C0 4.477 4.477 0 10 0 Z" fill="#e9eef5"/>
+    <path d="M15 25 L21 25 C21.552 25 22 25.448 22 26 L22 35 C22 35.552 21.552 36 21 36 L15 36 C14.448 36 14 35.552 14 35 L14 26 C14 25.448 14.448 25 15 25 Z" fill="#1d4f91"/>
+    <path d="M27 19 L33 19 C33.552 19 34 19.448 34 20 L34 35 C34 35.552 33.552 36 33 36 L27 36 C26.448 36 26 35.552 26 35 L26 20 C26 19.448 26.448 19 27 19 Z" fill="#b83d37"/>
+    <path d="M18 25 L18 21 M16 21 L20 21" fill="none" stroke="#243752" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M30 19 L30 15.5 M28 15.5 L32 15.5" fill="none" stroke="#243752" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <polyline points="18,17.5 18,12 30,12 30,12.8" fill="none" stroke="#243752" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M24 6.5 L24 10.5 M22.3 7.5 L25.7 9.5 M25.7 7.5 L22.3 9.5" fill="none" stroke="#b83d37" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <line x1="11" y1="36" x2="37" y2="36" fill="none" stroke="#243752" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -44,78 +44,108 @@
 
     <main id="main" tabindex="-1">
       <div class="overview">
-        <section class="intro" aria-labelledby="intro-title" itemscope itemtype="https://schema.org/SoftwareApplication">
-          <meta itemprop="name" content="CurveBook">
-          <meta itemprop="description" content="Free, open-source biostatistics, nonlinear regression, and scientific graphing application for macOS, Windows, and Linux. Runs offline with zero telemetry and opens .pzfx and .prism files.">
-          <meta itemprop="applicationCategory" content="ScientificApplication">
-          <meta itemprop="operatingSystem" content="macOS, Windows, Linux, FreeBSD">
-          <meta itemprop="license" content="https://spdx.org/licenses/MIT.html">
-          <meta itemprop="isAccessibleForFree" content="true">
-          <meta itemprop="url" content="https://curvebook.org/">
-          <meta itemprop="downloadUrl" content="https://github.com/HauserGroup/curvebook/releases">
-          <meta itemprop="screenshot" content="https://curvebook.org/images/workspace-split-fit.png">
-          <meta itemprop="sameAs" content="https://github.com/HauserGroup/curvebook">
-          <span itemprop="offers" itemscope itemtype="https://schema.org/Offer">
-            <meta itemprop="price" content="0">
-            <meta itemprop="priceCurrency" content="USD">
-          </span>
-          <h1 id="intro-title">Biostatistics.<br>Curve fitting.<br><span>Scientific graphs.</span></h1>
-          <p class="lead"><strong>CurveBook</strong> is free software for analyzing lab data, fitting curves, and making publication-ready graphs. It runs on your own computer and works offline.</p>
-          <div class="action-row">
-            <a class="button primary" href="#downloads">Download</a>
-            <a class="button secondary" href="manual/latest/index.html">Read the manual</a>
-          </div>
-          <ul class="pill-row" aria-label="At a glance">
-            <li class="pill">Free &amp; open source</li>
-            <li class="pill">Works offline</li>
-            <li class="pill">No tracking</li>
-            <li class="pill">macOS · Windows · Linux</li>
-          </ul>
-        </section>
+        <div class="hero">
+          <section class="intro" aria-labelledby="intro-title" itemscope itemtype="https://schema.org/SoftwareApplication">
+            <meta itemprop="name" content="CurveBook">
+            <meta itemprop="description" content="Free, open-source biostatistics, nonlinear regression, and scientific graphing application for macOS, Windows, and Linux. Runs offline with zero telemetry and opens .pzfx and .prism files.">
+            <meta itemprop="applicationCategory" content="ScientificApplication">
+            <meta itemprop="operatingSystem" content="macOS, Windows, Linux, FreeBSD">
+            <meta itemprop="license" content="https://spdx.org/licenses/MIT.html">
+            <meta itemprop="isAccessibleForFree" content="true">
+            <meta itemprop="url" content="https://curvebook.org/">
+            <meta itemprop="downloadUrl" content="https://github.com/HauserGroup/curvebook/releases">
+            <meta itemprop="screenshot" content="https://curvebook.org/images/workspace-split-fit.png">
+            <meta itemprop="sameAs" content="https://github.com/HauserGroup/curvebook">
+            <span itemprop="offers" itemscope itemtype="https://schema.org/Offer">
+              <meta itemprop="price" content="0">
+              <meta itemprop="priceCurrency" content="USD">
+            </span>
+            <h1 id="intro-title">Biostatistics.<br>Curve fitting.<br><span>Scientific graphs.</span></h1>
+            <p class="lead"><strong>CurveBook</strong> is free software for analyzing lab data, fitting curves, and making publication-ready graphs. It runs on your own computer and works offline.</p>
+            <div class="action-row">
+              <a class="button primary" href="#downloads">Download</a>
+              <a class="button secondary" href="manual/latest/get-started.html">Get started</a>
+            </div>
+            <ul class="pill-row" aria-label="At a glance">
+              <li class="pill">Free &amp; open source</li>
+              <li class="pill">No tracking</li>
+              <li class="pill">macOS · Windows · Linux</li>
+            </ul>
+          </section>
 
-        <figure class="screenshot-card hero-shot">
-          <img src="images/workspace-split-fit.png" width="1440" height="900" fetchpriority="high" alt="CurveBook showing an XY dose-response data table next to a live four-parameter logistic curve fit with confidence ribbons, a fit summary table, and the Graph Inspector.">
-          <figcaption>Edit your data and watch the curve fit update next to it.</figcaption>
-        </figure>
+          <figure class="hero-shot">
+            <div class="hero-crop">
+              <img src="images/workspace-layout-dark.png" width="1440" height="900" fetchpriority="high" alt="A two-panel figure made in CurveBook: dose-response curves for two variants, a bar chart of activation with significance brackets, and a summary table.">
+            </div>
+            <figcaption>A two-panel figure built and laid out in CurveBook.</figcaption>
+          </figure>
+        </div>
 
         <section id="features" class="features-section" aria-labelledby="features-title" tabindex="-1">
           <h2 id="features-title">Features</h2>
           <ul class="feature-grid">
             <li class="feature-card">
-              <h3><a href="manual/latest/tables.html#table-archetypes">Organize your data <span aria-hidden="true">→</span></a></h3>
-              <p>Tables built for XY, grouped, survival, contingency, and other common lab data.</p>
+              <img class="feature-icon" src="images/feature-data.svg" width="40" height="40" alt="">
+              <div>
+                <h3><a href="manual/latest/tables.html#table-archetypes">Organize your data <span aria-hidden="true">→</span></a></h3>
+                <p>Tables built for XY, grouped, survival, contingency, and other common lab data.</p>
+              </div>
             </li>
             <li class="feature-card">
-              <h3><a href="manual/latest/analyses.html">Run statistics <span aria-hidden="true">→</span></a></h3>
-              <p><em>t</em> tests, ANOVA, survival, contingency, ROC, and more, with assumption checks.</p>
+              <img class="feature-icon" src="images/feature-statistics.svg" width="40" height="40" alt="">
+              <div>
+                <h3><a href="manual/latest/analyses.html">Run statistics <span aria-hidden="true">→</span></a></h3>
+                <p><em>t</em> tests, ANOVA, survival, contingency, ROC, and more, with assumption checks.</p>
+              </div>
             </li>
             <li class="feature-card">
-              <h3><a href="manual/latest/fitting.html">Fit curves <span aria-hidden="true">→</span></a></h3>
-              <p>Dose-response and other built-in models, or type in your own equation.</p>
+              <img class="feature-icon" src="images/feature-fitting.svg" width="40" height="40" alt="">
+              <div>
+                <h3><a href="manual/latest/fitting.html">Fit curves <span aria-hidden="true">→</span></a></h3>
+                <p>Dose-response and other built-in models, or type in your own equation.</p>
+              </div>
             </li>
             <li class="feature-card">
-              <h3><a href="manual/latest/graphs.html#graph-families">Make graphs <span aria-hidden="true">→</span></a></h3>
-              <p>Publication-ready plots with significance brackets and color-blind-safe palettes.</p>
+              <img class="feature-icon" src="images/feature-graphs.svg" width="40" height="40" alt="">
+              <div>
+                <h3><a href="manual/latest/graphs.html#graph-families">Make graphs <span aria-hidden="true">→</span></a></h3>
+                <p>Publication-ready plots with significance brackets and color-blind-safe palettes.</p>
+              </div>
             </li>
             <li class="feature-card">
-              <h3><a href="manual/latest/graphs.html#page-layouts">Build figures <span aria-hidden="true">→</span></a></h3>
-              <p>Arrange multi-panel figures at journal sizes and export to SVG, PDF, PNG, or TIFF.</p>
+              <img class="feature-icon" src="images/feature-figures.svg" width="40" height="40" alt="">
+              <div>
+                <h3><a href="manual/latest/graphs.html#page-layouts">Build figures <span aria-hidden="true">→</span></a></h3>
+                <p>Arrange multi-panel figures at journal sizes and export to SVG, PDF, PNG, or TIFF.</p>
+              </div>
             </li>
             <li class="feature-card">
-              <h3><a href="open-pzfx-files.html">Open .pzfx &amp; .prism files <span aria-hidden="true">→</span></a></h3>
-              <p>Bring in the data tables from existing files and export them to CSV.</p>
+              <img class="feature-icon" src="images/feature-import.svg" width="40" height="40" alt="">
+              <div>
+                <h3><a href="open-pzfx-files.html">Open .pzfx &amp; .prism files <span aria-hidden="true">→</span></a></h3>
+                <p>Bring in the data tables from existing files and export them to CSV.</p>
+              </div>
             </li>
             <li class="feature-card">
-              <h3><a href="manual/latest/mcp-for-beginners.html">Work with an AI assistant <span aria-hidden="true">→</span></a></h3>
-              <p>Ask your AI assistant to build tables, run analyses, and draw graphs for you.</p>
+              <img class="feature-icon" src="images/feature-assistant.svg" width="40" height="40" alt="">
+              <div>
+                <h3><a href="manual/latest/mcp-for-beginners.html">Work with an AI assistant <span aria-hidden="true">→</span></a></h3>
+                <p>Ask your AI assistant to build tables, run analyses, and draw graphs for you.</p>
+              </div>
             </li>
             <li class="feature-card">
-              <h3><a href="manual/latest/automation/cli.html">Automate repeat work <span aria-hidden="true">→</span></a></h3>
-              <p>Rerun the same analysis on new data from the command line.</p>
+              <img class="feature-icon" src="images/feature-automation.svg" width="40" height="40" alt="">
+              <div>
+                <h3><a href="manual/latest/automation/cli.html">Automate repeat work <span aria-hidden="true">→</span></a></h3>
+                <p>Rerun the same analysis on new data from the command line.</p>
+              </div>
             </li>
             <li class="feature-card">
-              <h3><a href="manual/latest/files.html#native-formats">Keep it all in one file <span aria-hidden="true">→</span></a></h3>
-              <p>Data, analyses, and graphs save together in one project, with crash recovery.</p>
+              <img class="feature-icon" src="images/feature-project.svg" width="40" height="40" alt="">
+              <div>
+                <h3><a href="manual/latest/files.html#native-formats">Keep it all in one file <span aria-hidden="true">→</span></a></h3>
+                <p>Data, analyses, and graphs save together in one project, with crash recovery.</p>
+              </div>
             </li>
           </ul>
         </section>

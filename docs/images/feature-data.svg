@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="48" height="48" viewBox="0 0 48 48">
+  <title>Data table</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path d="M10 0 L38 0 C43.523 0 48 4.477 48 10 L48 38 C48 43.523 43.523 48 38 48 L10 48 C4.477 48 0 43.523 0 38 L0 10 C0 4.477 4.477 0 10 0 Z" fill="#e9eef5"/>
+    <path d="M13.5 13 L34.5 13 C35.881 13 37 14.119 37 15.5 L37 32.5 C37 33.881 35.881 35 34.5 35 L13.5 35 C12.119 35 11 33.881 11 32.5 L11 15.5 C11 14.119 12.119 13 13.5 13 Z" fill="#ffffff" stroke="#243752" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="12" y="14" width="24" height="5" fill="#c9d4e3"/>
+    <rect x="28.5" y="27" width="7.5" height="7" fill="#f2d4d1"/>
+    <line x1="11" y1="19" x2="37" y2="19" fill="none" stroke="#243752" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <line x1="11" y1="27" x2="37" y2="27" fill="none" stroke="#243752" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <line x1="20" y1="13" x2="20" y2="35" fill="none" stroke="#243752" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <line x1="28.5" y1="13" x2="28.5" y2="35" fill="none" stroke="#243752" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M13.5 13 L34.5 13 C35.881 13 37 14.119 37 15.5 L37 32.5 C37 33.881 35.881 35 34.5 35 L13.5 35 C12.119 35 11 33.881 11 32.5 L11 15.5 C11 14.119 12.119 13 13.5 13 Z" fill="none" stroke="#243752" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="48" height="48" viewBox="0 0 48 48">
+  <title>Single project file</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path d="M10 0 L38 0 C43.523 0 48 4.477 48 10 L48 38 C48 43.523 43.523 48 38 48 L10 48 C4.477 48 0 43.523 0 38 L0 10 C0 4.477 4.477 0 10 0 Z" fill="#e9eef5"/>
+    <path d="M19 8 L35 8 C36.105 8 37 8.895 37 10 L37 31 C37 32.105 36.105 33 35 33 L19 33 C17.895 33 17 32.105 17 31 L17 10 C17 8.895 17.895 8 19 8 Z" fill="#c9d4e3" stroke="#243752" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M15.5 11.5 L31.5 11.5 C32.605 11.5 33.5 12.395 33.5 13.5 L33.5 34.5 C33.5 35.605 32.605 36.5 31.5 36.5 L15.5 36.5 C14.395 36.5 13.5 35.605 13.5 34.5 L13.5 13.5 C13.5 12.395 14.395 11.5 15.5 11.5 Z" fill="#dde4ee" stroke="#243752" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M12 15 L28 15 C29.105 15 30 15.895 30 17 L30 38 C30 39.105 29.105 40 28 40 L12 40 C10.895 40 10 39.105 10 38 L10 17 C10 15.895 10.895 15 12 15 Z" fill="#ffffff" stroke="#243752" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M14 22 L26 22 M14 26.5 L24 26.5 M14 31 L20 31" fill="none" stroke="#1d4f91" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="32.5" cy="34.5" r="6" fill="#b83d37"/>
+    <polyline points="29.8,34.6 31.8,36.6 35.3,32.7" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -592,7 +592,8 @@ fn assert_release_snapshot_outputs(sim_root: &Path, manual_out: &Path, head_sha:
 
     let snap_home = fs::read_to_string(manual_out.join("v0.1/index.html")).map_err(|e| e.to_string())?;
     for needle in [
-        "Product site</a>",
+        "class=\"header-utility\" href=\"../../index.html\">Home</a>",
+        "class=\"wordmark\" href=\"../../index.html\"",
         "Privacy Policy</a>",
         "Documents v0.1.0-alpha.2",
         "aria-current=\"page\"",
