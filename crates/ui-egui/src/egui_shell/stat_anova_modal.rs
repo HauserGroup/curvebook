@@ -399,6 +399,7 @@ fn sync_modal_state_from_app(
         state.show_method_reference = false;
         if is_create_mode && let Some(saved) = &state.saved_default_spec {
             let mut applied = saved.clone();
+            applied.id = spec.id.clone();
             applied.source_sheet_id = spec.source_sheet_id.clone();
             applied.selected_data_sets.clone_from(&spec.selected_data_sets);
             applied.custom_title.clone_from(&spec.custom_title);
@@ -1152,6 +1153,7 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
         intents.push(UiIntent::StatParams(super::StatParamsIntent::StepMultiplicityThreshold { delta: 0.01 }));
     }
 
+    let cmp_ctrl_en = gate(MultiplicityMethod::Dunnett { control_column: rc.ep.control_column });
     if render_modal_checkbox(
         ui,
         rc.tokens,
@@ -1159,13 +1161,19 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
         "edit.compare_against_control",
         "Compare all groups against a designated control column",
         rc.ep.compare_against_control,
-        &ControlEnablement::enabled(),
+        &cmp_ctrl_en,
     ) {
         let next_cmp = !rc.ep.compare_against_control;
         if next_cmp && rc.ep.assume_gaussian {
             intents.push(UiIntent::StatParams(super::StatParamsIntent::SetMultiplicityMethod { slug: String::from("dunnett") }));
         } else if !next_cmp {
-            let fallback = if rc.ep.assume_gaussian { "tukey" } else { "dunn" };
+            let fallback = if !rc.ep.assume_gaussian {
+                "dunn"
+            } else if gate(MultiplicityMethod::TukeyHsd).enabled {
+                "tukey"
+            } else {
+                "bonferroni"
+            };
             intents.push(UiIntent::StatParams(super::StatParamsIntent::SetMultiplicityMethod { slug: String::from(fallback) }));
         } else {
             intents.push(UiIntent::StatParams(super::StatParamsIntent::SetCompareAgainstControl { enabled: true }));

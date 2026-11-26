@@ -22,6 +22,8 @@ use crate::PlatformError;
 /// and root `template` paths are resolved separately by batch manifest loaders.
 pub const PATH_PARAM_KEYS: &[&str] = &[
     "path",
+    "dir",
+    "directory",
     "file",
     "file_path",
     "filePath",
@@ -29,6 +31,10 @@ pub const PATH_PARAM_KEYS: &[&str] = &[
     "output",
     "output_path",
     "outputPath",
+    "destination_path",
+    "destinationPath",
+    "unpacked_dir",
+    "unpackedDir",
     "in",
     "input",
     "input_path",
@@ -271,7 +277,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{PathResolver, WorkdirGuard, ensure_regular_file};
+    use super::{PATH_PARAM_KEYS, PathResolver, WorkdirGuard, ensure_regular_file};
     use crate::PlatformError;
 
     static TEST_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -420,6 +426,66 @@ mod tests {
             {
                 assert!(matches!(guard.resolve_existing_file("pipe.csv"), Err(PlatformError::InvalidPath { .. })));
             }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn aud_13_23_canonical_path_keys_cover_and_enforce_all_directory_and_output_aliases() {
+        let required_keys = ["dir", "directory", "destination_path", "destinationPath", "unpacked_dir", "unpackedDir", "output_path", "outputPath"];
+        for key in required_keys {
+            assert!(PATH_PARAM_KEYS.contains(&key), "missing canonical path key `{key}` in PATH_PARAM_KEYS");
+        }
+
+        let dir = temp_dir("aud13-23-keys");
+        let outside = temp_dir("aud13-23-outside");
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        let guard = WorkdirGuard::new(&dir).unwrap();
+        let sandbox = PathResolver::Sandboxed(guard);
+        let unconstrained = PathResolver::Unconstrained { base_dir: dir.clone() };
+
+        for key in required_keys {
+            // Sandboxed resolver rewrites in-workdir relative paths (including nested objects/arrays).
+            let mut ok_params = json!({
+                key: "nested/target",
+                "nested": [{ key: "sub/item" }],
+                "csv": "x,y\n../1,2\n",
+            });
+            sandbox.sanitize_params(&mut ok_params).unwrap();
+            assert_eq!(ok_params[key], json!(canonical.join("nested").join("target").to_string_lossy()));
+            assert_eq!(ok_params["nested"][0][key], json!(canonical.join("sub").join("item").to_string_lossy()));
+            assert_eq!(ok_params["csv"], json!("x,y\n../1,2\n"));
+
+            // Sandboxed resolver rejects traversal and outside absolute paths.
+            let mut traversal = json!({ key: "../escape" });
+            assert!(
+                matches!(sandbox.sanitize_params(&mut traversal), Err(PlatformError::PathEscape { .. })),
+                "key `{key}` failed to block parent traversal"
+            );
+            let mut abs_outside = json!({ "nested": { key: outside.join("leak").to_string_lossy() } });
+            assert!(
+                matches!(sandbox.sanitize_params(&mut abs_outside), Err(PlatformError::PathEscape { .. })),
+                "nested key `{key}` failed to block outside absolute path"
+            );
+
+            // Non-string non-null values are rejected cleanly.
+            let mut bad_type = json!({ key: 42 });
+            assert!(
+                matches!(sandbox.sanitize_params(&mut bad_type), Err(PlatformError::InvalidPath { .. })),
+                "key `{key}` failed to reject non-string path value"
+            );
+
+            // Null optional values pass through cleanly.
+            let mut null_val = json!({ key: null });
+            sandbox.sanitize_params(&mut null_val).unwrap();
+            assert_eq!(null_val[key], json!(null));
+
+            // Unconstrained resolver resolves relative paths against base_dir.
+            let mut rel_unconstrained = json!({ key: "exports/out" });
+            unconstrained.sanitize_params(&mut rel_unconstrained).unwrap();
+            assert_eq!(rel_unconstrained[key], json!(dir.join("exports").join("out").to_string_lossy()));
         }
 
         let _ = std::fs::remove_dir_all(&dir);

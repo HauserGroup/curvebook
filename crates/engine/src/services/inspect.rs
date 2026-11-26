@@ -4,8 +4,8 @@ use std::path::Path;
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, ErrorCode, GroupedTable, InfoConstant,
-    MultipleVariablesTable, NestedGroupColumn, NestedTable, ParameterScope, PartsOfWholeTable, ProjectDocument, ResultTab, SheetId, SheetSection,
-    SurvivalTable, TableArchetype, VariableColumn, XyTable,
+    MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable, ProjectDocument, ResultTab, SheetId, SheetSection, SurvivalTable,
+    TableArchetype, VariableColumn, XyTable,
 };
 use curvebook_format::{CsvOptions, export_datasheet_to_csv};
 use serde::Serialize;
@@ -335,11 +335,9 @@ impl ProjectInspectSummary {
 }
 
 fn count_analysis_hooks(spec: &AnalysisSpec) -> usize {
-    match &spec.kind {
-        AnalysisKind::NonlinearRegression(nl) => nl.parameter_rules.iter().filter(|r| matches!(r.scope, ParameterScope::HookedConstant(_))).count(),
-        AnalysisKind::PowerAnalysis(p) => usize::from(p.info_sheet_id.is_some()),
-        _ => 0,
-    }
+    let generic_hooks = spec.kind.hooked_sources().len();
+    let power_info_hook = usize::from(matches!(&spec.kind, AnalysisKind::PowerAnalysis(p) if p.info_sheet_id.is_some()));
+    generic_hooks.saturating_add(power_info_hook)
 }
 
 /// Inspect project-wide metadata, sheet summaries, and optional focused sheet dependencies.

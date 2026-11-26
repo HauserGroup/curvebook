@@ -10,8 +10,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::{
-    BinaryOp, DatasetFilter, Expr, MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, MAX_TOTAL_DATASET_INDICES, UnaryOp, is_valid_ident, parse_dataset_prefix,
-    parse_expr_collecting_locs, split_top_level_assignment,
+    BinaryOp, DatasetFilter, DslSection, Expr, MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, MAX_TOTAL_DATASET_INDICES, UnaryOp, is_valid_ident,
+    parse_dataset_prefix, parse_expr_collecting_locs, parse_section_header, split_top_level_assignment,
 };
 use crate::library::normalize_id;
 use crate::types::per_dataset_parameter_key;
@@ -124,6 +124,20 @@ pub fn format_polynomial_equation_tex(
     normalize_tex_signs(&format!("Y = {}", terms.join(" + ")))
 }
 
+/// Formats a [`curvebook_doc::LinearRegressionSpec`] equation in canonical TeX-subset notation,
+/// preserving the Y-intercept whenever a non-origin `fixed_point` takes precedence over
+/// `force_through_origin` or when `deming_model_ii` is active (`AUD-13-18`).
+#[must_use]
+pub fn format_linear_regression_equation_tex(
+    spec: &curvebook_doc::LinearRegressionSpec,
+    params: &[(String, f64)],
+    substituted: bool,
+    sig_figs: usize,
+) -> String {
+    let through_origin = !spec.deming_model_ii && matches!(spec.effective_fixed_point(), Some((x0, y0)) if x0 == 0.0 && y0 == 0.0);
+    format_polynomial_equation_tex(1, through_origin, params, substituted, sig_figs)
+}
+
 fn format_linear_equation_tex(force_through_origin: bool, params: &[(String, f64)], substituted: bool, sig_figs: usize) -> String {
     if !substituted || params.is_empty() {
         return if force_through_origin {
@@ -136,7 +150,12 @@ fn format_linear_equation_tex(force_through_origin: bool, params: &[(String, f64
     let (slope, intercept) = extract_linear_params(params, force_through_origin);
     let slope_str = slope.map_or_else(|| "\\text{Slope}".to_string(), |v| format_number_sig_figs(v, sig_figs));
     if force_through_origin {
-        format!("Y = {slope_str} \\cdot X")
+        if let Some(b) = intercept.filter(|v| v.is_finite() && *v != 0.0) {
+            let intercept_str = format_number_sig_figs(b, sig_figs);
+            format!("Y = {slope_str} \\cdot X + {intercept_str}")
+        } else {
+            format!("Y = {slope_str} \\cdot X")
+        }
     } else {
         let intercept_str = intercept.map_or_else(|| "\\text{Intercept}".to_string(), |v| format_number_sig_figs(v, sig_figs));
         format!("Y = {slope_str} \\cdot X + {intercept_str}")
@@ -166,7 +185,9 @@ fn extract_linear_params(params: &[(String, f64)], force_through_origin: bool) -
         .map(|(_, v)| v)
         .or_else(|| params.iter().enumerate().find(|(idx, _)| intercept.is_none_or(|(i_idx, _)| *idx != i_idx)).map(|(_, (_, v))| *v));
     let b = if force_through_origin {
-        None
+        // Preserve an explicit non-zero intercept (e.g. non-origin `fixed_point` line) instead of
+        // silently truncating `Y = m*X + b` to `Y = m*X` (`AUD-13-18`).
+        intercept.map(|(_, v)| v).filter(|v| v.is_finite() && *v != 0.0)
     } else {
         intercept.map(|(_, v)| v).or_else(|| {
             let s_idx = slope
@@ -289,6 +310,14 @@ struct EqCtx<'a> {
 
 impl<'a> EqCtx<'a> {
     fn find(&self, name: &str) -> Option<f64> {
+        if let Some(ds_idx) = self.data_set_index {
+            let ds_target = normalize_id(&per_dataset_parameter_key(name, ds_idx));
+            for (k, v) in self.params {
+                if normalize_id(k) == ds_target {
+                    return Some(*v);
+                }
+            }
+        }
         for (k, v) in self.params {
             if k == name {
                 return Some(*v);
@@ -298,14 +327,6 @@ impl<'a> EqCtx<'a> {
         for (k, v) in self.params {
             if normalize_id(k) == target {
                 return Some(*v);
-            }
-        }
-        if let Some(ds_idx) = self.data_set_index {
-            let ds_target = normalize_id(&per_dataset_parameter_key(name, ds_idx));
-            for (k, v) in self.params {
-                if normalize_id(k) == ds_target {
-                    return Some(*v);
-                }
             }
         }
         None
@@ -1388,6 +1409,7 @@ struct SelectedDslScript<'a> {
 fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<SelectedDslScript<'_>> {
     let mut parsed: Vec<(DatasetFilter, DslRawStmt<'_>)> = Vec::new();
     let mut total_dataset_indices = 0_usize;
+    let mut in_equation = true;
     for (idx, raw_line) in src.lines().enumerate() {
         if idx >= MAX_DSL_LINES {
             break;
@@ -1396,25 +1418,11 @@ fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<Selecte
         if stripped.is_empty() {
             continue;
         }
-        if let Some(section_name) = stripped.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            let sec = normalize_id(section_name);
-            if matches!(
-                sec.as_str(),
-                "initialvalues"
-                    | "initialvalue"
-                    | "initials"
-                    | "init"
-                    | "initial_values"
-                    | "constraints"
-                    | "transforms"
-                    | "transform"
-                    | "derived"
-                    | "derivedscalars"
-                    | "weights"
-                    | "weighting"
-            ) {
-                break;
-            }
+        if stripped.starts_with('[') && stripped.ends_with(']') {
+            in_equation = matches!(parse_section_header(stripped, idx + 1), Ok(Some(DslSection::Equation)));
+            continue;
+        }
+        if !in_equation {
             continue;
         }
         let (filter, body) = parse_dataset_prefix(stripped, idx + 1).unwrap_or((DatasetFilter::Any, stripped));
@@ -1562,7 +1570,7 @@ fn render_selected_dsl_script(script: &SelectedDslScript<'_>, ctx: &EqCtx<'_>) -
                 let core = if expr_references_y(&raw_rhs) { format!("{rhs_tex} = 0") } else { format!("Y = {rhs_tex}") };
                 return append_helper_locals(core, &render_env.parsed_locals, ctx);
             }
-            let fb = fallback_custom_dsl_tex("Y", expr, ctx.params, ctx.substituted, ctx.sig_figs);
+            let fb = fallback_custom_dsl_tex("Y", expr, ctx);
             append_helper_locals(fb, &render_env.parsed_locals, ctx)
         }
     }
@@ -1597,13 +1605,13 @@ fn render_lhs_rhs_dsl(fixed_lhs_tex: &str, lhs_expr_src: Option<&str>, rhs_src: 
     } else {
         fixed_lhs_tex.to_string()
     };
-    let core = fallback_custom_dsl_tex(&lhs_tex, rhs_src, ctx.params, ctx.substituted, ctx.sig_figs);
+    let core = fallback_custom_dsl_tex(&lhs_tex, rhs_src, ctx);
     append_helper_locals(core, &render_env.parsed_locals, ctx)
 }
 
 fn fallback_lhs_tex(lhs_src: &str, ctx: &EqCtx<'_>) -> String {
-    let s = substitute_and_escape_fallback(lhs_src.trim(), ctx.params, ctx.substituted, ctx.sig_figs);
-    s.replace('*', " \\cdot ")
+    let s = substitute_and_escape_fallback(lhs_src.trim(), ctx);
+    format_fallback_operators(&s)
 }
 
 fn append_helper_locals(core: String, parsed_locals: &[(&str, &str, Option<Expr>)], ctx: &EqCtx<'_>) -> String {
@@ -1619,7 +1627,7 @@ fn append_helper_locals(core: String, parsed_locals: &[(&str, &str, Option<Expr>
             let rhs_tex = render_dsl_tex_iterative(expr, ctx, Some(&env_names));
             format!("{lhs_tex} = {rhs_tex}")
         } else {
-            fallback_custom_dsl_tex(&lhs_tex, rhs_src, ctx.params, ctx.substituted, ctx.sig_figs)
+            fallback_custom_dsl_tex(&lhs_tex, rhs_src, ctx)
         };
         env_names.insert(name);
         parts.push(stmt);
@@ -1628,33 +1636,16 @@ fn append_helper_locals(core: String, parsed_locals: &[(&str, &str, Option<Expr>
 }
 
 fn parse_algebraic_expr(src: &str) -> Option<Expr> {
-    let expr = parse_expr_collecting_locs(src, 1, 0, None).ok()?;
-    is_algebraic_tex_expr(&expr).then_some(expr)
-}
-
-fn is_algebraic_tex_expr(root: &Expr) -> bool {
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        match node {
-            Expr::Num(_) | Expr::Ident(_) => {}
-            Expr::Unary { op: UnaryOp::Neg, rhs } => stack.push(rhs),
-            Expr::Binary { op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow, lhs, rhs } => {
-                stack.push(rhs);
-                stack.push(lhs);
-            }
-            Expr::Call { args, .. } => stack.extend(args.iter()),
-            Expr::Unary { op: UnaryOp::Not, .. } | Expr::Binary { .. } | Expr::If { .. } => return false,
-        }
-    }
-    true
+    parse_expr_collecting_locs(src, 1, 0, None).ok()
 }
 
 fn inline_locals_iterative(root: &Expr, env: &HashMap<String, (Expr, usize)>, max_nodes: usize) -> Option<(Expr, usize)> {
     enum InlineTask<'a> {
         Visit(&'a Expr),
-        BuildNeg,
+        BuildUnary(UnaryOp),
         BuildBin(BinaryOp),
         BuildCall(&'a str, usize),
+        BuildIf,
     }
 
     let mut tasks = vec![InlineTask::Visit(root)];
@@ -1686,12 +1677,12 @@ fn inline_locals_iterative(root: &Expr, env: &HashMap<String, (Expr, usize)>, ma
                         results.push(Expr::Ident(name.clone()));
                     }
                 }
-                Expr::Unary { op: UnaryOp::Neg, rhs } => {
+                Expr::Unary { op, rhs } => {
                     count += 1;
                     if count > max_nodes {
                         return None;
                     }
-                    tasks.push(InlineTask::BuildNeg);
+                    tasks.push(InlineTask::BuildUnary(*op));
                     tasks.push(InlineTask::Visit(rhs));
                 }
                 Expr::Binary { op, lhs, rhs } => {
@@ -1713,11 +1704,20 @@ fn inline_locals_iterative(root: &Expr, env: &HashMap<String, (Expr, usize)>, ma
                         tasks.push(InlineTask::Visit(arg));
                     }
                 }
-                Expr::Unary { op: UnaryOp::Not, .. } | Expr::If { .. } => return None,
+                Expr::If { cond, then_br, else_br } => {
+                    count += 1;
+                    if count > max_nodes {
+                        return None;
+                    }
+                    tasks.push(InlineTask::BuildIf);
+                    tasks.push(InlineTask::Visit(else_br));
+                    tasks.push(InlineTask::Visit(then_br));
+                    tasks.push(InlineTask::Visit(cond));
+                }
             },
-            InlineTask::BuildNeg => {
+            InlineTask::BuildUnary(op) => {
                 let inner = results.pop()?;
-                results.push(Expr::Unary { op: UnaryOp::Neg, rhs: Box::new(inner) });
+                results.push(Expr::Unary { op, rhs: Box::new(inner) });
             }
             InlineTask::BuildBin(op) => {
                 let rhs = results.pop()?;
@@ -1730,6 +1730,12 @@ fn inline_locals_iterative(root: &Expr, env: &HashMap<String, (Expr, usize)>, ma
                 }
                 let args = results.split_off(results.len() - arity);
                 results.push(Expr::Call { name: name.to_owned(), args });
+            }
+            InlineTask::BuildIf => {
+                let else_br = results.pop()?;
+                let then_br = results.pop()?;
+                let cond = results.pop()?;
+                results.push(Expr::If { cond: Box::new(cond), then_br: Box::new(then_br), else_br: Box::new(else_br) });
             }
         }
     }
@@ -1792,11 +1798,15 @@ fn has_balanced_outer_parens(s: &str) -> bool {
 enum RenderTask<'a> {
     Visit { expr: &'a Expr, parent_prec: u8, strip_left_neg: bool },
     FinishNeg { parent_prec: u8, need_paren: bool },
+    FinishNot { parent_prec: u8, need_paren: bool },
     FinishAdd { parent_prec: u8 },
     FinishSub { parent_prec: u8, r_paren: bool },
     FinishMul { parent_prec: u8 },
+    FinishRem { parent_prec: u8 },
     FinishDiv { parent_prec: u8, strip_neg_active: bool, inner_is_add_sub: bool },
     FinishPow { lhs_is_bin_or_neg: bool, lhs_is_pow: bool },
+    FinishInfix { op_tex: &'static str, parent_prec: u8 },
+    FinishIf { parent_prec: u8 },
     FinishCall { name: &'a str, arg_count: usize, first_is_atom: bool },
 }
 
@@ -1823,6 +1833,11 @@ fn render_dsl_tex_iterative(root: &Expr, ctx: &EqCtx<'_>, shadowed_locals: Optio
                     results.push(if parent_prec >= 3 { format!("({neg})") } else { neg });
                 }
             }
+            RenderTask::FinishNot { parent_prec, need_paren } => {
+                let body = results.pop().unwrap_or_default();
+                let s = if need_paren { format!("\\neg ({body})") } else { format!("\\neg {body}") };
+                results.push(if parent_prec >= 3 { format!("({s})") } else { s });
+            }
             RenderTask::FinishAdd { parent_prec } => {
                 let r = results.pop().unwrap_or_default();
                 let l = results.pop().unwrap_or_default();
@@ -1840,6 +1855,12 @@ fn render_dsl_tex_iterative(root: &Expr, ctx: &EqCtx<'_>, shadowed_locals: Optio
                 let r = results.pop().unwrap_or_default();
                 let l = results.pop().unwrap_or_default();
                 let s = format!("{l} \\cdot {r}");
+                results.push(if parent_prec > 2 { format!("({s})") } else { s });
+            }
+            RenderTask::FinishRem { parent_prec } => {
+                let r = results.pop().unwrap_or_default();
+                let l = results.pop().unwrap_or_default();
+                let s = format!("{l} \\bmod {r}");
                 results.push(if parent_prec > 2 { format!("({s})") } else { s });
             }
             RenderTask::FinishDiv { parent_prec, strip_neg_active, inner_is_add_sub } => {
@@ -1866,6 +1887,19 @@ fn render_dsl_tex_iterative(root: &Expr, ctx: &EqCtx<'_>, shadowed_locals: Optio
                     b = format!("({b})");
                 }
                 results.push(format!("{b}^{{{e}}}"));
+            }
+            RenderTask::FinishInfix { op_tex, parent_prec } => {
+                let r = results.pop().unwrap_or_default();
+                let l = results.pop().unwrap_or_default();
+                let s = format!("{l} {op_tex} {r}");
+                results.push(if parent_prec > 0 { format!("({s})") } else { s });
+            }
+            RenderTask::FinishIf { parent_prec } => {
+                let e = results.pop().unwrap_or_default();
+                let t = results.pop().unwrap_or_default();
+                let c = results.pop().unwrap_or_default();
+                let s = format!("\\text{{IF}}({c}, {t}, {e})");
+                results.push(if parent_prec >= 4 { format!("({s})") } else { s });
             }
             RenderTask::FinishCall { name, arg_count, first_is_atom } => {
                 let start = results.len().saturating_sub(arg_count);
@@ -1920,6 +1954,11 @@ fn push_visit_tasks<'a>(
                 tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 2, strip_left_neg: false });
             }
         }
+        Expr::Unary { op: UnaryOp::Not, rhs } => {
+            let need_paren = matches!(rhs.as_ref(), Expr::Binary { .. } | Expr::If { .. });
+            tasks.push(RenderTask::FinishNot { parent_prec, need_paren });
+            tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 0, strip_left_neg: false });
+        }
         Expr::Binary { op: BinaryOp::Add, lhs, rhs } => {
             tasks.push(RenderTask::FinishAdd { parent_prec });
             tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 1, strip_left_neg: false });
@@ -1936,6 +1975,11 @@ fn push_visit_tasks<'a>(
             tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 3, strip_left_neg: false });
             tasks.push(RenderTask::Visit { expr: lhs, parent_prec: 2, strip_left_neg });
         }
+        Expr::Binary { op: BinaryOp::Rem, lhs, rhs } => {
+            tasks.push(RenderTask::FinishRem { parent_prec });
+            tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 3, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: lhs, parent_prec: 2, strip_left_neg: false });
+        }
         Expr::Binary { op: BinaryOp::Div, lhs, rhs } => {
             let strip_neg_active = has_leading_dsl_neg(lhs);
             let inner_is_add_sub = matches!(
@@ -1949,10 +1993,38 @@ fn push_visit_tasks<'a>(
         Expr::Binary { op: BinaryOp::Pow, lhs, rhs } => {
             let lhs_is_pow = matches!(lhs.as_ref(), Expr::Binary { op: BinaryOp::Pow, .. })
                 || matches!(lhs.as_ref(), Expr::Call { name, .. } if name.eq_ignore_ascii_case("pow") || name.eq_ignore_ascii_case("exp10"));
-            let lhs_is_bin_or_neg = matches!(lhs.as_ref(), Expr::Binary { .. } | Expr::Unary { op: UnaryOp::Neg, .. });
+            let lhs_is_bin_or_neg = matches!(lhs.as_ref(), Expr::Binary { .. } | Expr::Unary { .. });
             tasks.push(RenderTask::FinishPow { lhs_is_bin_or_neg, lhs_is_pow });
             tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 0, strip_left_neg: false });
             tasks.push(RenderTask::Visit { expr: lhs, parent_prec: 4, strip_left_neg: false });
+        }
+        Expr::Binary {
+            op: op @ (BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::And | BinaryOp::Or),
+            lhs,
+            rhs,
+        } => {
+            let (op_tex, child_prec) = match op {
+                BinaryOp::Eq => ("=", 1),
+                BinaryOp::Ne => ("\\neq", 1),
+                BinaryOp::Lt => ("<", 1),
+                BinaryOp::Le => ("\\leq", 1),
+                BinaryOp::Gt => (">", 1),
+                BinaryOp::Ge => ("\\geq", 1),
+                BinaryOp::And => ("\\land", 0),
+                BinaryOp::Or => ("\\lor", 0),
+                _ => ("", 0),
+            };
+            let l_prec = if matches!(op, BinaryOp::And) && matches!(lhs.as_ref(), Expr::Binary { op: BinaryOp::Or, .. }) { 1 } else { child_prec };
+            let r_prec = if matches!(op, BinaryOp::And) && matches!(rhs.as_ref(), Expr::Binary { op: BinaryOp::Or, .. }) { 1 } else { child_prec };
+            tasks.push(RenderTask::FinishInfix { op_tex, parent_prec });
+            tasks.push(RenderTask::Visit { expr: rhs, parent_prec: r_prec, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: lhs, parent_prec: l_prec, strip_left_neg: false });
+        }
+        Expr::If { cond, then_br, else_br } => {
+            tasks.push(RenderTask::FinishIf { parent_prec });
+            tasks.push(RenderTask::Visit { expr: else_br, parent_prec: 0, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: then_br, parent_prec: 0, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: cond, parent_prec: 0, strip_left_neg: false });
         }
         Expr::Call { name, args } => {
             let first_is_atom = matches!(args.first(), Some(Expr::Ident(_) | Expr::Num(_)));
@@ -1960,9 +2032,6 @@ fn push_visit_tasks<'a>(
             for arg in args.iter().rev() {
                 tasks.push(RenderTask::Visit { expr: arg, parent_prec: 0, strip_left_neg: false });
             }
-        }
-        Expr::Unary { op: UnaryOp::Not, .. } | Expr::Binary { .. } | Expr::If { .. } => {
-            results.push(String::new());
         }
     }
 }
@@ -2033,8 +2102,13 @@ fn escape_tex_fallback_into(input: &str, out: &mut String) {
     }
 }
 
-fn fallback_custom_dsl_tex(lhs: &str, rhs_raw: &str, params: &[(String, f64)], substituted: bool, sig_figs: usize) -> String {
-    let mut s = substitute_and_escape_fallback(rhs_raw, params, substituted, sig_figs);
+fn format_fallback_operators(input: &str) -> String {
+    let with_pow = input.replace("**", "^");
+    with_pow.replace('*', " \\cdot ")
+}
+
+fn fallback_custom_dsl_tex(lhs: &str, rhs_raw: &str, ctx: &EqCtx<'_>) -> String {
+    let mut s = substitute_and_escape_fallback(rhs_raw, ctx);
     for (pat, rep) in [
         ("exp(", "\\exp("),
         ("log10(", "\\log("),
@@ -2049,15 +2123,20 @@ fn fallback_custom_dsl_tex(lhs: &str, rhs_raw: &str, params: &[(String, f64)], s
     ] {
         s = replace_ident_word_prefix(&s, pat, rep);
     }
-    s = s.replace('*', " \\cdot ");
+    s = format_fallback_operators(&s);
     format!("{lhs} = {}", s.trim())
 }
 
-fn substitute_and_escape_fallback(input: &str, params: &[(String, f64)], substituted: bool, sig_figs: usize) -> String {
+fn substitute_and_escape_fallback(input: &str, ctx: &EqCtx<'_>) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
     while i < chars.len() {
+        if chars[i] == '*' && chars.get(i + 1) == Some(&'*') {
+            out.push('^');
+            i += 2;
+            continue;
+        }
         if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
             let start = i;
             i += 1;
@@ -2065,17 +2144,27 @@ fn substitute_and_escape_fallback(input: &str, params: &[(String, f64)], substit
                 i += 1;
             }
             let ident: String = chars[start..i].iter().collect();
-            let norm = normalize_id(&ident);
-            if substituted
-                && let Some((_, val)) = params.iter().find(|(k, _)| k == &ident).or_else(|| params.iter().find(|(k, _)| normalize_id(k) == norm))
+            let next_non_space_idx = (i..chars.len()).find(|&k| !chars[k].is_whitespace());
+            let next_non_space = next_non_space_idx.map(|k| chars[k]);
+            let next_is_call = next_non_space == Some('(');
+            if ctx.substituted
+                && !next_is_call
+                && let Some(val) = ctx.find(&ident)
             {
-                let mut num = format_number_sig_figs(*val, sig_figs);
+                let mut num = format_number_sig_figs(val, ctx.sig_figs);
                 let prev_non_space = out.chars().rev().find(|c| !c.is_whitespace());
-                let next_is_pow = chars[i..].iter().find(|c| !c.is_whitespace()).copied() == Some('^');
-                if (num.starts_with('-') || num.contains("\\times")) && (matches!(prev_non_space, Some('*' | '/')) || next_is_pow) {
-                    num = format!("({num})");
+                let next_is_pow =
+                    next_non_space == Some('^') || next_non_space_idx.is_some_and(|k| chars[k] == '*' && chars.get(k + 1) == Some(&'*'));
+                if prev_non_space == Some('^') {
+                    out.push('{');
+                    out.push_str(&num);
+                    out.push('}');
+                } else {
+                    if (num.starts_with('-') || num.contains("\\times")) && (matches!(prev_non_space, Some('*' | '/')) || next_is_pow) {
+                        num = format!("({num})");
+                    }
+                    out.push_str(&num);
                 }
-                out.push_str(&num);
             } else {
                 escape_tex_fallback_into(&ident, &mut out);
             }
@@ -2259,12 +2348,12 @@ fn normalize_tex_signs(input: &str) -> String {
             }
             let had_trailing_space = chars.get(j) == Some(&' ');
             let prev_char = out.chars().next_back();
-            let after_mul_op = ends_with_tex_mul_op(&out);
-            let is_unary = after_mul_op || is_unary_prev(prev_char);
+            let after_tex_op = ends_with_tex_op(&out);
+            let is_unary = after_tex_op || is_unary_prev(prev_char);
             let is_negative = neg_count % 2 == 1;
 
             if is_unary {
-                if after_mul_op || matches!(prev_char, Some('=' | ',' | ';')) {
+                if after_tex_op || matches!(prev_char, Some('=' | ',' | ';' | '<' | '>')) {
                     out.push(' ');
                 }
                 if is_negative {
@@ -2294,8 +2383,8 @@ fn normalize_tex_signs(input: &str) -> String {
     out.trim().to_string()
 }
 
-fn ends_with_tex_mul_op(out: &str) -> bool {
-    for kw in ["\\cdot", "\\times"] {
+fn ends_with_tex_op(out: &str) -> bool {
+    for kw in ["\\cdot", "\\times", "\\leq", "\\geq", "\\neq", "\\land", "\\lor", "\\neg", "\\bmod"] {
         if let Some(prefix) = out.strip_suffix(kw) {
             let backslashes = prefix.chars().rev().take_while(|&c| c == '\\').count();
             if backslashes % 2 == 0 {
@@ -2309,7 +2398,7 @@ fn ends_with_tex_mul_op(out: &str) -> bool {
 fn is_unary_prev(prev: Option<char>) -> bool {
     match prev {
         None => true,
-        Some(c) => matches!(c, '=' | '(' | '{' | '[' | ',' | ';' | '<' | '>' | '/'),
+        Some(c) => matches!(c, '=' | '(' | '{' | '[' | ',' | ';' | '<' | '>' | '/' | '^'),
     }
 }
 

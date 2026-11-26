@@ -212,6 +212,14 @@ pub struct EditAnalysisParametersState {
     pub diag_influence_leverage: bool,
     #[serde(default = "default_true_flag")]
     pub diag_assumption_checklist: bool,
+    #[serde(default)]
+    pub synced_diag_qq: Option<bool>,
+    #[serde(default)]
+    pub synced_diag_residuals: Option<bool>,
+    #[serde(default)]
+    pub synced_diag_homoscedasticity: Option<bool>,
+    #[serde(default)]
+    pub synced_diag_influence: Option<bool>,
 }
 
 fn default_schematic_mode() -> String {
@@ -257,6 +265,10 @@ impl Default for EditAnalysisParametersState {
             diag_homoscedasticity: true,
             diag_influence_leverage: false,
             diag_assumption_checklist: true,
+            synced_diag_qq: None,
+            synced_diag_residuals: None,
+            synced_diag_homoscedasticity: None,
+            synced_diag_influence: None,
         }
     }
 }
@@ -323,6 +335,18 @@ impl EditAnalysisParametersState {
             }
             AnalysisKind::TwoGroupComparison(two) => {
                 self.hodges_lehmann_ci = matches!(two.method, TwoGroupMethod::MannWhitneyU | TwoGroupMethod::WilcoxonSignedRank);
+            }
+            AnalysisKind::NonlinearRegression(nl) => {
+                self.diag_qq_plot = nl.normality_of_residuals;
+                self.diag_residuals_plot = nl.emit_residuals_tab;
+                self.diag_homoscedasticity = nl.homoscedasticity_test;
+                self.synced_diag_qq = Some(nl.normality_of_residuals);
+                self.synced_diag_residuals = Some(nl.emit_residuals_tab);
+                self.synced_diag_homoscedasticity = Some(nl.homoscedasticity_test);
+            }
+            AnalysisKind::GeneralizedLinearModel(glm) => {
+                self.diag_influence_leverage = glm.compute_vif;
+                self.synced_diag_influence = Some(glm.compute_vif);
             }
             _ => {}
         }
@@ -459,14 +483,57 @@ impl EditAnalysisParametersState {
         self.draft.as_ref().map(AnalysisSpec::effective_title)
     }
 
+    /// Returns an explicit error when a `Contingency` draft selects a non-default CI method
+    /// (`Woolf`, `Katz`, `Wald`, `Clopper-Pearson`) that `ContingencySpec` / `curvebook-stats`
+    /// does not yet compute (`AUD-09-12`), preventing silent wrong-method commits.
+    #[must_use]
+    pub fn unsupported_contingency_ci_error(&self) -> Option<String> {
+        let spec = self.draft.as_ref()?;
+        if !matches!(spec.kind, AnalysisKind::Contingency(_)) {
+            return None;
+        }
+        for (label, current, supported) in [
+            ("OR", self.contingency_or_ci_method.as_str(), "Baptista-Pike"),
+            ("RR", self.contingency_rr_ci_method.as_str(), "Koopman"),
+            ("ARR", self.contingency_arr_ci_method.as_str(), "Newcombe-Wilson"),
+            ("diagnostic", self.contingency_diag_ci_method.as_str(), "Wilson-Brown"),
+        ] {
+            if current != supported {
+                return Some(format!("unsupported {label} CI method `{current}`; engine currently computes `{supported}` only"));
+            }
+        }
+        None
+    }
+
     /// Emit declarative `analysis.updateParams` intent.
     #[must_use]
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
+        if self.unsupported_contingency_ci_error().is_some() {
+            return None;
+        }
         let id = self.result_sheet_id.as_ref()?;
         let spec = self.draft.as_ref()?;
+        let mut kind = spec.kind.clone();
+        match &mut kind {
+            AnalysisKind::NonlinearRegression(nl) => {
+                if self.synced_diag_qq.is_some_and(|s| s != self.diag_qq_plot) {
+                    nl.normality_of_residuals = self.diag_qq_plot;
+                }
+                if self.synced_diag_residuals.is_some_and(|s| s != self.diag_residuals_plot) {
+                    nl.emit_residuals_tab = self.diag_residuals_plot;
+                }
+                if self.synced_diag_homoscedasticity.is_some_and(|s| s != self.diag_homoscedasticity) {
+                    nl.homoscedasticity_test = self.diag_homoscedasticity;
+                }
+            }
+            AnalysisKind::GeneralizedLinearModel(glm) if self.synced_diag_influence.is_some_and(|s| s != self.diag_influence_leverage) => {
+                glm.compute_vif = self.diag_influence_leverage;
+            }
+            _ => {}
+        }
         let mut payload = json!({
             "sheet_id": id.as_str(),
-            "kind": spec.kind,
+            "kind": kind,
             "confidence_percent": spec.confidence_level.percent(),
             "selected_data_sets": spec.selected_data_sets,
             "p_value_format": spec.p_value_format,
@@ -557,6 +624,51 @@ impl EditAnalysisParametersState {
                 }
             }
         }
+        if let (Some(spec), Some(d)) = (&self.draft, doc)
+            && self.graph_ranks
+            && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
+            && crate::modal_predicates::r4_two_group_nonparametric_options(two.method).enabled
+            && let Some(source_ds) = d.data_sheet(&spec.source_sheet_id)
+            && matches!(source_ds.archetype, curvebook_doc::TableArchetype::Column(_))
+        {
+            let rank_title = format!("{} (Ranks)", source_ds.title);
+            let base_id = format!("{}_ranks", spec.source_sheet_id.as_str());
+            let already_has_rank_graph = d.graph_sheets.iter().any(|g| {
+                g.spec.primary_source_sheet_id == spec.source_sheet_id
+                    && (g.id.as_str() == base_id || g.title == rank_title || g.spec.title == rank_title)
+            });
+            if !already_has_rank_graph {
+                let mut cand = base_id.clone();
+                let mut suffix = 2_usize;
+                while let Ok(sid) = SheetId::try_new(cand.as_str())
+                    && d.sheet_section(&sid).is_some()
+                {
+                    cand = format!("{base_id}_{suffix}");
+                    suffix += 1;
+                }
+                if SheetId::try_new(cand.as_str()).is_ok() {
+                    intents.push(ToolCommandIntent::new(
+                        "graph.create",
+                        json!({
+                            "sheet_id": cand,
+                            "data_sheet_id": spec.source_sheet_id.as_str(),
+                            "kind": GraphKind::Column,
+                            "title": rank_title,
+                            "initialized": true,
+                        }),
+                    ));
+                    intents.push(ToolCommandIntent::new(
+                        "graph.setKind",
+                        json!({
+                            "sheet_id": cand,
+                            "option_id": "col.aligned_dot",
+                            "kind": GraphKind::Column,
+                            "reset_series_style": true,
+                        }),
+                    ));
+                }
+            }
+        }
         intents
     }
 }
@@ -593,8 +705,8 @@ fn read_linear_range_inputs(app: &crate::UiApp, mut fit: curvebook_doc::LinearRe
     fit.x_range_filter = (lo.is_some() || hi.is_some()).then_some((lo, hi));
     fit.plot_x_min = bound(plot_min_field, fit.plot_x_min)?;
     fit.plot_x_max = bound(plot_max_field, fit.plot_x_max)?;
-    if matches!((fit.plot_x_min.or(lo), fit.plot_x_max.or(hi)), (Some(start), Some(end)) if start > end) {
-        return Err("The curve start X must be at or below the curve end X.".to_owned());
+    if matches!((fit.plot_x_min.or(lo), fit.plot_x_max.or(hi)), (Some(start), Some(end)) if start >= end) {
+        return Err("The curve start X must be strictly less than the curve end X.".to_owned());
     }
     if let Some(text) = linear_range_field_text(app, segments_field) {
         fit.plot_segments = if text.is_empty() {

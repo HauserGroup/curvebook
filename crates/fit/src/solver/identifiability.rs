@@ -128,22 +128,83 @@ pub(crate) fn submatrix_columns(j_mat: &DenseMatrix, cols: &[usize]) -> Result<D
     Ok(DenseMatrix::from_row_major(rows, k, data)?)
 }
 
-/// Greedily delete rows/columns from Hessian `H` until `kappa(H) <= threshold` (§2.5.1).
+/// Symmetrically equilibrate a Hessian matrix `H` to correlation scale `D^{-1/2} H D^{-1/2}`
+/// (`D_jj = H_jj`; Golub & Van Loan 2013, §3.5.2) so condition-number checks are invariant to
+/// parameter/predictor unit rescaling. Returns `(H_eq, bad_indices)` where `bad_indices` lists
+/// any indices with non-positive or non-finite diagonal entries (or non-finite row entries).
+fn equilibrate_hessian_for_reduction(h: &DenseMatrix) -> Result<(DenseMatrix, Vec<usize>), FitError> {
+    let k = h.nrows();
+    let mut bad = Vec::new();
+    let mut inv_sqrt_d = vec![0.0_f64; k];
+    for i in 0..k {
+        let d = h.get(i, i).unwrap_or(f64::NAN);
+        let row_finite = (0..k).all(|j| h.get(i, j).is_some_and(f64::is_finite));
+        if !row_finite || !d.is_finite() || d <= 0.0 {
+            bad.push(i);
+        } else {
+            inv_sqrt_d[i] = 1.0 / d.sqrt();
+        }
+    }
+    let mut data = vec![0.0_f64; k * k];
+    for i in 0..k {
+        let si = inv_sqrt_d[i];
+        for j in 0..k {
+            let sj = inv_sqrt_d[j];
+            if si > 0.0 && sj > 0.0 {
+                data[i * k + j] = if i == j { 1.0 } else { h.get(i, j).unwrap_or(0.0) * si * sj };
+            }
+        }
+    }
+    Ok((DenseMatrix::from_row_major(k, k, data)?, bad))
+}
+
+/// Greedily delete rows/columns from symmetrically equilibrated Hessian `H_eq = D^{-1/2} H D^{-1/2}`
+/// until `kappa(H_eq) <= threshold` (§2.5.1; Golub & Van Loan 2013).
 ///
-/// At each step where `kappa(H_active) > threshold`, chooses `k* = argmin_k kappa(H_{-k,-k})`
-/// (breaking ties deterministically by smallest diagonal entry `H[k, k]`, then highest index)
-/// so the maximally ill-conditioned parameter is dropped first while remaining well-conditioned
-/// parameters retain valid covariance and confidence intervals.
+/// Correlation-scale equilibration (`D_jj = H_jj`) ensures unit choice (such as molar `Km = 1e-6`,
+/// slow rate constants `K = 1e-4 s^-1`, or large `X` scales) never triggers false `"Unstable"`
+/// classifications while true collinearity and zero/vanishing sensitivity (`H_jj <= 0`) are caught.
+/// At each step where `kappa(H_eq_active) > threshold`, chooses `k* = argmin_k kappa(H_eq_{-k,-k})`
+/// (for large `K > 32`, uses the maximum nullspace/smallest-singular-vector loading to avoid
+/// `O(K^5)` SVD blowup), breaking ties deterministically by smallest diagonal entry `H[k, k]`,
+/// then highest index.
 pub fn greedy_hessian_reduction(h: &DenseMatrix, threshold: f64) -> Result<GreedyHessianReduction, FitError> {
     let k = h.nrows();
     if k != h.ncols() {
         return Err(FitError::InvalidParameter { name: "hessian", reason: format!("Hessian must be square, got {}x{}", h.nrows(), h.ncols()) });
     }
+    let (h_eq, bad_diags) = equilibrate_hessian_for_reduction(h)?;
     let mut active: Vec<usize> = (0..k).collect();
-    let initial_kappa = hessian_condition_number(h)?;
+    let initial_kappa = if !bad_diags.is_empty() { f64::INFINITY } else { hessian_condition_number(&h_eq)? };
     let mut current_kappa = initial_kappa;
     let mut unstable_indices = Vec::new();
     let mut steps = Vec::new();
+
+    // Drop zero, negative, or non-finite diagonal entries immediately in O(K) before SVD search.
+    if !bad_diags.is_empty() {
+        let mut sorted_bad = bad_diags;
+        sorted_bad.sort_by(|&a, &b| {
+            let da = h.get(a, a).map_or(-1.0, f64::abs);
+            let db = h.get(b, b).map_or(-1.0, f64::abs);
+            da.total_cmp(&db).then_with(|| b.cmp(&a))
+        });
+        for dropped in sorted_bad {
+            if let Some(pos) = active.iter().position(|&idx| idx == dropped) {
+                active.remove(pos);
+                let next_kappa = if active.is_empty() {
+                    1.0
+                } else if active.iter().any(|&idx| !h.get(idx, idx).is_some_and(|d| d.is_finite() && d > 0.0)) {
+                    f64::INFINITY
+                } else {
+                    let sub = principal_submatrix(&h_eq, &active)?;
+                    hessian_condition_number(&sub)?
+                };
+                unstable_indices.push(dropped);
+                steps.push((dropped, current_kappa, next_kappa));
+                current_kappa = next_kappa;
+            }
+        }
+    }
 
     while !active.is_empty() && (!current_kappa.is_finite() || current_kappa > threshold) {
         if active.len() == 1 {
@@ -153,48 +214,80 @@ pub fn greedy_hessian_reduction(h: &DenseMatrix, threshold: f64) -> Result<Greed
             current_kappa = 1.0;
             break;
         }
-        let mut best_pos = 0_usize;
-        let mut best_kappa = f64::INFINITY;
-        let mut best_diag = f64::INFINITY;
-        let mut best_orig_idx = 0_usize;
-        let mut candidate = Vec::with_capacity(active.len() - 1);
+        let (best_pos, best_kappa) = if active.len() <= 32 {
+            let mut best_pos = 0_usize;
+            let mut best_kappa = f64::INFINITY;
+            let mut best_diag = f64::INFINITY;
+            let mut best_orig_idx = 0_usize;
+            let mut candidate = Vec::with_capacity(active.len() - 1);
 
-        for pos in 0..active.len() {
-            candidate.clear();
-            for (i, &orig) in active.iter().enumerate() {
-                if i != pos {
-                    candidate.push(orig);
+            for pos in 0..active.len() {
+                candidate.clear();
+                for (i, &orig) in active.iter().enumerate() {
+                    if i != pos {
+                        candidate.push(orig);
+                    }
+                }
+                let sub = principal_submatrix(&h_eq, &candidate)?;
+                let cand_kappa = hessian_condition_number(&sub)?;
+                let orig_idx = active[pos];
+                let diag = h.get(orig_idx, orig_idx).unwrap_or(0.0).abs();
+
+                let strictly_better = if cand_kappa.is_finite() && !best_kappa.is_finite() {
+                    true
+                } else if !cand_kappa.is_finite() && best_kappa.is_finite() {
+                    false
+                } else if cand_kappa.is_finite() && best_kappa.is_finite() {
+                    let scale = cand_kappa.abs().max(best_kappa.abs()).max(1.0);
+                    if (cand_kappa - best_kappa).abs() <= 1e-12 * scale {
+                        if (diag - best_diag).abs() <= 1e-12 * diag.max(best_diag).max(1.0) { orig_idx > best_orig_idx } else { diag < best_diag }
+                    } else {
+                        cand_kappa < best_kappa
+                    }
+                } else if (diag - best_diag).abs() <= 1e-12 * diag.max(best_diag).max(1.0) {
+                    orig_idx > best_orig_idx
+                } else {
+                    diag < best_diag
+                };
+
+                if pos == 0 || strictly_better {
+                    best_pos = pos;
+                    best_kappa = cand_kappa;
+                    best_diag = diag;
+                    best_orig_idx = orig_idx;
                 }
             }
-            let sub = principal_submatrix(h, &candidate)?;
-            let cand_kappa = hessian_condition_number(&sub)?;
-            let orig_idx = active[pos];
-            let diag = h.get(orig_idx, orig_idx).unwrap_or(0.0).abs();
-
-            let strictly_better = if cand_kappa.is_finite() && !best_kappa.is_finite() {
-                true
-            } else if !cand_kappa.is_finite() && best_kappa.is_finite() {
-                false
-            } else if cand_kappa.is_finite() && best_kappa.is_finite() {
-                let scale = cand_kappa.abs().max(best_kappa.abs()).max(1.0);
-                if (cand_kappa - best_kappa).abs() <= 1e-12 * scale {
+            (best_pos, best_kappa)
+        } else {
+            // Single-SVD O(K^3) pivot selection for large K > 32: drop the parameter with the
+            // largest loading in the smallest singular vector of H_eq_active.
+            let sub_all = principal_submatrix(&h_eq, &active)?;
+            let spectrum = svd(&sub_all)?;
+            let last_col = active.len() - 1;
+            let mut best_pos = 0_usize;
+            let mut best_loading = -1.0_f64;
+            let mut best_diag = f64::INFINITY;
+            let mut best_orig_idx = 0_usize;
+            for (pos, &orig_idx) in active.iter().enumerate() {
+                let loading = spectrum.v.get(pos, last_col).map_or(0.0, f64::abs);
+                let diag = h.get(orig_idx, orig_idx).unwrap_or(0.0).abs();
+                let better = if (loading - best_loading).abs() <= 1e-12 * loading.max(best_loading).max(1.0) {
                     if (diag - best_diag).abs() <= 1e-12 * diag.max(best_diag).max(1.0) { orig_idx > best_orig_idx } else { diag < best_diag }
                 } else {
-                    cand_kappa < best_kappa
+                    loading > best_loading
+                };
+                if pos == 0 || better {
+                    best_pos = pos;
+                    best_loading = loading;
+                    best_diag = diag;
+                    best_orig_idx = orig_idx;
                 }
-            } else if (diag - best_diag).abs() <= 1e-12 * diag.max(best_diag).max(1.0) {
-                orig_idx > best_orig_idx
-            } else {
-                diag < best_diag
-            };
-
-            if pos == 0 || strictly_better {
-                best_pos = pos;
-                best_kappa = cand_kappa;
-                best_diag = diag;
-                best_orig_idx = orig_idx;
             }
-        }
+            let candidate: Vec<usize> = active.iter().enumerate().filter_map(|(i, &orig)| (i != best_pos).then_some(orig)).collect();
+            let next_sub = principal_submatrix(&h_eq, &candidate)?;
+            let next_kappa = hessian_condition_number(&next_sub)?;
+            (best_pos, next_kappa)
+        };
 
         let dropped = active.remove(best_pos);
         unstable_indices.push(dropped);
@@ -219,11 +312,12 @@ pub struct FitFlagOutcome {
 #[must_use]
 pub fn evaluate_fit_flags(fit: &NonlinearFitResult, rules: &FitFlagRules) -> FitFlagOutcome {
     let mut reasons = Vec::new();
-    if let Some(min_r2) = rules.min_r_squared
-        && fit.r_squared.is_finite()
-        && fit.r_squared < min_r2
-    {
-        reasons.push(format!("R^2 = {:.4} is below minimum threshold {:.4}.", fit.r_squared, min_r2));
+    if let Some(min_r2) = rules.min_r_squared {
+        if !fit.r_squared.is_finite() {
+            reasons.push(format!("R^2 is undefined (NaN; minimum threshold is {:.4}).", min_r2));
+        } else if fit.r_squared < min_r2 {
+            reasons.push(format!("R^2 = {:.4} is below minimum threshold {:.4}.", fit.r_squared, min_r2));
+        }
     }
     if let Some(min_n) = rules.min_observations
         && fit.n_obs < min_n
@@ -274,6 +368,9 @@ pub fn is_fit_well_defined(fit: &NonlinearFitResult, rules: Option<&FitFlagRules
     let mut issues = Vec::new();
     if fit.status == FitStatus::Ambiguous || fit.covariance.ambiguous {
         issues.push("Fit status is Ambiguous (severe multicollinearity or rank deficiency).".to_owned());
+    }
+    if !matches!(fit.status, FitStatus::Converged | FitStatus::Ambiguous) {
+        issues.push(format!("Fit did not converge ({:?}).", fit.status));
     }
     if let FitIdentifiability::Ambiguous { reasons } = &fit.identifiability {
         issues.extend(reasons.iter().cloned());

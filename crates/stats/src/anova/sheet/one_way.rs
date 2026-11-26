@@ -19,12 +19,14 @@ use curvebook_math::dist::{
 use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::SummaryMoments;
 
-use crate::anova::factorial::{build_xtx_pinv_and_proj, collect_index_combinations, columns_to_matrix, kronecker_term_columns, sum_contrast_vectors};
+use crate::anova::factorial::{
+    build_xtx_pinv_and_proj, columns_to_matrix, kronecker_term_columns, plan_factorial_design_subsets, sum_contrast_vectors,
+};
 use crate::anova::nonparametric::{friedman_test, kruskal_wallis_test};
 use crate::anova::one_way::{ordinary_one_way_anova, ordinary_one_way_from_summary, rm_one_way_anova, unequal_variance_one_way_anova};
 use crate::anova::posthoc::{
-    ContrastFamilyEval, NamedSliceContrast, RemlContrastModel, collect_factor_pairs, compare_contrast_family, compare_independent_contrast_family,
-    factorial_design_vector, mark_pair_significance, push_pairwise_outputs_with_footnote, zero_se_pair,
+    ContrastEstimate, ContrastFamilyEval, NamedSliceContrast, RemlContrastModel, collect_factor_pairs, compare_contrast_family,
+    compare_independent_contrast_family, factorial_design_vector, mark_pair_significance, push_pairwise_outputs_with_footnote, zero_se_pair,
 };
 use crate::anova::reml::{
     RemlContrastCore, cluster_ids_to_g_matrix, fit_multi_vc_reml_with_method_and_core, fit_random_intercept_reml_with_method_and_core,
@@ -369,8 +371,9 @@ pub(in crate::anova) fn emit_multi_vc_rm_reml(
     }
     let (mres, core) = fit_multi_vc_reml_with_method_and_core(x_mat, y_vec, &specs, term_slices, df_method)?;
     let sum_rand: f64 = mres.variance_components.iter().map(|(_, v)| *v).sum();
-    let tot = (sum_rand + mres.sigma2_error).max(1e-18);
-    let icc_subj = mres.variance_components.first().map_or(0.0, |(_, v)| *v / tot);
+    let tot = sum_rand + mres.sigma2_error;
+    let frac_of_tot = |v: f64| if tot > 0.0 { v / tot } else { 0.0 };
+    let icc_subj = mres.variance_components.first().map_or(0.0, |(_, v)| frac_of_tot(*v));
 
     for (name, var) in &mres.variance_components {
         push_scalar(out, format!("REML sigma^2 ({name})"), None, *var);
@@ -384,11 +387,11 @@ pub(in crate::anova) fn emit_multi_vc_rm_reml(
         .headers(["Component", "Variance", "SD", "% of total"]);
     for (idx, (_, row_title, _)) in strata.iter().enumerate() {
         let var = mres.variance_components.get(idx).map_or(0.0, |(_, v)| *v);
-        vc_tab.push_row(*row_title, [text_cell(*row_title), num_cell(var), num_cell(var.sqrt()), num_cell(100.0 * var / tot)]);
+        vc_tab.push_row(*row_title, [text_cell(*row_title), num_cell(var), num_cell(var.sqrt()), num_cell(100.0 * frac_of_tot(var))]);
     }
     vc_tab.push_row(
         "Residual",
-        [text_cell("Residual"), num_cell(mres.sigma2_error), num_cell(mres.sigma2_error.sqrt()), num_cell(100.0 * mres.sigma2_error / tot)],
+        [text_cell("Residual"), num_cell(mres.sigma2_error), num_cell(mres.sigma2_error.sqrt()), num_cell(100.0 * frac_of_tot(mres.sigma2_error))],
     );
     if !mres.converged {
         vc_tab.push_footnote(
@@ -530,15 +533,12 @@ pub(in crate::anova) fn build_reml_effect_design(
     max_interaction_order: usize,
 ) -> Result<RemlEffectDesign, StatsError> {
     let n_obs = obs_cells.len();
-    let n_factors = factor_names.len();
-    let order_cap = max_interaction_order.clamp(1, n_factors);
-    let mut subsets: Vec<Vec<usize>> = Vec::new();
-    for ord in 1..=order_cap {
-        collect_index_combinations(n_factors, ord, 0, &mut Vec::new(), &mut subsets);
-    }
+    let level_counts: Vec<usize> = factor_levels.iter().map(Vec::len).collect();
+    let (subsets, expected_cols) = plan_factorial_design_subsets(n_obs, &level_counts, max_interaction_order)?;
     let factor_basis: Vec<Vec<Vec<f64>>> = factor_levels.iter().map(|levels| sum_contrast_vectors(levels.len())).collect();
     let obs_dummy: Vec<(Vec<usize>, f64)> = obs_cells.iter().map(|c| (c.clone(), 0.0)).collect();
-    let mut cols: Vec<Vec<f64>> = vec![vec![1.0_f64; n_obs]];
+    let mut cols: Vec<Vec<f64>> = Vec::with_capacity(expected_cols);
+    cols.push(vec![1.0_f64; n_obs]);
     let mut terms = Vec::with_capacity(subsets.len());
     for sub in &subsets {
         let col_start = cols.len();
@@ -640,13 +640,18 @@ pub(in crate::anova) fn run_rm_one_way_reml(
         row_trt.push(opt_num_cell(trt_term.partial_eta_squared));
         row_res.push(ResultCell::Empty);
     }
-    out.tabs.push(
-        TabBuilder::new("rm-one-way-anova", "RM one-way ANOVA (Mixed-effects REML)", ResultTabKind::AnovaTable)
-            .headers(headers)
-            .row("Treatment (between columns)", row_trt)
-            .row("Residual (REML)", row_res)
-            .build(),
-    );
+    let gg_not_applied_under_cs = matches!(anova_spec.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: true })
+        && anova_spec.residual_covariance == ResidualCovariance::CompoundSymmetry;
+    let mut rm_tab = TabBuilder::new("rm-one-way-anova", "RM one-way ANOVA (Mixed-effects REML)", ResultTabKind::AnovaTable)
+        .headers(headers)
+        .row("Treatment (between columns)", row_trt)
+        .row("Residual (REML)", row_res);
+    if gg_not_applied_under_cs {
+        rm_tab.push_footnote(
+            "Warning: Geisser-Greenhouse non-sphericity adjustment was not applied under CompoundSymmetry REML (which assumes equal within-subject variance and correlation); Unstructured residual covariance models arbitrary within-subject covariances without assuming sphericity.",
+        );
+    }
+    out.tabs.push(rm_tab.build());
 
     let (_, row_proj) = build_xtx_pinv_and_proj(&x_mat)?;
     let reml_model = RemlContrastModel {
@@ -684,8 +689,14 @@ pub(in crate::anova) fn run_rm_one_way_reml(
                 }
             }
             if let Some(est) = reml_model.eval_weight_vecs(&wa, &wb)? {
-                let f_tr = if est.se > 0.0 { (est.diff / est.se).powi(2) } else { 0.0 };
-                let p_tr = f_sf(f_tr, 1.0, est.df)?;
+                let (f_tr, p_tr) = if est.se > 0.0 {
+                    let f = (est.diff / est.se).powi(2);
+                    (f, f_sf(f, 1.0, est.df)?)
+                } else if est.diff != 0.0 {
+                    (f64::INFINITY, 0.0)
+                } else {
+                    (0.0, 1.0)
+                };
                 push_scalar(out, "Linear trend F", None, f_tr);
                 push_scalar(out, "Linear trend P", None, p_tr);
                 out.tabs.push(
@@ -738,6 +749,14 @@ pub(in crate::anova) fn run_rm_one_way_reml(
         )),
         format!("Fitted mixed-effects REML ({model_desc}) with {df_lbl} degrees of freedom across all available repeated measurements without listwise deletion."),
     ));
+    if gg_not_applied_under_cs {
+        out.checklist.push(checklist_item(
+            "Geisser-Greenhouse sphericity adjustment",
+            ChecklistStatus::Warn,
+            Some(String::from("CompoundSymmetry REML (sphericity assumed)")),
+            "Geisser-Greenhouse non-sphericity adjustment was not applied under CompoundSymmetry REML because missing data or mixed-effects mode engaged a compound-symmetry covariance structure; Unstructured residual covariance models arbitrary within-subject covariances without assuming sphericity.",
+        ));
+    }
     if scan.non_numeric_cells > 0 {
         append_ignored_text_checklist_and_footnote(
             out,
@@ -867,19 +886,18 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
                     sd: m.sample_sd().unwrap_or(0.0),
                 });
             }
-            if geisser_greenhouse
-                && matches!(
-                    anova_spec.multiplicity.method,
-                    MultiplicityMethod::Bonferroni
-                        | MultiplicityMethod::Sidak
-                        | MultiplicityMethod::HolmSidak
-                        | MultiplicityMethod::FisherLsd
-                        | MultiplicityMethod::BenjaminiHochbergFdr
-                        | MultiplicityMethod::BenjaminiYekutieliFdr
-                        | MultiplicityMethod::TwoStageBkyFdr
-                )
-            {
-                append_rm_paired_contrast_multiplicity(out, blocks, &inputs, &anova_spec.multiplicity, p_fmt, confidence)?;
+            if geisser_greenhouse && anova_spec.multiplicity.method != MultiplicityMethod::None {
+                match anova_spec.multiplicity.method {
+                    MultiplicityMethod::LinearTrend => {
+                        append_rm_subject_linear_trend(out, blocks, rm.ss_total, p_fmt, confidence.alpha())?;
+                    }
+                    MultiplicityMethod::TukeyHsd | MultiplicityMethod::Dunnett { .. } | MultiplicityMethod::NewmanKeuls => {
+                        append_rm_non_sphericity_family_multiplicity(out, blocks, &inputs, &anova_spec.multiplicity, p_fmt, confidence)?;
+                    }
+                    _ => {
+                        append_rm_paired_contrast_multiplicity(out, blocks, &inputs, &anova_spec.multiplicity, p_fmt, confidence)?;
+                    }
+                }
             } else {
                 append_one_way_multiplicity(out, &inputs, rm.ms_residual, rm.df_residual, rm.ss_total, &anova_spec.multiplicity, p_fmt, confidence)?;
             }
@@ -1421,6 +1439,152 @@ fn append_welch_multiplicity(
             Ok(())
         }
     }
+}
+
+/// Subject-level linear-trend contrast for complete repeated-measures designs without assuming
+/// sphericity (`df = n - 1`; Maxwell & Delaney, 2004, ch. 11, pp. 546–549).
+fn append_rm_subject_linear_trend(
+    out: &mut ResultSheet,
+    blocks: &[Vec<f64>],
+    ss_total: f64,
+    p_fmt: PValueFormat,
+    alpha: f64,
+) -> Result<(), StatsError> {
+    let n = blocks.len();
+    let k = blocks.first().map_or(0, Vec::len);
+    if n < 2 || k < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "repeated-measures linear trend", required: 2, actual: n.min(k) });
+    }
+    let nf = n as f64;
+    let kf = k as f64;
+    let center = 0.5 * (kf - 1.0);
+    let weights: Vec<f64> = (0..k).map(|j| (j as f64) - center).collect();
+    let sum_c2: f64 = weights.iter().map(|&c| c * c).sum();
+    let slopes: Vec<f64> = blocks.iter().map(|row| row.iter().zip(weights.iter()).map(|(&y, &c)| y * c).sum::<f64>() / sum_c2).collect();
+    let moments = SummaryMoments::from_slice(&slopes)?;
+    let df = (n - 1) as f64;
+    let se = moments.sample_sd().unwrap_or(0.0) / nf.sqrt();
+    let (f_stat, p_val) = if se > 0.0 {
+        let f = (moments.mean / se).powi(2);
+        (f, f_sf(f, 1.0, df)?)
+    } else if moments.mean != 0.0 {
+        (f64::INFINITY, 0.0)
+    } else {
+        (0.0, 1.0)
+    };
+    let ss_trend = nf * moments.mean * moments.mean * sum_c2;
+    let r_squared = if ss_total > 0.0 { (ss_trend / ss_total).clamp(0.0, 1.0) } else { 0.0 };
+    push_scalar(out, "Linear trend F", None, f_stat);
+    push_scalar(out, "Linear trend P", None, p_val);
+    out.tabs.push(
+        TabBuilder::new("linear-trend", "Test for linear trend (paired contrast)", ResultTabKind::MultipleComparisons)
+            .headers(["Slope", "SE", "DFd", "R squared", "F", "P value"])
+            .row(
+                "Linear trend",
+                [num_cell(moments.mean), num_cell(se), num_cell(df), num_cell(r_squared), num_cell(f_stat), p_cell_at_alpha(p_val, p_fmt, alpha)],
+            )
+            .footnote("Subject-level linear-trend contrast without assuming sphericity (df = n - 1; Maxwell & Delaney, 2004, ch. 11).")
+            .build(),
+    );
+    Ok(())
+}
+
+/// Non-sphericity subject-level paired-difference post-hoc family (`TukeyHsd`, `Dunnett`,
+/// `NewmanKeuls`) on `df = n - 1` using individual contrast standard errors (Maxwell & Delaney,
+/// 2004, ch. 11, pp. 542–554).
+fn append_rm_non_sphericity_family_multiplicity(
+    out: &mut ResultSheet,
+    blocks: &[Vec<f64>],
+    inputs: &[GroupComparisonInput],
+    mult: &MultiplicitySpec,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
+    let k = inputs.len();
+    let n = blocks.len();
+    let nf = n as f64;
+    let df = (n - 1) as f64;
+    let mut mapped_mult = *mult;
+    let pairs = if let MultiplicityMethod::Dunnett { control_column } = mult.method {
+        let ctrl_pos = inputs
+            .iter()
+            .position(|g| g.index == control_column)
+            .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+        mapped_mult.method = MultiplicityMethod::Dunnett { control_column: ctrl_pos };
+        let treats: Vec<usize> = (0..k).filter(|&i| i != ctrl_pos).collect();
+        let m = treats.len();
+        let mut diffs_by_treat: Vec<Vec<f64>> = Vec::with_capacity(m);
+        let mut means_by_treat: Vec<f64> = Vec::with_capacity(m);
+        for &tr in &treats {
+            let diffs: Vec<f64> = blocks.iter().map(|row| row[tr] - row[ctrl_pos]).collect();
+            let mom = SummaryMoments::from_slice(&diffs)?;
+            means_by_treat.push(mom.mean);
+            diffs_by_treat.push(diffs);
+        }
+        let denom = nf * df;
+        let mut cov_mat = vec![vec![0.0_f64; m]; m];
+        for a in 0..m {
+            for b in a..m {
+                let mut acc = 0.0_f64;
+                for s in 0..n {
+                    acc += (diffs_by_treat[a][s] - means_by_treat[a]) * (diffs_by_treat[b][s] - means_by_treat[b]);
+                }
+                let c = acc / denom;
+                cov_mat[a][b] = c;
+                cov_mat[b][a] = c;
+            }
+        }
+        let mut out_pairs = Vec::with_capacity(m);
+        for (a, &tr) in treats.iter().enumerate() {
+            let mut unit = vec![0.0_f64; m];
+            unit[a] = 1.0;
+            let se = cov_mat[a][a].max(0.0).sqrt();
+            out_pairs.push((
+                tr,
+                ctrl_pos,
+                ContrastEstimate { diff: means_by_treat[a], se, df, ctrl_var_pair: None, cov_vectors: Some((unit, cov_mat[a].clone())) },
+            ));
+        }
+        out_pairs
+    } else {
+        let mut out_pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+        for i in 0..k {
+            for j in (i + 1)..k {
+                let diffs: Vec<f64> = blocks.iter().map(|row| row[i] - row[j]).collect();
+                let moments = SummaryMoments::from_slice(&diffs)?;
+                let se = moments.sample_sd().unwrap_or(0.0) / nf.sqrt();
+                out_pairs.push((i, j, ContrastEstimate { diff: moments.mean, se, df, ctrl_var_pair: None, cov_vectors: None }));
+            }
+        }
+        out_pairs
+    };
+    let numbered_levels: Vec<(usize, String)> = inputs.iter().map(|g| (g.index, g.label.clone())).collect();
+    let level_means: Vec<Option<f64>> = inputs.iter().map(|g| Some(g.mean)).collect();
+    let (details, fam_note) = compare_contrast_family(ContrastFamilyEval {
+        levels: &numbered_levels,
+        level_means: &level_means,
+        mult_spec: &mapped_mult,
+        confidence,
+        n_slices: 1,
+        pairs,
+    })?;
+    let base_note = String::from(
+        "Paired-difference contrasts across matched subjects using individual contrast standard errors without assuming sphericity (df = n - 1; Maxwell & Delaney, 2004, ch. 11).",
+    );
+    let note = match fam_note {
+        Some(extra) => format!("{base_note} {extra}"),
+        None => base_note,
+    };
+    push_pairwise_outputs_with_footnote(
+        out,
+        &details,
+        "multiple-comparisons",
+        "Multiple comparisons (paired contrasts)",
+        p_fmt,
+        confidence,
+        Some(note),
+    );
+    Ok(())
 }
 
 /// Matched-pair difference *t* contrasts across complete RM subject blocks (`df = n - 1`), used when

@@ -114,17 +114,17 @@ fn collect_rel_files_recursive(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) 
     Ok(())
 }
 
-fn parse_table_row_asset_path(line: &str) -> Option<(&str, &str)> {
+fn parse_table_row_asset_path(line: &str) -> Option<(&str, &str, &str)> {
     let inner = line.trim().strip_prefix('|')?.strip_suffix('|')?;
     let cells: Vec<&str> = inner.split('|').map(str::trim).collect();
-    let [asset_cell, _, source_cell, ..] = cells.as_slice() else {
+    let [asset_cell, _, source_cell, licence_cell, ..] = cells.as_slice() else {
         return None;
     };
     let path = asset_cell.strip_prefix('`')?.strip_suffix('`')?.trim();
     if path.is_empty() {
         return None;
     }
-    Some((path, source_cell))
+    Some((path, source_cell, licence_cell))
 }
 
 fn extract_backticked_paths(source: &str) -> Vec<&str> {
@@ -144,19 +144,22 @@ fn extract_backticked_paths(source: &str) -> Vec<&str> {
 }
 
 fn filter_assets_markdown(assets_md: &str, seed: &BTreeSet<String>) -> (String, BTreeSet<String>) {
-    let mut source_by_asset = BTreeMap::new();
+    let mut refs_by_asset: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for line in assets_md.lines() {
-        if let Some((path, source)) = parse_table_row_asset_path(line) {
-            source_by_asset.insert(path.to_owned(), source.to_owned());
+        if let Some((path, source, licence)) = parse_table_row_asset_path(line) {
+            let mut refs = Vec::new();
+            refs.extend(extract_backticked_paths(source).into_iter().map(str::to_owned));
+            refs.extend(extract_backticked_paths(licence).into_iter().map(str::to_owned));
+            refs_by_asset.insert(path.to_owned(), refs);
         }
     }
     let mut needed = seed.clone();
     let mut queue: Vec<String> = seed.iter().cloned().collect();
     while let Some(path) = queue.pop() {
-        if let Some(src) = source_by_asset.get(&path) {
-            for parent in extract_backticked_paths(src) {
-                if needed.insert(parent.to_owned()) {
-                    queue.push(parent.to_owned());
+        if let Some(refs) = refs_by_asset.get(&path) {
+            for parent in refs {
+                if needed.insert(parent.clone()) {
+                    queue.push(parent.clone());
                 }
             }
         }
@@ -168,7 +171,7 @@ fn filter_assets_markdown(assets_md: &str, seed: &BTreeSet<String>) -> (String, 
 fn filter_attribution_table(md: &str, keep: &BTreeSet<String>) -> String {
     let mut out = String::with_capacity(md.len());
     for line in md.lines() {
-        if let Some((path, _)) = parse_table_row_asset_path(line)
+        if let Some((path, _, _)) = parse_table_row_asset_path(line)
             && !keep.contains(path)
         {
             continue;
@@ -338,6 +341,14 @@ fn assert_beta_site_contents(map_a: &BTreeMap<String, String>) -> Result<(), Str
     let graphs_html = map_a.get("registry/graphs.html").ok_or("missing registry/graphs.html")?;
     assert!(graphs_html.contains("id=\"graph-layout-features\""), "registry/graphs.html missing R13 features section");
     assert!(graphs_html.contains("EqualizeScaleMode") || graphs_html.contains("layout.equalizeScaling"));
+
+    // AUD-12-19: Math-containing headings in live docs must produce clean slug IDs and plain TOC text.
+    let fitting_html = map_a.get("fitting.html").ok_or("missing fitting.html")?;
+    assert!(fitting_html.contains("id=\"hougaard-skewness-g1\""), "fitting.html must render clean heading ID `hougaard-skewness-g1` (AUD-12-19)");
+    assert!(
+        fitting_html.contains("href=\"#hougaard-skewness-g1\">— Hougaard Skewness (g1)</a>"),
+        "fitting.html TOC must render clean plain math text for Hougaard Skewness (AUD-12-19)"
+    );
 
     // Contributor docs linked from automation pages must rewrite directly to GitHub blob URLs.
     let batch_html = map_a.get("automation/control-and-batch.html").ok_or("missing automation/control-and-batch.html")?;
@@ -580,6 +591,48 @@ fn assert_release_negative_gates_and_ci_stage(sim_root: &Path, manual_out: &Path
     for absent in ["manual/latest/manifest.json", "manual/v0.1/manifest.json", "ROADMAP.md"] {
         assert!(!staged_site.join(absent).exists(), "unexpected staged `{absent}`");
     }
+
+    assert_aud12_snapshot_and_guard_regressions(sim_root, manual_out, preview_str)
+}
+
+fn assert_aud12_snapshot_and_guard_regressions(sim_root: &Path, manual_out: &Path, preview_str: &str) -> Result<(), String> {
+    let manual_str = manual_out.to_str().ok_or("bad path")?;
+
+    // AUD-12-25: `--output` inside `docs/` (including via `..` traversal) must fail closed.
+    run_xtask_fail(sim_root, &["docs-site", "--output", "docs"], "strictly outside `docs/`")?;
+    run_xtask_fail(sim_root, &["docs-site", "--output", "target/../docs/preview"], "strictly outside `docs/`")?;
+
+    // AUD-12-06: Tampering snapshot HTML (script injection or latest/newest mismatch) must fail `--check --manual-dir`.
+    let snap_v01_index = manual_out.join("v0.1/index.html");
+    let snap_latest_index = manual_out.join("latest/index.html");
+    let orig_snap_html = fs::read_to_string(&snap_v01_index).map_err(|e| e.to_string())?;
+    let injected_html = orig_snap_html.replace("</body>", "<script>alert(1)</script></body>");
+    fs::write(&snap_v01_index, &injected_html).map_err(|e| e.to_string())?;
+    fs::write(&snap_latest_index, &injected_html).map_err(|e| e.to_string())?;
+    run_xtask_fail(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str], "<script>")?;
+    fs::write(&snap_v01_index, &orig_snap_html).map_err(|e| e.to_string())?;
+    fs::write(&snap_latest_index, orig_snap_html.replace("Manual Home", "Stale Manual Home")).map_err(|e| e.to_string())?;
+    run_xtask_fail(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str], "does not match")?;
+    fs::write(&snap_latest_index, &orig_snap_html).map_err(|e| e.to_string())?;
+
+    // AUD-12-25: Building a newer minor release (`0.2.0`) then backporting an older minor (`0.1.1`) must keep `latest/` on `v0.2`.
+    for tag in ["v0.2.0", "v0.1.1"] {
+        let out = Command::new("git").current_dir(sim_root).args(["tag", tag]).output().map_err(|e| e.to_string())?;
+        assert!(out.status.success(), "git tag {tag} failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    run_xtask_ok(sim_root, &["docs-site", "--release", "0.2.0", "--check"])?;
+    run_xtask_ok(sim_root, &["docs-site", "--release", "0.1.1", "--check"])?;
+    let latest_manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(manual_out.join("latest/manifest.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let v01_manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(manual_out.join("v0.1/manifest.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    assert_eq!(latest_manifest["minor_dir"], serde_json::json!("v0.2"));
+    assert_eq!(latest_manifest["version"], serde_json::json!("0.2.0"));
+    assert_eq!(v01_manifest["version"], serde_json::json!("0.1.1"));
+    assert_eq!(
+        fs::read_to_string(manual_out.join("latest/index.html")).map_err(|e| e.to_string())?,
+        fs::read_to_string(manual_out.join("v0.2/index.html")).map_err(|e| e.to_string())?
+    );
 
     Ok(())
 }

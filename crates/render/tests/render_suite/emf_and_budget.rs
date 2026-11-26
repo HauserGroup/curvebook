@@ -533,14 +533,14 @@ fn encode_raster_emf_emits_bottom_up_bgra_stretchdibits() {
     assert_eq!(dib.height, 2, "positive biHeight required for bottom-up DIB");
     assert_eq!(dib.bit_count, 32);
     assert_eq!(dib.compression, 0);
-    // DIB scanline 0 is bottom image row (y=1) in BGRA; scanline 1 is top image row (y=0) in BGRA.
+    // DIB scanline 0 is bottom image row (y=1) in opaque-composited BGRX; scanline 1 is top row (y=0).
     assert_eq!(
         dib.pixels_bgra,
         vec![
-            255, 0, 0, 255, // bottom-left Blue -> BGRA
-            255, 255, 255, 200, // bottom-right -> BGRA
-            0, 0, 255, 255, // top-left Red -> BGRA
-            0, 255, 0, 255, // top-right Green -> BGRA
+            255, 0, 0, 255, // bottom-left Blue -> BGRX
+            255, 255, 255, 255, // bottom-right White-ish composited over white -> opaque BGRX
+            0, 0, 255, 255, // top-left Red -> BGRX
+            0, 255, 0, 255, // top-right Green -> BGRX
         ]
     );
 }

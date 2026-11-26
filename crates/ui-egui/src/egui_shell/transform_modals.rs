@@ -74,7 +74,7 @@ impl ConstantKOp {
         } else if intercept.abs() < 1e-12 {
             Some((Self::Multiply, slope))
         } else {
-            Some((Self::Add, intercept))
+            None
         }
     }
 }
@@ -132,6 +132,8 @@ pub struct TransformModalsEguiState {
     pub rand_seed_draft: String,
     pub rand_stratify_col: Option<usize>,
     pub rand_proportional_allocation: bool,
+    pub exclude_session_synced: bool,
+    pub pending_standalone_transform_params: Option<Value>,
 }
 
 impl Default for TransformModalsEguiState {
@@ -187,6 +189,8 @@ impl Default for TransformModalsEguiState {
             rand_seed_draft: String::from("42"),
             rand_stratify_col: None,
             rand_proportional_allocation: true,
+            exclude_session_synced: false,
+            pending_standalone_transform_params: None,
         }
     }
 }
@@ -325,13 +329,12 @@ pub fn render_transform_modal(
         if from_edit {
             if commit_edit_transform_draft_if_needed(app, source_sheet, effective_kind, state, intents) {
                 intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
-                push_normalize_graph_if_requested(app, effective_kind, state, intents);
             }
         } else if let Some(sheet) = source_sheet {
             match build_standalone_transform_params(app, sheet, effective_kind, state) {
                 Ok(cmd_params) => {
-                    intents.push_engine("transform.run", cmd_params);
-                    intents.push(UiIntent::CloseTransformModal);
+                    state.pending_standalone_transform_params = Some(cmd_params);
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("__transform_standalone_commit") });
                 }
                 Err(err) => {
                     state.validation_error = Some(err);
@@ -562,8 +565,9 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
             state.sim_x_min_draft = format_draft_f64(*x_min, &app.locale_preset);
             state.sim_x_max_draft = format_draft_f64(*x_max, &app.locale_preset);
             state.sim_equation_id_draft = equation_id.clone();
+            let param_sep = if app.locale_preset.decimal_separator == ',' { "; " } else { ", " };
             state.sim_params_draft =
-                parameters.iter().map(|(k, v)| format!("{k}={}", format_draft_f64(*v, &app.locale_preset))).collect::<Vec<_>>().join(", ");
+                parameters.iter().map(|(k, v)| format!("{k}={}", format_draft_f64(*v, &app.locale_preset))).collect::<Vec<_>>().join(param_sep);
             let (nkind, nparam) = match noise {
                 SimulationNoise::None => (0, String::from("5")),
                 SimulationNoise::Gaussian { sd } => (1, format_draft_f64(*sd, &app.locale_preset)),
@@ -1110,18 +1114,22 @@ fn render_remove_baseline_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
             &legacy_op,
             FrameInspectEntryInput::modal("edit.transform.baseline_operation", "button", "Baseline Operation", None, true),
         );
-        if legacy_op.clicked()
-            && from_edit
-            && let Some(spec) = draft_spec.as_mut()
-        {
-            let next_op = match cur_op {
-                BaselineOperation::Difference => BaselineOperation::Ratio,
-                BaselineOperation::Ratio => BaselineOperation::PercentChange,
-                BaselineOperation::PercentChange => BaselineOperation::FractionalChange,
-                BaselineOperation::FractionalChange => BaselineOperation::Difference,
-            };
-            spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: cur_cols.clone(), operation: next_op });
-            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
+        if legacy_op.clicked() {
+            if from_edit {
+                if let Some(spec) = draft_spec.as_mut() {
+                    let next_op = match cur_op {
+                        BaselineOperation::Difference => BaselineOperation::Ratio,
+                        BaselineOperation::Ratio => BaselineOperation::PercentChange,
+                        BaselineOperation::PercentChange => BaselineOperation::FractionalChange,
+                        BaselineOperation::FractionalChange => BaselineOperation::Difference,
+                    };
+                    spec.kind =
+                        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: cur_cols.clone(), operation: next_op });
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
+                }
+            } else {
+                state.baseline_op = (state.baseline_op + 1) % 4;
+            }
         }
     });
 
@@ -2016,9 +2024,50 @@ fn validate_and_build_simulate_spec(state: &TransformModalsEguiState, preset: &c
     Ok(TransformAnalysisSpec::Simulate { seed, row_count, replicates, x_min, x_max, equation_id: eq.to_owned(), parameters, noise })
 }
 
+fn split_simulate_param_entries(raw: &str, comma_decimal: bool) -> Vec<&str> {
+    let mut entries = Vec::new();
+    for semi_seg in raw.split(';') {
+        if !comma_decimal {
+            for tok in semi_seg.split(',') {
+                let t = tok.trim();
+                if !t.is_empty() {
+                    entries.push(t);
+                }
+            }
+            continue;
+        }
+        let mut start = 0usize;
+        for (idx, ch) in semi_seg.char_indices() {
+            if ch != ',' {
+                continue;
+            }
+            let after = semi_seg.get(idx + 1..).unwrap_or("").trim_start();
+            let starts_new_assignment = after.split_once('=').is_some_and(|(lhs, _)| {
+                let k = lhs.trim();
+                !k.is_empty()
+                    && k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            });
+            if starts_new_assignment {
+                let piece = semi_seg.get(start..idx).unwrap_or("").trim();
+                if !piece.is_empty() {
+                    entries.push(piece);
+                }
+                start = idx + 1;
+            }
+        }
+        let tail = semi_seg.get(start..).unwrap_or("").trim();
+        if !tail.is_empty() {
+            entries.push(tail);
+        }
+    }
+    entries
+}
+
 fn parse_simulate_parameters(raw: &str, preset: &crate::i18n::LocalePreset) -> Result<Vec<(String, f64)>, String> {
     let mut out = Vec::new();
-    for entry in raw.split([',', ';']).map(str::trim).filter(|s| !s.is_empty()) {
+    let comma_decimal = preset.decimal_separator == ',';
+    for entry in split_simulate_param_entries(raw, comma_decimal) {
         let Some((name, val_s)) = entry.split_once('=') else {
             return Err(format!("Parameter `{entry}` must use `name=value` syntax."));
         };
@@ -2165,22 +2214,19 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
                 if from_edit {
                     if commit_edit_transform_draft_if_needed(app, ds, kind, state, intents) {
                         intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
-                        push_normalize_graph_if_requested(app, kind, state, intents);
+                    }
+                } else if let Some(sheet) = ds {
+                    match build_standalone_transform_params(app, sheet, kind, state) {
+                        Ok(cmd_params) => {
+                            state.pending_standalone_transform_params = Some(cmd_params);
+                            intents.push(UiIntent::DialogButtonAction { action: String::from("__transform_standalone_commit") });
+                        }
+                        Err(err) => {
+                            state.validation_error = Some(err);
+                        }
                     }
                 } else {
-                    if let Some(sheet) = ds {
-                        match build_standalone_transform_params(app, sheet, kind, state) {
-                            Ok(cmd_params) => {
-                                intents.push_engine("transform.run", cmd_params);
-                                intents.push(UiIntent::CloseTransformModal);
-                            }
-                            Err(err) => {
-                                state.validation_error = Some(err);
-                            }
-                        }
-                    } else {
-                        intents.push(UiIntent::CloseTransformModal);
-                    }
+                    intents.push(UiIntent::CloseTransformModal);
                 }
             }
 
@@ -2190,28 +2236,10 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
                 meta.record_modal_response(rhs, &apply_resp, FrameInspectEntryInput::modal("modal.apply", "button", apply_lbl, None, can_ok));
                 if apply_resp.clicked() && commit_edit_transform_draft_if_needed(app, ds, kind, state, intents) {
                     intents.push(UiIntent::DialogButtonAction { action: String::from("apply") });
-                    push_normalize_graph_if_requested(app, kind, state, intents);
                 }
             }
         });
     });
-}
-
-fn push_normalize_graph_if_requested(app: &UiApp, kind: TransformModalKind, state: &TransformModalsEguiState, intents: &mut PendingUiIntents) {
-    if kind != TransformModalKind::Normalize || !state.create_new_graph {
-        return;
-    }
-    if let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog
-        && !app.document().graph_sheets.iter().any(|g| g.spec.primary_source_sheet_id == *result_sheet_id)
-    {
-        intents.push_engine(
-            "graph.create",
-            json!({
-                "data_sheet_id": result_sheet_id.as_str(),
-                "initialized": true,
-            }),
-        );
-    }
 }
 
 fn commit_edit_transform_draft_if_needed(
@@ -2494,6 +2522,7 @@ pub fn render_exclude_with_reason_modal(
     intents: &mut PendingUiIntents,
 ) -> TransformModalFrameReport {
     if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ExcludeWithReason { .. }) {
+        state.exclude_session_synced = false;
         state.synced_exclude_tag.clear();
         return TransformModalFrameReport::default();
     }
@@ -2501,7 +2530,8 @@ pub fn render_exclude_with_reason_modal(
         intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
     }
 
-    if state.synced_exclude_tag.is_empty() {
+    if !state.exclude_session_synced {
+        state.exclude_session_synced = true;
         state.synced_exclude_tag = app.canvas_dialogs.exclude_with_reason.reason_tag.clone();
         state.exclude_reason_draft = app.canvas_dialogs.exclude_with_reason.reason_tag.clone();
         state.exclude_note_draft = app.canvas_dialogs.exclude_with_reason.note.clone();
@@ -2523,6 +2553,7 @@ pub fn render_exclude_with_reason_modal(
         ui.label(format!("Target cells selected: {}", app.canvas_dialogs.exclude_with_reason.coords.len()));
         ui.add_space(4.0);
         ui.label("Preset reason tags:");
+        let mut preset_clicked = false;
         ui.horizontal_wrapped(|row| {
             for (idx, tag) in ExcludeWithReasonDialogState::preset_reason_tags().iter().enumerate() {
                 let active = app.canvas_dialogs.exclude_with_reason.reason_tag == *tag;
@@ -2533,6 +2564,7 @@ pub fn render_exclude_with_reason_modal(
                     FrameInspectEntryInput::modal(&format!("exclude.preset.{idx}"), "radio", tag, Some(active.to_string()), true),
                 );
                 if r.clicked() {
+                    preset_clicked = true;
                     state.exclude_reason_draft = (*tag).to_owned();
                     let mut f = Map::new();
                     f.insert(String::from("reason_tag"), Value::String((*tag).to_owned()));
@@ -2544,7 +2576,15 @@ pub fn render_exclude_with_reason_modal(
         ui.add_space(6.0);
         ui.horizontal_wrapped(|row| {
             row.label("Reason Tag:");
-            let tr_box = row.add(egui::TextEdit::singleline(&mut state.exclude_reason_draft).hint_text("Reason tag").desired_width(180.0));
+            let reason_id = egui::Id::unique("exclude.reason_tag.input");
+            if !preset_clicked
+                && !row.ctx().memory(|m| m.has_focus(reason_id))
+                && state.exclude_reason_draft != app.canvas_dialogs.exclude_with_reason.reason_tag
+            {
+                state.exclude_reason_draft = app.canvas_dialogs.exclude_with_reason.reason_tag.clone();
+            }
+            let tr_box =
+                row.add(egui::TextEdit::singleline(&mut state.exclude_reason_draft).id(reason_id).hint_text("Reason tag").desired_width(180.0));
             meta.record_modal_response(
                 row,
                 &tr_box,

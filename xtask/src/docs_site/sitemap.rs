@@ -372,9 +372,13 @@ struct RepoLinkResolver<'a> {
     broken_links: std::cell::RefCell<Vec<String>>,
 }
 
+fn starts_with_scheme_ci(raw: &str, schemes: &[&str]) -> bool {
+    schemes.iter().any(|scheme| raw.get(..scheme.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme)))
+}
+
 impl LinkResolver for RepoLinkResolver<'_> {
     fn resolve_href(&self, raw_href: &str) -> String {
-        if raw_href.starts_with('#') || raw_href.starts_with("http://") || raw_href.starts_with("https://") || raw_href.starts_with("mailto:") {
+        if raw_href.starts_with('#') || starts_with_scheme_ci(raw_href, &["http://", "https://", "mailto:"]) {
             return raw_href.to_owned();
         }
         let (target_part, frag_part) = raw_href.split_once('#').map_or((raw_href, None), |(t, f)| (t, Some(f)));
@@ -389,7 +393,10 @@ impl LinkResolver for RepoLinkResolver<'_> {
         }
 
         let source_dir = Path::new(self.source_repo_rel).parent().unwrap_or_else(|| Path::new(""));
-        let normalized = normalize_repo_rel(source_dir, target_part);
+        let Some(normalized) = normalize_repo_rel(source_dir, target_part) else {
+            self.broken_links.borrow_mut().push(format!("{}: relative link `{raw_href}` escapes repository root", self.source_repo_rel));
+            return String::from("#");
+        };
 
         if let Some(mapped_site_rel) = self.known_site_targets.get(normalized.as_str()) {
             let frag = frag_part.map(|f| format!("#{f}")).or_else(|| default_schema_fragment(&normalized).map(str::to_owned)).unwrap_or_default();
@@ -425,12 +432,15 @@ impl LinkResolver for RepoLinkResolver<'_> {
     }
 
     fn resolve_image(&self, raw_src: &str) -> String {
-        if raw_src.starts_with("http://") || raw_src.starts_with("https://") {
+        if starts_with_scheme_ci(raw_src, &["http://", "https://"]) {
             return raw_src.to_owned();
         }
         let source_dir = Path::new(self.source_repo_rel).parent().unwrap_or_else(|| Path::new(""));
-        let normalized = normalize_repo_rel(source_dir, raw_src);
         let assets = super::template::asset_prefix(self.current_site_rel, self.meta.is_release_snapshot);
+        let Some(normalized) = normalize_repo_rel(source_dir, raw_src) else {
+            self.broken_links.borrow_mut().push(format!("{}: image path `{raw_src}` escapes repository root", self.source_repo_rel));
+            return String::from("#");
+        };
         if let Some(img_name) = normalized.strip_prefix("docs/images/") {
             if !is_regular_file(&self.repo_root.join("docs/images").join(img_name)) {
                 self.broken_links
@@ -466,7 +476,7 @@ fn default_schema_fragment(normalized: &str) -> Option<&'static str> {
     }
 }
 
-fn normalize_repo_rel(base_dir: &Path, raw: &str) -> String {
+fn normalize_repo_rel(base_dir: &Path, raw: &str) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     for comp in base_dir.components() {
         if let std::path::Component::Normal(s) = comp
@@ -480,23 +490,28 @@ fn normalize_repo_rel(base_dir: &Path, raw: &str) -> String {
     let stripped = clean.trim_start_matches("./");
     if let Some(abs) = stripped.strip_prefix('/') {
         parts.clear();
-        push_segments(abs, &mut parts);
-    } else {
-        push_segments(stripped, &mut parts);
+        if !push_segments(abs, &mut parts) {
+            return None;
+        }
+    } else if !push_segments(stripped, &mut parts) {
+        return None;
     }
-    parts.join("/")
+    Some(parts.join("/"))
 }
 
-fn push_segments(path: &str, parts: &mut Vec<String>) {
+fn push_segments(path: &str, parts: &mut Vec<String>) -> bool {
     for seg in path.split('/') {
         match seg {
             "" | "." => {}
             ".." => {
-                let _ = parts.pop();
+                if parts.pop().is_none() {
+                    return false;
+                }
             }
             other => parts.push(other.to_owned()),
         }
     }
+    true
 }
 
 fn build_known_site_targets() -> BTreeMap<&'static str, &'static str> {
@@ -516,6 +531,9 @@ fn build_known_site_targets() -> BTreeMap<&'static str, &'static str> {
 
 fn collect_defined_analysis_anchors(root: &Path) -> BTreeSet<String> {
     let analyses_md = root.join("docs/reference/analyses.md");
+    if !is_regular_file(&analyses_md) {
+        return BTreeSet::new();
+    }
     let Ok(md_src) = std::fs::read_to_string(analyses_md) else {
         return BTreeSet::new();
     };
@@ -564,7 +582,12 @@ pub fn assemble_site(root: &Path, meta: SiteMeta) -> Result<GeneratedSite, Strin
             PageSource::PreRendered { h1, toc, body_html } => (item.title.clone(), h1.clone(), toc.clone(), body_html.clone(), false),
             PageSource::Markdown { repo_path, fallback_kind } => {
                 let full_path = root.join(repo_path);
-                let rendered = if full_path.is_file() {
+                if let Ok(meta) = std::fs::symlink_metadata(&full_path)
+                    && meta.file_type().is_symlink()
+                {
+                    return Err(format!("{repo_path}: Markdown source must not be a symlink"));
+                }
+                let rendered = if is_regular_file(&full_path) {
                     let md_src = std::fs::read_to_string(&full_path).map_err(|e| format!("read {repo_path}: {e}"))?;
                     let resolver = RepoLinkResolver {
                         source_repo_rel: repo_path,
@@ -720,7 +743,9 @@ fn glossary_seed_terms() -> &'static [(&'static str, &'static str)] {
 
 fn collect_glossary_az_entries(root: &Path) -> Vec<AzEntry> {
     let glossary_md = root.join("docs/reference/glossary.md");
-    if let Ok(text) = std::fs::read_to_string(&glossary_md) {
+    if is_regular_file(&glossary_md)
+        && let Ok(text) = std::fs::read_to_string(&glossary_md)
+    {
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
         let rendered = render_markdown(&text, &super::markdown::IdentityResolver);
@@ -840,7 +865,14 @@ fn build_section_index_page(sec: &SectionDef, children: &[&PageItem]) -> PageIte
 
 fn build_az_index_page(entries: &[AzEntry]) -> PageItem {
     let mut sorted = entries.to_vec();
-    sorted.sort_by(|a, b| a.term.to_ascii_lowercase().cmp(&b.term.to_ascii_lowercase()).then_with(|| a.category.cmp(&b.category)));
+    sorted.sort_by(|a, b| {
+        a.term
+            .to_ascii_lowercase()
+            .cmp(&b.term.to_ascii_lowercase())
+            .then_with(|| a.category.cmp(&b.category))
+            .then_with(|| a.term.cmp(&b.term))
+            .then_with(|| a.rel_href.cmp(&b.rel_href))
+    });
     sorted.dedup();
 
     let mut grouped: BTreeMap<char, Vec<&AzEntry>> = BTreeMap::new();
@@ -896,5 +928,52 @@ fn build_az_index_page(entries: &[AzEntry]) -> PageItem {
         ),
         section_id: "glossary",
         source: PageSource::PreRendered { h1: String::from("A–Z Reference Index"), toc, body_html: body },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use super::{AzEntry, LinkResolver, PageSource, RepoLinkResolver, SiteMeta, build_az_index_page, normalize_repo_rel};
+
+    #[test]
+    fn aud_12_26_normalize_repo_rel_rejects_underflow_and_schemes_are_case_insensitive() {
+        assert_eq!(normalize_repo_rel(Path::new("docs/reference"), "../../README.md").as_deref(), Some("README.md"));
+        assert_eq!(normalize_repo_rel(Path::new("docs/reference"), "../../../../../../README.md"), None);
+
+        let meta = SiteMeta { version_label: String::from("v0.1.0"), commit_sha: None, release_date: None, is_release_snapshot: false };
+        let known = BTreeMap::new();
+        let resolver = RepoLinkResolver {
+            source_repo_rel: "docs/reference/get-started.md",
+            current_site_rel: "get-started.html",
+            repo_root: Path::new("."),
+            meta: &meta,
+            known_site_targets: &known,
+            broken_links: std::cell::RefCell::new(Vec::new()),
+        };
+        assert_eq!(resolver.resolve_href("HTTPS://example.com/a"), "HTTPS://example.com/a");
+        assert_eq!(resolver.resolve_href("MAILTO:user@example.com"), "MAILTO:user@example.com");
+        assert_eq!(resolver.resolve_image("HTTP://example.com/a.png"), "HTTP://example.com/a.png");
+        assert!(resolver.broken_links.borrow().is_empty());
+
+        let _ = resolver.resolve_href("../../../../../../../../README.md");
+        assert!(resolver.broken_links.borrow().iter().any(|e| e.contains("escapes repository root")));
+    }
+
+    #[test]
+    fn aud_12_44_az_index_total_order_deduplicates_non_adjacent_duplicates() {
+        let entries = vec![
+            AzEntry { term: String::from("Alpha"), category: String::from("Cat"), rel_href: String::from("a.html") },
+            AzEntry { term: String::from("alpha"), category: String::from("Cat"), rel_href: String::from("b.html") },
+            AzEntry { term: String::from("Alpha"), category: String::from("Cat"), rel_href: String::from("a.html") },
+        ];
+        let page = build_az_index_page(&entries);
+        let PageSource::PreRendered { body_html, .. } = page.source else {
+            panic!("expected PreRendered");
+        };
+        assert!(body_html.contains("<strong>2</strong> documented entries"), "{body_html}");
+        assert_eq!(body_html.matches("href=\"a.html\"").count(), 1);
     }
 }

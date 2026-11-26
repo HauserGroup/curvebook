@@ -2,10 +2,11 @@
 //! designed for downstream R, Python, Snakemake, and Nextflow analysis pipelines.
 
 use curvebook_doc::{
-    AnalysisSpec, ChecklistItem, CiBound, FittedCurveOverlay, PairwiseComparisonRecord, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus,
-    ResultTab, SheetId,
+    AnalysisSpec, ChecklistItem, CiBound, DataSheet, FittedCurveOverlay, PairwiseComparisonRecord, ResultCell, ResultScalarEntry, ResultSheet,
+    ResultStatus, ResultTab, SheetId, SourceCellId,
 };
 
+use crate::archive::validate_data_sheet_floats;
 use crate::csv::{CsvOptions, neutralize_csv_formula_text, write_delimited_records};
 use crate::error::FormatError;
 
@@ -20,6 +21,9 @@ pub struct ResultSheetExportJson<'a> {
     pub tabs: &'a [ResultTab],
     pub pairwise_comparisons: &'a [PairwiseComparisonRecord],
     pub fitted_curves: &'a [FittedCurveOverlay],
+    pub eliminated_outliers: &'a [SourceCellId],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analyzable_data: Option<&'a DataSheet>,
     pub checklist: &'a [ChecklistItem],
 }
 
@@ -82,6 +86,7 @@ pub fn export_result_sheet_tidy_csv(sheet: &ResultSheet, opts: &CsvOptions) -> S
     append_scalar_tidy_rows(&mut rows, &res_id, &title, &sheet.scalars, opts);
     append_comparison_tidy_rows(&mut rows, &res_id, &title, &sheet.pairwise_comparisons, opts);
     append_curve_tidy_rows(&mut rows, &res_id, &title, &sheet.fitted_curves, opts);
+    append_eliminated_outlier_tidy_rows(&mut rows, &res_id, &title, &sheet.eliminated_outliers);
     append_checklist_tidy_rows(&mut rows, &res_id, &title, &sheet.checklist);
 
     write_delimited_records(&rows, opts)
@@ -106,6 +111,8 @@ pub fn export_result_sheet_json(sheet: &ResultSheet, pretty: bool) -> Result<Str
         tabs: &sheet.tabs,
         pairwise_comparisons: &sheet.pairwise_comparisons,
         fitted_curves: &sheet.fitted_curves,
+        eliminated_outliers: &sheet.eliminated_outliers,
+        analyzable_data: sheet.analyzable_data.as_ref(),
         checklist: &sheet.checklist,
     };
     let json = if pretty { serde_json::to_string_pretty(&payload)? } else { serde_json::to_string(&payload)? };
@@ -133,6 +140,8 @@ fn tidy_header() -> Vec<String> {
         String::from("significant"),
         String::from("status"),
         String::from("diagnostic_metric"),
+        String::from("pred_lower"),
+        String::from("pred_upper"),
     ]
 }
 
@@ -159,8 +168,35 @@ fn append_tab_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: &str, 
                 rec.push(String::new()); // significant
                 rec.push(String::new()); // status
                 rec.push(String::new()); // diagnostic_metric
+                rec.push(String::new()); // pred_lower
+                rec.push(String::new()); // pred_upper
                 rows.push(rec);
             }
+        }
+        for (f_idx, footnote) in tab.footnotes.iter().enumerate() {
+            rows.push(vec![
+                res_id.to_owned(),
+                title.to_owned(),
+                String::from("tab_footnote"),
+                safe_tab_id.clone(),
+                safe_tab_title.clone(),
+                kind_str.clone(),
+                format!("footnote_{f_idx}"),
+                String::from("footnote"),
+                neutralize_csv_formula_text(footnote),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ]);
         }
     }
 }
@@ -240,6 +276,8 @@ fn append_scalar_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: &st
             String::new(),
             String::new(),
             String::new(),
+            String::new(),
+            String::new(),
         ]);
     }
 }
@@ -268,6 +306,8 @@ fn append_comparison_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title:
             String::new(),
             String::new(),
             cmp.significant.to_string(),
+            String::new(),
+            String::new(),
             String::new(),
             String::new(),
         ]);
@@ -301,8 +341,40 @@ fn append_curve_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: &str
                 String::new(),
                 String::new(),
                 diag.clone(),
+                format_float_opt(pt.pred_lower, opts),
+                format_float_opt(pt.pred_upper, opts),
             ]);
         }
+    }
+}
+
+fn append_eliminated_outlier_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: &str, outliers: &[SourceCellId]) {
+    for outlier in outliers {
+        let safe_sheet_id = neutralize_csv_formula_text(outlier.sheet_id.as_str());
+        let coord = format!("sheet={},row={},col={},subcol={}", outlier.sheet_id.as_str(), outlier.row, outlier.col, outlier.subcol);
+        rows.push(vec![
+            res_id.to_owned(),
+            title.to_owned(),
+            String::from("eliminated_outlier"),
+            safe_sheet_id,
+            format!("data_set_{}", outlier.col),
+            String::from("EliminatedOutliers"),
+            format!("row_{}", outlier.row),
+            format!("col_{}_sub_{}", outlier.col, outlier.subcol),
+            neutralize_csv_formula_text(&coord),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ]);
     }
 }
 
@@ -328,6 +400,8 @@ fn append_checklist_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: 
             String::new(),
             format!("{:?}", item.status),
             item.diagnostic_metric.as_deref().map_or_else(String::new, neutralize_csv_formula_text),
+            String::new(),
+            String::new(),
         ]);
     }
 }
@@ -416,6 +490,9 @@ fn validate_result_floats(sheet: &ResultSheet) -> Result<(), FormatError> {
                 return Err(FormatError::NonFiniteFloat { location: format!("{}.fitted_curves[{c_idx}].points[{p_idx}]", sheet.id) });
             }
         }
+    }
+    if let Some(ds) = sheet.analyzable_data.as_ref() {
+        validate_data_sheet_floats(ds)?;
     }
     Ok(())
 }

@@ -76,7 +76,6 @@ pub(super) enum FieldKind {
     Bool,
     OptBool,
     Str,
-    OptStr,
     StrOrNullEmpty,
     StrTrimNonEmpty,
     OptNonEmptyStr,
@@ -124,11 +123,6 @@ pub(super) fn try_apply_rule(
             _ => return Err(format!("`{key}` must be a boolean or null")),
         })),
         FieldKind::Str => Some(json!(parse_str_field(val, key)?)),
-        FieldKind::OptStr => Some(json!(match val {
-            Value::Null => None,
-            Value::String(s) => Some(s.as_str()),
-            _ => return Err(format!("`{key}` must be a string or null")),
-        })),
         FieldKind::StrOrNullEmpty => Some(json!(if val.is_null() { "" } else { parse_str_field(val, key)? })),
         FieldKind::StrTrimNonEmpty => {
             let s = parse_str_field(val, key)?.trim();

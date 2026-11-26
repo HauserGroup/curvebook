@@ -9,7 +9,7 @@ use curvebook_doc::{
     RepeatedMeasuresDesign, ResidualCovariance, SubcolumnAggregation, SumOfSquaresType, SummaryMeasure, SurvivalDisplayMetric, TableKind,
     TickDirection, TwoGroupMethod, WeightingScheme,
 };
-use curvebook_palette::{ColormapId, LineDashStyle, PaletteId, Rgba8};
+use curvebook_palette::{ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, PaletteId, Rgba8};
 use curvebook_render::TiffCompression;
 use serde_json::Value;
 
@@ -83,7 +83,10 @@ pub(super) fn parse_positive_usize_arg(val: &Value, field: &str, preset: &Locale
         return usize::try_from(u).map_err(|_| format!("`{field}` exceeds platform integer bounds"));
     }
     let f = parse_finite_f64_with_locale(val, field, preset).map_err(|_| format!("`{field}` must be a positive integer"))?;
-    if f < 1.0 || (f - f.round()).abs() > 1e-9 || f > (usize::MAX as f64) {
+    const MAX_EXACT_F64_INT: f64 = 9_007_199_254_740_992.0;
+    #[allow(clippy::cast_precision_loss)]
+    let max_allowed = MAX_EXACT_F64_INT.min(usize::MAX as f64);
+    if f < 1.0 || f >= max_allowed || (f - f.round()).abs() > 1e-9 {
         return Err(format!("`{field}` must be a positive integer"));
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -124,10 +127,10 @@ pub(super) fn parse_nonneg_f64(val: &Value, key: &str, preset: &LocalePreset) ->
     Ok(f)
 }
 
-pub(super) fn parse_ci_method_choice(val: &Value, key: &str, label: &str, allowed: [&str; 2]) -> Result<String, String> {
+pub(super) fn parse_ci_method_choice(val: &Value, key: &str, label: &str, allowed: &[&str]) -> Result<String, String> {
     let s = parse_str_field(val, key)?;
     if !allowed.contains(&s) {
-        return Err(format!("unsupported {label} CI method `{s}`; expected `{}` or `{}`", allowed[0], allowed[1]));
+        return Err(format!("invalid {label} CI method `{s}`"));
     }
     Ok(s.to_owned())
 }
@@ -550,6 +553,14 @@ pub(super) fn parse_outlier_fdr_q_percent(val: &Value, preset: &LocalePreset) ->
     Ok(q)
 }
 
+pub(super) fn parse_nonlinear_rout_q_percent(val: &Value, preset: &LocalePreset) -> Result<f64, String> {
+    let q = parse_finite_f64_with_locale(val, "fdr_q_percent", preset)?;
+    if q <= 0.0 || q > 50.0 {
+        return Err(format!("nonlinear ROUT `fdr_q_percent` must lie in (0, 50], got {q}"));
+    }
+    Ok(q)
+}
+
 pub(super) fn parse_outlier_alpha(val: &Value, preset: &LocalePreset) -> Result<f64, String> {
     let a = parse_finite_f64_with_locale(val, "alpha", preset)?;
     if a <= 0.0 || a >= 1.0 {
@@ -601,8 +612,8 @@ fn parse_rout_inline_q(raw: &str, preset: &LocalePreset) -> Result<Option<f64>, 
         .ok()
         .or_else(|| parse_localized_number_input(after_q, preset))
         .ok_or_else(|| format!("invalid ROUT Q% in fit method `{raw}`"))?;
-    if !q.is_finite() || q <= 0.0 || q > 100.0 {
-        return Err(format!("ROUT `fdr_q_percent` must lie in (0, 100], got {q}"));
+    if !q.is_finite() || q <= 0.0 || q > 50.0 {
+        return Err(format!("nonlinear ROUT `fdr_q_percent` must lie in (0, 50], got {q}"));
     }
     Ok(Some(q))
 }
@@ -610,9 +621,9 @@ fn parse_rout_inline_q(raw: &str, preset: &LocalePreset) -> Result<Option<f64>, 
 pub(super) fn parse_fit_method(val: &Value, preset: &LocalePreset) -> Result<FitMethod, String> {
     if let Ok(direct) = serde_json::from_value::<FitMethod>(val.clone()) {
         if let FitMethod::RoutOutlierElimination { fdr_q_percent } = direct
-            && (!fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 100.0)
+            && (!fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 50.0)
         {
-            return Err(format!("`fdr_q_percent` must lie in (0, 100], got {fdr_q_percent}"));
+            return Err(format!("nonlinear ROUT `fdr_q_percent` must lie in (0, 50], got {fdr_q_percent}"));
         }
         return Ok(direct);
     }
@@ -624,10 +635,10 @@ pub(super) fn parse_fit_method(val: &Value, preset: &LocalePreset) -> Result<Fit
                     .or_else(|| inner.get("q_percent"))
                     .or_else(|| inner.get("rout_q"))
                     .or_else(|| inner.get("q"))
-                    .map(|v| parse_outlier_fdr_q_percent(v, preset))
+                    .map(|v| parse_nonlinear_rout_q_percent(v, preset))
                     .transpose()?
                     .unwrap_or(1.0),
-                other => parse_outlier_fdr_q_percent(other, preset)?,
+                other => parse_nonlinear_rout_q_percent(other, preset)?,
             };
             return Ok(FitMethod::RoutOutlierElimination { fdr_q_percent: q });
         }
@@ -639,7 +650,7 @@ pub(super) fn parse_fit_method(val: &Value, preset: &LocalePreset) -> Result<Fit
                     .or_else(|| obj.get("q_percent"))
                     .or_else(|| obj.get("rout_q"))
                     .or_else(|| obj.get("q"))
-                    .map(|v| parse_outlier_fdr_q_percent(v, preset))
+                    .map(|v| parse_nonlinear_rout_q_percent(v, preset))
                     .transpose()?
                     .unwrap_or(fdr_q_percent);
                 return Ok(FitMethod::RoutOutlierElimination { fdr_q_percent: q });
@@ -1003,4 +1014,88 @@ fn parse_plate_scalar(val: &Value, preset: &LocalePreset) -> Result<Option<f64>,
         return parse_plate_cell_token(s, preset);
     }
     Err(String::from("plate well value must be a number, string, or null"))
+}
+
+pub(super) fn validate_point_color_str(raw: &str, key: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "black" | "white" | "transparent" | "red" | "blue" | "green" | "orange" | "purple" | "teal" | "gray" | "grey"
+    ) {
+        return Ok(trimmed.to_owned());
+    }
+    let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if hex.is_ascii() && (hex.len() == 6 || hex.len() == 8) && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(trimmed.to_owned());
+    }
+    Err(format!("invalid `{key}` color `{raw}`"))
+}
+
+pub(super) fn validate_marker_shape_str(raw: &str, key: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if serde_json::from_value::<MarkerShape>(Value::String(trimmed.to_owned())).is_ok()
+        || matches!(
+            norm_key(trimmed).as_str(),
+            "circle"
+                | "square"
+                | "triangle"
+                | "triangleup"
+                | "triangledown"
+                | "diamond"
+                | "plus"
+                | "cross"
+                | "x"
+                | "star"
+                | "hexagon"
+                | "horizontalbar"
+                | "verticalbar"
+        )
+    {
+        return Ok(trimmed.to_owned());
+    }
+    Err(format!("invalid `{key}` marker shape `{raw}`"))
+}
+
+pub(super) fn parse_marker_fill_mode_val(val: &Value, key: &str) -> Result<MarkerFillMode, String> {
+    if let Ok(mode) = serde_json::from_value::<MarkerFillMode>(val.clone()) {
+        return Ok(mode);
+    }
+    let raw = val.as_str().ok_or_else(|| format!("`{key}` must be a marker fill mode string"))?;
+    match norm_key(raw).as_str() {
+        "filled" | "solid" => Ok(MarkerFillMode::Filled),
+        "open" | "hollow" => Ok(MarkerFillMode::Open),
+        "semifilledtop" | "semitop" => Ok(MarkerFillMode::SemiFilledTop),
+        "semifilledbottom" | "semibottom" => Ok(MarkerFillMode::SemiFilledBottom),
+        "semifilledleft" | "semileft" => Ok(MarkerFillMode::SemiFilledLeft),
+        "semifilledright" | "semiright" => Ok(MarkerFillMode::SemiFilledRight),
+        _ => Err(format!("invalid `{key}` marker fill_mode `{raw}`")),
+    }
+}
+
+pub(super) type OptRangePair = Option<(Option<f64>, Option<f64>)>;
+
+pub(super) fn parse_opt_range_pair(val: &Value, key: &str, preset: &LocalePreset) -> Result<OptRangePair, String> {
+    if val.is_null() {
+        return Ok(None);
+    }
+    let (lo, hi) = if let Some(arr) = val.as_array() {
+        if arr.len() != 2 {
+            return Err(format!("`{key}` must be a 2-element `[min, max]` array or object"));
+        }
+        (parse_opt_finite_f64_with_locale(&arr[0], key, preset)?, parse_opt_finite_f64_with_locale(&arr[1], key, preset)?)
+    } else if let Some(obj) = val.as_object() {
+        let lo_val = obj.get("min").or_else(|| obj.get("lo")).or_else(|| obj.get("lower"));
+        let hi_val = obj.get("max").or_else(|| obj.get("hi")).or_else(|| obj.get("upper"));
+        let lo = lo_val.map(|v| parse_opt_finite_f64_with_locale(v, key, preset)).transpose()?.flatten();
+        let hi = hi_val.map(|v| parse_opt_finite_f64_with_locale(v, key, preset)).transpose()?.flatten();
+        (lo, hi)
+    } else {
+        return Err(format!("`{key}` must be null, `[min, max]`, or `{{min, max}}`"));
+    };
+    if let (Some(a), Some(b)) = (lo, hi)
+        && a > b
+    {
+        return Err(format!("invalid `{key}` range: lower bound ({a}) exceeds upper bound ({b})"));
+    }
+    Ok((lo.is_some() || hi.is_some()).then_some((lo, hi)))
 }

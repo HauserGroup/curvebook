@@ -25,6 +25,10 @@ const MAX_LOGICAL_SIZE_PX: f64 = 10_000.0;
 const MAX_HOST_FONT_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_DIR_FONTS: usize = 64;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_DIR_TOTAL_BYTES: usize = 128 * 1024 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_DIR_MANIFEST_CANDIDATES: usize = 256;
 
 /// Semantic UI and scientific typography family categories (`R10.9`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1007,7 +1011,7 @@ fn build_loaded_face(
     let ttf = TrueTypeFont::from_font_ref(font_ref).ok()?;
     let upem = f64::from(ttf.units_per_em().max(1));
     let ascent_em = (f64::from(ttf.ascent()) / upem).clamp(0.5, 1.25);
-    let descent_em = (f64::from(-ttf.descent()) / upem).clamp(0.1, 0.65);
+    let descent_em = (-f64::from(ttf.descent()) / upem).clamp(0.1, 0.65);
     let line_gap_em = (f64::from(ttf.line_gap()) / upem).clamp(0.0, 0.50);
     let meta = inspect_sfnt_face_meta(ttf.font_ref(), name);
     let family_kind = classify_face_family(name, &meta);
@@ -1098,31 +1102,134 @@ fn is_safe_relative_manifest_path(rel: &str) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+struct DirFontLoadBudget {
+    seen_canon: std::collections::HashSet<std::path::PathBuf>,
+    loaded_files: usize,
+    attempted_files: usize,
+    loaded_bytes: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DirFontLoadBudget {
+    fn new() -> Self {
+        Self { seen_canon: std::collections::HashSet::new(), loaded_files: 0, attempted_files: 0, loaded_bytes: 0 }
+    }
+
+    const fn exhausted(&self) -> bool {
+        self.loaded_files >= MAX_DIR_FONTS || self.loaded_bytes >= MAX_DIR_TOTAL_BYTES
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_contained_regular_file(root: &std::path::Path, root_canon: &std::path::Path, candidate: &std::path::Path) -> Option<std::path::PathBuf> {
+    let rel = candidate.strip_prefix(root).ok()?;
+    let mut cursor = root.to_path_buf();
+    let mut comps = rel.components().peekable();
+    let mut saw_file = false;
+    while let Some(comp) = comps.next() {
+        let std::path::Component::Normal(part) = comp else {
+            return None;
+        };
+        cursor.push(part);
+        let ft = std::fs::symlink_metadata(&cursor).ok()?.file_type();
+        if ft.is_symlink() {
+            return None;
+        }
+        if comps.peek().is_some() {
+            if !ft.is_dir() {
+                return None;
+            }
+        } else {
+            if !ft.is_file() {
+                return None;
+            }
+            saw_file = true;
+        }
+    }
+    if !saw_file {
+        return None;
+    }
+    let canon = cursor.canonicalize().ok()?;
+    canon.starts_with(root_canon).then_some(canon)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn try_load_contained_font_file(
+    root: &std::path::Path,
+    root_canon: &std::path::Path,
+    candidate: &std::path::Path,
+    tier: FontSourceTier,
+    budget: &mut DirFontLoadBudget,
+    out: &mut Vec<Arc<LoadedFontFace>>,
+) {
+    if budget.exhausted() {
+        return;
+    }
+    let Some(canon) = resolve_contained_regular_file(root, root_canon, candidate) else {
+        return;
+    };
+    if !budget.seen_canon.insert(canon.clone()) {
+        return;
+    }
+    budget.attempted_files = budget.attempted_files.saturating_add(1);
+    let max_bytes = MAX_HOST_FONT_BYTES.min(MAX_DIR_TOTAL_BYTES.saturating_sub(budget.loaded_bytes));
+    if max_bytes == 0 {
+        return;
+    }
+    let Some(bytes) = read_regular_bytes_bounded_impl(&canon, max_bytes, false) else {
+        return;
+    };
+    let byte_len = bytes.len();
+    let before = out.len();
+    let label = candidate.to_string_lossy();
+    let shared = FontBytes::Shared(Arc::new(bytes));
+    append_faces_from_bytes(&label, &shared, tier, false, out);
+    if out.len() > before {
+        budget.loaded_files = budget.loaded_files.saturating_add(1);
+        budget.loaded_bytes = budget.loaded_bytes.saturating_add(byte_len);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn load_faces_from_dir(dir: &std::path::Path, tier: FontSourceTier, out: &mut Vec<Arc<LoadedFontFace>>) {
-    let mut loaded_paths = Vec::new();
+    let Ok(dir_canon) = dir.canonicalize() else {
+        return;
+    };
+    let mut budget = DirFontLoadBudget::new();
     let manifest_specs = [(dir.join("fonts").join("manifest.txt"), dir.join("fonts")), (dir.join("manifest.txt"), dir.to_path_buf())];
     for (manifest_path, base_dir) in manifest_specs {
-        if let Ok(text) = read_regular_text_bounded(&manifest_path, 256 * 1024) {
+        if budget.exhausted() || budget.attempted_files >= MAX_DIR_MANIFEST_CANDIDATES {
+            break;
+        }
+        let Some(manifest_canon) = resolve_contained_regular_file(dir, &dir_canon, &manifest_path) else {
+            continue;
+        };
+        if let Ok(text) = read_regular_text_no_symlink(&manifest_canon, 256 * 1024) {
             for line in text.lines() {
+                if budget.exhausted() || budget.attempted_files >= MAX_DIR_MANIFEST_CANDIDATES {
+                    break;
+                }
                 let rel = line.split('#').next().unwrap_or_default().trim();
                 if !is_safe_relative_manifest_path(rel) {
                     continue;
                 }
                 let candidate = base_dir.join(rel);
-                if load_font_file(&candidate, tier, false, out) {
-                    loaded_paths.push(candidate);
-                }
+                try_load_contained_font_file(dir, &dir_canon, &candidate, tier, &mut budget, out);
             }
         }
     }
 
+    if budget.exhausted() {
+        return;
+    }
     let mut discovered = Vec::new();
     collect_font_files_bounded(dir, 0, &mut discovered);
     discovered.sort();
     for path in discovered {
-        if !loaded_paths.contains(&path) {
-            let _ = load_font_file(&path, tier, false, out);
+        if budget.exhausted() {
+            break;
         }
+        try_load_contained_font_file(dir, &dir_canon, &path, tier, &mut budget, out);
     }
 }
 
@@ -1134,15 +1241,19 @@ fn collect_font_files_bounded(dir: &std::path::Path, depth: usize, out: &mut Vec
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut paths: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).collect();
-    paths.sort();
-    for path in paths {
+    let mut items: Vec<(std::path::PathBuf, std::fs::FileType)> =
+        entries.flatten().filter_map(|e| e.file_type().ok().map(|ft| (e.path(), ft))).collect();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    for (path, ft) in items {
         if out.len() >= MAX_DIR_FONTS {
             break;
         }
-        if path.is_dir() {
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
             collect_font_files_bounded(&path, depth + 1, out);
-        } else if is_sfnt_extension(&path) {
+        } else if ft.is_file() && is_sfnt_extension(&path) {
             out.push(path);
         }
     }
@@ -1157,7 +1268,7 @@ fn is_sfnt_extension(path: &std::path::Path) -> bool {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn load_font_file(path: &std::path::Path, tier: FontSourceTier, is_script_fallback: bool, out: &mut Vec<Arc<LoadedFontFace>>) -> bool {
-    let Some(bytes) = read_regular_bytes_bounded(path, MAX_HOST_FONT_BYTES) else {
+    let Some(bytes) = read_regular_bytes_bounded_impl(path, MAX_HOST_FONT_BYTES, true) else {
         return false;
     };
     let before = out.len();
@@ -1168,16 +1279,19 @@ fn load_font_file(path: &std::path::Path, tier: FontSourceTier, is_script_fallba
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn read_regular_text_bounded(path: &std::path::Path, max_bytes: usize) -> Result<String, ()> {
-    let bytes = read_regular_bytes_bounded(path, max_bytes).ok_or(())?;
+fn read_regular_text_no_symlink(path: &std::path::Path, max_bytes: usize) -> Result<String, ()> {
+    let bytes = read_regular_bytes_bounded_impl(path, max_bytes, false).ok_or(())?;
     String::from_utf8(bytes).map_err(|_| ())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn read_regular_bytes_bounded(path: &std::path::Path, max_bytes: usize) -> Option<Vec<u8>> {
+fn read_regular_bytes_bounded_impl(path: &std::path::Path, max_bytes: usize, allow_symlinks: bool) -> Option<Vec<u8>> {
     use std::io::Read;
-    let pre_meta = std::fs::metadata(path).ok()?;
-    if !pre_meta.file_type().is_file() || pre_meta.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+    let pre_meta = if allow_symlinks { std::fs::metadata(path).ok()? } else { std::fs::symlink_metadata(path).ok()? };
+    if (!allow_symlinks && pre_meta.file_type().is_symlink())
+        || !pre_meta.file_type().is_file()
+        || pre_meta.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX)
+    {
         return None;
     }
     let file = std::fs::File::open(path).ok()?;

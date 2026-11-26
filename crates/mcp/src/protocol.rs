@@ -145,11 +145,128 @@ pub fn run_stdio() -> io::Result<()> {
 
 /// Run the MCP server on process stdin/stdout driven by an explicit [`McpServerState`].
 pub fn run_stdio_with_state(state: &mut McpServerState) -> io::Result<()> {
-    let stdin = io::stdin();
     let stdout = io::stdout();
-    let mut reader = BufReader::new(stdin.lock());
     let mut writer = BufWriter::new(stdout.lock());
-    serve(&mut reader, &mut writer, state)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let reader = BufReader::new(io::stdin());
+        serve_concurrent(reader, &mut writer, state, MAX_REQUEST_BYTES)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let stdin = io::stdin();
+        let mut reader = BufReader::new(stdin.lock());
+        serve(&mut reader, &mut writer, state)
+    }
+}
+
+/// Serve MCP JSON-RPC 2.0 requests using a dedicated reader thread so `notifications/cancelled`
+/// frames arriving while a compute call is in flight immediately signal the active request's
+/// cooperative `AtomicBool` cancel flag (`AUD-13-22`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn serve_concurrent<R: BufRead + Send + 'static, W: Write>(
+    mut reader: R,
+    writer: &mut W,
+    state: &mut McpServerState,
+    max_bytes: usize,
+) -> io::Result<()> {
+    let effective_max = max_bytes.clamp(1, MAX_REQUEST_BYTES);
+    let cancel_registry = state.cancellation_registry();
+    let (tx, rx) = std::sync::mpsc::channel::<io::Result<NextFrame>>();
+
+    let _reader_thread = std::thread::Builder::new().name(String::from("mcp-stdio-reader")).spawn(move || {
+        let mut last_mode = FramingMode::Newline;
+        loop {
+            match read_next_frame(&mut reader, effective_max, last_mode) {
+                Ok(NextFrame::Eof) => {
+                    let _ = tx.send(Ok(NextFrame::Eof));
+                    break;
+                }
+                Ok(NextFrame::Payload { bytes, mode }) => {
+                    last_mode = mode;
+                    if intercept_cancellation_frame(&bytes, &cancel_registry) {
+                        continue;
+                    }
+                    if tx.send(Ok(NextFrame::Payload { bytes, mode })).is_err() {
+                        break;
+                    }
+                }
+                Ok(frame @ NextFrame::RecoverableError { mode, .. }) => {
+                    last_mode = mode;
+                    if tx.send(Ok(frame)).is_err() {
+                        break;
+                    }
+                }
+                Ok(frame @ NextFrame::FatalError { .. }) => {
+                    let _ = tx.send(Ok(frame));
+                    break;
+                }
+                Err(err) => {
+                    let _ = tx.send(Err(err));
+                    break;
+                }
+            }
+        }
+    })?;
+
+    while let Ok(frame_res) = rx.recv() {
+        match frame_res? {
+            NextFrame::Eof => return Ok(()),
+            NextFrame::Payload { bytes, mode } => {
+                if let Some(reply_value) = dispatch_payload(&bytes, state) {
+                    write_json_value(writer, &reply_value, mode)?;
+                }
+                for notif in state.take_pending_notifications() {
+                    write_json_value(writer, &notif, mode)?;
+                }
+            }
+            NextFrame::RecoverableError { id, mode, code, message } => {
+                let resp = JsonRpcResponse::err(id, code, message, None);
+                write_response(writer, &resp, mode)?;
+            }
+            NextFrame::FatalError { id, mode, code, message } => {
+                let resp = JsonRpcResponse::err(id, code, message, None);
+                write_response(writer, &resp, mode)?;
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn intercept_cancellation_frame(bytes: &[u8], cancel_registry: &crate::tools::CancellationRegistry) -> bool {
+    let Ok(val) = serde_json::from_slice::<Value>(bytes) else {
+        return false;
+    };
+    match val {
+        Value::Object(ref obj) => {
+            if obj.get("id").is_none()
+                && obj.get("method").and_then(Value::as_str) == Some("notifications/cancelled")
+                && let Some(params) = obj.get("params")
+            {
+                if let Some(target_id) = extract_cancelled_request_id(params) {
+                    let _ = cancel_registry.cancel(target_id);
+                }
+                return true;
+            }
+            false
+        }
+        Value::Array(ref items) => {
+            for item in items {
+                if let Some(obj) = item.as_object()
+                    && obj.get("id").is_none()
+                    && obj.get("method").and_then(Value::as_str) == Some("notifications/cancelled")
+                    && let Some(params) = obj.get("params")
+                    && let Some(target_id) = extract_cancelled_request_id(params)
+                {
+                    let _ = cancel_registry.cancel(target_id);
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 /// Run the MCP server on process stdin/stdout attached to a live desktop `--control <port>` loop.
@@ -599,16 +716,126 @@ fn list_live_resources(state: &mut McpServerState) -> Result<Vec<ResourceDescrip
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn summarize_live_fitted_curve_value(curve: &Value) -> Value {
+    let Some(obj) = curve.as_object() else {
+        return curve.clone();
+    };
+    let points_count = obj.get("points").and_then(Value::as_array).map_or(0, Vec::len);
+    json!({
+        "data_set_index": obj.get("data_set_index").cloned().unwrap_or(Value::Null),
+        "equation_id": obj.get("equation_id").cloned().unwrap_or(Value::Null),
+        "converged": obj.get("converged").cloned().unwrap_or(Value::Bool(false)),
+        "ambiguous": obj.get("ambiguous").cloned().unwrap_or(Value::Bool(false)),
+        "points_count": points_count,
+        "points_omitted": true,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_live_resource_query_to_json(val: &mut Value, id_str: &str, query: &crate::resources::ResourceQuery) -> Result<(), ResourceError> {
+    let Some(obj) = val.as_object_mut() else {
+        return Ok(());
+    };
+    let include_curves = query.include_curves.unwrap_or(!query.detail_summary);
+    if !include_curves && let Some(Value::Array(curves)) = obj.get_mut("fitted_curves") {
+        for curve in curves.iter_mut() {
+            *curve = summarize_live_fitted_curve_value(curve);
+        }
+    }
+
+    if let Some(row_cap) = query.max_rows
+        && let Some(csv) = obj.get("csv_preview").and_then(Value::as_str).map(str::to_owned)
+    {
+        let mut lines = csv.lines();
+        if let Some(header) = lines.next() {
+            let mut sliced = String::from(header);
+            let mut kept = 0usize;
+            let mut truncated = false;
+            for line in lines {
+                if kept < row_cap {
+                    sliced.push('\n');
+                    sliced.push_str(line);
+                    kept += 1;
+                } else {
+                    truncated = true;
+                    break;
+                }
+            }
+            obj.insert(String::from("csv_preview"), Value::String(sliced));
+            if truncated {
+                obj.insert(String::from("csv_preview_truncated"), Value::Bool(true));
+            }
+        }
+    }
+
+    let tabs_key = if obj.get("tabs_data").is_some_and(Value::is_array) {
+        Some("tabs_data")
+    } else if obj.get("tabs").is_some_and(Value::is_array) {
+        Some("tabs")
+    } else {
+        None
+    };
+
+    if let Some(target_tab) = query.tab_id.as_deref() {
+        let available: Vec<String> = tabs_key
+            .and_then(|k| obj.get(k))
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(|t| t.get("id").and_then(Value::as_str).or_else(|| t.as_str()).map(str::to_owned)).collect())
+            .unwrap_or_default();
+        if !available.iter().any(|id| id == target_tab) {
+            return Err(ResourceError::NotFound(format!(
+                "tab_id '{target_tab}' not found on '{id_str}'; available tab_ids: {}",
+                available.join(", ")
+            )));
+        }
+        if let Some(k) = tabs_key
+            && let Some(Value::Array(arr)) = obj.get_mut(k)
+        {
+            arr.retain(|t| t.get("id").and_then(Value::as_str).or_else(|| t.as_str()) == Some(target_tab));
+        }
+    }
+
+    if let Some(row_cap) = query.max_rows
+        && let Some(k) = tabs_key
+        && let Some(Value::Array(arr)) = obj.get_mut(k)
+    {
+        let mut any_truncated = false;
+        for tab in arr.iter_mut() {
+            if let Some(tab_obj) = tab.as_object_mut() {
+                if let Some(Value::Array(rows)) = tab_obj.get_mut("rows")
+                    && rows.len() > row_cap
+                {
+                    rows.truncate(row_cap);
+                    any_truncated = true;
+                }
+                if let Some(Value::Array(labels)) = tab_obj.get_mut("row_labels")
+                    && labels.len() > row_cap
+                {
+                    labels.truncate(row_cap);
+                }
+            }
+        }
+        if any_truncated {
+            obj.insert(String::from("tabs_truncated"), Value::Bool(true));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn read_live_resource(state: &mut McpServerState, uri: &str) -> Result<Vec<ResourceContent>, ResourceError> {
     let trimmed = uri.trim();
-    if let Some(sheet_id_raw) = trimmed.strip_prefix("sheet://") {
-        let id_str = sheet_id_raw.trim();
+    if let Some(sheet_raw) = trimmed.strip_prefix("sheet://") {
+        let (id_part, query) = crate::resources::split_resource_query(sheet_raw)?;
+        let id_str = id_part.trim();
         if id_str.is_empty() {
             return Err(ResourceError::InvalidUri(String::from("sheet:// URI requires a non-empty sheet id")));
         }
         let mut val = state
             .send_live_control("doc.inspect", json!({ "sheet_id": id_str, "include_cells": true }))
             .map_err(|err| map_live_resource_error(uri, &err))?;
+        apply_live_resource_query_to_json(&mut val, id_str, &query)?;
         if let Some(obj) = val.as_object_mut() {
             obj.insert(String::from("uri"), Value::String(trimmed.to_owned()));
             if let Some(sec) = obj.get("section").and_then(Value::as_str) {
@@ -618,13 +845,15 @@ fn read_live_resource(state: &mut McpServerState, uri: &str) -> Result<Vec<Resou
         let text = serde_json::to_string_pretty(&val).map_err(|err| ResourceError::Internal(format!("resource JSON serialize failed: {err}")))?;
         return Ok(vec![ResourceContent { uri: trimmed.to_owned(), mime_type: String::from("application/json"), text }]);
     }
-    if let Some(result_id_raw) = trimmed.strip_prefix("result://") {
-        let id_str = result_id_raw.trim();
+    if let Some(result_raw) = trimmed.strip_prefix("result://") {
+        let (id_part, query) = crate::resources::split_resource_query(result_raw)?;
+        let id_str = id_part.trim();
         if id_str.is_empty() {
             return Err(ResourceError::InvalidUri(String::from("result:// URI requires a non-empty result sheet id")));
         }
         let inspect = state.send_live_control("doc.inspect", json!({ "sheet_id": id_str })).map_err(|err| map_live_resource_error(uri, &err))?;
-        let is_result = inspect.get("section").and_then(Value::as_str).is_some_and(|s| s.eq_ignore_ascii_case("results"));
+        let is_result =
+            inspect.get("section").and_then(Value::as_str).is_some_and(|s| s.eq_ignore_ascii_case("results") || s.eq_ignore_ascii_case("analyses"));
         if !is_result {
             return Err(ResourceError::NotFound(format!("resource not found: {trimmed}")));
         }
@@ -636,8 +865,17 @@ fn read_live_resource(state: &mut McpServerState, uri: &str) -> Result<Vec<Resou
             .and_then(Value::as_str)
             .ok_or_else(|| ResourceError::Internal(String::from("live doc.export response missing data_base64")))?;
         let bytes = decode_base64(b64).map_err(|err| ResourceError::Internal(format!("invalid base64 in live doc.export: {err}")))?;
-        let text = String::from_utf8(bytes).map_err(|err| ResourceError::Internal(format!("UTF-8 decode failed: {err}")))?;
-        return Ok(vec![ResourceContent { uri: trimmed.to_owned(), mime_type: String::from("application/json"), text }]);
+        let raw_text = String::from_utf8(bytes).map_err(|err| ResourceError::Internal(format!("UTF-8 decode failed: {err}")))?;
+        let include_curves = query.include_curves.unwrap_or(!query.detail_summary);
+        if include_curves && query.tab_id.is_none() && query.max_rows.is_none() {
+            return Ok(vec![ResourceContent { uri: trimmed.to_owned(), mime_type: String::from("application/json"), text: raw_text }]);
+        }
+        let mut parsed: Value =
+            serde_json::from_str(&raw_text).map_err(|err| ResourceError::Internal(format!("live result JSON parse failed: {err}")))?;
+        apply_live_resource_query_to_json(&mut parsed, id_str, &query)?;
+        let filtered_text =
+            serde_json::to_string(&parsed).map_err(|err| ResourceError::Internal(format!("resource JSON serialize failed: {err}")))?;
+        return Ok(vec![ResourceContent { uri: trimmed.to_owned(), mime_type: String::from("application/json"), text: filtered_text }]);
     }
     Err(ResourceError::InvalidUri(format!("unsupported resource URI scheme '{trimmed}'; expected sheet://<id> or result://<id>")))
 }

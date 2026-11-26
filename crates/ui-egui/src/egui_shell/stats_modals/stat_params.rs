@@ -1,8 +1,8 @@
 //! Statistical parameter modal dispatcher, dynamic test banners, and shared tabs (Design router, Range, RM, Multiplicity, Options, Diagnostics).
 
 use curvebook_doc::{
-    AnalysisKind, GlmFamily, MultiplicityMethod, MultivariateSpec, OneWayMethod, OutlierSpec, PValueFormat, RepeatedMeasuresDesign,
-    ResidualCovariance, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TwoGroupMethod,
+    AnalysisKind, GlmFamily, MultiplicityMethod, MultivariateSpec, OutlierSpec, PValueFormat, RepeatedMeasuresDesign, SumOfSquaresType,
+    SurvivalAnalysisSpec, TableArchetype, TwoGroupMethod,
 };
 use egui::{Context, CornerRadius, Key, Modifiers, Stroke, Ui, Vec2};
 
@@ -10,12 +10,13 @@ use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, EditAnalysisParametersState};
 use crate::i18n::{normalize_locale, tr};
 use crate::modal_predicates::{
-    ControlEnablement, is_reml_mixed_effects_active, r1_paired_or_matched_allowed, r1b_post_hoc_option_enabled, r1b_sphericity_correction,
-    r4_two_group_diagnostics, r9_pvalue_precision_spinner,
+    ControlEnablement, evaluate_dialog_button_for_app, evaluate_edit_params_tab, is_reml_mixed_effects_active, r1_paired_or_matched_allowed,
+    r1_sphericity_or_reml_control, r1b_post_hoc_option_enabled, r4_two_group_diagnostics, r9_pvalue_precision_spinner,
 };
 
 use crate::egui_shell::stat_anova_modal::{
-    StepperSpec, render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_modal_textbox_row, render_section_title, render_stepper_row,
+    StepperSpec, column_titles_for_draft, render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_modal_textbox_row,
+    render_section_title, render_stepper_row,
 };
 use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
@@ -312,46 +313,82 @@ pub fn render_stat_params_modal(
 ) -> StatsModalFrameReport {
     let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
         state.open_session_sheet_id = None;
+        state.numeric_field_errors.clear();
         return StatsModalFrameReport::default();
     };
     let doc = app.document();
     let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref().or_else(|| doc.result_sheet(result_sheet_id).map(|rs| &rs.analysis)) else {
         state.open_session_sheet_id = None;
+        state.numeric_field_errors.clear();
         return StatsModalFrameReport::default();
     };
+
+    // Single source of truth (`AUD-10-55`): delegate One-Way ANOVA directly to `stat_anova_modal`
+    // rather than duplicating ANOVA controls inside `render_stat_options_tab`.
+    if matches!(spec.kind, AnalysisKind::OneWayAnova(_)) {
+        let mut anova_state = crate::egui_shell::stat_anova_modal::AnovaModalEguiState {
+            active_tab: crate::egui_shell::stat_anova_modal::AnovaModalTab::from_slug(&state.active_tab).unwrap_or_default(),
+            open_session_sheet_id: state.open_session_sheet_id.clone(),
+            show_method_reference: state.show_method_reference,
+            method_saved_as_default: state.method_saved_as_default,
+            custom_title_draft: state.custom_title_draft.clone(),
+            ..Default::default()
+        };
+        let rep = crate::egui_shell::stat_anova_modal::render_one_way_anova_modal(ctx, app, &mut anova_state, tokens, meta, intents);
+        state.active_tab = anova_state.active_tab.slug().to_owned();
+        state.open_session_sheet_id = anova_state.open_session_sheet_id;
+        state.show_method_reference = anova_state.show_method_reference;
+        state.method_saved_as_default = anova_state.method_saved_as_default;
+        state.custom_title_draft = anova_state.custom_title_draft;
+        state.last_resolved_banner.clone_from(&rep.resolved_test_banner);
+        return StatsModalFrameReport {
+            modal_open: rep.modal_open,
+            dialog_rect_pt: rep.dialog_rect_pt,
+            outside_click_captured: rep.outside_click_captured,
+            outside_wheel_captured: rep.outside_wheel_captured,
+            resolved_test_banner: rep.resolved_test_banner,
+        };
+    }
 
     let locale = normalize_locale(&app.locale);
     let (header_title, banner) = resolve_stat_params_banner(app, spec);
     state.last_resolved_banner.clone_from(&banner);
     let tabs = tabs_for_spec(app, spec, locale);
     let ep = &app.canvas_dialogs.edit_params;
+    let first_enabled_tab = tabs.iter().find(|t| evaluate_edit_params_tab(ep, t.slug).enabled).map_or(tabs[0].slug, |t| t.slug);
+    let spec_key = super::saved_default_kind_key(&spec.kind);
 
     // Sync active tab and transient input drafts cleanly when opening or switching sheets
     if state.open_session_sheet_id.as_deref() != Some(result_sheet_id.as_str()) {
         state.open_session_sheet_id = Some(result_sheet_id.as_str().to_owned());
-        state.active_tab = tabs.iter().find(|t| t.slug == ep.active_tab).map_or(tabs[0].slug, |t| t.slug).to_owned();
+        state.open_generation = state.open_generation.wrapping_add(1);
+        state.numeric_field_errors.clear();
+        let initial_tab =
+            tabs.iter().find(|t| t.slug == ep.active_tab && evaluate_edit_params_tab(ep, t.slug).enabled).map_or(first_enabled_tab, |t| t.slug);
+        state.active_tab = initial_tab.to_owned();
         state.show_method_reference = false;
         let is_create_session = doc.result_sheet(result_sheet_id).is_none();
-        if is_create_session
-            && let Some(saved) = state.saved_defaults.iter().find(|d| std::mem::discriminant(&d.kind) == std::mem::discriminant(&spec.kind))
-        {
+        let mut effective_spec = spec.clone();
+        if is_create_session && let Some(saved) = state.saved_defaults.iter().find(|d| super::saved_default_kind_key(&d.kind) == spec_key) {
             let mut applied = saved.clone();
+            applied.id = spec.id.clone();
             applied.source_sheet_id = spec.source_sheet_id.clone();
             applied.selected_data_sets.clone_from(&spec.selected_data_sets);
             applied.custom_title.clone_from(&spec.custom_title);
             if applied != *spec {
-                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(applied) });
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(applied.clone()) });
             }
+            effective_spec = applied;
             state.method_saved_as_default = true;
         } else {
             state.method_saved_as_default = state.saved_defaults.iter().any(|saved| {
-                std::mem::discriminant(&saved.kind) == std::mem::discriminant(&spec.kind)
+                super::saved_default_kind_key(&saved.kind) == spec_key
                     && saved.kind == spec.kind
                     && saved.confidence_level == spec.confidence_level
                     && saved.p_value_format == spec.p_value_format
             });
         }
-        if let AnalysisKind::LinearRegression(lin) = &spec.kind {
+        if let AnalysisKind::LinearRegression(lin) = &effective_spec.kind {
             let (lo, hi) = lin.x_range_filter.unwrap_or_default();
             state.lin_x_min_draft = lo.map_or_else(String::new, |v| format!("{v}"));
             state.lin_x_max_draft = hi.map_or_else(String::new, |v| format!("{v}"));
@@ -365,16 +402,16 @@ pub fn render_stat_params_modal(
             state.lin_plot_max_draft.clear();
             state.lin_segments_draft.clear();
         }
-        state.custom_title_draft = spec.custom_title.as_deref().unwrap_or("").to_owned();
+        state.custom_title_draft = effective_spec.custom_title.as_deref().unwrap_or("").to_owned();
     } else {
         state.method_saved_as_default = state.saved_defaults.iter().any(|saved| {
-            std::mem::discriminant(&saved.kind) == std::mem::discriminant(&spec.kind)
+            super::saved_default_kind_key(&saved.kind) == spec_key
                 && saved.kind == spec.kind
                 && saved.confidence_level == spec.confidence_level
                 && saved.p_value_format == spec.p_value_format
         });
-        if !tabs.iter().any(|t| t.slug == state.active_tab) {
-            state.active_tab = tabs[0].slug.to_owned();
+        if !tabs.iter().any(|t| t.slug == state.active_tab) || !evaluate_edit_params_tab(ep, &state.active_tab).enabled {
+            state.active_tab = first_enabled_tab.to_owned();
         }
         let spec_title = spec.custom_title.as_deref().unwrap_or("");
         if !ctx.egui_wants_keyboard_input() && state.custom_title_draft != spec_title {
@@ -384,6 +421,8 @@ pub fn render_stat_params_modal(
 
     let is_create_mode = doc.result_sheet(result_sheet_id).is_none();
     let ok_lbl = if is_create_mode { tr(locale, "anova.run_analysis") } else { tr(locale, "btn.ok") };
+    let base_ok_en = evaluate_dialog_button_for_app(app, "ok").unwrap_or_else(ControlEnablement::enabled);
+    let base_apply_en = evaluate_dialog_button_for_app(app, "apply").unwrap_or_else(|| base_ok_en.clone());
     let wants_kb_before = ctx.egui_wants_keyboard_input();
 
     let mut report = StatsModalFrameReport::from(show_wave4_modal(
@@ -478,28 +517,34 @@ pub fn render_stat_params_modal(
                     state.method_saved_as_default,
                     &ControlEnablement::enabled(),
                 ) {
-                    let disc = std::mem::discriminant(&spec.kind);
-                    state.saved_defaults.retain(|d| std::mem::discriminant(&d.kind) != disc);
+                    let key = super::saved_default_kind_key(&spec.kind);
+                    state.saved_defaults.retain(|d| super::saved_default_kind_key(&d.kind) != key);
                     state.saved_defaults.push(spec.clone());
                     state.method_saved_as_default = true;
-                    intents.push(UiIntent::SaveEditParamsAsDefault);
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("__save_edit_params_default") });
                 }
+                let first_num_err = state.numeric_field_errors.values().next().cloned();
+                let ok_en = if !base_ok_en.enabled {
+                    base_ok_en.clone()
+                } else if let Some(err) = first_num_err.clone() {
+                    ControlEnablement::disabled(err)
+                } else {
+                    ControlEnablement::enabled()
+                };
+                let apply_en = if !base_apply_en.enabled {
+                    base_apply_en.clone()
+                } else if let Some(err) = first_num_err {
+                    ControlEnablement::disabled(err)
+                } else {
+                    ControlEnablement::enabled()
+                };
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if render_modal_action_button(ui, tokens, meta, "modal.ok", ok_lbl, true, false, &ControlEnablement::enabled()) {
+                    if render_modal_action_button(ui, tokens, meta, "modal.ok", ok_lbl, true, false, &ok_en) {
                         intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                     }
                     if !is_create_mode
                         && doc.result_sheet(result_sheet_id).is_some()
-                        && render_modal_action_button(
-                            ui,
-                            tokens,
-                            meta,
-                            "modal.apply",
-                            tr(locale, "anova.update_analysis"),
-                            false,
-                            false,
-                            &ControlEnablement::enabled(),
-                        )
+                        && render_modal_action_button(ui, tokens, meta, "modal.apply", tr(locale, "anova.update_analysis"), false, false, &apply_en)
                     {
                         intents.push(UiIntent::DialogButtonAction { action: String::from("apply") });
                     }
@@ -521,13 +566,18 @@ pub fn render_stat_params_modal(
     ));
 
     // Keyboard navigation: Ctrl+Tab/Ctrl+PageDown/Up between enabled tabs, Escape/Enter
+    let enter_ok_enabled = base_ok_en.enabled && state.numeric_field_errors.is_empty();
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         if state.show_method_reference {
             state.show_method_reference = false;
         } else {
             intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
         }
-    } else if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+    } else if !wants_kb_before
+        && !ctx.egui_wants_keyboard_input()
+        && enter_ok_enabled
+        && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+    {
         intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab) || i.consume_key(Modifiers::CTRL, Key::PageDown)) {
         step_stat_tab(ep, &tabs, state, 1, intents);
@@ -584,9 +634,9 @@ fn render_stat_params_tab_body(
         "range" => render_linear_range_tab(ui, state, spec, tokens, meta, intents),
         "repeated_measures" => render_stat_rm_tab(ui, app, ep, spec, tokens, meta, intents),
         "multiple_comparisons" => render_stat_multiplicity_tab(ui, app, ep, spec, tokens, meta, intents),
-        "options" => render_stat_options_tab(ui, ep, spec, tokens, meta, intents),
+        "options" => render_stat_options_tab(ui, spec, tokens, meta, intents),
         "diagnostics" => render_stat_diagnostics_tab(ui, app, spec, tokens, meta, intents),
-        _ => render_stat_design_tab(ui, app, ep, spec, tokens, meta, intents),
+        _ => render_stat_design_tab(ui, app, state, ep, spec, tokens, meta, intents),
     }
 }
 
@@ -660,9 +710,11 @@ fn render_linear_range_tab(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_stat_design_tab(
     ui: &mut Ui,
     app: &UiApp,
+    state: &mut StatsModalsEguiState,
     ep: &EditAnalysisParametersState,
     spec: &curvebook_doc::AnalysisSpec,
     tokens: &Tokens,
@@ -709,7 +761,7 @@ fn render_stat_design_tab(
         AnalysisKind::Multivariate(mv) => {
             render_multivariate_design_controls(ui, MultivariateDesignCtx { doc, ep, spec, mv }, tokens, meta, intents);
         }
-        _ => render_misc_stats_design(ui, doc, spec, tokens, meta, intents),
+        _ => render_misc_stats_design(ui, app, state, spec, tokens, meta, intents),
     }
 }
 
@@ -723,6 +775,7 @@ fn render_stat_rm_tab(
     intents: &mut PendingUiIntents,
 ) {
     let reml_active = is_reml_mixed_effects_active(ep, app.document());
+    let reml_ctrl_en = r1_sphericity_or_reml_control(ep.paired_or_matched);
     match &spec.kind {
         AnalysisKind::FactorialAnova(f) => {
             render_section_title(ui, tokens, "Repeated-Measures Matching Axis");
@@ -740,6 +793,11 @@ fn render_stat_rm_tab(
                     intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
+            let reml_chk_en = if reml_active && !f.mixed_effects_reml {
+                ControlEnablement::disabled("Mixed-Effects REML is automatically required by incomplete RM blocks or unstructured covariance.")
+            } else {
+                reml_ctrl_en.clone()
+            };
             if render_modal_checkbox(
                 ui,
                 tokens,
@@ -747,7 +805,7 @@ fn render_stat_rm_tab(
                 "edit.rm.mixed_effects_reml",
                 "Fit Mixed-Effects REML (handles missing cells)",
                 f.mixed_effects_reml || reml_active,
-                &ControlEnablement::enabled(),
+                &reml_chk_en,
             ) {
                 let mut next = spec.clone();
                 if let AnalysisKind::FactorialAnova(fa) = &mut next.kind {
@@ -755,8 +813,8 @@ fn render_stat_rm_tab(
                 }
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
-            render_df_method_picker(ui, spec, f.df_method, tokens, meta, intents);
-            render_cov_structure_picker(ui, spec, f.residual_covariance, tokens, meta, intents);
+            render_df_method_picker(ui, spec, f.df_method, &reml_ctrl_en, tokens, meta, intents);
+            render_cov_structure_picker(ui, spec, f.residual_covariance, &reml_ctrl_en, tokens, meta, intents);
         }
         AnalysisKind::TwoGroupComparison(_) => {
             let paired_en = r1_paired_or_matched_allowed(app.document(), Some(&spec.source_sheet_id));
@@ -794,19 +852,32 @@ fn render_stat_multiplicity_tab(
         AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity.method,
         _ => MultiplicityMethod::None,
     };
+    let is_row_t = matches!(spec.kind, AnalysisKind::MultipleRowTTests(_));
+    let default_ctrl_col = match cur {
+        MultiplicityMethod::Dunnett { control_column } => control_column,
+        _ => spec.selected_data_sets.first().copied().unwrap_or(ep.control_column),
+    };
     render_section_title(ui, tokens, "Multiplicity Adjustment / Post-Hoc Method");
     for (slug, lbl, m) in [
         ("tukey", "Tukey HSD (all-pairs)", MultiplicityMethod::TukeyHsd),
         ("bonferroni", "Bonferroni (FWER)", MultiplicityMethod::Bonferroni),
         ("sidak", "Sidak (FWER)", MultiplicityMethod::Sidak),
         ("holm_sidak", "Holm-Sidak (step-down FWER)", MultiplicityMethod::HolmSidak),
-        ("dunnett", "Dunnett (compare vs. control)", MultiplicityMethod::Dunnett { control_column: ep.control_column }),
+        ("dunnett", "Dunnett (compare vs. control)", MultiplicityMethod::Dunnett { control_column: default_ctrl_col }),
         ("bh", "Benjamini-Hochberg (FDR)", MultiplicityMethod::BenjaminiHochbergFdr),
         ("bky", "Two-Stage BKY (adaptive FDR)", MultiplicityMethod::TwoStageBkyFdr),
         ("none", "None (uncorrected)", MultiplicityMethod::None),
     ] {
-        let en = r1b_post_hoc_option_enabled(ep.assume_gaussian, reml_active, m);
-        if render_modal_radio(ui, tokens, meta, &format!("edit.post_hoc.{slug}"), lbl, cur == m, &en) {
+        let en = if is_row_t && matches!(m, MultiplicityMethod::TukeyHsd | MultiplicityMethod::Dunnett { .. }) {
+            ControlEnablement::disabled("Multiple Row t-Tests support Bonferroni, Sidak, Holm-Sidak, BH/BKY FDR, or None.")
+        } else {
+            r1b_post_hoc_option_enabled(ep.assume_gaussian, reml_active, m)
+        };
+        let is_active = match (cur, m) {
+            (MultiplicityMethod::Dunnett { .. }, MultiplicityMethod::Dunnett { .. }) => true,
+            _ => cur == m,
+        };
+        if render_modal_radio(ui, tokens, meta, &format!("edit.post_hoc.{slug}"), lbl, is_active, &en) {
             let mut next = spec.clone();
             match &mut next.kind {
                 AnalysisKind::FactorialAnova(f) => f.multiplicity.method = m,
@@ -818,11 +889,40 @@ fn render_stat_multiplicity_tab(
             intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     }
+    if let MultiplicityMethod::Dunnett { control_column } = cur {
+        let titles = column_titles_for_draft(app.document(), Some(&spec.source_sheet_id));
+        if !titles.is_empty() {
+            ui.add_space(6.0);
+            render_section_title(ui, tokens, "Dunnett Control Group Column");
+            ui.horizontal_wrapped(|ui| {
+                for (ci, col_title) in titles.iter().enumerate() {
+                    if render_modal_seg_btn(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("edit.post_hoc.control_col.{ci}"),
+                        col_title,
+                        control_column == ci,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        let mut next = spec.clone();
+                        let updated = MultiplicityMethod::Dunnett { control_column: ci };
+                        match &mut next.kind {
+                            AnalysisKind::FactorialAnova(f) => f.multiplicity.method = updated,
+                            AnalysisKind::NestedComparison(n) => n.multiplicity.method = updated,
+                            AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity.method = updated,
+                            _ => {}
+                        }
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                    }
+                }
+            });
+        }
+    }
 }
 
 fn render_stat_options_tab(
     ui: &mut Ui,
-    ep: &EditAnalysisParametersState,
     spec: &curvebook_doc::AnalysisSpec,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
@@ -869,15 +969,6 @@ fn render_stat_options_tab(
     );
     if step != 0 {
         intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::StepPValueDigits { delta: i32::from(step) }));
-    }
-
-    if let AnalysisKind::OneWayAnova(a) = &spec.kind {
-        let reml_active = a.mixed_effects_reml || a.residual_covariance == ResidualCovariance::Unstructured;
-        let sph = r1b_sphericity_correction(ep.paired_or_matched, reml_active);
-        let gg_checked = !matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false });
-        if render_modal_checkbox(ui, tokens, meta, "edit.sphericity.geisser_greenhouse", "Geisser-Greenhouse", gg_checked, &sph) {
-            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.sphericity.geisser_greenhouse") });
-        }
     }
 }
 
@@ -926,15 +1017,8 @@ fn render_stat_diagnostics_tab(
             }
         }
         AnalysisKind::LinearRegression(lin) => {
-            if render_modal_checkbox(
-                ui,
-                tokens,
-                meta,
-                "edit.lin.conf_bands",
-                "Plot 95% confidence bands",
-                lin.confidence_bands,
-                &ControlEnablement::enabled(),
-            ) {
+            let conf_band_lbl = format!("Plot {:.0}% confidence bands", spec.confidence_level.percent());
+            if render_modal_checkbox(ui, tokens, meta, "edit.lin.conf_bands", &conf_band_lbl, lin.confidence_bands, &ControlEnablement::enabled()) {
                 let mut next = spec.clone();
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                     l.confidence_bands = !lin.confidence_bands;

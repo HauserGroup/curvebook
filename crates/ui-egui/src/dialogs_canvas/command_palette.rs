@@ -341,7 +341,11 @@ fn build_default_params(command_id: &str, session: Option<&Session>) -> Value {
             }
         }
         "ui.canvas.applyPreset" | "graph.applyCanvasPreset" | "layout.applyCanvasPreset" => {
-            let target = if command_id == "layout.applyCanvasPreset" { active_layout } else { active_renderable };
+            let target = match command_id {
+                "graph.applyCanvasPreset" => active_graph,
+                "layout.applyCanvasPreset" => active_layout,
+                _ => active_renderable,
+            };
             if let Some(id) = target {
                 obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
             }

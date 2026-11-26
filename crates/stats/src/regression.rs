@@ -234,6 +234,45 @@ pub struct MultiplePoissonResult {
 // Multiple Linear Regression (OLS via QR/SVD)
 // ============================================================================
 
+fn compute_ols_residuals_and_dw(x: &DenseMatrix, y: &[f64], coefficients: &[f64]) -> (Vec<f64>, Vec<f64>, f64, f64) {
+    let n = y.len();
+    let mut fitted = Vec::with_capacity(n);
+    let mut residuals = Vec::with_capacity(n);
+    let mut dw_den_acc = NeumaierSum::new();
+    let mut max_term_scale = 0.0_f64;
+    for (r, &yr) in y.iter().enumerate() {
+        max_term_scale = max_term_scale.max(yr.abs());
+        let mut main = NeumaierSum::new();
+        let mut err = NeumaierSum::new();
+        main.add(yr);
+        for (c, &b) in coefficients.iter().enumerate() {
+            let xrc = x.get(r, c).unwrap_or(0.0);
+            let neg_x = -xrc;
+            let prod = neg_x * b;
+            max_term_scale = max_term_scale.max(prod.abs());
+            main.add(prod);
+            err.add(neg_x.mul_add(b, -prod));
+        }
+        let res_r = main.total() + err.total();
+        fitted.push(yr - res_r);
+        residuals.push(res_r);
+        dw_den_acc.add(res_r * res_r);
+    }
+
+    // Durbin & Watson (1950, Biometrika 37:409-428) autocorrelation statistic evaluated on the
+    // self-consistent Dot2 residual vector, returning 2.0 on exact fits at the machine noise floor.
+    let mut dw_num_acc = NeumaierSum::new();
+    for i in 1..n {
+        let d = residuals[i] - residuals[i - 1];
+        dw_num_acc.add(d * d);
+    }
+    let dw_num = dw_num_acc.total().max(0.0);
+    let dw_den = dw_den_acc.total().max(0.0);
+    let exact_fit_floor = (n as f64) * (64.0 * f64::EPSILON * max_term_scale).powi(2);
+    let durbin_watson = if dw_den > exact_fit_floor { (dw_num / dw_den).clamp(0.0, 4.0) } else { 2.0 };
+    (fitted, residuals, durbin_watson, exact_fit_floor)
+}
+
 /// Fit Ordinary Least Squares multiple linear regression on design matrix `x` (`n x p`,
 /// where column `0` is `1.0` if `has_intercept == true`) and response vector `y`.
 ///
@@ -283,10 +322,10 @@ pub fn multiple_linear_regression(
     let ss_reg = (ss_total - rss).max(0.0);
     let df_model_f = if has_intercept { rank.saturating_sub(1) as f64 } else { rank as f64 };
     let r_squared = if ss_total > 0.0 { (1.0 - rss / ss_total).clamp(0.0, 1.0) } else { 0.0 };
-    let adj_r2 = if has_intercept && n > rank {
-        1.0 - (rss / df_resid_f) / (ss_total / ((n - 1) as f64)).max(1e-30)
-    } else if !has_intercept && n > rank {
-        1.0 - (rss / df_resid_f) / (ss_total / (n as f64)).max(1e-30)
+    let adj_r2 = if ss_total > 0.0 && n > rank {
+        let denom_df = if has_intercept { (n - 1) as f64 } else { n as f64 };
+        let ms_tot = if denom_df > 0.0 { ss_total / denom_df } else { 0.0 };
+        if ms_tot > 0.0 { 1.0 - (rss / df_resid_f) / ms_tot } else { r_squared }
     } else {
         r_squared
     };
@@ -300,48 +339,8 @@ pub fn multiple_linear_regression(
         (0.0, 1.0)
     };
 
-    // Fitted values & residuals using FMA-compensated Dot2 evaluation (Ogita, Rump & Oishi 2005)
-    // matching `solve_linear_least_squares` so large-magnitude exact fits (e.g. NIST Wampler1/2)
-    // do not suffer catastrophic cancellation in `y - X * beta`.
-    let mut fitted = Vec::with_capacity(n);
-    let mut residuals = Vec::with_capacity(n);
-    let mut dw_den_acc = NeumaierSum::new();
-    let mut max_term_scale = 0.0_f64;
-    for (r, &yr) in y.iter().enumerate() {
-        max_term_scale = max_term_scale.max(yr.abs());
-        let mut main = NeumaierSum::new();
-        let mut err = NeumaierSum::new();
-        main.add(yr);
-        for (c, &b) in sol.coefficients.iter().enumerate() {
-            let xrc = x.get(r, c).unwrap_or(0.0);
-            let neg_x = -xrc;
-            let prod = neg_x * b;
-            max_term_scale = max_term_scale.max(prod.abs());
-            main.add(prod);
-            err.add(neg_x.mul_add(b, -prod));
-        }
-        let res_r = main.total() + err.total();
-        fitted.push(yr - res_r);
-        residuals.push(res_r);
-        dw_den_acc.add(res_r * res_r);
-    }
-
-    // Durbin & Watson (1950, Biometrika 37:409-428) autocorrelation statistic evaluated on the
-    // self-consistent Dot2 residual vector, returning 2.0 on exact fits at the machine noise floor.
-    let mut dw_num_acc = NeumaierSum::new();
-    for i in 1..n {
-        let d = residuals[i] - residuals[i - 1];
-        dw_num_acc.add(d * d);
-    }
-    let dw_num = dw_num_acc.total().max(0.0);
-    let dw_den = dw_den_acc.total().max(0.0);
-    let exact_fit_floor = (n as f64) * (64.0 * f64::EPSILON * max_term_scale).powi(2);
-    let durbin_watson = if dw_den > exact_fit_floor && dw_num > 0.0 {
-        let raw_dw = dw_num / dw_den;
-        if raw_dw > 0.0 && raw_dw < 4.0 { raw_dw } else { 2.0 }
-    } else {
-        2.0
-    };
+    // Fitted values, residuals (FMA-compensated Dot2; Ogita, Rump & Oishi 2005), and Durbin–Watson (1950).
+    let (fitted, residuals, durbin_watson, exact_fit_floor) = compute_ols_residuals_and_dw(x, y, &sol.coefficients);
 
     // Leverage h_i = x_i^T (X^T X)^+ x_i and Cook's distance D_i.
     let mut leverage = Vec::with_capacity(n);
@@ -606,7 +605,7 @@ fn has_logistic_separation(x: &DenseMatrix, y_binary: &[f64], dir: &[f64]) -> bo
     (min_1 >= max_0 - tol && max_1 > min_0 + tol) || (min_0 >= max_1 - tol && max_0 > min_1 + tol)
 }
 
-fn standardize_logistic_design(x: &DenseMatrix) -> Result<(DenseMatrix, Vec<f64>, Vec<f64>, bool), StatsError> {
+fn standardize_glm_design(x: &DenseMatrix) -> Result<(DenseMatrix, Vec<f64>, Vec<f64>, bool), StatsError> {
     let n = x.nrows();
     let p = x.ncols();
     let nf = n as f64;
@@ -618,16 +617,36 @@ fn standardize_logistic_design(x: &DenseMatrix) -> Result<(DenseMatrix, Vec<f64>
         let col: Vec<f64> = (0..n).map(|r| x.get(r, j).unwrap_or(0.0)).collect();
         if has_const_intercept {
             let mom = SummaryMoments::from_slice(&col)?;
-            let sd = (mom.css / nf).sqrt();
+            let max_dev = col.iter().map(|&v| (v - mom.mean).abs()).fold(0.0_f64, f64::max);
+            let sd = if max_dev > 0.0 {
+                let ss_scaled: f64 = col
+                    .iter()
+                    .map(|&v| {
+                        let d = (v - mom.mean) / max_dev;
+                        d * d
+                    })
+                    .sum();
+                max_dev * (ss_scaled / nf).sqrt()
+            } else {
+                0.0
+            };
             means[j] = mom.mean;
-            scales[j] = if sd.is_finite() && sd > 1.0e-15 { sd } else { 1.0 };
+            scales[j] = if sd.is_finite() && sd > 0.0 { sd } else { 1.0 };
         } else {
-            let mut ss = NeumaierSum::new();
-            for &v in &col {
-                ss.add(v * v);
-            }
-            let rms = (ss.total() / nf).sqrt();
-            scales[j] = if rms.is_finite() && rms > 1.0e-15 { rms } else { 1.0 };
+            let max_abs = col.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max);
+            let rms = if max_abs > 0.0 {
+                let ss_scaled: f64 = col
+                    .iter()
+                    .map(|&v| {
+                        let d = v / max_abs;
+                        d * d
+                    })
+                    .sum();
+                max_abs * (ss_scaled / nf).sqrt()
+            } else {
+                0.0
+            };
+            scales[j] = if rms.is_finite() && rms > 0.0 { rms } else { 1.0 };
         }
     }
     let mut z_flat = Vec::with_capacity(n * p);
@@ -639,6 +658,50 @@ fn standardize_logistic_design(x: &DenseMatrix) -> Result<(DenseMatrix, Vec<f64>
     }
     let z_mat = DenseMatrix::from_row_major(n, p, z_flat)?;
     Ok((z_mat, means, scales, has_const_intercept))
+}
+
+fn transform_cov_from_standardized(cov_z: &DenseMatrix, means: &[f64], scales: &[f64], has_const_intercept: bool) -> Result<DenseMatrix, StatsError> {
+    let p = cov_z.nrows();
+    // Jacobian J mapping standardized beta_z to raw beta = J * beta_z:
+    // J[j, j] = 1 / scales[j]; if has_const_intercept, J[0, j] = -means[j] / scales[j] (j >= 1).
+    let mut tmp = vec![0.0_f64; p * p];
+    for col in 0..p {
+        if has_const_intercept && p > 0 {
+            let mut acc = cov_z.get(0, col).unwrap_or(0.0);
+            for j in 1..p {
+                acc -= (means[j] / scales[j]) * cov_z.get(j, col).unwrap_or(0.0);
+            }
+            tmp[col] = acc;
+        } else if p > 0 {
+            tmp[col] = cov_z.get(0, col).unwrap_or(0.0) / scales[0];
+        }
+        for row in 1..p {
+            tmp[row * p + col] = cov_z.get(row, col).unwrap_or(0.0) / scales[row];
+        }
+    }
+    let mut out = vec![0.0_f64; p * p];
+    for row in 0..p {
+        if has_const_intercept && p > 0 {
+            let mut acc = tmp[row * p];
+            for k in 1..p {
+                acc -= tmp[row * p + k] * (means[k] / scales[k]);
+            }
+            out[row * p] = acc;
+        } else if p > 0 {
+            out[row * p] = tmp[row * p] / scales[0];
+        }
+        for col in 1..p {
+            out[row * p + col] = tmp[row * p + col] / scales[col];
+        }
+    }
+    for i in 0..p {
+        for j in (i + 1)..p {
+            let sym = 0.5 * (out[i * p + j] + out[j * p + i]);
+            out[i * p + j] = sym;
+            out[j * p + i] = sym;
+        }
+    }
+    Ok(DenseMatrix::from_row_major(p, p, out)?)
 }
 
 fn center_logistic_design(x: &DenseMatrix, means: &[f64], has_const_intercept: bool) -> Result<DenseMatrix, StatsError> {
@@ -750,41 +813,51 @@ fn run_logistic_irls_solver(x: &DenseMatrix, y_binary: &[f64], beta: &mut [f64],
     Ok((converged, cholesky_failed))
 }
 
-fn logistic_irls_loop(x: &DenseMatrix, y_binary: &[f64], beta: &mut [f64]) -> Result<(bool, bool), StatsError> {
-    let p = beta.len();
-    let (z_mat, means, scales, has_const_intercept) = standardize_logistic_design(x)?;
-    let mut beta_z = vec![0.0_f64; p];
-    if has_const_intercept && p > 0 {
-        beta_z[0] = beta[0];
-    }
+fn logistic_irls_loop(
+    x: &DenseMatrix,
+    z_mat: &DenseMatrix,
+    means: &[f64],
+    scales: &[f64],
+    has_const_intercept: bool,
+    y_binary: &[f64],
+    beta_z: &mut [f64],
+) -> Result<(Vec<f64>, bool, bool), StatsError> {
+    let p = beta_z.len();
+    let init_b0 = if has_const_intercept && p > 0 { beta_z[0] } else { 0.0 };
 
     // Phase 1: Pure unpenalized IRLS on affine-standardized coordinates so predictor unit
     // rescaling cannot trigger spurious separation or ridge bias on well-specified fits.
-    let (p1_converged, p1_chol_failed) = run_logistic_irls_solver(&z_mat, y_binary, &mut beta_z, 0.0, 60)?;
-    let beta_p1 = uncenter_beta(&beta_z, &means, &scales, has_const_intercept);
-    let (_, p1_probs, _) = eval_logistic_ll(x, y_binary, &beta_p1, 0.0);
-    let probs_saturated = p1_probs.iter().all(|&pr| pr < 1.0e-4 || pr > 1.0 - 1.0e-4);
+    let (p1_converged, p1_chol_failed) = run_logistic_irls_solver(z_mat, y_binary, beta_z, 0.0, 60)?;
+    let (_, p1_probs, _) = eval_logistic_ll(z_mat, y_binary, beta_z, 0.0);
+    // Only treat fitted probabilities as saturated separation when every event is near 1 AND
+    // every non-event is near 0 (true perfect classification, not low/high base prevalence).
+    let probs_saturated = p1_probs.iter().zip(y_binary.iter()).all(|(&pr, &yv)| if yv == 1.0 { pr > 1.0 - 1.0e-4 } else { pr < 1.0e-4 });
     let start = usize::from(has_const_intercept);
     let std_slope_diverged = beta_z.iter().skip(start).any(|b| b.abs() > 25.0);
-    let separated = p1_chol_failed || std_slope_diverged || probs_saturated || has_logistic_separation(&z_mat, y_binary, &beta_z);
+    let separated = p1_chol_failed || std_slope_diverged || probs_saturated || has_logistic_separation(z_mat, y_binary, beta_z);
 
     if !separated {
-        beta.copy_from_slice(&beta_p1);
-        return Ok((p1_converged, false));
+        let beta_p1 = uncenter_beta(beta_z, means, scales, has_const_intercept);
+        return Ok((beta_p1, p1_converged, false));
     }
 
     // Phase 2: Separation confirmed geometrically or by Fisher collapse — solve penalized IRLS
     // on centered predictors and report unpenalized non-convergence alongside the safeguard flag.
-    let c_mat = center_logistic_design(x, &means, has_const_intercept)?;
+    let c_mat = center_logistic_design(x, means, has_const_intercept)?;
     let mut beta_c = vec![0.0_f64; p];
     if has_const_intercept && p > 0 {
-        beta_c[0] = beta[0];
+        beta_c[0] = init_b0;
     }
     let _ = run_logistic_irls_solver(&c_mat, y_binary, &mut beta_c, 1.0e-2, 60)?;
     let unit_scales = vec![1.0_f64; p];
-    let beta_p2 = uncenter_beta(&beta_c, &means, &unit_scales, has_const_intercept);
-    beta.copy_from_slice(&beta_p2);
-    Ok((false, true))
+    let beta_p2 = uncenter_beta(&beta_c, means, &unit_scales, has_const_intercept);
+    if has_const_intercept && p > 0 {
+        beta_z[0] = beta_c[0];
+    }
+    for j in start..p {
+        beta_z[j] = beta_c[j] * scales[j];
+    }
+    Ok((beta_p2, false, true))
 }
 
 /// Fit binary Multiple Logistic Regression (`y in {0, 1}`) via IRLS Newton–Raphson with
@@ -820,9 +893,10 @@ pub fn multiple_logistic_regression(
     if n_events == 0 || n_events == n {
         return Err(StatsError::InvalidParameter { name: "logistic_events", value: n_events as f64 });
     }
-    let x_rank = svd(x)?.rank();
-    if x_rank < p {
-        return Err(StatsError::Math(curvebook_math::MathError::SingularMatrix { rank: x_rank, expected_rank: p }));
+    let (z_mat, means, scales, has_const_intercept) = standardize_glm_design(x)?;
+    let z_rank = svd(&z_mat)?.rank();
+    if z_rank < p {
+        return Err(StatsError::Math(curvebook_math::MathError::SingularMatrix { rank: z_rank, expected_rank: p }));
     }
 
     let nf = n as f64;
@@ -830,33 +904,36 @@ pub fn multiple_logistic_regression(
     let ll_null = (n_events as f64) * p_bar.ln() + ((n - n_events) as f64) * (1.0 - p_bar).ln();
     let dev_null = -2.0 * ll_null;
     let w_null = p_bar * (1.0 - p_bar);
-    let diag_null = fisher_null_diagonal(x, w_null);
+    let diag_null_z = fisher_null_diagonal(&z_mat, w_null);
 
-    let mut beta = vec![0.0_f64; p];
-    beta[0] = (p_bar / (1.0 - p_bar)).ln();
-    let (converged, separation_detected) = logistic_irls_loop(x, y_binary, &mut beta)?;
+    let mut beta_z = vec![0.0_f64; p];
+    if has_const_intercept {
+        beta_z[0] = (p_bar / (1.0 - p_bar)).ln();
+    }
+    let (beta, converged, separation_detected) = logistic_irls_loop(x, &z_mat, &means, &scales, has_const_intercept, y_binary, &mut beta_z)?;
 
-    // Recompute unpenalized log-likelihood & Fisher information covariance matrix I(beta)^{-1}
-    // (McCullagh & Nelder 1989, §2.5 & §4.3; Albert & Anderson 1984). Never substitute an
-    // identity covariance when I(beta) is singular or separated beyond identifiability.
-    let (ll_unpen, probs_final, _weights_final) = eval_logistic_ll(x, y_binary, &beta, 0.0);
-    let mut info_final = vec![0.0_f64; p * p];
+    // Recompute unpenalized log-likelihood & Fisher information covariance matrix I_z(theta)^{-1}
+    // in standardized coordinates (McCullagh & Nelder 1989, §2.5 & §4.3; Albert & Anderson 1984)
+    // and back-transform Cov(beta) = J I_z^{-1} J^T so shifted predictors never fail conditioning.
+    let (ll_unpen, probs_final, _weights_final) = eval_logistic_ll(&z_mat, y_binary, &beta_z, 0.0);
+    let mut info_z_final = vec![0.0_f64; p * p];
     for (r, &pr) in probs_final.iter().enumerate() {
         let wr = (pr * (1.0 - pr)).max(0.0);
         for j in 0..p {
-            let xrj = x.get(r, j).unwrap_or(0.0);
+            let zrj = z_mat.get(r, j).unwrap_or(0.0);
             for k in j..p {
-                info_final[j * p + k] += wr * xrj * x.get(r, k).unwrap_or(0.0);
+                info_z_final[j * p + k] += wr * zrj * z_mat.get(r, k).unwrap_or(0.0);
             }
         }
     }
     for j in 0..p {
         for k in 0..j {
-            info_final[j * p + k] = info_final[k * p + j];
+            info_z_final[j * p + k] = info_z_final[k * p + j];
         }
     }
-    let info_mat = DenseMatrix::from_row_major(p, p, info_final)?;
-    let cov_beta = invert_glm_fisher_information(&info_mat, &diag_null, 1e-8)?;
+    let info_z_mat = DenseMatrix::from_row_major(p, p, info_z_final)?;
+    let cov_z = invert_glm_fisher_information(&info_z_mat, &diag_null_z, 1e-8)?;
+    let cov_beta = transform_cov_from_standardized(&cov_z, &means, &scales, has_const_intercept)?;
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
     let vifs = if compute_vif { compute_vifs_from_matrix(x, true, &vec![false; p]) } else { vec![None; p] };
@@ -1078,9 +1155,10 @@ pub fn multiple_poisson_regression(
             return Err(StatsError::InvalidParameter { name: "poisson_y", value: yc });
         }
     }
-    let x_rank = svd(x)?.rank();
-    if x_rank < p {
-        return Err(StatsError::Math(curvebook_math::MathError::SingularMatrix { rank: x_rank, expected_rank: p }));
+    let (z_mat, means, scales, has_const_intercept) = standardize_glm_design(x)?;
+    let z_rank = svd(&z_mat)?.rank();
+    if z_rank < p {
+        return Err(StatsError::Math(curvebook_math::MathError::SingularMatrix { rank: z_rank, expected_rank: p }));
     }
 
     let nf = n as f64;
@@ -1093,9 +1171,11 @@ pub fn multiple_poisson_regression(
         return Err(StatsError::InvalidParameter { name: "poisson_events", value: 0.0 });
     }
     let y_mean = y_mean_raw.max(1e-6);
-    let diag_null = fisher_null_diagonal(x, y_mean);
-    let mut beta = vec![0.0_f64; p];
-    beta[0] = y_mean.ln();
+    let diag_null_z = fisher_null_diagonal(&z_mat, y_mean);
+    let mut beta_z = vec![0.0_f64; p];
+    if has_const_intercept {
+        beta_z[0] = y_mean.ln();
+    }
 
     let eval_poisson_half_dev = |b: &[f64]| -> Option<(f64, Vec<f64>, Vec<f64>)> {
         let mut half_dev = NeumaierSum::new();
@@ -1104,7 +1184,7 @@ pub fn multiple_poisson_regression(
         for (r, &yr) in y_counts.iter().enumerate() {
             let mut eta = 0.0_f64;
             for (c, &bc) in b.iter().enumerate() {
-                eta += x.get(r, c).unwrap_or(0.0) * bc;
+                eta += z_mat.get(r, c).unwrap_or(0.0) * bc;
             }
             if !eta.is_finite() || eta > 700.0 {
                 return None;
@@ -1125,7 +1205,7 @@ pub fn multiple_poisson_regression(
     };
 
     let (mut hd_curr, mut mus, mut etas) =
-        eval_poisson_half_dev(&beta).ok_or(StatsError::InvalidParameter { name: "poisson_eta", value: beta[0] })?;
+        eval_poisson_half_dev(&beta_z).ok_or(StatsError::InvalidParameter { name: "poisson_eta", value: beta_z[0] })?;
     let mut converged = false;
 
     for _iter in 0..80 {
@@ -1135,10 +1215,10 @@ pub fn multiple_poisson_regression(
             let diff = y_counts[r] - mus[r];
             let wr = mus[r].max(1e-12);
             for j in 0..p {
-                let xrj = x.get(r, j).unwrap_or(0.0);
-                grad[j] += xrj * diff;
+                let zrj = z_mat.get(r, j).unwrap_or(0.0);
+                grad[j] += zrj * diff;
                 for k in j..p {
-                    info[j * p + k] += wr * xrj * x.get(r, k).unwrap_or(0.0);
+                    info[j * p + k] += wr * zrj * z_mat.get(r, k).unwrap_or(0.0);
                 }
             }
         }
@@ -1154,18 +1234,18 @@ pub fn multiple_poisson_regression(
             let (ls, _) = solve_linear_least_squares(&info_mat, &grad)?;
             ls.coefficients
         };
-        let max_eta_jump = (0..n).map(|r| (0..p).map(|j| x.get(r, j).unwrap_or(0.0) * step[j]).sum::<f64>().abs()).fold(0.0_f64, f64::max);
+        let max_eta_jump = (0..n).map(|r| (0..p).map(|j| z_mat.get(r, j).unwrap_or(0.0) * step[j]).sum::<f64>().abs()).fold(0.0_f64, f64::max);
         let max_step = step.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         let mut scale = if max_eta_jump > 10.0 { 10.0 / max_eta_jump } else { 1.0 };
         let mut accepted = false;
         let hd_tol = 1.0e-10 * hd_curr.abs().max(1.0);
         for _ in 0..24 {
-            let cand: Vec<f64> = (0..p).map(|j| beta[j] + scale * step[j]).collect();
+            let cand: Vec<f64> = (0..p).map(|j| beta_z[j] + scale * step[j]).collect();
             if let Some((hd_cand, mu_cand, eta_cand)) = eval_poisson_half_dev(&cand)
                 && hd_cand <= hd_curr + hd_tol
             {
                 let delta = (hd_cand - hd_curr).abs();
-                beta = cand;
+                beta_z = cand;
                 hd_curr = hd_cand;
                 mus = mu_cand;
                 etas = eta_cand;
@@ -1181,6 +1261,8 @@ pub fn multiple_poisson_regression(
             break;
         }
     }
+
+    let beta = uncenter_beta(&beta_z, &means, &scales, has_const_intercept);
 
     let ln_fact = |y: f64| -> f64 { curvebook_math::special::ln_gamma(y + 1.0).unwrap_or(0.0) };
     let mut ll_null_acc = NeumaierSum::new();
@@ -1202,15 +1284,15 @@ pub fn multiple_poisson_regression(
     let dev_null = (2.0 * half_dev_null_acc.total()).max(0.0);
     let dev_resid = (2.0 * hd_curr).max(0.0);
 
-    let mut info_final = vec![0.0_f64; p * p];
+    let mut info_z_final = vec![0.0_f64; p * p];
     let mut pearson_acc = NeumaierSum::new();
     for (r, (&yr, &mur)) in y_counts.iter().zip(mus.iter()).enumerate() {
         let wr_info = mur.max(0.0);
         let wr_dev = mur.max(1e-12);
         for j in 0..p {
-            let xrj = x.get(r, j).unwrap_or(0.0);
+            let zrj = z_mat.get(r, j).unwrap_or(0.0);
             for k in j..p {
-                info_final[j * p + k] += wr_info * xrj * x.get(r, k).unwrap_or(0.0);
+                info_z_final[j * p + k] += wr_info * zrj * z_mat.get(r, k).unwrap_or(0.0);
             }
         }
         pearson_acc.add((yr - wr_dev).powi(2) / wr_dev);
@@ -1218,11 +1300,12 @@ pub fn multiple_poisson_regression(
     let pearson_chi2 = pearson_acc.total();
     for j in 0..p {
         for k in 0..j {
-            info_final[j * p + k] = info_final[k * p + j];
+            info_z_final[j * p + k] = info_z_final[k * p + j];
         }
     }
-    let info_mat = DenseMatrix::from_row_major(p, p, info_final)?;
-    let cov_beta = invert_glm_fisher_information(&info_mat, &diag_null, 1e-8)?;
+    let info_z_mat = DenseMatrix::from_row_major(p, p, info_z_final)?;
+    let cov_z = invert_glm_fisher_information(&info_z_mat, &diag_null_z, 1e-8)?;
+    let cov_beta = transform_cov_from_standardized(&cov_z, &means, &scales, has_const_intercept)?;
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
     let vifs = if compute_vif { compute_vifs_from_matrix(x, true, &vec![false; p]) } else { vec![None; p] };
@@ -1666,7 +1749,7 @@ pub struct PassingBablokResult {
     pub intercept_ci: (f64, f64),
     /// Raw maximum absolute cumulative sum `H = max_k |S_k|` across ordered residuals.
     pub cusum_h: f64,
-    /// Standardized CUSUM statistic `H / sqrt(L + 1)` (Passing & Bablok 1983 eq. 10) distributed as Kolmogorov supremum.
+    /// Standardized CUSUM statistic `H / sqrt(L + l)` (Passing & Bablok 1983, §3.3) distributed as Kolmogorov supremum.
     pub cusum_statistic: f64,
     /// Two-sided asymptotic Kolmogorov CUSUM linearity *p*-value.
     pub cusum_p_value: f64,
@@ -1757,8 +1840,9 @@ fn passing_bablok_cusum(x: &[f64], y: &[f64], slope: f64, intercept: f64, residu
         h_raw = h_raw.max(cum.abs());
     }
 
-    let l_one = pos_count.max(neg_count);
-    let h_std = h_raw / ((l_one + 1) as f64).sqrt();
+    // Passing & Bablok (1983, J. Clin. Chem. Clin. Biochem. 21:709-720, §3.3):
+    // H_std = H / sqrt(L + l), where L = pos_count and l = neg_count.
+    let h_std = h_raw / ((pos_count + neg_count) as f64).sqrt();
     let p_val = kolmogorov_cusum_p(h_std);
     (h_raw, h_std, p_val)
 }
@@ -1782,8 +1866,8 @@ pub fn passing_bablok_regression(x: &[f64], y: &[f64], conf: ConfidenceLevel) ->
 
     // Passing & Bablok (1983, J. Clin. Chem. Clin. Biochem. 21:709-720, eq. 2):
     // Identical pairs (dx == 0 && dy == 0) and exact -1 slopes are omitted, whereas vertical
-    // pairs (dx == 0 && dy != 0) carry slope +inf (dy > 0) or -inf (dy < 0, counted in K as
-    // < -1) and remain in N and K.
+    // pairs (dx == 0 && dy != 0) carry canonical undirected slope +inf (angle +pi/2, order-invariant,
+    // not counted in K as < -1).
     let mut slopes = Vec::with_capacity(n * (n - 1) / 2);
     for i in 0..n {
         for j in (i + 1)..n {
@@ -1793,7 +1877,7 @@ pub fn passing_bablok_regression(x: &[f64], y: &[f64], conf: ConfidenceLevel) ->
                 if dy == 0.0 {
                     continue;
                 }
-                slopes.push(if dy > 0.0 { f64::INFINITY } else { f64::NEG_INFINITY });
+                slopes.push(f64::INFINITY);
                 continue;
             }
             let s = dy / dx;
@@ -2105,7 +2189,7 @@ pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_sp
             .num("Valid pairwise slopes (N)", res.valid_slopes as f64)
             .num("Negative-slope offset (K)", res.k_offset as f64)
             .num("CUSUM linearity H", res.cusum_h)
-            .num("CUSUM standardized H / sqrt(L + 1)", res.cusum_statistic)
+            .num("CUSUM standardized H / sqrt(L + l)", res.cusum_statistic)
             .p("CUSUM linearity P value", res.cusum_p_value, p_fmt, conf.alpha())
             .build(),
     );
@@ -2422,6 +2506,29 @@ fn populate_logistic_glm_sheet(
     push_scalar(out, "Hosmer-Lemeshow P", None, res.hosmer_lemeshow_p);
     if let Some(auc) = res.roc_auc {
         push_scalar(out, "ROC AUC", None, auc);
+    }
+    let roc_ctrls: Vec<f64> = res.predicted_probs.iter().zip(design.y_vec.iter()).filter(|(_, y)| **y == 0.0).map(|(p, _)| *p).collect();
+    let roc_cases: Vec<f64> = res.predicted_probs.iter().zip(design.y_vec.iter()).filter(|(_, y)| **y == 1.0).map(|(p, _)| *p).collect();
+    if let Ok(roc) = roc_curve_analysis(&roc_ctrls, &roc_cases, RocCiMethod::DeLong, confidence) {
+        let curve_pts: Vec<CurveSamplePoint> = roc
+            .points
+            .iter()
+            .map(|pt| CurveSamplePoint {
+                x: pt.one_minus_specificity,
+                y: pt.sensitivity,
+                ci_lower: None,
+                ci_upper: None,
+                pred_lower: None,
+                pred_upper: None,
+            })
+            .collect();
+        out.fitted_curves.push(FittedCurveOverlay {
+            data_set_index: 0,
+            equation_id: String::from("ROC"),
+            converged: res.converged,
+            ambiguous: res.separation_detected,
+            points: curve_pts,
+        });
     }
 
     let mut params_tab = build_glm_ratio_params_tab(

@@ -48,9 +48,18 @@ pub(crate) fn has_ext_ci(path: &Path, exts: &[&str]) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|ext| exts.iter().any(|cand| ext.eq_ignore_ascii_case(cand)))
 }
 
-/// Returns `true` when `bytes` begins with a ZIP local-file or empty-archive EOCD signature.
+/// Archive file extensions that use ZIP containers and must always fail closed on corrupt/uninspectable payloads.
+pub(crate) const ZIP_CONTAINER_EXTS: &[&str] = &["zip", "curvebook", "cbtemplate", "prism", "pzf", "xlsx"];
+
+/// Returns `true` when `bytes` begins with a ZIP local-file, empty-archive EOCD, or spanned-archive signature.
 pub(crate) fn is_zip_magic(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06")
+    bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") || bytes.starts_with(b"PK\x07\x08")
+}
+
+/// Returns `true` when `bytes` starts with a ZIP signature OR ends with a valid ZIP EOCD record
+/// (catching PKWARE-valid preamble-prefixed ZIP containers).
+pub(crate) fn looks_like_zip(bytes: &[u8]) -> bool {
+    is_zip_magic(bytes) || crate::zip_read::has_zip_eocd(bytes)
 }
 
 /// Recursively collect non-symlink regular file paths under `dir` in sorted order.
@@ -175,6 +184,445 @@ pub(crate) fn next_ident_pattern_match<'a>(line: &str, from: usize, patterns: &[
 pub(crate) fn format_error_list<T: Display>(heading: &str, items: &[T]) -> String {
     let rendered: Vec<String> = items.iter().map(ToString::to_string).collect();
     format!("{} {heading}:\n  {}", items.len(), rendered.join("\n  "))
+}
+
+/// Decoded TOML 1.0 value parsed for manifest policy scanners (`telemetry`, `layers`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TomlVal {
+    Str(String),
+    Array(Vec<TomlVal>),
+    InlineTable(Vec<(Vec<String>, TomlVal)>),
+    Other(String),
+}
+
+impl TomlVal {
+    pub(crate) fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Str(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Recursively collect all decoded string scalars contained in this value (scalar or array).
+    pub(crate) fn collect_strings<'a>(&'a self, out: &mut Vec<&'a str>) {
+        match self {
+            Self::Str(s) => out.push(s.as_str()),
+            Self::Array(items) => {
+                for item in items {
+                    item.collect_strings(out);
+                }
+            }
+            Self::InlineTable(pairs) => {
+                for (_, val) in pairs {
+                    val.collect_strings(out);
+                }
+            }
+            Self::Other(_) => {}
+        }
+    }
+}
+
+/// Flattened TOML 1.0 entry (table header or leaf key-value with full section + dotted + inline path).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TomlEntry {
+    Section { line: usize, path: Vec<String> },
+    Leaf { line: usize, path: Vec<String>, value: TomlVal },
+}
+
+/// Parse a TOML 1.0 document into normalized section headers and flattened leaf assignments,
+/// supporting basic (`"..."`), literal (`'...'`), multiline basic (`"""..."""` with line-ending
+/// backslash trimming), multiline literal (`'''...'''`), `\uXXXX`/`\UXXXXXXXX` escapes, dotted
+/// keys, quoted keys, multiline arrays, and multiline/nested inline tables.
+pub(crate) fn parse_toml_entries(src: &str) -> Vec<TomlEntry> {
+    let mut parser = TomlParser { src, bytes: src.as_bytes(), pos: 0, line: 1 };
+    let mut out = Vec::new();
+    let mut cur_section: Vec<String> = Vec::new();
+    while !parser.is_eof() {
+        parser.skip_ws_and_comments(true);
+        if parser.is_eof() {
+            break;
+        }
+        let line = parser.line;
+        if parser.peek() == Some(b'[') {
+            parser.advance_one();
+            let is_array_table = parser.peek() == Some(b'[');
+            if is_array_table {
+                parser.advance_one();
+            }
+            let path = parser.read_dotted_key();
+            parser.skip_ws_and_comments(false);
+            if parser.peek() == Some(b']') {
+                parser.advance_one();
+                if is_array_table && parser.peek() == Some(b']') {
+                    parser.advance_one();
+                }
+            } else {
+                parser.skip_to_eol();
+            }
+            cur_section = path.clone();
+            if !path.is_empty() {
+                out.push(TomlEntry::Section { line, path });
+            }
+            continue;
+        }
+        let key_segs = parser.read_dotted_key();
+        parser.skip_ws_and_comments(false);
+        if !key_segs.is_empty() && parser.peek() == Some(b'=') {
+            parser.advance_one();
+            let val = parser.read_value(0);
+            let mut full_path = cur_section.clone();
+            full_path.extend(key_segs);
+            flatten_toml_leaf(line, &full_path, val, &mut out);
+        } else {
+            parser.skip_to_eol();
+        }
+    }
+    out
+}
+
+fn flatten_toml_leaf(line: usize, prefix: &[String], val: TomlVal, out: &mut Vec<TomlEntry>) {
+    match val {
+        TomlVal::InlineTable(pairs) => {
+            if pairs.is_empty() {
+                out.push(TomlEntry::Leaf { line, path: prefix.to_vec(), value: TomlVal::Other(String::new()) });
+                return;
+            }
+            for (sub_keys, sub_val) in pairs {
+                let mut next = prefix.to_vec();
+                next.extend(sub_keys);
+                flatten_toml_leaf(line, &next, sub_val, out);
+            }
+        }
+        other => out.push(TomlEntry::Leaf { line, path: prefix.to_vec(), value: other }),
+    }
+}
+
+struct TomlParser<'a> {
+    src: &'a str,
+    bytes: &'a [u8],
+    pos: usize,
+    line: usize,
+}
+
+impl<'a> TomlParser<'a> {
+    fn is_eof(&self) -> bool {
+        self.pos >= self.bytes.len()
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn advance_one(&mut self) -> Option<u8> {
+        let b = *self.bytes.get(self.pos)?;
+        self.pos += 1;
+        if b == b'\n' {
+            self.line += 1;
+        }
+        Some(b)
+    }
+
+    fn skip_to_eol(&mut self) {
+        while let Some(b) = self.advance_one() {
+            if b == b'\n' {
+                break;
+            }
+        }
+    }
+
+    fn skip_ws_and_comments(&mut self, allow_newlines: bool) {
+        while let Some(b) = self.peek() {
+            match b {
+                b' ' | b'\t' => {
+                    self.advance_one();
+                }
+                b'\r' | b'\n' if allow_newlines => {
+                    self.advance_one();
+                }
+                b'#' => {
+                    while let Some(c) = self.peek() {
+                        if c == b'\n' {
+                            break;
+                        }
+                        self.advance_one();
+                    }
+                    if !allow_newlines {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    fn read_dotted_key(&mut self) -> Vec<String> {
+        let mut segs = Vec::new();
+        loop {
+            self.skip_ws_and_comments(false);
+            let seg = match self.peek() {
+                Some(b'"' | b'\'') => self.read_string(),
+                Some(_) => self.read_bare_key(),
+                None => None,
+            };
+            let Some(seg) = seg else {
+                break;
+            };
+            segs.push(seg);
+            self.skip_ws_and_comments(false);
+            if self.peek() == Some(b'.') {
+                self.advance_one();
+            } else {
+                break;
+            }
+        }
+        segs
+    }
+
+    fn read_bare_key(&mut self) -> Option<String> {
+        let start = self.pos;
+        while let Some(b) = self.peek() {
+            if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-') {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        (self.pos > start).then(|| self.src.get(start..self.pos).unwrap_or("").to_owned())
+    }
+
+    fn read_string(&mut self) -> Option<String> {
+        if self.bytes.get(self.pos..self.pos + 3) == Some(b"\"\"\"") {
+            return Some(self.read_multiline_basic_string());
+        }
+        if self.bytes.get(self.pos..self.pos + 3) == Some(b"'''") {
+            return Some(self.read_multiline_literal_string());
+        }
+        match self.peek()? {
+            b'"' => Some(self.read_single_basic_string()),
+            b'\'' => Some(self.read_single_literal_string()),
+            _ => None,
+        }
+    }
+
+    fn skip_immediate_newline(&mut self) {
+        if self.peek() == Some(b'\n') {
+            self.advance_one();
+        } else if self.bytes.get(self.pos..self.pos + 2) == Some(b"\r\n") {
+            self.advance_one();
+            self.advance_one();
+        }
+    }
+
+    fn read_single_literal_string(&mut self) -> String {
+        self.advance_one(); // '
+        let mut out = String::new();
+        while !self.is_eof() {
+            if self.peek() == Some(b'\'') {
+                self.advance_one();
+                break;
+            }
+            if self.peek() == Some(b'\n') {
+                break;
+            }
+            self.push_next_char(&mut out);
+        }
+        out
+    }
+
+    fn read_multiline_literal_string(&mut self) -> String {
+        self.pos += 3;
+        self.skip_immediate_newline();
+        let mut out = String::new();
+        while !self.is_eof() {
+            if self.bytes.get(self.pos..self.pos + 3) == Some(b"'''") {
+                let mut quotes = 0usize;
+                while self.bytes.get(self.pos + quotes) == Some(&b'\'') && quotes < 5 {
+                    quotes += 1;
+                }
+                for _ in 0..quotes.saturating_sub(3) {
+                    out.push('\'');
+                }
+                self.pos += quotes;
+                break;
+            }
+            self.push_next_char(&mut out);
+        }
+        out
+    }
+
+    fn read_single_basic_string(&mut self) -> String {
+        self.advance_one(); // "
+        let mut out = String::new();
+        while !self.is_eof() {
+            match self.peek() {
+                Some(b'"') => {
+                    self.advance_one();
+                    break;
+                }
+                Some(b'\n') => break,
+                Some(b'\\') => {
+                    self.advance_one();
+                    self.decode_basic_escape(&mut out, false);
+                }
+                _ => self.push_next_char(&mut out),
+            }
+        }
+        out
+    }
+
+    fn read_multiline_basic_string(&mut self) -> String {
+        self.pos += 3;
+        self.skip_immediate_newline();
+        let mut out = String::new();
+        while !self.is_eof() {
+            if self.bytes.get(self.pos..self.pos + 3) == Some(b"\"\"\"") {
+                let mut quotes = 0usize;
+                while self.bytes.get(self.pos + quotes) == Some(&b'"') && quotes < 5 {
+                    quotes += 1;
+                }
+                for _ in 0..quotes.saturating_sub(3) {
+                    out.push('"');
+                }
+                self.pos += quotes;
+                break;
+            }
+            if self.peek() == Some(b'\\') {
+                self.advance_one();
+                self.decode_basic_escape(&mut out, true);
+                continue;
+            }
+            self.push_next_char(&mut out);
+        }
+        out
+    }
+
+    fn decode_basic_escape(&mut self, out: &mut String, allow_line_trim: bool) {
+        if allow_line_trim {
+            let mut look = self.pos;
+            while matches!(self.bytes.get(look), Some(b' ' | b'\t' | b'\r')) {
+                look += 1;
+            }
+            if self.bytes.get(look) == Some(&b'\n') {
+                while self.pos <= look {
+                    self.advance_one();
+                }
+                while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+                    self.advance_one();
+                }
+                return;
+            }
+        }
+        let Some(esc) = self.advance_one() else {
+            return;
+        };
+        match esc {
+            b'b' => out.push('\u{0008}'),
+            b't' => out.push('\t'),
+            b'n' => out.push('\n'),
+            b'f' => out.push('\u{000C}'),
+            b'r' => out.push('\r'),
+            b'"' => out.push('"'),
+            b'\\' => out.push('\\'),
+            b'u' | b'U' => {
+                let digits = if esc == b'u' { 4 } else { 8 };
+                if let Some(hex) = self.src.get(self.pos..self.pos + digits)
+                    && let Ok(code) = u32::from_str_radix(hex, 16)
+                    && let Some(ch) = char::from_u32(code)
+                {
+                    out.push(ch);
+                    self.pos += digits;
+                }
+            }
+            other => out.push(char::from(other)),
+        }
+    }
+
+    fn push_next_char(&mut self, out: &mut String) {
+        if let Some(ch) = self.src.get(self.pos..).and_then(|s| s.chars().next()) {
+            out.push(ch);
+            self.pos += ch.len_utf8();
+            if ch == '\n' {
+                self.line += 1;
+            }
+        } else {
+            self.advance_one();
+        }
+    }
+
+    fn read_value(&mut self, depth: usize) -> TomlVal {
+        self.skip_ws_and_comments(false);
+        if depth >= 32 {
+            return self.read_other_scalar();
+        }
+        match self.peek() {
+            Some(b'"' | b'\'') => TomlVal::Str(self.read_string().unwrap_or_default()),
+            Some(b'[') => {
+                self.advance_one();
+                let mut items = Vec::new();
+                loop {
+                    self.skip_ws_and_comments(true);
+                    if self.is_eof() || self.peek() == Some(b']') {
+                        self.advance_one();
+                        break;
+                    }
+                    let before = self.pos;
+                    items.push(self.read_value(depth + 1));
+                    self.skip_ws_and_comments(true);
+                    if self.peek() == Some(b',') {
+                        self.advance_one();
+                    } else if self.peek() == Some(b']') {
+                        self.advance_one();
+                        break;
+                    } else if self.pos == before {
+                        self.advance_one();
+                    }
+                }
+                TomlVal::Array(items)
+            }
+            Some(b'{') => {
+                self.advance_one();
+                let mut pairs = Vec::new();
+                loop {
+                    self.skip_ws_and_comments(true);
+                    if self.is_eof() || self.peek() == Some(b'}') {
+                        self.advance_one();
+                        break;
+                    }
+                    let before = self.pos;
+                    let keys = self.read_dotted_key();
+                    self.skip_ws_and_comments(true);
+                    if !keys.is_empty() && self.peek() == Some(b'=') {
+                        self.advance_one();
+                        self.skip_ws_and_comments(true);
+                        let val = self.read_value(depth + 1);
+                        pairs.push((keys, val));
+                    }
+                    self.skip_ws_and_comments(true);
+                    if self.peek() == Some(b',') {
+                        self.advance_one();
+                    } else if self.peek() == Some(b'}') {
+                        self.advance_one();
+                        break;
+                    } else if self.pos == before {
+                        self.advance_one();
+                    }
+                }
+                TomlVal::InlineTable(pairs)
+            }
+            _ => self.read_other_scalar(),
+        }
+    }
+
+    fn read_other_scalar(&mut self) -> TomlVal {
+        let start = self.pos;
+        while let Some(b) = self.peek() {
+            if matches!(b, b',' | b']' | b'}' | b'#' | b'\n' | b'\r') {
+                break;
+            }
+            self.pos += 1;
+        }
+        TomlVal::Other(self.src.get(start..self.pos).unwrap_or("").trim().to_owned())
+    }
 }
 
 #[cfg(test)]

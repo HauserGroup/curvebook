@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use crate::dsl::ast::{BinaryKind, BinaryOp, BuiltinFn, CompiledProgram, Expr, OpCode, UnaryKind, UnaryOp};
 use crate::dsl::limits::MAX_TOTAL_OPCODES;
 use crate::dsl::parser::LocalResolver;
-use crate::dsl::statements::parse_predictor_index;
+use crate::dsl::statements::{EqItem, parse_predictor_index};
 use crate::error::FitError;
 
 pub(in crate::dsl) fn check_opcode_budget(code: &[OpCode], max_opcodes: usize) -> Result<(), FitError> {
@@ -24,29 +24,41 @@ pub(in crate::dsl) fn check_opcode_budget(code: &[OpCode], max_opcodes: usize) -
     Ok(())
 }
 
-pub(in crate::dsl) fn compile_program_refs(
-    locals: &[(String, Expr)],
+pub(in crate::dsl) fn compile_program_from_indices(
+    eq_items: &[EqItem],
+    local_indices: &[usize],
     target: &Expr,
+    subtract_from_y: bool,
     params: &HashMap<String, usize>,
     max_opcodes: usize,
 ) -> Result<CompiledProgram, FitError> {
     let mut local_map: HashMap<String, usize> = HashMap::new();
     let mut code = Vec::new();
-    for (lname, rhs) in locals {
-        let resolver = LocalResolver::Flat(&local_map);
-        compile_expr_resolved(rhs, &resolver, params, &mut code, max_opcodes)?;
-        let slot = if let Some(&s) = local_map.get(lname) {
-            s
-        } else {
-            let s = local_map.len();
-            local_map.insert(lname.clone(), s);
-            s
-        };
-        code.push(OpCode::StoreLocal(slot));
-        check_opcode_budget(&code, max_opcodes)?;
+    for &idx in local_indices {
+        if let EqItem::Local { name: lname, rhs, .. } = &eq_items[idx] {
+            let resolver = LocalResolver::Flat(&local_map);
+            compile_expr_resolved(rhs, &resolver, params, &mut code, max_opcodes)?;
+            let slot = if let Some(&s) = local_map.get(lname) {
+                s
+            } else {
+                let s = local_map.len();
+                local_map.insert(lname.clone(), s);
+                s
+            };
+            code.push(OpCode::StoreLocal(slot));
+            check_opcode_budget(&code, max_opcodes)?;
+        }
     }
     let resolver = LocalResolver::Flat(&local_map);
-    compile_expr_resolved(target, &resolver, params, &mut code, max_opcodes)?;
+    if subtract_from_y {
+        code.push(OpCode::LoadY);
+        check_opcode_budget(&code, max_opcodes)?;
+        compile_expr_resolved(target, &resolver, params, &mut code, max_opcodes)?;
+        code.push(OpCode::Binary(BinaryKind::Sub));
+        check_opcode_budget(&code, max_opcodes)?;
+    } else {
+        compile_expr_resolved(target, &resolver, params, &mut code, max_opcodes)?;
+    }
     code.push(OpCode::Halt);
     check_opcode_budget(&code, max_opcodes)?;
     Ok(CompiledProgram { code, local_count: local_map.len() })
@@ -77,6 +89,7 @@ pub(in crate::dsl) enum CompileTask<'a> {
     IfAfterCond { then_br: &'a Expr, else_br: &'a Expr },
     IfAfterThen { else_br: &'a Expr, jz_idx: usize },
     IfAfterElse { jump_end: usize },
+    IsDefinedAfterArg { enter_idx: usize },
 }
 
 pub(in crate::dsl) fn binary_op_to_kind(op: BinaryOp) -> BinaryKind {
@@ -136,9 +149,18 @@ pub(in crate::dsl) fn schedule_expr_compile<'a>(
         }
         Expr::Call { name, args } => {
             let bf = resolve_builtin_fn(name, args.len())?;
-            tasks.push(CompileTask::EmitCall(bf, args.len()));
-            for a in args.iter().rev() {
-                tasks.push(CompileTask::Eval(a));
+            if matches!(bf, BuiltinFn::IsDefined) {
+                let enter_idx = code.len();
+                code.push(OpCode::EnterDefinedScope(0));
+                tasks.push(CompileTask::IsDefinedAfterArg { enter_idx });
+                if let Some(arg) = args.first() {
+                    tasks.push(CompileTask::Eval(arg));
+                }
+            } else {
+                tasks.push(CompileTask::EmitCall(bf, args.len()));
+                for a in args.iter().rev() {
+                    tasks.push(CompileTask::Eval(a));
+                }
             }
         }
     }
@@ -222,6 +244,12 @@ pub(in crate::dsl) fn compile_expr_resolved(
                 let end_target = code.len();
                 code[jump_end] = OpCode::Jump(end_target);
             }
+            CompileTask::IsDefinedAfterArg { enter_idx } => {
+                code.push(OpCode::ExitDefinedScope);
+                code.push(OpCode::CallBuiltin(BuiltinFn::IsDefined, 1));
+                let after_idx = code.len();
+                code[enter_idx] = OpCode::EnterDefinedScope(after_idx);
+            }
         }
     }
     check_opcode_budget(code, max_opcodes)
@@ -273,6 +301,16 @@ pub(in crate::dsl) fn resolve_builtin_fn(name: &str, argc: usize) -> Result<Buil
             _ => Err(FitError::DslCompileError { message: format!("Function `{name}` expects 1 or 3 argument(s), got {argc}"), line: 1, column: 1 }),
         };
     }
+    if u == "min" || u == "max" {
+        if argc < 2 {
+            return Err(FitError::DslCompileError {
+                message: format!("Function `{name}` expects at least 2 argument(s), got {argc}"),
+                line: 1,
+                column: 1,
+            });
+        }
+        return Ok(if u == "min" { BuiltinFn::Min } else { BuiltinFn::Max });
+    }
     let (bf, expected_arity) = match u.as_str() {
         "abs" => (BuiltinFn::Abs, 1),
         "sqrt" => (BuiltinFn::Sqrt, 1),
@@ -302,8 +340,6 @@ pub(in crate::dsl) fn resolve_builtin_fn(name: &str, argc: usize) -> Result<Buil
         "trunc" | "int" => (BuiltinFn::Trunc, 1),
         "sign" | "sgn" => (BuiltinFn::Sign, 1),
         "mod" => (BuiltinFn::Mod, 2),
-        "min" => (BuiltinFn::Min, 2),
-        "max" => (BuiltinFn::Max, 2),
         "clamp" => (BuiltinFn::Clamp, 3),
         "hypot" => (BuiltinFn::Hypot, 2),
         "pow" => (BuiltinFn::PowFn, 2),

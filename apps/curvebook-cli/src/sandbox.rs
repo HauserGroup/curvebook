@@ -40,6 +40,9 @@ pub enum PathResolver {
     Unconstrained { base_dir: PathBuf },
 }
 
+const EXTRA_CLI_PATH_PARAM_KEYS: &[&str] =
+    &["dir", "directory", "destination_path", "destinationPath", "unpacked_dir", "unpackedDir", "output_path", "outputPath"];
+
 impl PathResolver {
     fn as_platform(&self) -> PlatformPathResolver {
         match self {
@@ -62,7 +65,38 @@ impl PathResolver {
         self.as_platform().sanitize_params(params).map_err(|err| match err {
             PlatformError::InvalidPath { reason } if reason.starts_with("parameter `") => CliError::Schema(reason),
             other => map_guard_error(other, sandboxed),
-        })
+        })?;
+        self.sanitize_extra_path_keys(params)
+    }
+
+    fn sanitize_extra_path_keys(&self, value: &mut Value) -> Result<(), CliError> {
+        match value {
+            Value::Object(map) => {
+                for (key, val) in map.iter_mut() {
+                    if EXTRA_CLI_PATH_PARAM_KEYS.contains(&key.as_str()) {
+                        match val {
+                            Value::Null => {}
+                            Value::String(raw) => {
+                                let resolved = self.resolve(raw)?;
+                                *raw = resolved.to_string_lossy().into_owned();
+                            }
+                            _ => {
+                                return Err(CliError::Schema(format!("parameter `{key}` must be a string path")));
+                            }
+                        }
+                    } else {
+                        self.sanitize_extra_path_keys(val)?;
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items.iter_mut() {
+                    self.sanitize_extra_path_keys(item)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 

@@ -29,7 +29,7 @@ use crate::ui_catalog::UI_COMMANDS;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use live_control::MAX_CONTROL_RESPONSE_BYTES;
 
-const MAX_BATCH_COMMANDS: usize = 1024;
+const MAX_BATCH_COMMANDS: usize = 1_000;
 const MAX_PRE_CANCELLED_IDS: usize = 256;
 
 #[derive(Default)]
@@ -123,6 +123,15 @@ impl CancellationRegistry {
             guard.pre_cancelled.push_back(key);
         }
         false
+    }
+
+    /// Return `true` when `request_id` is currently active and its cancel flag has been signalled.
+    #[must_use]
+    pub fn is_cancelled(&self, request_id: &Value) -> bool {
+        let Some(key) = canonical_request_id_key(request_id) else {
+            return false;
+        };
+        self.read_inner().ok().and_then(|guard| guard.active.get(&key).map(|tok| tok.load(Ordering::Acquire))).unwrap_or(false)
     }
 
     /// Number of currently registered in-flight requests.
@@ -338,13 +347,17 @@ impl McpServerState {
         Ok(())
     }
 
-    fn effective_path_policy(&self) -> ExternalPathPolicy {
+    pub(crate) fn effective_path_policy(&self) -> ExternalPathPolicy {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(guard) = self.workdir_guard.as_ref() {
             return ExternalPathPolicy::from_guard(guard.clone());
         }
-        if *self.session.path_policy() == ExternalPathPolicy::RejectExternal {
+        if *self.session().path_policy() == ExternalPathPolicy::RejectExternal || *self.session.path_policy() == ExternalPathPolicy::RejectExternal {
             return ExternalPathPolicy::RejectExternal;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let ExternalPathPolicy::Workdir(guard) = self.session().path_policy() {
+            return ExternalPathPolicy::from_guard(guard.clone());
         }
         ExternalPathPolicy::Unconstrained
     }
@@ -780,7 +793,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "path": { "type": "string", "description": "Filesystem path to open or import." },
                     "format": { "type": "string", "enum": ["curvebook", "curvebook.d", "cbtemplate", "prism", "pzfx", "xlsx", "csv", "tsv"] },
                     "target_kind": { "type": "string", "enum": ["xy", "column", "grouped", "contingency", "survival", "parts_of_whole", "multiple_variables", "nested"] },
-                    "subcolumn_mode": { "type": "string", "description": "Optional subcolumn layout (e.g. 'none', 'replicates:3', 'mean_sd_n', 'mean_sem_n', 'mean_sd', 'mean_sem')." },
+                    "subcolumn_mode": { "type": "string", "description": "Optional subcolumn layout: 'single' (or 'none'), 'replicates:<1..=256>', 'mean_sd_n', 'mean_sem_n', 'mean_cv_n', 'mean_low_high', 'upper_lower_limits', or 'median_iqr'." },
                     "delimiter": { "type": "string", "description": "Optional single-character delimiter override for delimited text (omit to auto-detect comma, tab, semicolon, and European decimal comma)." },
                     "sheet_id": { "type": "string", "description": "Sheet ID used when importing delimited data." },
                     "title": { "type": "string", "description": "Optional title override for imported sheet or instantiated template." },
@@ -1175,6 +1188,9 @@ fn parse_bounded_limit(raw: Option<u32>, key: &str, max: usize, default: usize) 
 }
 
 fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    if state.current_cancel_token().load(Ordering::Acquire) {
+        return Ok(errors::result_from_code(ErrorCode::Cancelled, "doc_inspect cancelled before execution"));
+    }
     let parsed: DocInspectArgs = deserialize_args("doc_inspect", args)?;
     let sheet_id = trim_opt_non_empty(parsed.sheet_id, "sheet_id")?;
     let include_cells = parsed.include_cells.unwrap_or(false);
@@ -1202,17 +1218,24 @@ fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> 
                     merged.insert(k, v);
                 }
             }
+            apply_live_overview_inspect_filters(&mut merged, detail, sections.as_ref(), max_scalars);
             merged.insert(String::from("mode"), Value::String(String::from("live_attach")));
             merged.insert(String::from("control_port"), json!(port));
             merged.insert(String::from("snapshot"), snapshot);
             return ToolCallResult::ok_json(&Value::Object(merged));
         }
+        let fetch_cells = include_cells || detail == InspectDetail::Full || tab_id.is_some();
         let params = json!({
             "sheet_id": sheet_id,
-            "include_cells": include_cells,
+            "include_cells": fetch_cells,
         });
         return match state.send_live_control("doc.inspect", params) {
             Ok(mut remote) => {
+                if let Err(err_payload) =
+                    apply_live_sheet_inspect_filters(&mut remote, include_cells, detail, tab_id.as_deref(), max_rows, max_scalars)
+                {
+                    return Ok(errors::result_from_payload(&err_payload));
+                }
                 if let Some(obj) = remote.as_object_mut() {
                     if let Some(sec) = obj.get("section").and_then(Value::as_str) {
                         obj.insert(String::from("section"), Value::String(sec.to_ascii_lowercase()));
@@ -1234,6 +1257,174 @@ fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> 
 
     let summary = build_document_summary(state.session(), detail, sections.as_ref(), max_scalars);
     ToolCallResult::ok_json(&summary)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_live_overview_inspect_filters(
+    merged: &mut Map<String, Value>,
+    detail: InspectDetail,
+    sections: Option<&BTreeSet<String>>,
+    max_scalars: usize,
+) {
+    if let Some(sec_set) = sections {
+        let mapping = [
+            ("data", "data_sheets"),
+            ("info", "info_sheets"),
+            ("analyses", "result_sheets"),
+            ("graphs", "graph_sheets"),
+            ("layouts", "layout_sheets"),
+            ("variables", "variables"),
+            ("hooks", "hooks"),
+        ];
+        for (sec_name, json_key) in mapping {
+            if !sec_set.contains(sec_name) {
+                merged.remove(json_key);
+            }
+        }
+    }
+    if detail == InspectDetail::Compact {
+        for key in ["data_sheets", "info_sheets", "result_sheets", "graph_sheets", "layout_sheets"] {
+            if let Some(Value::Array(items)) = merged.get_mut(key) {
+                for item in items.iter_mut() {
+                    if let Some(obj) = item.as_object_mut() {
+                        obj.remove("scalars");
+                        obj.remove("tabs");
+                        obj.remove("series");
+                        obj.remove("items");
+                        obj.remove("constants");
+                        obj.remove("notes_markdown");
+                        obj.remove("spec");
+                    }
+                }
+            }
+        }
+    } else if let Some(Value::Array(results)) = merged.get_mut("result_sheets") {
+        for item in results.iter_mut() {
+            if let Some(obj) = item.as_object_mut()
+                && let Some(Value::Array(scalars)) = obj.get_mut("scalars")
+                && scalars.len() > max_scalars
+            {
+                scalars.truncate(max_scalars);
+                obj.insert(String::from("scalars_truncated"), Value::Bool(true));
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn truncate_csv_preview_lines(csv: &str, max_rows: usize) -> (String, bool) {
+    let mut lines = csv.lines();
+    let Some(header) = lines.next() else {
+        return (String::new(), false);
+    };
+    let mut out = String::from(header);
+    let mut kept = 0usize;
+    let mut truncated = false;
+    for line in lines {
+        if kept < max_rows {
+            out.push('\n');
+            out.push_str(line);
+            kept += 1;
+        } else {
+            truncated = true;
+            break;
+        }
+    }
+    (out, truncated)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_live_sheet_inspect_filters(
+    remote: &mut Value,
+    include_cells: bool,
+    detail: InspectDetail,
+    tab_id: Option<&str>,
+    max_rows: usize,
+    max_scalars: usize,
+) -> Result<(), StructuredErrorPayload> {
+    let Some(obj) = remote.as_object_mut() else {
+        return Ok(());
+    };
+
+    if let Some(csv) = obj.get("csv_preview").and_then(Value::as_str).map(str::to_owned) {
+        let (sliced, was_truncated) = truncate_csv_preview_lines(&csv, max_rows);
+        obj.insert(String::from("csv_preview"), Value::String(sliced));
+        if was_truncated {
+            obj.insert(String::from("csv_preview_truncated"), Value::Bool(true));
+        }
+    }
+
+    let tabs_key = if obj.get("tabs_data").is_some_and(Value::is_array) {
+        Some("tabs_data")
+    } else if obj.get("tabs").is_some_and(Value::is_array) {
+        Some("tabs")
+    } else {
+        None
+    };
+
+    if let Some(want_tab) = tab_id {
+        let available: Vec<String> = tabs_key
+            .and_then(|k| obj.get(k))
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(|t| t.get("id").and_then(Value::as_str).or_else(|| t.as_str()).map(str::to_owned)).collect())
+            .unwrap_or_default();
+        if !available.iter().any(|id| id == want_tab) {
+            let sheet_label = obj.get("id").and_then(Value::as_str).unwrap_or("sheet");
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::NotFound,
+                format!("tab_id '{want_tab}' not found on '{sheet_label}'; available tab_ids: {}", available.join(", ")),
+            ));
+        }
+        if let Some(k) = tabs_key
+            && let Some(Value::Array(arr)) = obj.get_mut(k)
+        {
+            arr.retain(|t| t.get("id").and_then(Value::as_str).or_else(|| t.as_str()) == Some(want_tab));
+        }
+    }
+
+    if let Some(k) = tabs_key
+        && let Some(Value::Array(arr)) = obj.get_mut(k)
+    {
+        let mut any_tab_truncated = false;
+        for tab in arr.iter_mut() {
+            if let Some(tab_obj) = tab.as_object_mut() {
+                if let Some(Value::Array(rows)) = tab_obj.get_mut("rows")
+                    && rows.len() > max_rows
+                {
+                    rows.truncate(max_rows);
+                    any_tab_truncated = true;
+                }
+                if let Some(Value::Array(labels)) = tab_obj.get_mut("row_labels")
+                    && labels.len() > max_rows
+                {
+                    labels.truncate(max_rows);
+                }
+            }
+        }
+        if any_tab_truncated {
+            obj.insert(String::from("tabs_truncated"), Value::Bool(true));
+        }
+    }
+
+    for scalars_key in ["scalars_data", "scalars"] {
+        if let Some(Value::Array(arr)) = obj.get_mut(scalars_key)
+            && arr.len() > max_scalars
+        {
+            arr.truncate(max_scalars);
+            obj.insert(String::from("scalars_truncated"), Value::Bool(true));
+        }
+    }
+
+    if detail == InspectDetail::Compact && !include_cells {
+        obj.remove("csv_preview");
+        obj.remove("scalars_data");
+        obj.remove("spec");
+        if tab_id.is_none() {
+            obj.remove("tabs_data");
+        }
+    }
+
+    Ok(())
 }
 
 fn inspect_single_sheet(
@@ -2053,10 +2244,32 @@ fn execute_live_command_batch(state: &mut McpServerState, mut items: Vec<(String
             let parsed_header = parse_batch_failure_header(&err_payload.message);
             let detail_idx =
                 err_payload.details.as_ref().and_then(|d| d.get("failed_index")).and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
+            let detail_completed =
+                err_payload.details.as_ref().and_then(|d| d.get("completed_steps")).and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
             let detail_cmd = err_payload.details.as_ref().and_then(|d| d.get("failed_command_id")).and_then(Value::as_str).map(ToOwned::to_owned);
             let detail_rb = err_payload.details.as_ref().and_then(|d| d.get("rolled_back")).and_then(Value::as_bool);
+            let detail_fs_persisted = err_payload.details.as_ref().and_then(|d| d.get("filesystem_side_effects_persisted")).and_then(Value::as_bool);
 
-            let failed_index = detail_idx.or_else(|| parsed_header.as_ref().map(|(idx, _, _)| *idx)).unwrap_or(0);
+            let lower_msg = err_payload.message.to_ascii_lowercase();
+            let is_response_overflow = err_payload.code == ErrorCode::ResourceLimit
+                || lower_msg.contains("exceeds maximum control line size")
+                || (lower_msg.contains("control response") && lower_msg.contains("exceeds"));
+            let has_step_failure_loc = detail_idx.is_some() || detail_completed.is_some() || parsed_header.is_some();
+
+            // Distinguish three live batch error shapes truthfully (`AUD-13-13`):
+            // 1. Explicit step failure (`failed_index` / `completed_steps` / parsed header): steps `0..executed` ran.
+            // 2. Post-execution response-frame overflow without step index: ALL steps may have run & written to disk.
+            // 3. Pre-execution rejection (step cap, unauthorized, malformed batch): 0 steps ran, session untouched.
+            let (failed_index, fs_scan_len, default_atomic_rolled_back) = if has_step_failure_loc {
+                let idx = detail_idx.or_else(|| parsed_header.as_ref().map(|(i, _, _)| *i)).or(detail_completed).unwrap_or(0);
+                let scan = detail_completed.unwrap_or(idx).min(items.len());
+                (idx, scan, false)
+            } else if is_response_overflow {
+                (items.len().saturating_sub(1), items.len(), false)
+            } else {
+                (0, 0, true)
+            };
+
             let failed_command_id = detail_cmd
                 .or_else(|| parsed_header.as_ref().map(|(_, cmd, _)| cmd.clone()))
                 .or_else(|| items.get(failed_index).map(|(c, _)| c.clone()))
@@ -2072,14 +2285,14 @@ fn execute_live_command_batch(state: &mut McpServerState, mut items: Vec<(String
             });
 
             let mut persisted_fs_steps = Vec::new();
-            for (idx, (cmd_id, params)) in items.iter().take(failed_index).enumerate() {
+            for (idx, (cmd_id, params)) in items.iter().take(fs_scan_len).enumerate() {
                 if command_step_writes_filesystem(cmd_id, params) {
                     persisted_fs_steps.push(json!({ "index": idx, "command_id": cmd_id }));
                 }
             }
 
             if atomic {
-                let session_rolled_back = reported_rolled_back.unwrap_or(false);
+                let session_rolled_back = reported_rolled_back.unwrap_or(default_atomic_rolled_back);
                 return Ok(build_atomic_failure_result_from_payload(
                     failed_index,
                     failed_command_id,
@@ -2087,10 +2300,11 @@ fn execute_live_command_batch(state: &mut McpServerState, mut items: Vec<(String
                     session_rolled_back,
                     Vec::new(),
                     persisted_fs_steps,
+                    detail_fs_persisted.unwrap_or(false),
                 ));
             }
 
-            let fs_persisted = !persisted_fs_steps.is_empty();
+            let fs_persisted = detail_fs_persisted.unwrap_or(false) || !persisted_fs_steps.is_empty();
             let mut extra = Map::new();
             extra.insert(String::from("failed_index"), json!(failed_index));
             extra.insert(String::from("failed_command_id"), json!(failed_command_id));
@@ -2099,10 +2313,10 @@ fn execute_live_command_batch(state: &mut McpServerState, mut items: Vec<(String
             extra.insert(String::from("rolled_back"), json!(false));
             extra.insert(String::from("session_rolled_back"), json!(false));
             extra.insert(String::from("filesystem_side_effects_persisted"), json!(fs_persisted));
-            if fs_persisted {
+            if !persisted_fs_steps.is_empty() {
                 extra.insert(String::from("persisted_filesystem_steps"), Value::Array(persisted_fs_steps));
             }
-            extra.insert(String::from("completed"), json!(failed_index));
+            extra.insert(String::from("completed"), json!(fs_scan_len));
             extra.insert(
                 String::from("results"),
                 Value::Array(vec![json!({
@@ -2174,7 +2388,7 @@ fn build_atomic_failure_result(
     persisted_fs_steps: Vec<Value>,
 ) -> ToolCallResult {
     let err_payload = StructuredErrorPayload::from_engine_error(err);
-    build_atomic_failure_result_from_payload(idx, command_id, &err_payload, session_rolled_back, completed_before_failure, persisted_fs_steps)
+    build_atomic_failure_result_from_payload(idx, command_id, &err_payload, session_rolled_back, completed_before_failure, persisted_fs_steps, false)
 }
 
 fn build_atomic_failure_result_from_payload(
@@ -2184,19 +2398,22 @@ fn build_atomic_failure_result_from_payload(
     session_rolled_back: bool,
     completed_before_failure: Vec<Value>,
     persisted_fs_steps: Vec<Value>,
+    reported_fs_persisted: bool,
 ) -> ToolCallResult {
     let mut extra = Map::new();
     extra.insert(String::from("failed_index"), json!(idx));
     extra.insert(String::from("failed_command_id"), json!(command_id));
     extra.insert(String::from("error"), json!(err_payload.message));
-    let fs_persisted = !persisted_fs_steps.is_empty();
+    let fs_persisted = reported_fs_persisted || !persisted_fs_steps.is_empty();
     let rolled_back = session_rolled_back && !fs_persisted;
     extra.insert(String::from("atomic"), json!(true));
     extra.insert(String::from("rolled_back"), json!(rolled_back));
     extra.insert(String::from("session_rolled_back"), json!(session_rolled_back));
     extra.insert(String::from("filesystem_side_effects_persisted"), json!(fs_persisted));
     if fs_persisted {
-        extra.insert(String::from("persisted_filesystem_steps"), Value::Array(persisted_fs_steps));
+        if !persisted_fs_steps.is_empty() {
+            extra.insert(String::from("persisted_filesystem_steps"), Value::Array(persisted_fs_steps));
+        }
         extra.insert(
             String::from("warning"),
             json!("In-memory session changes were rolled back, but earlier filesystem writes could not be reverted and remain on disk."),

@@ -1,6 +1,7 @@
 //! Project lifecycle, file I/O, template, inspection, recalculation, and checkpoint commands.
 
 use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,9 +48,10 @@ pub(super) fn recalculate_with_links_under_policy(
     doc: &mut ProjectDocument,
     include_external_links: bool,
     policy: &ExternalPathPolicy,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<RecalcSummary, EngineError> {
     let external_policy = include_external_links.then_some(policy);
-    let (report, refreshed_links) = dag::recalculate_project_with_links_report(doc, external_policy)?;
+    let (report, refreshed_links) = dag::recalculate_project_with_links_report(doc, external_policy, cancelled)?;
     prune_out_of_bounds_point_overrides(doc);
     let failed_result_sheets = dag::collect_failed_result_sheets_for_ids(doc, &report.failed_result_sheets);
     Ok(RecalcSummary { recalculated_sheets: report.total_updated(), refreshed_links, failed_result_sheets })
@@ -57,13 +59,15 @@ pub(super) fn recalculate_with_links_under_policy(
 
 /// Incrementally recalculate the dirty transitive closure of `dirty_seeds` (plus any pending
 /// `ResultStatus::Dirty` sheets) and refresh internal links without recomputing unrelated branches.
+///
+/// External links are refreshed only when an explicit [`ExternalPathPolicy`] is provided (`AUD-02-18`).
 pub(super) fn recalculate_dirty_with_links(
     doc: &mut ProjectDocument,
     dirty_seeds: &[SheetId],
-    include_external_links: bool,
+    external_policy: Option<&ExternalPathPolicy>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<RecalcSummary, EngineError> {
-    let external_policy = include_external_links.then_some(&ExternalPathPolicy::Unconstrained);
-    let (report, refreshed_links) = dag::recalculate_dirty_with_links_report(doc, dirty_seeds, external_policy)?;
+    let (report, refreshed_links) = dag::recalculate_dirty_with_links_report(doc, dirty_seeds, external_policy, cancelled)?;
     prune_out_of_bounds_point_overrides(doc);
     let failed_result_sheets = dag::collect_failed_result_sheets_for_ids(doc, &report.failed_result_sheets);
     Ok(RecalcSummary { recalculated_sheets: report.total_updated(), refreshed_links, failed_result_sheets })
@@ -194,6 +198,7 @@ fn run_project_save(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         (false, bytes, None)
     };
 
+    let reported_path = saved_path.as_ref().map(|p| p.to_string_lossy().into_owned()).or(parsed.path);
     if let Some(resolved_path) = saved_path {
         ctx.session.mark_saved_clean(resolved_path);
     }
@@ -205,7 +210,7 @@ fn run_project_save(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         "saved project",
         json!({
             "title": ctx.session.doc.title,
-            "path": parsed.path,
+            "path": reported_path,
             "unpacked": used_unpacked,
             "bytes_len": bytes_len,
             "bytes_base64": encoded,
@@ -306,7 +311,7 @@ fn run_project_recalculate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOu
     let parsed: RecalculateParams = parse_params(&command_schema::<RecalculateParams>(), params)?;
     let include_external = parsed.include_external_links.unwrap_or(true);
     let recalc_policy = ctx.session.path_policy.clone();
-    let summary = recalculate_with_links_under_policy(&mut ctx.session.doc, include_external, &recalc_policy)?;
+    let summary = recalculate_with_links_under_policy(&mut ctx.session.doc, include_external, &recalc_policy, Some(ctx.cancelled))?;
     let message = match summary.failure_note() {
         Some(note) => format!("recalculated project{note}"),
         None => String::from("recalculated project"),

@@ -393,7 +393,13 @@ pub(super) fn validate_layout_spec_in_doc(
     if spec.width < 0.01 || spec.height < 0.01 {
         return Err(bad_input("layout `width` and `height` must be finite and >= 0.01"));
     }
+    let mut seen_item_ids = std::collections::HashSet::with_capacity(spec.items.len());
     for (idx, item) in spec.items.iter().enumerate() {
+        let item_id = item.id();
+        if !seen_item_ids.insert(item_id) {
+            return Err(bad_input(format!("duplicate layout item id `{item_id}` at item[{idx}]"))
+                .with_remediation("Assign a unique `panel_id` to each layout item."));
+        }
         match item {
             LayoutItem::LiveGraph { graph_sheet_id, scale_percent, .. } => {
                 if *scale_percent < 0.01 {
@@ -501,11 +507,12 @@ fn run_layout_add_panel(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     if next_idx >= MAX_LAYOUT_ITEMS {
         return Err(DocError::TooManyLayoutItems { count: next_idx + 1, max: MAX_LAYOUT_ITEMS }.into());
     }
-    let bounds_pt = {
+    let (bounds_pt, panel_id) = {
         let layout = require_layout_sheet(doc, &id)?;
-        resolve_panel_bounds(&layout.spec, next_idx, &params)?
+        let bounds = resolve_panel_bounds(&layout.spec, next_idx, &params)?;
+        let pid = unique_layout_panel_id(&layout.spec.items, params.panel_id.as_deref());
+        (bounds, pid)
     };
-    let panel_id = params.panel_id.unwrap_or_else(|| format!("panel-{}", next_idx + 1));
 
     let inferred_kind = if params.graph_sheet_id.is_some() {
         "graph"
@@ -560,8 +567,7 @@ fn run_layout_add_panel(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         "text" | "callout" | "text_callout" => LayoutItem::TextCallout {
             id: panel_id,
             markdown: params.markdown.ok_or_else(|| {
-                bad_input_ptr("/markdown", "missing `markdown` or `text` for text callout panel")
-                    .with_remediation("Supply `markdown` (or `text`) for a text panel.")
+                bad_input_ptr("/markdown", "missing `markdown` for text callout panel").with_remediation("Supply `markdown` for a text panel.")
             })?,
             bounds_pt,
             font_size_pt: params.font_size_pt.unwrap_or(10.0),
@@ -638,7 +644,7 @@ fn run_layout_apply_canvas_preset(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comma
     let doc = &mut ctx.session.doc;
     let mut updated_spec = require_layout_sheet(doc, &id)?.spec.clone();
     resize_layout_spec(&mut updated_spec, preset, mode)?;
-    updated_spec.validate()?;
+    validate_layout_spec_in_doc(doc, &id, &updated_spec)?;
 
     require_layout_sheet_mut(doc, &id)?.spec = updated_spec;
 
@@ -979,7 +985,7 @@ fn resize_layout_spec(spec: &mut LayoutSpec, preset: FigureCanvasPreset, mode: C
             LayoutItem::TextCallout { bounds_pt, font_size_pt, .. } => {
                 *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
                 if mode == CanvasResizeMode::ProportionalScale {
-                    *font_size_pt = scale_finite(*font_size_pt, scale_1d, "layout.text_callout.font_size_pt")?;
+                    *font_size_pt = scale_finite(*font_size_pt, scale_1d, "layout.text_callout.font_size_pt")?.max(0.5);
                 }
             }
             LayoutItem::EmbeddedImage { bounds_pt, crop, border, .. } => {
@@ -1244,7 +1250,7 @@ pub(super) struct LayoutImageInsertArgs<'a> {
     pub badge_override: Option<&'a str>,
 }
 
-fn unique_layout_panel_id(items: &[LayoutItem], requested: Option<&str>) -> String {
+pub(super) fn unique_layout_panel_id(items: &[LayoutItem], requested: Option<&str>) -> String {
     if let Some(id) = requested.map(str::trim).filter(|s| !s.is_empty()) {
         return id.to_owned();
     }

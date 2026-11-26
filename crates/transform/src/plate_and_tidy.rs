@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use curvebook_doc::{
-    Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet, FloatingNote, GroupedTable, MultipleVariablesTable,
-    RectPt, SubcolumnMode, TableArchetype, TableKind, XColumnMode, XyTable, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
+    Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, FloatingNote, GroupedTable, MAX_DATA_SETS,
+    MAX_ROWS, MAX_SUBCOLUMNS, MultipleVariablesTable, RectPt, SubcolumnMode, TableArchetype, TableKind, XColumnMode, XyTable, validate_data_sets,
+    validate_rows, validate_subcolumns, validate_title,
 };
 use curvebook_math::sum::SummaryMoments;
 use serde::de::{self, SeqAccess, Visitor};
@@ -869,7 +870,8 @@ fn collect_tidy_records(
             None => (None, None, false),
             Some(xc) => {
                 let raw_x = row_cell_trimmed(row, xc);
-                if raw_x.is_empty() || is_missing_token(raw_x) {
+                let (core_x, _) = strip_tidy_asterisk(raw_x);
+                if core_x.is_empty() || is_missing_token(core_x) {
                     if target_kind == TargetArchetypeKind::Xy {
                         continue;
                     }
@@ -883,7 +885,6 @@ fn collect_tidy_records(
                     if target_kind == TargetArchetypeKind::Xy && num_x.is_none() {
                         return Err(TransformError::InvalidInput { message: format!("non-numeric X value `{raw_x}` at tidy row {}", row_idx + 1) });
                     }
-                    let (core_x, _) = strip_tidy_asterisk(raw_x);
                     (Some(core_x.to_owned()), num_x, parsed_x.excluded)
                 }
             }
@@ -990,9 +991,12 @@ fn pivot_tidy_to_column(title: &str, records: &[TidyRecord]) -> Result<DataSheet
 
     for rec in records {
         validate_title(&rec.group)?;
-        let g = ensure_group_slot(&rec.group, &mut group_names, &mut group_map);
+        let g = ensure_group_slot(&rec.group, &mut group_names, &mut group_map)?;
         while columns.len() <= g {
             columns.push(Vec::new());
+        }
+        if columns[g].len() >= MAX_ROWS {
+            return Err(DocError::TooManyRows { count: columns[g].len() + 1, max: MAX_ROWS }.into());
         }
         columns[g].push((rec.value.clone(), rec.exclusion_note.clone()));
     }
@@ -1056,11 +1060,16 @@ fn pivot_tidy_to_xy(
 
     for rec in records {
         validate_title(&rec.group)?;
-        ensure_group_slot(&rec.group, &mut group_names, &mut group_map);
+        ensure_group_slot(&rec.group, &mut group_names, &mut group_map)?;
         if let Some(x) = rec.x_num {
             let nx = normalize_zero(x);
             let bits = nx.to_bits();
-            x_by_bits.entry(bits).or_insert(nx);
+            if !x_by_bits.contains_key(&bits) {
+                if x_by_bits.len() >= MAX_ROWS {
+                    return Err(DocError::TooManyRows { count: x_by_bits.len() + 1, max: MAX_ROWS }.into());
+                }
+                x_by_bits.insert(bits, nx);
+            }
             if rec.x_excluded {
                 x_any_excluded_bits.insert(bits);
             } else {
@@ -1077,7 +1086,7 @@ fn pivot_tidy_to_xy(
     x_vals.sort_by(f64::total_cmp);
     let x_row_by_bits: BTreeMap<u64, usize> = x_vals.iter().enumerate().map(|(r, &x)| (normalize_zero(x).to_bits(), r)).collect();
 
-    let (use_named_reps, rep_slots) = build_replicate_slot_map(records, mapping.replicate_col.is_some(), decimal_sep);
+    let (use_named_reps, rep_slots) = build_replicate_slot_map(records, mapping.replicate_col.is_some(), decimal_sep)?;
     let mut placed: PlacedCellGrid = BTreeMap::new();
     let mut next_auto: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     let mut max_sub = 0_usize;
@@ -1097,11 +1106,17 @@ fn pivot_tidy_to_xy(
                     collisions += 1;
                 }
                 s += 1;
+                if s >= MAX_SUBCOLUMNS {
+                    return Err(DocError::TooManySubcolumns { count: s + 1, max: MAX_SUBCOLUMNS }.into());
+                }
             }
             s
         } else {
             let cursor = next_auto.entry((r, g)).or_insert(0);
             let s = *cursor;
+            if s >= MAX_SUBCOLUMNS {
+                return Err(DocError::TooManySubcolumns { count: s + 1, max: MAX_SUBCOLUMNS }.into());
+            }
             *cursor += 1;
             s
         };
@@ -1179,11 +1194,11 @@ fn pivot_tidy_to_grouped(
     let mut group_map = BTreeMap::new();
     for rec in records {
         validate_title(&rec.group)?;
-        ensure_group_slot(&rec.group, &mut group_names, &mut group_map);
+        ensure_group_slot(&rec.group, &mut group_names, &mut group_map)?;
     }
 
-    let (row_titles, row_lookup) = build_grouped_row_index(mapping.x_col.is_some(), records);
-    let (use_named_reps, rep_slots) = build_replicate_slot_map(records, mapping.replicate_col.is_some(), decimal_sep);
+    let (row_titles, row_lookup) = build_grouped_row_index(mapping.x_col.is_some(), records)?;
+    let (use_named_reps, rep_slots) = build_replicate_slot_map(records, mapping.replicate_col.is_some(), decimal_sep)?;
 
     let mut placed: PlacedCellGrid = BTreeMap::new();
     let mut next_row_or_sub: BTreeMap<(usize, usize), usize> = BTreeMap::new();
@@ -1205,11 +1220,17 @@ fn pivot_tidy_to_grouped(
                         collisions += 1;
                     }
                     slot += 1;
+                    if slot >= MAX_SUBCOLUMNS {
+                        return Err(DocError::TooManySubcolumns { count: slot + 1, max: MAX_SUBCOLUMNS }.into());
+                    }
                 }
                 slot
             } else {
                 let cursor = next_row_or_sub.entry((r, g)).or_insert(0);
                 let slot = *cursor;
+                if slot >= MAX_SUBCOLUMNS {
+                    return Err(DocError::TooManySubcolumns { count: slot + 1, max: MAX_SUBCOLUMNS }.into());
+                }
                 *cursor += 1;
                 slot
             };
@@ -1221,6 +1242,9 @@ fn pivot_tidy_to_grouped(
             let s = if use_named_reps { *rep_slots.get(&rec.replicate).unwrap_or(&0) } else { 0 };
             let cursor = next_row_or_sub.entry((g, s)).or_insert(0);
             let r = *cursor;
+            if r >= MAX_ROWS {
+                return Err(DocError::TooManyRows { count: r + 1, max: MAX_ROWS }.into());
+            }
             *cursor += 1;
             if r >= extra_rows {
                 extra_rows = r + 1;
@@ -1233,6 +1257,7 @@ fn pivot_tidy_to_grouped(
     }
 
     let row_count = extra_rows.max(1);
+    validate_rows(row_count)?;
     let mut final_row_titles = row_titles;
     while final_row_titles.len() < row_count {
         final_row_titles.push(format!("Row {}", final_row_titles.len() + 1));
@@ -1383,32 +1408,50 @@ fn fill_y_cells_and_notes(data_sets: &mut [curvebook_doc::DataSetColumn], placed
     notes
 }
 
-fn ensure_group_slot(name: &str, names: &mut Vec<String>, map: &mut BTreeMap<String, usize>) -> usize {
+fn ensure_group_slot(name: &str, names: &mut Vec<String>, map: &mut BTreeMap<String, usize>) -> Result<usize, TransformError> {
     if let Some(&idx) = map.get(name) {
-        idx
+        Ok(idx)
     } else {
+        if names.len() >= MAX_DATA_SETS {
+            return Err(DocError::TooManyDataSets { count: names.len() + 1, max: MAX_DATA_SETS }.into());
+        }
         let idx = names.len();
         names.push(name.to_owned());
         map.insert(name.to_owned(), idx);
-        idx
+        Ok(idx)
     }
 }
 
-fn build_replicate_slot_map(records: &[TidyRecord], has_replicate_col: bool, decimal_sep: char) -> (bool, BTreeMap<String, usize>) {
+fn build_replicate_slot_map(
+    records: &[TidyRecord],
+    has_replicate_col: bool,
+    decimal_sep: char,
+) -> Result<(bool, BTreeMap<String, usize>), TransformError> {
     if !has_replicate_col {
-        return (false, BTreeMap::new());
+        return Ok((false, BTreeMap::new()));
     }
-    let keys: BTreeSet<String> = records.iter().map(|r| r.replicate.clone()).collect();
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    for r in records {
+        if !keys.contains(&r.replicate) {
+            if keys.len() >= MAX_SUBCOLUMNS {
+                return Err(DocError::TooManySubcolumns { count: keys.len() + 1, max: MAX_SUBCOLUMNS }.into());
+            }
+            keys.insert(r.replicate.clone());
+        }
+    }
     if keys.is_empty() {
-        return (false, BTreeMap::new());
+        return Ok((false, BTreeMap::new()));
     }
-    let mut ordered: Vec<String> = keys.into_iter().collect();
-    ordered.sort_by(|a, b| match (parse_finite_with_decimal_sep(a, decimal_sep), parse_finite_with_decimal_sep(b, decimal_sep)) {
-        (Some(na), Some(nb)) => na.total_cmp(&nb).then_with(|| a.cmp(b)),
-        _ => a.cmp(b),
+    let mut ordered: Vec<(Option<f64>, String)> = keys.into_iter().map(|k| (parse_finite_with_decimal_sep(&k, decimal_sep), k)).collect();
+    // Strict total order: finite numeric keys precede non-numeric text keys.
+    ordered.sort_by(|(na, a), (nb, b)| match (na, nb) {
+        (Some(x), Some(y)) => x.total_cmp(y).then_with(|| a.cmp(b)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.cmp(b),
     });
-    let map = ordered.into_iter().enumerate().map(|(idx, k)| (k, idx)).collect();
-    (true, map)
+    let map = ordered.into_iter().enumerate().map(|(idx, (_, k))| (k, idx)).collect();
+    Ok((true, map))
 }
 
 fn grouped_row_key(rec: &TidyRecord) -> String {
@@ -1419,9 +1462,9 @@ fn grouped_row_key(rec: &TidyRecord) -> String {
     }
 }
 
-fn build_grouped_row_index(has_x_col: bool, records: &[TidyRecord]) -> (Vec<String>, BTreeMap<String, usize>) {
+fn build_grouped_row_index(has_x_col: bool, records: &[TidyRecord]) -> Result<(Vec<String>, BTreeMap<String, usize>), TransformError> {
     if !has_x_col {
-        return (Vec::new(), BTreeMap::new());
+        return Ok((Vec::new(), BTreeMap::new()));
     }
     let all_numeric = records.iter().filter(|r| r.x_token.is_some()).all(|r| r.x_num.is_some());
 
@@ -1430,8 +1473,14 @@ fn build_grouped_row_index(has_x_col: bool, records: &[TidyRecord]) -> (Vec<Stri
         for rec in records {
             if let Some(n) = rec.x_num {
                 let norm = normalize_zero(n);
-                let label = rec.x_token.clone().unwrap_or_else(|| format_compact_f64(norm));
-                by_bits.entry(norm.to_bits()).or_insert(label);
+                let bits = norm.to_bits();
+                if !by_bits.contains_key(&bits) {
+                    if by_bits.len() >= MAX_ROWS {
+                        return Err(DocError::TooManyRows { count: by_bits.len() + 1, max: MAX_ROWS }.into());
+                    }
+                    let label = rec.x_token.clone().unwrap_or_else(|| format_compact_f64(norm));
+                    by_bits.insert(bits, label);
+                }
             }
         }
         let mut pairs: Vec<(f64, String, Vec<String>)> = Vec::new();
@@ -1457,24 +1506,30 @@ fn build_grouped_row_index(has_x_col: bool, records: &[TidyRecord]) -> (Vec<Stri
             }
         }
         if records.iter().any(|r| r.x_token.is_none() && r.x_num.is_none()) {
+            if titles.len() >= MAX_ROWS {
+                return Err(DocError::TooManyRows { count: titles.len() + 1, max: MAX_ROWS }.into());
+            }
             let idx = titles.len();
             titles.push(String::from("(Missing)"));
             lookup.insert(String::from("(Missing)"), idx);
         }
-        return (titles, lookup);
+        return Ok((titles, lookup));
     }
 
     let mut titles = Vec::new();
     let mut lookup = BTreeMap::new();
     for rec in records {
         let key = grouped_row_key(rec);
-        lookup.entry(key.clone()).or_insert_with(|| {
+        if let std::collections::btree_map::Entry::Vacant(slot) = lookup.entry(key) {
+            if titles.len() >= MAX_ROWS {
+                return Err(DocError::TooManyRows { count: titles.len() + 1, max: MAX_ROWS }.into());
+            }
             let idx = titles.len();
-            titles.push(key);
-            idx
-        });
+            titles.push(slot.key().clone());
+            slot.insert(idx);
+        }
     }
-    (titles, lookup)
+    Ok((titles, lookup))
 }
 
 fn normalize_zero(v: f64) -> f64 {
@@ -1515,4 +1570,64 @@ fn make_sheet_id(prefix: &str, title: &str) -> String {
         slug.pop();
     }
     if slug.is_empty() || slug == prefix { format!("{prefix}-sheet") } else { slug }
+}
+
+#[cfg(test)]
+mod audit_w1_plate_tidy_tests {
+    use curvebook_doc::{DocError, MAX_SUBCOLUMNS, TableArchetype};
+
+    use super::{TidyColumnMapping, pivot_tidy_long_to_datasheet};
+    use crate::archetype_convert::TargetArchetypeKind;
+    use crate::error::TransformError;
+
+    #[test]
+    fn aud_04_01_mixed_numeric_and_text_replicate_labels_never_panic() {
+        let headers: Vec<String> = ["X", "Group", "Rep", "Val"].into_iter().map(String::from).collect();
+        let mut rows = Vec::new();
+        for i in 1..=20 {
+            rows.push(vec![String::from("1"), String::from("A"), format!("{i}"), format!("{i}")]);
+            rows.push(vec![String::from("1"), String::from("A"), format!("{i}a"), format!("{}", i + 100)]);
+            rows.push(vec![String::from("1"), String::from("A"), format!("-{i}"), format!("{}", i + 200)]);
+        }
+        let mapping = TidyColumnMapping { x_col: Some(0), group_col: 1, replicate_col: Some(2), value_col: 3, excluded_col: None };
+        let xy = pivot_tidy_long_to_datasheet("Mixed Reps XY", &headers, &rows, &mapping, TargetArchetypeKind::Xy, '.').unwrap();
+        let TableArchetype::Xy(t) = &xy.archetype else { panic!("expected Xy") };
+        assert_eq!(t.y_subcolumn_mode.subcolumn_count(), 60);
+
+        let grp = pivot_tidy_long_to_datasheet("Mixed Reps Grouped", &headers, &rows, &mapping, TargetArchetypeKind::Grouped, '.').unwrap();
+        let TableArchetype::Grouped(g) = &grp.archetype else { panic!("expected Grouped") };
+        assert_eq!(g.subcolumn_mode.subcolumn_count(), 60);
+    }
+
+    #[test]
+    fn aud_04_21_duplicate_replicate_collisions_fail_fast_at_max_subcolumns() {
+        let headers: Vec<String> = ["X", "Group", "Rep", "Val"].into_iter().map(String::from).collect();
+        let rows: Vec<Vec<String>> =
+            (0..(MAX_SUBCOLUMNS + 2000)).map(|_| vec![String::from("1"), String::from("A"), String::from("R1"), String::from("5")]).collect();
+        let mapping = TidyColumnMapping { x_col: Some(0), group_col: 1, replicate_col: Some(2), value_col: 3, excluded_col: None };
+        let err_xy = pivot_tidy_long_to_datasheet("Dup XY", &headers, &rows, &mapping, TargetArchetypeKind::Xy, '.').unwrap_err();
+        assert!(matches!(err_xy, TransformError::Doc(DocError::TooManySubcolumns { .. })));
+        let err_grp = pivot_tidy_long_to_datasheet("Dup Grp", &headers, &rows, &mapping, TargetArchetypeKind::Grouped, '.').unwrap_err();
+        assert!(matches!(err_grp, TransformError::Doc(DocError::TooManySubcolumns { .. })));
+    }
+
+    #[test]
+    fn aud_04_44_starred_missing_x_tokens_treated_as_missing_not_literal_text() {
+        let headers: Vec<String> = ["X", "Group", "Val"].into_iter().map(String::from).collect();
+        let rows: Vec<Vec<String>> = [("1", "A", "10"), ("10", "A", "20"), ("2", "A", "30"), ("NA*", "A", "40"), ("*", "A", "50")]
+            .into_iter()
+            .map(|(x, g, v)| vec![x.to_owned(), g.to_owned(), v.to_owned()])
+            .collect();
+        let mapping = TidyColumnMapping { x_col: Some(0), group_col: 1, replicate_col: None, value_col: 2, excluded_col: None };
+
+        // Grouped keeps numeric row sorting [1, 2, 10] and buckets starred missing X into "(Missing)".
+        let grp_sheet = pivot_tidy_long_to_datasheet("Starred Missing Grp", &headers, &rows, &mapping, TargetArchetypeKind::Grouped, '.').unwrap();
+        let TableArchetype::Grouped(g) = &grp_sheet.archetype else { panic!("expected Grouped") };
+        assert_eq!(g.row_titles, vec!["1", "2", "10", "(Missing)"]);
+
+        // XY skips missing X rows ("NA*" and "*") without failing as non-numeric.
+        let xy_sheet = pivot_tidy_long_to_datasheet("Starred Missing XY", &headers, &rows, &mapping, TargetArchetypeKind::Xy, '.').unwrap();
+        let TableArchetype::Xy(xy) = &xy_sheet.archetype else { panic!("expected Xy") };
+        assert_eq!(xy.row_count(), 3);
+    }
 }

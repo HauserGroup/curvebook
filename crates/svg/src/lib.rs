@@ -6,7 +6,7 @@
 
 pub mod writer;
 
-pub use writer::{SvgError, SvgExportOptions, render_svg, validate_svg_structure};
+pub use writer::{MAX_SVG_OUTPUT_BYTES, MAX_SVG_PATH_COMMANDS, MAX_SVG_PRIMITIVES, SvgError, SvgExportOptions, render_svg, validate_svg_structure};
 
 /// Default SVG XML namespace URI.
 pub const SVG_XMLNS: &str = "http://www.w3.org/2000/svg";

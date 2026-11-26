@@ -32,8 +32,13 @@ mod layout;
 mod parser;
 mod render;
 
-use curvebook_doc::{AnalysisKind, EquationDisplayMode, ProjectDocument, ResultSheet, ResultStatus, SheetId};
-use curvebook_fit::tex_format::{format_model_equation_tex, format_polynomial_equation_tex};
+use curvebook_doc::{
+    AnalysisKind, EquationDisplayMode, IdentifiabilityMode, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTabKind, SheetId,
+    TableArchetype,
+};
+use curvebook_fit::tex_format::{
+    format_linear_regression_equation_tex, format_model_equation_tex_for_dataset, format_number_sig_figs, format_polynomial_equation_tex,
+};
 
 pub use render::{render_model_equation_annotation, render_tex_equation_box, resolve_model_equation_hit_bounds};
 
@@ -133,17 +138,96 @@ fn has_all_polynomial_coeffs(params: &[(String, f64)], order: usize, through_ori
     })
 }
 
+/// Return `true` when `kind` represents a parametric regression analysis with a closed-form model
+/// equation suitable for live [`curvebook_doc::GraphAnnotation::ModelEquation`] rendering (`AUD-13-18`).
+#[must_use]
+pub const fn is_parametric_equation_analysis(kind: &AnalysisKind) -> bool {
+    matches!(
+        kind,
+        AnalysisKind::NonlinearRegression(_)
+            | AnalysisKind::LinearRegression(_)
+            | AnalysisKind::PassingBablok(_)
+            | AnalysisKind::SimpleLogisticRegression(_)
+    )
+}
+
+/// Resolve the display title for `data_set_index` in the upstream data table referenced by `res`.
+pub(crate) fn dataset_title_for_result<'a>(doc: &'a ProjectDocument, res: &ResultSheet, data_set_index: usize) -> Option<&'a str> {
+    let ds = crate::resolve_data_sheet_or_upstream(doc, &res.analysis.source_sheet_id)?;
+    let raw = match &ds.archetype {
+        TableArchetype::Xy(t) => t.data_sets.get(data_set_index).map(|c| c.title.as_str()),
+        TableArchetype::Column(t) => t.data_sets.get(data_set_index).map(|c| c.title.as_str()),
+        TableArchetype::Grouped(t) => t.data_sets.get(data_set_index).map(|c| c.title.as_str()),
+        TableArchetype::Contingency(t) => t.data_sets.get(data_set_index).map(|c| c.title.as_str()),
+        TableArchetype::Survival(t) => t.cohorts.get(data_set_index).map(|c| c.title.as_str()),
+        TableArchetype::PartsOfWhole(t) => t.data_sets.get(data_set_index).map(|c| c.title.as_str()),
+        TableArchetype::MultipleVariables(t) => t.variables.get(data_set_index).map(|v| v.title.as_str()),
+        TableArchetype::Nested(t) => t.groups.get(data_set_index).map(|g| g.title.as_str()),
+    }?;
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// Return `true` when `res` is a nonlinear regression running under
+/// [`IdentifiabilityMode::IdentifyUnstableParameters`] whose parameter table explicitly masks
+/// `key` as `"Unstable"` (`AUD-13-05` defense-in-depth for pre-Wave-1 saved sheets alongside Wave 1
+/// scalar omission).
+pub(crate) fn is_unstable_masked_scalar(res: &ResultSheet, key: &str, data_set_index: Option<usize>, doc: Option<&ProjectDocument>) -> bool {
+    let AnalysisKind::NonlinearRegression(nl) = &res.analysis.kind else {
+        return false;
+    };
+    if nl.effective_identifiability_mode() != Some(IdentifiabilityMode::IdentifyUnstableParameters) {
+        return false;
+    }
+    let Some(tab) = res.tabs.iter().find(|t| t.id == "nonlinear_parameters" || t.kind == ResultTabKind::ParametersAndConfidenceIntervals) else {
+        return false;
+    };
+    let target_norm = normalize_scalar_key(key);
+    let multi_ds = res.fitted_curves.iter().filter(|fc| !fc.equation_id.eq_ignore_ascii_case("ROC")).count() > 1;
+    let ds_title = data_set_index.and_then(|idx| doc.and_then(|d| dataset_title_for_result(d, res, idx)));
+
+    for (row_label, row_cells) in tab.row_labels.iter().zip(tab.rows.iter()) {
+        let is_marked_unstable = matches!(row_cells.first(), Some(ResultCell::Text(s)) if s.trim().eq_ignore_ascii_case("unstable"));
+        if !is_marked_unstable {
+            continue;
+        }
+        let trimmed = row_label.trim();
+        let without_suffix = trimmed.strip_suffix("(Unstable)").or_else(|| trimmed.strip_suffix("(unstable)")).unwrap_or(trimmed).trim();
+        let (param_part, bracket_label) = match without_suffix.strip_suffix(']').and_then(|s| s.rsplit_once('[')) {
+            Some((before, inside)) => (before.trim(), Some(inside.trim())),
+            None => (without_suffix, None),
+        };
+        if normalize_scalar_key(param_part) != target_norm {
+            continue;
+        }
+        if !multi_ds || data_set_index.is_none() || bracket_label.is_none() {
+            return true;
+        }
+        if let (Some(ds_idx), Some(lbl)) = (data_set_index, bracket_label) {
+            let ds_tag = format!("ds{}", ds_idx.saturating_add(1));
+            let lbl_low = lbl.to_ascii_lowercase();
+            if lbl_low == ds_tag || lbl_low.ends_with(&format!("({ds_tag})")) || ds_title.is_some_and(|title| lbl.eq_ignore_ascii_case(title)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Collect scalar parameters for `data_set_index` from `res`, preferring
 /// dataset-specific entries and falling back to shared (`data_set_index: None`)
 /// parameters for keys not already bound to the dataset when another dataset
 /// hasn't already claimed dataset-scoped parameters alone.
-#[must_use]
-pub(crate) fn collect_dataset_scalars(res: &ResultSheet, data_set_index: usize) -> Vec<(String, f64)> {
+fn collect_dataset_scalars_with_doc(doc: Option<&ProjectDocument>, res: &ResultSheet, data_set_index: usize) -> Vec<(String, f64)> {
     let mut out: Vec<(String, f64)> = Vec::new();
     let mut seen_keys: Vec<String> = Vec::new();
 
     for scalar in &res.scalars {
-        if scalar.data_set_index == Some(data_set_index) && scalar.value.is_finite() && !is_summary_or_gof_scalar(&scalar.key) {
+        if scalar.data_set_index == Some(data_set_index)
+            && scalar.value.is_finite()
+            && !is_summary_or_gof_scalar(&scalar.key)
+            && !is_unstable_masked_scalar(res, &scalar.key, Some(data_set_index), doc)
+        {
             let lower = scalar.key.trim().to_ascii_lowercase();
             if !seen_keys.iter().any(|k| k == &lower) {
                 seen_keys.push(lower);
@@ -152,13 +236,21 @@ pub(crate) fn collect_dataset_scalars(res: &ResultSheet, data_set_index: usize) 
         }
     }
 
-    let has_other_dataset_scoped = res
-        .scalars
-        .iter()
-        .any(|s| s.data_set_index.is_some_and(|idx| idx != data_set_index) && s.value.is_finite() && !is_summary_or_gof_scalar(&s.key));
-    if !out.is_empty() || !has_other_dataset_scoped {
+    let has_other_dataset_scoped = res.scalars.iter().any(|s| {
+        s.data_set_index.is_some_and(|idx| idx != data_set_index)
+            && s.value.is_finite()
+            && !is_summary_or_gof_scalar(&s.key)
+            && !is_unstable_masked_scalar(res, &s.key, s.data_set_index, doc)
+    });
+    let has_converged_overlay_for_ds =
+        res.fitted_curves.iter().any(|c| c.data_set_index == data_set_index && c.converged && !c.equation_id.eq_ignore_ascii_case("ROC"));
+    if !out.is_empty() || !has_other_dataset_scoped || has_converged_overlay_for_ds {
         for scalar in &res.scalars {
-            if scalar.data_set_index.is_none() && scalar.value.is_finite() && !is_summary_or_gof_scalar(&scalar.key) {
+            if scalar.data_set_index.is_none()
+                && scalar.value.is_finite()
+                && !is_summary_or_gof_scalar(&scalar.key)
+                && !is_unstable_masked_scalar(res, &scalar.key, Some(data_set_index), doc)
+            {
                 let lower = scalar.key.trim().to_ascii_lowercase();
                 if !seen_keys.iter().any(|k| k == &lower) {
                     seen_keys.push(lower);
@@ -169,6 +261,40 @@ pub(crate) fn collect_dataset_scalars(res: &ResultSheet, data_set_index: usize) 
     }
 
     out
+}
+
+fn find_legacy_prefixed_logistic_scalar(doc: &ProjectDocument, res: &ResultSheet, data_set_index: usize, aliases: &[&str]) -> Option<f64> {
+    let ds_title = dataset_title_for_result(doc, res, data_set_index)?;
+    let prefix = format!("{}.", ds_title.to_ascii_lowercase());
+    res.scalars
+        .iter()
+        .find(|s| {
+            if s.data_set_index.is_some() || !s.value.is_finite() {
+                return false;
+            }
+            let lower = s.key.trim().to_ascii_lowercase();
+            lower.strip_prefix(&prefix).is_some_and(|rest| {
+                let norm = normalize_scalar_key(rest);
+                aliases.iter().any(|a| *a == norm)
+            })
+        })
+        .map(|s| s.value)
+}
+
+/// Resolve the live TeX equation string for a [`curvebook_doc::GraphAnnotation::ModelEquation`],
+/// returning `None` for non-parametric analyses, missing/failed/pending results, or missing
+/// substituted parameters.
+#[must_use]
+pub fn resolve_model_equation_tex(
+    doc: &ProjectDocument,
+    result_sheet_id: &SheetId,
+    data_set_index: usize,
+    mode: EquationDisplayMode,
+) -> Option<String> {
+    match resolve_model_equation(doc, result_sheet_id, data_set_index, mode) {
+        ResolvedEquation::Tex(tex) if !tex.trim().is_empty() => Some(tex),
+        _ => None,
+    }
 }
 
 /// Resolve the live TeX equation string (or diagnostic placeholder) from `doc`.
@@ -191,11 +317,13 @@ pub(super) fn resolve_model_equation(
     }
 
     let substituted = matches!(mode, EquationDisplayMode::Substituted);
-    let params = collect_dataset_scalars(res, data_set_index);
-    let overlay_for_dataset = if res.fitted_curves.is_empty() {
+    let params = collect_dataset_scalars_with_doc(Some(doc), res, data_set_index);
+    let non_roc_curves: Vec<&curvebook_doc::FittedCurveOverlay> =
+        res.fitted_curves.iter().filter(|c| !c.equation_id.eq_ignore_ascii_case("ROC")).collect();
+    let overlay_for_dataset = if non_roc_curves.is_empty() {
         None
     } else {
-        let Some(ov) = res.fitted_curves.iter().find(|c| c.data_set_index == data_set_index) else {
+        let Some(ov) = non_roc_curves.into_iter().find(|c| c.data_set_index == data_set_index) else {
             return ResolvedEquation::Placeholder("(Fit unavailable)".to_owned());
         };
         if !ov.converged {
@@ -223,16 +351,16 @@ pub(super) fn resolve_model_equation(
                     return ResolvedEquation::Placeholder("(Fit parameters unavailable)".to_owned());
                 }
             }
-            let tex = format_model_equation_tex(equation_id, custom_dsl, &params, substituted, EQUATION_SIG_FIGS);
+            let tex = format_model_equation_tex_for_dataset(equation_id, custom_dsl, &params, Some(data_set_index), substituted, EQUATION_SIG_FIGS);
             ResolvedEquation::Tex(tex)
         }
         AnalysisKind::LinearRegression(lin) => {
-            let through_origin = lin.force_through_origin && !lin.deming_model_ii;
+            let through_origin = !lin.deming_model_ii && matches!(lin.effective_fixed_point(), Some((x0, y0)) if x0 == 0.0 && y0 == 0.0);
             let lin_params = collect_linear_params(&params, through_origin);
             if substituted && !has_all_polynomial_coeffs(&lin_params, 1, through_origin) {
                 return ResolvedEquation::Placeholder("(Fit parameters unavailable)".to_owned());
             }
-            let tex = format_polynomial_equation_tex(1, through_origin, &lin_params, substituted, EQUATION_SIG_FIGS);
+            let tex = format_linear_regression_equation_tex(lin, &lin_params, substituted, EQUATION_SIG_FIGS);
             ResolvedEquation::Tex(tex)
         }
         AnalysisKind::PassingBablok(_) => {
@@ -247,16 +375,30 @@ pub(super) fn resolve_model_equation(
             if !substituted {
                 return ResolvedEquation::Tex(String::from("P(Y=1) = \\frac{1}{1 + e^{-(\\beta_0 + \\beta_1 X)}}"));
             }
-            let b0 = params.iter().find(|(k, _)| matches!(normalize_scalar_key(k).as_str(), "beta0" | "b0" | "b_0")).map(|(_, v)| *v);
-            let b1 = params.iter().find(|(k, _)| matches!(normalize_scalar_key(k).as_str(), "beta1" | "b1" | "b_1")).map(|(_, v)| *v);
+            let b0 = params
+                .iter()
+                .find(|(k, _)| matches!(normalize_scalar_key(k).as_str(), "beta0" | "b0" | "b_0"))
+                .map(|(_, v)| *v)
+                .or_else(|| find_legacy_prefixed_logistic_scalar(doc, res, data_set_index, &["beta0", "b0", "b_0"]));
+            let b1 = params
+                .iter()
+                .find(|(k, _)| matches!(normalize_scalar_key(k).as_str(), "beta1" | "b1" | "b_1"))
+                .map(|(_, v)| *v)
+                .or_else(|| find_legacy_prefixed_logistic_scalar(doc, res, data_set_index, &["beta1", "b1", "b_1"]));
             match (b0, b1) {
                 (Some(v0), Some(v1)) if v0.is_finite() && v1.is_finite() => {
+                    let b0_str = format_number_sig_figs(v0, EQUATION_SIG_FIGS);
                     let sign = if v1 < 0.0 { "-" } else { "+" };
-                    let abs_b1 = v1.abs();
-                    ResolvedEquation::Tex(format!("P(Y=1) = \\frac{{1}}{{1 + e^{{-({v0:.4} {sign} {abs_b1:.4} X)}}}}"))
+                    let abs_b1_str = format_number_sig_figs(v1.abs(), EQUATION_SIG_FIGS);
+                    let mul = if abs_b1_str.contains("\\times") { " \\cdot " } else { " " };
+                    ResolvedEquation::Tex(format!("P(Y=1) = \\frac{{1}}{{1 + e^{{-({b0_str} {sign} {abs_b1_str}{mul}X)}}}}"))
                 }
                 _ => ResolvedEquation::Placeholder("(Fit parameters unavailable)".to_owned()),
             }
+        }
+        // Model-free / non-parametric curve analyses never emit bogus diagnostic scalar dumps (`AUD-13-18`).
+        AnalysisKind::FitSplineLowess(_) | AnalysisKind::Survival(_) | AnalysisKind::RocCurve(_) | AnalysisKind::GeneralizedLinearModel(_) => {
+            ResolvedEquation::Empty
         }
         _ => {
             if let Some(curve) = overlay_for_dataset.filter(|c| !c.equation_id.trim().is_empty()) {
@@ -270,7 +412,8 @@ pub(super) fn resolve_model_equation(
                         return ResolvedEquation::Placeholder("(Fit parameters unavailable)".to_owned());
                     }
                 }
-                let tex = format_model_equation_tex(&curve.equation_id, None, &params, substituted, EQUATION_SIG_FIGS);
+                let tex =
+                    format_model_equation_tex_for_dataset(&curve.equation_id, None, &params, Some(data_set_index), substituted, EQUATION_SIG_FIGS);
                 ResolvedEquation::Tex(tex)
             } else {
                 ResolvedEquation::Empty

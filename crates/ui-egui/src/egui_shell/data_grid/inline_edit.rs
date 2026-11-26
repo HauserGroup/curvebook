@@ -11,8 +11,8 @@ use crate::inspect::ZLayer;
 
 use super::super::{FrameInspectEntryInput, PendingUiIntents, UiIntent};
 use super::shared::{
-    AuxInlineTarget, MultiGridAuxState, MultiGridCtx, MultiGridFrameState, MultiGridGeom, parse_inline_cell_input, pending_commit_key,
-    pressed_key_event_modifiers, record_meta_if_enabled,
+    AuxInlineTarget, MultiGridAuxState, MultiGridCtx, MultiGridFrameState, MultiGridGeom, ParsedInlineCell, parse_inline_cell_with_exclusion,
+    pending_commit_key, pressed_key_event_modifiers, record_meta_if_enabled,
 };
 use super::shortcuts::{extract_multiline_or_tab_x_input, push_x_cell_text_paste_intents, step_cell_horiz};
 use super::{ColumnGridEguiState, GridInlineEditBuffer, GridInlineEditTarget};
@@ -344,8 +344,12 @@ fn rect_for_aux_target(geom: &MultiGridGeom, scroll_offset: Vec2, target: &AuxIn
     }
 }
 
-fn cell_value_matches_json(cell: Option<&curvebook_doc::Cell>, val: &serde_json::Value) -> bool {
-    match (cell.map(|c| &c.value), val) {
+fn cell_value_matches_parsed(cell: Option<&curvebook_doc::Cell>, parsed: &ParsedInlineCell) -> bool {
+    let cur_excluded = cell.is_some_and(|c| c.excluded);
+    if cur_excluded != parsed.excluded {
+        return false;
+    }
+    match (cell.map(|c| &c.value), &parsed.value) {
         (None | Some(curvebook_doc::CellValue::Empty), serde_json::Value::Null) => true,
         (Some(curvebook_doc::CellValue::Number(cur)), serde_json::Value::Number(n)) => n.as_f64().is_some_and(|v| v.to_bits() == cur.to_bits()),
         (Some(curvebook_doc::CellValue::Text(cur)), serde_json::Value::String(s)) => cur == s,
@@ -353,16 +357,25 @@ fn cell_value_matches_json(cell: Option<&curvebook_doc::Cell>, val: &serde_json:
     }
 }
 
-fn commit_standard_inline_edit(app: &UiApp, ds: &DataSheet, target: GridInlineEditTarget, draft: String, intents: &mut PendingUiIntents) {
+pub fn commit_standard_inline_edit(app: &UiApp, ds: &DataSheet, target: GridInlineEditTarget, draft: String, intents: &mut PendingUiIntents) {
     match target {
         GridInlineEditTarget::Cell(coord) => {
-            let val = parse_inline_cell_input(app, &draft);
-            if cell_value_matches_json(ds.cell(curvebook_doc::CellCoord::new(coord.row, coord.col, coord.subcol)), &val) {
+            let parsed = parse_inline_cell_with_exclusion(app, &draft);
+            if cell_value_matches_parsed(ds.cell(curvebook_doc::CellCoord::new(coord.row, coord.col, coord.subcol)), &parsed) {
                 return;
             }
             intents.push_engine(
                 "table.setCell",
-                json!({ "sheet_id": ds.id.as_str(), "row": coord.row, "col": coord.col, "subcol": coord.subcol, "value": val }),
+                json!({
+                    "sheet_id": ds.id.as_str(),
+                    "row": coord.row,
+                    "col": coord.col,
+                    "subcol": coord.subcol,
+                    "value": parsed.value,
+                    "excluded": parsed.excluded,
+                    "decimal_separator": app.locale_preset.decimal_separator.to_string(),
+                    "parse_asterisk_exclusion": false,
+                }),
             );
         }
         GridInlineEditTarget::ColumnTitle { col } => {
@@ -387,8 +400,21 @@ fn commit_aux_inline_edit(
             if draft.contains('\t') || draft.contains('\n') || draft.contains('\r') {
                 push_x_cell_text_paste_intents(app, ds, row, subcol, &draft, intents);
             } else {
-                let val = parse_inline_cell_input(app, &draft);
-                intents.push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": row, "subcol": subcol, "value": val }));
+                let parsed = parse_inline_cell_with_exclusion(app, &draft);
+                if !cell_value_matches_parsed(ds.archetype.x_or_time_cell(row, subcol), &parsed) {
+                    intents.push_engine(
+                        "table.setXCells",
+                        json!({
+                            "sheet_id": ds.id.as_str(),
+                            "row": row,
+                            "subcol": subcol,
+                            "value": parsed.value,
+                            "excluded": parsed.excluded,
+                            "decimal_separator": app.locale_preset.decimal_separator.to_string(),
+                            "parse_asterisk_exclusion": false,
+                        }),
+                    );
+                }
             }
             let selecting_y_grid = intents
                 .intents()

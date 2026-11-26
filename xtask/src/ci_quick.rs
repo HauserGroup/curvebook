@@ -24,7 +24,7 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::layers::Crate;
-use crate::{cargo_metadata_resolved, ci, has_cargo_nextest, layers, run_cargo};
+use crate::{cargo_metadata_resolved, ci, has_cargo_nextest, layers, run_cargo, run_cargo_strs};
 
 /// Root-level files whose edits can change how every workspace package builds, tests, or verifies.
 const WORKSPACE_WIDE_FILES: &[&str] = &[
@@ -37,9 +37,12 @@ const WORKSPACE_WIDE_FILES: &[&str] = &[
     ".config/nextest.toml",
     "deny.toml",
     "docs/control-protocol.md",
+    "docs/evidence/overview.md",
+    "docs/release/github-pages.md",
+    "docs/implementation/scripting-and-automation.md",
 ];
 /// Directories whose contents can change how every workspace package builds, tests, or packages.
-const WORKSPACE_WIDE_DIRS: &[&str] = &[".cargo/", ".github/", "assets/app-icon/", "packaging/windows/"];
+const WORKSPACE_WIDE_DIRS: &[&str] = &[".cargo/", ".github/", "assets/app-icon/", "packaging/", "docs/schemas/", "corpus/nist-strd/"];
 /// The package whose test library hosts the untranslated-locale report run by `policy`.
 const I18N_PACKAGE: &str = "curvebook-ui-egui";
 /// The workspace task runner package; its test suite (including release-scan `.dmg` checks)
@@ -58,6 +61,13 @@ pub enum Selection {
 impl Selection {
     fn is_empty(&self) -> bool {
         matches!(self, Self::Packages(set) if set.is_empty())
+    }
+
+    fn contains_package(&self, package: &str) -> bool {
+        match self {
+            Self::Workspace => true,
+            Self::Packages(set) => set.contains(package),
+        }
     }
 
     fn cargo_scope(&self) -> Vec<String> {
@@ -114,10 +124,16 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             lint.extend(lint_scope);
             lint.extend([String::from("--"), String::from("-D"), String::from("warnings")]);
             run_cargo(root, &lint)?;
+            if quick_plan.lint_selection.contains_package(XTASK_PACKAGE) {
+                run_cargo_strs(root, ci::DOCS_SITE_CLIPPY_ARGS)?;
+            }
         }
         if !quick_plan.test_selection.is_empty() {
             let test_scope = quick_plan.test_selection.cargo_scope();
             run_cargo(root, &test_args(root, &test_scope))?;
+            if quick_plan.test_selection.contains_package(XTASK_PACKAGE) {
+                run_cargo(root, &ci::docs_site_test_args(has_cargo_nextest()))?;
+            }
         }
     }
     println!("ci quick: passed in {:.2}s (full gate: `cargo xtask ci` or hosted CI on the pull request)", start.elapsed().as_secs_f64());
@@ -374,8 +390,17 @@ mod tests {
             "deny.toml",
             "assets/app-icon/icon.png",
             "docs/control-protocol.md",
+            "docs/evidence/overview.md",
+            "docs/release/github-pages.md",
+            "docs/implementation/scripting-and-automation.md",
+            "docs/schemas/document.schema.json",
+            "corpus/nist-strd/Misra1a.dat",
             ".github/workflows/ci.yml",
             "packaging/windows/installer.wxs",
+            "packaging/macos/Info.plist.in",
+            "packaging/linux/package.sh",
+            "packaging/web/_headers",
+            "packaging/release-channel.sh",
         ] {
             assert_eq!(select(&files(&[path]), &dirs(), &graph()), Selection::Workspace, "{path}");
         }

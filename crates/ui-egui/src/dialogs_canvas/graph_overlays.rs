@@ -1,8 +1,11 @@
 //! Graph overlay & style inspectors: Pairwise Comparisons, Bubble Plot channels, and Apply Style From.
 
+use std::collections::HashSet;
+
 use curvebook_doc::{
-    BracketLabelMode, BracketStyle, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, GraphKind, GraphSheet, GraphSpec,
-    MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PairwiseDisplayMode, ProjectDocument, SheetId, SizeChannelMapping,
+    BracketLabelMode, BracketStyle, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, DataSheet, GraphKind, GraphSheet, GraphSpec,
+    MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PairwiseDisplayMode, ProjectDocument, ResultStatus, SheetId,
+    SizeChannelMapping,
 };
 use curvebook_palette::{ColorRamp, ColormapId, PaletteId, Rgba8};
 
@@ -84,6 +87,15 @@ impl PairwiseComparisonsState {
         self.brackets_dirty = false;
         self.had_brackets_on_graph = !graph.spec.comparisons.is_empty();
         self.synced_brackets = graph.spec.comparisons.clone();
+        if let Some(first) = graph.spec.comparisons.first() {
+            self.bracket_style = first.style;
+            self.label_mode = first.label_mode.clone();
+            self.hide_non_significant = first.hide_if_non_significant;
+        } else {
+            self.bracket_style = BracketStyle::Square;
+            self.label_mode = BracketLabelMode::SummaryStars;
+            self.hide_non_significant = true;
+        }
         self.available_result_ids = doc.result_sheets.iter().filter(|rs| !rs.pairwise_comparisons.is_empty()).map(|rs| rs.id.clone()).collect();
         self.display_mode = graph.spec.pairwise_display_mode;
         if let Some(cld) = &graph.spec.compact_letter_display {
@@ -333,6 +345,25 @@ impl PairwiseComparisonsState {
     }
 }
 
+fn resolve_primary_source_data_sheet<'a>(doc: &'a ProjectDocument, source_id: &'a SheetId) -> Option<&'a DataSheet> {
+    let mut visited = HashSet::new();
+    let mut cursor = source_id;
+    while visited.insert(cursor) {
+        if let Some(ds) = doc.data_sheet(cursor) {
+            return Some(ds);
+        }
+        let rs = doc.result_sheet(cursor)?;
+        if matches!(rs.status, ResultStatus::Failed { .. }) {
+            return None;
+        }
+        if let Some(analyzable) = rs.analyzable_data.as_ref() {
+            return Some(analyzable);
+        }
+        cursor = &rs.analysis.source_sheet_id;
+    }
+    None
+}
+
 /// 5-channel `MultipleVariables` Bubble Plot inspector (`X`, `Y`, `Color`, `Size`, `Label`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BubblePlotInspectorState {
@@ -372,7 +403,8 @@ impl BubblePlotInspectorState {
     /// Load 5-channel encodings and typed source columns for `graph`.
     pub fn sync_from_graph(&mut self, graph: &GraphSheet, doc: &ProjectDocument) {
         self.graph_sheet_id = Some(graph.id.clone());
-        self.available_columns = doc.data_sheet(&graph.spec.primary_source_sheet_id).map_or_else(Vec::new, collect_variable_candidates);
+        self.available_columns =
+            resolve_primary_source_data_sheet(doc, &graph.spec.primary_source_sheet_id).map_or_else(Vec::new, collect_variable_candidates);
         if let Some(mv) = &graph.spec.multivariate {
             self.plot_mode = mv.plot_mode.clone();
             self.x_column = mv.x_column;
@@ -384,6 +416,15 @@ impl BubblePlotInspectorState {
             self.show_confidence_ellipses = mv.show_confidence_ellipses;
             self.x_level_order_override = mv.x_level_order_override.clone();
         } else {
+            let defaults = Self::default();
+            self.plot_mode = defaults.plot_mode;
+            self.x_column = defaults.x_column;
+            self.y_column = defaults.y_column;
+            self.color_channel = defaults.color_channel;
+            self.size_channel = defaults.size_channel;
+            self.label_column = defaults.label_column;
+            self.show_convex_hulls = defaults.show_convex_hulls;
+            self.show_confidence_ellipses = defaults.show_confidence_ellipses;
             self.x_level_order_override = None;
         }
     }

@@ -421,6 +421,9 @@ pub(crate) fn extract_sheet_grid(doc: &ProjectDocument, source_sheet_id: &SheetI
             let rows = finite_scalars.iter().map(|s| vec![format_axis_tick(s.value, AxisScale::Linear, &policy)]).collect();
             return Some(SheetGrid { headers, row_labels, rows });
         }
+        if let Some(ds) = res.analyzable_data.as_ref() {
+            return Some(extract_data_sheet_grid(ds));
+        }
     }
     if let Some(ds) = doc.data_sheet(source_sheet_id) {
         return Some(extract_data_sheet_grid(ds));

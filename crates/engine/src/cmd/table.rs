@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 
 use curvebook_doc::{
-    AnalysisKind, BaselineOperation, Cell, CellCoord, CellValue, DataSetColumn, DataSheet, GraphKind, GraphSpec, ImportFilterSpec, ImportLinkSpec,
-    ImportPlacementSpec, LevelOrderKind, LevelOrderSpec, LinkSource, MAX_PROJECT_CELLS, MAX_SHEET_CELLS, MultipleVariablesTable, NestedGroupColumn,
-    NestedTable, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SubcolumnMode, SurvivalAnalysisSpec, TableArchetype,
-    TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource, format_linked_paste_tsv_cell, validate_project_cells,
-    validate_rows, validate_title,
+    AnalysisKind, BaselineOperation, Cell, CellCoord, CellExclusionNote, CellValue, DataSetColumn, DataSheet, GraphKind, GraphSpec, ImportFilterSpec,
+    ImportLinkSpec, ImportPlacementSpec, LevelOrderKind, LevelOrderSpec, LinkSource, MAX_PROJECT_CELLS, MAX_SHEET_CELLS, MultipleVariablesTable,
+    NestedGroupColumn, NestedTable, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SubcolumnMode, SurvivalAnalysisSpec,
+    TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource, format_linked_paste_tsv_cell,
+    validate_project_cells, validate_rows, validate_title,
 };
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, try_export_result_sheet_tidy_csv};
 use curvebook_transform::{
@@ -981,6 +981,13 @@ fn validate_cell_range_bounds(ds: &DataSheet, range: SheetCellRange, target_x: b
         if !matches!(ds.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_)) {
             return Err(EngineError::with_code(ErrorCode::BadInput, "target=`x` requires an XY or Survival sheet"));
         }
+        if range.start.col != 0 || range.end.col != 0 {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("range column {}..={} must be 0 when target=`x`", range.start.col, range.end.col),
+            )
+            .with_remediation("Omit `col`/`col_start`/`col_end` or set them to 0 when targeting the X/time column."));
+        }
         let x_subcols = x_subcolumn_count(&ds.archetype);
         if range.end.subcol >= x_subcols {
             return Err(EngineError::with_code(
@@ -1141,7 +1148,7 @@ fn mutate_doc_data_sheet_and_recalc<T>(
     let before_active = prune_overrides.then(|| snapshot_active_series_lengths(doc, &id));
     let _ = require_unfrozen_data_sheet_mut(doc, &id)?;
     let out = f(doc, &id)?;
-    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), None, Some(ctx.cancelled))?;
     if let Some(before) = before_active.as_ref() {
         prune_shortened_series_overrides(doc, &id, before);
     }
@@ -1237,7 +1244,7 @@ fn collect_set_cells_edits(p: SetCellsParams) -> Result<Vec<(CellCoord, Cell)>, 
         }
         return Ok(out);
     }
-    Err(bad_input("table.setCells requires `edits`/`cells` or `rows`").with_remediation("Supply either an `edits` array or a 2D `rows` array."))
+    Err(bad_input("table.setCells requires `edits` or `rows`").with_remediation("Supply either an `edits` array or a 2D `rows` array."))
 }
 
 fn run_set_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -1744,7 +1751,14 @@ fn run_exclude_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
         let action = if excluded { "exclude" } else { "unexclude" };
         if let Some(range) = range_opt {
             validate_cell_range_bounds(ds, range, target_x)?;
-            if !target_x {
+            if target_x {
+                for r in range.start.row..=range.end.row {
+                    for s in range.start.subcol..=range.end.subcol {
+                        ds.set_x_or_time_excluded(r, s, excluded)?;
+                        updated = updated.saturating_add(1);
+                    }
+                }
+            } else {
                 for r in range.start.row..=range.end.row {
                     for c in range.start.col..=range.end.col {
                         for s in range.start.subcol..=range.end.subcol {
@@ -1752,16 +1766,12 @@ fn run_exclude_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
                         }
                     }
                 }
-            }
-            for r in range.start.row..=range.end.row {
-                for c in range.start.col..=range.end.col {
-                    for s in range.start.subcol..=range.end.subcol {
-                        if target_x {
-                            ds.set_x_or_time_excluded(r, s, excluded)?;
-                        } else {
+                for r in range.start.row..=range.end.row {
+                    for c in range.start.col..=range.end.col {
+                        for s in range.start.subcol..=range.end.subcol {
                             ds.set_excluded(CellCoord::new(r, c, s), excluded)?;
+                            updated = updated.saturating_add(1);
                         }
-                        updated = updated.saturating_add(1);
                     }
                 }
             }
@@ -1919,6 +1929,9 @@ fn run_exclude_cells_with_reason(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comman
         None => current_utc_timestamp(),
     };
     let note = p.note.clone().unwrap_or_default();
+    validate_title(&p.reason_tag)?;
+    validate_title(&note)?;
+    validate_title(&timestamp_utc)?;
     let raw_id = p.sheet_id.clone();
 
     let (sheet_id, count, recalc) = mutate_data_sheet_and_recalc(ctx, &raw_id, false, |ds| {
@@ -1929,9 +1942,16 @@ fn run_exclude_cells_with_reason(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comman
             }
         }
         ensure_coords_outside_linked_regions(ds, coords.iter().copied(), "exclude")?;
+        let mut notes_by_coord: BTreeMap<CellCoord, CellExclusionNote> =
+            std::mem::take(&mut ds.exclusion_notes).into_iter().map(|entry| (entry.coord, entry)).collect();
         for &coord in &coords {
-            ds.set_excluded_with_reason(coord, &p.reason_tag, &note, &timestamp_utc)?;
+            ds.set_excluded(coord, true)?;
+            notes_by_coord.insert(
+                coord,
+                CellExclusionNote { coord, reason_tag: p.reason_tag.clone(), note: note.clone(), timestamp_utc: timestamp_utc.clone() },
+            );
         }
+        ds.exclusion_notes = notes_by_coord.into_values().collect();
         Ok(coords.len())
     })?;
     Ok(CommandOutcome::mutated(
@@ -2353,8 +2373,7 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
             let payload = ImportSourcePayload::DelimitedText { text: &tsv, delimiter: '\t', decimal_separator: '.' };
             apply_paste_payload(ds, &spec, payload, &opts, other_project_cells)?
         } else {
-            return Err(bad_input("table.paste requires `text`/`tsv`/`csv` or `rows`/`grid`")
-                .with_remediation("Supply delimited `text` or a 2D `rows` array."));
+            return Err(bad_input("table.paste requires `text` or `rows`").with_remediation("Supply delimited `text` or a 2D `rows` array."));
         };
 
         ds.linked_regions.truncate(existing_links);
@@ -2452,7 +2471,7 @@ fn resolve_mv_variable_index(mv: &MultipleVariablesTable, col_ref: Option<&ColRe
             if let Some(title) = fallback_title {
                 mv.find_variable(title).ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("variable `{title}` not found")))
             } else {
-                Err(bad_input("missing required `column`/`col` variable index or title")
+                Err(bad_input("missing required `col` variable index or title")
                     .with_remediation("Identify the variable by zero-based index or title."))
             }
         }
@@ -2954,7 +2973,7 @@ fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
                     (mv.variables.len(), true, mv.row_count(), cur_slots)
                 }
             } else {
-                return Err(bad_input("table.setCalculatedVariable requires `column`/`col` or `title`")
+                return Err(bad_input("table.setCalculatedVariable requires `col` or `title`")
                     .with_remediation("Specify a target column index or a `title` for the calculated variable."));
             }
         };

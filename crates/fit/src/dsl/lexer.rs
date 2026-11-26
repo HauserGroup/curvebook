@@ -83,7 +83,8 @@ pub(in crate::dsl) fn tokenize(input: &str, line: usize) -> Result<Vec<Token>, F
             (b'>', _) => (TokenKind::Gt, 1),
             (b'!', _) => (TokenKind::Bang, 1),
             _ => {
-                return Err(FitError::DslCompileError { message: format!("Unexpected character `{}`", ch as char), line, column: col });
+                let bad_ch = input.get(i..).and_then(|s| s.chars().next()).unwrap_or(ch as char);
+                return Err(FitError::DslCompileError { message: format!("Unexpected character `{bad_ch}`"), line, column: col });
             }
         };
         let text = input.get(i..i + len).unwrap_or("").to_owned();

@@ -5,16 +5,18 @@
 //! Also provides `R10.1` / `R10.9` / `R10.22` web release bundle budget and packaging readiness
 //! validation (`<= 6_243_591` B compressed `curvebook-web-*.zip`).
 
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-use curvebook_platform::write_atomic;
+use curvebook_platform::{read_regular_file_bytes, write_atomic};
 
 const MANIFEST_REL: &str = "crates/text/web-fonts.txt";
 const TRUNK_TOML_REL: &str = "apps/curvebook-web/Trunk.toml";
 const WEB_INDEX_REL: &str = "apps/curvebook-web/index.html";
 const PACKAGE_SH_REL: &str = "packaging/web/package.sh";
 const MAX_BUILT_INDEX_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WEB_FONT_BYTES: usize = 32 * 1024 * 1024;
 
 /// `R10.22` web release zip budget (`1.5 * 4,162,394 B` pre-`R0.20` baseline).
 pub const MAX_WEB_RELEASE_ZIP_BYTES: u64 = 6_243_591;
@@ -31,10 +33,20 @@ fn resolve_staging_root(root: &Path) -> PathBuf {
 
 pub fn run(root: &Path) -> Result<(), String> {
     let staging_root = resolve_staging_root(root);
+    if let Ok(meta) = std::fs::symlink_metadata(&staging_root)
+        && meta.file_type().is_symlink()
+    {
+        return Err(format!("staging directory {} must not be a symlink", staging_root.display()));
+    }
     let built_index = staging_root.join("index.html");
-    if std::fs::symlink_metadata(&built_index).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
-        let hashes = rewrite_built_index_csp_file(&built_index)?;
-        println!("web-fonts: stamped {} SHA-256 script CSP hash(es) into {}", hashes.len(), built_index.display());
+    if let Ok(meta) = std::fs::symlink_metadata(&built_index) {
+        if meta.file_type().is_symlink() {
+            return Err(format!("built index {} must not be a symlink", built_index.display()));
+        }
+        if meta.file_type().is_file() {
+            let hashes = rewrite_built_index_csp_file(&built_index)?;
+            println!("web-fonts: stamped {} SHA-256 script CSP hash(es) into {}", hashes.len(), built_index.display());
+        }
     }
 
     let Some(fonts_root) = std::env::var_os("CURVEBOOK_FONTS_DIR").filter(|v| !v.is_empty()) else {
@@ -47,21 +59,63 @@ pub fn run(root: &Path) -> Result<(), String> {
     validate_manifest_entries(&faces)?;
 
     let staging = staging_root.join("fonts");
-    std::fs::create_dir_all(&staging).map_err(|e| format!("mkdir {}: {e}", staging.display()))?;
-
     let src_base = PathBuf::from(fonts_root).join("fonts");
+    let copied = stage_font_files(&src_base, &staging, &faces)?;
+    println!("web-fonts: staged {copied} font face(s) into {}", staging.display());
+    Ok(())
+}
+
+fn reject_symlink_rel_components(base: &Path, rel: &str) -> Result<(), String> {
+    let mut cur = base.to_path_buf();
+    for seg in rel.split('/') {
+        cur.push(seg);
+        if let Ok(meta) = std::fs::symlink_metadata(&cur)
+            && meta.file_type().is_symlink()
+        {
+            return Err(format!("{}: symlink forbidden during font staging", cur.display()));
+        }
+    }
+    Ok(())
+}
+
+fn stage_font_files(src_base: &Path, staging: &Path, faces: &[String]) -> Result<usize, String> {
+    if let Ok(meta) = std::fs::symlink_metadata(src_base)
+        && (meta.file_type().is_symlink() || !meta.file_type().is_dir())
+    {
+        return Err(format!("font source directory {} must be a regular non-symlink directory", src_base.display()));
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(staging)
+        && (meta.file_type().is_symlink() || !meta.file_type().is_dir())
+    {
+        return Err(format!("font staging directory {} must be a regular non-symlink directory", staging.display()));
+    }
+    std::fs::create_dir_all(staging).map_err(|e| format!("mkdir {}: {e}", staging.display()))?;
+
     let mut copied = 0usize;
-    for rel in &faces {
+    for rel in faces {
+        reject_symlink_rel_components(src_base, rel)?;
+        reject_symlink_rel_components(staging, rel)?;
+
         let src = src_base.join(rel);
+        let src_meta = std::fs::symlink_metadata(&src).map_err(|e| format!("stat {}: {e}", src.display()))?;
+        if src_meta.file_type().is_symlink() || !src_meta.file_type().is_file() {
+            return Err(format!("{}: font source must be a regular non-symlink file", src.display()));
+        }
+        let bytes = read_regular_file_bytes(&src, MAX_WEB_FONT_BYTES).map_err(|e| format!("read {}: {e}", src.display()))?;
+
         let dst = staging.join(rel);
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
-        std::fs::copy(&src, &dst).map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+        if let Ok(dst_meta) = std::fs::symlink_metadata(&dst)
+            && dst_meta.file_type().is_symlink()
+        {
+            return Err(format!("{}: font destination must not be a symlink", dst.display()));
+        }
+        write_atomic(&dst, &bytes).map_err(|e| format!("write {}: {e}", dst.display()))?;
         copied += 1;
     }
-    println!("web-fonts: staged {copied} font face(s) into {}", staging.display());
-    Ok(())
+    Ok(copied)
 }
 
 /// Compute exact CSP `'sha256-...'` hashes over every inline `<script>` block in built `html`
@@ -69,15 +123,17 @@ pub fn run(root: &Path) -> Result<(), String> {
 pub fn rewrite_built_index_csp_hashes(html: &str) -> Result<(String, Vec<String>), String> {
     let hashes = extract_inline_script_hashes(html)?;
     let rewritten = rewrite_csp_meta_tag(html, &hashes)?;
-    if rewritten.contains("'unsafe-inline'") {
+    let active_html = strip_html_comments(&rewritten)?;
+    if active_html.to_ascii_lowercase().contains("'unsafe-inline'")
+        || crate::pages_site::unescape_html_attr(&active_html).to_ascii_lowercase().contains("'unsafe-inline'")
+    {
         return Err(String::from("built index.html still contains `'unsafe-inline'` after CSP hash rewrite"));
     }
     Ok((rewritten, hashes))
 }
 
 fn rewrite_built_index_csp_file(index_path: &Path) -> Result<Vec<String>, String> {
-    let bytes =
-        curvebook_platform::read_regular_file_bytes(index_path, MAX_BUILT_INDEX_BYTES).map_err(|e| format!("read {}: {e}", index_path.display()))?;
+    let bytes = read_regular_file_bytes(index_path, MAX_BUILT_INDEX_BYTES).map_err(|e| format!("read {}: {e}", index_path.display()))?;
     let html = String::from_utf8(bytes).map_err(|_| format!("{} is not valid UTF-8", index_path.display()))?;
     let (rewritten, hashes) = rewrite_built_index_csp_hashes(&html)?;
     if rewritten != html {
@@ -86,164 +142,193 @@ fn rewrite_built_index_csp_file(index_path: &Path) -> Result<Vec<String>, String
     Ok(hashes)
 }
 
+fn skip_raw_text_element(html: &str, body_start: usize, tag_name: &str) -> Result<(usize, usize), String> {
+    crate::pages_site::skip_html_raw_or_rcdata_element(html, body_start, tag_name).map_err(|e| format!("{e} in index.html"))
+}
+
 fn extract_inline_script_hashes(html: &str) -> Result<Vec<String>, String> {
-    let lower = html.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
     let mut hashes = Vec::new();
     let mut pos = 0usize;
-    while let Some(rel) = lower.get(pos..).and_then(|s| s.find("<script")) {
-        let tag_start = pos + rel;
-        let after_name = tag_start + "<script".len();
-        let next_b = bytes.get(after_name).copied();
-        if !matches!(next_b, Some(b'>' | b'/' | b' ' | b'\t' | b'\r' | b'\n')) {
-            pos = after_name;
+    while let Some(rel_lt) = html.get(pos..).and_then(|s| s.find('<')) {
+        let lt_pos = pos + rel_lt;
+        let after_lt = html.get(lt_pos + 1..).unwrap_or("");
+        if !crate::pages_site::is_html_tag_start(after_lt) {
+            pos = lt_pos + 1;
             continue;
         }
-        let close_rel = html.get(after_name..).and_then(find_html_tag_close).ok_or_else(|| String::from("unclosed `<script>` opening tag"))?;
-        let open_end = after_name + close_rel;
-        let attrs = html.get(after_name..open_end).ok_or_else(|| String::from("unclosed `<script>` opening tag"))?;
-        let body_start = open_end + 1;
-        if attrs.trim_end().ends_with('/') {
-            pos = body_start;
+        if let Some(after_comment) = after_lt.strip_prefix("!--") {
+            let close_end =
+                crate::pages_site::find_html_comment_end(after_comment).ok_or_else(|| String::from("unclosed HTML comment in index.html"))?;
+            pos = lt_pos + 4 + close_end;
             continue;
         }
-        let close_tag_rel = lower.get(body_start..).and_then(|s| s.find("</script")).ok_or_else(|| String::from("unclosed `<script>` element"))?;
-        let body_end = body_start + close_tag_rel;
-        let close_tag_gt = html.get(body_end..).and_then(find_html_tag_close).ok_or_else(|| String::from("unclosed `</script>` closing tag"))?;
-        if !tag_has_src_attr(attrs) {
-            let body = html.get(body_start..body_end).ok_or_else(|| String::from("unclosed `<script>` element"))?;
-            let digest = crate::release_scan::sha256_bytes(body.as_bytes());
-            let token = format!("'sha256-{}'", encode_base64_std(&digest));
-            if !hashes.contains(&token) {
-                hashes.push(token);
+        let close_rel =
+            crate::pages_site::find_html_tag_close(after_lt).ok_or_else(|| String::from("unclosed HTML tag or attribute quote in index.html"))?;
+        let tag_body = after_lt.get(..close_rel).ok_or_else(|| String::from("unclosed HTML tag in index.html"))?;
+        let body_start = lt_pos + 1 + close_rel + 1;
+        let trimmed = tag_body.trim();
+        let is_closing = trimmed.starts_with('/');
+        let tag_lower = crate::pages_site::extract_html_tag_name(trimmed).to_ascii_lowercase();
+        if !is_closing && tag_lower == "script" {
+            // HTML5 `<script>` is never a void element (`<script/>...</script>` still executes its body).
+            let (body_end, next_pos) = skip_raw_text_element(html, body_start, "script")?;
+            let attrs = crate::pages_site::parse_html_tag_attributes(trimmed);
+            let has_src = attrs.iter().any(|(k, _)| k.eq_ignore_ascii_case("src"));
+            if !has_src {
+                let body = html.get(body_start..body_end).ok_or_else(|| String::from("unclosed `<script>` element"))?;
+                let digest = crate::release_scan::sha256_bytes(body.as_bytes());
+                let token = format!("'sha256-{}'", encode_base64_std(&digest));
+                if !hashes.contains(&token) {
+                    hashes.push(token);
+                }
             }
+            pos = next_pos;
+        } else if !is_closing && matches!(tag_lower.as_str(), "style" | "title" | "textarea") {
+            let (_, next_pos) = skip_raw_text_element(html, body_start, &tag_lower)?;
+            pos = next_pos;
+        } else {
+            pos = body_start;
         }
-        pos = body_end + close_tag_gt + 1;
     }
     Ok(hashes)
 }
 
-fn find_html_tag_close(slice: &str) -> Option<usize> {
-    let mut quote: Option<u8> = None;
-    for (idx, b) in slice.bytes().enumerate() {
-        if let Some(q) = quote {
-            if b == q {
-                quote = None;
-            }
-        } else if b == b'"' || b == b'\'' {
-            quote = Some(b);
-        } else if b == b'>' {
-            return Some(idx);
-        }
-    }
-    None
+struct CspMetaMatch {
+    abs_token_start: usize,
+    abs_token_end: usize,
+    decoded_policy: String,
 }
 
-fn tag_has_src_attr(attrs: &str) -> bool {
-    let bytes = attrs.as_bytes();
-    let lower = attrs.to_ascii_lowercase();
-    let mut i = 0usize;
+fn find_single_csp_meta_span(html: &str) -> Result<CspMetaMatch, String> {
+    let mut pos = 0usize;
+    let mut found_match: Option<CspMetaMatch> = None;
+    while let Some(rel_lt) = html.get(pos..).and_then(|s| s.find('<')) {
+        let lt_pos = pos + rel_lt;
+        let after_lt = html.get(lt_pos + 1..).unwrap_or("");
+        if !crate::pages_site::is_html_tag_start(after_lt) {
+            pos = lt_pos + 1;
+            continue;
+        }
+        if let Some(after_comment) = after_lt.strip_prefix("!--") {
+            let close_end =
+                crate::pages_site::find_html_comment_end(after_comment).ok_or_else(|| String::from("unclosed HTML comment in index.html"))?;
+            pos = lt_pos + 4 + close_end;
+            continue;
+        }
+        let close_rel =
+            crate::pages_site::find_html_tag_close(after_lt).ok_or_else(|| String::from("unclosed HTML tag or attribute quote in index.html"))?;
+        let tag_body = after_lt.get(..close_rel).ok_or_else(|| String::from("unclosed HTML tag in index.html"))?;
+        let next_after_tag = lt_pos + 1 + close_rel + 1;
+        let trimmed = tag_body.trim();
+        let is_closing = trimmed.starts_with('/');
+        let tag_lower = crate::pages_site::extract_html_tag_name(trimmed).to_ascii_lowercase();
+        if !is_closing && matches!(tag_lower.as_str(), "script" | "style" | "title" | "textarea") {
+            let (_, next_pos) = skip_raw_text_element(html, next_after_tag, &tag_lower)?;
+            pos = next_pos;
+            continue;
+        }
+        if !is_closing && tag_lower == "meta" {
+            let parsed = parse_meta_http_equiv_and_content(tag_body)?;
+            if parsed.is_csp {
+                let (tok_start, tok_end, decoded_policy) =
+                    parsed.content.ok_or_else(|| String::from("Content-Security-Policy `<meta>` lacks `content=\"...\"`"))?;
+                if found_match.is_some() {
+                    return Err(String::from("multiple active Content-Security-Policy `<meta>` tags found"));
+                }
+                found_match = Some(CspMetaMatch { abs_token_start: lt_pos + 1 + tok_start, abs_token_end: lt_pos + 1 + tok_end, decoded_policy });
+            }
+        }
+        pos = next_after_tag;
+    }
+    found_match.ok_or_else(|| String::from("built index.html missing `<meta http-equiv=\"Content-Security-Policy\">`"))
+}
+
+fn parse_csp_directives(policy: &str) -> Result<Vec<(String, Vec<String>)>, String> {
+    let mut directives = Vec::new();
+    let mut seen = BTreeSet::new();
+    for raw_dir in policy.split(';') {
+        let trimmed = raw_dir.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let Some(name_raw) = parts.next() else {
+            continue;
+        };
+        let name = name_raw.to_ascii_lowercase();
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate CSP directive `{name}`"));
+        }
+        let tokens: Vec<String> = parts.map(str::to_owned).collect();
+        directives.push((name, tokens));
+    }
+    Ok(directives)
+}
+
+fn rewrite_csp_meta_tag(html: &str, script_hashes: &[String]) -> Result<String, String> {
+    let csp = find_single_csp_meta_span(html)?;
+    let parsed = parse_csp_directives(&csp.decoded_policy)?;
+    let mut saw_script_src = false;
+    let mut rebuilt = Vec::with_capacity(parsed.len());
+    for (name, tokens) in parsed {
+        if name == "script-src" {
+            saw_script_src = true;
+            let mut parts = vec![String::from("script-src"), String::from("'self'")];
+            parts.extend(script_hashes.iter().cloned());
+            parts.push(String::from("'wasm-unsafe-eval'"));
+            rebuilt.push(parts.join(" "));
+        } else {
+            if tokens.iter().any(|t| t.eq_ignore_ascii_case("'unsafe-inline'")) {
+                return Err(format!("CSP directive `{name}` must not allow `'unsafe-inline'`"));
+            }
+            if tokens.is_empty() {
+                rebuilt.push(name);
+            } else {
+                rebuilt.push(format!("{name} {}", tokens.join(" ")));
+            }
+        }
+    }
+    if !saw_script_src {
+        return Err(String::from("Content-Security-Policy `<meta>` is missing a `script-src` directive"));
+    }
+    let new_policy = rebuilt.join("; ");
+    let prefix = html.get(..csp.abs_token_start).ok_or_else(|| String::from("invalid CSP meta tag boundary"))?;
+    let suffix = html.get(csp.abs_token_end..).ok_or_else(|| String::from("invalid CSP meta tag boundary"))?;
+    let mut out = String::with_capacity(html.len() + 256);
+    out.push_str(prefix);
+    out.push('"');
+    out.push_str(&new_policy);
+    out.push('"');
+    out.push_str(suffix);
+    Ok(out)
+}
+
+struct ParsedMetaCsp {
+    is_csp: bool,
+    content: Option<(usize, usize, String)>,
+}
+
+fn parse_meta_http_equiv_and_content(tag_body: &str) -> Result<ParsedMetaCsp, String> {
+    let bytes = tag_body.as_bytes();
+    let mut i = bytes.iter().position(|b| b.is_ascii_whitespace() || *b == b'/').unwrap_or(bytes.len());
+    let mut is_csp = false;
+    let mut http_equiv_count = 0usize;
+    let mut content: Option<(usize, usize, String)> = None;
+    let mut content_count = 0usize;
     while i < bytes.len() {
         while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
             i += 1;
         }
+        if i >= bytes.len() {
+            break;
+        }
         let k_start = i;
+        // HTML5 §13.2.5.32: the first non-whitespace, non-`/` byte starts the attribute name even if `=`.
+        i += 1;
         while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' && bytes[i] != b'/' {
             i += 1;
         }
-        let key = lower.get(k_start..i).unwrap_or("");
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        let has_eq = i < bytes.len() && bytes[i] == b'=';
-        if key == "src" && has_eq {
-            return true;
-        }
-        if has_eq {
-            i += 1;
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
-                let q = bytes[i];
-                i += 1;
-                while i < bytes.len() && bytes[i] != q {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1;
-                }
-            } else {
-                while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn rewrite_csp_meta_tag(html: &str, script_hashes: &[String]) -> Result<String, String> {
-    let lower = html.to_ascii_lowercase();
-    let mut pos = 0usize;
-    while let Some(rel) = lower.get(pos..).and_then(|s| s.find("<meta")) {
-        let tag_start = pos + rel;
-        let after_name = tag_start + "<meta".len();
-        if !matches!(lower.as_bytes().get(after_name), Some(b' ' | b'\t' | b'\r' | b'\n')) {
-            pos = after_name;
-            continue;
-        }
-        let close_rel = html.get(after_name..).and_then(find_html_tag_close).ok_or_else(|| String::from("unclosed `<meta>` tag"))?;
-        let tag_end = after_name + close_rel;
-        let tag = html.get(tag_start..=tag_end).ok_or_else(|| String::from("unclosed `<meta>` tag"))?;
-        if !tag.to_ascii_lowercase().contains("content-security-policy") {
-            pos = tag_end + 1;
-            continue;
-        }
-        let Some((val_start, val_end)) = find_meta_content_span(tag) else {
-            return Err(String::from("Content-Security-Policy `<meta>` lacks `content=\"...\"`"));
-        };
-        let old_policy = tag.get(val_start..val_end).ok_or_else(|| String::from("Content-Security-Policy `<meta>` lacks `content=\"...\"`"))?;
-        let mut rebuilt = Vec::new();
-        for dir in old_policy.split(';') {
-            let trimmed = dir.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if trimmed.to_ascii_lowercase().starts_with("script-src") {
-                let mut parts = vec![String::from("script-src"), String::from("'self'")];
-                parts.extend(script_hashes.iter().cloned());
-                parts.push(String::from("'wasm-unsafe-eval'"));
-                rebuilt.push(parts.join(" "));
-            } else {
-                rebuilt.push(trimmed.to_owned());
-            }
-        }
-        let new_policy = rebuilt.join("; ");
-        let prefix = html.get(..tag_start + val_start).ok_or_else(|| String::from("invalid CSP meta tag boundary"))?;
-        let suffix = html.get(tag_start + val_end..).ok_or_else(|| String::from("invalid CSP meta tag boundary"))?;
-        let mut out = String::with_capacity(html.len() + 256);
-        out.push_str(prefix);
-        out.push_str(&new_policy);
-        out.push_str(suffix);
-        return Ok(out);
-    }
-    Err(String::from("built index.html missing `<meta http-equiv=\"Content-Security-Policy\">`"))
-}
-
-fn find_meta_content_span(tag: &str) -> Option<(usize, usize)> {
-    let lower = tag.to_ascii_lowercase();
-    let bytes = tag.as_bytes();
-    let mut i = 5usize;
-    while i < bytes.len() {
-        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/' || bytes[i] == b'>') {
-            i += 1;
-        }
-        let k_start = i;
-        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' && bytes[i] != b'/' && bytes[i] != b'>' {
-            i += 1;
-        }
-        let key = lower.get(k_start..i).unwrap_or("");
+        let key = tag_body.get(k_start..i).unwrap_or("");
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
@@ -254,27 +339,44 @@ fn find_meta_content_span(tag: &str) -> Option<(usize, usize)> {
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
-        if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+        let (tok_start, tok_end, v_start, v_end) = if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
             let q = bytes[i];
+            let ts = i;
             i += 1;
-            let v_start = i;
+            let vs = i;
             while i < bytes.len() && bytes[i] != q {
                 i += 1;
             }
-            let v_end = i;
+            let ve = i;
             if i < bytes.len() {
                 i += 1;
             }
-            if key == "content" {
-                return Some((v_start, v_end));
-            }
+            (ts, i, vs, ve)
         } else {
-            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
                 i += 1;
+            }
+            (start, i, start, i)
+        };
+        if key.eq_ignore_ascii_case("http-equiv") {
+            http_equiv_count += 1;
+            let decoded = crate::pages_site::unescape_html_attr(tag_body.get(v_start..v_end).unwrap_or(""));
+            if decoded.trim().eq_ignore_ascii_case("content-security-policy") {
+                is_csp = true;
+            }
+        } else if key.eq_ignore_ascii_case("content") {
+            content_count += 1;
+            if content.is_none() {
+                let decoded = crate::pages_site::unescape_html_attr(tag_body.get(v_start..v_end).unwrap_or(""));
+                content = Some((tok_start, tok_end, decoded));
             }
         }
     }
-    None
+    if is_csp && (http_equiv_count > 1 || content_count > 1) {
+        return Err(String::from("duplicate `http-equiv` or `content` attribute on Content-Security-Policy `<meta>`"));
+    }
+    Ok(ParsedMetaCsp { is_csp, content })
 }
 
 fn encode_base64_std(input: &[u8]) -> String {
@@ -372,15 +474,7 @@ pub fn check_web_bundle_readiness_with_env(root: &Path, require_bundle_env: Opti
     }
 
     let index_html_raw = std::fs::read_to_string(root.join(WEB_INDEX_REL)).map_err(|e| format!("read {WEB_INDEX_REL}: {e}"))?;
-    let index_html = strip_html_comments(&index_html_raw)?;
-    for required in ["default-src 'self'", "data-wasm-opt", "style-src 'self'"] {
-        if !index_html.contains(required) {
-            return Err(format!("{WEB_INDEX_REL} missing required attribute `{required}`"));
-        }
-    }
-    if index_html.contains("style-src 'self' 'unsafe-inline'") {
-        return Err(format!("{WEB_INDEX_REL} must not allow `'unsafe-inline'` in `style-src`"));
-    }
+    validate_source_index_html(&index_html_raw)?;
 
     let pkg_sh_raw = std::fs::read_to_string(root.join(PACKAGE_SH_REL)).map_err(|e| format!("read {PACKAGE_SH_REL}: {e}"))?;
     let pkg_sh = strip_hash_comments(&pkg_sh_raw);
@@ -389,12 +483,7 @@ pub fn check_web_bundle_readiness_with_env(root: &Path, require_bundle_env: Opti
     }
 
     let cargo_toml_raw = std::fs::read_to_string(root.join("Cargo.toml")).map_err(|e| format!("read Cargo.toml: {e}"))?;
-    let cargo_toml = strip_hash_comments(&cargo_toml_raw);
-    for required in ["[profile.web-release]", "lto = \"fat\"", "strip = \"symbols\""] {
-        if !cargo_toml.contains(required) {
-            return Err(format!("Cargo.toml missing `{required}` for web release size budget"));
-        }
-    }
+    check_cargo_web_release_profile(&cargo_toml_raw)?;
 
     let release_dir = root.join("dist/release");
     let mut checked_zips = 0usize;
@@ -423,6 +512,77 @@ pub fn check_web_bundle_readiness_with_env(root: &Path, require_bundle_env: Opti
             "web-bundle: CI readiness OK ({} staged manifest entry/ies, budget <= {MAX_WEB_RELEASE_ZIP_BYTES} B; no local zip in dist/release/)",
             faces.len()
         );
+    }
+    Ok(())
+}
+
+fn validate_source_index_html(index_html_raw: &str) -> Result<(), String> {
+    let index_html = strip_html_comments(index_html_raw)?;
+    if !index_html.contains("data-wasm-opt") {
+        return Err(format!("{WEB_INDEX_REL} missing required attribute `data-wasm-opt`"));
+    }
+    let csp = find_single_csp_meta_span(index_html_raw).map_err(|e| format!("{WEB_INDEX_REL}: {e}"))?;
+    let directives = parse_csp_directives(&csp.decoded_policy).map_err(|e| format!("{WEB_INDEX_REL}: {e}"))?;
+
+    let find_dir = |name: &str| directives.iter().find(|(n, _)| n == name).map(|(_, toks)| toks);
+    let default_src = find_dir("default-src").ok_or_else(|| format!("{WEB_INDEX_REL} missing required CSP directive `default-src 'self'`"))?;
+    if !default_src.iter().any(|t| t.eq_ignore_ascii_case("'self'")) {
+        return Err(format!("{WEB_INDEX_REL}: `default-src` must include `'self'`"));
+    }
+    if default_src.iter().any(|t| t.eq_ignore_ascii_case("'unsafe-inline'")) {
+        return Err(format!("{WEB_INDEX_REL} must not allow `'unsafe-inline'` in `default-src`"));
+    }
+
+    let style_src = find_dir("style-src").ok_or_else(|| format!("{WEB_INDEX_REL} missing required CSP directive `style-src 'self'`"))?;
+    if !style_src.iter().any(|t| t.eq_ignore_ascii_case("'self'")) {
+        return Err(format!("{WEB_INDEX_REL}: `style-src` must include `'self'`"));
+    }
+    for style_dir in ["style-src", "style-src-elem", "style-src-attr"] {
+        if let Some(tokens) = find_dir(style_dir)
+            && tokens.iter().any(|t| t.eq_ignore_ascii_case("'unsafe-inline'"))
+        {
+            return Err(format!("{WEB_INDEX_REL} must not allow `'unsafe-inline'` in `{style_dir}`"));
+        }
+    }
+    Ok(())
+}
+
+fn check_cargo_web_release_profile(cargo_toml_raw: &str) -> Result<(), String> {
+    let mut in_web_release = false;
+    let mut saw_section = false;
+    let mut has_lto_fat = false;
+    let mut has_strip_symbols = false;
+    for raw_line in cargo_toml_raw.lines() {
+        let line = crate::scan_util::strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            let section = header.trim();
+            in_web_release = section == "profile.web-release";
+            if in_web_release {
+                saw_section = true;
+            }
+            continue;
+        }
+        if in_web_release && let Some((k, v)) = line.split_once('=') {
+            let key = k.trim();
+            let val = crate::scan_util::unquote_scalar(v);
+            if key == "lto" && val == "fat" {
+                has_lto_fat = true;
+            } else if key == "strip" && val == "symbols" {
+                has_strip_symbols = true;
+            }
+        }
+    }
+    if !saw_section {
+        return Err(String::from("Cargo.toml missing `[profile.web-release]` for web release size budget"));
+    }
+    if !has_lto_fat {
+        return Err(String::from("Cargo.toml `[profile.web-release]` missing `lto = \"fat\"` for web release size budget"));
+    }
+    if !has_strip_symbols {
+        return Err(String::from("Cargo.toml `[profile.web-release]` missing `strip = \"symbols\"` for web release size budget"));
     }
     Ok(())
 }
@@ -467,13 +627,39 @@ fn strip_hash_comments(text: &str) -> String {
 
 fn strip_html_comments(html: &str) -> Result<String, String> {
     let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some((before, after)) = rest.split_once("<!--") {
-        out.push_str(before);
-        let (_, tail) = after.split_once("-->").ok_or_else(|| String::from("unclosed HTML comment in index.html"))?;
-        rest = tail;
+    let mut pos = 0usize;
+    while let Some(rel_lt) = html.get(pos..).and_then(|s| s.find('<')) {
+        let lt_pos = pos + rel_lt;
+        out.push_str(html.get(pos..lt_pos).unwrap_or(""));
+        let after_lt = html.get(lt_pos + 1..).unwrap_or("");
+        if !crate::pages_site::is_html_tag_start(after_lt) {
+            out.push('<');
+            pos = lt_pos + 1;
+            continue;
+        }
+        if let Some(after_comment) = after_lt.strip_prefix("!--") {
+            let close_end =
+                crate::pages_site::find_html_comment_end(after_comment).ok_or_else(|| String::from("unclosed HTML comment in index.html"))?;
+            pos = lt_pos + 4 + close_end;
+            continue;
+        }
+        let close_rel =
+            crate::pages_site::find_html_tag_close(after_lt).ok_or_else(|| String::from("unclosed HTML tag or attribute quote in index.html"))?;
+        let tag_body = after_lt.get(..close_rel).ok_or_else(|| String::from("unclosed HTML tag in index.html"))?;
+        let next_after_tag = lt_pos + 1 + close_rel + 1;
+        let trimmed = tag_body.trim();
+        let is_closing = trimmed.starts_with('/');
+        let tag_lower = crate::pages_site::extract_html_tag_name(trimmed).to_ascii_lowercase();
+        if !is_closing && matches!(tag_lower.as_str(), "script" | "style" | "title" | "textarea") {
+            let (_, next_pos) = skip_raw_text_element(html, next_after_tag, &tag_lower)?;
+            out.push_str(html.get(lt_pos..next_pos).unwrap_or(""));
+            pos = next_pos;
+        } else {
+            out.push_str(html.get(lt_pos..next_after_tag).unwrap_or(""));
+            pos = next_after_tag;
+        }
     }
-    out.push_str(rest);
+    out.push_str(html.get(pos..).unwrap_or(""));
     Ok(out)
 }
 
@@ -491,7 +677,10 @@ mod tests {
         for (rel, body) in [
             ("crates/text/web-fonts.txt", "Inter/Inter-Regular.ttf\n"),
             ("apps/curvebook-web/Trunk.toml", "[build]\npublic_url = \"./\"\nfilehash = true\ncommand_arguments = [\"xtask\", \"web-fonts\"]\n"),
-            ("apps/curvebook-web/index.html", "<meta content=\"default-src 'self'; style-src 'self'\"><link data-wasm-opt=\"z\">"),
+            (
+                "apps/curvebook-web/index.html",
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; style-src 'self'\"><link data-wasm-opt=\"z\">",
+            ),
             ("packaging/web/package.sh", "trunk build --release --cargo-profile web-release\n"),
             ("Cargo.toml", "[profile.web-release]\ninherits = \"release\"\nlto = \"fat\"\nstrip = \"symbols\"\n"),
         ] {
@@ -582,6 +771,126 @@ mod tests {
         assert!(!rewritten.contains("'unsafe-inline'"));
         for h in &hashes {
             assert!(h.starts_with("'sha256-") && h.ends_with('\'') && rewritten.contains(h));
+        }
+    }
+
+    #[test]
+    fn aud_12_10_csp_parsing_case_sensitivity_script_src_attr_comments_and_script_close() {
+        // 1. Source index.html style-src 'unsafe-inline' bypasses must all be rejected.
+        for bad_policy in [
+            "default-src 'self'; style-src 'self'  'unsafe-inline'",
+            "default-src 'self'; style-src 'self' data: 'unsafe-inline'",
+            "default-src 'self'; style-src 'self' 'UNSAFE-INLINE'",
+            "default-src 'self'; style-src 'unsafe-inline' 'self'; style-src 'self'",
+            "default-src 'self' 'UNSAFE-INLINE'; style-src 'self'",
+        ] {
+            let dir = TestDir::new("webfonts-style-bypass");
+            write_minimal_web_workspace(&dir);
+            dir.write(
+                "apps/curvebook-web/index.html",
+                &format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{bad_policy}\"><link data-wasm-opt=\"z\">"),
+            );
+            assert!(check_web_bundle_readiness_with_env(dir.path(), None).is_err(), "expected rejection for `{bad_policy}`");
+        }
+
+        // 2. script-src-attr / script-src-elem must NOT be corrupted; missing script-src and uppercase 'UNSAFE-INLINE' fail.
+        let with_attr = concat!(
+            "<html><head>",
+            "<!-- <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'\"> -->",
+            "<meta name=\"description\" content=\"Uses Content-Security-Policy\">",
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; script-src-attr 'none'; style-src 'self'\">",
+            "</head><body>",
+            "<!-- <script>evilCommented();</script> -->",
+            "<script>const s = \"</script_tag\"; console.log(s);</script>",
+            "</body></html>"
+        );
+        let (rewritten, hashes) = super::rewrite_built_index_csp_hashes(with_attr).unwrap();
+        assert_eq!(hashes.len(), 1, "commented script must not be hashed; embedded </script_tag must not split script");
+        assert!(rewritten.contains("script-src-attr 'none'"), "script-src-attr must be preserved: {rewritten}");
+        assert!(!rewritten.to_ascii_lowercase().contains("'unsafe-inline'"));
+
+        // Self-closing <script/> is NOT void in HTML5; its body must still be hashed.
+        let slash_script = concat!(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self'\">",
+            "<script/>alert(1)</script>"
+        );
+        let (_, slash_hashes) = super::rewrite_built_index_csp_hashes(slash_script).unwrap();
+        assert_eq!(slash_hashes.len(), 1);
+
+        // Missing script-src fails closed.
+        let no_script_src = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; style-src 'self'\">";
+        assert!(super::rewrite_built_index_csp_hashes(no_script_src).unwrap_err().contains("script-src"));
+
+        // Uppercase 'UNSAFE-INLINE' in another directive fails closed.
+        let upper_unsafe =
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self'; style-src 'self' 'UNSAFE-INLINE'\">";
+        assert!(super::rewrite_built_index_csp_hashes(upper_unsafe).is_err());
+
+        // 3. Entity-encoded CSP directives/http-equiv, quote-desync, attribute-wrapped `<!--`, and abrupt/bang comments.
+        for bad_html in [
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; style-src 'self' &#39;unsafe-inline&#39;\"><link data-wasm-opt=\"z\">",
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; style-src 'self' &apos;unsafe-inline&apos;\"><link data-wasm-opt=\"z\">",
+            "<meta http-equiv=\"&#x43;ontent-Security-Policy\" content=\"default-src *\"><link data-wasm-opt=\"z\">",
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; style-src 'self'\"><meta http-equiv=\"&#x43;ontent-Security-Policy\" content=\"default-src *\"><link data-wasm-opt=\"z\">",
+            "<div title=\"<!--\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src *\"><span title=\"-->\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; style-src 'self'\"><link data-wasm-opt=\"z\">",
+            "<p title=x\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src *\"><b z=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; style-src 'self'\"><link data-wasm-opt=\"z\">",
+            "<!--><meta http-equiv=\"Content-Security-Policy\" content=\"default-src *\"><!-- --><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; style-src 'self'\"><link data-wasm-opt=\"z\">",
+            "<!-- c --!><meta http-equiv=\"Content-Security-Policy\" content=\"default-src *\"><!-- --><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; style-src 'self'\"><link data-wasm-opt=\"z\">",
+        ] {
+            let dir = TestDir::new("webfonts-entity-bypass");
+            write_minimal_web_workspace(&dir);
+            dir.write("apps/curvebook-web/index.html", bad_html);
+            assert!(check_web_bundle_readiness_with_env(dir.path(), None).is_err(), "source check must reject `{bad_html}`");
+            assert!(super::rewrite_built_index_csp_hashes(bad_html).is_err(), "rewrite check must reject `{bad_html}`");
+        }
+
+        // Entity-encoded `'unsafe-inline'` in style-src must also fail rewrite when script-src is present.
+        let entity_style_unsafe = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' &#39;unsafe-inline&#39;\">";
+        assert!(super::rewrite_built_index_csp_hashes(entity_style_unsafe).is_err());
+
+        // Quote-desync / attribute-wrapped `<!--` / abrupt comment / non-tag `<` / RCDATA `<title>` / form-feed close must not hide scripts.
+        let hidden_scripts = concat!(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self'\">",
+            "<p title=x\"><script>a();</script><b z=1\">",
+            "<div title=\"<!--\"><script>b();</script><span title=\"-->\">",
+            "<!--><script>c();</script><!-- -->",
+            "<!-- x --!><script>d();</script><!-- -->",
+            "< a=\"><script>e();</script>",
+            "<<script>f();</script\x0c>",
+            "<title><!--</title><script>g();</script><!-- -->"
+        );
+        let (_, hidden_hashes) = super::rewrite_built_index_csp_hashes(hidden_scripts).unwrap();
+        assert_eq!(hidden_hashes.len(), 7, "all seven inline scripts must be hashed");
+
+        // Leading `=` in `<meta =" http-equiv="Content-Security-Policy" ...>` must NOT hide a duplicate/permissive CSP meta tag.
+        let leading_eq_csp = "<meta =\" http-equiv=\"Content-Security-Policy\" content=\"default-src *\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self'; style-src 'self'\">";
+        assert!(super::rewrite_built_index_csp_hashes(leading_eq_csp).is_err());
+    }
+
+    #[test]
+    fn aud_12_43_web_fonts_rejects_symlinks_and_scopes_cargo_profile() {
+        let dir = TestDir::new("webfonts-profile-scope");
+        write_minimal_web_workspace(&dir);
+        // Put lto = "fat" and strip = "symbols" under [profile.release] instead of [profile.web-release].
+        dir.write("Cargo.toml", "[profile.release]\nlto = \"fat\"\nstrip = \"symbols\"\n\n[profile.web-release]\ninherits = \"release\"\n");
+        assert!(check_web_bundle_readiness_with_env(dir.path(), None).is_err());
+
+        #[cfg(unix)]
+        {
+            let font_dir = TestDir::new("webfonts-symlink");
+            let secret = font_dir.write("outside.ttf", "secret");
+            let src_fonts = font_dir.join("src/fonts");
+            let staging = font_dir.join("staging/fonts");
+            std::fs::create_dir_all(&src_fonts).unwrap();
+            std::os::unix::fs::symlink(&secret, src_fonts.join("Inter.ttf")).unwrap();
+            assert!(super::stage_font_files(&src_fonts, &staging, &[String::from("Inter.ttf")]).is_err());
+
+            let clean_src = font_dir.join("clean/fonts");
+            std::fs::create_dir_all(&clean_src).unwrap();
+            std::fs::write(clean_src.join("Inter.ttf"), b"font-bytes").unwrap();
+            std::fs::create_dir_all(&staging).unwrap();
+            std::os::unix::fs::symlink(&secret, staging.join("Inter.ttf")).unwrap();
+            assert!(super::stage_font_files(&clean_src, &staging, &[String::from("Inter.ttf")]).is_err());
         }
     }
 }

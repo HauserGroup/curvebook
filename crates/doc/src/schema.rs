@@ -757,30 +757,11 @@ fn analysis_spec_schema() -> SchemaNode {
     let kind_obj = SchemaNode { schema_type: Some(SchemaTypeSpec::Single(SchemaType::Object)), ..SchemaNode::default() };
     let power_variant = object_schema(vec![("PowerAnalysis", ref_schema(PowerAnalysisSpec::schema_name()))], &["PowerAnalysis"], false);
     let other_kind = object_schema(
-        [
-            "Transform",
-            "DescriptiveStats",
-            "OutlierDetection",
-            "TwoGroupComparison",
-            "BlandAltman",
-            "MultipleRowTTests",
-            "PassingBablok",
-            "OneWayAnova",
-            "FactorialAnova",
-            "NestedComparison",
-            "Contingency",
-            "Survival",
-            "RocCurve",
-            "GeneralizedLinearModel",
-            "Multivariate",
-            "LinearRegression",
-            "NonlinearRegression",
-            "PValueStack",
-            "LeveneTest",
-        ]
-        .into_iter()
-        .map(|tag| (tag, kind_obj.clone()))
-        .collect(),
+        crate::analysis::ALL_ANALYSIS_DESCRIPTORS
+            .iter()
+            .filter(|desc| desc.id != crate::analysis::AnalysisKindId::PowerAnalysis)
+            .map(|desc| (desc.serde_variant, kind_obj.clone()))
+            .collect(),
         &[],
         false,
     );

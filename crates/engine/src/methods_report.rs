@@ -64,17 +64,16 @@ pub fn generate_methods_report(doc: &ProjectDocument, result_sheet_id: &SheetId,
     if result_sheet_id.as_str().trim().is_empty() {
         return Err(EngineError::new("result sheet identifier must not be empty"));
     }
-    let res = doc.result_sheet(result_sheet_id).ok_or_else(|| EngineError::new(format!("result sheet `{result_sheet_id}` not found")))?;
+    let res = doc
+        .result_sheet(result_sheet_id)
+        .ok_or_else(|| EngineError::with_code(curvebook_doc::ErrorCode::NotFound, format!("result sheet `{result_sheet_id}` not found")))?;
     let source_ds = resolve_source_data_sheet(doc, &res.analysis.source_sheet_id);
     let blocks = build_report_blocks(doc, res, source_ds);
     Ok(render_blocks(&blocks, format))
 }
 
 fn resolve_source_data_sheet<'a>(doc: &'a ProjectDocument, source_id: &SheetId) -> Option<&'a DataSheet> {
-    if let Some(ds) = doc.data_sheet(source_id) {
-        return Some(ds);
-    }
-    doc.result_sheet(source_id).and_then(|r| r.analyzable_data.as_ref())
+    crate::cmd::graph::resolve_source_data_sheet(doc, source_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -1311,6 +1310,12 @@ fn describe_linear_regression(s: &LinearRegressionSpec) -> Vec<ReportBlock> {
     let range = s.x_range_filter.filter(|(lo, hi)| lo.is_some() || hi.is_some()).map_or_else(String::new, |(lo, hi)| {
         format!(" The fit included observations within X bounds [{}, {}].", opt_bound_str(lo), opt_bound_str(hi))
     });
+    let plot_bounds = match (s.plot_x_min, s.plot_x_max) {
+        (Some(lo), Some(hi)) => format!(" The fitted curve was plotted over custom X bounds [{lo}, {hi}]."),
+        (Some(lo), None) => format!(" The fitted curve was plotted starting at custom X bound {lo}."),
+        (None, Some(hi)) => format!(" The fitted curve was plotted up to custom X bound {hi}."),
+        (None, None) => String::new(),
+    };
     if s.deming_model_ii {
         let error_desc = match s.deming_error {
             curvebook_doc::DemingErrorSpec::EqualError => String::from("assuming equal X and Y error variances (lambda = 1)"),
@@ -1321,8 +1326,9 @@ fn describe_linear_regression(s: &LinearRegressionSpec) -> Vec<ReportBlock> {
                 format!("with error variance ratio lambda = {lambda}")
             }
         };
+        let extend_str = if s.extend_line_to_x_intercept { " Enabled outputs: fitted line extended to X-intercept." } else { "" };
         return vec![ReportBlock::Paragraph(vec![plain(format!(
-            "Model II Deming linear regression was fitted {error_desc} to account for measurement error in both X and Y variables, with standard errors and confidence intervals computed by leave-one-out jackknife resampling.{range}"
+            "Model II Deming linear regression was fitted {error_desc} to account for measurement error in both X and Y variables, with standard errors and confidence intervals computed by leave-one-out jackknife resampling.{extend_str}{range}{plot_bounds}"
         ))])];
     }
     let constraint = match s.effective_fixed_point() {
@@ -1348,7 +1354,7 @@ fn describe_linear_regression(s: &LinearRegressionSpec) -> Vec<ReportBlock> {
     }
     let extra_str = if extras.is_empty() { String::new() } else { format!(" Enabled outputs: {}.", extras.join(", ")) };
     vec![ReportBlock::Paragraph(vec![plain(format!(
-        "Ordinary least-squares simple linear regression was fitted {constraint}, including a runs test for departure from linearity and ANCOVA comparison of slopes and intercepts when multiple datasets are present.{extra_str}{range}"
+        "Ordinary least-squares simple linear regression was fitted {constraint}, including a runs test for departure from linearity and ANCOVA comparison of slopes and intercepts when multiple datasets are present.{extra_str}{range}{plot_bounds}"
     ))])]
 }
 
@@ -2932,13 +2938,35 @@ fn resolve_effective_power_spec(doc: &ProjectDocument, res: &ResultSheet, base: 
         if let Some(alpha) = info_f64(&["Alpha", "alpha"]).filter(|v| *v > 0.0 && *v < 1.0) {
             eff.alpha = alpha;
         }
-        if let Some(pw) = info_f64(&["Target Power", "target_power", "Target power"]).filter(|v| *v > 0.0 && *v < 1.0) {
+        if base.solve_target != PowerSolveTarget::Power
+            && let Some(pw) = info_f64(&["Target Power", "target_power", "Target power"]).filter(|v| *v > 0.0 && *v < 1.0)
+        {
             eff.target_power = Some(pw);
         }
         if base.solve_target != PowerSolveTarget::DetectableEffect
             && let Some(eff_sz) = info_f64(&["Effect Size", "effect_size", "Effect size"])
         {
-            eff.effect = PowerEffectSpec::Standardized(eff_sz);
+            let matches_rich_baseline = match &base.effect {
+                PowerEffectSpec::Standardized(_) | PowerEffectSpec::Unspecified => false,
+                _ => curvebook_stats::power::solve_power(&curvebook_stats::power::power_request_from_doc_spec(base))
+                    .ok()
+                    .is_some_and(|r| (eff_sz - r.effect_size).abs() <= 1e-12 * r.effect_size.abs().max(1.0)),
+            };
+            if !matches_rich_baseline {
+                eff.effect = PowerEffectSpec::Standardized(eff_sz);
+            }
+        }
+        if base.solve_target != PowerSolveTarget::SampleSize {
+            if let Some(n1) = info_f64(&["N per group", "sample_size", "n1"]).filter(|v| *v > 0.0)
+                && base.sample_size.is_none_or(|prev| (n1 - prev).abs() > 1e-12 * prev.abs().max(1.0))
+            {
+                eff.sample_size = Some(n1);
+            }
+            if let Some(n2) = info_f64(&["N group 2", "sample_size_group2", "n2"]).filter(|v| *v > 0.0)
+                && base.sample_size_group2.is_none_or(|prev| (n2 - prev).abs() > 1e-12 * prev.abs().max(1.0))
+            {
+                eff.sample_size_group2 = Some(n2);
+            }
         }
     }
     eff

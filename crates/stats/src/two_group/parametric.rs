@@ -177,6 +177,30 @@ fn compute_unpaired_effect_sizes(
     compute_unpaired_effect_sizes_f(diff, sds, (n_pair.0 as f64, n_pair.1 as f64), t_df_conf)
 }
 
+/// Overflow- and underflow-safe Welch standard error and Welch–Satterthwaite `df`
+/// (Satterthwaite 1946; Welch 1947), scaling by `max(sd_a, sd_b)` and `max(ra, rb)` before squaring.
+fn welch_se_and_df_from_sds(sd_a: f64, na: f64, sd_b: f64, nb: f64) -> Option<(f64, f64)> {
+    let s_max = sd_a.max(sd_b);
+    if s_max <= 0.0 {
+        return None;
+    }
+    let sa = sd_a / s_max;
+    let sb = sd_b / s_max;
+    let ra = (sa * sa) / na;
+    let rb = (sb * sb) / nb;
+    let r_sum = ra + rb;
+    if r_sum <= 0.0 {
+        return None;
+    }
+    let se = s_max * r_sum.sqrt();
+    let r_max = ra.max(rb);
+    let ua = ra / r_max;
+    let ub = rb / r_max;
+    let u_sum = ua + ub;
+    let denom = (ua * ua) / (na - 1.0) + (ub * ub) / (nb - 1.0);
+    Some((se, (u_sum * u_sum) / denom))
+}
+
 /// Student pooled-variance *t* (Student 1908; Zar 2010, ch. 8) or Welch *t* with Welch–Satterthwaite
 /// `df` (Welch 1947; Satterthwaite 1946) from `(mean, sd, n)` summaries.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -211,25 +235,20 @@ fn build_unpaired_t_from_moments(
         return Err(StatsError::InvalidParameter { name: "group_b_summary", value: sd_b });
     }
 
-    let va = sd_a * sd_a;
-    let vb = sd_b * sd_b;
-    let css_a = (na - 1.0) * va;
-    let css_b = (nb - 1.0) * vb;
     let df_pool = na + nb - 2.0;
-    let sp2 = (css_a + css_b) / df_pool;
-    let sp = sp2.sqrt();
+    let s_max = sd_a.max(sd_b);
+    let sp = if s_max > 0.0 {
+        let sa = sd_a / s_max;
+        let sb = sd_b / s_max;
+        s_max * (((na - 1.0) * sa * sa + (nb - 1.0) * sb * sb) / df_pool).sqrt()
+    } else {
+        0.0
+    };
 
     let (se, df) = if welch {
-        let sem2_a = va / na;
-        let sem2_b = vb / nb;
-        let se2 = sem2_a + sem2_b;
-        if se2 == 0.0 {
-            return Err(StatsError::ZeroVariance { context: "Welch t-test" });
-        }
-        let denom = (sem2_a * sem2_a) / (na - 1.0) + (sem2_b * sem2_b) / (nb - 1.0);
-        (se2.sqrt(), (se2 * se2) / denom)
+        welch_se_and_df_from_sds(sd_a, na, sd_b, nb).ok_or(StatsError::ZeroVariance { context: "Welch t-test" })?
     } else {
-        if sp2 == 0.0 {
+        if sp <= 0.0 {
             return Err(StatsError::ZeroVariance { context: "unpaired t-test" });
         }
         (sp * (1.0 / na + 1.0 / nb).sqrt(), df_pool)
@@ -431,15 +450,7 @@ pub fn welch_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confiden
     let sd_b = vb.sqrt();
     let na = a.len() as f64;
     let nb = b.len() as f64;
-    let sem2_a = va / na;
-    let sem2_b = vb / nb;
-    let se2 = sem2_a + sem2_b;
-    if se2 == 0.0 {
-        return Err(StatsError::ZeroVariance { context: "Welch t-test" });
-    }
-    let se = se2.sqrt();
-    let denom = (sem2_a * sem2_a) / (na - 1.0) + (sem2_b * sem2_b) / (nb - 1.0);
-    let df = (se2 * se2) / denom;
+    let (se, df) = welch_se_and_df_from_sds(sd_a, na, sd_b, nb).ok_or(StatsError::ZeroVariance { context: "Welch t-test" })?;
     let diff = ma.mean - mb.mean;
     let t_stat = diff / se;
     let p_value = t_tail_p(t_stat, df, two_tailed)?;

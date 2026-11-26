@@ -11,3 +11,4 @@ mod audit_sec02;
 mod error_and_schema;
 mod prop_serde;
 mod qol_doc_types;
+mod rem_audit_doc;

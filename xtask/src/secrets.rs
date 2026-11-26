@@ -9,6 +9,7 @@ use crate::scan_util::{format_error_list, lower_ext};
 
 const PEM_BEGIN_PREFIX: &str = concat!("-----", "BEGIN ");
 const PEM_PRIVATE_KEY_SUFFIX: &str = concat!("PRIVATE ", "KEY-----");
+const PEM_PGP_PRIVATE_KEY_SUFFIX: &str = concat!("PRIVATE ", "KEY BLOCK-----");
 
 const SECRET_KEY_SUFFIXES: &[&str] =
     &["_API_KEY", "_SECRET_KEY", "_ACCESS_KEY", "_PRIVATE_KEY", "_AUTH_TOKEN", "_SECRET", "_TOKEN", "_PASSWORD", "_PASSWD"];
@@ -106,11 +107,11 @@ pub fn run_cli(root: &Path, args: &[String]) -> Result<(), String> {
 fn run_history(root: &Path) -> Result<(), String> {
     let mut child = Command::new("git")
         .current_dir(root)
-        .args(["-c", "core.quotePath=false", "log", "--all", "-p", "--text", "--unified=0"])
+        .args(["-c", "core.quotePath=false", "log", "--all", "-m", "-p", "--text", "--unified=0"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("git log --all -p --text --unified=0: {e}"))?;
+        .map_err(|e| format!("git log --all -m -p --text --unified=0: {e}"))?;
 
     let stdout = child.stdout.take().ok_or_else(|| String::from("git log stdout pipe missing"))?;
     let mut reader = BufReader::new(stdout);
@@ -150,6 +151,7 @@ pub fn scan_repo(root: &Path, files: &[String]) -> Vec<SecretHit> {
     let mut hits = Vec::new();
     for path in files {
         let Ok(bytes) = std::fs::read(root.join(path)) else {
+            hits.push(SecretHit { location: path.clone(), line: 1, kind: "unreadable file (cannot scan for secrets)" });
             continue;
         };
         if let Ok(Some(text)) = crate::text_decode::decode_utf8_or_utf16(&bytes) {
@@ -208,7 +210,6 @@ const BINARY_EXTS: &[&str] = &[
     "flac",
     "curvebook",
     "cbtemplate",
-    "pzfx",
     "pzf",
 ];
 
@@ -435,13 +436,21 @@ fn scan_line(location: &str, line_no: usize, line: &str, out: &mut Vec<SecretHit
 }
 
 fn contains_pem_private_key(line: &str) -> bool {
-    let Some((_, after)) = line.split_once(PEM_BEGIN_PREFIX) else {
-        return false;
-    };
-    let Some((header_kind, _)) = after.split_once(PEM_PRIVATE_KEY_SUFFIX) else {
-        return false;
-    };
-    header_kind.len() <= 40 && header_kind.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b' ' || b == b'-')
+    let mut pos = 0usize;
+    while let Some(rel) = line.get(pos..).and_then(|s| s.find(PEM_BEGIN_PREFIX)) {
+        let after_start = pos + rel + PEM_BEGIN_PREFIX.len();
+        let after = line.get(after_start..).unwrap_or("");
+        for suffix in [PEM_PRIVATE_KEY_SUFFIX, PEM_PGP_PRIVATE_KEY_SUFFIX] {
+            if let Some((header_kind, _)) = after.split_once(suffix)
+                && header_kind.len() <= 40
+                && header_kind.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b' ' || b == b'-')
+            {
+                return true;
+            }
+        }
+        pos = after_start;
+    }
+    false
 }
 
 fn detect_api_token(line: &str) -> Option<&'static str> {
@@ -596,8 +605,48 @@ fn strip_rust_pub_prefix(s: &str) -> Option<&str> {
     s.strip_prefix("pub(").and_then(|after| after.split_once(')')).map(|(_, tail)| tail.trim_start())
 }
 
+/// Parse a Rust raw string literal prefix (`r"..."`, `r##"..."##`, `br#"..."#`, `cr#"..."#`) at the
+/// start of `s`, returning the inner literal slice if matched.
+fn parse_raw_string_prefix(s: &str) -> Option<&str> {
+    let after_prefix = s.strip_prefix("br").or_else(|| s.strip_prefix("cr")).or_else(|| s.strip_prefix('r'))?;
+    let hashes = after_prefix.bytes().take_while(|&b| b == b'#').count();
+    let after_hashes = after_prefix.get(hashes..)?;
+    let body = after_hashes.strip_prefix('"')?;
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'"' && bytes.get(i + 1..i + 1 + hashes).is_some_and(|h| h.iter().all(|&b| b == b'#')) {
+            return body.get(..i);
+        }
+        i += 1;
+    }
+    Some(body)
+}
+
+/// Extract a double-quoted string body starting immediately after the opening `"`, honoring `\"`
+/// and `\\` backslash escapes instead of truncating at the first escaped quote.
+fn slice_escaped_dq_body(after_dq: &str) -> &str {
+    let bytes = after_dq.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i = i.saturating_add(2).min(bytes.len());
+            continue;
+        }
+        if bytes[i] == b'"' {
+            return after_dq.get(..i).unwrap_or(after_dq);
+        }
+        i += 1;
+    }
+    after_dq
+}
+
 fn rhs_starts_with_string_literal(trimmed_rhs: &str) -> bool {
-    trimmed_rhs.starts_with('"') || trimmed_rhs.starts_with("r\"") || trimmed_rhs.starts_with("r#\"") || trimmed_rhs.starts_with('\'')
+    trimmed_rhs.starts_with('"')
+        || trimmed_rhs.starts_with('\'')
+        || trimmed_rhs.starts_with("b\"")
+        || trimmed_rhs.starts_with("c\"")
+        || parse_raw_string_prefix(trimmed_rhs).is_some()
 }
 
 fn split_assignment(s: &str, eq_only: bool) -> Option<(&str, &str)> {
@@ -621,14 +670,11 @@ fn is_secret_env_key(key: &str) -> bool {
 
 fn extract_assignment_value(raw_rhs: &str) -> (&str, bool) {
     let trimmed = raw_rhs.trim();
-    if let Some(after_raw) = trimmed.strip_prefix("r#\"") {
-        return (after_raw.split("\"#").next().unwrap_or(""), true);
+    if let Some(raw_body) = parse_raw_string_prefix(trimmed) {
+        return (raw_body, true);
     }
-    if let Some(after_raw) = trimmed.strip_prefix("r\"") {
-        return (after_raw.split('"').next().unwrap_or(""), true);
-    }
-    if let Some(after_dq) = trimmed.strip_prefix('"') {
-        return (after_dq.split('"').next().unwrap_or(""), true);
+    if let Some(after_dq) = trimmed.strip_prefix("b\"").or_else(|| trimmed.strip_prefix("c\"")).or_else(|| trimmed.strip_prefix('"')) {
+        return (slice_escaped_dq_body(after_dq), true);
     }
     if let Some(after_sq) = trimmed.strip_prefix('\'') {
         return (after_sq.split('\'').next().unwrap_or(""), true);
@@ -680,9 +726,9 @@ fn is_placeholder_home_user(name: &str) -> bool {
     matches!(name, "YOURNAME" | "YOUR_NAME" | "your-name" | "your_name")
 }
 
-fn matches_non_placeholder_home_user(tail: &[u8], sep: u8) -> bool {
+fn matches_non_placeholder_home_user_sep(tail: &[u8], sep: &[u8]) -> bool {
     let name_len = tail.iter().take_while(|&&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')).count();
-    if name_len == 0 || tail.get(name_len) != Some(&sep) {
+    if name_len == 0 || !tail.get(name_len..).is_some_and(|rest| rest.starts_with(sep)) {
         return false;
     }
     let name = std::str::from_utf8(&tail[..name_len]).unwrap_or("");
@@ -695,7 +741,7 @@ fn has_unix_home_prefix(line: &str, prefix: &str) -> bool {
     while let Some(rel) = line.get(start..).and_then(|s| s.find(prefix)) {
         let pos = start + rel;
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
-        if left_ok && matches_non_placeholder_home_user(&bytes[pos + prefix.len()..], b'/') {
+        if left_ok && matches_non_placeholder_home_user_sep(&bytes[pos + prefix.len()..], b"/") {
             return true;
         }
         start = pos + line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
@@ -710,11 +756,20 @@ fn has_windows_home_prefix(line: &str) -> bool {
         let drive_ok = bytes[i].is_ascii_alphabetic() && bytes[i + 1] == b':';
         let left_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
         if drive_ok && left_ok {
-            let sep = bytes[i + 2];
-            if (sep == b'\\' || sep == b'/')
-                && bytes.get(i + 3..i + 8).is_some_and(|w| w.eq_ignore_ascii_case(b"users"))
-                && bytes.get(i + 8) == Some(&sep)
-                && matches_non_placeholder_home_user(&bytes[i + 9..], sep)
+            let sep_info: Option<(&[u8], usize)> = if bytes.get(i + 2..i + 4) == Some(b"\\\\") {
+                Some((b"\\\\", i + 4))
+            } else if bytes.get(i + 2) == Some(&b'\\') {
+                Some((b"\\", i + 3))
+            } else if bytes.get(i + 2) == Some(&b'/') {
+                Some((b"/", i + 3))
+            } else {
+                None
+            };
+            if let Some((sep, after_sep1)) = sep_info
+                && bytes.get(after_sep1..after_sep1 + 5).is_some_and(|w| w.eq_ignore_ascii_case(b"users"))
+                && let Some(after_users) = bytes.get(after_sep1 + 5..)
+                && let Some(after_sep2) = after_users.strip_prefix(sep)
+                && matches_non_placeholder_home_user_sep(after_sep2, sep)
             {
                 return true;
             }
@@ -838,5 +893,60 @@ let token = raw.trim();
         assert_eq!(dhits.len(), 1, "{dhits:?}");
         assert_eq!(dhits[0].location, "abcdef123456:src/real.rs");
         assert_eq!(dhits[0].line, 2);
+    }
+
+    #[test]
+    fn aud_12_34_46_escaped_win_paths_pem_after_cert_rust_literals_and_pzfx_and_unreadable() {
+        let escaped_win = concat!("let p = \"C:\\\\Us", "ers\\\\alice\\\\Documents\\\\x\";");
+        let cert_then_key = concat!("{\"b\":\"-----", "BEGIN CERTIFICATE-----MIIB...-----", "BEGIN RSA ", "PRIVATE ", "KEY-----MIIE\"}");
+        let pgp_key = concat!("-----", "BEGIN PGP ", "PRIVATE ", "KEY BLOCK-----");
+        let byte_lit = format!("pub const API_{}: &[u8] = b\"{}\";", "SECRET", concat!("prod_sec", "ret_987654"));
+        let raw2_lit = format!("pub const API_{}: &str = r##\"{}\"##;", "SECRET", concat!("prod_sec", "ret_987654"));
+        let br_lit = format!("pub const API_{}: &[u8] = br#\"{}\"#;", "SECRET", concat!("prod_sec", "ret_987654"));
+        let c_lit = format!("pub const API_{}: &CStr = c\"{}\";", "SECRET", concat!("prod_sec", "ret_987654"));
+        let escaped_q = format!("DATABASE_{}=\"\\\"{}\"", "PASSWORD", concat!("real_prod_", "pw_2026"));
+
+        for sample in [escaped_win, cert_then_key, pgp_key, &byte_lit, &raw2_lit, &br_lit, &c_lit, &escaped_q] {
+            let mut hits = Vec::new();
+            scan_text("probe.rs", sample, &mut hits);
+            assert!(!hits.is_empty(), "AUD-12-34 missed `{sample}`");
+        }
+
+        // AUD-12-46: non-UTF-8 .pzfx XML is scanned and missing/unreadable file fails closed.
+        let dir = crate::scan_util::test_support::TestDir::new("aud12-46-secrets");
+        let mut pzfx = vec![0xA9, b' '];
+        pzfx.extend_from_slice(concat!("/Us", "ers/alice/work/exp.pzfx\n").as_bytes());
+        dir.write_bytes("sample.pzfx", &pzfx);
+        let hits = super::scan_repo(dir.path(), &[String::from("sample.pzfx"), String::from("missing.txt")]);
+        assert!(hits.iter().any(|h| h.location == "sample.pzfx"), "latin-1 pzfx missed: {hits:?}");
+        assert!(hits.iter().any(|h| h.location == "missing.txt" && h.kind.contains("unreadable")), "missing file must fail closed: {hits:?}");
+
+        // AUD-12-46: `run_history` (`git log -m`) catches a secret introduced ONLY in a merge commit
+        // (absent from both parents) and deleted in a subsequent commit.
+        let repo = crate::scan_util::test_support::TestDir::git_repo("aud12-46-merge-history");
+        repo.write("cfg.txt", "base\n");
+        repo.git_add_all();
+        repo.run_git(&["commit", "-q", "-m", "base"]);
+        repo.run_git(&["checkout", "-q", "-b", "branch-a"]);
+        repo.write("a.txt", "from-a\n");
+        repo.git_add_all();
+        repo.run_git(&["commit", "-q", "-m", "branch a"]);
+        repo.run_git(&["checkout", "-q", "-"]);
+        repo.write("b.txt", "from-b\n");
+        repo.git_add_all();
+        repo.run_git(&["commit", "-q", "-m", "branch b"]);
+        repo.run_git(&["merge", "-q", "--no-ff", "--no-commit", "branch-a"]);
+        let evil_merge_secret = format!("key = \"{}\"\n", concat!("sk-", "test", "MergeOnly123456"));
+        repo.write("cfg.txt", &evil_merge_secret);
+        repo.git_add_all();
+        repo.run_git(&["commit", "-q", "-m", "evil merge"]);
+        repo.write("cfg.txt", "cleaned\n");
+        repo.git_add_all();
+        repo.run_git(&["commit", "-q", "-m", "cleanup"]);
+
+        // Working tree is clean, but history scan (`-m`) catches the merge-only secret.
+        assert!(super::run(repo.path()).is_ok());
+        let hist_err = super::run_history(repo.path()).unwrap_err();
+        assert!(hist_err.contains("cfg.txt"), "expected merge-only secret in cfg.txt, got: {hist_err}");
     }
 }

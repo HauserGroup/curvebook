@@ -188,7 +188,7 @@ fn detect_proportion_scale(spec: &GraphSpec) -> Option<f64> {
 }
 
 fn extract_contingency_matrix(graph: &GraphSheet, doc: &ProjectDocument) -> Option<ContingencyMatrix> {
-    let ds = doc.data_sheet(&graph.spec.primary_source_sheet_id)?;
+    let ds = crate::resolve_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id)?;
     let by_columns = matches!(graph.spec.x_axis.tick_format, TickLabelFormat::Categorical(CategoricalTickSource::ColumnTitles));
     match &ds.archetype {
         TableArchetype::Contingency(cont) => {

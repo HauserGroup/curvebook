@@ -1232,6 +1232,12 @@ Write-Output $wrote
     }
 
     drop(stage_dir);
+    if primary_text.is_empty() {
+        return Ok(OsAdapterStatus::unavailable(
+            "powershell-win32-clipboard",
+            "multi-flavor figure clipboard unavailable; refusing to overwrite clipboard with placeholder text",
+        ));
+    }
     let fallback_candidates = vec![OsCommandCandidate::new("clip", &[])];
     write_os_clipboard_bundle_with(&fallback_candidates, bundle, primary_text, flavors)
 }
@@ -1309,6 +1315,12 @@ fn write_os_clipboard_bundle_platform(bundle: &ClipboardBundle, primary_text: &s
         }
     }
 
+    if primary_text.is_empty() {
+        return Ok(OsAdapterStatus::unavailable(
+            "os-pasteboard",
+            "binary figure clipboard backend unavailable; refusing to overwrite clipboard with placeholder text",
+        ));
+    }
     write_os_clipboard_bundle_with(&fallback_candidates, bundle, primary_text, flavors)
 }
 
@@ -1785,7 +1797,18 @@ pub fn read_os_pasteboard() -> Result<OsAdapterStatus, String> {
 /// invalid, or an available print-spool binary rejects the job.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn submit_os_print_job(spool: &crate::PrintSpoolOutput, printer: Option<&str>) -> Result<OsAdapterStatus, String> {
-    submit_os_print_pdf_bytes(&spool.pdf_bytes, printer)
+    submit_os_print_job_with_copies(spool, printer, 1)
+}
+
+/// Submit a physical-scale [`crate::PrintSpoolOutput`] PDF payload to the host OS print spooler
+/// (`lp` / `lpr`) with an explicit copy count (`1..=999`).
+///
+/// # Errors
+/// Returns a structured error string if `spool.pdf_bytes` is not a valid PDF payload, `printer` is
+/// invalid, or an available print-spool binary rejects the job.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn submit_os_print_job_with_copies(spool: &crate::PrintSpoolOutput, printer: Option<&str>, copies: u16) -> Result<OsAdapterStatus, String> {
+    submit_os_print_pdf_bytes_with_copies(&spool.pdf_bytes, printer, copies)
 }
 
 /// Submit raw `%PDF-` bytes to the host OS print spooler (`lp` / `lpr`).
@@ -1795,8 +1818,19 @@ pub fn submit_os_print_job(spool: &crate::PrintSpoolOutput, printer: Option<&str
 /// invalid, or an available print-spool binary fails.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn submit_os_print_pdf_bytes(pdf_bytes: &[u8], printer: Option<&str>) -> Result<OsAdapterStatus, String> {
+    submit_os_print_pdf_bytes_with_copies(pdf_bytes, printer, 1)
+}
+
+/// Submit raw `%PDF-` bytes to the host OS print spooler (`lp` / `lpr`) with an explicit copy count
+/// (`1..=999`, forwarded via `-n <copies>` for `lp` and `-# <copies>` for `lpr` when `copies > 1`).
+///
+/// # Errors
+/// Returns a structured error string if `pdf_bytes` is not a valid PDF payload, `printer` is
+/// invalid, or an available print-spool binary fails.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn submit_os_print_pdf_bytes_with_copies(pdf_bytes: &[u8], printer: Option<&str>, copies: u16) -> Result<OsAdapterStatus, String> {
     let clean_printer = validate_printer_name(printer)?;
-    let candidates = os_print_candidates(clean_printer);
+    let candidates = os_print_candidates(clean_printer, copies.clamp(1, 999));
     submit_os_print_bytes_with(&candidates, pdf_bytes)
 }
 
@@ -1815,9 +1849,14 @@ fn write_os_clipboard_bundle_with(
     primary_text: &str,
     flavors: &[&str],
 ) -> Result<OsAdapterStatus, String> {
-    let fallback_svg_or_html =
-        if primary_text.is_empty() { format!("curvebook-figure {}x{}", bundle.width_px, bundle.height_px) } else { primary_text.to_owned() };
-    let mut status = write_os_pasteboard_with(candidates, &fallback_svg_or_html)?;
+    let _ = bundle;
+    if primary_text.is_empty() {
+        return Ok(OsAdapterStatus::unavailable(
+            "os-pasteboard",
+            "no textual clipboard representation available; refusing to write placeholder text",
+        ));
+    }
+    let mut status = write_os_pasteboard_with(candidates, primary_text)?;
     if status.available {
         status.detail = format!("wrote clipboard bundle ({}) via {}", flavors.join(", "), status.backend);
     }
@@ -2030,15 +2069,32 @@ fn os_pasteboard_read_candidates() -> Vec<OsCommandCandidate> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn os_print_candidates(printer: Option<&str>) -> Vec<OsCommandCandidate> {
-    let lp = match printer {
-        Some(p) => OsCommandCandidate::new("lp", &["-d", p]),
-        None => OsCommandCandidate::new("lp", &[]),
-    };
-    let lpr = match printer {
-        Some(p) => OsCommandCandidate::new("lpr", &["-P", p]),
-        None => OsCommandCandidate::new("lpr", &[]),
-    };
+fn os_print_candidates(printer: Option<&str>, copies: u16) -> Vec<OsCommandCandidate> {
+    let clamped_copies = copies.clamp(1, 999);
+    let copies_str = clamped_copies.to_string();
+
+    let mut lp_args: Vec<String> = Vec::new();
+    if let Some(p) = printer {
+        lp_args.push(String::from("-d"));
+        lp_args.push(p.to_owned());
+    }
+    if clamped_copies > 1 {
+        lp_args.push(String::from("-n"));
+        lp_args.push(copies_str.clone());
+    }
+    let lp = OsCommandCandidate { program: String::from("lp"), args: lp_args };
+
+    let mut lpr_args: Vec<String> = Vec::new();
+    if let Some(p) = printer {
+        lpr_args.push(String::from("-P"));
+        lpr_args.push(p.to_owned());
+    }
+    if clamped_copies > 1 {
+        lpr_args.push(String::from("-#"));
+        lpr_args.push(copies_str);
+    }
+    let lpr = OsCommandCandidate { program: String::from("lpr"), args: lpr_args };
+
     #[cfg(target_os = "windows")]
     {
         vec![lpr, lp]
@@ -2181,10 +2237,11 @@ mod tests {
             assert!(status.detail.contains("emf"));
             assert!(status.detail.contains("tiff"));
 
+            // AUD-07-13: when no textual representation is provided (`primary_text == ""`), the
+            // text-only fallback helper must refuse to overwrite the clipboard with placeholder text.
             let slide_status = write_os_clipboard_bundle_with(&write_mock, &bundle, "", &bundle.available_flavors())?;
-            assert!(slide_status.available);
-            assert!(slide_status.detail.contains("pdf"));
-            assert!(slide_status.detail.contains("tiff"));
+            assert!(!slide_status.available);
+            assert_eq!(slide_status.availability, OsAdapterAvailability::Unavailable);
         }
         let _ = RectPt::new(0.0, 0.0, 1.0, 1.0);
         Ok(())
@@ -2394,6 +2451,47 @@ Laser_Lab_01 accepting requests since Mon Nov 14 10:00:00 2026
             drop(dir);
             let _ = std::fs::remove_dir_all(&root);
         }
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn os_print_candidates_forward_copies_and_empty_clipboard_fallback_is_unavailable() -> Result<(), String> {
+        // AUD-07-12: copy count > 1 adds `-n <copies>` to lp and `-# <copies>` to lpr, clamped to 1..=999.
+        let cands = super::os_print_candidates(Some("LabPrinter"), 4);
+        let lp = cands.iter().find(|c| c.program == "lp").ok_or("missing lp candidate")?;
+        assert_eq!(lp.args, vec!["-d", "LabPrinter", "-n", "4"]);
+        let lpr = cands.iter().find(|c| c.program == "lpr").ok_or("missing lpr candidate")?;
+        assert_eq!(lpr.args, vec!["-P", "LabPrinter", "-#", "4"]);
+
+        let single = super::os_print_candidates(None, 1);
+        let lp1 = single.iter().find(|c| c.program == "lp").ok_or("missing lp single")?;
+        assert!(lp1.args.is_empty(), "single copy must omit -n flag");
+        let lpr1 = single.iter().find(|c| c.program == "lpr").ok_or("missing lpr single")?;
+        assert!(lpr1.args.is_empty(), "single copy must omit -# flag");
+
+        let clamped = super::os_print_candidates(None, 5000);
+        let lp_max = clamped.iter().find(|c| c.program == "lp").ok_or("missing lp max")?;
+        assert_eq!(lp_max.args, vec!["-n", "999"]);
+
+        // AUD-07-13: write_os_clipboard_bundle_with refuses placeholder text when primary_text is empty.
+        let bundle = super::ClipboardBundle {
+            pdf_bytes: Vec::new(),
+            svg: String::new(),
+            html: String::new(),
+            png_bytes: vec![0x89, b'P', b'N', b'G'],
+            tiff_bytes: None,
+            emf_bytes: None,
+            width_pt: 100.0,
+            height_pt: 80.0,
+            width_px: 100,
+            height_px: 80,
+            dpi: 72,
+        };
+        let status = super::write_os_clipboard_bundle_with(&[], &bundle, "", &["png"])?;
+        assert!(!status.available);
+        assert_eq!(status.availability, super::OsAdapterAvailability::Unavailable);
+        assert!(!status.detail.contains("curvebook-figure"));
         Ok(())
     }
 }

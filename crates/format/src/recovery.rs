@@ -1453,7 +1453,7 @@ impl JournalBackend for DirectoryJournalBackend {
 pub struct CrashRecoveryJournal<B: JournalBackend> {
     backend: B,
     lease: JournalLockLease,
-    next_seq: u64,
+    last_seq: u64,
     limits: JournalLimits,
     pending_record_count: usize,
     pending_journal_bytes: usize,
@@ -1490,7 +1490,7 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
         let mut warnings = lock_warnings;
         warnings.extend(recovered_state.warnings);
 
-        let next_seq = recovered_state.last_seq.saturating_add(1).max(1);
+        let last_seq = recovered_state.last_seq;
         let pending_record_count = recovered_state.remaining_record_count;
         let pending_journal_bytes = recovered_state.remaining_journal_bytes;
         let report = RecoveryReport {
@@ -1504,7 +1504,7 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
             recovered_from_stale_lock,
             active_lease: lease.clone(),
         };
-        Ok((Self { backend, lease, next_seq, limits, pending_record_count, pending_journal_bytes }, report))
+        Ok((Self { backend, lease, last_seq, limits, pending_record_count, pending_journal_bytes }, report))
     }
 
     /// Return the active [`JournalLimits`] enforced for replay and command appends.
@@ -1528,7 +1528,7 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
     /// Append a new command JSON payload to `ops.journal` with monotonic sequence and CRC32.
     pub fn record_command(&mut self, command_json: serde_json::Value) -> Result<u64, FormatError> {
         self.ensure_lease_ownership("record journal command")?;
-        let seq = self.next_seq;
+        let seq = self.last_seq.checked_add(1).ok_or_else(|| FormatError::Io(String::from("journal sequence number overflow")))?;
         let record = JournalOpRecord::new(seq, command_json)?;
         let line = record.to_ndjson_line()?;
         if line.len() > self.limits.max_line_bytes {
@@ -1549,16 +1549,16 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
         self.backend.append_journal_line(&line)?;
         self.pending_record_count = next_record_count;
         self.pending_journal_bytes = next_journal_bytes;
-        self.next_seq = seq.checked_add(1).ok_or_else(|| FormatError::Io(String::from("journal sequence number overflow")))?;
+        self.last_seq = seq;
         Ok(seq)
     }
 
     fn publish_snapshot_and_optional_marker(&mut self, snapshot_bytes: &[u8]) -> Result<Option<PublishedSnapshotMarker>, FormatError> {
-        let covered_seq = self.next_seq.saturating_sub(1);
+        let covered_seq = self.last_seq;
         self.backend.write_snapshot_with_seq(snapshot_bytes, covered_seq)?;
         let backend_stored_seq = self.backend.read_snapshot_covered_seq_for(snapshot_bytes)? == Some(covered_seq);
         if covered_seq > 0 && !backend_stored_seq {
-            let marker_seq = self.next_seq;
+            let marker_seq = self.last_seq.checked_add(1).ok_or_else(|| FormatError::Io(String::from("journal sequence number overflow")))?;
             let marker = build_snapshot_marker_record(marker_seq, covered_seq, snapshot_bytes)?;
             let line = marker.to_ndjson_line()?;
             self.backend.append_journal_line(&line)?;
@@ -1575,7 +1575,7 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
         let appended_marker = self.publish_snapshot_and_optional_marker(snapshot_bytes)?;
         if let Err(err) = self.backend.clear_journal() {
             if let Some(marker) = appended_marker {
-                self.next_seq = marker.seq.checked_add(1).ok_or_else(|| FormatError::Io(String::from("journal sequence number overflow")))?;
+                self.last_seq = marker.seq;
                 self.pending_record_count = self.pending_record_count.saturating_add(1);
                 self.pending_journal_bytes = self.pending_journal_bytes.saturating_add(marker.line_bytes);
             }
@@ -1619,9 +1619,9 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
         &self.lease
     }
 
-    /// Next sequence number to be assigned on [`Self::record_command`].
+    /// Next sequence number to be assigned on [`Self::record_command`], saturating at `u64::MAX` once exhausted.
     pub fn next_seq(&self) -> u64 {
-        self.next_seq
+        self.last_seq.saturating_add(1)
     }
 
     /// Borrow the underlying backend.

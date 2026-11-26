@@ -126,17 +126,19 @@ pub(in crate::solver) fn fit_poisson_irls(
     let mut outer_converged = k_free == 0 && last_out.status == FitStatus::Converged;
 
     if k_free > 0 {
-        for _ in 0..12 {
+        let max_passes = config.max_iters.clamp(1, 60);
+        for _ in 0..max_passes {
             theta = last_out.theta.clone();
             assign_poisson_irls_weights(&mut work_obs, &last_out.y_hat)?;
             let next = run_trust_region_lm_with_domain(model, layout, &work_obs, &theta, config.max_iters, 10.0, true)?;
             total_iters = total_iters.saturating_add(next.iterations);
+            let y_scale = work_obs.iter().map(|o| (o.point.y * o.sqrt_weight).abs()).fold(0.0_f64, f64::max).max(1e-12);
 
             if let Some(dev) = poisson_deviance(&work_obs, &next.y_hat)
                 && dev <= prev_dev
             {
                 let rel_change = (prev_dev - dev).abs() / prev_dev.max(1.0);
-                let max_step = max_rel_theta_step(&theta, &next.theta);
+                let max_step = irls_theta_step(&theta, &next.theta, &next.j_mat, y_scale);
                 let next_status = next.status;
                 last_out = next;
                 prev_dev = dev;
@@ -185,7 +187,7 @@ pub(in crate::solver) fn fit_poisson_irls(
                 break;
             }
             if !improved {
-                if next.status == FitStatus::Converged && max_rel_theta_step(&theta, &next.theta) < 1e-8 {
+                if next.status == FitStatus::Converged && irls_theta_step(&theta, &next.theta, &next.j_mat, y_scale) < 1e-8 {
                     outer_converged = true;
                 } else if next.status == FitStatus::Diverged {
                     last_out.status = FitStatus::Diverged;
@@ -213,8 +215,66 @@ pub(in crate::solver) fn fit_poisson_irls(
     Ok(last_out)
 }
 
-fn max_rel_theta_step(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(&va, &vb)| (va - vb).abs() / vb.abs().max(va.abs()).max(f64::MIN_POSITIVE)).fold(0.0_f64, f64::max)
+/// Scale-invariant IRLS parameter step norm combining Jacobian-weighted displacement
+/// `||D (theta_next - theta_prev)|| / max(||D theta||, y_scale)` (Moré 1978) with a zero-column
+/// fallback so optimal parameters at `0.0` converge cleanly without premature termination on
+/// small non-zero physical scales (`AUD-03-23`).
+fn irls_theta_step(prev: &[f64], next: &[f64], j_mat: &DenseMatrix, y_scale: f64) -> f64 {
+    let k = prev.len().min(next.len());
+    let mut d_theta_sq = NeumaierSum::new();
+    let mut d_step_sq = NeumaierSum::new();
+    let mut fallback_max = 0.0_f64;
+    let theta_max = prev.iter().chain(next.iter()).map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let abs_floor = (1e-12 * theta_max).max(f64::MIN_POSITIVE);
+    let mut any_col = false;
+    for j in 0..k {
+        let delta = (next[j] - prev[j]).abs();
+        let cn = if j < j_mat.ncols() { j_mat.col_norm2(j) } else { 0.0 };
+        if cn.is_finite() && cn > 0.0 {
+            any_col = true;
+            let ds = cn * delta;
+            let dt = cn * next[j].abs().max(prev[j].abs());
+            d_step_sq.add(ds * ds);
+            d_theta_sq.add(dt * dt);
+        } else if delta > 0.0 {
+            let denom = prev[j].abs().max(next[j].abs()).max(abs_floor);
+            fallback_max = fallback_max.max(delta / denom);
+        }
+    }
+    if any_col {
+        let denom = d_theta_sq.total().sqrt().max(y_scale).max(f64::MIN_POSITIVE);
+        (d_step_sq.total().sqrt() / denom).max(fallback_max)
+    } else {
+        fallback_max
+    }
+}
+
+/// Recompute Cauchy-weighted residuals and weighted SS under curve-predicted base weights so
+/// `RobustCauchy` weighted residuals stay consistent between `ObservedY` and `PredictedY` (`AUD-03-35`).
+pub(in crate::solver) fn finalize_cauchy_weighted_residuals(obs: &[ObsRecord], out: &mut LmRunOutput, k_free: usize) {
+    let w_y_scale = obs.iter().map(|o| (o.point.y * o.sqrt_weight).abs()).fold(0.0_f64, f64::max).max(f64::MIN_POSITIVE);
+    let abs_res: Vec<f64> = obs.iter().zip(out.y_hat.iter()).map(|(o, yh)| ((o.point.y - yh) * o.sqrt_weight).abs()).collect();
+    let rsdr = compute_rsdr(&abs_res, k_free).max(1e-12 * w_y_scale);
+    let mut w_res = Vec::with_capacity(obs.len());
+    let mut ss = NeumaierSum::new();
+    for (i, (rec, &yh)) in obs.iter().zip(out.y_hat.iter()).enumerate() {
+        let z = abs_res[i] / rsdr;
+        let cauchy_sqrt_w = (1.0 / (1.0 + z * z)).sqrt();
+        let r = (rec.point.y - yh) * rec.sqrt_weight * cauchy_sqrt_w;
+        if !r.is_finite() {
+            out.status = FitStatus::ImpossibleWeights;
+            return;
+        }
+        w_res.push(r);
+        ss.add(r * r);
+    }
+    let total_ss = ss.total();
+    if !total_ss.is_finite() {
+        out.status = FitStatus::ImpossibleWeights;
+        return;
+    }
+    out.weighted_res = w_res;
+    out.weighted_ss = total_ss;
 }
 
 /// Poisson deviance `D = 2 sum [ y ln(y / mu) - (y - mu) ]` (McCullagh & Nelder 1989), evaluated
@@ -285,7 +345,7 @@ pub(in crate::solver) fn run_cauchy_irls_loop(
         }
         let next = run_trust_region_lm(model, layout, &work_obs, &prev_theta, config.max_iters, 10.0)?;
         total_iters = total_iters.saturating_add(next.iterations);
-        let max_step = max_rel_theta_step(&prev_theta, &next.theta);
+        let max_step = irls_theta_step(&prev_theta, &next.theta, &next.j_mat, w_y_scale);
         last_out = next;
         if last_out.status == FitStatus::Diverged {
             break;
@@ -376,6 +436,9 @@ pub(in crate::solver) fn fit_predicted_y_irls(
         last_out.weighted_res = w_res;
         last_out.y_hat = y_hat;
         last_out.weighted_ss = ss_no_within;
+    } else {
+        last_out.status = FitStatus::ImpossibleWeights;
+        return Ok(last_out);
     }
     let k_free = layout.k_free();
     if k_free == 0 {
@@ -408,12 +471,17 @@ pub(in crate::solver) fn fit_predicted_y_irls(
             failed.status = FitStatus::ImpossibleWeights;
             return Ok(failed);
         }
-        let max_step = max_rel_theta_step(&prev_theta, &next.theta);
+        let w_y_scale = obs.iter().map(|o| (o.point.y * o.sqrt_weight).abs()).fold(0.0_f64, f64::max).max(f64::MIN_POSITIVE);
+        let max_step = irls_theta_step(&prev_theta, &next.theta, &next.j_mat, w_y_scale);
         last_out = next;
         if let Some((w_res, y_hat, ss_no_within)) = eval_residuals_with_domain(model, layout, obs, &last_out.theta, false) {
             last_out.weighted_res = w_res;
             last_out.y_hat = y_hat;
             last_out.weighted_ss = ss_no_within;
+        } else {
+            last_out.iterations = total_iters;
+            last_out.status = FitStatus::ImpossibleWeights;
+            return Ok(last_out);
         }
         let new_wss = last_out.weighted_ss + obs_ss_within(obs);
         let rel_ss_change = (prev_wss - new_wss).abs() / prev_wss.abs().max(1.0);

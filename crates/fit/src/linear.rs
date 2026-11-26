@@ -508,6 +508,9 @@ fn fit_ols_core(points: &[DataPoint], fixed_point: Option<(f64, f64)>) -> Result
     let sy_x = (rss / (df_res as f64)).sqrt();
     let se_slope = sy_x * se_slope_factor;
     let se_intercept = sy_x * se_intercept_factor;
+    if ![slope, intercept, s_xx, s_yy, s_xy, rss, sy_x, se_slope, se_intercept].into_iter().all(f64::is_finite) {
+        return Err(FitError::InvalidParameter { name: "data", reason: String::from("linear regression moments or residuals overflowed f64 range") });
+    }
 
     Ok(OlsFitCore { series, n, df_res, slope, intercept, se_slope, se_intercept, s_xx, s_yy, s_xy, x_mean, rss, sy_x, raw_res, residuals })
 }
@@ -606,7 +609,11 @@ pub(crate) fn fit_linear_points(
     let ci_intercept = (fit.intercept - t_crit * fit.se_intercept, fit.intercept + t_crit * fit.se_intercept);
 
     let r_squared = if fit.s_yy > 0.0 { (1.0 - fit.rss / fit.s_yy).clamp(0.0, 1.0) } else { 1.0 };
-    let r = if !is_constrained && fit.s_xx > 0.0 && fit.s_yy > 0.0 { (fit.s_xy / (fit.s_xx * fit.s_yy).sqrt()).clamp(-1.0, 1.0) } else { f64::NAN };
+    let r = if !is_constrained && fit.s_xx > 0.0 && fit.s_yy > 0.0 {
+        ((fit.s_xy / fit.s_xx.sqrt()) / fit.s_yy.sqrt()).clamp(-1.0, 1.0)
+    } else {
+        f64::NAN
+    };
     let ms_res = fit.rss / (fit.df_res as f64);
     let ss_reg = (fit.s_yy - fit.rss).max(0.0);
     let f_stat = if ms_res > 0.0 {
@@ -688,7 +695,7 @@ pub(crate) fn fit_linear_points(
         n: fit.n,
         n_excluded_by_range,
         df_residual: fit.df_res,
-        force_through_origin: opts.force_through_origin || fixed_point == Some((0.0, 0.0)),
+        force_through_origin: fixed_point == Some((0.0, 0.0)),
         fixed_point,
         slope: fit.slope,
         intercept: fit.intercept,
@@ -821,6 +828,9 @@ fn fit_with_intercept(
     let intercept = y_mean - slope * x_mean;
     let se_slope_factor = (1.0 / s_xx).sqrt();
     let se_intercept_factor = (1.0 / nf + (x_mean * x_mean) / s_xx).sqrt();
+    if ![s_yy, s_xy, slope, intercept, se_slope_factor, se_intercept_factor].into_iter().all(f64::is_finite) {
+        return Err(FitError::InvalidParameter { name: "data", reason: String::from("linear regression moments overflowed f64 range") });
+    }
     Ok((slope, intercept, se_slope_factor, se_intercept_factor, s_xx, s_yy, s_xy, x_mean))
 }
 
@@ -858,6 +868,9 @@ fn fit_through_fixed_point(
     let intercept = y0 - slope * x0;
     let se_slope_factor = (1.0 / s_xx).sqrt();
     let se_intercept_factor = x0.abs() * se_slope_factor;
+    if ![s_yy, s_xy, slope, intercept, se_slope_factor, se_intercept_factor].into_iter().all(f64::is_finite) {
+        return Err(FitError::InvalidParameter { name: "data", reason: String::from("fixed-point linear regression moments overflowed f64 range") });
+    }
     Ok((slope, intercept, se_slope_factor, se_intercept_factor, s_xx, s_yy, s_xy, x0))
 }
 
@@ -1141,7 +1154,7 @@ pub fn compare_linear_lines(datasets: &[&[DataPoint]], force_through_origin: boo
         return Err(FitError::InsufficientData { required: 2, actual: k });
     }
     let min_per = if force_through_origin { 2 } else { 3 };
-    let mut ss_unpooled = 0.0_f64;
+    let mut ss_unpooled_acc = NeumaierSum::new();
     let mut n_total = 0_usize;
     let mut ss_within_total = 0.0_f64;
     let mut s_xx_pool = 0.0_f64;
@@ -1150,41 +1163,81 @@ pub fn compare_linear_lines(datasets: &[&[DataPoint]], force_through_origin: boo
     let mut all_xs = Vec::new();
     let mut all_ys = Vec::new();
     let mut all_ns = Vec::new();
+    let mut group_series = Vec::with_capacity(k);
 
     for &ds in datasets {
         let series = extract_linear_series(ds)?;
         if series.n_total < min_per {
             return Err(FitError::InsufficientData { required: min_per, actual: series.n_total });
         }
-        let (slope, intercept, _, _, s_xx, s_yy, s_xy, _) = if force_through_origin {
+        let (slope, intercept, _, _, s_xx, s_yy, s_xy, x_mean) = if force_through_origin {
             fit_through_fixed_point(&series.xs, &series.ys, &series.ns, series.ss_within, 0.0, 0.0)?
         } else {
             fit_with_intercept(&series.xs, &series.ys, &series.ns, series.n_total, series.ss_within)?
         };
-        let rss_j: f64 =
-            series.xs.iter().zip(series.ys.iter()).zip(series.ns.iter()).map(|((&x, &y), &w)| w * (y - (intercept + slope * x)).powi(2)).sum::<f64>()
-                + series.ss_within;
-        ss_unpooled += rss_j;
-        n_total += series.n_total;
+        let mut rss_j_acc = NeumaierSum::new();
+        for ((&x, &y), &w) in series.xs.iter().zip(series.ys.iter()).zip(series.ns.iter()) {
+            let r = y - (intercept + slope * x);
+            rss_j_acc.add(w * r * r);
+        }
+        rss_j_acc.add(series.ss_within);
+        ss_unpooled_acc.add(rss_j_acc.total().max(0.0));
+        n_total = n_total
+            .checked_add(series.n_total)
+            .ok_or_else(|| FitError::InvalidParameter { name: "n", reason: String::from("total observation count overflowed usize") })?;
         ss_within_total += series.ss_within;
         s_xx_pool += s_xx;
         s_xy_pool += s_xy;
         s_yy_pool += s_yy;
+        let y_mean = if force_through_origin {
+            0.0
+        } else {
+            let mut sum_y = NeumaierSum::new();
+            for (&y, &w) in series.ys.iter().zip(series.ns.iter()) {
+                sum_y.add(w * y);
+            }
+            sum_y.total() / (series.n_total as f64)
+        };
         all_xs.extend_from_slice(&series.xs);
         all_ys.extend_from_slice(&series.ys);
         all_ns.extend_from_slice(&series.ns);
+        group_series.push((series, x_mean, y_mean));
     }
 
+    if !s_xx_pool.is_finite() || s_xx_pool <= 0.0 || !s_xy_pool.is_finite() || !s_yy_pool.is_finite() {
+        return Err(FitError::InvalidParameter { name: "data", reason: String::from("pooled linear moments are degenerate or overflowed") });
+    }
     let pooled_slope = s_xy_pool / s_xx_pool;
-    let ss_common = (s_yy_pool - pooled_slope * pooled_slope * s_xx_pool).max(0.0);
+    if !pooled_slope.is_finite() {
+        return Err(FitError::InvalidParameter { name: "data", reason: String::from("pooled slope overflowed f64 range") });
+    }
+    // Compute SS_common directly from squared residuals around the pooled slope to avoid
+    // catastrophic cancellation in `s_yy_pool - pooled_slope^2 * s_xx_pool` (`AUD-03-22`).
+    let mut ss_common_acc = NeumaierSum::new();
+    for (series, x_bar, y_bar) in &group_series {
+        for ((&x, &y), &w) in series.xs.iter().zip(series.ys.iter()).zip(series.ns.iter()) {
+            let r = if force_through_origin { y - pooled_slope * x } else { (y - *y_bar) - pooled_slope * (x - *x_bar) };
+            ss_common_acc.add(w * r * r);
+        }
+        ss_common_acc.add(series.ss_within);
+    }
+    let ss_unpooled = ss_unpooled_acc.total().max(0.0);
+    let ss_common = ss_common_acc.total().max(0.0);
+    if !ss_unpooled.is_finite() || !ss_common.is_finite() {
+        return Err(FitError::InvalidParameter { name: "data", reason: String::from("ANCOVA sums of squares overflowed f64 range") });
+    }
 
     let df_num_s = k - 1;
     let df_den_s = if force_through_origin { n_total - k } else { n_total - 2 * k };
     if df_den_s == 0 {
         return Err(FitError::InsufficientData { required: n_total + 1, actual: n_total });
     }
+    let ss_diff_s = (ss_common - ss_unpooled).max(0.0);
+    // Treat sub-ULP^2 rounding noise on exact noiseless parallel lines as zero slope difference.
+    let zero_tol_s = 1e-26 * s_yy_pool;
+    let effective_diff_s = if ss_unpooled <= zero_tol_s && ss_diff_s <= zero_tol_s { 0.0 } else { ss_diff_s };
     let ms_den_s = ss_unpooled / (df_den_s as f64);
-    let ms_num_s = (ss_common - ss_unpooled).max(0.0) / (df_num_s as f64);
+    let ms_num_s = effective_diff_s / (df_num_s as f64);
     let f_slopes = if ms_den_s > 0.0 {
         ms_num_s / ms_den_s
     } else if ms_num_s > 0.0 {
@@ -1211,12 +1264,19 @@ pub fn compare_linear_lines(datasets: &[&[DataPoint]], force_through_origin: boo
     }
 
     let (all_slope, all_int, _, _, _, _, _, _) = fit_with_intercept(&all_xs, &all_ys, &all_ns, n_total, ss_within_total)?;
-    let ss_total_line: f64 =
-        all_xs.iter().zip(all_ys.iter()).zip(all_ns.iter()).map(|((&x, &y), &w)| w * (y - (all_int + all_slope * x)).powi(2)).sum::<f64>()
-            + ss_within_total;
+    let mut ss_total_acc = NeumaierSum::new();
+    for ((&x, &y), &w) in all_xs.iter().zip(all_ys.iter()).zip(all_ns.iter()) {
+        let r = y - (all_int + all_slope * x);
+        ss_total_acc.add(w * r * r);
+    }
+    ss_total_acc.add(ss_within_total);
+    let ss_total_line = ss_total_acc.total().max(0.0);
     let df_den_i = n_total - k - 1;
     let ms_den_i = ss_common / (df_den_i as f64);
-    let ms_num_i = (ss_total_line - ss_common).max(0.0) / (df_num_s as f64);
+    let ss_diff_i = (ss_total_line - ss_common).max(0.0);
+    let zero_tol_i = 1e-26 * ss_total_line.max(s_yy_pool);
+    let effective_diff_i = if ss_common <= zero_tol_i && ss_diff_i <= zero_tol_i { 0.0 } else { ss_diff_i };
+    let ms_num_i = effective_diff_i / (df_num_s as f64);
     let f_int = if ms_den_i > 0.0 {
         ms_num_i / ms_den_i
     } else if ms_num_i > 0.0 {
@@ -1314,26 +1374,48 @@ pub fn deming_regression(points: &[DataPoint], opts: &DemingOptions) -> Result<D
         return Err(FitError::InvalidParameter { name: "xy", reason: String::from("non-finite value") });
     }
     let n = points.len();
-    let (slope, intercept, sy_x) = fit_deming_core(&xs, &ys, opts.variance_ratio_lambda)?;
+    let (slope, intercept, sy_x, mx_mean, my_mean, s_xx_full, s_yy_full, s_xy_full) =
+        fit_deming_core_with_moments(&xs, &ys, opts.variance_ratio_lambda)?;
 
-    // Leave-One-Out Jackknife SEs for slope & intercept. If any leave-one-out subset is
-    // collinear/degenerate (e.g. n = 3 with replicate points), degrade SEs & CIs to NaN cleanly
-    // rather than aborting a well-defined full-sample fit.
+    // Leave-One-Out Jackknife SEs for slope & intercept in O(n) via exact moment downdating
+    // (falling back to direct recomputation on the <= 2 high-leverage points where downdating
+    // would cancel >90% of S_xx or S_yy, preserving both O(n) scaling and full precision; AUD-03-38).
     let mut jack_slopes = Vec::with_capacity(n);
     let mut jack_ints = Vec::with_capacity(n);
-    let mut sub_x = Vec::with_capacity(n - 1);
-    let mut sub_y = Vec::with_capacity(n - 1);
+    let mut sub_x = Vec::new();
+    let mut sub_y = Vec::new();
     let mut jack_valid = true;
+    let nf = n as f64;
+    let nm1 = (n - 1) as f64;
+    let factor = nf / nm1;
     for skip in 0..n {
-        sub_x.clear();
-        sub_y.clear();
-        for i in 0..n {
-            if i != skip {
-                sub_x.push(xs[i]);
-                sub_y.push(ys[i]);
+        let dx = xs[skip] - mx_mean;
+        let dy = ys[skip] - my_mean;
+        let dxx = factor * dx * dx;
+        let dyy = factor * dy * dy;
+        let dxy = factor * dx * dy;
+        let high_leverage = n <= 32 || dxx > 0.9 * s_xx_full || dyy > 0.9 * s_yy_full || !dxx.is_finite() || !dyy.is_finite();
+        let res = if high_leverage {
+            sub_x.clear();
+            sub_y.clear();
+            sub_x.reserve(n - 1);
+            sub_y.reserve(n - 1);
+            for i in 0..n {
+                if i != skip {
+                    sub_x.push(xs[i]);
+                    sub_y.push(ys[i]);
+                }
             }
-        }
-        if let Ok((js, ji, _)) = fit_deming_core(&sub_x, &sub_y, opts.variance_ratio_lambda) {
+            fit_deming_core(&sub_x, &sub_y, opts.variance_ratio_lambda).map(|(js, ji, _)| (js, ji))
+        } else {
+            let sub_mx = mx_mean - dx / nm1;
+            let sub_my = my_mean - dy / nm1;
+            let sub_sxx = (s_xx_full - dxx).max(0.0);
+            let sub_syy = (s_yy_full - dyy).max(0.0);
+            let sub_sxy = s_xy_full - dxy;
+            deming_slope_and_intercept(sub_mx, sub_my, sub_sxx, sub_syy, sub_sxy, opts.variance_ratio_lambda)
+        };
+        if let Ok((js, ji)) = res {
             jack_slopes.push(js);
             jack_ints.push(ji);
         } else {
@@ -1372,43 +1454,20 @@ pub fn deming_regression(points: &[DataPoint], opts: &DemingOptions) -> Result<D
         ci_slope,
         ci_intercept,
         sy_x,
-        x_intercept: if slope != 0.0 { Some(-intercept / slope) } else { None },
+        x_intercept: if slope != 0.0 {
+            let xi = -intercept / slope;
+            xi.is_finite().then_some(xi)
+        } else {
+            None
+        },
         residuals,
     })
 }
 
-/// Closed-form Deming regression (`lambda = sigma_x^2 / sigma_y^2`) minimizing
-/// `sum [(y_i - Yhat_i)^2 + (x_i - Xhat_i)^2 / lambda] = sum (y_i - (b0 + b1 x_i))^2 / (1 + lambda b1^2)`
-/// (Deming 1943, Ch. 9; Linnet 1990, eq. 2; Linnet 1993):
-/// `b1 = ((lambda S_yy - S_xx) + sqrt((lambda S_yy - S_xx)^2 + 4 lambda S_xy^2)) / (2 lambda S_xy)`,
-/// evaluated in overflow-safe cancellation-free form for both `lambda <= 1` and `lambda > 1` (via `1/lambda`).
-///
-/// As `lambda -> 0+` (`X` noiseless), `b1 -> S_xy / S_xx` (OLS of `Y` on `X`);
-/// as `lambda -> +inf` (`Y` noiseless), `b1 -> S_yy / S_xy` (OLS of `X` on `Y`, inverted).
-/// Residual SD `sy_x = sqrt(sum (y_i - yhat_i)^2 / ((1 + lambda b1^2) (n - 2)))` estimates `sigma_y`
-/// and satisfies the swap identity `sy_x' = sqrt(lambda) sy_x` under `(x, y, lambda) <-> (y, x, 1/lambda)`.
-fn fit_deming_core(xs: &[f64], ys: &[f64], lambda: f64) -> Result<(f64, f64, f64), FitError> {
-    let mx = SummaryMoments::from_slice(xs)?;
-    let my = SummaryMoments::from_slice(ys)?;
-    let mut dx_acc = NeumaierSum::new();
-    let mut dy_acc = NeumaierSum::new();
-    let mut xy_acc = NeumaierSum::new();
-    for (&x, &y) in xs.iter().zip(ys.iter()) {
-        let dx = x - mx.mean;
-        let dy = y - my.mean;
-        dx_acc.add(dx);
-        dy_acc.add(dy);
-        let p = dx * dy;
-        xy_acc.add(p);
-        xy_acc.add(dx.mul_add(dy, -p));
-    }
-    let s_xx = mx.css;
-    let s_yy = my.css;
-    let s_xy = xy_acc.total() - (dx_acc.total() * dy_acc.total()) / (xs.len() as f64);
+fn deming_slope_and_intercept(mx: f64, my: f64, s_xx: f64, s_yy: f64, s_xy: f64, lambda: f64) -> Result<(f64, f64), FitError> {
     if !s_xx.is_finite() || !s_yy.is_finite() || !s_xy.is_finite() {
         return Err(FitError::InvalidParameter { name: "data", reason: String::from("centered covariance overflowed f64 range") });
     }
-
     let slope = if s_xy == 0.0 {
         let vertical_axis = if lambda <= 1.0 { lambda * s_yy >= s_xx } else { s_yy >= s_xx / lambda };
         if vertical_axis {
@@ -1429,7 +1488,48 @@ fn fit_deming_core(xs: &[f64], ys: &[f64], lambda: f64) -> Result<(f64, f64, f64
     if !slope.is_finite() {
         return Err(FitError::InvalidParameter { name: "data", reason: String::from("Deming slope is non-finite") });
     }
-    let intercept = my.mean - slope * mx.mean;
+    let intercept = my - slope * mx;
+    if !intercept.is_finite() {
+        return Err(FitError::InvalidParameter { name: "data", reason: String::from("Deming intercept is non-finite") });
+    }
+    Ok((slope, intercept))
+}
+
+/// Closed-form Deming regression (`lambda = sigma_x^2 / sigma_y^2`) minimizing
+/// `sum [(y_i - Yhat_i)^2 + (x_i - Xhat_i)^2 / lambda] = sum (y_i - (b0 + b1 x_i))^2 / (1 + lambda b1^2)`
+/// (Deming 1943, Ch. 9; Linnet 1990, eq. 2; Linnet 1993):
+/// `b1 = ((lambda S_yy - S_xx) + sqrt((lambda S_yy - S_xx)^2 + 4 lambda S_xy^2)) / (2 lambda S_xy)`,
+/// evaluated in overflow-safe cancellation-free form for both `lambda <= 1` and `lambda > 1` (via `1/lambda`).
+///
+/// As `lambda -> 0+` (`X` noiseless), `b1 -> S_xy / S_xx` (OLS of `Y` on `X`);
+/// as `lambda -> +inf` (`Y` noiseless), `b1 -> S_yy / S_xy` (OLS of `X` on `Y`, inverted).
+/// Residual SD `sy_x = sqrt(sum (y_i - yhat_i)^2 / ((1 + lambda b1^2) (n - 2)))` estimates `sigma_y`
+/// and satisfies the swap identity `sy_x' = sqrt(lambda) sy_x` under `(x, y, lambda) <-> (y, x, 1/lambda)`.
+fn fit_deming_core(xs: &[f64], ys: &[f64], lambda: f64) -> Result<(f64, f64, f64), FitError> {
+    let (slope, intercept, sy_x, _, _, _, _, _) = fit_deming_core_with_moments(xs, ys, lambda)?;
+    Ok((slope, intercept, sy_x))
+}
+
+#[allow(clippy::type_complexity)]
+fn fit_deming_core_with_moments(xs: &[f64], ys: &[f64], lambda: f64) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), FitError> {
+    let mx = SummaryMoments::from_slice(xs)?;
+    let my = SummaryMoments::from_slice(ys)?;
+    let mut dx_acc = NeumaierSum::new();
+    let mut dy_acc = NeumaierSum::new();
+    let mut xy_acc = NeumaierSum::new();
+    for (&x, &y) in xs.iter().zip(ys.iter()) {
+        let dx = x - mx.mean;
+        let dy = y - my.mean;
+        dx_acc.add(dx);
+        dy_acc.add(dy);
+        let p = dx * dy;
+        xy_acc.add(p);
+        xy_acc.add(dx.mul_add(dy, -p));
+    }
+    let s_xx = mx.css;
+    let s_yy = my.css;
+    let s_xy = xy_acc.total() - (dx_acc.total() * dy_acc.total()) / (xs.len() as f64);
+    let (slope, intercept) = deming_slope_and_intercept(mx.mean, my.mean, s_xx, s_yy, s_xy, lambda)?;
 
     let sy_x = if xs.len() > 2 {
         let scale = 1.0_f64.hypot(lambda.sqrt() * slope.abs());
@@ -1442,7 +1542,10 @@ fn fit_deming_core(xs: &[f64], ys: &[f64], lambda: f64) -> Result<(f64, f64, f64
     } else {
         0.0
     };
-    Ok((slope, intercept, sy_x))
+    if !sy_x.is_finite() {
+        return Err(FitError::InvalidParameter { name: "data", reason: String::from("Deming residual SD overflowed f64 range") });
+    }
+    Ok((slope, intercept, sy_x, mx.mean, my.mean, s_xx, s_yy, s_xy))
 }
 
 /// Leave-one-out jackknife standard error `sqrt((n - 1)/n * sum (theta_(i) - theta_bar)^2)`

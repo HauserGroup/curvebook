@@ -85,7 +85,9 @@ fn rpc_ok(state: &mut McpServerState, id: i64, method: &str, params: Value) -> R
 
 #[test]
 fn r2_s12_03_ui_invoke_menu_params_object() -> TestResult {
-    // Omitted / null `params` must always be forwarded as `{}` (`Value::Object`).
+    // Omitted / null `params` must remain omitted (never synthesized as `{}`) so
+    // `dispatch_gui_invoke_menu` runs contextual synthesis and honors `--human-path-only`,
+    // while explicit `params: {}` is preserved verbatim (`AUD-13-10`).
     let (host, shared) = RecordingHost::new();
     let mut state = McpServerState::with_gui_host(Box::new(host));
 
@@ -93,11 +95,14 @@ fn r2_s12_03_ui_invoke_menu_params_object() -> TestResult {
     assert!(!res1.is_error);
     let res2 = call_tool(&mut state, "ui_invoke_menu", json!({ "command_id": "edit.undo", "params": null })).map_err(|e| format!("invoke 2: {e}"))?;
     assert!(!res2.is_error);
+    let res3 = call_tool(&mut state, "ui_invoke_menu", json!({ "command_id": "file.new", "params": {} })).map_err(|e| format!("invoke 3: {e}"))?;
+    assert!(!res3.is_error);
 
     let recorded = shared.borrow();
-    assert_eq!(recorded.calls.len(), 2);
-    assert_eq!(recorded.calls[0].1["params"], json!({}), "omitted params must serialize as empty JSON object");
-    assert_eq!(recorded.calls[1].1["params"], json!({}), "null params must serialize as empty JSON object");
+    assert_eq!(recorded.calls.len(), 3);
+    assert!(recorded.calls[0].1.get("params").is_none(), "omitted params must not synthesize empty JSON object");
+    assert!(recorded.calls[1].1.get("params").is_none(), "null params must not synthesize empty JSON object");
+    assert_eq!(recorded.calls[2].1["params"], json!({}), "explicit empty params object must be forwarded");
     Ok(())
 }
 

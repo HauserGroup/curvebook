@@ -31,8 +31,8 @@ use super::shared::{
     table_display_decimals,
 };
 use super::shortcuts::{
-    clear_x_clipboard_cache, copy_x_cell_to_clipboard, first_linked_region_in_bounds, handle_multi_keyboard_shortcuts, is_x_column_readonly,
-    push_x_cell_text_paste_intents, read_clipboard_text_for_x_paste,
+    clear_x_clipboard_cache, copy_x_cell_to_clipboard, first_linked_region_in_selection, handle_multi_keyboard_shortcuts, is_x_column_readonly,
+    push_exclude_selection_intent, push_x_cell_text_paste_intents, read_clipboard_text_for_x_paste, resolve_grid_selection,
 };
 use super::{DataGridEguiState, DataGridFrameReport, DataGridRenderContext, GridInlineEditTarget};
 
@@ -574,7 +574,12 @@ fn render_single_multi_x_cell(
         dbuf.base_row_bg
     };
     body_ui.painter().rect_filled(clipped, 0.0, fill);
-    if is_selected {
+    let x_find_coord = GridCellCoord::new(row, crate::egui_shell::sheet_find_bar::X_OR_TIME_COL_SENTINEL, subcol);
+    let x_find_active = fstate.state.active_find_matches.as_ref().is_some_and(|h| h.active_cell == Some(x_find_coord));
+    let x_find_match = x_find_active || fstate.state.active_find_matches.as_ref().is_some_and(|h| h.matching_cells.contains(&x_find_coord));
+    if x_find_match {
+        paint_find_highlight(body_ui, clipped, tokens, x_find_active);
+    } else if is_selected {
         body_ui.painter().rect_stroke(clipped, 0.0, Stroke::new(1.5, tokens.accent), StrokeKind::Inside);
     }
 
@@ -1041,7 +1046,14 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
     let is_parts_of_whole = matches!(ds.archetype, TableArchetype::PartsOfWhole(_));
     let at_col_cap = ds.archetype.column_count() >= curvebook_doc::MAX_DATA_SETS;
     let right_clicked_x = cell_ctx.is_some_and(|t| t.is_x);
-    let dup_enabled = !ds.frozen && !right_clicked_x && ds.archetype.column_count() > 0 && !is_parts_of_whole && !at_col_cap;
+    let target_dup_col = cell_ctx
+        .filter(|t| !t.is_x)
+        .map(|t| t.col)
+        .or_else(|| app.grid.tool.active.map(|c| c.col))
+        .unwrap_or(0)
+        .min(ds.archetype.column_count().saturating_sub(1));
+    let unequal_nested_units = nested_group_has_unequal_units(ds, target_dup_col);
+    let dup_enabled = !ds.frozen && !right_clicked_x && ds.archetype.column_count() > 0 && !is_parts_of_whole && !at_col_cap && !unequal_nested_units;
     let dup_disabled_reason = if ds.frozen {
         Some("Data sheet is frozen (read-only).")
     } else if right_clicked_x {
@@ -1052,6 +1064,8 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
         Some("Maximum data column limit reached.")
     } else if ds.archetype.column_count() == 0 {
         Some("No data columns available to duplicate.")
+    } else if unequal_nested_units {
+        Some("Nested group biological unit count differs from Group 1 and cannot be duplicated.")
     } else {
         None
     };
@@ -1221,54 +1235,8 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
                             }
                         }
                         "grid.ctx.duplicate_column" => {
-                            let col_count = ds.archetype.column_count();
-                            if col_count > 0 {
-                                let src_col = cell_ctx
-                                    .filter(|t| !t.is_x)
-                                    .map(|t| t.col)
-                                    .or_else(|| app.grid.tool.active.map(|c| c.col))
-                                    .unwrap_or(0)
-                                    .min(col_count.saturating_sub(1));
-                                let n_rows = ds.archetype.row_count().max(1);
-                                let n_sub = crate::grid_view::data_set_subcolumn_count(&ds.archetype, src_col).max(1);
-                                let mut rows_json = Vec::with_capacity(n_rows);
-                                for r in 0..n_rows {
-                                    let mut row_vals = Vec::with_capacity(n_sub);
-                                    for s in 0..n_sub {
-                                        let val = match ds.archetype.data_cell(CellCoord::new(r, src_col, s)).map(|c| &c.value) {
-                                            Some(CellValue::Number(v)) => json!(v),
-                                            Some(CellValue::Text(t)) => json!(t),
-                                            Some(CellValue::Empty) | None => serde_json::Value::Null,
-                                        };
-                                        row_vals.push(val);
-                                    }
-                                    rows_json.push(row_vals);
-                                }
-                                let src_title = crate::dialogs_canvas::data_column_title(ds, src_col)
-                                    .map(str::trim)
-                                    .filter(|s| !s.is_empty())
-                                    .map_or_else(|| curvebook_doc::default_column_label(src_col), str::to_owned);
-                                let max_base_len = curvebook_doc::MAX_TITLE_BYTES.saturating_sub(" (Copy)".len());
-                                let truncated_base: String =
-                                    src_title.char_indices().take_while(|(idx, ch)| idx + ch.len_utf8() <= max_base_len).map(|(_, ch)| ch).collect();
-                                let new_title = format!("{truncated_base} (Copy)");
-                                intents.push_engine(
-                                    "table.paste",
-                                    json!({
-                                        "sheet_id": ds.id.as_str(),
-                                        "mode": "append_columns",
-                                        "start_row": 0,
-                                        "rows": rows_json,
-                                    }),
-                                );
-                                intents.push_engine(
-                                    "table.setTitles",
-                                    json!({
-                                        "sheet_id": ds.id.as_str(),
-                                        "col": col_count,
-                                        "title": new_title,
-                                    }),
-                                );
+                            if let Some(intent) = build_duplicate_column_intent(app, ds, cell_ctx) {
+                                intents.push(intent);
                             }
                         }
                         _ => {}
@@ -1287,6 +1255,152 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
         open_link_popover(fstate.state, &reg, mctx.locale);
         ui.ctx().request_repaint();
     }
+}
+
+fn nested_group_has_unequal_units(ds: &DataSheet, src_col: usize) -> bool {
+    let TableArchetype::Nested(nt) = &ds.archetype else {
+        return false;
+    };
+    let default_units = nt.groups.first().map_or(1, curvebook_doc::NestedGroupColumn::biological_unit_count).max(1);
+    let src_units = nt.groups.get(src_col).map_or(default_units, curvebook_doc::NestedGroupColumn::biological_unit_count).max(1);
+    src_units != default_units
+}
+
+fn build_duplicate_column_intent(app: &UiApp, ds: &DataSheet, cell_ctx: Option<ContextCellTarget>) -> Option<UiIntent> {
+    let col_count = ds.archetype.column_count();
+    if col_count == 0 {
+        return None;
+    }
+    let src_col =
+        cell_ctx.filter(|t| !t.is_x).map(|t| t.col).or_else(|| app.grid.tool.active.map(|c| c.col)).unwrap_or(0).min(col_count.saturating_sub(1));
+    build_duplicate_column_intent_for_col(ds, src_col)
+}
+
+/// Build an atomic `UiIntent` duplicating `src_col` in `ds` (preserving exclusions, Nested
+/// subcolumn titles, and MV calculated/categorical roles in a single Undo step, and refusing
+/// unequal-unit Nested groups that `table.paste` cannot append without splitting).
+#[must_use]
+pub fn build_duplicate_column_intent_for_col(ds: &DataSheet, src_col: usize) -> Option<UiIntent> {
+    let col_count = ds.archetype.column_count();
+    if ds.frozen
+        || col_count == 0
+        || src_col >= col_count
+        || col_count >= curvebook_doc::MAX_DATA_SETS
+        || matches!(ds.archetype, TableArchetype::PartsOfWhole(_))
+        || nested_group_has_unequal_units(ds, src_col)
+    {
+        return None;
+    }
+    let src_title = crate::dialogs_canvas::data_column_title(ds, src_col)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| curvebook_doc::default_column_label(src_col), str::to_owned);
+    let max_base_len = curvebook_doc::MAX_TITLE_BYTES.saturating_sub(" (Copy)".len());
+    let truncated_base: String = src_title.char_indices().take_while(|(idx, ch)| idx + ch.len_utf8() <= max_base_len).map(|(_, ch)| ch).collect();
+    let new_title = format!("{truncated_base} (Copy)");
+
+    if let TableArchetype::MultipleVariables(mv) = &ds.archetype
+        && let Some(var) = mv.variables.get(src_col)
+        && let VariableSource::Calculated { formula } = &var.source
+    {
+        return Some(UiIntent::EngineCommand {
+            command_id: String::from("table.setCalculatedVariable"),
+            params: json!({
+                "sheet_id": ds.id.as_str(),
+                "title": new_title,
+                "formula": formula,
+            }),
+        });
+    }
+
+    let n_rows = ds.archetype.row_count().max(1);
+    let n_sub = crate::grid_view::data_set_subcolumn_count(&ds.archetype, src_col).max(1);
+    let mut rows_json = Vec::with_capacity(n_rows);
+    let mut excluded_cells = Vec::new();
+    for r in 0..n_rows {
+        let mut row_vals = Vec::with_capacity(n_sub);
+        for s in 0..n_sub {
+            let cell_opt = ds.archetype.data_cell(CellCoord::new(r, src_col, s));
+            let val = match cell_opt.map(|c| &c.value) {
+                Some(CellValue::Number(v)) => json!(v),
+                Some(CellValue::Text(t)) => json!(t),
+                Some(CellValue::Empty) | None => serde_json::Value::Null,
+            };
+            let is_excl = cell_opt.is_some_and(|c| c.excluded);
+            if is_excl {
+                excluded_cells.push(json!({ "row": r, "col": col_count, "subcol": s }));
+            }
+            row_vals.push(json!({ "value": val, "excluded": is_excl, "parse_asterisk_exclusion": false }));
+        }
+        rows_json.push(row_vals);
+    }
+
+    let mut commands = vec![
+        (
+            String::from("table.paste"),
+            json!({
+                "sheet_id": ds.id.as_str(),
+                "mode": "append_columns",
+                "start_row": 0,
+                "rows": rows_json,
+            }),
+        ),
+        (
+            String::from("table.setTitles"),
+            json!({
+                "sheet_id": ds.id.as_str(),
+                "col": col_count,
+                "title": new_title,
+            }),
+        ),
+    ];
+    if !excluded_cells.is_empty() {
+        commands.push((
+            String::from("table.excludeCells"),
+            json!({
+                "sheet_id": ds.id.as_str(),
+                "cells": excluded_cells,
+                "excluded": true,
+            }),
+        ));
+    }
+    if let TableArchetype::Nested(nt) = &ds.archetype
+        && let Some(grp) = nt.groups.get(src_col)
+    {
+        for (s, sub_title) in grp.subcolumn_titles.iter().enumerate() {
+            if !sub_title.is_empty() {
+                commands.push((
+                    String::from("table.setSubcolumnTitles"),
+                    json!({
+                        "sheet_id": ds.id.as_str(),
+                        "col": col_count,
+                        "subcol": s,
+                        "title": sub_title,
+                    }),
+                ));
+            }
+        }
+    }
+    if let TableArchetype::MultipleVariables(mv) = &ds.archetype
+        && let Some(var) = mv.variables.get(src_col)
+        && var.role != VariableRole::Calculated
+    {
+        let role_slug = match var.role {
+            VariableRole::Continuous => "continuous",
+            VariableRole::Categorical => "categorical",
+            VariableRole::Label => "label",
+            VariableRole::Calculated => "continuous",
+        };
+        commands.push((
+            String::from("table.setVariableRole"),
+            json!({
+                "sheet_id": ds.id.as_str(),
+                "col": col_count,
+                "role": role_slug,
+            }),
+        ));
+    }
+    Some(UiIntent::EngineCommandGroup { commands })
 }
 
 fn handle_grid_ctx_exclude(
@@ -1314,15 +1428,14 @@ fn handle_grid_ctx_exclude(
         intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "target": "x", "row": xr, "subcol": xs, "excluded": !was_ex }));
         return None;
     }
-    if let Some((start, end)) = app.grid.tool.selection_bounds().filter(|(s, e)| {
-        cell_ctx.is_none_or(|t| t.row >= s.row && t.row <= e.row && t.col >= s.col && t.col <= e.col && t.subcol >= s.subcol && t.subcol <= e.subcol)
-    }) {
-        if let Some(reg) = first_linked_region_in_bounds(ds, start, end) {
+    if let Some(sel) =
+        resolve_grid_selection(app, ds).filter(|sel| cell_ctx.is_none_or(|t| sel.contains_coord(GridCellCoord::new(t.row, t.col, t.subcol))))
+    {
+        if let Some(reg) = first_linked_region_in_selection(ds, &sel) {
             return Some(reg.clone());
         }
-        let target_excluded = !ds.archetype.data_cell(CellCoord::from(start)).is_some_and(|c| c.excluded);
-        let doc_range = curvebook_doc::SheetCellRange::new(CellCoord::from(start), CellCoord::from(end));
-        intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "range": doc_range, "excluded": target_excluded }));
+        let target_excluded = !sel.first_coord().and_then(|c| ds.archetype.data_cell(c)).is_some_and(|c| c.excluded);
+        push_exclude_selection_intent(ds, &sel, target_excluded, intents);
         return None;
     }
     let c = cell_ctx
@@ -1360,11 +1473,8 @@ fn handle_grid_ctx_cut(
     if ds.frozen {
         return None;
     }
-    let linked = app
-        .grid
-        .tool
-        .selection_bounds()
-        .and_then(|(s, e)| first_linked_region_in_bounds(ds, s, e))
+    let linked = resolve_grid_selection(app, ds)
+        .and_then(|sel| first_linked_region_in_selection(ds, &sel))
         .or_else(|| app.grid.tool.active.and_then(|active| linked_region_for_cell(ds, active.row, active.col)));
     if let Some(reg) = linked {
         return Some(reg.clone());

@@ -9,9 +9,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use curvebook_doc::error::MAX_SHEET_ID_BYTES;
 use curvebook_doc::{
-    Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, MultipleVariablesTable, SheetId,
-    TableArchetype, VariableRole, validate_data_sets, validate_rows, validate_title,
+    Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, MAX_TITLE_BYTES, MultipleVariablesTable,
+    SheetId, TableArchetype, VariableRole, validate_data_sets, validate_rows, validate_title,
 };
 use curvebook_math::{
     DeterministicRng,
@@ -20,7 +21,8 @@ use curvebook_math::{
 
 use crate::error::TransformError;
 use crate::import::validate_cell_budget;
-use crate::ops::reshape_select::retain_rows;
+use crate::ops::reshape_select::try_retain_rows;
+use crate::ops::{bounded_suffixed_str, snapshot_calculated_variables};
 
 /// Largest exact-integer `f64` trial count (`2^53`) permitted for [`SimulatedDistribution::Binomial`].
 const MAX_BINOMIAL_TRIALS: u64 = 1_u64 << 53;
@@ -33,10 +35,25 @@ const fn default_group_weight() -> usize {
 /// Experimental subject-to-treatment allocation scheme for [`randomize_subjects_to_groups`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum AllocationScheme {
-    /// Assign counts across arms as evenly as possible preserving `weights` ratios, then shuffle
-    /// globally across all `N` subjects.
+    /// Assign counts across arms via largest-remainder (Hamilton) integer apportionment preserving
+    /// `weights` ratios, then shuffle globally across all `N` subjects (Durstenfeld 1964).
+    ///
+    /// **Deterministic tie-breaking contract:** When `N % sum(weights) != 0` and multiple arms
+    /// share the same largest remainder `(N * w_i) mod sum(weights)`, surplus slots are assigned
+    /// deterministically in **ascending arm-index order** (`0, 1, ...`), matching
+    /// `docs/implementation/data-tables-and-transforms.md`. Note that this introduces a systematic
+    /// lower-index (arm-0) surplus bias across seeds whenever `N` is not divisible by
+    /// `sum(weights)` (for example, `3` vs `2` on `N = 5` with `[1, 1]` for every seed). Use
+    /// [`Self::CompleteBalancedUnbiased`] when unbiased marginal allocation across seeds is desired.
     #[default]
     CompleteBalanced,
+    /// Assign counts across arms via largest-remainder (Hamilton) integer apportionment with
+    /// **seeded random tie-breaking** across equal-remainder tie groups (`rng.shuffle` over each
+    /// tied-remainder group), then shuffle globally across all `N` subjects (Durstenfeld 1964).
+    ///
+    /// Deterministic per PRNG seed while achieving exact marginal allocation probabilities
+    /// `w_j / sum(w)` across seeds for symmetric equal-remainder arms when `N % sum(weights) != 0`.
+    CompleteBalancedUnbiased,
     /// Sequential permuted blocks whose sizes are fixed (`block_sizes.len() == 1`) or drawn
     /// uniformly per block from `block_sizes` (`block_sizes.len() > 1`). Every block size must be
     /// a positive multiple of `sum(weights)` within the bounded per-block capacity limit
@@ -80,7 +97,7 @@ pub struct SubjectRandomizationConfig {
     pub title: String,
     /// Ordered unique subject/animal identifiers (`len >= 1`).
     pub subject_ids: Vec<String>,
-    /// Treatment arms and positive integer allocation ratio weights (`len >= 2`).
+    /// Treatment arms and positive integer allocation ratio weights (`len >= 1`).
     pub groups: Vec<GroupAllocationWeight>,
     /// Complete balanced Durstenfeld shuffle vs Matts–Lachin permuted-block randomization.
     pub scheme: AllocationScheme,
@@ -90,6 +107,9 @@ pub struct SubjectRandomizationConfig {
 
 impl SubjectRandomizationConfig {
     /// Construct a configuration for `subject_count` sequentially numbered subjects (`"1"..=N`).
+    ///
+    /// Prefer [`Self::try_from_subject_count`] when `subject_count` originates from untrusted or
+    /// user-supplied input so `subject_count <= MAX_ROWS` is validated before allocating `subject_ids`.
     #[must_use]
     pub fn from_subject_count(
         sheet_id: impl Into<String>,
@@ -101,6 +121,24 @@ impl SubjectRandomizationConfig {
     ) -> Self {
         let subject_ids = (1..=subject_count).map(|i| i.to_string()).collect();
         Self { sheet_id: sheet_id.into(), title: title.into(), subject_ids, groups, scheme, seed }
+    }
+
+    /// Fallibly construct a configuration for `subject_count` sequentially numbered subjects
+    /// (`"1"..=N`), validating `subject_count <= MAX_ROWS` before allocating `subject_ids`.
+    ///
+    /// # Errors
+    /// Returns [`TransformError::Doc`] (`DocError::TooManyRows`) when `subject_count > MAX_ROWS`.
+    pub fn try_from_subject_count(
+        sheet_id: impl Into<String>,
+        title: impl Into<String>,
+        subject_count: usize,
+        groups: Vec<GroupAllocationWeight>,
+        scheme: AllocationScheme,
+        seed: u64,
+    ) -> Result<Self, TransformError> {
+        validate_rows(subject_count)?;
+        let subject_ids = (1..=subject_count).map(|i| i.to_string()).collect();
+        Ok(Self { sheet_id: sheet_id.into(), title: title.into(), subject_ids, groups, scheme, seed })
     }
 }
 
@@ -137,11 +175,11 @@ pub struct RowSampleConfig {
 /// Probability distribution family supported by [`simulate_distribution_columns`].
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SimulatedDistribution {
-    /// Continuous uniform distribution over `[min, max]` (`min <= max`, finite).
+    /// Continuous uniform distribution over `[min, max)` (`min < max`, finite).
     Uniform {
         /// Inclusive lower support bound.
         min: f64,
-        /// Inclusive upper support bound (`>= min`).
+        /// Exclusive upper support bound (`> min`).
         max: f64,
     },
     /// Univariate normal (Gaussian) distribution `N(mean, sd^2)`.
@@ -259,11 +297,11 @@ pub fn randomize_subjects_to_groups(config: &SubjectRandomizationConfig) -> Resu
 /// `stratify_column` is out of bounds, or `output_id` / `output_title` is invalid.
 pub fn random_sample_rows(source: &DataSheet, config: &RowSampleConfig) -> Result<DataSheet, TransformError> {
     let selected = sample_row_indices(source, config)?;
-    let id = config.output_id.clone().unwrap_or_else(|| format!("{}-sample", source.id.as_str()));
+    let id = config.output_id.clone().unwrap_or_else(|| bounded_suffixed_str(source.id.as_str(), "-sample", MAX_SHEET_ID_BYTES));
     if id.trim().is_empty() {
         return Err(TransformError::Doc(DocError::EmptyIdentifier));
     }
-    let title = config.output_title.clone().unwrap_or_else(|| format!("{} (Random Sample)", source.title));
+    let title = config.output_title.clone().unwrap_or_else(|| bounded_suffixed_str(&source.title, " (Random Sample)", MAX_TITLE_BYTES));
     validate_title(&title)?;
 
     let mut out = source.clone();
@@ -271,8 +309,10 @@ pub fn random_sample_rows(source: &DataSheet, config: &RowSampleConfig) -> Resul
     out.title = title;
     out.frozen = false;
     out.linked_regions.clear();
-    retain_rows(&mut out.archetype, &selected);
+    try_retain_rows(&mut out.archetype, &selected)?;
+    snapshot_calculated_variables(&mut out.archetype);
     out.exclusion_notes = remap_exclusion_notes(&source.exclusion_notes, &selected);
+    out.validate()?;
     Ok(out)
 }
 
@@ -282,6 +322,7 @@ pub fn random_sample_rows(source: &DataSheet, config: &RowSampleConfig) -> Resul
 /// Returns [`TransformError::InvalidSpec`] when `sample_size == 0`, `sample_size > row_count`, or
 /// `stratify_column` is out of bounds.
 pub fn sample_row_indices(source: &DataSheet, config: &RowSampleConfig) -> Result<Vec<usize>, TransformError> {
+    source.archetype.validate()?;
     let row_count = source.archetype.row_count();
     if config.sample_size == 0 {
         return Err(TransformError::InvalidSpec { message: String::from("random sample_size must be >= 1") });
@@ -446,6 +487,16 @@ fn assign_subject_groups(config: &SubjectRandomizationConfig, sum_weights: usize
             rng.shuffle(&mut pool);
             Ok(pool.into_iter().map(|g_idx| (g_idx, 1, n)).collect())
         }
+        AllocationScheme::CompleteBalancedUnbiased => {
+            let weights: Vec<usize> = config.groups.iter().map(|g| g.weight).collect();
+            let counts = hamilton_apportion_unbiased(n, &weights, &mut rng);
+            let mut pool = Vec::with_capacity(n);
+            for (g_idx, &count) in counts.iter().enumerate() {
+                pool.resize(pool.len() + count, g_idx);
+            }
+            rng.shuffle(&mut pool);
+            Ok(pool.into_iter().map(|g_idx| (g_idx, 1, n)).collect())
+        }
         AllocationScheme::PermutedBlock { block_sizes } => {
             let mut out = Vec::with_capacity(n);
             let mut block_idx = 0_usize;
@@ -483,11 +534,12 @@ fn assign_subject_groups(config: &SubjectRandomizationConfig, sum_weights: usize
 fn build_arrive_constants(config: &SubjectRandomizationConfig, total_subjects: usize) -> Vec<(String, String)> {
     let method = match &config.scheme {
         AllocationScheme::CompleteBalanced => String::from("complete_balanced"),
+        AllocationScheme::CompleteBalancedUnbiased => String::from("complete_balanced_unbiased"),
         AllocationScheme::PermutedBlock { .. } => String::from("permuted_block"),
     };
     let ratio = config.groups.iter().map(|g| g.weight.to_string()).collect::<Vec<_>>().join(":");
     let block_sizes = match &config.scheme {
-        AllocationScheme::CompleteBalanced => total_subjects.to_string(),
+        AllocationScheme::CompleteBalanced | AllocationScheme::CompleteBalancedUnbiased => total_subjects.to_string(),
         AllocationScheme::PermutedBlock { block_sizes } => block_sizes.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
     };
     vec![
@@ -530,6 +582,52 @@ fn hamilton_apportion(total: usize, weights: &[usize]) -> Vec<usize> {
 
     let leftover = total.saturating_sub(assigned);
     remainders.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    for &(idx, _) in remainders.iter().take(leftover) {
+        alloc[idx] += 1;
+    }
+    alloc
+}
+
+/// Largest-remainder (Hamilton) integer apportionment breaking equal-remainder ties uniformly at
+/// random via `rng.shuffle` over each tied-remainder group (Durstenfeld 1964).
+fn hamilton_apportion_unbiased(total: usize, weights: &[usize], rng: &mut DeterministicRng) -> Vec<usize> {
+    let k = weights.len();
+    let mut alloc = vec![0_usize; k];
+    if total == 0 || k == 0 {
+        return alloc;
+    }
+    let total_weight: u128 = weights.iter().map(|&w| w as u128).sum();
+    if total_weight == 0 {
+        return alloc;
+    }
+    let total_u128 = total as u128;
+    let mut remainders: Vec<(usize, u128)> = Vec::with_capacity(k);
+    let mut assigned = 0_usize;
+
+    for (idx, &w) in weights.iter().enumerate() {
+        let num = total_u128 * (w as u128);
+        #[allow(clippy::cast_possible_truncation)]
+        let base = (num / total_weight) as usize;
+        let rem = num % total_weight;
+        alloc[idx] = base;
+        assigned += base;
+        remainders.push((idx, rem));
+    }
+
+    let leftover = total.saturating_sub(assigned);
+    remainders.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut start = 0;
+    while start < remainders.len() {
+        let rem_val = remainders[start].1;
+        let mut end = start + 1;
+        while end < remainders.len() && remainders[end].1 == rem_val {
+            end += 1;
+        }
+        if end - start > 1 {
+            rng.shuffle(&mut remainders[start..end]);
+        }
+        start = end;
+    }
     for &(idx, _) in remainders.iter().take(leftover) {
         alloc[idx] += 1;
     }
@@ -1557,5 +1655,167 @@ mod tests {
             simulate_distribution_columns(&base(SimulatedDistribution::Exponential { rate: -2.0 })),
             Err(TransformError::InvalidSpec { .. })
         ));
+    }
+
+    #[test]
+    fn aud04_14_random_sample_snapshots_calculated_mv_variables() {
+        let mut mv = MultipleVariablesTable::new(2, 6).unwrap();
+        mv.variables[0].title = String::from("X");
+        mv.variables[1].title = String::from("Z");
+        for r in 0..6 {
+            mv.variables[0].cells[r] = Cell::number((r + 1) as f64);
+        }
+        mv.variables[1].set_calculated_formula("=([X] - mean([X])) / sd([X])");
+        crate::formula::evaluate_calculated_variables(&mut mv, None).unwrap();
+        let orig_z: Vec<f64> = mv.variables[1].cells.iter().map(|c| c.active_number().unwrap()).collect();
+        let sheet = DataSheet::new("mv-samp", "MV Samp", TableArchetype::MultipleVariables(mv)).unwrap();
+
+        let cfg =
+            RowSampleConfig { seed: 42, sample_size: 3, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None };
+        let idxs = sample_row_indices(&sheet, &cfg).unwrap();
+        let sampled = random_sample_rows(&sheet, &cfg).unwrap();
+        let TableArchetype::MultipleVariables(mut out_mv) = sampled.archetype else {
+            panic!("expected MV");
+        };
+        assert_eq!(out_mv.variables[1].source, curvebook_doc::VariableSource::Entered);
+        assert_eq!(out_mv.variables[1].role, VariableRole::Continuous);
+        // Recalculating calculated variables must be a no-op and preserve original population Z-scores.
+        assert!(crate::formula::evaluate_calculated_variables(&mut out_mv, None).unwrap().is_empty());
+        for (new_r, &orig_r) in idxs.iter().enumerate() {
+            assert!((out_mv.variables[1].cells[new_r].active_number().unwrap() - orig_z[orig_r]).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn aud04_24_try_from_subject_count_rejects_excess_rows_before_alloc() {
+        let err = SubjectRandomizationConfig::try_from_subject_count(
+            "too-many",
+            "Too Many",
+            curvebook_doc::MAX_ROWS + 1,
+            vec![GroupAllocationWeight::new("A"), GroupAllocationWeight::new("B")],
+            AllocationScheme::CompleteBalanced,
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(err, TransformError::Doc(curvebook_doc::DocError::TooManyRows { .. })), "unexpected err: {err:?}");
+
+        let ok = SubjectRandomizationConfig::try_from_subject_count(
+            "ok-rand",
+            "OK",
+            4,
+            vec![GroupAllocationWeight::new("A"), GroupAllocationWeight::new("B")],
+            AllocationScheme::CompleteBalanced,
+            7,
+        )
+        .unwrap();
+        assert_eq!(ok.subject_ids, vec!["1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn aud04_45_random_sample_validates_source_and_output_and_guards_generated_sequence() {
+        // Ragged source rejected by sample_row_indices and random_sample_rows.
+        let mut ragged = MultipleVariablesTable::new(2, 4).unwrap();
+        ragged.variables[1].cells.truncate(2);
+        let ragged_sheet = DataSheet {
+            id: curvebook_doc::SheetId::new("rag"),
+            title: String::from("Ragged"),
+            archetype: TableArchetype::MultipleVariables(ragged),
+            frozen: false,
+            info_sheet_id: None,
+            linked_regions: Vec::new(),
+            floating_notes: Vec::new(),
+            color_tag: None,
+            exclusion_notes: Vec::new(),
+        };
+        let cfg =
+            RowSampleConfig { seed: 1, sample_size: 2, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None };
+        assert!(matches!(sample_row_indices(&ragged_sheet, &cfg), Err(TransformError::Doc(_))));
+        assert!(matches!(random_sample_rows(&ragged_sheet, &cfg), Err(TransformError::Doc(_))));
+
+        // Long source title auto-suffix stays within MAX_TITLE_BYTES; invalid explicit output_id rejected.
+        let mut mv = MultipleVariablesTable::new(1, 3).unwrap();
+        mv.variables[0].cells = vec![Cell::number(1.0), Cell::number(2.0), Cell::number(3.0)];
+        let long_sheet = DataSheet::new("samp-long", "S".repeat(curvebook_doc::MAX_TITLE_BYTES), TableArchetype::MultipleVariables(mv)).unwrap();
+        let sampled = random_sample_rows(&long_sheet, &cfg).unwrap();
+        assert!(sampled.validate().is_ok());
+        assert!(sampled.title.len() <= curvebook_doc::MAX_TITLE_BYTES);
+
+        let bad_id_cfg = RowSampleConfig { output_id: Some(String::from("bad\0id")), ..cfg };
+        assert!(matches!(random_sample_rows(&long_sheet, &bad_id_cfg), Err(TransformError::Doc(curvebook_doc::DocError::InvalidIdentifier { .. }))));
+
+        // GeneratedSequence XY near MAX_SHEET_CELLS rejects materialization overflow cleanly.
+        let seq_xy = XyTable::new_with_x_mode(
+            curvebook_doc::XColumnMode::GeneratedSequence { start: 0.0, step: 1.0, progression: curvebook_doc::SequenceProgression::Arithmetic },
+            SubcolumnMode::RawReplicates(300),
+            1,
+            100_000,
+        )
+        .unwrap();
+        let seq_sheet = DataSheet::new("seq-cap", "Seq Cap", TableArchetype::Xy(seq_xy)).unwrap();
+        let full_cfg = RowSampleConfig {
+            seed: 1,
+            sample_size: 100_000,
+            stratify_column: None,
+            proportional_allocation: false,
+            output_id: None,
+            output_title: None,
+        };
+        assert!(matches!(random_sample_rows(&seq_sheet, &full_cfg), Err(TransformError::Doc(curvebook_doc::DocError::TooManyCells { .. }))));
+    }
+
+    #[test]
+    fn aud04_49_complete_balanced_unbiased_d1_marginal_counts_and_arrive_metadata() {
+        // Reference: Durstenfeld (1964) uniform permutation over tied Hamilton remainders.
+        // For N = 5, weights = [1, 1], each seed assigns either (3, 2) or (2, 3) with exact probability 0.5.
+        // Across K = 10_000 seeds, count(arm0 == 3) ~ Binomial(10_000, 0.5): mean = 5_000, sd = 50;
+        // z = 6.0 two-sided tolerance [4_700, 5_300] (tail probability < 2e-9).
+        let groups = vec![GroupAllocationWeight::new("Control"), GroupAllocationWeight::new("Drug")];
+        let mut arm0_got_surplus = 0_usize;
+        let mut total_arm0 = 0_usize;
+        let mut total_arm1 = 0_usize;
+
+        for seed in 1..=10_000_u64 {
+            let cfg = SubjectRandomizationConfig::try_from_subject_count(
+                "unb-5",
+                "Unbiased 5",
+                5,
+                groups.clone(),
+                AllocationScheme::CompleteBalancedUnbiased,
+                seed,
+            )
+            .unwrap();
+            let out = randomize_subjects_to_groups(&cfg).unwrap();
+            if seed == 1 {
+                // Reproducibility & ARRIVE metadata check.
+                assert_eq!(out, randomize_subjects_to_groups(&cfg).unwrap());
+                let arrive: BTreeMap<String, String> = out.arrive_constants.iter().cloned().collect();
+                assert_eq!(arrive.get("randomization.method").map(String::as_str), Some("complete_balanced_unbiased"));
+                assert_eq!(arrive.get("randomization.block_sizes").map(String::as_str), Some("5"));
+            }
+            let counts = group_counts_from_schedule(&out.data_sheet);
+            let c0 = counts.get("Control").copied().unwrap_or(0);
+            let c1 = counts.get("Drug").copied().unwrap_or(0);
+            assert!((c0 == 3 && c1 == 2) || (c0 == 2 && c1 == 3), "unexpected split ({c0}, {c1})");
+            if c0 == 3 {
+                arm0_got_surplus += 1;
+            }
+            total_arm0 += c0;
+            total_arm1 += c1;
+        }
+        assert!(
+            (4_700..=5_300).contains(&arm0_got_surplus),
+            "CompleteBalancedUnbiased arm0 surplus count {arm0_got_surplus} outside z=6.0 bounds [4700, 5300]"
+        );
+        assert_eq!(total_arm0 + total_arm1, 50_000);
+        assert!((24_700..=25_300).contains(&total_arm0), "total arm0 allocations {total_arm0} outside [24700, 25300]");
+
+        // Confirm CompleteBalanced retains deterministic ascending-index Hamilton tie-breaking (arm 0 always 3).
+        for seed in 1..=10_u64 {
+            let cfg =
+                SubjectRandomizationConfig::try_from_subject_count("det-5", "Det 5", 5, groups.clone(), AllocationScheme::CompleteBalanced, seed)
+                    .unwrap();
+            let counts = group_counts_from_schedule(&randomize_subjects_to_groups(&cfg).unwrap().data_sheet);
+            assert_eq!((counts.get("Control").copied(), counts.get("Drug").copied()), (Some(3), Some(2)));
+        }
     }
 }

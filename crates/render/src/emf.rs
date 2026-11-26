@@ -27,6 +27,10 @@ pub const MAX_EMF_PRIMITIVES: usize = 500_000;
 /// Hard ceiling on emitted EMF byte length (320 MiB, accommodating a full `MAX_RASTER_PIXELS` DIB).
 pub const MAX_EMF_OUTPUT_BYTES: usize = 320 * 1024 * 1024;
 
+/// Maximum buffered cubic control points before flushing an `EMR_POLYBEZIERTO` chunk
+/// (3,072 points = 1,024 cubic segments = ~24 KiB record), keeping pre-budget memory bounded.
+const MAX_EMF_BEZIER_CHUNK_POINTS: usize = 3 * 1024;
+
 /// Scale factor from PostScript points (`1/72` in) into integer EMF logical twips (`1/20` pt).
 const LOGICAL_SCALE: f64 = 20.0;
 
@@ -287,6 +291,7 @@ struct EmfWriter {
     handles: HandlePool,
     bounds: BoundsRect,
     clip_depth: usize,
+    max_output_bytes: usize,
 }
 
 impl EmfWriter {
@@ -294,7 +299,16 @@ impl EmfWriter {
         let mut buf = Vec::with_capacity(4096);
         buf.resize(EMR_HEADER_BASE_BYTES, 0);
         // Header counts as record #1; finalized once all records and bounds are known.
-        let mut writer = Self { buf, n_records: 1, metrics, bg_color, handles: HandlePool::new(), bounds: BoundsRect::empty(), clip_depth: 0 };
+        let mut writer = Self {
+            buf,
+            n_records: 1,
+            metrics,
+            bg_color,
+            handles: HandlePool::new(),
+            bounds: BoundsRect::empty(),
+            clip_depth: 0,
+            max_output_bytes: MAX_EMF_OUTPUT_BYTES,
+        };
         writer.patch_header(0, EMR_HEADER_BASE_BYTES as u32, 1, 1)?;
         Ok(writer)
     }
@@ -469,13 +483,18 @@ impl EmfWriter {
                     let Some(p0) = cur_pt else {
                         continue;
                     };
-                    // Exact quadratic-to-cubic Bezier degree elevation.
-                    let c1 = PointPt::new(p0.x + (2.0 / 3.0) * (control.x - p0.x), p0.y + (2.0 / 3.0) * (control.y - p0.y));
-                    let c2 = PointPt::new(to.x + (2.0 / 3.0) * (control.x - to.x), to.y + (2.0 / 3.0) * (control.y - to.y));
+                    // Exact overflow-safe quadratic-to-cubic Bezier degree elevation.
+                    let c1 = PointPt::new((1.0 / 3.0) * p0.x + (2.0 / 3.0) * control.x, (1.0 / 3.0) * p0.y + (2.0 / 3.0) * control.y);
+                    let c2 = PointPt::new((1.0 / 3.0) * to.x + (2.0 / 3.0) * control.x, (1.0 / 3.0) * to.y + (2.0 / 3.0) * control.y);
                     if pending_beziers.is_empty() {
                         bezier_start = Some(p0);
                     }
                     pending_beziers.extend_from_slice(&[c1, c2, to]);
+                    if pending_beziers.len() >= MAX_EMF_BEZIER_CHUNK_POINTS {
+                        commit_moveto_if_pending(self, &mut began, &mut pending_moveto, &mut dev_bounds)?;
+                        self.flush_polybezier_to(bezier_start.take(), &mut pending_beziers, &mut dev_bounds)?;
+                        has_segments = true;
+                    }
                     cur_pt = Some(to);
                 }
                 PathCmd::CubicTo { c1, c2, to } if point_is_finite(c1) && point_is_finite(c2) && point_is_finite(to) => {
@@ -486,6 +505,11 @@ impl EmfWriter {
                         bezier_start = Some(p0);
                     }
                     pending_beziers.extend_from_slice(&[c1, c2, to]);
+                    if pending_beziers.len() >= MAX_EMF_BEZIER_CHUNK_POINTS {
+                        commit_moveto_if_pending(self, &mut began, &mut pending_moveto, &mut dev_bounds)?;
+                        self.flush_polybezier_to(bezier_start.take(), &mut pending_beziers, &mut dev_bounds)?;
+                        has_segments = true;
+                    }
                     cur_pt = Some(to);
                 }
                 PathCmd::Close => {
@@ -574,9 +598,10 @@ impl EmfWriter {
             return Ok(());
         }
         let line_step = text.font_size_pt * 1.20;
-        let rad = if text.rotation_deg.is_finite() { text.rotation_deg.to_radians() } else { 0.0 };
+        let norm_deg = if text.rotation_deg.is_finite() { text.rotation_deg.rem_euclid(360.0) } else { 0.0 };
+        let rad = norm_deg.to_radians();
         let (sin_a, cos_a) = rad.sin_cos();
-        let escapement_tenths = if text.rotation_deg.is_finite() { (-text.rotation_deg * 10.0).round() as i32 } else { 0 };
+        let escapement_tenths = (((-norm_deg).rem_euclid(360.0) * 10.0).round() as i32).rem_euclid(3600);
 
         for (line_idx, line) in lines.iter().enumerate() {
             if line.spans.is_empty() {
@@ -620,12 +645,41 @@ impl EmfWriter {
         escapement_tenths: i32,
         color: Rgba8,
     ) -> Result<(), RenderError> {
-        let mut utf16_units: Vec<u16> = Vec::new();
-        let mut dx_logical: Vec<u32> = Vec::new();
+        let remaining = self.max_output_bytes.saturating_sub(self.buf.len());
+        let max_units = remaining.saturating_sub(84) / 6;
+        let mut needed_units = 0usize;
+        for ch in span.text.chars() {
+            if ch == '\n' || ch == '\r' {
+                continue;
+            }
+            let unit_count = if ch == '\t' { 4 } else { ch.len_utf16() };
+            needed_units = needed_units.saturating_add(unit_count);
+            if needed_units > max_units {
+                return Err(RenderError::EncodingFailed {
+                    message: format!("EMF text span exceeds maximum output budget {} bytes", self.max_output_bytes),
+                });
+            }
+        }
+        if needed_units == 0 {
+            return Ok(());
+        }
+
+        let mut utf16_units: Vec<u16> = Vec::with_capacity(needed_units);
+        let mut dx_logical: Vec<u32> = Vec::with_capacity(needed_units);
         let mut total_adv_pt = 0.0_f64;
 
         for ch in span.text.chars() {
             if ch == '\n' || ch == '\r' {
+                continue;
+            }
+            if ch == '\t' {
+                let space_adv_pt = char_advance_pt(' ', size_pt, span.weight, span.slope).max(0.0);
+                let space_adv_log = scale_logical(space_adv_pt).max(0) as u32;
+                for _ in 0..4 {
+                    utf16_units.push(u16::from(b' '));
+                    dx_logical.push(space_adv_log);
+                }
+                total_adv_pt += 4.0 * space_adv_pt;
                 continue;
             }
             let adv_pt = char_advance_pt(ch, size_pt, span.weight, span.slope);
@@ -641,9 +695,6 @@ impl EmfWriter {
                 dx_logical.push(0);
             }
             total_adv_pt += adv_pt.max(0.0);
-        }
-        if utf16_units.is_empty() {
-            return Ok(());
         }
 
         let family = normalize_emf_font_family(span.font_family.as_deref());
@@ -763,6 +814,13 @@ impl EmfWriter {
         payload.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
         payload.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
 
+        let opaque_bg = if self.bg_color.a == u8::MAX {
+            self.bg_color
+        } else if self.bg_color.a > 0 {
+            Rgba8::rgb(self.bg_color.r, self.bg_color.g, self.bg_color.b)
+        } else {
+            Rgba8::WHITE
+        };
         let row_bytes = (image.width_px as usize) * 4;
         for row in (0..image.height_px as usize).rev() {
             let start = row * row_bytes;
@@ -771,7 +829,8 @@ impl EmfWriter {
                 .get(start..start + row_bytes)
                 .ok_or(RenderError::BufferSizeMismatch { expected: expected_len, actual: image.rgba.len() })?;
             for &[r, g, b, a] in row_slice.as_chunks::<4>().0 {
-                payload.extend_from_slice(&[b, g, r, a]);
+                let px = if a == u8::MAX { Rgba8::rgba(r, g, b, u8::MAX) } else { blend_over_bg(Rgba8::rgba(r, g, b, a), opaque_bg) };
+                payload.extend_from_slice(&[px.b, px.g, px.r, u8::MAX]);
             }
         }
         self.emit_record(EMR_STRETCHDIBITS, &payload)
@@ -1071,9 +1130,9 @@ impl EmfWriter {
             .len()
             .checked_add(additional_bytes)
             .ok_or_else(|| RenderError::EncodingFailed { message: String::from("EMF stream byte length overflows usize") })?;
-        if projected > MAX_EMF_OUTPUT_BYTES {
+        if projected > self.max_output_bytes {
             return Err(RenderError::EncodingFailed {
-                message: format!("EMF output size {projected} bytes exceeds maximum {MAX_EMF_OUTPUT_BYTES} bytes"),
+                message: format!("EMF output size {projected} bytes exceeds maximum {} bytes", self.max_output_bytes),
             });
         }
         Ok(())
@@ -1121,12 +1180,16 @@ fn normalize_emf_font_family(raw: Option<&str>) -> &str {
 
 fn push_utf16_fixed(out: &mut Vec<u8>, text: &str, max_units: usize) {
     let mut written = 0usize;
-    for unit in text.encode_utf16() {
-        if written + 1 >= max_units {
+    let mut buf = [0u16; 2];
+    for ch in text.chars() {
+        let encoded = ch.encode_utf16(&mut buf);
+        if written.saturating_add(encoded.len()).saturating_add(1) > max_units {
             break;
         }
-        out.extend_from_slice(&unit.to_le_bytes());
-        written += 1;
+        for &unit in encoded.iter() {
+            out.extend_from_slice(&unit.to_le_bytes());
+            written += 1;
+        }
     }
     while written < max_units {
         out.extend_from_slice(&0u16.to_le_bytes());
@@ -1192,4 +1255,45 @@ fn blend_over_bg(fg: Rgba8, bg: Rgba8) -> Rgba8 {
     let g = ((u16::from(fg.g) * alpha + u16::from(bg.g) * inv + 127) / 255) as u8;
     let b = ((u16::from(fg.b) * alpha + u16::from(bg.b) * inv + 127) / 255) as u8;
     Rgba8 { r, g, b, a: 255 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EmfWriter, MAX_EMF_BEZIER_CHUNK_POINTS, SceneMetrics};
+    use curvebook_chart::{ChartScene, Path2D, PathCmd, PointPt, StrokePaint};
+    use curvebook_palette::Rgba8;
+    use curvebook_text::RichSpan;
+
+    #[test]
+    fn aud11_11_emf_writer_enforces_budget_before_unbounded_bezier_or_text_buffering() {
+        let scene = ChartScene::new("emf-budget", "Budget", 100.0, 100.0, Some(Rgba8::WHITE));
+        let metrics = SceneMetrics::from_scene(&scene).expect("metrics");
+
+        // 1. Tight budget rejects a long cubic path when flushing bounded chunks instead of buffering unboundedly.
+        let mut bezier_writer = EmfWriter::new(metrics, Rgba8::WHITE).expect("writer");
+        bezier_writer.max_output_bytes = 32 * 1024;
+        let mut path = Path2D::new();
+        path.commands.push(PathCmd::MoveTo(PointPt::new(0.0, 0.0)));
+        let n_cubics = (MAX_EMF_BEZIER_CHUNK_POINTS / 3) * 3;
+        for i in 0..n_cubics {
+            let x = f64::from(u32::try_from(i).unwrap_or(0)) * 0.01;
+            path.commands.push(PathCmd::CubicTo {
+                c1: PointPt::new(x + 0.002, 1.0),
+                c2: PointPt::new(x + 0.006, 2.0),
+                to: PointPt::new(x + 0.01, 0.0),
+            });
+        }
+        let err =
+            bezier_writer.emit_path(&path, None, Some(StrokePaint::solid(Rgba8::BLACK, 1.0)), None).expect_err("must reject over-budget bezier");
+        assert!(err.to_string().contains("exceeds maximum"));
+
+        // 2. Tight budget rejects oversized text span before allocating utf16/dx buffers.
+        let mut text_writer = EmfWriter::new(metrics, Rgba8::WHITE).expect("writer");
+        text_writer.max_output_bytes = 256;
+        let huge_span = RichSpan::plain("A".repeat(10_000));
+        let text_err = text_writer
+            .emit_text_span(&huge_span, PointPt::new(10.0, 20.0), 12.0, 0.0, 0, Rgba8::BLACK)
+            .expect_err("must reject over-budget text span pre-allocation");
+        assert!(text_err.to_string().contains("exceeds maximum"));
+    }
 }

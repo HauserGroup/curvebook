@@ -30,7 +30,7 @@ use crate::anova::factorial::{FactorialObservations, OlsPostHocModel};
 use crate::anova::results::FactorialAnovaResult;
 use crate::anova::rm_two_way::RmBalancedPostHocModel;
 use crate::error::StatsError;
-use crate::multiplicity::{MultiplicityProcedure, PairwiseComparisonDetail, adjust_p_values, build_multiplicity_tab};
+use crate::multiplicity::{MultiplicityProcedure, PairwiseComparisonDetail, build_multiplicity_tab, try_adjust_p_values};
 
 #[derive(Debug, Clone)]
 pub(in crate::anova) struct RemlContrastModel {
@@ -774,6 +774,11 @@ pub(in crate::anova) fn compare_independent_contrast_family(
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let m = entries.len();
+    if matches!(proc_req, MultiplicityProcedure::DunnRankSum | MultiplicityProcedure::LinearTrend) {
+        return Err(StatsError::IncompatibleAnalysisSpec {
+            expected: "parametric pairwise or vs-control contrast multiplicity procedure (None, TukeyKramer, NewmanKeuls, Dunnett, GamesHowell, TamhaneT2, DunnettT3, Bonferroni, Sidak, HolmBonferroni, HolmSidak, FisherLsd, or FDR)",
+        });
+    }
     if m == 0 {
         return Ok(Vec::new());
     }
@@ -880,7 +885,7 @@ pub(in crate::anova) fn compare_independent_contrast_family(
         }
         _ => {
             let eff_proc = if matches!(proc_req, MultiplicityProcedure::TamhaneT2) { MultiplicityProcedure::Sidak } else { proc_req };
-            let (adj_p, is_fdr) = adjust_p_values(&raw_p, eff_proc, threshold);
+            let (adj_p, is_fdr) = try_adjust_p_values(&raw_p, eff_proc, threshold)?;
             let per_alpha = match eff_proc {
                 MultiplicityProcedure::Bonferroni => Some(ci_alpha / (m as f64)),
                 MultiplicityProcedure::Sidak => Some(1.0 - (1.0 - ci_alpha).powf(1.0 / (m as f64))),
@@ -1217,17 +1222,27 @@ pub(in crate::anova) fn resolve_level_order_for_nk(k: usize, eval: &ContrastFami
             part.push(i);
         }
     }
-    if part.iter().any(|&idx| means[idx].is_none()) && !part.is_empty() {
-        means[part[0]] = Some(0.0);
+    let propagate = |means: &mut [Option<f64>]| {
         for _ in 0..part.len() {
+            let mut changed = false;
             for &(a, b, ref est) in &eval.pairs {
                 if let (Some(ma), None) = (means[a], means[b]) {
                     means[b] = Some(ma - est.diff);
+                    changed = true;
                 } else if let (None, Some(mb)) = (means[a], means[b]) {
                     means[a] = Some(mb + est.diff);
+                    changed = true;
                 }
             }
+            if !changed {
+                break;
+            }
         }
+    };
+    propagate(&mut means);
+    while let Some(&seed) = part.iter().find(|&&idx| means[idx].is_none()) {
+        means[seed] = Some(0.0);
+        propagate(&mut means);
     }
     part.sort_by(|&a, &b| means[a].unwrap_or(0.0).total_cmp(&means[b].unwrap_or(0.0)));
     part
@@ -1545,6 +1560,11 @@ pub(in crate::anova) fn run_factorial_multiplicity(
 ) -> Result<(), StatsError> {
     if mult_spec.method == MultiplicityMethod::None {
         return Ok(());
+    }
+    if matches!(mult_spec.method, MultiplicityMethod::DunnRankSum | MultiplicityMethod::LinearTrend) {
+        return Err(StatsError::IncompatibleAnalysisSpec {
+            expected: "parametric pairwise or vs-control factorial post-hoc procedure (None, TukeyHsd, NewmanKeuls, Dunnett, GamesHowell, TamhaneT2, DunnettT3, Bonferroni, Sidak, HolmSidak, FisherLsd, or FDR)",
+        });
     }
     if !result.df_residual.is_finite() || result.df_residual < 1.0 || !result.ms_residual.is_finite() || result.ms_residual < 0.0 {
         return Ok(());

@@ -397,6 +397,7 @@ pub(super) fn render_df_method_picker(
     ui: &mut Ui,
     spec: &curvebook_doc::AnalysisSpec,
     current: MixedModelDfMethod,
+    enablement: &ControlEnablement,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
@@ -408,7 +409,7 @@ pub(super) fn render_df_method_picker(
             ("edit.rm.df.kr", "Kenward-Roger", MixedModelDfMethod::KenwardRoger),
             ("edit.rm.df.sat", "Satterthwaite", MixedModelDfMethod::Satterthwaite),
         ] {
-            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, current == m, &ControlEnablement::enabled()) {
+            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, current == m, enablement) {
                 let mut next = spec.clone();
                 match &mut next.kind {
                     AnalysisKind::FactorialAnova(f) => f.df_method = m,
@@ -425,6 +426,7 @@ pub(super) fn render_cov_structure_picker(
     ui: &mut Ui,
     spec: &curvebook_doc::AnalysisSpec,
     current: ResidualCovariance,
+    enablement: &ControlEnablement,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
@@ -436,7 +438,7 @@ pub(super) fn render_cov_structure_picker(
             ("edit.reml.cs", "Compound Symmetry", ResidualCovariance::CompoundSymmetry),
             ("edit.reml.un", "Unstructured", ResidualCovariance::Unstructured),
         ] {
-            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, current == cov, &ControlEnablement::enabled()) {
+            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, current == cov, enablement) {
                 let mut next = spec.clone();
                 if let AnalysisKind::FactorialAnova(f) = &mut next.kind {
                     f.residual_covariance = cov;

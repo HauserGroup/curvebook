@@ -4,6 +4,8 @@
 //! 7-tab `Nonlinear Curve Fitting` + 3-branch `Hook Constant`, 4-stage `Power & Sample Size Studio`,
 //! and 14-locale modal backdrop/scrollbar parity.
 
+use std::sync::Arc;
+
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSheet, GlmFamily, GlmSpec, InfoConstant,
     InfoSheet, MultipleVariablesTable, NonlinearFitSpec, ProjectDocument, ResultCell, ResultScalarEntry, ResultSheet, ResultTab, ResultTabKind,
@@ -21,7 +23,7 @@ use curvebook_ui_egui::egui_shell::power_studio::PowerResultsSubTab;
 use curvebook_ui_egui::egui_shell::unit_spinners::{ScrubUnitFieldConfig, ScrubUnitFieldState, ScrubUnitKind, render_scrub_length_pt_field};
 use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens};
 use curvebook_ui_egui::interaction::ViewportMetrics;
-use curvebook_ui_egui::{UiApp, UiThemeMode};
+use curvebook_ui_egui::{StubPlatformClipboardAdapter, UiApp, UiThemeMode};
 use serde_json::json;
 
 use crate::common::{ShellTestState, assert_clean_parity, fill_col_values, make_shell_driver};
@@ -425,6 +427,8 @@ fn seven_tab_nonlinear_fit_and_three_branch_hook_browser() -> BoxRes {
 #[test]
 fn power_and_sample_size_studio_four_stages_65_35_and_sensitivity_sidebar() -> BoxRes {
     let (mut app, _, _, _) = seed_rich_project_app()?;
+    let clip = Arc::new(StubPlatformClipboardAdapter::new());
+    app.set_clipboard_adapter(Arc::clone(&clip) as Arc<dyn curvebook_ui_egui::PlatformClipboardAdapter>);
     app.canvas_dialogs.open_power_wizard();
     assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::PowerAndSampleSize);
 
@@ -449,6 +453,7 @@ fn power_and_sample_size_studio_four_stages_65_35_and_sensitivity_sidebar() -> B
 
     driver.click_widget_id("power.copy_narrative")?;
     assert!(driver.state().views.power_studio.narrative_copied);
+    assert!(clip.last_text().is_some_and(|t| !t.trim().is_empty()), "clipboard adapter must receive copied narrative");
     driver.click_widget_id("power.tab.curve")?;
     assert_eq!(driver.state().views.power_studio.results_tab, PowerResultsSubTab::PowerCurve);
     driver.hover_at(driver.frame_meta().find_by_widget_id("power.curve_hover").ok_or("power.curve_hover")?.clipped_rect.center())?;

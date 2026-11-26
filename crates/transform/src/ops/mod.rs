@@ -8,9 +8,13 @@ pub use math::{MathTransformOp, execute_math_op, execute_math_transform};
 pub use normalize_baseline::{BaselineKind, execute_normalize, execute_remove_baseline, execute_remove_baseline_kind};
 pub use reshape_select::{PruneMethod, SelectRule, execute_prune, execute_select, execute_select_with_derived, execute_transpose};
 
+use std::collections::HashSet;
+
+use curvebook_doc::error::MAX_SHEET_ID_BYTES;
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellExclusionNote, DataSheet, HookSource, InfoSheet, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus,
-    ResultTab, ResultTabKind, TableArchetype, TransformAnalysisSpec, parse_column_title_numeric_hook,
+    AnalysisKind, AnalysisSpec, Cell, CellExclusionNote, DataSheet, DocError, HookSource, InfoSheet, MAX_TITLE_BYTES, PartsOfWholeTable, ResultCell,
+    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, TableArchetype, TableKind, TransformAnalysisSpec, VariableRole,
+    VariableSource, parse_column_title_numeric_hook,
 };
 
 use crate::error::TransformError;
@@ -127,8 +131,8 @@ impl<'a> TransformContext<'a> {
     }
 
     pub(crate) fn derived_ids(&self, source: &DataSheet, suffix: &str, title_suffix: &str) -> (String, String) {
-        let id = self.output_id.clone().unwrap_or_else(|| format!("{}-{suffix}", source.id.as_str()));
-        let title = self.output_title.clone().unwrap_or_else(|| format!("{} ({title_suffix})", source.title));
+        let id = self.output_id.clone().unwrap_or_else(|| bounded_suffixed_str(source.id.as_str(), &format!("-{suffix}"), MAX_SHEET_ID_BYTES));
+        let title = self.output_title.clone().unwrap_or_else(|| bounded_suffixed_str(&source.title, &format!(" ({title_suffix})"), MAX_TITLE_BYTES));
         (id, title)
     }
 
@@ -299,13 +303,89 @@ pub(crate) fn swap_error_bound_cells(row_cells: &mut [Cell]) -> bool {
     }
 }
 
+pub(crate) fn bounded_suffixed_str(base: &str, suffix: &str, max_bytes: usize) -> String {
+    if base.len().saturating_add(suffix.len()) <= max_bytes {
+        return format!("{base}{suffix}");
+    }
+    if suffix.len() >= max_bytes {
+        let mut out = String::with_capacity(max_bytes);
+        for ch in suffix.chars() {
+            if out.len() + ch.len_utf8() > max_bytes {
+                break;
+            }
+            out.push(ch);
+        }
+        return out;
+    }
+    let prefix_budget = max_bytes - suffix.len();
+    let mut out = String::with_capacity(max_bytes);
+    for ch in base.chars() {
+        if out.len() + ch.len_utf8() > prefix_budget {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push_str(suffix);
+    out
+}
+
+pub(crate) fn snapshot_calculated_variables(arch: &mut TableArchetype) {
+    if let TableArchetype::MultipleVariables(mv) = arch {
+        for var in &mut mv.variables {
+            if matches!(var.source, VariableSource::Calculated { .. }) || var.role == VariableRole::Calculated {
+                var.source = VariableSource::Entered;
+                var.role = VariableRole::Continuous;
+                var.role_inferred = true;
+                var.refresh_inferred_role();
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_parts_of_whole_non_negative(table: &PartsOfWholeTable) -> Result<(), TransformError> {
+    for (col, ds) in table.data_sets.iter().enumerate() {
+        for (row, subs) in ds.cells.iter().enumerate() {
+            if let Some(val) = subs.first().and_then(Cell::active_number)
+                && val < 0.0
+            {
+                return Err(TransformError::Doc(DocError::InvalidCellValue {
+                    archetype: TableKind::PartsOfWhole,
+                    row,
+                    col,
+                    reason: "parts-of-whole slice values must be >= 0",
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub(crate) fn remap_swapped_error_notes(notes: &mut [CellExclusionNote], swapped_rows: &[usize], col: usize) {
     if notes.is_empty() || swapped_rows.is_empty() {
         return;
     }
+    let row_set: HashSet<usize> = swapped_rows.iter().copied().collect();
     let mut changed = false;
     for note in notes.iter_mut() {
-        if note.coord.col == col && (note.coord.subcol == 1 || note.coord.subcol == 2) && swapped_rows.contains(&note.coord.row) {
+        if note.coord.col == col && (note.coord.subcol == 1 || note.coord.subcol == 2) && row_set.contains(&note.coord.row) {
+            note.coord.subcol = if note.coord.subcol == 1 { 2 } else { 1 };
+            changed = true;
+        }
+    }
+    if changed {
+        notes.sort_by_key(|n| n.coord);
+    }
+}
+
+pub(crate) fn remap_swapped_error_notes_batch(notes: &mut [CellExclusionNote], swapped: &[(usize, usize)]) {
+    if notes.is_empty() || swapped.is_empty() {
+        return;
+    }
+    let swapped_set: HashSet<(usize, usize)> = swapped.iter().copied().collect();
+    let mut changed = false;
+    for note in notes.iter_mut() {
+        if (note.coord.subcol == 1 || note.coord.subcol == 2) && swapped_set.contains(&(note.coord.row, note.coord.col)) {
             note.coord.subcol = if note.coord.subcol == 1 { 2 } else { 1 };
             changed = true;
         }
@@ -325,5 +405,66 @@ fn column_title_at(arch: &TableArchetype, idx: usize) -> Option<&str> {
         TableArchetype::PartsOfWhole(t) => t.data_sets.get(idx).map(|d| d.title.as_str()),
         TableArchetype::MultipleVariables(t) => t.variables.get(idx).map(|v| v.title.as_str()),
         TableArchetype::Nested(t) => t.groups.get(idx).map(|g| g.title.as_str()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::error::MAX_SHEET_ID_BYTES;
+    use curvebook_doc::{CellCoord, CellExclusionNote, ColumnDesignHint, ColumnTable, DataSheet, MAX_TITLE_BYTES, TableArchetype};
+
+    use super::{TransformContext, bounded_suffixed_str, remap_swapped_error_notes, remap_swapped_error_notes_batch};
+
+    #[test]
+    fn aud04_38_batched_remap_swapped_error_notes_handles_large_tables() {
+        let n = 10_000_usize;
+        let mut notes: Vec<CellExclusionNote> = (0..n)
+            .map(|r| CellExclusionNote {
+                coord: CellCoord::new(r, r % 2, if r % 3 == 0 { 1 } else { 2 }),
+                reason_tag: String::from("qc"),
+                note: String::from("note"),
+                timestamp_utc: String::from("2026-11-25T00:00:00Z"),
+            })
+            .collect();
+        let swapped: Vec<(usize, usize)> = (0..n).step_by(2).map(|r| (r, r % 2)).collect();
+        remap_swapped_error_notes_batch(&mut notes, &swapped);
+        assert_eq!(notes.len(), n);
+        assert!(notes.windows(2).all(|w| w[0].coord <= w[1].coord));
+        for note in &notes {
+            let orig_sub = if note.coord.row % 3 == 0 { 1 } else { 2 };
+            let expected_sub = if note.coord.row % 2 == 0 { 3 - orig_sub } else { orig_sub };
+            assert_eq!(note.coord.subcol, expected_sub);
+        }
+
+        // Single-column helper also uses O(N + M log M) HashSet lookup and flips subcol 1 <-> 2.
+        let mut single_notes = vec![CellExclusionNote {
+            coord: CellCoord::new(4, 0, 1),
+            reason_tag: String::from("qc"),
+            note: String::from("n"),
+            timestamp_utc: String::new(),
+        }];
+        remap_swapped_error_notes(&mut single_notes, &[4], 0);
+        assert_eq!(single_notes[0].coord, CellCoord::new(4, 0, 2));
+    }
+
+    #[test]
+    fn aud04_45_derived_ids_bounds_auto_suffixes_preserving_utf8() {
+        let long_id = "s".repeat(MAX_SHEET_ID_BYTES);
+        let long_title = "µ".repeat(MAX_TITLE_BYTES / 2); // 2-byte UTF-8 chars filling MAX_TITLE_BYTES
+        assert_eq!(long_title.len(), MAX_TITLE_BYTES);
+        let sheet =
+            DataSheet::new(long_id, long_title, TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()))
+                .unwrap();
+        let ctx = TransformContext::default();
+        let (id, title) = ctx.derived_ids(&sheet, "normalize", "Normalized");
+        assert!(id.len() <= MAX_SHEET_ID_BYTES);
+        assert!(id.ends_with("-normalize"));
+        assert!(title.len() <= MAX_TITLE_BYTES);
+        assert!(title.ends_with(" (Normalized)"));
+
+        // Degenerate tiny max_bytes truncates suffix cleanly on char boundary.
+        let tiny = bounded_suffixed_str("abc", "µµµ", 3);
+        assert!(tiny.len() <= 3);
+        assert_eq!(tiny, "µ");
     }
 }

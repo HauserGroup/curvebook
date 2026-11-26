@@ -65,7 +65,7 @@ fn resolve_parts_of_whole_style(series: &[SeriesSpec]) -> (PartsOfWholeLayout, b
 }
 
 fn extract_parts_of_whole_slices(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<curvebook_doc::SliceFraction> {
-    let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id) else { return Vec::new() };
+    let Some(ds) = crate::resolve_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id) else { return Vec::new() };
     let series_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
     match &ds.archetype {
         TableArchetype::PartsOfWhole(pow) => pow.fractions_for_series(series_idx).unwrap_or_default(),

@@ -1,5 +1,9 @@
 //! Deterministic curve and distribution simulation (`TransformAnalysisSpec::Simulate`,
 //! `docs/implementation/data-tables-and-transforms.md` §5.5).
+//!
+//! Built-in pharmacology, binding, and growth models align with `curvebook-fit`'s canonical
+//! parameterizations (Hill 1910; Motulsky & Christopoulos 2004; Langmuir 1918; Michaelis & Menten
+//! 1913; Seber & Wild 1989).
 
 use curvebook_doc::{
     Cell, DataSheet, MAX_ROWS, MAX_SUBCOLUMNS, SimulationNoise, SubcolumnMode, TableArchetype, XColumnMode, XyTable, validate_rows,
@@ -8,78 +12,177 @@ use curvebook_doc::{
 use curvebook_math::DeterministicRng;
 
 use crate::error::TransformError;
-use crate::formula::{ScalarEnv, eval_scalar_expr, parse_formula};
+use crate::formula::{Expr, ScalarEnv, eval_scalar_expr, parse_formula};
 use crate::import::MAX_IMPORT_CELLS;
+
+/// Pre-compiled simulation equation so built-in parameter lookup/validation and custom formula
+/// parsing occur once per simulation rather than once per row.
+enum CompiledEquation<'a> {
+    Builtin { id: &'a str, kind: BuiltinEquation },
+    Custom { formula: &'a str, expr: Expr, env: ScalarEnv<'a> },
+}
+
+enum BuiltinEquation {
+    Linear { slope: f64, intercept: f64 },
+    Quadratic { a: f64, b: f64, c: f64 },
+    Cubic { b0: f64, b1: f64, b2: f64, b3: f64 },
+    OnePhaseDecay { plateau: f64, span: f64, k: f64 },
+    OnePhaseAssociation { y0: f64, plateau: f64, k: f64 },
+    TwoPhaseDecay { plateau: f64, span_fast: f64, span_slow: f64, k_fast: f64, k_slow: f64 },
+    ExponentialGrowth { y0: f64, k: f64 },
+    LogDoseResponse { bottom: f64, top: f64, log_c50: f64, hill_slope: f64, is_inhibition: bool },
+    LinearHill { bottom: f64, top: f64, ec50: f64, hill_slope: f64 },
+    MichaelisMenten { vmax: f64, km: f64 },
+    OneSiteSpecificBinding { bmax: f64, kd: f64 },
+    Gaussian { amp: f64, mean: f64, sd: f64, base: f64 },
+    Sine { amp: f64, freq: f64, phase: f64, base: f64 },
+}
+
+impl<'a> CompiledEquation<'a> {
+    fn compile(equation_id: &'a str, parameters: &'a [(String, f64)]) -> Result<Self, TransformError> {
+        for (k, v) in parameters {
+            if !v.is_finite() {
+                return Err(TransformError::InvalidSpec { message: format!("simulation parameter `{k}` must be finite, got {v}") });
+            }
+        }
+        let id = equation_id.trim();
+        if id.is_empty() {
+            return Err(TransformError::InvalidSpec { message: String::from("simulation equation_id must not be empty") });
+        }
+        let normalized = id.to_ascii_lowercase();
+        let custom_formula = if normalized.starts_with("expr:") {
+            id.get(5..)
+        } else if normalized.starts_with("custom:") {
+            id.get(7..)
+        } else if id.starts_with('=') {
+            Some(id)
+        } else {
+            None
+        };
+        if let Some(custom) = custom_formula {
+            return Self::compile_custom(custom, parameters);
+        }
+
+        let kind = match normalized.as_str() {
+            "linear" | "straight_line" => BuiltinEquation::Linear {
+                slope: param(parameters, &["slope", "m", "a"]).unwrap_or(1.0),
+                intercept: param(parameters, &["intercept", "b", "y0"]).unwrap_or(0.0),
+            },
+            "quadratic" => compile_quadratic(parameters),
+            "cubic" => BuiltinEquation::Cubic {
+                b0: param(parameters, &["b0", "d", "intercept"]).unwrap_or(0.0),
+                b1: param(parameters, &["b1", "c"]).unwrap_or(0.0),
+                b2: param(parameters, &["b2", "b"]).unwrap_or(0.0),
+                b3: param(parameters, &["b3", "a"]).unwrap_or(1.0),
+            },
+            "exponential_decay" | "one_phase_decay" => {
+                let plateau = param(parameters, &["plateau", "ns", "bottom"]).unwrap_or(0.0);
+                let span = param(parameters, &["span"]).unwrap_or_else(|| param(parameters, &["y0", "top"]).unwrap_or(100.0) - plateau);
+                let k = param(parameters, &["k", "rate"]).unwrap_or(1.0);
+                BuiltinEquation::OnePhaseDecay { plateau, span, k }
+            }
+            "one_phase_association" => BuiltinEquation::OnePhaseAssociation {
+                y0: param(parameters, &["y0", "bottom"]).unwrap_or(0.0),
+                plateau: param(parameters, &["plateau", "top", "ymax"]).unwrap_or(100.0),
+                k: param(parameters, &["k", "rate"]).unwrap_or(1.0),
+            },
+            "two_phase_decay" => BuiltinEquation::TwoPhaseDecay {
+                plateau: param(parameters, &["plateau", "bottom"]).unwrap_or(0.0),
+                span_fast: param(parameters, &["spanfast", "span_fast"]).unwrap_or(50.0),
+                span_slow: param(parameters, &["spanslow", "span_slow"]).unwrap_or(50.0),
+                k_fast: param(parameters, &["kfast", "k_fast"]).unwrap_or(2.0),
+                k_slow: param(parameters, &["kslow", "k_slow"]).unwrap_or(0.2),
+            },
+            "exponential_growth" | "malthusian_growth" => BuiltinEquation::ExponentialGrowth {
+                y0: param(parameters, &["y0", "a"]).unwrap_or(1.0),
+                k: param(parameters, &["k", "rate"]).unwrap_or(1.0),
+            },
+            "hill_4pl" | "four_pl" | "4pl" | "sigmoidal_dose_response" | "dose_response_4pl" | "agonist_4pl" => compile_hill(parameters, true)?,
+            "hill_3pl" | "three_pl" | "3pl" => compile_hill(parameters, false)?,
+            "log_agonist_vs_response_4pl" | "log_agonist_vs_response_variable_slope" => compile_log_dose_response(parameters, true, false, false),
+            "log_agonist_vs_response_3pl" | "log_agonist_vs_response" | "ec50_3pl" => compile_log_dose_response(parameters, false, false, false),
+            "log_inhibitor_vs_response_4pl" | "log_inhibitor_vs_response_variable_slope" => compile_log_dose_response(parameters, true, true, false),
+            "log_inhibitor_vs_response_3pl" | "log_inhibitor_vs_response" | "ic50_3pl" => compile_log_dose_response(parameters, false, true, false),
+            "log_agonist_vs_response_normalized" => compile_log_dose_response(parameters, false, false, true),
+            "log_agonist_vs_response_normalized_var" => compile_log_dose_response(parameters, true, false, true),
+            "log_inhibitor_vs_response_normalized" => compile_log_dose_response(parameters, false, true, true),
+            "log_inhibitor_vs_response_normalized_var" => compile_log_dose_response(parameters, true, true, true),
+            "michaelis_menten" => BuiltinEquation::MichaelisMenten {
+                vmax: param(parameters, &["vmax", "v_max"]).unwrap_or(100.0),
+                km: param(parameters, &["km", "k_m"]).unwrap_or(1.0),
+            },
+            "one_site_specific_binding" => {
+                let bmax = param(parameters, &["bmax", "b_max", "vmax"]).unwrap_or(100.0);
+                let kd = param(parameters, &["kd", "k_d", "km"]).unwrap_or(1.0);
+                if kd <= 0.0 {
+                    return Err(TransformError::InvalidSpec { message: format!("one_site_specific_binding Kd must be > 0, got {kd}") });
+                }
+                BuiltinEquation::OneSiteSpecificBinding { bmax, kd }
+            }
+            "gaussian" => {
+                let amp = param(parameters, &["amplitude", "amp", "a"]).unwrap_or(1.0);
+                let mean = param(parameters, &["mean", "mu", "xc", "x0"]).unwrap_or(0.0);
+                let sd = param(parameters, &["sd", "sigma", "w"]).unwrap_or(1.0);
+                let base = param(parameters, &["baseline", "b", "y0"]).unwrap_or(0.0);
+                if sd <= 0.0 {
+                    return Err(TransformError::InvalidSpec { message: format!("gaussian sd must be > 0, got {sd}") });
+                }
+                BuiltinEquation::Gaussian { amp, mean, sd, base }
+            }
+            "sine" | "sinusoid" => compile_sine(parameters)?,
+            _ => {
+                if looks_like_expression(id) {
+                    return Self::compile_custom(id, parameters);
+                }
+                return Err(TransformError::UnknownEquation { equation_id: id.to_owned() });
+            }
+        };
+
+        Ok(Self::Builtin { id, kind })
+    }
+
+    fn compile_custom(formula: &'a str, parameters: &'a [(String, f64)]) -> Result<Self, TransformError> {
+        let expr = parse_formula(formula)?;
+        let mut bindings: Vec<(&'a str, f64)> = Vec::with_capacity(parameters.len() + 1);
+        bindings.push(("x", 0.0));
+        for (k, v) in parameters {
+            bindings.push((k.as_str(), *v));
+        }
+        Ok(Self::Custom { formula, expr, env: ScalarEnv::new(bindings, None) })
+    }
+
+    fn eval(&mut self, x: f64) -> Result<f64, TransformError> {
+        if !x.is_finite() {
+            return Err(TransformError::InvalidSpec { message: format!("simulation x coordinate must be finite, got {x}") });
+        }
+        match self {
+            Self::Custom { formula, expr, env } => {
+                if let Some(slot) = env.bindings.first_mut() {
+                    slot.1 = x;
+                }
+                let val = eval_scalar_expr(expr, env)?;
+                val.as_finite_f64().ok_or_else(|| TransformError::EvalError {
+                    message: format!("custom equation `{formula}` evaluated to missing/non-finite at x={x}"),
+                })
+            }
+            Self::Builtin { id, kind } => {
+                let y = eval_builtin(kind, x)?;
+                if !y.is_finite() {
+                    return Err(TransformError::EvalError { message: format!("equation `{id}` produced non-finite value at x={x}") });
+                }
+                Ok(y)
+            }
+        }
+    }
+}
 
 /// Evaluate a named built-in simulation equation or custom formula expression at `x`.
 pub fn evaluate_equation(equation_id: &str, x: f64, parameters: &[(String, f64)]) -> Result<f64, TransformError> {
     if !x.is_finite() {
         return Err(TransformError::InvalidSpec { message: format!("simulation x coordinate must be finite, got {x}") });
     }
-    let id = equation_id.trim();
-    if id.is_empty() {
-        return Err(TransformError::InvalidSpec { message: String::from("simulation equation_id must not be empty") });
-    }
-    let normalized = id.to_ascii_lowercase();
-    if let Some(custom) = id.strip_prefix("expr:").or_else(|| id.strip_prefix("custom:")) {
-        return eval_custom_formula(custom, x, parameters);
-    }
-    if id.starts_with('=') {
-        return eval_custom_formula(id, x, parameters);
-    }
-
-    let y = match normalized.as_str() {
-        "linear" | "straight_line" => {
-            let slope = param(parameters, &["slope", "m", "a"]).unwrap_or(1.0);
-            let intercept = param(parameters, &["intercept", "b", "y0"]).unwrap_or(0.0);
-            slope * x + intercept
-        }
-        "quadratic" => eval_quadratic(x, parameters),
-        "cubic" => eval_cubic(x, parameters),
-        "exponential_decay" | "one_phase_decay" => eval_one_phase_decay(x, parameters),
-        "one_phase_association" => eval_one_phase_association(x, parameters),
-        "two_phase_decay" => eval_two_phase_decay(x, parameters),
-        "hill_4pl" | "four_pl" | "4pl" | "sigmoidal_dose_response" => eval_hill(x, parameters, true),
-        "hill_3pl" | "three_pl" | "3pl" => eval_hill(x, parameters, false),
-        "michaelis_menten" => {
-            let vmax = param(parameters, &["vmax", "v_max"]).unwrap_or(100.0);
-            let km = param(parameters, &["km", "k_m"]).unwrap_or(1.0);
-            if (km + x) == 0.0 {
-                return Err(TransformError::EvalError { message: String::from("Michaelis-Menten denominator km + x is zero") });
-            }
-            vmax * x / (km + x)
-        }
-        "gaussian" => {
-            let amp = param(parameters, &["amplitude", "amp", "a"]).unwrap_or(1.0);
-            let mean = param(parameters, &["mean", "mu", "xc", "x0"]).unwrap_or(0.0);
-            let sd = param(parameters, &["sd", "sigma", "w"]).unwrap_or(1.0);
-            let base = param(parameters, &["baseline", "b", "y0"]).unwrap_or(0.0);
-            if sd <= 0.0 {
-                return Err(TransformError::InvalidSpec { message: format!("gaussian sd must be > 0, got {sd}") });
-            }
-            let z = (x - mean) / sd;
-            base + amp * (-0.5 * z * z).exp()
-        }
-        "sine" | "sinusoid" => {
-            let amp = param(parameters, &["amplitude", "amp", "a"]).unwrap_or(1.0);
-            let freq = param(parameters, &["frequency", "freq", "omega"])
-                .unwrap_or_else(|| param(parameters, &["wavelength"]).map_or(1.0, |w| if w != 0.0 { std::f64::consts::TAU / w } else { 1.0 }));
-            let phase = param(parameters, &["phase", "phi"]).unwrap_or(0.0);
-            let base = param(parameters, &["baseline", "offset", "y0"]).unwrap_or(0.0);
-            base + amp * (freq * x + phase).sin()
-        }
-        _ => {
-            if looks_like_expression(id) {
-                return eval_custom_formula(id, x, parameters);
-            }
-            return Err(TransformError::UnknownEquation { equation_id: id.to_owned() });
-        }
-    };
-
-    if !y.is_finite() {
-        return Err(TransformError::EvalError { message: format!("equation `{id}` produced non-finite value at x={x}") });
-    }
-    Ok(y)
+    let mut compiled = CompiledEquation::compile(equation_id, parameters)?;
+    compiled.eval(x)
 }
 
 /// Generate a synthetic [`DataSheet`] deterministically using `curvebook_math::DeterministicRng`.
@@ -110,6 +213,7 @@ pub fn simulate_xy_sheet(
     }
     validate_noise(noise)?;
     check_simulation_cell_budget(row_count, 1, replicates, 1)?;
+    let mut compiled = CompiledEquation::compile(equation_id, parameters)?;
 
     let mode = if replicates == 1 { SubcolumnMode::Single } else { SubcolumnMode::RawReplicates(replicates) };
     let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, mode, 1, row_count)?;
@@ -126,7 +230,7 @@ pub fn simulate_xy_sheet(
             if (x_max - x_min).is_finite() { x_min + frac * (x_max - x_min) } else { (1.0 - frac) * x_min + frac * x_max }
         };
         xy.set_x_cell(row, Cell::number(x))?;
-        let y_true = match evaluate_equation(equation_id, x, parameters) {
+        let y_true = match compiled.eval(x) {
             Ok(v) => v,
             Err(err @ TransformError::EvalError { .. }) => {
                 first_eval_err.get_or_insert(err);
@@ -216,8 +320,11 @@ fn sample_noisy_observation(rng: &mut DeterministicRng, y_true: f64, noise: Simu
             }
         }
         SimulationNoise::RelativePercent { cv_percent } => {
-            let sd = (cv_percent / 100.0) * y_true.abs();
-            if sd == 0.0 { y_true } else { rng.normal(y_true, sd)? }
+            if cv_percent == 0.0 || y_true == 0.0 {
+                y_true
+            } else {
+                y_true * (1.0 + (cv_percent / 100.0) * rng.standard_normal())
+            }
         }
         SimulationNoise::Poisson => {
             // Exact PTRS Poisson count generation applies up to lambda = 1e15 (Atkinson, *Appl. Stat.* 1979,
@@ -247,79 +354,145 @@ fn param(parameters: &[(String, f64)], names: &[&str]) -> Option<f64> {
     None
 }
 
-fn eval_quadratic(x: f64, parameters: &[(String, f64)]) -> f64 {
+fn compile_quadratic(parameters: &[(String, f64)]) -> BuiltinEquation {
     if let (Some(b0), Some(b1), Some(b2)) = (param(parameters, &["b0"]), param(parameters, &["b1"]), param(parameters, &["b2"])) {
-        return b0 + b1 * x + b2 * x * x;
+        return BuiltinEquation::Quadratic { a: b2, b: b1, c: b0 };
     }
-    let a = param(parameters, &["a", "b2"]).unwrap_or(1.0);
-    let b = param(parameters, &["b", "b1"]).unwrap_or(0.0);
-    let c = param(parameters, &["c", "b0", "intercept"]).unwrap_or(0.0);
-    a * x * x + b * x + c
+    BuiltinEquation::Quadratic {
+        a: param(parameters, &["a", "b2"]).unwrap_or(1.0),
+        b: param(parameters, &["b", "b1"]).unwrap_or(0.0),
+        c: param(parameters, &["c", "b0", "intercept"]).unwrap_or(0.0),
+    }
 }
 
-fn eval_cubic(x: f64, parameters: &[(String, f64)]) -> f64 {
-    let b0 = param(parameters, &["b0", "d", "intercept"]).unwrap_or(0.0);
-    let b1 = param(parameters, &["b1", "c"]).unwrap_or(0.0);
-    let b2 = param(parameters, &["b2", "b"]).unwrap_or(0.0);
-    let b3 = param(parameters, &["b3", "a"]).unwrap_or(1.0);
-    b0 + x * (b1 + x * (b2 + x * b3))
+fn compile_sine(parameters: &[(String, f64)]) -> Result<BuiltinEquation, TransformError> {
+    let amp = param(parameters, &["amplitude", "amp", "a"]).unwrap_or(1.0);
+    let freq = if let Some(f) = param(parameters, &["frequency", "freq", "omega"]) {
+        f
+    } else if let Some(w) = param(parameters, &["wavelength"]) {
+        if w == 0.0 {
+            return Err(TransformError::InvalidSpec { message: String::from("sine wavelength must be non-zero, got 0") });
+        }
+        std::f64::consts::TAU / w
+    } else {
+        1.0
+    };
+    let phase = param(parameters, &["phase", "phi"]).unwrap_or(0.0);
+    let base = param(parameters, &["baseline", "offset", "y0"]).unwrap_or(0.0);
+    Ok(BuiltinEquation::Sine { amp, freq, phase, base })
 }
 
-fn eval_one_phase_decay(x: f64, parameters: &[(String, f64)]) -> f64 {
-    let plateau = param(parameters, &["plateau", "ns", "bottom"]).unwrap_or(0.0);
-    let span = param(parameters, &["span"]).unwrap_or_else(|| param(parameters, &["y0", "top"]).unwrap_or(100.0) - plateau);
-    let k = param(parameters, &["k", "rate"]).unwrap_or(1.0);
-    plateau + span * (-k * x).exp()
+fn compile_log_dose_response(parameters: &[(String, f64)], variable_slope: bool, is_inhibition: bool, normalized: bool) -> BuiltinEquation {
+    let (bottom, top) = if normalized {
+        (0.0, 100.0)
+    } else {
+        (param(parameters, &["bottom", "min", "y0"]).unwrap_or(0.0), param(parameters, &["top", "max", "ymax"]).unwrap_or(100.0))
+    };
+    let log_c50 = if is_inhibition {
+        param(parameters, &["logic50", "log_ic50", "logec50", "log_ec50"]).unwrap_or(0.0)
+    } else {
+        param(parameters, &["logec50", "log_ec50", "logic50", "log_ic50"]).unwrap_or(0.0)
+    };
+    let hill_slope = if variable_slope { param(parameters, &["hillslope", "hill_slope", "n", "slope"]).unwrap_or(1.0) } else { 1.0 };
+    BuiltinEquation::LogDoseResponse { bottom, top, log_c50, hill_slope, is_inhibition }
 }
 
-fn eval_one_phase_association(x: f64, parameters: &[(String, f64)]) -> f64 {
-    let y0 = param(parameters, &["y0", "bottom"]).unwrap_or(0.0);
-    let plateau = param(parameters, &["plateau", "top", "ymax"]).unwrap_or(100.0);
-    let k = param(parameters, &["k", "rate"]).unwrap_or(1.0);
-    y0 + (plateau - y0) * (1.0 - (-k * x).exp())
-}
-
-fn eval_two_phase_decay(x: f64, parameters: &[(String, f64)]) -> f64 {
-    let plateau = param(parameters, &["plateau", "bottom"]).unwrap_or(0.0);
-    let span_fast = param(parameters, &["spanfast", "span_fast"]).unwrap_or(50.0);
-    let span_slow = param(parameters, &["spanslow", "span_slow"]).unwrap_or(50.0);
-    let k_fast = param(parameters, &["kfast", "k_fast"]).unwrap_or(2.0);
-    let k_slow = param(parameters, &["kslow", "k_slow"]).unwrap_or(0.2);
-    plateau + span_fast * (-k_fast * x).exp() + span_slow * (-k_slow * x).exp()
-}
-
-fn eval_hill(x: f64, parameters: &[(String, f64)], allow_hill_slope: bool) -> f64 {
+fn compile_hill(parameters: &[(String, f64)], allow_hill_slope: bool) -> Result<BuiltinEquation, TransformError> {
     let bottom = param(parameters, &["bottom", "min", "y0"]).unwrap_or(0.0);
     let top = param(parameters, &["top", "max", "ymax"]).unwrap_or(100.0);
     let hill_slope = if allow_hill_slope { param(parameters, &["hillslope", "hill_slope", "n", "slope"]).unwrap_or(1.0) } else { 1.0 };
 
     if let Some(log_ec50) = param(parameters, &["logic50", "logec50", "log_ic50", "log_ec50"]) {
-        return bottom + (top - bottom) / (1.0 + 10.0_f64.powf((log_ec50 - x) * hill_slope));
+        return Ok(BuiltinEquation::LogDoseResponse { bottom, top, log_c50: log_ec50, hill_slope, is_inhibition: false });
     }
     if let Some(ec50) = param(parameters, &["ec50", "ic50", "k50"]) {
-        if x <= 0.0 {
-            return if hill_slope >= 0.0 { bottom } else { top };
+        if ec50 <= 0.0 {
+            return Err(TransformError::InvalidSpec { message: format!("Hill EC50/IC50 must be > 0, got {ec50}") });
         }
-        return bottom + (top - bottom) / (1.0 + (ec50 / x).powf(hill_slope));
+        return Ok(BuiltinEquation::LinearHill { bottom, top, ec50, hill_slope });
     }
-    bottom + (top - bottom) / (1.0 + 10.0_f64.powf(-x * hill_slope))
+    Ok(BuiltinEquation::LogDoseResponse { bottom, top, log_c50: 0.0, hill_slope, is_inhibition: false })
+}
+
+fn eval_builtin(kind: &BuiltinEquation, x: f64) -> Result<f64, TransformError> {
+    let y = match *kind {
+        BuiltinEquation::Linear { slope, intercept } => slope * x + intercept,
+        BuiltinEquation::Quadratic { a, b, c } => a * x * x + b * x + c,
+        BuiltinEquation::Cubic { b0, b1, b2, b3 } => b0 + x * (b1 + x * (b2 + x * b3)),
+        BuiltinEquation::OnePhaseDecay { plateau, span, k } => plateau + span * (-k * x).exp(),
+        BuiltinEquation::OnePhaseAssociation { y0, plateau, k } => y0 + (plateau - y0) * (1.0 - (-k * x).exp()),
+        BuiltinEquation::TwoPhaseDecay { plateau, span_fast, span_slow, k_fast, k_slow } => {
+            plateau + span_fast * (-k_fast * x).exp() + span_slow * (-k_slow * x).exp()
+        }
+        BuiltinEquation::ExponentialGrowth { y0, k } => y0 * (k * x).exp(),
+        BuiltinEquation::LogDoseResponse { bottom, top, log_c50, hill_slope, is_inhibition } => {
+            eval_log_dose_response(x, bottom, top, log_c50, hill_slope, is_inhibition)
+        }
+        BuiltinEquation::LinearHill { bottom, top, ec50, hill_slope } => {
+            if x <= 0.0 {
+                if hill_slope >= 0.0 { bottom } else { top }
+            } else {
+                bottom + (top - bottom) / (1.0 + (ec50 / x).powf(hill_slope))
+            }
+        }
+        BuiltinEquation::MichaelisMenten { vmax, km } => {
+            if (km + x) == 0.0 {
+                return Err(TransformError::EvalError { message: String::from("Michaelis-Menten denominator km + x is zero") });
+            }
+            vmax * x / (km + x)
+        }
+        BuiltinEquation::OneSiteSpecificBinding { bmax, kd } => {
+            if x < 0.0 {
+                return Err(TransformError::EvalError { message: format!("one_site_specific_binding requires x >= 0, got {x}") });
+            }
+            eval_one_site_binding(x, bmax, kd)
+        }
+        BuiltinEquation::Gaussian { amp, mean, sd, base } => {
+            let z = (x - mean) / sd;
+            base + amp * (-0.5 * z * z).exp()
+        }
+        BuiltinEquation::Sine { amp, freq, phase, base } => base + amp * (freq * x + phase).sin(),
+    };
+    Ok(y)
+}
+
+fn eval_log_dose_response(x: f64, bottom: f64, top: f64, log_c50: f64, hill_slope: f64, is_inhibition: bool) -> f64 {
+    let eff_slope = if is_inhibition { -hill_slope } else { hill_slope };
+    let arg = (log_c50 - x) * eff_slope;
+    let exp_ln10 = arg * std::f64::consts::LN_10;
+    let sig = if exp_ln10 > 700.0 {
+        0.0
+    } else if exp_ln10 < -700.0 {
+        1.0
+    } else {
+        1.0 / (1.0 + 10.0_f64.powf(arg))
+    };
+    bottom + (top - bottom) * sig
+}
+
+fn eval_one_site_binding(x: f64, bmax: f64, kd: f64) -> f64 {
+    if x == 0.0 {
+        return 0.0;
+    }
+    let r = x / kd;
+    let frac = if r.is_infinite() {
+        1.0
+    } else if r == 0.0 {
+        let log_r = x.ln() - kd.ln();
+        if log_r < -745.0 {
+            0.0
+        } else {
+            let rv = log_r.exp();
+            rv / (1.0 + rv)
+        }
+    } else {
+        r / (1.0 + r)
+    };
+    bmax * frac
 }
 
 fn looks_like_expression(s: &str) -> bool {
     s.contains('+') || s.contains('-') || s.contains('*') || s.contains('/') || s.contains('^') || s.contains('(')
-}
-
-fn eval_custom_formula(formula: &str, x: f64, parameters: &[(String, f64)]) -> Result<f64, TransformError> {
-    let expr = parse_formula(formula)?;
-    let mut bindings: Vec<(&str, f64)> = Vec::with_capacity(parameters.len() + 1);
-    bindings.push(("x", x));
-    for (k, v) in parameters {
-        bindings.push((k.as_str(), *v));
-    }
-    let env = ScalarEnv::new(bindings, None);
-    let val = eval_scalar_expr(&expr, &env)?;
-    val.as_finite_f64()
-        .ok_or_else(|| TransformError::EvalError { message: format!("custom equation `{formula}` evaluated to missing/non-finite at x={x}") })
 }
 
 #[cfg(test)]
@@ -373,5 +546,98 @@ mod tests {
         // Small trace within per-axis max subcolumns remains accepted.
         let ok = simulate_xy_sheet("sim-ok", "Small", 1, 2, MAX_SUBCOLUMNS, 0.0, 1.0, "linear", &[], SimulationNoise::None).unwrap();
         assert_eq!(ok.archetype.allocated_cell_slots(), 2 * (1 + MAX_SUBCOLUMNS));
+    }
+
+    #[test]
+    fn aud04_25_canonical_fit_library_equations_match_exact_formulas() {
+        let p4 = vec![(String::from("Bottom"), 10.0), (String::from("Top"), 90.0), (String::from("LogEC50"), -6.0), (String::from("HillSlope"), 2.0)];
+        // Agonist 4PL: 10 + 80 / (1 + 10^((-6 - (-5)) * 2)) = 10 + 80 / 1.01
+        let exp_ag4 = 10.0 + 80.0 / (1.0 + 10.0_f64.powf((-6.0 - (-5.0)) * 2.0));
+        for id in ["log_agonist_vs_response_4pl", "log_agonist_vs_response_variable_slope", "dose_response_4pl", "agonist_4pl"] {
+            assert!((evaluate_equation(id, -5.0, &p4).unwrap() - exp_ag4).abs() < 1e-12, "{id}");
+        }
+
+        // Agonist 3PL (fixed HillSlope = 1):
+        let exp_ag3 = 10.0 + 80.0 / (1.0 + 10.0_f64.powf(-6.0 - (-5.0)));
+        for id in ["log_agonist_vs_response_3pl", "log_agonist_vs_response"] {
+            assert!((evaluate_equation(id, -5.0, &p4).unwrap() - exp_ag3).abs() < 1e-12, "{id}");
+        }
+
+        // Inhibitor 4PL (descending): 10 + 80 / (1 + 10^((-5 - (-6)) * 2)) = 10 + 80 / 101
+        let pi4 =
+            vec![(String::from("Bottom"), 10.0), (String::from("Top"), 90.0), (String::from("LogIC50"), -6.0), (String::from("HillSlope"), 2.0)];
+        let exp_inh4 = 10.0 + 80.0 / (1.0 + 10.0_f64.powf((-5.0 - (-6.0)) * 2.0));
+        for id in ["log_inhibitor_vs_response_4pl", "log_inhibitor_vs_response_variable_slope"] {
+            assert!((evaluate_equation(id, -5.0, &pi4).unwrap() - exp_inh4).abs() < 1e-12, "{id}");
+        }
+
+        // Inhibitor 3PL (descending, HillSlope = 1):
+        let exp_inh3 = 10.0 + 80.0 / (1.0 + 10.0_f64.powf(-5.0 - (-6.0)));
+        for id in ["log_inhibitor_vs_response_3pl", "log_inhibitor_vs_response"] {
+            assert!((evaluate_equation(id, -5.0, &pi4).unwrap() - exp_inh3).abs() < 1e-12, "{id}");
+        }
+
+        // Normalized agonist & inhibitor variants (Bottom=0, Top=100):
+        assert!((evaluate_equation("log_agonist_vs_response_normalized", -5.0, &p4).unwrap() - 100.0 / 1.1).abs() < 1e-12);
+        assert!((evaluate_equation("log_agonist_vs_response_normalized_var", -5.0, &p4).unwrap() - 100.0 / 1.01).abs() < 1e-12);
+        assert!((evaluate_equation("log_inhibitor_vs_response_normalized", -5.0, &pi4).unwrap() - 100.0 / 11.0).abs() < 1e-12);
+        assert!((evaluate_equation("log_inhibitor_vs_response_normalized_var", -5.0, &pi4).unwrap() - 100.0 / 101.0).abs() < 1e-12);
+
+        // Exponential growth & one-site specific binding:
+        let growth_p = vec![(String::from("Y0"), 5.0), (String::from("k"), 0.5)];
+        assert!((evaluate_equation("exponential_growth", 2.0, &growth_p).unwrap() - 5.0 * 1.0_f64.exp()).abs() < 1e-12);
+        let bind_p = vec![(String::from("Bmax"), 120.0), (String::from("Kd"), 4.0)];
+        assert!((evaluate_equation("one_site_specific_binding", 4.0, &bind_p).unwrap() - 60.0).abs() < 1e-12);
+        assert!(matches!(evaluate_equation("one_site_specific_binding", -1.0, &bind_p), Err(TransformError::EvalError { .. })));
+        assert!(matches!(evaluate_equation("one_site_specific_binding", 1.0, &[(String::from("Kd"), 0.0)]), Err(TransformError::InvalidSpec { .. })));
+
+        // Default engine/GUI Simulate call with log_agonist_vs_response_4pl succeeds end-to-end.
+        let sim = simulate_xy_sheet("sim-4pl", "4PL", 42, 10, 2, -9.0, -3.0, "log_agonist_vs_response_4pl", &p4, SimulationNoise::None).unwrap();
+        assert_eq!(sim.archetype.row_count(), 10);
+    }
+
+    #[test]
+    fn aud04_37_simulate_compiles_custom_formula_once_across_many_rows() {
+        let params = vec![(String::from("a"), 2.0), (String::from("b"), 3.0)];
+        let sheet = simulate_xy_sheet("sim-expr", "Expr", 7, 2_000, 1, 0.0, 1999.0, "EXPR: a * x + b", &params, SimulationNoise::None).unwrap();
+        let TableArchetype::Xy(xy) = &sheet.archetype else {
+            panic!("expected Xy");
+        };
+        assert!((xy.data_sets[0].cells[0][0].active_number().unwrap() - 3.0).abs() < 1e-12);
+        assert!((xy.data_sets[0].cells[1999][0].active_number().unwrap() - 4001.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aud04_47_relative_percent_overflow_and_parameter_validation_and_case_insensitive_prefix() {
+        // RelativePercent near f64::MAX must NOT abort via MathError when finite rows exist.
+        let sim = simulate_xy_sheet(
+            "sim-rel-big",
+            "RelBig",
+            42,
+            3,
+            1,
+            0.0,
+            10.0,
+            "linear",
+            &[(String::from("m"), 1e307), (String::from("b"), 0.0)],
+            SimulationNoise::RelativePercent { cv_percent: 200.0 },
+        )
+        .unwrap();
+        let TableArchetype::Xy(xy) = &sim.archetype else {
+            panic!("expected Xy");
+        };
+        assert_eq!(xy.data_sets[0].cells[0][0].active_number(), Some(0.0));
+
+        // Non-finite parameters rejected upfront (including Gaussian NaN sd).
+        assert!(matches!(evaluate_equation("gaussian", 0.0, &[(String::from("sd"), f64::NAN)]), Err(TransformError::InvalidSpec { .. })));
+        assert!(matches!(evaluate_equation("linear", 0.0, &[(String::from("slope"), f64::INFINITY)]), Err(TransformError::InvalidSpec { .. })));
+        // Sine wavelength == 0 rejected instead of silently substituting freq = 1.0.
+        assert!(matches!(evaluate_equation("sine", 1.0, &[(String::from("wavelength"), 0.0)]), Err(TransformError::InvalidSpec { .. })));
+        // Hill ec50 <= 0 rejected.
+        assert!(matches!(evaluate_equation("hill_4pl", 1.0, &[(String::from("ec50"), 0.0)]), Err(TransformError::InvalidSpec { .. })));
+        assert!(matches!(evaluate_equation("hill_4pl", 1.0, &[(String::from("ec50"), -5.0)]), Err(TransformError::InvalidSpec { .. })));
+        // Case-insensitive expr: / custom: prefix stripping.
+        assert!((evaluate_equation("EXPR: 2 * x + 1", 3.0, &[]).unwrap() - 7.0).abs() < 1e-12);
+        assert!((evaluate_equation("CUSTOM: x^2", 4.0, &[]).unwrap() - 16.0).abs() < 1e-12);
     }
 }

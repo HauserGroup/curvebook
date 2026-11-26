@@ -1,6 +1,6 @@
 //! Native `egui` multi-tab reactive `ResultSheet` viewer (`docs/planning/gui-layout-spec.md` §8.10, `R15.3`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use curvebook_doc::{AnalysisKind, CiBound, PValueFormat, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId};
 use curvebook_palette::lerp_oklab;
@@ -68,6 +68,7 @@ pub struct ResultsFindHighlight {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResultsViewEguiState {
     pub scroll_offset_y: f32,
+    pub scroll_offset_x: f32,
     pub hovered_row: Option<usize>,
     pub selection_anchor: Option<(SheetId, usize, usize, usize)>,
     pub selected_cell: Option<(SheetId, usize, usize, usize)>,
@@ -78,13 +79,30 @@ pub struct ResultsViewEguiState {
     pub tab_overflow_open: bool,
     pub active_find_matches: Option<ResultsFindHighlight>,
     pub pending_scroll_to_match: Option<(SheetId, usize, usize, usize)>,
+    /// Per-sheet active tab index so split-pane secondary `ResultSheet` views switch tabs independently.
+    pub per_sheet_active_tab: BTreeMap<SheetId, usize>,
+    /// Last `(sheet_id, tab_index)` observed from `app.canvas_dialogs.result_view.active_tab_index` on the primary sheet.
+    pub last_synced_primary_tab: Option<(SheetId, usize)>,
+    /// Set when programmatic selection changes (e.g. Find navigation) must be mirrored via `SyncResultSelection`.
+    pub selection_sync_needed: bool,
 }
 
 impl ResultsViewEguiState {
+    /// Resolve the active tab index for `sheet_id` using per-sheet state when present.
+    #[must_use]
+    pub fn active_tab_for_sheet(&self, sheet_id: &SheetId, tab_count: usize, fallback_tab_index: usize) -> usize {
+        if tab_count == 0 {
+            return 0;
+        }
+        self.per_sheet_active_tab.get(sheet_id).copied().unwrap_or(fallback_tab_index).min(tab_count - 1)
+    }
+
     /// Request scrolling the results table to `(tab_idx, row_idx, col_idx)` and selecting that cell.
     pub fn scroll_to_match(&mut self, sheet_id: SheetId, tab_idx: usize, row_idx: usize, col_idx: usize) {
+        self.per_sheet_active_tab.insert(sheet_id.clone(), tab_idx);
         self.selection_anchor = Some((sheet_id.clone(), tab_idx, row_idx, col_idx));
         self.selected_cell = Some((sheet_id.clone(), tab_idx, row_idx, col_idx));
+        self.selection_sync_needed = true;
         self.pending_scroll_to_match = Some((sheet_id, tab_idx, row_idx, col_idx));
     }
 
@@ -217,6 +235,33 @@ fn format_ci_bound_semantic_sig(bound: CiBound, sig_figs: Option<u8>) -> String 
     }
 }
 
+/// Format `cell` identically to how [`render_results_view_for_sheet`] displays it on screen.
+#[must_use]
+pub fn format_result_cell_display_text(cell: &ResultCell, rs: &ResultSheet, tab: &ResultTab) -> String {
+    let is_survival_summary = matches!(rs.analysis.kind, AnalysisKind::Survival(_)) && matches!(tab.kind, ResultTabKind::MainSummary);
+    let sig_figs = match &rs.analysis.kind {
+        AnalysisKind::NonlinearRegression(nl) => nl.output_significant_digits,
+        _ => None,
+    };
+    format_result_cell_semantic(cell, rs.analysis.p_value_format, is_survival_summary, sig_figs).text
+}
+
+fn select_result_tab_for_sheet(
+    state: &mut ResultsViewEguiState,
+    sheet_id: &SheetId,
+    new_idx: usize,
+    is_primary_sheet: bool,
+    intents: &mut PendingUiIntents,
+) {
+    state.per_sheet_active_tab.insert(sheet_id.clone(), new_idx);
+    state.selection_anchor = None;
+    state.selected_cell = None;
+    if is_primary_sheet {
+        state.last_synced_primary_tab = Some((sheet_id.clone(), new_idx));
+        intents.push(UiIntent::SelectResultTab { index: new_idx });
+    }
+}
+
 /// Render the active [`curvebook_doc::ResultSheet`] with `32 pt` top summary bar, scrollable
 /// sub-tab strip (`< >` + `Ctrl+PageUp/PageDown`), ambiguity callouts, and semantic matrix/report body.
 pub fn render_results_view(
@@ -256,7 +301,22 @@ pub fn render_results_view_for_sheet(
     ensure_solid_scrollbar_style(ui, tokens);
 
     let tab_count = rs.tabs.len();
-    let mut active_idx = if tab_count == 0 { 0 } else { app.canvas_dialogs.result_view.active_tab_index.min(tab_count - 1) };
+    let is_primary_sheet = doc.active_sheet_id.as_ref() == Some(&rs.id);
+    let shared_tab = if tab_count == 0 { 0 } else { app.canvas_dialogs.result_view.active_tab_index.min(tab_count - 1) };
+    let mut active_idx = if tab_count == 0 {
+        0
+    } else if is_primary_sheet {
+        let shared_changed = state.last_synced_primary_tab.as_ref().is_none_or(|(sid, idx)| sid != &rs.id || *idx != shared_tab);
+        if shared_changed {
+            state.per_sheet_active_tab.insert(rs.id.clone(), shared_tab);
+            state.last_synced_primary_tab = Some((rs.id.clone(), shared_tab));
+            shared_tab
+        } else {
+            state.per_sheet_active_tab.get(&rs.id).copied().unwrap_or(shared_tab).min(tab_count - 1)
+        }
+    } else {
+        state.per_sheet_active_tab.get(&rs.id).copied().unwrap_or(0).min(tab_count - 1)
+    };
 
     // Ctrl+PageUp / Ctrl+PageDown keyboard switching across sub-tabs (§8.10)
     if enabled && tab_count > 1 && !ui.ctx().egui_wants_keyboard_input() {
@@ -264,10 +324,10 @@ pub fn render_results_view_for_sheet(
         let next_pressed = ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::PageDown) || i.consume_key(Modifiers::COMMAND, Key::PageDown));
         if prev_pressed {
             active_idx = if active_idx == 0 { tab_count - 1 } else { active_idx - 1 };
-            intents.push(UiIntent::SelectResultTab { index: active_idx });
+            select_result_tab_for_sheet(state, &rs.id, active_idx, is_primary_sheet, intents);
         } else if next_pressed {
             active_idx = (active_idx + 1) % tab_count;
-            intents.push(UiIntent::SelectResultTab { index: active_idx });
+            select_result_tab_for_sheet(state, &rs.id, active_idx, is_primary_sheet, intents);
         }
     }
     report.active_tab_index = active_idx;
@@ -402,7 +462,7 @@ pub fn render_results_view_for_sheet(
                 if vis.width() + 2.0 < *w {
                     hidden_tabs.push((*idx, tab.id.clone(), tab.title.clone(), *x0, *w));
                 }
-                paint_result_tab_chip(
+                if paint_result_tab_chip(
                     ui,
                     &ResultTabChipSpec {
                         sheet_id: rs.id.as_str(),
@@ -416,8 +476,10 @@ pub fn render_results_view_for_sheet(
                         tab_font: &tab_font,
                     },
                     meta,
-                    intents,
-                );
+                ) {
+                    active_idx = *idx;
+                    select_result_tab_for_sheet(state, &rs.id, *idx, is_primary_sheet, intents);
+                }
             }
 
             if needs_overflow && !hidden_tabs.is_empty() {
@@ -445,8 +507,8 @@ pub fn render_results_view_for_sheet(
                 }
                 if !enabled {
                     state.tab_overflow_open = false;
-                } else if state.tab_overflow_open {
-                    render_result_tabs_overflow_popup(
+                } else if state.tab_overflow_open
+                    && let Some(picked_idx) = render_result_tabs_overflow_popup(
                         ui.ctx(),
                         rs.id.as_str(),
                         tokens,
@@ -457,14 +519,17 @@ pub fn render_results_view_for_sheet(
                         max_scroll_x,
                         ov_resp.rect,
                         meta,
-                        intents,
-                    );
+                    )
+                {
+                    active_idx = picked_idx;
+                    select_result_tab_for_sheet(state, &rs.id, picked_idx, is_primary_sheet, intents);
                 }
             } else {
                 state.tab_overflow_open = false;
             }
         });
     });
+    report.active_tab_index = active_idx;
 
     let body_rect = Rect::from_min_max(pos2(avail.left(), hdr_rect.bottom()), avail.max);
     report.body_rect_pt = body_rect.is_positive().then_some(body_rect);
@@ -499,17 +564,21 @@ pub fn render_results_view_for_sheet(
             render_ambiguity_callout(ui, rs, tokens, enabled, meta, intents);
         }
 
-        let scroll_to_y = if state.pending_scroll_to_match.as_ref().is_some_and(|(sid, t, _, _)| sid == &rs.id && *t == active_idx) {
-            state.pending_scroll_to_match.take().map(|(_, _, target_row, _)| {
+        let (scroll_to_y, scroll_to_x) = if state.pending_scroll_to_match.as_ref().is_some_and(|(sid, t, _, _)| sid == &rs.id && *t == active_idx) {
+            state.pending_scroll_to_match.take().map_or((None, None), |(_, _, target_row, target_col)| {
                 expand_section_containing_row(&rs.id, tab, target_row, &mut state.collapsed_sections);
+                let vis_row = visible_row_index_for_raw_row(&rs.id, tab, target_row, &state.collapsed_sections);
                 let row_stride = 24.0_f32 + ui.spacing().item_spacing.y;
                 #[allow(clippy::cast_precision_loss)]
-                let y = ((target_row as f32) * row_stride - row_stride * 2.0).max(0.0);
+                let y = ((vis_row as f32) * row_stride - row_stride * 2.0).max(0.0);
+                #[allow(clippy::cast_precision_loss)]
+                let x = if target_col == 0 { 0.0 } else { (190.0_f32 + (target_col as f32) * 128.0 - 128.0).max(0.0) };
                 state.scroll_offset_y = y;
-                y
+                state.scroll_offset_x = x;
+                (Some(y), Some(x))
             })
         } else {
-            None
+            (None, None)
         };
 
         let mut scroll_area = egui::ScrollArea::both()
@@ -522,6 +591,9 @@ pub fn render_results_view_for_sheet(
             .auto_shrink([false, false]);
         if let Some(target_y) = scroll_to_y {
             scroll_area = scroll_area.vertical_scroll_offset(target_y);
+        }
+        if let Some(target_x) = scroll_to_x {
+            scroll_area = scroll_area.horizontal_scroll_offset(target_x);
         }
         let scroll_out = scroll_area.show_viewport(ui, |ui, viewport| {
             render_result_tab_table(ui, &tab_ctx, active_idx, is_survival_summary, viewport, state, meta, intents);
@@ -554,6 +626,7 @@ pub fn render_results_view_for_sheet(
             }
         });
         state.scroll_offset_y = scroll_out.state.clamped_offset().y;
+        state.scroll_offset_x = scroll_out.state.clamped_offset().x;
         if scroll_out.content_size.y > scroll_out.inner_rect.height() + 0.5 {
             let bar_w = ui.spacing().scroll.bar_width.max(10.0);
             report.scrollbar_rect_pt = Some(Rect::from_min_max(
@@ -579,6 +652,31 @@ fn expand_section_containing_row(sheet_id: &SheetId, tab: &ResultTab, target_row
             break;
         }
     }
+}
+
+/// Map a raw `tab.rows` index to its visible row index after accounting for collapsed sections.
+#[must_use]
+pub fn visible_row_index_for_raw_row(sheet_id: &SheetId, tab: &ResultTab, target_row: usize, collapsed_sections: &BTreeSet<String>) -> usize {
+    if tab.rows.is_empty() {
+        return 0;
+    }
+    let clamped = target_row.min(tab.rows.len().saturating_sub(1));
+    if collapsed_sections.is_empty() {
+        return clamped;
+    }
+    let mut visible_idx = 0usize;
+    let mut current_section: Option<String> = None;
+    for r_idx in 0..clamped {
+        let lbl = tab.row_labels.get(r_idx).map_or("", String::as_str);
+        let is_sec = !lbl.is_empty() && tab.rows[r_idx].iter().all(|c| matches!(c, ResultCell::Empty));
+        if is_sec {
+            current_section = Some(format!("{}:{}:{r_idx}", sheet_id.as_str(), tab.id));
+            visible_idx += 1;
+        } else if !current_section.as_ref().is_some_and(|sec_key| collapsed_sections.contains(sec_key)) {
+            visible_idx += 1;
+        }
+    }
+    visible_idx
 }
 
 fn tab_contains_ambiguity(tab: &ResultTab, _p_format: PValueFormat, is_survival_summary: bool) -> bool {
@@ -668,8 +766,8 @@ fn render_result_tabs_overflow_popup(
     max_scroll_x: f32,
     anchor: Rect,
     meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+) -> Option<usize> {
+    let mut picked_tab: Option<usize> = None;
     let screen = ctx.content_rect();
     let popup_w = 220.0_f32.min((screen.width() - 16.0).max(120.0));
     let est_h = (hidden_tabs.len() as f32 * 28.0 + 16.0).clamp(40.0, 260.0);
@@ -715,7 +813,7 @@ fn render_result_tabs_overflow_popup(
                                 );
                             }
                             if item_resp.clicked() {
-                                intents.push(UiIntent::SelectResultTab { index: *idx });
+                                picked_tab = Some(*idx);
                                 let x1 = *x0 + *w;
                                 state.tab_strip_scroll_x = (x1 - strip_w).max(*x0).clamp(0.0, max_scroll_x);
                                 state.tab_overflow_open = false;
@@ -754,6 +852,7 @@ fn render_result_tabs_overflow_popup(
     if esc_pressed || outside_clicked {
         state.tab_overflow_open = false;
     }
+    picked_tab
 }
 
 fn render_ambiguity_callout(
@@ -962,7 +1061,8 @@ fn update_result_cell_selection_from_pointer(
         if !ptr.mod_shift_now {
             state.selection_anchor = Some((rs_id.clone(), active_tab_idx, r_idx, c_idx));
         } else if state.selection_anchor.as_ref().is_none_or(|(sid, t, _, _)| sid != rs_id || *t != active_tab_idx) {
-            state.selection_anchor = state.selected_cell.clone().or_else(|| Some((rs_id.clone(), active_tab_idx, r_idx, c_idx)));
+            let same_tab_selected = state.selected_cell.as_ref().filter(|(sid, t, _, _)| sid == rs_id && *t == active_tab_idx).cloned();
+            state.selection_anchor = same_tab_selected.or_else(|| Some((rs_id.clone(), active_tab_idx, r_idx, c_idx)));
         }
         state.selected_cell = Some((rs_id.clone(), active_tab_idx, r_idx, c_idx));
         state.hovered_row = Some(r_idx);
@@ -973,7 +1073,8 @@ fn update_result_cell_selection_from_pointer(
     } else if cell_resp.clicked() {
         if ptr.mod_shift_now {
             if state.selection_anchor.as_ref().is_none_or(|(sid, t, _, _)| sid != rs_id || *t != active_tab_idx) {
-                state.selection_anchor = state.selected_cell.clone().or_else(|| Some((rs_id.clone(), active_tab_idx, r_idx, c_idx)));
+                let same_tab_selected = state.selected_cell.as_ref().filter(|(sid, t, _, _)| sid == rs_id && *t == active_tab_idx).cloned();
+                state.selection_anchor = same_tab_selected.or_else(|| Some((rs_id.clone(), active_tab_idx, r_idx, c_idx)));
             }
         } else {
             state.selection_anchor = Some((rs_id.clone(), active_tab_idx, r_idx, c_idx));
@@ -1192,7 +1293,7 @@ fn render_result_tab_table(
     if state.collapsed_sections.is_empty() {
         let total_rows = tab.rows.len();
         let start_r = ((body_top / row_stride).floor().max(0.0) as usize).saturating_sub(1).min(total_rows);
-        let end_r = (((body_bot / row_stride).ceil().max(0.0) as usize) + 1).min(total_rows);
+        let end_r = (((body_bot / row_stride).ceil().max(0.0) as usize) + 1).min(total_rows).max(start_r);
         if start_r > 0 {
             let spacer_h = ((start_r as f32) * row_stride - spacing_y).max(0.0);
             ui.allocate_space(vec2(layout.total_w, spacer_h));
@@ -1231,7 +1332,7 @@ fn render_result_tab_table(
         }
         let total_vis = visible_rows.len();
         let start_d = ((body_top / row_stride).floor().max(0.0) as usize).saturating_sub(1).min(total_vis);
-        let end_d = (((body_bot / row_stride).ceil().max(0.0) as usize) + 1).min(total_vis);
+        let end_d = (((body_bot / row_stride).ceil().max(0.0) as usize) + 1).min(total_vis).max(start_d);
         if start_d > 0 {
             let spacer_h = ((start_d as f32) * row_stride - spacing_y).max(0.0);
             ui.allocate_space(vec2(layout.total_w, spacer_h));
@@ -1263,9 +1364,14 @@ fn render_result_tab_table(
     }
 
     let next_range = state.selected_range(&rs.id, active_tab_idx);
-    if next_range != prev_range
-        && let (Some((_, _, ra, ca)), Some((_, _, rf, cf))) = (&state.selection_anchor, &state.selected_cell)
+    if (next_range != prev_range || state.selection_sync_needed)
+        && let (Some((sid_a, t_a, ra, ca)), Some((sid_f, t_f, rf, cf))) = (&state.selection_anchor, &state.selected_cell)
+        && sid_a == &rs.id
+        && *t_a == active_tab_idx
+        && sid_f == &rs.id
+        && *t_f == active_tab_idx
     {
+        state.selection_sync_needed = false;
         intents.push(UiIntent::SyncResultSelection { sheet_id: rs.id.clone(), tab_index: active_tab_idx, anchor: (*ra, *ca), focus: (*rf, *cf) });
     }
 
@@ -1460,7 +1566,7 @@ struct ResultTabChipSpec<'a> {
     tab_font: &'a FontId,
 }
 
-fn paint_result_tab_chip(ui: &mut egui::Ui, spec: &ResultTabChipSpec<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+fn paint_result_tab_chip(ui: &mut egui::Ui, spec: &ResultTabChipSpec<'_>, meta: &mut FrameInspectMeta) -> bool {
     let tokens = spec.tokens;
     let vis = spec.vis;
     let resp = ui.interact(
@@ -1543,7 +1649,5 @@ fn paint_result_tab_chip(ui: &mut egui::Ui, spec: &ResultTabChipSpec<'_>, meta: 
             full_label: ellipsized.then_some(spec.tab_title),
         },
     );
-    if resp.clicked() && enabled && !selected {
-        intents.push(UiIntent::SelectResultTab { index: spec.idx });
-    }
+    resp.clicked() && enabled && !selected
 }

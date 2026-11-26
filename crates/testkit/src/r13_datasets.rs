@@ -275,12 +275,17 @@ pub fn wf51_inhibitor_triplicate_xy() -> Wf51Dataset {
 }
 
 /// Construct synthetic sparse-plateau agonist dataset (`WF-52`).
+///
+/// `Ligand Alpha` spans the upper plateau (~91% of `Top = 100`) while `Ligand Beta` is
+/// right-shifted (`LogEC50 > -6.0`, max response ~33.6%) with no observed upper asymptote,
+/// so unconstrained per-series 4PL is ambiguous/extrapolated while global sharing of `Top`
+/// and `HillSlope` with `Bottom = 0` genuinely recovers identifiability (`AUD-13-04`).
 #[must_use]
 pub fn wf52_sparse_agonist_4pl_xy() -> Wf52Dataset {
     Wf52Dataset {
         title: "Sparse Agonist 4PL WF-52",
         series: [
-            Wf52Series { title: "Ligand Alpha", rows: vec![(-9.0, 1.2), (-8.0, 2.4), (-7.0, 8.5), (-6.5, 19.8), (-6.0, 42.5)] },
+            Wf52Series { title: "Ligand Alpha", rows: vec![(-9.0, 1.2), (-8.0, 9.2), (-7.0, 50.4), (-6.5, 76.2), (-6.0, 90.8)] },
             Wf52Series { title: "Ligand Beta", rows: vec![(-9.0, 0.8), (-8.0, 1.9), (-7.0, 6.4), (-6.5, 15.2), (-6.0, 33.6)] },
         ],
     }

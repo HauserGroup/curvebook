@@ -1,13 +1,16 @@
 //! ROC curve (sensitivity vs 1-specificity + AUC) and forest plot diagnostic builders.
 
-use curvebook_doc::{GraphSheet, ProjectDocument, ResultCell, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole};
+use curvebook_doc::{
+    AnalysisKind, FittedCurveOverlay, GlmFamily, GlmSpec, GraphSheet, ProjectDocument, ResultCell, ResultSheet, ResultTabKind, SubcolumnMode,
+    TableArchetype, VariableRole,
+};
 use curvebook_math::{AxisScale, ConfidenceLevel};
 use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 use curvebook_stats::roc::{RocCiMethod, roc_curve_analysis};
 use curvebook_text::{RichText, parse_markup};
 
 use super::super::multivariate::{cell_token, column_categorical_levels};
-use super::{find_matching_result_checked, resolve_source_data_sheet};
+use super::{find_matching_result_checked, find_matching_result_where_checked, raw_matching_results, resolve_source_data_sheet};
 use crate::markers::emit_marker;
 use crate::scene::{ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PointPt, PositionedText, ScenePrimitive, TextAnchor};
 use crate::survival_cat::{
@@ -102,13 +105,54 @@ pub(in crate::multivariate_layout) fn compile_roc_curve(graph: &GraphSheet, doc:
     Ok(())
 }
 
+fn is_roc_or_logistic_analysis(kind: &AnalysisKind) -> bool {
+    matches!(
+        kind,
+        AnalysisKind::RocCurve(_)
+            | AnalysisKind::SimpleLogisticRegression(_)
+            | AnalysisKind::GeneralizedLinearModel(GlmSpec { family: GlmFamily::Logistic, .. })
+    )
+}
+
+fn is_roc_auc_scalar_key(key: &str) -> bool {
+    let norm = key.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    matches!(norm.as_str(), "roc_auc" | "auc")
+}
+
+fn resolve_roc_auc_scalar(res: &ResultSheet, curve_ds_idx: usize, single_roc_curve: bool) -> Option<f64> {
+    res.scalars
+        .iter()
+        .find(|s| s.data_set_index == Some(curve_ds_idx) && is_roc_auc_scalar_key(&s.key) && s.value.is_finite())
+        .or_else(|| res.scalars.iter().find(|s| s.data_set_index.is_none() && is_roc_auc_scalar_key(&s.key) && s.value.is_finite()))
+        .or_else(|| single_roc_curve.then(|| res.scalars.iter().find(|s| is_roc_auc_scalar_key(&s.key) && s.value.is_finite())).flatten())
+        .map(|s| s.value)
+}
+
 fn extract_roc_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Option<(Vec<(f64, f64)>, f64)> {
-    if let Some(res) = find_matching_result_checked(graph, doc, warnings)
-        && let Some(curve) = res.fitted_curves.iter().find(|fc| fc.equation_id.eq_ignore_ascii_case("ROC"))
-    {
-        let pts: Vec<(f64, f64)> = curve.points.iter().map(|p| (p.x, p.y)).collect();
-        let auc = res.scalars.iter().find(|s| s.key.to_ascii_lowercase().contains("auc")).map_or_else(|| trapezoidal_auc(&pts), |s| s.value);
-        return Some((pts, auc));
+    let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
+    let roc_res =
+        find_matching_result_where_checked(graph, doc, warnings, |r| r.fitted_curves.iter().any(|fc| fc.equation_id.eq_ignore_ascii_case("ROC")))
+            .or_else(|| find_matching_result_where_checked(graph, doc, warnings, |r| is_roc_or_logistic_analysis(&r.analysis.kind)));
+
+    if let Some(res) = roc_res {
+        let roc_curves: Vec<&FittedCurveOverlay> = res.fitted_curves.iter().filter(|fc| fc.equation_id.eq_ignore_ascii_case("ROC")).collect();
+        if let Some(curve) = roc_curves.iter().copied().find(|fc| fc.data_set_index == ds_idx).or_else(|| roc_curves.first().copied()) {
+            let pts: Vec<(f64, f64)> = curve.points.iter().filter(|p| p.x.is_finite() && p.y.is_finite()).map(|p| (p.x, p.y)).collect();
+            if pts.len() >= 2 {
+                let auc = resolve_roc_auc_scalar(res, curve.data_set_index, roc_curves.len() == 1).unwrap_or_else(|| trapezoidal_auc(&pts));
+                return Some((pts, auc));
+            }
+        }
+        if is_roc_or_logistic_analysis(&res.analysis.kind) {
+            warnings.push(ChartWarning::new("missing_roc_overlay", format!("logistic/ROC result sheet '{}' contains no ROC curve overlay", res.id)));
+            return None;
+        }
+    }
+
+    // Never silently fall through to raw XY `(Dose, {0,1})` data when a matching logistic/ROC
+    // analysis result failed or lacks an `"ROC"` overlay (`AUD-13-06`).
+    if raw_matching_results(graph, doc).iter().any(|r| is_roc_or_logistic_analysis(&r.analysis.kind)) {
+        return None;
     }
 
     let ds = resolve_source_data_sheet(graph, doc)?;
@@ -150,11 +194,18 @@ fn extract_roc_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Ve
             Some((res.points.into_iter().map(|p| (p.one_minus_specificity, p.sensitivity)).collect(), res.auc))
         }
         TableArchetype::Xy(xy) => {
-            let mut pts = xy.active_xy_pairs(0);
-            if pts.is_empty() {
+            let mut pts: Vec<(f64, f64)> = xy.active_xy_pairs(ds_idx).into_iter().filter(|(x, y)| x.is_finite() && y.is_finite()).collect();
+            if pts.len() < 2 {
                 return None;
             }
-            pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+            if !pts.iter().all(|&(x, y)| (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)) {
+                warnings.push(ChartWarning::new(
+                    "invalid_roc_xy_coordinates",
+                    "XY ROC plot requires pre-computed (1 - Specificity, Sensitivity) coordinates in [0, 1] or a logistic/ROC analysis result",
+                ));
+                return None;
+            }
+            pts.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
             let auc = trapezoidal_auc(&pts);
             Some((pts, auc))
         }

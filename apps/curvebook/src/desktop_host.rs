@@ -12,9 +12,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use curvebook_doc::{CellCoord, CellValue, ProjectDocument, SheetId, SheetSection, SubcolumnMode, TableArchetype, TableKind, VariableSource};
-use curvebook_engine::{CommandOutcome, Session, cmd as engine_cmd};
-use curvebook_format::recovery::is_lease_reclaimable;
+use curvebook_doc::{
+    CellCoord, CellValue, ErrorCode, ProjectDocument, SheetId, SheetSection, SubcolumnMode, TableArchetype, TableKind, VariableSource,
+};
+use curvebook_engine::{CommandOutcome, ExternalPathPolicy, Session, cmd as engine_cmd};
+use curvebook_format::recovery::{JournalLockLease, is_lease_reclaimable};
 use curvebook_format::{
     CrashRecoveryJournal, DirectoryJournalBackend, FormatKind, FormatRegistry, ImportOptions, JournalBackend, JournalRecoveryWarning,
     MAX_ARCHIVE_FILE_BYTES, RecoveryReport, instantiate_template_bytes, is_unpacked_project_dir,
@@ -627,6 +629,96 @@ fn abort_journal_lease_best_effort(journal: CrashRecoveryJournal<DirectoryJourna
     let _ = backend.release_lease(&owner_id);
 }
 
+fn restore_evicted_stale_lease_best_effort(dir: &Path, stale_lease: &JournalLockLease) {
+    let lock_path = dir.join("curvebook.lock");
+    if let Ok(meta) = std::fs::symlink_metadata(&lock_path)
+        && (meta.file_type().is_symlink() || !meta.is_file())
+    {
+        return;
+    }
+    if let Ok(bytes) = serde_json::to_vec(stale_lease) {
+        let _ = curvebook_platform::fs::write_atomic(&lock_path, &bytes);
+    }
+}
+
+/// Open a crash-recovery journal directory and replay pending WAL commands under `path_policy`,
+/// refusing any WAL command with filesystem or process-launch effects (`AUD-13-01`).
+///
+/// # Errors
+/// Returns an error if the directory holds an active non-reclaimable lock, the snapshot fails to
+/// parse, or any WAL command has forbidden filesystem/process effects or fails replay.
+pub fn open_dir_with_policy_safe_recovery(
+    dir: &Path,
+    owner_id: impl Into<String>,
+    ttl_ms: u64,
+    now_epoch_ms: u64,
+    path_policy: &ExternalPathPolicy,
+) -> Result<(Session, CrashRecoveryJournal<DirectoryJournalBackend>, RecoveryReport), String> {
+    Session::open_dir_with_recovery_and_policy(dir, owner_id, ttl_ms, now_epoch_ms, path_policy.clone(), false)
+        .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", dir.display()))
+}
+
+/// Attach a crash-recovery journal to an already-loaded `session` without replaying any untrusted
+/// prior WAL commands (`AUD-06-12`, `AUD-13-01`).
+///
+/// If `candidate_dir` turns out to hold a raced stale crash journal, the new lease is released and
+/// any evicted stale lock lease is restored so `recover_stale_journals` can still reclaim it, and a
+/// fresh isolated directory is allocated under `root` instead.
+///
+/// # Errors
+/// Returns an error if locking or seeding the recovery snapshot fails.
+pub fn open_fresh_journal_for_seeded_session(
+    root: &Path,
+    candidate_dir: &Path,
+    window_id: DesktopWindowId,
+    owner_id: &str,
+    ttl_ms: u64,
+    now_epoch_ms: u64,
+    session: &Session,
+) -> Result<(PathBuf, CrashRecoveryJournal<DirectoryJournalBackend>), String> {
+    let (journal, report) = Session::open_dir_journal_lease_only(candidate_dir, owner_id, ttl_ms, now_epoch_ms)
+        .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", candidate_dir.display()))?;
+
+    let had_prior_crash = report.recovered_from_stale_lock.is_some() || !report.recovered_commands.is_empty();
+    let (final_dir, mut final_journal) = if had_prior_crash {
+        let evicted_stale = report.recovered_from_stale_lock.clone();
+        abort_journal_lease_best_effort(journal);
+        if let Some(ref stale_lease) = evicted_stale {
+            restore_evicted_stale_lease_best_effort(candidate_dir, stale_lease);
+        }
+        let fresh_dir = allocate_fresh_isolated_journal_dir(root, window_id, now_epoch_ms)?;
+        let (fresh_journal, _) = Session::open_dir_journal_lease_only(&fresh_dir, owner_id, ttl_ms, now_epoch_ms)
+            .map_err(|err| format!("failed to open fresh recovery journal in `{}`: {err}", fresh_dir.display()))?;
+        (fresh_dir, fresh_journal)
+    } else {
+        (candidate_dir.to_path_buf(), journal)
+    };
+
+    if let Err(err) = session.checkpoint_journal(&mut final_journal) {
+        abort_journal_lease_best_effort(final_journal);
+        return Err(format!("failed to seed recovery snapshot in `{}`: {err}", final_dir.display()));
+    }
+    Ok((final_dir, final_journal))
+}
+
+fn validate_path_with_policy(policy: &ExternalPathPolicy, path: &Path) -> Result<PathBuf, String> {
+    let raw = path.to_string_lossy();
+    if raw.trim().is_empty() {
+        return Err(format!("{}: path must not be empty", ErrorCode::BadInput.as_str()));
+    }
+    if raw.contains('\0') {
+        return Err(format!("{}: path must not contain NUL bytes", ErrorCode::BadInput.as_str()));
+    }
+    match policy {
+        ExternalPathPolicy::Unconstrained => Ok(path.to_path_buf()),
+        #[cfg(not(target_arch = "wasm32"))]
+        ExternalPathPolicy::Workdir(guard) => guard.resolve(raw.as_ref()).map_err(|err| err.to_string()),
+        ExternalPathPolicy::RejectExternal => {
+            Err(format!("{}: external filesystem access to `{}` is disabled by policy", ErrorCode::PathEscape.as_str(), path.display()))
+        }
+    }
+}
+
 fn paths_equal(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -785,8 +877,14 @@ fn apply_control_journal_steps(
             if unrecorded_mutation {
                 recorded_any_step = true;
                 requires_final_checkpoint = true;
-                dirty_commands.push(ctx.method.to_owned());
+                if now_dirty {
+                    dirty_commands.push(ctx.method.to_owned());
+                }
             }
+        }
+
+        if !app.session().is_dirty() {
+            dirty_commands.clear();
         }
     }
 
@@ -882,10 +980,28 @@ fn extract_project_save_path(params: &Value) -> Option<PathBuf> {
         .get("path")
         .or_else(|| params.get("file_path"))
         .or_else(|| params.get("filePath"))
+        .or_else(|| params.get("output_path"))
+        .or_else(|| params.get("outputPath"))
+        .or_else(|| params.get("destination_path"))
+        .or_else(|| params.get("destinationPath"))
+        .or_else(|| params.get("unpacked_dir"))
+        .or_else(|| params.get("unpackedDir"))
+        .or_else(|| params.get("dir"))
+        .or_else(|| params.get("directory"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
+}
+
+fn frame_has_valid_per_request_token(raw_bytes: &[u8], auth: &ControlAuth) -> bool {
+    let Ok(text) = std::str::from_utf8(raw_bytes) else {
+        return false;
+    };
+    let Ok(val) = serde_json::from_str::<Value>(text.trim()) else {
+        return false;
+    };
+    val.as_object().and_then(|obj| obj.get("token")).and_then(Value::as_str).is_some_and(|tok| auth.verify(tok))
 }
 
 fn dispatch_live_control_frame_with_hook<F>(
@@ -913,11 +1029,16 @@ where
             let mut combined_hook = |app_ref: &UiApp, ctx: &ControlPostRequestContext<'_>| -> Result<(), String> {
                 if !ctx.rolled_back {
                     for step in ctx.steps {
-                        if step.command_id == "project.save"
-                            && let Some(path) = extract_project_save_path(&step.params)
-                        {
-                            last_saved_path = Some(path);
-                            clean_after_save = true;
+                        if step.command_id == "project.save" {
+                            // Preserve the canonicalized `session.file_path` written by
+                            // `run_project_save` rather than clobbering it with raw request
+                            // params (`AUD-13-23`).
+                            if let Some(path) =
+                                app_ref.session().file_path().map(Path::to_path_buf).or_else(|| extract_project_save_path(&step.params))
+                            {
+                                last_saved_path = Some(path);
+                                clean_after_save = true;
+                            }
                         } else if step.mutated {
                             clean_after_save = false;
                         }
@@ -940,7 +1061,8 @@ where
         })
         .map_err(|err| format!("control dispatch I/O error: {err}"))?;
     if let Some(saved_path) = last_saved_path {
-        win.app_mut().session_mut().set_file_path(Some(saved_path), clean_after_save);
+        let final_path = win.app().session().file_path().map(Path::to_path_buf).unwrap_or(saved_path);
+        win.app_mut().session_mut().set_file_path(Some(final_path), clean_after_save);
         if clean_after_save {
             win.dirty_commands.clear();
             win.checkpoint_recovery_journal()?;
@@ -949,7 +1071,13 @@ where
     win.app_mut().sync_views();
 
     let response_bytes = if prepended_reauth { strip_first_control_response_line(&out_bytes)? } else { out_bytes };
-    let auth_succeeded = (kind == ControlFrameKind::Auth).then(|| parse_auth_response_ok(&response_bytes));
+    let auth_succeeded = if kind == ControlFrameKind::Auth {
+        Some(parse_auth_response_ok(&response_bytes))
+    } else if kind == ControlFrameKind::Command && !conn_authenticated && frame_has_valid_per_request_token(raw_bytes, auth) {
+        Some(true)
+    } else {
+        None
+    };
     let close_connection = quit || kind == ControlFrameKind::Http;
     Ok(LiveControlFrameOutput { response_bytes, quit, close_connection, auth_succeeded })
 }
@@ -1138,7 +1266,11 @@ impl DesktopWindowSession {
             renew_journal_lease_on_command(journal)?;
         }
         if outcome.mutated {
-            self.dirty_commands.push(command_id.to_owned());
+            if self.app.session().is_dirty() {
+                self.dirty_commands.push(command_id.to_owned());
+            } else {
+                self.dirty_commands.clear();
+            }
             if let Some(journal) = &mut self.recovery_journal {
                 self.app
                     .session()
@@ -1146,7 +1278,9 @@ impl DesktopWindowSession {
                     .map_err(|err| format!("failed to record WAL entry `{command_id}`: {err}"))?;
             }
         } else if command_id == "project.save" {
-            if let Some(saved_path) = extract_project_save_path(&params) {
+            if self.app.session().file_path().is_none()
+                && let Some(saved_path) = extract_project_save_path(&params)
+            {
                 self.app.session_mut().set_file_path(Some(saved_path), true);
             }
             if !self.app.session().is_dirty() {
@@ -1236,16 +1370,18 @@ impl DesktopWindowSession {
         let stack_changed = self.app.session().undo_depth() != prev_undo || self.app.session().redo_depth() != prev_redo;
         let became_dirty = !prev_dirty && now_dirty;
         if mutated || stack_changed || became_dirty {
-            let label = command_id.unwrap_or("ui.edit").to_owned();
-            self.dirty_commands.push(label);
+            if now_dirty {
+                let label = command_id.unwrap_or("ui.edit").to_owned();
+                self.dirty_commands.push(label);
+            } else {
+                self.dirty_commands.clear();
+            }
             self.checkpoint_recovery_journal()?;
-        }
-        if let Some(cmd) = command_id
-            && cmd == "project.save"
-            && !now_dirty
-        {
+        } else if !now_dirty && !self.dirty_commands.is_empty() {
             self.dirty_commands.clear();
-            self.checkpoint_recovery_journal()?;
+            if command_id == Some("project.save") {
+                self.checkpoint_recovery_journal()?;
+            }
         }
         Ok(())
     }
@@ -1295,6 +1431,14 @@ struct PreferencesPersistHook(Box<dyn FnMut(&UiApp)>);
 impl std::fmt::Debug for PreferencesPersistHook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PreferencesPersistHook(..)")
+    }
+}
+
+struct PreferencesInitHook(Box<dyn FnMut(&mut UiApp)>);
+
+impl std::fmt::Debug for PreferencesInitHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PreferencesInitHook(..)")
     }
 }
 
@@ -1476,13 +1620,32 @@ pub fn native_import_replaces_project_file_path(command_id: &str) -> bool {
 /// # Errors
 /// Returns an error string if executing the underlying engine command fails.
 pub fn execute_native_import_at_path(win: &mut DesktopWindowSession, command: &str, path: &Path, merge: bool) -> Result<(), String> {
+    execute_native_import_at_path_with_params(win, command, path, merge, &json!({}))
+}
+
+/// Execute a file-backed import or template instantiation command at `path`, forwarding any caller
+/// options from `extra_params` (such as `.xlsx` `sheets`, `sheet_indices`, `has_header`,
+/// `header_rows`, `has_row_titles`, `archetype`, `subcolumn_mode`, or `include_hidden`) while
+/// setting the resolved `path` and `merge` flags (`AUD-06-10`).
+///
+/// # Errors
+/// Returns an error string if executing the underlying engine command fails.
+pub fn execute_native_import_at_path_with_params(
+    win: &mut DesktopWindowSession,
+    command: &str,
+    path: &Path,
+    merge: bool,
+    extra_params: &Value,
+) -> Result<(), String> {
     let path_str = path.to_string_lossy().into_owned();
-    let params = if matches!(command, "table.importPrism" | "table.importPzfx" | "table.importXlsx") {
-        json!({ "path": path_str, "merge": merge })
+    let mut map = extra_params.as_object().cloned().unwrap_or_default();
+    map.insert(String::from("path"), json!(path_str));
+    if matches!(command, "table.importPrism" | "table.importPzfx" | "table.importXlsx") {
+        map.insert(String::from("merge"), json!(merge));
     } else {
-        json!({ "path": path_str })
-    };
-    let outcome = win.execute_and_journal(command, params)?;
+        map.remove("merge");
+    }
+    let outcome = win.execute_and_journal(command, Value::Object(map))?;
     if !merge && native_import_replaces_project_file_path(command) {
         win.app_mut().session_mut().set_file_path(None, false);
     }
@@ -1667,6 +1830,8 @@ pub struct DesktopHostRuntime {
     clipboard_text: Option<String>,
     clipboard_bundle: Option<ClipboardBundle>,
     clipboard_adapter: Box<dyn OsClipboardAdapter>,
+    has_custom_clipboard_adapter: bool,
+    preferences_init_hook: Option<PreferencesInitHook>,
     preferences_persist_hook: Option<PreferencesPersistHook>,
     open_file_dialog_hook: Option<OpenFileDialogHook>,
     file_dialog_adapter: Option<Arc<dyn NativeFileDialogAdapter>>,
@@ -1677,6 +1842,7 @@ impl DesktopHostRuntime {
     /// Construct a new empty [`DesktopHostRuntime`] governed by `config`.
     #[must_use]
     pub fn new(config: DesktopHostConfig) -> Self {
+        let has_custom_clipboard_adapter = config.clipboard_adapter.is_some();
         let clipboard_adapter: Box<dyn OsClipboardAdapter> = match config.clipboard_adapter.as_ref() {
             Some(adapter) => Box::new(PlatformOsClipboardBridge(Arc::clone(adapter))),
             None => Box::new(SystemOsClipboardAdapter),
@@ -1689,6 +1855,8 @@ impl DesktopHostRuntime {
             clipboard_text: None,
             clipboard_bundle: None,
             clipboard_adapter,
+            has_custom_clipboard_adapter,
+            preferences_init_hook: None,
             preferences_persist_hook: None,
             open_file_dialog_hook: None,
             file_dialog_adapter: None,
@@ -1700,6 +1868,21 @@ impl DesktopHostRuntime {
     /// external OS pasteboard changes or OS pasteboard failures).
     pub fn set_clipboard_adapter(&mut self, adapter: Box<dyn OsClipboardAdapter>) {
         self.clipboard_adapter = adapter;
+        self.has_custom_clipboard_adapter = true;
+    }
+
+    fn is_os_clipboard_isolated(&self, window_id: DesktopWindowId) -> bool {
+        !self.has_custom_clipboard_adapter
+            && (self.config.human_path_only || self.windows.get(&window_id).is_some_and(|w| w.app.is_human_path_only()))
+    }
+
+    fn validate_host_path_for_window(&self, window_id: Option<DesktopWindowId>, path: &Path) -> Result<PathBuf, String> {
+        let policy = window_id
+            .and_then(|id| self.windows.get(&id))
+            .map(|w| w.app.session().path_policy())
+            .filter(|p| p.is_constrained())
+            .unwrap_or(&self.config.path_policy);
+        validate_path_with_policy(policy, path)
     }
 
     /// Install a [`curvebook_ui_egui::PlatformUrlOpener`] across all current and future windows
@@ -1709,6 +1892,15 @@ impl DesktopHostRuntime {
             win.app.set_url_opener(Arc::clone(&opener));
         }
         self.url_opener = Some(opener);
+    }
+
+    /// Install a callback invoked on every newly opened window to hydrate persisted preferences
+    /// (locale, theme, UI scale, shortcuts) before applying explicit CLI/config overrides (`AUD-06-04`).
+    pub fn set_preferences_init_hook<F>(&mut self, hook: F)
+    where
+        F: FnMut(&mut UiApp) + 'static,
+    {
+        self.preferences_init_hook = Some(PreferencesInitHook(Box::new(hook)));
     }
 
     /// Install a callback invoked before closing windows or when UI preference/shortcut state changes.
@@ -1775,7 +1967,7 @@ impl DesktopHostRuntime {
         {
             let path = PathBuf::from(explicit_path);
             let win = self.window_mut(window_id)?;
-            execute_native_import_at_path(win, command_id, &path, merge)?;
+            execute_native_import_at_path_with_params(win, command_id, &path, merge, params)?;
             return Ok(Some(Self::completed_file_dialog_outcome(window_id, command_id, &path)));
         }
         if command_id == "project.open"
@@ -1873,7 +2065,7 @@ impl DesktopHostRuntime {
                         let win = self.window_mut(window_id)?;
                         if matches!(command_id, "table.importPrism" | "table.importPzfx" | "table.importXlsx") {
                             if let Some(merge) = params.get("merge").and_then(Value::as_bool) {
-                                execute_native_import_at_path(win, command_id, &path, merge)?;
+                                execute_native_import_at_path_with_params(win, command_id, &path, merge, params)?;
                                 Self::completed_file_dialog_outcome(window_id, command_id, &path)
                             } else if open_import_mode_prompt_if_needed(win, command_id, &path) {
                                 DesktopEventOutcome {
@@ -1885,11 +2077,11 @@ impl DesktopHostRuntime {
                                     ..Default::default()
                                 }
                             } else {
-                                execute_native_import_at_path(win, command_id, &path, false)?;
+                                execute_native_import_at_path_with_params(win, command_id, &path, false, params)?;
                                 Self::completed_file_dialog_outcome(window_id, command_id, &path)
                             }
                         } else {
-                            execute_native_import_at_path(win, command_id, &path, false)?;
+                            execute_native_import_at_path_with_params(win, command_id, &path, false, params)?;
                             Self::completed_file_dialog_outcome(window_id, command_id, &path)
                         }
                     }
@@ -2071,7 +2263,8 @@ impl DesktopHostRuntime {
         let path_str = target_path.to_string_lossy().into_owned();
         let win = self.window_mut(window_id)?;
         win.execute_and_journal("project.save", json!({ "path": path_str, "unpacked": is_unpacked }))?;
-        win.app_mut().session_mut().set_file_path(Some(target_path.clone()), true);
+        let final_path = win.app().session().file_path().map_or_else(|| target_path.clone(), Path::to_path_buf);
+        win.app_mut().session_mut().set_file_path(Some(final_path), true);
         win.dirty_commands.clear();
         win.checkpoint_recovery_journal()?;
         Ok(Self::completed_file_dialog_outcome(window_id, command_id, &target_path))
@@ -2106,16 +2299,17 @@ impl DesktopHostRuntime {
     fn export_all_tables_to_dir(
         &mut self,
         window_id: DesktopWindowId,
-        batch: PendingAllTablesExport,
+        mut batch: PendingAllTablesExport,
         policy: Option<ExistingExportFilePolicy>,
     ) -> Result<DesktopEventOutcome, String> {
         const COMMAND_ID: &str = "ui.export.allTablesCsv";
+        let dir = self.validate_host_path_for_window(Some(window_id), &batch.dir)?;
+        batch.dir = dir.clone();
         let win = self.window_mut(window_id)?;
         let sheets: Vec<(SheetId, String)> = win.app().document().data_sheets.iter().map(|ds| (ds.id.clone(), ds.title.clone())).collect();
         if sheets.is_empty() {
             return Err(String::from("no data tables available to export"));
         }
-        let dir = batch.dir.clone();
         std::fs::create_dir_all(&dir).map_err(|err| format!("failed to prepare export folder `{}`: {err}", dir.display()))?;
         let ext = if batch.delimiter == "\t" { "tsv" } else { "csv" };
         let planned = plan_all_tables_export_paths(&dir, sheets, ext, policy == Some(ExistingExportFilePolicy::KeepBoth));
@@ -2194,6 +2388,32 @@ impl DesktopHostRuntime {
         self.export_all_tables_to_dir(window_id, batch, Some(policy))
     }
 
+    fn sync_preferences_from_window(&mut self, source_id: DesktopWindowId) {
+        let Some((locale, theme_mode, ui_scale, shortcuts)) =
+            self.windows.get(&source_id).map(|w| (w.app.locale.clone(), w.app.theme.mode, w.app.ui_scale(), w.app.shortcuts.clone()))
+        else {
+            return;
+        };
+        for (&win_id, win) in &mut self.windows {
+            if win_id == source_id {
+                continue;
+            }
+            if win.app.locale != locale {
+                let _ = win.app.set_locale(normalize_beta_gui_locale(&locale));
+            }
+            if win.app.theme.mode != theme_mode {
+                win.app.set_theme_mode(theme_mode);
+            }
+            if (win.app.ui_scale() - ui_scale).abs() > 0.001 {
+                let _ = win.app.set_ui_scale(ui_scale);
+            }
+            if win.app.shortcuts != shortcuts {
+                win.app.shortcuts = shortcuts.clone();
+            }
+            win.app.sync_views();
+        }
+    }
+
     fn persist_window_preferences(&mut self, window_id: DesktopWindowId) {
         if let Some(hook) = self.preferences_persist_hook.as_mut()
             && let Some(win) = self.windows.get(&window_id)
@@ -2202,8 +2422,9 @@ impl DesktopHostRuntime {
         }
     }
 
-    /// Persist `preferences.json` for `window_id` when a persistence hook is attached.
+    /// Sync updated preferences across open windows and persist `preferences.json` when a persistence hook is attached.
     pub fn notify_preferences_changed(&mut self, window_id: DesktopWindowId) {
+        self.sync_preferences_from_window(window_id);
         self.persist_window_preferences(window_id);
     }
 
@@ -2353,7 +2574,10 @@ impl DesktopHostRuntime {
     /// # Errors
     /// Returns an error if loading `initial_file` or initializing crash recovery fails.
     pub fn open_window(&mut self, initial_file: Option<PathBuf>, viewport: ViewportMetrics) -> Result<DesktopWindowId, String> {
-        let files: Vec<PathBuf> = initial_file.into_iter().collect();
+        let files: Vec<PathBuf> = match initial_file {
+            Some(path) => vec![validate_path_with_policy(&self.config.path_policy, &path)?],
+            None => Vec::new(),
+        };
         let session = open_document_from_files(&files)?;
         let attach_recovery = self.config.recovery_root.is_some();
         self.open_window_with_session(session, viewport, attach_recovery)
@@ -2402,8 +2626,9 @@ impl DesktopHostRuntime {
         let id = DesktopWindowId(self.next_window_id);
         let owner_id = recovery_owner_for_window(id);
         std::fs::create_dir_all(&recovery_dir).map_err(|err| format!("failed to access recovery dir `{}`: {err}", recovery_dir.display()))?;
-        let (session, journal, report) = Session::open_dir_with_recovery(&recovery_dir, owner_id, DEFAULT_RECOVERY_LOCK_TTL_MS, now_epoch_ms)
-            .map_err(|err| format!("failed to recover journal in `{}`: {err}", recovery_dir.display()))?;
+        let (session, journal, report) =
+            open_dir_with_policy_safe_recovery(&recovery_dir, owner_id, DEFAULT_RECOVERY_LOCK_TTL_MS, now_epoch_ms, &self.config.path_policy)
+                .map_err(|err| format!("failed to recover journal in `{}`: {err}", recovery_dir.display()))?;
         self.install_window_session(id, session, viewport, Some((recovery_dir, journal, Some(report))))
     }
 
@@ -2449,26 +2674,18 @@ impl DesktopHostRuntime {
                 let has_doc = session_has_document(&session);
                 let journal_dir = self.choose_window_journal_dir(&dir, id, has_doc, now_epoch_ms)?;
                 let owner_id = recovery_owner_for_window(id);
-                let (recovered_session, journal, report) =
-                    Session::open_dir_with_recovery(&journal_dir, &owner_id, DEFAULT_RECOVERY_LOCK_TTL_MS, now_epoch_ms)
-                        .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", journal_dir.display()))?;
                 if !has_doc {
+                    let (recovered_session, journal, report) = open_dir_with_policy_safe_recovery(
+                        &journal_dir,
+                        &owner_id,
+                        DEFAULT_RECOVERY_LOCK_TTL_MS,
+                        now_epoch_ms,
+                        &self.config.path_policy,
+                    )?;
                     return self.install_window_session(id, recovered_session, viewport, Some((journal_dir, journal, Some(report))));
                 }
-                let had_prior_crash = report.recovered_from_stale_lock.is_some() || !report.recovered_commands.is_empty();
-                let (final_dir, mut final_journal) = if had_prior_crash {
-                    drop(journal.abandon());
-                    let fresh_dir = allocate_fresh_isolated_journal_dir(&dir, id, now_epoch_ms)?;
-                    let (_, fresh_journal, _) = Session::open_dir_with_recovery(&fresh_dir, &owner_id, DEFAULT_RECOVERY_LOCK_TTL_MS, now_epoch_ms)
-                        .map_err(|err| format!("failed to open fresh recovery journal in `{}`: {err}", fresh_dir.display()))?;
-                    (fresh_dir, fresh_journal)
-                } else {
-                    (journal_dir, journal)
-                };
-                if let Err(err) = session.checkpoint_journal(&mut final_journal) {
-                    abort_journal_lease_best_effort(final_journal);
-                    return Err(format!("failed to seed initial recovery snapshot: {err}"));
-                }
+                let (final_dir, final_journal) =
+                    open_fresh_journal_for_seeded_session(&dir, &journal_dir, id, &owner_id, DEFAULT_RECOVERY_LOCK_TTL_MS, now_epoch_ms, &session)?;
                 return self.install_window_session(id, session, viewport, Some((final_dir, final_journal, None)));
             }
             None
@@ -2501,6 +2718,18 @@ impl DesktopHostRuntime {
         let mut app = UiApp::from_session(session);
         if let Some(opener) = self.url_opener.as_ref() {
             app.set_url_opener(Arc::clone(opener));
+        }
+        // Hydrate persisted user preferences on every new window, then inherit any live
+        // in-session tweaks from the active sibling window so closing a secondary window never
+        // overwrites preferences.json with factory defaults (`AUD-06-04`).
+        if let Some(hook) = self.preferences_init_hook.as_mut() {
+            (hook.0)(&mut app);
+        }
+        if let Some(donor) = self.focused_window.and_then(|fid| self.windows.get(&fid)).or_else(|| self.windows.values().next()) {
+            let _ = app.set_locale(normalize_beta_gui_locale(&donor.app.locale));
+            app.set_theme_mode(donor.app.theme.mode);
+            let _ = app.set_ui_scale(donor.app.ui_scale());
+            app.shortcuts = donor.app.shortcuts.clone();
         }
         if let Err(err) = configure_app_overrides(&mut app, &self.config) {
             if let Some((_, journal, _)) = recovery {
@@ -2731,46 +2960,48 @@ impl DesktopHostRuntime {
     /// changes open the same replace-or-merge prompt as File › Import (see
     /// [`open_import_mode_prompt_if_needed`]); every other drop goes through [`Self::open_path_in_window`].
     fn handle_file_dropped(&mut self, window_id: DesktopWindowId, path: PathBuf) -> Result<DesktopEventOutcome, String> {
-        if let Some(command_id) = interchange_import_command_for_extension(&path)
-            && !is_unpacked_project_target(&path)
+        let resolved_path = self.validate_host_path_for_window(Some(window_id), &path)?;
+        if let Some(command_id) = interchange_import_command_for_extension(&resolved_path)
+            && !is_unpacked_project_target(&resolved_path)
         {
             let win = self.window_mut(window_id)?;
             win.hovered_files.clear();
-            if open_import_mode_prompt_if_needed(win, command_id, &path) {
+            if open_import_mode_prompt_if_needed(win, command_id, &resolved_path) {
                 return Ok(DesktopEventOutcome {
                     handled: true,
                     action: format!("file.dropped_confirm_import_mode:{command_id}"),
                     window_id: Some(window_id),
                     command_id: Some(command_id.to_owned()),
-                    command_result: Some(json!({ "path": path.to_string_lossy(), "prompted": true })),
+                    command_result: Some(json!({ "path": resolved_path.to_string_lossy(), "prompted": true })),
                     ..Default::default()
                 });
             }
         }
-        self.open_path_in_window(window_id, path)
+        self.open_path_in_window(window_id, resolved_path)
     }
 
     /// Open `path` into `window_id`, prompting replace-or-merge first when `path` is a `.prism`,
     /// `.pzfx`, or `.xlsx` interchange file and the window already has sheets or unsaved changes
     /// (`R10.29`, matching `File › Import` and drag-and-drop).
     fn open_or_prompt_interchange_in_window(&mut self, window_id: DesktopWindowId, path: PathBuf) -> Result<DesktopEventOutcome, String> {
-        if let Some(command_id) = interchange_import_command_for_extension(&path)
-            && !is_unpacked_project_target(&path)
+        let resolved_path = self.validate_host_path_for_window(Some(window_id), &path)?;
+        if let Some(command_id) = interchange_import_command_for_extension(&resolved_path)
+            && !is_unpacked_project_target(&resolved_path)
         {
             let win = self.window_mut(window_id)?;
             win.hovered_files.clear();
-            if open_import_mode_prompt_if_needed(win, command_id, &path) {
+            if open_import_mode_prompt_if_needed(win, command_id, &resolved_path) {
                 return Ok(DesktopEventOutcome {
                     handled: true,
                     action: format!("native_file_dialog.confirm_import_mode:{command_id}"),
                     window_id: Some(window_id),
                     command_id: Some(command_id.to_owned()),
-                    command_result: Some(json!({ "path": path.to_string_lossy(), "prompted": true })),
+                    command_result: Some(json!({ "path": resolved_path.to_string_lossy(), "prompted": true })),
                     ..Default::default()
                 });
             }
         }
-        self.open_path_in_window(window_id, path)
+        self.open_path_in_window(window_id, resolved_path)
     }
 
     /// Open or import `path` into `window_id` without an import-mode prompt: CSV/TSV become a new
@@ -2778,6 +3009,7 @@ impl DesktopHostRuntime {
     /// the target has unsaved changes or `new_instance` is set). Used by File › Open (for non-interchange
     /// files or empty windows) and by drops that need no prompt.
     fn open_path_in_window(&mut self, window_id: DesktopWindowId, path: PathBuf) -> Result<DesktopEventOutcome, String> {
+        let path = self.validate_host_path_for_window(Some(window_id), &path)?;
         {
             let win = self.window_mut(window_id)?;
             win.hovered_files.clear();
@@ -2930,9 +3162,8 @@ impl DesktopHostRuntime {
                 other => Err(format!("unhandled host action `{other}`")),
             },
             DesktopCommandRoute::UiCommand { ui_command_id, params } => {
-                let has_hook = self.preferences_persist_hook.is_some();
                 let win = self.window_mut(window_id)?;
-                let prev_prefs = has_hook.then(|| capture_pref_fingerprint(&win.app));
+                let prev_prefs = capture_pref_fingerprint(&win.app);
                 let prev_undo = win.app.session().undo_depth();
                 let prev_redo = win.app.session().redo_depth();
                 let prev_dirty = win.app.session().is_dirty();
@@ -2941,9 +3172,8 @@ impl DesktopHostRuntime {
                     .ok_or_else(|| format!("UI command `{ui_command_id}` is not registered in dispatcher"))?;
                 win.app.sync_views();
                 win.record_ui_mutation_checkpoint(Some(trimmed), prev_undo, prev_redo, prev_dirty, prev_mutation_seq)?;
-                let changed = prev_prefs.is_some_and(|before| before != capture_pref_fingerprint(&win.app));
-                if changed {
-                    self.persist_window_preferences(window_id);
+                if prev_prefs != capture_pref_fingerprint(&win.app) {
+                    self.notify_preferences_changed(window_id);
                 }
                 Ok(DesktopEventOutcome {
                     handled: true,
@@ -2968,12 +3198,11 @@ impl DesktopHostRuntime {
                 })
             }
             DesktopCommandRoute::EngineCommand { engine_command_id, params } => {
-                let has_hook = self.preferences_persist_hook.is_some();
                 let win = self.window_mut(window_id)?;
-                let prev_prefs = has_hook.then(|| capture_pref_fingerprint(&win.app));
+                let prev_prefs = capture_pref_fingerprint(&win.app);
                 let outcome = win.execute_and_journal(&engine_command_id, params)?;
-                if prev_prefs.is_some_and(|before| before != capture_pref_fingerprint(&win.app)) {
-                    self.persist_window_preferences(window_id);
+                if prev_prefs != capture_pref_fingerprint(&win.app) {
+                    self.notify_preferences_changed(window_id);
                 }
                 Ok(DesktopEventOutcome {
                     handled: true,
@@ -3028,7 +3257,12 @@ impl DesktopHostRuntime {
         window_id: DesktopWindowId,
         inline_active: bool,
     ) -> Result<Result<(String, Option<Value>), DesktopEventOutcome>, String> {
-        match self.clipboard_adapter.read_text() {
+        let os_read = if self.is_os_clipboard_isolated(window_id) {
+            Ok(OsAdapterStatus::unavailable("os-pasteboard", "OS clipboard access is isolated in human-path-only mode"))
+        } else {
+            self.clipboard_adapter.read_text()
+        };
+        match os_read {
             Ok(status) if status.available => {
                 let Some(os_text) = status.text.clone() else {
                     return Ok(Err(DesktopEventOutcome {
@@ -3127,17 +3361,19 @@ impl DesktopHostRuntime {
             }
         };
 
+        let isolated = self.is_os_clipboard_isolated(window_id);
+        let isolated_status = || Ok(OsAdapterStatus::unavailable("os-pasteboard", "OS clipboard access is isolated in human-path-only mode"));
         let (copied_text, copied_bundle, base_action, write_res) = match target {
             CopyTarget::InlineText(text) => {
-                let res = self.clipboard_adapter.write_text(&text);
+                let res = if isolated { isolated_status() } else { self.clipboard_adapter.write_text(&text) };
                 (Some(text), None, "clipboard.copied_inline_text", res)
             }
             CopyTarget::TableTsv(tsv) => {
-                let res = self.clipboard_adapter.write_text(&tsv);
+                let res = if isolated { isolated_status() } else { self.clipboard_adapter.write_text(&tsv) };
                 (Some(tsv), None, "clipboard.copied_tsv", res)
             }
             CopyTarget::Bundle(bundle) => {
-                let res = self.clipboard_adapter.write_bundle(&bundle);
+                let res = if isolated { isolated_status() } else { self.clipboard_adapter.write_bundle(&bundle) };
                 (None, Some(*bundle), "clipboard.copied_bundle", res)
             }
             CopyTarget::NothingSelected => {
@@ -3193,7 +3429,11 @@ impl DesktopHostRuntime {
         let emf_bytes = bundle.emf_bytes.as_ref().map_or(0, Vec::len);
         let width_px = bundle.width_px;
         let height_px = bundle.height_px;
-        let write_res = self.clipboard_adapter.write_slide_bundle(&bundle);
+        let write_res = if self.is_os_clipboard_isolated(window_id) {
+            Ok(OsAdapterStatus::unavailable("os-pasteboard", "OS clipboard access is isolated in human-path-only mode"))
+        } else {
+            self.clipboard_adapter.write_slide_bundle(&bundle)
+        };
 
         self.clipboard_text = None;
         self.clipboard_bundle = Some(bundle);

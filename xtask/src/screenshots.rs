@@ -138,23 +138,21 @@ fn verify_existing(root: &Path) -> Result<(), String> {
 
     for &(rel, (exp_w, exp_h), min_idat) in EXTRA_DOC_IMAGES {
         let abs = root.join(rel);
-        if abs.exists() {
-            let bytes = read_non_symlink_png_bytes(&abs, rel)?;
-            if bytes.len() > MAX_ICON_BYTES {
-                return Err(format!("`{rel}` size {} bytes exceeds icon budget ({MAX_ICON_BYTES} bytes)", bytes.len()));
-            }
-            let summary = validate_png_bytes_with_bounds(rel, &bytes, Some((exp_w, exp_h)), min_idat)?;
-            ensure_asset_listed(rel, &assets_md)?;
-            println!(
-                "screenshots: {rel} OK ({}x{}, color_type={}, idat={} B, chunks={}, crc32={:#010x})",
-                summary.width,
-                summary.height,
-                summary.color_type,
-                summary.idat_bytes,
-                summary.chunk_count,
-                crc32_ieee(&bytes)
-            );
+        let bytes = read_non_symlink_png_bytes(&abs, rel)?;
+        if bytes.len() > MAX_ICON_BYTES {
+            return Err(format!("`{rel}` size {} bytes exceeds icon budget ({MAX_ICON_BYTES} bytes)", bytes.len()));
         }
+        let summary = validate_png_bytes_with_bounds(rel, &bytes, Some((exp_w, exp_h)), min_idat)?;
+        ensure_asset_listed(rel, &assets_md)?;
+        println!(
+            "screenshots: {rel} OK ({}x{}, color_type={}, idat={} B, chunks={}, crc32={:#010x})",
+            summary.width,
+            summary.height,
+            summary.color_type,
+            summary.idat_bytes,
+            summary.chunk_count,
+            crc32_ieee(&bytes)
+        );
     }
     Ok(())
 }
@@ -271,36 +269,24 @@ fn parse_ihdr_with_bounds(label: &str, kind: [u8; 4], data: &[u8], expected_dims
 /// Compute IEEE 802.3 CRC-32 over raw PNG bytes.
 #[must_use]
 pub fn crc32_ieee(bytes: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFF_u32;
-    for &byte in bytes {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320_u32 & mask);
-        }
-    }
-    !crc
+    crc32fast::hash(bytes)
 }
 
 #[must_use]
 pub fn png_chunk_crc32(kind: [u8; 4], data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFF_u32;
-    for byte in kind.into_iter().chain(data.iter().copied()) {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320_u32 & mask);
-        }
-    }
-    !crc
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&kind);
+    hasher.update(data);
+    hasher.finalize()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        EXPECTED_HEIGHT, EXPECTED_WIDTH, PNG_SIGNATURE, parse_args, png_chunk_crc32, validate_png_bytes, validate_png_bytes_with_bounds,
-        verify_existing,
+        EXPECTED_HEIGHT, EXPECTED_WIDTH, PNG_SIGNATURE, SCREENSHOT_REL_PATHS, crc32_ieee, parse_args, png_chunk_crc32, validate_png_bytes,
+        validate_png_bytes_with_bounds, verify_existing,
     };
+    use crate::scan_util::test_support::TestDir;
 
     fn make_chunk(kind: [u8; 4], payload: &[u8]) -> Vec<u8> {
         let len = payload.len() as u32;
@@ -386,5 +372,37 @@ mod tests {
         assert!(super::ensure_asset_listed("docs/images/workspace-split-fit.png", "|").is_err());
         let row = "| `docs/images/workspace-split-fit.png` | CurveBook | Generated | MIT OR Apache-2.0 | Light |\n";
         assert!(super::ensure_asset_listed("docs/images/workspace-split-fit.png", row).is_ok());
+    }
+
+    #[test]
+    fn aud_12_43_and_52_extra_doc_icon_required_non_symlink_and_crc32fast_matches_ieee() {
+        assert_eq!(crc32_ieee(b"123456789"), 0xCBF4_3926);
+        assert_eq!(png_chunk_crc32(*b"IEND", &[]), 0xAE42_6082);
+
+        let dir = TestDir::new("screenshots-aud-12-43");
+        let valid_shot = make_synthetic_png(EXPECTED_WIDTH, EXPECTED_HEIGHT, 6, 2048);
+        let valid_icon = make_synthetic_png(128, 128, 6, 128);
+        let mut assets = String::from("| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n");
+        for rel in SCREENSHOT_REL_PATHS {
+            dir.write_bytes(rel, &valid_shot);
+            assets.push_str(&format!("| `{rel}` | CurveBook | Generated | MIT OR Apache-2.0 | ok |\n"));
+        }
+        assets.push_str("| `docs/images/curvebook.png` | CurveBook | Generated | MIT OR Apache-2.0 | icon |\n");
+        dir.write("ASSETS.md", &assets);
+
+        // Missing docs/images/curvebook.png must fail closed instead of silently skipping.
+        assert!(verify_existing(dir.path()).unwrap_err().contains("curvebook.png"));
+
+        // Broken symlink at docs/images/curvebook.png must also fail closed.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/nonexistent/curvebook.png", dir.join("docs/images/curvebook.png")).unwrap();
+            assert!(verify_existing(dir.path()).unwrap_err().contains("non-symlink"));
+            std::fs::remove_file(dir.join("docs/images/curvebook.png")).unwrap();
+        }
+
+        // Regular valid icon passes.
+        dir.write_bytes("docs/images/curvebook.png", &valid_icon);
+        assert!(verify_existing(dir.path()).is_ok());
     }
 }

@@ -95,25 +95,38 @@ pub fn rubin_pool_estimates(
 
     let pooled_se = t_total.sqrt();
     let lambda = (b_inflated / t_total).clamp(0.0, 1.0);
-    let riv = if u_bar > 0.0 { b_inflated / u_bar } else { 1.0e12 };
+    let one_minus_lambda = (u_bar / t_total).clamp(0.0, 1.0);
+    let riv = if u_bar > 0.0 { b_inflated / u_bar } else { f64::INFINITY };
 
     let (df, fmi) = if b <= 0.0 || lambda <= 1.0e-15 {
         (complete_data_df.unwrap_or(1.0e6), 0.0)
+    } else if u_bar <= 0.0 || one_minus_lambda <= 1.0e-12 {
+        // When within-imputation variance is zero (or negligible relative to between-imputation
+        // variance so 1 - lambda <= 1e-12), avoid collapsing Barnard-Rubin nu_obs to ~0 and use
+        // Rubin's large-sample df nu_old = (m - 1) / lambda^2 capped at complete_data_df (Rubin 1987).
+        let nu_old = (m_f - 1.0) / (lambda * lambda);
+        let df_val = complete_data_df.map_or(nu_old, |vc| nu_old.min(vc));
+        let fmi_val = (lambda + one_minus_lambda * (2.0 / (df_val + 3.0))).clamp(0.0, 1.0);
+        (df_val, fmi_val)
     } else {
         let nu_old = (m_f - 1.0) / (lambda * lambda);
         let df_val = if let Some(vc) = complete_data_df {
-            let nu_obs = ((vc + 1.0) / (vc + 3.0)) * vc * (1.0 - lambda).max(1.0e-12);
-            ((nu_old * nu_obs) / (nu_old + nu_obs)).max(1.0e-6)
+            let nu_obs = ((vc + 1.0) / (vc + 3.0)) * vc * one_minus_lambda;
+            (nu_old * nu_obs) / (nu_old + nu_obs)
         } else {
-            nu_old.max(1.0e-6)
+            nu_old
         };
-        let fmi_val = (lambda + (1.0 - lambda) * (2.0 / (df_val + 3.0))).clamp(0.0, 1.0);
+        let fmi_val = (lambda + one_minus_lambda * (2.0 / (df_val + 3.0))).clamp(0.0, 1.0);
         (df_val, fmi_val)
     };
 
     let t_stat = q_bar / pooled_se;
     let p_val = student_t_two_sided_p(t_stat, df)?;
-    let t_crit = t_crit_two_sided(confidence, df)?;
+    let t_crit = match t_crit_two_sided(confidence, df) {
+        Ok(tc) => tc,
+        Err(StatsError::Math(curvebook_math::MathError::NotConverged { .. })) => f64::INFINITY,
+        Err(e) => return Err(e),
+    };
 
     Ok(RubinPooledEstimate {
         term,

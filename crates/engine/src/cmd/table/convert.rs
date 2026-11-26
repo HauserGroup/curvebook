@@ -3,9 +3,10 @@
 use std::collections::HashSet;
 
 use curvebook_doc::{
-    AnalysisKind, ColorChannelMapping, DataSetColumn, DataSheet, HookSource, InternalLinkKind, LinkSource, MAX_DATA_SETS, MultipleVariablesTable,
-    MultiplicityMethod, MultivariateSpec, NormalizeAnchor, ParameterScope, PointStyleOverride, ProjectDocument, SheetCellRange, SheetId,
-    SizeChannelMapping, SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, VariableRole, XColumnMode,
+    AnalysisKind, ColorChannelMapping, DataSetColumn, DataSheet, DocError, HookSource, InternalLinkKind, LinkSource, MAX_DATA_SETS,
+    MultipleVariablesTable, MultiplicityMethod, MultivariateSpec, NormalizeAnchor, ParameterScope, PointStyleOverride, ProjectDocument,
+    SheetCellRange, SheetId, SizeChannelMapping, SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, VariableRole,
+    XColumnMode,
 };
 use curvebook_transform::{TargetArchetypeKind, convert_datasheet_archetype, preview_datasheet_conversion};
 use schemars::JsonSchema;
@@ -92,6 +93,7 @@ pub(super) fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
     ensure_sheet_not_frozen(target_ds)?;
     let old_ds = target_ds.clone();
     let impact = plan_conversion_impacts(doc, &old_ds, target_kind);
+    ensure_no_frozen_dependent_link_mutation(doc, &sheet_id, &impact)?;
     let (mut converted, base_preview) = convert_datasheet_archetype(&old_ds, target_kind, allow_lossy)?;
     if impact.incoming_links_lost && !allow_lossy {
         return Err(bad_input(format!(
@@ -108,7 +110,7 @@ pub(super) fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
         *slot = converted;
     }
     apply_conversion_dependents(doc, &sheet_id, &impact);
-    let mut recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&sheet_id), false)?;
+    let mut recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&sheet_id), None, Some(ctx.cancelled))?;
     finalize_broken_dependents(doc, &impact, &mut recalc);
     let preview_val = build_enriched_conversion_preview(&base_preview, &impact);
     Ok(CommandOutcome::mutated(
@@ -884,14 +886,35 @@ fn remap_analysis_kind_column_hooks(
     }
 }
 
-fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan, err: &mut Option<String>) {
-    match kind {
-        AnalysisKind::OneWayAnova(spec) => {
-            if let MultiplicityMethod::Dunnett { control_column } = &mut spec.multiplicity.method {
-                plan.map_one_or_oob(control_column, "Dunnett control_column", err);
-            }
+fn ensure_no_frozen_dependent_link_mutation(doc: &ProjectDocument, target_sheet_id: &SheetId, impact: &ConversionImpact) -> Result<(), EngineError> {
+    for ds in &doc.data_sheets {
+        if ds.id == *target_sheet_id || !ds.frozen {
+            continue;
         }
-        AnalysisKind::Transform(TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. }) => {
+        let mutates_frozen_link = ds.linked_regions.iter().any(|region| {
+            impact.broken_link_ids.iter().any(|(sid, rid)| sid == &ds.id && rid == &region.id)
+                || matches!(
+                    &region.spec.source,
+                    LinkSource::InternalSheet { sheet_id, kind: InternalLinkKind::DataSheet, range, .. }
+                        if *sheet_id == *target_sheet_id && impact.col_plan.map_source_range(*range).is_ok_and(|mapped| mapped != *range)
+                )
+        });
+        if mutates_frozen_link {
+            return Err(EngineError::from(DocError::SheetFrozen { sheet_id: ds.id.clone() }));
+        }
+    }
+    Ok(())
+}
+
+fn remap_dunnett_control_column(method: &mut MultiplicityMethod, label: &str, plan: &ConversionColPlan, err: &mut Option<String>) {
+    if let MultiplicityMethod::Dunnett { control_column } = method {
+        plan.map_one_or_oob(control_column, label, err);
+    }
+}
+
+fn remap_transform_kind_columns(spec: &mut TransformAnalysisSpec, plan: &ConversionColPlan, err: &mut Option<String>) {
+    match spec {
+        TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. } => {
             if let NormalizeAnchor::ControlColumnMean { column } = zero_anchor {
                 plan.map_one_or_oob(column, "Normalize zero_anchor control column", err);
             }
@@ -899,8 +922,64 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
                 plan.map_one_or_oob(column, "Normalize hundred_anchor control column", err);
             }
         }
-        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, .. }) => {
+        TransformAnalysisSpec::RemoveBaseline { baseline_columns, .. } => {
             *baseline_columns = plan.map_col_list_or_oob(baseline_columns, "RemoveBaseline baseline_columns", err);
+        }
+        TransformAnalysisSpec::RandomSample { stratify_column, .. } => {
+            plan.map_opt_or_oob(stratify_column, "RandomSample stratify_column", err);
+        }
+        TransformAnalysisSpec::Math { .. }
+        | TransformAnalysisSpec::Transpose { .. }
+        | TransformAnalysisSpec::PruneRows { .. }
+        | TransformAnalysisSpec::SelectAndTransform { .. }
+        | TransformAnalysisSpec::Simulate { .. } => {}
+    }
+}
+
+fn remap_survival_kind_columns(spec: &mut SurvivalAnalysisSpec, plan: &ConversionColPlan, err: &mut Option<String>) {
+    match spec {
+        SurvivalAnalysisSpec::KaplanMeier { multiplicity, mv_time_column, mv_status_column, mv_group_column, .. } => {
+            let uses_cohort_columns = mv_group_column.is_none();
+            plan.map_opt_or_oob(mv_time_column, "KaplanMeier mv_time_column", err);
+            plan.map_opt_or_oob(mv_status_column, "KaplanMeier mv_status_column", err);
+            plan.map_opt_or_oob(mv_group_column, "KaplanMeier mv_group_column", err);
+            if uses_cohort_columns {
+                remap_dunnett_control_column(&mut multiplicity.method, "KaplanMeier Dunnett control_column", plan, err);
+            }
+        }
+        SurvivalAnalysisSpec::CoxProportionalHazards { time_column, status_column, predictor_columns, reference_levels, .. } => {
+            plan.map_one_or_oob(time_column, "Cox time_column", err);
+            plan.map_one_or_oob(status_column, "Cox status_column", err);
+            *predictor_columns = plan.map_col_list_or_oob(predictor_columns, "Cox predictor_columns", err);
+            for (ref_col, _) in reference_levels.iter_mut() {
+                plan.map_one_or_oob(ref_col, "Cox reference_levels column", err);
+            }
+        }
+    }
+}
+
+fn remap_multivariate_kind_columns(spec: &mut MultivariateSpec, plan: &ConversionColPlan, err: &mut Option<String>) {
+    match spec {
+        MultivariateSpec::Pca { pcr_outcome_column, .. } => {
+            plan.map_opt_or_oob(pcr_outcome_column, "Pca pcr_outcome_column", err);
+        }
+        MultivariateSpec::MultipleImputation { response_column, predictor_columns, .. } => {
+            plan.map_opt_or_oob(response_column, "MultipleImputation response_column", err);
+            *predictor_columns = plan.map_col_list_or_oob(predictor_columns, "MultipleImputation predictor_columns", err);
+        }
+        MultivariateSpec::CorrelationMatrix { .. } | MultivariateSpec::Clustering { .. } => {}
+    }
+}
+
+fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan, err: &mut Option<String>) {
+    match kind {
+        AnalysisKind::Transform(spec) => remap_transform_kind_columns(spec, plan, err),
+        AnalysisKind::OneWayAnova(spec) => remap_dunnett_control_column(&mut spec.multiplicity.method, "Dunnett control_column", plan, err),
+        AnalysisKind::MultipleRowTTests(spec) => {
+            remap_dunnett_control_column(&mut spec.multiplicity.method, "MultipleRowTTests Dunnett control_column", plan, err);
+        }
+        AnalysisKind::NestedComparison(spec) => {
+            remap_dunnett_control_column(&mut spec.multiplicity.method, "NestedComparison Dunnett control_column", plan, err);
         }
         AnalysisKind::TwoGroupComparison(spec) => {
             plan.map_opt_or_oob(&mut spec.mv_group_column, "mv_group_column", err);
@@ -918,29 +997,9 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
         AnalysisKind::FactorialAnova(spec) => {
             spec.multifactor_columns = plan.map_col_list_or_oob(&spec.multifactor_columns, "FactorialAnova multifactor_columns", err);
             plan.map_opt_or_oob(&mut spec.response_column, "FactorialAnova response_column", err);
-            if let MultiplicityMethod::Dunnett { control_column } = &mut spec.multiplicity.method {
-                plan.map_one_or_oob(control_column, "FactorialAnova Dunnett control_column", err);
-            }
+            remap_dunnett_control_column(&mut spec.multiplicity.method, "FactorialAnova Dunnett control_column", plan, err);
         }
-        AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_time_column, mv_status_column, mv_group_column, .. }) => {
-            plan.map_opt_or_oob(mv_time_column, "KaplanMeier mv_time_column", err);
-            plan.map_opt_or_oob(mv_status_column, "KaplanMeier mv_status_column", err);
-            plan.map_opt_or_oob(mv_group_column, "KaplanMeier mv_group_column", err);
-        }
-        AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
-            time_column,
-            status_column,
-            predictor_columns,
-            reference_levels,
-            ..
-        }) => {
-            plan.map_one_or_oob(time_column, "Cox time_column", err);
-            plan.map_one_or_oob(status_column, "Cox status_column", err);
-            *predictor_columns = plan.map_col_list_or_oob(predictor_columns, "Cox predictor_columns", err);
-            for (ref_col, _) in reference_levels.iter_mut() {
-                plan.map_one_or_oob(ref_col, "Cox reference_levels column", err);
-            }
-        }
+        AnalysisKind::Survival(spec) => remap_survival_kind_columns(spec, plan, err),
         AnalysisKind::GeneralizedLinearModel(spec) => {
             plan.map_one_or_oob(&mut spec.response_column, "GLM response_column", err);
             spec.predictor_columns = plan.map_col_list_or_oob(&spec.predictor_columns, "GLM predictor_columns", err);
@@ -948,10 +1007,7 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
                 plan.map_one_or_oob(ref_col, "GLM reference_levels column", err);
             }
         }
-        AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { response_column, predictor_columns, .. }) => {
-            plan.map_opt_or_oob(response_column, "MultipleImputation response_column", err);
-            *predictor_columns = plan.map_col_list_or_oob(predictor_columns, "MultipleImputation predictor_columns", err);
-        }
+        AnalysisKind::Multivariate(spec) => remap_multivariate_kind_columns(spec, plan, err),
         AnalysisKind::NonlinearRegression(nl) => {
             nl.mv_group_columns = plan.map_col_list_or_oob(&nl.mv_group_columns, "NonlinearRegression mv_group_columns", err);
             nl.mv_x_columns = plan.map_col_list_or_oob(&nl.mv_x_columns, "NonlinearRegression mv_x_columns", err);
@@ -965,7 +1021,15 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
                 }
             }
         }
-        _ => {}
+        AnalysisKind::DescriptiveStats(_)
+        | AnalysisKind::OutlierDetection(_)
+        | AnalysisKind::Contingency(_)
+        | AnalysisKind::RocCurve(_)
+        | AnalysisKind::LinearRegression(_)
+        | AnalysisKind::FitSplineLowess(_)
+        | AnalysisKind::PowerAnalysis(_)
+        | AnalysisKind::SimpleLogisticRegression(_)
+        | AnalysisKind::LeveneTest(_) => {}
     }
 }
 

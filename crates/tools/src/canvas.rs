@@ -732,7 +732,7 @@ pub fn resolve_category_slots(scene: &ChartScene, graph: &GraphSheet, doc: &Proj
     if scene.plot_rect_pt.width <= 0.0 || scene.plot_rect_pt.height <= 0.0 {
         return Vec::new();
     }
-    let Some(data_sheet) = doc.data_sheet(&graph.spec.primary_source_sheet_id) else {
+    let Some(data_sheet) = curvebook_chart::resolve_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id) else {
         return Vec::new();
     };
     let Some(CategoryDataSlots { domain_bounds, slots: data_slots }) = category_data_slots(&graph.spec, data_sheet) else {

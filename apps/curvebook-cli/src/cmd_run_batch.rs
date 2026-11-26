@@ -132,7 +132,11 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
             push_unique_warning(&mut all_warnings, w.clone());
         }
 
-        let mut session = open_manifest_base_session(&manifest)?;
+        let (mut session, base_warnings) = open_manifest_base_session(&manifest)?;
+        for w in base_warnings {
+            eprintln!("warning: {w}");
+            push_unique_warning(&mut all_warnings, w);
+        }
         if let Some(dir) = parsed.workdir.as_deref() {
             session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
         }
@@ -296,6 +300,7 @@ fn parse_command_value(index: usize, val: Value, resolver: &PathResolver) -> Res
     let Value::Object(mut map) = val else {
         return Err(CliError::Schema(format!("command #{line_label} must be a JSON object")));
     };
+    reject_unknown_keys(&map, BATCH_MANIFEST_COMMAND_KEYS, &format!("command #{line_label}"))?;
 
     let cmd = extract_cmd_name(&map, line_label)?;
     let id = map.remove("id");
@@ -520,20 +525,20 @@ fn parse_export_ttf_font(idx: usize, val: Option<&Value>, resolver: &PathResolve
     }
 }
 
-fn open_manifest_base_session(manifest: &ParsedManifest) -> Result<Session, CliError> {
+fn open_manifest_base_session(manifest: &ParsedManifest) -> Result<(Session, Vec<String>), CliError> {
     if let Some(tpl_path) = &manifest.template_path {
         let bytes = curvebook_platform::fs::read_regular_file_bytes(tpl_path, MAX_ARCHIVE_FILE_BYTES).map_err(|err| match err {
             PlatformError::FileTooLarge { .. } => CliError::from(err),
             other => CliError::Runtime(format!("failed to read template `{}`: {other}", tpl_path.display())),
         })?;
         let doc = instantiate_template_bytes(&bytes, None)?;
-        return Ok(Session::from_document(doc));
+        return Ok((Session::from_document(doc), Vec::new()));
     }
     if let Some(proj_path) = &manifest.project_path {
         let (loaded, _bytes) = load_project_from_path(proj_path, false)?;
-        return Ok(Session::from_document(loaded.doc));
+        return Ok((Session::from_document(loaded.doc), loaded.warnings));
     }
-    Ok(Session::new())
+    Ok((Session::new(), Vec::new()))
 }
 
 fn load_manifest_inputs(session: &mut Session, inputs: &[BatchInputSpec]) -> Result<Vec<String>, CliError> {

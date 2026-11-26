@@ -2,8 +2,10 @@
 //! `AnalyzeDialogState` and `EditAnalysisParametersState`.
 
 use curvebook_doc::{
-    AnalysisKind, ContingencyMethod, ContingencySpec, FactorialAnovaSpec, FitMethod, GlmSpec, KappaWeighting, MultiplicityMethod, MultivariateSpec,
-    NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, RepeatedMeasuresDesign, ResidualCovariance, SurvivalAnalysisSpec,
+    AnalysisKind, BlandAltmanSpec, ContingencyMethod, ContingencySpec, DemingErrorSpec, FactorialAnovaSpec, FitFlagRules, FitMethod, GlmSpec,
+    IdentifiabilityMode, KappaWeighting, LinearRegressionSpec, ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec,
+    MultipleRowTestsSpec, MultiplicityMethod, MultivariateSpec, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat,
+    PassingBablokSpec, RepeatedMeasuresDesign, ResidualCovariance, RocCiMethod, RocSpec, SimpleLogisticSpec, SurvivalAnalysisSpec,
     TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
 };
 use serde_json::{Map, Value, json};
@@ -14,19 +16,21 @@ use super::value_parsers::{
     apply_transform_formula_str, norm_key, parse_baseline_operation_str, parse_bool_field, parse_ci_method_choice, parse_cluster_distance_str,
     parse_cluster_linkage_str, parse_contingency_method_name, parse_cox_tie_method_str, parse_df_method_str, parse_error_prop_value,
     parse_f64_list_with_locale, parse_finite_f64_with_locale, parse_fit_method, parse_glm_family_str, parse_kappa_weighting, parse_math_preset_opt,
-    parse_multiplicity_method_name, parse_one_way_method_str, parse_open_unit_f64, parse_opt_finite_f64_with_locale, parse_opt_upper_percentile,
-    parse_opt_usize_min, parse_outlier_alpha, parse_outlier_fdr_q_percent, parse_outlier_method_str, parse_parameter_rules, parse_pos_f64,
-    parse_pvalue_stack_method_val, parse_reference_levels, parse_residual_covariance_str, parse_rm_design_str, parse_ss_type_str, parse_str_field,
-    parse_subcolumn_aggregation_val, parse_table_kind_str, parse_two_group_method_str, parse_u64_val, parse_usize_list, parse_usize_min,
-    parse_weighting_scheme, post_hoc_method_for_widget_key,
+    parse_multiplicity_method_name, parse_nonlinear_rout_q_percent, parse_one_way_method_str, parse_open_unit_f64, parse_opt_finite_f64_with_locale,
+    parse_opt_nonempty_string, parse_opt_range_pair, parse_opt_upper_percentile, parse_opt_usize_min, parse_outlier_alpha,
+    parse_outlier_fdr_q_percent, parse_outlier_method_str, parse_parameter_rules, parse_pos_f64, parse_pvalue_stack_method_val,
+    parse_reference_levels, parse_residual_covariance_str, parse_rm_design_str, parse_ss_type_str, parse_str_field, parse_subcolumn_aggregation_val,
+    parse_table_kind_str, parse_two_group_method_str, parse_u64_val, parse_usize_list, parse_usize_min, parse_weighting_scheme,
+    post_hoc_method_for_widget_key,
 };
 use crate::dialogs_canvas::edit_params::{check_pcr_target_leakage, draft_forces_reml_mode, two_group_is_gaussian, two_group_is_paired};
-use crate::dialogs_canvas::{AnalyzeDialogState, EditAnalysisParametersState};
+use crate::dialogs_canvas::{AnalyzeDialogState, EditAnalysisParametersState, default_analysis_kind_for_id};
 use crate::i18n::LocalePreset;
 
 pub fn patch_analyze(state: &mut AnalyzeDialogState, fields: &Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
     let mut working = state.clone();
     let saved_explicit_resp = working.explicit_response_column;
+    let saved_force_create_new_once = working.force_create_new_once;
     apply_analyze_priority(&mut working, fields, preset)?;
 
     let mut patch = Map::new();
@@ -47,7 +51,7 @@ pub fn patch_analyze(state: &mut AnalyzeDialogState, fields: &Map<String, Value>
             "search" | "search_query" | "analyze.search" => {
                 patch.insert(String::from("search_query"), json!(parse_str_field(val, key)?));
             }
-            "equation_id" | "analyze.equation_id" | "analyze.fit.model_id" => {
+            "equation_id" | "fit_equation_id" | "analyze.equation_id" | "analyze.fit.equation_id" | "analyze.fit.model_id" => {
                 patch.insert(String::from("equation_id"), json!(parse_str_field(val, key)?));
             }
             "correlation_all_pairs" | "analyze.correlation_all_pairs" => {
@@ -92,7 +96,7 @@ pub fn patch_analyze(state: &mut AnalyzeDialogState, fields: &Map<String, Value>
                     } else {
                         patch.insert(String::from("transform_formula"), json!(raw));
                         if working.selected_entry_id.as_deref() != Some("transform.select") {
-                            let _ = apply_transform_formula_str(raw, &mut formula_x, &mut formula_y);
+                            apply_transform_formula_str(raw, &mut formula_x, &mut formula_y)?;
                             saw_formula_transforms = true;
                         }
                     }
@@ -125,8 +129,15 @@ pub fn patch_analyze(state: &mut AnalyzeDialogState, fields: &Map<String, Value>
         patch.insert(String::from("transform_y"), y_val);
     }
 
+    let patched_hypothetical = patch.contains_key("two_group_hypothetical");
     merge_struct_json(&mut working, &patch, &[])?;
     working.explicit_response_column = saved_explicit_resp;
+    working.force_create_new_once = saved_force_create_new_once;
+    if patched_hypothetical
+        && let Some(TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical }) = &mut working.two_group_method
+    {
+        *hypothetical = working.two_group_hypothetical;
+    }
     post_actions.sort_by_key(|act| match act {
         AnalyzePostAction::SetResponseColumn(_) | AnalyzePostAction::SetPcrOutcome(_, _) => 0u8,
         AnalyzePostAction::ToggleGaussian(_) => 1,
@@ -231,7 +242,10 @@ fn apply_analyze_priority(working: &mut AnalyzeDialogState, fields: &Map<String,
         ["selected_data_sets", "analyze.selected_data_sets", "pca_predictors", "analyze.pca_predictors"].iter().any(|k| fields.contains_key(*k));
     for key in ["entry_id", "selected_entry_id", "analysis", "analyze.entry", "analyze.entries_list"] {
         if let Some(val) = fields.get(key) {
-            let s = parse_str_field(val, key)?;
+            let s = parse_str_field(val, key)?.trim();
+            if default_analysis_kind_for_id(s).is_none() {
+                return Err(format!("unknown analysis catalog entry `{s}`"));
+            }
             if s == "stats.pcr" && !has_explicit_predictors {
                 working.select_catalog_entry(s);
             } else {
@@ -488,7 +502,7 @@ fn normalize_analyze_mv_glm_cox_km(key: &str, val: &Value, patch: &mut Map<Strin
             patch.insert(String::from("km_multiplicity_method"), serde_json::to_value(mm).map_err(|e| e.to_string())?);
         }
         "custom_dsl" | "analyze.fit.custom_dsl" => {
-            let dsl = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(ToOwned::to_owned);
+            let dsl = parse_opt_nonempty_string(val, key)?;
             patch.insert(String::from("custom_dsl"), json!(dsl));
         }
         "parameter_rules" | "analyze.fit.parameter_rules" => {
@@ -516,8 +530,17 @@ fn normalize_analyze_outlier_pstack(
     let is_outliers = working.selected_entry_id.as_deref() == Some("stats.outliers");
     let is_nonlinear = working.selected_entry_id.as_deref() == Some("fit.nonlinear");
     match key {
-        "outlier_fdr_q_percent" | "analyze.outlier.fdr_q_percent" | "analyze.fit.rout_q" => {
+        "outlier_fdr_q_percent" | "analyze.outlier.fdr_q_percent" => {
             let q = parse_outlier_fdr_q_percent(val, preset)?;
+            patch.insert(String::from("outlier_fdr_q_percent"), json!(q));
+            if let FitMethod::RoutOutlierElimination { fdr_q_percent } = &mut working.fit_method
+                && q <= 50.0
+            {
+                *fdr_q_percent = q;
+            }
+        }
+        "analyze.fit.rout_q" => {
+            let q = parse_nonlinear_rout_q_percent(val, preset)?;
             patch.insert(String::from("outlier_fdr_q_percent"), json!(q));
             if let FitMethod::RoutOutlierElimination { fdr_q_percent } = &mut working.fit_method {
                 *fdr_q_percent = q;
@@ -530,15 +553,15 @@ fn normalize_analyze_outlier_pstack(
             patch.insert(String::from("outlier_iterative"), json!(parse_bool_field(val, "outlier_iterative")?));
         }
         "fdr_q_percent" | "q_percent" | "rout_q" if is_outliers || is_nonlinear => {
-            let q = parse_outlier_fdr_q_percent(val, preset)?;
-            if is_outliers {
-                patch.insert(String::from("outlier_fdr_q_percent"), json!(q));
-            }
             if is_nonlinear {
+                let q = parse_nonlinear_rout_q_percent(val, preset)?;
                 let FitMethod::RoutOutlierElimination { fdr_q_percent } = &mut working.fit_method else {
                     return Err(String::from("`fdr_q_percent` requires ROUT outlier elimination fit method"));
                 };
                 *fdr_q_percent = q;
+            } else if is_outliers {
+                let q = parse_outlier_fdr_q_percent(val, preset)?;
+                patch.insert(String::from("outlier_fdr_q_percent"), json!(q));
             }
         }
         "alpha" if is_outliers => {
@@ -632,7 +655,26 @@ pub fn patch_edit_params(state: &mut EditAnalysisParametersState, fields: &Map<S
             }
         }
     }
+    if let Some(spec) = &working.draft {
+        validate_edit_draft_bounds(&spec.kind)?;
+    }
     *state = working;
+    Ok(())
+}
+
+fn validate_edit_draft_bounds(kind: &AnalysisKind) -> Result<(), String> {
+    let plot_bounds = match kind {
+        AnalysisKind::LinearRegression(lr) => (lr.plot_x_min, lr.plot_x_max),
+        AnalysisKind::SimpleLogisticRegression(sl) => (sl.plot_x_min, sl.plot_x_max),
+        AnalysisKind::NonlinearRegression(nl) => (nl.plot_x_min, nl.plot_x_max),
+        AnalysisKind::FitSplineLowess(sp) => (sp.plot_x_min, sp.plot_x_max),
+        _ => (None, None),
+    };
+    if let (Some(lo), Some(hi)) = plot_bounds
+        && lo >= hi
+    {
+        return Err(format!("invalid plot X range: `plot_x_min` ({lo}) must be strictly less than `plot_x_max` ({hi})"));
+    }
     Ok(())
 }
 
@@ -894,18 +936,19 @@ fn apply_edit_contingency_field(working: &mut EditAnalysisParametersState, key: 
             return Ok(true);
         }
         "edit.contingency.ci.baptista_pike" => {
-            top_patch.insert(String::from("contingency_or_ci_method"), json!(parse_ci_method_choice(val, key, "OR", ["Baptista-Pike", "Woolf"])?));
+            top_patch.insert(String::from("contingency_or_ci_method"), json!(parse_ci_method_choice(val, key, "OR", &["Baptista-Pike", "Woolf"])?));
         }
         "edit.contingency.ci.koopman" => {
-            top_patch.insert(String::from("contingency_rr_ci_method"), json!(parse_ci_method_choice(val, key, "RR", ["Koopman", "Katz"])?));
+            top_patch.insert(String::from("contingency_rr_ci_method"), json!(parse_ci_method_choice(val, key, "RR", &["Koopman", "Katz"])?));
         }
         "edit.contingency.ci.newcombe_wilson" => {
-            top_patch.insert(String::from("contingency_arr_ci_method"), json!(parse_ci_method_choice(val, key, "ARR", ["Newcombe-Wilson", "Wald"])?));
+            top_patch
+                .insert(String::from("contingency_arr_ci_method"), json!(parse_ci_method_choice(val, key, "ARR", &["Newcombe-Wilson", "Wald"])?));
         }
         "edit.contingency.ci.wilson_brown" => {
             top_patch.insert(
                 String::from("contingency_diag_ci_method"),
-                json!(parse_ci_method_choice(val, key, "diagnostic", ["Wilson-Brown", "Clopper-Pearson"])?),
+                json!(parse_ci_method_choice(val, key, "diagnostic", &["Wilson-Brown", "Clopper-Pearson"])?),
             );
         }
         "compute_odds_and_risk_ratios" | "contingency_odds_ratio_checked" | "edit.contingency.odds_ratio" => {
@@ -978,7 +1021,7 @@ fn apply_edit_draft_kind_field(working: &mut EditAnalysisParametersState, key: &
             }
             _ => Ok(false),
         },
-        AnalysisKind::TwoGroupComparison(t) => patch_two_group_spec(key, val, t),
+        AnalysisKind::TwoGroupComparison(t) => patch_two_group_spec(key, val, preset, t),
         AnalysisKind::OneWayAnova(a) => patch_one_way_spec(key, val, a),
         AnalysisKind::FactorialAnova(f) => patch_factorial_spec(key, val, ctrl, f),
         AnalysisKind::NestedComparison(n) => match key {
@@ -988,6 +1031,12 @@ fn apply_edit_draft_kind_field(working: &mut EditAnalysisParametersState, key: &
             }
             _ => Ok(false),
         },
+        AnalysisKind::LinearRegression(lr) => patch_linear_regression_spec(key, val, preset, lr),
+        AnalysisKind::SimpleLogisticRegression(sl) => patch_simple_logistic_spec(key, val, preset, sl),
+        AnalysisKind::RocCurve(roc) => patch_roc_spec(key, val, roc),
+        AnalysisKind::MultipleRowTTests(mrt) => patch_multiple_row_spec(key, val, preset, ctrl, mrt),
+        AnalysisKind::BlandAltman(ba) => patch_bland_altman_spec(key, val, ba),
+        AnalysisKind::PassingBablok(pb) => patch_passing_bablok_spec(key, val, pb),
         AnalysisKind::PValueStack(ps) => match key {
             "method"
             | "pvalue_stack_method"
@@ -1016,7 +1065,7 @@ fn apply_edit_draft_kind_field(working: &mut EditAnalysisParametersState, key: &
             }
             _ => Ok(false),
         },
-        AnalysisKind::FitSplineLowess(sp) => patch_spline_lowess_spec(key, val, sp),
+        AnalysisKind::FitSplineLowess(sp) => patch_spline_lowess_spec(key, val, preset, sp),
         AnalysisKind::Multivariate(mv) => patch_multivariate_spec(key, val, mv),
         AnalysisKind::GeneralizedLinearModel(glm) => patch_glm_spec(key, val, glm),
         AnalysisKind::Survival(surv) => patch_survival_spec(key, val, ctrl, surv),
@@ -1125,92 +1174,63 @@ fn apply_edit_transform_field(working: &mut EditAnalysisParametersState, key: &s
     if !working.draft.as_ref().is_some_and(|s| matches!(s.kind, AnalysisKind::Transform(_))) {
         return Ok(false);
     }
-    match key {
-        "x_transform" | "edit.transform.x_transform" => {
-            let parsed = parse_math_preset_opt(val)?;
-            working.update_draft_kind(|k| match k {
-                AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, .. }) => {
-                    *x_transform = parsed;
-                    true
-                }
-                _ => false,
-            });
+    working.try_update_draft_kind(|k| match (key, k) {
+        ("x_transform" | "edit.transform.x_transform", AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, .. })) => {
+            *x_transform = parse_math_preset_opt(val)?;
+            Ok(true)
         }
-        "y_transform" | "edit.transform.y_transform" => {
-            let parsed = parse_math_preset_opt(val)?;
-            working.update_draft_kind(|k| match k {
-                AnalysisKind::Transform(TransformAnalysisSpec::Math { y_transform, .. }) => {
-                    *y_transform = parsed;
-                    true
-                }
-                _ => false,
-            });
+        ("y_transform" | "edit.transform.y_transform", AnalysisKind::Transform(TransformAnalysisSpec::Math { y_transform, .. })) => {
+            *y_transform = parse_math_preset_opt(val)?;
+            Ok(true)
         }
-        "error_propagation" | "edit.transform.error_propagation" => {
-            let ep_mode = parse_error_prop_value(val)?;
-            working.update_draft_kind(|k| match k {
-                AnalysisKind::Transform(TransformAnalysisSpec::Math { error_propagation, .. }) => {
-                    *error_propagation = ep_mode;
-                    true
-                }
-                _ => false,
-            });
+        (
+            "error_propagation" | "edit.transform.error_propagation",
+            AnalysisKind::Transform(TransformAnalysisSpec::Math { error_propagation, .. }),
+        ) => {
+            *error_propagation = parse_error_prop_value(val)?;
+            Ok(true)
         }
-        "formula" | "transform_formula" | "edit.transform.formula" | "filter_formula" | "edit.transform.filter_formula" => {
-            working.try_update_draft_kind(|k| match k {
-                AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, .. }) => {
-                    if let Some(raw) = val.as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                        apply_transform_formula_str(raw, x_transform, y_transform)?;
-                        Ok(true)
-                    } else {
-                        Ok(false)
-                    }
-                }
-                AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, .. }) => {
-                    *filter_formula = if val.is_null() {
-                        None
-                    } else {
-                        let s = val.as_str().ok_or_else(|| String::from("`filter_formula` must be a string or null"))?.trim();
-                        (!s.is_empty()).then(|| s.to_owned())
-                    };
-                    Ok(true)
-                }
-                _ => Ok(false),
-            })?;
+        (
+            "formula" | "transform_formula" | "edit.transform.formula",
+            AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, .. }),
+        ) => {
+            let raw = parse_str_field(val, key)?.trim();
+            if raw.is_empty() {
+                return Err(format!("`{key}` cannot be empty"));
+            }
+            apply_transform_formula_str(raw, x_transform, y_transform)?;
+            Ok(true)
         }
-        "target_archetype" | "edit.transform.target_archetype" => {
-            let parsed = parse_table_kind_str(parse_str_field(val, "target_archetype")?)?;
-            working.update_draft_kind(|k| match k {
-                AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { target_archetype, .. }) => {
-                    *target_archetype = parsed;
-                    true
-                }
-                _ => false,
-            });
+        (
+            "formula" | "transform_formula" | "edit.transform.formula" | "filter_formula" | "edit.transform.filter_formula",
+            AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, .. }),
+        ) => {
+            *filter_formula = parse_opt_nonempty_string(val, key)?;
+            Ok(true)
         }
-        "baseline_columns" | "edit.transform.baseline_columns" => {
-            let cols = parse_usize_list(val, key)?;
-            working.update_draft_kind(|k| match k {
-                AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, .. }) => {
-                    *baseline_columns = cols;
-                    true
-                }
-                _ => false,
-            });
+        (
+            "target_archetype" | "edit.transform.target_archetype",
+            AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { target_archetype, .. }),
+        ) => {
+            *target_archetype = parse_table_kind_str(parse_str_field(val, "target_archetype")?)?;
+            Ok(true)
         }
-        "baseline_operation" | "operation" | "edit.transform.baseline_operation" => {
-            let op = parse_baseline_operation_str(parse_str_field(val, "baseline_operation")?)?;
-            working.update_draft_kind(|k| match k {
-                AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { operation, .. }) => {
-                    *operation = op;
-                    true
-                }
-                _ => false,
-            });
+        (
+            "baseline_columns" | "edit.transform.baseline_columns",
+            AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, .. }),
+        ) => {
+            *baseline_columns = parse_usize_list(val, key)?;
+            Ok(true)
         }
-        _ => return Ok(false),
-    }
-    Ok(true)
+        (
+            "baseline_operation" | "operation" | "edit.transform.baseline_operation",
+            AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { operation, .. }),
+        ) => {
+            *operation = parse_baseline_operation_str(parse_str_field(val, "baseline_operation")?)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    })
 }
 
 fn apply_edit_gaussian_toggle(working: &mut EditAnalysisParametersState, assume_gaussian: bool) {
@@ -1352,7 +1372,7 @@ fn patch_outlier_spec(
     Ok(true)
 }
 
-fn patch_two_group_spec(key: &str, val: &Value, t: &mut TwoGroupSpec) -> Result<bool, String> {
+fn patch_two_group_spec(key: &str, val: &Value, preset: &LocalePreset, t: &mut TwoGroupSpec) -> Result<bool, String> {
     match key {
         "two_group_method" | "edit.two_group.method" => {
             let hyp = match t.method {
@@ -1361,8 +1381,21 @@ fn patch_two_group_spec(key: &str, val: &Value, t: &mut TwoGroupSpec) -> Result<
             };
             t.method = parse_two_group_method_str(parse_str_field(val, "two_group_method")?, hyp)?;
         }
+        "hypothetical" | "two_group_hypothetical" | "edit.two_group.hypothetical" => {
+            let next_hyp = parse_finite_f64_with_locale(val, key, preset)?;
+            match &mut t.method {
+                TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
+                    *hypothetical = next_hyp;
+                }
+                _ => return Err(String::from("`hypothetical` requires a one-sample t test or one-sample Wilcoxon method")),
+            }
+        }
         "paired_sign_test" | "edit.two_group.paired_sign_test" => {
-            t.method = if parse_bool_field(val, "paired_sign_test")? { TwoGroupMethod::PairedSignTest } else { TwoGroupMethod::WilcoxonSignedRank };
+            if parse_bool_field(val, "paired_sign_test")? {
+                t.method = TwoGroupMethod::PairedSignTest;
+            } else if t.method == TwoGroupMethod::PairedSignTest {
+                t.method = TwoGroupMethod::WilcoxonSignedRank;
+            }
         }
         "two_tailed" | "edit.two_group.two_tailed" => t.two_tailed = parse_bool_field(val, "two_tailed")?,
         "compute_effect_sizes" | "edit.compute_effect_sizes" => t.compute_effect_sizes = parse_bool_field(val, "compute_effect_sizes")?,
@@ -1370,9 +1403,17 @@ fn patch_two_group_spec(key: &str, val: &Value, t: &mut TwoGroupSpec) -> Result<
         "mv_response_column" | "edit.two_group.mv_response_column" => t.mv_response_column = parse_opt_usize_min(val, key, 0)?,
         _ => {
             if let Some(col) = key.strip_prefix("edit.two_group.group.").and_then(|s| s.parse::<usize>().ok()) {
-                t.mv_group_column = Some(col);
+                if parse_bool_field(val, key)? {
+                    t.mv_group_column = Some(col);
+                } else if t.mv_group_column == Some(col) {
+                    t.mv_group_column = None;
+                }
             } else if let Some(col) = key.strip_prefix("edit.two_group.resp.").and_then(|s| s.parse::<usize>().ok()) {
-                t.mv_response_column = Some(col);
+                if parse_bool_field(val, key)? {
+                    t.mv_response_column = Some(col);
+                } else if t.mv_response_column == Some(col) {
+                    t.mv_response_column = None;
+                }
             } else {
                 return Ok(false);
             }
@@ -1430,9 +1471,13 @@ fn patch_factorial_spec(key: &str, val: &Value, control_col: usize, f: &mut Fact
         "response_column" | "factorial_response_column" | "edit.factorial.response_column" => f.response_column = parse_opt_usize_min(val, key, 0)?,
         _ => {
             if let Some(col) = key.strip_prefix("edit.fac.resp.").and_then(|s| s.parse::<usize>().ok()) {
-                f.response_column = Some(col);
+                if parse_bool_field(val, key)? {
+                    f.response_column = Some(col);
+                } else if f.response_column == Some(col) {
+                    f.response_column = None;
+                }
             } else if let Some(col) = key.strip_prefix("edit.fac.col.").and_then(|s| s.parse::<usize>().ok()) {
-                let want_on = val.as_bool().unwrap_or_else(|| !f.multifactor_columns.contains(&col));
+                let want_on = parse_bool_field(val, key)?;
                 if want_on {
                     if !f.multifactor_columns.contains(&col) {
                         f.multifactor_columns.push(col);
@@ -1585,11 +1630,11 @@ fn patch_nonlinear_spec(key: &str, val: &Value, preset: &LocalePreset, fit: &mut
                 fit.equation_id = raw.to_owned();
             }
         }
-        "custom_dsl" | "edit.fit.custom_dsl" => fit.custom_dsl = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(ToOwned::to_owned),
+        "custom_dsl" | "edit.fit.custom_dsl" => fit.custom_dsl = parse_opt_nonempty_string(val, key)?,
         "weighting" | "fit_weighting" | "edit.fit.weighting" => fit.weighting = parse_weighting_scheme(val)?,
         "fit_method" | "edit.fit.method" | "method" => fit.method = parse_fit_method(val, preset)?,
         "rout_q" | "fdr_q_percent" | "q_percent" | "edit.fit.rout_q" => {
-            let q = parse_outlier_fdr_q_percent(val, preset)?;
+            let q = parse_nonlinear_rout_q_percent(val, preset)?;
             let FitMethod::RoutOutlierElimination { fdr_q_percent } = &mut fit.method else {
                 return Err(String::from("`rout_q` requires ROUT outlier elimination fit method"));
             };
@@ -1597,8 +1642,109 @@ fn patch_nonlinear_spec(key: &str, val: &Value, preset: &LocalePreset, fit: &mut
         }
         "parameter_rules" | "edit.fit.parameter_rules" => fit.parameter_rules = parse_parameter_rules(val)?,
         "profile_likelihood_ci" | "edit.fit.profile_likelihood_ci" => fit.profile_likelihood_ci = parse_bool_field(val, "profile_likelihood_ci")?,
+        "identify_unstable_parameters" | "edit.fit.identify_unstable_parameters" => {
+            fit.identify_unstable_parameters = parse_bool_field(val, key)?;
+        }
+        "identifiability_mode" | "edit.fit.identifiability_mode" => {
+            fit.identifiability_mode = if val.is_null() {
+                None
+            } else {
+                Some(serde_json::from_value::<IdentifiabilityMode>(val.clone()).map_err(|e| format!("invalid `identifiability_mode`: {e}"))?)
+            };
+        }
+        "show_standard_errors" | "edit.fit.show_standard_errors" => {
+            fit.show_standard_errors = if val.is_null() { None } else { Some(parse_bool_field(val, key)?) };
+        }
+        "flag_r_squared_below" | "edit.fit.flag_r_squared_below" => {
+            let thr = parse_opt_finite_f64_with_locale(val, key, preset)?;
+            if let Some(v) = thr
+                && !(0.0..=1.0).contains(&v)
+            {
+                return Err(format!("`{key}` ({v}) must lie in [0, 1]"));
+            }
+            fit.flag_r_squared_below = thr;
+        }
+        "fit_flag_rules" | "edit.fit.fit_flag_rules" => {
+            fit.fit_flag_rules = if val.is_null() {
+                None
+            } else {
+                let rules: FitFlagRules = serde_json::from_value(val.clone()).map_err(|e| format!("invalid `fit_flag_rules`: {e}"))?;
+                if let Some(r2) = rules.min_r_squared
+                    && (!r2.is_finite() || !(0.0..=1.0).contains(&r2))
+                {
+                    return Err(format!("`fit_flag_rules.min_r_squared` ({r2}) must lie in [0, 1]"));
+                }
+                if let Some(dep) = rules.max_dependency
+                    && (!dep.is_finite() || !(0.0..=1.0).contains(&dep))
+                {
+                    return Err(format!("`fit_flag_rules.max_dependency` ({dep}) must lie in [0, 1]"));
+                }
+                if let Some(p) = rules.min_normality_p
+                    && (!p.is_finite() || !(0.0 < p && p < 1.0))
+                {
+                    return Err(format!("`fit_flag_rules.min_normality_p` ({p}) must lie strictly in (0, 1)"));
+                }
+                if let Some(p) = rules.min_runs_or_lof_p
+                    && (!p.is_finite() || !(0.0 < p && p < 1.0))
+                {
+                    return Err(format!("`fit_flag_rules.min_runs_or_lof_p` ({p}) must lie strictly in (0, 1)"));
+                }
+                Some(rules)
+            };
+        }
+        "comparison" | "edit.fit.comparison" => {
+            fit.comparison = if val.is_null() {
+                None
+            } else {
+                Some(serde_json::from_value::<ModelComparisonSpec>(val.clone()).map_err(|e| format!("invalid `comparison`: {e}"))?)
+            };
+        }
+        "comparison_question" | "edit.fit.comparison_question" => {
+            fit.comparison_question = if val.is_null() {
+                None
+            } else {
+                Some(serde_json::from_value::<ModelComparisonQuestion>(val.clone()).map_err(|e| format!("invalid `comparison_question`: {e}"))?)
+            };
+        }
+        "comparison_method" | "edit.fit.comparison_method" => {
+            fit.comparison_method = if val.is_null() {
+                None
+            } else {
+                Some(serde_json::from_value::<ModelComparisonMethod>(val.clone()).map_err(|e| format!("invalid `comparison_method`: {e}"))?)
+            };
+        }
+        "prefer_well_defined_fit" | "edit.fit.prefer_well_defined_fit" => {
+            fit.prefer_well_defined_fit = parse_bool_field(val, key)?;
+        }
+        "summary_parameter" | "edit.fit.summary_parameter" => {
+            fit.summary_parameter = parse_opt_nonempty_string(val, key)?;
+        }
+        "create_summary_graph" | "edit.fit.create_summary_graph" => {
+            fit.create_summary_graph = parse_bool_field(val, key)?;
+        }
+        "output_significant_digits" | "edit.fit.output_significant_digits" => {
+            fit.output_significant_digits = if val.is_null() {
+                None
+            } else {
+                let d = parse_usize_min(val, key, 1)?;
+                if d > 15 {
+                    return Err(format!("`{key}` ({d}) must lie in 1..=15"));
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                Some(d as u8)
+            };
+        }
         "confidence_bands" | "edit.fit.confidence_bands" => fit.confidence_bands = parse_bool_field(val, "confidence_bands")?,
         "prediction_bands" | "edit.fit.prediction_bands" => fit.prediction_bands = parse_bool_field(val, "prediction_bands")?,
+        "interpolate_unknowns" | "edit.fit.interpolate_unknowns" => fit.interpolate_unknowns = parse_bool_field(val, key)?,
+        "replicates_lack_of_fit_test" | "edit.fit.replicates_lack_of_fit_test" => fit.replicates_lack_of_fit_test = parse_bool_field(val, key)?,
+        "normality_of_residuals" | "edit.fit.normality_of_residuals" => fit.normality_of_residuals = parse_bool_field(val, key)?,
+        "max_iters" | "edit.fit.max_iters" => fit.max_iters = parse_usize_min(val, key, 1)?,
+        "x_range_filter" | "edit.fit.x_range_filter" => fit.x_range_filter = parse_opt_range_pair(val, key, preset)?,
+        "y_range_filter" | "edit.fit.y_range_filter" => fit.y_range_filter = parse_opt_range_pair(val, key, preset)?,
+        "plot_function_only" | "edit.fit.plot_function_only" => fit.plot_function_only = parse_bool_field(val, key)?,
+        "plot_x_min" | "edit.fit.plot_x_min" => fit.plot_x_min = parse_opt_finite_f64_with_locale(val, key, preset)?,
+        "plot_x_max" | "edit.fit.plot_x_max" => fit.plot_x_max = parse_opt_finite_f64_with_locale(val, key, preset)?,
         "homoscedasticity_test" | "edit.fit.homoscedasticity_test" => fit.homoscedasticity_test = parse_bool_field(val, "homoscedasticity_test")?,
         "emit_residuals_tab" | "edit.fit.emit_residuals_tab" => fit.emit_residuals_tab = parse_bool_field(val, "emit_residuals_tab")?,
         "emit_covariance_tab" | "edit.fit.emit_covariance_tab" => fit.emit_covariance_tab = parse_bool_field(val, "emit_covariance_tab")?,
@@ -1626,58 +1772,218 @@ fn patch_nonlinear_spec(key: &str, val: &Value, preset: &LocalePreset, fit: &mut
     Ok(true)
 }
 
-fn patch_spline_lowess_spec(key: &str, val: &Value, sp: &mut curvebook_doc::SplineLowessSpec) -> Result<bool, String> {
+fn patch_linear_regression_spec(key: &str, val: &Value, preset: &LocalePreset, lr: &mut LinearRegressionSpec) -> Result<bool, String> {
+    match key {
+        "deming_model_ii" | "deming" | "edit.lr.deming_model_ii" | "edit.lr.deming" => {
+            lr.deming_model_ii = parse_bool_field(val, key)?;
+        }
+        "force_through_origin" | "edit.lr.force_through_origin" => {
+            lr.force_through_origin = parse_bool_field(val, key)?;
+        }
+        "fixed_point" | "edit.lr.fixed_point" => {
+            lr.fixed_point = if val.is_null() {
+                None
+            } else if let Some(arr) = val.as_array() {
+                if arr.len() != 2 {
+                    return Err(String::from("`fixed_point` must be a 2-element `[x0, y0]` array or null"));
+                }
+                Some((parse_finite_f64_with_locale(&arr[0], key, preset)?, parse_finite_f64_with_locale(&arr[1], key, preset)?))
+            } else {
+                return Err(String::from("`fixed_point` must be a `[x0, y0]` array or null"));
+            };
+        }
+        "standard_addition" | "edit.lr.standard_addition" => {
+            lr.standard_addition = parse_bool_field(val, key)?;
+        }
+        "extend_line_to_x_intercept" | "edit.lr.extend_line_to_x_intercept" => {
+            lr.extend_line_to_x_intercept = parse_bool_field(val, key)?;
+        }
+        "deming_error" | "edit.lr.deming_error" => {
+            let parsed: DemingErrorSpec = serde_json::from_value(val.clone()).map_err(|e| format!("invalid `deming_error`: {e}"))?;
+            if parsed.resolved_lambda().is_none() {
+                return Err(String::from("invalid `deming_error`: standard deviations and variance ratio must be finite and > 0"));
+            }
+            lr.deming_error = parsed;
+        }
+        "confidence_bands" | "edit.lr.confidence_bands" => lr.confidence_bands = parse_bool_field(val, key)?,
+        "prediction_bands" | "edit.lr.prediction_bands" => lr.prediction_bands = parse_bool_field(val, key)?,
+        "interpolate_unknowns" | "edit.lr.interpolate_unknowns" => lr.interpolate_unknowns = parse_bool_field(val, key)?,
+        "x_range_filter" | "edit.lr.x_range_filter" => lr.x_range_filter = parse_opt_range_pair(val, key, preset)?,
+        "plot_x_min" | "edit.lr.plot_x_min" => lr.plot_x_min = parse_opt_finite_f64_with_locale(val, key, preset)?,
+        "plot_x_max" | "edit.lr.plot_x_max" => lr.plot_x_max = parse_opt_finite_f64_with_locale(val, key, preset)?,
+        "plot_segments" | "segments" | "edit.lr.plot_segments" => {
+            lr.plot_segments = if val.is_null() {
+                None
+            } else {
+                let segs = parse_usize_min(val, key, 1)?;
+                if segs > LinearRegressionSpec::MAX_PLOT_SEGMENTS {
+                    return Err(format!("`{key}` ({segs}) must lie in 1..={}", LinearRegressionSpec::MAX_PLOT_SEGMENTS));
+                }
+                Some(segs)
+            };
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn patch_simple_logistic_spec(key: &str, val: &Value, preset: &LocalePreset, sl: &mut SimpleLogisticSpec) -> Result<bool, String> {
+    match key {
+        "emit_row_classification" | "edit.simple_logistic.emit_row_classification" => {
+            sl.emit_row_classification = parse_bool_field(val, key)?;
+        }
+        "confidence_bands" | "edit.simple_logistic.confidence_bands" => {
+            sl.confidence_bands = parse_bool_field(val, key)?;
+        }
+        "classification_cutoff" | "cutoff" | "edit.simple_logistic.classification_cutoff" => {
+            sl.classification_cutoff = parse_open_unit_f64(val, key, preset)?;
+        }
+        "plot_x_min" | "edit.simple_logistic.plot_x_min" => {
+            sl.plot_x_min = parse_opt_finite_f64_with_locale(val, key, preset)?;
+        }
+        "plot_x_max" | "edit.simple_logistic.plot_x_max" => {
+            sl.plot_x_max = parse_opt_finite_f64_with_locale(val, key, preset)?;
+        }
+        "plot_segments" | "segments" | "edit.simple_logistic.plot_segments" => {
+            sl.plot_segments = if val.is_null() {
+                None
+            } else {
+                let segs = parse_usize_min(val, key, 1)?;
+                if segs > SimpleLogisticSpec::MAX_PLOT_SEGMENTS {
+                    return Err(format!("`{key}` ({segs}) must lie in 1..={}", SimpleLogisticSpec::MAX_PLOT_SEGMENTS));
+                }
+                Some(segs)
+            };
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn patch_roc_spec(key: &str, val: &Value, roc: &mut RocSpec) -> Result<bool, String> {
+    match key {
+        "ci_method" | "roc_ci_method" | "edit.roc.ci_method" => {
+            roc.ci_method = if let Ok(direct) = serde_json::from_value::<RocCiMethod>(val.clone()) {
+                direct
+            } else {
+                let raw = parse_str_field(val, key)?;
+                match norm_key(raw).as_str() {
+                    "delong" => RocCiMethod::DeLong,
+                    "hanleymcneil" | "hanley" | "wilson" => RocCiMethod::HanleyMcNeil,
+                    _ => return Err(format!("unknown ROC `ci_method` `{raw}`")),
+                }
+            };
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn patch_multiple_row_spec(
+    key: &str,
+    val: &Value,
+    preset: &LocalePreset,
+    control_col: usize,
+    mrt: &mut MultipleRowTestsSpec,
+) -> Result<bool, String> {
+    match key {
+        "paired" | "edit.multiple_row.paired" => mrt.paired = parse_bool_field(val, key)?,
+        "nonparametric" | "edit.multiple_row.nonparametric" => mrt.nonparametric = parse_bool_field(val, key)?,
+        "assume_equal_sd" | "edit.multiple_row.assume_equal_sd" => mrt.assume_equal_sd = parse_bool_field(val, key)?,
+        "multiplicity_method" | "multiplicity" | "edit.multiple_row.multiplicity" => {
+            mrt.multiplicity.method = parse_multiplicity_method_name(parse_str_field(val, key)?, control_col)?;
+        }
+        "fdr_q" | "q" | "threshold" | "alpha" | "edit.multiple_row.fdr_q" | "edit.multiple_row.threshold" => {
+            mrt.multiplicity.threshold = parse_open_unit_f64(val, key, preset)?;
+        }
+        "report_confidence_intervals" | "edit.multiple_row.report_confidence_intervals" => {
+            mrt.multiplicity.report_confidence_intervals = parse_bool_field(val, key)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn patch_bland_altman_spec(key: &str, val: &Value, ba: &mut BlandAltmanSpec) -> Result<bool, String> {
+    match key {
+        "column_a" | "edit.bland_altman.column_a" => ba.column_a = parse_usize_min(val, key, 0)?,
+        "column_b" | "edit.bland_altman.column_b" => ba.column_b = parse_usize_min(val, key, 0)?,
+        "percent_difference" | "edit.bland_altman.percent_difference" => ba.percent_difference = parse_bool_field(val, key)?,
+        "xy_compare_x_vs_y" | "edit.bland_altman.xy_compare_x_vs_y" => {
+            ba.xy_compare_x_vs_y = if val.is_null() { None } else { Some(parse_bool_field(val, key)?) };
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn patch_passing_bablok_spec(key: &str, val: &Value, pb: &mut PassingBablokSpec) -> Result<bool, String> {
+    match key {
+        "x_column" | "edit.passing_bablok.x_column" => pb.x_column = parse_usize_min(val, key, 0)?,
+        "y_column" | "edit.passing_bablok.y_column" => pb.y_column = parse_usize_min(val, key, 0)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn patch_spline_lowess_spec(key: &str, val: &Value, preset: &LocalePreset, sp: &mut curvebook_doc::SplineLowessSpec) -> Result<bool, String> {
     match key {
         "method" | "spline_method" | "edit.spline.method" => {
             sp.method = serde_json::from_value(val.clone()).map_err(|e| format!("invalid spline/LOWESS method: {e}"))?;
         }
         "segment_count" | "segments" | "edit.spline.segments" => {
-            if let Some(n) = parse_opt_usize_min(val, key, curvebook_doc::SplineLowessSpec::MIN_SEGMENTS)? {
-                sp.segment_count = n.min(curvebook_doc::SplineLowessSpec::MAX_SEGMENTS);
+            let n = parse_usize_min(val, key, curvebook_doc::SplineLowessSpec::MIN_SEGMENTS)?;
+            if n > curvebook_doc::SplineLowessSpec::MAX_SEGMENTS {
+                return Err(format!(
+                    "`{key}` ({n}) must lie in {}..={}",
+                    curvebook_doc::SplineLowessSpec::MIN_SEGMENTS,
+                    curvebook_doc::SplineLowessSpec::MAX_SEGMENTS
+                ));
             }
+            sp.segment_count = n;
         }
         "smoothing_knots" | "knots" | "edit.spline.knots" | "edit.spline.smoothing_knots" => {
             sp.smoothing_knots = parse_opt_usize_min(val, key, 2)?;
         }
         "smoothing_df" | "df" => {
-            sp.smoothing_df = if val.is_null() {
-                None
-            } else {
-                let v = val.as_f64().ok_or_else(|| format!("`{key}` must be a finite number >= 2"))?;
-                if !v.is_finite() || v < 2.0 {
-                    return Err(format!("`{key}` must be finite and >= 2"));
-                }
-                Some(v)
-            };
+            let v_opt = parse_opt_finite_f64_with_locale(val, key, preset)?;
+            if let Some(v) = v_opt
+                && v < 2.0
+            {
+                return Err(format!("`{key}` ({v}) must be finite and >= 2"));
+            }
+            sp.smoothing_df = v_opt;
         }
         "lowess_preset" | "edit.spline.lowess_preset" => {
             sp.lowess_preset = serde_json::from_value(val.clone()).map_err(|e| format!("invalid LOWESS preset: {e}"))?;
         }
         "lowess_fraction" | "span" => {
-            sp.lowess_fraction = if val.is_null() {
-                None
-            } else {
-                let v = val.as_f64().ok_or_else(|| format!("`{key}` must be a finite number in (0, 1]"))?;
-                if !v.is_finite() || v <= 0.0 || v > 1.0 {
-                    return Err(format!("`{key}` must be finite and in (0, 1]"));
-                }
-                Some(v)
-            };
+            let v_opt = parse_opt_finite_f64_with_locale(val, key, preset)?;
+            if let Some(v) = v_opt
+                && (v <= 0.0 || v > 1.0)
+            {
+                return Err(format!("`{key}` ({v}) must lie in (0, 1]"));
+            }
+            sp.lowess_fraction = v_opt;
         }
         "lowess_robustness_iters" | "edit.spline.lowess_iters" => {
-            if let Some(n) = parse_opt_usize_min(val, key, 0)? {
-                sp.lowess_robustness_iters = n.min(curvebook_doc::SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS);
+            let n = parse_usize_min(val, key, 0)?;
+            if n > curvebook_doc::SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS {
+                return Err(format!("`{key}` ({n}) must lie in 0..={}", curvebook_doc::SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS));
             }
+            sp.lowess_robustness_iters = n;
+        }
+        "plot_x_min" | "edit.spline.plot_x_min" => {
+            sp.plot_x_min = parse_opt_finite_f64_with_locale(val, key, preset)?;
+        }
+        "plot_x_max" | "edit.spline.plot_x_max" => {
+            sp.plot_x_max = parse_opt_finite_f64_with_locale(val, key, preset)?;
         }
         "emit_curve_coordinates_tab" | "edit.spline.emit_coords" => {
-            if let Some(b) = val.as_bool() {
-                sp.emit_curve_coordinates_tab = b;
-            }
+            sp.emit_curve_coordinates_tab = parse_bool_field(val, key)?;
         }
         "interpolate_unknowns" | "edit.spline.interpolate_unknowns" => {
-            if let Some(b) = val.as_bool() {
-                sp.interpolate_unknowns = b;
-            }
+            sp.interpolate_unknowns = parse_bool_field(val, key)?;
         }
         _ => return Ok(false),
     }

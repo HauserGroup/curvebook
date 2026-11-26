@@ -518,6 +518,14 @@ pub fn r1_paired_or_matched_allowed(doc: &ProjectDocument, source_sheet_id: Opti
     let Some(ds) = resolve_data_sheet(doc, source_sheet_id) else {
         return ControlEnablement::enabled();
     };
+    if let TableArchetype::Grouped(grp) = &ds.archetype {
+        if grp.subcolumn_mode.is_pre_summarized() {
+            return ControlEnablement::disabled(
+                "Paired and repeated-measures designs are disabled for pre-summarized (Mean +/- SD/SEM/%CV + n) Grouped tables.",
+            );
+        }
+        return ControlEnablement::enabled();
+    }
     let TableArchetype::Column(col) = &ds.archetype else {
         return ControlEnablement::enabled();
     };
@@ -592,34 +600,35 @@ fn evaluate_pairwise_widget(pw: &PairwiseComparisonsState, widget_id: &str) -> C
 }
 
 #[must_use]
-pub(crate) fn resolve_format_points_fallback_targets(app: &crate::UiApp) -> Vec<(usize, usize, Option<usize>)> {
+pub(crate) fn resolve_format_points_targets_for_graph(app: &crate::UiApp, graph_sheet_id: &SheetId) -> Vec<(usize, usize, Option<usize>)> {
     let doc = app.document();
-    if let Some(active_ds_id) = app.brushed_points.first().map(|p| p.sheet_id.clone())
-        && let Some(ds) = doc.data_sheet(&active_ds_id)
-    {
-        let grid_targets = app.grid.selected_graph_point_targets(ds, usize::MAX);
-        if !grid_targets.is_empty() {
-            return grid_targets;
-        }
-        let mut brushed: Vec<(usize, usize, Option<usize>)> = app
-            .brushed_points
-            .iter()
-            .map(|pt| {
-                let subcols = doc.data_sheet(&pt.sheet_id).map_or(1, |d| crate::grid_view::data_set_subcolumn_count(&d.archetype, pt.col));
-                (pt.col, pt.row, (subcols > 1).then_some(pt.subcol))
-            })
-            .collect();
+    let Some(graph) = doc.graph_sheet(graph_sheet_id) else {
+        return Vec::new();
+    };
+    let source_id = &graph.spec.primary_source_sheet_id;
+    let mut brushed: Vec<(usize, usize, Option<usize>)> = app
+        .brushed_points
+        .iter()
+        .filter(|pt| pt.sheet_id == *source_id)
+        .map(|pt| {
+            let subcols = doc.data_sheet(&pt.sheet_id).map_or(1, |d| crate::grid_view::data_set_subcolumn_count(&d.archetype, pt.col));
+            (pt.col, pt.row, (subcols > 1).then_some(pt.subcol))
+        })
+        .collect();
+    if !brushed.is_empty() {
         brushed.sort_unstable();
         brushed.dedup();
         return brushed;
     }
-    if let ActiveDialog::FormatSelectedPoints { graph_sheet_id } = &app.canvas_dialogs.active_dialog
-        && let Some(graph) = doc.graph_sheet(graph_sheet_id)
-        && let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id)
-    {
-        return app.grid.selected_graph_point_targets(ds, graph.spec.series.len().max(1));
-    }
-    Vec::new()
+    doc.data_sheet(source_id).map_or_else(Vec::new, |ds| app.grid.selected_graph_point_targets(ds, graph.spec.series.len().max(1)))
+}
+
+#[must_use]
+pub(crate) fn resolve_format_points_fallback_targets(app: &crate::UiApp) -> Vec<(usize, usize, Option<usize>)> {
+    let ActiveDialog::FormatSelectedPoints { graph_sheet_id } = &app.canvas_dialogs.active_dialog else {
+        return Vec::new();
+    };
+    resolve_format_points_targets_for_graph(app, graph_sheet_id)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -901,6 +910,9 @@ fn evaluate_edit_params_button(
         }
         if (cont.compute_odds_and_risk_ratios || cont.compute_sensitivity_specificity) && !(rows == 2 && cols == 2) {
             return r5_contingency_2x2_effect_sizes(rows, cols);
+        }
+        if let Some(err) = edit.unsupported_contingency_ci_error() {
+            return ControlEnablement::disabled(err);
         }
     }
     ControlEnablement::enabled()

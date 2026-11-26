@@ -887,6 +887,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         canonical_param_keys: &[
             "standardize",
             "parallel_analysis_seed",
+            "pcr_outcome_column",
             "spearman_rank",
             "k_means_k",
             "distance",

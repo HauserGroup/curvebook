@@ -12,6 +12,24 @@ use crate::formula::parser::{
     BinaryOp, Expr, FrameBound, NullsOrder, OrderByExpr, SortDirection, UnaryOp, VarRef, WindowFrame, WindowSpec, parse_formula,
 };
 
+/// Upper memory budget (64 MiB) for broadcasting a single string value across `N` rows.
+const MAX_MATERIALIZED_TEXT_BYTES: usize = 64 * 1024 * 1024;
+
+fn broadcast_formula_value(val: FormulaValue, n: usize) -> Result<Vec<FormulaValue>, TransformError> {
+    if let FormulaValue::Text(ref s) = val {
+        let total_bytes = s.len().saturating_mul(n);
+        if total_bytes > MAX_MATERIALIZED_TEXT_BYTES {
+            return Err(TransformError::InvalidSpec {
+                message: format!(
+                    "formula text broadcast ({} bytes across {n} rows = {total_bytes} bytes) exceeds maximum memory budget ({MAX_MATERIALIZED_TEXT_BYTES} bytes)",
+                    s.len()
+                ),
+            });
+        }
+    }
+    Ok(vec![val; n])
+}
+
 /// Typed runtime value produced by evaluating a formula expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FormulaValue {
@@ -437,7 +455,7 @@ fn dataset_row_value(cells: &[Vec<Cell>], row: usize) -> FormulaValue {
     if active.is_empty() {
         subcells.first().map_or(FormulaValue::Missing, FormulaValue::from_cell)
     } else {
-        FormulaValue::from_f64(sum::sum(&active) / (active.len() as f64))
+        sum::mean(&active).map_or(FormulaValue::Missing, FormulaValue::from_f64)
     }
 }
 
@@ -549,7 +567,7 @@ fn eval_column_expr_inner(expr: &Expr, ctx: &dyn FormulaContext) -> Result<Vec<F
         match step {
             EvalStep::Visit(node) => match node {
                 Expr::Number(v) => stack.push(vec![FormulaValue::from_f64(*v); n]),
-                Expr::Text(s) => stack.push(vec![FormulaValue::Text(s.clone()); n]),
+                Expr::Text(s) => stack.push(broadcast_formula_value(FormulaValue::Text(s.clone()), n)?),
                 Expr::Var(vref) => stack.push(eval_var_ref(vref, ctx)?),
                 Expr::Unary { op, expr: inner } => {
                     steps.push(EvalStep::ApplyUnary(*op));
@@ -624,7 +642,8 @@ fn eval_var_ref(vref: &VarRef, ctx: &dyn FormulaContext) -> Result<Vec<FormulaVa
             Err(TransformError::UnknownVariable { name: name.clone() })
         }
         VarRef::InfoConstant(key) => {
-            ctx.resolve_info_constant(key).map(|v| vec![v; n]).ok_or_else(|| TransformError::UnknownVariable { name: format!("Info(\"{key}\")") })
+            let v = ctx.resolve_info_constant(key).ok_or_else(|| TransformError::UnknownVariable { name: format!("Info(\"{key}\")") })?;
+            broadcast_formula_value(v, n)
         }
         VarRef::Bracketed(name) => {
             if let Some(idx) = ctx.resolve_column_index(name)
@@ -638,10 +657,10 @@ fn eval_var_ref(vref: &VarRef, ctx: &dyn FormulaContext) -> Result<Vec<FormulaVa
                 return Ok(normalize_col_len(xs, n));
             }
             if let Some(v) = ctx.resolve_info_constant(name) {
-                return Ok(vec![v; n]);
+                return broadcast_formula_value(v, n);
             }
             if let Some(v) = ctx.resolve_scalar(name) {
-                return Ok(vec![v; n]);
+                return broadcast_formula_value(v, n);
             }
             Err(TransformError::UnknownVariable { name: name.clone() })
         }
@@ -653,7 +672,7 @@ fn resolve_ident_var(name: &str, ctx: &dyn FormulaContext) -> Result<Vec<Formula
     let n = ctx.row_count();
     let trimmed = name.trim();
     if let Some(v) = ctx.resolve_scalar(trimmed) {
-        return Ok(vec![v; n]);
+        return broadcast_formula_value(v, n);
     }
     if let Some(c) = reserved_literal(trimmed) {
         return Ok(vec![c; n]);
@@ -668,7 +687,7 @@ fn resolve_ident_var(name: &str, ctx: &dyn FormulaContext) -> Result<Vec<Formula
             return Ok(vec![c; n]);
         }
         if let Some(v) = ctx.resolve_info_constant(trimmed) {
-            return Ok(vec![v; n]);
+            return broadcast_formula_value(v, n);
         }
         return Err(TransformError::UnknownVariable { name: name.to_owned() });
     }
@@ -683,7 +702,7 @@ fn resolve_ident_var(name: &str, ctx: &dyn FormulaContext) -> Result<Vec<Formula
         return Ok(normalize_col_len(vals, n));
     }
     if let Some(v) = ctx.resolve_info_constant(trimmed) {
-        return Ok(vec![v; n]);
+        return broadcast_formula_value(v, n);
     }
     Err(TransformError::UnknownVariable { name: name.to_owned() })
 }
@@ -860,15 +879,12 @@ fn try_eval_special_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext) -
         }
         "coalesce" => {
             check_min_arity("coalesce", args, 1)?;
-            let cols: Vec<Vec<FormulaValue>> = args.iter().map(|a| eval_column_expr_inner(a, ctx)).collect::<Result<_, _>>()?;
             let mut out = vec![FormulaValue::Missing; n];
-            for (r, slot) in out.iter_mut().enumerate() {
-                for col in &cols {
-                    if let Some(v) = col.get(r)
-                        && v.is_valid()
-                    {
-                        *slot = v.clone();
-                        break;
+            for arg in args {
+                let col = eval_column_expr_inner(arg, ctx)?;
+                for (slot, val) in out.iter_mut().zip(col) {
+                    if !slot.is_valid() && val.is_valid() {
+                        *slot = val;
                     }
                 }
             }
@@ -988,7 +1004,11 @@ fn cmp_formula_value_for_order(a: &FormulaValue, b: &FormulaValue, dir: SortDire
         (false, false) => {}
     }
     let base = match (a, b) {
-        (FormulaValue::Number(x), FormulaValue::Number(y)) => x.total_cmp(y),
+        (FormulaValue::Number(x), FormulaValue::Number(y)) => {
+            let xn = if *x == 0.0 { 0.0 } else { *x };
+            let yn = if *y == 0.0 { 0.0 } else { *y };
+            xn.total_cmp(&yn)
+        }
         (FormulaValue::Text(x), FormulaValue::Text(y)) => x.cmp(y),
         (FormulaValue::Number(_), FormulaValue::Text(_)) => Ordering::Less,
         (FormulaValue::Text(_), FormulaValue::Number(_)) => Ordering::Greater,
@@ -1431,7 +1451,7 @@ fn try_eval_aggregate_call(
     let Some(wspec) = window else {
         let all_rows: Vec<usize> = (0..n).collect();
         let val = compute_agg_over_rows(&op, &all_rows, where_mask.as_deref(), &vals, conds.as_deref());
-        return Ok(Some(vec![val; n]));
+        return Ok(Some(broadcast_formula_value(val, n)?));
     };
 
     let mut partitions = build_partitions(&wspec.partition_by, None, n, ctx)?;
@@ -1451,24 +1471,509 @@ fn try_eval_aggregate_call(
             continue;
         }
         let peer_ends = if resolved_frame.is_none() && !order_cols.is_empty() { Some(compute_peer_ends(part, &order_cols)) } else { None };
-        for (pos, &r) in part.iter().enumerate() {
-            let agg_val = if let Some(frame) = resolved_frame {
-                match frame.bounds_for(pos, part.len()) {
-                    Some((lo, hi)) => compute_agg_over_rows(&op, &part[lo..=hi], where_mask.as_deref(), &vals, conds.as_deref()),
-                    None => op.empty_frame_value(),
+        eval_framed_agg_partition(&op, part, resolved_frame, peer_ends.as_deref(), where_mask.as_deref(), &vals, conds.as_deref(), &mut out);
+    }
+    Ok(Some(out))
+}
+
+/// Amortized `O(1)`-per-step two-stack sliding-window aggregator for any associative semigroup.
+///
+/// Maintains monotonic window ranges `[lo, hi_excl)` without subtraction, avoiding catastrophic
+/// cancellation and `Inf - Inf` overflow while bounding total work to `<= 3 * m` combines (`O(m)`).
+struct SwagWindow<T: Copy, F: Fn(T, T) -> T> {
+    front: Vec<(T, T)>,
+    back: Vec<(T, T)>,
+    combine: F,
+}
+
+impl<T: Copy, F: Fn(T, T) -> T> SwagWindow<T, F> {
+    fn new(combine: F) -> Self {
+        Self { front: Vec::new(), back: Vec::new(), combine }
+    }
+
+    fn clear(&mut self) {
+        self.front.clear();
+        self.back.clear();
+    }
+
+    fn push(&mut self, val: T) {
+        let agg = match self.back.last() {
+            Some(&(_, prev)) => (self.combine)(prev, val),
+            None => val,
+        };
+        self.back.push((val, agg));
+    }
+
+    fn pop(&mut self) {
+        if self.front.is_empty() {
+            while let Some((v, _)) = self.back.pop() {
+                let agg = match self.front.last() {
+                    Some(&(_, prev)) => (self.combine)(v, prev),
+                    None => v,
+                };
+                self.front.push((v, agg));
+            }
+        }
+        let _ = self.front.pop();
+    }
+
+    fn query(&self) -> Option<T> {
+        match (self.front.last(), self.back.last()) {
+            (Some(&(_, f)), Some(&(_, b))) => Some((self.combine)(f, b)),
+            (Some(&(_, f)), None) => Some(f),
+            (None, Some(&(_, b))) => Some(b),
+            (None, None) => None,
+        }
+    }
+
+    fn advance_to<G: Fn(usize) -> T>(&mut self, cur_lo: &mut usize, cur_hi: &mut usize, lo: usize, hi_excl: usize, elem: G) {
+        if *cur_hi <= lo {
+            self.clear();
+            *cur_lo = lo;
+            *cur_hi = lo;
+        }
+        while *cur_hi < hi_excl {
+            self.push(elem(*cur_hi));
+            *cur_hi += 1;
+        }
+        while *cur_lo < lo {
+            self.pop();
+            *cur_lo += 1;
+        }
+    }
+}
+
+/// Associative parallel summary moments (Chan, Golub, & LeVeque 1979) with Neumaier sum
+/// and exact power-of-two `M2` rescaling so neither `mean([1e308, 1e308])` nor `sd([-1e160, 1e160])` overflows.
+#[derive(Clone, Copy)]
+struct MomentsAgg {
+    count: usize,
+    sum: sum::NeumaierSum,
+    mean: f64,
+    scale: f64,
+    m2_scaled: f64,
+}
+
+impl MomentsAgg {
+    const fn empty() -> Self {
+        Self { count: 0, sum: sum::NeumaierSum::new(), mean: 0.0, scale: 0.0, m2_scaled: 0.0 }
+    }
+
+    fn single(x: f64) -> Self {
+        let mut s = sum::NeumaierSum::new();
+        s.add(x);
+        Self { count: 1, sum: s, mean: x, scale: 0.0, m2_scaled: 0.0 }
+    }
+
+    fn combine(a: Self, b: Self) -> Self {
+        if a.count == 0 {
+            return b;
+        }
+        if b.count == 0 {
+            return a;
+        }
+        let count = a.count + b.count;
+        let mut s = a.sum;
+        s.add(b.sum.total());
+        #[allow(clippy::cast_precision_loss)]
+        let na = a.count as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let nb = b.count as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let n_f = count as f64;
+        let total = s.total();
+        let mean = if total.is_finite() { total / n_f } else { (na / n_f) * a.mean + (nb / n_f) * b.mean };
+
+        let raw_delta = b.mean - a.mean;
+        let ref_mag = a.scale.max(b.scale).max(if raw_delta.is_finite() { raw_delta.abs() } else { a.mean.abs().max(b.mean.abs()) });
+        if ref_mag == 0.0 {
+            return Self { count, sum: s, mean, scale: 0.0, m2_scaled: 0.0 };
+        }
+        let new_scale = if ref_mag > 1e130 || ref_mag < 1e-140 {
+            #[allow(clippy::cast_possible_truncation)]
+            let shift = (ref_mag.log2().floor() as i32).clamp(-1000, 1000);
+            2.0_f64.powi(shift)
+        } else {
+            a.scale.max(b.scale).max(1.0)
+        };
+        let fa = a.scale / new_scale;
+        let fb = b.scale / new_scale;
+        let delta_s = if raw_delta.is_finite() { raw_delta / new_scale } else { (b.mean / new_scale) - (a.mean / new_scale) };
+        let weight = na * (nb / n_f);
+        let m2_scaled = a.m2_scaled * (fa * fa) + b.m2_scaled * (fb * fb) + delta_s * delta_s * weight;
+        Self { count, sum: s, mean, scale: new_scale, m2_scaled }
+    }
+
+    fn sum_val(self, empty_as_zero: bool) -> FormulaValue {
+        if self.count == 0 {
+            return if empty_as_zero { FormulaValue::Number(0.0) } else { FormulaValue::Missing };
+        }
+        FormulaValue::from_f64(self.sum.total())
+    }
+
+    fn mean_val(self) -> FormulaValue {
+        if self.count == 0 { FormulaValue::Missing } else { FormulaValue::from_f64(self.mean) }
+    }
+
+    fn sd_val(self) -> FormulaValue {
+        if self.count < 2 {
+            return FormulaValue::Missing;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let denom = (self.count - 1) as f64;
+        FormulaValue::from_f64(self.scale * (self.m2_scaled / denom).max(0.0).sqrt())
+    }
+
+    fn sem_val(self) -> FormulaValue {
+        if self.count < 2 {
+            return FormulaValue::Missing;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let denom = ((self.count - 1) as f64) * (self.count as f64);
+        FormulaValue::from_f64(self.scale * (self.m2_scaled / denom).max(0.0).sqrt())
+    }
+
+    fn var_val(self) -> FormulaValue {
+        if self.count < 2 {
+            return FormulaValue::Missing;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let denom = (self.count - 1) as f64;
+        let v = (self.m2_scaled / denom).max(0.0);
+        FormulaValue::from_f64((v * self.scale) * self.scale)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GeoMeanAgg {
+    count: usize,
+    has_non_pos: bool,
+    log_sum: sum::NeumaierSum,
+}
+
+impl GeoMeanAgg {
+    const fn empty() -> Self {
+        Self { count: 0, has_non_pos: false, log_sum: sum::NeumaierSum::new() }
+    }
+
+    fn single(x: f64) -> Self {
+        if x <= 0.0 {
+            Self { count: 1, has_non_pos: true, log_sum: sum::NeumaierSum::new() }
+        } else {
+            let mut s = sum::NeumaierSum::new();
+            s.add(x.ln());
+            Self { count: 1, has_non_pos: false, log_sum: s }
+        }
+    }
+
+    fn combine(a: Self, b: Self) -> Self {
+        let mut s = a.log_sum;
+        s.add(b.log_sum.total());
+        Self { count: a.count + b.count, has_non_pos: a.has_non_pos || b.has_non_pos, log_sum: s }
+    }
+
+    fn finish(self) -> FormulaValue {
+        if self.count == 0 || self.has_non_pos {
+            return FormulaValue::Missing;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let mean_ln = self.log_sum.total() / (self.count as f64);
+        FormulaValue::from_f64(mean_ln.exp())
+    }
+}
+
+/// Coordinate-compressed Fenwick tree supporting `O(log m)` multiset insert/remove and Type-7
+/// quantile queries (`Median`, `Iqr`, `Percentile`) over sliding/cumulative window frames.
+struct OrderStatWindow {
+    unique: Vec<f64>,
+    bit: Vec<usize>,
+    count: usize,
+    highest_pow2: usize,
+}
+
+impl OrderStatWindow {
+    fn from_values(active: &[Option<f64>]) -> (Self, Vec<Option<usize>>) {
+        let mut unique: Vec<f64> = active.iter().copied().flatten().collect();
+        unique.sort_by(f64::total_cmp);
+        unique.dedup();
+        let ranks: Vec<Option<usize>> = active.iter().map(|opt| opt.map(|x| unique.partition_point(|&v| v < x))).collect();
+        let len = unique.len();
+        let highest_pow2 = if len == 0 { 0 } else { 1_usize << (usize::BITS - 1 - len.leading_zeros()) };
+        let bit = vec![0_usize; len + 1];
+        (Self { unique, bit, count: 0, highest_pow2 }, ranks)
+    }
+
+    fn insert(&mut self, rank: usize) {
+        self.count += 1;
+        let mut i = rank + 1;
+        while i < self.bit.len() {
+            self.bit[i] += 1;
+            i += i.isolate_lowest_one();
+        }
+    }
+
+    fn remove(&mut self, rank: usize) {
+        self.count = self.count.saturating_sub(1);
+        let mut i = rank + 1;
+        while i < self.bit.len() {
+            self.bit[i] = self.bit[i].saturating_sub(1);
+            i += i.isolate_lowest_one();
+        }
+    }
+
+    fn kth(&self, k: usize) -> Option<f64> {
+        if k >= self.count || self.unique.is_empty() {
+            return None;
+        }
+        let mut idx = 0_usize;
+        let mut rem = k;
+        let mut step = self.highest_pow2;
+        while step > 0 {
+            let next = idx + step;
+            if next < self.bit.len() && self.bit[next] <= rem {
+                rem -= self.bit[next];
+                idx = next;
+            }
+            step >>= 1;
+        }
+        self.unique.get(idx).copied()
+    }
+
+    fn percentile(&self, p_percent: f64) -> FormulaValue {
+        if self.count == 0 || !p_percent.is_finite() || !(0.0..=100.0).contains(&p_percent) {
+            return FormulaValue::Missing;
+        }
+        if self.count == 1 {
+            return self.kth(0).map_or(FormulaValue::Missing, FormulaValue::from_f64);
+        }
+        let pc = (p_percent / 100.0).clamp(0.0, 1.0);
+        #[allow(clippy::cast_precision_loss)]
+        let idx = pc * ((self.count - 1) as f64);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let lo = (idx.floor() as usize).min(self.count - 1);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let hi = (idx.ceil() as usize).min(self.count - 1);
+        let Some(lo_v) = self.kth(lo) else {
+            return FormulaValue::Missing;
+        };
+        if lo == hi {
+            return FormulaValue::from_f64(lo_v);
+        }
+        let Some(hi_v) = self.kth(hi) else {
+            return FormulaValue::Missing;
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let frac = idx - (lo as f64);
+        let diff = hi_v - lo_v;
+        let out = if diff.is_finite() { lo_v + frac * diff } else { (1.0 - frac) * lo_v + frac * hi_v };
+        FormulaValue::from_f64(out)
+    }
+}
+
+fn frame_range_for_pos(pos: usize, part_len: usize, resolved_frame: Option<ResolvedFrame>, peer_ends: Option<&[usize]>) -> Option<(usize, usize)> {
+    if let Some(frame) = resolved_frame {
+        frame.bounds_for(pos, part_len)
+    } else if let Some(ends) = peer_ends {
+        let end = ends.get(pos).copied().unwrap_or(pos);
+        Some((0, end))
+    } else if part_len > 0 {
+        Some((0, part_len - 1))
+    } else {
+        None
+    }
+}
+
+fn active_numeric_for_agg(
+    op: &AggOp,
+    part: &[usize],
+    where_mask: Option<&[bool]>,
+    vals: &[FormulaValue],
+    conds: Option<&[FormulaValue]>,
+) -> Vec<Option<f64>> {
+    let is_cond = matches!(op, AggOp::SumIf | AggOp::MeanIf | AggOp::MinIf | AggOp::MaxIf | AggOp::SdIf | AggOp::SemIf);
+    part.iter()
+        .map(|&r| {
+            if where_mask.is_some_and(|m| !m.get(r).copied().unwrap_or(false)) {
+                return None;
+            }
+            if is_cond && conds.and_then(|c| c.get(r)).and_then(FormulaValue::as_bool) != Some(true) {
+                return None;
+            }
+            vals.get(r).and_then(FormulaValue::as_finite_f64)
+        })
+        .collect()
+}
+
+fn active_count_flags(op: &AggOp, part: &[usize], where_mask: Option<&[bool]>, vals: &[FormulaValue], conds: Option<&[FormulaValue]>) -> Vec<usize> {
+    part.iter()
+        .map(|&r| {
+            if where_mask.is_some_and(|m| !m.get(r).copied().unwrap_or(false)) {
+                return 0;
+            }
+            let keep = match op {
+                AggOp::Count => vals.get(r).is_some_and(FormulaValue::is_valid),
+                AggOp::CountIf { has_value_expr } => {
+                    conds.and_then(|c| c.get(r)).and_then(FormulaValue::as_bool) == Some(true)
+                        && (!has_value_expr || vals.get(r).and_then(FormulaValue::as_finite_f64).is_some())
                 }
-            } else if let Some(ends) = &peer_ends {
-                let end = ends.get(pos).copied().unwrap_or(pos);
-                compute_agg_over_rows(&op, &part[0..=end], where_mask.as_deref(), &vals, conds.as_deref())
-            } else {
-                compute_agg_over_rows(&op, part, where_mask.as_deref(), &vals, conds.as_deref())
+                AggOp::CountAIf => {
+                    conds.and_then(|c| c.get(r)).and_then(FormulaValue::as_bool) == Some(true) && vals.get(r).is_some_and(FormulaValue::is_valid)
+                }
+                _ => false,
             };
-            if let Some(slot) = out.get_mut(r) {
-                *slot = agg_val;
+            usize::from(keep)
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn eval_framed_agg_partition(
+    op: &AggOp,
+    part: &[usize],
+    resolved_frame: Option<ResolvedFrame>,
+    peer_ends: Option<&[usize]>,
+    where_mask: Option<&[bool]>,
+    vals: &[FormulaValue],
+    conds: Option<&[FormulaValue]>,
+    out: &mut [FormulaValue],
+) {
+    let m = part.len();
+    if m == 0 {
+        return;
+    }
+    match op {
+        AggOp::Count | AggOp::CountIf { .. } | AggOp::CountAIf => {
+            let flags = active_count_flags(op, part, where_mask, vals, conds);
+            let mut prefix = Vec::with_capacity(m + 1);
+            prefix.push(0_usize);
+            let mut acc = 0_usize;
+            for f in flags {
+                acc += f;
+                prefix.push(acc);
+            }
+            for (pos, &r) in part.iter().enumerate() {
+                let agg_val = match frame_range_for_pos(pos, m, resolved_frame, peer_ends) {
+                    Some((lo, hi)) =>
+                    {
+                        #[allow(clippy::cast_precision_loss)]
+                        FormulaValue::Number((prefix[hi + 1] - prefix[lo]) as f64)
+                    }
+                    None => op.empty_frame_value(),
+                };
+                if let Some(slot) = out.get_mut(r) {
+                    *slot = agg_val;
+                }
+            }
+        }
+        AggOp::MinCol | AggOp::MinIf | AggOp::MaxCol | AggOp::MaxIf => {
+            let is_min = matches!(op, AggOp::MinCol | AggOp::MinIf);
+            let active = active_numeric_for_agg(op, part, where_mask, vals, conds);
+            let mut swag = SwagWindow::new(|a: Option<f64>, b: Option<f64>| match (a, b) {
+                (Some(x), Some(y)) => Some(if is_min { x.min(y) } else { x.max(y) }),
+                (Some(x), None) | (None, Some(x)) => Some(x),
+                (None, None) => None,
+            });
+            let (mut cur_lo, mut cur_hi) = (0_usize, 0_usize);
+            for (pos, &r) in part.iter().enumerate() {
+                let agg_val = match frame_range_for_pos(pos, m, resolved_frame, peer_ends) {
+                    Some((lo, hi)) => {
+                        swag.advance_to(&mut cur_lo, &mut cur_hi, lo, hi + 1, |i| active[i]);
+                        swag.query().flatten().map_or(FormulaValue::Missing, FormulaValue::from_f64)
+                    }
+                    None => op.empty_frame_value(),
+                };
+                if let Some(slot) = out.get_mut(r) {
+                    *slot = agg_val;
+                }
+            }
+        }
+        AggOp::GeoMean => {
+            let active = active_numeric_for_agg(op, part, where_mask, vals, conds);
+            let mut swag = SwagWindow::new(GeoMeanAgg::combine);
+            let (mut cur_lo, mut cur_hi) = (0_usize, 0_usize);
+            for (pos, &r) in part.iter().enumerate() {
+                let agg_val = match frame_range_for_pos(pos, m, resolved_frame, peer_ends) {
+                    Some((lo, hi)) => {
+                        swag.advance_to(&mut cur_lo, &mut cur_hi, lo, hi + 1, |i| active[i].map_or(GeoMeanAgg::empty(), GeoMeanAgg::single));
+                        swag.query().map_or(FormulaValue::Missing, GeoMeanAgg::finish)
+                    }
+                    None => op.empty_frame_value(),
+                };
+                if let Some(slot) = out.get_mut(r) {
+                    *slot = agg_val;
+                }
+            }
+        }
+        AggOp::Median | AggOp::Iqr | AggOp::Percentile(_) => {
+            let active = active_numeric_for_agg(op, part, where_mask, vals, conds);
+            let (mut tree, ranks) = OrderStatWindow::from_values(&active);
+            let (mut cur_lo, mut cur_hi) = (0_usize, 0_usize);
+            for (pos, &r) in part.iter().enumerate() {
+                let agg_val = match frame_range_for_pos(pos, m, resolved_frame, peer_ends) {
+                    Some((lo, hi)) => {
+                        let hi_excl = hi + 1;
+                        if cur_hi <= lo {
+                            for rk in ranks[cur_lo..cur_hi].iter().flatten() {
+                                tree.remove(*rk);
+                            }
+                            cur_lo = lo;
+                            cur_hi = lo;
+                        }
+                        while cur_hi < hi_excl {
+                            if let Some(rk) = ranks[cur_hi] {
+                                tree.insert(rk);
+                            }
+                            cur_hi += 1;
+                        }
+                        while cur_lo < lo {
+                            if let Some(rk) = ranks[cur_lo] {
+                                tree.remove(rk);
+                            }
+                            cur_lo += 1;
+                        }
+                        match op {
+                            AggOp::Median => tree.percentile(50.0),
+                            AggOp::Percentile(p) => tree.percentile(*p),
+                            AggOp::Iqr => match (tree.percentile(75.0).as_finite_f64(), tree.percentile(25.0).as_finite_f64()) {
+                                (Some(q3), Some(q1)) => FormulaValue::from_f64(q3 - q1),
+                                _ => FormulaValue::Missing,
+                            },
+                            _ => FormulaValue::Missing,
+                        }
+                    }
+                    None => op.empty_frame_value(),
+                };
+                if let Some(slot) = out.get_mut(r) {
+                    *slot = agg_val;
+                }
+            }
+        }
+        AggOp::Sum | AggOp::SumIf | AggOp::Mean | AggOp::MeanIf | AggOp::Sd | AggOp::SdIf | AggOp::Sem | AggOp::SemIf | AggOp::Var => {
+            let active = active_numeric_for_agg(op, part, where_mask, vals, conds);
+            let mut swag = SwagWindow::new(MomentsAgg::combine);
+            let (mut cur_lo, mut cur_hi) = (0_usize, 0_usize);
+            for (pos, &r) in part.iter().enumerate() {
+                let agg_val = match frame_range_for_pos(pos, m, resolved_frame, peer_ends) {
+                    Some((lo, hi)) => {
+                        swag.advance_to(&mut cur_lo, &mut cur_hi, lo, hi + 1, |i| active[i].map_or(MomentsAgg::empty(), MomentsAgg::single));
+                        let agg = swag.query().unwrap_or_else(MomentsAgg::empty);
+                        match op {
+                            AggOp::Sum | AggOp::SumIf => agg.sum_val(true),
+                            AggOp::Mean | AggOp::MeanIf => agg.mean_val(),
+                            AggOp::Sd | AggOp::SdIf => agg.sd_val(),
+                            AggOp::Sem | AggOp::SemIf => agg.sem_val(),
+                            AggOp::Var => agg.var_val(),
+                            _ => FormulaValue::Missing,
+                        }
+                    }
+                    None => op.empty_frame_value(),
+                };
+                if let Some(slot) = out.get_mut(r) {
+                    *slot = agg_val;
+                }
             }
         }
     }
-    Ok(Some(out))
 }
 
 struct ScalarOnlyContext<'a> {
@@ -1605,11 +2110,8 @@ fn var_ref_name(v: &VarRef) -> Option<&str> {
     }
 }
 
-fn expr_matches_single_order(expr: &Expr, order_by: &[OrderByExpr]) -> Option<SortDirection> {
-    if order_by.len() != 1 {
-        return None;
-    }
-    let ord = &order_by[0];
+fn expr_matches_primary_order(expr: &Expr, order_by: &[OrderByExpr]) -> Option<SortDirection> {
+    let ord = order_by.first()?;
     if &ord.expr == expr {
         return Some(ord.direction);
     }
@@ -1684,6 +2186,16 @@ fn eval_window_row_number(
     Ok(out)
 }
 
+/// Evaluate `rank(...)` and `dense_rank(...)` in both statistical 1-argument and SQL 0-argument modes:
+///
+/// - **1-argument `rank(expr)` / `dense_rank(expr)`**: ranks all non-missing values (both numeric
+///   and text) within each partition, honoring the primary `ORDER BY` key direction when `order_by.first()`
+///   matches `expr` (even when secondary tie-breaker keys follow). `rank(expr)` assigns statistical
+///   average midranks (`1.5, 1.5, 3`) and `dense_rank(expr)` assigns consecutive dense ranks (`1, 1, 2`);
+///   `Missing` inputs propagate as `FormulaValue::Missing`.
+/// - **0-argument `rank() OVER (ORDER BY ...)` / `dense_rank() OVER (ORDER BY ...)`**: evaluates
+///   standard SQL competition ranking (`1, 1, 3`) / dense ranking (`1, 1, 2`) across the full
+///   `ORDER BY` tuple, honoring explicit `NULLS FIRST` / `NULLS LAST` ordering on every key.
 fn eval_window_rank(
     lower: &str,
     args: &[Expr],
@@ -1704,7 +2216,7 @@ fn eval_window_rank(
     let prep = prepare_filtered_partitions(filter, window, n, ctx)?;
     let mut out = vec![FormulaValue::Missing; n];
     if let (Some(val_vec), Some(arg0)) = (vals, args.first()) {
-        let desc = expr_matches_single_order(arg0, order_by_slice) == Some(SortDirection::Desc);
+        let desc = expr_matches_primary_order(arg0, order_by_slice) == Some(SortDirection::Desc);
         for part in &prep.partitions {
             let part_vals: Vec<FormulaValue> = part.iter().map(|&r| val_vec.get(r).cloned().unwrap_or(FormulaValue::Missing)).collect();
             let ranked = eval_rank_directed(&part_vals, dense, desc);
@@ -1743,16 +2255,21 @@ fn eval_window_standardize(
 
     for part in &prep.partitions {
         if let Some(frame) = resolved_frame {
+            let mut swag = SwagWindow::new(MomentsAgg::combine);
+            let (mut cur_lo, mut cur_hi) = (0_usize, 0_usize);
             for (pos, &r) in part.iter().enumerate() {
-                let Some(x) = vals.get(r).and_then(FormulaValue::as_finite_f64) else {
-                    continue;
-                };
                 let Some((lo, hi)) = frame.bounds_for(pos, part.len()) else {
                     continue;
                 };
-                let nums = frame_finite_nums(part, lo, hi, &vals);
+                swag.advance_to(&mut cur_lo, &mut cur_hi, lo, hi + 1, |i| {
+                    part.get(i).and_then(|&idx| vals.get(idx)).and_then(FormulaValue::as_finite_f64).map_or(MomentsAgg::empty(), MomentsAgg::single)
+                });
+                let Some(x) = vals.get(r).and_then(FormulaValue::as_finite_f64) else {
+                    continue;
+                };
+                let agg = swag.query().unwrap_or_else(MomentsAgg::empty);
                 if let Some(slot) = out.get_mut(r) {
-                    *slot = compute_center_or_z(x, &nums, standardize);
+                    *slot = compute_center_or_z_from_agg(x, agg, standardize);
                 }
             }
         } else {
@@ -1785,31 +2302,55 @@ fn eval_window_cumulative(
 
     for part in &prep.partitions {
         if let Some(frame) = resolved_frame {
-            for (pos, &r) in part.iter().enumerate() {
-                if vals.get(r).and_then(FormulaValue::as_finite_f64).is_none() {
-                    continue;
-                }
-                let Some((lo, hi)) = frame.bounds_for(pos, part.len()) else {
-                    continue;
-                };
-                let nums = frame_finite_nums(part, lo, hi, &vals);
-                if nums.is_empty() {
-                    continue;
-                }
-                let res = match lower {
-                    "cumsum" => FormulaValue::from_f64(sum::sum(&nums)),
-                    "cummean" => sum::mean(&nums).map_or(FormulaValue::Missing, FormulaValue::from_f64),
-                    _ => FormulaValue::from_f64(nums.iter().copied().product()),
-                };
-                if let Some(slot) = out.get_mut(r) {
-                    *slot = res;
-                }
-            }
+            eval_framed_cumulative_partition(lower, part, frame, &vals, &mut out);
         } else {
             eval_cum_partition(lower, part, &vals, &mut out);
         }
     }
     Ok(out)
+}
+
+fn eval_framed_cumulative_partition(lower: &str, part: &[usize], frame: ResolvedFrame, vals: &[FormulaValue], out: &mut [FormulaValue]) {
+    if lower == "cumprod" {
+        let mut swag = SwagWindow::new(|a: Option<f64>, b: Option<f64>| match (a, b) {
+            (Some(x), Some(y)) => Some(x * y),
+            (Some(x), None) | (None, Some(x)) => Some(x),
+            (None, None) => None,
+        });
+        let (mut cur_lo, mut cur_hi) = (0_usize, 0_usize);
+        for (pos, &r) in part.iter().enumerate() {
+            let Some((lo, hi)) = frame.bounds_for(pos, part.len()) else {
+                continue;
+            };
+            swag.advance_to(&mut cur_lo, &mut cur_hi, lo, hi + 1, |i| {
+                part.get(i).and_then(|&idx| vals.get(idx)).and_then(FormulaValue::as_finite_f64)
+            });
+            if let Some(prod) = swag.query().flatten()
+                && let Some(slot) = out.get_mut(r)
+            {
+                *slot = FormulaValue::from_f64(prod);
+            }
+        }
+        return;
+    }
+
+    let as_mean = lower == "cummean";
+    let mut swag = SwagWindow::new(MomentsAgg::combine);
+    let (mut cur_lo, mut cur_hi) = (0_usize, 0_usize);
+    for (pos, &r) in part.iter().enumerate() {
+        let Some((lo, hi)) = frame.bounds_for(pos, part.len()) else {
+            continue;
+        };
+        swag.advance_to(&mut cur_lo, &mut cur_hi, lo, hi + 1, |i| {
+            part.get(i).and_then(|&idx| vals.get(idx)).and_then(FormulaValue::as_finite_f64).map_or(MomentsAgg::empty(), MomentsAgg::single)
+        });
+        let agg = swag.query().unwrap_or_else(MomentsAgg::empty);
+        if agg.count > 0
+            && let Some(slot) = out.get_mut(r)
+        {
+            *slot = if as_mean { agg.mean_val() } else { agg.sum_val(false) };
+        }
+    }
 }
 
 fn eval_shift_or_diff_k(args: &[Expr], ctx: &dyn FormulaContext, fn_name: &str) -> Result<usize, TransformError> {
@@ -1899,20 +2440,20 @@ fn eval_window_rolling(
 
     for part in &prep.partitions {
         if let Some(frame) = resolved_frame {
+            let mut swag = SwagWindow::new(MomentsAgg::combine);
+            let (mut cur_lo, mut cur_hi) = (0_usize, 0_usize);
             for (pos, &r) in part.iter().enumerate() {
-                if vals.get(r).and_then(FormulaValue::as_finite_f64).is_none() {
-                    continue;
-                }
                 let Some((lo, hi)) = frame.bounds_for(pos, part.len()) else {
                     continue;
                 };
-                let slice_nums = frame_finite_nums(part, lo, hi, &vals);
-                if !slice_nums.is_empty()
+                swag.advance_to(&mut cur_lo, &mut cur_hi, lo, hi + 1, |i| {
+                    part.get(i).and_then(|&idx| vals.get(idx)).and_then(FormulaValue::as_finite_f64).map_or(MomentsAgg::empty(), MomentsAgg::single)
+                });
+                let agg = swag.query().unwrap_or_else(MomentsAgg::empty);
+                if agg.count > 0
                     && let Some(slot) = out.get_mut(r)
                 {
-                    let total = sum::sum(&slice_nums);
-                    let res = if as_mean { total / (slice_nums.len() as f64) } else { total };
-                    *slot = FormulaValue::from_f64(res);
+                    *slot = if as_mean { agg.mean_val() } else { agg.sum_val(false) };
                 }
             }
         } else if let Some(width) = w {
@@ -1941,8 +2482,22 @@ fn compute_center_or_z(x: f64, nums: &[f64], standardize: bool) -> FormulaValue 
     if sd == 0.0 || !sd.is_finite() { FormulaValue::Missing } else { FormulaValue::from_f64((x - moments.mean) / sd) }
 }
 
+fn compute_center_or_z_from_agg(x: f64, agg: MomentsAgg, standardize: bool) -> FormulaValue {
+    if agg.count == 0 || !agg.mean.is_finite() {
+        return FormulaValue::Missing;
+    }
+    if !standardize {
+        return FormulaValue::from_f64(x - agg.mean);
+    }
+    let Some(sd) = agg.sd_val().as_finite_f64() else {
+        return FormulaValue::Missing;
+    };
+    if sd == 0.0 { FormulaValue::Missing } else { FormulaValue::from_f64((x - agg.mean) / sd) }
+}
+
 fn eval_cum_partition(lower: &str, part: &[usize], vals: &[FormulaValue], out: &mut [FormulaValue]) {
     let mut acc = sum::NeumaierSum::new();
+    let mut mean_est = 0.0_f64;
     let mut prod = 1.0_f64;
     let mut count = 0_usize;
     for &r in part {
@@ -1961,7 +2516,11 @@ fn eval_cum_partition(lower: &str, part: &[usize], vals: &[FormulaValue], out: &
             _ => {
                 acc.add(x);
                 count += 1;
-                FormulaValue::from_f64(acc.total() / (count as f64))
+                #[allow(clippy::cast_precision_loss)]
+                let c = count as f64;
+                mean_est += (x / c) - (mean_est / c);
+                let total = acc.total();
+                FormulaValue::from_f64(if total.is_finite() { total / c } else { mean_est })
             }
         };
         if let Some(slot) = out.get_mut(r) {
@@ -1994,33 +2553,37 @@ fn eval_order_rank_into(part: &[usize], order_cols: &[OrderKeyColumn], dense: bo
 fn eval_rolling(vals: &[FormulaValue], window: usize, as_mean: bool) -> Vec<FormulaValue> {
     let n = vals.len();
     let mut out = Vec::with_capacity(n);
+    let mut swag = SwagWindow::new(MomentsAgg::combine);
+    let (mut cur_lo, mut cur_hi) = (0_usize, 0_usize);
     for i in 0..n {
-        if i + 1 < window || vals.get(i).and_then(FormulaValue::as_finite_f64).is_none() {
+        if i + 1 < window {
             out.push(FormulaValue::Missing);
             continue;
         }
         let start = i + 1 - window;
-        let slice_nums: Vec<f64> = vals.get(start..=i).unwrap_or(&[]).iter().filter_map(FormulaValue::as_finite_f64).collect();
-        if slice_nums.is_empty() {
+        swag.advance_to(&mut cur_lo, &mut cur_hi, start, i + 1, |idx| {
+            vals.get(idx).and_then(FormulaValue::as_finite_f64).map_or(MomentsAgg::empty(), MomentsAgg::single)
+        });
+        let agg = swag.query().unwrap_or_else(MomentsAgg::empty);
+        if agg.count == 0 {
             out.push(FormulaValue::Missing);
         } else {
-            let total = sum::sum(&slice_nums);
-            let res = if as_mean { total / (slice_nums.len() as f64) } else { total };
-            out.push(FormulaValue::from_f64(res));
+            out.push(if as_mean { agg.mean_val() } else { agg.sum_val(false) });
         }
     }
     out
 }
 
 fn eval_rank_directed(vals: &[FormulaValue], dense: bool, descending: bool) -> Vec<FormulaValue> {
-    let mut indexed: Vec<(usize, f64)> = vals.iter().enumerate().filter_map(|(i, v)| v.as_finite_f64().map(|x| (i, x))).collect();
-    indexed.sort_by(|a, b| if descending { b.1.total_cmp(&a.1) } else { a.1.total_cmp(&b.1) });
+    let dir = if descending { SortDirection::Desc } else { SortDirection::Asc };
+    let mut indexed: Vec<(usize, &FormulaValue)> = vals.iter().enumerate().filter(|(_, v)| v.is_valid()).collect();
+    indexed.sort_by(|a, b| cmp_formula_value_for_order(a.1, b.1, dir, NullsOrder::Last));
     let mut out = vec![FormulaValue::Missing; vals.len()];
     let mut pos = 0;
     let mut dense_level = 1_usize;
     while let Some(&(_, pos_val)) = indexed.get(pos) {
         let mut end = pos + 1;
-        while indexed.get(end).is_some_and(|&(_, end_val)| end_val == pos_val) {
+        while indexed.get(end).is_some_and(|&(_, end_val)| cmp_formula_value_for_order(pos_val, end_val, dir, NullsOrder::Last) == Ordering::Equal) {
             end += 1;
         }
         #[allow(clippy::cast_precision_loss)]
@@ -2037,16 +2600,116 @@ fn eval_rank_directed(vals: &[FormulaValue], dense: bool, descending: bool) -> V
 }
 
 fn eval_scalar_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext) -> Result<Vec<FormulaValue>, TransformError> {
+    validate_scalar_call_arity(lower, args.len())?;
+    match lower {
+        "min" | "max" => return eval_streaming_minmax(args, ctx, lower == "min"),
+        "sum" | "mean" => return eval_streaming_sum_or_mean(args, ctx, lower == "mean"),
+        "and" | "or" => return eval_streaming_logic(args, ctx, lower == "and"),
+        _ => {}
+    }
+
     let n = ctx.row_count();
     let evaled: Vec<Vec<FormulaValue>> = args.iter().map(|a| eval_column_expr_inner(a, ctx)).collect::<Result<_, _>>()?;
-    validate_scalar_call_arity(lower, args.len())?;
-
     let mut out = Vec::with_capacity(n);
     for row in 0..n {
         let val = eval_scalar_row(lower, &evaled, row)?;
         out.push(val);
     }
     Ok(out)
+}
+
+fn eval_streaming_minmax(args: &[Expr], ctx: &dyn FormulaContext, is_min: bool) -> Result<Vec<FormulaValue>, TransformError> {
+    let n = ctx.row_count();
+    let mut acc: Vec<Option<f64>> = vec![None; n];
+    for arg in args {
+        let col = eval_column_expr_inner(arg, ctx)?;
+        for (slot, val) in acc.iter_mut().zip(col) {
+            if let Some(v) = val.as_finite_f64() {
+                *slot = Some(match *slot {
+                    None => v,
+                    Some(cur) if is_min => cur.min(v),
+                    Some(cur) => cur.max(v),
+                });
+            }
+        }
+    }
+    Ok(acc.into_iter().map(|opt| opt.map_or(FormulaValue::Missing, FormulaValue::from_f64)).collect())
+}
+
+#[derive(Clone, Copy)]
+struct StreamingMean {
+    sum: sum::NeumaierSum,
+    mean_est: f64,
+    count: usize,
+}
+
+impl StreamingMean {
+    const fn new() -> Self {
+        Self { sum: sum::NeumaierSum::new(), mean_est: 0.0, count: 0 }
+    }
+
+    fn add(&mut self, v: f64) {
+        self.count += 1;
+        self.sum.add(v);
+        #[allow(clippy::cast_precision_loss)]
+        let c = self.count as f64;
+        self.mean_est += (v / c) - (self.mean_est / c);
+    }
+
+    fn finish(self, is_mean: bool) -> FormulaValue {
+        if self.count == 0 {
+            return FormulaValue::Missing;
+        }
+        let total = self.sum.total();
+        if !is_mean {
+            return FormulaValue::from_f64(total);
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let c = self.count as f64;
+        FormulaValue::from_f64(if total.is_finite() { total / c } else { self.mean_est })
+    }
+}
+
+fn eval_streaming_sum_or_mean(args: &[Expr], ctx: &dyn FormulaContext, is_mean: bool) -> Result<Vec<FormulaValue>, TransformError> {
+    let n = ctx.row_count();
+    let mut accs = vec![StreamingMean::new(); n];
+    for arg in args {
+        let col = eval_column_expr_inner(arg, ctx)?;
+        for (acc, val) in accs.iter_mut().zip(col) {
+            if let Some(v) = val.as_finite_f64() {
+                acc.add(v);
+            }
+        }
+    }
+    Ok(accs.into_iter().map(|acc| acc.finish(is_mean)).collect())
+}
+
+fn eval_streaming_logic(args: &[Expr], ctx: &dyn FormulaContext, is_and: bool) -> Result<Vec<FormulaValue>, TransformError> {
+    // 0 = neutral (true for AND, false for OR), 1 = saw Missing, 2 = absorbing (false for AND, true for OR)
+    let n = ctx.row_count();
+    let mut states = vec![0_u8; n];
+    for arg in args {
+        let col = eval_column_expr_inner(arg, ctx)?;
+        for (state, val) in states.iter_mut().zip(col) {
+            if *state == 2 {
+                continue;
+            }
+            match val.as_bool() {
+                Some(false) if is_and => *state = 2,
+                Some(true) if !is_and => *state = 2,
+                Some(_) => {}
+                None => *state = 1,
+            }
+        }
+    }
+    Ok(states
+        .into_iter()
+        .map(|s| match s {
+            1 => FormulaValue::Missing,
+            2 => FormulaValue::Number(if is_and { 0.0 } else { 1.0 }),
+            _ => FormulaValue::Number(if is_and { 1.0 } else { 0.0 }),
+        })
+        .collect())
 }
 
 fn validate_scalar_call_arity(lower: &str, argc: usize) -> Result<(), TransformError> {
@@ -2084,15 +2747,9 @@ fn validate_scalar_call_arity(lower: &str, argc: usize) -> Result<(), TransformE
 }
 
 fn eval_scalar_row(lower: &str, cols: &[Vec<FormulaValue>], row: usize) -> Result<FormulaValue, TransformError> {
-    match lower {
-        "min" | "max" => return Ok(eval_variadic_minmax(cols, row, lower == "min")),
-        "sum" | "mean" => return Ok(eval_variadic_sum_or_mean(cols, row, lower == "mean")),
-        "and" | "or" => return Ok(eval_variadic_logic(cols, row, lower == "and")),
-        "not" => {
-            let b = cols.first().and_then(|c| c.get(row)).and_then(FormulaValue::as_bool);
-            return Ok(b.map_or(FormulaValue::Missing, |flag| FormulaValue::Number(if flag { 0.0 } else { 1.0 })));
-        }
-        _ => {}
+    if lower == "not" {
+        let b = cols.first().and_then(|c| c.get(row)).and_then(FormulaValue::as_bool);
+        return Ok(b.map_or(FormulaValue::Missing, |flag| FormulaValue::Number(if flag { 0.0 } else { 1.0 })));
     }
 
     let Some(x) = cols.first().and_then(|c| c.get(row)).and_then(FormulaValue::as_finite_f64) else {
@@ -2107,7 +2764,13 @@ fn eval_scalar_row(lower: &str, cols: &[Vec<FormulaValue>], row: usize) -> Resul
     if cols.len() == 2 {
         let out = match lower {
             "pow" => x.powf(y),
-            "log" => x.ln() / y.ln(),
+            "log" => {
+                if x > 0.0 && y > 0.0 && y != 1.0 {
+                    x.ln() / y.ln()
+                } else {
+                    f64::NAN
+                }
+            }
             "round" => eval_round_digits(x, y),
             "atan2" | "arctan2" => x.atan2(y),
             _ => f64::NAN,
@@ -2124,14 +2787,6 @@ fn eval_scalar_row(lower: &str, cols: &[Vec<FormulaValue>], row: usize) -> Resul
         return Ok(FormulaValue::from_f64(x.clamp(y, z)));
     }
     Ok(FormulaValue::Missing)
-}
-
-fn eval_variadic_sum_or_mean(cols: &[Vec<FormulaValue>], row: usize, is_mean: bool) -> FormulaValue {
-    let nums: Vec<f64> = cols.iter().filter_map(|col| col.get(row).and_then(FormulaValue::as_finite_f64)).collect();
-    if nums.is_empty() {
-        return FormulaValue::Missing;
-    }
-    if is_mean { sum::mean(&nums).map_or(FormulaValue::Missing, FormulaValue::from_f64) } else { FormulaValue::from_f64(sum::sum(&nums)) }
 }
 
 fn eval_round_digits(x: f64, digits: f64) -> f64 {
@@ -2155,39 +2810,6 @@ fn eval_round_digits(x: f64, digits: f64) -> f64 {
         let factor = 10.0_f64.powi(-d_i32);
         if factor.is_finite() { (x / factor).round() * factor } else { 0.0 }
     }
-}
-
-fn eval_variadic_minmax(cols: &[Vec<FormulaValue>], row: usize, is_min: bool) -> FormulaValue {
-    let mut acc: Option<f64> = None;
-    for col in cols {
-        let Some(v) = col.get(row).and_then(FormulaValue::as_finite_f64) else {
-            continue;
-        };
-        acc = Some(match acc {
-            None => v,
-            Some(cur) => {
-                if is_min {
-                    cur.min(v)
-                } else {
-                    cur.max(v)
-                }
-            }
-        });
-    }
-    acc.map_or(FormulaValue::Missing, FormulaValue::from_f64)
-}
-
-fn eval_variadic_logic(cols: &[Vec<FormulaValue>], row: usize, is_and: bool) -> FormulaValue {
-    let mut saw_missing = false;
-    for col in cols {
-        match col.get(row).and_then(FormulaValue::as_bool) {
-            Some(false) if is_and => return FormulaValue::Number(0.0),
-            Some(true) if !is_and => return FormulaValue::Number(1.0),
-            Some(_) => {}
-            None => saw_missing = true,
-        }
-    }
-    if saw_missing { FormulaValue::Missing } else { FormulaValue::Number(if is_and { 1.0 } else { 0.0 }) }
 }
 
 fn eval_unary_math(lower: &str, x: f64) -> f64 {
@@ -2256,5 +2878,176 @@ fn eval_unary_math(lower: &str, x: f64) -> f64 {
             }
         }
         _ => f64::NAN,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use curvebook_doc::{Cell, DataSheet, MultipleVariablesTable, TableArchetype};
+
+    use super::{FormulaContext, FormulaValue, ScalarEnv, eval_column_expr, eval_scalar_expr, evaluate_formula_for_sheet};
+    use crate::error::TransformError;
+    use crate::formula::parser::parse_formula;
+
+    fn mv_sheet_from_cols(cols: &[(&str, Vec<Cell>)]) -> DataSheet {
+        let rows = cols.first().map_or(0, |(_, c)| c.len());
+        let mut mv = MultipleVariablesTable::new(cols.len(), rows).expect("mv");
+        for (idx, (title, cells)) in cols.iter().enumerate() {
+            mv.variables[idx].title = (*title).to_owned();
+            mv.variables[idx].cells = cells.clone();
+        }
+        DataSheet::new("eval-test", "Eval", TableArchetype::MultipleVariables(mv)).expect("sheet")
+    }
+
+    #[test]
+    fn aud_04_07_two_arg_log_rejects_invalid_base_and_nonpositive_input() {
+        let env = ScalarEnv::default();
+        for bad in ["log(100, 0)", "log(100, 1)", "log(100, -2)", "log(0, 10)", "log(-5, 10)"] {
+            let val = eval_scalar_expr(&parse_formula(bad).expect("parse"), &env).expect("eval");
+            assert_eq!(val, FormulaValue::Missing, "`{bad}` must yield Missing, got {val:?}");
+        }
+        let ok10 = eval_scalar_expr(&parse_formula("log(100, 10)").expect("parse"), &env).expect("eval");
+        assert!((ok10.as_finite_f64().unwrap() - 2.0).abs() < 1e-12);
+        let ok2 = eval_scalar_expr(&parse_formula("log(8, 2)").expect("parse"), &env).expect("eval");
+        assert!((ok2.as_finite_f64().unwrap() - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aud_04_20_arity_before_eval_streaming_variadics_text_budget_and_fast_windows() {
+        // 1. Unknown function & arity mismatch fail BEFORE evaluating arguments (even with unknown vars inside args).
+        let env = ScalarEnv::default();
+        assert!(matches!(eval_scalar_expr(&parse_formula("bogus(NoSuchCol, 1, 2)").unwrap(), &env), Err(TransformError::UnknownFunction { .. })));
+        assert!(matches!(eval_scalar_expr(&parse_formula("sqrt(NoSuchCol, 2)").unwrap(), &env), Err(TransformError::ArityMismatch { .. })));
+
+        // 2. Streaming variadics (min/max/sum/mean/and/or/coalesce) with overflow-safe mean on 1e308.
+        let s = mv_sheet_from_cols(&[("A", vec![Cell::number(1e308), Cell::empty()]), ("B", vec![Cell::number(1e308), Cell::number(5.0)])]);
+        let mean_vals = evaluate_formula_for_sheet("mean(A, B)", &s, None).expect("streaming mean");
+        assert!((mean_vals[0].as_finite_f64().unwrap() - 1e308).abs() <= 1e295);
+        assert_eq!(mean_vals[1], FormulaValue::Number(5.0));
+
+        // 3. Text broadcast memory budget blocks multi-GB allocation cleanly.
+        struct VirtualRowsContext(usize);
+        impl FormulaContext for VirtualRowsContext {
+            fn row_count(&self) -> usize {
+                self.0
+            }
+            fn resolve_column_index(&self, _: &str) -> Option<usize> {
+                None
+            }
+            fn column_count(&self) -> usize {
+                0
+            }
+            fn column_values(&self, _: usize) -> Option<Vec<FormulaValue>> {
+                None
+            }
+            fn resolve_info_constant(&self, _: &str) -> Option<FormulaValue> {
+                None
+            }
+        }
+        let lit = format!("\"{}\"", "x".repeat(4_000));
+        let ast = parse_formula(&lit).expect("4000-byte literal parses");
+        assert!(
+            matches!(eval_column_expr(&ast, &VirtualRowsContext(50_000)), Err(TransformError::InvalidSpec { .. })),
+            "200 MB text broadcast must be rejected before allocation"
+        );
+
+        // 4. O(N) / O(N log N) window frames run quickly and accurately on N = 20,000 rows.
+        let n = 20_000_usize;
+        let big = mv_sheet_from_cols(&[("X", (1..=n).map(|i| Cell::number(i as f64)).collect())]);
+        let run_sum = evaluate_formula_for_sheet("sum(X) OVER (ORDER BY X ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", &big, None)
+            .expect("20k running sum");
+        assert!((run_sum[n - 1].as_finite_f64().unwrap() - ((n * (n + 1)) as f64) * 0.5).abs() < 1e-3);
+        let run_med = evaluate_formula_for_sheet("median(X) OVER (ORDER BY X ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", &big, None)
+            .expect("20k running median");
+        assert!((run_med[n - 1].as_finite_f64().unwrap() - ((n + 1) as f64) * 0.5).abs() < 1e-12);
+        let roll_mean = evaluate_formula_for_sheet("rolling_mean(X, 500)", &big, None).expect("20k rolling mean");
+        assert!((roll_mean[n - 1].as_finite_f64().unwrap() - ((n as f64) - 249.5)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aud_04_27_rank_multikey_desc_text_keys_and_deep_expr_equality() {
+        let s = mv_sheet_from_cols(&[
+            ("Grp", vec![Cell::text("G1"), Cell::text("G1"), Cell::text("G1"), Cell::text("G1")]),
+            ("Score", vec![Cell::number(10.0), Cell::number(20.0), Cell::number(30.0), Cell::empty()]),
+            ("Id", vec![Cell::number(1.0), Cell::number(2.0), Cell::number(3.0), Cell::number(4.0)]),
+            ("Label", vec![Cell::text("B"), Cell::text("A"), Cell::text("A"), Cell::text("C")]),
+        ]);
+
+        // Multi-key ORDER BY Score DESC, Id ASC must honor DESC for rank(Score).
+        let r_desc = evaluate_formula_for_sheet("rank(Score) OVER (PARTITION BY Grp ORDER BY Score DESC, Id ASC)", &s, None).expect("multikey rank");
+        assert_eq!(r_desc, vec![FormulaValue::Number(3.0), FormulaValue::Number(2.0), FormulaValue::Number(1.0), FormulaValue::Missing]);
+
+        // Text ordering in 1-arg rank(Label) and dense_rank(Label).
+        let r_txt = evaluate_formula_for_sheet("rank(Label)", &s, None).expect("text rank");
+        assert_eq!(r_txt, vec![FormulaValue::Number(3.0), FormulaValue::Number(1.5), FormulaValue::Number(1.5), FormulaValue::Number(4.0)]);
+        let dr_txt = evaluate_formula_for_sheet("dense_rank(Label) OVER (ORDER BY Label DESC, Id ASC)", &s, None).expect("text dense_rank desc");
+        assert_eq!(dr_txt, vec![FormulaValue::Number(2.0), FormulaValue::Number(3.0), FormulaValue::Number(3.0), FormulaValue::Number(1.0)]);
+
+        // AUD-04-02: deep left-leaning expression inside rank(expr) OVER (ORDER BY expr) uses iterative PartialEq.
+        let deep = vec!["1"; 4_000].join("+");
+        let formula = format!("rank({deep}) OVER (ORDER BY {deep} DESC)");
+        let handle = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || evaluate_formula_for_sheet(&formula, &s, None).expect("deep rank over"))
+            .expect("spawn 1 MiB worker");
+        let res = handle.join().expect("rank PartialEq must not stack overflow");
+        assert_eq!(res.len(), 4);
+    }
+
+    #[test]
+    fn aud_04_28_explicit_rows_frames_and_rolling_aggregate_over_missing_current_row_and_large_mean() {
+        let s = mv_sheet_from_cols(&[
+            ("Y", vec![Cell::number(10.0), Cell::number(20.0), Cell::empty(), Cell::number(40.0)]),
+            ("Big", vec![Cell::number(1e308), Cell::number(1e308), Cell::empty(), Cell::number(1e308)]),
+        ]);
+
+        // Explicit ROWS frame on rolling_mean & cumsum must NOT blank row 2 when neighbors are finite.
+        let r_mean =
+            evaluate_formula_for_sheet("rolling_mean(Y) OVER (ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)", &s, None).expect("rows rolling_mean");
+        assert_eq!(r_mean[2], FormulaValue::Number(30.0));
+        let c_sum = evaluate_formula_for_sheet("cumsum(Y) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", &s, None).expect("rows cumsum");
+        assert_eq!(c_sum[2], FormulaValue::Number(30.0));
+        let c_mean =
+            evaluate_formula_for_sheet("cummean(Y) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", &s, None).expect("rows cummean");
+        assert_eq!(c_mean[2], FormulaValue::Number(15.0));
+
+        // 2-arg rolling_mean(Y, 3) on [10, 20, Missing, 40]: row 2 window [10, 20, Missing] -> mean 15.0.
+        let r2 = evaluate_formula_for_sheet("rolling_mean(Y, 3)", &s, None).expect("2-arg rolling_mean");
+        assert_eq!(r2[2], FormulaValue::Number(15.0));
+
+        // Overflow-safe rolling mean on [1e308, 1e308].
+        let big_roll = evaluate_formula_for_sheet("rolling_mean(Big, 2)", &s, None).expect("big rolling_mean");
+        assert!((big_roll[1].as_finite_f64().unwrap() - 1e308).abs() <= 1e295);
+        let big_rows =
+            evaluate_formula_for_sheet("rolling_mean(Big) OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)", &s, None).expect("big rows mean");
+        assert!((big_rows[1].as_finite_f64().unwrap() - 1e308).abs() <= 1e295);
+    }
+
+    #[test]
+    fn aud_04_20_moments_agg_tiny_scale_sd_sem_and_zscore_do_not_underflow() {
+        let s =
+            mv_sheet_from_cols(&[("Tiny", vec![Cell::number(1e-200), Cell::number(2e-200)]), ("Const", vec![Cell::number(5.0), Cell::number(5.0)])]);
+        let expected_sd = std::f64::consts::FRAC_1_SQRT_2 * 1e-200;
+        let expected_sem = 0.5e-200;
+
+        let sd_res =
+            evaluate_formula_for_sheet("sd(Tiny) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)", &s, None).expect("tiny framed sd");
+        let sem_res = evaluate_formula_for_sheet("sem(Tiny) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)", &s, None)
+            .expect("tiny framed sem");
+        let z_res = evaluate_formula_for_sheet("zscore(Tiny) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)", &s, None)
+            .expect("tiny framed zscore");
+        let const_sd = evaluate_formula_for_sheet("sd(Const) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)", &s, None)
+            .expect("constant framed sd");
+
+        let sd_val = sd_res[0].as_finite_f64().expect("tiny sd finite");
+        assert!((sd_val - expected_sd).abs() <= 1e-214, "expected {expected_sd:e}, got {sd_val:e}");
+        let sem_val = sem_res[0].as_finite_f64().expect("tiny sem finite");
+        assert!((sem_val - expected_sem).abs() <= 1e-214, "expected {expected_sem:e}, got {sem_val:e}");
+        let z0 = z_res[0].as_finite_f64().expect("tiny zscore[0] finite");
+        let z1 = z_res[1].as_finite_f64().expect("tiny zscore[1] finite");
+        assert!((z0 + std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12, "z0={z0}");
+        assert!((z1 - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12, "z1={z1}");
+        assert_eq!(const_sd[0], FormulaValue::Number(0.0));
     }
 }

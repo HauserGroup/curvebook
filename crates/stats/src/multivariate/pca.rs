@@ -80,7 +80,10 @@ pub fn pca_analysis(
     for (i, &s) in dec.singular_values.iter().take(k_comp).enumerate() {
         eigenvalues[i] = s * s;
     }
-    let total_var: f64 = eigenvalues.iter().sum::<f64>().max(1e-30);
+    let total_var: f64 = eigenvalues.iter().sum();
+    if !total_var.is_finite() || total_var <= 0.0 {
+        return Err(StatsError::ZeroVariance { context: "PCA covariance matrix" });
+    }
     let variance_proportion: Vec<f64> = eigenvalues.iter().map(|&ev| ev / total_var).collect();
     let mut cumulative_proportion = Vec::with_capacity(k_comp);
     let mut run = 0.0_f64;

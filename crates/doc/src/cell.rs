@@ -283,7 +283,11 @@ where
         return ('.', Some(','));
     }
     if delimiter == ',' {
-        return ('.', (us_thousands_hits > 0).then_some(','));
+        if comma_non3_decimal_hits > 0 && dot_decimal_candidates == 0 && us_thousands_hits == 0 {
+            return (',', None);
+        }
+        let thousands = (us_thousands_hits > 0 || (comma_decimal_candidates > 0 && comma_non3_decimal_hits == 0)).then_some(',');
+        return ('.', thousands);
     }
     if comma_non3_decimal_hits > dot_non3_decimal_hits || (comma_decimal_candidates > 0 && dot_decimal_candidates == 0 && dot_non3_decimal_hits == 0)
     {
@@ -412,7 +416,7 @@ pub fn strip_thousands_grouping(int_part: &str, allowed_seps: &[char]) -> Option
         }
         let mut parts = int_part.split(sep);
         let first = parts.next()?;
-        if first.is_empty() || first.len() > 3 || !first.bytes().all(|b| b.is_ascii_digit()) {
+        if first.is_empty() || first.len() > 3 || first.starts_with('0') || !first.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
         let mut out = String::from(first);

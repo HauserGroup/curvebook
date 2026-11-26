@@ -335,6 +335,9 @@ fn compute_sd_ci_df(sd: Option<f64>, df: f64, confidence: ConfidenceLevel) -> Re
     let Some(s) = sd else {
         return Ok(None);
     };
+    if !s.is_finite() || s <= 0.0 {
+        return Ok(None);
+    }
     let half_alpha = 0.5 * confidence.alpha();
     let upper_chi2 = chi2_isf(half_alpha, df)?;
     let lower_chi2 = chi2_ppf(half_alpha, df)?;
@@ -384,7 +387,7 @@ fn compute_quadratic_stats(values: &[f64], confidence: ConfidenceLevel) -> Resul
     let n = values.len();
     let max_abs = values.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
     if max_abs == 0.0 {
-        return Ok((0.0, (n >= 2).then_some((0.0, 0.0))));
+        return Ok((0.0, None));
     }
     let sqs: Vec<f64> = values.iter().map(|v| (v / max_abs).powi(2)).collect();
     let sm = SummaryMoments::from_slice(&sqs)?;
@@ -1576,6 +1579,11 @@ pub(crate) fn ks_asymptotic_p(lambda: f64) -> f64 {
 
 /// Execute [`DescriptiveSpec`] on a [`DataSheet`] and emit a complete [`ResultSheet`].
 pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &DescriptiveSpec) -> Result<ResultSheet, StatsError> {
+    if let Some(mu0) = desc.hypothetical_value
+        && !mu0.is_finite()
+    {
+        return Err(StatsError::InvalidParameter { name: "hypothetical_value", value: mu0 });
+    }
     let mut res = init_result_sheet(spec)?;
     let extracted = extract_indexed_series_for_descriptive(sheet, &spec.selected_data_sets, desc.aggregation)?;
     let raw_series = extracted.raw;
@@ -2007,6 +2015,9 @@ fn append_one_sample_tab(
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) -> Result<(), StatsError> {
+    if !mu0.is_finite() {
+        return Err(StatsError::InvalidParameter { name: "hypothetical_value", value: mu0 });
+    }
     let t_results: Vec<_> = raw_series.iter().map(|s| one_sample_t_test(&s.values, mu0, true, conf).ok()).collect();
     let w_results: Vec<_> = raw_series.iter().map(|s| one_sample_wilcoxon(&s.values, mu0, true, conf).ok()).collect();
     let alpha = conf.alpha();
@@ -2030,6 +2041,9 @@ pub fn run_outlier_analysis(sheet: &DataSheet, spec: &AnalysisSpec, outlier_spec
     let extracted = extract_indexed_series_for_descriptive(sheet, &spec.selected_data_sets, SubcolumnAggregation::PooledGrandSample)?;
     let raw_series = extracted.raw;
     if raw_series.is_empty() {
+        if !extracted.pooled.is_empty() {
+            return Err(StatsError::RequiresRawReplicates);
+        }
         return Err(StatsError::EmptyInput);
     }
     let mut tab = TabBuilder::new("outliers", "Identified Outliers", ResultTabKind::MainSummary).headers([

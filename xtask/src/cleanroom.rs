@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::brands::is_plan_prism_path;
-use crate::scan_util::{collect_dist_files, format_error_list, has_ext_ci, is_zip_magic};
-use crate::text_decode::{decode_utf16, detect_bomless_utf16};
+use crate::scan_util::{ZIP_CONTAINER_EXTS, collect_dist_files, format_error_list, has_ext_ci, looks_like_zip};
+use crate::text_decode::{decode_utf8_or_utf16, decode_xml_html_entities};
 use crate::zip_read::{ZipArchive, ZipLimits};
 
 const SELF: &str = "xtask/src/cleanroom.rs";
@@ -178,16 +178,26 @@ fn scan_bytes_recursive(
     archive_entries: &mut usize,
     hits: &mut Vec<CleanroomHit>,
 ) {
-    let is_vendor_archive = has_ext_ci(Path::new(display_path), &["prism", "pzf"]);
-    if is_vendor_archive || is_zip_magic(bytes) {
+    let is_zip_ext = has_ext_ci(Path::new(display_path), ZIP_CONTAINER_EXTS);
+    if is_zip_ext || looks_like_zip(bytes) {
         if depth >= MAX_ARCHIVE_DEPTH {
             hits.push(CleanroomHit { path: display_path.to_owned(), line: 1, signature: "nested archive depth exceeded" });
             return;
         }
         if let Ok(archive) = ZipArchive::from_bytes_with_limits(bytes, CLEANROOM_ZIP_LIMITS) {
+            if !archive.archive_comment().is_empty() {
+                scan_text_bytes(&format!("{display_path}#comment"), archive.archive_comment(), allow_packaged, hits);
+            }
+            for (comment_entry, comment_bytes) in archive.entry_comments() {
+                scan_text_bytes(&format!("{display_path}!{comment_entry}#comment"), comment_bytes, allow_packaged, hits);
+            }
             for (entry_name, entry_bytes) in archive.iter() {
                 *archive_entries += 1;
                 let entry_path = format!("{display_path}!{entry_name}");
+                if is_plan_prism_path(entry_name) {
+                    hits.push(CleanroomHit { path: entry_path, line: 1, signature: "archived plan/prism reference directory" });
+                    continue;
+                }
                 let mut name_seen = HashSet::new();
                 scan_text(&entry_path, entry_name, allow_packaged, hits, &mut name_seen);
                 scan_bytes_recursive(&entry_path, entry_bytes, depth + 1, allow_packaged, archive_entries, hits);
@@ -202,33 +212,35 @@ fn scan_bytes_recursive(
         return;
     }
 
+    let lower_path = display_path.to_ascii_lowercase();
+    if lower_path.ends_with(".svgz") || (bytes.starts_with(&[0x1F, 0x8B]) && !lower_path.ends_with(".tar.gz") && !lower_path.ends_with(".tgz")) {
+        if depth >= MAX_ARCHIVE_DEPTH {
+            hits.push(CleanroomHit { path: display_path.to_owned(), line: 1, signature: "nested archive depth exceeded" });
+            return;
+        }
+        match crate::brands::inflate_gzip_bounded(bytes) {
+            Ok(raw) => scan_text_bytes(display_path, &raw, allow_packaged, hits),
+            Err(()) => hits.push(CleanroomHit { path: display_path.to_owned(), line: 1, signature: "corrupt or oversized gzip/.svgz asset" }),
+        }
+        return;
+    }
+
     scan_text_bytes(display_path, bytes, allow_packaged, hits);
 }
 
 fn scan_text_bytes(display_path: &str, bytes: &[u8], allow_packaged: bool, hits: &mut Vec<CleanroomHit>) {
     let mut seen_lines = HashSet::new();
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        let decoded = decode_utf16(bytes.get(2..).unwrap_or_default(), true);
-        scan_text(display_path, &decoded, allow_packaged, hits, &mut seen_lines);
-        return;
-    }
-    if bytes.starts_with(&[0xFE, 0xFF]) {
-        let decoded = decode_utf16(bytes.get(2..).unwrap_or_default(), false);
-        scan_text(display_path, &decoded, allow_packaged, hits, &mut seen_lines);
-        return;
-    }
-    if let Some(stripped) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        let text = String::from_utf8_lossy(stripped);
-        scan_text(display_path, &text, allow_packaged, hits, &mut seen_lines);
-        return;
-    }
-    if let Some(little_endian) = detect_bomless_utf16(bytes) {
-        let decoded = decode_utf16(bytes, little_endian);
+    if let Ok(Some(decoded)) = decode_utf8_or_utf16(bytes) {
         scan_text(display_path, &decoded, allow_packaged, hits, &mut seen_lines);
         return;
     }
     let text = String::from_utf8_lossy(bytes);
     scan_text(display_path, &text, allow_packaged, hits, &mut seen_lines);
+    if bytes.contains(&0) {
+        let stripped: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
+        let stripped_text = String::from_utf8_lossy(&stripped);
+        scan_text(display_path, &stripped_text, allow_packaged, hits, &mut seen_lines);
+    }
 }
 
 fn compute_attributed_section_lines(display_path: &str, text: &str, allow_packaged: bool) -> Vec<bool> {
@@ -290,9 +302,10 @@ fn scan_text(display_path: &str, text: &str, allow_packaged: bool, hits: &mut Ve
 }
 
 fn normalize_line(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
+    let decoded_cow = if line.contains('&') { std::borrow::Cow::Owned(decode_xml_html_entities(line)) } else { std::borrow::Cow::Borrowed(line) };
+    let mut out = String::with_capacity(decoded_cow.len());
     let mut prev_space = false;
-    for ch in line.chars() {
+    for ch in decoded_cow.chars() {
         if ch.is_whitespace() {
             if !prev_space {
                 out.push(' ');
@@ -590,5 +603,61 @@ mod tests {
         assert!(dist_hits.iter().any(|h| h.signature.contains("plan/prism")), "{dist_hits:?}");
         assert!(dist_hits.iter().any(|h| h.signature == "nested archive depth exceeded"), "{dist_hits:?}");
         assert!(dist_hits.iter().any(|h| h.signature == "uninspectable or corrupt archive"), "{dist_hits:?}");
+    }
+
+    #[test]
+    fn aud_12_12_16_45_catches_preamble_zip_utf32_svgz_entities_and_zip_plan_prism_and_comments() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let dir = TestDir::new("cleanroom-aud12");
+        // 1. UTF-32LE (BOM and BOM-less) vendor copyright.
+        let msg = "Copyright (c) 2024 Dotmatics. All rights reserved.\n";
+        let mut utf32_bom = vec![0xFF, 0xFE, 0x00, 0x00];
+        let mut utf32_bomless = Vec::new();
+        for ch in msg.chars() {
+            utf32_bom.extend_from_slice(&(ch as u32).to_le_bytes());
+            utf32_bomless.extend_from_slice(&(ch as u32).to_le_bytes());
+        }
+        dir.write_bytes("u32_bom.txt", &utf32_bom);
+        dir.write_bytes("u32_nobom.txt", &utf32_bomless);
+
+        // 2. General XML/HTML entities + leading-zero numeric entities.
+        dir.write("entities.pzfx", "<!-- &#0000000000169; 2024 Graph&#000000000080;ad Software -->\n");
+
+        // 3. Gzipped .svgz with vendor copyright.
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(b"<svg><!-- Copyright (c) 2024 StatSoft --></svg>").unwrap();
+        dir.write_bytes("icon.svgz", &gz.finish().unwrap());
+
+        // 4. ZIP entry inside plan/prism/ and EOCD comment.
+        let mut base_zip = zip_bytes(&[("plan/prism/frame01.jpg", b"clean"), ("ok.txt", b"ok")]);
+        // Append EOCD archive comment.
+        let eocd_pos = base_zip.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        let comment = b"Copyright (c) 2024 GraphPad Software";
+        base_zip[eocd_pos + 20..eocd_pos + 22].copy_from_slice(&(comment.len() as u16).to_le_bytes());
+        base_zip.extend_from_slice(comment);
+        dir.write_bytes("bundle.zip", &base_zip);
+
+        // 5. Preamble-prefixed .xlsx ZIP archive (1-byte preamble with adjusted CD/LFH offsets).
+        let mut raw_xlsx = zip_bytes(&[("xl/meta.xml", b"Copyright (c) 2024 OriginLab")]);
+        let cd_pos = raw_xlsx.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let eocd_pos2 = raw_xlsx.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        // Shift LFH offset in CD and CD offset in EOCD by +1 for 1-byte preamble.
+        raw_xlsx[cd_pos + 42..cd_pos + 46].copy_from_slice(&1u32.to_le_bytes());
+        raw_xlsx[eocd_pos2 + 16..eocd_pos2 + 20].copy_from_slice(&((cd_pos + 1) as u32).to_le_bytes());
+        let mut prefixed = vec![b'!'];
+        prefixed.extend_from_slice(&raw_xlsx);
+        dir.write_bytes("sheet.xlsx", &prefixed);
+
+        let hits = scan(dir.path(), &paths(&["u32_bom.txt", "u32_nobom.txt", "entities.pzfx", "icon.svgz", "bundle.zip", "sheet.xlsx"]));
+        assert!(hits.iter().any(|h| h.path == "u32_bom.txt"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "u32_nobom.txt"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "entities.pzfx"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "icon.svgz"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "bundle.zip!plan/prism/frame01.jpg"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "bundle.zip#comment"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "sheet.xlsx!xl/meta.xml"), "{hits:?}");
     }
 }

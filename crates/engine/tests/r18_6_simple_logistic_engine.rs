@@ -70,8 +70,11 @@ fn engine_runs_simple_logistic_updates_params_recomputes_and_emits_methods_repor
     assert_eq!(res.status, ResultStatus::UpToDate);
     assert!(matches!(res.analysis.kind, AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec { emit_row_classification: true, .. })));
     assert_eq!(res.tabs.len(), 4);
-    assert_eq!(res.fitted_curves.len(), 1);
-    assert_eq!(res.fitted_curves[0].points.len(), 71);
+    assert_eq!(res.fitted_curves.len(), 2);
+    let logistic_curve = res.fitted_curves.iter().find(|c| c.equation_id == "simple_logistic").expect("simple_logistic overlay");
+    assert_eq!(logistic_curve.points.len(), 71);
+    let roc_curve = res.fitted_curves.iter().find(|c| c.equation_id == "ROC").expect("ROC overlay");
+    assert!(!roc_curve.points.is_empty());
 
     let beta1_before = res.scalars.iter().find(|s| s.key == "Beta1").expect("Beta1 scalar").value;
     assert!(beta1_before > 0.0);

@@ -563,6 +563,161 @@ fn equation_category_label(cat: EquationCategory) -> (&'static str, &'static str
     }
 }
 
+fn ordered_equation_categories() -> Vec<EquationCategory> {
+    let cats = [
+        EquationCategory::DoseResponseStimulation,
+        EquationCategory::DoseResponseInhibition,
+        EquationCategory::ReceptorBinding,
+        EquationCategory::EnzymeKinetics,
+        EquationCategory::Exponential,
+        EquationCategory::Polynomial,
+        EquationCategory::Gaussian,
+        EquationCategory::SineWave,
+        EquationCategory::Growth,
+        EquationCategory::Peak,
+        EquationCategory::StandardCurve,
+        EquationCategory::Radiobiology,
+        EquationCategory::NistBenchmark,
+        EquationCategory::UserDefined,
+    ];
+    for cat in cats {
+        let _ = equation_category_label(cat);
+    }
+    cats.to_vec()
+}
+
+fn fit_method_entries() -> Vec<(&'static str, &'static str)> {
+    let methods =
+        [FitMethod::LeastSquares, FitMethod::PoissonDeviance, FitMethod::RobustCauchy, FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 }];
+    methods
+        .into_iter()
+        .map(|m| match m {
+            FitMethod::LeastSquares => ("least_squares", "Trust-region Levenberg–Marquardt sum-of-squares minimization."),
+            FitMethod::PoissonDeviance => ("poisson_deviance", "Poisson log-likelihood deviance IRLS for non-negative count responses."),
+            FitMethod::RobustCauchy => ("robust_cauchy", "Cauchy/Lorentzian M-estimator IRLS minimizing outlier leverage without deletion."),
+            FitMethod::RoutOutlierElimination { .. } => {
+                ("rout_outlier_elimination", "Two-stage Cauchy robust fit + Benjamini–Hochberg FDR outlier masking followed by OLS/weighted refit.")
+            }
+        })
+        .collect()
+}
+
+fn weighting_scheme_entries() -> Vec<(&'static str, &'static str)> {
+    let weights = [
+        WeightingScheme::None,
+        WeightingScheme::RelativeSquare,
+        WeightingScheme::Relative,
+        WeightingScheme::GeneralPowerY(2.0),
+        WeightingScheme::InverseX,
+        WeightingScheme::InverseX2,
+        WeightingScheme::ObservedSd,
+    ];
+    weights
+        .into_iter()
+        .map(|w| match w {
+            WeightingScheme::None => ("none", "Uniform weight w = 1 (homoscedastic constant-SD assumption)."),
+            WeightingScheme::RelativeSquare => ("relative_square", "1 / Y^2 weighting (constant %CV proportional scatter)."),
+            WeightingScheme::Relative => ("relative", "1 / |Y| weighting (Poisson-like variance proportional to mean)."),
+            WeightingScheme::GeneralPowerY(_) => ("general_power_y", "General power-of-Y weighting 1 / |Y|^k."),
+            WeightingScheme::InverseX => ("inverse_x", "1 / |X| inverse predictor weighting."),
+            WeightingScheme::InverseX2 => ("inverse_x2", "1 / X^2 inverse squared predictor weighting."),
+            WeightingScheme::ObservedSd => ("observed_sd", "Empirical replicate variance weighting 1 / SD_i^2."),
+        })
+        .collect()
+}
+
+fn parameter_scope_entries() -> Vec<(&'static str, &'static str)> {
+    let scopes = [
+        ParameterScope::Local,
+        ParameterScope::SharedGlobal,
+        ParameterScope::Constant(0.0),
+        ParameterScope::HookedConstant(curvebook_doc::HookSource::InfoConstant {
+            info_sheet_id: Some(curvebook_doc::SheetId::new("info-1")),
+            constant_name: String::from("K"),
+        }),
+        ParameterScope::PerDatasetConstant(Vec::new()),
+        ParameterScope::ColumnTitleConstant,
+    ];
+    scopes
+        .into_iter()
+        .map(|s| match s {
+            ParameterScope::Local => ("local", "Estimate independently per dataset."),
+            ParameterScope::SharedGlobal => ("shared_global", "Jointly optimize a single shared value across all datasets."),
+            ParameterScope::Constant(_) => ("constant", "Fix to a constant scalar value (0 free degrees of freedom)."),
+            ParameterScope::HookedConstant(_) => ("hooked_constant", "Fix dynamically to an upstream InfoSheet or ResultSheet scalar hook."),
+            ParameterScope::PerDatasetConstant(_) => ("per_dataset_constant", "Fix per-dataset constants while leaving unlisted datasets free."),
+            ParameterScope::ColumnTitleConstant => ("column_title_constant", "Fix per dataset from the numeric token in each column header."),
+        })
+        .collect()
+}
+
+fn subcolumn_mode_entries() -> Vec<(SubcolumnMode, &'static str, &'static str)> {
+    let modes = [
+        SubcolumnMode::Single,
+        SubcolumnMode::RawReplicates(3),
+        SubcolumnMode::MeanSdN,
+        SubcolumnMode::MeanSemN,
+        SubcolumnMode::MeanCvN,
+        SubcolumnMode::MeanLowHigh,
+        SubcolumnMode::UpperLowerLimits,
+        SubcolumnMode::MedianIqr,
+    ];
+    modes
+        .into_iter()
+        .map(|m| match m {
+            SubcolumnMode::Single => (m, "single", "Single Y subcolumn per dataset"),
+            SubcolumnMode::RawReplicates(_) => (m, "raw_replicates", "N raw replicate subcolumns (Y1..Yn)"),
+            SubcolumnMode::MeanSdN => (m, "mean_sd_n", "Pre-summarized Mean, SD, N"),
+            SubcolumnMode::MeanSemN => (m, "mean_sem_n", "Pre-summarized Mean, SEM, N"),
+            SubcolumnMode::MeanCvN => (m, "mean_cv_n", "Pre-summarized Mean, %CV, N"),
+            SubcolumnMode::MeanLowHigh => (m, "mean_low_high", "Pre-summarized Mean, -Error, +Error"),
+            SubcolumnMode::UpperLowerLimits => (m, "upper_lower_limits", "Pre-summarized Mean, LowerLimit, UpperLimit"),
+            SubcolumnMode::MedianIqr => (m, "median_iqr", "Pre-summarized Median, Q1, Q3"),
+        })
+        .collect()
+}
+
+fn frame_preset_entries() -> Vec<(&'static str, &'static str)> {
+    let frames =
+        [FramePreset::OpenL, FramePreset::OffsetRangeTufte, FramePreset::PlainBoxed, FramePreset::DualYSecondaryRight, FramePreset::OriginCrossing];
+    frames
+        .into_iter()
+        .map(|f| match f {
+            FramePreset::OpenL => ("open-l", "Open L-shaped bottom X and left Y spines."),
+            FramePreset::OffsetRangeTufte => ("offset-range-tufte", "Offset spines trimmed to the plotted data range."),
+            FramePreset::PlainBoxed => ("plain-boxed", "Enclosed four-sided frame around the plot area."),
+            FramePreset::DualYSecondaryRight => ("dual-y-secondary-right", "Left primary Y axis paired with an independent right Y2 axis."),
+            FramePreset::OriginCrossing => ("origin-crossing", "Axes intersecting directly at data coordinate (0, 0)."),
+        })
+        .collect()
+}
+
+fn axis_scale_entries() -> Vec<(&'static str, &'static str)> {
+    let scales = [
+        AxisScale::Linear,
+        AxisScale::Log10,
+        AxisScale::Log2,
+        AxisScale::Ln,
+        AxisScale::Logit(LogitDomain::Percent),
+        AxisScale::Logit(LogitDomain::Proportion),
+        AxisScale::Probit,
+        AxisScale::Reciprocal,
+    ];
+    scales
+        .into_iter()
+        .map(|s| match s {
+            AxisScale::Linear => ("linear", "Identity g(u) = u over finite reals."),
+            AxisScale::Log10 => ("log10", "Base-10 logarithm over u > 0."),
+            AxisScale::Log2 => ("log2", "Base-2 logarithm over u > 0."),
+            AxisScale::Ln => ("ln", "Natural logarithm over u > 0."),
+            AxisScale::Logit(LogitDomain::Percent) => ("logit-percent", "Logit ln(p / (1 - p)) over u in (0, 100)."),
+            AxisScale::Logit(LogitDomain::Proportion) => ("logit-proportion", "Logit ln(p / (1 - p)) over u in (0, 1)."),
+            AxisScale::Probit => ("probit", "Normal probability quantile transform over u in (0, 100)."),
+            AxisScale::Reciprocal => ("reciprocal", "Reciprocal 1 / u over nonzero finite u."),
+        })
+        .collect()
+}
+
 fn build_equations_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> RegistryPageSpec {
     let entries = list_builtin_equations();
     let sample_pts = vec![
@@ -586,23 +741,7 @@ fn build_equations_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) 
         "<p>See <a href=\"../fitting.html\">Curve Fitting Reference</a> for statistical theory, custom DSL equations, ODE models, and outlier handling.</p>"
     );
 
-    let ordered_cats = [
-        EquationCategory::DoseResponseStimulation,
-        EquationCategory::DoseResponseInhibition,
-        EquationCategory::ReceptorBinding,
-        EquationCategory::EnzymeKinetics,
-        EquationCategory::Exponential,
-        EquationCategory::Polynomial,
-        EquationCategory::Gaussian,
-        EquationCategory::SineWave,
-        EquationCategory::Growth,
-        EquationCategory::Peak,
-        EquationCategory::StandardCurve,
-        EquationCategory::Radiobiology,
-        EquationCategory::NistBenchmark,
-    ];
-
-    for cat in ordered_cats {
+    for cat in ordered_equation_categories() {
         let cat_items: Vec<_> = entries.iter().filter(|e| e.category == cat).collect();
         if cat_items.is_empty() {
             continue;
@@ -686,55 +825,24 @@ fn build_equations_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) 
         cfg.max_iters, cfg.compute_profile_ci, cfg.compute_hougaard, cfg.compute_bands, cfg.use_simplex_warm_start, cfg.curve_overlay_segments,
     );
 
-    let methods = [
-        (FitMethod::LeastSquares, "least_squares", "Trust-region Levenberg–Marquardt sum-of-squares minimization."),
-        (FitMethod::PoissonDeviance, "poisson_deviance", "Poisson log-likelihood deviance IRLS for non-negative count responses."),
-        (FitMethod::RobustCauchy, "robust_cauchy", "Cauchy/Lorentzian M-estimator IRLS minimizing outlier leverage without deletion."),
-        (
-            FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 },
-            "rout_outlier_elimination",
-            "Two-stage Cauchy robust fit + Benjamini–Hochberg FDR outlier masking followed by OLS/weighted refit.",
-        ),
-    ];
+    let methods = fit_method_entries();
     write_table(&mut body, &["FitMethod", "Key", "Description"], |body| {
-        for (_, key, desc) in methods {
+        for (key, desc) in methods {
             let _ = writeln!(body, "<tr><td><code>{key}</code></td><td><code>FitMethod::{key}</code></td><td>{}</td></tr>", escape_html(desc));
         }
     });
 
     push_heading(&mut toc, &mut body, 2, "weighting-schemes", "Weighting Schemes & Parameter Scopes");
-    let weights = [
-        (WeightingScheme::None, "none", "Uniform weight w = 1 (homoscedastic constant-SD assumption)."),
-        (WeightingScheme::RelativeSquare, "relative_square", "1 / Y^2 weighting (constant %CV proportional scatter)."),
-        (WeightingScheme::Relative, "relative", "1 / |Y| weighting (Poisson-like variance proportional to mean)."),
-        (WeightingScheme::GeneralPowerY(2.0), "general_power_y", "General power-of-Y weighting 1 / |Y|^k."),
-        (WeightingScheme::InverseX, "inverse_x", "1 / |X| inverse predictor weighting."),
-        (WeightingScheme::InverseX2, "inverse_x2", "1 / X^2 inverse squared predictor weighting."),
-        (WeightingScheme::ObservedSd, "observed_sd", "Empirical replicate variance weighting 1 / SD_i^2."),
-    ];
+    let weights = weighting_scheme_entries();
     write_table(&mut body, &["WeightingScheme", "Formula / Rule"], |body| {
-        for (_, key, desc) in weights {
+        for (key, desc) in weights {
             let _ = writeln!(body, "<tr><td><code>{key}</code></td><td>{}</td></tr>", escape_html(desc));
         }
     });
 
-    let scopes = [
-        (ParameterScope::Local, "local", "Estimate independently per dataset."),
-        (ParameterScope::SharedGlobal, "shared_global", "Jointly optimize a single shared value across all datasets."),
-        (ParameterScope::Constant(0.0), "constant", "Fix to a constant scalar value (0 free degrees of freedom)."),
-        (
-            ParameterScope::HookedConstant(curvebook_doc::HookSource::InfoConstant {
-                info_sheet_id: Some(curvebook_doc::SheetId::new("info-1")),
-                constant_name: String::from("K"),
-            }),
-            "hooked_constant",
-            "Fix dynamically to an upstream InfoSheet or ResultSheet scalar hook.",
-        ),
-        (ParameterScope::PerDatasetConstant(Vec::new()), "per_dataset_constant", "Fix per-dataset constants while leaving unlisted datasets free."),
-        (ParameterScope::ColumnTitleConstant, "column_title_constant", "Fix per dataset from the numeric token in each column header."),
-    ];
+    let scopes = parameter_scope_entries();
     write_table(&mut body, &["ParameterScope", "Behavior"], |body| {
-        for (_, key, desc) in scopes {
+        for (key, desc) in scopes {
             let _ = writeln!(body, "<tr><td><code>{key}</code></td><td>{}</td></tr>", escape_html(desc));
         }
     });
@@ -765,28 +873,19 @@ fn build_tables_page(defined_analysis_anchors: &BTreeSet<String>, az: &mut Vec<A
     let mut toc = Vec::new();
     let mut body = String::with_capacity(24_576);
     let analysis_meta = all_analysis_kinds_meta();
+    let submodes = subcolumn_mode_entries();
 
     let _ = writeln!(
         body,
         "<p class=\"lead\">Typed definitions from <code>curvebook-doc</code> and <code>curvebook-stats</code>: <strong>{}</strong> table archetypes, <strong>{}</strong> subcolumn modes, <strong>{}</strong> analysis kinds, <strong>{}</strong> info keys, and <strong>{}</strong> canonical engine error codes.</p>",
         TableKind::ALL.len(),
-        8,
+        submodes.len(),
         analysis_meta.len(),
         STANDARD_INFO_KEYS.len(),
         ErrorCode::ALL.len(),
     );
 
     push_heading(&mut toc, &mut body, 2, "table-archetypes", "Table Archetypes (TableKind)");
-    let submodes = [
-        (SubcolumnMode::Single, "single", "Single Y subcolumn per dataset"),
-        (SubcolumnMode::RawReplicates(3), "raw_replicates", "N raw replicate subcolumns (Y1..Yn)"),
-        (SubcolumnMode::MeanSdN, "mean_sd_n", "Pre-summarized Mean, SD, N"),
-        (SubcolumnMode::MeanSemN, "mean_sem_n", "Pre-summarized Mean, SEM, N"),
-        (SubcolumnMode::MeanCvN, "mean_cv_n", "Pre-summarized Mean, %CV, N"),
-        (SubcolumnMode::MeanLowHigh, "mean_low_high", "Pre-summarized Mean, -Error, +Error"),
-        (SubcolumnMode::UpperLowerLimits, "upper_lower_limits", "Pre-summarized Mean, LowerLimit, UpperLimit"),
-        (SubcolumnMode::MedianIqr, "median_iqr", "Pre-summarized Median, Q1, Q3"),
-    ];
     write_table(&mut body, &["Kind ID", "Display Label", "Supported Subcolumn Modes"], |body| {
         for kind in TableKind::ALL {
             let slug = table_kind_slug(kind);
@@ -1032,32 +1131,17 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
     });
 
     push_heading(&mut toc, &mut body, 2, "frame-presets", "Axis Frame Presets (FramePreset)");
-    let frames = [
-        (FramePreset::OpenL, "open-l", "Open L-shaped bottom X and left Y spines."),
-        (FramePreset::OffsetRangeTufte, "offset-range-tufte", "Offset spines trimmed to the plotted data range."),
-        (FramePreset::PlainBoxed, "plain-boxed", "Enclosed four-sided frame around the plot area."),
-        (FramePreset::DualYSecondaryRight, "dual-y-secondary-right", "Left primary Y axis paired with an independent right Y2 axis."),
-        (FramePreset::OriginCrossing, "origin-crossing", "Axes intersecting directly at data coordinate (0, 0)."),
-    ];
+    let frames = frame_preset_entries();
     write_table(&mut body, &["Preset", "Geometry"], |body| {
-        for (_, id, desc) in frames {
+        for (id, desc) in frames {
             let _ = writeln!(body, "<tr id=\"frame-{id}\" tabindex=\"-1\"><td><code>{id}</code></td><td>{}</td></tr>", escape_html(desc));
         }
     });
 
     push_heading(&mut toc, &mut body, 2, "axis-scales", "Axis Scale Bijections (AxisScale)");
-    let scales = [
-        (AxisScale::Linear, "linear", "Identity g(u) = u over finite reals."),
-        (AxisScale::Log10, "log10", "Base-10 logarithm over u > 0."),
-        (AxisScale::Log2, "log2", "Base-2 logarithm over u > 0."),
-        (AxisScale::Ln, "ln", "Natural logarithm over u > 0."),
-        (AxisScale::Logit(LogitDomain::Percent), "logit-percent", "Logit ln(p / (1 - p)) over u in (0, 100)."),
-        (AxisScale::Logit(LogitDomain::Proportion), "logit-proportion", "Logit ln(p / (1 - p)) over u in (0, 1)."),
-        (AxisScale::Probit, "probit", "Normal probability quantile transform over u in (0, 100)."),
-        (AxisScale::Reciprocal, "reciprocal", "Reciprocal 1 / u over nonzero finite u."),
-    ];
+    let scales = axis_scale_entries();
     write_table(&mut body, &["Scale", "Domain &amp; Transform"], |body| {
-        for (_, id, desc) in scales {
+        for (id, desc) in scales {
             let _ = writeln!(body, "<tr id=\"scale-{id}\" tabindex=\"-1\"><td><code>{id}</code></td><td>{}</td></tr>", escape_html(desc));
         }
     });

@@ -7,7 +7,7 @@ use egui::{Id, Key, Ui};
 use serde_json::json;
 
 use crate::UiApp;
-use crate::grid_view::linked_region_for_cell;
+use crate::grid_view::{data_set_subcolumn_count, linked_region_for_cell};
 
 use super::super::{PendingUiIntents, UiIntent};
 use super::GridInlineEditTarget;
@@ -32,7 +32,9 @@ pub(super) fn copy_x_cell_to_clipboard(ui: &Ui, app: &UiApp, ds: &DataSheet, row
         format_cell_into(cell, &app.locale_preset, &mut text);
     }
     let _ = app.write_clipboard_text(&text);
-    ui.ctx().copy_text(text.clone());
+    if !app.is_human_path_only() {
+        ui.ctx().copy_text(text.clone());
+    }
     let snapshot = app.interaction.last_clipboard_text.clone();
     ui.ctx().data_mut(|d| d.insert_temp(x_clipboard_cache_id(), Some((text, snapshot))));
 }
@@ -211,8 +213,208 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &m
     false
 }
 
-pub(super) fn first_linked_region_in_bounds(ds: &DataSheet, s: GridCellCoord, e: GridCellCoord) -> Option<&curvebook_doc::LinkedDataRegion> {
-    (s.row..=e.row).find_map(|r| (s.col..=e.col).find_map(|c| linked_region_for_cell(ds, r, c)))
+/// Exact resolved data-grid selection distinguishing discontiguous `Cmd/Ctrl+Click` cells
+/// from contiguous visual `(row, col, subcol)` spans decomposed into column-aligned sub-ranges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedGridSelection {
+    Discontiguous(Vec<GridCellCoord>),
+    Ranges(Vec<SheetCellRange>),
+}
+
+impl ResolvedGridSelection {
+    /// Returns `true` when `target` lies inside this resolved selection.
+    #[must_use]
+    pub fn contains_coord(&self, target: GridCellCoord) -> bool {
+        match self {
+            Self::Discontiguous(coords) => coords.contains(&target),
+            Self::Ranges(ranges) => ranges.iter().any(|r| {
+                target.row >= r.start.row
+                    && target.row <= r.end.row
+                    && target.col >= r.start.col
+                    && target.col <= r.end.col
+                    && target.subcol >= r.start.subcol
+                    && target.subcol <= r.end.subcol
+            }),
+        }
+    }
+
+    /// Return the first representative cell coordinate in this selection.
+    #[must_use]
+    pub fn first_coord(&self) -> Option<CellCoord> {
+        match self {
+            Self::Discontiguous(coords) => coords.first().copied().map(CellCoord::from),
+            Self::Ranges(ranges) => ranges.first().map(|r| r.start),
+        }
+    }
+
+    /// Concise human-readable summary for the Trailing Studio Table Selection panel.
+    #[must_use]
+    pub fn summary_label(&self) -> String {
+        match self {
+            Self::Discontiguous(coords) => match coords.as_slice() {
+                [] => String::from("No cells selected"),
+                [only] => format!("Row {}  •  Col {}", only.row + 1, only.col + 1),
+                many => format!("{} selected cells (discontiguous)", many.len()),
+            },
+            Self::Ranges(ranges) => {
+                let (Some(first), Some(last)) = (ranges.first(), ranges.last()) else {
+                    return String::from("No cells selected");
+                };
+                format!("Rows {}..{}  •  Cols {}..{}", first.start.row + 1, last.end.row + 1, first.start.col + 1, last.end.col + 1)
+            }
+        }
+    }
+}
+
+/// Decompose a visual contiguous selection `(a, b)` in flat `(col, subcol)` order into exact
+/// column-aligned [`SheetCellRange`] blocks so engine `CellRangeInput::resolve()` never expands
+/// or skips replicate subcolumns across column boundaries (`AUD-09-04`).
+#[must_use]
+pub fn selected_visual_subranges(ds: &DataSheet, a: GridCellCoord, b: GridCellCoord) -> Vec<SheetCellRange> {
+    let row_count = ds.archetype.row_count();
+    let col_count = ds.archetype.column_count();
+    if row_count == 0 || col_count == 0 {
+        return Vec::new();
+    }
+    let max_row = row_count - 1;
+    let max_col = col_count - 1;
+    let r0 = a.row.min(b.row).min(max_row);
+    let r1 = a.row.max(b.row).min(max_row);
+    let ((raw_c0, raw_s0), (raw_c1, raw_s1)) =
+        if (a.col, a.subcol) <= (b.col, b.subcol) { ((a.col, a.subcol), (b.col, b.subcol)) } else { ((b.col, b.subcol), (a.col, a.subcol)) };
+    if raw_c0 > max_col {
+        return Vec::new();
+    }
+    let c0 = raw_c0;
+    let c1 = raw_c1.min(max_col);
+    let sub_count = |col: usize| data_set_subcolumn_count(&ds.archetype, col).max(1);
+    let s0 = raw_s0.min(sub_count(c0) - 1);
+    let s1 = if raw_c1 > max_col { sub_count(c1) - 1 } else { raw_s1.min(sub_count(c1) - 1) };
+
+    if c0 == c1 {
+        return vec![SheetCellRange::new(CellCoord::new(r0, c0, s0.min(s1)), CellCoord::new(r1, c0, s0.max(s1)))];
+    }
+
+    let c1_subs = sub_count(c1);
+    if s0 == 0 && s1 + 1 == c1_subs && (c0..=c1).all(|col| sub_count(col) == c1_subs) {
+        return vec![SheetCellRange::new(CellCoord::new(r0, c0, 0), CellCoord::new(r1, c1, s1))];
+    }
+
+    let mut out = Vec::new();
+    let c0_last_sub = sub_count(c0) - 1;
+    out.push(SheetCellRange::new(CellCoord::new(r0, c0, s0), CellCoord::new(r1, c0, c0_last_sub)));
+
+    let mut run_col = c0 + 1;
+    while run_col < c1 {
+        let subs = sub_count(run_col);
+        let mut run_end = run_col;
+        while run_end + 1 < c1 && sub_count(run_end + 1) == subs {
+            run_end += 1;
+        }
+        out.push(SheetCellRange::new(CellCoord::new(r0, run_col, 0), CellCoord::new(r1, run_end, subs - 1)));
+        run_col = run_end + 1;
+    }
+
+    out.push(SheetCellRange::new(CellCoord::new(r0, c1, 0), CellCoord::new(r1, c1, s1)));
+    out
+}
+
+/// Resolve the active grid selection on `ds` honoring discontiguous `app.grid.selected_coords`
+/// and flat visual multi-subcolumn spans (`AUD-09-04`).
+#[must_use]
+pub fn resolve_grid_selection(app: &UiApp, ds: &DataSheet) -> Option<ResolvedGridSelection> {
+    let row_count = ds.archetype.row_count();
+    let col_count = ds.archetype.column_count();
+    if row_count == 0 || col_count == 0 {
+        return None;
+    }
+    let has_discontig = app.grid.selected_coords.len() > 1 || (!app.grid.selected_coords.is_empty() && app.grid.tool.anchor == app.grid.tool.active);
+    if has_discontig {
+        let coords: Vec<GridCellCoord> = app
+            .grid
+            .selected_coords
+            .iter()
+            .copied()
+            .filter(|c| c.row < row_count && c.col < col_count && c.subcol < data_set_subcolumn_count(&ds.archetype, c.col).max(1))
+            .collect();
+        return (!coords.is_empty()).then_some(ResolvedGridSelection::Discontiguous(coords));
+    }
+    let (a, b) = app.grid.tool.selection_bounds()?;
+    let ranges = selected_visual_subranges(ds, a, b);
+    (!ranges.is_empty()).then_some(ResolvedGridSelection::Ranges(ranges))
+}
+
+fn range_overlaps_linked_region(range: SheetCellRange, reg: &curvebook_doc::LinkedDataRegion) -> bool {
+    let rr = reg.target_range;
+    let r_start = range.start.row.max(rr.start.row);
+    let r_end = range.end.row.min(rr.end.row);
+    if r_start > r_end {
+        return false;
+    }
+    let cs_start = (range.start.col, range.start.subcol).max((rr.start.col, rr.start.subcol));
+    let cs_end = (range.end.col, range.end.subcol).min((rr.end.col, rr.end.subcol));
+    cs_start <= cs_end
+}
+
+fn coord_in_linked_region(coord: GridCellCoord, reg: &curvebook_doc::LinkedDataRegion) -> bool {
+    let rr = reg.target_range;
+    coord.row >= rr.start.row
+        && coord.row <= rr.end.row
+        && (coord.col, coord.subcol) >= (rr.start.col, rr.start.subcol)
+        && (coord.col, coord.subcol) <= (rr.end.col, rr.end.subcol)
+}
+
+/// O(regions) check for any linked region intersecting `selection` (`AUD-09-04`).
+pub fn first_linked_region_in_selection<'a>(ds: &'a DataSheet, selection: &ResolvedGridSelection) -> Option<&'a curvebook_doc::LinkedDataRegion> {
+    if ds.linked_regions.is_empty() {
+        return None;
+    }
+    match selection {
+        ResolvedGridSelection::Discontiguous(coords) => ds.linked_regions.iter().find(|reg| coords.iter().any(|&c| coord_in_linked_region(c, reg))),
+        ResolvedGridSelection::Ranges(ranges) => {
+            ds.linked_regions.iter().find(|reg| ranges.iter().any(|range| range_overlaps_linked_region(*range, reg)))
+        }
+    }
+}
+
+/// Emit an atomic `table.clearCells` intent (or `EngineCommandGroup`) for `selection` (`AUD-09-04`).
+pub fn push_clear_selection_intent(ds: &DataSheet, selection: &ResolvedGridSelection, intents: &mut PendingUiIntents) {
+    match selection {
+        ResolvedGridSelection::Discontiguous(coords) => {
+            let cells: Vec<serde_json::Value> = coords.iter().map(|c| json!({ "row": c.row, "col": c.col, "subcol": c.subcol })).collect();
+            intents.push_engine("table.clearCells", json!({ "sheet_id": ds.id.as_str(), "cells": cells }));
+        }
+        ResolvedGridSelection::Ranges(ranges) => match ranges.as_slice() {
+            [] => {}
+            [single] => intents.push_engine("table.clearCells", json!({ "sheet_id": ds.id.as_str(), "range": single })),
+            many => {
+                let commands =
+                    many.iter().map(|range| (String::from("table.clearCells"), json!({ "sheet_id": ds.id.as_str(), "range": range }))).collect();
+                intents.push(UiIntent::EngineCommandGroup { commands });
+            }
+        },
+    }
+}
+
+/// Emit an atomic `table.excludeCells` intent (or `EngineCommandGroup`) for `selection` (`AUD-09-04`).
+pub fn push_exclude_selection_intent(ds: &DataSheet, selection: &ResolvedGridSelection, excluded: bool, intents: &mut PendingUiIntents) {
+    match selection {
+        ResolvedGridSelection::Discontiguous(coords) => {
+            let cells: Vec<serde_json::Value> = coords.iter().map(|c| json!({ "row": c.row, "col": c.col, "subcol": c.subcol })).collect();
+            intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "cells": cells, "excluded": excluded }));
+        }
+        ResolvedGridSelection::Ranges(ranges) => match ranges.as_slice() {
+            [] => {}
+            [single] => intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "range": single, "excluded": excluded })),
+            many => {
+                let commands = many
+                    .iter()
+                    .map(|range| (String::from("table.excludeCells"), json!({ "sheet_id": ds.id.as_str(), "range": range, "excluded": excluded })))
+                    .collect();
+                intents.push(UiIntent::EngineCommandGroup { commands });
+            }
+        },
+    }
 }
 
 fn handle_multi_exclude_shortcut(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) -> bool {
@@ -239,8 +441,8 @@ fn handle_multi_exclude_shortcut(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &mut 
         }
         return true;
     }
-    if let Some(range) = app.grid.tool.selection_bounds() {
-        if let Some(reg) = first_linked_region_in_bounds(ds, range.0, range.1) {
+    if let Some(sel) = resolve_grid_selection(app, ds) {
+        if let Some(reg) = first_linked_region_in_selection(ds, &sel) {
             super::linked_regions::open_link_popover(fstate.state, reg, &app.locale);
             ui.ctx().request_repaint();
             return true;
@@ -248,9 +450,8 @@ fn handle_multi_exclude_shortcut(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &mut 
         if e_mods.shift {
             fstate.intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() }));
         } else {
-            let target_excluded = !ds.archetype.data_cell(CellCoord::from(range.0)).is_some_and(|c| c.excluded);
-            let doc_range = SheetCellRange::new(CellCoord::from(range.0), CellCoord::from(range.1));
-            fstate.intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "range": doc_range, "excluded": target_excluded }));
+            let target_excluded = !sel.first_coord().and_then(|c| ds.archetype.data_cell(c)).is_some_and(|c| c.excluded);
+            push_exclude_selection_intent(ds, &sel, target_excluded, fstate.intents);
         }
         return true;
     }
@@ -276,14 +477,13 @@ fn handle_multi_clear_and_edit_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstat
             }
             return true;
         }
-        if let Some(range) = app.grid.tool.selection_bounds() {
-            if let Some(reg) = first_linked_region_in_bounds(ds, range.0, range.1) {
+        if let Some(sel) = resolve_grid_selection(app, ds) {
+            if let Some(reg) = first_linked_region_in_selection(ds, &sel) {
                 super::linked_regions::open_link_popover(fstate.state, reg, &app.locale);
                 ui.ctx().request_repaint();
                 return true;
             }
-            let doc_range = SheetCellRange::new(CellCoord::from(range.0), CellCoord::from(range.1));
-            fstate.intents.push_engine("table.clearCells", json!({ "sheet_id": ds.id.as_str(), "range": doc_range }));
+            push_clear_selection_intent(ds, &sel, fstate.intents);
             return true;
         }
     }

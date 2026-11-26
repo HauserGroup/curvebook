@@ -288,6 +288,9 @@ pub(crate) fn dispatch_gui_tool(state: &mut McpServerState, name: &str, args: &M
 }
 
 fn dispatch_json_result(state: &mut McpServerState, method: &str, params: Value) -> Result<ToolCallResult, ToolCallError> {
+    if state.current_cancel_token().load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(errors::result_from_code(ErrorCode::Cancelled, format!("{method} cancelled before execution")));
+    }
     match dispatch_gui_backend(state, method, params) {
         Ok(val) => ToolCallResult::ok_json(&val),
         Err(payload) => Ok(errors::result_from_payload(&payload)),
@@ -444,6 +447,9 @@ fn handle_ui_screenshot(state: &mut McpServerState, args: &Map<String, Value>) -
         params.insert(String::from("path"), Value::String(resolved.to_string_lossy().into_owned()));
     }
 
+    if state.current_cancel_token().load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(errors::result_from_code(ErrorCode::Cancelled, "ui.screenshot cancelled before execution"));
+    }
     match dispatch_gui_backend(state, "ui.screenshot", Value::Object(params)) {
         Ok(raw) => format_screenshot_result(raw),
         Err(payload) => Ok(errors::result_from_payload(&payload)),
@@ -465,13 +471,6 @@ fn format_screenshot_result(raw: Value) -> Result<ToolCallResult, ToolCallError>
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned);
 
-    let Some(data) = b64_opt else {
-        return Ok(errors::result_from_payload(
-            &StructuredErrorPayload::new(ErrorCode::InternalError, "ui.screenshot response did not include base64 PNG data (`data_base64`)")
-                .with_details(raw),
-        ));
-    };
-
     let mut metadata = obj.clone();
     metadata.remove("data_base64");
     metadata.remove("png_base64");
@@ -480,11 +479,25 @@ fn format_screenshot_result(raw: Value) -> Result<ToolCallResult, ToolCallError>
 
     let meta_val = Value::Object(metadata);
     let meta_text = serde_json::to_string_pretty(&meta_val).unwrap_or_default();
-    Ok(ToolCallResult {
-        content: vec![ContentBlock::Image { data, mime_type: String::from("image/png") }, ContentBlock::Text { text: meta_text }],
-        is_error: false,
-        structured_content: Some(meta_val),
-    })
+
+    if let Some(data) = b64_opt {
+        return Ok(ToolCallResult {
+            content: vec![ContentBlock::Image { data, mime_type: String::from("image/png") }, ContentBlock::Text { text: meta_text }],
+            is_error: false,
+            structured_content: Some(meta_val),
+        });
+    }
+
+    // When the live backend wrote the PNG directly to `path` and omitted inline base64 to respect
+    // the 16 MiB control-frame budget (`AUD-13-12`), return metadata cleanly without failing.
+    if obj.get("path").and_then(Value::as_str).is_some_and(|p| !p.trim().is_empty()) {
+        return Ok(ToolCallResult { content: vec![ContentBlock::Text { text: meta_text }], is_error: false, structured_content: Some(meta_val) });
+    }
+
+    Ok(errors::result_from_payload(
+        &StructuredErrorPayload::new(ErrorCode::InternalError, "ui.screenshot response did not include base64 PNG data (`data_base64`)")
+            .with_details(raw),
+    ))
 }
 
 #[derive(Default, Deserialize, JsonSchema)]
@@ -649,19 +662,21 @@ fn handle_ui_invoke_menu(state: &mut McpServerState, args: &Map<String, Value>) 
         return Err(ToolCallError::InvalidParams(String::from("ui_invoke_menu requires \"path\" or \"command_id\"")));
     }
 
-    let mut extra = parsed.params.map_or_else(|| json!({}), Value::Object);
-    if let Err(err) = formats::sanitize_command_params(state, &mut extra) {
-        return Ok(errors::result_from_engine_error(&err));
-    }
-
     let mut params = Map::new();
     if let Some(p) = path {
         params.insert(String::from("path"), p);
     }
     insert_opt_str(&mut params, "command_id", command_id);
-    // Always supply an object for `params` (never `null`/omitted) so standard non-`ui.*` engine
-    // menu items pass strict root-object schema validation (`R2-S12-03`).
-    params.insert(String::from("params"), extra);
+    // Preserve omitted/null `params` (do NOT synthesize `{}`) so `dispatch_gui_invoke_menu` runs
+    // contextual parameter synthesis and allows parameterless menu clicks in `--human-path-only`
+    // mode (`AUD-13-10`). Explicit caller-supplied `params` (including `{}`) are sanitized and forwarded.
+    if let Some(map) = parsed.params {
+        let mut extra = Value::Object(map);
+        if let Err(err) = formats::sanitize_command_params(state, &mut extra) {
+            return Ok(errors::result_from_engine_error(&err));
+        }
+        params.insert(String::from("params"), extra);
+    }
     dispatch_json_result(state, "ui.invoke_menu", Value::Object(params))
 }
 
@@ -717,14 +732,32 @@ struct UiAnswerDialogArgs {
 fn handle_ui_answer_dialog(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     let parsed: UiAnswerDialogArgs = deserialize_args("ui_answer_dialog", args)?;
     let action = trim_opt_non_empty(parsed.action, "action")?;
-    let fields = parsed.fields.map(Value::Object);
-    let values = parsed.values.map(Value::Object);
-    let patches = parsed.patches.map(Value::Object);
+    let mut fields = parsed.fields;
+    let mut values = parsed.values;
+    let mut patches = parsed.patches;
     let choice = trim_opt_non_empty(parsed.choice, "choice")?;
     if action.is_none() && fields.is_none() && values.is_none() && patches.is_none() && choice.is_none() {
         return Err(ToolCallError::InvalidParams(String::from(
             "ui_answer_dialog requires \"action\", \"fields\", \"values\", \"patches\", or \"choice\"",
         )));
+    }
+
+    // Mirror top-level `choice` into the active field-patch map (without clobbering an explicit
+    // `choice`/`duplicate.choice` field) so both live and headless `parse_answer_dialog_params`
+    // forward prompt selections like `modify_existing` / `create_new` (`AUD-13-11`).
+    if let Some(ref choice_str) = choice {
+        let target_map = if let Some(ref mut f) = fields {
+            f
+        } else if let Some(ref mut v) = values {
+            v
+        } else if let Some(ref mut p) = patches {
+            p
+        } else {
+            fields.get_or_insert_with(Map::new)
+        };
+        if !target_map.contains_key("choice") && !target_map.contains_key("duplicate.choice") {
+            target_map.insert(String::from("choice"), Value::String(choice_str.clone()));
+        }
     }
 
     let mut params = Map::new();
@@ -734,13 +767,13 @@ fn handle_ui_answer_dialog(state: &mut McpServerState, args: &Map<String, Value>
         params.insert(String::from("force_create_new"), Value::Bool(force));
     }
     if let Some(f) = fields {
-        params.insert(String::from("fields"), f);
+        params.insert(String::from("fields"), Value::Object(f));
     }
     if let Some(v) = values {
-        params.insert(String::from("values"), v);
+        params.insert(String::from("values"), Value::Object(v));
     }
     if let Some(p) = patches {
-        params.insert(String::from("patches"), p);
+        params.insert(String::from("patches"), Value::Object(p));
     }
     dispatch_json_result(state, "ui.answer_dialog", Value::Object(params))
 }
@@ -781,7 +814,9 @@ fn check_positive_finite_f64(value: Option<f64>, key: &str, context: &str) -> Re
 
 fn normalize_tab_target(input: TabTargetInput, key: &str) -> Result<Value, ToolCallError> {
     match input {
-        TabTargetInput::Index(idx) => Ok(json!(idx)),
+        // Normalize zero-based integer tab indices to canonical decimal strings so every GUI
+        // backend (`inspect_bridge` and `gui_window`) parses them uniformly (`AUD-13-11`).
+        TabTargetInput::Index(idx) => Ok(Value::String(idx.to_string())),
         TabTargetInput::Label(s) => Ok(Value::String(trim_required_non_empty(s, key)?)),
     }
 }

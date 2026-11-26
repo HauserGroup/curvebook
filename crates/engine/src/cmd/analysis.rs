@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use curvebook_doc::{
-    AnalysisDomainKind, AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, CellValue, ClusterDistance, ClusterLinkage,
+    AnalysisDomainKind, AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, CellValue, ChecklistStatus, ClusterDistance, ClusterLinkage,
     ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError, ErrorCode, ErrorPropagationMode,
     FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, GraphSheet, HookSource, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec,
     MAX_SHEETS_PER_PROJECT, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod,
@@ -13,7 +13,7 @@ use curvebook_doc::{
     SplineLowessMethod, SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod,
     TwoGroupSpec, VariableColumn, VariableRole, XyTable,
 };
-use curvebook_fit::{get_builtin_model, list_builtin_equations, resolve_model_from_spec};
+use curvebook_fit::{get_builtin_model, list_builtin_equations, resolve_model_from_spec, suggested_default_dose_response_equation};
 use curvebook_format::{CsvOptions, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
 use curvebook_math::PValueFormat;
 use serde::{Deserialize, Serialize};
@@ -651,7 +651,7 @@ fn schema_result_generate_report() -> Value {
 fn run_analyze_run(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_analyze_run();
     let _parsed: AnalyzeRunParams = parse_params(&schema, raw)?;
-    let recalculated = dag::recalculate_project(&mut ctx.session.doc)?;
+    let recalculated = dag::recalculate_project_with_report_cancellable(&mut ctx.session.doc, Some(ctx.cancelled))?.total_updated();
     Ok(CommandOutcome::mutated("analyze.run", "ran analysis pipeline", json!({ "recalculated_sheets": recalculated })))
 }
 
@@ -730,6 +730,65 @@ fn has_creation_fields(parsed: &RunAnalysisParams) -> bool {
         || parsed.extra.contains_key("custom_dsl")
 }
 
+fn validate_transform_graph_params(command_id: &str, parsed: &RunAnalysisParams) -> Result<(), EngineError> {
+    if command_id != "transform.run" && (parsed.create_graph.is_some() || parsed.graph_sheet_id.is_some()) {
+        return Err(bad_input("`create_graph` and `graph_sheet_id` are only supported by `transform.run`")
+            .with_remediation("Use `transform.run` with `create_graph: true`, or create a graph afterward with `graph.create`."));
+    }
+    if parsed.graph_sheet_id.is_some() && parsed.create_graph != Some(true) {
+        return Err(bad_input("`graph_sheet_id` requires `create_graph: true`")
+            .with_remediation("Pass `create_graph: true` alongside `graph_sheet_id`, or omit `graph_sheet_id`."));
+    }
+    Ok(())
+}
+
+fn has_param_summary_analyzable_data(res: &ResultSheet) -> bool {
+    res.analyzable_data.as_ref().is_some_and(|ad| ad.id.as_str().ends_with("_param_summary"))
+}
+
+fn create_summary_graph_for_result(
+    doc: &mut ProjectDocument,
+    result_id: &SheetId,
+    eff_title: &str,
+    summary_param: &str,
+) -> Result<SheetId, EngineError> {
+    let graph_id = next_unique_sheet_id(doc, "graph")?;
+    let (ds, _) = super::graph::resolve_graph_create_source_sheet(doc, result_id)?;
+    let mut graph = GraphSheet::new_uninitialized_for_data(graph_id.clone(), &ds)?;
+    let summary_title = format!("{eff_title} — {summary_param} summary");
+    graph.title.clone_from(&summary_title);
+    graph.spec.title = summary_title;
+    graph.initialized = true;
+    graph.spec.primary_source_sheet_id = result_id.clone();
+    for s in &mut graph.spec.series {
+        s.source_sheet_id = result_id.clone();
+    }
+    super::graph::validate_graph_spec_in_doc(doc, &graph_id, &graph.spec)?;
+    doc.add_graph_sheet(graph)?;
+    Ok(graph_id)
+}
+
+fn maybe_create_summary_graph_for_update(
+    doc: &mut ProjectDocument,
+    result_id: &SheetId,
+    eff_title: &str,
+    summary_graph_param: Option<String>,
+    prev_create_summary_graph: bool,
+    payload: &mut Value,
+) -> Result<(), EngineError> {
+    let Some(summary_param) = summary_graph_param else {
+        return Ok(());
+    };
+    let has_existing_summary_graph = doc.graph_sheets.iter().any(|g| g.spec.primary_source_sheet_id == *result_id);
+    if !prev_create_summary_graph || !has_existing_summary_graph {
+        let graph_id = create_summary_graph_for_result(doc, result_id, eff_title, &summary_param)?;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(String::from("summary_graph_sheet_id"), Value::String(graph_id.as_str().to_owned()));
+        }
+    }
+    Ok(())
+}
+
 fn run_analysis_with_domain(
     ctx: &mut Ctx<'_>,
     command_id: &str,
@@ -745,9 +804,10 @@ fn run_analysis_with_domain(
             validate_confidence_percent(pct)?;
         }
         reject_extra_keys_without_creation(&parsed)?;
-        return run_existing_or_project_analysis(doc, command_id, parsed.sheet_id.as_deref());
+        return run_existing_or_project_analysis(doc, command_id, parsed.sheet_id.as_deref(), ctx.cancelled);
     }
 
+    validate_transform_graph_params(command_id, &parsed)?;
     let combined = params_to_combined_value(&parsed);
     let spec = build_analysis_spec(doc, &parsed, &combined, domain)?;
     let sheet_id = spec.id.clone();
@@ -785,14 +845,15 @@ fn run_analysis_with_domain(
         doc.add_result_sheet(ResultSheet::new(spec)?)?;
     }
 
-    let recalculated = dag::recalculate_dirty_with_report(doc, std::slice::from_ref(&sheet_id))?.total_updated();
+    let recalculated = dag::recalculate_dirty_with_report_cancellable(doc, std::slice::from_ref(&sheet_id), Some(ctx.cancelled))?.total_updated();
     let res = require_result_sheet(doc, &sheet_id)?;
     ensure_result_succeeded(res)?;
     let mut payload = result_summary_payload(res, recalculated);
+    let warnings = result_outcome_warnings(res);
     let eff_title = res.analysis.effective_title().to_owned();
 
     let summary_graph_param = match &res.analysis.kind {
-        AnalysisKind::NonlinearRegression(nl) if nl.create_summary_graph && res.analyzable_data.is_some() => nl.summary_parameter.clone(),
+        AnalysisKind::NonlinearRegression(nl) if nl.create_summary_graph && has_param_summary_analyzable_data(res) => nl.summary_parameter.clone(),
         _ => None,
     };
 
@@ -818,28 +879,23 @@ fn run_analysis_with_domain(
     }
 
     if let Some(summary_param) = summary_graph_param {
-        let graph_id = next_unique_sheet_id(doc, "graph")?;
-        let (ds, _) = super::graph::resolve_graph_create_source_sheet(doc, &sheet_id)?;
-        let mut graph = GraphSheet::new_uninitialized_for_data(graph_id.clone(), &ds)?;
-        let summary_title = format!("{eff_title} — {summary_param} summary");
-        graph.title.clone_from(&summary_title);
-        graph.spec.title = summary_title;
-        graph.initialized = true;
-        graph.spec.primary_source_sheet_id = sheet_id.clone();
-        for s in &mut graph.spec.series {
-            s.source_sheet_id = sheet_id.clone();
-        }
-        super::graph::validate_graph_spec_in_doc(doc, &graph_id, &graph.spec)?;
-        doc.add_graph_sheet(graph)?;
+        let graph_id = create_summary_graph_for_result(doc, &sheet_id, &eff_title, &summary_param)?;
         if let Some(obj) = payload.as_object_mut() {
             obj.insert(String::from("summary_graph_sheet_id"), Value::String(graph_id.as_str().to_owned()));
         }
     }
 
-    Ok(CommandOutcome::mutated(command_id, format!("ran {eff_title}"), payload))
+    let mut outcome = CommandOutcome::mutated(command_id, format!("ran {eff_title}"), payload);
+    outcome.warnings = warnings;
+    Ok(outcome)
 }
 
-fn run_existing_or_project_analysis(doc: &mut ProjectDocument, command_id: &str, raw_id: Option<&str>) -> Result<CommandOutcome, EngineError> {
+fn run_existing_or_project_analysis(
+    doc: &mut ProjectDocument,
+    command_id: &str,
+    raw_id: Option<&str>,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<CommandOutcome, EngineError> {
     if let Some(id_str) = raw_id {
         let id = parse_sheet_id(id_str)?;
         if doc.result_sheet(&id).is_none() {
@@ -850,12 +906,15 @@ fn run_existing_or_project_analysis(doc: &mut ProjectDocument, command_id: &str,
             .with_remediation("Supply `source_sheet_id` and `kind` to create a new result sheet, or verify the existing `sheet_id`.")
             .with_details(json!({ "sheet_id": id.as_str() })));
         }
-        let recalculated = dag::recalculate_dirty_with_report(doc, std::slice::from_ref(&id))?.total_updated();
+        let recalculated = dag::recalculate_dirty_with_report_cancellable(doc, std::slice::from_ref(&id), Some(cancelled))?.total_updated();
         let res = require_result_sheet(doc, &id)?;
         ensure_result_succeeded(res)?;
-        return Ok(CommandOutcome::mutated(command_id, "recalculated result sheet", result_summary_payload(res, recalculated)));
+        let warnings = result_outcome_warnings(res);
+        let mut outcome = CommandOutcome::mutated(command_id, "recalculated result sheet", result_summary_payload(res, recalculated));
+        outcome.warnings = warnings;
+        return Ok(outcome);
     }
-    let recalculated = dag::recalculate_project(doc)?;
+    let recalculated = dag::recalculate_project_with_report_cancellable(doc, Some(cancelled))?.total_updated();
     Ok(CommandOutcome::mutated(command_id, "recalculated analyses", json!({ "recalculated_sheets": recalculated })))
 }
 
@@ -865,7 +924,9 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let doc = &mut ctx.session.doc;
     let id = parse_sheet_id(&parsed.sheet_id)?;
     let mut updated = require_result_sheet(doc, &id)?.analysis.clone();
-    let source_kind = require_analyzable_data_sheet(doc, &updated.source_sheet_id)?.kind();
+    let prev_create_summary_graph = matches!(&updated.kind, AnalysisKind::NonlinearRegression(nl) if nl.create_summary_graph);
+    let source_ds_initial = require_analyzable_data_sheet(doc, &updated.source_sheet_id)?;
+    let source_kind = source_ds_initial.kind();
 
     let combined = update_params_to_value(&parsed);
     let explicit_empty_selection = parsed.selected_data_sets.as_ref().is_some_and(Vec::is_empty);
@@ -890,7 +951,7 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
                 .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`kind` must be string or object"))?
                 .trim()
                 .to_ascii_lowercase();
-            resolve_kind_shorthand(&name, &combined)?
+            resolve_kind_shorthand(&name, &combined, Some(source_ds_initial))?
         };
         apply_kind_patch_and_overrides(&mut new_kind, &combined)?;
         if let Some(ref patch_val) = cleaned_patch_val {
@@ -940,11 +1001,21 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     if let Some(res) = doc.result_sheet_mut(&id) {
         res.analysis = updated;
     }
-    let recalculated = dag::recalculate_dirty_with_report(doc, std::slice::from_ref(&id))?.total_updated();
+    let recalculated = dag::recalculate_dirty_with_report_cancellable(doc, std::slice::from_ref(&id), Some(ctx.cancelled))?.total_updated();
     let res = require_result_sheet(doc, &id)?;
     ensure_result_succeeded(res)?;
+    let mut payload = result_summary_payload(res, recalculated);
+    let warnings = result_outcome_warnings(res);
+    let eff_title = res.analysis.effective_title().to_owned();
+    let summary_graph_param = match &res.analysis.kind {
+        AnalysisKind::NonlinearRegression(nl) if nl.create_summary_graph && has_param_summary_analyzable_data(res) => nl.summary_parameter.clone(),
+        _ => None,
+    };
+    maybe_create_summary_graph_for_update(doc, &id, &eff_title, summary_graph_param, prev_create_summary_graph, &mut payload)?;
 
-    Ok(CommandOutcome::mutated("analysis.updateParams", format!("updated analysis parameters on `{id}`"), result_summary_payload(res, recalculated)))
+    let mut outcome = CommandOutcome::mutated("analysis.updateParams", format!("updated analysis parameters on `{id}`"), payload);
+    outcome.warnings = warnings;
+    Ok(outcome)
 }
 
 fn update_params_to_value(parsed: &AnalysisUpdateParams) -> Value {
@@ -999,15 +1070,17 @@ fn run_analysis_retarget_data(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     if let Some(res) = doc.result_sheet_mut(&id) {
         res.analysis = updated;
     }
-    let recalculated = dag::recalculate_dirty_with_report(doc, std::slice::from_ref(&id))?.total_updated();
+    let recalculated = dag::recalculate_dirty_with_report_cancellable(doc, std::slice::from_ref(&id), Some(ctx.cancelled))?.total_updated();
     let res = require_result_sheet(doc, &id)?;
     ensure_result_succeeded(res)?;
-
-    Ok(CommandOutcome::mutated(
+    let warnings = result_outcome_warnings(res);
+    let mut outcome = CommandOutcome::mutated(
         "analysis.retargetData",
         format!("retargeted analysis `{id}` to `{new_source}`"),
         result_summary_payload(res, recalculated),
-    ))
+    );
+    outcome.warnings = warnings;
+    Ok(outcome)
 }
 
 fn write_export_outcome(
@@ -1124,6 +1197,51 @@ fn ensure_result_succeeded(res: &ResultSheet) -> Result<(), EngineError> {
     }
 }
 
+fn collect_nonlinear_diagnostics(res: &ResultSheet) -> (bool, &'static str, Vec<String>, Vec<String>) {
+    let mut scale_warnings = Vec::new();
+    let mut identifiability_warnings = Vec::new();
+    let mut checklist_ambiguous = false;
+    for item in &res.checklist {
+        if !matches!(item.status, ChecklistStatus::Warn | ChecklistStatus::Violated) {
+            continue;
+        }
+        let assumption_lc = item.assumption.to_ascii_lowercase();
+        let formatted = format!("{}: {}", item.assumption, item.explanation);
+        if assumption_lc.contains("scale") {
+            scale_warnings.push(formatted);
+        } else if assumption_lc.contains("identifiability")
+            || assumption_lc.contains("multicollinearity")
+            || assumption_lc.contains("ambiguous")
+            || assumption_lc.contains("fit quality")
+        {
+            if item.status == ChecklistStatus::Violated && assumption_lc.contains("ambiguous") {
+                checklist_ambiguous = true;
+            }
+            identifiability_warnings.push(formatted);
+        }
+    }
+    let ambiguous = checklist_ambiguous || res.fitted_curves.iter().any(|fc| fc.ambiguous);
+    let fit_status = if ambiguous {
+        "Ambiguous"
+    } else if res.fitted_curves.iter().any(|fc| !fc.converged) {
+        "NotConverged"
+    } else if !identifiability_warnings.is_empty() || !scale_warnings.is_empty() {
+        "Flagged"
+    } else {
+        "Converged"
+    };
+    (ambiguous, fit_status, identifiability_warnings, scale_warnings)
+}
+
+fn result_outcome_warnings(res: &ResultSheet) -> Vec<String> {
+    if !matches!(&res.analysis.kind, AnalysisKind::NonlinearRegression(_)) {
+        return Vec::new();
+    }
+    let (_, _, identifiability_warnings, mut scale_warnings) = collect_nonlinear_diagnostics(res);
+    scale_warnings.extend(identifiability_warnings);
+    scale_warnings
+}
+
 fn result_summary_payload(res: &ResultSheet, recalculated: usize) -> Value {
     let scalars: Map<String, Value> =
         res.scalars.iter().map(|s| (s.key.clone(), json!({ "data_set_index": s.data_set_index, "value": s.value, "units": s.units }))).collect();
@@ -1139,10 +1257,18 @@ fn result_summary_payload(res: &ResultSheet, recalculated: usize) -> Value {
         "pairwise_comparisons_count": res.pairwise_comparisons.len(),
         "fitted_curves_count": res.fitted_curves.len(),
     });
-    if matches!(&res.analysis.kind, AnalysisKind::NonlinearRegression(nl) if nl.method == FitMethod::RobustCauchy)
+    if let AnalysisKind::NonlinearRegression(nl) = &res.analysis.kind
         && let Some(obj) = payload.as_object_mut()
     {
-        obj.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));
+        let (ambiguous, fit_status, identifiability_warnings, scale_warnings) = collect_nonlinear_diagnostics(res);
+        obj.insert(String::from("equation_id"), Value::String(nl.equation_id.clone()));
+        obj.insert(String::from("fit_status"), Value::String(String::from(fit_status)));
+        obj.insert(String::from("ambiguous"), Value::Bool(ambiguous));
+        obj.insert(String::from("identifiability_warnings"), Value::Array(identifiability_warnings.into_iter().map(Value::String).collect()));
+        obj.insert(String::from("scale_warnings"), Value::Array(scale_warnings.into_iter().map(Value::String).collect()));
+        if nl.method == FitMethod::RobustCauchy {
+            obj.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));
+        }
     }
     payload
 }
@@ -1166,6 +1292,23 @@ fn try_raw_analysis_spec(
             return Err(EngineError::with_code(ErrorCode::BadInput, format!("unrecognized parameter(s) {} alongside `spec`", extra_keys.join(", "))));
         }
         let mut spec: AnalysisSpec = deserialize_strict(spec_val, "/spec")?;
+        if let Some(raw_id) = parsed.sheet_id.as_deref() {
+            let explicit_id = parse_sheet_id(raw_id)?;
+            if explicit_id != spec.id {
+                return Err(bad_input(format!("top-level `sheet_id` (`{explicit_id}`) conflicts with `spec.id` (`{}`)", spec.id))
+                    .with_remediation("Omit top-level `sheet_id` when passing `spec`, or ensure it matches `spec.id`."));
+            }
+        }
+        if let Some(raw_src) = parsed.source_sheet_id.as_deref() {
+            let explicit_src = parse_sheet_id(raw_src)?;
+            if explicit_src != spec.source_sheet_id {
+                return Err(bad_input(format!(
+                    "top-level `source_sheet_id` (`{explicit_src}`) conflicts with `spec.source_sheet_id` (`{}`)",
+                    spec.source_sheet_id
+                ))
+                .with_remediation("Omit top-level `source_sheet_id` when passing `spec`, or ensure it matches `spec.source_sheet_id`."));
+            }
+        }
         validate_confidence_percent(spec.confidence_level.percent())?;
         apply_metadata_updates(
             &mut spec,
@@ -1223,13 +1366,14 @@ fn build_analysis_spec(
                 .with_details(json!({ "pointer": "/source_sheet_id" }))
         })?;
         let source_sheet_id = parse_sheet_id(raw_source)?;
-        let table_kind = require_analyzable_data_sheet(doc, &source_sheet_id)?.kind();
+        let source_ds = require_analyzable_data_sheet(doc, &source_sheet_id)?;
+        let table_kind = source_ds.kind();
         let id = match parsed.sheet_id.as_deref() {
             Some(raw) => parse_sheet_id(raw)?,
             None => next_unique_sheet_id(doc, domain_prefix(domain))?,
         };
 
-        let kind = parse_analysis_kind(parsed.kind.as_ref(), combined, &parsed.extra, domain, table_kind)?;
+        let kind = parse_analysis_kind(parsed.kind.as_ref(), combined, &parsed.extra, domain, source_ds)?;
         validate_domain_and_compat(&kind, domain, table_kind)?;
 
         let mut spec = AnalysisSpec::new(id, source_sheet_id, kind)?;
@@ -1387,6 +1531,8 @@ fn reject_extra_keys_without_creation(parsed: &RunAnalysisParams) -> Result<(), 
         || parsed.confidence_percent.is_some()
         || parsed.selected_data_sets.is_some()
         || parsed.p_value_format.is_some()
+        || parsed.create_graph.is_some()
+        || parsed.graph_sheet_id.is_some()
     {
         return Err(EngineError::with_code(
             ErrorCode::BadInput,
@@ -2438,12 +2584,29 @@ fn apply_metadata_updates(
     Ok(())
 }
 
+fn active_finite_x_values(ds: &DataSheet) -> Vec<f64> {
+    let TableArchetype::Xy(xy) = &ds.archetype else {
+        return Vec::new();
+    };
+    (0..xy.row_count()).filter_map(|r| xy.x_summary_at(r).ok().flatten()).filter(|x| x.is_finite()).collect()
+}
+
+fn default_dose_response_equation_for_sheet(source_ds: Option<&DataSheet>) -> &'static str {
+    match source_ds {
+        Some(ds) => {
+            let xs = active_finite_x_values(ds);
+            if xs.is_empty() { "log_agonist_vs_response_4pl" } else { suggested_default_dose_response_equation(&xs) }
+        }
+        None => "log_agonist_vs_response_4pl",
+    }
+}
+
 fn parse_analysis_kind(
     kind_val: Option<&Value>,
     params: &Value,
     extra: &Map<String, Value>,
     domain: AnalysisDomain,
-    table_kind: TableKind,
+    source_ds: &DataSheet,
 ) -> Result<AnalysisKind, EngineError> {
     let mut kind = if let Some(kv) = kind_val
         && kv.is_object()
@@ -2452,8 +2615,8 @@ fn parse_analysis_kind(
     } else {
         let raw_kind = kind_val.and_then(Value::as_str).map(|s| s.trim().to_ascii_lowercase());
         match raw_kind.as_deref() {
-            None => infer_default_kind(params, domain, table_kind)?,
-            Some(name) => resolve_kind_shorthand(name, params)?,
+            None => infer_default_kind(params, domain, source_ds)?,
+            Some(name) => resolve_kind_shorthand(name, params, Some(source_ds))?,
         }
     };
     apply_kind_patch_and_overrides(&mut kind, params)?;
@@ -2461,15 +2624,15 @@ fn parse_analysis_kind(
     Ok(kind)
 }
 
-fn infer_default_kind(params: &Value, domain: AnalysisDomain, table_kind: TableKind) -> Result<AnalysisKind, EngineError> {
+fn infer_default_kind(params: &Value, domain: AnalysisDomain, source_ds: &DataSheet) -> Result<AnalysisKind, EngineError> {
     if params.get("equation_id").is_some() || params.get("custom_dsl").is_some() {
-        return resolve_fit_shorthand("nonlinear", params);
+        return resolve_fit_shorthand("nonlinear", params, Some(source_ds));
     }
     match domain {
         AnalysisDomain::TransformOnly => Ok(default_transform_math()),
-        AnalysisDomain::FitOnly => resolve_fit_shorthand("four_parameter_logistic", params),
-        AnalysisDomain::StatsOnly | AnalysisDomain::Any => match table_kind {
-            TableKind::Xy => resolve_fit_shorthand("four_parameter_logistic", params),
+        AnalysisDomain::FitOnly => resolve_fit_shorthand("nonlinear", params, Some(source_ds)),
+        AnalysisDomain::StatsOnly | AnalysisDomain::Any => match source_ds.kind() {
+            TableKind::Xy => resolve_fit_shorthand("nonlinear", params, Some(source_ds)),
             TableKind::Column => Ok(AnalysisKind::OneWayAnova(default_one_way_anova(OneWayMethod::OrdinaryAnova))),
             TableKind::Grouped => Ok(AnalysisKind::FactorialAnova(default_factorial_anova(false))),
             TableKind::Contingency => Ok(AnalysisKind::Contingency(ContingencySpec::default())),
@@ -2481,7 +2644,7 @@ fn infer_default_kind(params: &Value, domain: AnalysisDomain, table_kind: TableK
     }
 }
 
-fn resolve_kind_shorthand(name: &str, params: &Value) -> Result<AnalysisKind, EngineError> {
+fn resolve_kind_shorthand(name: &str, params: &Value, source_ds: Option<&DataSheet>) -> Result<AnalysisKind, EngineError> {
     if let Some(kind) = resolve_transform_shorthand(name) {
         return Ok(kind);
     }
@@ -2491,7 +2654,7 @@ fn resolve_kind_shorthand(name: &str, params: &Value) -> Result<AnalysisKind, En
     if let Some(kind) = resolve_other_stats_shorthand(name) {
         return Ok(kind);
     }
-    resolve_fit_shorthand(name, params)
+    resolve_fit_shorthand(name, params, source_ds)
 }
 
 fn default_transform_math() -> AnalysisKind {
@@ -2667,7 +2830,7 @@ fn resolve_other_stats_shorthand(name: &str) -> Option<AnalysisKind> {
     Some(kind)
 }
 
-fn resolve_fit_shorthand(name: &str, params: &Value) -> Result<AnalysisKind, EngineError> {
+fn resolve_fit_shorthand(name: &str, params: &Value, source_ds: Option<&DataSheet>) -> Result<AnalysisKind, EngineError> {
     if matches!(name, "linear" | "simple_linear" | "linear_regression" | "deming" | "deming_regression") {
         let deming_model_ii = matches!(name, "deming" | "deming_regression") || opt_bool_checked(params, "deming")?.unwrap_or(false);
         return Ok(AnalysisKind::LinearRegression(LinearRegressionSpec { deming_model_ii, ..LinearRegressionSpec::default() }));
@@ -2683,7 +2846,9 @@ fn resolve_fit_shorthand(name: &str, params: &Value) -> Result<AnalysisKind, Eng
         "3pl" | "three_parameter_logistic" => "log_agonist_vs_response_3pl",
         "3pl_inhibitor" => "log_inhibitor_vs_response_3pl",
         "one_site_binding" | "saturation_binding" => "one_site_specific_binding",
-        "nonlinear" | "nonlinear_regression" => explicit_eq.unwrap_or("log_agonist_vs_response_4pl"),
+        "nonlinear" | "nonlinear_regression" => {
+            explicit_eq.unwrap_or_else(|| if explicit_dsl.is_some() { "custom_dsl" } else { default_dose_response_equation_for_sheet(source_ds) })
+        }
         other => {
             if get_builtin_model(other).is_some() {
                 other
@@ -2814,7 +2979,10 @@ fn is_omitted_optional_field(kind: &AnalysisKind, key: &str) -> bool {
         AnalysisKind::Contingency(_) => matches!(key, "expected_proportions" | "null_proportion"),
         AnalysisKind::Multivariate(MultivariateSpec::Pca { .. }) => key == "pcr_outcome_column",
         AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }) => key == "k_sweep_max",
-        AnalysisKind::LinearRegression(_) => matches!(key, "fixed_point" | "plot_x_min" | "plot_x_max" | "plot_segments"),
+        AnalysisKind::LinearRegression(_) => matches!(
+            key,
+            "fixed_point" | "plot_x_min" | "plot_x_max" | "plot_segments" | "standard_addition" | "extend_line_to_x_intercept" | "deming_error"
+        ),
         AnalysisKind::FitSplineLowess(_) => matches!(key, "smoothing_knots" | "smoothing_df" | "lowess_fraction" | "plot_x_min" | "plot_x_max"),
         AnalysisKind::NonlinearRegression(_) => matches!(
             key,
@@ -3113,8 +3281,14 @@ fn apply_transform_custom_overrides(spec: &mut TransformAnalysisSpec, norm: &Val
             }
         }
         TransformAnalysisSpec::Simulate { row_count, replicates, parameters, .. } => {
-            *row_count = (*row_count).max(2);
-            *replicates = (*replicates).max(1);
+            if *row_count == 0 {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`row_count` must be >= 1").with_details(json!({ "pointer": "/row_count" })));
+            }
+            if *replicates == 0 {
+                return Err(
+                    EngineError::with_code(ErrorCode::BadInput, "`replicates` must be >= 1").with_details(json!({ "pointer": "/replicates" }))
+                );
+            }
             if let Some(p_val) = norm.get("parameters")
                 && !p_val.is_null()
             {
@@ -4107,7 +4281,7 @@ mod tests {
             for &shorthand in desc.shorthands {
                 assert_eq!(descriptor_by_shorthand(shorthand).map(|d| d.id), Some(desc.id), "descriptor lookup mismatch for `{shorthand}`");
                 let resolved =
-                    resolve_kind_shorthand(shorthand, &empty).unwrap_or_else(|err| panic!("shorthand `{shorthand}` failed to resolve: {err}"));
+                    resolve_kind_shorthand(shorthand, &empty, None).unwrap_or_else(|err| panic!("shorthand `{shorthand}` failed to resolve: {err}"));
                 assert_eq!(resolved.id(), desc.id, "AnalysisKindId mismatch for `{shorthand}`");
                 assert_eq!(resolved.descriptor().domain, desc.domain, "domain mismatch for `{shorthand}`");
 
@@ -4129,7 +4303,7 @@ mod tests {
             }
         }
 
-        let eq_kind = resolve_kind_shorthand("one_phase_decay", &empty).expect("built-in equation ID must resolve");
+        let eq_kind = resolve_kind_shorthand("one_phase_decay", &empty, None).expect("built-in equation ID must resolve");
         assert_eq!(eq_kind.id(), AnalysisKindId::NonlinearRegression);
         assert!(eq_kind.descriptor().accepts_equation_id_shorthand);
     }

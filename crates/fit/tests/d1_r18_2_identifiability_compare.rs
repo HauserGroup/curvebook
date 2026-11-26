@@ -31,27 +31,36 @@ use common::{
 
 #[test]
 fn r18_2_greedy_hessian_identifiability_and_three_modes_r_oracle() {
-    // R 4.5.2 oracle from r18_2_identifiability_compare.R §1: Y = A*X + B + C*(1e-6 * X^2), X = 0..11
+    // R 4.5.2 oracle from r18_2_identifiability_compare.R §1, X = 0..11.
     let xs: Vec<f64> = (0..12).map(f64::from).collect();
     let noise = [0.02, -0.015, 0.01, -0.025, 0.015, -0.01, 0.02, -0.02, 0.005, -0.015, 0.025, -0.01];
     let ys: Vec<f64> = xs.iter().zip(noise).map(|(&x, e)| 1.5 + 2.5 * x + e).collect();
 
     assert_close(hessian_kappa_threshold(), 6.710_886_4e8, 1e-2, "10 / sqrt(eps_mach)");
 
-    let j_data: Vec<f64> = xs.iter().flat_map(|&x| [x, 1.0, 1e-6 * x * x]).collect();
-    let h = assemble_objective_hessian(&DenseMatrix::from_row_major(xs.len(), 3, j_data).unwrap(), false).unwrap();
-    assert_close(hessian_condition_number(&h).unwrap() / 3.856_137_345_783e11, 1.0, 1e-6, "kappa(H_full) relative");
+    // Raw unscaled condition number oracle on [X, 1, 1e-6 * X^2] remains exact, while AUD-03-05
+    // correlation-equilibrated `greedy_hessian_reduction` is unit-scale invariant and keeps all 3.
+    let j_scaled: Vec<f64> = xs.iter().flat_map(|&x| [x, 1.0, 1e-6 * x * x]).collect();
+    let h_scaled = assemble_objective_hessian(&DenseMatrix::from_row_major(xs.len(), 3, j_scaled).unwrap(), false).unwrap();
+    assert_close(hessian_condition_number(&h_scaled).unwrap() / 3.856_137_345_783e11, 1.0, 1e-6, "kappa(H_full) relative");
+    let red_scaled = greedy_hessian_reduction(&h_scaled, hessian_kappa_threshold()).unwrap();
+    assert!(red_scaled.unstable_indices.is_empty(), "pure unit rescaling must not trigger false instability (AUD-03-05)");
 
-    let red = greedy_hessian_reduction(&h, hessian_kappa_threshold()).unwrap();
+    // Truly collinear parameterization Y = A*X + B + C*(X + 1 + 1e-5 * X^2) spans the exact same
+    // subspace span{X, 1, X^2}, so RSS_full and the R 4.5.2 reduced-subspace SE(A), SE(B) are
+    // mathematically identical while equilibrated kappa(H_eq) >> 6.71e8 uniquely drops C (index 2).
+    let j_col: Vec<f64> = xs.iter().flat_map(|&x| [x, 1.0, x + 1.0 + 1e-5 * x * x]).collect();
+    let h_col = assemble_objective_hessian(&DenseMatrix::from_row_major(xs.len(), 3, j_col).unwrap(), false).unwrap();
+    let red = greedy_hessian_reduction(&h_col, hessian_kappa_threshold()).unwrap();
     assert_eq!(red.unstable_indices, vec![2], "greedy reduction must drop C (index 2)");
     assert_eq!(red.stable_indices, vec![0, 1], "A and B must remain well-conditioned");
-    assert_close(red.final_kappa, 154.359_488_982_3, 1e-6, "kappa(H_-3)");
+    assert_close(red.final_kappa, 12.071_002_996_5, 1e-6, "equilibrated kappa(H_eq_{-3})");
 
     let sheet = xy_sheet_single("xy-hess", "Ill-Conditioned Quadratic", "A", &xs, &ys);
 
     // 1) IdentifyUnstableParameters + Wald (show_standard_errors defaults true)
     let mut nl_u = nl_fast("ill_cond");
-    nl_u.custom_dsl = Some("Y = A*X + B + C*0.000001*X*X\n# Inits: A=2.0, B=1.0, C=0.0".to_owned());
+    nl_u.custom_dsl = Some("Y = A*X + B + C*(X + 1 + 0.00001*X*X)\n# Inits: A=2.0, B=1.0, C=0.0".to_owned());
     nl_u.identifiability_mode = Some(IdentifiabilityMode::IdentifyUnstableParameters);
     let res_u = exec_nl(&sheet, nl_u);
     assert_eq!(res_u.status, ResultStatus::UpToDate);
@@ -72,6 +81,8 @@ fn r18_2_greedy_hessian_identifiability_and_three_modes_r_oracle() {
         &row_c[0..3],
         &[ResultCell::Text("Unstable".to_owned()), ResultCell::Text("Unstable".to_owned()), ResultCell::Text("Unstable".to_owned())]
     );
+    // AUD-13-05: unstable parameter C must NOT leak into `result.scalars`.
+    assert!(res_u.scalars.iter().all(|s| !s.key.eq_ignore_ascii_case("C")), "unstable parameter C leaked into result.scalars");
 
     // 2) Profile-likelihood CI omits Std. Error column by default, and opt-in restores it.
     let mut nl_prof = NonlinearFitSpec::new("straight_line");

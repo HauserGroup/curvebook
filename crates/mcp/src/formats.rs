@@ -26,8 +26,9 @@
 //!    must always be launched with `--workdir <dir>`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
-use curvebook_doc::{DataSheet, ErrorCode, ProjectDocument, SheetId, SubcolumnMode, TableKind};
+use curvebook_doc::{DataSheet, ErrorCode, ProjectDocument, SheetId, SubcolumnMode, TableKind, validate_project_cells};
 use curvebook_engine::services::{
     DEFAULT_PREVIEW_DPI, DocumentExportFormat, ExportOptionsSpec, RasterMetadata, compile_visual_scene_for_sheet, export_document_artifact,
     import_registered_path, load_validated_ttf_font_bytes, parse_csv_delimiter_opt, parse_dpi, parse_pdf_color_space, parse_pdf_version,
@@ -35,10 +36,12 @@ use curvebook_engine::services::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_engine::services::{pdf_color_space_str, pdf_version_str, tiff_compression_str};
-use curvebook_engine::{EngineError, Session};
+use curvebook_engine::{EngineError, ExternalPathPolicy, Session};
+#[cfg(not(target_arch = "wasm32"))]
+use curvebook_format::list_xlsx_sheets;
 use curvebook_format::{
     CsvOptions, ExportOptions, ExportSource, FormatRegistry, ImportOptions, ImportPayload, XlsxImportOptions, decode_delimited_text_bytes,
-    list_xlsx_sheets, strip_project_data_for_template,
+    strip_project_data_for_template,
 };
 use curvebook_pdf::{PdfColorSpace, PdfVersion};
 use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, TiffCompression};
@@ -71,6 +74,80 @@ const MAX_LIVE_INLINE_CSV_BYTES: usize = 8 * 1024 * 1024;
 ///   [`std::env::current_dir`] so live-attached desktop processes receive the exact same absolute
 ///   path as the MCP server regardless of CWD differences. Callers writing to the returned path
 ///   (such as `save_file` and `export`) atomically overwrite any user-writable destination file.
+const EXTRA_PATH_PARAM_KEYS: &[&str] =
+    &["dir", "directory", "destination_path", "destinationPath", "unpacked_dir", "unpackedDir", "output_path", "outputPath"];
+
+fn is_mcp_path_param_key(key: &str) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    if curvebook_platform::path_guard::PATH_PARAM_KEYS.contains(&key) {
+        return true;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if matches!(
+        key,
+        "path"
+            | "file_path"
+            | "filePath"
+            | "source_path"
+            | "sourcePath"
+            | "template_path"
+            | "templatePath"
+            | "ttf_font"
+            | "ttfFont"
+            | "font_path"
+            | "fontPath"
+    ) {
+        return true;
+    }
+    EXTRA_PATH_PARAM_KEYS.contains(&key)
+}
+
+fn reject_external_err(raw_path: &str) -> EngineError {
+    EngineError::with_code(
+        ErrorCode::PathEscape,
+        format!("external filesystem access to `{raw_path}` is disabled by ExternalPathPolicy::RejectExternal"),
+    )
+    .with_remediation("Supply inline payload bytes or remove RejectExternal policy.")
+}
+
+fn enforce_path_keys_recursive(policy: &ExternalPathPolicy, value: &mut Value) -> Result<(), EngineError> {
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if is_mcp_path_param_key(k) {
+                    if let Some(raw) = v.as_str() {
+                        if !raw.trim().is_empty() {
+                            if raw.contains('\0') {
+                                return Err(EngineError::with_code(ErrorCode::BadInput, "path must not contain NUL bytes"));
+                            }
+                            match policy {
+                                ExternalPathPolicy::RejectExternal => return Err(reject_external_err(raw)),
+                                #[cfg(not(target_arch = "wasm32"))]
+                                ExternalPathPolicy::Workdir(guard) => {
+                                    let resolved = guard.resolve(raw).map_err(EngineError::from)?;
+                                    *v = Value::String(resolved.to_string_lossy().into_owned());
+                                }
+                                ExternalPathPolicy::Unconstrained => {}
+                            }
+                        }
+                    } else if !v.is_null() {
+                        enforce_path_keys_recursive(policy, v)?;
+                    }
+                } else {
+                    enforce_path_keys_recursive(policy, v)?;
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                enforce_path_keys_recursive(policy, item)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_mcp_path(state: &McpServerState, raw_path: &str) -> Result<PathBuf, EngineError> {
     if raw_path.trim().is_empty() {
         return Err(EngineError::with_code(ErrorCode::BadInput, "path must not be empty"));
@@ -78,9 +155,13 @@ pub(crate) fn resolve_mcp_path(state: &McpServerState, raw_path: &str) -> Result
     if raw_path.contains('\0') {
         return Err(EngineError::with_code(ErrorCode::BadInput, "path must not contain NUL bytes"));
     }
+    let policy = state.effective_path_policy();
+    if policy == ExternalPathPolicy::RejectExternal {
+        return Err(reject_external_err(raw_path));
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Some(guard) = state.workdir_guard() {
+        if let ExternalPathPolicy::Workdir(guard) = policy {
             return guard.resolve(raw_path).map_err(EngineError::from);
         }
         let path = PathBuf::from(raw_path);
@@ -99,23 +180,34 @@ pub(crate) fn resolve_mcp_path(state: &McpServerState, raw_path: &str) -> Result
     }
 }
 
-/// Sanitize recursive path keys inside engine command JSON payloads when a `WorkdirGuard` is active.
-///
-/// Applies to headless and in-process `GuiSessionHost` modes (`--workdir` cannot be combined with
-/// `--control-port`). Without `--workdir`, command path parameters remain unconstrained and execute
-/// with the local user's filesystem permissions.
+/// Sanitize recursive path keys inside engine command JSON payloads under active `WorkdirGuard` or
+/// `ExternalPathPolicy::RejectExternal` (`AUD-13-03`, `AUD-13-23`).
 pub(crate) fn sanitize_command_params(state: &McpServerState, params: &mut Value) -> Result<(), EngineError> {
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(guard) = state.workdir_guard() {
-        curvebook_platform::PathResolver::Sandboxed(guard.clone()).sanitize_params(params).map_err(EngineError::from)?;
+    let policy = state.effective_path_policy();
+    match policy {
+        ExternalPathPolicy::Unconstrained => Ok(()),
+        ExternalPathPolicy::RejectExternal => enforce_path_keys_recursive(&policy, params),
+        #[cfg(not(target_arch = "wasm32"))]
+        ExternalPathPolicy::Workdir(ref guard) => {
+            curvebook_platform::PathResolver::Sandboxed(guard.clone()).sanitize_params(params).map_err(EngineError::from)?;
+            enforce_path_keys_recursive(&policy, params)
+        }
     }
-    #[cfg(target_arch = "wasm32")]
-    let _ = (state, params);
-    Ok(())
 }
 
-/// Handle `open_file` dispatched via [`FormatRegistry`] with optional `WorkdirGuard` enforcement.
+fn check_not_cancelled(state: &McpServerState, tool_name: &str) -> Option<ToolCallResult> {
+    if state.current_cancel_token().load(Ordering::Acquire) {
+        Some(errors::result_from_code(ErrorCode::Cancelled, format!("{tool_name} cancelled before execution")))
+    } else {
+        None
+    }
+}
+
+/// Handle `open_file` dispatched via [`FormatRegistry`] with `ExternalPathPolicy` / `WorkdirGuard` enforcement.
 pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    if let Some(cancelled) = check_not_cancelled(state, "open_file") {
+        return Ok(cancelled);
+    }
     reject_unknown_args(
         "open_file",
         args,
@@ -157,32 +249,44 @@ pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Va
         return Err(ToolCallError::InvalidParams(format!("`list_sheets` is only supported for `.xlsx` workbooks (got `{format_id}`)")));
     }
     if format_id == "xlsx" && list_sheets_only {
-        #[cfg(not(target_arch = "wasm32"))]
-        let raw_bytes = match curvebook_platform::fs::read_regular_file_bytes(&resolved_path, importer.max_input_bytes()) {
-            Ok(bytes) => bytes,
-            Err(curvebook_platform::PlatformError::InvalidPath { reason }) => {
-                return Ok(errors::result_from_engine_error(&EngineError::with_code(
-                    ErrorCode::BadInput,
-                    format!("invalid file `{}`: {reason}", resolved_path.display()),
-                )));
-            }
-            Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
-        };
         #[cfg(target_arch = "wasm32")]
-        let raw_bytes: Vec<u8> = {
+        {
             return Ok(errors::result_from_code(ErrorCode::IoError, "filesystem operations are not supported on wasm32"));
-        };
-        let sheets = match list_xlsx_sheets(&raw_bytes) {
-            Ok(s) => s,
-            Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
-        };
-        return ToolCallResult::ok_json(&json!({
-            "opened": false,
-            "format": "xlsx",
-            "path": resolved_path.display().to_string(),
-            "sheet_count": sheets.len(),
-            "sheets": sheets,
-        }));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let raw_bytes = match curvebook_platform::fs::read_regular_file_bytes(&resolved_path, importer.max_input_bytes()) {
+                Ok(bytes) => bytes,
+                Err(curvebook_platform::PlatformError::InvalidPath { reason }) => {
+                    return Ok(errors::result_from_engine_error(&EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("invalid file `{}`: {reason}", resolved_path.display()),
+                    )));
+                }
+                Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
+            };
+            let sheets = match list_xlsx_sheets(&raw_bytes) {
+                Ok(s) => s,
+                Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
+            };
+            return ToolCallResult::ok_json(&json!({
+                "opened": false,
+                "format": "xlsx",
+                "path": resolved_path.display().to_string(),
+                "sheet_count": sheets.len(),
+                "sheets": sheets,
+            }));
+        }
+    }
+
+    // In standalone append mode for `.prism`/`.pzfx`/`.xlsx`, delegate directly to `table.import*`
+    // via `path` so the archive is parsed ONCE with zero base64 amplification (`AUD-13-14`).
+    #[cfg(not(target_arch = "wasm32"))]
+    let is_live_attached = state.control_port().is_some();
+    #[cfg(target_arch = "wasm32")]
+    let is_live_attached = false;
+    if !is_live_attached && append && matches!(format_id, "prism" | "pzfx" | "xlsx") {
+        return apply_report_import_append_via_path(state, &resolved_path, format_id, &import_opts);
     }
 
     let (payload, raw_bytes) = match import_registered_path(importer, &resolved_path, &import_opts) {
@@ -375,16 +479,13 @@ fn apply_imported_payload(
             }))
         }
         ("prism" | "pzfx" | "xlsx", ImportPayload::Report(report)) => {
-            let Some(bytes) = raw_bytes else {
-                return Ok(errors::result_from_code(ErrorCode::InternalError, format!("missing buffered bytes for '{format_id}'")));
-            };
             let warnings = match serde_json::to_value(&report.warnings) {
                 Ok(v) => v,
                 Err(err) => {
                     return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize import warnings: {err}")));
                 }
             };
-            apply_report_import(state, resolved_path, format_id, &bytes, import_opts, warnings, append)
+            apply_report_import_direct(state, resolved_path, format_id, report.document, warnings)
         }
         ("csv" | "tsv", ImportPayload::DataSheet(_)) => {
             let Some(bytes) = raw_bytes else {
@@ -528,19 +629,28 @@ fn apply_imported_payload_live(
                 }
             };
             let cmd_id = report_import_command_id(format_id);
-            let import_params = match build_live_report_import_params(Some(resolved_path), raw_bytes.as_deref(), format_id, import_opts, append) {
-                Ok(p) => p,
-                Err(err) => return Ok(live_attach_import_error(err)),
-            };
+            let preserve_xlsx_title = !append && format_id == "xlsx" && title_override.is_some();
+            let effective_merge = append || preserve_xlsx_title;
+            let import_params =
+                match build_live_report_import_params(Some(resolved_path), raw_bytes.as_deref(), format_id, import_opts, effective_merge) {
+                    Ok(p) => p,
+                    Err(err) => return Ok(live_attach_import_error(err)),
+                };
             let send_res = if append {
                 state.send_live_control("engine.execute", json!({ "command_id": cmd_id, "params": import_params }))
             } else {
+                let file_new_params = if preserve_xlsx_title && let Some(explicit_title) = import_opts.xlsx.as_ref().and_then(|x| x.title.as_deref())
+                {
+                    json!({ "title": explicit_title })
+                } else {
+                    json!({})
+                };
                 state.send_live_control(
                     "command.batch",
                     json!({
                         "atomic": true,
                         "commands": [
-                            { "command": "file.new", "params": {} },
+                            { "command": "file.new", "params": file_new_params },
                             { "command": cmd_id, "params": import_params },
                         ]
                     }),
@@ -567,26 +677,11 @@ fn apply_imported_payload_live(
             let Some(bytes) = raw_bytes else {
                 return Ok(errors::result_from_code(ErrorCode::InternalError, format!("missing buffered bytes for '{format_id}'")));
             };
-            let prefer_path = bytes.len() > MAX_LIVE_INLINE_CSV_BYTES;
-            let params = match build_csv_import_params(resolved_path, format_id, bytes, import_opts, prefer_path) {
-                Ok(p) => p,
+            let (live_method, live_payload) = match build_live_csv_control_envelope(resolved_path, format_id, &bytes, import_opts, append) {
+                Ok(pair) => pair,
                 Err(err_res) => return Ok(err_res),
             };
-            let send_res = if append {
-                state.send_live_control("engine.execute", json!({ "command_id": "table.importCsv", "params": params }))
-            } else {
-                state.send_live_control(
-                    "command.batch",
-                    json!({
-                        "atomic": true,
-                        "commands": [
-                            { "command": "file.new", "params": { "title": import_opts.title } },
-                            { "command": "table.importCsv", "params": params },
-                        ]
-                    }),
-                )
-            };
-            if let Err(err) = send_res {
+            if let Err(err) = state.send_live_control(live_method, live_payload) {
                 return Ok(live_attach_import_error(err));
             }
             let inspect = match state.send_live_control("doc.inspect", json!({ "sheet_id": import_opts.sheet_id.as_str() })) {
@@ -610,6 +705,50 @@ fn apply_imported_payload_live(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+const LIVE_CSV_ENVELOPE_OVERHEAD_BYTES: usize = 4096;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn build_live_csv_control_envelope(
+    resolved_path: &Path,
+    format_id: &str,
+    raw_bytes: &[u8],
+    import_opts: &ImportOptions,
+    append: bool,
+) -> Result<(&'static str, Value), ToolCallResult> {
+    let wrap = |params: Value| -> (&'static str, Value) {
+        if append {
+            ("engine.execute", json!({ "command_id": "table.importCsv", "params": params }))
+        } else {
+            (
+                "command.batch",
+                json!({
+                    "atomic": true,
+                    "commands": [
+                        { "command": "file.new", "params": { "title": import_opts.title } },
+                        { "command": "table.importCsv", "params": params },
+                    ]
+                }),
+            )
+        }
+    };
+
+    let budget = crate::tools::MAX_CONTROL_RESPONSE_BYTES.saturating_sub(LIVE_CSV_ENVELOPE_OVERHEAD_BYTES);
+    if raw_bytes.len() <= MAX_LIVE_INLINE_CSV_BYTES {
+        let inline_params = build_csv_import_params(resolved_path, format_id, raw_bytes.to_vec(), import_opts, false)?;
+        let (method, envelope) = wrap(inline_params);
+        let encoded_len = serde_json::to_vec(&envelope).map_or(usize::MAX, |v| v.len());
+        if encoded_len <= budget {
+            return Ok((method, envelope));
+        }
+    }
+
+    // Automatically fall back to `"path"` mode when JSON string escaping pushes the serialized
+    // control frame over the 16 MiB budget (`AUD-13-14`).
+    let path_params = build_csv_import_params(resolved_path, format_id, raw_bytes.to_vec(), import_opts, true)?;
+    Ok(wrap(path_params))
+}
+
 fn report_import_command_id(format_id: &str) -> &'static str {
     match format_id {
         "pzfx" => "table.importPzfx",
@@ -618,52 +757,30 @@ fn report_import_command_id(format_id: &str) -> &'static str {
     }
 }
 
-fn apply_report_import(
+fn apply_report_import_direct(
     state: &mut McpServerState,
     resolved_path: &Path,
     format_id: &str,
-    bytes: &[u8],
-    import_opts: &ImportOptions,
+    document: ProjectDocument,
     warnings: Value,
-    append: bool,
 ) -> Result<ToolCallResult, ToolCallError> {
-    let command_id = report_import_command_id(format_id);
-    let mut map = Map::new();
-    map.insert(String::from("bytes_base64"), json!(encode_base64(bytes)));
-    map.insert(String::from("merge"), json!(append));
-    if format_id == "xlsx"
-        && let Some(xopts) = import_opts.xlsx.as_ref()
-    {
-        attach_xlsx_command_params(&mut map, xopts);
+    // Install the already-parsed `ImportReport.document` directly without base64-encoding or
+    // re-parsing the archive, preserving `XlsxImportOptions.title` (override or filename stem)
+    // (`AUD-13-14`).
+    let total_cells = match document.total_allocated_cells() {
+        Ok(n) => n,
+        Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
+    };
+    if let Err(err) = validate_project_cells(0, total_cells) {
+        return Ok(errors::result_from_engine_error(&EngineError::from(err)));
     }
-    let params = Value::Object(map);
-
-    let cancel = state.current_cancel_token();
-    if append {
-        return state.mutate_active_session(|session| {
-            if let Err(err) = session.execute_with_caller(command_id, params, curvebook_engine::Caller::Mcp, &cancel) {
-                return Ok(errors::result_from_engine_error(&err));
-            }
-            let sheets = session.document().total_sheet_count();
-            let title = session.document().title.clone();
-            ToolCallResult::ok_json(&json!({
-                "opened": true,
-                "format": format_id,
-                "path": resolved_path.display().to_string(),
-                "title": title,
-                "total_sheet_count": sheets,
-                "warnings": warnings,
-            }))
-        });
+    let sheets = document.total_sheet_count();
+    let title = document.title.clone();
+    let mut next_session = Session::from_document(document);
+    next_session.set_file_path(None, false);
+    if !next_session.is_dirty() {
+        let _ = next_session.collapse_atomic_group(Session::new());
     }
-
-    let mut next_session = Session::new();
-    if let Err(err) = next_session.execute_with_caller(command_id, params, curvebook_engine::Caller::Mcp, &cancel) {
-        return Ok(errors::result_from_engine_error(&err));
-    }
-
-    let sheets = next_session.document().total_sheet_count();
-    let title = next_session.document().title.clone();
     state.install_session(next_session);
     ToolCallResult::ok_json(&json!({
         "opened": true,
@@ -673,6 +790,42 @@ fn apply_report_import(
         "total_sheet_count": sheets,
         "warnings": warnings,
     }))
+}
+
+fn apply_report_import_append_via_path(
+    state: &mut McpServerState,
+    resolved_path: &Path,
+    format_id: &str,
+    import_opts: &ImportOptions,
+) -> Result<ToolCallResult, ToolCallError> {
+    let command_id = report_import_command_id(format_id);
+    let mut map = Map::new();
+    map.insert(String::from("path"), json!(resolved_path.display().to_string()));
+    map.insert(String::from("merge"), json!(true));
+    if format_id == "xlsx"
+        && let Some(xopts) = import_opts.xlsx.as_ref()
+    {
+        attach_xlsx_command_params(&mut map, xopts);
+    }
+    let params = Value::Object(map);
+    let cancel = state.current_cancel_token();
+    state.mutate_active_session(|session| {
+        let outcome = match session.execute_with_caller(command_id, params, curvebook_engine::Caller::Mcp, &cancel) {
+            Ok(out) => out,
+            Err(err) => return Ok(errors::result_from_engine_error(&err)),
+        };
+        let warnings = outcome.payload.get("warnings").cloned().unwrap_or_else(|| json!([]));
+        let sheets = session.document().total_sheet_count();
+        let title = session.document().title.clone();
+        ToolCallResult::ok_json(&json!({
+            "opened": true,
+            "format": format_id,
+            "path": resolved_path.display().to_string(),
+            "title": title,
+            "total_sheet_count": sheets,
+            "warnings": warnings,
+        }))
+    })
 }
 
 fn apply_csv_import(
@@ -810,6 +963,9 @@ fn inspect_delimited_import_warnings(ds: &DataSheet) -> Vec<String> {
 
 /// Handle `save_file` dispatched via [`FormatRegistry`] (which persists atomically via `write_atomic`).
 pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    if let Some(cancelled) = check_not_cancelled(state, "save_file") {
+        return Ok(cancelled);
+    }
     reject_unknown_args("save_file", args, &["path", "format"])?;
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = state.control_port() {
@@ -906,6 +1062,9 @@ pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Va
 
 /// Handle `render_preview`: compile GraphSheet/LayoutSheet and rasterize PNG preview with metadata.
 pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    if let Some(cancelled) = check_not_cancelled(state, "render_preview") {
+        return Ok(cancelled);
+    }
     reject_unknown_args("render_preview", args, &["sheet_id", "width_px", "height_px", "dpi"])?;
     let sheet_id = optional_non_empty_str(args, "sheet_id")?;
     let dpi = parse_dpi(args.get("dpi"), DEFAULT_PREVIEW_DPI).map_err(|err| ToolCallError::InvalidParams(err.message().to_owned()))?;
@@ -996,6 +1155,9 @@ pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<Strin
 /// Handle `export` delegated to [`export_document_artifact`] with `WorkdirGuard` path checks
 /// and atomic writes (`write_atomic`).
 pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    if let Some(cancelled) = check_not_cancelled(state, "export") {
+        return Ok(cancelled);
+    }
     reject_unknown_args(
         "export",
         args,
@@ -1332,14 +1494,16 @@ fn parse_subcolumn_mode(raw: &str) -> Result<SubcolumnMode, ToolCallError> {
         return Ok(SubcolumnMode::RawReplicates(count));
     }
     match normalized.as_str() {
-        "single" => Ok(SubcolumnMode::Single),
+        "single" | "none" => Ok(SubcolumnMode::Single),
         "mean_sd_n" => Ok(SubcolumnMode::MeanSdN),
         "mean_sem_n" => Ok(SubcolumnMode::MeanSemN),
         "mean_cv_n" => Ok(SubcolumnMode::MeanCvN),
         "mean_low_high" => Ok(SubcolumnMode::MeanLowHigh),
         "upper_lower_limits" => Ok(SubcolumnMode::UpperLowerLimits),
         "median_iqr" => Ok(SubcolumnMode::MedianIqr),
-        _ => Err(ToolCallError::InvalidParams(format!("unknown subcolumn_mode '{raw}'"))),
+        _ => Err(ToolCallError::InvalidParams(format!(
+            "unknown subcolumn_mode '{raw}'; expected 'single' (or 'none'), 'replicates:<1..=256>', 'mean_sd_n', 'mean_sem_n', 'mean_cv_n', 'mean_low_high', 'upper_lower_limits', or 'median_iqr'"
+        ))),
     }
 }
 

@@ -372,12 +372,19 @@ impl PendingUiIntents {
         let pending = std::mem::take(&mut self.queue);
         let mut results = Vec::with_capacity(pending.len());
         let mut first_err_msg: Option<String> = None;
+        let mut had_error = false;
         for intent in pending {
+            // Preserve active modal state when a preceding commit intent in the same batch fails
+            // (e.g. `ExportFigure` / `CsvExportOptions` queuing `[EngineCommand, CloseAllModals]`; `AUD-10-22`).
+            if matches!(intent, UiIntent::CloseAllModals) && had_error {
+                continue;
+            }
             let res = executors::apply_single_ui_intent(app, intent);
-            if let Err(ref err) = res
-                && first_err_msg.is_none()
-            {
-                first_err_msg = Some(err.to_string());
+            if let Err(ref err) = res {
+                had_error = true;
+                if first_err_msg.is_none() {
+                    first_err_msg = Some(err.to_string());
+                }
             }
             results.push(res);
         }

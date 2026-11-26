@@ -184,10 +184,11 @@ pub fn fleiss_kappa(rater_counts: &[Vec<u64>], confidence: ConfidenceLevel) -> R
     let z_crit = norm_two_sided_isf(confidence.alpha()).unwrap_or(1.959_963_984_540_054);
     let ci = ((kappa - z_crit * se).clamp(-1.0, 1.0), (kappa + z_crit * se).clamp(-1.0, 1.0));
 
-    // Fleiss, Nee & Landis (1979) asymptotic variance under H0: kappa = 0 strictly for z-test.
+    // Fleiss, Nee & Landis (1979, Psychol. Bull. 86:974-977) asymptotic variance under H0: kappa = 0
+    // strictly for the z-test: Var_0(kappa) = 2 * (p_e + p_e^2 - 2 * sum_j p_j^3) / (N m (m - 1) (1 - p_e)^2).
     let sum_pj3: f64 = p_j.iter().map(|&pj| pj * pj * pj).sum();
     let denom0 = nf * mf * (mf - 1.0) * one_minus_pe_sq;
-    let var0 = if denom0 > 0.0 { 2.0 * (pe - (2.0 * mf - 3.0) * pe * pe + 2.0 * (mf - 2.0) * sum_pj3) / denom0 } else { 0.0 };
+    let var0 = if denom0 > 0.0 { 2.0 * (pe + pe * pe - 2.0 * sum_pj3) / denom0 } else { 0.0 };
     let se0 = var0.max(0.0).sqrt();
     let z_stat = if se0 > 0.0 { kappa / se0 } else { 0.0 };
     let p_val = 2.0 * norm_sf(z_stat.abs());

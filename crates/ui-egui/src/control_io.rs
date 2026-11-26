@@ -35,7 +35,7 @@ use crate::i18n::{is_rtl_locale, locale_display_name, normalize_locale};
 use crate::interaction::{UiInputEvent, ViewportMetrics, dispatch_ui_event};
 use crate::menus::ui_commands::UI_COMMANDS;
 pub use crate::os_integration::ClipboardBundle;
-use crate::theme::{UiThemeMode, UiThemeSpec};
+use crate::theme::UiThemeMode;
 use crate::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
 
 /// Hard bound per JSON-lines control request/response frame (16 MiB).
@@ -1256,11 +1256,19 @@ fn dispatch_gui_action_and_record(
             && value.get("command_id").and_then(Value::as_str) == Some("project.save")
             && !value.get("ui").and_then(Value::as_bool).unwrap_or(false)
         {
-            steps.push(ControlRecordedStep {
-                command_id: String::from("project.save"),
-                params: params.get("params").cloned().unwrap_or(Value::Null),
-                mutated: false,
-            });
+            let mut recorded_params = params.get("params").cloned().unwrap_or(Value::Null);
+            if let Some(canonical) = app.session().file_path() {
+                let canonical_str = canonical.to_string_lossy().into_owned();
+                match &mut recorded_params {
+                    Value::Object(map) => {
+                        map.insert(String::from("path"), Value::String(canonical_str));
+                    }
+                    _ => {
+                        recorded_params = json!({ "path": canonical_str });
+                    }
+                }
+            }
+            steps.push(ControlRecordedStep { command_id: String::from("project.save"), params: recorded_params, mutated: false });
         } else {
             let mutated = app.mutation_seq() != seq_before
                 || app.session().undo_depth() != undo_before
@@ -1283,6 +1291,23 @@ fn dispatch_command_by_id(
 ) -> Result<Value, ControlCallError> {
     if is_gui_action_method(command_id) {
         return dispatch_gui_action_and_record(app, command_id, params, recorded);
+    }
+    match command_id {
+        "ping" => {
+            return Ok(json!({
+                "pong": true,
+                "bundled_fonts": crate::bundled_fonts_enabled(),
+                "version": env!("CARGO_PKG_VERSION"),
+            }));
+        }
+        "command.list" => return Ok(handle_command_list(app)),
+        "doc.inspect" => return handle_doc_inspect(app.session().document(), app.session().is_dirty(), app.session().file_path(), &params),
+        "doc.export" => return handle_doc_export(app, &params),
+        "render.svg" => return handle_render_svg(app, &params),
+        "render.pdf" => return handle_render_pdf(app, &params),
+        "render.preview" => return handle_render_preview(app, &params),
+        "ui.state" | "state.snapshot" => return Ok(handle_ui_state(app)),
+        _ => {}
     }
     let seq_before = app.mutation_seq();
     if let Some(ui_value) = dispatch_ui_command_detailed(app, command_id, &params)? {
@@ -1426,7 +1451,21 @@ fn is_pure_engine_batch_step(cmd_id: &str) -> bool {
         && lookup_patched_sheet_dialog(cmd_id).is_none()
         && lookup_ui_command_handler(cmd_id).is_none()
         && !cmd_id.starts_with("ui.")
-        && !matches!(cmd_id, "app.about" | "app.feedback" | "file.print" | "app.quit")
+        && !matches!(
+            cmd_id,
+            "app.about"
+                | "app.feedback"
+                | "file.print"
+                | "app.quit"
+                | "ping"
+                | "command.list"
+                | "doc.inspect"
+                | "doc.export"
+                | "render.svg"
+                | "render.pdf"
+                | "render.preview"
+                | "state.snapshot"
+        )
         && cmd_id != "analysis.updateParams"
 }
 
@@ -1475,6 +1514,48 @@ fn finish_committed_atomic_batch(app: &mut UiApp, rollback: AtomicBatchRollbackS
     }
 }
 
+fn step_has_filesystem_side_effect(command_id: &str, params: &Value) -> bool {
+    if let Some(spec) = curvebook_engine::cmd::registry().get(command_id)
+        && spec.effects.contains(curvebook_engine::cmd::Effects::WRITES_FILESYSTEM)
+    {
+        return true;
+    }
+    !host_routing::is_command_read_only(command_id, Some(params)) && host_routing::has_non_null_path_param(params)
+}
+
+fn build_batch_failure_detail(
+    failed_index: Option<usize>,
+    failed_command_id: Option<&str>,
+    completed_steps: usize,
+    rolled_back: bool,
+    persisted_fs_steps: &[usize],
+    cause: Option<Value>,
+) -> Value {
+    let mut details = serde_json::Map::new();
+    if let Some(idx) = failed_index {
+        details.insert(String::from("failed_index"), json!(idx));
+    }
+    if let Some(cmd) = failed_command_id {
+        details.insert(String::from("failed_command_id"), json!(cmd));
+    }
+    details.insert(String::from("completed_steps"), json!(completed_steps));
+    details.insert(String::from("rolled_back"), json!(rolled_back));
+    details.insert(String::from("filesystem_side_effects_persisted"), json!(!persisted_fs_steps.is_empty()));
+    if !persisted_fs_steps.is_empty() {
+        details.insert(String::from("persisted_filesystem_steps"), json!(persisted_fs_steps));
+    }
+    let code = cause.as_ref().and_then(|c| c.get("code")).and_then(Value::as_str).unwrap_or("BAD_INPUT").to_owned();
+    if let Some(c) = cause {
+        details.insert(String::from("cause"), c);
+    }
+    // Mirror batch metadata inside `"details"` (read by MCP `parse_control_error`) while keeping
+    // top-level fields alongside `"code"` for direct control-protocol callers (`AUD-13-13`).
+    let mut map = details.clone();
+    map.insert(String::from("code"), Value::String(code));
+    map.insert(String::from("details"), Value::Object(details));
+    Value::Object(map)
+}
+
 fn try_execute_pure_engine_atomic_batch(
     app: &mut UiApp,
     items: &[Value],
@@ -1496,6 +1577,8 @@ fn try_execute_pure_engine_atomic_batch(
     let cancelled = std::sync::atomic::AtomicBool::new(false);
     match app.session.execute_batch_atomic(&steps, Caller::Control, &cancelled) {
         Ok(outcomes) => {
+            let persisted_fs_steps: Vec<usize> =
+                steps.iter().enumerate().filter_map(|(i, st)| step_has_filesystem_side_effect(&st.command_id, &st.params).then_some(i)).collect();
             let max_payload_bytes = MAX_CONTROL_LINE_BYTES.saturating_sub(512);
             let mut accumulated_bytes: usize = 64;
             let mut results = Vec::with_capacity(outcomes.len());
@@ -1510,7 +1593,21 @@ fn try_execute_pure_engine_atomic_batch(
                         if let Some(flag) = rolled_back {
                             *flag = true;
                         }
-                        return Some(Err(ControlCallError::from(format!("failed to serialize command outcome: {err}"))));
+                        let detail = build_batch_failure_detail(
+                            Some(idx),
+                            Some(step.command_id.as_str()),
+                            results.len(),
+                            true,
+                            &persisted_fs_steps,
+                            Some(json!({ "code": "INTERNAL_ERROR", "reason": format!("failed to serialize command outcome: {err}") })),
+                        );
+                        return Some(Err(ControlCallError {
+                            message: format!(
+                                "batch step {idx} ({}) failed (rolled_back=true): failed to serialize command outcome: {err}",
+                                step.command_id
+                            ),
+                            detail: Some(detail),
+                        }));
                     }
                 };
                 let entry = json!({ "index": idx, "command": step.command_id, "result": val });
@@ -1522,9 +1619,21 @@ fn try_execute_pure_engine_atomic_batch(
                     if let Some(flag) = rolled_back {
                         *flag = true;
                     }
-                    return Some(Err(ControlCallError::from(format!(
-                        "command.batch serialized payload exceeds maximum control line size of {MAX_CONTROL_LINE_BYTES} bytes (rolled_back=true)"
-                    ))));
+                    let detail = build_batch_failure_detail(
+                        Some(idx),
+                        Some(step.command_id.as_str()),
+                        results.len(),
+                        true,
+                        &persisted_fs_steps,
+                        Some(json!({ "code": "RESOURCE_LIMIT", "max_control_line_bytes": MAX_CONTROL_LINE_BYTES })),
+                    );
+                    return Some(Err(ControlCallError {
+                        message: format!(
+                            "batch step {idx} ({}) failed (rolled_back=true): command.batch serialized payload exceeds maximum control line size of {MAX_CONTROL_LINE_BYTES} bytes",
+                            step.command_id
+                        ),
+                        detail: Some(detail),
+                    }));
                 }
                 results.push(entry);
             }
@@ -1540,13 +1649,27 @@ fn try_execute_pure_engine_atomic_batch(
             Some(Ok(json!({ "atomic": true, "count": results.len(), "results": results })))
         }
         Err(failure) => {
+            let persisted_fs_steps: Vec<usize> = steps
+                .iter()
+                .take(failure.failed_index)
+                .enumerate()
+                .filter_map(|(i, st)| step_has_filesystem_side_effect(&st.command_id, &st.params).then_some(i))
+                .collect();
             app.sync_views();
             if let Some(flag) = rolled_back {
                 *flag = true;
             }
+            let detail = build_batch_failure_detail(
+                Some(failure.failed_index),
+                Some(failure.failed_command_id.as_str()),
+                failure.failed_index,
+                true,
+                &persisted_fs_steps,
+                Some(engine_error_detail(&failure.error)),
+            );
             Some(Err(ControlCallError {
                 message: format!("batch step {} ({}) failed (rolled_back=true): {}", failure.failed_index, failure.failed_command_id, failure.error),
-                detail: Some(engine_error_detail(&failure.error)),
+                detail: Some(detail),
             }))
         }
     }
@@ -1561,11 +1684,25 @@ fn handle_command_batch(
     let Some(items) = params.get("commands").and_then(Value::as_array) else {
         return Err(ControlCallError::from("command.batch requires a 'commands' array"));
     };
-    if items.len() > MAX_CONTROL_BATCH_STEPS {
-        return Err(ControlCallError::from(format!("command.batch exceeds maximum step limit of {MAX_CONTROL_BATCH_STEPS} (got {})", items.len())));
-    }
     let atomic =
         opt_bool_param(params, &["atomic"]).map_err(|_| ControlCallError::from("command.batch 'atomic' must be a boolean"))?.unwrap_or(false);
+    if items.len() > MAX_CONTROL_BATCH_STEPS {
+        if atomic && let Some(flag) = rolled_back {
+            *flag = true;
+        }
+        let detail = build_batch_failure_detail(
+            None,
+            None,
+            0,
+            atomic,
+            &[],
+            Some(json!({ "code": "RESOURCE_LIMIT", "max_steps": MAX_CONTROL_BATCH_STEPS, "got": items.len() })),
+        );
+        return Err(ControlCallError {
+            message: format!("command.batch exceeds maximum step limit of {MAX_CONTROL_BATCH_STEPS} (got {})", items.len()),
+            detail: Some(detail),
+        });
+    }
     if atomic && let Some(res) = try_execute_pure_engine_atomic_batch(app, items, recorded.as_deref_mut(), rolled_back.as_deref_mut()) {
         return res;
     }
@@ -1578,6 +1715,7 @@ fn handle_command_batch(
         AtomicBatchRollbackState { active: false, prev_tracker: None, baseline_session: None, ui_shell: None }
     };
     let mut batch_steps: Vec<ControlRecordedStep> = Vec::new();
+    let mut persisted_fs_steps: Vec<usize> = Vec::new();
     let max_payload_bytes = MAX_CONTROL_LINE_BYTES.saturating_sub(512);
     let mut accumulated_bytes: usize = 64;
 
@@ -1586,8 +1724,16 @@ fn handle_command_batch(
         let cmd_id = match extract_command_id(item) {
             Ok(id) => id,
             Err(err) => {
-                let _ = rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
-                return Err(ControlCallError::from(format!("batch step {idx}: {err}")));
+                let did_rollback = rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
+                let detail = build_batch_failure_detail(
+                    Some(idx),
+                    None,
+                    results.len(),
+                    did_rollback,
+                    &persisted_fs_steps,
+                    Some(json!({ "code": "BAD_INPUT", "reason": err })),
+                );
+                return Err(ControlCallError { message: format!("batch step {idx}: {err} (rolled_back={did_rollback})"), detail: Some(detail) });
             }
         };
         if rollback.active && !is_batch_readonly_step(&cmd_id) {
@@ -1599,25 +1745,42 @@ fn handle_command_batch(
             }
         }
         let cmd_params = extract_nested_params(item);
+        let step_writes_fs = step_has_filesystem_side_effect(&cmd_id, &cmd_params);
         let step_sink = recorded.as_ref().map(|_| &mut batch_steps);
         match dispatch_command_by_id(app, &cmd_id, cmd_params, step_sink) {
             Ok(val) => {
+                if step_writes_fs {
+                    persisted_fs_steps.push(idx);
+                }
                 let entry = json!({ "index": idx, "command": cmd_id, "result": val });
                 let entry_bytes = serde_json::to_string(&entry).map(|s| s.len().saturating_add(1)).unwrap_or(MAX_CONTROL_LINE_BYTES);
                 accumulated_bytes = accumulated_bytes.saturating_add(entry_bytes);
                 if accumulated_bytes > max_payload_bytes {
                     let did_rollback = rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
-                    return Err(ControlCallError::from(format!(
-                        "command.batch serialized payload exceeds maximum control line size of {MAX_CONTROL_LINE_BYTES} bytes (rolled_back={did_rollback})"
-                    )));
+                    let detail = build_batch_failure_detail(
+                        Some(idx),
+                        Some(cmd_id.as_str()),
+                        results.len(),
+                        did_rollback,
+                        &persisted_fs_steps,
+                        Some(json!({ "code": "RESOURCE_LIMIT", "max_control_line_bytes": MAX_CONTROL_LINE_BYTES })),
+                    );
+                    return Err(ControlCallError {
+                        message: format!(
+                            "batch step {idx} ({cmd_id}) failed (rolled_back={did_rollback}): command.batch serialized payload exceeds maximum control line size of {MAX_CONTROL_LINE_BYTES} bytes"
+                        ),
+                        detail: Some(detail),
+                    });
                 }
                 results.push(entry);
             }
             Err(err) => {
                 let did_rollback = rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
+                let detail =
+                    build_batch_failure_detail(Some(idx), Some(cmd_id.as_str()), results.len(), did_rollback, &persisted_fs_steps, err.detail);
                 return Err(ControlCallError {
                     message: format!("batch step {idx} ({cmd_id}) failed (rolled_back={did_rollback}): {}", err.message),
-                    detail: err.detail,
+                    detail: Some(detail),
                 });
             }
         }
@@ -1718,6 +1881,11 @@ fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
     let width_pt = artifact.width_pt.unwrap_or(0.0);
     let height_pt = artifact.height_pt.unwrap_or(0.0);
     let svg = artifact.into_utf8_string()?;
+    if svg.len() > MAX_CONTROL_LINE_BYTES.saturating_sub(4096) {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("rendered SVG ({} bytes) exceeds control frame limit", svg.len()))
+            .with_remediation("Export to a file path via `doc.export` or simplify the figure.")
+            .into());
+    }
     Ok(json!({ "sheet_id": sheet_id.as_str(), "title": title, "width_pt": width_pt, "height_pt": height_pt, "svg": svg }))
 }
 
@@ -1742,11 +1910,20 @@ fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         format: ExportArtifactFormat::Pdf { options, all_graphs: false, sheet_ids: (sheet_ids.len() > 1).then(|| sheet_ids.clone()) },
     };
     let artifact = export_document_artifact(doc, &request, None, "render.pdf")?;
+    let id_strings: Vec<&str> = sheet_ids.iter().map(SheetId::as_str).collect();
     if let Some(path) = opt_path {
         app.session().write_host_file_atomic(path, &artifact.bytes)?;
+        return Ok(json!({
+            "sheet_id": id_strings.first().copied(),
+            "sheet_ids": id_strings,
+            "page_count": artifact.page_count,
+            "bytes_len": artifact.bytes.len(),
+            "path": path,
+            "written_path": path,
+        }));
     }
 
-    let id_strings: Vec<&str> = sheet_ids.iter().map(SheetId::as_str).collect();
+    enforce_control_payload_budget(artifact.bytes.len())?;
     Ok(json!({
         "sheet_id": id_strings.first().copied(),
         "sheet_ids": id_strings,
@@ -1987,7 +2164,7 @@ fn resolve_target_result_sheet_id(doc: &ProjectDocument, params: &Value) -> Resu
         params,
         &["result_sheet_id"],
         "result sheet",
-        false,
+        true,
         |d, id| d.result_sheet(id).is_some(),
         |d| d.result_sheets.first().map(|r| r.id.clone()),
     )
@@ -1999,7 +2176,7 @@ fn resolve_renderable_sheet_id(doc: &ProjectDocument, params: &Value) -> Result<
         params,
         &[],
         "graph or layout sheet",
-        false,
+        true,
         |d, id| matches!(d.sheet_section(id), Some(SheetSection::Graphs | SheetSection::Layouts)),
         |d| d.graph_sheets.first().map(|g| g.id.clone()).or_else(|| d.layout_sheets.first().map(|l| l.id.clone())),
     )
@@ -2303,20 +2480,10 @@ fn open_patched_sheet_dialog_spec(app: &mut UiApp, params: &Value, spec: &Patche
 fn dispatch_ui_format_points_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
     let graph_id = resolve_target_graph_id(&doc, params)?;
-    let graph = doc.graph_sheet(&graph_id).ok_or_else(|| format!("graph sheet `{}` not found", graph_id.as_str()))?;
+    let _graph = doc.graph_sheet(&graph_id).ok_or_else(|| format!("graph sheet `{}` not found", graph_id.as_str()))?;
     let mut points: Vec<(usize, usize, Option<usize>)> = match params.get("points") {
         Some(v) if !v.is_null() => parse_selected_points_with_subcols(v, "points")?,
-        _ if !app.brushed_points.is_empty() => app
-            .brushed_points
-            .iter()
-            .map(|pt| {
-                let subcols = doc.data_sheet(&pt.sheet_id).map_or(1, |ds| crate::grid_view::data_set_subcolumn_count(&ds.archetype, pt.col));
-                (pt.col, pt.row, (subcols > 1).then_some(pt.subcol))
-            })
-            .collect(),
-        _ => doc
-            .data_sheet(&graph.spec.primary_source_sheet_id)
-            .map_or_else(Vec::new, |ds| app.grid.selected_graph_point_targets(ds, graph.spec.series.len().max(1))),
+        _ => crate::modal_predicates::resolve_format_points_targets_for_graph(app, &graph_id),
     };
     points.sort_unstable();
     points.dedup();
@@ -2436,7 +2603,7 @@ fn dispatch_ui_brush_point(app: &mut UiApp, params: &Value) -> Result<Value, Str
         params,
         &[],
         "data sheet",
-        false,
+        true,
         |d, id| d.data_sheet(id).is_some(),
         |d| d.data_sheets.first().map(|s| s.id.clone()),
     )?;
@@ -2624,7 +2791,7 @@ fn dispatch_ui_grid_exclude_with_reason(app: &mut UiApp, params: &Value) -> Resu
     let doc = app.document();
     let sheet_id = resolve_target_data_id(doc, params)?;
     let ds = doc.data_sheet(&sheet_id).ok_or_else(|| format!("data sheet `{}` not found", sheet_id.as_str()))?;
-    let mut coords = app.grid.selection_coords(ds);
+    let mut coords = app.grid.all_selected_coords(ds);
     if coords.is_empty()
         && let Some(active) = app.grid.tool.active
     {
@@ -2760,8 +2927,11 @@ fn dispatch_ui_append_cluster_column(app: &mut UiApp, params: &Value) -> Result<
     if let Some(col_idx) = mv.find_variable(col_title) {
         let edits: Vec<Value> =
             assigned.iter().enumerate().map(|(row, label_opt)| json!({ "row": row, "col": col_idx, "value": label_opt.as_deref() })).collect();
-        app.execute_command("table.setCells", json!({ "sheet_id": source_id.as_str(), "edits": edits }))?;
-        app.execute_command("table.setVariableRole", json!({ "sheet_id": source_id.as_str(), "col": col_idx, "role": "categorical" }))?;
+        app.execute_atomic_group(|a| {
+            a.execute_command("table.setCells", json!({ "sheet_id": source_id.as_str(), "edits": edits }))?;
+            a.execute_command("table.setVariableRole", json!({ "sheet_id": source_id.as_str(), "col": col_idx, "role": "categorical" }))?;
+            Ok::<(), EngineError>(())
+        })?;
         return Ok(json!({
             "result_sheet_id": rs_id.as_str(),
             "source_sheet_id": source_id.as_str(),
@@ -2774,9 +2944,12 @@ fn dispatch_ui_append_cluster_column(app: &mut UiApp, params: &Value) -> Result<
 
     let target_col = mv.variables.len();
     let rows: Vec<Vec<Value>> = assigned.iter().map(|opt| vec![opt.as_ref().map_or(Value::Null, |s| Value::String(s.clone()))]).collect();
-    app.execute_command("table.paste", json!({ "sheet_id": source_id.as_str(), "mode": "append_columns", "rows": rows }))?;
-    app.execute_command("table.setGroupTitles", json!({ "sheet_id": source_id.as_str(), "col": target_col, "title": col_title }))?;
-    app.execute_command("table.setVariableRole", json!({ "sheet_id": source_id.as_str(), "col": target_col, "role": "categorical" }))?;
+    app.execute_atomic_group(|a| {
+        a.execute_command("table.paste", json!({ "sheet_id": source_id.as_str(), "mode": "append_columns", "rows": rows }))?;
+        a.execute_command("table.setGroupTitles", json!({ "sheet_id": source_id.as_str(), "col": target_col, "title": col_title }))?;
+        a.execute_command("table.setVariableRole", json!({ "sheet_id": source_id.as_str(), "col": target_col, "role": "categorical" }))?;
+        Ok::<(), EngineError>(())
+    })?;
 
     Ok(json!({
         "result_sheet_id": rs_id.as_str(),
@@ -2801,7 +2974,7 @@ fn resolve_cluster_assignment_column_labels(rs: &ResultSheet, mv: &MultipleVaria
         let Some(cluster_label) = format_cluster_assignment_cell(row.first()) else {
             continue;
         };
-        let Some(target_row) = map_cluster_row_label_to_mv_row(tab.row_labels.get(k).map(String::as_str), k, mv) else {
+        let Some(target_row) = map_cluster_row_label_to_mv_row(tab.row_labels.get(k).map(String::as_str), k, mv, &assigned) else {
             continue;
         };
         if let Some(slot) = assigned.get_mut(target_row) {
@@ -2828,10 +3001,19 @@ fn format_cluster_assignment_cell(cell: Option<&ResultCell>) -> Option<String> {
     }
 }
 
-fn map_cluster_row_label_to_mv_row(label: Option<&str>, fallback_idx: usize, mv: &MultipleVariablesTable) -> Option<usize> {
+fn map_cluster_row_label_to_mv_row(
+    label: Option<&str>,
+    fallback_idx: usize,
+    mv: &MultipleVariablesTable,
+    assigned: &[Option<String>],
+) -> Option<usize> {
     let row_count = mv.row_count();
+    let is_unassigned = |idx: usize| idx < row_count && assigned.get(idx).is_some_and(Option::is_none);
     if let Some(lbl) = label.map(str::trim).filter(|s| !s.is_empty()) {
-        if let Some(pos) = mv.row_titles.iter().position(|t| !t.trim().is_empty() && t.trim() == lbl) {
+        if is_unassigned(fallback_idx) && mv.row_titles.get(fallback_idx).is_some_and(|t| t.trim() == lbl) {
+            return Some(fallback_idx);
+        }
+        if let Some(pos) = mv.row_titles.iter().enumerate().position(|(idx, t)| is_unassigned(idx) && !t.trim().is_empty() && t.trim() == lbl) {
             return Some(pos);
         }
         if let Some(obs) = lbl.strip_prefix("Obs ").and_then(|s| s.trim().parse::<usize>().ok())
@@ -2841,7 +3023,7 @@ fn map_cluster_row_label_to_mv_row(label: Option<&str>, fallback_idx: usize, mv:
             return Some(obs - 1);
         }
     }
-    (fallback_idx < row_count).then_some(fallback_idx)
+    if is_unassigned(fallback_idx) { Some(fallback_idx) } else { (fallback_idx < row_count).then_some(fallback_idx) }
 }
 
 fn resolve_target_embedded_index(doc: &ProjectDocument, sheet_id: &SheetId, explicit_idx: Option<usize>, want_image: bool) -> Option<usize> {
@@ -3101,10 +3283,19 @@ const UI_TOGGLE_AND_SETTER_SPECS: &[(&str, UiToggleFn)] = &[
     ("ui.family.toggle", |a, _| Ok(json!({ "family_open": a.toggle_family_pane() }))),
     ("ui.zoom.fitSheet", |a, _| {
         a.canvas_dialogs.reset_zoom_to_fit();
-        a.egui_views.canvas_view.fit_zoom_active = true;
-        a.egui_views.canvas_view.pan_pt = [0.0, 0.0];
-        a.egui_views.center_stage.secondary_canvas_view.fit_zoom_active = true;
-        a.egui_views.center_stage.secondary_canvas_view.pan_pt = [0.0, 0.0];
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            a.egui_views.canvas_view.fit_zoom_active = true;
+            a.egui_views.canvas_view.pan_pt = [0.0, 0.0];
+            for vp in a.egui_views.canvas_view.sheet_viewports.values_mut() {
+                vp.pan_pt = [0.0, 0.0];
+            }
+            a.egui_views.center_stage.secondary_canvas_view.fit_zoom_active = true;
+            a.egui_views.center_stage.secondary_canvas_view.pan_pt = [0.0, 0.0];
+            for vp in a.egui_views.center_stage.secondary_canvas_view.sheet_viewports.values_mut() {
+                vp.pan_pt = [0.0, 0.0];
+            }
+        }
         Ok(json!({ "zoom": a.canvas_dialogs.canvas.zoom, "fit": true }))
     }),
     ("ui.gridOverlay.toggle", |a, p| {
@@ -3209,7 +3400,7 @@ const UI_TOGGLE_AND_SETTER_SPECS: &[(&str, UiToggleFn)] = &[
         let norm = raw.replace(['-', ' '], "_").to_ascii_lowercase();
         let mode =
             parse_enum_alias(THEME_MODES, &norm).ok_or_else(|| format!("unsupported theme mode `{norm}`; expected light, dark, or high_contrast"))?;
-        a.theme = UiThemeSpec::for_mode(mode);
+        a.set_theme_mode(mode);
         Ok(json!({ "mode": theme_mode_name(a.theme.mode), "wcag_aa": a.theme.meets_wcag_aa() }))
     }),
     ("ui.shortcut.set", |a, p| {

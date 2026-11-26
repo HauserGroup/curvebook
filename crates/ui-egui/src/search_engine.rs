@@ -482,7 +482,7 @@ fn query_empty_default(app: &UiApp, max_rows: usize, recents: &SearchRecents) ->
             category_badge: String::from("Recent"),
             shortcut: entry.shortcut.clone(),
             match_spans: Vec::new(),
-            enabled: recent_action_is_enabled(doc, &entry.action),
+            enabled: recent_action_is_enabled(app, &entry.action),
             score: 20_000_i32.saturating_sub(offset),
             action: entry.action.clone(),
             completion_text: entry.completion_text.clone(),
@@ -527,13 +527,26 @@ fn recent_action_is_valid(doc: &ProjectDocument, action: &UnifiedSearchAction) -
     }
 }
 
-fn recent_action_is_enabled(doc: &ProjectDocument, action: &UnifiedSearchAction) -> bool {
+fn recent_action_is_enabled(app: &UiApp, action: &UnifiedSearchAction) -> bool {
+    let doc = app.document();
     match action {
         UnifiedSearchAction::ActivateSheet(id) => doc.sheet_section(id).is_some(),
         UnifiedSearchAction::JumpToColumn { sheet_id, col } => doc.data_sheet(sheet_id).is_some_and(|ds| *col < ds.archetype.column_count()),
         UnifiedSearchAction::OpenAnalysis { catalog_id } => *catalog_id == "transform.simulate" || !doc.data_sheets.is_empty(),
         UnifiedSearchAction::OpenEquation { .. } => !doc.data_sheets.is_empty(),
-        UnifiedSearchAction::RunCommand { .. } => true,
+        UnifiedSearchAction::RunCommand { command_id, is_ui_command } => {
+            if *is_ui_command {
+                crate::menus::ui_command_enabled_for_doc(doc, command_id)
+            } else if command_id == "edit.undo" {
+                app.session().undo_depth() > 0
+            } else if command_id == "edit.redo" {
+                app.session().redo_depth() > 0
+            } else if let Some(spec) = curvebook_engine::cmd::registry().get(command_id.as_str()) {
+                (spec.enabled)(app.session())
+            } else {
+                crate::menus::ui_command_enabled_for_doc(doc, command_id)
+            }
+        }
     }
 }
 

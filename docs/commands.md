@@ -327,7 +327,7 @@ Registered commands: 106
 - **Menu:** `File/Import/XLSX Workbook...`
 - **Summary:** Import one or more worksheets (or list available sheets) from an .xlsx workbook file, base64, or byte array.
 - **Beginner note:** Open or merge worksheets from a spreadsheet workbook (.xlsx) into the project.
-- **Parameters:** `archetype` (string|null), `bytes` (array|null), `bytes_base64` (string|null), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `include_hidden` (boolean|null), `list_sheets` (boolean|null), `merge` (boolean|null), `path` (string|null), `sheet_indices` (array|null), `sheets` (array|null), `subcolumn_mode` (any)
+- **Parameters:** `archetype` (string|null), `bytes` (array|null), `bytes_base64` (string|null), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `include_hidden` (boolean|null), `list_sheets` (boolean|null), `merge` (boolean|null), `path` (string|null), `sheet_indices` (array|null), `sheets` (array|null), `subcolumn_mode` (any), `title` (string|null)
 
 ### `table.paste` — Paste Special
 
@@ -809,7 +809,7 @@ Registered commands: 106
 
 - **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
 - **Menu:** `File/Export/PDF...`
-- **Summary:** Render one or more graph or layout sheets to publication PDF (sRGB or print CMYK) and optionally write it atomically to disk.
+- **Summary:** Render one or more graph or layout sheets to publication PDF (sRGB, print CMYK, or grayscale) and optionally write it atomically to disk.
 - **Beginner note:** Creates a single-page or multi-page vector PDF from one or more graphs and layouts.
 - **Parameters:** `color_space` (string|null), `compress_streams` (boolean|null), `outline_text` (boolean|null), `path` (string|null), `sheet_id` (string|null), `sheet_ids` (array|null), `title` (string|null)
 

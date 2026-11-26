@@ -180,36 +180,56 @@ pub struct MudaMenuSectionSpec {
     pub items: Vec<MudaMenuItemSpec>,
 }
 
-/// Parse CurveBook shortcut notation (e.g. `"Cmd+Shift+I"`, `"Cmd+\\"`, `"F6"`, `"Cmd+K / Ctrl+K"`)
-/// into a [`muda::accelerator::Accelerator`] without panicking on unknown or empty strings.
+/// Parse CurveBook shortcut notation (e.g. `"Cmd+Shift+I"`, `"Cmd+\\"`, `"Cmd++"`, `"Cmd+/"`,
+/// `"F6"`, `"Cmd+K / Ctrl+K"`) into a [`muda::accelerator::Accelerator`] without panicking on
+/// unknown or empty strings.
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn parse_muda_accelerator(shortcut: &str) -> Option<muda::accelerator::Accelerator> {
     use muda::accelerator::{Accelerator, Code, Modifiers};
 
-    let primary = shortcut.split('/').next().map(str::trim).filter(|s| !s.is_empty())?;
-    let parts: Vec<&str> = primary.split('+').map(str::trim).collect();
-    if parts.is_empty() {
+    let trimmed = shortcut.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Split alternative bindings like `"Cmd+K / Ctrl+K"` without slicing literal slash keys
+    // such as `"/"`, `"Cmd+/"`, or `"Cmd+Shift+/"`.
+    let primary = match trimmed
+        .char_indices()
+        .find(|&(idx, ch)| ch == '/' && idx > 0 && !trimmed.get(..idx).is_some_and(|prefix| prefix.trim_end().ends_with('+')))
+    {
+        Some((idx, _)) => trimmed.get(..idx)?.trim(),
+        None => trimmed,
+    };
+    if primary.is_empty() {
         return None;
     }
 
     let mut mods = Modifiers::empty();
-    let (mod_tokens, key_token) = if primary.ends_with('+') && !primary.ends_with("++") {
-        return None;
+    let (mod_tokens, key_token): (Vec<&str>, &str) = if primary == "+" {
+        (Vec::new(), "+")
+    } else if let Some(before_last_plus) = primary.strip_suffix('+') {
+        let prefix = before_last_plus.trim_end().strip_suffix('+')?;
+        let prefix_trimmed = prefix.trim();
+        if prefix_trimmed.is_empty() || prefix_trimmed.ends_with('+') {
+            return None;
+        }
+        (prefix_trimmed.split('+').map(str::trim).collect(), "+")
     } else if primary.contains('+') {
+        let parts: Vec<&str> = primary.split('+').map(str::trim).collect();
         let (&last_tok, head_toks) = parts.split_last()?;
-        (head_toks, last_tok)
+        (head_toks.to_vec(), last_tok)
     } else {
-        (&[][..], *parts.first()?)
+        (Vec::new(), primary)
     };
 
-    for &tok in mod_tokens {
+    for tok in mod_tokens {
         match tok.to_ascii_lowercase().as_str() {
             "cmd" | "command" | "meta" | "super" | "cmdorctrl" => mods |= Modifiers::META,
             "ctrl" | "control" => mods |= Modifiers::CONTROL,
             "alt" | "opt" | "option" => mods |= Modifiers::ALT,
             "shift" => mods |= Modifiers::SHIFT,
-            "" => {}
             _ => return None,
         }
     }
@@ -332,6 +352,41 @@ impl std::fmt::Debug for MacNativeMenuHost {
 }
 
 #[cfg(target_os = "macos")]
+static MAC_MENU_EVENT_QUEUE: std::sync::OnceLock<curvebook_platform::sync::Mutex<std::collections::VecDeque<String>>> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "macos")]
+static MAC_MENU_REPAINT_CTX: std::sync::OnceLock<curvebook_platform::sync::Mutex<Option<eframe::egui::Context>>> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "macos")]
+static MAC_MENU_EVENT_HANDLER_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Register a `muda::MenuEvent` handler that buffers triggered menu IDs and wakes an idle `egui`
+/// event loop via [`eframe::egui::Context::request_repaint`].
+#[cfg(target_os = "macos")]
+pub fn install_egui_repaint_event_handler(ctx: eframe::egui::Context) {
+    let ctx_slot = MAC_MENU_REPAINT_CTX.get_or_init(|| curvebook_platform::sync::Mutex::named("mac_menu.repaint_ctx", None));
+    if let Ok(mut guard) = ctx_slot.lock() {
+        *guard = Some(ctx);
+    }
+    if !MAC_MENU_EVENT_HANDLER_INSTALLED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        let _ =
+            MAC_MENU_EVENT_QUEUE.get_or_init(|| curvebook_platform::sync::Mutex::named("mac_menu.event_queue", std::collections::VecDeque::new()));
+        muda::MenuEvent::set_event_handler(Some(move |evt: muda::MenuEvent| {
+            if let Some(queue) = MAC_MENU_EVENT_QUEUE.get()
+                && let Ok(mut guard) = queue.lock()
+            {
+                guard.push_back(evt.id.0);
+            }
+            if let Some(slot) = MAC_MENU_REPAINT_CTX.get()
+                && let Ok(guard) = slot.lock()
+                && let Some(ref egui_ctx) = *guard
+            {
+                egui_ctx.request_repaint();
+            }
+        }));
+    }
+}
+
 impl MacNativeMenuHost {
     /// Construct an empty macOS native menu host (no AppKit side-effects until windowed startup).
     #[must_use]
@@ -425,6 +480,12 @@ impl MacNativeMenuHost {
     /// Poll pending `muda::MenuEvent` queue and map the clicked menu item back to a CurveBook `command_id`.
     #[must_use]
     pub fn poll_triggered_command_id(&self) -> Option<String> {
+        if let Some(queue) = MAC_MENU_EVENT_QUEUE.get()
+            && let Ok(mut guard) = queue.lock()
+            && let Some(cmd_id) = guard.pop_front()
+        {
+            return Some(cmd_id);
+        }
         muda::MenuEvent::receiver().try_recv().ok().map(|evt| evt.id.0)
     }
 

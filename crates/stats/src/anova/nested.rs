@@ -13,7 +13,8 @@ use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::{NeumaierSum, SummaryMoments};
 
 use crate::anova::effect_sizes::f_ratio_p;
-use crate::anova::reml::fit_random_intercept_reml_with_method_and_core;
+use crate::anova::factorial::checked_dense_vec;
+use crate::anova::reml::{RemlContrastCore, fit_random_intercept_reml_with_method_and_core};
 use crate::anova::results::NestedAnovaResult;
 use crate::error::StatsError;
 
@@ -48,7 +49,7 @@ pub(in crate::anova) fn nested_one_way_anova_selected(
     two_group_t_test: bool,
     df_method: MixedModelDfMethod,
 ) -> Result<NestedAnovaResult, StatsError> {
-    nested_one_way_anova_with_reml_status(table, selected_groups, two_group_t_test, df_method).map(|(res, _, _)| res)
+    nested_one_way_anova_with_reml_status(table, selected_groups, two_group_t_test, df_method).map(|(res, _, _, _)| res)
 }
 
 pub(in crate::anova) fn nested_one_way_anova_with_reml_status(
@@ -56,7 +57,7 @@ pub(in crate::anova) fn nested_one_way_anova_with_reml_status(
     selected_groups: &[usize],
     two_group_t_test: bool,
     df_method: MixedModelDfMethod,
-) -> Result<(NestedAnovaResult, bool, bool), StatsError> {
+) -> Result<(NestedAnovaResult, RemlContrastCore, bool, bool), StatsError> {
     let g_count = selected_groups.len();
     if g_count < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "nested ANOVA groups", required: 2, actual: g_count });
@@ -115,7 +116,7 @@ pub(in crate::anova) fn nested_one_way_anova_with_reml_status(
     }
 
     // Build REML matrix as well for exact unbalanced Satterthwaite & Kenward-Roger df.
-    let mut x_data = vec![0.0_f64; total_obs * g_count];
+    let mut x_data = checked_dense_vec(total_obs, g_count)?;
     let mut y_vec = Vec::with_capacity(total_obs);
     let mut cluster_ids = Vec::with_capacity(total_obs);
     let mut row_cursor = 0_usize;
@@ -154,7 +155,7 @@ pub(in crate::anova) fn nested_one_way_anova_with_reml_status(
     let (f_sub, p_sub) = f_ratio_p(mss, mse, df1_sub, df2_err)?;
 
     let x_mat = DenseMatrix::from_row_major(total_obs, g_count, x_data)?;
-    let (reml, _) = fit_random_intercept_reml_with_method_and_core(&x_mat, &y_vec, &cluster_ids, &[("Group", 1, g_count - 1)], df_method)?;
+    let (reml, core) = fit_random_intercept_reml_with_method_and_core(&x_mat, &y_vec, &cluster_ids, &[("Group", 1, g_count - 1)], df_method)?;
 
     let f_g = reml.fixed_terms.first().and_then(|t| t.f_statistic).unwrap_or(if mss > 0.0 {
         msg / mss
@@ -169,10 +170,16 @@ pub(in crate::anova) fn nested_one_way_anova_with_reml_status(
         MixedModelDfMethod::KenwardRoger => df2_kr,
         MixedModelDfMethod::Satterthwaite => df2_satt,
     };
-    let p_g = reml.fixed_terms.first().and_then(|t| t.p_value).unwrap_or(f_sf(f_g, df1_g, df2_active)?);
+    let p_g = match reml.fixed_terms.first().and_then(|t| t.p_value) {
+        Some(p) => p,
+        None => f_sf(f_g, df1_g, df2_active)?,
+    };
 
     let t_nested = if two_group_t_test {
-        let sign = if (group_sums[0] / (group_n[0] as f64)) >= (group_sums[1] / (group_n[1] as f64)) { 1.0 } else { -1.0 };
+        // Treatment coding has E[y | group 0] = beta[0] and E[y | group 1] = beta[0] + beta[1],
+        // so the REML GLS difference (mu_0 - mu_1) equals -beta[1] * y_scale.
+        let gls_diff_0_minus_1 = -core.beta.get(1).copied().unwrap_or(0.0) * core.y_scale;
+        let sign = if gls_diff_0_minus_1 >= 0.0 { 1.0 } else { -1.0 };
         Some(sign * f_g.sqrt())
     } else {
         None
@@ -202,6 +209,7 @@ pub(in crate::anova) fn nested_one_way_anova_with_reml_status(
             icc_subclusters: reml.icc,
             total_observations: total_obs,
         },
+        core,
         reml.converged,
         reml.at_boundary,
     ))

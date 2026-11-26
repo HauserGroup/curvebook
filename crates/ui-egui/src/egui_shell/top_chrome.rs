@@ -63,7 +63,7 @@ pub fn submenu_variants_for_command(command_id: &str) -> Option<&'static [(&'sta
     }
 }
 
-fn is_submenu_variant_selected(app: &UiApp, command_id: &str, variant: &str) -> Option<bool> {
+fn is_submenu_variant_selected(app: &UiApp, workspace_preset: WorkspacePreset, command_id: &str, variant: &str) -> Option<bool> {
     match command_id {
         "ui.theme.set" => {
             let active = match app.theme.mode {
@@ -74,7 +74,7 @@ fn is_submenu_variant_selected(app: &UiApp, command_id: &str, variant: &str) -> 
             Some(active == variant)
         }
         "ui.previewFilter.set" => Some(app.preview_filter.as_str() == variant),
-        "ui.workspacePreset.set" => Some(app.egui_views.workspace_preset.as_str() == variant),
+        "ui.workspacePreset.set" => Some(workspace_preset.as_str() == variant),
         _ => None,
     }
 }
@@ -272,6 +272,7 @@ struct Tier2OverflowState {
 struct TopMenuButtonSpec<'a> {
     app: &'a UiApp,
     tokens: &'a Tokens,
+    workspace_preset: WorkspacePreset,
     sec: &'a InWindowMenuSectionParity,
     sec_w: f32,
     enabled: bool,
@@ -281,6 +282,7 @@ struct TopMenuButtonSpec<'a> {
 struct MenuRenderCtx<'a> {
     app: &'a UiApp,
     locale: &'a str,
+    workspace_preset: WorkspacePreset,
 }
 
 struct Tier2ActionInput<'a> {
@@ -458,7 +460,7 @@ fn render_tier1_bar(
         let fitted = fit_right_group(&RightWidths {
             room: remaining_after_menus,
             has_pinned_badge: false,
-            switcher: 84.0,
+            switcher: 0.0,
             field: 176.0,
             icon: 48.0,
             gap: 6.0,
@@ -536,7 +538,13 @@ fn render_inline_menu_bar(
         egui::MenuBar::new().ui(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             for (sec, &sec_w) in sections.iter().take(visible_count).zip(measured_widths.iter()) {
-                render_top_menu_button(ui, TopMenuButtonSpec { app, tokens, sec, sec_w, enabled }, state, meta, intents);
+                render_top_menu_button(
+                    ui,
+                    TopMenuButtonSpec { app, tokens, workspace_preset: ctx_in.workspace_preset, sec, sec_w, enabled },
+                    state,
+                    meta,
+                    intents,
+                );
             }
             if visible_count < sections.len() {
                 let ov_resp = ui.add_enabled(enabled, egui::Button::new(overflow_lbl).min_size(Vec2::new(28.0, 22.0)));
@@ -559,7 +567,7 @@ fn render_inline_menu_bar(
                     },
                 );
                 if enabled {
-                    let mctx = MenuRenderCtx { app, locale: tokens.locale };
+                    let mctx = MenuRenderCtx { app, locale: tokens.locale, workspace_preset: ctx_in.workspace_preset };
                     egui::Popup::menu(&ov_resp).show(|ui| {
                         state.active_in_window_menu = Some(String::from("menu.bar.overflow"));
                         for sec in &sections[visible_count..] {
@@ -581,7 +589,7 @@ fn render_top_menu_button(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let TopMenuButtonSpec { app, tokens, sec, sec_w, enabled } = spec;
+    let TopMenuButtonSpec { app, tokens, workspace_preset, sec, sec_w, enabled } = spec;
     let (galley, ellipsized) = layout_single_line_job(ui.painter(), &sec.title, (sec_w - 10.0).max(16.0), tokens.text_primary, 12.0);
     let resp = ui.add_enabled_ui(enabled, |ui| ui.allocate_response(Vec2::new(sec_w, 22.0), Sense::click())).inner;
     let is_open = enabled && egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
@@ -627,7 +635,7 @@ fn render_top_menu_button(
     }
 
     if enabled {
-        let mctx = MenuRenderCtx { app, locale: tokens.locale };
+        let mctx = MenuRenderCtx { app, locale: tokens.locale, workspace_preset };
         egui::Popup::menu(&resp).show(|ui| {
             state.active_in_window_menu = Some(sec.menu_key.clone());
             render_section_menu_nodes(ui, mctx, &sec.nodes, meta, intents);
@@ -728,7 +736,7 @@ fn render_menu_leaf_item(
     if let Some(variants) = submenu_variants_for_command(&item.command_id) {
         let sub = ui.menu_button(&item.label, |ui| {
             for &(v_label, variant) in variants {
-                let is_selected = is_submenu_variant_selected(mctx.app, &item.command_id, variant);
+                let is_selected = is_submenu_variant_selected(mctx.app, mctx.workspace_preset, &item.command_id, variant);
                 let mut btn = egui::Button::new(v_label);
                 if is_selected == Some(true) {
                     btn = btn.selected(true);
@@ -772,56 +780,61 @@ fn render_menu_leaf_item(
 
     if item.command_id == "ui.locale.set" {
         let active_canonical = normalize_locale(mctx.locale);
-        let sub = ui.menu_button(&item.label, |ui| {
-            let scroll_out = egui::ScrollArea::vertical().id_salt("popup.menu.ui.locale.set").max_height(240.0).show(ui, |ui| {
-                for (idx, &loc) in LOCALES.iter().enumerate() {
-                    let canonical = normalize_locale(loc);
-                    let caption = locale_picker_label(loc);
-                    let opt_resp = ui.button(&caption).on_hover_text(&tooltip);
-                    record_menu_popup_response(
-                        ui,
-                        &opt_resp,
-                        meta,
-                        MenuPopupInspect {
-                            widget_id: &format!("popup.menu.ui.locale.set.opt.{idx}"),
-                            label: &caption,
-                            command_id: Some("ui.locale.set"),
-                            selected: Some(canonical == active_canonical),
+        let sub = ui
+            .add_enabled_ui(item.enabled, |ui| {
+                ui.menu_button(&item.label, |ui| {
+                    let scroll_out = egui::ScrollArea::vertical().id_salt("popup.menu.ui.locale.set").max_height(240.0).show(ui, |ui| {
+                        for (idx, &loc) in LOCALES.iter().enumerate() {
+                            let canonical = normalize_locale(loc);
+                            let caption = locale_picker_label(loc);
+                            let opt_resp =
+                                ui.add_enabled(item.enabled, egui::Button::new(&caption)).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
+                            record_menu_popup_response(
+                                ui,
+                                &opt_resp,
+                                meta,
+                                MenuPopupInspect {
+                                    widget_id: &format!("popup.menu.ui.locale.set.opt.{idx}"),
+                                    label: &caption,
+                                    command_id: Some("ui.locale.set"),
+                                    selected: Some(canonical == active_canonical),
+                                    enabled: item.enabled,
+                                },
+                            );
+                            if opt_resp.clicked() && item.enabled {
+                                push_menu_command_intent(mctx.app, &item.command_id, Some(canonical), intents);
+                                ui.close();
+                            }
+                        }
+                    });
+                    let popup_rect = scroll_out.inner_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
+                    if popup_rect.is_positive() {
+                        let popup_id = ui.scope_id().with("popup.menu.ui.locale.set");
+                        let p_resp = ui.interact(popup_rect, popup_id, Sense::hover());
+                        let p_lbl = item.label.clone();
+                        let p_en = item.enabled;
+                        p_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Menu, p_en, p_lbl.clone()));
+                        meta.record(FrameInspectNodeMeta {
+                            egui_id: p_resp.id,
+                            accesskit_id: p_resp.id.accesskit_id(),
+                            widget_id: String::from("popup.menu.ui.locale.set"),
+                            role: String::from("menu"),
+                            label: item.label.clone(),
+                            command_id: Some(String::from("ui.locale.set")),
+                            value: None,
                             enabled: item.enabled,
-                        },
-                    );
-                    if opt_resp.clicked() {
-                        push_menu_command_intent(mctx.app, &item.command_id, Some(canonical), intents);
-                        ui.close();
+                            disabled_reason: None,
+                            unclipped_rect: scroll_out.inner_rect,
+                            clipped_rect: popup_rect,
+                            z_layer: ZLayer::DropdownMenu,
+                            ellipsized: false,
+                            full_label: None,
+                            action_rank: None,
+                        });
                     }
-                }
-            });
-            let popup_rect = scroll_out.inner_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
-            if popup_rect.is_positive() {
-                let popup_id = ui.scope_id().with("popup.menu.ui.locale.set");
-                let p_resp = ui.interact(popup_rect, popup_id, Sense::hover());
-                let p_lbl = item.label.clone();
-                let p_en = item.enabled;
-                p_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Menu, p_en, p_lbl.clone()));
-                meta.record(FrameInspectNodeMeta {
-                    egui_id: p_resp.id,
-                    accesskit_id: p_resp.id.accesskit_id(),
-                    widget_id: String::from("popup.menu.ui.locale.set"),
-                    role: String::from("menu"),
-                    label: item.label.clone(),
-                    command_id: Some(String::from("ui.locale.set")),
-                    value: None,
-                    enabled: item.enabled,
-                    disabled_reason: None,
-                    unclipped_rect: scroll_out.inner_rect,
-                    clipped_rect: popup_rect,
-                    z_layer: ZLayer::DropdownMenu,
-                    ellipsized: false,
-                    full_label: None,
-                    action_rank: None,
-                });
-            }
-        });
+                })
+            })
+            .inner;
         record_menu_popup_response(
             ui,
             &sub.response,
@@ -940,6 +953,7 @@ fn render_tier1_right_group(
                 anchors.search_capsule = Some(capsule_rect);
             }
             SearchVisibility::Icon | SearchVisibility::Hidden => {
+                state.search_dropdown_open = false;
                 let pal_resp = render_command_palette_icon_button(ui, tokens, meta, base_label, &tip_text, selected, enabled);
                 if pal_resp.clicked() && enabled {
                     state.close_all_popups();

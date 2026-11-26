@@ -73,12 +73,24 @@ fn parse_constant_value(value: Value, kind: Option<&str>) -> Result<ConstantValu
     }
 
     match value {
-        Value::Null => Ok(ConstantValue::Empty),
+        Value::Null => match normalized_kind.as_deref() {
+            None | Some("empty") => Ok(ConstantValue::Empty),
+            Some(other) => Err(bad_input(format!("info constant `value: null` conflicts with `kind: \"{other}\"`"))
+                .with_remediation("Use `kind: \"empty\"` or omit `kind` when clearing a constant with `null`.")),
+        },
         Value::Number(n) => {
+            if let Some(other) = normalized_kind.as_deref()
+                && other != "number"
+            {
+                return Err(bad_input(format!("numeric info constant `value` conflicts with `kind: \"{other}\"`"))
+                    .with_remediation("Pass a string for `text`/`date`, `null` for `empty`, or omit `kind` for numbers."));
+            }
             let f = n.as_f64().filter(|v| v.is_finite()).ok_or_else(|| bad_input("info constant numeric value must be finite"))?;
             Ok(ConstantValue::Number(f))
         }
         Value::String(s) => match normalized_kind.as_deref() {
+            Some("empty") => Err(bad_input("string info constant `value` conflicts with `kind: \"empty\"`")
+                .with_remediation("Pass `value: null` when clearing a constant with `kind: \"empty\"`.")),
             Some("date") => Ok(ConstantValue::Date(s)),
             Some("number") => {
                 let parsed: f64 = s
@@ -110,7 +122,7 @@ fn run_info_set_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutc
         info.upsert_constant(name.clone(), constant_value, units)?;
     }
 
-    let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&info_id), false)?;
+    let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&info_id), None, Some(ctx.cancelled))?;
     Ok(CommandOutcome::mutated(
         "info.setConstant",
         "updated info constant",
@@ -168,7 +180,7 @@ fn run_info_remove_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandO
             warnings: Vec::new(),
         });
     }
-    let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&info_id), false)?;
+    let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&info_id), None, Some(ctx.cancelled))?;
 
     Ok(CommandOutcome {
         command_id: String::from("info.removeConstant"),

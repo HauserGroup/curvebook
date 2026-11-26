@@ -7,11 +7,16 @@
 //! for inner holes).
 
 use std::borrow::Cow;
+use std::cell::Cell;
 
 use curvebook_palette::Rgba8;
+use read_fonts::ps::cff::CffFontRef;
+use read_fonts::ps::cff::blend::BlendState;
+use read_fonts::ps::cff::index::Index;
+use read_fonts::ps::cs::{self, CharstringContext, CharstringKind, CommandSink};
 use read_fonts::tables::glyf::{Glyf, Glyph};
 use read_fonts::tables::loca::Loca;
-use read_fonts::types::GlyphId;
+use read_fonts::types::{Fixed, GlyphId, Tag};
 use read_fonts::{FontRef, TableProvider};
 use serde::{Deserialize, Serialize};
 use skrifa::instance::{LocationRef, Size};
@@ -30,6 +35,8 @@ const MAX_TTF_POINTS: usize = 4096;
 const MAX_TTF_TOTAL_POINTS: usize = 16_384;
 const MAX_TTF_TOTAL_COMPONENTS: usize = 256;
 const MAX_TTF_COMPONENT_DEPTH: usize = 8;
+const MAX_CFF_SUBR_CALLS: usize = 1024;
+const MAX_CFF_TOTAL_BYTECODE: usize = 65_536;
 
 #[derive(Debug)]
 struct GlyfBudgetState {
@@ -219,48 +226,9 @@ pub fn outline_visual_rich_text_rotated_with_fonts_and_ttf(
 
             let glyph_origin_y = line_y + y_offset;
             if is_combining_mark(ch) {
-                let below = is_below_combining_mark(ch);
-                let (mut commands, anchor_x, anchor_y) = if let Some(base) = &mut last_base {
-                    let y_shift = if below {
-                        let k = base.below_stack;
-                        base.below_stack = base.below_stack.saturating_add(1);
-                        -f64::from(k) * 0.14
-                    } else {
-                        let k = base.above_stack;
-                        base.above_stack = base.above_stack.saturating_add(1);
-                        (if base.tall_top { 0.20 } else { 0.0 }) + f64::from(k) * 0.16
-                    };
-                    if let Some(ttf) = preferred_ttf
-                        && let Some(cmds) = outline_ttf_glyph(ttf, ch, pen_x, glyph_origin_y, glyph_size, span.slope == SpanSlope::Italic)
-                    {
-                        (cmds, pen_x, glyph_origin_y)
-                    } else if let Some((cmds, _)) = fonts.outline_char(family, span.weight, span.slope, ch, pen_x, glyph_origin_y, glyph_size, true) {
-                        (cmds, pen_x, glyph_origin_y)
-                    } else {
-                        let cmds = cleanroom_vector_outline_with_y_shift(
-                            ch,
-                            base.pen_x,
-                            base.origin_y,
-                            base.glyph_size,
-                            base.adv_em,
-                            span.weight,
-                            span.slope,
-                            y_shift,
-                        );
-                        (cmds, base.pen_x, base.origin_y)
-                    }
-                } else {
-                    let cmds = if let Some(ttf) = preferred_ttf
-                        && let Some(cmds) = outline_ttf_glyph(ttf, ch, pen_x, glyph_origin_y, glyph_size, span.slope == SpanSlope::Italic)
-                    {
-                        cmds
-                    } else if let Some((cmds, _)) = fonts.outline_char(family, span.weight, span.slope, ch, pen_x, glyph_origin_y, glyph_size, true) {
-                        cmds
-                    } else {
-                        cleanroom_vector_outline_with_y_shift(ch, pen_x, glyph_origin_y, glyph_size, 0.36, span.weight, span.slope, 0.0)
-                    };
-                    (cmds, pen_x, glyph_origin_y)
-                };
+                let placement = GlyphPlacement { pen_x, origin_y: glyph_origin_y, size_pt: glyph_size, family };
+                let (mut commands, anchor_x, anchor_y) =
+                    resolve_combining_mark_outline(ch, placement, span, fonts, preferred_ttf, last_base.as_mut());
                 if rotate_active && !commands.is_empty() {
                     rotate_commands(&mut commands, origin_x_pt, origin_y_pt, cos_a, sin_a);
                 }
@@ -316,6 +284,57 @@ pub fn outline_visual_rich_text_rotated_with_fonts_and_ttf(
 }
 
 #[derive(Clone, Copy)]
+struct GlyphPlacement {
+    pen_x: f64,
+    origin_y: f64,
+    size_pt: f64,
+    family: FontFamilyKind,
+}
+
+fn resolve_combining_mark_outline(
+    ch: char,
+    placement: GlyphPlacement,
+    span: &RichSpan,
+    fonts: &SystemFontSet,
+    preferred_ttf: Option<&TrueTypeFont<'_>>,
+    last_base: Option<&mut BaseGlyphPlacement>,
+) -> (Vec<GlyphOutlineCmd>, f64, f64) {
+    let (cr_x, cr_y, cr_size, cr_adv, y_shift) = if let Some(base) = last_base {
+        let y_shift = if is_below_combining_mark(ch) {
+            let k = base.below_stack;
+            base.below_stack = base.below_stack.saturating_add(1);
+            -f64::from(k) * 0.14
+        } else {
+            let k = base.above_stack;
+            base.above_stack = base.above_stack.saturating_add(1);
+            (if base.tall_top { 0.20 } else { 0.0 }) + f64::from(k) * 0.16
+        };
+        (base.pen_x, base.origin_y, base.glyph_size, base.adv_em, y_shift)
+    } else {
+        (placement.pen_x, placement.origin_y, placement.size_pt, 0.36, 0.0)
+    };
+    if let Some(ttf) = preferred_ttf
+        && let Some(cmds) = outline_ttf_glyph(ttf, ch, placement.pen_x, placement.origin_y, placement.size_pt, span.slope == SpanSlope::Italic)
+        && !cmds.is_empty()
+    {
+        return (cmds, placement.pen_x, placement.origin_y);
+    }
+    if let Some((cmds, _)) =
+        fonts.outline_char(placement.family, span.weight, span.slope, ch, placement.pen_x, placement.origin_y, placement.size_pt, true)
+    {
+        return (cmds, placement.pen_x, placement.origin_y);
+    }
+    if !has_cleanroom_vector_outline(ch)
+        && let Some((cmds, _)) =
+            fonts.outline_char(placement.family, span.weight, span.slope, ch, placement.pen_x, placement.origin_y, placement.size_pt, false)
+    {
+        return (cmds, placement.pen_x, placement.origin_y);
+    }
+    let cmds = cleanroom_vector_outline_with_y_shift(ch, cr_x, cr_y, cr_size, cr_adv, span.weight, span.slope, y_shift);
+    (cmds, cr_x, cr_y)
+}
+
+#[derive(Clone, Copy)]
 struct BaseGlyphPlacement {
     pen_x: f64,
     origin_y: f64,
@@ -351,7 +370,7 @@ pub fn outline_ttf_glyph(
     font_size_pt: f64,
     italic_slant: bool,
 ) -> Option<Vec<GlyphOutlineCmd>> {
-    if !font_size_pt.is_finite() || font_size_pt <= 0.0 {
+    if !origin_x_pt.is_finite() || !origin_y_pt.is_finite() || !font_size_pt.is_finite() || font_size_pt <= 0.0 {
         return None;
     }
     let gid = ttf.glyph_id(ch)?;
@@ -362,8 +381,21 @@ pub fn outline_ttf_glyph(
     let font_ref = ttf.font_ref();
     let outlines = OutlineGlyphCollection::new(font_ref);
     let format = outlines.format()?;
-    if format == OutlineGlyphFormat::Glyf || ttf.has_glyf_outlines() {
-        validate_glyf_budgets(font_ref, gid, ttf.index_to_loc_format() == 1)?;
+    match format {
+        OutlineGlyphFormat::Glyf => {
+            validate_glyf_budgets(font_ref, gid, ttf.index_to_loc_format() == 1)?;
+        }
+        OutlineGlyphFormat::Cff => {
+            validate_cff_budgets(font_ref, gid, ttf.units_per_em(), false)?;
+        }
+        OutlineGlyphFormat::Cff2 => {
+            validate_cff_budgets(font_ref, gid, ttf.units_per_em(), true)?;
+        }
+        _ => {
+            if ttf.has_glyf_outlines() {
+                validate_glyf_budgets(font_ref, gid, ttf.index_to_loc_format() == 1)?;
+            }
+        }
     }
     let outline_glyph = outlines.get(GlyphId::from(gid))?;
     let mut cmds = Vec::new();
@@ -374,10 +406,16 @@ pub fn outline_ttf_glyph(
         slant: if italic_slant { 0.2125 } else { 0.0 },
         contour_start: None,
         last_was_line_to: false,
+        contours: 0,
+        segments: 0,
+        failed: false,
         out: &mut cmds,
     };
     let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default()).with_path_style(PathStyle::HarfBuzz);
     outline_glyph.draw(settings, &mut pen).ok()?;
+    if pen.failed {
+        return None;
+    }
     Some(cmds)
 }
 
@@ -526,6 +564,114 @@ fn validate_glyf_budgets_rec(loca: &Loca<'_>, glyf: &Glyf<'_>, gid: u16, depth: 
     }
 }
 
+struct BoundedCharstringContext<'a> {
+    inner: (&'a [u8], &'a Index<'a>, &'a Index<'a>, &'a Index<'a>),
+    remaining_calls: Cell<usize>,
+    remaining_bytes: Cell<usize>,
+}
+
+impl BoundedCharstringContext<'_> {
+    fn consume_call(&self, bytes_len: usize) -> Result<(), read_fonts::ps::error::Error> {
+        let calls = self.remaining_calls.get();
+        if calls == 0 {
+            return Err(read_fonts::ps::error::Error::CharstringNestingDepthLimitExceeded);
+        }
+        self.remaining_calls.set(calls - 1);
+        let rem = self.remaining_bytes.get();
+        let Some(next_rem) = rem.checked_sub(bytes_len) else {
+            return Err(read_fonts::ps::error::Error::CharstringNestingDepthLimitExceeded);
+        };
+        self.remaining_bytes.set(next_rem);
+        Ok(())
+    }
+}
+
+impl CharstringContext for BoundedCharstringContext<'_> {
+    fn kind(&self) -> CharstringKind {
+        CharstringKind::Type2
+    }
+
+    fn seac_components(&self, base_code: i32, accent_code: i32) -> Result<[&[u8]; 2], read_fonts::ps::error::Error> {
+        let [base, accent] = self.inner.seac_components(base_code, accent_code)?;
+        self.consume_call(base.len().saturating_add(accent.len()))?;
+        Ok([base, accent])
+    }
+
+    fn global_subr(&self, index: i32) -> Result<&[u8], read_fonts::ps::error::Error> {
+        let subr = self.inner.global_subr(index)?;
+        self.consume_call(subr.len())?;
+        Ok(subr)
+    }
+
+    fn subr(&self, index: i32) -> Result<&[u8], read_fonts::ps::error::Error> {
+        let subr = self.inner.subr(index)?;
+        self.consume_call(subr.len())?;
+        Ok(subr)
+    }
+}
+
+struct CffBudgetSink {
+    contours: usize,
+    segments: usize,
+    overflowed: bool,
+}
+
+impl CommandSink for CffBudgetSink {
+    fn move_to(&mut self, _x: Fixed, _y: Fixed) {
+        self.contours = self.contours.saturating_add(1);
+        self.segments = self.segments.saturating_add(1);
+        if self.contours > MAX_TTF_CONTOURS || self.segments > MAX_TTF_TOTAL_POINTS {
+            self.overflowed = true;
+        }
+    }
+
+    fn line_to(&mut self, _x: Fixed, _y: Fixed) {
+        self.segments = self.segments.saturating_add(1);
+        if self.segments > MAX_TTF_TOTAL_POINTS {
+            self.overflowed = true;
+        }
+    }
+
+    fn curve_to(&mut self, _cx0: Fixed, _cy0: Fixed, _cx1: Fixed, _cy1: Fixed, _x: Fixed, _y: Fixed) {
+        self.segments = self.segments.saturating_add(1);
+        if self.segments > MAX_TTF_TOTAL_POINTS {
+            self.overflowed = true;
+        }
+    }
+
+    fn close(&mut self) {}
+}
+
+fn validate_cff_budgets(font: &FontRef<'_>, gid: u16, upem: u16, is_cff2: bool) -> Option<()> {
+    let table_bytes = if is_cff2 { font.table_data(Tag::new(b"CFF2"))?.as_bytes() } else { font.table_data(Tag::new(b"CFF "))?.as_bytes() };
+    let cff = if is_cff2 {
+        CffFontRef::new_cff2(table_bytes, Some(i32::from(upem))).ok()?
+    } else {
+        CffFontRef::new_cff(table_bytes, 0, Some(i32::from(upem))).ok()?
+    };
+    let gid_t = GlyphId::from(gid);
+    let subfont_idx = cff.subfont_index(gid_t)?;
+    let subfont = cff.subfont(subfont_idx, &[]).ok()?;
+    let charstrings = cff.charstrings();
+    let charstring_data = charstrings.get(usize::from(gid)).ok()?;
+    let remaining_bytes = MAX_CFF_TOTAL_BYTECODE.checked_sub(charstring_data.len())?;
+    let local_subrs = if subfont.subrs_offset() != 0 {
+        let subr_slice = cff.data().get(usize::try_from(subfont.subrs_offset()).ok()?..)?;
+        Index::new(subr_slice, is_cff2).ok()?
+    } else {
+        Index::Empty
+    };
+    let blend = cff.var_store().and_then(|store| BlendState::new(store.clone(), &[], subfont.vs_index()).ok());
+    let ctx = BoundedCharstringContext {
+        inner: (cff.data(), charstrings, cff.global_subrs(), &local_subrs),
+        remaining_calls: Cell::new(MAX_CFF_SUBR_CALLS),
+        remaining_bytes: Cell::new(remaining_bytes),
+    };
+    let mut sink = CffBudgetSink { contours: 0, segments: 0, overflowed: false };
+    cs::evaluate(&ctx, blend, charstring_data, &mut sink).ok()?;
+    (!sink.overflowed).then_some(())
+}
+
 struct GlyphOutlinePen<'a> {
     origin_x: f64,
     origin_y: f64,
@@ -533,47 +679,96 @@ struct GlyphOutlinePen<'a> {
     slant: f64,
     contour_start: Option<(f64, f64)>,
     last_was_line_to: bool,
+    contours: usize,
+    segments: usize,
+    failed: bool,
     out: &'a mut Vec<GlyphOutlineCmd>,
 }
 
 impl GlyphOutlinePen<'_> {
-    fn map_pt(&self, fx: f32, fy: f32) -> (f64, f64) {
+    fn map_pt(&self, fx: f32, fy: f32) -> Option<(f64, f64)> {
         let x = f64::from(fx);
         let y = f64::from(fy);
-        (self.origin_x + (x + y * self.slant) * self.scale, self.origin_y - y * self.scale)
+        let mx = self.origin_x + (x + y * self.slant) * self.scale;
+        let my = self.origin_y - y * self.scale;
+        (mx.is_finite() && my.is_finite()).then_some((mx, my))
+    }
+
+    fn consume_segment(&mut self, is_contour_start: bool) -> bool {
+        if self.failed {
+            return false;
+        }
+        if is_contour_start {
+            self.contours = self.contours.saturating_add(1);
+            if self.contours > MAX_TTF_CONTOURS {
+                self.failed = true;
+                return false;
+            }
+        }
+        self.segments = self.segments.saturating_add(1);
+        if self.segments > MAX_TTF_TOTAL_POINTS {
+            self.failed = true;
+            return false;
+        }
+        true
     }
 }
 
 impl OutlinePen for GlyphOutlinePen<'_> {
     fn move_to(&mut self, x: f32, y: f32) {
-        let (x_pt, y_pt) = self.map_pt(x, y);
+        if !self.consume_segment(true) {
+            return;
+        }
+        let Some((x_pt, y_pt)) = self.map_pt(x, y) else {
+            self.failed = true;
+            return;
+        };
         self.contour_start = Some((x_pt, y_pt));
         self.last_was_line_to = false;
         self.out.push(GlyphOutlineCmd::MoveTo { x_pt, y_pt });
     }
 
     fn line_to(&mut self, x: f32, y: f32) {
-        let (x_pt, y_pt) = self.map_pt(x, y);
+        if !self.consume_segment(false) {
+            return;
+        }
+        let Some((x_pt, y_pt)) = self.map_pt(x, y) else {
+            self.failed = true;
+            return;
+        };
         self.last_was_line_to = true;
         self.out.push(GlyphOutlineCmd::LineTo { x_pt, y_pt });
     }
 
     fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
-        let (cx_pt, cy_pt) = self.map_pt(cx0, cy0);
-        let (x_pt, y_pt) = self.map_pt(x, y);
+        if !self.consume_segment(false) {
+            return;
+        }
+        let (Some((cx_pt, cy_pt)), Some((x_pt, y_pt))) = (self.map_pt(cx0, cy0), self.map_pt(x, y)) else {
+            self.failed = true;
+            return;
+        };
         self.last_was_line_to = false;
         self.out.push(GlyphOutlineCmd::QuadTo { cx_pt, cy_pt, x_pt, y_pt });
     }
 
     fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
-        let (c1x_pt, c1y_pt) = self.map_pt(cx0, cy0);
-        let (c2x_pt, c2y_pt) = self.map_pt(cx1, cy1);
-        let (x_pt, y_pt) = self.map_pt(x, y);
+        if !self.consume_segment(false) {
+            return;
+        }
+        let (Some((c1x_pt, c1y_pt)), Some((c2x_pt, c2y_pt)), Some((x_pt, y_pt))) = (self.map_pt(cx0, cy0), self.map_pt(cx1, cy1), self.map_pt(x, y))
+        else {
+            self.failed = true;
+            return;
+        };
         self.last_was_line_to = false;
         self.out.push(GlyphOutlineCmd::CubicTo { c1x_pt, c1y_pt, c2x_pt, c2y_pt, x_pt, y_pt });
     }
 
     fn close(&mut self) {
+        if self.failed {
+            return;
+        }
         if let Some((sx, sy)) = self.contour_start.take()
             && self.last_was_line_to
         {

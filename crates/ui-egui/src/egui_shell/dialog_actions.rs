@@ -1,16 +1,20 @@
 //! Desktop `egui_shell` modal button execution and dialog widget click/toggle handlers (`F6`).
 
-use curvebook_doc::{AnalysisKind, CldOrdering, ErrorCode, MultiplicityMethod, MultivariateSpec, OneWayMethod, ResidualCovariance, SheetId};
+use curvebook_doc::{
+    AnalysisKind, CldOrdering, DiagnosticPlotKind, ErrorCode, GraphKind, MultiplicityMethod, MultivariateSpec, OneWayMethod, ProjectDocument,
+    ResidualCovariance, SheetId, TransformAnalysisSpec,
+};
 use curvebook_engine::EngineError;
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
 use crate::control_io::dispatch_ui_command_as_ui;
-use crate::dialogs_canvas::{ActiveDialog, AnalyzeDialogState, AnalyzeDuplicateChoice, EditAnalysisParametersState, ExportFigureFormat};
+use crate::dialogs_canvas::{ActiveDialog, AnalysisCategory, AnalyzeDialogState, AnalyzeDuplicateChoice, EditAnalysisParametersState};
+use crate::grid_view::ImportOriginKind;
 use crate::interaction::{clear_modal_text_buffers, close_active_modal, sync_edit_params_text_buffers, sync_format_axes_text_buffers};
 use crate::modal_predicates::{
-    evaluate_dialog_button_for_app, is_reml_mixed_effects_active, r1_paired_or_matched_allowed, r1b_post_hoc_option_enabled,
-    r1b_sphericity_correction, r2_assume_gaussian_allowed, sync_format_points_fallback_targets,
+    evaluate_dialog_button_for_app, is_reml_mixed_effects_active, r1_paired_or_matched_allowed, r1_sphericity_or_reml_control,
+    r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed, sync_format_points_fallback_targets,
 };
 use crate::power_wizard::PowerWizardStage;
 
@@ -32,12 +36,20 @@ pub(crate) fn apply_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Op
 
 /// Execute a modal footer button action (`ok`, `create`, `cancel`, `apply`, `next`, `back`, `preview`).
 pub(crate) fn execute_dialog_button_action(app: &mut UiApp, action: &str) -> Result<Value, EngineError> {
+    let trimmed = action.trim();
+    if let Some(res) = try_execute_internal_modal_action(app, trimmed)? {
+        return Ok(res);
+    }
     if app.canvas_dialogs.active_dialog == ActiveDialog::None {
         return Err(EngineError::with_code(ErrorCode::Conflict, "no modal dialog is currently open"));
     }
-    let norm = action.trim().to_ascii_lowercase();
+    let norm = trimmed.to_ascii_lowercase();
     if norm == "cancel" {
         let prev = format!("{:?}", app.canvas_dialogs.active_dialog);
+        super::graph_modals::reset_graph_modal_on_close(&mut app.egui_views.graph_modals);
+        app.egui_views.app_modals.export_emf_selected = false;
+        app.egui_views.stats_modals.open_session_sheet_id = None;
+        app.egui_views.stats_modals.numeric_field_errors.clear();
         close_active_modal(app);
         return Ok(json!({ "action": "cancel", "closed": true, "previous_dialog": prev }));
     }
@@ -49,6 +61,232 @@ pub(crate) fn execute_dialog_button_action(app: &mut UiApp, action: &str) -> Res
         return Err(disabled_err(check.disabled_reason.unwrap_or_else(|| format!("dialog button `{action}` is currently disabled"))));
     }
     commit_active_dialog_action(app, &norm, &Value::Null)
+}
+
+fn try_execute_internal_modal_action(app: &mut UiApp, action: &str) -> Result<Option<Value>, EngineError> {
+    match action {
+        "__manage_vars_ok" => commit_manage_vars_ok_action(app).map(Some),
+        "__transform_standalone_commit" => commit_transform_standalone_action(app).map(Some),
+        "__import_wizard_commit" => commit_import_wizard_action(app).map(Some),
+        "__import_project_mode_replace" => commit_import_project_mode_action(app, false).map(Some),
+        "__import_project_mode_merge" => commit_import_project_mode_action(app, true).map(Some),
+        "__save_edit_params_default" => Ok(Some(commit_save_edit_params_default_action(app))),
+        other if other.starts_with("__analyze_category:") => {
+            let slug = other.trim_start_matches("__analyze_category:");
+            Ok(Some(commit_analyze_category_action(app, slug)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn commit_manage_vars_ok_action(app: &mut UiApp) -> Result<Value, EngineError> {
+    let cmds = super::manage_vars_modal::build_manage_vars_ok_commands(app);
+    let count = cmds.len();
+    if !cmds.is_empty() {
+        app.execute_atomic_group(|app| {
+            for (cmd_id, params) in cmds {
+                let _ = app.execute_command(&cmd_id, params)?;
+            }
+            Ok::<(), EngineError>(())
+        })?;
+    }
+    app.egui_views.manage_vars_modal.session_undo_depth = None;
+    app.egui_views.manage_vars_modal.session_mutation_seq = None;
+    app.egui_views.manage_vars_modal.staged_title_unit_drafts.clear();
+    app.grid.variables_dialog.recode_mappings.clear();
+    app.grid.variables_dialog.open = false;
+    Ok(json!({ "action": "ok", "closed": true, "command_count": count }))
+}
+
+fn commit_transform_standalone_action(app: &mut UiApp) -> Result<Value, EngineError> {
+    let Some(cmd_params) = app.egui_views.transform_modals.pending_standalone_transform_params.clone() else {
+        return Err(bad_input("no pending transform parameters to execute"));
+    };
+    let out = app.execute_command("transform.run", cmd_params)?;
+    app.egui_views.transform_modals.pending_standalone_transform_params = None;
+    app.egui_views.transform_modals.validation_error = None;
+    app.egui_views.transform_modals.open_kind = None;
+    Ok(json!({ "action": "ok", "closed": true, "mutated": out.mutated, "payload": out.payload }))
+}
+
+fn commit_import_project_mode_action(app: &mut UiApp, merge: bool) -> Result<Value, EngineError> {
+    let ActiveDialog::ImportProjectMode { command_id, path, .. } = app.canvas_dialogs.active_dialog.clone() else {
+        return Err(EngineError::with_code(ErrorCode::Conflict, "import project mode dialog is not open"));
+    };
+    let out = app.execute_command(&command_id, json!({ "path": path, "merge": merge }))?;
+    if !merge {
+        app.session_mut().set_file_path(None, false);
+    }
+    app.canvas_dialogs.close_dialog();
+    let source_label = std::path::Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or(&path);
+    app.record_import_warnings(&command_id, source_label, &out);
+    Ok(json!({ "action": "ok", "command_id": command_id, "merge": merge, "closed": true, "mutated": out.mutated, "payload": out.payload }))
+}
+
+fn commit_save_edit_params_default_action(app: &mut UiApp) -> Value {
+    sync_edit_params_text_buffers(app);
+    if let Some(spec) = app.canvas_dialogs.edit_params.draft.clone() {
+        let key = super::stats_modals::saved_default_kind_key(&spec.kind);
+        app.egui_views.stats_modals.saved_defaults.retain(|d| super::stats_modals::saved_default_kind_key(&d.kind) != key);
+        app.egui_views.stats_modals.saved_defaults.push(spec);
+        app.egui_views.stats_modals.method_saved_as_default = true;
+    } else {
+        app.egui_views.stats_modals.method_saved_as_default = true;
+    }
+    json!({ "action": "save_default", "saved": true })
+}
+
+fn commit_analyze_category_action(app: &mut UiApp, slug: &str) -> Value {
+    let cat = match slug {
+        "column" => Some(AnalysisCategory::Column),
+        "grouped" => Some(AnalysisCategory::Grouped),
+        "xy" => Some(AnalysisCategory::XyAndRegression),
+        "contingency" => Some(AnalysisCategory::Contingency),
+        "survival" => Some(AnalysisCategory::Survival),
+        "multivariate" => Some(AnalysisCategory::Multivariate),
+        "transform" => Some(AnalysisCategory::Transform),
+        _ => None,
+    };
+    app.canvas_dialogs.analyze.category_filter = cat;
+    app.egui_views.stats_modals.analyze_category_filter = cat;
+    json!({ "action": "category_filter", "category": slug })
+}
+
+fn commit_import_wizard_action(app: &mut UiApp) -> Result<Value, EngineError> {
+    if app.grid.import_wizard.origin_kind == ImportOriginKind::XlsxWorkbook {
+        if !app.grid.import_wizard.xlsx_sheets.is_empty() && app.grid.import_wizard.selected_xlsx_sheet_names().is_empty() {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "select at least one worksheet before importing the .xlsx workbook"));
+        }
+        let Some(params) = app.grid.import_wizard.build_xlsx_import_params() else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "choose an .xlsx file path or load workbook bytes before importing"));
+        };
+        let outcome = app.execute_command("table.importXlsx", params)?;
+        app.egui_views.import_wizard.pending_commit = None;
+        app.grid.import_wizard.open = false;
+        return Ok(
+            json!({ "action": "ok", "command_id": "table.importXlsx", "closed": true, "mutated": outcome.mutated, "payload": outcome.payload }),
+        );
+    }
+
+    let pending_meta = app.egui_views.import_wizard.pending_commit.clone().unwrap_or_default();
+    let result = app.execute_atomic_group(|app| {
+        let (target_id, primary_cmd, primary_outcome) = {
+            let doc = app.document();
+            let existing_target = app
+                .grid
+                .import_wizard
+                .target_sheet_id
+                .as_ref()
+                .filter(|id| doc.data_sheet(id).is_some())
+                .cloned()
+                .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned());
+            if let Some(id) = existing_target {
+                validate_import_wizard_internal_source(app, &id)?;
+                let tool_intent = app.grid.import_wizard.build_command_intent(&id, Some(app.document()));
+                let outcome = app.execute_command(&tool_intent.command_id, tool_intent.params)?;
+                (id, tool_intent.command_id, outcome)
+            } else if doc.data_sheets.is_empty()
+                && matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile)
+            {
+                if app.grid.import_wizard.origin_kind == ImportOriginKind::ExternalDelimitedFile
+                    && !app.grid.import_wizard.is_live_link
+                    && app.grid.import_wizard.raw_clipboard_text.trim().is_empty()
+                    && !app.grid.import_wizard.external_file_path.trim().is_empty()
+                {
+                    let delim =
+                        if app.grid.import_wizard.delimiter == '\0' { String::from("\t") } else { app.grid.import_wizard.delimiter.to_string() };
+                    let dec = if app.grid.import_wizard.decimal_separator == ',' { "," } else { "." };
+                    let outcome = app.execute_command(
+                        "table.importCsv",
+                        json!({
+                            "title": "Imported Data",
+                            "path": app.grid.import_wizard.external_file_path,
+                            "delimiter": delim,
+                            "decimal_separator": dec,
+                        }),
+                    )?;
+                    let created_id = outcome
+                        .payload
+                        .get("sheet_id")
+                        .and_then(Value::as_str)
+                        .and_then(|s| SheetId::try_new(s).ok())
+                        .or_else(|| app.document().data_sheets.last().map(|s| s.id.clone()))
+                        .ok_or_else(|| EngineError::with_code(ErrorCode::Conflict, "failed to resolve imported data sheet"))?;
+                    (created_id, String::from("table.importCsv"), outcome)
+                } else {
+                    let created =
+                        app.execute_command("sheet.createData", json!({ "kind": "Column", "title": "Imported Data", "auto_info": true }))?;
+                    let created_id = created
+                        .payload
+                        .get("sheet_id")
+                        .and_then(Value::as_str)
+                        .and_then(|s| SheetId::try_new(s).ok())
+                        .or_else(|| app.document().data_sheets.last().map(|s| s.id.clone()))
+                        .ok_or_else(|| EngineError::with_code(ErrorCode::Conflict, "failed to create target data sheet for import wizard"))?;
+                    let tool_intent = app.grid.import_wizard.build_command_intent(&created_id, Some(app.document()));
+                    let outcome = app.execute_command(&tool_intent.command_id, tool_intent.params)?;
+                    (created_id, tool_intent.command_id, outcome)
+                }
+            } else {
+                return Err(EngineError::with_code(
+                    ErrorCode::Conflict,
+                    "no target data sheet available for import wizard; activate or select a target data sheet first",
+                ));
+            }
+        };
+
+        let info_target_id = app
+            .document()
+            .data_sheet(&target_id)
+            .and_then(|d| d.info_sheet_id.clone())
+            .filter(|iid| app.document().info_sheet(iid).is_some())
+            .or_else(|| app.document().info_sheets.first().map(|i| i.id.clone()));
+
+        if let Some(info_id) = info_target_id {
+            for (key, val_json) in &pending_meta.extracted_kv_json {
+                if let Ok(val) = serde_json::from_str::<Value>(val_json) {
+                    let _ = app.execute_command(
+                        "info.setConstant",
+                        json!({
+                            "sheet_id": info_id.as_str(),
+                            "name": key,
+                            "value": val,
+                        }),
+                    )?;
+                }
+            }
+            if let Some(note_text) = &pending_meta.info_note_text {
+                let _ = app.execute_command(
+                    "info.setNote",
+                    json!({
+                        "sheet_id": info_id.as_str(),
+                        "text": note_text,
+                        "append": true,
+                    }),
+                )?;
+            }
+        }
+        Ok::<(String, curvebook_engine::CommandOutcome), EngineError>((primary_cmd, primary_outcome))
+    })?;
+
+    app.egui_views.import_wizard.pending_commit = None;
+    app.grid.import_wizard.open = false;
+    Ok(json!({ "action": "ok", "command_id": result.0, "closed": true, "mutated": result.1.mutated, "payload": result.1.payload }))
+}
+
+fn validate_import_wizard_internal_source(app: &UiApp, target_id: &SheetId) -> Result<(), EngineError> {
+    if matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::InternalDataSheet | ImportOriginKind::InternalResultSheet) {
+        let Some(src_id) = app.grid.import_wizard.source_sheet_id.as_ref() else {
+            return Err(EngineError::with_code(ErrorCode::Conflict, "select a source sheet before committing an internal link or import"));
+        };
+        if src_id == target_id {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("cannot link or import sheet `{}` onto itself; choose a different source or target sheet", target_id.as_str()),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Commit the active dialog's primary action (`create`/`next` for Power Wizard, `ok` otherwise).
@@ -90,23 +328,39 @@ pub(crate) fn commit_active_dialog_action(app: &mut UiApp, action: &str, params:
             match dialog_snapshot {
                 ActiveDialog::EditAnalysisParameters { .. } => commit_edit_params_action(app, act),
                 ActiveDialog::ChangeGraphType { .. } => {
+                    let close = act != "apply";
                     let intents = app.canvas_dialogs.change_graph_type.commit_intents(app.document());
-                    commit_many_intents_opt_close(app, intents, act != "apply")
+                    let res = commit_many_intents_opt_close(app, intents, close)?;
+                    if close {
+                        super::graph_modals::reset_graph_modal_on_close(&mut app.egui_views.graph_modals);
+                    }
+                    Ok(res)
                 }
                 ActiveDialog::FormatAxes { .. } => {
                     sync_format_axes_text_buffers(app);
                     let close = act != "apply";
-                    let res = commit_single_intent(app, app.canvas_dialogs.format_axes.commit_intent(), close)?;
+                    let intent = super::graph_modals::format_axes_commit_intent(app).map_err(bad_input)?;
+                    let res = commit_single_intent(app, intent, close)?;
+                    super::graph_modals::on_format_axes_committed(&mut app.egui_views.graph_modals, close);
                     if close {
                         clear_modal_text_buffers(app);
                     }
                     Ok(res)
                 }
                 ActiveDialog::PairwiseComparisons { .. } => {
-                    commit_many_intents_opt_close(app, app.canvas_dialogs.pairwise.commit_intents(), act != "apply")
+                    let close = act != "apply";
+                    let res = commit_many_intents_opt_close(app, app.canvas_dialogs.pairwise.commit_intents(), close)?;
+                    if close {
+                        super::graph_modals::reset_graph_modal_on_close(&mut app.egui_views.graph_modals);
+                    }
+                    Ok(res)
                 }
                 ActiveDialog::FormatGraph { .. } => {
-                    commit_many_intents_opt_close(app, app.canvas_dialogs.format_graph.commit_intents(), act != "apply")
+                    let close = act != "apply";
+                    let intents = super::graph_modals::format_graph_commit_intents(app).map_err(bad_input)?;
+                    let res = commit_many_intents_opt_close(app, intents, close)?;
+                    super::graph_modals::on_format_graph_committed(app, close);
+                    Ok(res)
                 }
                 ActiveDialog::FormatEmbeddedTable { .. } => {
                     let doc = app.document().clone();
@@ -148,22 +402,25 @@ pub(crate) fn commit_active_dialog_action(app: &mut UiApp, action: &str, params:
                 ActiveDialog::ChangeDataAnalyzed { .. } => commit_single_intent(app, app.canvas_dialogs.change_data.commit_intent(), true),
                 ActiveDialog::BubblePlotInspector { .. } => commit_single_intent(app, app.canvas_dialogs.bubble_plot.commit_intent(), true),
                 ActiveDialog::ApplyStyleFrom { .. } => commit_single_intent(app, app.canvas_dialogs.apply_style.commit_intent(), true),
-                ActiveDialog::PageLayoutComposer { .. } => commit_many_intents_opt_close(app, app.canvas_dialogs.page_layout.commit_intents(), true),
+                ActiveDialog::PageLayoutComposer { .. } => {
+                    let res = commit_many_intents_opt_close(app, app.canvas_dialogs.page_layout.commit_intents(), true)?;
+                    super::graph_modals::reset_graph_modal_on_close(&mut app.egui_views.graph_modals);
+                    Ok(res)
+                }
                 ActiveDialog::ExportFigure { sheet_id } => {
-                    let mut intent = app.canvas_dialogs.export_figure.commit_intent(&sheet_id);
+                    let is_layout = app.document().layout_sheet(&sheet_id).is_some();
+                    let export_emf = app.egui_views.app_modals.export_emf_selected;
+                    let (cmd, params) = super::app_modals::export_figure_command_and_params(app, is_layout, &sheet_id, export_emf);
                     let export_opts = &app.canvas_dialogs.export_figure;
-                    if matches!(export_opts.format, ExportFigureFormat::Pdf)
-                        && let Some(obj) = intent.params.as_object_mut()
-                    {
-                        let pdf_cs = if export_opts.color_space == "CMYK-Proof" { "cmyk" } else { "srgb" };
-                        obj.insert(String::from("color_space"), json!(pdf_cs));
-                    }
                     let opts_snapshot = json!({
                         "transparent_bg": export_opts.transparent_bg,
                         "color_space": export_opts.color_space,
                         "unit": export_opts.unit,
+                        "emf": export_emf,
                     });
+                    let intent = curvebook_tools::ToolCommandIntent::new(cmd, params);
                     let mut res = commit_single_intent(app, Some(intent), true)?;
+                    app.egui_views.app_modals.export_emf_selected = false;
                     if let Some(obj) = res.as_object_mut() {
                         obj.insert(String::from("export_options"), opts_snapshot);
                     }
@@ -256,18 +513,21 @@ fn commit_power_wizard_action(app: &mut UiApp, action: &str) -> Result<Value, En
 
 fn commit_format_points_action(app: &mut UiApp) -> Result<Value, EngineError> {
     sync_format_points_fallback_targets(app);
-    let mut outcomes = Vec::new();
-    if let Some(intent) = app.canvas_dialogs.format_points.build_commit_intent() {
-        let out = app.execute_command(&intent.command_id, intent.params)?;
-        outcomes.push(out.payload);
-    }
-    let scene = app.canvas_dialogs.format_points.graph_sheet_id.as_ref().and_then(|gid| app.session().render_sheet_scene(gid).ok());
-    let row_label_intents = app.canvas_dialogs.format_points.build_row_label_intents_for_scene(app.document(), scene.as_ref());
-    for intent in row_label_intents {
-        let out = app.execute_command(&intent.command_id, intent.params)?;
-        outcomes.push(out.payload);
-    }
     let count = app.canvas_dialogs.format_points.selected_points.len();
+    let outcomes = app.execute_atomic_group(|app| {
+        let mut out_payloads = Vec::new();
+        if let Some(intent) = app.canvas_dialogs.format_points.build_commit_intent() {
+            let out = app.execute_command(&intent.command_id, intent.params)?;
+            out_payloads.push(out.payload);
+        }
+        let scene = app.canvas_dialogs.format_points.graph_sheet_id.as_ref().and_then(|gid| app.session().render_sheet_scene(gid).ok());
+        let row_label_intents = app.canvas_dialogs.format_points.build_row_label_intents_for_scene(app.document(), scene.as_ref());
+        for intent in row_label_intents {
+            let out = app.execute_command(&intent.command_id, intent.params)?;
+            out_payloads.push(out.payload);
+        }
+        Ok::<Vec<Value>, EngineError>(out_payloads)
+    })?;
     app.canvas_dialogs.close_dialog();
     Ok(json!({ "action": "ok", "formatted_count": count, "outcomes": outcomes }))
 }
@@ -285,36 +545,117 @@ fn maybe_open_nonlinear_fit_params(app: &mut UiApp, sheet_id_str: &str, from_phy
     }
 }
 
-fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
-    let tab_id_opt = app.canvas_dialogs.analyze.extracted_result_tab_id.clone();
-    let src_id_opt = app.canvas_dialogs.analyze.source_sheet_id.clone();
-    if let (Some(src_id), Some(tab_id)) = (src_id_opt, tab_id_opt)
-        && app.document().result_sheet(&src_id).is_some_and(|rs| rs.analyzable_data.is_none())
+fn apply_ext01_default_nonlinear_equation(doc: &ProjectDocument, analyze: &AnalyzeDialogState, intent: &mut curvebook_tools::ToolCommandIntent) {
+    let eq_trimmed = analyze.equation_id.trim();
+    if intent.command_id != "analysis.run" || (!eq_trimmed.is_empty() && eq_trimmed != "log_agonist_vs_response_4pl") || analyze.custom_dsl.is_some()
     {
-        let ext = app.execute_command(
-            "sheet.extractResultTab",
-            json!({
-                "result_sheet_id": src_id.as_str(),
-                "tab_id": tab_id,
-                "archetype": "auto",
-                "auto_graph": false,
-            }),
-        )?;
-        let extracted_id = ext
-            .payload
-            .get("sheet_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "extractResultTab did not return `sheet_id`"))?;
-        let sid = SheetId::try_new(extracted_id).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?;
-        app.canvas_dialogs.analyze.source_sheet_id = Some(sid);
-        app.canvas_dialogs.analyze.extracted_result_tab_id = None;
+        return;
     }
+    let Some(src_str) = intent.params.get("source_sheet_id").and_then(Value::as_str) else {
+        return;
+    };
+    let Ok(src_id) = SheetId::try_new(src_str) else {
+        return;
+    };
+    let xs = super::fit_modal::collect_sheet_active_x_values(doc, &src_id, None, &analyze.mv_x_columns);
+    let suggested = curvebook_fit::suggested_default_dose_response_equation(&xs);
+    if let Some(nl_obj) =
+        intent.params.get_mut("kind").and_then(Value::as_object_mut).and_then(|k| k.get_mut("NonlinearRegression")).and_then(Value::as_object_mut)
+    {
+        let eq = nl_obj.get("equation_id").and_then(Value::as_str).unwrap_or("");
+        if eq.is_empty() || eq == "log_agonist_vs_response_4pl" {
+            nl_obj.insert(String::from("equation_id"), Value::String(suggested.to_owned()));
+        }
+    } else if intent.params.get("kind").and_then(Value::as_str) == Some("nonlinear_regression")
+        && let Some(obj) = intent.params.as_object_mut()
+    {
+        let eq = obj.get("equation_id").and_then(Value::as_str).unwrap_or("");
+        if eq.is_empty() || eq == "log_agonist_vs_response_4pl" {
+            obj.insert(String::from("equation_id"), Value::String(suggested.to_owned()));
+        }
+    }
+}
+
+fn execute_analyze_intent_atomically(
+    app: &mut UiApp,
+    mut intent: curvebook_tools::ToolCommandIntent,
+    pending_extract: Option<(SheetId, String)>,
+    spawn_corr_heatmap: bool,
+) -> Result<curvebook_engine::CommandOutcome, EngineError> {
+    app.execute_atomic_group(|app| {
+        if let Some((src_id, tab_id)) = pending_extract
+            && app.document().result_sheet(&src_id).is_some_and(|rs| rs.analyzable_data.is_none())
+        {
+            let ext = app.execute_command(
+                "sheet.extractResultTab",
+                json!({
+                    "result_sheet_id": src_id.as_str(),
+                    "tab_id": tab_id,
+                    "archetype": "auto",
+                    "auto_graph": false,
+                }),
+            )?;
+            let extracted_id = ext
+                .payload
+                .get("sheet_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "extractResultTab did not return `sheet_id`"))?;
+            let sid = SheetId::try_new(extracted_id).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?;
+            if let Some(obj) = intent.params.as_object_mut() {
+                obj.insert(String::from("source_sheet_id"), Value::String(sid.as_str().to_owned()));
+            }
+        }
+        apply_ext01_default_nonlinear_equation(app.document(), &app.canvas_dialogs.analyze, &mut intent);
+        let out = app.execute_command(&intent.command_id, intent.params)?;
+        if spawn_corr_heatmap
+            && let Some(res_id_str) = out.payload.get("sheet_id").and_then(Value::as_str)
+            && let Ok(res_id) = SheetId::try_new(res_id_str)
+            && app
+                .document()
+                .result_sheet(&res_id)
+                .is_some_and(|rs| matches!(rs.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. })))
+            && !app
+                .document()
+                .graph_sheets
+                .iter()
+                .any(|g| g.spec.primary_source_sheet_id == res_id && g.spec.kind == GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap))
+        {
+            let _ = app.execute_command(
+                "graph.create",
+                json!({
+                    "data_sheet_id": res_id.as_str(),
+                    "kind": GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap),
+                    "initialized": true,
+                }),
+            )?;
+        }
+        Ok(out)
+    })
+}
+
+fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
+    let pending_extract = app
+        .canvas_dialogs
+        .analyze
+        .source_sheet_id
+        .clone()
+        .zip(app.canvas_dialogs.analyze.extracted_result_tab_id.clone())
+        .filter(|(src_id, _)| app.document().result_sheet(src_id).is_some_and(|rs| rs.analyzable_data.is_none()));
+    let spawn_corr_heatmap = app.canvas_dialogs.analyze.correlation_all_pairs && app.canvas_dialogs.analyze.correlation_heatmap;
 
     let from_physical_gui = params.is_null();
     let transient_force = std::mem::take(&mut app.canvas_dialogs.analyze.force_create_new_once);
     let force_new = transient_force || params.get("force_create_new").and_then(Value::as_bool).unwrap_or(false);
+    let prev_dialog = app.canvas_dialogs.active_dialog.clone();
     if !force_new && let Some(intent) = app.canvas_dialogs.submit_analyze_or_prompt(app.session.document()) {
-        let out = app.execute_command(&intent.command_id, intent.params)?;
+        let out = match execute_analyze_intent_atomically(app, intent, pending_extract, spawn_corr_heatmap) {
+            Ok(o) => o,
+            Err(err) => {
+                app.canvas_dialogs.active_dialog = prev_dialog;
+                return Err(err);
+            }
+        };
+        app.canvas_dialogs.analyze.extracted_result_tab_id = None;
         if let Some(new_id) = out.payload.get("sheet_id").and_then(Value::as_str) {
             let _ = app.execute_command("sheet.select", json!({ "sheet_id": new_id }));
             maybe_open_nonlinear_fit_params(app, new_id, from_physical_gui);
@@ -325,7 +666,8 @@ fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value,
         return Ok(json!({ "action": "ok", "dialog": "duplicate_analysis_prompt", "pending_confirmation": true }));
     }
     let intent = app.canvas_dialogs.analyze.build_create_new_intent().ok_or_else(|| bad_input("Analyze selection incomplete"))?;
-    let out = app.execute_command(&intent.command_id, intent.params)?;
+    let out = execute_analyze_intent_atomically(app, intent, pending_extract, spawn_corr_heatmap)?;
+    app.canvas_dialogs.analyze.extracted_result_tab_id = None;
     app.canvas_dialogs.close_dialog();
     if let Some(new_id) = out.payload.get("sheet_id").and_then(Value::as_str) {
         let _ = app.execute_command("sheet.select", json!({ "sheet_id": new_id }));
@@ -336,6 +678,14 @@ fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value,
 
 fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &Value) -> Result<Value, EngineError> {
     let from_physical_gui = params.is_null();
+    let pending_extract = app
+        .canvas_dialogs
+        .analyze
+        .source_sheet_id
+        .clone()
+        .zip(app.canvas_dialogs.analyze.extracted_result_tab_id.clone())
+        .filter(|(src_id, _)| app.document().result_sheet(src_id).is_some_and(|rs| rs.analyzable_data.is_none()));
+    let spawn_corr_heatmap = app.canvas_dialogs.analyze.correlation_all_pairs && app.canvas_dialogs.analyze.correlation_heatmap;
     let raw_choice = match params.get("choice") {
         Some(v) => Some(v),
         None => params.get("fields").and_then(Value::as_object).and_then(|f| f.get("choice")),
@@ -361,33 +711,69 @@ fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &V
             app.canvas_dialogs.analyze.resolve_duplicate_choice(&choice).ok_or_else(|| bad_input("failed to resolve duplicate analysis choice"))?
         }
     };
-    let out = commit_single_intent(app, Some(intent), true)?;
-    if let Some(new_id) = out.get("payload").and_then(|p| p.get("sheet_id")).and_then(Value::as_str) {
+    let is_create_new = intent.command_id == "analysis.run";
+    let cmd_id = intent.command_id.clone();
+    let outcome = execute_analyze_intent_atomically(app, intent, is_create_new.then_some(pending_extract).flatten(), spawn_corr_heatmap)?;
+    app.canvas_dialogs.analyze.extracted_result_tab_id = None;
+    app.canvas_dialogs.close_dialog();
+    if let Some(new_id) = outcome.payload.get("sheet_id").and_then(Value::as_str) {
         let _ = app.execute_command("sheet.select", json!({ "sheet_id": new_id }));
         maybe_open_nonlinear_fit_params(app, new_id, from_physical_gui);
     }
     app.canvas_dialogs.analyze.duplicate_choice = crate::dialogs_canvas::DuplicateChoice::CreateNew;
     app.canvas_dialogs.analyze.duplicate_target_id = None;
-    Ok(out)
+    Ok(json!({ "action": "ok", "command_id": cmd_id, "mutated": outcome.mutated, "payload": outcome.payload }))
 }
 
 fn commit_edit_params_action(app: &mut UiApp, action: &str) -> Result<Value, EngineError> {
+    if let Some(err) = app.egui_views.stats_modals.numeric_field_errors.values().next() {
+        return Err(bad_input(err.clone()));
+    }
+    if let Some(err) = app.canvas_dialogs.edit_params.unsupported_contingency_ci_error() {
+        return Err(bad_input(err));
+    }
     sync_edit_params_text_buffers(app);
     crate::dialogs_canvas::sync_fit_parameter_inputs(app).map_err(bad_input)?;
     let close = action == "ok";
     let doc = app.document().clone();
-    let intents = app.canvas_dialogs.edit_params.commit_intents(Some(&doc));
-    let mut iter = intents.into_iter();
-    let primary = iter.next().ok_or_else(|| bad_input("missing analysis parameter draft"))?;
-    let out = app.execute_command(&primary.command_id, primary.params)?;
-    for extra in iter {
-        let _ = app.execute_command(&extra.command_id, extra.params)?;
+    let mut intents = app.canvas_dialogs.edit_params.commit_intents(Some(&doc));
+    if app.egui_views.transform_modals.create_new_graph
+        && let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog
+        && app
+            .canvas_dialogs
+            .edit_params
+            .draft
+            .as_ref()
+            .is_some_and(|d| matches!(d.kind, AnalysisKind::Transform(TransformAnalysisSpec::Normalize { .. })))
+        && !doc.graph_sheets.iter().any(|g| g.spec.primary_source_sheet_id == *result_sheet_id)
+    {
+        intents.push(curvebook_tools::ToolCommandIntent::new(
+            "graph.create",
+            json!({
+                "data_sheet_id": result_sheet_id.as_str(),
+                "initialized": true,
+            }),
+        ));
     }
+    if intents.is_empty() {
+        return Err(bad_input("missing analysis parameter draft"));
+    }
+    let primary_out = app.execute_atomic_group(|app| {
+        let mut iter = intents.into_iter();
+        let primary = iter.next().ok_or_else(|| bad_input("missing analysis parameter draft"))?;
+        let out = app.execute_command(&primary.command_id, primary.params)?;
+        for extra in iter {
+            let _ = app.execute_command(&extra.command_id, extra.params)?;
+        }
+        Ok::<curvebook_engine::CommandOutcome, EngineError>(out)
+    })?;
     if close {
         close_active_modal(app);
         clear_modal_text_buffers(app);
+        app.egui_views.stats_modals.open_session_sheet_id = None;
+        app.egui_views.stats_modals.numeric_field_errors.clear();
     }
-    Ok(json!({ "action": action, "mutated": out.mutated, "closed": close, "payload": out.payload }))
+    Ok(json!({ "action": action, "mutated": primary_out.mutated, "closed": close, "payload": primary_out.payload }))
 }
 
 fn commit_command_palette_action(app: &mut UiApp) -> Result<Value, EngineError> {
@@ -397,11 +783,16 @@ fn commit_command_palette_action(app: &mut UiApp) -> Result<Value, EngineError> 
         .or_else(|| hits.first())
         .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, "no matching command in palette"))?
         .clone();
-    app.canvas_dialogs.close_dialog();
     if let Some(res) = dispatch_ui_command_as_ui(app, selected.id, &Value::Null)? {
+        if app.canvas_dialogs.active_dialog == ActiveDialog::CommandPalette {
+            app.canvas_dialogs.close_dialog();
+        }
         return Ok(json!({ "action": "ok", "command_id": selected.id, "result": res }));
     }
     let out = app.execute_command(selected.id, Value::Null)?;
+    if app.canvas_dialogs.active_dialog == ActiveDialog::CommandPalette {
+        app.canvas_dialogs.close_dialog();
+    }
     Ok(json!({ "action": "ok", "command_id": selected.id, "mutated": out.mutated, "payload": out.payload }))
 }
 
@@ -417,11 +808,14 @@ fn commit_single_intent(app: &mut UiApp, intent: Option<curvebook_tools::ToolCom
 }
 
 fn commit_many_intents_opt_close(app: &mut UiApp, intents: Vec<curvebook_tools::ToolCommandIntent>, close: bool) -> Result<Value, EngineError> {
-    let mut payloads = Vec::with_capacity(intents.len());
-    for i in intents {
-        let out = app.execute_command(&i.command_id, i.params)?;
-        payloads.push(out.payload);
-    }
+    let payloads = app.execute_atomic_group(|app| {
+        let mut out_payloads = Vec::with_capacity(intents.len());
+        for i in intents {
+            let out = app.execute_command(&i.command_id, i.params)?;
+            out_payloads.push(out.payload);
+        }
+        Ok::<Vec<Value>, EngineError>(out_payloads)
+    })?;
     if close {
         app.canvas_dialogs.close_dialog();
     }
@@ -627,6 +1021,15 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
     let ep = &app.canvas_dialogs.edit_params;
     let mut patch = Map::new();
     if let Some(spec) = EDIT_PARAM_PATCH_CLICKS.iter().find(|s| s.widget_id == wid) {
+        let is_nested = matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::NestedComparison(_)));
+        if wid == "edit.rm.mixed_effects_reml" || (matches!(wid, "edit.rm.df_kenward_roger" | "edit.rm.df_satterthwaite") && !is_nested) {
+            let gate = r1_sphericity_or_reml_control(ep.paired_or_matched);
+            if !gate.enabled {
+                return Err(disabled_err(
+                    gate.disabled_reason.unwrap_or_else(|| String::from("Mixed-effects REML controls require matched/repeated measures.")),
+                ));
+            }
+        }
         patch.insert(spec.patch_key.to_owned(), (spec.next_value)(ep));
     } else if let Some(spec) = POST_HOC_CLICKS.iter().find(|s| s.widget_id == wid) {
         let gate = r1b_post_hoc_option_enabled(ep.assume_gaussian, is_reml_mixed_effects_active(ep, app.document()), (spec.method)(ep));

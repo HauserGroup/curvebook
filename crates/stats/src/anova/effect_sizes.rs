@@ -52,12 +52,12 @@ pub(in crate::anova) fn f_ratio_p(ms_num: f64, ms_den: f64, df1: f64, df2: f64) 
 ///   Olejnik & Algina, 2003).
 /// - Cohen's `f = sqrt(eta_p^2 / (1 - eta_p^2))` (Cohen, 1988, ch. 8; returns `+inf` when
 ///   `eta_p^2 = 1.0`).
-/// - For one-way designs (`SS_effect + SS_error == SS_total`), `N = df_effect + df_error + 1` is
-///   exact and `eta_squared == partial_eta_squared`, so Steiger (2004) noncentral-*F* intervals are
-///   computed automatically. For multi-way designs where `SS_effect + SS_error != SS_total`, the
-///   omitted factor degrees of freedom are unknown from `(df_effect, df_error)` alone and
-///   `eta_squared != partial_eta_squared`; call [`compute_anova_effect_sizes_for_n`] with the true
-///   `total_n` instead (this 6-argument helper returns `None` for the confidence intervals).
+/// - For one-way designs (`SS_effect + SS_error == SS_total` and `df_effect + df_error + 1 == N`),
+///   `N = df_effect + df_error + 1` is exact and `eta_squared == partial_eta_squared`, so Steiger
+///   (2004) noncentral-*F* intervals are computed automatically. Multi-way callers **must** call
+///   [`compute_anova_effect_sizes_for_n`] with the true `total_n` instead (because omitted factor
+///   terms with zero SS can satisfy `SS_effect + SS_error == SS_total` even though
+///   `df_effect + df_error + 1 != total_n`, and this 6-argument helper cannot verify `total_n`).
 pub fn compute_anova_effect_sizes(
     ss_effect: f64,
     ss_error: f64,
@@ -100,11 +100,12 @@ pub fn compute_anova_effect_sizes(
 /// Steiger (2004) noncentral-*F* confidence intervals for `partial_eta_squared` and `cohens_f`
 /// using an explicit total sample size `total_n`.
 ///
-/// For one-way designs (`SS_effect + SS_error == SS_total`), `eta_squared_ci` coincides with
-/// `partial_eta_squared_ci`. For multi-way designs (`SS_effect + SS_error != SS_total`),
+/// For one-way designs (`SS_effect + SS_error == SS_total` and `df_effect + df_error + 1 == total_n`),
+/// `eta_squared_ci` coincides with `partial_eta_squared_ci`. For multi-way designs,
 /// `partial_eta_squared_ci` uses `lambda / (lambda + total_n)` per Steiger (2004, eq. 16) while
 /// `eta_squared_ci` is left `None` because the noncentral-*F* pivot parameterizes `partial eta^2`,
-/// not classical `eta^2 = SS_effect / SS_total`.
+/// not classical `eta^2 = SS_effect / SS_total`. When `ms_error == 0` with `ss_effect > 0`, `F`
+/// diverges to `+inf` (`eta^2 = 1`, `cohens_f = +inf`) and all noncentral-*F* CIs return `None`.
 pub fn compute_anova_effect_sizes_for_n(
     ss_effect: f64,
     ss_error: f64,
@@ -127,7 +128,13 @@ pub fn compute_anova_effect_sizes_for_n(
         0.0
     };
 
-    let f_obs = if ms_error > 0.0 && df_effect > 0.0 { (ss_effect / df_effect) / ms_error } else { 0.0 };
+    let f_obs = if ms_error > 0.0 && df_effect > 0.0 {
+        (ss_effect / df_effect) / ms_error
+    } else if ss_effect > 0.0 && df_effect > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
     let total_n_f = total_n as f64;
     let ncf_ci = if total_n > 0 && f_obs.is_finite() && df_effect >= 1.0 && df_error >= 1.0 {
         noncentral_f_ci(f_obs.max(0.0), df_effect, df_error, confidence.percent()).ok()
@@ -145,7 +152,8 @@ pub fn compute_anova_effect_sizes_for_n(
         let f_hi = if p_hi < 1.0 { (p_hi / (1.0 - p_hi)).sqrt() } else { f64::INFINITY };
         (f_lo, f_hi)
     });
-    let is_one_way = ((ss_effect + ss_error) - ss_total).abs() <= 1e-9 * ss_total.max(1e-30);
+    let is_one_way =
+        ((ss_effect + ss_error) - ss_total).abs() <= 1e-9 * ss_total.max(1e-30) && (df_effect + df_error + 1.0 - total_n_f).abs() <= 1e-9;
 
     AnovaEffectSizes {
         eta_squared: eta2,

@@ -151,9 +151,10 @@ pub fn render_command_palette(
 
     let query_widget_id = Id::unique("egui_shell.palette.query");
     let query_focused = ctx.memory(|m| m.focused()) == Some(query_widget_id);
-    let ghost_suffix = compute_ghost_completion(&state.query, items.first());
+    let ghost_suffix = compute_ghost_completion(&state.query, ghost_target_item(&items, state.selected_index));
     let key_nav = consume_palette_keys(ctx, app, state, &items, ghost_suffix.as_deref(), query_focused, intents);
     if key_nav.accepted_ghost {
+        push_palette_query_patch(&state.query, intents);
         items = query_unified(app, &state.query, 24, recents);
         report.match_count = items.len();
         clamp_palette_selection(state, items.len());
@@ -188,14 +189,12 @@ pub fn render_command_palette(
                 state.just_opened = false;
             }
             if state.query != prev_query {
-                let mut fields = serde_json::Map::new();
-                fields.insert(String::from("query"), serde_json::Value::String(state.query.clone()));
-                intents.push(UiIntent::PatchActiveDialog { fields });
+                push_palette_query_patch(&state.query, intents);
                 items = query_unified(app, &state.query, 24, recents);
                 report.match_count = items.len();
                 state.selected_index = items.iter().position(|r| r.enabled).unwrap_or(0);
             }
-            if let Some(suffix) = compute_ghost_completion(&state.query, items.first()) {
+            if let Some(suffix) = compute_ghost_completion(&state.query, ghost_target_item(&items, state.selected_index)) {
                 paint_inline_ghost_completion(ui, &query_resp, &state.query, &suffix, tokens);
             }
             meta.record_response(
@@ -217,6 +216,7 @@ pub fn render_command_palette(
 
             ui.add_space(4.0);
             if render_palette_scope_pills(ui, &mut state.query, tokens, meta) {
+                push_palette_query_patch(&state.query, intents);
                 items = query_unified(app, &state.query, 24, recents);
                 report.match_count = items.len();
                 state.selected_index = items.iter().position(|r| r.enabled).unwrap_or(0);
@@ -846,8 +846,22 @@ fn resolve_palette_ui_route(app: &UiApp, command_id: &str) -> Option<PaletteComm
         "ui.canvas.preflight" | "ui.export.figure.open" | "ui.embeddedTable.format.open" | "ui.image.format.open" | "ui.clipboard.copyForSlides" => {
             Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_renderable_sheet_id(doc)) })
         }
+        "ui.sheet.find" => {
+            let searchable = doc.active_sheet_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some() || doc.result_sheet(id).is_some());
+            searchable.then(|| PaletteCommandRoute::UiCommand { command_id: String::from("ui.sheet.find"), params: json!({}) })
+        }
         _ => Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: json!({}) }),
     }
+}
+
+fn ghost_target_item(items: &[UnifiedSearchItem], selected_index: usize) -> Option<&UnifiedSearchItem> {
+    items.get(selected_index).filter(|r| r.enabled).or_else(|| items.iter().find(|r| r.enabled))
+}
+
+fn push_palette_query_patch(query: &str, intents: &mut PendingUiIntents) {
+    let mut fields = serde_json::Map::new();
+    fields.insert(String::from("query"), Value::String(query.to_owned()));
+    intents.push(UiIntent::PatchActiveDialog { fields });
 }
 
 fn resolve_palette_dialog_engine_route(doc: &ProjectDocument, command_id: &str) -> Option<PaletteCommandRoute> {

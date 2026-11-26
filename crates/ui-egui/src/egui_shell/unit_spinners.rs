@@ -337,6 +337,7 @@ fn render_scrub_unit_badge(
     preset: &LocalePreset,
     tokens: &Tokens,
     state: &mut ScrubUnitFieldState,
+    committed_value: &mut Option<f64>,
 ) -> bool {
     let mut converted = false;
     if state.unit.is_length() && cfg.allow_unit_switch {
@@ -364,10 +365,17 @@ fn render_scrub_unit_badge(
             let next = prev.next_length_unit();
             state.drag_anchor_value = prev.convert(state.drag_anchor_value, next);
             state.drag_current_value = prev.convert(state.drag_current_value, next);
+            if let Some(prev_last) = state.last_committed_value {
+                state.last_committed_value = Some(prev.convert(prev_last, next));
+            }
+            if let Some(prev_commit) = *committed_value {
+                *committed_value = Some(prev.convert(prev_commit, next));
+            }
             state.unit = next;
             converted = true;
             if state.editing {
-                state.draft_text = format_display_number(prev.convert(bounds.clamped_in, next), bounds.decimals, preset);
+                let display_val = committed_value.unwrap_or_else(|| prev.convert(bounds.clamped_in, next));
+                state.draft_text = format_display_number(display_val, bounds.decimals, preset);
             }
         } else if !cfg.enabled
             && let Some(reason) = cfg.disabled_reason
@@ -462,7 +470,7 @@ pub fn render_scrub_unit_field(
                 }
 
                 if has_unit_widget {
-                    unit_switched_conversion = render_scrub_unit_badge(ui, &bounds, &cfg, &preset, tokens, state);
+                    unit_switched_conversion = render_scrub_unit_badge(ui, &bounds, &cfg, &preset, tokens, state, &mut committed_value);
                 }
             })
             .response
@@ -654,5 +662,75 @@ mod tests {
         assert_eq!(u2, Some(ScrubUnitKind::Inches));
         let in_mm = ScrubUnitKind::Inches.convert(v2, ScrubUnitKind::Millimeters);
         assert!((in_mm - 38.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unit_badge_click_converts_committed_value_into_next_unit() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::default();
+        let mut state = ScrubUnitFieldState::new(ScrubUnitKind::Points);
+        state.last_committed_value = Some(72.0);
+        let cfg = ScrubUnitFieldConfig {
+            widget_id: "test.width",
+            label: "Width",
+            command_id: None,
+            min: 0.0,
+            max: 720.0,
+            step_per_pt: 1.0,
+            decimals: 2,
+            enabled: true,
+            disabled_reason: None,
+            allow_unit_switch: true,
+            z_layer: ZLayer::Workspace,
+        };
+
+        // Pass 1: locate unit badge rect on the trailing edge of the spinbutton widget.
+        let mut meta = FrameInspectMeta::default();
+        let mut badge_center = Pos2::ZERO;
+        ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 80.0))), ..Default::default() }, |ui| {
+            let _ = render_scrub_length_pt_field(ui, 72.0, &mut state, cfg, &tokens, &mut meta);
+            if let Some(node) = meta.find_by_widget_id("test.width") {
+                badge_center = Pos2::new(node.clipped_rect.right() - 15.0, node.clipped_rect.center().y);
+            }
+        })
+        .drop_without_applying_deltas();
+        assert!(badge_center.x > 0.0, "expected spinbutton widget in meta");
+
+        // Pass 2: enter editing mode with 72.0 pt, then click the unit badge so text commit + unit switch happen in one frame.
+        state.editing = true;
+        state.draft_text = String::from("72");
+        let mut committed_pt = None;
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 80.0))),
+                events: vec![
+                    egui::Event::PointerMoved(badge_center),
+                    egui::Event::PointerButton {
+                        pos: badge_center,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos: badge_center,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| {
+                let out = render_scrub_length_pt_field(ui, 72.0, &mut state, cfg, &tokens, &mut meta);
+                committed_pt = out.committed_value;
+            },
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(state.unit, ScrubUnitKind::Millimeters, "unit badge click must cycle Points -> Millimeters");
+        let last_mm = state.last_committed_value.expect("last_committed_value converted to mm");
+        assert!((last_mm - 25.4).abs() < 1e-6, "72 pt must convert to 25.4 mm, got {last_mm}");
+        if let Some(pt_val) = committed_pt {
+            assert!((pt_val - 72.0).abs() < 1e-6, "committed pt must preserve 72.0 pt, got {pt_val}");
+        }
     }
 }

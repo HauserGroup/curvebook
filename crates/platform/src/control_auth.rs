@@ -89,33 +89,10 @@ fn encode_lower_hex(bytes: &[u8]) -> String {
     out
 }
 
-#[cfg(unix)]
+#[cfg(not(target_arch = "wasm32"))]
 fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open("/dev/urandom")?;
     let mut buf = [0u8; CONTROL_AUTH_TOKEN_BYTES];
-    file.read_exact(&mut buf)?;
-    Ok(buf)
-}
-
-#[cfg(all(not(unix), not(target_arch = "wasm32")))]
-fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
-    use std::collections::hash_map::RandomState;
-    use std::hash::BuildHasher;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |dur| dur.as_nanos());
-    let pid = u64::from(std::process::id());
-    let mut buf = [0u8; CONTROL_AUTH_TOKEN_BYTES];
-    for (chunk_idx, chunk) in buf.chunks_exact_mut(8).enumerate() {
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let state = RandomState::new();
-        let mixed = state.hash_one((nanos, pid, seq, chunk_idx as u64, b"curvebook-control-auth"));
-        chunk.copy_from_slice(&mixed.to_le_bytes());
-    }
+    getrandom::fill(&mut buf).map_err(|err| io::Error::other(format!("OS CSPRNG entropy generation failed: {err}")))?;
     Ok(buf)
 }
 
@@ -126,6 +103,8 @@ fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::{CONTROL_AUTH_TOKEN_BYTES, ControlAuth, MAX_CONTROL_TOKEN_BYTES};
 
     #[test]
@@ -145,5 +124,24 @@ mod tests {
         let generated = ControlAuth::generate().expect("generate token");
         assert_eq!(generated.as_str().len(), CONTROL_AUTH_TOKEN_BYTES * 2);
         assert!(generated.verify(generated.as_str()));
+    }
+
+    #[test]
+    fn aud_07_27_control_auth_uses_os_csprng_without_random_state_fallback() {
+        // Verify generated tokens are 256-bit lowercase hex strings with no collisions across draws.
+        let mut seen = HashSet::new();
+        for _ in 0..16 {
+            let auth = ControlAuth::generate().expect("OS CSPRNG token generation");
+            let tok = auth.as_str();
+            assert_eq!(tok.len(), CONTROL_AUTH_TOKEN_BYTES * 2);
+            assert!(tok.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')), "non-hex token: {tok}");
+            assert!(tok.bytes().any(|b| b != b'0'), "degenerate all-zero token");
+            assert!(seen.insert(tok.to_owned()), "duplicate CSPRNG token generated");
+        }
+
+        // Guard against reintroducing a non-cryptographic RandomState fallback in production code.
+        let prod = include_str!("control_auth.rs").split("#[cfg(test)]").next().unwrap_or("");
+        assert!(!prod.contains("RandomState"), "control_auth.rs production code must use OS CSPRNG rather than SipHash RandomState");
+        assert!(prod.contains("getrandom::fill"), "control_auth.rs production code must invoke getrandom::fill");
     }
 }

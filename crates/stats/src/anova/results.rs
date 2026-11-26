@@ -26,11 +26,11 @@ pub struct AnovaEffectSizes {
 /// Homogeneity-of-variance diagnostic tests across `k` groups (`available = false` emits `NaN` metrics for summary inputs).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VarianceHomogeneityResult {
-    /// Bartlett's (1937) normal-theory likelihood-ratio $\chi^2$ test statistic for equal variances (`NaN` when `!available` or zero group variance).
+    /// Bartlett's (1937) normal-theory likelihood-ratio $\chi^2$ test statistic for equal variances (`NaN` when `!available`; `+inf` when some but not all groups have zero variance; `0.0` when all groups have zero variance).
     pub bartlett_chi2: f64,
     /// Bartlett test degrees of freedom `k - 1`.
     pub bartlett_df: f64,
-    /// Upper-tail $\chi^2(k - 1)$ *P* value for Bartlett's test (`NaN` when `!available` or zero group variance).
+    /// Upper-tail $\chi^2(k - 1)$ *P* value for Bartlett's test (`NaN` when `!available`; `0.0` when some but not all groups have zero variance; `1.0` when all groups have zero variance).
     pub bartlett_p: f64,
     /// Brown–Forsythe (1974) robust ANOVA *F*-statistic on absolute deviations from group medians (`NaN` when `!available`).
     pub brown_forsythe_f: f64,
@@ -139,11 +139,11 @@ pub enum RmSphericityCorrection {
 /// Per-factor sphericity diagnostics for two-way repeated-measures and split-plot ANOVA.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct RmTwoWaySphericities {
-    /// Sphericity result for the within-subject Row factor (`None` when between-subject or `< 3` levels).
+    /// Sphericity result for the within-subject Row factor (`None` when between-subject; for 2-level within-subject factors returns `Some` with `eps = 1.0`, `mauchly_df = 0.0`, and `mauchly_p = NaN`).
     pub row: Option<SphericityResult>,
-    /// Sphericity result for the within-subject Column factor (`None` when between-subject or `< 3` levels).
+    /// Sphericity result for the within-subject Column factor (`None` when between-subject; for 2-level within-subject factors returns `Some` with `eps = 1.0`, `mauchly_df = 0.0`, and `mauchly_p = NaN`).
     pub column: Option<SphericityResult>,
-    /// Sphericity result for the two-factor interaction (`None` when `< 3` combined within-subject contrasts).
+    /// Sphericity result for the two-factor interaction (`None` for split-plot designs; for 1-df within-subject interactions returns `Some` with `eps = 1.0`, `mauchly_df = 0.0`, and `mauchly_p = NaN`).
     pub interaction: Option<SphericityResult>,
 }
 

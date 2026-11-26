@@ -10,7 +10,7 @@ use crate::i18n::LocalePreset;
 
 use super::super::unit_spinners::{ScrubUnitFieldConfig, ScrubUnitFieldState, ScrubUnitKind, render_scrub_unit_field};
 use super::super::{FrameInspectMeta, PendingUiIntents, Tokens};
-use super::state::GraphModalEguiState;
+use super::state::{AdditionalTickDraft, GraphModalEguiState, GraphTypeFamily};
 
 pub(super) struct GraphModalCtx<'a> {
     pub(super) app: &'a UiApp,
@@ -63,33 +63,53 @@ pub(super) fn validate_heatmap_range(state: &GraphModalEguiState, preset: &Local
 pub(super) fn reset_format_axes_session_state(state: &mut GraphModalEguiState) {
     state.format_axes_session_synced = false;
     state.format_axes_last_target = None;
+    state.format_axes_selected_segment = 0;
+    state.format_axes_last_segment = 0;
     state.format_axes_pending_tab = None;
-    state.format_axes_per_axis_cache = [None, None, None];
+    state.format_axes_per_axis_cache = Default::default();
     state.format_axes_frame_preset_dirty = false;
-    state.additional_ticks.open = false;
+    state.additional_ticks = AdditionalTickDraft::default();
+    state.additional_tick_draw_gridline = true;
     state.additional_tick_status = None;
     state.axis_bounds_error = None;
-    state.axis_ticks_error = None;
+    state.axis_major_interval_error = None;
+    state.axis_minor_ticks_error = None;
+    state.axis_length_share_draft = String::from("1");
+    state.axis_length_share_error = None;
+    state.clear_categorical_guard();
 }
 
 pub(super) fn reset_format_graph_local_drafts(state: &mut GraphModalEguiState) {
     state.format_graph_session_synced = false;
     state.format_graph_last_sheet_id = None;
+    state.format_graph_synced_spec = None;
+    state.staged_series_edits.clear();
     state.mv_clamp_min_draft.clear();
     state.mv_clamp_max_draft.clear();
+    state.mv_clamp_error = None;
     state.heatmap_colormap = ColormapId::Viridis;
     state.heatmap_reversed = false;
     state.heatmap_auto_range = true;
     state.heatmap_min_draft = String::from("-1.0");
     state.heatmap_max_draft = String::from("1.0");
     state.heatmap_range_error = None;
-    state.heatmap_annotate_cells = true;
-    state.heatmap_cell_gap_pt = 1.5;
     state.heatmap_tick_angle_deg = 0.0;
     state.heatmap_color_dirty = false;
     state.heatmap_tick_angle_dirty = false;
     state.heatmap_synced_color_snapshot = None;
     state.heatmap_synced_tick_angle_deg = 0.0;
+}
+
+pub(super) fn reset_all_graph_modal_transient_state(state: &mut GraphModalEguiState) {
+    reset_format_axes_session_state(state);
+    reset_format_graph_local_drafts(state);
+    state.reset_all_spinners();
+    state.page_callout_draft.clear();
+    state.page_layout_last_sheet_id = None;
+    state.graph_type_family = GraphTypeFamily::Recommended;
+    state.graph_type_show_all = false;
+    state.change_graph_type_last_sheet_id = None;
+    state.graph_type_preview_cache = None;
 }
 
 pub(super) const fn rgba_to_color32(c: Rgba8) -> Color32 {
@@ -168,6 +188,12 @@ pub(in crate::egui_shell) struct LengthSpinnerSpec<'a> {
     pub disabled_reason: Option<&'a str>,
 }
 
+pub(super) fn convert_committed_length_to_pt(committed_in_pre_toggle_unit: f64, pre_toggle_unit: ScrubUnitKind, min_pt: f64, max_pt: f64) -> f64 {
+    let lo = min_pt.min(max_pt);
+    let hi = min_pt.max(max_pt);
+    pre_toggle_unit.to_points(committed_in_pre_toggle_unit).clamp(lo, hi)
+}
+
 pub(in crate::egui_shell) fn render_length_spinner_pt(
     ui: &mut Ui,
     spec: LengthSpinnerSpec<'_>,
@@ -194,7 +220,9 @@ pub(in crate::egui_shell) fn render_length_spinner_pt(
         ..ScrubUnitFieldConfig::new(spec.widget_id, spec.label, disp_min, disp_max)
     };
     let out = render_scrub_unit_field(ui, disp_in, state, cfg, tokens, meta);
-    out.committed_value.map(|v| out.display_unit.to_points(v).clamp(spec.min_pt, spec.max_pt))
+    // `render_scrub_unit_field` parses and commits text/drag values in the pre-toggle `unit` before any
+    // same-frame unit-badge click mutates `state.unit` (`AUD-10-11`).
+    out.committed_value.map(|v| convert_committed_length_to_pt(v, unit, spec.min_pt, spec.max_pt))
 }
 
 pub(super) fn record_label(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id: &str, text: &str) {

@@ -7,16 +7,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use curvebook_doc::error::MAX_SHEET_ID_BYTES;
 use curvebook_doc::{
-    Cell, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DocError, GroupedTable, MAX_DATA_SETS, MAX_PROJECT_CELLS,
-    MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, MAX_TITLE_BYTES, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable,
-    ProjectDocument, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XyTable, validate_data_sets, validate_rows,
-    validate_subcolumns, validate_title,
+    Cell, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DocError, GroupedTable, MAX_DATA_SETS,
+    MAX_PROJECT_CELLS, MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, MAX_TITLE_BYTES, MultipleVariablesTable, NestedGroupColumn, NestedTable,
+    PartsOfWholeTable, ProjectDocument, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable, validate_data_sets,
+    validate_rows, validate_subcolumns, validate_title,
 };
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use crate::archive::{MAX_ARCHIVE_FILE_BYTES, validate_project_document};
-use crate::csv::{MAX_IMPORT_CELLS, collapse_merged_header_rows};
+use crate::csv::{MAX_IMPORT_CELLS, collapse_merged_header_rows, detect_xy_x_subcolumn_header};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 use crate::xml::{MAX_XML_BYTES, MAX_XML_DEPTH, XmlLimits, decode_xml_entities, parse_xml_with_limits};
 use crate::zip::{ZipArchive, ZipLimits, sanitize_zip_path};
@@ -25,6 +25,12 @@ const DEFAULT_WORKBOOK_PATH: &str = "xl/workbook.xml";
 const DEFAULT_SHARED_STRINGS_PATH: &str = "xl/sharedStrings.xml";
 const MAX_SHARED_STRINGS: usize = 2_000_000;
 const MAX_MERGED_RANGES_PER_SHEET: usize = 65_536;
+const MAX_IMPORT_TEXT_BYTES: usize = MAX_XML_BYTES;
+/// Generous upper bound for empty/styled sparse OOXML row indices (> Excel's 1,048,576; << `u32::MAX`)
+/// preventing `usize::MAX + 1` overflow on untrusted coordinates while allowing styled Excel bottom rows.
+const MAX_XLSX_SPARSE_ROW: usize = 16_777_216;
+/// Generous upper bound for sparse OOXML column indices (> `MAX_DATA_SETS * MAX_SUBCOLUMNS + 4`; << `u32::MAX`).
+const MAX_XLSX_SPARSE_COL: usize = 1_048_576;
 const MAX_SHEET_ID_SUFFIX_HEADROOM: usize = 16;
 /// Example coordinates listed in the warning for formula cells without a stored result.
 const MAX_UNCACHED_FORMULA_EXAMPLES: usize = 5;
@@ -83,7 +89,7 @@ struct WorkbookManifest {
     warnings: Vec<ImportWarning>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct MergeRange {
     r1: usize,
     c1: usize,
@@ -122,6 +128,8 @@ struct ParsedWorksheet {
     max_row: Option<usize>,
     max_col: Option<usize>,
     merges: Vec<MergeRange>,
+    seen_merges: HashSet<MergeRange>,
+    merge_tag_count: usize,
     formula_cells: usize,
     /// Formula cells without a stored result (`<f>` and no `<v>` or inline string), imported as empty.
     uncached_formula_cells: usize,
@@ -160,10 +168,12 @@ pub fn import_xlsx_bytes_with_options(bytes: &[u8], opts: &XlsxImportOptions) ->
         });
     }
     opts.subcolumn_mode.validate()?;
-    if let Some(kind) = opts.table_kind
-        && !kind.allows_subcolumn_mode(opts.subcolumn_mode)
-    {
-        return Err(FormatError::Doc(DocError::IncompatibleSubcolumnMode { archetype: kind, mode: opts.subcolumn_mode }));
+    if let Some(kind) = opts.table_kind {
+        let effective = effective_subcolumn_mode(kind, opts.subcolumn_mode);
+        effective.validate()?;
+        if !kind.allows_subcolumn_mode(effective) {
+            return Err(FormatError::Doc(DocError::IncompatibleSubcolumnMode { archetype: kind, mode: effective }));
+        }
     }
 
     let archive = ZipArchive::from_bytes_with_limits(bytes, ZipLimits::default())?;
@@ -190,6 +200,7 @@ pub fn import_xlsx_bytes_with_options(bytes: &[u8], opts: &XlsxImportOptions) ->
     let mut doc = ProjectDocument::new(project_title)?;
     let mut used_ids: HashSet<String> = HashSet::new();
     let mut cumulative_cells = 0_usize;
+    let mut cumulative_text_bytes = 0_usize;
 
     let effective_header_rows = if opts.has_header { opts.header_rows.max(1) } else { 0 };
     for sheet_info in selected {
@@ -197,12 +208,12 @@ pub fn import_xlsx_bytes_with_options(bytes: &[u8], opts: &XlsxImportOptions) ->
             return Err(FormatError::MissingArchiveEntry { path: sheet_info.path.clone() });
         };
         let ws_xml = decode_xml_entry(ws_bytes, &sheet_info.path)?;
-        let parsed = parse_worksheet_xml(&ws_xml, &shared_strings)?;
+        let mut parsed = parse_worksheet_xml(&ws_xml, &shared_strings, &mut cumulative_text_bytes)?;
         emit_worksheet_warnings(&sheet_info.name, &parsed, effective_header_rows, &mut warnings);
 
         let sheet_id = make_unique_sheet_id(&sheet_info.name, sheet_info.index, &mut used_ids);
         let sheet_title = clamp_title(if sheet_info.name.trim().is_empty() { "Sheet" } else { sheet_info.name.trim() }, "worksheet", &mut warnings);
-        let ds = build_datasheet_from_worksheet(sheet_id, sheet_title, &parsed, opts, effective_header_rows)?;
+        let ds = build_datasheet_from_worksheet(sheet_id, sheet_title, &mut parsed, opts, effective_header_rows, &mut cumulative_text_bytes)?;
         cumulative_cells = cumulative_cells
             .checked_add(ds.archetype.allocated_cell_slots())
             .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("workbook cell count overflow") })?;
@@ -452,7 +463,9 @@ fn load_shared_strings(archive: &ZipArchive, shared_strings_path: Option<&str>) 
 
 fn parse_shared_strings_xml(xml: &str) -> Result<Vec<String>, FormatError> {
     let mut reader = Reader::from_str(xml);
+    reader.config_mut().check_end_names = true;
     let mut depth = 0_usize;
+    let mut saw_root = false;
     let mut in_si = false;
     let mut phonetic_depth = 0_usize;
     let mut in_text = false;
@@ -466,6 +479,9 @@ fn parse_shared_strings_xml(xml: &str) -> Result<Vec<String>, FormatError> {
         match event {
             Event::Start(start) => {
                 depth = enter_depth(depth)?;
+                if depth == 1 {
+                    saw_root = true;
+                }
                 let name = start.local_name();
                 match name.as_ref() {
                     "si" if depth == 2 => {
@@ -486,6 +502,9 @@ fn parse_shared_strings_xml(xml: &str) -> Result<Vec<String>, FormatError> {
             }
             Event::Empty(start) => {
                 let _ = enter_depth(depth)?;
+                if depth == 0 {
+                    saw_root = true;
+                }
                 if start.local_name().as_ref() == "si" && depth + 1 == 2 {
                     if strings.len() >= MAX_SHARED_STRINGS {
                         return Err(FormatError::ZipBomb { reason: format!("sharedStrings count exceeds maximum of {MAX_SHARED_STRINGS}") });
@@ -494,6 +513,9 @@ fn parse_shared_strings_xml(xml: &str) -> Result<Vec<String>, FormatError> {
                 }
             }
             Event::End(end) => {
+                if depth == 0 {
+                    return Err(FormatError::XmlParse { offset, reason: String::from("unexpected closing tag in sharedStrings XML") });
+                }
                 let name = end.local_name();
                 match name.as_ref() {
                     "t" if in_text => {
@@ -514,7 +536,7 @@ fn parse_shared_strings_xml(xml: &str) -> Result<Vec<String>, FormatError> {
                     }
                     _ => {}
                 }
-                depth = depth.saturating_sub(1);
+                depth -= 1;
             }
             Event::Text(text) if in_text => {
                 current.push_str(text.as_ref());
@@ -533,12 +555,25 @@ fn parse_shared_strings_xml(xml: &str) -> Result<Vec<String>, FormatError> {
         }
     }
 
+    if !saw_root || depth != 0 || in_si || in_text {
+        return Err(FormatError::XmlParse {
+            offset: reader_offset(&reader),
+            reason: if !saw_root {
+                String::from("empty sharedStrings XML document")
+            } else {
+                String::from("unexpected EOF with unclosed XML element in sharedStrings")
+            },
+        });
+    }
+
     Ok(strings)
 }
 
-fn parse_worksheet_xml(xml: &str, shared_strings: &[String]) -> Result<ParsedWorksheet, FormatError> {
+fn parse_worksheet_xml(xml: &str, shared_strings: &[String], cumulative_text_bytes: &mut usize) -> Result<ParsedWorksheet, FormatError> {
     let mut reader = Reader::from_str(xml);
+    reader.config_mut().check_end_names = true;
     let mut depth = 0_usize;
+    let mut saw_root = false;
     let mut ws = ParsedWorksheet::default();
 
     let mut current_row_idx: Option<usize> = None;
@@ -555,6 +590,9 @@ fn parse_worksheet_xml(xml: &str, shared_strings: &[String]) -> Result<ParsedWor
         match event {
             Event::Start(start) => {
                 depth = enter_depth(depth)?;
+                if depth == 1 {
+                    saw_root = true;
+                }
                 handle_ws_start(
                     &start,
                     depth,
@@ -570,9 +608,15 @@ fn parse_worksheet_xml(xml: &str, shared_strings: &[String]) -> Result<ParsedWor
             }
             Event::Empty(start) => {
                 let _ = enter_depth(depth)?;
+                if depth == 0 {
+                    saw_root = true;
+                }
                 handle_ws_empty(&start, offset, current_row_idx, &mut next_row_guess, &mut next_col_in_row, &mut active_cell, &mut ws)?;
             }
             Event::End(end) => {
+                if depth == 0 {
+                    return Err(FormatError::XmlParse { offset, reason: String::from("unexpected closing tag in worksheet XML") });
+                }
                 let name = end.local_name();
                 match name.as_ref() {
                     "v" | "t" => {
@@ -585,7 +629,7 @@ fn parse_worksheet_xml(xml: &str, shared_strings: &[String]) -> Result<ParsedWor
                         capture_tag = CaptureTag::None;
                         phonetic_depth = 0;
                         if let Some(cell_state) = active_cell.take() {
-                            commit_cell(cell_state, shared_strings, offset, &mut ws)?;
+                            commit_cell(cell_state, shared_strings, offset, &mut ws, cumulative_text_bytes)?;
                         }
                     }
                     "row" => {
@@ -594,7 +638,7 @@ fn parse_worksheet_xml(xml: &str, shared_strings: &[String]) -> Result<ParsedWor
                     }
                     _ => {}
                 }
-                depth = depth.saturating_sub(1);
+                depth -= 1;
             }
             Event::Text(text) => {
                 if let Some(ref mut cell) = active_cell {
@@ -617,6 +661,17 @@ fn parse_worksheet_xml(xml: &str, shared_strings: &[String]) -> Result<ParsedWor
             Event::Eof => break,
             _ => {}
         }
+    }
+
+    if !saw_root || depth != 0 || active_cell.is_some() {
+        return Err(FormatError::XmlParse {
+            offset: reader_offset(&reader),
+            reason: if !saw_root {
+                String::from("empty worksheet XML document")
+            } else {
+                String::from("unexpected EOF with unclosed XML element in worksheet")
+            },
+        });
     }
 
     Ok(ws)
@@ -735,7 +790,13 @@ fn parse_row_attr(start: &BytesStart<'_>, guess: usize, offset: usize) -> Result
         if r_one_based == 0 {
             return Err(FormatError::XmlParse { offset, reason: String::from("worksheet `<row r=\"0\">` must be >= 1") });
         }
+        if r_one_based > MAX_XLSX_SPARSE_ROW {
+            return Err(FormatError::Doc(DocError::TooManyRows { count: r_one_based, max: MAX_ROWS }));
+        }
         return Ok(r_one_based - 1);
+    }
+    if guess >= MAX_XLSX_SPARSE_ROW {
+        return Err(FormatError::Doc(DocError::TooManyRows { count: guess.saturating_add(1), max: MAX_ROWS }));
     }
     Ok(guess)
 }
@@ -747,13 +808,22 @@ fn begin_cell(start: &BytesStart<'_>, row_fallback: usize, next_col_in_row: &mut
         Some(r_str) => {
             let (col_idx, opt_row) = parse_cell_ref(&r_str, offset)?;
             let row_idx = opt_row.unwrap_or(row_fallback);
+            if row_idx >= MAX_XLSX_SPARSE_ROW {
+                return Err(FormatError::Doc(DocError::TooManyRows { count: row_idx.saturating_add(1), max: MAX_ROWS }));
+            }
             *next_col_in_row = col_idx.saturating_add(1);
             (row_idx, col_idx, r_str)
         }
         None => {
             let col_idx = *next_col_in_row;
+            if row_fallback >= MAX_XLSX_SPARSE_ROW {
+                return Err(FormatError::Doc(DocError::TooManyRows { count: row_fallback.saturating_add(1), max: MAX_ROWS }));
+            }
+            if col_idx >= MAX_XLSX_SPARSE_COL {
+                return Err(FormatError::Doc(DocError::TooManyDataSets { count: col_idx.saturating_add(1), max: MAX_DATA_SETS }));
+            }
             *next_col_in_row = col_idx.saturating_add(1);
-            (row_fallback, col_idx, format!("R{}C{}", row_fallback + 1, col_idx + 1))
+            (row_fallback, col_idx, format!("R{}C{}", row_fallback.saturating_add(1), col_idx.saturating_add(1)))
         }
     };
 
@@ -770,10 +840,20 @@ fn begin_cell(start: &BytesStart<'_>, row_fallback: usize, next_col_in_row: &mut
     })
 }
 
+fn reserve_text_bytes(total: &mut usize, added: usize, ctx: &str) -> Result<(), FormatError> {
+    let next = total.checked_add(added).ok_or_else(|| FormatError::ZipBomb { reason: format!("{ctx} decoded text size overflow") })?;
+    if next > MAX_IMPORT_TEXT_BYTES {
+        return Err(FormatError::ZipBomb { reason: format!("{ctx} decoded text exceeds {MAX_IMPORT_TEXT_BYTES} byte limit") });
+    }
+    *total = next;
+    Ok(())
+}
+
 fn record_merge_cell(start: &BytesStart<'_>, offset: usize, ws: &mut ParsedWorksheet) -> Result<(), FormatError> {
-    if ws.merges.len() >= MAX_MERGED_RANGES_PER_SHEET {
+    if ws.merge_tag_count >= MAX_MERGED_RANGES_PER_SHEET {
         return Err(FormatError::ZipBomb { reason: format!("worksheet mergedCells count exceeds {MAX_MERGED_RANGES_PER_SHEET}") });
     }
+    ws.merge_tag_count = ws.merge_tag_count.saturating_add(1);
     let Some(ref_attr) = find_attr(start, "ref", offset)? else {
         return Ok(());
     };
@@ -784,11 +864,20 @@ fn record_merge_cell(start: &BytesStart<'_>, offset: usize, ws: &mut ParsedWorks
     let (c2, Some(r2)) = parse_cell_ref(end_ref.trim(), offset)? else {
         return Err(FormatError::XmlParse { offset, reason: format!("invalid mergeCell ref `{ref_attr}`") });
     };
-    ws.merges.push(MergeRange { r1: r1.min(r2), c1: c1.min(c2), r2: r1.max(r2), c2: c1.max(c2) });
+    let range = MergeRange { r1: r1.min(r2), c1: c1.min(c2), r2: r1.max(r2), c2: c1.max(c2) };
+    if ws.seen_merges.insert(range) {
+        ws.merges.push(range);
+    }
     Ok(())
 }
 
-fn commit_cell(state: ActiveCellState, shared_strings: &[String], offset: usize, ws: &mut ParsedWorksheet) -> Result<(), FormatError> {
+fn commit_cell(
+    state: ActiveCellState,
+    shared_strings: &[String],
+    offset: usize,
+    ws: &mut ParsedWorksheet,
+    cumulative_text_bytes: &mut usize,
+) -> Result<(), FormatError> {
     if state.has_formula {
         ws.formula_cells = ws.formula_cells.saturating_add(1);
     }
@@ -804,6 +893,7 @@ fn commit_cell(state: ActiveCellState, shared_strings: &[String], offset: usize,
         return Ok(());
     }
 
+    let mut precharged_text_bytes = false;
     let cell = match state.cell_type {
         XlsxCellType::SharedString => {
             let idx_raw = state.value_buf.trim();
@@ -818,6 +908,9 @@ fn commit_cell(state: ActiveCellState, shared_strings: &[String], offset: usize,
                     offset,
                     reason: format!("shared string index {idx} out of bounds (table len {}) in cell {}", shared_strings.len(), state.coord_label),
                 })?;
+                // Charge cumulative workbook text bytes BEFORE cloning to prevent shared-string OOM amplification.
+                reserve_text_bytes(cumulative_text_bytes, text.len(), "workbook")?;
+                precharged_text_bytes = true;
                 Cell::text(text.clone())
             }
         }
@@ -880,12 +973,16 @@ fn commit_cell(state: ActiveCellState, shared_strings: &[String], offset: usize,
         return Ok(());
     }
 
+    if !precharged_text_bytes && let CellValue::Text(ref s) = cell.value {
+        reserve_text_bytes(cumulative_text_bytes, s.len(), "workbook")?;
+    }
+
     if state.row >= MAX_ROWS {
-        return Err(FormatError::Doc(DocError::TooManyRows { count: state.row + 1, max: MAX_ROWS }));
+        return Err(FormatError::Doc(DocError::TooManyRows { count: state.row.saturating_add(1), max: MAX_ROWS }));
     }
     let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS).saturating_add(4);
     if state.col >= max_cols {
-        return Err(FormatError::Doc(DocError::TooManyDataSets { count: state.col + 1, max: MAX_DATA_SETS }));
+        return Err(FormatError::Doc(DocError::TooManyDataSets { count: state.col.saturating_add(1), max: MAX_DATA_SETS }));
     }
 
     ws.max_row = Some(ws.max_row.map_or(state.row, |cur| cur.max(state.row)));
@@ -919,6 +1016,9 @@ fn parse_cell_ref(raw: &str, offset: usize) -> Result<(usize, Option<usize>), Fo
     if !saw_col || col == 0 {
         return Err(FormatError::XmlParse { offset, reason: format!("missing column letters in cell reference `{raw}`") });
     }
+    if col > MAX_XLSX_SPARSE_COL {
+        return Err(FormatError::Doc(DocError::TooManyDataSets { count: col, max: MAX_DATA_SETS }));
+    }
     let row_part = trimmed.get(split_idx..).unwrap_or("");
     let row = if row_part.is_empty() {
         None
@@ -927,6 +1027,9 @@ fn parse_cell_ref(raw: &str, offset: usize) -> Result<(usize, Option<usize>), Fo
             row_part.parse().map_err(|_| FormatError::XmlParse { offset, reason: format!("invalid row index in cell reference `{raw}`") })?;
         if r_one_based == 0 {
             return Err(FormatError::XmlParse { offset, reason: format!("row index 0 in cell reference `{raw}` must be >= 1") });
+        }
+        if r_one_based > MAX_XLSX_SPARSE_ROW {
+            return Err(FormatError::Doc(DocError::TooManyRows { count: r_one_based, max: MAX_ROWS }));
         }
         Some(r_one_based - 1)
     };
@@ -1072,9 +1175,10 @@ fn emit_worksheet_warnings(sheet_name: &str, ws: &ParsedWorksheet, header_rows: 
 fn build_datasheet_from_worksheet(
     sheet_id: SheetId,
     title: String,
-    ws: &ParsedWorksheet,
+    ws: &mut ParsedWorksheet,
     opts: &XlsxImportOptions,
     effective_header_rows: usize,
+    cumulative_text_bytes: &mut usize,
 ) -> Result<DataSheet, FormatError> {
     let Some(max_row) = ws.max_row else {
         let kind = opts.table_kind.unwrap_or(TableKind::Column);
@@ -1083,11 +1187,15 @@ fn build_datasheet_from_worksheet(
         return create_empty_datasheet(sheet_id, title, kind, sub_mode, ds_count);
     };
     let Some(max_col) = ws.max_col else {
-        return create_empty_datasheet(sheet_id, title, opts.table_kind.unwrap_or(TableKind::Column), opts.subcolumn_mode, 1);
+        let kind = opts.table_kind.unwrap_or(TableKind::Column);
+        let sub_mode = effective_subcolumn_mode(kind, opts.subcolumn_mode);
+        return create_empty_datasheet(sheet_id, title, kind, sub_mode, 1);
     };
 
-    let total_rows = max_row + 1;
-    let total_cols = max_col + 1;
+    let total_rows =
+        max_row.checked_add(1).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("worksheet row dimension overflow") })?;
+    let total_cols =
+        max_col.checked_add(1).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("worksheet column dimension overflow") })?;
     let total_grid_cells =
         total_rows.checked_mul(total_cols).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("worksheet dimensions overflow") })?;
     if total_grid_cells > MAX_IMPORT_CELLS {
@@ -1095,7 +1203,7 @@ fn build_datasheet_from_worksheet(
     }
 
     let header_count = effective_header_rows.min(total_rows);
-    let headers = extract_xlsx_headers(ws, header_count, total_cols);
+    let headers = extract_xlsx_headers(ws, header_count, total_cols, cumulative_text_bytes)?;
     let data_row_count = total_rows.saturating_sub(header_count);
     validate_rows(data_row_count)?;
 
@@ -1103,7 +1211,7 @@ fn build_datasheet_from_worksheet(
     for r in header_count..total_rows {
         let mut row_cells = Vec::with_capacity(total_cols);
         for c in 0..total_cols {
-            row_cells.push(ws.cells.get(&(r, c)).cloned().unwrap_or_else(Cell::empty));
+            row_cells.push(ws.cells.remove(&(r, c)).unwrap_or_else(Cell::empty));
         }
         data_rows.push(row_cells);
     }
@@ -1128,9 +1236,14 @@ fn create_empty_datasheet(
     assemble_datasheet(sheet_id, title, kind, sub_mode, false, &[], &[], ds_count)
 }
 
-fn extract_xlsx_headers(ws: &ParsedWorksheet, header_count: usize, total_cols: usize) -> Vec<String> {
+fn extract_xlsx_headers(
+    ws: &ParsedWorksheet,
+    header_count: usize,
+    total_cols: usize,
+    cumulative_text_bytes: &mut usize,
+) -> Result<Vec<String>, FormatError> {
     if header_count == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut raw_rows = vec![vec![String::new(); total_cols]; header_count];
     for r in 0..header_count {
@@ -1139,44 +1252,68 @@ fn extract_xlsx_headers(ws: &ParsedWorksheet, header_count: usize, total_cols: u
                 && let Some(row_vec) = raw_rows.get_mut(r)
                 && let Some(slot) = row_vec.get_mut(c)
             {
-                *slot = cell_as_header_text(cell);
+                let text = bounded_header_text(cell);
+                reserve_text_bytes(cumulative_text_bytes, text.len(), "workbook headers")?;
+                *slot = text;
             }
         }
     }
+    let max_header_merge_cells = header_count.saturating_mul(total_cols).min(MAX_IMPORT_CELLS);
+    let mut merge_cells_visited = 0_usize;
     for merge in &ws.merges {
-        if merge.r1 >= header_count {
-            continue;
-        }
-        let anchor_val = ws.cells.get(&(merge.r1, merge.c1)).map(cell_as_header_text).unwrap_or_default();
-        if anchor_val.trim().is_empty() {
+        if merge.r1 >= header_count || merge.c1 >= total_cols {
             continue;
         }
         let r_end = merge.r2.min(header_count.saturating_sub(1));
         let c_end = merge.c2.min(total_cols.saturating_sub(1));
+        let span = (r_end - merge.r1 + 1).saturating_mul(c_end - merge.c1 + 1);
+        merge_cells_visited = merge_cells_visited.saturating_add(span);
+        if merge_cells_visited > max_header_merge_cells {
+            return Err(FormatError::ZipBomb { reason: String::from("overlapping worksheet header mergeCell ranges exceed grid area") });
+        }
+        let anchor_is_empty = raw_rows.get(merge.r1).and_then(|row| row.get(merge.c1)).is_none_or(|s| s.trim().is_empty());
+        if anchor_is_empty {
+            continue;
+        }
+        let anchor_val = raw_rows.get(merge.r1).and_then(|row| row.get(merge.c1)).cloned().unwrap_or_default();
         for r in merge.r1..=r_end {
             for c in merge.c1..=c_end {
                 if let Some(row_vec) = raw_rows.get_mut(r)
                     && let Some(slot) = row_vec.get_mut(c)
                     && slot.trim().is_empty()
                 {
+                    reserve_text_bytes(cumulative_text_bytes, anchor_val.len(), "workbook headers")?;
                     *slot = anchor_val.clone();
                 }
             }
         }
     }
-    collapse_merged_header_rows(&raw_rows)
+    Ok(collapse_merged_header_rows(&raw_rows))
 }
 
-fn cell_as_header_text(cell: &Cell) -> String {
+fn bounded_header_text(cell: &Cell) -> String {
     match &cell.value {
-        curvebook_doc::CellValue::Empty => String::new(),
-        curvebook_doc::CellValue::Text(s) => s.clone(),
-        curvebook_doc::CellValue::Number(v) => v.to_string(),
+        CellValue::Empty => String::new(),
+        CellValue::Text(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                String::new()
+            } else if s.len() <= MAX_TITLE_BYTES {
+                s.clone()
+            } else {
+                truncate_utf8_to_bytes(trimmed, MAX_TITLE_BYTES).to_owned()
+            }
+        }
+        CellValue::Number(v) => v.to_string(),
     }
 }
 
 fn cell_as_label(cell: &Cell) -> String {
-    cell_as_header_text(cell).trim().to_owned()
+    match &cell.value {
+        CellValue::Empty => String::new(),
+        CellValue::Text(s) => s.trim().to_owned(),
+        CellValue::Number(v) => v.to_string(),
+    }
 }
 
 fn infer_xlsx_table_kind(data_rows: &[Vec<Cell>], total_cols: usize, opts: &XlsxImportOptions) -> TableKind {
@@ -1197,10 +1334,8 @@ fn infer_xlsx_table_kind(data_rows: &[Vec<Cell>], total_cols: usize, opts: &Xlsx
 }
 
 fn effective_subcolumn_mode(kind: TableKind, requested: SubcolumnMode) -> SubcolumnMode {
-    if matches!(kind, TableKind::Grouped) && requested == SubcolumnMode::Single {
+    if matches!(kind, TableKind::Grouped | TableKind::Nested) && requested == SubcolumnMode::Single {
         SubcolumnMode::RawReplicates(1)
-    } else if matches!(kind, TableKind::Contingency | TableKind::Survival | TableKind::PartsOfWhole | TableKind::MultipleVariables) {
-        SubcolumnMode::Single
     } else {
         requested
     }
@@ -1223,21 +1358,26 @@ fn assemble_datasheet(
 
     let arch = match target_kind {
         TableKind::Xy => {
-            let x_title = header_at(headers, col_offset).unwrap_or_else(|| String::from("X"));
+            let header_strs: Vec<&str> = headers.iter().map(String::as_str).collect();
+            let detected_x = detect_xy_x_subcolumn_header(&header_strs, col_offset);
+            let x_sub_mode = detected_x.as_ref().map_or(SubcolumnMode::Single, |(_, m)| *m);
+            let x_subs = x_sub_mode.subcolumn_count();
+            let x_title = detected_x.map(|(base, _)| base).or_else(|| header_at(headers, col_offset)).unwrap_or_else(|| String::from("X"));
             let x_col_idx = col_offset;
-            if raw_col_count > col_offset {
-                col_offset += 1;
-            }
+            let available_x_cols = raw_col_count.saturating_sub(col_offset).min(x_subs);
+            col_offset = col_offset.saturating_add(available_x_cols);
             let subs = subcolumn_mode.subcolumn_count();
             let ds_count = raw_col_count.saturating_sub(col_offset).div_ceil(subs);
             validate_data_sets(ds_count)?;
-            let mut xy = XyTable::new(subcolumn_mode, ds_count, row_count)?;
+            let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: x_sub_mode }, subcolumn_mode, ds_count, row_count)?;
             xy.x_title = clamp_header_title(&x_title)?;
             assign_xlsx_row_titles(&mut xy.row_titles, data_rows, has_row_titles);
             xy.row_titles_expanded = has_row_titles;
             for (r, rec) in data_rows.iter().enumerate() {
-                if let Some(cell) = rec.get(x_col_idx) {
-                    xy.set_x_cell(r, cell.clone())?;
+                for s in 0..available_x_cols {
+                    if let Some(cell) = rec.get(x_col_idx + s) {
+                        xy.set_x_subcell(r, s, cell.clone())?;
+                    }
                 }
             }
             populate_xlsx_datasets(&mut xy.data_sets, data_rows, headers, col_offset, subs)?;
@@ -1247,7 +1387,8 @@ fn assemble_datasheet(
             let subs = subcolumn_mode.subcolumn_count();
             let ds_count = raw_col_count.saturating_sub(col_offset).div_ceil(subs);
             validate_data_sets(ds_count)?;
-            let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, subcolumn_mode, ds_count, row_count)?;
+            let hint = if subcolumn_mode.is_pre_summarized() { ColumnDesignHint::PrecomputedError } else { ColumnDesignHint::UnpairedReplicates };
+            let mut col = ColumnTable::new_with_subcolumns(hint, subcolumn_mode, ds_count, row_count)?;
             assign_xlsx_row_titles(&mut col.row_titles, data_rows, has_row_titles);
             col.row_titles_expanded = has_row_titles;
             populate_xlsx_datasets(&mut col.data_sets, data_rows, headers, col_offset, subs)?;

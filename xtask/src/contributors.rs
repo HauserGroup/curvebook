@@ -34,18 +34,36 @@ pub fn run(root: &Path) -> Result<(), String> {
     let overrides = parse_people_toml(&people_raw);
 
     let repo = resolve_repo_slug(root);
-    let branch = git_stdout(root, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_else(|| String::from("main"));
+    let inside = git_stdout(root, &["rev-parse", "--is-inside-work-tree"])
+        .map_err(|e| format!("contributors: git worktree check failed (refusing to overwrite {OUT_REL}): {e}"))?;
+    if inside != "true" {
+        return Err(format!("contributors: `{}` is not inside a git work tree (refusing to overwrite {OUT_REL})", root.display()));
+    }
+
+    let branch = git_stdout(root, &["symbolic-ref", "--short", "HEAD"]).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| String::from("main"));
     let out_path = root.join(OUT_REL);
     let fallback_date = existing_head_date(&out_path).unwrap_or_else(|| String::from("1970-01-01T00:00:00Z"));
 
-    let (head, head_date, commits, unattributed, roster) = match git_stdout(root, &["rev-parse", "HEAD"]) {
-        Some(sha) => {
-            let date = git_stdout(root, &["show", "-s", "--format=%cI", "HEAD"]).unwrap_or(fallback_date);
-            let log = git_stdout(root, &["log", "--format=%an\x1f%ae"]).unwrap_or_default();
+    let (head, head_date, commits, unattributed, roster) = match git_stdout(root, &["rev-parse", "--verify", "HEAD"]) {
+        Ok(sha) if !sha.is_empty() => {
+            let date = git_stdout(root, &["show", "-s", "--format=%cI", "HEAD"])
+                .map_err(|e| format!("contributors: failed to read HEAD commit date (refusing to overwrite {OUT_REL}): {e}"))?;
+            if date.is_empty() {
+                return Err(format!("contributors: empty HEAD commit date (refusing to overwrite {OUT_REL})"));
+            }
+            let log = git_stdout(root, &["log", "--format=%an\x1f%ae"])
+                .map_err(|e| format!("contributors: failed to read git log (refusing to overwrite {OUT_REL}): {e}"))?;
             let (total, unattr, entries) = summarize_log(&log, &overrides);
             (sha, date, total, unattr, entries)
         }
-        None => (String::from(ZERO_HEAD), fallback_date, 0, 0, Vec::new()),
+        Ok(_) => return Err(format!("contributors: `git rev-parse --verify HEAD` returned empty SHA (refusing to overwrite {OUT_REL})")),
+        Err(head_err) => {
+            if is_verified_unborn_repo(root) {
+                (String::from(ZERO_HEAD), fallback_date, 0, 0, Vec::new())
+            } else {
+                return Err(format!("contributors: cannot resolve HEAD (refusing to overwrite {OUT_REL}): {head_err}"));
+            }
+        }
     };
 
     let rendered = render_contributors_json(&repo, &branch, &head, &head_date, commits, unattributed, &roster);
@@ -107,19 +125,25 @@ fn existing_head_date(path: &Path) -> Option<String> {
     parsed.get("head_date").and_then(serde_json::Value::as_str).map(str::to_owned)
 }
 
-fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
+fn is_verified_unborn_repo(root: &Path) -> bool {
+    let has_symbolic_head = git_stdout(root, &["symbolic-ref", "--short", "HEAD"]).is_ok_and(|s| !s.is_empty());
+    let zero_commits = git_stdout(root, &["rev-list", "--all", "--count"]).is_ok_and(|c| c == "0");
+    has_symbolic_head && zero_commits
+}
+
+fn git_stdout(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = crate::dev_tool_command("git")
         .current_dir(root)
         .args(args.iter().copied())
         .wall_timeout(Duration::from_secs(60))
         .idle_timeout(Duration::from_secs(30))
         .run()
-        .ok()?;
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
     if !out.success {
-        return None;
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        return Err(format!("git {} exited with {:?}: {stderr}", args.join(" "), out.status_code));
     }
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if text.is_empty() { None } else { Some(text) }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
 #[must_use]
@@ -350,5 +374,24 @@ Local User\x1flocal@example.org
         let map = parse_people_toml(people);
         assert_eq!(map["ada-lovelace"].real_name.as_deref(), Some("Ada # Byron"));
         assert_eq!(map["ada-lovelace"].display_name.as_deref(), Some("Ada"));
+    }
+
+    #[test]
+    fn aud_12_39_fails_closed_without_clobbering_contributors_json_outside_git_and_allows_unborn_repo() {
+        let non_git = crate::scan_util::test_support::TestDir::new("contributors-nogit");
+        let existing = "{\"schema\":1,\"commits\":244,\"contributors\":[{\"login\":\"alice\",\"commits\":244}]}\n";
+        non_git.write("contributors/contributors.json", existing);
+        let err = super::run(non_git.path()).unwrap_err();
+        assert!(err.contains("refusing to overwrite"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(non_git.join("contributors/contributors.json")).unwrap(),
+            existing,
+            "existing contributors.json must remain untouched on git failure"
+        );
+
+        let unborn = crate::scan_util::test_support::TestDir::git_repo("contributors-unborn");
+        super::run(unborn.path()).expect("explicitly verified unborn git repo should succeed with 0 commits");
+        let rendered = std::fs::read_to_string(unborn.join("contributors/contributors.json")).unwrap();
+        assert!(rendered.contains("\"commits\": 0"), "{rendered}");
     }
 }

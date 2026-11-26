@@ -916,7 +916,29 @@ fn resolve_single_hook(token: &str, doc: &ProjectDocument, paired_info: Option<&
             (!text.is_empty()).then_some(text)
         }
         ["result", sheet, param] if !sheet.is_empty() && !param.is_empty() => {
-            doc.result_sheet(&SheetId::new(*sheet)).and_then(|r| r.lookup_scalar(param, None)).map(format_scalar_clean)
+            let res = doc.result_sheet(&SheetId::new(*sheet))?;
+            if !matches!(res.status, ResultStatus::UpToDate) {
+                return None;
+            }
+            let needle = param.trim();
+            let val = res
+                .scalars
+                .iter()
+                .find(|s| {
+                    s.key.trim().eq_ignore_ascii_case(needle)
+                        && s.value.is_finite()
+                        && !crate::equation_box::is_unstable_masked_scalar(res, &s.key, s.data_set_index, Some(doc))
+                })
+                .or_else(|| {
+                    if !matches!(res.analysis.kind, curvebook_doc::AnalysisKind::SimpleLogisticRegression(_)) {
+                        return None;
+                    }
+                    let ds_title = crate::equation_box::dataset_title_for_result(doc, res, 0)?;
+                    let prefixed = format!("{ds_title}.{needle}");
+                    res.scalars.iter().find(|s| s.data_set_index.is_none() && s.key.trim().eq_ignore_ascii_case(&prefixed) && s.value.is_finite())
+                })
+                .map(|s| s.value)?;
+            Some(format_scalar_clean(val))
         }
         ["result", sheet, ds_str, param] if !sheet.is_empty() && !param.is_empty() => {
             let ds = ds_str.parse::<usize>().ok()?;
@@ -925,15 +947,35 @@ fn resolve_single_hook(token: &str, doc: &ProjectDocument, paired_info: Option<&
                 return None;
             }
             let needle = param.trim();
-            // Match the exact dataset index first; only fall back to sheet-global scalars
-            // (`data_set_index == None`), never to a different dataset's scalar.
-            let val = res.lookup_scalar(needle, Some(ds)).or_else(|| {
-                res.scalars
-                    .iter()
-                    .find(|s| s.data_set_index.is_none() && s.key.trim().eq_ignore_ascii_case(needle))
-                    .map(|s| s.value)
-                    .filter(|v| v.is_finite())
-            })?;
+            // Match the exact dataset index first; fall back to sheet-global scalars
+            // (`data_set_index == None`) or legacy pre-Wave-1 SimpleLogisticRegression
+            // `"{ds_title}.{param}"` scalars, never to a different dataset or an unstable scalar.
+            let val = res
+                .scalars
+                .iter()
+                .find(|s| {
+                    s.data_set_index == Some(ds)
+                        && s.key.trim().eq_ignore_ascii_case(needle)
+                        && s.value.is_finite()
+                        && !crate::equation_box::is_unstable_masked_scalar(res, &s.key, Some(ds), Some(doc))
+                })
+                .or_else(|| {
+                    res.scalars.iter().find(|s| {
+                        s.data_set_index.is_none()
+                            && s.key.trim().eq_ignore_ascii_case(needle)
+                            && s.value.is_finite()
+                            && !crate::equation_box::is_unstable_masked_scalar(res, &s.key, Some(ds), Some(doc))
+                    })
+                })
+                .or_else(|| {
+                    if !matches!(res.analysis.kind, curvebook_doc::AnalysisKind::SimpleLogisticRegression(_)) {
+                        return None;
+                    }
+                    let ds_title = crate::equation_box::dataset_title_for_result(doc, res, ds)?;
+                    let prefixed = format!("{ds_title}.{needle}");
+                    res.scalars.iter().find(|s| s.data_set_index.is_none() && s.key.trim().eq_ignore_ascii_case(&prefixed) && s.value.is_finite())
+                })
+                .map(|s| s.value)?;
             Some(format_scalar_clean(val))
         }
         _ => None,

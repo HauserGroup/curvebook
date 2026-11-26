@@ -57,7 +57,7 @@ pub(in crate::solver) fn unscaled_cov_from_diag_or_j(
     j_mat: &DenseMatrix,
 ) -> Option<DenseMatrix> {
     let k = cov.covariance_matrix.len();
-    if cov.ambiguous || k == 0 || j_mat.ncols() == 0 {
+    if cov.ambiguous || cov.numerical_rank < k || k == 0 || j_mat.ncols() == 0 {
         return None;
     }
     let sigma2 = if df > 0 { weighted_ss / (df as f64) } else { 0.0 };
@@ -66,12 +66,85 @@ pub(in crate::solver) fn unscaled_cov_from_diag_or_j(
         let inv_s2 = 1.0 / sigma2;
         for (i, row) in cov.covariance_matrix.iter().enumerate().take(k) {
             for (j, &v) in row.iter().enumerate().take(k) {
-                mat_set(&mut mat, i, j, v * inv_s2);
+                let scaled = v * inv_s2;
+                if !scaled.is_finite() {
+                    return None;
+                }
+                mat_set(&mut mat, i, j, scaled);
             }
         }
         return Some(mat);
     }
     compute_unscaled_cov(j_mat)
+}
+
+/// Build an unscaled PSD covariance matrix `(J_stable^T J_stable)^{-1}` embedded in the full
+/// `k x k` parameter space (with zeros on unstable rows/columns) so curve bands, leverages, and
+/// Hougaard skewness stay strictly positive semidefinite under greedy Hessian reduction (`AUD-03-04`).
+pub(in crate::solver) fn unscaled_cov_for_stable_subspace(
+    cov: &CovarianceDiagnostics,
+    df: usize,
+    weighted_ss: f64,
+    j_mat: &DenseMatrix,
+    stable_indices: &[usize],
+) -> Option<DenseMatrix> {
+    let k = cov.covariance_matrix.len();
+    if k == 0 || stable_indices.is_empty() || cov.numerical_rank < stable_indices.len() {
+        return None;
+    }
+    let mut mat = DenseMatrix::zeros(k, k).ok()?;
+    let sigma2 = if df > 0 { weighted_ss / (df as f64) } else { 0.0 };
+    if sigma2 > 0.0 && sigma2.is_finite() {
+        let inv_s2 = 1.0 / sigma2;
+        for &i in stable_indices {
+            for &j in stable_indices {
+                let v = cov.covariance_matrix.get(i).and_then(|r| r.get(j)).copied().unwrap_or(f64::NAN);
+                let scaled = v * inv_s2;
+                if !scaled.is_finite() {
+                    return None;
+                }
+                mat_set(&mut mat, i, j, scaled);
+            }
+        }
+        return Some(mat);
+    }
+    let j_stable = crate::solver::identifiability::submatrix_columns(j_mat, stable_indices).ok()?;
+    let sub = compute_unscaled_cov(&j_stable)?;
+    for (si, &oi) in stable_indices.iter().enumerate() {
+        for (sj, &oj) in stable_indices.iter().enumerate() {
+            let v = mat_get(&sub, si, sj);
+            if !v.is_finite() {
+                return None;
+            }
+            mat_set(&mut mat, oi, oj, v);
+        }
+    }
+    Some(mat)
+}
+
+/// Exact heteroscedastic Gaussian log-weight normalizing sum `-sum_i n_i ln(w_i)` for
+/// `WeightingSource::PredictedY` (`w_i = 1 / |y_hat_i|^k`, `sqrt_weight = sqrt(w_i * rep_n)`).
+pub(in crate::solver) fn predicted_y_neg_log_weight_sum(obs: &[ObsRecord]) -> Option<f64> {
+    let mut acc = NeumaierSum::new();
+    for rec in obs {
+        if !rec.sqrt_weight.is_finite() || rec.sqrt_weight <= 0.0 || rec.rep_n == 0 {
+            return None;
+        }
+        let rep_f = rec.rep_n as f64;
+        // w_i = sqrt_weight^2 / rep_n  =>  -ln(w_i) = ln(rep_n) - 2 ln(sqrt_weight)
+        let neg_ln_w = rep_f.ln() - 2.0 * rec.sqrt_weight.ln();
+        if !neg_ln_w.is_finite() {
+            return None;
+        }
+        acc.add(rep_f * neg_ln_w);
+    }
+    let total = acc.total();
+    total.is_finite().then_some(total)
+}
+
+/// Unweighted coefficient of determination `R^2 = 1 - rss / tss` (`NaN` when `tss <= 0` or `n <= 1`).
+pub(in crate::solver) fn compute_r_squared(raw_rss: f64, tss: f64, n_obs: usize) -> f64 {
+    if n_obs > 1 && tss > 0.0 && tss.is_finite() && raw_rss.is_finite() { 1.0 - raw_rss / tss } else { f64::NAN }
 }
 
 /// Internally studentised residuals `e_i / (s * sqrt(1 - h_ii))` with tangent-plane leverage

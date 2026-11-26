@@ -11,6 +11,7 @@ use curvebook_doc::{LayoutItem, LayoutSheet, LayoutSpec, RectPt, SheetId};
 use curvebook_engine::Session;
 use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
+use curvebook_ui_egui::egui_shell::canvas_view::canvas_async_worker_busy;
 use curvebook_ui_egui::egui_shell::driver::build_driver_font_definitions;
 use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
 use curvebook_ui_egui::egui_shell::{EguiShellViewState, FrameInspectMeta, PendingUiIntents, Tokens};
@@ -47,24 +48,33 @@ fn build_harness(mut app: UiApp) -> (Harness<'static, KitIdleState>, Arc<AtomicU
     (harness, repaints)
 }
 
-fn assert_kittest_settles_to_zero_repaints(label: &str, harness: &mut Harness<'_, KitIdleState>, repaints: &AtomicUsize, wait_async: bool) {
-    // Allow initial layout & optional ScrollArea animation / async raster worker to finish.
-    if wait_async {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            harness.step();
-            let in_flight = harness.state().views.canvas_view.slot.rendering_in_flight
-                || harness.state().views.center_stage.secondary_canvas_view.slot.rendering_in_flight;
-            if !in_flight {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(15));
+fn wait_for_async_canvas_idle(label: &str, harness: &mut Harness<'_, KitIdleState>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        harness.step();
+        let in_flight = harness.state().views.canvas_view.slot.rendering_in_flight
+            || harness.state().views.center_stage.secondary_canvas_view.slot.rendering_in_flight
+            || canvas_async_worker_busy(&harness.ctx);
+        if !in_flight {
+            return;
         }
+        assert!(Instant::now() < deadline, "[{label}] async canvas raster worker failed to settle within 5s");
+        std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn assert_kittest_settles_to_zero_repaints(label: &str, harness: &mut Harness<'_, KitIdleState>, repaints: &AtomicUsize, wait_async: bool) {
+    // Allow initial layout & optional ScrollArea animation / async raster worker (including its post-render wake) to finish.
     harness.run_ok();
+    if wait_async {
+        wait_for_async_canvas_idle(label, harness);
+    }
     for _ in 0..8 {
         harness.input_mut().time = Some(harness.input().time.unwrap_or(1.0) + 0.05);
         harness.step();
+    }
+    if wait_async {
+        wait_for_async_canvas_idle(label, harness);
     }
 
     for pass in 0..8 {

@@ -1,9 +1,15 @@
 //! Lexer and Pratt recursive-descent parser for CurveBook formulas (`docs/implementation/data-tables-and-transforms.md` §4.1).
 
+use std::fmt;
+
 use crate::error::TransformError;
 
 const MAX_PARSE_DEPTH: usize = 128;
 const MAX_TOKENS: usize = 16_384;
+/// Maximum UTF-8 byte length permitted for a single formula string (`64 KiB`).
+pub const MAX_FORMULA_BYTES: usize = 64 * 1024;
+/// Maximum UTF-8 byte length permitted for a single quoted string literal inside a formula (`4 KiB`).
+pub const MAX_STRING_LITERAL_BYTES: usize = 4 * 1024;
 
 /// Variable or constant reference inside a formula AST.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -133,7 +139,10 @@ pub struct WindowSpec {
 }
 
 /// Formula abstract syntax tree node.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Implements iterative [`Clone`], [`PartialEq`], [`fmt::Debug`], and [`Drop`] so deep
+/// left-associative binary expression chains (up to `(MAX_TOKENS - 1) / 2`) never overflow
+/// small thread or WebAssembly stacks.
 pub enum Expr {
     /// Numeric literal (`f64`).
     Number(f64),
@@ -226,6 +235,404 @@ impl Drop for Expr {
     }
 }
 
+#[derive(Clone, Copy)]
+enum FrameBoundKind {
+    UnboundedPreceding,
+    Preceding,
+    CurrentRow,
+    Following,
+    UnboundedFollowing,
+}
+
+impl FrameBoundKind {
+    fn from_bound(bound: &FrameBound) -> (Self, Option<&Expr>) {
+        match bound {
+            FrameBound::UnboundedPreceding => (Self::UnboundedPreceding, None),
+            FrameBound::Preceding(e) => (Self::Preceding, Some(e)),
+            FrameBound::CurrentRow => (Self::CurrentRow, None),
+            FrameBound::Following(e) => (Self::Following, Some(e)),
+            FrameBound::UnboundedFollowing => (Self::UnboundedFollowing, None),
+        }
+    }
+
+    fn rebuild(self, iter: &mut std::vec::Drain<'_, Expr>) -> FrameBound {
+        match self {
+            Self::UnboundedPreceding => FrameBound::UnboundedPreceding,
+            Self::Preceding => FrameBound::Preceding(Box::new(iter.next().unwrap_or(Expr::Number(0.0)))),
+            Self::CurrentRow => FrameBound::CurrentRow,
+            Self::Following => FrameBound::Following(Box::new(iter.next().unwrap_or(Expr::Number(0.0)))),
+            Self::UnboundedFollowing => FrameBound::UnboundedFollowing,
+        }
+    }
+}
+
+struct WindowCloneMeta {
+    part_len: usize,
+    order_meta: Vec<(SortDirection, NullsOrder)>,
+    frame_meta: Option<(FrameBoundKind, FrameBoundKind)>,
+    total_exprs: usize,
+}
+
+enum CloneTask<'a> {
+    Visit(&'a Expr),
+    BuildUnary(UnaryOp),
+    BuildBinary(BinaryOp),
+    BuildCall { name: String, argc: usize },
+    BuildWindowCall { name: String, argc: usize, has_filter: bool, window_meta: Option<WindowCloneMeta> },
+}
+
+fn schedule_window_clone<'a>(name: &str, args: &'a [Expr], filter: Option<&'a Expr>, window: Option<&'a WindowSpec>, tasks: &mut Vec<CloneTask<'a>>) {
+    let mut frame_end_expr: Option<&'a Expr> = None;
+    let mut frame_start_expr: Option<&'a Expr> = None;
+    let window_meta = window.map(|w| {
+        let mut total_exprs = w.partition_by.len() + w.order_by.len();
+        let frame_meta = w.frame.as_ref().map(|f| {
+            let (sk, se) = FrameBoundKind::from_bound(&f.start);
+            let (ek, ee) = FrameBoundKind::from_bound(&f.end);
+            frame_start_expr = se;
+            frame_end_expr = ee;
+            if se.is_some() {
+                total_exprs += 1;
+            }
+            if ee.is_some() {
+                total_exprs += 1;
+            }
+            (sk, ek)
+        });
+        let order_meta = w.order_by.iter().map(|o| (o.direction, o.nulls)).collect();
+        WindowCloneMeta { part_len: w.partition_by.len(), order_meta, frame_meta, total_exprs }
+    });
+    tasks.push(CloneTask::BuildWindowCall { name: name.to_owned(), argc: args.len(), has_filter: filter.is_some(), window_meta });
+    if let Some(e) = frame_end_expr {
+        tasks.push(CloneTask::Visit(e));
+    }
+    if let Some(e) = frame_start_expr {
+        tasks.push(CloneTask::Visit(e));
+    }
+    if let Some(w) = window {
+        for o in w.order_by.iter().rev() {
+            tasks.push(CloneTask::Visit(&o.expr));
+        }
+        for p in w.partition_by.iter().rev() {
+            tasks.push(CloneTask::Visit(p));
+        }
+    }
+    if let Some(f) = filter {
+        tasks.push(CloneTask::Visit(f));
+    }
+    for arg in args.iter().rev() {
+        tasks.push(CloneTask::Visit(arg));
+    }
+}
+
+impl Clone for Expr {
+    fn clone(&self) -> Self {
+        let mut tasks = vec![CloneTask::Visit(self)];
+        let mut vals: Vec<Self> = Vec::new();
+        while let Some(task) = tasks.pop() {
+            match task {
+                CloneTask::Visit(node) => match node {
+                    Self::Number(v) => vals.push(Self::Number(*v)),
+                    Self::Text(s) => vals.push(Self::Text(s.clone())),
+                    Self::Var(v) => vals.push(Self::Var(v.clone())),
+                    Self::Unary { op, expr } => {
+                        tasks.push(CloneTask::BuildUnary(*op));
+                        tasks.push(CloneTask::Visit(expr));
+                    }
+                    Self::Binary { op, left, right } => {
+                        tasks.push(CloneTask::BuildBinary(*op));
+                        tasks.push(CloneTask::Visit(right));
+                        tasks.push(CloneTask::Visit(left));
+                    }
+                    Self::Call { name, args } => {
+                        tasks.push(CloneTask::BuildCall { name: name.clone(), argc: args.len() });
+                        for arg in args.iter().rev() {
+                            tasks.push(CloneTask::Visit(arg));
+                        }
+                    }
+                    Self::WindowCall { name, args, filter, window } => {
+                        schedule_window_clone(name, args, filter.as_deref(), window.as_ref(), &mut tasks);
+                    }
+                },
+                CloneTask::BuildUnary(op) => {
+                    let inner = vals.pop().unwrap_or(Self::Number(0.0));
+                    vals.push(Self::Unary { op, expr: Box::new(inner) });
+                }
+                CloneTask::BuildBinary(op) => {
+                    let right = vals.pop().unwrap_or(Self::Number(0.0));
+                    let left = vals.pop().unwrap_or(Self::Number(0.0));
+                    vals.push(Self::Binary { op, left: Box::new(left), right: Box::new(right) });
+                }
+                CloneTask::BuildCall { name, argc } => {
+                    let start = vals.len().saturating_sub(argc);
+                    let args = vals.drain(start..).collect();
+                    vals.push(Self::Call { name, args });
+                }
+                CloneTask::BuildWindowCall { name, argc, has_filter, window_meta } => {
+                    let total = argc + usize::from(has_filter) + window_meta.as_ref().map_or(0, |m| m.total_exprs);
+                    let start = vals.len().saturating_sub(total);
+                    let mut drain = vals.drain(start..);
+                    let args: Vec<Self> = drain.by_ref().take(argc).collect();
+                    let filter = if has_filter { drain.next().map(Box::new) } else { None };
+                    let window = window_meta.map(|meta| {
+                        let partition_by: Vec<Self> = drain.by_ref().take(meta.part_len).collect();
+                        let order_by: Vec<OrderByExpr> = meta
+                            .order_meta
+                            .into_iter()
+                            .filter_map(|(direction, nulls)| drain.next().map(|expr| OrderByExpr { expr, direction, nulls }))
+                            .collect();
+                        let frame = meta.frame_meta.map(|(sk, ek)| WindowFrame { start: sk.rebuild(&mut drain), end: ek.rebuild(&mut drain) });
+                        WindowSpec { partition_by, order_by, frame }
+                    });
+                    drop(drain);
+                    vals.push(Self::WindowCall { name, args, filter, window });
+                }
+            }
+        }
+        vals.pop().unwrap_or(Self::Number(0.0))
+    }
+}
+
+fn push_frame_bound_eq_pairs<'a>(a: &'a FrameBound, b: &'a FrameBound, stack: &mut Vec<(&'a Expr, &'a Expr)>) -> bool {
+    match (a, b) {
+        (FrameBound::UnboundedPreceding, FrameBound::UnboundedPreceding)
+        | (FrameBound::CurrentRow, FrameBound::CurrentRow)
+        | (FrameBound::UnboundedFollowing, FrameBound::UnboundedFollowing) => true,
+        (FrameBound::Preceding(ea), FrameBound::Preceding(eb)) | (FrameBound::Following(ea), FrameBound::Following(eb)) => {
+            stack.push((ea, eb));
+            true
+        }
+        _ => false,
+    }
+}
+
+fn push_window_eq_pairs<'a>(wa: &'a WindowSpec, wb: &'a WindowSpec, stack: &mut Vec<(&'a Expr, &'a Expr)>) -> bool {
+    if wa.partition_by.len() != wb.partition_by.len() || wa.order_by.len() != wb.order_by.len() {
+        return false;
+    }
+    match (&wa.frame, &wb.frame) {
+        (None, None) => {}
+        (Some(fa), Some(fb)) => {
+            if !push_frame_bound_eq_pairs(&fa.start, &fb.start, stack) || !push_frame_bound_eq_pairs(&fa.end, &fb.end, stack) {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    for (oa, ob) in wa.order_by.iter().zip(wb.order_by.iter()) {
+        if oa.direction != ob.direction || oa.nulls != ob.nulls {
+            return false;
+        }
+        stack.push((&oa.expr, &ob.expr));
+    }
+    for (pa, pb) in wa.partition_by.iter().zip(wb.partition_by.iter()) {
+        stack.push((pa, pb));
+    }
+    true
+}
+
+impl PartialEq for Expr {
+    fn eq(&self, other: &Self) -> bool {
+        let mut stack = vec![(self, other)];
+        while let Some((a, b)) = stack.pop() {
+            match (a, b) {
+                (Self::Number(x), Self::Number(y)) => {
+                    if x != y {
+                        return false;
+                    }
+                }
+                (Self::Text(x), Self::Text(y)) => {
+                    if x != y {
+                        return false;
+                    }
+                }
+                (Self::Var(x), Self::Var(y)) => {
+                    if x != y {
+                        return false;
+                    }
+                }
+                (Self::Unary { op: oa, expr: ea }, Self::Unary { op: ob, expr: eb }) => {
+                    if oa != ob {
+                        return false;
+                    }
+                    stack.push((ea, eb));
+                }
+                (Self::Binary { op: oa, left: la, right: ra }, Self::Binary { op: ob, left: lb, right: rb }) => {
+                    if oa != ob {
+                        return false;
+                    }
+                    stack.push((ra, rb));
+                    stack.push((la, lb));
+                }
+                (Self::Call { name: na, args: aa }, Self::Call { name: nb, args: ab }) => {
+                    if na != nb || aa.len() != ab.len() {
+                        return false;
+                    }
+                    for pair in aa.iter().zip(ab.iter()) {
+                        stack.push(pair);
+                    }
+                }
+                (
+                    Self::WindowCall { name: na, args: aa, filter: fa, window: wa },
+                    Self::WindowCall { name: nb, args: ab, filter: fb, window: wb },
+                ) => {
+                    if na != nb || aa.len() != ab.len() {
+                        return false;
+                    }
+                    match (fa, fb) {
+                        (None, None) => {}
+                        (Some(ea), Some(eb)) => stack.push((ea, eb)),
+                        _ => return false,
+                    }
+                    match (wa, wb) {
+                        (None, None) => {}
+                        (Some(w_a), Some(w_b)) => {
+                            if !push_window_eq_pairs(w_a, w_b, &mut stack) {
+                                return false;
+                            }
+                        }
+                        _ => return false,
+                    }
+                    for pair in aa.iter().zip(ab.iter()) {
+                        stack.push(pair);
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+enum DebugStep<'a> {
+    Expr(&'a Expr),
+    Lit(&'static str),
+    DebugStr(&'a str),
+    UnaryOp(UnaryOp),
+    BinaryOp(BinaryOp),
+    OrderTail(SortDirection, NullsOrder),
+}
+
+fn push_expr_list_debug<'a>(items: &'a [Expr], stack: &mut Vec<DebugStep<'a>>) {
+    stack.push(DebugStep::Lit("]"));
+    for (idx, item) in items.iter().enumerate().rev() {
+        stack.push(DebugStep::Expr(item));
+        if idx > 0 {
+            stack.push(DebugStep::Lit(", "));
+        }
+    }
+    stack.push(DebugStep::Lit("["));
+}
+
+fn push_frame_bound_debug<'a>(bound: &'a FrameBound, stack: &mut Vec<DebugStep<'a>>) {
+    match bound {
+        FrameBound::UnboundedPreceding => stack.push(DebugStep::Lit("UnboundedPreceding")),
+        FrameBound::CurrentRow => stack.push(DebugStep::Lit("CurrentRow")),
+        FrameBound::UnboundedFollowing => stack.push(DebugStep::Lit("UnboundedFollowing")),
+        FrameBound::Preceding(e) => {
+            stack.push(DebugStep::Lit(")"));
+            stack.push(DebugStep::Expr(e));
+            stack.push(DebugStep::Lit("Preceding("));
+        }
+        FrameBound::Following(e) => {
+            stack.push(DebugStep::Lit(")"));
+            stack.push(DebugStep::Expr(e));
+            stack.push(DebugStep::Lit("Following("));
+        }
+    }
+}
+
+fn push_window_debug<'a>(w: &'a WindowSpec, stack: &mut Vec<DebugStep<'a>>) {
+    stack.push(DebugStep::Lit(" })"));
+    if let Some(frame) = &w.frame {
+        stack.push(DebugStep::Lit(" })"));
+        push_frame_bound_debug(&frame.end, stack);
+        stack.push(DebugStep::Lit(", end: "));
+        push_frame_bound_debug(&frame.start, stack);
+        stack.push(DebugStep::Lit("Some(WindowFrame { start: "));
+    } else {
+        stack.push(DebugStep::Lit("None"));
+    }
+    stack.push(DebugStep::Lit(", frame: "));
+    stack.push(DebugStep::Lit("]"));
+    for (idx, ord) in w.order_by.iter().enumerate().rev() {
+        stack.push(DebugStep::OrderTail(ord.direction, ord.nulls));
+        stack.push(DebugStep::Expr(&ord.expr));
+        stack.push(DebugStep::Lit("OrderByExpr { expr: "));
+        if idx > 0 {
+            stack.push(DebugStep::Lit(", "));
+        }
+    }
+    stack.push(DebugStep::Lit(", order_by: ["));
+    push_expr_list_debug(&w.partition_by, stack);
+    stack.push(DebugStep::Lit("Some(WindowSpec { partition_by: "));
+}
+
+impl fmt::Debug for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut stack = vec![DebugStep::Expr(self)];
+        while let Some(step) = stack.pop() {
+            match step {
+                DebugStep::Lit(s) => f.write_str(s)?,
+                DebugStep::DebugStr(s) => fmt::Debug::fmt(s, f)?,
+                DebugStep::UnaryOp(op) => fmt::Debug::fmt(&op, f)?,
+                DebugStep::BinaryOp(op) => fmt::Debug::fmt(&op, f)?,
+                DebugStep::OrderTail(dir, nulls) => write!(f, ", direction: {dir:?}, nulls: {nulls:?} }}")?,
+                DebugStep::Expr(node) => match node {
+                    Self::Number(v) => write!(f, "Number({v:?})")?,
+                    Self::Text(s) => write!(f, "Text({s:?})")?,
+                    Self::Var(v) => write!(f, "Var({v:?})")?,
+                    Self::Unary { op, expr } => {
+                        stack.push(DebugStep::Lit(" }"));
+                        stack.push(DebugStep::Expr(expr));
+                        stack.push(DebugStep::Lit(", expr: "));
+                        stack.push(DebugStep::UnaryOp(*op));
+                        stack.push(DebugStep::Lit("Unary { op: "));
+                    }
+                    Self::Binary { op, left, right } => {
+                        stack.push(DebugStep::Lit(" }"));
+                        stack.push(DebugStep::Expr(right));
+                        stack.push(DebugStep::Lit(", right: "));
+                        stack.push(DebugStep::Expr(left));
+                        stack.push(DebugStep::Lit(", left: "));
+                        stack.push(DebugStep::BinaryOp(*op));
+                        stack.push(DebugStep::Lit("Binary { op: "));
+                    }
+                    Self::Call { name, args } => {
+                        stack.push(DebugStep::Lit(" }"));
+                        push_expr_list_debug(args, &mut stack);
+                        stack.push(DebugStep::Lit(", args: "));
+                        stack.push(DebugStep::DebugStr(name));
+                        stack.push(DebugStep::Lit("Call { name: "));
+                    }
+                    Self::WindowCall { name, args, filter, window } => {
+                        stack.push(DebugStep::Lit(" }"));
+                        if let Some(w) = window {
+                            push_window_debug(w, &mut stack);
+                        } else {
+                            stack.push(DebugStep::Lit("None"));
+                        }
+                        stack.push(DebugStep::Lit(", window: "));
+                        if let Some(flt) = filter {
+                            stack.push(DebugStep::Lit(")"));
+                            stack.push(DebugStep::Expr(flt));
+                            stack.push(DebugStep::Lit("Some("));
+                        } else {
+                            stack.push(DebugStep::Lit("None"));
+                        }
+                        stack.push(DebugStep::Lit(", filter: "));
+                        push_expr_list_debug(args, &mut stack);
+                        stack.push(DebugStep::Lit(", args: "));
+                        stack.push(DebugStep::DebugStr(name));
+                        stack.push(DebugStep::Lit("WindowCall { name: "));
+                    }
+                },
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum TokenKind {
     Number(f64),
@@ -282,6 +689,12 @@ pub fn parse_formula(input: &str) -> Result<Expr, TransformError> {
 }
 
 fn parse_formula_internal(input: &str, collect_refs: bool) -> Result<(Expr, Vec<ColRefSpan>), TransformError> {
+    if input.len() > MAX_FORMULA_BYTES {
+        return Err(TransformError::ParseError {
+            position: MAX_FORMULA_BYTES,
+            message: format!("formula length ({} bytes) exceeds maximum limit ({MAX_FORMULA_BYTES} bytes)", input.len()),
+        });
+    }
     let after_leading_ws = input.trim_start();
     let after_eq = after_leading_ws.strip_prefix('=').unwrap_or(after_leading_ws);
     let body_with_tail = after_eq.trim_start();
@@ -462,6 +875,9 @@ impl<'a> Lexer<'a> {
             } else {
                 self.pos += ch.len_utf8();
                 out.push(ch);
+            }
+            if out.len() > MAX_STRING_LITERAL_BYTES {
+                return Err(self.err(start, format!("string literal exceeds maximum length ({MAX_STRING_LITERAL_BYTES} bytes)")));
             }
         }
         Err(self.err(start, "unterminated string literal"))
@@ -714,7 +1130,9 @@ impl Parser {
             if name.eq_ignore_ascii_case("$index") {
                 return Ok(Expr::Var(VarRef::IndexZeroBased));
             }
-            if let Some(spans) = &mut self.ref_spans {
+            if let Some(spans) = &mut self.ref_spans
+                && !is_reserved_literal_ident(&name)
+            {
                 spans.push(ColRefSpan { start: pos, end, name: name.clone(), kind: ColRefKind::Ident });
             }
             return Ok(Expr::Var(VarRef::Ident(name)));
@@ -1046,12 +1464,25 @@ impl Parser {
     }
 }
 
-fn static_literal_offset(expr: &Expr) -> Option<f64> {
-    match expr {
-        Expr::Number(v) => Some(*v),
-        Expr::Unary { op: UnaryOp::Neg, expr } => static_literal_offset(expr).map(|v| -v),
-        Expr::Unary { op: UnaryOp::Pos, expr } => static_literal_offset(expr),
-        _ => None,
+fn is_reserved_literal_ident(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.eq_ignore_ascii_case("true") || trimmed.eq_ignore_ascii_case("false") || trimmed.eq_ignore_ascii_case("nan")
+}
+
+fn static_literal_offset(mut expr: &Expr) -> Option<f64> {
+    let mut sign = 1.0_f64;
+    loop {
+        match expr {
+            Expr::Number(v) => return Some(sign * *v),
+            Expr::Unary { op: UnaryOp::Neg, expr: inner } => {
+                sign = -sign;
+                expr = inner;
+            }
+            Expr::Unary { op: UnaryOp::Pos, expr: inner } => {
+                expr = inner;
+            }
+            _ => return None,
+        }
     }
 }
 
@@ -1170,5 +1601,45 @@ mod rewrite_tests {
         let with_bracket = rewrite_formula_column_refs("[Dose] * 2", &[("Dose", "Dose [mg]")]).expect("rewritten");
         assert_eq!(with_bracket, "col(\"Dose [mg]\") * 2");
         assert!(parse_formula(&with_bracket).is_ok());
+    }
+
+    #[test]
+    fn aud_04_42_reserved_literals_are_never_rewritten_as_bare_idents() {
+        assert_eq!(rewrite_formula_column_refs("=if([X] > 0, true, false) + nan", &[("true", "Flag"), ("false", "Zero"), ("nan", "Missing")]), None);
+        // Explicit bracketed or col("...") references to a column titled "true" ARE still rewritten.
+        assert_eq!(
+            rewrite_formula_column_refs("=if([true] > 0, true, col(\"false\"))", &[("true", "Flag"), ("false", "Zero")]),
+            Some(String::from("=if([Flag] > 0, true, col(\"Zero\"))"))
+        );
+    }
+
+    #[test]
+    fn aud_04_02_deep_left_leaning_ast_clone_eq_debug_and_drop_are_iterative() {
+        let chain = vec!["1"; 8_191].join("+");
+        let handle = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let ast = parse_formula(&chain).expect("8191-term chain parses");
+                let cloned = ast.clone();
+                assert_eq!(ast, cloned);
+                let dbg = format!("{ast:?}");
+                assert!(dbg.starts_with("Binary { op: Add"));
+                drop(cloned);
+                drop(ast);
+            })
+            .expect("spawn 1 MiB worker");
+        handle.join().expect("iterative Clone/PartialEq/Debug/Drop must not overflow 1 MiB stack");
+    }
+
+    #[test]
+    fn aud_04_20_formula_byte_cap_and_string_literal_cap_enforced() {
+        let huge_formula = " ".repeat(super::MAX_FORMULA_BYTES + 1) + "1";
+        assert!(parse_formula(&huge_formula).is_err(), "formula > MAX_FORMULA_BYTES must fail");
+
+        let huge_literal = format!("\"{}\"", "a".repeat(super::MAX_STRING_LITERAL_BYTES + 1));
+        assert!(parse_formula(&huge_literal).is_err(), "string literal > MAX_STRING_LITERAL_BYTES must fail");
+
+        let ok_literal = format!("\"{}\"", "a".repeat(super::MAX_STRING_LITERAL_BYTES));
+        assert!(parse_formula(&ok_literal).is_ok(), "string literal at MAX_STRING_LITERAL_BYTES must succeed");
     }
 }

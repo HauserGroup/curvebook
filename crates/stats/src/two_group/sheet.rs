@@ -1279,19 +1279,34 @@ fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedT
             "Both groups contain at least 5 observations.",
         ));
     }
-    if out.method_label == "Unpaired Student t test" && out.f_test.p_value <= alpha {
-        checklist.push(checklist_item(
-            "Homogeneity of variances",
-            ChecklistStatus::Violated,
-            Some(format!("F = {:.3}, p = {:.4}", out.f_test.f_statistic, out.f_test.p_value)),
-            "F-test indicates unequal group variances (p <= alpha), violating the equal-variance assumption of pooled-variance Student t tests.",
-        ));
-    } else if has_raw_replicates && let Some(ref levene) = out.levene_median {
+    let assumes_equal_var = out.method_label != "Welch's t test";
+    let f_violated = out.f_test.p_value <= alpha;
+    let levene_opt = if has_raw_replicates { out.levene_median.as_ref() } else { None };
+    let levene_violated = levene_opt.is_some_and(|lev| lev.p_value <= alpha);
+    if assumes_equal_var && (f_violated || levene_violated) {
+        let (metric, explanation) = if f_violated {
+            (
+                Some(format!("F = {:.3}, p = {:.4}", out.f_test.f_statistic, out.f_test.p_value)),
+                "F-test indicates unequal group variances (p <= alpha), violating the equal-variance assumption of pooled-variance Student t tests.",
+            )
+        } else if let Some(levene) = levene_opt {
+            (
+                Some(format!("Levene(median) F = {:.3}, p = {:.4}", levene.f_statistic, levene.p_value)),
+                "Brown-Forsythe (Levene median) test indicates unequal group variances (p <= alpha), violating the equal-variance assumption of pooled-variance Student t tests.",
+            )
+        } else {
+            (
+                Some(format!("F = {:.3}, p = {:.4}", out.f_test.f_statistic, out.f_test.p_value)),
+                "Variance test indicates unequal group variances (p <= alpha), violating the equal-variance assumption of pooled-variance Student t tests.",
+            )
+        };
+        checklist.push(checklist_item("Homogeneity of variances", ChecklistStatus::Violated, metric, explanation));
+    } else if let Some(levene) = levene_opt {
         checklist.push(checklist_item(
             "Variance homogeneity check",
-            if out.method_label == "Welch's t test" && levene.p_value <= alpha { ChecklistStatus::Info } else { ChecklistStatus::Pass },
+            if levene_violated { ChecklistStatus::Info } else { ChecklistStatus::Pass },
             Some(format!("Levene(median) F = {:.3}, p = {:.4}", levene.f_statistic, levene.p_value)),
-            if out.method_label == "Welch's t test" && levene.p_value <= alpha {
+            if levene_violated {
                 "Levene test indicates heterogeneous variances; Welch's t-test does not assume equal variances."
             } else {
                 "No severe departure from equal group variances was detected."
@@ -1300,9 +1315,9 @@ fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedT
     } else {
         checklist.push(checklist_item(
             "Variance homogeneity check",
-            if out.f_test.p_value <= alpha { ChecklistStatus::Info } else { ChecklistStatus::Pass },
+            if f_violated { ChecklistStatus::Info } else { ChecklistStatus::Pass },
             Some(format!("F = {:.3}, p = {:.4}", out.f_test.f_statistic, out.f_test.p_value)),
-            if out.f_test.p_value <= alpha {
+            if f_violated {
                 "Variance F-test indicates unequal group variances (p <= alpha); Welch's t-test does not assume equal variances."
             } else {
                 "Variance F-test shows no significant departure from equal group variances."

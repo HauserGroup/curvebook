@@ -261,23 +261,61 @@ impl<'a> StatsAccum<'a> {
         }
 
         let nf = n as f64;
-        let mean = self.anchor + (self.sum_d / nf);
-        let (sd, sem) = if n >= 2 {
-            let span = (self.max - self.min).max(1e-9);
-            let max_abs = self.min.abs().max(self.max.abs());
-            let m2 = if max_abs <= 1e5 * span {
-                (self.sum_dd - (self.sum_d * self.sum_d) / nf).max(0.0)
-            } else {
-                let mut acc = 0.0_f64;
-                for &x in self.values.iter() {
-                    let d = x - mean;
-                    acc += d * d;
+        let raw_mean = self.anchor + (self.sum_d / nf);
+        let mean = if raw_mean.is_finite() {
+            raw_mean
+        } else {
+            let mut w_mean = 0.0_f64;
+            for (idx, &x) in self.values.iter().enumerate() {
+                let k = (idx + 1) as f64;
+                let delta = x - w_mean;
+                if delta.is_finite() {
+                    w_mean += delta / k;
+                } else {
+                    w_mean = w_mean * ((k - 1.0) / k) + (x / k);
                 }
-                acc
+            }
+            w_mean
+        };
+        let (sd, sem) = if n >= 2 {
+            let raw_span = self.max - self.min;
+            let span = if raw_span.is_finite() { raw_span.max(1e-9) } else { f64::INFINITY };
+            let max_abs = self.min.abs().max(self.max.abs());
+            let fast_ok = self.sum_d.is_finite()
+                && self.sum_dd.is_finite()
+                && (self.sum_d * self.sum_d).is_finite()
+                && raw_span.is_finite()
+                && max_abs <= 1e5 * span;
+            let s = if fast_ok {
+                let m2 = (self.sum_dd - (self.sum_d * self.sum_d) / nf).max(0.0);
+                (m2 / ((n - 1) as f64)).max(0.0).sqrt()
+            } else {
+                let half_scale = self
+                    .values
+                    .iter()
+                    .map(|&x| {
+                        let d = x - mean;
+                        if d.is_finite() { d.abs() * 0.5 } else { (0.5 * x - 0.5 * mean).abs() }
+                    })
+                    .fold(0.0_f64, f64::max);
+                if half_scale == 0.0 || !half_scale.is_finite() {
+                    0.0
+                } else {
+                    let inv = 1.0 / half_scale;
+                    let mut scaled_m2 = 0.0_f64;
+                    for &x in self.values.iter() {
+                        let d = x - mean;
+                        let half_d = if d.is_finite() { d * 0.5 } else { 0.5 * x - 0.5 * mean };
+                        let q = half_d * inv;
+                        scaled_m2 += q * q;
+                    }
+                    let rms = (scaled_m2 / ((n - 1) as f64)).max(0.0).sqrt();
+                    let scaled_sd = rms * half_scale;
+                    if (scaled_sd * 2.0).is_finite() { scaled_sd * 2.0 } else { f64::INFINITY }
+                }
             };
-            let var = (m2 / ((n - 1) as f64)).max(0.0);
-            let s = var.sqrt();
-            (Some(s), Some(s / nf.sqrt()))
+            let sem_val = if s.is_finite() { s / nf.sqrt() } else { f64::INFINITY };
+            (Some(s), Some(sem_val))
         } else {
             (None, None)
         };
@@ -297,7 +335,8 @@ impl<'a> StatsAccum<'a> {
                     lower = v;
                 }
             }
-            Some(0.5 * (lower + upper))
+            let diff = upper - lower;
+            Some(if diff.is_finite() { lower + 0.5 * diff } else { 0.5 * lower + 0.5 * upper })
         };
 
         let min = Some(self.min);
@@ -806,29 +845,33 @@ struct FooterSummarySpec<'a> {
     tooltip: &'a str,
     max_w: f32,
     clickable: bool,
+    enabled: bool,
     widget_id: &'a str,
 }
 
 fn draw_footer_summary_label(ui: &mut egui::Ui, tokens: &Tokens, spec: FooterSummarySpec<'_>, meta: &mut FrameInspectMeta) -> Response {
     let font_id = egui::FontId::proportional(tokens.metrics.font_ui_small_pt);
-    let mut job = egui::text::LayoutJob::simple_singleline(spec.text.to_owned(), font_id, tokens.text_primary);
+    let text_color = if spec.enabled { tokens.text_primary } else { tokens.text_disabled };
+    let mut job = egui::text::LayoutJob::simple_singleline(spec.text.to_owned(), font_id, text_color);
     job.wrap = egui::text::TextWrapping { max_rows: 1, break_anywhere: true, overflow_character: Some('…'), ..Default::default() };
     job.wrap.max_width = (spec.max_w - 8.0).max(8.0);
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let ellipsized = galley.elided;
     let w = (galley.size().x + 8.0).clamp(24.0_f32.min(spec.max_w.max(8.0)), spec.max_w.max(8.0));
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, FOOTER_CTRL_H), if spec.clickable { Sense::click() } else { Sense::hover() });
+    let active_clickable = spec.clickable && spec.enabled;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, FOOTER_CTRL_H), if active_clickable { Sense::click() } else { Sense::hover() });
     if ui.is_rect_visible(rect) {
-        if spec.clickable && resp.hovered() {
+        if active_clickable && resp.hovered() {
             ui.painter().rect_filled(rect, 4.0, tokens.hover_bg);
         }
         let text_pos = Pos2::new(rect.min.x + 4.0, rect.center().y - galley.size().y * 0.5);
         let painter = ui.painter().with_clip_rect(rect.shrink2(Vec2::new(2.0, 1.0)));
-        painter.galley(text_pos, galley, tokens.text_primary);
+        painter.galley(text_pos, galley, text_color);
     }
     let acc_sum = spec.text.to_owned();
     let sum_role = if spec.clickable { egui::Role::Button } else { egui::Role::Label };
-    resp.widget_info(move || egui::WidgetInfo::labeled(sum_role, true, acc_sum.clone()));
+    let sum_en = spec.enabled;
+    resp.widget_info(move || egui::WidgetInfo::labeled(sum_role, sum_en, acc_sum.clone()));
 
     let resp = if ellipsized {
         resp.on_hover_text(spec.text)
@@ -847,8 +890,8 @@ fn draw_footer_summary_label(ui: &mut egui::Ui, tokens: &Tokens, spec: FooterSum
                 label: spec.text,
                 command_id: None,
                 value: None,
-                enabled: true,
-                disabled_reason: None,
+                enabled: spec.enabled,
+                disabled_reason: (!spec.enabled).then_some("modal dialog is active"),
                 z_layer: ZLayer::Workspace,
                 ellipsized,
                 full_label: ellipsized.then_some(spec.text),
@@ -966,8 +1009,10 @@ struct FooterAnchors {
 #[derive(Clone, Copy)]
 struct FooterTrailingFlags {
     compact: bool,
+    gallery_open: bool,
     show_zoom: bool,
     show_rulers: bool,
+    fit_zoom_active: bool,
 }
 
 struct FooterPopoverData<'a> {
@@ -991,7 +1036,7 @@ fn render_footer_history_and_sections(
     let is_rtl = is_rtl_locale(locale);
     let gallery_open = app.nav.gallery.open;
     let _ = doc.active_sheet_id.as_ref().and_then(|sid| doc.sheet_section(sid));
-    let is_welcome = doc.active_sheet_id.is_none() && !gallery_open;
+    let is_welcome = (app.nav.welcome.open || views.launcher_open || doc.active_sheet_id.is_none()) && !gallery_open;
     let compact = !report.section_pills_shown && ui.available_width() < 760.0;
 
     let back_resp = draw_footer_chip(
@@ -1122,8 +1167,8 @@ fn render_footer_center_readout(
     let locale = &ctx_in.tokens.locale;
     let gallery_open = app.nav.gallery.open;
     let active_section = doc.active_sheet_id.as_ref().and_then(|sid| doc.sheet_section(sid));
-    let is_welcome = doc.active_sheet_id.is_none() && !gallery_open;
-    let is_graph_or_layout = !gallery_open && matches!(active_section, Some(SheetSection::Graphs | SheetSection::Layouts));
+    let is_welcome = (app.nav.welcome.open || views.launcher_open || doc.active_sheet_id.is_none()) && !gallery_open;
+    let is_graph_or_layout = !gallery_open && !is_welcome && matches!(active_section, Some(SheetSection::Graphs | SheetSection::Layouts));
 
     if is_graph_or_layout {
         let cursor_pt = center_stage_cursor_coords(ui, app, views, ctx_in.layout);
@@ -1145,13 +1190,21 @@ fn render_footer_center_readout(
         draw_footer_summary_label(
             ui,
             ctx_in.tokens,
-            FooterSummarySpec { text: &summary_text, tooltip: &summary_text, max_w: center_budget, clickable: false, widget_id: "status.summary" },
+            FooterSummarySpec {
+                text: &summary_text,
+                tooltip: &summary_text,
+                max_w: center_budget,
+                clickable: false,
+                enabled: ctx_in.enabled,
+                widget_id: "status.summary",
+            },
             meta,
         );
         return (None, None);
     }
 
     if !gallery_open
+        && !is_welcome
         && doc
             .active_sheet_id
             .as_ref()
@@ -1164,10 +1217,17 @@ fn render_footer_center_readout(
         let resp = draw_footer_summary_label(
             ui,
             ctx_in.tokens,
-            FooterSummarySpec { text: &text, tooltip: &text, max_w: center_budget, clickable: true, widget_id: "status.summary" },
+            FooterSummarySpec {
+                text: &text,
+                tooltip: &text,
+                max_w: center_budget,
+                clickable: true,
+                enabled: ctx_in.enabled,
+                widget_id: "status.summary",
+            },
             meta,
         );
-        if resp.clicked() {
+        if resp.clicked() && ctx_in.enabled {
             views.status_footer.stats_popover_open = !views.status_footer.stats_popover_open;
             views.status_footer.sheet_switcher_open = false;
             views.status_footer.link_popover_open = false;
@@ -1195,7 +1255,14 @@ fn render_footer_center_readout(
     draw_footer_summary_label(
         ui,
         ctx_in.tokens,
-        FooterSummarySpec { text: &status_text, tooltip: &status_text, max_w: center_budget, clickable: false, widget_id: "status.summary" },
+        FooterSummarySpec {
+            text: &status_text,
+            tooltip: &status_text,
+            max_w: center_budget,
+            clickable: false,
+            enabled: ctx_in.enabled,
+            widget_id: "status.summary",
+        },
         meta,
     );
     (None, None)
@@ -1204,15 +1271,92 @@ fn render_footer_center_readout(
 fn render_footer_trailing_controls(
     ui: &mut egui::Ui,
     app: &UiApp,
+    views: &mut EguiShellViewState,
     ctx_in: StatusFooterContext<'_>,
     flags: FooterTrailingFlags,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    const GALLERY_DEFAULT_ZOOM_PT: f32 = 168.0;
+    const GALLERY_MIN_ZOOM_PT: f32 = 120.0;
+    const GALLERY_MAX_ZOOM_PT: f32 = 260.0;
+    const GALLERY_STEP_PT: f32 = 20.0;
+
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
 
-        if flags.show_zoom {
+        if flags.show_zoom && flags.gallery_open {
+            let cur_w = views.center_stage.gallery_zoom_pt.clamp(GALLERY_MIN_ZOOM_PT, GALLERY_MAX_ZOOM_PT);
+            if draw_footer_chip(
+                ui,
+                ctx_in.tokens,
+                FooterChipSpec {
+                    label: "+",
+                    tooltip: "Increase gallery thumbnail size",
+                    max_w: 24.0,
+                    min_w: 24.0,
+                    selected: false,
+                    enabled: ctx_in.enabled && cur_w < GALLERY_MAX_ZOOM_PT - 0.5,
+                    accent_override: None,
+                    widget_id: "status.zoom.in",
+                    role: "button",
+                    command_id: None,
+                    disabled_reason: (cur_w >= GALLERY_MAX_ZOOM_PT - 0.5).then_some("at maximum gallery zoom"),
+                },
+                meta,
+            )
+            .clicked()
+            {
+                views.center_stage.gallery_zoom_pt = (cur_w + GALLERY_STEP_PT).clamp(GALLERY_MIN_ZOOM_PT, GALLERY_MAX_ZOOM_PT);
+            }
+
+            let zpct = format!("{:.0}%", (cur_w / GALLERY_DEFAULT_ZOOM_PT) * 100.0);
+            if draw_footer_chip(
+                ui,
+                ctx_in.tokens,
+                FooterChipSpec {
+                    label: &zpct,
+                    tooltip: "Reset gallery thumbnail size to 100%",
+                    max_w: 44.0,
+                    min_w: 36.0,
+                    selected: false,
+                    enabled: ctx_in.enabled,
+                    accent_override: None,
+                    widget_id: "status.zoom.reset",
+                    role: "button",
+                    command_id: None,
+                    disabled_reason: None,
+                },
+                meta,
+            )
+            .clicked()
+            {
+                views.center_stage.gallery_zoom_pt = GALLERY_DEFAULT_ZOOM_PT;
+            }
+
+            if draw_footer_chip(
+                ui,
+                ctx_in.tokens,
+                FooterChipSpec {
+                    label: "-",
+                    tooltip: "Decrease gallery thumbnail size",
+                    max_w: 24.0,
+                    min_w: 24.0,
+                    selected: false,
+                    enabled: ctx_in.enabled && cur_w > GALLERY_MIN_ZOOM_PT + 0.5,
+                    accent_override: None,
+                    widget_id: "status.zoom.out",
+                    role: "button",
+                    command_id: None,
+                    disabled_reason: (cur_w <= GALLERY_MIN_ZOOM_PT + 0.5).then_some("at minimum gallery zoom"),
+                },
+                meta,
+            )
+            .clicked()
+            {
+                views.center_stage.gallery_zoom_pt = (cur_w - GALLERY_STEP_PT).clamp(GALLERY_MIN_ZOOM_PT, GALLERY_MAX_ZOOM_PT);
+            }
+        } else if flags.show_zoom {
             let zoom = app.canvas_dialogs.canvas.zoom;
             if draw_footer_chip(
                 ui,
@@ -1222,7 +1366,7 @@ fn render_footer_trailing_controls(
                     tooltip: "Fit canvas to viewport (ui.zoom.fitSheet)",
                     max_w: 34.0,
                     min_w: 26.0,
-                    selected: app.egui_views.canvas_view.fit_zoom_active,
+                    selected: flags.fit_zoom_active,
                     enabled: ctx_in.enabled,
                     accent_override: None,
                     widget_id: "status.zoom.fit",
@@ -1522,8 +1666,9 @@ pub fn render_status_footer(
 
     let doc = app.document();
     let gallery_open = app.nav.gallery.open;
+    let is_welcome = (app.nav.welcome.open || views.launcher_open || doc.active_sheet_id.is_none()) && !gallery_open;
     let active_section = doc.active_sheet_id.as_ref().and_then(|sid| doc.sheet_section(sid));
-    let is_graph_or_layout = !gallery_open && matches!(active_section, Some(SheetSection::Graphs | SheetSection::Layouts));
+    let is_graph_or_layout = !gallery_open && !is_welcome && matches!(active_section, Some(SheetSection::Graphs | SheetSection::Layouts));
     let show_zoom = gallery_open || is_graph_or_layout;
     let show_rulers = is_graph_or_layout;
     report.zoom_controls_visible = show_zoom;
@@ -1617,7 +1762,16 @@ pub fn render_status_footer(
                 let (stats_anchor, active_stats) = render_footer_center_readout(ui, app, views, ctx_in, center_budget, meta, &mut report);
                 anchors.stats = stats_anchor;
 
-                render_footer_trailing_controls(ui, app, ctx_in, FooterTrailingFlags { compact, show_zoom, show_rulers }, meta, intents);
+                let fit_zoom_active = views.canvas_view.fit_zoom_active;
+                render_footer_trailing_controls(
+                    ui,
+                    app,
+                    views,
+                    ctx_in,
+                    FooterTrailingFlags { compact, gallery_open, show_zoom, show_rulers, fit_zoom_active },
+                    meta,
+                    intents,
+                );
 
                 if !ctx_in.enabled {
                     close_all_footer_popovers(&mut views.status_footer);
@@ -1678,5 +1832,37 @@ mod tests {
         let (mv_summary, _) = scan_rect_selection(&ds_mv, 0, 3, &[(0, 0)], &mut scratch);
         assert_eq!(mv_summary.n, 0);
         assert_eq!(mv_summary.mean, None);
+    }
+
+    #[test]
+    fn quick_stats_handles_extreme_magnitudes_without_overflow_or_nan() {
+        use curvebook_doc::Cell;
+
+        let mut scratch = Vec::new();
+        let mut acc = StatsAccum::new(&mut scratch, 4);
+        acc.push_cell(&Cell::number(1e308));
+        acc.push_cell(&Cell::number(1e308));
+        let same_huge = acc.finalize(2, false);
+        assert_eq!(same_huge.mean, Some(1e308));
+        assert_eq!(same_huge.sd, Some(0.0));
+        assert_eq!(same_huge.sem, Some(0.0));
+        assert_eq!(same_huge.median, Some(1e308));
+
+        let mut acc_sym = StatsAccum::new(&mut scratch, 4);
+        acc_sym.push_cell(&Cell::number(-1e308));
+        acc_sym.push_cell(&Cell::number(1e308));
+        let sym = acc_sym.finalize(2, false);
+        assert!(sym.mean.is_some_and(|m| m.is_finite() && m.abs() < 1e295), "mean={:?}", sym.mean);
+        assert!(sym.median.is_some_and(|m| m.is_finite() && m.abs() < 1e295), "median={:?}", sym.median);
+        assert!(sym.sd.is_some_and(|s| s.is_finite() && s > 1e307), "sd={:?}", sym.sd);
+        assert!(sym.sem.is_some_and(|s| s.is_finite() && s > 9e307), "sem={:?}", sym.sem);
+
+        let mut acc_large = StatsAccum::new(&mut scratch, 4);
+        acc_large.push_cell(&Cell::number(1e200));
+        acc_large.push_cell(&Cell::number(1e200 + 1e199));
+        let large = acc_large.finalize(2, false);
+        assert!(large.mean.is_some_and(|m| m.is_finite()), "mean={:?}", large.mean);
+        assert!(large.sd.is_some_and(|s| s.is_finite() && s > 0.0), "sd={:?}", large.sd);
+        assert!(large.sem.is_some_and(|s| s.is_finite() && s > 0.0), "sem={:?}", large.sem);
     }
 }

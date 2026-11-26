@@ -59,6 +59,11 @@ pub(super) fn render_results_interpret_studio(
     let locale = &tokens.locale;
     let doc = app.document();
 
+    // Clear stale copy confirmation whenever switching to a different ResultSheet (`AUD-09-46`).
+    if state.methods_cache_key.as_ref().is_some_and(|(sid, _, _)| sid != &rs.id) {
+        state.last_copied_methods = false;
+    }
+
     let small = tokens.metrics.font_ui_small_pt;
     let (status_lbl, status_clr) = match &rs.status {
         ResultStatus::UpToDate => ("Up to date", tokens.link_green),
@@ -237,13 +242,18 @@ pub(super) fn render_results_interpret_studio(
                             command_id: None,
                             disabled_reason: None,
                         },
-                    ) {
+                    ) && state.methods_format != slug
+                    {
                         state.methods_format = String::from(slug);
+                        state.last_copied_methods = false;
                     }
                 }
             });
             ui.add_space(4.0);
             let report = resolve_methods_paragraph(doc, app, rs, state);
+            if state.last_copied_methods && state.last_copied_methods_text != report {
+                state.last_copied_methods = false;
+            }
             if studio_full_button(
                 ui,
                 tokens,
@@ -261,7 +271,9 @@ pub(super) fn render_results_interpret_studio(
             ) {
                 state.last_copied_methods = true;
                 state.last_copied_methods_text = report.clone();
-                ui.ctx().copy_text(state.last_copied_methods_text.clone());
+                if !app.is_human_path_only() {
+                    ui.ctx().copy_text(state.last_copied_methods_text.clone());
+                }
                 intents.push_ui("ui.result.copyMethodsReport", json!({ "result_sheet_id": rs.id.as_str(), "format": state.methods_format }));
             }
             if state.last_copied_methods {

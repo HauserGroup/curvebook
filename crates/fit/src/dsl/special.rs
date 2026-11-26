@@ -9,6 +9,7 @@
 //! - Olver, F. W. J. et al. (eds.) (2010). *NIST Handbook of Mathematical Functions* (NIST Digital Library of Mathematical Functions, <https://dlmf.nist.gov/>). Cambridge University Press.
 //! - Thompson, I. J. & Barnett, A. R. (1986). Coulomb and Bessel functions of complex arguments and order. *Journal of Computational Physics* 64(2), 490–509.
 
+use std::cell::Cell;
 use std::sync::OnceLock;
 
 use curvebook_math::quad::{QuadOptions, integrate_adaptive};
@@ -369,13 +370,18 @@ pub(in crate::dsl) fn bessel_j1(x: f64) -> f64 {
 
 /// Steed / modified Lentz continued fraction `f_n = J'_n(x) / J_n(x)` for `0 < x < n`
 /// (DLMF §10.10.1 + §10.6.2): `f_n = n/x - 1 / (2(n+1)/x - 1 / (2(n+2)/x - ...))`.
-pub(in crate::dsl) fn bessel_cf1_jprime_over_j(n: i32, ax: f64) -> f64 {
+pub(in crate::dsl) fn bessel_cf1_jprime_over_j_counted(n: i32, ax: f64, max_work: usize) -> (Option<f64>, usize) {
     const TINY: f64 = 1e-300;
     let nf = f64::from(n);
     let mut f = nf / ax;
     let mut c = f;
     let mut d = 0.0_f64;
+    let mut work = 0_usize;
     for k in 1..=10_000_usize {
+        work += 1;
+        if work > max_work {
+            return (None, work);
+        }
         let b_k = 2.0 * (nf + k as f64) / ax;
         d = b_k - d;
         if d.abs() < TINY {
@@ -392,36 +398,42 @@ pub(in crate::dsl) fn bessel_cf1_jprime_over_j(n: i32, ax: f64) -> f64 {
             break;
         }
     }
-    f
+    (Some(f), work.max(1))
 }
 
-/// Integer-order `J_n(x)` from NIST DLMF §10:
+/// Integer-order `J_n(x)` from NIST DLMF §10 with internal iteration metering:
 /// - Upward recurrence from `J0`, `J1` in the oscillatory regime `|x| >= n` (DLMF §10.6.1);
 /// - For `0 < |x| < n`: small-argument series (`|x| < 1e-10`), DLMF §10.14.4 early underflow bound,
 ///   or Steed/Lentz continued fraction `J'_n / J_n` (DLMF §10.10.1) + power-of-2-scaled upward `Y_k`
 ///   recurrence + Wronskian normalization `J_n = 2 / (pi * x * (Y'_n - f_n Y_n))` (DLMF §10.5.2).
 ///
 /// Achieves near-`f64` accuracy (`~1e-15`–`1e-12` depending on `n`) without Miller downward loops.
-pub(in crate::dsl) fn bessel_jn(n: i32, x: f64) -> f64 {
+pub(in crate::dsl) fn bessel_jn_counted(n: i32, x: f64, max_work: usize) -> (Option<f64>, usize) {
     if n.unsigned_abs() > MAX_BESSEL_ORDER as u32 || !x.is_finite() {
-        return f64::NAN;
+        return (None, 1);
     }
     if n < 0 {
-        let pos = bessel_jn(-n, x);
-        return if (-n) % 2 == 0 { pos } else { -pos };
+        let (pos, work) = bessel_jn_counted(-n, x, max_work);
+        return (pos.map(|v| if (-n) % 2 == 0 { v } else { -v }), work);
     }
     if n == 0 {
-        return bessel_j0(x);
+        let v = bessel_j0(x);
+        return (v.is_finite().then_some(v), 1);
     }
     if n == 1 {
-        return bessel_j1(x);
+        let v = bessel_j1(x);
+        return (v.is_finite().then_some(v), 1);
     }
     if x == 0.0 {
-        return 0.0;
+        return (Some(0.0), 1);
     }
     let ax = x.abs();
     let nf = f64::from(n);
-    let ans = if ax >= nf {
+    let (ans, work) = if ax >= nf {
+        let iters = (n - 1) as usize;
+        if iters > max_work {
+            return (None, max_work.saturating_add(1));
+        }
         let tox = 2.0 / ax;
         let mut bjm = bessel_j0(ax);
         let mut bj = bessel_j1(ax);
@@ -430,37 +442,48 @@ pub(in crate::dsl) fn bessel_jn(n: i32, x: f64) -> f64 {
             bjm = bj;
             bj = bjp;
         }
-        bj
+        (bj.is_finite().then_some(bj), iters.max(1))
     } else {
-        bessel_jn_evanescent(n, nf, ax)
+        bessel_jn_evanescent_counted(n, nf, ax, max_work)
     };
-    if x < 0.0 && n % 2 != 0 { -ans } else { ans }
+    (ans.map(|v| if x < 0.0 && n % 2 != 0 { -v } else { v }), work)
 }
 
-pub(in crate::dsl) fn bessel_jn_evanescent(n: i32, nf: f64, ax: f64) -> f64 {
+#[cfg(test)]
+pub(in crate::dsl) fn bessel_jn(n: i32, x: f64) -> f64 {
+    bessel_jn_counted(n, x, usize::MAX).0.unwrap_or(f64::NAN)
+}
+
+pub(in crate::dsl) fn bessel_jn_evanescent_counted(n: i32, nf: f64, ax: f64, max_work: usize) -> (Option<f64>, usize) {
     // DLMF §10.14.4 upper bound |J_n(x)| <= (x / 2)^n / n!: guarantees exact f64 underflow to 0.
     let Ok(lg_np1) = ln_gamma(nf + 1.0) else {
-        return 0.0;
+        return (Some(0.0), 1);
     };
     let ln_lead = nf * (0.5 * ax).ln() - lg_np1;
     if ln_lead < -746.0 {
-        return 0.0;
+        return (Some(0.0), 1);
     }
     if ax < 1e-10 {
         let z2 = 0.25 * ax * ax;
         let poly = 1.0 - (z2 / (nf + 1.0)) * (1.0 - z2 / (2.0 * (nf + 2.0)));
-        return ln_lead.exp() * poly;
+        return (Some(ln_lead.exp() * poly), 1);
     }
 
-    let f_n = bessel_cf1_jprime_over_j(n, ax);
+    let (Some(f_n), mut work) = bessel_cf1_jprime_over_j_counted(n, ax, max_work) else {
+        return (None, max_work.saturating_add(1));
+    };
     let (Some(mut bym), Some(mut by)) = (bessel_y0(ax), bessel_y1(ax)) else {
-        return 0.0;
+        return (Some(0.0), work);
     };
     let mut scale_exp2: i32 = 0;
     const RESCALE_LIMIT: f64 = 1e100;
     // Exact 2^-512 power-of-2 scaling introduces zero mantissa rounding error.
     let scale_down = 2.0_f64.powi(-512);
     for j in 1..n {
+        work += 1;
+        if work > max_work {
+            return (None, work);
+        }
         let byp = (f64::from(2 * j) / ax).mul_add(by, -bym);
         bym = by;
         by = byp;
@@ -469,7 +492,7 @@ pub(in crate::dsl) fn bessel_jn_evanescent(n: i32, nf: f64, ax: f64) -> f64 {
             bym *= scale_down;
             scale_exp2 = scale_exp2.saturating_add(512);
             if scale_exp2 > 2_000 {
-                return 0.0;
+                return (Some(0.0), work);
             }
         }
     }
@@ -482,7 +505,7 @@ pub(in crate::dsl) fn bessel_jn_evanescent(n: i32, nf: f64, ax: f64) -> f64 {
         val *= 2.0_f64.powi(-step);
         rem -= step;
     }
-    val
+    (val.is_finite().then_some(val), work)
 }
 
 /// Bessel `Y0(x)` for `x > 0`: 106-bit compensated DLMF §10.8.1 series (`x <= 20`) and Hankel
@@ -519,133 +542,198 @@ pub(in crate::dsl) fn bessel_y1(x: f64) -> Option<f64> {
 }
 
 /// Integer-order `Y_n(x)` by (stable) upward recurrence from `Y0`, `Y1` (DLMF §10.6.1 / A&S 9.1.27),
-/// returning `None` if `x <= 0` or the dominant solution overflows `f64`.
-pub(in crate::dsl) fn bessel_yn(n: i32, x: f64) -> Option<f64> {
+/// returning `None` if `x <= 0`, the dominant solution overflows `f64`, or work exceeds `max_work`.
+pub(in crate::dsl) fn bessel_yn_counted(n: i32, x: f64, max_work: usize) -> (Option<f64>, usize) {
     if n.unsigned_abs() > MAX_BESSEL_ORDER as u32 || !x.is_finite() || x <= 0.0 {
-        return None;
+        return (None, 1);
     }
     if n < 0 {
-        let pos = bessel_yn(-n, x)?;
-        return Some(if (-n) % 2 == 0 { pos } else { -pos });
+        let (pos, work) = bessel_yn_counted(-n, x, max_work);
+        return (pos.map(|v| if (-n) % 2 == 0 { v } else { -v }), work);
     }
     if n == 0 {
-        return bessel_y0(x);
+        return (bessel_y0(x), 1);
     }
     if n == 1 {
-        return bessel_y1(x);
+        return (bessel_y1(x), 1);
     }
     let tox = 2.0 / x;
-    let mut bym = bessel_y0(x)?;
-    let mut by = bessel_y1(x)?;
+    let (Some(mut bym), Some(mut by)) = (bessel_y0(x), bessel_y1(x)) else {
+        return (None, 1);
+    };
+    let mut work = 0_usize;
     for j in 1..n {
+        work += 1;
+        if work > max_work {
+            return (None, work);
+        }
         let byp = (f64::from(j) * tox).mul_add(by, -bym);
         bym = by;
         by = byp;
         if !by.is_finite() {
-            return None;
+            return (None, work);
         }
     }
-    Some(by)
+    (Some(by), work.max(1))
 }
 
-/// Modified Bessel `I0(x)`: polynomial approximations A&S 9.8.1 (`|x| < 3.75`) and 9.8.2
-/// (`|x| >= 3.75`), whose tabulated error bounds are of order `1e-7` (A&S 1964).
+#[cfg(test)]
+pub(in crate::dsl) fn bessel_yn(n: i32, x: f64) -> Option<f64> {
+    bessel_yn_counted(n, x, usize::MAX).0
+}
+
+/// Natural logarithm of `|Gamma(x)|` over all real `x` except non-positive integers `{0, -1, -2, ...}`.
+///
+/// Uses `curvebook_math::special::ln_gamma(x)` for `x > 0` and Euler's reflection formula
+/// `ln |Gamma(x)| = ln(pi) - ln(|sin(pi * x)|) - ln Gamma(1 - x)` for negative non-integers `x < 0`
+/// (Abramowitz & Stegun 1964 §6.1.17; NIST DLMF §5.5.3).
+pub(in crate::dsl) fn ln_gamma_abs(x: f64) -> Option<f64> {
+    if !x.is_finite() {
+        return None;
+    }
+    if x > 0.0 {
+        return ln_gamma(x).ok();
+    }
+    let dist = (x - x.round()).abs();
+    if dist == 0.0 {
+        return None;
+    }
+    let sin_pi = (core::f64::consts::PI * dist).sin();
+    if !sin_pi.is_finite() || sin_pi <= 0.0 {
+        return None;
+    }
+    let lg_1mx = ln_gamma(1.0 - x).ok()?;
+    let val = core::f64::consts::PI.ln() - sin_pi.ln() - lg_1mx;
+    val.is_finite().then_some(val)
+}
+
+/// Modified Bessel `I0(x)` delegated to [`bessel_in_counted`] so `besseli0` shares the exact
+/// domain, overflow threshold, and accuracy of `besseli(0, x)` (DLMF §10.25.2, §10.29.1).
+pub(in crate::dsl) fn bessel_i0_counted(x: f64, max_work: usize) -> (Option<f64>, usize) {
+    bessel_in_counted(0, x, max_work)
+}
+
+/// Modified Bessel `I1(x)` delegated to [`bessel_in_counted`] so `besseli1` shares the exact
+/// domain, overflow threshold, and accuracy of `besseli(1, x)` (DLMF §10.25.2, §10.29.1).
+pub(in crate::dsl) fn bessel_i1_counted(x: f64, max_work: usize) -> (Option<f64>, usize) {
+    bessel_in_counted(1, x, max_work)
+}
+
 pub(in crate::dsl) fn bessel_i0(x: f64) -> Option<f64> {
-    let ax = x.abs();
-    if ax > 700.0 {
-        return None;
-    }
-    let ans = if ax < 3.75 {
-        let y = (x / 3.75).powi(2);
-        1.0 + y * (3.515_622_9 + y * (3.089_942_4 + y * (1.206_749_2 + y * (0.265_973_2 + y * (0.036_076_8 + y * 0.004_581_3)))))
-    } else {
-        let y = 3.75 / ax;
-        (ax.exp() / ax.sqrt())
-            * (0.398_942_28
-                + y * (0.013_285_92
-                    + y * (0.002_253_19
-                        + y * (-0.001_575_65
-                            + y * (0.009_162_81 + y * (-0.020_577_06 + y * (0.026_355_37 + y * (-0.016_476_33 + y * 0.003_923_77))))))))
-    };
-    if ans.is_finite() { Some(ans) } else { None }
+    bessel_i0_counted(x, usize::MAX).0
 }
 
-/// Modified Bessel `I1(x)`: A&S 9.8.3 / 9.8.4 polynomial approximations (error order `1e-7`).
 pub(in crate::dsl) fn bessel_i1(x: f64) -> Option<f64> {
-    let ax = x.abs();
-    if ax > 700.0 {
+    bessel_i1_counted(x, usize::MAX).0
+}
+
+/// Exponentially scaled modified Bessel `e^x K_0(x)` for `x > 0` (Abramowitz & Stegun 1964
+/// §§9.8.5–9.8.6; error order `1e-7`), avoiding `exp(-x)` underflow and subnormal precision loss
+/// for `x >= 710`.
+pub(in crate::dsl) fn bessel_k0_scaled(x: f64) -> Option<f64> {
+    if !x.is_finite() || x <= 0.0 {
         return None;
     }
-    let ans = if ax < 3.75 {
-        let y = (x / 3.75).powi(2);
-        ax * (0.5 + y * (0.878_905_94 + y * (0.514_988_69 + y * (0.150_849_34 + y * (0.026_587_33 + y * (0.003_015_32 + y * 0.000_324_11))))))
+    let ans = if x <= 2.0 {
+        let y = x * x / 4.0;
+        let k0 = -(x / 2.0).ln() * bessel_i0(x)?
+            + (-core::f64::consts::EULER_GAMMA
+                + y * (0.422_784_20 + y * (0.230_697_56 + y * (0.034_885_90 + y * (0.002_626_98 + y * (0.000_107_50 + y * 0.000_007_40))))));
+        x.exp() * k0
     } else {
-        let y = 3.75 / ax;
-        (ax.exp() / ax.sqrt())
-            * (0.398_942_28
-                + y * (-0.039_880_24
-                    + y * (-0.003_620_18
-                        + y * (0.001_638_01
-                            + y * (-0.010_315_55 + y * (0.022_829_67 + y * (-0.028_953_12 + y * (0.017_876_54 - y * 0.004_200_59))))))))
+        let y = 2.0 / x;
+        (1.0 / x.sqrt())
+            * (1.253_314_14
+                + y * (-0.078_323_58 + y * (0.021_895_68 + y * (-0.010_624_46 + y * (0.005_878_72 + y * (-0.002_515_40 + y * 0.000_532_08))))))
     };
-    let signed = if x < 0.0 { -ans } else { ans };
-    if signed.is_finite() { Some(signed) } else { None }
+    (ans.is_finite() && ans > 0.0).then_some(ans)
+}
+
+/// Exponentially scaled modified Bessel `e^x K_1(x)` for `x > 0` (Abramowitz & Stegun 1964
+/// §§9.8.7–9.8.8; error order `1e-7`), avoiding `exp(-x)` underflow and subnormal precision loss
+/// for `x >= 710`.
+pub(in crate::dsl) fn bessel_k1_scaled(x: f64) -> Option<f64> {
+    if !x.is_finite() || x <= 0.0 {
+        return None;
+    }
+    let ans = if x <= 2.0 {
+        let y = x * x / 4.0;
+        let k1 = (x / 2.0).ln() * bessel_i1(x)?
+            + (1.0 / x)
+                * (1.0
+                    + y * (0.154_431_44 + y * (-0.672_785_79 + y * (-0.181_568_97 + y * (-0.019_194_02 + y * (-0.001_104_04 - y * 0.000_046_86))))));
+        x.exp() * k1
+    } else {
+        let y = 2.0 / x;
+        (1.0 / x.sqrt())
+            * (1.253_314_14
+                + y * (0.234_986_19 + y * (-0.036_556_20 + y * (0.015_042_68 + y * (-0.007_803_53 + y * (0.003_256_14 - y * 0.000_682_45))))))
+    };
+    (ans.is_finite() && ans > 0.0).then_some(ans)
 }
 
 /// Modified Bessel `K0(x)`, `x > 0`: A&S 9.8.5 (`x <= 2`) / 9.8.6 (`x > 2`) (error order `1e-7`).
 pub(in crate::dsl) fn bessel_k0(x: f64) -> Option<f64> {
-    if x <= 0.0 {
+    if !x.is_finite() || x <= 0.0 {
         return None;
     }
-    let ans = if x <= 2.0 {
+    if x <= 2.0 {
         let y = x * x / 4.0;
-        -(x / 2.0).ln() * bessel_i0(x)?
+        let ans = -(x / 2.0).ln() * bessel_i0(x)?
             + (-core::f64::consts::EULER_GAMMA
-                + y * (0.422_784_20 + y * (0.230_697_56 + y * (0.034_885_90 + y * (0.002_626_98 + y * (0.000_107_50 + y * 0.000_007_40))))))
+                + y * (0.422_784_20 + y * (0.230_697_56 + y * (0.034_885_90 + y * (0.002_626_98 + y * (0.000_107_50 + y * 0.000_007_40))))));
+        return ans.is_finite().then_some(ans);
+    }
+    let scaled = bessel_k0_scaled(x)?;
+    let val = if x < 700.0 {
+        scaled * (-x).exp()
     } else {
-        let y = 2.0 / x;
-        ((-x).exp() / x.sqrt())
-            * (1.253_314_14
-                + y * (-0.078_323_58 + y * (0.021_895_68 + y * (-0.010_624_46 + y * (0.005_878_72 + y * (-0.002_515_40 + y * 0.000_532_08))))))
+        let ln_val = scaled.ln() - x;
+        if ln_val < -745.133_219_101_941_2 { 0.0 } else { ln_val.exp() }
     };
-    if ans.is_finite() { Some(ans) } else { None }
+    val.is_finite().then_some(val)
 }
 
 /// Modified Bessel `K1(x)`, `x > 0`: A&S 9.8.7 (`x <= 2`) / 9.8.8 (`x > 2`) (error order `1e-7`).
 pub(in crate::dsl) fn bessel_k1(x: f64) -> Option<f64> {
-    if x <= 0.0 {
+    if !x.is_finite() || x <= 0.0 {
         return None;
     }
-    let ans = if x <= 2.0 {
+    if x <= 2.0 {
         let y = x * x / 4.0;
-        (x / 2.0).ln() * bessel_i1(x)?
+        let ans = (x / 2.0).ln() * bessel_i1(x)?
             + (1.0 / x)
                 * (1.0
-                    + y * (0.154_431_44 + y * (-0.672_785_79 + y * (-0.181_568_97 + y * (-0.019_194_02 + y * (-0.001_104_04 - y * 0.000_046_86))))))
+                    + y * (0.154_431_44 + y * (-0.672_785_79 + y * (-0.181_568_97 + y * (-0.019_194_02 + y * (-0.001_104_04 - y * 0.000_046_86))))));
+        return ans.is_finite().then_some(ans);
+    }
+    let scaled = bessel_k1_scaled(x)?;
+    let val = if x < 700.0 {
+        scaled * (-x).exp()
     } else {
-        let y = 2.0 / x;
-        ((-x).exp() / x.sqrt())
-            * (1.253_314_14
-                + y * (0.234_986_19 + y * (-0.036_556_20 + y * (0.015_042_68 + y * (-0.007_803_53 + y * (0.003_256_14 - y * 0.000_682_45))))))
+        let ln_val = scaled.ln() - x;
+        if ln_val < -745.133_219_101_941_2 { 0.0 } else { ln_val.exp() }
     };
-    if ans.is_finite() { Some(ans) } else { None }
+    val.is_finite().then_some(val)
 }
 
-/// Modified Bessel function of the first kind `I_n(x)` for integer order `n`.
+/// Modified Bessel function of the first kind `I_n(x)` for integer order `n` with internal
+/// iteration metering and Debye uniform asymptotic overflow/underflow screening.
 ///
 /// Uses the strictly positive ascending power series (DLMF §10.25.2) for `|x| <= 25`,
-/// and Miller's downward recurrence `I_{k-1}(x) = I_{k+1}(x) + (2k/x) I_k(x)` normalized
-/// by the generating-function identity `I_0(x) + 2 sum_{k>=1} I_k(x) = exp(x)` (DLMF §10.29.1,
-/// §10.35.1; Press et al. 2007 §6.6) with log-scale rescaling for `|x| > 25`.
+/// Olver/Debye asymptotic bounds (DLMF §10.41.3; Olver 1954) to reject guaranteed `f64` overflow
+/// or underflow before entering the recurrence, and Miller's downward recurrence
+/// `I_{k-1}(x) = I_{k+1}(x) + (2k/x) I_k(x)` normalized by `I_0(x) + 2 sum_{k>=1} I_k(x) = exp(x)`
+/// (DLMF §10.29.1, §10.35.1; Press et al. 2007 §6.6) with log-scale rescaling for `|x| > 25`.
 /// Symmetry: `I_{-n}(x) = I_n(x)` (DLMF §10.27.1), `I_n(-x) = (-1)^n I_n(x)` (DLMF §10.34.1).
-pub(in crate::dsl) fn bessel_in(n: i32, x: f64) -> Option<f64> {
-    if !x.is_finite() {
-        return None;
-    }
+pub(in crate::dsl) fn bessel_in_counted(n: i32, x: f64, max_work: usize) -> (Option<f64>, usize) {
     let m = n.unsigned_abs();
+    if m > MAX_BESSEL_ORDER as u32 || !x.is_finite() {
+        return (None, 1);
+    }
     let ax = x.abs();
     if ax == 0.0 {
-        return Some(if m == 0 { 1.0 } else { 0.0 });
+        return (Some(if m == 0 { 1.0 } else { 0.0 }), 1);
     }
     let sign = if x < 0.0 && m % 2 == 1 { -1.0 } else { 1.0 };
     if ax <= 25.0 {
@@ -654,7 +742,12 @@ pub(in crate::dsl) fn bessel_in(n: i32, x: f64) -> Option<f64> {
         let q = 0.25 * ax * ax;
         let mut sum = 1.0_f64;
         let mut term = 1.0_f64;
+        let mut work = 0_usize;
         for k in 1..=256_u32 {
+            work += 1;
+            if work > max_work {
+                return (None, work);
+            }
             let kf = f64::from(k);
             term *= q / (kf * (mf + kf));
             sum += term;
@@ -663,22 +756,38 @@ pub(in crate::dsl) fn bessel_in(n: i32, x: f64) -> Option<f64> {
             }
         }
         let ln_val = ln_lead + sum.ln();
-        if !ln_val.is_finite() || ln_val > 709.78 {
-            return None;
+        if !ln_val.is_finite() || ln_val > 710.0 {
+            return (None, work.max(1));
         }
-        if ln_val < -745.0 {
-            return Some(0.0);
+        if ln_val < -745.133_219_101_941_2 {
+            return (Some(0.0), work.max(1));
         }
         let val = sign * ln_val.exp();
-        return val.is_finite().then_some(val);
+        return (val.is_finite().then_some(val), work.max(1));
     }
-    // Guard against extreme arguments that would make Miller's starting order exceed bounded work.
-    if ax > 500_000.0 {
-        return None;
+    // Debye / Olver uniform asymptotic bound (DLMF §10.41.3):
+    // ln I_m(x) = r - m * asinh(m / x) - 0.5 * ln(2 * pi * r) + O(1 / r), r = hypot(m, x).
+    let mf = f64::from(m);
+    let r = mf.hypot(ax);
+    let ln_debye = if m == 0 {
+        ax - 0.5 * (2.0 * core::f64::consts::PI * ax).ln()
+    } else {
+        r - mf * (mf / ax).asinh() - 0.5 * (2.0 * core::f64::consts::PI * r).ln()
+    };
+    if !ln_debye.is_finite() || ln_debye > 711.0 {
+        return (None, 1);
     }
+    if ln_debye < -748.0 {
+        return (Some(0.0), 1);
+    }
+
     let m_base = m.max(ax.ceil() as u32);
-    let extra = (40.0 * ax.max(f64::from(m))).sqrt().ceil() as u32 + 32;
+    let extra = (40.0 * ax.max(mf)).sqrt().ceil() as u32 + 32;
     let m_start = m_base.saturating_add(extra);
+    let needed = m_start as usize;
+    if needed > max_work {
+        return (None, max_work.saturating_add(1));
+    }
     let two_over_x = 2.0 / ax;
     const RESCALE: f64 = 1e-100;
     const LN_RESCALE: f64 = -230.258_509_299_404_6; // -100 * ln(10)
@@ -714,47 +823,90 @@ pub(in crate::dsl) fn bessel_in(n: i32, x: f64) -> Option<f64> {
     }
     sum += bi;
     if !have_ans || ans <= 0.0 || sum <= 0.0 || !sum.is_finite() {
-        return None;
+        return (None, needed.max(1));
     }
     let ln_val = ans.ln() + ans_log_scale + ax - sum.ln();
-    if !ln_val.is_finite() || ln_val > 709.78 {
-        return None;
+    if !ln_val.is_finite() || ln_val > 710.0 {
+        return (None, needed.max(1));
     }
-    if ln_val < -745.0 {
-        return Some(0.0);
+    if ln_val < -745.133_219_101_941_2 {
+        return (Some(0.0), needed.max(1));
     }
     let val = sign * ln_val.exp();
-    val.is_finite().then_some(val)
+    (val.is_finite().then_some(val), needed.max(1))
 }
 
-/// Modified Bessel function of the second kind `K_n(x)` for integer order `n` and `x > 0`.
+/// Modified Bessel function of the second kind `K_n(x)` for integer order `n` and `x > 0` with
+/// exponential scaling, log-scale rescaling, and internal iteration metering.
 ///
-/// Uses symmetry `K_{-n}(x) = K_n(x)` (DLMF §10.27.3) and the unconditionally stable upward
-/// recurrence `K_{k+1}(x) = K_{k-1}(x) + (2k/x) K_k(x)` seeded from `K_0(x)` and `K_1(x)`
-/// (DLMF §10.29.1; Press et al. 2007 §6.6).
-pub(in crate::dsl) fn bessel_kn(n: i32, x: f64) -> Option<f64> {
-    if !x.is_finite() || x <= 0.0 {
-        return None;
-    }
+/// Uses symmetry `K_{-n}(x) = K_n(x)` (DLMF §10.27.3), Debye uniform asymptotic screening
+/// (DLMF §10.41.4), and the unconditionally stable upward recurrence
+/// `(e^x K_{k+1}) = (e^x K_{k-1}) + (2k/x)(e^x K_k)` seeded from [`bessel_k0_scaled`] and
+/// [`bessel_k1_scaled`] with periodic log-scale rescaling (DLMF §10.29.1; Press et al. 2007 §6.6).
+pub(in crate::dsl) fn bessel_kn_counted(n: i32, x: f64, max_work: usize) -> (Option<f64>, usize) {
     let m = n.unsigned_abs();
+    if m > MAX_BESSEL_ORDER as u32 || !x.is_finite() || x <= 0.0 {
+        return (None, 1);
+    }
     if m == 0 {
-        return bessel_k0(x);
+        return (bessel_k0(x), 1);
     }
     if m == 1 {
-        return bessel_k1(x);
+        return (bessel_k1(x), 1);
     }
-    let mut k_prev = bessel_k0(x)?;
-    let mut k_curr = bessel_k1(x)?;
+    if m >= 10 {
+        let mf = f64::from(m);
+        let r = mf.hypot(x);
+        let ln_debye = mf * (mf / x).asinh() - r + 0.5 * (core::f64::consts::FRAC_PI_2 / r).ln();
+        if !ln_debye.is_finite() || ln_debye > 712.0 {
+            return (None, 1);
+        }
+        if ln_debye < -748.0 {
+            return (Some(0.0), 1);
+        }
+    }
+    let (Some(mut k_prev), Some(mut k_curr)) = (bessel_k0_scaled(x), bessel_k1_scaled(x)) else {
+        return (None, 1);
+    };
+    const RESCALE: f64 = 1e-100;
+    const LN_RESCALE_UP: f64 = 230.258_509_299_404_6; // +100 * ln(10)
     let two_over_x = 2.0 / x;
+    let mut log_scale = 0.0_f64;
+    let mut work = 0_usize;
     for k in 1..m {
+        work += 1;
+        if work > max_work {
+            return (None, work);
+        }
         let k_next = k_prev + f64::from(k) * two_over_x * k_curr;
         if !k_next.is_finite() {
-            return None;
+            return (None, work);
         }
         k_prev = k_curr;
         k_curr = k_next;
+        if k_curr > 1e100 {
+            k_curr *= RESCALE;
+            k_prev *= RESCALE;
+            log_scale += LN_RESCALE_UP;
+            // K_k(x) is strictly increasing with k >= 1; once K_k already overflows f64, K_m must too.
+            if k_curr.ln() + log_scale - x > 710.0 {
+                return (None, work);
+            }
+        }
     }
-    k_curr.is_finite().then_some(k_curr)
+    if log_scale == 0.0 && x < 700.0 {
+        let val = k_curr * (-x).exp();
+        return (val.is_finite().then_some(val), work.max(1));
+    }
+    let ln_val = k_curr.ln() + log_scale - x;
+    if !ln_val.is_finite() || ln_val > 710.0 {
+        return (None, work.max(1));
+    }
+    if ln_val < -745.133_219_101_941_2 {
+        return (Some(0.0), work.max(1));
+    }
+    let val = ln_val.exp();
+    (val.is_finite().then_some(val), work.max(1))
 }
 
 /// Factorial `n!` for non-negative integers `n` (`0 <= n <= 170`).
@@ -807,9 +959,9 @@ pub(in crate::dsl) fn is_non_positive_integer(v: f64) -> bool {
 
 /// Optimal-truncation asymptotic series `2F0(a, a - b + 1; ; inv_z)` (DLMF §13.7.1–§13.7.3)
 /// where `inv_z = -1 / z` (`-1 / z < 0` for `U(a, b, z)` at `z > 0`, and `-1 / z > 0` for
-/// `1F1(a; b; z)` at `z < 0`). Returns `Some(sum)` only when optimal truncation reaches
+/// `1F1(a; b; z)` at `z < 0`). Returns `(Some(sum), work)` only when optimal truncation reaches
 /// `|last_term| <= 1e-13 * |sum|` and alternating cancellation remains `<= 1e10`.
-pub(in crate::dsl) fn hyp2f0_asymp(a: f64, b: f64, inv_z: f64) -> Option<f64> {
+pub(in crate::dsl) fn hyp2f0_asymp_counted(a: f64, b: f64, inv_z: f64, max_work: usize) -> (Option<f64>, usize) {
     const MAX_TERMS: usize = 128;
     let c2 = a - b + 1.0;
     let mut sum = NeumaierSum::new();
@@ -817,23 +969,29 @@ pub(in crate::dsl) fn hyp2f0_asymp(a: f64, b: f64, inv_z: f64) -> Option<f64> {
     let mut term = 1.0_f64;
     let mut prev_abs = 1.0_f64;
     let mut max_abs = 1.0_f64;
+    let mut work = 0_usize;
 
     for k in 0..MAX_TERMS {
+        work += 1;
+        if work > max_work {
+            return (None, work);
+        }
         let kf = k as f64;
         let factor = ((a + kf) * (c2 + kf) / (kf + 1.0)) * inv_z;
         let next = term * factor;
         if !next.is_finite() {
-            return None;
+            return (None, work);
         }
         if next == 0.0 {
             let total = sum.total();
-            return (total.is_finite() && max_abs <= 1e10 * total.abs().max(f64::MIN_POSITIVE)).then_some(total);
+            let ok = total.is_finite() && max_abs <= 1e10 * total.abs().max(f64::MIN_POSITIVE);
+            return (ok.then_some(total), work);
         }
         let next_abs = next.abs();
         let cur_total = sum.total();
         if k >= 2 && next_abs > prev_abs {
-            return (cur_total.is_finite() && prev_abs <= 1e-13 * cur_total.abs().max(f64::MIN_POSITIVE) && max_abs <= 1e10 * cur_total.abs())
-                .then_some(cur_total);
+            let ok = cur_total.is_finite() && prev_abs <= 1e-13 * cur_total.abs().max(f64::MIN_POSITIVE) && max_abs <= 1e10 * cur_total.abs();
+            return (ok.then_some(cur_total), work);
         }
         term = next;
         prev_abs = next_abs;
@@ -841,17 +999,19 @@ pub(in crate::dsl) fn hyp2f0_asymp(a: f64, b: f64, inv_z: f64) -> Option<f64> {
         sum.add(term);
         let updated = sum.total();
         if !updated.is_finite() {
-            return None;
+            return (None, work);
         }
         max_abs = max_abs.max(updated.abs());
         if k >= 2 && next_abs <= 1e-15 * updated.abs().max(f64::MIN_POSITIVE) {
-            return (max_abs <= 1e10 * updated.abs().max(f64::MIN_POSITIVE)).then_some(updated);
+            let ok = max_abs <= 1e10 * updated.abs().max(f64::MIN_POSITIVE);
+            return (ok.then_some(updated), work);
         }
     }
-    None
+    (None, work.max(1))
 }
 
-/// Confluent hypergeometric function `1F1(a; b; z)` (Kummer's `M(a, b, z)`, DLMF §13.2 & §13.7):
+/// Confluent hypergeometric function `1F1(a; b; z)` (Kummer's `M(a, b, z)`, DLMF §13.2 & §13.7)
+/// with internal iteration metering:
 ///
 /// - Rejects non-positive integer poles `b in {0, -1, -2, ...}` (`None`);
 /// - Uses exact identities `1F1(0; b; z) = 1`, `1F1(a; b; 0) = 1`, `1F1(b; b; z) = exp(z)`;
@@ -860,170 +1020,264 @@ pub(in crate::dsl) fn hyp2f0_asymp(a: f64, b: f64, inv_z: f64) -> Option<f64> {
 ///   overflows (`z < -709`) or suffers `> 1e12` cancellation to DLMF §13.7.2 asymptotic
 ///   `(Gamma(b)/Gamma(b-a)) (-z)^(-a) 2F0(a, a-b+1; ; -1/z)` whenever the `exp(z)` branch is
 ///   `< 1e-16` relative to the algebraic branch and optimal truncation error is `<= 1e-13`;
-/// - Uses Neumaier-compensated Kummer power series (up to `4000` terms) elsewhere, returning `None`
-///   if `f64` overflows or cancellation exceeds `1e12` (`error <= ~1e-13` relative when accepted).
-pub(in crate::dsl) fn hyp1f1(a: f64, b: f64, z: f64) -> Option<f64> {
+/// - Uses Neumaier-compensated Kummer power series (up to `4000` terms) elsewhere, verifying
+///   that `k` is strictly past the analytical growth peak (`|factor(k+1)| < |factor(k)|` and
+///   tail-ratio upper bound `< 0.9`) before terminating, returning `None` if `f64` overflows,
+///   cancellation exceeds `1e12`, or iteration work exceeds `max_work`.
+pub(in crate::dsl) fn hyp1f1_counted(a: f64, b: f64, z: f64, max_work: usize) -> (Option<f64>, usize) {
     if !a.is_finite() || !b.is_finite() || !z.is_finite() || is_non_positive_integer(b) {
-        return None;
+        return (None, 1);
     }
     if z == 0.0 || a == 0.0 {
-        return Some(1.0);
+        return (Some(1.0), 1);
     }
     if (a - b).abs() == 0.0 {
         let v = z.exp();
-        return v.is_finite().then_some(v);
+        return (v.is_finite().then_some(v), 1);
     }
+    let mut total_work = 0_usize;
     if z < -1.0 {
-        if let Some(transformed) = hyp1f1_series(b - a, b, -z) {
+        let (t_opt, w1) = hyp1f1_series_counted(b - a, b, -z, max_work);
+        total_work = total_work.saturating_add(w1);
+        if total_work > max_work {
+            return (None, total_work);
+        }
+        if let Some(transformed) = t_opt {
             let scaled = z.exp() * transformed;
             if scaled.is_finite() {
-                return Some(scaled);
+                return (Some(scaled), total_work.max(1));
             }
         }
-        if z <= -30.0
-            && let Some(asymp) = hyp1f1_large_neg_z(a, b, z)
-        {
-            return Some(asymp);
+        if z <= -30.0 {
+            let (a_opt, w2) = hyp1f1_large_neg_z_counted(a, b, z, max_work.saturating_sub(total_work));
+            total_work = total_work.saturating_add(w2);
+            if total_work > max_work {
+                return (None, total_work);
+            }
+            if let Some(asymp) = a_opt {
+                return (Some(asymp), total_work.max(1));
+            }
         }
     }
-    hyp1f1_series(a, b, z)
+    let (res, w3) = hyp1f1_series_counted(a, b, z, max_work.saturating_sub(total_work));
+    total_work = total_work.saturating_add(w3);
+    if total_work > max_work { (None, total_work) } else { (res, total_work.max(1)) }
 }
 
-pub(in crate::dsl) fn hyp1f1_large_neg_z(a: f64, b: f64, z: f64) -> Option<f64> {
+pub(in crate::dsl) fn hyp1f1_large_neg_z_counted(a: f64, b: f64, z: f64, max_work: usize) -> (Option<f64>, usize) {
     // At z <= -30, the algebraic term dominates the exp(z) term only when b - a is not a pole
     // (if b - a <= 0 integer, M(b-a, b, -z) is a polynomial) and the log-ratio < -37 (< 1e-16).
     let bma = b - a;
     if is_non_positive_integer(bma) {
-        return None;
+        return (None, 1);
     }
     let neg_z = -z;
     if !is_non_positive_integer(a) {
-        let gbma = gamma(bma).ok()?;
-        let ga = gamma(a).ok()?;
+        let (Ok(gbma), Ok(ga)) = (gamma(bma), gamma(a)) else {
+            return (None, 1);
+        };
         let log_exp_over_alg = (gbma.abs() / ga.abs()).ln() + z + (2.0 * a - b) * neg_z.ln();
         if log_exp_over_alg > -37.0 {
-            return None;
+            return (None, 1);
         }
     }
-    let asymp_series = hyp2f0_asymp(a, b, -1.0 / z)?;
-    let gb = gamma(b).ok()?;
-    let gbma = gamma(bma).ok()?;
+    let (asymp_opt, work) = hyp2f0_asymp_counted(a, b, -1.0 / z, max_work);
+    let Some(asymp_series) = asymp_opt else {
+        return (None, work);
+    };
+    let (Ok(gb), Ok(gbma)) = (gamma(b), gamma(bma)) else {
+        return (None, work);
+    };
     let val = (gb / gbma) * neg_z.powf(-a) * asymp_series;
-    val.is_finite().then_some(val)
+    (val.is_finite().then_some(val), work)
 }
 
-pub(in crate::dsl) fn hyp1f1_series(a: f64, b: f64, z: f64) -> Option<f64> {
+pub(in crate::dsl) fn hyp1f1_series_counted(a: f64, b: f64, z: f64, max_work: usize) -> (Option<f64>, usize) {
     const MAX_ITERS: usize = 4_000;
     let mut term = 1.0_f64;
     let mut sum = NeumaierSum::new();
     sum.add(1.0);
     let mut max_abs = 1.0_f64;
     let mut prev_small = false;
+    let az = z.abs();
+    let mut work = 0_usize;
     for k in 0..MAX_ITERS {
+        work += 1;
+        if work > max_work {
+            return (None, work);
+        }
         let kf = k as f64;
         let denom = b + kf;
         if denom == 0.0 {
-            return None;
+            return (None, work);
         }
         let factor = ((a + kf) / denom) * (z / (kf + 1.0));
+        // For b + k > 0, every subsequent |factor(j)| (j >= k) is uniformly bounded above by:
+        // |z| * min(max(|a+k|/(b+k), 1)/(k+1), max(|a+k|/(k+1), 1)/(b+k)) (DLMF §13.2.2).
+        let future_bound = if denom > 0.0 {
+            let a_abs = (a + kf).abs();
+            let bound1 = (a_abs / denom).max(1.0) * (az / (kf + 1.0));
+            let bound2 = (a_abs / (kf + 1.0)).max(1.0) * (az / denom);
+            bound1.min(bound2)
+        } else {
+            f64::INFINITY
+        };
         term *= factor;
         if !term.is_finite() {
-            return None;
+            return (None, work);
         }
         if term == 0.0 {
+            let exact_zero = (a + kf) == 0.0;
+            if !exact_zero && !(denom > 0.0 && future_bound < 0.9) {
+                return (None, work);
+            }
             let total = sum.total();
-            return if max_abs > 1e12 * total.abs().max(1.0) { None } else { Some(total) };
+            let ok = if total == 0.0 { max_abs <= 1e4 } else { max_abs <= 1e12 * total.abs().max(f64::MIN_POSITIVE) };
+            return (ok.then_some(total), work);
         }
         max_abs = max_abs.max(term.abs());
         sum.add(term);
         let total = sum.total();
         if !total.is_finite() {
-            return None;
+            return (None, work);
         }
         max_abs = max_abs.max(total.abs());
         let is_small = term.abs() <= 1e-14 * total.abs().max(f64::MIN_POSITIVE);
-        let past_growth = (a + kf > 0.0 || kf + 1.0 > z.abs()) && b + kf > 0.0 && factor.abs() < 0.9;
+        // When future_bound < 0.9, the infinite remainder sum_{j>k} |T_j| is rigorously bounded by
+        // |T_k| * future_bound / (1 - future_bound), preventing premature termination before any
+        // growth peak while still converging when |factor(k)| approaches future_bound from below.
+        let past_growth =
+            denom > 0.0 && future_bound < 0.9 && term.abs() * future_bound <= 1e-14 * (1.0 - future_bound) * total.abs().max(f64::MIN_POSITIVE);
         if k >= 1 && is_small && prev_small && past_growth {
-            return if max_abs > 1e12 * total.abs().max(f64::MIN_POSITIVE) { None } else { Some(total) };
+            let res = if max_abs > 1e12 * total.abs().max(f64::MIN_POSITIVE) { None } else { Some(total) };
+            return (res, work);
         }
         prev_small = is_small;
     }
-    None
+    (None, work.max(1))
 }
 
-/// Gauss hypergeometric function `2F1(a, b; c; z)` for `z < 1` via Pfaff continuation (`z < -0.5`, A&S 15.3.4)
-/// and the Gauss series (A&S 15.1.1), returning `None` on non-convergence.
-pub(in crate::dsl) fn hyp2f1(a: f64, b: f64, c: f64, z: f64) -> Option<f64> {
+/// Gauss hypergeometric function `2F1(a, b; c; z)` for `z < 1` via Pfaff continuation (`z < -0.5`,
+/// A&S 15.3.4 / DLMF §15.8.1) and the Gauss series (A&S 15.1.1 / DLMF §15.2.1), with cumulative
+/// iteration metering across all continuation branches.
+pub(in crate::dsl) fn hyp2f1_counted(a: f64, b: f64, c: f64, z: f64, max_work: usize) -> (Option<f64>, usize) {
     if !a.is_finite() || !b.is_finite() || !c.is_finite() || !z.is_finite() || z >= 1.0 || (c <= 0.0 && (c - c.round()).abs() < 1e-12) {
-        return None;
+        return (None, 1);
     }
     if z == 0.0 || a == 0.0 || b == 0.0 {
-        return Some(1.0);
+        return (Some(1.0), 1);
     }
+    let mut total_work = 0_usize;
     if z < -0.5 {
         let w = z / (z - 1.0);
         if w.is_finite() && w < 1.0 {
             let one_minus_z = 1.0 - z;
-            if let Some(series_val) = hyp2f1_series(a, c - b, c, w) {
+            let (s1, w1) = hyp2f1_series_counted(a, c - b, c, w, max_work);
+            total_work = total_work.saturating_add(w1);
+            if total_work > max_work {
+                return (None, total_work);
+            }
+            if let Some(series_val) = s1 {
                 let res = one_minus_z.powf(-a) * series_val;
                 if res.is_finite() {
-                    return Some(res);
+                    return (Some(res), total_work.max(1));
                 }
             }
-            if let Some(series_val) = hyp2f1_series(c - a, b, c, w) {
+            let (s2, w2) = hyp2f1_series_counted(c - a, b, c, w, max_work.saturating_sub(total_work));
+            total_work = total_work.saturating_add(w2);
+            if total_work > max_work {
+                return (None, total_work);
+            }
+            if let Some(series_val) = s2 {
                 let res = one_minus_z.powf(-b) * series_val;
                 if res.is_finite() {
-                    return Some(res);
+                    return (Some(res), total_work.max(1));
                 }
             }
         }
         if z <= -1.0 {
-            return None;
+            return (None, total_work.max(1));
         }
     }
-    hyp2f1_series(a, b, c, z)
+    let (res, w3) = hyp2f1_series_counted(a, b, c, z, max_work.saturating_sub(total_work));
+    total_work = total_work.saturating_add(w3);
+    if total_work > max_work { (None, total_work) } else { (res, total_work.max(1)) }
 }
 
-pub(in crate::dsl) fn hyp2f1_series(a: f64, b: f64, c: f64, z: f64) -> Option<f64> {
+pub(in crate::dsl) fn hyp2f1_series_counted(a: f64, b: f64, c: f64, z: f64, max_work: usize) -> (Option<f64>, usize) {
     const MAX_ITERS: usize = 50_000;
     let mut term = 1.0_f64;
-    let mut sum = 1.0_f64;
+    let mut sum = NeumaierSum::new();
+    sum.add(1.0);
     let mut max_abs = 1.0_f64;
     let mut prev_small = false;
+    let az = z.abs();
+    let mut work = 0_usize;
     for k in 0..MAX_ITERS {
+        work += 1;
+        if work > max_work {
+            return (None, work);
+        }
         let kf = k as f64;
         let denom = c + kf;
         if denom == 0.0 {
-            return None;
+            return (None, work);
         }
         let factor = ((a + kf) * (b + kf) / denom) * (z / (kf + 1.0));
+        // For c + k > 0, every subsequent |factor(j)| (j >= k) is uniformly bounded by:
+        // |z| * min(max(|a+k|/(c+k), 1)*max(|b+k|/(k+1), 1), max(|b+k|/(c+k), 1)*max(|a+k|/(k+1), 1)).
+        let future_bound = if denom > 0.0 {
+            let a_abs = (a + kf).abs();
+            let b_abs = (b + kf).abs();
+            let kp1 = kf + 1.0;
+            let bound1 = (a_abs / denom).max(1.0) * (b_abs / kp1).max(1.0) * az;
+            let bound2 = (b_abs / denom).max(1.0) * (a_abs / kp1).max(1.0) * az;
+            bound1.min(bound2)
+        } else {
+            f64::INFINITY
+        };
         term *= factor;
         if !term.is_finite() {
-            return None;
+            return (None, work);
         }
         if term == 0.0 {
-            return if max_abs > 1e12 * sum.abs().max(1.0) { None } else { Some(sum) };
+            let exact_zero = (a + kf) == 0.0 || (b + kf) == 0.0;
+            if !exact_zero && !(denom > 0.0 && future_bound < 1.0) {
+                return (None, work);
+            }
+            let total = sum.total();
+            let ok = if total == 0.0 { max_abs <= 1e4 } else { max_abs <= 1e12 * total.abs().max(f64::MIN_POSITIVE) };
+            return (ok.then_some(total), work);
         }
         max_abs = max_abs.max(term.abs());
-        sum += term;
-        if !sum.is_finite() {
-            return None;
+        sum.add(term);
+        let total = sum.total();
+        if !total.is_finite() {
+            return (None, work);
         }
-        max_abs = max_abs.max(sum.abs());
-        let is_small = term.abs() <= 1e-14 * sum.abs().max(f64::MIN_POSITIVE);
-        let past_pole = c + kf > 0.0 && (a + kf > 0.0 || b + kf > 0.0 || kf + 1.0 > a.abs().max(b.abs()));
-        if k >= 1 && is_small && prev_small && past_pole && factor.abs() < 0.9999 {
-            return if max_abs > 1e12 * sum.abs().max(f64::MIN_POSITIVE) { None } else { Some(sum) };
+        max_abs = max_abs.max(total.abs());
+        let is_small = term.abs() <= 1e-14 * total.abs().max(f64::MIN_POSITIVE);
+        // When future_bound < 1, the infinite remainder sum_{j>k} |T_j| is rigorously bounded by
+        // |T_k| * future_bound / (1 - future_bound), preventing premature termination before any
+        // growth peak while allowing convergence even when |factor(k)| approaches |z| from below.
+        let past_growth =
+            denom > 0.0 && future_bound < 1.0 && term.abs() * future_bound <= 1e-14 * (1.0 - future_bound) * total.abs().max(f64::MIN_POSITIVE);
+        if k >= 1 && is_small && prev_small && past_growth {
+            let res = if max_abs > 1e12 * total.abs().max(f64::MIN_POSITIVE) { None } else { Some(total) };
+            return (res, work);
         }
         prev_small = is_small;
     }
-    None
+    (None, work.max(1))
 }
 
 /// Exact terminating polynomial `U(-m, b, z)` for integer `m >= 0` (DLMF §13.3.7 recurrence).
-pub(in crate::dsl) fn confluent_u_neg_int_a(m: usize, b: f64, z: f64) -> Option<f64> {
+pub(in crate::dsl) fn confluent_u_neg_int_a_counted(m: usize, b: f64, z: f64, max_work: usize) -> (Option<f64>, usize) {
     if m == 0 {
-        return Some(1.0);
+        return (Some(1.0), 1);
+    }
+    if m > max_work {
+        return (None, max_work.saturating_add(1));
     }
     let mut u_prev = 1.0_f64;
     let mut u_cur = z - b;
@@ -1031,24 +1285,24 @@ pub(in crate::dsl) fn confluent_u_neg_int_a(m: usize, b: f64, z: f64) -> Option<
         let kf = k as f64;
         let u_next = (z - b - 2.0 * kf) * u_cur - kf * (b + kf - 1.0) * u_prev;
         if !u_next.is_finite() {
-            return None;
+            return (None, k);
         }
         u_prev = u_cur;
         u_cur = u_next;
     }
-    u_cur.is_finite().then_some(u_cur)
+    (u_cur.is_finite().then_some(u_cur), m)
 }
 
 /// Exact integer-`b` logarithmic/digamma series (DLMF §13.2.9 / A&S 13.1.6) for `b = n + 1 >= 1`
 /// and moderate `z in (0, 4]`, replacing the unverified `b + 1e-7` perturbation.
-pub(in crate::dsl) fn confluent_u_integer_b_series(a: f64, n: usize, z: f64) -> Option<f64> {
+pub(in crate::dsl) fn confluent_u_integer_b_series_counted(a: f64, n: usize, z: f64, max_work: usize) -> (Option<f64>, usize) {
     let nf = n as f64;
     if a <= 0.0 && a.fract() == 0.0 {
-        return None;
+        return (None, 1);
     }
-    let ga = gamma(a).ok()?;
-    let g_an = gamma(a - nf).ok()?;
-    let psi_a0 = digamma(a).ok()?;
+    let (Ok(ga), Ok(g_an), Ok(psi_a0)) = (gamma(a), gamma(a - nf), digamma(a)) else {
+        return (None, 1);
+    };
     let mut psi_a = psi_a0;
     let mut psi_1 = -core::f64::consts::EULER_GAMMA;
     let mut psi_np1 = -core::f64::consts::EULER_GAMMA;
@@ -1068,12 +1322,20 @@ pub(in crate::dsl) fn confluent_u_integer_b_series(a: f64, n: usize, z: f64) -> 
     m_sum.add(1.0);
     psi_sum.add(psi_a - psi_1 - psi_np1);
     let mut max_psi_abs = (psi_a - psi_1 - psi_np1).abs();
+    let mut work = n.max(1);
+    if work > max_work {
+        return (None, work);
+    }
 
     for k in 0..512_usize {
+        work += 1;
+        if work > max_work {
+            return (None, work);
+        }
         let kf = k as f64;
         poch_term *= ((a + kf) / (nf + 1.0 + kf)) * (z / (kf + 1.0));
         if !poch_term.is_finite() {
-            return None;
+            return (None, work);
         }
         psi_a += 1.0 / (a + kf);
         psi_1 += 1.0 / (kf + 1.0);
@@ -1081,7 +1343,7 @@ pub(in crate::dsl) fn confluent_u_integer_b_series(a: f64, n: usize, z: f64) -> 
         let d_psi = psi_a - psi_1 - psi_np1;
         let psi_term = poch_term * d_psi;
         if !psi_term.is_finite() {
-            return None;
+            return (None, work);
         }
         max_psi_abs = max_psi_abs.max(psi_term.abs());
         m_sum.add(poch_term);
@@ -1111,111 +1373,197 @@ pub(in crate::dsl) fn confluent_u_integer_b_series(a: f64, n: usize, z: f64) -> 
 
     let ans = log_part + finite_part;
     if !ans.is_finite() || (max_psi_abs / (fact_n * g_an).abs() + finite_part.abs()) > 1e8 * ans.abs().max(1e-15) {
-        return None;
+        return (None, work);
     }
-    Some(ans)
+    (Some(ans), work)
 }
 
 /// Strictly positive Laplace integral (DLMF §13.4.4) for `a > 0, z > 0, b in R`:
 /// `U(a, b, z) = (z^-a / Gamma(a)) * int_0^inf exp(-u) u^(a-1) (1 + u/z)^(b-a-1) du`,
 /// evaluated in log-variable `s = ln(u)` centered on the exact log-integrand peak `u^*` using
-/// adaptive 15-point Gauss–Kronrod quadrature (`error <= ~1e-12` relative, zero integer-`b` pole).
-pub(in crate::dsl) fn confluent_u_laplace_pos_a(a: f64, b: f64, z: f64) -> Option<f64> {
+/// adaptive 15-point Gauss–Kronrod quadrature (`error <= ~1e-12` relative, zero integer-`b` pole),
+/// with geometric left-tail expansion and analytic `[0, delta]` tail when clamped to `s_delta`.
+pub(in crate::dsl) fn confluent_u_laplace_pos_a_counted(a: f64, b: f64, z: f64, max_work: usize) -> (Option<f64>, usize) {
     if a <= 0.0 || z <= 0.0 {
-        return None;
+        return (None, 1);
     }
-    let lg_a = ln_gamma(a).ok()?;
+    if max_work < 30 {
+        return (None, max_work.saturating_add(1));
+    }
+    let Ok(lg_a) = ln_gamma(a) else {
+        return (None, 1);
+    };
     let p = b - a - 1.0;
     let c = b - 1.0 - z;
     let disc = c * c + 4.0 * a * z;
     let u_star = if c >= 0.0 { 0.5 * (c + disc.sqrt()) } else { (2.0 * a * z) / (-c + disc.sqrt()) };
     if !u_star.is_finite() || u_star <= 0.0 {
-        return None;
+        return (None, 1);
     }
     let s_star = u_star.ln();
+    let ln_z = z.ln();
     let log_integrand = |s: f64| -> f64 {
+        if s > 709.0 {
+            return f64::NEG_INFINITY;
+        }
         let u = s.exp();
-        -u + a * s + p * (u / z).ln_1p()
+        let log_1p_u_over_z = if s - ln_z > 40.0 { s - ln_z } else { (u / z).ln_1p() };
+        -u + a * s + p * log_1p_u_over_z
     };
     let g_max = log_integrand(s_star);
     if !g_max.is_finite() {
-        return None;
+        return (None, 1);
     }
 
     let delta = (1e-15 * z.min(1.0) / p.abs().max(1.0)).max(1e-300);
     let s_delta = delta.ln();
-    let s_target_lo = s_star - 42.0 / a.min(100.0);
-    let (s_min, small_tail) = if s_target_lo >= s_delta {
-        let mut slo = s_target_lo;
-        for _ in 0..8 {
-            if log_integrand(slo) - g_max < -42.0 {
+    let mut slo = s_star - (42.0 / a.min(100.0)).max(1.0);
+    let mut prev_slo = s_star;
+    let mut expanded_below = false;
+    if slo > s_delta {
+        let mut step = (2.0 / a.min(10.0)).max(0.5);
+        for _ in 0..64 {
+            if slo <= s_delta {
+                slo = s_delta;
                 break;
             }
-            slo -= 2.0 / a.min(10.0);
+            if log_integrand(slo) - g_max < -42.0 {
+                expanded_below = true;
+                break;
+            }
+            prev_slo = slo;
+            slo -= step;
+            step *= 2.0;
         }
-        (slo.max(s_delta), 0.0)
-    } else {
+        if expanded_below && prev_slo - slo > 4.0 {
+            let mut hi = prev_slo;
+            let mut lo = slo;
+            for _ in 0..6 {
+                let mid = 0.5 * (lo + hi);
+                if log_integrand(mid) - g_max < -42.0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            slo = lo;
+        }
+    }
+    let (s_min, small_tail) = if slo <= s_delta {
         // Integrate [0, delta] analytically as delta^a / a since exp(-u)(1+u/z)^p = 1 + O(1e-15).
         let log_small = a * s_delta - a.ln() - g_max;
         let tail = if log_small < -745.0 { 0.0 } else { log_small.exp() };
         (s_delta, tail)
+    } else {
+        (slo, 0.0)
     };
 
-    let mut s_max = s_star + 1.0;
-    for _ in 0..64 {
-        if log_integrand(s_max) - g_max < -42.0 {
-            break;
-        }
-        s_max += 1.0;
-    }
+    let s_max = find_laplace_right_cutoff(&log_integrand, s_star, g_max);
 
-    let opts = QuadOptions { abs_tol: 1e-14, rel_tol: 1e-12, max_subdivisions: 256 };
-    let integral = integrate_adaptive(
+    let max_subdivisions = (max_work / 30).clamp(1, 256);
+    let evals = Cell::new(0_usize);
+    let opts = QuadOptions { abs_tol: 1e-14, rel_tol: 1e-12, max_subdivisions };
+    let Ok(integral) = integrate_adaptive(
         |s| {
+            evals.set(evals.get().saturating_add(1));
             let d = log_integrand(s) - g_max;
             if d < -745.0 { 0.0 } else { d.exp() }
         },
         s_min,
         s_max,
         opts,
-    )
-    .ok()?;
+    ) else {
+        return (None, evals.get().max(1));
+    };
+    let work = evals.get().max(1);
+    if work > max_work {
+        return (None, work);
+    }
     let total_scaled = integral + small_tail;
     if !total_scaled.is_finite() || total_scaled <= 0.0 {
-        return None;
+        return (None, work);
     }
-    let ln_u = -a * z.ln() - lg_a + g_max + total_scaled.ln();
-    let val = if ln_u < -745.0 { 0.0 } else { ln_u.exp() };
-    val.is_finite().then_some(val)
+    let ln_u = -a * ln_z - lg_a + g_max + total_scaled.ln();
+    let val = if ln_u < -745.133_219_101_941_2 { 0.0 } else { ln_u.exp() };
+    (val.is_finite().then_some(val), work)
+}
+
+fn find_laplace_right_cutoff<F: Fn(f64) -> f64>(log_integrand: &F, s_star: f64, g_max: f64) -> f64 {
+    let mut s_max = (s_star + 1.0).min(709.0);
+    let mut prev_s_max = s_star;
+    let mut expanded_above = false;
+    let mut step_hi = 1.0_f64;
+    for _ in 0..64 {
+        if log_integrand(s_max) - g_max < -42.0 {
+            expanded_above = true;
+            break;
+        }
+        if s_max >= 709.0 {
+            break;
+        }
+        prev_s_max = s_max;
+        s_max = (s_max + step_hi).min(709.0);
+        step_hi *= 2.0;
+    }
+    if expanded_above && s_max - prev_s_max > 4.0 {
+        let mut lo = prev_s_max;
+        let mut hi = s_max;
+        for _ in 0..8 {
+            let mid = 0.5 * (lo + hi);
+            if log_integrand(mid) - g_max < -42.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        s_max = hi;
+    }
+    s_max
 }
 
 /// Evaluate `U(a, b, z)` for `z > 0` via Laplace quadrature (`a > 0`) or stable downward
 /// `a`-recurrence (DLMF §13.3.7) from `a + m > 0` when `a < 0`.
-pub(in crate::dsl) fn confluent_u_via_laplace(a: f64, b: f64, z: f64) -> Option<f64> {
+pub(in crate::dsl) fn confluent_u_via_laplace_counted(a: f64, b: f64, z: f64, max_work: usize) -> (Option<f64>, usize) {
     if a > 0.0 {
-        return confluent_u_laplace_pos_a(a, b, z);
+        return confluent_u_laplace_pos_a_counted(a, b, z, max_work);
     }
     let shift = (1.0 - a).ceil();
     if !shift.is_finite() || shift > 200.0 {
-        return None;
+        return (None, 1);
     }
     let m = shift as usize;
     let a_hi = a + (m as f64);
-    let mut u_hi = confluent_u_laplace_pos_a(a_hi + 1.0, b, z)?;
-    let mut u_cur = confluent_u_laplace_pos_a(a_hi, b, z)?;
+    let (u_hi_opt, w1) = confluent_u_laplace_pos_a_counted(a_hi + 1.0, b, z, max_work);
+    let mut total_work = w1;
+    let Some(mut u_hi) = u_hi_opt else {
+        return (None, total_work);
+    };
+    if total_work > max_work {
+        return (None, total_work);
+    }
+    let (u_cur_opt, w2) = confluent_u_laplace_pos_a_counted(a_hi, b, z, max_work.saturating_sub(total_work));
+    total_work = total_work.saturating_add(w2);
+    let Some(mut u_cur) = u_cur_opt else {
+        return (None, total_work);
+    };
+    if total_work.saturating_add(m) > max_work {
+        return (None, max_work.saturating_add(1));
+    }
     for k in (1..=m).rev() {
+        total_work += 1;
         let ak = a + (k as f64);
         let u_lo = (z + 2.0 * ak - b) * u_cur - ak * (ak - b + 1.0) * u_hi;
         if !u_lo.is_finite() {
-            return None;
+            return (None, total_work);
         }
         u_hi = u_cur;
         u_cur = u_lo;
     }
-    Some(u_cur)
+    (Some(u_cur), total_work)
 }
 
-/// Tricomi confluent hypergeometric `U(a, b, z)` for `z > 0` (DLMF §13.2, §13.4, §13.7):
+/// Tricomi confluent hypergeometric `U(a, b, z)` for `z > 0` (DLMF §13.2, §13.4, §13.7) with
+/// internal iteration and quadrature work metering:
 ///
 /// - Exact terminating polynomials for non-positive integer `a` or non-negative integer `b - a - 1`
 ///   (including `U(a, a + 1, z) = z^(-a)`, exact for all real `a` and `z > 0`);
@@ -1229,29 +1577,38 @@ pub(in crate::dsl) fn confluent_u_via_laplace(a: f64, b: f64, z: f64) -> Option<
 ///   stable downward `a`-recurrence DLMF §13.3.7 when `a < 0`) for near-integer `b` and moderate `z`.
 ///
 /// Achieves `<= ~1e-12` relative accuracy across all covered `(a, b, z > 0)` domains.
-pub(in crate::dsl) fn confluent_u(a: f64, b_in: f64, z: f64) -> Option<f64> {
+pub(in crate::dsl) fn confluent_u_counted(a: f64, b_in: f64, z: f64, max_work: usize) -> (Option<f64>, usize) {
     if !a.is_finite() || !b_in.is_finite() || !z.is_finite() || z <= 0.0 {
-        return None;
+        return (None, 1);
     }
     if a == 0.0 {
-        return Some(1.0);
+        return (Some(1.0), 1);
     }
     if a < 0.0 && a.fract() == 0.0 && a >= -200.0 {
-        return confluent_u_neg_int_a((-a) as usize, b_in, z);
+        return confluent_u_neg_int_a_counted((-a) as usize, b_in, z, max_work);
     }
     let k_poly = b_in - a - 1.0;
     if k_poly >= 0.0 && k_poly.fract() == 0.0 && k_poly <= 200.0 {
-        let poly = confluent_u_neg_int_a(k_poly as usize, 2.0 - b_in, z)?;
-        let val = z.powf(1.0 - b_in) * poly;
-        return val.is_finite().then_some(val);
+        let (poly_opt, work) = confluent_u_neg_int_a_counted(k_poly as usize, 2.0 - b_in, z, max_work);
+        let val = poly_opt.and_then(|poly| {
+            let v = z.powf(1.0 - b_in) * poly;
+            v.is_finite().then_some(v)
+        });
+        return (val, work);
     }
 
-    if z >= 25.0
-        && let Some(asymp) = hyp2f0_asymp(a, b_in, -1.0 / z)
-    {
-        let val = z.powf(-a) * asymp;
-        if val.is_finite() {
-            return Some(val);
+    let mut total_work = 0_usize;
+    if z >= 25.0 {
+        let (a_opt, w) = hyp2f0_asymp_counted(a, b_in, -1.0 / z, max_work);
+        total_work = total_work.saturating_add(w);
+        if total_work > max_work {
+            return (None, total_work);
+        }
+        if let Some(asymp) = a_opt {
+            let val = z.powf(-a) * asymp;
+            if val.is_finite() {
+                return (Some(val), total_work.max(1));
+            }
         }
     }
 
@@ -1259,33 +1616,55 @@ pub(in crate::dsl) fn confluent_u(a: f64, b_in: f64, z: f64) -> Option<f64> {
         if b_in.fract() == 0.0 && b_in.abs() <= 100.0 && a.abs() <= 50.0 {
             if b_in <= 0.0 {
                 let m = (1.0 - b_in) as usize;
-                if let Some(u_pos) = confluent_u_integer_b_series(a + m as f64, m, z) {
+                let (u_opt, w) = confluent_u_integer_b_series_counted(a + m as f64, m, z, max_work.saturating_sub(total_work));
+                total_work = total_work.saturating_add(w);
+                if total_work > max_work {
+                    return (None, total_work);
+                }
+                if let Some(u_pos) = u_opt {
                     let val = z.powi(m as i32) * u_pos;
                     if val.is_finite() {
-                        return Some(val);
+                        return (Some(val), total_work.max(1));
                     }
                 }
             } else {
                 let n = (b_in - 1.0) as usize;
-                if let Some(val) = confluent_u_integer_b_series(a, n, z) {
-                    return Some(val);
+                let (u_opt, w) = confluent_u_integer_b_series_counted(a, n, z, max_work.saturating_sub(total_work));
+                total_work = total_work.saturating_add(w);
+                if total_work > max_work {
+                    return (None, total_work);
+                }
+                if let Some(val) = u_opt {
+                    return (Some(val), total_work.max(1));
                 }
             }
         } else if (b_in - b_in.round()).abs() >= 0.05 {
+            let (m1_opt, w1) = hyp1f1_counted(a, b_in, z, max_work.saturating_sub(total_work));
+            total_work = total_work.saturating_add(w1);
+            if total_work > max_work {
+                return (None, total_work);
+            }
+            let (m2_opt, w2) = hyp1f1_counted(1.0 + a - b_in, 2.0 - b_in, z, max_work.saturating_sub(total_work));
+            total_work = total_work.saturating_add(w2);
+            if total_work > max_work {
+                return (None, total_work);
+            }
             let pi = core::f64::consts::PI;
             if let (Some(m1), Some(m2), Ok(g1), Ok(g2), Ok(g3), Ok(g4)) =
-                (hyp1f1(a, b_in, z), hyp1f1(1.0 + a - b_in, 2.0 - b_in, z), gamma(1.0 + a - b_in), gamma(b_in), gamma(a), gamma(2.0 - b_in))
+                (m1_opt, m2_opt, gamma(1.0 + a - b_in), gamma(b_in), gamma(a), gamma(2.0 - b_in))
             {
                 let p1 = m1 / (g1 * g2);
                 let p2 = z.powf(1.0 - b_in) * m2 / (g3 * g4);
                 let diff = p1 - p2;
                 let res = (pi / (pi * b_in).sin()) * diff;
                 if res.is_finite() && (p1.abs() + p2.abs()) <= 1e8 * diff.abs().max(1e-300) {
-                    return Some(res);
+                    return (Some(res), total_work.max(1));
                 }
             }
         }
     }
 
-    confluent_u_via_laplace(a, b_in, z)
+    let (res, w_lap) = confluent_u_via_laplace_counted(a, b_in, z, max_work.saturating_sub(total_work));
+    total_work = total_work.saturating_add(w_lap);
+    if total_work > max_work { (None, total_work) } else { (res, total_work.max(1)) }
 }

@@ -419,8 +419,9 @@ fn gui_tools_forward_extended_parameters() {
     assert!(calls[4].1["metrics"].get("height_px").is_none());
     assert_eq!(calls[5].1["params"]["kind"], json!("Column"));
     assert_eq!(calls[6].1["sheet_id"], json!("result-1"));
-    assert_eq!(calls[7].1["tab"], json!(2));
+    assert_eq!(calls[7].1["tab"], json!("2"));
     assert_eq!(calls[8].1["patches"]["alpha"], json!(0.01));
+    assert_eq!(calls[8].1["patches"]["choice"], json!("create_new"));
     assert_eq!(calls[8].1["force_create_new"], json!(true));
     assert_eq!(calls[8].1["choice"], json!("create_new"));
     drop(host_guard);

@@ -710,7 +710,7 @@ impl CanvasDialogState {
                 self.active_dialog = ActiveDialog::None;
                 Some(intent)
             }
-            Err(existing_result_ids) => {
+            Err(existing_result_ids) if !existing_result_ids.is_empty() => {
                 if let (Some(src), Some(entry_id)) = (&self.analyze.source_sheet_id, &self.analyze.selected_entry_id) {
                     self.active_dialog = ActiveDialog::DuplicateAnalysisPrompt {
                         source_sheet_id: src.clone(),
@@ -720,6 +720,7 @@ impl CanvasDialogState {
                 }
                 None
             }
+            Err(_) => None,
         }
     }
 

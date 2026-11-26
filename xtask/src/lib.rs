@@ -124,7 +124,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "citations" => citations::run(&root, rest),
         "design-tokens" => design_tokens::run(&root, rest),
         "i18n-report" => cmd_i18n_report(&root),
-        "ui-commands" => ui_commands::run(&root, rest.iter().any(|a| a == "--check")),
+        "ui-commands" => ui_commands::run(&root, parse_single_flag(rest, "--check", "usage: cargo xtask ui-commands [--check]")?),
         "commands" => commands::run_cli(&root, rest),
         "schemas" => schemas::run_cli(&root, rest),
         "docs-site" => cmd_docs_site(&root, rest),
@@ -138,10 +138,18 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "release-scan" => release_scan::run(&root, rest),
         "ico" => ico::run(rest),
         "version" => version::run(&root, rest),
-        "stats" => stats::run(&root, rest.iter().any(|a| a == "--exact")),
+        "stats" => stats::run(&root, parse_single_flag(rest, "--exact", "usage: cargo xtask stats [--exact]")?),
         "contributors" => contributors::run(&root),
         "web-fonts" => web_fonts::run(&root),
         other => Err(format!("unknown xtask command `{other}`\n\n{HELP}")),
+    }
+}
+
+fn parse_single_flag(args: &[String], flag: &str, usage: &str) -> Result<bool, String> {
+    match args {
+        [] => Ok(false),
+        [a] if a == flag => Ok(true),
+        _ => Err(format!("unknown argument(s) `{}`; {usage}", args.join(" "))),
     }
 }
 
@@ -275,21 +283,26 @@ fn cmd_layers(root: &Path) -> Result<(), String> {
 }
 
 fn cmd_test(root: &Path, extra: &[String]) -> Result<(), String> {
-    if has_cargo_nextest() {
+    let use_nextest = has_cargo_nextest();
+    if use_nextest {
         let mut args =
             vec![String::from("nextest"), String::from("run"), String::from("--locked"), String::from("--workspace"), String::from("--all-targets")];
         args.extend_from_slice(extra);
-        run_cargo(root, &args)
+        run_cargo(root, &args)?;
     } else {
         let mut args = vec![String::from("test"), String::from("--locked"), String::from("--workspace"), String::from("--all-targets")];
         args.extend_from_slice(extra);
-        run_cargo(root, &args)
+        run_cargo(root, &args)?;
     }
+    if extra.is_empty() {
+        run_cargo(root, &ci::docs_site_test_args(use_nextest))?;
+    }
+    Ok(())
 }
 
 fn cmd_i18n_report(root: &Path) -> Result<(), String> {
     const TEST_PATH: &str = "i18n::tests::untranslated_report";
-    let args = ["test", "-p", "curvebook-ui-egui", "--lib", TEST_PATH, "--", "--exact", "--nocapture"];
+    let args = ["test", "--locked", "-p", "curvebook-ui-egui", "--lib", TEST_PATH, "--", "--exact", "--nocapture"];
     println!("+ cargo {}", args.join(" "));
     let out = Command::new("cargo").current_dir(root).args(args).output().map_err(|e| format!("cargo i18n-report: {e}"))?;
     let _ = std::io::stdout().write_all(&out.stdout);
@@ -541,5 +554,14 @@ mod tests {
         let out = super::dev_tool_command("rustfmt").arg("--version").run().expect("rustfmt on host PATH should execute");
         assert!(out.success, "rustfmt --version failed: {}", String::from_utf8_lossy(&out.stderr));
         assert!(String::from_utf8_lossy(&out.stdout).contains("rustfmt"));
+    }
+
+    #[test]
+    fn aud_12_50_parse_single_flag_rejects_typos_and_extra_args() {
+        assert_eq!(super::parse_single_flag(&[], "--check", "usage"), Ok(false));
+        assert_eq!(super::parse_single_flag(&[String::from("--check")], "--check", "usage"), Ok(true));
+        assert!(super::parse_single_flag(&[String::from("--chck")], "--check", "usage").is_err());
+        assert!(super::parse_single_flag(&[String::from("--check"), String::from("--check")], "--check", "usage").is_err());
+        assert!(super::parse_single_flag(&[String::from("--exact"), String::from("extra")], "--exact", "usage").is_err());
     }
 }

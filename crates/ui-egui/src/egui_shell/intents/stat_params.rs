@@ -123,7 +123,7 @@ pub(super) fn apply_stat_params_intent(app: &mut UiApp, intent: StatParamsIntent
             let next = !app.canvas_dialogs.edit_params.correlation_all_pairs;
             let mut map = serde_json::Map::new();
             map.insert(String::from("correlation_all_pairs"), serde_json::Value::Bool(next));
-            let _ = patch_edit_params(app, &map);
+            patch_edit_params(app, &map)?;
         }
         StatParamsIntent::ToggleCorrHeatmap => {
             let gate = r7_correlation_heatmap_toggle(app.canvas_dialogs.edit_params.correlation_all_pairs);
@@ -181,6 +181,12 @@ fn handle_schematic_toggle(app: &mut UiApp) -> Result<(), EngineError> {
             if f.repeated_measures != RepeatedMeasuresDesign::None {
                 let next = if f.residual_covariance == ResidualCovariance::CompoundSymmetry { "unstructured" } else { "compound_symmetry" };
                 return set_factorial_residual_cov(app, next);
+            }
+            let src = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.source_sheet_id);
+            if !r1_paired_or_matched_allowed(app.document(), src).enabled {
+                let mode = &mut app.canvas_dialogs.edit_params.schematic_mode;
+                *mode = if mode == "detail" { String::from("auto") } else { String::from("detail") };
+                return Ok(());
             }
             let mut map = serde_json::Map::new();
             map.insert(String::from("paired_or_matched"), serde_json::Value::Bool(true));
@@ -485,20 +491,23 @@ fn toggle_diag_flag(app: &mut UiApp, flag: DiagToggleFlag) -> Result<(), EngineE
             return Err(conflict(gate.disabled_reason.unwrap_or_default()));
         }
     }
-    let ep = &mut app.canvas_dialogs.edit_params;
     match flag {
-        DiagToggleFlag::QqPlot => ep.diag_qq_plot = !ep.diag_qq_plot,
-        DiagToggleFlag::Residuals => ep.diag_residuals_plot = !ep.diag_residuals_plot,
-        DiagToggleFlag::Homoscedasticity => ep.diag_homoscedasticity = !ep.diag_homoscedasticity,
-        DiagToggleFlag::Checklist => ep.diag_assumption_checklist = !ep.diag_assumption_checklist,
+        DiagToggleFlag::QqPlot => app.canvas_dialogs.edit_params.diag_qq_plot = !app.canvas_dialogs.edit_params.diag_qq_plot,
+        DiagToggleFlag::Residuals => app.canvas_dialogs.edit_params.diag_residuals_plot = !app.canvas_dialogs.edit_params.diag_residuals_plot,
+        DiagToggleFlag::Homoscedasticity => {
+            app.canvas_dialogs.edit_params.diag_homoscedasticity = !app.canvas_dialogs.edit_params.diag_homoscedasticity;
+        }
+        DiagToggleFlag::Checklist => {
+            app.canvas_dialogs.edit_params.diag_assumption_checklist = !app.canvas_dialogs.edit_params.diag_assumption_checklist;
+        }
         DiagToggleFlag::Influence => {
-            ep.diag_influence_leverage = !ep.diag_influence_leverage;
-            if let Some(AnalysisKind::GeneralizedLinearModel(g)) = ep.draft.as_ref().map(|d| &d.kind) {
+            if let Some(AnalysisKind::GeneralizedLinearModel(g)) = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) {
                 let next_vif = !g.compute_vif;
                 let mut map = serde_json::Map::new();
                 map.insert(String::from("compute_vif"), serde_json::Value::Bool(next_vif));
-                let _ = patch_edit_params(app, &map);
+                patch_edit_params(app, &map)?;
             }
+            app.canvas_dialogs.edit_params.diag_influence_leverage = !app.canvas_dialogs.edit_params.diag_influence_leverage;
         }
     }
     Ok(())

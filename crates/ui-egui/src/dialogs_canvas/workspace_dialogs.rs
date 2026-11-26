@@ -174,11 +174,9 @@ impl ExcludeWithReasonDialogState {
 
     /// Initialize dialog state targeting `coords` on `sheet_id`.
     pub fn open_for_coords(&mut self, sheet_id: SheetId, coords: Vec<GridCellCoord>) {
+        *self = Self::default();
         self.sheet_id = Some(sheet_id);
         self.coords = coords;
-        if self.reason_tag.trim().is_empty() {
-            self.reason_tag = String::from("Outlier");
-        }
     }
 
     /// Build the `table.excludeCellsWithReason` command intent.
@@ -499,17 +497,16 @@ pub struct FormatSelectedPointsState {
 impl FormatSelectedPointsState {
     /// Open dialog state targeting `graph_sheet_id` and `points` `(series_index, point_index)`.
     pub fn open_for_graph(&mut self, graph_sheet_id: SheetId, points: Vec<(usize, usize)>) {
+        *self = Self::default();
         self.graph_sheet_id = Some(graph_sheet_id);
         self.selected_points = points;
-        self.selected_subcols.clear();
-        self.clear_overrides = false;
     }
 
     /// Open dialog state targeting `graph_sheet_id` and `(series_index, point_index, subcol)` tuples.
     pub fn open_for_graph_with_subcols(&mut self, graph_sheet_id: SheetId, targets: Vec<(usize, usize, Option<usize>)>) {
+        *self = Self::default();
         self.graph_sheet_id = Some(graph_sheet_id);
         self.set_selected_targets(targets);
-        self.clear_overrides = false;
     }
 
     /// Replace selected targets with explicit `(series_index, point_index, subcol)` tuples.

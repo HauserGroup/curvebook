@@ -12,14 +12,33 @@ use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 use super::helpers::{render_dataset_checklist, render_mv_role_badge, resolve_source_data_sheet};
 
-fn collect_term_combinations(n: usize, k: usize, start: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+const MAX_FORMULA_DISPLAY_TERMS: usize = 64;
+
+fn collect_term_combinations(
+    n: usize,
+    k: usize,
+    start: usize,
+    cur: &mut Vec<usize>,
+    out: &mut Vec<Vec<usize>>,
+    max_terms: usize,
+    truncated: &mut bool,
+) {
+    if out.len() >= max_terms {
+        *truncated = true;
+        return;
+    }
     if cur.len() == k {
         out.push(cur.clone());
         return;
     }
-    for i in start..n {
+    let remaining_needed = k - cur.len();
+    for i in start..=n.saturating_sub(remaining_needed) {
+        if out.len() >= max_terms {
+            *truncated = true;
+            return;
+        }
         cur.push(i);
-        collect_term_combinations(n, k, i + 1, cur, out);
+        collect_term_combinations(n, k, i + 1, cur, out, max_terms, truncated);
         cur.pop();
     }
 }
@@ -33,12 +52,24 @@ pub(super) fn build_live_symbolic_formula(spec: &curvebook_doc::AnalysisSpec, do
             let terms: Vec<String> = f.multifactor_columns.iter().map(|&c| name(c)).collect();
             let order_cap = f.max_interaction_order.clamp(1, terms.len());
             let mut subsets: Vec<Vec<usize>> = Vec::new();
+            let mut truncated = false;
             for ord in 1..=order_cap {
-                collect_term_combinations(terms.len(), ord, 0, &mut Vec::new(), &mut subsets);
+                collect_term_combinations(terms.len(), ord, 0, &mut Vec::new(), &mut subsets, MAX_FORMULA_DISPLAY_TERMS, &mut truncated);
+                if truncated {
+                    break;
+                }
             }
-            let rhs =
-                subsets.iter().map(|sub| sub.iter().map(|&idx| terms[idx].as_str()).collect::<Vec<_>>().join(":")).collect::<Vec<_>>().join(" + ");
-            Some(format!("{y} ~ {rhs}"))
+            if truncated {
+                let factor_list = terms.join(" + ");
+                Some(format!("{y} ~ ({factor_list})^{order_cap}  [{} factors, up to {order_cap}-way]", terms.len()))
+            } else {
+                let rhs = subsets
+                    .iter()
+                    .map(|sub| sub.iter().map(|&idx| terms[idx].as_str()).collect::<Vec<_>>().join(":"))
+                    .collect::<Vec<_>>()
+                    .join(" + ");
+                Some(format!("{y} ~ {rhs}"))
+            }
         }
         AnalysisKind::GeneralizedLinearModel(glm) => {
             let y = name(glm.response_column);
@@ -143,8 +174,20 @@ pub(super) fn render_stat_mv_data_tab(
                         &ControlEnablement::enabled(),
                     ) {
                         let mut next = spec.clone();
-                        if let AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { time_column: tc, .. }) = &mut next.kind {
+                        if let AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
+                            time_column: tc,
+                            status_column: sc,
+                            predictor_columns: pc,
+                            ..
+                        }) = &mut next.kind
+                        {
+                            let prev_tc = *tc;
                             *tc = idx;
+                            if *sc == idx {
+                                *sc = if prev_tc != idx { prev_tc } else { (0..mv.variables.len()).find(|&c| c != idx).unwrap_or(idx) };
+                            }
+                            let cur_sc = *sc;
+                            pc.retain(|&c| c != idx && c != cur_sc);
                         }
                         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
@@ -158,8 +201,20 @@ pub(super) fn render_stat_mv_data_tab(
                         &ControlEnablement::enabled(),
                     ) {
                         let mut next = spec.clone();
-                        if let AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { status_column: sc, .. }) = &mut next.kind {
+                        if let AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
+                            time_column: tc,
+                            status_column: sc,
+                            predictor_columns: pc,
+                            ..
+                        }) = &mut next.kind
+                        {
+                            let prev_sc = *sc;
                             *sc = idx;
+                            if *tc == idx {
+                                *tc = if prev_sc != idx { prev_sc } else { (0..mv.variables.len()).find(|&c| c != idx).unwrap_or(idx) };
+                            }
+                            let cur_tc = *tc;
+                            pc.retain(|&c| c != idx && c != cur_tc);
                         }
                         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
@@ -250,8 +305,20 @@ pub(super) fn render_stat_mv_data_tab(
                         &ControlEnablement::enabled(),
                     ) {
                         let mut next = spec.clone();
-                        if let AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_time_column: c, .. }) = &mut next.kind {
-                            *c = Some(idx);
+                        if let AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier {
+                            mv_time_column: tc,
+                            mv_status_column: sc,
+                            mv_group_column: gc,
+                            ..
+                        }) = &mut next.kind
+                        {
+                            *tc = Some(idx);
+                            if *sc == Some(idx) {
+                                *sc = None;
+                            }
+                            if *gc == Some(idx) {
+                                *gc = None;
+                            }
                         }
                         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
@@ -265,8 +332,20 @@ pub(super) fn render_stat_mv_data_tab(
                         &ControlEnablement::enabled(),
                     ) {
                         let mut next = spec.clone();
-                        if let AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_status_column: c, .. }) = &mut next.kind {
-                            *c = Some(idx);
+                        if let AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier {
+                            mv_time_column: tc,
+                            mv_status_column: sc,
+                            mv_group_column: gc,
+                            ..
+                        }) = &mut next.kind
+                        {
+                            *sc = Some(idx);
+                            if *tc == Some(idx) {
+                                *tc = None;
+                            }
+                            if *gc == Some(idx) {
+                                *gc = None;
+                            }
                         }
                         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
@@ -280,8 +359,22 @@ pub(super) fn render_stat_mv_data_tab(
                         &ControlEnablement::enabled(),
                     ) {
                         let mut next = spec.clone();
-                        if let AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_group_column: c, .. }) = &mut next.kind {
-                            *c = if *c == Some(idx) { None } else { Some(idx) };
+                        if let AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier {
+                            mv_time_column: tc,
+                            mv_status_column: sc,
+                            mv_group_column: gc,
+                            ..
+                        }) = &mut next.kind
+                        {
+                            *gc = if *gc == Some(idx) { None } else { Some(idx) };
+                            if *gc == Some(idx) {
+                                if *tc == Some(idx) {
+                                    *tc = None;
+                                }
+                                if *sc == Some(idx) {
+                                    *sc = None;
+                                }
+                            }
                         }
                         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
@@ -325,12 +418,18 @@ pub(super) fn render_stat_mv_data_tab(
                         &ControlEnablement::enabled(),
                     ) {
                         let mut next = spec.clone();
-                        if let AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { predictor_columns: pc, .. }) = &mut next.kind {
+                        if let AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation {
+                            response_column: rc, predictor_columns: pc, ..
+                        }) = &mut next.kind
+                        {
                             if let Some(p) = pc.iter().position(|&c| c == idx) {
                                 pc.remove(p);
                             } else {
                                 pc.push(idx);
                                 pc.sort_unstable();
+                                if *rc == Some(idx) {
+                                    *rc = None;
+                                }
                             }
                         }
                         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });

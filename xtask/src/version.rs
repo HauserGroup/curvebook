@@ -37,15 +37,18 @@ fn is_toml_version_rhs(trimmed: &str) -> Option<&str> {
 pub fn read_workspace_version(cargo_toml: &str) -> Result<String, String> {
     let mut in_ws_pkg = false;
     for line in cargo_toml.lines() {
-        let t = line.trim();
-        let no_comment = t.split('#').next().unwrap_or_default().trim();
+        let no_comment = crate::scan_util::strip_toml_comment(line).trim();
         if no_comment.starts_with('[') && no_comment.ends_with(']') {
             in_ws_pkg = no_comment == "[workspace.package]";
             continue;
         }
-        if in_ws_pkg && let Some(rhs) = is_toml_version_rhs(t) {
-            let v = rhs.split('#').next().unwrap_or_default().trim().trim_matches('"');
-            if !v.is_empty() {
+        if in_ws_pkg && let Some(rhs) = is_toml_version_rhs(no_comment) {
+            let trimmed = rhs.trim();
+            let unquoted =
+                trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')).or_else(|| trimmed.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')));
+            if let Some(v) = unquoted
+                && !v.is_empty()
+            {
                 return Ok(v.to_owned());
             }
         }
@@ -66,11 +69,10 @@ pub fn replace_workspace_version(cargo_toml: &str, new_ver: &str) -> Result<Stri
     let mut in_ws_pkg = false;
     let mut replaced = false;
     for line in cargo_toml.split_inclusive('\n') {
-        let t = line.trim();
-        let no_comment = t.split('#').next().unwrap_or_default().trim();
+        let no_comment = crate::scan_util::strip_toml_comment(line).trim();
         if no_comment.starts_with('[') && no_comment.ends_with(']') {
             in_ws_pkg = no_comment == "[workspace.package]";
-        } else if in_ws_pkg && !replaced && is_toml_version_rhs(t).is_some() {
+        } else if in_ws_pkg && !replaced && is_toml_version_rhs(no_comment).is_some() {
             let newline = if line.ends_with("\r\n") {
                 "\r\n"
             } else if line.ends_with('\n') {
@@ -119,5 +121,9 @@ mod tests {
         let next = replace_workspace_version(toml, "0.2.0-rc.1").unwrap();
         assert!(next.contains("version_extra = \"9.9.9\""), "unrelated `version_*` key must stay untouched");
         assert_eq!(read_workspace_version(&next).unwrap(), "0.2.0-rc.1");
+
+        // AUD-12-51: single-quoted TOML string version must unquote cleanly.
+        let single_quoted = "[workspace.package]\nversion = '0.3.0-beta.2' # comment\n";
+        assert_eq!(read_workspace_version(single_quoted).unwrap(), "0.3.0-beta.2");
     }
 }

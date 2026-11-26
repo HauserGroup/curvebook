@@ -307,6 +307,12 @@ pub enum OpCode {
     JumpIfZero(usize),
     /// Discard top value from operand stack.
     Pop,
+    /// Enter a fault-catching scope for `is_defined(expr)` whose handler jumps to instruction offset `target`.
+    /// Domain errors, division by zero, `NaN`, or missing predictors before [`OpCode::ExitDefinedScope`] unwind
+    /// the operand stack to the saved depth, push `0.0`, and jump to `target`; step-budget exhaustion stays fatal.
+    EnterDefinedScope(usize),
+    /// Leave the innermost `is_defined(expr)` fault-catching scope normally.
+    ExitDefinedScope,
     /// Terminate VM execution and return top of stack.
     Halt,
 }
@@ -404,9 +410,9 @@ pub enum BuiltinFn {
     Trunc,
     /// Signum (`-1`, `0`, or `+1`).
     Sign,
-    /// Variadic minimum `min(...)`.
+    /// Variadic minimum `min(a, b, ...)` (2 or more arguments).
     Min,
-    /// Variadic maximum `max(...)`.
+    /// Variadic maximum `max(a, b, ...)` (2 or more arguments).
     Max,
     /// Clamp `x` to `[lo, hi]` (`clamp(x, lo, hi)`).
     Clamp,

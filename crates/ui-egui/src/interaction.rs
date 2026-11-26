@@ -715,25 +715,42 @@ impl VirtualWorkspaceFolder {
     pub fn save_unpacked_snapshot(&mut self, doc: &ProjectDocument) -> Result<usize, String> {
         doc.validate_structural_limits().map_err(|err| format!("invalid project structural limits: {err}"))?;
         let doc_bytes = serde_json::to_vec_pretty(doc).map_err(|err| err.to_string())?;
-        let mut sheet_entries = Vec::new();
-        self.files.retain(|k, _| !k.starts_with("sheets/"));
+        let mut staged = self.clone();
+        staged.files.retain(|k, _| !k.starts_with("sheets/"));
+        let mut sheet_entries = Vec::with_capacity(doc.data_sheets.len());
+        let mut used_paths = std::collections::HashSet::with_capacity(doc.data_sheets.len());
         for ds in &doc.data_sheets {
             let safe_id: String = ds.id.as_str().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
-            let csv_rel = format!("sheets/{safe_id}.csv");
+            let base = if safe_id.is_empty() { String::from("sheet") } else { safe_id };
+            let mut csv_rel = format!("sheets/{base}.csv");
+            if !used_paths.insert(csv_rel.clone()) {
+                let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+                for b in ds.id.as_str().as_bytes() {
+                    hash ^= u64::from(*b);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                csv_rel = format!("sheets/{base}_{hash:016x}.csv");
+                let mut collision_idx = 1usize;
+                while !used_paths.insert(csv_rel.clone()) {
+                    csv_rel = format!("sheets/{base}_{hash:016x}_{collision_idx}.csv");
+                    collision_idx += 1;
+                }
+            }
             let csv_text = export_datasheet_to_csv(ds, &curvebook_format::CsvOptions::csv()).map_err(|err| err.to_string())?;
-            self.write_file(&csv_rel, csv_text.into_bytes())?;
+            staged.write_file(&csv_rel, csv_text.into_bytes())?;
             sheet_entries.push(json!({ "id": ds.id.as_str(), "title": ds.title, "csv_path": csv_rel }));
         }
         let manifest_bytes = serde_json::to_vec_pretty(&json!({
-            "root_name": self.root_name,
+            "root_name": staged.root_name,
             "title": doc.title,
             "schema_version": doc.schema_version,
             "sheets": sheet_entries,
         }))
         .map_err(|err| err.to_string())?;
-        self.write_file("document.json", doc_bytes)?;
-        self.write_file("manifest.json", manifest_bytes)?;
-        self.validate_limits()?;
+        staged.write_file("document.json", doc_bytes)?;
+        staged.write_file("manifest.json", manifest_bytes)?;
+        staged.validate_limits()?;
+        *self = staged;
         Ok(self.total_bytes())
     }
 
@@ -1986,18 +2003,24 @@ fn try_handle_workspace_paste_shortcut(app: &mut UiApp) -> Result<Option<UiEvent
         }));
     }
     let anchor = app.grid.tool.active.unwrap_or(GridCellCoord::new(0, 0, 0));
-    let res = execute_engine_value(
-        app,
-        "table.paste",
-        json!({
-            "sheet_id": ds_id.as_str(),
-            "text": clip,
-            "start_row": anchor.row,
-            "start_col": anchor.col,
-            "start_subcol": anchor.subcol,
-            "propagate_title_header": false,
-        }),
-    )?;
+    let decimal_sep = app.locale_preset.decimal_separator;
+    let mut paste_params = json!({
+        "sheet_id": ds_id.as_str(),
+        "text": clip,
+        "decimal_separator": decimal_sep.to_string(),
+        "start_row": anchor.row,
+        "start_col": anchor.col,
+        "start_subcol": anchor.subcol,
+        "propagate_title_header": false,
+    });
+    if decimal_sep == ','
+        && !clip.contains('\t')
+        && !clip.contains(';')
+        && let Some(obj) = paste_params.as_object_mut()
+    {
+        obj.insert(String::from("delimiter"), json!("\t"));
+    }
+    let res = execute_engine_value(app, "table.paste", paste_params)?;
     app.grid.refresh_selection_stats(app.session.document());
     Ok(Some(UiEventOutcome {
         handled: true,
@@ -2025,9 +2048,12 @@ fn toggle_exclude_active_grid_cells(app: &mut UiApp) -> Result<Option<UiEventOut
         app.grid.tool.pending_intents.clear();
         let _ = app.grid.emit_toggle_exclude_intents(&ds, target_excluded);
         let intents = std::mem::take(&mut app.grid.tool.pending_intents);
-        for intent in intents {
-            app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
-        }
+        app.execute_atomic_group(|a| {
+            for intent in intents {
+                a.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
+            }
+            Ok::<(), String>(())
+        })?;
         app.grid.refresh_selection_stats(app.session.document());
         return Ok(Some(UiEventOutcome {
             handled: true,
@@ -2194,7 +2220,7 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
 
     for candidate in build_shortcut_candidates(trimmed, modifiers) {
         let on_result_sheet = resolve_result_sheet_for_shortcut(app, true).is_some();
-        if let Ok(Some(exec)) = app.handle_key_combo_for_context(&candidate, on_result_sheet) {
+        if let Some(exec) = app.handle_key_combo_for_context(&candidate, on_result_sheet)? {
             if matches!(exec.command_id.as_str(), "edit.undo" | "edit.redo" | "sheet.select") {
                 clear_inspector_axis_buffers(app);
             }

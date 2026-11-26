@@ -1575,12 +1575,35 @@ fn normalize_key(raw: &str) -> String {
 /// agree with live command, UI-command, and workspace-package counts (`R2-S13-11`).
 #[must_use]
 pub fn check_live_status_metrics(root: &Path, status_md: &str) -> Vec<EvidenceViolation> {
+    check_live_status_metrics_with_ci(root, status_md, crate::workflows::is_ci_env())
+}
+
+fn check_live_status_metrics_with_ci(root: &Path, status_md: &str, in_ci: bool) -> Vec<EvidenceViolation> {
     let mut violations = Vec::new();
     #[cfg(feature = "docs-site")]
     let live_engine = Some(curvebook_engine::cmd::registry().len());
     #[cfg(not(feature = "docs-site"))]
-    let live_engine: Option<usize> = None;
-    let live_ui = count_live_ui_commands(root);
+    let live_engine: Option<usize> = {
+        if in_ci {
+            push_ev(
+                &mut violations,
+                STATUS_REL,
+                1,
+                String::from("xtask built without `--features docs-site` under CI; cannot verify live engine command count parity"),
+            );
+        } else if !cfg!(test) {
+            eprintln!("status: warning: xtask built without `--features docs-site`; skipping live engine command count parity checks");
+        }
+        None
+    };
+    let _ = in_ci;
+    let live_ui = match count_live_ui_commands(root) {
+        Ok(n) => Some(n),
+        Err(err) => {
+            push_ev(&mut violations, "crates/ui-egui/src/menus/ui_commands.rs", 1, err);
+            None
+        }
+    };
     let live_pkgs = crate::layers::TABLE.len();
 
     check_status_structural_headings(status_md, &mut violations);
@@ -1589,10 +1612,14 @@ pub fn check_live_status_metrics(root: &Path, status_md: &str) -> Vec<EvidenceVi
     violations
 }
 
-fn count_live_ui_commands(root: &Path) -> Option<usize> {
+fn count_live_ui_commands(root: &Path) -> Result<usize, String> {
     let rel = "crates/ui-egui/src/menus/ui_commands.rs";
-    let src = fs::read_to_string(root.join(rel)).ok()?;
-    let (_with_strings, code_only) = build_stripped_views(&src);
+    let src = fs::read_to_string(root.join(rel)).map_err(|e| format!("cannot read `{rel}` to count live UI commands: {e}"))?;
+    count_ui_command_specs_in_source(&src).ok_or_else(|| format!("cannot parse `pub const UI_COMMANDS` array in `{rel}`"))
+}
+
+fn count_ui_command_specs_in_source(src: &str) -> Option<usize> {
+    let (_with_strings, code_only) = build_stripped_views(src);
     let (_, after_decl) = code_only.split_once("pub const UI_COMMANDS:")?;
     let (_, after_eq) = after_decl.split_once('=')?;
     let open_rel = after_eq.find('[')?;
@@ -1612,8 +1639,31 @@ fn count_live_ui_commands(root: &Path) -> Option<usize> {
             _ => {}
         }
     }
-    let slice_end = slice_end?;
-    Some(slice.get(..slice_end)?.matches("UiCommandSpec {").count())
+    let body = slice.get(..slice_end?)?;
+    Some(count_struct_literal_occurrences(body, "UiCommandSpec"))
+}
+
+fn count_struct_literal_occurrences(code: &str, type_name: &str) -> usize {
+    let bytes = code.as_bytes();
+    let mut count = 0usize;
+    let mut search = 0usize;
+    while let Some(rel) = code.get(search..).and_then(|s| s.find(type_name)) {
+        let pos = search + rel;
+        let end = pos + type_name.len();
+        let left_ok = pos == 0 || !crate::rust_lex::is_ident_byte(bytes[pos - 1]);
+        let right_ok = end == bytes.len() || !crate::rust_lex::is_ident_byte(bytes[end]);
+        if left_ok && right_ok {
+            let mut next = end;
+            while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                next += 1;
+            }
+            if bytes.get(next) == Some(&b'{') {
+                count += 1;
+            }
+        }
+        search = end;
+    }
+    count
 }
 
 fn check_status_structural_headings(status_md: &str, violations: &mut Vec<EvidenceViolation>) {
@@ -1695,33 +1745,51 @@ fn cell_contains_number(row: &str, needle: &str) -> bool {
 }
 
 fn check_doc_count_parity(root: &Path, live_engine: Option<usize>, live_ui: Option<usize>, violations: &mut Vec<EvidenceViolation>) {
-    if let Some(engine_count) = live_engine
-        && let Ok(cmds_doc) = fs::read_to_string(root.join("docs/commands.md"))
-    {
-        let expected = format!("Registered commands: {engine_count}");
-        if !cmds_doc.contains(&expected) {
-            push_ev(violations, "docs/commands.md", 1, format!("expected `{expected}` matching live registry"));
-        }
-    }
-    if let Ok(agents_doc) = fs::read_to_string(root.join("AGENTS.md")) {
-        if let Some(engine_count) = live_engine {
-            let expected = format!("`{engine_count}` commands");
-            if !agents_doc.contains(&expected) {
-                push_ev(violations, "AGENTS.md", 1, format!("expected `{expected}` matching live command registry"));
+    match fs::read_to_string(root.join("docs/commands.md")) {
+        Ok(cmds_doc) => {
+            if let Some(engine_count) = live_engine {
+                let expected = format!("Registered commands: {engine_count}");
+                if !cmds_doc.contains(&expected) {
+                    push_ev(violations, "docs/commands.md", 1, format!("expected `{expected}` matching live registry"));
+                }
             }
         }
-        if let Some(ui_count) = live_ui {
-            let expected = format!("`{ui_count}` entries");
-            if !agents_doc.contains(&expected) {
-                push_ev(violations, "AGENTS.md", 1, format!("expected `{expected}` matching live `UI_COMMANDS` count"));
+        Err(err) => push_ev(violations, "docs/commands.md", 1, format!("cannot read `docs/commands.md`: {err}")),
+    }
+    match fs::read_to_string(root.join("AGENTS.md")) {
+        Ok(agents_doc) => {
+            if let Some(engine_count) = live_engine {
+                let expected = format!("`{engine_count}` commands");
+                if !agents_doc.contains(&expected) {
+                    push_ev(violations, "AGENTS.md", 1, format!("expected `{expected}` matching live command registry"));
+                }
+            }
+            if let Some(ui_count) = live_ui {
+                let expected = format!("`{ui_count}` entries");
+                if !agents_doc.contains(&expected) {
+                    push_ev(violations, "AGENTS.md", 1, format!("expected `{expected}` matching live `UI_COMMANDS` count"));
+                }
             }
         }
+        Err(err) => push_ev(violations, "AGENTS.md", 1, format!("cannot read `AGENTS.md`: {err}")),
     }
-    if let (Some(ui_count), Ok(proto_doc)) = (live_ui, fs::read_to_string(root.join("docs/control-protocol.md"))) {
-        let exact_ui = format!("`{ui_count}` synced `UI_COMMANDS`");
-        if proto_doc.contains("`32` synced `UI_COMMANDS`") || (!proto_doc.contains("all synced `UI_COMMANDS`") && !proto_doc.contains(&exact_ui)) {
-            push_ev(violations, "docs/control-protocol.md", 1, format!("expected `all synced `UI_COMMANDS`` or `{exact_ui}` (found stale count)"));
+    match fs::read_to_string(root.join("docs/control-protocol.md")) {
+        Ok(proto_doc) => {
+            if let Some(ui_count) = live_ui {
+                let exact_ui = format!("`{ui_count}` synced `UI_COMMANDS`");
+                if proto_doc.contains("`32` synced `UI_COMMANDS`")
+                    || (!proto_doc.contains("all synced `UI_COMMANDS`") && !proto_doc.contains(&exact_ui))
+                {
+                    push_ev(
+                        violations,
+                        "docs/control-protocol.md",
+                        1,
+                        format!("expected `all synced `UI_COMMANDS`` or `{exact_ui}` (found stale count)"),
+                    );
+                }
+            }
         }
+        Err(err) => push_ev(violations, "docs/control-protocol.md", 1, format!("cannot read `docs/control-protocol.md`: {err}")),
     }
 }
 
@@ -1999,5 +2067,19 @@ mod tests {
         #[cfg(feature = "docs-site")]
         assert!(stale_hits.iter().any(|v| v.reason.contains("Engine command registry")), "{stale_hits:?}");
         assert!(stale_hits.iter().any(|v| v.reason.contains("UI command catalog")), "{stale_hits:?}");
+
+        // AUD-12-37: missing docs/catalog files fail closed, multiline `UiCommandSpec\n{` is counted,
+        // and CI without `docs-site` fails closed.
+        let multiline_ui = "pub const UI_COMMANDS: &[UiCommandSpec] = &[\n    UiCommandSpec\n    {\n        id: \"a\",\n    },\n    UiCommandSpec\t{\n        id: \"b\",\n    },\n];\n";
+        assert_eq!(super::count_ui_command_specs_in_source(multiline_ui), Some(2));
+
+        let empty_root = crate::scan_util::test_support::TestDir::new("status-missing");
+        let missing_hits = super::check_live_status_metrics_with_ci(empty_root.path(), &status_md, true);
+        assert!(missing_hits.iter().any(|v| v.path == "crates/ui-egui/src/menus/ui_commands.rs"), "{missing_hits:?}");
+        assert!(missing_hits.iter().any(|v| v.path == "docs/commands.md"), "{missing_hits:?}");
+        assert!(missing_hits.iter().any(|v| v.path == "AGENTS.md"), "{missing_hits:?}");
+        assert!(missing_hits.iter().any(|v| v.path == "docs/control-protocol.md"), "{missing_hits:?}");
+        #[cfg(not(feature = "docs-site"))]
+        assert!(missing_hits.iter().any(|v| v.reason.contains("docs-site")), "{missing_hits:?}");
     }
 }

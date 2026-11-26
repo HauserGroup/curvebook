@@ -523,6 +523,9 @@ fn run_sheet_rename(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
     let parsed: RenameSheetParams = parse_params(&rename_sheet_schema(), params)?;
     let id = parse_sheet_id(&parsed.sheet_id)?;
     let title = parsed.title.trim().to_owned();
+    if title.is_empty() {
+        return Err(bad_input("sheet `title` must not be empty").with_remediation("Provide a non-empty sheet title."));
+    }
     validate_title(&title)?;
 
     let section = ctx
@@ -531,7 +534,6 @@ fn run_sheet_rename(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         .sheet_section(&id)
         .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("sheet `{}` not found", id.as_str())))?;
 
-    validate_title(&title)?;
     match section {
         SheetSection::Data => {
             {
@@ -539,7 +541,7 @@ fn run_sheet_rename(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
                 ensure_sheet_not_frozen(ds)?;
                 ds.set_title(title.clone())?;
             }
-            let _ = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&id), false)?;
+            let _ = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&id), None, Some(ctx.cancelled))?;
         }
         SheetSection::Info => {
             let info = ctx
@@ -555,7 +557,7 @@ fn run_sheet_rename(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
                 .doc
                 .result_sheet_mut(&id)
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("result sheet `{}` not found", id.as_str())))?;
-            rs.analysis.custom_title = Some(title.clone());
+            rs.analysis.set_custom_title(Some(title.clone()))?;
         }
         SheetSection::Graphs => {
             let gs = ctx
@@ -761,7 +763,13 @@ fn run_sheet_delete(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
     }
 
     for ds in &ctx.session.doc.data_sheets {
-        if to_delete.contains(&ds.id) && ds.frozen {
+        if !ds.frozen {
+            continue;
+        }
+        let mutates_frozen_sheet = to_delete.contains(&ds.id)
+            || ds.info_sheet_id.as_ref().is_some_and(|iid| to_delete.contains(iid))
+            || ds.linked_regions.iter().any(|r| r.spec.source.upstream_sheet_id().is_some_and(|up| to_delete.contains(up)));
+        if mutates_frozen_sheet {
             return Err(EngineError::from(DocError::SheetFrozen { sheet_id: ds.id.clone() }));
         }
     }
@@ -780,7 +788,7 @@ fn run_sheet_delete(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         .collect();
     let deleted_ids = prune_deleted_sheets(&mut ctx.session.doc, &to_delete);
     if deleted_any_info || matches!(section, SheetSection::Data | SheetSection::Analyses) {
-        let _ = recalculate_dirty_with_links(&mut ctx.session.doc, &surviving_dependents, false)?;
+        let _ = recalculate_dirty_with_links(&mut ctx.session.doc, &surviving_dependents, None, Some(ctx.cancelled))?;
     }
 
     Ok(CommandOutcome::mutated(
@@ -919,7 +927,7 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
             if let Some(ref iid) = linked_info {
                 link_data_sheet_to_info(&mut ctx.session.doc, iid, &new_id);
             }
-            let _ = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&new_id), false)?;
+            let _ = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&new_id), None, Some(ctx.cancelled))?;
         }
         SheetSection::Info => {
             let mut copy = ctx
@@ -1161,7 +1169,11 @@ fn resolve_family_root_data_id_inner(
     }
 }
 
-fn clone_family_into_doc(doc: &mut ProjectDocument, req: &FamilyCloneOptions<'_>) -> Result<CommandOutcome, EngineError> {
+fn clone_family_into_doc(
+    doc: &mut ProjectDocument,
+    req: &FamilyCloneOptions<'_>,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<CommandOutcome, EngineError> {
     let raw_id = parse_sheet_id(req.raw_sheet_id)?;
     let root_data_id = resolve_family_root_data_id(doc, &raw_id)?;
     let existing_cells = document_used_cells(doc);
@@ -1219,7 +1231,7 @@ fn clone_family_into_doc(doc: &mut ProjectDocument, req: &FamilyCloneOptions<'_>
 
     if !req.clear_results {
         let dirty_seeds: Vec<SheetId> = id_map.values().cloned().collect();
-        let _ = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
+        let _ = recalculate_dirty_with_links(doc, &dirty_seeds, None, Some(cancelled))?;
     }
     doc.select_in_navigator(&new_data_id)?;
 
@@ -1472,7 +1484,7 @@ fn run_sheet_duplicate_family(ctx: &mut Ctx<'_>, params: Value) -> Result<Comman
         clone_layouts: true,
         clear_results: clear_data,
     };
-    clone_family_into_doc(&mut ctx.session.doc, &req)
+    clone_family_into_doc(&mut ctx.session.doc, &req, ctx.cancelled)
 }
 
 fn run_sheet_clone_pipeline(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
@@ -1498,7 +1510,7 @@ fn run_sheet_clone_pipeline(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandO
         clone_layouts: parsed.clone_layouts.unwrap_or(true),
         clear_results: parsed.clear_results.unwrap_or(clear_y),
     };
-    clone_family_into_doc(&mut ctx.session.doc, &req)
+    clone_family_into_doc(&mut ctx.session.doc, &req, ctx.cancelled)
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1525,8 +1537,11 @@ fn set_sheet_frozen(ctx: &mut Ctx<'_>, command_id: &str, params: Value, frozen: 
         ds.frozen = frozen;
     }
 
-    let recalc =
-        if frozen { RecalcSummary::default() } else { recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&id), false)? };
+    let recalc = if frozen {
+        RecalcSummary::default()
+    } else {
+        recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&id), None, Some(ctx.cancelled))?
+    };
     let message = if frozen { "froze data sheet" } else { "unfroze data sheet" };
     Ok(CommandOutcome::mutated(
         command_id,

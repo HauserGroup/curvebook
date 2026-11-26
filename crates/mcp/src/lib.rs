@@ -34,7 +34,7 @@ pub use protocol::{
     SERVER_INSTRUCTIONS, dispatch_json_value, dispatch_payload, run_stdio, run_stdio_with_state, serve, serve_with_max_bytes,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use protocol::{run_stdio_with_control_port, run_stdio_with_control_port_options};
+pub use protocol::{run_stdio_with_control_port, run_stdio_with_control_port_options, serve_concurrent};
 pub use resources::{
     ResourceContent, ResourceDescriptor, ResourceError, ResourceTemplateDescriptor, list_resource_templates, list_resources, read_resource,
 };

@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use curvebook_doc::{
     BaselineOperation, Cell, CellCoord, CellValue, CiBound, DataSetColumn, DataSheet, DelimitedScanError, DelimitedScanOptions,
     DelimitedVisitorError, ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS,
-    NestedGroupColumn, PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId, TableArchetype, VariableColumn, default_column_label,
-    scan_delimited, transpose_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells, validate_subcolumns,
+    NestedGroupColumn, PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId, TableArchetype, VariableColumn, XColumnMode,
+    default_column_label, scan_delimited, transpose_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells, validate_subcolumns,
+    validate_title,
 };
 
 use crate::error::TransformError;
@@ -167,10 +168,13 @@ pub fn apply_import_link_pipeline(
     }
 
     // Stage 1: Extract raw grid.
+    let is_delimited = matches!(payload, ImportSourcePayload::DelimitedText { .. });
     let (raw_grid, mut header_row) = extract_stage1(&spec.source, &spec.filter, payload)?;
 
     // Stage 2: Row/column window, decimation, unstacking, baseline, and exclusion rules.
-    let mut shaped = apply_stage2_filter(raw_grid, &spec.filter, opts, &mut header_row, info_sheet.as_deref())?;
+    let promote_first_row_header =
+        is_delimited && spec.placement.propagate_title_header && !spec.placement.transpose && spec.filter.unstack_group_column.is_none();
+    let mut shaped = apply_stage2_filter(raw_grid, &spec.filter, opts, &mut header_row, promote_first_row_header, info_sheet.as_deref())?;
 
     // Stage 3: Orientation (transpose), blank-skipping, and placement at anchor.
     if spec.placement.skip_contiguous_blanks {
@@ -187,14 +191,30 @@ pub fn apply_import_link_pipeline(
         shaped = transpose_cell_grid(&shaped);
     }
 
+    // Validate all propagated column titles before mutating `target`.
+    let propagate_headers = spec.placement.propagate_title_header && !spec.placement.transpose;
+    let validated_headers: Vec<Option<String>> = if propagate_headers {
+        let mut titles = Vec::with_capacity(header_row.len());
+        for hdr in &header_row {
+            let title_opt = header_cell_title(hdr);
+            if let Some(ref title) = title_opt {
+                validate_title(title)?;
+            }
+            titles.push(title_opt);
+        }
+        titles
+    } else {
+        Vec::new()
+    };
+
     let rows_placed = shaped.len();
     let cols_placed = shaped.iter().map(Vec::len).max().unwrap_or(0);
     let target_range = place_grid(target, &shaped, spec.placement.mode, spec.placement.anchor)?;
 
-    if spec.placement.propagate_title_header {
+    if propagate_headers {
         let base_col = target_range.start.col;
-        for (offset, hdr) in header_row.iter().enumerate() {
-            if let Some(title) = hdr.active_text()
+        for (offset, title_opt) in validated_headers.iter().enumerate() {
+            if let Some(title) = title_opt.as_deref()
                 && let Some(col) = base_col.checked_add(offset)
             {
                 set_column_title_if_possible(&mut target.archetype, col, title);
@@ -205,7 +225,7 @@ pub fn apply_import_link_pipeline(
     // Stage 4: Provenance tracking & InfoSheet audit entry.
     let provenance_summary = opts.provenance_summary.clone().unwrap_or_else(|| format_provenance(spec, rows_placed, cols_placed));
     if !matches!(spec.source, LinkSource::Clipboard) {
-        let link_id = opts.link_id.clone().unwrap_or_else(|| format!("link-{}", target.linked_regions.len() + 1));
+        let link_id = opts.link_id.clone().unwrap_or_else(|| next_unique_link_id(&target.linked_regions));
         let mut persisted_spec = spec.clone();
         persisted_spec.filter.baseline = opts.baseline.or(spec.filter.baseline);
         persisted_spec.filter.exclude_row_predicate = opts.exclude_row_predicate.clone().or_else(|| spec.filter.exclude_row_predicate.clone());
@@ -307,7 +327,8 @@ fn extract_stage1(
                 }
                 grid.push(row_cells);
             }
-            Ok((grid, Vec::new()))
+            let headers = (range.start.col..=end_c).map(|c| tab.column_headers.get(c).map_or_else(Cell::empty, |h| Cell::text(h.clone()))).collect();
+            Ok((grid, headers))
         }
         (LinkSource::ExternalDelimitedFile { delimiter, decimal_separator, .. }, ImportSourcePayload::DelimitedText { text, .. }) => {
             Ok((parse_delimited_text(text, *delimiter, *decimal_separator, filter.parse_asterisk_exclusions)?, Vec::new()))
@@ -362,6 +383,9 @@ fn map_delimited_scan_error(err: DelimitedScanError) -> TransformError {
 }
 
 fn parse_delimited_text(text: &str, delimiter: char, decimal_sep: char, parse_asterisk: bool) -> Result<Vec<Vec<Cell>>, TransformError> {
+    if decimal_sep != '.' && decimal_sep != ',' {
+        return Err(TransformError::InvalidSpec { message: format!("unsupported decimal separator `{decimal_sep}` (expected '.' or ',')") });
+    }
     let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS);
     let max_cells = MAX_IMPORT_CELLS;
 
@@ -411,6 +435,7 @@ fn apply_stage2_filter(
     filter: &ImportFilterSpec,
     opts: &ImportPipelineOptions,
     header_row: &mut Vec<Cell>,
+    promote_first_row_header: bool,
     info_sheet: Option<&InfoSheet>,
 ) -> Result<Vec<Vec<Cell>>, TransformError> {
     if let Some((r0, r1)) = filter.row_window {
@@ -437,6 +462,18 @@ fn apply_stage2_filter(
                 *row = row[c0..=end].to_vec();
             }
         }
+        if !header_row.is_empty() {
+            if c0 >= header_row.len() {
+                header_row.clear();
+            } else {
+                let end = c1.min(header_row.len() - 1);
+                *header_row = header_row[c0..=end].to_vec();
+            }
+        }
+    }
+
+    if promote_first_row_header && header_row.is_empty() && !grid.is_empty() {
+        *header_row = grid.remove(0);
     }
 
     if let Some(k) = filter.decimate_every_k {
@@ -491,6 +528,9 @@ fn unstack_grid_by_group(grid: &[Vec<Cell>], group_col: usize) -> Result<(Vec<Ve
         let Some(g_cell) = row.get(group_col) else {
             return Err(TransformError::InvalidSpec { message: format!("unstack_group_column {group_col} out of bounds") });
         };
+        if g_cell.excluded {
+            continue;
+        }
         let key = match &g_cell.value {
             CellValue::Text(s) => s.trim().to_owned(),
             CellValue::Number(v) if v.is_finite() => {
@@ -652,15 +692,6 @@ fn collapse_contiguous_blank_rows(grid: Vec<Vec<Cell>>) -> Vec<Vec<Cell>> {
 }
 
 fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, anchor: CellCoord) -> Result<SheetCellRange, TransformError> {
-    let subs_per_col = subcolumns_per_data_column(&target.archetype).max(1);
-    if anchor.subcol >= subs_per_col {
-        return Err(TransformError::InvalidSpec {
-            message: format!("anchor.subcol {} out of bounds for target subcolumn count {subs_per_col}", anchor.subcol),
-        });
-    }
-    if grid.is_empty() {
-        return Ok(SheetCellRange::new(anchor, anchor));
-    }
     let existing_rows = target.archetype.row_count();
     let start_row = match mode {
         PlacementMode::Overwrite | PlacementMode::InsertRows => anchor.row,
@@ -671,6 +702,16 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
         PlacementMode::AppendColumns => target.archetype.column_count(),
         _ => anchor.col,
     };
+    let anchor_subs = subcolumns_at_column(&target.archetype, start_col);
+    if anchor.subcol >= anchor_subs {
+        return Err(TransformError::InvalidSpec {
+            message: format!("anchor.subcol {} out of bounds for target subcolumn count {anchor_subs}", anchor.subcol),
+        });
+    }
+    if grid.is_empty() {
+        let pos = CellCoord::new(start_row, start_col, anchor.subcol);
+        return Ok(SheetCellRange::new(pos, pos));
+    }
 
     let needed_rows =
         if mode == PlacementMode::InsertRows { existing_rows.max(start_row).checked_add(grid.len()) } else { start_row.checked_add(grid.len()) }
@@ -685,26 +726,30 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
         ensure_sheet_rows(&mut target.archetype, target_rows)?;
     }
     if mode == PlacementMode::InsertRows && start_row < existing_rows {
-        target.archetype.shift_rows_down(start_row, grid.len(), existing_rows);
-        for note in &mut target.exclusion_notes {
-            if note.coord.row >= start_row {
-                note.coord.row += grid.len();
-            }
-        }
+        target.shift_rows_down(start_row, grid.len(), existing_rows);
         target.exclusion_notes.sort_by_key(|n| n.coord);
     }
 
-    let mut max_col = start_col;
-    let mut max_sub = anchor.subcol;
+    let mut end_col_sub = (start_col, anchor.subcol);
     for (dr, row_cells) in grid.iter().enumerate() {
         let r = start_row + dr;
+        let mut col = start_col;
+        let mut subcol = anchor.subcol;
         for (dc, cell) in row_cells.iter().enumerate() {
-            let (col, subcol) = resolve_target_coord(&target.archetype, start_col, anchor.subcol, dc)?;
+            if dc > 0 {
+                let col_subs = subcolumns_at_column(&target.archetype, col);
+                subcol += 1;
+                if subcol >= col_subs {
+                    col = col.checked_add(1).ok_or_else(|| TransformError::InvalidSpec { message: String::from("target column offset overflow") })?;
+                    subcol = 0;
+                }
+            }
             let coord = CellCoord::new(r, col, subcol);
             if let Some(slot) = target.archetype.data_cell_mut(coord) {
                 *slot = cell.clone();
-                max_col = max_col.max(col);
-                max_sub = max_sub.max(subcol);
+                if (col, subcol) > end_col_sub {
+                    end_col_sub = (col, subcol);
+                }
             }
         }
     }
@@ -712,7 +757,7 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
     if max_row_width > 0
         && let TableArchetype::MultipleVariables(mv) = &mut target.archetype
     {
-        for col in start_col..=max_col {
+        for col in start_col..=end_col_sub.0 {
             if let Some(var) = mv.variables.get_mut(col) {
                 var.refresh_inferred_role();
             }
@@ -720,43 +765,67 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
     }
     target.prune_stale_exclusion_notes();
 
-    Ok(SheetCellRange::new(CellCoord::new(start_row, start_col, anchor.subcol), CellCoord::new(start_row + grid.len() - 1, max_col, max_sub)))
+    Ok(SheetCellRange::new(
+        CellCoord::new(start_row, start_col, anchor.subcol),
+        CellCoord::new(start_row + grid.len() - 1, end_col_sub.0, end_col_sub.1),
+    ))
 }
 
-fn subcolumns_per_data_column(arch: &TableArchetype) -> usize {
+fn subcolumns_at_column(arch: &TableArchetype, col: usize) -> usize {
     match arch {
-        TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
-        TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
-        TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
+        TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count().max(1),
+        TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count().max(1),
+        TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count().max(1),
+        TableArchetype::Nested(t) => t
+            .groups
+            .get(col)
+            .map_or_else(|| t.groups.first().map_or(1, NestedGroupColumn::biological_unit_count), NestedGroupColumn::biological_unit_count)
+            .max(1),
         _ => 1,
     }
 }
 
-fn validate_grid_col_bounds(arch: &TableArchetype, base_col: usize, base_sub: usize, width: usize) -> Result<usize, TransformError> {
-    let subs_per_col = subcolumns_per_data_column(arch).max(1);
-    let span = width.max(1);
-    let total_flat = base_col
-        .checked_mul(subs_per_col)
-        .and_then(|v| v.checked_add(base_sub))
-        .and_then(|v| v.checked_add(span))
-        .ok_or_else(|| TransformError::InvalidSpec { message: String::from("target column/subcolumn offset overflow") })?;
-    if width == 0 { Ok(arch.column_count()) } else { Ok(total_flat.div_ceil(subs_per_col)) }
-}
-
-fn resolve_target_coord(arch: &TableArchetype, base_col: usize, base_sub: usize, offset: usize) -> Result<(usize, usize), TransformError> {
-    let subs_per_col = subcolumns_per_data_column(arch);
+fn advance_col_sub(arch: &TableArchetype, base_col: usize, base_sub: usize, offset: usize) -> Result<(usize, usize), TransformError> {
+    let overflow = || TransformError::InvalidSpec { message: String::from("target column/subcolumn offset overflow") };
+    if let TableArchetype::Nested(t) = arch {
+        let default_units = t.groups.first().map_or(1, NestedGroupColumn::biological_unit_count).max(1);
+        let mut col = base_col;
+        let mut cur_sub = base_sub;
+        let mut rem = offset;
+        while col < t.groups.len() && rem > 0 {
+            let cap = t.groups[col].biological_unit_count().max(1);
+            let avail = cap.saturating_sub(cur_sub);
+            if rem < avail {
+                return Ok((col, cur_sub + rem));
+            }
+            rem -= avail;
+            col = col.checked_add(1).ok_or_else(overflow)?;
+            cur_sub = 0;
+        }
+        if rem == 0 {
+            return Ok((col, cur_sub));
+        }
+        let flat = cur_sub.checked_add(rem).ok_or_else(overflow)?;
+        let final_col = col.checked_add(flat / default_units).ok_or_else(overflow)?;
+        return Ok((final_col, flat % default_units));
+    }
+    let subs_per_col = subcolumns_at_column(arch, base_col);
     if subs_per_col <= 1 {
-        let col =
-            base_col.checked_add(offset).ok_or_else(|| TransformError::InvalidSpec { message: String::from("target column offset overflow") })?;
+        let col = base_col.checked_add(offset).ok_or_else(overflow)?;
         Ok((col, 0))
     } else {
-        let flat =
-            base_sub.checked_add(offset).ok_or_else(|| TransformError::InvalidSpec { message: String::from("target subcolumn offset overflow") })?;
-        let col = base_col
-            .checked_add(flat / subs_per_col)
-            .ok_or_else(|| TransformError::InvalidSpec { message: String::from("target column offset overflow") })?;
+        let flat = base_sub.checked_add(offset).ok_or_else(overflow)?;
+        let col = base_col.checked_add(flat / subs_per_col).ok_or_else(overflow)?;
         Ok((col, flat % subs_per_col))
     }
+}
+
+fn validate_grid_col_bounds(arch: &TableArchetype, base_col: usize, base_sub: usize, width: usize) -> Result<usize, TransformError> {
+    if width == 0 {
+        return Ok(arch.column_count());
+    }
+    let (end_col, _) = advance_col_sub(arch, base_col, base_sub, width - 1)?;
+    end_col.checked_add(1).ok_or_else(|| TransformError::InvalidSpec { message: String::from("target column/subcolumn offset overflow") })
 }
 
 /// Enforce [`MAX_IMPORT_CELLS`] for a rectangular `(rows * cols * subcolumns) + (rows * extra_cols_per_row)`
@@ -822,7 +891,8 @@ fn validate_archetype_growth_budget(arch: &TableArchetype, min_cols: usize, min_
         TableArchetype::Xy(t) => {
             t.x_mode.validate()?;
             t.y_subcolumn_mode.validate()?;
-            let x_cells = t.x_cells.len().max(effective_rows).checked_mul(t.x_mode.subcolumn_count());
+            let x_subs = t.x_mode.subcolumn_count().max(t.x_cells.first().map_or(0, Vec::len));
+            let x_cells = t.x_cells.len().max(effective_rows).checked_mul(x_subs);
             sum_ds(&t.data_sets, t.y_subcolumn_mode.subcolumn_count(), x_cells)
         }
         TableArchetype::Column(t) => {
@@ -855,16 +925,24 @@ fn ensure_sheet_rows(arch: &mut TableArchetype, min_rows: usize) -> Result<(), T
     validate_archetype_growth_budget(arch, arch.column_count(), min_rows)?;
     match arch {
         TableArchetype::Xy(t) => {
-            let x_subs = t.x_mode.subcolumn_count();
-            if t.x_cells.len() < min_rows {
-                t.x_cells.resize_with(min_rows, || vec![Cell::empty(); x_subs]);
-            }
+            let x_subs = t.x_mode.subcolumn_count().max(t.x_cells.first().map_or(0, Vec::len));
             if t.row_titles.len() < min_rows {
                 t.row_titles.resize_with(min_rows, String::new);
             }
             let y_subs = t.y_subcolumn_mode.subcolumn_count();
             for ds in &mut t.data_sets {
                 ds.ensure_rows(min_rows, y_subs)?;
+            }
+            if t.x_cells.len() < min_rows {
+                if matches!(t.x_mode, XColumnMode::GeneratedSequence { .. }) && x_subs == 1 {
+                    let old_len = t.x_cells.len();
+                    for r in old_len..min_rows {
+                        let cell = t.materialized_x_cell_at(r);
+                        t.x_cells.push(vec![cell]);
+                    }
+                } else {
+                    t.x_cells.resize_with(min_rows, || vec![Cell::empty(); x_subs]);
+                }
             }
         }
         TableArchetype::Column(t) => {
@@ -1023,6 +1101,34 @@ fn set_column_title_if_possible(arch: &mut TableArchetype, col: usize, title: &s
     }
 }
 
+fn header_cell_title(cell: &Cell) -> Option<String> {
+    if cell.excluded {
+        return None;
+    }
+    match &cell.value {
+        CellValue::Text(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        }
+        CellValue::Number(v) if v.is_finite() => {
+            let norm = if *v == 0.0 { 0.0 } else { *v };
+            Some(format!("{norm}"))
+        }
+        _ => None,
+    }
+}
+
+fn next_unique_link_id(existing: &[LinkedDataRegion]) -> String {
+    let mut seq = existing.len().saturating_add(1);
+    loop {
+        let candidate = format!("link-{seq}");
+        if !existing.iter().any(|r| r.id == candidate) {
+            return candidate;
+        }
+        seq = seq.saturating_add(1);
+    }
+}
+
 fn format_provenance(spec: &ImportLinkSpec, rows: usize, cols: usize) -> String {
     let origin = match &spec.source {
         LinkSource::Clipboard => String::from("clipboard"),
@@ -1062,5 +1168,295 @@ mod dialect_tests {
         assert!(matches!(parse_delimited_text("a\"b,1", ',', '.', true), Err(TransformError::InvalidInput { .. })));
         assert!(matches!(parse_delimited_text("\"a\"x,1", ',', '.', true), Err(TransformError::InvalidInput { .. })));
         assert!(matches!(parse_delimited_text("\"unclosed", ',', '.', true), Err(TransformError::InvalidInput { .. })));
+    }
+}
+
+#[cfg(test)]
+mod audit_w1_import_tests {
+    use curvebook_doc::{
+        Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, GroupedTable, ImportFilterSpec, ImportLinkSpec,
+        ImportPlacementSpec, LinkSource, LinkedDataRegion, MAX_TITLE_BYTES, NestedTable, PlacementMode, SequenceProgression, SheetCellRange,
+        SubcolumnMode, TableArchetype, XColumnMode, XyTable,
+    };
+
+    use super::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline, parse_delimited_text};
+    use crate::error::TransformError;
+
+    #[test]
+    fn aud_04_12_unstack_skips_excluded_group_keys() {
+        let mut target =
+            DataSheet::new("dst-unstack", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 2).unwrap()))
+                .unwrap();
+        let spec = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec { unstack_group_column: Some(0), parse_asterisk_exclusions: true, ..Default::default() },
+            placement: ImportPlacementSpec { propagate_title_header: true, ..Default::default() },
+        };
+        let payload = ImportSourcePayload::DelimitedText { text: "Ctrl,10\nCtrl*,999\nDrug,20\n", delimiter: ',', decimal_separator: '.' };
+        apply_import_link_pipeline(&mut target, &spec, payload, &ImportPipelineOptions::default(), None).unwrap();
+        let TableArchetype::Column(col) = &target.archetype else { panic!("expected Column") };
+        assert_eq!(col.data_sets[0].title, "Ctrl");
+        assert_eq!(col.data_sets[1].title, "Drug");
+        assert_eq!(col.data_sets[0].cells[0][0].active_number(), Some(10.0));
+        assert!(col.data_sets[0].cells[1][0].is_empty(), "excluded group key row must not enter active Ctrl column");
+        assert_eq!(col.data_sets[1].cells[0][0].active_number(), Some(20.0));
+    }
+
+    #[test]
+    fn aud_04_13_place_grid_handles_nested_biological_units() {
+        let mut target = DataSheet::new("dst-nested", "Nested", TableArchetype::Nested(NestedTable::new(2, 3, 2).unwrap())).unwrap();
+        let spec = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec { anchor: CellCoord::new(0, 0, 0), ..Default::default() },
+        };
+        let payload = ImportSourcePayload::DelimitedText { text: "1,2,3,4,5,6\n7,8,9,10,11,12\n", delimiter: ',', decimal_separator: '.' };
+        let report = apply_import_link_pipeline(&mut target, &spec, payload, &ImportPipelineOptions::default(), None).unwrap();
+        assert_eq!(report.target_range, SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(1, 1, 2)));
+        let TableArchetype::Nested(nt) = &target.archetype else { panic!("expected Nested") };
+        assert_eq!(nt.groups.len(), 2, "must not fabricate spurious treatment groups");
+        assert_eq!(nt.groups[0].cells[0][2].active_number(), Some(3.0));
+        assert_eq!(nt.groups[1].cells[0][0].active_number(), Some(4.0));
+        assert_eq!(nt.groups[1].cells[1][2].active_number(), Some(12.0));
+
+        // Anchoring at a valid biological unit subcol >= 1 succeeds; out-of-range subcol fails.
+        let sub1_spec = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec { anchor: CellCoord::new(0, 0, 1), ..Default::default() },
+        };
+        let rep2 = apply_import_link_pipeline(
+            &mut target,
+            &sub1_spec,
+            ImportSourcePayload::DelimitedText { text: "99,100\n", delimiter: ',', decimal_separator: '.' },
+            &ImportPipelineOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(rep2.target_range, SheetCellRange::new(CellCoord::new(0, 0, 1), CellCoord::new(0, 0, 2)));
+        let bad_sub = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec { anchor: CellCoord::new(0, 0, 3), ..Default::default() },
+        };
+        assert!(matches!(
+            apply_import_link_pipeline(
+                &mut target,
+                &bad_sub,
+                ImportSourcePayload::DelimitedText { text: "1\n", delimiter: ',', decimal_separator: '.' },
+                &ImportPipelineOptions::default(),
+                None,
+            ),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+    }
+
+    #[test]
+    fn aud_04_15_place_grid_target_range_tracks_lexicographic_end() {
+        let mut target =
+            DataSheet::new("dst-grp", "Grouped", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(4), 2, 2).unwrap())).unwrap();
+        let spec = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec { anchor: CellCoord::new(0, 0, 0), ..Default::default() },
+        };
+        let rep = apply_import_link_pipeline(
+            &mut target,
+            &spec,
+            ImportSourcePayload::DelimitedText { text: "1,2,3,4,5\n", delimiter: ',', decimal_separator: '.' },
+            &ImportPipelineOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(rep.target_range, SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 1, 0)));
+    }
+
+    #[test]
+    fn aud_04_16_ensure_sheet_rows_keeps_generated_sequence_x_cells_rectangular() {
+        let xy = XyTable::new_with_x_mode(
+            XColumnMode::GeneratedSequence { start: 0.0, step: 1.0, progression: SequenceProgression::Arithmetic },
+            SubcolumnMode::Single,
+            1,
+            2,
+        )
+        .unwrap();
+        let mut sheet = DataSheet::new("xy-gen", "GenSeq", TableArchetype::Xy(xy)).unwrap();
+        sheet.set_x_or_time_excluded(0, 0, true).unwrap();
+        let spec = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec { mode: PlacementMode::AppendRows, ..Default::default() },
+        };
+        apply_import_link_pipeline(
+            &mut sheet,
+            &spec,
+            ImportSourcePayload::DelimitedText { text: "10\n20\n", delimiter: ',', decimal_separator: '.' },
+            &ImportPipelineOptions::default(),
+            None,
+        )
+        .unwrap();
+        sheet.validate().expect("XY sheet with excluded GeneratedSequence carrier must remain rectangular and valid");
+        let TableArchetype::Xy(xy_after) = &sheet.archetype else { panic!("expected Xy") };
+        assert_eq!(xy_after.x_cells.len(), 4);
+        assert!(xy_after.x_cells.iter().all(|row| row.len() == 1));
+        assert!(xy_after.x_cells[0][0].excluded);
+        assert!(!xy_after.x_cells[3][0].excluded);
+    }
+
+    #[test]
+    fn aud_04_17_insert_rows_shifts_linked_regions_and_saturates_exclusion_notes() {
+        let mut target =
+            DataSheet::new("dst-ins", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 4).unwrap()))
+                .unwrap();
+        target.set_cell(CellCoord::new(2, 1, 0), Cell { value: CellValue::Number(77.0), excluded: true }).unwrap();
+        target.exclusion_notes.push(curvebook_doc::CellExclusionNote {
+            coord: CellCoord::new(2, 1, 0),
+            reason_tag: String::from("outlier"),
+            note: String::from("Shifted with row 2"),
+            timestamp_utc: String::new(),
+        });
+        // Direct-API stale note at usize::MAX must saturate (no overflow panic) and be pruned cleanly.
+        target.exclusion_notes.push(curvebook_doc::CellExclusionNote {
+            coord: CellCoord::new(usize::MAX, 0, 0),
+            reason_tag: String::from("stale"),
+            note: String::from("Saturates without wrap"),
+            timestamp_utc: String::new(),
+        });
+        let existing_link = LinkedDataRegion {
+            id: String::from("link-1"),
+            spec: ImportLinkSpec {
+                source: LinkSource::Clipboard,
+                filter: ImportFilterSpec::default(),
+                placement: ImportPlacementSpec { anchor: CellCoord::new(2, 1, 0), ..Default::default() },
+            },
+            target_range: SheetCellRange::new(CellCoord::new(2, 1, 0), CellCoord::new(3, 1, 0)),
+            provenance_summary: String::from("existing"),
+        };
+        target.linked_regions.push(existing_link);
+        let spec = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec { mode: PlacementMode::InsertRows, anchor: CellCoord::new(0, 0, 0), ..Default::default() },
+        };
+        apply_import_link_pipeline(
+            &mut target,
+            &spec,
+            ImportSourcePayload::DelimitedText { text: "1\n2\n3\n", delimiter: ',', decimal_separator: '.' },
+            &ImportPipelineOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(target.linked_regions[0].target_range, SheetCellRange::new(CellCoord::new(5, 1, 0), CellCoord::new(6, 1, 0)));
+        assert_eq!(target.linked_regions[0].spec.placement.anchor.row, 5);
+        assert_eq!(target.exclusion_notes.len(), 1);
+        assert_eq!(target.exclusion_notes[0].coord, CellCoord::new(5, 1, 0));
+        assert_eq!(target.exclusion_notes[0].reason_tag, "outlier");
+        assert!(target.cell(CellCoord::new(5, 1, 0)).unwrap().excluded);
+    }
+
+    #[test]
+    fn aud_04_18_and_43_header_validation_propagation_decimal_sep_and_unique_link_ids() {
+        // AUD-04-18: oversized unstacked header rejected BEFORE mutating target.
+        let mut target =
+            DataSheet::new("dst-hdr", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()))
+                .unwrap();
+        let long_group = "G".repeat(MAX_TITLE_BYTES + 10);
+        let csv = format!("{long_group},42\n");
+        let spec = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec { unstack_group_column: Some(0), ..Default::default() },
+            placement: ImportPlacementSpec { propagate_title_header: true, ..Default::default() },
+        };
+        let err = apply_import_link_pipeline(
+            &mut target,
+            &spec,
+            ImportSourcePayload::DelimitedText { text: &csv, delimiter: ',', decimal_separator: '.' },
+            &ImportPipelineOptions::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, TransformError::Doc(DocError::TitleTooLong { .. })));
+        assert!(target.cell(CellCoord::new(0, 0, 0)).unwrap().is_empty(), "target must remain unmutated on invalid header");
+
+        // AUD-04-18: transpose=true must NOT apply pre-transpose headers onto post-transpose columns.
+        let tx_spec = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec { unstack_group_column: Some(0), ..Default::default() },
+            placement: ImportPlacementSpec { propagate_title_header: true, transpose: true, ..Default::default() },
+        };
+        apply_import_link_pipeline(
+            &mut target,
+            &tx_spec,
+            ImportSourcePayload::DelimitedText { text: "G1,10\nG2,20\n", delimiter: ',', decimal_separator: '.' },
+            &ImportPipelineOptions::default(),
+            None,
+        )
+        .unwrap();
+        let TableArchetype::Column(col_tx) = &target.archetype else { panic!("expected Column") };
+        assert_ne!(col_tx.data_sets[0].title, "G1");
+
+        // AUD-04-43 part 1: plain delimited import with propagate_title_header=true promotes row 0 to column titles.
+        let mut plain_dst =
+            DataSheet::new("dst-plain", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 1).unwrap()))
+                .unwrap();
+        let plain_spec = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec { propagate_title_header: true, ..Default::default() },
+        };
+        let rep = apply_import_link_pipeline(
+            &mut plain_dst,
+            &plain_spec,
+            ImportSourcePayload::DelimitedText { text: "Ctrl,Drug\n10,20\n30,40\n", delimiter: ',', decimal_separator: '.' },
+            &ImportPipelineOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(rep.rows_placed, 2);
+        let TableArchetype::Column(c_plain) = &plain_dst.archetype else { panic!("expected Column") };
+        assert_eq!((c_plain.data_sets[0].title.as_str(), c_plain.data_sets[1].title.as_str()), ("Ctrl", "Drug"));
+        assert_eq!(c_plain.data_sets[0].cells[0][0], Cell { value: CellValue::Number(10.0), excluded: false });
+
+        // AUD-04-43 part 2: invalid decimal separator rejected.
+        assert!(matches!(parse_delimited_text("105,2", ',', '0', false), Err(TransformError::InvalidSpec { .. })));
+
+        // AUD-04-43 part 3: default link_id avoids collisions after deleting an earlier link.
+        let mut lnk_dst =
+            DataSheet::new("dst-lnk", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()))
+                .unwrap();
+        let file_spec = ImportLinkSpec {
+            source: LinkSource::ExternalDelimitedFile { path: String::from("a.csv"), delimiter: ',', decimal_separator: '.' },
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec::default(),
+        };
+        apply_import_link_pipeline(
+            &mut lnk_dst,
+            &file_spec,
+            ImportSourcePayload::DelimitedText { text: "1\n", delimiter: ',', decimal_separator: '.' },
+            &ImportPipelineOptions::default(),
+            None,
+        )
+        .unwrap();
+        apply_import_link_pipeline(
+            &mut lnk_dst,
+            &file_spec,
+            ImportSourcePayload::DelimitedText { text: "2\n", delimiter: ',', decimal_separator: '.' },
+            &ImportPipelineOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(lnk_dst.linked_regions[0].id, "link-1");
+        assert_eq!(lnk_dst.linked_regions[1].id, "link-2");
+        lnk_dst.linked_regions.remove(0);
+        apply_import_link_pipeline(
+            &mut lnk_dst,
+            &file_spec,
+            ImportSourcePayload::DelimitedText { text: "3\n", delimiter: ',', decimal_separator: '.' },
+            &ImportPipelineOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(lnk_dst.linked_regions.len(), 2);
+        assert_ne!(lnk_dst.linked_regions[0].id, lnk_dst.linked_regions[1].id);
     }
 }

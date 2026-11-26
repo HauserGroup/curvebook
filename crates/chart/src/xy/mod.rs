@@ -161,9 +161,7 @@ impl SegmentedAxis {
 
 /// Resolve a `DataSheet` from either top-level `data_sheets` or an analyzable `ResultSheet`.
 pub(crate) fn resolve_data_sheet<'a>(doc: &'a ProjectDocument, id: &SheetId) -> Option<&'a DataSheet> {
-    doc.data_sheet(id).or_else(|| {
-        doc.result_sheet(id).filter(|res| !matches!(res.status, ResultStatus::Failed { .. })).and_then(|res| res.analyzable_data.as_ref())
-    })
+    crate::resolve_data_sheet(doc, id)
 }
 
 /// Resolve inline `{{info:...}}` and `{{result:...}}` template hooks and parse markup into `RichText`.

@@ -13,7 +13,7 @@ pub mod dag;
 pub mod guard;
 pub mod methods_report;
 pub mod path_policy;
-pub use path_policy::ExternalPathPolicy;
+pub use path_policy::{ExternalPathPolicy, PATH_PARAM_KEYS};
 pub mod services;
 pub use services::{BatchCommandStep, BatchStepFailure};
 
@@ -934,7 +934,7 @@ impl Session {
         ttl_ms: u64,
         now_epoch_ms: u64,
     ) -> Result<(Self, CrashRecoveryJournal<B>, RecoveryReport), EngineError> {
-        Self::open_with_recovery_mode(backend, owner_id, ttl_ms, now_epoch_ms, false)
+        Self::open_with_recovery_and_policy(backend, owner_id, ttl_ms, now_epoch_ms, ExternalPathPolicy::Unconstrained, false)
     }
 
     /// Open or crash-recover a [`Session`] from `backend` in opt-in salvage mode, skipping
@@ -947,14 +947,21 @@ impl Session {
         ttl_ms: u64,
         now_epoch_ms: u64,
     ) -> Result<(Self, CrashRecoveryJournal<B>, RecoveryReport), EngineError> {
-        Self::open_with_recovery_mode(backend, owner_id, ttl_ms, now_epoch_ms, true)
+        Self::open_with_recovery_and_policy(backend, owner_id, ttl_ms, now_epoch_ms, ExternalPathPolicy::Unconstrained, true)
     }
 
-    fn open_with_recovery_mode<B: JournalBackend>(
+    /// Open or crash-recover a [`Session`] from `backend` with an explicit [`ExternalPathPolicy`]
+    /// installed *before* WAL replay begins (`AUD-13-01`).
+    ///
+    /// Regardless of `path_policy`, WAL replay strictly restricts recovered commands to in-memory
+    /// document mutations and refuses any command declaring `READS_FILESYSTEM`, `WRITES_FILESYSTEM`,
+    /// or `LAUNCHES_PROCESS`.
+    pub fn open_with_recovery_and_policy<B: JournalBackend>(
         backend: B,
         owner_id: impl Into<String>,
         ttl_ms: u64,
         now_epoch_ms: u64,
+        path_policy: ExternalPathPolicy,
         skip_unreplayable: bool,
     ) -> Result<(Self, CrashRecoveryJournal<B>, RecoveryReport), EngineError> {
         let (mut journal, mut report) = CrashRecoveryJournal::open_or_recover(backend, owner_id, ttl_ms, now_epoch_ms)?;
@@ -968,7 +975,7 @@ impl Session {
             },
             None => ProjectDocument::default(),
         };
-        let mut session = Self::from_document(doc);
+        let mut session = Self::from_document(doc).with_path_policy(path_policy);
         let skipped = match replay_recovered_commands(&mut session, &report, skip_unreplayable) {
             Ok(warnings) => warnings,
             Err(err) => {
@@ -984,6 +991,18 @@ impl Session {
             }
         }
         Ok((session, journal, report))
+    }
+
+    /// Acquire a recovery journal lease on `backend` without loading a snapshot or replaying WAL
+    /// commands (`AUD-13-01`). Useful when a host is only probing a lock or attaching an
+    /// already-loaded document and intends to overwrite the journal with a fresh checkpoint.
+    pub fn open_journal_lease_only<B: JournalBackend>(
+        backend: B,
+        owner_id: impl Into<String>,
+        ttl_ms: u64,
+        now_epoch_ms: u64,
+    ) -> Result<(CrashRecoveryJournal<B>, RecoveryReport), EngineError> {
+        Ok(CrashRecoveryJournal::open_or_recover(backend, owner_id, ttl_ms, now_epoch_ms)?)
     }
 
     /// Native-only helper opening a [`Session`] backed by [`DirectoryJournalBackend`] in `dir`.
@@ -1011,6 +1030,34 @@ impl Session {
         Self::open_with_best_effort_recovery(backend, owner_id, ttl_ms, now_epoch_ms)
     }
 
+    /// Native-only helper opening a [`Session`] backed by [`DirectoryJournalBackend`] in `dir`
+    /// with an explicit [`ExternalPathPolicy`] applied before WAL replay (`AUD-13-01`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_dir_with_recovery_and_policy(
+        dir: impl AsRef<Path>,
+        owner_id: impl Into<String>,
+        ttl_ms: u64,
+        now_epoch_ms: u64,
+        path_policy: ExternalPathPolicy,
+        skip_unreplayable: bool,
+    ) -> Result<(Self, CrashRecoveryJournal<DirectoryJournalBackend>, RecoveryReport), EngineError> {
+        let backend = DirectoryJournalBackend::open_dir(dir)?;
+        Self::open_with_recovery_and_policy(backend, owner_id, ttl_ms, now_epoch_ms, path_policy, skip_unreplayable)
+    }
+
+    /// Native-only lease-only helper claiming [`DirectoryJournalBackend`] in `dir` without
+    /// replaying any `ops.journal` commands (`AUD-13-01`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_dir_journal_lease_only(
+        dir: impl AsRef<Path>,
+        owner_id: impl Into<String>,
+        ttl_ms: u64,
+        now_epoch_ms: u64,
+    ) -> Result<(CrashRecoveryJournal<DirectoryJournalBackend>, RecoveryReport), EngineError> {
+        let backend = DirectoryJournalBackend::open_dir(dir)?;
+        Self::open_journal_lease_only(backend, owner_id, ttl_ms, now_epoch_ms)
+    }
+
     /// Record a command invocation `{ command_id, params }` into the WAL `journal`, returning its sequence number.
     pub fn record_to_journal<B: JournalBackend>(
         &self,
@@ -1026,13 +1073,13 @@ impl Session {
     }
 
     /// Whether replaying `command_id` from `{ command_id, params }` alone is unsafe across crash
-    /// recovery (undo/redo depend on ephemeral stacks; wall-clock-defaulting checkpoint commands
-    /// mint non-deterministic timestamps when omitted; `READS_FILESYSTEM` commands depend on
+    /// recovery (undo/redo depend on ephemeral stacks; wall-clock-defaulting checkpoint/exclusion
+    /// commands mint non-deterministic timestamps when omitted; `READS_FILESYSTEM` commands depend on
     /// external files that may change or disappear before recovery) and must instead checkpoint an
     /// atomic document snapshot.
     #[must_use]
     pub fn command_requires_wal_checkpoint(command_id: &str) -> bool {
-        if matches!(command_id, "edit.undo" | "edit.redo" | "project.createCheckpoint") {
+        if matches!(command_id, "edit.undo" | "edit.redo" | "project.createCheckpoint" | "table.excludeCellsWithReason") {
             return true;
         }
         cmd::registry().get(command_id).is_some_and(|spec| spec.effects.contains(cmd::Effects::READS_FILESYSTEM))
@@ -1151,6 +1198,24 @@ fn replay_recovered_commands(
                     "Use Session::open_with_best_effort_recovery to skip unreplayable journal entries while preserving intact edits.",
                 ));
         };
+        let fs_effects = cmd::Effects::READS_FILESYSTEM.with(cmd::Effects::WRITES_FILESYSTEM).with(cmd::Effects::LAUNCHES_PROCESS);
+        if let Some(spec) = cmd::registry().get(command_id)
+            && spec.effects.intersects(fs_effects)
+        {
+            let err = EngineError::with_code(
+                ErrorCode::PathEscape,
+                format!("WAL replay refuses filesystem/process-accessing command `{command_id}`; only in-memory document mutations may be replayed"),
+            );
+            if skip_unreplayable {
+                skipped.push(JournalRecoveryWarning {
+                    line: 0,
+                    kind: String::from("skipped_unreplayable_command"),
+                    message: format!("skipped recovered journal command `{command_id}` at seq {seq} (index {idx}): {err}"),
+                });
+                continue;
+            }
+            return Err(attach_replay_failure_context(err, seq, idx, command_id));
+        }
         let params = cmd.get("params").cloned().unwrap_or_else(|| json!({}));
         let cancel = AtomicBool::new(false);
         if let Err(err) = session.execute_with_caller(command_id, params, Caller::Replay, &cancel) {
@@ -1303,8 +1368,27 @@ impl Session {
     }
 
     /// Associate or clear the archive file path and reset dirty tracking.
+    ///
+    /// When the session operates under [`ExternalPathPolicy::Workdir`], relative or non-canonical
+    /// paths are canonicalized against the workdir guard so host callers cannot clobber a
+    /// canonicalized `file_path` with a raw relative parameter (`AUD-13-23`).
     pub fn set_file_path(&mut self, path: Option<PathBuf>, mark_clean: bool) {
-        self.file_path = path;
+        #[cfg(not(target_arch = "wasm32"))]
+        let normalized = match (&self.path_policy, path) {
+            (ExternalPathPolicy::Workdir(guard), Some(raw)) => {
+                if let Some(raw_str) = raw.to_str()
+                    && let Ok(resolved) = guard.resolve(raw_str)
+                {
+                    Some(resolved)
+                } else {
+                    Some(raw)
+                }
+            }
+            (_, other) => other,
+        };
+        #[cfg(target_arch = "wasm32")]
+        let normalized = path;
+        self.file_path = normalized;
         if mark_clean {
             self.dirty = false;
         }
@@ -1663,6 +1747,14 @@ impl Session {
 
         match outcome {
             Ok(res) => {
+                if cancelled.load(Ordering::Relaxed) {
+                    self.doc = before;
+                    self.file_path = before_path;
+                    self.dirty = before_dirty;
+                    return Err(EngineError::with_code(ErrorCode::Cancelled, format!("command `{}` cancelled", spec.id))
+                        .with_retryable(true)
+                        .with_details(json!({ "command_id": spec.id })));
+                }
                 if res.mutated {
                     let cp_len_changed = self.doc.checkpoints.len() != before.checkpoints.len();
                     let val_res = if may_modify_checkpoints || cp_len_changed {

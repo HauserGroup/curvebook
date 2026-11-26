@@ -281,9 +281,11 @@ fn dispatch_accepted_stream<S, F, R>(
 
 /// Serve one bounded JSON-lines control connection over generic `reader` and `writer`.
 ///
-/// Before an `"auth"` handshake succeeds on the connection, lines are capped at
-/// [`MAX_PRE_AUTH_CONTROL_LINE_BYTES`] (64 KiB); authenticated sessions permit up to
-/// [`MAX_CONTROL_LINE_BYTES`] (16 MiB).
+/// Before authentication succeeds on the connection (either via an `"auth"` handshake or a valid
+/// per-request `"token"` on a command frame), lines are capped at [`MAX_PRE_AUTH_CONTROL_LINE_BYTES`]
+/// (64 KiB); authenticated connections permit up to [`MAX_CONTROL_LINE_BYTES`] (16 MiB) for
+/// subsequent frames. Clients whose very first command exceeds 64 KiB must send an `"auth"`
+/// handshake first.
 ///
 /// # Errors
 /// Propagates underlying stream read/write failures.
@@ -333,13 +335,14 @@ pub fn write_oversized_control_error<W: Write>(writer: &mut W) {
 
 /// Write a structured oversized-line JSON error response onto `writer` citing `max_bytes`.
 pub fn write_oversized_control_error_with_limit<W: Write>(writer: &mut W, max_bytes: usize) {
-    let resp = ControlResponse {
-        id: Value::String(String::new()),
-        ok: false,
-        result: Value::Null,
-        error: Some(format!("control line exceeds {max_bytes} bytes")),
-        error_detail: None,
+    let error_msg = if max_bytes == MAX_PRE_AUTH_CONTROL_LINE_BYTES {
+        format!(
+            "control line exceeds {max_bytes} bytes (unauthenticated pre-auth cap; send an {{\"id\":\"auth\",\"method\":\"auth\",\"params\":{{\"token\":\"<token>\"}}}} handshake first before sending frames up to {MAX_CONTROL_LINE_BYTES} bytes)"
+        )
+    } else {
+        format!("control line exceeds {max_bytes} bytes")
     };
+    let resp = ControlResponse { id: Value::String(String::new()), ok: false, result: Value::Null, error: Some(error_msg), error_detail: None };
     if let Ok(encoded) = serde_json::to_string(&resp) {
         let _ = writer.write_all(encoded.as_bytes());
         let _ = writer.write_all(b"\n");

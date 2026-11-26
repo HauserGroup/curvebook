@@ -671,13 +671,13 @@ fn append_columns_grows_multiple_variables_and_column_tables() {
     assert_approx(col_after.data_sets[2].cells[3][0].active_number().unwrap(), 70.0, 1e-12);
     assert_approx(col_after.data_sets[3].cells[1][0].active_number().unwrap(), 40.0, 1e-12);
 
-    // 3. Column (MeanSdN, 3 subcolumns): appends cols 2 & 3 across subcolumns.
+    // 3. Column (MeanSdN, 3 subcolumns): appends cols 2 & 3 across subcolumns (4 cells -> ends at col 3, subcol 0).
     let mut rep_s = sheet(
         "col-rep-append",
         TableArchetype::Column(ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanSdN, 2, 2).unwrap()),
     );
     let rep_res = import_tsv(&mut rep_s, "1\t2\t3\t4\n5\t6\t7\t8", &app_spec).unwrap();
-    assert_eq!(rep_res.target_range, SheetCellRange::new(CellCoord::new(0, 2, 0), CellCoord::new(1, 3, 2)));
+    assert_eq!(rep_res.target_range, SheetCellRange::new(CellCoord::new(0, 2, 0), CellCoord::new(1, 3, 0)));
     let rep_after = as_col(&rep_s);
     assert_eq!(rep_after.data_sets.len(), 4);
     assert_cells_3(&rep_after.data_sets[2].cells[0], [SubExp::Num(1.0), SubExp::Num(2.0), SubExp::Num(3.0)], (1e-12, 0.0), "rep col2");
@@ -697,11 +697,11 @@ fn append_columns_grows_all_remaining_archetypes() {
         sheet("nst-app", TableArchetype::Nested(NestedTable::new(1, 2, 2).unwrap())),
     ];
     for s in &mut sheets {
-        let is_grouped = matches!(s.archetype, TableArchetype::Grouped(_));
+        let is_two_sub = matches!(s.archetype, TableArchetype::Grouped(_) | TableArchetype::Nested(_));
         let report = import_tsv(s, "11\t22\n33\t44", &spec).unwrap();
-        assert_eq!((s.archetype.column_count(), report.target_range.start.col), (if is_grouped { 2 } else { 3 }, 1), "{:?}", s.kind());
+        assert_eq!((s.archetype.column_count(), report.target_range.start.col), (if is_two_sub { 2 } else { 3 }, 1), "{:?}", s.kind());
         assert_approx(s.cell(CellCoord::new(0, 1, 0)).unwrap().active_number().unwrap(), 11.0, 1e-12);
-        let corner = if is_grouped { CellCoord::new(1, 1, 1) } else { CellCoord::new(1, 2, 0) };
+        let corner = if is_two_sub { CellCoord::new(1, 1, 1) } else { CellCoord::new(1, 2, 0) };
         assert_approx(s.cell(corner).unwrap().active_number().unwrap(), 44.0, 1e-12);
     }
 }

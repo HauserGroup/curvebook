@@ -110,6 +110,8 @@ pub enum HybridModalSurface {
     EguiFindReplace,
     /// Native `egui` Navigator sheet delete confirmation modal (`FA-SEC16-04`).
     EguiNavDeleteConfirm,
+    /// Native `egui` blocking progress modal overlay (`AUD-08-15`).
+    EguiProgressModal,
 }
 
 /// Shared metadata descriptor passed into [`finalize_egui_modal_response`].
@@ -245,6 +247,8 @@ impl HybridCoexistenceArbiter {
             HybridModalSurface::EguiTransformModal
         } else if views.leading_dock.delete_confirm.is_some() {
             HybridModalSurface::EguiNavDeleteConfirm
+        } else if views.progress_modal.is_some() {
+            HybridModalSurface::EguiProgressModal
         } else {
             classify_active_dialog_surface(app)
         };
@@ -551,6 +555,7 @@ fn resolve_dialog_slug(app: &UiApp, decision: &HybridCoexistenceDecision, dialog
         HybridModalSurface::EguiFindReplace => String::from("find_replace"),
         HybridModalSurface::EguiManageVariables => String::from("manage_variables"),
         HybridModalSurface::EguiNavDeleteConfirm => String::from("nav_delete_confirm"),
+        HybridModalSurface::EguiProgressModal => String::from("progress_modal"),
         HybridModalSurface::EguiCommandPalette => String::from("command_palette"),
         _ if app.canvas_dialogs.active_dialog != ActiveDialog::None => active_dialog_slug(&app.canvas_dialogs.active_dialog),
         HybridModalSurface::EguiImportWizard => String::from("import_paste_special"),
@@ -1361,7 +1366,11 @@ fn build_canvas_snapshot(
         let paper_and_scene =
             cv.last_active_paper_sheet_id.as_ref().filter(|id| *id == &gs.id).and_then(|_| cv.last_paper_rect_pt.zip(cv.last_scene_size_pt));
         for pt in scene.plotted_points.iter().take(500) {
-            let wid = format!("canvas.point.{}.{}", pt.source_cell.col, pt.source_cell.row);
+            let wid = if pt.source_cell.subcol > 0 {
+                format!("canvas.point.{}.{}.{}", pt.source_cell.col, pt.source_cell.row, pt.source_cell.subcol)
+            } else {
+                format!("canvas.point.{}.{}", pt.source_cell.col, pt.source_cell.row)
+            };
             if nodes.iter().any(|n| n.widget_id == wid) {
                 continue;
             }
@@ -2113,6 +2122,81 @@ fn resolve_menu_command_by_path(app: &UiApp, raw_path: &str, explicit_segs: &[St
     None
 }
 
+/// Finalize a `ui.screenshot` response payload while enforcing `max_line_bytes` (`AUD-13-12`).
+///
+/// - When the response with inline `data_base64` fits within `max_line_bytes`: writes `validated_path`
+///   (if provided) via `write_file` and returns a single `data_base64` field (never duplicating
+///   `png_base64`).
+/// - When the inline response exceeds `max_line_bytes` and `validated_path` is `Some(dest)`: checks
+///   that path-only metadata fits within `max_line_bytes` before writing, writes `dest` atomically
+///   via `write_file`, and returns path-only metadata without `data_base64` (`"data_base64_omitted": true`,
+///   `"omitted_reason"`).
+/// - When the inline response exceeds `max_line_bytes` and `validated_path` is `None`: fails with
+///   `ErrorCode::ResourceLimit` and performs zero disk writes.
+pub fn finalize_screenshot_payload_with_limit<F>(
+    region_raw: &str,
+    target: RenderTargetSpec,
+    png: &[u8],
+    validated_path: Option<&str>,
+    max_line_bytes: usize,
+    write_file: F,
+) -> Result<Value, EngineError>
+where
+    F: FnOnce(&str, &[u8]) -> Result<(), EngineError>,
+{
+    let mut base_payload = json!({
+        "region": region_raw,
+        "width_px": target.width_px,
+        "height_px": target.height_px,
+        "dpi": target.dpi,
+        "format": "png",
+        "mime_type": "image/png",
+        "bytes_len": png.len(),
+        "path": validated_path,
+    });
+
+    let b64 = curvebook_platform::base64::encode(png);
+    let mut with_inline = base_payload.clone();
+    if let Some(map) = with_inline.as_object_mut() {
+        map.insert(String::from("data_base64"), Value::String(b64));
+    }
+
+    // Reserve headroom for the JSON-lines ControlResponse envelope (`{"id":...,"ok":true,"result":...}\n`).
+    const ENVELOPE_HEADROOM_BYTES: usize = 256;
+    let inline_bytes = serde_json::to_string(&with_inline)
+        .map(|s| s.len().saturating_add(ENVELOPE_HEADROOM_BYTES))
+        .map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?;
+
+    if inline_bytes <= max_line_bytes {
+        if let Some(dest_path) = validated_path {
+            write_file(dest_path, png)?;
+        }
+        return Ok(with_inline);
+    }
+
+    let reason =
+        format!("screenshot frame ({inline_bytes} bytes) exceeds control line limit ({max_line_bytes} bytes); supply `path` or reduce dimensions");
+    if let Some(dest_path) = validated_path {
+        if let Some(map) = base_payload.as_object_mut() {
+            map.insert(String::from("data_base64_omitted"), Value::Bool(true));
+            map.insert(String::from("omitted_reason"), Value::String(reason));
+        }
+        let meta_bytes = serde_json::to_string(&base_payload)
+            .map(|s| s.len().saturating_add(ENVELOPE_HEADROOM_BYTES))
+            .map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?;
+        if meta_bytes > max_line_bytes {
+            return Err(EngineError::with_code(
+                ErrorCode::ResourceLimit,
+                format!("screenshot response metadata ({meta_bytes} bytes) exceeds control frame limit ({max_line_bytes} bytes)"),
+            ));
+        }
+        write_file(dest_path, png)?;
+        Ok(base_payload)
+    } else {
+        Err(EngineError::with_code(ErrorCode::ResourceLimit, reason))
+    }
+}
+
 fn dispatch_gui_screenshot(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
     let region_raw = opt_non_empty_str_param(params, &["region", "target"]).map_err(bad_input_err)?.unwrap_or("full_window");
     let region = match region_raw.to_ascii_lowercase().as_str() {
@@ -2146,22 +2230,15 @@ fn dispatch_gui_screenshot(app: &mut UiApp, params: &Value) -> Result<Value, Eng
         }
     })?;
     let png = encode_png(&img).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?;
-    if let Some(ref dest_path) = validated_path {
-        app.session().write_host_file_atomic(dest_path, &png)?;
-    }
-    let b64 = curvebook_platform::base64::encode(&png);
-    Ok(json!({
-        "region": region_raw,
-        "width_px": img.width_px,
-        "height_px": img.height_px,
-        "dpi": img.dpi,
-        "format": "png",
-        "mime_type": "image/png",
-        "bytes_len": png.len(),
-        "data_base64": b64,
-        "png_base64": b64,
-        "path": validated_path,
-    }))
+    let actual_target = RenderTargetSpec { width_px: img.width_px, height_px: img.height_px, dpi: img.dpi };
+    finalize_screenshot_payload_with_limit(
+        region_raw,
+        actual_target,
+        &png,
+        validated_path.as_deref(),
+        crate::control_io::MAX_CONTROL_LINE_BYTES,
+        |dest_path, bytes| app.session().write_host_file_atomic(dest_path, bytes),
+    )
 }
 
 fn human_path_only_err(message: impl Into<String>) -> EngineError {
@@ -2171,8 +2248,12 @@ fn human_path_only_err(message: impl Into<String>) -> EngineError {
 fn dispatch_gui_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
     let explicit_cmd = opt_non_empty_str_param(params, &["command_id", "command"]).map_err(bad_input_err)?;
     let menu_path = extract_menu_path_param(params)?;
-    let has_explicit_params = params.get("params").is_some_and(|v| !v.is_null());
-    if app.is_human_path_only() && has_explicit_params {
+    let explicit_params = params.get("params").filter(|v| match v {
+        Value::Null => false,
+        Value::Object(map) => !map.is_empty(),
+        _ => true,
+    });
+    if app.is_human_path_only() && explicit_params.is_some() {
         return Err(human_path_only_err("direct command parameter injection via `ui.invoke_menu(params)` is blocked in human-path-only mode"));
     }
     let resolved_cmd: String = if let Some(cmd) = explicit_cmd {
@@ -2184,9 +2265,9 @@ fn dispatch_gui_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, En
         return Err(bad_input_err("`ui.invoke_menu` requires non-empty `command_id` or `path`"));
     };
     let command_id = resolved_cmd.as_str();
-    let cmd_params = match params.get("params") {
-        Some(v) if !v.is_null() => v.clone(),
-        _ => contextual_command_params(app, command_id),
+    let cmd_params = match explicit_params {
+        Some(v) => v.clone(),
+        None => contextual_command_params(app, command_id),
     };
     if HybridCoexistenceArbiter::evaluate(app, false).modal_backdrop_active {
         return Err(EngineError::with_code(ErrorCode::Conflict, format!("cannot invoke menu command `{command_id}` while a modal dialog is open")));
@@ -2331,8 +2412,14 @@ pub fn parse_pointer_gesture_params(params: &Value, default_scroll_dy: f64) -> R
     let metrics = parse_viewport_metrics_from_params(params)?;
     let widget_id = opt_non_empty_str_param(params, &["widget_id", "target_id"]).map_err(bad_input_err)?;
     let to_widget_id = opt_non_empty_str_param(params, &["to_widget_id", "end_widget_id"]).map_err(bad_input_err)?;
-    let explicit_x = opt_finite_f64_param(params, &["x"]).map_err(bad_input_err)?;
-    let explicit_y = opt_finite_f64_param(params, &["y"]).map_err(bad_input_err)?;
+    let ensure_f32_coord = |v: f64, name: &str| -> Result<f64, EngineError> {
+        if !v.is_finite() || v.abs() > f64::from(f32::MAX) {
+            return Err(bad_input_err(format!("`{name}` ({v}) exceeds finite f32 coordinate range")));
+        }
+        Ok(v)
+    };
+    let explicit_x = opt_finite_f64_param(params, &["x"]).map_err(bad_input_err)?.map(|v| ensure_f32_coord(v, "x")).transpose()?;
+    let explicit_y = opt_finite_f64_param(params, &["y"]).map_err(bad_input_err)?.map(|v| ensure_f32_coord(v, "y")).transpose()?;
     if explicit_x.is_some() != explicit_y.is_some() {
         return Err(bad_input_err("both `x` and `y` coordinates are required when targeting by coordinates"));
     }
@@ -2342,18 +2429,21 @@ pub fn parse_pointer_gesture_params(params: &Value, default_scroll_dy: f64) -> R
     if widget_id.is_none() && explicit_x.is_none() {
         return Err(bad_input_err("ui.pointer_gesture requires either `widget_id` or finite `x`/`y` coordinates"));
     }
-    let dx = opt_finite_f64_param(params, &["delta_x"]).map_err(bad_input_err)?.unwrap_or(0.0);
-    let dy = opt_finite_f64_param(params, &["delta_y"]).map_err(bad_input_err)?.unwrap_or(if params.get("delta_x").is_none() {
-        default_scroll_dy
-    } else {
-        0.0
-    });
+    let dx = ensure_f32_coord(opt_finite_f64_param(params, &["delta_x"]).map_err(bad_input_err)?.unwrap_or(0.0), "delta_x")?;
+    let dy = ensure_f32_coord(
+        opt_finite_f64_param(params, &["delta_y"]).map_err(bad_input_err)?.unwrap_or(if params.get("delta_x").is_none() {
+            default_scroll_dy
+        } else {
+            0.0
+        }),
+        "delta_y",
+    )?;
     let scale_delta = opt_finite_f64_param(params, &["scale_delta"]).map_err(bad_input_err)?.unwrap_or(1.0);
     if kind == "pinch" && (!scale_delta.is_finite() || scale_delta <= 0.0) {
         return Err(bad_input_err("`scale_delta` must be a positive finite number"));
     }
-    let end_x = opt_finite_f64_param(params, &["to_x", "end_x"]).map_err(bad_input_err)?;
-    let end_y = opt_finite_f64_param(params, &["to_y", "end_y"]).map_err(bad_input_err)?;
+    let end_x = opt_finite_f64_param(params, &["to_x", "end_x"]).map_err(bad_input_err)?.map(|v| ensure_f32_coord(v, "to_x")).transpose()?;
+    let end_y = opt_finite_f64_param(params, &["to_y", "end_y"]).map_err(bad_input_err)?.map(|v| ensure_f32_coord(v, "to_y")).transpose()?;
     if end_x.is_some() != end_y.is_some() {
         return Err(bad_input_err("both `to_x`/`end_x` and `to_y`/`end_y` must be provided together for `drag`"));
     }
@@ -2504,11 +2594,12 @@ pub fn resolve_power_curve_hover_target(app: &mut UiApp, meta: &FrameInspectMeta
     let entry = meta
         .find_by_widget_id("power.curve_hover")
         .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, "widget `power.curve_hover` not found in current UI tree"))?;
-    let frac = opt_finite_f64_param(params, &["hover_fraction_x", "fraction_x"])
-        .map_err(bad_input_err)?
+    let explicit_frac = opt_finite_f64_param(params, &["hover_fraction_x", "fraction_x"]).map_err(bad_input_err)?;
+    let hover_n_opt = opt_finite_f64_param(params, &["hover_n"]).map_err(bad_input_err)?;
+    let frac = explicit_frac
         .map(|f| f.clamp(0.0, 1.0))
         .or_else(|| {
-            opt_finite_f64_param(params, &["hover_n"]).ok().flatten().and_then(|n| {
+            hover_n_opt.and_then(|n| {
                 let pts = &app.canvas_dialogs.power_wizard.result.as_ref()?.power_curve;
                 let min_n = pts.first().map_or(2.0, |p| p.n);
                 let max_n = pts.last().map_or(min_n + 1.0, |p| p.n).max(min_n + 1.0);
@@ -2543,6 +2634,18 @@ fn dispatch_gui_pointer_gesture(app: &mut UiApp, params: &Value) -> Result<Value
         if let Some(col_str) = wid.strip_prefix("formula_bar.open_col.")
             && let Ok(col) = col_str.parse::<usize>()
         {
+            if !matches!(parsed.kind.as_str(), "click" | "double_click") {
+                return Ok(json!({
+                    "handled": true,
+                    "kind": parsed.kind,
+                    "action": parsed.kind,
+                    "widget_id": wid,
+                    "formula_bar_active": app.grid.formula_bar.active,
+                }));
+            }
+            if HybridCoexistenceArbiter::evaluate(app, false).modal_backdrop_active {
+                return Err(EngineError::with_code(ErrorCode::Conflict, format!("cannot open formula bar `{wid}` while a modal dialog is active")));
+            }
             let badge_wid = format!("mv_formula.role_badge.{col}");
             if let Ok((pos, enabled, reason)) = resolve_widget_center_pt(app, &meta, parsed.metrics, &badge_wid) {
                 if !enabled {
@@ -2672,16 +2775,11 @@ pub fn prepare_grid_type_text_target(
         });
     if let Some(coord) = resolved_grid_coord
         && let Some(ds) = app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id))
-        && let Some(reg) = ds.linked_regions.iter().find(|r| {
-            coord.row >= r.target_range.start.row
-                && coord.row <= r.target_range.end.row
-                && coord.col >= r.target_range.start.col
-                && coord.col <= r.target_range.end.col
-        })
+        && let Some(reg) = crate::grid_view::linked_region_for_cell_subcol(ds, coord.row, coord.col, coord.subcol)
     {
         return Err(EngineError::with_code(
             ErrorCode::Conflict,
-            format!("cell ({}, {}) belongs to read-only LinkedDataRegion `{}`", coord.row, coord.col, reg.id),
+            format!("cell ({}, {}, {}) belongs to read-only LinkedDataRegion `{}`", coord.row, coord.col, coord.subcol, reg.id),
         ));
     }
 
@@ -2912,19 +3010,55 @@ pub struct ParsedSwitchTabParams<'a> {
     pub metrics: ViewportMetrics,
 }
 
+const NUMERIC_TAB_INDICES: [&str; 64] = [
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25",
+    "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49",
+    "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63",
+];
+
+fn parse_tab_target_str_or_index(params: &Value) -> Result<Option<&str>, EngineError> {
+    let Some(obj) = params.as_object() else {
+        return Ok(None);
+    };
+    for key in ["tab_id", "tab", "tab_index", "widget_id", "id"] {
+        let Some(val) = obj.get(key) else {
+            continue;
+        };
+        if val.is_null() {
+            continue;
+        }
+        if let Some(s) = val.as_str() {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Err(bad_input_err(format!("`{key}` must be a non-empty string or non-negative integer")));
+            }
+            return Ok(Some(trimmed));
+        }
+        if let Some(idx_u64) = val.as_u64() {
+            let idx = usize::try_from(idx_u64).map_err(|_| bad_input_err(format!("`{key}` index out of range")))?;
+            let static_str = NUMERIC_TAB_INDICES
+                .get(idx)
+                .copied()
+                .ok_or_else(|| bad_input_err(format!("`{key}` index {idx} exceeds supported tab range (0..{})", NUMERIC_TAB_INDICES.len())))?;
+            return Ok(Some(static_str));
+        }
+        return Err(bad_input_err(format!("`{key}` must be a non-empty string or non-negative integer")));
+    }
+    Ok(None)
+}
+
 /// Parse and validate `ui.switch_tab` request parameters.
 ///
 /// # Errors
-/// Returns [`EngineError`] if neither `sheet_id` nor `tab_id` is present or metrics are invalid.
+/// Returns [`EngineError`] if neither `sheet_id` nor `tab_id`/`tab` is present or metrics are invalid.
 pub fn parse_switch_tab_params(params: &Value) -> Result<ParsedSwitchTabParams<'_>, EngineError> {
     require_params_object_or_null(params, "ui.switch_tab").map_err(bad_input_err)?;
     let metrics = parse_viewport_metrics_from_params(params)?;
     if let Some(sheet_id) = opt_non_empty_str_param(params, &["sheet_id"]).map_err(bad_input_err)? {
         return Ok(ParsedSwitchTabParams { target: ParsedSwitchTabTarget::Sheet(sheet_id), metrics });
     }
-    let tab_id = opt_non_empty_str_param(params, &["tab_id", "tab", "widget_id", "id"])
-        .map_err(bad_input_err)?
-        .ok_or_else(|| bad_input_err("`ui.switch_tab` requires non-empty `tab_id` or `sheet_id`"))?;
+    let tab_id =
+        parse_tab_target_str_or_index(params)?.ok_or_else(|| bad_input_err("`ui.switch_tab` requires non-empty `tab_id`, `tab`, or `sheet_id`"))?;
     Ok(ParsedSwitchTabParams { target: ParsedSwitchTabTarget::Tab(tab_id), metrics })
 }
 
@@ -2938,11 +3072,22 @@ pub fn find_switch_tab_widget_in_meta<'a>(meta: &'a FrameInspectMeta, target: &P
         }
         ParsedSwitchTabTarget::Tab(tab_id) => {
             let candidates = [(*tab_id).to_owned(), format!("result.tab.{tab_id}"), format!("edit.tab.{tab_id}")];
-            candidates.iter().find_map(|cand| meta.find_by_widget_id(cand)).or_else(|| {
-                meta.entries.iter().find(|e| {
-                    entry_belongs_to_scope(e, "tabs") && (e.widget_id.ends_with(&format!(".{tab_id}")) || e.label.eq_ignore_ascii_case(tab_id))
+            candidates
+                .iter()
+                .find_map(|cand| meta.find_by_widget_id(cand))
+                .or_else(|| {
+                    meta.entries.iter().find(|e| {
+                        entry_belongs_to_scope(e, "tabs") && (e.widget_id.ends_with(&format!(".{tab_id}")) || e.label.eq_ignore_ascii_case(tab_id))
+                    })
                 })
-            })
+                .or_else(|| {
+                    let idx = tab_id.parse::<usize>().ok()?;
+                    meta.entries
+                        .iter()
+                        .filter(|e| e.role == "tab" && entry_belongs_to_scope(e, "tabs"))
+                        .nth(idx)
+                        .or_else(|| meta.entries.iter().filter(|e| entry_belongs_to_scope(e, "tabs")).nth(idx))
+                })
         }
     }
 }
@@ -2999,14 +3144,27 @@ pub fn execute_switch_tab_fallback(app: &mut UiApp, target: &ParsedSwitchTabTarg
             let active_rs_id = app.document().active_sheet_id.clone();
             if let Some(rs_id) = active_rs_id
                 && let Some(rs) = app.document().result_sheet(&rs_id).cloned()
-                && rs.tabs.iter().any(|t| t.id == *tab_id || t.title.eq_ignore_ascii_case(tab_id))
             {
-                if !app.canvas_dialogs.result_view.select_tab_by_id(&rs, tab_id)
-                    && let Some(pos) = rs.tabs.iter().position(|t| t.title.eq_ignore_ascii_case(tab_id))
-                {
-                    app.canvas_dialogs.result_view.active_tab_index = pos;
+                if rs.tabs.iter().any(|t| t.id == *tab_id || t.title.eq_ignore_ascii_case(tab_id)) {
+                    if !app.canvas_dialogs.result_view.select_tab_by_id(&rs, tab_id)
+                        && let Some(pos) = rs.tabs.iter().position(|t| t.title.eq_ignore_ascii_case(tab_id))
+                    {
+                        app.canvas_dialogs.result_view.active_tab_index = pos;
+                    }
+                    return Ok(json!({ "switched": true, "tab_id": tab_id, "widget_id": format!("result.tab.{tab_id}") }));
                 }
-                return Ok(json!({ "switched": true, "tab_id": tab_id, "widget_id": format!("result.tab.{tab_id}") }));
+                if let Ok(idx) = tab_id.parse::<usize>()
+                    && idx < rs.tabs.len()
+                {
+                    app.canvas_dialogs.result_view.select_tab(idx, rs.tabs.len());
+                    let resolved_id = rs.tabs[idx].id.clone();
+                    return Ok(json!({
+                        "switched": true,
+                        "tab_id": resolved_id,
+                        "tab_index": idx,
+                        "widget_id": format!("result.tab.{resolved_id}"),
+                    }));
+                }
             }
             Err(EngineError::with_code(ErrorCode::NotFound, format!("tab `{tab_id}` not found in current UI tree")))
         }
@@ -3056,6 +3214,7 @@ fn dispatch_gui_switch_tab(app: &mut UiApp, params: &Value) -> Result<Value, Eng
 pub struct ParsedAnswerDialogParams<'a> {
     pub dialog_id: Option<&'a str>,
     pub action: Option<String>,
+    pub choice: Option<&'a str>,
     pub fields: Option<&'a Map<String, Value>>,
     pub force_create_new: bool,
     pub metrics: ViewportMetrics,
@@ -3064,18 +3223,19 @@ pub struct ParsedAnswerDialogParams<'a> {
 /// Parse and validate `ui.answer_dialog` request parameters.
 ///
 /// # Errors
-/// Returns [`EngineError`] on invalid `fields`, `dialog_id`, `action`, or `metrics`.
+/// Returns [`EngineError`] on invalid `fields`, `dialog_id`, `action`, `choice`, or `metrics`.
 pub fn parse_answer_dialog_params(params: &Value) -> Result<ParsedAnswerDialogParams<'_>, EngineError> {
     require_params_object_or_null(params, "ui.answer_dialog").map_err(bad_input_err)?;
     let dialog_id = opt_non_empty_str_param(params, &["dialog_id"]).map_err(bad_input_err)?;
     let action = opt_non_empty_str_param(params, &["action"]).map_err(bad_input_err)?.map(|s| s.to_ascii_lowercase());
+    let choice = opt_non_empty_str_param(params, &["choice"]).map_err(bad_input_err)?;
     let metrics = parse_viewport_metrics_from_params(params)?;
     let force_create_new = params.get("force_create_new").and_then(Value::as_bool) == Some(true);
     let fields = match params.get("fields").or_else(|| params.get("values")).or_else(|| params.get("patches")) {
         Some(v) if !v.is_null() => Some(v.as_object().ok_or_else(|| bad_input_err("`fields` must be a JSON object"))?),
         _ => None,
     };
-    Ok(ParsedAnswerDialogParams { dialog_id, action, fields, force_create_new, metrics })
+    Ok(ParsedAnswerDialogParams { dialog_id, action, choice, fields, force_create_new, metrics })
 }
 
 /// Validate dialog open state and `dialog_id`, then apply any `fields` patch to `app`.
@@ -3112,7 +3272,21 @@ pub fn prepare_answer_dialog_patch(
     }
 
     let mut want_force_create_new = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }) && parsed.force_create_new;
-    if let Some(fields_map) = parsed.fields {
+    let merged_fields: Option<Map<String, Value>> = match (parsed.fields, parsed.choice) {
+        (Some(f), Some(ch)) => {
+            let mut m = f.clone();
+            m.entry(String::from("choice")).or_insert_with(|| Value::String(ch.to_owned()));
+            Some(m)
+        }
+        (Some(f), None) => Some(f.clone()),
+        (None, Some(ch)) => {
+            let mut m = Map::new();
+            m.insert(String::from("choice"), Value::String(ch.to_owned()));
+            Some(m)
+        }
+        (None, None) => None,
+    };
+    if let Some(fields_map) = merged_fields.as_ref() {
         if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. })
             && (fields_map.get("create_new").and_then(Value::as_bool) == Some(true)
                 || fields_map.get("force_create_new").and_then(Value::as_bool) == Some(true))
@@ -3478,7 +3652,13 @@ pub fn render_egui_shell_frame_with_host(
         ui,
         app,
         &mut views.leading_dock,
-        LeadingDockContext { tokens: &tokens, layout, enabled, focused: app.nav.active_pane == ActiveWorkspacePane::Navigator },
+        LeadingDockContext {
+            tokens: &tokens,
+            layout,
+            workspace_preset: views.workspace_preset,
+            enabled,
+            focused: app.nav.active_pane == ActiveWorkspacePane::Navigator,
+        },
         meta,
         intents,
     );
@@ -3604,7 +3784,7 @@ pub fn render_egui_shell_frame_with_host(
                 intents,
             ));
         }
-        HybridModalSurface::None => {}
+        HybridModalSurface::EguiProgressModal | HybridModalSurface::None => {}
     }
 
     report
@@ -3692,18 +3872,20 @@ fn handle_shell_global_shortcuts(
             .active_sheet_id
             .as_ref()
             .is_some_and(|id| app.document().data_sheet(id).is_some() || app.document().result_sheet(id).is_some());
-    let active_canvas_target = if !app.egui_views.launcher_open && !app.nav.welcome.open && !app.nav.gallery.open {
+    let active_canvas_target = if !views.launcher_open && !app.nav.welcome.open && !app.nav.gallery.open {
         let doc = app.document();
         doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned()
     } else {
         None
     };
 
-    let has_renderable_figure = !app.egui_views.launcher_open
+    let has_renderable_figure = !views.launcher_open
         && !app.nav.welcome.open
         && !app.nav.gallery.open
         && (!app.document().graph_sheets.is_empty() || !app.document().layout_sheets.is_empty());
     let mut slide_copy_triggered = false;
+    let mut copy_handled = false;
+    let mut paste_handled = false;
 
     while let Some(m) = consume_matching_shortcut(ctx, app, on_result_sheet, |cmd| {
         if matches!(
@@ -3743,7 +3925,9 @@ fn handle_shell_global_shortcuts(
                 let doc = app.document();
                 let canvas_moved = (app.canvas_dialogs.canvas.zoom - 1.0).abs() > 0.001
                     || app.canvas_dialogs.canvas.pan_pt.x.abs() > 0.001
-                    || app.canvas_dialogs.canvas.pan_pt.y.abs() > 0.001;
+                    || app.canvas_dialogs.canvas.pan_pt.y.abs() > 0.001
+                    || views.canvas_view.pan_pt[0].abs() > 0.001
+                    || views.canvas_view.pan_pt[1].abs() > 0.001;
                 let ui_zoomed = (app.ui_scale() - 1.0).abs() > 0.001;
                 doc.total_sheet_count() > 0 && (canvas_moved || !ui_zoomed)
             }
@@ -3766,6 +3950,7 @@ fn handle_shell_global_shortcuts(
                 }
             }
             "edit.copy" => {
+                copy_handled = true;
                 let dpi = ViewportMetrics::new(1.0, 1.0, f64::from(ctx.pixels_per_point())).dpi_for_base(144);
                 intents.push(UiIntent::WorkspaceCopy { dpi });
             }
@@ -3774,6 +3959,7 @@ fn handle_shell_global_shortcuts(
                 intents.push(UiIntent::WorkspaceCopyForSlides { dpi: 300 });
             }
             "edit.paste" | "edit.pasteImage" | "table.paste" => {
+                paste_handled = true;
                 if let Some(ref target_id) = active_canvas_target {
                     intents.push(UiIntent::CanvasPaste { target_sheet_id: target_id.clone(), anchor_pt: None });
                 }
@@ -3806,15 +3992,21 @@ fn handle_shell_global_shortcuts(
     }
 
     let copy_key_unbound = !slide_copy_triggered
+        && !copy_handled
         && app.shortcuts.active_combo("edit.copy").is_none_or(|c| c == "Cmd+C")
         && !has_registered_shortcut(app, on_result_sheet, Key::C, Modifiers::COMMAND)
         && !has_registered_shortcut(app, on_result_sheet, Key::C, Modifiers::CTRL);
+    let copy_default_bound = copy_key_unbound;
     let copy_triggered = ctx.input_mut(|i| {
         let mut hit = false;
         i.events.retain(|ev| {
             if matches!(ev, egui::Event::Copy) {
-                hit = true;
-                false
+                if copy_default_bound {
+                    hit = true;
+                    false
+                } else {
+                    !(copy_handled || slide_copy_triggered)
+                }
             } else {
                 true
             }
@@ -3832,15 +4024,21 @@ fn handle_shell_global_shortcuts(
     }
 
     if let Some(target_id) = active_canvas_target {
-        let paste_key_unbound = app.shortcuts.active_combo("table.paste") == Some("Cmd+V")
+        let paste_default_bound = !paste_handled
+            && (app.shortcuts.active_combo("table.paste") == Some("Cmd+V") || app.shortcuts.active_combo("edit.paste") == Some("Cmd+V"));
+        let paste_key_unbound = paste_default_bound
             && !has_registered_shortcut(app, on_result_sheet, Key::V, Modifiers::COMMAND)
             && !has_registered_shortcut(app, on_result_sheet, Key::V, Modifiers::CTRL);
         let paste_triggered = ctx.input_mut(|i| {
             let mut hit = false;
             i.events.retain(|ev| {
                 if matches!(ev, egui::Event::Paste(_)) {
-                    hit = true;
-                    false
+                    if paste_default_bound {
+                        hit = true;
+                        false
+                    } else {
+                        !paste_handled
+                    }
                 } else {
                     true
                 }

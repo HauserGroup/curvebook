@@ -133,7 +133,12 @@ impl PowerTestFamily {
         !matches!(self, Self::OneWayAnova | Self::ChiSquare)
     }
 
-    /// Minimum valid integer primary sample size for this test family.
+    /// Default minimum valid integer primary sample size for this test family.
+    ///
+    /// Note that specific design contexts may permit smaller valid integer `n1` (for example,
+    /// `Correlation` under [`CorrelationPowerMethod::ExactTTransform`] or
+    /// [`CorrelationPowerMethod::ConditionalSlopeT`] allows `n = 3`, and homoscedastic
+    /// `TwoSampleUnpairedT` with effective `n2 >= 2` allows `n1 = 1`).
     #[must_use]
     pub const fn min_integer_n(self) -> usize {
         match self {
@@ -1364,6 +1369,13 @@ fn integrate_hotelling_z(n: f64, rho: f64, a: f64, b: f64, mu: f64, sig: f64) ->
     Ok(total)
 }
 
+/// Exact overflow- and saturation-free conversion `atanh(t / sqrt(t^2 + df)) = asinh(t / sqrt(df))`.
+#[inline]
+fn t_to_fisher_z(t_crit: f64, df: f64) -> f64 {
+    let ratio = t_crit / df.sqrt();
+    if ratio.is_finite() { ratio.asinh() } else { t_crit.signum() * (std::f64::consts::LN_2 + t_crit.abs().ln() - 0.5 * df.ln()) }
+}
+
 fn hotelling_correlation_power(n: f64, r: f64, alpha: f64, tail_mode: TailMode) -> Result<PowerEval, StatsError> {
     if !n.is_finite() || n <= 2.0 {
         return Err(StatsError::InvalidParameter { name: "sample_size", value: n });
@@ -1376,8 +1388,7 @@ fn hotelling_correlation_power(n: f64, r: f64, alpha: f64, tail_mode: TailMode) 
         TailMode::TwoSided => student_t_two_sided_isf(alpha, df)?,
         TailMode::OneSided(_) => student_t_isf(alpha, df)?,
     };
-    let r_crit = t_crit / t_crit.hypot(df.sqrt());
-    let z_crit = r_crit.atanh();
+    let z_crit = t_to_fisher_z(t_crit, df);
     let sig = 1.0 / df.sqrt();
     let span = (14.0 * sig).max(52.0 / df);
 
@@ -1444,8 +1455,7 @@ fn correlation_power(method: CorrelationPowerMethod, n: f64, r: f64, alpha: f64,
                 TailMode::TwoSided => student_t_two_sided_isf(alpha, df)?,
                 TailMode::OneSided(_) => student_t_isf(alpha, df)?,
             };
-            let rc = (t_crit * t_crit / (t_crit * t_crit + df)).sqrt();
-            let zrc = rc.atanh();
+            let zrc = t_to_fisher_z(t_crit, df);
             let zr = r.atanh() + r / (2.0 * (n - 1.0));
             let sqrt_n3 = (n - 3.0).sqrt();
             let (crit_out, power) = match tail_mode {
@@ -1588,8 +1598,32 @@ fn min_continuous_n(ctx: &ResolvedContext) -> f64 {
     }
 }
 
+/// Contextual minimum valid integer primary sample size `n1`, accounting for
+/// `CorrelationPowerMethod` (`3` for `ExactTTransform | ConditionalSlopeT`, `4` for
+/// `FisherZ | FisherZWithTCrit`) and homoscedastic `TwoSampleUnpairedT` (`1` when effective
+/// `n2 >= 2`, `2` for Welch or `n2 < 2`).
+fn min_integer_n_for_context(ctx: &ResolvedContext, n2_explicit: Option<f64>) -> Result<usize, StatsError> {
+    match ctx.family {
+        PowerTestFamily::Correlation => Ok(match ctx.correlation_method {
+            CorrelationPowerMethod::ExactTTransform | CorrelationPowerMethod::ConditionalSlopeT => 3,
+            CorrelationPowerMethod::FisherZ | CorrelationPowerMethod::FisherZWithTCrit => 4,
+        }),
+        PowerTestFamily::TwoSampleUnpairedT => {
+            if matches!(&ctx.effect, ResolvedEffect::UnpairedT { welch_sds: Some(_), .. }) {
+                return Ok(2);
+            }
+            let n2_at_one = match n2_explicit.or(ctx.fixed_n2) {
+                Some(n2_raw) => f64_to_checked_usize("sample_size_group2", n2_raw.ceil())?.max(1),
+                None => f64_to_checked_usize("sample_size", ctx.allocation_ratio.ceil())?.max(1),
+            };
+            Ok(if n2_at_one >= 2 { 1 } else { 2 })
+        }
+        _ => Ok(ctx.family.min_integer_n()),
+    }
+}
+
 fn min_curve_integer_n(ctx: &ResolvedContext) -> Result<usize, StatsError> {
-    let base = ctx.family.min_integer_n();
+    let base = min_integer_n_for_context(ctx, None)?;
     match ctx.family {
         PowerTestFamily::TwoSampleUnpairedT => {
             if let Some(n2_fix) = ctx.fixed_n2 {
@@ -1604,14 +1638,14 @@ fn min_curve_integer_n(ctx: &ResolvedContext) -> Result<usize, StatsError> {
             }
             let need = match &ctx.effect {
                 ResolvedEffect::UnpairedT { welch_sds: Some(_), .. } => {
-                    let mut n = f64_to_checked_usize("sample_size", (2.0 / ctx.allocation_ratio).ceil().max(2.0))?;
+                    let mut n = f64_to_checked_usize("sample_size", (1.0 / ctx.allocation_ratio).ceil().max(2.0))?;
                     while (n as f64) * ctx.allocation_ratio <= 1.0 {
                         n = n.checked_add(1).ok_or(StatsError::InvalidParameter { name: "sample_size", value: f64::INFINITY })?;
                     }
                     n
                 }
                 _ => {
-                    let start = (1.0 / ctx.allocation_ratio).max(2.25 / (1.0 + ctx.allocation_ratio)).ceil();
+                    let start = (1.0 / ctx.allocation_ratio).max(2.25 / (1.0 + ctx.allocation_ratio)).ceil().max(1.0);
                     let mut n = f64_to_checked_usize("sample_size", start)?;
                     while (n as f64) * ctx.allocation_ratio < 1.0 || (n as f64) + (n as f64) * ctx.allocation_ratio - 2.0 <= 0.0 {
                         n = n.checked_add(1).ok_or(StatsError::InvalidParameter { name: "sample_size", value: f64::INFINITY })?;
@@ -1705,7 +1739,11 @@ fn solve_continuous_n(ctx: &ResolvedContext) -> Result<f64, StatsError> {
     {
         let chi2_crit = chi2_isf(ctx.alpha, *df)?;
         let lambda = solve_chi2_lambda(chi2_crit, *df, target_power)?;
-        return Ok((lambda / (*w * *w)).max(n_min));
+        let n_cont = (lambda / (*w * *w)).max(n_min);
+        if !n_cont.is_finite() || n_cont > MAX_CONTINUOUS_N {
+            return Err(StatsError::NotConverged { algorithm: "solve_continuous_n" });
+        }
+        return Ok(n_cont);
     }
 
     let guess = asymptotic_n_guess(ctx, target_power).max(n_min + 1.0);
@@ -2086,7 +2124,7 @@ fn checked_two_sample_or_total_counts(ctx: &ResolvedContext, n1: usize, n2_expli
 }
 
 fn ceiling_counts(ctx: &ResolvedContext, n1_cont: f64, n2_explicit: Option<f64>) -> Result<(usize, Option<usize>, usize), StatsError> {
-    let min_int = ctx.family.min_integer_n();
+    let min_int = min_integer_n_for_context(ctx, n2_explicit)?;
     let n1_ceil = f64_to_checked_usize("sample_size", n1_cont.ceil())?.max(min_int);
     let (n_group2, total_n) = checked_two_sample_or_total_counts(ctx, n1_ceil, n2_explicit)?;
     Ok((n1_ceil, n_group2, total_n))
@@ -2322,8 +2360,14 @@ pub fn solve_power(req: &PowerAnalysisRequest) -> Result<PowerAnalysisResult, St
     };
     if can_build_sensitivity {
         let valid_alphas: Vec<f64> = DEFAULT_SENSITIVITY_ALPHAS.iter().copied().filter(|&a| a < 0.70).collect();
-        if let Ok(table) = compute_sensitivity_table(&curve_req, &valid_alphas, DEFAULT_SENSITIVITY_POWERS) {
+        if let Ok((table, omitted)) = compute_sensitivity_table_best_effort(&curve_req, &valid_alphas, DEFAULT_SENSITIVITY_POWERS) {
             res.sensitivity_table = table;
+            if omitted > 0 {
+                let total_cells = valid_alphas.len() * DEFAULT_SENSITIVITY_POWERS.len();
+                res.notes.push(format!(
+                    "Sensitivity table omitted {omitted} of {total_cells} (alpha, target power) cell(s) that are unachievable under the design constraints."
+                ));
+            }
         }
     }
 
@@ -2417,13 +2461,7 @@ fn sample_integer_grid(lo: usize, hi: usize, num_points: usize) -> Vec<usize> {
     out
 }
 
-/// Compute a Stage 4 sensitivity matrix across every `(alpha, target_power)` combination.
-///
-/// When `req.solve_target == PowerSolveTarget::DetectableEffect`, each cell reports the
-/// minimum detectable effect size at `req.sample_size`; otherwise each cell reports the required
-/// sample size (`sample_size`, `total_n`, `continuous_n`) at the configured effect size.
-pub fn compute_sensitivity_table(req: &PowerAnalysisRequest, alphas: &[f64], target_powers: &[f64]) -> Result<Vec<SensitivityCell>, StatsError> {
-    let mut out = Vec::with_capacity(alphas.len().saturating_mul(target_powers.len()));
+fn prepare_sensitivity_base(req: &PowerAnalysisRequest) -> Result<(PowerAnalysisRequest, PowerSolveTarget), StatsError> {
     let mode = if req.solve_target == PowerSolveTarget::DetectableEffect { PowerSolveTarget::DetectableEffect } else { PowerSolveTarget::SampleSize };
     let mut base_req = req.clone();
     if matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions)
@@ -2443,27 +2481,67 @@ pub fn compute_sensitivity_table(req: &PowerAnalysisRequest, alphas: &[f64], tar
             base_req.sample_size_group2 = None;
         }
     }
+    Ok((base_req, mode))
+}
 
+fn compute_sensitivity_table_best_effort(
+    req: &PowerAnalysisRequest,
+    alphas: &[f64],
+    target_powers: &[f64],
+) -> Result<(Vec<SensitivityCell>, usize), StatsError> {
+    let (base_req, mode) = prepare_sensitivity_base(req)?;
     for &alpha in alphas {
         let _ = validate_prob_open("alpha", alpha)?;
+    }
+    for &tp in target_powers {
+        let _ = validate_prob_open("target_power", tp)?;
+    }
+    let mut out = Vec::with_capacity(alphas.len().saturating_mul(target_powers.len()));
+    let mut omitted = 0_usize;
+    let mut first_err: Option<StatsError> = None;
+
+    for &alpha in alphas {
         for &tp in target_powers {
-            let _ = validate_prob_open("target_power", tp)?;
             let mut cell_req = base_req.clone();
             cell_req.solve_target = mode;
             cell_req.alpha = alpha;
             cell_req.target_power = Some(tp);
-            let solved = solve_power_core(&cell_req)?;
-            out.push(SensitivityCell {
-                alpha,
-                target_power: tp,
-                sample_size: solved.n_per_group,
-                effect_size: solved.effect_size,
-                total_n: solved.total_n,
-                continuous_n: solved.continuous_n,
-            });
+            match solve_power_core(&cell_req) {
+                Ok(solved) => out.push(SensitivityCell {
+                    alpha,
+                    target_power: tp,
+                    sample_size: solved.n_per_group,
+                    effect_size: solved.effect_size,
+                    total_n: solved.total_n,
+                    continuous_n: solved.continuous_n,
+                }),
+                Err(err) => {
+                    omitted += 1;
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
+            }
         }
     }
-    Ok(out)
+    if out.is_empty()
+        && let Some(err) = first_err
+    {
+        return Err(err);
+    }
+    Ok((out, omitted))
+}
+
+/// Compute a Stage 4 sensitivity matrix across every achievable `(alpha, target_power)` combination.
+///
+/// When `req.solve_target == PowerSolveTarget::DetectableEffect`, each cell reports the
+/// minimum detectable effect size at `req.sample_size`; otherwise each cell reports the required
+/// sample size (`sample_size`, `total_n`, `continuous_n`) at the configured effect size.
+/// Individual cells that are mathematically unachievable under design constraints (for example,
+/// a fixed second-group sample size power ceiling) are omitted while retaining all achievable
+/// cells; an error is returned if inputs are invalid or no cell in a non-empty grid succeeds.
+pub fn compute_sensitivity_table(req: &PowerAnalysisRequest, alphas: &[f64], target_powers: &[f64]) -> Result<Vec<SensitivityCell>, StatsError> {
+    compute_sensitivity_table_best_effort(req, alphas, target_powers).map(|(cells, _)| cells)
 }
 
 /// Convert a serialized document [`curvebook_doc::PowerAnalysisSpec`] into a solver

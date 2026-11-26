@@ -1,6 +1,7 @@
 //! Reactive `Data -> Analysis -> Graph -> Layout` topological DAG and deterministic recalculation.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use curvebook_doc::analysis::{AnalysisRecomputeStrategy, descriptor_for_kind};
 use curvebook_doc::{
@@ -161,22 +162,34 @@ fn collect_sheet_ids(doc: &ProjectDocument) -> BTreeSet<SheetId> {
 fn check_explicit_self_cycles(doc: &ProjectDocument) -> Result<(), EngineError> {
     for ds in &doc.data_sheets {
         if ds.info_sheet_id.as_ref() == Some(&ds.id) {
-            return Err(EngineError::new(format!("self-referential info sheet binding detected on `{}`", ds.id)));
+            return Err(EngineError::with_code(
+                crate::ErrorCode::CycleDetected,
+                format!("self-referential info sheet binding detected on `{}`", ds.id),
+            ));
         }
         for region in &ds.linked_regions {
             if link_source_sheet_id(&region.spec.source) == Some(&ds.id) {
-                return Err(EngineError::new(format!("self-referential link dependency detected on sheet `{}`", ds.id)));
+                return Err(EngineError::with_code(
+                    crate::ErrorCode::CycleDetected,
+                    format!("self-referential link dependency detected on sheet `{}`", ds.id),
+                ));
             }
         }
     }
 
     for res in &doc.result_sheets {
         if res.analysis.source_sheet_id == res.id {
-            return Err(EngineError::new(format!("self-referential analysis source detected on result sheet `{}`", res.id)));
+            return Err(EngineError::with_code(
+                crate::ErrorCode::CycleDetected,
+                format!("self-referential analysis source detected on result sheet `{}`", res.id),
+            ));
         }
         for hook in res.analysis.kind.hooked_sources() {
             if hook_source_sheet_id(&hook) == Some(&res.id) {
-                return Err(EngineError::new(format!("self-referential hook binding detected on result sheet `{}`", res.id)));
+                return Err(EngineError::with_code(
+                    crate::ErrorCode::CycleDetected,
+                    format!("self-referential hook binding detected on result sheet `{}`", res.id),
+                ));
             }
         }
     }
@@ -249,7 +262,10 @@ fn check_explicit_self_cycles(doc: &ProjectDocument) -> Result<(), EngineError> 
                 _ => false,
             };
             if self_ref {
-                return Err(EngineError::new(format!("self-referential item detected on layout sheet `{}`", layout.id)));
+                return Err(EngineError::with_code(
+                    crate::ErrorCode::CycleDetected,
+                    format!("self-referential item detected on layout sheet `{}`", layout.id),
+                ));
             }
         }
     }
@@ -262,7 +278,8 @@ fn check_explicit_self_cycles(doc: &ProjectDocument) -> Result<(), EngineError> 
 /// # Errors
 /// Returns [`EngineError`] if any link cycle, self-reference, or cross-sheet dependency cycle exists.
 pub fn topological_order(doc: &ProjectDocument) -> Result<Vec<SheetId>, EngineError> {
-    detect_link_cycles(&doc.data_sheets).map_err(|err| EngineError::new(format!("link cycle detected: {err}")))?;
+    detect_link_cycles(&doc.data_sheets)
+        .map_err(|err| EngineError::with_code(crate::ErrorCode::CycleDetected, format!("link cycle detected: {err}")))?;
     check_explicit_self_cycles(doc)?;
 
     let nodes = collect_sheet_ids(doc);
@@ -278,7 +295,7 @@ pub fn topological_order(doc: &ProjectDocument) -> Result<Vec<SheetId>, EngineEr
         let mut unique_existing: BTreeSet<SheetId> = BTreeSet::new();
         for dep in deps {
             if &dep == id {
-                return Err(EngineError::new(format!("self-referential dependency detected on sheet `{id}`")));
+                return Err(EngineError::with_code(crate::ErrorCode::CycleDetected, format!("self-referential dependency detected on sheet `{id}`")));
             }
             if nodes.contains(&dep) {
                 unique_existing.insert(dep);
@@ -452,12 +469,29 @@ pub fn recalculate_project(doc: &mut ProjectDocument) -> Result<usize, EngineErr
     Ok(report.total_updated())
 }
 
+fn check_recalc_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), EngineError> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        return Err(EngineError::with_code(ErrorCode::Cancelled, "project recalculation cancelled").with_retryable(true));
+    }
+    Ok(())
+}
+
 /// Recalculate the full project DAG and return a detailed [`RecalcReport`].
 ///
 /// # Errors
 /// Returns [`EngineError`] on cyclic sheet/link/formula dependencies; `doc` remains unmodified on error.
 pub fn recalculate_project_with_report(doc: &mut ProjectDocument) -> Result<RecalcReport, EngineError> {
-    let (report, _) = recalculate_project_with_links_report(doc, None)?;
+    let (report, _) = recalculate_project_with_links_report(doc, None, None)?;
+    Ok(report)
+}
+
+/// Recalculate the full project DAG with cooperative cancellation polling (`AUD-13-22`).
+///
+/// # Errors
+/// Returns [`EngineError`] with [`ErrorCode::Cancelled`] when `cancelled` is set, or on cyclic
+/// sheet/link/formula dependencies; `doc` remains unmodified on error.
+pub fn recalculate_project_with_report_cancellable(doc: &mut ProjectDocument, cancelled: Option<&AtomicBool>) -> Result<RecalcReport, EngineError> {
+    let (report, _) = recalculate_project_with_links_report(doc, None, cancelled)?;
     Ok(report)
 }
 
@@ -470,7 +504,22 @@ pub fn recalculate_project_with_report(doc: &mut ProjectDocument) -> Result<Reca
 /// Returns [`EngineError`] on cyclic dependencies or failing linked/calculated updates; `doc` remains
 /// unmodified on error.
 pub fn recalculate_dirty_with_report(doc: &mut ProjectDocument, dirty_seeds: &[SheetId]) -> Result<RecalcReport, EngineError> {
-    let (report, _) = recalculate_dirty_with_links_report(doc, dirty_seeds, None)?;
+    let (report, _) = recalculate_dirty_with_links_report(doc, dirty_seeds, None, None)?;
+    Ok(report)
+}
+
+/// Incrementally recalculate the dirty transitive closure of `dirty_seeds` with cooperative
+/// cancellation polling (`AUD-13-22`).
+///
+/// # Errors
+/// Returns [`EngineError`] with [`ErrorCode::Cancelled`] when `cancelled` is set, or on cyclic
+/// dependencies / failing linked or calculated updates; `doc` remains unmodified on error.
+pub fn recalculate_dirty_with_report_cancellable(
+    doc: &mut ProjectDocument,
+    dirty_seeds: &[SheetId],
+    cancelled: Option<&AtomicBool>,
+) -> Result<RecalcReport, EngineError> {
+    let (report, _) = recalculate_dirty_with_links_report(doc, dirty_seeds, None, cancelled)?;
     Ok(report)
 }
 
@@ -478,13 +527,14 @@ pub fn recalculate_dirty_with_report(doc: &mut ProjectDocument, dirty_seeds: &[S
 /// and return the [`RecalcReport`] alongside the number of linked regions refreshed.
 ///
 /// # Errors
-/// Returns [`EngineError`] on cyclic dependencies, unreadable/blocked external links, or failing linked refreshes /
-/// calculated variables; `doc` remains unmodified on error.
+/// Returns [`EngineError`] on cyclic dependencies, cancellation, unreadable/blocked external links,
+/// or failing linked refreshes / calculated variables; `doc` remains unmodified on error.
 pub(crate) fn recalculate_project_with_links_report(
     doc: &mut ProjectDocument,
     external_policy: Option<&ExternalPathPolicy>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(RecalcReport, usize), EngineError> {
-    recalculate_project_scoped(doc, external_policy, None)
+    recalculate_project_scoped(doc, external_policy, None, cancelled)
 }
 
 /// Incrementally recalculate the dirty transitive closure of `dirty_seeds` (plus any [`ResultStatus::Dirty`]
@@ -492,14 +542,15 @@ pub(crate) fn recalculate_project_with_links_report(
 /// delimited file links under `external_policy`.
 ///
 /// # Errors
-/// Returns [`EngineError`] on cyclic dependencies, unreadable/blocked external links, or failing linked refreshes /
-/// calculated variables; `doc` remains unmodified on error.
+/// Returns [`EngineError`] on cyclic dependencies, cancellation, unreadable/blocked external links,
+/// or failing linked refreshes / calculated variables; `doc` remains unmodified on error.
 pub(crate) fn recalculate_dirty_with_links_report(
     doc: &mut ProjectDocument,
     dirty_seeds: &[SheetId],
     external_policy: Option<&ExternalPathPolicy>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(RecalcReport, usize), EngineError> {
-    recalculate_project_scoped(doc, external_policy, Some(dirty_seeds))
+    recalculate_project_scoped(doc, external_policy, Some(dirty_seeds), cancelled)
 }
 
 pub(crate) fn data_sheet_has_calculated_variables(ds: &DataSheet) -> bool {
@@ -513,19 +564,24 @@ fn recalculate_project_scoped(
     doc: &mut ProjectDocument,
     external_policy: Option<&ExternalPathPolicy>,
     dirty_seeds: Option<&[SheetId]>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(RecalcReport, usize), EngineError> {
+    check_recalc_cancelled(cancelled)?;
     let order = topological_order(doc)?;
     let dirty_closure = dirty_seeds.map(|seeds| compute_dirty_closure(doc, &order, seeds, external_policy));
     let in_scope = |sheet_id: &SheetId| dirty_closure.as_ref().is_none_or(|dirty| dirty.contains(sheet_id));
 
     // Only dirty unfrozen data sheets with links or calculated variables can mutate data or fail.
-    // Skipping whole-document cloning (and massive checkpoints/assets) keeps plain cell edits O(1).
+    // Also stage a lightweight working clone when cancellation could abort mid-pass across multiple
+    // in-scope result sheets so direct DAG callers observe atomic rollback on cancellation.
     let has_fallible_dirty_ds =
         doc.data_sheets.iter().any(|ds| in_scope(&ds.id) && !ds.frozen && (!ds.linked_regions.is_empty() || data_sheet_has_calculated_variables(ds)));
+    let multi_result_cancellable = cancelled.is_some() && doc.result_sheets.iter().filter(|rs| in_scope(&rs.id)).take(2).count() > 1;
 
-    if !has_fallible_dirty_ds {
+    if !has_fallible_dirty_ds && !multi_result_cancellable {
         let mut report = RecalcReport { evaluated_order: order.clone(), ..RecalcReport::default() };
         for sheet_id in order {
+            check_recalc_cancelled(cancelled)?;
             if !in_scope(&sheet_id) {
                 continue;
             }
@@ -534,7 +590,7 @@ fn recalculate_project_scoped(
                     report.skipped_frozen_sheets.push(sheet_id);
                 }
             } else if let Some(res_idx) = doc.result_sheets.iter().position(|s| s.id == sheet_id) {
-                if recompute_result_sheet(doc, res_idx) {
+                if recompute_result_sheet(doc, res_idx, cancelled)? {
                     report.updated_result_sheets.push(sheet_id);
                 } else {
                     report.failed_result_sheets.push(sheet_id);
@@ -554,11 +610,16 @@ fn recalculate_project_scoped(
     let mut refreshed_links = 0usize;
 
     for sheet_id in order {
+        if let Err(err) = check_recalc_cancelled(cancelled) {
+            doc.checkpoints = saved_checkpoints;
+            doc.image_assets = saved_assets;
+            return Err(err);
+        }
         if !in_scope(&sheet_id) {
             continue;
         }
         if let Some(ds_idx) = working.data_sheets.iter().position(|s| s.id == sheet_id) {
-            let evaluated = evaluate_data_sheet_node(&mut working, ds_idx, &mut report, external_policy);
+            let evaluated = evaluate_data_sheet_node(&mut working, ds_idx, &mut report, external_policy, cancelled);
             match evaluated {
                 Ok(refreshed) => refreshed_links = refreshed_links.saturating_add(refreshed),
                 Err(err) => {
@@ -568,11 +629,14 @@ fn recalculate_project_scoped(
                 }
             }
         } else if let Some(res_idx) = working.result_sheets.iter().position(|s| s.id == sheet_id) {
-            let succeeded = recompute_result_sheet(&mut working, res_idx);
-            if succeeded {
-                report.updated_result_sheets.push(sheet_id);
-            } else {
-                report.failed_result_sheets.push(sheet_id);
+            match recompute_result_sheet(&mut working, res_idx, cancelled) {
+                Ok(true) => report.updated_result_sheets.push(sheet_id),
+                Ok(false) => report.failed_result_sheets.push(sheet_id),
+                Err(err) => {
+                    doc.checkpoints = saved_checkpoints;
+                    doc.image_assets = saved_assets;
+                    return Err(err);
+                }
             }
         } else if working.graph_sheets.iter().any(|g| g.id == sheet_id) {
             report.preserved_graph_sheets.push(sheet_id);
@@ -657,7 +721,9 @@ fn evaluate_data_sheet_node(
     ds_idx: usize,
     report: &mut RecalcReport,
     external_policy: Option<&ExternalPathPolicy>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<usize, EngineError> {
+    check_recalc_cancelled(cancelled)?;
     let Some(ds) = working.data_sheets.get(ds_idx) else {
         return Ok(0);
     };
@@ -673,7 +739,8 @@ fn evaluate_data_sheet_node(
     let before_active = crate::cmd::helpers::snapshot_active_series_lengths(working, &sheet_id);
     let had_links = !ds.linked_regions.is_empty();
     let info_sheet_id = ds.info_sheet_id.clone();
-    let refreshed = refresh_data_sheet_links(working, ds_idx, external_policy)?;
+    let refreshed = refresh_data_sheet_links(working, ds_idx, external_policy, cancelled)?;
+    check_recalc_cancelled(cancelled)?;
 
     // Resolve Info constants strictly from this sheet's bound `info_sheet_id` (never fall back to `info_sheets.first()`).
     let info_opt = info_sheet_id.as_ref().and_then(|id| working.info_sheet(id)).cloned();
@@ -693,21 +760,30 @@ fn evaluate_data_sheet_node(
 
 fn clear_cell_range(target: &mut DataSheet, range: SheetCellRange) {
     let row_count = target.archetype.row_count();
-    if row_count == 0 {
+    let col_count = target.archetype.column_count();
+    if row_count == 0 || col_count == 0 {
         return;
     }
     let min_row = range.start.row.min(range.end.row);
+    if min_row >= row_count {
+        return;
+    }
     let max_row = range.start.row.max(range.end.row).min(row_count - 1);
-    let ((min_col, start_sub), (max_col, end_sub)) = if range.start.col <= range.end.col {
+    let ((min_col, start_sub), (raw_max_col, raw_end_sub)) = if range.start.col <= range.end.col {
         ((range.start.col, range.start.subcol), (range.end.col, range.end.subcol))
     } else {
         ((range.end.col, range.end.subcol), (range.start.col, range.start.subcol))
     };
+    if min_col >= col_count {
+        return;
+    }
+    let max_col = raw_max_col.min(col_count - 1);
+    let end_sub_at_max = if raw_max_col > max_col { None } else { Some(raw_end_sub) };
 
     for r in min_row..=max_row {
         for c in min_col..=max_col {
-            let s_start = if c == min_col { if min_col == max_col { start_sub.min(end_sub) } else { start_sub } } else { 0 };
-            let s_end = if c == max_col { Some(if min_col == max_col { start_sub.max(end_sub) } else { end_sub }) } else { None };
+            let s_start = if c == min_col { if min_col == raw_max_col { start_sub.min(raw_end_sub) } else { start_sub } } else { 0 };
+            let s_end = if c == max_col { if min_col == raw_max_col { Some(start_sub.max(raw_end_sub)) } else { end_sub_at_max } } else { None };
             let mut s = s_start;
             while s_end.is_none_or(|end_s| s <= end_s) {
                 if target.archetype.data_cell(CellCoord::new(r, c, s)).is_none() {
@@ -716,7 +792,10 @@ fn clear_cell_range(target: &mut DataSheet, range: SheetCellRange) {
                 if target.set_cell(CellCoord::new(r, c, s), Cell::empty()).is_err() {
                     break;
                 }
-                s = s.saturating_add(1);
+                let Some(next_s) = s.checked_add(1) else {
+                    break;
+                };
+                s = next_s;
             }
         }
     }
@@ -739,12 +818,28 @@ pub(crate) fn propagate_internal_source_titles(target_ds: &mut DataSheet, spec: 
     };
 
     let titles: Vec<String> = if spec.placement.transpose {
-        let r0 = spec.filter.row_window.map_or(range.start.row, |(lo, _)| lo.max(range.start.row));
-        let r1 = spec.filter.row_window.map_or(range.end.row, |(_, hi)| hi.min(range.end.row));
+        let Some(last_row) = src.archetype.row_count().checked_sub(1) else {
+            return;
+        };
+        let min_r = range.start.row.min(range.end.row);
+        let max_r = range.start.row.max(range.end.row);
+        let r0 = spec.filter.row_window.map_or(min_r, |(lo, _)| lo.max(min_r));
+        let r1 = spec.filter.row_window.map_or(max_r, |(_, hi)| hi.min(max_r)).min(last_row);
+        if r0 > r1 {
+            return;
+        }
         (r0..=r1).filter_map(|r| source_row_title(&src.archetype, r)).collect()
     } else {
-        let c0 = spec.filter.col_window.map_or(range.start.col, |(lo, _)| lo.max(range.start.col));
-        let c1 = spec.filter.col_window.map_or(range.end.col, |(_, hi)| hi.min(range.end.col));
+        let Some(last_col) = src.archetype.column_count().checked_sub(1) else {
+            return;
+        };
+        let min_c = range.start.col.min(range.end.col);
+        let max_c = range.start.col.max(range.end.col);
+        let c0 = spec.filter.col_window.map_or(min_c, |(lo, _)| lo.max(min_c));
+        let c1 = spec.filter.col_window.map_or(max_c, |(_, hi)| hi.min(max_c)).min(last_col);
+        if c0 > c1 {
+            return;
+        }
         (c0..=c1).filter_map(|c| source_col_title(&src.archetype, c)).collect()
     };
 
@@ -941,6 +1036,7 @@ fn refresh_data_sheet_links(
     working: &mut ProjectDocument,
     ds_idx: usize,
     external_policy: Option<&ExternalPathPolicy>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<usize, EngineError> {
     let Some(ds) = working.data_sheets.get(ds_idx) else {
         return Ok(0);
@@ -954,6 +1050,7 @@ fn refresh_data_sheet_links(
     let mut target = ds.clone();
     let mut refreshed = 0usize;
     for reg_idx in 0..region_count {
+        check_recalc_cancelled(cancelled)?;
         if refresh_single_region(working, &mut target, reg_idx, external_policy)? {
             refreshed = refreshed.saturating_add(1);
         }
@@ -1048,9 +1145,10 @@ fn validate_info_constant_hooks(doc: &ProjectDocument, analysis: &AnalysisSpec, 
     Ok(())
 }
 
-fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
+fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize, cancelled: Option<&AtomicBool>) -> Result<bool, EngineError> {
+    check_recalc_cancelled(cancelled)?;
     let Some(existing) = doc.result_sheets.get(res_idx).cloned() else {
-        return false;
+        return Ok(false);
     };
     let source_ds = match resolve_source_table(doc, &existing.analysis.source_sheet_id) {
         Ok(ds) => ds,
@@ -1058,7 +1156,7 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             if let Some(target) = doc.result_sheets.get_mut(res_idx) {
                 clear_failed_result_sheet(target, code, message);
             }
-            return false;
+            return Ok(false);
         }
     };
     for hook in existing.analysis.kind.hooked_sources() {
@@ -1069,10 +1167,11 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             if let Some(target) = doc.result_sheets.get_mut(res_idx) {
                 clear_failed_result_sheet(target, code, message);
             }
-            return false;
+            return Ok(false);
         }
     }
 
+    check_recalc_cancelled(cancelled)?;
     let desc = descriptor_for_kind(&existing.analysis.kind);
     let output: Result<ResultSheet, String> = match desc.recompute_strategy {
         AnalysisRecomputeStrategy::Transform => {
@@ -1133,14 +1232,35 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
         }
     };
 
+    check_recalc_cancelled(cancelled)?;
     let Some(target) = doc.result_sheets.get_mut(res_idx) else {
-        return false;
+        return Ok(false);
     };
     match output {
         Ok(mut computed) => {
+            // Preserve `ResultStatus::Failed` emitted by solvers (e.g. unconverged/diverged
+            // nonlinear fits) rather than overwriting to `UpToDate` (`AUD-13-04`).
+            if let ResultStatus::Failed { code, message } = computed.status {
+                computed.id = existing.id.clone();
+                computed.analysis = existing.analysis;
+                computed.floating_notes = existing.floating_notes;
+                computed.color_tag = existing.color_tag;
+                computed.scalars.clear();
+                computed.pairwise_comparisons.clear();
+                computed.fitted_curves.clear();
+                computed.analyzable_data = None;
+                computed.eliminated_outliers.clear();
+                computed.status = ResultStatus::Failed { code, message: message.clone() };
+                if validate_result_sheet_finite(&computed, &existing.id).is_ok() {
+                    *target = computed;
+                } else {
+                    clear_failed_result_sheet(target, code, message);
+                }
+                return Ok(false);
+            }
             if let Err(reason) = validate_result_sheet_finite(&computed, &existing.id) {
                 clear_failed_result_sheet(target, ErrorCode::SolverFailed, reason);
-                return false;
+                return Ok(false);
             }
             computed.id = existing.id;
             computed.analysis = existing.analysis;
@@ -1165,13 +1285,46 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             }
             computed.status = ResultStatus::UpToDate;
             *target = computed;
-            true
+            Ok(true)
         }
         Err(message) => {
             clear_failed_result_sheet(target, ErrorCode::SolverFailed, message);
-            false
+            Ok(false)
         }
     }
+}
+
+fn lookup_power_info_constant_f64<'a>(info: &curvebook_doc::InfoSheet, names: &[&'a str]) -> Result<Option<(&'a str, f64)>, String> {
+    for &name in names {
+        let Some(entry) = info.get_constant(name) else {
+            continue;
+        };
+        match &entry.value {
+            curvebook_doc::ConstantValue::Empty => return Ok(None),
+            curvebook_doc::ConstantValue::Number(v) => {
+                if v.is_finite() {
+                    return Ok(Some((name, *v)));
+                }
+                return Err(format!("hooked Info constant `{name}` must be a finite number (got {v})"));
+            }
+            curvebook_doc::ConstantValue::Text(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    return Ok(None);
+                }
+                let parsed = trimmed
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite())
+                    .ok_or_else(|| format!("hooked Info constant `{name}` (`{s}`) is not a finite number"))?;
+                return Ok(Some((name, parsed)));
+            }
+            curvebook_doc::ConstantValue::Date(s) => {
+                return Err(format!("hooked Info constant `{name}` has date value `{s}`, expected a finite number"));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn resolve_power_analysis_with_info_hooks(
@@ -1186,22 +1339,22 @@ fn resolve_power_analysis_with_info_hooks(
         None => None,
     };
     if let Some(info) = info_opt {
-        let info_f64 =
-            |names: &[&str]| -> Option<f64> { names.iter().find_map(|name| info.get_constant(name).and_then(|c| c.value.as_finite_f64())) };
-        if let Some(alpha) = info_f64(&["Alpha", "alpha"])
-            && alpha > 0.0
-            && alpha < 1.0
-        {
+        if let Some((name, alpha)) = lookup_power_info_constant_f64(info, &["Alpha", "alpha"])? {
+            if !(alpha > 0.0 && alpha < 1.0) {
+                return Err(format!("hooked Info constant `{name}` ({alpha}) must lie strictly in (0, 1)"));
+            }
             patched.alpha = alpha;
         }
-        if let Some(target_power) = info_f64(&["Target Power", "target_power", "Target power"])
-            && target_power > 0.0
-            && target_power < 1.0
+        if patched.solve_target != curvebook_doc::PowerSolveTarget::Power
+            && let Some((name, target_power)) = lookup_power_info_constant_f64(info, &["Target Power", "target_power", "Target power"])?
         {
+            if !(target_power > 0.0 && target_power < 1.0) {
+                return Err(format!("hooked Info constant `{name}` ({target_power}) must lie strictly in (0, 1)"));
+            }
             patched.target_power = Some(target_power);
         }
         if patched.solve_target != curvebook_doc::PowerSolveTarget::DetectableEffect
-            && let Some(eff) = info_f64(&["Effect Size", "effect_size", "Effect size"])
+            && let Some((_, eff)) = lookup_power_info_constant_f64(info, &["Effect Size", "effect_size", "Effect size"])?
         {
             let matches_rich_baseline = match &base.effect {
                 curvebook_doc::PowerEffectSpec::Standardized(_) | curvebook_doc::PowerEffectSpec::Unspecified => false,
@@ -1214,17 +1367,21 @@ fn resolve_power_analysis_with_info_hooks(
             }
         }
         if patched.solve_target != curvebook_doc::PowerSolveTarget::SampleSize {
-            if let Some(n1) = info_f64(&["N per group", "sample_size", "n1"])
-                && n1 > 0.0
-                && base.sample_size.is_none_or(|prev| (n1 - prev).abs() > 1e-12 * prev.abs().max(1.0))
-            {
-                patched.sample_size = Some(n1);
+            if let Some((name, n1)) = lookup_power_info_constant_f64(info, &["N per group", "sample_size", "n1"])? {
+                if n1 <= 0.0 {
+                    return Err(format!("hooked Info constant `{name}` ({n1}) must be strictly positive"));
+                }
+                if base.sample_size.is_none_or(|prev| (n1 - prev).abs() > 1e-12 * prev.abs().max(1.0)) {
+                    patched.sample_size = Some(n1);
+                }
             }
-            if let Some(n2) = info_f64(&["N group 2", "sample_size_group2", "n2"])
-                && n2 > 0.0
-                && base.sample_size_group2.is_none_or(|prev| (n2 - prev).abs() > 1e-12 * prev.abs().max(1.0))
-            {
-                patched.sample_size_group2 = Some(n2);
+            if let Some((name, n2)) = lookup_power_info_constant_f64(info, &["N group 2", "sample_size_group2", "n2"])? {
+                if n2 <= 0.0 {
+                    return Err(format!("hooked Info constant `{name}` ({n2}) must be strictly positive"));
+                }
+                if base.sample_size_group2.is_none_or(|prev| (n2 - prev).abs() > 1e-12 * prev.abs().max(1.0)) {
+                    patched.sample_size_group2 = Some(n2);
+                }
             }
         }
     }

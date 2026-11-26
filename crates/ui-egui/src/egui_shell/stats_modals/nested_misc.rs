@@ -6,8 +6,10 @@ use curvebook_doc::{
 };
 use egui::{Id, TextEdit, Ui, Vec2};
 
+use crate::UiApp;
 use crate::dialogs_canvas::EditAnalysisParametersState;
-use crate::i18n::tr;
+use crate::grid_view::parse_localized_number_input;
+use crate::i18n::{LocalePreset, tr};
 use crate::inspect::ZLayer;
 use crate::modal_predicates::{
     ControlEnablement, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend, r6_contingency_ci_selector, r8_subcolumn_aggregation,
@@ -20,6 +22,7 @@ use crate::egui_shell::stat_anova_modal::{
 };
 use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
+use super::StatsModalsEguiState;
 use super::helpers::{render_dataset_checklist, render_df_method_picker};
 
 pub(super) struct ContingencyDesignCtx<'a> {
@@ -41,26 +44,57 @@ pub(super) fn render_contingency_design(
     let two_by_two_en = r5_contingency_2x2_effect_sizes(rows, cols);
     let trend_en = r5_contingency_cochran_armitage_trend(rows, cols);
     render_section_title(ui, tokens, "Categorical Test & Effect Sizes");
-    for (wid, lbl, m, en) in [
+    let cur_kappa_weighting = match c.method {
+        ContingencyMethod::CohenKappa { weighting } => weighting,
+        _ => KappaWeighting::Unweighted,
+    };
+    let cont_methods = [
         ("edit.cont.fisher", "Fisher's exact test", ContingencyMethod::FisherExact, ControlEnablement::enabled()),
-        ("edit.cont.chisq", "Pearson Chi-square test", ContingencyMethod::PearsonChiSquare { yates_continuity: false }, ControlEnablement::enabled()),
-        ("edit.cont.yates", "Chi-square + Yates continuity", ContingencyMethod::PearsonChiSquare { yates_continuity: true }, two_by_two_en.clone()),
-        ("edit.cont.trend", "Cochran-Armitage linear trend", ContingencyMethod::CochranArmitageTrend, trend_en),
+        ("edit.cont.chisq", "Pearson Chi-square", ContingencyMethod::PearsonChiSquare { yates_continuity: false }, ControlEnablement::enabled()),
+        ("edit.cont.yates", "Chi-square + Yates", ContingencyMethod::PearsonChiSquare { yates_continuity: true }, two_by_two_en.clone()),
+        ("edit.cont.g2", "Likelihood Ratio G²", ContingencyMethod::LikelihoodRatioG2, ControlEnablement::enabled()),
+        ("edit.cont.barnard", "Barnard's exact test", ContingencyMethod::BarnardExact, two_by_two_en.clone()),
+        ("edit.cont.trend", "Cochran-Armitage trend", ContingencyMethod::CochranArmitageTrend, trend_en),
         ("edit.cont.mcnemar", "McNemar's paired test", ContingencyMethod::McNemarPaired, two_by_two_en.clone()),
-        (
-            "edit.cont.kappa",
-            "Cohen's Kappa inter-rater agreement",
-            ContingencyMethod::CohenKappa { weighting: KappaWeighting::Unweighted },
-            ControlEnablement::enabled(),
-        ),
-    ] {
-        if render_modal_radio(ui, tokens, meta, wid, lbl, c.method == m, &en) {
-            let mut next = spec.clone();
-            if let AnalysisKind::Contingency(cg) = &mut next.kind {
-                cg.method = m;
+        ("edit.cont.kappa", "Cohen's Kappa", ContingencyMethod::CohenKappa { weighting: cur_kappa_weighting }, ControlEnablement::enabled()),
+        ("edit.cont.fleiss_kappa", "Fleiss' Kappa", ContingencyMethod::FleissKappa, ControlEnablement::enabled()),
+        ("edit.cont.exact_binomial", "Exact Binomial test", ContingencyMethod::ExactBinomial, ControlEnablement::enabled()),
+    ];
+    egui::Grid::new("edit.cont.methods.grid").num_columns(2).spacing([8.0, 2.0]).show(ui, |grid| {
+        for (idx, (wid, lbl, m, en)) in cont_methods.into_iter().enumerate() {
+            let is_selected = match (c.method, m) {
+                (ContingencyMethod::CohenKappa { .. }, ContingencyMethod::CohenKappa { .. }) => true,
+                _ => c.method == m,
+            };
+            if render_modal_radio(grid, tokens, meta, wid, lbl, is_selected, &en) {
+                let mut next = spec.clone();
+                if let AnalysisKind::Contingency(cg) = &mut next.kind {
+                    cg.method = m;
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
-            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            if idx % 2 == 1 {
+                grid.end_row();
+            }
         }
+    });
+    if let ContingencyMethod::CohenKappa { weighting } = c.method {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Kappa Weighting:").small().color(tokens.text_muted));
+            for (wid, lbl, w) in [
+                ("edit.cont.kappa.unweighted", "Unweighted", KappaWeighting::Unweighted),
+                ("edit.cont.kappa.linear", "Linear", KappaWeighting::Linear),
+                ("edit.cont.kappa.quadratic", "Quadratic", KappaWeighting::Quadratic),
+            ] {
+                if render_modal_seg_btn(ui, tokens, meta, wid, lbl, weighting == w, &ControlEnablement::enabled()) {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::Contingency(cg) = &mut next.kind {
+                        cg.method = ContingencyMethod::CohenKappa { weighting: w };
+                    }
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                }
+            }
+        });
     }
     if render_modal_checkbox(
         ui,
@@ -147,16 +181,23 @@ pub(super) fn render_contingency_design(
             }
         }
     });
+    if let Some(err) = ep.unsupported_contingency_ci_error() {
+        ui.add_space(4.0);
+        let resp = ui.label(egui::RichText::new(&err).small().color(tokens.error));
+        record_widget(ui, meta, &resp, "edit.contingency.ci.error", "alert", &err, None, None, true, None, ZLayer::ModalDialog, false, None);
+    }
 }
 
 pub(super) fn render_misc_stats_design(
     ui: &mut Ui,
-    doc: &ProjectDocument,
+    app: &UiApp,
+    state: &mut StatsModalsEguiState,
     spec: &curvebook_doc::AnalysisSpec,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let doc = app.document();
     match &spec.kind {
         AnalysisKind::NestedComparison(n) => {
             render_section_title(ui, tokens, "Nested Model Structure");
@@ -171,7 +212,7 @@ pub(super) fn render_misc_stats_design(
                     intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
-            render_df_method_picker(ui, spec, n.df_method, tokens, meta, intents);
+            render_df_method_picker(ui, spec, n.df_method, &ControlEnablement::enabled(), tokens, meta, intents);
             render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
         }
         AnalysisKind::MultipleRowTTests(m) => {
@@ -264,15 +305,17 @@ pub(super) fn render_misc_stats_design(
                 ui.horizontal_wrapped(|ui| {
                     if let Some(new_p) = render_linear_numeric_input(
                         ui,
+                        state,
+                        &app.locale_preset,
                         meta,
-                        ("edit_desc_custom_pct", sid),
-                        "edit.desc.custom_pct",
-                        "Upper percentile P (50 < P < 100)",
-                        p_hi,
-                        true,
-                    ) && new_p > 50.0
-                        && new_p < 100.0
-                    {
+                        NumericInputSpec {
+                            salt: ("edit_desc_custom_pct", sid),
+                            widget_id: "edit.desc.custom_pct",
+                            label: "Upper percentile P (50 < P < 100)",
+                            current: p_hi,
+                            bounds: NumericBounds::OpenRange(50.0, 100.0),
+                        },
+                    ) {
                         let mut next = spec.clone();
                         if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
                             ds.custom_upper_percentile = Some(new_p);
@@ -282,6 +325,9 @@ pub(super) fn render_misc_stats_design(
                     let p_lo = ((100.0 - p_hi) * 1e6).round() / 1e6;
                     ui.label(egui::RichText::new(format!("({p_lo}% & {p_hi}%, Type 7)")).small().color(tokens.text_muted));
                 });
+                render_numeric_field_errors(ui, state, tokens, &["edit.desc.custom_pct"]);
+            } else {
+                state.numeric_field_errors.remove("edit.desc.custom_pct");
             }
             render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
         }
@@ -322,13 +368,13 @@ pub(super) fn render_misc_stats_design(
             render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
         }
         AnalysisKind::LinearRegression(lin) => {
-            render_linear_regression_design(ui, doc, spec, lin, tokens, meta, intents);
+            render_linear_regression_design(ui, app, state, spec, lin, tokens, meta, intents);
         }
         AnalysisKind::SimpleLogisticRegression(sl) => {
-            render_simple_logistic_design(ui, doc, spec, sl, tokens, meta, intents);
+            render_simple_logistic_design(ui, app, state, spec, sl, tokens, meta, intents);
         }
         AnalysisKind::FitSplineLowess(sp) => {
-            render_spline_lowess_design(ui, spec, sp, tokens, meta, intents);
+            render_spline_lowess_design(ui, doc, spec, sp, tokens, meta, intents);
         }
         AnalysisKind::PassingBablok(pb) => {
             render_section_title(ui, tokens, "Method Comparison Columns (X Reference vs Y Candidate)");
@@ -427,15 +473,6 @@ fn render_pvalue_stack_design(
         false,
         None,
     );
-    for m in PValueStackMethod::ALL {
-        if render_modal_radio(ui, tokens, meta, &format!("edit.pstack.{m:?}"), m.label(), ps.method == m, &ControlEnablement::enabled()) {
-            let mut next = spec.clone();
-            if let AnalysisKind::PValueStack(p) = &mut next.kind {
-                p.method = m;
-            }
-            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-        }
-    }
     let step = render_stepper_row(
         ui,
         tokens,
@@ -463,7 +500,15 @@ fn render_pvalue_stack_design(
     {
         let mut next = spec.clone();
         if let AnalysisKind::PValueStack(p) = &mut next.kind {
-            p.column = Some(p.column.map_or(0, |c| (c + 1) % titles.len().max(1)));
+            p.column = if titles.is_empty() {
+                None
+            } else {
+                match p.column {
+                    None => Some(0),
+                    Some(c) if c + 1 < titles.len() => Some(c + 1),
+                    Some(_) => None,
+                }
+            };
         }
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
@@ -480,12 +525,14 @@ fn render_outlier_design(
 ) {
     render_section_title(ui, tokens, "Outlier Algorithm");
     let is_rout = matches!(out, OutlierSpec::Rout { .. });
-    if render_modal_radio(ui, tokens, meta, "edit.outlier.rout", "ROUT (Robust regression + FDR Q)", is_rout, &ControlEnablement::enabled()) {
+    if render_modal_radio(ui, tokens, meta, "edit.outlier.rout", "ROUT (Robust regression + FDR Q)", is_rout, &ControlEnablement::enabled())
+        && !is_rout
+    {
         let mut next = spec.clone();
         next.kind = AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: 1.0 });
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
-    if render_modal_radio(ui, tokens, meta, "edit.outlier.grubbs", "Grubbs' ESD test (Alpha)", !is_rout, &ControlEnablement::enabled()) {
+    if render_modal_radio(ui, tokens, meta, "edit.outlier.grubbs", "Grubbs' ESD test (Alpha)", !is_rout, &ControlEnablement::enabled()) && is_rout {
         let mut next = spec.clone();
         next.kind = AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha: 0.05, iterative: false });
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
@@ -550,31 +597,113 @@ fn render_outlier_design(
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }
 
+#[derive(Clone, Copy)]
+enum NumericBounds {
+    AnyFinite,
+    Positive,
+    OpenRange(f64, f64),
+}
+
+struct NumericInputSpec<'a> {
+    salt: (&'a str, &'a str),
+    widget_id: &'a str,
+    label: &'a str,
+    current: f64,
+    bounds: NumericBounds,
+}
+
+fn format_locale_f64(value: f64, locale_preset: &LocalePreset) -> String {
+    let norm = if value == 0.0 { 0.0 } else { value };
+    let text = format!("{norm}");
+    if locale_preset.decimal_separator != '.' { text.replace('.', &locale_preset.decimal_separator.to_string()) } else { text }
+}
+
+fn validate_numeric_draft(raw: &str, locale_preset: &LocalePreset, bounds: NumericBounds, label: &str) -> Result<f64, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label}: enter a finite number."));
+    }
+    let Some(parsed) = parse_localized_number_input(trimmed, locale_preset).filter(|v| v.is_finite()) else {
+        return Err(format!("{label}: invalid number `{trimmed}`."));
+    };
+    match bounds {
+        NumericBounds::AnyFinite => Ok(parsed),
+        NumericBounds::Positive => {
+            if parsed > 0.0 {
+                Ok(parsed)
+            } else {
+                Err(format!("{label}: value must be > 0."))
+            }
+        }
+        NumericBounds::OpenRange(lo, hi) => {
+            if parsed > lo && parsed < hi {
+                Ok(parsed)
+            } else {
+                Err(format!("{label}: value must be strictly between {lo} and {hi}."))
+            }
+        }
+    }
+}
+
 fn render_linear_numeric_input(
     ui: &mut Ui,
+    state: &mut StatsModalsEguiState,
+    locale_preset: &LocalePreset,
     meta: &mut FrameInspectMeta,
-    salt: (&str, &str),
-    widget_id: &str,
-    label: &str,
-    current: f64,
-    positive_only: bool,
+    input: NumericInputSpec<'_>,
 ) -> Option<f64> {
-    let key = Id::unique(salt);
-    let mut draft: String = ui.ctx().data(|d| d.get_temp(key)).unwrap_or_else(|| format!("{current}"));
+    let session_tag = state.open_session_sheet_id.as_deref().unwrap_or("");
+    let key = Id::unique((input.salt.0, session_tag, state.open_generation, input.salt.1));
+    let canonical = format_locale_f64(input.current, locale_preset);
+    let mut draft: String = ui.ctx().data(|d| d.get_temp(key)).unwrap_or_else(|| canonical.clone());
     let mut updated = None;
-    ui.label(label);
+    let err_label = if input.label.is_empty() { input.widget_id } else { input.label };
+    if !input.label.is_empty() {
+        ui.label(input.label);
+    }
     let resp = ui.add_sized(Vec2::new(72.0, 22.0), TextEdit::singleline(&mut draft).id(key));
-    record_widget(ui, meta, &resp, widget_id, "textbox", label, None, Some(serde_json::json!(draft)), true, None, ZLayer::ModalDialog, false, None);
+    record_widget(
+        ui,
+        meta,
+        &resp,
+        input.widget_id,
+        "textbox",
+        input.label,
+        None,
+        Some(serde_json::json!(draft)),
+        true,
+        None,
+        ZLayer::ModalDialog,
+        false,
+        None,
+    );
     if resp.changed() {
         ui.ctx().data_mut(|d| d.insert_temp(key, draft.clone()));
-        if let Ok(parsed) = draft.trim().replace(',', ".").parse::<f64>()
-            && parsed.is_finite()
-            && (!positive_only || parsed > 0.0)
-        {
-            updated = Some(parsed);
+        match validate_numeric_draft(&draft, locale_preset, input.bounds, err_label) {
+            Ok(parsed) => {
+                state.numeric_field_errors.remove(input.widget_id);
+                updated = Some(parsed);
+            }
+            Err(err) => {
+                state.numeric_field_errors.insert(input.widget_id.to_owned(), err);
+            }
         }
-    } else if !resp.has_focus() {
-        let canonical = format!("{current}");
+    } else if resp.has_focus() || resp.lost_focus() {
+        match validate_numeric_draft(&draft, locale_preset, input.bounds, err_label) {
+            Ok(parsed) => {
+                state.numeric_field_errors.remove(input.widget_id);
+                if (parsed - input.current).abs() > 1e-12 {
+                    updated = Some(parsed);
+                }
+            }
+            Err(err) => {
+                state.numeric_field_errors.insert(input.widget_id.to_owned(), err);
+            }
+        }
+    } else if let Err(err) = validate_numeric_draft(&draft, locale_preset, input.bounds, err_label) {
+        state.numeric_field_errors.insert(input.widget_id.to_owned(), err);
+    } else {
+        state.numeric_field_errors.remove(input.widget_id);
         if draft != canonical {
             ui.ctx().data_mut(|d| d.insert_temp(key, canonical));
         }
@@ -582,15 +711,26 @@ fn render_linear_numeric_input(
     updated
 }
 
+fn render_numeric_field_errors(ui: &mut Ui, state: &StatsModalsEguiState, tokens: &Tokens, widget_ids: &[&str]) {
+    for &wid in widget_ids {
+        if let Some(err) = state.numeric_field_errors.get(wid) {
+            ui.label(egui::RichText::new(err).small().color(tokens.link_red));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_linear_regression_design(
     ui: &mut Ui,
-    doc: &ProjectDocument,
+    app: &UiApp,
+    state: &mut StatsModalsEguiState,
     spec: &curvebook_doc::AnalysisSpec,
     lin: &curvebook_doc::LinearRegressionSpec,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let doc = app.document();
     let locale = tokens.locale;
     let sid = spec.source_sheet_id.as_str();
     render_section_title(ui, tokens, "Regression Model");
@@ -601,6 +741,11 @@ fn render_linear_regression_design(
             let mut next = spec.clone();
             if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                 l.deming_model_ii = deming;
+                if deming {
+                    l.force_through_origin = false;
+                    l.fixed_point = None;
+                    l.standard_addition = false;
+                }
             }
             intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
@@ -643,12 +788,16 @@ fn render_linear_regression_design(
         ui.horizontal_wrapped(|ui| {
             if let Some(new_x0) = render_linear_numeric_input(
                 ui,
+                state,
+                &app.locale_preset,
                 meta,
-                ("edit_lin_fp_x0", sid),
-                "edit.lin.fixed_point_x0",
-                tr(locale, "linear.fixed_point_x0"),
-                x0,
-                false,
+                NumericInputSpec {
+                    salt: ("edit_lin_fp_x0", sid),
+                    widget_id: "edit.lin.fixed_point_x0",
+                    label: tr(locale, "linear.fixed_point_x0"),
+                    current: x0,
+                    bounds: NumericBounds::AnyFinite,
+                },
             ) {
                 let mut next = spec.clone();
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
@@ -658,12 +807,16 @@ fn render_linear_regression_design(
             }
             if let Some(new_y0) = render_linear_numeric_input(
                 ui,
+                state,
+                &app.locale_preset,
                 meta,
-                ("edit_lin_fp_y0", sid),
-                "edit.lin.fixed_point_y0",
-                tr(locale, "linear.fixed_point_y0"),
-                y0,
-                false,
+                NumericInputSpec {
+                    salt: ("edit_lin_fp_y0", sid),
+                    widget_id: "edit.lin.fixed_point_y0",
+                    label: tr(locale, "linear.fixed_point_y0"),
+                    current: y0,
+                    bounds: NumericBounds::AnyFinite,
+                },
             ) {
                 let mut next = spec.clone();
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
@@ -672,6 +825,10 @@ fn render_linear_regression_design(
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         });
+        render_numeric_field_errors(ui, state, tokens, &["edit.lin.fixed_point_x0", "edit.lin.fixed_point_y0"]);
+    } else {
+        state.numeric_field_errors.remove("edit.lin.fixed_point_x0");
+        state.numeric_field_errors.remove("edit.lin.fixed_point_y0");
     }
     if render_modal_checkbox(
         ui,
@@ -704,7 +861,11 @@ fn render_linear_regression_design(
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
     if lin.deming_model_ii {
-        render_deming_error_controls(ui, spec, lin, tokens, meta, intents);
+        render_deming_error_controls(ui, app, state, spec, lin, tokens, meta, intents);
+    } else {
+        state.numeric_field_errors.remove("edit.lin.deming.sd_x");
+        state.numeric_field_errors.remove("edit.lin.deming.sd_y");
+        state.numeric_field_errors.remove("edit.lin.deming.lambda");
     }
     if render_modal_checkbox(
         ui,
@@ -724,8 +885,11 @@ fn render_linear_regression_design(
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_deming_error_controls(
     ui: &mut Ui,
+    app: &UiApp,
+    state: &mut StatsModalsEguiState,
     spec: &curvebook_doc::AnalysisSpec,
     lin: &curvebook_doc::LinearRegressionSpec,
     tokens: &Tokens,
@@ -758,18 +922,38 @@ fn render_deming_error_controls(
     }
     if let DemingErrorSpec::StandardDeviations { sd_x, sd_y } = lin.deming_error {
         ui.horizontal_wrapped(|ui| {
-            if let Some(new_sd_x) =
-                render_linear_numeric_input(ui, meta, ("edit_lin_dem_sdx", sid), "edit.lin.deming.sd_x", tr(locale, "linear.deming_sd_x"), sd_x, true)
-            {
+            if let Some(new_sd_x) = render_linear_numeric_input(
+                ui,
+                state,
+                &app.locale_preset,
+                meta,
+                NumericInputSpec {
+                    salt: ("edit_lin_dem_sdx", sid),
+                    widget_id: "edit.lin.deming.sd_x",
+                    label: tr(locale, "linear.deming_sd_x"),
+                    current: sd_x,
+                    bounds: NumericBounds::Positive,
+                },
+            ) {
                 let mut next = spec.clone();
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                     l.deming_error = DemingErrorSpec::StandardDeviations { sd_x: new_sd_x, sd_y };
                 }
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
-            if let Some(new_sd_y) =
-                render_linear_numeric_input(ui, meta, ("edit_lin_dem_sdy", sid), "edit.lin.deming.sd_y", tr(locale, "linear.deming_sd_y"), sd_y, true)
-            {
+            if let Some(new_sd_y) = render_linear_numeric_input(
+                ui,
+                state,
+                &app.locale_preset,
+                meta,
+                NumericInputSpec {
+                    salt: ("edit_lin_dem_sdy", sid),
+                    widget_id: "edit.lin.deming.sd_y",
+                    label: tr(locale, "linear.deming_sd_y"),
+                    current: sd_y,
+                    bounds: NumericBounds::Positive,
+                },
+            ) {
                 let mut next = spec.clone();
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
                     l.deming_error = DemingErrorSpec::StandardDeviations { sd_x, sd_y: new_sd_y };
@@ -777,6 +961,10 @@ fn render_deming_error_controls(
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         });
+        render_numeric_field_errors(ui, state, tokens, &["edit.lin.deming.sd_x", "edit.lin.deming.sd_y"]);
+    } else {
+        state.numeric_field_errors.remove("edit.lin.deming.sd_x");
+        state.numeric_field_errors.remove("edit.lin.deming.sd_y");
     }
     if render_modal_radio(
         ui,
@@ -799,12 +987,16 @@ fn render_deming_error_controls(
         ui.horizontal_wrapped(|ui| {
             if let Some(new_lambda) = render_linear_numeric_input(
                 ui,
+                state,
+                &app.locale_preset,
                 meta,
-                ("edit_lin_dem_lambda", sid),
-                "edit.lin.deming.lambda",
-                tr(locale, "linear.deming_lambda"),
-                lambda,
-                true,
+                NumericInputSpec {
+                    salt: ("edit_lin_dem_lambda", sid),
+                    widget_id: "edit.lin.deming.lambda",
+                    label: tr(locale, "linear.deming_lambda"),
+                    current: lambda,
+                    bounds: NumericBounds::Positive,
+                },
             ) {
                 let mut next = spec.clone();
                 if let AnalysisKind::LinearRegression(l) = &mut next.kind {
@@ -813,18 +1005,24 @@ fn render_deming_error_controls(
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         });
+        render_numeric_field_errors(ui, state, tokens, &["edit.lin.deming.lambda"]);
+    } else {
+        state.numeric_field_errors.remove("edit.lin.deming.lambda");
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_simple_logistic_design(
     ui: &mut Ui,
-    doc: &ProjectDocument,
+    app: &UiApp,
+    state: &mut StatsModalsEguiState,
     spec: &curvebook_doc::AnalysisSpec,
     sl: &curvebook_doc::SimpleLogisticSpec,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let doc = app.document();
     let locale = tokens.locale;
     let sid = spec.source_sheet_id.as_str();
     render_section_title(ui, tokens, "Simple Logistic Regression (Binary Y in {0, 1})");
@@ -861,15 +1059,17 @@ fn render_simple_logistic_design(
     ui.horizontal_wrapped(|ui| {
         if let Some(new_cut) = render_linear_numeric_input(
             ui,
+            state,
+            &app.locale_preset,
             meta,
-            ("edit_sl_cutoff", sid),
-            "edit.sl.cutoff",
-            tr(locale, "simple_logistic.cutoff"),
-            sl.classification_cutoff,
-            true,
-        ) && new_cut > 0.0
-            && new_cut < 1.0
-        {
+            NumericInputSpec {
+                salt: ("edit_sl_cutoff", sid),
+                widget_id: "edit.sl.cutoff",
+                label: tr(locale, "simple_logistic.cutoff"),
+                current: sl.classification_cutoff,
+                bounds: NumericBounds::OpenRange(0.0, 1.0),
+            },
+        ) {
             let mut next = spec.clone();
             if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
                 s.classification_cutoff = new_cut;
@@ -894,14 +1094,28 @@ fn render_simple_logistic_design(
             }
             intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
-        if let Some(x_min) = sl.plot_x_min
-            && let Some(new_min) = render_linear_numeric_input(ui, meta, ("edit_sl_plot_xmin", sid), "edit.sl.plot_x_min", "", x_min, false)
-        {
-            let mut next = spec.clone();
-            if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
-                s.plot_x_min = Some(new_min);
+        if let Some(x_min) = sl.plot_x_min {
+            if let Some(new_min) = render_linear_numeric_input(
+                ui,
+                state,
+                &app.locale_preset,
+                meta,
+                NumericInputSpec {
+                    salt: ("edit_sl_plot_xmin", sid),
+                    widget_id: "edit.sl.plot_x_min",
+                    label: "",
+                    current: x_min,
+                    bounds: NumericBounds::AnyFinite,
+                },
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
+                    s.plot_x_min = Some(new_min);
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
-            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        } else {
+            state.numeric_field_errors.remove("edit.sl.plot_x_min");
         }
         let max_enabled = sl.plot_x_max.is_some();
         if render_modal_checkbox(
@@ -919,21 +1133,37 @@ fn render_simple_logistic_design(
             }
             intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
-        if let Some(x_max) = sl.plot_x_max
-            && let Some(new_max) = render_linear_numeric_input(ui, meta, ("edit_sl_plot_xmax", sid), "edit.sl.plot_x_max", "", x_max, false)
-        {
-            let mut next = spec.clone();
-            if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
-                s.plot_x_max = Some(new_max);
+        if let Some(x_max) = sl.plot_x_max {
+            if let Some(new_max) = render_linear_numeric_input(
+                ui,
+                state,
+                &app.locale_preset,
+                meta,
+                NumericInputSpec {
+                    salt: ("edit_sl_plot_xmax", sid),
+                    widget_id: "edit.sl.plot_x_max",
+                    label: "",
+                    current: x_max,
+                    bounds: NumericBounds::AnyFinite,
+                },
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
+                    s.plot_x_max = Some(new_max);
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
-            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        } else {
+            state.numeric_field_errors.remove("edit.sl.plot_x_max");
         }
     });
+    render_numeric_field_errors(ui, state, tokens, &["edit.sl.cutoff", "edit.sl.plot_x_min", "edit.sl.plot_x_max"]);
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }
 
 fn render_spline_lowess_design(
     ui: &mut Ui,
+    doc: &ProjectDocument,
     spec: &curvebook_doc::AnalysisSpec,
     sp: &curvebook_doc::SplineLowessSpec,
     tokens: &Tokens,
@@ -977,24 +1207,30 @@ fn render_spline_lowess_design(
 
     if sp.method == SplineLowessMethod::SmoothingSpline {
         ui.add_space(4.0);
-        let knots_val = sp.smoothing_knots.unwrap_or(5);
+        let using_df = sp.smoothing_df.is_some();
+        let knots_val = sp.smoothing_df.map(|df| df.round().clamp(2.0, 50.0) as usize).or(sp.smoothing_knots).unwrap_or(5);
+        let value_text = if let Some(df) = sp.smoothing_df { format!("{df:.1}") } else { format!("{knots_val}") };
         let knot_step = render_stepper_row(
             ui,
             tokens,
             meta,
             StepperSpec {
                 id_prefix: "edit.spline.knots",
-                label: "Smoothing knots / df",
-                value_text: &format!("{knots_val}"),
+                label: if using_df { "Smoothing df" } else { "Smoothing knots" },
+                value_text: &value_text,
                 enablement: &ControlEnablement::enabled(),
             },
         );
         if knot_step != 0 {
             let mut next = spec.clone();
             if let AnalysisKind::FitSplineLowess(s) = &mut next.kind {
-                let updated = (knots_val as isize + isize::from(knot_step)).clamp(2, 50) as usize;
-                s.smoothing_knots = Some(updated);
-                s.smoothing_df = None;
+                if using_df {
+                    let cur_df = s.smoothing_df.unwrap_or(5.0);
+                    s.smoothing_df = Some((cur_df + f64::from(knot_step)).clamp(2.0, 50.0));
+                } else {
+                    let updated = (knots_val as isize + isize::from(knot_step)).clamp(2, 50) as usize;
+                    s.smoothing_knots = Some(updated);
+                }
             }
             intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
@@ -1003,6 +1239,13 @@ fn render_spline_lowess_design(
     if sp.method == SplineLowessMethod::Lowess {
         ui.add_space(4.0);
         render_section_title(ui, tokens, "LOWESS Window Preset");
+        if let Some(frac) = sp.lowess_fraction {
+            ui.label(
+                egui::RichText::new(format!("Custom LOWESS window fraction: {frac:.2} (choose a preset below to reset)"))
+                    .small()
+                    .color(tokens.accent),
+            );
+        }
         for preset in LowessPreset::ALL {
             if render_modal_radio(
                 ui,
@@ -1075,4 +1318,6 @@ fn render_spline_lowess_design(
         }
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
+    ui.add_space(4.0);
+    render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }

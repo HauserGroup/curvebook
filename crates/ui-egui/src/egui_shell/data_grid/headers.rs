@@ -90,10 +90,13 @@ fn render_factor_title_editor(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
         te = te.hint_text(hint);
     }
     let resp = ui.put(rect, te);
+    let will_discard = ui.ctx().will_discard();
     if edit.just_focused {
         resp.request_focus();
-        edit.just_focused = false;
-        edit.suppress_loss_once = true;
+        if !will_discard {
+            edit.just_focused = false;
+            edit.suppress_loss_once = true;
+        }
     }
     record_meta_if_enabled(
         ui,
@@ -114,6 +117,11 @@ fn render_factor_title_editor(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
         },
     );
 
+    if will_discard {
+        ui.ctx().data_mut(|d| d.insert_temp(key, Some(edit)));
+        return;
+    }
+
     let esc = ui.input(|i| i.key_pressed(Key::Escape));
     let enter = ui.input(|i| i.key_pressed(Key::Enter));
     let tab = pressed_key_event_modifiers(ui, Key::Tab).is_some();
@@ -121,6 +129,7 @@ fn render_factor_title_editor(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
     edit.suppress_loss_once = false;
 
     if esc {
+        ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         ui.ctx().data_mut(|d| d.remove_temp::<Option<FactorTitleEditBuffer>>(key));
         ui.memory_mut(|m| m.surrender_focus(te_id));
         return;
@@ -148,6 +157,23 @@ fn render_factor_title_editor(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
         return;
     }
     ui.ctx().data_mut(|d| d.insert_temp(key, Some(edit)));
+}
+
+/// Tooltip design-hint tag for a [`curvebook_doc::ColumnTable`] (`AUD-13-24`).
+///
+/// Pre-summarized subcolumn modes (`MeanSdN`, `MeanSemN`, `MeanCvN`, `MeanLowHigh`,
+/// `UpperLowerLimits`, `MedianIqr`) always display `"Summary"` alongside explicit
+/// [`ColumnDesignHint::PrecomputedError`].
+#[must_use]
+pub fn column_design_hint_tag(col_t: &curvebook_doc::ColumnTable) -> &'static str {
+    if col_t.subcolumn_mode.is_pre_summarized() {
+        return "Summary";
+    }
+    match col_t.design_hint {
+        ColumnDesignHint::UnpairedReplicates => "Unpaired",
+        ColumnDesignHint::PairedRepeatedMeasures => "Paired",
+        ColumnDesignHint::PrecomputedError => "Summary",
+    }
 }
 
 pub(super) fn column_subcolumn_role_label(mode: SubcolumnMode, subcol: usize, locale: &str) -> String {
@@ -533,7 +559,13 @@ fn render_multi_x_headers(hdr_ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
             let wid = format!("grid.x_title.{sx}");
             let x_title_editable = !blocked && !ds.frozen && sx == 0;
             let resp = hdr_ui.interact(t2_r, hdr_ui.make_persistent_id(&wid), if x_title_editable { Sense::click() } else { Sense::hover() });
-            if resp.hovered() && x_title_editable {
+            let x_sentinel = crate::egui_shell::sheet_find_bar::X_OR_TIME_COL_SENTINEL;
+            let x_find_active = sx == 0 && fstate.state.active_find_matches.as_ref().is_some_and(|h| h.active_col_title == Some(x_sentinel));
+            let x_find_match =
+                x_find_active || (sx == 0 && fstate.state.active_find_matches.as_ref().is_some_and(|h| h.matching_col_titles.contains(&x_sentinel)));
+            if x_find_match {
+                super::shared::paint_find_highlight(hdr_ui, t2_r, tokens, x_find_active);
+            } else if resp.hovered() && x_title_editable {
                 hdr_ui.painter().rect_filled(t2_r, 0.0, tokens.hover_bg);
             }
             render_ellipsized_text(
@@ -838,11 +870,7 @@ fn render_subcolumn_tier3_cells(
         }
         if sresp.hovered() {
             if let TableArchetype::Column(col_t) = &ds.archetype {
-                let hint_tag = match col_t.design_hint {
-                    ColumnDesignHint::UnpairedReplicates => "Unpaired",
-                    ColumnDesignHint::PairedRepeatedMeasures => "Paired",
-                    ColumnDesignHint::PrecomputedError => "Summary",
-                };
+                let hint_tag = column_design_hint_tag(col_t);
                 let _ = sresp.clone().on_hover_text(format!("{sub_lbl} · {hint_tag}"));
             } else if sub_elided {
                 let _ = sresp.clone().on_hover_text(&sub_lbl);

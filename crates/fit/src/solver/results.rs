@@ -399,7 +399,7 @@ pub struct FittedDatasetResult {
     pub y_hat: Vec<f64>,
     /// Unweighted residuals $y_i - \hat{y}_i$ in original $Y$ units.
     pub residuals: Vec<f64>,
-    /// Objective-weighted residuals $\sqrt{w_i}(y_i - \hat{y}_i)$ (or signed deviance residuals for `PoissonDeviance`).
+    /// Objective-weighted residuals $\sqrt{w_i}(y_i - \hat{y}_i)$ (or Pearson residuals $(y_i - \mu_i) / \sqrt{\mu_i}$ for `PoissonDeviance`).
     pub weighted_residuals: Vec<f64>,
     /// Internally studentized residuals $r_i / (\hat{\sigma}_w \sqrt{1 - h_{ii}})$ (`NaN` where leverage `h_ii >= 1` or under `RobustCauchy`).
     #[serde(default, deserialize_with = "deserialize_opt_f64_vec")]
@@ -415,7 +415,7 @@ pub struct FittedDatasetResult {
     /// using the dataset's effective parameter count $k_{\text{eff}, d}$ (`NaN` in Robust Cauchy mode).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub sy_x: f64,
-    /// Robust Standard Deviation of Residuals (`RSDR`) when `RobustCauchy` or `RoutOutlierElimination` is active (`None` otherwise).
+    /// Robust Standard Deviation of Residuals (`RSDR`) when `RobustCauchy` is active (`None` otherwise; ROUT RSDR is stored on `NonlinearFitResult::rout`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rsdr: Option<f64>,
     /// Within-dataset Wald–Wolfowitz runs test computed in this dataset's own X order (`None` when disabled or plot-only).
@@ -533,9 +533,13 @@ pub struct NonlinearFitResult {
     /// $\sigma_w = \sqrt{\text{weighted\_ss} / \text{df}}$ per Motulsky & Christopoulos (2004).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub rsd: f64,
-    /// Robust Standard Deviation of Residuals (`RSDR`, Motulsky & Brown 2006) populated under `RobustCauchy` or `RoutOutlierElimination` (`None` otherwise).
+    /// Robust Standard Deviation of Residuals (`RSDR`, Motulsky & Brown 2006) populated under `RobustCauchy` (`None` otherwise; ROUT RSDR is stored on `self.rout`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rsdr: Option<f64>,
+    /// Exact heteroscedastic Gaussian log-weight normalizing sum $-\sum_i n_i \ln w_i$ under
+    /// `WeightingSource::PredictedY` (`None` for data-fixed weights or Poisson/Robust fits; `AUD-03-09`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_y_neg_log_weight_sum: Option<f64>,
     /// Unweighted coefficient of determination $R^2 = 1 - \text{rss} / \text{TSS}$ in original $Y$ units
     /// even when weighted least squares or Poisson deviance is active (`NaN` when total SS is zero; Motulsky & Christopoulos 2004).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]

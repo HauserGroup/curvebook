@@ -13,10 +13,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::rust_lex::{
-    count_newlines, find_char_literal_span, find_raw_string_span, is_cfg_test_only, is_ident_byte, skip_block_comment_end, skip_line_comment_end,
-    skip_quoted_string_end,
+    count_newlines, find_char_literal_span, find_raw_string_span, is_cfg_test_only, is_cfg_test_only_submodule, is_ident_byte,
+    skip_block_comment_end, skip_line_comment_end, skip_quoted_string_end,
 };
-use crate::scan_util::{format_error_list, is_real_dir, walk_rel_files};
+use crate::scan_util::{format_error_list, is_real_dir, is_regular_file, read_dir_paths_sorted, rel_slash};
 
 /// Crate source directories governed by the `D1` rule-1 literature-citation gate.
 pub const NUMERICAL_SRC_DIRS: &[&str] = &["crates/math/src", "crates/stats/src", "crates/fit/src", "crates/transform/src"];
@@ -255,13 +255,7 @@ pub fn check_workspace_with_allowlist(
             continue;
         }
         let mut rs_files = Vec::new();
-        walk_rel_files(
-            root,
-            &dir,
-            &|p| p.file_name().is_some_and(|n| n == "tests"),
-            &|p| p.extension().is_some_and(|e| e == "rs") && p.file_name().is_none_or(|n| n != "tests.rs"),
-            &mut rs_files,
-        )?;
+        collect_rs_files_fail_closed(root, &dir, &mut violations, &mut rs_files)?;
         rs_files.sort();
         if rs_files.is_empty() {
             violations.push(CitationViolation {
@@ -272,6 +266,9 @@ pub fn check_workspace_with_allowlist(
             continue;
         }
         for rel in rs_files {
+            if is_cfg_test_only_submodule(root, &rel) {
+                continue;
+            }
             stats.total_modules += 1;
             if allow_map.contains_key(rel.as_str()) {
                 stats.allowlisted_modules += 1;
@@ -292,6 +289,27 @@ pub fn check_workspace_with_allowlist(
 
     violations.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)).then_with(|| a.detail.cmp(&b.detail)));
     Ok((stats, violations))
+}
+
+fn collect_rs_files_fail_closed(root: &Path, dir: &Path, violations: &mut Vec<CitationViolation>, out: &mut Vec<String>) -> Result<(), String> {
+    for path in read_dir_paths_sorted(dir)? {
+        let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+        let rel = rel_slash(root, &path)?;
+        if meta.file_type().is_symlink() {
+            violations.push(CitationViolation {
+                path: rel,
+                line: 1,
+                detail: String::from("symlink is forbidden inside governed numerical crate source directory"),
+            });
+            continue;
+        }
+        if meta.is_dir() {
+            collect_rs_files_fail_closed(root, &path, violations, out)?;
+        } else if meta.is_file() && path.extension().is_some_and(|e| e == "rs") {
+            out.push(rel);
+        }
+    }
+    Ok(())
 }
 
 fn validate_allowlist<'a>(
@@ -332,11 +350,11 @@ fn validate_allowlist<'a>(
             });
             continue;
         }
-        if !root.join(path).is_file() {
+        if !is_regular_file(&root.join(path)) {
             violations.push(CitationViolation {
                 path: path.to_owned(),
                 line: 1,
-                detail: format!("stale allow-list entry: `{path}` does not exist on disk"),
+                detail: format!("stale or symlinked allow-list entry: `{path}` is not a regular file on disk"),
             });
         }
     }
@@ -376,6 +394,9 @@ enum Token {
 #[must_use]
 pub fn scan_module_source(rel_path: &str, source: &str) -> ModuleScanReport {
     let tokens = lex_module(source);
+    // Collect ONLY top-level leading inner doc comments (`//!`, `/*!`, `#![doc = ...]`) before the
+    // first module item; inner docs inside nested `mod` / `#[cfg(test)]` / `fn` blocks cannot
+    // certify the enclosing module.
     let mut module_doc = String::new();
     for tok in &tokens {
         if let Token::InnerDoc(line) = tok {
@@ -383,6 +404,8 @@ pub fn scan_module_source(rel_path: &str, source: &str) -> ModuleScanReport {
                 module_doc.push('\n');
             }
             module_doc.push_str(line);
+        } else {
+            break;
         }
     }
     let module_cited = cites_published_reference(&module_doc);
@@ -479,7 +502,7 @@ fn parse_visibility(tokens: &[Token], idx: usize, end: usize) -> (bool, usize) {
             if let Some(Token::Ident { text: w, .. }) = tokens.get(cursor)
                 && matches!(
                     w.as_str(),
-                    "fn" | "const" | "async" | "extern" | "struct" | "enum" | "union" | "type" | "trait" | "mod" | "use" | "static"
+                    "fn" | "const" | "async" | "unsafe" | "extern" | "struct" | "enum" | "union" | "type" | "trait" | "mod" | "use" | "static"
                 )
             {
                 return (false, cursor);
@@ -497,7 +520,7 @@ fn match_fn_signature(tokens: &[Token], mut idx: usize, end: usize) -> Option<(S
             break;
         };
         match text.as_str() {
-            "const" | "async" => idx += 1,
+            "const" | "async" | "unsafe" => idx += 1,
             "extern" => {
                 idx += 1;
                 if matches!(tokens.get(idx), Some(Token::Other)) {
@@ -566,12 +589,16 @@ fn enter_or_skip_container(
                 saw_for = true;
                 idx += 1;
             }
-            Token::LBrace => {
+            Token::LBrace if paren_depth == 0 && bracket_depth == 0 && angle_depth == 0 => {
                 let close = find_matching_rbrace(tokens, idx, end);
                 if !saw_for {
                     parse_container_items(tokens, idx + 1, close, rel_path, report);
                 }
                 return (close + 1).min(end);
+            }
+            Token::LBrace => {
+                let close = find_matching_rbrace(tokens, idx, end);
+                idx = (close + 1).min(end);
             }
             _ => idx += 1,
         }
@@ -601,9 +628,17 @@ fn skip_item(tokens: &[Token], mut idx: usize, end: usize) -> usize {
                 idx += 1;
             }
             Token::Semi if paren_depth == 0 && bracket_depth == 0 => return idx + 1,
+            Token::LBrace if paren_depth == 0 && bracket_depth == 0 => {
+                let close = find_matching_rbrace(tokens, idx, end);
+                if matches!(tokens.get(close + 1), Some(Token::RAngle)) {
+                    idx = (close + 1).min(end);
+                } else {
+                    return (close + 1).min(end);
+                }
+            }
             Token::LBrace => {
                 let close = find_matching_rbrace(tokens, idx, end);
-                return (close + 1).min(end);
+                idx = (close + 1).min(end);
             }
             _ => idx += 1,
         }
@@ -679,14 +714,93 @@ fn contains_author_year_citation(doc: &str) -> bool {
         let Some(mut prefix) = doc.get(window_start..idx) else {
             continue;
         };
-        if let Some((_, after_cut)) = prefix.rsplit_once(['<', '>', '=', '[', ']', '`']) {
+        if let Some((_, after_cut)) = prefix.rsplit_once(['<', '>', '=', '[', ']', '`', '\n']) {
             prefix = after_cut;
         }
-        if (prefix.contains('(') || prefix.contains(',') || prefix.contains(' ')) && window_contains_author_surname(prefix, &disallowed_set) {
+        let trimmed_prefix = prefix.trim_end();
+        let next_after_year = after_year_byte(bytes, idx);
+
+        // Form A: `Author (YYYY)` or `Author, R. P. (YYYY; YYYY)` — opening `(` immediately before
+        // the year (or `;`/`,` after an earlier year inside `(...)`).
+        if let Some(before_paren) = trimmed_prefix.strip_suffix('(') {
+            if author_clause_ends_with_surname(before_paren, &disallowed_set) {
+                return true;
+            }
+            continue;
+        }
+        // Form B: `Author, YYYY` or `Author et al., YYYY` — comma immediately before the year.
+        if let Some(before_comma) = trimmed_prefix.strip_suffix(',') {
+            if author_clause_ends_with_surname(before_comma, &disallowed_set) {
+                return true;
+            }
+            continue;
+        }
+        // Form C: Parenthesized `(Author YYYY)` / `(Author & Coauthor YYYY; Author2 YYYY)` where
+        // the year is inside `(...)` and followed by citation punctuation (`)`, `;`, `,`, `]`, `.`).
+        if matches!(next_after_year, Some(b')' | b';' | b',' | b']'))
+            && let Some((_, inside_paren)) = trimmed_prefix.rsplit_once(['(', ';'])
+            && author_clause_ends_with_surname(inside_paren, &disallowed_set)
+        {
+            return true;
+        }
+        // Form D: Explicit `et al. YYYY` or `Author & Author YYYY` followed by punctuation/EOL.
+        if matches!(next_after_year, None | Some(b')' | b';' | b',' | b'.' | b':' | b']' | b'\n' | b'\r'))
+            && (trimmed_prefix.ends_with("et al.") || trimmed_prefix.ends_with("et al") || trimmed_prefix.contains('&'))
+            && author_clause_ends_with_surname(trimmed_prefix, &disallowed_set)
+        {
             return true;
         }
     }
     false
+}
+
+fn after_year_byte(bytes: &[u8], idx: usize) -> Option<u8> {
+    let mut end = idx + 4;
+    if bytes.get(end).is_some_and(|b| matches!(b, b'a'..=b'd')) {
+        end += 1;
+    }
+    bytes.get(end).copied()
+}
+
+/// Returns `true` when the tail of `clause` immediately before `(YYYY)`, `, YYYY`, or `YYYY)`
+/// consists of author-name tokens (capitalized surnames, initials, `&`, `and`, `et al.`, edition/ch
+/// markers) rather than generic prose like `"Gaussian window of"` or `"Linear interpolation over"`.
+fn author_clause_ends_with_surname(clause: &str, disallowed: &BTreeSet<&str>) -> bool {
+    const ALLOWED_LOWER_CONNECTORS: &[&str] = &["and", "et", "al", "de", "van", "von", "di", "la", "le", "del", "der", "den", "ed", "eds"];
+    let tail = clause.rsplit_once(['.', '!', '?', ':']).map_or(clause, |(head, after)| {
+        // Keep initials like `R. P.` or `et al.` attached to the author clause.
+        if after.trim().is_empty() || head.trim_end().ends_with("al") || head.trim_end().chars().last().is_some_and(char::is_uppercase) {
+            clause
+        } else {
+            after
+        }
+    });
+    let words: Vec<&str> =
+        tail.split(|c: char| !(c.is_alphabetic() || matches!(c, '\'' | '\u{2019}' | '-' | '&'))).filter(|w| !w.is_empty()).collect();
+    if words.is_empty() {
+        return false;
+    }
+    let mut saw_surname = false;
+    let mut inspected = 0usize;
+    for &w in words.iter().rev() {
+        if w == "&" || ALLOWED_LOWER_CONNECTORS.contains(&w.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        let trimmed = w.trim_matches(['\'', '\u{2019}', '-']);
+        if trimmed.len() == 1 && trimmed.chars().all(char::is_uppercase) {
+            // Author initial (`R.`, `P.`).
+            continue;
+        }
+        inspected += 1;
+        if is_candidate_surname(trimmed, disallowed) {
+            saw_surname = true;
+            break;
+        }
+        if inspected >= 1 {
+            return false;
+        }
+    }
+    saw_surname
 }
 
 fn floor_char_boundary(s: &str, mut index: usize) -> usize {
@@ -737,21 +851,6 @@ fn is_publication_year_at(bytes: &[u8], idx: usize) -> bool {
         }
     }
     true
-}
-
-fn window_contains_author_surname(window: &str, disallowed: &BTreeSet<&str>) -> bool {
-    let mut current = String::new();
-    for ch in window.chars() {
-        if ch.is_alphabetic() || matches!(ch, '\'' | '\u{2019}' | '-') {
-            current.push(ch);
-        } else {
-            if is_candidate_surname(&current, disallowed) {
-                return true;
-            }
-            current.clear();
-        }
-    }
-    is_candidate_surname(&current, disallowed)
 }
 
 fn is_candidate_surname(word: &str, disallowed: &BTreeSet<&str>) -> bool {
@@ -859,28 +958,36 @@ fn lex_attribute(source: &str, start: usize, line: &mut usize, tokens: &mut Vec<
     let mut depth = 0usize;
     let mut i = open_bracket;
     while i < bytes.len() {
-        match bytes[i] {
-            b'\n' => {
-                *line += 1;
-                i += 1;
+        let b = bytes[i];
+        if b == b'\n' {
+            *line += 1;
+            i += 1;
+        } else if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            i = skip_line_comment_end(bytes, i);
+        } else if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            let next_i = skip_block_comment_end(bytes, i);
+            *line += count_newlines(&bytes[i..next_i]);
+            i = next_i;
+        } else if let Some((_, next_i, _)) = find_raw_string_span(bytes, i) {
+            *line += count_newlines(&bytes[i..next_i]);
+            i = next_i;
+        } else if b == b'"' {
+            let next_i = skip_quoted_string_end(bytes, i);
+            *line += count_newlines(&bytes[i..next_i]);
+            i = next_i;
+        } else if b == b'\'' {
+            i = find_char_literal_span(source, i).map_or(i + 1, |(_, end_q)| end_q + 1);
+        } else if b == b'[' {
+            depth += 1;
+            i += 1;
+        } else if b == b']' {
+            depth = depth.saturating_sub(1);
+            i += 1;
+            if depth == 0 {
+                break;
             }
-            b'"' => {
-                let next_i = skip_quoted_string_end(bytes, i);
-                *line += count_newlines(&bytes[i..next_i]);
-                i = next_i;
-            }
-            b'[' => {
-                depth += 1;
-                i += 1;
-            }
-            b']' => {
-                depth = depth.saturating_sub(1);
-                i += 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            _ => i += 1,
+        } else {
+            i += 1;
         }
     }
     let inside = source.get(open_bracket + 1..i.saturating_sub(1)).unwrap_or_default().trim();
@@ -900,8 +1007,17 @@ fn lex_attribute(source: &str, start: usize, line: &mut usize, tokens: &mut Vec<
 fn extract_doc_attr_value(inside: &str) -> Option<String> {
     let rest = inside.strip_prefix("doc")?.trim_start();
     let rhs = rest.strip_prefix('=')?.trim();
-    let unquoted = rhs.strip_prefix('"')?.strip_suffix('"')?;
-    Some(unquoted.to_owned())
+    if let Some(unquoted) = rhs.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        return Some(unquoted.to_owned());
+    }
+    let bytes = rhs.as_bytes();
+    if let Some((content_start, end_idx, hashes)) = find_raw_string_span(bytes, 0)
+        && end_idx == bytes.len()
+    {
+        let content_end = end_idx.saturating_sub(1 + hashes);
+        return rhs.get(content_start..content_end).map(str::to_owned);
+    }
+    None
 }
 
 fn lex_ident(source: &str, start: usize, line: usize, tokens: &mut Vec<Token>) -> usize {
@@ -1131,5 +1247,79 @@ impl Default for Estimator<f64> {
         let report = scan_module_source("crates/stats/src/hrtb.rs", src);
         assert_eq!(report.public_routines, 3, "all three inherent impl pub fns must be counted");
         assert_eq!(report.violations.len(), 3, "all three undocumented inherent pub fns must trigger violations: {:?}", report.violations);
+    }
+
+    #[test]
+    fn aud_12_38_blocks_nested_inner_doc_const_generic_impl_raw_attr_unsafe_fn_lax_year_and_prod_tests_file() {
+        // 1. Inner doc inside #[cfg(test)] mod tests must NOT certify the module.
+        let nested_doc_src = "\
+pub fn uncited_prod(x: f64) -> f64 { x }
+#[cfg(test)]
+mod tests {
+    //! Reference: Brent (1973).
+    #[test] fn t() {}
+}
+";
+        let r1 = scan_module_source("crates/math/src/nested.rs", nested_doc_src);
+        assert!(!r1.module_cited);
+        assert_eq!(r1.violations.len(), 1);
+
+        // 2. Const-generic `{ 4 }` inside impl header must not skip the impl body.
+        let const_gen_src = "\
+pub struct Solver<T>(T);
+impl Solver<[f64; { 4 }]> {
+    pub fn uncited_fit(&self) -> f64 { 0.0 }
+}
+";
+        let r2 = scan_module_source("crates/fit/src/cg.rs", const_gen_src);
+        assert_eq!(r2.public_routines, 1);
+        assert_eq!(r2.violations.len(), 1);
+
+        // 3. Raw string in #[doc = r#"..."#] with brackets must neither break lexing nor drop valid citation.
+        let raw_attr_src = "\
+#[doc = r#\"interval [0, 1) and a]b\"#]
+pub fn uncited_with_raw_attr() {}
+
+#[doc = r#\"Reference: Brent (1973)\"#]
+pub fn cited_with_raw_attr() {}
+";
+        let r3 = scan_module_source("crates/math/src/raw_attr.rs", raw_attr_src);
+        assert_eq!(r3.public_routines, 2);
+        assert_eq!(r3.violations.len(), 1);
+        assert!(r3.violations[0].detail.contains("uncited_with_raw_attr"));
+
+        // 4. `pub unsafe fn` must be checked.
+        let unsafe_src = "pub unsafe fn uncited_unsafe() {}\n";
+        let r4 = scan_module_source("crates/math/src/u.rs", unsafe_src);
+        assert_eq!(r4.public_routines, 1);
+        assert_eq!(r4.violations.len(), 1);
+
+        // 5. Lax surname-year false positives must be rejected.
+        for bogus in [
+            "Gaussian window of 2000 samples.",
+            "Linear interpolation over 2000 grid points.",
+            "CurveBook 2026 release notes.",
+            "Spline clamping at 1995 iterations.",
+        ] {
+            assert!(!cites_published_reference(bogus), "must reject non-citation `{bogus}`");
+        }
+
+        // 6. Unconditional production `tests.rs` (NOT behind `#[cfg(test)]`) and symlinks fail closed.
+        let ws = make_temp_workspace("aud12-38");
+        ws.write("crates/math/src/mod_a.rs", "pub mod tests;\n");
+        ws.write("crates/math/src/tests.rs", "pub fn production_uncited_in_tests_rs() -> f64 { 1.0 }\n");
+        ws.write("crates/stats/src/ok.rs", "//! Reference: Zar (2010).\npub fn ok() -> f64 { 1.0 }\n");
+        ws.write("crates/fit/src/ok.rs", "//! Reference: Marquardt (1963).\npub fn ok() -> f64 { 1.0 }\n");
+        ws.write("crates/transform/src/ok.rs", "//! Reference: Savitzky & Golay (1964).\npub fn ok() -> f64 { 1.0 }\n");
+        let (_, v) = check_workspace_with_allowlist(ws.path(), NUMERICAL_SRC_DIRS, &[]).unwrap();
+        assert!(v.iter().any(|x| x.path == "crates/math/src/tests.rs" && x.detail.contains("production_uncited_in_tests_rs")), "{v:?}");
+
+        #[cfg(unix)]
+        {
+            ws.write("outside.rs", "pub fn leak() {}\n");
+            std::os::unix::fs::symlink(ws.join("outside.rs"), ws.join("crates/math/src/link.rs")).unwrap();
+            let (_, v_sym) = check_workspace_with_allowlist(ws.path(), NUMERICAL_SRC_DIRS, &[]).unwrap();
+            assert!(v_sym.iter().any(|x| x.path == "crates/math/src/link.rs" && x.detail.contains("symlink")), "{v_sym:?}");
+        }
     }
 }

@@ -10,19 +10,19 @@ use std::sync::atomic::Ordering;
 use curvebook_math::roots::{RootOptions, brent_root};
 
 use crate::dsl::ast::{CompiledInitRule, CompiledOdeInit, CompiledProgram, DatasetFilter, DslCompileWarning, DslEquationKind, Expr, OpCode};
-use crate::dsl::compile::compile_program_refs;
+use crate::dsl::compile::compile_program_from_indices;
 use crate::dsl::implicit::{implicit_newton_fallback, implicit_probes_and_scale};
-use crate::dsl::limits::{MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, MAX_ODE_VM_OPS_PER_EVAL, MAX_TOTAL_DATASET_INDICES, MAX_TOTAL_OPCODES};
+use crate::dsl::limits::{MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, MAX_ODE_VM_OPS_PER_EVAL, MAX_TOTAL_DATASET_INDICES, MAX_TOTAL_OPCODES, MAX_VM_STEPS};
 use crate::dsl::ode::{
     NEXT_ODE_MODEL_ID, OdeRhsSource, consume_ode_fit_rk_step, consume_ode_fit_vm_ops, eval_ode_on_side, ode_fit_budget_exceeded,
     store_cached_ode_trajectory, take_cached_ode_trajectory,
 };
 use crate::dsl::statements::{
-    DslSection, ParsedStatement, ResolvedEquationBody, byte_offset_in_line, collect_free_idents, compile_initial_rules, compile_transforms,
+    DslSection, EqItem, ParsedStatement, ResolvedEquationBody, byte_offset_in_line, collect_free_idents, compile_initial_rules, compile_transforms,
     compute_dataset_stats, is_builtin_constant_or_var, parse_dataset_prefix, parse_section_header, parse_statement, parse_statement_with_locs,
     resolve_equation_branches, strip_comment,
 };
-use crate::dsl::vm::{eval_bytecode, eval_bytecode_counted, eval_bytecode_with_locals};
+use crate::dsl::vm::{VmInput, eval_bytecode, eval_bytecode_with_budget, eval_bytecode_with_locals};
 use crate::error::FitError;
 use crate::library::ParametricModel;
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
@@ -149,6 +149,13 @@ impl CompiledDslModel {
                     }
                     match parse_statement(rest, line_no)? {
                         ParsedStatement::Assign { name, rhs } | ParsedStatement::OdeInitial { lhs_name: Some(name), rhs, .. } => {
+                            if is_builtin_constant_or_var(&name) {
+                                return Err(FitError::DslCompileError {
+                                    message: format!("Cannot assign derived transform to reserved identifier `{name}`"),
+                                    line: line_no,
+                                    column: col_offset + 1,
+                                });
+                            }
                             raw_transform_lines.push((line_no, name, rhs));
                         }
                         _ => {
@@ -167,7 +174,7 @@ impl CompiledDslModel {
             return Err(FitError::DslCompileError { message: "Empty custom equation".to_owned(), line: 1, column: 1 });
         }
 
-        let ResolvedEquationBody { kind, body_stmts, ode_init_branches, warnings } = resolve_equation_branches(parsed_lines, &ident_locs)?;
+        let ResolvedEquationBody { kind, eq_items, body_stmts, ode_init_branches, warnings } = resolve_equation_branches(parsed_lines, &ident_locs)?;
         if body_stmts.is_empty() {
             return Err(FitError::DslCompileError { message: "No target expression (`Y = ...` or expression) found".to_owned(), line: 1, column: 1 });
         }
@@ -176,21 +183,29 @@ impl CompiledDslModel {
         let mut param_order: Vec<String> = Vec::new();
         let mut seen_params: BTreeSet<String> = BTreeSet::new();
 
-        for (_, locals, target) in &body_stmts {
+        for branch in &body_stmts {
             let mut bound_locals: BTreeSet<String> = BTreeSet::new();
-            for (lname, rhs) in locals {
-                collect_free_idents(rhs, &bound_locals, &mut seen_params, &mut param_order);
-                bound_locals.insert(lname.clone());
+            for &idx in &branch.local_indices {
+                if let EqItem::Local { name: lname, rhs, .. } = &eq_items[idx] {
+                    collect_free_idents(rhs, &bound_locals, &mut seen_params, &mut param_order);
+                    bound_locals.insert(lname.clone());
+                }
             }
-            collect_free_idents(target, &bound_locals, &mut seen_params, &mut param_order);
+            if let Some((target, _)) = eq_items[branch.target_idx].target_expr_for_kind(kind) {
+                collect_free_idents(target, &bound_locals, &mut seen_params, &mut param_order);
+            }
         }
-        for (_, _, locals, rhs) in &ode_init_branches {
+        for init_branch in &ode_init_branches {
             let mut bound_locals: BTreeSet<String> = BTreeSet::new();
-            for (lname, lrhs) in locals {
-                collect_free_idents(lrhs, &bound_locals, &mut seen_params, &mut param_order);
-                bound_locals.insert(lname.clone());
+            for &idx in &init_branch.local_indices {
+                if let EqItem::Local { name: lname, rhs: lrhs, .. } = &eq_items[idx] {
+                    collect_free_idents(lrhs, &bound_locals, &mut seen_params, &mut param_order);
+                    bound_locals.insert(lname.clone());
+                }
             }
-            collect_free_idents(rhs, &bound_locals, &mut seen_params, &mut param_order);
+            if let EqItem::OdeInit { rhs, .. } = &eq_items[init_branch.init_idx] {
+                collect_free_idents(rhs, &bound_locals, &mut seen_params, &mut param_order);
+            }
         }
         if kind == DslEquationKind::OdeFirstOrder && ode_init_branches.is_empty() && !seen_params.contains("Y0") {
             param_order.push("Y0".to_owned());
@@ -203,9 +218,12 @@ impl CompiledDslModel {
         let mut programs = Vec::with_capacity(body_stmts.len());
         let mut program_by_ds = HashMap::new();
         let mut default_program_idx = None;
-        for (filter, locals, target) in body_stmts {
+        for branch in body_stmts {
+            let Some((target, subtract_from_y)) = eq_items[branch.target_idx].target_expr_for_kind(kind) else {
+                continue;
+            };
             let remaining = MAX_TOTAL_OPCODES.saturating_sub(total_opcodes);
-            let prog = compile_program_refs(&locals, &target, &param_map, remaining)?;
+            let prog = compile_program_from_indices(&eq_items, &branch.local_indices, target, subtract_from_y, &param_map, remaining)?;
             total_opcodes = total_opcodes.saturating_add(prog.code.len());
             if total_opcodes > MAX_TOTAL_OPCODES {
                 return Err(FitError::DslCompileError {
@@ -215,7 +233,7 @@ impl CompiledDslModel {
                 });
             }
             let prog_idx = programs.len();
-            match &filter {
+            match &branch.filter {
                 DatasetFilter::Include(v) => {
                     for &ds in v {
                         program_by_ds.insert(ds, prog_idx);
@@ -225,7 +243,7 @@ impl CompiledDslModel {
                     default_program_idx = Some(prog_idx);
                 }
             }
-            programs.push((filter, prog));
+            programs.push((branch.filter, prog));
         }
 
         let mut ode_inits = Vec::new();
@@ -246,9 +264,12 @@ impl CompiledDslModel {
                 ode_inits.push((DatasetFilter::Any, CompiledOdeInit { t0: 0.0, prog }));
                 default_ode_init_idx = Some(0);
             } else {
-                for (filter, t0, locals, init_expr) in ode_init_branches {
+                for init_branch in ode_init_branches {
+                    let EqItem::OdeInit { rhs: init_expr, .. } = &eq_items[init_branch.init_idx] else {
+                        continue;
+                    };
                     let remaining = MAX_TOTAL_OPCODES.saturating_sub(total_opcodes);
-                    let prog = compile_program_refs(&locals, &init_expr, &param_map, remaining)?;
+                    let prog = compile_program_from_indices(&eq_items, &init_branch.local_indices, init_expr, false, &param_map, remaining)?;
                     total_opcodes = total_opcodes.saturating_add(prog.code.len());
                     if total_opcodes > MAX_TOTAL_OPCODES {
                         return Err(FitError::DslCompileError {
@@ -258,7 +279,7 @@ impl CompiledDslModel {
                         });
                     }
                     let init_idx = ode_inits.len();
-                    match &filter {
+                    match &init_branch.filter {
                         DatasetFilter::Include(v) => {
                             for &ds in v {
                                 ode_init_by_ds.insert(ds, init_idx);
@@ -268,7 +289,7 @@ impl CompiledDslModel {
                             default_ode_init_idx = Some(init_idx);
                         }
                     }
-                    ode_inits.push((filter, CompiledOdeInit { t0, prog }));
+                    ode_inits.push((init_branch.filter, CompiledOdeInit { t0: init_branch.t0, prog }));
                 }
             }
         }
@@ -340,19 +361,40 @@ impl CompiledDslModel {
         let stats = compute_dataset_stats(points, column_titles);
         let same_ds = points.first().map(|p0| p0.data_set_index).filter(|&first| points.iter().all(|p| p.data_set_index == first));
         let eval_ds = same_ds.unwrap_or(0);
-        let mut applied = vec![false; guesses.len()];
         let mut locals = vec![None; self.init_local_count];
-        for pass in 0..2 {
-            if pass == 1 && same_ds.is_some() {
-                break;
-            }
+        if let Some(ds) = same_ds {
+            // Evaluate matching rules in textual order so scoped shadowing is visible to later
+            // rules, while preventing a later unscoped `Any` rule from overwriting an earlier
+            // dataset-specific rule on the same slot/parameter (specific-overrides-unscoped).
+            let mut specific_written = vec![false; self.init_local_count];
             for rule in &self.initial_rules {
-                let matches = match (same_ds, pass) {
-                    (Some(ds), 0) => rule.filter.matches(ds),
-                    (Some(_), _) => false,
-                    (None, 0) => rule.filter == DatasetFilter::Any,
-                    (None, _) => rule.filter != DatasetFilter::Any && rule.filter.matches(0),
-                };
+                if !rule.filter.matches(ds) {
+                    continue;
+                }
+                let is_specific = rule.filter != DatasetFilter::Any;
+                if let Some(val) = eval_bytecode_with_locals(&rule.prog, &[0.0], f64::NAN, &stats, eval_ds, &mut locals)
+                    && val.is_finite()
+                {
+                    let blocked = !is_specific && rule.slot < specific_written.len() && specific_written[rule.slot];
+                    if !blocked {
+                        if rule.slot < locals.len() {
+                            locals[rule.slot] = Some(val);
+                            if is_specific {
+                                specific_written[rule.slot] = true;
+                            }
+                        }
+                        if let Some(p_idx) = rule.param_idx {
+                            guesses[p_idx] = val;
+                        }
+                    }
+                }
+            }
+            return guesses;
+        }
+        let mut applied = vec![false; guesses.len()];
+        for pass in 0..2 {
+            for rule in &self.initial_rules {
+                let matches = if pass == 0 { rule.filter == DatasetFilter::Any } else { rule.filter != DatasetFilter::Any && rule.filter.matches(0) };
                 if !matches {
                     continue;
                 }
@@ -598,7 +640,8 @@ impl OdeEvalBudget {
             return None;
         }
         self.stack.clear();
-        let (res, ops) = eval_bytecode_counted(prog, x, y, params, ds_idx, locals, &mut self.stack);
+        let max_steps = self.remaining_ops.min(MAX_VM_STEPS);
+        let (res, ops) = eval_bytecode_with_budget(prog, &VmInput { x, y, params, ds_idx }, locals, &mut self.stack, max_steps);
         if ops > self.remaining_ops {
             self.remaining_ops = 0;
             self.exceeded = true;
@@ -666,6 +709,15 @@ impl ParametricModel for CompiledDslModel {
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         self.initial_guess_with_column_titles(points, &self.column_title_values)
+    }
+
+    fn initial_guess_with_column_titles(&self, points: &[DataPoint], column_titles: &[f64]) -> Vec<f64> {
+        let titles = if column_titles.is_empty() { &self.column_title_values } else { column_titles };
+        Self::initial_guess_with_column_titles(self, points, titles)
+    }
+
+    fn uses_sheet_dataset_index(&self) -> bool {
+        true
     }
 
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {

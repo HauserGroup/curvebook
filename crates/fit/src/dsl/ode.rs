@@ -112,6 +112,7 @@ pub(in crate::dsl) struct OdeKnot {
     pub(in crate::dsl) t: f64,
     pub(in crate::dsl) y: f64,
     pub(in crate::dsl) h: f64,
+    pub(in crate::dsl) y_ref: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -176,8 +177,8 @@ pub(in crate::dsl) fn slice_bits_eq(a: &[f64], b: &[f64]) -> bool {
 
 impl CachedOdeTrajectory {
     pub(in crate::dsl) fn new(model_id: u64, ds_idx: usize, t0: f64, y0: f64, params: &[f64], x_tail: &[f64]) -> Self {
-        let init_knot = OdeKnot { dist: 0.0, t: t0, y: y0, h: 0.0 };
         let y_ref = y0.abs();
+        let init_knot = OdeKnot { dist: 0.0, t: t0, y: y0, h: 0.0, y_ref };
         Self {
             model_id,
             ds_idx,
@@ -419,9 +420,11 @@ fn compute_ode_init_step_and_scale(t0: f64, y0: f64, dir: f64, rhs_src: &mut dyn
     let h0 = if d0 < 1e-5 || d1 < 1e-5 { 1e-6 * t_scale } else { 0.01 * (d0 / d1) };
     let h0 = h0.clamp(1e-12 * t_scale, 1e4 * t_scale);
     let y1 = y0 + dir * h0 * f0;
+    let mut f1_sample: Option<f64> = None;
     let h_init = if y1.is_finite() {
         match rhs_src.eval_rhs(t0 + dir * h0, y1) {
             Some(f1) if f1.is_finite() => {
+                f1_sample = Some(f1);
                 let d2 = (f1 - f0).abs() / (sc * h0);
                 let denom = d1.max(d2);
                 let h1 = if denom <= 1e-15 { (1e-6 * t_scale).max(h0 * 1e-3) } else { (0.01 / denom).powf(0.2) };
@@ -433,7 +436,21 @@ fn compute_ode_init_step_and_scale(t0: f64, y0: f64, dir: f64, rhs_src: &mut dyn
     } else {
         (h0 * 0.25).max(1e-12 * t_scale)
     };
-    let y_ref = if y0 != 0.0 { y0.abs() } else { f0.abs() * t_scale * 1e-2 };
+    let y_ref = if y0 != 0.0 {
+        y0.abs()
+    } else {
+        let s0 = f0.abs() * t_scale * 1e-2;
+        if s0 > 0.0 && s0.is_finite() {
+            s0
+        } else if let Some(s1) = f1_sample.map(|f1| f1.abs() * h0)
+            && s1 > 0.0
+            && s1.is_finite()
+        {
+            s1
+        } else {
+            1.0
+        }
+    };
     Ok((h_init.max(1e-15 * t_scale), y_ref))
 }
 
@@ -479,8 +496,9 @@ fn advance_ode_frontier(
                 t = t_next;
                 y = y_next;
                 h = h_next;
+                side.y_ref = side.y_ref.max(y_next.abs());
                 cur_dist = (t - t0) * dir;
-                new_knots.push(OdeKnot { dist: cur_dist, t, y, h });
+                new_knots.push(OdeKnot { dist: cur_dist, t, y, h, y_ref: side.y_ref });
                 if cur_dist + tol_dist >= target_dist {
                     side.push_frontier_knots(new_knots);
                     return FrontierAdvanceOutcome::Reached;
@@ -538,6 +556,7 @@ pub(in crate::dsl) fn eval_ode_on_side(
             return None;
         };
         side.frontier[0].h = h_init;
+        side.frontier[0].y_ref = y_ref;
         side.y_ref = y_ref;
     }
 
@@ -587,7 +606,7 @@ pub(in crate::dsl) fn eval_ode_on_side(
         return Some(y);
     }
 
-    match integrate_rk45_segment_src(prev.t, t_end, prev.y, prev.h, MAX_ODE_STEPS, (1e-15, side.y_ref, t_end.abs().max(t0.abs())), rhs_src) {
+    match integrate_rk45_segment_src(prev.t, t_end, prev.y, prev.h, MAX_ODE_STEPS, (1e-15, prev.y_ref, t_end.abs().max(t0.abs())), rhs_src) {
         Rk45Outcome::Reached { y } => {
             side.record_point(t_end.to_bits(), y);
             Some(y)
@@ -605,7 +624,7 @@ fn integrate_rk45_segment_src(
     tol_scale: (f64, f64, f64),
     rhs_src: &mut dyn OdeRhsSource,
 ) -> Rk45Outcome {
-    let (atol_rel, y_ref, total_span) = tol_scale;
+    let (atol_rel, mut y_ref, total_span) = tol_scale;
     if !t0.is_finite() || !t_end.is_finite() || !y0.is_finite() || !total_span.is_finite() {
         return Rk45Outcome::IntrinsicFailed;
     }
@@ -641,6 +660,7 @@ fn integrate_rk45_segment_src(
                 t = t_next;
                 y = y_next;
                 h = h_next;
+                y_ref = y_ref.max(y_next.abs());
             }
             Rk45StepResult::Rejected { h_next } | Rk45StepResult::DomainRejected { h_next } => {
                 if h_next < min_h {

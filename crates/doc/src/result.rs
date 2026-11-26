@@ -538,6 +538,7 @@ impl ResultSheet {
         self.analysis.validate_structural()?;
         if let Some(ds) = &self.analyzable_data {
             ds.validate()?;
+            ds.validate_finite_metadata()?;
         }
         for s in &self.scalars {
             if !s.value.is_finite() {
@@ -554,6 +555,14 @@ impl ResultSheet {
                                 row: 0,
                                 col: 0,
                                 reason: "result.tabs.rows.number",
+                            });
+                        }
+                        ResultCell::PValue { raw, .. } if !raw.is_finite() => {
+                            return Err(DocError::InvalidCellValue {
+                                archetype: crate::TableKind::Column,
+                                row: 0,
+                                col: 0,
+                                reason: "result.tabs.rows.p_value",
                             });
                         }
                         ResultCell::ConfidenceInterval { lower, upper } => {

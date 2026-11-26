@@ -26,7 +26,14 @@ use crate::UiApp;
 
 use super::{FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens};
 
-pub(in crate::egui_shell) use shared::{ScrollCellTarget, is_linked_region_broken, scroll_cell_into_view};
+pub use headers::column_design_hint_tag;
+pub use inline_edit::commit_standard_inline_edit;
+pub use multi_archetype::build_duplicate_column_intent_for_col;
+pub(in crate::egui_shell) use shared::{ScrollCellTarget, format_cell_into_with_decimals, is_linked_region_broken, scroll_cell_into_view};
+pub use shortcuts::{
+    ResolvedGridSelection, first_linked_region_in_selection, push_clear_selection_intent, push_exclude_selection_intent, resolve_grid_selection,
+    selected_visual_subranges,
+};
 
 /// Target inside the `Column` grid currently undergoing buffered inline text editing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

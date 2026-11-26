@@ -12,6 +12,7 @@ use crate::diagnostics::{CovarianceDiagnostics, compute_rsdr, runs_test};
 use crate::error::{FitStatus, ParameterNote};
 use crate::library::ParametricModel;
 use crate::solver::curves::{CurveOverlayContext, build_curve_overlay, interpolate_x_from_y, interpolate_y_from_x, inverse_targets};
+use crate::solver::inference::compute_r_squared;
 use crate::solver::layout::{ObsRecord, ParamBinding, ParameterLayout};
 use crate::solver::lm::LmRunOutput;
 use crate::solver::results::{FittedDatasetResult, FittedParameterSummary, InferenceAvailability, InterpolatedUnknown, SolverConfig};
@@ -170,7 +171,7 @@ pub(in crate::solver) fn assemble_dataset_results(
             }
         }
         let ds_ss = ds_rss.total();
-        let ds_r2 = if ds_n > 1 {
+        let dtss = if ds_n > 1 {
             let m = ds_y_sum.total() / (ds_n as f64);
             let mut dtss_acc = NeumaierSum::new();
             for &(v, rep_n, ss_w) in &ds_y_vals {
@@ -178,11 +179,11 @@ pub(in crate::solver) fn assemble_dataset_results(
                 dtss_acc.add((rep_n as f64) * d * d);
                 dtss_acc.add(ss_w);
             }
-            let dtss = dtss_acc.total();
-            if dtss > 0.0 { 1.0 - ds_ss / dtss } else { 1.0 }
+            dtss_acc.total()
         } else {
-            1.0
+            0.0
         };
+        let ds_r2 = compute_r_squared(ds_ss, dtss, ds_n);
         let is_robust = cfg.solver.method == FitMethod::RobustCauchy;
         let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
         let mut k_eff_d = 0.0_f64;
@@ -208,8 +209,13 @@ pub(in crate::solver) fn assemble_dataset_results(
             cfg.rsd
         };
         let ds_rsdr = if is_robust {
-            let k_ds = layout.bindings[ds_local_idx].iter().filter(|b| matches!(b, ParamBinding::Free(_))).count();
-            Some(compute_rsdr(&ds_base_w_abs_res, k_ds))
+            let n_d = ds_base_w_abs_res.len() as f64;
+            if n_d > 0.0 {
+                let p68 = compute_rsdr(&ds_base_w_abs_res, 0);
+                Some(p68 * (n_d / (n_d - k_eff_d).max(1.0)))
+            } else {
+                Some(0.0)
+            }
         } else {
             None
         };

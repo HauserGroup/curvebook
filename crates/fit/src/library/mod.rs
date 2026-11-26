@@ -103,6 +103,20 @@ pub trait ParametricModel: Send + Sync {
     }
     /// Deterministic data-driven initial parameter estimates from `(x, y)` observations.
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64>;
+    /// Deterministic data-driven initial parameter estimates using optional numeric dataset
+    /// column-title values (e.g., for custom DSL `MeanColumnTitle` / `LogMeanColumnTitle`
+    /// initial-value anchors). Defaults to [`ParametricModel::initial_guess`].
+    fn initial_guess_with_column_titles(&self, points: &[DataPoint], column_titles: &[f64]) -> Vec<f64> {
+        let _ = column_titles;
+        self.initial_guess(points)
+    }
+    /// Whether `eval` and `grad` interpret `dataset_index` as the raw sheet column index
+    /// (e.g., `<A>`, `<B>` dataset selectors in [`crate::CompiledDslModel`]) rather than the
+    /// 0-based ordinal index among selected datasets. Built-in multi-dataset models use
+    /// ordinal indices (`false`) so non-column-A selections route correctly.
+    fn uses_sheet_dataset_index(&self) -> bool {
+        false
+    }
     /// Optional default `(lower_bound, upper_bound)` per parameter.
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
         vec![(None, None); self.param_count()]

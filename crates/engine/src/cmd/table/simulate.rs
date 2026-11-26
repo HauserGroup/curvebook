@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use curvebook_doc::{ConstantValue, GraphSheet, InfoSheet, ProjectDocument, SheetId, SimulationNoise};
+use curvebook_doc::{ConstantValue, GraphSheet, InfoSheet, ProjectDocument, SheetId, SimulationNoise, validate_rows};
 use curvebook_transform::{
     AllocationScheme, DistributionSimulationConfig, GroupAllocationWeight, RowSampleConfig, SimulatedColumnSpec, SimulatedDistribution,
     SubjectRandomizationConfig, random_sample_rows, randomize_subjects_to_groups, simulate_distribution_columns, simulate_xy_sheet,
@@ -167,7 +167,7 @@ pub(super) fn run_simulate_xy(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         doc.select_in_navigator(&id)?;
     }
 
-    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), None, Some(ctx.cancelled))?;
     Ok(CommandOutcome::mutated(
         "table.simulateXy",
         "simulated XY data sheet",
@@ -286,7 +286,7 @@ pub(super) struct RandomizeGroupsParams {
     subject_ids: Option<Vec<String>>,
     /// Number of subjects (auto-numbered 1..=N when `subject_ids` is omitted).
     #[serde(default)]
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 1_000_000))]
     subject_count: Option<usize>,
     /// Allocation scheme (`complete_balanced` or `permuted_block`, default `complete_balanced`).
     #[serde(default)]
@@ -351,10 +351,20 @@ pub(super) fn run_randomize_groups(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comm
             if ids.len() != count {
                 return Err(bad_input(format!("`subject_ids` length ({}) does not match `subject_count` ({count})", ids.len())));
             }
+            validate_rows(ids.len())?;
+            validate_project_cell_budget_after_change(doc, None, ids.len().saturating_mul(4))?;
             SubjectRandomizationConfig { sheet_id: id.to_string(), title: title.clone(), subject_ids: ids, groups, scheme, seed }
         }
-        (Some(ids), None) => SubjectRandomizationConfig { sheet_id: id.to_string(), title: title.clone(), subject_ids: ids, groups, scheme, seed },
-        (None, Some(count)) => SubjectRandomizationConfig::from_subject_count(id.to_string(), title.clone(), count, groups, scheme, seed),
+        (Some(ids), None) => {
+            validate_rows(ids.len())?;
+            validate_project_cell_budget_after_change(doc, None, ids.len().saturating_mul(4))?;
+            SubjectRandomizationConfig { sheet_id: id.to_string(), title: title.clone(), subject_ids: ids, groups, scheme, seed }
+        }
+        (None, Some(count)) => {
+            validate_rows(count)?;
+            validate_project_cell_budget_after_change(doc, None, count.saturating_mul(4))?;
+            SubjectRandomizationConfig::try_from_subject_count(id.to_string(), title.clone(), count, groups, scheme, seed)?
+        }
         (None, None) => {
             return Err(bad_input("table.randomizeGroups requires `subject_ids` or `subject_count`"));
         }
@@ -368,7 +378,7 @@ pub(super) fn run_randomize_groups(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comm
     rand_out.data_sheet.info_sheet_id = Some(info_id.clone());
     doc.add_data_sheet(rand_out.data_sheet)?;
     link_data_sheet_to_info(doc, &info_id, &id);
-    let recalc = recalculate_dirty_with_links(doc, &[id.clone(), info_id.clone()], false)?;
+    let recalc = recalculate_dirty_with_links(doc, &[id.clone(), info_id.clone()], None, Some(ctx.cancelled))?;
 
     let constants_map: serde_json::Map<String, Value> = rand_out.arrive_constants.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
     Ok(CommandOutcome::mutated(
@@ -471,7 +481,7 @@ pub(super) fn run_random_sample_rows(ctx: &mut Ctx<'_>, raw: Value) -> Result<Co
     if let Some(ref iid) = info_id {
         dirty_seeds.push(iid.clone());
     }
-    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
+    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, None, Some(ctx.cancelled))?;
 
     Ok(CommandOutcome::mutated(
         "table.randomSampleRows",
@@ -646,7 +656,7 @@ pub(super) fn run_simulate_distributions(ctx: &mut Ctx<'_>, raw: Value) -> Resul
     let kind = sheet.archetype.kind();
     validate_project_cell_budget_after_change(doc, None, sheet.archetype.allocated_cell_slots())?;
     doc.add_data_sheet(sheet)?;
-    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), None, Some(ctx.cancelled))?;
 
     Ok(CommandOutcome::mutated(
         "table.simulateDistributions",

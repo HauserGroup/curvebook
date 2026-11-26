@@ -82,8 +82,8 @@ pub use os_integration::{
 pub use os_integration::{StubPlatformClipboardAdapter, StubPlatformUrlOpener};
 #[cfg(not(target_arch = "wasm32"))]
 pub use os_integration::{
-    read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_clipboard_bundle_for_slides,
-    write_os_pasteboard,
+    read_os_pasteboard, submit_os_print_job, submit_os_print_job_with_copies, submit_os_print_pdf_bytes, submit_os_print_pdf_bytes_with_copies,
+    write_os_clipboard_bundle, write_os_clipboard_bundle_for_slides, write_os_pasteboard,
 };
 pub use power_wizard::{PowerWizardStage, PowerWizardState};
 #[cfg(any(test, feature = "test-support"))]
@@ -1268,7 +1268,7 @@ impl UiApp {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let printer = self.canvas_dialogs.print.selected_printer.as_deref();
-                let status = os_integration::submit_os_print_job(&spool, printer)?;
+                let status = os_integration::submit_os_print_job_with_copies(&spool, printer, copies)?;
                 self.canvas_dialogs.print.last_status =
                     Some(format!("{} ({copies} copy/copies, {} page(s), {} bytes)", status.detail, spool.page_count, spool.pdf_bytes.len()));
             }
@@ -1349,12 +1349,9 @@ impl UiApp {
         if let Some(tracker) = self.batch_undo_log.as_mut() {
             tracker.capture_fallback_baseline_before(&self.session, true);
         }
-        let path_policy = self.session.path_policy().clone();
-        let mut next = Session::from_document(doc);
-        next.set_path_policy(path_policy);
-        self.session = next;
-        self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
-        self.sync_views();
+        let saved_batch_undo_log = self.batch_undo_log.take();
+        self.replace_session_preserving_policies(Session::from_document(doc));
+        self.batch_undo_log = saved_batch_undo_log;
         Ok(())
     }
 
@@ -1370,7 +1367,9 @@ impl UiApp {
         self.nav = WorkspaceNavState::default();
         self.grid = GridViewState::default();
         self.grid.apply_locale_preset(&self.locale_preset);
+        self.grid.import_wizard.path_policy = self.session.path_policy().clone();
         self.canvas_dialogs = CanvasDialogState { rulers_visible, ..CanvasDialogState::default() };
+        self.import_warnings = ImportWarningsState::default();
         self.split = SplitWorkspaceState::default();
         self.brushed_cell = None;
         self.brushed_points.clear();
@@ -1425,6 +1424,7 @@ impl UiApp {
 
     /// Synchronize navigator entries, family pane links, and status-bar statistics from `Session`.
     pub fn sync_views(&mut self) {
+        self.grid.import_wizard.path_policy = self.session.path_policy().clone();
         self.nav.sync_from_document(self.session.document());
         self.grid.refresh_selection_stats(self.session.document());
     }

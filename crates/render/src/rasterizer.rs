@@ -36,6 +36,7 @@ pub type RgbaPixmap = RasterImage;
 
 const BEZIER_FLATNESS_TOL_PX: f64 = 0.15;
 const MAX_BEZIER_DEPTH: u8 = 12;
+const MAX_FLATTENED_PATH_POINTS: usize = 524_288;
 const MITER_LIMIT: f64 = 4.0;
 const MAX_DASH_SEGMENTS: usize = 65_536;
 const SUBPIXEL_OFFSETS: [f64; 4] = [0.125, 0.375, 0.625, 0.875];
@@ -1716,10 +1717,26 @@ fn try_rasterize_small_poly_stamp(
         return false;
     }
 
+    let c_min_x = env.clip.min_x.max(0.0);
+    let c_max_x = env.clip.max_x.min(f64::from(img.width_px));
+    let c_min_y = env.clip.min_y.max(0.0);
+    let c_max_y = env.clip.max_y.min(f64::from(img.height_px));
+    if c_min_x >= c_max_x || c_min_y >= c_max_y {
+        return false;
+    }
+    let stamp_margin = MAX_SMALL_POLY_EXTENT_PX + 64.0;
+    if p0.x < c_min_x - stamp_margin || p0.x > c_max_x + stamp_margin || p0.y < c_min_y - stamp_margin || p0.y > c_max_y + stamp_margin {
+        return false;
+    }
+
     let cx_q = (p0.x * STAMP_PHASE_STEPS).round() as i64;
     let cy_q = (p0.y * STAMP_PHASE_STEPS).round() as i64;
-    let anchor_x = cx_q.div_euclid(8) as i32;
-    let anchor_y = cy_q.div_euclid(8) as i32;
+    let Ok(anchor_x) = i32::try_from(cx_q.div_euclid(8)) else {
+        return false;
+    };
+    let Ok(anchor_y) = i32::try_from(cy_q.div_euclid(8)) else {
+        return false;
+    };
     let qx = cx_q.rem_euclid(8) as u8;
     let qy = cy_q.rem_euclid(8) as u8;
 
@@ -1794,14 +1811,11 @@ fn try_rasterize_small_poly_stamp(
         return false;
     }
 
-    let ix0 = anchor_x + min_dx;
-    let ix1 = anchor_x + max_dx;
-    let iy0 = anchor_y + min_dy;
-    let iy1 = anchor_y + max_dy;
-    let c_min_x = env.clip.min_x.max(0.0);
-    let c_max_x = env.clip.max_x.min(f64::from(img.width_px));
-    let c_min_y = env.clip.min_y.max(0.0);
-    let c_max_y = env.clip.max_y.min(f64::from(img.height_px));
+    let (Some(ix0), Some(ix1), Some(iy0), Some(iy1)) =
+        (anchor_x.checked_add(min_dx), anchor_x.checked_add(max_dx), anchor_y.checked_add(min_dy), anchor_y.checked_add(max_dy))
+    else {
+        return false;
+    };
     if f64::from(ix0) < c_min_x || f64::from(ix1) > c_max_x || f64::from(iy0) < c_min_y || f64::from(iy1) > c_max_y {
         return false;
     }
@@ -1868,7 +1882,7 @@ fn build_small_poly_mask(
         }
     }
 
-    flatten_path_into(&local_path, 1.0, 1.0, &mut scratch.subpaths, &mut scratch.vec_pool);
+    flatten_path_into(&local_path, 1.0, 1.0, None, &mut scratch.subpaths, &mut scratch.vec_pool);
     let mut raw_cells = vec![[0u8; 2]; (width as usize) * (height as usize)];
     let local_clip = ClipRectPx::from_canvas(width, height);
     if !scratch.subpaths.is_empty() {
@@ -2040,12 +2054,22 @@ fn rasterize_path(
         return;
     }
 
+    let cull_bounds = {
+        let pad = stroke_paint.map_or(2.0, |sp| {
+            let sr = 0.5 * (sp.width_pt * env.stroke_scale).max(0.5);
+            (MITER_LIMIT * sr).max(sr * 2.0) + 4.0
+        });
+        let expanded =
+            ClipRectPx { min_x: env.clip.min_x - pad, min_y: env.clip.min_y - pad, max_x: env.clip.max_x + pad, max_y: env.clip.max_y + pad };
+        (expanded.min_x.is_finite() && expanded.min_y.is_finite() && expanded.max_x.is_finite() && expanded.max_y.is_finite()).then_some(expanded)
+    };
+
     if let Some(rect) = try_extract_axis_aligned_rect(path, env.sx, env.sy) {
         if let Some(color) = fill_color {
             fill_rect_fast(img, rect, color, env.clip, scratch.canvas_opaque);
         }
         if let Some(sp) = stroke_paint {
-            flatten_path_into(path, env.sx, env.sy, &mut scratch.subpaths, &mut scratch.vec_pool);
+            flatten_path_into(path, env.sx, env.sy, cull_bounds, &mut scratch.subpaths, &mut scratch.vec_pool);
             if !scratch.subpaths.is_empty() {
                 stroke_subpaths_target(
                     ScanTarget::Image { img, color: sp.color },
@@ -2061,7 +2085,7 @@ fn rasterize_path(
         return;
     }
 
-    flatten_path_into(path, env.sx, env.sy, &mut scratch.subpaths, &mut scratch.vec_pool);
+    flatten_path_into(path, env.sx, env.sy, cull_bounds, &mut scratch.subpaths, &mut scratch.vec_pool);
     if scratch.subpaths.is_empty() {
         return;
     }
@@ -2075,12 +2099,42 @@ fn rasterize_path(
     reclaim_subpaths(&mut scratch.subpaths, &mut scratch.vec_pool);
 }
 
-fn flatten_path_into(path: &Path2D, sx: f64, sy: f64, subpaths: &mut Vec<Subpath>, pool: &mut Vec<Vec<PointPx>>) {
+struct FlattenCtx {
+    cull_bounds: Option<ClipRectPx>,
+    remaining_points: usize,
+}
+
+impl FlattenCtx {
+    const fn new(cull_bounds: Option<ClipRectPx>) -> Self {
+        Self { cull_bounds, remaining_points: MAX_FLATTENED_PATH_POINTS }
+    }
+
+    fn take_point(&mut self) -> bool {
+        if let Some(next) = self.remaining_points.checked_sub(1) {
+            self.remaining_points = next;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn push_flattened_endpoint(out: &mut Vec<PointPx>, pt: PointPx, ctx: &mut FlattenCtx) {
+    if out.last().is_none_or(|prev| prev.dist_sq(pt) > 1e-18) && ctx.take_point() {
+        out.push(pt);
+    }
+}
+
+fn flatten_path_into(path: &Path2D, sx: f64, sy: f64, cull_bounds: Option<ClipRectPx>, subpaths: &mut Vec<Subpath>, pool: &mut Vec<Vec<PointPx>>) {
     reclaim_subpaths(subpaths, pool);
+    let mut ctx = FlattenCtx::new(cull_bounds);
     let mut current: Option<Subpath> = None;
     let mut start_pt: Option<PointPx> = None;
 
     for cmd in &path.commands {
+        if ctx.remaining_points == 0 {
+            break;
+        }
         match *cmd {
             PathCmd::MoveTo(pt) => {
                 if let Some(mut sub) = current.take() {
@@ -2092,7 +2146,7 @@ fn flatten_path_into(path: &Path2D, sx: f64, sy: f64, subpaths: &mut Vec<Subpath
                     }
                 }
                 let p = PointPx::new(pt.x * sx, pt.y * sy);
-                if p.is_finite() {
+                if p.is_finite() && ctx.take_point() {
                     start_pt = Some(p);
                     current = Some(Subpath { points: take_point_vec(pool, p), closed: false, has_segment: false });
                 } else {
@@ -2102,14 +2156,14 @@ fn flatten_path_into(path: &Path2D, sx: f64, sy: f64, subpaths: &mut Vec<Subpath
             PathCmd::LineTo(pt) => {
                 let p = PointPx::new(pt.x * sx, pt.y * sy);
                 if p.is_finite() {
-                    push_line_point(&mut current, &mut start_pt, p, pool);
+                    push_line_point(&mut current, &mut start_pt, p, &mut ctx, pool);
                 }
             }
             PathCmd::QuadTo { control, to } => {
                 let c = PointPx::new(control.x * sx, control.y * sy);
                 let p = PointPx::new(to.x * sx, to.y * sy);
                 if c.is_finite() && p.is_finite() {
-                    push_quad_points(&mut current, &mut start_pt, c, p, pool);
+                    push_quad_points(&mut current, &mut start_pt, c, p, &mut ctx, pool);
                 }
             }
             PathCmd::CubicTo { c1, c2, to } => {
@@ -2117,7 +2171,7 @@ fn flatten_path_into(path: &Path2D, sx: f64, sy: f64, subpaths: &mut Vec<Subpath
                 let p2 = PointPx::new(c2.x * sx, c2.y * sy);
                 let p = PointPx::new(to.x * sx, to.y * sy);
                 if p1.is_finite() && p2.is_finite() && p.is_finite() {
-                    push_cubic_points(&mut current, &mut start_pt, p1, p2, p, pool);
+                    push_cubic_points(&mut current, &mut start_pt, p1, p2, p, &mut ctx, pool);
                 }
             }
             PathCmd::Close => {
@@ -2130,7 +2184,9 @@ fn flatten_path_into(path: &Path2D, sx: f64, sy: f64, subpaths: &mut Vec<Subpath
                         pool.push(sub.points);
                     }
                 }
-                if let Some(st) = start_pt {
+                if let Some(st) = start_pt
+                    && ctx.take_point()
+                {
                     current = Some(Subpath { points: take_point_vec(pool, st), closed: false, has_segment: false });
                 }
             }
@@ -2147,27 +2203,34 @@ fn flatten_path_into(path: &Path2D, sx: f64, sy: f64, subpaths: &mut Vec<Subpath
     }
 }
 
-fn push_line_point(current: &mut Option<Subpath>, start_pt: &mut Option<PointPx>, p: PointPx, pool: &mut Vec<Vec<PointPx>>) {
+fn push_line_point(current: &mut Option<Subpath>, start_pt: &mut Option<PointPx>, p: PointPx, ctx: &mut FlattenCtx, pool: &mut Vec<Vec<PointPx>>) {
     if let Some(sub) = current.as_mut() {
         sub.has_segment = true;
-        if sub.points.last().is_none_or(|prev| prev.dist_sq(p) > 1e-18) {
-            sub.points.push(p);
-        }
-    } else {
+        push_flattened_endpoint(&mut sub.points, p, ctx);
+    } else if ctx.take_point() {
         *start_pt = Some(p);
         *current = Some(Subpath { points: take_point_vec(pool, p), closed: false, has_segment: false });
     }
 }
 
-fn push_quad_points(current: &mut Option<Subpath>, start_pt: &mut Option<PointPx>, c: PointPx, to: PointPx, pool: &mut Vec<Vec<PointPx>>) {
+fn push_quad_points(
+    current: &mut Option<Subpath>,
+    start_pt: &mut Option<PointPx>,
+    c: PointPx,
+    to: PointPx,
+    ctx: &mut FlattenCtx,
+    pool: &mut Vec<Vec<PointPx>>,
+) {
     let Some(sub) = current.as_mut() else {
-        *start_pt = Some(to);
-        *current = Some(Subpath { points: take_point_vec(pool, to), closed: false, has_segment: false });
+        if ctx.take_point() {
+            *start_pt = Some(to);
+            *current = Some(Subpath { points: take_point_vec(pool, to), closed: false, has_segment: false });
+        }
         return;
     };
     sub.has_segment = true;
     if let Some(&p0) = sub.points.last() {
-        flatten_quad(p0, c, to, 0, &mut sub.points);
+        flatten_quad(p0, c, to, 0, ctx, &mut sub.points);
     }
 }
 
@@ -2177,60 +2240,93 @@ fn push_cubic_points(
     c1: PointPx,
     c2: PointPx,
     to: PointPx,
+    ctx: &mut FlattenCtx,
     pool: &mut Vec<Vec<PointPx>>,
 ) {
     let Some(sub) = current.as_mut() else {
-        *start_pt = Some(to);
-        *current = Some(Subpath { points: take_point_vec(pool, to), closed: false, has_segment: false });
+        if ctx.take_point() {
+            *start_pt = Some(to);
+            *current = Some(Subpath { points: take_point_vec(pool, to), closed: false, has_segment: false });
+        }
         return;
     };
     sub.has_segment = true;
     if let Some(&p0) = sub.points.last() {
-        flatten_cubic(p0, c1, c2, to, 0, &mut sub.points);
+        flatten_cubic(p0, c1, c2, to, 0, ctx, &mut sub.points);
     }
 }
 
-fn flatten_quad(p0: PointPx, p1: PointPx, p2: PointPx, depth: u8, out: &mut Vec<PointPx>) {
-    let mid_x = 0.5 * (p0.x + p2.x);
-    let mid_y = 0.5 * (p0.y + p2.y);
+fn hull_outside_bounds(min_x: f64, max_x: f64, min_y: f64, max_y: f64, bounds: ClipRectPx) -> bool {
+    max_x < bounds.min_x || min_x > bounds.max_x || max_y < bounds.min_y || min_y > bounds.max_y
+}
+
+fn flatten_quad(p0: PointPx, p1: PointPx, p2: PointPx, depth: u8, ctx: &mut FlattenCtx, out: &mut Vec<PointPx>) {
+    if ctx.remaining_points == 0 {
+        return;
+    }
+    if let Some(bounds) = ctx.cull_bounds
+        && hull_outside_bounds(p0.x.min(p1.x).min(p2.x), p0.x.max(p1.x).max(p2.x), p0.y.min(p1.y).min(p2.y), p0.y.max(p1.y).max(p2.y), bounds)
+    {
+        push_flattened_endpoint(out, p2, ctx);
+        return;
+    }
+    let mid_x = 0.5 * p0.x + 0.5 * p2.x;
+    let mid_y = 0.5 * p0.y + 0.5 * p2.y;
     let dx = p1.x - mid_x;
     let dy = p1.y - mid_y;
     let err_sq = dx * dx + dy * dy;
     let max_dev_sq = 4.0 * BEZIER_FLATNESS_TOL_PX * BEZIER_FLATNESS_TOL_PX;
-    if depth >= MAX_BEZIER_DEPTH || err_sq <= max_dev_sq {
-        if out.last().is_none_or(|prev| prev.dist_sq(p2) > 1e-18) {
-            out.push(p2);
-        }
+    if depth >= MAX_BEZIER_DEPTH || !err_sq.is_finite() || err_sq <= max_dev_sq {
+        push_flattened_endpoint(out, p2, ctx);
         return;
     }
-    let q0 = PointPx::new(0.5 * (p0.x + p1.x), 0.5 * (p0.y + p1.y));
-    let q1 = PointPx::new(0.5 * (p1.x + p2.x), 0.5 * (p1.y + p2.y));
-    let r = PointPx::new(0.5 * (q0.x + q1.x), 0.5 * (q0.y + q1.y));
-    flatten_quad(p0, q0, r, depth + 1, out);
-    flatten_quad(r, q1, p2, depth + 1, out);
+    let q0 = PointPx::new(0.5 * p0.x + 0.5 * p1.x, 0.5 * p0.y + 0.5 * p1.y);
+    let q1 = PointPx::new(0.5 * p1.x + 0.5 * p2.x, 0.5 * p1.y + 0.5 * p2.y);
+    let r = PointPx::new(0.5 * q0.x + 0.5 * q1.x, 0.5 * q0.y + 0.5 * q1.y);
+    if !q0.is_finite() || !q1.is_finite() || !r.is_finite() {
+        push_flattened_endpoint(out, p2, ctx);
+        return;
+    }
+    flatten_quad(p0, q0, r, depth + 1, ctx, out);
+    flatten_quad(r, q1, p2, depth + 1, ctx, out);
 }
 
-fn flatten_cubic(p0: PointPx, p1: PointPx, p2: PointPx, p3: PointPx, depth: u8, out: &mut Vec<PointPx>) {
+fn flatten_cubic(p0: PointPx, p1: PointPx, p2: PointPx, p3: PointPx, depth: u8, ctx: &mut FlattenCtx, out: &mut Vec<PointPx>) {
+    if ctx.remaining_points == 0 {
+        return;
+    }
+    if let Some(bounds) = ctx.cull_bounds {
+        let min_x = p0.x.min(p1.x).min(p2.x).min(p3.x);
+        let max_x = p0.x.max(p1.x).max(p2.x).max(p3.x);
+        let min_y = p0.y.min(p1.y).min(p2.y).min(p3.y);
+        let max_y = p0.y.max(p1.y).max(p2.y).max(p3.y);
+        if hull_outside_bounds(min_x, max_x, min_y, max_y, bounds) {
+            push_flattened_endpoint(out, p3, ctx);
+            return;
+        }
+    }
     let ux = 3.0 * p1.x - 2.0 * p0.x - p3.x;
     let uy = 3.0 * p1.y - 2.0 * p0.y - p3.y;
     let vx = 3.0 * p2.x - p0.x - 2.0 * p3.x;
     let vy = 3.0 * p2.y - p0.y - 2.0 * p3.y;
     let max_uv_sq = (ux * ux + uy * uy).max(vx * vx + vy * vy);
     let limit_sq = 16.0 * BEZIER_FLATNESS_TOL_PX * BEZIER_FLATNESS_TOL_PX;
-    if depth >= MAX_BEZIER_DEPTH || max_uv_sq <= limit_sq {
-        if out.last().is_none_or(|prev| prev.dist_sq(p3) > 1e-18) {
-            out.push(p3);
-        }
+    if depth >= MAX_BEZIER_DEPTH || !max_uv_sq.is_finite() || max_uv_sq <= limit_sq {
+        push_flattened_endpoint(out, p3, ctx);
         return;
     }
-    let q0 = PointPx::new(0.5 * (p0.x + p1.x), 0.5 * (p0.y + p1.y));
-    let q1 = PointPx::new(0.5 * (p1.x + p2.x), 0.5 * (p1.y + p2.y));
-    let q2 = PointPx::new(0.5 * (p2.x + p3.x), 0.5 * (p2.y + p3.y));
-    let r0 = PointPx::new(0.5 * (q0.x + q1.x), 0.5 * (q0.y + q1.y));
-    let r1 = PointPx::new(0.5 * (q1.x + q2.x), 0.5 * (q1.y + q2.y));
-    let s = PointPx::new(0.5 * (r0.x + r1.x), 0.5 * (r0.y + r1.y));
-    flatten_cubic(p0, q0, r0, s, depth + 1, out);
-    flatten_cubic(s, r1, q2, p3, depth + 1, out);
+    let q0 = PointPx::new(0.5 * p0.x + 0.5 * p1.x, 0.5 * p0.y + 0.5 * p1.y);
+    let q1 = PointPx::new(0.5 * p1.x + 0.5 * p2.x, 0.5 * p1.y + 0.5 * p2.y);
+    let q2 = PointPx::new(0.5 * p2.x + 0.5 * p3.x, 0.5 * p2.y + 0.5 * p3.y);
+    let r0 = PointPx::new(0.5 * q0.x + 0.5 * q1.x, 0.5 * q0.y + 0.5 * q1.y);
+    let r1 = PointPx::new(0.5 * q1.x + 0.5 * q2.x, 0.5 * q1.y + 0.5 * q2.y);
+    let s = PointPx::new(0.5 * r0.x + 0.5 * r1.x, 0.5 * r0.y + 0.5 * r1.y);
+    if !q0.is_finite() || !q1.is_finite() || !q2.is_finite() || !r0.is_finite() || !r1.is_finite() || !s.is_finite() {
+        push_flattened_endpoint(out, p3, ctx);
+        return;
+    }
+    flatten_cubic(p0, q0, r0, s, depth + 1, ctx, out);
+    flatten_cubic(s, r1, q2, p3, depth + 1, ctx, out);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3111,10 +3207,14 @@ fn render_text(img: &mut RasterImage, text: &PositionedText, sx: f64, sy: f64, c
 
 fn flatten_glyph_commands_into(cmds: &[GlyphOutlineCmd], xform: TextTransform, subpaths: &mut Vec<Subpath>, pool: &mut Vec<Vec<PointPx>>) {
     reclaim_subpaths(subpaths, pool);
+    let mut ctx = FlattenCtx::new(None);
     let mut current: Option<Subpath> = None;
     let mut start_pt: Option<PointPx> = None;
 
     for cmd in cmds {
+        if ctx.remaining_points == 0 {
+            break;
+        }
         match *cmd {
             GlyphOutlineCmd::MoveTo { x_pt, y_pt } => {
                 if let Some(mut sub) = current.take() {
@@ -3126,7 +3226,7 @@ fn flatten_glyph_commands_into(cmds: &[GlyphOutlineCmd], xform: TextTransform, s
                     }
                 }
                 let p = xform.map_pt(x_pt, y_pt);
-                if p.is_finite() {
+                if p.is_finite() && ctx.take_point() {
                     start_pt = Some(p);
                     current = Some(Subpath { points: take_point_vec(pool, p), closed: true, has_segment: false });
                 } else {
@@ -3136,14 +3236,14 @@ fn flatten_glyph_commands_into(cmds: &[GlyphOutlineCmd], xform: TextTransform, s
             GlyphOutlineCmd::LineTo { x_pt, y_pt } => {
                 let p = xform.map_pt(x_pt, y_pt);
                 if p.is_finite() {
-                    push_line_point(&mut current, &mut start_pt, p, pool);
+                    push_line_point(&mut current, &mut start_pt, p, &mut ctx, pool);
                 }
             }
             GlyphOutlineCmd::QuadTo { cx_pt, cy_pt, x_pt, y_pt } => {
                 let c = xform.map_pt(cx_pt, cy_pt);
                 let p = xform.map_pt(x_pt, y_pt);
                 if c.is_finite() && p.is_finite() {
-                    push_quad_points(&mut current, &mut start_pt, c, p, pool);
+                    push_quad_points(&mut current, &mut start_pt, c, p, &mut ctx, pool);
                 }
             }
             GlyphOutlineCmd::CubicTo { c1x_pt, c1y_pt, c2x_pt, c2y_pt, x_pt, y_pt } => {
@@ -3151,7 +3251,7 @@ fn flatten_glyph_commands_into(cmds: &[GlyphOutlineCmd], xform: TextTransform, s
                 let c2 = xform.map_pt(c2x_pt, c2y_pt);
                 let p = xform.map_pt(x_pt, y_pt);
                 if c1.is_finite() && c2.is_finite() && p.is_finite() {
-                    push_cubic_points(&mut current, &mut start_pt, c1, c2, p, pool);
+                    push_cubic_points(&mut current, &mut start_pt, c1, c2, p, &mut ctx, pool);
                 }
             }
             GlyphOutlineCmd::Close => {
@@ -3164,7 +3264,9 @@ fn flatten_glyph_commands_into(cmds: &[GlyphOutlineCmd], xform: TextTransform, s
                         pool.push(sub.points);
                     }
                 }
-                if let Some(st) = start_pt {
+                if let Some(st) = start_pt
+                    && ctx.take_point()
+                {
                     current = Some(Subpath { points: take_point_vec(pool, st), closed: true, has_segment: false });
                 }
             }
@@ -3387,7 +3489,7 @@ mod tests {
         let img_rect_fast = render_scene(&fast_rect_scene, RenderTargetSpec { width_px: 60, height_px: 60, dpi: 72 }).expect("fast rect");
         let mut ref_img = RasterImage::new(60, 60, 72, Rgba8::WHITE).expect("ref img");
         let mut ref_scratch = RasterScratch::new(true);
-        flatten_path_into(&Path2D::rect(RectPt::new(10.25, 10.6, 15.5, 12.25)), 1.0, 1.0, &mut ref_scratch.subpaths, &mut ref_scratch.vec_pool);
+        flatten_path_into(&Path2D::rect(RectPt::new(10.25, 10.6, 15.5, 12.25)), 1.0, 1.0, None, &mut ref_scratch.subpaths, &mut ref_scratch.vec_pool);
         fill_subpaths_target(
             ScanTarget::Image { img: &mut ref_img, color: Rgba8::rgba(20, 110, 190, 180) },
             &ref_scratch.subpaths,

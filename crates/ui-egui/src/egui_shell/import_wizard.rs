@@ -105,6 +105,13 @@ pub struct ImportWizardSavedPreset {
     pub add_floating_note: bool,
 }
 
+/// Prepared metadata carried from `import_wizard` into atomic commit (`AUD-10-21`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PendingImportWizardCommit {
+    pub extracted_kv_json: Vec<(String, String)>,
+    pub info_note_text: Option<String>,
+}
+
 /// Persistent transient UI state for `render_import_or_convert_modal`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ImportWizardEguiState {
@@ -135,6 +142,9 @@ pub struct ImportWizardEguiState {
     pub saved_preset: Option<ImportWizardSavedPreset>,
     pub preset_saved_feedback: bool,
     pub initialized_for_open: bool,
+    pub unstack_value_column: Option<usize>,
+    pub unstack_error: Option<String>,
+    pub pending_commit: Option<PendingImportWizardCommit>,
 }
 
 /// Frame geometry and modal capture report emitted by `render_import_or_convert_modal`.
@@ -170,6 +180,8 @@ pub fn render_import_or_convert_modal(
     let is_convert = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ConvertArchetype { .. });
     if !is_wizard && !is_reshape && !is_convert {
         state.initialized_for_open = false;
+        state.unstack_error = None;
+        state.pending_commit = None;
         return ImportWizardFrameReport::default();
     }
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
@@ -416,23 +428,35 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
     });
 
     ui.add_space(6.0);
+    let path_policy = app.session().path_policy();
+    let external_paths_allowed = !matches!(path_policy, curvebook_engine::ExternalPathPolicy::RejectExternal);
     if wiz.origin_kind == ImportOriginKind::ExternalDelimitedFile {
         ui.horizontal_wrapped(|row| {
             row.label("File Path:");
-            let pr = row.add(
+            let pr = row.add_enabled(
+                external_paths_allowed,
                 egui::TextEdit::singleline(&mut wiz.external_file_path).hint_text("/path/to/data.csv").desired_width((avail_w - 90.0).max(160.0)),
             );
             meta.record_modal_response(
                 row,
                 &pr,
-                FrameInspectEntryInput::modal("import_paste.input.path", "textbox", "External File Path", Some(wiz.external_file_path.clone()), true),
+                FrameInspectEntryInput::modal(
+                    "import_paste.input.path",
+                    "textbox",
+                    "External File Path",
+                    Some(wiz.external_file_path.clone()),
+                    external_paths_allowed,
+                ),
             );
             if pr.changed() {
                 dirty = true;
             }
         });
+        if !external_paths_allowed {
+            ui.label(RichText::new("External host file paths are disabled by the active security policy.").color(tokens.error).small());
+        }
     } else if wiz.origin_kind == ImportOriginKind::XlsxWorkbook {
-        if render_source_xlsx_controls(ui, wiz, tokens, meta, avail_w) {
+        if render_source_xlsx_controls(ui, wiz, path_policy, tokens, meta, avail_w) {
             dirty = true;
         }
     } else if wiz.origin_kind == ImportOriginKind::InternalDataSheet {
@@ -665,33 +689,103 @@ fn render_header_rows_selector(row: &mut Ui, wiz: &mut ImportPasteWizardState, t
     dirty
 }
 
-fn render_source_xlsx_controls(ui: &mut Ui, wiz: &mut ImportPasteWizardState, tokens: &Tokens, meta: &mut FrameInspectMeta, avail_w: f32) -> bool {
+const MAX_XLSX_INSPECT_BYTES: u64 = 64 * 1024 * 1024;
+
+fn validate_and_load_xlsx_path(wiz: &mut ImportPasteWizardState, path_policy: &curvebook_engine::ExternalPathPolicy) {
+    let trimmed = wiz.external_file_path.trim().to_owned();
+    if trimmed.is_empty() {
+        wiz.xlsx_error = Some(String::from("Enter an `.xlsx` file path before loading worksheets."));
+        return;
+    }
+    match path_policy {
+        curvebook_engine::ExternalPathPolicy::RejectExternal => {
+            wiz.xlsx_sheets.clear();
+            wiz.xlsx_error = Some(String::from("External host file access is disabled by the active security policy."));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        curvebook_engine::ExternalPathPolicy::Workdir(guard) => match guard.resolve(&trimmed) {
+            Ok(resolved) => {
+                if let Err(msg) = validate_regular_xlsx_file(&resolved) {
+                    wiz.xlsx_sheets.clear();
+                    wiz.xlsx_error = Some(msg);
+                    return;
+                }
+                wiz.external_file_path = resolved.to_string_lossy().into_owned();
+                let _ = wiz.load_xlsx_from_path_str();
+            }
+            Err(err) => {
+                wiz.xlsx_sheets.clear();
+                wiz.xlsx_error = Some(format!("Workbook path blocked by workdir policy: {err}"));
+            }
+        },
+        curvebook_engine::ExternalPathPolicy::Unconstrained => {
+            if let Err(msg) = validate_regular_xlsx_file(std::path::Path::new(&trimmed)) {
+                wiz.xlsx_sheets.clear();
+                wiz.xlsx_error = Some(msg);
+                return;
+            }
+            let _ = wiz.load_xlsx_from_path_str();
+        }
+    }
+}
+
+fn validate_regular_xlsx_file(path: &std::path::Path) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("Cannot inspect `{}`: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("`{}` is not a regular file.", path.display()));
+    }
+    if meta.len() > MAX_XLSX_INSPECT_BYTES {
+        return Err(format!("Workbook `{}` ({} bytes) exceeds the 64 MiB worksheet inspection limit.", path.display(), meta.len()));
+    }
+    Ok(())
+}
+
+fn render_source_xlsx_controls(
+    ui: &mut Ui,
+    wiz: &mut ImportPasteWizardState,
+    path_policy: &curvebook_engine::ExternalPathPolicy,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    avail_w: f32,
+) -> bool {
     let mut dirty = false;
+    let external_paths_allowed = !matches!(path_policy, curvebook_engine::ExternalPathPolicy::RejectExternal);
     ui.horizontal_wrapped(|row| {
         row.label("Workbook Path:");
-        let pr = row.add(
+        let pr = row.add_enabled(
+            external_paths_allowed,
             egui::TextEdit::singleline(&mut wiz.external_file_path).hint_text("/path/to/workbook.xlsx").desired_width((avail_w - 200.0).max(160.0)),
         );
         meta.record_modal_response(
             row,
             &pr,
-            FrameInspectEntryInput::modal("import_paste.input.path", "textbox", "XLSX Workbook Path", Some(wiz.external_file_path.clone()), true),
+            FrameInspectEntryInput::modal(
+                "import_paste.input.path",
+                "textbox",
+                "XLSX Workbook Path",
+                Some(wiz.external_file_path.clone()),
+                external_paths_allowed,
+            ),
         );
         if pr.changed() {
             wiz.xlsx_error = None;
             dirty = true;
         }
-        let load_btn = row.button("Load Sheets");
+        let load_enabled = external_paths_allowed && !wiz.external_file_path.trim().is_empty();
+        let load_btn = row.add_enabled(load_enabled, egui::Button::new("Load Sheets"));
         meta.record_modal_response(
             row,
             &load_btn,
-            FrameInspectEntryInput::modal("import_wizard.xlsx.load_path", "button", "Load Sheets", None, !wiz.external_file_path.trim().is_empty()),
+            FrameInspectEntryInput::modal("import_wizard.xlsx.load_path", "button", "Load Sheets", None, load_enabled),
         );
-        if load_btn.clicked() {
-            let _ = wiz.load_xlsx_from_path_str();
+        if load_btn.clicked() && load_enabled {
+            validate_and_load_xlsx_path(wiz, path_policy);
             dirty = true;
         }
     });
+    if !external_paths_allowed {
+        ui.label(RichText::new("External host file paths are disabled by the active security policy.").color(tokens.error).small());
+    }
 
     if let Some(err) = &wiz.xlsx_error {
         ui.label(RichText::new(err).color(tokens.error).small());
@@ -732,25 +826,25 @@ fn render_source_xlsx_controls(ui: &mut Ui, wiz: &mut ImportPasteWizardState, to
         let count = wiz.xlsx_sheets.len();
         let selected_count = wiz.xlsx_sheets.iter().filter(|s| s.selected).count();
         row.label(RichText::new(format!("Worksheets ({selected_count}/{count} selected):")).strong());
-        let all_btn = row.button("Select All");
+        let all_btn = row.add_enabled(count > 0, egui::Button::new("Select All"));
         meta.record_modal_response(
             row,
             &all_btn,
             FrameInspectEntryInput::modal("import_wizard.xlsx.select_all", "button", "Select All Worksheets", None, count > 0),
         );
-        if all_btn.clicked() {
+        if all_btn.clicked() && count > 0 {
             for s in &mut wiz.xlsx_sheets {
                 s.selected = true;
             }
             dirty = true;
         }
-        let none_btn = row.button("Select None");
+        let none_btn = row.add_enabled(count > 0, egui::Button::new("Select None"));
         meta.record_modal_response(
             row,
             &none_btn,
             FrameInspectEntryInput::modal("import_wizard.xlsx.select_none", "button", "Deselect All Worksheets", None, count > 0),
         );
-        if none_btn.clicked() {
+        if none_btn.clicked() && count > 0 {
             for s in &mut wiz.xlsx_sheets {
                 s.selected = false;
             }
@@ -857,11 +951,42 @@ fn render_step_filter_unstack(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
             row.label("Group col:");
             if choice_pill(row, tokens, "-", false, *gcol > 0).clicked() {
                 *gcol = gcol.saturating_sub(1);
+                if state.unstack_value_column == Some(*gcol) {
+                    state.unstack_value_column = None;
+                }
                 dirty = true;
             }
             row.label(format!("C{}", *gcol + 1));
             if choice_pill(row, tokens, "+", false, true).clicked() {
                 *gcol += 1;
+                if state.unstack_value_column == Some(*gcol) {
+                    state.unstack_value_column = None;
+                }
+                dirty = true;
+            }
+            let cur_val = resolve_unstack_value_col(*gcol, state.unstack_value_column);
+            row.separator();
+            row.label("Value col:");
+            let can_dec_v = cur_val > 0 && !(cur_val == 1 && *gcol == 0);
+            let dec_v = choice_pill(row, tokens, "-", false, can_dec_v);
+            meta.record_modal_response(row, &dec_v, FrameInspectEntryInput::modal_button("import_paste.unstack.val_dec", "-", can_dec_v));
+            if dec_v.clicked() && can_dec_v {
+                let mut next_v = cur_val.saturating_sub(1);
+                if next_v == *gcol {
+                    next_v = next_v.saturating_sub(1);
+                }
+                state.unstack_value_column = Some(next_v);
+                dirty = true;
+            }
+            row.label(format!("C{}", cur_val + 1));
+            let inc_v = choice_pill(row, tokens, "+", false, true);
+            meta.record_modal_response(row, &inc_v, FrameInspectEntryInput::modal_button("import_paste.unstack.val_inc", "+", true));
+            if inc_v.clicked() {
+                let mut next_v = cur_val.saturating_add(1);
+                if next_v == *gcol {
+                    next_v = next_v.saturating_add(1);
+                }
+                state.unstack_value_column = Some(next_v);
                 dirty = true;
             }
         }
@@ -972,8 +1097,15 @@ fn render_step_filter_unstack(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
         cx.wiz_dirty = true;
     }
     ui.add_space(6.0);
-    let preview = prepare_wizard_import_data(app, &cx.wiz, state, true).grid;
-    render_preview_grid_table(ui, app, &preview, tokens);
+    let prepared = prepare_wizard_import_data(app, &cx.wiz, state, true);
+    state.unstack_error.clone_from(&prepared.unstack_error);
+    if let Some(err) = &prepared.unstack_error {
+        ui.label(RichText::new(err).color(tokens.error).small());
+    }
+    if let Some(warn) = &prepared.unstack_warning {
+        ui.label(RichText::new(warn).color(tokens.accent).small());
+    }
+    render_preview_grid_table(ui, app, &prepared.grid, tokens);
 }
 
 fn render_step_placement(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
@@ -1120,8 +1252,15 @@ fn render_step_placement(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
         cx.wiz_dirty = true;
     }
     ui.add_space(6.0);
-    let preview = prepare_wizard_import_data(app, &cx.wiz, state, true).grid;
-    render_preview_grid_table(ui, app, &preview, tokens);
+    let prepared = prepare_wizard_import_data(app, &cx.wiz, state, true);
+    state.unstack_error.clone_from(&prepared.unstack_error);
+    if let Some(err) = &prepared.unstack_error {
+        ui.label(RichText::new(err).color(tokens.error).small());
+    }
+    if let Some(warn) = &prepared.unstack_warning {
+        ui.label(RichText::new(warn).color(tokens.accent).small());
+    }
+    render_preview_grid_table(ui, app, &prepared.grid, tokens);
 }
 
 fn render_step_metadata(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
@@ -1192,7 +1331,7 @@ fn render_step_metadata(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
         state.preset_saved_feedback = false;
     }
 
-    let note_chk = ui.checkbox(&mut state.add_floating_note, "Attach FloatingNote summary card onto target sheet");
+    let note_chk = ui.checkbox(&mut state.add_floating_note, "Append import summary note to InfoSheet");
     meta.record_modal_response(
         ui,
         &note_chk,
@@ -1553,9 +1692,10 @@ fn render_wizard_footer(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, is_wizard: boo
 
         footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
             let finish_lbl = if is_wizard { tr(tokens.locale, "btn.import") } else { tr(tokens.locale, "btn.ok") };
-            let ok_resp = widgets::primary_button(rhs, finish_lbl);
-            cx.meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", finish_lbl, None, true));
-            if ok_resp.clicked() {
+            let can_finish = !is_wizard || cx.state.unstack_error.is_none();
+            let ok_resp = widgets::primary_button_enabled(rhs, finish_lbl, can_finish);
+            cx.meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", finish_lbl, None, can_finish));
+            if ok_resp.clicked() && can_finish {
                 if is_wizard {
                     commit_wizard_import(cx);
                 } else {
@@ -1629,6 +1769,9 @@ fn reset_wizard_defaults(state: &mut ImportWizardEguiState, wiz: &mut ImportPast
     state.plate_rows_per_dataset_draft = String::from("8");
     state.extract_info_metadata = false;
     state.add_floating_note = false;
+    state.unstack_value_column = None;
+    state.unstack_error = None;
+    state.pending_commit = None;
     *wiz = ImportPasteWizardState {
         open: true,
         stage: state.active_step.sync_backend_stage(),
@@ -1653,13 +1796,19 @@ fn commit_wizard_import(cx: &mut ImportModalCtx<'_>) {
     sync_wizard_filter_from_drafts(&mut cx.wiz, cx.state);
     if cx.wiz.origin_kind == ImportOriginKind::XlsxWorkbook {
         let commit_wiz = cx.wiz.clone();
+        cx.state.pending_commit = None;
         cx.intents.push(UiIntent::UpdateImportWizard(Box::new(commit_wiz)));
-        cx.intents.push(UiIntent::CommitImportWizard { close_after: true });
+        cx.intents.push(UiIntent::DialogButtonAction { action: String::from("__import_wizard_commit") });
         cx.wiz_dirty = false;
         return;
     }
     let doc = cx.app.document();
     let prepared = prepare_wizard_import_data(cx.app, &cx.wiz, cx.state, false);
+    if let Some(err) = prepared.unstack_error {
+        cx.state.unstack_error = Some(err);
+        return;
+    }
+    cx.state.unstack_error = None;
     let row_count = prepared.grid.len();
     let col_count = prepared.grid.iter().map(Vec::len).max().unwrap_or(0);
 
@@ -1687,59 +1836,28 @@ fn commit_wizard_import(cx: &mut ImportModalCtx<'_>) {
         commit_wiz.placement.skip_contiguous_blanks = false;
     }
 
-    cx.intents.push(UiIntent::UpdateImportWizard(Box::new(commit_wiz)));
-    cx.intents.push(UiIntent::CommitImportWizard { close_after: true });
-    cx.wiz_dirty = false;
-
-    let target_ds_id = cx
-        .wiz
-        .target_sheet_id
-        .as_ref()
-        .filter(|id| doc.data_sheet(id).is_some())
-        .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()))
-        .or_else(|| doc.data_sheets.first().map(|d| &d.id));
-    let info_target_id = target_ds_id
-        .and_then(|did| doc.data_sheet(did).and_then(|d| d.info_sheet_id.as_ref()))
-        .filter(|iid| doc.info_sheet(iid).is_some())
-        .or_else(|| doc.info_sheets.first().map(|i| &i.id));
-
-    if let Some(info_id) = info_target_id {
-        for (key, val) in prepared.extracted_kv {
-            cx.intents.push_engine(
-                "info.setConstant",
-                json!({
-                    "sheet_id": info_id.as_str(),
-                    "name": key,
-                    "value": val,
-                }),
-            );
-        }
-
-        let mut note_parts = Vec::new();
-        if !is_live_link && cx.wiz.record_in_info_sheet && !cx.wiz.provenance_note.trim().is_empty() {
-            note_parts.push(cx.wiz.provenance_note.trim().to_owned());
-        }
-        if cx.state.add_floating_note {
-            let mut summary = format!(
-                "[Import Summary] {row_count} rows x {col_count} cols · Origin: {:?} · Encoding: {} · Reshape: {:?}",
-                cx.wiz.origin_kind, cx.state.encoding_name, cx.state.block_reshape
-            );
-            if !cx.wiz.provenance_note.trim().is_empty() && note_parts.is_empty() {
-                summary.push_str(&format!(" · Note: {}", cx.wiz.provenance_note.trim()));
-            }
-            note_parts.push(summary);
-        }
-        if !note_parts.is_empty() {
-            cx.intents.push_engine(
-                "info.setNote",
-                json!({
-                    "sheet_id": info_id.as_str(),
-                    "text": note_parts.join("\n"),
-                    "append": true,
-                }),
-            );
-        }
+    let extracted_kv_json: Vec<(String, String)> =
+        prepared.extracted_kv.into_iter().filter_map(|(k, v)| serde_json::to_string(&v).ok().map(|s| (k, s))).collect();
+    let mut note_parts = Vec::new();
+    if !is_live_link && cx.wiz.record_in_info_sheet && !cx.wiz.provenance_note.trim().is_empty() {
+        note_parts.push(cx.wiz.provenance_note.trim().to_owned());
     }
+    if cx.state.add_floating_note {
+        let mut summary = format!(
+            "[Import Summary] {row_count} rows x {col_count} cols · Origin: {:?} · Encoding: {} · Reshape: {:?}",
+            cx.wiz.origin_kind, cx.state.encoding_name, cx.state.block_reshape
+        );
+        if !cx.wiz.provenance_note.trim().is_empty() && note_parts.is_empty() {
+            summary.push_str(&format!(" · Note: {}", cx.wiz.provenance_note.trim()));
+        }
+        note_parts.push(summary);
+    }
+    let info_note_text = (!note_parts.is_empty()).then(|| note_parts.join("\n"));
+
+    cx.state.pending_commit = Some(PendingImportWizardCommit { extracted_kv_json, info_note_text });
+    cx.intents.push(UiIntent::UpdateImportWizard(Box::new(commit_wiz)));
+    cx.intents.push(UiIntent::DialogButtonAction { action: String::from("__import_wizard_commit") });
+    cx.wiz_dirty = false;
 }
 
 fn parse_opt_window(start_s: &str, end_s: &str) -> Option<(usize, usize)> {
@@ -1751,6 +1869,8 @@ fn parse_opt_window(start_s: &str, end_s: &str) -> Option<(usize, usize)> {
 struct PreparedWizardImport {
     grid: Vec<Vec<Cell>>,
     extracted_kv: Vec<(String, Value)>,
+    unstack_warning: Option<String>,
+    unstack_error: Option<String>,
 }
 
 fn normalize_source_text(raw: &str, encoding_name: &str) -> String {
@@ -1846,6 +1966,14 @@ fn split_leading_kv_metadata(
     (remaining_lines.join("\n"), kv_pairs)
 }
 
+const MAX_PREVIEW_PARSE_ROWS: usize = 512;
+const MAX_UNSTACK_PREVIEW_CELLS: usize = 50_000;
+const MAX_UNSTACK_COMMIT_CELLS: usize = 500_000;
+
+fn resolve_unstack_value_col(group_col: usize, explicit: Option<usize>) -> usize {
+    explicit.filter(|&c| c != group_col).unwrap_or(if group_col == 0 { 1 } else { 0 })
+}
+
 fn prepare_wizard_import_data(app: &UiApp, wiz: &ImportPasteWizardState, state: &ImportWizardEguiState, preview_cap: bool) -> PreparedWizardImport {
     let missing_tokens: Vec<&str> = state.missing_tokens_draft.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
     let mut extracted_kv = Vec::new();
@@ -1862,7 +1990,7 @@ fn prepare_wizard_import_data(app: &UiApp, wiz: &ImportPasteWizardState, state: 
                 }
             }
         }
-        return PreparedWizardImport { grid, extracted_kv };
+        return PreparedWizardImport { grid, extracted_kv, unstack_warning: None, unstack_error: None };
     }
     let mut grid = match wiz.origin_kind {
         ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile => {
@@ -1871,18 +1999,24 @@ fn prepare_wizard_import_data(app: &UiApp, wiz: &ImportPasteWizardState, state: 
             let delim = if wiz.delimiter == '\0' { '\t' } else { wiz.delimiter };
             let (table_src, kvs) = split_leading_kv_metadata(&normalized, delim, state.extract_info_metadata, &app.locale_preset);
             extracted_kv = kvs;
-            parse_delimited_wizard_grid(&table_src, delim, wiz, &missing_tokens)
+            parse_delimited_wizard_grid(&table_src, delim, wiz, &missing_tokens, preview_cap)
         }
         ImportOriginKind::InternalDataSheet => read_internal_data_sheet_grid(app, wiz, &missing_tokens, preview_cap),
-        ImportOriginKind::InternalResultSheet => read_internal_result_sheet_grid(app, wiz),
+        ImportOriginKind::InternalResultSheet => read_internal_result_sheet_grid(app, wiz, &missing_tokens, preview_cap),
         ImportOriginKind::XlsxWorkbook => Vec::new(),
     };
 
-    apply_wizard_grid_transforms(&mut grid, app, wiz, state);
-    PreparedWizardImport { grid, extracted_kv }
+    let (unstack_warning, unstack_error) = apply_wizard_grid_transforms(&mut grid, app, wiz, state, preview_cap);
+    PreparedWizardImport { grid, extracted_kv, unstack_warning, unstack_error }
 }
 
-fn parse_delimited_wizard_grid(table_src: &str, delim: char, wiz: &ImportPasteWizardState, missing_tokens: &[&str]) -> Vec<Vec<Cell>> {
+fn parse_delimited_wizard_grid(
+    table_src: &str,
+    delim: char,
+    wiz: &ImportPasteWizardState,
+    missing_tokens: &[&str],
+    preview_cap: bool,
+) -> Vec<Vec<Cell>> {
     let opts = CsvOptions {
         delimiter: delim,
         quote_char: '"',
@@ -1899,7 +2033,12 @@ fn parse_delimited_wizard_grid(table_src: &str, delim: char, wiz: &ImportPasteWi
     records.retain(|row| row.iter().any(|cell| !cell.trim().is_empty()));
     let hdr_n = if wiz.header_rows > 1 && records.len() >= wiz.header_rows { wiz.header_rows } else { 0 };
     let collapsed_hdr = records.get(..hdr_n).filter(|_| hdr_n > 1).map(collapse_merged_header_rows);
-    let body_rows = records.get(hdr_n..).unwrap_or(&[]);
+    let raw_body_rows = records.get(hdr_n..).unwrap_or(&[]);
+    let body_rows = if preview_cap && raw_body_rows.len() > MAX_PREVIEW_PARSE_ROWS {
+        raw_body_rows.get(..MAX_PREVIEW_PARSE_ROWS).unwrap_or(raw_body_rows)
+    } else {
+        raw_body_rows
+    };
 
     let (_, detected_thousands) = infer_number_separators(body_rows.iter().flatten().map(String::as_str), delim);
     let thousands_sep = detected_thousands.filter(|&t| t != wiz.decimal_separator);
@@ -1925,6 +2064,56 @@ fn parse_delimited_wizard_grid(table_src: &str, delim: char, wiz: &ImportPasteWi
     out
 }
 
+fn extract_full_datasheet_grid(ds: &curvebook_doc::DataSheet, missing_tokens: &[&str], preview_cap: bool) -> Vec<Vec<Cell>> {
+    let row_count = ds.archetype.row_count();
+    let col_count = ds.archetype.column_count();
+    let max_r = if preview_cap { row_count.min(128) } else { row_count };
+    let max_c = if preview_cap { col_count.min(24) } else { col_count };
+    if max_r == 0 {
+        return Vec::new();
+    }
+    let y_grid = if max_c > 0 {
+        ds.extract_cell_grid(curvebook_doc::SheetCellRange { start: CellCoord::new(0, 0, 0), end: CellCoord::new(max_r - 1, max_c - 1, usize::MAX) })
+    } else {
+        vec![Vec::new(); max_r]
+    };
+
+    let mut rows = Vec::with_capacity(max_r);
+    for (r, y_row) in y_grid.into_iter().enumerate() {
+        let mut row = Vec::new();
+        match &ds.archetype {
+            curvebook_doc::TableArchetype::Xy(xy) => {
+                let x_subs = xy.x_mode.subcolumn_count().max(1);
+                for s in 0..x_subs {
+                    let cell = xy
+                        .x_cells
+                        .get(r)
+                        .and_then(|xr| xr.get(s))
+                        .cloned()
+                        .unwrap_or_else(|| if s == 0 { xy.x_value_at(r).map_or_else(Cell::empty, Cell::number) } else { Cell::empty() });
+                    row.push(cell);
+                }
+            }
+            curvebook_doc::TableArchetype::Survival(surv) => {
+                row.push(surv.times.get(r).cloned().unwrap_or_else(Cell::empty));
+            }
+            _ => {}
+        }
+        row.extend(y_row);
+        if !missing_tokens.is_empty() {
+            for cell in &mut row {
+                if let CellValue::Text(ref s) = cell.value
+                    && missing_tokens.iter().any(|m| m.eq_ignore_ascii_case(s.trim()))
+                {
+                    *cell = Cell::empty();
+                }
+            }
+        }
+        rows.push(row);
+    }
+    rows
+}
+
 fn read_internal_data_sheet_grid(app: &UiApp, wiz: &ImportPasteWizardState, missing_tokens: &[&str], preview_cap: bool) -> Vec<Vec<Cell>> {
     let Some(sid) = wiz.source_sheet_id.as_ref() else {
         return Vec::new();
@@ -1932,26 +2121,10 @@ fn read_internal_data_sheet_grid(app: &UiApp, wiz: &ImportPasteWizardState, miss
     let Some(ds) = app.document().data_sheet(sid) else {
         return Vec::new();
     };
-    let max_r = if preview_cap { ds.archetype.row_count().min(128) } else { ds.archetype.row_count() };
-    let max_c = if preview_cap { ds.archetype.column_count().min(24) } else { ds.archetype.column_count() };
-    let mut rows = Vec::with_capacity(max_r);
-    for r in 0..max_r {
-        let mut row = Vec::with_capacity(max_c);
-        for c in 0..max_c {
-            let mut cell = ds.archetype.data_cell(CellCoord::new(r, c, 0)).cloned().unwrap_or_else(Cell::empty);
-            if let CellValue::Text(ref s) = cell.value
-                && missing_tokens.iter().any(|m| m.eq_ignore_ascii_case(s.trim()))
-            {
-                cell = Cell::empty();
-            }
-            row.push(cell);
-        }
-        rows.push(row);
-    }
-    rows
+    extract_full_datasheet_grid(ds, missing_tokens, preview_cap)
 }
 
-fn read_internal_result_sheet_grid(app: &UiApp, wiz: &ImportPasteWizardState) -> Vec<Vec<Cell>> {
+fn read_internal_result_sheet_grid(app: &UiApp, wiz: &ImportPasteWizardState, missing_tokens: &[&str], preview_cap: bool) -> Vec<Vec<Cell>> {
     let Some(sid) = wiz.source_sheet_id.as_ref() else {
         return Vec::new();
     };
@@ -1959,13 +2132,7 @@ fn read_internal_result_sheet_grid(app: &UiApp, wiz: &ImportPasteWizardState) ->
         return Vec::new();
     };
     if let Some(ds) = rs.analyzable_data.as_ref() {
-        return (0..ds.archetype.row_count())
-            .map(|r| {
-                (0..ds.archetype.column_count())
-                    .map(|c| ds.archetype.data_cell(CellCoord::new(r, c, 0)).cloned().unwrap_or_else(Cell::empty))
-                    .collect()
-            })
-            .collect();
+        return extract_full_datasheet_grid(ds, missing_tokens, preview_cap);
     }
     let Some(tab) = wiz.source_tab_id.as_deref().and_then(|tid| rs.tabs.iter().find(|t| t.id == tid)).or_else(|| rs.tabs.first()) else {
         return Vec::new();
@@ -2001,7 +2168,15 @@ fn read_internal_result_sheet_grid(app: &UiApp, wiz: &ImportPasteWizardState) ->
     grid
 }
 
-fn apply_wizard_grid_transforms(grid: &mut Vec<Vec<Cell>>, app: &UiApp, wiz: &ImportPasteWizardState, state: &ImportWizardEguiState) {
+fn apply_wizard_grid_transforms(
+    grid: &mut Vec<Vec<Cell>>,
+    app: &UiApp,
+    wiz: &ImportPasteWizardState,
+    state: &ImportWizardEguiState,
+    preview_cap: bool,
+) -> (Option<String>, Option<String>) {
+    let mut unstack_warning = None;
+    let mut unstack_error = None;
     if !state.filter_predicate_draft.trim().is_empty() {
         let needle = state.filter_predicate_draft.trim().to_ascii_lowercase();
         grid.retain(|row| row.iter().any(|c| format_cell_display(c, &app.locale_preset).to_ascii_lowercase().contains(&needle)));
@@ -2014,7 +2189,19 @@ fn apply_wizard_grid_transforms(grid: &mut Vec<Vec<Cell>>, app: &UiApp, wiz: &Im
         }
     }
     if let Some(gcol) = wiz.filter.unstack_group_column {
-        *grid = unstack_preview(grid, gcol, &app.locale_preset);
+        let skip_header = wiz.header_rows >= 1 || wiz.placement.propagate_title_header;
+        let max_cells = if preview_cap { MAX_UNSTACK_PREVIEW_CELLS } else { MAX_UNSTACK_COMMIT_CELLS };
+        match unstack_preview(grid, gcol, state.unstack_value_column, skip_header, max_cells, &app.locale_preset) {
+            Ok((pivoted, warn)) => {
+                *grid = pivoted;
+                unstack_warning = warn;
+            }
+            Err(err) => {
+                grid.clear();
+                unstack_error = Some(err);
+                return (unstack_warning, unstack_error);
+            }
+        }
     } else if let Some((c0, c1)) = wiz.filter.col_window {
         for row in grid.iter_mut() {
             if c0 <= c1 && c0 < row.len() {
@@ -2038,6 +2225,7 @@ fn apply_wizard_grid_transforms(grid: &mut Vec<Vec<Cell>>, app: &UiApp, wiz: &Im
     if state.block_reshape != WizardBlockReshape::None {
         *grid = reshape_block_grid(std::mem::take(grid), state);
     }
+    (unstack_warning, unstack_error)
 }
 
 fn reshape_block_grid(grid: Vec<Vec<Cell>>, state: &ImportWizardEguiState) -> Vec<Vec<Cell>> {
@@ -2107,21 +2295,52 @@ fn serialize_grid_for_import(grid: &[Vec<Cell>], delimiter: char, decimal_sep: c
     write_delimited_records(&rows, &opts)
 }
 
-fn unstack_preview(grid: &[Vec<Cell>], group_col: usize, preset: &crate::i18n::LocalePreset) -> Vec<Vec<Cell>> {
+fn unstack_preview(
+    grid: &[Vec<Cell>],
+    group_col: usize,
+    value_col_opt: Option<usize>,
+    skip_header_row: bool,
+    max_cells: usize,
+    preset: &crate::i18n::LocalePreset,
+) -> Result<(Vec<Vec<Cell>>, Option<String>), String> {
     if grid.is_empty() {
-        return Vec::new();
+        return Ok((Vec::new(), None));
     }
-    let val_col = if group_col == 0 { 1 } else { 0 };
+    let max_cols = grid.iter().map(Vec::len).max().unwrap_or(0);
+    let val_col = resolve_unstack_value_col(group_col, value_col_opt);
+    let data_rows = if skip_header_row { grid.get(1..).unwrap_or(&[]) } else { grid };
     let mut grouped: BTreeMap<String, Vec<Cell>> = BTreeMap::new();
-    for row in grid {
+    for row in data_rows {
         let key = row.get(group_col).map(|c| format_cell_display(c, preset)).unwrap_or_default();
         if let Some(val) = row.get(val_col) {
             grouped.entry(key).or_default().push(val.clone());
         }
     }
-    let headers: Vec<Cell> = grouped.keys().map(|k| Cell { value: CellValue::Text(k.clone()), excluded: false }).collect();
+    let warning = if max_cols > 2 {
+        Some(format!(
+            "Unstack pivots Group C{} and Value C{}; {} other column(s) are omitted from the output.",
+            group_col + 1,
+            val_col + 1,
+            max_cols - 2
+        ))
+    } else {
+        None
+    };
+    if grouped.is_empty() {
+        return Ok((Vec::new(), warning));
+    }
     let max_rows = grouped.values().map(Vec::len).max().unwrap_or(0);
-    let mut out = vec![headers];
+    let total_cells = max_rows.saturating_add(1).checked_mul(grouped.len());
+    if total_cells.is_none_or(|c| c > max_cells) {
+        return Err(format!(
+            "Unstack output ({} groups x {} rows) exceeds the safe limit of {max_cells} cells; narrow Row Window or pick a categorical group column.",
+            grouped.len(),
+            max_rows.saturating_add(1)
+        ));
+    }
+    let headers: Vec<Cell> = grouped.keys().map(|k| Cell { value: CellValue::Text(k.clone()), excluded: false }).collect();
+    let mut out = Vec::with_capacity(max_rows + 1);
+    out.push(headers);
     for r in 0..max_rows {
         let mut row_cells = Vec::with_capacity(grouped.len());
         for col_vec in grouped.values() {
@@ -2129,7 +2348,7 @@ fn unstack_preview(grid: &[Vec<Cell>], group_col: usize, preset: &crate::i18n::L
         }
         out.push(row_cells);
     }
-    out
+    Ok((out, warning))
 }
 
 fn render_preview_grid_table(ui: &mut Ui, app: &UiApp, grid: &[Vec<Cell>], tokens: &Tokens) {

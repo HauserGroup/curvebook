@@ -4,12 +4,12 @@
 use std::collections::BTreeMap;
 
 use curvebook_doc::{
-    Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DelimitedScanError, DelimitedScanOptions,
-    DelimitedVisitorError, DocError, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS,
-    MAX_SUBCOLUMNS, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable, PlacementMode, SheetCellRange, SheetId, SubcolumnMode,
-    SurvivalTable, TableArchetype, TableKind, VariableColumn, XColumnMode, XyTable, default_column_label, infer_number_separators,
-    parse_import_number, scan_delimited, transpose_cell_grid, validate_cell_grid, validate_data_sets, validate_rows, validate_subcolumns,
-    validate_title,
+    BaselineOperation, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DelimitedScanError,
+    DelimitedScanOptions, DelimitedVisitorError, DocError, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkedDataRegion,
+    MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable, PlacementMode,
+    SheetCellRange, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableColumn, XColumnMode, XyTable, default_column_label,
+    infer_number_separators, parse_import_number, scan_delimited, transpose_cell_grid, validate_cell_grid, validate_data_sets, validate_rows,
+    validate_subcolumns, validate_title,
 };
 
 use crate::error::FormatError;
@@ -172,19 +172,27 @@ fn decode_utf16_bytes(bytes: &[u8], big_endian: bool, format_id: &str) -> Result
 fn collect_detection_tokens(sample: &str, delim: char) -> Vec<String> {
     let opts = DelimitedScanOptions { delimiter: delim, quote_char: Some('"') };
     let mut tokens = Vec::new();
+    let mut fields_seen = 0_usize;
     let _ = scan_delimited(sample, opts, |field| {
-        if field.record_index >= 32 || tokens.len() >= 1_024 {
-            return Ok::<(), FormatError>(());
+        if field.record_index >= 32 || tokens.len() >= 1_024 || fields_seen >= 4_096 {
+            return Err(());
         }
+        fields_seen = fields_seen.saturating_add(1);
         if field.record_index > 0 || tokens.len() < 32 {
             tokens.push(field.text);
         }
-        Ok::<(), FormatError>(())
+        Ok(())
     });
     if tokens.is_empty() {
         for line in sample.lines().take(16) {
             for part in line.split(delim) {
+                if tokens.len() >= 1_024 {
+                    break;
+                }
                 tokens.push(part.trim_matches('"').to_owned());
+            }
+            if tokens.len() >= 1_024 {
+                break;
             }
         }
     }
@@ -412,18 +420,65 @@ pub fn format_cell_token(cell: &Cell, opts: &CsvOptions) -> String {
     out
 }
 
-fn unwrap_quoted_excluded_text(text: &str, quote_char: char) -> Option<String> {
-    let inner = text.strip_suffix('*')?;
-    let inner = inner.strip_prefix(quote_char)?.strip_suffix(quote_char)?;
-    Some(inner.to_owned())
+const QUOTED_EXCLUDED_TAG: &str = "[excluded]";
+
+/// Match `[excluded]` followed by `k >= 0` backslashes and `:`, returning `(k, rest)`.
+///
+/// Using `k == 0` (`[excluded]:<payload>`) for excluded quoted text and `k + 1` backslashes to
+/// escape active text that already matches the envelope forms a lossless bijection over all
+/// strings while preventing collisions with external quoted strings like `"""label""*"`.
+fn split_quoted_excluded_envelope(text: &str) -> Option<(usize, &str)> {
+    let after_tag = text.strip_prefix(QUOTED_EXCLUDED_TAG)?;
+    let backslashes = after_tag.bytes().take_while(|&b| b == b'\\').count();
+    let rest = after_tag.get(backslashes..)?.strip_prefix(':')?;
+    Some((backslashes, rest))
+}
+
+fn encode_quoted_excluded_text(safe: &str) -> String {
+    format!("{QUOTED_EXCLUDED_TAG}:{safe}")
+}
+
+fn escape_quoted_active_text(safe: &str) -> Option<String> {
+    let (backslashes, rest) = split_quoted_excluded_envelope(safe)?;
+    let mut out = String::with_capacity(safe.len().saturating_add(1));
+    out.push_str(QUOTED_EXCLUDED_TAG);
+    for _ in 0..=backslashes {
+        out.push('\\');
+    }
+    out.push(':');
+    out.push_str(rest);
+    Some(out)
+}
+
+fn decode_quoted_excluded_or_escaped(text: &str) -> Option<Cell> {
+    let (backslashes, rest) = split_quoted_excluded_envelope(text)?;
+    if backslashes == 0 {
+        Some(Cell::excluded_text(rest.to_owned()))
+    } else {
+        let mut out = String::with_capacity(text.len().saturating_sub(1));
+        out.push_str(QUOTED_EXCLUDED_TAG);
+        for _ in 1..backslashes {
+            out.push('\\');
+        }
+        out.push(':');
+        out.push_str(rest);
+        Some(Cell::text(out))
+    }
 }
 
 fn parse_csv_field_cell(field: &ParsedCsvField, opts: &CsvOptions) -> Cell {
     if field.quoted {
         if opts.parse_asterisk_exclusions
-            && let Some(inner) = unwrap_quoted_excluded_text(&field.text, opts.quote_char)
+            && let Some(cell) = decode_quoted_excluded_or_escaped(&field.text)
         {
-            return Cell::excluded_text(inner);
+            return cell;
+        }
+        let delimiter_is_numeric_sep = opts.delimiter == opts.decimal_separator || opts.thousands_separator == Some(opts.delimiter);
+        if delimiter_is_numeric_sep && field.text.contains(opts.delimiter) {
+            let parsed = parse_cell_token(&field.text, opts);
+            if matches!(parsed.value, CellValue::Number(_)) {
+                return parsed;
+            }
         }
         Cell::text(field.text.clone())
     } else {
@@ -530,9 +585,12 @@ impl CsvExportField {
                         text.push('*');
                         Self::unquoted(text)
                     } else {
-                        let q = opts.quote_char;
-                        Self { text: format!("{q}{safe}{q}*"), force_quote: true }
+                        Self { text: encode_quoted_excluded_text(&safe), force_quote: true }
                     }
+                } else if opts.parse_asterisk_exclusions
+                    && let Some(escaped) = escape_quoted_active_text(&safe)
+                {
+                    Self { text: escaped, force_quote: true }
                 } else {
                     let force_quote = is_ambiguous_csv_text(&safe, opts);
                     Self { text: safe, force_quote }
@@ -631,9 +689,20 @@ fn export_xy_rows(t: &XyTable, opts: &CsvOptions) -> Vec<Vec<CsvExportField>> {
         header.push(CsvExportField::header(&t.x_title));
     } else {
         let x_subs = t.x_mode.subcolumn_count();
-        for s in 0..x_subs {
-            let raw = if s == 0 { t.x_title.clone() } else { format!("{}:{}", t.x_title, s + 1) };
-            header.push(CsvExportField::header(&raw));
+        match t.x_mode {
+            XColumnMode::Numbers { subcolumn_mode } if subcolumn_mode.is_pre_summarized() => {
+                let sub_labels = subcolumn_mode.subcolumn_labels();
+                for s in 0..x_subs {
+                    let suffix = sub_labels.get(s).map(String::as_str).unwrap_or("X");
+                    header.push(CsvExportField::header_with_suffix(&t.x_title, suffix));
+                }
+            }
+            _ => {
+                for s in 0..x_subs {
+                    let raw = if s == 0 { t.x_title.clone() } else { format!("{}:{}", t.x_title, s + 1) };
+                    header.push(CsvExportField::header(&raw));
+                }
+            }
         }
     }
     push_dataset_headers(&mut header, &t.data_sets, t.y_subcolumn_mode);
@@ -822,6 +891,84 @@ fn push_dataset_row(row: &mut Vec<CsvExportField>, data_sets: &[DataSetColumn], 
     }
 }
 
+/// Detect contiguous multi-subcolumn `X` headers (`X:Mean/X:SD/X:N`, `X:Mean/X:Lower/X:Upper`,
+/// `X/X:2/X:3`, `X:1/X:2/X:3`, or `X:X1/X:X2/...`) starting at `col_offset` so multi-subcolumn
+/// `XyTable` CSV/XLSX round-trips preserve `X` subcolumns instead of shifting them into `Y` datasets.
+pub(crate) fn detect_xy_x_subcolumn_header(headers: &[&str], col_offset: usize) -> Option<(String, SubcolumnMode)> {
+    let first = headers.get(col_offset)?.trim();
+    if first.is_empty() {
+        return None;
+    }
+
+    // 1. Check 3-column pre-summarized X header triples (`{base}:Mean`, `{base}:SD`, `{base}:N`, ...).
+    if let (Some(h0), Some(h1), Some(h2)) = (headers.get(col_offset), headers.get(col_offset + 1), headers.get(col_offset + 2))
+        && let (Some((p0, s0)), Some((p1, s1)), Some((p2, s2))) = (h0.trim().rsplit_once(':'), h1.trim().rsplit_once(':'), h2.trim().rsplit_once(':'))
+    {
+        let base = p0.trim();
+        if !base.is_empty() && p1.trim() == base && p2.trim() == base {
+            let t0 = s0.trim().to_ascii_lowercase();
+            let t1 = s1.trim().to_ascii_lowercase();
+            let t2 = s2.trim().to_ascii_lowercase();
+            let mode = match (t0.as_str(), t1.as_str(), t2.as_str()) {
+                ("mean", "sd", "n") => Some(SubcolumnMode::MeanSdN),
+                ("mean", "sem", "n") => Some(SubcolumnMode::MeanSemN),
+                ("mean", "%cv" | "cv", "n") => Some(SubcolumnMode::MeanCvN),
+                ("mean", "-error", "+error") => Some(SubcolumnMode::MeanLowHigh),
+                ("mean", "lower" | "lowerlimit" | "lower limit", "upper" | "upperlimit" | "upper limit") => Some(SubcolumnMode::UpperLowerLimits),
+                ("median", "q1", "q3") => Some(SubcolumnMode::MedianIqr),
+                _ => None,
+            };
+            if let Some(m) = mode {
+                return Some((base.to_owned(), m));
+            }
+        }
+    }
+
+    // 2. Check `{base}`, `{base}:2`, `{base}:3`, ... contiguous sequence.
+    let mut numbered_count = 1_usize;
+    while numbered_count < MAX_SUBCOLUMNS
+        && let Some(next_h) = headers.get(col_offset + numbered_count)
+    {
+        let expected = format!("{first}:{}", numbered_count + 1);
+        if next_h.trim() == expected {
+            numbered_count += 1;
+        } else {
+            break;
+        }
+    }
+    if numbered_count >= 2 {
+        return Some((first.to_owned(), SubcolumnMode::RawReplicates(numbered_count)));
+    }
+
+    // 3. Check `{base}:1`, `{base}:2`, ... or `{base}:X1`, `{base}:X2`, ... contiguous sequence.
+    if let Some((base_raw, suf0_raw)) = first.rsplit_once(':') {
+        let base = base_raw.trim();
+        let suf0 = suf0_raw.trim();
+        let is_x_prefixed = suf0.eq_ignore_ascii_case("x1");
+        if !base.is_empty() && (suf0 == "1" || is_x_prefixed) {
+            let mut count = 1_usize;
+            while count < MAX_SUBCOLUMNS
+                && let Some(next_h) = headers.get(col_offset + count)
+                && let Some((nb, ns)) = next_h.trim().rsplit_once(':')
+            {
+                let ns_t = ns.trim();
+                let matches_next =
+                    if is_x_prefixed { ns_t.eq_ignore_ascii_case(&format!("x{}", count + 1)) } else { ns_t == format!("{}", count + 1) };
+                if nb.trim() == base && matches_next {
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+            if count >= 2 {
+                return Some((base.to_owned(), SubcolumnMode::RawReplicates(count)));
+            }
+        }
+    }
+
+    None
+}
+
 /// Import delimited CSV/TSV text into a typed [`DataSheet`].
 pub fn import_csv_to_datasheet(
     id: impl Into<SheetId>,
@@ -831,7 +978,21 @@ pub fn import_csv_to_datasheet(
     subcolumn_mode: SubcolumnMode,
     opts: &CsvOptions,
 ) -> Result<DataSheet, FormatError> {
-    import_csv_to_datasheet_with_budget(id, title, input, target_kind, subcolumn_mode, opts, MAX_IMPORT_CELLS)
+    import_csv_to_datasheet_with_budget_and_x_mode(id, title, input, target_kind, subcolumn_mode, None, opts, MAX_IMPORT_CELLS)
+}
+
+/// Import delimited CSV/TSV text into a typed [`DataSheet`] with an explicit optional `X`
+/// subcolumn mode for [`TableKind::Xy`] tables (useful for headerless multi-subcolumn `X` inputs).
+pub fn import_csv_to_datasheet_with_x_mode(
+    id: impl Into<SheetId>,
+    title: impl Into<String>,
+    input: &str,
+    target_kind: TableKind,
+    subcolumn_mode: SubcolumnMode,
+    x_subcolumn_mode: Option<SubcolumnMode>,
+    opts: &CsvOptions,
+) -> Result<DataSheet, FormatError> {
+    import_csv_to_datasheet_with_budget_and_x_mode(id, title, input, target_kind, subcolumn_mode, x_subcolumn_mode, opts, MAX_IMPORT_CELLS)
 }
 
 /// Import delimited CSV/TSV text into a typed [`DataSheet`] bounded by `max_cells`.
@@ -844,14 +1005,37 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
     opts: &CsvOptions,
     max_cells: usize,
 ) -> Result<DataSheet, FormatError> {
+    import_csv_to_datasheet_with_budget_and_x_mode(id, title, input, target_kind, subcolumn_mode, None, opts, max_cells)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn import_csv_to_datasheet_with_budget_and_x_mode(
+    id: impl Into<SheetId>,
+    title: impl Into<String>,
+    input: &str,
+    target_kind: TableKind,
+    subcolumn_mode: SubcolumnMode,
+    explicit_x_subcolumn_mode: Option<SubcolumnMode>,
+    opts: &CsvOptions,
+    max_cells: usize,
+) -> Result<DataSheet, FormatError> {
     subcolumn_mode.validate()?;
     if !target_kind.allows_subcolumn_mode(subcolumn_mode) {
         return Err(FormatError::Doc(curvebook_doc::DocError::IncompatibleSubcolumnMode { archetype: target_kind, mode: subcolumn_mode }));
     }
+    if let Some(x_sub) = explicit_x_subcolumn_mode {
+        x_sub.validate()?;
+        if target_kind != TableKind::Xy {
+            return Err(FormatError::Doc(curvebook_doc::DocError::IncompatibleSubcolumnMode { archetype: target_kind, mode: x_sub }));
+        }
+    }
     let prefix_cols = usize::from(opts.has_row_titles)
-        + usize::from(
-            matches!(target_kind, TableKind::Xy | TableKind::Survival) || (matches!(target_kind, TableKind::PartsOfWhole) && !opts.has_row_titles),
-        );
+        + match target_kind {
+            TableKind::Xy => explicit_x_subcolumn_mode.map_or(MAX_SUBCOLUMNS, SubcolumnMode::subcolumn_count),
+            TableKind::Survival => 1,
+            TableKind::PartsOfWhole if !opts.has_row_titles => 1,
+            _ => 0,
+        };
     let data_col_limit = if matches!(target_kind, TableKind::Nested) {
         MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS)
     } else {
@@ -875,26 +1059,34 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
 
     let arch = match target_kind {
         TableKind::Xy => {
+            let header_strs: Vec<&str> = headers.iter().map(|f| f.text.as_str()).collect();
+            let detected_x = detect_xy_x_subcolumn_header(&header_strs, col_offset);
+            let x_sub_mode = explicit_x_subcolumn_mode.or_else(|| detected_x.as_ref().map(|(_, m)| *m)).unwrap_or(SubcolumnMode::Single);
+            let x_subs = x_sub_mode.subcolumn_count();
             let x_title_field = headers.get(col_offset).filter(|f| !f.text.trim().is_empty());
             let x_col_idx = col_offset;
-            if raw_col_count > col_offset {
-                col_offset += 1;
-            }
+            let available_x_cols = raw_col_count.saturating_sub(col_offset).min(x_subs);
+            col_offset = col_offset.saturating_add(available_x_cols);
             let subs = subcolumn_mode.subcolumn_count();
             let data_cols = raw_col_count.saturating_sub(col_offset);
             let ds_count = data_cols.div_ceil(subs);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, subs, 1, err_line, max_cells)?;
-            let mut xy = XyTable::new(subcolumn_mode, ds_count, row_count)?;
-            xy.x_title = match x_title_field {
-                Some(f) => header_field_title(f)?,
-                None => String::from("X"),
+            validate_csv_cell_budget(row_count, ds_count, subs, x_subs, err_line, max_cells)?;
+            let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: x_sub_mode }, subcolumn_mode, ds_count, row_count)?;
+            xy.x_title = match detected_x {
+                Some((base, _)) => sanitize_title(&base)?,
+                None => match x_title_field {
+                    Some(f) => header_field_title(f)?,
+                    None => String::from("X"),
+                },
             };
             assign_row_titles(&mut xy.row_titles, data_rows, has_row_titles);
             xy.row_titles_expanded = opts.has_row_titles;
             for (r, rec) in data_rows.iter().enumerate() {
-                if let Some(tok) = rec.get(x_col_idx) {
-                    xy.set_x_cell(r, parse_csv_field_cell(tok, opts))?;
+                for s in 0..available_x_cols {
+                    if let Some(tok) = rec.get(x_col_idx + s) {
+                        xy.set_x_subcell(r, s, parse_csv_field_cell(tok, opts))?;
+                    }
                 }
             }
             populate_datasets(&mut xy.data_sets, data_rows, &headers, col_offset, subs, opts)?;
@@ -1337,7 +1529,10 @@ pub struct FilteredDelimitedGrid {
 }
 
 /// Stage 1 & 2: Parse delimited text and apply [`ImportFilterSpec`] (`row_window`, `col_window`,
-/// `decimate_every_k`, `unstack_group_column`, and `parse_asterisk_exclusions`).
+/// `decimate_every_k`, `unstack_group_column`, `baseline`, and `parse_asterisk_exclusions`).
+///
+/// Rejects `filter.exclude_row_predicate` with [`FormatError::InvalidPipeline`] because formula
+/// predicate evaluation belongs to L2 `curvebook-transform` (`apply_import_link_pipeline`).
 pub fn filter_delimited_text(
     input: &str,
     delimiter: char,
@@ -1345,6 +1540,13 @@ pub fn filter_delimited_text(
     has_header: bool,
     filter: &ImportFilterSpec,
 ) -> Result<FilteredDelimitedGrid, FormatError> {
+    if filter.exclude_row_predicate.is_some() {
+        return Err(FormatError::InvalidPipeline {
+            reason: String::from(
+                "ImportFilterSpec::exclude_row_predicate requires formula evaluation; use curvebook_transform::apply_import_link_pipeline",
+            ),
+        });
+    }
     let opts = CsvOptions {
         delimiter,
         decimal_separator,
@@ -1365,6 +1567,10 @@ pub fn filter_delimited_text(
     } else {
         (Vec::new(), records.as_slice())
     };
+
+    let (inferred_dec, inferred_thousands) =
+        infer_number_separators(data_rows.iter().take(32).flat_map(|row| row.iter().map(|f| f.text.as_str())), delimiter);
+    let parse_opts = CsvOptions { thousands_separator: if inferred_dec == decimal_separator { inferred_thousands } else { None }, ..opts };
 
     let (r_start, r_end) = match filter.row_window {
         Some((s, e)) if e < s => return Err(FormatError::InvalidPipeline { reason: String::from("row_window end < start") }),
@@ -1401,21 +1607,66 @@ pub fn filter_delimited_text(
             }
             let mut parsed_row = Vec::with_capacity(kept_cols);
             for c in c_start..=c_end {
-                let cell = row.get(c).map_or_else(Cell::empty, |tok| parse_csv_field_cell(tok, &opts));
+                let cell = row.get(c).map_or_else(Cell::empty, |tok| parse_csv_field_cell(tok, &parse_opts));
                 parsed_row.push(cell);
             }
             cells.push(parsed_row);
         }
     }
 
-    if let Some(group_col_raw) = filter.unstack_group_column {
+    let mut out = if let Some(group_col_raw) = filter.unstack_group_column {
         let rel_col = group_col_raw
             .checked_sub(c_start)
             .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("unstack_group_column outside col_window") })?;
-        return unstack_grid(&headers, &cells, rel_col);
+        unstack_grid(&headers, &cells, rel_col)?
+    } else {
+        FilteredDelimitedGrid { headers, cells }
+    };
+
+    if let Some((base_col, op)) = filter.baseline {
+        apply_filter_baseline(&mut out.cells, base_col, op)?;
     }
 
-    Ok(FilteredDelimitedGrid { headers, cells })
+    Ok(out)
+}
+
+fn apply_filter_baseline(grid: &mut [Vec<Cell>], base_col: usize, op: BaselineOperation) -> Result<(), FormatError> {
+    for row in grid.iter_mut() {
+        let Some(base_val) = row.get(base_col).and_then(Cell::active_number) else {
+            return Err(FormatError::InvalidPipeline { reason: format!("baseline column {base_col} missing active numeric value") });
+        };
+        for cell in row.iter_mut() {
+            let Some(v) = cell.value.finite_f64() else {
+                continue;
+            };
+            let res = match op {
+                BaselineOperation::Difference => v - base_val,
+                BaselineOperation::Ratio => {
+                    if base_val == 0.0 {
+                        f64::NAN
+                    } else {
+                        v / base_val
+                    }
+                }
+                BaselineOperation::PercentChange => {
+                    if base_val == 0.0 {
+                        f64::NAN
+                    } else {
+                        100.0 * (v - base_val) / base_val
+                    }
+                }
+                BaselineOperation::FractionalChange => {
+                    if base_val == 0.0 {
+                        f64::NAN
+                    } else {
+                        (v - base_val) / base_val
+                    }
+                }
+            };
+            cell.value = CellValue::from_finite_or_empty(res);
+        }
+    }
+    Ok(())
 }
 
 fn check_pipeline_cell_budget(total_cells: Option<usize>, stage: &str) -> Result<(), FormatError> {
@@ -1506,26 +1757,24 @@ fn apply_baseline_to_grid(grid: &mut [Vec<Cell>], baseline: ImportBaselineAdjust
             };
             for row in grid {
                 for (c, cell) in row.iter_mut().enumerate() {
-                    if let (CellValue::Number(v), Some(b)) = (&cell.value, base_row.get(c).and_then(Cell::active_number)) {
-                        let diff = *v - b;
-                        if diff.is_finite() {
-                            cell.value = CellValue::Number(diff);
-                        }
+                    if let CellValue::Number(v) = cell.value {
+                        cell.value = match base_row.get(c).and_then(Cell::active_number) {
+                            Some(b) => CellValue::from_finite_or_empty(v - b),
+                            None => CellValue::Empty,
+                        };
                     }
                 }
             }
         }
         ImportBaselineAdjustment::SubtractColumn(base_col) => {
             for row in grid {
-                let Some(b) = row.get(base_col).and_then(Cell::active_number) else {
-                    continue;
-                };
+                let base_opt = row.get(base_col).and_then(Cell::active_number);
                 for cell in row {
                     if let CellValue::Number(v) = cell.value {
-                        let diff = v - b;
-                        if diff.is_finite() {
-                            cell.value = CellValue::Number(diff);
-                        }
+                        cell.value = match base_opt {
+                            Some(b) => CellValue::from_finite_or_empty(v - b),
+                            None => CellValue::Empty,
+                        };
                     }
                 }
             }
@@ -1536,13 +1785,11 @@ fn apply_baseline_to_grid(grid: &mut [Vec<Cell>], baseline: ImportBaselineAdjust
             };
             for row in grid {
                 for (c, cell) in row.iter_mut().enumerate() {
-                    if let (CellValue::Number(v), Some(b)) = (&cell.value, base_row.get(c).and_then(Cell::active_number))
-                        && b != 0.0
-                    {
-                        let pct = (*v / b) * 100.0;
-                        if pct.is_finite() {
-                            cell.value = CellValue::Number(pct);
-                        }
+                    if let CellValue::Number(v) = cell.value {
+                        cell.value = match base_row.get(c).and_then(Cell::active_number) {
+                            Some(b) if b != 0.0 => CellValue::from_finite_or_empty((v / b) * 100.0),
+                            _ => CellValue::Empty,
+                        };
                     }
                 }
             }

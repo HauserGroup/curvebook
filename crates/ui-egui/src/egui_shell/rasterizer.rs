@@ -348,18 +348,47 @@ pub fn crop_raster_rgba(image: &RasterImage, x: u32, y: u32, w: u32, h: u32) -> 
             message: format!("crop rectangle ({x}, {y}, {w}x{h}) exceeds image {}x{}", image.width_px, image.height_px),
         });
     }
-    let src_stride = usize::try_from(image.width_px).unwrap_or(0) * 4;
-    let dst_w = usize::try_from(w).unwrap_or(0);
-    let dst_h = usize::try_from(h).unwrap_or(0);
-    let mut rgba = Vec::with_capacity(dst_w * dst_h * 4);
-    let x_off = usize::try_from(x).unwrap_or(0) * 4;
-    let row_bytes = dst_w * 4;
+    let src_w =
+        usize::try_from(image.width_px).map_err(|_| RenderError::InvalidTarget { message: String::from("source image width exceeds usize") })?;
+    let src_h =
+        usize::try_from(image.height_px).map_err(|_| RenderError::InvalidTarget { message: String::from("source image height exceeds usize") })?;
+    let expected_src_bytes = src_w
+        .checked_mul(src_h)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| RenderError::InvalidTarget { message: String::from("source image byte size overflows usize") })?;
+    if image.rgba.len() < expected_src_bytes {
+        return Err(RenderError::InvalidTarget {
+            message: format!(
+                "source RGBA buffer truncated ({} bytes < expected {expected_src_bytes} bytes for {}x{})",
+                image.rgba.len(),
+                image.width_px,
+                image.height_px
+            ),
+        });
+    }
+    let src_stride = src_w.checked_mul(4).ok_or_else(|| RenderError::InvalidTarget { message: String::from("source stride overflows usize") })?;
+    let dst_w = usize::try_from(w).map_err(|_| RenderError::InvalidTarget { message: String::from("crop width exceeds usize") })?;
+    let dst_h = usize::try_from(h).map_err(|_| RenderError::InvalidTarget { message: String::from("crop height exceeds usize") })?;
+    let row_bytes = dst_w.checked_mul(4).ok_or_else(|| RenderError::InvalidTarget { message: String::from("crop row bytes overflow usize") })?;
+    let dst_bytes = dst_h
+        .checked_mul(row_bytes)
+        .ok_or_else(|| RenderError::InvalidTarget { message: String::from("crop output buffer size overflows usize") })?;
+    let mut rgba = Vec::with_capacity(dst_bytes);
+    let x_off = usize::try_from(x)
+        .ok()
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| RenderError::InvalidTarget { message: String::from("crop x offset overflows usize") })?;
+    let y_base = usize::try_from(y).map_err(|_| RenderError::InvalidTarget { message: String::from("crop y offset exceeds usize") })?;
     for row in 0..dst_h {
-        let src_y = usize::try_from(y).unwrap_or(0) + row;
-        let start = src_y * src_stride + x_off;
+        let start = y_base
+            .checked_add(row)
+            .and_then(|sy| sy.checked_mul(src_stride))
+            .and_then(|off| off.checked_add(x_off))
+            .ok_or_else(|| RenderError::InvalidTarget { message: String::from("crop row offset overflows usize") })?;
+        let end = start.checked_add(row_bytes).ok_or_else(|| RenderError::InvalidTarget { message: String::from("crop row end overflows usize") })?;
         let row_slice = image
             .rgba
-            .get(start..start + row_bytes)
+            .get(start..end)
             .ok_or_else(|| RenderError::InvalidTarget { message: String::from("crop rectangle row exceeds source buffer") })?;
         rgba.extend_from_slice(row_slice);
     }

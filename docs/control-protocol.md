@@ -72,4 +72,4 @@ These 8 JSON-lines actions form the **semantic agent harness** for live desktop 
 - Never binds to `0.0.0.0` or `::`; loopback (`127.0.0.1` / `::1` via `validate_loopback_addr`) only (`cargo xtask telemetry`).
 - Disabled by default unless `--control <port>` (`1..=65535`) or `CURVEBOOK_CONTROL_PORT` is explicitly set.
 - Requires bearer-token authentication (`ControlAuth`, via `--control-token` / `CURVEBOOK_CONTROL_TOKEN` or an auto-generated session token) supplied via `"auth"` handshake or per-request `"token"`.
-- Rejects HTTP request lines (`403 Forbidden`) and bounds line framing (`MAX_CONTROL_LINE_BYTES = 16 MiB`, 2s TCP idle timeout).
+- Rejects HTTP request lines (`403 Forbidden`) and bounds line framing (`MAX_PRE_AUTH_CONTROL_LINE_BYTES = 64 KiB` prior to authentication, promoted to `MAX_CONTROL_LINE_BYTES = 16 MiB` after either an `"auth"` handshake or a valid per-request `"token"` frame on the connection, with a 2s TCP idle timeout; clients sending a first frame larger than 64 KiB must authenticate first via `"auth"`).

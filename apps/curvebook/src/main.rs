@@ -13,14 +13,15 @@ use std::time::{Duration, Instant};
 
 use curvebook::desktop_host::{
     DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowId, DesktopWindowSession, LiveControlFrameOutput,
-    allocate_fresh_isolated_journal_dir, dir_has_active_lease, dir_has_unrecovered_crash, open_document_from_files,
+    allocate_fresh_isolated_journal_dir, dir_has_unrecovered_crash, open_dir_with_policy_safe_recovery, open_document_from_files,
+    open_fresh_journal_for_seeded_session,
 };
 use curvebook::gui_window::{LiveControlChannel, LiveControlPostHook, run_native_desktop_with_control};
 use curvebook::live_control::{
     LiveControlBridge, LiveControlServerGuard, serve_live_control_io, spawn_live_control_accept_loop_with_reject, write_busy_control_error,
 };
-use curvebook_engine::Session;
-use curvebook_format::recovery::{CrashRecoveryJournal, DirectoryJournalBackend, JournalBackend, RecoveryReport};
+use curvebook_engine::{ExternalPathPolicy, Session};
+use curvebook_format::recovery::{CrashRecoveryJournal, DirectoryJournalBackend, JournalBackend, RecoveryReport, is_lease_reclaimable};
 use curvebook_format::versioned::{
     CURRENT_PREFERENCES_VERSION, MAX_PREFERENCES_FILE_BYTES, PreferencesFile, load_preferences_file, save_preferences_file,
 };
@@ -468,6 +469,23 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
     };
     let mut runtime_guard = RuntimeShutdownGuard::new(DesktopHostRuntime::new(host_cfg));
 
+    // Hydrate persisted preferences into EVERY newly opened window (initial, recovered, and
+    // secondary `Cmd+N` windows) before explicit CLI/config overrides so closing a secondary
+    // window can never overwrite `preferences.json` with factory defaults (`AUD-06-04`).
+    {
+        let init_paths = app_paths.clone();
+        let init_cfg = cfg.clone();
+        runtime_guard.get_mut()?.set_preferences_init_hook(move |app| {
+            configure_window_preferences(app, &init_paths, &init_cfg, no_prefs);
+        });
+    }
+    if !no_prefs {
+        let persist_paths = app_paths.clone();
+        runtime_guard.get_mut()?.set_preferences_persist_hook(move |app| {
+            persist_window_preferences_best_effort(app, &persist_paths, false);
+        });
+    }
+
     let initial_win_id = if cfg.new_instance {
         let session = load_startup_session(&cfg.files)?;
         let attach_recovery = recovery_root.is_some();
@@ -486,18 +504,6 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
         if !cfg.files.is_empty() {
             let _ = runtime_guard.get_mut()?.focus_window(initial_win_id);
         }
-    }
-
-    let window_ids = runtime_guard.get_mut()?.window_ids();
-    for win_id in window_ids {
-        let win = runtime_guard.get_mut()?.window_mut(win_id)?;
-        configure_window_preferences(win.app_mut(), &app_paths, cfg, no_prefs);
-    }
-    if !no_prefs {
-        let persist_paths = app_paths.clone();
-        runtime_guard.get_mut()?.set_preferences_persist_hook(move |app| {
-            persist_window_preferences_best_effort(app, &persist_paths, false);
-        });
     }
 
     if let Some(script_path) = cfg.event_script.as_deref() {
@@ -614,21 +620,132 @@ fn resolve_control_auth(cfg: &LaunchConfig) -> Result<ControlAuth, String> {
     }
 }
 
-fn write_control_token_file(path: &Path, auth: &ControlAuth) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("failed to create control token directory `{}`: {err}", parent.display()))?;
-    }
-    curvebook_platform::fs::write_atomic_with_hook(path, auth.as_str().as_bytes(), |tmp_path| {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(tmp_path, std::fs::Permissions::from_mode(0o600))?;
+#[cfg(unix)]
+fn create_private_control_token_dir(parent: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    let uid = current_unix_uid()?;
+    let mut missing_dirs: Vec<PathBuf> = Vec::new();
+    let mut cur = parent;
+    loop {
+        match std::fs::symlink_metadata(cur) {
+            Ok(_) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                missing_dirs.push(cur.to_path_buf());
+                match cur.parent() {
+                    Some(p) if !p.as_os_str().is_empty() => cur = p,
+                    _ => break,
+                }
+            }
+            Err(err) => return Err(format!("failed to inspect control token directory `{}`: {err}", cur.display())),
         }
-        #[cfg(not(unix))]
-        let _ = tmp_path;
-        Ok(())
-    })
-    .map_err(|err| format!("failed to write control token file `{}`: {err}", path.display()))
+    }
+    for dir in missing_dirs.into_iter().rev() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(&dir) {
+            Ok(()) => {
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|err| format!("failed to set private permissions on control token directory `{}`: {err}", dir.display()))?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(format!("failed to create control token directory `{}`: {err}", dir.display())),
+        }
+    }
+
+    let meta = std::fs::symlink_metadata(parent).map_err(|err| format!("failed to inspect control token directory `{}`: {err}", parent.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(format!("refusing unsafe non-directory or symlink control token directory `{}`", parent.display()));
+    }
+    if meta.uid() != uid {
+        return Err(format!("refusing control token directory `{}` owned by uid {} (expected uid {uid})", parent.display(), meta.uid()));
+    }
+    if (meta.mode() & 0o022) != 0 {
+        return Err(format!("refusing group/world-writable control token directory `{}` with mode {:04o}", parent.display(), meta.mode() & 0o777));
+    }
+    Ok(())
+}
+
+struct TempTokenCleanupGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl Drop for TempTokenCleanupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn write_control_token_file(path: &Path, auth: &ControlAuth) -> Result<(), String> {
+    static NEXT_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    #[cfg(unix)]
+    create_private_control_token_dir(parent)?;
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(parent).map_err(|err| format!("failed to create control token directory `{}`: {err}", parent.display()))?;
+
+    // Never follow a pre-existing symlink or overwrite a non-regular file at the target token path (`AUD-06-02`).
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            return Err(format!("refusing to overwrite symlink or non-regular control token path `{}`", path.display()));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("failed to inspect control token file `{}`: {err}", path.display())),
+    }
+
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("control.token");
+    let pid = std::process::id();
+    let (mut file, tmp_path) = {
+        let mut created = None;
+        for _ in 0..64 {
+            let seq = NEXT_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let candidate = parent.join(format!(".{file_name}.{pid}.{seq}.tmp"));
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                // Create the temp file with `0600` atomically BEFORE writing a single token byte (`AUD-06-02`).
+                opts.mode(0o600);
+            }
+            match opts.open(&candidate) {
+                Ok(f) => {
+                    created = Some((f, candidate));
+                    break;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(format!("failed to create staging control token file `{}`: {err}", candidate.display())),
+            }
+        }
+        created.ok_or_else(|| format!("failed to allocate unique staging control token file beside `{}`", path.display()))?
+    };
+
+    let mut cleanup = TempTokenCleanupGuard { path: tmp_path.clone(), armed: true };
+    file.write_all(auth.as_str().as_bytes()).map_err(|err| format!("failed to write control token file `{}`: {err}", path.display()))?;
+    file.sync_all().map_err(|err| format!("failed to sync control token file `{}`: {err}", path.display()))?;
+    drop(file);
+
+    // Re-check destination before atomic rename so a symlink raced in cannot be followed.
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            return Err(format!("refusing to overwrite symlink or non-regular control token path `{}`", path.display()));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("failed to re-inspect control token file `{}`: {err}", path.display())),
+    }
+
+    std::fs::rename(&tmp_path, path).map_err(|err| format!("failed to atomically install control token file `{}`: {err}", path.display()))?;
+    cleanup.armed = false;
+    if let Ok(dir_handle) = std::fs::File::open(parent) {
+        let _ = dir_handle.sync_all();
+    }
+    Ok(())
 }
 
 use curvebook_ui_egui::control_io::host_routing::{HostPrefFingerprint, capture_pref_fingerprint};
@@ -860,9 +977,13 @@ fn open_startup_session_with_recovery(
     }
 
     if files.is_empty() {
-        let (recovered_session, journal, report) =
-            Session::open_dir_with_recovery(&app_paths.recovery_dir, recovery_owner_id(), RECOVERY_LOCK_TTL_MS, now_ms)
-                .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", app_paths.recovery_dir.display()))?;
+        let (recovered_session, journal, report) = open_dir_with_policy_safe_recovery(
+            &app_paths.recovery_dir,
+            recovery_owner_id(),
+            RECOVERY_LOCK_TTL_MS,
+            now_ms,
+            &ExternalPathPolicy::default(),
+        )?;
         log_recovery_warnings(&app_paths.recovery_dir, &report);
         return Ok(StartupRecoveryState {
             session: recovered_session,
@@ -872,25 +993,33 @@ fn open_startup_session_with_recovery(
         });
     }
 
-    if dir_has_active_lease(&app_paths.recovery_dir, now_ms) {
-        let _ = Session::open_dir_with_recovery(&app_paths.recovery_dir, recovery_owner_id(), RECOVERY_LOCK_TTL_MS, now_ms)
-            .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", app_paths.recovery_dir.display()))?;
+    // Check active lease directly without acquiring/replaying any WAL (`AUD-06-12`, `AUD-13-01`).
+    if let Ok(backend) = DirectoryJournalBackend::open_dir(&app_paths.recovery_dir)
+        && let Ok(Some(lease)) = backend.read_lease()
+        && !is_lease_reclaimable(&lease, now_ms)
+    {
+        return Err(format!(
+            "failed to open recovery journal in `{}`: recovery directory is locked by active owner `{}`",
+            app_paths.recovery_dir.display(),
+            lease.owner_id
+        ));
     }
 
-    let target_dir = if dir_has_unrecovered_crash(&app_paths.recovery_dir, now_ms) {
+    let candidate_dir = if dir_has_unrecovered_crash(&app_paths.recovery_dir, now_ms) {
         allocate_fresh_isolated_journal_dir(&app_paths.recovery_dir, DesktopWindowId(1), now_ms)?
     } else {
         app_paths.recovery_dir.clone()
     };
 
-    let (_, mut journal, _) = Session::open_dir_with_recovery(&target_dir, recovery_owner_id(), RECOVERY_LOCK_TTL_MS, now_ms)
-        .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", target_dir.display()))?;
-    if let Err(err) = session.checkpoint_journal(&mut journal) {
-        let owner_id = journal.lease().owner_id.clone();
-        let mut backend = journal.abandon();
-        let _ = backend.release_lease(&owner_id);
-        return Err(format!("failed to seed startup recovery snapshot in `{}`: {err}", target_dir.display()));
-    }
+    let (target_dir, journal) = open_fresh_journal_for_seeded_session(
+        &app_paths.recovery_dir,
+        &candidate_dir,
+        DesktopWindowId(1),
+        &recovery_owner_id(),
+        RECOVERY_LOCK_TTL_MS,
+        now_ms,
+        &session,
+    )?;
     Ok(StartupRecoveryState { session, journal: Some(journal), report: None, recovery_dir: Some(target_dir) })
 }
 
@@ -1972,6 +2101,78 @@ mod tests {
         let mut help_stderr = Vec::new();
         super::run_with_process_env_and_stderr(&sv(&["--control-token", "cli-visible-token-123", "--help"]), None, None, |_| None, &mut help_stderr)?;
         assert!(help_stderr.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aud_06_02_write_control_token_file_uses_0700_dir_0600_file_and_rejects_symlink_and_permissive_dir() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = TestDir::new("aud06-02-tok")?;
+        let auth = ControlAuth::generate()?;
+
+        // 1. Fresh nested parent dir created with 0700 and token file created with 0600.
+        let cfg_dir = dir.join("fresh_cfg");
+        let token_path = super::control_token_file_path(&cfg_dir, 9321);
+        super::write_control_token_file(&token_path, &auth)?;
+        let dir_meta = std::fs::symlink_metadata(&cfg_dir)?;
+        assert_eq!(dir_meta.mode() & 0o777, 0o700, "created token dir must be 0700");
+        let file_meta = std::fs::symlink_metadata(&token_path)?;
+        assert!(!file_meta.file_type().is_symlink() && file_meta.is_file());
+        assert_eq!(file_meta.mode() & 0o777, 0o600, "token file must be 0600");
+        assert_eq!(std::fs::read_to_string(&token_path)?, auth.as_str());
+
+        // 2. Pre-existing symlink target must be rejected without modifying the symlink target.
+        let decoy = dir.join("decoy.txt");
+        std::fs::write(&decoy, "keep-decoy")?;
+        let sym_path = cfg_dir.join("control-9322.token");
+        std::os::unix::fs::symlink(&decoy, &sym_path)?;
+        let sym_err = super::write_control_token_file(&sym_path, &auth);
+        assert!(sym_err.is_err(), "symlink token path must be rejected");
+        assert_eq!(std::fs::read_to_string(&decoy)?, "keep-decoy");
+
+        // 3. Group/world-writable parent directory must be rejected.
+        let perm_dir = dir.join("perm_cfg");
+        std::fs::create_dir_all(&perm_dir)?;
+        std::fs::set_permissions(&perm_dir, std::fs::Permissions::from_mode(0o775))?;
+        let perm_err = super::write_control_token_file(&super::control_token_file_path(&perm_dir, 9323), &auth);
+        assert!(perm_err.is_err(), "group/world-writable parent directory must be rejected");
+        Ok(())
+    }
+
+    #[test]
+    fn aud_06_12_and_aud_13_01_startup_with_files_checks_lease_without_replaying_wal() -> Result<(), Box<dyn std::error::Error>> {
+        use super::{CrashRecoveryJournal, DirectoryJournalBackend, dir_has_unrecovered_crash};
+
+        let dir = TestDir::new("aud06-12-startup")?;
+        let paths = super::portable_app_paths(dir.path());
+        std::fs::create_dir_all(&paths.recovery_dir)?;
+
+        let startup_csv = dir.join("input.csv");
+        std::fs::write(&startup_csv, "X,Y\n1,10\n2,20\n")?;
+        let evil_out = dir.join("evil_wal_write.curvebook");
+
+        // 1. Active non-reclaimable lease rejects cleanly without clobbering or replaying WAL.
+        let backend = DirectoryJournalBackend::open_dir(&paths.recovery_dir)?;
+        let (mut active_journal, _) = CrashRecoveryJournal::open_or_recover(backend, "other-live-pid", 300_000, 100_000)?;
+        let _ = active_journal.record_command(json!({
+            "command_id": "project.save",
+            "params": { "path": evil_out.display().to_string() }
+        }))?;
+        let active_err = super::open_startup_session_with_recovery(std::slice::from_ref(&startup_csv), &paths, true, 100_500);
+        assert!(active_err.is_err(), "active lease must block startup with explicit files");
+        assert!(!evil_out.exists(), "startup active-lease check must never replay WAL");
+        let _ = active_journal.abandon();
+
+        // 2. Once lease is stale (now_ms = 500_000), startup with files isolates cleanly without replaying WAL!
+        let mut startup = super::open_startup_session_with_recovery(&[startup_csv], &paths, true, 500_000)?;
+        assert!(!evil_out.exists(), "startup with files must never replay stale crafted WAL");
+        assert_ne!(startup.recovery_dir.as_deref(), Some(paths.recovery_dir.as_path()));
+        assert!(dir_has_unrecovered_crash(&paths.recovery_dir, 500_000), "stale crash dir must remain intact for recovery");
+        if let Some(j) = startup.journal {
+            let _ = startup.session.close_journal_cleanly(j)?;
+        }
         Ok(())
     }
 }

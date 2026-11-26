@@ -353,37 +353,61 @@ struct EocdInfo {
     cd_offset: usize,
 }
 
+fn validate_eocd_candidate(bytes: &[u8], pos: usize) -> Result<Result<EocdInfo, FormatError>, FormatError> {
+    let disk = read_u16_le(bytes, pos + 4)?;
+    let cd_disk = read_u16_le(bytes, pos + 6)?;
+    if disk != 0 || cd_disk != 0 {
+        return Ok(Err(FormatError::InvalidZip { reason: String::from("multi-disk ZIP archives are not supported") }));
+    }
+    let entries_disk = usize::from(read_u16_le(bytes, pos + 8)?);
+    let total_entries = usize::from(read_u16_le(bytes, pos + 10)?);
+    if entries_disk != total_entries {
+        return Ok(Err(FormatError::InvalidZip { reason: String::from("inconsistent central directory entry count") }));
+    }
+    let Ok(cd_size) = usize::try_from(read_u32_le(bytes, pos + 12)?) else {
+        return Ok(Err(FormatError::InvalidZip { reason: String::from("central directory size overflow") }));
+    };
+    let Ok(cd_offset) = usize::try_from(read_u32_le(bytes, pos + 16)?) else {
+        return Ok(Err(FormatError::InvalidZip { reason: String::from("central directory offset overflow") }));
+    };
+    let Some(cd_end) = cd_offset.checked_add(cd_size) else {
+        return Ok(Err(FormatError::InvalidZip { reason: String::from("central directory range overflow") }));
+    };
+    if cd_end > pos {
+        return Ok(Err(FormatError::InvalidZip { reason: String::from("central directory extends past EOCD") }));
+    }
+    if total_entries > 0 {
+        if cd_size < 46 {
+            return Ok(Err(FormatError::InvalidZip { reason: String::from("truncated central directory header") }));
+        }
+        if read_u32_le(bytes, cd_offset)? != CENTRAL_DIR_HEADER_SIG {
+            return Ok(Err(FormatError::InvalidZip { reason: String::from("invalid central directory signature") }));
+        }
+    } else if cd_size != 0 {
+        return Ok(Err(FormatError::InvalidZip { reason: String::from("central directory trailing bytes mismatch") }));
+    }
+    Ok(Ok(EocdInfo { total_entries, cd_size, cd_offset }))
+}
+
 fn locate_eocd(bytes: &[u8]) -> Result<EocdInfo, FormatError> {
     if bytes.len() < 22 {
         return Err(FormatError::InvalidZip { reason: String::from("buffer smaller than 22-byte EOCD") });
     }
     let min_offset = bytes.len().saturating_sub(22 + usize::from(u16::MAX));
     let mut pos = bytes.len() - 22;
+    let mut candidate_err: Option<FormatError> = None;
     loop {
         if read_u32_le(bytes, pos)? == EOCD_SIG {
             let comment_len = usize::from(read_u16_le(bytes, pos + 20)?);
             if pos + 22 + comment_len == bytes.len() {
-                let disk = read_u16_le(bytes, pos + 4)?;
-                let cd_disk = read_u16_le(bytes, pos + 6)?;
-                if disk != 0 || cd_disk != 0 {
-                    return Err(FormatError::InvalidZip { reason: String::from("multi-disk ZIP archives are not supported") });
+                match validate_eocd_candidate(bytes, pos)? {
+                    Ok(eocd) => return Ok(eocd),
+                    Err(err) => {
+                        if candidate_err.is_none() {
+                            candidate_err = Some(err);
+                        }
+                    }
                 }
-                let entries_disk = usize::from(read_u16_le(bytes, pos + 8)?);
-                let total_entries = usize::from(read_u16_le(bytes, pos + 10)?);
-                if entries_disk != total_entries {
-                    return Err(FormatError::InvalidZip { reason: String::from("inconsistent central directory entry count") });
-                }
-                let cd_size = usize::try_from(read_u32_le(bytes, pos + 12)?)
-                    .map_err(|_| FormatError::InvalidZip { reason: String::from("central directory size overflow") })?;
-                let cd_offset = usize::try_from(read_u32_le(bytes, pos + 16)?)
-                    .map_err(|_| FormatError::InvalidZip { reason: String::from("central directory offset overflow") })?;
-                let cd_end = cd_offset
-                    .checked_add(cd_size)
-                    .ok_or_else(|| FormatError::InvalidZip { reason: String::from("central directory range overflow") })?;
-                if cd_end > pos {
-                    return Err(FormatError::InvalidZip { reason: String::from("central directory extends past EOCD") });
-                }
-                return Ok(EocdInfo { total_entries, cd_size, cd_offset });
             }
         }
         if pos == min_offset {
@@ -391,7 +415,7 @@ fn locate_eocd(bytes: &[u8]) -> Result<EocdInfo, FormatError> {
         }
         pos -= 1;
     }
-    Err(FormatError::InvalidZip { reason: String::from("missing End of Central Directory record") })
+    Err(candidate_err.unwrap_or_else(|| FormatError::InvalidZip { reason: String::from("missing End of Central Directory record") }))
 }
 
 fn parse_central_directory(bytes: &[u8], eocd: &EocdInfo, limits: ZipLimits) -> Result<Vec<ParsedCdEntry>, FormatError> {

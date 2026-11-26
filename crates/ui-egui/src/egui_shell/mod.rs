@@ -122,13 +122,30 @@ impl EguiShellViewState {
         self.history_cursor = self.active_sheet_history.len().saturating_sub(1);
     }
 
-    /// Prune deleted sheets cleanly and record `active_sheet_id` when missing from cursor.
+    /// Prune deleted sheets cleanly, adjust cursor for removed predecessors, collapse adjacent
+    /// duplicates, and record `active_sheet_id` when missing from cursor.
     pub fn sync_history_with_document(&mut self, doc: &curvebook_doc::ProjectDocument) {
-        self.active_sheet_history.retain(|id| doc_sheet_title(doc, id).is_some());
-        if self.active_sheet_history.is_empty() {
+        let old_cursor = self.history_cursor;
+        let mut new_history = Vec::with_capacity(self.active_sheet_history.len());
+        let mut new_cursor = 0usize;
+        let mut cursor_mapped = false;
+        for (idx, id) in self.active_sheet_history.drain(..).enumerate() {
+            if doc_sheet_title(doc, &id).is_none() {
+                continue;
+            }
+            if new_history.last() != Some(&id) {
+                new_history.push(id);
+            }
+            if idx <= old_cursor {
+                new_cursor = new_history.len().saturating_sub(1);
+                cursor_mapped = true;
+            }
+        }
+        self.active_sheet_history = new_history;
+        if self.active_sheet_history.is_empty() || !cursor_mapped {
             self.history_cursor = 0;
-        } else if self.history_cursor >= self.active_sheet_history.len() {
-            self.history_cursor = self.active_sheet_history.len() - 1;
+        } else {
+            self.history_cursor = new_cursor.min(self.active_sheet_history.len() - 1);
         }
         if let Some(active) = doc.active_sheet_id.as_ref() {
             self.record_active_sheet_visit(active);

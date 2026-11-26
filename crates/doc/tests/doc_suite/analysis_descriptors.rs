@@ -85,20 +85,32 @@ fn descriptors_form_exact_bijection_with_all_analysis_kind_variants() {
         let variant_key = obj.keys().next().expect("variant key present");
         assert_eq!(variant_key, desc.serde_variant, "serde variant mismatch for `{}`", desc.slug);
 
-        // Every concrete top-level struct key produced by Serde must be listed in `canonical_param_keys`
-        // (sub-enums `Transform`/`OutlierDetection`/`Survival`/`Multivariate` wrap another variant layer).
-        if let Some(inner) = obj.get(variant_key).and_then(|v| v.as_object())
-            && !matches!(
+        // Every concrete top-level struct key produced by Serde must be listed in `canonical_param_keys`.
+        // For sub-enums (`Transform`/`OutlierDetection`/`Survival`/`Multivariate`), inspect the inner variant's fields.
+        if let Some(inner) = obj.get(variant_key).and_then(|v| v.as_object()) {
+            if matches!(
                 desc.id,
                 AnalysisKindId::Transform | AnalysisKindId::OutlierDetection | AnalysisKindId::Survival | AnalysisKindId::Multivariate
-            )
-        {
-            for field_key in inner.keys() {
-                assert!(
-                    desc.accepts_canonical_param_key(field_key),
-                    "descriptor `{}` missing serialized canonical param key `{field_key}`",
-                    desc.slug
-                );
+            ) {
+                for sub_val in inner.values() {
+                    if let Some(sub_obj) = sub_val.as_object() {
+                        for field_key in sub_obj.keys() {
+                            assert!(
+                                desc.accepts_canonical_param_key(field_key),
+                                "sub-enum descriptor `{}` missing serialized canonical param key `{field_key}`",
+                                desc.slug
+                            );
+                        }
+                    }
+                }
+            } else {
+                for field_key in inner.keys() {
+                    assert!(
+                        desc.accepts_canonical_param_key(field_key),
+                        "descriptor `{}` missing serialized canonical param key `{field_key}`",
+                        desc.slug
+                    );
+                }
             }
         }
     }

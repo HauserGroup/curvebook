@@ -11,12 +11,16 @@ use crate::i18n::tr;
 use super::helpers::{MediaControlsSpec, StudioButtonSpec, StudioChipSpec, render_canvas_media_buttons, studio_chip, studio_full_button};
 use super::{TrailingStudioContext, TrailingStudioEguiState};
 
-fn arrange_layout_grid_items(spec: &LayoutSpec, rows_u8: u8, cols_u8: u8, margin_mm: u16) -> Vec<LayoutItem> {
+/// Auto-arrange `LiveGraph`/`LiveTable` panels inside the printable page bounds, expanding rows
+/// when `panel_count > rows * cols` so excess panels are never pushed off-page (`AUD-09-19`).
+#[must_use]
+pub fn arrange_layout_grid_items(spec: &LayoutSpec, rows_u8: u8, cols_u8: u8, margin_mm: u16) -> Vec<LayoutItem> {
     let page = spec.page_size_pt();
     let margin = f64::from(margin_mm) * (72.0 / 25.4);
     let gutter = 12.0_f64;
-    let rows = usize::from(rows_u8.max(1));
     let cols = usize::from(cols_u8.max(1));
+    let panel_count = spec.items.iter().filter(|item| matches!(item, LayoutItem::LiveGraph { .. } | LayoutItem::LiveTable { .. })).count();
+    let rows = usize::from(rows_u8.max(1)).max(panel_count.div_ceil(cols));
     let usable_w = (page.width - 2.0 * margin - gutter * ((cols - 1) as f64)).max(40.0);
     let usable_h = (page.height - 2.0 * margin - gutter * ((rows - 1) as f64)).max(40.0);
     let cell_w = usable_w / (cols as f64);

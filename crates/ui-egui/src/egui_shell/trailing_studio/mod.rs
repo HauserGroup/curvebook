@@ -30,6 +30,7 @@ use crate::inspect::ZLayer;
 
 pub use metadata_hooks::collect_info_downstream_references;
 pub use mv_formula::{resolve_formula_operand_highlights, studio_formula_signature};
+pub use page_layout::arrange_layout_grid_items;
 
 use drill_back::render_data_point_drill_back_studio;
 use graph_inspector::render_graph_inspector_studio;
@@ -283,7 +284,8 @@ pub fn resolve_studio_surface(app: &UiApp) -> StudioContextSurface {
         return StudioContextSurface::PageLayoutComposer;
     }
     if doc.graph_sheet(target).is_some() {
-        return if app.brushed_cell.is_some() && !(app.split.enabled && app.split.inspector_pinned) {
+        let valid_brushed = app.brushed_cell.as_ref().is_some_and(|b| doc.data_sheet(&b.sheet_id).is_some());
+        return if valid_brushed && !(app.split.enabled && app.split.inspector_pinned) {
             StudioContextSurface::DataPointDrillBack
         } else {
             StudioContextSurface::GraphInspector

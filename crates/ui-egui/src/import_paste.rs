@@ -1,8 +1,8 @@
 //! Cross-platform Import / Paste Special state and commit pipeline (`ImportReshape` / `Paste Special`).
 
 use curvebook_doc::{
-    Cell, CellCoord, CiBound, DataSheet, ImportFilterSpec, ImportPlacementSpec, PlacementMode, ResultCell, SheetCellRange, SheetId, TableArchetype,
-    TableKind, infer_number_separators,
+    Cell, CellCoord, CiBound, DataSheet, ImportFilterSpec, ImportPlacementSpec, PlacementMode, ResultCell, SheetId, TableArchetype, TableKind,
+    infer_number_separators,
 };
 use curvebook_format::{CsvOptions, collapse_merged_header_rows, parse_delimited_records, write_delimited_records};
 use curvebook_transform::{
@@ -406,9 +406,11 @@ fn commit_external_csv_path(app: &mut UiApp, state: &ImportPasteState, path: &st
     params.insert(String::from("source_path"), json!(path.trim()));
     params.insert(String::from("delimiter"), json!(app.grid.import_reshape.tidy_delimiter.to_string()));
     params.insert(String::from("decimal_separator"), json!(app.grid.import_reshape.decimal_separator.to_string()));
-    let out = app.execute_command("table.pasteLink", Value::Object(params)).map_err(|e| e.to_string())?;
-    maybe_append_provenance_to_info(app, state, Some(target_id.as_str()));
-    Ok(out.payload)
+    app.execute_atomic_group(|a| {
+        let out = a.execute_command("table.pasteLink", Value::Object(params)).map_err(|e| e.to_string())?;
+        maybe_append_provenance_to_info(a, state, Some(target_id.as_str()))?;
+        Ok(out.payload)
+    })
 }
 
 fn commit_external_csv_non_live(app: &mut UiApp, state: &ImportPasteState, path: &str) -> Result<Value, String> {
@@ -443,22 +445,23 @@ fn commit_external_csv_non_live(app: &mut UiApp, state: &ImportPasteState, path:
         params.insert(String::from("replicates"), json!(1));
         None
     };
-    let out = app.execute_command("table.importCsv", Value::Object(params)).map_err(|e| e.to_string())?;
-    let resolved_sid = target_id_opt.as_ref().map_or_else(|| out.payload.get("sheet_id").and_then(Value::as_str), |id| Some(id.as_str()));
-    maybe_append_provenance_to_info(app, state, resolved_sid);
-    Ok(out.payload)
+    app.execute_atomic_group(|a| {
+        let out = a.execute_command("table.importCsv", Value::Object(params)).map_err(|e| e.to_string())?;
+        let resolved_sid = target_id_opt.as_ref().map_or_else(|| out.payload.get("sheet_id").and_then(Value::as_str), |id| Some(id.as_str()));
+        maybe_append_provenance_to_info(a, state, resolved_sid)?;
+        Ok(out.payload)
+    })
 }
 
 fn commit_xlsx_workbook(app: &mut UiApp, state: &ImportPasteState) -> Result<Value, String> {
     let mut params = serde_json::Map::new();
-    if let Some(b64) = state.xlsx_bytes_base64.as_ref().filter(|s| !s.is_empty()) {
+    let path = effective_text(app, WID_PATH, &state.external_path);
+    if !path.trim().is_empty() && (state.xlsx_bytes_base64.as_ref().is_none_or(String::is_empty) || app.grid.import_wizard.xlsx_loaded_from_path) {
+        params.insert(String::from("path"), json!(path.trim()));
+    } else if let Some(b64) = state.xlsx_bytes_base64.as_ref().filter(|s| !s.is_empty()) {
         params.insert(String::from("bytes_base64"), json!(b64));
     } else {
-        let path = effective_text(app, WID_PATH, &state.external_path);
-        if path.trim().is_empty() {
-            return Err(String::from("XLSX import requires a workbook path or bytes payload"));
-        }
-        params.insert(String::from("path"), json!(path.trim()));
+        return Err(String::from("XLSX import requires a workbook path or bytes payload"));
     }
     if !state.xlsx_sheets.is_empty() {
         params.insert(String::from("sheets"), json!(state.xlsx_sheets));
@@ -473,10 +476,12 @@ fn commit_xlsx_workbook(app: &mut UiApp, state: &ImportPasteState) -> Result<Val
     let subcol_wire = if matches!(target_kind, TableKind::Grouped | TableKind::Nested) { "raw_replicates" } else { "single" };
     params.insert(String::from("archetype"), json!(table_kind_wire_name(target_kind)));
     params.insert(String::from("subcolumn_mode"), json!(subcol_wire));
-    let out = app.execute_command("table.importXlsx", Value::Object(params)).map_err(|e| e.to_string())?;
-    let first_sid = out.payload.get("imported_sheet_ids").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str);
-    maybe_append_provenance_to_info(app, state, first_sid);
-    Ok(out.payload)
+    app.execute_atomic_group(|a| {
+        let out = a.execute_command("table.importXlsx", Value::Object(params)).map_err(|e| e.to_string())?;
+        let first_sid = out.payload.get("imported_sheet_ids").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str);
+        maybe_append_provenance_to_info(a, state, first_sid)?;
+        Ok(out.payload)
+    })
 }
 
 fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteState) -> Result<Value, String> {
@@ -486,15 +491,19 @@ fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteState) ->
     if state.source_origin == "reshape" {
         if matches!(app.grid.import_reshape.mode, ImportReshapeMode::Plate96 | ImportReshapeMode::Plate384) {
             let intent = app.grid.import_reshape.build_import_intent()?;
-            let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
-            maybe_append_provenance_to_info(app, state, out.payload.get("sheet_id").and_then(Value::as_str));
-            return Ok(out.payload);
+            return app.execute_atomic_group(|a| {
+                let out = a.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
+                maybe_append_provenance_to_info(a, state, out.payload.get("sheet_id").and_then(Value::as_str))?;
+                Ok(out.payload)
+            });
         }
         if is_fast_path_tidy_pivot(app, state) {
             let intent = app.grid.import_reshape.build_import_intent()?;
-            let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
-            maybe_append_provenance_to_info(app, state, out.payload.get("sheet_id").and_then(Value::as_str));
-            return Ok(out.payload);
+            return app.execute_atomic_group(|a| {
+                let out = a.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
+                maybe_append_provenance_to_info(a, state, out.payload.get("sheet_id").and_then(Value::as_str))?;
+                Ok(out.payload)
+            });
         }
     }
 
@@ -551,9 +560,11 @@ fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteState) ->
             params.insert(String::from("delimiter"), json!(app.grid.import_reshape.tidy_delimiter.to_string()));
             params.insert(String::from("decimal_separator"), json!(app.grid.import_reshape.decimal_separator.to_string()));
         }
-        let out = app.execute_command("table.pasteLink", Value::Object(params)).map_err(|e| e.to_string())?;
-        maybe_append_provenance_to_info(app, state, Some(target_id.as_str()));
-        return Ok(out.payload);
+        return app.execute_atomic_group(|a| {
+            let out = a.execute_command("table.pasteLink", Value::Object(params)).map_err(|e| e.to_string())?;
+            maybe_append_provenance_to_info(a, state, Some(target_id.as_str()))?;
+            Ok(out.payload)
+        });
     }
 
     if state.target_mode == "existing_sheet" {
@@ -562,68 +573,74 @@ fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteState) ->
         if tsv.trim().is_empty() {
             return Err(String::from("no data rows available to paste after filtering"));
         }
-        let out = app
-            .execute_command(
-                "table.paste",
-                json!({
-                    "sheet_id": target_id.as_str(),
-                    "text": tsv,
-                    "delimiter": "\t",
-                    "decimal_separator": ".",
-                    "start_row": state.anchor_row,
-                    "start_col": state.anchor_col,
-                    "start_subcol": state.anchor_subcol,
-                    "mode": state.placement_mode,
-                    "propagate_title_header": state.propagate_title_header,
-                    "skip_contiguous_blanks": state.skip_contiguous_blanks,
-                    "transpose": false,
-                }),
-            )
-            .map_err(|e| e.to_string())?;
-        let placed_start_row =
-            out.payload.pointer("/target_range/start/row").and_then(Value::as_u64).and_then(|r| usize::try_from(r).ok()).unwrap_or(state.anchor_row);
-        if !state.parse_asterisk_exclusions {
-            let placed_start_col = out
-                .payload
-                .pointer("/target_range/start/col")
-                .and_then(Value::as_u64)
-                .and_then(|c| usize::try_from(c).ok())
-                .unwrap_or(state.anchor_col);
-            let placed_start_sub = out
-                .payload
-                .pointer("/target_range/start/subcol")
-                .and_then(Value::as_u64)
-                .and_then(|s| usize::try_from(s).ok())
-                .unwrap_or(state.anchor_subcol);
-            restore_unexcluded_asterisk_cells(app, target_id.as_str(), &preview.rows, placed_start_row, placed_start_col, placed_start_sub, false)?;
-        }
-        if (state.has_row_titles || state.transpose || state.source_origin == "internal_sheet")
-            && !preview.row_labels.is_empty()
-            && !preview.rows.is_empty()
-        {
-            let titles: Vec<Option<String>> = preview
-                .row_labels
-                .iter()
-                .take(preview.rows.len())
-                .map(|lbl| {
-                    let trimmed = lbl.trim();
-                    (!trimmed.is_empty()).then(|| trimmed.to_owned())
-                })
-                .collect();
-            if titles.iter().any(Option::is_some) {
-                app.execute_command(
-                    "table.setRowTitles",
+        return app.execute_atomic_group(|a| {
+            let out = a
+                .execute_command(
+                    "table.paste",
                     json!({
                         "sheet_id": target_id.as_str(),
-                        "start_row": placed_start_row,
-                        "titles": titles,
+                        "text": tsv,
+                        "delimiter": "\t",
+                        "decimal_separator": ".",
+                        "start_row": state.anchor_row,
+                        "start_col": state.anchor_col,
+                        "start_subcol": state.anchor_subcol,
+                        "mode": state.placement_mode,
+                        "propagate_title_header": state.propagate_title_header,
+                        "skip_contiguous_blanks": false,
+                        "transpose": false,
                     }),
                 )
                 .map_err(|e| e.to_string())?;
+            let placed_start_row = out
+                .payload
+                .pointer("/target_range/start/row")
+                .and_then(Value::as_u64)
+                .and_then(|r| usize::try_from(r).ok())
+                .unwrap_or(state.anchor_row);
+            if !state.parse_asterisk_exclusions {
+                let placed_start_col = out
+                    .payload
+                    .pointer("/target_range/start/col")
+                    .and_then(Value::as_u64)
+                    .and_then(|c| usize::try_from(c).ok())
+                    .unwrap_or(state.anchor_col);
+                let placed_start_sub = out
+                    .payload
+                    .pointer("/target_range/start/subcol")
+                    .and_then(Value::as_u64)
+                    .and_then(|s| usize::try_from(s).ok())
+                    .unwrap_or(state.anchor_subcol);
+                restore_unexcluded_asterisk_cells(a, target_id.as_str(), &preview.rows, placed_start_row, placed_start_col, placed_start_sub, false)?;
             }
-        }
-        maybe_append_provenance_to_info(app, state, Some(target_id.as_str()));
-        return Ok(out.payload);
+            if (state.has_row_titles || state.transpose || state.source_origin == "internal_sheet")
+                && !preview.row_labels.is_empty()
+                && !preview.rows.is_empty()
+            {
+                let titles: Vec<Option<String>> = preview
+                    .row_labels
+                    .iter()
+                    .take(preview.rows.len())
+                    .map(|lbl| {
+                        let trimmed = lbl.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                    })
+                    .collect();
+                if titles.iter().any(Option::is_some) {
+                    a.execute_command(
+                        "table.setRowTitles",
+                        json!({
+                            "sheet_id": target_id.as_str(),
+                            "start_row": placed_start_row,
+                            "titles": titles,
+                        }),
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+            maybe_append_provenance_to_info(a, state, Some(target_id.as_str()))?;
+            Ok(out.payload)
+        });
     }
 
     let csv_text = serialize_preview_as_csv_with_headers(&preview);
@@ -632,35 +649,37 @@ fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteState) ->
     }
     let title = {
         let raw = app.grid.import_reshape.title.trim();
-        if raw.is_empty() { "Imported Table" } else { raw }
+        if raw.is_empty() { String::from("Imported Table") } else { raw.to_owned() }
     };
     let target_kind = app.grid.import_reshape.target_kind;
     let subcol_wire = if matches!(target_kind, TableKind::Grouped | TableKind::Nested) { "raw_replicates" } else { "single" };
-    let out = app
-        .execute_command(
-            "table.importCsv",
-            json!({
-                "title": title,
-                "archetype": table_kind_wire_name(target_kind),
-                "subcolumn_mode": subcol_wire,
-                "replicates": 1,
-                "csv": csv_text,
-                "delimiter": "\t",
-                "decimal_separator": ".",
-                "has_header": true,
-                "header_rows": 1,
-                "has_row_titles": !preview.row_labels.is_empty(),
-            }),
-        )
-        .map_err(|e| e.to_string())?;
-    let new_sid = out.payload.get("sheet_id").and_then(Value::as_str);
-    if !state.parse_asterisk_exclusions
-        && let Some(sid) = new_sid
-    {
-        restore_unexcluded_asterisk_cells(app, sid, &preview.rows, 0, 0, 0, target_kind == TableKind::Xy)?;
-    }
-    maybe_append_provenance_to_info(app, state, new_sid);
-    Ok(out.payload)
+    app.execute_atomic_group(|a| {
+        let out = a
+            .execute_command(
+                "table.importCsv",
+                json!({
+                    "title": title,
+                    "archetype": table_kind_wire_name(target_kind),
+                    "subcolumn_mode": subcol_wire,
+                    "replicates": 1,
+                    "csv": csv_text,
+                    "delimiter": "\t",
+                    "decimal_separator": ".",
+                    "has_header": true,
+                    "header_rows": 1,
+                    "has_row_titles": !preview.row_labels.is_empty(),
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+        let new_sid = out.payload.get("sheet_id").and_then(Value::as_str);
+        if !state.parse_asterisk_exclusions
+            && let Some(sid) = new_sid
+        {
+            restore_unexcluded_asterisk_cells(a, sid, &preview.rows, 0, 0, 0, target_kind == TableKind::Xy)?;
+        }
+        maybe_append_provenance_to_info(a, state, new_sid)?;
+        Ok(out.payload)
+    })
 }
 
 fn restore_unexcluded_asterisk_cells(
@@ -672,6 +691,16 @@ fn restore_unexcluded_asterisk_cells(
     start_subcol: usize,
     first_col_is_x: bool,
 ) -> Result<(), String> {
+    let ds_opt = app.document().data_sheet(&SheetId::new(sheet_id)).cloned();
+    let x_subs = if first_col_is_x {
+        match ds_opt.as_ref().map(|d| &d.archetype) {
+            Some(TableArchetype::Xy(xy)) => xy.x_mode.subcolumn_count().max(1),
+            _ => 1,
+        }
+    } else {
+        0
+    };
+    let base_flat = ds_opt.as_ref().map_or(start_col, |ds| crate::grid_view::flat_index_for_coord(&ds.archetype, start_col, start_subcol));
     let mut cell_edits = Vec::new();
     let mut x_edits = Vec::new();
     for (r_off, row) in rows.iter().enumerate() {
@@ -681,20 +710,24 @@ fn restore_unexcluded_asterisk_cells(
                 && (s.starts_with('*') || s.ends_with('*'))
             {
                 let target_row = start_row + r_off;
-                if first_col_is_x && c_off == 0 {
+                if first_col_is_x && c_off < x_subs {
                     x_edits.push(json!({
                         "row": target_row,
-                        "subcol": 0,
+                        "subcol": c_off,
                         "value": s,
                         "excluded": false,
                         "parse_asterisk_exclusion": false,
                     }));
                 } else {
-                    let target_col = if first_col_is_x { start_col + c_off - 1 } else { start_col + c_off };
+                    let data_c_off = c_off.saturating_sub(x_subs);
+                    let (target_col, target_subcol) = ds_opt
+                        .as_ref()
+                        .and_then(|ds| crate::grid_view::resolve_flat_coord(&ds.archetype, base_flat + data_c_off))
+                        .unwrap_or((start_col + data_c_off, start_subcol));
                     cell_edits.push(json!({
                         "row": target_row,
                         "col": target_col,
-                        "subcol": start_subcol,
+                        "subcol": target_subcol,
                         "value": s,
                         "excluded": false,
                         "parse_asterisk_exclusion": false,
@@ -725,18 +758,19 @@ fn resolve_existing_target_sheet(app: &UiApp, state: &ImportPasteState) -> Resul
     app.document().data_sheets.first().map(|d| d.id.clone()).ok_or_else(|| String::from("no target data sheet exists"))
 }
 
-fn maybe_append_provenance_to_info(app: &mut UiApp, state: &ImportPasteState, target_sheet_id: Option<&str>) {
+fn maybe_append_provenance_to_info(app: &mut UiApp, state: &ImportPasteState, target_sheet_id: Option<&str>) -> Result<(), String> {
     if !state.record_in_info_sheet || state.provenance_notes.trim().is_empty() {
-        return;
+        return Ok(());
     }
     let info_id = target_sheet_id
         .and_then(|sid| app.document().data_sheet(&SheetId::new(sid)).and_then(|d| d.info_sheet_id.clone()))
         .or_else(|| app.document().info_sheets.first().map(|i| i.id.clone()));
     let Some(iid) = info_id else {
-        return;
+        return Ok(());
     };
     let line = format!("- [Import {}] {}", state.link_id.trim(), state.provenance_notes.trim());
     let _ = app.execute_command("info.setNote", json!({ "sheet_id": iid.as_str(), "text": line, "append": true }));
+    Ok(())
 }
 
 fn table_kind_wire_name(kind: TableKind) -> &'static str {
@@ -746,7 +780,9 @@ fn table_kind_wire_name(kind: TableKind) -> &'static str {
         TableKind::Xy => "Xy",
         TableKind::MultipleVariables => "MultipleVariables",
         TableKind::Contingency => "Contingency",
-        _ => "Column",
+        TableKind::Survival => "Survival",
+        TableKind::PartsOfWhole => "PartsOfWhole",
+        TableKind::Nested => "Nested",
     }
 }
 
@@ -767,7 +803,21 @@ fn serialize_preview_as_tsv(preview: &ImportPreviewGrid, include_headers: bool) 
     for row in &preview.rows {
         records.push(row.iter().map(format_preview_cell_preserving_newlines).collect());
     }
-    write_delimited_records(&records, &CsvOptions::tsv())
+    let opts = CsvOptions::tsv();
+    let mut out = String::new();
+    for (r_idx, row) in records.iter().enumerate() {
+        if r_idx > 0 {
+            out.push('\n');
+        }
+        if row.is_empty() || (row.len() == 1 && row[0].is_empty()) {
+            // Preserve intentional single-column blank separator rows through `table.paste`'s
+            // delimited scanner, which skips bare unquoted empty lines.
+            out.push_str("\"\"");
+        } else {
+            out.push_str(&write_delimited_records(std::slice::from_ref(row), &opts));
+        }
+    }
+    out
 }
 
 fn serialize_preview_as_csv_with_headers(preview: &ImportPreviewGrid) -> String {
@@ -847,7 +897,6 @@ fn compute_import_preview(app: &UiApp, state: &ImportPasteState) -> ImportPrevie
             return ImportPreviewGrid { headers: Vec::new(), row_labels: Vec::new(), rows: Vec::new(), validation_error: Some(err.to_string()) };
         }
     };
-    records.retain(|row| row.iter().any(|c| !c.trim().is_empty()) || !state.skip_contiguous_blanks);
     if records.is_empty() {
         return ImportPreviewGrid {
             headers: Vec::new(),
@@ -885,8 +934,10 @@ fn compute_import_preview(app: &UiApp, state: &ImportPasteState) -> ImportPrevie
         let _ = headers.remove(0);
     }
 
-    let (headers, row_labels, rows, _excluded_count) = apply_filter_and_placement_to_grid(headers, row_labels, grid, state, &app.locale_preset);
-    ImportPreviewGrid { headers, row_labels, rows, validation_error: None }
+    match apply_filter_and_placement_to_grid(headers, row_labels, grid, state, &app.locale_preset) {
+        Ok((headers, row_labels, rows, _excluded_count)) => ImportPreviewGrid { headers, row_labels, rows, validation_error: None },
+        Err(err) => ImportPreviewGrid { headers: Vec::new(), row_labels: Vec::new(), rows: Vec::new(), validation_error: Some(err) },
+    }
 }
 
 fn compute_plate_preview(app: &UiApp, state: &ImportPasteState) -> ImportPreviewGrid {
@@ -916,10 +967,16 @@ fn compute_plate_preview(app: &UiApp, state: &ImportPasteState) -> ImportPreview
                 target,
                 st.subtract_blank_mean,
             ) {
-                let (_headers, _row_labels, _rows, _excluded_count) = extract_datasheet_preview_grid(&ds, &app.locale_preset);
-                let (headers, row_labels, rows, _excluded_count) =
-                    apply_filter_and_placement_to_grid(_headers, _row_labels, _rows, state, &app.locale_preset);
-                return ImportPreviewGrid { headers, row_labels, rows, validation_error: None };
+                match extract_datasheet_preview_grid(&ds, &app.locale_preset)
+                    .and_then(|(h, rl, g, _)| apply_filter_and_placement_to_grid(h, rl, g, state, &app.locale_preset))
+                {
+                    Ok((headers, row_labels, rows, _excluded_count)) => {
+                        return ImportPreviewGrid { headers, row_labels, rows, validation_error: None };
+                    }
+                    Err(err) => {
+                        return ImportPreviewGrid { headers: Vec::new(), row_labels: Vec::new(), rows: Vec::new(), validation_error: Some(err) };
+                    }
+                }
             }
         }
     }
@@ -1080,19 +1137,23 @@ fn compute_tidy_pivot_preview(app: &UiApp, state: &ImportPasteState, mut records
         target,
         st.decimal_separator,
     ) {
-        Ok(ds) => {
-            let (hdrs, r_labels, mut grid, _) = extract_datasheet_preview_grid(&ds, &app.locale_preset);
-            restore_tidy_asterisk_cells(&mut grid, &asterisk_originals);
-            let mut post_state = state.clone();
-            post_state.row_start.clear();
-            post_state.row_end.clear();
-            post_state.col_start.clear();
-            post_state.col_end.clear();
-            post_state.decimate_every_k = 1;
-            post_state.unstack_enabled = false;
-            let (hdrs, r_labels, rows, _excl) = apply_filter_and_placement_to_grid(hdrs, r_labels, grid, &post_state, &app.locale_preset);
-            ImportPreviewGrid { headers: hdrs, row_labels: r_labels, rows, validation_error: None }
-        }
+        Ok(ds) => match extract_datasheet_preview_grid(&ds, &app.locale_preset) {
+            Ok((hdrs, r_labels, mut grid, _)) => {
+                restore_tidy_asterisk_cells(&mut grid, &asterisk_originals);
+                let mut post_state = state.clone();
+                post_state.row_start.clear();
+                post_state.row_end.clear();
+                post_state.col_start.clear();
+                post_state.col_end.clear();
+                post_state.decimate_every_k = 1;
+                post_state.unstack_enabled = false;
+                match apply_filter_and_placement_to_grid(hdrs, r_labels, grid, &post_state, &app.locale_preset) {
+                    Ok((hdrs, r_labels, rows, _excl)) => ImportPreviewGrid { headers: hdrs, row_labels: r_labels, rows, validation_error: None },
+                    Err(err) => ImportPreviewGrid { headers, row_labels: Vec::new(), rows: Vec::new(), validation_error: Some(err) },
+                }
+            }
+            Err(err) => ImportPreviewGrid { headers, row_labels: Vec::new(), rows: Vec::new(), validation_error: Some(err) },
+        },
         Err(err) => ImportPreviewGrid { headers, row_labels: Vec::new(), rows: Vec::new(), validation_error: Some(err.to_string()) },
     }
 }
@@ -1123,14 +1184,22 @@ fn compute_internal_sheet_preview(app: &UiApp, state: &ImportPasteState) -> Impo
     let sid = SheetId::new(sid_str);
     let doc = app.document();
     if let Some(ds) = doc.data_sheet(&sid) {
-        let (headers, row_labels, grid, _) = extract_datasheet_preview_grid(ds, &app.locale_preset);
-        let (headers, row_labels, rows, _excluded_count) = apply_filter_and_placement_to_grid(headers, row_labels, grid, state, &app.locale_preset);
-        return ImportPreviewGrid { headers, row_labels, rows, validation_error: None };
+        return match extract_datasheet_preview_grid(ds, &app.locale_preset)
+            .and_then(|(h, rl, g, _)| apply_filter_and_placement_to_grid(h, rl, g, state, &app.locale_preset))
+        {
+            Ok((headers, row_labels, rows, _excluded_count)) => ImportPreviewGrid { headers, row_labels, rows, validation_error: None },
+            Err(err) => ImportPreviewGrid { headers: Vec::new(), row_labels: Vec::new(), rows: Vec::new(), validation_error: Some(err) },
+        };
     }
     if let Some(rs) = doc.result_sheet(&sid) {
-        let (headers, row_labels, grid) = extract_resultsheet_preview_grid(rs);
-        let (headers, row_labels, rows, _excluded_count) = apply_filter_and_placement_to_grid(headers, row_labels, grid, state, &app.locale_preset);
-        return ImportPreviewGrid { headers, row_labels, rows, validation_error: None };
+        let active_tab_idx =
+            (app.canvas_dialogs.result_view.result_sheet_id.as_ref() == Some(&sid)).then_some(app.canvas_dialogs.result_view.active_tab_index);
+        return match extract_resultsheet_preview_grid(rs, active_tab_idx)
+            .and_then(|(h, rl, g)| apply_filter_and_placement_to_grid(h, rl, g, state, &app.locale_preset))
+        {
+            Ok((headers, row_labels, rows, _excluded_count)) => ImportPreviewGrid { headers, row_labels, rows, validation_error: None },
+            Err(err) => ImportPreviewGrid { headers: Vec::new(), row_labels: Vec::new(), rows: Vec::new(), validation_error: Some(err) },
+        };
     }
     ImportPreviewGrid {
         headers: Vec::new(),
@@ -1146,7 +1215,7 @@ fn apply_filter_and_placement_to_grid(
     mut grid: Vec<Vec<Cell>>,
     state: &ImportPasteState,
     preset: &LocalePreset,
-) -> (Vec<String>, Vec<String>, Vec<Vec<Cell>>, usize) {
+) -> Result<ExtractedSheetGrid, String> {
     let filter = build_filter_spec(state);
     if let Some((r0, r1)) = filter.row_window {
         if r0 < grid.len() {
@@ -1190,7 +1259,7 @@ fn apply_filter_and_placement_to_grid(
     if let Some(gcol) = filter.unstack_group_column
         && !grid.is_empty()
     {
-        let (unstacked, new_headers) = unstack_preview_grid(&grid, gcol, preset);
+        let (unstacked, new_headers) = unstack_preview_grid(&grid, gcol, preset)?;
         grid = unstacked;
         headers = new_headers;
         row_labels.clear();
@@ -1215,7 +1284,8 @@ fn apply_filter_and_placement_to_grid(
     }
 
     let pat = state.filter_pattern.trim().to_ascii_lowercase();
-    let pred = parse_simple_row_predicate(&state.exclude_predicate);
+    let effective_col_count = grid.iter().map(Vec::len).max().unwrap_or(0).max(headers.len());
+    let pred = parse_simple_row_predicate(&state.exclude_predicate, &headers, effective_col_count)?;
     for row in &mut grid {
         let row_matches_pred = pred.as_ref().is_some_and(|p| p.matches_row(row));
         for cell in row.iter_mut() {
@@ -1240,6 +1310,13 @@ fn apply_filter_and_placement_to_grid(
     }
 
     if state.row_wrap_width > 0 {
+        if state.row_wrap_width > curvebook_doc::MAX_DATA_SETS {
+            return Err(format!("row wrap width {} exceeds maximum of {} columns", state.row_wrap_width, curvebook_doc::MAX_DATA_SETS));
+        }
+        let flat_len: usize = grid.iter().map(Vec::len).sum();
+        if flat_len > curvebook_doc::MAX_SHEET_CELLS {
+            return Err(format!("wrapped grid ({flat_len} cells) exceeds maximum of {} cells", curvebook_doc::MAX_SHEET_CELLS));
+        }
         let flat: Vec<Cell> = grid.into_iter().flatten().collect();
         grid = flat.chunks(state.row_wrap_width).map(<[Cell]>::to_vec).collect();
         headers = (0..state.row_wrap_width).map(curvebook_doc::default_column_label).collect();
@@ -1251,10 +1328,10 @@ fn apply_filter_and_placement_to_grid(
         headers = (0..max_cols).map(curvebook_doc::default_column_label).collect();
     }
     let excluded_count = grid.iter().flatten().filter(|c| c.excluded).count();
-    (headers, row_labels, grid, excluded_count)
+    Ok((headers, row_labels, grid, excluded_count))
 }
 
-fn unstack_preview_grid(grid: &[Vec<Cell>], group_col: usize, preset: &LocalePreset) -> (Vec<Vec<Cell>>, Vec<String>) {
+fn unstack_preview_grid(grid: &[Vec<Cell>], group_col: usize, preset: &LocalePreset) -> Result<(Vec<Vec<Cell>>, Vec<String>), String> {
     let mut order: Vec<String> = Vec::new();
     let mut buckets: std::collections::BTreeMap<String, Vec<Cell>> = std::collections::BTreeMap::new();
     for row in grid {
@@ -1267,12 +1344,19 @@ fn unstack_preview_grid(grid: &[Vec<Cell>], group_col: usize, preset: &LocalePre
         }
         let val_cell = row.iter().enumerate().find(|&(i, _)| i != group_col).map_or_else(Cell::empty, |(_, c)| c.clone());
         if !buckets.contains_key(&key) {
+            if order.len() >= curvebook_doc::MAX_DATA_SETS {
+                return Err(format!("unstack produced more than {} distinct groups", curvebook_doc::MAX_DATA_SETS));
+            }
             order.push(key.clone());
         }
         buckets.entry(key).or_default().push(val_cell);
     }
     let max_rows = buckets.values().map(Vec::len).max().unwrap_or(0);
     let cols = order.len();
+    let total_cells = max_rows.checked_mul(cols).ok_or_else(|| String::from("unstack output dimensions overflow cell limit"))?;
+    if total_cells > curvebook_doc::MAX_SHEET_CELLS {
+        return Err(format!("unstack output ({max_rows}x{cols} = {total_cells} cells) exceeds maximum of {} cells", curvebook_doc::MAX_SHEET_CELLS));
+    }
     let mut out = vec![vec![Cell::empty(); cols]; max_rows];
     for (c, k) in order.iter().enumerate() {
         if let Some(vals) = buckets.get(k) {
@@ -1283,7 +1367,7 @@ fn unstack_preview_grid(grid: &[Vec<Cell>], group_col: usize, preset: &LocalePre
             }
         }
     }
-    (out, order)
+    Ok((out, order))
 }
 
 struct SimpleRowPred {
@@ -1304,145 +1388,205 @@ impl SimpleRowPred {
             ">" => v > self.threshold,
             ">=" => v >= self.threshold,
             "==" => (v - self.threshold).abs() < 1e-12,
+            "!=" => (v - self.threshold).abs() >= 1e-12,
             _ => false,
         })
     }
 }
 
-fn parse_simple_row_predicate(raw: &str) -> Option<SimpleRowPred> {
-    let s = raw.trim();
-    if s.is_empty() {
+fn parse_excel_column_label(label: &str) -> Option<usize> {
+    if label.is_empty() || !label.chars().all(|c| c.is_ascii_alphabetic()) {
         return None;
     }
-    for op in ["<=", ">=", "==", "<", ">"] {
-        if let Some((lhs, rhs)) = s.split_once(op)
-            && let Ok(threshold) = rhs.trim().parse::<f64>()
-            && threshold.is_finite()
-        {
-            let l = lhs.trim();
-            let col_idx = if l.is_empty() {
-                None
-            } else if l.len() == 1 && l.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
-                let c = l.chars().next()?.to_ascii_uppercase() as u8;
-                Some(usize::from(c.saturating_sub(b'A')))
-            } else {
-                l.parse::<usize>().ok()
-            };
-            return Some(SimpleRowPred { col_idx, op, threshold });
-        }
+    let mut acc: usize = 0;
+    for ch in label.bytes() {
+        let digit = usize::from(ch.to_ascii_uppercase().checked_sub(b'A')?) + 1;
+        acc = acc.checked_mul(26)?.checked_add(digit)?;
     }
-    None
+    acc.checked_sub(1)
 }
 
-fn extract_datasheet_preview_grid(ds: &DataSheet, preset: &LocalePreset) -> (Vec<String>, Vec<String>, Vec<Vec<Cell>>, usize) {
-    let row_count = ds.archetype.row_count().min(200);
-    let mut headers = Vec::new();
-    let mut grid = vec![Vec::new(); row_count];
-    let mut row_labels = Vec::new();
+fn parse_simple_row_predicate(raw: &str, headers: &[String], col_count: usize) -> Result<Option<SimpleRowPred>, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let Some((op, lhs, rhs)) = ["<=", ">=", "==", "!=", "<", ">"].into_iter().find_map(|op| s.split_once(op).map(|(l, r)| (op, l, r))) else {
+        return Err(format!("invalid exclude predicate `{s}`: expected `<column> <op> <number>` with op in <, <=, >, >=, ==, !="));
+    };
+    let threshold = rhs
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| format!("invalid numeric threshold `{}` in exclude predicate `{s}`", rhs.trim()))?;
+    let l = lhs.trim();
+    if l.is_empty() || l == "*" || l.eq_ignore_ascii_case("any") {
+        return Ok(Some(SimpleRowPred { col_idx: None, op, threshold }));
+    }
+    let unquoted =
+        l.strip_prefix('[').and_then(|t| t.strip_suffix(']')).or_else(|| l.strip_prefix('"').and_then(|t| t.strip_suffix('"'))).map_or(l, str::trim);
+    if let Some(pos) = headers.iter().position(|h| !h.trim().is_empty() && h.trim().eq_ignore_ascii_case(unquoted)) {
+        return Ok(Some(SimpleRowPred { col_idx: Some(pos), op, threshold }));
+    }
+    if let Ok(idx) = unquoted.parse::<usize>() {
+        if idx < col_count {
+            return Ok(Some(SimpleRowPred { col_idx: Some(idx), op, threshold }));
+        }
+        return Err(format!("exclude predicate column index `{idx}` out of bounds (table has {col_count} columns)"));
+    }
+    if let Some(idx) = parse_excel_column_label(unquoted) {
+        if idx < col_count {
+            return Ok(Some(SimpleRowPred { col_idx: Some(idx), op, threshold }));
+        }
+        return Err(format!("exclude predicate column `{unquoted}` not found in headers or column range (0..{col_count})"));
+    }
+    Err(format!("unknown exclude predicate column `{l}`"))
+}
 
-    match &ds.archetype {
-        TableArchetype::Xy(xy) => {
-            headers.push(if xy.x_title.trim().is_empty() { String::from("X") } else { xy.x_title.clone() });
-            row_labels = xy.row_titles.iter().take(row_count).cloned().collect();
-            for (r, row_slot) in grid.iter_mut().enumerate() {
-                row_slot.push(xy.x_cells.get(r).and_then(|x| x.first()).cloned().unwrap_or_default());
-                for dcol in &xy.data_sets {
-                    let subs = xy.y_subcolumn_mode.subcolumn_count();
-                    for s in 0..subs {
-                        row_slot.push(dcol.cells.get(r).and_then(|rc| rc.get(s)).cloned().unwrap_or_default());
-                    }
-                }
-            }
-            for dcol in &xy.data_sets {
-                let subs = xy.y_subcolumn_mode.subcolumn_count();
-                for s in 0..subs {
-                    if subs == 1 {
-                        headers.push(dcol.title.clone());
-                    } else {
-                        headers.push(format!("{}:{}", dcol.title, s + 1));
-                    }
-                }
+fn check_extract_cell_budget(rows: usize, cols: usize, label: &str) -> Result<(), String> {
+    let total = rows.checked_mul(cols).ok_or_else(|| format!("{label} dimensions ({rows}x{cols}) overflow cell limit"))?;
+    if total > curvebook_doc::MAX_SHEET_CELLS {
+        return Err(format!("{label} ({rows}x{cols} = {total} cells) exceeds maximum of {} cells", curvebook_doc::MAX_SHEET_CELLS));
+    }
+    Ok(())
+}
+
+type ExtractedSheetGrid = (Vec<String>, Vec<String>, Vec<Vec<Cell>>, usize);
+type ExtractedResultGrid = (Vec<String>, Vec<String>, Vec<Vec<Cell>>);
+
+fn append_subcolumn_datasets(data_sets: &[curvebook_doc::DataSetColumn], subs: usize, headers: &mut Vec<String>, grid: &mut [Vec<Cell>]) {
+    let subs = subs.max(1);
+    for dcol in data_sets {
+        for s in 0..subs {
+            headers.push(if subs == 1 { dcol.title.clone() } else { format!("{}:{}", dcol.title, s + 1) });
+        }
+    }
+    for (r, row_slot) in grid.iter_mut().enumerate() {
+        for dcol in data_sets {
+            for s in 0..subs {
+                row_slot.push(dcol.cells.get(r).and_then(|rc| rc.get(s)).cloned().unwrap_or_default());
             }
         }
+    }
+}
+
+fn extract_xy_preview(xy: &curvebook_doc::XyTable, row_count: usize, headers: &mut Vec<String>, grid: &mut [Vec<Cell>]) -> Vec<String> {
+    let x_base = if xy.x_title.trim().is_empty() { String::from("X") } else { xy.x_title.clone() };
+    let x_subs = xy.x_mode.subcolumn_count();
+    if x_subs <= 1 {
+        headers.push(x_base);
+    } else {
+        for s in 0..x_subs {
+            headers.push(if s == 0 { x_base.clone() } else { format!("{x_base}:{}", s + 1) });
+        }
+    }
+    for (r, row_slot) in grid.iter_mut().enumerate() {
+        if x_subs == 0 {
+            row_slot.push(xy.materialized_x_cell_at(r));
+        } else {
+            for s in 0..x_subs {
+                row_slot.push(xy.x_cells.get(r).and_then(|x| x.get(s)).cloned().unwrap_or_default());
+            }
+        }
+    }
+    append_subcolumn_datasets(&xy.data_sets, xy.y_subcolumn_mode.subcolumn_count(), headers, grid);
+    xy.row_titles.iter().take(row_count).cloned().collect()
+}
+
+fn extract_nested_preview(nst: &curvebook_doc::NestedTable, row_count: usize, headers: &mut Vec<String>, grid: &mut [Vec<Cell>]) -> Vec<String> {
+    for grp in &nst.groups {
+        let units = grp.biological_unit_count().max(1);
+        for u in 0..units {
+            let sub_title = grp.subcolumn_titles.get(u).map(String::as_str).unwrap_or("").trim();
+            if sub_title.is_empty() {
+                headers.push(format!("{}:{}", grp.title, u + 1));
+            } else {
+                headers.push(sub_title.to_owned());
+            }
+        }
+    }
+    for (r, row_slot) in grid.iter_mut().enumerate() {
+        for grp in &nst.groups {
+            let units = grp.biological_unit_count().max(1);
+            for u in 0..units {
+                row_slot.push(grp.cells.get(r).and_then(|rc| rc.get(u)).cloned().unwrap_or_default());
+            }
+        }
+    }
+    nst.row_titles.iter().take(row_count).cloned().collect()
+}
+
+fn extract_datasheet_preview_grid(ds: &DataSheet, preset: &LocalePreset) -> Result<ExtractedSheetGrid, String> {
+    let row_count = ds.archetype.row_count();
+    let flat_cols = match &ds.archetype {
+        TableArchetype::Xy(xy) => {
+            let x_subs = xy.x_mode.subcolumn_count().max(1);
+            x_subs.saturating_add(xy.data_sets.len().saturating_mul(xy.y_subcolumn_mode.subcolumn_count().max(1)))
+        }
+        TableArchetype::Column(col) => col.data_sets.len().saturating_mul(col.subcolumn_mode.subcolumn_count().max(1)),
+        TableArchetype::Grouped(grp) => grp.data_sets.len().saturating_mul(grp.subcolumn_mode.subcolumn_count().max(1)),
+        TableArchetype::MultipleVariables(mv) => mv.variables.len(),
+        TableArchetype::Contingency(ct) => ct.data_sets.len(),
+        TableArchetype::Survival(surv) => 1usize.saturating_add(surv.cohorts.len()),
+        TableArchetype::PartsOfWhole(pow) => pow.data_sets.len(),
+        TableArchetype::Nested(nst) => nst.groups.iter().map(|g| g.biological_unit_count().max(1)).sum(),
+    };
+    check_extract_cell_budget(row_count, flat_cols, "internal data sheet extraction")?;
+
+    let mut headers = Vec::with_capacity(flat_cols);
+    let mut grid = vec![Vec::with_capacity(flat_cols); row_count];
+    let row_labels = match &ds.archetype {
+        TableArchetype::Xy(xy) => extract_xy_preview(xy, row_count, &mut headers, &mut grid),
         TableArchetype::Column(col) => {
-            row_labels = col.row_titles.iter().take(row_count).cloned().collect();
-            for dcol in &col.data_sets {
-                let subs = col.subcolumn_mode.subcolumn_count();
-                for s in 0..subs {
-                    headers.push(if subs == 1 { dcol.title.clone() } else { format!("{}:{}", dcol.title, s + 1) });
-                }
-            }
-            for (r, row_slot) in grid.iter_mut().enumerate() {
-                for dcol in &col.data_sets {
-                    let subs = col.subcolumn_mode.subcolumn_count();
-                    for s in 0..subs {
-                        row_slot.push(dcol.cells.get(r).and_then(|rc| rc.get(s)).cloned().unwrap_or_default());
-                    }
-                }
-            }
+            append_subcolumn_datasets(&col.data_sets, col.subcolumn_mode.subcolumn_count(), &mut headers, &mut grid);
+            col.row_titles.iter().take(row_count).cloned().collect()
         }
         TableArchetype::Grouped(grp) => {
-            row_labels = grp.row_titles.iter().take(row_count).cloned().collect();
-            for dcol in &grp.data_sets {
-                let subs = grp.subcolumn_mode.subcolumn_count();
-                for s in 0..subs {
-                    headers.push(if subs == 1 { dcol.title.clone() } else { format!("{}:{}", dcol.title, s + 1) });
-                }
-            }
-            for (r, row_slot) in grid.iter_mut().enumerate() {
-                for dcol in &grp.data_sets {
-                    let subs = grp.subcolumn_mode.subcolumn_count();
-                    for s in 0..subs {
-                        row_slot.push(dcol.cells.get(r).and_then(|rc| rc.get(s)).cloned().unwrap_or_default());
-                    }
-                }
-            }
+            append_subcolumn_datasets(&grp.data_sets, grp.subcolumn_mode.subcolumn_count(), &mut headers, &mut grid);
+            grp.row_titles.iter().take(row_count).cloned().collect()
         }
         TableArchetype::MultipleVariables(mv) => {
-            row_labels = mv.row_titles.iter().take(row_count).cloned().collect();
-            for v in &mv.variables {
-                headers.push(v.title.clone());
-            }
+            headers.extend(mv.variables.iter().map(|v| v.title.clone()));
             for (r, row_slot) in grid.iter_mut().enumerate() {
-                for v in &mv.variables {
-                    row_slot.push(v.cells.get(r).cloned().unwrap_or_default());
-                }
+                row_slot.extend(mv.variables.iter().map(|v| v.cells.get(r).cloned().unwrap_or_default()));
             }
+            mv.row_titles.iter().take(row_count).cloned().collect()
         }
         TableArchetype::Contingency(ct) => {
-            row_labels = ct.row_titles.iter().take(row_count).cloned().collect();
-            for dcol in &ct.data_sets {
-                headers.push(dcol.title.clone());
-            }
+            append_subcolumn_datasets(&ct.data_sets, 1, &mut headers, &mut grid);
+            ct.row_titles.iter().take(row_count).cloned().collect()
+        }
+        TableArchetype::Survival(surv) => {
+            headers.push(if surv.time_title.trim().is_empty() { String::from("Elapsed Time") } else { surv.time_title.clone() });
             for (r, row_slot) in grid.iter_mut().enumerate() {
-                for dcol in &ct.data_sets {
-                    row_slot.push(dcol.cells.get(r).and_then(|rc| rc.first()).cloned().unwrap_or_default());
-                }
+                row_slot.push(surv.times.get(r).cloned().unwrap_or_default());
             }
+            append_subcolumn_datasets(&surv.cohorts, 1, &mut headers, &mut grid);
+            surv.row_titles.iter().take(row_count).cloned().collect()
         }
-        _ => {
-            let full = ds.extract_cell_grid(SheetCellRange::new(CellCoord::default(), CellCoord::new(row_count, 32, 8)));
-            grid = full;
-            let cols = grid.first().map_or(0, Vec::len);
-            headers =
-                (0..cols).map(|c| crate::dialogs_canvas::data_column_title(ds, c).map_or_else(|| format!("C{}", c + 1), str::to_owned)).collect();
+        TableArchetype::PartsOfWhole(pow) => {
+            append_subcolumn_datasets(&pow.data_sets, 1, &mut headers, &mut grid);
+            pow.slice_labels.iter().take(row_count).cloned().collect()
         }
-    }
+        TableArchetype::Nested(nst) => extract_nested_preview(nst, row_count, &mut headers, &mut grid),
+    };
     let _ = preset;
     let excl = grid.iter().flatten().filter(|c| c.excluded).count();
-    (headers, row_labels, grid, excl)
+    Ok((headers, row_labels, grid, excl))
 }
 
-fn extract_resultsheet_preview_grid(rs: &curvebook_doc::ResultSheet) -> (Vec<String>, Vec<String>, Vec<Vec<Cell>>) {
-    let Some(tab) = rs.tabs.first() else {
-        return (Vec::new(), Vec::new(), Vec::new());
+fn extract_resultsheet_preview_grid(rs: &curvebook_doc::ResultSheet, active_tab_index: Option<usize>) -> Result<ExtractedResultGrid, String> {
+    let Some(tab) = active_tab_index.and_then(|idx| rs.tabs.get(idx)).or_else(|| rs.tabs.first()) else {
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     };
+    let col_count = tab.column_headers.len().max(tab.rows.iter().map(Vec::len).max().unwrap_or(0));
+    check_extract_cell_budget(tab.rows.len(), col_count, "internal result sheet extraction")?;
     let headers = tab.column_headers.clone();
     let row_labels = tab.row_labels.clone();
     let rows = tab
         .rows
         .iter()
-        .take(200)
         .map(|r| {
             r.iter()
                 .map(|rc| match rc {
@@ -1453,11 +1597,11 @@ fn extract_resultsheet_preview_grid(rs: &curvebook_doc::ResultSheet) -> (Vec<Str
                     ResultCell::Boolean(b) => Cell::number(if *b { 1.0 } else { 0.0 }),
                     ResultCell::ConfidenceInterval { lower, upper } => {
                         let lo = match lower {
-                            CiBound::Finite(v) => format!("{v:.3}"),
+                            CiBound::Finite(v) => v.to_string(),
                             CiBound::Open => String::from("-inf"),
                         };
                         let hi = match upper {
-                            CiBound::Finite(v) => format!("{v:.3}"),
+                            CiBound::Finite(v) => v.to_string(),
                             CiBound::Open => String::from("+inf"),
                         };
                         Cell::text(format!("[{lo}, {hi}]"))
@@ -1466,5 +1610,5 @@ fn extract_resultsheet_preview_grid(rs: &curvebook_doc::ResultSheet) -> (Vec<Str
                 .collect()
         })
         .collect();
-    (headers, row_labels, rows)
+    Ok((headers, row_labels, rows))
 }

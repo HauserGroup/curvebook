@@ -47,6 +47,7 @@ fn render_randomize_groups_modal(
     intents: &mut PendingUiIntents,
 ) -> StatsModalFrameReport {
     let rg = &app.canvas_dialogs.randomize_groups;
+    let ok_en = crate::modal_predicates::evaluate_dialog_button_for_app(app, "ok").unwrap_or_else(ControlEnablement::enabled);
     let mut dummy = ();
     let capture = show_wave4_modal(
         ctx,
@@ -76,6 +77,8 @@ fn render_randomize_groups_modal(
                     if render_modal_seg_btn(ui, tokens, meta, wid, lbl, false, &ControlEnablement::enabled()) {
                         let mut next = rg.clone();
                         let _ = next.set_groups_from_str(raw);
+                        let w_sum = next.groups.iter().map(|(_, w)| *w).sum::<usize>().max(1);
+                        next.block_sizes = vec![(w_sum.saturating_mul(2)).clamp(w_sum, 64)];
                         intents.push(UiIntent::UpdateRandomizeGroupsState(Box::new(next)));
                     }
                 }
@@ -122,10 +125,16 @@ fn render_randomize_groups_modal(
             ) {
                 let mut next = rg.clone();
                 next.scheme = RandomizationSchemeKind::PermutedBlock;
+                let w_sum = next.groups.iter().map(|(_, w)| *w).sum::<usize>().max(1);
+                if next.block_sizes.first().copied().is_none_or(|b| b == 0 || !b.is_multiple_of(w_sum)) {
+                    next.block_sizes = vec![(w_sum.saturating_mul(2)).clamp(w_sum, 64)];
+                }
                 intents.push(UiIntent::UpdateRandomizeGroupsState(Box::new(next)));
             }
             if rg.scheme == RandomizationSchemeKind::PermutedBlock {
-                let blk = rg.block_sizes.first().copied().unwrap_or(4);
+                let w_sum = rg.groups.iter().map(|(_, w)| *w).sum::<usize>().max(1);
+                let blk = rg.block_sizes.first().copied().unwrap_or(w_sum.saturating_mul(2));
+                let max_blk = (64_usize / w_sum).max(1).saturating_mul(w_sum);
                 let step_b = render_stepper_row(
                     ui,
                     tokens,
@@ -139,7 +148,13 @@ fn render_randomize_groups_modal(
                 );
                 if step_b != 0 {
                     let mut next = rg.clone();
-                    let next_blk = if step_b > 0 { (blk + 2).min(64) } else { blk.saturating_sub(2).max(2) };
+                    let next_blk = if step_b > 0 {
+                        let mult = (blk / w_sum).saturating_add(1).saturating_mul(w_sum);
+                        mult.clamp(w_sum, max_blk)
+                    } else {
+                        let base = if blk.is_multiple_of(w_sum) { blk.saturating_sub(w_sum) } else { (blk / w_sum).saturating_mul(w_sum) };
+                        base.clamp(w_sum, max_blk)
+                    };
                     next.block_sizes = vec![next_blk];
                     intents.push(UiIntent::UpdateRandomizeGroupsState(Box::new(next)));
                 }
@@ -157,13 +172,13 @@ fn render_randomize_groups_modal(
             );
             if step_seed != 0 {
                 let mut next = rg.clone();
-                next.seed = if step_seed > 0 { rg.seed + 1 } else { rg.seed.saturating_sub(1).max(1) };
+                next.seed = if step_seed > 0 { rg.seed.saturating_add(1) } else { rg.seed.saturating_sub(1).max(1) };
                 intents.push(UiIntent::UpdateRandomizeGroupsState(Box::new(next)));
             }
         },
         |ui, _state, meta, intents| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ControlEnablement::enabled()) {
+                if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ok_en) {
                     intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
                 if render_modal_action_button(ui, tokens, meta, "modal.cancel", tr(locale, "btn.cancel"), false, false, &ControlEnablement::enabled())
@@ -175,7 +190,7 @@ fn render_randomize_groups_modal(
     );
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
-    } else if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+    } else if !ctx.egui_wants_keyboard_input() && ok_en.enabled && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
         intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     }
     StatsModalFrameReport::from(capture)
@@ -191,6 +206,8 @@ fn render_random_sample_modal(
 ) -> StatsModalFrameReport {
     let rs = &app.canvas_dialogs.random_sample_rows;
     let doc = app.document();
+    let ok_en = crate::modal_predicates::evaluate_dialog_button_for_app(app, "ok").unwrap_or_else(ControlEnablement::enabled);
+    let max_sample_rows = rs.source_sheet_id.as_ref().and_then(|sid| doc.data_sheet(sid)).map_or(5000, |ds| ds.archetype.row_count().clamp(1, 5000));
     let prop_en = if rs.stratify_column.is_none() {
         ControlEnablement::disabled("Proportional allocation requires selecting a stratification column.")
     } else {
@@ -224,6 +241,10 @@ fn render_random_sample_modal(
                     if render_modal_radio(ui, tokens, meta, &format!("rand_sample.src.{idx}"), &ds.title, selected, &ControlEnablement::enabled()) {
                         let mut next = rs.clone();
                         next.source_sheet_id = Some(ds.id.clone());
+                        next.stratify_column = None;
+                        next.proportional_allocation = false;
+                        let ds_rows = ds.archetype.row_count().clamp(1, 5000);
+                        next.sample_size = next.sample_size.clamp(1, ds_rows);
                         intents.push(UiIntent::UpdateRandomSampleRowsState(Box::new(next)));
                     }
                 }
@@ -241,7 +262,11 @@ fn render_random_sample_modal(
                 );
                 if step_n != 0 {
                     let mut next = rs.clone();
-                    next.sample_size = if step_n > 0 { (rs.sample_size + 5).min(5000) } else { rs.sample_size.saturating_sub(5).max(1) };
+                    next.sample_size = if step_n > 0 {
+                        (rs.sample_size.saturating_add(5)).min(max_sample_rows)
+                    } else {
+                        rs.sample_size.saturating_sub(5).max(1).min(max_sample_rows)
+                    };
                     intents.push(UiIntent::UpdateRandomSampleRowsState(Box::new(next)));
                 }
                 let step_s = render_stepper_row(
@@ -257,7 +282,7 @@ fn render_random_sample_modal(
                 );
                 if step_s != 0 {
                     let mut next = rs.clone();
-                    next.seed = if step_s > 0 { rs.seed + 1 } else { rs.seed.saturating_sub(1).max(1) };
+                    next.seed = if step_s > 0 { rs.seed.saturating_add(1) } else { rs.seed.saturating_sub(1).max(1) };
                     intents.push(UiIntent::UpdateRandomSampleRowsState(Box::new(next)));
                 }
             };
@@ -287,6 +312,7 @@ fn render_random_sample_modal(
                 ) {
                     let mut next = rs.clone();
                     next.stratify_column = None;
+                    next.proportional_allocation = false;
                     intents.push(UiIntent::UpdateRandomSampleRowsState(Box::new(next)));
                 }
                 for (ci, t) in titles.iter().enumerate() {
@@ -327,7 +353,7 @@ fn render_random_sample_modal(
         },
         |ui, _state, meta, intents| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ControlEnablement::enabled()) {
+                if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ok_en) {
                     intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
                 if render_modal_action_button(ui, tokens, meta, "modal.cancel", tr(locale, "btn.cancel"), false, false, &ControlEnablement::enabled())
@@ -339,7 +365,7 @@ fn render_random_sample_modal(
     );
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
-    } else if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+    } else if !ctx.egui_wants_keyboard_input() && ok_en.enabled && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
         intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     }
     StatsModalFrameReport::from(capture)
@@ -354,6 +380,7 @@ fn render_simulate_dist_modal(
     intents: &mut PendingUiIntents,
 ) -> StatsModalFrameReport {
     let sd = &app.canvas_dialogs.simulate_distributions;
+    let ok_en = crate::modal_predicates::evaluate_dialog_button_for_app(app, "ok").unwrap_or_else(ControlEnablement::enabled);
     let col_idx = sd.selected_col_idx.min(sd.columns.len().saturating_sub(1));
 
     let mut dummy = ();
@@ -404,7 +431,7 @@ fn render_simulate_dist_modal(
             );
             if step_seed != 0 {
                 let mut next = sd.clone();
-                next.seed = if step_seed > 0 { sd.seed + 1 } else { sd.seed.saturating_sub(1).max(1) };
+                next.seed = if step_seed > 0 { sd.seed.saturating_add(1) } else { sd.seed.saturating_sub(1).max(1) };
                 intents.push(UiIntent::UpdateSimulateDistributionsState(Box::new(next)));
             }
             if render_modal_checkbox(
@@ -519,7 +546,7 @@ fn render_simulate_dist_modal(
         },
         |ui, _state, meta, intents| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ControlEnablement::enabled()) {
+                if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &ok_en) {
                     intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
                 }
                 if render_modal_action_button(ui, tokens, meta, "modal.cancel", tr(locale, "btn.cancel"), false, false, &ControlEnablement::enabled())
@@ -531,7 +558,7 @@ fn render_simulate_dist_modal(
     );
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
-    } else if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+    } else if !ctx.egui_wants_keyboard_input() && ok_en.enabled && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
         intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
     }
     StatsModalFrameReport::from(capture)

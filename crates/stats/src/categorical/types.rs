@@ -102,7 +102,8 @@ pub struct TwoByTwoRatiosResult {
     pub risk_difference: f64,
     /// Two-sided Newcombe (1998) Method 10 hybrid Wilson score CI for `risk_difference` (`None` if zero row marginals).
     pub rd_newcombe_ci: Option<(f64, f64)>,
-    /// Legacy reciprocal `1 / |risk_difference|` (`None` when `risk_difference == 0.0`; prefer `nnt_kind` and `nnt_value` per Altman 1998).
+    /// Legacy signed reciprocal `1 / risk_difference` (positive for benefit, negative for harm;
+    /// `None` when `|risk_difference| <= 1e-15`; prefer `nnt_kind` and `nnt_value` per Altman 1998).
     pub nnt: Option<f64>,
     /// Altman (1998) treatment direction (`Benefit`, `Harm`, or `Infinite`).
     #[serde(default)]

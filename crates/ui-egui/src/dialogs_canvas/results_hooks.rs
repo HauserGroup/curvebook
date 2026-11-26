@@ -51,6 +51,10 @@ impl ChangeDataAnalyzedState {
             .find(|c| c.compatible && Some(&c.sheet_id) != self.current_source_id.as_ref())
             .or_else(|| self.candidates.iter().find(|c| c.compatible))
             .map(|c| c.sheet_id.clone());
+        if let Some(target_ds) = self.selected_target_id.as_ref().and_then(|id| doc.data_sheet(id)) {
+            let col_count = target_ds.archetype.column_count();
+            self.selected_data_sets.retain(|&col| col < col_count);
+        }
     }
 
     /// Select a candidate target sheet id. Returns `Err` if incompatible.
@@ -60,6 +64,9 @@ impl ChangeDataAnalyzedState {
         };
         if !candidate.compatible {
             return Err(candidate.incompatible_reason.clone().unwrap_or_else(|| String::from("incompatible table archetype")));
+        }
+        if self.selected_target_id.as_ref() != Some(&candidate.sheet_id) {
+            self.selected_data_sets.clear();
         }
         self.selected_target_id = Some(candidate.sheet_id.clone());
         Ok(())
@@ -125,28 +132,52 @@ fn default_report_format() -> String {
 }
 
 impl ResultSheetViewState {
+    fn clear_cell_selection(&mut self) {
+        self.bound_tab_idx = None;
+        self.selected_anchor = None;
+        self.selected_focus = None;
+    }
+
     /// Synchronize active tab bounds against `result`.
     pub fn sync_with_result(&mut self, result: &ResultSheet) {
         if self.result_sheet_id.as_ref() != Some(&result.id) {
             self.result_sheet_id = Some(result.id.clone());
             self.active_tab_index = 0;
             self.checklist_expanded = !result.checklist.is_empty();
+            self.last_methods_report = None;
+            if self.bound_sheet_id.as_deref() != Some(result.id.as_str()) {
+                self.bound_sheet_id = None;
+                self.clear_cell_selection();
+            }
         }
         if result.tabs.is_empty() {
             self.active_tab_index = 0;
-        } else if self.active_tab_index >= result.tabs.len() {
-            self.active_tab_index = result.tabs.len() - 1;
+            self.clear_cell_selection();
+        } else {
+            if self.active_tab_index >= result.tabs.len() {
+                self.active_tab_index = result.tabs.len() - 1;
+            }
+            if self.bound_sheet_id.as_deref() == Some(result.id.as_str()) && self.bound_tab_idx.is_some_and(|idx| idx >= result.tabs.len()) {
+                self.clear_cell_selection();
+            }
         }
     }
 
     /// Select tab by zero-based index, clamped within `tab_count`.
     pub fn select_tab(&mut self, index: usize, tab_count: usize) {
-        self.active_tab_index = if tab_count == 0 { 0 } else { index.min(tab_count - 1) };
+        let next = if tab_count == 0 { 0 } else { index.min(tab_count - 1) };
+        if next != self.active_tab_index || self.bound_tab_idx.is_some_and(|idx| idx != next) {
+            self.clear_cell_selection();
+        }
+        self.active_tab_index = next;
     }
 
     /// Select a [`ResultTab`] by its stable `id`.
     pub fn select_tab_by_id(&mut self, result: &ResultSheet, tab_id: &str) -> bool {
         if let Some(pos) = result.tabs.iter().position(|t| t.id == tab_id) {
+            if pos != self.active_tab_index || self.bound_tab_idx.is_some_and(|idx| idx != pos) {
+                self.clear_cell_selection();
+            }
             self.active_tab_index = pos;
             true
         } else {
@@ -278,6 +309,16 @@ pub enum HookTargetKind {
     LayoutTextCallout,
 }
 
+/// Specific analysis parameter binding supported by [`ConstantHookPickerState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AnalysisHookTarget {
+    #[default]
+    NonlinearParameter,
+    NormalizeZeroAnchor,
+    NormalizeHundredAnchor,
+    Unsupported,
+}
+
 /// Dialog picker inserting live `InfoConstant`, `ResultScalar`, and `ColumnTitleValue` hooks.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ConstantHookPickerState {
@@ -285,6 +326,8 @@ pub struct ConstantHookPickerState {
     pub target_parameter_name: Option<String>,
     #[serde(default)]
     pub target_kind: HookTargetKind,
+    #[serde(default)]
+    pub analysis_hook_target: AnalysisHookTarget,
     #[serde(default)]
     pub existing_parameter_rules: Vec<ParameterRule>,
     pub search_query: String,
@@ -298,15 +341,32 @@ impl ConstantHookPickerState {
         self.existing_parameter_rules.clear();
         if let Some(res) = doc.result_sheet(&target_sheet_id) {
             self.target_kind = HookTargetKind::AnalysisParameter;
-            if let AnalysisKind::NonlinearRegression(nl) = &res.analysis.kind {
-                self.existing_parameter_rules = nl.parameter_rules.clone();
+            match &res.analysis.kind {
+                AnalysisKind::NonlinearRegression(nl) => {
+                    self.existing_parameter_rules = nl.parameter_rules.clone();
+                    self.analysis_hook_target = AnalysisHookTarget::NonlinearParameter;
+                }
+                AnalysisKind::Transform(curvebook_doc::TransformAnalysisSpec::Normalize { .. }) => {
+                    let is_zero = parameter_name.as_deref().is_some_and(|raw| {
+                        let norm = raw.trim().to_ascii_lowercase();
+                        matches!(norm.as_str(), "zero" | "0" | "0%" | "zero_anchor" | "baseline" | "bottom")
+                    });
+                    self.analysis_hook_target =
+                        if is_zero { AnalysisHookTarget::NormalizeZeroAnchor } else { AnalysisHookTarget::NormalizeHundredAnchor };
+                }
+                _ => {
+                    self.analysis_hook_target = AnalysisHookTarget::Unsupported;
+                }
             }
         } else if doc.graph_sheet(&target_sheet_id).is_some() {
             self.target_kind = HookTargetKind::GraphTextBox;
+            self.analysis_hook_target = AnalysisHookTarget::NonlinearParameter;
         } else if doc.layout_sheet(&target_sheet_id).is_some() {
             self.target_kind = HookTargetKind::LayoutTextCallout;
+            self.analysis_hook_target = AnalysisHookTarget::NonlinearParameter;
         } else {
             self.target_kind = HookTargetKind::AnalysisParameter;
+            self.analysis_hook_target = AnalysisHookTarget::Unsupported;
         }
         self.target_sheet_id = Some(target_sheet_id.clone());
         self.target_parameter_name = parameter_name;
@@ -342,24 +402,41 @@ impl ConstantHookPickerState {
         let target = self.target_sheet_id.as_ref()?;
         let opt = self.selected_option()?;
         match self.target_kind {
-            HookTargetKind::AnalysisParameter => {
-                let param_name = self.target_parameter_name.clone().unwrap_or_else(|| String::from("Bottom"));
-                let mut rules: Vec<ParameterRule> = self.existing_parameter_rules.iter().filter(|r| r.name != param_name).cloned().collect();
-                rules.push(ParameterRule {
-                    name: param_name,
-                    scope: ParameterScope::HookedConstant(opt.source.clone()),
-                    initial_override: None,
-                    lower_bound: None,
-                    upper_bound: None,
-                });
-                Some(ToolCommandIntent::new(
+            HookTargetKind::AnalysisParameter => match self.analysis_hook_target {
+                AnalysisHookTarget::NonlinearParameter => {
+                    let param_name = self.target_parameter_name.clone().unwrap_or_else(|| String::from("Bottom"));
+                    let mut rules: Vec<ParameterRule> = self.existing_parameter_rules.iter().filter(|r| r.name != param_name).cloned().collect();
+                    rules.push(ParameterRule {
+                        name: param_name,
+                        scope: ParameterScope::HookedConstant(opt.source.clone()),
+                        initial_override: None,
+                        lower_bound: None,
+                        upper_bound: None,
+                    });
+                    Some(ToolCommandIntent::new(
+                        "analysis.updateParams",
+                        json!({
+                            "sheet_id": target.as_str(),
+                            "parameter_rules": rules,
+                        }),
+                    ))
+                }
+                AnalysisHookTarget::NormalizeZeroAnchor => Some(ToolCommandIntent::new(
                     "analysis.updateParams",
                     json!({
                         "sheet_id": target.as_str(),
-                        "parameter_rules": rules,
+                        "zero_anchor": curvebook_doc::NormalizeAnchor::Hooked(opt.source.clone()),
                     }),
-                ))
-            }
+                )),
+                AnalysisHookTarget::NormalizeHundredAnchor => Some(ToolCommandIntent::new(
+                    "analysis.updateParams",
+                    json!({
+                        "sheet_id": target.as_str(),
+                        "hundred_anchor": curvebook_doc::NormalizeAnchor::Hooked(opt.source.clone()),
+                    }),
+                )),
+                AnalysisHookTarget::Unsupported => None,
+            },
             HookTargetKind::GraphTextBox => Some(ToolCommandIntent::new(
                 "graph.addAnnotation",
                 json!({
@@ -473,13 +550,12 @@ pub fn copy_result_table_to_clipboard(app: &mut crate::UiApp, sheet_id: &str, fo
             return crate::interaction::UiEventOutcome::default();
         };
         let rv = &app.canvas_dialogs.result_view;
-        let requested_idx = if !force_full && rv.bound_sheet_id.as_deref() == Some(sheet_id) {
-            rv.bound_tab_idx.unwrap_or(rv.active_tab_index)
-        } else {
-            rv.active_tab_index
-        };
-        let fallback_tab =
-            rs.tabs.is_empty().then(|| rs.analyzable_data.as_ref().map(|ds| datasheet_to_preview_tab(ds, &app.locale_preset))).flatten();
+        let bound_tab = (!force_full && rv.bound_sheet_id.as_deref() == Some(sheet_id)).then_some(rv.bound_tab_idx).flatten();
+        #[cfg(not(target_arch = "wasm32"))]
+        let requested_idx = app.egui_views.results_view.per_sheet_active_tab.get(&rs.id).copied().or(bound_tab).unwrap_or(rv.active_tab_index);
+        #[cfg(target_arch = "wasm32")]
+        let requested_idx = bound_tab.unwrap_or(rv.active_tab_index);
+        let fallback_tab = rs.tabs.is_empty().then(|| rs.analyzable_data.as_ref().map(|ds| datasheet_to_copy_tab(ds, &app.locale_preset))).flatten();
         let (resolved_idx, tab_ref) = if let Some(tab) = rs.tabs.get(requested_idx) {
             (requested_idx, Some(tab))
         } else if let Some(tab) = rs.tabs.first() {
@@ -490,7 +566,8 @@ pub fn copy_result_table_to_clipboard(app: &mut crate::UiApp, sheet_id: &str, fo
         let Some(tab) = tab_ref else {
             return crate::interaction::UiEventOutcome::default();
         };
-        let sel = if force_full { None } else { rv.selection_bounds(sheet_id, resolved_idx) };
+        let sel =
+            if force_full || (bound_tab.is_some() && bound_tab != Some(resolved_idx)) { None } else { rv.selection_bounds(sheet_id, resolved_idx) };
         let tsv = format_tab_selection_tsv(tab, rs.analysis.p_value_format, sel);
         (rs.id.clone(), tab.id.clone(), tsv, sel)
     };
@@ -558,23 +635,162 @@ fn format_tab_selection_tsv(tab: &ResultTab, p_fmt: curvebook_doc::PValueFormat,
     lines.join("\n")
 }
 
-fn datasheet_to_preview_tab(ds: &DataSheet, preset: &crate::i18n::LocalePreset) -> ResultTab {
-    let (row_total, col_total) = crate::inspect::table_dimensions_summary(&ds.archetype);
-    let col_count = col_total.max(1);
-    let headers: Vec<String> = (0..col_count).map(|c| data_column_title(ds, c).map_or_else(|| format!("Col {}", c + 1), str::to_owned)).collect();
-    let row_count = row_total.min(200);
+fn cell_to_result_cell(cell: Option<&curvebook_doc::Cell>, preset: &crate::i18n::LocalePreset) -> ResultCell {
+    let txt = cell.map(|c| crate::grid_view::format_cell_display(c, preset)).unwrap_or_default();
+    if txt.is_empty() { ResultCell::Empty } else { ResultCell::Text(txt) }
+}
+
+fn subcol_header(title: &str, col_idx: usize, subcol_idx: usize, subcol_count: usize) -> String {
+    let base = if title.trim().is_empty() { format!("Col {}", col_idx + 1) } else { title.to_owned() };
+    if subcol_count > 1 { format!("{base}:{}", subcol_idx + 1) } else { base }
+}
+
+fn row_label_from_titles(titles: &[String], row: usize) -> String {
+    titles.get(row).map(String::as_str).map(str::trim).filter(|s| !s.is_empty()).map_or_else(|| format!("Row {}", row + 1), str::to_owned)
+}
+
+type CopyTabParts = (Vec<String>, Vec<String>, Vec<Vec<ResultCell>>);
+
+fn xy_to_copy_rows(t: &curvebook_doc::XyTable, preset: &crate::i18n::LocalePreset) -> CopyTabParts {
+    let row_count = t.row_count();
+    let mut headers = Vec::new();
+    let x_title = if t.x_title.trim().is_empty() { "X" } else { t.x_title.as_str() };
+    let x_subs = t.x_mode.subcolumn_count();
+    if x_subs == 0 {
+        headers.push(x_title.to_owned());
+    } else {
+        for s in 0..x_subs {
+            headers.push(if x_subs > 1 { format!("{x_title}:{}", s + 1) } else { x_title.to_owned() });
+        }
+    }
+    let y_subs = t.y_subcolumn_mode.subcolumn_count().max(1);
+    for (c, col) in t.data_sets.iter().enumerate() {
+        for s in 0..y_subs {
+            headers.push(subcol_header(&col.title, c, s, y_subs));
+        }
+    }
     let mut row_labels = Vec::with_capacity(row_count);
     let mut rows = Vec::with_capacity(row_count);
     for r in 0..row_count {
-        row_labels.push(format!("Row {}", r + 1));
-        let mut row = Vec::with_capacity(col_count);
-        for c in 0..col_count {
-            let txt =
-                ds.cell(curvebook_doc::CellCoord::new(r, c, 0)).map(|cell| crate::grid_view::format_cell_display(cell, preset)).unwrap_or_default();
-            row.push(if txt.is_empty() { ResultCell::Empty } else { ResultCell::Text(txt) });
+        row_labels.push(row_label_from_titles(&t.row_titles, r));
+        let mut row = Vec::with_capacity(headers.len());
+        if x_subs == 0 {
+            let mat = t.materialized_x_cell_at(r);
+            row.push(cell_to_result_cell(Some(&mat), preset));
+        } else {
+            for s in 0..x_subs {
+                let cell = t.x_cells.get(r).and_then(|subs| subs.get(s));
+                row.push(cell_to_result_cell(cell, preset));
+            }
+        }
+        for col in &t.data_sets {
+            for s in 0..y_subs {
+                row.push(cell_to_result_cell(col.cell(r, s), preset));
+            }
         }
         rows.push(row);
     }
+    (headers, row_labels, rows)
+}
+
+fn datasets_to_copy_rows(
+    data_sets: &[curvebook_doc::DataSetColumn],
+    row_titles: &[String],
+    row_count: usize,
+    fixed_subs: Option<usize>,
+    preset: &crate::i18n::LocalePreset,
+) -> CopyTabParts {
+    let mut headers = Vec::new();
+    for (c, col) in data_sets.iter().enumerate() {
+        let subs = fixed_subs.unwrap_or_else(|| col.subcolumn_count()).max(1);
+        for s in 0..subs {
+            headers.push(subcol_header(&col.title, c, s, subs));
+        }
+    }
+    let mut row_labels = Vec::with_capacity(row_count);
+    let mut rows = Vec::with_capacity(row_count);
+    for r in 0..row_count {
+        row_labels.push(row_label_from_titles(row_titles, r));
+        let mut row = Vec::with_capacity(headers.len());
+        for col in data_sets {
+            let subs = fixed_subs.unwrap_or_else(|| col.subcolumn_count()).max(1);
+            for s in 0..subs {
+                row.push(cell_to_result_cell(col.cell(r, s), preset));
+            }
+        }
+        rows.push(row);
+    }
+    (headers, row_labels, rows)
+}
+
+fn nested_to_copy_rows(t: &curvebook_doc::NestedTable, row_count: usize, preset: &crate::i18n::LocalePreset) -> CopyTabParts {
+    let mut headers = Vec::new();
+    for (c, group) in t.groups.iter().enumerate() {
+        let subs = group.biological_unit_count().max(1);
+        for s in 0..subs {
+            let hdr = group
+                .subcolumn_titles
+                .get(s)
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map_or_else(|| subcol_header(&group.title, c, s, subs), str::to_owned);
+            headers.push(hdr);
+        }
+    }
+    let mut row_labels = Vec::with_capacity(row_count);
+    let mut rows = Vec::with_capacity(row_count);
+    for r in 0..row_count {
+        row_labels.push(row_label_from_titles(&t.row_titles, r));
+        let mut row = Vec::with_capacity(headers.len());
+        for group in &t.groups {
+            let subs = group.biological_unit_count().max(1);
+            for s in 0..subs {
+                let cell = group.cells.get(r).and_then(|cells| cells.get(s));
+                row.push(cell_to_result_cell(cell, preset));
+            }
+        }
+        rows.push(row);
+    }
+    (headers, row_labels, rows)
+}
+
+fn datasheet_to_copy_tab(ds: &DataSheet, preset: &crate::i18n::LocalePreset) -> ResultTab {
+    let row_count = ds.archetype.row_count();
+    let (headers, row_labels, rows) = match &ds.archetype {
+        TableArchetype::Xy(t) => xy_to_copy_rows(t, preset),
+        TableArchetype::Column(t) => datasets_to_copy_rows(&t.data_sets, &t.row_titles, row_count, None, preset),
+        TableArchetype::Grouped(t) => datasets_to_copy_rows(&t.data_sets, &t.row_titles, row_count, Some(t.subcolumn_mode.subcolumn_count()), preset),
+        TableArchetype::Contingency(t) => datasets_to_copy_rows(&t.data_sets, &t.row_titles, row_count, Some(1), preset),
+        TableArchetype::PartsOfWhole(t) => datasets_to_copy_rows(&t.data_sets, &t.slice_labels, row_count, Some(1), preset),
+        TableArchetype::Survival(t) => {
+            let time_title = if t.time_title.trim().is_empty() { "Elapsed Time" } else { t.time_title.as_str() };
+            let mut headers = vec![time_title.to_owned()];
+            for (c, cohort) in t.cohorts.iter().enumerate() {
+                headers.push(subcol_header(&cohort.title, c, 0, 1));
+            }
+            let row_labels = (0..row_count).map(|r| row_label_from_titles(&t.row_titles, r)).collect();
+            let rows = (0..row_count)
+                .map(|r| {
+                    let mut row = Vec::with_capacity(headers.len());
+                    row.push(cell_to_result_cell(t.times.get(r), preset));
+                    for cohort in &t.cohorts {
+                        row.push(cell_to_result_cell(cohort.cell(r, 0), preset));
+                    }
+                    row
+                })
+                .collect();
+            (headers, row_labels, rows)
+        }
+        TableArchetype::MultipleVariables(t) => {
+            let headers = t.variables.iter().enumerate().map(|(c, var)| subcol_header(&var.title, c, 0, 1)).collect();
+            let row_labels = (0..row_count).map(|r| row_label_from_titles(&t.row_titles, r)).collect();
+            let rows = (0..row_count).map(|r| t.variables.iter().map(|var| cell_to_result_cell(var.cells.get(r), preset)).collect()).collect();
+            (headers, row_labels, rows)
+        }
+        TableArchetype::Nested(t) => nested_to_copy_rows(t, row_count, preset),
+    };
+
     ResultTab {
         id: String::from("analyzable-data"),
         title: ds.title.clone(),

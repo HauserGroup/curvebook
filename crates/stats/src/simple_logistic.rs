@@ -36,11 +36,12 @@ use curvebook_doc::{
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{chi2_sf, norm_two_sided_isf, norm_two_sided_p};
+use curvebook_math::sum::SummaryMoments;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, ci_cell, init_result_sheet, is_ignored_non_numeric_cell,
-    num_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
+    KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, ci_cell, init_result_sheet, num_cell, opt_num_cell,
+    p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 use crate::roc::{RocCiMethod, RocResult, roc_curve_analysis};
@@ -287,11 +288,16 @@ fn detect_separation(x: &[f64], y: &[f64]) -> SimpleLogisticSeparation {
             max_x1 = max_x1.max(xi);
         }
     }
-    let scale = x_min.abs().max(x_max.abs()).max(1.0);
-    let tol = 1e-12 * scale;
-    if (x_max - x_min) <= tol {
+    if x_max == x_min {
         return SimpleLogisticSeparation::Collinear;
     }
+    let scale = x_min.abs().max(x_max.abs());
+    let span = x_max - x_min;
+    let half_span = 0.5 * x_max - 0.5 * x_min;
+    if !half_span.is_finite() || half_span <= 0.5e-12 * scale {
+        return SimpleLogisticSeparation::Collinear;
+    }
+    let tol = if span.is_finite() { 1e-12 * span } else { 1e-12 * scale };
     if max_x0 + tol < min_x1 || max_x1 + tol < min_x0 {
         return SimpleLogisticSeparation::CompleteSeparation;
     }
@@ -301,13 +307,69 @@ fn detect_separation(x: &[f64], y: &[f64]) -> SimpleLogisticSeparation {
     SimpleLogisticSeparation::None
 }
 
+/// Standardized IRLS fit parameters retained for shift- and scale-invariant predictions,
+/// log-likelihood evaluation, and profile-likelihood confidence intervals.
+struct StandardizedLogisticFit {
+    mean_x: f64,
+    sd_x: f64,
+    z: Vec<f64>,
+    t0: f64,
+    t1: f64,
+    s00: f64,
+    s01: f64,
+    s11: f64,
+    beta0: f64,
+    beta1: f64,
+    cov00: f64,
+    cov01: f64,
+    cov11: f64,
+    converged: bool,
+}
+
+impl StandardizedLogisticFit {
+    fn failed() -> Self {
+        Self {
+            mean_x: f64::NAN,
+            sd_x: f64::NAN,
+            z: Vec::new(),
+            t0: f64::NAN,
+            t1: f64::NAN,
+            s00: f64::NAN,
+            s01: f64::NAN,
+            s11: f64::NAN,
+            beta0: f64::NAN,
+            beta1: f64::NAN,
+            cov00: f64::NAN,
+            cov01: f64::NAN,
+            cov11: f64::NAN,
+            converged: false,
+        }
+    }
+}
+
 /// Exact 2-parameter Newton-Raphson / Fisher scoring IRLS on standardized predictor `z = (x - mean) / sd`.
-/// Returns `(beta0, beta1, cov00, cov01, cov11, converged)`.
-fn fit_irls_standardized(x: &[f64], y: &[f64], n_events: usize) -> (f64, f64, f64, f64, f64, bool) {
+fn fit_irls_standardized(x: &[f64], y: &[f64], n_events: usize) -> StandardizedLogisticFit {
     let nf = x.len() as f64;
-    let mean_x = x.iter().sum::<f64>() / nf;
-    let var_x = x.iter().map(|&xi| (xi - mean_x) * (xi - mean_x)).sum::<f64>() / nf;
-    let sd_x = var_x.sqrt();
+    let Ok(mom) = SummaryMoments::from_slice(x) else {
+        return StandardizedLogisticFit::failed();
+    };
+    let mean_x = mom.mean;
+    let max_dev = x.iter().map(|&xi| (xi - mean_x).abs()).fold(0.0_f64, f64::max);
+    if !max_dev.is_finite() || max_dev <= 0.0 {
+        return StandardizedLogisticFit::failed();
+    }
+    let var_scaled = x
+        .iter()
+        .map(|&xi| {
+            let d = (xi - mean_x) / max_dev;
+            d * d
+        })
+        .sum::<f64>()
+        / nf;
+    let sd_x = max_dev * var_scaled.sqrt();
+    if !sd_x.is_finite() || sd_x <= 0.0 {
+        return StandardizedLogisticFit::failed();
+    }
     let z: Vec<f64> = x.iter().map(|&xi| (xi - mean_x) / sd_x).collect();
 
     let p_bar = (n_events as f64) / nf;
@@ -341,14 +403,15 @@ fn fit_irls_standardized(x: &[f64], y: &[f64], n_events: usize) -> (f64, f64, f6
         let step_norm = step0.abs().max(step1.abs());
         let grad_norm = g0.abs().max(g1.abs());
 
-        // Backtracking line search guaranteeing monotonic log-likelihood ascent.
+        // Backtracking line search with log-likelihood-scaled tolerance guaranteeing ascent.
+        let ll_tol = 1e-12 * (1.0 + ll_curr.abs());
         let mut alpha = 1.0_f64;
         let mut accepted = false;
         for _ in 0..30 {
             let cand0 = t0 + alpha * step0;
             let cand1 = t1 + alpha * step1;
             let ll_cand = log_likelihood(&z, y, cand0, cand1);
-            if ll_cand.is_finite() && ll_cand >= ll_curr - 1e-13 {
+            if ll_cand.is_finite() && ll_cand >= ll_curr - ll_tol {
                 t0 = cand0;
                 t1 = cand1;
                 ll_curr = ll_cand;
@@ -360,7 +423,9 @@ fn fit_irls_standardized(x: &[f64], y: &[f64], n_events: usize) -> (f64, f64, f6
         if !accepted {
             break;
         }
-        if step_norm < 1e-12 && grad_norm < 1e-10 {
+        let step_tol = 1e-12 * (1.0 + t0.abs().max(t1.abs()));
+        let grad_tol = 1e-10 * (1.0 + nf * 1e-3);
+        if step_norm < step_tol && grad_norm < grad_tol {
             converged = true;
             break;
         }
@@ -379,7 +444,7 @@ fn fit_irls_standardized(x: &[f64], y: &[f64], n_events: usize) -> (f64, f64, f6
     }
     let det = i00 * i11 - i01 * i01;
     if !det.is_finite() || det <= 1e-24 {
-        return (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, false);
+        return StandardizedLogisticFit::failed();
     }
     let s00 = i11 / det;
     let s01 = -i01 / det;
@@ -391,119 +456,170 @@ fn fit_irls_standardized(x: &[f64], y: &[f64], n_events: usize) -> (f64, f64, f6
     let beta0 = t0 - mean_x * beta1;
     let a = -mean_x / sd_x;
     let b = 1.0 / sd_x;
-    let cov00 = s00 + 2.0 * a * s01 + a * a * s11;
+    let cov00 = (s00 + 2.0 * a * s01 + a * a * s11).max(0.0);
     let cov01 = b * (s01 + a * s11);
-    let cov11 = b * b * s11;
-    (beta0, beta1, cov00.max(0.0), cov01, cov11.max(0.0), converged)
+    let cov11 = (b * b * s11).max(0.0);
+    StandardizedLogisticFit { mean_x, sd_x, z, t0, t1, s00, s01, s11, beta0, beta1, cov00, cov01, cov11, converged }
 }
 
-/// Maximize $\ell(\beta_0, \beta_1)$ over $\beta_0$ for fixed $\beta_1$.
-fn profile_ll_beta1(x: &[f64], y: &[f64], beta1: f64, init_beta0: f64) -> f64 {
-    let mut b0 = init_beta0;
-    let mut ll = log_likelihood(x, y, b0, beta1);
-    for _ in 0..50 {
-        let mut g = 0.0_f64;
-        let mut h = 0.0_f64;
-        for (&xi, &yi) in x.iter().zip(y.iter()) {
-            let p = logistic_sigmoid(b0 + beta1 * xi);
-            g += yi - p;
-            h += p * (1.0 - p);
+/// Evaluate log-likelihood, score, and observed Fisher information for a 1D affine linear
+/// predictor `eta_i(u) = base_i + u * coeff_i` (McCullagh & Nelder 1989).
+fn eval_affine_1d(y: &[f64], eval_eta_coeff: impl Fn(usize) -> (f64, f64)) -> (f64, f64, f64) {
+    let mut ll = 0.0_f64;
+    let mut g = 0.0_f64;
+    let mut h = 0.0_f64;
+    for (i, &yi) in y.iter().enumerate() {
+        let (eta, c) = eval_eta_coeff(i);
+        if eta >= 0.0 {
+            ll += (yi - 1.0) * eta - (-eta).exp().ln_1p();
+        } else {
+            ll += yi * eta - eta.exp().ln_1p();
         }
-        if g.abs() < 1e-12 || h <= 1e-24 {
-            break;
-        }
-        let step = (g / h).clamp(-10.0, 10.0);
-        let mut alpha = 1.0_f64;
-        let mut moved = false;
-        for _ in 0..25 {
-            let cand = b0 + alpha * step;
-            let ll_cand = log_likelihood(x, y, cand, beta1);
-            if ll_cand.is_finite() && ll_cand >= ll - 1e-14 {
-                b0 = cand;
-                ll = ll_cand;
-                moved = true;
-                break;
-            }
-            alpha *= 0.5;
-        }
-        if !moved || (alpha * step).abs() < 1e-12 {
-            break;
-        }
+        let p = logistic_sigmoid(eta);
+        g += (yi - p) * c;
+        h += p * (1.0 - p) * c * c;
     }
-    ll
+    (ll, g, h)
 }
 
-/// Maximize $\ell(\beta_0, \beta_1)$ over $\beta_1$ for fixed $\beta_0$.
-fn profile_ll_beta0(x: &[f64], y: &[f64], beta0: f64, init_beta1: f64) -> f64 {
-    let mut b1 = init_beta1;
-    let mut ll = log_likelihood(x, y, beta0, b1);
-    for _ in 0..60 {
-        let mut g = 0.0_f64;
-        let mut h = 0.0_f64;
-        for (&xi, &yi) in x.iter().zip(y.iter()) {
-            let p = logistic_sigmoid(beta0 + b1 * xi);
-            g += (yi - p) * xi;
-            h += p * (1.0 - p) * xi * xi;
-        }
-        if g.abs() < 1e-12 || h <= 1e-24 {
+/// Bracket the unique root of a strictly decreasing score `g(u) = d(ll)/du = 0` from `init`.
+fn bracket_concave_1d(eval: &impl Fn(f64) -> (f64, f64, f64), init: f64, g_init: f64, h_init: f64, step_base: f64) -> (f64, f64, f64, f64, f64) {
+    let dir = if g_init > 0.0 { 1.0 } else { -1.0 };
+    let newton_mag = if h_init > 1e-18 { (g_init.abs() / h_init).clamp(step_base, 1e4 * step_base) } else { step_base };
+    let mut step = if newton_mag.is_finite() { newton_mag } else { step_base };
+    let mut prev_u = init;
+    let mut prev_g = g_init;
+    let mut best_ll = f64::NEG_INFINITY;
+    let mut curr_u = init + dir * step;
+    let (mut curr_ll, mut curr_g, _) = eval(curr_u);
+    if curr_ll.is_finite() {
+        best_ll = best_ll.max(curr_ll);
+    }
+    for _ in 0..80 {
+        if !curr_g.is_finite() || curr_g * dir <= 0.0 {
             break;
         }
-        let step = g / h;
-        let mut alpha = 1.0_f64;
-        let mut moved = false;
-        for _ in 0..25 {
-            let cand = b1 + alpha * step;
-            let ll_cand = log_likelihood(x, y, beta0, cand);
-            if ll_cand.is_finite() && ll_cand >= ll - 1e-14 {
-                b1 = cand;
-                ll = ll_cand;
-                moved = true;
-                break;
-            }
-            alpha *= 0.5;
-        }
-        if !moved || (alpha * step).abs() < 1e-12 {
+        prev_u = curr_u;
+        prev_g = curr_g;
+        step *= 2.0;
+        if step > 1e12 * step_base {
             break;
+        }
+        curr_u = prev_u + dir * step;
+        let (ll_next, g_next, _) = eval(curr_u);
+        curr_ll = ll_next;
+        curr_g = g_next;
+        if curr_ll.is_finite() {
+            best_ll = best_ll.max(curr_ll);
         }
     }
-    ll
+    if dir > 0.0 { (prev_u, curr_u, prev_g, curr_g, best_ll) } else { (curr_u, prev_u, curr_g, prev_g, best_ll) }
 }
 
-/// Maximize $\ell(-\beta_1 x_{50}, \beta_1)$ over $\beta_1$ for fixed $x_{50}$.
-fn profile_ll_x50(x: &[f64], y: &[f64], x50: f64, init_beta1: f64) -> f64 {
-    let mut b1 = init_beta1;
-    let mut ll = log_likelihood(x, y, -b1 * x50, b1);
-    for _ in 0..60 {
-        let mut g = 0.0_f64;
-        let mut h = 0.0_f64;
-        for (&xi, &yi) in x.iter().zip(y.iter()) {
-            let d = xi - x50;
-            let p = logistic_sigmoid(b1 * d);
-            g += (yi - p) * d;
-            h += p * (1.0 - p) * d * d;
-        }
-        if g.abs() < 1e-12 || h <= 1e-24 {
-            break;
-        }
-        let step = g / h;
-        let mut alpha = 1.0_f64;
-        let mut moved = false;
-        for _ in 0..25 {
-            let cand = b1 + alpha * step;
-            let ll_cand = log_likelihood(x, y, -cand * x50, cand);
-            if ll_cand.is_finite() && ll_cand >= ll - 1e-14 {
-                b1 = cand;
-                ll = ll_cand;
-                moved = true;
-                break;
-            }
-            alpha *= 0.5;
-        }
-        if !moved || (alpha * step).abs() < 1e-12 {
-            break;
-        }
+/// Maximize a strictly concave 1D log-likelihood given `eval(u) -> (ll, g, h)` via exponential
+/// score bracketing and safeguarded Newton-bisection (Press et al. 2007, §9.4), preventing early
+/// termination in saturated tails where `h <= 1e-24`.
+fn maximize_concave_1d(eval: impl Fn(f64) -> (f64, f64, f64), init: f64, init_step: f64) -> f64 {
+    let u0 = if init.is_finite() { init } else { 0.0 };
+    let (mut best_ll, g0, h0) = eval(u0);
+    if !best_ll.is_finite() || !g0.is_finite() || g0.abs() <= 1e-12 {
+        return best_ll;
     }
-    ll
+    let step_base = if init_step.is_finite() && init_step > 0.0 { init_step } else { 1.0 };
+    let (mut lo, mut hi, g_lo, g_hi, b_ll) = bracket_concave_1d(&eval, u0, g0, h0, step_base);
+    if b_ll.is_finite() && b_ll > best_ll {
+        best_ll = b_ll;
+    }
+    if !g_lo.is_finite() || !g_hi.is_finite() || g_lo < 0.0 || g_hi > 0.0 {
+        return best_ll;
+    }
+
+    let mut u = 0.5 * (lo + hi);
+    for _ in 0..100 {
+        let (ll_u, g_u, h_u) = eval(u);
+        if ll_u.is_finite() && ll_u > best_ll {
+            best_ll = ll_u;
+        }
+        if !g_u.is_finite() {
+            u = 0.5 * (lo + hi);
+            continue;
+        }
+        if g_u > 0.0 {
+            lo = u;
+        } else if g_u < 0.0 {
+            hi = u;
+        } else {
+            return best_ll;
+        }
+        if g_u.abs() <= 1e-12 || (hi - lo) <= 1e-12 * (1.0 + lo.abs() + hi.abs()) {
+            break;
+        }
+        let mid = 0.5 * (lo + hi);
+        let margin = 1e-6 * (hi - lo);
+        u = if h_u.is_finite() && h_u > 1e-24 {
+            let cand = u + g_u / h_u;
+            if cand > lo + margin && cand < hi - margin { cand } else { mid }
+        } else {
+            mid
+        };
+    }
+    let (ll_mid, _, _) = eval(0.5 * (lo + hi));
+    if ll_mid.is_finite() && ll_mid > best_ll { ll_mid } else { best_ll }
+}
+
+/// Maximize $\ell(\theta_0, \theta_1)$ over standardized intercept $\theta_0$ for fixed
+/// standardized slope $\theta_1 = \beta_1 s_x$.
+fn profile_ll_t1(z: &[f64], y: &[f64], t1: f64, init_t0: f64) -> f64 {
+    maximize_concave_1d(|t0| eval_affine_1d(y, |i| (t0 + t1 * z[i], 1.0)), init_t0, 1.0)
+}
+
+/// Maximize $\ell(\beta_0, \beta_1)$ over $\beta_1$ for fixed raw intercept $\beta_0$,
+/// reparameterized through $v = \beta_0 + \beta_1 \bar{x}$ when $|\bar{x}| > s_x$ to avoid
+/// catastrophic shift cancellation and Hessian saturation.
+fn profile_ll_beta0_std(fit: &StandardizedLogisticFit, y: &[f64], beta0: f64, logit_p_bar: f64) -> f64 {
+    if fit.mean_x.abs() > fit.sd_x {
+        let ratio = fit.sd_x / fit.mean_x;
+        maximize_concave_1d(
+            |v| {
+                eval_affine_1d(y, |i| {
+                    let r_i = fit.z[i] * ratio;
+                    let eta = v + (v * r_i - beta0 * r_i);
+                    (eta, 1.0 + r_i)
+                })
+            },
+            logit_p_bar,
+            1.0,
+        )
+    } else {
+        let c = fit.mean_x / fit.sd_x;
+        maximize_concave_1d(
+            |t1| {
+                eval_affine_1d(y, |i| {
+                    let coeff = c + fit.z[i];
+                    (beta0 + t1 * coeff, coeff)
+                })
+            },
+            fit.t1,
+            1.0,
+        )
+    }
+}
+
+/// Maximize $\ell(-\theta_1 z_{50}, \theta_1)$ over standardized slope $\theta_1$ for fixed
+/// standardized midpoint $z_{50} = (x_{50} - \bar{x}) / s_x$, warm-started at $\theta_1 = 0$.
+fn profile_ll_z50(z: &[f64], y: &[f64], z50: f64) -> f64 {
+    let max_d = z.iter().map(|&zi| (zi - z50).abs()).fold(0.0_f64, f64::max);
+    let init_step = 1.0 / max_d.max(1.0);
+    maximize_concave_1d(
+        |t1| {
+            eval_affine_1d(y, |i| {
+                let d = z[i] - z50;
+                (t1 * d, d)
+            })
+        },
+        0.0,
+        init_step,
+    )
 }
 
 /// Bracket and solve $f(t) = \text{target\_ll}$ on one side (`dir = -1.0` or `+1.0`) of `t_mle`.
@@ -588,53 +704,47 @@ fn solve_profile_bound(f: impl Fn(f64) -> f64, t_mle: f64, dir: f64, init_step: 
     Some(0.5 * (a + b))
 }
 
-fn compute_profile_ci_beta1(x: &[f64], y: &[f64], beta0: f64, beta1: f64, se1: f64, z_crit: f64, target_ll: f64) -> ProfileCi {
-    let step = (z_crit * se1).max(1e-4);
-    let lower = solve_profile_bound(|b1| profile_ll_beta1(x, y, b1, beta0), beta1, -1.0, step, target_ll);
-    let upper = solve_profile_bound(|b1| profile_ll_beta1(x, y, b1, beta0), beta1, 1.0, step, target_ll);
-    ProfileCi { lower, upper }
+fn compute_profile_ci_beta1_std(fit: &StandardizedLogisticFit, y: &[f64], logit_p_bar: f64, z_crit: f64, target_ll: f64) -> ProfileCi {
+    let se_t1 = fit.s11.max(0.0).sqrt();
+    let step = (z_crit * se_t1).max(1e-4);
+    let lo_t1 = solve_profile_bound(|t1| profile_ll_t1(&fit.z, y, t1, logit_p_bar), fit.t1, -1.0, step, target_ll);
+    let hi_t1 = solve_profile_bound(|t1| profile_ll_t1(&fit.z, y, t1, logit_p_bar), fit.t1, 1.0, step, target_ll);
+    ProfileCi { lower: lo_t1.map(|v| v / fit.sd_x).filter(|v| v.is_finite()), upper: hi_t1.map(|v| v / fit.sd_x).filter(|v| v.is_finite()) }
 }
 
-fn compute_profile_ci_beta0(x: &[f64], y: &[f64], beta0: f64, beta1: f64, se0: f64, z_crit: f64, target_ll: f64) -> ProfileCi {
+fn compute_profile_ci_beta0_std(fit: &StandardizedLogisticFit, y: &[f64], se0: f64, logit_p_bar: f64, z_crit: f64, target_ll: f64) -> ProfileCi {
     let step = (z_crit * se0).max(1e-4);
-    let lower = solve_profile_bound(|b0| profile_ll_beta0(x, y, b0, beta1), beta0, -1.0, step, target_ll);
-    let upper = solve_profile_bound(|b0| profile_ll_beta0(x, y, b0, beta1), beta0, 1.0, step, target_ll);
+    let lower = solve_profile_bound(|b0| profile_ll_beta0_std(fit, y, b0, logit_p_bar), fit.beta0, -1.0, step, target_ll);
+    let upper = solve_profile_bound(|b0| profile_ll_beta0_std(fit, y, b0, logit_p_bar), fit.beta0, 1.0, step, target_ll);
     ProfileCi { lower, upper }
 }
 
-struct ProfileX50Ctx {
-    x50: f64,
-    beta1: f64,
-    cov00: f64,
-    cov01: f64,
-    cov11: f64,
-    z_crit: f64,
-    target_ll: f64,
-    ll_null: f64,
-}
-
-fn compute_profile_ci_x50(x: &[f64], y: &[f64], ctx: &ProfileX50Ctx) -> ProfileCi {
+fn compute_profile_ci_x50_std(fit: &StandardizedLogisticFit, y: &[f64], z50: f64, z_crit: f64, target_ll: f64, ll_null: f64) -> ProfileCi {
     // Profile likelihood for X50 approaches ll_null as |X50| -> Inf.
     // Bounded CI exists iff ll_null < target_ll (equivalently G^2 > chi^2_{1, 1-alpha}).
-    if ctx.ll_null >= ctx.target_ll - 1e-12 {
+    if ll_null >= target_ll - 1e-12 {
         return ProfileCi::OPEN;
     }
-    let var_x50 = (ctx.cov00 + 2.0 * ctx.x50 * ctx.cov01 + ctx.x50 * ctx.x50 * ctx.cov11) / (ctx.beta1 * ctx.beta1);
-    let se_x50 = if var_x50.is_finite() && var_x50 > 0.0 { var_x50.sqrt() } else { 1.0 };
-    let step = (ctx.z_crit * se_x50).max(1e-3);
-    let lower = solve_profile_bound(|x0| profile_ll_x50(x, y, x0, ctx.beta1), ctx.x50, -1.0, step, ctx.target_ll);
-    let upper = solve_profile_bound(|x0| profile_ll_x50(x, y, x0, ctx.beta1), ctx.x50, 1.0, step, ctx.target_ll);
-    ProfileCi { lower, upper }
+    let var_z50 = (fit.s00 + 2.0 * z50 * fit.s01 + z50 * z50 * fit.s11) / (fit.t1 * fit.t1);
+    let se_z50 = if var_z50.is_finite() && var_z50 > 0.0 { var_z50.sqrt() } else { 1.0 };
+    let step = (z_crit * se_z50).max(1e-3);
+    let lo_z = solve_profile_bound(|z0| profile_ll_z50(&fit.z, y, z0), z50, -1.0, step, target_ll);
+    let hi_z = solve_profile_bound(|z0| profile_ll_z50(&fit.z, y, z0), z50, 1.0, step, target_ll);
+    ProfileCi {
+        lower: lo_z.map(|z0| fit.mean_x + fit.sd_x * z0).filter(|v| v.is_finite()),
+        upper: hi_z.map(|z0| fit.mean_x + fit.sd_x * z0).filter(|v| v.is_finite()),
+    }
 }
 
 fn exp_profile_ci(ci: ProfileCi) -> ProfileCi {
     ProfileCi { lower: ci.lower.map(f64::exp).filter(|v| v.is_finite()), upper: ci.upper.map(f64::exp).filter(|v| v.is_finite()) }
 }
 
-fn predict_prob_with_ci(x_val: f64, beta0: f64, beta1: f64, cov00: f64, cov01: f64, cov11: f64, z_crit: f64) -> (f64, (f64, f64)) {
-    let eta = beta0 + beta1 * x_val;
+fn predict_prob_with_ci_std(x_val: f64, fit: &StandardizedLogisticFit, z_crit: f64) -> (f64, (f64, f64)) {
+    let z = (x_val - fit.mean_x) / fit.sd_x;
+    let eta = fit.t0 + fit.t1 * z;
     let p = logistic_sigmoid(eta);
-    let var_eta = (cov00 + 2.0 * x_val * cov01 + x_val * x_val * cov11).max(0.0);
+    let var_eta = (fit.s00 + 2.0 * z * fit.s01 + z * z * fit.s11).max(0.0);
     let se_eta = var_eta.sqrt();
     let lo = logistic_sigmoid(eta - z_crit * se_eta);
     let hi = logistic_sigmoid(eta + z_crit * se_eta);
@@ -705,8 +815,12 @@ pub fn simple_logistic_regression(
     cutoff: f64,
     confidence: ConfidenceLevel,
 ) -> Result<SimpleLogisticResult, StatsError> {
+    if x.len() != y.len() {
+        return Err(StatsError::DimensionMismatch { expected: x.len(), actual: y.len() });
+    }
     let observed_rows: Vec<(usize, f64, f64)> = x.iter().zip(y.iter()).enumerate().map(|(i, (&xi, &yi))| (i, xi, yi)).collect();
-    simple_logistic_regression_rows(&observed_rows, unknown_x, cutoff, confidence)
+    let (res, _) = simple_logistic_regression_rows(&observed_rows, unknown_x, cutoff, confidence)?;
+    Ok(res)
 }
 
 /// Internal row-index-preserving entry point used by both [`simple_logistic_regression`] and
@@ -716,7 +830,7 @@ fn simple_logistic_regression_rows(
     unknown_x: &[(usize, f64)],
     cutoff: f64,
     confidence: ConfidenceLevel,
-) -> Result<SimpleLogisticResult, StatsError> {
+) -> Result<(SimpleLogisticResult, Option<StandardizedLogisticFit>), StatsError> {
     if !cutoff.is_finite() || cutoff <= 0.0 || cutoff >= 1.0 {
         return Err(StatsError::InvalidParameter { name: "classification_cutoff", value: cutoff });
     }
@@ -746,17 +860,23 @@ fn simple_logistic_regression_rows(
 
     let nf = n as f64;
     let p_bar = (n_events as f64) / nf;
+    let logit_p_bar = (p_bar / (1.0 - p_bar)).ln();
     let ll_null = (n_events as f64) * p_bar.ln() + ((n - n_events) as f64) * (1.0 - p_bar).ln();
 
     let separation = detect_separation(&x, &y);
     if separation != SimpleLogisticSeparation::None {
-        return Ok(build_separated_result(n, n_events, separation, ll_null, cutoff));
+        return Ok((build_separated_result(n, n_events, separation, ll_null, cutoff), None));
     }
 
-    let (beta0, beta1, cov00, cov01, cov11, converged) = fit_irls_standardized(&x, &y, n_events);
-    if !converged || !beta0.is_finite() || !beta1.is_finite() {
+    let fit = fit_irls_standardized(&x, &y, n_events);
+    if !fit.converged || !fit.beta0.is_finite() || !fit.beta1.is_finite() {
         return Err(StatsError::NotConverged { algorithm: "simple logistic IRLS" });
     }
+    let beta0 = fit.beta0;
+    let beta1 = fit.beta1;
+    let cov00 = fit.cov00;
+    let cov01 = fit.cov01;
+    let cov11 = fit.cov11;
 
     let se_beta0 = cov00.sqrt();
     let se_beta1 = cov11.sqrt();
@@ -765,7 +885,7 @@ fn simple_logistic_regression_rows(
     let wald_z_beta1 = if se_beta1 > 0.0 { beta1 / se_beta1 } else { 0.0 };
     let wald_p_beta1 = norm_two_sided_p(wald_z_beta1);
 
-    let ll_model = log_likelihood(&x, &y, beta0, beta1);
+    let ll_model = log_likelihood(&fit.z, &y, fit.t0, fit.t1);
     let deviance_null = (-2.0 * ll_null).max(0.0);
     let deviance_model = (-2.0 * ll_model).max(0.0);
     let lr_chi2 = (deviance_null - deviance_model).max(0.0);
@@ -775,17 +895,22 @@ fn simple_logistic_regression_rows(
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
     let target_ll = ll_model - 0.5 * z_crit * z_crit;
 
-    let profile_ci_beta0 = compute_profile_ci_beta0(&x, &y, beta0, beta1, se_beta0, z_crit, target_ll);
-    let profile_ci_beta1 = compute_profile_ci_beta1(&x, &y, beta0, beta1, se_beta1, z_crit, target_ll);
+    let profile_ci_beta0 = compute_profile_ci_beta0_std(&fit, &y, se_beta0, logit_p_bar, z_crit, target_ll);
+    let profile_ci_beta1 = compute_profile_ci_beta1_std(&fit, &y, logit_p_bar, z_crit, target_ll);
     let odds_ratio_beta0 = beta0.exp();
     let odds_ratio_beta1 = beta1.exp();
     let odds_ratio_ci_beta0 = exp_profile_ci(profile_ci_beta0);
     let odds_ratio_ci_beta1 = exp_profile_ci(profile_ci_beta1);
 
-    let (x50, x50_profile_ci) = if beta1.abs() > 1e-15 {
-        let est = -beta0 / beta1;
-        let ci = compute_profile_ci_x50(&x, &y, &ProfileX50Ctx { x50: est, beta1, cov00, cov01, cov11, z_crit, target_ll, ll_null });
-        (Some(est), ci)
+    let (x50, x50_profile_ci) = if fit.t1.abs() > 1e-12 {
+        let z50 = -fit.t0 / fit.t1;
+        let est = fit.mean_x + fit.sd_x * z50;
+        if est.is_finite() {
+            let ci = compute_profile_ci_x50_std(&fit, &y, z50, z_crit, target_ll, ll_null);
+            (Some(est), ci)
+        } else {
+            (None, ProfileCi::OPEN)
+        }
     } else {
         (None, ProfileCi::OPEN)
     };
@@ -811,7 +936,7 @@ fn simple_logistic_regression_rows(
     let mut row_predictions = Vec::with_capacity(n + unknown_x.len());
 
     for &(row_index, xi, yi) in observed_rows {
-        let (p, prob_ci) = predict_prob_with_ci(xi, beta0, beta1, cov00, cov01, cov11, z_crit);
+        let (p, prob_ci) = predict_prob_with_ci_std(xi, &fit, z_crit);
         let pred_class = u8::from(p >= cutoff);
         if yi == 1.0 {
             sum_p1 += p;
@@ -844,7 +969,7 @@ fn simple_logistic_regression_rows(
         if !x_new.is_finite() {
             continue;
         }
-        let (p, prob_ci) = predict_prob_with_ci(x_new, beta0, beta1, cov00, cov01, cov11, z_crit);
+        let (p, prob_ci) = predict_prob_with_ci_std(x_new, &fit, z_crit);
         row_predictions.push(SimpleLogisticRowPrediction {
             row_index,
             x: x_new,
@@ -863,11 +988,11 @@ fn simple_logistic_regression_rows(
     let sensitivity = (tp as f64) / (n_events as f64);
     let specificity = (tn as f64) / ((n - n_events) as f64);
 
-    Ok(SimpleLogisticResult {
+    let result = SimpleLogisticResult {
         n,
         n_events,
         n_non_events: n - n_events,
-        converged,
+        converged: fit.converged,
         separation,
         beta0,
         beta1,
@@ -910,7 +1035,8 @@ fn simple_logistic_regression_rows(
         sensitivity,
         specificity,
         row_predictions,
-    })
+    };
+    Ok((result, Some(fit)))
 }
 
 // ============================================================================
@@ -949,13 +1075,21 @@ fn extract_xy_binary_datasets(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<
         let mut ignored_text_cells = 0_usize;
 
         for row in 0..n_rows {
-            let x_val = xy.x_value_at(row);
+            let x_val = xy.x_summary_at(row)?;
             let y_cell = col.cells.get(row).and_then(|r| r.first());
             if let Some(cell) = y_cell
-                && is_ignored_non_numeric_cell(cell)
+                && !cell.excluded
             {
-                ignored_text_cells += 1;
-                continue;
+                match &cell.value {
+                    CellValue::Text(_) => {
+                        ignored_text_cells += 1;
+                        continue;
+                    }
+                    CellValue::Number(yv) if !yv.is_finite() => {
+                        return Err(StatsError::InvalidParameter { name: "Y (must be binary 0 or 1)", value: *yv });
+                    }
+                    _ => {}
+                }
             }
             let Some(xv) = x_val.filter(|v| v.is_finite()) else {
                 continue;
@@ -989,10 +1123,11 @@ fn extract_xy_binary_datasets(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<
 fn build_sigmoid_overlay(
     ds: &ExtractedXyBinaryDataset,
     res: &SimpleLogisticResult,
+    fit: Option<&StandardizedLogisticFit>,
     sl_spec: &SimpleLogisticSpec,
     confidence: ConfidenceLevel,
 ) -> Result<Option<FittedCurveOverlay>, StatsError> {
-    if !res.converged {
+    let Some(std_fit) = fit.filter(|_| res.converged) else {
         return Ok(Some(FittedCurveOverlay {
             data_set_index: ds.data_set_index,
             equation_id: String::from("simple_logistic"),
@@ -1000,7 +1135,7 @@ fn build_sigmoid_overlay(
             converged: false,
             ambiguous: true,
         }));
-    }
+    };
     let segments = sl_spec.plot_segments.unwrap_or(SimpleLogisticSpec::DEFAULT_PLOT_SEGMENTS);
     if !(1..=SimpleLogisticSpec::MAX_PLOT_SEGMENTS).contains(&segments) {
         return Err(StatsError::InvalidParameter { name: "plot_segments", value: segments as f64 });
@@ -1017,14 +1152,12 @@ fn build_sigmoid_overlay(
         return Err(StatsError::InvalidParameter { name: "plot_x_range", value: x_max - x_min });
     }
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
-    let cov00 = res.se_beta0 * res.se_beta0;
-    let cov11 = res.se_beta1 * res.se_beta1;
     let n_pts = segments + 1;
     let mut points = Vec::with_capacity(n_pts);
     for i in 0..n_pts {
         let frac = (i as f64) / (segments as f64);
-        let x = x_min + frac * (x_max - x_min);
-        let (p, (lo, hi)) = predict_prob_with_ci(x, res.beta0, res.beta1, cov00, res.cov_01, cov11, z_crit);
+        let x = (1.0 - frac) * x_min + frac * x_max;
+        let (p, (lo, hi)) = predict_prob_with_ci_std(x, std_fit, z_crit);
         let (ci_lower, ci_upper) = if sl_spec.confidence_bands { (Some(lo), Some(hi)) } else { (None, None) };
         points.push(CurveSamplePoint { x, y: p, ci_lower, ci_upper, pred_lower: None, pred_upper: None });
     }
@@ -1115,33 +1248,33 @@ fn append_gof_rows(kv: &mut KvTabBuilder, ds_label: Option<&str>, res: &SimpleLo
     kv.push_cell(pfx("Specificity"), opt_num_cell(res.specificity.is_finite().then_some(res.specificity)));
 }
 
-fn push_dataset_scalars(out: &mut ResultSheet, ds_label: Option<&str>, res: &SimpleLogisticResult) {
-    let key = |name: &str| ds_label.map_or_else(|| name.to_owned(), |l| format!("{l}.{name}"));
-    push_scalar(out, key("Beta0"), None, res.beta0);
-    push_scalar(out, key("Beta1"), None, res.beta1);
-    push_scalar(out, key("SE_Beta0"), None, res.se_beta0);
-    push_scalar(out, key("SE_Beta1"), None, res.se_beta1);
-    push_scalar(out, key("OR_Beta0"), None, res.odds_ratio_beta0);
-    push_scalar(out, key("OR_Beta1"), None, res.odds_ratio_beta1);
+fn push_dataset_scalars(out: &mut ResultSheet, data_set_index: usize, res: &SimpleLogisticResult) {
+    let ds = Some(data_set_index);
+    push_scalar(out, "Beta0", ds, res.beta0);
+    push_scalar(out, "Beta1", ds, res.beta1);
+    push_scalar(out, "SE_Beta0", ds, res.se_beta0);
+    push_scalar(out, "SE_Beta1", ds, res.se_beta1);
+    push_scalar(out, "OR_Beta0", ds, res.odds_ratio_beta0);
+    push_scalar(out, "OR_Beta1", ds, res.odds_ratio_beta1);
     if let Some(x50) = res.x50 {
-        push_scalar(out, key("X50"), None, x50);
+        push_scalar(out, "X50", ds, x50);
     }
-    push_scalar(out, key("Wald_Z"), None, res.wald_z_beta1);
-    push_scalar(out, key("Wald_P"), None, res.wald_p_beta1);
-    push_scalar(out, key("LR_G2"), None, res.lr_chi2);
-    push_scalar(out, key("LR_P"), None, res.lr_p);
-    push_scalar(out, key("Deviance_Null"), None, res.deviance_null);
-    push_scalar(out, key("Deviance_Model"), None, res.deviance_model);
-    push_scalar(out, key("AIC"), None, res.aic);
-    push_scalar(out, key("AICc"), None, res.aicc);
-    push_scalar(out, key("Tjur_R2"), None, res.tjur_r2);
-    push_scalar(out, key("CoxSnell_R2"), None, res.cox_snell_r2);
-    push_scalar(out, key("Nagelkerke_R2"), None, res.nagelkerke_r2);
+    push_scalar(out, "Wald_Z", ds, res.wald_z_beta1);
+    push_scalar(out, "Wald_P", ds, res.wald_p_beta1);
+    push_scalar(out, "LR_G2", ds, res.lr_chi2);
+    push_scalar(out, "LR_P", ds, res.lr_p);
+    push_scalar(out, "Deviance_Null", ds, res.deviance_null);
+    push_scalar(out, "Deviance_Model", ds, res.deviance_model);
+    push_scalar(out, "AIC", ds, res.aic);
+    push_scalar(out, "AICc", ds, res.aicc);
+    push_scalar(out, "Tjur_R2", ds, res.tjur_r2);
+    push_scalar(out, "CoxSnell_R2", ds, res.cox_snell_r2);
+    push_scalar(out, "Nagelkerke_R2", ds, res.nagelkerke_r2);
     if let Some(roc) = &res.roc {
-        push_scalar(out, key("ROC_AUC"), None, roc.auc);
-        push_scalar(out, key("ROC_AUC_SE"), None, roc.se);
+        push_scalar(out, "ROC_AUC", ds, roc.auc);
+        push_scalar(out, "ROC_AUC_SE", ds, roc.se);
     }
-    push_scalar(out, key("Accuracy"), None, res.accuracy);
+    push_scalar(out, "Accuracy", ds, res.accuracy);
 }
 
 /// Execute [`curvebook_doc::AnalysisKind::SimpleLogisticRegression`] against an `XY` [`DataSheet`]
@@ -1186,12 +1319,12 @@ pub fn run_simple_logistic_analysis(sheet: &DataSheet, spec: &AnalysisSpec, sl_s
         if ds.ignored_text_cells > 0 {
             ignored_text_details.push((ds.title.clone(), ds.ignored_text_cells));
         }
-        let res = simple_logistic_regression_rows(&ds.observed, &ds.unknown_x, sl_spec.classification_cutoff, spec.confidence_level)?;
+        let (res, std_fit) = simple_logistic_regression_rows(&ds.observed, &ds.unknown_x, sl_spec.classification_cutoff, spec.confidence_level)?;
         let ds_label = multi.then_some(ds.title.as_str());
 
         append_parameter_rows(&mut params_tab, ds_label, &res, spec.p_value_format, alpha);
         append_gof_rows(&mut gof_kv, ds_label, &res, spec.p_value_format, alpha);
-        push_dataset_scalars(&mut out, ds_label, &res);
+        push_dataset_scalars(&mut out, ds.data_set_index, &res);
 
         if res.separation != SimpleLogisticSeparation::None {
             params_tab.push_footnote(format!("{}: {}", ds.title, res.separation.explanation()));
@@ -1258,8 +1391,29 @@ pub fn run_simple_logistic_analysis(sheet: &DataSheet, spec: &AnalysisSpec, sl_s
             }
         }
 
-        if let Some(overlay) = build_sigmoid_overlay(ds, &res, sl_spec, spec.confidence_level)? {
+        if let Some(overlay) = build_sigmoid_overlay(ds, &res, std_fit.as_ref(), sl_spec, spec.confidence_level)? {
             out.fitted_curves.push(overlay);
+        }
+        if let Some(roc) = &res.roc {
+            let curve_pts: Vec<CurveSamplePoint> = roc
+                .points
+                .iter()
+                .map(|pt| CurveSamplePoint {
+                    x: pt.one_minus_specificity,
+                    y: pt.sensitivity,
+                    ci_lower: None,
+                    ci_upper: None,
+                    pred_lower: None,
+                    pred_upper: None,
+                })
+                .collect();
+            out.fitted_curves.push(FittedCurveOverlay {
+                data_set_index: ds.data_set_index,
+                equation_id: String::from("ROC"),
+                converged: true,
+                ambiguous: false,
+                points: curve_pts,
+            });
         }
     }
 

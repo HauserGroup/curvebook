@@ -329,21 +329,24 @@ fn r35_2_nested_posthoc_uses_hierarchical_group_mean_variance_oracle() {
         &tuk_spec,
     )
     .unwrap();
-    assert_approx_eq(res_tuk.pairwise_comparisons[0].raw_p_or_q, 0.953_463_243_279, 5e-4, 5e-3, "Unbal Nested Tukey U1-U2");
-    assert_approx_eq(res_tuk.pairwise_comparisons[1].raw_p_or_q, 0.014_322_261_944, 5e-4, 5e-3, "Unbal Nested Tukey U1-U3");
-    assert_approx_eq(res_tuk.pairwise_comparisons[2].raw_p_or_q, 0.032_358_122_917, 5e-4, 5e-3, "Unbal Nested Tukey U2-U3");
+    // Exact REML GLS + Kenward-Roger (1997) Phi_A / df Tukey studentized-range p-values (AUD-05-20; R stats::ptukey):
+    // U1-U2: diff=-2.257205, SE_KR=3.217393, df_KR=8.9994 -> p_tukey = 0.768597853075
+    // U1-U3: diff=-11.645277, SE_KR=2.825930, df_KR=9.0002 -> p_tukey = 0.006581384112
+    // U2-U3: diff=-9.388071, SE_KR=3.076434, df_KR=8.9996 -> p_tukey = 0.033357239531
+    assert_approx_eq(res_tuk.pairwise_comparisons[0].raw_p_or_q, 0.768_597_853_075, 1e-5, 1e-4, "Unbal Nested REML GLS Tukey U1-U2");
+    assert_approx_eq(res_tuk.pairwise_comparisons[1].raw_p_or_q, 0.006_581_384_112, 1e-5, 1e-4, "Unbal Nested REML GLS Tukey U1-U3");
+    assert_approx_eq(res_tuk.pairwise_comparisons[2].raw_p_or_q, 0.033_357_239_531, 1e-5, 1e-4, "Unbal Nested REML GLS Tukey U2-U3");
 
+    // Games-Howell assumes flat independent unequal-variance samples and is incompatible with nested REML (AUD-05-20).
     let gh_spec = NestedAnalysisSpec {
         two_group_t_test: false,
         multiplicity: MultiplicitySpec { method: MultiplicityMethod::GamesHowell, threshold: 0.05, report_confidence_intervals: true },
         ..NestedAnalysisSpec::default()
     };
-    let res_gh =
+    let err_gh =
         run_nested_analysis(&sheet_unb, &AnalysisSpec::new("an-unb-gh", ds_unb, AnalysisKind::NestedComparison(gh_spec.clone())).unwrap(), &gh_spec)
-            .unwrap();
-    assert_approx_eq(res_gh.pairwise_comparisons[0].raw_p_or_q, 0.953_696_870_470, 5e-4, 5e-3, "Unbal Nested GH U1-U2");
-    assert_approx_eq(res_gh.pairwise_comparisons[1].raw_p_or_q, 0.023_405_045_121, 5e-4, 5e-3, "Unbal Nested GH U1-U3");
-    assert_approx_eq(res_gh.pairwise_comparisons[2].raw_p_or_q, 0.070_152_011_736, 5e-4, 5e-3, "Unbal Nested GH U2-U3");
+            .unwrap_err();
+    assert!(matches!(err_gh, curvebook_stats::StatsError::IncompatibleAnalysisSpec { .. }), "expected IncompatibleAnalysisSpec, got {err_gh:?}");
 }
 
 // ============================================================================

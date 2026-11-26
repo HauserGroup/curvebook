@@ -1160,36 +1160,65 @@ fn validate_array_keywords(
 }
 
 // Retained until Stage 4 retires r16_5_cli_and_callers.rs
-fn canonicalize_aliases(obj: &mut Map<String, Value>, schema_obj: &Map<String, Value>, hits: &mut Vec<DeprecationHit>) {
+fn canonicalize_aliases(
+    obj: &mut Map<String, Value>,
+    schema_obj: &Map<String, Value>,
+    pointer: &str,
+    hits: &mut Vec<DeprecationHit>,
+) -> Result<(), EngineError> {
     let props = schema_obj.get("properties").and_then(Value::as_object);
     let Some(Value::Object(alias_map)) = schema_obj.get("x-deprecated-aliases") else {
-        return;
+        return Ok(());
     };
     for (canonical, aliases_val) in alias_map {
         let Some(alias_list) = aliases_val.as_array() else {
             continue;
         };
-        for alias in alias_list.iter().filter_map(Value::as_str) {
-            let is_declared_prop = props.is_some_and(|p| p.contains_key(alias));
-            if alias != canonical && !is_declared_prop && obj.contains_key(alias) {
-                push_unique_hit(hits, DeprecationHit { deprecated: alias.to_owned(), canonical: canonical.clone() });
-            }
+        let active_aliases: Vec<&str> = alias_list
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|&alias| {
+                let is_declared_prop = props.is_some_and(|p| p.contains_key(alias));
+                alias != canonical && !is_declared_prop && obj.contains_key(alias)
+            })
+            .collect();
+        for &alias in &active_aliases {
+            push_unique_hit(hits, DeprecationHit { deprecated: alias.to_owned(), canonical: canonical.clone() });
         }
-        if !obj.contains_key(canonical) {
-            for alias in alias_list.iter().filter_map(Value::as_str) {
-                if let Some(moved) = obj.remove(alias) {
-                    obj.insert(canonical.clone(), moved);
-                    break;
+        if let Some(canon_val) = obj.get(canonical) {
+            for &alias in &active_aliases {
+                if obj.get(alias).is_some_and(|alias_val| alias_val != canon_val) {
+                    let ptr = append_pointer(pointer, alias);
+                    return Err(pointer_error(
+                        &ptr,
+                        format!("conflicting values supplied for canonical parameter `{canonical}` and deprecated alias `{alias}`"),
+                    ));
                 }
             }
-        }
-        for alias in alias_list.iter().filter_map(Value::as_str) {
-            let is_declared_prop = props.is_some_and(|p| p.contains_key(alias));
-            if alias != canonical && !is_declared_prop {
+            for alias in active_aliases {
                 obj.remove(alias);
+            }
+        } else if let Some((&first_alias, rest_aliases)) = active_aliases.split_first() {
+            if let Some(first_val) = obj.get(first_alias) {
+                for &other_alias in rest_aliases {
+                    if obj.get(other_alias).is_some_and(|other_val| other_val != first_val) {
+                        let ptr = append_pointer(pointer, other_alias);
+                        return Err(pointer_error(
+                            &ptr,
+                            format!("conflicting values supplied for deprecated aliases `{first_alias}` and `{other_alias}` of `{canonical}`"),
+                        ));
+                    }
+                }
+            }
+            if let Some(moved) = obj.remove(first_alias) {
+                obj.insert(canonical.clone(), moved);
+            }
+            for &other_alias in rest_aliases {
+                obj.remove(other_alias);
             }
         }
     }
+    Ok(())
 }
 
 fn validate_object_keywords(
@@ -1200,7 +1229,7 @@ fn validate_object_keywords(
     depth: usize,
     hits: &mut Vec<DeprecationHit>,
 ) -> Result<(), EngineError> {
-    canonicalize_aliases(obj, schema_obj, hits);
+    canonicalize_aliases(obj, schema_obj, pointer, hits)?;
     if let Some(Value::Array(required)) = schema_obj.get("required") {
         for req_key in required.iter().filter_map(Value::as_str) {
             if !obj.contains_key(req_key) {

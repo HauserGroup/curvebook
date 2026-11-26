@@ -263,11 +263,18 @@ pub(super) fn render_multivariate_design_controls(
                 tokens,
                 meta,
                 "edit.corr.all_pairs",
-                "Compute all pairwise correlations",
+                "All pairwise matrix (enables correlation heatmap)",
                 ep.correlation_all_pairs,
                 &ControlEnablement::enabled(),
             ) {
                 intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::ToggleCorrAllPairs));
+            }
+            if !ep.correlation_all_pairs {
+                ui.label(
+                    egui::RichText::new("Engine computes all selected column pairs; unchecking disables heatmap graph creation.")
+                        .small()
+                        .color(tokens.text_muted),
+                );
             }
             let heat_en = r7_correlation_heatmap_toggle(ep.correlation_all_pairs);
             if render_modal_checkbox(ui, tokens, meta, "edit.corr.heatmap", "Generate correlation heatmap graph", ep.correlation_heatmap, &heat_en) {
@@ -403,7 +410,7 @@ pub(super) fn render_multivariate_design_controls(
             if step_it != 0 {
                 let mut next = spec.clone();
                 if let AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { max_iters: it, .. }) = &mut next.kind {
-                    *it = (*it as isize + step_it as isize * 5).clamp(5, 200) as usize;
+                    *it = (*it as isize + step_it as isize * 5).clamp(5, 100) as usize;
                 }
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }

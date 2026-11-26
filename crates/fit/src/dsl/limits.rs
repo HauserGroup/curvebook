@@ -14,5 +14,6 @@ pub(crate) const MAX_DSL_SOURCE_BYTES: usize = 1_048_576;
 pub(crate) const MAX_DSL_LINES: usize = 16_384;
 pub(crate) const MAX_TOTAL_DATASET_INDICES: usize = 50_000;
 pub(in crate::dsl) const MAX_DATASET_CLASSES: usize = 4_096;
+pub(in crate::dsl) const MAX_FILTER_CLASS_MATCHES: usize = 100_000;
 pub(in crate::dsl) const MAX_TOTAL_OPCODES: usize = 100_000;
 pub(in crate::dsl) const MAX_BESSEL_ORDER: i32 = 100_000;

@@ -69,6 +69,8 @@ pub struct ManageVarsModalEguiState {
     pub level_merge_target_draft: String,
     pub compact_detail_tab: usize,
     pub session_undo_depth: Option<usize>,
+    pub session_mutation_seq: Option<u64>,
+    pub staged_title_unit_drafts: std::collections::BTreeMap<(SheetId, usize), (String, String)>,
 }
 
 /// Frame geometry and modal capture report emitted by `render_manage_vars_modal`.
@@ -86,6 +88,63 @@ struct ManageVarsSheetCtx<'a> {
     mv: &'a MultipleVariablesTable,
     col: usize,
     tokens: &'a Tokens,
+}
+
+fn compute_manage_vars_revert_steps(app: &UiApp, state: &mut ManageVarsModalEguiState) -> usize {
+    let undo_delta = state.session_undo_depth.take().map_or(0, |d| app.session().undo_depth().saturating_sub(d));
+    let mut_delta = state.session_mutation_seq.take().and_then(|s| usize::try_from(app.mutation_seq().saturating_sub(s)).ok()).unwrap_or(0);
+    undo_delta.max(mut_delta).min(app.session().undo_depth())
+}
+
+fn stage_active_manage_var_title_draft(app: &UiApp, mv_ctx: Option<(&DataSheet, &MultipleVariablesTable)>, state: &mut ManageVarsModalEguiState) {
+    let Some((ds, mv)) = mv_ctx else {
+        return;
+    };
+    if ds.frozen || state.title_draft.trim().is_empty() {
+        return;
+    }
+    let col = app.grid.variables_dialog.selected_column.unwrap_or(0).min(mv.variables.len().saturating_sub(1));
+    let next_title = combine_title_and_unit(&state.title_draft, &state.unit_draft);
+    if !next_title.is_empty() && mv.variables.get(col).is_some_and(|v| v.title != next_title) {
+        state.staged_title_unit_drafts.insert((ds.id.clone(), col), (state.title_draft.clone(), state.unit_draft.clone()));
+    }
+}
+
+/// Build atomic commit commands for `Manage Variables` (`OK` / `Enter`) (`AUD-10-22`, `AUD-10-43`).
+pub(super) fn build_manage_vars_ok_commands(app: &UiApp) -> Vec<(String, serde_json::Value)> {
+    let mut cmds = Vec::new();
+    let state = &app.egui_views.manage_vars_modal;
+    let Some((ds, mv)) = active_mv_sheet(app, state) else {
+        return cmds;
+    };
+    if ds.frozen {
+        return cmds;
+    }
+    let col = app.grid.variables_dialog.selected_column.unwrap_or(0).min(mv.variables.len().saturating_sub(1));
+    for ((sid, staged_col), (title_draft, unit_draft)) in &state.staged_title_unit_drafts {
+        if sid != &ds.id || title_draft.trim().is_empty() {
+            continue;
+        }
+        let next_title = combine_title_and_unit(title_draft, unit_draft);
+        if !next_title.is_empty() && mv.variables.get(*staged_col).is_some_and(|v| v.title != next_title) {
+            cmds.push((String::from("table.setTitles"), json!({ "sheet_id": ds.id.as_str(), "col": staged_col, "title": next_title })));
+        }
+    }
+    if let Some(sel_lvl) = state.selected_level.as_deref() {
+        let trimmed = state.rename_draft.trim();
+        if !trimmed.is_empty() && trimmed != sel_lvl {
+            cmds.push((
+                String::from("table.recodeLevels"),
+                json!({ "sheet_id": ds.id.as_str(), "col": col, "mappings": [{ "from": sel_lvl, "to": trimmed }] }),
+            ));
+        }
+    }
+    if !app.grid.variables_dialog.recode_mappings.is_empty() {
+        let mappings: Vec<serde_json::Value> =
+            app.grid.variables_dialog.recode_mappings.iter().map(|(from, to)| json!({ "from": from, "to": to })).collect();
+        cmds.push((String::from("table.recodeLevels"), json!({ "sheet_id": ds.id.as_str(), "col": col, "mappings": mappings })));
+    }
+    cmds
 }
 
 fn split_title_and_unit(raw: &str) -> (String, String) {
@@ -141,13 +200,19 @@ pub fn render_manage_vars_modal(
         state.unit_draft.clear();
         state.rename_draft.clear();
         state.session_undo_depth = None;
+        state.session_mutation_seq = None;
+        state.staged_title_unit_drafts.clear();
         return ManageVarsModalFrameReport::default();
     }
     if state.session_undo_depth.is_none() {
         state.session_undo_depth = Some(app.session().undo_depth());
     }
+    if state.session_mutation_seq.is_none() {
+        state.session_mutation_seq = Some(app.mutation_seq());
+    }
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-        let steps = state.session_undo_depth.take().map_or(0, |d| app.session().undo_depth().saturating_sub(d));
+        let steps = compute_manage_vars_revert_steps(app, state);
+        state.staged_title_unit_drafts.clear();
         intents.push(UiIntent::CancelManageVariables { revert_steps: steps });
     }
 
@@ -171,9 +236,12 @@ pub fn render_manage_vars_modal(
             hdr.heading(RichText::new(title).color(tokens.text_primary));
             hdr.with_layout(Layout::right_to_left(Align::Center), |rhs| {
                 let close_lbl = "×";
-                let close_resp = rhs.button(close_lbl);
+                let close_resp = rhs.button(close_lbl).on_hover_text("Close dialog (keeps already-applied live edits; use Cancel or Esc to revert)");
                 meta.record_modal_response(rhs, &close_resp, FrameInspectEntryInput::modal_button("mv_formula.vars.close", close_lbl, true));
                 if close_resp.clicked() {
+                    state.session_undo_depth = None;
+                    state.session_mutation_seq = None;
+                    state.staged_title_unit_drafts.clear();
                     intents.push(UiIntent::CloseManageVariables);
                 }
             });
@@ -186,6 +254,15 @@ pub fn render_manage_vars_modal(
             let col_changed = state.synced_sheet_col.as_ref() != Some(&(ds.id.clone(), sel_col));
             let live_title = mv.variables.get(sel_col).map(|v| v.title.as_str());
             if col_changed {
+                if let Some((prev_sid, prev_col)) = state.synced_sheet_col.clone()
+                    && !ds.frozen
+                    && !state.title_draft.trim().is_empty()
+                {
+                    let combined = combine_title_and_unit(&state.title_draft, &state.unit_draft);
+                    if !combined.is_empty() && state.synced_var_title.as_deref() != Some(combined.as_str()) {
+                        state.staged_title_unit_drafts.insert((prev_sid, prev_col), (state.title_draft.clone(), state.unit_draft.clone()));
+                    }
+                }
                 state.synced_sheet_col = Some((ds.id.clone(), sel_col));
                 state.selected_level = None;
                 state.synced_level_key = None;
@@ -194,7 +271,10 @@ pub fn render_manage_vars_modal(
             }
             if col_changed || state.synced_var_title.as_deref() != live_title {
                 state.synced_var_title = live_title.map(str::to_owned);
-                if let Some(title) = live_title {
+                if let Some((staged_title, staged_unit)) = state.staged_title_unit_drafts.get(&(ds.id.clone(), sel_col)) {
+                    state.title_draft.clone_from(staged_title);
+                    state.unit_draft.clone_from(staged_unit);
+                } else if let Some(title) = live_title {
                     let (n, u) = split_title_and_unit(title);
                     state.title_draft = n;
                     state.unit_draft = u;
@@ -262,7 +342,8 @@ pub fn render_manage_vars_modal(
             let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
             meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal_button("modal.cancel", cancel_lbl, true));
             if cancel_resp.clicked() {
-                let steps = state.session_undo_depth.take().map_or(0, |d| app.session().undo_depth().saturating_sub(d));
+                let steps = compute_manage_vars_revert_steps(app, state);
+                state.staged_title_unit_drafts.clear();
                 intents.push(UiIntent::CancelManageVariables { revert_steps: steps });
             }
 
@@ -271,31 +352,8 @@ pub fn render_manage_vars_modal(
                 let ok_resp = widgets::primary_button(rhs, ok_lbl);
                 meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal_button("modal.ok", ok_lbl, true));
                 if ok_resp.clicked() {
-                    if let Some((ds, mv)) = mv_ctx {
-                        let col = app.grid.variables_dialog.selected_column.unwrap_or(0).min(mv.variables.len().saturating_sub(1));
-                        if !ds.frozen && !state.title_draft.trim().is_empty() {
-                            let next_title = combine_title_and_unit(&state.title_draft, &state.unit_draft);
-                            if !next_title.is_empty() && mv.variables.get(col).is_some_and(|v| v.title != next_title) {
-                                intents.push_engine("table.setTitles", json!({ "sheet_id": ds.id.as_str(), "col": col, "title": next_title }));
-                            }
-                        }
-                        if !ds.frozen
-                            && let Some(sel_lvl) = state.selected_level.as_deref()
-                        {
-                            let trimmed = state.rename_draft.trim();
-                            if !trimmed.is_empty() && trimmed != sel_lvl {
-                                intents.push_engine(
-                                    "table.recodeLevels",
-                                    json!({ "sheet_id": ds.id.as_str(), "col": col, "mappings": [{ "from": sel_lvl, "to": trimmed }] }),
-                                );
-                            }
-                        }
-                        if !app.grid.variables_dialog.recode_mappings.is_empty() {
-                            intents.push(UiIntent::ApplyManageVarRecodes { sheet_id: ds.id.clone() });
-                        }
-                    }
-                    state.session_undo_depth = None;
-                    intents.push(UiIntent::CloseManageVariables);
+                    stage_active_manage_var_title_draft(app, mv_ctx, state);
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("__manage_vars_ok") });
                 }
             });
         });
@@ -311,31 +369,8 @@ pub fn render_manage_vars_modal(
         meta,
     );
     if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
-        if let Some((ds, mv)) = mv_ctx {
-            let col = app.grid.variables_dialog.selected_column.unwrap_or(0).min(mv.variables.len().saturating_sub(1));
-            if !ds.frozen && !state.title_draft.trim().is_empty() {
-                let next_title = combine_title_and_unit(&state.title_draft, &state.unit_draft);
-                if !next_title.is_empty() && mv.variables.get(col).is_some_and(|v| v.title != next_title) {
-                    intents.push_engine("table.setTitles", json!({ "sheet_id": ds.id.as_str(), "col": col, "title": next_title }));
-                }
-            }
-            if !ds.frozen
-                && let Some(sel_lvl) = state.selected_level.as_deref()
-            {
-                let trimmed = state.rename_draft.trim();
-                if !trimmed.is_empty() && trimmed != sel_lvl {
-                    intents.push_engine(
-                        "table.recodeLevels",
-                        json!({ "sheet_id": ds.id.as_str(), "col": col, "mappings": [{ "from": sel_lvl, "to": trimmed }] }),
-                    );
-                }
-            }
-            if !app.grid.variables_dialog.recode_mappings.is_empty() {
-                intents.push(UiIntent::ApplyManageVarRecodes { sheet_id: ds.id.clone() });
-            }
-        }
-        state.session_undo_depth = None;
-        intents.push(UiIntent::CloseManageVariables);
+        stage_active_manage_var_title_draft(app, mv_ctx, state);
+        intents.push(UiIntent::DialogButtonAction { action: String::from("__manage_vars_ok") });
     }
     ManageVarsModalFrameReport {
         modal_open: true,
@@ -451,25 +486,29 @@ fn render_detail_pane(
         let unit_w = if tight_h { 64.0 } else { 82.0 };
         ui.horizontal_wrapped(|row| {
             row.label("Name:");
-            let nr = row.add(egui::TextEdit::singleline(&mut state.title_draft).hint_text("Variable name").desired_width(name_w));
+            let nr = row.add_enabled(!ds.frozen, egui::TextEdit::singleline(&mut state.title_draft).hint_text("Variable name").desired_width(name_w));
             meta.record_modal_response(
                 row,
                 &nr,
                 FrameInspectEntryInput::modal("mv_formula.vars.title_input", "textbox", "Variable Name", Some(state.title_draft.clone()), !ds.frozen),
             );
             row.label("Unit:");
-            let ur = row.add(egui::TextEdit::singleline(&mut state.unit_draft).hint_text("e.g. uM, mg/kg").desired_width(unit_w));
+            let ur = row.add_enabled(!ds.frozen, egui::TextEdit::singleline(&mut state.unit_draft).hint_text("e.g. uM, mg/kg").desired_width(unit_w));
             meta.record_modal_response(
                 row,
                 &ur,
                 FrameInspectEntryInput::modal("mv_formula.vars.unit_input", "textbox", "Variable Unit", Some(state.unit_draft.clone()), !ds.frozen),
             );
+            if !ds.frozen && (nr.changed() || ur.changed()) {
+                state.staged_title_unit_drafts.insert((ds.id.clone(), col), (state.title_draft.clone(), state.unit_draft.clone()));
+            }
             let apply_lbl = "Save";
             let can_save = !ds.frozen && !state.title_draft.trim().is_empty();
             let ar = row.add_enabled(can_save, egui::Button::new(apply_lbl));
             meta.record_modal_response(row, &ar, FrameInspectEntryInput::modal_button("mv_formula.vars.meta.apply", apply_lbl, can_save));
             if ar.clicked() {
                 let next_title = combine_title_and_unit(&state.title_draft, &state.unit_draft);
+                state.staged_title_unit_drafts.remove(&(ds.id.clone(), col));
                 if !next_title.is_empty() {
                     intents.push_engine("table.setTitles", json!({ "sheet_id": ds.id.as_str(), "col": col, "title": next_title }));
                 }
@@ -561,7 +600,7 @@ fn render_detail_pane(
             }
             let rev_lbl = tr(tokens.locale, "mv.vars.reverse_order");
             let mut rev = vd.level_order.reversed;
-            let rr = row.checkbox(&mut rev, rev_lbl);
+            let rr = row.add_enabled(!ds.frozen, egui::Checkbox::new(&mut rev, rev_lbl));
             meta.record_modal_response(
                 row,
                 &rr,
@@ -608,7 +647,7 @@ fn render_detail_pane(
         ui.label(RichText::new("Stage Level Rename / Merge").strong().color(tokens.text_primary));
         ui.horizontal_wrapped(|row| {
             row.label("From:");
-            let rf = row.add(egui::TextEdit::singleline(&mut state.recode_from_draft).hint_text("Old level").desired_width(92.0));
+            let rf = row.add_enabled(!ds.frozen, egui::TextEdit::singleline(&mut state.recode_from_draft).hint_text("Old level").desired_width(92.0));
             meta.record_modal_response(
                 row,
                 &rf,
@@ -621,7 +660,7 @@ fn render_detail_pane(
                 ),
             );
             row.label("To:");
-            let rt = row.add(egui::TextEdit::singleline(&mut state.recode_to_draft).hint_text("New level").desired_width(92.0));
+            let rt = row.add_enabled(!ds.frozen, egui::TextEdit::singleline(&mut state.recode_to_draft).hint_text("New level").desired_width(92.0));
             meta.record_modal_response(
                 row,
                 &rt,
@@ -823,7 +862,10 @@ fn render_levels_inspector(
                 if is_selected {
                     row.horizontal_wrapped(|edit_row| {
                         edit_row.label("Rename/Merge to:");
-                        let er = edit_row.add(egui::TextEdit::singleline(&mut state.rename_draft).hint_text("New level name").desired_width(105.0));
+                        let er = edit_row.add_enabled(
+                            !ds.frozen,
+                            egui::TextEdit::singleline(&mut state.rename_draft).hint_text("New level name").desired_width(105.0),
+                        );
                         meta.record_modal_response(
                             edit_row,
                             &er,

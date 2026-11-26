@@ -64,6 +64,12 @@ pub const MAX_PDF_PAGES: usize = 64;
 /// Hard ceiling on total scene primitives encoded across all pages of a PDF document.
 pub const MAX_PDF_TOTAL_PRIMITIVES: usize = 500_000;
 
+/// Hard ceiling on cumulative path commands encoded across all pages of a PDF document.
+pub const MAX_PDF_TOTAL_PATH_COMMANDS: usize = 2_000_000;
+
+/// Hard ceiling on cumulative uncompressed PDF content-stream bytes before Flate compression (64 MiB).
+pub const MAX_PDF_RAW_STREAM_BYTES: usize = 64 * 1024 * 1024;
+
 /// Hard ceiling on emitted PDF byte length (32 MiB).
 pub const MAX_PDF_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 
@@ -115,6 +121,15 @@ pub fn render_pdf_pages(pages: &[ChartScene], options: &PdfExportOptions) -> Res
 /// Returns [`PdfError`] if `pages` is empty, exceeds [`MAX_PDF_PAGES`], [`MAX_PDF_TOTAL_PRIMITIVES`],
 /// or [`MAX_PDF_OUTPUT_BYTES`], contains invalid geometry, or fails stream compression.
 pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -> Result<Vec<u8>, PdfError> {
+    render_pdf_page_refs_with_limits(pages, options, MAX_PDF_RAW_STREAM_BYTES, MAX_PDF_OUTPUT_BYTES)
+}
+
+fn render_pdf_page_refs_with_limits(
+    pages: &[&ChartScene],
+    options: &PdfExportOptions,
+    max_raw_stream_bytes: usize,
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, PdfError> {
     if pages.is_empty() {
         return Err(PdfError::EmptyDocument);
     }
@@ -123,6 +138,7 @@ pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -
     }
 
     let mut total_primitives = 0_usize;
+    let mut total_path_commands = 0_usize;
     for scene in pages {
         total_primitives = total_primitives
             .checked_add(scene.primitives.len())
@@ -132,16 +148,30 @@ pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -
                 message: format!("PDF scene primitive count {total_primitives} exceeds maximum {MAX_PDF_TOTAL_PRIMITIVES}"),
             });
         }
+        for prim in &scene.primitives {
+            if let ScenePrimitive::Path { path, .. } = prim {
+                total_path_commands = total_path_commands.checked_add(path.commands.len()).ok_or_else(|| PdfError::ResourceLimit {
+                    message: format!("PDF path command count overflows budget {MAX_PDF_TOTAL_PATH_COMMANDS}"),
+                })?;
+                if total_path_commands > MAX_PDF_TOTAL_PATH_COMMANDS {
+                    return Err(PdfError::ResourceLimit {
+                        message: format!("PDF cumulative path command count {total_path_commands} exceeds maximum {MAX_PDF_TOTAL_PATH_COMMANDS}"),
+                    });
+                }
+            }
+        }
     }
 
     validate_box_opt(options.trim_pt, "trim_pt")?;
     validate_box_opt(options.bleed_pt, "bleed_pt")?;
 
-    let embedded_ttf = resolve_embedded_truetype(options, !options.outline_text)?;
+    let embedded_ttf = resolve_embedded_truetype(options, max_raw_stream_bytes)?;
     let embedded_info = embedded_ttf.as_ref().map(|ttf| &ttf.info);
     let parsed_ttf = embedded_ttf.as_ref().map(|ttf| &ttf.parsed);
+    let raw_stream_limit = if options.compress_streams { max_raw_stream_bytes } else { max_output_bytes };
+    let mut cumulative_raw_stream_bytes = 0_usize;
     let mut cumulative_stream_bytes = 0_usize;
-    let mut doc_ttf_charged = false;
+    let mut doc_ttf_compressed: Option<Vec<u8>> = None;
 
     let mut encoded_pages = Vec::with_capacity(pages.len());
     let mut all_gs_both = BTreeSet::new();
@@ -150,38 +180,79 @@ pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -
 
     for scene in pages {
         validate_scene_bounds(scene)?;
-        let (raw_stream, used) = encode_page_stream(scene, options, embedded_info, parsed_ttf, &mut image_registry, &mut cumulative_stream_bytes)?;
-        if !options.outline_text && used.ttf && !doc_ttf_charged {
-            let font_bytes = embedded_ttf.as_ref().map_or(0_usize, |t| t.compressed_bytes.len());
+        if let Some(trim) = options.trim_pt {
+            let _ = rect_to_pdf_box(trim, scene.height_pt, "trim_pt")?;
+        }
+        if let Some(bleed) = options.bleed_pt {
+            let _ = rect_to_pdf_box(bleed, scene.height_pt, "bleed_pt")?;
+        }
+        let mut budgets = PageEncodeBudgets {
+            cumulative_raw_stream_bytes: &mut cumulative_raw_stream_bytes,
+            raw_stream_limit,
+            cumulative_stream_bytes: &mut cumulative_stream_bytes,
+            max_output_bytes,
+        };
+        let (raw_stream, used) = encode_page_stream(scene, options, embedded_info, parsed_ttf, &mut image_registry, &mut budgets)?;
+        cumulative_raw_stream_bytes = cumulative_raw_stream_bytes
+            .checked_add(raw_stream.len())
+            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF uncompressed stream byte count overflows limit {raw_stream_limit}") })?;
+        if cumulative_raw_stream_bytes > raw_stream_limit {
+            return Err(PdfError::ResourceLimit { message: format!("PDF uncompressed content size exceeds maximum {raw_stream_limit} bytes") });
+        }
+        if !options.outline_text
+            && used.ttf
+            && doc_ttf_compressed.is_none()
+            && let Some(ttf) = embedded_ttf.as_ref()
+        {
+            let remaining = max_output_bytes.saturating_sub(cumulative_stream_bytes);
+            let compressed = compress_slice_bounded(ttf.raw_bytes, remaining, "embedded PDF font")?;
             cumulative_stream_bytes = cumulative_stream_bytes
-                .checked_add(font_bytes)
-                .ok_or_else(|| PdfError::ResourceLimit { message: format!("embedded PDF font exceeds output byte limit {MAX_PDF_OUTPUT_BYTES}") })?;
-            if cumulative_stream_bytes > MAX_PDF_OUTPUT_BYTES {
-                return Err(PdfError::ResourceLimit { message: format!("embedded PDF font exceeds output byte limit {MAX_PDF_OUTPUT_BYTES}") });
+                .checked_add(compressed.len())
+                .ok_or_else(|| PdfError::ResourceLimit { message: format!("embedded PDF font exceeds output byte limit {max_output_bytes}") })?;
+            if cumulative_stream_bytes > max_output_bytes {
+                return Err(PdfError::ResourceLimit { message: format!("embedded PDF font exceeds output byte limit {max_output_bytes}") });
             }
-            doc_ttf_charged = true;
+            doc_ttf_compressed = Some(compressed);
         }
         all_gs_both.extend(used.gs_both.iter().copied());
         all_gs_stroke.extend(used.gs_stroke.iter().copied());
-        let stream_bytes = compress_if_requested(raw_stream.into_bytes(), options.compress_streams)?;
+        let remaining_out = max_output_bytes.saturating_sub(cumulative_stream_bytes);
+        let stream_bytes = if options.compress_streams {
+            compress_slice_bounded(raw_stream.as_bytes(), remaining_out, "PDF encoded content")?
+        } else {
+            let raw_bytes = raw_stream.into_bytes();
+            if raw_bytes.len() > remaining_out {
+                return Err(PdfError::ResourceLimit { message: format!("PDF encoded content size exceeds maximum {max_output_bytes} bytes") });
+            }
+            raw_bytes
+        };
         cumulative_stream_bytes = cumulative_stream_bytes
             .checked_add(stream_bytes.len())
-            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF stream byte count overflows limit {MAX_PDF_OUTPUT_BYTES}") })?;
-        if cumulative_stream_bytes > MAX_PDF_OUTPUT_BYTES {
-            return Err(PdfError::ResourceLimit { message: format!("PDF encoded content size exceeds maximum {MAX_PDF_OUTPUT_BYTES} bytes") });
+            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF stream byte count overflows limit {max_output_bytes}") })?;
+        if cumulative_stream_bytes > max_output_bytes {
+            return Err(PdfError::ResourceLimit { message: format!("PDF encoded content size exceeds maximum {max_output_bytes} bytes") });
         }
         encoded_pages.push(EncodedPage { stream_bytes, used });
     }
 
-    let doc_embedded_ttf = if doc_ttf_charged { embedded_ttf.as_ref() } else { None };
+    let doc_embedded_ttf = match (embedded_ttf.as_ref(), doc_ttf_compressed.as_deref()) {
+        (Some(ttf), Some(compressed)) => Some((ttf, compressed)),
+        _ => None,
+    };
     let doc_resources =
         PdfDocResources { all_gs_both: &all_gs_both, all_gs_stroke: &all_gs_stroke, embedded_ttf: doc_embedded_ttf, images: &image_registry };
-    assemble_pdf_document(pages, &encoded_pages, &doc_resources, options)
+    assemble_pdf_document(pages, &encoded_pages, &doc_resources, options, max_output_bytes)
+}
+
+struct PageEncodeBudgets<'a> {
+    cumulative_raw_stream_bytes: &'a mut usize,
+    raw_stream_limit: usize,
+    cumulative_stream_bytes: &'a mut usize,
+    max_output_bytes: usize,
 }
 
 struct EmbeddedTrueTypeFont<'a> {
-    raw_len: usize,
-    compressed_bytes: Vec<u8>,
+    raw_bytes: &'a [u8],
     parsed: TrueTypeFont<'a>,
     info: TrueTypeFontInfo,
     ps_name: String,
@@ -217,8 +288,13 @@ fn parse_embedded_sfnt(bytes: &[u8]) -> Option<(&[u8], TrueTypeFont<'_>, TrueTyp
     Some((bytes, parsed, info))
 }
 
-fn resolve_embedded_truetype(options: &PdfExportOptions, compress_for_embedding: bool) -> Result<Option<EmbeddedTrueTypeFont<'_>>, PdfError> {
+fn resolve_embedded_truetype(options: &PdfExportOptions, max_raw_bytes: usize) -> Result<Option<EmbeddedTrueTypeFont<'_>>, PdfError> {
     let candidate = if let Some(bytes) = options.embedded_truetype_font.as_deref() {
+        if bytes.len() > max_raw_bytes {
+            return Err(PdfError::ResourceLimit {
+                message: format!("embedded PDF TrueType font size {} bytes exceeds maximum {max_raw_bytes} bytes", bytes.len()),
+            });
+        }
         parse_embedded_sfnt(bytes)
     } else {
         BUNDLED_FONTS.iter().find_map(|&(_, bytes)| parse_embedded_sfnt(bytes))
@@ -228,8 +304,7 @@ fn resolve_embedded_truetype(options: &PdfExportOptions, compress_for_embedding:
         return Ok(None);
     };
     let ps_name = sanitize_pdf_font_name(&info.postscript_name, &info.family_name);
-    let compressed_bytes = if compress_for_embedding { compress_if_requested(raw_bytes.to_vec(), true)? } else { Vec::new() };
-    Ok(Some(EmbeddedTrueTypeFont { raw_len: raw_bytes.len(), compressed_bytes, parsed, info, ps_name }))
+    Ok(Some(EmbeddedTrueTypeFont { raw_bytes, parsed, info, ps_name }))
 }
 
 #[derive(Default)]
@@ -246,25 +321,27 @@ struct EncodedPage {
     used: PageResourcesUsed,
 }
 
-struct PdfImageEntry {
+struct PdfImageEntry<'a> {
+    asset_id: &'a str,
     width: u32,
     height: u32,
+    rgba: &'a [u8],
     color_space: PdfColorSpace,
     color_stream: Vec<u8>,
     smask_stream: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
-struct PdfImageRegistry {
-    index_by_key: BTreeMap<(String, u32, u32, u64), usize>,
-    entries: Vec<PdfImageEntry>,
+struct PdfImageRegistry<'a> {
+    buckets: BTreeMap<(u32, u32, u64), Vec<usize>>,
+    entries: Vec<PdfImageEntry<'a>>,
 }
 
 struct PdfDocResources<'a> {
     all_gs_both: &'a BTreeSet<u8>,
     all_gs_stroke: &'a BTreeSet<u8>,
-    embedded_ttf: Option<&'a EmbeddedTrueTypeFont<'a>>,
-    images: &'a PdfImageRegistry,
+    embedded_ttf: Option<(&'a EmbeddedTrueTypeFont<'a>, &'a [u8])>,
+    images: &'a PdfImageRegistry<'a>,
 }
 
 fn fnv1a_64(bytes: &[u8]) -> u64 {
@@ -301,6 +378,7 @@ fn convert_raster_chunk(pixels: &[[u8; 4]], color_space: PdfColorSpace, color_ou
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_raster_streams(
     rgba: &[u8],
     color_space: PdfColorSpace,
@@ -309,6 +387,7 @@ fn encode_raster_streams(
     raw_alpha_bytes: usize,
     has_alpha: bool,
     cumulative_stream_bytes: usize,
+    max_output_bytes: usize,
 ) -> Result<(Vec<u8>, Option<Vec<u8>>), PdfError> {
     let pixels = rgba.as_chunks::<4>().0;
     if !compress {
@@ -338,8 +417,8 @@ fn encode_raster_streams(
             enc.write_all(&alpha_chunk).map_err(|err| PdfError::CompressionFailed { message: err.to_string() })?;
         }
         let partial = color_encoder.get_ref().len().saturating_add(alpha_encoder.as_ref().map_or(0, |e| e.get_ref().len()));
-        if cumulative_stream_bytes.saturating_add(partial) > MAX_PDF_OUTPUT_BYTES {
-            return Err(PdfError::ResourceLimit { message: format!("PDF embedded image size exceeds maximum {MAX_PDF_OUTPUT_BYTES} bytes") });
+        if cumulative_stream_bytes.saturating_add(partial) > max_output_bytes {
+            return Err(PdfError::ResourceLimit { message: format!("PDF embedded image size exceeds maximum {max_output_bytes} bytes") });
         }
     }
 
@@ -348,8 +427,14 @@ fn encode_raster_streams(
     Ok((color_stream, smask_stream))
 }
 
-impl PdfImageRegistry {
-    fn register(&mut self, raster: &SceneRasterImage, options: &PdfExportOptions, cumulative_stream_bytes: &mut usize) -> Result<usize, PdfError> {
+impl<'a> PdfImageRegistry<'a> {
+    fn register(
+        &mut self,
+        raster: &'a SceneRasterImage,
+        options: &PdfExportOptions,
+        cumulative_stream_bytes: &mut usize,
+        max_output_bytes: usize,
+    ) -> Result<usize, PdfError> {
         let (w, h) = raster.pixel_size;
         if w == 0 || h == 0 {
             return Err(PdfError::InvalidScene { message: String::from("invalid raster image buffer for PDF XObject") });
@@ -371,9 +456,18 @@ impl PdfImageRegistry {
         if raster.rgba.len() != expected_len {
             return Err(PdfError::InvalidScene { message: String::from("invalid raster image buffer for PDF XObject") });
         }
-        let key = (raster.asset_id.clone(), w, h, fnv1a_64(&raster.rgba));
-        if let Some(&idx) = self.index_by_key.get(&key) {
-            return Ok(idx);
+        let bucket_key = (w, h, fnv1a_64(&raster.rgba));
+        if let Some(candidates) = self.buckets.get(&bucket_key) {
+            for &idx in candidates {
+                if let Some(existing) = self.entries.get(idx)
+                    && existing.asset_id == raster.asset_id.as_str()
+                    && existing.width == w
+                    && existing.height == h
+                    && existing.rgba == raster.rgba.as_slice()
+                {
+                    return Ok(idx);
+                }
+            }
         }
 
         let has_alpha = raster.rgba.as_chunks::<4>().0.iter().any(|&[_, _, _, a]| a < 255);
@@ -384,18 +478,18 @@ impl PdfImageRegistry {
         };
         let raw_color_bytes = px_count
             .checked_mul(color_channels)
-            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF image color buffer overflows limit {MAX_PDF_OUTPUT_BYTES}") })?;
+            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF image color buffer overflows limit {max_output_bytes}") })?;
         let raw_alpha_bytes = if has_alpha { px_count } else { 0_usize };
         let raw_total_bytes = raw_color_bytes
             .checked_add(raw_alpha_bytes)
-            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF image byte count overflows limit {MAX_PDF_OUTPUT_BYTES}") })?;
+            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF image byte count overflows limit {max_output_bytes}") })?;
         if !options.compress_streams {
             let projected = cumulative_stream_bytes
                 .checked_add(raw_total_bytes)
-                .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF image stream byte count overflows limit {MAX_PDF_OUTPUT_BYTES}") })?;
-            if projected > MAX_PDF_OUTPUT_BYTES {
+                .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF image stream byte count overflows limit {max_output_bytes}") })?;
+            if projected > max_output_bytes {
                 return Err(PdfError::ResourceLimit {
-                    message: format!("PDF uncompressed image stream size exceeds maximum {MAX_PDF_OUTPUT_BYTES} bytes"),
+                    message: format!("PDF uncompressed image stream size exceeds maximum {max_output_bytes} bytes"),
                 });
             }
         }
@@ -408,18 +502,27 @@ impl PdfImageRegistry {
             raw_alpha_bytes,
             has_alpha,
             *cumulative_stream_bytes,
+            max_output_bytes,
         )?;
         let added = color_stream.len().saturating_add(smask_stream.as_ref().map_or(0, Vec::len));
         *cumulative_stream_bytes = cumulative_stream_bytes
             .checked_add(added)
-            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF image stream byte count overflows limit {MAX_PDF_OUTPUT_BYTES}") })?;
-        if *cumulative_stream_bytes > MAX_PDF_OUTPUT_BYTES {
-            return Err(PdfError::ResourceLimit { message: format!("PDF embedded image size exceeds maximum {MAX_PDF_OUTPUT_BYTES} bytes") });
+            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF image stream byte count overflows limit {max_output_bytes}") })?;
+        if *cumulative_stream_bytes > max_output_bytes {
+            return Err(PdfError::ResourceLimit { message: format!("PDF embedded image size exceeds maximum {max_output_bytes} bytes") });
         }
 
         let idx = self.entries.len();
-        self.entries.push(PdfImageEntry { width: w, height: h, color_space: options.color_space, color_stream, smask_stream });
-        self.index_by_key.insert(key, idx);
+        self.entries.push(PdfImageEntry {
+            asset_id: raster.asset_id.as_str(),
+            width: w,
+            height: h,
+            rgba: raster.rgba.as_slice(),
+            color_space: options.color_space,
+            color_stream,
+            smask_stream,
+        });
+        self.buckets.entry(bucket_key).or_default().push(idx);
         Ok(idx)
     }
 }
@@ -440,13 +543,20 @@ fn validate_box_opt(box_opt: Option<RectPt>, label: &str) -> Result<(), PdfError
     Ok(())
 }
 
-fn compress_if_requested(raw: Vec<u8>, compress: bool) -> Result<Vec<u8>, PdfError> {
-    if !compress {
-        return Ok(raw);
-    }
+fn compress_slice_bounded(raw: &[u8], max_compressed_bytes: usize, label: &str) -> Result<Vec<u8>, PdfError> {
+    const CHUNK_BYTES: usize = 65_536;
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&raw).map_err(|err| PdfError::CompressionFailed { message: err.to_string() })?;
-    encoder.finish().map_err(|err| PdfError::CompressionFailed { message: err.to_string() })
+    for chunk in raw.chunks(CHUNK_BYTES) {
+        encoder.write_all(chunk).map_err(|err| PdfError::CompressionFailed { message: err.to_string() })?;
+        if encoder.get_ref().len() > max_compressed_bytes {
+            return Err(PdfError::ResourceLimit { message: format!("{label} exceeds output byte budget {max_compressed_bytes} bytes") });
+        }
+    }
+    let finished = encoder.finish().map_err(|err| PdfError::CompressionFailed { message: err.to_string() })?;
+    if finished.len() > max_compressed_bytes {
+        return Err(PdfError::ResourceLimit { message: format!("{label} exceeds output byte budget {max_compressed_bytes} bytes") });
+    }
+    Ok(finished)
 }
 
 fn assemble_pdf_document(
@@ -454,6 +564,7 @@ fn assemble_pdf_document(
     encoded_pages: &[EncodedPage],
     res: &PdfDocResources<'_>,
     options: &PdfExportOptions,
+    max_output_bytes: usize,
 ) -> Result<Vec<u8>, PdfError> {
     // Fixed objects:
     // 1: Catalog, 2: Pages, 3: /F1 Helvetica, 4: /F2 Helvetica-Bold,
@@ -461,12 +572,12 @@ fn assemble_pdf_document(
     let fixed_objs = 8usize;
     let mut next_id = fixed_objs + 1;
 
-    let ttf_ids = res.embedded_ttf.map(|ttf| {
+    let ttf_ids = res.embedded_ttf.map(|(ttf, compressed)| {
         let font_id = next_id;
         let desc_id = next_id + 1;
         let stream_id = next_id + 2;
         next_id += 3;
-        (ttf, font_id, desc_id, stream_id)
+        (ttf, compressed, font_id, desc_id, stream_id)
     });
 
     let mut gs_both_ids = BTreeMap::new();
@@ -497,7 +608,7 @@ fn assemble_pdf_document(
     let total_objs = pages_base_id - 1 + pages.len() * 2;
     let mut offsets = vec![0usize; total_objs + 1];
 
-    let mut pdf = Vec::with_capacity(8192 + res.embedded_ttf.map_or(0, |t| t.compressed_bytes.len()));
+    let mut pdf = Vec::with_capacity(8192 + res.embedded_ttf.map_or(0, |(_, comp)| comp.len()));
     let header: &[u8] = match options.version {
         PdfVersion::Pdf14 => b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n",
         PdfVersion::Pdf17 => b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n",
@@ -523,8 +634,8 @@ fn assemble_pdf_document(
     let info_dict = build_info_dict(pages, options);
     write_pdf_obj(&mut pdf, &mut offsets, 8, info_dict.as_bytes());
 
-    if let Some((ttf, font_id, desc_id, stream_id)) = ttf_ids {
-        write_truetype_font_objects(&mut pdf, &mut offsets, ttf, font_id, desc_id, stream_id);
+    if let Some((ttf, compressed, font_id, desc_id, stream_id)) = ttf_ids {
+        write_truetype_font_objects(&mut pdf, &mut offsets, ttf, compressed, font_id, desc_id, stream_id);
     }
 
     for (&alpha, &obj_id) in &gs_ids.both {
@@ -543,7 +654,7 @@ fn assemble_pdf_document(
         write_pdf_image_objects(&mut pdf, &mut offsets, entry, im_id, smask_id, filter_tag);
     }
 
-    let ttf_font_id = ttf_ids.map(|(_, font_id, _, _)| font_id);
+    let ttf_font_id = ttf_ids.map(|(_, _, font_id, _, _)| font_id);
     for (idx, (&scene, encoded)) in pages.iter().zip(encoded_pages.iter()).enumerate() {
         let content_obj_id = pages_base_id + idx * 2;
         let page_obj_id = content_obj_id + 1;
@@ -555,15 +666,13 @@ fn assemble_pdf_document(
         content_obj.extend_from_slice(b"\nendstream\n");
         write_pdf_obj(&mut pdf, &mut offsets, content_obj_id, &content_obj);
 
-        let page_dict = build_page_dict(scene, options, encoded, content_obj_id, ttf_font_id, &gs_ids, &image_obj_ids);
+        let page_dict = build_page_dict(scene, options, encoded, content_obj_id, ttf_font_id, &gs_ids, &image_obj_ids)?;
         write_pdf_obj(&mut pdf, &mut offsets, page_obj_id, page_dict.as_bytes());
     }
 
     write_xref_and_trailer(&mut pdf, &offsets, total_objs);
-    if pdf.len() > MAX_PDF_OUTPUT_BYTES {
-        return Err(PdfError::ResourceLimit {
-            message: format!("PDF output length {} bytes exceeds maximum {MAX_PDF_OUTPUT_BYTES} bytes", pdf.len()),
-        });
+    if pdf.len() > max_output_bytes {
+        return Err(PdfError::ResourceLimit { message: format!("PDF output length {} bytes exceeds maximum {max_output_bytes} bytes", pdf.len()) });
     }
     Ok(pdf)
 }
@@ -572,6 +681,7 @@ fn write_truetype_font_objects(
     pdf: &mut Vec<u8>,
     offsets: &mut [usize],
     ttf: &EmbeddedTrueTypeFont<'_>,
+    compressed_bytes: &[u8],
     font_id: usize,
     desc_id: usize,
     stream_id: usize,
@@ -614,10 +724,10 @@ fn write_truetype_font_objects(
     );
     write_pdf_obj(pdf, offsets, desc_id, desc_dict.as_bytes());
 
-    let mut stream_obj = Vec::with_capacity(ttf.compressed_bytes.len() + 128);
-    let header = format!("<< /Length {} /Length1 {} /Filter /FlateDecode >>\nstream\n", ttf.compressed_bytes.len(), ttf.raw_len);
+    let mut stream_obj = Vec::with_capacity(compressed_bytes.len() + 128);
+    let header = format!("<< /Length {} /Length1 {} /Filter /FlateDecode >>\nstream\n", compressed_bytes.len(), ttf.raw_bytes.len());
     stream_obj.extend_from_slice(header.as_bytes());
-    stream_obj.extend_from_slice(&ttf.compressed_bytes);
+    stream_obj.extend_from_slice(compressed_bytes);
     stream_obj.extend_from_slice(b"\nendstream\n");
     write_pdf_obj(pdf, offsets, stream_id, &stream_obj);
 }
@@ -637,7 +747,14 @@ fn build_info_dict(pages: &[&ChartScene], options: &PdfExportOptions) -> String 
     dict
 }
 
-fn write_pdf_image_objects(pdf: &mut Vec<u8>, offsets: &mut [usize], entry: &PdfImageEntry, im_id: usize, smask_id: Option<usize>, filter_tag: &str) {
+fn write_pdf_image_objects(
+    pdf: &mut Vec<u8>,
+    offsets: &mut [usize],
+    entry: &PdfImageEntry<'_>,
+    im_id: usize,
+    smask_id: Option<usize>,
+    filter_tag: &str,
+) {
     let cs_name = match entry.color_space {
         PdfColorSpace::Srgb => "DeviceRGB",
         PdfColorSpace::Grayscale => "DeviceGray",
@@ -682,15 +799,15 @@ fn build_page_dict(
     ttf_font_id: Option<usize>,
     gs_ids: &ExtGStateIds,
     image_obj_ids: &[(usize, Option<usize>)],
-) -> String {
+) -> Result<String, PdfError> {
     let mut dict = String::with_capacity(280);
     let _ = write!(dict, "<< /Type /Page /Parent 2 0 R /MediaBox [0.000 0.000 {:.3} {:.3}]", norm_zero(scene.width_pt), norm_zero(scene.height_pt));
     if let Some(trim) = options.trim_pt {
-        let [llx, lly, urx, ury] = rect_to_pdf_box(trim, scene.height_pt);
+        let [llx, lly, urx, ury] = rect_to_pdf_box(trim, scene.height_pt, "trim_pt")?;
         let _ = write!(dict, " /TrimBox [{llx:.3} {lly:.3} {urx:.3} {ury:.3}]");
     }
     if let Some(bleed) = options.bleed_pt {
-        let [llx, lly, urx, ury] = rect_to_pdf_box(bleed, scene.height_pt);
+        let [llx, lly, urx, ury] = rect_to_pdf_box(bleed, scene.height_pt, "bleed_pt")?;
         let _ = write!(dict, " /BleedBox [{llx:.3} {lly:.3} {urx:.3} {ury:.3}]");
     }
     dict.push_str(" /Resources <<");
@@ -735,7 +852,7 @@ fn build_page_dict(
         dict.push_str(" >>");
     }
     let _ = writeln!(dict, " >> /Contents {content_obj_id} 0 R >>");
-    dict
+    Ok(dict)
 }
 
 fn write_xref_and_trailer(pdf: &mut Vec<u8>, offsets: &[usize], total_objs: usize) {
@@ -763,13 +880,13 @@ fn write_pdf_obj(pdf: &mut Vec<u8>, offsets: &mut [usize], obj_id: usize, body: 
     pdf.extend_from_slice(b"endobj\n");
 }
 
-fn encode_page_stream<'a>(
-    scene: &ChartScene,
-    options: &'a PdfExportOptions,
-    embedded_info: Option<&'a TrueTypeFontInfo>,
-    embedded_ttf: Option<&'a TrueTypeFont<'a>>,
-    images: &'a mut PdfImageRegistry,
-    cumulative_stream_bytes: &'a mut usize,
+fn encode_page_stream<'a, 'b>(
+    scene: &'a ChartScene,
+    options: &'b PdfExportOptions,
+    embedded_info: Option<&'b TrueTypeFontInfo>,
+    embedded_ttf: Option<&'b TrueTypeFont<'b>>,
+    images: &'b mut PdfImageRegistry<'a>,
+    budgets: &'b mut PageEncodeBudgets<'b>,
 ) -> Result<(String, PageResourcesUsed), PdfError> {
     let mut ctx = StreamCtx {
         buf: String::with_capacity(1024),
@@ -781,7 +898,10 @@ fn encode_page_stream<'a>(
         embedded_info,
         embedded_ttf,
         images,
-        cumulative_stream_bytes,
+        cumulative_raw_stream_bytes: *budgets.cumulative_raw_stream_bytes,
+        raw_stream_limit: budgets.raw_stream_limit,
+        cumulative_stream_bytes: budgets.cumulative_stream_bytes,
+        max_output_bytes: budgets.max_output_bytes,
     };
     let mut clip_depth = 0usize;
 
@@ -807,35 +927,50 @@ fn encode_page_stream<'a>(
                 }
             }
         }
+        ctx.check_raw_stream_budget()?;
     }
 
     while clip_depth > 0 {
         ctx.buf.push_str("Q\n");
         clip_depth -= 1;
     }
+    ctx.check_raw_stream_budget()?;
 
     Ok((ctx.buf, ctx.used))
 }
 
-struct StreamCtx<'a> {
+struct StreamCtx<'a, 'b> {
     buf: String,
     used: PageResourcesUsed,
     page_h: f64,
     color_space: PdfColorSpace,
     outline_text: bool,
-    options: &'a PdfExportOptions,
-    embedded_info: Option<&'a TrueTypeFontInfo>,
-    embedded_ttf: Option<&'a TrueTypeFont<'a>>,
-    images: &'a mut PdfImageRegistry,
-    cumulative_stream_bytes: &'a mut usize,
+    options: &'b PdfExportOptions,
+    embedded_info: Option<&'b TrueTypeFontInfo>,
+    embedded_ttf: Option<&'b TrueTypeFont<'b>>,
+    images: &'b mut PdfImageRegistry<'a>,
+    cumulative_raw_stream_bytes: usize,
+    raw_stream_limit: usize,
+    cumulative_stream_bytes: &'b mut usize,
+    max_output_bytes: usize,
 }
 
-impl StreamCtx<'_> {
-    fn y_pdf(&self, y_scene: f64) -> f64 {
-        norm_zero(self.page_h - y_scene)
+impl<'a> StreamCtx<'a, '_> {
+    fn check_raw_stream_budget(&self) -> Result<(), PdfError> {
+        let projected = self.cumulative_raw_stream_bytes.saturating_add(self.buf.len());
+        if projected > self.raw_stream_limit {
+            return Err(PdfError::ResourceLimit {
+                message: format!("PDF uncompressed content stream size {projected} bytes exceeds maximum {} bytes", self.raw_stream_limit),
+            });
+        }
+        Ok(())
     }
 
-    fn emit_raster_image(&mut self, raster: &SceneRasterImage) -> Result<(), PdfError> {
+    fn y_pdf(&self, y_scene: f64) -> Result<f64, PdfError> {
+        checked_pdf_scalar(self.page_h - y_scene, "y coordinate")
+    }
+
+    fn emit_raster_image(&mut self, raster: &'a SceneRasterImage) -> Result<(), PdfError> {
         let b = raster.bounds_pt;
         check_finite_rect(b, "raster image bounds")?;
         if b.width <= 0.0 || b.height <= 0.0 || !raster.rotation_deg.is_finite() {
@@ -845,19 +980,19 @@ impl StreamCtx<'_> {
             return Ok(());
         };
         let vis = RectPt::from(vis_doc);
-        let im_idx = self.images.register(raster, self.options, self.cumulative_stream_bytes)?;
+        let im_idx = self.images.register(raster, self.options, self.cumulative_stream_bytes, self.max_output_bytes)?;
         self.used.images.insert(im_idx);
 
         self.buf.push_str("q\n");
         if let Some(c) = raster.clip {
-            check_finite_rect(c, "raster image clip")?;
-            let [llx, lly, _, _] = rect_to_pdf_box(c, self.page_h);
-            let _ = writeln!(self.buf, "{llx:.3} {lly:.3} {:.3} {:.3} re W n", norm_zero(c.width.max(0.0)), norm_zero(c.height.max(0.0)));
+            let [llx, lly, _, _] = validate_clip_rect(c, self.page_h, "raster image clip")?;
+            let _ = writeln!(self.buf, "{llx:.3} {lly:.3} {:.3} {:.3} re W n", norm_zero(c.width), norm_zero(c.height));
         }
 
         if raster.rotation_deg.abs() > 1e-9 {
-            let cx = norm_zero(b.x + 0.5 * b.width);
-            let cy_pdf = self.y_pdf(b.y + 0.5 * b.height);
+            let cx = checked_pdf_scalar(b.x + 0.5 * b.width, "raster rotation center x")?;
+            let cy_scene = checked_pdf_scalar(b.y + 0.5 * b.height, "raster rotation center y")?;
+            let cy_pdf = self.y_pdf(cy_scene)?;
             let (sin_t, cos_t) = raster.rotation_deg.to_radians().sin_cos();
             let _ = writeln!(self.buf, "1 0 0 1 {cx:.3} {cy_pdf:.3} cm");
             let _ = writeln!(self.buf, "{cos_t:.6} {:.6} {sin_t:.6} {cos_t:.6} 0 0 cm", norm_tiny(-sin_t));
@@ -866,23 +1001,26 @@ impl StreamCtx<'_> {
 
         let is_cropped = raster.crop.left_pt > 0.0 || raster.crop.right_pt > 0.0 || raster.crop.top_pt > 0.0 || raster.crop.bottom_pt > 0.0;
         if is_cropped {
-            let [vx, vy, _, _] = rect_to_pdf_box(vis, self.page_h);
-            let _ = writeln!(self.buf, "{vx:.3} {vy:.3} {:.3} {:.3} re W n", norm_zero(vis.width), norm_zero(vis.height));
+            let [vx, vy, _, _] = rect_to_pdf_box(vis, self.page_h, "raster image crop")?;
+            let vw = checked_pdf_scalar(vis.width, "raster image crop width")?;
+            let vh = checked_pdf_scalar(vis.height, "raster image crop height")?;
+            let _ = writeln!(self.buf, "{vx:.3} {vy:.3} {vw:.3} {vh:.3} re W n");
         }
 
-        let [bx, by, _, _] = rect_to_pdf_box(b, self.page_h);
-        let _ = writeln!(self.buf, "{:.3} 0 0 {:.3} {bx:.3} {by:.3} cm", norm_zero(b.width), norm_zero(b.height));
+        let [bx, by, _, _] = rect_to_pdf_box(b, self.page_h, "raster image bounds")?;
+        let bw = checked_pdf_scalar(b.width, "raster image width")?;
+        let bh = checked_pdf_scalar(b.height, "raster image height")?;
+        let _ = writeln!(self.buf, "{bw:.3} 0 0 {bh:.3} {bx:.3} {by:.3} cm");
         let _ = writeln!(self.buf, "/Im{im_idx} Do");
         self.buf.push_str("Q\n");
         Ok(())
     }
 
     fn push_clip(&mut self, rect: RectPt) -> Result<(), PdfError> {
-        check_finite_rect(rect, "clip rect")?;
+        let [llx, lly, _, _] = validate_clip_rect(rect, self.page_h, "clip rect")?;
         self.buf.push_str("q\n");
-        let [llx, lly, _, _] = rect_to_pdf_box(rect, self.page_h);
-        let w = norm_zero(rect.width.max(0.0));
-        let h = norm_zero(rect.height.max(0.0));
+        let w = norm_zero(rect.width);
+        let h = norm_zero(rect.height);
         let _ = writeln!(self.buf, "{llx:.3} {lly:.3} {w:.3} {h:.3} re W n");
         Ok(())
     }
@@ -891,18 +1029,26 @@ impl StreamCtx<'_> {
         if path.is_empty() {
             return Ok(());
         }
+        if let Some(st) = stroke
+            && (!st.width_pt.is_finite() || st.width_pt < 0.0)
+        {
+            return Err(PdfError::InvalidScene { message: String::from("PDF stroke width must be finite and non-negative") });
+        }
         let active_fill = fill.filter(|f| f.color.a > 0);
-        let active_stroke = stroke.filter(|s| s.color.a > 0 && s.width_pt.is_finite() && s.width_pt > 0.0);
+        let active_stroke = stroke.filter(|s| s.color.a > 0 && s.width_pt > 0.0);
         if active_fill.is_none() && active_stroke.is_none() {
+            validate_path_commands(path, self.page_h)?;
+            if let Some(r) = clip {
+                let _ = validate_clip_rect(r, self.page_h, "path clip rect")?;
+            }
             return Ok(());
         }
 
         self.buf.push_str("q\n");
         if let Some(r) = clip {
-            check_finite_rect(r, "path clip rect")?;
-            let [llx, lly, _, _] = rect_to_pdf_box(r, self.page_h);
-            let w = norm_zero(r.width.max(0.0));
-            let h = norm_zero(r.height.max(0.0));
+            let [llx, lly, _, _] = validate_clip_rect(r, self.page_h, "path clip rect")?;
+            let w = norm_zero(r.width);
+            let h = norm_zero(r.height);
             let _ = writeln!(self.buf, "{llx:.3} {lly:.3} {w:.3} {h:.3} re W n");
         }
 
@@ -911,7 +1057,7 @@ impl StreamCtx<'_> {
             let _ = writeln!(self.buf, "{}", format_fill_color(f.color, self.color_space));
         }
         if let Some(st) = active_stroke {
-            self.emit_stroke_style(st);
+            self.emit_stroke_style(st)?;
         }
         self.emit_path_commands(path)?;
 
@@ -949,7 +1095,7 @@ impl StreamCtx<'_> {
         }
     }
 
-    fn emit_stroke_style(&mut self, st: StrokePaint) {
+    fn emit_stroke_style(&mut self, st: StrokePaint) -> Result<(), PdfError> {
         let cap_code = match st.cap {
             LineCap::Butt => 0,
             LineCap::Round => 1,
@@ -960,8 +1106,8 @@ impl StreamCtx<'_> {
             LineJoin::Round => 1,
             LineJoin::Bevel => 2,
         };
-        let _ =
-            writeln!(self.buf, "{} {:.3} w {} J {} j", format_stroke_color(st.color, self.color_space), norm_zero(st.width_pt), cap_code, join_code);
+        let stroke_w = checked_pdf_scalar(st.width_pt, "stroke width")?;
+        let _ = writeln!(self.buf, "{} {stroke_w:.3} w {} J {} j", format_stroke_color(st.color, self.color_space), cap_code, join_code);
         let mults = st.dash.dash_multipliers();
         if !mults.is_empty() {
             self.buf.push('[');
@@ -969,11 +1115,12 @@ impl StreamCtx<'_> {
                 if idx > 0 {
                     self.buf.push(' ');
                 }
-                let dash_len = norm_zero((m * st.width_pt).max(0.1));
+                let dash_len = checked_pdf_scalar((m * st.width_pt).max(0.1), "stroke dash length")?;
                 let _ = write!(self.buf, "{dash_len:.3}");
             }
             self.buf.push_str("] 0 d\n");
         }
+        Ok(())
     }
 
     fn emit_path_commands(&mut self, path: &Path2D) -> Result<(), PdfError> {
@@ -983,48 +1130,44 @@ impl StreamCtx<'_> {
             match *cmd {
                 PathCmd::MoveTo(pt) => {
                     check_finite_pt(pt, "MoveTo")?;
-                    let _ = writeln!(self.buf, "{:.3} {:.3} m", norm_zero(pt.x), self.y_pdf(pt.y));
+                    let x = checked_pdf_scalar(pt.x, "MoveTo.x")?;
+                    let y = self.y_pdf(pt.y)?;
+                    let _ = writeln!(self.buf, "{x:.3} {y:.3} m");
                     cur = pt;
                     start = pt;
                 }
                 PathCmd::LineTo(pt) => {
                     check_finite_pt(pt, "LineTo")?;
-                    let _ = writeln!(self.buf, "{:.3} {:.3} l", norm_zero(pt.x), self.y_pdf(pt.y));
+                    let x = checked_pdf_scalar(pt.x, "LineTo.x")?;
+                    let y = self.y_pdf(pt.y)?;
+                    let _ = writeln!(self.buf, "{x:.3} {y:.3} l");
                     cur = pt;
                 }
                 PathCmd::QuadTo { control, to } => {
                     check_finite_pt(control, "QuadTo.control")?;
                     check_finite_pt(to, "QuadTo.to")?;
-                    // Exact quadratic-to-cubic degree elevation:
-                    // C1 = P0 + 2/3 (P1 - P0), C2 = P2 + 2/3 (P1 - P2).
-                    let c1 = PointPt::new(cur.x + (2.0 / 3.0) * (control.x - cur.x), cur.y + (2.0 / 3.0) * (control.y - cur.y));
-                    let c2 = PointPt::new(to.x + (2.0 / 3.0) * (control.x - to.x), to.y + (2.0 / 3.0) * (control.y - to.y));
-                    let _ = writeln!(
-                        self.buf,
-                        "{:.3} {:.3} {:.3} {:.3} {:.3} {:.3} c",
-                        norm_zero(c1.x),
-                        self.y_pdf(c1.y),
-                        norm_zero(c2.x),
-                        self.y_pdf(c2.y),
-                        norm_zero(to.x),
-                        self.y_pdf(to.y),
-                    );
+                    // Overflow-safe quadratic-to-cubic degree elevation:
+                    // C1 = 1/3 P0 + 2/3 P1, C2 = 1/3 P2 + 2/3 P1.
+                    let c1x = checked_pdf_scalar((1.0 / 3.0) * cur.x + (2.0 / 3.0) * control.x, "QuadTo.c1.x")?;
+                    let c1y = self.y_pdf((1.0 / 3.0) * cur.y + (2.0 / 3.0) * control.y)?;
+                    let c2x = checked_pdf_scalar((1.0 / 3.0) * to.x + (2.0 / 3.0) * control.x, "QuadTo.c2.x")?;
+                    let c2y = self.y_pdf((1.0 / 3.0) * to.y + (2.0 / 3.0) * control.y)?;
+                    let tx = checked_pdf_scalar(to.x, "QuadTo.to.x")?;
+                    let ty = self.y_pdf(to.y)?;
+                    let _ = writeln!(self.buf, "{c1x:.3} {c1y:.3} {c2x:.3} {c2y:.3} {tx:.3} {ty:.3} c");
                     cur = to;
                 }
                 PathCmd::CubicTo { c1, c2, to } => {
                     check_finite_pt(c1, "CubicTo.c1")?;
                     check_finite_pt(c2, "CubicTo.c2")?;
                     check_finite_pt(to, "CubicTo.to")?;
-                    let _ = writeln!(
-                        self.buf,
-                        "{:.3} {:.3} {:.3} {:.3} {:.3} {:.3} c",
-                        norm_zero(c1.x),
-                        self.y_pdf(c1.y),
-                        norm_zero(c2.x),
-                        self.y_pdf(c2.y),
-                        norm_zero(to.x),
-                        self.y_pdf(to.y),
-                    );
+                    let c1x = checked_pdf_scalar(c1.x, "CubicTo.c1.x")?;
+                    let c1y = self.y_pdf(c1.y)?;
+                    let c2x = checked_pdf_scalar(c2.x, "CubicTo.c2.x")?;
+                    let c2y = self.y_pdf(c2.y)?;
+                    let tx = checked_pdf_scalar(to.x, "CubicTo.to.x")?;
+                    let ty = self.y_pdf(to.y)?;
+                    let _ = writeln!(self.buf, "{c1x:.3} {c1y:.3} {c2x:.3} {c2y:.3} {tx:.3} {ty:.3} c");
                     cur = to;
                 }
                 PathCmd::Close => {
@@ -1032,6 +1175,7 @@ impl StreamCtx<'_> {
                     cur = start;
                 }
             }
+            self.check_raw_stream_budget()?;
         }
         Ok(())
     }
@@ -1094,9 +1238,9 @@ impl StreamCtx<'_> {
         Ok(())
     }
 
-    fn open_selectable_block(&mut self, state: &mut SelectableTextState, color: Rgba8, italic_slant: bool) {
+    fn open_selectable_block(&mut self, state: &mut SelectableTextState, color: Rgba8, italic_slant: bool) -> Result<(), PdfError> {
         if state.in_text_block {
-            return;
+            return Ok(());
         }
         // Emit page-level graphics state alpha outside `BT ... ET` per PDF 1.4 operator rules.
         self.buf.push_str("q\n");
@@ -1114,8 +1258,9 @@ impl StreamCtx<'_> {
         state.active_stroke_color = None;
         state.active_italic_slant = italic_slant;
         self.buf.push_str("BT\n");
-        self.emit_text_matrix(state.anchor_pt, state.pen_u, state.line_v, state.cos_a, state.sin_a, italic_slant);
+        self.emit_text_matrix(state.anchor_pt, state.pen_u, state.line_v, state.cos_a, state.sin_a, italic_slant)?;
         state.in_text_block = true;
+        Ok(())
     }
 
     fn close_selectable_block(&mut self, state: &mut SelectableTextState) {
@@ -1171,20 +1316,25 @@ impl StreamCtx<'_> {
                         bold_stroke: is_ttf && want_bold_stroke,
                         italic_slant: is_ttf && want_italic_slant,
                     };
-                    self.emit_pdf_text_segment(font, &bytes, style, state);
+                    self.emit_pdf_text_segment(font, &bytes, style, state)?;
                     state.pen_u += width_pt;
+                    if !state.pen_u.is_finite() {
+                        return Err(PdfError::InvalidScene { message: String::from("non-finite PDF text pen position") });
+                    }
+                    self.check_raw_stream_budget()?;
                 }
                 SpanPdfSegment::Outlined(slice) => {
                     self.emit_outlined_segment(&slice, span, span_size, state)?;
+                    self.check_raw_stream_budget()?;
                 }
             }
         }
         Ok(())
     }
 
-    fn emit_pdf_text_segment(&mut self, font: PdfFontId, bytes: &[u8], style: SpanPdfStyle, state: &mut SelectableTextState) {
+    fn emit_pdf_text_segment(&mut self, font: PdfFontId, bytes: &[u8], style: SpanPdfStyle, state: &mut SelectableTextState) -> Result<(), PdfError> {
         if bytes.is_empty() {
-            return;
+            return Ok(());
         }
         self.used.fonts.insert(font);
         if font == PdfFontId::EmbeddedTrueType {
@@ -1194,19 +1344,19 @@ impl StreamCtx<'_> {
             self.close_selectable_block(state);
         }
         if !state.in_text_block {
-            self.open_selectable_block(state, style.color, style.italic_slant);
+            self.open_selectable_block(state, style.color, style.italic_slant)?;
         } else {
             if style.color != state.active_color {
                 let _ = writeln!(self.buf, "{}", format_fill_color(style.color, self.color_space));
                 state.active_color = style.color;
             }
             if style.italic_slant != state.active_italic_slant {
-                self.emit_text_matrix(state.anchor_pt, state.pen_u, state.line_v, state.cos_a, state.sin_a, style.italic_slant);
+                self.emit_text_matrix(state.anchor_pt, state.pen_u, state.line_v, state.cos_a, state.sin_a, style.italic_slant)?;
                 state.active_italic_slant = style.italic_slant;
             }
         }
         if style.bold_stroke {
-            let stroke_w = norm_zero((style.size_pt * 0.032).max(0.15));
+            let stroke_w = checked_pdf_scalar((style.size_pt * 0.032).max(0.15), "text bold stroke width")?;
             if !state.active_bold_stroke {
                 self.buf.push_str("2 Tr\n");
                 state.active_bold_stroke = true;
@@ -1224,17 +1374,20 @@ impl StreamCtx<'_> {
             state.active_bold_stroke = false;
         }
         if (style.rise_pt - state.active_rise).abs() > 1e-4 {
-            let _ = writeln!(self.buf, "{:.3} Ts", norm_zero(style.rise_pt));
+            let rise = checked_pdf_scalar(style.rise_pt, "text rise")?;
+            let _ = writeln!(self.buf, "{rise:.3} Ts");
             state.active_rise = style.rise_pt;
         }
-        let size_key = (style.size_pt * 100.0).round();
+        let size_pt = checked_pdf_scalar(style.size_pt, "text font size")?;
+        let size_key = (size_pt * 100.0).round();
         let need_tf = state.active_font.is_none_or(|(pf, ps)| pf != font || (ps - size_key).abs() > 0.5);
         if need_tf {
-            let _ = writeln!(self.buf, "/{} {:.2} Tf", font.tag(), style.size_pt);
+            let _ = writeln!(self.buf, "/{} {size_pt:.2} Tf", font.tag());
             state.active_font = Some((font, size_key));
         }
         write_pdf_bytes_literal(&mut self.buf, bytes);
         self.buf.push_str(" Tj\n");
+        Ok(())
     }
 
     fn emit_outlined_segment(&mut self, slice: &str, span: &RichSpan, span_size: f64, state: &mut SelectableTextState) -> Result<(), PdfError> {
@@ -1254,16 +1407,24 @@ impl StreamCtx<'_> {
             self.emit_single_outlined_glyph(glyph, state.base_color, span_size, &xform)?;
         }
         state.pen_u += width_pt;
+        if !state.pen_u.is_finite() {
+            return Err(PdfError::InvalidScene { message: String::from("non-finite PDF outlined text pen position") });
+        }
         Ok(())
     }
 
-    fn emit_text_matrix(&mut self, anchor_pt: PointPt, pen_u: f64, line_v: f64, cos_a: f64, sin_a: f64, italic_slant: bool) {
-        let tx = norm_zero(anchor_pt.x + pen_u * cos_a - line_v * sin_a);
-        let ty = norm_zero(self.y_pdf(anchor_pt.y + pen_u * sin_a + line_v * cos_a));
+    fn emit_text_matrix(&mut self, anchor_pt: PointPt, pen_u: f64, line_v: f64, cos_a: f64, sin_a: f64, italic_slant: bool) -> Result<(), PdfError> {
+        let tx = checked_pdf_scalar(anchor_pt.x + pen_u * cos_a - line_v * sin_a, "text matrix tx")?;
+        let y_scene = anchor_pt.y + pen_u * sin_a + line_v * cos_a;
+        let ty = self.y_pdf(y_scene)?;
         let slant = if italic_slant { 0.2125 } else { 0.0 };
         let c = norm_tiny(sin_a + slant * cos_a);
         let d = norm_tiny(cos_a - slant * sin_a);
+        if !cos_a.is_finite() || !sin_a.is_finite() || !c.is_finite() || !d.is_finite() {
+            return Err(PdfError::InvalidScene { message: String::from("non-finite PDF text matrix component") });
+        }
         let _ = writeln!(self.buf, "{cos_a:.6} {:.6} {c:.6} {d:.6} {tx:.3} {ty:.3} Tm", norm_tiny(-sin_a));
+        Ok(())
     }
 
     fn emit_outlined_text(&mut self, text: &PositionedText) -> Result<(), PdfError> {
@@ -1322,7 +1483,7 @@ impl StreamCtx<'_> {
         if has_close {
             let _ = writeln!(self.buf, "{}", format_fill_color(color, self.color_space));
         } else {
-            let stroke_w = norm_zero((font_size_pt * 0.08).max(0.4));
+            let stroke_w = checked_pdf_scalar((font_size_pt * 0.08).max(0.4), "outlined glyph stroke width")?;
             let _ = writeln!(self.buf, "{} {stroke_w:.3} w 1 J 1 j", format_stroke_color(color, self.color_space));
         }
 
@@ -1342,10 +1503,10 @@ impl StreamCtx<'_> {
                     cur_scene = PointPt::new(x_pt, y_pt);
                 }
                 GlyphOutlineCmd::QuadTo { cx_pt, cy_pt, x_pt, y_pt } => {
-                    let c1x = cur_scene.x + (2.0 / 3.0) * (cx_pt - cur_scene.x);
-                    let c1y = cur_scene.y + (2.0 / 3.0) * (cy_pt - cur_scene.y);
-                    let c2x = x_pt + (2.0 / 3.0) * (cx_pt - x_pt);
-                    let c2y = y_pt + (2.0 / 3.0) * (cy_pt - y_pt);
+                    let c1x = (1.0 / 3.0) * cur_scene.x + (2.0 / 3.0) * cx_pt;
+                    let c1y = (1.0 / 3.0) * cur_scene.y + (2.0 / 3.0) * cy_pt;
+                    let c2x = (1.0 / 3.0) * x_pt + (2.0 / 3.0) * cx_pt;
+                    let c2y = (1.0 / 3.0) * y_pt + (2.0 / 3.0) * cy_pt;
                     let p1 = xform.to_pdf(c1x, c1y)?;
                     let p2 = xform.to_pdf(c2x, c2y)?;
                     let p3 = xform.to_pdf(x_pt, y_pt)?;
@@ -1382,6 +1543,7 @@ impl StreamCtx<'_> {
                     cur_scene = start_scene;
                 }
             }
+            self.check_raw_stream_budget()?;
         }
 
         self.buf.push_str(if has_close { "f\nQ\n" } else { "S\nQ\n" });
@@ -1434,9 +1596,10 @@ impl TextOutlineTransform {
         }
         let u = self.u_start + local_x;
         let v = self.v_start + local_y;
-        let x_scene = self.ax + u * self.cos_a - v * self.sin_a;
+        let x_scene = checked_pdf_scalar(self.ax + u * self.cos_a - v * self.sin_a, "outlined glyph x")?;
         let y_scene = self.ay + u * self.sin_a + v * self.cos_a;
-        Ok(PointPt::new(x_scene, self.page_h - y_scene))
+        let y_pdf = checked_pdf_scalar(self.page_h - y_scene, "outlined glyph y")?;
+        Ok(PointPt::new(x_scene, y_pdf))
     }
 }
 
@@ -1861,12 +2024,71 @@ fn format_stroke_color(color: Rgba8, space: PdfColorSpace) -> String {
     }
 }
 
-fn rect_to_pdf_box(rect: RectPt, page_h: f64) -> [f64; 4] {
-    let llx = norm_zero(rect.x);
-    let lly = norm_zero(page_h - (rect.y + rect.height));
-    let urx = norm_zero(rect.x + rect.width);
-    let ury = norm_zero(page_h - rect.y);
-    [llx, lly, urx, ury]
+fn checked_pdf_scalar(v: f64, label: &str) -> Result<f64, PdfError> {
+    if !v.is_finite() {
+        return Err(PdfError::InvalidScene { message: format!("non-finite computed value in {label}") });
+    }
+    Ok(norm_zero(v))
+}
+
+fn rect_to_pdf_box(rect: RectPt, page_h: f64, label: &str) -> Result<[f64; 4], PdfError> {
+    let llx = checked_pdf_scalar(rect.x, label)?;
+    let y_bottom = rect.y + rect.height;
+    let lly = checked_pdf_scalar(page_h - y_bottom, label)?;
+    let urx = checked_pdf_scalar(rect.x + rect.width, label)?;
+    let ury = checked_pdf_scalar(page_h - rect.y, label)?;
+    Ok([llx, lly, urx, ury])
+}
+
+fn validate_clip_rect(rect: RectPt, page_h: f64, label: &str) -> Result<[f64; 4], PdfError> {
+    check_finite_rect(rect, label)?;
+    if rect.width < 0.0 || rect.height < 0.0 {
+        return Err(PdfError::InvalidScene { message: format!("PDF {label} dimensions must be non-negative") });
+    }
+    rect_to_pdf_box(rect, page_h, label)
+}
+
+fn validate_path_commands(path: &Path2D, page_h: f64) -> Result<(), PdfError> {
+    let mut cur = PointPt::new(0.0, 0.0);
+    let mut start = cur;
+    for cmd in &path.commands {
+        match *cmd {
+            PathCmd::MoveTo(pt) => {
+                check_finite_pt(pt, "MoveTo")?;
+                let _ = checked_pdf_scalar(page_h - pt.y, "MoveTo.y")?;
+                cur = pt;
+                start = pt;
+            }
+            PathCmd::LineTo(pt) => {
+                check_finite_pt(pt, "LineTo")?;
+                let _ = checked_pdf_scalar(page_h - pt.y, "LineTo.y")?;
+                cur = pt;
+            }
+            PathCmd::QuadTo { control, to } => {
+                check_finite_pt(control, "QuadTo.control")?;
+                check_finite_pt(to, "QuadTo.to")?;
+                let _ = checked_pdf_scalar((1.0 / 3.0) * cur.x + (2.0 / 3.0) * control.x, "QuadTo.c1.x")?;
+                let _ = checked_pdf_scalar(page_h - ((1.0 / 3.0) * cur.y + (2.0 / 3.0) * control.y), "QuadTo.c1.y")?;
+                let _ = checked_pdf_scalar((1.0 / 3.0) * to.x + (2.0 / 3.0) * control.x, "QuadTo.c2.x")?;
+                let _ = checked_pdf_scalar(page_h - ((1.0 / 3.0) * to.y + (2.0 / 3.0) * control.y), "QuadTo.c2.y")?;
+                let _ = checked_pdf_scalar(page_h - to.y, "QuadTo.to.y")?;
+                cur = to;
+            }
+            PathCmd::CubicTo { c1, c2, to } => {
+                check_finite_pt(c1, "CubicTo.c1")?;
+                check_finite_pt(c2, "CubicTo.c2")?;
+                check_finite_pt(to, "CubicTo.to")?;
+                let _ = checked_pdf_scalar(page_h - c1.y, "CubicTo.c1.y")?;
+                let _ = checked_pdf_scalar(page_h - c2.y, "CubicTo.c2.y")?;
+                let _ = checked_pdf_scalar(page_h - to.y, "CubicTo.to.y")?;
+                cur = to;
+            }
+            PathCmd::Close => {
+                cur = start;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_finite_pt(pt: PointPt, label: &str) -> Result<(), PdfError> {
@@ -1901,5 +2123,65 @@ impl std::fmt::Write for VecAsciiWriter<'_> {
     fn write_str(&mut self, s: &str) -> std::fmt::Result {
         self.0.extend_from_slice(s.as_bytes());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_chart::{ChartScene, Path2D, PathCmd, PointPt, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint};
+    use curvebook_doc::{CropInsetsPt, ImageMimeKind};
+    use curvebook_palette::Rgba8;
+
+    use super::{MAX_PDF_OUTPUT_BYTES, PdfError, PdfExportOptions, PdfImageRegistry, fnv1a_64, render_pdf_page_refs_with_limits};
+
+    #[test]
+    fn aud11_06_raw_stream_budget_rejects_compression_bomb_before_flate() {
+        let mut path = Path2D::new();
+        path.commands.push(PathCmd::MoveTo(PointPt::new(10.0, 10.0)));
+        for _ in 0..500 {
+            path.commands.push(PathCmd::LineTo(PointPt::new(20.0, 20.0)));
+        }
+        let mut scene = ChartScene::new("pdf-bomb", "Bomb", 100.0, 100.0, None);
+        scene.primitives.push(ScenePrimitive::Path { path, fill: None, stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.0)), clip: None });
+        // Even with Flate compression enabled (where 500 identical lines compress to < 100 bytes),
+        // the incremental raw-stream budget (2048 bytes) must reject the scene before finishing.
+        let opts = PdfExportOptions { compress_streams: true, ..PdfExportOptions::default() };
+        let err = render_pdf_page_refs_with_limits(&[&scene], &opts, 2048, 32 * 1024 * 1024).expect_err("must reject over-raw-budget stream");
+        assert!(matches!(err, PdfError::ResourceLimit { .. }));
+    }
+
+    #[test]
+    fn aud11_15_pdf_image_registry_verifies_byte_equality_on_hash_bucket_collision() {
+        let img_a = SceneRasterImage {
+            asset_id: String::new(),
+            media_type: ImageMimeKind::Png,
+            pixel_size: (2, 2),
+            rgba: vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255],
+            bounds_pt: RectPt::new(0.0, 0.0, 20.0, 20.0),
+            crop: CropInsetsPt::default(),
+            rotation_deg: 0.0,
+            clip: None,
+        };
+        let img_b = SceneRasterImage { rgba: vec![10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255], ..img_a.clone() };
+        let opts = PdfExportOptions { compress_streams: false, ..PdfExportOptions::default() };
+        let mut reg = PdfImageRegistry::default();
+        let mut cum = 0usize;
+
+        let idx_a = reg.register(&img_a, &opts, &mut cum, MAX_PDF_OUTPUT_BYTES).expect("register img_a");
+        assert_eq!(idx_a, 0);
+        // Inject an adversarial hash-bucket collision: place `idx_a` into `img_b`'s FNV-1a bucket.
+        let colliding_key = (2u32, 2u32, fnv1a_64(&img_b.rgba));
+        reg.buckets.entry(colliding_key).or_default().push(idx_a);
+
+        // Byte-equality verification must reject `idx_a` and register `img_b` as a distinct entry.
+        let idx_b = reg.register(&img_b, &opts, &mut cum, MAX_PDF_OUTPUT_BYTES).expect("register colliding img_b");
+        assert_eq!(idx_b, 1, "hash-bucket collision with different pixels must not reuse img_a");
+        assert_eq!(reg.entries.len(), 2);
+
+        // Re-registering identical `img_b` bytes must deduplicate cleanly to `idx_b`.
+        let img_b_dup = img_b.clone();
+        let idx_b2 = reg.register(&img_b_dup, &opts, &mut cum, MAX_PDF_OUTPUT_BYTES).expect("register dup img_b");
+        assert_eq!(idx_b2, idx_b);
+        assert_eq!(reg.entries.len(), 2);
     }
 }

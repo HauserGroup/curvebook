@@ -2,15 +2,18 @@
 //! §8.11A & §8.12, `R15.3`).
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 
 use curvebook_chart::equation_box::resolve_model_equation_hit_bounds;
 use curvebook_chart::{ChartScene, PathCmd, PointPt, RectPt, ScenePrimitive};
 use curvebook_doc::{
     AnalysisKind, EquationDisplayMode, GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject, LayoutItem, LayoutSheet, ProjectDocument,
-    RectPt as DocRectPt, ResultTabKind, SheetId,
+    RectPt as DocRectPt, ResultSheet, ResultStatus, ResultTabKind, SheetId,
 };
-use curvebook_fit::tex_format::{format_model_equation_tex, format_polynomial_equation_tex};
+use curvebook_fit::tex_format::{
+    format_linear_regression_equation_tex, format_model_equation_tex_for_dataset, format_number_sig_figs, format_polynomial_equation_tex,
+};
 use curvebook_palette::{CanvasPreviewFilter, Rgba8};
 use curvebook_platform::sync::RwLock;
 use curvebook_render::{RasterImage, RenderTargetSpec, apply_canvas_preview_filter, render_scene};
@@ -221,12 +224,35 @@ pub fn canvas_async_worker_stats(ctx: &egui::Context) -> Option<CanvasAsyncWorke
     })
 }
 
+/// Return whether the per-context async canvas raster worker has any queued, rendering, or
+/// post-render repaint-wakeup job still in flight.
+#[must_use]
+pub fn canvas_async_worker_busy(ctx: &egui::Context) -> bool {
+    AsyncRasterWorkerHandle::try_get(ctx).is_some_and(|handle| handle.owner.pending_jobs.load(Ordering::Acquire) > 0)
+}
+
+struct PendingJobGuard(Arc<AtomicUsize>);
+
+impl PendingJobGuard {
+    fn acquire(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for PendingJobGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
+
 struct RasterJobRequest {
     slot_key: (String, SheetId),
     req_key: RasterRequestKey,
     scene: Arc<ChartScene>,
     filter: CanvasPreviewFilter,
     ctx_wake: egui::Context,
+    job_guard: PendingJobGuard,
 }
 
 #[derive(Default)]
@@ -241,6 +267,7 @@ struct RasterWorkerResults {
 struct AsyncRasterWorkerOwner {
     tx: RwLock<Option<mpsc::Sender<RasterJobRequest>>>,
     results: Arc<RwLock<RasterWorkerResults>>,
+    pending_jobs: Arc<AtomicUsize>,
     join: RwLock<Option<std::thread::JoinHandle<()>>>,
 }
 
@@ -305,6 +332,7 @@ impl AsyncRasterWorkerHandle {
             owner: Arc::new(AsyncRasterWorkerOwner {
                 tx: RwLock::named("egui_shell.canvas_raster_tx", Some(tx)),
                 results,
+                pending_jobs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 join: RwLock::named("egui_shell.canvas_raster_join", Some(join_handle)),
             }),
         };
@@ -325,6 +353,7 @@ impl AsyncRasterWorkerHandle {
         };
         if let Some(pos) = guard.completed.iter().position(|(sk, rk, _)| *sk == slot_key && *rk == req_key) {
             let (_, _, img) = guard.completed.remove(pos);
+            guard.last_submitted.retain(|(sk, rk)| !(*sk == slot_key && *rk == req_key));
             return AsyncRasterPoll::Ready(img);
         }
         let already_submitted = guard.last_submitted.iter().any(|(sk, rk)| *sk == slot_key && *rk == req_key);
@@ -340,6 +369,7 @@ impl AsyncRasterWorkerHandle {
                 scene: Arc::clone(scene),
                 filter,
                 ctx_wake: ctx_wake.clone(),
+                job_guard: PendingJobGuard::acquire(&self.owner.pending_jobs),
             };
             if tx.send(request).is_ok() {
                 if let Some(entry) = guard.last_submitted.iter_mut().find(|(sk, _)| *sk == slot_key) {
@@ -367,10 +397,13 @@ fn coalesce_pending_raster_jobs(rx: &mpsc::Receiver<RasterJobRequest>, pending: 
 }
 
 fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<RasterWorkerResults>) {
-    struct WakeGuard(Option<egui::Context>);
+    struct WakeGuard {
+        ctx: Option<egui::Context>,
+        _job_guard: PendingJobGuard,
+    }
     impl Drop for WakeGuard {
         fn drop(&mut self) {
-            if let Some(ctx) = self.0.take() {
+            if let Some(ctx) = self.ctx.take() {
                 ctx.request_repaint();
             }
         }
@@ -386,7 +419,7 @@ fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<Ra
         }
         coalesce_pending_raster_jobs(rx, &mut pending);
         let job = pending.remove(0);
-        let mut wake_guard = WakeGuard(Some(job.ctx_wake.clone()));
+        let mut wake_guard = WakeGuard { ctx: Some(job.ctx_wake.clone()), _job_guard: job.job_guard };
 
         let rendered =
             render_scene(&job.scene, RenderTargetSpec { width_px: job.req_key.width_px, height_px: job.req_key.height_px, dpi: job.req_key.dpi })
@@ -401,7 +434,7 @@ fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<Ra
         coalesce_pending_raster_jobs(rx, &mut pending);
         let superseded = pending.iter().any(|p| p.slot_key == job.slot_key);
         if superseded {
-            let _ = wake_guard.0.take();
+            let _ = wake_guard.ctx.take();
         }
         if let Ok(mut guard) = results.write_or_recover() {
             guard.rendered_count = guard.rendered_count.saturating_add(1);
@@ -413,7 +446,7 @@ fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<Ra
                 }
             }
         }
-        if !superseded && let Some(ctx) = wake_guard.0.take() {
+        if !superseded && let Some(ctx) = wake_guard.ctx.take() {
             ctx.request_repaint();
         }
     }
@@ -563,7 +596,8 @@ pub fn render_canvas_view_for_sheet(
     let paper_size = vec2(scene_w_pt * eff_scale, scene_h_pt * eff_scale);
     let pan_x = app.canvas_dialogs.canvas.pan_pt.x as f32 + state.pan_pt[0];
     let pan_y = app.canvas_dialogs.canvas.pan_pt.y as f32 + state.pan_pt[1];
-    let paper_center = mat_rect.center() + vec2(pan_x, pan_y - km_reserve_h * 0.4);
+    let unpanned_paper_center = mat_rect.center() + vec2(0.0, -km_reserve_h * 0.4);
+    let paper_center = unpanned_paper_center + vec2(pan_x, pan_y);
     let paper_rect = Rect::from_center_size(paper_center, paper_size);
     report.paper_rect_pt = Some(paper_rect);
     if !ctx_in.is_secondary_split {
@@ -634,8 +668,10 @@ pub fn render_canvas_view_for_sheet(
 
     // Pan gesture when dragging empty canvas with middle-mouse or Pan tool
     if ctx_in.enabled && resp.dragged_by(egui::PointerButton::Middle) {
-        state.pan_pt[0] += resp.drag_delta().x;
-        state.pan_pt[1] += resp.drag_delta().y;
+        let drag_delta = resp.drag_delta();
+        if drag_delta != egui::Vec2::ZERO {
+            intents.push(UiIntent::CanvasPanDelta { delta_x: f64::from(drag_delta.x), delta_y: f64::from(drag_delta.y) });
+        }
     }
 
     // Wheel pan / Ctrl+Meta wheel zoom / trackpad pinch zoom over canvas viewport
@@ -643,8 +679,8 @@ pub fn render_canvas_view_for_sheet(
         let pointer_pos = ui.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()));
         let over_canvas = pointer_pos.is_some_and(|p| mat_rect.contains(p)) || resp.hovered();
         if over_canvas {
-            let anchor = pointer_pos.unwrap_or_else(|| mat_rect.center());
-            let anchor_pt = [f64::from(anchor.x), f64::from(anchor.y)];
+            let anchor = pointer_pos.unwrap_or(unpanned_paper_center);
+            let anchor_pt = [f64::from(anchor.x - unpanned_paper_center.x), f64::from(anchor.y - unpanned_paper_center.y)];
             let zoom_delta = ui.input(|i| i.zoom_delta());
             if zoom_delta.is_finite() && (zoom_delta - 1.0).abs() > 1e-4 {
                 intents.push(UiIntent::CanvasPinchZoom { scale_delta: f64::from(zoom_delta), anchor_pt });
@@ -1488,7 +1524,26 @@ fn build_km_risk_rows(gs: &GraphSheet, doc: &ProjectDocument, ticks: &[(f64, f64
         for (c_idx, cohort) in surv.cohorts.iter().enumerate() {
             let times: Vec<f64> = match surv.cohort_observations(c_idx) {
                 Ok(obs) => obs.into_iter().map(|o| o.time).filter(|v| v.is_finite()).collect(),
-                Err(_) => (0..surv.row_count()).filter_map(|row| surv.times.get(row).and_then(|c| c.value.finite_f64())).collect(),
+                Err(_) => (0..surv.row_count())
+                    .filter_map(|row| {
+                        let time_cell = surv.times.get(row)?;
+                        if time_cell.excluded || time_cell.is_empty() {
+                            return None;
+                        }
+                        let t = time_cell.active_number().filter(|&v| v.is_finite() && v >= 0.0)?;
+                        let status_cell = cohort.cells.get(row).and_then(|subs| subs.first())?;
+                        if status_cell.excluded || status_cell.is_empty() {
+                            return None;
+                        }
+                        let code_f = status_cell.active_number()?;
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                        let valid_code = code_f.fract() == 0.0 && code_f >= (i64::MIN as f64) && code_f <= (i64::MAX as f64) && {
+                            let code = code_f as i64;
+                            code == surv.event_code || code == surv.censored_code
+                        };
+                        valid_code.then_some(t)
+                    })
+                    .collect(),
             };
             let counts = ticks.iter().map(|&(t_val, _)| times.iter().filter(|&&t| t >= t_val - 1e-9).count()).collect();
             let col = gs
@@ -1564,34 +1619,117 @@ fn render_live_tex_equations(
     rects
 }
 
-fn resolve_live_equation_tex(doc: &ProjectDocument, result_sheet_id: &SheetId, data_set_index: usize, mode: EquationDisplayMode) -> Option<String> {
-    let rs = doc.result_sheet(result_sheet_id)?;
-    let substituted = matches!(mode, EquationDisplayMode::Substituted);
-    let params: Vec<(String, f64)> = rs
+fn is_live_equation_gof_scalar(key: &str) -> bool {
+    let lower = key.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "r2" | "r^2"
+            | "adjusted r2"
+            | "adjusted r^2"
+            | "pseudo r2"
+            | "rss"
+            | "rsdr"
+            | "sy.x"
+            | "residual sd (sy.x)"
+            | "rmse"
+            | "aic"
+            | "aicc"
+            | "bic"
+            | "auc"
+            | "roc auc"
+            | "dof"
+    ) || lower.starts_with("auc (")
+        || lower.starts_with("residual sd")
+}
+
+fn normalize_live_scalar_key(key: &str) -> String {
+    key.trim().to_ascii_lowercase().replace([' ', '-'], "_")
+}
+
+fn collect_live_equation_params(rs: &ResultSheet, data_set_index: usize) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    for s in &rs.scalars {
+        if s.data_set_index == Some(data_set_index) && s.value.is_finite() && !is_live_equation_gof_scalar(&s.key) {
+            let lower = s.key.trim().to_ascii_lowercase();
+            if !seen.iter().any(|k| k == &lower) {
+                seen.push(lower);
+                out.push((s.key.clone(), s.value));
+            }
+        }
+    }
+    let has_other_scoped = rs
         .scalars
         .iter()
-        .filter(|s| s.data_set_index == Some(data_set_index) || s.data_set_index.is_none())
-        .map(|s| (s.key.clone(), s.value))
-        .collect();
+        .any(|s| s.data_set_index.is_some_and(|idx| idx != data_set_index) && s.value.is_finite() && !is_live_equation_gof_scalar(&s.key));
+    let has_converged_overlay_for_ds =
+        rs.fitted_curves.iter().any(|c| c.data_set_index == data_set_index && c.converged && !c.equation_id.eq_ignore_ascii_case("ROC"));
+    if !out.is_empty() || !has_other_scoped || has_converged_overlay_for_ds {
+        for s in &rs.scalars {
+            if s.data_set_index.is_none() && s.value.is_finite() && !is_live_equation_gof_scalar(&s.key) {
+                let lower = s.key.trim().to_ascii_lowercase();
+                if !seen.iter().any(|k| k == &lower) {
+                    seen.push(lower);
+                    out.push((s.key.clone(), s.value));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Resolve the live TeX equation markup for a `ModelEquation` overlay box (`AUD-13-16` / `AUD-13-18`).
+#[must_use]
+pub fn resolve_live_equation_tex(
+    doc: &ProjectDocument,
+    result_sheet_id: &SheetId,
+    data_set_index: usize,
+    mode: EquationDisplayMode,
+) -> Option<String> {
+    let rs = doc.result_sheet(result_sheet_id)?;
+    if matches!(rs.status, ResultStatus::Failed { .. } | ResultStatus::Dirty) {
+        return None;
+    }
+    let substituted = matches!(mode, EquationDisplayMode::Substituted);
+    let params = collect_live_equation_params(rs, data_set_index);
+    let non_roc_curves: Vec<&curvebook_doc::FittedCurveOverlay> =
+        rs.fitted_curves.iter().filter(|c| !c.equation_id.eq_ignore_ascii_case("ROC")).collect();
+    let overlay_for_dataset = if non_roc_curves.is_empty() {
+        None
+    } else {
+        let ov = non_roc_curves.into_iter().find(|c| c.data_set_index == data_set_index)?;
+        if !ov.converged {
+            return None;
+        }
+        Some(ov)
+    };
 
     match &rs.analysis.kind {
         AnalysisKind::NonlinearRegression(nl) => {
-            let eq_id =
-                rs.fitted_curves.iter().find(|c| c.data_set_index == data_set_index).map_or(nl.equation_id.as_str(), |c| c.equation_id.as_str());
+            let eq_id = overlay_for_dataset.map(|c| c.equation_id.as_str()).filter(|id| !id.trim().is_empty()).unwrap_or(nl.equation_id.as_str());
             if eq_id.trim().is_empty() {
                 return None;
             }
-            Some(format_model_equation_tex(eq_id, nl.custom_dsl.as_deref(), &params, substituted, 4))
+            let custom_dsl = if overlay_for_dataset.is_none() || eq_id == nl.equation_id { nl.custom_dsl.as_deref() } else { None };
+            Some(format_model_equation_tex_for_dataset(eq_id, custom_dsl, &params, Some(data_set_index), substituted, 4))
         }
-        AnalysisKind::LinearRegression(lin) => {
-            let through_origin = lin.force_through_origin && !lin.deming_model_ii;
-            Some(format_polynomial_equation_tex(1, through_origin, &params, substituted, 4))
+        AnalysisKind::LinearRegression(lin) => Some(format_linear_regression_equation_tex(lin, &params, substituted, 4)),
+        AnalysisKind::PassingBablok(_) => Some(format_polynomial_equation_tex(1, false, &params, substituted, 4)),
+        AnalysisKind::SimpleLogisticRegression(_) => {
+            if !substituted {
+                return Some(String::from("P(Y=1) = \\frac{1}{1 + e^{-(\\beta_0 + \\beta_1 X)}}"));
+            }
+            let b0 = params.iter().find(|(k, _)| matches!(normalize_live_scalar_key(k).as_str(), "beta0" | "b0" | "b_0")).map(|(_, v)| *v)?;
+            let b1 = params.iter().find(|(k, _)| matches!(normalize_live_scalar_key(k).as_str(), "beta1" | "b1" | "b_1")).map(|(_, v)| *v)?;
+            if !b0.is_finite() || !b1.is_finite() {
+                return None;
+            }
+            let sign = if b1 < 0.0 { "-" } else { "+" };
+            let b0_str = format_number_sig_figs(b0, 4);
+            let b1_str = format_number_sig_figs(b1.abs(), 4);
+            Some(format!("P(Y=1) = \\frac{{1}}{{1 + e^{{-({b0_str} {sign} {b1_str} X)}}}}"))
         }
-        _ => rs
-            .fitted_curves
-            .iter()
-            .find(|c| c.data_set_index == data_set_index)
-            .map(|c| format_model_equation_tex(&c.equation_id, None, &params, substituted, 4)),
+        _ => None,
     }
 }
 
@@ -1980,22 +2118,9 @@ fn render_canvas_rulers(ui: &egui::Ui, spec: CanvasRulersSpec<'_>) {
         corner_painter.galley(unit_pos, unit_galley, tokens.text_muted);
     }
 
-    let pt_per_unit = match unit {
-        PhysicalUnit::Points => 72.0_f32,
-        PhysicalUnit::Inches => 72.0_f32,
-        PhysicalUnit::Millimeters => 72.0_f32 / 25.4_f32 * 10.0_f32,
-    };
-    let step_px = (pt_per_unit * eff_scale).max(28.0);
-    let mut x = paper_rect.left();
-    let mut tick_idx = 0i32;
-    while x <= mat_rect.right() && tick_idx < 32 {
-        if x >= top_r.left() {
+    for (x, val) in compute_ruler_ticks(paper_rect.left(), top_r.left(), mat_rect.right(), eff_scale, unit) {
+        if x >= top_r.left() && x <= mat_rect.right() {
             top_painter.line_segment([pos2(x, top_r.bottom() - 6.0), pos2(x, top_r.bottom())], Stroke::new(1.0, tokens.border));
-            let val = match unit {
-                PhysicalUnit::Points => tick_idx * 72,
-                PhysicalUnit::Inches => tick_idx,
-                PhysicalUnit::Millimeters => tick_idx * 10,
-            };
             let galley = top_painter.layout_no_wrap(format!("{val}"), FontId::monospace(9.0), tokens.text_muted);
             let label_pos = pos2(x + 2.0, top_r.top() + 3.0);
             if label_pos.x >= top_clip.left()
@@ -2006,20 +2131,11 @@ fn render_canvas_rulers(ui: &egui::Ui, spec: CanvasRulersSpec<'_>) {
                 top_painter.galley(label_pos, galley, tokens.text_muted);
             }
         }
-        x += step_px;
-        tick_idx += 1;
     }
 
-    let mut y = paper_rect.top();
-    let mut y_idx = 0i32;
-    while y <= mat_rect.bottom() && y_idx < 32 {
-        if y >= left_r.top() {
+    for (y, val) in compute_ruler_ticks(paper_rect.top(), left_r.top(), mat_rect.bottom(), eff_scale, unit) {
+        if y >= left_r.top() && y <= mat_rect.bottom() {
             left_painter.line_segment([pos2(left_r.right() - 6.0, y), pos2(left_r.right(), y)], Stroke::new(1.0, tokens.border));
-            let val = match unit {
-                PhysicalUnit::Points => y_idx * 72,
-                PhysicalUnit::Inches => y_idx,
-                PhysicalUnit::Millimeters => y_idx * 10,
-            };
             let label = format!("{val}");
             let mut galley = left_painter.layout_no_wrap(label.clone(), FontId::monospace(9.0), tokens.text_muted);
             if galley.size().x > left_clip.width() - 2.0 {
@@ -2034,9 +2150,56 @@ fn render_canvas_rulers(ui: &egui::Ui, spec: CanvasRulersSpec<'_>) {
                 left_painter.galley(label_pos, galley, tokens.text_muted);
             }
         }
-        y += step_px;
-        y_idx += 1;
     }
+}
+
+/// Compute `(screen_px, physical_unit_label_value)` ruler ticks across `[visible_min_px, visible_max_px]`
+/// using nice `1-2-5` multiples so labels always match true physical scale (`>= 28 pt` screen spacing)
+/// and cover arbitrary panned/zoomed ranges without a fixed 32-tick cutoff (`AUD-08-06`).
+#[must_use]
+pub fn compute_ruler_ticks(origin_px: f32, visible_min_px: f32, visible_max_px: f32, eff_scale: f32, unit: PhysicalUnit) -> Vec<(f32, i64)> {
+    if !origin_px.is_finite() || !visible_min_px.is_finite() || !visible_max_px.is_finite() || visible_max_px < visible_min_px {
+        return Vec::new();
+    }
+    let (base_pt, base_val): (f32, i64) = match unit {
+        PhysicalUnit::Points => (72.0, 72),
+        PhysicalUnit::Inches => (72.0, 1),
+        PhysicalUnit::Millimeters => (72.0 / 25.4 * 10.0, 10),
+    };
+    let safe_scale = if eff_scale.is_finite() && eff_scale > 1e-4 { eff_scale } else { 1.0 };
+    let mut mult: i64 = 1;
+    let mut decade: i64 = 1;
+    'outer: for _ in 0..7 {
+        for factor in [1_i64, 2, 5] {
+            let cand = decade.saturating_mul(factor);
+            #[allow(clippy::cast_precision_loss)]
+            let px = base_pt * (cand as f32) * safe_scale;
+            if px >= 28.0 {
+                mult = cand;
+                break 'outer;
+            }
+        }
+        decade = decade.saturating_mul(10);
+        mult = decade;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let step_px = (base_pt * (mult as f32) * safe_scale).max(28.0);
+    let step_val = base_val.saturating_mul(mult);
+
+    #[allow(clippy::cast_possible_truncation)]
+    let start_idx = ((visible_min_px - origin_px) / step_px).floor() as i64;
+    #[allow(clippy::cast_possible_truncation)]
+    let end_idx = ((visible_max_px - origin_px) / step_px).ceil() as i64;
+    let clamped_end = end_idx.min(start_idx.saturating_add(512));
+    let mut out = Vec::new();
+    for idx in start_idx..=clamped_end {
+        #[allow(clippy::cast_precision_loss)]
+        let pos = origin_px + (idx as f32) * step_px;
+        if pos >= visible_min_px - 0.5 && pos <= visible_max_px + 0.5 {
+            out.push((pos, idx.saturating_mul(step_val)));
+        }
+    }
+    out
 }
 
 struct CanvasOverlayCtx<'a> {
@@ -3087,6 +3250,7 @@ mod raster_worker_drop_tests {
         let owner = Arc::new(AsyncRasterWorkerOwner {
             tx: RwLock::new(None),
             results: Arc::new(RwLock::new(RasterWorkerResults::default())),
+            pending_jobs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             join: RwLock::new(Some(join_handle)),
         });
         assert!(owner_tx.send(owner).is_ok(), "owner hand-off to worker thread failed");
@@ -3207,5 +3371,87 @@ mod raster_worker_drop_tests {
                 assert_eq!(delay, Some(Duration::MAX));
             }
         }
+    }
+
+    #[test]
+    fn km_risk_rows_fallback_filters_excluded_negative_and_invalid_status_cells() {
+        use curvebook_doc::{Cell, DataSheet, GraphSheet, ProjectDocument, SheetId, SurvivalTable, TableArchetype};
+
+        let mut surv = SurvivalTable::new(1, 5).expect("survival table");
+        // Row 0: valid event at t=10 (status=1)
+        surv.times[0] = Cell::number(10.0);
+        surv.cohorts[0].cells[0][0] = Cell::number(1.0);
+        // Row 1: valid censored at t=20 (status=0)
+        surv.times[1] = Cell::number(20.0);
+        surv.cohorts[0].cells[1][0] = Cell::number(0.0);
+        // Row 2: invalid status=7 triggers fallback branch in build_km_risk_rows and must be excluded
+        surv.times[2] = Cell::number(30.0);
+        surv.cohorts[0].cells[2][0] = Cell::number(7.0);
+        // Row 3: negative time with valid status=1 must be excluded
+        surv.times[3] = Cell::number(-5.0);
+        surv.cohorts[0].cells[3][0] = Cell::number(1.0);
+        // Row 4: excluded cell at t=40 must be excluded
+        surv.times[4] = Cell::number(40.0);
+        let mut excl = Cell::number(1.0);
+        excl.excluded = true;
+        surv.cohorts[0].cells[4][0] = excl;
+
+        let ds = DataSheet::new(SheetId::new("surv-km"), "Survival", TableArchetype::Survival(surv)).expect("ds");
+        let gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-km"), &ds).expect("gs");
+        let mut doc = ProjectDocument::new("KMTest").expect("doc");
+        doc.data_sheets.push(ds);
+        doc.graph_sheets.push(gs.clone());
+
+        let tokens = super::Tokens::default();
+        let rows = super::build_km_risk_rows(&gs, &doc, &[(0.0, 0.0), (15.0, 50.0), (25.0, 100.0)], &tokens);
+        assert_eq!(rows.len(), 1);
+        // Only Row 0 (t=10) and Row 1 (t=20) are valid -> at t=0: 2 at risk, at t=15: 1 at risk, at t=25: 0 at risk.
+        assert_eq!(rows[0].counts, vec![2, 1, 0], "fallback must count only valid non-negative 0/1 unexcluded rows");
+    }
+
+    #[test]
+    fn revisiting_sheet_after_switch_does_not_wedge_in_flight() {
+        use curvebook_chart::ChartScene;
+        use curvebook_doc::SheetId;
+        use curvebook_palette::Rgba8;
+
+        use super::{CanvasViewEguiState, CompositeSceneSpec, composite_async_scene_texture};
+        use crate::UiApp;
+
+        let ctx = egui::Context::default();
+        let app = UiApp::new();
+        let mut state = CanvasViewEguiState::default();
+        let scene_a = Arc::new(ChartScene::new("sheet-a", "A", 120.0, 90.0, Some(Rgba8::WHITE)));
+        let scene_b = Arc::new(ChartScene::new("sheet-b", "B", 120.0, 90.0, Some(Rgba8::WHITE)));
+        let id_a = SheetId::from("sheet-a");
+        let id_b = SheetId::from("sheet-b");
+        let paper = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(120.0, 90.0));
+
+        let pump_until_ready = |scene: &Arc<ChartScene>, sid: &SheetId, st: &mut CanvasViewEguiState| -> bool {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                ctx.run_ui(
+                    egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0))), ..Default::default() },
+                    |ui| {
+                        composite_async_scene_texture(
+                            ui,
+                            &app,
+                            CompositeSceneSpec { scene, sheet_id: sid, paper_rect: paper, slot_tag: "main", painter: ui.painter() },
+                            st,
+                        );
+                    },
+                )
+                .drop_without_applying_deltas();
+                if st.slot.last_sheet_id.as_ref() == Some(sid) && st.slot.cached_texture.is_some() && !st.slot.rendering_in_flight {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        };
+
+        assert!(pump_until_ready(&scene_a, &id_a, &mut state), "initial Sheet A raster must complete");
+        assert!(pump_until_ready(&scene_b, &id_b, &mut state), "switch to Sheet B raster must complete");
+        assert!(pump_until_ready(&scene_a, &id_a, &mut state), "revisiting Sheet A after B must not wedge in InFlight");
     }
 }

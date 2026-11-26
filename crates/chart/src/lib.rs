@@ -161,6 +161,44 @@ pub(crate) fn clamp_f64_safe(value: f64, min: f64, max: f64) -> f64 {
     if value.is_nan() { lo } else { value.clamp(lo, hi) }
 }
 
+/// Resolve a [`curvebook_doc::DataSheet`] directly from `doc.data_sheets` or from a non-failed
+/// [`curvebook_doc::ResultSheet`]'s [`curvebook_doc::ResultSheet::analyzable_data`].
+#[must_use]
+pub fn resolve_data_sheet<'a>(doc: &'a ProjectDocument, id: &curvebook_doc::SheetId) -> Option<&'a curvebook_doc::DataSheet> {
+    doc.data_sheet(id).or_else(|| {
+        doc.result_sheet(id)
+            .filter(|res| !matches!(res.status, curvebook_doc::ResultStatus::Failed { .. }))
+            .and_then(|res| res.analyzable_data.as_ref())
+    })
+}
+
+/// Resolve a [`curvebook_doc::DataSheet`] for `id`, checking top-level `data_sheets` first, then
+/// a non-failed [`curvebook_doc::ResultSheet::analyzable_data`], and walking upstream
+/// `analysis.source_sheet_id` links iteratively with cycle protection only when `analyzable_data`
+/// is `None`.
+///
+/// Returns `None` if `id` (or any intermediate result sheet along the chain) has
+/// [`curvebook_doc::ResultStatus::Failed`], or if a dependency cycle is encountered.
+#[must_use]
+pub fn resolve_data_sheet_or_upstream<'a>(doc: &'a ProjectDocument, id: &curvebook_doc::SheetId) -> Option<&'a curvebook_doc::DataSheet> {
+    let mut visited = std::collections::HashSet::new();
+    let mut cursor = id;
+    while visited.insert(cursor) {
+        if let Some(ds) = doc.data_sheet(cursor) {
+            return Some(ds);
+        }
+        let res = doc.result_sheet(cursor)?;
+        if matches!(res.status, curvebook_doc::ResultStatus::Failed { .. }) {
+            return None;
+        }
+        if let Some(analyzable) = res.analyzable_data.as_ref() {
+            return Some(analyzable);
+        }
+        cursor = &res.analysis.source_sheet_id;
+    }
+    None
+}
+
 /// Explicit opt-in compilation options for [`compile_graph_with_options`] (`R20.5`).
 ///
 /// [`CompileOptions::default()`] keeps `fit_summary.enabled == false` so existing saved figures

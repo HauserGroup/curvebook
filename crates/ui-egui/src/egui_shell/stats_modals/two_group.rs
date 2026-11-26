@@ -202,7 +202,11 @@ pub(super) fn render_two_group_design(
                     ) {
                         let mut next = spec.clone();
                         if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
+                            let prev_grp = tg.mv_group_column;
                             tg.mv_group_column = Some(idx);
+                            if tg.mv_response_column == Some(idx) {
+                                tg.mv_response_column = prev_grp.filter(|&c| c != idx);
+                            }
                         }
                         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
@@ -217,7 +221,11 @@ pub(super) fn render_two_group_design(
                     ) {
                         let mut next = spec.clone();
                         if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
+                            let prev_resp = tg.mv_response_column;
                             tg.mv_response_column = Some(idx);
+                            if tg.mv_group_column == Some(idx) {
+                                tg.mv_group_column = prev_resp.filter(|&c| c != idx);
+                            }
                         }
                         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }

@@ -18,7 +18,7 @@
 //! dependency, so it continues to build with `--no-default-features`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use curvebook_platform::write_atomic;
 
@@ -232,8 +232,19 @@ fn publish_entries(root: &Path, manual_dir: Option<&Path>) -> Result<Vec<StagedE
 
     let mut snap_roots: Vec<PathBuf> = snapshot_dirs(&manual_root)?.into_iter().map(|s| manual_root.join(s)).collect();
     let latest_dir = manual_root.join("latest");
-    if is_real_dir(&latest_dir) && is_regular_file(&latest_dir.join("manifest.json")) {
-        snap_roots.push(latest_dir);
+    if let Ok(meta) = std::fs::symlink_metadata(&latest_dir) {
+        if meta.file_type().is_symlink() {
+            return Err(format!("{}: symlinks are never published on Pages", latest_dir.display()));
+        }
+        let latest_manifest = latest_dir.join("manifest.json");
+        if let Ok(m_meta) = std::fs::symlink_metadata(&latest_manifest)
+            && m_meta.file_type().is_symlink()
+        {
+            return Err(format!("{}: symlinks are never published on Pages", latest_manifest.display()));
+        }
+        if meta.file_type().is_dir() && is_regular_file(&latest_manifest) {
+            snap_roots.push(latest_dir);
+        }
     }
     let mut manual_page_count = 0usize;
     for snap_dir in snap_roots {
@@ -273,12 +284,17 @@ fn check_publish_entries(root: &Path, manual_dir: Option<&Path>) -> Result<Vec<S
     for entry in entries.iter().filter(|e| e.site_rel.ends_with(".html")) {
         let rel = entry.site_rel.as_str();
         let html = std::fs::read_to_string(&entry.source_path).map_err(|e| format!("read {}: {e}", entry.source_path.display()))?;
-        for target in local_references(&html) {
-            match resolve(rel, &target) {
-                Some(resolved) if published.contains(resolved.as_str()) => {}
-                Some(resolved) => problems.push(format!("{rel} links to `{target}` ({resolved}), which is not published")),
-                None => problems.push(format!("{rel} links to `{target}`, which leaves the site root")),
+        match local_references(&html) {
+            Ok(targets) => {
+                for target in targets {
+                    match resolve(rel, &target) {
+                        Some(resolved) if published.contains(resolved.as_str()) => {}
+                        Some(resolved) => problems.push(format!("{rel} links to `{target}` ({resolved}), which is not published")),
+                        None => problems.push(format!("{rel} links to `{target}`, which leaves the site root")),
+                    }
+                }
             }
+            Err(err) => problems.push(format!("{rel}: {err}")),
         }
     }
     let sitemap_entry =
@@ -303,21 +319,87 @@ pub fn stage(root: &Path, out_dir: &Path) -> Result<usize, String> {
     stage_with_manual(root, None, out_dir)
 }
 
+/// Parse a strict `v<major>.<minor>` snapshot directory name (ASCII digits only, fitting in `u64`).
+#[must_use]
+pub fn parse_minor_dir_version(name: &str) -> Option<(u64, u64)> {
+    let core = name.strip_prefix('v')?;
+    let (maj, min) = core.split_once('.')?;
+    if maj.is_empty() || min.is_empty() || !maj.bytes().chain(min.bytes()).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((maj.parse::<u64>().ok()?, min.parse::<u64>().ok()?))
+}
+
+/// Normalize `path` for containment checks by resolving symlinks on existing prefixes while
+/// folding `.` and `..` segments cleanly even when trailing components do not yet exist.
+pub(crate) fn resolve_path_for_containment(path: &Path) -> Result<PathBuf, String> {
+    let mut cur = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(p) => cur.push(p.as_os_str()),
+            Component::RootDir => cur.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(seg) => {
+                cur.push(seg);
+                if let Ok(meta) = std::fs::symlink_metadata(&cur)
+                    && meta.file_type().is_symlink()
+                {
+                    cur = std::fs::canonicalize(&cur).map_err(|e| format!("canonicalize {}: {e}", cur.display()))?;
+                }
+            }
+            Component::ParentDir => {
+                if std::fs::symlink_metadata(&cur).is_ok() {
+                    cur = std::fs::canonicalize(&cur).map_err(|e| format!("canonicalize {}: {e}", cur.display()))?;
+                }
+                cur.pop();
+            }
+        }
+    }
+    let mut tail = Vec::new();
+    let mut probe = cur.clone();
+    while !probe.as_os_str().is_empty() && std::fs::symlink_metadata(&probe).is_err() {
+        if let Some(name) = probe.file_name() {
+            tail.push(name.to_os_string());
+        }
+        if !probe.pop() {
+            break;
+        }
+    }
+    let mut resolved = if !probe.as_os_str().is_empty() && std::fs::symlink_metadata(&probe).is_ok() {
+        std::fs::canonicalize(&probe).map_err(|e| format!("canonicalize {}: {e}", probe.display()))?
+    } else {
+        cur
+    };
+    for seg in tail.into_iter().rev() {
+        resolved.push(seg);
+    }
+    Ok(resolved)
+}
+
 /// Copy the checked publish set (combining `docs/` and `manual_dir`) into `out_dir`.
 pub fn stage_with_manual(root: &Path, manual_dir: Option<&Path>, out_dir: &Path) -> Result<usize, String> {
-    let docs = root.join("docs");
-    if out_dir.starts_with(&docs) {
-        return Err(format!("staging directory {} must be outside docs/", out_dir.display()));
-    }
-    let resolved_manual = resolve_manual_dir(root, manual_dir)?;
-    if out_dir.starts_with(&resolved_manual) {
-        return Err(format!("staging directory {} must be outside manual directory {}", out_dir.display(), resolved_manual.display()));
-    }
-    if std::fs::symlink_metadata(out_dir).is_ok() {
+    if let Ok(meta) = std::fs::symlink_metadata(out_dir) {
+        if meta.file_type().is_symlink() {
+            return Err(format!("staging directory {} must not be a symlink", out_dir.display()));
+        }
+        if !meta.file_type().is_dir() {
+            return Err(format!("staging directory {} must be a directory", out_dir.display()));
+        }
         let mut entries = std::fs::read_dir(out_dir).map_err(|e| format!("read_dir {}: {e}", out_dir.display()))?;
         if entries.next().is_some() {
             return Err(format!("staging directory {} must be empty", out_dir.display()));
         }
+    }
+    let docs = root.join("docs");
+    let norm_out = resolve_path_for_containment(out_dir)?;
+    let norm_docs = resolve_path_for_containment(&docs)?;
+    if norm_out.starts_with(&norm_docs) || norm_docs.starts_with(&norm_out) {
+        return Err(format!("staging directory {} must be outside docs/", out_dir.display()));
+    }
+    let resolved_manual = resolve_manual_dir(root, manual_dir)?;
+    let norm_manual = resolve_path_for_containment(&resolved_manual)?;
+    if norm_out.starts_with(&norm_manual) || norm_manual.starts_with(&norm_out) {
+        return Err(format!("staging directory {} must be outside manual directory {}", out_dir.display(), resolved_manual.display()));
     }
     let entries = check_publish_entries(root, Some(&resolved_manual))?;
     for entry in &entries {
@@ -353,12 +435,20 @@ fn snapshot_dirs(manual: &Path) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for path in read_dir_paths_sorted(manual)? {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let is_versioned = name
-            .strip_prefix('v')
-            .and_then(|core| core.split_once('.'))
-            .is_some_and(|(maj, min)| !maj.is_empty() && !min.is_empty() && maj.bytes().chain(min.bytes()).all(|b| b.is_ascii_digit()));
-        if is_versioned && is_real_dir(&path) && is_regular_file(&path.join("manifest.json")) {
-            out.push(name);
+        if parse_minor_dir_version(&name).is_some() {
+            let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+            if meta.file_type().is_symlink() {
+                return Err(format!("{}: symlinks are never published on Pages", path.display()));
+            }
+            let manifest = path.join("manifest.json");
+            if let Ok(m_meta) = std::fs::symlink_metadata(&manifest)
+                && m_meta.file_type().is_symlink()
+            {
+                return Err(format!("{}: symlinks are never published on Pages", manifest.display()));
+            }
+            if meta.file_type().is_dir() && is_regular_file(&manifest) {
+                out.push(name);
+            }
         }
     }
     out.sort();
@@ -367,6 +457,13 @@ fn snapshot_dirs(manual: &Path) -> Result<Vec<String>, String> {
 
 /// Collect regular files below `dir` as `/`-separated site-relative paths; symlinks are refused.
 fn collect_entries(base: &Path, dir: &Path, site_prefix: &str, out: &mut BTreeMap<String, PathBuf>) -> Result<(), String> {
+    let dir_meta = std::fs::symlink_metadata(dir).map_err(|e| format!("file type of {}: {e}", dir.display()))?;
+    if dir_meta.file_type().is_symlink() {
+        return Err(format!("{}: symlinks are never published on Pages", dir.display()));
+    }
+    if !dir_meta.file_type().is_dir() {
+        return Err(format!("{}: expected a regular directory for Pages staging", dir.display()));
+    }
     for path in read_dir_paths_sorted(dir)? {
         let file_type = std::fs::symlink_metadata(&path).map_err(|e| format!("file type of {}: {e}", path.display()))?.file_type();
         if file_type.is_symlink() {
@@ -381,30 +478,462 @@ fn collect_entries(base: &Path, dir: &Path, site_prefix: &str, out: &mut BTreeMa
     Ok(())
 }
 
-/// Local targets of `href="…"`, `src="…"`, and meta-refresh `url=…` in `html`, without fragments or queries.
-fn local_references(html: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for attr in ["href=\"", "src=\""] {
-        for chunk in html.split(attr).skip(1) {
-            if let Some(value) = chunk.split('"').next() {
-                push_local(value, &mut out);
+/// Given the slice immediately following `<!--`, return the byte offset immediately after the
+/// HTML5 comment terminator (`<!-->`, `<!--->`, `-->`, or `--!>`), or `None` if unclosed.
+pub(crate) fn find_html_comment_end(after_open: &str) -> Option<usize> {
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    enum State {
+        Start,
+        StartDash,
+        Comment,
+        EndDash,
+        End,
+        EndBang,
+    }
+    let mut state = State::Start;
+    for (i, &b) in after_open.as_bytes().iter().enumerate() {
+        match state {
+            State::Start => match b {
+                b'>' => return Some(i + 1),
+                b'-' => state = State::StartDash,
+                _ => state = State::Comment,
+            },
+            State::StartDash => match b {
+                b'>' => return Some(i + 1),
+                b'-' => state = State::End,
+                _ => state = State::Comment,
+            },
+            State::Comment => {
+                if b == b'-' {
+                    state = State::EndDash;
+                }
             }
+            State::EndDash => {
+                if b == b'-' {
+                    state = State::End;
+                } else {
+                    state = State::Comment;
+                }
+            }
+            State::End => match b {
+                b'>' => return Some(i + 1),
+                b'!' => state = State::EndBang,
+                b'-' => {}
+                _ => state = State::Comment,
+            },
+            State::EndBang => match b {
+                b'>' => return Some(i + 1),
+                b'-' => state = State::EndDash,
+                _ => state = State::Comment,
+            },
         }
     }
-    for chunk in html.split("http-equiv=\"refresh\"").skip(1) {
-        let tag = chunk.split('>').next().unwrap_or("");
-        if let Some(target) = tag.split("url=").nth(1).and_then(|rest| rest.split('"').next()) {
-            push_local(target.trim(), &mut out);
+    None
+}
+
+/// HTML5 §13.2.5.6 (Tag open state): `<` begins a tag, comment, or markup declaration ONLY when
+/// immediately followed by an ASCII letter, `/`, `!`, or `?`; otherwise `<` is literal text.
+#[must_use]
+pub(crate) fn is_html_tag_start(after_lt: &str) -> bool {
+    matches!(after_lt.as_bytes().first(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'/' | b'!' | b'?'))
+}
+
+/// Find the byte offset of the first matching HTML5 raw-text or RCDATA end tag `</tag_lower`
+/// (case-insensitive) followed by `>`, `/`, or HTML5 ASCII whitespace (including form feed `0x0C`).
+#[must_use]
+pub(crate) fn find_html_raw_close_tag_start(html: &str, body_start: usize, tag_lower: &str) -> Option<usize> {
+    let bytes = html.as_bytes();
+    let tag_bytes = tag_lower.as_bytes();
+    let mut i = body_start;
+    while i + 2 + tag_bytes.len() <= bytes.len() {
+        if bytes[i] == b'<'
+            && bytes[i + 1] == b'/'
+            && bytes[i + 2..i + 2 + tag_bytes.len()].eq_ignore_ascii_case(tag_bytes)
+            && matches!(bytes.get(i + 2 + tag_bytes.len()), Some(b'>' | b'/' | b' ' | b'\t' | b'\r' | b'\n' | b'\x0c'))
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Skip an HTML5 raw-text or RCDATA element body (`<script>`, `<style>`, `<title>`, `<textarea>`)
+/// starting at `body_start` (immediately after the opening tag's `>`), returning
+/// `(body_end_abs, after_close_tag_abs)`. Fails closed if unclosed.
+pub(crate) fn skip_html_raw_or_rcdata_element(html: &str, body_start: usize, tag_lower: &str) -> Result<(usize, usize), String> {
+    let body_end = find_html_raw_close_tag_start(html, body_start, tag_lower).ok_or_else(|| format!("unclosed `<{tag_lower}>` element"))?;
+    let after_lt = html.get(body_end + 1..).ok_or_else(|| format!("unclosed `</{tag_lower}>` closing tag"))?;
+    let close_gt = find_html_tag_close(after_lt).ok_or_else(|| format!("unclosed `</{tag_lower}>` closing tag"))?;
+    Ok((body_end, body_end + 1 + close_gt + 1))
+}
+
+/// Find the byte offset of the closing `>` of an HTML5 tag body (starting immediately after `<`),
+/// entering quote mode only immediately after `=` (+ optional ASCII whitespace) per WHATWG HTML5
+/// §13.2.5.32–38 so quotes in attribute names or unquoted values cannot desync tag boundaries.
+pub(crate) fn find_html_tag_close(rest: &str) -> Option<usize> {
+    let bytes = rest.as_bytes();
+    if matches!(bytes.first(), Some(b'!' | b'?')) || (bytes.first() == Some(&b'/') && !bytes.get(1).is_some_and(u8::is_ascii_alphabetic)) {
+        return rest.find('>');
+    }
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    enum State {
+        TagName,
+        BeforeAttrName,
+        AttrName,
+        AfterAttrName,
+        BeforeAttrValue,
+        DoubleQuoted,
+        SingleQuoted,
+        AfterQuotedValue,
+        UnquotedValue,
+    }
+    let mut state = State::TagName;
+    let mut i = usize::from(bytes.first() == Some(&b'/'));
+    while i < bytes.len() {
+        let b = bytes[i];
+        match state {
+            State::TagName => match b {
+                b'>' => return Some(i),
+                b'/' => state = State::BeforeAttrName,
+                _ if b.is_ascii_whitespace() => state = State::BeforeAttrName,
+                _ => {}
+            },
+            State::BeforeAttrName => match b {
+                b'>' => return Some(i),
+                b'/' => {}
+                _ if b.is_ascii_whitespace() => {}
+                _ => state = State::AttrName,
+            },
+            State::AttrName => match b {
+                b'>' => return Some(i),
+                b'=' => state = State::BeforeAttrValue,
+                b'/' => state = State::BeforeAttrName,
+                _ if b.is_ascii_whitespace() => state = State::AfterAttrName,
+                _ => {}
+            },
+            State::AfterAttrName => match b {
+                b'>' => return Some(i),
+                b'=' => state = State::BeforeAttrValue,
+                b'/' => state = State::BeforeAttrName,
+                _ if b.is_ascii_whitespace() => {}
+                _ => state = State::AttrName,
+            },
+            State::BeforeAttrValue => match b {
+                b'>' => return Some(i),
+                b'"' => state = State::DoubleQuoted,
+                b'\'' => state = State::SingleQuoted,
+                _ if b.is_ascii_whitespace() => {}
+                _ => state = State::UnquotedValue,
+            },
+            State::DoubleQuoted => {
+                if b == b'"' {
+                    state = State::AfterQuotedValue;
+                }
+            }
+            State::SingleQuoted => {
+                if b == b'\'' {
+                    state = State::AfterQuotedValue;
+                }
+            }
+            State::AfterQuotedValue => match b {
+                b'>' => return Some(i),
+                b'/' => state = State::BeforeAttrName,
+                _ if b.is_ascii_whitespace() => state = State::BeforeAttrName,
+                _ => state = State::AttrName,
+            },
+            State::UnquotedValue => match b {
+                b'>' => return Some(i),
+                _ if b.is_ascii_whitespace() => state = State::BeforeAttrName,
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Extract the HTML5 tag name from a trimmed tag body (stopping at ASCII whitespace or `/`).
+#[must_use]
+pub(crate) fn extract_html_tag_name(trimmed_tag: &str) -> &str {
+    let body = trimmed_tag.strip_prefix('/').unwrap_or(trimmed_tag).trim_start();
+    let end = body.bytes().position(|b| b.is_ascii_whitespace() || b == b'/').unwrap_or(body.len());
+    body.get(..end).unwrap_or("")
+}
+
+/// Parse HTML5 tag attributes from a trimmed tag body, supporting `/` tag-name delimiters,
+/// double/single/unquoted attribute values, whitespace around `=`, and entity decoding.
+pub(crate) fn parse_html_tag_attributes(trimmed_tag: &str) -> Vec<(String, String)> {
+    let mut attrs = Vec::new();
+    let bytes = trimmed_tag.as_bytes();
+    let mut i = bytes.iter().position(|b| b.is_ascii_whitespace() || *b == b'/').unwrap_or(bytes.len());
+    while i < bytes.len() {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let k_start = i;
+        // HTML5 §13.2.5.32: the first non-whitespace, non-`/` byte starts the attribute name even if `=`.
+        i += 1;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' && bytes[i] != b'/' {
+            i += 1;
+        }
+        let key = trimmed_tag.get(k_start..i).unwrap_or("").to_owned();
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            if !key.is_empty() {
+                attrs.push((key, String::new()));
+            }
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let val = if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+            let q = bytes[i];
+            i += 1;
+            let v_start = i;
+            while i < bytes.len() && bytes[i] != q {
+                i += 1;
+            }
+            let raw = trimmed_tag.get(v_start..i).unwrap_or("").to_owned();
+            if i < bytes.len() {
+                i += 1;
+            }
+            unescape_html_attr(&raw)
+        } else {
+            let v_start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            unescape_html_attr(trimmed_tag.get(v_start..i).unwrap_or(""))
+        };
+        attrs.push((key, val));
+    }
+    attrs
+}
+
+pub(crate) fn unescape_html_attr(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'&'
+            && let Some((ch, consumed)) = decode_html_entity(raw.get(i..).unwrap_or(""))
+        {
+            out.push(ch);
+            i += consumed;
+            continue;
+        }
+        if let Some(rest) = raw.get(i..)
+            && let Some(ch) = rest.chars().next()
+        {
+            out.push(ch);
+            i += ch.len_utf8();
+        } else {
+            i += 1;
         }
     }
     out
 }
 
+fn decode_html_entity(slice: &str) -> Option<(char, usize)> {
+    let rest = slice.strip_prefix('&')?;
+    if let Some(num) = rest.strip_prefix('#') {
+        let (tail, radix, max_digits, prefix_len) =
+            if let Some(hex) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) { (hex, 16, 8, 3) } else { (num, 10, 10, 2) };
+        let digits_len = tail.bytes().take_while(|b| if radix == 16 { b.is_ascii_hexdigit() } else { b.is_ascii_digit() }).count();
+        if digits_len == 0 {
+            return None;
+        }
+        let trimmed = tail.get(..digits_len)?.trim_start_matches('0');
+        let code = if trimmed.is_empty() {
+            0u32
+        } else if trimmed.len() > max_digits {
+            return None;
+        } else {
+            u32::from_str_radix(trimmed, radix).ok()?
+        };
+        let semi = usize::from(tail.as_bytes().get(digits_len) == Some(&b';'));
+        let ch = char::from_u32(code).filter(|&c| c != '\0').unwrap_or('\u{FFFD}');
+        return Some((ch, prefix_len + digits_len + semi));
+    }
+    let semi_pos = rest.find(';')?;
+    if semi_pos == 0 || semi_pos > 16 {
+        return None;
+    }
+    let ch = match rest.get(..semi_pos)?.to_ascii_lowercase().as_str() {
+        "amp" => '&',
+        "quot" => '"',
+        "apos" => '\'',
+        "lt" => '<',
+        "gt" => '>',
+        "colon" => ':',
+        "sol" => '/',
+        "semi" => ';',
+        "period" => '.',
+        "equals" => '=',
+        "quest" => '?',
+        "nbsp" => ' ',
+        "tab" => '\t',
+        "newline" => '\n',
+        _ => return None,
+    };
+    Some((ch, semi_pos + 2))
+}
+
+/// Parse the redirect target URL from a `<meta http-equiv="refresh" content="...">` value per
+/// WHATWG HTML §4.2.5.3 (supporting `;`, `,`, or whitespace separators, optional `url=`, and quotes).
+#[must_use]
+pub(crate) fn parse_meta_refresh_url(content: &str) -> Option<&str> {
+    let bytes = content.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let digits_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == digits_start && bytes.get(i) != Some(&b'.') {
+        return None;
+    }
+    while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+        i += 1;
+    }
+    let ws_before = i;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let saw_ws = i > ws_before;
+    if bytes[i] == b';' || bytes[i] == b',' {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+    } else if !saw_ws {
+        return None;
+    }
+    let rest = content.get(i..)?;
+    if rest.is_empty() {
+        return None;
+    }
+    let url_slice = if let Some(after_u) = rest.get(..3).filter(|s| s.eq_ignore_ascii_case("url")).and_then(|_| rest.get(3..)) {
+        let after_ws = after_u.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        if let Some(after_eq) = after_ws.strip_prefix('=') { after_eq.trim_start_matches(|c: char| c.is_ascii_whitespace()) } else { rest }
+    } else {
+        rest
+    };
+    let target = if let Some(after_q) = url_slice.strip_prefix('"') {
+        after_q.split('"').next().unwrap_or(after_q)
+    } else if let Some(after_q) = url_slice.strip_prefix('\'') {
+        after_q.split('\'').next().unwrap_or(after_q)
+    } else {
+        url_slice.trim_end_matches(|c: char| c.is_ascii_whitespace())
+    };
+    (!target.is_empty()).then_some(target)
+}
+
+/// Local targets of `href`, `src`, `srcset`, `poster`, `action`, `formaction`, `ping`, `xlink:href`,
+/// and meta-refresh values in `html`, without fragments or queries. Fails closed on unclosed HTML
+/// comments or tags.
+fn local_references(html: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some((_, after_lt)) = rest.split_once('<') {
+        if !is_html_tag_start(after_lt) {
+            rest = after_lt;
+            continue;
+        }
+        if let Some(after_comment) = after_lt.strip_prefix("!--") {
+            let Some(close_end) = find_html_comment_end(after_comment) else {
+                return Err(String::from("unclosed HTML comment `<!--`"));
+            };
+            rest = after_comment.get(close_end..).ok_or_else(|| String::from("unclosed HTML comment `<!--`"))?;
+            continue;
+        }
+        let Some(tag_end) = find_html_tag_close(after_lt) else {
+            return Err(String::from("unclosed HTML tag or attribute quote"));
+        };
+        let Some((tag_body, tail)) = after_lt.split_at_checked(tag_end) else {
+            return Err(String::from("unclosed HTML tag or attribute quote"));
+        };
+        rest = tail.strip_prefix('>').unwrap_or(tail);
+        let trimmed = tag_body.trim();
+        if trimmed.starts_with('/') {
+            continue;
+        }
+        let tag_lower = extract_html_tag_name(trimmed).to_ascii_lowercase();
+        let attrs = parse_html_tag_attributes(trimmed);
+        if let Some((bad_key, _)) = attrs.iter().find(|(k, _)| k.contains(['"', '\'', '<'])) {
+            return Err(format!("malformed HTML attribute name `{bad_key}` on `<{tag_lower}>` (unclosed quote or parse error)"));
+        }
+        collect_tag_local_refs(&tag_lower, &attrs, &mut out);
+        if matches!(tag_lower.as_str(), "title" | "textarea" | "script" | "style") {
+            let (_, after_close) = skip_html_raw_or_rcdata_element(rest, 0, &tag_lower)?;
+            rest = rest.get(after_close..).unwrap_or("");
+        }
+    }
+    Ok(out)
+}
+
+fn collect_tag_local_refs(tag_lower: &str, attrs: &[(String, String)], out: &mut Vec<String>) {
+    let mut is_meta_refresh = false;
+    let mut refresh_contents: Vec<&str> = Vec::new();
+    let mut saw_http_equiv = false;
+    for (k, v) in attrs {
+        let key_lower = k.to_ascii_lowercase();
+        match key_lower.as_str() {
+            "href" | "src" | "poster" | "action" | "formaction" | "xlink:href" => push_local(v, out),
+            "srcset" | "imagesrcset" => {
+                for candidate in v.split(',') {
+                    if let Some(url) = candidate.split_whitespace().next() {
+                        push_local(url, out);
+                    }
+                }
+            }
+            "ping" => {
+                for url in v.split_whitespace() {
+                    push_local(url, out);
+                }
+            }
+            "http-equiv" if tag_lower == "meta" && !saw_http_equiv => {
+                saw_http_equiv = true;
+                if v.trim().eq_ignore_ascii_case("refresh") {
+                    is_meta_refresh = true;
+                }
+            }
+            "content" if tag_lower == "meta" => {
+                refresh_contents.push(v.as_str());
+            }
+            _ => {}
+        }
+    }
+    if is_meta_refresh {
+        for content in refresh_contents {
+            if let Some(target) = parse_meta_refresh_url(content) {
+                push_local(target, out);
+            }
+        }
+    }
+}
+
 fn push_local(raw: &str, out: &mut Vec<String>) {
     let value = raw.trim();
-    let is_external = value.starts_with("//") || value.split_once(':').is_some_and(|(scheme, _)| !scheme.contains('/'));
-    let path = value.split(['#', '?']).next().unwrap_or("");
-    if !is_external && !path.is_empty() {
+    if value.starts_with("//") {
+        return;
+    }
+    let path = value.split(['#', '?']).next().unwrap_or("").trim();
+    let is_scheme = path.split_once(':').is_some_and(|(scheme, _)| !scheme.is_empty() && !scheme.contains('/'));
+    if !is_scheme && !path.is_empty() {
         out.push(path.to_owned());
     }
 }
@@ -639,6 +1168,77 @@ mod tests {
             ("404.html", "/other/site.css", None),
         ] {
             assert_eq!(resolve(from, target).as_deref(), expected, "resolve({from}, {target})");
+        }
+    }
+
+    #[test]
+    fn aud_12_07_and_26_traversal_symlinks_html_links_and_snapshot_grammar() {
+        // 1. stage() rejects `..` traversal into docs/ or manual_dir and symlinked out_dir.
+        let root = seed("aud-12-07-stage");
+        assert!(stage(root.path(), &root.join("_site/../docs/sub")).unwrap_err().contains("outside docs/"));
+        assert!(stage(root.path(), &root.join("_site/../target/docs-manual/sub")).unwrap_err().contains("outside manual directory"));
+
+        #[cfg(unix)]
+        {
+            let empty_dir = root.join("_empty_target");
+            std::fs::create_dir_all(&empty_dir).unwrap();
+            let link_out = root.join("_symlink_out");
+            std::os::unix::fs::symlink(&empty_dir, &link_out).unwrap();
+            assert!(stage(root.path(), &link_out).unwrap_err().contains("symlink"));
+
+            let link_to_docs = root.join("_link_docs");
+            std::os::unix::fs::symlink(root.join("docs"), &link_to_docs).unwrap();
+            assert!(stage(root.path(), &link_to_docs.join("nested")).unwrap_err().contains("outside docs/"));
+
+            // 2. Symlinked SITE_DIRS root (`docs/images`) must be rejected.
+            let sym_root = seed("aud-12-07-sitedir");
+            std::fs::remove_dir_all(sym_root.join("docs/images")).unwrap();
+            std::os::unix::fs::symlink(sym_root.join("docs/audit"), sym_root.join("docs/images")).unwrap();
+            assert!(publish_list(sym_root.path()).unwrap_err().contains("symlinks are never published"));
+        }
+
+        // 3. local_references / push_local catch single quotes, uppercase, unquoted, spaced '=',
+        //    slash tag delimiter, reversed meta refresh, url=-less/comma refresh, and colon in fragment/query.
+        for snippet in [
+            "<a href='ROADMAP.md'>x</a>",
+            "<A HREF=\"ROADMAP.md\">x</A>",
+            "<a href=ROADMAP.md>x</a>",
+            "<a href = \"ROADMAP.md\">x</a>",
+            "<a/href=\"ROADMAP.md\">x</a>",
+            "<meta content=\"0; url=ROADMAP.md\" http-equiv=\"refresh\">",
+            "<meta http-equiv=\"refresh\" content=\"0; ROADMAP.md\">",
+            "<meta http-equiv=\"refresh\" content=\"0, url=ROADMAP.md\">",
+            "<a href=\"ROADMAP.md#r1:2\">x</a>",
+            "<a href=\"ROADMAP.md?v=1:2\">x</a>",
+        ] {
+            let r = seed("aud-12-07-links");
+            r.write("docs/privacy.html", snippet);
+            assert!(check_publish_set(r.path()).unwrap_err().contains("ROADMAP.md"), "expected `{snippet}` to fail publish set check");
+        }
+
+        // 4. Unified parse_minor_dir_version rejects + signs and u64 overflow.
+        assert_eq!(parse_minor_dir_version("v0.1"), Some((0, 1)));
+        assert_eq!(parse_minor_dir_version("v+0.+1"), None);
+        assert_eq!(parse_minor_dir_version("v999999999999999999999999.0"), None);
+
+        // 5. HTML5 quote-desync, abrupt/bang comment closes, and unclosed tag/comment fail-closed.
+        for snippet in [
+            "<p title=x\"><a href=\"ROADMAP.md\">x</a><b z=1\">",
+            "<p a\"><a href=\"ROADMAP.md\">x</a><b z=\">",
+            "<!--><a href=\"ROADMAP.md\">x</a><!-- -->",
+            "<!---><a href=\"ROADMAP.md\">x</a><!-- -->",
+            "<!-- c --!><a href=\"ROADMAP.md\">x</a><!-- -->",
+            "<!-- unclosed comment",
+            "<a href=\"index.html\" title=\"unclosed",
+            "< a=\"><a href=\"ROADMAP.md\">x</a>",
+            "<<a href=\"ROADMAP.md\">x</a>",
+            "<p =\" href=\"ROADMAP.md\" x=\">",
+            "<title><!--</title><a href=\"ROADMAP.md\">x</a><!-- -->",
+            "<textarea><!--</textarea><a href=\"ROADMAP.md\">x</a><!-- -->",
+        ] {
+            let r = seed("aud-12-07-html5");
+            r.write("docs/privacy.html", snippet);
+            assert!(check_publish_set(r.path()).is_err(), "expected `{snippet}` to fail publish set check");
         }
     }
 }

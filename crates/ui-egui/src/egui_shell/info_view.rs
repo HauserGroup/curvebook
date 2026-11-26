@@ -78,6 +78,7 @@ pub struct InfoHookReference {
 #[derive(Debug, Clone, PartialEq)]
 pub struct InfoViewEguiState {
     pub selected_row: Option<usize>,
+    pub editing_sheet_id: Option<SheetId>,
     pub editing_key: Option<String>,
     pub editing_value: String,
     pub notes_draft: Option<(SheetId, String)>,
@@ -94,6 +95,7 @@ impl Default for InfoViewEguiState {
     fn default() -> Self {
         Self {
             selected_row: None,
+            editing_sheet_id: None,
             editing_key: None,
             editing_value: String::new(),
             notes_draft: None,
@@ -104,6 +106,18 @@ impl Default for InfoViewEguiState {
             notes_preview_mode: false,
             notes_dirty: false,
             notes_focus_seen: false,
+        }
+    }
+}
+
+impl InfoViewEguiState {
+    /// Flush any uncommitted notes edits for the currently tracked Info sheet before switching or saving.
+    pub fn flush_pending_notes(&mut self, doc: &ProjectDocument, intents: &mut PendingUiIntents) {
+        if self.notes_dirty
+            && let Some((sheet_id, draft)) = self.notes_draft.clone()
+        {
+            flush_dirty_notes_if_needed(doc, &sheet_id, &draft, &mut self.notes_dirty, intents, true);
+            self.notes_focus_seen = false;
         }
     }
 }
@@ -444,7 +458,7 @@ fn render_constants_pane(
                     intents
                         .push_engine("info.setConstant", json!({ "sheet_id": info.id.as_str(), "name": new_name, "value": serde_json::Value::Null }));
                     state.selected_row = Some(info.constants.len());
-                    begin_constant_edit(state, &InfoConstant { name: new_name, value: ConstantValue::Empty, units: None }, locale_preset);
+                    begin_constant_edit(state, &info.id, &InfoConstant { name: new_name, value: ConstantValue::Empty, units: None }, locale_preset);
                 }
             });
         });
@@ -491,7 +505,8 @@ fn render_constants_pane(
 
                 for (idx, constant, refs) in rows_to_render {
                     let is_selected = state.selected_row == Some(idx);
-                    let is_editing = state.editing_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&constant.name));
+                    let is_editing = state.editing_sheet_id.as_ref().is_none_or(|sid| sid == &info.id)
+                        && state.editing_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&constant.name));
                     if !refs.is_empty() {
                         hook_badge_count += 1;
                     }
@@ -533,13 +548,10 @@ fn render_constants_pane(
                         tokens.text_strong,
                         tokens.metrics.font_ui_small_pt,
                     );
+                    let formatted_val = format_localized_constant_value(&constant.value, locale_preset);
                     let unit_suffix = constant.units.as_deref().filter(|u| !u.is_empty()).map_or(String::new(), |u| format!(" {u}"));
-                    let val_display = if constant.value.display_text().is_empty() {
-                        String::from("—")
-                    } else {
-                        format!("{}{unit_suffix}", constant.value.display_text())
-                    };
-                    let val_col = if constant.value.display_text().is_empty() { tokens.text_muted } else { tokens.text_primary };
+                    let val_display = if formatted_val.is_empty() { String::from("—") } else { format!("{formatted_val}{unit_suffix}") };
+                    let val_col = if formatted_val.is_empty() { tokens.text_muted } else { tokens.text_primary };
                     let _ = paint_ellipsized_cell_text(ui, val_rect.shrink2(vec2(4.0, 2.0)), &val_display, val_col, tokens.metrics.font_ui_small_pt);
 
                     // Type pill & 🔗 Hook Badge inside trailing cell
@@ -608,10 +620,10 @@ fn render_constants_pane(
                     );
                     if row_resp.double_clicked() && enabled {
                         state.selected_row = Some(idx);
-                        begin_constant_edit(state, constant, locale_preset);
+                        begin_constant_edit(state, &info.id, constant, locale_preset);
                     } else if row_resp.clicked() && enabled {
                         if state.selected_row == Some(idx) {
-                            begin_constant_edit(state, constant, locale_preset);
+                            begin_constant_edit(state, &info.id, constant, locale_preset);
                         } else {
                             state.selected_row = Some(idx);
                         }
@@ -633,7 +645,8 @@ struct InlineConstantTarget<'a> {
     locale_preset: &'a LocalePreset,
 }
 
-fn begin_constant_edit(state: &mut InfoViewEguiState, constant: &InfoConstant, locale_preset: &LocalePreset) {
+fn begin_constant_edit(state: &mut InfoViewEguiState, info_id: &SheetId, constant: &InfoConstant, locale_preset: &LocalePreset) {
+    state.editing_sheet_id = Some(info_id.clone());
     state.editing_key = Some(constant.name.clone());
     state.editing_value = format_localized_constant_value(&constant.value, locale_preset);
     state.editing_units = constant.units.clone().unwrap_or_default();
@@ -739,10 +752,11 @@ fn render_inline_constant_editor(
 
             let cancel_resp = ui.add_enabled(enabled, egui::Button::new("Cancel"));
             let enter_commit = edit_resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            let esc_cancel = ui.input(|i| i.key_pressed(Key::Escape));
+            let esc_cancel = enabled && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
 
-            if esc_cancel || cancel_resp.clicked() {
+            if esc_cancel || (cancel_resp.clicked() && enabled) {
                 state.editing_key = None;
+                state.editing_sheet_id = None;
             } else if (save_resp.clicked() || enter_commit) && save_enabled {
                 commit_constant_edit(info, constant, state, locale_preset, intents);
             }
@@ -840,6 +854,7 @@ fn commit_constant_edit(
 
     intents.push_engine("info.setConstant", serde_json::Value::Object(params));
     state.editing_key = None;
+    state.editing_sheet_id = None;
 }
 
 fn flush_dirty_notes_if_needed(
@@ -870,6 +885,13 @@ fn sync_notes_draft_with_sheet(doc: &ProjectDocument, state: &mut InfoViewEguiSt
         state.notes_draft = Some((info.id.clone(), info.notes_markdown.clone()));
         state.notes_dirty = false;
         state.notes_focus_seen = false;
+        state.editing_sheet_id = None;
+        state.editing_key = None;
+        state.editing_value.clear();
+        state.editing_units.clear();
+        state.editing_kind = InfoConstantKind::Auto;
+        state.editing_focus_seen = false;
+        state.selected_row = None;
     } else if !state.notes_dirty
         && let Some((_, text)) = state.notes_draft.as_mut()
         && text != &info.notes_markdown
@@ -1034,6 +1056,16 @@ fn render_notes_pane(
                 }
             });
         let _ = scroll_out.inner_rect;
+
+        let shortcut_flush = enabled
+            && state.notes_dirty
+            && ui.input(|i| (i.modifiers.command || i.modifiers.ctrl) && (i.key_pressed(Key::S) || i.key_pressed(Key::E) || i.key_pressed(Key::W)));
+        let outside_click_flush = enabled
+            && state.notes_dirty
+            && ui.input(|i| i.pointer.primary_pressed() && i.pointer.interact_pos().is_some_and(|p| !padded.contains(p)));
+        if shortcut_flush || outside_click_flush {
+            commit_now = true;
+        }
 
         if commit_now
             && state.notes_dirty

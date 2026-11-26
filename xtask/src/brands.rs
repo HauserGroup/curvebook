@@ -1,11 +1,11 @@
 //! `cargo xtask brands`: keep competitor vendor/product trademarks and retired suite branding out
 //! of user-facing strings, package descriptions, workflows, and packaging metadata (`AGENTS.md`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::rust_lex::{ExtractedLiteral, RustLexer, count_newlines, push_char_with_line};
-use crate::scan_util::{collect_dist_files, is_zip_magic, lower_ext};
+use crate::scan_util::{ZIP_CONTAINER_EXTS, collect_dist_files, looks_like_zip, lower_ext};
 use crate::text_decode::{decode_utf8_or_utf16, decode_utf16, decode_xml_html_entities};
 use crate::zip_read::{ZipArchive, ZipLimits};
 
@@ -87,44 +87,11 @@ const ROADMAP_R24_ANCHOR: &str = "r24-clean-room-prism--pzfx-project-import-with
 /// Canonical `plan/prism/` reference-policy path identifier allowed strictly in `AGENTS.md`.
 const PLAN_PRISM_SCOPE: &str = "plan/prism";
 
-/// Binary asset formats that do not carry UTF-8/UTF-16 text.
+/// Binary asset formats that do not carry UTF-8/UTF-16 text (ZIP container extensions are
+/// intentionally excluded so corrupt or preamble-prefixed archives always fail closed).
 const BINARY_ASSET_EXT: &[&str] = &[
-    "png",
-    "jpg",
-    "jpeg",
-    "gif",
-    "webp",
-    "bmp",
-    "tif",
-    "tiff",
-    "ico",
-    "icns",
-    "avif",
-    "svgz",
-    "pdf",
-    "eps",
-    "icc",
-    "icm",
-    "cur",
-    "ani",
-    "ase",
-    "aco",
-    "ttf",
-    "otf",
-    "ttc",
-    "woff",
-    "woff2",
-    "eot",
-    "pfb",
-    "zip",
-    "curvebook",
-    "cbtemplate",
-    "prism",
-    "pzf",
-    "xlsx",
-    "mp4",
-    "wav",
-    "mp3",
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "icns", "avif", "svgz", "pdf", "eps", "icc", "icm", "cur", "ani", "ase", "aco",
+    "ttf", "otf", "ttc", "woff", "woff2", "eot", "pfb", "mp4", "wav", "mp3",
 ];
 
 /// The only file in which a suite name may appear, and only on a line that carries [`ALLOW_MARKER`].
@@ -251,21 +218,34 @@ pub(crate) fn is_forbidden_bundled_dir(rel: &str) -> bool {
         || is_plan_prism_path(trimmed)
 }
 
-fn try_scan_binary_metadata(path: &str, ext: &str, bytes: &[u8], sniff_magic: bool, hits: &mut Vec<BrandHit>) -> Result<bool, String> {
+fn try_scan_binary_metadata(
+    path: &str,
+    ext: &str,
+    bytes: &[u8],
+    sniff_magic: bool,
+    allow_packaged: bool,
+    hits: &mut Vec<BrandHit>,
+) -> Result<bool, String> {
     if ext == "png" || (sniff_magic && bytes.starts_with(b"\x89PNG\r\n\x1a\n")) {
-        hits.extend(check_png_metadata(path, bytes));
+        hits.extend(check_png_metadata_checked(path, bytes)?);
         return Ok(true);
     }
-    if matches!(ext, "ico" | "icns") {
-        hits.extend(check_icon_container_metadata(path, bytes));
+    if matches!(ext, "ico" | "icns") || (sniff_magic && detect_icon_magic(bytes).is_some()) {
+        hits.extend(check_icon_container_metadata_checked(path, bytes)?);
         return Ok(true);
     }
     if ext == "gif" || (sniff_magic && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"))) {
-        hits.extend(check_gif_metadata(path, bytes));
+        hits.extend(check_gif_metadata_checked(path, bytes)?);
+        return Ok(true);
+    }
+    if matches!(ext, "jpg" | "jpeg" | "tif" | "tiff" | "webp" | "avif") || (sniff_magic && detect_raster_format_magic(bytes).is_some()) {
+        let fmt =
+            if matches!(ext, "jpg" | "jpeg" | "tif" | "tiff" | "webp" | "avif") { ext } else { detect_raster_format_magic(bytes).unwrap_or(ext) };
+        hits.extend(check_raster_metadata_checked(path, fmt, bytes)?);
         return Ok(true);
     }
     if ext == "pdf" || bytes.starts_with(b"%PDF-") {
-        hits.extend(check_pdf_metadata(path, bytes));
+        hits.extend(check_pdf_metadata_checked(path, bytes)?);
         return Ok(true);
     }
     if ext == "svgz" || (bytes.starts_with(&[0x1F, 0x8B]) && is_binary_asset_ext(path)) {
@@ -273,8 +253,11 @@ fn try_scan_binary_metadata(path: &str, ext: &str, bytes: &[u8], sniff_magic: bo
         let DecodedFile::Text(svg) = decode_text_file(path, &raw)? else {
             return Err(format!("cannot scan {path}: .svgz payload is not valid UTF-8/UTF-16 SVG text"));
         };
-        scan_svg(path, &svg, hits);
+        let start_idx = hits.len();
+        scan_suite_lines_with_scope(path, &svg, allow_packaged, hits);
+        scan_svg_checked(path, &svg, 0, hits)?;
         hits.extend(check_svg_metadata(path, &svg));
+        dedup_tail_hits(hits, start_idx);
         return Ok(true);
     }
     Ok(false)
@@ -282,23 +265,31 @@ fn try_scan_binary_metadata(path: &str, ext: &str, bytes: &[u8], sniff_magic: bo
 
 fn scan_repo_file_bytes(path: &str, bytes: &[u8], hits: &mut Vec<BrandHit>, scan_errors: &mut Vec<String>) {
     let ext_lower = lower_ext(path);
-    match try_scan_binary_metadata(path, &ext_lower, bytes, false, hits) {
-        Ok(true) => return,
+    let mut handled_binary = false;
+    match try_scan_binary_metadata(path, &ext_lower, bytes, true, false, hits) {
+        Ok(true) => handled_binary = true,
         Ok(false) => {}
         Err(err) => {
             scan_errors.push(err);
-            return;
+            handled_binary = true;
         }
     }
-    if is_zip_magic(bytes) || matches!(ext_lower.as_str(), "zip" | "curvebook" | "cbtemplate") {
+    if looks_like_zip(bytes) || ZIP_CONTAINER_EXTS.contains(&ext_lower.as_str()) {
         let mut stats = DistScanStats::default();
-        if let Err(err) = scan_dist_bytes(path, bytes, 0, &mut stats, hits) {
+        if let Err(err) = scan_zip_container_bytes(path, bytes, 0, &mut stats, hits) {
             scan_errors.push(err);
         }
         return;
     }
+    if handled_binary {
+        return;
+    }
     match decode_text_file(path, bytes) {
-        Ok(DecodedFile::Text(text)) => scan_file(path, &text, hits),
+        Ok(DecodedFile::Text(text)) => {
+            if let Err(err) = scan_file_checked(path, &text, hits) {
+                scan_errors.push(err);
+            }
+        }
         Ok(DecodedFile::BinaryAsset) => {}
         Err(msg) => scan_errors.push(msg),
     }
@@ -344,7 +335,12 @@ fn skip_path(path: &str) -> bool {
     SELF_SCANNER_PATHS.contains(&trimmed)
 }
 
+#[cfg(test)]
 fn scan_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
+    let _ = scan_file_checked(path, text, out);
+}
+
+fn scan_file_checked(path: &str, text: &str, out: &mut Vec<BrandHit>) -> Result<(), String> {
     let start_idx = out.len();
     scan_suite_lines(path, text, out);
     let ext = Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
@@ -355,8 +351,12 @@ fn scan_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
         scan_rust(path, text, out);
     } else if is_cargo_toml {
         scan_cargo_toml(path, text, out);
+    } else if path == "Cargo.lock" {
+        // Cargo.lock records crates.io dependency identifiers (mirroring scan_cargo_toml's [dependencies] skip);
+        // suite brand lines were already scanned above.
     } else if ext == "svg" {
-        scan_svg(path, text, out);
+        scan_svg_checked(path, text, 0, out)?;
+        out.extend(check_svg_metadata(path, text));
     } else if lower_path.ends_with(".plist") || lower_path.ends_with(".plist.in") {
         scan_plist(path, text, out);
     } else if is_mime_package_xml(path) {
@@ -370,46 +370,47 @@ fn scan_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
     } else if matches!(ext.as_str(), "html" | "htm") {
         scan_html_file(path, text, out);
         out.extend(check_html_metadata(path, text));
-    } else if is_scanned_non_rs_text_file(path, &ext) {
+    } else if path == "crates/ui-egui/locales/catalog.tsv" {
+        scan_locale_catalog_tsv(path, text, out);
+    } else {
         scan_plain_lines_no_waiver(path, text, out);
     }
     dedup_tail_hits(out, start_idx);
+    Ok(())
 }
 
-fn is_scanned_non_rs_text_file(path: &str, ext: &str) -> bool {
-    let norm = path.replace('\\', "/");
-    let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
-    let file_name = Path::new(trimmed).file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let is_hook = trimmed.strip_prefix(".githooks/").is_some_and(|rest| !rest.is_empty() && !rest.ends_with(".sample"));
-    matches!(
-        ext,
-        "txt"
-            | "toml"
-            | "json"
-            | "yaml"
-            | "yml"
-            | "xml"
-            | "css"
-            | "js"
-            | "mjs"
-            | "cjs"
-            | "ts"
-            | "jsx"
-            | "tsx"
-            | "sh"
-            | "ps1"
-            | "wxs"
-            | "wxl"
-            | "wxi"
-            | "hbs"
-            | "py"
-            | "r"
-            | "rc"
-            | "in"
-            | "conf"
-            | "ini"
-    ) || is_hook
-        || matches!(file_name, "_headers" | ".htaccess" | "NOTICE" | "LICENSE" | "LICENSE.txt" | "CODEOWNERS")
+/// Scan the i18n locale table (`crates/ui-egui/locales/catalog.tsv`) column-by-column:
+/// - Column 0 (`key`) permits the canonical `table.importPrism` command ID (mirroring `UiTextRun`).
+/// - The Italian (`it`) locale column permits lowercase Italian `"statistica"` ("statistics"),
+///   while capitalized `"Statistica"` and all other brands remain strictly forbidden.
+/// - Every other translation column is scanned with [`PrismPolicy::Strict`].
+fn scan_locale_catalog_tsv(path: &str, text: &str, out: &mut Vec<BrandHit>) {
+    let mut it_col: Option<usize> = None;
+    let mut saw_header = false;
+    for (idx, line) in text.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            collect_line_words(path, line_no, line, BRANDS, PrismPolicy::Strict, out);
+            continue;
+        }
+        if !saw_header {
+            saw_header = true;
+            it_col = line.split('\t').position(|hdr| hdr.trim() == "it");
+            collect_line_words(path, line_no, line, BRANDS, PrismPolicy::Strict, out);
+            continue;
+        }
+        for (col_idx, cell) in line.split('\t').enumerate() {
+            let policy = if col_idx == 0 {
+                PrismPolicy::UiTextRun { allow_it_statistica: false, allow_palette_cmd_id: true }
+            } else if it_col == Some(col_idx) {
+                PrismPolicy::UiTextRun { allow_it_statistica: true, allow_palette_cmd_id: false }
+            } else {
+                PrismPolicy::Strict
+            };
+            collect_line_words(path, line_no, cell, BRANDS, policy, out);
+        }
+    }
 }
 
 fn dedup_tail_hits(hits: &mut Vec<BrandHit>, from: usize) {
@@ -430,10 +431,12 @@ fn scan_suite_lines(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 
 fn scan_suite_lines_with_scope(path: &str, text: &str, allow_packaged: bool, out: &mut Vec<BrandHit>) {
     let masked = mask_attributed_upstream_url(path, text, allow_packaged);
-    let check_adapted_brand = is_crates_or_apps_path(path) || (allow_packaged && !is_attribution_or_notice_path(path, true));
+    let check_adapted_brand =
+        is_crates_or_apps_path(path) || (allow_packaged && !is_attribution_or_notice_path(path, true) && !is_legal_policy_doc_path(path));
+    let is_readme = is_readme_disclaimer_path(path, allow_packaged);
     for (idx, line) in masked.lines().enumerate() {
         let line_no = idx + 1;
-        if path == SUITE_DISCLAIMER_PATH && line.contains(ALLOW_MARKER) {
+        if is_readme && line.contains(ALLOW_MARKER) {
             let strict: Vec<&'static str> = SUITE_BRANDS.iter().copied().filter(|brand| !SUITE_DISCLAIMER_NAMES.contains(brand)).collect();
             collect_line_words(path, line_no, line, &strict, PrismPolicy::Strict, out);
         } else {
@@ -865,13 +868,23 @@ impl SvgState {
     }
 }
 
+const MAX_SVG_DATA_URI_DEPTH: usize = 2;
+
 fn scan_svg(path: &str, text: &str, out: &mut Vec<BrandHit>) {
-    let lines: Vec<&str> = text.lines().collect();
+    if scan_svg_checked(path, text, 0, out).is_err() {
+        out.push(BrandHit { path: path.to_owned(), line: 1, brand: "prism" });
+    }
+}
+
+fn scan_svg_checked(path: &str, text: &str, depth: usize, out: &mut Vec<BrandHit>) -> Result<(), String> {
+    if depth > MAX_SVG_DATA_URI_DEPTH {
+        return Err(format!("cannot scan {path}: nested SVG data:image/ URI depth exceeded (max {MAX_SVG_DATA_URI_DEPTH})"));
+    }
+    let stripped = check_and_strip_svg_data_uris_doc(path, text, depth, out)?;
+    let effective_doc = stripped.as_deref().unwrap_or(text);
     let mut state = SvgState::default();
-    for (idx, &line) in lines.iter().enumerate() {
-        let stripped = check_and_strip_svg_data_uri(path, line, out);
-        let effective = stripped.as_deref().unwrap_or(line);
-        let chunks = state.split_line_chunks(effective);
+    for (idx, line) in effective_doc.lines().enumerate() {
+        let chunks = state.split_line_chunks(line);
         let mut line_brands: BTreeSet<&'static str> = BTreeSet::new();
         for chunk in chunks {
             let policy = if chunk.is_meta_text { PrismPolicy::SvgTitleOrDesc { prev_word: chunk.prev_word.as_deref() } } else { PrismPolicy::Strict };
@@ -884,60 +897,386 @@ fn scan_svg(path: &str, text: &str, out: &mut Vec<BrandHit>) {
             }
         }
     }
+    Ok(())
 }
 
-fn check_and_strip_svg_data_uri(path: &str, line: &str, out: &mut Vec<BrandHit>) -> Option<String> {
-    const MARKER: &str = "data:image/";
-    let lower = line.to_ascii_lowercase();
-    if !lower.contains(MARKER) {
-        return None;
+fn find_data_uri_end(decoded: &str, hit: usize, marker_len: usize, inside_attr: bool) -> usize {
+    let bytes = decoded.as_bytes();
+    let mut back = hit;
+    while back > 0 && bytes[back - 1].is_ascii_whitespace() {
+        back -= 1;
     }
-    let mut out_str = String::with_capacity(line.len().min(4096));
+    let closing_delim: Option<u8> = match bytes.get(back.saturating_sub(1)).filter(|_| back > 0) {
+        Some(b'"') => Some(b'"'),
+        Some(b'\'') => Some(b'\''),
+        Some(b'(') => Some(b')'),
+        _ => None,
+    };
+    let after = decoded.get(hit + marker_len..).unwrap_or("");
+    if let Some(delim) = closing_delim {
+        return after.find(char::from(delim)).unwrap_or(after.len());
+    }
+    if inside_attr {
+        // When the entire decoded attribute value is a `data:image/` URI (e.g. XML-escaped
+        // `href="data:image/svg+xml,&lt;svg ...&gt;..."`), keep the full decoded payload intact.
+        if decoded.get(..hit).unwrap_or("").trim().is_empty() {
+            return after.len();
+        }
+        return after
+            .find(['"', '\'', ')', ';'])
+            .filter(|&sep| after.find(',').is_some_and(|comma| sep > comma))
+            .or_else(|| after.find(['"', '\'', ')']))
+            .unwrap_or(after.len());
+    }
+    after
+        .find(['"', '\'', ')', '<', '>', ';'])
+        .filter(|&sep| after.find(',').is_some_and(|comma| sep > comma))
+        .or_else(|| after.find(['"', '\'', ')', '<', '>']))
+        .unwrap_or(after.len())
+}
+
+/// Inspect all `data:image/` URIs inside an already entity-decoded string (`decoded`) and return
+/// `Ok(Some(stripped))` with only each `data:image/...` URI span replaced by `data:image/stripped`
+/// (preserving co-located surrounding text and newline counts), or `Ok(None)` if none were present.
+fn inspect_and_strip_data_uris_in_decoded_str(
+    path: &str,
+    base_line: usize,
+    decoded: &str,
+    inside_attr: bool,
+    depth: usize,
+    out: &mut Vec<BrandHit>,
+) -> Result<Option<String>, String> {
+    const MARKER: &str = "data:image/";
+    let lower = decoded.to_ascii_lowercase();
+    if !lower.contains(MARKER) {
+        return Ok(None);
+    }
+    let mut stripped = String::with_capacity(decoded.len().min(4096));
+    let mut last_copied = 0usize;
     let mut pos = 0usize;
+    let mut line_no = base_line;
     while let Some(rel) = lower.get(pos..).and_then(|s| s.find(MARKER)) {
         let hit = pos + rel;
-        out_str.push_str(line.get(pos..hit).unwrap_or(""));
-        let after = line.get(hit + MARKER.len()..).unwrap_or("");
+        stripped.push_str(decoded.get(last_copied..hit).unwrap_or(""));
+        line_no += count_newlines(decoded.get(pos..hit).unwrap_or("").as_bytes());
+        let uri_end = find_data_uri_end(decoded, hit, MARKER.len(), inside_attr);
+        let after = decoded.get(hit + MARKER.len()..).unwrap_or("");
         let after_lower = lower.get(hit + MARKER.len()..).unwrap_or("");
-        let Some(comma_rel) = after.find(',') else {
-            out_str.push_str(line.get(hit..hit + MARKER.len()).unwrap_or(MARKER));
-            pos = hit + MARKER.len();
-            continue;
+        let uri_body = after.get(..uri_end).unwrap_or(after);
+        let uri_body_lower = after_lower.get(..uri_end).unwrap_or(after_lower);
+        let Some(comma_rel) = uri_body.find(',') else {
+            return Err(format!("cannot scan {path}:{line_no}: malformed data:image/ URI missing `,` payload separator"));
         };
-        let meta = after_lower.get(..comma_rel).unwrap_or("");
-        let mime = meta.split(';').next().unwrap_or("").trim();
-        let is_base64 = meta.split(';').skip(1).any(|p| p.trim() == "base64");
-        let payload_start = after.get(comma_rel + 1..).unwrap_or("");
-        let end_quote = payload_start.find(['"', '\'', ')', ' ', '\t']).unwrap_or(payload_start.len());
-        let raw_payload = payload_start.get(..end_quote).unwrap_or(payload_start);
-        if is_base64 {
-            if let Some(decoded) = decode_base64_ascii(raw_payload) {
-                inspect_embedded_image_payload(path, mime, &decoded, out);
-            }
-        } else if mime == "svg+xml" {
-            let svg_text = percent_decode_utf8_lossy(raw_payload);
-            scan_svg(path, &svg_text, out);
-            out.extend(check_svg_metadata(path, &svg_text));
+        let meta_raw = uri_body.get(..comma_rel).unwrap_or("");
+        let meta_lower = uri_body_lower.get(..comma_rel).unwrap_or("");
+        scan_xml_text_fragment(path, line_no, meta_raw, PrismPolicy::Strict, out);
+        let mime = meta_lower.split(';').next().unwrap_or("").trim();
+        let is_base64 = meta_lower.split(';').skip(1).any(|p| p.trim() == "base64");
+        let raw_payload = uri_body.get(comma_rel + 1..).unwrap_or("");
+        inspect_data_uri_payload(path, line_no, mime, is_base64, raw_payload, depth, out)?;
+        let span_newlines = count_newlines(uri_body.as_bytes());
+        stripped.push_str("data:image/stripped");
+        for _ in 0..span_newlines {
+            stripped.push('\n');
         }
-        out_str.push_str("data:image/stripped");
-        pos = hit + MARKER.len() + comma_rel + 1 + end_quote;
+        line_no += span_newlines;
+        pos = hit + MARKER.len() + uri_end;
+        last_copied = pos;
     }
-    out_str.push_str(line.get(pos..).unwrap_or(""));
-    Some(out_str)
+    stripped.push_str(decoded.get(last_copied..).unwrap_or(""));
+    Ok(Some(stripped))
 }
 
-fn inspect_embedded_image_payload(path: &str, mime: &str, decoded: &[u8], out: &mut Vec<BrandHit>) {
+fn escape_xml_attr_preserved(s: &str, out: &mut String) {
+    for ch in s.chars() {
+        match ch {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+fn find_css_url_close(bytes: &[u8], inner_start: usize) -> usize {
+    let mut i = inner_start;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if matches!(bytes.get(i), Some(b'"' | b'\'')) {
+        let q = bytes[i];
+        i += 1;
+        while i < bytes.len() && bytes[i] != q {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            i += 1;
+        }
+        if i < bytes.len() {
+            i += 1;
+        }
+    }
+    while i < bytes.len() && bytes[i] != b')' {
+        i += 1;
+    }
+    i
+}
+
+fn classify_svg_style_tag(tag_inner: &str) -> Option<bool> {
+    let (is_close, self_closing, name) = extract_tag_name(tag_inner);
+    if !name.eq_ignore_ascii_case("style") {
+        return None;
+    }
+    if is_close {
+        Some(false)
+    } else if !self_closing {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn find_svg_quote_end(bytes: &[u8], val_start: usize, quote: u8, allow_backslash_escape: bool) -> usize {
+    let mut end = val_start;
+    while end < bytes.len() && bytes[end] != quote {
+        if allow_backslash_escape && bytes[end] == b'\\' && end + 1 < bytes.len() {
+            end += 2;
+            continue;
+        }
+        end += 1;
+    }
+    end
+}
+
+/// Whole-document SVG `data:image/` URI extractor that decodes XML/HTML character entities inside
+/// quoted tag attributes and `<style>` CSS `url(...)`/strings before matching `data:image/`, spans
+/// newlines, scans MIME parameters, preserves co-located non-URI text, skips XML `<!-- ... -->`
+/// and CSS `/* ... */` comments so stray apostrophes never desync scanning, enforces
+/// `MAX_SVG_DATA_URI_DEPTH`, and fails closed on corrupt/unrecognized payloads.
+fn check_and_strip_svg_data_uris_doc(path: &str, doc: &str, depth: usize, out: &mut Vec<BrandHit>) -> Result<Option<String>, String> {
+    const MARKER: &str = "data:image/";
+    let lower = doc.to_ascii_lowercase();
+    if !doc.contains('&') && !lower.contains(MARKER) {
+        return Ok(None);
+    }
+    let bytes = doc.as_bytes();
+    let mut out_str = String::with_capacity(doc.len().min(65_536));
+    let mut modified = false;
+    let mut in_tag = false;
+    let mut in_style = false;
+    let mut tag_start = 0usize;
+    let mut pos = 0usize;
+    let mut line_no = 1usize;
+    while pos < bytes.len() {
+        if !in_tag && bytes.get(pos..pos + 4) == Some(b"<!--") {
+            let end = doc.get(pos + 4..).and_then(|s| s.find("-->")).map_or(bytes.len(), |r| pos + 4 + r + 3);
+            let seg = doc.get(pos..end).unwrap_or("");
+            line_no += count_newlines(seg.as_bytes());
+            out_str.push_str(seg);
+            pos = end;
+            continue;
+        }
+        if !in_tag && bytes.get(pos..pos + 9) == Some(b"<![CDATA[") {
+            out_str.push_str("<![CDATA[");
+            pos += 9;
+            continue;
+        }
+        if !in_tag && bytes.get(pos..pos + 3) == Some(b"]]>") {
+            out_str.push_str("]]>");
+            pos += 3;
+            continue;
+        }
+        if !in_tag && in_style && bytes.get(pos..pos + 2) == Some(b"/*") {
+            let end = doc.get(pos + 2..).and_then(|s| s.find("*/")).map_or(bytes.len(), |r| pos + 2 + r + 2);
+            let seg = doc.get(pos..end).unwrap_or("");
+            line_no += count_newlines(seg.as_bytes());
+            out_str.push_str(seg);
+            pos = end;
+            continue;
+        }
+        let b = bytes[pos];
+        if !in_tag && b == b'<' {
+            if bytes.get(pos + 1).is_some_and(|n| n.is_ascii_alphabetic() || matches!(n, b'/' | b'!' | b'?')) {
+                in_tag = true;
+                tag_start = pos;
+            }
+            out_str.push('<');
+            pos += 1;
+            continue;
+        }
+        if in_tag && b == b'>' {
+            in_tag = false;
+            if let Some(next_style) = classify_svg_style_tag(doc.get(tag_start + 1..pos).unwrap_or("")) {
+                in_style = next_style;
+            }
+            out_str.push('>');
+            pos += 1;
+            continue;
+        }
+        if (in_tag || in_style) && (b == b'"' || b == b'\'') {
+            let quote_start = pos;
+            let val_start = pos + 1;
+            let val_line = line_no;
+            let end = find_svg_quote_end(bytes, val_start, b, !in_tag && in_style);
+            let raw_val = doc.get(val_start..end).unwrap_or("");
+            let decoded_val = decode_xml_html_entities(raw_val);
+            if let Some(stripped) = inspect_and_strip_data_uris_in_decoded_str(path, val_line, &decoded_val, in_tag, depth, out)? {
+                modified = true;
+                let raw_newlines = count_newlines(raw_val.as_bytes());
+                let stripped_newlines = count_newlines(stripped.as_bytes());
+                out_str.push(char::from(b));
+                if in_tag {
+                    escape_xml_attr_preserved(&stripped, &mut out_str);
+                } else {
+                    out_str.push_str(&stripped);
+                }
+                for _ in 0..raw_newlines.saturating_sub(stripped_newlines) {
+                    out_str.push('\n');
+                }
+                if end < bytes.len() {
+                    out_str.push(char::from(b));
+                    pos = end + 1;
+                } else {
+                    pos = end;
+                }
+                line_no += raw_newlines;
+                continue;
+            }
+            let next_pos = if end < bytes.len() { end + 1 } else { end };
+            let seg = doc.get(quote_start..next_pos).unwrap_or("");
+            line_no += count_newlines(seg.as_bytes());
+            out_str.push_str(seg);
+            pos = next_pos;
+            continue;
+        }
+        if !in_tag && lower.get(pos..pos + 4) == Some("url(") {
+            let url_start = pos;
+            let inner_start = pos + 4;
+            let val_line = line_no;
+            let end = find_css_url_close(bytes, inner_start);
+            let raw_inner = doc.get(inner_start..end).unwrap_or("");
+            let decoded_inner = decode_xml_html_entities(raw_inner);
+            if let Some(stripped) = inspect_and_strip_data_uris_in_decoded_str(path, val_line, &decoded_inner, false, depth, out)? {
+                modified = true;
+                let raw_newlines = count_newlines(raw_inner.as_bytes());
+                let stripped_newlines = count_newlines(stripped.as_bytes());
+                out_str.push_str("url(");
+                out_str.push_str(&stripped);
+                for _ in 0..raw_newlines.saturating_sub(stripped_newlines) {
+                    out_str.push('\n');
+                }
+                if end < bytes.len() {
+                    out_str.push(')');
+                    pos = end + 1;
+                } else {
+                    pos = end;
+                }
+                line_no += raw_newlines;
+                continue;
+            }
+            let next_pos = if end < bytes.len() { end + 1 } else { end };
+            let seg = doc.get(url_start..next_pos).unwrap_or("");
+            line_no += count_newlines(seg.as_bytes());
+            out_str.push_str(seg);
+            pos = next_pos;
+            continue;
+        }
+        if !in_tag && lower.get(pos..pos + MARKER.len()) == Some(MARKER) {
+            let after = doc.get(pos..).unwrap_or("");
+            let end_rel = after.find(['"', '\'', ')', '<', '>', ' ', '\t', '\r', '\n']).unwrap_or(after.len());
+            let raw_uri = after.get(..end_rel).unwrap_or(after);
+            let decoded_uri = decode_xml_html_entities(raw_uri);
+            if inspect_and_strip_data_uris_in_decoded_str(path, line_no, &decoded_uri, false, depth, out)?.is_some() {
+                modified = true;
+                out_str.push_str("data:image/stripped");
+                pos += end_rel;
+                continue;
+            }
+        }
+        if let Some(ch) = doc.get(pos..).and_then(|s| s.chars().next()) {
+            if ch == '\n' {
+                line_no += 1;
+            }
+            out_str.push(ch);
+            pos += ch.len_utf8();
+        } else {
+            pos += 1;
+        }
+    }
+    Ok(modified.then_some(out_str))
+}
+
+fn inspect_data_uri_payload(
+    path: &str,
+    line_no: usize,
+    mime: &str,
+    is_base64: bool,
+    raw_payload: &str,
+    depth: usize,
+    out: &mut Vec<BrandHit>,
+) -> Result<(), String> {
+    if is_base64 {
+        let decoded = decode_base64_for_data_uri(raw_payload)
+            .ok_or_else(|| format!("cannot scan {path}:{line_no}: malformed base64 payload in data:image/{mime} URI"))?;
+        inspect_embedded_image_payload_checked(path, line_no, mime, &decoded, depth, out)
+    } else if mime == "svg+xml" {
+        if depth >= MAX_SVG_DATA_URI_DEPTH {
+            return Err(format!("cannot scan {path}:{line_no}: nested SVG data:image/ URI depth exceeded (max {MAX_SVG_DATA_URI_DEPTH})"));
+        }
+        let xml_decoded = decode_xml_html_entities(raw_payload);
+        let svg_text = percent_decode_utf8_lossy(&xml_decoded);
+        scan_suite_lines_with_scope(path, &svg_text, true, out);
+        scan_svg_checked(path, &svg_text, depth + 1, out)?;
+        out.extend(check_svg_metadata_with_depth(path, &svg_text, depth + 1));
+        Ok(())
+    } else {
+        Err(format!("cannot scan {path}:{line_no}: unsupported non-base64 data:image/{mime} URI"))
+    }
+}
+
+fn inspect_embedded_image_payload_checked(
+    path: &str,
+    line_no: usize,
+    mime: &str,
+    decoded: &[u8],
+    depth: usize,
+    out: &mut Vec<BrandHit>,
+) -> Result<(), String> {
+    if decoded.is_empty() {
+        return Err(format!("cannot scan {path}:{line_no}: empty base64 payload in data:image/{mime} URI"));
+    }
     if mime == "png" || decoded.starts_with(b"\x89PNG\r\n\x1a\n") {
-        out.extend(check_png_metadata(path, decoded));
+        out.extend(check_png_metadata_checked(path, decoded)?);
+        Ok(())
     } else if mime == "gif" || decoded.starts_with(b"GIF87a") || decoded.starts_with(b"GIF89a") {
-        out.extend(check_gif_metadata(path, decoded));
+        out.extend(check_gif_metadata_checked(path, decoded)?);
+        Ok(())
     } else if matches!(mime, "x-icon" | "vnd.microsoft.icon") {
-        out.extend(check_icon_container_metadata(path, decoded));
-    } else if mime == "svg+xml"
-        && let Ok(Some(svg_text)) = decode_utf8_or_utf16(decoded)
-    {
-        scan_svg(path, &svg_text, out);
-        out.extend(check_svg_metadata(path, &svg_text));
+        out.extend(check_icon_container_metadata_checked(path, decoded)?);
+        Ok(())
+    } else if matches!(mime, "jpeg" | "jpg" | "webp" | "tiff" | "tif" | "avif") {
+        let ext = match mime {
+            "jpeg" => "jpg",
+            "tiff" => "tif",
+            other => other,
+        };
+        out.extend(check_raster_metadata_checked(path, ext, decoded)?);
+        Ok(())
+    } else if mime == "svg+xml" {
+        if depth >= MAX_SVG_DATA_URI_DEPTH {
+            return Err(format!("cannot scan {path}:{line_no}: nested SVG data:image/ URI depth exceeded (max {MAX_SVG_DATA_URI_DEPTH})"));
+        }
+        let Some(svg_text) = decode_utf8_or_utf16(decoded)? else {
+            return Err(format!("cannot scan {path}:{line_no}: base64 data:image/svg+xml payload is not valid UTF-8/UTF-16"));
+        };
+        scan_suite_lines_with_scope(path, &svg_text, true, out);
+        scan_svg_checked(path, &svg_text, depth + 1, out)?;
+        out.extend(check_svg_metadata_with_depth(path, &svg_text, depth + 1));
+        Ok(())
+    } else {
+        Err(format!("cannot scan {path}:{line_no}: unrecognized data:image/{mime} payload"))
     }
 }
 
@@ -965,6 +1304,23 @@ fn decode_base64_ascii(b64: &str) -> Option<Vec<u8>> {
         return Some(Vec::new());
     }
     curvebook_platform::base64::decode(b64).ok()
+}
+
+/// Decode base64 for `data:` URIs: strips ASCII whitespace (browser-valid multiline base64) and
+/// accepts unpadded RFC 4648 payloads (padding 2/3-mod-4 lengths with `=`) so browser-rendered
+/// payloads cannot silently bypass inspection.
+fn decode_base64_for_data_uri(raw: &str) -> Option<Vec<u8>> {
+    let mut clean: String = raw.chars().filter(|c| !matches!(c, ' ' | '\t' | '\r' | '\n')).collect();
+    if clean.is_empty() {
+        return None;
+    }
+    match clean.len() % 4 {
+        0 => {}
+        2 => clean.push_str("=="),
+        3 => clean.push('='),
+        _ => return None,
+    }
+    curvebook_platform::base64::decode(&clean).ok()
 }
 
 struct TomlScanner<'a> {
@@ -1306,16 +1662,36 @@ fn is_ui_or_app_rust_path(path: &str) -> bool {
     path.starts_with("crates/ui-egui/src/") || path.starts_with("apps/")
 }
 
-fn is_negative_brand_guard_line(path: &str, lines: &[&str], line_no: usize) -> bool {
+fn is_negative_brand_guard_literal(path: &str, src: &str, lit: &ExtractedLiteral) -> bool {
     let is_test_src = path.starts_with("tests/") || path.contains("/tests/");
-    if !is_test_src {
+    if !is_test_src || lit.start_line != lit.end_line {
         return false;
     }
-    let Some(&src_line) = lines.get(line_no.saturating_sub(1)) else {
+    let line_start = src.get(..lit.quote_start).and_then(|s| s.rfind('\n')).map_or(0, |p| p + 1);
+    let line_end = src.get(lit.quote_end..).and_then(|s| s.find('\n')).map_or(src.len(), |rel| lit.quote_end + rel);
+    let line_text = src.get(line_start..line_end).unwrap_or("");
+    let lit_rel_start = lit.quote_start.saturating_sub(line_start);
+    let lit_rel_end = lit.quote_end.saturating_sub(line_start);
+    let blanked = crate::rust_lex::blank_comments_and_literals(line_text);
+    let before = blanked.get(..lit_rel_start).unwrap_or("");
+    let after = blanked.get(lit_rel_end..).unwrap_or("");
+    let Some((_, tail_after_for)) = before.rsplit_once("for forbidden in [") else {
         return false;
     };
-    let trimmed = src_line.trim();
-    trimmed.starts_with("for forbidden in [") || trimmed.contains("for forbidden in [")
+    let mut bracket_depth = 1usize;
+    for b in tail_after_for.bytes() {
+        match b {
+            b'[' => bracket_depth += 1,
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                if bracket_depth == 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    after.contains(']')
 }
 
 fn is_pzfx_xml_literal(text: &str) -> bool {
@@ -1348,7 +1724,7 @@ fn scan_rust(path: &str, text: &str, out: &mut Vec<BrandHit>) {
             continue;
         }
         if let Some(lit) = lexer.try_read_raw_string().or_else(|| lexer.try_read_quoted_string()) {
-            if is_negative_brand_guard_line(path, &lines, lit.start_line) && lit.start_line == lit.end_line {
+            if is_negative_brand_guard_literal(path, text, &lit) {
                 continue;
             }
             let allow_bare_prism = is_import_export_prism_literal(path, text, &lit);
@@ -2117,8 +2493,22 @@ fn extract_tag_name(raw_tag_inner: &str) -> (bool, bool, &str) {
 
 fn scan_xml_text_fragment(source: &str, start_line: usize, raw: &str, policy: PrismPolicy<'_>, out: &mut Vec<BrandHit>) {
     let decoded = decode_xml_html_entities(raw);
+    let mut prev_word: Option<String> = match policy {
+        PrismPolicy::SvgTitleOrDesc { prev_word } => prev_word.map(str::to_owned),
+        _ => None,
+    };
     for (offset, line_text) in decoded.lines().enumerate() {
-        check_single_string_with_extra(source, start_line + offset, line_text, policy, true, out);
+        let line_policy = match policy {
+            PrismPolicy::SvgTitleOrDesc { .. } => PrismPolicy::SvgTitleOrDesc { prev_word: prev_word.as_deref() },
+            other => other,
+        };
+        check_single_string_with_extra(source, start_line + offset, line_text, line_policy, true, out);
+        if matches!(policy, PrismPolicy::SvgTitleOrDesc { .. }) {
+            let last = trailing_ascii_word(line_text.trim_end());
+            if !last.is_empty() {
+                prev_word = Some(last.to_ascii_lowercase());
+            }
+        }
     }
 }
 
@@ -2138,11 +2528,49 @@ fn next_markup_text_chunk<'a>(doc: &'a str, pos: usize, rest: &'a str) -> (&'a s
     (doc.get(pos..next_lt).unwrap_or(""), next_lt)
 }
 
-/// Inspect rendered SVG export metadata (`<title>`, `<desc>`, `<metadata>`) and text elements
-/// strictly against external brands and suite names.
+/// Inspect rendered SVG export metadata (`<title>`, `<desc>`, `<metadata>`, `<style>`, `<script>`)
+/// and text/attribute elements strictly against external brands and suite names.
 #[must_use]
 pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
-    let (mut out, mut line, mut pos, mut active_depth, mut skip_depth, mut active_start_line) = (Vec::new(), 1usize, 0usize, 0usize, 0usize, 1usize);
+    check_svg_metadata_with_depth(source, svg, 0)
+}
+
+fn flush_svg_metadata_buf(
+    source: &str,
+    active_start_line: usize,
+    active_is_title_or_desc: bool,
+    active_is_style: bool,
+    buf: &str,
+    depth: usize,
+    out: &mut Vec<BrandHit>,
+) {
+    if buf.trim().is_empty() {
+        return;
+    }
+    if active_is_style {
+        let decoded = decode_xml_html_entities(buf);
+        if decoded.to_ascii_lowercase().contains("data:image/") {
+            match inspect_and_strip_data_uris_in_decoded_str(source, active_start_line, &decoded, false, depth, out) {
+                Ok(Some(stripped)) => {
+                    scan_xml_text_fragment(source, active_start_line, &stripped, PrismPolicy::Strict, out);
+                    return;
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    out.push(BrandHit { path: source.to_owned(), line: active_start_line, brand: "prism" });
+                    return;
+                }
+            }
+        }
+    }
+    let policy = if active_is_title_or_desc { PrismPolicy::SvgTitleOrDesc { prev_word: None } } else { PrismPolicy::Strict };
+    scan_xml_text_fragment(source, active_start_line, buf, policy, out);
+}
+
+fn check_svg_metadata_with_depth(source: &str, svg: &str, depth: usize) -> Vec<BrandHit> {
+    let (mut out, mut line, mut pos, mut active_depth, mut active_start_line) = (Vec::new(), 1usize, 0usize, 0usize, 1usize);
+    let mut active_is_title_or_desc = false;
+    let mut active_is_style = false;
     let mut buf = String::new();
 
     while let Some(rest) = svg.get(pos..) {
@@ -2158,7 +2586,7 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
             continue;
         }
         if let Some((body, end)) = consume_delimited_span(svg, pos, "<![CDATA[", "]]>") {
-            if skip_depth == 0 && active_depth > 0 {
+            if active_depth > 0 {
                 buf.push_str(body);
             }
             line += count_newlines(svg.get(pos..end).unwrap_or(rest).as_bytes());
@@ -2172,39 +2600,38 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
             let raw_inner = rest.get(1..gt_rel).unwrap_or("");
             let (is_close, self_closing, name) = extract_tag_name(raw_inner);
             let lower = name.to_ascii_lowercase();
-            let is_active = matches!(lower.as_str(), "title" | "desc" | "metadata" | "text" | "tspan" | "textpath");
-            let is_skip = matches!(lower.as_str(), "style" | "image");
+            let is_title_or_desc = matches!(lower.as_str(), "title" | "desc");
+            let is_style = lower == "style";
+            let is_active = is_title_or_desc || matches!(lower.as_str(), "metadata" | "text" | "tspan" | "textpath" | "style" | "script");
 
-            if !is_close && !is_skip {
-                scan_svg_tag_attributes(source, line, raw_inner, &mut out);
+            if !is_close {
+                scan_svg_tag_attributes(source, line, raw_inner, depth, &mut out);
             }
             if is_close {
-                if is_skip {
-                    skip_depth = skip_depth.saturating_sub(1);
-                } else if is_active {
+                if is_active {
                     active_depth = active_depth.saturating_sub(1);
-                    if active_depth == 0 && !buf.trim().is_empty() {
-                        scan_xml_text_fragment(source, active_start_line, &buf, PrismPolicy::Strict, &mut out);
-                        buf.clear();
-                    }
-                }
-            } else if !self_closing {
-                if is_skip {
-                    skip_depth += 1;
-                } else if is_active {
                     if active_depth == 0 {
-                        active_start_line = line;
+                        flush_svg_metadata_buf(source, active_start_line, active_is_title_or_desc, active_is_style, &buf, depth, &mut out);
                         buf.clear();
+                        active_is_title_or_desc = false;
+                        active_is_style = false;
                     }
-                    active_depth += 1;
                 }
+            } else if !self_closing && is_active {
+                if active_depth == 0 {
+                    active_start_line = line;
+                    active_is_title_or_desc = is_title_or_desc;
+                    active_is_style = is_style;
+                    buf.clear();
+                }
+                active_depth += 1;
             }
             line += count_newlines(svg.get(pos..tag_end).unwrap_or("").as_bytes());
             pos = tag_end;
             continue;
         }
         let (chunk, next_lt) = next_markup_text_chunk(svg, pos, rest);
-        if skip_depth == 0 && active_depth > 0 {
+        if active_depth > 0 {
             if buf.is_empty() {
                 active_start_line = line;
             }
@@ -2214,13 +2641,11 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
         pos = next_lt;
     }
 
-    if !buf.trim().is_empty() {
-        scan_xml_text_fragment(source, active_start_line, &buf, PrismPolicy::Strict, &mut out);
-    }
+    flush_svg_metadata_buf(source, active_start_line, active_is_title_or_desc, active_is_style, &buf, depth, &mut out);
     out
 }
 
-fn scan_svg_tag_attributes(source: &str, start_line: usize, raw_inner: &str, out: &mut Vec<BrandHit>) {
+fn scan_svg_tag_attributes(source: &str, start_line: usize, raw_inner: &str, depth: usize, out: &mut Vec<BrandHit>) {
     let bytes = raw_inner.as_bytes();
     let mut i = 0usize;
     let mut cur_line = start_line;
@@ -2242,7 +2667,14 @@ fn scan_svg_tag_attributes(source: &str, start_line: usize, raw_inner: &str, out
                 i += 1;
             }
             let val = raw_inner.get(val_start..i).unwrap_or("");
-            if !val.to_ascii_lowercase().trim_start().starts_with("data:image/") {
+            let decoded_val = decode_xml_html_entities(val);
+            if decoded_val.to_ascii_lowercase().contains("data:image/") {
+                match inspect_and_strip_data_uris_in_decoded_str(source, attr_line, &decoded_val, true, depth, out) {
+                    Ok(Some(stripped)) => scan_xml_text_fragment(source, attr_line, &stripped, PrismPolicy::Strict, out),
+                    Ok(None) => scan_xml_text_fragment(source, attr_line, val, PrismPolicy::Strict, out),
+                    Err(_) => out.push(BrandHit { path: source.to_owned(), line: attr_line, brand: "prism" }),
+                }
+            } else {
                 scan_xml_text_fragment(source, attr_line, val, PrismPolicy::Strict, out);
             }
             if i < bytes.len() {
@@ -2384,19 +2816,189 @@ fn decode_pdf_hex_string(bytes: &[u8], pos: &mut usize, line: &mut usize) -> Str
     decode_pdf_bytes_to_string(&raw)
 }
 
-/// Inspect PDF document metadata (`/Creator`, `/Producer`, `/Title`, `/Author`, `/Subject`,
-/// `/Keywords`), decoding both literal PDF strings and UTF-16BE hex strings.
-#[must_use]
-pub fn check_pdf_metadata(source: &str, pdf_bytes: &[u8]) -> Vec<BrandHit> {
+fn decode_pdf_name(bytes: &[u8], pos: &mut usize) -> String {
+    let mut raw = Vec::new();
+    while *pos < bytes.len() {
+        let b = bytes[*pos];
+        if b.is_ascii_whitespace() || matches!(b, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%') {
+            break;
+        }
+        if b == b'#'
+            && let (Some(&h), Some(&l)) = (bytes.get(*pos + 1), bytes.get(*pos + 2))
+            && let (Some(hd), Some(ld)) = ((char::from(h)).to_digit(16), (char::from(l)).to_digit(16))
+        {
+            raw.push(((hd << 4) | ld) as u8);
+            *pos += 3;
+            continue;
+        }
+        raw.push(b);
+        *pos += 1;
+    }
+    String::from_utf8_lossy(&raw).into_owned()
+}
+
+fn skip_pdf_literal_string_bytes(bytes: &[u8], limit: usize, mut i: usize) -> usize {
+    i += 1;
+    let mut paren = 1usize;
+    while i < limit && paren > 0 {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'(' => {
+                paren += 1;
+                i += 1;
+            }
+            b')' => {
+                paren -= 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    i.min(limit)
+}
+
+/// Locate the stream's own preceding `<< ... >>` dictionary before `stream_kw_pos`, bounded by
+/// `floor` (end of previous `endstream`) and resetting at any unquoted `endobj`/`endstream` token
+/// so prior objects never leak `/FlateDecode` into an uncompressed XMP stream and large stream
+/// dicts (>512 B) remain captured in full.
+fn find_pdf_stream_dict(pdf_bytes: &[u8], floor: usize, stream_kw_pos: usize) -> &[u8] {
+    let start = floor.max(stream_kw_pos.saturating_sub(65_536));
+    let mut i = start;
+    let mut dict_depth = 0usize;
+    let mut current_dict_start = 0usize;
+    let mut last_dict: Option<(usize, usize)> = None;
+    while i < stream_kw_pos {
+        match pdf_bytes[i] {
+            b'%' => {
+                while i < stream_kw_pos && !matches!(pdf_bytes[i], b'\n' | b'\r') {
+                    i += 1;
+                }
+            }
+            b'(' => i = skip_pdf_literal_string_bytes(pdf_bytes, stream_kw_pos, i),
+            b'<' if i + 1 < stream_kw_pos && pdf_bytes[i + 1] == b'<' => {
+                if dict_depth == 0 {
+                    current_dict_start = i;
+                }
+                dict_depth += 1;
+                i += 2;
+            }
+            b'>' if i + 1 < stream_kw_pos && pdf_bytes[i + 1] == b'>' => {
+                if dict_depth > 0 {
+                    dict_depth -= 1;
+                    if dict_depth == 0 {
+                        last_dict = Some((current_dict_start, i + 2));
+                    }
+                }
+                i += 2;
+            }
+            b'e' if dict_depth == 0 => {
+                let boundary_before = i == start || pdf_bytes[i - 1].is_ascii_whitespace() || matches!(pdf_bytes[i - 1], b'>' | b']' | b')' | b'/');
+                if boundary_before
+                    && pdf_bytes.get(i..i + 6) == Some(b"endobj")
+                    && pdf_bytes.get(i + 6).is_none_or(|b| b.is_ascii_whitespace() || matches!(b, b'<' | b'/' | b'%'))
+                {
+                    last_dict = None;
+                    i += 6;
+                } else if boundary_before
+                    && pdf_bytes.get(i..i + 9) == Some(b"endstream")
+                    && pdf_bytes.get(i + 9).is_none_or(|b| b.is_ascii_whitespace() || matches!(b, b'<' | b'/' | b'%'))
+                {
+                    last_dict = None;
+                    i += 9;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    last_dict.and_then(|(s, e)| pdf_bytes.get(s..e)).unwrap_or(&[])
+}
+
+fn decode_pdf_dict_names(dict_window: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut i = 0usize;
+    while i < dict_window.len() {
+        match dict_window[i] {
+            b'%' => {
+                while i < dict_window.len() && !matches!(dict_window[i], b'\n' | b'\r') {
+                    i += 1;
+                }
+            }
+            b'(' => i = skip_pdf_literal_string_bytes(dict_window, dict_window.len(), i),
+            b'/' => {
+                i += 1;
+                let name = decode_pdf_name(dict_window, &mut i);
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    names
+}
+
+fn inflate_pdf_flate_stream(stream_body: &[u8]) -> Result<Vec<u8>, ()> {
+    if let Ok(v) = inflate_zlib_bounded(stream_body) {
+        return Ok(v);
+    }
+    if let Some(stripped) = stream_body.strip_suffix(b"\r\n").or_else(|| stream_body.strip_suffix(b"\n")).or_else(|| stream_body.strip_suffix(b"\r"))
+        && let Ok(v) = inflate_zlib_bounded(stripped)
+    {
+        return Ok(v);
+    }
+    inflate_zlib_bounded(stream_body.trim_ascii())
+}
+
+/// Fail-closed PDF document metadata inspector (`/Creator`, `/Producer`, `/Title`, `/Author`,
+/// `/Subject`, `/Keywords`) and XMP metadata streams, verifying `%PDF-` magic, decoding `#XX`
+/// PDF name tokens in both Info and stream dictionaries, and failing closed on corrupt `/FlateDecode`
+/// XMP streams.
+pub(crate) fn check_pdf_metadata_checked(source: &str, pdf_bytes: &[u8]) -> Result<Vec<BrandHit>, String> {
     const PDF_INFO_KEYS: &[&str] = &["Creator", "Producer", "Title", "Author", "Subject", "Keywords"];
+    let header_end = pdf_bytes.len().min(1024);
+    if !pdf_bytes[..header_end].windows(5).any(|w| w == b"%PDF-") {
+        return Err(format!("cannot scan {source}: invalid PDF magic header (missing `%PDF-`)"));
+    }
     let mut out = Vec::new();
     let mut line = 1usize;
     let mut pos = 0usize;
+    let mut last_stream_end = 0usize;
 
     while pos < pdf_bytes.len() {
         if let Some(stream_start) = is_pdf_stream_start(pdf_bytes, pos) {
-            line += pdf_bytes[pos..stream_start].iter().filter(|&&b| b == b'\n').count();
-            pos = find_pdf_endstream(pdf_bytes, stream_start, &mut line);
+            let dict_window = find_pdf_stream_dict(pdf_bytes, last_stream_end, pos);
+            let stream_line = line + pdf_bytes[pos..stream_start].iter().filter(|&&b| b == b'\n').count();
+            line = stream_line;
+            let end_pos = find_pdf_endstream(pdf_bytes, stream_start, &mut line);
+            let body_end = end_pos.saturating_sub(9).max(stream_start);
+            let stream_body = &pdf_bytes[stream_start..body_end];
+            let dict_names = decode_pdf_dict_names(dict_window);
+            let is_xmp_dict = dict_names.iter().any(|n| n == "Metadata" || n == "XML");
+            let has_flate = dict_names.iter().any(|n| n == "FlateDecode" || n == "Fl");
+            let looks_xmp = stream_body.windows(10).any(|w| w == b"<x:xmpmeta")
+                || stream_body.windows(9).any(|w| w == b"<?xpacket")
+                || stream_body.windows(8).any(|w| w == b"<rdf:RDF");
+            if is_xmp_dict || looks_xmp {
+                let inflated = if has_flate {
+                    Some(
+                        inflate_pdf_flate_stream(stream_body)
+                            .map_err(|()| format!("cannot scan {source}:{stream_line}: corrupt or oversized /FlateDecode PDF XMP metadata stream"))?,
+                    )
+                } else {
+                    None
+                };
+                let slice = inflated.as_deref().unwrap_or(stream_body);
+                if let Ok(Some(xml)) = decode_utf8_or_utf16(slice) {
+                    scan_xml_text_fragment(source, stream_line, &xml, PrismPolicy::Strict, &mut out);
+                } else {
+                    let lossy = String::from_utf8_lossy(slice);
+                    scan_xml_text_fragment(source, stream_line, &lossy, PrismPolicy::Strict, &mut out);
+                }
+            }
+            last_stream_end = end_pos;
+            pos = end_pos;
             continue;
         }
         let b = pdf_bytes[pos];
@@ -2407,12 +3009,8 @@ pub fn check_pdf_metadata(source: &str, pdf_bytes: &[u8]) -> Vec<BrandHit> {
         }
         if b == b'/' {
             pos += 1;
-            let key_start = pos;
-            while pos < pdf_bytes.len() && pdf_bytes[pos].is_ascii_alphanumeric() {
-                pos += 1;
-            }
-            let key = String::from_utf8_lossy(&pdf_bytes[key_start..pos]);
-            if PDF_INFO_KEYS.contains(&key.as_ref()) {
+            let key = decode_pdf_name(pdf_bytes, &mut pos);
+            if PDF_INFO_KEYS.contains(&key.as_str()) {
                 while pos < pdf_bytes.len() && matches!(pdf_bytes[pos], b' ' | b'\t' | b'\r' | b'\n' | 0 | 0x0C) {
                     if pdf_bytes[pos] == b'\n' {
                         line += 1;
@@ -2422,69 +3020,127 @@ pub fn check_pdf_metadata(source: &str, pdf_bytes: &[u8]) -> Vec<BrandHit> {
                 let val_line = line;
                 if pdf_bytes.get(pos) == Some(&b'(') {
                     let decoded = decode_pdf_literal_string(pdf_bytes, &mut pos, &mut line);
-                    check_single_string(source, val_line, &decoded, PrismPolicy::Strict, &mut out);
+                    check_single_string_with_extra(source, val_line, &decoded, PrismPolicy::Strict, true, &mut out);
                 } else if pdf_bytes.get(pos) == Some(&b'<') && pdf_bytes.get(pos + 1) != Some(&b'<') {
                     let decoded = decode_pdf_hex_string(pdf_bytes, &mut pos, &mut line);
-                    check_single_string(source, val_line, &decoded, PrismPolicy::Strict, &mut out);
+                    check_single_string_with_extra(source, val_line, &decoded, PrismPolicy::Strict, true, &mut out);
                 }
             }
             continue;
         }
         pos += 1;
     }
-    out
+    Ok(out)
 }
 
-fn extract_html_attr(raw_tag_inner: &str, attr_name: &str) -> Option<String> {
-    let lower = raw_tag_inner.to_ascii_lowercase();
-    let mut search = 0usize;
-    while let Some(rel) = lower.get(search..).and_then(|s| s.find(attr_name)) {
-        let pos = search + rel;
-        let end = pos + attr_name.len();
-        let left_ok = pos == 0 || lower.as_bytes()[pos - 1].is_ascii_whitespace();
-        if !left_ok {
-            search = end;
+/// Inspect PDF document metadata (`/Creator`, `/Producer`, `/Title`, `/Author`, `/Subject`,
+/// `/Keywords`) and XMP metadata streams, decoding literal strings, UTF-16BE hex strings, and
+/// `#XX`-escaped PDF name tokens.
+#[must_use]
+pub fn check_pdf_metadata(source: &str, pdf_bytes: &[u8]) -> Vec<BrandHit> {
+    check_pdf_metadata_checked(source, pdf_bytes).unwrap_or_default()
+}
+
+/// Parse all `(lowercase_name, decoded_value)` HTML5 attributes from `raw_tag_inner`, supporting
+/// double-quoted, single-quoted, and unquoted attribute values and `/` tag-name delimiters.
+fn parse_html_tag_attrs(raw_tag_inner: &str) -> Vec<(String, String)> {
+    let bytes = raw_tag_inner.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    // Skip tag name up to first whitespace or `/`.
+    while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'/' {
+        i += 1;
+    }
+    let mut attrs = Vec::new();
+    while i < bytes.len() {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let name_start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && !matches!(bytes[i], b'=' | b'/' | b'>') {
+            i += 1;
+        }
+        let name = raw_tag_inner.get(name_start..i).unwrap_or("").to_ascii_lowercase();
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b'=') {
             continue;
         }
-        let after = raw_tag_inner.get(end..)?.trim_start();
-        let Some(after_eq) = after.strip_prefix('=') else {
-            search = end;
-            continue;
-        };
-        let val_src = after_eq.trim_start();
-        for q in ['"', '\''] {
-            if let Some(inner) = val_src.strip_prefix(q)
-                && let Some((val, _)) = inner.split_once(q)
-            {
-                return Some(decode_xml_html_entities(val));
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let raw_val = match bytes[i] {
+            b'"' | b'\'' => {
+                let q = bytes[i];
+                i += 1;
+                let v_start = i;
+                while i < bytes.len() && bytes[i] != q {
+                    i += 1;
+                }
+                let val = raw_tag_inner.get(v_start..i).unwrap_or("");
+                if i < bytes.len() {
+                    i += 1;
+                }
+                val
             }
+            _ => {
+                let v_start = i;
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
+                    i += 1;
+                }
+                let mut val = raw_tag_inner.get(v_start..i).unwrap_or("");
+                if i == bytes.len() {
+                    val = val.trim_end_matches('/');
+                }
+                val
+            }
+        };
+        if !name.is_empty() {
+            attrs.push((name, decode_xml_html_entities(raw_val)));
         }
-        search = end;
+    }
+    attrs
+}
+
+fn find_raw_text_close_tag(lower_rest: &str, close_prefix: &str) -> Option<usize> {
+    let mut search = 0usize;
+    while let Some(rel) = lower_rest.get(search..).and_then(|s| s.find(close_prefix)) {
+        let pos = search + rel;
+        let after = lower_rest.as_bytes().get(pos + close_prefix.len()).copied();
+        if after.is_none_or(|b| b.is_ascii_whitespace() || matches!(b, b'>' | b'/')) {
+            return Some(pos);
+        }
+        search = pos + close_prefix.len();
     }
     None
 }
 
-/// Inspect HTML metadata (`<title>`, `<meta content=...>`, `aria-label`/`alt`/`title` attributes,
-/// embedded `<svg>` metadata, and visible DOM text) for external brand or suite mentions.
+/// Inspect HTML metadata (`<title>`, `<meta content=...>`, all HTML tag attributes including
+/// unquoted values, embedded `<svg>` metadata, and visible DOM text) for external brand or suite mentions.
 #[must_use]
 pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
-    let (mut out, mut line, mut pos, mut strict_depth, mut in_script_or_style, mut text_start_line) =
-        (Vec::new(), 1usize, 0usize, 0usize, false, 1usize);
+    let (mut out, mut line, mut pos, mut strict_depth, mut text_start_line) = (Vec::new(), 1usize, 0usize, 0usize, 1usize);
+    let mut raw_text_close: Option<&'static str> = None;
     let mut buf = String::new();
+    let is_gen_docs = is_generated_docs_html_path(source);
 
     while let Some(rest) = html.get(pos..) {
         if rest.is_empty() {
             break;
         }
-        if let Some((comment_inner, end)) = consume_delimited_span(html, pos, "<!--", "-->") {
-            flush_html_text(source, line, comment_inner, true, &mut out);
-            line += count_newlines(html.get(pos..end).unwrap_or(rest).as_bytes());
-            pos = end;
-            continue;
-        }
-        if in_script_or_style {
+        if let Some(close_tag) = raw_text_close {
             let lower_rest = rest.to_ascii_lowercase();
-            let close_pos = lower_rest.find("</script").or_else(|| lower_rest.find("</style"));
+            let close_pos = find_raw_text_close_tag(&lower_rest, close_tag);
             let chunk_end = close_pos.map_or(html.len(), |rel| pos + rel);
             if chunk_end > pos {
                 let chunk = html.get(pos..chunk_end).unwrap_or("");
@@ -2496,10 +3152,16 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
                 let gt_end = html.get(tag_start..).and_then(|s| s.find('>')).map_or(html.len(), |g| tag_start + g + 1);
                 line += count_newlines(html.get(tag_start..gt_end).unwrap_or("").as_bytes());
                 pos = gt_end;
-                in_script_or_style = false;
+                raw_text_close = None;
             } else {
                 pos = html.len();
             }
+            continue;
+        }
+        if let Some((comment_inner, end)) = consume_delimited_span(html, pos, "<!--", "-->") {
+            flush_html_text(source, line, comment_inner, true, &mut out);
+            line += count_newlines(html.get(pos..end).unwrap_or(rest).as_bytes());
+            pos = end;
             continue;
         }
         if rest.starts_with('<')
@@ -2514,17 +3176,38 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
             let (is_close, self_closing, name) = extract_tag_name(raw_inner);
             let lower = name.to_ascii_lowercase();
 
-            if matches!(lower.as_str(), "script" | "style") {
+            if !is_close {
+                for (attr_name, val) in parse_html_tag_attrs(raw_inner) {
+                    let strict_attr = matches!(attr_name.as_str(), "aria-label" | "alt" | "title") || (lower == "meta" && attr_name == "content");
+                    if !strict_attr && is_gen_docs && attr_name == "id" && val == "format-prism" {
+                        continue;
+                    }
+                    let stripped_opt = if val.to_ascii_lowercase().contains("data:image/") {
+                        match inspect_and_strip_data_uris_in_decoded_str(source, line, &val, true, 0, &mut out) {
+                            Ok(opt) => opt,
+                            Err(_) => {
+                                out.push(BrandHit { path: source.to_owned(), line, brand: "prism" });
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let attr_text = stripped_opt.as_deref().unwrap_or(&val);
+                    let masked_opt = if !strict_attr && is_gen_docs { mask_generated_docs_html_tokens(source, attr_text) } else { None };
+                    let scanned = masked_opt.as_deref().unwrap_or(attr_text);
+                    check_single_string_with_extra(source, line, scanned, PrismPolicy::Strict, true, &mut out);
+                }
+            }
+            if lower == "script" {
                 if !is_close && !self_closing {
-                    in_script_or_style = true;
+                    raw_text_close = Some("</script");
+                }
+            } else if lower == "style" {
+                if !is_close && !self_closing {
+                    raw_text_close = Some("</style");
                 }
             } else if !is_close {
-                let attrs: &[&str] = if lower == "meta" { &["content", "aria-label", "alt", "title"] } else { &["aria-label", "alt", "title"] };
-                for attr in attrs {
-                    if let Some(val) = extract_html_attr(raw_inner, attr) {
-                        check_single_string_with_extra(source, line, &val, PrismPolicy::Strict, true, &mut out);
-                    }
-                }
                 if matches!(lower.as_str(), "title" | "desc" | "metadata") {
                     strict_depth += 1;
                 }
@@ -2568,7 +3251,7 @@ pub fn check_manifest_metadata(source: &str, manifest_json: &str) -> Vec<BrandHi
         Ok(val) => visit_json_strings(source, &val, 1, &mut out),
         Err(_) => {
             for (idx, line) in manifest_json.lines().enumerate() {
-                check_single_string(source, idx + 1, line, PrismPolicy::Strict, &mut out);
+                check_single_string_with_extra(source, idx + 1, line, PrismPolicy::Strict, true, &mut out);
             }
         }
     }
@@ -2578,7 +3261,7 @@ pub fn check_manifest_metadata(source: &str, manifest_json: &str) -> Vec<BrandHi
 fn visit_json_strings(source: &str, val: &serde_json::Value, idx_hint: usize, out: &mut Vec<BrandHit>) {
     match val {
         serde_json::Value::String(s) => {
-            check_single_string(source, idx_hint, s, PrismPolicy::Strict, out);
+            check_single_string_with_extra(source, idx_hint, s, PrismPolicy::Strict, true, out);
         }
         serde_json::Value::Array(items) => {
             for (i, item) in items.iter().enumerate() {
@@ -2587,7 +3270,7 @@ fn visit_json_strings(source: &str, val: &serde_json::Value, idx_hint: usize, ou
         }
         serde_json::Value::Object(map) => {
             for (i, (k, v)) in map.iter().enumerate() {
-                check_single_string(source, i + 1, k, PrismPolicy::Strict, out);
+                check_single_string_with_extra(source, i + 1, k, PrismPolicy::Strict, true, out);
                 visit_json_strings(source, v, i + 1, out);
             }
         }
@@ -2662,10 +3345,15 @@ fn scan_mcp_inline_png_block(source: &str, ptr: &str, map: &serde_json::Map<Stri
     for (idx, k) in map.keys().enumerate() {
         check_single_string_with_extra(&block_src, idx + 1, k, PrismPolicy::Strict, true, out);
     }
-    if let Some(b64) = map.get("data").and_then(serde_json::Value::as_str)
-        && let Some(decoded) = decode_base64_ascii(b64)
-    {
-        out.extend(check_png_metadata(&format!("{block_src}/data#png"), &decoded));
+    if let Some(b64) = map.get("data").and_then(serde_json::Value::as_str) {
+        let png_src = format!("{block_src}/data#png");
+        match decode_base64_ascii(b64) {
+            Some(decoded) => match check_png_metadata_checked(&png_src, &decoded) {
+                Ok(hits) => out.extend(hits),
+                Err(_) => out.push(BrandHit { path: png_src, line: 1, brand: "prism" }),
+            },
+            None => out.push(BrandHit { path: png_src, line: 1, brand: "prism" }),
+        }
     }
 }
 
@@ -2748,15 +3436,14 @@ fn mcp_leaf_prism_policy<'a>(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> Pris
     PrismPolicy::Strict
 }
 
-/// Inspect PNG binary metadata chunks (`tEXt`, `iTXt`, and compressed `zTXt`) strictly against
-/// external brands, suite names, and pre-rename `LumenCraft` icon tags.
-#[must_use]
-pub fn check_png_metadata(source: &str, png_bytes: &[u8]) -> Vec<BrandHit> {
+/// Fail-closed PNG metadata inspector (`tEXt`, `iTXt`, and compressed `zTXt`), returning an error
+/// on invalid PNG magic, truncated chunks, or corrupt/oversized compressed text chunks.
+pub(crate) fn check_png_metadata_checked(source: &str, png_bytes: &[u8]) -> Result<Vec<BrandHit>, String> {
     const PNG_SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    let mut out = Vec::new();
     if !png_bytes.starts_with(PNG_SIG) {
-        return out;
+        return Err(format!("cannot scan {source}: invalid PNG magic signature"));
     }
+    let mut out = Vec::new();
     let mut pos = 8usize;
     let mut chunk_idx = 0usize;
     while pos + 12 <= png_bytes.len() {
@@ -2765,12 +3452,10 @@ pub fn check_png_metadata(source: &str, png_bytes: &[u8]) -> Vec<BrandHit> {
         let chunk_len = u32::from_be_bytes(len_bytes) as usize;
         let ctype = &png_bytes[pos + 4..pos + 8];
         let data_start = pos + 8;
-        let Some(data_end) = data_start.checked_add(chunk_len) else {
-            break;
-        };
-        if data_end + 4 > png_bytes.len() {
-            break;
-        }
+        let data_end = data_start
+            .checked_add(chunk_len)
+            .filter(|&end| end.checked_add(4).is_some_and(|with_crc| with_crc <= png_bytes.len()))
+            .ok_or_else(|| format!("cannot scan {source}: truncated PNG chunk {chunk_idx}"))?;
         let cdata = &png_bytes[data_start..data_end];
         match ctype {
             b"tEXt" => {
@@ -2778,106 +3463,174 @@ pub fn check_png_metadata(source: &str, png_bytes: &[u8]) -> Vec<BrandHit> {
                 check_single_string_with_extra(source, chunk_idx, &text, PrismPolicy::Strict, true, &mut out);
             }
             b"zTXt" => {
-                if let Some(nul) = cdata.iter().position(|&b| b == 0) {
-                    let keyword = latin1_to_string(&cdata[..nul]);
-                    check_single_string_with_extra(source, chunk_idx, &keyword, PrismPolicy::Strict, true, &mut out);
-                    if let Some(&method) = cdata.get(nul + 1)
-                        && method == 0
-                        && let Some(compressed) = cdata.get(nul + 2..)
-                        && let Ok(raw) = inflate_zlib_bounded(compressed)
-                    {
-                        let decoded = latin1_to_string(&raw);
-                        check_single_string_with_extra(source, chunk_idx, &decoded, PrismPolicy::Strict, true, &mut out);
-                    }
+                let Some(nul) = cdata.iter().position(|&b| b == 0) else {
+                    return Err(format!("cannot scan {source}: malformed PNG zTXt chunk {chunk_idx} (missing NUL separator)"));
+                };
+                let keyword = latin1_to_string(&cdata[..nul]);
+                check_single_string_with_extra(source, chunk_idx, &keyword, PrismPolicy::Strict, true, &mut out);
+                let Some(&method) = cdata.get(nul + 1) else {
+                    return Err(format!("cannot scan {source}: truncated PNG zTXt chunk {chunk_idx}"));
+                };
+                if method != 0 {
+                    return Err(format!("cannot scan {source}: unsupported PNG zTXt compression method {method} in chunk {chunk_idx}"));
                 }
+                let compressed = cdata.get(nul + 2..).unwrap_or(&[]);
+                let raw = inflate_zlib_bounded(compressed)
+                    .map_err(|()| format!("cannot scan {source}: corrupt or oversized PNG zTXt chunk {chunk_idx}"))?;
+                let decoded = latin1_to_string(&raw);
+                check_single_string_with_extra(source, chunk_idx, &decoded, PrismPolicy::Strict, true, &mut out);
             }
             b"iTXt" => {
-                scan_itxt_chunk(source, chunk_idx, cdata, &mut out);
+                scan_itxt_chunk_checked(source, chunk_idx, cdata, &mut out)?;
             }
             b"IEND" => break,
             _ => {}
         }
         pos = data_end + 4;
     }
-    out
+    Ok(out)
 }
 
-fn scan_itxt_chunk(source: &str, chunk_idx: usize, cdata: &[u8], out: &mut Vec<BrandHit>) {
+/// Inspect PNG binary metadata chunks (`tEXt`, `iTXt`, and compressed `zTXt`) strictly against
+/// external brands, suite names, and pre-rename `LumenCraft` icon tags.
+#[must_use]
+pub fn check_png_metadata(source: &str, png_bytes: &[u8]) -> Vec<BrandHit> {
+    check_png_metadata_checked(source, png_bytes).unwrap_or_default()
+}
+
+fn scan_itxt_chunk_checked(source: &str, chunk_idx: usize, cdata: &[u8], out: &mut Vec<BrandHit>) -> Result<(), String> {
     let Some(nul1) = cdata.iter().position(|&b| b == 0) else {
-        return;
+        return Err(format!("cannot scan {source}: malformed PNG iTXt chunk {chunk_idx}"));
     };
     let keyword = String::from_utf8_lossy(&cdata[..nul1]);
     check_single_string_with_extra(source, chunk_idx, &keyword, PrismPolicy::Strict, true, out);
-    let comp_flag = cdata.get(nul1 + 1).copied().unwrap_or(0);
-    let comp_method = cdata.get(nul1 + 2).copied().unwrap_or(0);
-    let Some(rest_lang) = cdata.get(nul1 + 3..) else {
-        return;
-    };
-    let Some(nul2) = rest_lang.iter().position(|&b| b == 0) else {
-        return;
-    };
-    let Some(rest_trans) = rest_lang.get(nul2 + 1..) else {
-        return;
-    };
-    let Some(nul3) = rest_trans.iter().position(|&b| b == 0) else {
-        return;
-    };
+    let comp_flag = *cdata.get(nul1 + 1).ok_or_else(|| format!("cannot scan {source}: truncated PNG iTXt chunk {chunk_idx}"))?;
+    let comp_method = *cdata.get(nul1 + 2).ok_or_else(|| format!("cannot scan {source}: truncated PNG iTXt chunk {chunk_idx}"))?;
+    let rest_lang = cdata.get(nul1 + 3..).ok_or_else(|| format!("cannot scan {source}: truncated PNG iTXt chunk {chunk_idx}"))?;
+    let nul2 = rest_lang.iter().position(|&b| b == 0).ok_or_else(|| format!("cannot scan {source}: malformed PNG iTXt chunk {chunk_idx}"))?;
+    let rest_trans = rest_lang.get(nul2 + 1..).ok_or_else(|| format!("cannot scan {source}: truncated PNG iTXt chunk {chunk_idx}"))?;
+    let nul3 = rest_trans.iter().position(|&b| b == 0).ok_or_else(|| format!("cannot scan {source}: malformed PNG iTXt chunk {chunk_idx}"))?;
     let translated = String::from_utf8_lossy(&rest_trans[..nul3]);
     check_single_string_with_extra(source, chunk_idx, &translated, PrismPolicy::Strict, true, out);
     let payload = rest_trans.get(nul3 + 1..).unwrap_or(&[]);
-    if comp_flag == 1 && comp_method == 0 {
-        if let Ok(raw) = inflate_zlib_bounded(payload) {
-            let text = String::from_utf8_lossy(&raw);
-            check_single_string_with_extra(source, chunk_idx, &text, PrismPolicy::Strict, true, out);
+    if comp_flag == 1 {
+        if comp_method != 0 {
+            return Err(format!("cannot scan {source}: unsupported PNG iTXt compression method {comp_method} in chunk {chunk_idx}"));
         }
+        let raw = inflate_zlib_bounded(payload).map_err(|()| format!("cannot scan {source}: corrupt or oversized PNG iTXt chunk {chunk_idx}"))?;
+        let text = String::from_utf8_lossy(&raw);
+        check_single_string_with_extra(source, chunk_idx, &text, PrismPolicy::Strict, true, out);
     } else if comp_flag == 0 {
         let text = String::from_utf8_lossy(payload);
         check_single_string_with_extra(source, chunk_idx, &text, PrismPolicy::Strict, true, out);
+    } else {
+        return Err(format!("cannot scan {source}: invalid PNG iTXt compression flag {comp_flag} in chunk {chunk_idx}"));
     }
+    Ok(())
+}
+
+fn detect_icon_magic(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"icns") && bytes.len() >= 8 {
+        return Some("icns");
+    }
+    if bytes.len() >= 6 && matches!(&bytes[..4], [0, 0, 1, 0] | [0, 0, 2, 0]) {
+        return Some("ico");
+    }
+    None
+}
+
+/// Detect any binary asset format by magic bytes (for extension-mismatched or ZIP-polyglot files).
+pub(crate) fn detect_binary_asset_magic(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("png");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("gif");
+    }
+    if let Some(fmt) = detect_raster_format_magic(bytes) {
+        return Some(fmt);
+    }
+    if let Some(fmt) = detect_icon_magic(bytes) {
+        return Some(fmt);
+    }
+    if bytes.starts_with(b"%PDF-") {
+        return Some("pdf");
+    }
+    None
+}
+
+/// Fail-closed `.ico` / `.icns` icon container inspector (validating container header/directory,
+/// checking every embedded PNG frame with `check_png_metadata_checked`, and scanning `.icns`
+/// metadata chunks such as `info` / `name` / `icnV`).
+pub(crate) fn check_icon_container_metadata_checked(source: &str, bytes: &[u8]) -> Result<Vec<BrandHit>, String> {
+    const PNG_SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    let mut out = Vec::new();
+    if bytes.starts_with(b"icns") && bytes.len() >= 8 {
+        let total_len = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        if total_len < 8 || total_len > bytes.len() {
+            return Err(format!("cannot scan {source}: invalid ICNS container length ({total_len})"));
+        }
+        let mut pos = 8usize;
+        let mut chunk_idx = 0usize;
+        while pos < total_len {
+            let Some(hdr) = bytes.get(pos..pos + 8) else {
+                return Err(format!("cannot scan {source}: truncated ICNS chunk header at offset {pos}"));
+            };
+            chunk_idx += 1;
+            let len = u32::from_be_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
+            if len < 8 || pos.checked_add(len).is_none_or(|end| end > total_len) {
+                return Err(format!("cannot scan {source}: truncated or invalid ICNS chunk {chunk_idx}"));
+            }
+            let payload = &bytes[pos + 8..pos + len];
+            if payload.starts_with(PNG_SIG) {
+                out.extend(check_png_metadata_checked(&format!("{source}#icns_png{chunk_idx}"), payload)?);
+            } else if matches!(&hdr[..4], b"info" | b"name" | b"icnV") {
+                let tag = String::from_utf8_lossy(&hdr[..4]);
+                scan_binary_ascii_runs(&format!("{source}#icns_{tag}"), chunk_idx, payload, &mut out);
+            }
+            pos += len;
+        }
+        return Ok(out);
+    }
+    if bytes.len() >= 6 && matches!(&bytes[..4], [0, 0, 1, 0] | [0, 0, 2, 0]) {
+        let count = usize::from(u16::from_le_bytes([bytes[4], bytes[5]]));
+        let dir_end = 6usize
+            .checked_add(count.checked_mul(16).ok_or_else(|| format!("cannot scan {source}: ICO count overflow"))?)
+            .ok_or_else(|| format!("cannot scan {source}: ICO directory overflow"))?;
+        if count == 0 || dir_end > bytes.len() {
+            return Err(format!("cannot scan {source}: truncated or empty ICO directory ({count} entries)"));
+        }
+        for idx in 0..count {
+            let entry_off = 6 + idx * 16;
+            let img_size = u32::from_le_bytes([bytes[entry_off + 8], bytes[entry_off + 9], bytes[entry_off + 10], bytes[entry_off + 11]]) as usize;
+            let img_off = u32::from_le_bytes([bytes[entry_off + 12], bytes[entry_off + 13], bytes[entry_off + 14], bytes[entry_off + 15]]) as usize;
+            let img_end = img_off
+                .checked_add(img_size)
+                .filter(|&end| img_size > 0 && end <= bytes.len())
+                .ok_or_else(|| format!("cannot scan {source}: truncated ICO entry {}", idx + 1))?;
+            let payload = &bytes[img_off..img_end];
+            if payload.starts_with(PNG_SIG) {
+                out.extend(check_png_metadata_checked(&format!("{source}#png{}", idx + 1), payload)?);
+            }
+        }
+        return Ok(out);
+    }
+    Err(format!("cannot scan {source}: invalid ICO/ICNS container signature"))
 }
 
 /// Inspect `.ico` / `.icns` icon containers (including every embedded PNG frame and non-PNG `.icns`
 /// metadata chunks such as `info` / `name`).
 #[must_use]
 pub fn check_icon_container_metadata(source: &str, bytes: &[u8]) -> Vec<BrandHit> {
-    const PNG_SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    let mut out = Vec::new();
-    let mut offset = 0usize;
-    let mut frame_idx = 0usize;
-    while let Some(rel) = bytes.get(offset..).and_then(|s| s.windows(PNG_SIG.len()).position(|w| w == PNG_SIG)) {
-        frame_idx += 1;
-        let abs = offset + rel;
-        let frame_source = format!("{source}#png{frame_idx}");
-        out.extend(check_png_metadata(&frame_source, &bytes[abs..]));
-        offset = abs + PNG_SIG.len();
-    }
-    if bytes.starts_with(b"icns") && bytes.len() >= 8 {
-        let mut pos = 8usize;
-        let mut chunk_idx = 0usize;
-        while let Some(hdr) = bytes.get(pos..pos + 8) {
-            chunk_idx += 1;
-            let len = u32::from_be_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
-            if len < 8 || pos.checked_add(len).is_none_or(|end| end > bytes.len()) {
-                break;
-            }
-            let payload = &bytes[pos + 8..pos + len];
-            if !payload.starts_with(PNG_SIG) && matches!(&hdr[..4], b"info" | b"name" | b"icnV") {
-                let tag = String::from_utf8_lossy(&hdr[..4]);
-                scan_binary_ascii_runs(&format!("{source}#icns_{tag}"), chunk_idx, payload, &mut out);
-            }
-            pos += len;
-        }
-    }
-    out
+    check_icon_container_metadata_checked(source, bytes).unwrap_or_default()
 }
 
-/// Inspect `.gif` Comment Extension (`0x21 0xFE`) and Application Extension (`0x21 0xFF`) blocks.
-#[must_use]
-pub fn check_gif_metadata(source: &str, bytes: &[u8]) -> Vec<BrandHit> {
-    let mut out = Vec::new();
+/// Fail-closed GIF metadata inspector (`0x21 0xFE` Comment and `0x21 0xFF` Application extensions).
+pub(crate) fn check_gif_metadata_checked(source: &str, bytes: &[u8]) -> Result<Vec<BrandHit>, String> {
     if !(bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) || bytes.len() < 13 {
-        return out;
+        return Err(format!("cannot scan {source}: invalid GIF magic signature"));
     }
+    let mut out = Vec::new();
     let packed = bytes[10];
     let gct_len = if (packed & 0x80) != 0 { 3usize * (1usize << ((packed & 0x07) + 1)) } else { 0 };
     let mut pos = 13usize.saturating_add(gct_len);
@@ -2910,7 +3663,465 @@ pub fn check_gif_metadata(source: &str, bytes: &[u8]) -> Vec<BrandHit> {
             _ => break,
         }
     }
-    out
+    Ok(out)
+}
+
+/// Inspect `.gif` Comment Extension (`0x21 0xFE`) and Application Extension (`0x21 0xFF`) blocks.
+#[must_use]
+pub fn check_gif_metadata(source: &str, bytes: &[u8]) -> Vec<BrandHit> {
+    check_gif_metadata_checked(source, bytes).unwrap_or_default()
+}
+
+fn detect_raster_format_magic(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("jpg");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("webp");
+    }
+    if bytes.starts_with(b"II\x2A\x00") || bytes.starts_with(b"MM\x00\x2A") || bytes.starts_with(b"II\x2B\x00") || bytes.starts_with(b"MM\x00\x2B") {
+        return Some("tif");
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"avif" | b"avis") {
+        return Some("avif");
+    }
+    None
+}
+
+/// Fail-closed metadata scanner for JPEG, TIFF, WebP, and AVIF assets (EXIF, XMP, IPTC, COM, ICCP).
+pub(crate) fn check_raster_metadata_checked(source: &str, ext: &str, bytes: &[u8]) -> Result<Vec<BrandHit>, String> {
+    match ext {
+        "jpg" | "jpeg" => check_jpeg_metadata(source, bytes),
+        "webp" => check_webp_metadata(source, bytes),
+        "tif" | "tiff" => check_tiff_metadata(source, bytes),
+        "avif" => check_avif_metadata(source, bytes),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn scan_metadata_blob(source: &str, idx: usize, payload: &[u8], out: &mut Vec<BrandHit>) {
+    if payload.windows(10).any(|w| w == b"<x:xmpmeta")
+        || payload.windows(9).any(|w| w == b"<?xpacket")
+        || payload.windows(8).any(|w| w == b"<rdf:RDF")
+    {
+        let xml = String::from_utf8_lossy(payload);
+        scan_xml_text_fragment(source, idx, &xml, PrismPolicy::Strict, out);
+    }
+    scan_binary_ascii_runs(source, idx, payload, out);
+    if payload.contains(&0) {
+        let stripped: Vec<u8> = payload.iter().copied().filter(|&b| b != 0).collect();
+        scan_binary_ascii_runs(source, idx, &stripped, out);
+    }
+}
+
+fn check_jpeg_metadata(source: &str, bytes: &[u8]) -> Result<Vec<BrandHit>, String> {
+    if !bytes.starts_with(&[0xFF, 0xD8]) {
+        return Err(format!("cannot scan {source}: invalid JPEG magic signature"));
+    }
+    let mut out = Vec::new();
+    let mut pos = 2usize;
+    let mut seg_idx = 0usize;
+    while pos < bytes.len() {
+        while pos < bytes.len() && bytes[pos] != 0xFF {
+            pos += 1;
+        }
+        while pos < bytes.len() && bytes[pos] == 0xFF {
+            pos += 1;
+        }
+        let Some(&marker) = bytes.get(pos) else { break };
+        pos += 1;
+        if marker == 0xD9 || marker == 0xDA {
+            break;
+        }
+        if matches!(marker, 0x00 | 0x01 | 0xD0..=0xD8) {
+            continue;
+        }
+        let Some(len_bytes) = bytes.get(pos..pos + 2) else {
+            return Err(format!("cannot scan {source}: truncated JPEG segment length for marker 0x{marker:02X}"));
+        };
+        let seg_len = usize::from(u16::from_be_bytes([len_bytes[0], len_bytes[1]]));
+        if seg_len < 2 || pos.checked_add(seg_len).is_none_or(|end| end > bytes.len()) {
+            return Err(format!("cannot scan {source}: truncated JPEG segment 0x{marker:02X}"));
+        }
+        let payload = &bytes[pos + 2..pos + seg_len];
+        if marker == 0xFE || (0xE1..=0xEF).contains(&marker) {
+            seg_idx += 1;
+            scan_metadata_blob(&format!("{source}#jpeg_seg{seg_idx}"), seg_idx, payload, &mut out);
+        }
+        pos += seg_len;
+    }
+    Ok(out)
+}
+
+fn check_webp_metadata(source: &str, bytes: &[u8]) -> Result<Vec<BrandHit>, String> {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return Err(format!("cannot scan {source}: invalid WebP magic signature"));
+    }
+    let mut out = Vec::new();
+    let mut pos = 12usize;
+    let mut chunk_idx = 0usize;
+    while let Some(hdr) = bytes.get(pos..pos + 8) {
+        chunk_idx += 1;
+        let fourcc = &hdr[..4];
+        let chunk_len = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
+        let data_start = pos + 8;
+        let data_end = data_start
+            .checked_add(chunk_len)
+            .filter(|&end| end <= bytes.len())
+            .ok_or_else(|| format!("cannot scan {source}: truncated WebP chunk {chunk_idx}"))?;
+        if matches!(fourcc, b"EXIF" | b"XMP " | b"ICCP") {
+            let tag = String::from_utf8_lossy(fourcc).trim().to_owned();
+            scan_metadata_blob(&format!("{source}#webp_{tag}"), chunk_idx, &bytes[data_start..data_end], &mut out);
+        }
+        pos = data_end.saturating_add(chunk_len & 1);
+    }
+    Ok(out)
+}
+
+fn check_tiff_metadata(source: &str, bytes: &[u8]) -> Result<Vec<BrandHit>, String> {
+    let little = if bytes.starts_with(b"II\x2A\x00") || bytes.starts_with(b"II\x2B\x00") {
+        true
+    } else if bytes.starts_with(b"MM\x00\x2A") || bytes.starts_with(b"MM\x00\x2B") {
+        false
+    } else {
+        return Err(format!("cannot scan {source}: invalid TIFF magic signature"));
+    };
+    let mut out = Vec::new();
+    let is_classic = bytes[2] == 0x2A || bytes[3] == 0x2A;
+    if is_classic && bytes.len() >= 8 {
+        let u16_at = |off: usize| -> Option<u16> {
+            let s = bytes.get(off..off + 2)?;
+            Some(if little { u16::from_le_bytes([s[0], s[1]]) } else { u16::from_be_bytes([s[0], s[1]]) })
+        };
+        let u32_at = |off: usize| -> Option<u32> {
+            let s = bytes.get(off..off + 4)?;
+            Some(if little { u32::from_le_bytes([s[0], s[1], s[2], s[3]]) } else { u32::from_be_bytes([s[0], s[1], s[2], s[3]]) })
+        };
+        let first_ifd = u32_at(4).unwrap_or(0) as usize;
+        let mut queue = vec![first_ifd];
+        let mut visited: BTreeSet<usize> = BTreeSet::new();
+        while let Some(ifd) = queue.pop() {
+            if ifd == 0 || !visited.insert(ifd) || visited.len() > 64 {
+                continue;
+            }
+            if ifd + 2 > bytes.len() {
+                return Err(format!("cannot scan {source}: truncated TIFF IFD at offset {ifd}"));
+            }
+            let count = usize::from(u16_at(ifd).unwrap_or(0));
+            let entries_start = ifd + 2;
+            for idx in 0..count.min(256) {
+                let off = entries_start + idx * 12;
+                let (Some(tag), Some(ty), Some(cnt)) = (u16_at(off), u16_at(off + 2), u32_at(off + 4)) else {
+                    break;
+                };
+                // Descend into ExifIFD (34665 / 0x8769), GPSInfo (34853), InteropIFD (40965), and SubIFDs (330).
+                if matches!(tag, 330 | 34665 | 34853 | 40965) && matches!(ty, 4 | 13) && cnt > 0 && cnt <= 16 {
+                    if cnt == 1 {
+                        if let Some(sub_off) = u32_at(off + 8) {
+                            queue.push(sub_off as usize);
+                        }
+                    } else if let Some(arr_off) = u32_at(off + 8).map(|v| v as usize) {
+                        for k in 0..cnt as usize {
+                            if let Some(sub_off) = u32_at(arr_off + k * 4) {
+                                queue.push(sub_off as usize);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // ASCII (2), BYTE/UNDEFINED (1/7 for XMP tag 700 / IPTC tag 33723 / EXIF UserComment 37510 / XP* 40091..40095), UTF-8 (129).
+                let is_meta_tag = matches!(ty, 2 | 129)
+                    || matches!(tag, 270 | 271 | 272 | 305 | 315 | 700 | 33432 | 33723 | 37510 | 40091..=40095 | 42016 | 42032..=42037);
+                if is_meta_tag && cnt > 0 && cnt <= 4 * 1024 * 1024 {
+                    let byte_len = cnt as usize;
+                    let slice = if byte_len <= 4 {
+                        bytes.get(off + 8..off + 8 + byte_len)
+                    } else if let Some(val_off) = u32_at(off + 8).map(|v| v as usize) {
+                        val_off.checked_add(byte_len).and_then(|end| bytes.get(val_off..end))
+                    } else {
+                        None
+                    };
+                    if let Some(payload) = slice {
+                        scan_metadata_blob(&format!("{source}#tiff_tag{tag}"), idx + 1, payload, &mut out);
+                    }
+                }
+            }
+            let next_off = entries_start.saturating_add(count.saturating_mul(12));
+            if let Some(next_ifd) = u32_at(next_off).filter(|&v| v > 0) {
+                queue.push(next_ifd as usize);
+            }
+        }
+    } else {
+        scan_metadata_blob(&format!("{source}#tiff"), 1, bytes, &mut out);
+    }
+    Ok(out)
+}
+
+fn check_avif_metadata(source: &str, bytes: &[u8]) -> Result<Vec<BrandHit>, String> {
+    if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+        return Err(format!("cannot scan {source}: invalid AVIF magic signature"));
+    }
+    let mut out = Vec::new();
+    scan_isobmff_boxes(source, bytes, bytes, 0, &mut out)?;
+    Ok(out)
+}
+
+type IsoBox<'a> = (&'a [u8; 4], &'a [u8]);
+
+fn parse_isobmff_boxes<'a>(source: &str, bytes: &'a [u8]) -> Result<Vec<IsoBox<'a>>, String> {
+    let mut boxes = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let Some(hdr) = bytes.get(pos..pos + 8) else {
+            return Err(format!("cannot scan {source}: truncated ISOBMFF box header at offset {pos}"));
+        };
+        let size32 = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
+        let box_type: &[u8; 4] = hdr[4..8].try_into().map_err(|_| format!("cannot scan {source}: invalid ISOBMFF box header"))?;
+        let (hdr_len, box_size) = if size32 == 0 {
+            (8usize, bytes.len().saturating_sub(pos))
+        } else if size32 == 1 {
+            let Some(ext) = bytes.get(pos + 8..pos + 16) else {
+                return Err(format!("cannot scan {source}: truncated 64-bit ISOBMFF box size"));
+            };
+            let sz = u64::from_be_bytes([ext[0], ext[1], ext[2], ext[3], ext[4], ext[5], ext[6], ext[7]]);
+            let sz_usize = usize::try_from(sz).map_err(|_| format!("cannot scan {source}: oversized 64-bit ISOBMFF box size"))?;
+            (16usize, sz_usize)
+        } else {
+            (8usize, size32)
+        };
+        if box_size < hdr_len || pos.checked_add(box_size).is_none_or(|end| end > bytes.len()) {
+            return Err(format!("cannot scan {source}: truncated or invalid ISOBMFF box `{}`", String::from_utf8_lossy(box_type)));
+        }
+        boxes.push((box_type, &bytes[pos + hdr_len..pos + box_size]));
+        pos += box_size;
+    }
+    Ok(boxes)
+}
+
+fn read_be_uint(bytes: &[u8], pos: &mut usize, size: u8) -> Option<u64> {
+    match size {
+        0 => Some(0),
+        4 => {
+            let s = bytes.get(*pos..*pos + 4)?;
+            *pos += 4;
+            Some(u64::from(u32::from_be_bytes([s[0], s[1], s[2], s[3]])))
+        }
+        8 => {
+            let s = bytes.get(*pos..*pos + 8)?;
+            *pos += 8;
+            Some(u64::from_be_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
+        }
+        _ => None,
+    }
+}
+
+fn parse_iinf_metadata_items(source: &str, iinf_body: &[u8]) -> Result<BTreeMap<u32, [u8; 4]>, String> {
+    let mut items = BTreeMap::new();
+    let Some(&version) = iinf_body.first() else {
+        return Err(format!("cannot scan {source}: truncated ISOBMFF `iinf` box"));
+    };
+    let children_start = if version == 0 { 6usize } else { 8usize };
+    let Some(children) = iinf_body.get(children_start..) else {
+        return Err(format!("cannot scan {source}: truncated ISOBMFF `iinf` header"));
+    };
+    for (btype, body) in parse_isobmff_boxes(source, children)? {
+        if btype != b"infe" {
+            continue;
+        }
+        let Some(&infe_ver) = body.first() else {
+            return Err(format!("cannot scan {source}: truncated ISOBMFF `infe` box"));
+        };
+        if infe_ver < 2 {
+            continue;
+        }
+        let (item_id, type_off) = if infe_ver == 2 {
+            let Some(hdr) = body.get(4..12) else {
+                return Err(format!("cannot scan {source}: truncated ISOBMFF `infe` v2 entry"));
+            };
+            (u32::from(u16::from_be_bytes([hdr[0], hdr[1]])), 8usize)
+        } else {
+            let Some(hdr) = body.get(4..14) else {
+                return Err(format!("cannot scan {source}: truncated ISOBMFF `infe` v3 entry"));
+            };
+            (u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]), 10usize)
+        };
+        let Some(itype_slice) = body.get(type_off..type_off + 4) else {
+            return Err(format!("cannot scan {source}: truncated ISOBMFF `infe` item_type"));
+        };
+        let itype: [u8; 4] = [itype_slice[0], itype_slice[1], itype_slice[2], itype_slice[3]];
+        if matches!(&itype, b"Exif" | b"mime" | b"uri ") {
+            items.insert(item_id, itype);
+        }
+    }
+    Ok(items)
+}
+
+fn scan_iloc_metadata_items(
+    source: &str,
+    iloc_body: &[u8],
+    meta_items: &BTreeMap<u32, [u8; 4]>,
+    full_file: &[u8],
+    idat_body: Option<&[u8]>,
+    out: &mut Vec<BrandHit>,
+) -> Result<(), String> {
+    if iloc_body.len() < 8 {
+        return Err(format!("cannot scan {source}: truncated ISOBMFF `iloc` box"));
+    }
+    let version = iloc_body[0];
+    let offset_size = (iloc_body[4] >> 4) & 0x0F;
+    let length_size = iloc_body[4] & 0x0F;
+    let base_offset_size = (iloc_body[5] >> 4) & 0x0F;
+    let index_size = if version == 1 || version == 2 { iloc_body[5] & 0x0F } else { 0 };
+    if ![offset_size, length_size, base_offset_size, index_size].iter().all(|s| matches!(s, 0 | 4 | 8)) {
+        return Err(format!("cannot scan {source}: invalid ISOBMFF `iloc` field sizes"));
+    }
+    let mut pos = 6usize;
+    let item_count = if version < 2 {
+        let s = iloc_body.get(pos..pos + 2).ok_or_else(|| format!("cannot scan {source}: truncated `iloc` item_count"))?;
+        pos += 2;
+        u32::from(u16::from_be_bytes([s[0], s[1]]))
+    } else {
+        let s = iloc_body.get(pos..pos + 4).ok_or_else(|| format!("cannot scan {source}: truncated `iloc` item_count"))?;
+        pos += 4;
+        u32::from_be_bytes([s[0], s[1], s[2], s[3]])
+    };
+    const MAX_ILOC_ITEMS: u32 = 4096;
+    const MAX_ILOC_ITEM_BYTES: usize = 16 * 1024 * 1024;
+    if item_count > MAX_ILOC_ITEMS {
+        return Err(format!("cannot scan {source}: ISOBMFF `iloc` item_count {item_count} exceeds limit {MAX_ILOC_ITEMS}"));
+    }
+    for _ in 0..item_count {
+        let item_id = if version < 2 {
+            let s = iloc_body.get(pos..pos + 2).ok_or_else(|| format!("cannot scan {source}: truncated `iloc` item_id"))?;
+            pos += 2;
+            u32::from(u16::from_be_bytes([s[0], s[1]]))
+        } else {
+            let s = iloc_body.get(pos..pos + 4).ok_or_else(|| format!("cannot scan {source}: truncated `iloc` item_id"))?;
+            pos += 4;
+            u32::from_be_bytes([s[0], s[1], s[2], s[3]])
+        };
+        let construction_method = if version == 1 || version == 2 {
+            let s = iloc_body.get(pos..pos + 2).ok_or_else(|| format!("cannot scan {source}: truncated `iloc` method"))?;
+            pos += 2;
+            u16::from_be_bytes([s[0], s[1]]) & 0x0F
+        } else {
+            0
+        };
+        if iloc_body.get(pos..pos + 2).is_none() {
+            return Err(format!("cannot scan {source}: truncated `iloc` data_reference_index"));
+        }
+        pos += 2;
+        let base_offset =
+            read_be_uint(iloc_body, &mut pos, base_offset_size).ok_or_else(|| format!("cannot scan {source}: truncated `iloc` base_offset"))?;
+        let ext_cnt_bytes = iloc_body.get(pos..pos + 2).ok_or_else(|| format!("cannot scan {source}: truncated `iloc` extent_count"))?;
+        pos += 2;
+        let extent_count = u16::from_be_bytes([ext_cnt_bytes[0], ext_cnt_bytes[1]]);
+        let mut payload = Vec::new();
+        let wanted_type = meta_items.get(&item_id).copied();
+        let wanted_backing = if wanted_type.is_some() {
+            Some(match construction_method {
+                0 => full_file,
+                1 => idat_body.ok_or_else(|| format!("cannot scan {source}: `iloc` references missing `idat` box"))?,
+                other => {
+                    return Err(format!("cannot scan {source}: unsupported ISOBMFF `iloc` construction_method {other} for item {item_id}"));
+                }
+            })
+        } else {
+            None
+        };
+        for _ in 0..extent_count {
+            if version == 1 || version == 2 {
+                let _ =
+                    read_be_uint(iloc_body, &mut pos, index_size).ok_or_else(|| format!("cannot scan {source}: truncated `iloc` extent_index"))?;
+            }
+            let ext_off =
+                read_be_uint(iloc_body, &mut pos, offset_size).ok_or_else(|| format!("cannot scan {source}: truncated `iloc` extent_offset"))?;
+            let ext_len =
+                read_be_uint(iloc_body, &mut pos, length_size).ok_or_else(|| format!("cannot scan {source}: truncated `iloc` extent_length"))?;
+            if let Some(backing) = wanted_backing {
+                let abs_off =
+                    usize::try_from(base_offset.checked_add(ext_off).ok_or_else(|| format!("cannot scan {source}: `iloc` offset overflow"))?)
+                        .map_err(|_| format!("cannot scan {source}: `iloc` offset overflow"))?;
+                if abs_off > backing.len() {
+                    return Err(format!("cannot scan {source}: out-of-bounds ISOBMFF `iloc` offset for item {item_id}"));
+                }
+                // ISO/IEC 14496-12 §8.11.3: `length_size == 0` (or `ext_len == 0`) spans to the end of the backing region.
+                let end = if length_size == 0 || ext_len == 0 {
+                    backing.len()
+                } else {
+                    let len = usize::try_from(ext_len).map_err(|_| format!("cannot scan {source}: `iloc` extent too large"))?;
+                    abs_off
+                        .checked_add(len)
+                        .filter(|&e| e <= backing.len())
+                        .ok_or_else(|| format!("cannot scan {source}: out-of-bounds ISOBMFF `iloc` extent for item {item_id}"))?
+                };
+                if payload.len().saturating_add(end - abs_off) > MAX_ILOC_ITEM_BYTES {
+                    return Err(format!("cannot scan {source}: ISOBMFF `iloc` item {item_id} exceeds {MAX_ILOC_ITEM_BYTES} B limit"));
+                }
+                payload.extend_from_slice(&backing[abs_off..end]);
+            }
+        }
+        if let Some(itype) = wanted_type
+            && !payload.is_empty()
+        {
+            let item_src = format!("{source}#avif_item{item_id}");
+            scan_metadata_blob(&item_src, item_id as usize, &payload, out);
+            if &itype == b"Exif" && payload.len() >= 4 {
+                let tiff_off = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+                if let Some(tiff_start) = 4usize.checked_add(tiff_off)
+                    && let Some(tiff_bytes) = payload.get(tiff_start..)
+                    && tiff_bytes.len() >= 8
+                {
+                    out.extend(check_tiff_metadata(&format!("{item_src}_exif"), tiff_bytes)?);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scan_isobmff_boxes(source: &str, full_file: &[u8], bytes: &[u8], depth: usize, out: &mut Vec<BrandHit>) -> Result<(), String> {
+    if depth >= 4 {
+        return Ok(());
+    }
+    let boxes = parse_isobmff_boxes(source, bytes)?;
+    for (idx, (box_type, body)) in boxes.into_iter().enumerate() {
+        let box_idx = idx + 1;
+        match box_type {
+            b"meta" => {
+                let Some(children) = body.get(4..) else {
+                    return Err(format!("cannot scan {source}: truncated ISOBMFF `meta` box"));
+                };
+                let child_boxes = parse_isobmff_boxes(source, children)?;
+                let mut iinf_items: BTreeMap<u32, [u8; 4]> = BTreeMap::new();
+                let mut iloc_body: Option<&[u8]> = None;
+                let mut idat_body: Option<&[u8]> = None;
+                for (ctype, cbody) in &child_boxes {
+                    match *ctype {
+                        b"iinf" => iinf_items.extend(parse_iinf_metadata_items(source, cbody)?),
+                        b"iloc" => iloc_body = Some(cbody),
+                        b"idat" => idat_body = Some(cbody),
+                        _ => {}
+                    }
+                }
+                if !iinf_items.is_empty()
+                    && let Some(iloc) = iloc_body
+                {
+                    scan_iloc_metadata_items(source, iloc, &iinf_items, full_file, idat_body, out)?;
+                }
+                scan_isobmff_boxes(source, full_file, children, depth + 1, out)?;
+            }
+            b"udta" | b"ilst" | b"iprp" | b"ipco" => {
+                scan_isobmff_boxes(source, full_file, body, depth + 1, out)?;
+            }
+            b"xml " | b"bxml" | b"uuid" | b"Exif" | b"idat" | b"data" => {
+                let tag = String::from_utf8_lossy(box_type).trim().to_owned();
+                scan_metadata_blob(&format!("{source}#avif_{tag}"), box_idx, body, out);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn read_gif_subblocks(bytes: &[u8], pos: &mut usize) -> Vec<u8> {
@@ -2942,7 +4153,7 @@ fn scan_binary_ascii_runs(source: &str, line: usize, bytes: &[u8], out: &mut Vec
         while idx < bytes.len() && (bytes[idx].is_ascii_graphic() || bytes[idx] == b' ') {
             idx += 1;
         }
-        if idx - start >= 4
+        if idx - start >= 3
             && let Ok(run) = std::str::from_utf8(&bytes[start..idx])
         {
             check_single_string_with_extra(source, line, run, PrismPolicy::Strict, true, out);
@@ -3104,24 +4315,47 @@ fn is_native_binary_blob(display_path: &str, bytes: &[u8]) -> bool {
         .any(|sig| bytes.starts_with(sig))
 }
 
+fn scan_zip_container_bytes(
+    display_path: &str,
+    bytes: &[u8],
+    depth: usize,
+    stats: &mut DistScanStats,
+    hits: &mut Vec<BrandHit>,
+) -> Result<(), String> {
+    if depth >= 2 {
+        return Err(format!("{display_path}: nested archive depth exceeded (max depth 2)"));
+    }
+    let zip = ZipArchive::from_bytes_with_limits(bytes, ZipLimits::default()).map_err(|e| format!("cannot inspect archive `{display_path}`: {e}"))?;
+    if !zip.archive_comment().is_empty() {
+        let text = String::from_utf8_lossy(zip.archive_comment());
+        scan_strict_label_words(&format!("{display_path}#comment"), &text, true, hits);
+    }
+    for (comment_name, comment_bytes) in zip.entry_comments() {
+        let text = String::from_utf8_lossy(comment_bytes);
+        scan_strict_label_words(&format!("{display_path}!{comment_name}#comment"), &text, true, hits);
+    }
+    for (name, entry_bytes) in zip.iter() {
+        stats.archive_entries += 1;
+        let entry_path = format!("{display_path}!{name}");
+        if is_forbidden_bundled_dir(name) {
+            hits.push(BrandHit { path: entry_path.clone(), line: 1, brand: "prism" });
+            continue;
+        }
+        scan_strict_label_words(&entry_path, name, true, hits);
+        scan_dist_bytes(&entry_path, entry_bytes, depth + 1, stats, hits)?;
+    }
+    Ok(())
+}
+
 fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut DistScanStats, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     let ext = lower_ext(display_path);
     let lower_path = display_path.to_ascii_lowercase();
-    if is_zip_magic(bytes) {
-        if depth >= 2 {
-            return Err(format!("{display_path}: nested archive depth exceeded (max depth 2)"));
-        }
-        let zip =
-            ZipArchive::from_bytes_with_limits(bytes, ZipLimits::default()).map_err(|e| format!("cannot inspect archive `{display_path}`: {e}"))?;
-        for (name, entry_bytes) in zip.iter() {
-            stats.archive_entries += 1;
-            let entry_path = format!("{display_path}!{name}");
-            scan_strict_label_words(&entry_path, name, true, hits);
-            scan_dist_bytes(&entry_path, entry_bytes, depth + 1, stats, hits)?;
-        }
-        return Ok(());
+    let scanned_binary = try_scan_binary_metadata(display_path, &ext, bytes, true, true, hits)?;
+    let is_zip = looks_like_zip(bytes) || ZIP_CONTAINER_EXTS.contains(&ext.as_str());
+    if is_zip {
+        scan_zip_container_bytes(display_path, bytes, depth, stats, hits)?;
     }
-    if try_scan_binary_metadata(display_path, &ext, bytes, true, hits)? {
+    if scanned_binary || is_zip {
         return Ok(());
     }
     let text = match decode_text_file(display_path, bytes) {
@@ -3129,10 +4363,12 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut D
         Ok(DecodedFile::BinaryAsset) => return Ok(()),
         Err(err) => return if is_native_binary_blob(display_path, bytes) { Ok(()) } else { Err(err) },
     };
+    let start_idx = hits.len();
+    scan_suite_lines_with_scope(display_path, &text, true, hits);
     if ext == "json" {
         hits.extend(check_manifest_metadata(display_path, &text));
     } else if ext == "svg" {
-        scan_svg(display_path, &text, hits);
+        scan_svg_checked(display_path, &text, 0, hits)?;
         hits.extend(check_svg_metadata(display_path, &text));
     } else if matches!(ext.as_str(), "html" | "htm") {
         scan_html_file(display_path, &text, hits);
@@ -3144,9 +4380,9 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut D
     } else if lower_path.ends_with(".desktop") {
         scan_desktop_entry(display_path, &text, hits);
     } else {
-        scan_suite_lines_with_scope(display_path, &text, true, hits);
         scan_plain_lines_with_scope(display_path, &text, true, hits);
     }
+    dedup_tail_hits(hits, start_idx);
     Ok(())
 }
 
@@ -3864,6 +5100,112 @@ serde = "1"
     }
 
     #[test]
+    fn aud_12_01_11_12_29_30_48_svg_data_uri_dist_suite_html_pdf_png_and_waiver_guards() {
+        // AUD-12-01: deep recursive SVG data:image/svg+xml fails closed without stack overflow.
+        let deep = format!("<svg><image href=\"{}clean\"/></svg>", "data:image/svg+xml,".repeat(256));
+        assert!(super::scan_svg_checked("deep.svg", &deep, 0, &mut Vec::new()).is_err());
+
+        // AUD-12-01: multiline/whitespace base64, MIME params, and malformed base64.
+        let b64_svg = curvebook_platform::base64::encode(b"<svg><title>GraphPad</title></svg>");
+        let multiline_svg = format!("<svg><image href=\"data:image/svg+xml;base64,\n  {b64_svg}\"/></svg>");
+        let mut ml_hits = Vec::new();
+        super::scan_svg_checked("ml.svg", &multiline_svg, 0, &mut ml_hits).unwrap();
+        assert!(ml_hits.iter().any(|h| h.brand == "graphpad"), "{ml_hits:?}");
+
+        let mime_param_svg = format!(
+            "<svg><image href=\"data:image/png;title=GraphPad;base64,{}\"/></svg>",
+            curvebook_platform::base64::encode(&build_test_png_with_chunk(b"tEXt", b"t\x00clean"))
+        );
+        let mut mp_hits = Vec::new();
+        super::scan_svg_checked("mp.svg", &mime_param_svg, 0, &mut mp_hits).unwrap();
+        assert!(mp_hits.iter().any(|h| h.brand == "graphpad"), "{mp_hits:?}");
+        assert!(super::scan_svg_checked("badb64.svg", "<svg><image href=\"data:image/png;base64,!!!not-b64\"/></svg>", 0, &mut Vec::new()).is_err());
+
+        // AUD-12-11: scan_dist_bytes checks SUITE_BRANDS & vectorcraft on plist/desktop/mime/html/svg.
+        let dist = TestDir::new("brands-aud12-11");
+        dist.write("CurveBook.app/Contents/Info.plist", "<dict><string>com.artcraft.cb</string><string>VectorCraft</string></dict>\n");
+        dist.write("app.desktop", "[Desktop Entry]\nComment=ArtCraft Storytold VectorCraft\n");
+        dist.write("share/mime/packages/cb.xml", "<mime-info><!-- ArtCraft VectorCraft --></mime-info>\n");
+        dist.write("web/index.html", "<a href=\"https://getartcraft.com/vectorcraft\" data-suite=\"ArtCraft\">Open</a>\n");
+        dist.write("web/icon.svg", "<svg><style>/* ArtCraft VectorCraft */</style><image id=\"StorytoldLogo\"/></svg>\n");
+        let dist_hits = super::scan_dist_artefacts(dist.path()).unwrap();
+        for (file, brand) in [
+            ("CurveBook.app/Contents/Info.plist", "artcraft"),
+            ("CurveBook.app/Contents/Info.plist", "vectorcraft"),
+            ("app.desktop", "storytold"),
+            ("share/mime/packages/cb.xml", "artcraft"),
+            ("web/index.html", "getartcraft"),
+            ("web/index.html", "vectorcraft"),
+            ("web/icon.svg", "artcraft"),
+            ("web/icon.svg", "storytold"),
+        ] {
+            assert!(dist_hits.iter().any(|h| h.path == file && h.brand == brand), "missing ({file}, {brand}) in {dist_hits:?}");
+        }
+
+        // AUD-12-12: preamble-prefixed and corrupt .zip/.xlsx fail closed or scan entries.
+        let mut zw = crate::zip_read::TestZipWriter::new();
+        zw.add_file("xl/info.txt", b"GraphPad".to_vec()).unwrap();
+        let mut raw_zip = zw.finish().unwrap();
+        let cd_pos = raw_zip.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let eocd_pos = raw_zip.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        raw_zip[cd_pos + 42..cd_pos + 46].copy_from_slice(&1u32.to_le_bytes());
+        raw_zip[eocd_pos + 16..eocd_pos + 20].copy_from_slice(&((cd_pos + 1) as u32).to_le_bytes());
+        let mut preamble_zip = vec![b'X'];
+        preamble_zip.extend_from_slice(&raw_zip);
+        let mut pz_hits = Vec::new();
+        super::scan_dist_bytes("book.xlsx", &preamble_zip, 0, &mut super::DistScanStats::default(), &mut pz_hits).unwrap();
+        assert!(pz_hits.iter().any(|h| h.brand == "graphpad"), "{pz_hits:?}");
+        assert!(super::scan_dist_bytes("corrupt.zip", b"not-a-zip-at-all", 0, &mut super::DistScanStats::default(), &mut Vec::new()).is_err());
+
+        // AUD-12-29: <style>...</style> before <script>...</script> does not hide <title>/unquoted attrs.
+        let html = "<html><head><style>body{}</style><title>LumenCraft</title><meta name=author content=LumenCraft></head><body><img alt=GraphPad><script>/* ok */</script></body></html>";
+        let html_hits = check_html_metadata("page.html", html);
+        assert!(html_hits.iter().any(|h| h.brand == "lumencraft"), "{html_hits:?}");
+        assert!(html_hits.iter().any(|h| h.brand == "graphpad"), "{html_hits:?}");
+
+        // HTML `<img src="data:image/png;base64,...">` inspects decoded PNG metadata and fails closed on corrupt URIs
+        // without false-matching random 3-letter base64 runs inside clean compressed PNG bytes.
+        let clean_png_b64 = curvebook_platform::base64::encode(&build_test_png_with_chunk(b"tEXt", b"Software\x00CurveBook"));
+        let dirty_png_b64 = curvebook_platform::base64::encode(&build_test_png_with_chunk(b"tEXt", b"Software\x00GraphPad"));
+        assert!(
+            check_html_metadata("clipboard:html", &format!(r#"<img src="data:image/png;base64,{clean_png_b64}" alt="Figure">"#)).is_empty(),
+            "clean PNG data URI must pass check_html_metadata"
+        );
+        let dirty_html_hits = check_html_metadata("clipboard:html", &format!(r#"<img src="data:image/png;base64,{dirty_png_b64}" alt="Figure">"#));
+        assert!(dirty_html_hits.iter().any(|h| h.brand == "graphpad"), "dirty PNG data URI must be caught: {dirty_html_hits:?}");
+        let corrupt_html_hits = check_html_metadata("clipboard:html", r#"<img src="data:image/png;base64,!!!not-base64!!!">"#);
+        assert!(!corrupt_html_hits.is_empty(), "corrupt PNG data URI in HTML must fail closed");
+
+        // AUD-12-30: LICENSE-MIT / .tsv / .csv / .pzfx scanned; PDF #XX & XMP + pre-rename; corrupt PNG zTXt fails closed.
+        assert!(scan("LICENSE-MIT", "GraphPad Prism\n").iter().any(|h| h.brand == "graphpad"));
+        assert!(scan("data/sample.tsv", "col\tOriginPro\n").iter().any(|h| h.brand == "originpro"));
+        assert!(scan("data/sample.pzfx", "<tag>Minitab</tag>\n").iter().any(|h| h.brand == "minitab"));
+        let pdf = b"%PDF-1.4\n<< /Cre#61tor (LumenCraft) >>\n<< /Type /Metadata /Subtype /XML >>\nstream\n<x:xmpmeta><xmp:CreatorTool>GraphPad</xmp:CreatorTool></x:xmpmeta>\nendstream\n";
+        let pdf_hits = check_pdf_metadata("doc.pdf", pdf);
+        assert!(pdf_hits.iter().any(|h| h.brand == "lumencraft") && pdf_hits.iter().any(|h| h.brand == "graphpad"), "{pdf_hits:?}");
+        assert!(check_manifest_metadata("manifest.json", r#"{"app":"LumenCraft"}"#).iter().any(|h| h.brand == "lumencraft"));
+        assert!(super::check_png_metadata_checked("fake.png", b"GraphPad plain text").is_err());
+        assert!(super::check_png_metadata_checked("bad_ztxt.png", &build_test_png_with_chunk(b"zTXt", b"k\x00\x00\x78\x9cBAD")).is_err());
+        assert!(super::check_gif_metadata_checked("fake.gif", b"GraphPad plain text").is_err());
+
+        // AUD-12-48: packaged README ArtCraft disclaimer parity & comment-triggered negative guard blocked.
+        let mut readme_hits = Vec::new();
+        super::scan_dist_bytes(
+            "curvebook-0.1.0-linux-x86_64/README.md",
+            b"Not affiliated with ArtCraft. <!-- brand-ok -->\n",
+            0,
+            &mut super::DistScanStats::default(),
+            &mut readme_hits,
+        )
+        .unwrap();
+        assert!(readme_hits.is_empty(), "{readme_hits:?}");
+        let stealth = scan("crates/engine/tests/stealth.rs", "const LEAK: &str = \"GraphPad Prism\"; // for forbidden in [\n");
+        assert!(stealth.iter().any(|h| h.brand == "graphpad"), "{stealth:?}");
+        let valid_guard = scan("crates/engine/tests/ok.rs", "for forbidden in [\"GraphPad\", \"Prism\"] { let _ = forbidden; }\n");
+        assert!(valid_guard.is_empty(), "{valid_guard:?}");
+    }
+
+    #[test]
     fn sec22_escapes_svg_comments_dist_and_macos_stapled_ticket_guards() {
         let dir = TestDir::new("brands-sec22");
         dir.write("crates/core/src/esc.rs", "pub fn a() -> &'static str { \"\\x47raph\\u{0050}ad\" }\npub fn b() -> &'static str { \"\\x61rtcraft\" }\npub fn c() -> &'static str { \"\\x76ectorcraft\" }\n");
@@ -3946,5 +5288,271 @@ serde = "1"
         zip.add_file("CurveBook.app/Contents/CodeResources", valid_ticket.to_vec()).unwrap();
         zip_dir.write_bytes("project.curvebook", &zip.finish().unwrap());
         assert!(super::scan_dist_artefacts(zip_dir.path()).is_err());
+    }
+
+    #[test]
+    fn aud_12_30_locale_catalog_tsv_allows_import_prism_key_and_italian_statistica_only() {
+        let mut locale_ok = Vec::new();
+        scan_file(
+            "crates/ui-egui/locales/catalog.tsv",
+            "# Header comment\nkey\ten\tde\tit\ncmd.table.importPrism\tImport External Archive\tExternes Archiv\tImporta archivio\ncmd.ui.copy\tCopy Stats\tStatistik\tCopia report metodi e statistica\n",
+            &mut locale_ok,
+        );
+        assert!(locale_ok.is_empty(), "valid catalog.tsv key and Italian noun must pass: {locale_ok:?}");
+
+        let mut locale_bad = Vec::new();
+        scan_file(
+            "crates/ui-egui/locales/catalog.tsv",
+            "key\ten\tde\tit\ncmd.bad\tImport Prism\tStatistica kopieren\tCopia Statistica\n",
+            &mut locale_bad,
+        );
+        assert!(locale_bad.iter().any(|h| h.brand == "prism"), "{locale_bad:?}");
+        assert!(locale_bad.iter().any(|h| h.brand == "statistica"), "{locale_bad:?}");
+    }
+
+    #[test]
+    fn aud_12_01_09_30_svg_entity_data_uri_ico_pdf_xmp_raster_ifd_avif_and_polyglot() {
+        use std::io::Write as _;
+
+        // 1. AUD-12-01: Entity-encoded `data&#58;image/svg+xml;base64,...` caught in BOTH scan_svg_checked and check_svg_metadata.
+        // Base64 of `<svg><title>OriginPro</title></svg>`.
+        let svg_entity_uri = "<svg xmlns=\"http://www.w3.org/2000/svg\"><image href=\"data&#58;image/svg+xml;base64,PHN2Zz48dGl0bGU+T3JpZ2luUHJvPC90aXRsZT48L3N2Zz4=\"/></svg>";
+        let mut svg_hits = Vec::new();
+        super::scan_svg_checked("entity.svg", svg_entity_uri, 0, &mut svg_hits).unwrap();
+        assert!(svg_hits.iter().any(|h| h.brand == "originpro"), "scan_svg_checked missed entity data URI: {svg_hits:?}");
+        let meta_hits = check_svg_metadata("entity.svg", svg_entity_uri);
+        assert!(meta_hits.iter().any(|h| h.brand == "originpro"), "check_svg_metadata missed entity data URI: {meta_hits:?}");
+
+        // AUD-12-01: Corrupt ICO inside data:image/x-icon and data:image/vnd.microsoft.icon fails closed.
+        for mime in ["x-icon", "vnd.microsoft.icon"] {
+            let bad_ico_svg = format!("<svg><image href=\"data:image/{mime};base64,Tk9UX0FOX0lDTw==\"/></svg>");
+            let mut h = Vec::new();
+            assert!(super::scan_svg_checked("bad_ico.svg", &bad_ico_svg, 0, &mut h).is_err(), "{mime} must fail closed");
+        }
+        // Corrupt embedded PNG inside ICO container fails closed.
+        let mut ico_bad_png = vec![0x00, 0x00, 0x01, 0x00, 0x01, 0x00]; // ICONDIR count=1
+        let bad_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x20tEXttruncated";
+        ico_bad_png.extend_from_slice(&[16, 16, 0, 0, 1, 0, 32, 0]);
+        ico_bad_png.extend_from_slice(&(bad_png.len() as u32).to_le_bytes());
+        ico_bad_png.extend_from_slice(&22u32.to_le_bytes());
+        ico_bad_png.extend_from_slice(bad_png);
+        assert!(super::check_icon_container_metadata_checked("bad.ico", &ico_bad_png).is_err());
+
+        // 2. AUD-12-09: 3-byte `jmp` caught in raster metadata + JPEG truncated length fails closed.
+        let mut jpeg_jmp = vec![0xFF, 0xD8, 0xFF, 0xFE, 0x00, 0x05];
+        jpeg_jmp.extend_from_slice(b"JMP");
+        jpeg_jmp.extend_from_slice(&[0xFF, 0xD9]);
+        let jmp_hits = super::check_raster_metadata_checked("jmp.jpg", "jpg", &jpeg_jmp).unwrap();
+        assert!(jmp_hits.iter().any(|h| h.brand == "jmp"), "3-byte jmp missed: {jmp_hits:?}");
+        assert!(super::check_raster_metadata_checked("trunc.jpg", "jpg", &[0xFF, 0xD8, 0xFF, 0xE1, 0x00]).is_err());
+
+        // WebP EXIF chunk hit.
+        let mut webp = Vec::from(&b"RIFF\x00\x00\x00\x00WEBPEXIF"[..]);
+        let exif_txt = b"Made with Minitab";
+        webp.extend_from_slice(&(exif_txt.len() as u32).to_le_bytes());
+        webp.extend_from_slice(exif_txt);
+        webp.push(0); // odd padding byte
+        let webp_hits = super::check_raster_metadata_checked("pic.webp", "webp", &webp).unwrap();
+        assert!(webp_hits.iter().any(|h| h.brand == "minitab"), "WebP EXIF missed: {webp_hits:?}");
+
+        // TIFF descending into ExifIFD (tag 34665 / 0x8769) carrying UserComment (tag 37510).
+        let mut tiff = Vec::from(&b"II\x2A\x00"[..]);
+        tiff.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset = 8
+        tiff.extend_from_slice(&1u16.to_le_bytes()); // IFD0 count = 1
+        tiff.extend_from_slice(&34665u16.to_le_bytes()); // ExifIFD tag
+        tiff.extend_from_slice(&4u16.to_le_bytes()); // LONG
+        tiff.extend_from_slice(&1u32.to_le_bytes()); // count = 1
+        tiff.extend_from_slice(&26u32.to_le_bytes()); // ExifIFD offset = 26
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+        assert_eq!(tiff.len(), 26);
+        let comment = b"ASCII\0\0\0SigmaPlot";
+        tiff.extend_from_slice(&1u16.to_le_bytes()); // ExifIFD count = 1
+        tiff.extend_from_slice(&37510u16.to_le_bytes()); // UserComment
+        tiff.extend_from_slice(&7u16.to_le_bytes()); // UNDEFINED
+        tiff.extend_from_slice(&(comment.len() as u32).to_le_bytes());
+        tiff.extend_from_slice(&44u32.to_le_bytes()); // comment value offset = 44
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+        assert_eq!(tiff.len(), 44);
+        tiff.extend_from_slice(comment);
+        let tiff_hits = super::check_raster_metadata_checked("pic.tif", "tif", &tiff).unwrap();
+        assert!(tiff_hits.iter().any(|h| h.brand == "sigmaplot"), "TIFF ExifIFD missed: {tiff_hits:?}");
+
+        // AVIF `meta` -> `iinf` (`mime` XMP) + `iloc` pointing into `mdat`, plus fail-closed truncated box.
+        fn isobmff_box(fourcc: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut b = ((8 + body.len()) as u32).to_be_bytes().to_vec();
+            b.extend_from_slice(fourcc);
+            b.extend_from_slice(body);
+            b
+        }
+        let ftyp = isobmff_box(b"ftyp", b"avif\x00\x00\x00\x00mif1avif");
+        let infe_body = [
+            2u8, 0, 0, 0, 0, 2, 0, 0, b'm', b'i', b'm', b'e', 0, b'a', b'p', b'p', b'l', b'i', b'c', b'a', b't', b'i', b'o', b'n', b'/', b'r', b'd',
+            b'f', b'+', b'x', b'm', b'l', 0,
+        ];
+        let infe = isobmff_box(b"infe", &infe_body);
+        let mut iinf_body = vec![0u8, 0, 0, 0, 0, 1];
+        iinf_body.extend_from_slice(&infe);
+        let iinf = isobmff_box(b"iinf", &iinf_body);
+        let xmp_payload = b"<x:xmpmeta>OriginPro</x:xmpmeta>";
+        // Build placeholder iloc (version 0, offset_size=4, length_size=4, base_offset_size=0, 1 item) to measure meta size.
+        let build_iloc = |mdat_data_off: u32| -> Vec<u8> {
+            let mut b = vec![0u8, 0, 0, 0, 0x44, 0x00, 0, 1, 0, 2, 0, 0, 0, 1];
+            b.extend_from_slice(&mdat_data_off.to_be_bytes());
+            b.extend_from_slice(&(xmp_payload.len() as u32).to_be_bytes());
+            isobmff_box(b"iloc", &b)
+        };
+        let meta_size = 8 + 4 + iinf.len() + build_iloc(0).len();
+        let mdat_data_off = (ftyp.len() + meta_size + 8) as u32;
+        let mut meta_body = vec![0u8, 0, 0, 0];
+        meta_body.extend_from_slice(&iinf);
+        meta_body.extend_from_slice(&build_iloc(mdat_data_off));
+        let meta = isobmff_box(b"meta", &meta_body);
+        let mdat = isobmff_box(b"mdat", xmp_payload);
+        let mut avif = Vec::new();
+        avif.extend_from_slice(&ftyp);
+        avif.extend_from_slice(&meta);
+        avif.extend_from_slice(&mdat);
+        let avif_hits = super::check_raster_metadata_checked("pic.avif", "avif", &avif).unwrap();
+        assert!(avif_hits.iter().any(|h| h.brand == "originpro"), "AVIF iinf/iloc->mdat XMP missed: {avif_hits:?}");
+        let mut trunc_avif = ftyp.clone();
+        trunc_avif.extend_from_slice(&[0, 0, 0, 99, b'm', b'e', b't', b'a', 0, 0]);
+        assert!(super::check_raster_metadata_checked("trunc.avif", "avif", &trunc_avif).is_err());
+
+        // PNG + ZIP polyglot: BOTH PNG metadata and appended ZIP entries are scanned.
+        let mut polyglot = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let text_chunk = b"Comment\0Systat";
+        polyglot.extend_from_slice(&(text_chunk.len() as u32).to_be_bytes());
+        polyglot.extend_from_slice(b"tEXt");
+        polyglot.extend_from_slice(text_chunk);
+        polyglot.extend_from_slice(&[0, 0, 0, 0]);
+        polyglot.extend_from_slice(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0, 0, 0, 0]);
+        let mut zw = crate::zip_read::TestZipWriter::new();
+        zw.add_file("hidden.txt", b"OriginPro".to_vec()).unwrap();
+        polyglot.extend_from_slice(&zw.finish().unwrap());
+        let poly_dir = TestDir::new("brands-polyglot");
+        poly_dir.write_bytes("assets/poly.png", &polyglot);
+        let dist_poly_hits = super::scan_dist_artefacts(poly_dir.path()).unwrap();
+        assert!(dist_poly_hits.iter().any(|h| h.brand == "systat"), "polyglot PNG metadata missed: {dist_poly_hits:?}");
+        assert!(dist_poly_hits.iter().any(|h| h.brand == "originpro"), "polyglot ZIP entry missed: {dist_poly_hits:?}");
+
+        // 3. AUD-12-30: PDF `<x:xmpmeta` (10 bytes), `#XX`-escaped `/FlateDecode` XMP stream, corrupt FlateDecode & missing `%PDF-` fail closed.
+        let bare_xmp_pdf = b"%PDF-1.7\n1 0 obj\n<< /Length 36 >>\nstream\n<x:xmpmeta>Minitab</x:xmpmeta>\nendstream\nendobj\n";
+        let xmp_hits = super::check_pdf_metadata_checked("xmp.pdf", bare_xmp_pdf).unwrap();
+        assert!(xmp_hits.iter().any(|h| h.brand == "minitab"), "10-byte <x:xmpmeta missed: {xmp_hits:?}");
+
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"<x:xmpmeta>SigmaPlot</x:xmpmeta>").unwrap();
+        let flate_xmp = enc.finish().unwrap();
+        let mut hex_pdf = b"%PDF-1.7\n1 0 obj\n<< /Sub#74ype /X#4dL /Fil#74er /Flate#44ecode >>\nstream\n".to_vec();
+        hex_pdf.extend_from_slice(&flate_xmp);
+        hex_pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        let hex_hits = super::check_pdf_metadata_checked("hex.pdf", &hex_pdf).unwrap();
+        assert!(hex_hits.iter().any(|h| h.brand == "sigmaplot"), "#XX FlateDecode XMP missed: {hex_hits:?}");
+
+        let bad_flate_pdf = b"%PDF-1.7\n1 0 obj\n<< /Subtype /XML /Filter /FlateDecode >>\nstream\nNOT_ZLIB\nendstream\nendobj\n";
+        assert!(super::check_pdf_metadata_checked("bad_flate.pdf", bad_flate_pdf).is_err());
+        assert!(super::check_pdf_metadata_checked("no_magic.pdf", b"not a pdf").is_err());
+
+        // MCP inline image/png fails closed on corrupt PNG payload.
+        let bad_mcp = serde_json::json!({"result": {"content": [{"type": "image", "mimeType": "image/png", "data": "Tk9UX1BORw=="}]}});
+        let mcp_hits = super::check_mcp_rpc_response("mcp.json", "tools/call", Some("export"), &bad_mcp);
+        assert!(!mcp_hits.is_empty(), "corrupt MCP inline PNG must fail closed");
+    }
+
+    #[test]
+    fn round3_216_svg_data_uri_pdf_dict_scope_and_avif_iloc_hardening() {
+        use std::io::Write as _;
+
+        // Item 1 (AUD-12-01): XML-escaped non-base64 SVG data URI, co-located brand in same attr,
+        // and stray apostrophes in XML/CSS comments + `<style>` `url(data:image/...)` in BOTH scan_svg & check_svg_metadata.
+        let xml_escaped_svg = "<svg><image href=\"data:image/svg+xml,&lt;svg&gt;&lt;title&gt;OriginPro&lt;/title&gt;&lt;/svg&gt;\"/></svg>";
+        let mut h1 = Vec::new();
+        super::scan_svg("escaped.svg", xml_escaped_svg, &mut h1);
+        assert!(h1.iter().any(|h| h.brand == "originpro"), "scan_svg missed XML-escaped SVG data URI: {h1:?}");
+        let h1_meta = super::check_svg_metadata("escaped.svg", xml_escaped_svg);
+        assert!(h1_meta.iter().any(|h| h.brand == "originpro"), "check_svg_metadata missed XML-escaped SVG data URI: {h1_meta:?}");
+
+        let colocated_svg = "<svg><rect style=\"background: url(data:image/svg+xml;base64,PHN2Zy8+); font-family: 'OriginPro'\"/></svg>";
+        let mut h2 = Vec::new();
+        super::scan_svg("coloc.svg", colocated_svg, &mut h2);
+        assert!(h2.iter().any(|h| h.brand == "originpro"), "scan_svg dropped co-located brand: {h2:?}");
+        let h2_meta = super::check_svg_metadata("coloc.svg", colocated_svg);
+        assert!(h2_meta.iter().any(|h| h.brand == "originpro"), "check_svg_metadata dropped co-located brand: {h2_meta:?}");
+
+        let apostrophe_style_svg = "<svg><!-- it's --><text>it's</text><style>/* it's */ .a { background: url('data&#58;image/svg+xml;base64,PHN2Zz48dGl0bGU+T3JpZ2luUHJvPC90aXRsZT48L3N2Zz4='); }</style></svg>";
+        let mut h3 = Vec::new();
+        super::scan_svg("style.svg", apostrophe_style_svg, &mut h3);
+        assert!(h3.iter().any(|h| h.brand == "originpro"), "scan_svg desynced on apostrophe: {h3:?}");
+        let h3_meta = super::check_svg_metadata("style.svg", apostrophe_style_svg);
+        assert!(h3_meta.iter().any(|h| h.brand == "originpro"), "check_svg_metadata missed <style> data URI: {h3_meta:?}");
+
+        // Item 2 (AUD-12-30): valid PDF/A with short /FlateDecode stream <512 B before uncompressed XMP must pass;
+        // >512 B padded /FlateDecode XMP stream must still be inflated and caught.
+        let mut enc_clean = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc_clean.write_all(b"BT /F1 12 Tf (Hello) Tj ET").unwrap();
+        let clean_flate = enc_clean.finish().unwrap();
+        let mut pdfa = b"%PDF-1.7\n1 0 obj\n<< /Filter /FlateDecode /Length 32 >>\nstream\n".to_vec();
+        pdfa.extend_from_slice(&clean_flate);
+        pdfa.extend_from_slice(b"\nendstream\nendobj\n2 0 obj\n<< /Type /Metadata /Subtype /XML /Length 42 >>\nstream\n<x:xmpmeta>Clean CurveBook</x:xmpmeta>\nendstream\nendobj\n");
+        let pdfa_hits = super::check_pdf_metadata_checked("valid-pdfa.pdf", &pdfa).expect("valid PDF/A must not falsely fail /FlateDecode");
+        assert!(pdfa_hits.is_empty(), "valid PDF/A had unexpected hits: {pdfa_hits:?}");
+
+        let mut enc_evil = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc_evil.write_all(b"<x:xmpmeta>Minitab</x:xmpmeta>").unwrap();
+        let evil_flate = enc_evil.finish().unwrap();
+        let pad = " ".repeat(700);
+        let mut padded_pdf = format!("%PDF-1.7\n1 0 obj\n<< /Subtype /XML /Filter /FlateDecode /Pad ({pad}) >>\n{pad}stream\n").into_bytes();
+        padded_pdf.extend_from_slice(&evil_flate);
+        padded_pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        let padded_hits = super::check_pdf_metadata_checked("padded.pdf", &padded_pdf).unwrap();
+        assert!(padded_hits.iter().any(|h| h.brand == "minitab"), ">512 B padded FlateDecode XMP missed: {padded_hits:?}");
+
+        // Item 3 (AUD-12-09): AVIF iloc length_size == 0 (ext_len == 0 -> rest of backing), item_count > 4096 & construction_method == 2 fail closed.
+        fn isobmff_box(fourcc: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut b = ((8 + body.len()) as u32).to_be_bytes().to_vec();
+            b.extend_from_slice(fourcc);
+            b.extend_from_slice(body);
+            b
+        }
+        let ftyp = isobmff_box(b"ftyp", b"avif\x00\x00\x00\x00mif1avif");
+        let infe = isobmff_box(b"infe", b"\x02\x00\x00\x00\x00\x02\x00\x00mime\x00application/rdf+xml\x00");
+        let mut iinf_body = vec![0u8, 0, 0, 0, 0, 1];
+        iinf_body.extend_from_slice(&infe);
+        let iinf = isobmff_box(b"iinf", &iinf_body);
+        let xmp = b"<x:xmpmeta>SigmaPlot</x:xmpmeta>";
+        // length_size = 0 (byte4 = 0x40), offset_size = 4, version = 0, item_id = 2, 1 extent -> reads to EOF.
+        let build_len0_iloc = |off: u32| -> Vec<u8> {
+            let mut b = vec![0u8, 0, 0, 0, 0x40, 0x00, 0, 1, 0, 2, 0, 0, 0, 1];
+            b.extend_from_slice(&off.to_be_bytes());
+            isobmff_box(b"iloc", &b)
+        };
+        let meta_sz = 8 + 4 + iinf.len() + build_len0_iloc(0).len();
+        let mdat_off = (ftyp.len() + meta_sz + 8) as u32;
+        let mut meta_b = vec![0u8, 0, 0, 0];
+        meta_b.extend_from_slice(&iinf);
+        meta_b.extend_from_slice(&build_len0_iloc(mdat_off));
+        let mut avif_len0 = ftyp.clone();
+        avif_len0.extend_from_slice(&isobmff_box(b"meta", &meta_b));
+        avif_len0.extend_from_slice(&isobmff_box(b"mdat", xmp));
+        let len0_hits = super::check_raster_metadata_checked("len0.avif", "avif", &avif_len0).unwrap();
+        assert!(len0_hits.iter().any(|h| h.brand == "sigmaplot"), "AVIF iloc length_size=0 missed: {len0_hits:?}");
+
+        // item_count = 4097 -> fail closed.
+        let iloc_many = isobmff_box(b"iloc", &[0, 0, 0, 0, 0x44, 0x00, 0x10, 0x01]);
+        let mut meta_many = vec![0u8, 0, 0, 0];
+        meta_many.extend_from_slice(&iinf);
+        meta_many.extend_from_slice(&iloc_many);
+        let mut avif_many = ftyp.clone();
+        avif_many.extend_from_slice(&isobmff_box(b"meta", &meta_many));
+        assert!(super::check_raster_metadata_checked("many.avif", "avif", &avif_many).unwrap_err().contains("4096"));
+
+        // construction_method = 2 on wanted metadata item -> fail closed.
+        let iloc_cm2 = isobmff_box(b"iloc", &[1, 0, 0, 0, 0x44, 0x00, 0, 1, 0, 2, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 4]);
+        let mut meta_cm2 = vec![0u8, 0, 0, 0];
+        meta_cm2.extend_from_slice(&iinf);
+        meta_cm2.extend_from_slice(&iloc_cm2);
+        let mut avif_cm2 = ftyp;
+        avif_cm2.extend_from_slice(&isobmff_box(b"meta", &meta_cm2));
+        assert!(super::check_raster_metadata_checked("cm2.avif", "avif", &avif_cm2).unwrap_err().contains("construction_method"));
     }
 }

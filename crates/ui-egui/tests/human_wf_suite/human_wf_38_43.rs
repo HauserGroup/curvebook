@@ -293,7 +293,9 @@ fn wf40_human_multiple_linear_regression_type_iii_and_vif() -> TestRes {
     run.select_sheet(&rs_id)?;
     run.open_cmd_t()?;
     run.click("edit.tab.data")?;
-    run.click("edit.glm.pred.2")?;
+    // AUD-09-11: Analyze honors `is_response` (last numeric column, col 2) by default;
+    // bind col 0 (`Response`) as Y so predictors become `[1, 3]`.
+    run.click("edit.glm.resp.0")?;
     run.click("edit.tab.experimental_design")?;
     run.click("edit.glm.linear")?;
     run.commit_modal_ok()?;
@@ -382,6 +384,10 @@ fn wf41_human_multiple_logistic_classification_and_roc() -> TestRes {
     let rs_id = run.run_analyze_entry("Multiple Regression", "analyze.entry.stats.glm")?;
     run.select_sheet(&rs_id)?;
     run.open_cmd_t()?;
+    run.click("edit.tab.data")?;
+    // AUD-09-11: bind binary outcome col 0 (`Event`) as Y and re-include col 2 (`BaselineMarker`) as X.
+    run.click("edit.glm.resp.0")?;
+    run.click("edit.glm.pred.2")?;
     run.click("edit.tab.experimental_design")?;
     run.click("edit.glm.logistic")?;
     run.commit_modal_ok()?;
@@ -457,6 +463,10 @@ fn wf42_human_poisson_count_glm_dispersion_and_vif() -> TestRes {
     let rs_id = run.run_analyze_entry("Multiple Regression", "analyze.entry.stats.glm")?;
     run.select_sheet(&rs_id)?;
     run.open_cmd_t()?;
+    run.click("edit.tab.data")?;
+    // AUD-09-11: bind integer count col 0 (`Counts`) as Y and re-include col 2 (`DoseLevel`) as X.
+    run.click("edit.glm.resp.0")?;
+    run.click("edit.glm.pred.2")?;
     run.click("edit.tab.experimental_design")?;
     run.click("edit.glm.poisson")?;
     run.commit_modal_ok()?;

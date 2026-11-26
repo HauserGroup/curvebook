@@ -322,14 +322,16 @@ fn metric_priority(key: &str) -> Option<(u8, &'static str)> {
     }
 }
 
-fn collect_ranked_metrics(res: &ResultSheet, data_set_index: usize, max_metrics: usize) -> Vec<FitSummaryMetric> {
+fn collect_ranked_metrics(doc: &ProjectDocument, res: &ResultSheet, data_set_index: usize, max_metrics: usize) -> Vec<FitSummaryMetric> {
     let limit = max_metrics.clamp(1, 6);
     let mut ranked: Vec<(u8, usize, &'static str, String)> = Vec::new();
     let mut seen_labels: Vec<&'static str> = Vec::new();
 
     // Pass 1: dataset-specific scalars.
     for (idx, scalar) in res.scalars.iter().enumerate() {
-        if scalar.data_set_index != Some(data_set_index) {
+        if scalar.data_set_index != Some(data_set_index)
+            || crate::equation_box::is_unstable_masked_scalar(res, &scalar.key, Some(data_set_index), Some(doc))
+        {
             continue;
         }
         if let Some((prio, label)) = metric_priority(&scalar.key)
@@ -347,7 +349,7 @@ fn collect_ranked_metrics(res: &ResultSheet, data_set_index: usize, max_metrics:
 
     // Pass 2: shared (`data_set_index: None`) fallback for metrics not already populated.
     for (idx, scalar) in res.scalars.iter().enumerate() {
-        if scalar.data_set_index.is_some() {
+        if scalar.data_set_index.is_some() || crate::equation_box::is_unstable_masked_scalar(res, &scalar.key, Some(data_set_index), Some(doc)) {
             continue;
         }
         if let Some((prio, label)) = metric_priority(&scalar.key)
@@ -383,12 +385,13 @@ pub fn extract_fit_summary_entries(graph: &GraphSheet, doc: &ProjectDocument, ma
         if !matches!(res.status, ResultStatus::UpToDate) {
             continue;
         }
-        let Some(curve) = res.fitted_curves.iter().find(|fc| fc.data_set_index == series.data_set_index) else {
+        let Some(curve) =
+            res.fitted_curves.iter().find(|fc| fc.data_set_index == series.data_set_index && !fc.equation_id.eq_ignore_ascii_case("ROC"))
+        else {
             continue;
         };
 
-        let fallback_label = doc
-            .data_sheet(&series.source_sheet_id)
+        let fallback_label = crate::resolve_data_sheet_or_upstream(doc, &series.source_sheet_id)
             .and_then(|ds| match &ds.archetype {
                 TableArchetype::Xy(xy) => xy.data_sets.get(series.data_set_index).map(|d| d.title.clone()),
                 _ => None,
@@ -396,7 +399,7 @@ pub fn extract_fit_summary_entries(graph: &GraphSheet, doc: &ProjectDocument, ma
             .unwrap_or_else(|| format!("Series {}", idx + 1));
         let series_label = series.legend_label.clone().unwrap_or(fallback_label);
         let equation_label = humanize_equation_id(&curve.equation_id);
-        let metrics = collect_ranked_metrics(res, series.data_set_index, max_metrics_per_series);
+        let metrics = collect_ranked_metrics(doc, res, series.data_set_index, max_metrics_per_series);
         out.push(FitSummaryEntry {
             series_label,
             equation_label,

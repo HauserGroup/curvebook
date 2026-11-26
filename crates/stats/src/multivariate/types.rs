@@ -159,9 +159,9 @@ pub struct RubinPooledEstimate {
     pub p_value: f64,
     /// Two-sided `t(df)` confidence interval `(lower, upper)` around `estimate` at configured `ConfidenceLevel` (`(f64::NAN, f64::NAN)` when `T <= 0`).
     pub ci: (f64, f64),
-    /// Relative increase in variance due to nonresponse $r = (1 + 1/m) B / \bar{U}$ (`0.0` when $\bar{U} = 0$).
+    /// Relative increase in variance due to nonresponse $r = (1 + 1/m) B / \bar{U}$ (`f64::INFINITY` when $\bar{U} = 0$ and $B > 0$; `0.0` when $T = 0$).
     pub riv: f64,
-    /// Proportion of total variance attributable to missingness $\lambda = (r + 2 / (\mathrm{df}_{\text{old}} + 3)) / (r + 1)$ in `[0, 1]`.
+    /// Proportion of total variance attributable to missingness $\lambda = (1 + 1/m) B / T = r / (1 + r)$ in `[0, 1]` (Rubin 1987).
     pub lambda: f64,
     /// Fraction of missing information `FMI = (r + 2 / (df + 3)) / (1 + r)` in `[0, 1]` (Rubin 1987).
     pub fmi: f64,

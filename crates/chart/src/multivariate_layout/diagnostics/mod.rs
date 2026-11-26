@@ -245,11 +245,7 @@ fn collect_ds_active_values_with_sources(ds: &DataSheet, col_idx: usize) -> (Vec
 }
 
 fn resolve_source_data_sheet<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Option<&'a DataSheet> {
-    doc.data_sheet(&graph.spec.primary_source_sheet_id).or_else(|| {
-        doc.result_sheet(&graph.spec.primary_source_sheet_id)
-            .filter(|r| !matches!(r.status, ResultStatus::Failed { .. }))
-            .and_then(|r| doc.data_sheet(&r.analysis.source_sheet_id))
-    })
+    crate::resolve_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id)
 }
 
 fn result_cell_num(cell: &ResultCell) -> Option<f64> {
@@ -308,8 +304,9 @@ fn extract_residuals_tab_points(res: &ResultSheet, tab: &ResultTab, graph: &Grap
     let (ds_col, x_col, y_col, obs_col) = extract_residuals_cols(&tab.column_headers);
     let target_label = selected_dataset_label_in_tab(tab, ds_col, graph, doc);
     let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
-    let fallback_sheet_id =
-        doc.data_sheet(&res.analysis.source_sheet_id).map(|d| d.id.clone()).unwrap_or_else(|| graph.spec.primary_source_sheet_id.clone());
+    let fallback_sheet_id = crate::resolve_data_sheet_or_upstream(doc, &res.analysis.source_sheet_id)
+        .map(|d| d.id.clone())
+        .unwrap_or_else(|| graph.spec.primary_source_sheet_id.clone());
 
     let pairs: Vec<(usize, f64, f64)> = tab
         .rows
@@ -351,7 +348,7 @@ fn extract_residuals_tab_points(res: &ResultSheet, tab: &ResultTab, graph: &Grap
         AnalysisKind::GeneralizedLinearModel(glm) => glm.response_column,
         _ => ds_idx,
     };
-    let ds_opt = doc.data_sheet(&res.analysis.source_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
+    let ds_opt = crate::resolve_data_sheet_or_upstream(doc, &res.analysis.source_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
     let (resolved_sources, series_label) = if let Some(ds) = ds_opt {
         let (all_rep_sources, lbl) = collect_ds_active_point_sources(ds, source_col, true);
         if all_rep_sources.len() == pairs.len() {

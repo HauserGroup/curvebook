@@ -4,8 +4,6 @@
 //! - Bates, D. M. & Watts, D. G. (1988). *Nonlinear Regression Analysis and Its Applications*. Wiley.
 //! - Seber, G. A. F. & Wild, C. J. (1989). *Nonlinear Regression*. Wiley.
 
-use curvebook_math::linalg::DenseMatrix;
-
 use crate::diagnostics::ProfileStep;
 use crate::error::FitStatus;
 use crate::library::ParametricModel;
@@ -13,7 +11,7 @@ use crate::solver::inference::obs_y_ss;
 use crate::solver::irls::{assign_poisson_irls_weights, poisson_deviance};
 use crate::solver::layout::{ObsRecord, ParameterLayout, project_theta};
 use crate::solver::lm::{
-    LmDampWorkspace, LmStepContext, TrStepOutcome, compute_jacobian, eval_residuals, eval_residuals_with_domain, mat_get, mat_set, project_tr_trial,
+    LmDampWorkspace, LmStepContext, TrStepOutcome, compute_jacobian_subset, eval_residuals, eval_residuals_with_domain, project_tr_trial,
     quadratic_pred_num, scaled_l2_norm, solve_trust_region_subproblem, stalled_lm_status, update_lm_diag_and_projected_grad, update_tr_radius_more,
 };
 
@@ -59,13 +57,8 @@ pub(in crate::solver) fn run_reduced_lm_with_domain(
         for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
             work[orig] = v;
         }
-        let j_full = compute_jacobian(model, layout, obs, work, &y_hat, full_bounds)?;
-        let mut j_sub = DenseMatrix::zeros(obs.len(), sub_k).ok()?;
-        for (sub_j, &orig_j) in map_indices.iter().enumerate() {
-            for i in 0..obs.len() {
-                mat_set(&mut j_sub, i, sub_j, mat_get(&j_full, i, orig_j));
-            }
-        }
+        // Compute only the active nuisance columns without perturbing held-fixed parameters (`AUD-03-10`).
+        let j_sub = compute_jacobian_subset(model, layout, obs, work, &y_hat, full_bounds, map_indices)?;
         if ss_curr == 0.0 {
             return Some(ReducedLmState { y_hat, ss_curr, converged: true });
         }
@@ -181,11 +174,13 @@ pub(in crate::solver) fn check_profile_fixed_param(
     Some(full_bounds)
 }
 
-/// Optimize the remaining `K - 1` nuisance parameters with `theta[fixed_idx] = fixed_val` held constant.
+/// Optimize the remaining free nuisance parameters with `theta[fixed_idx] = fixed_val` (and any
+/// `extra_fixed` unstable indices from greedy Hessian reduction) held constant.
 ///
 /// Returns the profile sum of squares `S~(theta_k)` of Bates & Watts (1988) along with
 /// reduced-LM convergence status via [`run_reduced_lm_with_domain`] (Moré 1978 trust-region
 /// gain-ratio step acceptance and `ftol`/`xtol`/`gtol` stopping).
+#[allow(clippy::too_many_arguments)]
 pub(in crate::solver) fn solve_profile_subproblem(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
@@ -193,24 +188,26 @@ pub(in crate::solver) fn solve_profile_subproblem(
     seed: &[f64],
     fixed_idx: usize,
     fixed_val: f64,
+    extra_fixed: &[usize],
     ss_within: f64,
 ) -> Option<ProfileStep> {
     let full_bounds = check_profile_fixed_param(layout, fixed_idx, fixed_val)?;
     let k = layout.k_free();
     let mut work = seed.to_vec();
     work[fixed_idx] = fixed_val;
-    if k == 1 {
+    let map_indices: Vec<usize> = (0..k).filter(|&i| i != fixed_idx && !extra_fixed.contains(&i)).collect();
+    if map_indices.is_empty() {
         let (_, _, ss) = eval_residuals(model, layout, obs, &work)?;
         return Some(ProfileStep { objective: ss + ss_within, theta: work, converged: true });
     }
 
-    let map_indices: Vec<usize> = (0..k).filter(|&i| i != fixed_idx).collect();
     let state = run_reduced_lm_with_domain(model, layout, obs, &mut work, &map_indices, &full_bounds, 200, false)?;
     Some(ProfileStep { objective: state.ss_curr + ss_within, theta: work, converged: state.converged })
 }
 
-/// Optimize the remaining `K - 1` nuisance parameters under Poisson deviance with `theta[fixed_idx] = fixed_val`
-/// held constant via reduced IRLS + deviance monotonicity guard.
+/// Optimize the remaining free nuisance parameters under Poisson deviance with `theta[fixed_idx] = fixed_val`
+/// (and any `extra_fixed` unstable indices) held constant via reduced IRLS + deviance monotonicity guard.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::solver) fn solve_profile_subproblem_poisson(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
@@ -218,18 +215,19 @@ pub(in crate::solver) fn solve_profile_subproblem_poisson(
     seed: &[f64],
     fixed_idx: usize,
     fixed_val: f64,
+    extra_fixed: &[usize],
 ) -> Option<ProfileStep> {
     let full_bounds = check_profile_fixed_param(layout, fixed_idx, fixed_val)?;
     let k = layout.k_free();
     let mut work = seed.to_vec();
     work[fixed_idx] = fixed_val;
     let (_, init_y_hat, _) = eval_residuals_with_domain(model, layout, obs, &work, true)?;
-    if k == 1 {
+    let map_indices: Vec<usize> = (0..k).filter(|&i| i != fixed_idx && !extra_fixed.contains(&i)).collect();
+    if map_indices.is_empty() {
         let dev = poisson_deviance(obs, &init_y_hat)?;
         return Some(ProfileStep { objective: dev, theta: work, converged: true });
     }
 
-    let map_indices: Vec<usize> = (0..k).filter(|&i| i != fixed_idx).collect();
     let mut work_obs = obs.to_vec();
     let mut curr_y_hat = init_y_hat;
     let mut curr_dev = poisson_deviance(&work_obs, &curr_y_hat)?;
@@ -260,7 +258,7 @@ pub(in crate::solver) fn solve_profile_subproblem_poisson(
         // Step-halving line search on IRLS step if linearization briefly overshot deviance.
         let mut improved = false;
         let mut alpha = 0.5_f64;
-        for _ in 0..5 {
+        for _ in 0..8 {
             let mut blended = work.clone();
             for &idx in &map_indices {
                 blended[idx] = work[idx] + alpha * (trial[idx] - work[idx]);
@@ -282,8 +280,18 @@ pub(in crate::solver) fn solve_profile_subproblem_poisson(
             alpha *= 0.5;
         }
         if irls_converged || !improved {
+            // Only declare convergence on unimproved step when the trial step is genuinely stationary
+            // (small parameter change), not on a large unimproved deviance overshoot (`AUD-03-25`).
             if !improved && state.converged {
-                irls_converged = true;
+                let theta_scale = map_indices.iter().map(|&idx| work[idx].abs().max(trial[idx].abs())).fold(0.0_f64, f64::max);
+                let abs_floor = (1e-8 * theta_scale).max(1e-12);
+                let max_step = map_indices
+                    .iter()
+                    .map(|&idx| (trial[idx] - work[idx]).abs() / work[idx].abs().max(trial[idx].abs()).max(abs_floor))
+                    .fold(0.0_f64, f64::max);
+                if max_step < 1e-8 {
+                    irls_converged = true;
+                }
             }
             break;
         }

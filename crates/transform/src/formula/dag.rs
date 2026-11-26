@@ -152,14 +152,14 @@ fn plan_calculated_variables(
     override_col: Option<(usize, Expr)>,
 ) -> Result<(Vec<usize>, Vec<Option<Expr>>), TransformError> {
     let n_cols = table.variables.len();
-    let mut parsed_cols: Vec<(usize, Expr)> = Vec::new();
+    let mut parsed_cols: Vec<usize> = Vec::new();
     let mut is_calc = vec![false; n_cols];
     let mut expr_by_col: Vec<Option<Expr>> = vec![None; n_cols];
 
     if let Some((target_idx, expr)) = override_col {
         is_calc[target_idx] = true;
-        expr_by_col[target_idx] = Some(expr.clone());
-        parsed_cols.push((target_idx, expr));
+        expr_by_col[target_idx] = Some(expr);
+        parsed_cols.push(target_idx);
     }
 
     for (idx, var) in table.variables.iter().enumerate() {
@@ -169,8 +169,8 @@ fn plan_calculated_variables(
         if let VariableSource::Calculated { formula } = &var.source {
             let expr = parse_formula(formula)?;
             is_calc[idx] = true;
-            expr_by_col[idx] = Some(expr.clone());
-            parsed_cols.push((idx, expr));
+            expr_by_col[idx] = Some(expr);
+            parsed_cols.push(idx);
         }
     }
 
@@ -178,7 +178,7 @@ fn plan_calculated_variables(
         return Ok((Vec::new(), expr_by_col));
     }
 
-    let (dependents, mut in_degree) = build_dependency_graph(table, &parsed_cols, &is_calc)?;
+    let (dependents, mut in_degree) = build_dependency_graph(table, &parsed_cols, &expr_by_col, &is_calc)?;
     let order = topo_sort_columns(table, &parsed_cols, &dependents, &mut in_degree)?;
     Ok((order, expr_by_col))
 }
@@ -199,23 +199,27 @@ fn col_display_name(table: &MultipleVariablesTable, idx: usize) -> String {
 
 fn build_dependency_graph(
     table: &MultipleVariablesTable,
-    parsed_cols: &[(usize, Expr)],
+    parsed_cols: &[usize],
+    expr_by_col: &[Option<Expr>],
     is_calc: &[bool],
 ) -> Result<(Vec<Vec<usize>>, Vec<usize>), TransformError> {
     let n_cols = table.variables.len();
     let mut dependents = vec![Vec::new(); n_cols];
     let mut in_degree = vec![0_usize; n_cols];
 
-    for (col_idx, expr) in parsed_cols {
+    for &col_idx in parsed_cols {
+        let Some(expr) = expr_by_col.get(col_idx).and_then(Option::as_ref) else {
+            continue;
+        };
         let deps = resolve_col_deps(table, expr);
         for dep in deps {
-            if dep == *col_idx {
-                let name = col_display_name(table, *col_idx);
+            if dep == col_idx {
+                let name = col_display_name(table, col_idx);
                 return Err(TransformError::CircularDependency { cycle: vec![name.clone(), name] });
             }
-            if is_calc[dep] && !dependents[dep].contains(col_idx) {
-                dependents[dep].push(*col_idx);
-                in_degree[*col_idx] += 1;
+            if is_calc[dep] && !dependents[dep].contains(&col_idx) {
+                dependents[dep].push(col_idx);
+                in_degree[col_idx] += 1;
             }
         }
     }
@@ -250,12 +254,12 @@ fn resolve_col_deps(table: &MultipleVariablesTable, expr: &Expr) -> BTreeSet<usi
 
 fn topo_sort_columns(
     table: &MultipleVariablesTable,
-    parsed_cols: &[(usize, Expr)],
+    parsed_cols: &[usize],
     dependents: &[Vec<usize>],
     in_degree: &mut [usize],
 ) -> Result<Vec<usize>, TransformError> {
     let mut ready = BinaryHeap::new();
-    for &(col_idx, _) in parsed_cols {
+    for &col_idx in parsed_cols {
         if in_degree[col_idx] == 0 {
             ready.push(Reverse(col_idx));
         }
@@ -273,7 +277,7 @@ fn topo_sort_columns(
     }
 
     if order.len() < parsed_cols.len() {
-        let remaining: Vec<usize> = parsed_cols.iter().map(|(c, _)| *c).filter(|c| in_degree[*c] > 0).collect();
+        let remaining: Vec<usize> = parsed_cols.iter().copied().filter(|&c| in_degree[c] > 0).collect();
         let cycle = find_cycle_names(table, dependents, &remaining);
         return Err(TransformError::CircularDependency { cycle });
     }
@@ -283,10 +287,9 @@ fn topo_sort_columns(
 
 fn find_cycle_names(table: &MultipleVariablesTable, dependents: &[Vec<usize>], remaining: &[usize]) -> Vec<String> {
     let mut state = vec![0_u8; table.variables.len()];
-    let mut stack = Vec::new();
     for &start in remaining {
         if state[start] == 0
-            && let Some(cycle_idxs) = dfs_cycle(start, dependents, &mut state, &mut stack)
+            && let Some(cycle_idxs) = dfs_cycle(start, dependents, &mut state)
         {
             return cycle_idxs.into_iter().map(|i| col_display_name(table, i)).collect();
         }
@@ -294,23 +297,76 @@ fn find_cycle_names(table: &MultipleVariablesTable, dependents: &[Vec<usize>], r
     remaining.iter().map(|&i| col_display_name(table, i)).collect()
 }
 
-fn dfs_cycle(node: usize, adj: &[Vec<usize>], state: &mut [u8], stack: &mut Vec<usize>) -> Option<Vec<usize>> {
-    state[node] = 1;
-    stack.push(node);
-    for &next in &adj[node] {
-        if state[next] == 1 {
-            let pos = stack.iter().position(|&x| x == next).unwrap_or(0);
-            let mut cycle = stack[pos..].to_vec();
-            cycle.push(next);
-            return Some(cycle);
-        }
-        if state[next] == 0
-            && let Some(found) = dfs_cycle(next, adj, state, stack)
-        {
-            return Some(found);
+/// Iterative three-color DFS cycle finder using an explicit `(node, next_edge_idx)` stack.
+fn dfs_cycle(start: usize, adj: &[Vec<usize>], state: &mut [u8]) -> Option<Vec<usize>> {
+    let mut frames: Vec<(usize, usize)> = vec![(start, 0)];
+    let mut path: Vec<usize> = vec![start];
+    state[start] = 1;
+
+    while let Some((node, edge_idx)) = frames.last_mut() {
+        let cur = *node;
+        if let Some(&next) = adj[cur].get(*edge_idx) {
+            *edge_idx += 1;
+            if state[next] == 1 {
+                let pos = path.iter().position(|&x| x == next).unwrap_or(0);
+                let mut cycle = path[pos..].to_vec();
+                cycle.push(next);
+                return Some(cycle);
+            }
+            if state[next] == 0 {
+                state[next] = 1;
+                path.push(next);
+                frames.push((next, 0));
+            }
+        } else {
+            let _ = frames.pop();
+            let _ = path.pop();
+            state[cur] = 2;
         }
     }
-    let _ = stack.pop();
-    state[node] = 2;
     None
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use curvebook_doc::{Cell, MultipleVariablesTable};
+
+    use super::{evaluate_calculated_variables, validate_no_formula_cycle};
+    use crate::error::TransformError;
+
+    #[test]
+    fn aud_04_02_dag_handles_deep_ast_and_long_cycle_iteratively() {
+        let handle = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                // 1. Deep left-leaning calculated variable (8,000 additions) on 1 MiB stack.
+                let mut mv = MultipleVariablesTable::new(2, 1).expect("mv");
+                mv.variables[0].title = String::from("X");
+                mv.variables[0].cells[0] = Cell::number(1.0);
+                mv.variables[1].title = String::from("Sum");
+                let deep = format!("={}", vec!["1"; 8_000].join("+"));
+                mv.variables[1].set_calculated_formula(&deep);
+                validate_no_formula_cycle(&mv, 1, &deep).expect("no cycle");
+                evaluate_calculated_variables(&mut mv, None).expect("evaluate deep formula");
+                assert_eq!(mv.variables[1].cells[0].active_number(), Some(8_000.0));
+
+                // 2. 600-column cyclic chain tests iterative dfs_cycle on 1 MiB stack.
+                let n = 600_usize;
+                let mut cyc = MultipleVariablesTable::new(n, 1).expect("cyc mv");
+                for i in 0..n {
+                    cyc.variables[i].title = format!("V{i}");
+                    let prev = (i + n - 1) % n;
+                    let formula = format!("=[V{prev}] + 1");
+                    cyc.variables[i].set_calculated_formula(&formula);
+                }
+                let err = evaluate_calculated_variables(&mut cyc, None).expect_err("must detect 600-col cycle");
+                let TransformError::CircularDependency { cycle } = err else {
+                    panic!("expected CircularDependency, got {err:?}");
+                };
+                assert_eq!(cycle.len(), n + 1, "expected full cycle closure");
+            })
+            .expect("spawn 1 MiB worker");
+        handle.join().expect("DAG planning and cycle detection must not stack overflow");
+    }
 }

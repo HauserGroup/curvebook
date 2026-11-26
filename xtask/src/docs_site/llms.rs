@@ -5,6 +5,7 @@
 //! `docs/mcp-for-beginners.md`). They contain zero timestamps and never include internal
 //! contributor/planning documents (`ROADMAP.md`, `STATUS.md`, `audit/`, `planning/`, etc.).
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -146,30 +147,289 @@ pub fn build_llms_full_txt(root: &Path) -> Result<String, String> {
     Ok(out)
 }
 
-/// Replace Markdown links pointing at internal contributor/planning docs (`ROADMAP.md`,
-/// `STATUS.md`, `audit/`, `planning/`, `evidence/`, `history/`) with their plain link text.
-fn strip_internal_doc_links(md: &str) -> String {
-    const INTERNAL_TARGETS: &[&str] = &["roadmap.md", "status.md", "audit/", "planning/", "evidence/", "history/"];
-    let mut out = String::with_capacity(md.len());
-    let mut rest = md;
-    while let Some((before, after_open)) = rest.split_once('[') {
-        out.push_str(before);
-        if let Some((label, after_mid)) = after_open.split_once("](")
-            && !label.contains(['\n', '['])
-            && let Some((target, tail)) = after_mid.split_once(')')
-            && !target.contains('\n')
+const INTERNAL_TARGETS: &[&str] = &["roadmap.md", "status.md", "audit/", "planning/", "evidence/", "history/"];
+
+fn is_internal_target(target: &str) -> bool {
+    let lower = target.to_ascii_lowercase();
+    INTERNAL_TARGETS.iter().any(|pat| lower.contains(pat))
+}
+
+fn normalize_ref_label(label: &str) -> String {
+    label.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase()
+}
+
+fn parse_fence_delim(trimmed: &str) -> Option<(char, usize)> {
+    let first = trimmed.chars().next()?;
+    if first != '`' && first != '~' {
+        return None;
+    }
+    let count = trimmed.bytes().take_while(|&b| b == first as u8).count();
+    (count >= 3).then_some((first, count))
+}
+
+fn parse_ref_def_line(line: &str) -> Option<(String, &str)> {
+    let trimmed = line.trim_start();
+    let after_open = trimmed.strip_prefix('[')?;
+    let (label, after_colon) = after_open.split_once("]:")?;
+    if label.trim().is_empty() || label.contains(['[', ']']) {
+        return None;
+    }
+    let rest = after_colon.trim_start();
+    let dest = if let Some(after_lt) = rest.strip_prefix('<') { after_lt.split_once('>')?.0 } else { rest.split_whitespace().next()? };
+    Some((normalize_ref_label(label), dest))
+}
+
+fn strip_internal_ref_defs(md: &str) -> (String, BTreeSet<String>) {
+    let mut kept = String::with_capacity(md.len());
+    let mut internal_refs = BTreeSet::new();
+    let mut fence: Option<(char, usize)> = None;
+
+    for line in md.split_inclusive('\n') {
+        let bare = line.trim_end_matches('\n');
+        let trimmed = bare.trim();
+        if let Some((ch, min_len)) = fence {
+            kept.push_str(line);
+            let count = trimmed.bytes().take_while(|&b| b == ch as u8).count();
+            if count >= min_len && trimmed.get(count..).is_some_and(|r| r.trim().is_empty()) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(open) = parse_fence_delim(trimmed) {
+            fence = Some(open);
+            kept.push_str(line);
+            continue;
+        }
+        if let Some((key, dest)) = parse_ref_def_line(bare)
+            && is_internal_target(dest)
         {
-            let lower_target = target.to_ascii_lowercase();
-            if INTERNAL_TARGETS.iter().any(|pat| lower_target.contains(pat)) {
-                out.push_str(label);
-                rest = tail;
+            internal_refs.insert(key);
+            continue;
+        }
+        kept.push_str(line);
+    }
+    (kept, internal_refs)
+}
+
+fn parse_balanced_brackets(slice: &str) -> Option<(&str, usize)> {
+    const MAX_LABEL_BYTES: usize = 2048;
+    let after = slice.strip_prefix('[')?;
+    let mut depth = 1usize;
+    let mut i = 0usize;
+    while let Some(rest) = after.get(i..) {
+        if i >= MAX_LABEL_BYTES || rest.starts_with("\n\n") {
+            return None;
+        }
+        let ch = rest.chars().next()?;
+        if ch == '\\' {
+            i += 1;
+            if let Some(nc) = after.get(i..).and_then(|s| s.chars().next()) {
+                i += nc.len_utf8();
+            }
+            continue;
+        }
+        if ch == '`' {
+            let ticks = rest.bytes().take_while(|&b| b == b'`').count();
+            i += ticks;
+            continue;
+        }
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((after.get(..i)?, i + 2));
+                }
+            }
+            _ => {}
+        }
+        i += ch.len_utf8();
+    }
+    None
+}
+
+fn parse_inline_link_dest(slice: &str) -> Option<(&str, usize)> {
+    const MAX_DEST_BYTES: usize = 2048;
+    let after_open = slice.strip_prefix('(')?;
+    let ws = after_open.bytes().take_while(u8::is_ascii_whitespace).count();
+    let rest = after_open.get(ws..)?;
+    let (dest, after_dest_offset) = if let Some(after_lt) = rest.strip_prefix('<') {
+        let close = after_lt.find('>')?;
+        if close >= MAX_DEST_BYTES || after_lt.get(..close)?.contains('\n') {
+            return None;
+        }
+        (after_lt.get(..close)?, ws + 1 + close + 1)
+    } else {
+        let mut paren_depth = 0usize;
+        let mut i = 0usize;
+        while let Some(cur) = rest.get(i..) {
+            if i >= MAX_DEST_BYTES {
+                return None;
+            }
+            let ch = cur.chars().next()?;
+            if ch == '\\' {
+                i += 1;
+                if let Some(nc) = rest.get(i..).and_then(|s| s.chars().next()) {
+                    i += nc.len_utf8();
+                }
+                continue;
+            }
+            if ch.is_ascii_whitespace() {
+                break;
+            }
+            if ch == '(' {
+                paren_depth += 1;
+            } else if ch == ')' {
+                if paren_depth == 0 {
+                    break;
+                }
+                paren_depth -= 1;
+            }
+            i += ch.len_utf8();
+        }
+        if paren_depth != 0 {
+            return None;
+        }
+        (rest.get(..i)?, ws + i)
+    };
+
+    let tail = after_open.get(after_dest_offset..)?;
+    let mut j = tail.bytes().take_while(u8::is_ascii_whitespace).count();
+    if let Some(rem) = tail.get(j..) {
+        if let Some(q) = rem.bytes().next().filter(|&b| b == b'"' || b == b'\'') {
+            j += 1;
+            let mut escaped = false;
+            while let Some(&b) = tail.as_bytes().get(j) {
+                j += 1;
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == q {
+                    break;
+                }
+            }
+            j += tail.get(j..).map_or(0, |s| s.bytes().take_while(u8::is_ascii_whitespace).count());
+        }
+        if tail.as_bytes().get(j) == Some(&b')') {
+            return Some((dest, 1 + after_dest_offset + j + 1));
+        }
+    }
+    None
+}
+
+fn parse_code_span_len(slice: &str) -> Option<usize> {
+    let ticks = slice.bytes().take_while(|&b| b == b'`').count();
+    if ticks == 0 {
+        return None;
+    }
+    let after = slice.get(ticks..)?;
+    let mut i = 0usize;
+    while let Some(cur) = after.get(i..) {
+        if cur.is_empty() {
+            break;
+        }
+        if cur.starts_with('`') {
+            let run = cur.bytes().take_while(|&b| b == b'`').count();
+            if run == ticks {
+                return Some(ticks + i + ticks);
+            }
+            i += run;
+            continue;
+        }
+        i += cur.chars().next()?.len_utf8();
+    }
+    None
+}
+
+fn strip_internal_links_segment(segment: &str, internal_refs: &BTreeSet<String>) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let mut i = 0usize;
+    while let Some(rest) = segment.get(i..) {
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch == '`' {
+            let run = rest.bytes().take_while(|&b| b == b'`').count();
+            let consumed = parse_code_span_len(rest).unwrap_or(run);
+            if let Some(raw) = rest.get(..consumed) {
+                out.push_str(raw);
+            }
+            i += consumed;
+            continue;
+        }
+        if ch == '<'
+            && let Some((inner, _)) = rest.get(1..).and_then(|s| s.split_once('>'))
+            && !inner.is_empty()
+            && !inner.chars().any(char::is_whitespace)
+            && !inner.contains('<')
+            && is_internal_target(inner)
+        {
+            i += inner.len() + 2;
+            continue;
+        }
+        if ch == '['
+            && let Some((label, label_consumed)) = parse_balanced_brackets(rest)
+        {
+            let after_label = rest.get(label_consumed..).unwrap_or("");
+            if let Some((dest, dest_consumed)) = parse_inline_link_dest(after_label) {
+                if is_internal_target(dest) {
+                    out.push_str(&strip_internal_links_segment(label, internal_refs));
+                    i += label_consumed + dest_consumed;
+                    continue;
+                }
+            } else if let Some((ref_label, ref_consumed)) = parse_balanced_brackets(after_label) {
+                let key = if ref_label.trim().is_empty() { normalize_ref_label(label) } else { normalize_ref_label(ref_label) };
+                if internal_refs.contains(&key) {
+                    out.push_str(&strip_internal_links_segment(label, internal_refs));
+                    i += label_consumed + ref_consumed;
+                    continue;
+                }
+            } else if internal_refs.contains(&normalize_ref_label(label)) {
+                out.push_str(&strip_internal_links_segment(label, internal_refs));
+                i += label_consumed;
                 continue;
             }
         }
-        out.push('[');
-        rest = after_open;
+        out.push(ch);
+        i += ch.len_utf8();
     }
-    out.push_str(rest);
+    out
+}
+
+/// Replace Markdown links (inline, reference-style, and autolinks) pointing at internal
+/// contributor/planning docs (`ROADMAP.md`, `STATUS.md`, `audit/`, `planning/`, `evidence/`,
+/// `history/`) with their plain link text.
+fn strip_internal_doc_links(md: &str) -> String {
+    let (without_defs, internal_refs) = strip_internal_ref_defs(md);
+    let mut out = String::with_capacity(without_defs.len());
+    let mut pending = String::new();
+    let mut fence: Option<(char, usize)> = None;
+
+    for line in without_defs.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches('\n').trim();
+        if let Some((ch, min_len)) = fence {
+            out.push_str(line);
+            let count = trimmed.bytes().take_while(|&b| b == ch as u8).count();
+            if count >= min_len && trimmed.get(count..).is_some_and(|r| r.trim().is_empty()) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(open) = parse_fence_delim(trimmed) {
+            if !pending.is_empty() {
+                out.push_str(&strip_internal_links_segment(&pending, &internal_refs));
+                pending.clear();
+            }
+            fence = Some(open);
+            out.push_str(line);
+            continue;
+        }
+        pending.push_str(line);
+    }
+    if !pending.is_empty() {
+        out.push_str(&strip_internal_links_segment(&pending, &internal_refs));
+    }
     out
 }
 
@@ -238,6 +498,30 @@ mod tests {
         }
         for forbidden in ["ROADMAP.md", "STATUS.md", "audit/", "SECRET_ROADMAP_MARKER", "SECRET_STATUS_MARKER", "SECRET_AUDIT_MARKER"] {
             assert!(!pass_a.contains(forbidden), "unexpected `{forbidden}`");
+        }
+    }
+
+    #[test]
+    fn aud_12_44_strip_internal_doc_links_handles_brackets_parens_multiline_refs_and_autolinks() {
+        let md = concat!(
+            "Nested: [see arr[0]](../ROADMAP.md).\n",
+            "Parens: [doc](../audit/report(1).md).\n",
+            "Multiline: [see\nroadmap](../ROADMAP.md).\n",
+            "Ref: [roadmap][r] and [status][] and [hist].\n",
+            "Auto: <https://github.com/HauserGroup/curvebook/blob/main/docs/ROADMAP.md>.\n",
+            "Keep: [Get Started](get-started.md) and `arr[0]`.\n\n",
+            "[r]: ../ROADMAP.md\n",
+            "[status]: ../STATUS.md \"Status\"\n",
+            "[hist]: ../history/r1.md\n",
+        );
+        let cleaned = strip_internal_doc_links(md);
+        assert!(cleaned.contains("Nested: see arr[0]."), "{cleaned}");
+        assert!(cleaned.contains("Parens: doc."), "{cleaned}");
+        assert!(cleaned.contains("Multiline: see\nroadmap."), "{cleaned}");
+        assert!(cleaned.contains("Ref: roadmap and status and hist."), "{cleaned}");
+        assert!(cleaned.contains("Keep: [Get Started](get-started.md) and `arr[0]`."), "{cleaned}");
+        for forbidden in ["ROADMAP.md", "STATUS.md", "audit/", "history/"] {
+            assert!(!cleaned.contains(forbidden), "leaked `{forbidden}` in:\n{cleaned}");
         }
     }
 }

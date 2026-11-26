@@ -1,6 +1,9 @@
 //! Multi-panel `Page Layout Composer` and `Export Figure` dialog state machines.
 
-use curvebook_doc::{EmbeddedTableStyle, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, PageOrientation, PanelBadgeStyle, RectPt, SheetId};
+use curvebook_doc::{
+    EmbeddedTableStyle, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, PageOrientation, PanelBadgeStyle, PhysicalUnit, RectPt, SheetId,
+};
+use curvebook_palette::Rgba8;
 use curvebook_render::TiffCompression;
 
 use curvebook_tools::ToolCommandIntent;
@@ -19,6 +22,18 @@ pub struct PageLayoutComposerState {
     pub panel_badges: PanelBadgeStyle,
     pub items: Vec<LayoutItem>,
     pub new_callout_markdown: String,
+    #[serde(default)]
+    pub page_width: Option<f64>,
+    #[serde(default)]
+    pub page_height: Option<f64>,
+    #[serde(default)]
+    pub page_unit: Option<PhysicalUnit>,
+    #[serde(default)]
+    pub has_synced_background_fill: bool,
+    #[serde(default)]
+    pub background_fill: Option<Rgba8>,
+    #[serde(default)]
+    pub preset_dirty: bool,
 }
 
 impl Default for PageLayoutComposerState {
@@ -33,6 +48,12 @@ impl Default for PageLayoutComposerState {
             panel_badges: PanelBadgeStyle::UpperCaseLetters,
             items: Vec::new(),
             new_callout_markdown: String::new(),
+            page_width: None,
+            page_height: None,
+            page_unit: None,
+            has_synced_background_fill: false,
+            background_fill: Some(Rgba8::WHITE),
+            preset_dirty: false,
         }
     }
 }
@@ -48,6 +69,15 @@ impl PageLayoutComposerState {
         self.align_plot_origins = layout.spec.align_plot_origins;
         self.panel_badges = layout.spec.panel_badges;
         self.items = layout.spec.items.clone();
+        self.page_width = Some(layout.spec.width);
+        self.page_height = Some(layout.spec.height);
+        self.page_unit = Some(layout.spec.unit);
+        self.has_synced_background_fill = true;
+        self.background_fill = layout.spec.background_fill;
+        self.preset_dirty = false;
+        if let Some(matched) = detect_matching_preset(&layout.spec) {
+            self.preset = matched;
+        }
     }
 
     /// Switch physical journal/page size preset.
@@ -55,11 +85,15 @@ impl PageLayoutComposerState {
         self.preset = preset;
         let derived = LayoutSpec::from_preset(preset);
         self.orientation = derived.orientation;
+        self.page_width = Some(derived.width);
+        self.page_height = Some(derived.height);
+        self.page_unit = Some(derived.unit);
+        self.preset_dirty = true;
     }
 
-    /// Place `graph_ids` neatly across `rows x cols` slots inside `LayoutSpec::from_preset(preset)`.
+    /// Place `graph_ids` neatly across `rows x cols` slots inside the current page dimensions.
     pub fn arrange_grid(&mut self, graph_ids: &[SheetId], margin_pt: f64, gutter_pt: f64) {
-        let page = LayoutSpec::from_preset(self.preset).page_size_pt();
+        let page = self.to_layout_spec().page_size_pt();
         let rows = usize::from(self.rows.max(1));
         let cols = usize::from(self.cols.max(1));
         let margin = if margin_pt.is_finite() { margin_pt.max(0.0) } else { 14.0 };
@@ -111,6 +145,20 @@ impl PageLayoutComposerState {
     #[must_use]
     pub fn to_layout_spec(&self) -> LayoutSpec {
         let mut spec = LayoutSpec::from_preset(self.preset);
+        if !self.preset_dirty
+            && let (Some(width), Some(height), Some(unit)) = (self.page_width, self.page_height, self.page_unit)
+            && width.is_finite()
+            && height.is_finite()
+            && width > 0.0
+            && height > 0.0
+        {
+            spec.width = width;
+            spec.height = height;
+            spec.unit = unit;
+        }
+        if self.has_synced_background_fill {
+            spec.background_fill = self.background_fill;
+        }
         spec.orientation = self.orientation;
         spec.grid_template = Some((self.rows.max(1), self.cols.max(1)));
         spec.align_plot_origins = self.align_plot_origins;
@@ -137,6 +185,25 @@ impl PageLayoutComposerState {
         }
         out
     }
+}
+
+fn detect_matching_preset(spec: &LayoutSpec) -> Option<JournalWidthPreset> {
+    const PRESETS: [JournalWidthPreset; 10] = [
+        JournalWidthPreset::SingleColumn85Mm,
+        JournalWidthPreset::SingleColumn89Mm,
+        JournalWidthPreset::OneAndHalfColumn120Mm,
+        JournalWidthPreset::OneAndHalfColumn136Mm,
+        JournalWidthPreset::DoubleColumn174Mm,
+        JournalWidthPreset::DoubleColumn183Mm,
+        JournalWidthPreset::LetterPortrait,
+        JournalWidthPreset::LetterLandscape,
+        JournalWidthPreset::A4Portrait,
+        JournalWidthPreset::A4Landscape,
+    ];
+    PRESETS.into_iter().find(|&preset| {
+        let cand = LayoutSpec::from_preset(preset);
+        cand.unit == spec.unit && (cand.width - spec.width).abs() < 1e-6 && (cand.height - spec.height).abs() < 1e-6
+    })
 }
 
 /// Output format for [`ExportFigureState`].

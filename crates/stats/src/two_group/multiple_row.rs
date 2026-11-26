@@ -82,6 +82,9 @@ pub fn multiple_row_t_tests(
     threshold: f64,
 ) -> Result<Vec<MultipleRowTestEntry>, StatsError> {
     validate_raw_p_multiplicity_procedure(procedure)?;
+    if !threshold.is_finite() || threshold <= 0.0 || threshold >= 1.0 {
+        return Err(StatsError::InvalidParameter { name: "threshold", value: threshold });
+    }
     if group_a_rows.len() != group_b_rows.len() {
         return Err(StatsError::DimensionMismatch { expected: group_a_rows.len(), actual: group_b_rows.len() });
     }

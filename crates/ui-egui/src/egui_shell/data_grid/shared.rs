@@ -383,12 +383,16 @@ pub(super) fn apply_pending_scroll_target(state: &mut ColumnGridEguiState, geom:
     let vis_h = geom.body_inner_clip.height().max(geom.row_h);
     match target {
         DataGridScrollTarget::Cell(coord) => {
-            let flat = geom.coord_to_flat_all(false, coord.col, coord.subcol);
-            #[allow(clippy::cast_precision_loss)]
-            let x0 = (flat as f32) * geom.subcol_w;
-            let x1 = x0 + geom.subcol_w;
-            if x0 < state.scroll_offset_pt.x || x1 > state.scroll_offset_pt.x + vis_w {
-                state.scroll_offset_pt.x = (x0 - vis_w * 0.35).max(0.0);
+            if coord.col == crate::egui_shell::sheet_find_bar::X_OR_TIME_COL_SENTINEL {
+                state.scroll_offset_pt.x = 0.0;
+            } else {
+                let flat = geom.coord_to_flat_all(false, coord.col, coord.subcol);
+                #[allow(clippy::cast_precision_loss)]
+                let x0 = (flat as f32) * geom.subcol_w;
+                let x1 = x0 + geom.subcol_w;
+                if x0 < state.scroll_offset_pt.x || x1 > state.scroll_offset_pt.x + vis_w {
+                    state.scroll_offset_pt.x = (x0 - vis_w * 0.35).max(0.0);
+                }
             }
             #[allow(clippy::cast_precision_loss)]
             let y0 = (coord.row as f32) * geom.row_h;
@@ -398,12 +402,16 @@ pub(super) fn apply_pending_scroll_target(state: &mut ColumnGridEguiState, geom:
             }
         }
         DataGridScrollTarget::ColumnTitle { col } => {
-            let (flat_start, _) = geom.col_span_flat(col);
-            #[allow(clippy::cast_precision_loss)]
-            let x0 = (flat_start as f32) * geom.subcol_w;
-            let x1 = x0 + geom.subcol_w;
-            if x0 < state.scroll_offset_pt.x || x1 > state.scroll_offset_pt.x + vis_w {
-                state.scroll_offset_pt.x = (x0 - vis_w * 0.35).max(0.0);
+            if col == crate::egui_shell::sheet_find_bar::X_OR_TIME_COL_SENTINEL {
+                state.scroll_offset_pt.x = 0.0;
+            } else {
+                let (flat_start, _) = geom.col_span_flat(col);
+                #[allow(clippy::cast_precision_loss)]
+                let x0 = (flat_start as f32) * geom.subcol_w;
+                let x1 = x0 + geom.subcol_w;
+                if x0 < state.scroll_offset_pt.x || x1 > state.scroll_offset_pt.x + vis_w {
+                    state.scroll_offset_pt.x = (x0 - vis_w * 0.35).max(0.0);
+                }
             }
         }
         DataGridScrollTarget::RowTitle { row } => {
@@ -593,7 +601,7 @@ pub(super) fn table_display_decimals(ctx: &egui::Context) -> Option<u8> {
     crate::egui_shell::trailing_studio::studio_table_decimals(ctx)
 }
 
-pub(super) fn format_cell_into_with_decimals(cell: &Cell, preset: &LocalePreset, decimals: Option<u8>, out: &mut String) {
+pub(in crate::egui_shell) fn format_cell_into_with_decimals(cell: &Cell, preset: &LocalePreset, decimals: Option<u8>, out: &mut String) {
     out.clear();
     match &cell.value {
         CellValue::Empty => {}
@@ -640,16 +648,33 @@ pub(super) fn initial_edit_text_for_cell(cell: Option<&Cell>, preset: &LocalePre
     }
 }
 
-pub(super) fn parse_inline_cell_input(app: &UiApp, draft: &str) -> serde_json::Value {
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ParsedInlineCell {
+    pub(super) value: serde_json::Value,
+    pub(super) excluded: bool,
+}
+
+pub(super) fn parse_inline_cell_with_exclusion(app: &UiApp, draft: &str) -> ParsedInlineCell {
     let trimmed = draft.trim();
     if trimmed.is_empty() {
-        serde_json::Value::Null
-    } else if trimmed.starts_with('=') {
-        serde_json::Value::String(trimmed.to_owned())
-    } else if let Some(num) = parse_localized_number_input(trimmed, &app.locale_preset) {
-        json!(num)
+        return ParsedInlineCell { value: serde_json::Value::Null, excluded: false };
+    }
+    if trimmed.starts_with('=') {
+        return ParsedInlineCell { value: serde_json::Value::String(trimmed.to_owned()), excluded: false };
+    }
+    if let Some(stem) = trimmed.strip_suffix('*') {
+        let inner = stem.trim();
+        if !inner.is_empty() {
+            if let Some(num) = parse_localized_number_input(inner, &app.locale_preset) {
+                return ParsedInlineCell { value: json!(num), excluded: true };
+            }
+            return ParsedInlineCell { value: serde_json::Value::String(inner.to_owned()), excluded: true };
+        }
+    }
+    if let Some(num) = parse_localized_number_input(trimmed, &app.locale_preset) {
+        ParsedInlineCell { value: json!(num), excluded: false }
     } else {
-        serde_json::Value::String(draft.to_owned())
+        ParsedInlineCell { value: serde_json::Value::String(draft.to_owned()), excluded: false }
     }
 }
 

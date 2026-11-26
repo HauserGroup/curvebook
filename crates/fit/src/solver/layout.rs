@@ -46,6 +46,16 @@ impl ParameterLayout {
         hooks: &HookContext,
         rules: &[ParameterRule],
     ) -> Result<Self, FitError> {
+        Self::build_with_column_titles(model, datasets, hooks, rules, None)
+    }
+
+    pub(in crate::solver) fn build_with_column_titles(
+        model: &dyn ParametricModel,
+        datasets: &[DatasetSeries],
+        hooks: &HookContext,
+        rules: &[ParameterRule],
+        override_column_titles: Option<&[f64]>,
+    ) -> Result<Self, FitError> {
         let param_names = model.param_names();
         let mut seen_rule_names: Vec<&str> = Vec::with_capacity(rules.len());
         for rule in rules {
@@ -63,11 +73,13 @@ impl ParameterLayout {
         let p_model = param_names.len();
         let n_datasets = datasets.len();
         let all_points: Vec<DataPoint> = datasets.iter().flat_map(|d| d.points.iter().cloned()).collect();
-        let default_init = model.initial_guess(&all_points);
+        let extracted_titles: Vec<f64> = if override_column_titles.is_some() { Vec::new() } else { collect_column_title_values(datasets) };
+        let col_titles = override_column_titles.unwrap_or(&extracted_titles);
+        let default_init = model.initial_guess_with_column_titles(&all_points, col_titles);
         let default_bounds = model.default_bounds();
         let default_rules = model.default_parameter_rules(&all_points);
 
-        let per_ds_init: Vec<Vec<f64>> = datasets.iter().map(|d| model.initial_guess(&d.points)).collect();
+        let per_ds_init: Vec<Vec<f64>> = datasets.iter().map(|d| model.initial_guess_with_column_titles(&d.points, col_titles)).collect();
 
         let mut bindings = vec![vec![ParamBinding::Fixed(0.0); p_model]; n_datasets];
         let mut free_slots = Vec::new();
@@ -262,6 +274,19 @@ impl ParameterLayout {
     }
 }
 
+#[inline]
+pub(in crate::solver) fn model_dataset_index(model: &dyn ParametricModel, ds_local_idx: usize, data_set_index: usize) -> usize {
+    if model.uses_sheet_dataset_index() { data_set_index } else { ds_local_idx }
+}
+
+pub(in crate::solver) fn collect_column_title_values(datasets: &[DatasetSeries]) -> Vec<f64> {
+    datasets
+        .iter()
+        .filter_map(|d| d.column_title_value.or_else(|| parse_column_title_numeric_hook(&d.label).ok()))
+        .filter(|v| v.is_finite())
+        .collect()
+}
+
 pub(in crate::solver) fn uses_shared_global(rules: &[ParameterRule]) -> bool {
     rules.iter().any(|r| matches!(r.scope, ParameterScope::SharedGlobal))
 }
@@ -354,8 +379,11 @@ pub(in crate::solver) fn compute_point_weight(pt: &DataPoint, scheme: WeightingS
             1.0 / pt.y.abs()
         }
         WeightingScheme::GeneralPowerY(k) => {
-            if pt.y == 0.0 && k > 0.0 {
-                return Err(FitError::ImpossibleWeights { reason: format!("1/|Y|^{k} weighting is undefined where Y == 0") });
+            if !k.is_finite() {
+                return Err(FitError::ImpossibleWeights { reason: format!("General power Y exponent must be finite, got {k}") });
+            }
+            if !pt.y.is_finite() || (pt.y == 0.0 && k > 0.0) {
+                return Err(FitError::ImpossibleWeights { reason: format!("1/|Y|^{k} weighting is undefined where Y == 0 or non-finite") });
             }
             let denom = pt.y.abs().powf(k);
             if !denom.is_finite() || denom <= 0.0 {
@@ -416,6 +444,9 @@ pub(in crate::solver) fn compute_predicted_y_weight(y_hat: f64, scheme: Weightin
             1.0 / y_hat.abs()
         }
         WeightingScheme::GeneralPowerY(k) => {
+            if !k.is_finite() {
+                return Err(FitError::ImpossibleWeights { reason: format!("General power Y exponent must be finite, got {k}") });
+            }
             if !y_hat.is_finite() || (y_hat == 0.0 && k > 0.0) {
                 return Err(FitError::ImpossibleWeights { reason: format!("1/|Y_curve|^{k} weighting is undefined where predicted Y_hat == 0") });
             }
@@ -434,15 +465,18 @@ pub(in crate::solver) fn compute_predicted_y_weight(y_hat: f64, scheme: Weightin
     }
 }
 
-/// Apply curve-predicted weights `w_i = 1 / |y_hat_i|^k` across `obs`, preserving `(Mean, SD, n)`
+/// Apply curve-predicted weights `w_i = 1 / |y_hat_i|^k` across `obs` atomically (two-phase:
+/// validates every observation before committing any update), preserving `(Mean, SD, n)`
 /// sufficient statistics (`sqrt_weight = sqrt(w_i * rep_n)` and `ss_within = w_i * raw_ss_within`).
 ///
-/// Returns `false` if any predicted value yields an impossible weight (e.g., `y_hat == 0` or overflow).
+/// Returns `false` if any predicted value yields an impossible weight (e.g., `y_hat == 0` or overflow),
+/// leaving `obs` completely unmodified.
 pub(in crate::solver) fn apply_predicted_y_weights(obs: &mut [ObsRecord], y_hat: &[f64], scheme: WeightingScheme) -> bool {
     if obs.len() != y_hat.len() {
         return false;
     }
-    for (rec, &yh) in obs.iter_mut().zip(y_hat.iter()) {
+    let mut staged = Vec::with_capacity(obs.len());
+    for (rec, &yh) in obs.iter().zip(y_hat.iter()) {
         let Ok(w) = compute_predicted_y_weight(yh, scheme, rec.point.explicit_weight) else {
             return false;
         };
@@ -451,8 +485,15 @@ pub(in crate::solver) fn apply_predicted_y_weights(obs: &mut [ObsRecord], y_hat:
         if !weighted_n.is_finite() || weighted_n <= 0.0 || !weighted_ss_i.is_finite() {
             return false;
         }
-        rec.sqrt_weight = weighted_n.sqrt();
-        rec.ss_within = weighted_ss_i;
+        let sw = weighted_n.sqrt();
+        if !sw.is_finite() || sw <= 0.0 {
+            return false;
+        }
+        staged.push((sw, weighted_ss_i));
+    }
+    for (rec, (sw, ss_i)) in obs.iter_mut().zip(staged) {
+        rec.sqrt_weight = sw;
+        rec.ss_within = ss_i;
     }
     true
 }

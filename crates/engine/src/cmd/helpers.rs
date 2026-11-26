@@ -730,8 +730,53 @@ pub(super) fn sync_info_linked_data_sheets(doc: &mut ProjectDocument, deleted: &
     }
 }
 
-fn find_backing_data_sheet<'a>(data_sheets: &'a [DataSheet], result_sheets: &'a [ResultSheet], id: &SheetId) -> Option<&'a DataSheet> {
-    data_sheets.iter().find(|d| &d.id == id).or_else(|| result_sheets.iter().find(|r| &r.id == id).and_then(|r| r.analyzable_data.as_ref()))
+enum DirectBacking<'a> {
+    DataSheet(&'a DataSheet),
+    TerminalResult(&'a ResultSheet),
+    Failed { sheet_id: SheetId, code: ErrorCode, message: String },
+    NotFound,
+}
+
+fn resolve_direct_backing<'a>(data_sheets: &'a [DataSheet], result_sheets: &'a [ResultSheet], id: &SheetId) -> DirectBacking<'a> {
+    if let Some(ds) = data_sheets.iter().find(|d| &d.id == id) {
+        return DirectBacking::DataSheet(ds);
+    }
+    let Some(res) = result_sheets.iter().find(|r| &r.id == id) else {
+        return DirectBacking::NotFound;
+    };
+    if let curvebook_doc::ResultStatus::Failed { code, message } = &res.status {
+        return DirectBacking::Failed { sheet_id: res.id.clone(), code: *code, message: message.clone() };
+    }
+    if let Some(ref analyzable) = res.analyzable_data {
+        return DirectBacking::DataSheet(analyzable);
+    }
+    let mut cursor = &res.analysis.source_sheet_id;
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(&res.id);
+    while visited.insert(cursor) {
+        if data_sheets.iter().any(|d| &d.id == cursor) {
+            break;
+        }
+        let Some(up) = result_sheets.iter().find(|r| &r.id == cursor) else {
+            break;
+        };
+        if let curvebook_doc::ResultStatus::Failed { code, message } = &up.status {
+            return DirectBacking::Failed { sheet_id: up.id.clone(), code: *code, message: message.clone() };
+        }
+        if up.analyzable_data.is_some() {
+            break;
+        }
+        cursor = &up.analysis.source_sheet_id;
+    }
+    DirectBacking::TerminalResult(res)
+}
+
+fn failed_result_bounds_error(sheet_id: &SheetId, code: ErrorCode, message: &str) -> EngineError {
+    EngineError::with_code(
+        ErrorCode::Conflict,
+        format!("cannot validate point override against failed result sheet `{sheet_id}` ({code}): {message}"),
+    )
+    .with_remediation("Fix or recalculate the failed analysis before editing point overrides on this graph.")
 }
 
 fn point_override_bounds_parts(
@@ -741,40 +786,15 @@ fn point_override_bounds_parts(
     series_index: usize,
 ) -> Result<(usize, usize), EngineError> {
     let result_row_upper = |res: &ResultSheet| -> usize {
-        let mut cursor = &res.analysis.source_sheet_id;
-        let mut origin_rows = 0usize;
-        let mut seen = Vec::new();
-        while !seen.contains(&cursor) {
-            seen.push(cursor);
-            if let Some(ds) = find_backing_data_sheet(data_sheets, result_sheets, cursor) {
-                origin_rows = ds.archetype.row_count();
-                break;
-            }
-            if let Some(upstream) = result_sheets.iter().find(|r| &r.id == cursor) {
-                cursor = &upstream.analysis.source_sheet_id;
-            } else {
-                break;
-            }
-        }
+        let origin_rows = super::graph::resolve_source_data_sheet_slices(data_sheets, result_sheets, &res.analysis.source_sheet_id)
+            .map_or(0, |ds| ds.archetype.row_count());
         let tab_rows = res.tabs.iter().map(|t| t.rows.len()).max().unwrap_or(0);
         origin_rows.max(res.pairwise_comparisons.len()).max(tab_rows)
     };
 
     let result_col_and_subcols = |res: &ResultSheet, col: usize| -> (usize, usize) {
-        let mut cursor = &res.analysis.source_sheet_id;
-        let mut seen = Vec::new();
-        while !seen.contains(&cursor) {
-            seen.push(cursor);
-            if let Some(ds) = find_backing_data_sheet(data_sheets, result_sheets, cursor) {
-                return (ds.archetype.column_count().max(1), column_subcolumn_count(&ds.archetype, col));
-            }
-            if let Some(upstream) = result_sheets.iter().find(|r| &r.id == cursor) {
-                cursor = &upstream.analysis.source_sheet_id;
-            } else {
-                break;
-            }
-        }
-        (1, 1)
+        super::graph::resolve_source_data_sheet_slices(data_sheets, result_sheets, &res.analysis.source_sheet_id)
+            .map_or((1, 1), |ds| (ds.archetype.column_count().max(1), column_subcolumn_count(&ds.archetype, col)))
     };
 
     if !spec.series.is_empty() {
@@ -784,22 +804,23 @@ fn point_override_bounds_parts(
                 format!("`series_index` {series_index} is out of bounds for this graph's plotted series (series_count={})", spec.series.len()),
             ));
         };
-        if let Some(ds) = find_backing_data_sheet(data_sheets, result_sheets, &series.source_sheet_id) {
-            return Ok((ds.archetype.row_count(), column_subcolumn_count(&ds.archetype, series.data_set_index)));
-        }
-        if let Some(res) = result_sheets.iter().find(|r| r.id == series.source_sheet_id) {
-            let (_cols, subcols) = result_col_and_subcols(res, series.data_set_index);
-            return Ok((result_row_upper(res), subcols));
-        }
-        return Err(EngineError::with_code(
-            ErrorCode::NotFound,
-            format!("source sheet `{}` for series `{series_index}` was not found", series.source_sheet_id),
-        ));
+        return match resolve_direct_backing(data_sheets, result_sheets, &series.source_sheet_id) {
+            DirectBacking::DataSheet(ds) => Ok((ds.archetype.row_count(), column_subcolumn_count(&ds.archetype, series.data_set_index))),
+            DirectBacking::TerminalResult(res) => {
+                let (_cols, subcols) = result_col_and_subcols(res, series.data_set_index);
+                Ok((result_row_upper(res), subcols))
+            }
+            DirectBacking::Failed { sheet_id, code, message } => Err(failed_result_bounds_error(&sheet_id, code, &message)),
+            DirectBacking::NotFound => Err(EngineError::with_code(
+                ErrorCode::NotFound,
+                format!("source sheet `{}` for series `{series_index}` was not found", series.source_sheet_id),
+            )),
+        };
     }
 
     match spec.kind {
-        GraphKind::MultipleVariables => {
-            if let Some(ds) = find_backing_data_sheet(data_sheets, result_sheets, &spec.primary_source_sheet_id) {
+        GraphKind::MultipleVariables => match resolve_direct_backing(data_sheets, result_sheets, &spec.primary_source_sheet_id) {
+            DirectBacking::DataSheet(ds) => {
                 if series_index >= ds.archetype.column_count() {
                     return Err(EngineError::with_code(
                         ErrorCode::BadInput,
@@ -808,9 +829,22 @@ fn point_override_bounds_parts(
                 }
                 return Ok((ds.archetype.row_count(), column_subcolumn_count(&ds.archetype, series_index)));
             }
-        }
-        GraphKind::Diagnostic(_) => {
-            if let Some(ds) = find_backing_data_sheet(data_sheets, result_sheets, &spec.primary_source_sheet_id) {
+            DirectBacking::TerminalResult(res) => {
+                if let Some(ds) = super::graph::resolve_source_data_sheet_slices(data_sheets, result_sheets, &res.analysis.source_sheet_id) {
+                    if series_index >= ds.archetype.column_count() {
+                        return Err(EngineError::with_code(
+                            ErrorCode::BadInput,
+                            format!("`series_index` {series_index} exceeds column count {}", ds.archetype.column_count()),
+                        ));
+                    }
+                    return Ok((ds.archetype.row_count(), column_subcolumn_count(&ds.archetype, series_index)));
+                }
+            }
+            DirectBacking::Failed { sheet_id, code, message } => return Err(failed_result_bounds_error(&sheet_id, code, &message)),
+            DirectBacking::NotFound => {}
+        },
+        GraphKind::Diagnostic(_) => match resolve_direct_backing(data_sheets, result_sheets, &spec.primary_source_sheet_id) {
+            DirectBacking::DataSheet(ds) => {
                 if series_index >= ds.archetype.column_count().max(1) {
                     return Err(EngineError::with_code(
                         ErrorCode::BadInput,
@@ -819,7 +853,7 @@ fn point_override_bounds_parts(
                 }
                 return Ok((ds.archetype.row_count(), column_subcolumn_count(&ds.archetype, series_index)));
             }
-            if let Some(res) = result_sheets.iter().find(|r| r.id == spec.primary_source_sheet_id) {
+            DirectBacking::TerminalResult(res) => {
                 let (cols, subcols) = result_col_and_subcols(res, series_index);
                 if series_index >= cols {
                     return Err(EngineError::with_code(
@@ -829,7 +863,9 @@ fn point_override_bounds_parts(
                 }
                 return Ok((result_row_upper(res), subcols));
             }
-        }
+            DirectBacking::Failed { sheet_id, code, message } => return Err(failed_result_bounds_error(&sheet_id, code, &message)),
+            DirectBacking::NotFound => {}
+        },
         _ => {}
     }
 

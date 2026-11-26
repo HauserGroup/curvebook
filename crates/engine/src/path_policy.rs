@@ -15,8 +15,44 @@ use serde_json::{Value, json};
 
 use crate::EngineError;
 
-const ENGINE_PATH_PARAM_KEYS: &[&str] =
-    &["path", "file_path", "filePath", "source_path", "sourcePath", "template_path", "templatePath", "ttf_font", "ttfFont", "font_path", "fontPath"];
+/// Canonical JSON parameter keys interpreted as host filesystem paths across engine commands (`AUD-13-23`).
+pub const PATH_PARAM_KEYS: &[&str] = &[
+    "path",
+    "file",
+    "file_path",
+    "filePath",
+    "out",
+    "output",
+    "output_path",
+    "outputPath",
+    "in",
+    "input",
+    "input_path",
+    "inputPath",
+    "source_path",
+    "sourcePath",
+    "target_path",
+    "targetPath",
+    "destination_path",
+    "destinationPath",
+    "template_path",
+    "templatePath",
+    "project",
+    "project_path",
+    "projectPath",
+    "csv_path",
+    "csvPath",
+    "ttf_font",
+    "ttfFont",
+    "font_path",
+    "fontPath",
+    "dir",
+    "directory",
+    "unpacked_dir",
+    "unpackedDir",
+];
+
+const ENGINE_PATH_PARAM_KEYS: &[&str] = PATH_PARAM_KEYS;
 
 /// Policy governing external filesystem reads, writes, and stored `ExternalDelimitedFile` links
 /// on an engine [`crate::Session`].

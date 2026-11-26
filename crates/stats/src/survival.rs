@@ -66,6 +66,7 @@ use curvebook_doc::{
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{chi2_sf, norm_two_sided_isf, norm_two_sided_p};
 use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, sym_eigen};
+use curvebook_math::sum::SummaryMoments;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
@@ -270,6 +271,11 @@ pub struct CoxPhResult {
 // Kaplan–Meier, Brookmeyer–Crowley Median CI, Log-Rank & Wilcoxon
 // ============================================================================
 
+#[inline]
+fn normalize_zero_time(t: f64) -> f64 {
+    if t == 0.0 { 0.0 } else { t }
+}
+
 /// Compute Kaplan–Meier survival curve, Greenwood SE, pointwise CIs (asymmetrical log-log or linear),
 /// and Brookmeyer–Crowley median survival CI.
 ///
@@ -301,7 +307,14 @@ pub fn kaplan_meier_curve(
             return Err(StatsError::InvalidParameter { name: "survival_time", value: obs.time });
         }
     }
-    let mut sorted = observations.to_vec();
+    let mut sorted: Vec<SurvivalObservation> = observations
+        .iter()
+        .map(|o| {
+            let mut copy = *o;
+            copy.time = normalize_zero_time(copy.time);
+            copy
+        })
+        .collect();
     sorted.sort_by(|a, b| a.time.total_cmp(&b.time));
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
@@ -652,10 +665,10 @@ fn log_scale_hr_ci(hr: f64, se_log: f64, z_crit: f64) -> Option<(f64, f64)> {
 fn mh_strata_sums(cohort_a: &[SurvivalObservation], cohort_b: &[SurvivalObservation]) -> (f64, f64, f64) {
     let mut recs: Vec<(f64, usize, SurvivalStatus)> = Vec::with_capacity(cohort_a.len() + cohort_b.len());
     for o in cohort_a {
-        recs.push((o.time, 0, o.status));
+        recs.push((normalize_zero_time(o.time), 0, o.status));
     }
     for o in cohort_b {
-        recs.push((o.time, 1, o.status));
+        recs.push((normalize_zero_time(o.time), 1, o.status));
     }
     recs.sort_by(|a, b| a.0.total_cmp(&b.0));
 
@@ -707,7 +720,7 @@ fn weighted_log_rank_stats(cohorts: &[&[SurvivalObservation]], weight_kind: Surv
             if !o.time.is_finite() || o.time < 0.0 {
                 return Err(StatsError::InvalidParameter { name: "survival_time", value: o.time });
             }
-            all_recs.push((o.time, g, o.status));
+            all_recs.push((normalize_zero_time(o.time), g, o.status));
         }
     }
     all_recs.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -779,24 +792,85 @@ pub struct CoxSubject {
     pub x: Vec<f64>,
 }
 
-/// Fit Cox Proportional Hazards model via Newton–Raphson with backtracking step-halving,
-/// supporting Breslow, Efron, and Exact discrete tie handling, omnibus LR/Wald/Score tests,
-/// Harrell's C-index, and Schoenfeld residual proportional-hazards checks.
+const COX_EXACT_MAX_DP_ELEMS: usize = 4_000_000;
+const COX_EXACT_MAX_OPS_PER_EVAL: usize = 50_000_000;
+
+type OrderedCoxSubject = (f64, bool, Vec<f64>, usize);
+
+fn standardize_cox_subjects(subjects: &[CoxSubject], p: usize) -> Result<(Vec<OrderedCoxSubject>, Vec<f64>), StatsError> {
+    let n = subjects.len();
+    let nf = n as f64;
+    let mut x_means = vec![0.0_f64; p];
+    let mut x_sds = vec![1.0_f64; p];
+    for j in 0..p {
+        let col: Vec<f64> = subjects.iter().map(|s| s.x[j]).collect();
+        let mom = SummaryMoments::from_slice(&col)?;
+        x_means[j] = mom.mean;
+        let max_dev = col.iter().map(|&v| (v - mom.mean).abs()).fold(0.0_f64, f64::max);
+        if max_dev > 0.0 {
+            let ss_scaled: f64 = col
+                .iter()
+                .map(|&v| {
+                    let d = (v - mom.mean) / max_dev;
+                    d * d
+                })
+                .sum();
+            let sd = max_dev * (ss_scaled / nf).sqrt();
+            if sd.is_finite() && sd > 0.0 {
+                x_sds[j] = sd;
+            }
+        }
+    }
+    let mut ordered: Vec<(f64, bool, Vec<f64>, usize)> = subjects
+        .iter()
+        .enumerate()
+        .map(|(orig_idx, s)| {
+            let xs: Vec<f64> = (0..p).map(|j| (s.x[j] - x_means[j]) / x_sds[j]).collect();
+            (normalize_zero_time(s.time), s.event, xs, orig_idx)
+        })
+        .collect();
+    ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    Ok((ordered, x_sds))
+}
+
+fn validate_cox_exact_ties_budget(n: usize, clusters: &[CoxTimeCluster], p: usize) -> Result<(), StatsError> {
+    let p_sq = p.checked_mul(p).ok_or(StatsError::InvalidParameter { name: "cox_exact_ties_budget", value: f64::INFINITY })?;
+    let p_tri = p
+        .checked_mul(p.saturating_add(1))
+        .map(|v| v / 2)
+        .ok_or(StatsError::InvalidParameter { name: "cox_exact_ties_budget", value: f64::INFINITY })?;
+    let mut total_ops = 0_usize;
+    for cl in clusters {
+        let d = cl.event_end - cl.risk_start;
+        let m = n - cl.risk_start;
+        if d < 2 || d >= m {
+            continue;
+        }
+        let k_target = d.min(m - d);
+        let dp_elems = k_target.checked_add(1).and_then(|kp1| kp1.checked_mul(p_sq));
+        if dp_elems.is_none_or(|elems| elems > COX_EXACT_MAX_DP_ELEMS) {
+            return Err(StatsError::InvalidParameter { name: "cox_exact_ties_budget", value: ((k_target as f64) + 1.0) * (p as f64) * (p as f64) });
+        }
+        let cl_ops = m.checked_mul(k_target).and_then(|mk| mk.checked_mul(p_tri));
+        let Some(next_ops) = cl_ops.and_then(|ops| total_ops.checked_add(ops)) else {
+            return Err(StatsError::InvalidParameter { name: "cox_exact_ties_budget", value: (m as f64) * (k_target as f64) * (p_tri as f64) });
+        };
+        if next_ops > COX_EXACT_MAX_OPS_PER_EVAL {
+            return Err(StatsError::InvalidParameter { name: "cox_exact_ties_budget", value: next_ops as f64 });
+        }
+        total_ops = next_ops;
+    }
+    Ok(())
+}
+
+/// Fit a Cox (1972) Proportional Hazards regression model using Newton–Raphson with backtracking
+/// line search and Breslow (1974), Efron (1977), or Exact discrete (Gail, Lubin & Rubinstein
+/// 1981) tie handling.
 ///
-/// - Model and estimation: maximizes the Cox (1972) partial likelihood (covariates are centred at
-///   their sample means first; `beta` is invariant to the shift) with per-risk-set log-sum-exp
-///   stabilization so cohorts with large predicted-risk differences across follow-up time avoid
-///   risk-set underflow or overflow.
-/// - Ties: Breslow (1974) approximation, Efron (1977) approximation, or Exact discrete partial
-///   likelihood (Kalbfleisch & Prentice 2002; Gail, Lubin & Rubinstein 1981 log-space symmetric
-///   polynomial dynamic programming over tied event sets).
-/// - Inference: `Cov(beta)` is the inverse observed information at convergence; Wald `z` and HR CIs
-///   `exp(beta +/- z * SE)`; omnibus likelihood-ratio, Wald, and score (at `beta = 0`) chi-square
-///   tests on `p` degrees of freedom.
-/// - Residuals and baseline hazard: martingale and deviance residuals (Therneau, Grambsch & Fleming
-///   1990) and the cumulative baseline hazard (Breslow 1974, Efron-adjusted when Efron ties are
-///   selected; Therneau & Grambsch 2000).
-/// - Discrimination: Harrell et al. (1982) concordance index.
+/// Covariates are centered and standardized internally so orthogonal multi-scale covariates do
+/// not fail Cholesky conditioning; coefficients and covariance matrices are back-transformed to
+/// the original predictor units.
+///
 /// - Proportional hazards: Schoenfeld (1982) residuals and the Grambsch & Therneau (1994) test.
 ///
 /// Full references are listed in the module header.
@@ -821,29 +895,19 @@ pub fn cox_ph_regression(
         }
     }
 
-    // Center covariates for numerical stability (partial likelihood and beta are shift-invariant!).
-    let mut x_means = vec![0.0_f64; p];
-    for s in subjects {
-        for (xm, &xj) in x_means.iter_mut().zip(&s.x) {
-            *xm += xj / (n as f64);
-        }
-    }
-    let mut ordered: Vec<(f64, bool, Vec<f64>, usize)> = subjects
-        .iter()
-        .enumerate()
-        .map(|(orig_idx, s)| {
-            let xc: Vec<f64> = (0..p).map(|j| s.x[j] - x_means[j]).collect();
-            (s.time, s.event, xc, orig_idx)
-        })
-        .collect();
-    ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    // Center and standardize covariates internally so multi-scale predictors never trigger
+    // spurious Cholesky failure or Levenberg damping imbalance.
+    let (ordered, x_sds) = standardize_cox_subjects(subjects, p)?;
     let clusters = build_cox_clusters(&ordered);
+    if tie_method == CoxTieMethod::Exact {
+        validate_cox_exact_ties_budget(n, &clusters, p)?;
+    }
 
     let zero_beta = vec![0.0_f64; p];
     let (ll_null, grad_null, info_null) = cox_eval(&ordered, &clusters, &zero_beta, tie_method, p)?;
     let score_chi2 = solve_quad_form(&info_null, &grad_null, p).unwrap_or(0.0);
 
-    let mut beta = vec![0.0_f64; p];
+    let mut beta_std = vec![0.0_f64; p];
     let mut ll_curr = ll_null;
     let mut grad = grad_null;
     let mut info = info_null.clone();
@@ -857,7 +921,7 @@ pub fn cox_ph_regression(
         let step = if let Ok(chol) = cholesky(&info_mat) {
             chol.solve(&grad)?
         } else {
-            // Mild Levenberg damping on near-singular information matrix.
+            // Mild Levenberg damping on near-singular standardized information matrix.
             let mut damped = info.clone();
             for j in 0..p {
                 damped[j * p + j] += 1e-4;
@@ -871,13 +935,13 @@ pub fn cox_ph_regression(
 
         let mut accepted = false;
         for _ in 0..32 {
-            let cand: Vec<f64> = (0..p).map(|j| beta[j] + scale * step[j]).collect();
+            let cand: Vec<f64> = (0..p).map(|j| beta_std[j] + scale * step[j]).collect();
             if let Ok((ll_cand, g_cand, i_cand)) = cox_eval(&ordered, &clusters, &cand, tie_method, p)
                 && ll_cand.is_finite()
                 && ll_cand >= ll_curr - 1e-12
             {
                 let delta = (ll_cand - ll_curr).abs();
-                beta = cand;
+                beta_std = cand;
                 ll_curr = ll_cand;
                 grad = g_cand;
                 info = i_cand;
@@ -901,26 +965,26 @@ pub fn cox_ph_regression(
     let chol_opt = cholesky(&info_mat).ok();
     let curr_well_conditioned = chol_opt.as_ref().is_some_and(|chol| matrix_pivots_well_conditioned(chol, &info, p));
 
-    let separated = detect_cox_separation(&ordered, &clusters, &beta, &last_step, &info_null, &info, p);
-    let diverged = !converged || !ll_curr.is_finite() || beta.iter().any(|b| !b.is_finite());
+    let separated = detect_cox_separation(&ordered, &clusters, &beta_std, &last_step, &info_null, &info, tie_method);
+    let diverged = !converged || !ll_curr.is_finite() || beta_std.iter().any(|b| !b.is_finite());
 
     // Never regularize (info + 1e-6*I) or substitute I when covariance is singular/separated.
     if diverged || separated || !null_well_conditioned || !curr_well_conditioned {
         converged = false;
     }
-    let cov_beta = if converged { chol_opt.and_then(|chol| chol.inverse().ok()) } else { None };
-    if cov_beta.is_none() {
+    let cov_std = if converged { chol_opt.and_then(|chol| chol.inverse().ok()) } else { None };
+    if cov_std.is_none() {
         converged = false;
     }
 
     let lr_chi2 = (2.0 * (ll_curr - ll_null)).max(0.0);
     let df = p as f64;
     let lr_p = chi2_sf(lr_chi2, df)?;
-    let (wald_chi2, wald_p) = if cov_beta.is_some() {
+    let (wald_chi2, wald_p) = if cov_std.is_some() {
         let w = (0..p)
             .map(|j| {
-                let row_dot: f64 = (0..p).map(|k| info[j * p + k] * beta[k]).sum();
-                beta[j] * row_dot
+                let row_dot: f64 = (0..p).map(|k| info[j * p + k] * beta_std[k]).sum();
+                beta_std[j] * row_dot
             })
             .sum::<f64>()
             .max(0.0);
@@ -931,23 +995,25 @@ pub fn cox_ph_regression(
     let score_p = chi2_sf(score_chi2, df)?;
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
-    let (schoenfeld_rhos, schoenfeld_ps, global_sch_chi2) = schoenfeld_diagnostics(&ordered, &clusters, &beta, cov_beta.as_ref(), tie_method, p)?;
+    let (schoenfeld_rhos, schoenfeld_ps, global_sch_chi2) = schoenfeld_diagnostics(&ordered, &clusters, &beta_std, cov_std.as_ref(), tie_method, p)?;
     let global_sch_p = if global_sch_chi2.is_finite() { chi2_sf(global_sch_chi2, df)? } else { f64::NAN };
 
     let mut covariates = Vec::with_capacity(p);
     for j in 0..p {
-        let var_j = cov_beta.as_ref().and_then(|cov| cov.get(j, j)).filter(|v| v.is_finite() && *v > 0.0);
-        let (se, z_stat, p_val, hr_lo, hr_hi) = if let Some(vj) = var_j {
-            let s = vj.sqrt();
-            let z = beta[j] / s;
-            (s, z, norm_two_sided_p(z), (beta[j] - z_crit * s).exp(), (beta[j] + z_crit * s).exp())
+        let beta_j = beta_std[j] / x_sds[j];
+        let var_std_j = cov_std.as_ref().and_then(|cov| cov.get(j, j)).filter(|v| v.is_finite() && *v > 0.0);
+        let (se, z_stat, p_val, hr_lo, hr_hi) = if let Some(vj) = var_std_j {
+            let s_std = vj.sqrt();
+            let s = s_std / x_sds[j];
+            let z = beta_std[j] / s_std;
+            (s, z, norm_two_sided_p(z), (beta_j - z_crit * s).exp(), (beta_j + z_crit * s).exp())
         } else {
             (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN)
         };
-        let hr = beta[j].exp();
+        let hr = beta_j.exp();
         covariates.push(CoxCovariateResult {
             name: covariate_names[j].clone(),
-            beta: beta[j],
+            beta: beta_j,
             se,
             z_statistic: z_stat,
             p_value: p_val,
@@ -958,9 +1024,9 @@ pub fn cox_ph_regression(
         });
     }
 
-    let (martingale_residuals, deviance_residuals, baseline_survival) = cox_residuals_and_baseline(&ordered, &clusters, &beta, tie_method, n);
-    let (concordance, comparable_pairs) = harrell_c_index(&ordered, &beta);
-    let (cov_beta_rows, correlation_matrix) = cox_cov_and_corr_matrices(cov_beta.as_ref(), p);
+    let (martingale_residuals, deviance_residuals, baseline_survival) = cox_residuals_and_baseline(&ordered, &clusters, &beta_std, tie_method, n);
+    let (concordance, comparable_pairs) = harrell_c_index(&ordered, &beta_std);
+    let (cov_beta_rows, correlation_matrix) = cox_cov_and_corr_matrices(cov_std.as_ref(), &x_sds, p);
 
     Ok(CoxPhResult {
         n_subjects: n,
@@ -990,8 +1056,8 @@ pub fn cox_ph_regression(
     })
 }
 
-fn cox_cov_and_corr_matrices(cov_beta: Option<&DenseMatrix>, p: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
-    let Some(cov) = cov_beta else {
+fn cox_cov_and_corr_matrices(cov_std: Option<&DenseMatrix>, x_sds: &[f64], p: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+    let Some(cov) = cov_std else {
         return (vec![vec![f64::NAN; p]; p], vec![vec![f64::NAN; p]; p]);
     };
     let mut cov_rows = vec![vec![0.0_f64; p]; p];
@@ -1004,9 +1070,9 @@ fn cox_cov_and_corr_matrices(cov_beta: Option<&DenseMatrix>, p: usize) -> (Vec<V
         .collect();
     for j in 0..p {
         for k in 0..p {
-            let c = cov.get(j, k).unwrap_or(0.0);
-            cov_rows[j][k] = c;
-            corr_rows[j][k] = if j == k { if inv_sds[j] > 0.0 { 1.0 } else { f64::NAN } } else { (c * inv_sds[j] * inv_sds[k]).clamp(-1.0, 1.0) };
+            let c_std = cov.get(j, k).unwrap_or(0.0);
+            cov_rows[j][k] = c_std / (x_sds[j] * x_sds[k]);
+            corr_rows[j][k] = if j == k { if inv_sds[j] > 0.0 { 1.0 } else { f64::NAN } } else { (c_std * inv_sds[j] * inv_sds[k]).clamp(-1.0, 1.0) };
         }
     }
     (cov_rows, corr_rows)
@@ -1077,7 +1143,7 @@ fn matrix_pivots_well_conditioned(chol: &curvebook_math::linalg::Cholesky, mat: 
     })
 }
 
-fn has_monotone_separation(ordered: &[(f64, bool, Vec<f64>, usize)], clusters: &[CoxTimeCluster], dir: &[f64]) -> bool {
+fn has_monotone_separation(ordered: &[(f64, bool, Vec<f64>, usize)], clusters: &[CoxTimeCluster], dir: &[f64], tie_method: CoxTieMethod) -> bool {
     let dir_norm = dir.iter().map(|v| v * v).sum::<f64>().sqrt();
     if !dir_norm.is_finite() || dir_norm <= 0.0 {
         return false;
@@ -1091,42 +1157,71 @@ fn has_monotone_separation(ordered: &[(f64, bool, Vec<f64>, usize)], clusters: &
     let n = ordered.len();
     let mut has_strict = false;
     for cl in clusters {
-        if cl.event_end == cl.risk_start || cl.event_end == n {
+        if cl.event_end == cl.risk_start {
             continue;
         }
-        let min_evt = lps[cl.risk_start..cl.event_end].iter().copied().fold(f64::INFINITY, f64::min);
+        let mut min_evt = f64::INFINITY;
+        let mut max_evt = f64::NEG_INFINITY;
+        for &lp in &lps[cl.risk_start..cl.event_end] {
+            min_evt = min_evt.min(lp);
+            max_evt = max_evt.max(lp);
+        }
+        if cl.event_end == n {
+            // Under Breslow/Efron, tied events appear in the risk-set denominator alongside each
+            // other, so min_evt < max_evt forces partial log-likelihood -> -inf along `dir`.
+            if tie_method != CoxTieMethod::Exact && min_evt < max_evt - tol {
+                return false;
+            }
+            continue;
+        }
         let mut max_surv = f64::NEG_INFINITY;
         let mut min_surv = f64::INFINITY;
         for &lp in &lps[cl.event_end..n] {
             max_surv = max_surv.max(lp);
             min_surv = min_surv.min(lp);
         }
-        if min_evt < max_surv - tol {
-            return false;
-        }
-        // Strict or quasi-complete separation: all events >= all survivors, and some survivor is strictly lower.
-        if min_evt > min_surv + tol {
-            has_strict = true;
+        match tie_method {
+            CoxTieMethod::Breslow | CoxTieMethod::Efron => {
+                // Every tied event must attain the maximum across both tied events and survivors.
+                if min_evt < max_evt.max(max_surv) - tol {
+                    return false;
+                }
+                if min_evt > min_surv + tol {
+                    has_strict = true;
+                }
+            }
+            CoxTieMethod::Exact => {
+                // Exact discrete partial likelihood sums over d-subsets of the risk set; the
+                // observed event subset attains the max subset sum iff min_evt >= max_surv and
+                // strictly beats another d-subset iff max_evt > min_surv.
+                if min_evt < max_surv - tol {
+                    return false;
+                }
+                if max_evt > min_surv + tol {
+                    has_strict = true;
+                }
+            }
         }
     }
     has_strict
 }
 
 fn detect_cox_separation(
-    ordered: &[(f64, bool, Vec<f64>, usize)],
+    ordered: &[OrderedCoxSubject],
     clusters: &[CoxTimeCluster],
     beta: &[f64],
     last_step: &[f64],
     info_null: &[f64],
     info_curr: &[f64],
-    p: usize,
+    tie_method: CoxTieMethod,
 ) -> bool {
+    let p = beta.len();
     let neg_beta: Vec<f64> = beta.iter().map(|b| -b).collect();
-    if has_monotone_separation(ordered, clusters, beta) || has_monotone_separation(ordered, clusters, &neg_beta) {
+    if has_monotone_separation(ordered, clusters, beta, tie_method) || has_monotone_separation(ordered, clusters, &neg_beta, tie_method) {
         return true;
     }
     let neg_step: Vec<f64> = last_step.iter().map(|v| -v).collect();
-    if has_monotone_separation(ordered, clusters, last_step) || has_monotone_separation(ordered, clusters, &neg_step) {
+    if has_monotone_separation(ordered, clusters, last_step, tie_method) || has_monotone_separation(ordered, clusters, &neg_step, tie_method) {
         return true;
     }
     for j in 0..p {
@@ -1137,7 +1232,7 @@ fn detect_cox_separation(
             let mut neg_e = vec![0.0_f64; p];
             pos_e[j] = 1.0;
             neg_e[j] = -1.0;
-            if has_monotone_separation(ordered, clusters, &pos_e) || has_monotone_separation(ordered, clusters, &neg_e) {
+            if has_monotone_separation(ordered, clusters, &pos_e, tie_method) || has_monotone_separation(ordered, clusters, &neg_e, tie_method) {
                 return true;
             }
         }
@@ -1764,10 +1859,11 @@ fn harrell_c_index(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64]) -> (O
             let comparable = ordered[j].0 > ordered[i].0 || (ordered[j].0 == ordered[i].0 && !ordered[j].1);
             if comparable {
                 pairs += 1;
-                if lp[i] > lp[j] {
-                    conc += 1.0;
-                } else if (lp[i] - lp[j]).abs() <= 1e-12 {
+                let tie_tol = 1e-12 * lp[i].abs().max(lp[j].abs()).max(1.0);
+                if (lp[i] - lp[j]).abs() <= tie_tol {
                     conc += 0.5;
+                } else if lp[i] > lp[j] {
+                    conc += 1.0;
                 }
             }
         }
@@ -2299,9 +2395,17 @@ fn build_cox_design_subjects(
 ) -> Result<CoxDesignExtraction, StatsError> {
     let time_var = mv.variables.get(time_column).ok_or(StatsError::MissingColumn { index: time_column })?;
     let status_var = mv.variables.get(status_column).ok_or(StatsError::MissingColumn { index: status_column })?;
+    if time_column == status_column {
+        return Err(StatsError::InvalidParameter { name: "status_column", value: status_column as f64 });
+    }
     let mut is_cat = Vec::with_capacity(predictor_columns.len());
+    let mut seen_preds = Vec::with_capacity(predictor_columns.len());
     for &pc in predictor_columns {
         let pv = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
+        if pc == time_column || pc == status_column || seen_preds.contains(&pc) {
+            return Err(StatsError::InvalidParameter { name: "predictor_columns", value: pc as f64 });
+        }
+        seen_preds.push(pc);
         is_cat.push(pv.role == VariableRole::Categorical);
     }
     for &(ref_col, _) in reference_levels {
@@ -2386,6 +2490,9 @@ fn build_cox_design_subjects(
     for (pos, &pc) in predictor_columns.iter().enumerate() {
         let title = &mv.variables[pc].title;
         if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
+            if !retained_rows.is_empty() && non_refs.is_empty() {
+                return Err(StatsError::ZeroVariance { context: "Cox PH predictor has fewer than 2 levels after complete-case filtering" });
+            }
             for lv in non_refs {
                 pred_names.push(format!("{title}[{lv} vs {ref_lvl}]"));
             }

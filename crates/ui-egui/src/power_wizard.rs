@@ -269,7 +269,10 @@ impl PowerWizardState {
                 }
             }
             PowerTestFamily::TwoSamplePairedT => {
-                if self.effect_mode == PowerEffectInputMode::Proportions || self.effect_mode == PowerEffectInputMode::RegressionRSquared {
+                if matches!(
+                    self.effect_mode,
+                    PowerEffectInputMode::Proportions | PowerEffectInputMode::RegressionRSquared | PowerEffectInputMode::RegressionSlope
+                ) {
                     PowerEffectInputMode::Standardized
                 } else {
                     self.effect_mode

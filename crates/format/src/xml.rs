@@ -340,18 +340,32 @@ pub fn decode_xml_entities(raw: &str, base_offset: usize) -> Result<String, Form
     Ok(out)
 }
 
+/// Enforce XML 1.0 §2.2 `Char` validity (`#x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]`).
+const fn is_valid_xml10_char(ch: char) -> bool {
+    matches!(ch as u32, 0x09 | 0x0A | 0x0D | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
+}
+
+fn decode_numeric_xml_char(code: u32, entity: &str, base_offset: usize) -> Result<char, FormatError> {
+    let ch =
+        char::from_u32(code).ok_or_else(|| FormatError::XmlParse { offset: base_offset, reason: format!("invalid Unicode scalar `&{entity};`") })?;
+    if !is_valid_xml10_char(ch) {
+        return Err(FormatError::XmlParse { offset: base_offset, reason: format!("forbidden XML 1.0 character reference `&{entity};`") });
+    }
+    Ok(ch)
+}
+
 fn decode_xml_entity_name(entity: &str, base_offset: usize) -> Result<char, FormatError> {
     if let Some(ch) = lookup_named_xml_entity(entity) {
         Ok(ch)
     } else if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
         let code = u32::from_str_radix(hex, 16)
             .map_err(|_| FormatError::XmlParse { offset: base_offset, reason: format!("invalid hex XML entity `&{entity};`") })?;
-        char::from_u32(code).ok_or_else(|| FormatError::XmlParse { offset: base_offset, reason: format!("invalid Unicode scalar `&{entity};`") })
+        decode_numeric_xml_char(code, entity, base_offset)
     } else if let Some(digits) = entity.strip_prefix('#') {
         let code = digits
             .parse::<u32>()
             .map_err(|_| FormatError::XmlParse { offset: base_offset, reason: format!("invalid decimal XML entity `&{entity};`") })?;
-        char::from_u32(code).ok_or_else(|| FormatError::XmlParse { offset: base_offset, reason: format!("invalid Unicode scalar `&{entity};`") })
+        decode_numeric_xml_char(code, entity, base_offset)
     } else {
         Err(FormatError::XmlParse { offset: base_offset, reason: format!("unknown XML entity `&{entity};`") })
     }

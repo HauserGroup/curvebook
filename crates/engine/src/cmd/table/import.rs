@@ -5,8 +5,9 @@
 use std::collections::{HashMap, HashSet};
 
 use curvebook_doc::{
-    CellCoord, DataSheet, DocError, ImportLinkSpec, InfoSheet, InternalLinkKind, LinkSource, MAX_SHEETS_PER_PROJECT, PlacementMode, ProjectDocument,
-    ResultSheet, SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableArchetype, VariableSource, validate_project_cells, validate_title,
+    CellCoord, DataSheet, DocError, ImportLinkSpec, InfoSheet, InternalLinkKind, LinkSource, MAX_PROJECT_IMAGE_ASSETS, MAX_SHEETS_PER_PROJECT,
+    PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableArchetype, VariableSource,
+    validate_project_cells, validate_title,
 };
 use curvebook_format::{
     CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, XlsxImportOptions, import_csv_to_datasheet, import_prism_bytes,
@@ -290,8 +291,8 @@ pub(super) fn build_paste_link_spec(
         policy.normalize_stored_link_source(&mut src)?;
         src
     } else {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "table.pasteLink requires `link_spec`, `source_sheet_id`, or `path`")
-            .with_remediation("Specify an internal `source_sheet_id` or an external `path`."));
+        return Err(EngineError::with_code(ErrorCode::BadInput, "table.pasteLink requires `link_spec`, `source_sheet_id`, or `source_path`")
+            .with_remediation("Specify an internal `source_sheet_id` or an external `source_path`."));
     };
 
     Ok(ImportLinkSpec { source, filter, placement })
@@ -395,7 +396,7 @@ pub(super) fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
     {
         dirty_seeds.push(iid.clone());
     }
-    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
+    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, None, Some(ctx.cancelled))?;
     prune_shortened_series_overrides(doc, &target_id, &before_active);
     Ok(CommandOutcome::mutated(
         "table.pasteLink",
@@ -510,8 +511,25 @@ pub(super) fn import_into_existing_sheet(
     policy.normalize_stored_link_source(&mut source)?;
     let link_spec = ImportLinkSpec { source, filter, placement };
     let (target_idx, info_idx) = locate_target_and_info_indices(doc, id, info_id.as_ref())?;
+    let existing_link_ids: HashSet<String> =
+        doc.data_sheets.get(target_idx).map(|d| d.linked_regions.iter().map(|r| r.id.clone()).collect()).unwrap_or_default();
+    let csv_link_id = keep_link.then(|| {
+        let base = format!("csv-link-{}", id.as_str());
+        if !existing_link_ids.contains(&base) {
+            base
+        } else {
+            let mut seq = 2usize;
+            loop {
+                let candidate = format!("csv-link-{}-{seq}", id.as_str());
+                if !existing_link_ids.contains(&candidate) {
+                    break candidate;
+                }
+                seq = seq.saturating_add(1);
+            }
+        }
+    });
     let opts = ImportPipelineOptions {
-        link_id: if keep_link { Some(format!("csv-link-{}", id.as_str())) } else { None },
+        link_id: csv_link_id,
         provenance_summary: if keep_link { Some(String::from("Imported CSV link")) } else { None },
         ..ImportPipelineOptions::default()
     };
@@ -549,21 +567,29 @@ pub(super) fn import_into_existing_sheet(
             }
             return Err(err);
         }
-        if !keep_link
-            && link_before > 0
-            && report.rows_placed > 0
-            && report.cols_placed > 0
-            && let Err(err) = ensure_range_outside_linked_regions(prev_ds, report.target_range, "import into")
-        {
-            if let Some(slot) = doc.data_sheets.get_mut(target_idx) {
-                *slot = prev_ds.clone();
+        if link_before > 0 && report.rows_placed > 0 && report.cols_placed > 0 {
+            let link_conflict = ensure_range_outside_linked_regions(prev_ds, report.target_range, "import into").and_then(|()| {
+                if matches!(link_spec.placement.mode, PlacementMode::InsertRows) {
+                    let shift_span = SheetCellRange::new(
+                        CellCoord::new(link_spec.placement.anchor.row, report.target_range.start.col, report.target_range.start.subcol),
+                        CellCoord::new(usize::MAX, report.target_range.end.col, report.target_range.end.subcol),
+                    );
+                    ensure_range_outside_linked_regions(prev_ds, shift_span, "insert rows into")
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(err) = link_conflict {
+                if let Some(slot) = doc.data_sheets.get_mut(target_idx) {
+                    *slot = prev_ds.clone();
+                }
+                if let (Some(idx), Some(prev_info)) = (info_idx, pre_info_snapshot)
+                    && let Some(slot) = doc.info_sheets.get_mut(idx)
+                {
+                    *slot = prev_info;
+                }
+                return Err(err);
             }
-            if let (Some(idx), Some(prev_info)) = (info_idx, pre_info_snapshot)
-                && let Some(slot) = doc.info_sheets.get_mut(idx)
-            {
-                *slot = prev_info;
-            }
-            return Err(err);
         }
     }
     if !keep_link && let Some(target_ds) = doc.data_sheets.get_mut(target_idx) {
@@ -592,7 +618,7 @@ pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
     } else if let Some(path) = &p.path {
         policy.read_delimited_text_file(path, "CSV", MAX_CSV_FILE_BYTES)?
     } else {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "table.importCsv requires `path` or `csv`/`text`")
+        return Err(EngineError::with_code(ErrorCode::BadInput, "table.importCsv requires `path` or `csv`")
             .with_remediation("Provide a CSV/TSV file `path` or inline `csv` text."));
     };
 
@@ -628,7 +654,7 @@ pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
         None
     };
 
-    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
+    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, None, Some(ctx.cancelled))?;
     if let Some(before) = before_active.as_deref() {
         prune_shortened_series_overrides(doc, &id, before);
     }
@@ -731,6 +757,17 @@ pub(super) fn merge_imported_document(doc: &mut ProjectDocument, mut imported: P
     let existing_cells = doc.total_allocated_cells()?;
     let added_cells = imported.total_allocated_cells()?;
     validate_project_cells(existing_cells, added_cells)?;
+    let existing_asset_ids: HashSet<&str> = doc.image_assets.iter().map(|a| a.asset_id.as_str()).collect();
+    let mut added_asset_ids: HashSet<&str> = HashSet::new();
+    for asset in &imported.image_assets {
+        if !existing_asset_ids.contains(asset.asset_id.as_str()) {
+            added_asset_ids.insert(asset.asset_id.as_str());
+        }
+    }
+    let total_assets = doc.image_assets.len().saturating_add(added_asset_ids.len());
+    if total_assets > MAX_PROJECT_IMAGE_ASSETS {
+        return Err(EngineError::from(DocError::TooManyImageAssets { count: total_assets, max: MAX_PROJECT_IMAGE_ASSETS }));
+    }
 
     let id_map = plan_imported_id_remap(doc, &imported)?;
     if !id_map.is_empty() {
@@ -753,6 +790,9 @@ pub(super) fn merge_imported_document(doc: &mut ProjectDocument, mut imported: P
                 ad.id = res.id.clone();
                 remap_data_sheet_links(ad, &id_map);
             }
+            for outlier in &mut res.eliminated_outliers {
+                remap_sheet_id(&mut outlier.sheet_id, &id_map);
+            }
         }
         for gs in &mut imported.graph_sheets {
             remap_sheet_id(&mut gs.id, &id_map);
@@ -764,6 +804,9 @@ pub(super) fn merge_imported_document(doc: &mut ProjectDocument, mut imported: P
         }
     }
 
+    for asset in imported.image_assets {
+        doc.upsert_image_asset(asset)?;
+    }
     for ds in imported.data_sheets {
         doc.add_data_sheet(ds)?;
     }
@@ -872,7 +915,7 @@ pub(super) fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         let bytes = decode_base64(b64)?;
         import_pzfx_bytes(&bytes)?
     } else {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "table.importPzfx requires `path`, `xml`/`text`, or `bytes_base64`")
+        return Err(EngineError::with_code(ErrorCode::BadInput, "table.importPzfx requires `path`, `xml`, or `bytes_base64`")
             .with_remediation("Provide an XML `path`, inline `xml` string, or `bytes_base64`."));
     };
 
@@ -915,10 +958,18 @@ pub(super) struct ImportXlsxParams {
     pub(super) include_hidden: Option<bool>,
     /// Merge imported worksheets into the current project instead of replacing it (default false).
     pub(super) merge: Option<bool>,
+    /// Optional project title override (defaults to the workbook filename stem when omitted).
+    pub(super) title: Option<String>,
 }
 
 pub(super) fn run_import_xlsx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportXlsxParams = parse_params(&command_schema::<ImportXlsxParams>(), raw)?;
+    if let Some(ref title) = p.title {
+        validate_title(title)?;
+        if title.trim().is_empty() {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "table.importXlsx `title` must not be empty"));
+        }
+    }
     let bytes = if let Some(path) = p.path.as_deref() {
         ctx.session.path_policy.read_binary_file(path, "workbook", MAX_ARCHIVE_FILE_BYTES)?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
@@ -950,10 +1001,11 @@ pub(super) fn run_import_xlsx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     };
     let table_kind = p.archetype.as_deref().map(parse_table_kind).transpose()?;
     let subcolumn_mode = resolve_subcolumn_mode(p.subcolumn_mode.as_ref(), 1)?;
-    let title = p
-        .path
-        .as_deref()
-        .and_then(|raw_path| std::path::Path::new(raw_path).file_stem().and_then(|s| s.to_str()).filter(|s| !s.trim().is_empty()).map(str::to_owned));
+    let title = p.title.map(|t| t.trim().to_owned()).or_else(|| {
+        p.path.as_deref().and_then(|raw_path| {
+            std::path::Path::new(raw_path).file_stem().and_then(|s| s.to_str()).filter(|s| !s.trim().is_empty()).map(str::to_owned)
+        })
+    });
 
     let opts = XlsxImportOptions {
         sheet_names: p.sheets,
@@ -1339,7 +1391,7 @@ pub(super) fn parse_explicit_tidy_decimal(raw: Option<&str>) -> Result<Option<ch
     let Some(s) = raw else {
         return Ok(None);
     };
-    match s.trim() {
+    match s.trim().to_ascii_lowercase().as_str() {
         "." | "dot" | "period" => Ok(Some('.')),
         "," | "comma" => Ok(Some(',')),
         "auto" => Ok(None),
@@ -1405,6 +1457,18 @@ pub(super) fn extract_tidy_data(p: &ImportTidyLongParams, policy: &ExternalPathP
 }
 
 pub(super) fn resolve_tidy_mapping(p: &ImportTidyLongParams, headers: &[String]) -> Result<TidyColumnMapping, EngineError> {
+    let has_flat = p.flat_mapping.x_col.is_some()
+        || p.flat_mapping.group_col.is_some()
+        || p.flat_mapping.replicate_col.is_some()
+        || p.flat_mapping.value_col.is_some()
+        || p.flat_mapping.excluded_col.is_some();
+    if p.mapping.is_some() && has_flat {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            "table.importTidyLong cannot combine nested `mapping` with top-level column mapping fields",
+        )
+        .with_remediation("Supply either `mapping: { ... }` or top-level column mapping fields, not both."));
+    }
     let m = p.mapping.as_ref().unwrap_or(&p.flat_mapping);
     let group_col = m
         .group_col
@@ -1474,5 +1538,66 @@ mod tests {
         let params = ImportPrismParams { path: None, bytes_base64: None, bytes: Some(vec![0u8; MAX_ARCHIVE_FILE_BYTES + 1]), merge: None };
         let res = import_prism_with_params(&mut ctx, params);
         assert!(matches!(res, Err(err) if err.code == ErrorCode::ResourceLimit));
+    }
+
+    #[test]
+    fn aud_02_05_merge_imported_document_preserves_images_and_remaps_outliers() {
+        use curvebook_doc::{
+            AnalysisKind, AnalysisSpec, ColumnDesignHint, ColumnTable, DescriptiveSpec, ImageMimeKind, LayoutItem, LayoutSheet, LayoutSpec,
+            ProjectImageAsset, RectPt, SourceCellId,
+        };
+
+        let mut dest = ProjectDocument::new("Dest").unwrap();
+        let d_dest =
+            DataSheet::new("data-1", "Dest Data", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).unwrap()))
+                .unwrap();
+        dest.add_data_sheet(d_dest).unwrap();
+
+        let mut imported = ProjectDocument::new("Imported").unwrap();
+        let d_imp =
+            DataSheet::new("data-1", "Imp Data", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).unwrap()))
+                .unwrap();
+        imported.add_data_sheet(d_imp).unwrap();
+
+        let asset = ProjectImageAsset {
+            asset_id: String::from("img-0123456789abcdef"),
+            media_type: ImageMimeKind::Png,
+            pixel_size: (2, 2),
+            bytes: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0],
+        };
+        imported.upsert_image_asset(asset.clone()).unwrap();
+
+        let mut layout_spec = LayoutSpec::default();
+        layout_spec
+            .add_item(LayoutItem::EmbeddedImage {
+                id: String::from("img-panel"),
+                asset_id: asset.asset_id.clone(),
+                bounds_pt: RectPt::new(10.0, 10.0, 40.0, 40.0),
+                rotation_deg: 0.0,
+                lock_aspect_ratio: true,
+                crop: curvebook_doc::CropInsetsPt::default(),
+                border: None,
+                badge_override: None,
+            })
+            .unwrap();
+        imported.add_layout_sheet(LayoutSheet::new("layout-1", "Imp Layout", layout_spec).unwrap()).unwrap();
+
+        let spec =
+            AnalysisSpec::new(SheetId::new("res-1"), SheetId::new("data-1"), AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).unwrap();
+        let mut res = ResultSheet::new(spec).unwrap();
+        res.eliminated_outliers.push(SourceCellId { sheet_id: SheetId::new("data-1"), row: 0, col: 0, subcol: 0 });
+        imported.add_result_sheet(res).unwrap();
+
+        merge_imported_document(&mut dest, imported).unwrap();
+
+        assert!(dest.image_asset(&asset.asset_id).is_some(), "merged document must retain imported image assets");
+        let merged_res = dest.result_sheet(&SheetId::new("res-1")).expect("merged result sheet");
+        assert_eq!(merged_res.analysis.source_sheet_id.as_str(), "data-1-2");
+        assert_eq!(merged_res.eliminated_outliers.len(), 1);
+        assert_eq!(
+            merged_res.eliminated_outliers[0].sheet_id.as_str(),
+            "data-1-2",
+            "eliminated_outliers.sheet_id must be remapped on sheet ID collision"
+        );
     }
 }

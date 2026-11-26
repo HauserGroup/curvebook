@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
 
-use crate::scan_util::{has_ext_ci, is_real_dir, is_regular_file, read_dir_paths_sorted, rel_slash_lossy, walk_rel_files};
+use crate::scan_util::{has_ext_ci, read_dir_paths_sorted, rel_slash_lossy, walk_rel_files};
 
 const ACTIONLINT_CONFIG: &str = ".github/actionlint.yaml";
 const REQUIRE_WORKFLOW_LINT_ENV: &str = "CURVEBOOK_REQUIRE_WORKFLOW_LINT";
@@ -52,22 +52,25 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let shellcheck_ran =
         !shell_scripts.is_empty() && run_linter_if_installed(root, "shellcheck", "shellcheck -x", &["-x"], &shell_scripts, in_ci, require_lint)?;
 
-    if actionlint_ran && (shellcheck_ran || shell_scripts.is_empty()) {
-        println!("workflows: actionlint ({} workflow files) and shellcheck ({} shell scripts) passed", workflows.len(), shell_scripts.len());
-    } else if !actionlint_ran && !shellcheck_ran {
-        return Err(String::from(
+    report_lint_outcome(actionlint_ran, shellcheck_ran, workflows.len(), shell_scripts.len())
+}
+
+fn report_lint_outcome(actionlint_ran: bool, shellcheck_ran: bool, workflow_count: usize, shell_script_count: usize) -> Result<(), String> {
+    let shellcheck_ok = shellcheck_ran || shell_script_count == 0;
+    if actionlint_ran && shellcheck_ok {
+        println!("workflows: actionlint ({workflow_count} workflow files) and shellcheck ({shell_script_count} shell scripts) passed");
+        Ok(())
+    } else if !actionlint_ran && !shellcheck_ok {
+        Err(String::from(
             "neither `actionlint` nor `shellcheck` is installed in PATH; cannot verify workflows/scripts (offline YAML check passed, both required when CI=true)",
-        ));
+        ))
     } else if !actionlint_ran {
-        return Err(String::from(
-            "`actionlint` is not installed in PATH while `shellcheck` ran; cannot skip workflow linting silently (install `actionlint`)",
-        ));
+        Err(String::from("`actionlint` is not installed in PATH; cannot skip workflow linting silently (install `actionlint`)"))
     } else {
-        return Err(String::from(
+        Err(String::from(
             "`shellcheck` is not installed in PATH while `actionlint` ran; cannot skip shell script linting silently (install `shellcheck`)",
-        ));
+        ))
     }
-    Ok(())
 }
 
 /// Perform offline YAML syntax & structure checks so malformed workflows always fail even without `actionlint`.
@@ -150,11 +153,25 @@ fn is_yaml_path(path: &Path) -> bool {
 /// Discover all `.yml` / `.yaml` files inside `.github/workflows` as slash-normalized relative paths.
 pub fn collect_workflow_files(root: &Path) -> Result<Vec<String>, String> {
     let dir = root.join(".github/workflows");
-    if !dir.is_dir() {
-        return Ok(Vec::new());
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(String::from(".github/workflows: symlink directory is forbidden"));
+        }
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err(String::from(".github/workflows: expected directory")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(format!("stat .github/workflows: {err}")),
     }
-    let mut out: Vec<String> =
-        read_dir_paths_sorted(&dir)?.into_iter().filter(|p| is_regular_file(p) && is_yaml_path(p)).map(|p| rel_slash_lossy(root, &p)).collect();
+    let mut out = Vec::new();
+    for path in read_dir_paths_sorted(&dir)? {
+        let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!("{}: symlink is forbidden inside `.github/workflows`", rel_slash_lossy(root, &path)));
+        }
+        if meta.is_file() && is_yaml_path(&path) {
+            out.push(rel_slash_lossy(root, &path));
+        }
+    }
     out.sort();
     Ok(out)
 }
@@ -162,13 +179,34 @@ pub fn collect_workflow_files(root: &Path) -> Result<Vec<String>, String> {
 /// Discover all `.yml` / `.yaml` files inside `.github/actions` recursively as slash-normalized paths.
 pub fn collect_action_files(root: &Path) -> Result<Vec<String>, String> {
     let dir = root.join(".github/actions");
-    if !is_real_dir(&dir) {
-        return Ok(Vec::new());
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(String::from(".github/actions: symlink directory is forbidden"));
+        }
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err(String::from(".github/actions: expected directory")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(format!("stat .github/actions: {err}")),
     }
     let mut out = Vec::new();
-    walk_rel_files(root, &dir, &|_| false, &is_yaml_path, &mut out)?;
+    collect_yaml_tree_fail_closed(root, &dir, &mut out)?;
     out.sort();
     Ok(out)
+}
+
+fn collect_yaml_tree_fail_closed(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    for path in read_dir_paths_sorted(dir)? {
+        let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!("{}: symlink is forbidden inside `.github/actions`", rel_slash_lossy(root, &path)));
+        }
+        if meta.is_dir() {
+            collect_yaml_tree_fail_closed(root, &path, out)?;
+        } else if meta.is_file() && is_yaml_path(&path) {
+            out.push(rel_slash_lossy(root, &path));
+        }
+    }
+    Ok(())
 }
 
 /// Discover all tracked `.sh` scripts and `.githooks/*` hooks (falling back to recursive filesystem scan outside git).
@@ -317,6 +355,25 @@ mod tests {
             let corrupt = TestDir::new("wf-corrupt-git");
             std::fs::create_dir_all(corrupt.join(".git")).unwrap();
             assert!(collect_shell_scripts(corrupt.path()).is_err(), "corrupt .git must propagate git ls-files failure");
+        }
+
+        // AUD-12-51: empty shell_scripts with missing actionlint must blame actionlint, not shellcheck.
+        let err_no_sh = super::report_lint_outcome(false, false, 1, 0).unwrap_err();
+        assert!(err_no_sh.contains("actionlint") && !err_no_sh.contains("neither"), "{err_no_sh}");
+        let err_both = super::report_lint_outcome(false, false, 1, 2).unwrap_err();
+        assert!(err_both.contains("neither `actionlint` nor `shellcheck`"), "{err_both}");
+
+        #[cfg(unix)]
+        {
+            let sym_dir = TestDir::new("wf-symlink");
+            sym_dir.write("outside.yml", "name: Outside\non: push\njobs: {}\n");
+            std::fs::create_dir_all(sym_dir.join(".github/workflows")).unwrap();
+            std::os::unix::fs::symlink(sym_dir.join("outside.yml"), sym_dir.join(".github/workflows/link.yml")).unwrap();
+            assert!(collect_workflow_files(sym_dir.path()).unwrap_err().contains("symlink"));
+
+            std::fs::create_dir_all(sym_dir.join(".github/actions/setup")).unwrap();
+            std::os::unix::fs::symlink(sym_dir.join("outside.yml"), sym_dir.join(".github/actions/setup/action.yml")).unwrap();
+            assert!(super::collect_action_files(sym_dir.path()).unwrap_err().contains("symlink"));
         }
     }
 }

@@ -18,7 +18,7 @@ use crate::dsl::ode_fit_budget_exceeded;
 use crate::error::{FitError, FitStatus};
 use crate::library::ParametricModel;
 use crate::solver::inference::obs_y_ss;
-use crate::solver::layout::{ObsRecord, ParamBinding, ParameterLayout, obs_is_sweep_ordered, ode_budget_error, project_theta};
+use crate::solver::layout::{ObsRecord, ParamBinding, ParameterLayout, model_dataset_index, obs_is_sweep_ordered, ode_budget_error, project_theta};
 use crate::solver::results::SolverConfig;
 
 pub(in crate::solver) fn eval_predictions_ordered(
@@ -37,7 +37,8 @@ pub(in crate::solver) fn eval_predictions_ordered(
         for (dst, rec) in y_hat_out.iter_mut().zip(obs.iter()) {
             if slot_ds.is_none_or(|d| d == rec.ds_local_idx) {
                 let start = rec.ds_local_idx * p_m;
-                let Some(pred) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
+                let ds_arg = model_dataset_index(model, rec.ds_local_idx, rec.point.data_set_index);
+                let Some(pred) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], ds_arg) else {
                     return false;
                 };
                 if !pred.is_finite() {
@@ -56,7 +57,8 @@ pub(in crate::solver) fn eval_predictions_ordered(
     for idx in order {
         let rec = &obs[idx];
         let start = rec.ds_local_idx * p_m;
-        let Some(pred) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
+        let ds_arg = model_dataset_index(model, rec.ds_local_idx, rec.point.data_set_index);
+        let Some(pred) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], ds_arg) else {
             return false;
         };
         if !pred.is_finite() {
@@ -129,12 +131,33 @@ pub(in crate::solver) fn mat_set(m: &mut DenseMatrix, r: usize, c: usize, val: f
     }
 }
 
+/// Scale-aware finite-difference step `h = eps * |theta_j|` (or `eps` at `0`), capped by
+/// `0.25 * (ub - lb)` on narrow box bounds so nanomolar/picomolar parameters and narrow boxes
+/// never step out of bounds or distort derivatives (`AUD-03-10`; Nocedal & Wright 2006, Ch. 8).
+pub(in crate::solver) fn fd_step_size(xj: f64, eps: f64, lb: Option<f64>, ub: Option<f64>) -> f64 {
+    let mut h = if xj != 0.0 && xj.is_finite() { eps * xj.abs() } else { eps };
+    if let (Some(l), Some(u)) = (lb, ub)
+        && u > l
+        && (u - l).is_finite()
+    {
+        let box_w = u - l;
+        if xj == 0.0 && box_w < 1.0 {
+            h = eps * box_w;
+        }
+        h = h.min(0.25 * box_w);
+    }
+    let min_ulp = 4.0 * f64::EPSILON * xj.abs().max(f64::MIN_POSITIVE);
+    if h < min_ulp {
+        h = match (lb, ub) {
+            (Some(l), Some(u)) if u > l => min_ulp.min(0.25 * (u - l)),
+            _ => min_ulp,
+        };
+    }
+    h
+}
+
 /// Compute weighted Jacobian `J_{i, j} = sqrt_w_i * df_i / dtheta_j` (`N x K`) using analytical
-/// `model.grad` when supported, or central/forward finite differences otherwise.
-///
-/// Step sizes `h = 1e-6 * max(|theta_j|, 1)` (central, near `eps^(1/3)`) and
-/// `h = 1.5e-8 * max(|theta_j|, 1)` (one-sided, near `eps^(1/2)`) follow the truncation /
-/// round-off balance in Nocedal & Wright (2006), Ch. 8.
+/// `model.grad` when supported and finite, or scale-aware central/forward finite differences otherwise.
 pub(in crate::solver) fn compute_jacobian(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
@@ -143,11 +166,34 @@ pub(in crate::solver) fn compute_jacobian(
     y_hat0: &[f64],
     bounds: &[(Option<f64>, Option<f64>)],
 ) -> Option<DenseMatrix> {
+    let all_slots: Vec<usize> = (0..layout.k_free()).collect();
+    compute_jacobian_subset(model, layout, obs, theta, y_hat0, bounds, &all_slots)
+}
+
+/// Compute weighted Jacobian columns strictly for `active_slots` (`N x active_slots.len()`),
+/// never perturbing held-fixed parameters (used by full LM and reduced profile-likelihood LM;
+/// `AUD-03-10`). Falls back to finite differences if analytical `model.grad` yields non-finite entries.
+pub(in crate::solver) fn compute_jacobian_subset(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    theta: &[f64],
+    y_hat0: &[f64],
+    bounds: &[(Option<f64>, Option<f64>)],
+    active_slots: &[usize],
+) -> Option<DenseMatrix> {
     let n = obs.len();
-    let k = layout.k_free();
-    let mut j_mat = DenseMatrix::zeros(n, k).ok()?;
-    if k == 0 {
+    let k_sub = active_slots.len();
+    let mut j_mat = DenseMatrix::zeros(n, k_sub).ok()?;
+    if k_sub == 0 {
         return Some(j_mat);
+    }
+
+    let mut slot_to_col = vec![None; layout.k_free()];
+    for (col, &slot) in active_slots.iter().enumerate() {
+        if let Some(dst) = slot_to_col.get_mut(slot) {
+            *dst = Some(col);
+        }
     }
 
     // Try analytical gradient path first across all observations.
@@ -160,37 +206,47 @@ pub(in crate::solver) fn compute_jacobian(
     for (i, rec) in obs.iter().enumerate() {
         grad_buf.fill(0.0);
         let start = rec.ds_local_idx * p_m;
-        if !model.grad(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index, &mut grad_buf) {
+        let ds_arg = model_dataset_index(model, rec.ds_local_idx, rec.point.data_set_index);
+        if !model.grad(&rec.point.x, &flat_params[start..(start + p_m)], ds_arg, &mut grad_buf) {
             analytical_ok = false;
             break;
         }
         for (p_idx, &g_val) in grad_buf.iter().enumerate().take(p_m) {
-            if let ParamBinding::Free(slot) = layout.bindings[rec.ds_local_idx][p_idx] {
-                let prev = mat_get(&j_mat, i, slot);
-                mat_set(&mut j_mat, i, slot, prev + rec.sqrt_weight * g_val);
+            if let ParamBinding::Free(slot) = layout.bindings[rec.ds_local_idx][p_idx]
+                && let Some(col) = slot_to_col.get(slot).copied().flatten()
+            {
+                let next_val = mat_get(&j_mat, i, col) + rec.sqrt_weight * g_val;
+                if !g_val.is_finite() || !next_val.is_finite() {
+                    analytical_ok = false;
+                    break;
+                }
+                mat_set(&mut j_mat, i, col, next_val);
             }
+        }
+        if !analytical_ok {
+            break;
         }
     }
     if analytical_ok {
         return Some(j_mat);
     }
 
-    // Central difference Jacobian (with bounded one-sided fallback when near domain/box edges).
-    j_mat = DenseMatrix::zeros(n, k).ok()?;
+    // Scale-aware central difference Jacobian (with bounded one-sided fallback when near domain/box edges).
+    j_mat = DenseMatrix::zeros(n, k_sub).ok()?;
     let eps_central = 1e-6_f64;
     let eps_forward = 1.5e-8_f64;
     let mut work = theta.to_vec();
     let mut yp = vec![0.0_f64; n];
     let mut ym = vec![0.0_f64; n];
 
-    for slot in 0..k {
+    for (col, &slot) in active_slots.iter().enumerate() {
         let info = &layout.free_slots[slot];
         let xj = theta[slot];
-        let h_c = eps_central * xj.abs().max(1.0);
         let (lb, ub) = bounds[slot];
+        let h_c = fd_step_size(xj, eps_central, lb, ub);
 
-        let mut can_plus = ub.is_none_or(|u| xj + h_c <= u);
-        let mut can_minus = lb.is_none_or(|l| xj - h_c >= l);
+        let mut can_plus = h_c > 0.0 && ub.is_none_or(|u| xj + h_c <= u);
+        let mut can_minus = h_c > 0.0 && lb.is_none_or(|l| xj - h_c >= l);
 
         if can_plus {
             work[slot] = xj + h_c;
@@ -206,20 +262,23 @@ pub(in crate::solver) fn compute_jacobian(
             let inv_2h = 1.0 / (2.0 * h_c);
             for (i, rec) in obs.iter().enumerate() {
                 if info.ds_local_idx.is_none_or(|d| d == rec.ds_local_idx) {
-                    mat_set(&mut j_mat, i, slot, rec.sqrt_weight * (yp[i] - ym[i]) * inv_2h);
+                    let jv = rec.sqrt_weight * (yp[i] - ym[i]) * inv_2h;
+                    if !jv.is_finite() {
+                        return None;
+                    }
+                    mat_set(&mut j_mat, i, col, jv);
                 }
             }
             continue;
         }
 
-        // One-sided fallback with smaller step `eps_forward`, retrying the opposite sign if
-        // the preferred direction evaluates outside the model domain while staying inside bounds.
-        let h_f = eps_forward * xj.abs().max(1.0);
+        // One-sided fallback with smaller scale-aware step `h_f`.
+        let h_f = fd_step_size(xj, eps_forward, lb, ub);
         let signs = if (!can_plus && can_minus) || ub.is_some_and(|u| xj + h_f > u) { [-1.0_f64, 1.0_f64] } else { [1.0_f64, -1.0_f64] };
         let mut found_sign = None;
         for &sign in &signs {
             let x_try = xj + sign * h_f;
-            if lb.is_some_and(|l| x_try < l) || ub.is_some_and(|u| x_try > u) {
+            if h_f <= 0.0 || lb.is_some_and(|l| x_try < l) || ub.is_some_and(|u| x_try > u) {
                 continue;
             }
             work[slot] = x_try;
@@ -234,7 +293,11 @@ pub(in crate::solver) fn compute_jacobian(
         let inv_h = sign / h_f;
         for (i, rec) in obs.iter().enumerate() {
             if info.ds_local_idx.is_none_or(|d| d == rec.ds_local_idx) {
-                mat_set(&mut j_mat, i, slot, rec.sqrt_weight * (yp[i] - y_hat0[i]) * inv_h);
+                let jv = rec.sqrt_weight * (yp[i] - y_hat0[i]) * inv_h;
+                if !jv.is_finite() {
+                    return None;
+                }
+                mat_set(&mut j_mat, i, col, jv);
             }
         }
     }
@@ -466,17 +529,23 @@ pub(in crate::solver) fn run_trust_region_lm_with_options(
 
                 let raw_xnorm = scaled_l2_norm(&diag, &theta);
                 let x_norm = if raw_xnorm > 0.0 { raw_xnorm } else { 1.0 };
-                if preset_converged || (act_red.abs() <= ftol && pred_red <= ftol && rho <= 2.0) || p_norm <= xtol * x_norm {
+                let ftol_hit = act_red.abs() <= ftol && pred_red <= ftol && rho <= 2.0;
+                let xtol_hit = p_norm <= xtol * x_norm;
+                if preset_converged || ftol_hit || xtol_hit {
                     let j_final = compute_jacobian(model, layout, obs, &theta, &y_hat, &bounds).unwrap_or(j_mat);
-                    return Ok(LmRunOutput {
-                        theta,
-                        weighted_res: w_res,
-                        y_hat,
-                        weighted_ss: ss_curr,
-                        j_mat: j_final,
-                        status: FitStatus::Converged,
-                        iterations: iter,
-                    });
+                    let status = if preset_converged {
+                        FitStatus::Converged
+                    } else if xtol_hit && !ftol_hit {
+                        // A tiny accepted step caused by trust-region collapse at an implicit
+                        // domain wall must verify projected-gradient stationarity before declaring
+                        // `Converged`.
+                        let mut diag_final = diag.clone();
+                        let g_cos_final = update_lm_diag_and_projected_grad(&j_final, &w_res, &theta, &bounds, ss_curr, &mut diag_final);
+                        stalled_lm_status(g_cos_final, ss_curr, y_norm, stall_gtol)
+                    } else {
+                        FitStatus::Converged
+                    };
+                    return Ok(LmRunOutput { theta, weighted_res: w_res, y_hat, weighted_ss: ss_curr, j_mat: j_final, status, iterations: iter });
                 }
                 break;
             }
@@ -509,24 +578,38 @@ pub(in crate::solver) fn update_lm_diag_and_projected_grad(
 ) -> f64 {
     let n = j_mat.nrows();
     let fnorm = ss_curr.sqrt();
+    if !fnorm.is_finite() {
+        return f64::INFINITY;
+    }
     let mut max_g_cos = 0.0_f64;
     for (j, d_j) in diag.iter_mut().enumerate() {
-        let mut col_ss = NeumaierSum::new();
-        let mut col_dot = NeumaierSum::new();
-        for (i, &w_r) in w_res.iter().enumerate().take(n) {
-            let jv = mat_get(j_mat, i, j);
-            col_ss.add(jv * jv);
-            col_dot.add(jv * w_r);
+        let cnorm = j_mat.col_norm2(j);
+        if !cnorm.is_finite() {
+            return f64::INFINITY;
         }
-        let cnorm = col_ss.total().sqrt();
         let eff = if cnorm > f64::MIN_POSITIVE.sqrt() { cnorm } else { 1.0 };
         *d_j = if *d_j == 0.0 { eff } else { d_j.max(eff) };
         if cnorm > 0.0 && fnorm > 0.0 {
-            let grad_j = col_dot.total();
-            let at_lo = bounds[j].0.is_some_and(|l| (theta[j] - l).abs() <= 1e-12 * l.abs().max(f64::MIN_POSITIVE) && grad_j < 0.0);
-            let at_hi = bounds[j].1.is_some_and(|u| (u - theta[j]).abs() <= 1e-12 * u.abs().max(f64::MIN_POSITIVE) && grad_j > 0.0);
+            // Compute normalized cosine sum_i (J_{i,j} / ||J_{:,j}||) * (r_i / ||r||) directly so
+            // large Jacobian entries (|J| > 1.34e154) never overflow `jv * jv` or `jv * w_r` (`AUD-03-10`).
+            let mut cos_acc = NeumaierSum::new();
+            let inv_cn = 1.0 / cnorm;
+            let inv_fn = 1.0 / fnorm;
+            for (i, &w_r) in w_res.iter().enumerate().take(n) {
+                let jv = mat_get(j_mat, i, j);
+                if !jv.is_finite() || !w_r.is_finite() {
+                    return f64::INFINITY;
+                }
+                cos_acc.add((jv * inv_cn) * (w_r * inv_fn));
+            }
+            let cos_j = cos_acc.total();
+            if !cos_j.is_finite() {
+                return f64::INFINITY;
+            }
+            let at_lo = bounds[j].0.is_some_and(|l| (theta[j] - l).abs() <= 1e-12 * l.abs().max(f64::MIN_POSITIVE) && cos_j < 0.0);
+            let at_hi = bounds[j].1.is_some_and(|u| (u - theta[j]).abs() <= 1e-12 * u.abs().max(f64::MIN_POSITIVE) && cos_j > 0.0);
             if !at_lo && !at_hi {
-                max_g_cos = max_g_cos.max((grad_j / (cnorm * fnorm)).abs());
+                max_g_cos = max_g_cos.max(cos_j.abs());
             }
         }
     }
@@ -705,9 +788,11 @@ pub(in crate::solver) fn solve_trust_region_subproblem(
     if gnorm == 0.0 || !gnorm.is_finite() {
         return Ok((vec![0.0_f64; k], 0.0));
     }
-    let mut paru = (gnorm / delta.max(f64::MIN_POSITIVE)).max(1e-12);
+    let raw_paru = gnorm / delta.max(f64::MIN_POSITIVE);
+    let mut paru = if raw_paru.is_finite() { raw_paru.clamp(1e-12, 1e150) } else { 1e150 };
     // When rank-deficient (parl == 0), keep sqrt(lambda) safely above QR rounding noise in nullspace.
     let lam_floor = if pqr.rank() < k { (1e-10 * paru).max(1e-12).min(paru) } else { (1e-14 * paru).max(1e-24).min(paru) };
+    let mut parl = parl.min(paru);
     let mut lam = lambda_hint.max(parl).min(paru);
     if lam < lam_floor {
         let fallback = if gn_norm_for_init > 0.0 { gnorm / gn_norm_for_init } else { 0.001 * paru };
@@ -934,8 +1019,18 @@ where
     for j in 0..k {
         let mut vj = v0.clone();
         let step = if vj[j].abs() > 1e-8 { 0.1 * vj[j] } else { zero_step };
-        vj[j] += step;
+        vj[j] = v0[j] + step;
         project_theta(&mut vj, &bounds);
+        if (vj[j] - v0[j]).abs() <= 1e-15 * v0[j].abs().max(1.0) {
+            vj[j] = v0[j] - step;
+            project_theta(&mut vj, &bounds);
+        }
+        if (vj[j] - v0[j]).abs() <= 1e-15 * v0[j].abs().max(1.0)
+            && let (Some(l), Some(u)) = bounds[j]
+            && u > l
+        {
+            vj[j] = 0.5 * (l + u);
+        }
         let fj = eval_obj(&vj);
         if ode_fit_budget_exceeded().is_some() {
             return None;
@@ -967,12 +1062,14 @@ where
         }
 
         let worst = &simplex[k].0;
-        let xr: Vec<f64> = centroid.iter().zip(worst.iter()).map(|(c, w)| c + (c - w)).collect();
+        let mut xr: Vec<f64> = centroid.iter().zip(worst.iter()).map(|(c, w)| c + (c - w)).collect();
+        project_theta(&mut xr, &bounds);
         let fr = eval_obj(&xr);
         evals += 1;
 
         if fr < simplex[0].1 {
-            let xe: Vec<f64> = centroid.iter().zip(xr.iter()).map(|(c, r)| c + 2.0 * (r - c)).collect();
+            let mut xe: Vec<f64> = centroid.iter().zip(xr.iter()).map(|(c, r)| c + 2.0 * (r - c)).collect();
+            project_theta(&mut xe, &bounds);
             let fe = eval_obj(&xe);
             evals += 1;
             simplex[k] = if fe < fr { (xe, fe) } else { (xr, fr) };
@@ -982,7 +1079,8 @@ where
             let use_outside = fr < simplex[k].1;
             let base = if use_outside { &xr } else { &simplex[k].0 };
             let f_base = if use_outside { fr } else { simplex[k].1 };
-            let xc: Vec<f64> = centroid.iter().zip(base.iter()).map(|(c, b)| c + 0.5 * (b - c)).collect();
+            let mut xc: Vec<f64> = centroid.iter().zip(base.iter()).map(|(c, b)| c + 0.5 * (b - c)).collect();
+            project_theta(&mut xc, &bounds);
             let fc = eval_obj(&xc);
             evals += 1;
             if fc <= f_base {

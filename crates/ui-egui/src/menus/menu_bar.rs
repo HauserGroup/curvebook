@@ -65,9 +65,11 @@ fn drain_actions_from_nodes(nodes: Vec<CuratedMenuNode>, out: &mut Vec<CommandTo
 
 fn localized_preferences_label(locale: &str) -> &'static str {
     match i18n::normalize_locale(locale) {
+        "ar" => "التفضيلات...",
         "de" => "Einstellungen...",
         "es" => "Preferencias...",
         "fr" => "Préférences...",
+        "he" => "העדפות...",
         "it" => "Preferenze...",
         "ja" => "環境設定...",
         "ko" => "환경설정...",

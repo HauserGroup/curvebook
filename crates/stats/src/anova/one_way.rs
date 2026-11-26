@@ -25,6 +25,7 @@ use curvebook_math::linalg::{DenseMatrix, sym_eigen};
 use curvebook_math::sum::{NeumaierSum, SummaryMoments};
 
 use crate::anova::effect_sizes::{clamp_ss_roundoff, compute_anova_effect_sizes, f_ratio_p, variance_homogeneity_tests};
+use crate::anova::factorial::checked_dense_vec;
 use crate::anova::reml::symmetrize_dense;
 use crate::anova::results::{OneWayAnovaResult, RmOneWayAnovaResult, SphericityResult, UnequalVarianceAnovaResult, VarianceHomogeneityResult};
 use crate::common::validate_finite_slice;
@@ -150,30 +151,44 @@ pub fn ordinary_one_way_from_summary(groups: &[GroupComparisonInput], confidence
     if groups.len() < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "ANOVA groups", required: 2, actual: groups.len() });
     }
+    const MAX_EXACT_INT_F64: f64 = 9_007_199_254_740_992.0; // 2^53
+    let max_n = MAX_EXACT_INT_F64.min(usize::MAX as f64);
     let mut total_n_f = 0.0_f64;
     let mut grand_sum = NeumaierSum::new();
     let mut ss_within = NeumaierSum::new();
     for g in groups {
-        if !g.n.is_finite() || g.n < 1.0 || g.n.fract() != 0.0 {
+        if !g.n.is_finite() || g.n < 1.0 || g.n.fract() != 0.0 || g.n > max_n {
             return Err(StatsError::InvalidParameter { name: "group_n", value: g.n });
         }
         if !g.mean.is_finite() || !g.sd.is_finite() || g.sd < 0.0 {
             return Err(StatsError::InvalidParameter { name: "group_summary", value: g.sd });
         }
         total_n_f += g.n;
+        if !total_n_f.is_finite() || total_n_f > max_n {
+            return Err(StatsError::InvalidParameter { name: "group_n", value: total_n_f });
+        }
         grand_sum.add(g.n * g.mean);
         if g.n > 1.0 {
             ss_within.add((g.n - 1.0) * g.sd * g.sd);
         }
     }
     let grand_mean = grand_sum.total() / total_n_f;
+    if !grand_mean.is_finite() {
+        return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "grand_mean", value: grand_mean }));
+    }
     let mut ss_between = NeumaierSum::new();
     for g in groups {
         let d = g.mean - grand_mean;
         ss_between.add(g.n * d * d);
     }
-    let ssb = ss_between.total().max(0.0);
-    let ssw = ss_within.total().max(0.0);
+    let ssb_raw = ss_between.total();
+    let ssw_raw = ss_within.total();
+    let sst_raw = ssb_raw + ssw_raw;
+    if !ssb_raw.is_finite() || !ssw_raw.is_finite() || !sst_raw.is_finite() {
+        return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "sum_of_squares", value: sst_raw }));
+    }
+    let ssb = ssb_raw.max(0.0);
+    let ssw = ssw_raw.max(0.0);
     let sst = ssb + ssw;
     let dfb = (groups.len() - 1) as f64;
     let dfw = total_n_f - (groups.len() as f64);
@@ -440,9 +455,11 @@ pub(in crate::anova) fn kronecker_dense(a: &DenseMatrix, b: &DenseMatrix) -> Res
     let ca = a.ncols();
     let rb = b.nrows();
     let cb = b.ncols();
-    let rows = ra * rb;
-    let cols = ca * cb;
-    let mut data = vec![0.0_f64; rows * cols];
+    let rows =
+        ra.checked_mul(rb).ok_or(StatsError::Math(curvebook_math::MathError::InvalidParameter { name: "matrix_elements", value: f64::INFINITY }))?;
+    let cols =
+        ca.checked_mul(cb).ok_or(StatsError::Math(curvebook_math::MathError::InvalidParameter { name: "matrix_elements", value: f64::INFINITY }))?;
+    let mut data = checked_dense_vec(rows, cols)?;
     for ia in 0..ra {
         for ja in 0..ca {
             let av = a.get(ia, ja).unwrap_or(0.0);
@@ -464,7 +481,7 @@ pub(in crate::anova) fn pooled_within_group_cov(groups: &[Vec<Vec<f64>>]) -> Res
         return Err(StatsError::EmptyInput);
     }
     let mut total_df = 0.0_f64;
-    let mut s_sum = vec![0.0_f64; k * k];
+    let mut s_sum = checked_dense_vec(k, k)?;
     for grp in groups {
         let n_g = grp.len();
         if n_g < 2 {
@@ -528,7 +545,7 @@ pub(in crate::anova) fn compute_sphericity_from_cov_contrast(
             mauchly_w: 1.0,
             mauchly_chi2: 0.0,
             mauchly_df: 0.0,
-            mauchly_p: 1.0,
+            mauchly_p: f64::NAN,
             greenhouse_geisser_eps: 1.0,
             huynh_feldt_eps: 1.0,
         });
@@ -605,7 +622,7 @@ pub(in crate::anova) fn compute_sphericity(blocks: &[Vec<f64>]) -> Result<Spheri
             mauchly_w: 1.0,
             mauchly_chi2: 0.0,
             mauchly_df: 0.0,
-            mauchly_p: 1.0,
+            mauchly_p: f64::NAN,
             greenhouse_geisser_eps: 1.0,
             huynh_feldt_eps: 1.0,
         });

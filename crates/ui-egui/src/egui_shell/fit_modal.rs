@@ -195,6 +195,12 @@ pub fn render_fit_modal(
     let param_names = resolve_parameter_names(nl);
     let locale_preset = &app.locale_preset;
     let (alerts, blocking_error) = compute_fit_alerts(nl, &param_names, state, locale_preset);
+    let log_x_warning = if nl.custom_dsl.is_none() {
+        let xs = collect_sheet_active_x_values(doc, &spec.source_sheet_id, nl.x_range_filter, &nl.mv_x_columns);
+        curvebook_fit::detect_log_x_scale_mismatch(&nl.equation_id, &xs)
+    } else {
+        None
+    };
     let commit_en = blocking_error.as_deref().map_or_else(ControlEnablement::enabled, ControlEnablement::disabled);
     let locale = normalize_locale(&app.locale);
     let is_create = doc.result_sheet(result_sheet_id).is_none();
@@ -235,6 +241,59 @@ pub fn render_fit_modal(
                     }
                 }
             });
+            if let Some(warn) = &log_x_warning {
+                ui.add_space(4.0);
+                egui::Frame::NONE
+                    .fill(tokens.panel_bg)
+                    .stroke(Stroke::new(1.0, tokens.accent))
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .inner_margin(Vec2::new(8.0, 5.0))
+                    .show(ui, |ui| {
+                        let msg = if let Some(alt_id) = &warn.suggested_equation_id {
+                            let alt_name = builtin_catalog().iter().find(|e| e.id == *alt_id).map_or_else(|| alt_id.clone(), |e| e.name.clone());
+                            format!("X-scale mismatch: {} Suggested non-log counterpart: {}.", warn.reason, alt_name)
+                        } else {
+                            format!("X-scale mismatch: {} Transform X to log10(X) before fitting this log-X model.", warn.reason)
+                        };
+                        render_clipped_text(
+                            ui,
+                            meta,
+                            ClippedTextSpec {
+                                widget_id: "fit.warning.log_x_scale",
+                                role: "status",
+                                text: &msg,
+                                font_size: tokens.metrics.font_ui_small_pt,
+                                color: tokens.accent,
+                                z_layer: ZLayer::ModalDialog,
+                                tooltip: Some(&msg),
+                                record_meta: true,
+                            },
+                        );
+                        if let Some(alt_id) = &warn.suggested_equation_id {
+                            let alt_name = builtin_catalog().iter().find(|e| e.id == *alt_id).map_or_else(|| alt_id.clone(), |e| e.name.clone());
+                            if render_modal_seg_btn(
+                                ui,
+                                tokens,
+                                meta,
+                                "fit.warning.switch_non_log",
+                                &format!("Switch to {alt_name}"),
+                                false,
+                                &ControlEnablement::enabled(),
+                            ) {
+                                let mut next = spec.clone();
+                                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                                    fit.equation_id = alt_id.clone();
+                                    fit.custom_dsl = None;
+                                    fit.parameter_rules.clear();
+                                    sync_summary_parameter_for_fit(fit);
+                                }
+                                state.custom_dsl_enabled = false;
+                                clear_fit_parameter_drafts(state);
+                                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                            }
+                        }
+                    });
+            }
             if !alerts.is_empty() {
                 ui.add_space(4.0);
                 egui::Frame::NONE
@@ -467,6 +526,7 @@ fn sync_fit_modal_state(
             && let AnalysisKind::NonlinearRegression(saved_nl) = &saved.kind
         {
             let mut applied = saved.clone();
+            applied.id = spec.id.clone();
             applied.source_sheet_id = spec.source_sheet_id.clone();
             applied.selected_data_sets.clone_from(&spec.selected_data_sets);
             applied.custom_title.clone_from(&spec.custom_title);
@@ -626,7 +686,9 @@ fn compute_fit_alerts(nl: &NonlinearFitSpec, params: &[String], state: &FitModal
     }
     let mut fixed_count = 0usize;
     for rule in &nl.parameter_rules {
-        if matches!(rule.scope, ParameterScope::Constant(_) | ParameterScope::HookedConstant(_) | ParameterScope::ColumnTitleConstant) {
+        if params.iter().any(|p| p == &rule.name)
+            && matches!(rule.scope, ParameterScope::Constant(_) | ParameterScope::HookedConstant(_) | ParameterScope::ColumnTitleConstant)
+        {
             fixed_count += 1;
         }
         if let (Some(lo), Some(hi)) = (rule.lower_bound, rule.upper_bound)
@@ -753,6 +815,10 @@ fn render_fit_mv_mapping_grid(
                         } else {
                             fit.mv_x_columns.push(idx);
                             fit.mv_x_columns.sort_unstable();
+                            fit.mv_y_columns.retain(|&c| c != idx);
+                            if fit.mv_y_column == Some(idx) {
+                                fit.mv_y_column = fit.mv_y_columns.first().copied();
+                            }
                         }
                     }
                     intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
@@ -858,7 +924,10 @@ fn render_fit_model_tab(
                 let mut next = spec.clone();
                 if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                     fit.custom_dsl = None;
+                    fit.parameter_rules.clear();
+                    sync_summary_parameter_for_fit(fit);
                 }
+                clear_fit_parameter_drafts(state);
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
@@ -875,7 +944,10 @@ fn render_fit_model_tab(
             let mut next = spec.clone();
             if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                 fit.custom_dsl = Some(state.custom_equation_draft.clone());
+                fit.parameter_rules.clear();
+                sync_summary_parameter_for_fit(fit);
             }
+            clear_fit_parameter_drafts(state);
             intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     });
@@ -894,7 +966,10 @@ fn render_fit_model_tab(
                     let mut next = spec.clone();
                     if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                         fit.custom_dsl = Some(state.custom_equation_draft.clone());
+                        fit.parameter_rules.clear();
+                        sync_summary_parameter_for_fit(fit);
                     }
+                    clear_fit_parameter_drafts(state);
                     intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                 }
             }
@@ -1022,15 +1097,89 @@ fn render_fit_model_tab(
                     fit.equation_id = entry.id.clone();
                     fit.custom_dsl = None;
                     fit.parameter_rules.clear();
+                    sync_summary_parameter_for_fit(fit);
                 }
-                state.initial_override_drafts.clear();
-                state.lower_bound_drafts.clear();
-                state.upper_bound_drafts.clear();
-                state.constant_drafts.clear();
+                clear_fit_parameter_drafts(state);
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
         }
     }
+}
+
+fn clear_fit_parameter_drafts(state: &mut FitModalEguiState) {
+    state.initial_override_drafts.clear();
+    state.lower_bound_drafts.clear();
+    state.upper_bound_drafts.clear();
+    state.constant_drafts.clear();
+}
+
+fn sync_summary_parameter_for_fit(fit: &mut NonlinearFitSpec) {
+    let params = resolve_parameter_names(fit);
+    if let Some(cur) = &fit.summary_parameter
+        && !params.iter().any(|p| p == cur)
+    {
+        fit.summary_parameter = if fit.create_summary_graph { params.first().cloned() } else { None };
+    } else if fit.create_summary_graph && fit.summary_parameter.is_none() {
+        fit.summary_parameter = params.first().cloned();
+    }
+}
+
+/// Collect active finite predictor `X` values from a sheet for `EXT-01` log-X scale checks.
+pub(super) fn collect_sheet_active_x_values(
+    doc: &ProjectDocument,
+    sheet_id: &SheetId,
+    x_range_filter: Option<(Option<f64>, Option<f64>)>,
+    mv_x_columns: &[usize],
+) -> Vec<f64> {
+    let Some(ds) = doc.data_sheet(sheet_id).or_else(|| doc.result_sheet(sheet_id).and_then(|rs| rs.analyzable_data.as_ref())) else {
+        return Vec::new();
+    };
+    let in_range = |x: f64| -> bool {
+        if !x.is_finite() {
+            return false;
+        }
+        match x_range_filter {
+            Some((lo, hi)) => lo.is_none_or(|a| x >= a) && hi.is_none_or(|b| x <= b),
+            None => true,
+        }
+    };
+    let mut xs = Vec::new();
+    match &ds.archetype {
+        TableArchetype::Xy(xy) => {
+            for row in 0..xy.row_count() {
+                if let Some(x) = xy.x_summary_at(row).ok().flatten()
+                    && in_range(x)
+                {
+                    xs.push(x);
+                }
+            }
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            let cols: Vec<usize> = if mv_x_columns.is_empty() {
+                mv.variables
+                    .iter()
+                    .enumerate()
+                    .find(|(_, v)| !matches!(v.role, curvebook_doc::VariableRole::Label | curvebook_doc::VariableRole::Categorical))
+                    .map(|(i, _)| vec![i])
+                    .unwrap_or_default()
+            } else {
+                mv_x_columns.to_vec()
+            };
+            for col in cols {
+                if let Some(var) = mv.variables.get(col) {
+                    for cell in &var.cells {
+                        if let Some(x) = cell.active_number()
+                            && in_range(x)
+                        {
+                            xs.push(x);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    xs
 }
 
 fn render_fit_compare_tab(
@@ -1043,37 +1192,50 @@ fn render_fit_compare_tab(
     intents: &mut PendingUiIntents,
 ) {
     render_section_title(ui, tokens, "Compare Two Models");
-    let alt_id = match &nl.comparison {
-        Some(ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id })
-        | Some(ModelComparisonSpec::Aicc { alternative_equation_id })
-        | Some(ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id }) => alternative_equation_id.clone(),
-        None => String::from("straight_line"),
+    let eff_cmp = nl.effective_comparison();
+    let eff_method = eff_cmp.as_ref().map(|(m, _)| *m);
+    let alt_id = match eff_cmp.as_ref().map(|(_, q)| q) {
+        Some(ModelComparisonQuestion::AlternativeEquation { alternative_equation_id }) => alternative_equation_id.clone(),
+        _ => match &nl.comparison {
+            Some(ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id })
+            | Some(ModelComparisonSpec::Aicc { alternative_equation_id })
+            | Some(ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id }) => alternative_equation_id.clone(),
+            None => String::from("straight_line"),
+        },
     };
     for (wid, lbl, active, comp) in [
-        ("fit.cmp.none", "Fit one model only (no comparison)", nl.comparison.is_none(), None),
+        ("fit.cmp.none", "Fit one model only (no comparison)", eff_cmp.is_none(), None),
         (
             "fit.cmp.extra_f",
             "Extra sum-of-squares F test (nested models)",
-            matches!(nl.comparison, Some(ModelComparisonSpec::ExtraSumOfSquaresF { .. })),
+            eff_method == Some(ModelComparisonMethod::ExtraSumOfSquaresF),
             Some(ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: alt_id.clone() }),
         ),
         (
             "fit.cmp.aicc",
             "Compare AICc evidence ratio (nested or non-nested)",
-            matches!(nl.comparison, Some(ModelComparisonSpec::Aicc { .. })),
+            eff_method == Some(ModelComparisonMethod::Aicc),
             Some(ModelComparisonSpec::Aicc { alternative_equation_id: alt_id.clone() }),
         ),
         (
             "fit.cmp.lrt",
             "Likelihood Ratio Test (Poisson Deviance)",
-            matches!(nl.comparison, Some(ModelComparisonSpec::LikelihoodRatioTest { .. })),
+            eff_method == Some(ModelComparisonMethod::LikelihoodRatioTest),
             Some(ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id: alt_id.clone() }),
         ),
     ] {
         if render_modal_radio(ui, tokens, meta, wid, lbl, active, &ControlEnablement::enabled()) {
             let mut next = spec.clone();
             if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
-                fit.comparison = comp.clone();
+                if let Some(next_cmp) = comp.clone() {
+                    let next_method = next_cmp.method();
+                    fit.comparison = Some(next_cmp);
+                    fit.comparison_method = Some(next_method);
+                } else {
+                    fit.comparison = None;
+                    fit.comparison_question = None;
+                    fit.comparison_method = None;
+                }
             }
             intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
@@ -1095,7 +1257,7 @@ fn render_fit_compare_tab(
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
 
-    if nl.comparison.is_some() || nl.comparison_question.is_some() {
+    if eff_cmp.is_some() {
         ui.add_space(6.0);
         render_section_title(ui, tokens, tr(locale, "fit.cmp.question.heading"));
         let first_param =
@@ -1141,7 +1303,7 @@ fn render_fit_compare_tab(
         }
     }
 
-    if let Some(cur_cmp) = &nl.comparison
+    if let Some((active_method, _)) = eff_cmp
         && matches!(nl.comparison_question, None | Some(ModelComparisonQuestion::AlternativeEquation { .. }))
     {
         ui.add_space(6.0);
@@ -1159,18 +1321,22 @@ fn render_fit_compare_tab(
                 alt_id == entry.id,
                 &ControlEnablement::enabled(),
             ) {
-                let updated = match cur_cmp {
-                    ModelComparisonSpec::ExtraSumOfSquaresF { .. } => {
+                let updated = match active_method {
+                    ModelComparisonMethod::ExtraSumOfSquaresF => {
                         ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: entry.id.clone() }
                     }
-                    ModelComparisonSpec::Aicc { .. } => ModelComparisonSpec::Aicc { alternative_equation_id: entry.id.clone() },
-                    ModelComparisonSpec::LikelihoodRatioTest { .. } => {
+                    ModelComparisonMethod::Aicc => ModelComparisonSpec::Aicc { alternative_equation_id: entry.id.clone() },
+                    ModelComparisonMethod::LikelihoodRatioTest => {
                         ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id: entry.id.clone() }
                     }
                 };
                 let mut next = spec.clone();
                 if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                     fit.comparison = Some(updated);
+                    fit.comparison_method = Some(active_method);
+                    if matches!(fit.comparison_question, Some(ModelComparisonQuestion::AlternativeEquation { .. })) {
+                        fit.comparison_question = Some(ModelComparisonQuestion::AlternativeEquation { alternative_equation_id: entry.id.clone() });
+                    }
                 }
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
@@ -2004,11 +2170,40 @@ fn render_fit_identifiability_and_flags_controls(
         let mut next = spec.clone();
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
             fit.create_summary_graph = !nl.create_summary_graph;
-            if fit.create_summary_graph && fit.summary_parameter.is_none() {
-                fit.summary_parameter = resolve_model_from_spec(fit).ok().and_then(|m| m.param_names().first().cloned());
-            }
+            sync_summary_parameter_for_fit(fit);
         }
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    if nl.create_summary_graph {
+        let summary_params = resolve_parameter_names(nl);
+        if !summary_params.is_empty() {
+            let active_summary_param = nl
+                .summary_parameter
+                .as_deref()
+                .filter(|p| summary_params.iter().any(|cand| cand == p))
+                .or_else(|| summary_params.first().map(String::as_str));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Summary Parameter:").small().color(tokens.text_muted));
+                for param in &summary_params {
+                    let selected = active_summary_param == Some(param.as_str());
+                    if render_modal_seg_btn(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("fit.out.summary_param.{param}"),
+                        param,
+                        selected,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        let mut next = spec.clone();
+                        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                            fit.summary_parameter = Some(param.clone());
+                        }
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                    }
+                }
+            });
+        }
     }
     let sig_display = nl.output_significant_digits.map_or_else(|| String::from("Auto"), |d| d.to_string());
     let sig_step = render_stepper_row(

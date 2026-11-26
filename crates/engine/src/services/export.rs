@@ -275,7 +275,13 @@ impl ExportOptionsSpec {
                 },
             ),
             DocumentExportFormat::Csv => (
-                resolve_csv_export_target(doc, self.sheet_id.as_ref(), self.tab_id.as_deref(), prefer_result_when_active_non_tabular)?,
+                resolve_csv_export_target_with_tab_index(
+                    doc,
+                    self.sheet_id.as_ref(),
+                    self.tab_id.as_deref(),
+                    self.tab_index,
+                    prefer_result_when_active_non_tabular,
+                )?,
                 ExportArtifactFormat::Csv {
                     options: self.csv_options.unwrap_or_else(CsvOptions::csv),
                     tab_id: self.tab_id,
@@ -284,7 +290,13 @@ impl ExportOptionsSpec {
                 },
             ),
             DocumentExportFormat::Tsv => (
-                resolve_csv_export_target(doc, self.sheet_id.as_ref(), self.tab_id.as_deref(), prefer_result_when_active_non_tabular)?,
+                resolve_csv_export_target_with_tab_index(
+                    doc,
+                    self.sheet_id.as_ref(),
+                    self.tab_id.as_deref(),
+                    self.tab_index,
+                    prefer_result_when_active_non_tabular,
+                )?,
                 ExportArtifactFormat::Csv {
                     options: self.csv_options.unwrap_or_else(CsvOptions::tsv),
                     tab_id: self.tab_id,
@@ -788,6 +800,23 @@ pub fn resolve_csv_export_target(
     tab_id: Option<&str>,
     prefer_result_when_active_non_tabular: bool,
 ) -> Result<ExportTarget, EngineError> {
+    resolve_csv_export_target_with_tab_index(doc, sheet_id, tab_id, None, prefer_result_when_active_non_tabular)
+}
+
+/// Resolve the [`ExportTarget`] for CSV/TSV export given optional `sheet_id`, `tab_id`, and `tab_index`.
+///
+/// When `tab_index` is supplied without an explicit `sheet_id`, prefers a [`curvebook_doc::ResultSheet`]
+/// over an active [`curvebook_doc::DataSheet`] because data sheets do not contain named result tabs.
+///
+/// # Errors
+/// Returns [`EngineError`] with [`ErrorCode::NotFound`] if `tab_id` is given and no result sheet owns it.
+pub fn resolve_csv_export_target_with_tab_index(
+    doc: &ProjectDocument,
+    sheet_id: Option<&SheetId>,
+    tab_id: Option<&str>,
+    tab_index: Option<usize>,
+    prefer_result_when_active_non_tabular: bool,
+) -> Result<ExportTarget, EngineError> {
     if let Some(id) = sheet_id {
         return Ok(ExportTarget::Explicit(id.clone()));
     }
@@ -802,6 +831,17 @@ pub fn resolve_csv_export_target(
             return Ok(ExportTarget::Explicit(rs.id.clone()));
         }
         return Err(EngineError::with_code(ErrorCode::NotFound, format!("tab '{tid}' not found on any result sheet")));
+    }
+    if tab_index.is_some() {
+        if let Some(active) = &doc.active_sheet_id
+            && doc.result_sheet(active).is_some()
+        {
+            return Ok(ExportTarget::Explicit(active.clone()));
+        }
+        if let Some(rs) = doc.result_sheets.first() {
+            return Ok(ExportTarget::Explicit(rs.id.clone()));
+        }
+        return Ok(ExportTarget::AutoOrExplicit(None));
     }
     if prefer_result_when_active_non_tabular {
         if let Some(active) = &doc.active_sheet_id

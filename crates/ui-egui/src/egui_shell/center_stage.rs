@@ -23,7 +23,8 @@ use crate::egui_shell::info_view::{InfoViewEguiState, render_info_view_for_sheet
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
 use crate::egui_shell::results_view::{ResultsViewEguiState, render_results_view_for_sheet};
 use crate::egui_shell::sheet_find_bar::{
-    DataSheetFindMatch, DataSheetFindOverlay, ResultSheetFindOverlay, find_matches_in_data_sheet, find_matches_in_result_sheet, render_sheet_find_bar,
+    DataSheetFindMatch, DataSheetFindOverlay, ResultSheetFindOverlay, find_matches_in_data_sheet_cached, find_matches_in_result_sheet_cached,
+    render_sheet_find_bar, set_active_find_locale,
 };
 use crate::egui_shell::welcome_hub::render_welcome_hub;
 use crate::egui_shell::widgets::dropdown;
@@ -435,7 +436,15 @@ fn sync_sheet_find_before_stage(
 
     let doc = app.document();
     if is_data && let Some(ds) = doc.data_sheet(sheet_id) {
-        let matches = find_matches_in_data_sheet(ds, &views.sheet_find.query, views.sheet_find.match_case, views.sheet_find.match_entire_cell);
+        let _ = set_active_find_locale(sheet_id, &app.locale_preset);
+        let matches = find_matches_in_data_sheet_cached(
+            app.mutation_seq(),
+            ds,
+            &views.sheet_find.query,
+            views.sheet_find.match_case,
+            views.sheet_find.match_entire_cell,
+            &app.locale_preset,
+        );
         views.sheet_find.sync_match_count(matches.len());
         let overlay = DataSheetFindOverlay::from_matches(&matches, views.sheet_find.active_match_index);
         views.column_grid.active_find_matches = (!overlay.is_empty()).then(|| overlay.to_grid_highlight());
@@ -456,7 +465,8 @@ fn sync_sheet_find_before_stage(
 
     if is_result && let Some(rs) = doc.result_sheet(sheet_id) {
         let active_tab_idx = app.canvas_dialogs.result_view.active_tab_index.min(rs.tabs.len().saturating_sub(1));
-        let matches = find_matches_in_result_sheet(
+        let matches = find_matches_in_result_sheet_cached(
+            app.mutation_seq(),
             rs,
             active_tab_idx,
             views.sheet_find.all_result_tabs,

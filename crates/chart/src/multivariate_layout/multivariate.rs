@@ -53,7 +53,7 @@ struct BubblePoint {
 }
 
 pub(super) fn compile_multiple_variables(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id) else {
+    let Some(ds) = crate::resolve_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id) else {
         draw_empty_open_frame(scene);
         return Ok(());
     };

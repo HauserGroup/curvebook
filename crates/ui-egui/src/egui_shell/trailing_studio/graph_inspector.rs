@@ -579,9 +579,10 @@ pub(super) fn render_graph_inspector_studio(
                 }
             });
 
+            let default_y2 = AxisSpec::linear("Right Y");
             let target_axis: &AxisSpec = match state.graph_axis_target {
                 0 => &gs.spec.x_axis,
-                2 => gs.spec.y2_axis.as_ref().unwrap_or(&gs.spec.y_axis),
+                2 => gs.spec.y2_axis.as_ref().unwrap_or(&default_y2),
                 _ => &gs.spec.y_axis,
             };
             let cur_scale = target_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale);

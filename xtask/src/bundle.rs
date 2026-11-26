@@ -12,6 +12,9 @@ const PLUTIL_BIN: &str = "/usr/bin/plutil";
 const CODESIGN_BIN: &str = "/usr/bin/codesign";
 
 pub fn run(root: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err(String::from("macOS .app bundling requires macOS (plutil + codesign)"));
+    }
     let cargo_toml = std::fs::read_to_string(root.join("Cargo.toml")).map_err(|e| format!("Cargo.toml: {e}"))?;
     let version = crate::version::read_workspace_version(&cargo_toml)?;
     let sha = git_short_sha(root);
@@ -83,21 +86,43 @@ fn assemble_validate_and_sign(root: &Path, app_dir: &Path, version: &str, sha: &
 
     let icns = root.join(ICON_ICNS);
     std::fs::copy(&icns, res_dir.join("curvebook.icns")).map_err(|e| format!("copy {ICON_ICNS}: {e}"))?;
-    for doc in ["README.md", "LICENSE", "LICENSE-MIT", "LICENSE-APACHE", "COPYRIGHT", "NOTICE", "ATTRIBUTION.md", "ASSETS.md"] {
+    copy_bundle_legal_docs(root, &res_dir)?;
+
+    adhoc_codesign_and_verify(app_dir)?;
+    Ok(())
+}
+
+fn copy_bundle_legal_docs(root: &Path, res_dir: &Path) -> Result<(), String> {
+    const REQUIRED_DOCS: &[&str] = &["LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ATTRIBUTION.md", "ASSETS.md"];
+    const OPTIONAL_DOCS: &[&str] = &["README.md", "LICENSE", "COPYRIGHT"];
+
+    for doc in REQUIRED_DOCS {
         let src = root.join(doc);
-        if src.is_file() {
+        if !crate::scan_util::is_regular_file(&src) {
+            return Err(format!("missing required legal/attribution file `{doc}` in {}", root.display()));
+        }
+        std::fs::copy(&src, res_dir.join(doc)).map_err(|e| format!("copy {doc}: {e}"))?;
+    }
+    for doc in OPTIONAL_DOCS {
+        let src = root.join(doc);
+        if crate::scan_util::is_regular_file(&src) {
             std::fs::copy(&src, res_dir.join(doc)).map_err(|e| format!("copy {doc}: {e}"))?;
         }
     }
+    let mut copied_third_party = false;
     for rel in ["THIRD-PARTY-LICENSES.html", "licenses/THIRD-PARTY-LICENSES.html"] {
         let src = root.join(rel);
-        if src.is_file() {
+        if crate::scan_util::is_regular_file(&src) {
             std::fs::copy(&src, res_dir.join("THIRD-PARTY-LICENSES.html")).map_err(|e| format!("copy {rel}: {e}"))?;
+            copied_third_party = true;
             break;
         }
     }
-
-    adhoc_codesign_and_verify(app_dir)?;
+    if !copied_third_party {
+        return Err(String::from(
+            "missing required `THIRD-PARTY-LICENSES.html` (or `licenses/THIRD-PARTY-LICENSES.html`); run `cargo xtask licenses --html` first",
+        ));
+    }
     Ok(())
 }
 
@@ -251,5 +276,28 @@ mod tests {
                 assert!(!content.contains(leftover), "{rel} contains leftover `{leftover}`");
             }
         }
+    }
+
+    #[test]
+    fn aud_12_40_copy_bundle_legal_docs_fails_closed_when_required_license_or_notice_missing() {
+        let dir = TestDir::new("bundle-legal");
+        let res_dir = dir.join("Resources");
+        std::fs::create_dir_all(&res_dir).unwrap();
+        for f in ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ATTRIBUTION.md", "ASSETS.md"] {
+            dir.write(f, "ok\n");
+        }
+        // Missing THIRD-PARTY-LICENSES.html must fail closed.
+        let err = super::copy_bundle_legal_docs(dir.path(), &res_dir).unwrap_err();
+        assert!(err.contains("THIRD-PARTY-LICENSES.html"), "{err}");
+
+        dir.write("licenses/THIRD-PARTY-LICENSES.html", "<html>ok</html>\n");
+        super::copy_bundle_legal_docs(dir.path(), &res_dir).unwrap();
+        assert!(res_dir.join("THIRD-PARTY-LICENSES.html").is_file());
+        assert!(res_dir.join("LICENSE-MIT").is_file());
+
+        // Missing NOTICE must fail closed.
+        std::fs::remove_file(dir.join("NOTICE")).unwrap();
+        let err_notice = super::copy_bundle_legal_docs(dir.path(), &res_dir).unwrap_err();
+        assert!(err_notice.contains("NOTICE"), "{err_notice}");
     }
 }

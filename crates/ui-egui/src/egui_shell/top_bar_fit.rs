@@ -62,9 +62,13 @@ pub struct RightGroup {
 #[must_use]
 pub fn fit_right_group(w: &RightWidths) -> RightGroup {
     let room = w.room;
-    let switcher = !w.has_pinned_badge || room >= MIN_SWITCHER_PT + 8.0;
-    let icon = switcher && room >= MIN_SWITCHER_PT + 8.0 + w.gap + w.icon;
-    let field = icon && room >= w.switcher + 8.0 + w.gap + w.field;
+    let has_switcher = w.switcher > 0.0;
+    let min_sw = if has_switcher { MIN_SWITCHER_PT } else { 0.0 };
+    let sw_pad = if has_switcher { 8.0 } else { 0.0 };
+    let search_gap = if has_switcher { w.gap } else { 0.0 };
+    let switcher = has_switcher && (!w.has_pinned_badge || room >= min_sw + sw_pad);
+    let icon = (!has_switcher || switcher) && room >= min_sw + sw_pad + search_gap + w.icon;
+    let field = icon && room >= w.switcher.max(0.0) + sw_pad + search_gap + w.field;
     let search = if field {
         SearchVisibility::Field
     } else if icon {
@@ -73,12 +77,12 @@ pub fn fit_right_group(w: &RightWidths) -> RightGroup {
         SearchVisibility::Hidden
     };
     let search_w = match search {
-        SearchVisibility::Field => w.gap + w.field,
-        SearchVisibility::Icon => w.gap + w.icon,
+        SearchVisibility::Field => search_gap + w.field,
+        SearchVisibility::Icon => search_gap + w.icon,
         SearchVisibility::Hidden => 0.0,
     };
-    let switcher_w = w.switcher.min(room - 8.0 - search_w).max(MIN_SWITCHER_PT);
-    let split_end = switcher_w + 8.0 + search_w + w.gap + w.icon;
+    let switcher_w = if has_switcher { w.switcher.min(room - 8.0 - search_w).max(MIN_SWITCHER_PT) } else { 0.0 };
+    let split_end = switcher_w + sw_pad + search_w + w.gap + w.icon;
     let split_toggle = field && room >= split_end;
     let trailing_extra = split_toggle && room >= split_end + 10.0 + w.gap + w.trailing_extra;
     RightGroup { switcher, switcher_w, search, split_toggle, trailing_extra }

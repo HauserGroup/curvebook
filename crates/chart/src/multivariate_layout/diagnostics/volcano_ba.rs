@@ -222,7 +222,7 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
         && (matches!(res.analysis.kind, AnalysisKind::MultipleRowTTests(_)) || doc.result_sheet(&graph.spec.primary_source_sheet_id).is_some())
     {
         let ds_id = res.analysis.source_sheet_id.clone();
-        let ds_opt = doc.data_sheet(&ds_id);
+        let ds_opt = crate::resolve_data_sheet_or_upstream(doc, &ds_id);
         let default_col = graph.spec.series.first().map_or(0, |s| s.data_set_index);
         let from_pairs: Vec<DiagPoint> = res
             .pairwise_comparisons
@@ -638,7 +638,7 @@ fn extract_bland_altman_from_result(res: &ResultSheet, graph: &GraphSheet, doc: 
         .or_else(|| find_tab_row_value(res, |l| l.contains("upper") && l.contains("loa")));
     let mut sd_bias_opt = find_scalar_ci(res, |k| k == "sdbias" || k == "sd_bias").or_else(|| find_tab_row_value(res, |l| l.contains("sd of bias")));
 
-    let ds_opt = doc.data_sheet(&res.analysis.source_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
+    let ds_opt = crate::resolve_data_sheet_or_upstream(doc, &res.analysis.source_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
     let ds_pairs = ds_opt.and_then(|ds| extract_bland_altman_pairs_from_ds(ds, col_a, col_b, xy_compare_x_vs_y, true, graph));
     if (raw_pts.is_empty() || bias_opt.is_none() || loa_lo_opt.is_none() || loa_hi_opt.is_none())
         && let Some(ref extracted) = ds_pairs

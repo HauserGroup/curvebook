@@ -371,21 +371,34 @@ fn fa_sec19_08_09_10_x1_06_unified_fixes() -> Result<(), Box<dyn std::error::Err
     save_sess.execute("project.saveTemplate", json!({ "path": tpl_path.to_string_lossy() }))?;
     assert!(open_document_from_files(std::slice::from_ref(&tpl_path))?.is_dirty());
 
-    // FA-X1-06 + FA-SEC19-09: policy, human_path_only, clipboard propagation across open + FileDropped.
-    let policy = ExternalPathPolicy::reject_external();
+    // FA-X1-06 + FA-SEC19-09 + AUD-13-09: policy, human_path_only, clipboard propagation across open + FileDropped.
+    // 1. Workdir-confined policy allows in-workdir FileDropped and preserves all policies across session replacement.
+    let wd_policy = ExternalPathPolicy::workdir(tmp.path())?;
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: true,
-        path_policy: policy.clone(),
+        path_policy: wd_policy.clone(),
         human_path_only: true,
         clipboard_adapter: Some(Arc::new(StubPlatformClipboardAdapter::new())),
         ..DesktopHostConfig::default()
     });
     let wid = rt.open_window_with_session(Session::new(), ViewportMetrics::new(1024.0, 640.0, 1.0), false)?;
     for _ in 0..2 {
-        assert_eq!(rt.window(wid)?.app().session().path_policy(), &policy);
+        assert_eq!(rt.window(wid)?.app().session().path_policy(), &wd_policy);
         assert!(rt.window(wid)?.app().is_human_path_only() && rt.window(wid)?.app().has_custom_clipboard_adapter());
         rt.dispatch(DesktopHostEvent::FileDropped { window_id: wid, path: archive_path.clone() })?;
     }
+    // 2. RejectExternal policy blocks FileDropped before reading from disk (`AUD-13-09`).
+    let reject_policy = ExternalPathPolicy::reject_external();
+    let mut rt_reject = DesktopHostRuntime::new(DesktopHostConfig {
+        in_window_menus: true,
+        path_policy: reject_policy.clone(),
+        human_path_only: true,
+        clipboard_adapter: Some(Arc::new(StubPlatformClipboardAdapter::new())),
+        ..DesktopHostConfig::default()
+    });
+    let wid_reject = rt_reject.open_window_with_session(Session::new(), ViewportMetrics::new(1024.0, 640.0, 1.0), false)?;
+    assert!(rt_reject.dispatch(DesktopHostEvent::FileDropped { window_id: wid_reject, path: archive_path.clone() }).is_err());
+    assert_eq!(rt_reject.window(wid_reject)?.app().session().path_policy(), &reject_policy);
 
     // FA-SEC19-10: Localized app submenu labels.
     let (en, de, fr) = (localized_app_submenu_labels("en"), localized_app_submenu_labels("de"), localized_app_submenu_labels("fr"));

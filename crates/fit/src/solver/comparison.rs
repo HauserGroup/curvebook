@@ -11,14 +11,17 @@ use curvebook_doc::{
     ReplicateFitMode,
 };
 
-use crate::diagnostics::{compare_models_aicc, compare_models_f_test, compare_models_lrt, compare_models_lrt_deviance};
+use crate::diagnostics::{
+    compare_models_aicc, compare_models_f_test, compare_models_lrt, compare_models_lrt_deviance, compare_models_lrt_from_neg2ll,
+    gaussian_neg2_ll_core,
+};
 use crate::error::{FitError, FitStatus};
 use crate::library::{ParametricModel, get_builtin_model};
 use crate::solver::fit::fit_nonlinear;
 use crate::solver::identifiability::is_fit_well_defined;
 use crate::solver::inference::compare_poisson_aicc;
 use crate::solver::results::{InferenceAvailability, ModelComparisonOutcome, ModelComparisonResult, NonlinearFitResult, SolverConfig};
-use crate::types::{DatasetSeries, HookContext, collapse_datasets_to_row_means, filter_datasets_by_range};
+use crate::types::{DataPoint, DatasetSeries, HookContext, collapse_datasets_to_row_means, filter_datasets_by_range};
 
 pub(in crate::solver) fn comparison_test_label(spec: &ModelComparisonSpec) -> &'static str {
     match spec {
@@ -131,7 +134,9 @@ pub fn compare_models(
             ),
         });
     }
-    if let (Some(rout_a), Some(rout_b)) = (&primary.rout, &alt.rout) {
+    if (primary.n_outliers_excluded > 0 || alt.n_outliers_excluded > 0)
+        && let (Some(rout_a), Some(rout_b)) = (&primary.rout, &alt.rout)
+    {
         let mut idx_a = rout_a.outlier_indices.clone();
         let mut idx_b = rout_b.outlier_indices.clone();
         idx_a.sort_unstable();
@@ -143,46 +148,80 @@ pub fn compare_models(
             });
         }
     }
-    let outcome = match spec {
-        ModelComparisonSpec::ExtraSumOfSquaresF { .. } => {
-            let (null_fit, complex_fit, _) = ordered_nested_roles(primary, &alt);
+    let method = spec_to_method(spec);
+    let outcome = compare_validated_pair(primary, &alt, config, method)?;
+    Ok((alt, outcome))
+}
+
+fn spec_to_method(spec: &ModelComparisonSpec) -> ModelComparisonMethod {
+    match spec {
+        ModelComparisonSpec::ExtraSumOfSquaresF { .. } => ModelComparisonMethod::ExtraSumOfSquaresF,
+        ModelComparisonSpec::Aicc { .. } => ModelComparisonMethod::Aicc,
+        ModelComparisonSpec::LikelihoodRatioTest { .. } => ModelComparisonMethod::LikelihoodRatioTest,
+    }
+}
+
+fn compare_validated_pair(
+    fit_a: &NonlinearFitResult,
+    fit_b: &NonlinearFitResult,
+    config: &SolverConfig,
+    method: ModelComparisonMethod,
+) -> Result<ModelComparisonOutcome, FitError> {
+    let uses_pred_y_penalty = fit_a.predicted_y_neg_log_weight_sum.is_some() || fit_b.predicted_y_neg_log_weight_sum.is_some();
+    match method {
+        ModelComparisonMethod::ExtraSumOfSquaresF => {
+            let (null_fit, complex_fit, _) = ordered_nested_roles(fit_a, fit_b);
             ensure_nested_ss_order(null_fit, complex_fit)?;
-            ModelComparisonOutcome::ExtraSumOfSquaresF(compare_models_f_test(
+            Ok(ModelComparisonOutcome::ExtraSumOfSquaresF(compare_models_f_test(
                 null_fit.weighted_ss,
                 null_fit.df,
                 complex_fit.weighted_ss,
                 complex_fit.df,
                 config.confidence.alpha(),
-            )?)
+            )?))
         }
-        ModelComparisonSpec::Aicc { .. } => {
-            if config.method == FitMethod::PoissonDeviance {
-                let aicc_a = primary.aic_c.ok_or_else(|| FitError::InsufficientData { required: primary.k_free + 2, actual: primary.n_obs })?;
-                let aicc_b = alt.aic_c.ok_or_else(|| FitError::InsufficientData { required: alt.k_free + 2, actual: alt.n_obs })?;
-                ModelComparisonOutcome::Aicc(compare_poisson_aicc(aicc_a, aicc_b)?)
+        ModelComparisonMethod::Aicc => {
+            if config.method == FitMethod::PoissonDeviance || uses_pred_y_penalty {
+                let aicc_a = fit_a.aic_c.ok_or_else(|| FitError::InsufficientData { required: fit_a.k_free + 2, actual: fit_a.n_obs })?;
+                let aicc_b = fit_b.aic_c.ok_or_else(|| FitError::InsufficientData { required: fit_b.k_free + 2, actual: fit_b.n_obs })?;
+                Ok(ModelComparisonOutcome::Aicc(compare_poisson_aicc(aicc_a, aicc_b)?))
             } else {
-                ModelComparisonOutcome::Aicc(compare_models_aicc(primary.weighted_ss, primary.k_free, alt.weighted_ss, alt.k_free, primary.n_obs)?)
+                Ok(ModelComparisonOutcome::Aicc(compare_models_aicc(fit_a.weighted_ss, fit_a.k_free, fit_b.weighted_ss, fit_b.k_free, fit_a.n_obs)?))
             }
         }
-        ModelComparisonSpec::LikelihoodRatioTest { .. } => {
-            let (null_fit, complex_fit, _) = ordered_nested_roles(primary, &alt);
-            ensure_nested_ss_order(null_fit, complex_fit)?;
+        ModelComparisonMethod::LikelihoodRatioTest => {
+            let (null_fit, complex_fit, _) = ordered_nested_roles(fit_a, fit_b);
             let res = if config.method == FitMethod::PoissonDeviance {
+                ensure_nested_ss_order(null_fit, complex_fit)?;
                 compare_models_lrt_deviance(null_fit.weighted_ss, null_fit.df, complex_fit.weighted_ss, complex_fit.df, config.confidence.alpha())?
+            } else if let (Some(nlw_null), Some(nlw_complex)) = (null_fit.predicted_y_neg_log_weight_sum, complex_fit.predicted_y_neg_log_weight_sum)
+            {
+                let neg2ll_null = gaussian_neg2_ll_core(null_fit.weighted_ss, nlw_null, fit_a.n_obs)?;
+                let neg2ll_complex = gaussian_neg2_ll_core(complex_fit.weighted_ss, nlw_complex, fit_a.n_obs)?;
+                if complex_fit.df < null_fit.df && neg2ll_complex > neg2ll_null + 1e-6 * neg2ll_null.abs().max(1.0) {
+                    return Err(FitError::InvalidParameter {
+                        name: "comparison",
+                        reason: format!(
+                            "Nested model comparison failed: complex model (df = {}, -2 ln L = {:.6}) fits worse than simpler model (df = {}, -2 ln L = {:.6})",
+                            complex_fit.df, neg2ll_complex, null_fit.df, neg2ll_null
+                        ),
+                    });
+                }
+                compare_models_lrt_from_neg2ll(neg2ll_null, null_fit.df, neg2ll_complex, complex_fit.df, config.confidence.alpha())?
             } else {
+                ensure_nested_ss_order(null_fit, complex_fit)?;
                 compare_models_lrt(
                     null_fit.weighted_ss,
                     null_fit.df,
                     complex_fit.weighted_ss,
                     complex_fit.df,
-                    primary.n_obs,
+                    fit_a.n_obs,
                     config.confidence.alpha(),
                 )?
             };
-            ModelComparisonOutcome::LikelihoodRatioTest(res)
+            Ok(ModelComparisonOutcome::LikelihoodRatioTest(res))
         }
-    };
-    Ok((alt, outcome))
+    }
 }
 
 fn ensure_nested_ss_order(null_fit: &NonlinearFitResult, complex_fit: &NonlinearFitResult) -> Result<(), FitError> {
@@ -244,30 +283,7 @@ pub struct SynchronizedComparisonRequest<'a> {
     pub spec: &'a ModelComparisonSpec,
 }
 
-/// Compare two models with automatic union-of-outliers (`O_1 U O_2`) synchronization under ROUT
-/// elimination (Motulsky & Brown 2006): when `M_1` and `M_2` flag different outlier sets `O_1 != O_2`,
-/// removes `O_1 U O_2` from the active observations and refits both `M_1` and `M_2` on the identical
-/// retained set `I \ (O_1 U O_2)` before computing Extra-SS *F*, `AICc`, or LRT.
-///
-/// Returns `(effective_primary_fit, comparison_result)`.
-pub fn compare_models_synchronized(req: &SynchronizedComparisonRequest<'_>) -> Result<(NonlinearFitResult, ModelComparisonResult), FitError> {
-    let SynchronizedComparisonRequest { primary_model, primary_fit, alt_model, datasets, hooks, config, spec } = *req;
-    if config.effective_outlier_handling() != OutlierHandling::Eliminate || primary_fit.is_robust_cauchy() || config.method == FitMethod::RobustCauchy
-    {
-        let comp = compare_models_checked(primary_fit, alt_model, datasets, hooks, config, spec)?;
-        return Ok((primary_fit.clone(), comp));
-    }
-
-    let alt_config = filter_config_rules_for_alt_model(config, alt_model);
-    let alt_initial = fit_nonlinear(alt_model, datasets, hooks, &alt_config)?;
-    let set_a: BTreeSet<usize> = primary_fit.rout.as_ref().map(|r| r.outlier_indices.iter().copied().collect()).unwrap_or_default();
-    let set_b: BTreeSet<usize> = alt_initial.rout.as_ref().map(|r| r.outlier_indices.iter().copied().collect()).unwrap_or_default();
-    if set_a == set_b {
-        let comp = compare_models_checked(primary_fit, alt_model, datasets, hooks, config, spec)?;
-        return Ok((primary_fit.clone(), comp));
-    }
-
-    let union: BTreeSet<usize> = set_a.union(&set_b).copied().collect();
+fn remove_union_outliers(datasets: &[DatasetSeries], config: &SolverConfig, union: &BTreeSet<usize>) -> Result<Vec<DatasetSeries>, FitError> {
     let mut cleaned = datasets.to_vec();
     if config.replicate_fit_mode == ReplicateFitMode::RowMeansOnly {
         collapse_datasets_to_row_means(&mut cleaned);
@@ -290,13 +306,46 @@ pub fn compare_models_synchronized(req: &SynchronizedComparisonRequest<'_>) -> R
     if cleaned.is_empty() {
         return Err(FitError::EmptyInput);
     }
+    Ok(cleaned)
+}
 
+fn refit_config_without_rout(config: &SolverConfig) -> SolverConfig {
     let mut refit_cfg = config.clone();
     refit_cfg.method = FitMethod::LeastSquares;
     refit_cfg.outlier_handling = OutlierHandling::None;
     refit_cfg.replicate_fit_mode = ReplicateFitMode::IndividualReplicates;
     refit_cfg.x_range_filter = None;
     refit_cfg.y_range_filter = None;
+    refit_cfg
+}
+
+/// Compare two models with automatic union-of-outliers (`O_1 U O_2`) synchronization under ROUT
+/// elimination (Motulsky & Brown 2006): when `M_1` and `M_2` flag different outlier sets `O_1 != O_2`,
+/// removes `O_1 U O_2` from the active observations and refits both `M_1` and `M_2` on the identical
+/// retained set `I \ (O_1 U O_2)` before computing Extra-SS *F*, `AICc`, or LRT.
+///
+/// Returns `(effective_primary_fit, comparison_result)`.
+pub fn compare_models_synchronized(req: &SynchronizedComparisonRequest<'_>) -> Result<(NonlinearFitResult, ModelComparisonResult), FitError> {
+    let SynchronizedComparisonRequest { primary_model, primary_fit, alt_model, datasets, hooks, config, spec } = *req;
+    if config.effective_outlier_handling() != OutlierHandling::Eliminate || primary_fit.is_robust_cauchy() || config.method == FitMethod::RobustCauchy
+    {
+        let comp = compare_models_checked(primary_fit, alt_model, datasets, hooks, config, spec)?;
+        return Ok((primary_fit.clone(), comp));
+    }
+
+    let alt_config = filter_config_rules_for_alt_model(config, alt_model);
+    let alt_initial = fit_nonlinear(alt_model, datasets, hooks, &alt_config)?;
+    let set_a: BTreeSet<usize> = primary_fit.rout.as_ref().map(|r| r.outlier_indices.iter().copied().collect()).unwrap_or_default();
+    let set_b: BTreeSet<usize> = alt_initial.rout.as_ref().map(|r| r.outlier_indices.iter().copied().collect()).unwrap_or_default();
+    if set_a == set_b {
+        let outcome = compare_fitted_pair(primary_fit, &alt_initial, config, spec_to_method(spec))?;
+        let comp = ModelComparisonResult { inference_availability: outcome.inference_availability(), outcome, alternative_fit: alt_initial };
+        return Ok((primary_fit.clone(), comp));
+    }
+
+    let union: BTreeSet<usize> = set_a.union(&set_b).copied().collect();
+    let cleaned = remove_union_outliers(datasets, config, &union)?;
+    let refit_cfg = refit_config_without_rout(config);
 
     let mut primary_refit = fit_nonlinear(primary_model, &cleaned, hooks, &refit_cfg)?;
     let mut comp = compare_models_checked(&primary_refit, alt_model, &cleaned, hooks, &refit_cfg, spec)?;
@@ -397,7 +446,9 @@ fn compare_fitted_pair(
             ),
         });
     }
-    if let (Some(rout_a), Some(rout_b)) = (&fit_a.rout, &fit_b.rout) {
+    if (fit_a.n_outliers_excluded > 0 || fit_b.n_outliers_excluded > 0)
+        && let (Some(rout_a), Some(rout_b)) = (&fit_a.rout, &fit_b.rout)
+    {
         let mut idx_a = rout_a.outlier_indices.clone();
         let mut idx_b = rout_b.outlier_indices.clone();
         idx_a.sort_unstable();
@@ -409,45 +460,26 @@ fn compare_fitted_pair(
             });
         }
     }
-    match method {
-        ModelComparisonMethod::ExtraSumOfSquaresF => {
-            let (null_fit, complex_fit, _) = ordered_nested_roles(fit_a, fit_b);
-            ensure_nested_ss_order(null_fit, complex_fit)?;
-            Ok(ModelComparisonOutcome::ExtraSumOfSquaresF(compare_models_f_test(
-                null_fit.weighted_ss,
-                null_fit.df,
-                complex_fit.weighted_ss,
-                complex_fit.df,
-                config.confidence.alpha(),
-            )?))
-        }
-        ModelComparisonMethod::Aicc => {
-            if config.method == FitMethod::PoissonDeviance {
-                let aicc_a = fit_a.aic_c.ok_or_else(|| FitError::InsufficientData { required: fit_a.k_free + 2, actual: fit_a.n_obs })?;
-                let aicc_b = fit_b.aic_c.ok_or_else(|| FitError::InsufficientData { required: fit_b.k_free + 2, actual: fit_b.n_obs })?;
-                Ok(ModelComparisonOutcome::Aicc(compare_poisson_aicc(aicc_a, aicc_b)?))
-            } else {
-                Ok(ModelComparisonOutcome::Aicc(compare_models_aicc(fit_a.weighted_ss, fit_a.k_free, fit_b.weighted_ss, fit_b.k_free, fit_a.n_obs)?))
-            }
-        }
-        ModelComparisonMethod::LikelihoodRatioTest => {
-            let (null_fit, complex_fit, _) = ordered_nested_roles(fit_a, fit_b);
-            ensure_nested_ss_order(null_fit, complex_fit)?;
-            let res = if config.method == FitMethod::PoissonDeviance {
-                compare_models_lrt_deviance(null_fit.weighted_ss, null_fit.df, complex_fit.weighted_ss, complex_fit.df, config.confidence.alpha())?
-            } else {
-                compare_models_lrt(
-                    null_fit.weighted_ss,
-                    null_fit.df,
-                    complex_fit.weighted_ss,
-                    complex_fit.df,
-                    fit_a.n_obs,
-                    config.confidence.alpha(),
-                )?
-            };
-            Ok(ModelComparisonOutcome::LikelihoodRatioTest(res))
-        }
+    compare_validated_pair(fit_a, fit_b, config, method)
+}
+
+fn is_fixed_parameter_for_model(
+    pname: &str,
+    p_idx: usize,
+    explicit_rules: &[ParameterRule],
+    default_rules: &[ParameterRule],
+    default_bounds: &[(Option<f64>, Option<f64>)],
+) -> bool {
+    let explicit = explicit_rules.iter().find(|r| r.name.eq_ignore_ascii_case(pname));
+    let def_rule = default_rules.iter().find(|r| r.name.eq_ignore_ascii_case(pname));
+    let effective_scope = explicit.map(|r| &r.scope).or_else(|| def_rule.map(|r| &r.scope));
+    if effective_scope.is_some_and(is_constant_scope) {
+        return true;
     }
+    let def_b = default_bounds.get(p_idx).copied().unwrap_or((None, None));
+    let lb = explicit.and_then(|r| r.lower_bound).or_else(|| def_rule.and_then(|r| r.lower_bound)).or(def_b.0);
+    let ub = explicit.and_then(|r| r.upper_bound).or_else(|| def_rule.and_then(|r| r.upper_bound)).or(def_b.1);
+    matches!((lb, ub), (Some(l), Some(u)) if l == u)
 }
 
 /// Evaluate any of the 4 scientific [`ModelComparisonQuestion`] hypotheses (`AlternativeEquation`,
@@ -465,13 +497,15 @@ pub fn compare_models_question(
     prefer_well_defined_fit: bool,
     flag_rules: Option<&FitFlagRules>,
 ) -> Result<ModelComparisonQuestionResult, FitError> {
-    let (model_a_label, model_a_fit, model_b_label, model_b_fit) = match question {
+    let mut alt_model_storage: Option<Box<dyn ParametricModel>> = None;
+    let (model_a_label, mut model_a_fit, cfg_a, model_b_label, mut model_b_fit, cfg_b) = match question {
         ModelComparisonQuestion::AlternativeEquation { alternative_equation_id } => {
             let alt_model =
                 get_builtin_model(alternative_equation_id).ok_or_else(|| FitError::UnknownEquation { id: alternative_equation_id.clone() })?;
             let alt_config = filter_config_rules_for_alt_model(config, alt_model.as_ref());
             let alt_fit = fit_nonlinear(alt_model.as_ref(), datasets, hooks, &alt_config)?;
-            (primary_fit.equation_name.clone(), primary_fit.clone(), alt_fit.equation_name.clone(), alt_fit)
+            alt_model_storage = Some(alt_model);
+            (primary_fit.equation_name.clone(), primary_fit.clone(), config.clone(), alt_fit.equation_name.clone(), alt_fit, alt_config)
         }
         ModelComparisonQuestion::ParameterInvarianceAcrossDatasets { shared_params } => {
             if datasets.len() < 2 {
@@ -499,7 +533,7 @@ pub fn compare_models_question(
             let fit_null = fit_nonlinear(primary_model, datasets, hooks, &null_config)?;
             let fit_alt = fit_nonlinear(primary_model, datasets, hooks, &alt_config)?;
             let joined = canonical_names.join(", ");
-            (format!("Shared {joined} across datasets"), fit_null, format!("Separate {joined} per dataset"), fit_alt)
+            (format!("Shared {joined} across datasets"), fit_null, null_config, format!("Separate {joined} per dataset"), fit_alt, alt_config)
         }
         ModelComparisonQuestion::SingleGlobalCurveVsSeparate => {
             if datasets.len() < 2 {
@@ -508,12 +542,13 @@ pub fn compare_models_question(
                     reason: "SingleGlobalCurveVsSeparate requires at least 2 datasets".to_owned(),
                 });
             }
+            let all_points: Vec<DataPoint> = datasets.iter().flat_map(|d| d.points.iter().cloned()).collect();
+            let default_rules = primary_model.default_parameter_rules(&all_points);
+            let default_bounds = primary_model.default_bounds();
             let mut null_config = config.clone();
             let mut alt_config = config.clone();
-            for pname in primary_model.param_names() {
-                let is_const =
-                    config.parameter_rules.iter().find(|r| r.name.eq_ignore_ascii_case(pname.as_str())).is_some_and(|r| is_constant_scope(&r.scope));
-                if !is_const {
+            for (p_idx, pname) in primary_model.param_names().iter().enumerate() {
+                if !is_fixed_parameter_for_model(pname.as_str(), p_idx, &config.parameter_rules, &default_rules, &default_bounds) {
                     upsert_param_scope(&mut null_config.parameter_rules, pname.as_str(), ParameterScope::SharedGlobal, false);
                     upsert_param_scope(&mut alt_config.parameter_rules, pname.as_str(), ParameterScope::Local, false);
                 }
@@ -523,8 +558,10 @@ pub fn compare_models_question(
             (
                 format!("One global curve for all datasets ({})", primary_model.name()),
                 fit_null,
+                null_config,
                 format!("Separate curve for each dataset ({})", primary_model.name()),
                 fit_alt,
+                alt_config,
             )
         }
         ModelComparisonQuestion::ParameterEqualsTheoretical { param, theoretical_value } => {
@@ -545,7 +582,14 @@ pub fn compare_models_question(
             }
             let fit_null = fit_nonlinear(primary_model, datasets, hooks, &null_config)?;
             let fit_alt = fit_nonlinear(primary_model, datasets, hooks, &alt_config)?;
-            (format!("{canonical} = {theoretical_value} (constrained)"), fit_null, format!("{canonical} unconstrained"), fit_alt)
+            (
+                format!("{canonical} = {theoretical_value} (constrained)"),
+                fit_null,
+                null_config,
+                format!("{canonical} unconstrained"),
+                fit_alt,
+                alt_config,
+            )
         }
     };
 
@@ -564,6 +608,25 @@ pub fn compare_models_question(
             inference_availability: InferenceAvailability::NotApplicableInRobustMode,
             outcome,
         });
+    }
+
+    // Union-of-outliers (`O_1 U O_2`) synchronization under ROUT elimination (Motulsky & Brown 2006; AUD-03-24).
+    let mut effective_compare_cfg = config.clone();
+    if config.effective_outlier_handling() == OutlierHandling::Eliminate {
+        let set_a: BTreeSet<usize> = model_a_fit.rout.as_ref().map(|r| r.outlier_indices.iter().copied().collect()).unwrap_or_default();
+        let set_b: BTreeSet<usize> = model_b_fit.rout.as_ref().map(|r| r.outlier_indices.iter().copied().collect()).unwrap_or_default();
+        if set_a != set_b {
+            let union: BTreeSet<usize> = set_a.union(&set_b).copied().collect();
+            let cleaned = remove_union_outliers(datasets, config, &union)?;
+            let refit_a_cfg = refit_config_without_rout(&cfg_a);
+            let refit_b_cfg = refit_config_without_rout(&cfg_b);
+            let model_b_ref: &dyn ParametricModel = alt_model_storage.as_deref().unwrap_or(primary_model);
+            model_a_fit = fit_nonlinear(primary_model, &cleaned, hooks, &refit_a_cfg)?;
+            model_b_fit = fit_nonlinear(model_b_ref, &cleaned, hooks, &refit_b_cfg)?;
+            model_a_fit.n_outliers_excluded = union.len();
+            model_b_fit.n_outliers_excluded = union.len();
+            effective_compare_cfg = refit_config_without_rout(config);
+        }
     }
 
     if prefer_well_defined_fit {
@@ -603,7 +666,7 @@ pub fn compare_models_question(
         }
     }
 
-    let outcome = compare_fitted_pair(&model_a_fit, &model_b_fit, config, method)?;
+    let outcome = compare_fitted_pair(&model_a_fit, &model_b_fit, &effective_compare_cfg, method)?;
     Ok(ModelComparisonQuestionResult {
         model_a_label,
         model_b_label,

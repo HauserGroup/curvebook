@@ -9,6 +9,7 @@
 
 use curvebook_doc::SumOfSquaresType;
 use curvebook_math::dist::f_sf;
+use curvebook_math::linalg::matrix::MAX_MATRIX_ELEMENTS;
 use curvebook_math::linalg::{DenseMatrix, solve_linear_least_squares, sym_eigen};
 use curvebook_math::sum::SummaryMoments;
 
@@ -16,6 +17,86 @@ use crate::anova::reml::symmetrize_dense;
 use crate::anova::results::{FactorialAnovaResult, FactorialAnovaTerm};
 use crate::common::validate_finite_slice;
 use crate::error::StatsError;
+
+/// Maximum number of design-matrix columns permitted in a factorial / REML effect-coded design.
+pub(in crate::anova) const MAX_FACTORIAL_DESIGN_COLS: usize = 4_096;
+/// Maximum number of model terms (main effects + interactions) permitted in a factorial design.
+pub(in crate::anova) const MAX_FACTORIAL_TERMS: usize = 4_096;
+
+/// Allocate a zero-initialized dense row-major buffer after checking `rows * cols <= MAX_MATRIX_ELEMENTS`.
+pub(in crate::anova) fn checked_dense_vec(rows: usize, cols: usize) -> Result<Vec<f64>, StatsError> {
+    let Some(len) = rows.checked_mul(cols) else {
+        return Err(StatsError::Math(curvebook_math::MathError::InvalidParameter { name: "matrix_elements", value: f64::INFINITY }));
+    };
+    if len > MAX_MATRIX_ELEMENTS {
+        return Err(StatsError::Math(curvebook_math::MathError::InvalidParameter { name: "matrix_elements", value: len as f64 }));
+    }
+    Ok(vec![0.0_f64; len])
+}
+
+/// Pre-flight check on factorial interaction subset count, total design column count, and total
+/// matrix element count (`n_obs * total_cols <= MAX_MATRIX_ELEMENTS`) using elementary symmetric
+/// polynomial DP with checked arithmetic before enumerating any factor combinations.
+pub(in crate::anova) fn plan_factorial_design_subsets(
+    n_obs: usize,
+    factor_level_counts: &[usize],
+    max_interaction_order: usize,
+) -> Result<(Vec<Vec<usize>>, usize), StatsError> {
+    let n_factors = factor_level_counts.len();
+    if n_factors == 0 {
+        return Ok((Vec::new(), 1));
+    }
+    let order_cap = max_interaction_order.clamp(1, n_factors);
+    // DP over elementary symmetric polynomials:
+    // term_dp[k] = C(seen, k), col_dp[k] = sum_{|S|=k} prod_{f in S} (levels_f - 1).
+    let mut term_dp = vec![0_usize; order_cap + 1];
+    let mut col_dp = vec![0_usize; order_cap + 1];
+    term_dp[0] = 1;
+    col_dp[0] = 1;
+    for &n_lvl in factor_level_counts {
+        let df_f = n_lvl.saturating_sub(1);
+        for k in (1..=order_cap).rev() {
+            let next_terms =
+                term_dp[k].checked_add(term_dp[k - 1]).ok_or(StatsError::InvalidParameter { name: "factorial_terms", value: f64::INFINITY })?;
+            if next_terms > MAX_FACTORIAL_TERMS {
+                return Err(StatsError::InvalidParameter { name: "factorial_terms", value: next_terms as f64 });
+            }
+            term_dp[k] = next_terms;
+            let add_cols =
+                col_dp[k - 1].checked_mul(df_f).ok_or(StatsError::InvalidParameter { name: "factorial_design_columns", value: f64::INFINITY })?;
+            let next_cols =
+                col_dp[k].checked_add(add_cols).ok_or(StatsError::InvalidParameter { name: "factorial_design_columns", value: f64::INFINITY })?;
+            if next_cols > MAX_FACTORIAL_DESIGN_COLS {
+                return Err(StatsError::InvalidParameter { name: "factorial_design_columns", value: next_cols as f64 });
+            }
+            col_dp[k] = next_cols;
+        }
+    }
+    let mut total_terms = 0_usize;
+    let mut total_cols = 1_usize; // intercept column
+    for k in 1..=order_cap {
+        total_terms = total_terms.checked_add(term_dp[k]).ok_or(StatsError::InvalidParameter { name: "factorial_terms", value: f64::INFINITY })?;
+        total_cols =
+            total_cols.checked_add(col_dp[k]).ok_or(StatsError::InvalidParameter { name: "factorial_design_columns", value: f64::INFINITY })?;
+    }
+    if total_terms > MAX_FACTORIAL_TERMS {
+        return Err(StatsError::InvalidParameter { name: "factorial_terms", value: total_terms as f64 });
+    }
+    if total_cols > MAX_FACTORIAL_DESIGN_COLS {
+        return Err(StatsError::InvalidParameter { name: "factorial_design_columns", value: total_cols as f64 });
+    }
+    let total_elems = n_obs
+        .checked_mul(total_cols)
+        .ok_or(StatsError::Math(curvebook_math::MathError::InvalidParameter { name: "matrix_elements", value: f64::INFINITY }))?;
+    if total_elems > MAX_MATRIX_ELEMENTS {
+        return Err(StatsError::Math(curvebook_math::MathError::InvalidParameter { name: "matrix_elements", value: total_elems as f64 }));
+    }
+    let mut subsets: Vec<Vec<usize>> = Vec::with_capacity(total_terms);
+    for ord in 1..=order_cap {
+        collect_index_combinations(n_factors, ord, 0, &mut Vec::new(), &mut subsets);
+    }
+    Ok((subsets, total_cols))
+}
 
 /// Factor definition and active observations for general factorial ANOVA (`N >= 1` factors).
 #[derive(Debug, Clone)]
@@ -61,8 +142,8 @@ pub(in crate::anova) fn build_xtx_pinv_and_proj(x: &DenseMatrix) -> Result<(Dens
     let eig = sym_eigen(&xtx)?;
     let max_ev = eig.eigenvalues.iter().copied().fold(0.0_f64, f64::max);
     let tol = max_ev.max(1.0) * (p.max(1) as f64) * 1e-11;
-    let mut pinv = vec![0.0_f64; p * p];
-    let mut proj = vec![0.0_f64; p * p];
+    let mut pinv = checked_dense_vec(p, p)?;
+    let mut proj = checked_dense_vec(p, p)?;
     for (k, &ev) in eig.eigenvalues.iter().enumerate() {
         if ev <= tol {
             continue;
@@ -147,17 +228,15 @@ pub(in crate::anova) fn fit_factorial_anova_with_model(
     validate_finite_slice(&y)?;
     let y_moments = SummaryMoments::from_slice(&y)?;
 
-    // Build factor combinations up to max_interaction_order.
-    let order_cap = max_interaction_order.clamp(1, n_factors);
-    let mut subsets: Vec<Vec<usize>> = Vec::new();
-    for ord in 1..=order_cap {
-        collect_index_combinations(n_factors, ord, 0, &mut Vec::new(), &mut subsets);
-    }
+    // Pre-check interaction term/column/element bounds before expanding factor combinations.
+    let level_counts: Vec<usize> = data.factor_levels.iter().map(Vec::len).collect();
+    let (subsets, expected_cols) = plan_factorial_design_subsets(n_obs, &level_counts, max_interaction_order)?;
 
     // Build sum-to-zero effect coding (+1 / -1) for each factor (needed for valid Type III partial SS!).
     let factor_basis: Vec<Vec<Vec<f64>>> = data.factor_levels.iter().map(|levels| sum_contrast_vectors(levels.len())).collect();
 
-    let mut cols: Vec<Vec<f64>> = vec![vec![1.0_f64; n_obs]]; // column 0 = intercept
+    let mut cols: Vec<Vec<f64>> = Vec::with_capacity(expected_cols);
+    cols.push(vec![1.0_f64; n_obs]); // column 0 = intercept
     let mut terms = Vec::with_capacity(subsets.len());
 
     for sub in &subsets {
@@ -350,7 +429,7 @@ pub(in crate::anova) fn kronecker_term_columns(rows: &[(Vec<usize>, f64)], facto
 
 pub(in crate::anova) fn columns_to_matrix(cols: &[Vec<f64>], n_rows: usize) -> Result<DenseMatrix, StatsError> {
     let n_cols = cols.len();
-    let mut data = vec![0.0_f64; n_rows * n_cols];
+    let mut data = checked_dense_vec(n_rows, n_cols)?;
     for (c, col) in cols.iter().enumerate() {
         for (r, &v) in col.iter().enumerate() {
             data[r * n_cols + c] = v;

@@ -141,7 +141,7 @@ pub struct AiccComparisonResult {
     pub aicc_a: f64,
     /// Corrected AIC value $\text{AIC}_{c,B}$ for candidate model `1`.
     pub aicc_b: f64,
-    /// Absolute difference $|\text{AIC}_{c,A} - \text{AIC}_{c,B}| \ge 0$ (lower AICc is better).
+    /// Signed difference $\text{AIC}_{c,B} - \text{AIC}_{c,A}$ (negative favors model `B`, positive favors model `A`; lower AICc is better).
     pub delta_aicc: f64,
     /// Akaike relative model weight $w_A \in [0, 1]$ with $w_A + w_B = 1$.
     pub weight_a: f64,
@@ -256,7 +256,7 @@ pub struct RoutPointAudit {
     pub x0: f64,
     /// Observed response $y_i$ in original table units.
     pub y: f64,
-    /// Robust raw residual $y_i - \hat{y}_{\text{robust}, i}$ in original $Y$ units.
+    /// Base-weighted robust residual $\sqrt{w_i}(y_i - \hat{y}_{\text{robust}, i})$ (equals raw residual $y_i - \hat{y}_{\text{robust}, i}$ when unweighted).
     pub residual: f64,
     /// Two-sided Student *t* outlier *P* value $|r_i| / \text{RSDR}$ on `df` degrees of freedom.
     pub p_value: f64,
@@ -322,6 +322,51 @@ pub(crate) fn compute_poisson_covariance_diagnostics(
     compute_covariance_from_scale(j_mat, sigma2, z_crit, theta)
 }
 
+fn compute_rank_deficient_xtx_inv(j_scaled: &DenseMatrix, col_norms: &[f64]) -> Result<(DenseMatrix, Vec<f64>, bool), FitError> {
+    let p = col_norms.len();
+    let sv_scaled = svd(j_scaled)?;
+    let r_sv = sv_scaled.rank();
+    let inv_scaled = sv_scaled.ata_pseudoinverse(None)?;
+    let mut inv = DenseMatrix::zeros(p, p)?;
+    let mut deps = Vec::with_capacity(p);
+    let mut unidentifiable = vec![false; p];
+    for i in 0..p {
+        let di = col_norms[i];
+        let range_norm_sq: f64 = (0..r_sv)
+            .map(|m| {
+                let v = sv_scaled.v.get(i, m).unwrap_or(0.0);
+                v * v
+            })
+            .sum();
+        let null_proj_sq = (1.0 - range_norm_sq).max(0.0);
+        let diag_prod = inv_scaled.get(i, i).unwrap_or(f64::NAN);
+        let is_unid = di == 0.0 || !di.is_finite() || null_proj_sq > 1e-8 || !diag_prod.is_finite();
+        unidentifiable[i] = is_unid;
+        let dep = if is_unid {
+            1.0
+        } else if diag_prod <= 1.0 {
+            0.0
+        } else {
+            (1.0 - 1.0 / diag_prod).clamp(0.0, 1.0)
+        };
+        deps.push(dep);
+    }
+    for i in 0..p {
+        let di = col_norms[i];
+        for j in 0..p {
+            let dj = col_norms[j];
+            if let Some(slot) = inv.get_mut(i, j) {
+                *slot = if unidentifiable[i] || unidentifiable[j] || di <= 0.0 || dj <= 0.0 || !di.is_finite() || !dj.is_finite() {
+                    f64::NAN
+                } else {
+                    (inv_scaled.get(i, j).unwrap_or(f64::NAN) / di) / dj
+                };
+            }
+        }
+    }
+    Ok((inv, deps, true))
+}
+
 fn compute_covariance_from_scale(j_mat: &DenseMatrix, sigma2: f64, crit: f64, theta: &[f64]) -> Result<CovarianceDiagnostics, FitError> {
     let p = theta.len();
     if p == 0 {
@@ -381,37 +426,7 @@ fn compute_covariance_from_scale(j_mat: &DenseMatrix, sigma2: f64, crit: f64, th
         let amb = deps.iter().any(|&d| !d.is_finite() || d > 0.9999);
         (inv, deps, amb)
     } else {
-        let sv_scaled = svd(&j_scaled)?;
-        let r_sv = sv_scaled.rank();
-        let inv_scaled = sv_scaled.ata_pseudoinverse(None)?;
-        let mut inv = DenseMatrix::zeros(p, p)?;
-        let mut deps = Vec::with_capacity(p);
-        for i in 0..p {
-            let di = col_norms[i];
-            let range_norm_sq: f64 = (0..r_sv)
-                .map(|m| {
-                    let v = sv_scaled.v.get(i, m).unwrap_or(0.0);
-                    v * v
-                })
-                .sum();
-            let null_proj_sq = (1.0 - range_norm_sq).max(0.0);
-            let diag_prod = inv_scaled.get(i, i).unwrap_or(f64::NAN);
-            let dep = if di == 0.0 || !di.is_finite() || null_proj_sq > 1e-8 || !diag_prod.is_finite() {
-                1.0
-            } else if diag_prod <= 1.0 {
-                0.0
-            } else {
-                (1.0 - 1.0 / diag_prod).clamp(0.0, 1.0)
-            };
-            deps.push(dep);
-            for j in 0..p {
-                let dj = col_norms[j];
-                if let Some(slot) = inv.get_mut(i, j) {
-                    *slot = if di > 0.0 && dj > 0.0 { (inv_scaled.get(i, j).unwrap_or(0.0) / di) / dj } else { 0.0 };
-                }
-            }
-        }
-        (inv, deps, true)
+        compute_rank_deficient_xtx_inv(&j_scaled, &col_norms)?
     };
 
     let mut se = Vec::with_capacity(p);
@@ -422,12 +437,17 @@ fn compute_covariance_from_scale(j_mat: &DenseMatrix, sigma2: f64, crit: f64, th
 
     for i in 0..p {
         let se_i = if sigma2.is_finite() {
-            let var_i = (sigma2 * xtx_inv.get(i, i).unwrap_or(0.0)).max(0.0);
-            let s = var_i.sqrt();
-            if !s.is_finite() {
+            let raw_var = sigma2 * xtx_inv.get(i, i).unwrap_or(f64::NAN);
+            if raw_var.is_finite() {
+                let s = raw_var.max(0.0).sqrt();
+                if !s.is_finite() {
+                    ambiguous = true;
+                }
+                s
+            } else {
                 ambiguous = true;
+                f64::NAN
             }
-            s
         } else {
             f64::NAN
         };
@@ -436,18 +456,19 @@ fn compute_covariance_from_scale(j_mat: &DenseMatrix, sigma2: f64, crit: f64, th
         ci_lo.push(theta[i] - half);
         ci_hi.push(theta[i] + half);
         for (j, cell) in cov_vec[i].iter_mut().enumerate().take(p) {
-            *cell = if sigma2.is_finite() { sigma2 * xtx_inv.get(i, j).unwrap_or(0.0) } else { f64::NAN };
+            let raw_cov = if sigma2.is_finite() { sigma2 * xtx_inv.get(i, j).unwrap_or(f64::NAN) } else { f64::NAN };
+            *cell = if raw_cov.is_finite() { raw_cov } else { f64::NAN };
         }
     }
 
     for i in 0..p {
         for j in 0..p {
             let denom = se[i] * se[j];
-            corr_vec[i][j] = if !sigma2.is_finite() {
+            corr_vec[i][j] = if !sigma2.is_finite() || !se[i].is_finite() || !se[j].is_finite() {
                 f64::NAN
             } else if i == j {
                 1.0
-            } else if denom > 0.0 && denom.is_finite() {
+            } else if denom > 0.0 && denom.is_finite() && cov_vec[i][j].is_finite() {
                 (cov_vec[i][j] / denom).clamp(-1.0, 1.0)
             } else {
                 0.0
@@ -1111,8 +1132,23 @@ pub(crate) fn compare_models_lrt_deviance(
 /// Returns [`FitError::InvalidParameter`] if `ss` is negative or non-finite, or
 /// [`FitError::InsufficientData`] if `n_obs <= p_free + 2` (so $N - K - 1 \le 0$).
 pub fn compute_information_criteria(ss: f64, n_obs: usize, p_free: usize) -> Result<InformationCriteria, FitError> {
+    compute_information_criteria_with_log_weight_penalty(ss, 0.0, n_obs, p_free)
+}
+
+/// Compute Gaussian $\text{AIC}_c$ and $\text{BIC}$ including the exact heteroscedastic
+/// normalizing penalty $-\sum_i n_i \ln w_i$ (needed whenever weights depend on model predictions
+/// `w_i = 1 / |y_hat_i|^k` under `WeightingSource::PredictedY`; Carroll & Ruppert 1988; Burnham & Anderson 2002).
+pub(crate) fn compute_information_criteria_with_log_weight_penalty(
+    ss: f64,
+    neg_log_weight_sum: f64,
+    n_obs: usize,
+    p_free: usize,
+) -> Result<InformationCriteria, FitError> {
     if !ss.is_finite() || ss < 0.0 {
         return Err(FitError::InvalidParameter { name: "ss", reason: String::from("SS must be finite and non-negative") });
+    }
+    if !neg_log_weight_sum.is_finite() {
+        return Err(FitError::InvalidParameter { name: "weights", reason: String::from("log-weight penalty must be finite") });
     }
     let k = p_free + 1;
     if n_obs <= k + 1 {
@@ -1121,10 +1157,47 @@ pub fn compute_information_criteria(ss: f64, n_obs: usize, p_free: usize) -> Res
     let n_f = n_obs as f64;
     let k_f = k as f64;
     let mse_ratio = (ss / n_f).max(1e-300);
-    let aic = n_f * mse_ratio.ln() + 2.0 * k_f;
+    let neg2_ll_core = n_f * mse_ratio.ln() + neg_log_weight_sum;
+    let aic = neg2_ll_core + 2.0 * k_f;
     let aicc = aic + (2.0 * k_f * (k_f + 1.0)) / ((n_obs - k - 1) as f64);
-    let bic = n_f * mse_ratio.ln() + k_f * n_f.ln();
+    let bic = neg2_ll_core + k_f * n_f.ln();
     Ok(InformationCriteria { aicc, bic, n_obs, k_params_plus_sigma: k })
+}
+
+/// Compute Gaussian profile `-2 ln L` core `N ln(SS_w / N) - sum_i n_i ln(w_i)` up to the
+/// data-only constant `N (1 + ln(2 pi))` (Carroll & Ruppert 1988; Wilks 1938).
+pub(crate) fn gaussian_neg2_ll_core(ss: f64, neg_log_weight_sum: f64, n_obs: usize) -> Result<f64, FitError> {
+    if !ss.is_finite() || ss < 0.0 || n_obs == 0 {
+        return Err(FitError::InvalidParameter { name: "ss", reason: String::from("SS must be finite, non-negative, and n_obs > 0") });
+    }
+    if !neg_log_weight_sum.is_finite() {
+        return Err(FitError::InvalidParameter { name: "weights", reason: String::from("log-weight penalty must be finite") });
+    }
+    let n_f = n_obs as f64;
+    let mse_ratio = (ss / n_f).max(1e-300);
+    let val = n_f * mse_ratio.ln() + neg_log_weight_sum;
+    if val.is_finite() { Ok(val) } else { Err(FitError::InvalidParameter { name: "ss", reason: String::from("Gaussian log-likelihood overflowed") }) }
+}
+
+/// Likelihood ratio test from arbitrary `-2 ln L` values `neg2_ll_null - neg2_ll_alt ~ chi^2_{df_diff}`
+/// (Wilks 1938; Carroll & Ruppert 1988).
+pub(crate) fn compare_models_lrt_from_neg2ll(
+    neg2_ll_null: f64,
+    df_null: usize,
+    neg2_ll_alt: f64,
+    df_alt: usize,
+    alpha: f64,
+) -> Result<LikelihoodRatioResult, FitError> {
+    if df_alt == 0 || df_null <= df_alt {
+        return Err(FitError::InvalidParameter { name: "df", reason: format!("requires df_null ({df_null}) > df_alt ({df_alt}) > 0") });
+    }
+    if !neg2_ll_null.is_finite() || !neg2_ll_alt.is_finite() {
+        return Err(FitError::InvalidParameter { name: "likelihood", reason: String::from("log-likelihood values must be finite") });
+    }
+    let df_diff = df_null - df_alt;
+    let lr_statistic = (neg2_ll_null - neg2_ll_alt).max(0.0);
+    let p_value = chi2_sf(lr_statistic, df_diff as f64)?.clamp(0.0, 1.0);
+    Ok(LikelihoodRatioResult { lr_statistic, df_diff, df_null, df_alt, p_value, preferred_complex_model: p_value < alpha })
 }
 
 /// Compare two models on identical observations via $\text{AIC}_c$, Akaike weights, and evidence ratio.

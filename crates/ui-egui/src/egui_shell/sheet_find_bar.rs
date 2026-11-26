@@ -3,20 +3,72 @@
 //! Anchored top-right inside the active sheet viewport (`Order::Foreground`, `ZLayer::FloatingOverlay`)
 //! with no backdrop scrim so users can continue inspecting or editing cells while navigating matches.
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
 
-use curvebook_doc::{CellCoord, DataSheet, ResultCell, ResultSheet, SheetId, TableArchetype, default_column_label};
+use curvebook_doc::{
+    Cell, CellCoord, CellValue, DataSheet, ResultCell, ResultSheet, SequenceProgression, SheetId, TableArchetype, XColumnMode, default_column_label,
+};
 use curvebook_tools::GridCellCoord;
 use egui::{CornerRadius, Id, Key, Modifiers, Order, Rect, RichText, Stroke, TextEdit, Ui, WidgetInfo, pos2, vec2};
 use serde_json::json;
 
-use crate::dialogs_canvas::ResultSheetViewState;
-use crate::egui_shell::data_grid::DataGridFindHighlight;
-use crate::egui_shell::results_view::ResultsFindHighlight;
+use crate::egui_shell::data_grid::{DataGridFindHighlight, format_cell_into_with_decimals};
+use crate::egui_shell::results_view::{ResultsFindHighlight, format_result_cell_display_text};
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
-use crate::grid_view::{data_set_subcolumn_count, format_cell_display};
+use crate::grid_view::data_set_subcolumn_count;
 use crate::i18n::LocalePreset;
 use crate::inspect::ZLayer;
+
+/// Sentinel column index representing the pinned `X` (for `XY` tables) or `Time` (for `Survival`
+/// tables) column in [`DataSheetFindMatch`] and [`crate::egui_shell::data_grid::DataGridScrollTarget`].
+pub const X_OR_TIME_COL_SENTINEL: usize = usize::MAX;
+
+thread_local! {
+    static ACTIVE_FIND_LOCALE: RefCell<Option<(SheetId, LocalePreset)>> = const { RefCell::new(None) };
+    static DATA_FIND_CACHE: RefCell<Option<(DataFindCacheKey, Vec<DataSheetFindMatch>)>> = const { RefCell::new(None) };
+    static RESULT_FIND_CACHE: RefCell<Option<(ResultFindCacheKey, Vec<ResultSheetFindMatch>)>> = const { RefCell::new(None) };
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DataFindCacheKey {
+    mutation_seq: u64,
+    sheet_id: SheetId,
+    query: String,
+    match_case: bool,
+    match_entire_cell: bool,
+    decimal_sep: char,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResultFindCacheKey {
+    mutation_seq: u64,
+    sheet_id: SheetId,
+    active_tab_idx: usize,
+    all_tabs: bool,
+    query: String,
+    match_case: bool,
+    match_entire_cell: bool,
+}
+
+pub(crate) fn set_active_find_locale(sheet_id: &SheetId, locale_preset: &LocalePreset) -> bool {
+    ACTIVE_FIND_LOCALE.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        let changed = guard.as_ref().is_none_or(|(sid, prev)| sid != sheet_id || prev.decimal_separator != locale_preset.decimal_separator);
+        *guard = Some((sheet_id.clone(), locale_preset.clone()));
+        changed
+    })
+}
+
+fn clear_active_find_locale() {
+    ACTIVE_FIND_LOCALE.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
+fn active_find_locale_for(sheet_id: &SheetId) -> Option<LocalePreset> {
+    ACTIVE_FIND_LOCALE.with(|slot| slot.borrow().as_ref().filter(|(sid, _)| sid == sheet_id).map(|(_, p)| p.clone()))
+}
 
 /// Persistent UI state for the floating in-sheet Find bar (`Cmd/Ctrl+F`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -53,6 +105,7 @@ impl SheetFindBarState {
         self.open = false;
         self.request_focus = false;
         self.pending_scroll_to_active = false;
+        clear_active_find_locale();
     }
 
     /// Clamp `active_match_index` against `match_count` and update `last_match_count`.
@@ -200,16 +253,36 @@ impl ResultSheetFindOverlay {
     }
 }
 
-fn text_matches(haystack: &str, needle: &str, needle_lower: Option<&str>, match_case: bool, match_entire_cell: bool) -> bool {
+fn text_matches_with_buf(
+    haystack: &str,
+    needle: &str,
+    needle_lower: Option<&str>,
+    match_case: bool,
+    match_entire_cell: bool,
+    lower_buf: &mut String,
+) -> bool {
     if haystack.is_empty() || needle.is_empty() {
         return false;
     }
     if match_case {
         if match_entire_cell { haystack == needle } else { haystack.contains(needle) }
     } else {
-        let h_lower = haystack.to_lowercase();
+        lower_buf.clear();
+        for ch in haystack.chars() {
+            for lc in ch.to_lowercase() {
+                lower_buf.push(lc);
+            }
+        }
         let n_lower = needle_lower.unwrap_or(needle);
-        if match_entire_cell { h_lower == n_lower } else { h_lower.contains(n_lower) }
+        if match_entire_cell { lower_buf == n_lower } else { lower_buf.contains(n_lower) }
+    }
+}
+
+fn data_sheet_x_column_title(arch: &TableArchetype) -> Option<&str> {
+    match arch {
+        TableArchetype::Xy(t) => Some(if t.x_title.is_empty() { "X" } else { t.x_title.as_str() }),
+        TableArchetype::Survival(t) => Some(if t.time_title.is_empty() { "Time" } else { t.time_title.as_str() }),
+        _ => None,
     }
 }
 
@@ -242,41 +315,116 @@ fn data_sheet_row_titles(arch: &TableArchetype) -> &[String] {
     }
 }
 
-/// Find all matches across column titles, row titles, and cell values of `sheet`.
+#[derive(Clone, Copy)]
+struct FindQuerySpec<'a> {
+    query: &'a str,
+    needle_lower: Option<&'a str>,
+    match_case: bool,
+    match_entire_cell: bool,
+}
+
+fn cell_matches_query(cell: &Cell, locale_preset: &LocalePreset, spec: FindQuerySpec<'_>, cell_buf: &mut String, lower_buf: &mut String) -> bool {
+    match &cell.value {
+        CellValue::Empty => false,
+        CellValue::Text(s) if !cell.excluded => {
+            text_matches_with_buf(s, spec.query, spec.needle_lower, spec.match_case, spec.match_entire_cell, lower_buf)
+        }
+        _ => {
+            cell_buf.clear();
+            format_cell_into_with_decimals(cell, locale_preset, None, cell_buf);
+            text_matches_with_buf(cell_buf, spec.query, spec.needle_lower, spec.match_case, spec.match_entire_cell, lower_buf)
+        }
+    }
+}
+
+/// Find all matches across column titles, X/Time headers and cells, row titles, and cell values of `sheet`
+/// using the active shell locale when open, or the default locale otherwise.
 #[must_use]
 pub fn find_matches_in_data_sheet(sheet: &DataSheet, query: &str, match_case: bool, match_entire_cell: bool) -> Vec<DataSheetFindMatch> {
+    let locale_preset = active_find_locale_for(&sheet.id).unwrap_or_default();
+    find_matches_in_data_sheet_with_locale(sheet, query, match_case, match_entire_cell, &locale_preset)
+}
+
+/// Find all matches across `sheet` formatted with `locale_preset`, including `XY` X and `Survival` Time columns.
+#[must_use]
+pub fn find_matches_in_data_sheet_with_locale(
+    sheet: &DataSheet,
+    query: &str,
+    match_case: bool,
+    match_entire_cell: bool,
+    locale_preset: &LocalePreset,
+) -> Vec<DataSheetFindMatch> {
     if query.is_empty() {
         return Vec::new();
     }
     let needle_lower = (!match_case).then(|| query.to_lowercase());
-    let needle_lower_ref = needle_lower.as_deref();
+    let spec = FindQuerySpec { query, needle_lower: needle_lower.as_deref(), match_case, match_entire_cell };
     let mut out = Vec::new();
+    let mut cell_buf = String::with_capacity(32);
+    let mut lower_buf = String::with_capacity(32);
+
+    if let Some(x_title) = data_sheet_x_column_title(&sheet.archetype)
+        && text_matches_with_buf(x_title, spec.query, spec.needle_lower, spec.match_case, spec.match_entire_cell, &mut lower_buf)
+    {
+        out.push(DataSheetFindMatch::ColumnTitle { col: X_OR_TIME_COL_SENTINEL });
+    }
 
     let col_count = sheet.archetype.column_count();
     for col in 0..col_count {
         let title = data_sheet_column_title(&sheet.archetype, col);
-        if text_matches(&title, query, needle_lower_ref, match_case, match_entire_cell) {
+        if text_matches_with_buf(&title, spec.query, spec.needle_lower, spec.match_case, spec.match_entire_cell, &mut lower_buf) {
             out.push(DataSheetFindMatch::ColumnTitle { col });
         }
     }
 
     for (row, title) in data_sheet_row_titles(&sheet.archetype).iter().enumerate() {
-        if text_matches(title, query, needle_lower_ref, match_case, match_entire_cell) {
+        if text_matches_with_buf(title, spec.query, spec.needle_lower, spec.match_case, spec.match_entire_cell, &mut lower_buf) {
             out.push(DataSheetFindMatch::RowTitle { row });
         }
     }
 
-    let locale_preset = LocalePreset::default();
     let row_count = sheet.archetype.row_count();
     for row in 0..row_count {
+        match &sheet.archetype {
+            TableArchetype::Xy(xy) => {
+                let x_subcols = xy.x_mode.subcolumn_count();
+                for subcol in 0..x_subcols {
+                    if let Some(cell) = sheet.archetype.x_or_time_cell(row, subcol) {
+                        if cell_matches_query(cell, locale_preset, spec, &mut cell_buf, &mut lower_buf) {
+                            out.push(DataSheetFindMatch::Cell(GridCellCoord::new(row, X_OR_TIME_COL_SENTINEL, subcol)));
+                        }
+                    } else if subcol == 0
+                        && let XColumnMode::GeneratedSequence { start, step, progression } = &xy.x_mode
+                    {
+                        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                        let seq_val = match progression {
+                            SequenceProgression::Arithmetic => *start + (row as f64) * (*step),
+                            SequenceProgression::Geometric => *start * step.powi(row as i32),
+                        };
+                        let seq_cell = Cell::number(seq_val);
+                        if cell_matches_query(&seq_cell, locale_preset, spec, &mut cell_buf, &mut lower_buf) {
+                            out.push(DataSheetFindMatch::Cell(GridCellCoord::new(row, X_OR_TIME_COL_SENTINEL, 0)));
+                        }
+                    }
+                }
+            }
+            TableArchetype::Survival(surv) => {
+                if let Some(cell) = surv.times.get(row)
+                    && cell_matches_query(cell, locale_preset, spec, &mut cell_buf, &mut lower_buf)
+                {
+                    out.push(DataSheetFindMatch::Cell(GridCellCoord::new(row, X_OR_TIME_COL_SENTINEL, 0)));
+                }
+            }
+            _ => {}
+        }
+
         for col in 0..col_count {
             let subcols = data_set_subcolumn_count(&sheet.archetype, col).max(1);
             for subcol in 0..subcols {
                 let Some(cell) = sheet.archetype.data_cell(CellCoord::new(row, col, subcol)) else {
                     continue;
                 };
-                let formatted = format_cell_display(cell, &locale_preset);
-                if text_matches(&formatted, query, needle_lower_ref, match_case, match_entire_cell) {
+                if cell_matches_query(cell, locale_preset, spec, &mut cell_buf, &mut lower_buf) {
                     out.push(DataSheetFindMatch::Cell(GridCellCoord::new(row, col, subcol)));
                 }
             }
@@ -286,7 +434,41 @@ pub fn find_matches_in_data_sheet(sheet: &DataSheet, query: &str, match_case: bo
     out
 }
 
+/// Cached variant of [`find_matches_in_data_sheet_with_locale`] keyed by `mutation_seq` and search inputs.
+#[must_use]
+pub fn find_matches_in_data_sheet_cached(
+    mutation_seq: u64,
+    sheet: &DataSheet,
+    query: &str,
+    match_case: bool,
+    match_entire_cell: bool,
+    locale_preset: &LocalePreset,
+) -> Vec<DataSheetFindMatch> {
+    let key = DataFindCacheKey {
+        mutation_seq,
+        sheet_id: sheet.id.clone(),
+        query: query.to_owned(),
+        match_case,
+        match_entire_cell,
+        decimal_sep: locale_preset.decimal_separator,
+    };
+    DATA_FIND_CACHE.with(|cache| {
+        if let Some((cached_key, cached_matches)) = cache.borrow().as_ref()
+            && *cached_key == key
+        {
+            return cached_matches.clone();
+        }
+        let fresh = find_matches_in_data_sheet_with_locale(sheet, query, match_case, match_entire_cell, locale_preset);
+        *cache.borrow_mut() = Some((key, fresh.clone()));
+        fresh
+    })
+}
+
 /// Find all matches across formatted [`ResultCell`] values and row/column headers in `sheet`.
+///
+/// Uses the same semantic formatter as [`crate::egui_shell::results_view`] (ambiguous CIs, blank
+/// unreached survival medians, significant-digit overrides), keeps header/row-label/data-cell hits
+/// in separate dedup namespaces, and never emits out-of-bounds row indices on empty tabs.
 ///
 /// Searches only `active_tab_idx` when `all_tabs == false`, or every tab when `all_tabs == true`.
 #[must_use]
@@ -311,21 +493,25 @@ pub fn find_matches_in_result_sheet(
     };
 
     let mut out = Vec::new();
+    let mut lower_buf = String::with_capacity(32);
     for tab_idx in tab_range {
         let Some(tab) = sheet.tabs.get(tab_idx) else {
             continue;
         };
+        if tab.rows.is_empty() {
+            continue;
+        }
         let mut seen: HashSet<(usize, usize)> = HashSet::new();
 
         for (col_idx, header) in tab.column_headers.iter().enumerate() {
-            if text_matches(header, query, needle_lower_ref, match_case, match_entire_cell) && seen.insert((0, col_idx)) {
+            if text_matches_with_buf(header, query, needle_lower_ref, match_case, match_entire_cell, &mut lower_buf) && seen.insert((0, col_idx)) {
                 out.push(ResultSheetFindMatch { tab_idx, row_idx: 0, col_idx });
             }
         }
 
         for (row_idx, row) in tab.rows.iter().enumerate() {
             if let Some(row_label) = tab.row_labels.get(row_idx)
-                && text_matches(row_label, query, needle_lower_ref, match_case, match_entire_cell)
+                && text_matches_with_buf(row_label, query, needle_lower_ref, match_case, match_entire_cell, &mut lower_buf)
                 && seen.insert((row_idx, 0))
             {
                 out.push(ResultSheetFindMatch { tab_idx, row_idx, col_idx: 0 });
@@ -334,8 +520,10 @@ pub fn find_matches_in_result_sheet(
                 if matches!(cell, ResultCell::Empty) {
                     continue;
                 }
-                let formatted = ResultSheetViewState::format_result_cell(cell, sheet.analysis.p_value_format);
-                if text_matches(&formatted, query, needle_lower_ref, match_case, match_entire_cell) && seen.insert((row_idx, col_idx)) {
+                let formatted = format_result_cell_display_text(cell, sheet, tab);
+                if text_matches_with_buf(&formatted, query, needle_lower_ref, match_case, match_entire_cell, &mut lower_buf)
+                    && seen.insert((row_idx, col_idx))
+                {
                     out.push(ResultSheetFindMatch { tab_idx, row_idx, col_idx });
                 }
             }
@@ -343,6 +531,38 @@ pub fn find_matches_in_result_sheet(
     }
 
     out
+}
+
+/// Cached variant of [`find_matches_in_result_sheet`] keyed by `mutation_seq` and search inputs.
+#[must_use]
+pub fn find_matches_in_result_sheet_cached(
+    mutation_seq: u64,
+    sheet: &ResultSheet,
+    active_tab_idx: usize,
+    all_tabs: bool,
+    query: &str,
+    match_case: bool,
+    match_entire_cell: bool,
+) -> Vec<ResultSheetFindMatch> {
+    let key = ResultFindCacheKey {
+        mutation_seq,
+        sheet_id: sheet.id.clone(),
+        active_tab_idx,
+        all_tabs,
+        query: query.to_owned(),
+        match_case,
+        match_entire_cell,
+    };
+    RESULT_FIND_CACHE.with(|cache| {
+        if let Some((cached_key, cached_matches)) = cache.borrow().as_ref()
+            && *cached_key == key
+        {
+            return cached_matches.clone();
+        }
+        let fresh = find_matches_in_result_sheet(sheet, active_tab_idx, all_tabs, query, match_case, match_entire_cell);
+        *cache.borrow_mut() = Some((key, fresh.clone()));
+        fresh
+    })
 }
 
 struct FindWidgetMeta<'a> {
@@ -503,6 +723,7 @@ fn render_find_bar_controls(
             if repl_resp.clicked() {
                 let initial_query = (!state.query.is_empty()).then(|| state.query.clone());
                 intents.push(UiIntent::OpenFindReplace { initial_query });
+                state.close();
                 out.replace_requested = true;
             }
         }
@@ -540,7 +761,8 @@ fn handle_find_bar_keys(ctx: &egui::Context, query_focused: bool, match_count: u
 
 /// Render the non-blocking floating in-sheet Find bar anchored top-right inside `anchor_rect`.
 ///
-/// Returns `true` when the user triggers the `Replace…` handoff (`UiIntent::OpenFindReplace`).
+/// Returns `true` while the Find bar remains open (`state.open`), and `false` once dismissed via
+/// `Esc`, `×`, or the `Replace…` handoff (`UiIntent::OpenFindReplace`).
 #[allow(clippy::too_many_arguments)]
 pub fn render_sheet_find_bar(
     ctx: &egui::Context,
@@ -554,7 +776,15 @@ pub fn render_sheet_find_bar(
     intents: &mut PendingUiIntents,
 ) -> bool {
     if !state.open || !anchor_rect.is_positive() {
+        clear_active_find_locale();
         return false;
+    }
+    if is_data_sheet
+        && let Some(ref sid) = state.last_sheet_id
+        && active_find_locale_for(sid).is_none()
+        && set_active_find_locale(sid, &LocalePreset::for_locale(tokens.locale))
+    {
+        ctx.request_repaint();
     }
     state.sync_match_count(match_count);
 
@@ -597,7 +827,7 @@ pub fn render_sheet_find_bar(
         }
     }
 
-    outcome.replace_requested
+    state.open
 }
 
 #[cfg(test)]

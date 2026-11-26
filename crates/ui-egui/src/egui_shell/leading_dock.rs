@@ -145,6 +145,7 @@ impl Default for LeadingDockEguiState {
 pub struct LeadingDockContext<'a> {
     pub tokens: &'a Tokens,
     pub layout: ResponsiveShellLayout,
+    pub workspace_preset: super::WorkspacePreset,
     pub enabled: bool,
     pub focused: bool,
 }
@@ -394,7 +395,6 @@ pub fn render_leading_dock(
         state.context_menu = None;
     } else {
         render_navigator_context_menu(ui, app, state, tokens, meta, intents);
-        let _ = render_navigator_delete_confirm_modal(ui.ctx(), &app.locale, state, tokens, meta, intents);
     }
     report
 }
@@ -415,7 +415,7 @@ fn handle_leading_dock_shortcuts(
 
     while let Some(m) = consume_matching_shortcut(ui.ctx(), app, on_result_sheet, |cmd| match cmd {
         "ui.navigator.toggle" | "ui.family.toggle" => true,
-        "sheet.rename" => can_rename && app.document().active_sheet_id.is_some(),
+        "sheet.rename" => can_rename && app.document().active_sheet_id.as_ref().is_some_and(|id| !is_sheet_frozen(app.document(), id)),
         _ => false,
     }) {
         match m.command_id.as_str() {
@@ -431,6 +431,7 @@ fn handle_leading_dock_shortcuts(
     }
 
     let f2_fallback_allowed = can_rename
+        && app.document().active_sheet_id.as_ref().is_some_and(|id| !is_sheet_frozen(app.document(), id))
         && app.shortcuts.active_combo("sheet.rename").is_none_or(str::is_empty)
         && !has_registered_shortcut(app, on_result_sheet, Key::F2, Modifiers::NONE);
     if f2_fallback_allowed
@@ -441,7 +442,14 @@ fn handle_leading_dock_shortcuts(
     }
 }
 
+fn is_sheet_frozen(doc: &ProjectDocument, sheet_id: &SheetId) -> bool {
+    doc.data_sheet(sheet_id).is_some_and(|ds| ds.frozen)
+}
+
 fn begin_inline_rename(app: &UiApp, state: &mut LeadingDockEguiState, sheet_id: SheetId) {
+    if is_sheet_frozen(app.document(), &sheet_id) {
+        return;
+    }
     let title = doc_sheet_title(app.document(), &sheet_id).unwrap_or(sheet_id.as_str()).to_owned();
     state.renaming_sheet_id = Some(sheet_id);
     state.rename_draft = title.clone();
@@ -853,9 +861,11 @@ fn render_nested_navigator_tree(
                 meta,
                 intents,
             );
+            for (child, _) in &matching_children {
+                placed.insert(child.sheet_id.clone());
+            }
             if !collapsed {
                 for (child, depth) in matching_children {
-                    placed.insert(child.sheet_id.clone());
                     let s_idx = entry_map.get(&child.sheet_id).map_or(0, |(idx, _)| *idx);
                     render_navigator_row(
                         ui,
@@ -1179,7 +1189,7 @@ fn render_navigator_row(
         state.context_menu =
             Some(NavigatorContextMenuState { sheet_id: entry.sheet_id.clone(), section: entry.section, is_frozen: entry.is_frozen, anchor });
     }
-    if resp.double_clicked() && enabled {
+    if resp.double_clicked() && enabled && !entry.is_frozen {
         begin_inline_rename(app, state, entry.sheet_id.clone());
     } else if resp.clicked() && enabled && state.dragging_sheet_id.is_none() {
         intents.push_engine("sheet.select", json!({ "sheet_id": entry.sheet_id.as_str(), "mode": "navigator" }));
@@ -1796,9 +1806,53 @@ fn finalize_drag_state(ui: &egui::Ui, app: &UiApp, state: &mut LeadingDockEguiSt
     }
 }
 
-fn collect_visible_sheet_ids(app: &UiApp, state: &LeadingDockEguiState) -> Vec<SheetId> {
+/// Collect sheet IDs in the exact visible top-to-bottom navigator order (respecting
+/// `SeparateFolders` vs `NestedResultsUnderData`, collapsed folders/parents, kind chip, and search).
+#[must_use]
+pub fn collect_visible_sheet_ids(app: &UiApp, state: &LeadingDockEguiState) -> Vec<SheetId> {
     let q = state.search_draft.trim().to_ascii_lowercase();
     let mut ids = Vec::new();
+    if app.nav.nesting_mode == NavigatorNestingMode::NestedResultsUnderData {
+        let doc = app.document();
+        let entry_map: BTreeMap<SheetId, (usize, &NavigatorEntry)> =
+            app.nav.folders.iter().flat_map(|f| f.entries.iter().enumerate()).map(|(i, e)| (e.sheet_id.clone(), (i, e))).collect();
+        let mut placed = BTreeSet::new();
+        if state.kind_chip.matches_section(SheetSection::Data) || state.kind_chip == NavigatorKindChip::All {
+            for ds in &doc.data_sheets {
+                let Some((_, data_entry)) = entry_map.get(&ds.id) else {
+                    continue;
+                };
+                let children = collect_data_sheet_children(doc, &ds.id, &entry_map);
+                let matching_children: Vec<(&NavigatorEntry, usize)> =
+                    children.into_iter().filter(|(e, _)| state.kind_chip.matches_section(e.section) && entry_matches_query(e, &q)).collect();
+                let parent_matches = state.kind_chip.matches_section(SheetSection::Data) && entry_matches_query(data_entry, &q);
+                if !parent_matches && matching_children.is_empty() {
+                    continue;
+                }
+                placed.insert(ds.id.clone());
+                ids.push(ds.id.clone());
+                for (child, _) in &matching_children {
+                    placed.insert(child.sheet_id.clone());
+                }
+                if !state.nested_collapsed_parents.contains(&ds.id) {
+                    for (child, _) in matching_children {
+                        ids.push(child.sheet_id.clone());
+                    }
+                }
+            }
+        }
+        for folder in &app.nav.folders {
+            if !state.kind_chip.matches_section(folder.section) {
+                continue;
+            }
+            for entry in &folder.entries {
+                if !placed.contains(&entry.sheet_id) && entry_matches_query(entry, &q) {
+                    ids.push(entry.sheet_id.clone());
+                }
+            }
+        }
+        return ids;
+    }
     for folder in &app.nav.folders {
         if !state.kind_chip.matches_section(folder.section) || folder.collapsed {
             continue;
@@ -2027,7 +2081,7 @@ const fn section_header_widget_id(section: SheetSection) -> &'static str {
 
 fn render_leading_dock_splitter(
     ui: &mut egui::Ui,
-    app: &UiApp,
+    _app: &UiApp,
     ctx_in: LeadingDockContext<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
@@ -2058,7 +2112,7 @@ fn render_leading_dock_splitter(
 
         if enabled {
             if resp.double_clicked() {
-                let default_w = app.egui_views.workspace_preset.default_dock_config().leading_width_pt;
+                let default_w = ctx_in.workspace_preset.default_dock_config().leading_width_pt;
                 intents.push(UiIntent::SyncLeadingWidth { width_pt: default_w });
             } else if resp.dragged() {
                 let dx = if ctx_in.layout.rtl_mirrored { -resp.drag_delta().x } else { resp.drag_delta().x };
@@ -2473,6 +2527,7 @@ fn render_navigator_context_menu(
             })
             .collect();
         state.delete_confirm = Some(NavigatorDeleteConfirmState { sheet_id: menu.sheet_id, title, dependents });
+        ui.ctx().request_repaint();
     }
 
     let esc = ui.ctx().input(|i| i.key_pressed(Key::Escape));

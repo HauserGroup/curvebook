@@ -680,39 +680,60 @@ fn load_dir_into_db(dir: &Path, db: &mut fontdb::Database, out_ids: &mut Vec<fon
     let mut loaded_paths = HashSet::new();
     let manifest_specs = [(dir.join("fonts").join("manifest.txt"), dir.join("fonts")), (dir.join("manifest.txt"), dir.to_path_buf())];
     for (manifest_path, base_dir) in manifest_specs {
+        let Ok(canonical_base) = std::fs::canonicalize(&base_dir) else {
+            continue;
+        };
         if let Ok(text) = read_regular_file_utf8(&manifest_path, MAX_MANIFEST_BYTES) {
             for line in text.lines() {
                 let rel = line.split('#').next().unwrap_or_default().trim();
-                if rel.is_empty() || rel.contains("..") {
+                if rel.is_empty() {
                     continue;
                 }
-                let candidate = base_dir.join(rel);
+                let rel_path = Path::new(rel);
+                if rel_path.is_absolute() || !rel_path.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+                    continue;
+                }
+                let candidate = base_dir.join(rel_path);
+                let Ok(canonical_candidate) = std::fs::canonicalize(&candidate) else {
+                    continue;
+                };
+                if !canonical_candidate.starts_with(&canonical_base) {
+                    continue;
+                }
                 if loaded_paths.len() >= MAX_ENV_FONT_FILES {
                     break;
                 }
-                if is_sfnt_extension(&candidate)
-                    && !loaded_paths.contains(&candidate)
-                    && let Some(blob) = read_font_blob(&candidate)
+                if is_sfnt_extension(&canonical_candidate)
+                    && !loaded_paths.contains(&canonical_candidate)
+                    && let Some(blob) = read_font_blob(&canonical_candidate)
                 {
-                    loaded_paths.insert(candidate);
+                    loaded_paths.insert(canonical_candidate);
                     out_ids.extend(db.load_font_source(fontdb::Source::Binary(blob)));
                 }
             }
         }
     }
 
-    let mut discovered = Vec::new();
-    collect_sfnt_files_bounded(dir, 0, MAX_ENV_FONT_FILES, &mut discovered);
-    discovered.sort();
-    for path in discovered {
-        if loaded_paths.len() >= MAX_ENV_FONT_FILES {
-            break;
-        }
-        if !loaded_paths.contains(&path)
-            && let Some(blob) = read_font_blob(&path)
-        {
-            loaded_paths.insert(path);
-            out_ids.extend(db.load_font_source(fontdb::Source::Binary(blob)));
+    if let Ok(canonical_dir) = std::fs::canonicalize(dir) {
+        let mut discovered = Vec::new();
+        collect_sfnt_files_bounded(dir, 0, MAX_ENV_FONT_FILES, &mut discovered);
+        discovered.sort();
+        for path in discovered {
+            if loaded_paths.len() >= MAX_ENV_FONT_FILES {
+                break;
+            }
+            let Ok(dedup_key) = std::fs::canonicalize(&path) else {
+                continue;
+            };
+            if !dedup_key.starts_with(&canonical_dir) {
+                continue;
+            }
+            if !loaded_paths.contains(&dedup_key)
+                && let Some(blob) = read_font_blob(&dedup_key)
+            {
+                loaded_paths.insert(dedup_key);
+                out_ids.extend(db.load_font_source(fontdb::Source::Binary(blob)));
+            }
         }
     }
 }
@@ -1126,5 +1147,46 @@ mod tests {
             assert!((max_w - min_w) <= 0.5, "aligned numeral family ({:?}) produced uneven digit widths: {widths:?}", report.numeral_font_strategy);
         })
         .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn manifest_font_loading_rejects_traversal_absolute_and_escaping_symlinks() {
+        let root = std::env::temp_dir().join(format!("curvebook-font-manifest-sec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bundle_dir = root.join("bundle");
+        let fonts_dir = bundle_dir.join("fonts");
+        let outside_dir = root.join("outside");
+        std::fs::create_dir_all(&fonts_dir).expect("create fonts dir");
+        std::fs::create_dir_all(&outside_dir).expect("create outside dir");
+
+        let minimal_ttf = build_minimal_truetype_font();
+        let outside_font = outside_dir.join("escaped.ttf");
+        std::fs::write(&outside_font, &minimal_ttf).expect("write outside font");
+
+        let mut manifest_lines =
+            vec![String::from("../../outside/escaped.ttf"), outside_font.to_string_lossy().into_owned(), String::from("./../../outside/escaped.ttf")];
+
+        #[cfg(unix)]
+        {
+            let link_path = fonts_dir.join("escape_link.ttf");
+            std::os::unix::fs::symlink(&outside_font, &link_path).expect("create symlink");
+            manifest_lines.push(String::from("escape_link.ttf"));
+        }
+
+        std::fs::write(fonts_dir.join("manifest.txt"), manifest_lines.join("\n")).expect("write manifest");
+
+        let mut db = fontdb::Database::new();
+        let mut ids = Vec::new();
+        super::load_dir_into_db(&bundle_dir, &mut db, &mut ids);
+        assert!(ids.is_empty(), "manifest traversal/escape entries must not load fonts outside base_dir; loaded={ids:?}");
+
+        // Valid in-directory entry still loads cleanly.
+        let inside_font = fonts_dir.join("safe.ttf");
+        std::fs::write(&inside_font, &minimal_ttf).expect("write safe font");
+        std::fs::write(fonts_dir.join("manifest.txt"), "safe.ttf\n").expect("write safe manifest");
+        super::load_dir_into_db(&bundle_dir, &mut db, &mut ids);
+        assert!(!ids.is_empty(), "valid relative in-dir manifest entry must load");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

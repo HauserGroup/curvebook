@@ -153,6 +153,9 @@ impl ParametricModel for NistModel {
 
     fn eval(&self, x_vec: &[f64], b: &[f64], _dataset_index: usize) -> Option<f64> {
         let x = *x_vec.first()?;
+        if !x.is_finite() || !b.iter().all(|v| v.is_finite()) {
+            return None;
+        }
         let val = match self.kind {
             NistKind::Misra1a | NistKind::BoxBod => b[0] * (1.0 - safe_exp(-b[1] * x)?),
             NistKind::Chwirut => {
@@ -292,6 +295,9 @@ impl ParametricModel for NistModel {
         let Some(&x) = x_vec.first() else {
             return false;
         };
+        if !x.is_finite() || !b.iter().all(|v| v.is_finite()) {
+            return false;
+        }
         match self.kind {
             NistKind::Misra1a | NistKind::BoxBod => {
                 let Some(e) = safe_exp(-b[1] * x) else {

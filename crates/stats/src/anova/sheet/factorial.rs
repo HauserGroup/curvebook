@@ -164,6 +164,9 @@ pub(in crate::anova) fn build_rm_sphericity_tab(
         let (Some(s), Some(term), Some(&df_err)) = (s_opt, res.terms.get(term_idx), rm_res.term_error_dfs.get(term_idx)) else {
             continue;
         };
+        if s.mauchly_df <= 0.0 {
+            continue;
+        }
         let f_val = term.f_statistic.unwrap_or(0.0);
         let p_gg = apply_rm_sphericity_p(f_val, term.df, df_err, Some(s), RmSphericityCorrection::GreenhouseGeisser)?;
         let p_hf = apply_rm_sphericity_p(f_val, term.df, df_err, Some(s), RmSphericityCorrection::HuynhFeldt)?;
@@ -383,10 +386,28 @@ pub(in crate::anova) fn run_grouped_factorial(
                     RepeatedMeasuresDesign::ColumnFactorMatched => {
                         selected_cols.iter().filter(|c| !active_cols.contains(c)).map(|&c| grouped.data_sets[c].title.clone()).collect()
                     }
-                    RepeatedMeasuresDesign::RowFactorMatched => (0..grouped.row_count())
-                        .filter(|r| !active_rows.contains(r))
-                        .map(|r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1)))
-                        .collect(),
+                    RepeatedMeasuresDesign::RowFactorMatched => {
+                        let first_active = active_rows.first().copied().unwrap_or(0);
+                        let last_active = active_rows.last().copied().unwrap_or(0);
+                        (0..grouped.row_count())
+                            .filter(|&r| {
+                                if active_rows.contains(&r) {
+                                    return false;
+                                }
+                                let has_title = grouped.row_titles.get(r).is_some_and(|s| !s.trim().is_empty());
+                                let has_entry = selected_cols.iter().any(|&c| {
+                                    grouped
+                                        .data_sets
+                                        .get(c)
+                                        .and_then(|ds| ds.cells.get(r))
+                                        .is_some_and(|subs| subs.iter().any(|cell| cell.excluded || !cell.value.is_empty()))
+                                });
+                                let is_interior = r > first_active && r < last_active;
+                                has_title || has_entry || is_interior
+                            })
+                            .map(|r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1)))
+                            .collect()
+                    }
                     _ => Vec::new(),
                 }
             } else {
@@ -501,10 +522,17 @@ fn compact_binary_levels(levels: &[String], observed: &[bool; 2]) -> (Vec<String
 
 pub(in crate::anova) fn push_reml_df_scalars(out: &mut ResultSheet, terms: &[FactorialAnovaTerm], satt: &[f64], kr: &[f64]) {
     for (idx, term) in terms.iter().enumerate() {
-        if let Some(&df_s) = satt.get(idx) {
+        if term.df <= 0.0 {
+            continue;
+        }
+        if let Some(&df_s) = satt.get(idx)
+            && df_s.is_finite()
+        {
             push_scalar(out, format!("{}: Satterthwaite df", term.name), None, df_s);
         }
-        if let Some(&df_k) = kr.get(idx) {
+        if let Some(&df_k) = kr.get(idx)
+            && df_k.is_finite()
+        {
             push_scalar(out, format!("{}: Kenward-Roger df", term.name), None, df_k);
         }
     }
@@ -837,6 +865,14 @@ pub(in crate::anova) fn run_multifactor_mv(
     mv: &curvebook_doc::MultipleVariablesTable,
     fac_spec: &FactorialAnovaSpec,
 ) -> Result<(FactorialAnovaResult, FactorialObservations, OlsPostHocModel), StatsError> {
+    if fac_spec.repeated_measures != RepeatedMeasuresDesign::None
+        || fac_spec.mixed_effects_reml
+        || fac_spec.residual_covariance == ResidualCovariance::Unstructured
+    {
+        return Err(StatsError::IncompatibleAnalysisSpec {
+            expected: "independent-observations OLS multifactor ANOVA on MultipleVariablesTable (repeated_measures = None, mixed_effects_reml = false, residual_covariance = CompoundSymmetry)",
+        });
+    }
     let resp_idx = fac_spec.response_column.ok_or(StatsError::MissingColumn { index: 0 })?;
     let resp_var = mv.variables.get(resp_idx).ok_or(StatsError::MissingColumn { index: resp_idx })?;
     if fac_spec.multifactor_columns.is_empty() {
@@ -845,9 +881,13 @@ pub(in crate::anova) fn run_multifactor_mv(
     if fac_spec.three_way && fac_spec.multifactor_columns.len() != 3 {
         return Err(StatsError::InvalidParameter { name: "three_way_factor_count", value: fac_spec.multifactor_columns.len() as f64 });
     }
+    let mut seen_factor_cols = std::collections::BTreeSet::new();
     let mut factor_names = Vec::with_capacity(fac_spec.multifactor_columns.len());
     let mut factor_levels = Vec::with_capacity(fac_spec.multifactor_columns.len());
     for &c_idx in &fac_spec.multifactor_columns {
+        if c_idx == resp_idx || !seen_factor_cols.insert(c_idx) {
+            return Err(StatsError::InvalidParameter { name: "multifactor_columns", value: c_idx as f64 });
+        }
         let var = mv.variables.get(c_idx).ok_or(StatsError::MissingColumn { index: c_idx })?;
         factor_names.push(var.title.clone());
         let levels: Vec<String> = var.ordered_levels_with(&var.level_order).into_iter().map(|s| s.level).collect();

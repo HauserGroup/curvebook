@@ -155,14 +155,14 @@ pub fn read_resource(doc: &ProjectDocument, uri: &str) -> Result<Vec<ResourceCon
 }
 
 #[derive(Default)]
-struct ResourceQuery {
-    include_curves: Option<bool>,
-    detail_summary: bool,
-    max_rows: Option<usize>,
-    tab_id: Option<String>,
+pub(crate) struct ResourceQuery {
+    pub(crate) include_curves: Option<bool>,
+    pub(crate) detail_summary: bool,
+    pub(crate) max_rows: Option<usize>,
+    pub(crate) tab_id: Option<String>,
 }
 
-fn split_resource_query(raw: &str) -> Result<(&str, ResourceQuery), ResourceError> {
+pub(crate) fn split_resource_query(raw: &str) -> Result<(&str, ResourceQuery), ResourceError> {
     let Some((id, query_str)) = raw.split_once('?') else {
         return Ok((raw, ResourceQuery::default()));
     };
@@ -335,50 +335,131 @@ fn summarize_fitted_curve_meta(curve: &curvebook_doc::FittedCurveOverlay) -> Val
     })
 }
 
+#[derive(Serialize)]
+struct FilteredResultTabJson<'a> {
+    id: &'a str,
+    title: &'a str,
+    kind: curvebook_doc::ResultTabKind,
+    column_headers: &'a [String],
+    row_labels: &'a [String],
+    rows: &'a [Vec<curvebook_doc::ResultCell>],
+    footnotes: &'a [String],
+}
+
+#[derive(Serialize)]
+struct FittedCurveMetaSummary<'a> {
+    data_set_index: usize,
+    equation_id: &'a str,
+    converged: bool,
+    ambiguous: bool,
+    points_count: usize,
+    points_omitted: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum FilteredFittedCurves<'a> {
+    Full(&'a [curvebook_doc::FittedCurveOverlay]),
+    Summary(Vec<FittedCurveMetaSummary<'a>>),
+}
+
+#[derive(Serialize)]
+struct FilteredResultSheetJson<'a> {
+    id: &'a SheetId,
+    title: &'a str,
+    status: &'a curvebook_doc::ResultStatus,
+    analysis: &'a curvebook_doc::AnalysisSpec,
+    scalars: &'a [curvebook_doc::ResultScalarEntry],
+    tabs: Vec<FilteredResultTabJson<'a>>,
+    pairwise_comparisons: &'a [curvebook_doc::PairwiseComparisonRecord],
+    fitted_curves: FilteredFittedCurves<'a>,
+    eliminated_outliers: &'a [curvebook_doc::SourceCellId],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    analyzable_data: Option<&'a DataSheet>,
+    checklist: &'a [curvebook_doc::ChecklistItem],
+}
+
 fn read_result_resource(doc: &ProjectDocument, uri: &str, id_str: &str, query: &ResourceQuery) -> Result<Vec<ResourceContent>, ResourceError> {
     let target = SheetId::new(id_str);
     let Some(rs) = doc.result_sheet(&target) else {
         return Err(ResourceError::NotFound(format!("resource not found: {uri}")));
     };
-    let text = export_result_sheet_json(rs, false).map_err(|err| ResourceError::Internal(format!("result JSON export failed: {err}")))?;
     let include_curves = query.include_curves.unwrap_or(!query.detail_summary);
     if include_curves && query.tab_id.is_none() && query.max_rows.is_none() {
+        let text = export_result_sheet_json(rs, false).map_err(|err| ResourceError::Internal(format!("result JSON export failed: {err}")))?;
         return Ok(vec![ResourceContent { uri: uri.to_owned(), mime_type: String::from("application/json"), text }]);
     }
-    let mut val: Value = serde_json::from_str(&text).map_err(|err| ResourceError::Internal(format!("result JSON parse failed: {err}")))?;
-    if let Some(obj) = val.as_object_mut() {
-        if !include_curves {
-            let summaries: Vec<Value> = rs.fitted_curves.iter().map(summarize_fitted_curve_meta).collect();
-            obj.insert(String::from("fitted_curves"), Value::Array(summaries));
-        }
-        if let Some(target_tab) = query.tab_id.as_deref()
-            && !rs.tabs.iter().any(|t| t.id == target_tab)
-        {
-            let available: Vec<&str> = rs.tabs.iter().map(|t| t.id.as_str()).collect();
-            return Err(ResourceError::NotFound(format!(
-                "tab_id '{target_tab}' not found on '{}'; available tab_ids: {}",
-                rs.id.as_str(),
-                available.join(", ")
-            )));
-        }
-        if (query.tab_id.is_some() || query.max_rows.is_some())
-            && let Some(tabs_arr) = obj.get_mut("tabs").and_then(Value::as_array_mut)
-        {
-            if let Some(target_tab) = query.tab_id.as_deref() {
-                tabs_arr.retain(|t| t.get("id").and_then(Value::as_str) == Some(target_tab));
-            }
-            if let Some(row_cap) = query.max_rows {
-                for tab in tabs_arr.iter_mut() {
-                    if let Some(rows) = tab.get_mut("rows").and_then(Value::as_array_mut) {
-                        rows.truncate(row_cap);
-                    }
-                    if let Some(labels) = tab.get_mut("row_labels").and_then(Value::as_array_mut) {
-                        labels.truncate(row_cap);
-                    }
-                }
-            }
-        }
+
+    // Validate `tab_id` and serialize directly from borrowed slices without building a full
+    // JSON string + `serde_json::Value` DOM round-trip (`AUD-06-16`).
+    if let Some(target_tab) = query.tab_id.as_deref()
+        && !rs.tabs.iter().any(|t| t.id == target_tab)
+    {
+        let available: Vec<&str> = rs.tabs.iter().map(|t| t.id.as_str()).collect();
+        return Err(ResourceError::NotFound(format!(
+            "tab_id '{target_tab}' not found on '{}'; available tab_ids: {}",
+            rs.id.as_str(),
+            available.join(", ")
+        )));
     }
-    let compact = serde_json::to_string(&val).map_err(|err| ResourceError::Internal(format!("JSON serialization failed: {err}")))?;
+
+    let tabs: Vec<FilteredResultTabJson<'_>> = rs
+        .tabs
+        .iter()
+        .filter(|t| query.tab_id.as_deref().is_none_or(|want| t.id == want))
+        .map(|t| {
+            let row_slice = match query.max_rows {
+                Some(cap) => t.rows.get(..cap.min(t.rows.len())).unwrap_or(&t.rows),
+                None => t.rows.as_slice(),
+            };
+            let label_slice = match query.max_rows {
+                Some(cap) => t.row_labels.get(..cap.min(t.row_labels.len())).unwrap_or(&t.row_labels),
+                None => t.row_labels.as_slice(),
+            };
+            FilteredResultTabJson {
+                id: &t.id,
+                title: &t.title,
+                kind: t.kind,
+                column_headers: &t.column_headers,
+                row_labels: label_slice,
+                rows: row_slice,
+                footnotes: &t.footnotes,
+            }
+        })
+        .collect();
+
+    let fitted_curves = if include_curves {
+        FilteredFittedCurves::Full(&rs.fitted_curves)
+    } else {
+        FilteredFittedCurves::Summary(
+            rs.fitted_curves
+                .iter()
+                .map(|c| FittedCurveMetaSummary {
+                    data_set_index: c.data_set_index,
+                    equation_id: &c.equation_id,
+                    converged: c.converged,
+                    ambiguous: c.ambiguous,
+                    points_count: c.points.len(),
+                    points_omitted: true,
+                })
+                .collect(),
+        )
+    };
+
+    let view = FilteredResultSheetJson {
+        id: &rs.id,
+        title: rs.title(),
+        status: &rs.status,
+        analysis: &rs.analysis,
+        scalars: &rs.scalars,
+        tabs,
+        pairwise_comparisons: &rs.pairwise_comparisons,
+        fitted_curves,
+        eliminated_outliers: &rs.eliminated_outliers,
+        analyzable_data: rs.analyzable_data.as_ref(),
+        checklist: &rs.checklist,
+    };
+
+    let compact = serde_json::to_string(&view).map_err(|err| ResourceError::Internal(format!("JSON serialization failed: {err}")))?;
     Ok(vec![ResourceContent { uri: uri.to_owned(), mime_type: String::from("application/json"), text: compact }])
 }

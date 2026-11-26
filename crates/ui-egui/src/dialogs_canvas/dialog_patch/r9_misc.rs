@@ -207,7 +207,7 @@ pub fn patch_randomize_groups(state: &mut RandomizeGroupsDialogState, fields: &M
                 }
             }
             "info_sheet_id" | "target_info_sheet_id" | "randomize.info_sheet_id" => {
-                let tid = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(SheetId::from);
+                let tid = parse_opt_sheet_id(val, key)?;
                 patch.insert(String::from("target_info_sheet_id"), serde_json::to_value(tid).map_err(|e| e.to_string())?);
             }
             other => return Err(format!("unknown Randomize Groups field `{other}`")),
@@ -252,9 +252,19 @@ fn parse_randomize_groups_val(val: &Value) -> Result<Vec<(String, usize)>, Strin
     Ok(next)
 }
 
+fn parse_opt_sheet_id(val: &Value, key: &str) -> Result<Option<SheetId>, String> {
+    if val.is_null() {
+        return Ok(None);
+    }
+    let raw = val.as_str().ok_or_else(|| format!("`{key}` must be a string or null"))?.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    SheetId::try_new(raw).map(Some).map_err(|e| format!("invalid `{key}`: {e}"))
+}
+
 pub fn patch_random_sample_rows(state: &mut RandomSampleRowsDialogState, fields: &Map<String, Value>) -> Result<(), String> {
     const RULES: &[FieldRule] = &[
-        FieldRule::new(&["source_sheet_id", "sample.source_sheet_id"], "source_sheet_id", FieldKind::StrTrimNonEmpty),
         FieldRule::new(&["sample_size", "sample.sample_size", "rand_sample.n.val"], "sample_size", FieldKind::UsizeMin(1)),
         FieldRule::new(&["seed", "sample.seed"], "seed", FieldKind::U64),
         FieldRule::new(&["stratify_column", "sample.stratify_column"], "stratify_column", FieldKind::OptUsizeMin(0)),
@@ -268,8 +278,16 @@ pub fn patch_random_sample_rows(state: &mut RandomSampleRowsDialogState, fields:
             continue;
         }
         match key.as_str() {
+            "source_sheet_id" | "sample.source_sheet_id" => {
+                let raw = parse_str_field(val, key)?.trim();
+                if raw.is_empty() {
+                    return Err(format!("`{key}` cannot be empty"));
+                }
+                let sid = SheetId::try_new(raw).map_err(|e| format!("invalid `{key}`: {e}"))?;
+                patch.insert(String::from("source_sheet_id"), json!(sid.as_str()));
+            }
             "info_sheet_id" | "target_info_sheet_id" | "sample.info_sheet_id" => {
-                let tid = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(SheetId::from);
+                let tid = parse_opt_sheet_id(val, key)?;
                 patch.insert(String::from("target_info_sheet_id"), serde_json::to_value(tid).map_err(|e| e.to_string())?);
             }
             other => return Err(format!("unknown Random Sample Rows field `{other}`")),
@@ -354,7 +372,53 @@ pub fn patch_simulate_distributions(
     {
         merge_struct_json(first_col, &col0_patch, &[])?;
     }
+    for (idx, col) in working.columns.iter().enumerate() {
+        validate_sim_column_draft(col, idx)?;
+    }
     *state = working;
+    Ok(())
+}
+
+fn validate_sim_column_draft(col: &SimulatedDistColumnDraft, idx: usize) -> Result<(), String> {
+    if col.name.trim().is_empty() {
+        return Err(format!("columns[{idx}].name cannot be empty"));
+    }
+    match col.distribution {
+        SimDistKind::Uniform => {
+            if !col.min.is_finite() || !col.max.is_finite() || col.min >= col.max {
+                return Err(format!("invalid columns[{idx}] Uniform bounds: `min` ({}) must be < `max` ({})", col.min, col.max));
+            }
+        }
+        SimDistKind::Gaussian => {
+            if !col.mean.is_finite() || !col.sd.is_finite() || col.sd < 0.0 {
+                return Err(format!("invalid columns[{idx}] Gaussian parameter: `sd` ({}) must be >= 0", col.sd));
+            }
+        }
+        SimDistKind::LogNormal => {
+            if !col.mean_log.is_finite() || !col.sd_log.is_finite() || col.sd_log < 0.0 {
+                return Err(format!("invalid columns[{idx}] LogNormal parameter: `sd_log` ({}) must be >= 0", col.sd_log));
+            }
+        }
+        SimDistKind::Binomial => {
+            const MAX_EXACT_TRIALS: u64 = 1u64 << 53;
+            if col.trials > MAX_EXACT_TRIALS {
+                return Err(format!("invalid columns[{idx}] Binomial parameter: `trials` ({}) exceeds 2^53", col.trials));
+            }
+            if !col.p.is_finite() || !(0.0..=1.0).contains(&col.p) {
+                return Err(format!("invalid columns[{idx}] Binomial parameter: `p` ({}) must lie in [0, 1]", col.p));
+            }
+        }
+        SimDistKind::Poisson => {
+            if !col.lambda.is_finite() || col.lambda < 0.0 {
+                return Err(format!("invalid columns[{idx}] Poisson parameter: `lambda` ({}) must be >= 0", col.lambda));
+            }
+        }
+        SimDistKind::Exponential => {
+            if !col.rate.is_finite() || col.rate <= 0.0 {
+                return Err(format!("invalid columns[{idx}] Exponential parameter: `rate` ({}) must be > 0", col.rate));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -372,21 +436,34 @@ fn normalize_sim_column_object(obj: &Map<String, Value>, preset: &LocalePreset, 
         FieldRule::new(&["rate"], "rate", FieldKind::FiniteF64),
     ];
     let mut out = Map::new();
-    if let Some(name) = obj.get("name").or_else(|| obj.get("title")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
-        out.insert(String::from("name"), json!(name));
-    }
-    if let Some(dist_raw) =
-        obj.get("distribution").and_then(|d| d.as_str().or_else(|| d.as_object().and_then(|o| o.get("kind").and_then(Value::as_str))))
-    {
-        let kind = SimDistKind::from_str(dist_raw)?;
-        out.insert(String::from("distribution"), serde_json::to_value(kind).map_err(|e| e.to_string())?);
-    }
     for (field, val) in obj {
         if try_apply_rule(field, val, COL_RULES, preset, &mut out)? {
             continue;
         }
         match field.as_str() {
-            "name" | "title" | "distribution" | "kind" => {}
+            "name" | "title" => {
+                let raw = parse_str_field(val, field)?.trim();
+                if raw.is_empty() {
+                    return Err(format!("`{field}` cannot be empty"));
+                }
+                out.insert(String::from("name"), json!(raw));
+            }
+            "distribution" => {
+                let dist_raw = if let Some(s) = val.as_str() {
+                    s
+                } else if let Some(dist_obj) = val.as_object() {
+                    dist_obj.get("kind").and_then(Value::as_str).ok_or_else(|| String::from("`distribution` object must specify string `kind`"))?
+                } else {
+                    return Err(String::from("`distribution` must be a distribution name string or object"));
+                };
+                let kind = SimDistKind::from_str(dist_raw)?;
+                out.insert(String::from("distribution"), serde_json::to_value(kind).map_err(|e| e.to_string())?);
+            }
+            "kind" if !allow_params => {
+                let raw = parse_str_field(val, "kind")?;
+                let kind = SimDistKind::from_str(raw)?;
+                out.insert(String::from("distribution"), serde_json::to_value(kind).map_err(|e| e.to_string())?);
+            }
             "params" if allow_params => {
                 if !val.is_object() {
                     return Err(String::from("`params` must be an object"));

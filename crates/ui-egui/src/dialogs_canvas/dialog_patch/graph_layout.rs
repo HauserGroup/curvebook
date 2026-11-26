@@ -12,9 +12,10 @@ use super::value_parsers::{
     norm_key, parse_axis_scale_str, parse_axis_thresholds_value, parse_bool_field, parse_bracket_label_mode, parse_bracket_style_str,
     parse_break_ornament_str, parse_cld_ordering_str, parse_colormap_id_str, parse_equation_display_mode_str, parse_error_bar_metric_str,
     parse_export_format, parse_finite_f64_with_locale, parse_frame_preset_str, parse_graph_kind_str, parse_grouped_arrangement_str,
-    parse_journal_preset_str, parse_nonneg_f64, parse_opt_finite_f64_with_locale, parse_page_orientation_str, parse_pairwise_display_mode_str,
-    parse_palette_str, parse_panel_badge_style_str, parse_paper_fill_patch, parse_str_field, parse_summary_measure_str, parse_survival_metric_str,
-    parse_table_kind_str, parse_threshold_color, parse_threshold_dash_style, parse_tick_direction_str, parse_usize_min,
+    parse_journal_preset_str, parse_marker_fill_mode_val, parse_nonneg_f64, parse_opt_finite_f64_with_locale, parse_page_orientation_str,
+    parse_pairwise_display_mode_str, parse_palette_str, parse_panel_badge_style_str, parse_paper_fill_patch, parse_str_field,
+    parse_summary_measure_str, parse_survival_metric_str, parse_table_kind_str, parse_threshold_color, parse_threshold_dash_style,
+    parse_tick_direction_str, parse_usize_min, validate_marker_shape_str, validate_point_color_str,
 };
 use crate::dialogs_canvas::graph_type::build_gdo_for_option;
 use crate::dialogs_canvas::{
@@ -164,22 +165,26 @@ pub fn patch_format_axes(
     {
         merge_struct_json(seg0, &seg0_patch, &[])?;
     }
+    if bounds_changed {
+        working.set_segment_bounds(0, pending_min, pending_max)?;
+    }
     for act in actions {
         match act {
             AxesAction::AddSegment => {
-                let _ = working.add_segment();
+                if !working.add_segment() {
+                    return Err(String::from("cannot add axis segment: maximum of 3 segments already reached"));
+                }
             }
             AxesAction::RemoveSegment(idx) => {
-                let _ = working.remove_segment(idx);
+                if !working.remove_segment(idx) {
+                    return Err(format!("invalid `remove_segment` index {idx}: axis must retain at least 1 segment"));
+                }
             }
             AxesAction::SetActiveThresholds(items) => working.set_active_thresholds(items),
             AxesAction::SetXThresholds(items) => working.set_x_thresholds(items),
             AxesAction::SetYThresholds(items) => working.set_y_thresholds(items),
             AxesAction::AppendThresholds(axis, items) => working.append_thresholds_for_target(axis, items),
         }
-    }
-    if bounds_changed {
-        working.set_segment_bounds(0, pending_min, pending_max)?;
     }
     *state = working;
     Ok(())
@@ -217,6 +222,17 @@ pub fn patch_format_graph(state: &mut FormatGraphState, fields: &Map<String, Val
                     return Err(String::from("`marker_size_pt` must be a finite positive number"));
                 }
                 patch.insert(String::from("marker_size_pt"), json!(sz.clamp(1.0, 24.0)));
+                patch.insert(String::from("marker_dirty"), json!(true));
+            }
+            "marker_fill_mode" | "format_graph.marker_fill_mode" => {
+                let fm = parse_marker_fill_mode_val(val, key)?;
+                patch.insert(String::from("marker_fill_mode"), serde_json::to_value(fm).map_err(|e| e.to_string())?);
+                patch.insert(String::from("marker_dirty"), json!(true));
+            }
+            "line_dash" | "dash_style" | "format_graph.line_dash" => {
+                let dash = parse_threshold_dash_style(val, key)?;
+                patch.insert(String::from("line_dash"), serde_json::to_value(dash).map_err(|e| e.to_string())?);
+                patch.insert(String::from("line_dash_dirty"), json!(true));
             }
             "selected_series_index" | "series_index" | "format_graph.selected_series_index" => {
                 let idx = val
@@ -495,6 +511,7 @@ pub fn patch_bubble_plot(state: &mut BubblePlotInspectorState, fields: &Map<Stri
     let mut patch = Map::new();
     let mut color_mode: Option<String> = None;
     let mut color_col: Option<usize> = None;
+    let mut color_col_explicit = false;
     let mut palette_override: Option<PaletteId> = None;
     let mut colormap_override: Option<ColormapId> = None;
 
@@ -527,6 +544,7 @@ pub fn patch_bubble_plot(state: &mut BubblePlotInspectorState, fields: &Map<Stri
                 }
             }
             "color_column" | "bubble.color_column" => {
+                color_col_explicit = true;
                 color_col = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
             }
             "palette" | "bubble.palette" => {
@@ -612,28 +630,63 @@ pub fn patch_bubble_plot(state: &mut BubblePlotInspectorState, fields: &Map<Stri
         }
     }
 
-    merge_struct_json(state, &patch, &[])?;
-    if color_mode.is_some() || color_col.is_some() || palette_override.is_some() || colormap_override.is_some() {
+    let mut working = state.clone();
+    merge_struct_json(&mut working, &patch, &[])?;
+    if color_mode.is_some() || color_col_explicit || palette_override.is_some() || colormap_override.is_some() {
         match color_mode.as_deref() {
-            Some("constant") => state.color_channel = ColorChannelMapping::Constant(PaletteId::OkabeIto.color_at(0)),
+            Some("constant") => {
+                let pal = palette_override.unwrap_or(PaletteId::OkabeIto);
+                working.color_channel = ColorChannelMapping::Constant(pal.color_at(0));
+            }
             Some("continuous") => {
-                let col = color_col.unwrap_or(state.y_column);
-                state.set_color_continuous(col, colormap_override.unwrap_or(ColormapId::Viridis), None);
+                let col = color_col.unwrap_or(working.y_column);
+                working.set_color_continuous(col, colormap_override.unwrap_or(ColormapId::Viridis), None);
             }
             Some("categorical") => {
-                let col = color_col.unwrap_or(state.label_column.unwrap_or(0));
-                state.set_color_categorical(col, palette_override.unwrap_or(PaletteId::OkabeIto));
+                let col = color_col.unwrap_or(working.label_column.unwrap_or(0));
+                working.set_color_categorical(col, palette_override.unwrap_or(PaletteId::OkabeIto));
+            }
+            _ if color_col_explicit && color_col.is_none() => {
+                let pal = palette_override.unwrap_or(PaletteId::OkabeIto);
+                working.color_channel = ColorChannelMapping::Constant(pal.color_at(0));
             }
             _ if colormap_override.is_some() => {
-                let col = color_col.unwrap_or(state.y_column);
-                state.set_color_continuous(col, colormap_override.unwrap_or(ColormapId::Viridis), None);
+                let existing_col = match &working.color_channel {
+                    ColorChannelMapping::Continuous { column, .. } => *column,
+                    _ => working.y_column,
+                };
+                let col = color_col.unwrap_or(existing_col);
+                working.set_color_continuous(col, colormap_override.unwrap_or(ColormapId::Viridis), None);
             }
-            _ if color_col.is_some() => {
-                state.set_color_categorical(color_col.unwrap_or(0), palette_override.unwrap_or(PaletteId::OkabeIto));
-            }
+            _ if let Some(col) = color_col => match &mut working.color_channel {
+                ColorChannelMapping::Continuous { column, .. } if palette_override.is_none() => {
+                    *column = col;
+                }
+                ColorChannelMapping::Categorical { column, palette, .. } => {
+                    *column = col;
+                    if let Some(pal) = palette_override {
+                        *palette = pal;
+                    }
+                }
+                _ => {
+                    working.set_color_categorical(col, palette_override.unwrap_or(PaletteId::OkabeIto));
+                }
+            },
+            _ if let Some(pal) = palette_override => match &mut working.color_channel {
+                ColorChannelMapping::Categorical { palette, .. } => {
+                    *palette = pal;
+                }
+                ColorChannelMapping::Constant(c) => {
+                    *c = pal.color_at(0);
+                }
+                ColorChannelMapping::Continuous { .. } => {
+                    return Err(String::from("`palette` applies to categorical or constant color channels; use `colormap` for continuous mode"));
+                }
+            },
             _ => {}
         }
     }
+    *state = working;
     Ok(())
 }
 
@@ -643,16 +696,15 @@ pub fn patch_apply_style(state: &mut ApplyStyleFromState, fields: &Map<String, V
         match key.as_str() {
             "donor_graph_id" | "donor_sheet_id" | "style.donor_graph_id" | "apply_style.donor_graph_id" => {
                 let s = parse_str_field(val, "donor_graph_id")?.trim();
-                if !s.is_empty() {
-                    patch.insert(String::from("donor_graph_id"), json!(s));
-                }
+                let sid = SheetId::try_new(s).map_err(|e| format!("invalid `donor_graph_id`: {e}"))?;
+                patch.insert(String::from("donor_graph_id"), json!(sid.as_str()));
             }
             "target_sheet_ids" | "target_graph_ids" | "apply_style.target_sheet_ids" => {
                 let arr = val.as_array().ok_or_else(|| String::from("`target_sheet_ids` must be an array"))?;
                 let mut ids = Vec::with_capacity(arr.len());
-                for entry in arr {
-                    let s = entry.as_str().ok_or_else(|| String::from("target sheet ID must be a string"))?;
-                    let sid = SheetId::from(s);
+                for (idx, entry) in arr.iter().enumerate() {
+                    let s = entry.as_str().ok_or_else(|| format!("`target_sheet_ids[{idx}]` must be a string"))?.trim();
+                    let sid = SheetId::try_new(s).map_err(|e| format!("invalid `target_sheet_ids[{idx}]`: {e}"))?;
                     if !ids.contains(&sid) {
                         ids.push(sid);
                     }
@@ -685,10 +737,14 @@ pub fn patch_page_layout(state: &mut PageLayoutComposerState, fields: &Map<Strin
         match key.as_str() {
             "preset" | "layout.preset" => {
                 let preset = parse_journal_preset_str(parse_str_field(val, "preset")?)?;
+                let derived = LayoutSpec::from_preset(preset);
                 patch.insert(String::from("preset"), serde_json::to_value(preset).map_err(|e| e.to_string())?);
+                patch.insert(String::from("preset_dirty"), json!(true));
+                patch.insert(String::from("page_width"), json!(derived.width));
+                patch.insert(String::from("page_height"), json!(derived.height));
+                patch.insert(String::from("page_unit"), serde_json::to_value(derived.unit).map_err(|e| e.to_string())?);
                 if !has_explicit_orient {
-                    let derived_orient = LayoutSpec::from_preset(preset).orientation;
-                    patch.insert(String::from("orientation"), serde_json::to_value(derived_orient).map_err(|e| e.to_string())?);
+                    patch.insert(String::from("orientation"), serde_json::to_value(derived.orientation).map_err(|e| e.to_string())?);
                 }
             }
             "orientation" | "layout.orientation" => {
@@ -947,12 +1003,6 @@ pub fn patch_format_image(state: &mut FormatImageDialogState, fields: &Map<Strin
 
 pub fn patch_format_selected_points(state: &mut FormatSelectedPointsState, fields: &Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
     const RULES: &[FieldRule] = &[
-        FieldRule::new(&["color", "symbol_color", "format_points.color"], "color", FieldKind::OptStr),
-        FieldRule::new(&["fill_color", "format_points.fill_color"], "fill_color", FieldKind::OptStr),
-        FieldRule::new(&["symbol", "shape", "symbol_shape", "format_points.symbol"], "symbol", FieldKind::OptStr),
-        FieldRule::new(&["size_pt", "format_points.size_pt"], "size_pt", FieldKind::OptFiniteF64),
-        FieldRule::new(&["border_width_pt", "stroke_width_pt", "format_points.border_width_pt"], "border_width_pt", FieldKind::OptFiniteF64),
-        FieldRule::new(&["fill_mode", "format_points.fill_mode"], "fill_mode", FieldKind::OptStr),
         FieldRule::new(&["hidden", "format_points.hidden", "fmt_pts.hidden"], "hidden", FieldKind::OptBool),
         FieldRule::new(&["show_row_labels", "format_points.show_row_labels"], "show_row_labels", FieldKind::Bool),
         FieldRule::new(&["clear", "clear_overrides", "format_points.clear"], "clear_overrides", FieldKind::Bool),
@@ -965,6 +1015,46 @@ pub fn patch_format_selected_points(state: &mut FormatSelectedPointsState, field
             continue;
         }
         match key.as_str() {
+            "color" | "symbol_color" | "format_points.color" => {
+                let parsed = if val.is_null() { None } else { Some(validate_point_color_str(parse_str_field(val, key)?, key)?) };
+                patch.insert(String::from("color"), json!(parsed));
+            }
+            "fill_color" | "format_points.fill_color" => {
+                let parsed = if val.is_null() { None } else { Some(validate_point_color_str(parse_str_field(val, key)?, key)?) };
+                patch.insert(String::from("fill_color"), json!(parsed));
+            }
+            "symbol" | "shape" | "symbol_shape" | "format_points.symbol" => {
+                let parsed = if val.is_null() { None } else { Some(validate_marker_shape_str(parse_str_field(val, key)?, key)?) };
+                patch.insert(String::from("symbol"), json!(parsed));
+            }
+            "size_pt" | "format_points.size_pt" => {
+                let parsed = parse_opt_finite_f64_with_locale(val, key, preset)?;
+                if let Some(sz) = parsed
+                    && sz <= 0.0
+                {
+                    return Err(format!("`{key}` must be finite and > 0"));
+                }
+                patch.insert(String::from("size_pt"), json!(parsed));
+            }
+            "border_width_pt" | "stroke_width_pt" | "format_points.border_width_pt" => {
+                let parsed = parse_opt_finite_f64_with_locale(val, key, preset)?;
+                if let Some(bw) = parsed
+                    && bw < 0.0
+                {
+                    return Err(format!("`{key}` must be finite and >= 0"));
+                }
+                patch.insert(String::from("border_width_pt"), json!(parsed));
+            }
+            "fill_mode" | "format_points.fill_mode" => {
+                let parsed = if val.is_null() {
+                    None
+                } else {
+                    let s = parse_str_field(val, key)?;
+                    let _ = parse_marker_fill_mode_val(val, key)?;
+                    Some(s.trim().to_owned())
+                };
+                patch.insert(String::from("fill_mode"), json!(parsed));
+            }
             "points" | "selected_points" => {
                 if !val.is_null() {
                     next_targets = Some(crate::control_io::parse_selected_points_with_subcols(val, key)?);

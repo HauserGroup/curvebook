@@ -1,10 +1,10 @@
 //! Heatmap `Format Graph` schema tabs: Color Mapping, Labels & Ticks, and Gaps & Borders.
 
-use crate::egui_shell::UiIntent;
 use curvebook_doc::{HeatmapColumnLabelAngle, HeatmapColumnLabelMode, HeatmapRowLabelMode};
 use curvebook_palette::{ColormapId, simulate_cvd};
 use egui::{CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 
+use crate::dialogs_canvas::FormatGraphState;
 use crate::grid_view::parse_localized_number_input;
 use crate::i18n::tr;
 
@@ -109,18 +109,21 @@ pub(super) fn render_fg_heatmap_color_mapping(ui: &mut Ui, state: &mut GraphModa
     }
 }
 
-pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
-    let mut next_fg = gctx.app.canvas_dialogs.format_graph.clone();
-    let mut fg_dirty = false;
-    let mut annotate = next_fg.heatmap_labels.annotate_cells;
+pub(super) fn render_fg_heatmap_labels(
+    ui: &mut Ui,
+    state: &mut GraphModalEguiState,
+    gctx: &mut GraphModalCtx<'_>,
+    draft: &mut FormatGraphState,
+    dirty: &mut bool,
+) {
+    let mut annotate = draft.heatmap_labels.annotate_cells;
     let ann_lbl = tr(gctx.locale, "fg.heatmap.annotate_cells");
     let ann_chk = ui.checkbox(&mut annotate, ann_lbl);
     record_checkbox(ui, &ann_chk, gctx.meta, "format_graph.heatmap.annotate_cells", ann_lbl, annotate);
     if ann_chk.changed() {
-        state.heatmap_annotate_cells = annotate;
-        next_fg.heatmap_labels.annotate_cells = annotate;
-        next_fg.heatmap_labels_dirty = true;
-        fg_dirty = true;
+        draft.heatmap_labels.annotate_cells = annotate;
+        draft.heatmap_labels_dirty = true;
+        *dirty = true;
     }
 
     ui.add_space(6.0);
@@ -140,7 +143,7 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
                     widget_id: &format!("format_graph.heatmap.row_labels.{slug}"),
                     label: lbl,
                     command_id: None,
-                    selected: next_fg.heatmap_labels.row_labels == mode,
+                    selected: draft.heatmap_labels.row_labels == mode,
                     enabled: true,
                     disabled_reason: None,
                 },
@@ -148,9 +151,9 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
             )
             .clicked()
             {
-                next_fg.heatmap_labels.row_labels = mode;
-                next_fg.heatmap_labels_dirty = true;
-                fg_dirty = true;
+                draft.heatmap_labels.row_labels = mode;
+                draft.heatmap_labels_dirty = true;
+                *dirty = true;
             }
         }
     });
@@ -172,7 +175,7 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
                     widget_id: &format!("format_graph.heatmap.col_labels.{slug}"),
                     label: lbl,
                     command_id: None,
-                    selected: next_fg.heatmap_labels.column_labels == mode,
+                    selected: draft.heatmap_labels.column_labels == mode,
                     enabled: true,
                     disabled_reason: None,
                 },
@@ -180,9 +183,9 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
             )
             .clicked()
             {
-                next_fg.heatmap_labels.column_labels = mode;
-                next_fg.heatmap_labels_dirty = true;
-                fg_dirty = true;
+                draft.heatmap_labels.column_labels = mode;
+                draft.heatmap_labels_dirty = true;
+                *dirty = true;
             }
         }
     });
@@ -214,36 +217,36 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
             {
                 state.heatmap_tick_angle_deg = deg;
                 state.heatmap_tick_angle_dirty = true;
-                next_fg.heatmap_labels.column_angle = angle_variant;
-                next_fg.heatmap_labels_dirty = true;
-                fg_dirty = true;
+                draft.heatmap_labels.column_angle = angle_variant;
+                draft.heatmap_labels_dirty = true;
+                *dirty = true;
             }
         }
     });
-    if fg_dirty {
-        gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next_fg.clone())));
-    }
+
     ui.add_space(6.0);
-    render_legend_toggles(ui, gctx, &next_fg);
+    render_legend_toggles(ui, gctx, draft, dirty);
 }
 
-pub(super) fn render_fg_heatmap_borders(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
-    let fg = gctx.app.canvas_dialogs.format_graph.clone();
+pub(super) fn render_fg_heatmap_borders(
+    ui: &mut Ui,
+    state: &mut GraphModalEguiState,
+    gctx: &mut GraphModalCtx<'_>,
+    draft: &mut FormatGraphState,
+    dirty: &mut bool,
+) {
     let gap_cfg = ScrubUnitFieldConfig {
         step_per_pt: 0.5,
         decimals: 1,
         allow_unit_switch: false,
         ..ScrubUnitFieldConfig::new("format_graph.heatmap.cell_gap", "Tile Gap", 0.0, 12.0)
     };
-    let out = render_scrub_unit_field(ui, fg.heatmap_labels.cell_gap_pt, &mut state.heatmap_gap_spinner, gap_cfg, gctx.tokens, gctx.meta);
+    let out = render_scrub_unit_field(ui, draft.heatmap_labels.cell_gap_pt, &mut state.heatmap_gap_spinner, gap_cfg, gctx.tokens, gctx.meta);
     if let Some(v) = out.committed_value {
-        let clamped = v.clamp(0.0, 12.0);
-        state.heatmap_cell_gap_pt = clamped;
-        let mut next = fg.clone();
-        next.heatmap_labels.cell_gap_pt = clamped;
-        next.heatmap_labels_dirty = true;
-        gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
+        draft.heatmap_labels.cell_gap_pt = v.clamp(0.0, 12.0);
+        draft.heatmap_labels_dirty = true;
+        *dirty = true;
     }
     ui.add_space(6.0);
-    render_legend_toggles(ui, gctx, &fg);
+    render_legend_toggles(ui, gctx, draft, dirty);
 }

@@ -357,12 +357,24 @@ impl ChangeGraphTypeState {
         true
     }
 
-    /// Emit `graph.setKind` (and mark sheet initialized) command intent.
+    /// Emit `graph.setKind` (or `graph.setSpec` for `grouped.superimposed`, which carries
+    /// `GroupedArrangement::Superimposed`) command intent.
     #[must_use]
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
         let id = self.graph_sheet_id.as_ref()?;
         let opt = GRAPH_TYPE_OPTIONS.iter().find(|o| o.id == self.selected_option_id)?;
         let kind = self.resolved_graph_kind(opt, None);
+        if opt.id == "grouped.superimposed" {
+            return Some(ToolCommandIntent::new(
+                "graph.setSpec",
+                json!({
+                    "sheet_id": id.as_str(),
+                    "kind": kind,
+                    "grouped_arrangement": GroupedArrangement::Superimposed,
+                    "initialized": true,
+                }),
+            ));
+        }
         Some(ToolCommandIntent::new(
             "graph.setKind",
             json!({
@@ -385,7 +397,26 @@ impl ChangeGraphTypeState {
             return Vec::new();
         };
         let Some(mut spec) = doc.graph_sheet(id).map(|g| g.spec.clone()) else {
-            return self.commit_intent().into_iter().collect();
+            let kind = self.resolved_graph_kind(opt, None);
+            let mut intents = vec![ToolCommandIntent::new(
+                "graph.setKind",
+                json!({
+                    "sheet_id": id.as_str(),
+                    "option_id": opt.id,
+                    "kind": kind,
+                    "reset_series_style": true,
+                }),
+            )];
+            if opt.id == "grouped.superimposed" {
+                intents.push(ToolCommandIntent::new(
+                    "graph.setSpec",
+                    json!({
+                        "sheet_id": id.as_str(),
+                        "grouped_arrangement": GroupedArrangement::Superimposed,
+                    }),
+                ));
+            }
+            return intents;
         };
         let _ = self.apply_to_spec(&mut spec);
         spec.kind = self.resolved_graph_kind(opt, Some(doc));

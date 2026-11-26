@@ -7,7 +7,9 @@
 use curvebook_doc::{CiBound, FitMethod, IdentifiabilityMode, OutlierHandling, ParameterRule, ParameterScope};
 use curvebook_math::sum::NeumaierSum;
 
-use crate::diagnostics::{CovarianceDiagnostics, RoutDetectionResult, compute_information_criteria, compute_rsdr};
+use crate::diagnostics::{
+    CovarianceDiagnostics, RoutDetectionResult, compute_information_criteria, compute_information_criteria_with_log_weight_penalty, compute_rsdr,
+};
 use crate::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use crate::library::ParametricModel;
 use crate::solver::assembly::{DatasetAssemblyConfig, assemble_dataset_results, build_fitted_parameter_summaries};
@@ -15,15 +17,15 @@ use crate::solver::fit::{finalize_fit_uncertainty, solve_lm_by_method};
 use crate::solver::identifiability;
 use crate::solver::identifiability::Assessment;
 use crate::solver::inference::{
-    compute_residual_diagnostics, compute_studentized_residuals, information_criteria_from_poisson_ll, poisson_information_criteria,
-    poisson_log_likelihood_from_obs, rout_detect_outliers_mb2006,
+    compute_r_squared, compute_residual_diagnostics, compute_studentized_residuals, information_criteria_from_poisson_ll,
+    poisson_information_criteria, poisson_log_likelihood_from_obs, predicted_y_neg_log_weight_sum, rout_detect_outliers_mb2006,
 };
-use crate::solver::irls::{fit_cauchy_irls, fit_poisson_irls, fit_predicted_y_irls};
+use crate::solver::irls::{finalize_cauchy_weighted_residuals, fit_cauchy_irls, fit_poisson_irls, fit_predicted_y_irls};
 use crate::solver::layout::{
-    ObsRecord, ParamBinding, ParameterLayout, apply_predicted_y_weights, build_observations_with_source, obs_replicate_count, obs_ss_within,
-    rules_for_dataset, uses_replicate_summary_moments,
+    ObsRecord, ParamBinding, ParameterLayout, apply_predicted_y_weights, build_observations_with_source, collect_column_title_values,
+    obs_replicate_count, obs_ss_within, rules_for_dataset, uses_replicate_summary_moments,
 };
-use crate::solver::lm::{eval_residuals_with_domain, solve_with_warm_start};
+use crate::solver::lm::solve_with_warm_start;
 use crate::solver::results::{FittedDatasetResult, InferenceAvailability, InterpolatedUnknown, NonlinearFitResult, SolverConfig};
 use crate::types::{DatasetSeries, DerivedScalar, HookContext, per_dataset_parameter_key};
 
@@ -78,13 +80,20 @@ pub(in crate::solver) fn fit_single_or_shared(
     }
     let tss = tss_acc.total();
     let is_robust = config.method == FitMethod::RobustCauchy;
-    let r_squared = if tss > 0.0 { 1.0 - raw_rss / tss } else { 1.0 };
+    let r_squared = compute_r_squared(raw_rss, tss, n_obs);
     let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
 
+    let predicted_y_neg_log_weight_sum = if !is_robust && config.method != FitMethod::PoissonDeviance && config.uses_predicted_y_weighting() {
+        predicted_y_neg_log_weight_sum(&obs)
+    } else {
+        None
+    };
     let ic = if is_robust {
         None
     } else if config.method == FitMethod::PoissonDeviance {
         poisson_information_criteria(&obs, &lm_out.y_hat, k_free)
+    } else if let Some(neg_log_w) = predicted_y_neg_log_weight_sum {
+        compute_information_criteria_with_log_weight_penalty(lm_out.weighted_ss, neg_log_w, n_obs, k_free).ok()
     } else {
         compute_information_criteria(lm_out.weighted_ss, n_obs, k_free).ok()
     };
@@ -135,6 +144,7 @@ pub(in crate::solver) fn fit_single_or_shared(
         df,
         rss: raw_rss,
         weighted_ss: lm_out.weighted_ss,
+        predicted_y_neg_log_weight_sum,
         rsd,
         rsdr,
         r_squared,
@@ -182,9 +192,10 @@ pub(in crate::solver) fn solve_single_dataset_unit(
     ds_rules: &[ParameterRule],
     config: &SolverConfig,
     seed_override: Option<&[f64]>,
+    column_titles: Option<&[f64]>,
 ) -> Result<SingleDatasetOutcome, FitError> {
     let ds_slice = std::slice::from_ref(ds);
-    let ds_layout = ParameterLayout::build(model, ds_slice, hooks, ds_rules)?;
+    let ds_layout = ParameterLayout::build_with_column_titles(model, ds_slice, hooks, ds_rules, column_titles)?;
     let p_d = ds_layout.k_free();
     let use_rep_moments = uses_replicate_summary_moments(config);
     let mut ds_obs = build_observations_with_source(ds_slice, config.weighting, config.weighting_source, use_rep_moments)?;
@@ -209,9 +220,8 @@ pub(in crate::solver) fn solve_single_dataset_unit(
             if config.uses_predicted_y_weighting() {
                 if !apply_predicted_y_weights(&mut ds_obs, &out.y_hat, config.weighting) {
                     out.status = FitStatus::ImpossibleWeights;
-                } else if let Some((w_res, _, ss)) = eval_residuals_with_domain(model, &ds_layout, &ds_obs, &out.theta, false) {
-                    out.weighted_res = w_res;
-                    out.weighted_ss = ss;
+                } else {
+                    finalize_cauchy_weighted_residuals(&ds_obs, &mut out, p_d);
                 }
             }
             out
@@ -287,28 +297,37 @@ pub(in crate::solver) fn fit_independent_datasets(
     _initial_obs: Vec<ObsRecord>,
 ) -> Result<NonlinearFitResult, FitError> {
     let k_free = global_layout.k_free();
+    let all_column_titles = collect_column_title_values(datasets);
     let outlier_handling = config.effective_outlier_handling();
-    let (clean_storage, cauchy_seeds, rout_result, n_outliers_excluded) = if outlier_handling != OutlierHandling::None {
-        let pre = run_independent_rout_prefilter(
+    let (clean_storage, cauchy_seeds, rout_result, n_outliers_excluded, aborted_sub_fits) = if outlier_handling != OutlierHandling::None {
+        match run_independent_rout_prefilter(
             model,
             datasets,
             hooks,
             config,
+            &all_column_titles,
             config.effective_rout_q_percent(),
             outlier_handling == OutlierHandling::Eliminate,
-        )?;
-        (Some(pre.cleaned), Some(pre.seeds), Some(pre.rout), pre.excluded)
+        )? {
+            IndependentRoutPrefilter::Clean { cleaned, seeds, rout, excluded } => (Some(cleaned), Some(seeds), Some(rout), excluded, None),
+            IndependentRoutPrefilter::Aborted { sub_fits } => (None, None, None, 0, Some(sub_fits)),
+        }
     } else {
-        (None, None, None, 0)
+        (None, None, None, 0, None)
     };
 
     let active_datasets = clean_storage.as_deref().unwrap_or(datasets);
-    let mut sub_fits = Vec::with_capacity(active_datasets.len());
-    for (d_idx, ds) in active_datasets.iter().enumerate() {
-        let ds_rules = rules_for_dataset(&config.parameter_rules, ds.data_set_index);
-        let seed = cauchy_seeds.as_ref().map(|v| v[d_idx].as_slice());
-        sub_fits.push(solve_single_dataset_unit(model, ds, hooks, &ds_rules, config, seed)?);
-    }
+    let sub_fits = if let Some(failed_subs) = aborted_sub_fits {
+        failed_subs
+    } else {
+        let mut built = Vec::with_capacity(active_datasets.len());
+        for (d_idx, ds) in active_datasets.iter().enumerate() {
+            let ds_rules = rules_for_dataset(&config.parameter_rules, ds.data_set_index);
+            let seed = cauchy_seeds.as_ref().map(|v| v[d_idx].as_slice());
+            built.push(solve_single_dataset_unit(model, ds, hooks, &ds_rules, config, seed, Some(&all_column_titles))?);
+        }
+        built
+    };
 
     let is_robust = config.method == FitMethod::RobustCauchy;
     let mut global_theta = vec![0.0_f64; k_free];
@@ -416,17 +435,7 @@ pub(in crate::solver) fn fit_independent_datasets(
     if any_unassessed_free && matches!(identifiability, FitIdentifiability::Identifiable) {
         identifiability = FitIdentifiability::NotAssessed;
     }
-    let status = if any_impossible_weights {
-        FitStatus::ImpossibleWeights
-    } else if any_diverged {
-        FitStatus::Diverged
-    } else if any_max_iters {
-        FitStatus::HitMaxIters
-    } else if any_ambiguous {
-        FitStatus::Ambiguous
-    } else {
-        FitStatus::Converged
-    };
+    let status = resolve_independent_status(any_impossible_weights, any_diverged, any_max_iters, any_ambiguous);
     let cov = CovarianceDiagnostics {
         standard_errors: global_se,
         symmetric_ci_lower: global_sym_lo,
@@ -462,25 +471,10 @@ pub(in crate::solver) fn fit_independent_datasets(
         tss_acc.add(ss_w);
     }
     let tss = tss_acc.total();
-    let r_squared = if tss > 0.0 { 1.0 - raw_rss / tss } else { 1.0 };
+    let r_squared = compute_r_squared(raw_rss, tss, n_obs);
     let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
-    let rsdr = if is_robust {
-        if ds_results.len() == 1 {
-            ds_results[0].rsdr
-        } else {
-            let abs_res: Vec<f64> = all_obs.iter().zip(all_raw_residuals.iter()).map(|(o, r)| (r * o.sqrt_weight).abs()).collect();
-            Some(compute_rsdr(&abs_res, k_free))
-        }
-    } else {
-        None
-    };
-    let ic = if is_robust {
-        None
-    } else if config.method == FitMethod::PoissonDeviance {
-        all_poisson_ll.and_then(|ll| information_criteria_from_poisson_ll(ll, n_obs, k_free))
-    } else {
-        compute_information_criteria(weighted_ss, n_obs, k_free).ok()
-    };
+    let rsdr = compute_independent_rsdr(is_robust, &ds_results, &all_obs, &all_raw_residuals, k_free);
+    let (predicted_y_neg_log_weight_sum, ic) = compute_independent_ic(config, &all_obs, weighted_ss, n_obs, k_free, all_poisson_ll);
 
     let res_diag = compute_residual_diagnostics(&all_obs, &ds_results, &all_y_hat, &all_raw_residuals, weighted_ss, df, config);
 
@@ -498,6 +492,7 @@ pub(in crate::solver) fn fit_independent_datasets(
         df,
         rss: raw_rss,
         weighted_ss,
+        predicted_y_neg_log_weight_sum,
         rsd,
         rsdr,
         r_squared,
@@ -518,6 +513,63 @@ pub(in crate::solver) fn fit_independent_datasets(
         interpolated_x,
         interpolated_y,
     })
+}
+
+fn resolve_independent_status(any_impossible_weights: bool, any_diverged: bool, any_max_iters: bool, any_ambiguous: bool) -> FitStatus {
+    if any_impossible_weights {
+        FitStatus::ImpossibleWeights
+    } else if any_diverged {
+        FitStatus::Diverged
+    } else if any_max_iters {
+        FitStatus::HitMaxIters
+    } else if any_ambiguous {
+        FitStatus::Ambiguous
+    } else {
+        FitStatus::Converged
+    }
+}
+
+fn compute_independent_rsdr(
+    is_robust: bool,
+    ds_results: &[FittedDatasetResult],
+    all_obs: &[ObsRecord],
+    all_raw_residuals: &[f64],
+    k_free: usize,
+) -> Option<f64> {
+    if !is_robust {
+        return None;
+    }
+    if ds_results.len() == 1 {
+        return ds_results[0].rsdr;
+    }
+    let abs_res: Vec<f64> = all_obs.iter().zip(all_raw_residuals.iter()).map(|(o, r)| (r * o.sqrt_weight).abs()).collect();
+    Some(compute_rsdr(&abs_res, k_free))
+}
+
+fn compute_independent_ic(
+    config: &SolverConfig,
+    all_obs: &[ObsRecord],
+    weighted_ss: f64,
+    n_obs: usize,
+    k_free: usize,
+    all_poisson_ll: Option<f64>,
+) -> (Option<f64>, Option<crate::diagnostics::InformationCriteria>) {
+    let is_robust = config.method == FitMethod::RobustCauchy;
+    let pred_y_nlw = if !is_robust && config.method != FitMethod::PoissonDeviance && config.uses_predicted_y_weighting() {
+        predicted_y_neg_log_weight_sum(all_obs)
+    } else {
+        None
+    };
+    let ic = if is_robust {
+        None
+    } else if config.method == FitMethod::PoissonDeviance {
+        all_poisson_ll.and_then(|ll| information_criteria_from_poisson_ll(ll, n_obs, k_free))
+    } else if let Some(neg_log_w) = pred_y_nlw {
+        compute_information_criteria_with_log_weight_penalty(weighted_ss, neg_log_w, n_obs, k_free).ok()
+    } else {
+        compute_information_criteria(weighted_ss, n_obs, k_free).ok()
+    };
+    (pred_y_nlw, ic)
 }
 
 fn collect_independent_fixed_constants(
@@ -563,11 +615,9 @@ fn collect_independent_fixed_constants(
     fixed_constants
 }
 
-struct IndependentRoutPrefilter {
-    cleaned: Vec<DatasetSeries>,
-    seeds: Vec<Vec<f64>>,
-    rout: RoutDetectionResult,
-    excluded: usize,
+enum IndependentRoutPrefilter {
+    Clean { cleaned: Vec<DatasetSeries>, seeds: Vec<Vec<f64>>, rout: RoutDetectionResult, excluded: usize },
+    Aborted { sub_fits: Vec<SingleDatasetOutcome> },
 }
 
 fn run_independent_rout_prefilter(
@@ -575,6 +625,7 @@ fn run_independent_rout_prefilter(
     datasets: &[DatasetSeries],
     hooks: &HookContext,
     config: &SolverConfig,
+    column_titles: &[f64],
     fdr_q_percent: f64,
     eliminate_outliers: bool,
 ) -> Result<IndependentRoutPrefilter, FitError> {
@@ -586,6 +637,20 @@ fn run_independent_rout_prefilter(
     cauchy_cfg.compute_bands = false;
     cauchy_cfg.interpolate_unknowns = false;
 
+    let mut stage1_subs = Vec::with_capacity(datasets.len());
+    let mut any_stage1_failed = false;
+    for ds in datasets {
+        let ds_rules = rules_for_dataset(&config.parameter_rules, ds.data_set_index);
+        let sub = solve_single_dataset_unit(model, ds, hooks, &ds_rules, &cauchy_cfg, None, Some(column_titles))?;
+        if matches!(sub.status, FitStatus::ImpossibleWeights | FitStatus::Diverged | FitStatus::BadInitialValues) {
+            any_stage1_failed = true;
+        }
+        stage1_subs.push(sub);
+    }
+    if any_stage1_failed {
+        return Ok(IndependentRoutPrefilter::Aborted { sub_fits: stage1_subs });
+    }
+
     let mut cleaned = Vec::with_capacity(datasets.len());
     let mut seeds = Vec::with_capacity(datasets.len());
     let mut combined_outliers = Vec::new();
@@ -596,9 +661,7 @@ fn run_independent_rout_prefilter(
     let mut total_pts = 0_usize;
     let mut pt_offset = 0_usize;
 
-    for ds in datasets {
-        let ds_rules = rules_for_dataset(&config.parameter_rules, ds.data_set_index);
-        let sub = solve_single_dataset_unit(model, ds, hooks, &ds_rules, &cauchy_cfg, None)?;
+    for (ds, sub) in datasets.iter().zip(stage1_subs) {
         let p_d = sub.layout.k_free();
         let sqrt_w_d: Vec<f64> = sub.obs_moments.iter().map(|&(sw, _, _, _)| sw).collect();
         let w_res_d: Vec<f64> = sub.ds_result.residuals.iter().zip(sqrt_w_d.iter()).map(|(&r, &sw)| r * sw).collect();
@@ -642,5 +705,5 @@ fn run_independent_rout_prefilter(
         audit: combined_audit,
     };
     let excluded = total_pts - remaining_obs;
-    Ok(IndependentRoutPrefilter { cleaned, seeds, rout, excluded })
+    Ok(IndependentRoutPrefilter::Clean { cleaned, seeds, rout, excluded })
 }

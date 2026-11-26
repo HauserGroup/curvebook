@@ -654,10 +654,12 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             app.grid.import_wizard.is_live_link = is_live_link;
             app.grid.import_wizard.target_sheet_id = target_sheet_id
                 .or_else(|| app.session.document().active_sheet_id.as_ref().filter(|id| app.session.document().data_sheet(id).is_some()).cloned());
+            app.grid.import_wizard.path_policy = app.session.path_policy().clone();
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::UpdateImportWizard(wizard) => {
             app.grid.import_wizard = *wizard;
+            app.grid.import_wizard.path_policy = app.session.path_policy().clone();
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::PasteClipboardIntoImportReshape => {
@@ -731,64 +733,71 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
                 .filter(|id| doc.data_sheet(id).is_some())
                 .cloned()
                 .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned());
-            let target_id = if let Some(id) = existing_target {
-                id
-            } else if doc.data_sheets.is_empty()
-                && matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile)
-            {
-                if app.grid.import_wizard.origin_kind == ImportOriginKind::ExternalDelimitedFile
-                    && !app.grid.import_wizard.is_live_link
-                    && app.grid.import_wizard.raw_clipboard_text.trim().is_empty()
-                    && !app.grid.import_wizard.external_file_path.trim().is_empty()
-                {
-                    let delim =
-                        if app.grid.import_wizard.delimiter == '\0' { String::from("\t") } else { app.grid.import_wizard.delimiter.to_string() };
-                    let dec = if app.grid.import_wizard.decimal_separator == ',' { "," } else { "." };
-                    let outcome = app.execute_session_ui_cmd(
-                        "table.importCsv",
-                        serde_json::json!({
-                            "title": "Imported Data",
-                            "path": app.grid.import_wizard.external_file_path,
-                            "delimiter": delim,
-                            "decimal_separator": dec,
-                        }),
-                    )?;
-                    if close_after {
-                        app.grid.import_wizard.open = false;
-                    }
-                    return Ok(UiIntentOutcome::Engine { command_id: String::from("table.importCsv"), outcome });
-                }
-                let created = app.execute_session_ui_cmd("sheet.createData", serde_json::json!({ "kind": "Column", "title": "Imported Data" }))?;
-                created
-                    .payload
-                    .get("sheet_id")
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(|s| SheetId::try_new(s).ok())
-                    .or_else(|| app.session.document().data_sheets.last().map(|s| s.id.clone()))
-                    .ok_or_else(|| EngineError::with_code(ErrorCode::Conflict, "failed to create target data sheet for import wizard"))?
-            } else {
+            let should_create_target = existing_target.is_none()
+                && doc.data_sheets.is_empty()
+                && matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile);
+            if existing_target.is_none() && !should_create_target {
                 return Err(EngineError::with_code(
                     ErrorCode::Conflict,
                     "no target data sheet available for import wizard; activate or select a target data sheet first",
                 ));
-            };
-            if matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::InternalDataSheet | ImportOriginKind::InternalResultSheet) {
+            }
+            if should_create_target
+                && app.grid.import_wizard.origin_kind == ImportOriginKind::ExternalDelimitedFile
+                && !app.grid.import_wizard.is_live_link
+                && app.grid.import_wizard.raw_clipboard_text.trim().is_empty()
+                && !app.grid.import_wizard.external_file_path.trim().is_empty()
+            {
+                let delim = if app.grid.import_wizard.delimiter == '\0' { String::from("\t") } else { app.grid.import_wizard.delimiter.to_string() };
+                let dec = if app.grid.import_wizard.decimal_separator == ',' { "," } else { "." };
+                let outcome = app.execute_session_ui_cmd(
+                    "table.importCsv",
+                    serde_json::json!({
+                        "title": "Imported Data",
+                        "path": app.grid.import_wizard.external_file_path,
+                        "delimiter": delim,
+                        "decimal_separator": dec,
+                    }),
+                )?;
+                if close_after {
+                    app.grid.import_wizard.open = false;
+                }
+                return Ok(UiIntentOutcome::Engine { command_id: String::from("table.importCsv"), outcome });
+            }
+            if let Some(ref target_id) = existing_target
+                && matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::InternalDataSheet | ImportOriginKind::InternalResultSheet)
+            {
                 let Some(src_id) = app.grid.import_wizard.source_sheet_id.as_ref() else {
                     return Err(EngineError::with_code(ErrorCode::Conflict, "select a source sheet before committing an internal link or import"));
                 };
-                if src_id == &target_id {
+                if src_id == target_id {
                     return Err(EngineError::with_code(
                         ErrorCode::Conflict,
                         format!("cannot link or import sheet `{}` onto itself; choose a different source or target sheet", target_id.as_str()),
                     ));
                 }
             }
-            let tool_intent = app.grid.import_wizard.build_command_intent(&target_id, Some(app.session.document()));
-            let outcome = app.execute_session_ui_cmd(&tool_intent.command_id, tool_intent.params)?;
+            let (command_id, outcome) = app.execute_atomic_group(|a| {
+                let target_id = if let Some(id) = existing_target {
+                    id
+                } else {
+                    let created = a.execute_session_ui_cmd("sheet.createData", serde_json::json!({ "kind": "Column", "title": "Imported Data" }))?;
+                    created
+                        .payload
+                        .get("sheet_id")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|s| SheetId::try_new(s).ok())
+                        .or_else(|| a.session.document().data_sheets.last().map(|s| s.id.clone()))
+                        .ok_or_else(|| EngineError::with_code(ErrorCode::Conflict, "failed to create target data sheet for import wizard"))?
+                };
+                let tool_intent = a.grid.import_wizard.build_command_intent(&target_id, Some(a.session.document()));
+                let outcome = a.execute_session_ui_cmd(&tool_intent.command_id, tool_intent.params)?;
+                Ok::<_, EngineError>((tool_intent.command_id, outcome))
+            })?;
             if close_after {
                 app.grid.import_wizard.open = false;
             }
-            Ok(UiIntentOutcome::Engine { command_id: tool_intent.command_id, outcome })
+            Ok(UiIntentOutcome::Engine { command_id, outcome })
         }
         UiIntent::CloseImportWizard => {
             app.grid.import_wizard.open = false;
@@ -935,10 +944,13 @@ fn execute_grid_clipboard_copy(app: &mut UiApp, cut: bool) -> Result<UiIntentOut
     app.interaction.last_clipboard_text = Some(plan.tsv.clone());
     let _ = app.write_clipboard_text(&plan.tsv);
     if cut && !frozen && !clear_reqs.is_empty() {
-        let mut last_outcome = None;
-        for params in clear_reqs {
-            last_outcome = Some(app.execute_session_ui_cmd("table.clearCells", params)?);
-        }
+        let last_outcome = app.execute_atomic_group(|a| {
+            let mut out = None;
+            for params in clear_reqs {
+                out = Some(a.execute_session_ui_cmd("table.clearCells", params)?);
+            }
+            Ok::<_, EngineError>(out)
+        })?;
         if let Some(outcome) = last_outcome {
             return Ok(UiIntentOutcome::Engine { command_id: String::from("table.clearCells"), outcome });
         }
@@ -1053,8 +1065,8 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
                 None => AnalyzeDuplicateChoice::CreateNew,
             };
             if let Some(tool_intent) = app.canvas_dialogs.analyze.resolve_duplicate_choice(&choice) {
-                app.canvas_dialogs.close_dialog();
                 let outcome = app.execute_session_ui_cmd(&tool_intent.command_id, tool_intent.params)?;
+                app.canvas_dialogs.close_dialog();
                 return Ok(UiIntentOutcome::Engine { command_id: tool_intent.command_id, outcome });
             }
         }
@@ -1392,15 +1404,18 @@ fn apply_find_replace_on_active_sheet(
                 }
             }
         }
-        let mut last_outcome: Option<(&'static str, curvebook_engine::CommandOutcome)> = None;
-        if !x_edits.is_empty() {
-            let outcome = app.execute_session_ui_cmd("table.setXCells", serde_json::json!({ "sheet_id": ds_id.as_str(), "edits": x_edits }))?;
-            last_outcome = Some(("table.setXCells", outcome));
-        }
-        if !data_edits.is_empty() {
-            let outcome = app.execute_session_ui_cmd("table.setCells", serde_json::json!({ "sheet_id": ds_id.as_str(), "edits": data_edits }))?;
-            last_outcome = Some(("table.setCells", outcome));
-        }
+        let last_outcome = app.execute_atomic_group(|a| {
+            let mut last: Option<(&'static str, curvebook_engine::CommandOutcome)> = None;
+            if !x_edits.is_empty() {
+                let outcome = a.execute_session_ui_cmd("table.setXCells", serde_json::json!({ "sheet_id": ds_id.as_str(), "edits": x_edits }))?;
+                last = Some(("table.setXCells", outcome));
+            }
+            if !data_edits.is_empty() {
+                let outcome = a.execute_session_ui_cmd("table.setCells", serde_json::json!({ "sheet_id": ds_id.as_str(), "edits": data_edits }))?;
+                last = Some(("table.setCells", outcome));
+            }
+            Ok::<_, EngineError>(last)
+        })?;
         if let Some((cmd_id, outcome)) = last_outcome {
             return Ok(UiIntentOutcome::Engine { command_id: String::from(cmd_id), outcome });
         }

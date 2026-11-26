@@ -401,7 +401,7 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut V
         };
 
         let fallback_sheet_id = res.analysis.source_sheet_id.clone();
-        let ds_opt = doc.data_sheet(&fallback_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
+        let ds_opt = crate::resolve_data_sheet_or_upstream(doc, &fallback_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
         let ds_col_idx = match ds_opt.map(|d| &d.archetype) {
             Some(TableArchetype::MultipleVariables(_)) => graph.spec.multivariate.as_ref().map_or(ds_idx, |m| m.x_column),
             _ => ds_idx,

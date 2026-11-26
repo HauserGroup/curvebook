@@ -14,16 +14,26 @@
 //!   restricted maximum likelihood. *Biometrics* 53(3):983–997. doi:10.2307/2533558
 
 use curvebook_doc::MixedModelDfMethod;
-use curvebook_math::linalg::{DenseMatrix, cholesky, qr_col_pivoted, sym_eigen};
+use curvebook_math::linalg::{DenseMatrix, cholesky, qr_col_pivoted, svd, sym_eigen};
 use curvebook_math::sum::SummaryMoments;
 
-use crate::anova::reml::{OwnedRemlFisherMats, RemlContrastCore, eval_reml_wald_terms_for_df, scale_dense, symmetrize_dense, trace_product};
+use crate::anova::factorial::checked_dense_vec;
+use crate::anova::reml::{
+    OwnedRemlFisherMats, RemlContrastCore, RemlFisherQ, RemlTermContrast, eval_reml_wald_terms_for_df, invert_reml_info, scale_dense,
+    symmetrize_dense, trace_product,
+};
 use crate::anova::results::{UnstructuredFallbackReason, UnstructuredRemlResult};
 use crate::common::validate_finite_slice;
 use crate::error::StatsError;
 
 pub(in crate::anova) const LOG_CHOL_DIAG_MIN: f64 = -9.0;
 pub(in crate::anova) const LOG_CHOL_DIAG_MAX: f64 = 9.0;
+/// Maximum unstructured covariance parameter count `t * (t + 1) / 2` permitted for full REML / Fisher construction (`t <= 24`).
+pub(in crate::anova) const MAX_UNSTRUCTURED_COV_PARAMS: usize = 300;
+/// Maximum Fisher contraction work budget `k_dim^2 * p_eff^2`.
+pub(in crate::anova) const MAX_UNSTRUCTURED_FISHER_WORK: usize = 64_000_000;
+/// Maximum active repeated-measures timepoints permitted even on regularized fallbacks.
+pub(in crate::anova) const MAX_UNSTRUCTURED_TIMEPOINTS: usize = 64;
 
 pub(in crate::anova) fn chol_diag_mask(t: usize) -> Vec<bool> {
     let mut is_diag = Vec::with_capacity(t * (t + 1) / 2);
@@ -50,7 +60,7 @@ pub(in crate::anova) struct UnstructuredEval {
 
 pub(in crate::anova) struct UnstructuredPrepared {
     pub(in crate::anova) blocks: Vec<UnstructuredClusterBlock>,
-    pub(in crate::anova) reduced_terms: Vec<(String, usize, usize)>,
+    pub(in crate::anova) reduced_terms: Vec<RemlTermContrast>,
     pub(in crate::anova) col_map: Vec<Option<usize>>,
     pub(in crate::anova) active_tp_indices: Vec<usize>,
     pub(in crate::anova) active_labels: Vec<String>,
@@ -188,7 +198,78 @@ pub(in crate::anova) fn unstructured_shrink_spd(mat: &DenseMatrix, target_ratio:
     symmetrize_dense(&DenseMatrix::from_row_major(t, t, psd)?)
 }
 
-pub(in crate::anova) type ReducedDesignOut = (DenseMatrix, Vec<(String, usize, usize)>, Vec<Option<usize>>, usize);
+pub(in crate::anova) type ReducedDesignOut = (DenseMatrix, Vec<RemlTermContrast>, Vec<Option<usize>>, usize);
+
+/// Build an orthonormal Type III estimable contrast matrix `L` (`q x p_eff`) acting on `beta_red`
+/// for the term covering original columns `start..start+len`, given `X = X_red * T` where `t_cols[j]`
+/// is column `j` of `T` (`len == p_eff`).
+///
+/// The row space of `L` equals `N(T_{-t}^T)`, the exact space of estimable linear functions
+/// `c^T beta` (`c in R(X)`) with zero loading on all columns outside `start..start+len`
+/// (Searle, 1987, ch. 4; Kenward & Roger, 1997).
+fn build_type3_contrast_matrix(t_cols: &[Vec<f64>], p_eff: usize, start: usize, len: usize) -> Result<DenseMatrix, StatsError> {
+    let p = t_cols.len();
+    if len == 0 || start >= p {
+        return Ok(DenseMatrix::zeros(0, p_eff)?);
+    }
+    let end = start.saturating_add(len).min(p);
+    let m_other = p - (end - start);
+    if m_other == 0 {
+        return Ok(DenseMatrix::identity(p_eff)?);
+    }
+    let mut t_other_data = checked_dense_vec(p_eff, m_other)?;
+    let mut col_out = 0_usize;
+    for (j, tj) in t_cols.iter().enumerate() {
+        if j >= start && j < end {
+            continue;
+        }
+        for (r, &val) in tj.iter().enumerate() {
+            t_other_data[r * m_other + col_out] = val;
+        }
+        col_out += 1;
+    }
+    let t_other = DenseMatrix::from_row_major(p_eff, m_other, t_other_data)?;
+    let sv = svd(&t_other)?;
+    let sigma_max = sv.singular_values.first().copied().unwrap_or(0.0);
+    let tol = if sigma_max > 0.0 { sigma_max * (p_eff.max(m_other) as f64) * 1e-10 } else { 0.0 };
+    let r_other = sv.singular_values.iter().filter(|&&s| s > tol).count();
+    let q_t = p_eff.saturating_sub(r_other);
+    if q_t == 0 {
+        return Ok(DenseMatrix::zeros(0, p_eff)?);
+    }
+    if r_other == 0 {
+        return Ok(DenseMatrix::identity(p_eff)?);
+    }
+    let mut p_perp = checked_dense_vec(p_eff, p_eff)?;
+    for i in 0..p_eff {
+        p_perp[i * p_eff + i] = 1.0;
+        for j in i..p_eff {
+            let mut dot = 0.0_f64;
+            for k in 0..r_other {
+                dot += sv.u.get(i, k).unwrap_or(0.0) * sv.u.get(j, k).unwrap_or(0.0);
+            }
+            p_perp[i * p_eff + j] -= dot;
+            if i != j {
+                p_perp[j * p_eff + i] -= dot;
+            }
+        }
+    }
+    let eig = sym_eigen(&symmetrize_dense(&DenseMatrix::from_row_major(p_eff, p_eff, p_perp)?)?)?;
+    let mut order: Vec<usize> = (0..p_eff).collect();
+    order.sort_by(|&a, &b| eig.eigenvalues[b].total_cmp(&eig.eigenvalues[a]));
+    let selected: Vec<usize> = order.into_iter().take(q_t).filter(|&k| eig.eigenvalues[k] > 0.5).collect();
+    let q_actual = selected.len();
+    if q_actual == 0 {
+        return Ok(DenseMatrix::zeros(0, p_eff)?);
+    }
+    let mut l_data = checked_dense_vec(q_actual, p_eff)?;
+    for (row_idx, &eig_k) in selected.iter().enumerate() {
+        for c in 0..p_eff {
+            l_data[row_idx * p_eff + c] = eig.eigenvectors.get(c, eig_k).unwrap_or(0.0);
+        }
+    }
+    Ok(DenseMatrix::from_row_major(q_actual, p_eff, l_data)?)
+}
 
 pub(in crate::anova) fn unstructured_reduce_design(x: &DenseMatrix, terms: &[(&str, usize, usize)]) -> Result<ReducedDesignOut, StatsError> {
     let n = x.nrows();
@@ -203,15 +284,17 @@ pub(in crate::anova) fn unstructured_reduce_design(x: &DenseMatrix, terms: &[(&s
     }
     let qr = qr_col_pivoted(x)?;
     if qr.rank() == p {
-        let kept_terms = terms.iter().map(|&(name, s, l)| (name.to_owned(), s, l)).collect();
+        let kept_terms = terms.iter().map(|&(name, start, len)| RemlTermContrast::Slice { name: name.to_owned(), start, len }).collect();
         let col_map = (0..p).map(Some).collect();
         return Ok((x.clone(), kept_terms, col_map, p));
     }
 
-    // Sequential re-orthogonalized Modified Gram-Schmidt preserves term column ordering while
-    // dropping structurally aliased columns (e.g., when a factor level/timepoint is all missing).
+    // Sequential re-orthogonalized Modified Gram-Schmidt builds a full-rank basis `X_red`
+    // (`X = X_red * T`), then constructs explicit estimable Type III contrast matrices `L_t`
+    // in `N(T_{-t}^T)` so empty-cell aliasing never contaminates main-effect Wald tests.
     let mut keep = vec![false; p];
     let mut q_cols: Vec<Vec<f64>> = Vec::with_capacity(p);
+    let mut kept_orig_indices: Vec<usize> = Vec::with_capacity(p);
     for (j, slot) in keep.iter_mut().enumerate() {
         let mut w: Vec<f64> = (0..n).map(|r| x.get(r, j).unwrap_or(0.0)).collect();
         let norm0 = w.iter().map(|&v| v * v).sum::<f64>().sqrt();
@@ -234,6 +317,7 @@ pub(in crate::anova) fn unstructured_reduce_design(x: &DenseMatrix, terms: &[(&s
                 *wi *= inv;
             }
             q_cols.push(w);
+            kept_orig_indices.push(j);
         }
     }
 
@@ -249,22 +333,54 @@ pub(in crate::anova) fn unstructured_reduce_design(x: &DenseMatrix, terms: &[(&s
         return Err(StatsError::EmptyInput);
     }
 
-    let mut x_data = Vec::with_capacity(n * p_eff);
+    let mut x_data = checked_dense_vec(n, p_eff)?;
     for r in 0..n {
+        let mut c_out = 0_usize;
         for (j, &is_kept) in keep.iter().enumerate() {
             if is_kept {
-                x_data.push(x.get(r, j).unwrap_or(0.0));
+                x_data[r * p_eff + c_out] = x.get(r, j).unwrap_or(0.0);
+                c_out += 1;
             }
         }
     }
     let x_red = DenseMatrix::from_row_major(n, p_eff, x_data)?;
+
+    // Build upper-triangular `R_red = Q_red^T X_red` and solve `X = X_red * T`.
+    let mut r_mat = vec![vec![0.0_f64; p_eff]; p_eff];
+    for (k, &orig_j) in kept_orig_indices.iter().enumerate() {
+        for i in 0..=k {
+            let dot: f64 = q_cols[i].iter().enumerate().map(|(r, &q)| q * x.get(r, orig_j).unwrap_or(0.0)).sum();
+            r_mat[i][k] = dot;
+        }
+    }
+    let mut t_cols: Vec<Vec<f64>> = Vec::with_capacity(p);
+    for (j, &mapped_opt) in col_map.iter().enumerate() {
+        if let Some(dst) = mapped_opt {
+            let mut unit = vec![0.0_f64; p_eff];
+            unit[dst] = 1.0;
+            t_cols.push(unit);
+        } else {
+            let mut rhs = vec![0.0_f64; p_eff];
+            for (i, qi) in q_cols.iter().enumerate() {
+                rhs[i] = qi.iter().enumerate().map(|(r, &q)| q * x.get(r, j).unwrap_or(0.0)).sum();
+            }
+            let mut tj = vec![0.0_f64; p_eff];
+            for i in (0..p_eff).rev() {
+                let mut acc = rhs[i];
+                for m in (i + 1)..p_eff {
+                    acc -= r_mat[i][m] * tj[m];
+                }
+                let diag = r_mat[i][i];
+                tj[i] = if diag.abs() > 1e-15 { acc / diag } else { 0.0 };
+            }
+            t_cols.push(tj);
+        }
+    }
+
     let mut reduced_terms = Vec::with_capacity(terms.len());
     for &(name, start, len) in terms {
-        let s = start.min(p);
-        let end = s.saturating_add(len).min(p);
-        let mapped: Vec<usize> = col_map[s..end].iter().filter_map(|&m| m).collect();
-        let new_start = mapped.first().copied().unwrap_or(0);
-        reduced_terms.push((name.to_owned(), new_start, mapped.len()));
+        let l_mat = build_type3_contrast_matrix(&t_cols, p_eff, start, len)?;
+        reduced_terms.push(RemlTermContrast::Matrix { name: name.to_owned(), l_mat });
     }
     Ok((x_red, reduced_terms, col_map, p_eff))
 }
@@ -448,8 +564,8 @@ pub(in crate::anova) fn unstructured_ols_pairwise_init(
     p_eff: usize,
     t_obs: usize,
     n_obs: usize,
-) -> Result<(DenseMatrix, f64, f64), StatsError> {
-    let mut xtx_data = vec![0.0_f64; p_eff * p_eff];
+) -> Result<(DenseMatrix, f64), StatsError> {
+    let mut xtx_data = checked_dense_vec(p_eff, p_eff)?;
     let mut xty = vec![0.0_f64; p_eff];
     for block in blocks {
         let m = block.tps.len();
@@ -472,7 +588,7 @@ pub(in crate::anova) fn unstructured_ols_pairwise_init(
     let beta_ols = chol.solve(&xty)?;
 
     let mut rss = 0.0_f64;
-    let mut sum_prod = vec![0.0_f64; t_obs * t_obs];
+    let mut sum_prod = checked_dense_vec(t_obs, t_obs)?;
     let mut counts = vec![0_usize; t_obs * t_obs];
     let df_ratio = (n_obs as f64) / ((n_obs - p_eff).max(1) as f64);
 
@@ -488,7 +604,7 @@ pub(in crate::anova) fn unstructured_ols_pairwise_init(
         }
     }
     let ols_var = (rss / ((n_obs - p_eff).max(1) as f64)).max(1e-8);
-    let mut cov0 = vec![0.0_f64; t_obs * t_obs];
+    let mut cov0 = checked_dense_vec(t_obs, t_obs)?;
     for i in 0..t_obs {
         let cnt_ii = counts[i * t_obs + i];
         cov0[i * t_obs + i] = if cnt_ii > 0 { (sum_prod[i * t_obs + i] / (cnt_ii as f64) * df_ratio).max(1e-8) } else { ols_var };
@@ -506,10 +622,8 @@ pub(in crate::anova) fn unstructured_ols_pairwise_init(
         }
     }
     let raw_mat = symmetrize_dense(&DenseMatrix::from_row_major(t_obs, t_obs, cov0)?)?;
-    let (min_ev, max_ev, _) = unstructured_eigen_ratio(&raw_mat)?;
-    let scatter_ratio = if max_ev > 1e-30 { min_ev / max_ev } else { 0.0 };
     let (spd_init, _) = unstructured_floor_spd(&raw_mat, 0.02, ols_var)?;
-    Ok((spd_init, ols_var, scatter_ratio))
+    Ok((spd_init, ols_var))
 }
 
 pub(in crate::anova) fn unstructured_em_warm_start(
@@ -563,6 +677,43 @@ pub(in crate::anova) fn unstructured_em_warm_start(
     Ok((sigma, iters))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn unstructured_armijo_search(
+    eta: &[f64],
+    dir: &[f64],
+    g_dot_d: f64,
+    ll_curr: f64,
+    is_diag: &[bool],
+    t_obs: usize,
+    blocks: &[UnstructuredClusterBlock],
+    p_eff: usize,
+) -> Option<(Vec<f64>, DenseMatrix, DenseMatrix, UnstructuredEval)> {
+    let k_dim = eta.len();
+    let mut alpha = 1.0_f64;
+    for _ in 0..24 {
+        let mut eta_cand = vec![0.0_f64; k_dim];
+        for i in 0..k_dim {
+            let val = eta[i] + alpha * dir[i];
+            eta_cand[i] = if is_diag[i] { val.clamp(LOG_CHOL_DIAG_MIN, LOG_CHOL_DIAG_MAX) } else { val };
+        }
+        if let Ok((lc, sig_c)) = sigma_from_log_chol(&eta_cand, t_obs)
+            && let Ok(st_c) = unstructured_eval_state(&sig_c, blocks, p_eff)
+            && st_c.ll.is_finite()
+            && st_c.ll >= ll_curr - 1e-4 * alpha * g_dot_d
+        {
+            return Some((eta_cand, lc, sig_c, st_c));
+        }
+        alpha *= 0.5;
+    }
+    None
+}
+
+fn reset_h_inv_identity(h_inv: &mut [f64], k_dim: usize) {
+    for (idx, val) in h_inv.iter_mut().enumerate() {
+        *val = if idx / k_dim == idx % k_dim { 1.0 } else { 0.0 };
+    }
+}
+
 pub(in crate::anova) fn unstructured_bfgs_optimize(
     blocks: &[UnstructuredClusterBlock],
     sigma_start: DenseMatrix,
@@ -593,31 +744,20 @@ pub(in crate::anova) fn unstructured_bfgs_optimize(
             dir[i] = sum;
         }
         let mut g_dot_d: f64 = g.iter().zip(dir.iter()).map(|(&gi, &di)| gi * di).sum();
+        let mut used_steepest = false;
         if !g_dot_d.is_finite() || g_dot_d >= -1e-16 * g_inf {
-            for (idx, val) in h_inv.iter_mut().enumerate() {
-                *val = if idx / k_dim == idx % k_dim { 1.0 } else { 0.0 };
-            }
+            reset_h_inv_identity(&mut h_inv, k_dim);
             dir = g.iter().map(|&gi| -gi).collect();
             g_dot_d = -g.iter().map(|&gi| gi * gi).sum::<f64>();
+            used_steepest = true;
         }
 
-        let mut alpha = 1.0_f64;
-        let mut accepted = None;
-        for _ in 0..24 {
-            let mut eta_cand = vec![0.0_f64; k_dim];
-            for i in 0..k_dim {
-                let val = eta[i] + alpha * dir[i];
-                eta_cand[i] = if is_diag[i] { val.clamp(LOG_CHOL_DIAG_MIN, LOG_CHOL_DIAG_MAX) } else { val };
-            }
-            if let Ok((lc, sig_c)) = sigma_from_log_chol(&eta_cand, t_obs)
-                && let Ok(st_c) = unstructured_eval_state(&sig_c, blocks, p_eff)
-                && st_c.ll.is_finite()
-                && st_c.ll >= st.ll - 1e-4 * alpha * g_dot_d
-            {
-                accepted = Some((eta_cand, lc, sig_c, st_c));
-                break;
-            }
-            alpha *= 0.5;
+        let mut accepted = unstructured_armijo_search(&eta, &dir, g_dot_d, st.ll, &is_diag, t_obs, blocks, p_eff);
+        if accepted.is_none() && !used_steepest {
+            reset_h_inv_identity(&mut h_inv, k_dim);
+            dir = g.iter().map(|&gi| -gi).collect();
+            g_dot_d = -g.iter().map(|&gi| gi * gi).sum::<f64>();
+            accepted = unstructured_armijo_search(&eta, &dir, g_dot_d, st.ll, &is_diag, t_obs, blocks, p_eff);
         }
         let Some((eta_next, l_next, sigma_next, st_next)) = accepted else {
             return Ok((sigma, g_inf <= 1e-4, iter));
@@ -673,27 +813,64 @@ pub(in crate::anova) fn unstructured_bfgs_optimize(
     Ok((sigma, g_inf <= 1e-4, max_iters))
 }
 
-pub(in crate::anova) struct UnstructuredBlockFisher<'a> {
+pub(in crate::anova) struct UnstructuredBlockFisherCache {
     pub(in crate::anova) w_tilde: Vec<f64>,
     pub(in crate::anova) u_rows: Vec<Vec<f64>>,
-    pub(in crate::anova) pair_ab: &'a [(usize, usize)],
 }
 
-pub(in crate::anova) fn unstructured_accumulate_fisher(
-    blk: &UnstructuredBlockFisher<'_>,
+fn validate_unstructured_fisher_budget(t_obs: usize, p_eff: usize) -> Result<usize, StatsError> {
+    let k_dim = t_obs
+        .checked_mul(t_obs.saturating_add(1))
+        .map(|v| v / 2)
+        .ok_or(StatsError::InvalidParameter { name: "unstructured_covariance_params", value: f64::INFINITY })?;
+    if k_dim > MAX_UNSTRUCTURED_COV_PARAMS {
+        return Err(StatsError::InvalidParameter { name: "unstructured_covariance_params", value: k_dim as f64 });
+    }
+    let work = k_dim
+        .checked_mul(k_dim)
+        .and_then(|k2| k2.checked_mul(p_eff))
+        .and_then(|v| v.checked_mul(p_eff))
+        .ok_or(StatsError::InvalidParameter { name: "unstructured_fisher_work", value: f64::INFINITY })?;
+    if work > MAX_UNSTRUCTURED_FISHER_WORK {
+        return Err(StatsError::InvalidParameter { name: "unstructured_fisher_work", value: work as f64 });
+    }
+    Ok(k_dim)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn unstructured_accumulate_block_info(
+    blk: &UnstructuredBlockFisherCache,
+    phi: &DenseMatrix,
+    active_tps: &[usize],
+    pair_ab: &[(usize, usize)],
     t_obs: usize,
     p_eff: usize,
     m_data: &mut [Vec<f64>],
-    q_data: &mut [Vec<f64>],
+    tr_phi_q: &mut [f64],
     tr_ww: &mut [f64],
-) {
-    let k_dim = blk.pair_ab.len();
-    let row_contrib = |k_idx: usize| -> [(usize, usize); 2] {
-        let (a, b) = blk.pair_ab[k_idx];
-        [(a, b), (b, a)]
+) -> Result<(), StatsError> {
+    let k_dim = pair_ab.len();
+    // Precompute `B[s1, s2] = u_rows[s1]^T Phi u_rows[s2]` so `tr(Phi Q_{rs})` accumulates
+    // on the fly in O(1) per `(r, s)` pair without storing `k_dim^2` matrices of size `p_eff^2`.
+    let mut b_mat = vec![0.0_f64; t_obs * t_obs];
+    let mut phi_u: Vec<(usize, Vec<f64>)> = Vec::with_capacity(active_tps.len());
+    for &ta in active_tps {
+        phi_u.push((ta, phi.matvec(&blk.u_rows[ta])?));
+    }
+    for (idx_a, &(ta, ref pu_a)) in phi_u.iter().enumerate() {
+        for &(tb, _) in &phi_u[idx_a..] {
+            let val: f64 = blk.u_rows[tb].iter().zip(pu_a.iter()).map(|(&x, &y)| x * y).sum();
+            b_mat[ta * t_obs + tb] = val;
+            b_mat[tb * t_obs + ta] = val;
+        }
+    }
+
+    let row_contrib = |k_idx: usize| -> ([(usize, usize); 2], usize) {
+        let (a, b) = pair_ab[k_idx];
+        ([(a, b), (b, a)], if a == b { 1 } else { 2 })
     };
 
-    for (k_idx, &(a, b)) in blk.pair_ab.iter().enumerate() {
+    for (k_idx, &(a, b)) in pair_ab.iter().enumerate() {
         let ua = &blk.u_rows[a];
         let ub = &blk.u_rows[b];
         let md = &mut m_data[k_idx];
@@ -711,33 +888,83 @@ pub(in crate::anova) fn unstructured_accumulate_fisher(
             }
         }
 
-        let pairs_k = row_contrib(k_idx);
-        let len_k = if a == b { 1 } else { 2 };
+        let (pairs_k, len_k) = row_contrib(k_idx);
         for l_idx in k_idx..k_dim {
-            let (cp, dp) = blk.pair_ab[l_idx];
-            let pairs_l = row_contrib(l_idx);
-            let len_l = if cp == dp { 1 } else { 2 };
-            let qd = &mut q_data[k_idx * k_dim + l_idx];
-            let mut tr_acc = 0.0_f64;
+            let (pairs_l, len_l) = row_contrib(l_idx);
+            let mut tr_q_acc = 0.0_f64;
+            let mut tr_w_acc = 0.0_f64;
             for &(r1, s1) in &pairs_k[..len_k] {
-                let v1 = &blk.u_rows[s1];
                 for &(r2, s2) in &pairs_l[..len_l] {
-                    let w12 = blk.w_tilde[r1 * t_obs + r2];
-                    if w12 != 0.0 {
-                        let v2 = &blk.u_rows[s2];
-                        for r in 0..p_eff {
-                            let wr = w12 * v1[r];
-                            for c in 0..p_eff {
-                                qd[r * p_eff + c] += wr * v2[c];
+                    tr_q_acc += blk.w_tilde[r1 * t_obs + r2] * b_mat[s1 * t_obs + s2];
+                    tr_w_acc += blk.w_tilde[r1 * t_obs + s2] * blk.w_tilde[s1 * t_obs + r2];
+                }
+            }
+            tr_phi_q[k_idx * k_dim + l_idx] += tr_q_acc;
+            tr_ww[k_idx * k_dim + l_idx] += tr_w_acc;
+        }
+    }
+    Ok(())
+}
+
+fn unstructured_contract_q_weighted(
+    cache: &[UnstructuredBlockFisherCache],
+    pair_ab: &[(usize, usize)],
+    w_info_inv: &DenseMatrix,
+    t_obs: usize,
+    p_eff: usize,
+) -> Result<DenseMatrix, StatsError> {
+    let k_dim = pair_ab.len();
+    let row_contrib = |k_idx: usize| -> ([(usize, usize); 2], usize) {
+        let (a, b) = pair_ab[k_idx];
+        ([(a, b), (b, a)], if a == b { 1 } else { 2 })
+    };
+    let mut qw_data = checked_dense_vec(p_eff, p_eff)?;
+    let mut c_mat = vec![0.0_f64; t_obs * t_obs];
+    for blk in cache {
+        c_mat.fill(0.0);
+        for r in 0..k_dim {
+            let (pairs_r, len_r) = row_contrib(r);
+            for s in r..k_dim {
+                let wrs = w_info_inv.get(r, s).unwrap_or(0.0);
+                if wrs == 0.0 {
+                    continue;
+                }
+                let (pairs_s, len_s) = row_contrib(s);
+                for &(r1, s1) in &pairs_r[..len_r] {
+                    for &(r2, s2) in &pairs_s[..len_s] {
+                        let w12 = blk.w_tilde[r1 * t_obs + r2];
+                        if w12 != 0.0 {
+                            let delta = wrs * w12;
+                            c_mat[s1 * t_obs + s2] += delta;
+                            if r != s {
+                                c_mat[s2 * t_obs + s1] += delta;
                             }
                         }
                     }
-                    tr_acc += blk.w_tilde[r1 * t_obs + s2] * blk.w_tilde[s1 * t_obs + r2];
                 }
             }
-            tr_ww[k_idx * k_dim + l_idx] += tr_acc;
+        }
+        for s1 in 0..t_obs {
+            let u1 = &blk.u_rows[s1];
+            for s2 in 0..t_obs {
+                let c12 = c_mat[s1 * t_obs + s2];
+                if c12 == 0.0 {
+                    continue;
+                }
+                let u2 = &blk.u_rows[s2];
+                for row in 0..p_eff {
+                    let v = c12 * u1[row];
+                    if v == 0.0 {
+                        continue;
+                    }
+                    for col in 0..p_eff {
+                        qw_data[row * p_eff + col] += v * u2[col];
+                    }
+                }
+            }
         }
     }
+    Ok(DenseMatrix::from_row_major(p_eff, p_eff, qw_data)?)
 }
 
 pub(in crate::anova) fn unstructured_build_fisher_mats(
@@ -747,16 +974,18 @@ pub(in crate::anova) fn unstructured_build_fisher_mats(
     p_eff: usize,
 ) -> Result<OwnedRemlFisherMats, StatsError> {
     let t_obs = sigma.nrows();
-    let k_dim = t_obs * (t_obs + 1) / 2;
+    let k_dim = validate_unstructured_fisher_budget(t_obs, p_eff)?;
     let mut pair_ab = Vec::with_capacity(k_dim);
     for a in 0..t_obs {
         for b in 0..=a {
             pair_ab.push((a, b));
         }
     }
-    let mut m_data = vec![vec![0.0_f64; p_eff * p_eff]; k_dim];
-    let mut q_data = vec![vec![0.0_f64; p_eff * p_eff]; k_dim * k_dim];
-    let mut tr_ww = vec![0.0_f64; k_dim * k_dim];
+    let p2 = p_eff.checked_mul(p_eff).ok_or(StatsError::InvalidParameter { name: "unstructured_fisher_work", value: f64::INFINITY })?;
+    let mut m_data = vec![vec![0.0_f64; p2]; k_dim];
+    let mut tr_phi_q = checked_dense_vec(k_dim, k_dim)?;
+    let mut tr_ww = checked_dense_vec(k_dim, k_dim)?;
+    let mut cache = Vec::with_capacity(blocks.len());
 
     for block in blocks {
         let m = block.tps.len();
@@ -780,8 +1009,9 @@ pub(in crate::anova) fn unstructured_build_fisher_mats(
                 w_tilde[ta * t_obs + tb] = w_c.get(a, b).unwrap_or(0.0);
             }
         }
-        let blk = UnstructuredBlockFisher { w_tilde, u_rows, pair_ab: &pair_ab };
-        unstructured_accumulate_fisher(&blk, t_obs, p_eff, &mut m_data, &mut q_data, &mut tr_ww);
+        let blk = UnstructuredBlockFisherCache { w_tilde, u_rows };
+        unstructured_accumulate_block_info(&blk, phi, &block.tps, &pair_ab, t_obs, p_eff, &mut m_data, &mut tr_phi_q, &mut tr_ww)?;
+        cache.push(blk);
     }
 
     let mut m_mats = Vec::with_capacity(k_dim);
@@ -792,24 +1022,18 @@ pub(in crate::anova) fn unstructured_build_fisher_mats(
         m_mats.push(m_mat);
     }
 
-    let mut q_mats = vec![vec![DenseMatrix::zeros(p_eff, p_eff)?; k_dim]; k_dim];
-    let mut ie_data = vec![0.0_f64; k_dim * k_dim];
+    let mut ie_data = checked_dense_vec(k_dim, k_dim)?;
     for r in 0..k_dim {
         for s in r..k_dim {
-            let q_rs = DenseMatrix::from_row_major(p_eff, p_eff, std::mem::take(&mut q_data[r * k_dim + s]))?;
-            let ie_rs = 0.5 * (tr_ww[r * k_dim + s] - 2.0 * trace_product(phi, &q_rs) + trace_product(&phi_m[r], &phi_m[s]));
+            let ie_rs = 0.5 * (tr_ww[r * k_dim + s] - 2.0 * tr_phi_q[r * k_dim + s] + trace_product(&phi_m[r], &phi_m[s]));
             ie_data[r * k_dim + s] = ie_rs;
             ie_data[s * k_dim + r] = ie_rs;
-            if r == s {
-                q_mats[r][s] = symmetrize_dense(&q_rs)?;
-            } else {
-                q_mats[s][r] = q_rs.transpose();
-                q_mats[r][s] = q_rs;
-            }
         }
     }
     let info_e = symmetrize_dense(&DenseMatrix::from_row_major(k_dim, k_dim, ie_data)?)?;
-    Ok(OwnedRemlFisherMats { info_e, m_mats, q_mats })
+    let w_info_inv = invert_reml_info(&info_e)?;
+    let q_weighted = unstructured_contract_q_weighted(&cache, &pair_ab, &w_info_inv, t_obs, p_eff)?;
+    Ok(OwnedRemlFisherMats { info_e, w_info_inv: Some(w_info_inv), m_mats, q_term: RemlFisherQ::Contracted(q_weighted) })
 }
 
 pub(in crate::anova) fn unstructured_corr_from_cov(cov: &[Vec<f64>]) -> Vec<Vec<f64>> {
@@ -873,11 +1097,18 @@ pub(in crate::anova) fn fit_unstructured_rm_reml_with_method_and_core(
 ) -> Result<(UnstructuredRemlResult, RemlContrastCore), StatsError> {
     let prep = unstructured_prepare_clusters(x, y, cluster_ids, timepoint_ids, timepoint_labels, terms)?;
     let t_obs = prep.active_tp_indices.len();
+    if t_obs > MAX_UNSTRUCTURED_TIMEPOINTS {
+        return Err(StatsError::InvalidParameter { name: "unstructured_timepoints", value: t_obs as f64 });
+    }
     let n_clusters = prep.blocks.len();
     let n_minus_p = (prep.n_obs - prep.p_eff) as f64;
     let k_params = t_obs * (t_obs + 1) / 2;
+    let is_rank_fallback = n_clusters == 1 || n_clusters < t_obs || (prep.n_obs - prep.p_eff) < k_params;
+    if !is_rank_fallback {
+        let _ = validate_unstructured_fisher_budget(t_obs, prep.p_eff)?;
+    }
 
-    let (sigma_init, ols_var, scatter_ratio) = unstructured_ols_pairwise_init(&prep.blocks, prep.p_eff, t_obs, prep.n_obs)?;
+    let (sigma_init, ols_var) = unstructured_ols_pairwise_init(&prep.blocks, prep.p_eff, t_obs, prep.n_obs)?;
     let (sigma_scaled, converged, iterations, fallback_reason) = if n_clusters == 1 {
         let diag = scale_dense(&DenseMatrix::identity(t_obs)?, ols_var.max(1e-8))?;
         (diag, true, 0, Some(UnstructuredFallbackReason::SingleSubject))
@@ -890,7 +1121,7 @@ pub(in crate::anova) fn fit_unstructured_rm_reml_with_method_and_core(
         let total_iters = em_iters + bfgs_iters;
         let (min_ev, max_ev, _) = unstructured_eigen_ratio(&bfgs_sig)?;
         let cov_ratio = if max_ev > 1e-30 { min_ev / max_ev } else { 0.0 };
-        if cov_ratio <= 1e-6 || scatter_ratio <= 1e-8 {
+        if cov_ratio <= 1e-6 {
             let reason = if n_clusters <= t_obs || (prep.n_obs - prep.p_eff) <= k_params {
                 UnstructuredFallbackReason::SmallSampleRankDeficient
             } else {
@@ -906,12 +1137,16 @@ pub(in crate::anova) fn fit_unstructured_rm_reml_with_method_and_core(
     };
 
     let st_final = unstructured_eval_state(&sigma_scaled, &prep.blocks, prep.p_eff)?;
-    let fisher = unstructured_build_fisher_mats(&prep.blocks, &sigma_scaled, &st_final.phi, prep.p_eff)?;
-    let term_refs: Vec<(&str, usize, usize)> = prep.reduced_terms.iter().map(|(n, s, l)| (n.as_str(), *s, *l)).collect();
+    let fisher = if matches!(fallback_reason, Some(UnstructuredFallbackReason::SingleSubject | UnstructuredFallbackReason::SmallSampleRankDeficient))
+    {
+        OwnedRemlFisherMats { info_e: DenseMatrix::zeros(0, 0)?, w_info_inv: None, m_mats: Vec::new(), q_term: RemlFisherQ::None }
+    } else {
+        unstructured_build_fisher_mats(&prep.blocks, &sigma_scaled, &st_final.phi, prep.p_eff)?
+    };
     let mean_diag_scaled: f64 = (0..t_obs).map(|i| sigma_scaled.get(i, i).unwrap_or(1.0)).sum::<f64>() / (t_obs as f64);
 
     let ((mut fixed_terms, satterthwaite_df, kenward_roger_df), mut core) =
-        eval_reml_wald_terms_for_df(&st_final.phi, &st_final.beta, mean_diag_scaled, &fisher, &term_refs, n_minus_p, df_method)?;
+        eval_reml_wald_terms_for_df(&st_final.phi, &st_final.beta, mean_diag_scaled, &fisher, &prep.reduced_terms, n_minus_p, df_method)?;
     core.y_scale = prep.y_scale;
     core.col_map = prep.col_map;
 

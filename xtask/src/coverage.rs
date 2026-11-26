@@ -13,7 +13,7 @@ const USAGE: &str = "usage: cargo xtask coverage [-p <crate>]... [-- <test-runne
 const EXCLUDED_PACKAGES: &[&str] = &["xtask", "curvebook-testkit"];
 
 /// Source files dropped from every report (build automation and dev-only fixtures).
-const IGNORE_FILENAME_REGEX: &str = r"(^|/)(xtask|crates/testkit)/";
+const IGNORE_FILENAME_REGEX: &str = r"(^|[/\\])(xtask|crates[/\\]testkit)[/\\]";
 
 const INSTALL_HINT: &str = "install it with `cargo install --locked cargo-llvm-cov`";
 const LLVM_TOOLS_HINT: &str = "run `rustup component add llvm-tools-preview`, or, for a toolchain without that component \
@@ -113,6 +113,7 @@ fn plan(opts: &Options, nextest: bool, out: &Outputs) -> Vec<Vec<String>> {
     } else {
         test_run.push(s("--all-targets"));
     }
+    test_run.push(s("--locked"));
     test_run.push(s("--no-report"));
     if opts.packages.is_empty() {
         test_run.push(s("--workspace"));
@@ -256,8 +257,19 @@ mod tests {
         assert_eq!(steps.first(), Some(&strs(&["llvm-cov", "clean", "--workspace"])));
         assert_eq!(
             steps.get(1),
-            Some(&strs(&["llvm-cov", "--all-targets", "--no-report", "--workspace", "--exclude", "xtask", "--exclude", "curvebook-testkit"]))
+            Some(&strs(&[
+                "llvm-cov",
+                "--all-targets",
+                "--locked",
+                "--no-report",
+                "--workspace",
+                "--exclude",
+                "xtask",
+                "--exclude",
+                "curvebook-testkit"
+            ]))
         );
+        assert!(IGNORE_FILENAME_REGEX.contains(r"[/\\]"));
         for report in steps.iter().skip(2) {
             assert_eq!(report.get(..4), Some(strs(&["llvm-cov", "report", "--ignore-filename-regex", IGNORE_FILENAME_REGEX]).as_slice()));
         }
@@ -270,7 +282,7 @@ mod tests {
     fn package_plan_uses_nextest_and_forwards_runner_args() {
         let opts = Options { packages: strs(&["curvebook-stats"]), runner_args: strs(&["anova"]) };
         let steps = plan(&opts, true, &Outputs::in_dir(Path::new("o")));
-        assert_eq!(steps.get(1), Some(&strs(&["llvm-cov", "nextest", "--no-report", "-p", "curvebook-stats", "--", "anova"])));
+        assert_eq!(steps.get(1), Some(&strs(&["llvm-cov", "nextest", "--locked", "--no-report", "-p", "curvebook-stats", "--", "anova"])));
     }
 
     #[test]

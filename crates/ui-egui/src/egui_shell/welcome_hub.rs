@@ -3,7 +3,7 @@
 
 use curvebook_doc::{
     Cell, CellValue, ColumnDesignHint, ColumnTable, DataSetColumn, DataSheet, GraphSheet, GroupedTable, InfoSheet, ProjectDocument, ResultSheet,
-    SequenceProgression, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
+    SequenceProgression, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableSource, XColumnMode, XyTable,
 };
 use curvebook_format::save_template_bytes;
 use egui::{Align, Color32, CornerRadius, FontId, Id, Key, Layout, Modifiers, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Vec2};
@@ -231,6 +231,10 @@ pub struct WelcomeHubEguiState {
     pub template_error: Option<String>,
     /// Inline error from the last failed `Load Sample` attempt (cleared on any sample-mode change).
     pub sample_error: Option<String>,
+    /// Inline error from the last failed or policy-rejected `Open Existing Project` attempt.
+    pub open_file_error: Option<String>,
+    /// Snapshot of `app.mutation_seq()` when `project.open` was dispatched; closes launcher only once it succeeds.
+    pub pending_open_mutation_seq: Option<u64>,
 }
 
 /// Per-frame layout report returned by [`render_welcome_hub`].
@@ -346,6 +350,19 @@ pub fn render_welcome_hub(
     let cancel_visible = !empty_project;
     report.cancel_visible = cancel_visible;
     ensure_clone_source_default(app, state);
+
+    if let Some(prev_seq) = state.pending_open_mutation_seq {
+        if app.mutation_seq() != prev_seq {
+            state.pending_open_mutation_seq = None;
+            state.open_file_error = None;
+            intents.push(UiIntent::SetLauncherOpen { open: false });
+        } else if !ui.ctx().will_discard()
+            && let Some(banner) = app.canvas_dialogs.status_banner.as_ref()
+        {
+            state.open_file_error = Some(banner.clone());
+            state.pending_open_mutation_seq = None;
+        }
+    }
 
     let stage_rect = ui.max_rect();
     if !stage_rect.is_positive() {
@@ -930,8 +947,8 @@ fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx
                 {
                     cx.state.schema.col_design_kind = idx;
                     cx.state.schema.paired_design = idx == 1;
-                    if idx == 2 && cx.state.schema.y_subcolumn_kind < 2 {
-                        cx.state.schema.y_subcolumn_kind = 2;
+                    if idx == 2 {
+                        cx.state.schema.y_subcolumn_kind = normalize_summary_subcolumn_kind(cx.state.schema.y_subcolumn_kind);
                     }
                 }
                 ui.add_space(2.0);
@@ -1199,6 +1216,13 @@ fn render_subcolumn_selector(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
     }
 }
 
+const fn normalize_summary_subcolumn_kind(kind: usize) -> usize {
+    match kind {
+        2 | 3 | 7 => kind,
+        _ => 2,
+    }
+}
+
 fn render_summary_subcolumn_selector(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
     let locale = cx.app.locale.as_str();
     let tokens = cx.tokens;
@@ -1207,6 +1231,7 @@ fn render_summary_subcolumn_selector(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCt
     let content_w = cx.content_w;
     let state = &mut *cx.state;
     let meta = &mut *cx.meta;
+    state.schema.y_subcolumn_kind = normalize_summary_subcolumn_kind(state.schema.y_subcolumn_kind);
 
     let opts = [
         (2usize, "welcome.subcol.mean_sd_n", tr(locale, "welcome.subcol.mean_sd_n")),
@@ -1462,7 +1487,8 @@ fn render_middle_clone_pipeline(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>
 fn render_middle_open_file(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
     let locale = cx.app.locale.as_str();
     let tokens = cx.tokens;
-    let enabled = cx.enabled;
+    let external_rejected = matches!(cx.app.session().path_policy(), curvebook_engine::ExternalPathPolicy::RejectExternal);
+    let enabled = cx.enabled && !external_rejected;
     let z_layer = cx.z_layer;
     let content_w = cx.content_w;
     let state = &mut *cx.state;
@@ -1488,6 +1514,7 @@ fn render_middle_open_file(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
         meta,
     );
     ui.add_space(6.0);
+    let prev_draft = state.open_file_path_draft.clone();
     render_clipped_text_edit(
         ui,
         &mut state.open_file_path_draft,
@@ -1501,6 +1528,50 @@ fn render_middle_open_file(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
             z_layer,
         },
     );
+    if state.open_file_path_draft != prev_draft {
+        state.open_file_error = None;
+    }
+    if external_rejected {
+        ui.add_space(4.0);
+        let notice = "External file access is disabled by host security policy.";
+        let resp = ui.add(egui::Label::new(egui::RichText::new(notice).small().color(tokens.text_muted)).wrap());
+        meta.record_response(
+            ui,
+            &resp,
+            FrameInspectEntryInput {
+                widget_id: "welcome.open.policy_notice",
+                role: "text",
+                label: notice,
+                command_id: None,
+                value: None,
+                enabled: true,
+                disabled_reason: None,
+                z_layer,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+    }
+    if let Some(err_msg) = state.open_file_error.as_deref() {
+        ui.add_space(4.0);
+        let err_resp = ui.add(egui::Label::new(egui::RichText::new(err_msg).small().color(tokens.link_red)).wrap());
+        meta.record_response(
+            ui,
+            &err_resp,
+            FrameInspectEntryInput {
+                widget_id: "welcome.open.error",
+                role: "text",
+                label: err_msg,
+                command_id: None,
+                value: None,
+                enabled: true,
+                disabled_reason: None,
+                z_layer,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+    }
 }
 
 fn render_right_pane(
@@ -1657,7 +1728,16 @@ fn render_card_footer(ui: &mut egui::Ui, cx: &mut WelcomeFooterCtx<'_>) {
                     (!has_src).then_some("Select a Data table to clone"),
                 )
             }
-            WelcomeLeftMode::OpenFile => ("welcome.btn.open_file", tr(locale, "welcome.action.open_existing"), Some("project.open"), enabled, None),
+            WelcomeLeftMode::OpenFile => {
+                let external_rejected = matches!(app.session().path_policy(), curvebook_engine::ExternalPathPolicy::RejectExternal);
+                (
+                    "welcome.btn.open_file",
+                    tr(locale, "welcome.action.open_existing"),
+                    Some("project.open"),
+                    enabled && !external_rejected,
+                    external_rejected.then_some("External file access is disabled by host security policy"),
+                )
+            }
         };
 
         let btn_w = ui.available_width().clamp(72.0_f32.min(ui.available_width().max(48.0)), 196.0);
@@ -1731,7 +1811,6 @@ fn dispatch_welcome_primary_action(app: &UiApp, state: &mut WelcomeHubEguiState,
                 let mut params = json!({
                     "sheet_id": src_id.as_str(),
                     "keep_x_values": state.schema.clone_keep_x,
-                    "clear_data": state.schema.clone_clear_values,
                     "clear_y_values": state.schema.clone_clear_values,
                     "clear_column_titles": state.schema.clone_clear_column_titles,
                     "clear_row_titles": state.schema.clone_clear_row_titles,
@@ -1751,13 +1830,34 @@ fn dispatch_welcome_primary_action(app: &UiApp, state: &mut WelcomeHubEguiState,
             }
         }
         WelcomeLeftMode::OpenFile => {
+            if matches!(app.session().path_policy(), curvebook_engine::ExternalPathPolicy::RejectExternal) {
+                state.open_file_error = Some(String::from("External file access is disabled by host security policy."));
+                return;
+            }
             let trimmed = state.open_file_path_draft.trim();
             if trimmed.is_empty() {
+                state.open_file_error = None;
                 state.open_file_request_count = state.open_file_request_count.saturating_add(1);
                 intents.push(UiIntent::OpenProjectFile);
             } else {
-                intents.push_engine("project.open", json!({ "path": trimmed }));
-                intents.push(UiIntent::SetLauncherOpen { open: false });
+                let open_path = match app.session().path_policy() {
+                    curvebook_engine::ExternalPathPolicy::Unconstrained => trimmed.to_owned(),
+                    curvebook_engine::ExternalPathPolicy::RejectExternal => {
+                        state.open_file_error = Some(String::from("External file access is disabled by host security policy."));
+                        return;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    curvebook_engine::ExternalPathPolicy::Workdir(guard) => match guard.resolve(trimmed) {
+                        Ok(resolved) => resolved.to_string_lossy().into_owned(),
+                        Err(err) => {
+                            state.open_file_error = Some(err.to_string());
+                            return;
+                        }
+                    },
+                };
+                state.open_file_error = None;
+                state.pending_open_mutation_seq = Some(app.mutation_seq());
+                intents.push_engine("project.open", json!({ "path": open_path }));
             }
         }
     }
@@ -2005,7 +2105,10 @@ fn build_empty_create_params(arch: WelcomeArchetypeChoice, schema: &WelcomeSchem
             WelcomeArchetypeChoice::Column => {
                 let (design, subcol) = match schema.col_design_kind {
                     1 => (ColumnDesignHint::PairedRepeatedMeasures, SubcolumnMode::Single),
-                    2 => (ColumnDesignHint::PrecomputedError, subcolumn_mode_from_index(schema.y_subcolumn_kind.max(2), schema.subcols)),
+                    2 => (
+                        ColumnDesignHint::PrecomputedError,
+                        subcolumn_mode_from_index(normalize_summary_subcolumn_kind(schema.y_subcolumn_kind), schema.subcols),
+                    ),
                     _ => (ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single),
                 };
                 map.insert(String::from("design_hint"), json!(design));
@@ -2126,7 +2229,14 @@ pub fn build_sample_creation_intent(
                 map.insert(String::from("censored_code"), json!(t.censored_code));
             }
             TableArchetype::MultipleVariables(t) => {
-                let vars: Vec<Value> = t.variables.iter().map(|v| json!({ "title": v.title, "role": v.role })).collect();
+                let vars: Vec<Value> = t
+                    .variables
+                    .iter()
+                    .map(|v| {
+                        let role = if matches!(v.source, VariableSource::Calculated { .. }) { json!("continuous") } else { json!(v.role) };
+                        json!({ "title": v.title, "role": role })
+                    })
+                    .collect();
                 map.insert(String::from("variables"), Value::Array(vars));
             }
             TableArchetype::Nested(t) => {
@@ -2209,6 +2319,29 @@ fn collect_sample_population_commands(sid: &str, arch: &TableArchetype, commands
         commands.push((String::from("table.setTitles"), json!({ "sheet_id": sid, "titles": col_titles })));
     }
 
+    let row_titles: &[String] = match arch {
+        TableArchetype::Xy(t) => &t.row_titles,
+        TableArchetype::Column(t) => &t.row_titles,
+        TableArchetype::Grouped(t) => &t.row_titles,
+        TableArchetype::Contingency(t) => &t.row_titles,
+        TableArchetype::Survival(t) => &t.row_titles,
+        TableArchetype::PartsOfWhole(t) => &t.slice_labels,
+        TableArchetype::MultipleVariables(t) => &t.row_titles,
+        TableArchetype::Nested(t) => &t.row_titles,
+    };
+    if row_titles.iter().any(|t| !t.trim().is_empty()) {
+        let titles: Vec<Option<String>> = row_titles.iter().map(|t| (!t.trim().is_empty()).then(|| t.clone())).collect();
+        commands.push((String::from("table.setRowTitles"), json!({ "sheet_id": sid, "titles": titles })));
+    }
+
+    if let TableArchetype::Nested(t) = arch {
+        for (col, grp) in t.groups.iter().enumerate() {
+            if grp.subcolumn_titles.iter().any(|s| !s.trim().is_empty()) {
+                commands.push((String::from("table.setSubcolumnTitles"), json!({ "sheet_id": sid, "col": col, "titles": grp.subcolumn_titles })));
+            }
+        }
+    }
+
     let mut edits = Vec::new();
     match arch {
         TableArchetype::Xy(t) => collect_dataset_edits(&t.data_sets, &mut edits),
@@ -2219,6 +2352,9 @@ fn collect_sample_population_commands(sid: &str, arch: &TableArchetype, commands
         TableArchetype::Survival(t) => collect_dataset_edits(&t.cohorts, &mut edits),
         TableArchetype::MultipleVariables(t) => {
             for (c, var) in t.variables.iter().enumerate() {
+                if matches!(var.source, VariableSource::Calculated { .. }) {
+                    continue;
+                }
                 for (r, cell) in var.cells.iter().enumerate() {
                     push_cell_edit(&mut edits, r, Some(c), Some(0), cell);
                 }
@@ -2236,6 +2372,17 @@ fn collect_sample_population_commands(sid: &str, arch: &TableArchetype, commands
     }
     if !edits.is_empty() {
         commands.push((String::from("table.setCells"), json!({ "sheet_id": sid, "edits": edits })));
+    }
+
+    if let TableArchetype::MultipleVariables(t) = arch {
+        for (col, var) in t.variables.iter().enumerate() {
+            if let VariableSource::Calculated { formula } = &var.source {
+                commands.push((
+                    String::from("table.setCalculatedVariable"),
+                    json!({ "sheet_id": sid, "col": col, "title": var.title, "formula": formula }),
+                ));
+            }
+        }
     }
 }
 

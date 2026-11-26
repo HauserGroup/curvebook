@@ -800,7 +800,7 @@ pub fn analyze_2x2_ratios(a: u64, b: u64, c: u64, d: u64, confidence: Confidence
         None
     };
     let rd = p1 - p2;
-    let nnt = if rd.abs() > 1e-12 { Some(1.0 / rd) } else { None };
+    let nnt = if rd.abs() > 1e-15 { Some(1.0 / rd) } else { None };
 
     let (l1, u1) = wilson_score_ci(a, r1, confidence);
     let (l2, u2) = wilson_score_ci(c, r2, confidence);

@@ -261,12 +261,16 @@ impl RandomSampleRowsDialogState {
         let Some(ds) = doc.data_sheet(source_sheet_id) else {
             return false;
         };
+        let switching_sheet = self.source_sheet_id.as_ref() != Some(&ds.id);
         self.source_sheet_id = Some(ds.id.clone());
         self.target_info_sheet_id = ds.info_sheet_id.clone().or_else(|| doc.info_sheets.first().map(|s| s.id.clone()));
         let col_count = ds.archetype.column_count();
         self.available_columns = (0..col_count)
             .map(|i| data_column_title(ds, i).map_or_else(|| format!("Col {}", curvebook_doc::default_column_label(i)), ToOwned::to_owned))
             .collect();
+        if switching_sheet || self.stratify_column.is_some_and(|col| col >= col_count) {
+            self.stratify_column = None;
+        }
         self.sample_size = self.sample_size.max(1).min(ds.archetype.row_count().max(1));
         true
     }
@@ -479,8 +483,11 @@ impl InsertModelEquationDialogState {
             .filter(|rs| {
                 matches!(
                     rs.analysis.kind,
-                    AnalysisKind::NonlinearRegression(_) | AnalysisKind::LinearRegression(_) | AnalysisKind::GeneralizedLinearModel(_)
-                ) || !rs.fitted_curves.is_empty()
+                    AnalysisKind::NonlinearRegression(_)
+                        | AnalysisKind::LinearRegression(_)
+                        | AnalysisKind::PassingBablok(_)
+                        | AnalysisKind::SimpleLogisticRegression(_)
+                )
             })
             .map(|rs| rs.id.clone())
             .collect();

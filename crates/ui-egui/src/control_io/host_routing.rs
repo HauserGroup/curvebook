@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, ExportFigureFormat};
-use crate::i18n::{BETA_ACTIVE_LOCALES, normalize_locale};
+use crate::i18n::{BETA_ACTIVE_LOCALES, LOCALES, normalize_locale};
 use crate::import_paste::commit_import_paste_dialog;
 use crate::interaction::{UiEventOutcome, clear_modal_text_buffers, sync_edit_params_text_buffers, sync_format_axes_text_buffers};
 use crate::power_wizard::PowerWizardStage;
@@ -70,6 +70,17 @@ pub fn next_locale_code(current: &str) -> &'static str {
     BETA_ACTIVE_LOCALES.get((idx + 1) % BETA_ACTIVE_LOCALES.len()).copied().unwrap_or("en")
 }
 
+/// Cycle to the next supported locale across all registered [`LOCALES`] (including RTL locales).
+#[must_use]
+pub fn next_supported_locale_code(current: &str) -> &'static str {
+    if LOCALES.is_empty() {
+        return "en";
+    }
+    let canonical = normalize_locale(current);
+    let idx = LOCALES.iter().position(|&loc| loc.eq_ignore_ascii_case(canonical)).unwrap_or(0);
+    LOCALES.get((idx + 1) % LOCALES.len()).copied().unwrap_or("en")
+}
+
 /// Split an optional `:variant` suffix on known parameterized chrome commands.
 #[must_use]
 pub fn split_variant_command(command_id: &str) -> (&str, Option<&str>) {
@@ -115,8 +126,6 @@ pub fn is_read_only_ui_command(command_id: &str) -> bool {
             | "ui.clipboard.copy"
             | "ui.clipboard.copyForSlides"
             | "ui.export.figure"
-            | "ui.print.open"
-            | "file.print"
             | "ui.navigator.toggle"
             | "ui.inspector.toggle"
             | "ui.family.toggle"
@@ -128,6 +137,7 @@ pub fn is_read_only_ui_command(command_id: &str) -> bool {
             | "ui.shortcut.reset"
             | "ui.closeWorkspace.prompt"
             | "ui.analyze.open"
+            | "ui.editParams.open"
             | "ui.powerWizard.open"
             | "ui.formatPoints.open"
             | "ui.changeGraphType.open"
@@ -149,7 +159,6 @@ pub fn is_read_only_ui_command(command_id: &str) -> bool {
             | "ui.export.tableCsv.open"
             | "ui.export.resultsCsv.open"
             | "ui.export.allTablesCsv.open"
-            | "ui.export.allTablesCsv"
             | "ui.import.warnings.open"
             | "ui.import.reshape.open"
             | "ui.result.copyMethodsReport"
@@ -174,10 +183,38 @@ pub fn is_read_only_control_method(command_id: &str) -> bool {
     matches!(command_id, "ping" | "command.list" | "doc.inspect" | "render.svg" | "render.preview" | "ui.state" | "state.snapshot")
 }
 
-/// Whether `params` carries a non-null filesystem export path (`path`, `file_path`, `filePath`, `output_path`, or `outputPath`).
+const EXTRA_PATH_PARAM_KEYS: &[&str] = &[
+    "dir",
+    "directory",
+    "destination_path",
+    "destinationPath",
+    "unpacked_dir",
+    "unpackedDir",
+    "output_path",
+    "outputPath",
+    "target_path",
+    "targetPath",
+];
+
+fn value_has_non_null_path_param(val: &Value, depth: usize) -> bool {
+    if depth > MAX_READ_ONLY_NESTING_DEPTH {
+        return true;
+    }
+    match val {
+        Value::Object(map) => map.iter().any(|(key, v)| {
+            let is_path_key = curvebook_platform::PATH_PARAM_KEYS.contains(&key.as_str()) || EXTRA_PATH_PARAM_KEYS.contains(&key.as_str());
+            if is_path_key && !v.is_null() { true } else { value_has_non_null_path_param(v, depth + 1) }
+        }),
+        Value::Array(arr) => arr.iter().any(|v| value_has_non_null_path_param(v, depth + 1)),
+        _ => false,
+    }
+}
+
+/// Whether `params` carries a non-null filesystem path key (aligned with `curvebook_platform::PATH_PARAM_KEYS`
+/// plus directory/destination/output variants).
 #[must_use]
 pub fn has_non_null_path_param(params: &Value) -> bool {
-    ["path", "file_path", "filePath", "output_path", "outputPath"].iter().any(|&key| params.get(key).is_some_and(|v| !v.is_null()))
+    value_has_non_null_path_param(params, 0)
 }
 
 /// Return the first non-null, non-empty trimmed string value across candidate keys in `obj`.
@@ -281,11 +318,12 @@ pub fn command_replaces_project(command_id: &str, params: &Value) -> bool {
 
 fn command_replaces_project_depth(command_id: &str, params: &Value, depth: usize) -> bool {
     if depth > MAX_READ_ONLY_NESTING_DEPTH {
-        return false;
+        return true;
     }
     let trimmed = command_id.trim();
     match trimmed {
         "project.new" | "file.new" | "project.open" | "project.instantiateTemplate" => true,
+        "table.importPrism" | "table.importPzfx" | "table.importXlsx" => params.get("merge").and_then(Value::as_bool) != Some(true),
         "command.run" | "engine.execute" => extract_control_subcommand(trimmed, Some(params))
             .is_some_and(|(inner, inner_params)| command_replaces_project_depth(&inner, &inner_params, depth + 1)),
         "command.batch" => params.get("commands").and_then(Value::as_array).is_some_and(|cmds| {
@@ -342,6 +380,9 @@ fn is_command_read_only_depth(command_id: &str, params: Option<&Value>, depth: u
         });
     }
     let base = command_id.split(':').next().unwrap_or(command_id);
+    if matches!(base, "ui.print.open" | "file.print") {
+        return params.and_then(|p| p.get("submit_to_os")).and_then(Value::as_bool) != Some(true);
+    }
     if matches!(
         base,
         "ui.export.csv"
@@ -593,7 +634,7 @@ pub fn contextual_command_params(app: &UiApp, command_id: &str) -> Value {
         "result.generateReport" => json!({ "result_sheet_id": result_str }),
         "project.createCheckpoint" => json!({ "name": "Checkpoint" }),
         "ui.theme.set" => json!({ "mode": next_theme_mode_name(app.theme.mode) }),
-        "ui.locale.set" => json!({ "locale": if app.locale == "en" { "de" } else { "en" } }),
+        "ui.locale.set" => json!({ "locale": next_supported_locale_code(&app.locale) }),
         "ui.previewFilter.set" => json!({ "filter": next_preview_filter_name(app.preview_filter) }),
         "ui.brush.point" => {
             if let (Some(d), Some(c)) = (data_str, app.grid.tool.active) {
@@ -622,13 +663,16 @@ fn commit_modal_intent_batch<I>(app: &mut UiApp, intents: I, action: &str) -> Re
 where
     I: IntoIterator<Item = (String, Value)>,
 {
-    let mut last_cmd = None;
-    let mut last_payload = None;
-    for (command_id, params) in intents {
-        let out = app.execute_command(&command_id, params).map_err(|e| e.to_string())?;
-        last_cmd = Some(command_id);
-        last_payload = Some(out.payload);
-    }
+    let (last_cmd, last_payload) = app.execute_atomic_group(|a| {
+        let mut last_cmd = None;
+        let mut last_payload = None;
+        for (command_id, params) in intents {
+            let out = a.execute_command(&command_id, params).map_err(|e| e.to_string())?;
+            last_cmd = Some(command_id);
+            last_payload = Some(out.payload);
+        }
+        Ok::<_, String>((last_cmd, last_payload))
+    })?;
     Ok(finish_modal_commit(app, action, last_cmd, last_payload))
 }
 
@@ -816,11 +860,14 @@ fn commit_edit_params_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> 
     let mut iter = intents.into_iter();
     let primary = iter.next().ok_or_else(|| String::from("no draft parameters ready to commit"))?;
     let primary_cmd = primary.command_id.clone();
-    let out = app.execute_command(&primary.command_id, primary.params).map_err(|e| e.to_string())?;
-    for extra in iter {
-        let _ = app.execute_command(&extra.command_id, extra.params).map_err(|e| e.to_string())?;
-    }
-    Ok(finish_modal_commit(app, "dialog.edit_params_committed", Some(primary_cmd), Some(out.payload)))
+    let primary_payload = app.execute_atomic_group(|a| {
+        let out = a.execute_command(&primary.command_id, primary.params).map_err(|e| e.to_string())?;
+        for extra in iter {
+            let _ = a.execute_command(&extra.command_id, extra.params).map_err(|e| e.to_string())?;
+        }
+        Ok::<_, String>(out.payload)
+    })?;
+    Ok(finish_modal_commit(app, "dialog.edit_params_committed", Some(primary_cmd), Some(primary_payload)))
 }
 
 fn commit_export_figure_dialog(app: &mut UiApp, sheet_id: &SheetId) -> Result<UiEventOutcome, String> {
@@ -903,11 +950,12 @@ fn commit_power_wizard_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String>
 
 fn commit_format_points_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> {
     if app.canvas_dialogs.format_points.selected_points.is_empty()
-        && let Some(active_ds_id) = app.brushed_points.first().map(|p| p.sheet_id.clone())
-        && let Some(ds) = app.document().data_sheet(&active_ds_id).cloned()
+        && let Some(gid) = app.canvas_dialogs.format_points.graph_sheet_id.clone()
     {
-        let targets = app.grid.selected_graph_point_targets(&ds, usize::MAX);
-        app.canvas_dialogs.format_points.set_selected_targets(targets);
+        let targets = crate::modal_predicates::resolve_format_points_targets_for_graph(app, &gid);
+        if !targets.is_empty() {
+            app.canvas_dialogs.format_points.set_selected_targets(targets);
+        }
     }
     let mut pairs: Vec<(String, Value)> = Vec::new();
     if let Some(intent) = app.canvas_dialogs.format_points.build_commit_intent() {

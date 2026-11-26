@@ -340,3 +340,70 @@ fn sec19_03_clean_multi_window_app_quit_and_startup_recovery_focus_preservation(
     );
     Ok(())
 }
+
+#[test]
+fn wave3_aud10_22_export_figure_stays_open_on_cancel_and_error_and_closes_on_ok() -> Result<(), Box<dyn std::error::Error>> {
+    use curvebook_engine::ExternalPathPolicy;
+
+    let dir = TempDirGuard::new("cb-w3-export-seam")?;
+    let wd = dir.child("workdir");
+    fs::create_dir_all(&wd)?;
+    let outside_emf = dir.child("outside.emf");
+    let inside_emf = wd.join("inside.emf");
+
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
+        in_window_menus: true,
+        locale_override: Some(String::from("en")),
+        recovery_root: None,
+        path_policy: ExternalPathPolicy::workdir(&wd)?,
+        initial_viewport: ViewportMetrics::new(1280.0, 820.0, 1.0),
+        ..DesktopHostConfig::default()
+    });
+    let w1 = open_window_with_rich_project(&mut rt)?;
+
+    let adapter = Arc::new(StubNativeFileDialogAdapter::new());
+    adapter.push_response("graph.exportEmf", None);
+    adapter.push_response("graph.exportEmf", Some(outside_emf.clone()));
+    adapter.push_response("graph.exportEmf", Some(inside_emf.clone()));
+    rt.set_file_dialog_adapter(Arc::clone(&adapter) as Arc<dyn NativeFileDialogAdapter>);
+
+    let mut h = NativeHarness::with_screen(CurveBookNativeApp::new(rt, w1, None), Vec2::new(1280.0, 820.0));
+    h.settle(4);
+
+    h.app.runtime_mut().window_mut(w1)?.app_mut().canvas_dialogs.open_export_figure(&"gs-1".into());
+    h.settle(4);
+    let _ = h.click_widget("export.fmt.emf")?;
+
+    // 1. Cancelling the OS SaveFile dialog must keep ExportFigure open & preserve EMF selection.
+    let _ = h.click_widget("modal.ok")?;
+    assert_eq!(h.app.status_banner(), None);
+    assert!(
+        matches!(h.app.runtime().window(w1)?.app().canvas_dialogs.active_dialog, ActiveDialog::ExportFigure { .. }),
+        "AUD-10-22: cancelled OS SaveFile must keep ExportFigure modal open"
+    );
+    assert!(
+        h.app.runtime().window(w1)?.app().egui_views.app_modals.export_emf_selected,
+        "AUD-10-22: cancelled OS SaveFile must preserve export_emf_selected"
+    );
+
+    // 2. Policy error on export path must surface error banner, keep modal open, and preserve EMF selection.
+    let _ = h.click_widget("modal.ok")?;
+    assert!(h.app.status_banner().is_some(), "escaped path export must set status_banner");
+    assert!(!outside_emf.exists(), "escaped path must not be written");
+    assert!(
+        matches!(h.app.runtime().window(w1)?.app().canvas_dialogs.active_dialog, ActiveDialog::ExportFigure { .. }),
+        "AUD-10-22: failed host export must keep ExportFigure modal open"
+    );
+    assert!(
+        h.app.runtime().window(w1)?.app().egui_views.app_modals.export_emf_selected,
+        "AUD-10-22: failed host export must preserve export_emf_selected"
+    );
+
+    // 3. Valid in-workdir export succeeds, writes file, closes modal, and clears export_emf_selected.
+    let _ = h.click_widget("modal.ok")?;
+    assert_eq!(h.app.status_banner(), None);
+    assert!(inside_emf.exists(), "valid in-workdir EMF export must write file");
+    assert_eq!(h.app.runtime().window(w1)?.app().canvas_dialogs.active_dialog, ActiveDialog::None);
+    assert!(!h.app.runtime().window(w1)?.app().egui_views.app_modals.export_emf_selected);
+    Ok(())
+}

@@ -17,8 +17,12 @@ mod r13_modals;
 mod selected_points;
 mod state;
 
-use curvebook_doc::{ColorChannelMapping, HeatmapColumnLabelAngle, MultivariateGraphEncoding, MultivariatePlotMode, SheetId, SizeChannelMapping};
+use curvebook_doc::{
+    ColorChannelMapping, DiagnosticPlotKind, GraphKind, HeatmapColumnLabelAngle, MultivariateGraphEncoding, MultivariatePlotMode, SheetId,
+    SizeChannelMapping,
+};
 use curvebook_palette::{ColorRamp, ColormapId};
+use curvebook_tools::ToolCommandIntent;
 use egui::scroll_area::ScrollBarVisibility;
 use egui::{Context, Ui};
 use serde_json::{Map, Value, json};
@@ -37,7 +41,8 @@ use change_graph_type::render_change_graph_type_body;
 use format_axes::render_format_axes_body;
 use format_graph::render_format_graph_body;
 use helpers::{
-    ButtonEntry, GraphModalCtx, record_button, record_tab, reset_format_axes_session_state, reset_format_graph_local_drafts, validate_heatmap_range,
+    ButtonEntry, GraphModalCtx, record_button, record_tab, reset_all_graph_modal_transient_state, reset_format_axes_session_state,
+    reset_format_graph_local_drafts, validate_heatmap_range,
 };
 use insert_equation::render_insert_equation_body;
 use page_layout::render_page_layout_body;
@@ -52,6 +57,289 @@ pub use state::{
     MvOutOfRangePolicy, is_graph_modal_active,
 };
 
+/// Reset all transient graph-modal drafts, staged edits, spinners, and preview caches on dialog close.
+pub(super) fn reset_graph_modal_on_close(state: &mut GraphModalEguiState) {
+    reset_all_graph_modal_transient_state(state);
+}
+
+/// Build the single atomic `graph.setAxes` commit intent for `FormatAxes`, enforcing local axis
+/// validation errors and honoring an explicit user-chosen `frame_preset` even when `enable_y2` is true.
+pub(super) fn format_axes_commit_intent(app: &UiApp) -> Result<Option<ToolCommandIntent>, String> {
+    let gm = &app.egui_views.graph_modals;
+    if let Some(err) = gm.first_axis_error() {
+        return Err(err);
+    }
+    let fa = &app.canvas_dialogs.format_axes;
+    if fa.graph_sheet_id.is_none() {
+        return Ok(None);
+    }
+    if let Err(err) = fa.axis_draft.validate() {
+        return Err(err.to_string());
+    }
+    let mut intent = fa.commit_intent().ok_or_else(|| String::from("Axis configuration is invalid and cannot be committed"))?;
+    if gm.format_axes_frame_preset_dirty
+        && let Some(obj) = intent.params.as_object_mut()
+    {
+        let preset_val = serde_json::to_value(gm.format_axes_frame_preset).map_err(|e| e.to_string())?;
+        obj.insert(String::from("frame_preset"), preset_val);
+    }
+    Ok(Some(intent))
+}
+
+/// Update `FormatAxes` transient state after commit succeeds (`apply` vs `ok` close).
+pub(super) fn on_format_axes_committed(state: &mut GraphModalEguiState, close: bool) {
+    state.format_axes_frame_preset_dirty = false;
+    if close {
+        reset_graph_modal_on_close(state);
+    }
+}
+
+fn heatmap_color_changed(state: &GraphModalEguiState) -> bool {
+    state.heatmap_color_dirty
+        || state.heatmap_synced_color_snapshot.as_ref().is_none_or(|snap| {
+            snap.colormap != state.heatmap_colormap
+                || snap.reversed != state.heatmap_reversed
+                || snap.auto_range != state.heatmap_auto_range
+                || snap.min_draft != state.heatmap_min_draft
+                || snap.max_draft != state.heatmap_max_draft
+        })
+}
+
+fn heatmap_tick_angle_changed(state: &GraphModalEguiState) -> bool {
+    state.heatmap_tick_angle_dirty || (state.heatmap_tick_angle_deg - state.heatmap_synced_tick_angle_deg).abs() > 1e-6
+}
+
+fn build_heatmap_multivariate_encoding(app: &UiApp, gid: &SheetId, clamp: Option<(f64, f64)>) -> MultivariateGraphEncoding {
+    let fg = &app.canvas_dialogs.format_graph;
+    let state = &app.egui_views.graph_modals;
+    let mut enc = fg.mv_encoding.clone().or_else(|| app.document().graph_sheet(gid).and_then(|g| g.spec.multivariate.clone())).unwrap_or_else(|| {
+        MultivariateGraphEncoding {
+            plot_mode: MultivariatePlotMode::BubbleScatter,
+            x_column: 0,
+            y_column: 0,
+            color: ColorChannelMapping::Constant(fg.palette.color_at(0)),
+            size: SizeChannelMapping::Constant { radius_pt: 5.0 },
+            label_column: None,
+            x_level_order_override: None,
+            show_convex_hulls: false,
+            show_confidence_ellipses: false,
+        }
+    });
+    let col = match enc.color {
+        ColorChannelMapping::Continuous { column, .. } | ColorChannelMapping::Categorical { column, .. } => column,
+        ColorChannelMapping::Constant(_) => enc.y_column,
+    };
+    enc.color = ColorChannelMapping::Continuous {
+        column: col,
+        ramp: ColorRamp::Named { id: state.heatmap_colormap, reversed: state.heatmap_reversed },
+        domain_clamp: clamp,
+    };
+    enc
+}
+
+/// Build the full atomic command list for `FormatGraph`, enforcing MV/Heatmap validation,
+/// skipping invalid `graph.setSeries` for `Heatmap`/empty-series graphs, merging heatmap
+/// colormap/clamp into `graph.setSpec`, appending `graph.setAxes` only when `tick_angle_deg`
+/// changed, and emitting staged per-series edits (`AUD-10-31`, `AUD-10-38`, `AUD-10-40`).
+pub(super) fn format_graph_commit_intents(app: &UiApp) -> Result<Vec<ToolCommandIntent>, String> {
+    let fg = &app.canvas_dialogs.format_graph;
+    let state = &app.egui_views.graph_modals;
+    if let Some(err) = &state.mv_clamp_error {
+        return Err(err.clone());
+    }
+    if let Some(err) = &state.heatmap_range_error {
+        return Err(err.clone());
+    }
+    let Some(gid) = &fg.graph_sheet_id else {
+        return Ok(Vec::new());
+    };
+    let gs_opt = app.document().graph_sheet(gid);
+    let schema = FormatGraphSchema::detect(app);
+    let hm_color_dirty = schema == FormatGraphSchema::Heatmap && heatmap_color_changed(state);
+    let hm_angle_dirty = schema == FormatGraphSchema::Heatmap && heatmap_tick_angle_changed(state);
+    let validated_clamp = if hm_color_dirty { Some(validate_heatmap_range(state, &app.locale_preset)?) } else { None };
+
+    let eff_kind = gs_opt.map(|g| g.spec.kind).or(fg.graph_kind);
+    let skip_series = matches!(eff_kind, Some(GraphKind::MultipleVariables | GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap)))
+        || gs_opt.is_some_and(|g| g.spec.series.is_empty());
+
+    let mut intents = fg.commit_intents();
+    if skip_series {
+        intents.retain(|i| i.command_id != "graph.setSeries" && i.command_id != "graph.setRegressionOverlay");
+    }
+
+    if let Some(clamp) = validated_clamp {
+        let enc = build_heatmap_multivariate_encoding(app, gid, clamp);
+        let enc_val = serde_json::to_value(&enc).map_err(|e| e.to_string())?;
+        if let Some(spec_cmd) = intents.iter_mut().find(|i| i.command_id == "graph.setSpec")
+            && let Some(obj) = spec_cmd.params.as_object_mut()
+        {
+            obj.insert(String::from("multivariate"), enc_val);
+        } else {
+            intents.push(ToolCommandIntent::new(
+                "graph.setSpec",
+                json!({
+                    "sheet_id": gid.as_str(),
+                    "multivariate": enc,
+                }),
+            ));
+        }
+    }
+
+    if !skip_series && !fg.apply_all_data_sets {
+        let series_limit = gs_opt.map_or(usize::MAX, |g| g.spec.series.len());
+        for (&idx, staged) in &state.staged_series_edits {
+            if idx == fg.selected_series_index || idx >= series_limit {
+                continue;
+            }
+            let mut tmp = fg.clone();
+            tmp.selected_series_index = idx;
+            tmp.apply_all_data_sets = false;
+            staged.apply_to(&mut tmp);
+            for extra in tmp.commit_intents() {
+                if extra.command_id == "graph.setSeries" || extra.command_id == "graph.setRegressionOverlay" {
+                    intents.push(extra);
+                }
+            }
+        }
+    }
+
+    if hm_angle_dirty {
+        intents.push(ToolCommandIntent::new(
+            "graph.setAxes",
+            json!({
+                "sheet_id": gid.as_str(),
+                "axis": "x",
+                "tick_angle_deg": state.heatmap_tick_angle_deg,
+            }),
+        ));
+    }
+
+    Ok(intents)
+}
+
+/// Update `FormatGraph` local drafts, staged edits, and synced spec snapshot after commit succeeds.
+pub(super) fn on_format_graph_committed(app: &mut UiApp, close: bool) {
+    if close {
+        reset_graph_modal_on_close(&mut app.egui_views.graph_modals);
+        return;
+    }
+    let gid = app.canvas_dialogs.format_graph.graph_sheet_id.clone();
+    let fresh_spec = gid.as_ref().and_then(|id| app.document().graph_sheet(id)).map(|g| g.spec.clone());
+    let state = &mut app.egui_views.graph_modals;
+    state.staged_series_edits.clear();
+    state.heatmap_color_dirty = false;
+    state.heatmap_tick_angle_dirty = false;
+    state.heatmap_synced_tick_angle_deg = state.heatmap_tick_angle_deg;
+    state.heatmap_synced_color_snapshot = Some(HeatmapColorSnapshot {
+        colormap: state.heatmap_colormap,
+        reversed: state.heatmap_reversed,
+        auto_range: state.heatmap_auto_range,
+        min_draft: state.heatmap_min_draft.clone(),
+        max_draft: state.heatmap_max_draft.clone(),
+    });
+    state.format_graph_synced_spec = fresh_spec;
+
+    let fg = &mut app.canvas_dialogs.format_graph;
+    fg.annotations_dirty = false;
+    fg.mv_levels_dirty = false;
+    fg.alpha_dirty = false;
+    fg.paper_fill_dirty = false;
+    fg.heatmap_labels_dirty = false;
+    fg.orientation_dirty = false;
+    fg.show_symbols_dirty = false;
+    fg.replicate_lines_dirty = false;
+    fg.bind_to_right_y2_dirty = false;
+    fg.offset_x_data_dirty = false;
+    fg.bar_border_width_dirty = false;
+    fg.forest_show_pooled_diamond_dirty = false;
+    fg.pending_overlay_result_id = None;
+    fg.series_gdo_dirty = false;
+}
+
+fn graph_modal_local_validation_error(app: &UiApp, state: &GraphModalEguiState) -> Option<String> {
+    match &app.canvas_dialogs.active_dialog {
+        ActiveDialog::FormatAxes { .. } => state.first_axis_error(),
+        ActiveDialog::FormatGraph { .. } => state.heatmap_range_error.clone().or_else(|| state.mv_clamp_error.clone()),
+        _ => None,
+    }
+}
+
+fn evaluate_graph_modal_button(app: &UiApp, _state: &GraphModalEguiState, action: &str) -> (bool, Option<String>) {
+    if let Some(eval) = crate::modal_predicates::evaluate_dialog_button_for_app(app, action)
+        && !eval.enabled
+    {
+        return (false, eval.disabled_reason);
+    }
+    (true, None)
+}
+
+fn sync_transient_sheet_state(app: &UiApp, state: &mut GraphModalEguiState) {
+    if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) {
+        reset_format_axes_session_state(state);
+    }
+    if let ActiveDialog::FormatGraph { graph_sheet_id } = &app.canvas_dialogs.active_dialog {
+        sync_format_graph_local_drafts(app, state, graph_sheet_id);
+    } else {
+        reset_format_graph_local_drafts(state);
+    }
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::PageLayoutComposer { .. }) {
+        let cur_id = app.canvas_dialogs.page_layout.layout_sheet_id.as_ref().map(|s| s.as_str().to_owned());
+        if state.page_layout_last_sheet_id != cur_id {
+            state.page_callout_draft.clear();
+            state.page_layout_last_sheet_id = cur_id;
+        }
+    } else {
+        state.page_callout_draft.clear();
+        state.page_layout_last_sheet_id = None;
+    }
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ChangeGraphType { .. }) {
+        let cur_id = app.canvas_dialogs.change_graph_type.graph_sheet_id.as_ref().map(|s| s.as_str().to_owned());
+        if state.change_graph_type_last_sheet_id != cur_id {
+            state.graph_type_family = GraphTypeFamily::Recommended;
+            state.graph_type_show_all = false;
+            state.graph_type_preview_cache = None;
+            state.change_graph_type_last_sheet_id = cur_id;
+        }
+    } else {
+        state.graph_type_family = GraphTypeFamily::Recommended;
+        state.graph_type_show_all = false;
+        state.graph_type_preview_cache = None;
+        state.change_graph_type_last_sheet_id = None;
+    }
+}
+
+fn handle_post_modal_keys(
+    ctx: &Context,
+    gctx: &mut GraphModalCtx<'_>,
+    state: &mut GraphModalEguiState,
+    spinner_editing_before: bool,
+    wants_kb_before: bool,
+) {
+    let active = &gctx.app.canvas_dialogs.active_dialog;
+    if !spinner_editing_before && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        if matches!(active, ActiveDialog::FormatAxes { .. }) && state.additional_ticks.open {
+            state.additional_ticks.open = false;
+        } else if matches!(active, ActiveDialog::FormatAxes { .. }) && state.has_pending_categorical_guard() {
+            state.clear_categorical_guard();
+        } else {
+            reset_graph_modal_on_close(state);
+            gctx.intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+        }
+        return;
+    }
+
+    if !wants_kb_before
+        && !ctx.egui_wants_keyboard_input()
+        && !(matches!(active, ActiveDialog::FormatAxes { .. }) && state.additional_ticks.open)
+        && evaluate_graph_modal_button(gctx.app, state, "ok").0
+        && graph_modal_local_validation_error(gctx.app, state).is_none()
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+    {
+        commit_graph_modal_action(gctx, state, "ok");
+    }
+}
+
 /// Render the active graph or page-layout configuration modal when active.
 pub fn render_graph_modal(
     ctx: &Context,
@@ -61,15 +349,7 @@ pub fn render_graph_modal(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> GraphModalFrameReport {
-    if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) {
-        reset_format_axes_session_state(state);
-        state.axis_ticks_error = None;
-    }
-    if let ActiveDialog::FormatGraph { graph_sheet_id } = &app.canvas_dialogs.active_dialog {
-        sync_format_graph_local_drafts(app, state, graph_sheet_id);
-    } else {
-        reset_format_graph_local_drafts(state);
-    }
+    sync_transient_sheet_state(app, state);
     let locale = normalize_locale(&app.locale);
     let (widget_id, title, preferred_w) = match &app.canvas_dialogs.active_dialog {
         ActiveDialog::ChangeGraphType { .. } => ("dialog.change_graph_type", tr(locale, "cmd.graph.setKind"), 760.0_f32),
@@ -94,19 +374,7 @@ pub fn render_graph_modal(
     let inner_w = max_w.min(preferred_w).max(260.0);
     let body_w = (inner_w - 28.0).max(200.0);
 
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-        if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) && state.additional_ticks.open {
-            state.additional_ticks.open = false;
-        } else if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) && state.categorical_guard_pending_axis.is_some() {
-            state.categorical_guard_confirmed = false;
-            state.categorical_guard_pending_axis = None;
-        } else {
-            reset_format_axes_session_state(state);
-            reset_format_graph_local_drafts(state);
-            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
-        }
-    }
-
+    let spinner_editing_before = state.any_spinner_editing();
     let wants_kb_before = ctx.egui_wants_keyboard_input();
     let modal_resp = egui::Modal::new(egui::Id::unique(("egui_shell_graph_modal", widget_id))).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.set_min_width(inner_w);
@@ -144,21 +412,18 @@ pub fn render_graph_modal(
 
     modal_resp.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Dialog, true, title));
     let capture = finalize_egui_modal_response(ctx, &modal_resp, ModalCaptureSpec { widget_id, title, z_dialog: ZLayer::ModalDialog }, meta);
-    if !wants_kb_before
-        && !ctx.egui_wants_keyboard_input()
-        && !(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) && state.additional_ticks.open)
-        && crate::modal_predicates::evaluate_dialog_button_for_app(app, "ok").is_none_or(|e| e.enabled)
-        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
-    {
-        let mut gctx = GraphModalCtx { app, tokens, locale, meta, intents, body_w };
-        commit_graph_modal_action(&mut gctx, state, "ok");
-    }
+    let mut gctx = GraphModalCtx { app, tokens, locale, meta, intents, body_w };
+    handle_post_modal_keys(ctx, &mut gctx, state, spinner_editing_before, wants_kb_before);
     GraphModalFrameReport {
         modal_open: true,
         dialog_rect_pt: capture.dialog_rect_pt,
         outside_click_captured: capture.outside_click_captured,
         outside_wheel_captured: capture.outside_wheel_captured,
     }
+}
+
+fn format_graph_jump_params(app: &UiApp) -> Value {
+    app.canvas_dialogs.format_graph.graph_sheet_id.as_ref().map_or_else(|| json!({}), |gid| json!({ "sheet_id": gid.as_str() }))
 }
 
 fn render_dialog_top_strip(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) -> f32 {
@@ -185,7 +450,7 @@ fn render_dialog_top_strip(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &
                 )
                 .clicked()
                 {
-                    gctx.intents.push_ui("ui.changeGraphType.open", json!({}));
+                    gctx.intents.push_ui("ui.changeGraphType.open", format_graph_jump_params(gctx.app));
                 }
                 let axes_lbl = tr(gctx.locale, "fg.jump.format_axes");
                 if record_button(
@@ -203,7 +468,7 @@ fn render_dialog_top_strip(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &
                 )
                 .clicked()
                 {
-                    gctx.intents.push_ui("ui.graph.axes.open", json!({}));
+                    gctx.intents.push_ui("ui.graph.axes.open", format_graph_jump_params(gctx.app));
                 }
             });
             ui.add_space(4.0);
@@ -318,9 +583,7 @@ fn render_dialog_footer(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut
         )
         .clicked()
         {
-            reset_format_axes_session_state(state);
-            reset_format_graph_local_drafts(state);
-            state.axis_ticks_error = None;
+            reset_graph_modal_on_close(state);
             gctx.intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
         }
 
@@ -335,27 +598,44 @@ fn render_dialog_footer(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut
         );
         if supports_apply {
             let apply_lbl = tr(gctx.locale, "btn.apply");
-            let apply_wid = if matches!(active, ActiveDialog::ChangeGraphType { .. }) { "graph_type.apply" } else { "modal.apply" };
+            let (apply_enabled, apply_reason) = evaluate_graph_modal_button(gctx.app, state, "apply");
             if record_button(
                 ui,
                 gctx.meta,
-                ButtonEntry { widget_id: apply_wid, label: apply_lbl, command_id: None, selected: false, enabled: true, disabled_reason: None },
+                ButtonEntry {
+                    widget_id: "modal.apply",
+                    label: apply_lbl,
+                    command_id: None,
+                    selected: false,
+                    enabled: apply_enabled,
+                    disabled_reason: apply_reason.as_deref(),
+                },
                 gctx.tokens,
             )
             .clicked()
+                && apply_enabled
             {
                 commit_graph_modal_action(gctx, state, "apply");
             }
         }
 
         let ok_lbl = tr(gctx.locale, "btn.ok");
+        let (ok_enabled, ok_reason) = evaluate_graph_modal_button(gctx.app, state, "ok");
         if record_button(
             ui,
             gctx.meta,
-            ButtonEntry { widget_id: "modal.ok", label: ok_lbl, command_id: None, selected: true, enabled: true, disabled_reason: None },
+            ButtonEntry {
+                widget_id: "modal.ok",
+                label: ok_lbl,
+                command_id: None,
+                selected: true,
+                enabled: ok_enabled,
+                disabled_reason: ok_reason.as_deref(),
+            },
             gctx.tokens,
         )
         .clicked()
+            && ok_enabled
         {
             commit_graph_modal_action(gctx, state, "ok");
         }
@@ -364,14 +644,25 @@ fn render_dialog_footer(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut
 
 fn sync_format_graph_local_drafts(app: &UiApp, state: &mut GraphModalEguiState, sheet_id: &SheetId) {
     let key = sheet_id.as_str();
-    if state.format_graph_session_synced && state.format_graph_last_sheet_id.as_deref() == Some(key) {
+    let gs_opt = app.document().graph_sheet(sheet_id);
+    let doc_spec = gs_opt.map(|g| &g.spec);
+    let spec_changed = state.format_graph_synced_spec.as_ref() != doc_spec;
+    if state.format_graph_session_synced && state.format_graph_last_sheet_id.as_deref() == Some(key) && !spec_changed {
         return;
     }
+    let external_spec_change = state.format_graph_synced_spec.is_some() && spec_changed;
     state.format_graph_session_synced = true;
     state.format_graph_last_sheet_id = Some(key.to_owned());
-    let gs_opt = app.document().graph_sheet(sheet_id);
+    state.format_graph_synced_spec = doc_spec.cloned();
+    state.staged_series_edits.clear();
+    state.mv_clamp_error = None;
+
     let fg = &app.canvas_dialogs.format_graph;
-    let enc_opt = fg.mv_encoding.as_ref().or_else(|| gs_opt.and_then(|g| g.spec.multivariate.as_ref()));
+    let enc_opt = if external_spec_change {
+        gs_opt.and_then(|g| g.spec.multivariate.as_ref()).or(fg.mv_encoding.as_ref())
+    } else {
+        fg.mv_encoding.as_ref().or_else(|| gs_opt.and_then(|g| g.spec.multivariate.as_ref()))
+    };
 
     if let Some(enc) = enc_opt
         && let ColorChannelMapping::Continuous { domain_clamp: Some((lo, hi)), .. } = enc.color
@@ -416,8 +707,6 @@ fn sync_format_graph_local_drafts(app: &UiApp, state: &mut GraphModalEguiState, 
         max_draft: state.heatmap_max_draft.clone(),
     });
 
-    state.heatmap_annotate_cells = fg.heatmap_labels.annotate_cells;
-    state.heatmap_cell_gap_pt = fg.heatmap_labels.cell_gap_pt;
     let axis_angle = gs_opt.map_or(0.0, |g| g.spec.x_axis.tick_angle_deg);
     let label_angle_deg = match fg.heatmap_labels.column_angle {
         HeatmapColumnLabelAngle::Horizontal0 => 0.0,
@@ -426,137 +715,34 @@ fn sync_format_graph_local_drafts(app: &UiApp, state: &mut GraphModalEguiState, 
     };
     state.heatmap_tick_angle_deg = if axis_angle != 0.0 { axis_angle } else { label_angle_deg };
     state.heatmap_tick_angle_dirty = false;
-    state.heatmap_synced_tick_angle_deg = axis_angle;
-}
-
-fn commit_format_graph_heatmap(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModalEguiState, action: &str) {
-    let fg = &gctx.app.canvas_dialogs.format_graph;
-    let schema = FormatGraphSchema::detect(gctx.app);
-    let Some(gid) = fg.graph_sheet_id.clone() else {
-        gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
-        return;
-    };
-    if schema != FormatGraphSchema::Heatmap {
-        gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
-        return;
-    }
-
-    let color_changed = state.heatmap_color_dirty
-        || state.heatmap_synced_color_snapshot.as_ref().is_none_or(|snap| {
-            snap.colormap != state.heatmap_colormap
-                || snap.reversed != state.heatmap_reversed
-                || snap.auto_range != state.heatmap_auto_range
-                || snap.min_draft != state.heatmap_min_draft
-                || snap.max_draft != state.heatmap_max_draft
-        });
-    let tick_angle_changed = state.heatmap_tick_angle_dirty || (state.heatmap_tick_angle_deg - state.heatmap_synced_tick_angle_deg).abs() > 1e-6;
-
-    let validated_clamp = if color_changed {
-        match validate_heatmap_range(state, &gctx.app.locale_preset) {
-            Ok(bounds) => {
-                state.heatmap_range_error = None;
-                Some(bounds)
-            }
-            Err(msg) => {
-                state.heatmap_range_error = Some(msg);
-                state.format_graph_tab = FormatGraphTab::ColorMapping;
-                return;
-            }
-        }
-    } else {
-        None
-    };
-
-    // Execute dialog button first so `FormatGraphState::commit_intents()` cannot overwrite explicit heatmap edits.
-    gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
-
-    if let Some(clamp) = validated_clamp {
-        let mut enc =
-            fg.mv_encoding.clone().or_else(|| gctx.app.document().graph_sheet(&gid).and_then(|g| g.spec.multivariate.clone())).unwrap_or_else(|| {
-                MultivariateGraphEncoding {
-                    plot_mode: MultivariatePlotMode::BubbleScatter,
-                    x_column: 0,
-                    y_column: 0,
-                    color: ColorChannelMapping::Constant(fg.palette.color_at(0)),
-                    size: SizeChannelMapping::Constant { radius_pt: 5.0 },
-                    label_column: None,
-                    x_level_order_override: None,
-                    show_convex_hulls: false,
-                    show_confidence_ellipses: false,
-                }
-            });
-        let col = match enc.color {
-            ColorChannelMapping::Continuous { column, .. } | ColorChannelMapping::Categorical { column, .. } => column,
-            ColorChannelMapping::Constant(_) => enc.y_column,
-        };
-        enc.color = ColorChannelMapping::Continuous {
-            column: col,
-            ramp: ColorRamp::Named { id: state.heatmap_colormap, reversed: state.heatmap_reversed },
-            domain_clamp: clamp,
-        };
-        gctx.intents.push_engine(
-            "graph.setSpec",
-            json!({
-                "sheet_id": gid.as_str(),
-                "multivariate": enc,
-            }),
-        );
-    }
-
-    if tick_angle_changed {
-        gctx.intents.push_engine(
-            "graph.setAxes",
-            json!({
-                "sheet_id": gid.as_str(),
-                "axis": "x",
-                "tick_angle_deg": state.heatmap_tick_angle_deg,
-            }),
-        );
-    }
-
-    if action != "ok" {
-        state.heatmap_color_dirty = false;
-        state.heatmap_tick_angle_dirty = false;
-        state.heatmap_synced_tick_angle_deg = state.heatmap_tick_angle_deg;
-        state.heatmap_synced_color_snapshot = Some(HeatmapColorSnapshot {
-            colormap: state.heatmap_colormap,
-            reversed: state.heatmap_reversed,
-            auto_range: state.heatmap_auto_range,
-            min_draft: state.heatmap_min_draft.clone(),
-            max_draft: state.heatmap_max_draft.clone(),
-        });
-    }
+    state.heatmap_synced_tick_angle_deg = state.heatmap_tick_angle_deg;
 }
 
 fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModalEguiState, action: &str) {
     match &gctx.app.canvas_dialogs.active_dialog {
-        ActiveDialog::FormatGraph { .. } => commit_format_graph_heatmap(gctx, state, action),
+        ActiveDialog::FormatGraph { .. } => {
+            if state.mv_clamp_error.is_some() {
+                return;
+            }
+            if FormatGraphSchema::detect(gctx.app) == FormatGraphSchema::Heatmap
+                && (state.heatmap_range_error.is_some() || heatmap_color_changed(state))
+            {
+                match validate_heatmap_range(state, &gctx.app.locale_preset) {
+                    Ok(_) => state.heatmap_range_error = None,
+                    Err(msg) => {
+                        state.heatmap_range_error = Some(msg);
+                        state.format_graph_tab = FormatGraphTab::ColorMapping;
+                        return;
+                    }
+                }
+            }
+            gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
+        }
         ActiveDialog::FormatAxes { .. } => {
             if state.has_any_axis_errors() {
                 return;
             }
-            let fa = &gctx.app.canvas_dialogs.format_axes;
-            if state.format_axes_frame_preset_dirty
-                && let Some(gid) = &fa.graph_sheet_id
-            {
-                gctx.intents.push_engine(
-                    "graph.setAxes",
-                    json!({
-                        "sheet_id": gid.as_str(),
-                        "frame_preset": state.format_axes_frame_preset,
-                    }),
-                );
-            }
-            if action == "apply" {
-                if let Some(intent) = fa.commit_intent() {
-                    gctx.intents.push_engine(intent.command_id, intent.params);
-                }
-                state.format_axes_frame_preset_dirty = false;
-            } else {
-                reset_format_axes_session_state(state);
-                state.axis_ticks_error = None;
-                gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
-            }
+            gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
         }
         _ => {
             gctx.intents.push(UiIntent::DialogButtonAction { action: action.into() });
@@ -565,17 +751,4 @@ fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModa
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{AdditionalTickDraft, FormatAxesTab, FormatGraphSchema, FormatGraphTab, GraphModalEguiState};
-
-    #[test]
-    fn format_graph_schema_clamps_tabs_cleanly() {
-        assert_eq!(FormatGraphSchema::Heatmap.clamp_tab(FormatGraphTab::Appearance), FormatGraphTab::ColorMapping);
-        assert_eq!(FormatGraphSchema::MvChannelLayer.clamp_tab(FormatGraphTab::ColorMapping), FormatGraphTab::AxisVariables);
-        assert_eq!(FormatGraphSchema::SeriesBased.clamp_tab(FormatGraphTab::DataObjects), FormatGraphTab::Appearance);
-        assert_eq!(FormatAxesTab::ALL.len(), 5);
-        let st = GraphModalEguiState::default();
-        assert!(!st.categorical_guard_confirmed);
-        assert!(!AdditionalTickDraft::default().open);
-    }
-}
+mod tests;

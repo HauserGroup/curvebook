@@ -18,8 +18,8 @@ use curvebook_doc::result_builder::{KvTabBuilder, TabBuilder, bool_cell, ci_cell
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, ColumnDesignHint, ColumnTable, CurveSamplePoint, DataSheet,
     DemingErrorSpec, ErrorCode, FitFlagRules, FittedCurveOverlay, IdentifiabilityMode, LinearRegressionSpec, NonlinearFitSpec, OutlierHandling,
-    ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTabKind, SourceCellId, SubcolumnMode, TableArchetype, XColumnMode, XyTable,
-    format_significant_digits,
+    ReplicateFitMode, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTabKind, SourceCellId, SubcolumnMode, TableArchetype,
+    XColumnMode, XyTable, format_significant_digits,
 };
 use curvebook_math::PValueFormat;
 use curvebook_math::dist::norm_ppf;
@@ -129,7 +129,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
         };
         result.fitted_curves.push(FittedCurveOverlay {
             data_set_index: ds.data_set_index,
-            equation_id: if lin_spec.fixed_point.is_none() && lin_spec.force_through_origin {
+            equation_id: if lin_spec.effective_fixed_point() == Some((0.0, 0.0)) {
                 "line_through_origin".to_owned()
             } else {
                 "straight_line".to_owned()
@@ -315,6 +315,24 @@ fn build_deming_result_sheet(
     options: &SimpleLinearOptions,
     lin_spec: &LinearRegressionSpec,
 ) -> Result<ResultSheet, FitError> {
+    if lin_spec.force_through_origin || lin_spec.fixed_point.is_some() {
+        return Err(FitError::InvalidParameter {
+            name: "fixed_point",
+            reason: String::from("Model II Deming regression does not support forcing the line through the origin or a fixed point"),
+        });
+    }
+    if lin_spec.standard_addition {
+        return Err(FitError::InvalidParameter {
+            name: "standard_addition",
+            reason: String::from("Model II Deming regression does not support standard addition Fieller intervals"),
+        });
+    }
+    if lin_spec.interpolate_unknowns {
+        return Err(FitError::InvalidParameter {
+            name: "interpolate_unknowns",
+            reason: String::from("Model II Deming regression does not support unknown interpolation"),
+        });
+    }
     let lambda = lin_spec.deming_error.resolved_lambda().ok_or_else(|| FitError::InvalidParameter {
         name: "deming_error",
         reason: String::from("Deming error SDs and variance ratio lambda must be finite and > 0"),
@@ -322,9 +340,6 @@ fn build_deming_result_sheet(
     let opts = DemingOptions { variance_ratio_lambda: lambda, confidence_level: options.confidence_level };
     let mut dems = Vec::with_capacity(datasets.len());
     let has_range = options.x_range_filter.is_some();
-    let (plot_min, plot_max) = options.plot_x_range.unwrap_or_default();
-    let emit_overlay =
-        has_range || plot_min.is_some() || plot_max.is_some() || lin_spec.plot_segments.is_some() || lin_spec.extend_line_to_x_intercept;
     let conf_pct = format_percent_label(options.confidence_level.percent());
 
     for (ds, &n_excluded) in datasets.iter().zip(excluded) {
@@ -332,16 +347,14 @@ fn build_deming_result_sheet(
             return Err(FitError::RequiresRawReplicates);
         }
         let dem = deming_regression(&ds.points, &opts)?;
-        if emit_overlay {
-            let extend_x = if lin_spec.extend_line_to_x_intercept { dem.x_intercept } else { None };
-            result.fitted_curves.push(FittedCurveOverlay {
-                data_set_index: ds.data_set_index,
-                equation_id: "straight_line".to_owned(),
-                converged: true,
-                ambiguous: false,
-                points: build_linear_overlay_points(&ds.points, dem.slope, dem.intercept, options, extend_x)?,
-            });
-        }
+        let extend_x = if lin_spec.extend_line_to_x_intercept { dem.x_intercept } else { None };
+        result.fitted_curves.push(FittedCurveOverlay {
+            data_set_index: ds.data_set_index,
+            equation_id: "straight_line".to_owned(),
+            converged: true,
+            ambiguous: false,
+            points: build_linear_overlay_points(&ds.points, dem.slope, dem.intercept, options, extend_x)?,
+        });
         result.scalars.push(ResultScalarEntry { key: "Slope".to_owned(), data_set_index: Some(ds.data_set_index), value: dem.slope, units: None });
         result.scalars.push(ResultScalarEntry {
             key: "YIntercept".to_owned(),
@@ -508,17 +521,17 @@ pub fn execute_nonlinear_analysis(
     }
     populate_nonlinear_result_sheet(&mut result, &fit, &datasets, nl_spec, spec.p_value_format);
     if let Some(rout) = &fit.rout {
-        let outlier_cells: Vec<SourceCellId> = rout
-            .audit
-            .iter()
-            .filter(|point| point.is_outlier)
-            .map(|point| SourceCellId {
-                sheet_id: sheet.id.clone(),
-                row: point.row,
-                col: mv_y_col_map.as_ref().and_then(|m| m.get(&point.data_set_index).copied()).unwrap_or(point.data_set_index),
-                subcol: point.source_subcolumn,
-            })
-            .collect();
+        let mut outlier_cells: Vec<SourceCellId> = Vec::new();
+        for point in rout.audit.iter().filter(|point| point.is_outlier) {
+            let col = mv_y_col_map.as_ref().and_then(|m| m.get(&point.data_set_index).copied()).unwrap_or(point.data_set_index);
+            if nl_spec.replicate_fit_mode == ReplicateFitMode::RowMeansOnly {
+                for subcol in expand_row_outlier_subcolumns(sheet, col, point.row) {
+                    outlier_cells.push(SourceCellId { sheet_id: sheet.id.clone(), row: point.row, col, subcol });
+                }
+            } else {
+                outlier_cells.push(SourceCellId { sheet_id: sheet.id.clone(), row: point.row, col, subcol: point.source_subcolumn });
+            }
+        }
         if config.effective_outlier_handling() == OutlierHandling::Eliminate {
             result.eliminated_outliers.clone_from(&outlier_cells);
         }
@@ -717,7 +730,11 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         let prefix = (!unstable && p.notes.contains(&ParameterNote::Ambiguous)).then(|| "~".to_owned());
         if is_robust || !p.inference_availability.is_available() {
             let na = text_cell("Not applicable");
-            tab.push_row(label, [ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na.clone(), na]);
+            if show_se {
+                tab.push_row(label, [ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na.clone(), na]);
+            } else {
+                tab.push_row(label, [ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na]);
+            }
         } else if unstable && unstable_as_text {
             let u_cell = text_cell("Unstable");
             if show_se {
@@ -748,7 +765,9 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
             );
         }
         emitted_scalars.insert((p.name.to_ascii_lowercase(), p.dataset_index));
-        result.scalars.push(ResultScalarEntry { key: p.name.clone(), data_set_index: p.dataset_index, value: p.estimate, units: None });
+        if !(unstable && unstable_as_text) && p.estimate.is_finite() {
+            result.scalars.push(ResultScalarEntry { key: p.name.clone(), data_set_index: p.dataset_index, value: p.estimate, units: None });
+        }
     }
 
     for (name, val, _) in &fit.fixed_constants {
@@ -887,8 +906,16 @@ fn populate_nonlinear_result_sheet(
 
     append_nonlinear_gof_tab(result, fit, nl_spec, p_fmt, flag_outcome.as_ref());
 
+    let unstable_as_text = nl_spec.effective_identifiability_mode() == Some(IdentifiabilityMode::IdentifyUnstableParameters);
     if let Some(target_param) = nl_spec.summary_parameter.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        append_parameter_summary_tab_and_data(result, fit, datasets, target_param, nl_spec.should_show_standard_errors() || is_robust);
+        append_parameter_summary_tab_and_data(
+            result,
+            fit,
+            datasets,
+            target_param,
+            nl_spec.should_show_standard_errors() || is_robust,
+            unstable_as_text,
+        );
     }
     if nl_spec.emit_residuals_tab {
         append_nonlinear_residuals_tab(result, fit);
@@ -908,18 +935,24 @@ fn populate_nonlinear_result_sheet(
         }
         if let Some(derived) = fit.derived_scalars.get(idx) {
             for d in derived {
-                result.scalars.push(ResultScalarEntry {
-                    key: d.name.clone(),
-                    data_set_index: Some(ds_res.data_set_index),
-                    value: d.value,
-                    units: d.units.clone(),
-                });
+                if d.value.is_finite() {
+                    result.scalars.push(ResultScalarEntry {
+                        key: d.name.clone(),
+                        data_set_index: Some(ds_res.data_set_index),
+                        value: d.value,
+                        units: d.units.clone(),
+                    });
+                }
             }
         }
     }
-    result.scalars.push(ResultScalarEntry { key: "R2".to_owned(), data_set_index: None, value: fit.r_squared, units: None });
-    result.scalars.push(ResultScalarEntry { key: "RSS".to_owned(), data_set_index: None, value: fit.rss, units: None });
-    if weighted_obj {
+    if fit.r_squared.is_finite() {
+        result.scalars.push(ResultScalarEntry { key: "R2".to_owned(), data_set_index: None, value: fit.r_squared, units: None });
+    }
+    if fit.rss.is_finite() {
+        result.scalars.push(ResultScalarEntry { key: "RSS".to_owned(), data_set_index: None, value: fit.rss, units: None });
+    }
+    if weighted_obj && fit.weighted_ss.is_finite() {
         result.scalars.push(ResultScalarEntry { key: "Weighted SS".to_owned(), data_set_index: None, value: fit.weighted_ss, units: None });
     }
     if is_robust && let Some(rsdr) = fit.rsdr.filter(|v| v.is_finite()) {
@@ -960,8 +993,232 @@ fn populate_nonlinear_result_sheet(
         });
     }
     if nl_spec.custom_dsl.is_none() && !nl_spec.plot_function_only {
+        append_log_x_scale_warning_check(result, &fit.equation_id, datasets, nl_spec.x_range_filter, nl_spec.y_range_filter);
         append_midpoint_extrapolation_checks(result, fit);
     }
+}
+
+/// Diagnostic warning emitted when a `log10(X)` dose–response or pharmacological equation is
+/// applied to X values that appear to be raw (non-log10) concentrations (`EXT-01`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RawXScaleWarning {
+    /// Canonical built-in equation ID that expects `log10(X)` predictor values.
+    pub equation_id: String,
+    /// Suggested non-log counterpart built-in equation ID (e.g. `Some("agonist_vs_response_4pl")`),
+    /// or `None` when the model only has a `log10(X)` formulation and `X` should be log10-transformed.
+    pub suggested_equation_id: Option<String>,
+    /// Minimum finite X value observed across the active datasets.
+    pub min_x: f64,
+    /// Maximum finite X value observed across the active datasets.
+    pub max_x: f64,
+    /// Plain-language explanation of why the X values look like raw concentrations.
+    pub reason: String,
+}
+
+/// Return the non-log concentration counterpart for any paired built-in equation that expects
+/// `X = log10(concentration)` (resolving common aliases such as `"4pl"`, `"5pl"`, `"ec50_3pl"`,
+/// `"ic50_3pl"`, `"ecf"`, `"gaddum_schild"`).
+#[must_use]
+pub fn non_log_counterpart_equation_id(equation_id: &str) -> Option<&'static str> {
+    let resolved = get_builtin_model(equation_id);
+    let canonical = resolved.as_deref().map_or(equation_id, ParametricModel::id);
+    match canonical {
+        "log_agonist_vs_response_3pl" => Some("agonist_vs_response_3pl"),
+        "log_agonist_vs_response_4pl" => Some("agonist_vs_response_4pl"),
+        "log_agonist_vs_response_normalized" => Some("agonist_vs_response_normalized"),
+        "log_agonist_vs_response_normalized_var" => Some("agonist_vs_response_normalized_var"),
+        "log_agonist_vs_response_5pl" => Some("agonist_vs_response_5pl"),
+        "log_agonist_vs_response_ecf" => Some("agonist_vs_response_ecf"),
+        "log_inhibitor_vs_response_3pl" => Some("inhibitor_vs_response_3pl"),
+        "log_inhibitor_vs_response_4pl" => Some("inhibitor_vs_response_4pl"),
+        "log_inhibitor_vs_response_normalized" => Some("inhibitor_vs_response_normalized"),
+        "log_inhibitor_vs_response_normalized_var" => Some("inhibitor_vs_response_normalized_var"),
+        "absolute_ic50_4pl" => Some("absolute_ic50_4pl_conc"),
+        "bell_shaped_dose_response" => Some("bell_shaped_dose_response_conc"),
+        "biphasic_dose_response" => Some("biphasic_dose_response_conc"),
+        "ec50_shift_gaddum_schild" => Some("ec50_shift_gaddum_schild_conc"),
+        "ec50_shift_gaddum_schild_unity_log" => Some("ec50_shift_gaddum_schild_unity_conc"),
+        "ec50_shift_ratio_log" => Some("ec50_shift_ratio_conc"),
+        "allosteric_ec50_shift" => Some("allosteric_ec50_shift_conc"),
+        "operational_model_agonist" => Some("operational_model_agonist_conc"),
+        "operational_model_depletion_log" => Some("operational_model_depletion_conc"),
+        _ => None,
+    }
+}
+
+/// Return `true` when `equation_id` (or its alias) resolves to any of the 26 built-in equations
+/// expecting `X = log10(concentration)` (19 paired dose–response/shift/operational models plus
+/// 7 competitive/allosteric binding models).
+#[must_use]
+pub fn is_log_x_equation_id(equation_id: &str) -> bool {
+    if non_log_counterpart_equation_id(equation_id).is_some() {
+        return true;
+    }
+    let resolved = get_builtin_model(equation_id);
+    let canonical = resolved.as_deref().map_or(equation_id, ParametricModel::id);
+    matches!(
+        canonical,
+        "one_site_fit_ki"
+            | "one_site_fit_logic50"
+            | "two_sites_fit_logic50"
+            | "two_sites_fit_ki"
+            | "homologous_one_site_competition"
+            | "one_site_competition_ligand_depletion"
+            | "allosteric_modulator_competition"
+    )
+}
+
+/// Inspect a slice of predictor `X` values and return `(min_x, max_x, reason)` when they appear
+/// to be on a raw (non-log10) concentration scale rather than `log10(X)` (`EXT-01`).
+///
+/// Triggers when at least 2 finite `X` values are present and any of the following hold:
+/// - `max(X) > 20` (`10^20` exceeds realistic log10 concentrations),
+/// - all `X >= 0` with strictly positive values spanning `>= 2` orders of magnitude (`max / min_pos >= 100`),
+/// - all `X >= 0` with `0 < max(X) <= 1e-3` (e.g. raw molar concentrations `1e-9..1e-6`).
+#[must_use]
+pub fn detect_raw_non_log10_x_scale(xs: &[f64]) -> Option<(f64, f64, String)> {
+    let mut count = 0_usize;
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_pos_x = f64::INFINITY;
+    for &x in xs {
+        if !x.is_finite() {
+            continue;
+        }
+        count += 1;
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        if x > 0.0 {
+            min_pos_x = min_pos_x.min(x);
+        }
+    }
+    if count < 2 {
+        return None;
+    }
+    if max_x > 20.0 {
+        return Some((
+            min_x,
+            max_x,
+            format!(
+                "Observed X values reach {} (> 20), which looks like raw/linear concentrations rather than log10(X).",
+                format_significant_digits(max_x, 4)
+            ),
+        ));
+    }
+    if min_x >= 0.0 && max_x > 0.0 && max_x <= 1e-3 {
+        return Some((
+            min_x,
+            max_x,
+            format!(
+                "Observed X values are small non-negative concentrations in [{}, {}], which look like raw molar/linear units rather than log10(X).",
+                format_significant_digits(min_x, 4),
+                format_significant_digits(max_x, 4)
+            ),
+        ));
+    }
+    if min_x >= 0.0 && min_pos_x.is_finite() && min_pos_x > 0.0 && max_x / min_pos_x >= 100.0 {
+        return Some((
+            min_x,
+            max_x,
+            format!(
+                "Observed non-negative X values span >= 2 orders of magnitude ({} to {}), which looks like raw concentrations rather than log10(X).",
+                format_significant_digits(min_pos_x, 4),
+                format_significant_digits(max_x, 4)
+            ),
+        ));
+    }
+    None
+}
+
+/// Detect a mismatch when a `log10(X)` built-in equation is applied to raw/non-log10 `X` values
+/// and suggest the corresponding non-log equation when one exists (`EXT-01`).
+#[must_use]
+pub fn detect_log_x_scale_mismatch(equation_id: &str, xs: &[f64]) -> Option<RawXScaleWarning> {
+    if !is_log_x_equation_id(equation_id) {
+        return None;
+    }
+    let (min_x, max_x, reason) = detect_raw_non_log10_x_scale(xs)?;
+    let canonical = get_builtin_model(equation_id).map_or_else(|| equation_id.to_owned(), |m| m.id().to_owned());
+    let suggested_equation_id = non_log_counterpart_equation_id(&canonical).map(str::to_owned);
+    Some(RawXScaleWarning { equation_id: canonical, suggested_equation_id, min_x, max_x, reason })
+}
+
+/// Dataset-slice convenience wrapper around [`detect_log_x_scale_mismatch`] (`EXT-01`).
+#[must_use]
+pub fn detect_log_x_scale_mismatch_datasets(equation_id: &str, datasets: &[DatasetSeries]) -> Option<RawXScaleWarning> {
+    let xs: Vec<f64> = datasets.iter().flat_map(|ds| ds.points.iter().map(DataPoint::x0)).collect();
+    detect_log_x_scale_mismatch(equation_id, &xs)
+}
+
+/// Choose a default 4PL dose–response equation appropriate for the observed `X` scale:
+/// `"agonist_vs_response_4pl"` when `xs` looks like raw/non-log10 concentrations, otherwise
+/// `"log_agonist_vs_response_4pl"` (`EXT-01`).
+#[must_use]
+pub fn suggested_default_dose_response_equation(xs: &[f64]) -> &'static str {
+    if detect_raw_non_log10_x_scale(xs).is_some() { "agonist_vs_response_4pl" } else { "log_agonist_vs_response_4pl" }
+}
+
+fn append_log_x_scale_warning_check(
+    result: &mut ResultSheet,
+    equation_id: &str,
+    datasets: &[DatasetSeries],
+    x_range_filter: Option<(Option<f64>, Option<f64>)>,
+    y_range_filter: Option<(Option<f64>, Option<f64>)>,
+) {
+    let xs: Vec<f64> = datasets
+        .iter()
+        .flat_map(|ds| ds.points.iter())
+        .filter(|pt| {
+            let x0 = pt.x0();
+            let x_ok =
+                x_range_filter.is_none_or(|(lo, hi)| lo.is_none_or(|v| !v.is_finite() || x0 >= v) && hi.is_none_or(|v| !v.is_finite() || x0 <= v));
+            let y_ok = y_range_filter
+                .is_none_or(|(lo, hi)| lo.is_none_or(|v| !v.is_finite() || pt.y >= v) && hi.is_none_or(|v| !v.is_finite() || pt.y <= v));
+            x_ok && y_ok
+        })
+        .map(DataPoint::x0)
+        .collect();
+    if let Some(warn) = detect_log_x_scale_mismatch(equation_id, &xs) {
+        let (metric, explanation) = match &warn.suggested_equation_id {
+            Some(alt) => (
+                format!("X in [{}, {}]; suggested: {alt}", format_significant_digits(warn.min_x, 4), format_significant_digits(warn.max_x, 4),),
+                format!(
+                    "{} Switch to the non-log counterpart `{alt}` for raw concentration X values, or transform X to log10(X) before fitting `{}`.",
+                    warn.reason, warn.equation_id
+                ),
+            ),
+            None => (
+                format!("X in [{}, {}]; transform X to log10(X)", format_significant_digits(warn.min_x, 4), format_significant_digits(warn.max_x, 4),),
+                format!("{} Transform X to log10(X) before fitting `{}`.", warn.reason, warn.equation_id),
+            ),
+        };
+        result.checklist.push(ChecklistItem {
+            assumption: "X-axis scale matches log10(X) equation".to_owned(),
+            status: ChecklistStatus::Warn,
+            diagnostic_metric: Some(metric),
+            explanation,
+            remediation: None,
+        });
+    }
+}
+
+fn expand_row_outlier_subcolumns(sheet: &DataSheet, col: usize, row: usize) -> Vec<usize> {
+    let subcols: Vec<usize> = match &sheet.archetype {
+        TableArchetype::Xy(xy) => xy
+            .data_sets
+            .get(col)
+            .and_then(|ds| ds.cells.get(row))
+            .map(|row_cells| row_cells.iter().enumerate().filter_map(|(s, c)| c.active_number().map(|_| s)).collect())
+            .unwrap_or_default(),
+        TableArchetype::Grouped(g) => g
+            .data_sets
+            .get(col)
+            .and_then(|ds| ds.cells.get(row))
+            .map(|row_cells| row_cells.iter().enumerate().filter_map(|(s, c)| c.active_number().map(|_| s)).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    if subcols.is_empty() { vec![0] } else { subcols }
 }
 
 /// Compare fitted dose–response midpoints to each dataset's observed X extent. Use the
@@ -1304,6 +1561,16 @@ fn append_comparison_tab(
     }
 }
 
+struct ParamSummaryRow {
+    label: String,
+    title_x: Option<f64>,
+    est: f64,
+    se: f64,
+    lo: CiBound,
+    hi: CiBound,
+    is_unstable: bool,
+}
+
 /// Emit an analyzable parameter summary `ResultTab` and companion `analyzable_data` (`XyTable`
 /// when all dataset column titles parse to finite numeric values, `ColumnTable` otherwise; §2.5.3).
 fn append_parameter_summary_tab_and_data(
@@ -1312,9 +1579,10 @@ fn append_parameter_summary_tab_and_data(
     datasets: &[DatasetSeries],
     target_param: &str,
     show_se: bool,
+    unstable_as_text: bool,
 ) {
     let ds_names = dataset_display_names(fit);
-    let mut rows_data: Vec<(String, Option<f64>, f64, f64, CiBound, CiBound)> = Vec::new();
+    let mut rows_data: Vec<ParamSummaryRow> = Vec::new();
     for (idx, ds_res) in fit.datasets.iter().enumerate() {
         let label = ds_names.get(&ds_res.data_set_index).cloned().unwrap_or_else(|| ds_res.label.clone());
         let title_x = datasets.iter().find(|d| d.data_set_index == ds_res.data_set_index).and_then(|d| d.column_title_value);
@@ -1323,20 +1591,21 @@ fn append_parameter_summary_tab_and_data(
             .iter()
             .find(|p| p.name.eq_ignore_ascii_case(target_param) && (p.dataset_index == Some(ds_res.data_set_index) || p.dataset_index.is_none()))
         {
-            rows_data.push((label, title_x, p.estimate, p.se, p.ci_lower, p.ci_upper));
+            let is_unstable = unstable_as_text && p.notes.contains(&ParameterNote::Unstable);
+            rows_data.push(ParamSummaryRow { label, title_x, est: p.estimate, se: p.se, lo: p.ci_lower, hi: p.ci_upper, is_unstable });
         } else if let Some(d) = fit.derived_scalars.get(idx).and_then(|list| list.iter().find(|d| d.name.eq_ignore_ascii_case(target_param))) {
-            rows_data.push((label, title_x, d.value, f64::NAN, CiBound::Open, CiBound::Open));
+            rows_data.push(ParamSummaryRow { label, title_x, est: d.value, se: f64::NAN, lo: CiBound::Open, hi: CiBound::Open, is_unstable: false });
         } else if let Some(pos) = ds_res.param_names.iter().position(|n| n.eq_ignore_ascii_case(target_param))
             && let Some(&val) = ds_res.params.get(pos)
         {
-            rows_data.push((label, title_x, val, f64::NAN, CiBound::Open, CiBound::Open));
+            rows_data.push(ParamSummaryRow { label, title_x, est: val, se: f64::NAN, lo: CiBound::Open, hi: CiBound::Open, is_unstable: false });
         }
     }
     if rows_data.is_empty() {
         return;
     }
 
-    let has_numeric_x = rows_data.iter().all(|(_, x, _, _, _, _)| x.is_some_and(f64::is_finite));
+    let has_numeric_x = rows_data.iter().all(|row| row.title_x.is_some_and(f64::is_finite));
     let mut tab =
         if has_numeric_x && show_se {
             TabBuilder::new("nonlinear_parameter_summary", format!("Parameter Summary ({target_param})"), ResultTabKind::DescriptiveSummary)
@@ -1352,19 +1621,25 @@ fn append_parameter_summary_tab_and_data(
                 .headers([target_param, "Confidence Interval"])
         };
 
-    for (label, title_x, est, se, lo, hi) in &rows_data {
+    for row in &rows_data {
+        let (val_cell, se_cell, ci_cell) = if row.is_unstable {
+            let u = text_cell("Unstable");
+            (u.clone(), u.clone(), u)
+        } else {
+            (num_cell(row.est), num_cell(row.se), ci_bounds_cell(row.lo, row.hi))
+        };
         match (has_numeric_x, show_se) {
             (true, true) => {
-                tab.push_row(label.as_str(), [opt_num_cell(*title_x), num_cell(*est), num_cell(*se), ci_bounds_cell(*lo, *hi)]);
+                tab.push_row(row.label.as_str(), [opt_num_cell(row.title_x), val_cell, se_cell, ci_cell]);
             }
             (true, false) => {
-                tab.push_row(label.as_str(), [opt_num_cell(*title_x), num_cell(*est), ci_bounds_cell(*lo, *hi)]);
+                tab.push_row(row.label.as_str(), [opt_num_cell(row.title_x), val_cell, ci_cell]);
             }
             (false, true) => {
-                tab.push_row(label.as_str(), [num_cell(*est), num_cell(*se), ci_bounds_cell(*lo, *hi)]);
+                tab.push_row(row.label.as_str(), [val_cell, se_cell, ci_cell]);
             }
             (false, false) => {
-                tab.push_row(label.as_str(), [num_cell(*est), ci_bounds_cell(*lo, *hi)]);
+                tab.push_row(row.label.as_str(), [val_cell, ci_cell]);
             }
         }
     }
@@ -1379,17 +1654,18 @@ fn append_parameter_summary_tab_and_data(
             if let Some(ds) = xy.data_sets.first_mut() {
                 ds.title = target_param.to_owned();
             }
-            for (r, (label, title_x, est, _, _, _)) in rows_data.iter().enumerate() {
+            for (r, row) in rows_data.iter().enumerate() {
                 if let Some(rt) = xy.row_titles.get_mut(r) {
-                    *rt = label.clone();
+                    *rt = row.label.clone();
                 }
-                if let Some(x) = title_x.filter(|v| v.is_finite()) {
+                if let Some(x) = row.title_x.filter(|v| v.is_finite()) {
                     let _ = xy.set_x_cell(r, Cell::number(x));
                 }
-                if est.is_finite()
-                    && let Some(cell) = xy.data_sets.first_mut().and_then(|d| d.cells.get_mut(r)).and_then(|row| row.first_mut())
+                if !row.is_unstable
+                    && row.est.is_finite()
+                    && let Some(cell) = xy.data_sets.first_mut().and_then(|d| d.cells.get_mut(r)).and_then(|row_cells| row_cells.first_mut())
                 {
-                    *cell = Cell::number(*est);
+                    *cell = Cell::number(row.est);
                 }
             }
             if let Ok(ds_sheet) = DataSheet::new(sheet_id, sheet_title, TableArchetype::Xy(xy)) {
@@ -1397,13 +1673,14 @@ fn append_parameter_summary_tab_and_data(
             }
         }
     } else if let Ok(mut col) = ColumnTable::new(ColumnDesignHint::default(), rows_data.len(), 1) {
-        for (c, (label, _, est, _, _, _)) in rows_data.iter().enumerate() {
+        for (c, row) in rows_data.iter().enumerate() {
             if let Some(ds) = col.data_sets.get_mut(c) {
-                ds.title = label.clone();
-                if est.is_finite()
-                    && let Some(cell) = ds.cells.first_mut().and_then(|row| row.first_mut())
+                ds.title = row.label.clone();
+                if !row.is_unstable
+                    && row.est.is_finite()
+                    && let Some(cell) = ds.cells.first_mut().and_then(|row_cells| row_cells.first_mut())
                 {
-                    *cell = Cell::number(*est);
+                    *cell = Cell::number(row.est);
                 }
             }
         }
@@ -1643,7 +1920,9 @@ fn append_cleaned_data_tab_and_analyzable_sheet(result: &mut ResultSheet, sheet:
         tab.push_row(lbl, row_cells);
     }
     result.tabs.push(tab.build());
-    result.analyzable_data = Some(cleaned);
+    if result.analyzable_data.is_none() {
+        result.analyzable_data = Some(cleaned);
+    }
 }
 
 fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFitResult) {
@@ -2405,7 +2684,7 @@ mod tests {
         assert_num_cell_approx(&auc_tab.rows[2][1], 0.0, 1e-12, "DS1 xmin");
         assert_num_cell_approx(&auc_tab.rows[3][1], 3.0, 1e-12, "DS1 xmax");
 
-        // Deming Model II emits no FittedCurveOverlay, so AUC (trapezoidal) is emitted and Fitted curve AUC is Empty.
+        // Deming Model II emits a default FittedCurveOverlay (AUD-13-17), so both trapezoidal and fitted-curve AUC emit.
         let dem_spec = AnalysisSpec::new(
             "dem-auc",
             "lin-auc-ds",
@@ -2413,11 +2692,15 @@ mod tests {
         )
         .unwrap();
         let dem_res = execute_analysis(&dem_spec, &sheet, &HookContext::default()).unwrap();
+        assert_eq!(dem_res.fitted_curves.len(), 2, "default Deming emits FittedCurveOverlay for every dataset");
         assert!(dem_res.scalars.iter().any(|s| s.key == "AUC (trapezoidal)" && s.data_set_index == Some(0)));
-        assert!(!dem_res.scalars.iter().any(|s| s.key == "AUC (fitted curve)"));
+        assert!(dem_res.scalars.iter().any(|s| s.key == "AUC (fitted curve)" && s.data_set_index == Some(0)));
+        let dem_slope0 = dem_res.lookup_scalar("Slope", Some(0)).unwrap();
+        let dem_int0 = dem_res.lookup_scalar("YIntercept", Some(0)).unwrap();
+        let expected_dem_fit0 = 0.5 * ((dem_int0 + dem_slope0 * 0.0) + (dem_int0 + dem_slope0 * 3.0)) * 3.0;
         let dem_auc_tab = dem_res.tabs.iter().find(|t| t.id == "fit_auc").expect("Deming fit_auc tab");
         assert_num_cell_approx(&dem_auc_tab.rows[0][0], 12.0, 1e-12, "Deming DS0 emp");
-        assert_eq!(dem_auc_tab.rows[1][0], ResultCell::Empty);
+        assert_num_cell_approx(&dem_auc_tab.rows[1][0], expected_dem_fit0, 1e-10, "Deming DS0 fit");
     }
 
     #[test]

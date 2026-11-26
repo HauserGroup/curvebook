@@ -5,8 +5,8 @@
 //! `curvebook-format` can reject a document with a precise location.
 
 use super::{
-    AnalysisKind, AnalysisSpec, FitMethod, MathTransformPreset, NonlinearFitSpec, NormalizeAnchor, OutlierSpec, ParameterScope, SimulationNoise,
-    SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, WeightingScheme,
+    AnalysisKind, AnalysisSpec, DemingErrorSpec, FitMethod, MathTransformPreset, NonlinearFitSpec, NormalizeAnchor, OutlierSpec, ParameterScope,
+    SimulationNoise, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, WeightingScheme,
 };
 
 /// `Some(path())` when `value` is `NaN` or infinite.
@@ -79,7 +79,15 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
         AnalysisKind::NonlinearRegression(fit) => nonlinear_fit_first_non_finite_float(fit),
         AnalysisKind::LinearRegression(fit) => range_first_non_finite_float(fit.x_range_filter, "x_range_filter")
             .or_else(|| non_finite_opt(fit.plot_x_min, at("plot_x_min")))
-            .or_else(|| non_finite_opt(fit.plot_x_max, at("plot_x_max"))),
+            .or_else(|| non_finite_opt(fit.plot_x_max, at("plot_x_max")))
+            .or_else(|| fit.fixed_point.and_then(|(x0, y0)| non_finite(x0, at("fixed_point.x0")).or_else(|| non_finite(y0, at("fixed_point.y0")))))
+            .or_else(|| match fit.deming_error {
+                DemingErrorSpec::EqualError => None,
+                DemingErrorSpec::StandardDeviations { sd_x, sd_y } => {
+                    non_finite(sd_x, at("deming_error.sd_x")).or_else(|| non_finite(sd_y, at("deming_error.sd_y")))
+                }
+                DemingErrorSpec::VarianceRatio { lambda } => non_finite(lambda, at("deming_error.lambda")),
+            }),
         AnalysisKind::FitSplineLowess(spec) => non_finite_opt(spec.smoothing_df, at("smoothing_df"))
             .or_else(|| non_finite_opt(spec.lowess_fraction, at("lowess_fraction")))
             .or_else(|| non_finite_opt(spec.plot_x_min, at("plot_x_min")))

@@ -448,6 +448,12 @@ impl AnalyzeDialogState {
         self.source_sheet_id = Some(sheet.id.clone());
         self.source_table_kind = Some(sheet.kind());
         self.variable_candidates = collect_variable_candidates(sheet);
+        if let TableArchetype::Xy(xy) = &sheet.archetype {
+            let xs: Vec<f64> = (0..xy.row_count()).filter_map(|r| xy.x_summary_at(r).ok().flatten().filter(|x| x.is_finite())).collect();
+            self.equation_id = String::from(curvebook_fit::suggested_default_dose_response_equation(&xs));
+        } else {
+            self.equation_id = String::from("log_agonist_vs_response_4pl");
+        }
         self.selected_entry_id = self.compatible_entries().first().map(|item| item.id.to_owned());
     }
 
@@ -636,6 +642,9 @@ impl AnalyzeDialogState {
                 if let Some(m) = self.two_group_method {
                     tg.method = m;
                 }
+                if let TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } = &mut tg.method {
+                    *hypothetical = self.two_group_hypothetical;
+                }
                 if let Some(ces) = self.compute_effect_sizes {
                     tg.compute_effect_sizes = ces;
                 }
@@ -797,7 +806,7 @@ impl AnalyzeDialogState {
             .iter()
             .find(|v| v.selected && !matches!(v.role, VariableRole::Label | VariableRole::Categorical))
             .map(|v| v.col_index);
-        if let Some(resp) = self.explicit_response_column.or(first_numeric).or(response_col) {
+        if let Some(resp) = self.explicit_response_column.or(response_col).or(first_numeric) {
             glm.response_column = resp;
             let preds: Vec<usize> = self
                 .variable_candidates
@@ -885,22 +894,22 @@ impl AnalyzeDialogState {
         let Some(pending) = self.build_analysis_kind() else {
             return Vec::new();
         };
-        let pending_tag = std::mem::discriminant(&pending);
         doc.result_sheets
             .iter()
-            .filter(|rs| &rs.analysis.source_sheet_id == src && std::mem::discriminant(&rs.analysis.kind) == pending_tag)
+            .filter(|rs| &rs.analysis.source_sheet_id == src && same_analysis_family(&rs.analysis.kind, &pending))
             .map(|rs| rs.id.clone())
             .collect()
     }
 
-    /// Either return `Err(existing_ids)` to prompt `Modify existing` vs `Create new`, or build an
-    /// `analysis.run` [`ToolCommandIntent`].
+    /// Either return `Err(existing_ids)` to prompt `Modify existing` vs `Create new`, return
+    /// `Err(vec![])` when the current selection is incomplete/invalid, or build an `analysis.run`
+    /// [`ToolCommandIntent`].
     pub fn try_build_run_intent(&self, doc: &ProjectDocument) -> Result<ToolCommandIntent, Vec<SheetId>> {
         let matches = self.matching_existing_analyses(doc);
         if !matches.is_empty() {
             return Err(matches);
         }
-        Ok(self.build_create_new_intent().unwrap_or_else(|| ToolCommandIntent::new("analyze.run", json!({}))))
+        self.build_create_new_intent().ok_or_else(Vec::new)
     }
 
     /// Resolve a duplicate-analysis confirmation prompt into `analysis.updateParams` or `analysis.run`.
@@ -933,6 +942,16 @@ impl AnalyzeDialogState {
                 "kind": kind,
             }),
         ))
+    }
+}
+
+fn same_analysis_family(a: &AnalysisKind, b: &AnalysisKind) -> bool {
+    match (a, b) {
+        (AnalysisKind::Transform(x), AnalysisKind::Transform(y)) => std::mem::discriminant(x) == std::mem::discriminant(y),
+        (AnalysisKind::Multivariate(x), AnalysisKind::Multivariate(y)) => std::mem::discriminant(x) == std::mem::discriminant(y),
+        (AnalysisKind::Survival(x), AnalysisKind::Survival(y)) => std::mem::discriminant(x) == std::mem::discriminant(y),
+        (AnalysisKind::OutlierDetection(x), AnalysisKind::OutlierDetection(y)) => std::mem::discriminant(x) == std::mem::discriminant(y),
+        _ => std::mem::discriminant(a) == std::mem::discriminant(b),
     }
 }
 

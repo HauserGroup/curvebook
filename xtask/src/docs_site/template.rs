@@ -111,13 +111,13 @@ fn write_doc_open(out: &mut String, head: &DocHead<'_>) {
         out.push_str("\">\n  <meta property=\"og:url\" content=\"");
         push_html_escaped(url, out);
         out.push_str("\">\n  <meta property=\"og:image\" content=\"");
-        out.push_str(super::seo::SITE_BASE_URL);
+        push_html_escaped(super::seo::SITE_BASE_URL, out);
         out.push_str("images/workspace-layout-dark.png\">\n  <meta name=\"twitter:card\" content=\"summary_large_image\">\n");
     }
     out.push_str("  <link rel=\"icon\" type=\"image/png\" href=\"");
-    out.push_str(head.assets);
+    push_html_escaped(head.assets, out);
     out.push_str("images/curvebook.png\">\n  <link rel=\"stylesheet\" href=\"");
-    out.push_str(head.assets);
+    push_html_escaped(head.assets, out);
     out.push_str(
         "site.css\">\n</head>\n<body>\n  <a class=\"skip-link\" href=\"#main\">Skip to content</a>\n  <div class=\"desktop-window wrap\">\n",
     );
@@ -125,21 +125,21 @@ fn write_doc_open(out: &mut String, head: &DocHead<'_>) {
 
 fn write_main_site_header(out: &mut String, assets: &str, home_href: &str, brand: &str, status: &str, docs_href: &str, docs_current: bool) {
     out.push_str("    <header class=\"site-header\">\n      <a class=\"title-bar\" href=\"");
-    out.push_str(home_href);
+    push_html_escaped(home_href, out);
     out.push_str("\">\n        <span class=\"wordmark\"><img src=\"");
-    out.push_str(assets);
+    push_html_escaped(assets, out);
     out.push_str("images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\"><span>");
     out.push_str(brand);
     out.push_str("</span></span>\n        <span class=\"window-status\">");
     push_html_escaped(status, out);
     out.push_str("</span>\n      </a>\n      <nav aria-label=\"Main navigation\">\n        <a href=\"");
-    out.push_str(home_href);
+    push_html_escaped(home_href, out);
     out.push_str("\">Home</a>\n        <a href=\"");
-    out.push_str(docs_href);
+    push_html_escaped(docs_href, out);
     out.push_str(if docs_current { "\" aria-current=\"page\">Documentation</a>\n" } else { "\">Documentation</a>\n" });
     for (file, label) in [("open-pzfx-files.html", ".pzfx &amp; .prism"), ("linux.html", "Linux"), ("faq.html", "FAQ"), ("privacy.html", "Privacy")] {
         out.push_str("        <a href=\"");
-        out.push_str(assets);
+        push_html_escaped(assets, out);
         out.push_str(file);
         out.push_str("\">");
         out.push_str(label);
@@ -219,9 +219,9 @@ fn active_nav_target(spec: &PageSpec<'_>) -> &'static str {
 
 fn render_header(spec: &PageSpec<'_>, root: &str, assets: &str, out: &mut String) {
     out.push_str("    <header class=\"site-header\">\n      <a class=\"title-bar\" href=\"");
-    out.push_str(assets);
+    push_html_escaped(assets, out);
     out.push_str("index.html\">\n        <span class=\"wordmark\">\n          <img src=\"");
-    out.push_str(assets);
+    push_html_escaped(assets, out);
     out.push_str("images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\">\n          <span>CurveBook · Reference Manual</span>\n        </span>\n        <span class=\"window-status\">");
     push_html_escaped(spec.section_title, out);
     out.push_str("</span>\n      </a>\n      <nav aria-label=\"Manual navigation\">\n");
@@ -237,7 +237,7 @@ fn render_header(spec: &PageSpec<'_>, root: &str, assets: &str, out: &mut String
         ("Contribute", "section-contribute.html"),
     ] {
         out.push_str("        <a href=\"");
-        out.push_str(root);
+        push_html_escaped(root, out);
         out.push_str(target);
         out.push_str(if target == active_target { "\" aria-current=\"page\">" } else { "\">" });
         out.push_str(label);
@@ -246,7 +246,7 @@ fn render_header(spec: &PageSpec<'_>, root: &str, assets: &str, out: &mut String
     if spec.meta.is_release_snapshot {
         for (file, label) in [("index.html", "Product Home"), ("privacy.html", "Privacy Policy")] {
             out.push_str("        <a href=\"");
-            out.push_str(assets);
+            push_html_escaped(assets, out);
             out.push_str(file);
             out.push_str("\">");
             out.push_str(label);
@@ -272,7 +272,7 @@ fn render_version_banner(spec: &PageSpec<'_>, out: &mut String) {
         out.push_str("</code>)");
     }
     out.push_str("</span>\n      <span>No scripts · No telemetry · <a href=\"");
-    out.push_str(&rel_href(spec.rel_path, "az-index.html"));
+    push_html_escaped(&rel_href(spec.rel_path, "az-index.html"), out);
     out.push_str("\">A–Z Index</a></span>\n    </div>\n");
 }
 
@@ -282,14 +282,14 @@ fn render_breadcrumbs(spec: &PageSpec<'_>, root: &str, out: &mut String) {
     }
     let mut pos = 2usize;
     out.push_str("        <nav class=\"breadcrumbs\" aria-label=\"Breadcrumb\" itemscope itemtype=\"https://schema.org/BreadcrumbList\">\n          <span itemprop=\"itemListElement\" itemscope itemtype=\"https://schema.org/ListItem\"><a itemprop=\"item\" href=\"");
-    out.push_str(root);
+    push_html_escaped(root, out);
     out.push_str("index.html\"><span itemprop=\"name\">Manual</span></a><meta itemprop=\"position\" content=\"1\"></span>\n");
     if let Some(sec_rel) = spec.section_rel_path
         && sec_rel != spec.rel_path
     {
         out.push_str("          <span aria-hidden=\"true\">/</span>\n          <span itemprop=\"itemListElement\" itemscope itemtype=\"https://schema.org/ListItem\"><a itemprop=\"item\" href=\"");
-        out.push_str(root);
-        out.push_str(sec_rel);
+        push_html_escaped(root, out);
+        push_html_escaped(sec_rel, out);
         out.push_str("\"><span itemprop=\"name\">");
         push_html_escaped(spec.section_title, out);
         out.push_str("</span></a><meta itemprop=\"position\" content=\"2\"></span>\n");
@@ -453,9 +453,9 @@ pub fn render_not_found_page(base_path: &str) -> String {
     );
     write_main_site_header(&mut out, base_path, base_path, "CurveBook", "404 · Not found", &format!("{base_path}manual/latest/index.html"), false);
     out.push_str("    <main id=\"main\" tabindex=\"-1\">\n      <article class=\"overview doc-body\">\n        <p class=\"eyebrow\">HTTP 404</p>\n        <h1 id=\"page-title\" tabindex=\"-1\">Page not found.</h1>\n        <p class=\"lead\">The page you requested does not exist on the CurveBook site, or it moved when documentation URLs were updated.</p>\n        <div class=\"action-row\">\n          <a class=\"button primary\" href=\"");
-    out.push_str(base_path);
+    push_html_escaped(base_path, &mut out);
     out.push_str("\">CurveBook Home</a>\n          <a class=\"button secondary\" href=\"");
-    out.push_str(base_path);
+    push_html_escaped(base_path, &mut out);
     out.push_str("manual/latest/index.html\">Read the Manual <span aria-hidden=\"true\">→</span></a>\n        </div>\n        <h2>Helpful links</h2>\n        <ul>\n");
     for (rel, link_html, desc) in [
         ("manual/latest/get-started.html", "Get Started &amp; Installation", "installers, checksums, and first run."),
@@ -463,7 +463,7 @@ pub fn render_not_found_page(base_path: &str) -> String {
         ("faq.html", "FAQ &amp; Quick Facts", "licence, platforms, formats, and offline guarantees."),
     ] {
         out.push_str("          <li><a href=\"");
-        out.push_str(base_path);
+        push_html_escaped(base_path, &mut out);
         out.push_str(rel);
         out.push_str("\">");
         out.push_str(link_html);
@@ -474,4 +474,34 @@ pub fn render_not_found_page(base_path: &str) -> String {
     out.push_str("          <li><a href=\"https://github.com/HauserGroup/curvebook\">GitHub repository <span aria-hidden=\"true\">↗</span></a> — source code, issue tracker, and contributor documentation.</li>\n        </ul>\n      </article>\n    </main>\n");
     write_doc_close(&mut out, "Read the ", &format!("{base_path}privacy.html"), "Privacy Policy");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PageSpec, SiteMeta, render_not_found_page, render_page};
+
+    #[test]
+    fn aud_12_44_escapes_base_path_and_section_rel_in_html_attributes() {
+        let html_404 = render_not_found_page("/curvebook/\" onclick=\"alert(1)/");
+        assert!(!html_404.contains("\" onclick=\"alert(1)"), "attribute breakout in 404: {html_404}");
+        assert!(html_404.contains("&quot; onclick=&quot;alert(1)"));
+
+        let meta = SiteMeta { version_label: String::from("v0.1.0"), commit_sha: None, release_date: None, is_release_snapshot: false };
+        let page = render_page(&PageSpec {
+            title: "T",
+            description: "D",
+            rel_path: "sub.html",
+            section_title: "Sec",
+            section_rel_path: Some("sec\" onclick=\"x.html"),
+            h1: "T",
+            toc_headings: &[],
+            body_html: "<p>Hi</p>",
+            body_has_h1: false,
+            prev: None,
+            next: None,
+            meta: &meta,
+        });
+        assert!(!page.contains("sec\" onclick=\"x.html"), "unescaped sec_rel in breadcrumbs: {page}");
+        assert!(page.contains("sec&quot; onclick=&quot;x.html"));
+    }
 }

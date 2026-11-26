@@ -38,7 +38,8 @@ pub(super) fn resolve_fitted_overlay<'a>(
         ));
         return None;
     }
-    let Some(curve) = res.fitted_curves.iter().find(|fc| fc.data_set_index == series.data_set_index) else {
+    let Some(curve) = res.fitted_curves.iter().find(|fc| fc.data_set_index == series.data_set_index && !fc.equation_id.eq_ignore_ascii_case("ROC"))
+    else {
         warnings.push(ChartWarning::new(
             "missing_fitted_curve",
             format!("regression result sheet '{}' has no fitted curve for data set {}", spec.result_sheet_id, series.data_set_index),

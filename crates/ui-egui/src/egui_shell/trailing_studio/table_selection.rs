@@ -94,20 +94,12 @@ pub(super) fn render_table_selection_studio(
 
     ui.add_space(6.0);
     widgets::subheader(ui, "Selection & Graph Subset");
-    let bounds = app.grid.tool.selection_bounds();
-    let sel_text = if let Some((a, b)) = bounds {
-        let r0 = a.row.min(b.row);
-        let r1 = a.row.max(b.row);
-        let c0 = a.col.min(b.col);
-        let c1 = a.col.max(b.col);
-        format!("Rows {}..{}  •  Cols {}..{}", r0 + 1, r1 + 1, c0 + 1, c1 + 1)
-    } else {
-        String::from("No cells selected")
-    };
+    let resolved_sel = crate::egui_shell::data_grid::resolve_grid_selection(app, ds);
+    let sel_text = resolved_sel.as_ref().map_or_else(|| String::from("No cells selected"), |s| s.summary_label());
     state.selected_subset_rows_summary = sel_text.clone();
     widgets::dim_label(ui, &sel_text);
 
-    let has_bounds = bounds.is_some() && !ds.frozen;
+    let has_selection = resolved_sel.is_some() && !ds.frozen;
     if studio_full_button(
         ui,
         tokens,
@@ -116,27 +108,15 @@ pub(super) fn render_table_selection_studio(
             label: "Exclude Selected Subset",
             tooltip: "Exclude selected rows/columns from graphs and analyses (table.excludeCells)",
             selected: false,
-            enabled: ctx_in.enabled && has_bounds,
+            enabled: ctx_in.enabled && has_selection,
             primary: false,
             widget_id: "inspector.table.exclude_subset",
             command_id: Some("table.excludeCells"),
-            disabled_reason: ds.frozen.then_some("sheet is frozen").or_else(|| (!has_bounds).then_some("select cells first")),
+            disabled_reason: ds.frozen.then_some("sheet is frozen").or_else(|| (!has_selection).then_some("select cells first")),
         },
-    ) && let Some((a, b)) = bounds
+    ) && let Some(sel) = resolved_sel.as_ref()
     {
-        intents.push_engine(
-            "table.excludeCells",
-            json!({
-                "sheet_id": ds.id.as_str(),
-                "row_start": a.row.min(b.row),
-                "row_end": a.row.max(b.row),
-                "col_start": a.col.min(b.col),
-                "col_end": a.col.max(b.col),
-                "subcol_start": a.subcol.min(b.subcol),
-                "subcol_end": a.subcol.max(b.subcol),
-                "excluded": true,
-            }),
-        );
+        crate::egui_shell::data_grid::push_exclude_selection_intent(ds, sel, true, intents);
     }
 
     if studio_full_button(
@@ -147,27 +127,15 @@ pub(super) fn render_table_selection_studio(
             label: "Include Selected Subset",
             tooltip: "Clear exclusion mask on selected cells (table.excludeCells)",
             selected: false,
-            enabled: ctx_in.enabled && has_bounds,
+            enabled: ctx_in.enabled && has_selection,
             primary: false,
             widget_id: "inspector.table.include_subset",
             command_id: Some("table.excludeCells"),
-            disabled_reason: ds.frozen.then_some("sheet is frozen").or_else(|| (!has_bounds).then_some("select cells first")),
+            disabled_reason: ds.frozen.then_some("sheet is frozen").or_else(|| (!has_selection).then_some("select cells first")),
         },
-    ) && let Some((a, b)) = bounds
+    ) && let Some(sel) = resolved_sel.as_ref()
     {
-        intents.push_engine(
-            "table.excludeCells",
-            json!({
-                "sheet_id": ds.id.as_str(),
-                "row_start": a.row.min(b.row),
-                "row_end": a.row.max(b.row),
-                "col_start": a.col.min(b.col),
-                "col_end": a.col.max(b.col),
-                "subcol_start": a.subcol.min(b.subcol),
-                "subcol_end": a.subcol.max(b.subcol),
-                "excluded": false,
-            }),
-        );
+        crate::egui_shell::data_grid::push_exclude_selection_intent(ds, sel, false, intents);
     }
 
     let downstream_graph = find_downstream_graph_for_data(doc, &ds.id);

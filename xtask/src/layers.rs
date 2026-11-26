@@ -10,8 +10,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::rust_lex::{blank_comments_and_literals, is_ident_byte, strip_cfg_test_items, strip_non_prod_rust};
-use crate::scan_util::{has_ext_ci, next_ident_pattern_match, walk_rel_files};
+use crate::rust_lex::{blank_comments_and_literals, is_cfg_test_only_submodule, is_ident_byte, strip_cfg_test_items, strip_non_prod_rust};
+use crate::scan_util::{has_ext_ci, next_ident_pattern_match, read_dir_paths_sorted, rel_slash};
 
 /// Where a workspace crate sits in the dependency graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +140,7 @@ pub enum Violation {
     TestkitAsNormalDep { krate: String },
     UiBelowL6 { krate: String, dep: String, layer: u8 },
     SuiteCrate { krate: String, dep: String },
+    IoError { path: String, detail: String },
 }
 
 impl std::fmt::Display for Violation {
@@ -162,6 +163,9 @@ impl std::fmt::Display for Violation {
             }
             Violation::SuiteCrate { krate, dep } => {
                 write!(f, "{krate} depends on external suite crate `{dep}`; CurveBook is standalone and may not depend on `craft-*` crates")
+            }
+            Violation::IoError { path, detail } => {
+                write!(f, "{path}: cannot audit manifest/file: {detail}")
             }
         }
     }
@@ -397,11 +401,23 @@ fn node_edges(node: &Value) -> Vec<(&str, Vec<DepKind>)> {
 }
 
 /// Inspect workspace `Cargo.toml` `[patch]` and `[replace]` sections for banned suite crates
-/// or attempts to patch UI/workspace crates invisibly.
+/// or attempts to patch UI/workspace crates invisibly. Fails closed if `Cargo.toml` is a symlink
+/// or unreadable.
 #[must_use]
 pub fn check_manifest_patches(root: &Path) -> Vec<Violation> {
-    let Ok(text) = std::fs::read_to_string(root.join("Cargo.toml")) else {
-        return Vec::new();
+    let manifest = root.join("Cargo.toml");
+    match std::fs::symlink_metadata(&manifest) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return vec![Violation::IoError { path: String::from("Cargo.toml"), detail: String::from("manifest is a symlink") }];
+        }
+        Err(e) => {
+            return vec![Violation::IoError { path: String::from("Cargo.toml"), detail: e.to_string() }];
+        }
+        Ok(_) => {}
+    }
+    let text = match std::fs::read_to_string(&manifest) {
+        Ok(t) => t,
+        Err(e) => return vec![Violation::IoError { path: String::from("Cargo.toml"), detail: e.to_string() }],
     };
     scan_patch_sections(&text)
 }
@@ -409,79 +425,48 @@ pub fn check_manifest_patches(root: &Path) -> Vec<Violation> {
 #[must_use]
 pub fn scan_patch_sections(cargo_toml: &str) -> Vec<Violation> {
     let mut violations = Vec::new();
-    let mut in_patch_or_replace = false;
-    let mut in_patch_crate_subtable = false;
-    for raw in cargo_toml.lines() {
-        let line = raw.split('#').next().unwrap_or_default().trim();
-        if line.is_empty() {
-            continue;
+    let push_suite = |dep: &str, out: &mut Vec<Violation>| {
+        if is_suite_crate(dep) {
+            let v = Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: dep.to_owned() };
+            if !out.contains(&v) {
+                out.push(v);
+            }
         }
-        if let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            let sec = inner.trim();
-            let segs = split_toml_table_segments(sec);
-            in_patch_or_replace = sec == "replace" || segs.first().is_some_and(|s| s == "patch");
-            in_patch_crate_subtable = false;
-            if segs.first().is_some_and(|s| s == "patch")
-                && let Some(crate_name) = segs.get(2)
-            {
-                in_patch_crate_subtable = true;
-                if is_suite_crate(crate_name) {
-                    violations.push(Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: crate_name.clone() });
+    };
+    for entry in crate::scan_util::parse_toml_entries(cargo_toml) {
+        match entry {
+            crate::scan_util::TomlEntry::Section { path, .. } => {
+                if path.first().map(String::as_str) == Some("patch")
+                    && let Some(crate_name) = path.get(2)
+                {
+                    push_suite(crate_name, &mut violations);
                 }
             }
-            continue;
-        }
-        if !in_patch_or_replace {
-            continue;
-        }
-        if let Some((lhs, rhs)) = line.split_once('=') {
-            let lhs_clean = lhs.trim().trim_matches('"').trim_matches('\'');
-            if in_patch_crate_subtable && lhs_clean == "package" {
-                let pkg_name = rhs.trim().trim_matches('"').trim_matches('\'');
-                if is_suite_crate(pkg_name) {
-                    violations.push(Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: pkg_name.to_owned() });
-                }
-                continue;
-            }
-            if !in_patch_crate_subtable {
-                let pkg_name = lhs_clean.split(':').next().unwrap_or(lhs_clean).trim();
-                if is_suite_crate(pkg_name) {
-                    violations.push(Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: pkg_name.to_owned() });
+            crate::scan_util::TomlEntry::Leaf { path, value, .. } => {
+                if path.first().map(String::as_str) == Some("replace") {
+                    if let Some(spec) = path.get(1) {
+                        let pkg_name = spec.split(':').next().unwrap_or(spec).trim();
+                        push_suite(pkg_name, &mut violations);
+                    }
+                    if path.last().map(String::as_str) == Some("package")
+                        && let Some(pkg) = value.as_str()
+                    {
+                        push_suite(pkg, &mut violations);
+                    }
+                } else if path.first().map(String::as_str) == Some("patch") {
+                    if let Some(crate_name) = path.get(2) {
+                        push_suite(crate_name, &mut violations);
+                    }
+                    if path.get(3).map(String::as_str) == Some("package")
+                        && let Some(pkg) = value.as_str()
+                    {
+                        push_suite(pkg, &mut violations);
+                    }
                 }
             }
         }
     }
     violations
-}
-
-fn split_toml_table_segments(sec: &str) -> Vec<String> {
-    let mut segs = Vec::new();
-    let mut cur = String::new();
-    let mut quote: Option<char> = None;
-    for ch in sec.chars() {
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            } else {
-                cur.push(ch);
-            }
-        } else if ch == '"' || ch == '\'' {
-            quote = Some(ch);
-        } else if ch == '.' {
-            let trimmed = cur.trim();
-            if !trimmed.is_empty() {
-                segs.push(trimmed.to_owned());
-            }
-            cur.clear();
-        } else {
-            cur.push(ch);
-        }
-    }
-    let trimmed = cur.trim();
-    if !trimmed.is_empty() {
-        segs.push(trimmed.to_owned());
-    }
-    segs
 }
 
 #[must_use]
@@ -526,10 +511,21 @@ const UI_IO_SHARED_PATHS: &[&str] = &[
     "std::os::unix::fs::symlink",
     "os::unix::fs::symlink",
     "unix::fs::symlink",
+    "fs::symlink",
+    "std::os::unix::fs::*",
+    "os::unix::fs::*",
+    "unix::fs::*",
     "std::os::windows::fs::symlink_file",
     "std::os::windows::fs::symlink_dir",
+    "os::windows::fs::symlink_file",
+    "os::windows::fs::symlink_dir",
     "windows::fs::symlink_file",
     "windows::fs::symlink_dir",
+    "fs::symlink_file",
+    "fs::symlink_dir",
+    "std::os::windows::fs::*",
+    "os::windows::fs::*",
+    "windows::fs::*",
     "std::fs::copy",
     "fs::copy",
     "std::fs::rename",
@@ -562,18 +558,17 @@ impl std::fmt::Display for HygieneViolation {
 /// Check workspace Rust sources for banned raw process spawning and unguarded `ui-egui` file I/O.
 #[must_use]
 pub fn check_source_hygiene(root: &Path) -> Vec<HygieneViolation> {
-    let mut files = Vec::new();
-    collect_rs_files(root, &mut files);
-    files.sort();
-
     let mut violations = Vec::new();
+    let files = collect_rs_files_checked(root, &mut violations);
+
     for rel in files {
-        let exempt_process = is_exempt_process_path(&rel);
-        let in_ui_src = is_ui_egui_prod_path(&rel);
+        let exempt_process = is_exempt_process_path(root, &rel);
+        let in_ui_src = is_ui_egui_prod_path(root, &rel);
         if exempt_process && !in_ui_src {
             continue;
         }
         let Ok(src) = std::fs::read_to_string(root.join(&rel)) else {
+            violations.push(HygieneViolation { path: rel, line: 1, rule: "io-error", pattern: "unreadable source file" });
             continue;
         };
         let prod = strip_non_prod_rust(&src);
@@ -595,7 +590,26 @@ pub fn check_source_hygiene(root: &Path) -> Vec<HygieneViolation> {
                 &prod,
                 "ui-raw-io",
                 &[UI_IO_SHARED_PATHS, UI_IO_EXTRA_USE_PATHS],
-                &["std::fs", "fs", "std::os::unix::fs", "os::unix::fs", "unix::fs", "std::os::windows::fs", "std::process", "process"],
+                &[
+                    "std::fs",
+                    "fs",
+                    "std::os",
+                    "os",
+                    "std::os::unix",
+                    "os::unix",
+                    "unix",
+                    "std::os::unix::fs",
+                    "os::unix::fs",
+                    "unix::fs",
+                    "std::os::windows",
+                    "os::windows",
+                    "windows",
+                    "std::os::windows::fs",
+                    "os::windows::fs",
+                    "windows::fs",
+                    "std::process",
+                    "process",
+                ],
                 &mut violations,
             );
         }
@@ -660,51 +674,126 @@ fn check_workspace_string_slice_lint(root: &Path, violations: &mut Vec<HygieneVi
 
 fn check_strict_crate_indexing_deny(root: &Path, violations: &mut Vec<HygieneViolation>) {
     for group in ["crates", "apps"] {
-        let Ok(entries) = std::fs::read_dir(root.join(group)) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+        let group_dir = root.join(group);
+        let meta = match std::fs::symlink_metadata(&group_dir) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                violations.push(HygieneViolation { path: group.to_owned(), line: 1, rule: "io-error", pattern: "unreadable directory" });
                 continue;
             }
-            let dir_name = entry.file_name();
-            let Some(dir_str) = dir_name.to_str() else {
+        };
+        if meta.file_type().is_symlink() {
+            violations.push(HygieneViolation { path: group.to_owned(), line: 1, rule: "io-error", pattern: "symlinked directory" });
+            continue;
+        }
+        let entries = match read_dir_paths_sorted(&group_dir) {
+            Ok(p) => p,
+            Err(_) => {
+                violations.push(HygieneViolation { path: group.to_owned(), line: 1, rule: "io-error", pattern: "unreadable directory" });
+                continue;
+            }
+        };
+        for path in entries {
+            let Some(dir_str) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
             let pkg_rel = format!("{group}/{dir_str}");
-            if LEGACY_INDEXING_ALLOWLIST.contains(&pkg_rel.as_str()) {
+            let entry_meta = match std::fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(_) => {
+                    violations.push(HygieneViolation { path: pkg_rel, line: 1, rule: "io-error", pattern: "unreadable directory" });
+                    continue;
+                }
+            };
+            if entry_meta.file_type().is_symlink() {
+                violations.push(HygieneViolation { path: pkg_rel, line: 1, rule: "io-error", pattern: "symlinked crate directory" });
+                continue;
+            }
+            if !entry_meta.is_dir() || LEGACY_INDEXING_ALLOWLIST.contains(&pkg_rel.as_str()) {
                 continue;
             }
             for root_file in ["src/lib.rs", "src/main.rs"] {
                 let rel = format!("{pkg_rel}/{root_file}");
-                if root.join(&rel).is_file() {
-                    require_indexing_slicing_deny(root, &rel, violations);
+                let full = root.join(&rel);
+                match std::fs::symlink_metadata(&full) {
+                    Ok(m) if m.file_type().is_symlink() => {
+                        violations.push(HygieneViolation { path: rel, line: 1, rule: "io-error", pattern: "symlinked source file" });
+                    }
+                    Ok(m) if m.is_file() => require_indexing_slicing_deny(root, &rel, violations),
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        violations.push(HygieneViolation { path: rel, line: 1, rule: "io-error", pattern: "unreadable source file" });
+                    }
+                    _ => {}
                 }
             }
         }
     }
     let screenshots = root.join(DOC_SCREENSHOTS_REL);
-    if screenshots.is_file() || root.join("crates/ui-egui").is_dir() {
+    if std::fs::symlink_metadata(&screenshots).is_ok() || root.join("crates/ui-egui").is_dir() {
         require_indexing_slicing_deny(root, DOC_SCREENSHOTS_REL, violations);
     }
 }
 
+/// Verify `#![deny(clippy::indexing_slicing)]` (or `forbid(...)`) appears in a top-level
+/// crate-root inner attribute (before any item or nested block).
+fn has_crate_root_indexing_slicing_deny(prod: &str) -> bool {
+    let bytes = prod.as_bytes();
+    let mut i = 0usize;
+    loop {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if bytes.get(i..i + 3) != Some(b"#![") {
+            return false;
+        }
+        let attr_start = i + 3;
+        let mut p = attr_start;
+        let mut depth = 1usize;
+        while p < bytes.len() && depth > 0 {
+            match bytes[p] {
+                b'[' => depth += 1,
+                b']' => depth -= 1,
+                _ => {}
+            }
+            p += 1;
+        }
+        if depth != 0 {
+            return false;
+        }
+        if let Some(inner) = prod.get(attr_start..p - 1) {
+            let compact: String = inner.chars().filter(|ch| !ch.is_whitespace()).collect();
+            for kw in ["deny(", "forbid("] {
+                if let Some(rest) = compact.strip_prefix(kw)
+                    && let Some(list) = rest.strip_suffix(')')
+                    && list.split(',').any(|item| item == "clippy::indexing_slicing")
+                {
+                    return true;
+                }
+            }
+        }
+        i = p;
+    }
+}
+
 fn require_indexing_slicing_deny(root: &Path, rel: &str, violations: &mut Vec<HygieneViolation>) {
-    let Ok(src) = std::fs::read_to_string(root.join(rel)) else {
+    let full = root.join(rel);
+    if std::fs::symlink_metadata(&full).is_ok_and(|m| m.file_type().is_symlink()) {
+        violations.push(HygieneViolation { path: rel.to_owned(), line: 1, rule: "io-error", pattern: "symlinked source file" });
+        return;
+    }
+    let Ok(src) = std::fs::read_to_string(&full) else {
         violations.push(HygieneViolation { path: rel.to_owned(), line: 1, rule: "lint-policy", pattern: "#![deny(clippy::indexing_slicing)]" });
         return;
     };
     let prod = strip_non_prod_rust(&src);
-    let compact: String = prod.chars().filter(|ch| !ch.is_whitespace()).collect();
-    if !compact.contains("#![deny(clippy::indexing_slicing)]") {
+    if !has_crate_root_indexing_slicing_deny(&prod) {
         violations.push(HygieneViolation { path: rel.to_owned(), line: 1, rule: "lint-policy", pattern: "#![deny(clippy::indexing_slicing)]" });
     }
 }
 
 fn check_lint_allow_escapes(root: &Path, violations: &mut Vec<HygieneViolation>) {
-    let mut files = Vec::new();
-    collect_rs_files(root, &mut files);
-    files.sort();
+    let files = collect_rs_files_checked(root, violations);
     for rel in files {
         let in_strict_src = is_strict_src_path(&rel);
         let in_any_src = is_workspace_src_path(&rel);
@@ -712,17 +801,18 @@ fn check_lint_allow_escapes(root: &Path, violations: &mut Vec<HygieneViolation>)
             continue;
         }
         let Ok(src) = std::fs::read_to_string(root.join(&rel)) else {
+            violations.push(HygieneViolation { path: rel, line: 1, rule: "io-error", pattern: "unreadable source file" });
             continue;
         };
         let blanked = blank_comments_and_literals(&src);
-        if has_lint_allow(&blanked, "clippy::string_slice") {
-            let line = first_matching_line(&src, "string_slice").unwrap_or(1);
+        if let Some(matched) = find_lint_escape(&blanked, "clippy::string_slice") {
+            let line = first_matching_line(&src, matched).unwrap_or(1);
             violations.push(HygieneViolation { path: rel.clone(), line, rule: "lint-policy", pattern: "allow(clippy::string_slice)" });
         }
         if in_strict_src || rel == DOC_SCREENSHOTS_REL {
             let prod = strip_cfg_test_items(&blanked);
-            if has_lint_allow(&prod, "clippy::indexing_slicing") {
-                let line = first_matching_line(&src, "indexing_slicing").unwrap_or(1);
+            if let Some(matched) = find_lint_escape(&prod, "clippy::indexing_slicing") {
+                let line = first_matching_line(&src, matched).unwrap_or(1);
                 violations.push(HygieneViolation { path: rel, line, rule: "lint-policy", pattern: "allow(clippy::indexing_slicing)" });
             }
         }
@@ -740,46 +830,106 @@ fn is_strict_src_path(rel: &str) -> bool {
     !LEGACY_INDEXING_ALLOWLIST.iter().any(|prefix| rel == *prefix || rel.starts_with(&format!("{prefix}/")))
 }
 
-fn has_lint_allow(src: &str, lint: &str) -> bool {
+/// Detect `allow(...)` or `expect(...)` attributes suppressing `lint` directly or via a blanket
+/// lint group (`clippy::restriction`, `clippy::all`, `warnings`).
+fn find_lint_escape<'a>(src: &str, lint: &'a str) -> Option<&'a str> {
     let compact: String = src.chars().filter(|ch| !ch.is_whitespace()).collect();
-    let mut rest = compact.as_str();
-    while let Some((_, after)) = rest.split_once("allow(") {
-        if let Some((inside, tail)) = after.split_once(')') {
-            if inside.split(',').any(|item| item == lint) {
-                return true;
+    let bytes = compact.as_bytes();
+    for attr_kw in ["allow(", "expect("] {
+        let mut search = 0usize;
+        while let Some(rel) = compact.get(search..).and_then(|s| s.find(attr_kw)) {
+            let pos = search + rel;
+            let left_ok = pos == 0 || !is_ident_byte(bytes[pos - 1]);
+            let inner_start = pos + attr_kw.len();
+            if left_ok && let Some(close_rel) = compact.get(inner_start..).and_then(|s| s.find(')')) {
+                let inside = compact.get(inner_start..inner_start + close_rel).unwrap_or("");
+                for item in inside.split(',') {
+                    if item == lint {
+                        return Some(lint.rsplit("::").next().unwrap_or(lint));
+                    }
+                    if matches!(item, "clippy::restriction" | "clippy::all" | "warnings") {
+                        return Some(if item == "warnings" { "warnings" } else { "clippy::" });
+                    }
+                }
+                search = inner_start + close_rel + 1;
+            } else {
+                search = inner_start;
             }
-            rest = tail;
-        } else {
-            break;
         }
     }
-    false
+    None
 }
 
 fn first_matching_line(src: &str, needle: &str) -> Option<usize> {
     src.lines().enumerate().find(|(_, line)| line.contains(needle)).map(|(idx, _)| idx + 1)
 }
 
-fn collect_rs_files(root: &Path, out: &mut Vec<String>) {
-    let _ = walk_rel_files(
-        root,
-        root,
-        &|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|s| matches!(s, "target" | "dist" | "corpus") || s.starts_with('.')),
-        &|p| has_ext_ci(p, &["rs"]),
-        out,
-    );
+fn collect_rs_files_checked(root: &Path, violations: &mut Vec<HygieneViolation>) -> Vec<String> {
+    let mut files = Vec::new();
+    walk_rs_fail_closed(root, root, &mut files, violations);
+    files.sort();
+    files
 }
 
-fn is_exempt_process_path(rel: &str) -> bool {
+fn walk_rs_fail_closed(root: &Path, dir: &Path, out: &mut Vec<String>, violations: &mut Vec<HygieneViolation>) {
+    let entries = match read_dir_paths_sorted(dir) {
+        Ok(paths) => paths,
+        Err(_) => {
+            let rel = rel_slash(root, dir).unwrap_or_else(|_| dir.display().to_string());
+            violations.push(HygieneViolation { path: rel, line: 1, rule: "io-error", pattern: "unreadable directory" });
+            return;
+        }
+    };
+    for path in entries {
+        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if matches!(fname, "target" | "dist" | "corpus") || fname.starts_with('.') {
+            continue;
+        }
+        let rel = rel_slash(root, &path).unwrap_or_else(|_| path.display().to_string());
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => {
+                violations.push(HygieneViolation { path: rel, line: 1, rule: "io-error", pattern: "unreadable path" });
+                continue;
+            }
+        };
+        if meta.file_type().is_symlink() {
+            let is_source_tree = matches!(rel.as_str(), "crates" | "apps" | "xtask")
+                || rel.starts_with("crates/")
+                || rel.starts_with("apps/")
+                || rel.starts_with("xtask/");
+            if has_ext_ci(&path, &["rs"]) || is_source_tree {
+                violations.push(HygieneViolation { path: rel, line: 1, rule: "io-error", pattern: "symlinked source path" });
+            }
+            continue;
+        }
+        if meta.is_dir() {
+            walk_rs_fail_closed(root, &path, out, violations);
+        } else if meta.is_file() && has_ext_ci(&path, &["rs"]) {
+            out.push(rel);
+        }
+    }
+}
+
+/// Returns `true` for top-level Cargo integration test directories (`tests/**`, `crates/<pkg>/tests/**`,
+/// `apps/<pkg>/tests/**` — never inside `src/`).
+fn is_cargo_integration_test_path(rel: &str) -> bool {
+    if rel.starts_with("tests/") {
+        return true;
+    }
+    let parts: Vec<&str> = rel.split('/').collect();
+    matches!(parts.as_slice(), ["crates" | "apps", _, "tests", ..])
+}
+
+fn is_exempt_process_path(root: &Path, rel: &str) -> bool {
     rel.starts_with("crates/platform/src/")
         || rel.starts_with("xtask/")
-        || rel.starts_with("tests/")
-        || rel.contains("/tests/")
-        || rel.ends_with("_test.rs")
+        || is_cargo_integration_test_path(rel)
+        || is_cfg_test_only_submodule(root, rel)
 }
 
-fn is_ui_egui_prod_path(rel: &str) -> bool {
-    rel.starts_with("crates/ui-egui/src/") && !rel.contains("/tests/") && !rel.ends_with("_test.rs")
+fn is_ui_egui_prod_path(root: &Path, rel: &str) -> bool {
+    rel.starts_with("crates/ui-egui/src/") && !is_cfg_test_only_submodule(root, rel)
 }
 
 pub(crate) fn collapse_colon_whitespace(src: &str) -> (String, Vec<usize>) {
@@ -1094,7 +1244,9 @@ mod tests {
             ("crates/engine/src/after_cfg.rs", "#[cfg(test)]\nuse std::process::Command;\npub fn bad() { let _ = process::Command::new(\"ls\"); }\n"),
             ("crates/platform/src/process.rs", "pub fn ok() { let _ = std::process::Command::new(\"sh\"); }\n"),
             ("crates/engine/tests/it.rs", "fn t() { let _ = std::process::Command::new(\"sh\"); }\n"),
-            ("crates/engine/src/foo_test.rs", "fn t() { let _ = std::process::Command::new(\"sh\"); }\n"),
+            ("crates/engine/src/lib.rs", "#[cfg(test)]\nmod cfg_only_test;\n"),
+            ("crates/engine/src/cfg_only_test.rs", "fn t() { let _ = std::process::Command::new(\"sh\"); }\n"),
+            ("crates/engine/src/unguarded_test.rs", "pub fn t() { let _ = std::process::Command::new(\"sh\"); }\n"),
             (
                 "crates/ui-egui/src/bad_io.rs",
                 "pub fn w() {\n    let _ = std::fs::write(\"a\", b\"b\");\n    let _ = File::create(\"c\");\n    let _ = OpenOptions::new();\n}\n",
@@ -1112,6 +1264,7 @@ mod tests {
             vec![
                 "crates/engine/src/after_cfg.rs:3: [raw-process] forbidden `process::Command::new`",
                 "crates/engine/src/bad.rs:2: [raw-process] forbidden `std::process::Command::new`",
+                "crates/engine/src/unguarded_test.rs:1: [raw-process] forbidden `std::process::Command::new`",
                 "crates/ui-egui/src/bad_io.rs:2: [ui-raw-io] forbidden `std::fs::write`",
                 "crates/ui-egui/src/bad_io.rs:3: [ui-raw-io] forbidden `File::create`",
                 "crates/ui-egui/src/bad_io.rs:4: [ui-raw-io] forbidden `OpenOptions`",
@@ -1183,6 +1336,53 @@ mod tests {
             ("crates/format/src/bad_idx.rs", "allow(clippy::indexing_slicing)"),
         ] {
             assert!(lint_hits.iter().any(|h| h.path == path && h.pattern == pat), "missing ({path}, {pat}) in {lint_hits:?}");
+        }
+
+        // AUD-12-18: #[expect(...)], clippy::restriction, nested #![deny(...)], inline/dotted/multiline [patch] package,
+        // std::os::{unix,windows}::fs aliases & wildcards, and top-level/nested symlink fail-closed.
+        for patch_toml in [
+            "[patch.crates-io]\nhelper = { package = \"craft-core\", path = \"../craft-core\" }\n",
+            "[patch.crates-io]\nhelper = { path = \"../package\", version = \"0.1\", package = \"craft-core\" }\n",
+            "[patch.crates-io]\nhelper.package = \"craft-core\"\n",
+            "[patch.crates-io]\nhelper = { package = \"\"\"\ncraft-\\\ncore\"\"\", path = \"../x\" }\n",
+            "[patch.crates-io]\nhelper = { package = \"craft-\\u0063ore\", path = \"../x\" }\n",
+        ] {
+            let aud18_patch = scan_patch_sections(patch_toml);
+            assert_eq!(aud18_patch.len(), 1, "{patch_toml} -> {aud18_patch:?}");
+            assert!(matches!(&aud18_patch[0], Violation::SuiteCrate { dep, .. } if dep == "craft-core"));
+        }
+
+        let aud18_dir = TestDir::new("layers-aud12-18");
+        aud18_dir.write("Cargo.toml", "[workspace.lints.clippy]\nstring_slice = \"deny\"\n");
+        aud18_dir.write("crates/format/src/lib.rs", "mod dummy { #![deny(clippy::indexing_slicing)] }\n");
+        aud18_dir.write("crates/format/src/exp.rs", "#[expect(clippy::indexing_slicing)]\npub fn f(s: &[u8]) -> u8 { s[0] }\n");
+        aud18_dir.write("crates/format/src/grp.rs", "#[allow(clippy::restriction)]\npub fn g(s: &str) -> &str { &s[0..1] }\n");
+        aud18_dir.write("crates/ui-egui/src/os_alias.rs", "use std::os::unix as u;\npub fn f() { let _ = u::fs::symlink(\"a\", \"b\"); }\n");
+        aud18_dir.write("crates/ui-egui/src/unix_fs.rs", "use std::os::unix::fs;\npub fn f() { let _ = fs::symlink(\"a\", \"b\"); }\n");
+        aud18_dir.write("crates/ui-egui/src/win_fs.rs", "use std::os::windows::fs;\npub fn f() { let _ = fs::symlink_file(\"a\", \"b\"); }\n");
+        aud18_dir.write("crates/ui-egui/src/win_glob.rs", "use std::os::windows::fs::*;\npub fn f() { let _ = symlink_dir(\"a\", \"b\"); }\n");
+        let aud18_lint = check_lint_policy(aud18_dir.path());
+        assert!(aud18_lint.iter().any(|h| h.path == "crates/format/src/lib.rs"), "nested deny must not satisfy crate root: {aud18_lint:?}");
+        assert!(aud18_lint.iter().any(|h| h.path == "crates/format/src/exp.rs"), "#[expect] bypass: {aud18_lint:?}");
+        assert!(aud18_lint.iter().any(|h| h.path == "crates/format/src/grp.rs"), "clippy::restriction bypass: {aud18_lint:?}");
+        let aud18_hyg = check_source_hygiene(aud18_dir.path());
+        assert!(aud18_hyg.iter().any(|h| h.path == "crates/ui-egui/src/os_alias.rs" && h.pattern == "std::os::unix"), "{aud18_hyg:?}");
+        assert!(aud18_hyg.iter().any(|h| h.path == "crates/ui-egui/src/unix_fs.rs" && h.pattern == "fs::symlink"), "{aud18_hyg:?}");
+        assert!(aud18_hyg.iter().any(|h| h.path == "crates/ui-egui/src/win_fs.rs" && h.pattern == "fs::symlink_file"), "{aud18_hyg:?}");
+        assert!(aud18_hyg.iter().any(|h| h.path == "crates/ui-egui/src/win_glob.rs" && h.pattern == "std::os::windows::fs::*"), "{aud18_hyg:?}");
+
+        #[cfg(unix)]
+        {
+            let sym_dir = TestDir::new("layers-aud12-18-sym");
+            let outside = sym_dir.join("outside_crates");
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(outside.join("leak.rs"), "pub fn f() { let _ = std::process::Command::new(\"sh\"); }\n").unwrap();
+            std::os::unix::fs::symlink(&outside, sym_dir.join("crates")).unwrap();
+            let sym_hits = check_source_hygiene(sym_dir.path());
+            assert!(
+                sym_hits.iter().any(|h| h.path == "crates" && h.rule == "io-error" && h.pattern == "symlinked source path"),
+                "top-level symlinked crates/ must fail closed: {sym_hits:?}"
+            );
         }
     }
 }

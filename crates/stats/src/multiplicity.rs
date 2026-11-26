@@ -426,16 +426,18 @@ fn step_up_fdr_finite(raw_p: &[f64], multiplier: f64) -> Vec<f64> {
 /// `r1 = m` everything is; otherwise `m0_hat = m - r1` and stage 2 runs the linear step-up with
 /// thresholds `i * q' / m0_hat`. The returned values depend on `fdr_q` (via `q'` and `m0_hat`), so
 /// they are threshold-specific decision values rather than `q`-independent *q*-values.
-/// Non-finite entries (`NaN`, `±Inf`) remain `NaN` and are excluded from `m`.
+/// Any finite `fdr_q` strictly in `(0, 1)` is used directly without floor clamping; non-finite or
+/// out-of-range `fdr_q` yields `NaN` for every entry. Non-finite *p*-value entries (`NaN`, `±Inf`)
+/// remain `NaN` and are excluded from `m`.
 #[must_use]
 pub fn adjust_two_stage_bky(raw_p: &[f64], fdr_q: f64) -> Vec<f64> {
     if raw_p.is_empty() {
         return Vec::new();
     }
-    if !fdr_q.is_finite() {
+    if !fdr_q.is_finite() || fdr_q <= 0.0 || fdr_q >= 1.0 {
         return vec![f64::NAN; raw_p.len()];
     }
-    let q = fdr_q.clamp(1e-6, 0.9999);
+    let q = fdr_q;
     with_finite_pvalues(raw_p, |vals| {
         let m = vals.len();
         let q_stage1 = q / (1.0 + q);
@@ -594,9 +596,16 @@ fn compare_groups_impl(
     if report_ci && (!ci_alpha.is_finite() || ci_alpha <= 0.0 || ci_alpha >= 1.0) {
         return Err(StatsError::InvalidParameter { name: "ci_alpha", value: ci_alpha });
     }
+    let requires_group_variance =
+        matches!(procedure, MultiplicityProcedure::GamesHowell | MultiplicityProcedure::TamhaneT2 | MultiplicityProcedure::DunnettT3);
     for g in groups {
         if !g.n.is_finite() || g.n <= 0.0 {
             return Err(StatsError::InvalidParameter { name: "group_n", value: g.n });
+        }
+        if requires_group_variance && g.n < 2.0 {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let actual = g.n.floor().max(0.0) as usize;
+            return Err(StatsError::InsufficientSampleSize { context: "unequal-variance pairwise comparison group", required: 2, actual });
         }
         if !g.mean.is_finite() {
             return Err(StatsError::InvalidParameter { name: "group_mean", value: g.mean });
@@ -918,16 +927,35 @@ fn compare_dunnett(
 
 /// Welch standard error `sqrt(s_a^2/n_a + s_b^2/n_b)` and Welch–Satterthwaite df for one pair,
 /// as used by the Games & Howell (1976), Tamhane (1979) T2 and Dunnett (1980) T3 procedures.
+///
+/// Scales group standard deviations by `s_max = max(s_a, s_b)` (and variance terms by their
+/// maximum) before squaring so neither `se` nor `df` can overflow or underflow to `NaN` across
+/// the full finite `f64` range. Returns `(NaN, NaN)` if either group has `n <= 1.0` or invalid SD.
 pub(crate) fn welch_pair_se_df(ga: &GroupComparisonInput, gb: &GroupComparisonInput) -> (f64, f64) {
-    let va = (ga.sd * ga.sd) / ga.n;
-    let vb = (gb.sd * gb.sd) / gb.n;
-    let v_sum = va + vb;
-    if v_sum <= 0.0 {
+    if !ga.n.is_finite() || !gb.n.is_finite() || ga.n <= 1.0 || gb.n <= 1.0 || !ga.sd.is_finite() || !gb.sd.is_finite() || ga.sd < 0.0 || gb.sd < 0.0
+    {
+        return (f64::NAN, f64::NAN);
+    }
+    let s_max = ga.sd.max(gb.sd);
+    if s_max <= 0.0 {
         return (0.0, (ga.n + gb.n - 2.0).max(1.0));
     }
-    let denom = (va * va) / (ga.n - 1.0).max(1.0) + (vb * vb) / (gb.n - 1.0).max(1.0);
-    let df = if denom > 0.0 { (v_sum * v_sum) / denom } else { (ga.n + gb.n - 2.0).max(1.0) };
-    (v_sum.sqrt(), df.max(1.0))
+    let sa = ga.sd / s_max;
+    let sb = gb.sd / s_max;
+    let ra = (sa * sa) / ga.n;
+    let rb = (sb * sb) / gb.n;
+    let r_sum = ra + rb;
+    if r_sum <= 0.0 {
+        return (0.0, (ga.n + gb.n - 2.0).max(1.0));
+    }
+    let se = s_max * r_sum.sqrt();
+    let r_max = ra.max(rb);
+    let ua = ra / r_max;
+    let ub = rb / r_max;
+    let u_sum = ua + ub;
+    let denom = (ua * ua) / (ga.n - 1.0) + (ub * ub) / (gb.n - 1.0);
+    let df = if denom > 0.0 && denom.is_finite() { (u_sum * u_sum) / denom } else { (ga.n + gb.n - 2.0).max(1.0) };
+    (se, df.max(1.0))
 }
 
 /// Games & Howell (1976) unequal-variance pairwise comparisons: per-pair Welch standard error and

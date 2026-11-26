@@ -10,13 +10,13 @@
 //! copy of each page. The output carries no `<lastmod>` dates, so it is a pure function of the
 //! published page set and `--check` can compare it byte for byte.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use curvebook_platform::write_atomic;
 
 use super::llms::{build_llms_full_txt, build_llms_txt};
-use super::verify::{find_tag_close, parse_minor_dir_version, parse_tag_attributes};
+use crate::pages_site::{extract_html_tag_name, find_html_tag_close, parse_html_tag_attributes, parse_minor_dir_version};
 use crate::scan_util::{is_real_dir, is_regular_file, read_dir_paths_sorted, walk_rel_files};
 
 /// The published base URL, optional custom domain, and landing pages live with the Pages publish
@@ -50,10 +50,17 @@ pub fn validate_site_config(site_base_url: &str, custom_domain: Option<&str>) ->
     if !site_base_url.starts_with("https://") || !site_base_url.ends_with('/') {
         return Err(format!("SITE_BASE_URL `{site_base_url}` must start with `https://` and end with `/`"));
     }
+    if site_base_url.chars().any(|c| c.is_whitespace() || c.is_ascii_control() || matches!(c, '"' | '\'' | '<' | '>' | '&')) {
+        return Err(format!("SITE_BASE_URL `{site_base_url}` must not contain whitespace, control chars, or HTML metacharacters"));
+    }
     if let Some(domain) = custom_domain {
         let trimmed = domain.trim();
-        if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains("://") || trimmed.chars().any(char::is_whitespace) {
-            return Err(format!("CUSTOM_DOMAIN `{domain}` must be a bare hostname without scheme or path"));
+        if trimmed.is_empty()
+            || trimmed.contains('/')
+            || trimmed.contains("://")
+            || trimmed.chars().any(|c| c.is_whitespace() || c.is_ascii_control() || matches!(c, '"' | '\'' | '<' | '>' | '&'))
+        {
+            return Err(format!("CUSTOM_DOMAIN `{domain}` must be a bare hostname without scheme, path, or HTML metacharacters"));
         }
         let expected_base = format!("https://{trimmed}/");
         if site_base_url != expected_base {
@@ -107,7 +114,19 @@ pub fn build_sitemap_with_manual(root: &Path, manual_dir: Option<&Path>) -> Resu
         }
     };
     if let Some(manual_root) = resolved_manual {
-        let snapshot_sub = if is_regular_file(&manual_root.join("latest/manifest.json")) {
+        let latest_dir = manual_root.join("latest");
+        if let Ok(meta) = std::fs::symlink_metadata(&latest_dir)
+            && meta.file_type().is_symlink()
+        {
+            return Err(format!("{}: symlinked `latest/` directory is forbidden in sitemap", latest_dir.display()));
+        }
+        let latest_manifest = latest_dir.join("manifest.json");
+        if let Ok(meta) = std::fs::symlink_metadata(&latest_manifest)
+            && meta.file_type().is_symlink()
+        {
+            return Err(format!("{}: symlinked `manifest.json` is forbidden in sitemap", latest_manifest.display()));
+        }
+        let snapshot_sub = if is_real_dir(&latest_dir) && is_regular_file(&latest_manifest) {
             Some(String::from("latest"))
         } else {
             newest_snapshot_dir(&manual_root)?
@@ -172,9 +191,9 @@ pub fn check_search_metadata_with_manual(root: &Path, manual_dir: Option<&Path>)
     for page in LANDING_PAGES {
         let html = std::fs::read_to_string(root.join("docs").join(page)).map_err(|e| format!("read docs/{page}: {e}"))?;
         let tag = canonical_link_tag(page);
-        let lower = html.to_ascii_lowercase();
-        let canonical_count = lower.matches("rel=\"canonical\"").count() + lower.matches("rel='canonical'").count();
-        if canonical_count != 1 || !html.contains(&tag) {
+        let expected_url = published_url(page);
+        let canonical_hrefs = extract_canonical_hrefs(page, &html)?;
+        if canonical_hrefs.len() != 1 || canonical_hrefs[0] != expected_url {
             return Err(format!("docs/{page}: expected exactly one canonical link `{tag}`"));
         }
         check_landing_page_social_meta(root, page, &html)?;
@@ -182,8 +201,66 @@ pub fn check_search_metadata_with_manual(root: &Path, manual_dir: Option<&Path>)
     Ok(())
 }
 
+fn extract_canonical_hrefs(page: &str, html: &str) -> Result<Vec<String>, String> {
+    let mut hrefs = Vec::new();
+    let mut rest = html;
+    while let Some((_, after_lt)) = rest.split_once('<') {
+        if !crate::pages_site::is_html_tag_start(after_lt) {
+            rest = after_lt;
+            continue;
+        }
+        if let Some(after_comment) = after_lt.strip_prefix("!--") {
+            let Some(close_end) = crate::pages_site::find_html_comment_end(after_comment) else {
+                return Err(format!("docs/{page}: unclosed HTML comment `<!--`"));
+            };
+            rest = after_comment.get(close_end..).ok_or_else(|| format!("docs/{page}: unclosed HTML comment `<!--`"))?;
+            continue;
+        }
+        let Some(tag_end) = find_html_tag_close(after_lt) else {
+            return Err(format!("docs/{page}: unclosed HTML tag or attribute quote"));
+        };
+        let Some((tag_body, tail)) = after_lt.split_at_checked(tag_end) else {
+            return Err(format!("docs/{page}: unclosed HTML tag or attribute quote"));
+        };
+        rest = tail.strip_prefix('>').unwrap_or(tail);
+        let trimmed = tag_body.trim();
+        if trimmed.starts_with('/') {
+            continue;
+        }
+        let tag_lower = extract_html_tag_name(trimmed).to_ascii_lowercase();
+        if matches!(tag_lower.as_str(), "title" | "textarea" | "script" | "style") {
+            let (_, after_close) =
+                crate::pages_site::skip_html_raw_or_rcdata_element(rest, 0, &tag_lower).map_err(|e| format!("docs/{page}: {e}"))?;
+            rest = rest.get(after_close..).unwrap_or("");
+            continue;
+        }
+        if tag_lower != "link" {
+            continue;
+        }
+        let mut rel_val: Option<String> = None;
+        let mut href_val: Option<String> = None;
+        for (k, v) in parse_html_tag_attributes(trimmed) {
+            if k.eq_ignore_ascii_case("rel") {
+                if rel_val.is_some() {
+                    return Err(format!("docs/{page}: duplicate `rel` attribute on `<link>`"));
+                }
+                rel_val = Some(v);
+            } else if k.eq_ignore_ascii_case("href") {
+                if href_val.is_some() {
+                    return Err(format!("docs/{page}: duplicate `href` attribute on `<link>`"));
+                }
+                href_val = Some(v);
+            }
+        }
+        if rel_val.as_deref().is_some_and(|r| r.split_whitespace().any(|tok| tok.eq_ignore_ascii_case("canonical"))) {
+            hrefs.push(href_val.unwrap_or_default());
+        }
+    }
+    Ok(hrefs)
+}
+
 fn check_landing_page_social_meta(root: &Path, page: &str, html: &str) -> Result<(), String> {
-    let metas = extract_meta_map(html);
+    let metas = extract_meta_map(page, html)?;
     for required in ["og:type", "og:title", "og:description", "og:url", "og:image", "twitter:card"] {
         match metas.get(required) {
             Some(val) if !val.trim().is_empty() => {}
@@ -212,43 +289,68 @@ fn check_landing_page_social_meta(root: &Path, page: &str, html: &str) -> Result
     Ok(())
 }
 
-/// Extract `<meta property="..." content="...">` and `<meta name="..." content="...">` pairs.
-fn extract_meta_map(html: &str) -> BTreeMap<String, String> {
+/// Extract `<meta property="..." content="...">` and `<meta name="..." content="...">` pairs,
+/// rejecting duplicate social (`og:*`/`twitter:*`) keys and duplicate attributes on one `<meta>`.
+fn extract_meta_map(page: &str, html: &str) -> Result<BTreeMap<String, String>, String> {
     let mut map = BTreeMap::new();
+    let mut seen_social: BTreeSet<String> = BTreeSet::new();
     let mut rest = html;
     while let Some((_, after_lt)) = rest.split_once('<') {
-        if let Some(after_comment) = after_lt.strip_prefix("!--") {
-            let Some((_, after_close)) = after_comment.split_once("-->") else {
-                break;
-            };
-            rest = after_close;
+        if !crate::pages_site::is_html_tag_start(after_lt) {
+            rest = after_lt;
             continue;
         }
-        let Some(tag_end) = find_tag_close(after_lt) else {
-            break;
+        if let Some(after_comment) = after_lt.strip_prefix("!--") {
+            let Some(close_end) = crate::pages_site::find_html_comment_end(after_comment) else {
+                return Err(format!("docs/{page}: unclosed HTML comment `<!--`"));
+            };
+            rest = after_comment.get(close_end..).ok_or_else(|| format!("docs/{page}: unclosed HTML comment `<!--`"))?;
+            continue;
+        }
+        let Some(tag_end) = find_html_tag_close(after_lt) else {
+            return Err(format!("docs/{page}: unclosed HTML tag or attribute quote"));
         };
-        let (tag_body, tail) = after_lt.split_at(tag_end);
+        let Some((tag_body, tail)) = after_lt.split_at_checked(tag_end) else {
+            return Err(format!("docs/{page}: unclosed HTML tag or attribute quote"));
+        };
         rest = tail.strip_prefix('>').unwrap_or(tail);
 
         let trimmed = tag_body.trim();
-        let tag_name = trimmed.split_whitespace().next().unwrap_or("");
-        if !tag_name.eq_ignore_ascii_case("meta") {
+        if trimmed.starts_with('/') {
+            continue;
+        }
+        let tag_lower = extract_html_tag_name(trimmed).to_ascii_lowercase();
+        if matches!(tag_lower.as_str(), "title" | "textarea" | "script" | "style") {
+            let (_, after_close) =
+                crate::pages_site::skip_html_raw_or_rcdata_element(rest, 0, &tag_lower).map_err(|e| format!("docs/{page}: {e}"))?;
+            rest = rest.get(after_close..).unwrap_or("");
+            continue;
+        }
+        if tag_lower != "meta" {
             continue;
         }
         let mut key: Option<String> = None;
         let mut content: Option<String> = None;
-        for (k, v) in parse_tag_attributes(trimmed) {
+        for (k, v) in parse_html_tag_attributes(trimmed) {
             if k.eq_ignore_ascii_case("property") || k.eq_ignore_ascii_case("name") {
-                key = Some(v.to_ascii_lowercase());
+                if key.is_none() {
+                    key = Some(v.to_ascii_lowercase());
+                }
             } else if k.eq_ignore_ascii_case("content") {
+                if content.is_some() {
+                    return Err(format!("docs/{page}: duplicate `content` attribute on `<meta>`"));
+                }
                 content = Some(v);
             }
         }
         if let (Some(k), Some(c)) = (key, content) {
-            map.insert(k, c);
+            if (k.starts_with("og:") || k.starts_with("twitter:")) && !seen_social.insert(k.clone()) {
+                return Err(format!("docs/{page}: duplicate `<meta>` tag for `{k}`"));
+            }
+            map.entry(k).or_insert(c);
         }
     }
-    map
+    Ok(map)
 }
 
 /// Newest `docs/manual/v<major>.<minor>/` directory that carries a release `manifest.json`.
@@ -258,15 +360,21 @@ fn newest_snapshot_dir(manual_dir: &Path) -> Result<Option<String>, String> {
     }
     let mut best: Option<((u64, u64), String)> = None;
     for path in read_dir_paths_sorted(manual_dir)? {
-        if !is_real_dir(&path) {
-            continue;
-        }
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if let Some(ver) = parse_minor_dir_version(&name)
-            && is_regular_file(&path.join("manifest.json"))
-            && best.as_ref().is_none_or(|(b, _)| ver > *b)
-        {
-            best = Some((ver, name));
+        if let Some(ver) = parse_minor_dir_version(&name) {
+            let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+            if meta.file_type().is_symlink() {
+                return Err(format!("{}: symlinked snapshot directory is forbidden in sitemap", path.display()));
+            }
+            let manifest = path.join("manifest.json");
+            if let Ok(m_meta) = std::fs::symlink_metadata(&manifest)
+                && m_meta.file_type().is_symlink()
+            {
+                return Err(format!("{}: symlinked `manifest.json` is forbidden in sitemap", manifest.display()));
+            }
+            if meta.file_type().is_dir() && is_regular_file(&manifest) && best.as_ref().is_none_or(|(b, _)| ver > *b) {
+                best = Some((ver, name));
+            }
         }
     }
     Ok(best.map(|(_, name)| name))
@@ -397,5 +505,70 @@ mod tests {
 
         std::fs::remove_file(root.join("docs/privacy.html")).unwrap();
         assert!(build_sitemap_with_manual(root.path(), None).unwrap_err().contains("LANDING_PAGES"));
+    }
+
+    #[test]
+    fn aud_12_41_and_44_rejects_commented_canonical_duplicate_og_slash_meta_symlink_latest_and_bad_base_url() {
+        // AUD-12-44: reject HTML metacharacters / whitespace in SITE_BASE_URL when CUSTOM_DOMAIN is None.
+        for bad in ["https://example.com/\" onclick=\"x/", "https://example.com/<bad>/", "https://example.com/a b/", "https://example.com/a&b/"] {
+            assert!(validate_site_config(bad, None).is_err(), "expected rejection for `{bad}`");
+        }
+
+        let root = TestDir::new("docs-seo-aud-12-41");
+        seed_landing_pages(&root);
+        let generated_root = root.join("target/docs-manual/_root");
+        write_sitemap_into(root.path(), None, &generated_root).unwrap();
+        write_not_found_page(root.path()).unwrap();
+        write_llms_files_into(root.path(), &generated_root).unwrap();
+
+        let base_privacy = valid_landing_html("privacy.html");
+        let canon_tag = canonical_link_tag("privacy.html");
+
+        // 1. Commented-out canonical link must NOT satisfy canonical check.
+        let commented_canon = base_privacy.replace(&canon_tag, &format!("<!-- {canon_tag} -->"));
+        root.write("docs/privacy.html", &commented_canon);
+        assert!(check_search_metadata_with_manual(root.path(), None).unwrap_err().contains("canonical"));
+
+        // 2. Duplicate og:url (first bad, second valid) must fail closed.
+        let dup_og = base_privacy
+            .replace("<meta property=\"og:url\"", "<meta property=\"og:url\" content=\"https://evil.example/\"><meta property=\"og:url\"");
+        root.write("docs/privacy.html", &dup_og);
+        assert!(check_search_metadata_with_manual(root.path(), None).unwrap_err().contains("duplicate `<meta>`"));
+
+        // 3. Slash tag-name delimiter `<meta/property="og:url"...>` is parsed and catches duplicates.
+        let slash_dup_og = base_privacy
+            .replace("<meta property=\"og:url\"", "<meta/property=\"og:url\"/content=\"https://evil.example/\"><meta property=\"og:url\"");
+        root.write("docs/privacy.html", &slash_dup_og);
+        assert!(check_search_metadata_with_manual(root.path(), None).unwrap_err().contains("duplicate `<meta>`"));
+
+        // 3b. Quote-desync and abrupt/bang HTML5 comments cannot hide duplicate canonical or og:* meta tags.
+        for poisoned_prefix in [
+            "<p title=x\"><link rel=\"canonical\" href=\"https://evil.example/\"><b z=1\">",
+            "<!--><link rel=\"canonical\" href=\"https://evil.example/\"><!-- -->",
+            "<!---><meta property=\"og:url\" content=\"https://evil.example/\"><!-- -->",
+            "<!-- c --!><meta property=\"og:url\" content=\"https://evil.example/\"><!-- -->",
+            "< a=\"><link rel=\"canonical\" href=\"https://evil.example/\">",
+            "<<meta property=\"og:url\" content=\"https://evil.example/\">",
+            "<meta =\" property=\"og:url\" content=\"https://evil.example/\" x=\">",
+            "<title><!--</title><link rel=\"canonical\" href=\"https://evil.example/\"><!-- -->",
+            "<textarea><!--</textarea><meta property=\"og:url\" content=\"https://evil.example/\"><!-- -->",
+        ] {
+            let poisoned = base_privacy.replace("<head>", &format!("<head>{poisoned_prefix}"));
+            root.write("docs/privacy.html", &poisoned);
+            assert!(check_search_metadata_with_manual(root.path(), None).is_err(), "expected rejection for `{poisoned_prefix}`");
+        }
+
+        // 4. Symlinked latest/ directory must fail closed in build_sitemap_with_manual.
+        #[cfg(unix)]
+        {
+            root.write("docs/privacy.html", &base_privacy);
+            let outside = root.join("outside_snap");
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(outside.join("manifest.json"), "{}").unwrap();
+            std::fs::write(outside.join("index.html"), "<html></html>").unwrap();
+            std::fs::create_dir_all(root.join("target/docs-manual")).unwrap();
+            std::os::unix::fs::symlink(&outside, root.join("target/docs-manual/latest")).unwrap();
+            assert!(build_sitemap_with_manual(root.path(), None).unwrap_err().contains("symlinked `latest/`"));
+        }
     }
 }

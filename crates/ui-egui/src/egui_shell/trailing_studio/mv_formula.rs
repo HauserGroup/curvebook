@@ -81,6 +81,21 @@ pub fn studio_formula_signature(name: &str) -> Option<&'static str> {
     STUDIO_FORMULA_FUNCS.iter().find(|entry| entry.name == name).map(|entry| entry.signature)
 }
 
+fn unique_new_calc_title(mv: &MultipleVariablesTable, draft: &str) -> String {
+    let base = draft.trim();
+    let candidate = if base.is_empty() { format!("Calc {}", mv.variables.len() + 1) } else { base.to_owned() };
+    if mv.find_variable(&candidate).is_none() {
+        return candidate;
+    }
+    for n in 2..10_000 {
+        let numbered = format!("{candidate} ({n})");
+        if mv.find_variable(&numbered).is_none() {
+            return numbered;
+        }
+    }
+    format!("Calc {}", mv.variables.len() + 1)
+}
+
 fn role_label(role: VariableRole) -> &'static str {
     match role {
         VariableRole::Continuous => "Continuous",
@@ -90,52 +105,23 @@ fn role_label(role: VariableRole) -> &'static str {
     }
 }
 
-pub(super) fn render_mv_formula_studio(
+fn render_mv_variable_selector(
     ui: &mut egui::Ui,
     ds: &DataSheet,
     mv: &MultipleVariablesTable,
+    active_col: usize,
     state: &mut TrailingStudioEguiState,
     ctx_in: TrailingStudioContext<'_>,
     meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
 ) {
     let tokens = ctx_in.tokens;
-    let locale = &tokens.locale;
     let editable = ctx_in.enabled && !ds.frozen;
     let frozen_reason = ds.frozen.then_some("data sheet is frozen (read-only)");
     let col_count = mv.variables.len();
-    if col_count > 0 && state.mv_selected_col >= col_count {
-        state.mv_selected_col = 0;
-    }
-    let active_col = state.mv_selected_col;
-
-    // Sync formula & title drafts cleanly whenever selected sheet or column changes.
-    if state.mv_synced_sheet.as_ref() != Some(&ds.id) || state.mv_synced_col != Some(active_col) {
-        state.mv_synced_sheet = Some(ds.id.clone());
-        state.mv_synced_col = Some(active_col);
-        if let Some(var) = mv.variables.get(active_col) {
-            state.mv_title_draft = var.title.clone();
-            state.mv_formula_draft = match &var.source {
-                VariableSource::Calculated { formula } => formula.clone(),
-                VariableSource::Entered => String::new(),
-            };
-        }
-    }
-
-    // Keep live colored operand column outline highlights synced with the active formula!
-    let effective_formula = if !state.mv_formula_draft.trim().is_empty() {
-        state.mv_formula_draft.as_str()
-    } else if let Some(VariableSource::Calculated { formula }) = mv.variables.get(active_col).map(|v| &v.source) {
-        formula.as_str()
-    } else {
-        ""
-    };
-    state.mv_operand_highlights = resolve_formula_operand_highlights(&mv.variables, effective_formula);
-
-    // Variable selector row
-    widgets::subheader(ui, tr(locale, "mv.panel.var_name"));
+    let creating_new_col = active_col == col_count;
+    widgets::subheader(ui, tr(tokens.locale, "mv.panel.var_name"));
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+        ui.spacing_mut().item_spacing = Vec2::new(tokens.metrics.space_xs, tokens.metrics.space_xs);
         let max_w = (ui.available_width() * 0.48).max(60.0);
         for (idx, var) in mv.variables.iter().enumerate() {
             let hl = state.mv_operand_highlights.iter().find(|h| h.variable_index == idx).map(MvOperandHighlight::color32);
@@ -159,10 +145,93 @@ pub(super) fn render_mv_formula_studio(
             );
             if r {
                 state.mv_selected_col = idx;
-                state.mv_synced_col = None;
+                state.mv_synced_sheet = Some(ds.id.clone());
+                state.mv_synced_col = Some(idx);
+                state.mv_title_draft = var.title.clone();
+                state.mv_formula_draft = match &var.source {
+                    VariableSource::Calculated { formula } => formula.clone(),
+                    VariableSource::Entered => String::new(),
+                };
             }
         }
+        let new_col_clicked = studio_chip(
+            ui,
+            tokens,
+            meta,
+            &StudioChipSpec {
+                label: "+ New",
+                tooltip: "Create a new calculated variable column without overwriting existing data",
+                max_w: 68.0,
+                selected: creating_new_col,
+                enabled: editable,
+                border_override: None,
+                widget_id: "inspector.mv.new_calc_col",
+                role: "button",
+                command_id: None,
+                disabled_reason: frozen_reason,
+            },
+        );
+        if new_col_clicked {
+            state.mv_selected_col = col_count;
+            state.mv_synced_sheet = Some(ds.id.clone());
+            state.mv_synced_col = Some(col_count);
+            state.mv_title_draft = unique_new_calc_title(mv, "");
+            state.mv_formula_draft.clear();
+            state.mv_sub_tab = 0;
+        }
     });
+}
+
+pub(super) fn render_mv_formula_studio(
+    ui: &mut egui::Ui,
+    ds: &DataSheet,
+    mv: &MultipleVariablesTable,
+    state: &mut TrailingStudioEguiState,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let tokens = ctx_in.tokens;
+    let locale = &tokens.locale;
+    let editable = ctx_in.enabled && !ds.frozen;
+    let frozen_reason = ds.frozen.then_some("data sheet is frozen (read-only)");
+    let col_count = mv.variables.len();
+    // Allow `state.mv_selected_col == col_count` to represent creating a brand-new calculated column (`AUD-09-18`).
+    if state.mv_selected_col > col_count {
+        state.mv_selected_col = 0;
+    }
+    let active_col = state.mv_selected_col;
+
+    // Sync formula & title drafts cleanly whenever selected sheet or column changes.
+    if state.mv_synced_sheet.as_ref() != Some(&ds.id) || state.mv_synced_col != Some(active_col) {
+        state.mv_synced_sheet = Some(ds.id.clone());
+        state.mv_synced_col = Some(active_col);
+        if let Some(var) = mv.variables.get(active_col) {
+            state.mv_title_draft = var.title.clone();
+            state.mv_formula_draft = match &var.source {
+                VariableSource::Calculated { formula } => formula.clone(),
+                VariableSource::Entered => String::new(),
+            };
+        } else {
+            state.mv_title_draft = format!("Calc {}", col_count + 1);
+            state.mv_formula_draft.clear();
+        }
+    }
+
+    // Keep live colored operand column outline highlights synced with the active formula!
+    let effective_formula = if !state.mv_formula_draft.trim().is_empty() {
+        state.mv_formula_draft.as_str()
+    } else if let Some(VariableSource::Calculated { formula }) = mv.variables.get(active_col).map(|v| &v.source) {
+        formula.as_str()
+    } else {
+        ""
+    };
+    state.mv_operand_highlights = resolve_formula_operand_highlights(&mv.variables, effective_formula);
+
+    // Variable selector row
+    render_mv_variable_selector(ui, ds, mv, active_col, state, ctx_in, meta);
+    let active_col = state.mv_selected_col.min(col_count);
+    let creating_new_col = active_col == col_count;
 
     ui.add_space(4.0);
     let sub_tabs = [tr(locale, "mv.editor_btn"), "Role & Levels"];
@@ -212,14 +281,19 @@ pub(super) fn render_mv_formula_studio(
         state.mv_operand_highlights = resolve_formula_operand_highlights(&mv.variables, &state.mv_formula_draft);
 
         // Live validation + cycle badge
-        let formula_status = if state.mv_formula_draft.trim().is_empty() {
+        let syntax_status = if state.mv_formula_draft.trim().is_empty() {
             Ok("Enter an expression referencing [Columns]".to_owned())
-        } else if active_col < col_count {
+        } else {
+            parse_formula(&state.mv_formula_draft)
+                .map(|_| format!("Valid formula • {} operand highlight(s)", state.mv_operand_highlights.len()))
+                .map_err(|e| e.to_string())
+        };
+        let formula_status = if state.mv_formula_draft.trim().is_empty() || creating_new_col {
+            syntax_status.clone()
+        } else {
             validate_no_formula_cycle(mv, active_col, &state.mv_formula_draft)
                 .map(|()| format!("Valid formula • {} operand highlight(s)", state.mv_operand_highlights.len()))
                 .map_err(|e| e.to_string())
-        } else {
-            parse_formula(&state.mv_formula_draft).map(|_| String::from("Valid formula")).map_err(|e| e.to_string())
         };
         match &formula_status {
             Ok(msg) => ui.label(egui::RichText::new(msg).size(tokens.metrics.font_ui_small_pt).color(tokens.link_green)),
@@ -231,7 +305,7 @@ pub(super) fn render_mv_formula_studio(
             ui.add_space(2.0);
             widgets::dim_label(ui, "Operand Highlights");
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                ui.spacing_mut().item_spacing = Vec2::new(tokens.metrics.space_xs, tokens.metrics.space_xs);
                 for (i, hl) in state.mv_operand_highlights.iter().enumerate() {
                     let lbl = format!("[{}] {}", hl.variable_title, hl.color_hex);
                     let wid = format!("inspector.mv.operand_highlight.{i}");
@@ -256,16 +330,22 @@ pub(super) fn render_mv_formula_studio(
             });
         }
 
+        let is_entered_col = mv.variables.get(active_col).is_some_and(|v| matches!(v.source, VariableSource::Entered));
         let can_apply = editable && !state.mv_formula_draft.trim().is_empty() && formula_status.is_ok();
         let apply_reason = frozen_reason.or_else(|| (!can_apply).then_some("enter a valid non-circular formula"));
+        let apply_label = if creating_new_col { "Add Calculated Column" } else { "Apply Formula" };
         ui.add_space(4.0);
         if studio_full_button(
             ui,
             tokens,
             meta,
             &StudioButtonSpec {
-                label: "Apply Formula",
-                tooltip: "Save calculated variable formula (table.setCalculatedVariable)",
+                label: apply_label,
+                tooltip: if creating_new_col {
+                    "Append a new calculated variable column (table.setCalculatedVariable)"
+                } else {
+                    "Save calculated variable formula onto the selected column (table.setCalculatedVariable)"
+                },
                 selected: false,
                 enabled: can_apply,
                 primary: true,
@@ -274,14 +354,20 @@ pub(super) fn render_mv_formula_studio(
                 disabled_reason: apply_reason,
             },
         ) {
-            let title =
-                if state.mv_title_draft.trim().is_empty() { format!("Calc {}", col_count + 1) } else { state.mv_title_draft.trim().to_owned() };
+            let title = if creating_new_col {
+                unique_new_calc_title(mv, &state.mv_title_draft)
+            } else if state.mv_title_draft.trim().is_empty() {
+                format!("Calc {}", col_count + 1)
+            } else {
+                state.mv_title_draft.trim().to_owned()
+            };
             let mut params = json!({
                 "sheet_id": ds.id.as_str(),
                 "title": title,
                 "formula": state.mv_formula_draft.trim(),
             });
-            if active_col < col_count
+            if !creating_new_col
+                && active_col < col_count
                 && let Some(obj) = params.as_object_mut()
             {
                 obj.insert(String::from("col"), json!(active_col));
@@ -289,10 +375,42 @@ pub(super) fn render_mv_formula_studio(
             intents.push_engine("table.setCalculatedVariable", params);
         }
 
+        // Always provide a safe create-new-column path when an Entered column is focused so users
+        // never overwrite entered data in-place or hit self-cycle errors (`AUD-09-18`).
+        if is_entered_col {
+            let can_add_new = editable && !state.mv_formula_draft.trim().is_empty() && syntax_status.is_ok();
+            let add_reason = frozen_reason.or_else(|| (!can_add_new).then_some("enter a valid formula expression"));
+            if studio_full_button(
+                ui,
+                tokens,
+                meta,
+                &StudioButtonSpec {
+                    label: "Add as New Calculated Column",
+                    tooltip: "Append a new calculated column without overwriting the focused entered column",
+                    selected: false,
+                    enabled: can_add_new,
+                    primary: false,
+                    widget_id: "inspector.mv.add_new_formula",
+                    command_id: Some("table.setCalculatedVariable"),
+                    disabled_reason: add_reason,
+                },
+            ) {
+                let title = unique_new_calc_title(mv, &state.mv_title_draft);
+                intents.push_engine(
+                    "table.setCalculatedVariable",
+                    json!({
+                        "sheet_id": ds.id.as_str(),
+                        "title": title,
+                        "formula": state.mv_formula_draft.trim(),
+                    }),
+                );
+            }
+        }
+
         ui.add_space(6.0);
         widgets::subheader(ui, tr(locale, "mv.panel.column_vars"));
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+            ui.spacing_mut().item_spacing = Vec2::new(tokens.metrics.space_xs, tokens.metrics.space_xs);
             let max_w = (ui.available_width() * 0.48).max(56.0);
             for (idx, var) in mv.variables.iter().enumerate() {
                 let hl = state.mv_operand_highlights.iter().find(|h| h.variable_index == idx).map(MvOperandHighlight::color32);
@@ -330,9 +448,12 @@ pub(super) fn render_mv_formula_studio(
         ui.add(egui::TextEdit::singleline(&mut state.mv_fn_filter).desired_width(ui.available_width()).hint_text("Search functions..."));
         let filter_lower = state.mv_fn_filter.trim().to_ascii_lowercase();
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+            ui.spacing_mut().item_spacing = Vec2::new(tokens.metrics.space_xs, tokens.metrics.space_xs);
             for (idx, func) in STUDIO_FORMULA_FUNCS.iter().enumerate() {
-                if !filter_lower.is_empty() && !func.name.contains(&filter_lower) && !func.summary.to_ascii_lowercase().contains(&filter_lower) {
+                if !filter_lower.is_empty()
+                    && !func.name.to_ascii_lowercase().contains(&filter_lower)
+                    && !func.summary.to_ascii_lowercase().contains(&filter_lower)
+                {
                     continue;
                 }
                 let wid = format!("inspector.mv.fn.{idx}");
@@ -371,116 +492,8 @@ pub(super) fn render_mv_formula_studio(
                     ui.label(egui::RichText::new(spec.summary).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
                 });
         }
-    } else if let Some(var) = mv.variables.get(active_col) {
-        // Role & Levels sub-tab
-        let cur_role = var.role;
-        ui.label(egui::RichText::new(format!("{} ({})", var.title, role_label(cur_role))).size(12.0).strong().color(tokens.text_strong));
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-            for (slug, lbl, r_kind) in [
-                ("continuous", "Continuous", VariableRole::Continuous),
-                ("categorical", "Categorical", VariableRole::Categorical),
-                ("label", "Label", VariableRole::Label),
-            ] {
-                let wid = format!("inspector.mv.role.{slug}");
-                let role_enabled = editable && cur_role != VariableRole::Calculated;
-                let role_reason =
-                    frozen_reason.or_else(|| (cur_role == VariableRole::Calculated).then_some("calculated columns lock Calculated role"));
-                let r = studio_chip(
-                    ui,
-                    tokens,
-                    meta,
-                    &StudioChipSpec {
-                        label: lbl,
-                        tooltip: "Assign variable semantic role",
-                        max_w: 88.0,
-                        selected: cur_role == r_kind,
-                        enabled: role_enabled,
-                        border_override: None,
-                        widget_id: &wid,
-                        role: "button",
-                        command_id: Some("table.setVariableRole"),
-                        disabled_reason: role_reason,
-                    },
-                );
-                if r {
-                    intents.push_engine("table.setVariableRole", json!({ "sheet_id": ds.id.as_str(), "col": active_col, "role": slug }));
-                }
-            }
-        });
-
-        if cur_role == VariableRole::Categorical {
-            ui.add_space(6.0);
-            widgets::subheader(ui, tr(locale, "mv.vars.order_mode"));
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-                for (order_slug, lbl, active) in [
-                    ("entry_order", "Entry", matches!(var.level_order.order, LevelOrderKind::EntryOrder)),
-                    ("alphabetical", "A-Z", matches!(var.level_order.order, LevelOrderKind::Alphabetical)),
-                    ("frequency_descending", "Freq ↓", matches!(var.level_order.order, LevelOrderKind::FrequencyDescending)),
-                    ("frequency_ascending", "Freq ↑", matches!(var.level_order.order, LevelOrderKind::FrequencyAscending)),
-                ] {
-                    let wid = format!("inspector.mv.order.{order_slug}");
-                    let r = studio_chip(
-                        ui,
-                        tokens,
-                        meta,
-                        &StudioChipSpec {
-                            label: lbl,
-                            tooltip: "Set categorical level ordering",
-                            max_w: 74.0,
-                            selected: active,
-                            enabled: editable,
-                            border_override: None,
-                            widget_id: &wid,
-                            role: "button",
-                            command_id: Some("table.setCategoricalOrder"),
-                            disabled_reason: frozen_reason,
-                        },
-                    );
-                    if r {
-                        intents.push_engine(
-                            "table.setCategoricalOrder",
-                            json!({ "sheet_id": ds.id.as_str(), "col": active_col, "order": order_slug, "reversed": var.level_order.reversed }),
-                        );
-                    }
-                }
-            });
-
-            ui.add_space(4.0);
-            let mut from_edit =
-                egui::TextEdit::singleline(&mut state.mv_recode_from).desired_width(ui.available_width()).hint_text("Recode from level");
-            if !editable {
-                from_edit = from_edit.interactive(false);
-            }
-            ui.add(from_edit);
-            let mut to_edit = egui::TextEdit::singleline(&mut state.mv_recode_to).desired_width(ui.available_width()).hint_text("Recode to level");
-            if !editable {
-                to_edit = to_edit.interactive(false);
-            }
-            ui.add(to_edit);
-            let can_recode = editable && !state.mv_recode_from.trim().is_empty() && !state.mv_recode_to.trim().is_empty();
-            let recode_reason = frozen_reason.or_else(|| (!can_recode).then_some("enter source and target level names"));
-            if studio_full_button(
-                ui,
-                tokens,
-                meta,
-                &StudioButtonSpec {
-                    label: "Recode Level",
-                    tooltip: "Apply categorical level recoding (table.recodeLevels)",
-                    selected: false,
-                    enabled: can_recode,
-                    primary: false,
-                    widget_id: "inspector.mv.recode_apply",
-                    command_id: Some("table.recodeLevels"),
-                    disabled_reason: recode_reason,
-                },
-            ) {
-                let mut map = serde_json::Map::new();
-                map.insert(state.mv_recode_from.trim().to_owned(), json!(state.mv_recode_to.trim()));
-                intents.push_engine("table.recodeLevels", json!({ "sheet_id": ds.id.as_str(), "col": active_col, "mappings": map }));
-            }
-        }
+    } else {
+        render_mv_role_and_levels_tab(ui, ds, mv, state, ctx_in, meta, intents);
     }
 
     ui.add_space(6.0);
@@ -502,5 +515,130 @@ pub(super) fn render_mv_formula_studio(
         },
     ) {
         intents.push_ui("ui.table.openFormulaBar", json!({ "sheet_id": ds.id.as_str(), "col": active_col }));
+    }
+}
+
+fn render_mv_role_and_levels_tab(
+    ui: &mut egui::Ui,
+    ds: &DataSheet,
+    mv: &MultipleVariablesTable,
+    state: &mut TrailingStudioEguiState,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let active_col = state.mv_selected_col;
+    let Some(var) = mv.variables.get(active_col) else {
+        return;
+    };
+    let tokens = ctx_in.tokens;
+    let locale = tokens.locale;
+    let editable = ctx_in.enabled && !ds.frozen;
+    let frozen_reason = ds.frozen.then_some("data sheet is frozen (read-only)");
+    let cur_role = var.role;
+    ui.label(egui::RichText::new(format!("{} ({})", var.title, role_label(cur_role))).size(12.0).strong().color(tokens.text_strong));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(tokens.metrics.space_xs, tokens.metrics.space_xs);
+        for (slug, lbl, r_kind) in [
+            ("continuous", "Continuous", VariableRole::Continuous),
+            ("categorical", "Categorical", VariableRole::Categorical),
+            ("label", "Label", VariableRole::Label),
+        ] {
+            let wid = format!("inspector.mv.role.{slug}");
+            let role_enabled = editable && cur_role != VariableRole::Calculated;
+            let role_reason = frozen_reason.or_else(|| (cur_role == VariableRole::Calculated).then_some("calculated columns lock Calculated role"));
+            let r = studio_chip(
+                ui,
+                tokens,
+                meta,
+                &StudioChipSpec {
+                    label: lbl,
+                    tooltip: "Assign variable semantic role",
+                    max_w: 88.0,
+                    selected: cur_role == r_kind,
+                    enabled: role_enabled,
+                    border_override: None,
+                    widget_id: &wid,
+                    role: "button",
+                    command_id: Some("table.setVariableRole"),
+                    disabled_reason: role_reason,
+                },
+            );
+            if r {
+                intents.push_engine("table.setVariableRole", json!({ "sheet_id": ds.id.as_str(), "col": active_col, "role": slug }));
+            }
+        }
+    });
+
+    if cur_role == VariableRole::Categorical {
+        ui.add_space(6.0);
+        widgets::subheader(ui, tr(locale, "mv.vars.order_mode"));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(tokens.metrics.space_xs, tokens.metrics.space_xs);
+            for (order_slug, lbl, active) in [
+                ("entry_order", "Entry", matches!(var.level_order.order, LevelOrderKind::EntryOrder)),
+                ("alphabetical", "A-Z", matches!(var.level_order.order, LevelOrderKind::Alphabetical)),
+                ("frequency_descending", "Freq ↓", matches!(var.level_order.order, LevelOrderKind::FrequencyDescending)),
+                ("frequency_ascending", "Freq ↑", matches!(var.level_order.order, LevelOrderKind::FrequencyAscending)),
+            ] {
+                let wid = format!("inspector.mv.order.{order_slug}");
+                let r = studio_chip(
+                    ui,
+                    tokens,
+                    meta,
+                    &StudioChipSpec {
+                        label: lbl,
+                        tooltip: "Set categorical level ordering",
+                        max_w: 74.0,
+                        selected: active,
+                        enabled: editable,
+                        border_override: None,
+                        widget_id: &wid,
+                        role: "button",
+                        command_id: Some("table.setCategoricalOrder"),
+                        disabled_reason: frozen_reason,
+                    },
+                );
+                if r {
+                    intents.push_engine(
+                        "table.setCategoricalOrder",
+                        json!({ "sheet_id": ds.id.as_str(), "col": active_col, "order": order_slug, "reversed": var.level_order.reversed }),
+                    );
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        let mut from_edit = egui::TextEdit::singleline(&mut state.mv_recode_from).desired_width(ui.available_width()).hint_text("Recode from level");
+        if !editable {
+            from_edit = from_edit.interactive(false);
+        }
+        ui.add(from_edit);
+        let mut to_edit = egui::TextEdit::singleline(&mut state.mv_recode_to).desired_width(ui.available_width()).hint_text("Recode to level");
+        if !editable {
+            to_edit = to_edit.interactive(false);
+        }
+        ui.add(to_edit);
+        let can_recode = editable && !state.mv_recode_from.trim().is_empty() && !state.mv_recode_to.trim().is_empty();
+        let recode_reason = frozen_reason.or_else(|| (!can_recode).then_some("enter source and target level names"));
+        if studio_full_button(
+            ui,
+            tokens,
+            meta,
+            &StudioButtonSpec {
+                label: "Recode Level",
+                tooltip: "Apply categorical level recoding (table.recodeLevels)",
+                selected: false,
+                enabled: can_recode,
+                primary: false,
+                widget_id: "inspector.mv.recode_apply",
+                command_id: Some("table.recodeLevels"),
+                disabled_reason: recode_reason,
+            },
+        ) {
+            let mut map = serde_json::Map::new();
+            map.insert(state.mv_recode_from.trim().to_owned(), json!(state.mv_recode_to.trim()));
+            intents.push_engine("table.recodeLevels", json!({ "sheet_id": ds.id.as_str(), "col": active_col, "mappings": map }));
+        }
     }
 }

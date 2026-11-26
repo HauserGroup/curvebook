@@ -13,6 +13,9 @@ pub(crate) fn detect_bomless_utf16(bytes: &[u8]) -> Option<bool> {
     let mut le_nul_hi = 0usize;
     let mut be_nul_hi = 0usize;
     let (pairs, remainder) = bytes.as_chunks::<2>();
+    if pairs.contains(&[0, 0]) {
+        return None;
+    }
     let total_pairs = pairs.len();
     for &[a, b] in pairs {
         if a != 0 && (a.is_ascii_graphic() || a.is_ascii_whitespace()) && b == 0 {
@@ -83,8 +86,26 @@ pub(crate) fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
     out
 }
 
+/// Strictly decode a UTF-32 byte stream, returning `None` if empty, misaligned, containing any
+/// embedded `U+0000` NUL code unit, or containing invalid Unicode scalar values.
+fn decode_utf32_strict(bytes: &[u8], little_endian: bool) -> Option<String> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let (quads, _) = bytes.as_chunks::<4>();
+    let mut out = String::with_capacity(quads.len());
+    for &arr in quads {
+        let code = if little_endian { u32::from_le_bytes(arr) } else { u32::from_be_bytes(arr) };
+        let ch = char::from_u32(code).filter(|&c| c != '\0')?;
+        out.push(ch);
+    }
+    Some(out)
+}
+
 /// Decode text bytes preferring UTF BOMs and BOM-less UTF-16 over UTF-8, returning `None` if the
-/// payload is binary/corrupt (invalid UTF-8 or unexpected NUL bytes outside recognized UTF-16).
+/// payload is binary/corrupt (invalid UTF-8 or unexpected NUL bytes outside recognized UTF-16/UTF-32).
+///
+/// Postcondition: any returned `Ok(Some(text))` is guaranteed to contain zero `'\0'` characters.
 pub(crate) fn decode_utf8_or_utf16(bytes: &[u8]) -> Result<Option<String>, String> {
     if let Some(bomless) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         let s = std::str::from_utf8(bomless).map_err(|e| format!("invalid UTF-8 after BOM: {e}"))?;
@@ -93,14 +114,24 @@ pub(crate) fn decode_utf8_or_utf16(bytes: &[u8]) -> Result<Option<String>, Strin
         }
         return Ok(Some(s.to_owned()));
     }
+    // Check 4-byte UTF-32 BOMs BEFORE 2-byte UTF-16 BOMs (UTF-32LE starts with 0xFF 0xFE 0x00 0x00).
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE, 0x00, 0x00]) {
+        return Ok(decode_utf32_strict(rest, true));
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0x00, 0x00, 0xFE, 0xFF]) {
+        return Ok(decode_utf32_strict(rest, false));
+    }
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        return Ok(Some(decode_utf16(rest, true)));
+        let decoded = decode_utf16(rest, true);
+        return Ok((!decoded.contains('\0')).then_some(decoded));
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        return Ok(Some(decode_utf16(rest, false)));
+        let decoded = decode_utf16(rest, false);
+        return Ok((!decoded.contains('\0')).then_some(decoded));
     }
     if let Some(little_endian) = detect_bomless_utf16(bytes) {
-        return Ok(Some(decode_utf16(bytes, little_endian)));
+        let decoded = decode_utf16(bytes, little_endian);
+        return Ok((!decoded.contains('\0')).then_some(decoded));
     }
     if let Ok(s) = std::str::from_utf8(bytes) {
         if s.as_bytes().contains(&0) {
@@ -113,40 +144,77 @@ pub(crate) fn decode_utf8_or_utf16(bytes: &[u8]) -> Result<Option<String>, Strin
 
 /// Decode common XML/HTML named and numeric character entities (`&#58;`, `&#x2f;`, `&colon;`, etc.)
 /// so obfuscated URLs, attributes, and brand strings in SVG/XML/HTML are checked canonically.
+///
+/// Handles spec-valid numeric character references with arbitrary leading zeros (`&#000000000080;`)
+/// in $O(N)$ time without arbitrary total-length caps.
 pub(crate) fn decode_xml_html_entities(input: &str) -> String {
     if !input.contains('&') {
         return input.to_owned();
     }
+    let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some((before, after_amp)) = rest.split_once('&') {
-        out.push_str(before);
-        if let Some((body, tail)) = after_amp.split_once(';')
-            && !body.is_empty()
-            && body.len() <= 12
-            && let Some(decoded) = decode_entity_body(body)
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'&'
+            && let Some((decoded, next_i)) = try_decode_entity_at(input, bytes, i)
         {
             out.push(decoded);
-            rest = tail;
-        } else {
-            out.push('&');
-            rest = after_amp;
+            i = next_i;
+            continue;
         }
+        let ch = input.get(i..).and_then(|s| s.chars().next()).unwrap_or('\u{FFFD}');
+        out.push(ch);
+        i += ch.len_utf8();
     }
-    out.push_str(rest);
     out
 }
 
-fn decode_entity_body(body: &str) -> Option<char> {
-    if let Some(hex) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
-        let code = u32::from_str_radix(hex, 16).ok()?;
-        return char::from_u32(code).filter(|&c| c != '\0');
+fn try_decode_entity_at(input: &str, bytes: &[u8], amp: usize) -> Option<(char, usize)> {
+    let start = amp + 1;
+    let first = *bytes.get(start)?;
+    if first == b'#' {
+        let (is_hex, mut j) = if matches!(bytes.get(start + 1), Some(b'x' | b'X')) { (true, start + 2) } else { (false, start + 1) };
+        let digits_start = j;
+        while bytes.get(j) == Some(&b'0') {
+            j += 1;
+        }
+        let sig_start = j;
+        while let Some(&b) = bytes.get(j) {
+            let ok = if is_hex { b.is_ascii_hexdigit() } else { b.is_ascii_digit() };
+            if ok {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        if j == digits_start || bytes.get(j) != Some(&b';') {
+            return None;
+        }
+        let sig = input.get(sig_start..j)?;
+        // Reject overflow before parsing; max Unicode scalar is 0x10FFFF (6 hex / 7 dec digits).
+        if sig.is_empty() || sig.len() > if is_hex { 6 } else { 7 } {
+            return None;
+        }
+        let radix = if is_hex { 16 } else { 10 };
+        let code = u32::from_str_radix(sig, radix).ok()?;
+        let ch = char::from_u32(code).filter(|&c| c != '\0')?;
+        return Some((ch, j + 1));
     }
-    if let Some(dec) = body.strip_prefix('#') {
-        let code = dec.parse::<u32>().ok()?;
-        return char::from_u32(code).filter(|&c| c != '\0');
+    // Named entity: ASCII alphanumeric name up to 16 chars followed by `;`.
+    let mut j = start;
+    while j < bytes.len() && j - start <= 16 && bytes[j].is_ascii_alphanumeric() {
+        j += 1;
     }
-    match body {
+    if j == start || bytes.get(j) != Some(&b';') {
+        return None;
+    }
+    let name = input.get(start..j)?;
+    let ch = decode_named_entity(name)?;
+    Some((ch, j + 1))
+}
+
+fn decode_named_entity(body: &str) -> Option<char> {
+    match body.to_ascii_lowercase().as_str() {
         "amp" => Some('&'),
         "lt" => Some('<'),
         "gt" => Some('>'),
@@ -154,10 +222,16 @@ fn decode_entity_body(body: &str) -> Option<char> {
         "apos" => Some('\''),
         "colon" => Some(':'),
         "sol" => Some('/'),
+        "semi" => Some(';'),
         "period" => Some('.'),
         "quest" => Some('?'),
         "equals" => Some('='),
         "nbsp" => Some(' '),
+        "tab" => Some('\t'),
+        "newline" => Some('\n'),
+        "copy" => Some('©'),
+        "reg" => Some('®'),
+        "trade" => Some('™'),
         "hellip" => Some('…'),
         "mdash" => Some('—'),
         "ndash" => Some('–'),
@@ -207,5 +281,46 @@ mod tests {
         // High surrogate 0xD800 without low surrogate, followed by 'A' and a trailing odd byte.
         let raw = [0x00, 0xD8, b'A', 0x00, 0x7F];
         assert_eq!(decode_utf16(&raw, true), "\u{FFFD}A\u{FFFD}");
+    }
+
+    #[test]
+    fn aud_12_16_utf32_and_nul_utf16_never_emit_embedded_nuls() {
+        // UTF-32LE with BOM decodes cleanly without embedded NULs.
+        let mut utf32le_bom = vec![0xFF, 0xFE, 0x00, 0x00];
+        for ch in "CurveBook".chars() {
+            utf32le_bom.extend_from_slice(&(ch as u32).to_le_bytes());
+        }
+        assert_eq!(decode_utf8_or_utf16(&utf32le_bom).unwrap().as_deref(), Some("CurveBook"));
+
+        // UTF-32BE with BOM decodes cleanly without embedded NULs.
+        let mut utf32be_bom = vec![0x00, 0x00, 0xFE, 0xFF];
+        for ch in "CurveBook".chars() {
+            utf32be_bom.extend_from_slice(&(ch as u32).to_be_bytes());
+        }
+        assert_eq!(decode_utf8_or_utf16(&utf32be_bom).unwrap().as_deref(), Some("CurveBook"));
+
+        // BOM-less UTF-32LE and UTF-32BE must NOT be misclassified as UTF-16 with embedded NULs.
+        let utf32le_bomless: Vec<u8> = "CurveBook".chars().flat_map(|c| (c as u32).to_le_bytes()).collect();
+        let utf32be_bomless: Vec<u8> = "CurveBook".chars().flat_map(|c| (c as u32).to_be_bytes()).collect();
+        assert_eq!(detect_bomless_utf16(&utf32le_bomless), None);
+        assert_eq!(detect_bomless_utf16(&utf32be_bomless), None);
+        assert_eq!(decode_utf8_or_utf16(&utf32le_bomless).unwrap(), None);
+        assert_eq!(decode_utf8_or_utf16(&utf32be_bomless).unwrap(), None);
+
+        // UTF-16 BOM with embedded NUL code unit must return None.
+        let utf16_with_nul = [0xFF, 0xFE, b'A', 0x00, 0x00, 0x00, b'B', 0x00];
+        assert_eq!(decode_utf8_or_utf16(&utf16_with_nul).unwrap(), None);
+        // UTF-16LE BOM + single NUL (also empty UTF-32LE BOM) must return None.
+        assert_eq!(decode_utf8_or_utf16(&[0xFF, 0xFE, 0x00, 0x00]).unwrap(), None);
+    }
+
+    #[test]
+    fn aud_12_28_decodes_leading_zero_numeric_entities_without_length_cap() {
+        assert_eq!(super::decode_xml_html_entities("https&#000000000058;&#000000000047;&#x0000000000002f;evil.example"), "https://evil.example");
+        assert_eq!(super::decode_xml_html_entities("Curve&#000000000080;ad &copy;"), "CurvePad ©");
+        assert_eq!(super::decode_xml_html_entities("&#x000000000041;&reg;&trade;"), "A®™");
+        // NUL entity and out-of-range entity stay literal.
+        assert_eq!(super::decode_xml_html_entities("&#000000000000;"), "&#000000000000;");
+        assert_eq!(super::decode_xml_html_entities("&#x000000110000;"), "&#x000000110000;");
     }
 }

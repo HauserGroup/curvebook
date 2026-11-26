@@ -306,6 +306,9 @@ pub fn render_app_modal(
     if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::Checkpoints) {
         state.checkpoint_pending_restore_id = None;
     }
+    if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ExportFigure { .. }) {
+        state.export_emf_selected = false;
+    }
 
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::ExportFigure { sheet_id } => render_export_modal(ctx, app, state, sheet_id.clone(), tokens, meta, intents),
@@ -958,8 +961,11 @@ fn capture_keyboard_combo(ctx: &Context) -> Option<String> {
                 && let Some(key_name) = map_egui_key_name(*key)
             {
                 let mut parts = Vec::new();
-                if modifiers.ctrl || modifiers.mac_cmd || modifiers.command {
-                    parts.push("CmdOrCtrl");
+                if modifiers.mac_cmd || (modifiers.command && !modifiers.ctrl) {
+                    parts.push("Cmd");
+                }
+                if modifiers.ctrl {
+                    parts.push("Ctrl");
                 }
                 if modifiers.alt {
                     parts.push("Alt");
@@ -1258,6 +1264,17 @@ fn render_export_modal(
                     state.export_emf_selected = false;
                     intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                 }
+                let ef = &app.canvas_dialogs.export_figure;
+                let is_vector = state.export_emf_selected || matches!(ef.format, ExportFigureFormat::Pdf | ExportFigureFormat::Svg);
+                let raster_dims_valid = is_vector || (ef.width_px > 0 && ef.height_px > 0 && ef.dpi > 0);
+                let can_export = target_valid && raster_dims_valid;
+                let disabled_reason = if !target_valid {
+                    Some("Select a Graph or Layout sheet to export")
+                } else if !raster_dims_valid {
+                    Some("Raster export requires positive width, height, and DPI")
+                } else {
+                    None
+                };
                 if app_button(
                     ui,
                     meta,
@@ -1266,15 +1283,18 @@ fn render_export_modal(
                         label: tr(locale, "btn.export"),
                         command_id: None,
                         selected: true,
-                        enabled: target_valid,
-                        disabled_reason: (!target_valid).then_some("Select a Graph or Layout sheet to export"),
+                        enabled: can_export,
+                        disabled_reason,
                     },
                     tokens,
                 )
                 .clicked()
                 {
+                    // Keep emitting host-routed `EngineCommand` + `CloseAllModals` so desktop
+                    // `gui_window.rs` routes exports through the OS Save File dialog (and preserves
+                    // `audit_w1_sec18_01_export` / `audit_w1_sec19_s1` / `r15_6_phase1_pipeline`
+                    // contracts); `export_emf_selected` is cleared on actual modal close.
                     let (cmd, params) = export_figure_command_and_params(app, is_layout, &sheet_id, state.export_emf_selected);
-                    state.export_emf_selected = false;
                     intents.push_engine(cmd, params);
                     intents.push(UiIntent::CloseAllModals);
                 }
@@ -1282,9 +1302,11 @@ fn render_export_modal(
         },
     );
 
-    if target_valid && !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+    let ef = &app.canvas_dialogs.export_figure;
+    let is_vector = state.export_emf_selected || matches!(ef.format, ExportFigureFormat::Pdf | ExportFigureFormat::Svg);
+    let can_export = target_valid && (is_vector || (ef.width_px > 0 && ef.height_px > 0 && ef.dpi > 0));
+    if can_export && !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
         let (cmd, params) = export_figure_command_and_params(app, is_layout, &sheet_id, state.export_emf_selected);
-        state.export_emf_selected = false;
         intents.push_engine(cmd, params);
         intents.push(UiIntent::CloseAllModals);
     }
@@ -1292,7 +1314,7 @@ fn render_export_modal(
     report_from_capture(capture)
 }
 
-fn export_figure_command_and_params(
+pub(super) fn export_figure_command_and_params(
     app: &UiApp,
     is_layout: bool,
     sheet_id: &SheetId,
@@ -1976,8 +1998,17 @@ pub(crate) fn render_about_modal(
                     },
                 );
                 if copy_resp.clicked() {
-                    ui.ctx().copy_text(format_about_diagnostic_summary(app, build_sha));
-                    ctx.data_mut(|d| d.insert_temp(copied_id, true));
+                    let summary = format_about_diagnostic_summary(app, build_sha);
+                    let status = app
+                        .write_clipboard_text(&summary)
+                        .unwrap_or_else(|err| crate::os_integration::OsAdapterStatus::unavailable("os-pasteboard", err));
+                    ctx.data_mut(|d| {
+                        d.insert_temp(copied_id, true);
+                        d.insert_temp(egui::Id::unique("about.copy_version.unavailable"), !status.available);
+                    });
+                }
+                if ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("about.copy_version.unavailable")).unwrap_or(false)) {
+                    ui.label(egui::RichText::new("Host clipboard unavailable in this session.").small().color(tokens.text_muted));
                 }
 
                 let feedback_lbl = tr(locale, "menu.help.feedback");
@@ -2522,8 +2553,7 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
         )
         .clicked()
         {
-            let md = crate::feedback::build_feedback_markdown(draft, active_diag);
-            ui.ctx().copy_text(md);
+            let _ = active_diag;
             intents.push(UiIntent::CopyFeedbackMarkdown);
         }
 
@@ -2844,11 +2874,8 @@ fn render_import_project_mode_modal(
                 )
                 .clicked()
                 {
-                    intents.push(UiIntent::CloseAllModals);
-                    intents.push(UiIntent::EngineCommand {
-                        command_id: cmd_owned.clone(),
-                        params: json!({ "path": path_owned.clone(), "merge": false }),
-                    });
+                    let _ = (&cmd_owned, &path_owned);
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("__import_project_mode_replace") });
                 }
                 if app_button(
                     ui,
@@ -2865,11 +2892,8 @@ fn render_import_project_mode_modal(
                 )
                 .clicked()
                 {
-                    intents.push(UiIntent::CloseAllModals);
-                    intents.push(UiIntent::EngineCommand {
-                        command_id: cmd_owned.clone(),
-                        params: json!({ "path": path_owned.clone(), "merge": true }),
-                    });
+                    let _ = (&cmd_owned, &path_owned);
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("__import_project_mode_merge") });
                 }
             });
         },
@@ -3024,13 +3048,9 @@ fn render_csv_export_options_modal(
 
     let opts = app.canvas_dialogs.csv_export.clone();
     let changed = false;
+    let wants_kb_before = ctx.egui_wants_keyboard_input();
 
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
-        intents.push(UiIntent::CloseAllModals);
-    } else if target_valid && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
-        emit_csv_export_intent(target, &opts, intents);
-    }
-
+    let mut enter_export_opts: Option<crate::dialogs_canvas::CsvExportOptionsState> = None;
     let capture = show_scrolled_modal(
         ctx,
         meta,
@@ -3046,9 +3066,9 @@ fn render_csv_export_options_modal(
             body_max_h: (max_h - 116.0).max(120.0),
             footer_separator: true,
         },
-        &mut (opts, changed, intents),
+        &mut (opts, changed, &mut *intents, &mut enter_export_opts),
         |_, _, _| {},
-        |ui, meta, (opts, changed, _)| {
+        |ui, meta, (opts, changed, _, _)| {
             if let CsvExportTargetKind::ResultSheet { sheet_id } = target
                 && let Some(res) = doc.result_sheet(sheet_id)
             {
@@ -3116,10 +3136,11 @@ fn render_csv_export_options_modal(
             let hint_resp = ui.add(egui::Label::new(egui::RichText::new(hint).small().color(tokens.text_muted)).wrap());
             app_text(ui, &hint_resp, meta, "csv_export.tsv_hint", hint);
         },
-        |ui, meta, (opts, changed, intents)| {
+        |ui, meta, (opts, changed, intents, enter_export_opts)| {
             if *changed {
                 intents.push(UiIntent::UpdateCsvExportOptions(Box::new(opts.clone())));
             }
+            **enter_export_opts = Some(opts.clone());
             ui.horizontal_wrapped(|ui| {
                 ui.set_max_width(body_w);
                 if app_button(
@@ -3159,6 +3180,17 @@ fn render_csv_export_options_modal(
             });
         },
     );
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        intents.push(UiIntent::CloseAllModals);
+    } else if target_valid
+        && !wants_kb_before
+        && !ctx.egui_wants_keyboard_input()
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+        && let Some(final_opts) = enter_export_opts.as_ref()
+    {
+        emit_csv_export_intent(target, final_opts, intents);
+    }
 
     report_from_capture(capture)
 }

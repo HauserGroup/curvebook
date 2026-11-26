@@ -587,6 +587,7 @@ impl DataSheet {
         cloned.floating_notes.clear();
         apply_clone_options(&mut cloned.archetype, opts)?;
         cloned.prune_stale_exclusion_notes();
+        cloned.validate()?;
         Ok(cloned)
     }
 }
@@ -743,22 +744,33 @@ fn apply_clone_options(arch: &mut TableArchetype, opts: &CloneDataSheetOptions) 
             }
         }
         TableArchetype::Nested(t) => {
-            if let Some(n) = opts.override_replicates {
-                validate_cell_grid(t.row_count(), t.groups.len(), n, 0)?;
-            }
-            if opts.clear_row_titles {
-                clear_strings(&mut t.row_titles);
-            }
-            for (idx, g) in t.groups.iter_mut().enumerate() {
-                if opts.clear_column_titles {
-                    g.title = default_column_label(idx);
-                }
-                let units = opts.override_replicates.unwrap_or_else(|| g.biological_unit_count());
-                if opts.clear_column_titles || opts.override_replicates.is_some() || g.subcolumn_titles.len() != units {
-                    g.subcolumn_titles = (1..=units).map(|i| format!("{}:{i}", g.title)).collect();
-                }
-                if opts.clear_y_values || opts.override_replicates.is_some() {
-                    g.cells = vec![vec![Cell::empty(); units]; g.cells.len()];
+            reset_nested_groups(t, opts)?;
+        }
+    }
+    Ok(())
+}
+
+fn reset_nested_groups(t: &mut crate::archetypes::NestedTable, opts: &CloneDataSheetOptions) -> Result<(), DocError> {
+    if let Some(n) = opts.override_replicates {
+        validate_cell_grid(t.row_count(), t.groups.len(), n, 0)?;
+    }
+    if opts.clear_row_titles {
+        clear_strings(&mut t.row_titles);
+    }
+    for (idx, g) in t.groups.iter_mut().enumerate() {
+        if opts.clear_column_titles {
+            g.title = default_column_label(idx);
+        }
+        let units = opts.override_replicates.unwrap_or_else(|| g.biological_unit_count());
+        if opts.clear_column_titles || opts.override_replicates.is_some() || g.subcolumn_titles.len() != units {
+            g.subcolumn_titles = (1..=units).map(|i| crate::archetypes::format_nested_subcolumn_title(&g.title, i)).collect();
+        }
+        if opts.clear_y_values {
+            g.cells = vec![vec![Cell::empty(); units]; g.cells.len()];
+        } else {
+            for row in &mut g.cells {
+                if row.len() != units {
+                    row.resize(units, Cell::empty());
                 }
             }
         }

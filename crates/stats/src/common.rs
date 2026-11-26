@@ -592,6 +592,7 @@ fn select_kth_monotone_matrix<F: Fn(usize, usize) -> f64>(init_left: &[usize], n
     let mut k_rem = k_target;
     let mut pivots = Vec::with_capacity(state.n_rows);
     while state.rem > 256 {
+        let prev_rem = state.rem;
         state.collect_pivots(&eval, &mut pivots);
         let pivot = weighted_median_pivot(&mut pivots, state.rem).ok_or(StatsError::EmptyInput)?;
         let (count_lt, count_le) = state.partition_counts(pivot, &eval);
@@ -605,6 +606,9 @@ fn select_kth_monotone_matrix<F: Fn(usize, usize) -> f64>(init_left: &[usize], n
             state.left.copy_from_slice(&state.cut_le);
             state.rem -= count_le;
         }
+        if state.rem >= prev_rem {
+            return Err(StatsError::NotConverged { algorithm: "select_kth_monotone_matrix" });
+        }
     }
     let mut tail = state.collect_tail(&eval);
     let idx = usize::try_from(k_rem).map_err(|_| StatsError::InvalidParameter { name: "k_target", value: k_rem as f64 })?;
@@ -615,6 +619,13 @@ fn select_kth_monotone_matrix<F: Fn(usize, usize) -> f64>(init_left: &[usize], n
 #[inline]
 fn normalize_zero(v: f64) -> f64 {
     if v == 0.0 { 0.0 } else { v }
+}
+
+fn validate_sorted_ascending(name: &'static str, values: &[f64]) -> Result<(), StatsError> {
+    if let Some(bad) = values.windows(2).find(|w| w[0].total_cmp(&w[1]).is_gt()) {
+        return Err(StatsError::InvalidParameter { name, value: bad[1] });
+    }
+    Ok(())
 }
 
 /// Exact `k`-th smallest (`0`-based) pairwise sum `sorted_xs[i] + sorted_ys[j]` across all pairs
@@ -629,6 +640,8 @@ fn normalize_zero(v: f64) -> f64 {
 pub fn select_kth_pairwise_sum(sorted_xs: &[f64], sorted_ys: &[f64], k: u64) -> Result<f64, StatsError> {
     validate_finite_slice(sorted_xs)?;
     validate_finite_slice(sorted_ys)?;
+    validate_sorted_ascending("sorted_xs", sorted_xs)?;
+    validate_sorted_ascending("sorted_ys", sorted_ys)?;
     let max_x = sorted_xs.first().map_or(0.0, |v| v.abs()).max(sorted_xs.last().map_or(0.0, |v| v.abs()));
     let max_y = sorted_ys.first().map_or(0.0, |v| v.abs()).max(sorted_ys.last().map_or(0.0, |v| v.abs()));
     let scale_half = max_x >= 1e300 || max_y >= 1e300;
@@ -652,6 +665,7 @@ pub fn select_kth_pairwise_sum(sorted_xs: &[f64], sorted_ys: &[f64], k: u64) -> 
 /// in [`select_kth_pairwise_sum`].
 pub fn select_kth_upper_triangle_half_sum(sorted_x: &[f64], k: u64) -> Result<f64, StatsError> {
     validate_finite_slice(sorted_x)?;
+    validate_sorted_ascending("sorted_x", sorted_x)?;
     let n = sorted_x.len();
     let init_left: Vec<usize> = (0..n).collect();
     select_kth_monotone_matrix(&init_left, n, k, |i, j| normalize_zero(0.5 * sorted_x[i] + 0.5 * sorted_x[j]))

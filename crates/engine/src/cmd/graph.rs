@@ -924,6 +924,40 @@ fn schema_graph_set_compact_letter_display() -> Value {
 // Command Runners
 // ---------------------------------------------------------------------------
 
+/// Resolve a source sheet ID (`DataSheet` or `ResultSheet`) from raw slices to its backing
+/// [`curvebook_doc::DataSheet`], checking a non-failed result sheet's `analyzable_data` before
+/// walking upstream sources and stopping with `None` if any traversed result sheet has
+/// [`curvebook_doc::ResultStatus::Failed`].
+pub(crate) fn resolve_source_data_sheet_slices<'a>(
+    data_sheets: &'a [curvebook_doc::DataSheet],
+    result_sheets: &'a [curvebook_doc::ResultSheet],
+    source_id: &curvebook_doc::SheetId,
+) -> Option<&'a curvebook_doc::DataSheet> {
+    let mut cursor = source_id;
+    let mut visited = std::collections::HashSet::new();
+    while visited.insert(cursor) {
+        if let Some(ds) = data_sheets.iter().find(|d| &d.id == cursor) {
+            return Some(ds);
+        }
+        let res = result_sheets.iter().find(|r| &r.id == cursor)?;
+        if matches!(res.status, curvebook_doc::ResultStatus::Failed { .. }) {
+            return None;
+        }
+        if let Some(ref analyzable) = res.analyzable_data {
+            return Some(analyzable);
+        }
+        cursor = &res.analysis.source_sheet_id;
+    }
+    None
+}
+
+/// Resolve a graph or analysis source sheet ID (`DataSheet` or `ResultSheet`) to its backing
+/// [`curvebook_doc::DataSheet`], checking a non-failed result sheet's `analyzable_data` before
+/// walking upstream sources and stopping with `None` on [`curvebook_doc::ResultStatus::Failed`].
+pub(crate) fn resolve_source_data_sheet<'a>(doc: &'a ProjectDocument, source_id: &curvebook_doc::SheetId) -> Option<&'a curvebook_doc::DataSheet> {
+    resolve_source_data_sheet_slices(&doc.data_sheets, &doc.result_sheets, source_id)
+}
+
 pub(super) fn resolve_graph_create_source_sheet(
     doc: &ProjectDocument,
     source_id: &curvebook_doc::SheetId,
@@ -934,6 +968,13 @@ pub(super) fn resolve_graph_create_source_sheet(
     let Some(initial_res) = doc.result_sheet(source_id) else {
         return Err(curvebook_doc::DocError::SheetNotFound { sheet_id: source_id.clone() }.into());
     };
+    if let curvebook_doc::ResultStatus::Failed { code, ref message } = initial_res.status {
+        return Err(EngineError::with_code(
+            ErrorCode::Conflict,
+            format!("cannot create graph from failed result sheet `{source_id}` ({code}): {message}"),
+        )
+        .with_remediation("Fix or recalculate the failed analysis before creating a graph from it."));
+    }
     if let Some(ref analyzable) = initial_res.analyzable_data {
         return Ok((analyzable.clone(), None));
     }
@@ -946,6 +987,13 @@ pub(super) fn resolve_graph_create_source_sheet(
             return Ok((ds.clone(), Some(res_title)));
         }
         if let Some(res) = doc.result_sheet(&cursor) {
+            if let curvebook_doc::ResultStatus::Failed { code, ref message } = res.status {
+                return Err(EngineError::with_code(
+                    ErrorCode::Conflict,
+                    format!("cannot create graph from `{source_id}`: upstream result sheet `{cursor}` failed ({code}): {message}"),
+                )
+                .with_remediation("Fix or recalculate the failed upstream analysis before creating a graph."));
+            }
             if let Some(ref analyzable) = res.analyzable_data {
                 return Ok((analyzable.clone(), Some(res_title)));
             }
@@ -1099,6 +1147,7 @@ fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
     if let Some(ref title) = params.title {
         curvebook_doc::validate_title(title)?;
         graph.title = title.clone();
+        graph.spec.title = title.clone();
     }
     if let Some(kind) = parsed_kind {
         apply_graph_kind(&mut graph.spec, kind, true);
@@ -1136,6 +1185,9 @@ fn run_graph_initialize(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     let graph_kind = mutate_graph_sheet(&mut ctx.session.doc, &id, true, true, |_, updated_spec| {
         if let Some(kind) = kind_opt {
             apply_graph_kind(updated_spec, kind, true);
+        }
+        if let Some(ref title) = params.title {
+            updated_spec.title = title.clone();
         }
         Ok(updated_spec.kind)
     })?;
@@ -1337,7 +1389,7 @@ fn run_graph_format_selected_points(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
             "graph.formatSelectedPoints requires at least one style attribute (`color`, `symbol`, `size_pt`, `border_width_pt`, `fill_color`, `fill_mode`, or `hidden`)",
         ));
     }
-    {
+    if mode != "clear" {
         let doc = ctx.session.document();
         let current_spec = &require_graph_sheet(doc, &id)?.spec;
         for (series_index, point_index, subcol, _) in &entries {
@@ -1503,6 +1555,7 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
         curvebook_doc::validate_title(title)?;
     }
 
+    let spec_overrode_title = params.spec.as_ref().and_then(Value::as_object).is_some_and(|o| o.contains_key("title"));
     let base_ptr = if params.spec.is_some() { "/spec" } else { "" };
     let patch =
         params.spec.clone().unwrap_or_else(|| strip_keys(&Value::Object(params.patch_fields.clone()), &["sheet_id", "id", "title", "initialized"]));
@@ -1545,6 +1598,11 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
             new_spec.heatmap_labels = parse_heatmap_label_spec(hm_val, current_spec.heatmap_labels)?;
         }
         apply_opt!(params.survival_number_at_risk => new_spec.survival_number_at_risk);
+        if let Some(ref title) = params.title
+            && !spec_overrode_title
+        {
+            new_spec.title = title.clone();
+        }
         let explicit_point_overrides = patch.get("point_overrides").is_some();
         if explicit_point_overrides {
             for ov in &new_spec.point_overrides {
@@ -1997,10 +2055,14 @@ fn run_graph_add_annotation(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutc
     let schema = schema_graph_add_annotation();
     let params: GraphAddAnnotationParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
+    if params.annotation.is_some() && !params.fields.is_empty() {
+        return Err(bad_input_ptr("/annotation", "cannot combine `annotation` with shorthand annotation fields in `graph.addAnnotation`")
+            .with_remediation("Pass either the full `annotation` object OR top-level shorthand fields, not both."));
+    }
 
     let total = mutate_graph_sheet(&mut ctx.session.doc, &id, true, true, |doc, spec| {
         let annotation = if let Some(ref ann_val) = params.annotation {
-            let ann: GraphAnnotation = serde_json::from_value(ann_val.clone()).map_err(|err| bad_input(format!("invalid `annotation`: {err}")))?;
+            let ann: GraphAnnotation = deserialize_strict(ann_val, "/annotation").map_err(|err| bad_input(format!("invalid `annotation`: {err}")))?;
             match &ann {
                 GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
                     let _ = require_result_sheet(doc, result_sheet_id)?;
@@ -3178,60 +3240,94 @@ fn parse_size_channel(val: &Value) -> Result<SizeChannelMapping, EngineError> {
     Err(EngineError::with_code(ErrorCode::BadInput, "invalid multivariate `size` mapping"))
 }
 
+fn ensure_annotation_keys(obj: &Map<String, Value>, allowed: &[&str], kind: &str) -> Result<(), EngineError> {
+    for key in obj.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(bad_input_ptr(&format!("/{key}"), format!("unknown field `{key}` for `{kind}` annotation"))
+                .with_remediation(format!("Allowed fields for `{kind}` annotations: {}.", allowed.join(", "))));
+        }
+    }
+    Ok(())
+}
+
+fn opt_ann_f64(obj: &Map<String, Value>, key: &str, default: f64) -> Result<f64, EngineError> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => v.as_f64().filter(|f| f.is_finite()).ok_or_else(|| bad_input_ptr(&format!("/{key}"), format!("`{key}` must be a finite number"))),
+    }
+}
+
+fn opt_ann_bool(obj: &Map<String, Value>, key: &str, default: bool) -> Result<bool, EngineError> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => v.as_bool().ok_or_else(|| bad_input_ptr(&format!("/{key}"), format!("`{key}` must be a boolean"))),
+    }
+}
+
+fn opt_ann_str<'a>(obj: &'a Map<String, Value>, key: &str) -> Result<Option<&'a str>, EngineError> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_str().map(Some).ok_or_else(|| bad_input_ptr(&format!("/{key}"), format!("`{key}` must be a string"))),
+    }
+}
+
 fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<GraphAnnotation, EngineError> {
-    let kind = params.get("kind").and_then(Value::as_str).unwrap_or("text").trim().to_ascii_lowercase();
+    let obj = params.as_object().ok_or_else(|| bad_input("annotation parameters must be an object"))?;
+    let kind = opt_ann_str(obj, "kind")?.unwrap_or("text").trim().to_ascii_lowercase();
     match kind.as_str() {
         "text" | "text_box" | "textbox" => {
-            let markdown =
-                params.get("text").and_then(Value::as_str).ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `text`"))?.to_owned();
+            ensure_annotation_keys(obj, &["kind", "text", "bounds_pt", "x_pt", "y_pt", "width_pt", "height_pt", "bordered"], &kind)?;
+            let markdown = opt_ann_str(obj, "text")?.ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `text`"))?.to_owned();
             let bounds_pt = parse_rect_pt(
-                params.get("bounds_pt"),
+                obj.get("bounds_pt").filter(|v| !v.is_null()),
                 RectPt::new(
-                    params.get("x_pt").and_then(Value::as_f64).unwrap_or(100.0),
-                    params.get("y_pt").and_then(Value::as_f64).unwrap_or(80.0),
-                    params.get("width_pt").and_then(Value::as_f64).unwrap_or(120.0),
-                    params.get("height_pt").and_then(Value::as_f64).unwrap_or(28.0),
+                    opt_ann_f64(obj, "x_pt", 100.0)?,
+                    opt_ann_f64(obj, "y_pt", 80.0)?,
+                    opt_ann_f64(obj, "width_pt", 120.0)?,
+                    opt_ann_f64(obj, "height_pt", 28.0)?,
                 ),
             )?;
-            let bordered = params.get("bordered").and_then(Value::as_bool).unwrap_or(false);
+            let bordered = opt_ann_bool(obj, "bordered", false)?;
             Ok(GraphAnnotation::TextBox { bounds_pt, markdown, bordered })
         }
         "line" | "arrow" => {
-            let start_pt = parse_pair_f64(params.get("start_pt"), (40.0, 40.0))?;
-            let end_pt = parse_pair_f64(params.get("end_pt"), (140.0, 40.0))?;
-            let arrowhead = params.get("arrowhead").and_then(Value::as_bool).unwrap_or(kind == "arrow");
-            let dash = params.get("dash").map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
-            let color = params.get("color").map(parse_rgba8).transpose()?.unwrap_or(Rgba8::BLACK);
+            ensure_annotation_keys(obj, &["kind", "start_pt", "end_pt", "arrowhead", "dash", "color"], &kind)?;
+            let start_pt = parse_pair_f64(obj.get("start_pt").filter(|v| !v.is_null()), (40.0, 40.0))?;
+            let end_pt = parse_pair_f64(obj.get("end_pt").filter(|v| !v.is_null()), (140.0, 40.0))?;
+            let arrowhead = opt_ann_bool(obj, "arrowhead", kind == "arrow")?;
+            let dash = obj.get("dash").filter(|v| !v.is_null()).map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
+            let color = obj.get("color").filter(|v| !v.is_null()).map(parse_rgba8).transpose()?.unwrap_or(Rgba8::BLACK);
             Ok(GraphAnnotation::LineOrArrow { start_pt, end_pt, arrowhead, dash, color })
         }
         "shape" | "rect" | "ellipse" => {
-            let shape_kind = match params
-                .get("shape")
-                .and_then(Value::as_str)
-                .unwrap_or(if kind == "ellipse" { "ellipse" } else { "rectangle" })
-                .to_ascii_lowercase()
-                .as_str()
-            {
+            ensure_annotation_keys(obj, &["kind", "shape", "bounds_pt", "stroke_color", "fill_color", "stroke_width_pt", "dash"], &kind)?;
+            let shape_raw = opt_ann_str(obj, "shape")?.unwrap_or(if kind == "ellipse" { "ellipse" } else { "rectangle" });
+            let shape_kind = match shape_raw.trim().to_ascii_lowercase().as_str() {
+                "rectangle" | "rect" => AnnotationShapeKind::Rectangle,
                 "ellipse" | "circle" => AnnotationShapeKind::Ellipse,
                 "rounded_rectangle" | "rounded" => AnnotationShapeKind::RoundedRectangle,
-                _ => AnnotationShapeKind::Rectangle,
+                other => {
+                    return Err(bad_input_ptr(
+                        "/shape",
+                        format!("unknown annotation shape `{other}`; use `rectangle`, `rounded_rectangle`, or `ellipse`"),
+                    ));
+                }
             };
-            let bounds_pt = parse_rect_pt(params.get("bounds_pt"), RectPt::new(60.0, 60.0, 80.0, 40.0))?;
-            let stroke_color = params.get("stroke_color").map(parse_rgba8).transpose()?.unwrap_or(Rgba8::BLACK);
-            let fill_color = params.get("fill_color").filter(|v| !v.is_null()).map(parse_rgba8).transpose()?;
-            let stroke_width_pt = params.get("stroke_width_pt").and_then(Value::as_f64).unwrap_or(1.0);
-            let dash = params.get("dash").map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
+            let bounds_pt = parse_rect_pt(obj.get("bounds_pt").filter(|v| !v.is_null()), RectPt::new(60.0, 60.0, 80.0, 40.0))?;
+            let stroke_color = obj.get("stroke_color").filter(|v| !v.is_null()).map(parse_rgba8).transpose()?.unwrap_or(Rgba8::BLACK);
+            let fill_color = obj.get("fill_color").filter(|v| !v.is_null()).map(parse_rgba8).transpose()?;
+            let stroke_width_pt = opt_ann_f64(obj, "stroke_width_pt", 1.0)?;
+            let dash = obj.get("dash").filter(|v| !v.is_null()).map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
             Ok(GraphAnnotation::Shape { kind: shape_kind, bounds_pt, stroke_color, stroke_width_pt, dash, fill_color })
         }
         "table" | "embedded_result_table" | "result_table" => {
-            let raw_res = params
-                .get("result_sheet_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `result_sheet_id`"))?;
+            ensure_annotation_keys(obj, &["kind", "result_sheet_id", "bounds_pt", "tab_id"], &kind)?;
+            let raw_res =
+                opt_ann_str(obj, "result_sheet_id")?.ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `result_sheet_id`"))?;
             let res_id = parse_sheet_id(raw_res)?;
             let _ = require_result_sheet(doc, &res_id)?;
-            let bounds_pt = parse_rect_pt(params.get("bounds_pt"), RectPt::new(180.0, 40.0, 180.0, 90.0))?;
-            let tab_id = params.get("tab_id").and_then(Value::as_str).map(str::to_owned);
+            let bounds_pt = parse_rect_pt(obj.get("bounds_pt").filter(|v| !v.is_null()), RectPt::new(180.0, 40.0, 180.0, 90.0))?;
+            let tab_id = opt_ann_str(obj, "tab_id")?.map(str::to_owned);
             Ok(GraphAnnotation::EmbeddedResultTable {
                 result_sheet_id: res_id,
                 tab_id,
@@ -3242,13 +3338,12 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
             })
         }
         "equation" | "model_equation" => {
-            let raw_res = params
-                .get("result_sheet_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `result_sheet_id`"))?;
+            ensure_annotation_keys(obj, &["kind", "result_sheet_id", "data_set_index", "mode", "bounds_pt", "font_size_pt", "bordered"], &kind)?;
+            let raw_res =
+                opt_ann_str(obj, "result_sheet_id")?.ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `result_sheet_id`"))?;
             let res_id = parse_sheet_id(raw_res)?;
             let _ = require_result_sheet(doc, &res_id)?;
-            let data_set_index = match params.get("data_set_index") {
+            let data_set_index = match obj.get("data_set_index") {
                 Some(v) if !v.is_null() => {
                     let raw =
                         v.as_u64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`data_set_index` must be a non-negative integer"))?;
@@ -3256,7 +3351,7 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
                 }
                 _ => 0,
             };
-            let mode = match params.get("mode").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
+            let mode = match opt_ann_str(obj, "mode")?.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
                 None | Some("substituted") => EquationDisplayMode::Substituted,
                 Some("symbolic") => EquationDisplayMode::Symbolic,
                 Some(other) => {
@@ -3266,17 +3361,12 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
                     ));
                 }
             };
-            let bounds_pt = parse_rect_pt(params.get("bounds_pt"), RectPt::new(60.0, 48.0, 220.0, 44.0))?;
-            let font_size_pt = match params.get("font_size_pt") {
-                Some(v) if !v.is_null() => {
-                    v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`font_size_pt` must be a finite number"))?
-                }
-                _ => 10.0,
-            };
+            let bounds_pt = parse_rect_pt(obj.get("bounds_pt").filter(|v| !v.is_null()), RectPt::new(60.0, 48.0, 220.0, 44.0))?;
+            let font_size_pt = opt_ann_f64(obj, "font_size_pt", 10.0)?;
             if !font_size_pt.is_finite() || font_size_pt <= 0.0 {
                 return Err(EngineError::with_code(ErrorCode::BadInput, "`font_size_pt` must be positive and finite"));
             }
-            let bordered = params.get("bordered").and_then(Value::as_bool).unwrap_or(true);
+            let bordered = opt_ann_bool(obj, "bordered", true)?;
             Ok(GraphAnnotation::ModelEquation { result_sheet_id: res_id, data_set_index, mode, bounds_pt, font_size_pt, bordered })
         }
         other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown annotation kind `{other}`"))),
@@ -3822,9 +3912,14 @@ fn parse_bracket_label_mode(val: Option<&Value>) -> Result<BracketLabelMode, Eng
     if let Ok(mode) = parse_serde_enum::<BracketLabelMode>(v, "`label_mode`") {
         return Ok(mode);
     }
-    v.as_str()
-        .map(|s| BracketLabelMode::Custom(s.trim().to_ascii_lowercase()))
-        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "invalid `label_mode`"))
+    let Some(raw) = v.as_str() else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "invalid `label_mode`"));
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`label_mode` custom label must not be empty"));
+    }
+    Ok(BracketLabelMode::Custom(trimmed.to_owned()))
 }
 
 #[cfg(test)]

@@ -53,4 +53,4 @@ pub use model::CompiledDslModel;
 pub use ode::integrate_rk45;
 pub(crate) use ode::{enter_ode_fit_budget, ode_fit_budget_exceeded};
 pub(crate) use parser::parse_expr_collecting_locs;
-pub(crate) use statements::{is_valid_ident, parse_dataset_prefix, split_top_level_assignment};
+pub(crate) use statements::{DslSection, is_valid_ident, parse_dataset_prefix, parse_section_header, split_top_level_assignment};

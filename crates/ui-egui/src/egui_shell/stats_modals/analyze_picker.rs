@@ -36,11 +36,13 @@ pub fn render_analyze_sheet_modal(
 ) -> StatsModalFrameReport {
     let ActiveDialog::AnalyzeSheet { .. } = &app.canvas_dialogs.active_dialog else {
         ctx.data_mut(|d| d.remove::<bool>(Id::unique("analyze_modal.init_focus")));
+        state.analyze_category_filter = None;
         return StatsModalFrameReport::default();
     };
     let az = &app.canvas_dialogs.analyze;
     let doc = app.document();
-    let entries = az.compatible_entries();
+    let active_cat_filter = az.category_filter.or(state.analyze_category_filter);
+    let entries: Vec<_> = az.compatible_entries().into_iter().filter(|item| active_cat_filter.is_none_or(|c| item.category == c)).collect();
     let src_name = az
         .source_sheet_id
         .as_ref()
@@ -122,8 +124,9 @@ pub fn render_analyze_sheet_modal(
 
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                if render_modal_seg_btn(ui, tokens, meta, "analyze.cat.all", "All", az.category_filter.is_none(), &ControlEnablement::enabled()) {
-                    intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ToggleCategory { slug: String::from("all") }));
+                if render_modal_seg_btn(ui, tokens, meta, "analyze.cat.all", "All", active_cat_filter.is_none(), &ControlEnablement::enabled()) {
+                    state.analyze_category_filter = None;
+                    intents.push(UiIntent::DialogButtonAction { action: String::from("__analyze_category:all") });
                 }
                 for (slug, cat) in [
                     ("column", AnalysisCategory::Column),
@@ -134,9 +137,12 @@ pub fn render_analyze_sheet_modal(
                     ("multivariate", AnalysisCategory::Multivariate),
                     ("transform", AnalysisCategory::Transform),
                 ] {
-                    let active = az.category_filter == Some(cat);
+                    let active = active_cat_filter == Some(cat);
                     if render_modal_seg_btn(ui, tokens, meta, &format!("analyze.cat.{slug}"), cat.label(), active, &ControlEnablement::enabled()) {
-                        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ToggleCategory { slug: slug.to_owned() }));
+                        let next_cat = if active { None } else { Some(cat) };
+                        state.analyze_category_filter = next_cat;
+                        let action = if next_cat.is_some() { format!("__analyze_category:{slug}") } else { String::from("__analyze_category:all") };
+                        intents.push(UiIntent::DialogButtonAction { action });
                     }
                 }
             });
@@ -225,7 +231,9 @@ fn render_analyze_entries_pane(
         let selected = app.canvas_dialogs.analyze.selected_entry_id.as_deref() == Some(item.id);
         let en = crate::modal_predicates::evaluate_dialog_widget(&app.canvas_dialogs, app.document(), &format!("analyze.entry.{}", item.id));
         if render_modal_radio(ui, tokens, meta, &format!("analyze.entry.{}", item.id), item.label, selected, &en) {
-            intents.push(UiIntent::SelectAnalyzeEntry { entry_id: (item.id).into(), clear_duplicate_prompt: false });
+            let mut fields = Map::new();
+            fields.insert(String::from("entry_id"), Value::String(item.id.to_owned()));
+            intents.push(UiIntent::PatchActiveDialog { fields });
         }
     }
 
@@ -259,11 +267,20 @@ fn render_analyze_datasets_pane(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    if matches!(az.selected_entry_id.as_deref(), Some("stats.pca" | "stats.pcr" | "pca" | "pcr")) && !az.variable_candidates.is_empty() {
+    let is_pca_or_pcr = matches!(az.selected_entry_id.as_deref(), Some("stats.pca" | "stats.pcr" | "pca" | "pcr"));
+    let mut synced_pca_preds = az.pca_predictors.clone();
+    for &c in &az.selected_data_sets {
+        if !synced_pca_preds.contains(&c) {
+            synced_pca_preds.push(c);
+        }
+    }
+    synced_pca_preds.sort_unstable();
+
+    if is_pca_or_pcr && !az.variable_candidates.is_empty() {
         render_section_title(ui, tokens, "PCA Predictors / PCR Outcome");
         let is_pcr = matches!(az.selected_entry_id.as_deref(), Some("stats.pcr" | "pcr"));
         for var in &az.variable_candidates {
-            let pred_on = az.pca_predictors.contains(&var.col_index);
+            let pred_on = synced_pca_preds.contains(&var.col_index);
             ui.horizontal_wrapped(|ui| {
                 let pred_lbl = if is_pcr { format!("Pred: {}", var.title) } else { format!("Predictor: {}", var.title) };
                 if render_modal_checkbox(
@@ -275,10 +292,19 @@ fn render_analyze_datasets_pane(
                     pred_on,
                     &ControlEnablement::enabled(),
                 ) {
-                    intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::TogglePcaPredictor { col: var.col_index }));
+                    let mut next = synced_pca_preds.clone();
+                    if let Some(pos) = next.iter().position(|&c| c == var.col_index) {
+                        next.remove(pos);
+                    } else {
+                        next.push(var.col_index);
+                        next.sort_unstable();
+                    }
+                    let mut fields = Map::new();
+                    fields.insert(String::from("pca_predictors"), Value::Array(next.into_iter().map(|i| json!(i)).collect()));
+                    intents.push(UiIntent::PatchActiveDialog { fields });
                 }
                 if is_pcr {
-                    let pcr_en = r10_pcr_outcome_column(var.col_index, &az.pca_predictors);
+                    let pcr_en = r10_pcr_outcome_column(var.col_index, &synced_pca_preds);
                     if render_modal_radio(
                         ui,
                         tokens,
@@ -321,7 +347,11 @@ fn render_analyze_datasets_pane(
         });
         ui.add_space(4.0);
         for var in az.filtered_variables() {
-            let checked = az.selected_data_sets.contains(&var.col_index);
+            let checked = if is_pca_or_pcr {
+                synced_pca_preds.contains(&var.col_index)
+            } else {
+                az.selected_data_sets.contains(&var.col_index) || (az.selected_data_sets.is_empty() && var.selected)
+            };
             ui.horizontal(|ui| {
                 render_mv_role_badge(ui, tokens, var.role, var.role_inferred);
                 if render_modal_checkbox(
@@ -333,7 +363,20 @@ fn render_analyze_datasets_pane(
                     checked,
                     &ControlEnablement::enabled(),
                 ) {
-                    intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ToggleMvVar { col: var.col_index }));
+                    if is_pca_or_pcr {
+                        let mut next = synced_pca_preds.clone();
+                        if let Some(pos) = next.iter().position(|&c| c == var.col_index) {
+                            next.remove(pos);
+                        } else {
+                            next.push(var.col_index);
+                            next.sort_unstable();
+                        }
+                        let mut fields = Map::new();
+                        fields.insert(String::from("pca_predictors"), Value::Array(next.into_iter().map(|i| json!(i)).collect()));
+                        intents.push(UiIntent::PatchActiveDialog { fields });
+                    } else {
+                        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ToggleMvVar { col: var.col_index }));
+                    }
                 }
             });
         }
@@ -347,7 +390,20 @@ fn render_analyze_datasets_pane(
         for (idx, col_title) in titles.iter().enumerate() {
             let checked = az.selected_data_sets.is_empty() || az.selected_data_sets.contains(&idx);
             if render_modal_checkbox(ui, tokens, meta, &format!("analyze.dataset.{idx}"), col_title, checked, &ControlEnablement::enabled()) {
-                intents.push(UiIntent::ToggleAnalyzeDataset { col_index: idx });
+                let mut next = if az.selected_data_sets.is_empty() { (0..titles.len()).collect() } else { az.selected_data_sets.clone() };
+                if let Some(pos) = next.iter().position(|&c| c == idx) {
+                    if next.len() > 1 {
+                        next.remove(pos);
+                    }
+                } else {
+                    next.push(idx);
+                    next.sort_unstable();
+                    next.dedup();
+                }
+                if !titles.is_empty() && next.len() == titles.len() {
+                    next.clear();
+                }
+                intents.push(UiIntent::SetAnalyzeSelectedDatasets { cols: next });
             }
         }
     }
@@ -420,11 +476,18 @@ fn render_analyze_entry_specific_options(
             tokens,
             meta,
             "analyze.correlation_all_pairs",
-            "Compute all pairwise correlations",
+            "All pairwise matrix (enables correlation heatmap)",
             az.correlation_all_pairs,
             &ControlEnablement::enabled(),
         ) {
             intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.correlation_all_pairs") });
+        }
+        if !az.correlation_all_pairs {
+            ui.label(
+                egui::RichText::new("Engine computes all selected column pairs; unchecking disables heatmap graph creation.")
+                    .small()
+                    .color(tokens.text_muted),
+            );
         }
         let heat_en = r7_correlation_heatmap_toggle(az.correlation_all_pairs);
         if render_modal_checkbox(
@@ -443,7 +506,6 @@ fn render_analyze_entry_specific_options(
         ui.add_space(6.0);
         crate::egui_shell::stat_anova_modal::render_section_title(ui, tokens, "P-Value Stack Options");
         let cur_method_lbl = az.pvalue_stack_method.label();
-        let next_idx = (PValueStackMethod::ALL.iter().position(|m| *m == az.pvalue_stack_method).unwrap_or(0) + 1) % PValueStackMethod::ALL.len();
         let method_resp = crate::egui_shell::widgets::dropdown("analyze.pvalue_stack.method", cur_method_lbl)
             .show_ui(ui, |ui| {
                 for m in PValueStackMethod::ALL {
@@ -470,11 +532,6 @@ fn render_analyze_entry_specific_options(
             false,
             None,
         );
-        if method_resp.clicked() {
-            let mut patch = Map::new();
-            patch.insert(String::from("pvalue_stack_method"), json!(PValueStackMethod::ALL[next_idx].label()));
-            intents.push(UiIntent::PatchActiveDialog { fields: patch });
-        }
 
         let thresh_step = render_stepper_row(
             ui,
@@ -494,7 +551,12 @@ fn render_analyze_entry_specific_options(
             intents.push(UiIntent::PatchActiveDialog { fields: patch });
         }
 
-        let col_lbl = az.pvalue_stack_column.map_or_else(|| String::from("All"), |c| format!("Col {}", c + 1));
+        let titles = column_titles_for_draft(app.document(), az.source_sheet_id.as_ref());
+        let col_count = titles.len();
+        let col_lbl = az
+            .pvalue_stack_column
+            .and_then(|c| titles.get(c).cloned().or_else(|| Some(format!("Col {}", c + 1))))
+            .unwrap_or_else(|| String::from("All"));
         if render_modal_seg_btn(
             ui,
             tokens,
@@ -504,9 +566,14 @@ fn render_analyze_entry_specific_options(
             false,
             &ControlEnablement::enabled(),
         ) {
-            let next_col = match az.pvalue_stack_column {
-                None => Some(0usize),
-                Some(c) => Some(c + 1),
+            let next_col = if col_count == 0 {
+                None
+            } else {
+                match az.pvalue_stack_column {
+                    None => Some(0usize),
+                    Some(c) if c + 1 < col_count => Some(c + 1),
+                    Some(_) => None,
+                }
             };
             let mut patch = Map::new();
             patch.insert(String::from("pvalue_stack_column"), json!(next_col));
@@ -722,10 +789,16 @@ pub fn render_change_data_analyzed_modal(
                         if render_modal_checkbox(ui, tokens, meta, &format!("change_data.col.{ci}"), col_name, on, &ControlEnablement::enabled()) {
                             let mut next = if cd.selected_data_sets.is_empty() { (0..titles.len()).collect() } else { cd.selected_data_sets.clone() };
                             if let Some(pos) = next.iter().position(|&c| c == ci) {
-                                next.remove(pos);
+                                if next.len() > 1 {
+                                    next.remove(pos);
+                                }
                             } else {
                                 next.push(ci);
                                 next.sort_unstable();
+                                next.dedup();
+                            }
+                            if !titles.is_empty() && next.len() == titles.len() {
+                                next.clear();
                             }
                             let mut fields = Map::new();
                             fields.insert(String::from("selected_data_sets"), Value::Array(next.into_iter().map(|i| json!(i)).collect()));

@@ -278,10 +278,11 @@ enum HtmlTag {
 
 fn parse_html_tag(rest: &str) -> Option<(HtmlTag, usize)> {
     let after = rest.strip_prefix('<')?;
-    let (inner, _) = after.split_once('>')?;
-    if inner.is_empty() || inner.len() > 7 {
+    let close_idx = after.as_bytes().iter().take(8).position(|&b| b == b'>')?;
+    if close_idx == 0 || close_idx > 7 {
         return None;
     }
+    let inner = after.get(..close_idx)?;
     let tag = if inner.eq_ignore_ascii_case("b") {
         HtmlTag::BoldOpen
     } else if inner.eq_ignore_ascii_case("/b") {
@@ -1079,10 +1080,11 @@ pub fn lookup_math_escape(name: &str) -> Option<&'static str> {
 
 fn parse_html_entity(rest: &str) -> Option<(String, usize)> {
     let after = rest.strip_prefix('&')?;
-    let (name, _) = after.split_once(';')?;
-    if name.is_empty() || name.len() > 16 {
+    let semi_idx = after.as_bytes().iter().take(17).position(|&b| b == b';')?;
+    if semi_idx == 0 || semi_idx > 16 {
         return None;
     }
+    let name = after.get(..semi_idx)?;
     let consumed = 1 + name.len() + 1;
     if let Some(hex) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
         let code = u32::from_str_radix(hex, 16).ok()?;
@@ -1196,7 +1198,8 @@ where
             rest = tail;
         } else {
             out.push_str("{{");
-            rest = after_open;
+            out.push_str(after_open);
+            return out;
         }
     }
     out.push_str(rest);

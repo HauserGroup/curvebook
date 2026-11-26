@@ -114,6 +114,20 @@ pub struct FormatGraphState {
     pub series_gdo_bar: bool,
     #[serde(default)]
     pub series_gdo_dirty: bool,
+    #[serde(default)]
+    pub show_connecting_line: bool,
+    #[serde(default)]
+    pub line_dash_dirty: bool,
+    #[serde(default)]
+    pub marker_dirty: bool,
+    #[serde(default)]
+    pub synced_marker_size_pt: Option<f64>,
+    #[serde(default)]
+    pub synced_marker_fill_mode: Option<MarkerFillMode>,
+    #[serde(default)]
+    pub synced_line_dash: Option<LineDashStyle>,
+    #[serde(default)]
+    pub synced_series_count: Option<usize>,
 }
 
 impl Default for FormatGraphState {
@@ -170,6 +184,13 @@ impl Default for FormatGraphState {
             pending_overlay_result_id: None,
             series_gdo_bar: false,
             series_gdo_dirty: false,
+            show_connecting_line: false,
+            line_dash_dirty: false,
+            marker_dirty: false,
+            synced_marker_size_pt: None,
+            synced_marker_fill_mode: None,
+            synced_line_dash: None,
+            synced_series_count: None,
         }
     }
 }
@@ -197,6 +218,7 @@ impl FormatGraphState {
         self.mv_encoding.clone_from(&graph.spec.multivariate);
         self.mv_levels.clear();
         self.mv_level_is_x = true;
+        self.mv_selected_level = None;
         self.mv_levels_dirty = false;
         let series_idx = self.selected_series_index.min(graph.spec.series.len().saturating_sub(1));
         self.selected_series_index = series_idx;
@@ -211,10 +233,12 @@ impl FormatGraphState {
 
     /// Refresh series-scoped formatting controls from `spec.series[self.selected_series_index]`.
     pub fn sync_selected_series_from_spec(&mut self, spec: &GraphSpec) {
+        self.synced_series_count = Some(spec.series.len());
         let series_idx = self.selected_series_index.min(spec.series.len().saturating_sub(1));
         self.selected_series_index = series_idx;
         self.pending_overlay_result_id = None;
         self.series_gdo_dirty = false;
+        self.alpha_dirty = false;
         if let Some(series) = spec.series.get(series_idx) {
             self.error_bar_enabled = series.y_error_bars.is_some();
             self.error_bar_spec = series.y_error_bars.unwrap_or_default();
@@ -238,6 +262,7 @@ impl FormatGraphState {
                 _ => true,
             };
             self.show_symbols_dirty = false;
+            self.show_connecting_line = matches!(&series.gdo, GraphicalDataObject::ScatterAndLine { line: Some(_), .. });
             self.replicate_lines = match &series.gdo {
                 GraphicalDataObject::ScatterAndLine { replicate_lines, .. } => *replicate_lines,
                 _ => ReplicateLineMode::default(),
@@ -252,14 +277,50 @@ impl FormatGraphState {
             self.bar_border_width_dirty = false;
             let alpha_u8 = extract_gdo_alpha_byte(&series.gdo);
             self.series_alpha_pct = ((f64::from(alpha_u8) / 255.0) * 100.0).round().clamp(0.0, 100.0) as u8;
+            self.marker_size_pt = 5.0;
+            self.marker_fill_mode = MarkerFillMode::Filled;
+            self.line_dash = LineDashStyle::Solid;
             self.extract_series_marker_and_dash(&series.gdo);
+            self.marker_dirty = false;
+            self.line_dash_dirty = false;
+            self.synced_marker_size_pt = Some(self.marker_size_pt);
+            self.synced_marker_fill_mode = Some(self.marker_fill_mode);
+            self.synced_line_dash = Some(self.line_dash);
         } else {
+            self.error_bar_enabled = false;
+            self.error_bar_spec = ErrorBarSpec::default();
+            self.half_violin_with_points = false;
+            self.initial_violin_options = None;
             self.series_gdo_bar = false;
+            self.show_raw_data = true;
+            self.cached_regression_overlay = None;
+            self.show_fitted_curve = false;
+            self.bind_to_right_y2 = false;
+            self.bind_to_right_y2_dirty = false;
+            self.offset_x_data = 0.0;
+            self.offset_x_data_dirty = false;
+            self.show_symbols = true;
+            self.show_symbols_dirty = false;
+            self.show_connecting_line = false;
+            self.marker_size_pt = 5.0;
+            self.marker_fill_mode = MarkerFillMode::Filled;
+            self.marker_dirty = false;
+            self.line_dash = LineDashStyle::Solid;
+            self.line_dash_dirty = false;
+            self.synced_marker_size_pt = None;
+            self.synced_marker_fill_mode = None;
+            self.synced_line_dash = None;
+            self.replicate_lines = ReplicateLineMode::default();
+            self.replicate_lines_dirty = false;
+            self.bar_border_width_pt = 1.0;
+            self.bar_border_width_dirty = false;
+            self.series_alpha_pct = 100;
         }
     }
 
     /// Populate draft controls plus any categorical `MultipleVariables` level ordering from `doc`.
     pub fn sync_from_graph_with_doc(&mut self, graph: &GraphSheet, doc: Option<&ProjectDocument>) {
+        let prev_selected = (self.graph_sheet_id.as_ref() == Some(&graph.id)).then(|| self.mv_selected_level.clone()).flatten();
         self.sync_from_graph(graph);
         let Some(doc) = doc else {
             return;
@@ -284,7 +345,7 @@ impl FormatGraphState {
                 self.mv_levels = lvls;
                 self.mv_level_is_x = true;
                 self.mv_selected_level =
-                    resolve_selected_level_idx(&self.mv_levels, self.mv_selected_level.as_deref()).and_then(|i| self.mv_levels.get(i).cloned());
+                    resolve_selected_level_idx(&self.mv_levels, prev_selected.as_deref()).and_then(|i| self.mv_levels.get(i).cloned());
                 return;
             }
         }
@@ -297,7 +358,7 @@ impl FormatGraphState {
                 self.mv_levels = lvls;
                 self.mv_level_is_x = false;
                 self.mv_selected_level =
-                    resolve_selected_level_idx(&self.mv_levels, self.mv_selected_level.as_deref()).and_then(|i| self.mv_levels.get(i).cloned());
+                    resolve_selected_level_idx(&self.mv_levels, prev_selected.as_deref()).and_then(|i| self.mv_levels.get(i).cloned());
             }
         }
     }
@@ -491,71 +552,103 @@ impl FormatGraphState {
             spec_patch.insert(String::from("forest_show_pooled_diamond"), json!(self.forest_show_pooled_diamond));
         }
         spec_patch.insert(String::from("legend"), json!({ "visible": self.show_legend, "bordered": self.legend_bordered }));
-        let mut series_patch = serde_json::Map::new();
-        series_patch.insert(String::from("sheet_id"), json!(id.as_str()));
-        if self.apply_all_data_sets {
-            series_patch.insert(String::from("all_series"), json!(true));
-        } else {
-            series_patch.insert(String::from("series_index"), json!(self.selected_series_index));
-        }
-        series_patch.insert(String::from("y_error_bars"), json!(error_bars));
-        series_patch.insert(String::from("show_raw_data"), json!(self.show_raw_data));
-        let marker_val = if self.show_symbols {
-            json!({
-                "size_pt": self.marker_size_pt,
-                "fill_mode": self.marker_fill_mode,
-            })
-        } else {
-            Value::Null
-        };
-        series_patch.insert(String::from("marker"), marker_val);
-        series_patch.insert(
-            String::from("connecting_line"),
-            json!({
-                "dash_style": self.line_dash,
-            }),
-        );
-        if self.replicate_lines_dirty {
-            series_patch.insert(String::from("replicate_lines"), json!(self.replicate_lines));
-        }
-        if self.bind_to_right_y2_dirty {
-            series_patch.insert(String::from("bind_to_right_y2"), json!(self.bind_to_right_y2));
-        }
-        if self.offset_x_data_dirty {
-            series_patch.insert(String::from("offset"), json!({ "x_data": self.offset_x_data }));
-        }
-        if self.bar_border_width_dirty {
-            series_patch.insert(String::from("border_width_pt"), json!(self.bar_border_width_pt));
-        }
-        if self.alpha_dirty {
-            let alpha_u8 = ((f64::from(self.series_alpha_pct) / 100.0) * 255.0).round().clamp(0.0, 255.0) as u8;
-            series_patch.insert(String::from("alpha"), json!(alpha_u8));
-        }
-        if self.pending_overlay_result_id.is_none() && self.cached_regression_overlay.is_some() {
-            series_patch
-                .insert(String::from("regression_overlay"), if self.show_fitted_curve { json!(self.cached_regression_overlay) } else { Value::Null });
-        }
-        if self.series_gdo_dirty {
-            let swatch = self.palette.color_at(self.selected_series_index);
-            series_patch.insert(String::from("gdo"), json!(self.build_switched_series_gdo(swatch)));
-        } else if self.half_violin_with_points || self.initial_violin_options.is_some_and(|(_, _, was_half)| was_half) {
-            let swatch = self.palette.color_at(self.selected_series_index);
-            let (clip_to_observed_range, show_median_and_quartiles, _) = self.initial_violin_options.unwrap_or((true, true, false));
-            series_patch.insert(
-                String::from("gdo"),
-                json!(GraphicalDataObject::Violin {
-                    fill_color: swatch.with_alpha(190),
-                    stroke_color: swatch,
-                    clip_to_observed_range,
-                    show_median_and_quartiles,
-                    half_violin_with_points: self.half_violin_with_points,
-                }),
-            );
-        }
-        let series_obj = Value::Object(series_patch);
         let mut intents = vec![ToolCommandIntent::new("graph.setSpec", Value::Object(spec_patch))];
-        if !matches!(self.graph_kind, Some(GraphKind::MultipleVariables)) {
-            intents.push(ToolCommandIntent::new("graph.setSeries", series_obj));
+        let skip_series = matches!(self.graph_kind, Some(GraphKind::MultipleVariables)) || self.synced_series_count == Some(0);
+        if !skip_series {
+            let mut base_series_patch = serde_json::Map::new();
+            base_series_patch.insert(String::from("sheet_id"), json!(id.as_str()));
+            base_series_patch.insert(String::from("y_error_bars"), json!(error_bars));
+            base_series_patch.insert(String::from("show_raw_data"), json!(self.show_raw_data));
+
+            let base_marker_size = self.synced_marker_size_pt.unwrap_or(5.0);
+            let base_marker_fill = self.synced_marker_fill_mode.unwrap_or(MarkerFillMode::Filled);
+            let base_line_dash = self.synced_line_dash.unwrap_or(LineDashStyle::Solid);
+            let marker_modified = self.marker_dirty
+                || self.show_symbols_dirty
+                || (base_marker_size - self.marker_size_pt).abs() > 1e-12
+                || base_marker_fill != self.marker_fill_mode;
+            let line_modified = self.line_dash_dirty || base_line_dash != self.line_dash;
+            if marker_modified {
+                let marker_val = if self.show_symbols {
+                    json!({
+                        "size_pt": self.marker_size_pt,
+                        "fill_mode": self.marker_fill_mode,
+                    })
+                } else {
+                    Value::Null
+                };
+                base_series_patch.insert(String::from("marker"), marker_val);
+            }
+            if line_modified {
+                base_series_patch.insert(
+                    String::from("connecting_line"),
+                    json!({
+                        "dash_style": self.line_dash,
+                    }),
+                );
+            }
+            if self.replicate_lines_dirty {
+                base_series_patch.insert(String::from("replicate_lines"), json!(self.replicate_lines));
+            }
+            if self.bind_to_right_y2_dirty {
+                base_series_patch.insert(String::from("bind_to_right_y2"), json!(self.bind_to_right_y2));
+            }
+            if self.offset_x_data_dirty {
+                base_series_patch.insert(String::from("offset"), json!({ "x_data": self.offset_x_data }));
+            }
+            if self.bar_border_width_dirty {
+                base_series_patch.insert(String::from("border_width_pt"), json!(self.bar_border_width_pt));
+            }
+            if self.alpha_dirty {
+                let alpha_u8 = ((f64::from(self.series_alpha_pct) / 100.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+                base_series_patch.insert(String::from("alpha"), json!(alpha_u8));
+            }
+            if self.pending_overlay_result_id.is_none() && self.cached_regression_overlay.is_some() {
+                base_series_patch.insert(
+                    String::from("regression_overlay"),
+                    if self.show_fitted_curve { json!(self.cached_regression_overlay) } else { Value::Null },
+                );
+            }
+
+            let replacing_violin =
+                !self.series_gdo_dirty && (self.half_violin_with_points || self.initial_violin_options.is_some_and(|(_, _, was_half)| was_half));
+            let replacing_gdo = self.series_gdo_dirty || replacing_violin;
+            let build_gdo_for_idx = |idx: usize| -> GraphicalDataObject {
+                let swatch = self.palette.color_at(idx);
+                if self.series_gdo_dirty {
+                    self.build_switched_series_gdo(swatch)
+                } else {
+                    let (clip_to_observed_range, show_median_and_quartiles, _) = self.initial_violin_options.unwrap_or((true, true, false));
+                    GraphicalDataObject::Violin {
+                        fill_color: swatch.with_alpha(190),
+                        stroke_color: swatch,
+                        clip_to_observed_range,
+                        show_median_and_quartiles,
+                        half_violin_with_points: self.half_violin_with_points,
+                    }
+                }
+            };
+
+            if self.apply_all_data_sets && replacing_gdo {
+                let count = self.synced_series_count.unwrap_or(1);
+                for idx in 0..count {
+                    let mut per_series = base_series_patch.clone();
+                    per_series.insert(String::from("series_index"), json!(idx));
+                    per_series.insert(String::from("gdo"), json!(build_gdo_for_idx(idx)));
+                    intents.push(ToolCommandIntent::new("graph.setSeries", Value::Object(per_series)));
+                }
+            } else {
+                if self.apply_all_data_sets {
+                    base_series_patch.insert(String::from("all_series"), json!(true));
+                } else {
+                    base_series_patch.insert(String::from("series_index"), json!(self.selected_series_index));
+                }
+                if replacing_gdo {
+                    base_series_patch.insert(String::from("gdo"), json!(build_gdo_for_idx(self.selected_series_index)));
+                }
+                intents.push(ToolCommandIntent::new("graph.setSeries", Value::Object(base_series_patch)));
+            }
+
             if let Some(overlay_target) = &self.pending_overlay_result_id {
                 let mut ov_params = serde_json::Map::new();
                 ov_params.insert(String::from("sheet_id"), json!(id.as_str()));

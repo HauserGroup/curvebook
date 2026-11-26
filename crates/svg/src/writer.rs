@@ -7,6 +7,7 @@ use curvebook_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint,
     TextAnchor,
 };
+use curvebook_doc::{MAX_IMAGE_DIM_PX, MAX_IMAGE_PIXELS};
 use curvebook_palette::Rgba8;
 use curvebook_platform::base64::encode as encode_base64;
 use curvebook_text::metrics::split_rich_text_lines;
@@ -17,6 +18,15 @@ use quick_xml::{Reader as XmlReader, XmlVersion};
 use serde::{Deserialize, Serialize};
 
 use crate::SVG_XMLNS;
+
+/// Hard ceiling on scene primitives serialized into a single SVG document.
+pub const MAX_SVG_PRIMITIVES: usize = 500_000;
+
+/// Hard ceiling on cumulative path commands serialized across all paths in a single SVG document.
+pub const MAX_SVG_PATH_COMMANDS: usize = 2_000_000;
+
+/// Hard ceiling on emitted SVG byte length (32 MiB).
+pub const MAX_SVG_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 
 const MAX_PRECISION: u8 = 6;
 const DEFAULT_FONT_FAMILY: &str = "Helvetica, Arial, sans-serif";
@@ -108,31 +118,120 @@ impl ClipRegistry {
     }
 }
 
+struct SvgImageAsset<'a> {
+    id: String,
+    asset_id: &'a str,
+    width: u32,
+    height: u32,
+    rgba: &'a [u8],
+    data_uri: String,
+}
+
 struct SvgRenderCtx<'a> {
     options: &'a SvgExportOptions,
     bundled_fonts: &'a [(&'a str, &'a [u8])],
     prec: usize,
     opacity_prec: usize,
     clips: ClipRegistry,
-    image_data_uris: BTreeMap<(String, u32, u32, u32), String>,
+    image_assets: Vec<SvgImageAsset<'a>>,
+    image_buckets: BTreeMap<(u32, u32, u32), Vec<usize>>,
     has_images: bool,
     body: String,
     clip_depth: usize,
+    total_path_commands: usize,
+    defs_estimated_bytes: usize,
+    max_output_bytes: usize,
 }
 
 impl<'a> SvgRenderCtx<'a> {
-    fn new(options: &'a SvgExportOptions, bundled_fonts: &'a [(&'a str, &'a [u8])], prec: usize) -> Self {
+    fn new(options: &'a SvgExportOptions, bundled_fonts: &'a [(&'a str, &'a [u8])], prec: usize, max_output_bytes: usize) -> Self {
         Self {
             options,
             bundled_fonts,
             prec,
             opacity_prec: prec.max(3),
             clips: ClipRegistry::default(),
-            image_data_uris: BTreeMap::new(),
+            image_assets: Vec::new(),
+            image_buckets: BTreeMap::new(),
             has_images: false,
             body: String::with_capacity(2048),
             clip_depth: 0,
+            total_path_commands: 0,
+            defs_estimated_bytes: 0,
+            max_output_bytes,
         }
+    }
+
+    fn check_output_budget(&self, additional_bytes: usize) -> Result<(), SvgError> {
+        let projected = self
+            .body
+            .len()
+            .checked_add(self.defs_estimated_bytes)
+            .and_then(|n| n.checked_add(additional_bytes))
+            .ok_or_else(|| SvgError::InvalidScene { message: String::from("SVG output byte length overflows usize") })?;
+        if projected > self.max_output_bytes {
+            return Err(SvgError::InvalidScene {
+                message: format!("SVG output size {projected} bytes exceeds maximum {} bytes", self.max_output_bytes),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_raster_buffer(raster: &SceneRasterImage) -> Result<(u32, u32), SvgError> {
+        let (w, h) = raster.pixel_size;
+        if w == 0 || h == 0 {
+            return Err(SvgError::InvalidScene { message: String::from("invalid raster image pixel buffer in SVG scene") });
+        }
+        if w > MAX_IMAGE_DIM_PX || h > MAX_IMAGE_DIM_PX {
+            return Err(SvgError::InvalidScene { message: format!("SVG raster image dimension {w}x{h} exceeds maximum {MAX_IMAGE_DIM_PX}px") });
+        }
+        let px_count_u64 = u64::from(w) * u64::from(h);
+        if px_count_u64 > MAX_IMAGE_PIXELS {
+            return Err(SvgError::InvalidScene {
+                message: format!("SVG raster image pixel count {px_count_u64} exceeds maximum {MAX_IMAGE_PIXELS}"),
+            });
+        }
+        let Some(expected_len) = (w as usize).checked_mul(h as usize).and_then(|p| p.checked_mul(4)) else {
+            return Err(SvgError::InvalidScene { message: String::from("raster image dimensions overflow byte count") });
+        };
+        if raster.rgba.len() != expected_len {
+            return Err(SvgError::InvalidScene { message: String::from("invalid raster image pixel buffer in SVG scene") });
+        }
+        Ok((w, h))
+    }
+
+    fn register_image(&mut self, raster: &'a SceneRasterImage) -> Result<usize, SvgError> {
+        let (w, h) = Self::validate_raster_buffer(raster)?;
+
+        let bucket_key = (w, h, crc32fast::hash(&raster.rgba));
+        if let Some(candidates) = self.image_buckets.get(&bucket_key) {
+            for &idx in candidates {
+                if let Some(existing) = self.image_assets.get(idx)
+                    && existing.asset_id == raster.asset_id.as_str()
+                    && existing.width == w
+                    && existing.height == h
+                    && existing.rgba == raster.rgba.as_slice()
+                {
+                    return Ok(idx);
+                }
+            }
+        }
+
+        let png_bytes = encode_rgba_png(w, h, &raster.rgba)?;
+        let estimated_uri_len = png_bytes.len().div_ceil(3).saturating_mul(4).saturating_add(22);
+        let estimated_def_bytes = estimated_uri_len.saturating_mul(2).saturating_add(160);
+        self.check_output_budget(estimated_def_bytes)?;
+
+        let data_uri = format!("data:image/png;base64,{}", encode_base64(&png_bytes));
+        let def_bytes = data_uri.len().saturating_mul(2).saturating_add(160);
+        self.check_output_budget(def_bytes)?;
+        self.defs_estimated_bytes = self.defs_estimated_bytes.saturating_add(def_bytes);
+
+        let idx = self.image_assets.len();
+        let id = format!("img-{idx}");
+        self.image_assets.push(SvgImageAsset { id, asset_id: raster.asset_id.as_str(), width: w, height: h, rgba: raster.rgba.as_slice(), data_uri });
+        self.image_buckets.entry(bucket_key).or_default().push(idx);
+        Ok(idx)
     }
 
     fn push_indent(&mut self, extra: usize) {
@@ -170,14 +269,28 @@ fn is_matching_full_bg_rect(scene: &ChartScene, bg: Rgba8) -> bool {
 }
 
 fn render_svg_with_bundled_fonts(scene: &ChartScene, options: &SvgExportOptions, bundled_fonts: &[(&str, &[u8])]) -> Result<String, SvgError> {
+    render_svg_with_limits(scene, options, bundled_fonts, MAX_SVG_OUTPUT_BYTES)
+}
+
+fn render_svg_with_limits(
+    scene: &ChartScene,
+    options: &SvgExportOptions,
+    bundled_fonts: &[(&str, &[u8])],
+    max_output_bytes: usize,
+) -> Result<String, SvgError> {
     if !scene.width_pt.is_finite() || !scene.height_pt.is_finite() || scene.width_pt <= 0.0 || scene.height_pt <= 0.0 {
         return Err(SvgError::InvalidScene { message: String::from("scene dimensions must be finite and positive") });
+    }
+    if scene.primitives.len() > MAX_SVG_PRIMITIVES {
+        return Err(SvgError::InvalidScene {
+            message: format!("SVG scene primitive count {} exceeds maximum {MAX_SVG_PRIMITIVES}", scene.primitives.len()),
+        });
     }
     let prec = usize::from(options.precision.min(MAX_PRECISION));
     let w = format_scalar(scene.width_pt, prec)?;
     let h = format_scalar(scene.height_pt, prec)?;
 
-    let mut ctx = SvgRenderCtx::new(options, bundled_fonts, prec);
+    let mut ctx = SvgRenderCtx::new(options, bundled_fonts, prec, max_output_bytes);
     let skip_first_bg = options.transparent_bg && scene.background.is_some_and(|bg| is_matching_full_bg_rect(scene, bg));
     let start_idx = usize::from(skip_first_bg);
     for prim in scene.primitives.iter().skip(start_idx) {
@@ -205,6 +318,7 @@ fn render_svg_with_bundled_fonts(scene: &ChartScene, options: &SvgExportOptions,
                 }
             }
         }
+        ctx.check_output_budget(0)?;
     }
     while ctx.clip_depth > 0 {
         ctx.clip_depth -= 1;
@@ -212,8 +326,9 @@ fn render_svg_with_bundled_fonts(scene: &ChartScene, options: &SvgExportOptions,
         ctx.body.push_str("</g>");
         ctx.push_newline();
     }
+    ctx.check_output_budget(128)?;
 
-    let mut out = String::with_capacity(ctx.body.len() + 512);
+    let mut out = String::with_capacity(ctx.body.len().saturating_add(ctx.defs_estimated_bytes).min(max_output_bytes));
     if options.include_xml_declaration {
         out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     }
@@ -240,7 +355,11 @@ fn render_svg_with_bundled_fonts(scene: &ChartScene, options: &SvgExportOptions,
         }
     }
 
-    write_defs(&mut out, &ctx.clips.entries, options, bundled_fonts);
+    write_defs(&mut out, &ctx.clips.entries, &ctx.image_assets, options, bundled_fonts);
+    let final_len = out.len().saturating_add(ctx.body.len()).saturating_add("</svg>\n".len());
+    if final_len > max_output_bytes {
+        return Err(SvgError::InvalidScene { message: format!("SVG output size {final_len} bytes exceeds maximum {max_output_bytes} bytes") });
+    }
     out.push_str(&ctx.body);
     out.push_str("</svg>\n");
     Ok(out)
@@ -250,9 +369,9 @@ fn has_embeddable_faces(options: &SvgExportOptions, bundled_fonts: &[(&str, &[u8
     options.embed_fonts && !options.outline_text && bundled_fonts.iter().any(|(name, bytes)| !name.is_empty() && !bytes.is_empty())
 }
 
-fn write_defs(out: &mut String, clips: &[ClipEntry], options: &SvgExportOptions, bundled_fonts: &[(&str, &[u8])]) {
+fn write_defs(out: &mut String, clips: &[ClipEntry], images: &[SvgImageAsset<'_>], options: &SvgExportOptions, bundled_fonts: &[(&str, &[u8])]) {
     let embed_faces = has_embeddable_faces(options, bundled_fonts);
-    if clips.is_empty() && !embed_faces {
+    if clips.is_empty() && images.is_empty() && !embed_faces {
         return;
     }
 
@@ -266,6 +385,15 @@ fn write_defs(out: &mut String, clips: &[ClipEntry], options: &SvgExportOptions,
         let _ = write!(out, "{indent2}<clipPath id=\"{}\">{nl}", clip.id);
         let _ = write!(out, "{indent3}<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>{nl}", clip.x, clip.y, clip.width, clip.height);
         let _ = write!(out, "{indent2}</clipPath>{nl}");
+    }
+    for asset in images {
+        let _ = write!(out, "{indent2}<symbol id=\"{}\" viewBox=\"0 0 1 1\" preserveAspectRatio=\"none\">{nl}", asset.id);
+        let _ = write!(
+            out,
+            "{indent3}<image width=\"1\" height=\"1\" preserveAspectRatio=\"none\" xlink:href=\"{}\" href=\"{}\"/>{nl}",
+            asset.data_uri, asset.data_uri
+        );
+        let _ = write!(out, "{indent2}</symbol>{nl}");
     }
     if embed_faces {
         let mut css = String::from(nl);
@@ -290,7 +418,18 @@ fn write_path_element(
     stroke: Option<&StrokePaint>,
     clip: Option<RectPt>,
 ) -> Result<(), SvgError> {
-    let d = build_path_d(path, ctx.prec)?;
+    ctx.total_path_commands = ctx
+        .total_path_commands
+        .checked_add(path.commands.len())
+        .ok_or_else(|| SvgError::InvalidScene { message: format!("SVG path command count overflows maximum {MAX_SVG_PATH_COMMANDS}") })?;
+    if ctx.total_path_commands > MAX_SVG_PATH_COMMANDS {
+        return Err(SvgError::InvalidScene {
+            message: format!("SVG cumulative path command count {} exceeds maximum {MAX_SVG_PATH_COMMANDS}", ctx.total_path_commands),
+        });
+    }
+    ctx.check_output_budget(path.commands.len().saturating_mul(2))?;
+    let remaining_budget = ctx.max_output_bytes.saturating_sub(ctx.body.len().saturating_add(ctx.defs_estimated_bytes));
+    let d = build_path_d(path, ctx.prec, remaining_budget)?;
     if let Some(st) = stroke
         && (!st.width_pt.is_finite() || st.width_pt < 0.0)
     {
@@ -309,6 +448,7 @@ fn write_path_element(
         None => None,
     };
 
+    ctx.check_output_budget(d.len().saturating_add(64))?;
     ctx.push_indent(0);
     let _ = write!(ctx.body, "<path d=\"{d}\"");
 
@@ -337,14 +477,8 @@ fn write_path_element(
     Ok(())
 }
 
-fn write_raster_image_element(ctx: &mut SvgRenderCtx<'_>, raster: &SceneRasterImage) -> Result<(), SvgError> {
-    let (w, h) = raster.pixel_size;
-    let Some(expected_len) = (w as usize).checked_mul(h as usize).and_then(|p| p.checked_mul(4)) else {
-        return Err(SvgError::InvalidScene { message: String::from("raster image dimensions overflow byte count") });
-    };
-    if w == 0 || h == 0 || raster.rgba.len() != expected_len {
-        return Err(SvgError::InvalidScene { message: String::from("invalid raster image pixel buffer in SVG scene") });
-    }
+fn write_raster_image_element<'a>(ctx: &mut SvgRenderCtx<'a>, raster: &'a SceneRasterImage) -> Result<(), SvgError> {
+    let _ = SvgRenderCtx::validate_raster_buffer(raster)?;
     let b = raster.bounds_pt;
     if !b.x.is_finite() || !b.y.is_finite() || !b.width.is_finite() || !b.height.is_finite() || b.width <= 0.0 || b.height <= 0.0 {
         return Err(SvgError::InvalidScene { message: String::from("raster image bounds_pt must be finite and positive") });
@@ -357,15 +491,12 @@ fn write_raster_image_element(ctx: &mut SvgRenderCtx<'_>, raster: &SceneRasterIm
     };
     let vis = RectPt::from(vis_doc);
 
-    let key = (raster.asset_id.clone(), w, h, crc32fast::hash(&raster.rgba));
-    let data_uri = if let Some(cached) = ctx.image_data_uris.get(&key) {
-        cached.clone()
-    } else {
-        let png_bytes = encode_rgba_png(w, h, &raster.rgba)?;
-        let encoded = format!("data:image/png;base64,{}", encode_base64(&png_bytes));
-        ctx.image_data_uris.insert(key, encoded.clone());
-        encoded
-    };
+    let asset_idx = ctx.register_image(raster)?;
+    let img_id = ctx
+        .image_assets
+        .get(asset_idx)
+        .map(|a| a.id.clone())
+        .ok_or_else(|| SvgError::InvalidScene { message: String::from("missing registered SVG image asset") })?;
 
     let outer_clip_id = match raster.clip {
         Some(rect) => Some(ctx.clips.register(rect, ctx.prec)?),
@@ -398,11 +529,11 @@ fn write_raster_image_element(ctx: &mut SvgRenderCtx<'_>, raster: &SceneRasterIm
     let h_s = format_scalar(b.height, ctx.prec)?;
     ctx.has_images = true;
     ctx.push_indent(0);
-    let _ = write!(ctx.body, "<image x=\"{x_s}\" y=\"{y_s}\" width=\"{w_s}\" height=\"{h_s}\" preserveAspectRatio=\"none\"");
+    let _ = write!(ctx.body, "<use x=\"{x_s}\" y=\"{y_s}\" width=\"{w_s}\" height=\"{h_s}\"");
     if let Some(ref cid) = crop_clip_id {
         let _ = write!(ctx.body, " clip-path=\"url(#{cid})\"");
     }
-    let _ = write!(ctx.body, " xlink:href=\"{data_uri}\" href=\"{data_uri}\"/>");
+    let _ = write!(ctx.body, " xlink:href=\"#{img_id}\" href=\"#{img_id}\"/>");
     ctx.push_newline();
 
     if rotated {
@@ -478,8 +609,8 @@ fn write_stroke_attrs(ctx: &mut SvgRenderCtx<'_>, st: &StrokePaint) -> Result<()
     Ok(())
 }
 
-fn build_path_d(path: &Path2D, prec: usize) -> Result<String, SvgError> {
-    let mut d = String::with_capacity(path.commands.len() * 16);
+fn build_path_d(path: &Path2D, prec: usize, max_bytes: usize) -> Result<String, SvgError> {
+    let mut d = String::with_capacity(path.commands.len().saturating_mul(16).min(max_bytes).min(1024 * 1024));
     for (idx, cmd) in path.commands.iter().enumerate() {
         if idx > 0 {
             d.push(' ');
@@ -505,6 +636,9 @@ fn build_path_d(path: &Path2D, prec: usize) -> Result<String, SvgError> {
                 let _ = write!(d, "C{c1x} {c1y} {c2x} {c2y} {x} {y}");
             }
             PathCmd::Close => d.push('Z'),
+        }
+        if d.len() > max_bytes {
+            return Err(SvgError::InvalidScene { message: format!("SVG path data exceeds remaining byte budget {max_bytes}") });
         }
     }
     Ok(d)
@@ -1298,5 +1432,25 @@ mod tests {
         validate_svg_structure(&transparent).expect("transparent svg valid");
         assert!(!transparent.contains("fill=\"#FFFFFF\""), "transparent SVG must omit opaque white background: {transparent}");
         assert!(transparent.contains("fill=\"#0C5AB4\""), "transparent SVG must preserve foreground path: {transparent}");
+    }
+
+    #[test]
+    fn aud11_07_svg_output_byte_budget_enforced_incrementally() {
+        use curvebook_chart::{ChartScene, Path2D, PointPt, ScenePrimitive, StrokePaint};
+        use curvebook_palette::Rgba8;
+
+        use super::{SvgError, SvgExportOptions, render_svg_with_limits};
+
+        let mut scene = ChartScene::new("svg-budget", "Budget", 200.0, 100.0, Some(Rgba8::WHITE));
+        for i in 0..50u32 {
+            scene.primitives.push(ScenePrimitive::Path {
+                path: Path2D::line(PointPt::new(0.0, f64::from(i)), PointPt::new(100.0, f64::from(i))),
+                fill: None,
+                stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.0)),
+                clip: None,
+            });
+        }
+        let err = render_svg_with_limits(&scene, &SvgExportOptions::default(), &[], 1024).expect_err("must reject over-budget SVG");
+        assert!(matches!(err, SvgError::InvalidScene { .. }));
     }
 }

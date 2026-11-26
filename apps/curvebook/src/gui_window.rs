@@ -7,12 +7,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 
+use curvebook_render::RenderTargetSpec;
 use curvebook_text::TrueTypeFont;
+use curvebook_ui_egui::control_io::MAX_CONTROL_LINE_BYTES;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::rasterizer::EguiScreenshotRegions;
 use curvebook_ui_egui::egui_shell::{FrameInspectMeta, GeometryStamp, PendingUiIntents, Tokens, UiIntent, UiIntentOutcome, inspect_bridge};
 use curvebook_ui_egui::interaction::KeyModifiers;
-use curvebook_ui_egui::{ControlAuth, ControlPostRequestContext, ControlRequest, UiApp, is_desktop_host_routed_command, parse_control_request};
+use curvebook_ui_egui::{
+    ControlAuth, ControlPostRequestContext, ControlRequest, ScreenshotRegionTarget, UiApp, is_desktop_host_routed_command, parse_control_request,
+};
 use eframe::egui;
 
 use crate::desktop_host::{
@@ -491,10 +495,13 @@ impl CurveBookNativeApp {
     }
 
     fn send_live_control_reply(req: LiveControlRequest, id: serde_json::Value, result: Result<serde_json::Value, curvebook_engine::EngineError>) {
+        // Promote socket framing cap from 64 KiB to 16 MiB when a deferred GUI command authenticates
+        // via per-request `"token"` (`AUD-13-21`).
+        let auth_succeeded = (!req.conn_authenticated && is_request_authorized(&req)).then_some(true);
         let reply = curvebook_ui_egui::encode_egui_control_response(id, result);
         let bytes = serde_json::to_vec(&reply).map(|mut b| {
             b.push(b'\n');
-            LiveControlFrameOutput { response_bytes: b, quit: false, close_connection: false, auth_succeeded: None }
+            LiveControlFrameOutput { response_bytes: b, quit: false, close_connection: false, auth_succeeded }
         });
         let _ = req.reply_tx.send(bytes.map_err(|e| e.to_string()));
     }
@@ -599,9 +606,9 @@ impl CurveBookNativeApp {
         LiveActionDispatch::EguiQueued
     }
 
-    fn complete_pending_live_action(&mut self, ctx: &egui::Context, post_hook: &mut Option<LiveControlPostHook>) {
+    fn complete_pending_live_action(&mut self, ctx: &egui::Context, post_hook: &mut Option<LiveControlPostHook>) -> bool {
         let Some(pending) = self.pending_live_action.take() else {
-            return;
+            return false;
         };
         let outcomes = std::mem::take(&mut self.pending_live_outcomes);
         let pending_err = self.pending_live_error.take();
@@ -622,7 +629,7 @@ impl CurveBookNativeApp {
         if let Some(err) = pending_err {
             Self::send_live_control_reply(pending.req, pending.request_id, Err(err));
             self.invoke_live_post_hook(post_hook, &pending.method, baseline, false);
-            return;
+            return true;
         }
 
         let result_val = match pending.kind {
@@ -651,7 +658,7 @@ impl CurveBookNativeApp {
                         pending.request_id,
                         Err(curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::InternalError, "missing active window")),
                     );
-                    return;
+                    return true;
                 };
                 inspect_bridge::format_type_text_result(win.app(), &text, widget_id.as_deref(), submit, &outcomes)
             }
@@ -664,7 +671,7 @@ impl CurveBookNativeApp {
                         pending.request_id,
                         Err(curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::InternalError, "missing active window")),
                     );
-                    return;
+                    return true;
                 };
                 inspect_bridge::format_answer_dialog_click_result(
                     win.app(),
@@ -680,6 +687,7 @@ impl CurveBookNativeApp {
 
         Self::send_live_control_reply(pending.req, pending.request_id, Ok(result_val));
         self.invoke_live_post_hook(post_hook, &pending.method, baseline, true);
+        true
     }
 
     fn flush_deferred_live_requests(&mut self, ctx: &egui::Context, scroll_active_this_frame: bool) {
@@ -703,7 +711,10 @@ impl CurveBookNativeApp {
         }
 
         let mut post_hook = self.live_control.as_mut().and_then(|ctrl| ctrl.post_hook.take());
-        self.complete_pending_live_action(ctx, &mut post_hook);
+        let completed_pending = self.complete_pending_live_action(ctx, &mut post_hook);
+        if completed_pending {
+            ctx.request_repaint();
+        }
 
         if self.deferred_live_requests.is_empty() {
             if let Some(ref mut ctrl) = self.live_control {
@@ -715,6 +726,7 @@ impl CurveBookNativeApp {
         let queued = std::mem::take(&mut self.deferred_live_requests);
         let mut iter = queued.into_iter();
         let mut quit_requested = false;
+        let mut needs_repaint = false;
         while let Some(deferred) = iter.next() {
             if quit_requested {
                 let _ = deferred.req.reply_tx.send(Err(String::from("desktop window is closing")));
@@ -733,6 +745,7 @@ impl CurveBookNativeApp {
                     quit_requested = true;
                 }
                 let _ = deferred.req.reply_tx.send(res);
+                needs_repaint = true;
                 continue;
             };
 
@@ -743,9 +756,10 @@ impl CurveBookNativeApp {
                     LiveActionDispatch::ImmediateReply
                 }
                 "ui.screenshot" => {
-                    let injected_bytes = self.prepare_settled_live_request_bytes(&deferred.req.raw_bytes, stamp);
-                    let res = self.dispatch_single_live_request(&injected_bytes, &deferred.req.auth, deferred.req.conn_authenticated, &mut post_hook);
-                    let _ = deferred.req.reply_tx.send(res);
+                    let settled_bytes = self.prepare_settled_live_request_bytes(&deferred.req.raw_bytes, stamp);
+                    let settled_params = parse_control_request_from_bytes(&settled_bytes).map_or(parsed.params, |req| req.params);
+                    let res = self.handle_live_ui_screenshot(&parsed.id, stamp, &settled_params);
+                    Self::send_live_control_reply(deferred.req, parsed.id, res);
                     LiveActionDispatch::ImmediateReply
                 }
                 "ui.pointer_gesture" => self.try_enqueue_live_pointer_gesture(ctx, deferred, parsed, &mut post_hook),
@@ -764,6 +778,7 @@ impl CurveBookNativeApp {
                         quit_requested = true;
                     }
                     let _ = deferred.req.reply_tx.send(res);
+                    needs_repaint = true;
                     if !iter.as_slice().is_empty() { LiveActionDispatch::YieldFrame } else { LiveActionDispatch::ImmediateReply }
                 }
             };
@@ -783,12 +798,149 @@ impl CurveBookNativeApp {
                 }
             }
         }
+        if needs_repaint {
+            ctx.request_repaint();
+        }
         if let Some(ref mut ctrl) = self.live_control {
             ctrl.post_hook = post_hook;
         }
         if quit_requested {
             self.finish_live_quit(ctx);
         }
+    }
+
+    fn handle_live_ui_screenshot(
+        &mut self,
+        request_id: &serde_json::Value,
+        stamp: GeometryStamp,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, curvebook_engine::EngineError> {
+        use curvebook_doc::ErrorCode;
+        use curvebook_engine::EngineError;
+
+        let empty_map = serde_json::Map::new();
+        let obj = match params {
+            serde_json::Value::Null => &empty_map,
+            serde_json::Value::Object(map) => map,
+            _ => return Err(EngineError::with_code(ErrorCode::BadInput, "`ui.screenshot` params must be a JSON object")),
+        };
+
+        let region_raw = match obj.get("region").or_else(|| obj.get("target")) {
+            None | Some(serde_json::Value::Null) => "full_window",
+            Some(v) => v
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`region`/`target` must be a non-empty string"))?,
+        };
+        let region = match region_raw.to_ascii_lowercase().as_str() {
+            "full_window" | "full" | "window" | "workspace" | "viewport" => ScreenshotRegionTarget::FullWindow,
+            "canvas" => ScreenshotRegionTarget::Canvas,
+            "dialog" => ScreenshotRegionTarget::Dialog,
+            other => {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported screenshot region `{other}`")));
+            }
+        };
+
+        let parse_dim = |key: &str, default_val: u32| -> Result<u32, EngineError> {
+            match obj.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(default_val),
+                Some(v) => {
+                    let n = v
+                        .as_u64()
+                        .and_then(|u| u32::try_from(u).ok())
+                        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{key}` must be a positive integer")))?;
+                    if !(64..=4096).contains(&n) {
+                        return Err(EngineError::with_code(ErrorCode::BadInput, format!("`{key}` must be in 64..=4096 (got {n})")));
+                    }
+                    Ok(n)
+                }
+            }
+        };
+        let width_px = parse_dim("width_px", stamp.physical_width_px.clamp(64, 4096))?;
+        let height_px = parse_dim("height_px", stamp.physical_height_px.clamp(64, 4096))?;
+        let dpi = if let Some(v) = obj.get("dpi").filter(|v| !v.is_null()) {
+            let n = v
+                .as_u64()
+                .and_then(|u| u16::try_from(u).ok())
+                .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`dpi` must be an integer in 72..=600"))?;
+            if !(72..=600).contains(&n) {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("`dpi` must be in 72..=600 (got {n})")));
+            }
+            n
+        } else if let Some(v) = obj.get("scale_factor").filter(|v| !v.is_null()) {
+            let sf = v
+                .as_f64()
+                .filter(|x| x.is_finite())
+                .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`scale_factor` must be a finite number"))?;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let computed = (96.0 * sf.clamp(0.5, 6.0)).round().clamp(72.0, 600.0) as u16;
+            computed
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let computed = (96.0 * f64::from(stamp.scale_factor()).clamp(0.5, 6.0)).round().clamp(72.0, 600.0) as u16;
+            computed
+        };
+
+        let raw_dest_path = match obj.get("path") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => {
+                let s = v
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`path` must be a non-empty string"))?;
+                if s.contains('\0') {
+                    return Err(EngineError::with_code(ErrorCode::BadInput, "`path` must not contain NUL bytes"));
+                }
+                Some(s.to_owned())
+            }
+        };
+
+        let win_id = self.active_window_id();
+        let win = self.runtime.window_mut(win_id).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e))?;
+
+        let validated_path = if let Some(raw) = raw_dest_path.as_deref() {
+            let validated = win.app().session().validate_host_write_path(raw)?;
+            if let Ok(meta) = std::fs::symlink_metadata(&validated)
+                && (meta.file_type().is_symlink() || meta.is_dir())
+            {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("refusing to write screenshot to symlink or directory `{validated}`"),
+                ));
+            }
+            Some(validated)
+        } else {
+            None
+        };
+
+        let (png, actual_w, actual_h) =
+            win.app_mut().render_egui_shell_screenshot_png(RenderTargetSpec { width_px, height_px, dpi }, region).map_err(|err| {
+                let msg = err.to_string();
+                if msg.contains("no modal dialog") || msg.contains("unavailable") {
+                    EngineError::with_code(ErrorCode::Conflict, msg)
+                } else {
+                    EngineError::with_code(ErrorCode::BadInput, msg)
+                }
+            })?;
+
+        let final_payload = finalize_live_screenshot_payload_with_limit(
+            request_id,
+            region_raw,
+            actual_w,
+            actual_h,
+            dpi,
+            &png,
+            validated_path.as_deref(),
+            MAX_CONTROL_LINE_BYTES,
+        )?;
+
+        if let Some(ref dest) = validated_path {
+            win.app().session().write_host_file_atomic(dest, &png)?;
+        }
+
+        Ok(final_payload)
     }
 
     fn handle_live_ui_inspect(
@@ -1146,7 +1298,11 @@ impl CurveBookNativeApp {
                 .with_details(serde_json::json!({ "code": "human_path_only_policy" })),
             );
         }
-        let tab_params = match inspect_bridge::parse_switch_tab_params(&parsed.params) {
+        let (normalized_params, numeric_tab_index) = match normalize_live_switch_tab_params(&parsed.params) {
+            Ok(pair) => pair,
+            Err(err) => return Self::send_live_engine_err_val(deferred.req, parsed.id, err),
+        };
+        let tab_params = match inspect_bridge::parse_switch_tab_params(&normalized_params) {
             Ok(p) => p,
             Err(err) => return Self::send_live_engine_err_val(deferred.req, parsed.id, err),
         };
@@ -1175,7 +1331,9 @@ impl CurveBookNativeApp {
             }
         }
 
-        if let Some(entry) = inspect_bridge::find_switch_tab_widget_in_meta(&self.inspect_meta, &tab_params.target) {
+        if let Some(entry) = inspect_bridge::find_switch_tab_widget_in_meta(&self.inspect_meta, &tab_params.target)
+            .or_else(|| numeric_tab_index.and_then(|idx| find_indexed_tab_widget_in_meta(&self.inspect_meta, idx)))
+        {
             if !entry.enabled {
                 let tab_label = match tab_params.target {
                     inspect_bridge::ParsedSwitchTabTarget::Sheet(s) => s,
@@ -1191,7 +1349,13 @@ impl CurveBookNativeApp {
                     serde_json::json!({ "switched": true, "sheet_id": sheet_id, "widget_id": wid })
                 }
                 inspect_bridge::ParsedSwitchTabTarget::Tab(tab_id) => {
-                    serde_json::json!({ "switched": true, "tab_id": tab_id, "widget_id": wid })
+                    let resolved_tab_id = wid
+                        .strip_prefix("result.tab.")
+                        .or_else(|| wid.strip_prefix("edit.tab."))
+                        .or_else(|| wid.strip_prefix("fit.tab."))
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(tab_id);
+                    serde_json::json!({ "switched": true, "tab_id": resolved_tab_id, "widget_id": wid })
                 }
             };
             let batches = inspect_bridge::click_pos_batches(pos, egui::PointerButton::Primary, egui::Modifiers::NONE);
@@ -1207,6 +1371,23 @@ impl CurveBookNativeApp {
         let Ok(win) = self.runtime.window_mut(win_id) else {
             return Self::send_live_engine_error(deferred.req, parsed.id, curvebook_doc::ErrorCode::InternalError, "missing active window");
         };
+        // Support 0-based numeric tab indices on active `ResultSheet` sub-tabs (`AUD-13-11`).
+        if let Some(idx) = numeric_tab_index
+            && let Some(rs_id) = win.app().document().active_sheet_id.clone()
+            && let Some(tab_id) = win.app().document().result_sheet(&rs_id).and_then(|rs| rs.tabs.get(idx)).map(|t| t.id.clone())
+        {
+            win.app_mut().canvas_dialogs.result_view.active_tab_index = idx;
+            let out = serde_json::json!({
+                "switched": true,
+                "tab_id": tab_id,
+                "tab_index": idx,
+                "widget_id": format!("result.tab.{tab_id}"),
+            });
+            self.record_direct_live_mutation("ui.switch_tab", baseline);
+            Self::send_live_control_reply(deferred.req, parsed.id, Ok(out));
+            self.invoke_live_post_hook(post_hook, "ui.switch_tab", baseline, true);
+            return LiveActionDispatch::YieldFrame;
+        }
         match inspect_bridge::execute_switch_tab_fallback(win.app_mut(), &tab_params.target) {
             Ok(out) => {
                 self.record_direct_live_mutation("ui.switch_tab", baseline);
@@ -1227,7 +1408,8 @@ impl CurveBookNativeApp {
         parsed: ControlRequest,
         post_hook: &mut Option<LiveControlPostHook>,
     ) -> LiveActionDispatch {
-        let dlg_params = match inspect_bridge::parse_answer_dialog_params(&parsed.params) {
+        let normalized_params = normalize_live_answer_dialog_params(&parsed.params);
+        let dlg_params = match inspect_bridge::parse_answer_dialog_params(&normalized_params) {
             Ok(p) => p,
             Err(err) => return Self::send_live_engine_err_val(req, parsed.id, err),
         };
@@ -1303,23 +1485,36 @@ impl CurveBookNativeApp {
     }
 
     fn prepare_settled_live_request_bytes(&self, raw_bytes: &[u8], stamp: GeometryStamp) -> Vec<u8> {
-        let Some(mut req) = parse_control_request_from_bytes(raw_bytes) else {
+        // Mutate the raw JSON Value in place so per-request `"token"` and all top-level envelope
+        // fields are preserved verbatim (`AUD-06-03`).
+        let Ok(text) = std::str::from_utf8(raw_bytes) else {
             return raw_bytes.to_vec();
         };
+        let Ok(mut val) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
+            return raw_bytes.to_vec();
+        };
+        let Some(obj) = val.as_object_mut() else {
+            return raw_bytes.to_vec();
+        };
+        let method = obj.get("method").or_else(|| obj.get("op")).and_then(serde_json::Value::as_str).map(str::trim);
+        if method != Some("ui.screenshot") {
+            return raw_bytes.to_vec();
+        }
         let scale = f64::from(stamp.scale_factor());
         let mut updated = false;
-        if req.method == "ui.screenshot"
-            && let Some(map) = ensure_params_object(&mut req.params)
-        {
+        let params_entry = obj.entry(String::from("params")).or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(map) = ensure_params_object(params_entry) {
             if !map.contains_key("width_px") {
-                map.insert(String::from("width_px"), serde_json::json!(stamp.physical_width_px.max(64)));
+                map.insert(String::from("width_px"), serde_json::json!(stamp.physical_width_px.clamp(64, 4096)));
                 updated = true;
             }
             if !map.contains_key("height_px") {
-                map.insert(String::from("height_px"), serde_json::json!(stamp.physical_height_px.max(64)));
+                map.insert(String::from("height_px"), serde_json::json!(stamp.physical_height_px.clamp(64, 4096)));
                 updated = true;
             }
-            if !map.contains_key("dpi") {
+            let has_dpi = map.get("dpi").is_some_and(|v| !v.is_null());
+            let has_scale = map.get("scale_factor").is_some_and(|v| !v.is_null());
+            if !has_dpi && !has_scale {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let dpi = (scale * 96.0).round().clamp(72.0, 600.0) as u16;
                 map.insert(String::from("dpi"), serde_json::json!(dpi));
@@ -1329,7 +1524,7 @@ impl CurveBookNativeApp {
         if !updated {
             return raw_bytes.to_vec();
         }
-        serde_json::to_vec(&req).map_or_else(
+        serde_json::to_vec(&val).map_or_else(
             |_| raw_bytes.to_vec(),
             |mut bytes| {
                 bytes.push(b'\n');
@@ -1358,15 +1553,16 @@ impl CurveBookNativeApp {
         }
     }
 
-    fn commit_pending_intents(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, will_discard: bool) {
+    fn commit_pending_intents(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, will_discard: bool) -> bool {
         if self.pending_intents.is_empty() || will_discard {
             // Preserve pass-0 intents across discarded layout passes (`R15-GUI-05`) until settled.
-            return;
+            return false;
         }
         let raw_intents = std::mem::take(&mut self.pending_intents);
 
         let mut remaining_intents = PendingUiIntents::default();
         let mut host_commands: Vec<(String, serde_json::Value)> = Vec::new();
+        let mut close_modals_after_host_commands = false;
         let mut host_copy = false;
         let mut host_copy_for_slides: Option<u16> = None;
         let mut host_cut = false;
@@ -1389,6 +1585,11 @@ impl CurveBookNativeApp {
                         && params.get("asset_id").is_none() =>
                 {
                     host_commands.push((command_id.clone(), params.clone()));
+                }
+                UiIntent::CloseAllModals if !host_commands.is_empty() => {
+                    // Defer modal dismissal until after host-routed commands finish cleanly
+                    // (`AUD-10-22` ExportFigure / CsvExportOptions error & cancel preservation).
+                    close_modals_after_host_commands = true;
                 }
                 UiIntent::OpenProjectFile => {
                     host_commands.push((String::from("project.open"), serde_json::json!({})));
@@ -1471,9 +1672,27 @@ impl CurveBookNativeApp {
         if host_paste && let Err(err) = self.runtime.dispatch(DesktopHostEvent::ClipboardPaste { window_id, text_override: None }) {
             self.status_banner = Some(err);
         }
+        let dialog_before_host = if close_modals_after_host_commands {
+            self.runtime.window(window_id).ok().map(|w| w.app().canvas_dialogs.active_dialog.clone())
+        } else {
+            None
+        };
+        let mut all_host_cmds_completed = true;
         for (cmd_id, params) in host_commands {
-            self.execute_menu_command_with_params(Some(ctx), window_id, &cmd_id, &params);
+            if !self.execute_menu_command_with_params(Some(ctx), window_id, &cmd_id, &params) {
+                all_host_cmds_completed = false;
+            }
         }
+        if close_modals_after_host_commands
+            && all_host_cmds_completed
+            && let Ok(win) = self.runtime.window_mut(window_id)
+            && dialog_before_host.as_ref().is_none_or(|before| win.app().canvas_dialogs.active_dialog == *before)
+        {
+            let mut close_intents = PendingUiIntents::default();
+            close_intents.push(UiIntent::CloseAllModals);
+            let _ = close_intents.commit_all_if_settled(win.app_mut(), false);
+        }
+        true
     }
 
     fn apply_egui_unsaved_close_action(
@@ -1595,22 +1814,24 @@ impl CurveBookNativeApp {
 
         let canvas_rect = report.regions.canvas_rect_pt.unwrap_or(available_rect);
         self.sync_canvas_viewport(input_window_id, canvas_rect, ppp);
-        self.process_canvas_input(ui, input_window_id);
+        if self.process_canvas_input_inner(ui, input_window_id) {
+            ctx.request_repaint();
+        }
         self.render_dnd_hover_overlay(ui);
         self.render_status_banner_toast(&ctx);
 
         let post_window_id = self.active_window_id();
-        self.sync_window_title(&ctx, post_window_id);
-
         let will_discard = ctx.will_discard();
         let force_commit = will_discard && self.discarded_carry_passes >= 7;
         if will_discard && !force_commit {
             self.discarded_carry_passes = self.discarded_carry_passes.saturating_add(1);
-            self.commit_pending_intents(&ctx, post_window_id, true);
+            let _ = self.commit_pending_intents(&ctx, post_window_id, true);
             ctx.request_repaint();
         } else {
             self.discarded_carry_passes = 0;
-            self.commit_pending_intents(&ctx, post_window_id, false);
+            if self.commit_pending_intents(&ctx, post_window_id, false) {
+                ctx.request_repaint();
+            }
             if will_discard {
                 ctx.request_repaint();
             }
@@ -1634,6 +1855,10 @@ impl CurveBookNativeApp {
             }
             self.last_egui_wants_kb = now_wants_kb;
         }
+        // Sync native window title AFTER post-render intent commits and deferred live-control
+        // actions so title/dirty-marker updates take effect on the same frame (`AUD-06-06`).
+        let final_window_id = self.active_window_id();
+        self.sync_window_title(&ctx, final_window_id);
         if !self.pending_synthetic_egui_batches.is_empty() || self.pending_live_action.is_some() {
             ctx.request_repaint();
         }
@@ -1832,7 +2057,7 @@ impl CurveBookNativeApp {
     }
 
     fn execute_menu_command(&mut self, ctx: Option<&egui::Context>, window_id: DesktopWindowId, command_id: &str) {
-        self.execute_menu_command_with_params(ctx, window_id, command_id, &serde_json::json!({}));
+        let _ = self.execute_menu_command_with_params(ctx, window_id, command_id, &serde_json::json!({}));
     }
 
     fn execute_menu_command_with_params(
@@ -1841,25 +2066,28 @@ impl CurveBookNativeApp {
         window_id: DesktopWindowId,
         command_id: &str,
         params: &serde_json::Value,
-    ) {
+    ) -> bool {
         self.status_banner = None;
         if command_id == "app.preferences" {
             if let Ok(win) = self.runtime.window_mut(window_id) {
                 let shortcuts = win.app().shortcuts.clone();
                 win.app_mut().egui_views.app_modals.open_preferences(&shortcuts, None);
             }
-            return;
+            return true;
         }
         if let Some(native_result) = self.try_handle_native_file_command_with_params(window_id, command_id, params) {
             match native_result {
-                Ok(()) => {
+                Ok(completed) => {
                     if self.active_window_id() != window_id {
                         self.on_active_window_switched();
                     }
+                    return completed;
                 }
-                Err(err) => self.status_banner = Some(err),
+                Err(err) => {
+                    self.status_banner = Some(err);
+                    return false;
+                }
             }
-            return;
         }
         if matches!(command_id, "app.quit" | "file.quit") {
             self.quit_in_progress = true;
@@ -1882,10 +2110,12 @@ impl CurveBookNativeApp {
                         self.maybe_sync_plain_text_fallback(ctx_ref, &outcome);
                     }
                 }
+                true
             }
             Err(err) => {
                 self.quit_in_progress = false;
                 self.status_banner = Some(err);
+                false
             }
         }
     }
@@ -1895,7 +2125,7 @@ impl CurveBookNativeApp {
         window_id: DesktopWindowId,
         command_id: &str,
         params: &serde_json::Value,
-    ) -> Option<Result<(), String>> {
+    ) -> Option<Result<bool, String>> {
         if !menu_action_triggers_native_file_dialog(command_id) {
             return None;
         }
@@ -1907,7 +2137,8 @@ impl CurveBookNativeApp {
         if outcome.opened_window_id.is_some() {
             self.on_active_window_switched();
         }
-        Some(Ok(()))
+        let completed = !outcome.action.starts_with("native_file_dialog.cancelled:");
+        Some(Ok(completed))
     }
 
     fn handle_native_save(&mut self, window_id: DesktopWindowId, force_dialog: bool) -> Result<(), String> {
@@ -1933,38 +2164,57 @@ impl CurveBookNativeApp {
 
     /// Process host-level `egui` file drag-and-drop and global desktop shortcut events.
     pub fn process_canvas_input(&mut self, ui: &egui::Ui, window_id: DesktopWindowId) {
-        let (events, raw_hovered, raw_dropped) = ui.ctx().input(|i| (i.events.clone(), i.raw.hovered_files.clone(), i.raw.dropped_files.clone()));
-
-        self.dispatch_file_dnd(window_id, &raw_hovered, &raw_dropped);
-        self.dispatch_egui_events(ui.ctx(), window_id, &events);
+        let _ = self.process_canvas_input_inner(ui, window_id);
     }
 
-    fn dispatch_file_dnd(&mut self, window_id: DesktopWindowId, hovered: &[egui::HoveredFile], dropped: &[egui::DroppedFileHandle]) {
+    fn process_canvas_input_inner(&mut self, ui: &egui::Ui, window_id: DesktopWindowId) -> bool {
+        let (events, raw_hovered, raw_dropped) = ui.ctx().input(|i| (i.events.clone(), i.raw.hovered_files.clone(), i.raw.dropped_files.clone()));
+
+        let dnd_acted = self.dispatch_file_dnd(window_id, &raw_hovered, &raw_dropped);
+        let key_acted = self.dispatch_egui_events(ui.ctx(), window_id, &events);
+        dnd_acted || key_acted
+    }
+
+    fn dispatch_file_dnd(&mut self, window_id: DesktopWindowId, hovered: &[egui::HoveredFile], dropped: &[egui::DroppedFileHandle]) -> bool {
+        let mut acted = false;
         let hovered_paths: Vec<PathBuf> = hovered.iter().filter_map(|f| f.path.clone()).collect();
         if !hovered.is_empty() {
             self.hovered_paths_active = true;
             let _ = self.runtime.dispatch(DesktopHostEvent::FileHovered { window_id, paths: hovered_paths });
+            acted = true;
         } else if self.hovered_paths_active {
             self.hovered_paths_active = false;
             let _ = self.runtime.dispatch(DesktopHostEvent::FileHoverCancelled { window_id });
+            acted = true;
         }
 
         if !dropped.is_empty() {
             self.status_banner = None;
+            acted = true;
         }
+        // Track the active drop target across a multi-file batch so dropping a project + CSV
+        // routes follow-up files into the newly opened project window, and join all errors
+        // rather than overwriting earlier failures (`AUD-06-13`).
+        let mut target_window_id = window_id;
+        let mut drop_errors: Vec<String> = Vec::new();
         for file in dropped {
             self.hovered_paths_active = false;
-            match self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id, path: file.path().to_path_buf() }) {
+            match self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id: target_window_id, path: file.path().to_path_buf() }) {
                 Ok(outcome) => {
-                    if outcome.opened_window_id.is_some() {
+                    if let Some(opened_id) = outcome.opened_window_id {
+                        target_window_id = opened_id;
                         self.on_active_window_switched();
                     }
                 }
                 Err(err) => {
-                    self.status_banner = Some(err);
+                    drop_errors.push(err);
                 }
             }
         }
+        if !drop_errors.is_empty() {
+            self.status_banner = Some(drop_errors.join("; "));
+        }
+        acted
     }
 
     fn render_dnd_hover_overlay(&self, ui: &egui::Ui) {
@@ -2032,8 +2282,9 @@ impl CurveBookNativeApp {
         }
     }
 
-    fn dispatch_egui_events(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, events: &[egui::Event]) {
+    fn dispatch_egui_events(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, events: &[egui::Event]) -> bool {
         let popup_open = self.menu_popup_was_open || egui::Popup::is_any_open(ctx);
+        let mut acted = false;
 
         for event in events {
             if let egui::Event::Key { key, pressed, modifiers, .. } = event {
@@ -2051,9 +2302,10 @@ impl CurveBookNativeApp {
                 if popup_open && is_menu_nav_key {
                     continue;
                 }
-                self.dispatch_key_event(ctx, window_id, *key, *pressed, *modifiers);
+                acted |= self.dispatch_key_event(ctx, window_id, *key, *pressed, *modifiers);
             }
         }
+        acted
     }
 
     fn apply_clipboard_outcome_status(&mut self, outcome: &DesktopEventOutcome) {
@@ -2068,6 +2320,10 @@ impl CurveBookNativeApp {
     }
 
     fn maybe_sync_plain_text_fallback(&self, ctx: &egui::Context, outcome: &DesktopEventOutcome) {
+        let win_id = outcome.window_id.unwrap_or_else(|| self.active_window_id());
+        if self.runtime.config().human_path_only || self.runtime.window(win_id).is_ok_and(|w| w.app().is_human_path_only()) {
+            return;
+        }
         let os_available =
             outcome.command_result.as_ref().and_then(|v| v.get("os_clipboard")).and_then(|s| s.get("available")).and_then(serde_json::Value::as_bool)
                 == Some(true);
@@ -2116,12 +2372,19 @@ impl CurveBookNativeApp {
         }
     }
 
-    fn dispatch_key_event(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, key: egui::Key, pressed: bool, modifiers: egui::Modifiers) {
+    fn dispatch_key_event(
+        &mut self,
+        ctx: &egui::Context,
+        window_id: DesktopWindowId,
+        key: egui::Key,
+        pressed: bool,
+        modifiers: egui::Modifiers,
+    ) -> bool {
         if !pressed || ctx.text_edit_focused() {
-            return;
+            return false;
         }
         let Some(key_name) = egui_key_to_name(key) else {
-            return;
+            return false;
         };
         let (dialog_inactive, inline_active, shortcut_cmd, should_fit_sheet_on_cmd_zero) =
             self.runtime.window(window_id).ok().map_or((false, false, None, false), |w| {
@@ -2153,7 +2416,7 @@ impl CurveBookNativeApp {
                 (true, app.inline_editor.active, cmd, fit_sheet)
             });
         if !dialog_inactive || inline_active {
-            return;
+            return false;
         }
 
         let primary_cmd = modifiers.command || modifiers.mac_cmd || modifiers.ctrl;
@@ -2163,7 +2426,7 @@ impl CurveBookNativeApp {
         if let Some(cmd) = shortcut_cmd {
             if cmd == "ui.zoom.fitSheet" && is_cmd_zero_reset && !should_fit_sheet_on_cmd_zero {
                 self.apply_ui_scale_adjustment(ctx, window_id, UiScaleAdjust::Reset);
-                return;
+                return true;
             }
             let already_queued_edit_params = cmd == "ui.editParams.open"
                 && self.pending_intents.intents().iter().any(|intent| {
@@ -2188,11 +2451,11 @@ impl CurveBookNativeApp {
                     ))
             {
                 self.execute_menu_command(Some(ctx), window_id, &cmd);
-                return;
+                return true;
             }
             if cmd != "ui.editParams.open" {
                 self.execute_menu_command(Some(ctx), window_id, &cmd);
-                return;
+                return true;
             }
         }
 
@@ -2200,25 +2463,27 @@ impl CurveBookNativeApp {
         if primary_cmd && !modifiers.alt {
             if key == egui::Key::Plus || key == egui::Key::Equals {
                 self.apply_ui_scale_adjustment(ctx, window_id, UiScaleAdjust::In);
-                return;
+                return true;
             }
             if key == egui::Key::Minus {
                 self.apply_ui_scale_adjustment(ctx, window_id, UiScaleAdjust::Out);
-                return;
+                return true;
             }
             if key == egui::Key::Num0 && !modifiers.shift {
                 self.apply_ui_scale_adjustment(ctx, window_id, UiScaleAdjust::Reset);
-                return;
+                return true;
             }
             if key == egui::Key::O && !modifiers.shift {
                 self.execute_menu_command(Some(ctx), window_id, "project.open");
-                return;
+                return true;
             }
             if key == egui::Key::S {
                 let cmd = if modifiers.shift { "project.saveAs" } else { "project.save" };
                 self.execute_menu_command(Some(ctx), window_id, cmd);
+                return true;
             }
         }
+        false
     }
 }
 
@@ -2313,6 +2578,147 @@ fn should_defer_to_settled_frame(req: &LiveControlRequest) -> bool {
         parsed.method.as_str(),
         "ui.inspect" | "ui.screenshot" | "ui.pointer_gesture" | "ui.type_text" | "ui.press_key" | "ui.switch_tab" | "ui.answer_dialog"
     )
+}
+
+fn serialized_control_reply_len(id: &serde_json::Value, payload: &serde_json::Value) -> Result<usize, curvebook_engine::EngineError> {
+    let reply = curvebook_ui_egui::encode_egui_control_response(id.clone(), Ok(payload.clone()));
+    let bytes = serde_json::to_vec(&reply).map_err(|err| {
+        curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::InternalError, format!("serialize control reply: {err}"))
+    })?;
+    Ok(bytes.len().saturating_add(1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_live_screenshot_payload_with_limit(
+    request_id: &serde_json::Value,
+    region_raw: &str,
+    width_px: u32,
+    height_px: u32,
+    dpi: u16,
+    png: &[u8],
+    validated_path: Option<&str>,
+    max_line_bytes: usize,
+) -> Result<serde_json::Value, curvebook_engine::EngineError> {
+    use curvebook_doc::ErrorCode;
+    use curvebook_engine::EngineError;
+
+    // Emit a SINGLE `data_base64` field (never duplicate as `png_base64`) and verify serialized
+    // control-frame size against `max_line_bytes` BEFORE writing `validated_path` to disk (`AUD-13-12`).
+    let mut base_payload = serde_json::json!({
+        "region": region_raw,
+        "width_px": width_px,
+        "height_px": height_px,
+        "dpi": dpi,
+        "format": "png",
+        "mime_type": "image/png",
+        "bytes_len": png.len(),
+        "path": validated_path,
+    });
+
+    let b64 = curvebook_platform::base64::encode(png);
+    let mut with_inline = base_payload.clone();
+    if let Some(map) = with_inline.as_object_mut() {
+        map.insert(String::from("data_base64"), serde_json::Value::String(b64));
+    }
+
+    let inline_frame_len = serialized_control_reply_len(request_id, &with_inline)?;
+    if inline_frame_len <= max_line_bytes {
+        return Ok(with_inline);
+    }
+
+    if validated_path.is_some() {
+        if let Some(map) = base_payload.as_object_mut() {
+            map.insert(String::from("inline_omitted"), serde_json::Value::Bool(true));
+        }
+        let meta_len = serialized_control_reply_len(request_id, &base_payload)?;
+        if meta_len > max_line_bytes {
+            return Err(EngineError::with_code(
+                ErrorCode::ResourceLimit,
+                format!("screenshot response metadata ({meta_len} bytes) exceeds control frame limit ({max_line_bytes} bytes)"),
+            ));
+        }
+        Ok(base_payload)
+    } else {
+        Err(EngineError::with_code(
+            ErrorCode::ResourceLimit,
+            format!(
+                "screenshot frame ({inline_frame_len} bytes) exceeds control line limit ({max_line_bytes} bytes); supply `path` or reduce dimensions"
+            ),
+        ))
+    }
+}
+
+fn normalize_live_switch_tab_params(params: &serde_json::Value) -> Result<(serde_json::Value, Option<usize>), curvebook_engine::EngineError> {
+    let mut cloned = params.clone();
+    let mut numeric_index = None;
+    if let Some(obj) = cloned.as_object_mut() {
+        for key in ["tab", "tab_id"] {
+            if let Some(val) = obj.get_mut(key) {
+                if let Some(num) = val.as_number() {
+                    let Some(idx_u64) = num.as_u64() else {
+                        return Err(curvebook_engine::EngineError::with_code(
+                            curvebook_doc::ErrorCode::BadInput,
+                            format!("`{key}` index must be a non-negative integer"),
+                        ));
+                    };
+                    let idx = usize::try_from(idx_u64).map_err(|_| {
+                        curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::BadInput, format!("`{key}` index out of range"))
+                    })?;
+                    *val = serde_json::Value::String(idx.to_string());
+                    if numeric_index.is_none() {
+                        numeric_index = Some(idx);
+                    }
+                } else if let Some(s) = val.as_str()
+                    && numeric_index.is_none()
+                    && let Ok(idx) = s.trim().parse::<usize>()
+                {
+                    numeric_index = Some(idx);
+                }
+            }
+        }
+    }
+    Ok((cloned, numeric_index))
+}
+
+fn find_indexed_tab_widget_in_meta(meta: &FrameInspectMeta, idx: usize) -> Option<&curvebook_ui_egui::egui_shell::FrameInspectNodeMeta> {
+    for prefix in ["edit.tab.", "fit.tab.", "result.tab."] {
+        let mut matches: Vec<&curvebook_ui_egui::egui_shell::FrameInspectNodeMeta> =
+            meta.entries.iter().filter(|w| w.widget_id.starts_with(prefix)).collect();
+        if !matches.is_empty() {
+            if let Some(&entry) = matches.get(idx) {
+                return Some(entry);
+            }
+            matches.clear();
+        }
+    }
+    None
+}
+
+fn normalize_live_answer_dialog_params(params: &serde_json::Value) -> serde_json::Value {
+    let mut cloned = params.clone();
+    let Some(obj) = cloned.as_object_mut() else {
+        return cloned;
+    };
+    let Some(choice_str) = obj.get("choice").and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned) else {
+        return cloned;
+    };
+    let patch_key = if obj.get("fields").is_some_and(serde_json::Value::is_object) {
+        "fields"
+    } else if obj.get("values").is_some_and(serde_json::Value::is_object) {
+        "values"
+    } else if obj.get("patches").is_some_and(serde_json::Value::is_object) {
+        "patches"
+    } else {
+        obj.insert(String::from("fields"), serde_json::Value::Object(serde_json::Map::new()));
+        "fields"
+    };
+    if let Some(map) = obj.get_mut(patch_key).and_then(serde_json::Value::as_object_mut)
+        && !map.contains_key("choice")
+        && !map.contains_key("duplicate.choice")
+    {
+        map.insert(String::from("choice"), serde_json::Value::String(choice_str));
+    }
+    cloned
 }
 
 fn ensure_params_object(params: &mut serde_json::Value) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
@@ -2613,7 +3019,10 @@ pub fn run_native_desktop_with_control(
             let mut app = CurveBookNativeApp::new(runtime, primary_window_id, Some(on_exit_cleanup))
                 .with_device_lost_slot(pending_device_lost, interactive_dialogs);
             #[cfg(target_os = "macos")]
-            app.attach_macos_menus_on_windowed_startup();
+            {
+                app.attach_macos_menus_on_windowed_startup();
+                crate::mac_menu::install_egui_repaint_event_handler(cc.egui_ctx.clone());
+            }
             if let Some(ctrl) = control {
                 let _ = ctrl.egui_ctx_cell.set(cc.egui_ctx.clone());
                 cc.egui_ctx.request_repaint();
@@ -3330,9 +3739,9 @@ mod tests {
                 json!({ "sheet_id": "ds-col-w5", "kind": "column", "cols": 2, "rows": 4, "auto_graph": false }),
             )?;
             win.execute_and_journal("table.setCells", json!({ "sheet_id": "ds-col-w5", "rows": [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]] }))?;
-            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-fit-w5", "kind": "xy", "cols": 1, "rows": 4, "auto_graph": false }))?;
-            win.execute_and_journal("table.setXCells", json!({ "sheet_id": "ds-fit-w5", "values": [1.0, 2.0, 3.0, 4.0] }))?;
-            win.execute_and_journal("table.setCells", json!({ "sheet_id": "ds-fit-w5", "rows": [[2.0], [4.0], [6.0], [8.0]] }))?;
+            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-fit-w5", "kind": "xy", "cols": 1, "rows": 6, "auto_graph": false }))?;
+            win.execute_and_journal("table.setXCells", json!({ "sheet_id": "ds-fit-w5", "values": [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0] }))?;
+            win.execute_and_journal("table.setCells", json!({ "sheet_id": "ds-fit-w5", "rows": [[5.0], [12.0], [48.0], [88.0], [97.0], [99.0]] }))?;
             win.execute_and_journal("sheet.select", json!({ "sheet_id": "ds-col-w5" }))
         })?;
         h.settle(4);
@@ -3420,5 +3829,45 @@ mod tests {
             assert_eq!(std::mem::discriminant(&action), std::mem::discriminant(&expected_action));
             assert_eq!(msg.is_some(), expect_msg);
         }
+    }
+
+    #[test]
+    fn aud_13_12_live_screenshot_frame_budget_overflow_branches() {
+        let req_id = serde_json::json!("shot-overflow");
+        let png = vec![0x89u8; 512];
+
+        // 1. Fits within frame limit -> emits exact parity schema with single `data_base64` (no `png_base64`).
+        let ok_inline = super::finalize_live_screenshot_payload_with_limit(&req_id, "workspace", 640, 480, 144, &png, None, 16 * 1024)
+            .expect("inline screenshot fits within limit");
+        assert_eq!(ok_inline["region"], serde_json::json!("workspace"));
+        assert_eq!(ok_inline["width_px"], serde_json::json!(640));
+        assert_eq!(ok_inline["height_px"], serde_json::json!(480));
+        assert_eq!(ok_inline["dpi"], serde_json::json!(144));
+        assert_eq!(ok_inline["format"], serde_json::json!("png"));
+        assert_eq!(ok_inline["mime_type"], serde_json::json!("image/png"));
+        assert_eq!(ok_inline["bytes_len"], serde_json::json!(png.len()));
+        assert!(ok_inline["path"].is_null());
+        assert!(ok_inline["data_base64"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(ok_inline.get("png_base64").is_none());
+        assert!(ok_inline.get("inline_omitted").is_none());
+
+        // 2. Exceeds inline limit WITH `path` -> falls back cleanly to path-only metadata (`inline_omitted: true`).
+        let path_only = super::finalize_live_screenshot_payload_with_limit(&req_id, "full_window", 640, 480, 144, &png, Some("/tmp/out.png"), 512)
+            .expect("path-only fallback fits within metadata budget");
+        assert_eq!(path_only["inline_omitted"], serde_json::json!(true));
+        assert_eq!(path_only["path"], serde_json::json!("/tmp/out.png"));
+        assert_eq!(path_only["bytes_len"], serde_json::json!(png.len()));
+        assert!(path_only.get("data_base64").is_none());
+        assert!(path_only.get("png_base64").is_none());
+
+        // 3. Exceeds inline limit WITHOUT `path` -> ResourceLimit error (caller never writes disk).
+        let pathless_err = super::finalize_live_screenshot_payload_with_limit(&req_id, "full_window", 640, 480, 144, &png, None, 512)
+            .expect_err("pathless overflow must fail with ResourceLimit");
+        assert_eq!(pathless_err.code, curvebook_doc::ErrorCode::ResourceLimit);
+
+        // 4. Even metadata overflows limit WITH `path` -> ResourceLimit error BEFORE disk write!
+        let meta_err = super::finalize_live_screenshot_payload_with_limit(&req_id, "full_window", 640, 480, 144, &png, Some("/tmp/out.png"), 64)
+            .expect_err("metadata overflow must fail before write");
+        assert_eq!(meta_err.code, curvebook_doc::ErrorCode::ResourceLimit);
     }
 }

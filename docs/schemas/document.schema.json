@@ -51,6 +51,9 @@
                 "FactorialAnova": {
                   "type": "object"
                 },
+                "FitSplineLowess": {
+                  "type": "object"
+                },
                 "GeneralizedLinearModel": {
                   "type": "object"
                 },
@@ -85,6 +88,9 @@
                   "type": "object"
                 },
                 "RocCurve": {
+                  "type": "object"
+                },
+                "SimpleLogisticRegression": {
                   "type": "object"
                 },
                 "Survival": {

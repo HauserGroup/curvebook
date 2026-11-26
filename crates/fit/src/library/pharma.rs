@@ -514,6 +514,55 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
     resolve_from_specs(PHARMA_SPECS, norm_id)
 }
 
+#[inline]
+fn all_finite_params(params: &[f64], count: usize) -> bool {
+    params.len() >= count && params[..count].iter().all(|v| v.is_finite())
+}
+
+#[inline]
+fn push_finite_scalar(out: &mut Vec<DerivedScalar>, name: &str, value: f64) {
+    if value.is_finite() {
+        out.push(DerivedScalar { name: name.to_owned(), value, units: None });
+    }
+}
+
+fn constant_rule(name: &str, value: f64) -> ParameterRule {
+    ParameterRule { name: name.to_owned(), scope: ParameterScope::Constant(value), initial_override: None, lower_bound: None, upper_bound: None }
+}
+
+/// Positive linear-concentration midpoint seed preserving nanomolar/picomolar scales down to
+/// `min_floor` (falling back to `0.5 * xmax.max(1e-12)` when the midpoint is non-positive).
+fn estimate_positive_x_midpoint(points: &[DataPoint], min_floor: f64) -> f64 {
+    let raw = estimate_x_at_ymid(points);
+    if raw.is_finite() && raw > 0.0 {
+        raw.max(min_floor)
+    } else {
+        let (_, xmax) = data_x_min_max(points);
+        let fallback = if xmax.is_finite() && xmax > 0.0 { 0.5 * xmax } else { 0.5 * 1e-12 };
+        fallback.max(min_floor)
+    }
+}
+
+/// Strictly positive `(x_lo, x_hi)` concentration span for multi-phase linear-concentration seeds.
+fn positive_x_range(points: &[DataPoint]) -> (f64, f64) {
+    let mut x_lo = f64::INFINITY;
+    let mut x_hi = 0.0_f64;
+    for p in points {
+        let x = p.x0();
+        if x.is_finite() && x > 0.0 {
+            x_lo = x_lo.min(x);
+            x_hi = x_hi.max(x);
+        }
+    }
+    if !x_lo.is_finite() || x_hi <= 0.0 {
+        (1e-6, 1e-5)
+    } else {
+        let lo = x_lo.max(1e-30);
+        let hi = x_hi.max(lo * 10.0);
+        (lo, hi)
+    }
+}
+
 /// Three/four-parameter logistic on log10 concentration:
 /// `Y = Bottom + (Top - Bottom) / (1 + 10^((LogEC50 - X) * HillSlope))` (agonist; the inhibitor
 /// form uses `(X - LogIC50) * HillSlope`). The normalized variants fix `Bottom = 0`, `Top = 100`.
@@ -530,6 +579,10 @@ impl ParametricModel for LogDoseResponse {
     impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
+        let p_len = self.meta.params.len();
+        if !x0.is_finite() || !all_finite_params(params, p_len) {
+            return None;
+        }
         let (bottom, top, log_c50, hill) = match (self.normalized, self.variable_slope) {
             (true, false) => (0.0, 100.0, params[0], 1.0),
             (true, true) => (0.0, 100.0, params[0], params[1]),
@@ -538,12 +591,17 @@ impl ParametricModel for LogDoseResponse {
         };
         let eff_slope = if self.is_inhibition { -hill } else { hill };
         let (sig, _) = sigmoid_from_log_x(x0, log_c50, eff_slope)?;
-        Some(bottom + (top - bottom) * sig)
+        let y = bottom + (top - bottom) * sig;
+        y.is_finite().then_some(y)
     }
     fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
         let Some(&x0) = x.first() else {
             return false;
         };
+        let p_len = self.meta.params.len();
+        if !x0.is_finite() || !all_finite_params(params, p_len) || out.len() < p_len {
+            return false;
+        }
         let (bottom, top, log_c50, hill) = match (self.normalized, self.variable_slope) {
             (true, false) => (0.0, 100.0, params[0], 1.0),
             (true, true) => (0.0, 100.0, params[0], params[1]),
@@ -586,7 +644,7 @@ impl ParametricModel for LogDoseResponse {
                 out[3] = d_hill;
             }
         }
-        out.iter().all(|v| v.is_finite())
+        out[..p_len].iter().all(|v| v.is_finite())
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
@@ -600,16 +658,17 @@ impl ParametricModel for LogDoseResponse {
     }
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
         let mut out = Vec::new();
-        let (span, log_c50) = match (self.normalized, self.variable_slope) {
-            (true, _) => (100.0, params[0]),
-            (false, _) => (params[1] - params[0], params[2]),
-        };
+        let req = if self.normalized { 1 } else { 3 };
+        if params.len() < req {
+            return out;
+        }
+        let (span, log_c50) = if self.normalized { (100.0, params[0]) } else { (params[1] - params[0], params[2]) };
         let label = if self.is_inhibition { "IC50" } else { "EC50" };
         if let Some(c50) = safe_pow10(log_c50) {
-            out.push(DerivedScalar { name: label.to_owned(), value: c50, units: None });
+            push_finite_scalar(&mut out, label, c50);
         }
         if !self.normalized {
-            out.push(DerivedScalar { name: "Span".to_owned(), value: span, units: None });
+            push_finite_scalar(&mut out, "Span", span);
         }
         out
     }
@@ -628,7 +687,8 @@ impl ParametricModel for LinearDoseResponse {
     impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let c = x.first().copied()?;
-        if c < 0.0 || !c.is_finite() {
+        let p_len = self.meta.params.len();
+        if !c.is_finite() || c < 0.0 || !all_finite_params(params, p_len) {
             return None;
         }
         let bottom = params[0];
@@ -642,25 +702,30 @@ impl ParametricModel for LinearDoseResponse {
             return Some(if self.is_inhibition { top } else { bottom });
         }
         let ratio = (c / c50).powf(hill);
-        if !ratio.is_finite() {
+        if ratio.is_nan() {
+            return None;
+        }
+        if ratio.is_infinite() {
             return Some(if self.is_inhibition { bottom } else { top });
         }
         let frac = if self.is_inhibition { 1.0 / (1.0 + ratio) } else { ratio / (1.0 + ratio) };
-        Some(bottom + (top - bottom) * frac)
+        let y = bottom + (top - bottom) * frac;
+        y.is_finite().then_some(y)
     }
 
     fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
         let Some(&c) = x.first() else {
             return false;
         };
-        if !c.is_finite() || c < 0.0 || params.len() < self.meta.params.len() || out.len() < self.meta.params.len() {
+        let p_len = self.meta.params.len();
+        if !c.is_finite() || c < 0.0 || !all_finite_params(params, p_len) || out.len() < p_len {
             return false;
         }
         let bottom = params[0];
         let top = params[1];
         let c50 = params[2];
         let hill = if self.variable_slope { params[3] } else { 1.0 };
-        if !bottom.is_finite() || !top.is_finite() || !c50.is_finite() || c50 <= 0.0 || !hill.is_finite() {
+        if c50 <= 0.0 {
             return false;
         }
         if c == 0.0 {
@@ -673,7 +738,10 @@ impl ParametricModel for LinearDoseResponse {
             return true;
         }
         let ratio = (c / c50).powf(hill);
-        if !ratio.is_finite() {
+        if ratio.is_nan() {
+            return false;
+        }
+        if ratio.is_infinite() {
             out[0] = if self.is_inhibition { 1.0 } else { 0.0 };
             out[1] = if self.is_inhibition { 0.0 } else { 1.0 };
             out[2] = 0.0;
@@ -697,11 +765,11 @@ impl ParametricModel for LinearDoseResponse {
         if self.variable_slope {
             out[3] = span * sign * du_d_ln * (c / c50).ln();
         }
-        out[..self.meta.params.len()].iter().all(|v| v.is_finite())
+        out[..p_len].iter().all(|v| v.is_finite())
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        let c50 = estimate_x_at_ymid(points).max(1e-6);
+        let c50 = estimate_positive_x_midpoint(points, 1e-30);
         if self.variable_slope { vec![ymin, ymax, c50, 1.0] } else { vec![ymin, ymax, c50] }
     }
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
@@ -729,13 +797,28 @@ impl ParametricModel for RichardsFivePl {
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 5) {
+            return None;
+        }
         let (bottom, top, log_xb, hill, s) = (params[0], params[1], params[2], params[3], params[4]);
         if s <= 0.0 {
             return None;
         }
-        let (sig, _) = sigmoid_from_log_x(x0, log_xb, hill)?;
-        let asym = sig.powf(s);
-        if asym.is_finite() { Some(bottom + (top - bottom) * asym) } else { None }
+        let u = (log_xb - x0) * hill * core::f64::consts::LN_10;
+        if !u.is_finite() {
+            return None;
+        }
+        let ln_denom = if u > 40.0 {
+            u
+        } else if u < -40.0 {
+            u.exp()
+        } else {
+            u.exp().ln_1p()
+        };
+        let neg = -s * ln_denom;
+        let asym = if neg < -745.0 { 0.0 } else { safe_exp(neg)? };
+        let y = bottom + (top - bottom) * asym;
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
@@ -745,8 +828,11 @@ impl ParametricModel for RichardsFivePl {
         vec![(None, None), (None, None), (None, None), (None, None), (Some(1e-4), Some(100.0))]
     }
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
-        let (log_xb, hill, s) = (params[2], params[3], params[4]);
         let mut out = Vec::new();
+        if params.len() < 5 {
+            return out;
+        }
+        let (log_xb, hill, s) = (params[2], params[3], params[4]);
         if log_xb.is_finite() && hill.is_finite() && s.is_finite() && s > 0.0 && hill.abs() > 1e-12 {
             let log10_term = if s == 1.0 {
                 0.0
@@ -760,9 +846,9 @@ impl ParametricModel for RichardsFivePl {
             };
             let log_ec50 = log_xb - log10_term / hill;
             if log_ec50.is_finite() {
-                out.push(DerivedScalar { name: "LogEC50".to_owned(), value: log_ec50, units: None });
+                push_finite_scalar(&mut out, "LogEC50", log_ec50);
                 if let Some(ec50) = safe_pow10(log_ec50) {
-                    out.push(DerivedScalar { name: "EC50".to_owned(), value: ec50, units: None });
+                    push_finite_scalar(&mut out, "EC50", ec50);
                 }
             }
         }
@@ -785,10 +871,14 @@ impl ParametricModel for BellShapedDoseResponse {
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 7) {
+            return None;
+        }
         let (p1, p2, dip, l1, l2, n1, n2) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
         let (s1, _) = sigmoid_from_log_x(x0, l1, -n1)?;
         let (s2, _) = sigmoid_from_log_x(x0, l2, -n2)?;
-        Some(dip + (p1 - dip) * s1 + (p2 - dip) * (1.0 - s2))
+        let y = dip + (p1 - dip) * s1 + (p2 - dip) * (1.0 - s2);
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
@@ -847,10 +937,14 @@ impl ParametricModel for BiphasicDoseResponse {
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 7) {
+            return None;
+        }
         let (bottom, top, frac, l1, l2, n1, n2) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
         let (s1, _) = sigmoid_from_log_x(x0, l1, n1)?;
         let (s2, _) = sigmoid_from_log_x(x0, l2, n2)?;
-        Some(bottom + (top - bottom) * (frac * s1 + (1.0 - frac) * s2))
+        let y = bottom + (top - bottom) * (frac * s1 + (1.0 - frac) * s2);
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
@@ -879,17 +973,27 @@ impl ParametricModel for DoseResponseEcF {
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 5) {
+            return None;
+        }
         let (bottom, top, log_ecf, hill, f_pct) = (params[0], params[1], params[2], params[3], params[4]);
         if f_pct <= 0.0 || f_pct >= 100.0 || hill.abs() < 1e-12 {
             return None;
         }
         let log_ec50 = log_ecf + ((100.0 - f_pct) / f_pct).log10() / hill;
         let (sig, _) = sigmoid_from_log_x(x0, log_ec50, hill)?;
-        Some(bottom + (top - bottom) * sig)
+        let y = bottom + (top - bottom) * sig;
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
         vec![ymin, ymax, estimate_x_at_ymid(points), 1.0, 50.0]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (None, None), (None, None), (None, None), (Some(1e-6), Some(100.0 - 1e-6))]
+    }
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        vec![constant_rule("F", 50.0)]
     }
 }
 
@@ -910,6 +1014,9 @@ impl ParametricModel for AbsoluteIc50 {
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 6) {
+            return None;
+        }
         let (bottom, top, log_abs_ic50, hill, control0, control100) = (params[0], params[1], params[2], params[3], params[4], params[5]);
         let fifty = 0.5 * (control0 + control100);
         if !fifty.is_finite() || top <= fifty || bottom >= fifty || (top - bottom).abs() < 1e-15 || hill.abs() < 1e-12 {
@@ -917,7 +1024,8 @@ impl ParametricModel for AbsoluteIc50 {
         }
         let log_ic50 = log_abs_ic50 - ((top - fifty) / (fifty - bottom)).log10() / hill;
         let (sig, _) = sigmoid_from_log_x(x0, log_ic50, -hill)?;
-        Some(bottom + (top - bottom) * sig)
+        let y = bottom + (top - bottom) * sig;
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
@@ -925,22 +1033,7 @@ impl ParametricModel for AbsoluteIc50 {
     }
     fn default_parameter_rules(&self, points: &[DataPoint]) -> Vec<ParameterRule> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![
-            ParameterRule {
-                name: "Control0".to_owned(),
-                scope: ParameterScope::Constant(ymin),
-                initial_override: None,
-                lower_bound: None,
-                upper_bound: None,
-            },
-            ParameterRule {
-                name: "Control100".to_owned(),
-                scope: ParameterScope::Constant(ymax),
-                initial_override: None,
-                lower_bound: None,
-                upper_bound: None,
-            },
-        ]
+        vec![constant_rule("Control0", ymin), constant_rule("Control100", ymax)]
     }
 }
 
@@ -960,15 +1053,42 @@ impl ParametricModel for GaddumSchild {
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 7) {
+            return None;
+        }
         let (bottom, top, log_ec50, hill, pa2, schild_slope, antag) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
-        let p_kb = pa2;
-        let log_dr = if antag > 0.0 { (1.0 + (antag * safe_pow10(p_kb)?).powf(schild_slope)).log10() } else { 0.0 };
+        if antag < 0.0 {
+            return None;
+        }
+        let log_dr = if antag > 0.0 {
+            let dr = 1.0 + (antag * safe_pow10(pa2)?).powf(schild_slope);
+            if !dr.is_finite() || dr <= 0.0 {
+                return None;
+            }
+            dr.log10()
+        } else {
+            0.0
+        };
         let (sig, _) = sigmoid_from_log_x(x0, log_ec50 + log_dr, hill)?;
-        Some(bottom + (top - bottom) * sig)
+        let y = bottom + (top - bottom) * sig;
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
         vec![ymin, ymax, estimate_x_at_ymid(points), 1.0, 7.0, 1.0, 0.0]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (None, None), (None, None), (None, None), (None, None), (Some(1e-4), None), (Some(0.0), None)]
+    }
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        vec![
+            shared_global_rule("Bottom"),
+            shared_global_rule("Top"),
+            shared_global_rule("LogEC50"),
+            shared_global_rule("HillSlope"),
+            shared_global_rule("pA2"),
+            shared_global_rule("SchildSlope"),
+        ]
     }
 }
 
@@ -986,18 +1106,38 @@ impl ParametricModel for AllostericEc50Shift {
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 7) {
+            return None;
+        }
         let (bottom, top, log_ec50, hill, kb, alpha, mod_conc) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
         if kb <= 0.0 || alpha <= 0.0 || mod_conc < 0.0 {
             return None;
         }
         let ratio = (1.0 + mod_conc / kb) / (1.0 + alpha * mod_conc / kb);
+        if !ratio.is_finite() || ratio <= 0.0 {
+            return None;
+        }
         let shifted = log_ec50 + ratio.log10();
         let (sig, _) = sigmoid_from_log_x(x0, shifted, hill)?;
-        Some(bottom + (top - bottom) * sig)
+        let y = bottom + (top - bottom) * sig;
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![ymin, ymax, estimate_x_at_ymid(points), 1.0, 1e-6, 1.0, 0.0]
+        vec![ymin, ymax, estimate_x_at_ymid(points), 1.0, 1e-6, 0.5, 0.0]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (None, None), (None, None), (None, None), (Some(1e-30), None), (Some(1e-30), None), (Some(0.0), None)]
+    }
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        vec![
+            shared_global_rule("Bottom"),
+            shared_global_rule("Top"),
+            shared_global_rule("LogEC50"),
+            shared_global_rule("HillSlope"),
+            shared_global_rule("Kb"),
+            shared_global_rule("alpha"),
+        ]
     }
 }
 
@@ -1016,25 +1156,44 @@ impl ParametricModel for OperationalAgonism {
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
-        let (basal, emax, log_ka, log_tau, n) = (params[0], params[1], params[2], params[3], params[4]);
+        if !x0.is_finite() || !all_finite_params(params, 5) {
+            return None;
+        }
         let a = safe_pow10(x0)?;
-        let ka = safe_pow10(log_ka)?;
-        let tau = safe_pow10(log_tau)?;
-        let num = tau * a;
-        let den = a + ka;
-        if den <= 0.0 {
-            return None;
+        let ka = safe_pow10(params[2])?;
+        let tau = safe_pow10(params[3])?;
+        eval_operational_response(a, params[0], params[1], ka, tau, params[4])
+    }
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || !all_finite_params(params, 5) || out.len() < 5 {
+            return false;
         }
-        let operate = (num / den).powf(n);
-        if !operate.is_finite() {
-            return None;
-        }
-        let term = operate / (1.0 + operate);
-        Some(basal + (emax - basal) * term)
+        let (Some(a), Some(ka), Some(tau)) = (safe_pow10(x0), safe_pow10(params[2]), safe_pow10(params[3])) else {
+            return false;
+        };
+        grad_operational_response(a, [params[0], params[1], ka, tau, params[4]], true, out)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
         vec![ymin, ymax, estimate_x_at_ymid(points), 0.5, 1.0]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (None, None), (None, None), (None, None), (Some(1e-4), None)]
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 4 {
+            if let Some(ka) = safe_pow10(params[2]) {
+                push_finite_scalar(&mut out, "KA", ka);
+            }
+            if let Some(tau) = safe_pow10(params[3]) {
+                push_finite_scalar(&mut out, "Tau", tau);
+            }
+        }
+        out
     }
 }
 
@@ -1133,9 +1292,16 @@ impl ParametricModel for OneSiteBinding {
         let Some(&c) = x.first() else {
             return false;
         };
+        let p_len = self.meta.params.len();
+        if !c.is_finite() || c < 0.0 || !all_finite_params(params, p_len) || out.len() < p_len {
+            return false;
+        }
         let (bmax, kd) = (params[0], params[1]);
+        if kd <= 0.0 {
+            return false;
+        }
         let denom = kd + c;
-        if c < 0.0 || denom <= 0.0 {
+        if !denom.is_finite() || denom <= 0.0 {
             return false;
         }
         out[0] = c / denom;
@@ -1144,11 +1310,11 @@ impl ParametricModel for OneSiteBinding {
             out[2] = c;
             out[3] = 1.0;
         }
-        out.iter().all(|v| v.is_finite())
+        out[..p_len].iter().all(|v| v.is_finite())
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        let kd = estimate_x_at_ymid(points).abs().max(1e-3);
+        let kd = estimate_positive_x_midpoint(points, 1e-30);
         if self.with_hill {
             vec![ymax, kd, 1.0]
         } else if self.with_ns {
@@ -1182,15 +1348,19 @@ impl ParametricModel for TwoSiteBinding {
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let c = x.first().copied()?;
-        let (b1, kd1, b2, kd2) = (params[0], params[1], params[2], params[3]);
-        if c < 0.0 || kd1 <= 0.0 || kd2 <= 0.0 {
+        if !c.is_finite() || c < 0.0 || !all_finite_params(params, 4) {
             return None;
         }
-        Some(b1 * c / (kd1 + c) + b2 * c / (kd2 + c))
+        let (b1, kd1, b2, kd2) = (params[0], params[1], params[2], params[3]);
+        if kd1 <= 0.0 || kd2 <= 0.0 {
+            return None;
+        }
+        let y = b1 * (c / (kd1 + c)) + b2 * (c / (kd2 + c));
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
-        let kd = estimate_x_at_ymid(points).abs().max(1e-3);
+        let kd = estimate_positive_x_midpoint(points, 1e-30);
         vec![0.5 * ymax, 0.2 * kd, 0.5 * ymax, 5.0 * kd]
     }
 }
@@ -1208,13 +1378,17 @@ impl ParametricModel for CompetitionOneSiteKi {
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 5) {
+            return None;
+        }
         let (top, bottom, log_ki, hot_conc, hot_kd) = (params[0], params[1], params[2], params[3], params[4]);
         if hot_conc < 0.0 || hot_kd <= 0.0 {
             return None;
         }
         let log_ic50 = log_ki + (1.0 + hot_conc / hot_kd).log10();
         let (sig, _) = sigmoid_from_log_x(x0, log_ic50, -1.0)?;
-        Some(bottom + (top - bottom) * sig)
+        let y = bottom + (top - bottom) * sig;
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
@@ -1236,6 +1410,9 @@ impl ParametricModel for CompetitionTwoSiteKi {
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 7) {
+            return None;
+        }
         let (top, bottom, f_hi, log_ki1, log_ki2, hot_conc, hot_kd) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
         if hot_conc < 0.0 || hot_kd <= 0.0 {
             return None;
@@ -1243,7 +1420,8 @@ impl ParametricModel for CompetitionTwoSiteKi {
         let shift = (1.0 + hot_conc / hot_kd).log10();
         let (s1, _) = sigmoid_from_log_x(x0, log_ki1 + shift, -1.0)?;
         let (s2, _) = sigmoid_from_log_x(x0, log_ki2 + shift, -1.0)?;
-        Some(bottom + (top - bottom) * (f_hi * s1 + (1.0 - f_hi) * s2))
+        let y = bottom + (top - bottom) * (f_hi * s1 + (1.0 - f_hi) * s2);
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
@@ -1393,34 +1571,48 @@ impl ParametricModel for MichaelisMenten {
     impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let s = x.first().copied()?;
-        if s < 0.0 || !s.is_finite() {
+        let p_len = self.meta.params.len();
+        if !s.is_finite() || s < 0.0 || !all_finite_params(params, p_len) {
             return None;
         }
-        if self.kcat_mode {
+        let y = if self.kcat_mode {
             let (kcat, km, et) = (params[0], params[1], params[2]);
-            if km <= 0.0 || km + s == 0.0 {
+            if km <= 0.0 {
                 return None;
             }
-            Some(et * kcat * s / (km + s))
+            let d = km + s;
+            if !d.is_finite() || d <= 0.0 {
+                return None;
+            }
+            (et * kcat) * (s / d)
         } else {
             let (vmax, km) = (params[0], params[1]);
-            if km <= 0.0 || km + s == 0.0 {
+            if km <= 0.0 {
                 return None;
             }
-            Some(vmax * s / (km + s))
-        }
+            let d = km + s;
+            if !d.is_finite() || d <= 0.0 {
+                return None;
+            }
+            vmax * (s / d)
+        };
+        y.is_finite().then_some(y)
     }
     fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
         let Some(&s) = x.first() else {
             return false;
         };
-        if s < 0.0 {
+        let p_len = self.meta.params.len();
+        if !s.is_finite() || s < 0.0 || !all_finite_params(params, p_len) || out.len() < p_len {
             return false;
         }
         if self.kcat_mode {
             let (kcat, km, et) = (params[0], params[1], params[2]);
+            if km <= 0.0 {
+                return false;
+            }
             let d = km + s;
-            if d <= 0.0 {
+            if !d.is_finite() || d <= 0.0 {
                 return false;
             }
             out[0] = et * s / d;
@@ -1428,19 +1620,22 @@ impl ParametricModel for MichaelisMenten {
             out[2] = kcat * s / d;
         } else {
             let (vmax, km) = (params[0], params[1]);
+            if km <= 0.0 {
+                return false;
+            }
             let d = km + s;
-            if d <= 0.0 {
+            if !d.is_finite() || d <= 0.0 {
                 return false;
             }
             out[0] = s / d;
             out[1] = -(vmax * s) / (d * d);
         }
-        out.iter().all(|v| v.is_finite())
+        out[..p_len].iter().all(|v| v.is_finite())
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
         let v_init = if ymax > 0.0 && ymax.is_finite() { ymax } else { 1.0 };
-        let km = estimate_x_at_ymid(points).abs().max(1e-3);
+        let km = estimate_positive_x_midpoint(points, 1e-30);
         if self.kcat_mode { vec![v_init, km, 1.0] } else { vec![v_init, km] }
     }
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
@@ -1456,12 +1651,15 @@ impl ParametricModel for AllostericSigmoidal {
     impl_static_meta!("allosteric_sigmoidal_kinetics", "Allosteric sigmoidal", EquationCategory::EnzymeKinetics, ["Vmax", "Khalf", "h"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let s = x.first().copied()?;
+        if !all_finite_params(params, 3) {
+            return None;
+        }
         let (vmax, khalf, h) = (params[0], params[1], params[2]);
         eval_hill_binding(s, vmax, khalf, h)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
-        vec![ymax.max(1.0), estimate_x_at_ymid(points).abs().max(1e-3), 1.5]
+        vec![ymax.max(1.0), estimate_positive_x_midpoint(points, 1e-30), 1.5]
     }
 }
 
@@ -1473,16 +1671,26 @@ impl ParametricModel for SubstrateInhibition {
     impl_static_meta!("substrate_inhibition", "Substrate inhibition", EquationCategory::EnzymeKinetics, ["Vmax", "Km", "Ki"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let s = x.first().copied()?;
-        let (vmax, km, ki) = (params[0], params[1], params[2]);
-        if s < 0.0 || km <= 0.0 || ki <= 0.0 {
+        if !s.is_finite() || s < 0.0 || !all_finite_params(params, 3) {
             return None;
         }
-        Some(vmax * s / (km + s * (1.0 + s / ki)))
+        let (vmax, km, ki) = (params[0], params[1], params[2]);
+        if km <= 0.0 || ki <= 0.0 {
+            return None;
+        }
+        let denom = km + s * (1.0 + s / ki);
+        if !denom.is_finite() || denom <= 0.0 {
+            return None;
+        }
+        let y = vmax * (s / denom);
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
         let (_, xmax) = data_x_min_max(points);
-        vec![ymax.max(1.0) * 1.5, estimate_x_at_ymid(points).abs().max(1e-3), xmax.abs().max(1.0)]
+        let km = estimate_positive_x_midpoint(points, 1e-30);
+        let ki = if xmax.is_finite() && xmax > 0.0 { xmax.max(1e-30) } else { 1.0 };
+        vec![ymax.max(1.0) * 1.5, km, ki]
     }
 }
 
@@ -1508,51 +1716,74 @@ impl ParametricModel for EnzymeInhibition {
     impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let s = x.first().copied()?;
-        if s < 0.0 {
+        let p_len = self.meta.params.len();
+        if !s.is_finite() || s < 0.0 || !all_finite_params(params, p_len) {
             return None;
         }
-        match self.mode {
+        let y = match self.mode {
             EnzymeInhibMode::Competitive => {
                 let (vmax, km, ki, i_conc) = (params[0], params[1], params[2], params[3]);
-                if km <= 0.0 || ki <= 0.0 {
+                if km <= 0.0 || ki <= 0.0 || i_conc < 0.0 {
                     return None;
                 }
-                let km_app = km * (1.0 + i_conc / ki);
-                Some(vmax * s / (km_app + s))
+                let denom = km * (1.0 + i_conc / ki) + s;
+                if !denom.is_finite() || denom <= 0.0 {
+                    return None;
+                }
+                vmax * (s / denom)
             }
             EnzymeInhibMode::Noncompetitive => {
                 let (vmax, km, ki, i_conc) = (params[0], params[1], params[2], params[3]);
-                if km <= 0.0 || ki <= 0.0 {
+                if km <= 0.0 || ki <= 0.0 || i_conc < 0.0 {
                     return None;
                 }
-                let vmax_app = vmax / (1.0 + i_conc / ki);
-                Some(vmax_app * s / (km + s))
+                let factor = 1.0 + i_conc / ki;
+                let denom = km + s;
+                if !factor.is_finite() || !denom.is_finite() || denom <= 0.0 {
+                    return None;
+                }
+                (vmax / factor) * (s / denom)
             }
             EnzymeInhibMode::Uncompetitive => {
                 let (vmax, km, aki, i_conc) = (params[0], params[1], params[2], params[3]);
-                if km <= 0.0 || aki <= 0.0 {
+                if km <= 0.0 || aki <= 0.0 || i_conc < 0.0 {
                     return None;
                 }
                 let factor = 1.0 + i_conc / aki;
-                Some((vmax / factor) * s / (km / factor + s))
+                let denom = km + factor * s;
+                if !denom.is_finite() || denom <= 0.0 {
+                    return None;
+                }
+                vmax * (s / denom)
             }
             EnzymeInhibMode::Mixed => {
                 let (vmax, km, ki, alpha, i_conc) = (params[0], params[1], params[2], params[3], params[4]);
-                if km <= 0.0 || ki <= 0.0 || alpha <= 0.0 {
+                if km <= 0.0 || ki <= 0.0 || alpha <= 0.0 || i_conc < 0.0 {
                     return None;
                 }
-                let vmax_app = vmax / (1.0 + i_conc / (alpha * ki));
-                let km_app = km * (1.0 + i_conc / ki) / (1.0 + i_conc / (alpha * ki));
-                Some(vmax_app * s / (km_app + s))
+                let f1 = 1.0 + i_conc / ki;
+                let f2 = 1.0 + i_conc / (alpha * ki);
+                let denom = km * f1 + f2 * s;
+                if !denom.is_finite() || denom <= 0.0 {
+                    return None;
+                }
+                vmax * (s / denom)
             }
-        }
+        };
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
-        let km = estimate_x_at_ymid(points).abs().max(1e-3);
+        let km = estimate_positive_x_midpoint(points, 1e-30);
         match self.mode {
             EnzymeInhibMode::Mixed => vec![ymax.max(1.0), km, 1.0, 1.0, 0.0],
             _ => vec![ymax.max(1.0), km, 1.0, 0.0],
+        }
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        match self.mode {
+            EnzymeInhibMode::Mixed => vec![(Some(0.0), None), (Some(1e-30), None), (Some(1e-30), None), (Some(1e-30), None), (Some(0.0), None)],
+            _ => vec![(Some(0.0), None), (Some(1e-30), None), (Some(1e-30), None), (Some(0.0), None)],
         }
     }
 }
@@ -1616,8 +1847,17 @@ impl ParametricModel for MorrisonKi {
 }
 
 fn split_total_and_ns_datasets(points: &[DataPoint]) -> (Vec<DataPoint>, Vec<DataPoint>) {
-    let ds0 = points.iter().filter(|p| p.data_set_index == 0).cloned().collect();
-    let ds1 = points.iter().filter(|p| p.data_set_index >= 1).cloned().collect();
+    let min_ds = points
+        .iter()
+        .filter(|p| p.x0().is_finite() && p.y.is_finite())
+        .map(|p| p.data_set_index)
+        .min()
+        .or_else(|| points.iter().map(|p| p.data_set_index).min());
+    let Some(first_ds) = min_ds else {
+        return (Vec::new(), Vec::new());
+    };
+    let ds0 = points.iter().filter(|p| p.data_set_index == first_ds).cloned().collect();
+    let ds1 = points.iter().filter(|p| p.data_set_index != first_ds).cloned().collect();
     (ds0, ds1)
 }
 
@@ -1707,14 +1947,18 @@ impl ParametricModel for OneSiteTotalAndNsGlobal {
         let primary = if ds0.is_empty() { points } else { &ds0 };
         let (ymin, ymax) = data_y_min_max(primary);
         let (_, xmax) = data_x_min_max(primary);
-        let kd = estimate_x_at_ymid(primary).max(1e-6);
+        let kd = estimate_positive_x_midpoint(primary, 1e-30);
         let (ns, bg) = estimate_global_ns_and_bg(primary, &ds1);
         let bmax = (ymax - bg - ns * xmax).max(ymax - ymin).max(1.0);
         vec![bmax, kd, ns, bg]
     }
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
-        vec![(Some(0.0), None), (Some(1e-12), None), (Some(0.0), None), (None, None)]
+        vec![(Some(0.0), None), (Some(1e-30), None), (Some(0.0), None), (None, None)]
+    }
+
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        vec![shared_global_rule("Bmax"), shared_global_rule("Kd"), shared_global_rule("NS"), shared_global_rule("Background")]
     }
 }
 
@@ -1806,6 +2050,17 @@ impl ParametricModel for TwoSiteTotalAndNsGlobal {
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
         vec![(Some(0.0), None), (Some(1e-15), None), (Some(0.0), None), (Some(1e-15), None), (Some(0.0), None), (None, None)]
     }
+
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        vec![
+            shared_global_rule("BmaxHi"),
+            shared_global_rule("KdHi"),
+            shared_global_rule("BmaxLo"),
+            shared_global_rule("KdLo"),
+            shared_global_rule("NS"),
+            shared_global_rule("Background"),
+        ]
+    }
 }
 
 /// Specific saturation binding with ligand depletion (Swillens 1995 / Morrison quadratic root).
@@ -1816,18 +2071,39 @@ struct OneSiteSpecificLigandDepletion;
 impl OneSiteSpecificLigandDepletion {
     fn solve_free_ligand(hot_tot: f64, rt: f64, kd: f64, ns: f64) -> Option<(f64, f64)> {
         let a = 1.0 + ns;
-        if a <= 0.0 || kd <= 0.0 || rt < 0.0 || hot_tot < 0.0 {
+        if !a.is_finite() || a <= 0.0 || !kd.is_finite() || kd <= 0.0 || !rt.is_finite() || rt < 0.0 || !hot_tot.is_finite() || hot_tot < 0.0 {
             return None;
         }
         if hot_tot == 0.0 {
             return Some((0.0, a));
         }
-        let b = kd * a + rt - hot_tot;
-        let disc = (b * b + 4.0 * a * kd * hot_tot).sqrt();
-        if !disc.is_finite() {
+        let r_a = rt / a;
+        let x_a = hot_tot / a;
+        if !r_a.is_finite() || !x_a.is_finite() {
             return None;
         }
-        let l_free = if b >= 0.0 { (2.0 * kd * hot_tot) / (b + disc) } else { (-b + disc) / (2.0 * a) };
+        let scale = kd.max(r_a).max(x_a);
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        let k_s = kd / scale;
+        let r_s = r_a / scale;
+        let x_s = x_a / scale;
+        let q_s = (r_s - x_s) + k_s;
+        let disc_s = q_s.hypot(2.0 * k_s.sqrt() * x_s.sqrt());
+        if !disc_s.is_finite() {
+            return None;
+        }
+        let l_s = if q_s >= 0.0 {
+            let denom = q_s + disc_s;
+            if !denom.is_finite() || denom <= 0.0 {
+                return None;
+            }
+            (2.0 * k_s * x_s) / denom
+        } else {
+            0.5 * (-q_s + disc_s)
+        };
+        let l_free = scale * l_s;
         l_free.is_finite().then_some((l_free, a))
     }
 }
@@ -1847,7 +2123,11 @@ impl ParametricModel for OneSiteSpecificLigandDepletion {
         }
         let [rt, kd, ns] = [params[0], params[1], params[2]];
         let (l_free, _) = Self::solve_free_ligand(hot_tot, rt, kd, ns)?;
-        let y = rt * l_free / (kd + l_free);
+        let denom = kd + l_free;
+        if !denom.is_finite() || denom <= 0.0 {
+            return None;
+        }
+        let y = rt * (l_free / denom);
         y.is_finite().then_some(y)
     }
 
@@ -1878,12 +2158,12 @@ impl ParametricModel for OneSiteSpecificLigandDepletion {
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
-        let kd = estimate_x_at_ymid(points).max(1e-6);
+        let kd = estimate_positive_x_midpoint(points, 1e-30);
         vec![ymax.max(1.0), kd, 0.0]
     }
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
-        vec![(Some(0.0), None), (Some(1e-12), None), (Some(0.0), None)]
+        vec![(Some(0.0), None), (Some(1e-30), None), (Some(0.0), None)]
     }
 }
 
@@ -2139,12 +2419,12 @@ impl ParametricModel for AllostericModulatorSaturation {
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
-        let kd = estimate_x_at_ymid(points).max(1e-6);
+        let kd = estimate_positive_x_midpoint(points, 1e-30);
         vec![ymax.max(1.0), kd, 1.0, 1e-6, 0.0]
     }
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
-        vec![(Some(0.0), None), (Some(1e-12), None), (Some(0.0), None), (Some(1e-12), None), (Some(0.0), None)]
+        vec![(Some(0.0), None), (Some(1e-30), None), (Some(0.0), None), (Some(1e-30), None), (Some(0.0), None)]
     }
 }
 
@@ -2403,7 +2683,7 @@ impl ParametricModel for LinearNormalizedDoseResponse {
     }
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
-        let c50 = estimate_x_at_ymid(points).abs().max(1e-6);
+        let c50 = estimate_positive_x_midpoint(points, 1e-30);
         match (self.variable_slope, self.is_inhibition) {
             (false, _) => vec![c50],
             (true, false) => vec![c50, 1.0],
@@ -2426,7 +2706,7 @@ impl ParametricModel for LinearNormalizedDoseResponse {
             && c50 > 0.0
         {
             let label = if self.is_inhibition { "LogIC50" } else { "LogEC50" };
-            out.push(DerivedScalar { name: label.to_owned(), value: c50.log10(), units: None });
+            push_finite_scalar(&mut out, label, c50.log10());
         }
         out
     }
@@ -2491,7 +2771,7 @@ impl ParametricModel for RichardsFivePlConc {
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![ymin, ymax, estimate_x_at_ymid(points).abs().max(1e-6), 1.0, 1.0]
+        vec![ymin, ymax, estimate_positive_x_midpoint(points, 1e-30), 1.0, 1.0]
     }
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
@@ -2503,10 +2783,10 @@ impl ParametricModel for RichardsFivePlConc {
         if params.len() >= 5 {
             let (bottom, top, ec50) = (params[0], params[1], params[2]);
             if ec50.is_finite() && ec50 > 0.0 {
-                out.push(DerivedScalar { name: "LogEC50".to_owned(), value: ec50.log10(), units: None });
+                push_finite_scalar(&mut out, "LogEC50", ec50.log10());
             }
             if bottom.is_finite() && top.is_finite() {
-                out.push(DerivedScalar { name: "Span".to_owned(), value: top - bottom, units: None });
+                push_finite_scalar(&mut out, "Span", top - bottom);
             }
         }
         out
@@ -2542,11 +2822,11 @@ impl ParametricModel for BellShapedDoseResponseConc {
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        let (xmin, xmax) = data_x_min_max(points);
-        let x_lo = xmin.max(1e-6);
-        let x_hi = xmax.max(x_lo * 10.0);
-        let c1 = (x_lo.powf(0.7) * x_hi.powf(0.3)).max(1e-6);
-        let c2 = (x_lo.powf(0.3) * x_hi.powf(0.7)).max(c1 * 2.0);
+        let (x_lo, x_hi) = positive_x_range(points);
+        let ln_lo = x_lo.ln();
+        let ln_hi = x_hi.ln();
+        let c1 = (0.7 * ln_lo + 0.3 * ln_hi).exp().max(1e-30);
+        let c2 = (0.3 * ln_lo + 0.7 * ln_hi).exp().max(c1 * 2.0);
         vec![ymin, ymin, ymax, c1, c2, 1.0, 1.0]
     }
 
@@ -2558,10 +2838,10 @@ impl ParametricModel for BellShapedDoseResponseConc {
         let mut out = Vec::new();
         if params.len() >= 5 {
             if params[3].is_finite() && params[3] > 0.0 {
-                out.push(DerivedScalar { name: "LogEC50_1".to_owned(), value: params[3].log10(), units: None });
+                push_finite_scalar(&mut out, "LogEC50_1", params[3].log10());
             }
             if params[4].is_finite() && params[4] > 0.0 {
-                out.push(DerivedScalar { name: "LogEC50_2".to_owned(), value: params[4].log10(), units: None });
+                push_finite_scalar(&mut out, "LogEC50_2", params[4].log10());
             }
         }
         out
@@ -2596,11 +2876,11 @@ impl ParametricModel for BiphasicDoseResponseConc {
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        let (xmin, xmax) = data_x_min_max(points);
-        let x_lo = xmin.max(1e-6);
-        let x_hi = xmax.max(x_lo * 10.0);
-        let c1 = (x_lo.powf(0.7) * x_hi.powf(0.3)).max(1e-6);
-        let c2 = (x_lo.powf(0.3) * x_hi.powf(0.7)).max(c1 * 2.0);
+        let (x_lo, x_hi) = positive_x_range(points);
+        let ln_lo = x_lo.ln();
+        let ln_hi = x_hi.ln();
+        let c1 = (0.7 * ln_lo + 0.3 * ln_hi).exp().max(1e-30);
+        let c2 = (0.3 * ln_lo + 0.7 * ln_hi).exp().max(c1 * 2.0);
         let slope = if estimate_curve_is_falling(points) { -1.0 } else { 1.0 };
         vec![ymin, ymax, 0.5, c1, c2, slope, slope]
     }
@@ -2613,13 +2893,13 @@ impl ParametricModel for BiphasicDoseResponseConc {
         let mut out = Vec::new();
         if params.len() >= 5 {
             if params[3].is_finite() && params[3] > 0.0 {
-                out.push(DerivedScalar { name: "LogEC50_1".to_owned(), value: params[3].log10(), units: None });
+                push_finite_scalar(&mut out, "LogEC50_1", params[3].log10());
             }
             if params[4].is_finite() && params[4] > 0.0 {
-                out.push(DerivedScalar { name: "LogEC50_2".to_owned(), value: params[4].log10(), units: None });
+                push_finite_scalar(&mut out, "LogEC50_2", params[4].log10());
             }
             if params[0].is_finite() && params[1].is_finite() {
-                out.push(DerivedScalar { name: "Span".to_owned(), value: params[1] - params[0], units: None });
+                push_finite_scalar(&mut out, "Span", params[1] - params[0]);
             }
         }
         out
@@ -2661,11 +2941,15 @@ impl ParametricModel for DoseResponseEcFConc {
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![ymin, ymax, estimate_x_at_ymid(points).abs().max(1e-6), 1.0, 50.0]
+        vec![ymin, ymax, estimate_positive_x_midpoint(points, 1e-30), 1.0, 50.0]
     }
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
         vec![(None, None), (None, None), (Some(1e-30), None), (None, None), (Some(1e-6), Some(100.0 - 1e-6))]
+    }
+
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        vec![constant_rule("F", 50.0)]
     }
 
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
@@ -2673,16 +2957,16 @@ impl ParametricModel for DoseResponseEcFConc {
         if params.len() >= 5 {
             let [bottom, top, ecf, hill, f_pct] = [params[0], params[1], params[2], params[3], params[4]];
             if ecf.is_finite() && ecf > 0.0 {
-                out.push(DerivedScalar { name: "LogECF".to_owned(), value: ecf.log10(), units: None });
+                push_finite_scalar(&mut out, "LogECF", ecf.log10());
                 if f_pct > 0.0 && f_pct < 100.0 && hill.abs() > 1e-12 {
                     let ec50 = ecf * ((100.0 - f_pct) / f_pct).powf(1.0 / hill);
-                    if ec50.is_finite() && ec50 > 0.0 {
-                        out.push(DerivedScalar { name: "EC50".to_owned(), value: ec50, units: None });
+                    if ec50 > 0.0 {
+                        push_finite_scalar(&mut out, "EC50", ec50);
                     }
                 }
             }
             if bottom.is_finite() && top.is_finite() {
-                out.push(DerivedScalar { name: "Span".to_owned(), value: top - bottom, units: None });
+                push_finite_scalar(&mut out, "Span", top - bottom);
             }
         }
         out
@@ -2726,7 +3010,7 @@ impl ParametricModel for AbsoluteIc50Conc {
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![ymin, ymax, estimate_x_at_ymid(points).abs().max(1e-6), 1.0, ymin, ymax]
+        vec![ymin, ymax, estimate_positive_x_midpoint(points, 1e-30), 1.0, ymin, ymax]
     }
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
@@ -2735,22 +3019,7 @@ impl ParametricModel for AbsoluteIc50Conc {
 
     fn default_parameter_rules(&self, points: &[DataPoint]) -> Vec<ParameterRule> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![
-            ParameterRule {
-                name: "Control0".to_owned(),
-                scope: ParameterScope::Constant(ymin),
-                initial_override: None,
-                lower_bound: None,
-                upper_bound: None,
-            },
-            ParameterRule {
-                name: "Control100".to_owned(),
-                scope: ParameterScope::Constant(ymax),
-                initial_override: None,
-                lower_bound: None,
-                upper_bound: None,
-            },
-        ]
+        vec![constant_rule("Control0", ymin), constant_rule("Control100", ymax)]
     }
 
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
@@ -2758,17 +3027,17 @@ impl ParametricModel for AbsoluteIc50Conc {
         if params.len() >= 6 {
             let [bottom, top, abs_ic50, hill, control0, control100] = [params[0], params[1], params[2], params[3], params[4], params[5]];
             if abs_ic50.is_finite() && abs_ic50 > 0.0 {
-                out.push(DerivedScalar { name: "LogIC50".to_owned(), value: abs_ic50.log10(), units: None });
+                push_finite_scalar(&mut out, "LogIC50", abs_ic50.log10());
                 let fifty = 0.5 * (control0 + control100);
                 if fifty.is_finite() && top > fifty && bottom < fifty && hill.abs() > 1e-12 {
                     let rel = abs_ic50 * ((fifty - bottom) / (top - fifty)).powf(1.0 / hill);
-                    if rel.is_finite() && rel > 0.0 {
-                        out.push(DerivedScalar { name: "RelativeIC50".to_owned(), value: rel, units: None });
+                    if rel > 0.0 {
+                        push_finite_scalar(&mut out, "RelativeIC50", rel);
                     }
                 }
             }
             if bottom.is_finite() && top.is_finite() {
-                out.push(DerivedScalar { name: "Span".to_owned(), value: top - bottom, units: None });
+                push_finite_scalar(&mut out, "Span", top - bottom);
             }
         }
         out
@@ -2852,31 +3121,51 @@ impl ParametricModel for GaddumSchildConc {
             out[4] = d_ln_ceff * (p * schild_slope * core::f64::consts::LN_10 / dr);
             out[5] = d_ln_ceff * (p * u.ln() / dr);
             out[6] = d_ln_ceff * (p * schild_slope / (dr * antag));
-        } else {
+        } else if (schild_slope - 1.0).abs() <= 1e-15 {
+            let Some(p10) = safe_pow10(pa2) else {
+                return false;
+            };
+            out[4] = 0.0;
+            out[5] = 0.0;
+            out[6] = d_ln_ceff * p10;
+        } else if schild_slope > 1.0 {
             out[4] = 0.0;
             out[5] = 0.0;
             out[6] = 0.0;
+        } else {
+            return false;
         }
         out[..7].iter().all(|v| v.is_finite())
     }
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![ymin, ymax, estimate_x_at_ymid(points).abs().max(1e-6), 1.0, 7.0, 1.0, 0.0]
+        vec![ymin, ymax, estimate_positive_x_midpoint(points, 1e-30), 1.0, 7.0, 1.0, 0.0]
     }
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
         vec![(None, None), (None, None), (Some(1e-30), None), (None, None), (None, None), (Some(1e-4), None), (Some(0.0), None)]
     }
 
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        vec![
+            shared_global_rule("Bottom"),
+            shared_global_rule("Top"),
+            shared_global_rule("EC50"),
+            shared_global_rule("HillSlope"),
+            shared_global_rule("pA2"),
+            shared_global_rule("SchildSlope"),
+        ]
+    }
+
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
         let mut out = Vec::new();
         if params.len() >= 3 {
             if params[2].is_finite() && params[2] > 0.0 {
-                out.push(DerivedScalar { name: "LogEC50".to_owned(), value: params[2].log10(), units: None });
+                push_finite_scalar(&mut out, "LogEC50", params[2].log10());
             }
             if params[0].is_finite() && params[1].is_finite() {
-                out.push(DerivedScalar { name: "Span".to_owned(), value: params[1] - params[0], units: None });
+                push_finite_scalar(&mut out, "Span", params[1] - params[0]);
             }
         }
         out
@@ -2935,15 +3224,11 @@ impl ParametricModel for GaddumSchildUnity {
         if antag < 0.0 {
             return false;
         }
-        let (dr, p) = if antag > 0.0 {
-            let Some(p10) = safe_pow10(pkb) else {
-                return false;
-            };
-            let p = antag * p10;
-            (1.0 + p, p)
-        } else {
-            (1.0, 0.0)
+        let Some(p10) = safe_pow10(pkb) else {
+            return false;
         };
+        let p = antag * p10;
+        let dr = 1.0 + p;
         if !dr.is_finite() || dr <= 0.0 {
             return false;
         }
@@ -2960,7 +3245,7 @@ impl ParametricModel for GaddumSchildUnity {
             out[2] = d_log_ceff;
             out[3] = span * dsig * core::f64::consts::LN_10 * (x0 - shifted);
             out[4] = d_log_ceff * (p / dr);
-            out[5] = if antag > 0.0 { d_log_ceff * (p / (dr * antag * core::f64::consts::LN_10)) } else { 0.0 };
+            out[5] = d_log_ceff * (p10 / (dr * core::f64::consts::LN_10));
         } else {
             if x0 < 0.0 || c50_or_log <= 0.0 {
                 return false;
@@ -2980,14 +3265,14 @@ impl ParametricModel for GaddumSchildUnity {
             out[2] = d_ln_ceff / c50_or_log;
             out[3] = span * dsig * (x0.ln() - shifted.ln());
             out[4] = d_ln_ceff * (p * core::f64::consts::LN_10 / dr);
-            out[5] = if antag > 0.0 { d_ln_ceff * (p / (dr * antag)) } else { 0.0 };
+            out[5] = d_ln_ceff * (p10 / dr);
         }
         out[..6].iter().all(|v| v.is_finite())
     }
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        let mid = if self.log_x { estimate_x_at_ymid(points) } else { estimate_x_at_ymid(points).abs().max(1e-6) };
+        let mid = if self.log_x { estimate_x_at_ymid(points) } else { estimate_positive_x_midpoint(points, 1e-30) };
         vec![ymin, ymax, mid, 1.0, 7.0, 0.0]
     }
 
@@ -3013,16 +3298,16 @@ impl ParametricModel for GaddumSchildUnity {
             let [bottom, top, c50_or_log, _, pkb] = [params[0], params[1], params[2], params[3], params[4]];
             if self.log_x {
                 if let Some(ec50) = safe_pow10(c50_or_log) {
-                    out.push(DerivedScalar { name: "EC50".to_owned(), value: ec50, units: None });
+                    push_finite_scalar(&mut out, "EC50", ec50);
                 }
             } else if c50_or_log.is_finite() && c50_or_log > 0.0 {
-                out.push(DerivedScalar { name: "LogEC50".to_owned(), value: c50_or_log.log10(), units: None });
+                push_finite_scalar(&mut out, "LogEC50", c50_or_log.log10());
             }
             if let Some(kb) = safe_pow10(-pkb) {
-                out.push(DerivedScalar { name: "KB".to_owned(), value: kb, units: None });
+                push_finite_scalar(&mut out, "KB", kb);
             }
             if bottom.is_finite() && top.is_finite() {
-                out.push(DerivedScalar { name: "Span".to_owned(), value: top - bottom, units: None });
+                push_finite_scalar(&mut out, "Span", top - bottom);
             }
         }
         out
@@ -3129,11 +3414,11 @@ impl ParametricModel for Ec50ShiftRatio {
             };
             vec![ymin, ymax, ctrl, 1.0, ratio]
         } else {
-            let ctrl = estimate_x_at_ymid(primary).abs().max(1e-6);
+            let ctrl = estimate_positive_x_midpoint(primary, 1e-30);
             let ratio = if ds1.is_empty() {
                 1.0
             } else {
-                let shifted = estimate_x_at_ymid(&ds1).abs().max(1e-6);
+                let shifted = estimate_positive_x_midpoint(&ds1, 1e-30);
                 (shifted / ctrl).clamp(1e-6, 1e6)
             };
             vec![ymin, ymax, ctrl, 1.0, ratio]
@@ -3162,16 +3447,16 @@ impl ParametricModel for Ec50ShiftRatio {
             let [bottom, top, ctrl, _, ratio] = [params[0], params[1], params[2], params[3], params[4]];
             if self.log_x {
                 if let Some(ec50) = safe_pow10(ctrl) {
-                    out.push(DerivedScalar { name: "EC50Control".to_owned(), value: ec50, units: None });
+                    push_finite_scalar(&mut out, "EC50Control", ec50);
                 }
             } else if ctrl.is_finite() && ctrl > 0.0 {
-                out.push(DerivedScalar { name: "LogEC50Control".to_owned(), value: ctrl.log10(), units: None });
+                push_finite_scalar(&mut out, "LogEC50Control", ctrl.log10());
             }
             if ratio.is_finite() && ratio > 0.0 {
-                out.push(DerivedScalar { name: "LogEC50Ratio".to_owned(), value: ratio.log10(), units: None });
+                push_finite_scalar(&mut out, "LogEC50Ratio", ratio.log10());
             }
             if bottom.is_finite() && top.is_finite() {
-                out.push(DerivedScalar { name: "Span".to_owned(), value: top - bottom, units: None });
+                push_finite_scalar(&mut out, "Span", top - bottom);
             }
         }
         out
@@ -3246,21 +3531,32 @@ impl ParametricModel for AllostericEc50ShiftConc {
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![ymin, ymax, estimate_x_at_ymid(points).abs().max(1e-6), 1.0, 1e-6, 1.0, 0.0]
+        vec![ymin, ymax, estimate_positive_x_midpoint(points, 1e-30), 1.0, 1e-6, 0.5, 0.0]
     }
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
         vec![(None, None), (None, None), (Some(1e-30), None), (None, None), (Some(1e-30), None), (Some(1e-30), None), (Some(0.0), None)]
     }
 
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        vec![
+            shared_global_rule("Bottom"),
+            shared_global_rule("Top"),
+            shared_global_rule("EC50"),
+            shared_global_rule("HillSlope"),
+            shared_global_rule("Kb"),
+            shared_global_rule("alpha"),
+        ]
+    }
+
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
         let mut out = Vec::new();
         if params.len() >= 3 {
             if params[2].is_finite() && params[2] > 0.0 {
-                out.push(DerivedScalar { name: "LogEC50".to_owned(), value: params[2].log10(), units: None });
+                push_finite_scalar(&mut out, "LogEC50", params[2].log10());
             }
             if params[0].is_finite() && params[1].is_finite() {
-                out.push(DerivedScalar { name: "Span".to_owned(), value: params[1] - params[0], units: None });
+                push_finite_scalar(&mut out, "Span", params[1] - params[0]);
             }
         }
         out
@@ -3269,17 +3565,35 @@ impl ParametricModel for AllostericEc50ShiftConc {
 
 #[inline]
 fn eval_operational_response(a: f64, basal: f64, emax: f64, ka: f64, tau: f64, n: f64) -> Option<f64> {
-    if !a.is_finite() || a < 0.0 || !ka.is_finite() || ka <= 0.0 || !tau.is_finite() || tau <= 0.0 || !n.is_finite() || n <= 0.0 {
+    if !a.is_finite()
+        || a < 0.0
+        || !basal.is_finite()
+        || !emax.is_finite()
+        || !ka.is_finite()
+        || ka <= 0.0
+        || !tau.is_finite()
+        || tau <= 0.0
+        || !n.is_finite()
+        || n <= 0.0
+    {
         return None;
     }
     if a == 0.0 {
         return Some(basal);
     }
-    let ratio = (tau * a) / (a + ka);
-    if !ratio.is_finite() || ratio <= 0.0 {
+    let occ = if a >= ka {
+        1.0 / (1.0 + ka / a)
+    } else {
+        let r = a / ka;
+        r / (1.0 + r)
+    };
+    if !occ.is_finite() || occ <= 0.0 {
         return None;
     }
-    let log_op = n * ratio.ln();
+    let log_op = n * (tau.ln() + occ.ln());
+    if !log_op.is_finite() {
+        return None;
+    }
     let frac = if log_op > 700.0 {
         1.0
     } else if log_op < -700.0 {
@@ -3294,7 +3608,18 @@ fn eval_operational_response(a: f64, basal: f64, emax: f64, ka: f64, tau: f64, n
 
 fn grad_operational_response(a: f64, params: [f64; 5], log_ka_tau: bool, out: &mut [f64]) -> bool {
     let [basal, emax, ka, tau, n] = params;
-    if !a.is_finite() || a < 0.0 || !ka.is_finite() || ka <= 0.0 || !tau.is_finite() || tau <= 0.0 || !n.is_finite() || n <= 0.0 || out.len() < 5 {
+    if !a.is_finite()
+        || a < 0.0
+        || !basal.is_finite()
+        || !emax.is_finite()
+        || !ka.is_finite()
+        || ka <= 0.0
+        || !tau.is_finite()
+        || tau <= 0.0
+        || !n.is_finite()
+        || n <= 0.0
+        || out.len() < 5
+    {
         return false;
     }
     if a == 0.0 {
@@ -3302,11 +3627,20 @@ fn grad_operational_response(a: f64, params: [f64; 5], log_ka_tau: bool, out: &m
         out[1..5].fill(0.0);
         return true;
     }
-    let ratio = (tau * a) / (a + ka);
-    if !ratio.is_finite() || ratio <= 0.0 {
+    let occ = if a >= ka {
+        1.0 / (1.0 + ka / a)
+    } else {
+        let r = a / ka;
+        r / (1.0 + r)
+    };
+    if !occ.is_finite() || occ <= 0.0 {
         return false;
     }
-    let log_op = n * ratio.ln();
+    let ln_ratio = tau.ln() + occ.ln();
+    let log_op = n * ln_ratio;
+    if !log_op.is_finite() {
+        return false;
+    }
     let frac = if log_op > 700.0 {
         1.0
     } else if log_op < -700.0 {
@@ -3321,13 +3655,14 @@ fn grad_operational_response(a: f64, params: [f64; 5], log_ka_tau: bool, out: &m
     out[1] = frac;
     if log_ka_tau {
         let ln10 = core::f64::consts::LN_10;
-        out[2] = -span * dfrac * (n * ka * ln10 / (a + ka));
+        let ka_frac = if ka >= a { 1.0 / (1.0 + a / ka) } else { (ka / a) / (1.0 + ka / a) };
+        out[2] = -span * dfrac * (n * ka_frac * ln10);
         out[3] = span * dfrac * (n * ln10);
     } else {
         out[2] = -span * dfrac * (n / (a + ka));
         out[3] = span * dfrac * (n / tau);
     }
-    out[4] = span * dfrac * ratio.ln();
+    out[4] = span * dfrac * ln_ratio;
     out[..5].iter().all(|v| v.is_finite())
 }
 
@@ -3365,7 +3700,7 @@ impl ParametricModel for OperationalAgonismConc {
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![ymin, ymax, estimate_x_at_ymid(points).abs().max(1e-6), 3.0, 1.0]
+        vec![ymin, ymax, estimate_positive_x_midpoint(points, 1e-30), 3.0, 1.0]
     }
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
@@ -3376,10 +3711,10 @@ impl ParametricModel for OperationalAgonismConc {
         let mut out = Vec::new();
         if params.len() >= 4 {
             if params[2].is_finite() && params[2] > 0.0 {
-                out.push(DerivedScalar { name: "LogKA".to_owned(), value: params[2].log10(), units: None });
+                push_finite_scalar(&mut out, "LogKA", params[2].log10());
             }
             if params[3].is_finite() && params[3] > 0.0 {
-                out.push(DerivedScalar { name: "LogTau".to_owned(), value: params[3].log10(), units: None });
+                push_finite_scalar(&mut out, "LogTau", params[3].log10());
             }
         }
         out
@@ -3439,7 +3774,7 @@ impl ParametricModel for OperationalDepletion {
         if self.log_x {
             vec![ymin, ymax, estimate_x_at_ymid(points), 0.5, 1.0]
         } else {
-            vec![ymin, ymax, estimate_x_at_ymid(points).abs().max(1e-6), 3.0, 1.0]
+            vec![ymin, ymax, estimate_positive_x_midpoint(points, 1e-30), 3.0, 1.0]
         }
     }
 
@@ -3461,17 +3796,17 @@ impl ParametricModel for OperationalDepletion {
         if params.len() >= 4 {
             if self.log_x {
                 if let Some(ka) = safe_pow10(params[2]) {
-                    out.push(DerivedScalar { name: "KA".to_owned(), value: ka, units: None });
+                    push_finite_scalar(&mut out, "KA", ka);
                 }
                 if let Some(tau) = safe_pow10(params[3]) {
-                    out.push(DerivedScalar { name: "Tau".to_owned(), value: tau, units: None });
+                    push_finite_scalar(&mut out, "Tau", tau);
                 }
             } else {
                 if params[2].is_finite() && params[2] > 0.0 {
-                    out.push(DerivedScalar { name: "LogKA".to_owned(), value: params[2].log10(), units: None });
+                    push_finite_scalar(&mut out, "LogKA", params[2].log10());
                 }
                 if params[3].is_finite() && params[3] > 0.0 {
-                    out.push(DerivedScalar { name: "LogTau".to_owned(), value: params[3].log10(), units: None });
+                    push_finite_scalar(&mut out, "LogTau", params[3].log10());
                 }
             }
         }
@@ -3512,16 +3847,30 @@ impl ParametricModel for OneSiteTotalLigandDepletion {
         if !kd_cpm.is_finite() || kd_cpm <= 0.0 {
             return None;
         }
+        // Divide the quadratic by a_neg = (1 + NS) >= 1 and rescale by max(kd_cpm, x0, bmax / a_neg),
+        // then evaluate the exact non-cancelling discriminant (kd + (bmax - x0)/a_neg)^2 + 4 * kd * (x0/a_neg).
         let a_neg = 1.0 + ns;
-        let b = kd_cpm * a_neg + x0 * (1.0 + 2.0 * ns) + bmax;
-        let c_neg = x0 * (ns * kd_cpm + ns * x0 + bmax);
-        let disc_sq = (b * b - 4.0 * a_neg * c_neg).max(0.0);
-        let disc = disc_sq.sqrt();
-        let denom = b + disc;
-        if !denom.is_finite() || denom <= 0.0 {
+        let f_ns = ns / a_neg;
+        let b_a = bmax / a_neg;
+        let scale = kd_cpm.max(x0).max(b_a);
+        if !a_neg.is_finite() || !scale.is_finite() || scale <= 0.0 {
             return None;
         }
-        let y = (2.0 * c_neg) / denom;
+        let k_s = kd_cpm / scale;
+        let x_s = x0 / scale;
+        let b_as = b_a / scale;
+        let x_as = x_s / a_neg;
+        let b_s = k_s + (1.0 + f_ns) * x_s + b_as;
+        let disc_s = ((b_as - x_as) + k_s).hypot(2.0 * k_s.sqrt() * x_as.sqrt());
+        let denom_s = b_s + disc_s;
+        if !disc_s.is_finite() || !denom_s.is_finite() || denom_s <= 0.0 {
+            return None;
+        }
+        let frac = (2.0 * (f_ns * k_s + f_ns * x_s + b_as)) / denom_s;
+        if !frac.is_finite() {
+            return None;
+        }
+        let y = x0 * frac.min(1.0);
         y.is_finite().then_some(y)
     }
 
@@ -3543,8 +3892,8 @@ impl ParametricModel for OneSiteTotalLigandDepletion {
         let mut out = Vec::new();
         if params.len() >= 5 {
             let kd_cpm = params[1] * params[4] * 1000.0 * params[3];
-            if kd_cpm.is_finite() && kd_cpm > 0.0 {
-                out.push(DerivedScalar { name: "Kd_cpm".to_owned(), value: kd_cpm, units: None });
+            if kd_cpm > 0.0 {
+                push_finite_scalar(&mut out, "Kd_cpm", kd_cpm);
             }
         }
         out
@@ -3591,13 +3940,13 @@ impl ParametricModel for CompetitionTwoSiteLogIc50 {
         let mut out = Vec::new();
         if params.len() >= 5 {
             if let Some(ic50_hi) = safe_pow10(params[3]) {
-                out.push(DerivedScalar { name: "IC50_Hi".to_owned(), value: ic50_hi, units: None });
+                push_finite_scalar(&mut out, "IC50_Hi", ic50_hi);
             }
             if let Some(ic50_lo) = safe_pow10(params[4]) {
-                out.push(DerivedScalar { name: "IC50_Lo".to_owned(), value: ic50_lo, units: None });
+                push_finite_scalar(&mut out, "IC50_Lo", ic50_lo);
             }
             if params[0].is_finite() && params[1].is_finite() {
-                out.push(DerivedScalar { name: "Span".to_owned(), value: params[1] - params[0], units: None });
+                push_finite_scalar(&mut out, "Span", params[1] - params[0]);
             }
         }
         out
@@ -3632,14 +3981,27 @@ impl ParametricModel for AllostericModulatorCompetition {
         let log_u = x0 - log_kb;
         let log_au = log_u + log_alpha;
         let factor = if log_u > 100.0 && log_au > 100.0 {
-            safe_pow10(-log_alpha)?
+            if -log_alpha < -300.0 { 0.0 } else { safe_pow10(-log_alpha)? }
         } else if log_u < -100.0 && log_au < -100.0 {
             1.0
+        } else if log_au > 300.0 {
+            let log_num = if log_u > 20.0 {
+                log_u
+            } else if log_u < -20.0 {
+                0.0
+            } else {
+                10.0_f64.powf(log_u).ln_1p() / core::f64::consts::LN_10
+            };
+            let log_f = log_num - log_au;
+            if log_f < -300.0 { 0.0 } else { safe_pow10(log_f)? }
         } else {
-            let u = safe_pow10(log_u)?;
-            let au = safe_pow10(log_au)?;
+            let u = if log_u < -300.0 { 0.0 } else { safe_pow10(log_u)? };
+            let au = if log_au < -300.0 { 0.0 } else { safe_pow10(log_au)? };
             (1.0 + u) / (1.0 + au)
         };
+        if !factor.is_finite() {
+            return None;
+        }
         let k_app = hot_kd_nm * factor;
         let denom = hot_nm + k_app;
         if !denom.is_finite() || denom <= 0.0 {

@@ -26,6 +26,7 @@ use curvebook_math::dist::{chi2_sf, f_sf};
 use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, sym_eigen};
 use curvebook_math::sum::{NeumaierSum, SummaryMoments};
 
+use crate::anova::factorial::checked_dense_vec;
 use crate::anova::reml_unstructured::unstructured_reduce_design;
 use crate::anova::results::{FactorialAnovaTerm, MixedRemlResult, MultiVcRemlResult};
 use crate::common::validate_finite_slice;
@@ -45,10 +46,26 @@ pub(in crate::anova) struct RiClusterStats {
     pub(in crate::anova) within_rows: Vec<(Vec<f64>, f64)>,
 }
 
+#[derive(Debug, Clone)]
+pub(in crate::anova) enum RemlTermContrast {
+    /// Contiguous coordinate slice `beta_red[start..start+len] = 0` (exact when `rank(X) == p`).
+    Slice { name: String, start: usize, len: usize },
+    /// Explicit estimable Type III contrast matrix `L` (`q x p_eff`) mapped to the reduced basis
+    /// (`q == 0` marks an unestimable term emitting `df = 0, F = None, P = None`).
+    Matrix { name: String, l_mat: DenseMatrix },
+}
+
+pub(in crate::anova) enum RemlFisherQ {
+    Grid(Vec<Vec<DenseMatrix>>),
+    Contracted(DenseMatrix),
+    None,
+}
+
 pub(in crate::anova) struct OwnedRemlFisherMats {
     pub(in crate::anova) info_e: DenseMatrix,
+    pub(in crate::anova) w_info_inv: Option<DenseMatrix>,
     pub(in crate::anova) m_mats: Vec<DenseMatrix>,
-    pub(in crate::anova) q_mats: Vec<Vec<DenseMatrix>>,
+    pub(in crate::anova) q_term: RemlFisherQ,
 }
 
 pub(in crate::anova) struct KrTermContext<'a> {
@@ -79,7 +96,7 @@ pub(in crate::anova) fn symmetrize_dense(m: &DenseMatrix) -> Result<DenseMatrix,
     if nr != nc {
         return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: nr, actual: nc }));
     }
-    let mut data = vec![0.0_f64; nr * nr];
+    let mut data = checked_dense_vec(nr, nr)?;
     for i in 0..nr {
         data[i * nr + i] = m.get(i, i).unwrap_or(0.0);
         for j in (i + 1)..nr {
@@ -369,7 +386,7 @@ pub(in crate::anova) fn ri_build_fisher_mats(
     let m_mats = vec![scale_dense(&m0_mat, inv_s4)?, scale_dense(&m1_mat, inv_s4)?];
     let q01_s = scale_dense(&q01_mat, inv_s6)?;
     let q_mats = vec![vec![scale_dense(&q00_mat, inv_s6)?, q01_s.clone()], vec![q01_s, scale_dense(&q11_mat, inv_s6)?]];
-    Ok(OwnedRemlFisherMats { info_e, m_mats, q_mats })
+    Ok(OwnedRemlFisherMats { info_e, w_info_inv: None, m_mats, q_term: RemlFisherQ::Grid(q_mats) })
 }
 
 pub(in crate::anova) fn kr_scale_and_df(qf: f64, a1: f64, a2: f64, nu_sat: f64, n_minus_p: f64) -> (f64, f64) {
@@ -441,34 +458,89 @@ pub(in crate::anova) fn kr_single_term_df1(ctx: &KrTermContext<'_>, term_name: &
     };
     let f_kr = f_from_var(v_a);
     let f_sat = f_from_var(v);
-    let mut grad = Vec::with_capacity(ctx.phi_m_phi.len());
-    for pmp in ctx.phi_m_phi {
-        grad.push(pmp.get(col, col).unwrap_or(0.0));
-    }
-    let wg = ctx.w_info_inv.matvec(&grad)?;
-    let denom: f64 = grad.iter().zip(wg.iter()).map(|(&a, &c)| a * c).sum();
-    let nu = if denom > 1e-30 * v * v { (2.0 * v * v / denom).clamp(1.0, ctx.n_minus_p) } else { ctx.n_minus_p };
+    let nu = if ctx.phi_m_phi.is_empty() {
+        ctx.n_minus_p
+    } else {
+        let mut grad = Vec::with_capacity(ctx.phi_m_phi.len());
+        for pmp in ctx.phi_m_phi {
+            grad.push(pmp.get(col, col).unwrap_or(0.0));
+        }
+        let wg = ctx.w_info_inv.matvec(&grad)?;
+        let denom: f64 = grad.iter().zip(wg.iter()).map(|(&a, &c)| a * c).sum();
+        if denom > 1e-30 * v * v { (2.0 * v * v / denom).clamp(1.0, ctx.n_minus_p) } else { ctx.n_minus_p }
+    };
     let kr = build_wald_term(term_name, 1.0, f_kr, nu, ctx.sigma2_e)?;
     let sat = build_wald_term(term_name, 1.0, f_sat, nu, ctx.sigma2_e)?;
     Ok(KrSatTermPair { kr, sat, nu_sat: nu, nu_kr: nu })
 }
 
-pub(in crate::anova) fn kr_multi_term_df(ctx: &KrTermContext<'_>, term_name: &str, start: usize, q: usize) -> Result<KrSatTermPair, StatsError> {
+pub(in crate::anova) fn kr_single_contrast_df1(ctx: &KrTermContext<'_>, term_name: &str, l_vec: &[f64]) -> Result<KrSatTermPair, StatsError> {
+    let phi_l = ctx.phi.matvec(l_vec)?;
+    let v: f64 = l_vec.iter().zip(phi_l.iter()).map(|(&a, &b)| a * b).sum::<f64>().max(0.0);
+    let phi_a_l = ctx.phi_a.matvec(l_vec)?;
+    let v_a_raw: f64 = l_vec.iter().zip(phi_a_l.iter()).map(|(&a, &b)| a * b).sum();
+    let v_a = if v_a_raw > 1e-12 * v { v_a_raw } else { v };
+    let b: f64 = l_vec.iter().zip(ctx.beta.iter()).map(|(&a, &c)| a * c).sum();
+    let f_from_var = |var: f64| -> f64 {
+        if var > 0.0 {
+            (b * b) / var
+        } else if b != 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        }
+    };
+    let f_kr = f_from_var(v_a);
+    let f_sat = f_from_var(v);
+    let nu = if ctx.phi_m_phi.is_empty() {
+        ctx.n_minus_p
+    } else {
+        let mut grad = Vec::with_capacity(ctx.phi_m_phi.len());
+        for pmp in ctx.phi_m_phi {
+            let pmp_l = pmp.matvec(l_vec)?;
+            grad.push(l_vec.iter().zip(pmp_l.iter()).map(|(&a, &c)| a * c).sum());
+        }
+        let wg = ctx.w_info_inv.matvec(&grad)?;
+        let denom: f64 = grad.iter().zip(wg.iter()).map(|(&a, &c)| a * c).sum();
+        if denom > 1e-30 * v * v { (2.0 * v * v / denom).clamp(1.0, ctx.n_minus_p) } else { ctx.n_minus_p }
+    };
+    let kr = build_wald_term(term_name, 1.0, f_kr, nu, ctx.sigma2_e)?;
+    let sat = build_wald_term(term_name, 1.0, f_sat, nu, ctx.sigma2_e)?;
+    Ok(KrSatTermPair { kr, sat, nu_sat: nu, nu_kr: nu })
+}
+
+fn kr_multi_from_projected(
+    ctx: &KrTermContext<'_>,
+    term_name: &str,
+    beta_sub: &[f64],
+    sigma: &DenseMatrix,
+    sigma_a: &DenseMatrix,
+    d_mats: &[DenseMatrix],
+) -> Result<KrSatTermPair, StatsError> {
+    let q = beta_sub.len();
     let qf = q as f64;
-    let sigma = symmetrize_dense(&subblock_dense(ctx.phi, start, q)?)?;
-    let sigma_a = symmetrize_dense(&subblock_dense(ctx.phi_a, start, q)?)?;
-    let beta_sub = &ctx.beta[start..(start + q)];
-    let inv_a = match cholesky(&sigma_a).and_then(|c| c.inverse()) {
+    let inv_a = match cholesky(sigma_a).and_then(|c| c.inverse()) {
         Ok(inv) => inv,
-        Err(_) => invert_reml_info(&sigma_a)?,
+        Err(_) => invert_reml_info(sigma_a)?,
     };
     let inv_b = inv_a.matvec(beta_sub)?;
     let quad: f64 = beta_sub.iter().zip(inv_b.iter()).map(|(&b, &ib)| b * ib).sum();
     let f_raw = (quad / qf).max(0.0);
 
+    let sigma_inv = invert_reml_info(sigma)?;
+    let inv_b_sat = sigma_inv.matvec(beta_sub)?;
+    let quad_sat: f64 = beta_sub.iter().zip(inv_b_sat.iter()).map(|(&b, &ib)| b * ib).sum();
+    let f_sat = (quad_sat / qf).max(0.0);
+
+    let n_vc = d_mats.len();
+    if n_vc == 0 {
+        let kr = build_wald_term(term_name, qf, f_raw, ctx.n_minus_p, ctx.sigma2_e)?;
+        let sat = build_wald_term(term_name, qf, f_sat, ctx.n_minus_p, ctx.sigma2_e)?;
+        return Ok(KrSatTermPair { kr, sat, nu_sat: ctx.n_minus_p, nu_kr: ctx.n_minus_p });
+    }
+
     // Fai & Cornelius (1996) Satterthwaite df via spectral decomposition of L Phi L^T.
-    let eig = sym_eigen(&sigma)?;
-    let n_vc = ctx.w_info_inv.nrows();
+    let eig = sym_eigen(sigma)?;
     let mut nu_modes = Vec::with_capacity(q);
     for m in 0..q {
         let v_m = eig.eigenvalues[m];
@@ -481,9 +553,8 @@ pub(in crate::anova) fn kr_multi_term_df(ctx: &KrTermContext<'_>, term_name: &st
             u_m.push(eig.eigenvectors.get(r, m).unwrap_or(0.0));
         }
         let mut grad_m = Vec::with_capacity(n_vc);
-        for pmp in ctx.phi_m_phi {
-            let sub = subblock_dense(pmp, start, q)?;
-            let sv = sub.matvec(&u_m)?;
+        for d_sub in d_mats {
+            let sv = d_sub.matvec(&u_m)?;
             grad_m.push(u_m.iter().zip(sv.iter()).map(|(&a, &b)| a * b).sum());
         }
         let wg = ctx.w_info_inv.matvec(&grad_m)?;
@@ -499,16 +570,10 @@ pub(in crate::anova) fn kr_multi_term_df(ctx: &KrTermContext<'_>, term_name: &st
     };
 
     // Kenward & Roger (1997, Biometrics 53:985 Eq. (6)) scaled F* and denominator df.
-    let sigma_inv = invert_reml_info(&sigma)?;
-    let inv_b_sat = sigma_inv.matvec(beta_sub)?;
-    let quad_sat: f64 = beta_sub.iter().zip(inv_b_sat.iter()).map(|(&b, &ib)| b * ib).sum();
-    let f_sat = (quad_sat / qf).max(0.0);
-
     let mut t_mats = Vec::with_capacity(n_vc);
     let mut tr_t = Vec::with_capacity(n_vc);
-    for pmp in ctx.phi_m_phi {
-        let d_sub = subblock_dense(pmp, start, q)?;
-        let ti = sigma_inv.matmul(&d_sub)?;
+    for d_sub in d_mats {
+        let ti = sigma_inv.matmul(d_sub)?;
         let mut tr = 0.0_f64;
         for k in 0..q {
             tr += ti.get(k, k).unwrap_or(0.0);
@@ -532,6 +597,29 @@ pub(in crate::anova) fn kr_multi_term_df(ctx: &KrTermContext<'_>, term_name: &st
     Ok(KrSatTermPair { kr, sat, nu_sat, nu_kr })
 }
 
+pub(in crate::anova) fn kr_multi_term_df(ctx: &KrTermContext<'_>, term_name: &str, start: usize, q: usize) -> Result<KrSatTermPair, StatsError> {
+    let sigma = symmetrize_dense(&subblock_dense(ctx.phi, start, q)?)?;
+    let sigma_a = symmetrize_dense(&subblock_dense(ctx.phi_a, start, q)?)?;
+    let beta_sub = &ctx.beta[start..(start + q)];
+    let mut d_mats = Vec::with_capacity(ctx.phi_m_phi.len());
+    for pmp in ctx.phi_m_phi {
+        d_mats.push(subblock_dense(pmp, start, q)?);
+    }
+    kr_multi_from_projected(ctx, term_name, beta_sub, &sigma, &sigma_a, &d_mats)
+}
+
+pub(in crate::anova) fn kr_multi_contrast_df(ctx: &KrTermContext<'_>, term_name: &str, l_mat: &DenseMatrix) -> Result<KrSatTermPair, StatsError> {
+    let lt = l_mat.transpose();
+    let sigma = symmetrize_dense(&l_mat.matmul(ctx.phi)?.matmul(&lt)?)?;
+    let sigma_a = symmetrize_dense(&l_mat.matmul(ctx.phi_a)?.matmul(&lt)?)?;
+    let beta_sub = l_mat.matvec(ctx.beta)?;
+    let mut d_mats = Vec::with_capacity(ctx.phi_m_phi.len());
+    for pmp in ctx.phi_m_phi {
+        d_mats.push(symmetrize_dense(&l_mat.matmul(pmp)?.matmul(&lt)?)?);
+    }
+    kr_multi_from_projected(ctx, term_name, &beta_sub, &sigma, &sigma_a, &d_mats)
+}
+
 pub(in crate::anova) type RemlWaldTermsOut = (Vec<FactorialAnovaTerm>, Vec<f64>, Vec<f64>);
 
 pub(in crate::anova) struct RemlContrastCore {
@@ -546,56 +634,143 @@ pub(in crate::anova) struct RemlContrastCore {
     pub(in crate::anova) df_method: MixedModelDfMethod,
 }
 
-pub(in crate::anova) fn eval_reml_wald_terms_for_df(
-    phi: &DenseMatrix,
-    beta: &[f64],
-    sigma2_e: f64,
-    fisher: &OwnedRemlFisherMats,
-    terms: &[(&str, usize, usize)],
-    n_minus_p: f64,
-    df_method: MixedModelDfMethod,
-) -> Result<(RemlWaldTermsOut, RemlContrastCore), StatsError> {
-    let w_info_inv = invert_reml_info(&fisher.info_e)?;
-    let n_vc = fisher.m_mats.len();
-    let p = phi.nrows();
-    let mut phi_m_phi = Vec::with_capacity(n_vc);
-    for m_mat in &fisher.m_mats {
-        phi_m_phi.push(symmetrize_dense(&phi.matmul(m_mat)?.matmul(phi)?)?);
+fn unestimable_wald_term(name: &str) -> FactorialAnovaTerm {
+    FactorialAnovaTerm {
+        name: name.to_owned(),
+        ss: 0.0,
+        df: 0.0,
+        ms: 0.0,
+        f_statistic: None,
+        p_value: None,
+        partial_eta_squared: None,
+        eta_squared: None,
     }
-    let mut lambda_data = vec![0.0_f64; p * p];
+}
+
+fn compute_kr_phi_a(phi: &DenseMatrix, w_info_inv: &DenseMatrix, fisher: &OwnedRemlFisherMats) -> Result<DenseMatrix, StatsError> {
+    let p = phi.nrows();
+    let n_vc = fisher.m_mats.len();
+    if n_vc == 0 || matches!(fisher.q_term, RemlFisherQ::None) {
+        return Ok(phi.clone());
+    }
+    let mut q_weighted_data = checked_dense_vec(p, p)?;
+    match &fisher.q_term {
+        RemlFisherQ::Grid(q_mats) => {
+            for r in 0..n_vc {
+                for s in 0..n_vc {
+                    let wrs = w_info_inv.get(r, s).unwrap_or(0.0);
+                    if wrs == 0.0 {
+                        continue;
+                    }
+                    for (dst, &val) in q_weighted_data.iter_mut().zip(q_mats[r][s].as_slice().iter()) {
+                        *dst += wrs * val;
+                    }
+                }
+            }
+        }
+        RemlFisherQ::Contracted(q_w) => {
+            q_weighted_data.copy_from_slice(q_w.as_slice());
+        }
+        RemlFisherQ::None => return Ok(phi.clone()),
+    }
+    // Subtract sum_{r, s} W_{rs} M_r Phi M_s = sum_r M_r Phi (sum_s W_{rs} M_s) in O(n_vc * p^3).
+    let mut m_phi_m_sum = checked_dense_vec(p, p)?;
     for r in 0..n_vc {
+        let mut s_r_data = checked_dense_vec(p, p)?;
+        let mut any_nz = false;
         for s in 0..n_vc {
             let wrs = w_info_inv.get(r, s).unwrap_or(0.0);
             if wrs == 0.0 {
                 continue;
             }
-            let m_phi_m = fisher.m_mats[r].matmul(phi)?.matmul(&fisher.m_mats[s])?;
-            let diff = dense_sub(&fisher.q_mats[r][s], &m_phi_m)?;
-            let contrib = phi.matmul(&diff)?.matmul(phi)?;
-            for (dst, &val) in lambda_data.iter_mut().zip(contrib.as_slice().iter()) {
+            any_nz = true;
+            for (dst, &val) in s_r_data.iter_mut().zip(fisher.m_mats[s].as_slice().iter()) {
                 *dst += wrs * val;
             }
         }
+        if !any_nz {
+            continue;
+        }
+        let s_r = DenseMatrix::from_row_major(p, p, s_r_data)?;
+        let prod = fisher.m_mats[r].matmul(phi)?.matmul(&s_r)?;
+        for (dst, &val) in m_phi_m_sum.iter_mut().zip(prod.as_slice().iter()) {
+            *dst += val;
+        }
     }
-    let phi_a_raw: Vec<f64> = phi.as_slice().iter().zip(lambda_data.iter()).map(|(&a, &l)| a + 2.0 * l).collect();
+    let inner_data: Vec<f64> = q_weighted_data.iter().zip(m_phi_m_sum.iter()).map(|(&q, &m)| q - m).collect();
+    let inner = DenseMatrix::from_row_major(p, p, inner_data)?;
+    let lambda = phi.matmul(&inner)?.matmul(phi)?;
+    let phi_a_raw: Vec<f64> = phi.as_slice().iter().zip(lambda.as_slice().iter()).map(|(&a, &l)| a + 2.0 * l).collect();
     let phi_a_sym = symmetrize_dense(&DenseMatrix::from_row_major(p, p, phi_a_raw)?)?;
-    let phi_a = if cholesky(&phi_a_sym).is_ok() { phi_a_sym } else { phi.clone() };
+    Ok(if cholesky(&phi_a_sym).is_ok() { phi_a_sym } else { phi.clone() })
+}
+
+pub(in crate::anova) fn eval_reml_wald_terms_for_df(
+    phi: &DenseMatrix,
+    beta: &[f64],
+    sigma2_e: f64,
+    fisher: &OwnedRemlFisherMats,
+    terms: &[RemlTermContrast],
+    n_minus_p: f64,
+    df_method: MixedModelDfMethod,
+) -> Result<(RemlWaldTermsOut, RemlContrastCore), StatsError> {
+    let n_vc = fisher.m_mats.len();
+    let p = phi.nrows();
+    let w_info_inv = if n_vc == 0 {
+        DenseMatrix::zeros(0, 0)?
+    } else if let Some(ref pre_inv) = fisher.w_info_inv {
+        pre_inv.clone()
+    } else {
+        invert_reml_info(&fisher.info_e)?
+    };
+    let mut phi_m_phi = Vec::with_capacity(n_vc);
+    for m_mat in &fisher.m_mats {
+        phi_m_phi.push(symmetrize_dense(&phi.matmul(m_mat)?.matmul(phi)?)?);
+    }
+    let phi_a = compute_kr_phi_a(phi, &w_info_inv, fisher)?;
     let ctx = KrTermContext { phi, phi_a: &phi_a, beta, sigma2_e, w_info_inv: &w_info_inv, phi_m_phi: &phi_m_phi, n_minus_p };
 
     let mut fixed_terms = Vec::with_capacity(terms.len());
     let mut satt_dfs = Vec::with_capacity(terms.len());
     let mut kr_dfs = Vec::with_capacity(terms.len());
-    for &(name, start, len) in terms {
-        if len == 0 || start.checked_add(len).is_none_or(|end| end > p) {
-            continue;
+    for term in terms {
+        let pair_opt = match term {
+            RemlTermContrast::Slice { name, start, len } => {
+                if *len == 0 || start.checked_add(*len).is_none_or(|end| end > p) {
+                    None
+                } else if *len == 1 {
+                    Some(kr_single_term_df1(&ctx, name, *start)?)
+                } else {
+                    Some(kr_multi_term_df(&ctx, name, *start, *len)?)
+                }
+            }
+            RemlTermContrast::Matrix { name, l_mat } => {
+                let q = l_mat.nrows();
+                if q == 0 || l_mat.ncols() != p {
+                    None
+                } else if q == 1 {
+                    let row: Vec<f64> = (0..p).map(|c| l_mat.get(0, c).unwrap_or(0.0)).collect();
+                    Some(kr_single_contrast_df1(&ctx, name, &row)?)
+                } else {
+                    Some(kr_multi_contrast_df(&ctx, name, l_mat)?)
+                }
+            }
+        };
+        if let Some(pair) = pair_opt {
+            fixed_terms.push(match df_method {
+                MixedModelDfMethod::KenwardRoger => pair.kr,
+                MixedModelDfMethod::Satterthwaite => pair.sat,
+            });
+            satt_dfs.push(pair.nu_sat);
+            kr_dfs.push(pair.nu_kr);
+        } else {
+            let name = match term {
+                RemlTermContrast::Slice { name, .. } | RemlTermContrast::Matrix { name, .. } => name.as_str(),
+            };
+            fixed_terms.push(unestimable_wald_term(name));
+            satt_dfs.push(f64::NAN);
+            kr_dfs.push(f64::NAN);
         }
-        let pair = if len == 1 { kr_single_term_df1(&ctx, name, start)? } else { kr_multi_term_df(&ctx, name, start, len)? };
-        fixed_terms.push(match df_method {
-            MixedModelDfMethod::KenwardRoger => pair.kr,
-            MixedModelDfMethod::Satterthwaite => pair.sat,
-        });
-        satt_dfs.push(pair.nu_sat);
-        kr_dfs.push(pair.nu_kr);
     }
     let core = RemlContrastCore {
         beta: beta.to_vec(),
@@ -751,9 +926,8 @@ pub(in crate::anova) fn fit_random_intercept_reml_with_method_and_core(
     let phi = scale_dense(&xtvx_rel_inv, sigma2_e)?;
 
     let fisher = ri_build_fisher_mats(&clusters, p_eff, n, tau_hat, sigma2_e, &xtvx_rel_inv)?;
-    let term_refs: Vec<(&str, usize, usize)> = reduced_terms.iter().map(|(n_str, s, l)| (n_str.as_str(), *s, *l)).collect();
     let ((fixed_terms, satterthwaite_df, kenward_roger_df), mut core) =
-        eval_reml_wald_terms_for_df(&phi, &beta, sigma2_e, &fisher, &term_refs, n_minus_p, df_method)?;
+        eval_reml_wald_terms_for_df(&phi, &beta, sigma2_e, &fisher, &reduced_terms, n_minus_p, df_method)?;
     core.col_map = col_map;
 
     let res = MixedRemlResult {
@@ -782,7 +956,7 @@ pub(in crate::anova) fn cluster_ids_to_g_matrix(cluster_ids: &[usize]) -> Result
         mapped.push(idx);
     }
     let c_count = remap.len();
-    let mut g = vec![0.0_f64; n * n];
+    let mut g = checked_dense_vec(n, n)?;
     for i in 0..n {
         g[i * n + i] = 1.0;
         for j in (i + 1)..n {
@@ -798,7 +972,7 @@ pub(in crate::anova) fn cluster_ids_to_g_matrix(cluster_ids: &[usize]) -> Result
 pub(in crate::anova) fn multi_vc_eval_state(x: &DenseMatrix, y: &[f64], gs: &[DenseMatrix], theta: &[f64]) -> Result<MultiVcEvalState, StatsError> {
     let n = x.nrows();
     let n_vc = gs.len();
-    let mut v_data = vec![0.0_f64; n * n];
+    let mut v_data = checked_dense_vec(n, n)?;
     for (&th, g) in theta.iter().zip(gs.iter()) {
         for (dst, &gv) in v_data.iter_mut().zip(g.as_slice().iter()) {
             *dst += th * gv;
@@ -1031,15 +1205,16 @@ pub(in crate::anova) fn fit_multi_vc_reml_with_method_and_core(
     for _ in 0..80 {
         let (step_conv, used_ai) = multi_vc_ai_step(&x_red, &y_scaled, &gs, &dofs, &mut theta, n_minus_p)?;
         if step_conv {
-            if used_ai {
-                loop_converged = true;
-                break;
-            }
             let st_chk = multi_vc_eval_state(&x_red, &y_scaled, &gs, &theta)?;
             let max_g = (0..n_vc).filter(|&k| theta[k] > 1e-11 || st_chk.score[k] > 1e-9).map(|k| st_chk.score[k].abs()).fold(0.0_f64, f64::max);
             if max_g.is_finite() && max_g < 1e-5 {
                 loop_converged = true;
                 break;
+            }
+            if used_ai {
+                // Stalled AI backtrack away from stationarity: advance with a monotone EM step.
+                let em_next = multi_vc_em_step(&st_chk, &gs, &dofs, &theta, false);
+                theta.copy_from_slice(&em_next);
             }
         }
     }
@@ -1072,11 +1247,15 @@ pub(in crate::anova) fn fit_multi_vc_reml_with_method_and_core(
             ie_data[s * n_vc + r] = ie_rs;
         }
     }
-    let fisher = OwnedRemlFisherMats { info_e: DenseMatrix::from_row_major(n_vc, n_vc, ie_data)?, m_mats, q_mats };
+    let fisher = OwnedRemlFisherMats {
+        info_e: DenseMatrix::from_row_major(n_vc, n_vc, ie_data)?,
+        w_info_inv: None,
+        m_mats,
+        q_term: RemlFisherQ::Grid(q_mats),
+    };
     let sigma2_error = theta[0] * y_scale * y_scale;
-    let term_refs: Vec<(&str, usize, usize)> = reduced_terms.iter().map(|(n_str, s, l)| (n_str.as_str(), *s, *l)).collect();
     let ((mut fixed_terms, satterthwaite_df, kenward_roger_df), mut core) =
-        eval_reml_wald_terms_for_df(&st.phi, &st.beta, theta[0], &fisher, &term_refs, n_minus_p, df_method)?;
+        eval_reml_wald_terms_for_df(&st.phi, &st.beta, theta[0], &fisher, &reduced_terms, n_minus_p, df_method)?;
     core.y_scale = y_scale;
     core.col_map = col_map;
     for term in &mut fixed_terms {

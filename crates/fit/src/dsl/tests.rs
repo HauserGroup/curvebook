@@ -6,11 +6,11 @@ use crate::library::ParametricModel;
 
 use crate::dsl::ast::{BinaryOp, DatasetFilter, Expr, UnaryOp};
 use crate::dsl::compile::compile_expr;
-use crate::dsl::limits::{MAX_DATASET_EXPANSION, MAX_PARSE_DEPTH};
+use crate::dsl::limits::{MAX_BESSEL_ORDER, MAX_DATASET_EXPANSION, MAX_PARSE_DEPTH};
 use crate::dsl::model::CompiledDslModel;
 use crate::dsl::ode::integrate_rk45;
-use crate::dsl::special::{bessel_jn, bessel_yn};
-use crate::dsl::statements::{collect_free_idents, expr_references_y, parse_dataset_prefix};
+use crate::dsl::special::{bessel_in_counted, bessel_jn, bessel_kn_counted, bessel_yn};
+use crate::dsl::statements::{DslSection, collect_free_idents, expr_references_y, parse_dataset_prefix, parse_section_header};
 
 #[test]
 fn rk45_tiny_and_non_finite_spans_do_not_panic_or_hang() {
@@ -106,4 +106,17 @@ fn deep_expr_all_variants_clone_and_debug_without_stack_overflow() {
         })
         .unwrap();
     handle.join().unwrap();
+}
+
+#[test]
+fn bessel_in_kn_enforce_max_order_and_section_header_export_works() {
+    assert!(bessel_in_counted(MAX_BESSEL_ORDER + 1, 2.0, 10_000).0.is_none());
+    assert!(bessel_in_counted(-(MAX_BESSEL_ORDER + 1), 2.0, 10_000).0.is_none());
+    assert!(bessel_kn_counted(MAX_BESSEL_ORDER + 1, 2.0, 10_000).0.is_none());
+    assert!(bessel_kn_counted(-(MAX_BESSEL_ORDER + 1), 2.0, 10_000).0.is_none());
+
+    assert_eq!(parse_section_header("[Equation]", 1).unwrap(), Some(DslSection::Equation));
+    assert_eq!(parse_section_header("[Initial Value]", 1).unwrap(), Some(DslSection::InitialValues));
+    assert_eq!(parse_section_header("[Derived Scalars]", 1).unwrap(), Some(DslSection::Transforms));
+    assert_eq!(parse_section_header("Y = A * X", 1).unwrap(), None);
 }

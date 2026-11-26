@@ -192,6 +192,11 @@ impl BitCol {
     }
 }
 
+/// Maximum intermediate or final clique columns permitted during Piepho (2004) insert-and-absorb
+/// enumeration before returning [`StatsError::InvalidParameter`] (`"cld_complexity_limit"`),
+/// preventing exponential `O(3^{n/3})` CPU/memory blowup on pathological non-transitive graphs.
+pub const MAX_CLD_COLUMNS: usize = 4_096;
+
 fn absorb_insert(cols: &mut Vec<BitCol>, candidate: BitCol) {
     if candidate.is_empty() {
         return;
@@ -203,7 +208,7 @@ fn absorb_insert(cols: &mut Vec<BitCol>, candidate: BitCol) {
     cols.push(candidate);
 }
 
-fn insert_and_absorb(n: usize, sig_matrix: &[bool]) -> Vec<BitCol> {
+fn insert_and_absorb(n: usize, sig_matrix: &[bool]) -> Result<Vec<BitCol>, StatsError> {
     let mut cols = vec![BitCol::all_ones(n)];
     for i in 0..n {
         for j in (i + 1)..n {
@@ -225,13 +230,19 @@ fn insert_and_absorb(n: usize, sig_matrix: &[bool]) -> Vec<BitCol> {
             }
             for col in conflicts {
                 absorb_insert(&mut next_cols, col.without(i));
+                if next_cols.len() > MAX_CLD_COLUMNS {
+                    return Err(StatsError::InvalidParameter { name: "cld_complexity_limit", value: next_cols.len() as f64 });
+                }
                 absorb_insert(&mut next_cols, col.without(j));
+                if next_cols.len() > MAX_CLD_COLUMNS {
+                    return Err(StatsError::InvalidParameter { name: "cld_complexity_limit", value: next_cols.len() as f64 });
+                }
             }
             cols = next_cols;
         }
     }
     cols.sort_by(BitCol::cmp_piepho);
-    cols
+    Ok(cols)
 }
 
 fn is_column_redundant(cols: &[BitCol], active: &[bool], candidate_idx: usize) -> bool {
@@ -432,7 +443,7 @@ pub fn compute_cld(groups: &[CldGroupInput], pairs: &[CldPairwiseInput], options
     }
 
     let sig_matrix = build_significance_matrix(&sorted, pairs, options.alpha_override)?;
-    let absorbed = insert_and_absorb(n, &sig_matrix);
+    let absorbed = insert_and_absorb(n, &sig_matrix)?;
     let swept = sweep_redundant_columns(absorbed);
 
     let total_cols = swept.len();

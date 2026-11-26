@@ -92,6 +92,7 @@ pub fn build_info_json(file_label: &str, loaded: &LoadedProject) -> Value {
 fn summarize_table_json(summary: &DataSheetSummary, ds: &curvebook_doc::DataSheet) -> Value {
     let subcolumn_mode = match &ds.archetype {
         TableArchetype::Xy(xy) => format!("{:?}", xy.y_subcolumn_mode),
+        TableArchetype::Column(c) => format!("{:?}", c.subcolumn_mode),
         TableArchetype::Grouped(g) => format!("{:?}", g.subcolumn_mode),
         _ => String::from("None"),
     };

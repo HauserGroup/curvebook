@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use curvebook_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DocError, GroupedTable,
-    MAX_DATA_SETS, MAX_SUBCOLUMNS, MultipleVariablesTable, SequenceProgression, SubcolumnMode, TableArchetype, TableKind, VariableColumn,
+    MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, MultipleVariablesTable, SequenceProgression, SubcolumnMode, TableArchetype, TableKind, VariableColumn,
     VariableRole, VariableSource, XColumnMode, XyTable, default_column_label, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
 };
 
@@ -72,6 +72,10 @@ pub struct ConversionPreview {
 
 /// Inspect how converting `sheet` into `target` will map cells, exclusions, and subcolumns
 /// without mutating `sheet`.
+///
+/// Low-level archetype conversion does not remap [`DataSheet::linked_regions`]; if the source sheet
+/// has attached live links, a non-lossy informational warning is reported so higher-level callers
+/// (such as `curvebook-engine`) can re-attach or detach them explicitly.
 pub fn preview_datasheet_conversion(sheet: &DataSheet, target: TargetArchetypeKind) -> Result<ConversionPreview, TransformError> {
     let (_, preview) = build_converted_datasheet(sheet, target)?;
     Ok(preview)
@@ -79,6 +83,11 @@ pub fn preview_datasheet_conversion(sheet: &DataSheet, target: TargetArchetypeKi
 
 /// Convert `sheet` into `target`, preserving metadata, cell `excluded` masks, and remapped
 /// [`CellExclusionNote`] coordinates.
+///
+/// Live [`DataSheet::linked_regions`] are not automatically remapped by this low-level routine and
+/// are left empty on the returned [`DataSheet`] (emitting an informational warning when present on
+/// `sheet`); higher-level orchestrators (`curvebook-engine`) remap or guard incoming links
+/// separately.
 ///
 /// Refuses lossy conversions with [`TransformError::InvalidSpec`] when `allow_lossy` is `false`.
 pub fn convert_datasheet_archetype(
@@ -381,6 +390,12 @@ fn assemble_datasheet(
         }
     }
     out.exclusion_notes.sort_by_key(|n| n.coord);
+    if !source.linked_regions.is_empty() {
+        acc.warn(format!(
+            "{} live linked data region(s) are not automatically remapped by archetype conversion and must be re-attached or detached by the caller",
+            source.linked_regions.len()
+        ));
+    }
 
     let preserved_exclusions = count_archetype_cells(&out.archetype, |c| c.excluded);
     let lossy = acc.dropped > 0 || dropped_notes > 0 || acc.schema_lossy;
@@ -449,6 +464,21 @@ fn convert_column_to_grouped(col: &ColumnTable) -> Result<BuiltArchetype, Transf
     Ok(acc.finish(TableArchetype::Grouped(grouped)))
 }
 
+fn warn_grouped_metadata_loss(grp: &GroupedTable, include_row_spacing: bool, target_label: &str, acc: &mut ConversionAcc) {
+    let loses_three_way = grp.three_way_grouping.is_some();
+    let loses_spacing = include_row_spacing && grp.row_numeric_spacing.is_some();
+    match (loses_three_way, loses_spacing) {
+        (true, true) => acc.warn_lossy(format!(
+            "Grouped three-way column grouping and numeric row spacing cannot be represented in {target_label} tables and will be discarded"
+        )),
+        (true, false) => {
+            acc.warn_lossy(format!("Grouped three-way column grouping cannot be represented in {target_label} tables and will be discarded"))
+        }
+        (false, true) => acc.warn_lossy(format!("Grouped numeric row spacing cannot be represented in {target_label} tables and will be discarded")),
+        (false, false) => {}
+    }
+}
+
 fn convert_grouped_to_column(grp: &GroupedTable) -> Result<BuiltArchetype, TransformError> {
     require_non_empty_datasets(&grp.data_sets, "Grouped table has no data columns")?;
     let cols = grp.data_sets.len();
@@ -460,15 +490,14 @@ fn convert_grouped_to_column(grp: &GroupedTable) -> Result<BuiltArchetype, Trans
                 if has_non_empty_title(&grp.row_titles) { ColumnDesignHint::PairedRepeatedMeasures } else { ColumnDesignHint::UnpairedReplicates };
             let mut acc = ConversionAcc::default();
             let out = copy_grouped_direct_to_column(grp, hint, SubcolumnMode::Single, rows, &mut acc)?;
-            if grp.three_way_grouping.is_some() || grp.row_numeric_spacing.is_some() {
-                acc.warn("Grouped factor metadata flattened into Column row structure");
-            }
+            warn_grouped_metadata_loss(grp, true, "Column", &mut acc);
             Ok(acc.finish(TableArchetype::Column(out)))
         }
         SubcolumnMode::RawReplicates(n) => convert_grouped_multi_rep_to_column(grp, cols, rows, n),
         SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN => {
             let mut acc = ConversionAcc::default();
             let out = copy_grouped_direct_to_column(grp, ColumnDesignHint::PrecomputedError, grp.subcolumn_mode, rows, &mut acc)?;
+            warn_grouped_metadata_loss(grp, true, "Column", &mut acc);
             Ok(acc.finish(TableArchetype::Column(out)))
         }
         SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => build_grouped_truncated_column(
@@ -499,6 +528,7 @@ fn build_grouped_truncated_column(grp: &GroupedTable, rows: usize, warning: Stri
     let mut acc = ConversionAcc::default();
     DataSetSubcolumnUnpacker::new(&mut acc, rows).copy_primary_only(&grp.data_sets, &mut out.data_sets, 0);
     acc.warn_lossy(warning);
+    warn_grouped_metadata_loss(grp, true, "Column", &mut acc);
     Ok(acc.finish(TableArchetype::Column(out)))
 }
 
@@ -513,6 +543,7 @@ fn convert_grouped_multi_rep_to_column(grp: &GroupedTable, cols: usize, rows: us
             }
         }
         acc.warn("Grouped replicate subcolumns stacked vertically down Column rows");
+        warn_grouped_metadata_loss(grp, true, "Column", &mut acc);
         return Ok(acc.finish(TableArchetype::Column(out)));
     }
 
@@ -544,6 +575,7 @@ fn convert_grouped_multi_rep_to_column(grp: &GroupedTable, cols: usize, rows: us
             }
         }
         acc.warn("Grouped (Row x Column) cells expanded into Column groups with stacked replicates");
+        warn_grouped_metadata_loss(grp, true, "Column", &mut acc);
         return Ok(acc.finish(TableArchetype::Column(out)));
     }
 
@@ -738,7 +770,13 @@ fn convert_xy_parametric_to_column(xy: &XyTable, rows: usize, y_cols: usize) -> 
     // columns and promote active X coordinates into row_titles so column analyses never fail with
     // MissingSpread on a half-populated X column.
     let xy_rows = build_xy_row_titles(xy, rows)?;
-    if !matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
+    if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
+        let excluded_gen_x = count_excluded_generated_x(xy, rows);
+        if excluded_gen_x > 0 {
+            acc.drop_cells(excluded_gen_x);
+            acc.warn_lossy(format!("Dropped {excluded_gen_x} excluded generated X value(s) unsupported by Column row titles"));
+        }
+    } else {
         for (r, x_val) in xy_rows.spacing.iter().enumerate() {
             let has_explicit = xy.row_titles.get(r).is_some_and(|s| !s.trim().is_empty());
             let skip_first = !has_explicit && x_val.is_some();
@@ -771,7 +809,7 @@ fn copy_xy_x_into_column0(xy: &XyTable, col: &mut ColumnTable, rows: usize, acc:
     match &xy.x_mode {
         XColumnMode::GeneratedSequence { .. } => {
             for r in 0..rows {
-                set_dataset_cell(&mut col.data_sets, 0, r, 0, xy_x_value_at_row(xy, r).map_or_else(Cell::empty, Cell::number));
+                set_dataset_cell(&mut col.data_sets, 0, r, 0, xy_materialized_x_cell(xy, r));
             }
             acc.warn("Generated X sequence materialized into static Column 0 values");
         }
@@ -846,24 +884,18 @@ fn convert_grouped_reps_to_mv(
     row_title: String,
     col_title: String,
 ) -> Result<BuiltArchetype, TransformError> {
-    let mut records: Vec<(Cell, Cell, Option<Cell>, Cell, CellCoord)> = Vec::new();
+    let mut out_rows = 0_usize;
     for r in 0..rows {
-        let row_cell = grouped_row_factor_cell(grp, r);
-        for (c, ds) in grp.data_sets.iter().enumerate() {
-            let col_cell = Cell::text(non_empty_or(&ds.title, &default_column_label(c)));
+        for ds in &grp.data_sets {
             if let Some(row_cells) = ds.cells.get(r)
                 && row_cells.iter().take(n).any(is_occupied)
             {
-                for s in 0..n {
-                    let cell = row_cells.get(s).cloned().unwrap_or_default();
-                    if n == 1 && !is_occupied(&cell) {
-                        continue;
-                    }
-                    let rep = (n > 1).then(|| {
-                        #[allow(clippy::cast_precision_loss)]
-                        Cell::number((s + 1) as f64)
-                    });
-                    records.push((row_cell.clone(), col_cell.clone(), rep, cell, CellCoord::new(r, c, s)));
+                let add = if n == 1 { usize::from(row_cells.first().is_some_and(is_occupied)) } else { n };
+                out_rows = out_rows
+                    .checked_add(add)
+                    .ok_or_else(|| TransformError::InvalidSpec { message: String::from("Grouped-to-MultipleVariables row count overflows") })?;
+                if out_rows > MAX_ROWS {
+                    validate_rows(out_rows)?;
                 }
             }
         }
@@ -871,56 +903,87 @@ fn convert_grouped_reps_to_mv(
 
     let extra_titles = if n > 1 { vec![String::from("Replicate"), String::from("Value")] } else { vec![String::from("Value")] };
     let val_col_idx = 1 + extra_titles.len();
-    let mut mv = init_grouped_factor_mv(records.len(), row_title, col_title, extra_titles, "Grouped-to-MultipleVariables replicate reshape")?;
+    let mut mv = init_grouped_factor_mv(out_rows, row_title, col_title, extra_titles, "Grouped-to-MultipleVariables replicate reshape")?;
     let mut acc = ConversionAcc::default();
+    let col_labels: Vec<String> = grp.data_sets.iter().enumerate().map(|(c, ds)| non_empty_or(&ds.title, &default_column_label(c))).collect();
 
-    for (out_r, (rf, cf, rep, val, old_coord)) in records.into_iter().enumerate() {
-        if let Some(title) = grp.row_titles.get(old_coord.row) {
-            mv.row_titles[out_r].clone_from(title);
+    let mut out_r = 0_usize;
+    for r in 0..rows {
+        let row_cell = grouped_row_factor_cell(grp, r);
+        for (c, ds) in grp.data_sets.iter().enumerate() {
+            if let Some(row_cells) = ds.cells.get(r)
+                && row_cells.iter().take(n).any(is_occupied)
+            {
+                let col_cell = Cell::text(col_labels[c].clone());
+                for s in 0..n {
+                    let val = row_cells.get(s).cloned().unwrap_or_default();
+                    if n == 1 && !is_occupied(&val) {
+                        continue;
+                    }
+                    if let Some(title) = grp.row_titles.get(r) {
+                        mv.row_titles[out_r].clone_from(title);
+                    }
+                    set_mv_cell(&mut mv, 0, out_r, row_cell.clone());
+                    set_mv_cell(&mut mv, 1, out_r, col_cell.clone());
+                    if n > 1 {
+                        #[allow(clippy::cast_precision_loss)]
+                        set_mv_cell(&mut mv, 2, out_r, Cell::number((s + 1) as f64));
+                    }
+                    acc.record_preserved(&val);
+                    set_mv_cell(&mut mv, val_col_idx, out_r, val);
+                    acc.map_coord(CellCoord::new(r, c, s), CellCoord::new(out_r, val_col_idx, 0));
+                    out_r += 1;
+                }
+            }
         }
-        set_mv_cell(&mut mv, 0, out_r, rf);
-        set_mv_cell(&mut mv, 1, out_r, cf);
-        if let Some(rep_cell) = rep {
-            set_mv_cell(&mut mv, 2, out_r, rep_cell);
-        }
-        acc.record_preserved(&val);
-        set_mv_cell(&mut mv, val_col_idx, out_r, val);
-        acc.map_coord(old_coord, CellCoord::new(out_r, val_col_idx, 0));
     }
     finalize_grouped_mv(&mut mv);
+    warn_grouped_metadata_loss(grp, false, "MultipleVariables", &mut acc);
     Ok(acc.finish(TableArchetype::MultipleVariables(mv)))
 }
 
 fn convert_grouped_summary_to_mv(grp: &GroupedTable, rows: usize, row_title: String, col_title: String) -> Result<BuiltArchetype, TransformError> {
     let sub_labels = grp.subcolumn_mode.subcolumn_labels();
     let sub_count = sub_labels.len();
-    let mut row_entries: Vec<(Cell, Cell, Vec<Cell>, usize, usize)> = Vec::new();
+    let mut out_rows = 0_usize;
+    for r in 0..rows {
+        for ds in &grp.data_sets {
+            if let Some(row_cells) = ds.cells.get(r)
+                && row_cells.iter().take(sub_count).any(is_occupied)
+            {
+                out_rows = out_rows
+                    .checked_add(1)
+                    .ok_or_else(|| TransformError::InvalidSpec { message: String::from("Grouped-to-MultipleVariables row count overflows") })?;
+                if out_rows > MAX_ROWS {
+                    validate_rows(out_rows)?;
+                }
+            }
+        }
+    }
 
+    let mut mv = init_grouped_factor_mv(out_rows, row_title, col_title, sub_labels, "Grouped-to-MultipleVariables summary reshape")?;
+    let mut acc = ConversionAcc::default();
+    let col_labels: Vec<String> = grp.data_sets.iter().enumerate().map(|(c, ds)| non_empty_or(&ds.title, &default_column_label(c))).collect();
+
+    let mut out_r = 0_usize;
     for r in 0..rows {
         let row_cell = grouped_row_factor_cell(grp, r);
         for (c, ds) in grp.data_sets.iter().enumerate() {
             let Some(row_cells) = ds.cells.get(r) else { continue };
             if row_cells.iter().take(sub_count).any(is_occupied) {
-                let vals = (0..sub_count).map(|s| row_cells.get(s).cloned().unwrap_or_default()).collect();
-                let col_label = non_empty_or(&ds.title, &default_column_label(c));
-                row_entries.push((row_cell.clone(), Cell::text(col_label), vals, r, c));
+                if let Some(title) = grp.row_titles.get(r) {
+                    mv.row_titles[out_r].clone_from(title);
+                }
+                set_mv_cell(&mut mv, 0, out_r, row_cell.clone());
+                set_mv_cell(&mut mv, 1, out_r, Cell::text(col_labels[c].clone()));
+                for s in 0..sub_count {
+                    let val = row_cells.get(s).cloned().unwrap_or_default();
+                    acc.record_preserved(&val);
+                    set_mv_cell(&mut mv, 2 + s, out_r, val);
+                    acc.map_coord(CellCoord::new(r, c, s), CellCoord::new(out_r, 2 + s, 0));
+                }
+                out_r += 1;
             }
-        }
-    }
-
-    let mut mv = init_grouped_factor_mv(row_entries.len(), row_title, col_title, sub_labels, "Grouped-to-MultipleVariables summary reshape")?;
-    let mut acc = ConversionAcc::default();
-
-    for (out_r, (rf, cf, vals, old_r, old_c)) in row_entries.into_iter().enumerate() {
-        if let Some(title) = grp.row_titles.get(old_r) {
-            mv.row_titles[out_r].clone_from(title);
-        }
-        set_mv_cell(&mut mv, 0, out_r, rf);
-        set_mv_cell(&mut mv, 1, out_r, cf);
-        for (s, val) in vals.into_iter().enumerate() {
-            acc.record_preserved(&val);
-            set_mv_cell(&mut mv, 2 + s, out_r, val);
-            acc.map_coord(CellCoord::new(old_r, old_c, s), CellCoord::new(out_r, 2 + s, 0));
         }
     }
     finalize_grouped_mv(&mut mv);
@@ -931,6 +994,7 @@ fn convert_grouped_summary_to_mv(grp: &GroupedTable, rows: usize, row_title: Str
             grp.subcolumn_mode
         ));
     }
+    warn_grouped_metadata_loss(grp, false, "MultipleVariables", &mut acc);
     Ok(acc.finish(TableArchetype::MultipleVariables(mv)))
 }
 
@@ -1015,6 +1079,7 @@ fn pivot_mv_two_way_to_grouped(mv: &MultipleVariablesTable, part: &MvPartition) 
     let mut col_levels = LevelInterner::default();
     let mut buckets: RepBucketMap<Cell> = BTreeMap::new();
     let mut warned_rep_dropped = false;
+    let mut skipped_factor_cells = 0_usize;
 
     for r in 0..part.rows {
         let r_tok = mv_cell_level_token(mv.variables[row_fac_col].cells.get(r));
@@ -1023,6 +1088,7 @@ fn pivot_mv_two_way_to_grouped(mv: &MultipleVariablesTable, part: &MvPartition) 
         let (Some(rk), Some(ck)) = (r_tok, c_tok) else {
             let skipped = count_mv_row_occupied(mv, [row_fac_col, col_fac_col, val_col].into_iter().chain(rep_col), r);
             acc.drop_cells(skipped);
+            skipped_factor_cells += skipped;
             continue;
         };
         let ri = row_levels.intern(rk);
@@ -1031,11 +1097,17 @@ fn pivot_mv_two_way_to_grouped(mv: &MultipleVariablesTable, part: &MvPartition) 
         let rep_order = extract_replicate_order(mv, rep_col, r, &mut acc, &mut warned_rep_dropped);
         buckets.entry((ri, ci)).or_default().push((rep_order, r, val_cell));
     }
+    if skipped_factor_cells > 0 {
+        acc.warn(format!("Dropped {skipped_factor_cells} cell(s) from rows with missing or excluded factor levels"));
+    }
 
     if col_levels.is_empty() {
         return Err(TransformError::InvalidInput { message: String::from("no factor levels found to build Grouped table") });
     }
-    let (assigned_buckets, max_reps) = slot_buckets(buckets, rep_col.is_some());
+    let (assigned_buckets, max_reps, rep_collisions) = slot_buckets(buckets, rep_col.is_some())?;
+    if rep_collisions > 0 {
+        acc.warn(format!("{rep_collisions} duplicate replicate slot collision(s) shifted to subsequent subcolumns"));
+    }
     let col_titles = col_levels.into_levels();
     let mut grouped = build_grouped_shell(
         SubcolumnMode::RawReplicates(max_reps),
@@ -1089,7 +1161,10 @@ impl ReplicateSlotMapper {
     }
 }
 
-fn assign_bucket_slots<T>(mut entries: Vec<(Option<f64>, usize, T)>, mapper: Option<&ReplicateSlotMapper>) -> Vec<(usize, usize, T)> {
+type SlottedBucketResult<T> = Result<(SlottedBucketMap<T>, usize, usize), TransformError>;
+type AssignedBucketSlots<T> = Result<(Vec<(usize, usize, T)>, usize), TransformError>;
+
+fn assign_bucket_slots<T>(mut entries: Vec<(Option<f64>, usize, T)>, mapper: Option<&ReplicateSlotMapper>) -> AssignedBucketSlots<T> {
     entries.sort_by(|a, b| match (a.0, b.0) {
         (Some(ra), Some(rb)) => ra.total_cmp(&rb).then_with(|| a.1.cmp(&b.1)),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -1098,41 +1173,75 @@ fn assign_bucket_slots<T>(mut entries: Vec<(Option<f64>, usize, T)>, mapper: Opt
     });
     let mut used = BTreeSet::new();
     let mut placed = Vec::with_capacity(entries.len());
-    let mut overflow = Vec::new();
+    let mut colliding = Vec::new();
+    let mut unkeyed = Vec::new();
     for (rep_opt, old_row, item) in entries {
         if let (Some(rep), Some(m)) = (rep_opt, mapper)
             && let Some(slot) = m.slot_for(rep)
-            && used.insert(slot)
         {
-            placed.push((slot, old_row, item));
+            if slot >= MAX_SUBCOLUMNS {
+                return Err(DocError::TooManySubcolumns { count: slot + 1, max: MAX_SUBCOLUMNS }.into());
+            }
+            if used.insert(slot) {
+                placed.push((slot, old_row, item));
+            } else {
+                colliding.push((slot, old_row, item));
+            }
             continue;
         }
-        overflow.push((old_row, item));
+        unkeyed.push((old_row, item));
+    }
+    let collisions = colliding.len();
+    // `entries` is sorted by `rep` and `slot_for` is monotone non-decreasing, so `colliding` is
+    // non-decreasing in `desired_slot` and a monotone cursor avoids O(N^2) duplicate probing.
+    let mut next_collision = 0_usize;
+    for (desired_slot, old_row, item) in colliding {
+        let mut s = desired_slot.saturating_add(1).max(next_collision);
+        loop {
+            if s >= MAX_SUBCOLUMNS {
+                return Err(DocError::TooManySubcolumns { count: s + 1, max: MAX_SUBCOLUMNS }.into());
+            }
+            if used.insert(s) {
+                break;
+            }
+            s += 1;
+        }
+        next_collision = s.saturating_add(1);
+        placed.push((s, old_row, item));
     }
     let mut next_free = 0_usize;
-    for (old_row, item) in overflow {
-        while !used.insert(next_free) {
+    for (old_row, item) in unkeyed {
+        loop {
+            if next_free >= MAX_SUBCOLUMNS {
+                return Err(DocError::TooManySubcolumns { count: next_free + 1, max: MAX_SUBCOLUMNS }.into());
+            }
+            if used.insert(next_free) {
+                break;
+            }
             next_free += 1;
         }
         placed.push((next_free, old_row, item));
+        next_free += 1;
     }
     placed.sort_by_key(|(s, _, _)| *s);
-    placed
+    Ok((placed, collisions))
 }
 
-fn slot_buckets<T>(buckets: RepBucketMap<T>, has_rep_col: bool) -> (SlottedBucketMap<T>, usize) {
+fn slot_buckets<T>(buckets: RepBucketMap<T>, has_rep_col: bool) -> SlottedBucketResult<T> {
     let mapper = has_rep_col
         .then(|| ReplicateSlotMapper::from_values(buckets.values().flat_map(|entries| entries.iter().filter_map(|(rep_opt, _, _)| *rep_opt))));
     let mut assigned_buckets: SlottedBucketMap<T> = BTreeMap::new();
     let mut max_reps = 1_usize;
+    let mut total_collisions = 0_usize;
     for (key, entries) in buckets {
-        let assigned = assign_bucket_slots(entries, mapper.as_ref());
+        let (assigned, collisions) = assign_bucket_slots(entries, mapper.as_ref())?;
+        total_collisions += collisions;
         if let Some(bucket_max) = assigned.iter().map(|(s, _, _)| s + 1).max() {
             max_reps = max_reps.max(bucket_max);
         }
         assigned_buckets.insert(key, assigned);
     }
-    (assigned_buckets, max_reps)
+    Ok((assigned_buckets, max_reps, total_collisions))
 }
 
 fn extract_replicate_order(
@@ -1360,71 +1469,107 @@ fn convert_xy_single_to_mv(xy: &XyTable, rows: usize) -> Result<BuiltArchetype, 
     Ok(acc.finish(TableArchetype::MultipleVariables(mv)))
 }
 
-fn convert_xy_reps_to_mv(xy: &XyTable, rows: usize, n: usize) -> Result<BuiltArchetype, TransformError> {
-    let mut records: Vec<(Cell, Cell, Cell, Cell, CellCoord)> = Vec::new();
-    let mut acc = ConversionAcc::default();
-    let mut seen_x_rows = BTreeSet::new();
+fn xy_row_has_unpaired_x_only(xy: &XyTable, row: usize) -> bool {
+    match &xy.x_mode {
+        XColumnMode::GeneratedSequence { .. } => xy.x_cells.get(row).and_then(|s| s.first()).is_some_and(|c| c.excluded),
+        XColumnMode::Numbers { .. } | XColumnMode::DateOrElapsedTime { .. } => xy.x_cells.get(row).and_then(|s| s.first()).is_some_and(is_occupied),
+    }
+}
 
+fn count_xy_reps_mv_rows(xy: &XyTable, rows: usize, n: usize) -> Result<usize, TransformError> {
+    let mut out_rows = 0_usize;
     for r in 0..rows {
-        let x_cell = match &xy.x_mode {
-            XColumnMode::GeneratedSequence { .. } => xy_x_value_at_row(xy, r).map_or_else(Cell::empty, Cell::number),
-            XColumnMode::Numbers { .. } | XColumnMode::DateOrElapsedTime { .. } => {
-                xy.x_cells.get(r).and_then(|s| s.first()).cloned().unwrap_or_default()
-            }
-        };
-        for (c, ds) in xy.data_sets.iter().enumerate() {
-            let grp_cell = Cell::text(ds.title.clone());
+        let mut any_y = false;
+        for ds in &xy.data_sets {
             if let Some(row_cells) = ds.cells.get(r)
                 && row_cells.iter().take(n).any(is_occupied)
             {
-                for s in 0..n {
-                    let cell = row_cells.get(s).cloned().unwrap_or_default();
-                    if is_occupied(&x_cell) && seen_x_rows.insert(r) {
-                        acc.preserved += 1;
-                    }
-                    #[allow(clippy::cast_precision_loss)]
-                    let rep_cell = Cell::number((s + 1) as f64);
-                    records.push((x_cell.clone(), grp_cell.clone(), rep_cell, cell, CellCoord::new(r, c, s)));
+                any_y = true;
+                out_rows = out_rows
+                    .checked_add(n)
+                    .ok_or_else(|| TransformError::InvalidSpec { message: String::from("XY-to-MultipleVariables row count overflows") })?;
+                if out_rows > MAX_ROWS {
+                    validate_rows(out_rows)?;
                 }
             }
         }
-    }
-
-    // Preserve any occupied X-only row not paired with Y.
-    if !matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
-        for r in 0..rows {
-            if !seen_x_rows.contains(&r)
-                && let Some(x_cell) = xy.x_cells.get(r).and_then(|s| s.first())
-                && is_occupied(x_cell)
-            {
-                acc.preserved += 1;
-                records.push((x_cell.clone(), Cell::empty(), Cell::empty(), Cell::empty(), CellCoord::new(r, 0, 0)));
+        if !any_y && xy_row_has_unpaired_x_only(xy, r) {
+            out_rows = out_rows
+                .checked_add(1)
+                .ok_or_else(|| TransformError::InvalidSpec { message: String::from("XY-to-MultipleVariables row count overflows") })?;
+            if out_rows > MAX_ROWS {
+                validate_rows(out_rows)?;
             }
         }
     }
+    Ok(out_rows)
+}
 
-    let out_rows = records.len();
+fn convert_xy_reps_to_mv(xy: &XyTable, rows: usize, n: usize) -> Result<BuiltArchetype, TransformError> {
+    let out_rows = count_xy_reps_mv_rows(xy, rows, n)?;
     validate_rows(out_rows)?;
     validate_cell_budget(out_rows, 4, 1, 0, "XY-to-MultipleVariables replicate reshape")?;
     let mut mv = MultipleVariablesTable::new(4, out_rows)?;
     mv.variables[0].title = non_empty_or(&xy.x_title, "X");
     mv.variables[1].title = String::from("Group");
+    mv.variables[1].lock_role(VariableRole::Categorical);
     mv.variables[2].title = String::from("Replicate");
     mv.variables[3].title = String::from("Value");
 
-    for (out_r, (xc, gc, rc, yc, old_coord)) in records.into_iter().enumerate() {
-        if let Some(title) = xy.row_titles.get(old_coord.row) {
-            mv.row_titles[out_r].clone_from(title);
+    let mut acc = ConversionAcc::default();
+    let mut paired_y_rows = BTreeSet::new();
+    let mut counted_x_rows = BTreeSet::new();
+    let grp_labels: Vec<String> = xy.data_sets.iter().enumerate().map(|(c, ds)| non_empty_or(&ds.title, &default_column_label(c))).collect();
+    let mut out_r = 0_usize;
+
+    for r in 0..rows {
+        let x_cell = xy_materialized_x_cell(xy, r);
+        for (c, ds) in xy.data_sets.iter().enumerate() {
+            if let Some(row_cells) = ds.cells.get(r)
+                && row_cells.iter().take(n).any(is_occupied)
+            {
+                paired_y_rows.insert(r);
+                let grp_cell = Cell::text(grp_labels[c].clone());
+                for s in 0..n {
+                    let yc = row_cells.get(s).cloned().unwrap_or_default();
+                    if is_occupied(&x_cell) && counted_x_rows.insert(r) {
+                        acc.preserved += 1;
+                    }
+                    if let Some(title) = xy.row_titles.get(r)
+                        && let Some(dst) = mv.row_titles.get_mut(out_r)
+                    {
+                        dst.clone_from(title);
+                    }
+                    set_mv_cell(&mut mv, 0, out_r, x_cell.clone());
+                    set_mv_cell(&mut mv, 1, out_r, grp_cell.clone());
+                    #[allow(clippy::cast_precision_loss)]
+                    set_mv_cell(&mut mv, 2, out_r, Cell::number((s + 1) as f64));
+                    if is_occupied(&yc) {
+                        acc.preserved += 1;
+                        acc.map_coord(CellCoord::new(r, c, s), CellCoord::new(out_r, 3, 0));
+                    }
+                    set_mv_cell(&mut mv, 3, out_r, yc);
+                    out_r += 1;
+                }
+            }
         }
-        set_mv_cell(&mut mv, 0, out_r, xc);
-        set_mv_cell(&mut mv, 1, out_r, gc);
-        set_mv_cell(&mut mv, 2, out_r, rc);
-        if is_occupied(&yc) {
-            acc.preserved += 1;
-            acc.map_coord(old_coord, CellCoord::new(out_r, 3, 0));
-        }
-        set_mv_cell(&mut mv, 3, out_r, yc);
     }
+
+    // Preserve any occupied X-only row (including excluded GeneratedSequence X) not paired with Y.
+    for r in 0..rows {
+        if !paired_y_rows.contains(&r) && xy_row_has_unpaired_x_only(xy, r) {
+            let x_cell = xy_materialized_x_cell(xy, r);
+            acc.preserved += 1;
+            if let Some(title) = xy.row_titles.get(r)
+                && let Some(dst) = mv.row_titles.get_mut(out_r)
+            {
+                dst.clone_from(title);
+            }
+            set_mv_cell(&mut mv, 0, out_r, x_cell);
+            out_r += 1;
+        }
+    }
+
     mv.row_titles_expanded = xy.row_titles_expanded || has_non_empty_title(&mv.row_titles);
     for var in &mut mv.variables {
         var.refresh_inferred_role();
@@ -1470,7 +1615,7 @@ fn collect_xy_wide_mv_titles(xy: &XyTable, x_subs: usize, total_vars: usize) -> 
 fn populate_xy_mv_x_cells(xy: &XyTable, mv: &mut MultipleVariablesTable, rows: usize, x_subs: usize) -> usize {
     if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
         for r in 0..rows {
-            set_mv_cell(mv, 0, r, xy_x_value_at_row(xy, r).map_or_else(Cell::empty, Cell::number));
+            set_mv_cell(mv, 0, r, xy_materialized_x_cell(xy, r));
         }
         return 0;
     }
@@ -1563,7 +1708,8 @@ fn convert_mv_to_xy(mv: &MultipleVariablesTable) -> Result<BuiltArchetype, Trans
         populate_generated_or_titled_x(&mut xy, &row_titles_copy, part.rows);
         for (r, cell) in mv.variables[yc].cells.iter().enumerate().take(part.rows) {
             if let Some(slot) = xy.data_sets[0].cells.get_mut(r).and_then(|row| row.first_mut()) {
-                copy_mv_cell_to_xy_numeric(slot, cell, &mut acc);
+                *slot = cell.clone();
+                acc.record_preserved(cell);
             }
             acc.map_coord(CellCoord::new(r, yc, 0), CellCoord::new(r, 0, 0));
         }
@@ -1571,16 +1717,26 @@ fn convert_mv_to_xy(mv: &MultipleVariablesTable) -> Result<BuiltArchetype, Trans
     } else {
         let xc = part.num_cols[0];
         xy.x_title = mv.variables[xc].title.clone();
+        let mut text_in_x = 0_usize;
         for (r, cell) in mv.variables[xc].cells.iter().enumerate().take(part.rows) {
-            if let Some(slot) = xy.x_cells.get_mut(r).and_then(|row| row.first_mut()) {
-                copy_mv_cell_to_xy_numeric(slot, cell, &mut acc);
+            if let Some(slot) = xy.x_cells.get_mut(r).and_then(|row| row.first_mut())
+                && copy_mv_cell_to_xy_numeric(slot, cell, &mut acc)
+            {
+                text_in_x += 1;
             }
+        }
+        if text_in_x > 0 {
+            acc.warn_lossy(format!(
+                "X variable `{}` contains {text_in_x} non-numeric text cell(s) incompatible with numeric XY X coordinates",
+                mv.variables[xc].title
+            ));
         }
         for (yi, &yc) in part.num_cols.iter().skip(1).enumerate() {
             xy.data_sets[yi].title = mv.variables[yc].title.clone();
             for (r, cell) in mv.variables[yc].cells.iter().enumerate().take(part.rows) {
                 if let Some(slot) = xy.data_sets.get_mut(yi).and_then(|d| d.cells.get_mut(r)).and_then(|row| row.first_mut()) {
-                    copy_mv_cell_to_xy_numeric(slot, cell, &mut acc);
+                    *slot = cell.clone();
+                    acc.record_preserved(cell);
                 }
                 acc.map_coord(CellCoord::new(r, yc, 0), CellCoord::new(r, yi, 0));
             }
@@ -1590,15 +1746,17 @@ fn convert_mv_to_xy(mv: &MultipleVariablesTable) -> Result<BuiltArchetype, Trans
     Ok(acc.finish(TableArchetype::Xy(xy)))
 }
 
-fn copy_mv_cell_to_xy_numeric(dst: &mut Cell, src: &Cell, acc: &mut ConversionAcc) {
+fn copy_mv_cell_to_xy_numeric(dst: &mut Cell, src: &Cell, acc: &mut ConversionAcc) -> bool {
     match &src.value {
         CellValue::Text(s) if !s.trim().is_empty() => {
             acc.drop_cells(1);
             *dst = Cell { value: CellValue::Empty, excluded: src.excluded };
+            true
         }
         _ => {
             *dst = src.clone();
             acc.record_preserved(src);
+            false
         }
     }
 }
@@ -1620,6 +1778,7 @@ fn pivot_mv_grouped_xy(mv: &MultipleVariablesTable, part: &MvPartition) -> Resul
     let mut x_any_active: BTreeSet<usize> = BTreeSet::new();
     let mut x_any_excluded: BTreeSet<usize> = BTreeSet::new();
     let mut warned_rep_dropped = false;
+    let mut skipped_xy_cells = 0_usize;
 
     for r in 0..part.rows {
         let x_cell = mv.variables[x_col].cells.get(r);
@@ -1629,6 +1788,7 @@ fn pivot_mv_grouped_xy(mv: &MultipleVariablesTable, part: &MvPartition) -> Resul
         let (Some(xv), Some(gk)) = (x_cell.and_then(|c| c.value.finite_f64()), g_tok) else {
             let skipped = count_mv_row_occupied(mv, [x_col, group_col, y_col].into_iter().chain(rep_col), r);
             acc.drop_cells(skipped);
+            skipped_xy_cells += skipped;
             continue;
         };
 
@@ -1649,6 +1809,9 @@ fn pivot_mv_grouped_xy(mv: &MultipleVariablesTable, part: &MvPartition) -> Resul
         let rep_ord = extract_replicate_order(mv, rep_col, r, &mut acc, &mut warned_rep_dropped);
         buckets.entry((xi, gi)).or_default().push((rep_ord, r, (y_cell, x_excluded)));
     }
+    if skipped_xy_cells > 0 {
+        acc.warn(format!("Dropped {skipped_xy_cells} cell(s) from rows with missing/non-numeric X or excluded group labels"));
+    }
 
     if groups.is_empty() || x_keys.is_empty() {
         return Err(TransformError::InvalidInput { message: String::from("no valid (X, Group, Y) records to pivot into XY") });
@@ -1665,7 +1828,10 @@ fn pivot_mv_grouped_xy(mv: &MultipleVariablesTable, part: &MvPartition) -> Resul
     let n_cols = groups.len();
     validate_data_sets(n_cols)?;
     validate_rows(n_rows)?;
-    let (assigned_buckets, max_reps) = slot_buckets(buckets, rep_col.is_some());
+    let (assigned_buckets, max_reps, rep_collisions) = slot_buckets(buckets, rep_col.is_some())?;
+    if rep_collisions > 0 {
+        acc.warn(format!("{rep_collisions} duplicate replicate slot collision(s) shifted to subsequent subcolumns"));
+    }
     validate_subcolumns(max_reps)?;
     let group_titles = groups.into_levels();
     validate_title_slice(&group_titles)?;
@@ -1764,10 +1930,13 @@ fn unstack_mv_to_column(mv: &MultipleVariablesTable, grp_col: usize, val_col: us
     let mut buckets: Vec<Vec<(usize, Cell)>> = Vec::new();
     let mut acc = ConversionAcc::default();
 
+    let mut skipped_unstack_cells = 0_usize;
     for r in 0..rows {
         let cell = mv.variables[val_col].cells.get(r).cloned().unwrap_or_default();
         let Some(gk) = mv_cell_level_token(mv.variables[grp_col].cells.get(r)) else {
-            acc.drop_cells(count_mv_row_occupied(mv, [grp_col, val_col], r));
+            let skipped = count_mv_row_occupied(mv, [grp_col, val_col], r);
+            acc.drop_cells(skipped);
+            skipped_unstack_cells += skipped;
             continue;
         };
         acc.preserved += 1;
@@ -1776,6 +1945,9 @@ fn unstack_mv_to_column(mv: &MultipleVariablesTable, grp_col: usize, val_col: us
             buckets.resize_with(gi + 1, Vec::new);
         }
         buckets[gi].push((r, cell));
+    }
+    if skipped_unstack_cells > 0 {
+        acc.warn(format!("Dropped {skipped_unstack_cells} cell(s) from rows with missing or excluded group labels"));
     }
 
     if groups.is_empty() {
@@ -1825,6 +1997,7 @@ fn convert_grouped_to_xy(grp: &GroupedTable) -> Result<BuiltArchetype, Transform
     }
 
     DataSetSubcolumnUnpacker::new(&mut acc, rows).copy_direct(&grp.data_sets, &mut xy.data_sets, 0, 0, grp.subcolumn_mode.subcolumn_count());
+    warn_grouped_metadata_loss(grp, false, "XY", &mut acc);
     Ok(acc.finish(TableArchetype::Xy(xy)))
 }
 
@@ -1840,7 +2013,14 @@ fn convert_xy_to_grouped(xy: &XyTable) -> Result<BuiltArchetype, TransformError>
     grouped.row_numeric_spacing = Some(xy_rows.spacing);
 
     let mut acc = ConversionAcc::default();
-    if !matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
+    if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
+        let excluded_gen_x = count_excluded_generated_x(xy, rows);
+        if excluded_gen_x > 0 {
+            acc.drop_cells(excluded_gen_x);
+            acc.warn_lossy(format!("Dropped {excluded_gen_x} excluded generated X value(s) unsupported by Grouped row spacing"));
+        }
+    } else {
+        let mut dropped_x_primary = 0_usize;
         let mut dropped_x_subs = 0_usize;
         for x_row in xy.x_cells.iter().take(rows) {
             for (s, cell) in x_row.iter().enumerate() {
@@ -1853,9 +2033,14 @@ fn convert_xy_to_grouped(xy: &XyTable) -> Result<BuiltArchetype, TransformError>
                     acc.drop_cells(1);
                     if s > 0 {
                         dropped_x_subs += 1;
+                    } else {
+                        dropped_x_primary += 1;
                     }
                 }
             }
+        }
+        if dropped_x_primary > 0 {
+            acc.warn(format!("Dropped {dropped_x_primary} excluded or non-numeric X cell(s) unsupported by Grouped row spacing"));
         }
         if dropped_x_subs > 0 {
             acc.warn(format!("Dropped {dropped_x_subs} X error subcolumn cell(s) unsupported by Grouped row spacing"));
@@ -1877,7 +2062,14 @@ fn convert_column_to_contingency(col: &ColumnTable) -> Result<BuiltArchetype, Tr
 
 fn convert_grouped_to_contingency(grp: &GroupedTable) -> Result<BuiltArchetype, TransformError> {
     require_non_empty_datasets(&grp.data_sets, "Grouped table has no data columns")?;
-    build_contingency_from_datasets(&grp.data_sets, &grp.row_titles, Some(grp.row_factor_title.as_str()), Some(grp.column_factor_title.as_str()))
+    let mut built = build_contingency_from_datasets(
+        &grp.data_sets,
+        &grp.row_titles,
+        Some(grp.row_factor_title.as_str()),
+        Some(grp.column_factor_title.as_str()),
+    )?;
+    warn_grouped_metadata_loss(grp, true, "Contingency", &mut built.acc);
+    Ok(built)
 }
 
 fn build_contingency_from_datasets(
@@ -1910,7 +2102,19 @@ fn convert_xy_to_contingency(xy: &XyTable) -> Result<BuiltArchetype, TransformEr
     let xy_rows = build_xy_row_titles(xy, rows)?;
 
     let mut extra_acc = ConversionAcc::default();
-    if !matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
+    if xy_rows.x_used_as_label {
+        extra_acc.warn_lossy("XY X values converted to Contingency row labels (numeric X spacing dropped)");
+    } else if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) && rows > 0 {
+        extra_acc.warn_lossy("XY generated X sequence cannot be represented in Contingency tables and will be discarded");
+    }
+    if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
+        let excluded_gen_x = count_excluded_generated_x(xy, rows);
+        if excluded_gen_x > 0 {
+            extra_acc.drop_cells(excluded_gen_x);
+            extra_acc.warn_lossy(format!("Dropped {excluded_gen_x} excluded generated X value(s) unsupported by Contingency row labels"));
+        }
+    } else {
+        let mut x_primary_dropped = 0_usize;
         let mut x_extra = 0_usize;
         for (r, x_row) in xy.x_cells.iter().enumerate().take(rows) {
             for (s, cell) in x_row.iter().enumerate() {
@@ -1922,12 +2126,16 @@ fn convert_xy_to_contingency(xy: &XyTable) -> Result<BuiltArchetype, TransformEr
                     extra_acc.drop_cells(1);
                     if s > 0 {
                         x_extra += 1;
+                    } else {
+                        x_primary_dropped += 1;
                     }
                 }
             }
         }
-        if xy_rows.x_used_as_label {
-            extra_acc.warn_lossy("XY X values converted to Contingency row labels (numeric X spacing dropped)");
+        if x_primary_dropped > 0 {
+            extra_acc.warn(format!(
+                "Dropped {x_primary_dropped} X cell(s) (excluded, non-numeric, or overridden by row titles) unsupported by Contingency row labels"
+            ));
         }
         if x_extra > 0 {
             extra_acc.warn(format!("Dropped {x_extra} X subcolumn cell(s) unsupported by Contingency row labels"));
@@ -1979,6 +2187,9 @@ fn convert_mv_to_contingency(mv: &MultipleVariablesTable) -> Result<BuiltArchety
     Ok(acc.finish(TableArchetype::Contingency(cont)))
 }
 
+/// Largest exact-integer `f64` value (`2^53`) accepted and accumulated for contingency counts.
+const MAX_EXACT_F64_COUNT: u64 = 1_u64 << 53;
+
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
 fn validate_count_cell_value(cell: &Cell, row: usize, col: usize) -> Result<Option<u64>, TransformError> {
     if cell.excluded || cell.is_empty() {
@@ -1986,12 +2197,12 @@ fn validate_count_cell_value(cell: &Cell, row: usize, col: usize) -> Result<Opti
     }
     match &cell.value {
         CellValue::Empty => Ok(None),
-        CellValue::Number(v) if v.is_finite() && *v >= 0.0 && v.fract() == 0.0 && *v <= (u64::MAX as f64) => Ok(Some(*v as u64)),
+        CellValue::Number(v) if v.is_finite() && *v >= 0.0 && v.fract() == 0.0 && *v <= (MAX_EXACT_F64_COUNT as f64) => Ok(Some(*v as u64)),
         _ => Err(TransformError::Doc(DocError::InvalidCellValue {
             archetype: TableKind::Contingency,
             row,
             col,
-            reason: "contingency table cells must be non-negative integer counts",
+            reason: "contingency table cells must be exact non-negative integer counts <= 2^53",
         })),
     }
 }
@@ -2003,8 +2214,11 @@ fn crosstab_mv_to_contingency(mv: &MultipleVariablesTable, part: &MvPartition, c
     let mut col_levels = LevelInterner::default();
     let mut counts: BTreeMap<(usize, usize), u64> = BTreeMap::new();
     let mut acc = ConversionAcc::default();
-    acc.drop_mv_columns(mv, part.label_cols.iter().copied(), part.rows);
+    if acc.drop_mv_columns(mv, part.label_cols.iter().copied(), part.rows) {
+        acc.warn("Label variable(s) cannot be represented in Contingency cross-tabulation and will be dropped");
+    }
 
+    let mut skipped_crosstab_cells = 0_usize;
     for r in 0..part.rows {
         let row_active = mv_cell_level_token(mv.variables[row_fac_col].cells.get(r));
         let col_active = mv_cell_level_token(mv.variables[col_fac_col].cells.get(r));
@@ -2014,13 +2228,21 @@ fn crosstab_mv_to_contingency(mv: &MultipleVariablesTable, part: &MvPartition, c
         };
 
         let (Some(rk), Some(ck), Some(cnt)) = (row_active, col_active, increment) else {
-            acc.drop_cells(count_mv_row_occupied(mv, [row_fac_col, col_fac_col].into_iter().chain(count_col), r));
+            let skipped = count_mv_row_occupied(mv, [row_fac_col, col_fac_col].into_iter().chain(count_col), r);
+            acc.drop_cells(skipped);
+            skipped_crosstab_cells += skipped;
             continue;
         };
         let ri = row_levels.intern(rk);
         let ci = col_levels.intern(ck);
         let entry = counts.entry((ri, ci)).or_insert(0);
-        *entry = entry.saturating_add(cnt);
+        let next = entry.checked_add(cnt).filter(|&sum| sum <= MAX_EXACT_F64_COUNT).ok_or_else(|| TransformError::InvalidInput {
+            message: format!("cross-tabulated contingency count exceeds exact IEEE-754 integer limit ({MAX_EXACT_F64_COUNT})"),
+        })?;
+        *entry = next;
+    }
+    if skipped_crosstab_cells > 0 {
+        acc.warn(format!("Dropped {skipped_crosstab_cells} cell(s) from rows with missing or excluded factor/count values"));
     }
 
     if row_levels.is_empty() || col_levels.is_empty() {
@@ -2083,6 +2305,7 @@ fn fill_mv_label_row_titles(
     row_titles: &mut [String],
     acc: &mut ConversionAcc,
 ) -> Result<(), TransformError> {
+    let mut dropped_labels = 0_usize;
     for (r, slot) in row_titles.iter_mut().enumerate() {
         let cell = mv.variables[label_col].cells.get(r);
         if let Some(tok) = mv_cell_level_token(cell) {
@@ -2091,7 +2314,11 @@ fn fill_mv_label_row_titles(
             acc.preserved += 1;
         } else if cell.is_some_and(is_occupied) {
             acc.drop_cells(1);
+            dropped_labels += 1;
         }
+    }
+    if dropped_labels > 0 {
+        acc.warn(format!("Dropped {dropped_labels} excluded or non-representable label cell(s) when building row titles"));
     }
     Ok(())
 }
@@ -2180,20 +2407,29 @@ fn set_x_cell(xy: &mut XyTable, row: usize, subcol: usize, cell: Cell) {
     }
 }
 
+fn count_excluded_generated_x(xy: &XyTable, rows: usize) -> usize {
+    (0..rows).filter(|&r| xy.x_cells.get(r).and_then(|s| s.first()).is_some_and(|c| c.excluded)).count()
+}
+
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-fn xy_x_value_at_row(xy: &XyTable, row: usize) -> Option<f64> {
+fn xy_materialized_x_cell(xy: &XyTable, row: usize) -> Cell {
     match &xy.x_mode {
         XColumnMode::Numbers { .. } | XColumnMode::DateOrElapsedTime { .. } => {
-            xy.x_cells.get(row).and_then(|subs| subs.first()).and_then(Cell::active_number)
+            xy.x_cells.get(row).and_then(|subs| subs.first()).cloned().unwrap_or_default()
         }
         XColumnMode::GeneratedSequence { start, step, progression } => {
+            let excluded = xy.x_cells.get(row).and_then(|subs| subs.first()).is_some_and(|c| c.excluded);
             let val = match progression {
                 SequenceProgression::Arithmetic => *start + (row as f64) * *step,
                 SequenceProgression::Geometric => *start * step.powi(row.min(i32::MAX as usize) as i32),
             };
-            val.is_finite().then_some(val)
+            if val.is_finite() { Cell { value: CellValue::Number(val), excluded } } else { Cell { value: CellValue::Empty, excluded } }
         }
     }
+}
+
+fn xy_x_value_at_row(xy: &XyTable, row: usize) -> Option<f64> {
+    xy_materialized_x_cell(xy, row).active_number()
 }
 
 fn parse_numeric_row_spacing(levels: &[String]) -> Option<Vec<Option<f64>>> {
@@ -2213,4 +2449,290 @@ fn validate_title_slice(titles: &[String]) -> Result<(), TransformError> {
         validate_title(t)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod audit_w1_convert_tests {
+    use curvebook_doc::{
+        Cell, CellCoord, DataSheet, DocError, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkSource, LinkedDataRegion,
+        MultipleVariablesTable, SequenceProgression, SheetCellRange, SubcolumnMode, TableArchetype, ThreeWayColumnGrouping, VariableRole,
+        XColumnMode, XyTable,
+    };
+
+    use super::{TargetArchetypeKind, convert_datasheet_archetype, preview_datasheet_conversion};
+    use crate::error::TransformError;
+
+    #[test]
+    fn aud_04_11_generated_sequence_x_exclusions_preserved_or_flagged_lossy() {
+        let mut xy = XyTable::new_with_x_mode(
+            XColumnMode::GeneratedSequence { start: 0.0, step: 10.0, progression: SequenceProgression::Arithmetic },
+            SubcolumnMode::Single,
+            1,
+            3,
+        )
+        .unwrap();
+        xy.data_sets[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)], vec![Cell::number(3.0)]];
+        let mut sheet = DataSheet::new("xy-gen-excl", "GenSeq", TableArchetype::Xy(xy)).unwrap();
+        sheet.set_x_or_time_excluded(1, 0, true).unwrap();
+
+        // Xy -> Column preserves excluded=true on row 1 X cell.
+        let (col_sheet, col_prev) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::Column, false).unwrap();
+        assert!(!col_prev.lossy);
+        assert!(col_sheet.cell(CellCoord::new(1, 0, 0)).unwrap().excluded);
+
+        // Xy -> MultipleVariables preserves excluded=true on row 1 X cell.
+        let (mv_sheet, mv_prev) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::MultipleVariables, false).unwrap();
+        assert!(!mv_prev.lossy);
+        assert!(mv_sheet.cell(CellCoord::new(1, 0, 0)).unwrap().excluded);
+
+        // Xy -> Grouped and Xy -> Contingency cannot retain excluded X flags: must flag lossy & refuse allow_lossy=false.
+        for target in [TargetArchetypeKind::Grouped, TargetArchetypeKind::Contingency] {
+            let prev = preview_datasheet_conversion(&sheet, target).unwrap();
+            assert!(prev.lossy && prev.dropped_cells >= 1 && !prev.warnings.is_empty(), "{target:?}: {prev:?}");
+            assert!(matches!(convert_datasheet_archetype(&sheet, target, false), Err(TransformError::InvalidSpec { .. })));
+        }
+    }
+
+    #[test]
+    fn aud_04_29_crosstab_rejects_above_2_to_53_and_sum_overflow() {
+        let mut mv = MultipleVariablesTable::new(3, 2).unwrap();
+        mv.variables[0].title = String::from("RowFac");
+        mv.variables[0].lock_role(VariableRole::Categorical);
+        mv.variables[0].cells = vec![Cell::text("A"), Cell::text("A")];
+        mv.variables[1].title = String::from("ColFac");
+        mv.variables[1].lock_role(VariableRole::Categorical);
+        mv.variables[1].cells = vec![Cell::text("X"), Cell::text("X")];
+        mv.variables[2].title = String::from("Count");
+        mv.variables[2].cells = vec![Cell::number(9_007_199_254_740_992.0), Cell::number(1.0)];
+        let s_sum = DataSheet::new("mv-sum-ovf", "SumOvf", TableArchetype::MultipleVariables(mv.clone())).unwrap();
+        assert!(matches!(convert_datasheet_archetype(&s_sum, TargetArchetypeKind::Contingency, true), Err(TransformError::InvalidInput { .. })));
+
+        // 2^64 must also be rejected cleanly as invalid count cell value.
+        mv.variables[2].cells = vec![Cell::number(18_446_744_073_709_551_616.0), Cell::number(0.0)];
+        let s_big = DataSheet::new("mv-big-cnt", "BigCnt", TableArchetype::MultipleVariables(mv)).unwrap();
+        assert!(matches!(
+            convert_datasheet_archetype(&s_big, TargetArchetypeKind::Contingency, true),
+            Err(TransformError::Doc(DocError::InvalidCellValue { .. }))
+        ));
+    }
+
+    #[test]
+    fn aud_04_33_xy_reps_blank_title_uses_fallback_and_locks_group_categorical() {
+        let mut xy =
+            XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::RawReplicates(2), 1, 2).unwrap();
+        xy.data_sets[0].title = String::new();
+        xy.x_cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)]];
+        xy.data_sets[0].cells = vec![vec![Cell::number(10.0), Cell::number(11.0)], vec![Cell::number(20.0), Cell::number(21.0)]];
+        let s = DataSheet::new("xy-blank", "BlankTitle", TableArchetype::Xy(xy)).unwrap();
+        let (mv_s, prev) = convert_datasheet_archetype(&s, TargetArchetypeKind::MultipleVariables, false).unwrap();
+        assert!(!prev.lossy);
+        let TableArchetype::MultipleVariables(mv) = &mv_s.archetype else { panic!("expected MV") };
+        assert_eq!((mv.variables[1].role, mv.variables[1].role_inferred), (VariableRole::Categorical, false));
+        assert!(mv.variables[1].cells.iter().all(|c| c.active_text() == Some("A")));
+
+        let (xy_rt, rt_prev) = convert_datasheet_archetype(&mv_s, TargetArchetypeKind::Xy, false).unwrap();
+        assert!(!rt_prev.lossy);
+        let TableArchetype::Xy(rt) = &xy_rt.archetype else { panic!("expected Xy") };
+        assert_eq!(rt.active_xy_pairs(0), vec![(1.0, 10.0), (1.0, 11.0), (2.0, 20.0), (2.0, 21.0)]);
+    }
+
+    #[test]
+    fn aud_04_34_grouped_three_way_and_spacing_loss_flagged_lossy() {
+        let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(1), 4, 2).unwrap();
+        grp.row_titles = vec![String::from("Low"), String::from("High")];
+        grp.row_numeric_spacing = Some(vec![Some(1.0), Some(10.0)]);
+        grp.three_way_grouping = Some(ThreeWayColumnGrouping {
+            factor_1_name: String::from("Drug"),
+            factor_1_levels: [String::from("Vehicle"), String::from("Active")],
+            factor_2_name: String::from("Sex"),
+            factor_2_levels: [String::from("F"), String::from("M")],
+        });
+        for c in 0..4 {
+            grp.data_sets[c].cells = vec![vec![Cell::number(5.0)], vec![Cell::number(6.0)]];
+        }
+        let s = DataSheet::new("grp-3way", "3Way", TableArchetype::Grouped(grp)).unwrap();
+        for target in [TargetArchetypeKind::Column, TargetArchetypeKind::Xy, TargetArchetypeKind::MultipleVariables, TargetArchetypeKind::Contingency]
+        {
+            let prev = preview_datasheet_conversion(&s, target).unwrap();
+            assert!(prev.lossy && !prev.warnings.is_empty(), "{target:?}: {prev:?}");
+            assert!(matches!(convert_datasheet_archetype(&s, target, false), Err(TransformError::InvalidSpec { .. })));
+        }
+    }
+
+    #[test]
+    fn aud_04_35_and_44_mv_xy_text_y_consistency_warnings_and_duplicate_rep_ordering() {
+        // AUD-04-35 part 1: direct MV -> XY preserves text in Y (matching Column/Grouped/pivoted -> XY).
+        let mut mv = MultipleVariablesTable::new(2, 2).unwrap();
+        mv.variables[0].title = String::from("Dose");
+        mv.variables[0].cells = vec![Cell::number(1.0), Cell::number(2.0)];
+        mv.variables[1].title = String::from("Response");
+        mv.variables[1].lock_role(VariableRole::Continuous);
+        mv.variables[1].cells = vec![Cell::number(10.0), Cell::text("BLQ")];
+        let s = DataSheet::new("mv-blq", "BLQ", TableArchetype::MultipleVariables(mv)).unwrap();
+        let (xy_s, prev) = convert_datasheet_archetype(&s, TargetArchetypeKind::Xy, false).unwrap();
+        assert!(!prev.lossy);
+        let TableArchetype::Xy(xy) = &xy_s.archetype else { panic!("expected Xy") };
+        assert_eq!(xy.data_sets[0].cells[1][0].active_text(), Some("BLQ"));
+
+        // AUD-04-35 part 3: GeneratedSequence -> Contingency marks lossy=true.
+        let mut xy_gen = XyTable::new_with_x_mode(
+            XColumnMode::GeneratedSequence { start: 1.0, step: 2.0, progression: SequenceProgression::Arithmetic },
+            SubcolumnMode::Single,
+            1,
+            2,
+        )
+        .unwrap();
+        xy_gen.data_sets[0].cells = vec![vec![Cell::number(4.0)], vec![Cell::number(9.0)]];
+        let s_gen = DataSheet::new("xy-gen-cnt", "GenCnt", TableArchetype::Xy(xy_gen)).unwrap();
+        let gen_prev = preview_datasheet_conversion(&s_gen, TargetArchetypeKind::Contingency).unwrap();
+        assert!(gen_prev.lossy && !gen_prev.warnings.is_empty());
+
+        // AUD-04-44 part 2: duplicate Replicate=2 rows place into Y2 then Y3 (never reordering into Y1 ahead of Y2).
+        let mut mv_dup = MultipleVariablesTable::new(4, 2).unwrap();
+        mv_dup.variables[0].title = String::from("Dose");
+        mv_dup.variables[0].lock_role(VariableRole::Categorical);
+        mv_dup.variables[0].cells = vec![Cell::text("1"), Cell::text("1")];
+        mv_dup.variables[1].title = String::from("Arm");
+        mv_dup.variables[1].lock_role(VariableRole::Categorical);
+        mv_dup.variables[1].cells = vec![Cell::text("A"), Cell::text("A")];
+        mv_dup.variables[2].title = String::from("Replicate");
+        mv_dup.variables[2].cells = vec![Cell::number(2.0), Cell::number(2.0)];
+        mv_dup.variables[3].title = String::from("Value");
+        mv_dup.variables[3].cells = vec![Cell::number(100.0), Cell::number(200.0)];
+        let s_dup = DataSheet::new("mv-dup-rep", "DupRep", TableArchetype::MultipleVariables(mv_dup)).unwrap();
+        let (grp_dup, dup_prev) = convert_datasheet_archetype(&s_dup, TargetArchetypeKind::Grouped, false).unwrap();
+        let TableArchetype::Grouped(g) = &grp_dup.archetype else { panic!("expected Grouped") };
+        assert!(g.data_sets[0].cells[0][0].is_empty(), "Y1 must remain empty");
+        assert_eq!(g.data_sets[0].cells[0][1].active_number(), Some(100.0));
+        assert_eq!(g.data_sets[0].cells[0][2].active_number(), Some(200.0));
+        assert!(dup_prev.warnings.iter().any(|w| w.contains("collision")));
+
+        // AUD-04-44 part 3: linked_regions emit an informational warning without forcing lossy.
+        let mut s_linked = s_dup;
+        s_linked.linked_regions.push(LinkedDataRegion {
+            id: String::from("l1"),
+            spec: ImportLinkSpec { source: LinkSource::Clipboard, filter: ImportFilterSpec::default(), placement: ImportPlacementSpec::default() },
+            target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
+            provenance_summary: String::from("test"),
+        });
+        let lnk_prev = preview_datasheet_conversion(&s_linked, TargetArchetypeKind::Grouped).unwrap();
+        assert!(!lnk_prev.lossy);
+        assert!(lnk_prev.warnings.iter().any(|w| w.contains("linked data region")));
+    }
+
+    #[test]
+    fn aud_04_22_grouped_and_xy_to_mv_reject_over_max_rows_before_allocating_tuples() {
+        // 500 rows x 10 cols x 250 reps = 1,250,000 output rows > MAX_ROWS (1,000,000) while valid input table.
+        let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(250), 10, 500).unwrap();
+        for ds in &mut grp.data_sets {
+            for r in 0..500 {
+                ds.cells[r][0] = Cell::number(1.0);
+            }
+        }
+        let s_grp = DataSheet::new("grp-big-mv", "BigGrp", TableArchetype::Grouped(grp)).unwrap();
+        assert!(matches!(
+            preview_datasheet_conversion(&s_grp, TargetArchetypeKind::MultipleVariables),
+            Err(TransformError::Doc(DocError::TooManyRows { .. }))
+        ));
+
+        let mut xy =
+            XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::RawReplicates(250), 10, 500)
+                .unwrap();
+        for ds in &mut xy.data_sets {
+            for r in 0..500 {
+                ds.cells[r][0] = Cell::number(1.0);
+            }
+        }
+        let s_xy = DataSheet::new("xy-big-mv", "BigXy", TableArchetype::Xy(xy)).unwrap();
+        assert!(matches!(
+            preview_datasheet_conversion(&s_xy, TargetArchetypeKind::MultipleVariables),
+            Err(TransformError::Doc(DocError::TooManyRows { .. }))
+        ));
+    }
+
+    #[test]
+    fn aud_04_35_all_drop_paths_emit_non_empty_warnings() {
+        // Unstack MV -> Column with missing group token drops cell and emits warning.
+        let mut mv = MultipleVariablesTable::new(2, 2).unwrap();
+        mv.variables[0].title = String::from("Group");
+        mv.variables[0].lock_role(VariableRole::Categorical);
+        mv.variables[0].cells = vec![Cell::text("Ctrl"), Cell::empty()];
+        mv.variables[1].title = String::from("Val");
+        mv.variables[1].cells = vec![Cell::number(1.0), Cell::number(2.0)];
+        let s = DataSheet::new("mv-drop-warn", "DropWarn", TableArchetype::MultipleVariables(mv)).unwrap();
+        let prev = preview_datasheet_conversion(&s, TargetArchetypeKind::Column).unwrap();
+        assert!(prev.lossy && prev.dropped_cells >= 1 && !prev.warnings.is_empty());
+
+        // Direct MV -> XY with non-numeric text in X drops text and emits warning.
+        let mut mv_xy = MultipleVariablesTable::new(2, 2).unwrap();
+        mv_xy.variables[0].title = String::from("X");
+        mv_xy.variables[0].lock_role(VariableRole::Continuous);
+        mv_xy.variables[0].cells = vec![Cell::number(1.0), Cell::text("bad_x")];
+        mv_xy.variables[1].title = String::from("Y");
+        mv_xy.variables[1].cells = vec![Cell::number(10.0), Cell::number(20.0)];
+        let s_xy = DataSheet::new("mv-xy-warn", "XyWarn", TableArchetype::MultipleVariables(mv_xy)).unwrap();
+        let prev_xy = preview_datasheet_conversion(&s_xy, TargetArchetypeKind::Xy).unwrap();
+        assert!(prev_xy.lossy && prev_xy.dropped_cells == 1 && !prev_xy.warnings.is_empty());
+
+        // GeneratedSequence -> Contingency with explicit row titles on every row still flags lossy=true.
+        let mut xy_gen_titled = XyTable::new_with_x_mode(
+            XColumnMode::GeneratedSequence { start: 1.0, step: 2.0, progression: SequenceProgression::Arithmetic },
+            SubcolumnMode::Single,
+            1,
+            2,
+        )
+        .unwrap();
+        xy_gen_titled.row_titles = vec![String::from("R1"), String::from("R2")];
+        xy_gen_titled.data_sets[0].cells = vec![vec![Cell::number(4.0)], vec![Cell::number(9.0)]];
+        let s_gen_titled = DataSheet::new("xy-gen-titled", "GenTitled", TableArchetype::Xy(xy_gen_titled)).unwrap();
+        let gen_titled_prev = preview_datasheet_conversion(&s_gen_titled, TargetArchetypeKind::Contingency).unwrap();
+        assert!(gen_titled_prev.lossy && !gen_titled_prev.warnings.is_empty());
+    }
+
+    #[test]
+    fn aud_04_11_and_22_overflowing_excluded_generated_sequence_x_with_replicates_no_panic() {
+        let mut xy = XyTable::new_with_x_mode(
+            XColumnMode::GeneratedSequence { start: 1e308, step: 10.0, progression: SequenceProgression::Geometric },
+            SubcolumnMode::RawReplicates(2),
+            1,
+            3,
+        )
+        .unwrap();
+        xy.row_titles = vec![String::from("R0"), String::from("R1"), String::from("R2")];
+        // Row 0: finite X + occupied Y; Row 1: overflowing excluded X + occupied Y; Row 2: overflowing excluded X-only.
+        xy.data_sets[0].cells[0] = vec![Cell::number(1.0), Cell::number(2.0)];
+        xy.data_sets[0].cells[1] = vec![Cell::number(10.0), Cell::number(20.0)];
+        let mut sheet = DataSheet::new("xy-gen-ovf", "GenOvf", TableArchetype::Xy(xy)).unwrap();
+        sheet.set_x_or_time_excluded(1, 0, true).unwrap();
+        sheet.set_x_or_time_excluded(2, 0, true).unwrap();
+
+        let (mv_sheet, prev) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::MultipleVariables, false).unwrap();
+        assert!(!prev.lossy);
+        let TableArchetype::MultipleVariables(mv) = &mv_sheet.archetype else { panic!("expected MV") };
+        // 2 paired rows * 2 reps + 1 unpaired excluded X-only row = 5 rows.
+        assert_eq!(mv.row_count(), 5);
+        assert!(mv.variables[0].cells[2].excluded, "overflowing generated X on paired row must keep excluded=true");
+        assert!(mv.variables[0].cells[3].excluded);
+        assert!(mv.variables[0].cells[4].excluded, "unpaired overflowing excluded X row must keep excluded=true");
+        assert_eq!(mv.row_titles[4], "R2");
+    }
+
+    #[test]
+    fn aud_04_44_duplicate_replicate_collisions_fail_fast_at_max_subcolumns() {
+        let n = curvebook_doc::MAX_SUBCOLUMNS + 2_000;
+        let mut mv = MultipleVariablesTable::new(4, n).unwrap();
+        mv.variables[0].title = String::from("Dose");
+        mv.variables[0].lock_role(VariableRole::Categorical);
+        mv.variables[0].cells = vec![Cell::text("1"); n];
+        mv.variables[1].title = String::from("Arm");
+        mv.variables[1].lock_role(VariableRole::Categorical);
+        mv.variables[1].cells = vec![Cell::text("A"); n];
+        mv.variables[2].title = String::from("Replicate");
+        mv.variables[2].cells = vec![Cell::number(1.0); n];
+        mv.variables[3].title = String::from("Value");
+        mv.variables[3].cells = vec![Cell::number(5.0); n];
+        let s = DataSheet::new("mv-dup-ovf", "DupOvf", TableArchetype::MultipleVariables(mv)).unwrap();
+        let err = preview_datasheet_conversion(&s, TargetArchetypeKind::Grouped).unwrap_err();
+        assert!(matches!(err, TransformError::Doc(DocError::TooManySubcolumns { .. })), "got {err:?}");
+    }
 }

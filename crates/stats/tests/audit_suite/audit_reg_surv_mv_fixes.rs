@@ -638,7 +638,7 @@ fn audit_84_85_101_103_logistic_poisson_and_singular_fisher() {
 fn audit_102_117_passing_bablok_cusum_rows_replicates_vertical_and_alpha() {
     let conf = ConfidenceLevel::DEFAULT_95;
 
-    // 1. CUSUM null rejection calibration (#102).
+    // 1. CUSUM exact Passing & Bablok (1983, §3.3) H / sqrt(L + l) normalization & Type I error control (#102, AUD-05-03).
     let mut rng = DeterministicRng::from_seed(0x102_BABC);
     for (n, trials) in [(30_usize, 400_usize), (100_usize, 250_usize)] {
         let mut rej = 0_usize;
@@ -649,12 +649,18 @@ fn audit_102_117_passing_bablok_cusum_rows_replicates_vertical_and_alpha() {
                 xs.push(x + 0.25 * rng.standard_normal());
                 ys.push(1.5 + 1.2 * x + 0.25 * rng.standard_normal());
             }
-            if passing_bablok_regression(&xs, &ys, conf).unwrap().cusum_p_value < 0.05 {
+            let pb = passing_bablok_regression(&xs, &ys, conf).unwrap();
+            let scale_y = ys.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+            let scale_x = xs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+            let tol = 1e-12 * (1.0 + scale_y + (pb.slope * scale_x).abs());
+            let l_plus_l = pb.residuals.iter().filter(|&&r| r.abs() > tol).count();
+            assert_close(pb.cusum_statistic, pb.cusum_h / (l_plus_l as f64).sqrt(), 1e-12, "PB CUSUM H/sqrt(L+l)");
+            if pb.cusum_p_value < 0.05 {
                 rej += 1;
             }
         }
         let rate = rej as f64 / trials as f64;
-        assert!((0.025..=0.085).contains(&rate), "PB CUSUM n={n} rate={rate:.3}");
+        assert!(rate <= 0.05, "PB CUSUM n={n} Type I error rate={rate:.3} exceeded nominal 0.05");
     }
 
     // 2. Source row indices across Column, MV, and XY (#117) + XY RawReplicates & overflow sanitization (FA-SEC06-07).
@@ -697,10 +703,10 @@ fn audit_102_117_passing_bablok_cusum_rows_replicates_vertical_and_alpha() {
         Err(StatsError::Math(MathError::DomainError { name: "non_finite_curve_point", .. }))
     ));
 
-    // 3. Vertical slopes +/-inf included in N and K + X<->Y equivariance (RV-34) + linearity alpha (FA-SEC06-11).
+    // 3. Vertical slopes +inf included in N (order-invariant K; AUD-05-34) + X<->Y equivariance (RV-34) + linearity alpha (FA-SEC06-11).
     let pb_v = passing_bablok_regression(&[1.0, 2.0, 2.0, 4.0, 6.0], &[2.0, 5.0, 20.0, 8.0, 11.0], conf).unwrap();
     let pb_s = passing_bablok_regression(&[1.0, 2.0, 2.0, 4.0, 6.0], &[2.0, 20.0, 5.0, 8.0, 11.0], conf).unwrap();
-    assert_eq!((pb_v.valid_slopes, pb_v.k_offset, pb_s.valid_slopes, pb_s.k_offset), (10, 2, 10, 3));
+    assert_eq!((pb_v.valid_slopes, pb_v.k_offset, pb_s.valid_slopes, pb_s.k_offset), (10, 2, 10, 2));
     assert_close(pb_v.slope, 2.5, 1e-12, "PB vertical slope");
     assert_close(pb_s.slope, pb_v.slope, 1e-12, "PB swap slope");
     assert_eq!(passing_bablok_regression(&[1.0, 2.0, 2.0, 4.0, 6.0], &[2.0, 5.0, 5.0, 8.0, 11.0], conf).unwrap().valid_slopes, 9);
@@ -708,10 +714,10 @@ fn audit_102_117_passing_bablok_cusum_rows_replicates_vertical_and_alpha() {
     let (pxy, pyx) = (passing_bablok_regression(&hx, &hy, conf).unwrap(), passing_bablok_regression(&hy, &hx, conf).unwrap());
     assert_close(pyx.slope, 1.0 / pxy.slope, 1e-12, "PB X<->Y slope");
     assert_close(pyx.intercept, -pxy.intercept / pxy.slope, 1e-11, "PB X<->Y intercept");
-    let xs20: Vec<f64> = (1..=20).map(f64::from).collect();
-    let ys20: Vec<f64> = xs20.iter().map(|&x| 0.25 * x * x + 0.5 * x + 1.0).collect();
-    assert!(!passing_bablok_regression(&xs20, &ys20, conf).unwrap().linearity_passed);
-    assert!(passing_bablok_regression(&xs20, &ys20, ConfidenceLevel::PERCENT_99).unwrap().linearity_passed);
+    let xs36: Vec<f64> = (1..=36).map(f64::from).collect();
+    let ys36: Vec<f64> = xs36.iter().map(|&x| 0.25 * x * x + 0.5 * x + 1.0).collect();
+    assert!(!passing_bablok_regression(&xs36, &ys36, conf).unwrap().linearity_passed);
+    assert!(passing_bablok_regression(&xs36, &ys36, ConfidenceLevel::PERCENT_99).unwrap().linearity_passed);
 }
 
 #[test]

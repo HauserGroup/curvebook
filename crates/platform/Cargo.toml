@@ -12,4 +12,5 @@ description = "CurveBook platform abstractions: atomic file writes, bounded subp
 workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom = { version = "0.4", default-features = false }
 serde_json = { workspace = true }

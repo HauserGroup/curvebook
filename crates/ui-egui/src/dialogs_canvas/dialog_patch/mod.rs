@@ -66,25 +66,50 @@ fn map_opt_str<'a>(fields: &'a Map<String, Value>, keys: &[&str]) -> Result<Opti
 
 /// Validate pre-summarized table restrictions on `AnalyzeSheet` / `EditAnalysisParameters` patches.
 pub(crate) fn validate_pre_summarized_patch(doc: &ProjectDocument, src: Option<&SheetId>, fields: &Map<String, Value>) -> Result<(), EngineError> {
-    let wants_paired = map_opt_bool(fields, &["paired_or_matched", "edit.paired_or_matched", "matched"])? == Some(true);
-    let two_method_norm = map_opt_str(fields, &["two_group_method", "edit.two_group.method", "analyze.two_group.method"])?
-        .map(|s| s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect::<String>());
+    let norm = |s: &str| s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect::<String>();
+    let wants_paired_sign = map_opt_bool(fields, &["paired_sign_test", "edit.two_group.paired_sign_test"])? == Some(true);
+    let wants_paired = map_opt_bool(fields, &["paired_or_matched", "edit.paired_or_matched", "matched"])? == Some(true) || wants_paired_sign;
+    let two_method_norm = map_opt_str(fields, &["two_group_method", "edit.two_group.method", "analyze.two_group.method"])?.map(norm);
+    let anova_method_norm = map_opt_str(fields, &["anova_method", "one_way_method", "edit.anova_method", "edit.one_way_method"])?.map(norm);
+    let rm_design_norm =
+        map_opt_str(fields, &["repeated_measures", "edit.factorial.repeated_measures", "analyze.factorial.repeated_measures"])?.map(norm);
     let wants_paired_method = two_method_norm
         .as_deref()
-        .is_some_and(|m| matches!(m, "pairedt" | "ratiopairedt" | "wilcoxon" | "wilcoxonsignedrank" | "pairedsigntest" | "signtest"));
+        .is_some_and(|m| matches!(m, "pairedt" | "ratiopairedt" | "wilcoxon" | "wilcoxonsignedrank" | "pairedsigntest" | "signtest" | "pairedsign"))
+        || anova_method_norm.as_deref().is_some_and(|m| matches!(m, "friedman" | "rm" | "repeatedmeasures"))
+        || rm_design_norm.as_deref().is_some_and(|m| !matches!(m, "none" | "nomatching"));
     if wants_paired || wants_paired_method {
         let gate = r1_paired_or_matched_allowed(doc, src);
         if !gate.enabled {
             return Err(disabled_err(gate.disabled_reason.unwrap_or_else(|| String::from("Matched / Repeated Measures requires equal N >= 2"))));
         }
+        if let Some(id) = src
+            && let Some(ds) = doc.data_sheet(id)
+            && let curvebook_doc::TableArchetype::Grouped(g) = &ds.archetype
+            && g.subcolumn_mode.is_pre_summarized()
+        {
+            return Err(disabled_err("Repeated Measures is disabled for pre-summarized Grouped tables."));
+        }
     }
     let wants_nonparam = map_opt_bool(fields, &["assume_gaussian", "edit.assume_gaussian"])? == Some(false)
+        || wants_paired_sign
         || two_method_norm.as_deref().is_some_and(|m| {
             matches!(
                 m,
-                "mannwhitney" | "mannwhitneyu" | "wilcoxon" | "wilcoxonsignedrank" | "pairedsigntest" | "signtest" | "ks" | "kolmogorovsmirnov"
+                "mannwhitney"
+                    | "mannwhitneyu"
+                    | "mw"
+                    | "wilcoxon"
+                    | "wilcoxonsignedrank"
+                    | "onesamplewilcoxon"
+                    | "pairedsigntest"
+                    | "signtest"
+                    | "pairedsign"
+                    | "ks"
+                    | "kolmogorovsmirnov"
             )
-        });
+        })
+        || anova_method_norm.as_deref().is_some_and(|m| matches!(m, "kruskal" | "kruskalwallis" | "friedman"));
     if wants_nonparam {
         let gate = r2_assume_gaussian_allowed(doc, src);
         if !gate.enabled {
@@ -100,10 +125,9 @@ fn is_bad_input_patch_err(msg: &str) -> bool {
     msg.starts_with("unknown ")
         || msg.starts_with("unsupported ")
         || msg.starts_with("conflicting ")
-        || msg.starts_with("invalid parameter ")
-        || msg.starts_with("invalid power wizard stage index")
-        || msg.starts_with("invalid dialog patch")
+        || msg.starts_with("invalid ")
         || (msg.starts_with('`') && msg.contains(" must be "))
+        || msg.contains(" must lie ")
         || msg.contains("must specify")
         || msg.contains("cannot be empty")
 }
@@ -163,15 +187,7 @@ pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) 
                                 && let Some(target_id) = working.selected_target_id.as_ref()
                                 && let Some(ds) = app.document().data_sheet(target_id)
                             {
-                                let total = match &ds.archetype {
-                                    curvebook_doc::TableArchetype::Column(t) => t.data_sets.len(),
-                                    curvebook_doc::TableArchetype::Grouped(t) => t.data_sets.len(),
-                                    curvebook_doc::TableArchetype::Xy(t) => t.data_sets.len(),
-                                    curvebook_doc::TableArchetype::Contingency(t) => t.data_sets.len(),
-                                    curvebook_doc::TableArchetype::Survival(t) => t.cohorts.len(),
-                                    curvebook_doc::TableArchetype::MultipleVariables(t) => t.variables.len(),
-                                    _ => 0,
-                                };
+                                let total = ds.archetype.column_count();
                                 working.selected_data_sets = (0..total).collect();
                             }
                             if enabled {
@@ -226,17 +242,35 @@ pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) 
             let mut target_id = app.canvas_dialogs.analyze.duplicate_target_id.clone();
             for (key, val) in fields {
                 match key.as_str() {
-                    "choice" | "duplicate.choice" => {
+                    "choice" | "duplicate.choice" | "duplicate_choice" => {
                         let s = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
-                        if s.eq_ignore_ascii_case("create_new") {
-                            choice = crate::dialogs_canvas::DuplicateChoice::CreateNew;
-                        } else if s.eq_ignore_ascii_case("modify_existing") {
-                            choice = crate::dialogs_canvas::DuplicateChoice::ModifyExisting;
-                            if target_id.is_none() {
-                                target_id.clone_from(&first_existing);
+                        match value_parsers::norm_key(s).as_str() {
+                            "createnew" | "create" | "new" => {
+                                choice = crate::dialogs_canvas::DuplicateChoice::CreateNew;
                             }
+                            "modifyexisting" | "modify" | "existing" | "update" | "replace" | "overwrite" => {
+                                choice = crate::dialogs_canvas::DuplicateChoice::ModifyExisting;
+                                if target_id.is_none() {
+                                    target_id.clone_from(&first_existing);
+                                }
+                            }
+                            _ => {
+                                return Err(bad_input(format!(
+                                    "unsupported duplicate analysis choice `{s}`; expected create_new or modify_existing"
+                                )));
+                            }
+                        }
+                    }
+                    "duplicate_target_id" | "target_id" | "result_sheet_id" | "duplicate.target_id" => {
+                        if val.is_null() {
+                            target_id = None;
                         } else {
-                            return Err(bad_input(format!("unsupported duplicate analysis choice `{s}`; expected create_new or modify_existing")));
+                            let raw = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string or null")))?.trim();
+                            let parsed = SheetId::try_new(raw).map_err(|e| bad_input(e.to_string()))?;
+                            if !existing_result_ids.is_empty() && !existing_result_ids.contains(&parsed) {
+                                return Err(bad_input(format!("invalid `{key}`: `{raw}` is not one of the matching existing result sheets")));
+                            }
+                            target_id = Some(parsed.as_str().to_owned());
                         }
                     }
                     other => return Err(bad_input(format!("unknown DuplicateAnalysisPrompt field `{other}`"))),

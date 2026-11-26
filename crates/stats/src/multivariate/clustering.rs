@@ -202,12 +202,17 @@ fn repair_empty_clusters(rows: &[Vec<f64>], assignments: &mut [usize], centroids
 /// centroids, total within-cluster sum of squares (WCSS), and mean silhouette score.
 ///
 /// `D^2` seeding of Arthur & Vassilvitskii (2007), Lloyd (1982) assignment/update iterations, and
-/// the mean silhouette of Rousseeuw (1987).
+/// the mean silhouette of Rousseeuw (1987). Enforces `rows.len() <= MAX_CLUSTERING_N` consistently
+/// with [`kmeans_pp_with_distance`] and [`pairwise_distance_matrix`] so silhouette evaluation never
+/// silently falls back to `0.0`.
 pub fn kmeans_pp(rows: &[Vec<f64>], k: usize, seed: u64) -> Result<KMeansResult, StatsError> {
     let n = rows.len();
     let d = rows.first().map_or(0, Vec::len);
     if n < 2 || d == 0 || k == 0 || k > n {
         return Err(StatsError::InvalidParameter { name: "k_means_k", value: k as f64 });
+    }
+    if n > MAX_CLUSTERING_N {
+        return Err(StatsError::InvalidParameter { name: "clustering_n", value: n as f64 });
     }
     for r in rows {
         if r.len() != d {
@@ -255,7 +260,7 @@ pub fn kmeans_pp(rows: &[Vec<f64>], k: usize, seed: u64) -> Result<KMeansResult,
     for (r, &c_idx) in rows.iter().zip(assignments.iter()) {
         wcss += sq_dist(r, &centroids[c_idx]);
     }
-    let mean_silhouette = compute_mean_silhouette(rows, &assignments, k);
+    let mean_silhouette = compute_mean_silhouette(rows, &assignments, k)?;
 
     Ok(KMeansResult { k, assignments, centroids, wcss, mean_silhouette })
 }
@@ -320,7 +325,7 @@ pub(super) fn pairwise_distance_unchecked(a: &[f64], b: &[f64], metric: ClusterD
     }
 }
 
-/// Maximum observation count accepted by hierarchical clustering and pairwise distance matrices.
+/// Maximum observation count accepted by *k*-means++, hierarchical clustering, and pairwise distance matrices.
 pub const MAX_CLUSTERING_N: usize = 2_000;
 pub(super) const MAX_CLUSTER_MATRIX_TAB_N: usize = 500;
 pub(super) const MAX_CLUSTER_K_SWEEP: usize = 50;
@@ -449,11 +454,9 @@ pub(super) fn kmeans_pp_from_dist(
     Ok(KMeansResult { k, assignments, centroids, wcss, mean_silhouette })
 }
 
-fn compute_mean_silhouette(rows: &[Vec<f64>], assignments: &[usize], k: usize) -> f64 {
-    let Ok(dist_mat) = pairwise_distance_matrix(rows, ClusterDistance::Euclidean) else {
-        return 0.0;
-    };
-    compute_mean_silhouette_from_dist(&dist_mat, assignments, k)
+fn compute_mean_silhouette(rows: &[Vec<f64>], assignments: &[usize], k: usize) -> Result<f64, StatsError> {
+    let dist_mat = pairwise_distance_matrix(rows, ClusterDistance::Euclidean)?;
+    Ok(compute_mean_silhouette_from_dist(&dist_mat, assignments, k))
 }
 
 /// Compute mean silhouette width in `[-1, 1]` directly from a precomputed `n x n` distance matrix.
@@ -533,6 +536,85 @@ fn lance_williams_distance(linkage: ClusterLinkage, dik: f64, djk: f64, dij: f64
     }
 }
 
+#[derive(Clone, Copy)]
+struct TopoMergeKey {
+    dist: f64,
+    orig_idx: usize,
+}
+
+impl PartialEq for TopoMergeKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.dist.to_bits() == other.dist.to_bits() && self.orig_idx == other.orig_idx
+    }
+}
+
+impl Eq for TopoMergeKey {}
+
+impl Ord for TopoMergeKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.dist.total_cmp(&self.dist).then_with(|| other.orig_idx.cmp(&self.orig_idx))
+    }
+}
+
+impl PartialOrd for TopoMergeKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Reorder dendrogram merges in ascending height using Kahn's topological min-heap sort keyed by
+/// `(distance, orig_idx)` so parent merges can never precede their children even under float ties.
+fn reorder_merges_topologically(raw_merges: Vec<DendrogramMerge>) -> Vec<DendrogramMerge> {
+    let m = raw_merges.len();
+    let mut in_deg = vec![0_u8; m];
+    let mut parent = vec![usize::MAX; m];
+    for (idx, merge) in raw_merges.iter().enumerate() {
+        if merge.left >= 0 {
+            let child = merge.left as usize;
+            in_deg[idx] += 1;
+            parent[child] = idx;
+        }
+        if merge.right >= 0 {
+            let child = merge.right as usize;
+            in_deg[idx] += 1;
+            parent[child] = idx;
+        }
+    }
+    let mut ready = BinaryHeap::with_capacity(m);
+    for (idx, &deg) in in_deg.iter().enumerate() {
+        if deg == 0 {
+            ready.push(TopoMergeKey { dist: raw_merges[idx].distance, orig_idx: idx });
+        }
+    }
+    let mut order = Vec::with_capacity(m);
+    while let Some(TopoMergeKey { orig_idx, .. }) = ready.pop() {
+        order.push(orig_idx);
+        let p = parent[orig_idx];
+        if p < m {
+            in_deg[p] = in_deg[p].saturating_sub(1);
+            if in_deg[p] == 0 {
+                ready.push(TopoMergeKey { dist: raw_merges[p].distance, orig_idx: p });
+            }
+        }
+    }
+    let mut remap = vec![0_isize; m];
+    for (new_idx, &orig_idx) in order.iter().enumerate() {
+        remap[orig_idx] = new_idx as isize;
+    }
+    let mut sorted = Vec::with_capacity(m);
+    for orig_idx in order {
+        let mut entry = raw_merges[orig_idx].clone();
+        if entry.left >= 0 {
+            entry.left = remap[entry.left as usize];
+        }
+        if entry.right >= 0 {
+            entry.right = remap[entry.right as usize];
+        }
+        sorted.push(entry);
+    }
+    sorted
+}
+
 /// O(n^2) nearest-neighbor chain agglomerative clustering (Murtagh 1983) for reducible linkages.
 fn nn_chain_linkage(dist_mat: &[Vec<f64>], linkage: ClusterLinkage) -> Vec<DendrogramMerge> {
     let n = dist_mat.len();
@@ -590,7 +672,18 @@ fn nn_chain_linkage(dist_mat: &[Vec<f64>], linkage: ClusterLinkage) -> Vec<Dendr
             let ni = sizes[keep] as f64;
             let nj = sizes[drop_slot] as f64;
             let new_size = sizes[keep] + sizes[drop_slot];
-            raw_merges.push(DendrogramMerge { left: ids[keep], right: ids[drop_slot], distance: best_d, cluster_size: new_size });
+            let left_id = ids[keep];
+            let right_id = ids[drop_slot];
+            // Reducible linkages satisfy parent.distance >= max(child_left, child_right) in exact
+            // arithmetic; clamp 1-2 ULP Lance-Williams roundoff inversions before recording.
+            let mut merge_dist = best_d;
+            if left_id >= 0 {
+                merge_dist = merge_dist.max(raw_merges[left_id as usize].distance);
+            }
+            if right_id >= 0 {
+                merge_dist = merge_dist.max(raw_merges[right_id as usize].distance);
+            }
+            raw_merges.push(DendrogramMerge { left: left_id, right: right_id, distance: merge_dist, cluster_size: new_size });
             for (k, &is_act) in active.iter().enumerate() {
                 if !is_act || k == keep || k == drop_slot {
                     continue;
@@ -607,26 +700,7 @@ fn nn_chain_linkage(dist_mat: &[Vec<f64>], linkage: ClusterLinkage) -> Vec<Dendr
         }
     }
 
-    // Reorder subtrees into ascending merge height while preserving topological parent-after-child order.
-    let m = raw_merges.len();
-    let mut order: Vec<usize> = (0..m).collect();
-    order.sort_by(|&a, &b| raw_merges[a].distance.total_cmp(&raw_merges[b].distance).then_with(|| a.cmp(&b)));
-    let mut remap = vec![0_isize; m];
-    for (new_idx, &orig_idx) in order.iter().enumerate() {
-        remap[orig_idx] = new_idx as isize;
-    }
-    let mut sorted = Vec::with_capacity(m);
-    for orig_idx in order {
-        let mut entry = raw_merges[orig_idx].clone();
-        if entry.left >= 0 {
-            entry.left = remap[entry.left as usize];
-        }
-        if entry.right >= 0 {
-            entry.right = remap[entry.right as usize];
-        }
-        sorted.push(entry);
-    }
-    sorted
+    reorder_merges_topologically(raw_merges)
 }
 
 #[derive(Clone, Copy)]

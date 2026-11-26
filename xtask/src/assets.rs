@@ -3,13 +3,14 @@
 //! licence, and zero font binaries may be tracked in the repository.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Component, Path};
 
 use crate::brands::{is_forbidden_bundled_dir, is_plan_prism_path};
-use crate::scan_util::{collect_dist_files, format_error_list, is_zip_magic, lower_ext};
+use crate::scan_util::{ZIP_CONTAINER_EXTS, collect_dist_files, format_error_list, looks_like_zip, lower_ext};
 use crate::zip_read::{ZipArchive, ZipLimits};
 
-const FONT_EXT: &[&str] = &["ttf", "otf", "ttc", "woff", "woff2", "eot", "pfb"];
+const FONT_EXT: &[&str] = &["ttf", "otf", "ttc", "otc", "woff", "woff2", "eot", "pfb", "pfa", "dfont", "sfnt", "bdf", "pcf", "fon", "fnt"];
+const EXTRA_ZIP_ARCHIVE_EXT: &[&str] = &["docx", "odt", "jar", "whl"];
 
 const VISUAL_ASSET_EXT: &[&str] =
     &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "icns", "svg", "svgz", "avif", "pdf", "eps", "cur", "ani"];
@@ -98,10 +99,18 @@ const ASSET_EXT: &[&str] = &[
     "ttf",
     "otf",
     "ttc",
+    "otc",
     "woff",
     "woff2",
     "eot",
     "pfb",
+    "pfa",
+    "dfont",
+    "sfnt",
+    "bdf",
+    "pcf",
+    "fon",
+    "fnt",
     "curvebook",
     "cbtemplate",
     "prism",
@@ -140,6 +149,7 @@ struct AssetRow {
     author: String,
     source: String,
     licence_tokens: Vec<String>,
+    licence_note_path: Option<String>,
     notes: String,
 }
 
@@ -147,6 +157,35 @@ struct AssetRow {
 pub fn is_font_file(path: &str) -> bool {
     let ext = lower_ext(path);
     FONT_EXT.contains(&ext.as_str())
+}
+
+/// Returns `true` when `bytes` starts with an unambiguous font binary header
+/// (`OTTO` OpenType CFF, `ttcf` TrueType/OpenType Collection, `wOFF` WOFF1, `wOF2` WOFF2,
+/// or a valid TrueType sfnt offset table).
+#[must_use]
+pub fn has_font_magic(bytes: &[u8]) -> bool {
+    if bytes.starts_with(b"OTTO") || bytes.starts_with(b"ttcf") || bytes.starts_with(b"wOFF") || bytes.starts_with(b"wOF2") {
+        return true;
+    }
+    // TrueType sfnt header: version 0x00010000 + consistent binary-search directory fields.
+    if bytes.len() >= 12 && bytes.starts_with(&[0x00, 0x01, 0x00, 0x00]) {
+        let num_tables = u16::from_be_bytes([bytes[4], bytes[5]]);
+        let search_range = u16::from_be_bytes([bytes[6], bytes[7]]);
+        let entry_selector = u16::from_be_bytes([bytes[8], bytes[9]]);
+        let range_shift = u16::from_be_bytes([bytes[10], bytes[11]]);
+        if (4..=64).contains(&num_tables) {
+            let max_pow2 = 1u16 << (15 - num_tables.leading_zeros());
+            let expected_search = max_pow2.saturating_mul(16);
+            let expected_selector = (15 - num_tables.leading_zeros()) as u16;
+            let expected_shift = num_tables.saturating_mul(16).saturating_sub(expected_search);
+            return search_range == expected_search && entry_selector == expected_selector && range_shift == expected_shift;
+        }
+    }
+    false
+}
+
+fn is_zip_archive_ext(ext: &str) -> bool {
+    ZIP_CONTAINER_EXTS.contains(&ext) || EXTRA_ZIP_ARCHIVE_EXT.contains(&ext)
 }
 
 #[must_use]
@@ -190,14 +229,57 @@ fn parse_table_cells(line: &str) -> Option<Vec<&str>> {
     Some(inner.split('|').map(str::trim).collect())
 }
 
-fn strip_trailing_licence_note(raw: &str) -> &str {
-    let trimmed = raw.trim();
-    if trimmed.ends_with("`)")
-        && let Some((head, _)) = trimmed.rsplit_once(" (`")
-    {
-        return head.trim();
+fn has_copyleft_note_token(lower: &str) -> bool {
+    if lower.contains("licenseref-") || lower.contains("cc-by-sa") || lower.contains("cc_by_sa") {
+        return true;
     }
-    trimmed
+    lower.split(|c: char| !c.is_ascii_alphanumeric()).any(|tok| {
+        matches!(tok, "gpl" | "agpl" | "lgpl" | "mpl" | "sspl")
+            || ["gpl", "agpl", "lgpl", "mpl", "sspl"]
+                .iter()
+                .any(|prefix| tok.strip_prefix(prefix).is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit() || c == 'v')))
+    })
+}
+
+fn is_safe_relative_licence_note(note: &str) -> bool {
+    if note.is_empty()
+        || note.starts_with('/')
+        || note.contains('\\')
+        || note.contains('\0')
+        || note.chars().any(char::is_whitespace)
+        || !note.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_'))
+    {
+        return false;
+    }
+    if Path::new(note).components().any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))) {
+        return false;
+    }
+    let lower_full = note.to_ascii_lowercase();
+    if has_copyleft_note_token(&lower_full) {
+        return false;
+    }
+    let fname = lower_full.rsplit('/').next().unwrap_or(lower_full.as_str());
+    fname.starts_with("license")
+        || fname.starts_with("licence")
+        || fname.starts_with("copying")
+        || fname.starts_with("notice")
+        || fname.ends_with(".txt")
+        || fname.ends_with(".md")
+}
+
+fn split_trailing_licence_note(raw: &str) -> (&str, Option<&str>) {
+    let trimmed = raw.trim();
+    if let Some(without_close) = trimmed.strip_suffix("`)")
+        && let Some((head, note)) = without_close.rsplit_once(" (`")
+        && is_safe_relative_licence_note(note)
+    {
+        return (head.trim(), Some(note));
+    }
+    (trimmed, None)
+}
+
+fn strip_trailing_licence_note(raw: &str) -> &str {
+    split_trailing_licence_note(raw).0
 }
 
 fn validate_licence_expression(raw: &str) -> Result<Vec<String>, String> {
@@ -259,6 +341,7 @@ fn parse_attribution_table(md: &str, table_name: &str) -> Result<BTreeMap<String
         if is_placeholder_cell(source_cell) {
             return Err(format!("{table_name}:{line_no} (`{path}`): missing or placeholder source `{source_cell}`"));
         }
+        let (_, licence_note) = split_trailing_licence_note(licence_cell);
         let licence_tokens = validate_licence_expression(licence_cell).map_err(|e| format!("{table_name}:{line_no} (`{path}`): {e}"))?;
         if rows.contains_key(path) {
             return Err(format!("{table_name}:{line_no}: duplicate row for `{path}`"));
@@ -266,7 +349,14 @@ fn parse_attribution_table(md: &str, table_name: &str) -> Result<BTreeMap<String
         let notes = cells.get(4).map(|s| (*s).trim().to_owned()).unwrap_or_default();
         rows.insert(
             path.to_owned(),
-            AssetRow { path: path.to_owned(), author: (*author_cell).to_owned(), source: (*source_cell).to_owned(), licence_tokens, notes },
+            AssetRow {
+                path: path.to_owned(),
+                author: (*author_cell).to_owned(),
+                source: (*source_cell).to_owned(),
+                licence_tokens,
+                licence_note_path: licence_note.map(str::to_owned),
+                notes,
+            },
         );
     }
     Ok(rows)
@@ -509,21 +599,25 @@ const MAX_DIST_ASSET_BYTES: usize = 256 * 1024 * 1024;
 fn verify_asset_binaries(root: &Path, files: &[String], errors: &mut Vec<String>) {
     for path in files {
         let ext = lower_ext(path);
-        let is_archive = matches!(ext.as_str(), "zip" | "curvebook" | "cbtemplate" | "prism" | "pzf");
-        if !matches!(ext.as_str(), "png" | "ico" | "icns" | "svg" | "svgz" | "gif" | "pdf") && !is_archive {
-            continue;
-        }
+        let is_archive_ext = is_zip_archive_ext(&ext);
+        let is_meta_ext =
+            matches!(ext.as_str(), "png" | "ico" | "icns" | "svg" | "svgz" | "gif" | "pdf" | "jpg" | "jpeg" | "tif" | "tiff" | "webp" | "avif");
         let Ok(bytes) = curvebook_platform::fs::read_regular_file_bytes(&root.join(path), MAX_DIST_ASSET_BYTES) else {
-            errors.push(format!("{path}: unreadable or oversized asset file"));
-            continue;
-        };
-        if is_archive || is_zip_magic(&bytes) {
-            if is_zip_magic(&bytes) || matches!(ext.as_str(), "zip" | "curvebook" | "cbtemplate") {
-                scan_repo_zip_for_fonts(path, &bytes, 0, errors);
+            if is_archive_ext || is_meta_ext || is_asset(path) {
+                errors.push(format!("{path}: unreadable or oversized asset file"));
             }
             continue;
+        };
+        if has_font_magic(&bytes) {
+            errors.push(format!("{path}: committed font binary (font magic header) forbidden by zero-bundled-fonts policy"));
+            continue;
         }
-        check_asset_embedded_metadata(path, &bytes, errors);
+        if is_archive_ext || looks_like_zip(&bytes) {
+            scan_repo_zip_for_fonts(path, &bytes, 0, errors);
+        }
+        if is_meta_ext || crate::brands::detect_binary_asset_magic(&bytes).is_some() {
+            check_asset_embedded_metadata(path, &bytes, errors);
+        }
     }
 }
 
@@ -536,9 +630,10 @@ fn scan_repo_zip_for_fonts(display_path: &str, bytes: &[u8], depth: usize, error
         Ok(zip) => {
             for (name, entry_bytes) in zip.iter() {
                 let nested = format!("{display_path}!{name}");
-                if is_font_file(name) {
+                let entry_ext = lower_ext(name);
+                if is_font_file(name) || has_font_magic(entry_bytes) {
                     errors.push(format!("{nested}: bundled font file forbidden by zero-bundled-fonts policy"));
-                } else if is_zip_magic(entry_bytes) {
+                } else if is_zip_archive_ext(&entry_ext) || looks_like_zip(entry_bytes) {
                     scan_repo_zip_for_fonts(&nested, entry_bytes, depth + 1, errors);
                 }
             }
@@ -579,6 +674,16 @@ pub fn verify_repo_provenance(root: &Path, files: &[String], assets_md: &str, at
         }
     }
 
+    for row in asset_rows.values().chain(attr_rows.values()) {
+        if let Some(note_path) = &row.licence_note_path {
+            if let Err(err) = reject_symlink_path_components(root, note_path, "licence note file") {
+                errors.push(err);
+            } else if !crate::scan_util::is_regular_file(&root.join(note_path)) {
+                errors.push(format!("{}: referenced licence note `{note_path}` must exist as a regular non-symlink file", row.path));
+            }
+        }
+    }
+
     for (name, body) in [("ASSETS.md", assets_md), ("ATTRIBUTION.md", attribution_md), ("NOTICE", notice)] {
         if let Err(err) = check_document_prose(name, body, false) {
             errors.push(err);
@@ -608,6 +713,35 @@ pub(crate) struct RepoAssetCatalog {
     allowed_sha256: BTreeSet<[u8; 32]>,
 }
 
+fn validate_catalog_rel_path(rel: &str) -> Result<(), String> {
+    if rel.is_empty() || rel.starts_with('/') || rel.contains('\\') || rel.contains('\0') {
+        return Err(format!("ASSETS.md: unsafe asset path `{rel}`"));
+    }
+    for comp in Path::new(rel).components() {
+        match comp {
+            Component::Normal(_) => {}
+            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("ASSETS.md: unsafe asset path `{rel}`"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_symlink_path_components(root: &Path, rel: &str, label: &str) -> Result<(), String> {
+    let mut cur = root.to_path_buf();
+    for comp in Path::new(rel).components() {
+        if let Component::Normal(seg) = comp {
+            cur.push(seg);
+            let meta = std::fs::symlink_metadata(&cur).map_err(|e| format!("{label} `{rel}`: {e}"))?;
+            if meta.file_type().is_symlink() {
+                return Err(format!("{label} `{rel}` must not traverse symlink `{}`", cur.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Load and verify `ASSETS.md`, `ATTRIBUTION.md`, and `NOTICE` from `root`, indexing the SHA-256
 /// digest of every attributed repository asset so unpacked release containers can be verified.
 pub(crate) fn load_repo_asset_catalog(root: &Path) -> Result<RepoAssetCatalog, String> {
@@ -627,14 +761,36 @@ pub(crate) fn load_repo_asset_catalog(root: &Path) -> Result<RepoAssetCatalog, S
 
     let mut allowed_sha256 = BTreeSet::new();
     for row in asset_rows.values() {
+        validate_catalog_rel_path(&row.path)?;
         if row_requires_attribution_entry(row) && !attr_rows.contains_key(&row.path) {
             return Err(format!("{}: third-party or attribution-licensed asset lacks an ATTRIBUTION.md row", row.path));
         }
         if is_original_only_visual_asset(&row.path) {
             verify_original_provenance(row, &asset_rows)?;
         }
-        let bytes = std::fs::read(root.join(&row.path)).map_err(|e| format!("ASSETS.md attributed file `{}`: {e}", row.path))?;
+        if let Some(note_path) = &row.licence_note_path {
+            reject_symlink_path_components(root, note_path, "ASSETS.md licence note file")?;
+            if !crate::scan_util::is_regular_file(&root.join(note_path)) {
+                return Err(format!("{}: referenced licence note `{note_path}` must exist as a regular non-symlink file", row.path));
+            }
+        }
+        reject_symlink_path_components(root, &row.path, "ASSETS.md attributed file")?;
+        let full = root.join(&row.path);
+        let meta = std::fs::symlink_metadata(&full).map_err(|e| format!("ASSETS.md attributed file `{}`: {e}", row.path))?;
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            return Err(format!("ASSETS.md attributed file `{}` must be a regular non-symlink file", row.path));
+        }
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(&full, MAX_DIST_ASSET_BYTES)
+            .map_err(|e| format!("ASSETS.md attributed file `{}`: {e}", row.path))?;
         allowed_sha256.insert(crate::release_scan::sha256_bytes(&bytes));
+    }
+    for row in attr_rows.values() {
+        if let Some(note_path) = &row.licence_note_path {
+            reject_symlink_path_components(root, note_path, "ATTRIBUTION.md licence note file")?;
+            if !crate::scan_util::is_regular_file(&root.join(note_path)) {
+                return Err(format!("{}: referenced licence note `{note_path}` must exist as a regular non-symlink file", row.path));
+            }
+        }
     }
     Ok(RepoAssetCatalog { allowed_sha256 })
 }
@@ -675,7 +831,7 @@ struct DistAssetScanState<'a> {
 }
 
 fn scan_dist_asset_bytes(state: &mut DistAssetScanState<'_>, display_path: &str, bytes: &[u8], depth: usize) {
-    if is_font_file(display_path) {
+    if is_font_file(display_path) || has_font_magic(bytes) {
         state.checked_assets += 1;
         state.violations.push(format!("{display_path}: bundled font file forbidden by zero-bundled-fonts policy"));
         return;
@@ -687,14 +843,17 @@ fn scan_dist_asset_bytes(state: &mut DistAssetScanState<'_>, display_path: &str,
         state.checked_assets += 1;
         check_asset_embedded_metadata(display_path, bytes, &mut state.violations);
         let digest = crate::release_scan::sha256_bytes(bytes);
-        if !state.catalog.allowed_sha256.contains(&digest) && !is_flatpak_appstream_icon_cache(state.catalog, state.dist_dir, display_path) {
+        if !state.catalog.allowed_sha256.contains(&digest) && !is_flatpak_appstream_icon_cache(state.catalog, state.dist_dir, display_path, bytes) {
             state
                 .violations
                 .push(format!("{display_path}: unattributed asset in release package (SHA-256 does not match any attributed entry in ASSETS.md)"));
         }
+    } else if crate::brands::detect_binary_asset_magic(bytes).is_some() {
+        check_asset_embedded_metadata(display_path, bytes, &mut state.violations);
     }
 
-    if is_zip_magic(bytes) {
+    let ext = lower_ext(display_path);
+    if is_zip_archive_ext(&ext) || looks_like_zip(bytes) {
         if depth >= 2 {
             state.violations.push(format!("{display_path}: nested archive depth exceeded (max depth 2)"));
             return;
@@ -748,11 +907,50 @@ fn check_bundled_attribution_doc(display_path: &str, bytes: &[u8], violations: &
 
 fn check_asset_embedded_metadata(display_path: &str, bytes: &[u8], violations: &mut Vec<String>) {
     let ext = lower_ext(display_path);
-    let hits = match ext.as_str() {
-        "png" => crate::brands::check_png_metadata(display_path, bytes),
-        "ico" | "icns" => crate::brands::check_icon_container_metadata(display_path, bytes),
-        "gif" => crate::brands::check_gif_metadata(display_path, bytes),
-        "pdf" => crate::brands::check_pdf_metadata(display_path, bytes),
+    let effective_fmt =
+        if matches!(ext.as_str(), "png" | "ico" | "icns" | "gif" | "jpg" | "jpeg" | "tif" | "tiff" | "webp" | "avif" | "pdf" | "svg" | "svgz") {
+            ext.as_str()
+        } else if let Some(magic_fmt) = crate::brands::detect_binary_asset_magic(bytes) {
+            magic_fmt
+        } else {
+            ext.as_str()
+        };
+    let hits = match effective_fmt {
+        "png" => match crate::brands::check_png_metadata_checked(display_path, bytes) {
+            Ok(h) => h,
+            Err(err) => {
+                violations.push(err);
+                Vec::new()
+            }
+        },
+        "ico" | "icns" => match crate::brands::check_icon_container_metadata_checked(display_path, bytes) {
+            Ok(h) => h,
+            Err(err) => {
+                violations.push(err);
+                Vec::new()
+            }
+        },
+        "gif" => match crate::brands::check_gif_metadata_checked(display_path, bytes) {
+            Ok(h) => h,
+            Err(err) => {
+                violations.push(err);
+                Vec::new()
+            }
+        },
+        "jpg" | "jpeg" | "tif" | "tiff" | "webp" | "avif" => match crate::brands::check_raster_metadata_checked(display_path, effective_fmt, bytes) {
+            Ok(h) => h,
+            Err(err) => {
+                violations.push(err);
+                Vec::new()
+            }
+        },
+        "pdf" => match crate::brands::check_pdf_metadata_checked(display_path, bytes) {
+            Ok(h) => h,
+            Err(err) => {
+                violations.push(err);
+                Vec::new()
+            }
+        },
         "svg" => match crate::text_decode::decode_utf8_or_utf16(bytes) {
             Ok(Some(svg)) => crate::brands::check_svg_metadata(display_path, &svg),
             Ok(None) => {
@@ -784,23 +982,87 @@ fn check_asset_embedded_metadata(display_path: &str, bytes: &[u8], violations: &
     }
 }
 
-fn is_flatpak_appstream_icon_cache(catalog: &RepoAssetCatalog, dist_dir: &Path, display_path: &str) -> bool {
+fn is_valid_icon_dim(dim: &str) -> bool {
+    let Some((w, h)) = dim.split_once('x') else {
+        return false;
+    };
+    !w.is_empty()
+        && !h.is_empty()
+        && w.bytes().all(|b| b.is_ascii_digit())
+        && h.bytes().all(|b| b.is_ascii_digit())
+        && w.parse::<u32>().is_ok_and(|v| v > 0)
+        && h.parse::<u32>().is_ok_and(|v| v > 0)
+}
+
+fn decode_png_to_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let mut decoder = png::Decoder::new_with_limits(std::io::Cursor::new(bytes), png::Limits { bytes: 64 * 1024 * 1024 });
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().ok()?;
+    let buf_len = reader.output_buffer_size()?;
+    let mut buf = vec![0u8; buf_len];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let raw = buf.get(..info.buffer_size())?;
+    let pixel_count = usize::try_from(info.width).ok()?.checked_mul(usize::try_from(info.height).ok()?)?;
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => raw.to_vec(),
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity(pixel_count.checked_mul(4)?);
+            for &[r, g, b] in raw.as_chunks::<3>().0 {
+                out.extend_from_slice(&[r, g, b, 255]);
+            }
+            out
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let mut out = Vec::with_capacity(pixel_count.checked_mul(4)?);
+            for &[g, a] in raw.as_chunks::<2>().0 {
+                out.extend_from_slice(&[g, g, g, a]);
+            }
+            out
+        }
+        png::ColorType::Grayscale => {
+            let mut out = Vec::with_capacity(pixel_count.checked_mul(4)?);
+            for &g in raw {
+                out.extend_from_slice(&[g, g, g, 255]);
+            }
+            out
+        }
+        png::ColorType::Indexed => return None,
+    };
+    if rgba.len() != pixel_count.checked_mul(4)? {
+        return None;
+    }
+    Some((info.width, info.height, rgba))
+}
+
+fn is_flatpak_appstream_icon_cache(catalog: &RepoAssetCatalog, dist_dir: &Path, display_path: &str, candidate_bytes: &[u8]) -> bool {
     const MARKER: &str = "/share/app-info/icons/flatpak/";
     const ICON_FILE: &str = "/org.curvebook.CurveBook.png";
+    if display_path.contains('!') || display_path.contains('\\') || display_path.contains('\0') {
+        return false;
+    }
     let Some((prefix, after)) = display_path.split_once(MARKER) else {
         return false;
     };
+    if Path::new(prefix).components().any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))) {
+        return false;
+    }
     let Some(dim) = after.strip_suffix(ICON_FILE) else {
         return false;
     };
-    if dim.is_empty() || dim.contains('/') {
+    if !is_valid_icon_dim(dim) {
         return false;
     }
     let hicolor_rel = format!("{prefix}/share/icons/hicolor/{dim}/apps/org.curvebook.CurveBook.png");
     let Ok(src_bytes) = curvebook_platform::fs::read_regular_file_bytes(&dist_dir.join(hicolor_rel), MAX_DIST_ASSET_BYTES) else {
         return false;
     };
-    catalog.allowed_sha256.contains(&crate::release_scan::sha256_bytes(&src_bytes))
+    if !catalog.allowed_sha256.contains(&crate::release_scan::sha256_bytes(&src_bytes)) {
+        return false;
+    }
+    match (decode_png_to_rgba(candidate_bytes), decode_png_to_rgba(&src_bytes)) {
+        (Some(cand_px), Some(src_px)) => cand_px == src_px,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -1039,5 +1301,168 @@ mod tests {
         let cat = super::RepoAssetCatalog { allowed_sha256: std::collections::BTreeSet::new() };
         let (_, dist_errs) = super::scan_dist_artefacts(&cat, &root.join("dist")).unwrap();
         assert!(dist_errs.iter().any(|e| e.contains("nested archive depth")), "{dist_errs:?}");
+    }
+
+    fn encode_1x1_png(rgba: [u8; 4], compression: png::Compression) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, 1, 1);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.set_compression(compression);
+        let mut writer = enc.write_header().unwrap();
+        writer.write_image_data(&rgba).unwrap();
+        writer.finish().unwrap();
+        out
+    }
+
+    #[test]
+    fn aud_12_08_09_43_flatpak_pixel_check_xlsx_font_magic_raster_meta_and_catalog_guards() {
+        // AUD-12-08: Flatpak appstream icon cache requires matching decoded RGBA pixels.
+        let src_png = encode_1x1_png([10, 20, 30, 255], png::Compression::default());
+        let reencoded_same = encode_1x1_png([10, 20, 30, 255], png::Compression::Fast);
+        let different_png = encode_1x1_png([200, 10, 10, 255], png::Compression::default());
+        let mut allowed = std::collections::BTreeSet::new();
+        allowed.insert(crate::release_scan::sha256_bytes(&src_png));
+        let cat = super::RepoAssetCatalog { allowed_sha256: allowed };
+
+        let fp_dir = TestDir::new("assets-aud12-08");
+        fp_dir.write_bytes("files/share/icons/hicolor/128x128/apps/org.curvebook.CurveBook.png", &src_png);
+        fp_dir.write_bytes("files/share/app-info/icons/flatpak/128x128/org.curvebook.CurveBook.png", &reencoded_same);
+        let (_, ok_errs) = super::scan_dist_artefacts(&cat, fp_dir.path()).unwrap();
+        assert!(ok_errs.is_empty(), "same-pixel re-encoded flatpak icon must pass: {ok_errs:?}");
+
+        fp_dir.write_bytes("files/share/app-info/icons/flatpak/128x128/org.curvebook.CurveBook.png", &different_png);
+        let (_, bad_errs) = super::scan_dist_artefacts(&cat, fp_dir.path()).unwrap();
+        assert!(bad_errs.iter().any(|e| e.contains("unattributed asset")), "different-pixel flatpak icon must fail: {bad_errs:?}");
+
+        // AUD-12-09: extended font extensions, font magic bytes, .xlsx ZIP font scan, corrupt dist .zip, JPEG metadata.
+        for ext_path in ["a.otc", "b.pfa", "c.dfont", "d.sfnt", "e.bdf", "f.pcf", "g.fon", "h.fnt"] {
+            assert!(is_font_file(ext_path), "expected font ext: {ext_path}");
+        }
+        assert!(super::has_font_magic(b"OTTO\x00\x01"));
+        assert!(super::has_font_magic(b"wOF2\x00\x01"));
+
+        let repo_dir = TestDir::new("assets-aud12-09");
+        repo_dir.write_bytes("examples/book.xlsx", &zip_single("xl/fonts/Hidden.ttf", b"font"));
+        repo_dir.write_bytes("assets/renamed.bin", b"wOF2fontpayload");
+        let xlsx_md = "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `examples/book.xlsx` | CurveBook | Original | MIT | x |\n| `assets/renamed.bin` | CurveBook | Original | MIT | b |\n";
+        let err_repo = super::verify_repo_provenance(
+            repo_dir.path(),
+            &[String::from("examples/book.xlsx"), String::from("assets/renamed.bin")],
+            xlsx_md,
+            "",
+            "CurveBook",
+        )
+        .unwrap_err();
+        assert!(err_repo.contains("Hidden.ttf"), "{err_repo}");
+        assert!(err_repo.contains("font magic"), "{err_repo}");
+
+        let dist_dir = TestDir::new("assets-aud12-09-dist");
+        dist_dir.write_bytes("corrupt.zip", b"NOT_A_VALID_ZIP");
+        let mut jpeg_dirty = vec![0xFF, 0xD8, 0xFF, 0xFE, 0x00, 0x10];
+        jpeg_dirty.extend_from_slice(b"GraphPad Prism");
+        jpeg_dirty.extend_from_slice(&[0xFF, 0xD9]);
+        dist_dir.write_bytes("photo.jpg", &jpeg_dirty);
+        let (_, d_errs) = super::scan_dist_artefacts(&cat, dist_dir.path()).unwrap();
+        assert!(d_errs.iter().any(|e| e.contains("corrupt.zip")), "{d_errs:?}");
+        assert!(d_errs.iter().any(|e| e.contains("photo.jpg") && e.contains("graphpad")), "{d_errs:?}");
+
+        // AUD-12-43: licence note rejects copyleft SPDX injection (`MIT (`GPL-3.0-only`)`), missing
+        // licence note files, traversal, and intermediate symlinked parent directories.
+        for bad_lic_cell in ["MIT (`or GPL-3.0`)", "MIT (`GPL-3.0-only`)", "MIT (`AGPL-3.0-or-later`)"] {
+            let bad_lic = format!(
+                "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/x.png` | CurveBook | Original | {bad_lic_cell} | n |\n"
+            );
+            assert!(verify_assets(&[String::from("assets/x.png")], &bad_lic, "").is_err(), "must reject `{bad_lic_cell}`");
+        }
+
+        // Image+ZIP polyglot in repo and dist checks BOTH ZIP fonts AND image metadata.
+        let mut jpeg_zip = vec![0xFF, 0xD8, 0xFF, 0xFE, 0x00, 0x0B];
+        jpeg_zip.extend_from_slice(b"OriginPro");
+        jpeg_zip.extend_from_slice(&[0xFF, 0xD9]);
+        jpeg_zip.extend_from_slice(&zip_single("fonts/Sneaky.ttf", b"font"));
+        let poly_repo = TestDir::new("assets-polyglot");
+        poly_repo.write_bytes("assets/poly.jpg", &jpeg_zip);
+        let poly_md =
+            "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/poly.jpg` | CurveBook | Original | MIT | p |\n";
+        let poly_err = super::verify_repo_provenance(poly_repo.path(), &[String::from("assets/poly.jpg")], poly_md, "", "CurveBook").unwrap_err();
+        assert!(poly_err.contains("Sneaky.ttf") && poly_err.contains("originpro"), "polyglot must catch BOTH font and JPEG meta: {poly_err}");
+
+        // Entity-encoded SVG data:image/ URI caught by assets provenance check (AUD-12-01).
+        let svg_repo = TestDir::new("assets-svg-entity");
+        svg_repo.write(
+            "assets/ui/icon.svg",
+            "<svg><image href=\"data&#58;image/svg+xml;base64,PHN2Zz48dGl0bGU+T3JpZ2luUHJvPC90aXRsZT48L3N2Zz4=\"/></svg>",
+        );
+        let svg_md =
+            "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/ui/icon.svg` | CurveBook | Original SVG | MIT | s |\n";
+        let svg_err = super::verify_repo_provenance(svg_repo.path(), &[String::from("assets/ui/icon.svg")], svg_md, "", "CurveBook").unwrap_err();
+        assert!(svg_err.contains("originpro"), "assets must catch entity-encoded SVG data URI: {svg_err}");
+
+        let trav_dir = TestDir::new("assets-aud12-43");
+        trav_dir.write(
+            "ASSETS.md",
+            "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `../escape.png` | CurveBook | Original | MIT | x |\n",
+        );
+        trav_dir.write("ATTRIBUTION.md", "");
+        trav_dir.write("NOTICE", "CurveBook\n");
+        assert!(super::load_repo_asset_catalog(trav_dir.path()).unwrap_err().contains("unsafe asset path"));
+
+        // Non-existent trailing licence note file must fail catalog & repo provenance checks.
+        trav_dir.write("assets/ok.png", "png");
+        trav_dir.write(
+            "ASSETS.md",
+            "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/ok.png` | CurveBook | Original | MIT (`assets/missing-LICENSE.txt`) | x |\n",
+        );
+        assert!(super::load_repo_asset_catalog(trav_dir.path()).is_err());
+
+        #[cfg(unix)]
+        {
+            let sym_dir = TestDir::new("assets-aud12-43-symparent");
+            let outside = sym_dir.join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(outside.join("icon.png"), b"png").unwrap();
+            std::fs::create_dir_all(sym_dir.join("assets")).unwrap();
+            std::os::unix::fs::symlink(&outside, sym_dir.join("assets/symparent")).unwrap();
+            sym_dir.write(
+                "ASSETS.md",
+                "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/symparent/icon.png` | CurveBook | Original | MIT | x |\n",
+            );
+            sym_dir.write("ATTRIBUTION.md", "");
+            sym_dir.write("NOTICE", "CurveBook\n");
+            assert!(super::load_repo_asset_catalog(sym_dir.path()).unwrap_err().contains("symlink"));
+        }
+
+        // Round-3 #216 (AUD-12-43 & AUD-12-01): reject LicenseRef-* / copyleft licence notes,
+        // verify ATTRIBUTION.md licence_note_path existence in load_repo_asset_catalog, and catch <style> SVG data URIs.
+        for bad_note in ["MIT (`LicenseRef-GPL-3.0`)", "MIT (`LICENSE-GPLv3.txt`)", "MIT (`LICENSE-MPL-2.0.txt`)", "MIT (`LICENSE-CC-BY-SA.txt`)"] {
+            let bad_md = format!(
+                "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/x.png` | CurveBook | Original | {bad_note} | n |\n"
+            );
+            assert!(verify_assets(&[String::from("assets/x.png")], &bad_md, "").is_err(), "must reject `{bad_note}`");
+        }
+        let attr_note_dir = TestDir::new("assets-attr-missing-note");
+        attr_note_dir.write("assets/ok.png", "png");
+        attr_note_dir.write(
+            "ASSETS.md",
+            "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/ok.png` | CurveBook | Original | MIT | x |\n",
+        );
+        attr_note_dir.write(
+            "ATTRIBUTION.md",
+            "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/ok.png` | CurveBook | Original | MIT (`assets/no-such-LICENSE.txt`) | x |\n",
+        );
+        attr_note_dir.write("NOTICE", "CurveBook\n");
+        assert!(super::load_repo_asset_catalog(attr_note_dir.path()).is_err());
+
+        let style_svg_repo = TestDir::new("assets-svg-style-uri");
+        style_svg_repo.write(
+            "assets/ui/icon.svg",
+            "<svg><style>.a { background: url(data:image/svg+xml;base64,PHN2Zz48dGl0bGU+T3JpZ2luUHJvPC90aXRsZT48L3N2Zz4=); }</style></svg>",
+        );
+        let style_svg_md =
+            "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/ui/icon.svg` | CurveBook | Original SVG | MIT | s |\n";
+        let style_err =
+            super::verify_repo_provenance(style_svg_repo.path(), &[String::from("assets/ui/icon.svg")], style_svg_md, "", "CurveBook").unwrap_err();
+        assert!(style_err.contains("originpro"), "assets must catch <style> data URI: {style_err}");
     }
 }

@@ -55,14 +55,18 @@ fn human_path_import_wizard_handles_messy_paste_quoted_newlines_thousands_and_mu
     assert!(!driver.state().app.grid.import_wizard.open);
 
     let ds = driver.state().app.document().data_sheet(&SheetId::new("col-1")).unwrap();
+    // With `header_rows == 2` (`propagate_title_header = true`), collapsed multi-row headers are
+    // promoted to ColumnTable column titles (`AUD-04-43`) and data begins at row 0.
+    let TableArchetype::Column(col_tbl) = &ds.archetype else {
+        return Err("expected ColumnTable".into());
+    };
+    assert_eq!(col_tbl.data_sets.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), vec!["Group A - Rep 1", "Group A - Rep 2", "Group B - Ctrl"]);
     for (r, c, expected) in [
-        (0, 0, Cell::text("Group A - Rep 1")),
-        (0, 1, Cell::text("Group A - Rep 2")),
-        (1, 0, Cell::number(1234.56)),
-        (1, 1, Cell::text("Line 1\nLine 2")),
-        (1, 2, Cell { value: curvebook_doc::CellValue::Number(2.5), excluded: true }),
-        (2, 0, Cell::number(3.75)),
-        (2, 1, Cell::empty()),
+        (0, 0, Cell::number(1234.56)),
+        (0, 1, Cell::text("Line 1\nLine 2")),
+        (0, 2, Cell { value: curvebook_doc::CellValue::Number(2.5), excluded: true }),
+        (1, 0, Cell::number(3.75)),
+        (1, 1, Cell::empty()),
     ] {
         assert_eq!(ds.cell(CellCoord::new(r, c, 0)), Some(&expected), "mismatch at ({r},{c})");
     }

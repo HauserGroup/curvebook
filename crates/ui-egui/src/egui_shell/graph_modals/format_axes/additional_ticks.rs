@@ -1,26 +1,32 @@
 //! `Additional Ticks / Thresholds` sub-modal body inside `Format Axes`.
 
-use crate::egui_shell::UiIntent;
 use curvebook_doc::{AdditionalTick, AxisThreshold};
 use curvebook_palette::LineDashStyle;
 use egui::Ui;
 
+use crate::dialogs_canvas::FormatAxesState;
 use crate::grid_view::parse_localized_number_input;
 use crate::i18n::tr;
 
 use super::super::helpers::{ButtonEntry, GraphModalCtx, record_button, record_checkbox, record_input, record_label};
 use super::super::state::GraphModalEguiState;
 
-pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
-    let fa = gctx.app.canvas_dialogs.format_axes.clone();
+pub(super) fn render_additional_ticks_submodal(
+    ui: &mut Ui,
+    state: &mut GraphModalEguiState,
+    gctx: &mut GraphModalCtx<'_>,
+    draft: &mut FormatAxesState,
+    dirty: &mut bool,
+) {
     ui.label(egui::RichText::new("Custom Ticks & Reference Thresholds").strong());
     ui.add_space(4.0);
 
     // Existing custom ticks table.
-    if fa.axis_draft.additional_ticks.is_empty() {
+    let mut delete_tick_idx: Option<usize> = None;
+    if draft.axis_draft.additional_ticks.is_empty() {
         ui.label(egui::RichText::new("No additional ticks defined on this axis.").color(gctx.tokens.text_muted));
     } else {
-        for (idx, tick) in fa.axis_draft.additional_ticks.iter().enumerate() {
+        for (idx, tick) in draft.axis_draft.additional_ticks.iter().enumerate() {
             ui.horizontal_wrapped(|ui| {
                 ui.set_max_width(gctx.body_w);
                 let label_part = tick.label.as_deref().unwrap_or("(auto)");
@@ -41,19 +47,24 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
                 )
                 .clicked()
                 {
-                    let mut next = fa.clone();
-                    next.axis_draft.additional_ticks.remove(idx);
-                    next.stage_active_additional_ticks();
-                    gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
+                    delete_tick_idx = Some(idx);
                 }
             });
         }
     }
+    if let Some(idx) = delete_tick_idx
+        && idx < draft.axis_draft.additional_ticks.len()
+    {
+        draft.axis_draft.additional_ticks.remove(idx);
+        draft.stage_active_additional_ticks();
+        *dirty = true;
+    }
 
-    if !fa.axis_draft.thresholds.is_empty() {
+    let mut delete_threshold_idx: Option<usize> = None;
+    if !draft.axis_draft.thresholds.is_empty() {
         ui.add_space(4.0);
         ui.label(egui::RichText::new("Thresholds & Shaded Zones:").strong());
-        for (idx, th) in fa.axis_draft.thresholds.iter().enumerate() {
+        for (idx, th) in draft.axis_draft.thresholds.iter().enumerate() {
             ui.horizontal_wrapped(|ui| {
                 ui.set_max_width(gctx.body_w);
                 let span = match th.shade_to {
@@ -76,13 +87,17 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
                 )
                 .clicked()
                 {
-                    let mut next = fa.clone();
-                    next.axis_draft.thresholds.remove(idx);
-                    next.stage_active_thresholds();
-                    gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
+                    delete_threshold_idx = Some(idx);
                 }
             });
         }
+    }
+    if let Some(idx) = delete_threshold_idx
+        && idx < draft.axis_draft.thresholds.len()
+    {
+        draft.axis_draft.thresholds.remove(idx);
+        draft.stage_active_thresholds();
+        *dirty = true;
     }
 
     ui.add_space(6.0);
@@ -148,7 +163,6 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
         match parse_localized_number_input(&state.additional_ticks.value_draft, &gctx.app.locale_preset) {
             Some(val) => {
                 let label_opt = (!state.additional_ticks.label_draft.trim().is_empty()).then(|| state.additional_ticks.label_draft.trim().to_owned());
-                let mut next = fa.clone();
                 if state.additional_ticks.show_line || state.additional_ticks.shaded_zone {
                     let shade_to = if state.additional_ticks.shaded_zone {
                         match parse_localized_number_input(&state.additional_ticks.end_value_draft, &gctx.app.locale_preset) {
@@ -161,7 +175,7 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
                     } else {
                         None
                     };
-                    next.axis_draft.thresholds.push(AxisThreshold {
+                    draft.axis_draft.thresholds.push(AxisThreshold {
                         value: val,
                         shade_to,
                         color: curvebook_palette::Rgba8::BLACK,
@@ -169,17 +183,17 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
                         stroke_width_pt: 1.0,
                         label: label_opt.clone(),
                     });
-                    next.stage_active_thresholds();
+                    draft.stage_active_thresholds();
                 }
                 if !state.additional_ticks.shaded_zone {
-                    next.axis_draft.additional_ticks.push(AdditionalTick {
+                    draft.axis_draft.additional_ticks.push(AdditionalTick {
                         value: val,
                         label: label_opt,
                         draw_gridline: state.additional_tick_draw_gridline,
                     });
-                    next.stage_active_additional_ticks();
+                    draft.stage_active_additional_ticks();
                 }
-                gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
+                *dirty = true;
                 state.additional_tick_status = None;
                 state.additional_ticks.value_draft.clear();
                 state.additional_ticks.end_value_draft.clear();

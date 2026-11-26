@@ -103,16 +103,14 @@ pub fn kendall_tau_b(x: &[f64], y: &[f64]) -> Result<CorrelationPairResult, Stat
     let mut ties_y = 0.0_f64;
     for i in 0..n {
         for j in (i + 1)..n {
-            let dx = x[i] - x[j];
-            let dy = y[i] - y[j];
-            if dx == 0.0 && dy == 0.0 {
+            if x[i] == x[j] && y[i] == y[j] {
                 ties_x += 1.0;
                 ties_y += 1.0;
-            } else if dx == 0.0 {
+            } else if x[i] == x[j] {
                 ties_x += 1.0;
-            } else if dy == 0.0 {
+            } else if y[i] == y[j] {
                 ties_y += 1.0;
-            } else if dx * dy > 0.0 {
+            } else if (x[i] > x[j]) == (y[i] > y[j]) {
                 conc += 1.0;
             } else {
                 disc += 1.0;

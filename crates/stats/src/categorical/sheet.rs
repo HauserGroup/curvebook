@@ -142,7 +142,7 @@ fn resolve_contingency_primary(
             let ca_p = res
                 .cochran_armitage_p
                 .ok_or(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: n_rows.max(n_cols) as f64 })?;
-            Ok(ContingencyPrimaryOutcome::plain("Cochran-Armitage trend", res.cochran_armitage_z, Some(1.0), ca_p))
+            Ok(ContingencyPrimaryOutcome::plain("Cochran-Armitage trend", res.cochran_armitage_z, None, ca_p))
         }
         ContingencyMethod::McNemarPaired => {
             let err = if n_rows == 2 && n_cols == 2 {
@@ -216,6 +216,14 @@ fn append_mcnemar_outputs(out: &mut ResultSheet, b: u64, c: u64, confidence: Con
     Ok(())
 }
 
+fn opt_ratio_cell(val: Option<f64>) -> ResultCell {
+    match val {
+        Some(v) if v.is_finite() => num_cell(v),
+        Some(v) if v.is_infinite() && v.is_sign_positive() => ResultCell::Text(String::from("∞")),
+        _ => ResultCell::Empty,
+    }
+}
+
 fn append_2x2_ratios_tab(
     out: &mut ResultSheet,
     counts: &[Vec<u64>],
@@ -237,8 +245,8 @@ fn append_2x2_ratios_tab(
     let mut tab = TabBuilder::new("contingency-ratios", "Effect sizes & diagnostic proportions", ResultTabKind::ParametersAndConfidenceIntervals)
         .headers([String::from("Estimate"), format!("{}% CI", confidence.percent())]);
     if cont_spec.compute_odds_and_risk_ratios {
-        tab.push_row("Odds ratio (Baptista-Pike CI)", [opt_num_cell(r2x2.odds_ratio), opt_ci_cell(r2x2.or_baptista_pike_ci)])
-            .push_row("Relative risk (Koopman CI)", [opt_num_cell(r2x2.relative_risk), opt_ci_cell(r2x2.rr_koopman_ci)])
+        tab.push_row("Odds ratio (Baptista-Pike CI)", [opt_ratio_cell(r2x2.odds_ratio), opt_ci_cell(r2x2.or_baptista_pike_ci)])
+            .push_row("Relative risk (Koopman CI)", [opt_ratio_cell(r2x2.relative_risk), opt_ci_cell(r2x2.rr_koopman_ci)])
             .push_row("Risk difference (Newcombe CI)", [num_cell(r2x2.risk_difference), opt_ci_cell(r2x2.rd_newcombe_ci)])
             .push_row("Number needed to treat (NNT)", [text_cell(r2x2.nnt_point_label.clone()), text_cell(r2x2.nnt_ci_label.clone())])
             .push_row("NNT magnitude (1 / |RD|)", [opt_num_cell(r2x2.nnt_value), opt_ci_cell(r2x2.nnt_ci_bounds)]);
@@ -303,6 +311,9 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
         ContingencyMethod::FleissKappa => {
             return run_fleiss_kappa_sheet(&counts, confidence, p_fmt, out);
         }
+        ContingencyMethod::McNemarPaired => {
+            return run_mcnemar_sheet(&counts, cont_spec, confidence, p_fmt, out);
+        }
         _ => {}
     }
 
@@ -342,10 +353,6 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
     out.tabs.push(main_tab.build());
     append_reduced_margins_note(&mut out, &reduced);
 
-    if matches!(cont_spec.method, ContingencyMethod::McNemarPaired) {
-        append_mcnemar_outputs(&mut out, reduced.counts[0][1], reduced.counts[1][0], confidence, p_fmt)?;
-    }
-
     if reduced.n_rows == 2 && reduced.n_cols == 2 && (cont_spec.compute_odds_and_risk_ratios || cont_spec.compute_sensitivity_specificity) {
         append_2x2_ratios_tab(&mut out, &reduced.counts, cont_spec, confidence)?;
     }
@@ -364,7 +371,8 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
         ));
     }
 
-    let expected_ok = res.min_expected_count >= 5.0 || (res.n_rows > 2 && res.cells_lt5_fraction <= 0.2 && res.min_expected_count >= 1.0);
+    let expected_ok =
+        res.min_expected_count >= 5.0 || ((res.n_rows > 2 || res.n_cols > 2) && res.cells_lt5_fraction <= 0.2 && res.min_expected_count >= 1.0);
     out.checklist.push(checklist_item(
         "Minimum expected cell count",
         if expected_ok { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
@@ -375,6 +383,107 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
             "Small expected counts detected (< 5); large-sample chi-square asymptotic accuracy is reduced."
         },
     ));
+
+    Ok(out)
+}
+
+/// Dispatch McNemar's paired `2 x 2` test directly on the unreduced table so valid zero-margin
+/// paired tables are not rejected and asymmetric `>= 3 x 3` tables cannot be misaligned into `2 x 2`.
+fn run_mcnemar_sheet(
+    counts: &[Vec<u64>],
+    cont_spec: &ContingencySpec,
+    confidence: ConfidenceLevel,
+    p_fmt: PValueFormat,
+    mut out: ResultSheet,
+) -> Result<ResultSheet, StatsError> {
+    let n_rows = counts.len();
+    let n_cols = counts.first().map_or(0, Vec::len);
+    if n_rows != 2 || n_cols != 2 || counts.iter().any(|r| r.len() != 2) {
+        return Err(StatsError::InvalidParameter { name: "mcnemar_dimensions", value: n_rows.max(n_cols) as f64 });
+    }
+    let (r_sums, c_sums, total_count) = checked_table_margins(counts)?;
+    if total_count == 0 {
+        return Err(StatsError::EmptyInput);
+    }
+
+    let mc = mcnemar_detailed(counts[0][1], counts[1][0], confidence)?;
+    let all_margins_positive = !r_sums.contains(&0) && !c_sums.contains(&0);
+
+    let mut headers = vec![String::from("Statistic"), String::from("df"), String::from("P value")];
+    let mut row_main = vec![num_cell(mc.chi_square_yates), num_cell(1.0), p_cell_at_alpha(mc.exact_p_value, p_fmt, confidence.alpha())];
+
+    let mut aux_res: Option<ContingencyResult> = None;
+    if all_margins_positive {
+        let reduced = ReducedContingencyTable {
+            counts: counts.to_vec(),
+            active_rows: vec![0, 1],
+            active_cols: vec![0, 1],
+            r_sums: r_sums.clone(),
+            c_sums: c_sums.clone(),
+            total_count,
+            n_rows: 2,
+            n_cols: 2,
+            dropped_rows: 0,
+            dropped_cols: 0,
+        };
+        let res = analyze_reduced_contingency(&reduced, false, confidence)?;
+        push_scalar(&mut out, "Chi-square", None, res.chi_square);
+        push_scalar(&mut out, "Chi-square P value", None, res.chi_square_p);
+        push_scalar(&mut out, "G-squared", None, res.g_squared);
+        push_scalar(&mut out, "Cramer's V", None, res.cramers_v);
+        if let Some(fp) = res.fisher_exact_p {
+            push_scalar(&mut out, "Fisher's exact P", None, fp);
+        }
+        aux_res = Some(res);
+    }
+
+    if cont_spec.compute_phi_and_cramers_v {
+        headers.push(String::from("Cramer's V / Phi"));
+        headers.push(format!("{}% CI", confidence.percent()));
+        if let Some(res) = &aux_res {
+            row_main.push(num_cell(res.phi.unwrap_or(res.cramers_v)));
+            row_main.push(opt_ci_cell(res.cramers_v_ci));
+        } else {
+            row_main.push(ResultCell::Empty);
+            row_main.push(ResultCell::Empty);
+        }
+    }
+
+    let mut main_tab =
+        TabBuilder::new("contingency-main", "Contingency analysis", ResultTabKind::MainSummary).headers(headers).row("McNemar's test", row_main);
+    if !all_margins_positive {
+        main_tab.push_footnote(
+            "One or more row or column margins are zero; paired 2 x 2 cell alignment was preserved for McNemar's test while auxiliary chi-square and Phi/Cramer's V were omitted.",
+        );
+    }
+    out.tabs.push(main_tab.build());
+
+    append_mcnemar_outputs(&mut out, counts[0][1], counts[1][0], confidence, p_fmt)?;
+
+    if (cont_spec.compute_odds_and_risk_ratios || cont_spec.compute_sensitivity_specificity) && r_sums[0] > 0 && r_sums[1] > 0 {
+        append_2x2_ratios_tab(&mut out, counts, cont_spec, confidence)?;
+    }
+
+    if let Some(res) = &aux_res {
+        let expected_ok = res.min_expected_count >= 5.0;
+        out.checklist.push(checklist_item(
+            "Minimum expected cell count",
+            if expected_ok { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+            Some(format!("min E = {:.2}, {:.1}% cells < 5", res.min_expected_count, 100.0 * res.cells_lt5_fraction)),
+            if expected_ok {
+                "Expected cell counts satisfy Cochran's guidelines for asymptotic chi-square approximation."
+            } else {
+                "Small expected counts detected (< 5); large-sample chi-square asymptotic accuracy is reduced."
+            },
+        ));
+    } else {
+        out.checklist.push(checklist_item(
+            "Paired table zero margin",
+            ChecklistStatus::Info,
+            Some(format!("b = {}, c = {}", counts[0][1], counts[1][0])),
+            "McNemar's paired test evaluated directly on the unreduced 2 x 2 discordant pairs (b, c) without dropping empty margins.",
+        ));
+    }
 
     Ok(out)
 }

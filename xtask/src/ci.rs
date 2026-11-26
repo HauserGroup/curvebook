@@ -47,7 +47,10 @@ fn run_stage(root: &Path, stage: &str) -> Result<(), String> {
     match stage {
         "build" => build_archive(root)?,
         "policy" => policy(root, true)?,
-        "lint" => run_cargo_strs(root, &["clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"])?,
+        "lint" => {
+            run_cargo_strs(root, &["clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"])?;
+            run_cargo_strs(root, DOCS_SITE_CLIPPY_ARGS)?;
+        }
         "tests" => native_tests(root, false)?,
         "performance" => native_tests(root, true)?,
         "doctests" => {
@@ -114,13 +117,31 @@ pub(crate) fn test_args(root: &Path, performance: bool, archive: Option<&str>) -
     args
 }
 
+pub(crate) const DOCS_SITE_CLIPPY_ARGS: &[&str] =
+    &["clippy", "--locked", "-p", "xtask", "--features", "docs-site", "--all-targets", "--", "-D", "warnings"];
+
+pub(crate) fn docs_site_test_args(use_nextest: bool) -> Vec<String> {
+    if use_nextest {
+        ["nextest", "run", "--profile", "ci", "--no-fail-fast", "--locked", "-p", "xtask", "--features", "docs-site", "--all-targets"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    } else {
+        ["test", "--locked", "-p", "xtask", "--features", "docs-site", "--all-targets"].into_iter().map(String::from).collect()
+    }
+}
+
 fn native_tests(root: &Path, performance: bool) -> Result<(), String> {
     require_nextest()?;
     let archive = std::env::var("CURVEBOOK_CI_TEST_ARCHIVE").map(Some).or_else(|err| match err {
         std::env::VarError::NotPresent => Ok(None),
         std::env::VarError::NotUnicode(_) => Err(String::from("CURVEBOOK_CI_TEST_ARCHIVE must be UTF-8")),
     })?;
-    run_cargo(root, &test_args(root, performance, archive.as_deref()))
+    run_cargo(root, &test_args(root, performance, archive.as_deref()))?;
+    if !performance {
+        run_cargo(root, &docs_site_test_args(true))?;
+    }
+    Ok(())
 }
 
 const FEATURE_CHECK_COMMANDS: &[&[&str]] = &[
@@ -249,5 +270,18 @@ mod tests {
                 &["check", "--locked", "-p", "curvebook-mcp", "--no-default-features"][..],
             ]
         );
+    }
+
+    #[test]
+    fn aud_12_04_docs_site_clippy_and_test_commands_enable_docs_site_feature() {
+        assert!(super::DOCS_SITE_CLIPPY_ARGS.windows(2).any(|w| w == ["--features", "docs-site"]));
+        assert!(super::DOCS_SITE_CLIPPY_ARGS.contains(&"--all-targets"));
+        for use_nextest in [true, false] {
+            let args = super::docs_site_test_args(use_nextest);
+            assert!(args.windows(2).any(|w| w == ["-p", "xtask"]));
+            assert!(args.windows(2).any(|w| w == ["--features", "docs-site"]));
+            assert!(args.contains(&String::from("--all-targets")));
+            assert!(args.contains(&String::from("--locked")));
+        }
     }
 }

@@ -12,10 +12,11 @@
 //!   *Journal of the American Statistical Association*, 74(368), 829-836.
 //!   `doi:10.1080/01621459.1979.10481038`.
 
-use curvebook_doc::{Cell, DataSheet, SubcolumnMode, SummarizedPoint, TableArchetype, XColumnMode, XyTable};
+use curvebook_doc::{Cell, DataSheet, SplineLowessSpec, SubcolumnMode, SummarizedPoint, TableArchetype, XColumnMode, XyTable};
 use curvebook_math::{DenseMatrix, solve_linear_least_squares, sum};
 
 use crate::error::TransformError;
+use crate::spline::fit_lowess_sorted_values;
 
 /// Options controlling Area Under the Curve and peak detection.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -271,7 +272,7 @@ fn compute_auc_internal(raw: &[(f64, f64, Option<f64>)], opts: &AucOptions) -> R
     let qualifying: Vec<PeakSummary> = raw_peaks
         .into_iter()
         .filter(|p| p.height_above_baseline >= opts.min_peak_height)
-        .filter(|p| pos_area <= 0.0 || (p.area / pos_area) >= opts.min_area_fraction)
+        .filter(|p| if pos_area > 0.0 { (p.area / pos_area) >= opts.min_area_fraction } else { opts.min_area_fraction == 0.0 })
         .map(|mut p| {
             p.area_fraction = if pos_area > 0.0 { p.area / pos_area } else { 0.0 };
             p
@@ -383,7 +384,14 @@ fn integrate_segments_and_peaks(pts: &[CurvePoint], baseline: f64) -> (f64, f64,
                 peaks.push(finish_peak(finished, p0.x, baseline));
             }
         } else {
-            let frac = d0.abs() / (d0 - d1).abs();
+            let scale = d0.abs().max(d1.abs());
+            let frac = if scale > 0.0 && scale.is_finite() {
+                let s0 = d0 / scale;
+                let s1 = d1 / scale;
+                (s0.abs() / (s0 - s1).abs()).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
             let x_cross = p0.x + frac * dx;
             if d0 > 0.0 {
                 let area = 0.5 * d0 * (x_cross - p0.x);
@@ -444,8 +452,32 @@ fn propagate_trapezoidal_se(pts: &mut [CurvePoint]) -> Option<f64> {
     Some(var_acc.total().max(0.0).sqrt())
 }
 
+fn validate_smooth_method(method: SmoothMethod) -> Result<(), TransformError> {
+    match method {
+        SmoothMethod::SavitzkyGolay5 | SmoothMethod::SavitzkyGolay7 | SmoothMethod::SavitzkyGolay9 => Ok(()),
+        SmoothMethod::MovingAverage { window } => {
+            if window == 0 {
+                return Err(TransformError::InvalidSpec { message: String::from("moving average window must be >= 1") });
+            }
+            Ok(())
+        }
+        SmoothMethod::Lowess { span, robustness_iters } => {
+            if !span.is_finite() || span <= 0.0 || span > 1.0 {
+                return Err(TransformError::InvalidSpec { message: format!("LOWESS span must be finite and in (0, 1], got {span}") });
+            }
+            if robustness_iters > SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("LOWESS robustness_iters must be <= {}, got {robustness_iters}", SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS),
+                });
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Smooth an `(x, y)` series using Savitzky-Golay, moving average, or LOWESS.
 pub fn smooth_xy(points: &[(f64, f64)], method: SmoothMethod) -> Result<Vec<(f64, f64)>, TransformError> {
+    validate_smooth_method(method)?;
     if points.is_empty() {
         return Ok(Vec::new());
     }
@@ -461,6 +493,9 @@ pub fn smooth_xy(points: &[(f64, f64)], method: SmoothMethod) -> Result<Vec<(f64
         SmoothMethod::Lowess { span, robustness_iters } => lowess(&xs, &ys, span, robustness_iters)?,
     };
 
+    if smoothed_y.iter().any(|v| !v.is_finite()) {
+        return Err(TransformError::InvalidInput { message: String::from("curve smoothing produced non-finite value") });
+    }
     Ok(xs.into_iter().zip(smoothed_y).collect())
 }
 
@@ -469,10 +504,13 @@ fn is_uniform_grid(xs: &[f64]) -> bool {
         return true;
     }
     let h0 = xs[1] - xs[0];
-    if h0 <= 0.0 {
+    if !h0.is_finite() || h0 <= 0.0 {
         return false;
     }
-    xs.windows(2).all(|w| ((w[1] - w[0]) - h0).abs() <= 1e-7 * h0.abs())
+    xs.windows(2).all(|w| {
+        let h = w[1] - w[0];
+        h.is_finite() && (h - h0).abs() <= 1e-7 * h0.abs()
+    })
 }
 
 /// Polynomial order (`d = 3`, quadratic/cubic family) for Savitzky–Golay smoothing.
@@ -506,11 +544,26 @@ fn savitzky_golay(xs: &[f64], ys: &[f64], width: usize) -> Result<Vec<f64>, Tran
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         if uniform && i >= half && i + half < n {
+            let window = &ys[i - half..=i + half];
             let mut acc = sum::NeumaierSum::new();
-            for (k, &w) in weights.iter().enumerate() {
-                acc.add(w * ys[i - half + k]);
+            for (&w, &yv) in weights.iter().zip(window.iter()) {
+                acc.add(w * yv);
             }
-            out.push(acc.total());
+            let val = acc.total();
+            if val.is_finite() {
+                out.push(val);
+            } else {
+                let scale = window.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+                if scale > 0.0 && scale.is_finite() {
+                    let mut scaled = sum::NeumaierSum::new();
+                    for (&w, &yv) in weights.iter().zip(window.iter()) {
+                        scaled.add(w * (yv / scale));
+                    }
+                    out.push(scaled.total() * scale);
+                } else {
+                    out.push(ys[i]);
+                }
+            }
         } else {
             let start = if i < half {
                 0
@@ -558,6 +611,9 @@ fn local_poly_eval(xs: &[f64], ys: &[f64], range: std::ops::Range<usize>, x_targ
     }
     let a = DenseMatrix::from_row_major(m, p, data).ok()?;
     let (sol, _) = solve_linear_least_squares(&a, &b).ok()?;
+    if sol.rank == 0 {
+        return None;
+    }
     sol.coefficients.first().copied().filter(|v| v.is_finite())
 }
 
@@ -572,7 +628,7 @@ fn moving_average(ys: &[f64], window: usize) -> Result<Vec<f64>, TransformError>
     for i in 0..n {
         let start = i.saturating_sub(half_left);
         let end = (i + half_right + 1).min(n);
-        out.push(sum::sum(&ys[start..end]) / ((end - start) as f64));
+        out.push(sum::mean(&ys[start..end])?);
     }
     Ok(out)
 }
@@ -583,94 +639,25 @@ fn lowess(xs: &[f64], ys: &[f64], span: f64, robustness_iters: usize) -> Result<
     if !span.is_finite() || span <= 0.0 || span > 1.0 {
         return Err(TransformError::InvalidSpec { message: format!("LOWESS span must be in (0, 1], got {span}") });
     }
+    if robustness_iters > SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS {
+        return Err(TransformError::InvalidSpec {
+            message: format!("LOWESS robustness_iters must be <= {}, got {robustness_iters}", SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS),
+        });
+    }
     let n = xs.len();
     if n <= 2 {
         return Ok(ys.to_vec());
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let q = ((span * (n as f64)).round() as usize).clamp(2, n);
-    let mut rob_weights = vec![1.0_f64; n];
-    let mut fitted = ys.to_vec();
-
-    for iter in 0..=robustness_iters {
-        for (i, slot) in fitted.iter_mut().enumerate().take(n) {
-            *slot = lowess_point(xs, ys, &rob_weights, i, q);
-        }
-        if iter < robustness_iters {
-            update_lowess_robust_weights(ys, &fitted, &mut rob_weights);
-        }
-    }
+    let (fitted, _) = fit_lowess_sorted_values(xs, ys, q, robustness_iters);
     Ok(fitted)
-}
-
-fn lowess_point(xs: &[f64], ys: &[f64], rob_weights: &[f64], i: usize, q: usize) -> f64 {
-    let xi = xs[i];
-    let mut dists: Vec<(usize, f64)> = xs.iter().enumerate().map(|(j, &xj)| (j, (xj - xi).abs())).collect();
-    dists.sort_by(|a, b| a.1.total_cmp(&b.1));
-    let max_d = dists[q - 1].1;
-    if max_d == 0.0 {
-        return tied_lowess_mean(xs, ys, rob_weights, xi, ys[i]);
-    }
-
-    let mut data = Vec::with_capacity(q * 2);
-    let mut b = Vec::with_capacity(q);
-    for &(j, d) in &dists[..q] {
-        let u = (d / max_d).min(1.0);
-        let tricube = (1.0 - u * u * u).powi(3);
-        let w = (tricube * rob_weights[j]).max(0.0).sqrt();
-        data.push(w);
-        data.push(w * (xs[j] - xi));
-        b.push(w * ys[j]);
-    }
-    let Ok(a) = DenseMatrix::from_row_major(q, 2, data) else {
-        return ys[i];
-    };
-    solve_linear_least_squares(&a, &b).ok().and_then(|(s, _)| s.coefficients.first().copied()).filter(|v| v.is_finite()).unwrap_or(ys[i])
-}
-
-fn tied_lowess_mean(xs: &[f64], ys: &[f64], rob_weights: &[f64], xi: f64, fallback: f64) -> f64 {
-    let mut w_sum = sum::NeumaierSum::new();
-    let mut wy_sum = sum::NeumaierSum::new();
-    let mut tied_ys = Vec::new();
-    for (&xj, (&yj, &rw)) in xs.iter().zip(ys.iter().zip(rob_weights.iter())) {
-        if (xj - xi).abs() == 0.0 {
-            tied_ys.push(yj);
-            let w = rw.max(0.0);
-            if w > 0.0 {
-                w_sum.add(w);
-                wy_sum.add(w * yj);
-            }
-        }
-    }
-    let total_w = w_sum.total();
-    if total_w > 0.0 {
-        let weighted = wy_sum.total() / total_w;
-        if weighted.is_finite() {
-            return weighted;
-        }
-    }
-    sum::mean(&tied_ys).ok().filter(|v| v.is_finite()).unwrap_or(fallback)
-}
-
-fn update_lowess_robust_weights(ys: &[f64], fitted: &[f64], rob_weights: &mut [f64]) {
-    let mut abs_res: Vec<f64> = ys.iter().zip(fitted.iter()).map(|(y, f)| (y - f).abs()).collect();
-    let mut sorted = abs_res.clone();
-    sorted.sort_by(f64::total_cmp);
-    let mad = if sorted.len().is_multiple_of(2) { 0.5 * (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) } else { sorted[sorted.len() / 2] };
-    let scale = 6.0 * mad;
-    if scale <= 0.0 {
-        rob_weights.fill(1.0);
-        return;
-    }
-    for (w, r) in rob_weights.iter_mut().zip(abs_res.drain(..)) {
-        let u = r / scale;
-        *w = if u < 1.0 { (1.0 - u * u).powi(2) } else { 0.0 };
-    }
 }
 
 /// Compute numerical first (`dy/dx`) or second (`d2y/dx2`) derivative of an `(x, y)` curve.
 ///
-/// Uses exact 3-point Lagrange quadratic differentiation on both uniform and non-uniform grids.
+/// Uses exact shifted-step 3-point Newton/Lagrange quadratic divided differences on both uniform
+/// and non-uniform grids, eliminating coordinate-offset cancellation and `h^2` underflow/overflow.
 pub fn differentiate_xy(points: &[(f64, f64)], order: DerivativeOrder) -> Result<Vec<(f64, f64)>, TransformError> {
     let pts = prepare_sorted_points(&points.iter().map(|&(x, y)| (x, y, None)).collect::<Vec<_>>())?;
     let n = pts.len();
@@ -686,6 +673,9 @@ pub fn differentiate_xy(points: &[(f64, f64)], order: DerivativeOrder) -> Result
             DerivativeOrder::First => (pts[1].y - pts[0].y) / dx,
             DerivativeOrder::Second => 0.0,
         };
+        if !slope.is_finite() {
+            return Err(TransformError::InvalidInput { message: String::from("derivative overflowed to non-finite value") });
+        }
         return Ok(vec![(pts[0].x, slope), (pts[1].x, slope)]);
     }
 
@@ -701,18 +691,38 @@ pub fn differentiate_xy(points: &[(f64, f64)], order: DerivativeOrder) -> Result
         let (x0, y0) = (pts[i0].x, pts[i0].y);
         let (x1, y1) = (pts[i1].x, pts[i1].y);
         let (x2, y2) = (pts[i2].x, pts[i2].y);
-        let d0 = (x0 - x1) * (x0 - x2);
-        let d1 = (x1 - x0) * (x1 - x2);
-        let d2 = (x2 - x0) * (x2 - x1);
-        if d0 == 0.0 || d1 == 0.0 || d2 == 0.0 {
+        let h1 = x1 - x0;
+        let h2 = x2 - x1;
+        if h1 <= 0.0 || h2 <= 0.0 {
             return Err(TransformError::InvalidInput { message: String::from("duplicate x coordinates in differentiation") });
         }
-        let xt = pts[i].x;
+        let s1 = (y1 - y0) / h1;
+        let s2 = (y2 - y1) / h2;
+        let h_max = h1.max(h2);
+        let u1 = h1 / h_max;
+        let u2 = h2 / h_max;
+        let u_sum = u1 + u2;
+        let r1 = u1 / u_sum;
+        let r2 = u2 / u_sum;
         let val = match order {
-            DerivativeOrder::First => y0 * ((2.0 * xt - x1 - x2) / d0) + y1 * ((2.0 * xt - x0 - x2) / d1) + y2 * ((2.0 * xt - x0 - x1) / d2),
-            DerivativeOrder::Second => 2.0 * (y0 / d0 + y1 / d1 + y2 / d2),
+            DerivativeOrder::First => {
+                if i == 0 {
+                    s1 - r1 * (s2 - s1)
+                } else if i + 1 == n {
+                    s2 + r2 * (s2 - s1)
+                } else {
+                    r2 * s1 + r1 * s2
+                }
+            }
+            DerivativeOrder::Second => {
+                let h_sum = h1 + h2;
+                if h_sum.is_finite() { 2.0 * ((s2 - s1) / h_sum) } else { (s2 - s1) / (0.5 * h1 + 0.5 * h2) }
+            }
         };
-        out.push((xt, val));
+        if !val.is_finite() {
+            return Err(TransformError::InvalidInput { message: String::from("derivative overflowed to non-finite value") });
+        }
+        out.push((pts[i].x, val));
     }
     Ok(out)
 }
@@ -846,4 +856,81 @@ fn extract_xy_mean_entries(xy: &XyTable, ds_idx: usize) -> Result<Vec<(usize, f6
     // Match `prepare_sorted_points` ordering so `transformed` aligns 1:1 with `entries`.
     entries.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     Ok(entries)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use curvebook_doc::SplineLowessSpec;
+
+    use super::{AucOptions, DerivativeOrder, SmoothMethod, compute_auc, differentiate_xy, smooth_xy};
+    use crate::error::TransformError;
+
+    #[test]
+    fn aud_04_04_and_19_curve_lowess_no_collapse_and_caps_robustness_iters() {
+        // 1. Cap robustness_iters cleanly even on tiny or empty input.
+        assert!(matches!(
+            smooth_xy(&[], SmoothMethod::Lowess { span: 0.5, robustness_iters: SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS + 1 }),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+        assert!(matches!(
+            smooth_xy(&[(0.0, 1.0), (1.0, 2.0)], SmoothMethod::Lowess { span: 0.5, robustness_iters: usize::MAX }),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+        assert!(matches!(smooth_xy(&[], SmoothMethod::MovingAverage { window: 0 }), Err(TransformError::InvalidSpec { .. })));
+
+        // 2. Bisquare peak neighborhood never collapses to 0.0.
+        let mut peak_pts: Vec<(f64, f64)> = (0..21).map(|i| (i as f64, 50.0)).collect();
+        peak_pts[10].1 = 200.0;
+        peak_pts[11].1 = 200.0;
+        let smoothed = smooth_xy(&peak_pts, SmoothMethod::Lowess { span: 0.15, robustness_iters: 3 }).expect("LOWESS peak");
+        for &(x, y) in &smoothed {
+            assert!(y.is_finite() && y >= 49.0, "curve::lowess collapsed at x={x}: got {y}");
+        }
+    }
+
+    #[test]
+    fn aud_04_41_shifted_lagrange_derivative_scaled_auc_crossing_and_zero_area_filter() {
+        // 1. Offset cancellation on non-power-of-two h = 0.001 at x ~ 1e9 (y = (x - x0)^2),
+        //    and large Y baseline (y = 1e12 + (x - x0)^2 at h = 0.3).
+        let x0 = 1e9_f64;
+        let x1 = x0 + 0.001;
+        let x2 = x0 + 0.002;
+        let x_offset_pts = [(x0, 0.0), (x1, (x1 - x0).powi(2)), (x2, (x2 - x0).powi(2))];
+        let d1 = differentiate_xy(&x_offset_pts, DerivativeOrder::First).expect("shifted d1");
+        let d2 = differentiate_xy(&x_offset_pts, DerivativeOrder::Second).expect("shifted d2");
+        assert!((d1[1].1 - 2.0 * (x1 - x0)).abs() < 1e-12, "d1 x-offset cancellation: got {}", d1[1].1);
+        assert!((d2[1].1 - 2.0).abs() < 1e-10, "d2 x-offset cancellation: got {}", d2[1].1);
+
+        let xb1 = x0 + 0.3;
+        let xb2 = x0 + 0.6;
+        let y_base_pts = [(x0, 1e12), (xb1, 1e12 + (xb1 - x0).powi(2)), (xb2, 1e12 + (xb2 - x0).powi(2))];
+        let d2_base = differentiate_xy(&y_base_pts, DerivativeOrder::Second).expect("shifted d2 baseline");
+        assert!((d2_base[1].1 - 2.0).abs() < 1e-3, "d2 y-baseline cancellation: got {}", d2_base[1].1);
+
+        // 2. Tiny dx = 1e-162 must not falsely error as duplicate X (old d0 underflowed to 0.0).
+        let dx = 1e-162_f64;
+        let tiny = [(0.0, 0.0), (dx, dx), (2.0 * dx, 2.0 * dx)];
+        let d1_tiny = differentiate_xy(&tiny, DerivativeOrder::First).expect("tiny dx d1");
+        for &(_, v) in &d1_tiny {
+            assert!((v - 1.0).abs() < 1e-12, "tiny dx first derivative got {v}");
+        }
+
+        // 3. Extreme Y sign crossing: d0 = 1e308, d1 = -1e308 must cross at midpoint x = 1.0 (not 0.0).
+        let extreme_pts = [(0.0, 1e308), (2.0, -1e308)];
+        let auc_ext = compute_auc(&extreme_pts, &AucOptions::default()).expect("extreme AUC");
+        assert_eq!(auc_ext.peaks.len(), 1);
+        assert!((auc_ext.peaks[0].end_x - 1.0).abs() < 1e-12, "expected crossing at x=1.0, got {}", auc_ext.peaks[0].end_x);
+
+        // 4. Zero-area underflow peak must be rejected when min_area_fraction > 0.0.
+        let tiny_peak = [(0.0, 0.0), (1e-200, 1e-200), (2e-200, 0.0)];
+        let auc_filtered = compute_auc(&tiny_peak, &AucOptions { min_area_fraction: 0.1, ..AucOptions::default() }).expect("filtered AUC");
+        assert!(auc_filtered.peaks.is_empty(), "zero-area peak must be rejected when min_area_fraction > 0");
+        let auc_unfiltered = compute_auc(&tiny_peak, &AucOptions::default()).expect("unfiltered AUC");
+        assert_eq!(auc_unfiltered.peaks.len(), 1);
+
+        // 5. Moving average overflow-safe mean on [1e308, 1e308].
+        let ma = smooth_xy(&[(0.0, 1e308), (1.0, 1e308)], SmoothMethod::MovingAverage { window: 2 }).expect("MA large");
+        assert!((ma[0].1 - 1e308).abs() <= 1e295);
+    }
 }

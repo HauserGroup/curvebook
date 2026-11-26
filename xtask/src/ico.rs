@@ -7,6 +7,8 @@ use curvebook_platform::{read_regular_file_bytes, write_atomic};
 
 const PNG_SIG: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 const MAX_ICO_INPUT_PNG_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ICO_TOTAL_BYTES: u32 = 256 * 1024 * 1024;
+const MIN_PNG_IHDR_BYTES: usize = 29; // 8-byte signature + 4-byte length + 4-byte type + 13-byte IHDR data
 
 struct Frame {
     width: u32,
@@ -26,6 +28,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
 }
 
 pub fn pack_files(out: &Path, inputs: &[PathBuf]) -> Result<(), String> {
+    if inputs.is_empty() {
+        return Err(String::from("ICO requires at least one PNG input"));
+    }
     let mut frames = Vec::with_capacity(inputs.len());
     for path in inputs {
         let meta = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -49,26 +54,44 @@ pub fn pack_files(out: &Path, inputs: &[PathBuf]) -> Result<(), String> {
 }
 
 fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
-    if bytes.len() < 24 || bytes[..8] != PNG_SIG || &bytes[12..16] != b"IHDR" {
-        return Err(String::from("not a valid PNG with leading IHDR chunk"));
+    if bytes.len() < MIN_PNG_IHDR_BYTES || bytes[..8] != PNG_SIG || bytes[8..12] != 13u32.to_be_bytes() || &bytes[12..16] != b"IHDR" {
+        return Err(String::from("not a valid PNG with leading 13-byte IHDR chunk"));
     }
     let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
     let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
     Ok((w, h))
 }
 
+fn compute_ico_layout(frame_lens: &[usize], max_total_bytes: u32) -> Result<(u16, u32, u32), String> {
+    if frame_lens.is_empty() {
+        return Err(String::from("ICO requires at least one PNG frame"));
+    }
+    let count = u16::try_from(frame_lens.len()).map_err(|_| String::from("too many ICO frames"))?;
+    let header_len = u32::from(count).checked_mul(16).and_then(|n| n.checked_add(6)).ok_or_else(|| String::from("ICO header overflow"))?;
+    let mut total = header_len;
+    for &len in frame_lens {
+        let size = u32::try_from(len).map_err(|_| String::from("PNG frame > 4 GiB"))?;
+        total = total.checked_add(size).ok_or_else(|| String::from("ICO offset overflow"))?;
+    }
+    if total > max_total_bytes {
+        return Err(format!("ICO total size {total} bytes exceeds budget ({max_total_bytes} bytes)"));
+    }
+    Ok((count, header_len, total))
+}
+
 fn encode_ico(frames: &[Frame]) -> Result<Vec<u8>, String> {
-    let count = u16::try_from(frames.len()).map_err(|_| String::from("too many ICO frames"))?;
-    let header_len = 6usize + 16usize * frames.len();
-    let total_payload: usize = frames.iter().map(|f| f.bytes.len()).sum();
-    let mut buf = Vec::with_capacity(header_len + total_payload);
+    let frame_lens: Vec<usize> = frames.iter().map(|f| f.bytes.len()).collect();
+    let (count, header_len, total_u32) = compute_ico_layout(&frame_lens, MAX_ICO_TOTAL_BYTES)?;
+    let total_usize = usize::try_from(total_u32).map_err(|_| String::from("ICO total size overflows usize"))?;
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(total_usize).map_err(|e| format!("ICO buffer allocation failed ({total_usize} bytes): {e}"))?;
 
     // ICONDIR: reserved (0), type (1 = icon), count
     buf.extend_from_slice(&0u16.to_le_bytes());
     buf.extend_from_slice(&1u16.to_le_bytes());
     buf.extend_from_slice(&count.to_le_bytes());
 
-    let mut offset = u32::try_from(header_len).map_err(|_| String::from("ICO header overflow"))?;
+    let mut offset = header_len;
     for f in frames {
         let w_byte = if f.width == 256 { 0u8 } else { u8::try_from(f.width).unwrap_or(0) };
         let h_byte = if f.height == 256 { 0u8 } else { u8::try_from(f.height).unwrap_or(0) };
@@ -92,7 +115,8 @@ fn encode_ico(frames: &[Frame]) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, encode_ico, png_dimensions};
+    use super::{Frame, MAX_ICO_INPUT_PNG_BYTES, MAX_ICO_TOTAL_BYTES, compute_ico_layout, encode_ico, pack_files, png_dimensions};
+    use crate::scan_util::test_support::TestDir;
 
     fn fake_png_header(w: u32, h: u32) -> Vec<u8> {
         let mut v = vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, b'I', b'H', b'D', b'R'];
@@ -111,5 +135,27 @@ mod tests {
         assert_eq!(&ico[0..6], &[0, 0, 1, 0, 2, 0]);
         assert_eq!(ico[6], 16);
         assert_eq!(ico[22], 0); // 256 encoded as 0 in ICONDIRENTRY
+    }
+
+    #[test]
+    fn aud_12_42_rejects_empty_inputs_bad_ihdr_length_and_offset_overflow() {
+        let dir = TestDir::new("ico-aud-12-42");
+        assert!(pack_files(&dir.join("empty.ico"), &[]).is_err());
+        assert!(encode_ico(&[]).is_err());
+
+        let mut bad_ihdr_len = fake_png_header(16, 16);
+        bad_ihdr_len[11] = 12;
+        assert!(png_dimensions(&bad_ihdr_len).is_err());
+
+        let truncated = fake_png_header(16, 16)[..24].to_vec();
+        assert!(png_dimensions(&truncated).is_err());
+
+        // 65 * 64 MiB exceeds u32::MAX without allocating the payload buffer.
+        let overflow_lens = vec![MAX_ICO_INPUT_PNG_BYTES; 65];
+        assert!(compute_ico_layout(&overflow_lens, u32::MAX).unwrap_err().contains("offset overflow"));
+
+        // 5 * 64 MiB fits u32 but exceeds the 256 MiB total ICO cap.
+        let over_cap_lens = vec![MAX_ICO_INPUT_PNG_BYTES; 5];
+        assert!(compute_ico_layout(&over_cap_lens, MAX_ICO_TOTAL_BYTES).unwrap_err().contains("exceeds budget"));
     }
 }

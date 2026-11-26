@@ -51,6 +51,7 @@ pub fn render_result_viewer_modal(
             if let Some(res) = rs
                 && !res.tabs.is_empty()
             {
+                let eff_tab_idx = tab_idx.min(res.tabs.len() - 1);
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     for (idx, tab) in res.tabs.iter().enumerate() {
@@ -60,7 +61,7 @@ pub fn render_result_viewer_modal(
                             meta,
                             &format!("result.tab.{idx}"),
                             &tab.title,
-                            idx == tab_idx.min(res.tabs.len() - 1),
+                            idx == eff_tab_idx,
                             &ControlEnablement::enabled(),
                         ) {
                             intents.push(UiIntent::SelectResultTab { index: idx });
@@ -71,14 +72,24 @@ pub fn render_result_viewer_modal(
         },
         |ui, _, _w, _h, _meta, _intents| {
             if let Some(res) = rs
-                && let Some(tab) = res.tabs.get(tab_idx).or_else(|| res.tabs.first())
+                && !res.tabs.is_empty()
+                && let Some(tab) = res.tabs.get(tab_idx.min(res.tabs.len() - 1))
             {
-                egui::Grid::new("result_viewer_table").striped(true).num_columns(tab.column_headers.len().max(1)).show(ui, |ui| {
+                let has_row_labels = !tab.row_labels.is_empty();
+                let num_cols = tab.column_headers.len().max(1) + usize::from(has_row_labels);
+                egui::Grid::new("result_viewer_table").striped(true).num_columns(num_cols).show(ui, |ui| {
+                    if has_row_labels {
+                        ui.label(egui::RichText::new("Row").strong().small().color(tokens.text_muted));
+                    }
                     for hdr in &tab.column_headers {
                         ui.label(egui::RichText::new(hdr).strong().small().color(tokens.text_strong));
                     }
                     ui.end_row();
-                    for row in tab.rows.iter().take(120) {
+                    for (r_idx, row) in tab.rows.iter().take(120).enumerate() {
+                        if has_row_labels {
+                            let row_lbl = tab.row_labels.get(r_idx).map_or("", String::as_str);
+                            ui.label(egui::RichText::new(row_lbl).strong().small().color(tokens.text_primary));
+                        }
                         for cell in row {
                             let s = ResultSheetViewState::format_result_cell(cell, res.analysis.p_value_format);
                             ui.label(egui::RichText::new(s).small());
@@ -86,6 +97,14 @@ pub fn render_result_viewer_modal(
                         ui.end_row();
                     }
                 });
+                if tab.rows.len() > 120 {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!("Showing first 120 of {} rows — open the full ResultSheet to inspect all rows.", tab.rows.len()))
+                            .small()
+                            .color(tokens.text_muted),
+                    );
+                }
             } else {
                 ui.label(tr(locale, "results.no_tabular"));
             }

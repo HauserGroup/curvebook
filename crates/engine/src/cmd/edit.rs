@@ -12,7 +12,7 @@ use crate::cmd::helpers::{
     require_layout_sheet, require_layout_sheet_mut, require_result_sheet,
 };
 use crate::cmd::image::{CropInsetsPatchParams, ImageBorderParams};
-use crate::cmd::layout::{LayoutImageInsertArgs, insert_image_on_layout, validate_layout_spec_in_doc};
+use crate::cmd::layout::{LayoutImageInsertArgs, insert_image_on_layout, unique_layout_panel_id, validate_layout_spec_in_doc};
 use crate::cmd::params::{command_schema, empty_object_schema, parse_params};
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects, command_specs};
 use crate::{CommandOutcome, EngineError};
@@ -85,6 +85,24 @@ fn parse_embedded_table_style(style_val: Option<&Value>, transpose_shorthand: Op
         let Some(obj) = val.as_object() else {
             return Err(bad_input("`style` must be an object"));
         };
+        for key in obj.keys() {
+            if !matches!(
+                key.as_str(),
+                "show_column_titles"
+                    | "show_row_titles"
+                    | "transpose"
+                    | "bold_headers"
+                    | "font_size_pt"
+                    | "outer_border_width_pt"
+                    | "gridline_width_pt"
+                    | "border_color"
+                    | "fill_color"
+            ) {
+                return Err(bad_input_ptr(&format!("/style/{key}"), format!("unknown `style` field `{key}`")).with_remediation(
+                    "Allowed `style` fields: `show_column_titles`, `show_row_titles`, `transpose`, `bold_headers`, `font_size_pt`, `outer_border_width_pt`, `gridline_width_pt`, `border_color`, `fill_color`.",
+                ));
+            }
+        }
         if let Some(v) = obj.get("show_column_titles") {
             style.show_column_titles = v.as_bool().ok_or_else(|| bad_input("`style.show_column_titles` must be bool"))?;
         }
@@ -212,7 +230,7 @@ fn run_edit_paste_result_table(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
             if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
                 return Err(bad_input("`bounds_pt` width and height must be > 0"));
             }
-            let panel_id = params.panel_id.unwrap_or_else(|| format!("panel-{}", candidate_spec.items.len() + 1));
+            let panel_id = unique_layout_panel_id(&candidate_spec.items, params.panel_id.as_deref());
             candidate_spec
                 .add_item(LayoutItem::LiveTable {
                     id: panel_id.clone(),

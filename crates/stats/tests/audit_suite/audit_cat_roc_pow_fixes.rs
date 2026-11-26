@@ -241,7 +241,8 @@ fn audit_22_contingency_method_df_yates_label_and_no_silent_fallback() {
     let ca_t = tab_by_id(&ca_res, "contingency-main");
     assert_eq!(ca_t.row_labels[0], "Cochran-Armitage trend");
     assert_close(cell_num(&ca_t.rows[0][0]).abs(), 3.819_143_697_985_006, 1e-10, "CA |z|");
-    assert_close(cell_num(&ca_t.rows[0][1]), 1.0, 1e-12, "CA df=1");
+    // AUD-05-60: Cochran-Armitage emits signed standard normal z (not z^2), so df is Empty.
+    assert_eq!(ca_t.rows[0][1], ResultCell::Empty);
     assert_close(cell_p(&ca_t.rows[0][2]), 0.000_133_915_738_267_329_4, 1e-12, "CA P");
 
     let s2 = contingency_sheet("s2", &[&[14, 6], &[5, 15]]);
@@ -417,7 +418,8 @@ fn audit_90_kappa_se_coverage_pe_one_and_erfc_tail() {
         let pj: Vec<f64> = cs.iter().map(|&s| s / (n * mf)).collect();
         let pe: f64 = pj.iter().map(|&p| p * p).sum();
         let pj3: f64 = pj.iter().map(|&p| p * p * p).sum();
-        (2.0 * (pe - (2.0 * mf - 3.0) * pe * pe + 2.0 * (mf - 2.0) * pj3) / (n * mf * (mf - 1.0) * (1.0 - pe).powi(2))).max(0.0).sqrt()
+        // AUD-05-04: Fleiss, Nee & Landis (1979) asymptotic null variance under H0: kappa = 0.
+        (2.0 * (pe + pe * pe - 2.0 * pj3) / (n * mf * (mf - 1.0) * (1.0 - pe).powi(2))).max(0.0).sqrt()
     };
     let fixed: Vec<Vec<u64>> = [
         [4, 0, 0],

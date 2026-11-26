@@ -62,17 +62,27 @@ pub fn f_test_variances(a: &[f64], b: &[f64]) -> Result<VarianceFTestResult, Sta
 
 /// Variance-ratio *F* test (Zar 2010, ch. 8) from summary SDs; same convention as [`f_test_variances`].
 pub(super) fn f_test_from_summary(sd_a: f64, n_a: f64, sd_b: f64, n_b: f64) -> Result<VarianceFTestResult, StatsError> {
-    let va = sd_a * sd_a;
-    let vb = sd_b * sd_b;
     let df_a = (n_a - 1.0).max(1.0);
     let df_b = (n_b - 1.0).max(1.0);
-    if va == 0.0 && vb == 0.0 {
+    if sd_a == 0.0 && sd_b == 0.0 {
         return Ok(VarianceFTestResult { f_statistic: 1.0, df_num: df_a, df_den: df_b, p_value: 1.0 });
     }
-    let (f_stat, df_n, df_d) = if va >= vb {
-        (if vb > 0.0 { va / vb } else { f64::INFINITY }, df_a, df_b)
+    let (f_stat, df_n, df_d) = if sd_a >= sd_b {
+        let f = if sd_b > 0.0 {
+            let ratio = sd_a / sd_b;
+            ratio * ratio
+        } else {
+            f64::INFINITY
+        };
+        (f, df_a, df_b)
     } else {
-        (if va > 0.0 { vb / va } else { f64::INFINITY }, df_b, df_a)
+        let f = if sd_a > 0.0 {
+            let ratio = sd_b / sd_a;
+            ratio * ratio
+        } else {
+            f64::INFINITY
+        };
+        (f, df_b, df_a)
     };
     let p_value = if f_stat.is_finite() { (2.0 * f_sf(f_stat, df_n, df_d)?).min(1.0) } else { 0.0 };
     Ok(VarianceFTestResult { f_statistic: f_stat, df_num: df_n, df_den: df_d, p_value })

@@ -37,6 +37,10 @@ pub fn collect_info_downstream_references(doc: &ProjectDocument, info: &InfoShee
     }
 
     for ds in &doc.data_sheets {
+        // Engine resolves MV `Info(...)` constants strictly from `ds.info_sheet_id` (`AUD-09-20`).
+        if ds.info_sheet_id.as_ref() != Some(&info.id) {
+            continue;
+        }
         if let TableArchetype::MultipleVariables(mv) = &ds.archetype {
             for var in &mv.variables {
                 if let VariableSource::Calculated { formula } = &var.source
@@ -45,7 +49,7 @@ pub fn collect_info_downstream_references(doc: &ProjectDocument, info: &InfoShee
                     let info_keys: Vec<String> = extract_dependencies(&expr)
                         .into_iter()
                         .filter_map(|d| match d {
-                            DependencyTarget::InfoConstant(k) => Some(k),
+                            DependencyTarget::InfoConstant(k) if info.get_constant(&k).is_some() => Some(k),
                             _ => None,
                         })
                         .collect();
@@ -339,31 +343,33 @@ pub(super) fn render_metadata_hooks_studio(
             _ => "number",
         };
         let val_json = match state.info_kind_draft {
-            0 if raw_val.is_empty() => serde_json::Value::Null,
+            0 | 2 if raw_val.is_empty() => serde_json::Value::Null,
             0 => parsed_num.map_or_else(|| json!(raw_val), |n| json!(n)),
             _ => json!(raw_val),
         };
         let units_val = if state.info_units_draft.trim().is_empty() { serde_json::Value::Null } else { json!(state.info_units_draft.trim()) };
-        intents.push_engine(
-            "info.setConstant",
-            json!({
-                "sheet_id": info.id.as_str(),
-                "name": state.info_name_draft.trim(),
-                "value": val_json,
-                "units": units_val,
-                "kind": kind_str,
-            }),
-        );
+        let mut payload = serde_json::Map::new();
+        payload.insert(String::from("sheet_id"), json!(info.id.as_str()));
+        payload.insert(String::from("name"), json!(state.info_name_draft.trim()));
+        payload.insert(String::from("value"), val_json);
+        payload.insert(String::from("units"), units_val);
+        if !(state.info_kind_draft == 2 && raw_val.is_empty()) {
+            payload.insert(String::from("kind"), json!(kind_str));
+        }
+        intents.push_engine("info.setConstant", serde_json::Value::Object(payload));
     }
 
     if let Some(existing_name) = state.info_selected_constant.clone()
         && info.get_constant(&existing_name).is_some()
-        && studio_full_button(
+        && state.info_name_draft.trim().eq_ignore_ascii_case(&existing_name)
+    {
+        let remove_lbl = format!("Remove \"{existing_name}\"");
+        if studio_full_button(
             ui,
             tokens,
             meta,
             &StudioButtonSpec {
-                label: "Remove Constant",
+                label: &remove_lbl,
                 tooltip: "Delete selected constant (info.removeConstant)",
                 selected: false,
                 enabled: ctx_in.enabled,
@@ -372,9 +378,9 @@ pub(super) fn render_metadata_hooks_studio(
                 command_id: Some("info.removeConstant"),
                 disabled_reason: None,
             },
-        )
-    {
-        intents.push_engine("info.removeConstant", json!({ "sheet_id": info.id.as_str(), "name": existing_name }));
+        ) {
+            intents.push_engine("info.removeConstant", json!({ "sheet_id": info.id.as_str(), "name": existing_name }));
+        }
     }
 
     ui.add_space(6.0);

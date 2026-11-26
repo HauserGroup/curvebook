@@ -122,8 +122,8 @@ fn passing_bablok_oracle_benchmark_and_collinear_baseline() {
     assert_approx_eq(pb.intercept_ci.0, 0.787499999999997, 1e-11, 1e-11, "PB16 intercept CI lower");
     assert_approx_eq(pb.intercept_ci.1, 1.383333333333331, 1e-11, 1e-11, "PB16 intercept CI upper");
     assert_approx_eq(pb.cusum_h, 1.0, 1e-12, 1e-12, "PB16 CUSUM H");
-    assert_approx_eq(pb.cusum_statistic, 1.0 / 8.0_f64.sqrt(), 1e-12, 1e-12, "PB16 CUSUM statistic H / sqrt(L + 1)");
-    assert_approx_eq(pb.cusum_p_value, 0.999_633_292_157_727_7, 1e-9, 1e-9, "PB16 CUSUM P");
+    assert_approx_eq(pb.cusum_statistic, 1.0 / 14.0_f64.sqrt(), 1e-12, 1e-12, "PB16 CUSUM statistic H / sqrt(L + l)");
+    assert_approx_eq(pb.cusum_p_value, 0.999_999_704_128_472, 1e-9, 1e-9, "PB16 CUSUM P");
     assert!(pb.linearity_passed);
 
     let x_exact = [1.0, 2.0, 3.0, 5.0, 8.0, 11.0];
@@ -158,8 +158,9 @@ fn passing_bablok_k_offset_symmetry_permutation_and_nonlinear_cusum() {
     let qy: Vec<f64> = qx.iter().map(|&x| 0.25 * x * x + 0.5 * x + 1.0).collect();
     let pb_quad = passing_bablok_regression(&qx, &qy, conf).unwrap();
     assert_approx_eq(pb_quad.cusum_h, 9.0, 1e-9, 1e-9, "quadratic CUSUM H");
-    assert_approx_eq(pb_quad.cusum_statistic, 9.0 / 19.0_f64.sqrt(), 1e-9, 1e-9, "quadratic CUSUM statistic");
-    assert!(pb_quad.cusum_p_value < 0.001 && !pb_quad.linearity_passed);
+    assert_approx_eq(pb_quad.cusum_statistic, 9.0 / 36.0_f64.sqrt(), 1e-9, 1e-9, "quadratic CUSUM statistic H / sqrt(L + l)");
+    assert_approx_eq(pb_quad.cusum_p_value, 0.022_217_962_616_525_1, 1e-9, 1e-9, "quadratic CUSUM P");
+    assert!(pb_quad.cusum_p_value < 0.05 && !pb_quad.linearity_passed);
 
     assert!(passing_bablok_regression(&[1.0, 2.0], &[3.0, 4.0], conf).is_err());
     assert!(passing_bablok_regression(&[1.0, 2.0, 3.0], &[1.0, f64::NAN, 3.0], conf).is_err());

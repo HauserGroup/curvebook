@@ -18,11 +18,20 @@
 
 use curvebook_doc::{
     AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, ResultCell, ResultScalarEntry, ResultSheet,
-    ResultStatus, ResultTab, ResultTabKind, SplineLowessMethod, SplineLowessSpec, TableArchetype, XyTable,
+    ResultStatus, ResultTab, ResultTabKind, SplineLowessMethod, SplineLowessSpec, TableArchetype, XColumnMode, XyTable,
 };
-use curvebook_math::{DenseMatrix, solve_linear_least_squares, sum};
+use curvebook_math::sum;
 
 use crate::error::TransformError;
+
+/// Exact-evaluation threshold for LOWESS: series with `n <= LOWESS_EXACT_MAX_N` or
+/// `n * q <= LOWESS_EXACT_WORK_LIMIT` evaluate every distinct knot directly (`delta = 0`);
+/// larger series switch to Cleveland (1979) delta-anchor linear interpolation to prevent `O(N^2)` hangs.
+const LOWESS_EXACT_MAX_N: usize = 200;
+const LOWESS_EXACT_WORK_LIMIT: usize = 500_000;
+const LOWESS_ANCHOR_TARGET: usize = 250;
+/// Safe upper ceiling on `ln(lambda)` in Reinsch smoothing-spline root search (`exp(700) < f64::MAX`).
+const MAX_SMOOTHING_LOG_LAMBDA: f64 = 700.0;
 
 /// Single piecewise cubic polynomial `a + b*u + c*u^2 + d*u^3` on `[x0, x1]` with `u = x - x0`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -142,7 +151,19 @@ impl FittedCurveModel {
                 let idx = pieces.partition_point(|p| p.x1 < x).min(pieces.len().saturating_sub(1));
                 pieces[idx].eval(x)
             }
-            Self::Lowess { xs, ys, rob_weights, q, .. } => eval_lowess_at(xs, ys, rob_weights, *q, x),
+            Self::Lowess { xs, ys, rob_weights, q, fitted_y } => {
+                if fitted_y.len() == xs.len()
+                    && xs.len() > LOWESS_EXACT_MAX_N
+                    && xs.len().saturating_mul(*q) > LOWESS_EXACT_WORK_LIMIT
+                    && let (Some(&x0), Some(&xn)) = (xs.first(), xs.last())
+                    && x >= x0
+                    && x <= xn
+                {
+                    eval_sorted_linear_interp(xs, fitted_y, x)
+                } else {
+                    eval_lowess_sorted_at(xs, ys, rob_weights, *q, x)
+                }
+            }
             Self::PiecewiseLinear { xs, ys } => eval_piecewise_linear(xs, ys, x),
         }
     }
@@ -153,12 +174,18 @@ impl FittedCurveModel {
         if !y_target.is_finite() || !x_lo.is_finite() || !x_hi.is_finite() || x_hi < x_lo {
             return Vec::new();
         }
-        let span = (x_hi - x_lo).abs().max(1.0);
-        let dedup_tol = 1e-9 * span;
+        let span = (x_hi - x_lo).abs();
+        let x_scale = span.max(x_lo.abs()).max(x_hi.abs());
+        let dedup_tol = (1e-9 * span).max(16.0 * f64::EPSILON * x_scale);
         let mut roots = Vec::new();
 
         match self {
-            Self::PiecewiseCubic { pieces, .. } => {
+            Self::PiecewiseCubic { pieces, left_slope, right_slope, x_min, x_max } => {
+                if let Some(first) = pieces.first()
+                    && x_lo < *x_min
+                {
+                    solve_linear_tail_root(*x_min, first.a, *left_slope, y_target, x_lo, x_hi.min(*x_min), x_scale, &mut roots);
+                }
                 for piece in pieces {
                     let seg_lo = piece.x0.max(x_lo);
                     let seg_hi = piece.x1.min(x_hi);
@@ -167,52 +194,52 @@ impl FittedCurveModel {
                     }
                     solve_cubic_piece_roots(piece, y_target, seg_lo, seg_hi, &mut roots);
                 }
+                if let Some(last) = pieces.last()
+                    && x_hi > *x_max
+                {
+                    solve_linear_tail_root(*x_max, last.eval(*x_max), *right_slope, y_target, x_lo.max(*x_max), x_hi, x_scale, &mut roots);
+                }
             }
             Self::PiecewiseLinear { xs, ys } => {
-                for i in 0..xs.len().saturating_sub(1) {
-                    let (xa, xb) = (xs[i], xs[i + 1]);
-                    let seg_lo = xa.max(x_lo);
-                    let seg_hi = xb.min(x_hi);
-                    if seg_hi < seg_lo || xb <= xa {
-                        continue;
-                    }
-                    let ya = eval_piecewise_linear(xs, ys, seg_lo) - y_target;
-                    let yb = eval_piecewise_linear(xs, ys, seg_hi) - y_target;
-                    if ya == 0.0 {
-                        roots.push(seg_lo);
-                    } else if yb == 0.0 {
-                        roots.push(seg_hi);
-                    } else if ya * yb < 0.0 {
-                        let frac = -ya / (yb - ya);
-                        let xr = seg_lo + frac * (seg_hi - seg_lo);
-                        if xr.is_finite() {
-                            roots.push(xr);
-                        }
-                    }
-                }
+                solve_piecewise_linear_roots(xs, ys, y_target, x_lo, x_hi, x_scale, &mut roots);
             }
-            Self::Lowess { xs, .. } => {
-                let n_steps = (4 * xs.len()).clamp(200, 2_000);
-                let step = (x_hi - x_lo) / (n_steps as f64);
-                let mut prev_x = x_lo;
-                let mut prev_f = self.eval(prev_x) - y_target;
-                if prev_f.abs() <= 1e-12 {
-                    roots.push(prev_x);
-                }
-                for k in 1..=n_steps {
-                    let curr_x = if k == n_steps { x_hi } else { x_lo + (k as f64) * step };
-                    let curr_f = self.eval(curr_x) - y_target;
-                    if curr_f.abs() <= 1e-12 {
-                        roots.push(curr_x);
-                    } else if prev_f.is_finite()
-                        && curr_f.is_finite()
-                        && prev_f * curr_f < 0.0
-                        && let Some(r) = brent_root(|x| self.eval(x) - y_target, prev_x, curr_x, prev_f, curr_f)
-                    {
-                        roots.push(r);
+            Self::Lowess { xs, ys, fitted_y, .. } => {
+                let mut y_scale = y_target.abs();
+                for &y in ys.iter().chain(fitted_y.iter()) {
+                    if y.is_finite() {
+                        y_scale = y_scale.max(y.abs());
                     }
-                    prev_x = curr_x;
-                    prev_f = curr_f;
+                }
+                let res_tol = 1e-12 * y_scale;
+                if x_hi == x_lo {
+                    let f0 = self.eval(x_lo) - y_target;
+                    if f0.is_finite() && f0.abs() <= res_tol {
+                        roots.push(x_lo);
+                    }
+                } else {
+                    let n_steps = (4 * xs.len()).clamp(200, 2_000);
+                    let step = (x_hi - x_lo) / (n_steps as f64);
+                    let mut prev_x = x_lo;
+                    let mut prev_f = self.eval(prev_x) - y_target;
+                    if prev_f.is_finite() && prev_f.abs() <= res_tol {
+                        roots.push(prev_x);
+                    }
+                    for k in 1..=n_steps {
+                        let curr_x = if k == n_steps { x_hi } else { x_lo + (k as f64) * step };
+                        let curr_f = self.eval(curr_x) - y_target;
+                        if curr_f.is_finite() && curr_f.abs() <= res_tol {
+                            roots.push(curr_x);
+                        } else if prev_f.is_finite()
+                            && curr_f.is_finite()
+                            && prev_f.abs() > res_tol
+                            && prev_f * curr_f < 0.0
+                            && let Some(r) = brent_root(|x| self.eval(x) - y_target, prev_x, curr_x, prev_f, curr_f)
+                        {
+                            roots.push(r);
+                        }
+                        prev_x = curr_x;
+                        prev_f = curr_f;
+                    }
                 }
             }
         }
@@ -256,13 +283,24 @@ pub fn fit_akima_subspline(points: &[(f64, f64)]) -> Result<FittedCurveModel, Tr
     let n_seg = m - 1;
     let mut sec = vec![0.0_f64; n_seg + 4];
     for i in 0..n_seg {
-        sec[i + 2] = (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]);
+        let h = xs[i + 1] - xs[i];
+        if !h.is_finite() || h <= 0.0 {
+            return Err(TransformError::InvalidInput { message: String::from("Akima knots must be strictly increasing with finite spacing") });
+        }
+        let s = (ys[i + 1] - ys[i]) / h;
+        if !s.is_finite() {
+            return Err(TransformError::InvalidInput { message: String::from("Akima secant slope overflowed to non-finite value") });
+        }
+        sec[i + 2] = s;
     }
     // Boundary chord extensions per Akima (1970) Eq. (5)-(6).
     sec[1] = 2.0 * sec[2] - sec[3];
     sec[0] = 2.0 * sec[1] - sec[2];
     sec[n_seg + 2] = 2.0 * sec[n_seg + 1] - sec[n_seg];
     sec[n_seg + 3] = 2.0 * sec[n_seg + 2] - sec[n_seg + 1];
+    if sec.iter().any(|v| !v.is_finite()) {
+        return Err(TransformError::InvalidInput { message: String::from("Akima boundary secant extension overflowed to non-finite value") });
+    }
 
     let mut slopes = vec![0.0_f64; m];
     for i in 0..m {
@@ -273,7 +311,21 @@ pub fn fit_akima_subspline(points: &[(f64, f64)]) -> Result<FittedCurveModel, Tr
         let w1 = (d_p1 - d_0).abs();
         let w2 = (d_m1 - d_m2).abs();
         let denom = w1 + w2;
-        slopes[i] = if denom > 0.0 { (w1 * d_m1 + w2 * d_0) / denom } else { 0.5 * (d_m1 + d_0) };
+        slopes[i] = if denom > 0.0 && denom.is_finite() {
+            (w1 / denom) * d_m1 + (w2 / denom) * d_0
+        } else if !denom.is_finite() {
+            let scale = w1.max(w2);
+            if scale.is_finite() && scale > 0.0 {
+                let s1 = w1 / scale;
+                let s2 = w2 / scale;
+                let s_den = s1 + s2;
+                (s1 / s_den) * d_m1 + (s2 / s_den) * d_0
+            } else {
+                0.5 * d_m1 + 0.5 * d_0
+            }
+        } else {
+            0.5 * d_m1 + 0.5 * d_0
+        };
     }
 
     let mut pieces = Vec::with_capacity(n_seg);
@@ -283,12 +335,12 @@ pub fn fit_akima_subspline(points: &[(f64, f64)]) -> Result<FittedCurveModel, Tr
         let t0 = slopes[i];
         let t1 = slopes[i + 1];
         let c = (3.0 * delta - 2.0 * t0 - t1) / h;
-        let d = (t0 + t1 - 2.0 * delta) / (h * h);
+        let d = ((t0 + t1 - 2.0 * delta) / h) / h;
         pieces.push(CubicPiece { x0: xs[i], x1: xs[i + 1], a: ys[i], b: t0, c, d });
     }
     let left_slope = slopes[0];
     let right_slope = slopes[m - 1];
-    Ok(FittedCurveModel::PiecewiseCubic { pieces, left_slope, right_slope, x_min: xs[0], x_max: xs[m - 1] })
+    validate_piecewise_cubic(pieces, left_slope, right_slope, xs[0], xs[m - 1])
 }
 
 /// Fit a Reinsch (1967) penalized cubic smoothing spline minimizing
@@ -326,19 +378,30 @@ pub fn fit_smoothing_spline(points: &[(f64, f64)], weights: Option<&[f64]>, targ
         return Ok(SmoothingSplineFit { model, effective_df: m_f, lambda: 0.0, weighted_rss: 0.0 });
     }
     if df_goal <= 2.0 + 1e-9 {
-        let (intercept, slope) = weighted_ols_line(&xs, &ys, &ws)?;
-        let fitted: Vec<f64> = xs.iter().map(|&x| intercept + slope * x).collect();
-        let rss = weighted_rss(&ys, &fitted, &ws);
-        let model = build_linear_cubic_piece(xs[0], fitted[0], xs[m - 1], fitted[m - 1])?;
-        return Ok(SmoothingSplineFit { model, effective_df: 2.0, lambda: f64::MAX, weighted_rss: rss });
+        return fit_smoothing_linear_limit(&xs, &ys, &ws);
     }
 
     let reinsch = ReinschSystem::build(&xs, &ys, &ws)?;
     let (lambda, achieved_df) = reinsch.solve_lambda_for_df(df_goal)?;
+    if !lambda.is_finite() {
+        return fit_smoothing_linear_limit(&xs, &ys, &ws);
+    }
     let (g_vals, gammas) = reinsch.solve_for_lambda(lambda)?;
     let model = build_cubic_from_values_and_second_derivs(&xs, &g_vals, &gammas)?;
     let rss = weighted_rss(&ys, &g_vals, &ws);
     Ok(SmoothingSplineFit { model, effective_df: achieved_df, lambda, weighted_rss: rss })
+}
+
+fn fit_smoothing_linear_limit(xs: &[f64], ys: &[f64], ws: &[f64]) -> Result<SmoothingSplineFit, TransformError> {
+    let m = xs.len();
+    let (intercept, slope) = weighted_ols_line(xs, ys, ws)?;
+    let fitted: Vec<f64> = xs.iter().map(|&x| intercept + slope * x).collect();
+    if fitted.iter().any(|v| !v.is_finite()) {
+        return Err(TransformError::InvalidInput { message: String::from("smoothing spline linear limit overflowed to non-finite values") });
+    }
+    let rss = weighted_rss(ys, &fitted, ws);
+    let model = build_linear_cubic_piece(xs[0], fitted[0], xs[m - 1], fitted[m - 1])?;
+    Ok(SmoothingSplineFit { model, effective_df: 2.0, lambda: f64::INFINITY, weighted_rss: rss })
 }
 
 /// Fit a Cleveland (1979) LOWESS local linear smoother with tricube kernel and Tukey bisquare robustness passes.
@@ -364,17 +427,7 @@ pub fn fit_lowess_curve(points: &[(f64, f64)], fraction: f64, robustness_iters: 
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let q = ((fraction * (n as f64)).round() as usize).clamp(2, n);
-    let mut rob_weights = vec![1.0_f64; n];
-    let mut fitted_y = ys.clone();
-
-    for iter in 0..=robustness_iters {
-        for i in 0..n {
-            fitted_y[i] = eval_lowess_at(&xs, &ys, &rob_weights, q, xs[i]);
-        }
-        if iter < robustness_iters {
-            update_bisquare_weights(&ys, &fitted_y, &mut rob_weights);
-        }
-    }
+    let (fitted_y, rob_weights) = fit_lowess_sorted_values(&xs, &ys, q, robustness_iters);
 
     Ok(FittedCurveModel::Lowess { xs, ys, rob_weights, q, fitted_y })
 }
@@ -387,6 +440,12 @@ pub fn fit_point_to_point(points: &[(f64, f64)]) -> Result<FittedCurveModel, Tra
     }
     let xs: Vec<f64> = knots.iter().map(|k| k.0).collect();
     let ys: Vec<f64> = knots.iter().map(|k| k.1).collect();
+    for i in 0..xs.len() - 1 {
+        let h = xs[i + 1] - xs[i];
+        if !h.is_finite() || h <= 0.0 || !((ys[i + 1] - ys[i]) / h).is_finite() {
+            return Err(TransformError::InvalidInput { message: String::from("point-to-point curve segment slope overflowed to non-finite value") });
+        }
+    }
     Ok(FittedCurveModel::PiecewiseLinear { xs, ys })
 }
 
@@ -494,9 +553,19 @@ pub fn execute_spline_lowess(source: &DataSheet, analysis: &AnalysisSpec, spec: 
         let sampled = sample_curve(&model, eval_x_min, eval_x_max, effective_segments)?;
 
         let mut rss_acc = sum::NeumaierSum::new();
-        for &(x, y) in &obs {
-            let r = y - model.eval(x);
-            rss_acc.add(r * r);
+        if let FittedCurveModel::Lowess { ys, fitted_y, .. } = &model
+            && ys.len() == fitted_y.len()
+            && ys.len() == obs.len()
+        {
+            for (&y, &fy) in ys.iter().zip(fitted_y.iter()) {
+                let r = y - fy;
+                rss_acc.add(r * r);
+            }
+        } else {
+            for &(x, y) in &obs {
+                let r = y - model.eval(x);
+                rss_acc.add(r * r);
+            }
         }
         let rss = rss_acc.total().max(0.0);
         let rmse = (rss / (n_obs as f64)).sqrt();
@@ -691,6 +760,19 @@ struct ExtractedXySeries {
     inverse_unknowns: Vec<(usize, f64)>,
 }
 
+fn x_row_is_blank_unknown(xy: &XyTable, row: usize) -> bool {
+    match &xy.x_mode {
+        XColumnMode::Numbers { .. } | XColumnMode::DateOrElapsedTime { .. } => {
+            xy.x_cells.get(row).is_some_and(|subs| !subs.is_empty() && subs.iter().all(|cell| !cell.excluded && cell.is_empty()))
+        }
+        XColumnMode::GeneratedSequence { .. } => false,
+    }
+}
+
+fn y_cells_are_blank_unknown(subcells: &[Cell]) -> bool {
+    !subcells.is_empty() && subcells.iter().all(|cell| !cell.excluded && cell.is_empty())
+}
+
 fn extract_xy_observations_and_unknowns(xy: &XyTable, ds_idx: usize) -> Result<ExtractedXySeries, TransformError> {
     let ds = &xy.data_sets[ds_idx];
     let mut obs = Vec::new();
@@ -699,26 +781,51 @@ fn extract_xy_observations_and_unknowns(xy: &XyTable, ds_idx: usize) -> Result<E
 
     for row in 0..xy.row_count() {
         let x_opt = xy.x_summary_at(row)?.filter(|v| v.is_finite()).map(|x| if x == 0.0 { 0.0 } else { x });
-        let y_vals: Vec<f64> = if xy.y_subcolumn_mode.is_pre_summarized() {
-            ds.cells.get(row).and_then(|sub| sub.first()).and_then(Cell::active_number).into_iter().collect()
-        } else {
-            ds.cells.get(row).map(|sub| sub.iter().filter_map(Cell::active_number).collect()).unwrap_or_default()
-        };
+        let x_blank = x_opt.is_none() && x_row_is_blank_unknown(xy, row);
+        // Excluded or non-blank non-numeric X rows must be skipped outright rather than
+        // masquerading as blank X cells queued for inverse interpolation (parity with `fit/src/types.rs`).
+        if x_opt.is_none() && !x_blank {
+            continue;
+        }
+        let subcells = ds.cells.get(row).map_or(&[][..], Vec::as_slice);
 
-        match (x_opt, y_vals.is_empty()) {
-            (Some(x), false) => {
-                for y in y_vals {
-                    obs.push((x, y));
+        if xy.y_subcolumn_mode.supports_parametric_moments() {
+            if x_blank {
+                if let Some(y) = subcells.first().and_then(Cell::active_number) {
+                    inverse_unknowns.push((row, y));
                 }
+                continue;
             }
-            (Some(x), true) => {
-                forward_unknowns.push((row, x));
+            let pt_opt = xy.summarized_y_point(row, ds_idx)?;
+            match (x_opt, pt_opt) {
+                (Some(x), Some(pt)) if pt.mean.is_finite() => obs.push((x, pt.mean)),
+                (Some(x), None) if y_cells_are_blank_unknown(subcells) => forward_unknowns.push((row, x)),
+                _ => {}
             }
-            (None, false) => {
-                let y_mean = sum::mean(&y_vals)?;
-                inverse_unknowns.push((row, y_mean));
+        } else if xy.y_subcolumn_mode.is_pre_summarized() {
+            match (x_opt, subcells.first().and_then(Cell::active_number)) {
+                (Some(x), Some(y)) => obs.push((x, y)),
+                (None, Some(y)) if x_blank => inverse_unknowns.push((row, y)),
+                (Some(x), None) if y_cells_are_blank_unknown(subcells) => forward_unknowns.push((row, x)),
+                _ => {}
             }
-            (None, true) => {}
+        } else {
+            let y_vals: Vec<f64> = subcells.iter().filter_map(Cell::active_number).collect();
+            match (x_opt, y_vals.is_empty()) {
+                (Some(x), false) => {
+                    for y in y_vals {
+                        obs.push((x, y));
+                    }
+                }
+                (Some(x), true) if y_cells_are_blank_unknown(subcells) => {
+                    forward_unknowns.push((row, x));
+                }
+                (None, false) if x_blank => {
+                    let y_mean = sum::mean(&y_vals)?;
+                    inverse_unknowns.push((row, y_mean));
+                }
+                _ => {}
+            }
         }
     }
     Ok(ExtractedXySeries { obs, forward_unknowns, inverse_unknowns })
@@ -999,14 +1106,32 @@ fn count_distinct_x(obs: &[(f64, f64)]) -> usize {
     xs.len()
 }
 
+fn validate_piecewise_cubic(
+    pieces: Vec<CubicPiece>,
+    left_slope: f64,
+    right_slope: f64,
+    x_min: f64,
+    x_max: f64,
+) -> Result<FittedCurveModel, TransformError> {
+    if !left_slope.is_finite() || !right_slope.is_finite() || !x_min.is_finite() || !x_max.is_finite() {
+        return Err(TransformError::InvalidInput { message: String::from("spline boundary parameters overflowed to non-finite values") });
+    }
+    for p in &pieces {
+        if !p.x0.is_finite() || !p.x1.is_finite() || !p.a.is_finite() || !p.b.is_finite() || !p.c.is_finite() || !p.d.is_finite() {
+            return Err(TransformError::InvalidInput { message: String::from("spline polynomial coefficients overflowed to non-finite values") });
+        }
+    }
+    Ok(FittedCurveModel::PiecewiseCubic { pieces, left_slope, right_slope, x_min, x_max })
+}
+
 fn build_linear_cubic_piece(x0: f64, y0: f64, x1: f64, y1: f64) -> Result<FittedCurveModel, TransformError> {
     let dx = x1 - x0;
-    if dx <= 0.0 {
+    if !dx.is_finite() || dx <= 0.0 {
         return Err(TransformError::InvalidInput { message: String::from("curve requires strictly increasing X endpoints") });
     }
     let slope = (y1 - y0) / dx;
     let piece = CubicPiece { x0, x1, a: y0, b: slope, c: 0.0, d: 0.0 };
-    Ok(FittedCurveModel::PiecewiseCubic { pieces: vec![piece], left_slope: slope, right_slope: slope, x_min: x0, x_max: x1 })
+    validate_piecewise_cubic(vec![piece], slope, slope, x0, x1)
 }
 
 fn build_natural_cubic_from_knots(xs: &[f64], ys: &[f64]) -> Result<FittedCurveModel, TransformError> {
@@ -1022,11 +1147,15 @@ fn build_natural_cubic_from_knots(xs: &[f64], ys: &[f64]) -> Result<FittedCurveM
     let mut delta = Vec::with_capacity(n_seg);
     for i in 0..n_seg {
         let hi = xs[i + 1] - xs[i];
-        if hi <= 0.0 {
+        if !hi.is_finite() || hi <= 0.0 {
             return Err(TransformError::InvalidInput { message: String::from("spline knots must be strictly increasing") });
         }
+        let d = (ys[i + 1] - ys[i]) / hi;
+        if !d.is_finite() {
+            return Err(TransformError::InvalidInput { message: String::from("spline secant slope overflowed to non-finite value") });
+        }
         h.push(hi);
-        delta.push((ys[i + 1] - ys[i]) / hi);
+        delta.push(d);
     }
 
     // Solve strictly diagonally dominant tridiagonal system for interior second derivatives M_1..M_{m-2}.
@@ -1058,7 +1187,7 @@ fn build_cubic_from_values_and_second_derivs(xs: &[f64], vals: &[f64], interior_
     let mut pieces = Vec::with_capacity(n_seg);
     for i in 0..n_seg {
         let hi = xs[i + 1] - xs[i];
-        if hi <= 0.0 {
+        if !hi.is_finite() || hi <= 0.0 {
             return Err(TransformError::InvalidInput { message: String::from("spline knots must be strictly increasing") });
         }
         let m0 = full_m[i];
@@ -1071,7 +1200,7 @@ fn build_cubic_from_values_and_second_derivs(xs: &[f64], vals: &[f64], interior_
     }
     let left_slope = pieces[0].b;
     let right_slope = pieces[n_seg - 1].deriv(xs[m - 1]);
-    Ok(FittedCurveModel::PiecewiseCubic { pieces, left_slope, right_slope, x_min: xs[0], x_max: xs[m - 1] })
+    validate_piecewise_cubic(pieces, left_slope, right_slope, xs[0], xs[m - 1])
 }
 
 fn solve_tridiagonal(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> Result<Vec<f64>, TransformError> {
@@ -1107,6 +1236,9 @@ fn solve_tridiagonal(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> Res
     x[n - 1] = d_prime[n - 1];
     for i in (0..n - 1).rev() {
         x[i] = d_prime[i] - c_prime[i] * x[i + 1];
+    }
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(TransformError::InvalidInput { message: String::from("tridiagonal spline solve produced non-finite values") });
     }
     Ok(x)
 }
@@ -1178,6 +1310,18 @@ impl ReinschSystem {
             if j + 2 < k {
                 b_sup2.push(q2[j] * q0[j + 2] * inv_w[j + 2]);
             }
+        }
+
+        if r_diag.iter().any(|v| !v.is_finite())
+            || r_sup1.iter().any(|v| !v.is_finite())
+            || b_diag.iter().any(|v| !v.is_finite())
+            || b_sup1.iter().any(|v| !v.is_finite())
+            || b_sup2.iter().any(|v| !v.is_finite())
+            || qt_y.iter().any(|v| !v.is_finite())
+        {
+            return Err(TransformError::InvalidInput {
+                message: String::from("smoothing spline system coefficients overflowed to non-finite values"),
+            });
         }
 
         Ok(Self { m, ys: ys.to_vec(), inv_w, q0, q1, q2, r_diag, r_sup1, b_diag, b_sup1, b_sup2, qt_y })
@@ -1269,8 +1413,16 @@ impl ReinschSystem {
     fn solve_lambda_for_df(&self, target_df: f64) -> Result<(f64, f64), TransformError> {
         let tr_r: f64 = self.r_diag.iter().sum();
         let tr_b: f64 = self.b_diag.iter().sum();
-        let scale = if tr_b > 0.0 && tr_r > 0.0 { tr_r / tr_b } else { 1.0 };
-        let log_mid = scale.ln();
+        let max_b = self.b_diag.iter().chain(self.b_sup1.iter()).chain(self.b_sup2.iter()).fold(0.0_f64, |m, &v| m.max(v.abs()));
+        let max_log_lambda = if max_b > 0.0 && max_b.is_finite() {
+            (1e290_f64 / max_b).ln().clamp(-MAX_SMOOTHING_LOG_LAMBDA, MAX_SMOOTHING_LOG_LAMBDA)
+        } else {
+            MAX_SMOOTHING_LOG_LAMBDA
+        };
+        let min_log_lambda = -MAX_SMOOTHING_LOG_LAMBDA;
+
+        let scale = if tr_b > 0.0 && tr_r > 0.0 && tr_r.is_finite() && tr_b.is_finite() { tr_r / tr_b } else { 1.0 };
+        let log_mid = if scale.is_finite() && scale > 0.0 { scale.ln().clamp(min_log_lambda, max_log_lambda) } else { 0.0 };
 
         let mut lo = log_mid;
         let mut hi = log_mid;
@@ -1279,8 +1431,8 @@ impl ReinschSystem {
 
         let mut step = 1.0_f64;
         for _ in 0..80 {
-            if f_lo < 0.0 {
-                lo -= step;
+            if f_lo < 0.0 && lo > min_log_lambda {
+                lo = (lo - step).max(min_log_lambda);
                 f_lo = self.effective_df(lo.exp())? - target_df;
                 step *= 1.5;
             } else {
@@ -1289,13 +1441,27 @@ impl ReinschSystem {
         }
         step = 1.0;
         for _ in 0..80 {
-            if f_hi > 0.0 {
-                hi += step;
-                f_hi = self.effective_df(hi.exp())? - target_df;
-                step *= 1.5;
+            if f_hi > 0.0 && hi < max_log_lambda {
+                let next_hi = (hi + step).min(max_log_lambda);
+                match self.effective_df(next_hi.exp()) {
+                    Ok(df_next) => {
+                        hi = next_hi;
+                        f_hi = df_next - target_df;
+                        step *= 1.5;
+                    }
+                    Err(_) => {
+                        // Extreme penalty conditioning reached; fall back cleanly to the linear limit.
+                        return Ok((f64::INFINITY, 2.0));
+                    }
+                }
             } else {
                 break;
             }
+        }
+
+        if f_hi > 1e-10 {
+            // Even at the maximum safe finite penalty, effective df remains above target_df -> linear limit.
+            return Ok((f64::INFINITY, 2.0));
         }
 
         if f_lo.abs() <= 1e-10 {
@@ -1406,67 +1572,250 @@ fn weighted_rss(ys: &[f64], fitted: &[f64], ws: &[f64]) -> f64 {
     acc.total().max(0.0)
 }
 
-fn eval_lowess_at(xs: &[f64], ys: &[f64], rob_weights: &[f64], q: usize, x_target: f64) -> f64 {
+pub(crate) fn fit_lowess_sorted_values(xs: &[f64], ys: &[f64], q: usize, robustness_iters: usize) -> (Vec<f64>, Vec<f64>) {
     let n = xs.len();
+    let mut rob_weights = vec![1.0_f64; n];
+    let mut fitted_y = ys.to_vec();
     if n == 0 {
-        return f64::NAN;
-    }
-    let mut dists: Vec<(usize, f64)> = xs.iter().enumerate().map(|(j, &xj)| (j, (xj - x_target).abs())).collect();
-    dists.sort_by(|a, b| a.1.total_cmp(&b.1));
-    let q_eff = q.clamp(1, n);
-    let max_d = dists[q_eff - 1].1;
-    if max_d == 0.0 {
-        return tied_weighted_mean(xs, ys, rob_weights, x_target);
+        return (fitted_y, rob_weights);
     }
 
-    let mut data = Vec::with_capacity(q_eff * 2);
-    let mut b = Vec::with_capacity(q_eff);
-    let mut w_sum = sum::NeumaierSum::new();
-    let mut wy_sum = sum::NeumaierSum::new();
-    for &(j, d) in &dists[..q_eff] {
-        let u = (d / max_d).min(1.0);
-        let tricube = (1.0 - u * u * u).powi(3);
-        let total_w = (tricube * rob_weights[j]).max(0.0);
-        w_sum.add(total_w);
-        wy_sum.add(total_w * ys[j]);
-        let sw = total_w.sqrt();
-        data.push(sw);
-        data.push(sw * (xs[j] - x_target));
-        b.push(sw * ys[j]);
+    for iter in 0..=robustness_iters {
+        lowess_pass_sorted(xs, ys, &rob_weights, q, &mut fitted_y);
+        if iter < robustness_iters {
+            update_bisquare_weights(ys, &fitted_y, &mut rob_weights);
+        }
     }
-    if let Ok(a) = DenseMatrix::from_row_major(q_eff, 2, data)
-        && let Ok((sol, _)) = solve_linear_least_squares(&a, &b)
-        && let Some(&y0) = sol.coefficients.first()
-        && y0.is_finite()
-    {
-        return y0;
-    }
-    let tw = w_sum.total();
-    if tw > 0.0 { wy_sum.total() / tw } else { ys[dists[0].0] }
+    (fitted_y, rob_weights)
 }
 
-fn tied_weighted_mean(xs: &[f64], ys: &[f64], rob_weights: &[f64], x_target: f64) -> f64 {
+fn lowess_pass_sorted(xs: &[f64], ys: &[f64], rob_weights: &[f64], q: usize, fitted_y: &mut [f64]) {
+    let n = xs.len();
+    if n <= LOWESS_EXACT_MAX_N || n.saturating_mul(q) <= LOWESS_EXACT_WORK_LIMIT {
+        for i in 0..n {
+            if i > 0 && xs[i] == xs[i - 1] {
+                fitted_y[i] = fitted_y[i - 1];
+            } else {
+                fitted_y[i] = eval_lowess_sorted_at(xs, ys, rob_weights, q, xs[i]);
+            }
+        }
+        return;
+    }
+
+    // Cleveland (1979) delta-anchor linear interpolation for large series (`n * q > 500_000`).
+    let x_span = (xs[n - 1] - xs[0]).abs();
+    let delta = if x_span.is_finite() { 0.005 * x_span } else { 0.0 };
+    let max_idx_step = (n / LOWESS_ANCHOR_TARGET).max(1);
+
+    let mut last = 0_usize;
+    fitted_y[0] = eval_lowess_sorted_at(xs, ys, rob_weights, q, xs[0]);
+    while last + 1 < n {
+        let limit_idx = (last + max_idx_step).min(n - 1);
+        let target_x = xs[last] + delta;
+        let mut next = last + 1;
+        while next < limit_idx && xs[next + 1] <= target_x {
+            next += 1;
+        }
+        if xs[next] == xs[last] {
+            fitted_y[next] = fitted_y[last];
+        } else {
+            fitted_y[next] = eval_lowess_sorted_at(xs, ys, rob_weights, q, xs[next]);
+        }
+        let x0 = xs[last];
+        let x1 = xs[next];
+        let y0 = fitted_y[last];
+        let y1 = fitted_y[next];
+        let dx = x1 - x0;
+        for k in (last + 1)..next {
+            fitted_y[k] = if dx > 0.0 && dx.is_finite() {
+                let t = ((xs[k] - x0) / dx).clamp(0.0, 1.0);
+                y0 + t * (y1 - y0)
+            } else {
+                y0
+            };
+        }
+        last = next;
+    }
+}
+
+fn lowess_window_bounds(xs: &[f64], x_target: f64, q_eff: usize) -> (usize, usize) {
+    let n = xs.len();
+    let mut hi = xs.partition_point(|&x| x < x_target);
+    let mut lo = hi;
+    while hi - lo < q_eff {
+        if lo == 0 {
+            hi = q_eff.min(n);
+            break;
+        }
+        if hi == n {
+            lo = n.saturating_sub(q_eff);
+            break;
+        }
+        let dl = (x_target - xs[lo - 1]).abs();
+        let dr = (xs[hi] - x_target).abs();
+        if dl <= dr {
+            lo -= 1;
+        } else {
+            hi += 1;
+        }
+    }
+    (lo, hi)
+}
+
+/// Closed-form centered 2x2 weighted linear regression in normalized coordinates `u = (x - x_target) / max_d`.
+///
+/// Requires non-degenerate weighted variance (`s_uu > 1e-24 * w_sum`, rank 2) for slope estimation;
+/// degrades cleanly to the weighted local mean `y_bar` at rank 1, and returns `None` when total
+/// weight is zero so the caller can apply pure-tricube or unweighted fallbacks without collapsing to `0.0`.
+fn lowess_local_linear_pass(xs: &[f64], ys: &[f64], rob_weights: Option<&[f64]>, lo: usize, hi: usize, x_target: f64, max_d: f64) -> Option<f64> {
+    let y_ref = if ys[lo].abs() < 1e300 && ys[lo..hi].iter().all(|&y| (y - ys[lo]).is_finite()) { ys[lo] } else { 0.0 };
+
+    let mut w_sum = sum::NeumaierSum::new();
+    let mut wu_sum = sum::NeumaierSum::new();
+    let mut wdy_sum = sum::NeumaierSum::new();
+    for j in lo..hi {
+        let u = (xs[j] - x_target) / max_d;
+        let abs_u = u.abs().min(1.0);
+        let tricube = (1.0 - abs_u * abs_u * abs_u).powi(3);
+        let rw = rob_weights.map_or(1.0, |r| r[j].max(0.0));
+        let w = (tricube * rw).max(0.0);
+        if w > 0.0 {
+            w_sum.add(w);
+            wu_sum.add(w * u);
+            wdy_sum.add(w * (ys[j] - y_ref));
+        }
+    }
+
+    let tw = w_sum.total();
+    if !tw.is_finite() || tw <= 0.0 {
+        return None;
+    }
+    let u_bar = wu_sum.total() / tw;
+    let dy_bar = wdy_sum.total() / tw;
+    let y_bar = y_ref + dy_bar;
+    if !u_bar.is_finite() || !y_bar.is_finite() {
+        return None;
+    }
+
+    let mut s_uu = sum::NeumaierSum::new();
+    let mut s_uy = sum::NeumaierSum::new();
+    for j in lo..hi {
+        let u = (xs[j] - x_target) / max_d;
+        let abs_u = u.abs().min(1.0);
+        let tricube = (1.0 - abs_u * abs_u * abs_u).powi(3);
+        let rw = rob_weights.map_or(1.0, |r| r[j].max(0.0));
+        let w = (tricube * rw).max(0.0);
+        if w > 0.0 {
+            let du = u - u_bar;
+            let ddy = (ys[j] - y_ref) - dy_bar;
+            s_uu.add(w * du * du);
+            s_uy.add(w * du * ddy);
+        }
+    }
+
+    let denom = s_uu.total();
+    if denom.is_finite() && denom > 1e-24 * tw {
+        let slope = s_uy.total() / denom;
+        let y_hat = y_bar - slope * u_bar;
+        if slope.is_finite() && y_hat.is_finite() {
+            return Some(y_hat);
+        }
+    }
+    Some(y_bar)
+}
+
+fn lowess_fallback_mean(ys: &[f64], rob_weights: &[f64], lo: usize, hi: usize) -> f64 {
     let mut w_sum = sum::NeumaierSum::new();
     let mut wy_sum = sum::NeumaierSum::new();
-    let mut tied = Vec::new();
-    for (&xj, (&yj, &rw)) in xs.iter().zip(ys.iter().zip(rob_weights.iter())) {
-        if (xj - x_target).abs() == 0.0 {
-            tied.push(yj);
-            let w = rw.max(0.0);
-            if w > 0.0 {
-                w_sum.add(w);
-                wy_sum.add(w * yj);
-            }
+    for j in lo..hi {
+        let rw = rob_weights[j].max(0.0);
+        if rw > 0.0 {
+            w_sum.add(rw);
+            wy_sum.add(rw * ys[j]);
         }
     }
     let tw = w_sum.total();
-    if tw > 0.0 {
+    if tw > 0.0 && tw.is_finite() {
         let weighted = wy_sum.total() / tw;
         if weighted.is_finite() {
             return weighted;
         }
     }
-    sum::mean(&tied).unwrap_or(f64::NAN)
+    sum::mean(&ys[lo..hi]).ok().filter(|v| v.is_finite()).unwrap_or(ys[lo])
+}
+
+pub(crate) fn eval_lowess_sorted_at(xs: &[f64], ys: &[f64], rob_weights: &[f64], q: usize, x_target: f64) -> f64 {
+    let n = xs.len();
+    if n == 0 || !x_target.is_finite() {
+        return f64::NAN;
+    }
+    let q_eff = q.clamp(1, n);
+    let (lo, hi) = lowess_window_bounds(xs, x_target, q_eff);
+    let max_d = (x_target - xs[lo]).abs().max((xs[hi - 1] - x_target).abs());
+    if !max_d.is_finite() {
+        return lowess_fallback_mean(ys, rob_weights, lo, hi);
+    }
+    if max_d == 0.0 {
+        return tied_weighted_mean(xs, ys, rob_weights, x_target);
+    }
+
+    if let Some(y_hat) = lowess_local_linear_pass(xs, ys, Some(rob_weights), lo, hi, x_target, max_d) {
+        return y_hat;
+    }
+    if let Some(y_hat) = lowess_local_linear_pass(xs, ys, None, lo, hi, x_target, max_d) {
+        return y_hat;
+    }
+    lowess_fallback_mean(ys, rob_weights, lo, hi)
+}
+
+fn eval_sorted_linear_interp(xs: &[f64], ys: &[f64], x: f64) -> f64 {
+    let n = xs.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    let hi = xs.partition_point(|&xk| xk < x);
+    if hi == 0 {
+        return ys[0];
+    }
+    if hi >= n {
+        return ys[n - 1];
+    }
+    if xs[hi] == x {
+        return ys[hi];
+    }
+    let lo = hi - 1;
+    let dx = xs[hi] - xs[lo];
+    if dx > 0.0 && dx.is_finite() {
+        let t = ((x - xs[lo]) / dx).clamp(0.0, 1.0);
+        ys[lo] + t * (ys[hi] - ys[lo])
+    } else {
+        ys[lo]
+    }
+}
+
+fn tied_weighted_mean(xs: &[f64], ys: &[f64], rob_weights: &[f64], x_target: f64) -> f64 {
+    let eq_lo = xs.partition_point(|&xj| xj < x_target);
+    let eq_hi = xs.partition_point(|&xj| xj <= x_target);
+    if eq_lo >= eq_hi {
+        return f64::NAN;
+    }
+    let mut w_sum = sum::NeumaierSum::new();
+    let mut wy_sum = sum::NeumaierSum::new();
+    for j in eq_lo..eq_hi {
+        let w = rob_weights[j].max(0.0);
+        if w > 0.0 {
+            w_sum.add(w);
+            wy_sum.add(w * ys[j]);
+        }
+    }
+    let tw = w_sum.total();
+    if tw > 0.0 && tw.is_finite() {
+        let weighted = wy_sum.total() / tw;
+        if weighted.is_finite() {
+            return weighted;
+        }
+    }
+    sum::mean(&ys[eq_lo..eq_hi]).unwrap_or(f64::NAN)
 }
 
 fn update_bisquare_weights(ys: &[f64], fitted: &[f64], rob_weights: &mut [f64]) {
@@ -1504,51 +1853,144 @@ fn eval_piecewise_linear(xs: &[f64], ys: &[f64], x: f64) -> f64 {
     ys[idx] + t * (ys[idx + 1] - ys[idx])
 }
 
+#[allow(clippy::too_many_arguments)]
+fn solve_linear_tail_root(x_anchor: f64, y_anchor: f64, slope: f64, y_target: f64, seg_lo: f64, seg_hi: f64, x_scale: f64, out: &mut Vec<f64>) {
+    if !y_anchor.is_finite() || !slope.is_finite() || seg_hi < seg_lo {
+        return;
+    }
+    let y_lo = y_anchor + slope * (seg_lo - x_anchor);
+    let y_hi = y_anchor + slope * (seg_hi - x_anchor);
+    let y_scale =
+        y_anchor.abs().max(y_target.abs()).max(if y_lo.is_finite() { y_lo.abs() } else { 0.0 }).max(if y_hi.is_finite() { y_hi.abs() } else { 0.0 });
+    let res_tol = 1e-12 * y_scale;
+    if slope == 0.0 {
+        if (y_anchor - y_target).abs() <= res_tol {
+            out.push(seg_lo);
+        }
+        return;
+    }
+    let xr = x_anchor + (y_target - y_anchor) / slope;
+    let tail_tol = (1e-12 * (seg_hi - seg_lo).abs()).max(16.0 * f64::EPSILON * x_scale);
+    if xr.is_finite() && xr >= seg_lo - tail_tol && xr <= seg_hi + tail_tol {
+        out.push(xr.clamp(seg_lo, seg_hi));
+    }
+}
+
+fn solve_piecewise_linear_roots(xs: &[f64], ys: &[f64], y_target: f64, x_lo: f64, x_hi: f64, x_scale: f64, out: &mut Vec<f64>) {
+    let n = xs.len();
+    if n < 2 {
+        return;
+    }
+    if x_lo < xs[0] && xs[1] > xs[0] {
+        let left_slope = (ys[1] - ys[0]) / (xs[1] - xs[0]);
+        solve_linear_tail_root(xs[0], ys[0], left_slope, y_target, x_lo, x_hi.min(xs[0]), x_scale, out);
+    }
+    for i in 0..n - 1 {
+        let (xa, xb) = (xs[i], xs[i + 1]);
+        let seg_lo = xa.max(x_lo);
+        let seg_hi = xb.min(x_hi);
+        if seg_hi < seg_lo || xb <= xa {
+            continue;
+        }
+        let val_a = eval_piecewise_linear(xs, ys, seg_lo);
+        let val_b = eval_piecewise_linear(xs, ys, seg_hi);
+        let y_scale = val_a.abs().max(val_b.abs()).max(y_target.abs());
+        let res_tol = 1e-12 * y_scale;
+        let ya = val_a - y_target;
+        let yb = val_b - y_target;
+        if ya.abs() <= res_tol {
+            out.push(seg_lo);
+        }
+        if yb.abs() <= res_tol {
+            out.push(seg_hi);
+        }
+        if ya.abs() > res_tol && yb.abs() > res_tol && ya * yb < 0.0 {
+            let m = ya.abs().max(yb.abs());
+            let sa = ya / m;
+            let sb = yb / m;
+            let frac = (-sa / (sb - sa)).clamp(0.0, 1.0);
+            let xr = seg_lo + frac * (seg_hi - seg_lo);
+            if xr.is_finite() {
+                out.push(xr);
+            }
+        }
+    }
+    if x_hi > xs[n - 1] && xs[n - 1] > xs[n - 2] {
+        let right_slope = (ys[n - 1] - ys[n - 2]) / (xs[n - 1] - xs[n - 2]);
+        solve_linear_tail_root(xs[n - 1], ys[n - 1], right_slope, y_target, x_lo.max(xs[n - 1]), x_hi, x_scale, out);
+    }
+}
+
 /// Find all real roots of `piece.eval(x) == y_target` in `[seg_lo, seg_hi]` by partitioning at
-/// the exact roots of `piece.deriv(x) == 0` (at most 2 interior critical points).
+/// the exact roots of `piece.deriv(x) == 0` in dimensionless normalized coordinates `t = (x - x0) / h`.
 fn solve_cubic_piece_roots(piece: &CubicPiece, y_target: f64, seg_lo: f64, seg_hi: f64, out: &mut Vec<f64>) {
+    let h = piece.x1 - piece.x0;
+    if !h.is_finite() || h <= 0.0 {
+        return;
+    }
     let mut breaks = Vec::with_capacity(4);
     breaks.push(seg_lo);
 
-    // Solve 3*d*u^2 + 2*c*u + b = 0 for interior extrema u = x - piece.x0.
-    let qa = 3.0 * piece.d;
-    let qb = 2.0 * piece.c;
-    let qc = piece.b;
-    if qa.abs() > 1e-15 {
-        let disc = qb * qb - 4.0 * qa * qc;
-        if disc >= 0.0 {
-            let sqrt_d = disc.sqrt();
-            let u1 = (-qb - sqrt_d) / (2.0 * qa);
-            let u2 = (-qb + sqrt_d) / (2.0 * qa);
-            let x1 = piece.x0 + u1;
-            let x2 = piece.x0 + u2;
-            if x1 > seg_lo && x1 < seg_hi {
+    // Transform P(x) = a + b*u + c*u^2 + d*u^3 to dimensionless t = u / h in [0, 1]:
+    // P'(t) = 3*(d*h^3)*t^2 + 2*(c*h^2)*t + (b*h) = qa*t^2 + qb*t + qc (all in Y units).
+    let qa_raw = 3.0 * piece.d * h * h * h;
+    let qb_raw = 2.0 * piece.c * h * h;
+    let qc_raw = piece.b * h;
+    let deriv_scale = qa_raw.abs().max(qb_raw.abs()).max(qc_raw.abs());
+    let x_eps = 1e-12 * h;
+    if deriv_scale > 0.0 && deriv_scale.is_finite() {
+        let qa = qa_raw / deriv_scale;
+        let qb = qb_raw / deriv_scale;
+        let qc = qc_raw / deriv_scale;
+        if qa.abs() > 1e-12 {
+            let disc = qb * qb - 4.0 * qa * qc;
+            if disc >= 0.0 {
+                let sqrt_d = disc.sqrt();
+                let sign = if qb >= 0.0 { 1.0 } else { -1.0 };
+                let q = -0.5 * (qb + sign * sqrt_d);
+                let (t1, t2) = if q != 0.0 { (q / qa, qc / q) } else { (0.0, 0.0) };
+                let x1 = piece.x0 + t1 * h;
+                let x2 = piece.x0 + t2 * h;
+                if x1.is_finite() && x1 > seg_lo && x1 < seg_hi {
+                    breaks.push(x1);
+                }
+                if x2.is_finite() && x2 > seg_lo && x2 < seg_hi && (x2 - x1).abs() > x_eps {
+                    breaks.push(x2);
+                }
+            }
+        } else if qb.abs() > 1e-12 {
+            let t1 = -qc / qb;
+            let x1 = piece.x0 + t1 * h;
+            if x1.is_finite() && x1 > seg_lo && x1 < seg_hi {
                 breaks.push(x1);
             }
-            if x2 > seg_lo && x2 < seg_hi && (x2 - x1).abs() > 1e-14 {
-                breaks.push(x2);
-            }
-        }
-    } else if qb.abs() > 1e-15 {
-        let x1 = piece.x0 - qc / qb;
-        if x1 > seg_lo && x1 < seg_hi {
-            breaks.push(x1);
         }
     }
     breaks.push(seg_hi);
     breaks.sort_by(f64::total_cmp);
 
+    let piece_y_scale = piece.a.abs().max(piece.eval(piece.x1).abs()).max(y_target.abs());
     for pair in breaks.windows(2) {
         let (a, b) = (pair[0], pair[1]);
-        let fa = piece.eval(a) - y_target;
-        let fb = piece.eval(b) - y_target;
-        if fa.abs() <= 1e-12 {
+        let ya = piece.eval(a);
+        let yb = piece.eval(b);
+        let local_y_scale = piece_y_scale.max(ya.abs()).max(yb.abs());
+        let res_tol = 1e-12 * local_y_scale;
+        let fa = ya - y_target;
+        let fb = yb - y_target;
+        let a_hit = fa.is_finite() && fa.abs() <= res_tol;
+        let b_hit = fb.is_finite() && fb.abs() <= res_tol;
+        if a_hit {
             out.push(a);
         }
-        if fb.abs() <= 1e-12 {
+        if b_hit {
             out.push(b);
         }
-        if fa * fb < 0.0
+        if !a_hit
+            && !b_hit
+            && fa.is_finite()
+            && fb.is_finite()
+            && fa * fb < 0.0
             && let Some(r) = brent_root(|x| piece.eval(x) - y_target, a, b, fa, fb)
         {
             out.push(r);
@@ -1565,7 +2007,7 @@ fn brent_root<F: Fn(f64) -> f64>(f: F, mut a: f64, mut b: f64, mut fa: f64, mut 
     let mut fc = fa;
     let mut d = b - a;
     let mut e = d;
-    let tol = 1e-13 * (a.abs().max(b.abs()).max(1.0));
+    let tol = 1e-13 * (b - a).abs().max(a.abs().max(b.abs()));
 
     for _ in 0..100 {
         if (fb > 0.0 && fc > 0.0) || (fb < 0.0 && fc < 0.0) {
@@ -1589,7 +2031,7 @@ fn brent_root<F: Fn(f64) -> f64>(f: F, mut a: f64, mut b: f64, mut fa: f64, mut 
         }
         if e.abs() >= tol1 && fa.abs() > fb.abs() {
             let s = fb / fa;
-            let (p, q) = if (a - c).abs() <= f64::EPSILON {
+            let (p, q) = if a == c {
                 (2.0 * xm * s, 1.0 - s)
             } else {
                 let q0 = fa / fc;
@@ -1623,4 +2065,207 @@ fn brent_root<F: Fn(f64) -> f64>(f: F, mut a: f64, mut b: f64, mut fa: f64, mut 
         }
     }
     Some(b)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use curvebook_doc::{
+        AnalysisKind, AnalysisSpec, Cell, DataSheet, ResultCell, ResultTabKind, SplineLowessMethod, SplineLowessSpec, SubcolumnMode, TableArchetype,
+        XyTable,
+    };
+
+    use super::{
+        FittedCurveModel, execute_spline_lowess, fit_akima_subspline, fit_lowess_curve, fit_natural_cubic_spline, fit_point_to_point,
+        fit_smoothing_spline,
+    };
+    use crate::error::TransformError;
+
+    #[test]
+    fn aud_04_04_lowess_constant_midpoint_and_bisquare_peak_never_collapse_to_zero() {
+        // 1. q = 2 on constant Y = 100.0 evaluated at exact midpoints and interior offsets.
+        let pts: Vec<(f64, f64)> = (0..6).map(|i| (i as f64, 100.0)).collect();
+        let model = fit_lowess_curve(&pts, 0.25, 0).expect("q=2 LOWESS fit");
+        for xq in [0.5, 1.5, 2.5, 3.5, 4.5, 0.25, 2.75] {
+            let y = model.eval(xq);
+            assert!((y - 100.0).abs() < 1e-12, "LOWESS q=2 collapsed at x={xq}: got {y}");
+        }
+
+        // 2. Bisquare robustness passes on flat baseline (Y = 50.0) + narrow peak (Y = 200.0).
+        let mut peak_pts: Vec<(f64, f64)> = (0..21).map(|i| (i as f64, 50.0)).collect();
+        peak_pts[10].1 = 200.0;
+        peak_pts[11].1 = 200.0;
+        let peak_model = fit_lowess_curve(&peak_pts, 0.15, 3).expect("bisquare peak LOWESS");
+        for i in 0..21 {
+            let y = peak_model.eval(i as f64);
+            assert!(y.is_finite() && y >= 49.0, "LOWESS peak/baseline collapsed at x={i}: got {y}");
+        }
+    }
+
+    #[test]
+    fn aud_04_05_solve_inverse_scale_invariance_and_extrapolated_tails() {
+        // (a) Large X scale arch: interior maximum (exact analytical S(1.5e8) = 1.15) must not be skipped.
+        let arch = fit_natural_cubic_spline(&[(0.0, 0.0), (1e8, 1.0), (2e8, 1.0), (3e8, 0.0)]).expect("large-X spline");
+        let mid_y = arch.eval(1.5e8);
+        assert!((mid_y - 1.15).abs() < 1e-12, "expected arch maximum 1.15, got {mid_y}");
+        let arch_roots = arch.solve_inverse(1.1, 0.0, 3e8);
+        assert_eq!(arch_roots.len(), 2, "must find both roots on large-X arch: {arch_roots:?}");
+        for r in arch_roots {
+            assert!((arch.eval(r) - 1.1).abs() < 1e-9, "arch root residual too large at x={r}");
+        }
+
+        // (b) Small Y scale (1e-13): out-of-range query 5e-13 must return zero bogus roots.
+        let small_y = fit_natural_cubic_spline(&[(0.0, 0.0), (1.0, 1e-13), (2.0, 0.0), (3.0, 1e-13)]).expect("small-Y spline");
+        assert!(small_y.solve_inverse(5e-13, 0.0, 3.0).is_empty(), "must not emit bogus roots on small-Y spline");
+        let small_lowess = fit_lowess_curve(&[(0.0, 0.0), (1.0, 1e-13), (2.0, 0.0), (3.0, 1e-13)], 0.75, 0).expect("small-Y LOWESS");
+        assert!(small_lowess.solve_inverse(5e-13, 0.0, 3.0).is_empty(), "must not emit bogus roots on small-Y LOWESS");
+
+        // (c) Nanomolar & picomolar X scales: distinct roots preserved and accurately refined.
+        let nano = fit_natural_cubic_spline(&[(0.0, 0.0), (5e-10, 1.0), (1e-9, 0.0)]).expect("nano-X spline");
+        let nano_roots = nano.solve_inverse(0.5, 0.0, 1e-9);
+        assert_eq!(nano_roots.len(), 2, "nanomolar roots must not collapse: {nano_roots:?}");
+        for r in nano_roots {
+            assert!((nano.eval(r) - 0.5).abs() < 1e-10, "nanomolar root inaccuracy at x={r}");
+        }
+        let pico = fit_natural_cubic_spline(&[(0.0, 0.0), (5e-13, 1.0), (1e-12, 0.0)]).expect("pico-X spline");
+        let pico_roots = pico.solve_inverse(0.5, 0.0, 1e-12);
+        assert_eq!(pico_roots.len(), 2, "picomolar roots must refine accurately: {pico_roots:?}");
+        for r in pico_roots {
+            assert!((pico.eval(r) - 0.5).abs() < 1e-10, "picomolar root inaccuracy at x={r}");
+        }
+
+        // (d) Extrapolated linear tails for PiecewiseCubic and PiecewiseLinear.
+        let lin_cubic = fit_natural_cubic_spline(&[(0.0, 0.0), (1.0, 2.0), (2.0, 4.0)]).expect("linear cubic");
+        let left_r = lin_cubic.solve_inverse(-4.0, -5.0, 5.0);
+        let right_r = lin_cubic.solve_inverse(8.0, -5.0, 5.0);
+        assert_eq!(left_r.len(), 1);
+        assert!((left_r[0] - (-2.0)).abs() < 1e-12);
+        assert_eq!(right_r.len(), 1);
+        assert!((right_r[0] - 4.0).abs() < 1e-12);
+
+        let p2p = fit_point_to_point(&[(0.0, 0.0), (1.0, 2.0), (2.0, 4.0)]).expect("p2p");
+        let p2p_left = p2p.solve_inverse(-4.0, -5.0, 5.0);
+        let p2p_right = p2p.solve_inverse(8.0, -5.0, 5.0);
+        assert_eq!(p2p_left.len(), 1);
+        assert!((p2p_left[0] - (-2.0)).abs() < 1e-12);
+        assert_eq!(p2p_right.len(), 1);
+        assert!((p2p_right[0] - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aud_04_06_excluded_and_text_cells_not_fabricated_as_unknowns() {
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 8).expect("xy");
+        let pts = [(0.0, 0.0), (1.0, 2.0), (2.0, 4.0), (3.0, 6.0)];
+        for (r, &(x, y)) in pts.iter().enumerate() {
+            xy.set_x_cell(r, Cell::number(x)).expect("x");
+            xy.data_sets[0].cells[r][0] = Cell::number(y);
+        }
+        // Row 4: excluded Y outlier with active X -> must NOT become forward unknown.
+        xy.set_x_cell(4, Cell::number(1.5)).expect("x4");
+        xy.data_sets[0].cells[4][0] = Cell::excluded_number(999.0);
+        // Row 5: excluded X with active Y -> must NOT become inverse unknown.
+        xy.set_x_cell(5, Cell::excluded_number(2.5)).expect("x5");
+        xy.data_sets[0].cells[5][0] = Cell::number(5.0);
+        // Row 6: non-empty text Y ("BLQ") with active X -> must NOT become forward unknown.
+        xy.set_x_cell(6, Cell::number(2.0)).expect("x6");
+        xy.data_sets[0].cells[6][0] = Cell::text("BLQ");
+        // Row 7: genuinely blank Y with active X -> MUST be interpolated as forward unknown.
+        xy.set_x_cell(7, Cell::number(1.5)).expect("x7");
+
+        let sheet = DataSheet::new("excl-unk", "Excl", TableArchetype::Xy(xy)).expect("sheet");
+        let spec = SplineLowessSpec { method: SplineLowessMethod::NaturalCubicSpline, interpolate_unknowns: true, ..SplineLowessSpec::default() };
+        let analysis = AnalysisSpec::new("res", "excl-unk", AnalysisKind::FitSplineLowess(spec.clone())).expect("spec");
+        let res = execute_spline_lowess(&sheet, &analysis, &spec).expect("execute");
+        let unk_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::InterpolatedUnknowns).expect("unk tab");
+        assert_eq!(unk_tab.rows.len(), 1, "only genuine blank row 7 should be interpolated, got {:?}", unk_tab.row_labels);
+        assert_eq!(unk_tab.row_labels[0], "Row 8");
+    }
+
+    #[test]
+    fn aud_13_20_presummarized_y_validation_rejects_malformed_summary_rows() {
+        let mut xy = XyTable::new(SubcolumnMode::MeanSdN, 1, 4).expect("xy MeanSdN");
+        xy.set_x_cell(0, Cell::number(0.0)).expect("x0");
+        xy.data_sets[0].cells[0] = vec![Cell::number(1.0), Cell::number(0.1), Cell::number(3.0)];
+        xy.set_x_cell(1, Cell::number(1.0)).expect("x1");
+        xy.data_sets[0].cells[1] = vec![Cell::number(2.0), Cell::number(-0.5), Cell::number(3.0)]; // invalid negative SD
+        xy.set_x_cell(2, Cell::number(2.0)).expect("x2");
+        xy.data_sets[0].cells[2] = vec![Cell::number(3.0), Cell::number(0.2), Cell::number(3.0)];
+        // Row 3: blank X with mean-only Y for inverse unknown must be allowed once row 1 is fixed.
+        xy.data_sets[0].cells[3] = vec![Cell::number(1.5), Cell::empty(), Cell::empty()];
+
+        let spec = SplineLowessSpec { method: SplineLowessMethod::NaturalCubicSpline, interpolate_unknowns: true, ..SplineLowessSpec::default() };
+        let analysis = AnalysisSpec::new("res-ps", "ps-bad", AnalysisKind::FitSplineLowess(spec.clone())).expect("analysis");
+        let bad_sheet = DataSheet::new("ps-bad", "Bad", TableArchetype::Xy(xy.clone())).expect("bad sheet");
+        assert!(
+            matches!(execute_spline_lowess(&bad_sheet, &analysis, &spec), Err(TransformError::SummaryPoint(_))),
+            "negative SD in MeanSdN must return SummaryPoint error"
+        );
+
+        // Fix row 1 SD -> should succeed and interpolate inverse unknown row 3.
+        xy.data_sets[0].cells[1][1] = Cell::number(0.2);
+        let good_sheet = DataSheet::new("ps-bad", "Good", TableArchetype::Xy(xy)).expect("good sheet");
+        let res = execute_spline_lowess(&good_sheet, &analysis, &spec).expect("valid MeanSdN fit");
+        let unk_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::InterpolatedUnknowns).expect("unk tab");
+        assert_eq!(unk_tab.rows.len(), 1);
+        assert_eq!(unk_tab.row_labels[0], "Row 4");
+    }
+
+    #[test]
+    fn aud_04_19_large_lowess_completes_quickly_and_reuses_fitted_y() {
+        let n = 4_000_usize;
+        let pts: Vec<(f64, f64)> = (0..n).map(|i| (i as f64, (i as f64 * 0.01).sin())).collect();
+        let model = fit_lowess_curve(&pts, 0.25, 2).expect("large LOWESS");
+        let FittedCurveModel::Lowess { fitted_y, .. } = &model else {
+            panic!("expected Lowess model");
+        };
+        assert_eq!(fitted_y.len(), n);
+        assert!(fitted_y.iter().all(|v| v.is_finite()));
+        assert!(model.eval(2_000.5).is_finite());
+    }
+
+    #[test]
+    fn aud_04_26_and_40_akima_overflow_guard_reinsch_clamp_and_infinite_lambda() {
+        // 1. Akima with extreme spacing: must either produce finite coefficients or reject cleanly (never Ok with NaN/Inf).
+        let tiny_dx = [(0.0, 0.0), (1e-160, 1.0), (2e-160, 0.5), (3e-160, 2.0)];
+        if let Ok(FittedCurveModel::PiecewiseCubic { pieces, left_slope, right_slope, .. }) = fit_akima_subspline(&tiny_dx) {
+            assert!(left_slope.is_finite() && right_slope.is_finite());
+            for p in pieces {
+                assert!(p.a.is_finite() && p.b.is_finite() && p.c.is_finite() && p.d.is_finite());
+            }
+        }
+        // Moderate large slopes (~1e100) where old w1*d_m1 overflowed (1e200 ok, 1e160 -> w*d = 1e320 overflowed!)
+        // Check y ~ 1e160 with h = 1.0: c and d are ~1e160 (finite!), while old w1*d_m1 = 1e320 overflowed!
+        let large_y = [(0.0, 0.0), (1.0, 1e160), (2.0, 0.5e160), (3.0, 2e160), (4.0, 1.5e160)];
+        let ak = fit_akima_subspline(&large_y).expect("normalized Akima weights must handle 1e160 ordinates");
+        let FittedCurveModel::PiecewiseCubic { pieces, left_slope, right_slope, .. } = ak else {
+            panic!("expected PiecewiseCubic");
+        };
+        assert!(left_slope.is_finite() && right_slope.is_finite());
+        for p in pieces {
+            assert!(p.a.is_finite() && p.b.is_finite() && p.c.is_finite() && p.d.is_finite());
+        }
+
+        // 2. Reinsch solve_lambda_for_df near df = 2.0 on large X scale must not overflow hi.exp().
+        let large_x = [(0.0, 1.0), (1e6, 2.1), (2e6, 2.9), (3e6, 4.2), (4e6, 5.0)];
+        let fit_near = fit_smoothing_spline(&large_x, None, Some(2.00001)).expect("near-linear smoothing spline");
+        assert!(fit_near.model.eval(1.5e6).is_finite());
+
+        // 3. AUD-04-40: df = 2.0 returns lambda = +Inf and renders "Infinity (linear limit)" without leaking f64::MAX into scalars.
+        let fit_lin = fit_smoothing_spline(&large_x, None, Some(2.0)).expect("df=2 smoothing spline");
+        assert!(fit_lin.lambda.is_infinite() && fit_lin.lambda.is_sign_positive());
+
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, large_x.len()).expect("xy");
+        for (r, &(x, y)) in large_x.iter().enumerate() {
+            xy.set_x_cell(r, Cell::number(x)).expect("x");
+            xy.data_sets[0].cells[r][0] = Cell::number(y);
+        }
+        let sheet = DataSheet::new("ss-lin", "SS Lin", TableArchetype::Xy(xy)).expect("sheet");
+        let spec = SplineLowessSpec { method: SplineLowessMethod::SmoothingSpline, smoothing_df: Some(2.0), ..SplineLowessSpec::default() };
+        let analysis = AnalysisSpec::new("res-ss", "ss-lin", AnalysisKind::FitSplineLowess(spec.clone())).expect("analysis");
+        let res = execute_spline_lowess(&sheet, &analysis, &spec).expect("execute ss");
+        assert!(!res.scalars.iter().any(|s| s.key == "smoothing_lambda"), "non-finite linear-limit lambda must not leak into scalars");
+        let summary = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary).expect("summary");
+        let lam_row = summary.row_labels.iter().position(|l| l.contains("lambda")).expect("lambda row");
+        assert_eq!(summary.rows[lam_row][0], ResultCell::Text(String::from("Infinity (linear limit)")));
+    }
 }

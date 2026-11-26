@@ -30,7 +30,11 @@ fn rv23_and_rv24_tex_text_escapes_and_unary_sign_after_cdot() {
     }
     assert!(!tex_id.contains(r"\<") && !tex_id.contains(r"\>") && !tex_id.contains(r"\\"), "{tex_id}");
 
-    let fb = format_model_equation_tex("custom_dsl", Some("Y = a % b + c * -3"), &[], false, 4);
+    // AUD-03-34: valid `%` now renders through the AST as `\bmod` with parenthesized negative factor,
+    // while unparseable fallback DSL still exercises `normalize_tex_signs` unary preservation after `\cdot`.
+    let ast_rem = format_model_equation_tex("custom_dsl", Some("Y = a % b + c * -3"), &[], false, 4);
+    assert_eq!(ast_rem, r"Y = a \bmod b + c \cdot (-3)");
+    let fb = format_model_equation_tex("custom_dsl", Some("Y = a @ b + c * -3"), &[], false, 4);
     assert!(fb.contains(r"\cdot -3") && !fb.contains(r"\cdot - 3"), "{fb}");
 }
 

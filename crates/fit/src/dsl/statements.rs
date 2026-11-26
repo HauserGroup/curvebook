@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::dsl::ast::{BinaryOp, CompiledInitRule, CompiledProgram, DatasetFilter, DslCompileWarning, DslEquationKind, DslWarningKind, Expr, OpCode};
 use crate::dsl::compile::compile_target_resolved;
-use crate::dsl::limits::{MAX_DATASET_CLASSES, MAX_DATASET_EXPANSION, MAX_TOTAL_OPCODES};
+use crate::dsl::limits::{MAX_DATASET_CLASSES, MAX_DATASET_EXPANSION, MAX_FILTER_CLASS_MATCHES, MAX_TOTAL_OPCODES};
 use crate::dsl::parser::{LocalResolver, parse_expr_collecting_locs};
 use crate::error::FitError;
 use crate::library::estimate_x_at_ymid;
@@ -68,17 +68,22 @@ pub(crate) fn parse_dataset_prefix(line: &str, line_no: usize) -> Result<(Datase
         if let Some((start_s, end_s)) = p.split_once(':') {
             let s_idx = parse_ds_token(start_s.trim(), line_no)?;
             let e_idx = parse_ds_token(end_s.trim(), line_no)?;
-            if s_idx <= e_idx {
-                let count = e_idx.checked_sub(s_idx).and_then(|d| d.checked_add(1));
-                if count.is_none_or(|c| c > MAX_DATASET_EXPANSION || indices.len().saturating_add(c) > MAX_DATASET_EXPANSION) {
-                    return Err(FitError::DslCompileError {
-                        message: format!("Dataset range `{p}` exceeds maximum expansion limit ({MAX_DATASET_EXPANSION})"),
-                        line: line_no,
-                        column: 1,
-                    });
-                }
-                indices.extend(s_idx..=e_idx);
+            if s_idx > e_idx {
+                return Err(FitError::DslCompileError {
+                    message: format!("Reversed dataset range `{p}`: start index ({s_idx}) exceeds end index ({e_idx})"),
+                    line: line_no,
+                    column: 1,
+                });
             }
+            let count = e_idx.checked_sub(s_idx).and_then(|d| d.checked_add(1));
+            if count.is_none_or(|c| c > MAX_DATASET_EXPANSION || indices.len().saturating_add(c) > MAX_DATASET_EXPANSION) {
+                return Err(FitError::DslCompileError {
+                    message: format!("Dataset range `{p}` exceeds maximum expansion limit ({MAX_DATASET_EXPANSION})"),
+                    line: line_no,
+                    column: 1,
+                });
+            }
+            indices.extend(s_idx..=e_idx);
         } else if !p.is_empty() {
             if indices.len() >= MAX_DATASET_EXPANSION {
                 return Err(FitError::DslCompileError {
@@ -205,7 +210,7 @@ pub(crate) fn is_valid_ident(s: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::dsl) enum DslSection {
+pub(crate) enum DslSection {
     Equation,
     InitialValues,
     Transforms,
@@ -235,8 +240,41 @@ pub(in crate::dsl) const INIT_STAT_NAMES: [&str; 21] = [
     "SLOPEATXMAX",
 ];
 
-pub(in crate::dsl) type OutputBranch = (DatasetFilter, Vec<(String, Expr)>, Expr);
-pub(in crate::dsl) type OdeInitBranch = (DatasetFilter, f64, Vec<(String, Expr)>, Expr);
+pub(in crate::dsl) struct OutputBranchSpec {
+    pub(in crate::dsl) filter: DatasetFilter,
+    pub(in crate::dsl) local_indices: Vec<usize>,
+    pub(in crate::dsl) target_idx: usize,
+}
+
+pub(in crate::dsl) struct OdeInitBranchSpec {
+    pub(in crate::dsl) filter: DatasetFilter,
+    pub(in crate::dsl) t0: f64,
+    pub(in crate::dsl) local_indices: Vec<usize>,
+    pub(in crate::dsl) init_idx: usize,
+}
+
+pub(in crate::dsl) fn expr_ast_nodes(expr: &Expr) -> usize {
+    let mut count = 0_usize;
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        count = count.saturating_add(1);
+        match node {
+            Expr::Num(_) | Expr::Ident(_) => {}
+            Expr::Unary { rhs, .. } => stack.push(rhs),
+            Expr::Binary { lhs, rhs, .. } => {
+                stack.push(rhs);
+                stack.push(lhs);
+            }
+            Expr::Call { args, .. } => stack.extend(args.iter()),
+            Expr::If { cond, then_br, else_br } => {
+                stack.push(else_br);
+                stack.push(then_br);
+                stack.push(cond);
+            }
+        }
+    }
+    count
+}
 
 pub(in crate::dsl) enum EqItem {
     Local { filter: DatasetFilter, name: String, rhs: Expr, line_no: usize },
@@ -270,6 +308,14 @@ impl EqItem {
         }
     }
 
+    pub(in crate::dsl) fn ast_node_count(&self) -> usize {
+        match self {
+            Self::Local { rhs, .. } | Self::TargetOde { rhs, .. } | Self::OdeInit { rhs, .. } => expr_ast_nodes(rhs),
+            Self::TargetExplicit { expr, .. } | Self::TargetBare { expr, .. } => expr_ast_nodes(expr),
+            Self::TargetImplicitDiff { diff, .. } => expr_ast_nodes(diff),
+        }
+    }
+
     pub(in crate::dsl) fn is_target_for_mode(&self, has_ode: bool) -> bool {
         if has_ode {
             matches!(self, Self::TargetOde { .. })
@@ -286,9 +332,21 @@ impl EqItem {
             _ => None,
         }
     }
+
+    /// Return `(target_expr, subtract_from_y)` for the resolved equation kind without cloning `Expr`.
+    pub(in crate::dsl) fn target_expr_for_kind(&self, kind: DslEquationKind) -> Option<(&Expr, bool)> {
+        match (kind, self) {
+            (DslEquationKind::OdeFirstOrder, Self::TargetOde { rhs, .. }) => Some((rhs, false)),
+            (DslEquationKind::Implicit, Self::TargetImplicitDiff { diff, .. }) => Some((diff, false)),
+            (DslEquationKind::Implicit, Self::TargetExplicit { expr, .. }) => Some((expr, true)),
+            (DslEquationKind::Implicit | DslEquationKind::Explicit, Self::TargetBare { expr, .. }) => Some((expr, false)),
+            (DslEquationKind::Explicit, Self::TargetExplicit { expr, .. }) => Some((expr, false)),
+            _ => None,
+        }
+    }
 }
 
-pub(in crate::dsl) fn parse_section_header(trimmed: &str, line_no: usize) -> Result<Option<DslSection>, FitError> {
+pub(crate) fn parse_section_header(trimmed: &str, line_no: usize) -> Result<Option<DslSection>, FitError> {
     let Some(stripped) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
         return Ok(None);
     };
@@ -441,6 +499,7 @@ pub(in crate::dsl) fn collect_filter_classes(eq_items: &[EqItem]) -> Result<Filt
 
     let mut matching_classes = vec![Vec::new(); unique_filters.len()];
     let mut stamp = vec![usize::MAX; total_classes];
+    let mut total_matches = 0_usize;
     for (fi, &f) in unique_filters.iter().enumerate() {
         match f {
             DatasetFilter::Any => {}
@@ -450,6 +509,14 @@ pub(in crate::dsl) fn collect_filter_classes(eq_items: &[EqItem]) -> Result<Filt
                         && stamp[c_idx] != fi
                     {
                         stamp[c_idx] = fi;
+                        total_matches = total_matches.saturating_add(1);
+                        if total_matches > MAX_FILTER_CLASS_MATCHES {
+                            return Err(FitError::DslCompileError {
+                                message: format!("Dataset filter class expansion exceeds budget ({MAX_FILTER_CLASS_MATCHES})"),
+                                line: 1,
+                                column: 1,
+                            });
+                        }
                         matching_classes[fi].push(c_idx);
                     }
                 }
@@ -462,6 +529,14 @@ pub(in crate::dsl) fn collect_filter_classes(eq_items: &[EqItem]) -> Result<Filt
                 }
                 for (c_idx, st) in stamp.iter().enumerate().take(total_classes) {
                     if *st != fi {
+                        total_matches = total_matches.saturating_add(1);
+                        if total_matches > MAX_FILTER_CLASS_MATCHES {
+                            return Err(FitError::DslCompileError {
+                                message: format!("Dataset filter class expansion exceeds budget ({MAX_FILTER_CLASS_MATCHES})"),
+                                line: 1,
+                                column: 1,
+                            });
+                        }
                         matching_classes[fi].push(c_idx);
                     }
                 }
@@ -472,26 +547,13 @@ pub(in crate::dsl) fn collect_filter_classes(eq_items: &[EqItem]) -> Result<Filt
     Ok(FilterClassPartition { explicit_classes: explicit_filters, outside_filter, filter_ids, matching_classes })
 }
 
-pub(in crate::dsl) fn target_for_resolved_kind(item: &EqItem, kind: DslEquationKind) -> Option<Expr> {
-    match (kind, item) {
-        (DslEquationKind::OdeFirstOrder, EqItem::TargetOde { rhs, .. }) => Some(rhs.clone()),
-        (DslEquationKind::Implicit, EqItem::TargetImplicitDiff { diff, .. }) => Some(diff.clone()),
-        (DslEquationKind::Implicit, EqItem::TargetExplicit { expr, .. }) => {
-            Some(Expr::Binary { op: BinaryOp::Sub, lhs: Box::new(Expr::Ident("Y".to_owned())), rhs: Box::new(expr.clone()) })
-        }
-        (DslEquationKind::Implicit | DslEquationKind::Explicit, EqItem::TargetBare { expr, .. }) => Some(expr.clone()),
-        (DslEquationKind::Explicit, EqItem::TargetExplicit { expr, .. }) => Some(expr.clone()),
-        _ => None,
-    }
-}
-
-fn expr_depends_on_y_or_locals(expr: &Expr, y_locals: &HashSet<String>) -> bool {
+fn expr_depends_on_y_or_locals(expr: &Expr, y_locals: &HashSet<&str>) -> bool {
     let mut stack = vec![expr];
     while let Some(node) = stack.pop() {
         match node {
             Expr::Num(_) => {}
             Expr::Ident(n) => {
-                if n.eq_ignore_ascii_case("Y") || y_locals.contains(n) {
+                if n.eq_ignore_ascii_case("Y") || y_locals.contains(n.as_str()) {
                     return true;
                 }
             }
@@ -511,50 +573,54 @@ fn expr_depends_on_y_or_locals(expr: &Expr, y_locals: &HashSet<String>) -> bool 
     false
 }
 
-/// Returns `true` when `target_expr` references `Y` directly or transitively through `locals` (#44).
-fn branch_target_depends_on_y(locals: &[(String, Expr)], target_expr: &Expr) -> bool {
-    let mut y_locals: HashSet<String> = HashSet::new();
-    for (name, rhs) in locals {
-        if expr_depends_on_y_or_locals(rhs, &y_locals) {
-            y_locals.insert(name.clone());
-        } else {
-            y_locals.remove(name);
+/// Returns `true` when `target_expr` references `Y` directly or transitively through `local_indices` (#44).
+fn branch_target_depends_on_y(eq_items: &[EqItem], local_indices: &[usize], target_expr: &Expr) -> bool {
+    let mut y_locals: HashSet<&str> = HashSet::new();
+    for &idx in local_indices {
+        if let EqItem::Local { name, rhs, .. } = &eq_items[idx] {
+            if expr_depends_on_y_or_locals(rhs, &y_locals) {
+                y_locals.insert(name.as_str());
+            } else {
+                y_locals.remove(name.as_str());
+            }
         }
     }
     expr_depends_on_y_or_locals(target_expr, &y_locals)
 }
 
-pub(in crate::dsl) fn branch_uses_unbound_scoped_indices(
-    eq_items: &[EqItem],
-    local_indices: &[usize],
-    target_idx: usize,
-    has_ode: bool,
-    scoped_names: &HashSet<String>,
-) -> bool {
-    let Some(target) = eq_items[target_idx].target_raw_expr(has_ode) else {
-        return false;
-    };
-    let declared_scoped: HashSet<&str> = scoped_names.iter().map(String::as_str).collect();
-    let mut free = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut bound = BTreeSet::new();
-    for &idx in local_indices {
-        if let EqItem::Local { name, rhs, .. } = &eq_items[idx] {
-            collect_free_idents_with_declared_locals(rhs, &bound, &declared_scoped, &mut seen, &mut free);
-            bound.insert(name.clone());
+fn expr_uses_unbound_scoped_at(expr: &Expr, first_bound_pos: &HashMap<&str, usize>, loc_len: usize, scoped_names: &HashSet<String>) -> bool {
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Num(_) => {}
+            Expr::Ident(name) => {
+                if scoped_names.contains(name) && !first_bound_pos.get(name.as_str()).is_some_and(|&pos| pos < loc_len) {
+                    return true;
+                }
+            }
+            Expr::Unary { rhs, .. } => stack.push(rhs),
+            Expr::Binary { lhs, rhs, .. } => {
+                stack.push(rhs);
+                stack.push(lhs);
+            }
+            Expr::Call { args, .. } => stack.extend(args.iter()),
+            Expr::If { cond, then_br, else_br } => {
+                stack.push(else_br);
+                stack.push(then_br);
+                stack.push(cond);
+            }
         }
     }
-    collect_free_idents_with_declared_locals(target, &bound, &declared_scoped, &mut seen, &mut free);
-    free.iter().any(|ident| scoped_names.contains(ident))
+    false
 }
 
-fn collect_all_expr_idents(expr: &Expr, out: &mut HashSet<String>) {
+fn collect_all_expr_idents<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
     let mut stack = vec![expr];
     while let Some(node) = stack.pop() {
         match node {
             Expr::Num(_) => {}
             Expr::Ident(n) => {
-                out.insert(n.clone());
+                out.insert(n.as_str());
             }
             Expr::Unary { rhs, .. } => stack.push(rhs),
             Expr::Binary { lhs, rhs, .. } => {
@@ -571,21 +637,22 @@ fn collect_all_expr_idents(expr: &Expr, out: &mut HashSet<String>) {
     }
 }
 
-/// Keep only the minimal backward-live prefix of `locals` needed to evaluate `rhs`,
-/// preserving assignment order and shadowing semantics.
-fn needed_locals_for_expr(locals: &[(String, Expr)], rhs: &Expr) -> Vec<(String, Expr)> {
-    let mut needed = HashSet::new();
+/// Keep only the minimal backward-live prefix of `local_indices` needed to evaluate `rhs`,
+/// preserving assignment order and shadowing semantics without cloning `Expr` trees.
+fn needed_local_indices_for_expr(eq_items: &[EqItem], local_indices: &[usize], rhs: &Expr) -> Vec<usize> {
+    let mut needed: HashSet<&str> = HashSet::new();
     collect_all_expr_idents(rhs, &mut needed);
-    let mut keep = vec![false; locals.len()];
-    for idx in (0..locals.len()).rev() {
-        let (name, expr) = &locals[idx];
-        if needed.contains(name) {
-            keep[idx] = true;
-            needed.remove(name);
-            collect_all_expr_idents(expr, &mut needed);
+    let mut keep = vec![false; local_indices.len()];
+    for (pos, &idx) in local_indices.iter().enumerate().rev() {
+        if let EqItem::Local { name, rhs: lrhs, .. } = &eq_items[idx]
+            && needed.contains(name.as_str())
+        {
+            keep[pos] = true;
+            needed.remove(name.as_str());
+            collect_all_expr_idents(lrhs, &mut needed);
         }
     }
-    locals.iter().zip(keep).filter_map(|(pair, k)| if k { Some(pair.clone()) } else { None }).collect()
+    local_indices.iter().zip(keep).filter_map(|(&idx, k)| k.then_some(idx)).collect()
 }
 
 struct BranchValidationCtx<'a> {
@@ -602,7 +669,7 @@ fn validate_branch_locals_and_trailing(
     target_idx: usize,
     skip_scoped_check: bool,
     target_is_specific: bool,
-) -> Result<Vec<(String, Expr)>, FitError> {
+) -> Result<Vec<usize>, FitError> {
     let eq_items = ctx.eq_items;
     let is_overridden_any_local = |pos: usize, idx: usize| -> bool {
         pos >= loc_len
@@ -644,7 +711,7 @@ fn validate_branch_locals_and_trailing(
     }
 
     let mut bound = BTreeSet::new();
-    let mut materialized = Vec::with_capacity(loc_len);
+    let mut validated_indices = Vec::with_capacity(loc_len);
     for &idx in &all_class_locals[..loc_len] {
         if let EqItem::Local { name, rhs, line_no, .. } = &eq_items[idx] {
             let mut free = Vec::new();
@@ -667,7 +734,7 @@ fn validate_branch_locals_and_trailing(
                 }
             }
             bound.insert(name.clone());
-            materialized.push((name.clone(), rhs.clone()));
+            validated_indices.push(idx);
         }
     }
 
@@ -694,53 +761,46 @@ fn validate_branch_locals_and_trailing(
         }
     }
 
-    Ok(materialized)
+    Ok(validated_indices)
 }
-
-type ResolvedOdeInit = (f64, Vec<(String, Expr)>, Expr);
 
 fn resolve_ode_init_for_class(
     eq_items: &[EqItem],
     preceding_local_indices: &[usize],
     init_item_idx: usize,
     all_local_names: &HashSet<&str>,
-) -> Result<ResolvedOdeInit, FitError> {
+) -> Result<(f64, Vec<usize>, usize), FitError> {
     let EqItem::OdeInit { t0, rhs, line_no, .. } = &eq_items[init_item_idx] else {
         return Err(FitError::DslCompileError { message: "Invalid ODE initial condition item".to_owned(), line: 1, column: 1 });
     };
-    let all_prior_locals: Vec<(String, Expr)> = preceding_local_indices
-        .iter()
-        .filter_map(|&idx| match &eq_items[idx] {
-            EqItem::Local { name, rhs, .. } => Some((name.clone(), rhs.clone())),
-            _ => None,
-        })
-        .collect();
-    let live_locals = needed_locals_for_expr(&all_prior_locals, rhs);
+    let live_local_indices = needed_local_indices_for_expr(eq_items, preceding_local_indices, rhs);
 
     let mut bound = BTreeSet::new();
-    for (name, lrhs) in &live_locals {
-        if expr_references_y(lrhs) {
-            return Err(FitError::DslCompileError {
-                message: format!("ODE initial condition cannot depend on `Y` (transitively via `{name}`)"),
-                line: *line_no,
-                column: 1,
-            });
-        }
-        let mut free = Vec::new();
-        let mut seen = BTreeSet::new();
-        collect_free_idents_with_declared_locals(lrhs, &bound, all_local_names, &mut seen, &mut free);
-        for ident in &free {
-            if all_local_names.contains(ident.as_str()) {
+    for &idx in &live_local_indices {
+        if let EqItem::Local { name, rhs: lrhs, .. } = &eq_items[idx] {
+            if expr_references_y(lrhs) {
                 return Err(FitError::DslCompileError {
-                    message: format!(
-                        "ODE initial condition references out-of-scope or later-defined local `{ident}`; assign `{ident}` before the initial condition in this dataset scope"
-                    ),
+                    message: format!("ODE initial condition cannot depend on `Y` (transitively via `{name}`)"),
                     line: *line_no,
                     column: 1,
                 });
             }
+            let mut free = Vec::new();
+            let mut seen = BTreeSet::new();
+            collect_free_idents_with_declared_locals(lrhs, &bound, all_local_names, &mut seen, &mut free);
+            for ident in &free {
+                if all_local_names.contains(ident.as_str()) {
+                    return Err(FitError::DslCompileError {
+                        message: format!(
+                            "ODE initial condition references out-of-scope or later-defined local `{ident}`; assign `{ident}` before the initial condition in this dataset scope"
+                        ),
+                        line: *line_no,
+                        column: 1,
+                    });
+                }
+            }
+            bound.insert(name.clone());
         }
-        bound.insert(name.clone());
     }
     if expr_references_y(rhs) {
         return Err(FitError::DslCompileError { message: "ODE initial condition cannot depend on `Y`".to_owned(), line: *line_no, column: 1 });
@@ -760,7 +820,7 @@ fn resolve_ode_init_for_class(
         }
     }
 
-    Ok((*t0, live_locals, rhs.clone()))
+    Ok((*t0, live_local_indices, init_item_idx))
 }
 
 fn reserved_ident_info(raw: &str) -> Option<(String, &'static str)> {
@@ -821,7 +881,7 @@ fn collect_dsl_warnings(ident_locs: &HashMap<String, (usize, usize)>, local_name
 struct PendingBranch {
     class_idx: usize,
     filter: DatasetFilter,
-    locals: Vec<(String, Expr)>,
+    local_indices: Vec<usize>,
     item_idx: usize,
     init_sel: Option<(usize, usize)>,
     target_was_any: bool,
@@ -862,7 +922,7 @@ fn infer_final_equation_kind(eq_items: &[EqItem], pending_branches: &[PendingBra
     let is_implicit = pending_branches.iter().any(|b| {
         let item = &eq_items[b.item_idx];
         matches!(item, EqItem::TargetImplicitDiff { .. })
-            || item.target_raw_expr(false).is_some_and(|expr| branch_target_depends_on_y(&b.locals, expr))
+            || item.target_raw_expr(false).is_some_and(|expr| branch_target_depends_on_y(eq_items, &b.local_indices, expr))
     });
     if is_implicit { DslEquationKind::Implicit } else { DslEquationKind::Explicit }
 }
@@ -876,6 +936,23 @@ fn select_outside_branch(
     outside_inits: &[(usize, usize, bool)],
     any_explicit_branch: bool,
 ) -> Result<Option<PendingBranch>, FitError> {
+    // Precompute in one linear O(total_nodes) pass over `outside_locals` both the earliest
+    // prefix length `first_unbound_len` where a local references an unbound scoped variable
+    // and the first position where each local name is bound (`AUD-03-01`).
+    let mut first_bound_pos: HashMap<&str, usize> = HashMap::new();
+    let mut first_unbound_len = usize::MAX;
+    if any_explicit_branch && !val_ctx.scoped_names.is_empty() {
+        for (pos, &idx) in outside_locals.iter().enumerate() {
+            if let EqItem::Local { name, rhs, .. } = &val_ctx.eq_items[idx] {
+                if expr_uses_unbound_scoped_at(rhs, &first_bound_pos, pos, val_ctx.scoped_names) {
+                    first_unbound_len = pos + 1;
+                    break;
+                }
+                first_bound_pos.entry(name.as_str()).or_insert(pos);
+            }
+        }
+    }
+
     let outside_candidates = outside_outputs
         .iter()
         .copied()
@@ -883,20 +960,22 @@ fn select_outside_branch(
         .filter(|&(_, _, was_any)| !was_any)
         .chain(outside_outputs.iter().copied().rev().filter(|&(_, _, was_any)| was_any));
     for (loc_len, item_idx, was_any) in outside_candidates {
-        let local_slice = &outside_locals[..loc_len];
         if any_explicit_branch
             && was_any
-            && branch_uses_unbound_scoped_indices(val_ctx.eq_items, local_slice, item_idx, val_ctx.has_ode, val_ctx.scoped_names)
+            && !val_ctx.scoped_names.is_empty()
+            && let Some(target) = val_ctx.eq_items[item_idx].target_raw_expr(val_ctx.has_ode)
+            && (loc_len >= first_unbound_len || expr_uses_unbound_scoped_at(target, &first_bound_pos, loc_len, val_ctx.scoped_names))
         {
             continue;
         }
-        let locals = validate_branch_locals_and_trailing(val_ctx, outside_locals, loc_len, item_idx, any_explicit_branch && was_any, !was_any)?;
+        let local_indices =
+            validate_branch_locals_and_trailing(val_ctx, outside_locals, loc_len, item_idx, any_explicit_branch && was_any, !was_any)?;
         let selected_outside_init =
             outside_inits.iter().rev().find(|&&(_, _, spec)| spec).or_else(|| outside_inits.last()).map(|&(i_loc, i_idx, _)| (i_loc, i_idx));
         return Ok(Some(PendingBranch {
             class_idx: outside_class,
             filter: outside_filter,
-            locals,
+            local_indices,
             item_idx,
             init_sel: selected_outside_init,
             target_was_any: was_any,
@@ -907,8 +986,9 @@ fn select_outside_branch(
 
 pub(in crate::dsl) struct ResolvedEquationBody {
     pub(in crate::dsl) kind: DslEquationKind,
-    pub(in crate::dsl) body_stmts: Vec<OutputBranch>,
-    pub(in crate::dsl) ode_init_branches: Vec<OdeInitBranch>,
+    pub(in crate::dsl) eq_items: Vec<EqItem>,
+    pub(in crate::dsl) body_stmts: Vec<OutputBranchSpec>,
+    pub(in crate::dsl) ode_init_branches: Vec<OdeInitBranchSpec>,
     pub(in crate::dsl) warnings: Vec<DslCompileWarning>,
 }
 
@@ -947,6 +1027,7 @@ pub(in crate::dsl) fn resolve_equation_branches(
     let mut explicit_inits: Vec<Option<(usize, usize, bool)>> = vec![None; num_explicit];
     let mut outside_inits: Vec<(usize, usize, bool)> = Vec::new();
     let mut total_branch_refs = 0_usize;
+    let mut amplified_branch_nodes = 0_usize;
     let mut last_any_target_idx: Option<usize> = None;
 
     for (item_idx, item) in eq_items.iter().enumerate() {
@@ -969,13 +1050,25 @@ pub(in crate::dsl) fn resolve_equation_branches(
             &[]
         };
 
-        if is_local {
-            let count_matched = if was_any { total_classes } else { classes_slice.len() };
-            total_branch_refs = total_branch_refs.saturating_add(count_matched);
-            if total_branch_refs > MAX_TOTAL_OPCODES {
+        let count_matched = if was_any { total_classes } else { classes_slice.len() };
+        total_branch_refs = total_branch_refs.saturating_add(count_matched);
+        if total_branch_refs > MAX_TOTAL_OPCODES {
+            return Err(FitError::DslCompileError {
+                message: format!("Compiled equation exceeds branch-expansion budget ({MAX_TOTAL_OPCODES})"),
+                line: item.line_no(),
+                column: 1,
+            });
+        }
+        // Only amplified statements (`count_matched > 1`) multiply AST size across branches;
+        // single-branch (`count_matched == 1`) statements are stored by index without cloning
+        // and bounded during bytecode emission so per-branch remaining-budget diagnostics fire.
+        if count_matched > 1 {
+            let stmt_nodes = item.ast_node_count().max(1);
+            amplified_branch_nodes = amplified_branch_nodes.saturating_add(stmt_nodes.saturating_mul(count_matched));
+            if amplified_branch_nodes > MAX_TOTAL_OPCODES {
                 return Err(FitError::DslCompileError {
                     message: format!("Compiled equation exceeds branch-expansion budget ({MAX_TOTAL_OPCODES})"),
-                    line: 1,
+                    line: item.line_no(),
                     column: 1,
                 });
             }
@@ -1005,9 +1098,16 @@ pub(in crate::dsl) fn resolve_equation_branches(
     let mut pending_branches: Vec<PendingBranch> = Vec::new();
     for (c_idx, class_filter) in partition.explicit_classes.into_iter().enumerate() {
         if let Some((loc_len, item_idx, is_specific)) = explicit_outputs[c_idx] {
-            let locals = validate_branch_locals_and_trailing(&val_ctx, &class_locals[c_idx], loc_len, item_idx, false, is_specific)?;
+            let local_indices = validate_branch_locals_and_trailing(&val_ctx, &class_locals[c_idx], loc_len, item_idx, false, is_specific)?;
             let init_sel = explicit_inits[c_idx].map(|(i_loc, i_idx, _)| (i_loc, i_idx));
-            pending_branches.push(PendingBranch { class_idx: c_idx, filter: class_filter, locals, item_idx, init_sel, target_was_any: !is_specific });
+            pending_branches.push(PendingBranch {
+                class_idx: c_idx,
+                filter: class_filter,
+                local_indices,
+                item_idx,
+                init_sel,
+                target_was_any: !is_specific,
+            });
         }
     }
 
@@ -1032,13 +1132,18 @@ pub(in crate::dsl) fn resolve_equation_branches(
     let mut body_stmts = Vec::with_capacity(pending_branches.len());
     let mut ode_init_branches = Vec::new();
     for b in pending_branches {
-        if let Some(target) = target_for_resolved_kind(&eq_items[b.item_idx], final_kind) {
+        if eq_items[b.item_idx].target_expr_for_kind(final_kind).is_some() {
             if has_ode && let Some((init_loc_len, init_idx)) = b.init_sel {
-                let (t0, init_locals, init_rhs) =
+                let (t0, init_local_indices, resolved_init_idx) =
                     resolve_ode_init_for_class(&eq_items, &class_locals[b.class_idx][..init_loc_len], init_idx, &all_local_names)?;
-                ode_init_branches.push((b.filter.clone(), t0, init_locals, init_rhs));
+                ode_init_branches.push(OdeInitBranchSpec {
+                    filter: b.filter.clone(),
+                    t0,
+                    local_indices: init_local_indices,
+                    init_idx: resolved_init_idx,
+                });
             }
-            body_stmts.push((b.filter, b.locals, target));
+            body_stmts.push(OutputBranchSpec { filter: b.filter, local_indices: b.local_indices, target_idx: b.item_idx });
         }
     }
     if has_ode && has_ode_init && ode_init_branches.is_empty() {
@@ -1050,7 +1155,9 @@ pub(in crate::dsl) fn resolve_equation_branches(
         });
     }
     let warnings = collect_dsl_warnings(ident_locs, &all_local_names, uses_t_axis);
-    Ok(ResolvedEquationBody { kind: final_kind, body_stmts, ode_init_branches, warnings })
+    drop(all_local_names);
+    drop(partition.filter_ids);
+    Ok(ResolvedEquationBody { kind: final_kind, eq_items, body_stmts, ode_init_branches, warnings })
 }
 
 fn ols_slope(pts: &[(f64, f64)]) -> f64 {
@@ -1081,7 +1188,7 @@ fn ols_slope(pts: &[(f64, f64)]) -> f64 {
     if sxx > 0.0 && sxx.is_finite() && sxy.is_finite() { sxy / sxx } else { f64::NAN }
 }
 
-fn interpolate_y_at_x(sorted_pts: &[(f64, f64)], x_target: f64, eps: f64) -> f64 {
+fn collapse_replicate_knots(sorted_pts: &[(f64, f64)], eps: f64) -> Vec<(f64, f64)> {
     let mut knots: Vec<(f64, f64)> = Vec::new();
     let mut i = 0_usize;
     while i < sorted_pts.len() {
@@ -1105,6 +1212,10 @@ fn interpolate_y_at_x(sorted_pts: &[(f64, f64)], x_target: f64, eps: f64) -> f64
             knots.push((sum_x / count as f64, sum_y / count as f64));
         }
     }
+    knots
+}
+
+fn interpolate_y_at_x_knots(knots: &[(f64, f64)], x_target: f64) -> f64 {
     let Some(&(first_x, first_y)) = knots.first() else {
         return f64::NAN;
     };
@@ -1204,18 +1315,19 @@ pub(in crate::dsl) fn compute_dataset_stats(points: &[DataPoint], column_titles:
         }
     }
     let eps = 1e-12 * (xmax - xmin).max(1e-12);
+    let knots = collapse_replicate_knots(&finite_pts, eps);
     let left_vals: Vec<f64> = finite_pts.iter().filter(|&&(x, _)| (x - xmin).abs() <= eps).map(|&(_, y)| y).collect();
     let right_vals: Vec<f64> = finite_pts.iter().filter(|&&(x, _)| (xmax - x).abs() <= eps).map(|&(_, y)| y).collect();
     let y_at_xmin = if left_vals.is_empty() { finite_pts[0].1 } else { left_vals.iter().sum::<f64>() / left_vals.len() as f64 };
     let y_at_xmax = if right_vals.is_empty() { finite_pts[finite_pts.len() - 1].1 } else { right_vals.iter().sum::<f64>() / right_vals.len() as f64 };
     let xmid = 0.5 * (xmin + xmax);
     let ymid = 0.5 * (ymin + ymax);
-    let y_at_xmid = interpolate_y_at_x(&finite_pts, xmid, eps);
+    let y_at_xmid = interpolate_y_at_x_knots(&knots, xmid);
     let span = ymax - ymin;
     let sign = if y_at_xmax >= y_at_xmin { 1.0 } else { -1.0 };
     let est_50 = estimate_x_at_ymid(points);
     let x_at_ymid = if est_50.is_finite() { est_50 } else { xmid };
-    let (slope_at_xmin, slope_at_xmid, slope_at_xmax) = compute_empirical_slopes(&finite_pts);
+    let (slope_at_xmin, slope_at_xmid, slope_at_xmax) = compute_empirical_slopes(&knots);
     [
         ymin,
         ymax,
@@ -1291,6 +1403,106 @@ pub(in crate::dsl) fn ensure_no_data_vars(prog: &CompiledProgram, section_name: 
     Ok(())
 }
 
+/// Return `true` when every dataset matching `target` is guaranteed to be matched by at least
+/// one filter in `providers` (exact finite/cofinite set coverage over `DatasetFilter`).
+fn filter_is_covered_by(target: &DatasetFilter, providers: &[DatasetFilter]) -> bool {
+    if providers.contains(&DatasetFilter::Any) {
+        return true;
+    }
+    let mut excludes = providers.iter().filter_map(|p| match p {
+        DatasetFilter::Exclude(v) => Some(v.as_slice()),
+        _ => None,
+    });
+    if let Some(first_excl) = excludes.next() {
+        let mut missed: Vec<usize> = first_excl.to_vec();
+        for excl in excludes {
+            missed.retain(|ds| excl.contains(ds));
+        }
+        for p in providers {
+            if let DatasetFilter::Include(inc) = p {
+                missed.retain(|ds| !inc.contains(ds));
+            }
+        }
+        return match target {
+            DatasetFilter::Any => missed.is_empty(),
+            DatasetFilter::Exclude(t) => missed.iter().all(|ds| t.contains(ds)),
+            DatasetFilter::Include(t) => t.iter().all(|ds| !missed.contains(ds)),
+        };
+    }
+    let DatasetFilter::Include(target_ids) = target else {
+        return false;
+    };
+    target_ids.iter().all(|ds| providers.iter().any(|p| p.matches(*ds)))
+}
+
+struct InitSlotTable {
+    any_slots: HashMap<String, (usize, usize)>,
+    scoped_slots: HashMap<String, (usize, usize)>,
+    slot_filters: Vec<Vec<DatasetFilter>>,
+    slot_names: Vec<Vec<String>>,
+}
+
+impl InitSlotTable {
+    fn new() -> Self {
+        Self { any_slots: HashMap::new(), scoped_slots: HashMap::new(), slot_filters: Vec::new(), slot_names: Vec::new() }
+    }
+
+    fn lookup_slot(&self, name: &str) -> Option<usize> {
+        self.any_slots.get(name).or_else(|| self.scoped_slots.get(name)).map(|&(slot, _)| slot)
+    }
+
+    fn covered_specific(&self, filter: &DatasetFilter) -> Option<HashMap<String, (usize, usize)>> {
+        if self.scoped_slots.is_empty() {
+            return None;
+        }
+        let mut out = HashMap::new();
+        for (name, &(slot, ord)) in &self.scoped_slots {
+            if filter_is_covered_by(filter, &self.slot_filters[slot]) {
+                out.insert(name.clone(), (slot, ord));
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    fn register(&mut self, name: String, canon_param: Option<&str>, filter: &DatasetFilter, rule_idx: usize) -> usize {
+        let slot = self.lookup_slot(&name).or_else(|| canon_param.and_then(|c| self.lookup_slot(c))).unwrap_or_else(|| {
+            let s = self.slot_filters.len();
+            self.slot_filters.push(Vec::new());
+            self.slot_names.push(Vec::new());
+            s
+        });
+        if !self.slot_names[slot].iter().any(|existing| existing == &name) {
+            self.slot_names[slot].push(name);
+        }
+        if let Some(canon) = canon_param
+            && !self.slot_names[slot].iter().any(|existing| existing == canon)
+        {
+            self.slot_names[slot].push(canon.to_owned());
+        }
+        let filters = &mut self.slot_filters[slot];
+        if *filter == DatasetFilter::Any {
+            filters.clear();
+            filters.push(DatasetFilter::Any);
+        } else if !filters.contains(&DatasetFilter::Any) && !filters.contains(filter) {
+            filters.push(filter.clone());
+        }
+        let covers_any = filter_is_covered_by(&DatasetFilter::Any, &self.slot_filters[slot]);
+        for spelling in &self.slot_names[slot] {
+            if covers_any {
+                self.scoped_slots.remove(spelling.as_str());
+                self.any_slots.insert(spelling.clone(), (slot, rule_idx));
+            } else {
+                self.scoped_slots.insert(spelling.clone(), (slot, rule_idx));
+            }
+        }
+        slot
+    }
+
+    fn slot_count(&self) -> usize {
+        self.slot_filters.len()
+    }
+}
+
 pub(in crate::dsl) fn compile_initial_rules(
     raw_init_lines: Vec<(usize, DatasetFilter, String, Expr)>,
     param_names: &[String],
@@ -1301,15 +1513,14 @@ pub(in crate::dsl) fn compile_initial_rules(
         return Ok((Vec::new(), 0));
     }
     let stat_map: HashMap<String, usize> = INIT_STAT_NAMES.iter().enumerate().map(|(i, &n)| (n.to_owned(), i)).collect();
-    let mut any_slots: HashMap<String, (usize, usize)> = HashMap::new();
-    let mut scoped_slots: HashMap<DatasetFilter, HashMap<String, (usize, usize)>> = HashMap::new();
-    let total_slots = raw_init_lines.len();
-    let mut compiled = Vec::with_capacity(total_slots);
+    let mut slots = InitSlotTable::new();
+    let mut compiled = Vec::with_capacity(raw_init_lines.len());
 
     for (rule_idx, (line_no, filter, name, mut rhs)) in raw_init_lines.into_iter().enumerate() {
-        let specific = if filter == DatasetFilter::Any { None } else { scoped_slots.get(&filter) };
-        canonicalize_init_expr(&mut rhs, &any_slots, specific);
-        let resolver = LocalResolver::Scoped { any: &any_slots, specific };
+        let covered_scoped = slots.covered_specific(&filter);
+        let specific = covered_scoped.as_ref();
+        canonicalize_init_expr(&mut rhs, &slots.any_slots, specific);
+        let resolver = LocalResolver::Scoped { any: &slots.any_slots, specific };
         let remaining = MAX_TOTAL_OPCODES.saturating_sub(*total_opcodes);
         let prog = compile_target_resolved(&rhs, &resolver, &stat_map, remaining).map_err(|e| with_line(e, line_no))?;
         *total_opcodes = total_opcodes.saturating_add(prog.code.len());
@@ -1322,15 +1533,11 @@ pub(in crate::dsl) fn compile_initial_rules(
         }
         ensure_no_data_vars(&prog, "[InitialValues]", line_no)?;
         let param_idx = param_map.get(&name).copied().or_else(|| param_names.iter().position(|p| p.eq_ignore_ascii_case(&name)));
-        let slot = rule_idx;
-        if filter == DatasetFilter::Any {
-            any_slots.insert(name, (slot, rule_idx));
-        } else {
-            scoped_slots.entry(filter.clone()).or_default().insert(name, (slot, rule_idx));
-        }
+        let canon_param = param_idx.and_then(|idx| param_names.get(idx)).map(String::as_str);
+        let slot = slots.register(name, canon_param, &filter, rule_idx);
         compiled.push(CompiledInitRule { filter, slot, param_idx, prog });
     }
-    Ok((compiled, total_slots))
+    Ok((compiled, slots.slot_count()))
 }
 
 pub(in crate::dsl) type CompiledTransforms = Vec<(String, usize, CompiledProgram)>;

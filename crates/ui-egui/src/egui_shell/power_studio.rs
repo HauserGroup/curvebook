@@ -40,6 +40,8 @@ pub struct PowerStudioEguiState {
     pub power_spinner: ScrubUnitFieldState,
     pub hover_n: Option<u32>,
     pub narrative_copied: bool,
+    pub last_copied_narrative: Option<String>,
+    pub last_edit_result_sheet_id: Option<curvebook_doc::SheetId>,
 }
 
 /// Frame geometry and modal capture report emitted by `power_studio`.
@@ -56,6 +58,8 @@ pub(crate) fn reset_results_transient_state(state: &mut PowerStudioEguiState) {
     state.results_tab = PowerResultsSubTab::default();
     state.hover_n = None;
     state.narrative_copied = false;
+    state.last_copied_narrative = None;
+    state.last_edit_result_sheet_id = None;
 }
 
 /// Return `true` when `ActiveDialog::PowerAndSampleSize` OR `EditAnalysisParameters` (`PowerAnalysis`) is open.
@@ -83,9 +87,7 @@ pub fn render_power_studio_modal(
     intents: &mut PendingUiIntents,
 ) -> PowerStudioFrameReport {
     if !is_power_studio_dialog_active(app) {
-        state.results_tab = PowerResultsSubTab::default();
-        state.hover_n = None;
-        state.narrative_copied = false;
+        reset_results_transient_state(state);
         return PowerStudioFrameReport::default();
     }
 
@@ -95,6 +97,21 @@ pub fn render_power_studio_modal(
     }
     if state.power_spinner.unit != ScrubUnitKind::Percent {
         state.power_spinner = ScrubUnitFieldState::new(ScrubUnitKind::Percent);
+    }
+
+    if let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog {
+        if state.last_edit_result_sheet_id.as_ref() != Some(result_sheet_id) {
+            state.last_edit_result_sheet_id = Some(result_sheet_id.clone());
+            let pw_cur = &app.canvas_dialogs.power_wizard;
+            if pw_cur.family == PowerTestFamily::TwoProportions && pw_cur.survival_log_rank {
+                let mut fixed = pw_cur.clone();
+                fixed.survival_log_rank = false;
+                let _ = fixed.recalculate();
+                intents.push(UiIntent::UpdatePowerWizardState(Box::new(fixed)));
+            }
+        }
+    } else {
+        state.last_edit_result_sheet_id = None;
     }
 
     let is_edit_mode = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. });
@@ -172,7 +189,7 @@ pub fn render_power_studio_modal(
                                 PowerWizardStage::ExperimentDesign => render_stage1_design(ui, app, pw, state, tokens, meta, intents),
                                 PowerWizardStage::EffectSize => render_stage2_effect(ui, app, pw, tokens, meta, intents),
                                 PowerWizardStage::SignificanceAndSolve => render_stage3_alpha_power(ui, app, pw, tokens, meta, intents),
-                                PowerWizardStage::Results => render_stage4_results(ctx, ui, pw, state, tokens, meta, intents),
+                                PowerWizardStage::Results => render_stage4_results(ui, app, pw, state, tokens, meta, intents),
                             }
                         });
                 });
@@ -308,8 +325,31 @@ fn format_power_banner(pw: &PowerWizardState) -> String {
             s.push_str(&format!(" (n₂={n2})"));
         }
         s
+    } else if let Some(err) = pw.validation_error.as_deref() {
+        format!("{}  |  Error: {err}", pw.family.label())
     } else {
         format!("{}  |  α = {:.3}  |  Target Power = {:.0}%", pw.family.label(), pw.alpha, pw.target_power * 100.0)
+    }
+}
+
+/// Synchronize `pw.group_means` length with `pw.anova_groups` (padding or truncating cleanly).
+pub fn sync_anova_group_means(pw: &mut PowerWizardState) {
+    let k = pw.anova_groups.clamp(2, 24);
+    pw.anova_groups = k;
+    if pw.group_means.len() > k {
+        pw.group_means.truncate(k);
+    } else if pw.group_means.len() < k {
+        let base = pw.group_means.first().copied().unwrap_or(0.0);
+        while pw.group_means.len() < k {
+            let idx = pw.group_means.len() as f64;
+            pw.group_means.push(base + idx * 0.4);
+        }
+    }
+    if pw.family == PowerTestFamily::OneWayAnova
+        && pw.effect_mode == PowerEffectInputMode::MeansAndSd
+        && let Some(d) = pw.derived_standardized_effect()
+    {
+        pw.standardized_effect = d;
     }
 }
 
@@ -404,6 +444,7 @@ fn render_stage1_design(
         if step != 0 {
             let mut next = pw.clone();
             next.anova_groups = (next.anova_groups as isize + step as isize).clamp(2, 24) as usize;
+            sync_anova_group_means(&mut next);
             let _ = next.recalculate();
             intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
@@ -440,9 +481,10 @@ fn render_stage1_design(
         &ControlEnablement::enabled(),
     ) {
         let mut next = pw.clone();
-        let _ = next.recalculate();
-        next.stage = PowerWizardStage::Results;
-        state.results_tab = PowerResultsSubTab::NarrativeReport;
+        if next.recalculate().is_ok() {
+            next.stage = PowerWizardStage::Results;
+            state.results_tab = PowerResultsSubTab::NarrativeReport;
+        }
         intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
     }
 }
@@ -495,7 +537,7 @@ fn render_stage2_paired_t_inputs(ui: &mut Ui, pw: &PowerWizardState, tokens: &To
         ) {
             let mut next = pw.clone();
             next.effect_mode = PowerEffectInputMode::MeansAndSd;
-            next.mean_diff = next.pilot_mean2 - next.pilot_mean1;
+            next.pilot_mean2 = next.pilot_mean1 + next.mean_diff;
             let _ = next.recalculate();
             intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
         }
@@ -529,6 +571,7 @@ fn render_stage2_paired_t_inputs(ui: &mut Ui, pw: &PowerWizardState, tokens: &To
         intents,
         |next, d| {
             next.mean_diff = (next.mean_diff + f64::from(d) * 0.5).max(0.05);
+            next.pilot_mean2 = next.pilot_mean1 + next.mean_diff;
         },
     );
     if pw.effect_mode == PowerEffectInputMode::PairedDiffDirect {
@@ -583,35 +626,46 @@ fn render_stage2_paired_t_inputs(ui: &mut Ui, pw: &PowerWizardState, tokens: &To
 }
 
 fn render_stage2_anova_inputs(ui: &mut Ui, pw: &PowerWizardState, tokens: &Tokens, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
-    let k = pw.anova_groups.max(2);
+    let k = pw.anova_groups.clamp(2, 24);
     let mut cur_means = pw.group_means.clone();
-    if cur_means.len() < k {
+    if cur_means.len() > k {
+        cur_means.truncate(k);
+    } else if cur_means.len() < k {
         let base = cur_means.first().copied().unwrap_or(0.0);
         while cur_means.len() < k {
             let idx = cur_means.len() as f64;
             cur_means.push(base + idx * 0.4);
         }
     }
-    for (g_idx, &g_val) in cur_means.iter().take(k.min(8)).enumerate() {
-        let snapshot = cur_means.clone();
-        let pid = format!("power.pilot.group_{g_idx}");
-        let lbl = format!("Group {} Mean", g_idx + 1);
-        let val = format!("{g_val:.2}");
-        render_pilot_stepper(
-            ui,
-            pw,
-            PilotStepperCfg { id_prefix: &pid, label: &lbl, value_text: &val, derive_eff: true },
-            tokens,
-            meta,
-            intents,
-            move |next, d| {
-                next.group_means = snapshot;
-                if let Some(slot) = next.group_means.get_mut(g_idx) {
-                    *slot += f64::from(d) * 0.5;
-                }
-                next.effect_mode = PowerEffectInputMode::MeansAndSd;
-            },
-        );
+    let render_group_rows = |ui: &mut Ui, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents| {
+        for (g_idx, &g_val) in cur_means.iter().take(k).enumerate() {
+            let snapshot = cur_means.clone();
+            let pid = format!("power.pilot.group_{g_idx}");
+            let lbl = format!("Group {} Mean", g_idx + 1);
+            let val = format!("{g_val:.2}");
+            render_pilot_stepper(
+                ui,
+                pw,
+                PilotStepperCfg { id_prefix: &pid, label: &lbl, value_text: &val, derive_eff: true },
+                tokens,
+                meta,
+                intents,
+                move |next, d| {
+                    next.group_means = snapshot;
+                    if let Some(slot) = next.group_means.get_mut(g_idx) {
+                        *slot += f64::from(d) * 0.5;
+                    }
+                    next.effect_mode = PowerEffectInputMode::MeansAndSd;
+                },
+            );
+        }
+    };
+    if k > 8 {
+        egui::ScrollArea::vertical().id_salt("power.anova.groups_scroll").max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
+            render_group_rows(ui, meta, intents);
+        });
+    } else {
+        render_group_rows(ui, meta, intents);
     }
     let sd_str = format!("{:.2}", pw.sd);
     render_pilot_stepper(
@@ -742,7 +796,9 @@ fn render_stage2_effect(
             if next.effect_mode == PowerEffectInputMode::MeansAndSd
                 && matches!(next.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoSamplePairedT | PowerTestFamily::OneSampleT)
             {
-                next.mean_diff = next.pilot_mean2 - next.pilot_mean1;
+                next.pilot_mean2 = next.pilot_mean1 + next.mean_diff;
+            } else if next.family == PowerTestFamily::OneWayAnova {
+                sync_anova_group_means(&mut next);
             }
             let _ = next.recalculate();
             intents.push(UiIntent::UpdatePowerWizardState(Box::new(next)));
@@ -848,6 +904,7 @@ fn render_stage2_effect(
                     intents,
                     |next, d| {
                         next.mean_diff = (next.mean_diff + f64::from(d) * 0.5).max(0.05);
+                        next.pilot_mean2 = next.pilot_mean1 + next.mean_diff;
                     },
                 );
                 let sd_str = format!("{:.2}", pw.sd);
@@ -1132,8 +1189,8 @@ fn render_stage3_alpha_power(
 }
 
 fn render_stage4_results(
-    ctx: &Context,
     ui: &mut Ui,
+    app: &UiApp,
     pw: &PowerWizardState,
     state: &mut PowerStudioEguiState,
     tokens: &Tokens,
@@ -1154,13 +1211,35 @@ fn render_stage4_results(
     ui.add_space(6.0);
 
     let Some(res) = &pw.result else {
-        ui.label(tr(tokens.locale, "pw.solving"));
+        if let Some(err) = pw.validation_error.as_deref() {
+            let resp = ui.colored_label(tokens.link_red, err);
+            record_widget(
+                ui,
+                meta,
+                &resp,
+                "power.validation_error",
+                "status",
+                err,
+                None,
+                Some(json!(err)),
+                true,
+                None,
+                ZLayer::ModalDialog,
+                false,
+                None,
+            );
+        } else {
+            ui.label(tr(tokens.locale, "pw.solving"));
+        }
         return;
     };
 
     match state.results_tab {
         PowerResultsSubTab::NarrativeReport => {
             let narrative = build_narrative_paragraph(pw, res);
+            if state.last_copied_narrative.as_deref() != Some(narrative.as_str()) {
+                state.narrative_copied = false;
+            }
             egui::Frame::NONE
                 .fill(tokens.panel_bg)
                 .stroke(Stroke::new(1.0, tokens.border))
@@ -1197,8 +1276,15 @@ fn render_stage4_results(
                 state.narrative_copied,
                 &ControlEnablement::enabled(),
             ) {
-                ctx.copy_text(narrative);
-                state.narrative_copied = true;
+                if let Ok(status) = app.write_clipboard_text(&narrative)
+                    && status.available
+                {
+                    state.narrative_copied = true;
+                    state.last_copied_narrative = Some(narrative);
+                } else {
+                    state.narrative_copied = false;
+                    state.last_copied_narrative = None;
+                }
             }
         }
         PowerResultsSubTab::PowerCurve => {
@@ -1438,19 +1524,48 @@ fn render_live_sidebar(
     }
 }
 
-fn build_narrative_paragraph(pw: &PowerWizardState, res: &PowerAnalysisResult) -> String {
+/// Format the human-readable methods paragraph for the active power calculation result.
+#[must_use]
+pub fn build_narrative_paragraph(pw: &PowerWizardState, res: &PowerAnalysisResult) -> String {
     let tail = if pw.two_tailed { "two-tailed" } else { "one-tailed" };
-    format!(
-        "For a {} {} test at α = {:.3} targeting {:.1}% statistical power with standardized effect {} = {:.3}, a required sample size of {} per group (total N = {}) achieves {:.1}% power (critical threshold = {:.3}).",
-        tail,
-        res.family.label(),
-        res.alpha,
-        pw.target_power * 100.0,
-        pw.family.default_effect_label(),
-        res.effect_size,
-        res.n_per_group,
-        res.total_n,
-        res.achieved_power * 100.0,
-        res.critical_value,
-    )
+    match pw.solve_target {
+        PowerSolveTarget::SampleSize => format!(
+            "For a {} {} test at α = {:.3} targeting {:.1}% statistical power with standardized effect {} = {:.3}, a required sample size of {} per group (total N = {}) achieves {:.1}% power (critical threshold = {:.3}).",
+            tail,
+            res.family.label(),
+            res.alpha,
+            pw.target_power * 100.0,
+            pw.family.default_effect_label(),
+            res.effect_size,
+            res.n_per_group,
+            res.total_n,
+            res.achieved_power * 100.0,
+            res.critical_value,
+        ),
+        PowerSolveTarget::Power => format!(
+            "For a {} {} test at α = {:.3} with a fixed sample size of {} per group (total N = {}) and standardized effect {} = {:.3}, the achieved statistical power is {:.1}% (critical threshold = {:.3}).",
+            tail,
+            res.family.label(),
+            res.alpha,
+            res.n_per_group,
+            res.total_n,
+            pw.family.default_effect_label(),
+            res.effect_size,
+            res.achieved_power * 100.0,
+            res.critical_value,
+        ),
+        PowerSolveTarget::DetectableEffect => format!(
+            "For a {} {} test at α = {:.3} with a fixed sample size of {} per group (total N = {}) targeting {:.1}% statistical power, the minimum detectable standardized effect is {} = {:.3} (achieved power = {:.1}%, critical threshold = {:.3}).",
+            tail,
+            res.family.label(),
+            res.alpha,
+            res.n_per_group,
+            res.total_n,
+            pw.target_power * 100.0,
+            pw.family.default_effect_label(),
+            res.effect_size,
+            res.achieved_power * 100.0,
+            res.critical_value,
+        ),
+    }
 }

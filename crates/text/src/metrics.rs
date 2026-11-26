@@ -323,7 +323,7 @@ fn font_vertical_em(bundled: Option<&TrueTypeFont<'_>>) -> (f64, f64) {
         let upem = f64::from(ttf.units_per_em());
         if upem > 0.0 {
             let asc = (f64::from(ttf.ascent()) / upem).clamp(0.5, 1.2);
-            let desc = (f64::from(-ttf.descent()) / upem).clamp(0.1, 0.6);
+            let desc = (-f64::from(ttf.descent()) / upem).clamp(0.1, 0.6);
             return (asc, desc);
         }
     }
@@ -1332,85 +1332,129 @@ fn parse_name_table(data: FontData<'_>) -> Result<(String, String), crate::TextE
     Ok((best_family.map_or_else(String::new, |(_, s)| s), best_ps.map_or_else(String::new, |(_, s)| s)))
 }
 
+fn insert_cmap_entry(out: &mut std::collections::BTreeMap<u32, u16>, cp: u32, gid_u16: u16) -> bool {
+    if out.contains_key(&cp) {
+        return true;
+    }
+    if out.len() >= MAX_CMAP_COLLECT {
+        return false;
+    }
+    out.insert(cp, gid_u16);
+    true
+}
+
+fn collect_cmap_subtable_at(
+    records: &[read_fonts::tables::cmap::EncodingRecord],
+    data: read_fonts::FontData<'_>,
+    idx: usize,
+    num_glyphs: u16,
+    merged: &mut std::collections::BTreeMap<u32, u16>,
+) -> Result<(), crate::TextError> {
+    let Some(rec) = records.get(idx) else {
+        return Ok(());
+    };
+    match rec.subtable(data).map_err(map_read_error)? {
+        CmapSubtable::Format12(sub12) => collect_cmap_format12(&sub12, num_glyphs, merged),
+        CmapSubtable::Format4(sub4) => collect_cmap_format4(&sub4, num_glyphs, merged),
+        CmapSubtable::Format0(sub0) => {
+            collect_cmap_format0(&sub0, num_glyphs, merged);
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn collect_cmap_mappings(cmap: &Cmap<'_>, subtables: CmapSubtables, num_glyphs: u16) -> Result<Vec<(u32, u16)>, crate::TextError> {
-    let mut merged = Vec::new();
+    let mut merged = std::collections::BTreeMap::new();
     let records = cmap.encoding_records();
     let data = cmap.offset_data();
+    let mut visited = [None::<usize>; 4];
+    let mut visited_len = 0usize;
 
-    if let Some(idx) = subtables.best_fmt4
-        && let Some(rec) = records.get(idx)
-        && let CmapSubtable::Format4(sub4) = rec.subtable(data).map_err(map_read_error)?
-    {
-        collect_cmap_format4(&sub4, num_glyphs, &mut merged)?;
+    let mut try_collect = |idx: usize, merged: &mut std::collections::BTreeMap<u32, u16>| -> Result<(), crate::TextError> {
+        if visited.get(..visited_len).is_some_and(|seen| seen.contains(&Some(idx))) {
+            return Ok(());
+        }
+        if let Some(slot) = visited.get_mut(visited_len) {
+            *slot = Some(idx);
+            visited_len += 1;
+        }
+        collect_cmap_subtable_at(records, data, idx, num_glyphs, merged)
+    };
+
+    // Always collect `primary_idx` first (Format 12 when preferred) so `TrueTypeFontInfo::glyph_id`
+    // matches `TrueTypeFont::glyph_id` deterministically and supplementary codepoints are never
+    // truncated behind a large Format 4 subtable.
+    try_collect(subtables.primary_idx, &mut merged)?;
+    if let Some(idx) = subtables.best_fmt12 {
+        try_collect(idx, &mut merged)?;
     }
-    if let Some(idx) = subtables.best_fmt12
-        && let Some(rec) = records.get(idx)
-        && let CmapSubtable::Format12(sub12) = rec.subtable(data).map_err(map_read_error)?
-    {
-        collect_cmap_format12(&sub12, num_glyphs, &mut merged)?;
+    if let Some(idx) = subtables.best_fmt4 {
+        try_collect(idx, &mut merged)?;
     }
     if merged.is_empty()
         && let Some(idx) = subtables.best_fmt0
-        && let Some(rec) = records.get(idx)
-        && let CmapSubtable::Format0(sub0) = rec.subtable(data).map_err(map_read_error)?
     {
-        collect_cmap_format0(&sub0, num_glyphs, &mut merged);
+        try_collect(idx, &mut merged)?;
     }
 
-    merged.sort_unstable_by_key(|&(cp, _)| cp);
-    merged.dedup_by_key(|pair| pair.0);
-    Ok(merged)
+    Ok(merged.into_iter().collect())
 }
 
-fn collect_cmap_format4(sub4: &Cmap4<'_>, num_glyphs: u16, out: &mut Vec<(u32, u16)>) -> Result<(), crate::TextError> {
+fn collect_cmap_format4(sub4: &Cmap4<'_>, num_glyphs: u16, out: &mut std::collections::BTreeMap<u32, u16>) -> Result<(), crate::TextError> {
     for (start_be, end_be) in sub4.start_code().iter().zip(sub4.end_code().iter()) {
         if start_be.get() > end_be.get() {
             return Err(invalid_sfnt("cmap4 segment has startCode > endCode"));
         }
     }
+    if out.len() >= MAX_CMAP_COLLECT {
+        return Ok(());
+    }
     for (cp, gid) in sub4.iter() {
-        if out.len() >= MAX_CMAP_COLLECT {
-            return Ok(());
-        }
         if cp == 0xFFFF {
             continue;
         }
         if let Ok(gid_u16) = u16::try_from(gid.to_u32())
             && gid_u16 != 0
             && gid_u16 < num_glyphs
+            && !insert_cmap_entry(out, cp, gid_u16)
         {
-            out.push((cp, gid_u16));
+            return Ok(());
         }
     }
     Ok(())
 }
 
-fn collect_cmap_format12(sub12: &Cmap12<'_>, num_glyphs: u16, out: &mut Vec<(u32, u16)>) -> Result<(), crate::TextError> {
+fn collect_cmap_format12(sub12: &Cmap12<'_>, num_glyphs: u16, out: &mut std::collections::BTreeMap<u32, u16>) -> Result<(), crate::TextError> {
     for group in sub12.groups() {
         if group.start_char_code() > group.end_char_code() {
             return Err(invalid_sfnt("cmap12 group has startCharCode > endCharCode"));
         }
     }
+    if out.len() >= MAX_CMAP_COLLECT {
+        return Ok(());
+    }
     let limits = CmapIterLimits { max_char: u32::from(char::MAX), glyph_count: u32::from(num_glyphs) };
     for (cp, gid) in sub12.iter_with_limits(limits) {
-        if out.len() >= MAX_CMAP_COLLECT {
-            return Ok(());
-        }
         if let Ok(gid_u16) = u16::try_from(gid.to_u32())
             && gid_u16 != 0
             && gid_u16 < num_glyphs
+            && !insert_cmap_entry(out, cp, gid_u16)
         {
-            out.push((cp, gid_u16));
+            return Ok(());
         }
     }
     Ok(())
 }
 
-fn collect_cmap_format0(sub0: &Cmap0<'_>, num_glyphs: u16, out: &mut Vec<(u32, u16)>) {
+fn collect_cmap_format0(sub0: &Cmap0<'_>, num_glyphs: u16, out: &mut std::collections::BTreeMap<u32, u16>) {
+    if out.len() >= MAX_CMAP_COLLECT {
+        return;
+    }
     for (code, &gid_byte) in sub0.glyph_id_array().iter().enumerate() {
         let gid = u16::from(gid_byte);
-        if gid != 0 && gid < num_glyphs {
-            out.push((code as u32, gid));
+        if gid != 0 && gid < num_glyphs && !insert_cmap_entry(out, code as u32, gid) {
+            return;
         }
     }
 }
@@ -1445,7 +1489,7 @@ fn scale_font_units_1000(value: i32, units_per_em: u16) -> i32 {
 
 fn sanitize_postscript_name(raw: &str) -> String {
     let cleaned: String =
-        raw.chars().filter(|&c| c.is_ascii_graphic() && !matches!(c, '(' | ')' | '<' | '>' | '[' | ']' | '{' | '}' | '/' | '%')).collect();
+        raw.chars().filter(|&c| c.is_ascii_graphic() && !matches!(c, '(' | ')' | '<' | '>' | '[' | ']' | '{' | '}' | '/' | '%' | '#')).collect();
     if cleaned.is_empty() { String::from("CurveBookSans-Regular") } else { cleaned }
 }
 
@@ -1968,5 +2012,26 @@ mod symbol_fallback_tests {
         assert!(min_parsed.glyph_id('A').is_some());
         assert!(min_parsed.glyph_id('▾').is_none());
         assert!(min_parsed.glyph_id('≤').is_none());
+    }
+
+    #[test]
+    fn aud11_02_font_vertical_em_handles_i16_min_descender() {
+        let mut bytes = build_minimal_truetype_font();
+        // Patch `hhea` table descender (offset 6 inside `hhea`) to `i16::MIN` (-32768).
+        let num_tables = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+        let mut hhea_off = None;
+        for i in 0..num_tables {
+            let rec = 12 + i * 16;
+            if &bytes[rec..rec + 4] == b"hhea" {
+                hhea_off = Some(u32::from_be_bytes([bytes[rec + 8], bytes[rec + 9], bytes[rec + 10], bytes[rec + 11]]) as usize);
+                break;
+            }
+        }
+        let off = hhea_off.expect("hhea table");
+        bytes[off + 6..off + 8].copy_from_slice(&i16::MIN.to_be_bytes());
+        let parsed = TrueTypeFont::parse_checked(&bytes).expect("parse patched i16::MIN hhea font");
+        assert_eq!(parsed.descent(), i16::MIN);
+        let (_asc, desc) = super::font_vertical_em(Some(&parsed));
+        assert!((desc - 0.6).abs() < 1e-9, "expected clamped 0.6 descent_em for i16::MIN descender, got {desc}");
     }
 }

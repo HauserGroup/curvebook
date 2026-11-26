@@ -63,10 +63,10 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
 
     let nist_root = root.join("corpus").join("nist-strd");
     let require_corpus = nist_root.exists() || opts.fetch;
-    run_cargo_corpus(root, &["test", "-p", "curvebook-format", "-p", "curvebook-testkit"], require_corpus)?;
-    run_cargo_corpus(root, &["test", "-p", "curvebook-math", "--test", "nist_strd"], require_corpus)?;
-    run_cargo_corpus(root, &["test", "-p", "curvebook-stats", "--test", "nist_strd"], require_corpus)?;
-    run_cargo_corpus(root, &["test", "-p", "curvebook-fit", "--test", "nist_strd"], require_corpus)?;
+    run_cargo_corpus(root, &["test", "--locked", "-p", "curvebook-format", "-p", "curvebook-testkit"], require_corpus)?;
+    run_cargo_corpus(root, &["test", "--locked", "-p", "curvebook-math", "--test", "nist_strd"], require_corpus)?;
+    run_cargo_corpus(root, &["test", "--locked", "-p", "curvebook-stats", "--test", "nist_strd"], require_corpus)?;
+    run_cargo_corpus(root, &["test", "--locked", "-p", "curvebook-fit", "--test", "nist_strd"], require_corpus)?;
     Ok(())
 }
 

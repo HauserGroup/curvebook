@@ -2220,9 +2220,43 @@ fn write_unpacked_tx_commit_marker(
     platform_sync_dir(&tx_dir)
 }
 
+/// Strictly validate that `rel` matches the staged sibling file naming convention created by
+/// `stage_unpacked_entry_file` (`[sheets/|assets/].{stem}.stage.{pid}.{seq}`), preventing tampered
+/// `.curvebook.tx/COMMITTING` markers from deleting `.git/` metadata or user files.
+fn validate_unpacked_stage_rel_path(rel: &str) -> Result<(), FormatError> {
+    validate_unpacked_relative_path(rel)?;
+    let file_name = match rel.split_once('/') {
+        None => rel,
+        Some((dir, rest)) if matches!(dir, SHEETS_DIR | ASSETS_DIR) && !rest.contains('/') => rest,
+        Some(_) => return Err(FormatError::UnsafePath { path: rel.to_owned() }),
+    };
+    let Some(without_dot) = file_name.strip_prefix('.') else {
+        return Err(FormatError::UnsafePath { path: rel.to_owned() });
+    };
+    let Some((before_seq, seq)) = without_dot.rsplit_once('.') else {
+        return Err(FormatError::UnsafePath { path: rel.to_owned() });
+    };
+    let Some((before_pid, pid)) = before_seq.rsplit_once('.') else {
+        return Err(FormatError::UnsafePath { path: rel.to_owned() });
+    };
+    let Some((stem, tag)) = before_pid.rsplit_once('.') else {
+        return Err(FormatError::UnsafePath { path: rel.to_owned() });
+    };
+    let valid_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let valid_stem = !stem.is_empty()
+        && stem.len() <= 48
+        && stem != "."
+        && stem != ".."
+        && stem.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'));
+    if tag != "stage" || !valid_digits(pid) || !valid_digits(seq) || !valid_stem {
+        return Err(FormatError::UnsafePath { path: rel.to_owned() });
+    }
+    Ok(())
+}
+
 fn remove_stage_rel_files(canon_root: &Path, stage_rels: &[String]) -> Result<(), FormatError> {
     for rel in stage_rels {
-        validate_unpacked_relative_path(rel)?;
+        validate_unpacked_stage_rel_path(rel)?;
         let path = resolve_contained_path(canon_root, rel, false)?;
         if let Ok(meta) = std::fs::symlink_metadata(&path)
             && !meta.file_type().is_symlink()
@@ -2272,7 +2306,9 @@ fn reconcile_pending_unpacked_tx(canon_root: &Path) -> Result<(), FormatError> {
         return Err(FormatError::Io(String::from("unsupported unpacked transaction marker format")));
     }
 
-    remove_stage_rel_files(canon_root, &record.stage_paths)?;
+    for rel in &record.stage_paths {
+        validate_unpacked_stage_rel_path(rel)?;
+    }
     let next_dir = validated_tx_subdir(canon_root, &tx_dir, UNPACKED_TX_NEXT_DIR)?;
     let prev_dir = validated_tx_subdir(canon_root, &tx_dir, UNPACKED_TX_PREV_DIR)?;
 
@@ -2307,6 +2343,7 @@ fn reconcile_pending_unpacked_tx(canon_root: &Path) -> Result<(), FormatError> {
         }
     }
 
+    remove_stage_rel_files(canon_root, &record.stage_paths)?;
     std::fs::remove_file(&marker)?;
     std::fs::remove_dir_all(&tx_dir)?;
     platform_sync_dir(canon_root)
@@ -2951,21 +2988,16 @@ fn validate_project_document_inner(doc: &ProjectDocument, validate_checkpoint_en
     }
     for ds in &doc.data_sheets {
         ds.validate()?;
+        ds.validate_finite_metadata()?;
         validate_exclusion_notes(ds)?;
     }
     for info in &doc.info_sheets {
-        validate_title(&info.title)?;
-        for c in &info.constants {
-            validate_title(&c.name)?;
-            if let Some(u) = &c.units {
-                validate_title(u)?;
-            }
-        }
+        info.validate()?;
     }
     for res in &doc.result_sheets {
         validate_title(res.title())?;
+        res.validate()?;
         if let Some(data) = &res.analyzable_data {
-            data.validate()?;
             validate_exclusion_notes(data)?;
         }
     }
@@ -2992,6 +3024,7 @@ fn validate_project_document_inner(doc: &ProjectDocument, validate_checkpoint_en
 
 pub(crate) fn validate_data_sheet_floats(ds: &DataSheet) -> Result<(), FormatError> {
     ds.validate()?;
+    ds.validate_finite_metadata()?;
     if let Some(location) = ProjectDocument::first_non_finite_data_sheet_float(ds) {
         return Err(FormatError::NonFiniteFloat { location });
     }

@@ -232,7 +232,7 @@ fn result_sheet_includes_tabs_overlay_unknown_predictions_and_separation_checkli
     assert_eq!(res.tabs[2].title, "ROC Curve");
     assert_eq!(res.tabs[3].title, "Row Classification");
     assert_eq!(res.tabs[3].rows.len(), 12);
-    assert_eq!(res.fitted_curves.len(), 1);
+    assert_eq!(res.fitted_curves.len(), 2);
     let curve = &res.fitted_curves[0];
     assert!(curve.converged);
     assert_eq!(curve.equation_id, "simple_logistic");
@@ -240,6 +240,8 @@ fn result_sheet_includes_tabs_overlay_unknown_predictions_and_separation_checkli
     assert_close(curve.points[0].x, 0.0, 1e-12, "plot_x_min");
     assert_close(curve.points[60].x, 6.0, 1e-12, "plot_x_max");
     assert!(curve.points[30].ci_lower.is_some() && curve.points[30].ci_upper.is_some());
+    assert_eq!(res.fitted_curves[1].equation_id, "ROC");
+    assert!(!res.fitted_curves[1].points.is_empty());
 
     // Verify optional suppression of Row Classification tab
     let sl_no_class = SimpleLogisticSpec { emit_row_classification: false, ..sl_spec };

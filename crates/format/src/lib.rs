@@ -32,7 +32,7 @@ pub use archive::{
 pub use csv::{
     CsvOptions, FilteredDelimitedGrid, ImportBaselineAdjustment, MAX_CSV_FILE_BYTES, apply_csv_import_link, collapse_merged_header_rows,
     decode_delimited_text_bytes, export_datasheet_to_csv, filter_delimited_text, format_cell_token, format_csv_field, import_csv_to_datasheet,
-    parse_cell_token, parse_delimited_records, rearrange_and_baseline_grid, write_delimited_records,
+    import_csv_to_datasheet_with_x_mode, parse_cell_token, parse_delimited_records, rearrange_and_baseline_grid, write_delimited_records,
 };
 pub use error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 pub use export::{

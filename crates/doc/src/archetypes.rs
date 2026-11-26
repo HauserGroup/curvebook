@@ -354,6 +354,9 @@ impl XyTable {
                 self.x_cells.get(row).and_then(|subs| subs.first()).and_then(Cell::active_number)
             }
             XColumnMode::GeneratedSequence { start, step, progression } => {
+                if self.x_cells.get(row).and_then(|subs| subs.first()).is_some_and(|c| c.excluded) {
+                    return None;
+                }
                 let val = match progression {
                     SequenceProgression::Arithmetic => *start + (row as f64) * *step,
                     SequenceProgression::Geometric => *start * step.powi(row.min(i32::MAX as usize) as i32),
@@ -1748,6 +1751,23 @@ pub struct NestedGroupColumn {
     pub cells: Vec<Vec<Cell>>,
 }
 
+/// Format a default nested subcolumn label `"{group_title}:{unit_one_based}"` bounded to
+/// [`crate::error::MAX_TITLE_BYTES`] on a UTF-8 character boundary.
+pub(crate) fn format_nested_subcolumn_title(group_title: &str, unit_one_based: usize) -> String {
+    let suffix = format!(":{unit_one_based}");
+    let max_prefix = crate::error::MAX_TITLE_BYTES.saturating_sub(suffix.len());
+    let prefix = if group_title.len() <= max_prefix {
+        group_title
+    } else {
+        let mut end = max_prefix;
+        while end > 0 && !group_title.is_char_boundary(end) {
+            end -= 1;
+        }
+        group_title.get(..end).unwrap_or("")
+    };
+    format!("{prefix}{suffix}")
+}
+
 impl NestedGroupColumn {
     /// Allocate an empty `NestedGroupColumn` with `biological_unit_count` subcolumns and `row_count` technical-replicate rows.
     pub fn new(title: impl Into<String>, biological_unit_count: usize, row_count: usize) -> Result<Self, DocError> {
@@ -1756,7 +1776,7 @@ impl NestedGroupColumn {
         validate_subcolumns(biological_unit_count)?;
         validate_rows(row_count)?;
         validate_cell_grid(row_count, 1, biological_unit_count, 0)?;
-        let subcolumn_titles = (1..=biological_unit_count).map(|i| format!("{title}:{i}")).collect();
+        let subcolumn_titles = (1..=biological_unit_count).map(|i| format_nested_subcolumn_title(&title, i)).collect();
         Ok(Self { title, subcolumn_titles, cells: vec![vec![Cell::empty(); biological_unit_count]; row_count] })
     }
 

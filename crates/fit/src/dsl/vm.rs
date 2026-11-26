@@ -7,14 +7,22 @@
 use curvebook_math::dist::{
     chi2_cdf, chi2_isf, chi2_sf, f_isf, f_pdf, f_sf, norm_cdf, norm_pdf, norm_ppf, student_t_pdf, student_t_sf, student_t_two_sided_isf,
 };
-use curvebook_math::special::{beta, digamma, erf, erfc, gamma, ln_gamma, reg_beta, reg_gamma_p, reg_gamma_q};
+use curvebook_math::special::{beta, digamma, erf, erfc, gamma, reg_beta, reg_gamma_p, reg_gamma_q};
 
 use crate::dsl::ast::{BinaryKind, BuiltinFn, CompiledProgram, OpCode, UnaryKind};
 use crate::dsl::limits::MAX_VM_STEPS;
 use crate::dsl::special::{
-    bessel_i0, bessel_i1, bessel_in, bessel_j0, bessel_j1, bessel_jn, bessel_k0, bessel_k1, bessel_kn, bessel_y0, bessel_y1, bessel_yn,
-    binomial_upper_tail, confluent_u, factorial_f64, hyp1f1, hyp2f1, parse_bessel_order,
+    bessel_i0_counted, bessel_i1_counted, bessel_in_counted, bessel_j0, bessel_j1, bessel_jn_counted, bessel_k0, bessel_k1, bessel_kn_counted,
+    bessel_y0, bessel_y1, bessel_yn_counted, binomial_upper_tail, confluent_u_counted, factorial_f64, hyp1f1_counted, hyp2f1_counted, ln_gamma_abs,
+    parse_bessel_order,
 };
+
+pub(in crate::dsl) struct VmInput<'a> {
+    pub(in crate::dsl) x: &'a [f64],
+    pub(in crate::dsl) y: f64,
+    pub(in crate::dsl) params: &'a [f64],
+    pub(in crate::dsl) ds_idx: usize,
+}
 
 pub(in crate::dsl) fn eval_bytecode(prog: &CompiledProgram, x: &[f64], y: f64, params: &[f64], ds_idx: usize) -> Option<f64> {
     let mut locals = vec![None; prog.local_count];
@@ -42,45 +50,61 @@ pub(in crate::dsl) fn eval_bytecode_with_bufs(
     locals: &mut [Option<f64>],
     stack: &mut Vec<f64>,
 ) -> Option<f64> {
-    eval_bytecode_counted(prog, x, y, params, ds_idx, locals, stack).0
+    eval_bytecode_with_budget(prog, &VmInput { x, y, params, ds_idx }, locals, stack, MAX_VM_STEPS).0
 }
 
-pub(in crate::dsl) fn eval_bytecode_counted(
+fn catch_defined_fault(try_scopes: &mut Vec<(usize, usize)>, stack: &mut Vec<f64>, ip: &mut usize) -> bool {
+    if let Some((saved_depth, target)) = try_scopes.pop() {
+        stack.truncate(saved_depth);
+        stack.push(0.0);
+        *ip = target;
+        true
+    } else {
+        false
+    }
+}
+
+pub(in crate::dsl) fn eval_bytecode_with_budget(
     prog: &CompiledProgram,
-    x: &[f64],
-    y: f64,
-    params: &[f64],
-    ds_idx: usize,
+    input: &VmInput<'_>,
     locals: &mut [Option<f64>],
     stack: &mut Vec<f64>,
+    max_steps: usize,
 ) -> (Option<f64>, usize) {
     stack.clear();
+    let mut try_scopes: Vec<(usize, usize)> = Vec::new();
     let mut ip = 0_usize;
     let mut steps = 0_usize;
 
     while ip < prog.code.len() {
         steps += 1;
-        if steps > MAX_VM_STEPS {
+        if steps > max_steps {
             return (None, steps);
         }
         match prog.code[ip] {
             OpCode::PushConst(v) => stack.push(v),
             OpCode::LoadPredictor(idx) => {
-                let Some(&val) = x.get(idx) else {
+                let Some(&val) = input.x.get(idx) else {
+                    if catch_defined_fault(&mut try_scopes, stack, &mut ip) {
+                        continue;
+                    }
                     return (None, steps);
                 };
                 stack.push(val);
             }
-            OpCode::LoadY => stack.push(y),
-            OpCode::LoadDatasetIndex => stack.push(ds_idx as f64),
+            OpCode::LoadY => stack.push(input.y),
+            OpCode::LoadDatasetIndex => stack.push(input.ds_idx as f64),
             OpCode::LoadParam(idx) => {
-                let Some(&val) = params.get(idx) else {
+                let Some(&val) = input.params.get(idx) else {
                     return (None, steps);
                 };
                 stack.push(val);
             }
             OpCode::LoadLocal(slot) => {
                 let Some(val) = locals.get(slot).copied().flatten() else {
+                    if catch_defined_fault(&mut try_scopes, stack, &mut ip) {
+                        continue;
+                    }
                     return (None, steps);
                 };
                 stack.push(val);
@@ -96,6 +120,9 @@ pub(in crate::dsl) fn eval_bytecode_counted(
                     return (None, steps);
                 };
                 if v.is_nan() {
+                    if catch_defined_fault(&mut try_scopes, stack, &mut ip) {
+                        continue;
+                    }
                     return (None, steps);
                 }
                 let out = match kind {
@@ -115,6 +142,9 @@ pub(in crate::dsl) fn eval_bytecode_counted(
                     return (None, steps);
                 };
                 let Some(v) = eval_binary_op(kind, a, b) else {
+                    if catch_defined_fault(&mut try_scopes, stack, &mut ip) {
+                        continue;
+                    }
                     return (None, steps);
                 };
                 stack.push(v);
@@ -124,7 +154,16 @@ pub(in crate::dsl) fn eval_bytecode_counted(
                     return (None, steps);
                 }
                 let base = stack.len() - arity;
-                let Some(res) = eval_builtin(bf, &stack[base..]) else {
+                let max_work = max_steps.saturating_sub(steps).saturating_add(1);
+                let (res_opt, work) = eval_builtin_counted(bf, &stack[base..], max_work);
+                steps = steps.saturating_add(work.saturating_sub(1));
+                if steps > max_steps {
+                    return (None, steps);
+                }
+                let Some(res) = res_opt else {
+                    if catch_defined_fault(&mut try_scopes, stack, &mut ip) {
+                        continue;
+                    }
                     return (None, steps);
                 };
                 stack.truncate(base);
@@ -139,6 +178,9 @@ pub(in crate::dsl) fn eval_bytecode_counted(
                     return (None, steps);
                 };
                 if cond.is_nan() {
+                    if catch_defined_fault(&mut try_scopes, stack, &mut ip) {
+                        continue;
+                    }
                     return (None, steps);
                 }
                 if cond == 0.0 {
@@ -150,6 +192,10 @@ pub(in crate::dsl) fn eval_bytecode_counted(
                 if stack.pop().is_none() {
                     return (None, steps);
                 }
+            }
+            OpCode::EnterDefinedScope(target) => try_scopes.push((stack.len(), target)),
+            OpCode::ExitDefinedScope => {
+                let _ = try_scopes.pop();
             }
             OpCode::Halt => break,
         }
@@ -193,12 +239,12 @@ pub(in crate::dsl) fn eval_binary_op(kind: BinaryKind, a: f64, b: f64) -> Option
     if v.is_nan() { None } else { Some(v) }
 }
 
-pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
+pub(in crate::dsl) fn eval_builtin_counted(bf: BuiltinFn, a: &[f64], max_work: usize) -> (Option<f64>, usize) {
     if matches!(bf, BuiltinFn::IsDefined) {
-        return Some(if a[0].is_finite() { 1.0 } else { 0.0 });
+        return (Some(if a.first().is_some_and(|v| v.is_finite()) { 1.0 } else { 0.0 }), 1);
     }
     if a.iter().any(|v| v.is_nan()) {
-        return None;
+        return (None, 1);
     }
     let allow_inf = matches!(
         bf,
@@ -229,11 +275,12 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
             | BuiltinFn::NormDist3
             | BuiltinFn::NormPdf3
     );
+    let mut work = 1_usize;
     let val = match bf {
         BuiltinFn::Abs => a[0].abs(),
         BuiltinFn::Sqrt => {
             if a[0] < 0.0 {
-                return None;
+                return (None, 1);
             }
             a[0].sqrt()
         }
@@ -243,19 +290,19 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         BuiltinFn::Exp10 => 10.0_f64.powf(a[0]),
         BuiltinFn::Ln => {
             if a[0] <= 0.0 || !a[0].is_finite() {
-                return None;
+                return (None, 1);
             }
             a[0].ln()
         }
         BuiltinFn::Log10 => {
             if a[0] <= 0.0 || !a[0].is_finite() {
-                return None;
+                return (None, 1);
             }
             a[0].log10()
         }
         BuiltinFn::Log2 => {
             if a[0] <= 0.0 || !a[0].is_finite() {
-                return None;
+                return (None, 1);
             }
             a[0].log2()
         }
@@ -287,16 +334,16 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         }
         BuiltinFn::Mod => {
             if a[1] == 0.0 {
-                return None;
+                return (None, 1);
             }
             a[0] % a[1]
         }
-        BuiltinFn::Min => a[0].min(a[1]),
-        BuiltinFn::Max => a[0].max(a[1]),
+        BuiltinFn::Min => a.iter().copied().reduce(f64::min).unwrap_or(f64::NAN),
+        BuiltinFn::Max => a.iter().copied().reduce(f64::max).unwrap_or(f64::NAN),
         BuiltinFn::Clamp => {
             let lo = a[1].min(a[2]);
             let hi = a[1].max(a[2]);
-            if lo <= hi { a[0].clamp(lo, hi) } else { return None }
+            if lo <= hi { a[0].clamp(lo, hi) } else { return (None, 1) }
         }
         BuiltinFn::Hypot => a[0].hypot(a[1]),
         BuiltinFn::PowFn => a[0].powf(a[1]),
@@ -304,15 +351,58 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         BuiltinFn::Deg => a[0].to_degrees(),
         BuiltinFn::Rad => a[0].to_radians(),
         BuiltinFn::IsDefined => unreachable_is_defined(a[0]),
-        other => eval_special_or_dist_builtin(other, a)?,
+        other => {
+            let (opt, w) = eval_special_or_dist_builtin(other, a, max_work);
+            work = w;
+            let Some(v) = opt else {
+                return (None, work);
+            };
+            v
+        }
     };
     if val.is_nan() {
-        return None;
+        return (None, work);
     }
-    if allow_inf || val.is_finite() { Some(val) } else { None }
+    let out = if allow_inf || val.is_finite() { Some(val) } else { None };
+    (out, work)
 }
 
-fn eval_special_or_dist_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
+fn eval_special_or_dist_builtin(bf: BuiltinFn, a: &[f64], max_work: usize) -> (Option<f64>, usize) {
+    match bf {
+        BuiltinFn::BesselJn => {
+            let Some(n) = parse_bessel_order(a[0]) else {
+                return (None, 1);
+            };
+            bessel_jn_counted(n, a[1], max_work)
+        }
+        BuiltinFn::BesselYn => {
+            let Some(n) = parse_bessel_order(a[0]) else {
+                return (None, 1);
+            };
+            bessel_yn_counted(n, a[1], max_work)
+        }
+        BuiltinFn::BesselI0 => bessel_i0_counted(a[0], max_work),
+        BuiltinFn::BesselI1 => bessel_i1_counted(a[0], max_work),
+        BuiltinFn::BesselIn => {
+            let Some(n) = parse_bessel_order(a[0]) else {
+                return (None, 1);
+            };
+            bessel_in_counted(n, a[1], max_work)
+        }
+        BuiltinFn::BesselKn => {
+            let Some(n) = parse_bessel_order(a[0]) else {
+                return (None, 1);
+            };
+            bessel_kn_counted(n, a[1], max_work)
+        }
+        BuiltinFn::Hyp1F1 => hyp1f1_counted(a[0], a[1], a[2], max_work),
+        BuiltinFn::Hyp2F1 => hyp2f1_counted(a[0], a[1], a[2], a[3], max_work),
+        BuiltinFn::ConfluentU => confluent_u_counted(a[0], a[1], a[2], max_work),
+        other => (eval_simple_special_or_dist(other, a), 1),
+    }
+}
+
+fn eval_simple_special_or_dist(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
     let val = match bf {
         BuiltinFn::Fact => factorial_f64(a[0])?,
         BuiltinFn::Logit => {
@@ -359,36 +449,15 @@ fn eval_special_or_dist_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         BuiltinFn::ChiInv => chi2_isf(a[0], a[1]).ok()?,
         BuiltinFn::Binomial => binomial_upper_tail(a[0], a[1], a[2])?,
         BuiltinFn::Gamma => gamma(a[0]).ok()?,
-        BuiltinFn::LnGamma => ln_gamma(a[0]).ok()?,
+        BuiltinFn::LnGamma => ln_gamma_abs(a[0])?,
         BuiltinFn::Beta => beta(a[0], a[1]).ok()?,
         BuiltinFn::Digamma => digamma(a[0]).ok()?,
         BuiltinFn::BesselJ0 => bessel_j0(a[0]),
         BuiltinFn::BesselJ1 => bessel_j1(a[0]),
-        BuiltinFn::BesselJn => {
-            let n = parse_bessel_order(a[0])?;
-            bessel_jn(n, a[1])
-        }
         BuiltinFn::BesselY0 => bessel_y0(a[0])?,
         BuiltinFn::BesselY1 => bessel_y1(a[0])?,
-        BuiltinFn::BesselYn => {
-            let n = parse_bessel_order(a[0])?;
-            bessel_yn(n, a[1])?
-        }
-        BuiltinFn::BesselI0 => bessel_i0(a[0])?,
-        BuiltinFn::BesselI1 => bessel_i1(a[0])?,
-        BuiltinFn::BesselIn => {
-            let n = parse_bessel_order(a[0])?;
-            bessel_in(n, a[1])?
-        }
         BuiltinFn::BesselK0 => bessel_k0(a[0])?,
         BuiltinFn::BesselK1 => bessel_k1(a[0])?,
-        BuiltinFn::BesselKn => {
-            let n = parse_bessel_order(a[0])?;
-            bessel_kn(n, a[1])?
-        }
-        BuiltinFn::Hyp1F1 => hyp1f1(a[0], a[1], a[2])?,
-        BuiltinFn::Hyp2F1 => hyp2f1(a[0], a[1], a[2], a[3])?,
-        BuiltinFn::ConfluentU => confluent_u(a[0], a[1], a[2])?,
         _ => return None,
     };
     Some(val)

@@ -120,14 +120,26 @@ pub(super) fn render_data_point_drill_back_studio(
                         .color(tokens.text_muted),
                 );
             }
+            if !brushed_on_graph {
+                ui.label(egui::RichText::new("Not plotted on this graph").size(small).color(tokens.text_muted));
+            }
             if currently_excluded {
                 ui.label(egui::RichText::new("Status: Excluded from analyses").size(small).strong().color(tokens.link_red));
             }
         });
 
     ui.add_space(6.0);
+    let src_exists = src_ds.is_some();
     let ds_frozen = src_ds.is_some_and(|d| d.frozen);
     let exclude_lbl = if currently_excluded { "Include Point" } else { "Exclude Point" };
+    let exclude_enabled = ctx_in.enabled && src_exists && !ds_frozen;
+    let exclude_disabled_reason = if !src_exists {
+        Some("source sheet no longer exists")
+    } else if ds_frozen {
+        Some("source sheet is frozen")
+    } else {
+        None
+    };
     if studio_full_button(
         ui,
         tokens,
@@ -136,11 +148,11 @@ pub(super) fn render_data_point_drill_back_studio(
             label: exclude_lbl,
             tooltip: "Toggle exclusion flag for this datum cell (table.excludeCells)",
             selected: currently_excluded,
-            enabled: ctx_in.enabled && !ds_frozen,
+            enabled: exclude_enabled,
             primary: false,
             widget_id: "inspector.drill_back.toggle_exclude",
             command_id: Some("table.excludeCells"),
-            disabled_reason: ds_frozen.then_some("source sheet is frozen"),
+            disabled_reason: exclude_disabled_reason,
         },
     ) {
         intents.push_engine(
@@ -157,12 +169,12 @@ pub(super) fn render_data_point_drill_back_studio(
 
     let resolved_series_idx = brushed_on_graph
         .then(|| {
-            gs.spec
-                .series
-                .iter()
-                .position(|s| s.source_sheet_id == brushed.sheet_id && s.data_set_index == brushed.col)
-                .or_else(|| gs.spec.series.iter().position(|s| s.data_set_index == brushed.col))
-                .or_else(|| (brushed.col < gs.spec.series.len()).then_some(brushed.col))
+            gs.spec.series.iter().position(|s| s.source_sheet_id == brushed.sheet_id && s.data_set_index == brushed.col).or_else(|| {
+                gs.spec.series.iter().position(|s| {
+                    s.data_set_index == brushed.col
+                        && doc.result_sheet(&s.source_sheet_id).is_some_and(|rs| rs.analysis.source_sheet_id == brushed.sheet_id)
+                })
+            })
         })
         .flatten();
     let format_enabled = ctx_in.enabled && resolved_series_idx.is_some();
@@ -210,11 +222,11 @@ pub(super) fn render_data_point_drill_back_studio(
             label: tr(tokens.locale, "inspector.drill_back.go"),
             tooltip: "Navigate to source data table and select exact cell",
             selected: false,
-            enabled: ctx_in.enabled,
+            enabled: ctx_in.enabled && src_exists,
             primary: true,
             widget_id: "inspector.drill_back.jump",
             command_id: Some("sheet.select"),
-            disabled_reason: None,
+            disabled_reason: (!src_exists).then_some("source sheet no longer exists"),
         },
     ) {
         intents.push_engine("sheet.select", json!({ "sheet_id": brushed.sheet_id.as_str() }));

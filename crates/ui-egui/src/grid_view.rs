@@ -857,6 +857,10 @@ pub struct ImportPasteWizardState {
     pub xlsx_has_row_titles: bool,
     #[serde(default)]
     pub xlsx_error: Option<String>,
+    #[serde(skip)]
+    pub path_policy: curvebook_engine::ExternalPathPolicy,
+    #[serde(skip)]
+    pub xlsx_loaded_from_path: bool,
 }
 
 impl Default for ImportPasteWizardState {
@@ -885,6 +889,8 @@ impl Default for ImportPasteWizardState {
             xlsx_merge: true,
             xlsx_has_row_titles: false,
             xlsx_error: None,
+            path_policy: curvebook_engine::ExternalPathPolicy::Unconstrained,
+            xlsx_loaded_from_path: false,
         }
     }
 }
@@ -926,18 +932,20 @@ impl ImportPasteWizardState {
             .collect();
         let count = sheets.len();
         self.xlsx_bytes_base64 = Some(curvebook_platform::base64::encode(bytes));
+        self.xlsx_loaded_from_path = false;
         self.xlsx_sheets = sheets;
         self.xlsx_error = None;
         self.origin_kind = ImportOriginKind::XlsxWorkbook;
         Ok(count)
     }
 
-    /// Read `.xlsx` workbook bytes from [`Self::external_file_path`] on native hosts and populate
-    /// worksheet selections.
+    /// Read `.xlsx` workbook bytes from [`Self::external_file_path`] on native hosts under an
+    /// explicit [`curvebook_engine::ExternalPathPolicy`] and populate worksheet selections.
     ///
     /// # Errors
-    /// Returns a descriptive error string when the path is empty, invalid, unreadable, or unavailable on `wasm32`.
-    pub fn load_xlsx_from_path_str(&mut self) -> Result<usize, String> {
+    /// Returns a descriptive error string when the path is empty, disallowed by `policy`,
+    /// unreadable, or unavailable on `wasm32`.
+    pub fn load_xlsx_from_path_str_with_policy(&mut self, policy: &curvebook_engine::ExternalPathPolicy) -> Result<usize, String> {
         let raw_path = self.external_file_path.trim().to_owned();
         if raw_path.is_empty() {
             let msg = String::from("enter an .xlsx file path first");
@@ -946,21 +954,51 @@ impl ImportPasteWizardState {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = raw_path;
+            let _ = (raw_path, policy);
             let msg = String::from("reading .xlsx files by filesystem path is unavailable on wasm32");
             self.xlsx_error = Some(msg.clone());
             Err(msg)
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let bytes = curvebook_platform::fs::read_regular_file_bytes(std::path::Path::new(&raw_path), curvebook_format::MAX_ARCHIVE_FILE_BYTES)
-                .map_err(|err| {
-                    let msg = format!("failed to read `{raw_path}`: {err}");
+            if raw_path.contains('\0') {
+                let msg = String::from("workbook path contains an invalid NUL byte");
+                self.xlsx_error = Some(msg.clone());
+                return Err(msg);
+            }
+            let resolved = match policy {
+                curvebook_engine::ExternalPathPolicy::Unconstrained => std::path::PathBuf::from(&raw_path),
+                curvebook_engine::ExternalPathPolicy::RejectExternal => {
+                    let msg = format!("external filesystem reads are disabled by path policy for `{raw_path}`");
+                    self.xlsx_error = Some(msg.clone());
+                    return Err(msg);
+                }
+                curvebook_engine::ExternalPathPolicy::Workdir(guard) => guard.resolve(&raw_path).map_err(|err| {
+                    let msg = format!("workbook `{raw_path}` blocked by workdir policy: {err}");
                     self.xlsx_error = Some(msg.clone());
                     msg
-                })?;
-            self.load_xlsx_bytes(&bytes)
+                })?,
+            };
+            let bytes = curvebook_platform::fs::read_regular_file_bytes(&resolved, curvebook_format::MAX_ARCHIVE_FILE_BYTES).map_err(|err| {
+                let msg = format!("failed to read workbook `{raw_path}`: {err}");
+                self.xlsx_error = Some(msg.clone());
+                msg
+            })?;
+            let count = self.load_xlsx_bytes(&bytes)?;
+            self.xlsx_loaded_from_path = true;
+            Ok(count)
         }
+    }
+
+    /// Read `.xlsx` workbook bytes from [`Self::external_file_path`] on native hosts under
+    /// [`Self::path_policy`] and populate worksheet selections.
+    ///
+    /// # Errors
+    /// Returns a descriptive error string when the path is empty, invalid, disallowed by
+    /// [`Self::path_policy`], unreadable, or unavailable on `wasm32`.
+    pub fn load_xlsx_from_path_str(&mut self) -> Result<usize, String> {
+        let policy = self.path_policy.clone();
+        self.load_xlsx_from_path_str_with_policy(&policy)
     }
 
     /// Selected worksheet names in workbook order for `.xlsx` multi-sheet import.
@@ -973,7 +1011,9 @@ impl ImportPasteWizardState {
     #[must_use]
     pub fn build_xlsx_import_params(&self) -> Option<Value> {
         let mut map = serde_json::Map::new();
-        if let Some(b64) = self.xlsx_bytes_base64.as_ref().filter(|s| !s.is_empty()) {
+        if self.xlsx_loaded_from_path && !self.external_file_path.trim().is_empty() {
+            map.insert(String::from("path"), json!(self.external_file_path.trim()));
+        } else if let Some(b64) = self.xlsx_bytes_base64.as_ref().filter(|s| !s.is_empty()) {
             map.insert(String::from("bytes_base64"), json!(b64));
         } else {
             let trimmed = self.external_file_path.trim();
@@ -1653,9 +1693,11 @@ impl GridViewState {
 
     fn refresh_selection_stats_slice(&mut self, sheet: &DataSheet) {
         let coords = self.all_selected_coords(sheet);
-        let Some(_first) = coords.first().copied() else {
+        if coords.is_empty() {
+            self.quick_stats = None;
+            self.extended_stats = None;
             return;
-        };
+        }
         let total = coords.len();
         if total <= MAX_QUICK_STATS_CELLS_FOR_CLONE_PASS {
             let ext = GridQuickStats::from_coords(sheet, &coords);
@@ -1704,11 +1746,16 @@ impl GridViewState {
     pub fn all_selected_coords(&self, sheet: &DataSheet) -> Vec<GridCellCoord> {
         if !self.selected_coords.is_empty() {
             let total_rows = sheet.archetype.row_count();
+            let total_cols = sheet.archetype.column_count();
             let cap = self.selected_coords.len().min(MAX_MATERIALIZED_SELECTION_COORDS);
             let mut seen = HashSet::with_capacity(cap);
             let mut out = Vec::with_capacity(cap);
             for &c in &self.selected_coords {
-                if c.row < total_rows && seen.insert((c.row, c.col, c.subcol)) {
+                if c.row < total_rows
+                    && c.col < total_cols
+                    && c.subcol < data_set_subcolumn_count(&sheet.archetype, c.col)
+                    && seen.insert((c.row, c.col, c.subcol))
+                {
                     out.push(c);
                     if out.len() >= MAX_MATERIALIZED_SELECTION_COORDS {
                         break;
@@ -1745,11 +1792,12 @@ impl GridViewState {
 
     fn discontiguous_graph_point_targets(&self, sheet: &DataSheet, max_series: usize) -> Vec<(usize, usize, Option<usize>)> {
         let total_rows = sheet.archetype.row_count();
+        let total_cols = sheet.archetype.column_count();
         let cap = self.selected_coords.len().min(MAX_MATERIALIZED_SELECTION_COORDS);
         let mut seen = HashSet::with_capacity(cap);
         let mut out = Vec::with_capacity(cap);
         for &c in &self.selected_coords {
-            if c.row >= total_rows {
+            if c.row >= total_rows || c.col >= total_cols || c.subcol >= data_set_subcolumn_count(&sheet.archetype, c.col) {
                 continue;
             }
             let target = graph_target_for_coord(&sheet.archetype, c.col, c.row, c.subcol, max_series);
@@ -2112,7 +2160,7 @@ fn uniform_subcolumn_count(arch: &TableArchetype) -> Option<usize> {
 }
 
 #[must_use]
-fn flat_index_for_coord(arch: &TableArchetype, col: usize, subcol: usize) -> usize {
+pub(crate) fn flat_index_for_coord(arch: &TableArchetype, col: usize, subcol: usize) -> usize {
     if let Some(subs) = uniform_subcolumn_count(arch) {
         return col.saturating_mul(subs).saturating_add(subcol.min(subs - 1));
     }
@@ -3451,10 +3499,25 @@ pub fn grid_tr(locale: &str, key: &str, fallback: &'static str) -> &'static str 
 #[must_use]
 pub fn linked_region_for_cell(ds: &DataSheet, row: usize, col: usize) -> Option<&curvebook_doc::LinkedDataRegion> {
     ds.linked_regions.iter().find(|region| {
-        row >= region.target_range.start.row
-            && row <= region.target_range.end.row
-            && col >= region.target_range.start.col
-            && col <= region.target_range.end.col
+        let r_lo = region.target_range.start.row.min(region.target_range.end.row);
+        let r_hi = region.target_range.start.row.max(region.target_range.end.row);
+        let c_lo = region.target_range.start.col.min(region.target_range.end.col);
+        let c_hi = region.target_range.start.col.max(region.target_range.end.col);
+        row >= r_lo && row <= r_hi && col >= c_lo && col <= c_hi
+    })
+}
+
+/// Return the [`LinkedDataRegion`] containing domain cell `(row, col, subcol)`, if any.
+#[must_use]
+pub fn linked_region_for_cell_subcol(ds: &DataSheet, row: usize, col: usize, subcol: usize) -> Option<&curvebook_doc::LinkedDataRegion> {
+    ds.linked_regions.iter().find(|region| {
+        let r_lo = region.target_range.start.row.min(region.target_range.end.row);
+        let r_hi = region.target_range.start.row.max(region.target_range.end.row);
+        let cs_lo =
+            (region.target_range.start.col, region.target_range.start.subcol).min((region.target_range.end.col, region.target_range.end.subcol));
+        let cs_hi =
+            (region.target_range.start.col, region.target_range.start.subcol).max((region.target_range.end.col, region.target_range.end.subcol));
+        row >= r_lo && row <= r_hi && (col, subcol) >= cs_lo && (col, subcol) <= cs_hi
     })
 }
 
@@ -3474,7 +3537,7 @@ pub fn handle_grid_text_input(app: &crate::UiApp, text: &str) -> crate::interact
     let Some(active) = app.grid.tool.active else {
         return crate::interaction::UiEventOutcome::default();
     };
-    if linked_region_for_cell(ds, active.row, active.col).is_some() {
+    if linked_region_for_cell_subcol(ds, active.row, active.col, active.subcol).is_some() {
         return crate::interaction::UiEventOutcome { handled: true, action: String::from("grid_core.link_read_only_prompt"), ..Default::default() };
     }
     crate::interaction::UiEventOutcome::default()
@@ -3557,7 +3620,7 @@ fn prepare_clear_selected_cells(ds: &DataSheet, grid: &GridViewState) -> ClearSe
             }
         }
         GridClipboardTarget::Cells(coords) => {
-            if coords.iter().any(|coord| linked_region_for_cell(ds, coord.row, coord.col).is_some()) {
+            if coords.iter().any(|coord| linked_region_for_cell_subcol(ds, coord.row, coord.col, coord.subcol).is_some()) {
                 return ClearSelectionPlan::LinkBlocked;
             }
         }
@@ -3606,10 +3669,13 @@ fn apply_grid_nav_event(app: &mut crate::UiApp, event: GridNavEvent) -> Result<c
             ClearSelectionPlan::LinkBlocked => outcome.action = String::from("grid_core.link_read_only_prompt"),
             ClearSelectionPlan::NothingToClear => outcome.action = String::from("grid_core.clear_selection_empty"),
             ClearSelectionPlan::Execute { requests } => {
-                let mut last_out = None;
-                for req in requests {
-                    last_out = Some(app.execute_command("table.clearCells", req).map_err(|e| e.to_string())?);
-                }
+                let last_out = app.execute_atomic_group(|a| {
+                    let mut out = None;
+                    for req in requests {
+                        out = Some(a.execute_command("table.clearCells", req).map_err(|e| e.to_string())?);
+                    }
+                    Ok::<_, String>(out)
+                })?;
                 outcome.action = String::from("grid_core.clear_selection");
                 if let Some(out) = last_out {
                     outcome.command_id = Some(out.command_id);

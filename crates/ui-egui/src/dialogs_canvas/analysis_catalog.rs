@@ -363,17 +363,17 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             tie_method: CoxTieMethod::Efron,
         })),
         "stats.contingency" => Some(AnalysisKind::Contingency(ContingencySpec::default())),
-        "stats.glm" => Some(AnalysisKind::GeneralizedLinearModel(GlmSpec {
+        "stats.glm" | "stats.multiple_regression" => Some(AnalysisKind::GeneralizedLinearModel(GlmSpec {
             family: GlmFamily::Linear,
             response_column: 0,
             predictor_columns: vec![1],
             reference_levels: Vec::new(),
             compute_vif: true,
         })),
-        "stats.pca" | "stats.pcr" => {
+        "stats.pca" | "stats.pcr" | "pca" | "pcr" => {
             Some(AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(7), pcr_outcome_column: None }))
         }
-        "stats.corr_matrix" => Some(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false })),
+        "stats.corr_matrix" | "stats.correlation" => Some(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false })),
         "stats.clustering" => Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering {
             k_means_k: Some(3),
             distance: curvebook_doc::ClusterDistance::default(),

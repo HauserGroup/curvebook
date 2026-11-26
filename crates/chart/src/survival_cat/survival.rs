@@ -180,7 +180,9 @@ fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut 
                 .push(ChartWarning::new("failed_result_sheet", format!("survival result sheet '{}' failed; omitted failed result curves", res.id)));
             return Vec::new();
         }
-        return build_km_from_result_sheet(graph, res);
+        if !res.fitted_curves.is_empty() || matches!(res.analysis.kind, AnalysisKind::Survival(_)) {
+            return build_km_from_result_sheet(graph, res);
+        }
     }
 
     let km_result = doc
@@ -206,7 +208,7 @@ fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut 
             .push(ChartWarning::new("failed_result_sheet", format!("survival result sheet '{}' failed; fell back to raw survival table", failed.id)));
     }
 
-    if let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id)
+    if let Some(ds) = crate::resolve_data_sheet_or_upstream(doc, primary)
         && let TableArchetype::Survival(surv) = &ds.archetype
     {
         return build_km_from_survival_table(graph, &ds.id, surv, km_result);

@@ -9,7 +9,8 @@ pub mod writer;
 use serde::{Deserialize, Serialize};
 
 pub use writer::{
-    MAX_PDF_OUTPUT_BYTES, MAX_PDF_PAGES, MAX_PDF_TOTAL_PRIMITIVES, PdfError, PdfExportOptions, render_pdf, render_pdf_page_refs, render_pdf_pages,
+    MAX_PDF_OUTPUT_BYTES, MAX_PDF_PAGES, MAX_PDF_RAW_STREAM_BYTES, MAX_PDF_TOTAL_PATH_COMMANDS, MAX_PDF_TOTAL_PRIMITIVES, PdfError, PdfExportOptions,
+    render_pdf, render_pdf_page_refs, render_pdf_pages,
 };
 
 /// Supported PDF specification version headers.

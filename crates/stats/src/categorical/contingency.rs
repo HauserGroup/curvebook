@@ -42,6 +42,7 @@ use crate::error::StatsError;
 
 const FISHER_2X2_MAX_TOTAL: u64 = 5_000_000;
 const FISHER_RXC_MAX_TOTAL: u64 = 50_000;
+const FISHER_RXC_MAX_CELLS: usize = 4_096;
 const FISHER_RXC_ANALYZE_MAX_TOTAL: u64 = 20_000;
 const MCNEMAR_MAX_TOTAL: u64 = 5_000_000;
 
@@ -73,25 +74,6 @@ pub(super) fn checked_table_margins(counts: &[Vec<u64>]) -> Result<(Vec<u64>, Ve
         }
     }
     Ok((r_sums, c_sums, total))
-}
-
-/// Log-probability of observing integer matrix `counts` given its row sums `r_sums` and column sums
-/// `c_sums` under the multiple hypergeometric null distribution.
-fn log_hypergeom_table(counts: &[Vec<u64>], r_sums: &[u64], c_sums: &[u64], total: u64) -> Result<f64, StatsError> {
-    let mut num = 0.0_f64;
-    for &r in r_sums {
-        num += ln_factorial(r);
-    }
-    for &c in c_sums {
-        num += ln_factorial(c);
-    }
-    let mut den = ln_factorial(total);
-    for row in counts {
-        for &v in row {
-            den += ln_factorial(v);
-        }
-    }
-    Ok(num - den)
 }
 
 /// Exact two-sided Fisher's test for a `2 x 2` count matrix `[[a, b], [c, d]]`.
@@ -302,12 +284,51 @@ fn fast_grid_max_pi(f_s: &[f64], ln_fact: &[f64], total: usize) -> f64 {
     let f0 = f_s.first().copied().unwrap_or(0.0);
     let fn_end = f_s.last().copied().unwrap_or(0.0);
     let terms = precompute_binom_terms(f_s, ln_fact, total);
-    let mut best = f0.max(fn_end);
+    if terms.is_empty() {
+        return f0.max(fn_end);
+    }
+
+    let mut pis = Vec::with_capacity(240 + terms.len());
+    pis.push(0.0);
     for k in 1..200 {
-        let pi = (k as f64) / 200.0;
-        let v = eval_unconditional_prob(&terms, f0, fn_end, total, pi);
+        pis.push((k as f64) / 200.0);
+    }
+    pis.push(1.0);
+    if total > 0 {
+        let tf = total as f64;
+        for k in 1..=16 {
+            let eps = (k as f64) / (16.0 * tf);
+            if eps > 0.0 && eps < 1.0 {
+                pis.push(eps);
+                pis.push(1.0 - eps);
+            }
+        }
+        for &(s, _, _) in &terms {
+            if s > 0 && s < total {
+                pis.push((s as f64) / tf);
+            }
+        }
+    }
+    pis.sort_by(f64::total_cmp);
+    pis.dedup_by(|a, b| (*a - *b).abs() < 1e-13);
+
+    let eval = |pi: f64| eval_unconditional_prob(&terms, f0, fn_end, total, pi);
+    let vals: Vec<f64> = pis.iter().map(|&pi| eval(pi)).collect();
+    let mut best = f0.max(fn_end);
+    let mut local_peaks: Vec<(f64, usize)> = Vec::new();
+    for (idx, &v) in vals.iter().enumerate() {
         if v > best {
             best = v;
+        }
+        if idx > 0 && idx + 1 < vals.len() && v >= vals[idx - 1] && v >= vals[idx + 1] {
+            local_peaks.push((v, idx));
+        }
+    }
+    local_peaks.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for &(_, idx) in local_peaks.iter().take(4) {
+        let (cand_p, _) = golden_maximize_pi(&eval, pis[idx - 1], pis[idx + 1]);
+        if cand_p > best {
+            best = cand_p;
         }
     }
     best
@@ -598,37 +619,54 @@ pub fn fisher_exact_rxc(counts: &[Vec<u64>]) -> Result<f64, StatsError> {
         return Ok(1.0);
     }
 
+    // Enforce an explicit R * C cell cap before allocating or iterating Monte Carlo draws.
+    let n_cells = n_rows
+        .checked_mul(n_cols)
+        .filter(|&cells| cells <= FISHER_RXC_MAX_CELLS)
+        .ok_or(StatsError::InvalidParameter { name: "fisher_exact_max_cells", value: (n_rows as f64) * (n_cols as f64) })?;
+
     // Build flat vector of column assignments and permute deterministically across 10,000 draws.
     if total > FISHER_RXC_MAX_TOTAL {
         // Reject tables exceeding the deterministic Monte Carlo permutation cap rather than silently
         // substituting asymptotic chi-square under a Fisher exact label.
         return Err(StatsError::InvalidParameter { name: "fisher_exact_max_total", value: total as f64 });
     }
-    let obs_log = log_hypergeom_table(counts, &r_sums, &c_sums, total)?;
+    let total_usize = usize::try_from(total).map_err(|_| StatsError::InvalidParameter { name: "fisher_exact_max_total", value: total as f64 })?;
+    let ln_fact = build_ln_factorials(total_usize)?;
+    let obs_den: f64 = counts.iter().flat_map(|row| row.iter()).map(|&v| ln_fact[v as usize]).sum();
     let log_rel_tol = (1.0_f64 + 1e-7).ln();
     let mut col_pool = build_fisher_rxc_pool(&c_sums, total)?;
     let n_sims = 10_000_usize;
     let mut rng = DeterministicRng::from_seed(0xC07_4F15_8E2B_1001);
-    let mut sim_table = vec![vec![0_u64; n_cols]; n_rows];
+    let mut sim_counts = vec![0_usize; n_cells];
+    let mut touched = Vec::with_capacity(total_usize.min(n_cells));
     let mut extreme = 0_usize;
 
     for _ in 0..n_sims {
         rng.shuffle(&mut col_pool);
-        for row in &mut sim_table {
-            row.fill(0);
-        }
+        touched.clear();
         let mut cursor = 0_usize;
         for (r_idx, &r_cnt) in r_sums.iter().enumerate() {
+            let row_off = r_idx * n_cols;
             for _ in 0..r_cnt {
                 let Some(&c_idx) = col_pool.get(cursor) else {
                     return Err(StatsError::InvalidParameter { name: "fisher_exact_max_total", value: total as f64 });
                 };
-                sim_table[r_idx][c_idx] += 1;
+                let cell_idx = row_off + c_idx;
+                if sim_counts[cell_idx] == 0 {
+                    touched.push(cell_idx);
+                }
+                sim_counts[cell_idx] += 1;
                 cursor += 1;
             }
         }
-        let sim_log = log_hypergeom_table(&sim_table, &r_sums, &c_sums, total)?;
-        if sim_log <= obs_log + log_rel_tol {
+        let mut sim_den = 0.0_f64;
+        for &cell_idx in &touched {
+            sim_den += ln_fact[sim_counts[cell_idx]];
+            sim_counts[cell_idx] = 0;
+        }
+        // sim_log = marg_const - sim_den <= marg_const - obs_den + log_rel_tol <=> sim_den >= obs_den - log_rel_tol.
+        if sim_den >= obs_den - log_rel_tol {
             extreme += 1;
         }
     }
@@ -637,6 +675,8 @@ pub fn fisher_exact_rxc(counts: &[Vec<u64>]) -> Result<f64, StatsError> {
 
 pub(super) struct ReducedContingencyTable {
     pub(super) counts: Vec<Vec<u64>>,
+    pub(super) active_rows: Vec<usize>,
+    pub(super) active_cols: Vec<usize>,
     pub(super) r_sums: Vec<u64>,
     pub(super) c_sums: Vec<u64>,
     pub(super) total_count: u64,
@@ -681,6 +721,8 @@ pub(super) fn reduce_zero_margin_table(counts: &[Vec<u64>]) -> Result<ReducedCon
     let c_sums: Vec<u64> = active_cols.iter().map(|&c| c_sums_all[c]).collect();
     Ok(ReducedContingencyTable {
         counts: reduced,
+        active_rows,
+        active_cols,
         r_sums,
         c_sums,
         total_count,
@@ -735,6 +777,44 @@ fn chi_square_stats_with_margins(
     Ok((chi2, g2.max(0.0), min_exp))
 }
 
+fn cochran_armitage_from_scored_pairs(oriented: &[(f64, [f64; 2])]) -> Result<(f64, f64), StatsError> {
+    if oriented.len() < 3 {
+        return Err(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: oriented.len() as f64 });
+    }
+    let mut n_total = 0.0_f64;
+    let mut r_sum_0 = 0.0_f64;
+    let mut n_i = Vec::with_capacity(oriented.len());
+    for &(_, pair) in oriented {
+        let ni = pair[0] + pair[1];
+        n_i.push(ni);
+        n_total += ni;
+        r_sum_0 += pair[0];
+    }
+    if n_total <= 0.0 || r_sum_0 <= 0.0 || r_sum_0 >= n_total {
+        return Ok((0.0, 1.0));
+    }
+    let p_bar = r_sum_0 / n_total;
+    let mut w_mean = 0.0_f64;
+    for (&(s_i, _), &ni) in oriented.iter().zip(n_i.iter()) {
+        w_mean += s_i * ni / n_total;
+    }
+
+    let mut num = 0.0_f64;
+    let mut var_num = 0.0_f64;
+    for (&(s_i, pair), &ni) in oriented.iter().zip(n_i.iter()) {
+        let score = s_i - w_mean;
+        num += score * pair[0];
+        var_num += score * score * ni;
+    }
+    let denom = (p_bar * (1.0 - p_bar) * var_num).sqrt();
+    if denom <= 0.0 {
+        return Ok((0.0, 1.0));
+    }
+    let z = num / denom;
+    let p = 2.0 * norm_sf(z.abs());
+    Ok((z, p.clamp(0.0, 1.0)))
+}
+
 /// Cochran–Armitage chi-square test for linear trend across ordered levels (`R x 2` or `2 x C`).
 ///
 /// Cochran (1954); Armitage (1955). Uses equally spaced scores `1..k` and the unconditional
@@ -751,56 +831,23 @@ pub fn cochran_armitage_trend(counts: &[Vec<u64>]) -> Result<(f64, f64), StatsEr
         let bad = if n_rows == 2 || n_cols == 2 { n_rows.max(n_cols) } else { n_rows.min(n_cols) };
         return Err(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: bad as f64 });
     }
-    let reduced = reduce_zero_margin_table(counts).map_err(|err| match err {
-        StatsError::InsufficientSampleSize { actual, .. } => {
-            StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: actual as f64 }
-        }
-        other => other,
-    })?;
-    if !((reduced.n_cols == 2 && reduced.n_rows >= 3) || (reduced.n_rows == 2 && reduced.n_cols >= 3)) {
-        let bad = if reduced.n_rows == 2 || reduced.n_cols == 2 { reduced.n_rows.max(reduced.n_cols) } else { reduced.n_rows.min(reduced.n_cols) };
-        return Err(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: bad as f64 });
+    let (r_sums, c_sums, total) = checked_table_margins(counts)?;
+    if total == 0 {
+        return Err(StatsError::EmptyInput);
     }
-    // Orient as k ordered levels x 2 outcomes.
-    let oriented: Vec<[f64; 2]> = if reduced.n_cols == 2 {
-        reduced.counts.iter().map(|r| [r[0] as f64, r[1] as f64]).collect()
+    // Preserve original ordinal scores (1..=k_orig) even when an interior dose level is empty.
+    let (outcome_sums, oriented): ([u64; 2], Vec<(f64, [f64; 2])>) = if n_cols == 2 {
+        let levels =
+            counts.iter().enumerate().filter(|(r, _)| r_sums[*r] > 0).map(|(r, row)| ((r + 1) as f64, [row[0] as f64, row[1] as f64])).collect();
+        ([c_sums[0], c_sums[1]], levels)
     } else {
-        (0..reduced.n_cols).map(|c| [reduced.counts[0][c] as f64, reduced.counts[1][c] as f64]).collect()
+        let levels = (0..n_cols).filter(|&c| c_sums[c] > 0).map(|c| ((c + 1) as f64, [counts[0][c] as f64, counts[1][c] as f64])).collect();
+        ([r_sums[0], r_sums[1]], levels)
     };
-
-    let k = oriented.len();
-    let mut n_total = 0.0_f64;
-    let mut r_sum_0 = 0.0_f64;
-    let mut n_i = Vec::with_capacity(k);
-    for pair in &oriented {
-        let ni = pair[0] + pair[1];
-        n_i.push(ni);
-        n_total += ni;
-        r_sum_0 += pair[0];
+    if outcome_sums[0] == 0 || outcome_sums[1] == 0 {
+        return Err(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: 1.0 });
     }
-    if n_total <= 0.0 || r_sum_0 <= 0.0 || r_sum_0 >= n_total {
-        return Ok((0.0, 1.0));
-    }
-    let p_bar = r_sum_0 / n_total;
-    let mut w_mean = 0.0_f64;
-    for (idx, &ni) in n_i.iter().enumerate() {
-        w_mean += ((idx + 1) as f64) * ni / n_total;
-    }
-
-    let mut num = 0.0_f64;
-    let mut var_num = 0.0_f64;
-    for (idx, pair) in oriented.iter().enumerate() {
-        let score = (idx + 1) as f64 - w_mean;
-        num += score * pair[0];
-        var_num += score * score * n_i[idx];
-    }
-    let denom = (p_bar * (1.0 - p_bar) * var_num).sqrt();
-    if denom <= 0.0 {
-        return Ok((0.0, 1.0));
-    }
-    let z = num / denom;
-    let p = 2.0 * norm_sf(z.abs());
-    Ok((z, p.clamp(0.0, 1.0)))
+    cochran_armitage_from_scored_pairs(&oriented)
 }
 
 /// McNemar's paired `2 x 2` test on discordant counts `(b = cell[0][1], c = cell[1][0])`,
@@ -930,7 +977,9 @@ pub(super) fn analyze_reduced_contingency(
         None
     };
 
-    let (mcnemar_chi2, mcnemar_exact_p) = if n_rows == 2 && n_cols == 2 {
+    // McNemar requires paired 2x2 correspondence on the original unreduced table; dropping rows/cols
+    // independently from a larger table can shift off-diagonal discordant counts onto the diagonal.
+    let (mcnemar_chi2, mcnemar_exact_p) = if n_rows == 2 && n_cols == 2 && reduced.dropped_rows == 0 && reduced.dropped_cols == 0 {
         let discordant_total =
             counts[0][1].checked_add(counts[1][0]).ok_or(StatsError::InvalidParameter { name: "mcnemar_discordant_total", value: f64::INFINITY })?;
         if discordant_total <= MCNEMAR_MAX_TOTAL {
@@ -943,8 +992,16 @@ pub(super) fn analyze_reduced_contingency(
         (None, None)
     };
 
-    let (cochran_armitage_z, cochran_armitage_p) = if (n_rows == 2 && n_cols >= 3) || (n_cols == 2 && n_rows >= 3) {
-        let (z, p) = cochran_armitage_trend(counts)?;
+    // Preserve original 1-based ordinal scores across any dropped interior empty rows/columns.
+    let (cochran_armitage_z, cochran_armitage_p) = if n_cols == 2 && n_rows >= 3 {
+        let oriented: Vec<(f64, [f64; 2])> =
+            reduced.active_rows.iter().enumerate().map(|(i, &orig_r)| ((orig_r + 1) as f64, [counts[i][0] as f64, counts[i][1] as f64])).collect();
+        let (z, p) = cochran_armitage_from_scored_pairs(&oriented)?;
+        (Some(z), Some(p))
+    } else if n_rows == 2 && n_cols >= 3 {
+        let oriented: Vec<(f64, [f64; 2])> =
+            reduced.active_cols.iter().enumerate().map(|(j, &orig_c)| ((orig_c + 1) as f64, [counts[0][j] as f64, counts[1][j] as f64])).collect();
+        let (z, p) = cochran_armitage_from_scored_pairs(&oriented)?;
         (Some(z), Some(p))
     } else {
         (None, None)

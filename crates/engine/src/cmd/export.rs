@@ -62,7 +62,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
         id: "export.pdf",
         label: "Export PDF",
         menu_path: "File/Export/PDF...",
-        summary: "Render one or more graph or layout sheets to publication PDF (sRGB or print CMYK) and optionally write it atomically to disk.",
+        summary: "Render one or more graph or layout sheets to publication PDF (sRGB, print CMYK, or grayscale) and optionally write it atomically to disk.",
         beginner: "Creates a single-page or multi-page vector PDF from one or more graphs and layouts.",
         effects: EXPORT_EFFECTS,
         input_schema: command_schema::<ExportPdfParams>,
@@ -270,7 +270,7 @@ struct ExportPdfParams {
     /// Optional output PDF file path.
     #[schemars(length(min = 1))]
     path: Option<String>,
-    /// PDF output color space (`srgb` or `cmyk`).
+    /// PDF output color space (`srgb`, `cmyk`, or `grayscale`).
     color_space: Option<String>,
     /// Compress PDF content streams.
     compress_streams: Option<bool>,
@@ -414,17 +414,21 @@ fn run_graph_export_pdf(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
 }
 
 fn parse_pdf_color_space(raw: Option<&str>) -> Result<PdfColorSpace, EngineError> {
-    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        None | Some("srgb" | "rgb") => Ok(PdfColorSpace::Srgb),
-        Some("cmyk") => Ok(PdfColorSpace::Cmyk),
-        Some(other) => Err(bad_input(format!("unknown PDF `color_space` `{other}`"))
-            .with_remediation("Use `srgb` or `cmyk`.")
-            .with_details(json!({ "pointer": "/color_space", "color_space": other }))),
-    }
+    let Some(token) = raw else {
+        return Ok(PdfColorSpace::Srgb);
+    };
+    crate::services::parse_pdf_color_space(token).map_err(|mut err| {
+        err.details = Some(json!({ "pointer": "/color_space", "color_space": token }));
+        err
+    })
 }
 
 fn run_pdf_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<CommandOutcome, EngineError> {
     let params: ExportPdfParams = parse_params(&command_schema::<ExportPdfParams>(), raw)?;
+    if params.sheet_id.is_some() && params.sheet_ids.is_some() {
+        return Err(bad_input_ptr("/sheet_ids", "cannot specify both `sheet_id` and `sheet_ids`")
+            .with_remediation("Pass `sheet_id` for a single page or `sheet_ids` for a multi-page PDF, not both."));
+    }
 
     let color_space = parse_pdf_color_space(params.color_space.as_deref())?;
     let mut opts = PdfExportOptions { color_space, ..PdfExportOptions::default() };
