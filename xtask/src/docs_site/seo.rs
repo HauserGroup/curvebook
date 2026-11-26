@@ -261,10 +261,18 @@ fn extract_canonical_hrefs(page: &str, html: &str) -> Result<Vec<String>, String
 
 fn check_landing_page_social_meta(root: &Path, page: &str, html: &str) -> Result<(), String> {
     let metas = extract_meta_map(page, html)?;
-    for required in ["og:type", "og:title", "og:description", "og:url", "og:image", "twitter:card"] {
+    for required in
+        ["og:type", "og:title", "og:description", "og:url", "og:image", "og:image:alt", "og:image:width", "og:image:height", "twitter:card"]
+    {
         match metas.get(required) {
             Some(val) if !val.trim().is_empty() => {}
             _ => return Err(format!("docs/{page}: missing or empty `<meta>` tag for `{required}`")),
+        }
+    }
+    for dim in ["og:image:width", "og:image:height"] {
+        let raw = metas.get(dim).map(String::as_str).unwrap_or("");
+        if !raw.trim().parse::<u32>().is_ok_and(|n| n > 0) {
+            return Err(format!("docs/{page}: `{dim}` must be a positive integer, found `{raw}`"));
         }
     }
 
@@ -390,7 +398,7 @@ mod tests {
         let url = published_url(page);
         let img = format!("{SITE_BASE_URL}images/workspace-split-fit.png");
         format!(
-            "<html><head>{}<meta property=\"og:type\" content=\"website\"><meta property=\"og:title\" content=\"CurveBook\"><meta property=\"og:description\" content=\"CurveBook biostatistics.\"><meta property=\"og:url\" content=\"{url}\"><meta property=\"og:image\" content=\"{img}\"><meta name=\"twitter:card\" content=\"summary_large_image\"></head></html>",
+            "<html><head>{}<meta property=\"og:type\" content=\"website\"><meta property=\"og:title\" content=\"CurveBook\"><meta property=\"og:description\" content=\"CurveBook biostatistics.\"><meta property=\"og:url\" content=\"{url}\"><meta property=\"og:image\" content=\"{img}\"><meta property=\"og:image:alt\" content=\"CurveBook workspace preview.\"><meta property=\"og:image:width\" content=\"1440\"><meta property=\"og:image:height\" content=\"900\"><meta name=\"twitter:card\" content=\"summary_large_image\"></head></html>",
             canonical_link_tag(page),
         )
     }
@@ -497,6 +505,8 @@ mod tests {
             (format!("{0}{0}", canonical_link_tag("privacy.html")), "exactly one"),
             (bad_og_url, "og:url"),
             (base_privacy.replace("workspace-split-fit.png", "does-not-exist.png"), "og:image"),
+            (base_privacy.replace("og:image:alt", "og:image:other"), "og:image:alt"),
+            (base_privacy.replace("content=\"1440\"", "content=\"0\""), "og:image:width"),
             (base_privacy.replace("twitter:card", "other:card"), "twitter:card"),
         ] {
             root.write("docs/privacy.html", &html);

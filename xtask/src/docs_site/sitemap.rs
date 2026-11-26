@@ -1038,7 +1038,7 @@ fn build_section_index_page(sec: &SectionDef, children: &[&PageItem]) -> PageIte
 
     PageItem {
         rel_path: sec.index_rel_path.to_owned(),
-        title: sec.title.to_owned(),
+        title: format!("{} (Overview)", sec.title),
         description: sec.summary.to_owned(),
         section_id: Some(sec.id),
         nav_group: Some(sec.nav_group),

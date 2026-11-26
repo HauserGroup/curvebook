@@ -11,6 +11,11 @@ use super::sitemap::NavGroup;
 /// Strict Content-Security-Policy matching `docs/index.html` and `docs/privacy.html`.
 pub const STRICT_CSP: &str = "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'";
 
+/// Shared social preview image metadata matching the landing pages (`docs/images/workspace-layout-dark.png`).
+pub const SOCIAL_IMAGE_ALT: &str = "CurveBook dark-theme Page Layout Composer showing a two-panel publication figure with a 4PL dose-response curve, potency bar chart with significance brackets, embedded summary table, and millimeter rulers.";
+pub const SOCIAL_IMAGE_WIDTH: &str = "1440";
+pub const SOCIAL_IMAGE_HEIGHT: &str = "900";
+
 /// Release / build context rendered into every manual page banner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiteMeta {
@@ -110,6 +115,7 @@ struct DocHead<'a> {
     robots: Option<&'a str>,
     refresh: Option<&'a str>,
     canonical_url: Option<&'a str>,
+    emit_social_meta: bool,
     shell_class: &'a str,
 }
 
@@ -137,16 +143,25 @@ fn write_doc_open(out: &mut String, head: &DocHead<'_>) {
     if let Some(url) = head.canonical_url {
         out.push_str("  <link rel=\"canonical\" href=\"");
         push_html_escaped(url, out);
-        out.push_str("\">\n  <meta property=\"og:type\" content=\"article\">\n  <meta property=\"og:site_name\" content=\"CurveBook\">\n  <meta property=\"og:title\" content=\"");
-        push_html_escaped(head.title, out);
-        out.push_str(head.title_suffix);
-        out.push_str("\">\n  <meta property=\"og:description\" content=\"");
-        push_html_escaped(head.description, out);
-        out.push_str("\">\n  <meta property=\"og:url\" content=\"");
-        push_html_escaped(url, out);
-        out.push_str("\">\n  <meta property=\"og:image\" content=\"");
-        push_html_escaped(super::seo::SITE_BASE_URL, out);
-        out.push_str("images/workspace-layout-dark.png\">\n  <meta name=\"twitter:card\" content=\"summary_large_image\">\n");
+        out.push_str("\">\n");
+        if head.emit_social_meta {
+            out.push_str("  <meta property=\"og:type\" content=\"article\">\n  <meta property=\"og:site_name\" content=\"CurveBook\">\n  <meta property=\"og:title\" content=\"");
+            push_html_escaped(head.title, out);
+            out.push_str(head.title_suffix);
+            out.push_str("\">\n  <meta property=\"og:description\" content=\"");
+            push_html_escaped(head.description, out);
+            out.push_str("\">\n  <meta property=\"og:url\" content=\"");
+            push_html_escaped(url, out);
+            out.push_str("\">\n  <meta property=\"og:image\" content=\"");
+            push_html_escaped(super::seo::SITE_BASE_URL, out);
+            out.push_str("images/workspace-layout-dark.png\">\n  <meta property=\"og:image:alt\" content=\"");
+            push_html_escaped(SOCIAL_IMAGE_ALT, out);
+            out.push_str("\">\n  <meta property=\"og:image:width\" content=\"");
+            out.push_str(SOCIAL_IMAGE_WIDTH);
+            out.push_str("\">\n  <meta property=\"og:image:height\" content=\"");
+            out.push_str(SOCIAL_IMAGE_HEIGHT);
+            out.push_str("\">\n  <meta name=\"twitter:card\" content=\"summary_large_image\">\n");
+        }
     }
     out.push_str("  <link rel=\"icon\" type=\"image/png\" href=\"");
     push_html_escaped(head.assets, out);
@@ -239,6 +254,7 @@ pub fn render_page(spec: &PageSpec<'_>) -> String {
             robots: None,
             refresh: None,
             canonical_url: Some(&canonical_url),
+            emit_social_meta: true,
             shell_class: "site-shell is-manual",
         },
     );
@@ -522,6 +538,7 @@ fn render_pager(spec: &PageSpec<'_>, out: &mut String) {
 #[must_use]
 pub fn render_release_redirect_index(version_dir: &str, version_label: &str, available_versions: &[String]) -> String {
     let target = format!("{version_dir}/index.html");
+    let canonical = super::seo::manual_canonical_url("index.html");
     let mut out = String::with_capacity(2048);
     write_doc_open(
         &mut out,
@@ -530,9 +547,10 @@ pub fn render_release_redirect_index(version_dir: &str, version_label: &str, ava
             title: "Documentation",
             title_suffix: " — CurveBook",
             assets: "../",
-            robots: None,
+            robots: Some("noindex, follow"),
             refresh: Some(&target),
-            canonical_url: None,
+            canonical_url: Some(&canonical),
+            emit_social_meta: false,
             shell_class: "site-shell",
         },
     );
@@ -562,6 +580,8 @@ pub fn render_release_redirect_index(version_dir: &str, version_label: &str, ava
 /// or `docs/troubleshooting.html`) forwarding legacy root URLs into the manual snapshot.
 #[must_use]
 pub fn render_root_redirect_shim(title: &str, description: &str, target_href: &str, _version_label: &str) -> String {
+    let canonical_rel = target_href.split(['#', '?']).next().unwrap_or(target_href).trim_start_matches('/');
+    let canonical = super::seo::published_url(canonical_rel);
     let mut out = String::with_capacity(2048);
     write_doc_open(
         &mut out,
@@ -570,9 +590,10 @@ pub fn render_root_redirect_shim(title: &str, description: &str, target_href: &s
             title,
             title_suffix: " — CurveBook",
             assets: "",
-            robots: None,
+            robots: Some("noindex, follow"),
             refresh: Some(target_href),
-            canonical_url: None,
+            canonical_url: Some(&canonical),
+            emit_social_meta: false,
             shell_class: "site-shell",
         },
     );
@@ -607,6 +628,7 @@ pub fn render_not_found_page(base_path: &str) -> String {
             robots: Some("noindex"),
             refresh: None,
             canonical_url: None,
+            emit_social_meta: false,
             shell_class: "site-shell",
         },
     );
@@ -637,8 +659,22 @@ pub fn render_not_found_page(base_path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{NavGroup, PageSpec, SiteMeta, render_not_found_page, render_page};
+    use super::{NavGroup, PageSpec, SiteMeta, render_not_found_page, render_page, render_release_redirect_index, render_root_redirect_shim};
     use crate::docs_site::markdown::{IdentityResolver, TocHeading, render_markdown};
+
+    #[test]
+    fn r12_8_redirect_shims_emit_noindex_follow_and_fragment_free_canonical() {
+        let manual_idx = render_release_redirect_index("latest", "v0.1.0", &[String::from("v0.1")]);
+        assert!(manual_idx.contains("<meta name=\"robots\" content=\"noindex, follow\">"));
+        assert!(manual_idx.contains("<link rel=\"canonical\" href=\"https://curvebook.org/manual/latest/index.html\">"));
+        assert!(!manual_idx.contains("og:image"));
+
+        let shim = render_root_redirect_shim("Troubleshooting", "Redirect desc", "manual/latest/troubleshooting.html#known-issues", "v0.1.0");
+        assert!(shim.contains("<meta name=\"robots\" content=\"noindex, follow\">"));
+        assert!(shim.contains("<link rel=\"canonical\" href=\"https://curvebook.org/manual/latest/troubleshooting.html\">"));
+        assert!(!shim.contains("rel=\"canonical\" href=\"https://curvebook.org/manual/latest/troubleshooting.html#known-issues\""));
+        assert!(shim.contains("<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/troubleshooting.html#known-issues\">"));
+    }
 
     #[test]
     fn aud_12_44_escapes_base_path_and_section_rel_in_html_attributes() {

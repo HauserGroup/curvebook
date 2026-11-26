@@ -565,16 +565,24 @@ fn assert_release_snapshot_outputs(sim_root: &Path, manual_out: &Path, head_sha:
     assert_eq!(manifest_json["source"], serde_json::json!("release"));
     assert_eq!(fs::read_to_string(manual_out.join("latest/manifest.json")).map_err(|e| e.to_string())?, manifest_text);
 
-    for (path, refresh, href) in [
-        (manual_out.join("index.html"), "latest/index.html", "v0.1/index.html"),
-        (sim_root.join("docs/get-started.html"), "manual/latest/get-started.html", "manual/latest/get-started.html"),
+    for (path, refresh, href, canonical) in [
+        (manual_out.join("index.html"), "latest/index.html", "v0.1/index.html", "https://curvebook.org/manual/latest/index.html"),
+        (
+            sim_root.join("docs/get-started.html"),
+            "manual/latest/get-started.html",
+            "manual/latest/get-started.html",
+            "https://curvebook.org/manual/latest/get-started.html",
+        ),
         (
             sim_root.join("docs/troubleshooting.html"),
             "manual/latest/troubleshooting.html#known-issues",
             "manual/latest/troubleshooting.html#known-issues",
+            "https://curvebook.org/manual/latest/troubleshooting.html",
         ),
     ] {
         let html = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        assert!(html.contains("<meta name=\"robots\" content=\"noindex, follow\">"));
+        assert!(html.contains(&format!("<link rel=\"canonical\" href=\"{canonical}\">")));
         assert!(html.contains(&format!("<meta http-equiv=\"refresh\" content=\"0; url={refresh}\">")));
         assert!(html.contains(&format!("href=\"{href}\"")));
         assert!(html.contains("class=\"site-shell\""));

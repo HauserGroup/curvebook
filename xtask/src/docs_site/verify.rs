@@ -21,6 +21,7 @@ struct PageFacts {
     asset_srcs: Vec<String>,
     meta_refresh_targets: Vec<String>,
     meta_descriptions: Vec<String>,
+    titles: Vec<String>,
     has_strict_csp: bool,
     has_no_referrer: bool,
     has_skip_link: bool,
@@ -68,6 +69,7 @@ fn verify_generated_pages(root: &Path, out_dir: &Path, site: &GeneratedSite) -> 
         facts.insert(rel_path.clone(), page_facts);
     }
 
+    check_unique_titles(facts.iter().map(|(k, v)| (k.as_str(), v)))?;
     check_unique_meta_descriptions(facts.iter().map(|(k, v)| (k.as_str(), v)))?;
     check_internal_links_and_fragments(root, out_dir, site, &facts)?;
     check_registry_coverage(&facts, site)
@@ -81,6 +83,24 @@ fn verify_workspace_and_manual(root: &Path, manual_dir: &Path) -> Result<(), Str
     super::seo::check_search_metadata_with_manual(root, Some(manual_dir))?;
     crate::pages_site::check_publish_set_with_manual(root, Some(manual_dir))?;
     run_hygiene_scanners(root, manual_dir, true)
+}
+
+fn check_unique_titles<'a>(pages: impl IntoIterator<Item = (&'a str, &'a PageFacts)>) -> Result<(), String> {
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+    for (rel, facts) in pages {
+        if facts.titles.len() != 1 {
+            return Err(format!("{rel}: expected exactly one `<title>` element, found {}", facts.titles.len()));
+        }
+        let title = facts.titles[0].trim();
+        if title.is_empty() {
+            return Err(format!("{rel}: `<title>` text must not be empty"));
+        }
+        let key = title.to_ascii_lowercase();
+        if let Some(prev) = seen.insert(key, rel) {
+            return Err(format!("{rel}: duplicate `<title>` already used by `{prev}`: \"{title}\""));
+        }
+    }
+    Ok(())
 }
 
 fn check_unique_meta_descriptions<'a>(pages: impl IntoIterator<Item = (&'a str, &'a PageFacts)>) -> Result<(), String> {
@@ -193,7 +213,12 @@ fn scan_html_tags(rel_path: &str, html: &str, facts: &mut PageFacts) -> Result<(
         let attrs = parse_html_tag_attributes(trimmed);
         process_tag_attrs(rel_path, &tag_lower, &attrs, facts)?;
         if matches!(tag_lower.as_str(), "title" | "textarea") {
-            let (_, after_close) = crate::pages_site::skip_html_raw_or_rcdata_element(rest, 0, &tag_lower).map_err(|e| format!("{rel_path}: {e}"))?;
+            let (body_end, after_close) =
+                crate::pages_site::skip_html_raw_or_rcdata_element(rest, 0, &tag_lower).map_err(|e| format!("{rel_path}: {e}"))?;
+            if tag_lower == "title" {
+                let raw_title = rest.get(..body_end).unwrap_or("").trim();
+                facts.titles.push(crate::pages_site::unescape_html_attr(raw_title));
+            }
             rest = rest.get(after_close..).unwrap_or("");
         }
     }
@@ -703,6 +728,7 @@ fn audit_snapshot_dir_on_disk(root: &Path, snap_dir: &Path, snap_name: &str) -> 
     if facts.is_empty() {
         return Err(format!("{}: manual snapshot contains no HTML pages", snap_dir.display()));
     }
+    check_unique_titles(facts.iter().map(|(k, v)| (k.as_str(), v)))?;
     check_unique_meta_descriptions(facts.iter().map(|(k, v)| (k.as_str(), v)))?;
     check_page_map_links_and_fragments(root, snap_dir, true, &facts)?;
     Ok(file_bytes)
@@ -853,6 +879,7 @@ pub fn check_root_pages(root: &Path, manual_dir: &Path) -> Result<(), String> {
         audited.insert(rel.to_owned(), audit_single_html(&format!("docs/{rel}"), &html)?);
     }
 
+    check_unique_titles(audited.iter().map(|(k, v)| (k.as_str(), v)))?;
     check_unique_meta_descriptions(audited.iter().map(|(k, v)| (k.as_str(), v)))?;
 
     let mut extra_html_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -1471,6 +1498,11 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
             &base_root_html("Privacy", "<a href=\"index.html\">H</a>").replace("Privacy page description", "Home page description"),
         );
         assert!(check_root_pages(root_dir.path(), &manual).unwrap_err().contains("duplicate `<meta name=\"description\">`"));
+        root_dir.write(
+            "docs/privacy.html",
+            &base_root_html("Privacy", "<a href=\"index.html\">H</a>").replace("<title>Privacy</title>", "<title>Home</title>"),
+        );
+        assert!(check_root_pages(root_dir.path(), &manual).unwrap_err().contains("duplicate `<title>`"));
         root_dir.write("docs/privacy.html", &base_root_html("Privacy", "<a href=\"index.html\">H</a>"));
         root_dir.write("docs/index.html", &base_root_html("Home", "<a href=\"missing.html\">Broken</a>"));
         assert!(check_root_pages(root_dir.path(), &manual).unwrap_err().contains("missing.html"));
@@ -1596,14 +1628,14 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         assert!(check_internal_links_and_fragments(Path::new("."), Path::new("."), &site, &facts).is_err());
 
         let root_dir = TestDir::new("docs-da-03-10");
-        let root_html = |extra: &str| {
+        let root_html = |title: &str, extra: &str| {
             format!(
-                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\">{extra}<title>T</title></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>T</h1></main></body></html>"
+                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"description\" content=\"{title} desc\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\">{extra}<title>{title}</title></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>{title}</h1></main></body></html>"
             )
         };
-        root_dir.write("docs/index.html", &root_html("<meta http-equiv=\"refresh\" content=\"0; url=https://evil.example/\">"));
-        root_dir.write("docs/privacy.html", &root_html(""));
-        root_dir.write("target/docs-manual/index.html", &root_html(""));
+        root_dir.write("docs/index.html", &root_html("Home", "<meta http-equiv=\"refresh\" content=\"0; url=https://evil.example/\">"));
+        root_dir.write("docs/privacy.html", &root_html("Privacy", ""));
+        root_dir.write("target/docs-manual/index.html", &root_html("Manual", ""));
         assert!(check_root_pages(root_dir.path(), &root_dir.join("target/docs-manual")).is_err());
     }
 
@@ -1636,6 +1668,9 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
             "<meta property=\"og:description\" content=\"Statistical analyses reference.\">",
             "<meta property=\"og:url\" content=\"https://curvebook.org/manual/latest/analyses.html\">",
             "<meta property=\"og:image\" content=\"https://curvebook.org/images/workspace-layout-dark.png\">",
+            "<meta property=\"og:image:alt\" content=\"",
+            "<meta property=\"og:image:width\" content=\"1440\">",
+            "<meta property=\"og:image:height\" content=\"900\">",
             "<meta name=\"twitter:card\" content=\"summary_large_image\">",
         ] {
             assert!(page.contains(expected), "missing `{expected}`");

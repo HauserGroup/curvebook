@@ -16,12 +16,14 @@
   <meta property="og:url" content="https://curvebook.org/open-pzfx-files.html">
   <meta property="og:image" content="https://curvebook.org/images/workspace-layout-dark.png">
   <meta property="og:image:alt" content="CurveBook dark-theme Page Layout Composer showing a two-panel publication figure with a 4PL dose-response curve, potency bar chart with significance brackets, embedded summary table, and millimeter rulers.">
+  <meta property="og:image:width" content="1440">
+  <meta property="og:image:height" content="900">
   <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" type="image/png" href="images/curvebook.png">
   <link rel="stylesheet" href="site.css">
 </head>
 <body>
-  <!-- R12.8: every behaviour described here is checked by apps/curvebook-cli/tests/r12_8_pzfx_landing_page.rs. -->
+  <!-- R12.8: CLI behaviour is checked by apps/curvebook-cli/tests/r12_8_pzfx_landing_page.rs; desktop GUI import/export behaviour is checked by crates/ui-egui/tests/human_wf_suite/human_wf_import_export.rs (R10.30). -->
   <a class="skip-link" href="#main">Skip to content</a>
   <div class="site-shell">
     <header class="site-header">
@@ -56,7 +58,8 @@
             <p class="toc-title">On this page</p>
             <ul>
               <li><a href="#what-is-read">What is read</a></li>
-              <li><a href="#convert">Convert to CSV</a></li>
+              <li><a href="#desktop">Open and export in the desktop app</a></li>
+              <li><a href="#convert">Convert to CSV from the command line</a></li>
               <li><a href="#limits">Limits and privacy</a></li>
               <li><a href="#get">Get CurveBook</a></li>
             </ul>
@@ -74,6 +77,18 @@
             <li><strong>Not imported:</strong> graphs, analysis results, and page layouts. Rerun the analyses in CurveBook on the imported tables; its methods and their published references are listed in the <a href="manual/latest/analyses.html">analyses reference</a>.</li>
             <li><strong>Read only:</strong> CurveBook opens these formats but does not write them. Save your work as a <code>.curvebook</code> project, or export tables to CSV or TSV.</li>
           </ul>
+        </section>
+
+        <hr>
+
+        <section id="desktop" aria-labelledby="desktop-title" tabindex="-1">
+          <p class="eyebrow">Desktop app · <code>curvebook</code></p>
+          <h2 id="desktop-title">Open and export in the desktop app</h2>
+          <ol>
+            <li><strong>Import the file:</strong> open CurveBook and choose <strong>File › Open…</strong> or <strong>File › Import</strong>, then pick your <code>.pzfx</code> or <code>.prism</code> file. If your workspace already contains tables or unsaved edits, CurveBook asks whether to <strong>Add to current project</strong> or open the imported tables as a new project.</li>
+            <li><strong>Review any skipped items:</strong> when a file includes graphs or unrecognized archive entries, CurveBook opens the <strong>Import Warnings</strong> dialog so you can inspect every skipped part. You can reopen it later from the status bar or <strong>File › Import › Import Warnings…</strong>.</li>
+            <li><strong>Export tables to CSV or TSV:</strong> select any imported table and choose <strong>File › Export › CSV Table…</strong> (picking comma, semicolon, or tab delimiter and decimal mark), or choose <strong>File › Export › Export All Data Tables…</strong> to write every data table to a folder at once.</li>
+          </ol>
         </section>
 
         <hr>
