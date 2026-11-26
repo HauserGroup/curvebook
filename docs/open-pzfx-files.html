@@ -23,30 +23,27 @@
 <body>
   <!-- R12.8: every behaviour described here is checked by apps/curvebook-cli/tests/r12_8_pzfx_landing_page.rs. -->
   <a class="skip-link" href="#main">Skip to content</a>
-  <div class="desktop-window wrap">
+  <div class="site-shell">
     <header class="site-header">
-      <a class="title-bar" href="index.html">
-        <span class="wordmark">
-          <img src="images/curvebook.png" width="64" height="64" alt="">
+      <div class="header-inner">
+        <a class="wordmark" href="index.html">
+          <img src="images/curvebook.png" width="32" height="32" alt="">
           <span>CurveBook</span>
-        </span>
-        <span class="window-status">.pzfx &amp; .prism files</span>
-      </a>
-      <nav aria-label="Main navigation">
-        <a href="index.html">Home</a>
-        <a href="manual/latest/index.html">Documentation</a>
-        <a href="open-pzfx-files.html" aria-current="page">.pzfx &amp; .prism</a>
-        <a href="linux.html">Linux</a>
-        <a href="faq.html">FAQ</a>
-        <a href="privacy.html">Privacy</a>
-        <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
-      </nav>
+        </a>
+        <nav class="site-nav" aria-label="Main navigation">
+          <a href="index.html">Home</a>
+          <a href="manual/latest/index.html">Documentation</a>
+          <a href="open-pzfx-files.html" aria-current="page">.pzfx &amp; .prism</a>
+          <a href="linux.html">Linux</a>
+          <a href="faq.html">FAQ</a>
+          <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
     </header>
 
     <main id="main" tabindex="-1">
-      <div class="overview">
+      <div class="overview doc-body">
         <section id="summary" aria-labelledby="page-title" tabindex="-1">
-          <div class="document-brand"><img src="images/curvebook.png" width="64" height="64" alt=""><span>CurveBook</span></div>
           <p class="eyebrow">File formats · <code>.pzfx</code> · <code>.prism</code></p>
           <h1 id="page-title">Open .pzfx and .prism files.<br><span>Export the tables to CSV.</span></h1>
           <p class="lead"><strong>CurveBook</strong> is a free, open-source biostatistics and graphing application that reads the data tables in <code>.pzfx</code> and <code>.prism</code> files. You can list the tables, export any of them to CSV, or convert the whole file to a CurveBook project and analyse the data again. It runs offline on macOS, Windows, and Linux, needs no account, and never uploads your files.</p>
@@ -60,7 +57,7 @@
             <ul>
               <li><a href="#what-is-read">What is read</a></li>
               <li><a href="#convert">Convert to CSV</a></li>
-              <li><a href="#limits">Limits</a></li>
+              <li><a href="#limits">Limits and privacy</a></li>
               <li><a href="#get">Get CurveBook</a></li>
             </ul>
           </nav>
@@ -120,7 +117,7 @@
             <p>Installers for macOS, Windows, and Linux (desktop app + <code>curvebook-cli</code>), plus a Tier 2 FreeBSD CLI-only archive, are on the release page.</p>
             <div class="download-links">
               <a href="index.html#downloads">Downloads</a>
-              <a href="manual/latest/get-started.html">Install &amp; Checksums</a>
+              <a href="manual/latest/get-started.html">Install &amp; checksums</a>
               <a href="https://github.com/HauserGroup/curvebook/releases">GitHub Releases <span aria-hidden="true">↗</span></a>
             </div>
           </div>
@@ -129,18 +126,13 @@
     </main>
 
     <footer class="site-footer">
-      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
-      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
-      <p class="privacy">CurveBook runs locally and collects no telemetry. GitHub Pages logs visitor IP addresses for security. Read the <a href="privacy.html">Privacy Policy</a> or the <a href="faq.html">FAQ</a>.</p>
-      <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+      <p><strong>License:</strong> MIT OR Apache-2.0. Clean-room implementation from published scientific references without commercial software or copied proprietary assets. CurveBook runs locally with zero telemetry; GitHub Pages logs visitor IP addresses for security.</p>
+      <p class="footer-links">
+        <a href="privacy.html">Privacy Policy</a>
+        <a href="faq.html">FAQ</a>
+        <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+      </p>
     </footer>
-
-    <div class="window-statusbar" aria-label="Application summary">
-      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
-      <span class="status-cell">Pure Rust</span>
-      <span class="status-cell">Zero Telemetry</span>
-      <span class="status-cell">MIT / Apache-2.0</span>
-    </div>
   </div>
 </body>
 </html>

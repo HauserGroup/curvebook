@@ -1,13 +1,13 @@
-# Control Protocol, Batch Format & Engine Errors
+# Control protocol, batch format, and engine errors
 
-CurveBook supports three scriptable interfaces alongside MCP: a loopback JSON-lines `--control` channel attached to a desktop window, standalone `run` command scripts, and `curvebook.batch.v1` manifests. Every engine command identifier follows the stability contract documented in [Command IDs](../../command-ids.md).
+CurveBook supports three scriptable interfaces alongside MCP: a loopback JSON-lines `--control` channel attached to the desktop app, standalone `run` scripts, and `curvebook.batch.v1` batch manifests. Every engine command follows the stability contract in [Command IDs](../../command-ids.md).
 
-## Loopback Desktop Control Protocol (`--control`)
+## Loopback desktop control protocol (`--control`)
 
-Launch the desktop GUI with `--control <port>` (optionally paired with `--window` or `--control-token <token>`) to bind a loopback TCP JSON-lines listener on `127.0.0.1:<port>`. Non-loopback bindings are never opened.
+Launch the desktop app with `--control <port>` (and optionally `--window` or `CURVEBOOK_CONTROL_TOKEN`) to bind a loopback TCP JSON-lines listener on `127.0.0.1:<port>`. CurveBook never opens non-loopback network bindings.
 
-- **Framing:** One UTF-8 JSON object per line terminated by `\n`, bounded by `MAX_CONTROL_LINE_BYTES` (`16 MiB`).
-- **Authentication:** Supply the bearer token via `"auth"` handshake or per-request `"token"` field (`--control-token`, `CURVEBOOK_CONTROL_TOKEN`, or the `control-<port>.token` file).
+- **Framing:** Send one UTF-8 JSON object per line terminated by `\n`, up to 16 MiB per line.
+- **Authentication:** Provide the bearer token via an `"auth"` handshake or a per-request `"token"` field (`CURVEBOOK_CONTROL_TOKEN`, `--control-token`, or the `control-<port>.token` file).
 - **Dispatch key:** Requests accept `"method"` or its alias `"op"`.
 
 Single-call request and response syntax:
@@ -20,32 +20,34 @@ Single-call request and response syntax:
 {"id":1,"ok":true,"result":{"command_id":"sheet.createData","mutated":true,"message":"created data table sheet","payload":{"sheet_id":"data-1","title":"Data 1","kind":"xy","info_sheet_id":"info-1","graph_sheet_id":"graph-1"}},"error":null}
 ```
 
-Built-in control methods: `"auth"`, `"ping"`, `"command.list"`, `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`), `"app.quit"`, the interactive `ui.*` GUI actions (`ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`, `ui.answer_dialog`), plus any registered engine or `ui.*` command ID passed directly as `"method"`/`"op"`.
+Built-in control methods are `"auth"`, `"ping"`, `"command.list"`, `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`), `"app.quit"`, and interactive UI actions (`ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`, `ui.answer_dialog`). You can also pass any registered engine or `ui.*` command ID directly as `"method"` or `"op"`.
 
-## Batch Manifest Format (`curvebook.batch.v1`) {#batch-manifest}
+## Batch manifest format (`curvebook.batch.v1`) {#batch-manifest}
 
-A `curvebook.batch.v1` manifest is a deterministic JSON document validated strictly against the JSON Schema (`additionalProperties: false`) published in the [Formats & Schemas Registry](../registry/formats.html#schema-batch-v1) before any operation runs. Execute a manifest with `curvebook-cli batch <manifest> [--workdir <dir>] [--json]`.
+A `curvebook.batch.v1` manifest is a JSON document validated strictly against the schema (`additionalProperties: false`) in the [Formats & Schemas Registry](../registry/formats.html#schema-batch-v1) before anything runs. Run a manifest with `curvebook-cli batch <manifest> [--workdir <dir>] [--json]`.
 
-Single-call manifest structure (top-level keys):
+Single-call manifest structure:
 
 ```json
 {"schema":"curvebook.batch.v1","project":"in.curvebook","inputs":[{"csv":"assay.csv","sheet":"data-2","kind":"xy"}],"commands":[{"cmd":"fit.run","id":"step-1","params":{"source_sheet_id":"data-2","sheet_id":"fit-1","equation_id":"log_agonist_vs_response_4pl"}}],"exports":[{"out":"out.curvebook","format":"curvebook"},{"sheet":"graph-1","out":"out.svg","format":"svg"}]}
 ```
 
+Top-level manifest keys:
+
 - `schema`: Required constant `"curvebook.batch.v1"`.
-- `project` / `template`: Mutually exclusive optional source project path or `.cbtemplate` template path (omit both to start from a blank session).
-- `inputs`: Optional ordered list of delimited imports using canonical keys (`path`/`file` or inline `csv`/`tsv`; optional `sheet`, `kind`, `subcolumn_mode`, `delimiter`, and `decimal_separator`).
-- `commands`: Optional ordered list of command steps, each naming the command via `cmd` (accepted aliases: `command`, `method`), with optional `id` and canonical `snake_case` `params` object.
-- `exports`: Optional ordered list of project saves or table/figure exports using canonical keys (`out`/`path`; optional `format`, `sheet`, `dpi`, `pretty`, `tab_index`, `pdf_version`, `ttf_font`). Pass `format: "curvebook"` or `"curvebook.d"` to write the resulting project archive or unpacked directory.
+- `project` / `template`: Optional source project or `.cbtemplate` path. These two keys are mutually exclusive; omit both to start from a blank session.
+- `inputs`: Optional ordered list of delimited imports using `path` or `file` (or inline `csv` / `tsv`), plus optional `sheet`, `kind`, `subcolumn_mode`, `delimiter`, and `decimal_separator`.
+- `commands`: Optional ordered list of steps, each naming `cmd` (aliases: `command`, `method`) with an optional `id` and canonical `snake_case` `params` object.
+- `exports`: Optional ordered list of project saves or table/figure exports using `out` or `path` and optional `format`, `sheet`, `dpi`, `pretty`, `tab_index`, `pdf_version`, and `ttf_font`. Use `format: "curvebook"` or `"curvebook.d"` to save the resulting project.
 
-## `run` Script Format
+## `run` script format
 
-`curvebook-cli run <script> [--workdir <dir>] [--json]` accepts either newline-delimited JSON objects (NDJSON) or a JSON array of command step objects (`{"cmd":"...","id":"...","params":{...}}`, accepting `cmd`, `command`, or `method`). Passing `-` reads the script from `stdin`.
+`curvebook-cli run <script> [--workdir <dir>] [--json]` accepts newline-delimited JSON objects (NDJSON) or a JSON array of command steps (`{"cmd":"...","id":"...","params":{...}}`, accepting `cmd`, `command`, or `method`). Pass `-` to read the script from standard input.
 
-## Engine Error Codes and Categories {#error-codes}
+## Engine error codes and categories {#error-codes}
 
-Engine, MCP, and CLI errors carry stable machine-readable `ErrorCode` variants classified into seven `ErrorCategory` values (`input`, `state`, `format`, `io`, `policy`, `compute`, `internal`) and an explicit `retryable` boolean flag (`StructuredErrorPayload` / `StructuredCliError`). See the complete generated `ErrorCode` table in the [Tables & Error Codes Registry](../registry/tables.html#error-codes).
+Engine, MCP, and CLI failures return stable `snake_case` error codes across seven categories (`input`, `state`, `format`, `io`, `policy`, `compute`, `internal`) plus a `retryable` boolean flag. See the complete generated table in the [Tables & Error Codes Registry](../registry/tables.html#error-codes).
 
-## Command ID Stability Rules
+## Command ID stability rules
 
-Command IDs used in scripts, batch manifests, and MCP `command_run` calls remain stable across minor releases. See [Command IDs](../../command-ids.md) for naming, command aliases, and canonical `snake_case` parameter schema compatibility guarantees.
+Command IDs used in scripts, batch manifests, and MCP `command_run` calls stay stable across minor releases. See [Command IDs](../../command-ids.md) for naming conventions, aliases, and `snake_case` parameter compatibility rules.

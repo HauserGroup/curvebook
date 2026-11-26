@@ -22,31 +22,28 @@
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
-  <div class="desktop-window wrap">
+  <div class="site-shell">
     <header class="site-header">
-      <a class="title-bar" href="index.html">
-        <span class="wordmark">
-          <img src="images/curvebook.png" width="64" height="64" alt="">
+      <div class="header-inner">
+        <a class="wordmark" href="index.html">
+          <img src="images/curvebook.png" width="32" height="32" alt="">
           <span>CurveBook</span>
-        </span>
-        <span class="window-status">Privacy Policy</span>
-      </a>
-      <nav aria-label="Main navigation">
-        <a href="index.html">Home</a>
-        <a href="manual/latest/index.html">Documentation</a>
-        <a href="open-pzfx-files.html">.pzfx &amp; .prism</a>
-        <a href="linux.html">Linux</a>
-        <a href="faq.html">FAQ</a>
-        <a href="privacy.html" aria-current="page">Privacy</a>
-        <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
-      </nav>
+        </a>
+        <nav class="site-nav" aria-label="Main navigation">
+          <a href="index.html">Home</a>
+          <a href="manual/latest/index.html">Documentation</a>
+          <a href="open-pzfx-files.html">.pzfx &amp; .prism</a>
+          <a href="linux.html">Linux</a>
+          <a href="faq.html">FAQ</a>
+          <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
     </header>
 
     <main id="main" tabindex="-1">
-      <div class="overview">
+      <div class="overview doc-body">
         <section id="summary" aria-labelledby="policy-title" tabindex="-1">
-          <div class="document-brand"><img src="images/curvebook.png" width="64" height="64" alt=""><span>CurveBook</span></div>
-          <p class="eyebrow">Privacy Policy · Effective 2026-11-18 · Updated 2026-11-23</p>
+          <p class="eyebrow">Privacy policy · Effective 2026-11-18 · Updated 2026-11-23</p>
           <h1 id="policy-title">Local by design.<br><span>Zero telemetry.</span></h1>
           <p class="lead"><strong>CurveBook</strong> runs locally on your computer or inside your browser tab. Across every distribution, CurveBook collects no personal data, sends no telemetry or crash reports, makes no outbound network connections, and has no auto-updater.</p>
           <ul>
@@ -157,18 +154,14 @@
     </main>
 
     <footer class="site-footer">
-      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
-      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
-      <p class="privacy">CurveBook runs locally and collects no telemetry. GitHub Pages logs visitor IP addresses for security. Return to <a href="index.html">CurveBook home</a> or read the <a href="faq.html">FAQ</a>.</p>
-      <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+      <p><strong>License:</strong> MIT OR Apache-2.0. Clean-room implementation from published scientific references without commercial software or copied proprietary assets. CurveBook runs locally with zero telemetry; GitHub Pages logs visitor IP addresses for security.</p>
+      <p class="footer-links">
+        <a href="index.html">CurveBook home</a>
+        <a href="faq.html">FAQ</a>
+        <a href="privacy.html" aria-current="page">Privacy Policy</a>
+        <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+      </p>
     </footer>
-
-    <div class="window-statusbar" aria-label="Application summary">
-      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
-      <span class="status-cell">Pure Rust</span>
-      <span class="status-cell">Zero Telemetry</span>
-      <span class="status-cell">MIT / Apache-2.0</span>
-    </div>
   </div>
 </body>
 </html>

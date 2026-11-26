@@ -217,6 +217,7 @@ fn preview_meta(root: &Path) -> SiteMeta {
         commit_sha: git_head_sha(root),
         release_date: git_head_date(root),
         is_release_snapshot: false,
+        is_tagged_release: false,
     }
 }
 
@@ -372,6 +373,7 @@ fn build_manual_into(
         commit_sha: commit.clone(),
         release_date: release_date.clone(),
         is_release_snapshot: true,
+        is_tagged_release: source_kind == "release",
     };
     let site = assemble_site(root, meta.clone())?;
     if check_determinism {
@@ -654,7 +656,13 @@ mod tests {
         let site = GeneratedSite {
             html_pages: BTreeMap::from([(String::from("index.html"), String::from("<h1>Ok</h1>"))]),
             expected_coverage: Default::default(),
-            meta: SiteMeta { version_label: String::from("v0.1.0"), commit_sha: None, release_date: None, is_release_snapshot: false },
+            meta: SiteMeta {
+                version_label: String::from("v0.1.0"),
+                commit_sha: None,
+                release_date: None,
+                is_release_snapshot: false,
+                is_tagged_release: false,
+            },
         };
         let out_dir = root.join("target/preview");
         write_preview_site(root.path(), &out_dir, &site).unwrap();

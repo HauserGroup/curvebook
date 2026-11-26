@@ -6,10 +6,43 @@ use std::path::Path;
 
 use super::markdown::{LinkResolver, TocHeading, escape_html, github_slug, render_markdown};
 use super::registries::{AzEntry, ExpectedCoverage, RegistryBundle, RegistryPageSpec, all_analysis_kinds_meta, generate_registry_pages};
-use super::template::{NavLink, PageSpec, SiteMeta, rel_href, render_page};
+use super::template::{NavLink, PageSpec, SidebarChild, SidebarGroup, SidebarSection, SiteMeta, rel_href, render_page};
 use crate::scan_util::{is_real_dir, is_regular_file};
 
 const GITHUB_REPO_BASE: &str = "https://github.com/HauserGroup/curvebook";
+
+/// Top-level manual navigation group owning each section in [`BETA_SECTIONS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavGroup {
+    GettingStarted,
+    Reference,
+    Automation,
+    Support,
+}
+
+impl NavGroup {
+    const ALL: [Self; 4] = [Self::GettingStarted, Self::Reference, Self::Automation, Self::Support];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::GettingStarted => "Getting started",
+            Self::Reference => "Reference",
+            Self::Automation => "Automation",
+            Self::Support => "Support",
+        }
+    }
+
+    #[must_use]
+    pub const fn nav_target(self) -> &'static str {
+        match self {
+            Self::GettingStarted => "section-get-started.html",
+            Self::Reference => "reference.html",
+            Self::Automation => "section-automation.html",
+            Self::Support => "support.html",
+        }
+    }
+}
 
 /// Complete generated static site in memory before writing to disk or checking invariants.
 pub struct GeneratedSite {
@@ -27,92 +60,107 @@ struct SectionDef {
     id: &'static str,
     title: &'static str,
     index_rel_path: &'static str,
+    nav_group: NavGroup,
     summary: &'static str,
 }
 
 const BETA_SECTIONS: &[SectionDef] = &[
     SectionDef {
         id: "get-started",
-        title: "Get started",
+        title: "Getting started",
         index_rel_path: "section-get-started.html",
+        nav_group: NavGroup::GettingStarted,
         summary: "Installation, checksum/attestation verification, font configuration, desktop onboarding, and MCP client setup.",
     },
     SectionDef {
         id: "concepts",
         title: "Concepts",
         index_rel_path: "section-concepts.html",
+        nav_group: NavGroup::Reference,
         summary: "Projects, five sheet families, reactive recalculation pipeline, non-destructive exclusions, checkpoints, and undo.",
     },
     SectionDef {
         id: "tables",
         title: "Data tables & formulas",
         index_rel_path: "section-tables.html",
+        nav_group: NavGroup::Reference,
         summary: "Table archetypes, subcolumn and replicate modes, Calculated Variables formulas, and linked data transforms.",
     },
     SectionDef {
         id: "analyses",
         title: "Analyses",
         index_rel_path: "section-analyses.html",
+        nav_group: NavGroup::Reference,
         summary: "Statistical tests, assumptions, diagnostics, edge-case behavior, peer-reviewed citations, and oracle verification.",
     },
     SectionDef {
         id: "fitting",
         title: "Curve fitting",
         index_rel_path: "section-fitting.html",
+        nav_group: NavGroup::Reference,
         summary: "Built-in equation library, nonlinear solvers, weighting schemes, robust/ROUT fitting, bands, and custom DSL/ODE models.",
     },
     SectionDef {
         id: "graphs",
         title: "Graphs & Page Layouts",
         index_rel_path: "section-graphs.html",
+        nav_group: NavGroup::Reference,
         summary: "Plot families, scales, frames, palettes, multi-panel Page Layouts, and publication vector/raster rendering.",
     },
     SectionDef {
         id: "qol",
         title: "Calculators & quality-of-life tools",
         index_rel_path: "section-qol.html",
+        nav_group: NavGroup::Reference,
         summary: "Quick statistics, scientific calculators, command palette, cloning pipelines, and quality-of-life capabilities.",
     },
     SectionDef {
         id: "files",
         title: "Files, import & export",
         index_rel_path: "section-files.html",
+        nav_group: NavGroup::Reference,
         summary: "Archive/directory/template formats, interchange importers, export formats, autosave recovery, and JSON Schemas.",
-    },
-    SectionDef {
-        id: "automation",
-        title: "Automation",
-        index_rel_path: "section-automation.html",
-        summary: "MCP server, curvebook-cli subcommands, loopback --control protocol, curvebook.batch.v1 manifests, and command catalogs.",
     },
     SectionDef {
         id: "settings",
         title: "Settings & languages",
         index_rel_path: "section-settings.html",
+        nav_group: NavGroup::Reference,
         summary: "Preference schema keys, shortcut customization, supported interface locales, and locale formatting.",
     },
     SectionDef {
-        id: "privacy-security",
-        title: "Privacy, licences & security",
-        index_rel_path: "section-privacy-security.html",
-        summary: "Offline/zero-telemetry operation, loopback socket policy, dual licensing, clean-room policy, and security disclosures.",
+        id: "glossary",
+        title: "Glossary",
+        index_rel_path: "section-glossary.html",
+        nav_group: NavGroup::Reference,
+        summary: "Defined terminology across statistical and software workflows plus the complete A–Z index of symbols.",
+    },
+    SectionDef {
+        id: "automation",
+        title: "Automation",
+        index_rel_path: "section-automation.html",
+        nav_group: NavGroup::Automation,
+        summary: "MCP server, curvebook-cli subcommands, loopback --control protocol, curvebook.batch.v1 manifests, and command catalogs.",
     },
     SectionDef {
         id: "troubleshooting",
         title: "Troubleshooting & known issues",
         index_rel_path: "section-troubleshooting.html",
+        nav_group: NavGroup::Support,
         summary: "Diagnosing font, MCP, archive recovery, and solver diagnostics alongside documented release limits.",
     },
     SectionDef {
-        id: "glossary",
-        title: "Glossary & A–Z index",
-        index_rel_path: "section-glossary.html",
-        summary: "Defined terminology across statistical and software workflows plus the complete A–Z index of symbols.",
+        id: "privacy-security",
+        title: "Privacy, licences & security",
+        index_rel_path: "section-privacy-security.html",
+        nav_group: NavGroup::Support,
+        summary: "Offline/zero-telemetry operation, loopback socket policy, dual licensing, clean-room policy, and security disclosures.",
     },
     SectionDef {
         id: "contribute",
         title: "Contribute",
         index_rel_path: "section-contribute.html",
+        nav_group: NavGroup::Support,
         summary: "Architecture, clean-room rules, CI stages, extending analyses/commands, localization, and releasing snapshots.",
     },
 ];
@@ -173,7 +221,7 @@ const fn guide(
 pub(crate) const MANUAL_GUIDES: &[GuideDescriptor] = &[
     guide(
         "get-started.html",
-        "Get Started",
+        "Install CurveBook",
         "System requirements, installing CurveBook, verifying checksums/attestations, and font configuration.",
         "get-started",
         "docs/reference/get-started.md",
@@ -359,7 +407,9 @@ struct PageItem {
     rel_path: String,
     title: String,
     description: String,
-    section_id: &'static str,
+    section_id: Option<&'static str>,
+    nav_group: Option<NavGroup>,
+    is_hub: bool,
     source: PageSource,
 }
 
@@ -552,14 +602,20 @@ pub fn assemble_site(root: &Path, meta: SiteMeta) -> Result<GeneratedSite, Strin
     let glossary_extra = collect_glossary_az_entries(root);
     az_entries.extend(glossary_extra);
 
-    // Build deterministic flat reading sequence: home, then per section (section index -> section pages).
-    let mut ordered: Vec<PageItem> = Vec::with_capacity(pages.len() + BETA_SECTIONS.len() + 2);
-    ordered.push(build_home_page(&pages));
-
     let mut by_section: BTreeMap<&'static str, Vec<PageItem>> = BTreeMap::new();
     for p in pages.drain(..) {
-        by_section.entry(p.section_id).or_default().push(p);
+        if let Some(sec_id) = p.section_id {
+            by_section.entry(sec_id).or_default().push(p);
+        }
     }
+
+    let sidebar_groups = build_sidebar_groups(&by_section);
+    let az_count = count_unique_az_entries(&az_entries);
+
+    let mut ordered: Vec<PageItem> = Vec::with_capacity(MANUAL_GUIDES.len() + BETA_SECTIONS.len() + 12);
+    ordered.push(build_home_page(&by_section));
+    ordered.push(build_reference_page(&by_section, az_count));
+    ordered.push(build_support_page(&by_section));
 
     for sec in BETA_SECTIONS {
         let children = by_section.remove(sec.id).unwrap_or_default();
@@ -571,13 +627,16 @@ pub fn assemble_site(root: &Path, meta: SiteMeta) -> Result<GeneratedSite, Strin
         }
     }
 
-    let nav_links: Vec<NavLink> = ordered.iter().map(|p| NavLink { label: p.title.clone(), rel_path: p.rel_path.clone() }).collect();
+    let pager_links: Vec<NavLink> =
+        ordered.iter().filter(|p| !p.is_hub).map(|p| NavLink { label: p.title.clone(), rel_path: p.rel_path.clone() }).collect();
+    let pager_pos: BTreeMap<&str, usize> = pager_links.iter().enumerate().map(|(idx, link)| (link.rel_path.as_str(), idx)).collect();
     let mut html_pages = BTreeMap::new();
 
-    for (idx, item) in ordered.iter().enumerate() {
-        let sec = section_by_id(item.section_id);
-        let prev = idx.checked_sub(1).and_then(|i| nav_links.get(i));
-        let next = nav_links.get(idx + 1);
+    for item in &ordered {
+        let sec = item.section_id.and_then(section_by_id);
+        let pos = if item.is_hub { None } else { pager_pos.get(item.rel_path.as_str()).copied() };
+        let prev = pos.and_then(|i| i.checked_sub(1)).and_then(|i| pager_links.get(i));
+        let next = pos.and_then(|i| pager_links.get(i + 1));
         let (title, h1, toc, body_html, body_has_h1) = match &item.source {
             PageSource::PreRendered { h1, toc, body_html } => (item.title.clone(), h1.clone(), toc.clone(), body_html.clone(), false),
             PageSource::Markdown { repo_path, fallback_kind } => {
@@ -616,6 +675,9 @@ pub fn assemble_site(root: &Path, meta: SiteMeta) -> Result<GeneratedSite, Strin
             rel_path: &item.rel_path,
             section_title: sec.map_or("Manual", |s| s.title),
             section_rel_path: sec.map(|s| s.index_rel_path),
+            nav_group: item.nav_group.or_else(|| sec.map(|s| s.nav_group)),
+            active_section_id: item.section_id,
+            sidebar_groups: &sidebar_groups,
             h1: &h1,
             toc_headings: &toc,
             body_html: &body_html,
@@ -634,6 +696,35 @@ fn section_by_id(id: &str) -> Option<&'static SectionDef> {
     BETA_SECTIONS.iter().find(|s| s.id == id)
 }
 
+fn section_target_href(sec: &SectionDef, by_section: &BTreeMap<&'static str, Vec<PageItem>>) -> String {
+    match by_section.get(sec.id).map(Vec::as_slice) {
+        Some([single]) => single.rel_path.clone(),
+        _ => sec.index_rel_path.to_owned(),
+    }
+}
+
+fn build_sidebar_groups(by_section: &BTreeMap<&'static str, Vec<PageItem>>) -> Vec<SidebarGroup> {
+    NavGroup::ALL
+        .into_iter()
+        .map(|group| {
+            let sections = BETA_SECTIONS
+                .iter()
+                .filter(|sec| sec.nav_group == group)
+                .map(|sec| {
+                    let items = by_section.get(sec.id).map(Vec::as_slice).unwrap_or(&[]);
+                    let children = if items.len() > 1 {
+                        items.iter().map(|p| SidebarChild { title: p.title.clone(), rel_path: p.rel_path.clone() }).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    SidebarSection { id: sec.id, title: sec.title.to_owned(), href: section_target_href(sec, by_section), children }
+                })
+                .collect();
+            SidebarGroup { group, sections }
+        })
+        .collect()
+}
+
 fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem> {
     let mut reg_map: BTreeMap<String, RegistryPageSpec> = registry_pages.into_iter().map(|p| (p.rel_path.clone(), p)).collect();
     let mut items: Vec<PageItem> = MANUAL_GUIDES
@@ -642,7 +733,9 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             rel_path: g.rel_path.to_owned(),
             title: g.title.to_owned(),
             description: g.description.to_owned(),
-            section_id: g.section_id,
+            section_id: Some(g.section_id),
+            nav_group: section_by_id(g.section_id).map(|s| s.nav_group),
+            is_hub: false,
             source: PageSource::Markdown { repo_path: g.repo_path, fallback_kind: g.fallback_kind },
         })
         .collect();
@@ -661,7 +754,9 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
                 rel_path: reg.rel_path,
                 title: reg.title,
                 description: reg.description,
-                section_id,
+                section_id: Some(section_id),
+                nav_group: section_by_id(section_id).map(|s| s.nav_group),
+                is_hub: false,
                 source: PageSource::PreRendered { h1: reg.h1, toc: reg.toc_headings, body_html: reg.body_html },
             });
         }
@@ -775,31 +870,65 @@ const HOME_SECTION_GROUPS: &[(&str, &str, &[&str])] = &[
     ("group-support-contribute", "Support & Contribute", &["privacy-security", "troubleshooting", "glossary", "contribute"]),
 ];
 
-fn build_home_page(pages: &[PageItem]) -> PageItem {
+const REFERENCE_SECTION_GROUPS: &[(&str, &str, &[&str])] = &[
+    ("group-core-concepts-data", "Core concepts & data", &["concepts", "tables"]),
+    ("group-stats-fitting", "Statistics & curve fitting", &["analyses", "fitting"]),
+    ("group-graphs-files-settings", "Graphs, files & settings", &["graphs", "qol", "files", "settings"]),
+    ("group-terminology", "Terminology", &["glossary"]),
+];
+
+fn format_page_count(count: usize) -> String {
+    if count == 1 { String::from("1 page") } else { format!("{count} pages") }
+}
+
+fn section_badge(sec: &SectionDef, by_section: &BTreeMap<&'static str, Vec<PageItem>>) -> String {
+    if sec.id == "contribute" {
+        format!("{} GitHub guides", CONTRIBUTOR_GITHUB_GUIDES.len())
+    } else {
+        let count = by_section.get(sec.id).map_or(0, Vec::len);
+        format_page_count(count)
+    }
+}
+
+fn append_section_cards_group(
+    body: &mut String,
+    group_id: &str,
+    group_title: &str,
+    section_ids: &[&str],
+    by_section: &BTreeMap<&'static str, Vec<PageItem>>,
+    extra_terminology_az: Option<usize>,
+) {
+    let _ = writeln!(body, "<section class=\"section-group\" aria-labelledby=\"{group_id}\">");
+    let _ = writeln!(body, "  <h2 id=\"{group_id}\" tabindex=\"-1\">{}</h2>", escape_html(group_title));
+    body.push_str("  <div class=\"section-grid\">\n");
+    for &sec_id in section_ids {
+        let Some(sec) = section_by_id(sec_id) else {
+            continue;
+        };
+        let href = section_target_href(sec, by_section);
+        let badge = section_badge(sec, by_section);
+        let _ = writeln!(body, "    <section class=\"section-card\">");
+        let _ = writeln!(body, "      <h3><a href=\"{}\">{}</a></h3>", escape_html(&href), escape_html(sec.title));
+        let _ = writeln!(body, "      <p>{}</p>", escape_html(sec.summary));
+        let _ = writeln!(body, "      <p><span class=\"badge\">{badge}</span></p>");
+        let _ = writeln!(body, "    </section>");
+    }
+    if let Some(az_count) = extra_terminology_az {
+        body.push_str("    <section class=\"section-card\">\n");
+        body.push_str("      <h3><a href=\"az-index.html\">A–Z Reference Index</a></h3>\n");
+        body.push_str("      <p>Alphabetical symbol directory covering every analysis kind, fit equation, graph type, table type, command, MCP tool, CLI flag, format, and setting key.</p>\n");
+        let _ = writeln!(body, "      <p><span class=\"badge\">{az_count} entries</span></p>");
+        body.push_str("    </section>\n");
+    }
+    body.push_str("  </div>\n");
+    body.push_str("</section>\n");
+}
+
+fn build_home_page(by_section: &BTreeMap<&'static str, Vec<PageItem>>) -> PageItem {
     let mut body = String::with_capacity(8192);
     body.push_str("<p class=\"lead\">Complete static reference manual for CurveBook scientific tables, statistical methods, nonlinear regression, publication graphics, MCP/CLI automation, and contributor guides on GitHub.</p>\n");
     for &(group_id, group_title, section_ids) in HOME_SECTION_GROUPS {
-        let _ = writeln!(body, "<section class=\"section-group\" aria-labelledby=\"{group_id}\">");
-        let _ = writeln!(body, "  <h2 id=\"{group_id}\" tabindex=\"-1\">{}</h2>", escape_html(group_title));
-        body.push_str("  <div class=\"section-grid\">\n");
-        for &sec_id in section_ids {
-            let Some(sec) = section_by_id(sec_id) else {
-                continue;
-            };
-            let badge = if sec.id == "contribute" {
-                format!("{} GitHub guides", CONTRIBUTOR_GITHUB_GUIDES.len())
-            } else {
-                let count = pages.iter().filter(|p| p.section_id == sec.id).count();
-                format!("{count} pages")
-            };
-            let _ = writeln!(body, "    <section class=\"section-card\">");
-            let _ = writeln!(body, "      <h3><a href=\"{}\">{}</a></h3>", escape_html(sec.index_rel_path), escape_html(sec.title));
-            let _ = writeln!(body, "      <p>{}</p>", escape_html(sec.summary));
-            let _ = writeln!(body, "      <p><span class=\"badge\">{badge}</span></p>");
-            let _ = writeln!(body, "    </section>");
-        }
-        body.push_str("  </div>\n");
-        body.push_str("</section>\n");
+        append_section_cards_group(&mut body, group_id, group_title, section_ids, by_section, None);
     }
 
     PageItem {
@@ -808,8 +937,61 @@ fn build_home_page(pages: &[PageItem]) -> PageItem {
         description: String::from(
             "Section map and typed reference manual for CurveBook statistical analyses, curve fitting, graphics, MCP, and CLI automation.",
         ),
-        section_id: "get-started",
+        section_id: None,
+        nav_group: None,
+        is_hub: true,
         source: PageSource::PreRendered { h1: String::from("CurveBook Reference Manual"), toc: Vec::new(), body_html: body },
+    }
+}
+
+fn build_reference_page(by_section: &BTreeMap<&'static str, Vec<PageItem>>, az_count: usize) -> PageItem {
+    let mut body = String::with_capacity(6144);
+    body.push_str("<p class=\"lead\">Scientific and workspace reference across core concepts, data tables, statistical analyses, curve fitting, graphs, calculators, files, settings, and terminology.</p>\n");
+    for &(group_id, group_title, section_ids) in REFERENCE_SECTION_GROUPS {
+        let extra = (group_id == "group-terminology").then_some(az_count);
+        append_section_cards_group(&mut body, group_id, group_title, section_ids, by_section, extra);
+    }
+
+    PageItem {
+        rel_path: String::from("reference.html"),
+        title: String::from("Reference"),
+        description: String::from(
+            "Grouped reference directory for CurveBook concepts, data tables, statistical analyses, curve fitting, graphs, calculators, files, settings, and glossary.",
+        ),
+        section_id: None,
+        nav_group: Some(NavGroup::Reference),
+        is_hub: true,
+        source: PageSource::PreRendered { h1: String::from("Reference"), toc: Vec::new(), body_html: body },
+    }
+}
+
+fn build_support_page(by_section: &BTreeMap<&'static str, Vec<PageItem>>) -> PageItem {
+    let mut body = String::with_capacity(3072);
+    body.push_str("<p class=\"lead\">Diagnostic guides, offline privacy and licensing commitments, security reporting, and contributor resources on GitHub.</p>\n");
+    body.push_str("<div class=\"section-grid\">\n");
+    for sec_id in ["troubleshooting", "privacy-security", "contribute"] {
+        if let Some(sec) = section_by_id(sec_id) {
+            let href = section_target_href(sec, by_section);
+            let badge = section_badge(sec, by_section);
+            let _ = writeln!(body, "  <section class=\"section-card\">");
+            let _ = writeln!(body, "    <h2><a href=\"{}\">{}</a></h2>", escape_html(&href), escape_html(sec.title));
+            let _ = writeln!(body, "    <p>{}</p>", escape_html(sec.summary));
+            let _ = writeln!(body, "    <p><span class=\"badge\">{badge}</span></p>");
+            let _ = writeln!(body, "  </section>");
+        }
+    }
+    body.push_str("</div>\n");
+
+    PageItem {
+        rel_path: String::from("support.html"),
+        title: String::from("Support"),
+        description: String::from(
+            "Troubleshooting, known issues, offline privacy guarantees, dual licensing, security reporting, and contributor guides.",
+        ),
+        section_id: None,
+        nav_group: Some(NavGroup::Support),
+        is_hub: true,
+        source: PageSource::PreRendered { h1: String::from("Support"), toc: Vec::new(), body_html: body },
     }
 }
 
@@ -858,12 +1040,14 @@ fn build_section_index_page(sec: &SectionDef, children: &[&PageItem]) -> PageIte
         rel_path: sec.index_rel_path.to_owned(),
         title: sec.title.to_owned(),
         description: sec.summary.to_owned(),
-        section_id: sec.id,
+        section_id: Some(sec.id),
+        nav_group: Some(sec.nav_group),
+        is_hub: true,
         source: PageSource::PreRendered { h1: sec.title.to_owned(), toc: Vec::new(), body_html: body },
     }
 }
 
-fn build_az_index_page(entries: &[AzEntry]) -> PageItem {
+fn sort_and_dedup_az(entries: &[AzEntry]) -> Vec<AzEntry> {
     let mut sorted = entries.to_vec();
     sorted.sort_by(|a, b| {
         a.term
@@ -874,6 +1058,15 @@ fn build_az_index_page(entries: &[AzEntry]) -> PageItem {
             .then_with(|| a.rel_href.cmp(&b.rel_href))
     });
     sorted.dedup();
+    sorted
+}
+
+fn count_unique_az_entries(entries: &[AzEntry]) -> usize {
+    sort_and_dedup_az(entries).len()
+}
+
+fn build_az_index_page(entries: &[AzEntry]) -> PageItem {
+    let sorted = sort_and_dedup_az(entries);
 
     let mut grouped: BTreeMap<char, Vec<&AzEntry>> = BTreeMap::new();
     for entry in &sorted {
@@ -889,7 +1082,6 @@ fn build_az_index_page(entries: &[AzEntry]) -> PageItem {
         sorted.len(),
     );
 
-    let mut toc = Vec::new();
     body.push_str("<ul class=\"az-letters\" aria-label=\"Alphabetical jump links\">\n");
     for letter in 'A'..='Z' {
         if grouped.contains_key(&letter) {
@@ -906,7 +1098,6 @@ fn build_az_index_page(entries: &[AzEntry]) -> PageItem {
     for (bucket, items) in grouped {
         let (id, heading) =
             if bucket == '#' { (String::from("letter-other"), String::from("#")) } else { (format!("letter-{bucket}"), bucket.to_string()) };
-        toc.push(TocHeading { level: 2, id: id.clone(), text: heading.clone() });
         let _ = writeln!(body, "<h2 id=\"{id}\" tabindex=\"-1\">{heading}</h2>\n<ul>");
         for item in items {
             let _ = writeln!(
@@ -926,8 +1117,10 @@ fn build_az_index_page(entries: &[AzEntry]) -> PageItem {
         description: String::from(
             "Alphabetical index of CurveBook analyses, equations, graph kinds, tables, commands, MCP tools, CLI flags, formats, and preferences.",
         ),
-        section_id: "glossary",
-        source: PageSource::PreRendered { h1: String::from("A–Z Reference Index"), toc, body_html: body },
+        section_id: None,
+        nav_group: None,
+        is_hub: false,
+        source: PageSource::PreRendered { h1: String::from("A–Z Reference Index"), toc: Vec::new(), body_html: body },
     }
 }
 
@@ -943,7 +1136,13 @@ mod tests {
         assert_eq!(normalize_repo_rel(Path::new("docs/reference"), "../../README.md").as_deref(), Some("README.md"));
         assert_eq!(normalize_repo_rel(Path::new("docs/reference"), "../../../../../../README.md"), None);
 
-        let meta = SiteMeta { version_label: String::from("v0.1.0"), commit_sha: None, release_date: None, is_release_snapshot: false };
+        let meta = SiteMeta {
+            version_label: String::from("v0.1.0"),
+            commit_sha: None,
+            release_date: None,
+            is_release_snapshot: false,
+            is_tagged_release: false,
+        };
         let known = BTreeMap::new();
         let resolver = RepoLinkResolver {
             source_repo_rel: "docs/reference/get-started.md",
@@ -975,5 +1174,20 @@ mod tests {
         };
         assert!(body_html.contains("<strong>2</strong> documented entries"), "{body_html}");
         assert_eq!(body_html.matches("href=\"a.html\"").count(), 1);
+        let PageSource::PreRendered { toc, .. } = build_az_index_page(&entries).source else {
+            panic!("expected PreRendered");
+        };
+        assert!(toc.is_empty(), "A-Z index must suppress duplicate vertical TOC");
+    }
+
+    #[test]
+    fn r12_14_and_r12_13_pluralization_nav_groups_and_direct_single_page_links() {
+        assert_eq!(super::format_page_count(1), "1 page");
+        assert_eq!(super::format_page_count(2), "2 pages");
+
+        for sec in super::BETA_SECTIONS {
+            assert!(!sec.nav_group.label().is_empty());
+            assert!(!sec.nav_group.nav_target().is_empty());
+        }
     }
 }

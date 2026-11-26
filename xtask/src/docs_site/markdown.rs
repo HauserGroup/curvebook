@@ -22,6 +22,81 @@ pub struct RenderedMarkdown {
     pub html: String,
 }
 
+#[cfg(test)]
+impl RenderedMarkdown {
+    /// Extract the first top-level `<h1>...</h1>` block while preserving any introductory blocks
+    /// before it and the remaining body after it.
+    #[must_use]
+    pub fn split_leading_h1(&self) -> (&str, Option<&str>, &str) {
+        extract_leading_h1(&self.html)
+    }
+}
+
+/// Extract the first top-level `<h1>...</h1>` block from rendered Markdown HTML, returning
+/// `(pre_h1_html, Some(h1_html), post_h1_html)` while preserving inline HTML (e.g., `<code>`),
+/// generated or explicit `{#id}` attributes, and any introductory blocks preceding the heading.
+#[must_use]
+pub fn extract_leading_h1(html: &str) -> (&str, Option<&str>, &str) {
+    let mut offset = 0usize;
+    let mut block_depth = 0usize;
+    let mut h1_start: Option<usize> = None;
+
+    while let Some(rest) = html.get(offset..) {
+        let Some(rel_lt) = rest.find('<') else {
+            break;
+        };
+        let tag_abs = offset + rel_lt;
+        let Some(after_lt) = html.get(tag_abs + 1..) else {
+            break;
+        };
+        if !crate::pages_site::is_html_tag_start(after_lt) {
+            offset = tag_abs + 1;
+            continue;
+        }
+        if let Some(after_comment) = after_lt.strip_prefix("!--") {
+            let Some(close_end) = crate::pages_site::find_html_comment_end(after_comment) else {
+                break;
+            };
+            offset = tag_abs + 4 + close_end;
+            continue;
+        }
+        let Some(tag_end_rel) = crate::pages_site::find_html_tag_close(after_lt) else {
+            break;
+        };
+        let Some(tag_body) = after_lt.get(..tag_end_rel) else {
+            break;
+        };
+        let after_tag_abs = tag_abs + 1 + tag_end_rel + 1;
+        let trimmed = tag_body.trim();
+        let is_closing = trimmed.starts_with('/');
+        let tag_lower = crate::pages_site::extract_html_tag_name(trimmed).to_ascii_lowercase();
+
+        if let Some(start) = h1_start {
+            if is_closing && tag_lower == "h1" {
+                let end = if html.get(after_tag_abs..).is_some_and(|s| s.starts_with('\n')) { after_tag_abs + 1 } else { after_tag_abs };
+                return (html.get(..start).unwrap_or(""), Some(html.get(start..end).unwrap_or("")), html.get(end..).unwrap_or(""));
+            }
+            offset = after_tag_abs;
+            continue;
+        }
+
+        let is_container = matches!(tag_lower.as_str(), "blockquote" | "div" | "pre" | "code" | "ul" | "ol" | "table");
+        if is_closing {
+            if is_container {
+                block_depth = block_depth.saturating_sub(1);
+            }
+        } else if !trimmed.ends_with('/') {
+            if is_container {
+                block_depth += 1;
+            } else if tag_lower == "h1" && block_depth == 0 {
+                h1_start = Some(tag_abs);
+            }
+        }
+        offset = after_tag_abs;
+    }
+    ("", None, html)
+}
+
 /// Rewrites relative `.md` links and asset paths into site URLs during rendering.
 pub trait LinkResolver {
     fn resolve_href(&self, raw_href: &str) -> String;
@@ -222,7 +297,7 @@ impl<'a> HtmlRenderer<'a> {
     fn flush_heading(&mut self, level: HeadingLevel, explicit_id: Option<&str>, events: Vec<Event<'_>>) {
         let plain = events_to_plain_text(&events, self.sentinel_open, self.math_slots);
         let lvl = heading_level_u8(level);
-        if lvl == 1 && self.title.is_none() {
+        if lvl == 1 && self.title.is_none() && self.blockquote_ends.is_empty() {
             self.title = Some(plain.clone());
         }
         let base_slug = match explicit_id {
@@ -996,6 +1071,8 @@ fn render_tex_math_inner(tex: &str, depth: usize, out: &mut String) {
         push_html_escaped(tex, out);
         return;
     }
+    let tex = tex.trim();
+    let start_len = out.len();
     let mut i = 0usize;
     while let Some(rest) = tex.get(i..) {
         let Some(ch) = rest.chars().next() else {
@@ -1007,7 +1084,7 @@ fn render_tex_math_inner(tex: &str, depth: usize, out: &mut String) {
             {
                 i += nc.len_utf8();
             }
-            if !out.ends_with(' ') && !out.is_empty() && !out.ends_with('>') {
+            if out.len() > start_len && !out.ends_with(' ') {
                 out.push(' ');
             }
             continue;
@@ -1718,5 +1795,48 @@ mod tests {
         let rendered_c = render_markdown(md_c, &IdentityResolver);
         let ids_c: Vec<&str> = rendered_c.headings.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids_c, vec!["main-1", "page-title-1"]);
+    }
+
+    #[test]
+    fn r12_14_extract_leading_h1_math_operator_spacing_and_escaped_table_pipe_code() {
+        // 1. H1 with inline <code> and explicit {#custom-id}
+        let rendered_a = render_markdown("# CLI Reference (`curvebook-cli`) {#custom-cli-id}\n\n## Usage\n\nRun it.\n", &IdentityResolver);
+        let (pre_a, h1_a, post_a) = rendered_a.split_leading_h1();
+        assert_eq!(pre_a, "");
+        assert_eq!(h1_a, Some("<h1 id=\"custom-cli-id\" tabindex=\"-1\">CLI Reference (<code>curvebook-cli</code>)</h1>\n"));
+        assert!(post_a.starts_with("<h2 id=\"usage\""));
+
+        // 2. Markdown with introductory paragraph before first H1 preserves pre-H1 content.
+        let rendered_b = render_markdown("Introductory paragraph.\n\n# Guide Title\n\n## Details\n\nBody.\n", &IdentityResolver);
+        let (pre_b, h1_b, post_b) = rendered_b.split_leading_h1();
+        assert_eq!(pre_b, "<p>Introductory paragraph.</p>\n");
+        assert_eq!(h1_b, Some("<h1 id=\"guide-title\" tabindex=\"-1\">Guide Title</h1>\n"));
+        assert!(post_b.starts_with("<h2 id=\"details\""));
+
+        // 3. Golden H1 IDs remain unchanged.
+        assert_eq!(render_markdown("# Get started & installation\n", &IdentityResolver).headings[0].id, "get-started--installation");
+        assert_eq!(render_markdown("# CLI Reference (`curvebook-cli`)\n", &IdentityResolver).headings[0].id, "cli-reference-curvebook-cli");
+
+        // 4. Escaped `\|\|` inside code spans in GFM tables renders intact with no split cell or dangling backtick.
+        let table_md = "| Precedence | Operators | Semantics |\n|---|---|---|\n| Disjunction | `\\|\\|`, `OR` | Strong Kleene 3-valued OR |\n";
+        let table_html = render_markdown(table_md, &IdentityResolver).html;
+        assert!(table_html.contains("<td><code>||</code>, <code>OR</code></td>"), "broken table row: {table_html}");
+        assert!(!table_html.contains('`'), "dangling backtick in table: {table_html}");
+
+        // 5. TeX math preserves left-side spacing before binary operators after tags (</span>, </sup>, </sub>).
+        let eq_math = render_math_html(
+            "Y = \\text{Bottom} + \\frac{\\text{Top} - \\text{Bottom}}{1 + 10^{(\\log\\text{EC}_{50} - X) \\cdot \\text{HillSlope}}}",
+        );
+        assert!(eq_math.contains("<span class=\"math-text\">Bottom</span> + <span class=\"math-frac\">"), "{eq_math}");
+        assert!(eq_math.contains("<span class=\"math-text\">Top</span> - <span class=\"math-text\">Bottom</span>"), "{eq_math}");
+        assert!(eq_math.contains("<sub>50</sub> - X) · <span class=\"math-text\">HillSlope</span>"), "{eq_math}");
+
+        let r2_math = render_math_html("R^2 = 1 - \\text{rss} / \\text{TSS}");
+        assert!(r2_math.contains("R<sup>2</sup> = 1 - <span class=\"math-text\">rss</span>"), "{r2_math}");
+
+        let rel_math = render_math_html("p_0 \\in (0, 1),\\; y_i \\ge 0,\\; G^2 \\le \\chi^2");
+        assert!(rel_math.contains("p<sub>0</sub> ∈ (0, 1)"), "{rel_math}");
+        assert!(rel_math.contains("y<sub>i</sub> ≥ 0"), "{rel_math}");
+        assert!(rel_math.contains("G<sup>2</sup> ≤ χ<sup>2</sup>"), "{rel_math}");
     }
 }

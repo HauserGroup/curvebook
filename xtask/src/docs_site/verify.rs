@@ -28,8 +28,13 @@ struct PageFacts {
     has_h1: bool,
 }
 
+/// Hand-written guide paths temporarily exempted from the `R*.*` / `QOL-*` readability lint gate.
+/// Kept empty by default so all existing and future user guides under `MANUAL_GUIDES` are enforced.
+pub const READABILITY_LINT_EXEMPTIONS: &[&str] = &[];
+
 /// Verify generated preview pages, optional generated manual pages, snapshot manifests in
-/// `manual_dir`, committed root pages, search metadata, Pages publish set, and hygiene scanners.
+/// `manual_dir`, committed root pages, search metadata, Pages publish set, readability lint,
+/// and hygiene scanners.
 pub fn verify_site(
     root: &Path,
     preview_out_dir: &Path,
@@ -42,6 +47,7 @@ pub fn verify_site(
     if let Some(site) = manual_site {
         verify_generated_pages(root, &manual_dir.join("latest"), site)?;
     }
+    check_guide_readability(root)?;
     verify_workspace_and_manual(root, manual_dir)
 }
 
@@ -49,6 +55,7 @@ pub fn verify_site(
 /// workspace and manual tree.
 pub fn verify_manual_snapshot_build(root: &Path, manual_dir: &Path, snapshot_sub: &str, manual_site: &GeneratedSite) -> Result<(), String> {
     verify_generated_pages(root, &manual_dir.join(snapshot_sub), manual_site)?;
+    check_guide_readability(root)?;
     verify_workspace_and_manual(root, manual_dir)
 }
 
@@ -922,7 +929,10 @@ fn verify_docs_relative_target(
             }
             return Ok(());
         }
-        check_cached_html_fragment(&target_path, &resolved, &format!("docs/{resolved}"), frag, extra_html_ids, || {
+        // Manual pages are only scanned for anchor ids here; a `docs/` label would wrongly apply
+        // hand-written root-page rules (such as explicit `<img>` dimensions) to generated pages.
+        let scan_label = if resolved.starts_with("manual/") { resolved.clone() } else { format!("docs/{resolved}") };
+        check_cached_html_fragment(&target_path, &resolved, &scan_label, frag, extra_html_ids, || {
             format!("docs/{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `{resolved}`)")
         })?;
     }
@@ -982,6 +992,230 @@ fn run_hygiene_scanners(root: &Path, out_dir: &Path, is_manual_build_dir: bool) 
     Ok(())
 }
 
+/// Enforce that hand-written user guides (`MANUAL_GUIDES`) contain zero roadmap IDs (`\bR\d+\.\d+\b`)
+/// and zero internal QoL IDs (`\bQOL-\d+\b`), and emit an info-only readability report per guide.
+pub fn check_guide_readability(root: &Path) -> Result<(), String> {
+    let mut violations = Vec::new();
+    for guide in super::sitemap::MANUAL_GUIDES {
+        let full_path = root.join(guide.repo_path);
+        if !is_regular_file(&full_path) {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&full_path).map_err(|e| format!("read {}: {e}", guide.repo_path))?;
+        let exempt = READABILITY_LINT_EXEMPTIONS.contains(&guide.repo_path);
+        if !exempt {
+            for (idx, line) in raw.lines().enumerate() {
+                if let Some(tok) = find_forbidden_guide_id(line) {
+                    violations.push(format!("{}:{}: forbidden internal ID `{tok}` in user guide", guide.repo_path, idx + 1));
+                }
+            }
+        }
+        let stats = compute_guide_readability_stats(&raw);
+        println!(
+            "docs-site readability: {}: avg_sentence={:.1} words, code_per_100w={:.1}, rs_refs={}",
+            guide.repo_path, stats.avg_sentence_words, stats.code_per_100_words, stats.rs_filename_count
+        );
+    }
+    if let Some(first) = violations.first() {
+        return Err(format!(
+            "user-guide readability lint found {} internal ID violation(s) (first: {first}); remove roadmap/QOL IDs from docs/",
+            violations.len()
+        ));
+    }
+    Ok(())
+}
+
+fn is_word_boundary_byte(b: Option<u8>) -> bool {
+    !matches!(b, Some(b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'_'))
+}
+
+fn find_forbidden_guide_id(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let prev = i.checked_sub(1).and_then(|p| bytes.get(p).copied());
+        if is_word_boundary_byte(prev) {
+            if bytes[i] == b'R'
+                && let Some(end) = match_roadmap_id_end(bytes, i)
+                && is_word_boundary_byte(bytes.get(end).copied())
+            {
+                return line.get(i..end);
+            }
+            if line.get(i..).is_some_and(|s| s.starts_with("QOL-"))
+                && let Some(end) = match_qol_id_end(bytes, i)
+                && is_word_boundary_byte(bytes.get(end).copied())
+            {
+                return line.get(i..end);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn match_roadmap_id_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut j = start + 1;
+    let d1 = bytes.get(j..)?.iter().take_while(|b| b.is_ascii_digit()).count();
+    if d1 == 0 {
+        return None;
+    }
+    j += d1;
+    if bytes.get(j) != Some(&b'.') {
+        return None;
+    }
+    j += 1;
+    let d2 = bytes.get(j..)?.iter().take_while(|b| b.is_ascii_digit()).count();
+    (d2 > 0).then_some(j + d2)
+}
+
+fn match_qol_id_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let j = start + 4;
+    let digits = bytes.get(j..)?.iter().take_while(|b| b.is_ascii_digit()).count();
+    (digits > 0).then_some(j + digits)
+}
+
+struct GuideReadabilityStats {
+    avg_sentence_words: f64,
+    code_per_100_words: f64,
+    rs_filename_count: usize,
+}
+
+fn parse_fence_marker(trimmed: &str) -> Option<(u8, usize)> {
+    let first = trimmed.bytes().next().filter(|&b| b == b'`' || b == b'~')?;
+    let count = trimmed.bytes().take_while(|&b| b == first).count();
+    (count >= 3).then_some((first, count))
+}
+
+fn compute_guide_readability_stats(raw: &str) -> GuideReadabilityStats {
+    let mut fence: Option<(u8, usize)> = None;
+    let mut prose_words = 0usize;
+    let mut prose_sentences = 0usize;
+    let mut code_spans = 0usize;
+    let mut rs_filename_count = 0usize;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if let Some((ch, min_len)) = fence {
+            let count = trimmed.bytes().take_while(|&b| b == ch).count();
+            if count >= min_len && trimmed.get(count..).is_some_and(|r| r.trim().is_empty()) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(open) = parse_fence_marker(trimmed) {
+            fence = Some(open);
+            continue;
+        }
+        rs_filename_count += count_rs_filenames(line);
+        code_spans += count_inline_code_spans(line);
+
+        if is_non_prose_markdown_line(trimmed) {
+            continue;
+        }
+        let cleaned = trimmed.trim_start_matches('>').trim();
+        let line_words = cleaned.split_whitespace().count();
+        if line_words == 0 {
+            continue;
+        }
+        prose_words += line_words;
+        prose_sentences += count_sentence_endings(cleaned);
+    }
+    let effective_sentences = prose_sentences.max(usize::from(prose_words > 0));
+    let avg_sentence_words = if effective_sentences == 0 { 0.0 } else { prose_words as f64 / effective_sentences as f64 };
+    let code_per_100_words = if prose_words == 0 { 0.0 } else { (code_spans as f64) * 100.0 / (prose_words as f64) };
+    GuideReadabilityStats { avg_sentence_words, code_per_100_words, rs_filename_count }
+}
+
+fn is_non_prose_markdown_line(trimmed: &str) -> bool {
+    trimmed.is_empty()
+        || trimmed.starts_with('|')
+        || trimmed.starts_with('#')
+        || trimmed == "---"
+        || trimmed == "***"
+        || trimmed == "___"
+        || trimmed == "$$"
+        || (trimmed.starts_with("<!--") && trimmed.ends_with("-->"))
+        || trimmed.starts_with("![")
+        || trimmed.starts_with("> [!")
+}
+
+fn count_inline_code_spans(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let ticks = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+            let mut j = i + ticks;
+            let mut closed = false;
+            while j < bytes.len() {
+                if bytes[j] == b'`' {
+                    let run = bytes[j..].iter().take_while(|&&b| b == b'`').count();
+                    j += run;
+                    if run == ticks {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            if closed {
+                count += 1;
+                i = j;
+                continue;
+            }
+            i += ticks;
+        } else {
+            i += 1;
+        }
+    }
+    count
+}
+
+fn count_rs_filenames(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    let mut count = 0usize;
+    let mut pos = 0usize;
+    while let Some(rest) = line.get(pos..) {
+        let Some(rel) = rest.find(".rs") else {
+            break;
+        };
+        let dot_abs = pos + rel;
+        let end_abs = dot_abs + 3;
+        let before_ok = dot_abs > 0 && matches!(bytes.get(dot_abs - 1), Some(b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'_'));
+        let after_ok = is_word_boundary_byte(bytes.get(end_abs).copied());
+        if before_ok && after_ok {
+            count += 1;
+        }
+        pos = end_abs;
+    }
+    count
+}
+
+fn count_sentence_endings(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    let mut count = 0usize;
+    let mut in_code = false;
+    for (idx, &b) in bytes.iter().enumerate() {
+        if b == b'`' {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code || !matches!(b, b'.' | b'!' | b'?') {
+            continue;
+        }
+        if b == b'.' && bytes.get(idx + 1).is_some_and(u8::is_ascii_digit) {
+            continue;
+        }
+        let next = bytes.get(idx + 1).copied();
+        if next.is_none() || matches!(next, Some(b' ' | b'\t' | b')' | b']' | b'"' | b'\'' | b'*')) {
+            count += 1;
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::markdown::{IdentityResolver, TocHeading, render_markdown, render_math_html};
@@ -995,6 +1229,7 @@ mod tests {
             commit_sha: Some(String::from("0123456789abcdef0123456789abcdef01234567")),
             release_date: Some(String::from("2026-11-18")),
             is_release_snapshot: false,
+            is_tagged_release: false,
         }
     }
 
@@ -1006,6 +1241,9 @@ mod tests {
             rel_path,
             section_title: "Concepts",
             section_rel_path: None,
+            nav_group: Some(super::super::sitemap::NavGroup::Reference),
+            active_section_id: Some("concepts"),
+            sidebar_groups: &[],
             h1: title,
             toc_headings: &[],
             body_html,
@@ -1163,6 +1401,9 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
             rel_path: "analyses.html",
             section_title: "Analyses",
             section_rel_path: Some("section-analyses.html"),
+            nav_group: Some(super::super::sitemap::NavGroup::Reference),
+            active_section_id: Some("analyses"),
+            sidebar_groups: &[],
             h1: "Long",
             toc_headings: &long_headings,
             body_html: "<p>Body.</p>",
@@ -1171,8 +1412,8 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
             next: None,
             meta: &meta,
         });
-        assert!(long_page.contains("<details open class=\"toc\">\n          <summary class=\"toc-title\">On this page</summary>"));
-        assert!(long_page.contains("href=\"section-analyses.html\" aria-current=\"page\">Reference</a>"));
+        assert!(long_page.contains("<details class=\"toc\">\n          <summary class=\"toc-title\">On this page</summary>"));
+        assert!(long_page.contains("href=\"reference.html\" aria-current=\"page\">Reference</a>"));
         assert!(audit_single_html("analyses.html", &long_page).is_ok());
 
         assert!(
@@ -1266,6 +1507,9 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
             rel_path: "dup.html",
             section_title: "Concepts",
             section_rel_path: None,
+            nav_group: Some(super::super::sitemap::NavGroup::Reference),
+            active_section_id: Some("concepts"),
+            sidebar_groups: &[],
             h1: "Dup",
             toc_headings: &[],
             body_html: &rendered_dup.html,
@@ -1372,6 +1616,9 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
             rel_path: "analyses.html",
             section_title: "Analyses",
             section_rel_path: Some("section-analyses.html"),
+            nav_group: Some(super::super::sitemap::NavGroup::Reference),
+            active_section_id: Some("analyses"),
+            sidebar_groups: &[],
             h1: "Analyses",
             toc_headings: &[],
             body_html: "<p>Body.</p>",
@@ -1412,9 +1659,9 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
                 .replace("src=\"images/curvebook.png\"", "src=\"../../images/curvebook.png\"")
                 .replace("href=\"index.html\"", "href=\"../../index.html\"")
                 .replace("href=\"section-get-started.html\"", "href=\"index.html\"")
-                .replace("href=\"section-analyses.html\"", "href=\"index.html\"")
+                .replace("href=\"reference.html\"", "href=\"index.html\"")
                 .replace("href=\"section-automation.html\"", "href=\"index.html\"")
-                .replace("href=\"registry/commands.html\"", "href=\"index.html\"")
+                .replace("href=\"support.html\"", "href=\"index.html\"")
                 .replace("href=\"az-index.html\"", "href=\"index.html\"")
                 .replace("href=\"section-contribute.html\"", "href=\"index.html\"")
                 .replace("href=\"privacy-security.html\"", "href=\"../../privacy.html\""),
@@ -1536,5 +1783,29 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         };
         assert!(verify_target(dir.path(), dir.path(), &site, &facts, "index.html", "/privacy.html").unwrap_err().contains("root-absolute"));
         assert!(verify_target(dir.path(), dir.path(), &site, &facts, "index.html", "#").is_ok());
+    }
+
+    #[test]
+    fn r12_12_readability_lint_catches_internal_ids_and_reports_metrics() {
+        assert!(READABILITY_LINT_EXEMPTIONS.is_empty(), "all user guides must be enforced by default");
+        assert_eq!(find_forbidden_guide_id("Implemented in R12.11 and QOL-7."), Some("R12.11"));
+        assert_eq!(find_forbidden_guide_id("Diagnostic QOL-7 note."), Some("QOL-7"));
+        assert_eq!(find_forbidden_guide_id("Fitted $R^2$ with R 4.5.2 and `v0.1.0`."), None);
+
+        let dir = TestDir::new("docs-readability-lint");
+        dir.write("docs/reference/get-started.md", "# Get Started\n\nInstall `curvebook`. Run `curvebook-cli --version`.\n");
+        assert!(check_guide_readability(dir.path()).is_ok());
+
+        dir.write("docs/reference/get-started.md", "# Get Started\n\nAdded in R12.11.\n");
+        assert!(check_guide_readability(dir.path()).unwrap_err().contains("R12.11"));
+
+        dir.write("docs/reference/get-started.md", "# Get Started\n\nUses QOL-7 checklist.\n");
+        assert!(check_guide_readability(dir.path()).unwrap_err().contains("QOL-7"));
+
+        let stats = compute_guide_readability_stats(
+            "# Heading\n\nShort sentence with `foo` and `bar.rs`. Second sentence!\n\n```rust\nfn x() {} // ignored.rs\n```\n\n| Col |\n|---|\n| `baz.rs` |\n",
+        );
+        assert_eq!(stats.rs_filename_count, 2, "must count non-fence .rs filenames (`bar.rs`, `baz.rs`) while ignoring fenced `ignored.rs`");
+        assert!(stats.avg_sentence_words > 0.0 && stats.code_per_100_words > 0.0);
     }
 }

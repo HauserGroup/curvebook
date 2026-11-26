@@ -1,56 +1,56 @@
-# Using CurveBook with Your AI Assistant
+# Using CurveBook with your AI assistant
 
-CurveBook includes both a full **[desktop app](reference/desktop-gui.md)** (`CurveBook`) and a built-in **MCP (Model Context Protocol)** server (`curvebook-cli mcp`) so you can drive analyses from a local AI assistant in plain English and inspect or refine the same `.curvebook` project in the desktop GUI.
+CurveBook includes both a [desktop app](reference/desktop-gui.md) and a built-in **MCP (Model Context Protocol)** server (`curvebook-cli mcp`). You can run analyses from a local AI assistant in plain English, then open and refine the same `.curvebook` project in the desktop app.
 
-Every Beta installer bundles both `curvebook` (desktop app) and `curvebook-cli` (CLI & MCP server) inside the same package, and everything runs locally on your computer with zero telemetry or cloud uploads.
+Every Beta installer includes both `curvebook` and `curvebook-cli`. Everything runs locally on your computer with zero telemetry and no cloud uploads.
 
-> **Using CurveBook directly without AI?** Follow [Get Started](reference/get-started.md) to install the desktop app and browse the [Desktop App Guide](reference/desktop-gui.md).
-
----
-
-## What You Need
-
-1. **CurveBook installed** from the [Releases page](https://github.com/HauserGroup/curvebook/releases) (follow [Get Started](reference/get-started.md) to install and verify your download).
-2. **An AI desktop app that supports MCP**, such as Claude Desktop, Cursor, Windsurf, or any other local MCP client.
-3. **A folder for your data** — for example `Documents/MyResearchData` — where you keep your CSV/data files and `.curvebook` projects.
+> **Using CurveBook without AI?** Follow [Get started](reference/get-started.md) to install the desktop app and read the [Desktop GUI overview](reference/desktop-gui.md).
 
 ---
 
-## Step 1: Locate `curvebook-cli` on Your Computer
+## What you need
 
-Each CurveBook installer places `curvebook-cli` alongside the desktop application:
+1. **CurveBook installed** from the [Releases page](https://github.com/HauserGroup/curvebook/releases). Follow [Get started](reference/get-started.md) to install and verify your download.
+2. **An AI desktop app that supports MCP**, such as Claude Desktop, Cursor, Windsurf, or another local MCP client.
+3. **A folder for your data**, such as `Documents/MyResearchData`, where you keep your CSV files and `.curvebook` projects.
 
-- **macOS:** Drag `CurveBook.app` from the `.dmg` into `/Applications`. The bundled CLI binary is at:
+---
+
+## Step 1: Locate `curvebook-cli` on your computer
+
+Each installer places `curvebook-cli` alongside the desktop app:
+
+- **macOS:** Drag **CurveBook.app** from the `.dmg` into **Applications**. Find the CLI binary at:
   ```text
   /Applications/CurveBook.app/Contents/MacOS/curvebook-cli
   ```
-- **Windows:** Run the `.msi` installer (Per-User default). The bundled CLI binary is at:
+- **Windows:** Run the `.msi` installer (per-user by default). Find the CLI binary at:
   ```text
   %LocalAppData%\Programs\CurveBook\curvebook-cli.exe
   ```
-  *(If you chose a machine-wide install for all users, use `%ProgramFiles%\CurveBook\curvebook-cli.exe`.)*
-- **Linux:** Make the `.AppImage` executable and extract the bundled binaries once so your AI assistant can invoke `curvebook-cli` directly without unpacking the AppImage on every launch:
+  If you installed machine-wide for all users, use `%ProgramFiles%\CurveBook\curvebook-cli.exe`.
+- **Linux:** Make the `.AppImage` executable and extract it once so your AI assistant can invoke `curvebook-cli` directly without unpacking on every call:
   ```sh
   chmod +x curvebook-<version>-linux-x86_64.AppImage
   ./curvebook-<version>-linux-x86_64.AppImage --appimage-extract
   ```
-  *(Use `aarch64` instead of `x86_64` on ARM64 Linux.)* The CLI binary is inside the extracted directory at:
+  Use `aarch64` instead of `x86_64` on ARM64 Linux. The CLI binary lives at:
   ```text
   <path-to-extracted-folder>/squashfs-root/usr/bin/curvebook-cli
   ```
-- **Contributors / source checkouts / FreeBSD:** Build with `cargo build --release -p curvebook-cli` and point your AI client to `target/release/curvebook-cli` inside your checkout (see [docs/mcp.md](mcp.md)).
+- **Source builds and FreeBSD:** Build with `cargo build --release -p curvebook-cli` and point your client to `target/release/curvebook-cli` (see [docs/mcp.md](mcp.md)).
 
 ---
 
-## Step 2: Connect CurveBook to Your AI App (One-Time Setup)
+## Step 2: Connect CurveBook to your AI app (one-time setup)
 
-Open your AI assistant's MCP settings file:
+Open your AI assistant's MCP configuration file:
 
-- **Claude Desktop (macOS):** `~/Library/Application Support/Claude/claude_desktop_config.json` *(or **Settings → Developer → Edit Config**)*
-- **Claude Desktop (Windows):** `%APPDATA%\Claude\claude_desktop_config.json` *(or **Settings → Developer → Edit Config**)*
-- **Other MCP clients (Cursor, Windsurf, Cline, etc.):** Open your client's `mcp.json` or MCP server configuration screen.
+- **Claude Desktop (macOS):** `~/Library/Application Support/Claude/claude_desktop_config.json` (or **Settings › Developer › Edit Config**).
+- **Claude Desktop (Windows):** `%APPDATA%\Claude\claude_desktop_config.json` (or **Settings › Developer › Edit Config**).
+- **Other MCP clients (Cursor, Windsurf, Cline, and others):** Open the client's `mcp.json` or MCP server settings screen.
 
-Add a `"curvebook"` entry matching your OS, replacing `YOURNAME` and the `--workdir` folder path with your real username and project folder.
+Add a `"curvebook"` entry matching your OS. Replace `YOURNAME` and the `--workdir` path with your real username and project folder.
 
 ### macOS
 
@@ -86,7 +86,7 @@ Add a `"curvebook"` entry matching your OS, replacing `YOURNAME` and the `--work
 }
 ```
 
-> **Note:** Use double backslashes (`\\`) inside Windows JSON strings, and write out your real Windows username (`YOURNAME`) instead of `%LocalAppData%` because most JSON configs do not expand environment variables.
+> **Windows tip:** Use double backslashes (`\\`) inside JSON strings. Write your real username instead of `%LocalAppData%`, because most JSON configs do not expand environment variables.
 
 ### Linux
 
@@ -105,15 +105,15 @@ Add a `"curvebook"` entry matching your OS, replacing `YOURNAME` and the `--work
 }
 ```
 
-Save the config file and **fully quit and reopen your AI app** so it detects the new `"curvebook"` server.
+Save the file, then **fully quit and reopen your AI app** so it loads the new `"curvebook"` server.
 
-> **Why `--workdir`?** `--workdir` locks file access strictly to that folder and its subfolders. CurveBook will not read or write files outside it.
+> **Why `--workdir`?** This flag restricts file access to that folder and its subfolders. CurveBook will not read or write files outside it.
 
 ---
 
-## Step 3: Run Your First Analysis in Plain English
+## Step 3: Run your first analysis in plain English
 
-Open a fresh chat in your AI app and paste a request like this:
+Start a new chat in your AI app and paste this prompt:
 
 > Use CurveBook to create a Column table comparing two groups:
 > - Control: 10.2, 9.8, 10.5, 10.0, 10.1
@@ -121,42 +121,42 @@ Open a fresh chat in your AI app and paste a request like this:
 >
 > Run a Welch's t-test, show me the summary statistics and P-value, create a box-and-whisker graph showing individual points, export the graph as `comparison.png` and `comparison.pdf`, and save the project as `first-example.curvebook`.
 
-Your assistant will call CurveBook's tools locally, print the *t*-test summary and *P*-value in chat, and write `comparison.png`, `comparison.pdf`, and `first-example.curvebook` inside your `--workdir` folder.
+Your assistant runs CurveBook's tools locally and prints the *t*-test summary and *P*-value in chat. It also writes `comparison.png`, `comparison.pdf`, and `first-example.curvebook` into your `--workdir` folder.
 
 ---
 
-## Step 4: Open `first-example.curvebook` in the CurveBook Desktop App
+## Step 4: Open `first-example.curvebook` in the CurveBook desktop app
 
-Projects created by an AI assistant use the exact same native `.curvebook` format as the desktop app:
+Projects created through an AI assistant use the same native `.curvebook` format as the desktop app:
 
-1. Launch **CurveBook** (from `/Applications` on macOS, the Start Menu on Windows, or your `.AppImage` on Linux).
-2. Choose **File › Open…** (`Cmd+O` on macOS / `Ctrl+O` on Windows & Linux) — or drag `first-example.curvebook` from your `--workdir` folder onto the CurveBook window — and open `first-example.curvebook`.
-3. Explore the reactive **Project Navigator** and **Family** tree on the left: click the **Data** table to inspect values, click the **ResultSheet** to review diagnostics and parameter details, or click the **Graph** to customize axes, error bars, themes, and multi-panel layouts interactively.
+1. Open **CurveBook** from **Applications** on macOS, the Start Menu on Windows, or your `.AppImage` on Linux.
+2. Choose **File › Open…** (`Cmd/Ctrl+O`) or drag `first-example.curvebook` from your `--workdir` folder onto the CurveBook window.
+3. Use the **Project Navigator** and **Family** tree on the left to inspect your work. Click the **Data** table to view values, the **Results** sheet to check diagnostics, or the **Graph** to refine axes, error bars, themes, and page layouts.
 
-You can also hand files back the other way: save edits in the desktop app, then ask your AI assistant to open the updated `.curvebook` file and run follow-up fits or batch exports.
+The workflow works in reverse, too. Save edits in the desktop app, then ask your AI assistant to open the updated `.curvebook` file for follow-up fits or batch exports.
 
 ---
 
-## Everyday Things You Can Ask For
+## Everyday things you can ask for
 
 - **Curve fitting:** *"Fit a 4-parameter logistic (EC50) dose-response curve to this XY dataset and report IC50 with 95% confidence intervals."*
 - **Model comparison:** *"Compare a 3-parameter vs 4-parameter curve fit on this table using AICc and the extra sum-of-squares F-test."*
-- **Multi-group & survival statistics:** *"Import `experiment.csv`, run a one-way ANOVA with Tukey post-hoc comparisons (or Kaplan-Meier log-rank survival analysis), and tell me which differences are significant."*
+- **Group and survival statistics:** *"Import `experiment.csv`, run a one-way ANOVA with Tukey post-hoc comparisons (or Kaplan–Meier log-rank survival analysis), and tell me which differences are significant."*
 - **Publication figures:** *"Export every graph in `study.curvebook` as 300 DPI PNG and vector PDF."*
 
 ---
 
 ## Troubleshooting
 
-- **Your AI app does not see CurveBook tools:** Make sure you edited the right config file, checked your `"command"` path and JSON commas/backslashes, and **fully restarted** the AI app.
-- **"Access denied" / path outside `--workdir`:** CurveBook blocks file paths outside the `--workdir` directory you configured. Move data files inside that folder or update `--workdir`.
-- **More MCP connection checks:** See [Troubleshooting: MCP Connection](reference/troubleshooting.md#mcp-connection).
-- **Technical reference:** See [MCP Automation Reference](reference/automation/mcp.md), [Control & Batch Automation](reference/automation/control-and-batch.md), and [docs/mcp.md](mcp.md).
+- **CurveBook tools do not appear:** Confirm you edited the right config file, check the `"command"` path and JSON punctuation, and **fully restart** your AI app.
+- **"Access denied" or path outside `--workdir`:** CurveBook blocks paths outside your configured `--workdir` folder. Move your data files inside that folder or update `--workdir`.
+- **More connection checks:** See [Troubleshooting: MCP connection](reference/troubleshooting.md#mcp-connection).
+- **Technical reference:** See [MCP automation reference](reference/automation/mcp.md), [Control & batch automation](reference/automation/control-and-batch.md), and [docs/mcp.md](mcp.md).
 
 ---
 
-## Your Data Stays Private
+## Your data stays private
 
-- CurveBook has **no network telemetry** and never sends spreadsheets or projects to external servers (`cargo xtask telemetry`).
-- Everything runs offline inside the `--workdir` folder you choose (see [Privacy & Security](reference/privacy-security.md)).
-- Your AI assistant sees only the tool parameters and summary outputs shown in your chat — never arbitrary folders outside `--workdir`.
+- CurveBook has **no network telemetry** and never sends spreadsheets or projects to external servers.
+- All computations run offline inside the `--workdir` folder you choose ([Privacy & Security](reference/privacy-security.md)).
+- Your AI assistant sees only the tool calls and summary outputs shown in chat, never files outside `--workdir`.

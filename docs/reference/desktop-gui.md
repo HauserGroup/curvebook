@@ -1,71 +1,74 @@
-# Desktop GUI Getting Started (Beta)
+# Desktop GUI getting started (Beta)
 
-The CurveBook desktop GUI (`curvebook`) runs a declarative `egui 0.37` / `wgpu` + AccessKit workspace pairing a curated 8-menu bar (`File`, `Edit`, `View`, `Insert`, `Data`, `Analyze`, `Graph`, `Help`), OKLab/OKLCH perceptual themes (`Light`, `Dark`, `HighContrast`), `ActionRank`-prioritized contextual toolbars (`⋯` overflow on compact windows), draggable splitters, live split data-and-graph comparison, and multi-panel figure layout composition.
+Launch CurveBook to enter data, run statistical tests and curve fits, inspect live split data-and-graph views, and arrange multi-panel figures offline. Need installers or checksum steps first? See [Get started & installation](get-started.md).
 
 > [!NOTE]
-> **Beta documentation boundary (`R12.7`):** This page is the Beta desktop quick-start covering the primary interactive workspace and dialogs. The comprehensive menu-by-menu **Using the App** user guide (`R12.7`) and step-by-step workflow tutorials (`R12.2`) follow after Beta alongside recorded cross-OS manual walkthroughs (`R10.13`, `R10.24`).
-
-See [Get Started & Installation](get-started.md) for platform packages and checksum verification.
+> **Beta guide scope:** This page introduces the main desktop workspace and dialogs. A complete menu-by-menu guide and step-by-step workflow tutorials will follow after Beta.
 
 ---
 
-## 1. Launching & Starting a Project (`Welcome & New Data Table`) {#launch-and-welcome}
+## 1. Launch CurveBook and start a project {#launch-and-welcome}
 
-When launching `curvebook` without an existing `.curvebook` argument (or starting a new workspace), CurveBook presents the 3-pane **Welcome & New Data Table** Workspace Hub (`WelcomeWizardState`) with four starting modes:
+When you open CurveBook without a project file, the **Welcome & New Data Table** hub opens with four ways to begin:
 
-- **Empty Data Table:** Choose any of CurveBook's [structured table archetypes](tables.md#table-archetypes) (`XY`, `Column`, `Grouped`, `Contingency`, `Survival`, `Parts of Whole`, `Multiple Variables`, `Nested`), configure X-column format (`Numbers`, `Dates`, `Sequence`, `None`), and choose raw replicate subcolumns or pre-summarized entry (`Mean + SD + N`, `Mean + SEM + N`, error limits, quartiles).
-- **Tutorial Sample Data:** Instantiate built-in clean-room scientific sample datasets to inspect populated tables, analyses, and graphs immediately.
-- **`.cbtemplate` Templates:** Open a saved reusable template carrying preconfigured analyses, parameter rules, graphs, and layouts ready for new observations.
-- **Clone Pipeline:** Duplicate an existing sheet family structure (`sheet.clonePipeline`) onto new raw data.
+- **Empty Data Table:** Pick one of CurveBook's [structured table types](tables.md#table-archetypes) (XY, Column, Grouped, Contingency, Survival, Parts of Whole, Multiple Variables, or Nested). Set the X-column format (Numbers, Dates, Sequence, or None). Choose raw replicate subcolumns or pre-summarized entry such as Mean + SD + N, Mean + SEM + N, error limits, or quartiles.
+- **Tutorial Sample Data:** Load a built-in sample dataset to explore populated tables, analyses, and graphs right away.
+- **Templates (`.cbtemplate`):** Start from a saved template with analyses, parameter rules, graphs, and page layouts already configured.
+- **Clone Pipeline:** Copy an existing sheet family's analyses and graphs onto a fresh dataset.
 
-The two-tier top chrome features the curated 8-menu bar (`File`, `Edit`, `View`, `Insert`, `Data`, `Analyze`, `Graph`, `Help` — using native macOS menus or `--in-window-menus`), a Sheet-Adaptive Contextual Action Strip ordered by `ActionRank` (`Primary`, `Secondary`, `Overflow`), the `Cmd/Ctrl+K` Command Palette, and **Workspace Presets** (`Default`, `Data Prep`, `Modeling`, `Publication`, `Compact`). Optional launch flags (`curvebook --help`) include `--portable-dir <dir>`, `--rulers`, `--in-window-menus`, `--ttf-font <path>`, and `--new-instance`.
+Across the top of the window, CurveBook pairs standard menus (**File**, **Edit**, **View**, **Insert**, **Data**, **Analyze**, **Graph**, **Help**) with a contextual action strip that adapts to the active sheet. Press `Cmd/Ctrl+K` to open the **Command Palette**. Switch layouts anytime with **Workspace Presets** (**Default**, **Data Prep**, **Modeling**, **Publication**, and **Compact**).
 
----
-
-## 2. Entering Data, Exclusions & Quick Statistics {#data-and-exclusions}
-
-1. Edit data cells directly in the Data grid (toggle row titles on `Column` tables via **View › Row Titles**), paste delimited clipboard text (`Cmd/Ctrl+V`), or open/import `.curvebook`, `.csv`, `.tsv`, `.pzfx`, `.prism`, or `.xlsx` files via **File › Open…**, **File › Import**, or file drag-and-drop. Importing `.prism`, `.pzfx`, or `.xlsx` into an open project with existing sheets or unsaved changes opens a replace-or-merge confirmation modal (**Add to current project** vs. **Open as new project**), and any non-fatal import warnings are shown in the **Import Warnings** panel (reopenable from the status bar or **File › Import › Import Warnings…**).
-2. Selecting any numeric cell range updates the footer **Quick Statistics** readout live (`n`, `excl`, `mean`, `SD`, `SEM`, `median`, `sum`; see [Calculators & Quality-of-Life Capabilities](qol.md#quick-statistics)).
-3. Toggle non-destructive observation exclusions (`Cmd/Ctrl+E`) or attach audit provenance tags (**Edit › Exclude Selection with Auditable Reason...**, `Shift+Cmd/Ctrl+E`; [`QOL-3`](concepts.md#cell-exclusions)) without deleting underlying values.
-4. Create derived columns using [`=` Calculated Variables](tables.md#calculated-variables) directly in `MultipleVariables` tables (`Manage Variables…` renames, merges, orders, or pins categorical reference levels).
+If you launch `curvebook` from a terminal, optional flags (`curvebook --help`) include `--portable-dir <dir>`, `--rulers`, `--in-window-menus`, `--ttf-font <path>`, and `--new-instance`.
 
 ---
 
-## 3. Running an Analysis, Creating Graphs & Live Split Comparison {#analysis-and-split-graph}
+## 2. Enter data, manage exclusions, and check quick statistics {#data-and-exclusions}
 
-Run a statistical test, curve fit, or table transform from **Analyze › Analyze...** (`Cmd/Ctrl+Shift+A`), the toolbar **Analyze** CTA, or the Command Palette (`Cmd/Ctrl+K`):
-
-- CurveBook attaches a linked `ResultSheet` under **Analyses** (with multi-tab tables, [`QOL-7` diagnostics-only assumption banner](qol.md#active-qol), and [`QOL-6` Copy Methods & Statistical Reporting](qol.md#active-qol)) and updates dependent **Graphs** automatically through the reactive DAG.
-- Use **Transform / Normalize** with **Create a new graph of the results** checked to generate a graph (such as a normalized vertical-label heatmap) alongside derived data, or use **Insert › New Graph… (`Create Graph`)** to create single-series graphs across every dataset at once with a shared Y-axis title.
-- In the **Portfolio Gallery**, use `Shift+Click` or `Cmd/Ctrl+Click` to select multiple graphs and invoke **Apply Style From…** (`Graph › Apply Style From…`) to clone selected formatting facets across targets in one undo step.
-- Copy a rectangular cell range in any `ResultSheet` and choose **Right-click › Paste Table** on a `GraphSheet` to place a live `EmbeddedResultTable`, then customize transposing, headers, typography, and borders in **Format Embedded Table…** (`Graph › Layout › Format Embedded Table…`).
-- Open **Format Graph…** or **Format Axes…** (or the Trailing Inspector dock, `Cmd/Ctrl+Shift+I`) to configure opacity presets, independent **Show data points** and **Show fitted curve** checkboxes, Left Y / Right Y2 assignment, horizontal offsets, `Column`/`Grouped` horizontal orientation, Kaplan–Meier metric/staircase/error modes, pooled Forest diamond visibility, heatmap label orientations, `TickDirection`, `AbsoluteDecimal` labels, and transparent/solid page fills.
-- Toggle **View › Toggle Split Data + Graph Workspace** (`Cmd/Ctrl+\`, `QOL-4`) with a draggable splitter to display a `Graph` alongside your `Data` or `Result` sheet: edits, cell exclusions, and model parameter tweaks immediately redraw the fitted curve and bands, with two-way cell/point brushing (`QOL-5`) and vertex hover readouts on longitudinal spaghetti plots.
-
-![CurveBook light theme egui split workspace showing Project Navigator, Family tree, XY data table, live 4PL nonlinear dose–response curve fit with confidence bands, and Graph Inspector](../images/workspace-split-fit.png)
-
-![CurveBook light theme egui split workspace showing multi-tab One-Way ANOVA multiple comparisons, QOL-7 assumption diagnostic banner and Interpret inspector, and linked Column graph with Compact Letter Display and significance brackets](../images/workspace-anova-results.png)
+1. **Enter or import data:** Type values directly in the data grid or paste delimited text with `Cmd/Ctrl+V`. On Column tables, toggle row titles with **View › Row Titles**.
+2. **Open existing files:** Use **File › Open…**, **File › Import**, or drag and drop `.curvebook`, `.csv`, `.tsv`, `.pzfx`, `.prism`, or `.xlsx` files onto the window.
+   - When you open or import `.prism`, `.pzfx`, or `.xlsx` files into a project with existing sheets or unsaved edits, choose **Add to current project** or **Open as new project**.
+   - Non-fatal import issues appear in the **Import Warnings** panel. Reopen it anytime from the status bar or **File › Import › Import Warnings…**.
+3. **Check live summary numbers:** Select any numeric cells to update the footer **Quick Statistics** bar (`n`, excluded count, mean, SD, SEM, median, and sum; see [Calculators & quality-of-life tools](qol.md#quick-statistics)).
+4. **Exclude observations without deleting them:** Press `Cmd/Ctrl+E` to toggle cell exclusions. To attach an auditable reason, choose **Edit › Exclude Selection with Auditable Reason…** (`Shift+Cmd/Ctrl+E`; see [Cell exclusions](concepts.md#cell-exclusions)).
+5. **Add derived columns:** Create [`=` Calculated Variables](tables.md#calculated-variables) directly in Multiple Variables tables. Open **Manage Variables…** to rename, merge, reorder, or pin categorical reference levels.
 
 ---
 
-## 4. Composing Multi-Panel Page Layouts & Embedded Images {#page-layouts}
+## 3. Run analyses, customize graphs, and compare side by side {#analysis-and-split-graph}
 
-Switch to the **Layouts** section in the Project Navigator (or **Graph › Layout…**) to arrange multiple `GraphSheet`s, live tables, and images onto a physical page canvas (`LayoutSpec`, `MAX_LAYOUT_ITEMS = 64`):
+Start a statistical test, curve fit, or table transform from **Analyze › Analyze…** (`Cmd/Ctrl+Shift+A`), the toolbar **Analyze** button, or the **Command Palette** (`Cmd/Ctrl+K`).
 
-- **Scaling, Alignment & Z-Order:** Apply [journal column-width presets](graphs.md#page-layouts) (`SingleColumn88mm`, `ColumnAndHalf130mm`, `DoubleColumn180mm`), align axis origins (**Graph › Layout › Align Plot Origins**), open **Equalize Scaling…** (`Match Smallest`, `Match Largest`, or `Explicit %`) to normalize inner plot scaling factors across panels, and reorder panel Z-stacking (**Bring to Front**, **Bring Forward**, **Send Backward**, **Send to Back**) with transparent `paper_fill: None` foreground overlays/insets.
-- **Embedded Images & Canvas Grid:** Insert **PNG**, **JPEG**, or **TIFF** images via **Insert › Image…** (`rfd` file picker) or paste with `Cmd/Ctrl+V`, resize from corner handles (`Shift` unlocks aspect ratio), rotate (`Shift` snaps in 15° steps), edit 4-edge crop and borders in **Format Image…**, and toggle non-exported guides via **View › Canvas Grid**.
-- **OKLab/OKLCH Themes & CVD Preview:** Switch `Light`, `Dark`, and `HighContrast` OKLab/OKLCH themes in [Settings & Languages](settings.md), and toggle live [CVD / grayscale canvas preview](graphs.md#palettes-and-cvd) (`QOL-9`). Broken upstream references display explicit dashed broken-link glyphs.
+- **Automatic linked results:** CurveBook creates a linked result sheet under **Analyses** with multi-tab tables, an inline assumption-diagnostics banner, and one-click [methods reporting](qol.md#active-qol). Linked graphs update automatically when source data or settings change.
+- **Create graphs from transforms or in batches:** Check **Create a new graph of the results** in **Transform / Normalize** to plot derived tables (such as normalized heatmaps) right away. Use **Insert › New Graph…** to create single-series graphs across all datasets at once with a shared Y-axis title.
+- **Reuse graph styles across sheets:** In the **Portfolio Gallery**, hold `Shift` or `Cmd/Ctrl` to select multiple graphs. Choose **Graph › Apply Style From…** to copy selected styling facets in one undo step.
+- **Embed live result tables on a graph:** Copy a rectangular cell range from any result sheet, right-click a graph, and select **Paste Table**. Adjust orientation, headers, typography, and borders via **Graph › Layout › Format Embedded Table…**.
+- **Format plots and axes:** Open **Format Graph…**, **Format Axes…**, or the right-hand Inspector (`Cmd/Ctrl+Shift+I`). Toggle data points and fitted curves independently, assign series to Left Y or Right Y2, add horizontal offsets, or switch Column and Grouped plots to horizontal bars. You can also adjust Kaplan–Meier curves, pooled forest diamonds, heatmap labels, tick directions, decimal labels, and solid or transparent backgrounds.
+- **Work in split view:** Choose **View › Toggle Split Data + Graph Workspace** (`Cmd/Ctrl+\`) to view a graph beside its data or result sheet with a draggable divider. Edits, exclusions, and parameter tweaks redraw curves and bands live. Two-way brushing highlights matching cells and plotted points, and longitudinal plots show vertex hover readouts.
 
-![CurveBook dark theme egui multi-panel Page Layout workspace with physical millimeter rulers, significance brackets, embedded summary table, and Page Layout Composer](../images/workspace-layout-dark.png)
+![CurveBook light theme split workspace showing Project Navigator, Family tree, XY data table, live 4PL nonlinear dose-response curve fit with confidence bands, and Graph Inspector](../images/workspace-split-fit.png)
+
+![CurveBook light theme split workspace showing multi-tab One-Way ANOVA multiple comparisons, inline assumption diagnostic banner and Interpret inspector, and linked Column graph with Compact Letter Display and significance brackets](../images/workspace-anova-results.png)
 
 ---
 
-## 5. Saving Projects, Templates & Publication Exports {#saving-and-exporting}
+## 4. Compose multi-panel page layouts and insert images {#page-layouts}
 
-- **Save Project (`.curvebook` or `.curvebook.d/`):** **File › Save** and **File › Save As…** write atomic deterministic `.curvebook` ZIP archives (with forward-version overwrite refusal), alongside CRC-verified crash-recovery WAL journals between saves ([Files, Storage & Interchange](files.md)). Create persistent milestone snapshots via **File › Checkpoints › Create Checkpoint…**.
-- **Import & Warnings (`File › Import` / `File › Open…`):** Import `.csv`/`.tsv`, `.pzfx`, `.prism`, and `.xlsx` files via **File › Import**, **File › Open…**, or drag-and-drop. When opening or importing `.prism`, `.pzfx`, or `.xlsx` into a project with existing sheets or unsaved changes, the replace-or-merge confirmation modal offers **Add to current project** alongside **Open as new project**. Non-fatal warnings open the **Import Warnings** panel, which can be reopened from the status bar or **File › Import › Import Warnings…**.
-- **Export Figures (`File › Export`):** Use **File › Export** (figure export) or **File › Print…** to generate publication **SVG 1.1**, **`%PDF-1.7`** (sRGB / CMYK / Grayscale, optional glyph outlining), high-DPI **PNG** / **TIFF** (`LZW` / `Deflate` / uncompressed), Windows **`.emf`**, or multi-flavor OS clipboard vector/raster copies.
-- **Export Data, Results & Reports (`File › Export`):**
-  - **CSV Table…**, **CSV Results…**, and **Export All Data Tables…** open the CSV export options dialog to select delimiter, decimal separator (defaulting to the active locale preset, pairing `;` with decimal `,` and `,` with decimal `.`), and (for results) all tabs in tidy format or a single tab; saving with a `.tsv` extension automatically selects the tab (`\t`) delimiter. **Export All Data Tables…** prompts for an output folder and writes one delimited file per `DataSheet`, named from the sanitized table title (and prompts before overwriting existing files).
-  - **JSON Results…** writes structured analysis output (`analysis.exportJson`).
-  - **Save Methods Report…** writes the active result's methods summary (`result.generateReport`) to `.md`, `.txt`, or `.tex` based on the chosen extension (while **Analyze › Copy Methods & Statistical Reporting** remains available for clipboard export).
+Open **Layouts** in the Project Navigator (or choose **Graph › Layout…**) to place multiple graphs, live result tables, and images on a physical page canvas.
+
+- **Size, align, and layer panels:** Apply [journal column-width presets](graphs.md#page-layouts) (88 mm single column, 130 mm column-and-a-half, or 180 mm double column). Align axes with **Graph › Layout › Align Plot Origins** and match plot scales with **Equalize Scaling…** (**Match Smallest**, **Match Largest**, or **Explicit %**). Reorder overlapping panels and transparent insets with **Bring to Front**, **Bring Forward**, **Send Backward**, and **Send to Back**.
+- **Add and crop images:** Insert PNG, JPEG, or TIFF images through **Insert › Image…** or paste with `Cmd/Ctrl+V`. Drag corner handles to resize (`Shift` unlocks aspect ratio) and rotate (`Shift` snaps in 15° steps). Edit crop margins and borders in **Format Image…**, and toggle non-exported alignment guides with **View › Canvas Grid**.
+- **Check themes and color accessibility:** Switch between **Light**, **Dark**, and **High Contrast** themes in [Settings & languages](settings.md). Turn on live [color-vision deficiency and grayscale preview](graphs.md#palettes-and-cvd) to verify figures before export. Broken upstream references appear with a dashed broken-link marker.
+
+![CurveBook dark theme multi-panel Page Layout workspace with physical millimeter rulers, significance brackets, embedded summary table, and Page Layout Composer](../images/workspace-layout-dark.png)
+
+---
+
+## 5. Save projects and export publication figures {#saving-and-exporting}
+
+- **Save projects and checkpoints:** Choose **File › Save** or **File › Save As…** to write atomic `.curvebook` archives or `.curvebook.d/` folders. CurveBook refuses to overwrite files saved by a newer release and keeps crash-recovery journals between saves ([Files, storage & interchange](files.md)). Create named snapshots anytime with **File › Checkpoints › Create Checkpoint…**.
+- **Export figures and print:** Use **File › Export** or **File › Print…** to output vector **SVG 1.1**, **PDF 1.7** (sRGB, CMYK, or Grayscale, with optional text outlining), high-DPI **PNG** and **TIFF** (LZW, Deflate, or uncompressed), or Windows **EMF**. You can also copy vector or bitmap figures directly to the clipboard.
+- **Export data tables:** Choose **File › Export › CSV Table…** or **File › Export › Export All Data Tables…**. Set the delimiter and decimal separator in the CSV options dialog (defaulting to your active locale, such as `;` with `,` or `,` with `.`). Saving with a `.tsv` extension uses tabs automatically. Exporting all tables prompts for a folder, writes one file per data table, and asks before overwriting existing files.
+- **Export results and methods reports:**
+  - **File › Export › CSV Results…** exports either the active result tab or all tabs in tidy format.
+  - **File › Export › JSON Results…** saves structured machine-readable analysis output.
+  - **File › Export › Save Methods Report…** writes the active result's methods summary as `.md`, `.txt`, or `.tex` based on the filename extension. You can also copy the report directly to the clipboard with **Analyze › Copy Methods & Statistical Reporting**.

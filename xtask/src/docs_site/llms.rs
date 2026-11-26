@@ -21,7 +21,7 @@ pub const SITE_SUMMARY: &str = "CurveBook is a free, open-source biostatistics, 
 const GITHUB_REPO_URL: &str = "https://github.com/HauserGroup/curvebook";
 
 const KEY_PAGES: &[(&str, &str, &str)] = &[
-    ("CurveBook Home", "index.html", "Overview, workspace screenshots, core pillars, and Beta release downloads."),
+    ("CurveBook Home", "index.html", "Overview, feature summary with links into the manual, and Beta release downloads."),
     (
         "Open .pzfx and .prism Files",
         "open-pzfx-files.html",
@@ -102,6 +102,16 @@ pub fn build_llms_txt(_root: &Path) -> Result<String, String> {
         out,
         "- [CurveBook Reference Manual]({}): Section map and typed reference manual for CurveBook statistical analyses, curve fitting, graphics, MCP, and CLI automation.",
         manual_canonical_url("index.html")
+    );
+    let _ = writeln!(
+        out,
+        "- [Reference]({}): Grouped reference directory for CurveBook concepts, data tables, statistical analyses, curve fitting, graphs, calculators, files, settings, and glossary.",
+        manual_canonical_url("reference.html")
+    );
+    let _ = writeln!(
+        out,
+        "- [Support]({}): Troubleshooting, known issues, offline privacy guarantees, dual licensing, security reporting, and contributor guides.",
+        manual_canonical_url("support.html")
     );
     for g in MANUAL_GUIDES {
         let _ = writeln!(out, "- [{}]({}): {}", g.title, manual_canonical_url(g.rel_path), g.description);

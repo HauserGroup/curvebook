@@ -790,13 +790,13 @@ fn build_equations_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) 
                     match bound {
                         (None, None) => param_summary.push_str(pname),
                         (Some(lo), None) => {
-                            let _ = write!(param_summary, "{pname} (>= {lo})");
+                            let _ = write!(param_summary, "{pname} (>= {})", format_bound_f64(lo));
                         }
                         (None, Some(hi)) => {
-                            let _ = write!(param_summary, "{pname} (<= {hi})");
+                            let _ = write!(param_summary, "{pname} (<= {})", format_bound_f64(hi));
                         }
                         (Some(lo), Some(hi)) => {
-                            let _ = write!(param_summary, "{pname} ([{lo}, {hi}])");
+                            let _ = write!(param_summary, "{pname} ([{}, {}])", format_bound_f64(lo), format_bound_f64(hi));
                         }
                     }
                 }
@@ -1221,6 +1221,17 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
     )
 }
 
+fn format_bound_f64(val: f64) -> String {
+    if val == 0.0 {
+        return String::from("0");
+    }
+    if !val.is_finite() {
+        return val.to_string();
+    }
+    let abs = val.abs();
+    if !(1e-4..1e6).contains(&abs) { format!("{val:e}") } else { val.to_string() }
+}
+
 fn format_kind_label(kind: FormatKind) -> &'static str {
     match kind {
         FormatKind::Archive => "Project Archive",
@@ -1381,5 +1392,20 @@ mod tests {
         assert!(!page.body_html.contains("<td>Transform & Derive</td>"));
         assert!(!page.body_html.contains("<td>XY & Regression</td>"));
         assert!(!page.body_html.contains("<td>Multivariate & GLM</td>"));
+    }
+
+    #[test]
+    fn r12_14_equations_page_formats_extreme_bounds_in_scientific_notation() {
+        assert_eq!(super::format_bound_f64(0.0), "0");
+        assert_eq!(super::format_bound_f64(1e-30), "1e-30");
+        assert_eq!(super::format_bound_f64(1e-15), "1e-15");
+        assert_eq!(super::format_bound_f64(0.05), "0.05");
+        assert_eq!(super::format_bound_f64(1e6), "1e6");
+
+        let mut az = Vec::new();
+        let mut expected = ExpectedCoverage::default();
+        let eq_page = super::build_equations_page(&mut az, &mut expected);
+        assert!(eq_page.body_html.contains("1e-30"), "missing clean scientific bound `1e-30`");
+        assert!(!eq_page.body_html.contains("0.000000000000000000000000000001"), "unformatted decimal bound leaked");
     }
 }

@@ -1,103 +1,112 @@
-# Files, Persistence, Crash Recovery & Interchange Formats
+# Files, persistence, crash recovery & interchange formats
 
-CurveBook stores studies in deterministic archives and directories, protects unsaved edits with a CRC-checked Write-Ahead Log (WAL), enforces explicit schema-version safety guards against accidental downgrades/overwrites, and imports delimited and project interchange formats strictly at bounded format edges.
+CurveBook stores studies in deterministic archives or unpacked folders, protects unsaved edits with a CRC-checked write-ahead log (WAL), and refuses to overwrite files saved by newer schema versions. Interchange importers and exporters validate every boundary strictly.
 
-See [File Formats Specification](../file-formats.md) and [JSON Schemas](../schemas/document.schema.json) for wire-level definitions.
+See the [File Formats Specification](../file-formats.md) and [JSON Schemas](../schemas/document.schema.json) for wire-level definitions.
 
 ---
 
-## Native Project Containers & Templates {#native-formats}
+## Native project containers & templates {#native-formats}
 
-### `.curvebook` Deterministic ZIP Archive {#curvebook-zip}
+### `.curvebook` deterministic ZIP archive {#curvebook-zip}
 
-A `.curvebook` file (`ArchiveKind::Project`) is a standard ZIP container compressed reproducibly with deterministic entry order, timestamps, and CRC-32 validation (`crates/format/src/archive.rs`):
+A `.curvebook` file is a standard ZIP archive written with deterministic entry order, timestamps, and CRC-32 validation:
 
-| Entry Path | Contents | Integrity / Limits |
+| Entry path | Contents | Integrity & limits |
 |---|---|---|
-| `manifest.json` | `ArchiveManifest`: `format: "curvebook-archive"`, `schema_version`, `kind`, `title`, `document_crc32`, per-sheet descriptors (`id`, `section`, `title`, `csv_path`, `crc32`), and `assets` descriptors (`asset_id`, `media_type`, `pixel_size`, `asset_path`, `crc32`). | Validated against `archive-manifest.schema.json` and checked against `document_crc32`. |
-| `document.json` | Canonical 2-space-indented `ProjectDocument` JSON (`schema_version = CURRENT_SCHEMA_VERSION`; `image_assets[].bytes` omitted inline). | Validated against `document.schema.json`, finite floats, dimensions, and acyclic DAGs. |
-| `sheets/<id>.csv` | RFC-4180 CSV snapshots for every `DataSheet` (`*` marks excluded cells). | Per-sheet CRC-32 recorded in `manifest.json`. |
-| `assets/<asset_id>.<ext>` | Content-addressed binary PNG/JPEG/TIFF payloads referenced by `GraphAnnotation::EmbeddedImage` and `LayoutItem::EmbeddedImage`. | `MAX_IMAGE_ASSET_BYTES = 32 MiB`, `MAX_RASTER_PIXELS = 67_108_864`, CRC-32 + SHA-256 verified against `asset_id` and image header. |
+| `manifest.json` | Format tag, schema version, sheet index, and asset descriptors. | Validated against `archive-manifest.schema.json` and `document_crc32`. |
+| `document.json` | Canonical 2-space-indented project JSON without inline image bytes. | Validated against `document.schema.json`, finite floats, limits, and acyclic DAG. |
+| `sheets/<id>.csv` | RFC-4180 CSV snapshot for every data table (`*` marks excluded cells). | Per-sheet CRC-32 verified against `manifest.json`. |
+| `assets/<asset_id>.<ext>` | Content-addressed PNG, JPEG, or TIFF embedded images. | Up to 32 MiB and 67,108,864 pixels; CRC-32 and SHA-256 verified. |
 
-**Archive Safety Limits (`ZipLimits::default()` & `archive.rs`):** `MAX_ARCHIVE_FILE_BYTES = 128 MiB`, `MAX_ZIP_ENTRIES = 4,096`, `MAX_ZIP_UNCOMPRESSED_BYTES = 128 MiB`, `MAX_ZIP_ENTRY_BYTES = 64 MiB`, strict path sanitization rejecting `..` traversal, absolute paths, and symlink escapes. All disk writes go through atomic temp-file write + rename (`platform_write_atomic`).
+Archive structure and safety limits:
 
-### `.curvebook.d/` Unpacked Project Directory {#unpacked-dir}
+- **Manifest metadata:** `manifest.json` records `format: "curvebook-archive"`, `schema_version`, `kind`, `title`, `document_crc32`, per-sheet descriptors (`id`, `section`, `title`, `csv_path`, `crc32`), and asset descriptors (`asset_id`, `media_type`, `pixel_size`, `asset_path`, `crc32`).
+- **Hard size and path caps:** Opening an archive enforces limits of 128 MiB archive size, 4,096 ZIP entries, 128 MiB total uncompressed bytes, and 64 MiB per entry. Strict path checks reject `..` traversal, absolute paths, and symlink escapes.
+- **Atomic writes:** Every disk save writes to a temporary file, syncs to disk, and renames atomically into place.
 
-CurveBook also supports reading and writing unpacked, Git-friendly project directories (`.curvebook.d/`, via `open_project_unpacked_dir` / `save_project_unpacked_dir` / `is_unpacked_project_dir`):
+### `.curvebook.d/` unpacked project directory {#unpacked-dir}
 
-- Mirrors the exact `.curvebook` internal layout (`manifest.json`, 2-space-indented `document.json`, `sheets/<id>.csv`, `assets/<asset_id>.<ext>`) directly on disk for clean line-by-line version-control diffs.
-- Preserves non-archive repository files (such as `.git/`, READMEs, or notes) while pruning stale sheet CSVs and image assets tracked by previous manifests.
-- Enforces strict root canonicalization, symlink boundary checks, `ZipLimits`, and CRC-32 verification on load.
+CurveBook also reads and writes unpacked `.curvebook.d/` directories for clean line-by-line Git diffs:
 
-### `.cbtemplate` Reusable Templates {#cbtemplate}
+- Mirrors the exact `.curvebook` layout (`manifest.json`, 2-space-indented `document.json`, `sheets/<id>.csv`, `assets/<asset_id>.<ext>`) directly on disk.
+- Preserves non-archive files (such as `.git/`, READMEs, or notes) while pruning stale sheet CSVs and unused image assets tracked by previous manifests.
+- Enforces root canonicalization, symlink boundary checks, archive size limits, and CRC-32 validation on open.
 
-Saving a template (`project.saveTemplate` -> `.cbtemplate`, `ArchiveKind::Template`) calls `strip_project_data_for_template`, which clears project-specific raw table cell observations, `exclusion_notes`, `plate_well_origins`, and cached computed `ResultSheet` tab numbers while preserving:
+### `.cbtemplate` reusable templates {#cbtemplate}
 
-- Table archetypes, column headers, subcolumn layouts, and `=` Calculated Variable formulas
-- `InfoSheet` constants (`HookSource` targets)
-- Complete `AnalysisSpec` pipelines, parameter rules/sharing, `GraphSpec` styling/axes/equations, `LayoutSpec` panel geometry, and referenced embedded image assets (unreferenced assets dropped)
+Saving a template (`project.saveTemplate`) writes a `.cbtemplate` archive with project-specific raw table observations, exclusion notes, plate well origins, and cached result numbers stripped out. Templates retain:
 
-Instantiating (`project.instantiateTemplate`) creates a fresh independent project ready for incoming data.
+- Table archetypes, column headers, subcolumn modes, and `=` Calculated Variable formulas.
+- Info sheet constants used as hook targets.
+- Complete analysis pipelines, parameter rules and sharing, graph styling, axis settings, live equations, page layout geometry, and referenced embedded images (unreferenced images are dropped).
 
-### `.cbplate` Microplate Layouts {#cbplate}
+Instantiating a template (`project.instantiateTemplate`) creates a fresh independent project ready for incoming data.
 
-Reusable 96-well (`8×12`) and 384-well (`16×24`) microplate role assignments persist as single-extension **`.cbplate`** UTF-8 JSON (`PlateMapFile`, `CURRENT_PLATE_MAP_VERSION = 1`, `docs/schemas/plate-map.schema.json`), distinct from `.cbtemplate` ZIP project templates and `.json` result exports. Legacy unversioned plate JSON migrates cleanly (`v0 -> v1`); files declaring `format_version > 1` are refused cleanly on load and never overwritten on save, and all writes go through atomic temp-file write + rename (`curvebook_platform::fs::write_atomic`).
+### `.cbplate` microplate layouts {#cbplate}
 
-### Complete-Workspace Sharing vs. Linked Data {#sharing}
+Reusable 96-well (8×12) and 384-well (16×24) microplate role layouts persist as single-extension `.cbplate` UTF-8 JSON files (`format_version = 1`; see [`plate-map.schema.json`](../schemas/plate-map.schema.json)). They are distinct from `.cbtemplate` project archives and `.json` result exports.
 
-A `.curvebook` archive embeds all `DataSheet` values, exclusion notes, `plate_well_origins`, `InfoSheet` constants, `ResultSheet` outputs, `GraphSheet`s, and `LayoutSheet`s inside a single self-contained file for collaborator sharing. Projects referencing external disk imports via `ImportLinkSpec` retain provenance metadata; headless/MCP opens under `--workdir` reject stored external link escapes outside the allowed workspace root.
+Legacy unversioned plate JSON upgrades cleanly in memory (`v0` to `v1`). Files with `format_version > 1` are refused on open and never overwritten on save, and every write is atomic.
+
+### Complete-workspace sharing vs. linked data {#sharing}
+
+A `.curvebook` archive bundles all data tables, exclusion notes, plate well origins, info constants, results, graphs, and page layouts into one self-contained file for sharing. Projects with external disk import links keep their source provenance metadata. Under headless CLI and MCP `--workdir` containment, stored external links outside the allowed workspace root are rejected.
 
 ---
 
-## Schema Versioning & Forward-Overwrite Refusal {#schema-versioning}
+## Schema versioning & forward-overwrite refusal {#schema-versioning}
 
-| Format / Record | Current Version Constant | Migration & Safety Rule |
+| Format / record | Current version | Migration & compatibility |
 |---|---:|---|
-| Project / Template (`document.json`, `manifest.json`) | `CURRENT_SCHEMA_VERSION = 8` | Migrations (`migrate_document_json`, `VersionStep`) automatically upgrade schemas `0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8`. Files with `schema_version > CURRENT_SCHEMA_VERSION` fail on open with `UnsupportedSchemaVersion` (`unsupported_version`). |
-| Plate Map Layout (`.cbplate`) | `CURRENT_PLATE_MAP_VERSION = 1` | Migrates legacy unversioned `v0 -> v1` in memory; `format_version > 1` fails cleanly with `UnsupportedSchemaVersion` on load and refuses overwrite on save. |
-| User Preferences (`preferences.json`) | `CURRENT_PREFERENCES_VERSION = 1` | Unknown extension fields preserved via `additionalProperties`; `version > 1` triggers warning/refusal without silent overwrite. |
-| Recovery WAL (`ops.journal` & `curvebook.lock`) | `CURRENT_JOURNAL_VERSION = 2`<br>`CURRENT_LOCK_VERSION = 1` | Strict NDJSON line validation, per-record CRC-32 checking, and CRC-verified `v1` to `v2` upgrade in memory before replay. |
+| Project & template (`document.json`, `manifest.json`) | 8 | Upgrades schemas 0 through 8 automatically; rejects newer versions. |
+| Plate map layout (`.cbplate`) | 1 | Upgrades legacy `v0` to `v1` in memory; rejects `format_version > 1`. |
+| User preferences (`preferences.json`) | 1 | Preserves unknown extension keys; refuses overwrite if `version > 1`. |
+| Recovery WAL (`ops.journal` / `curvebook.lock`) | 2 / 1 | Validates NDJSON and CRC-32 per line; upgrades `v1` journals to `v2` in memory. |
 
-**Forward-Overwrite Guard:** Before writing to an existing `.curvebook`, `.cbtemplate`, `.curvebook.d/`, or `.cbplate` target (`save_project_file`, `save_template_file`, `save_project_unpacked_dir`, `save_cbplate_file`), CurveBook inspects the existing target's metadata on disk and **refuses to overwrite** any file or directory carrying a schema version greater than the running binary's maximum supported version, leaving newer collaborator files intact byte-for-byte.
+**Forward-overwrite guard:** Before overwriting an existing `.curvebook`, `.cbtemplate`, `.curvebook.d/`, or `.cbplate` target, CurveBook inspects the existing metadata on disk. If the file carries a schema version higher than the running binary supports, CurveBook refuses the write (`UnsupportedSchemaVersion`) and leaves the newer file untouched byte-for-byte.
 
 ---
 
-## WAL Crash Recovery (`CrashRecoveryJournal`) & Autosave {#crash-recovery}
+## WAL crash recovery & autosave {#crash-recovery}
 
-Desktop GUI sessions (`curvebook`, unless `CURVEBOOK_NO_PREFS=1` is set) attach a directory-backed WAL `CrashRecoveryJournal` (`crates/format/src/recovery.rs`) under the platform recovery directory (or `<portable>/curvebook-data/recovery/`):
+Desktop GUI sessions (`curvebook`, unless `CURVEBOOK_NO_PREFS=1` is set) maintain a write-ahead crash recovery journal inside the platform recovery directory (or `<portable>/curvebook-data/recovery/`):
 
-| Recovery File | Purpose | Limits & Integrity |
+| Recovery file | Purpose | Limits & integrity |
 |---|---|---|
-| `curvebook.lock` | `JournalLockLease` (`owner_id`, `host_id`, `acquired_epoch_ms`, `ttl_ms`) preventing concurrent journal corruption across active processes. | Automatically detects expired leases and dead local PIDs on the same host for safe reclaim (`is_dead_same_host_owner`), or isolates parallel instances into separate directories. |
-| `snapshot.curvebook` | Full periodic baseline archive snapshot written on open and at structural/checkpoint commands (`command_requires_wal_checkpoint`, or bounded journal rotation). | Same CRC-32 & archive limits (`64 MiB` web storage JSON cap). |
-| `ops.journal` | Append-only NDJSON log of `JournalOpRecord { format_version, seq, crc32, command_json }` (`CURRENT_JOURNAL_VERSION = 2`; `v1` records upgrade in memory after CRC-32 verification before replay) flushed after mutating engine commands. | `MAX_JOURNAL_BYTES = 32 MiB`, `MAX_JOURNAL_LINE_BYTES = 16 MiB`, `MAX_JOURNAL_RECORDS = 65,536`. Tail truncation or CRC-32 mismatch stops replay cleanly at the last valid record and emits `JournalRecoveryWarning` diagnostics. |
+| `curvebook.lock` | Lock lease preventing concurrent processes from corrupting the journal. | Reclaims expired leases and dead local PIDs safely; isolates parallel sessions. |
+| `snapshot.curvebook` | Periodic baseline archive written on open and at structural checkpoints. | Same CRC-32 and archive caps (64 MiB JSON cap in web storage). |
+| `ops.journal` | Append-only NDJSON log of mutating engine commands. | Caps at 32 MiB total, 16 MiB per line, and 65,536 records. |
+
+Recovery journal details:
+
+- `curvebook.lock` tracks `owner_id`, `host_id`, `acquired_epoch_ms`, and `ttl_ms`.
+- `ops.journal` writes `{ format_version, seq, crc32, command_json }` (journal version 2; `v1` records upgrade in memory after CRC-32 verification before replay).
+- If a crash truncates the journal tail or triggers a CRC-32 mismatch, replay stops cleanly at the last valid record and emits recovery diagnostics.
 
 ---
 
-## Supported Interchange Formats & CSV Parsing Rules {#interchange-and-csv}
+## Supported interchange formats & CSV parsing rules {#interchange-and-csv}
 
-All import and export adapters register through `FormatRegistry` (`crates/format/src/registry.rs`):
+- **Supported imports:**
+  - `.curvebook` native project archives, `.curvebook.d/` unpacked directories, and `.cbtemplate` templates.
+  - `.csv`, `.tsv`, and delimited text (`table.importCsv`, `table.paste`).
+  - `.pzfx` files (`table.importPzfx`), importing tables, subcolumn modes, row and column titles, `Excluded="1"` masks, and info constants.
+  - `.prism` files (`table.importPrism`), reading tabular CSVs, optional table/info metadata JSON, or embedded XML tables with bounded ZIP validation.
+  - `.xlsx` workbooks (`table.importXlsx`), importing worksheet tables with bounded OOXML parsing.
+- **Import warnings & replace-or-merge behavior:**
+  - Non-fatal warnings from `.pzfx`, `.prism`, and `.xlsx` imports (such as skipped archive parts or unsupported elements) appear in the desktop **Import Warnings** panel. Reopen it from the status bar or **File › Import › Import Warnings…** (also exposed via `ui.inspect`).
+  - When opening or importing `.prism`, `.pzfx`, or `.xlsx` files via **File › Open…**, **File › Import**, or drag-and-drop into an occupied or unsaved project, CurveBook prompts before replacing the workspace. Choose **Add to current project** (`merge: true`) or **Open as new project** (`merge: false`).
+- **Supported exports:**
+  - `.curvebook`, `.curvebook.d/`, and `.cbtemplate`.
+  - Delimited table export (`table.exportCsv`), **Export All Data Tables…** (`ui.export.allTablesCsv`, writing one file per table named from its sanitized title), single-tab or tidy results CSV (`analysis.exportCsv`), and structured results JSON (`analysis.exportJson`).
+  - Publication figures: **SVG**, **PDF 1.7**, **PNG**, **TIFF**, and ECMA-234 **`.emf`** (see [Graphs & Export Capabilities](graphs.md#export-capabilities)).
+  - **Save Methods Report…** (`result.generateReport`), writing `plain`, `markdown`, or `latex` analytical methods summaries selected by extension (`.txt`, `.md`, `.tex`).
 
-- **Supported Imports:**
-  - `.curvebook` (native project archive) and `.curvebook.d/` (unpacked directory)
-  - `.cbtemplate` (native template archive)
-  - `.csv` / `.tsv` / delimited text (`table.importCsv`, `table.paste`)
-  - `.pzfx` XML files (`table.importPzfx`, parsing tables, subcolumn modes, row/column titles, `Excluded="1"` masks, and Info constants strictly at the format boundary)
-  - `.prism` ZIP containers (`table.importPrism`, bounded ZIP reader extracting tabular CSVs, optional table/info metadata JSON, or embedded XML tables while emitting non-fatal `ImportWarning` entries for unrecognized binary or script chunks)
-  - `.xlsx` workbooks (`table.importXlsx`, bounded OOXML spreadsheet reader importing worksheet tables while emitting non-fatal `ImportWarning` entries for skipped archive parts or unsupported elements)
-- **Import Warnings & Replace-or-Merge Behavior:**
-  - Non-fatal `ImportWarning` entries produced by `.pzfx`, `.prism`, and `.xlsx` imports (e.g., skipped archive parts) are surfaced in the desktop **Import Warnings** panel (reopenable from the status bar or **File › Import › Import Warnings…**) and exposed via `ui.inspect`.
-  - When opening or importing `.prism`, `.pzfx`, or `.xlsx` via **File › Open…**, **File › Import**, or drag-and-drop into a project that has unsaved changes or existing sheets, CurveBook prompts before replacing the workspace, offering **Add to current project** (`merge: true`) alongside **Open as new project** (`merge: false`).
-- **Supported Exports:**
-  - `.curvebook`, `.curvebook.d/`, `.cbtemplate`
-  - Table delimited export (`table.exportCsv` / `export_datasheet_to_csv`), **Export All Data Tables…** (`ui.export.allTablesCsv`, folder picker writing one delimited file per `DataSheet`, named from the sanitized table title), Result sheet single-tab or tidy delimited export (`analysis.exportCsv`), and Result sheet structured JSON (`analysis.exportJson`)
-  - Publication figures: **SVG**, **`%PDF-1.7`**, **PNG**, **TIFF**, and ECMA-234 **`.emf`** ([Graphs & Export Capabilities](graphs.md#export-capabilities))
-  - **Save Methods Report…** (`result.generateReport`): writes `plain`, `markdown`, or `latex` analytical methods summaries, with output format selected by file extension (`.txt`, `.md`, `.tex`).
+### CSV / TSV parsing & formatting rules {#csv-rules}
 
-### CSV / TSV Parsing & Formatting Rules (`CsvOptions`) {#csv-rules}
-
-- **Limits:** `MAX_CSV_FILE_BYTES = 64 MiB`, `MAX_IMPORT_CELLS = 10,000,000` dense cells.
-- **RFC-4180 Quotes & BOM:** Strips leading UTF-8 BOM (`\u{FEFF}`), honors standard double-quote escaping (`""`), and preserves embedded newlines within quoted fields.
-- **Auto-Detection (`CsvOptions::detect`):** Inspects the first `10` non-empty lines to distinguish `\t` (TSV), `;` (European CSV with `,` decimal), and `,` (standard CSV with `.` decimal). Presets include `CsvOptions::csv()`, `CsvOptions::tsv()`, and `CsvOptions::european_csv()`.
-- **Exclusion Syntax & Missing Sentinels:** When `parse_asterisk_exclusions == true` (default), numeric tokens prefixed with `*` (e.g., `*4.52`) import as excluded numeric cells (`Cell { value: Number(4.52), excluded: true }`). Empty cells and recognized missing sentinels (e.g., `NA`, `NaN`, `null`) map cleanly to `CellValue::Empty`.
-- **Default CSV / TSV Export Behavior:** `analysis.exportCsv` defaults to exporting all result tabs in tidy format using the active locale preset's decimal separator paired with a matching delimiter (`,` with decimal `.`, or `;` with decimal `,`, matching `CsvOptions::european_csv()`), or a single selected tab when `tab_id` or `tab_index` is specified. `table.exportCsv` uses the same delimiter and decimal separator choices, and saving with a `.tsv` extension automatically selects the tab (`\t`) delimiter.
+- **Size limits:** Up to 64 MiB per CSV/TSV file and 10,000,000 dense imported cells.
+- **RFC-4180 quotes and BOM:** Strips leading UTF-8 BOMs (`\u{FEFF}`), honors standard `""` quote escaping, and preserves embedded newlines inside quoted fields.
+- **Delimiter auto-detection:** Inspects the first 10 non-empty lines to distinguish `\t` (TSV), `;` (European CSV with `,` decimals), and `,` (standard CSV with `.` decimals).
+- **Exclusions and missing sentinels:** When `parse_asterisk_exclusions` is `true` (default), numeric values prefixed with `*` (such as `*4.52`) import as excluded numbers. Empty cells and missing sentinels (`NA`, `NaN`, `null`) import as empty cells.
+- **Default export delimiters:** `analysis.exportCsv` defaults to exporting all result tabs in tidy format (or one tab when `tab_id` or `tab_index` is specified). Both `analysis.exportCsv` and `table.exportCsv` pair the active locale's decimal separator with its matching delimiter (`,` with decimal `.`, or `;` with decimal `,`), and saving with a `.tsv` extension selects `\t` automatically.

@@ -14,40 +14,37 @@
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
-  <div class="desktop-window wrap">
+  <div class="site-shell">
     <header class="site-header">
-      <a class="title-bar" href="index.html">
-        <span class="wordmark"><img src="images/curvebook.png" width="64" height="64" alt=""><span>CurveBook · Documentation</span></span>
-        <span class="window-status">Redirect · v0.1.0-alpha.2</span>
-      </a>
-      <nav aria-label="Main navigation">
-        <a href="index.html">Home</a>
-        <a href="manual/latest/index.html">Documentation</a>
-        <a href="open-pzfx-files.html">.pzfx &amp; .prism</a>
-        <a href="linux.html">Linux</a>
-        <a href="faq.html">FAQ</a>
-        <a href="privacy.html">Privacy</a>
-        <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
-      </nav>
+      <div class="header-inner">
+        <a class="wordmark" href="index.html">
+          <img src="images/curvebook.png" width="32" height="32" alt="">
+          <span>CurveBook</span>
+        </a>
+        <nav class="site-nav" aria-label="Main navigation">
+          <a href="index.html">Home</a>
+          <a href="manual/latest/index.html">Documentation</a>
+          <a href="open-pzfx-files.html">.pzfx &amp; .prism</a>
+          <a href="linux.html">Linux</a>
+          <a href="faq.html">FAQ</a>
+          <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
     </header>
     <main id="main" tabindex="-1">
       <article class="overview doc-body">
         <h1 id="page-title" tabindex="-1">Get Started &amp; Installation</h1>
-        <p>This page now lives in the versioned reference manual. Redirecting automatically to <a href="manual/latest/get-started.html"><code>manual/latest/get-started.html</code></a>.</p>
+        <p>This page now lives in the reference manual. Redirecting automatically to <a href="manual/latest/get-started.html"><code>manual/latest/get-started.html</code></a>.</p>
         <p class="primary-action"><a class="button primary" href="manual/latest/get-started.html">Open manual page <span aria-hidden="true">→</span></a></p>
       </article>
     </main>
     <footer class="site-footer">
-      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
-      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
-      <p class="privacy">CurveBook runs locally and collects no telemetry. Read the <a href="privacy.html">Privacy Policy</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+      <p><strong>License:</strong> MIT OR Apache-2.0. Clean-room implementation from published scientific references without commercial software or copied proprietary assets. CurveBook runs locally with zero telemetry; GitHub Pages logs visitor IPs for security.</p>
+      <p class="footer-links">
+        <a href="privacy.html">Privacy Policy</a>
+        <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+      </p>
     </footer>
-    <div class="window-statusbar" aria-label="Application summary">
-      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
-      <span class="status-cell">Pure Rust</span>
-      <span class="status-cell">Zero Telemetry</span>
-      <span class="status-cell">MIT / Apache-2.0</span>
-    </div>
   </div>
 </body>
 </html>

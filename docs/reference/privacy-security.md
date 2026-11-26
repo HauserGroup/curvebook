@@ -1,64 +1,66 @@
-# Privacy, Security, Licensing & Clean-Room Policy
+# Privacy, security, licensing, and clean-room policy
 
-CurveBook is engineered for confidential laboratory and clinical research data: the desktop application, headless CLI, MCP server, and statistical libraries run offline on your machine with zero telemetry and zero network egress.
+CurveBook is built for confidential laboratory and clinical research data. The desktop app, headless CLI, MCP server, and statistical libraries run offline on your machine with zero telemetry and zero network egress.
 
 See the public [Privacy Policy](https://curvebook.org/privacy.html), [Security Policy](../../SECURITY.md), and [Licence & Attribution Policy](../licences.md).
 
 ---
 
-## Zero Telemetry & Zero Network Egress {#zero-egress}
+## Zero telemetry and zero network egress {#zero-egress}
 
-CurveBook's application binaries (`curvebook`, `curvebook-cli`) and core libraries contain **no** network clients, **no** crash reporters, **no** usage analytics, and **no** background update checks:
+CurveBook's binaries (`curvebook`, `curvebook-cli`) and core libraries contain **no** network clients, crash reporters, analytics, or background update checks:
 
-- **Offline enforcement:** Enforced in CI via `cargo xtask telemetry`, checking source code and dependency trees for telemetry, HTTP client crates, or remote calls.
-- **No external telemetry in documentation:** The documentation site uses pure static HTML/CSS with strict Content-Security-Policy (`default-src 'none'`), `Referrer-Policy: no-referrer`, zero `<script>` tags, zero `<form>` elements, zero cookies, and zero third-party web fonts.
-- **Updates:** Because shipped binaries make zero outbound HTTP requests, updates are installed manually from verified release downloads ([Get Started & Installation](get-started.md#updating)).
-
----
-
-## Local IPC, MCP Confinement & Trust Boundaries {#local-security}
-
-### `--workdir` Filesystem Confinement (CLI & MCP) {#workdir-confinement}
-
-- Launching `curvebook-cli mcp --workdir <dir>` or `curvebook-cli ... --workdir <dir>` confines every file read, write, archive open, external import link, and figure export strictly inside the canonicalized `<dir>` boundary (`crates/engine/src/path_policy.rs`, `crates/mcp/src/formats.rs`).
-- Relative escape segments (`..`), absolute paths outside `<dir>`, and symlinks resolving outside `<dir>` fail with `ErrorCode::PathEscape` (`path_escape`) without creating missing parent directories.
-- Without `--workdir`, commands execute with your OS user account permissions (`Unconstrained local-user mode`); AI assistants and untrusted MCP prompts should always run with `--workdir <dir>` (see [Automation: MCP](automation/mcp.md)).
-
-### Loopback-Only `--control` Socket {#control-socket}
-
-When enabled via `--control <port>` (or `CURVEBOOK_CONTROL_PORT`, `port` in `1..=65535`):
-
-- Binds strictly to **`127.0.0.1:<port>`** (loopback interface only — never `0.0.0.0` or external NICs).
-- Authenticates JSON-lines commands with a constant-time bearer token (`CURVEBOOK_CONTROL_TOKEN` environment variable recommended; passing `--control-token` on the CLI exposes the secret in `ps` process listings and triggers a stderr warning).
+- **Offline enforcement:** Automated repository checks (`cargo xtask telemetry`) verify that source code and dependencies contain no telemetry, HTTP client crates, or outbound network calls.
+- **Static documentation site:** The manual uses static HTML and CSS with a strict Content-Security-Policy (`default-src 'none'`), `Referrer-Policy: no-referrer`, zero scripts, zero forms, zero cookies, and zero third-party web fonts.
+- **Manual updates:** Because shipped binaries never connect to the internet, install updates manually from verified release downloads ([Get started and installation](get-started.md#updating)).
 
 ---
 
-## GitHub Pages & GitHub Releases Policies {#pages-and-releases}
+## Local IPC, MCP confinement, and trust boundaries {#local-security}
 
-- **GitHub Pages:** Serves static documentation (`docs/index.html`, `docs/privacy.html`, `docs/manual/`) directly via GitHub infrastructure with zero application tracking, zero analytics beacons, and strict zero-script rendering (`privacy.html` documents GitHub hosting metadata policies).
-- **GitHub Releases & Build Attestations:** Every Beta release package, `curvebook-<version>.cdx.json` (CycloneDX 1.5 SBOM), `THIRD-PARTY-LICENSES.html`, and `SHA256SUMS.txt` is published through GitHub Actions (`release-scan` security gate) and receives a keyless OIDC/Sigstore build provenance attestation (`actions/attest-build-provenance`), while each platform package also receives a CycloneDX SBOM attestation (`actions/attest-sbom`, documented in [Releasing](../release/releasing.md)). Attestation calls run strictly inside CI workflows (`id-token: write`, `attestations: write`), adding zero network behavior to compiled CurveBook binaries.
+### `--workdir` filesystem confinement (CLI and MCP) {#workdir-confinement}
 
----
+- Passing `--workdir <dir>` to `curvebook-cli` or `curvebook-cli mcp` confines all reads, saves, archives, linked imports, and exports inside the canonicalized `<dir>` folder.
+- Path traversal (`..`), external absolute paths, and symlinks pointing outside `<dir>` fail with `path_escape` without creating missing parent directories.
+- Without `--workdir`, commands run with your OS user account permissions. Always pass `--workdir <dir>` for AI assistants and untrusted MCP sessions (see [Automation: MCP](automation/mcp.md)).
 
-## Licensing, Dependencies & Attributions {#licensing}
+### Loopback-only `--control` socket {#control-socket}
 
-- **Dual Licence:** CurveBook source code is dual-licensed under **`MIT OR Apache-2.0`** ([Cargo.toml](../../Cargo.toml), [NOTICE](../../NOTICE)).
-- **Permissive Dependency Allowlist:** Checked continuously via `cargo deny check` (`deny.toml`) and `cargo xtask licenses`, allowing only permissive SPDX licences (`MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib`, `Unicode-3.0`, `CC0-1.0`) and prohibiting all copyleft dependencies (`GPL-*`, `AGPL-*`, `LGPL-*`). See [Licence & Attribution Policy](../licences.md).
-- **Release Notices:** Every release includes `THIRD-PARTY-LICENSES.html` alongside [`ATTRIBUTION.md`](../../ATTRIBUTION.md) and [`NOTICE`](../../NOTICE). CurveBook repositories and binaries contain **zero bundled binary font files** (`cargo xtask assets`); custom builds using `CURVEBOOK_FONTS_DIR` embed only explicitly supplied `OFL-1.1` font files.
+When enabled with `--control <port>` (or `CURVEBOOK_CONTROL_PORT`, port `1` to `65535`):
 
----
-
-## Clean-Room Implementation Statement {#clean-room}
-
-CurveBook is an original clean-room scientific software suite. Statistical methods, nonlinear least-squares solvers, distribution evaluators, vector graphics renderers, file container parsers, and user interface components are implemented independently in Rust from published peer-reviewed academic literature (`D1` citations documented in the numerical modules, [Analysis Kinds Registry](registry/tables.html#analysis-kinds), and [Parametric Equations Registry](registry/equations.html)), validated against public NIST StRD and open-source reference oracles, and verified continuously via `cargo xtask brands`, `cargo xtask cleanroom`, and `cargo xtask citations`. Support for `.pzfx` and `.prism` files is implemented purely at the external file-format import boundary (`crates/format`).
+- CurveBook binds strictly to **`127.0.0.1:<port>`** (loopback only, never `0.0.0.0` or external interfaces).
+- Requests require a bearer token checked in constant time. Set `CURVEBOOK_CONTROL_TOKEN` rather than passing `--control-token` on the command line, which exposes the token in process listings and prints a warning.
 
 ---
 
-## Vulnerability Reporting {#security-reporting}
+## GitHub Pages and GitHub Releases policies {#pages-and-releases}
 
-Security vulnerabilities, crash bugs, parser exploits, path-escape bypasses, or archive integrity defects should be reported following [SECURITY.md](../../SECURITY.md). In-scope threat boundaries include:
+- **GitHub Pages:** Serves static documentation pages directly from GitHub infrastructure with zero application tracking, analytics beacons, or scripts. See the [Privacy Policy](https://curvebook.org/privacy.html) for GitHub hosting details.
+- **GitHub Releases and build attestations:** Release packages, the CycloneDX 1.5 SBOM (`curvebook-<version>.cdx.json`), `THIRD-PARTY-LICENSES.html`, and `SHA256SUMS.txt` are published through GitHub Actions. Each release carries a keyless Sigstore build provenance attestation, and platform packages carry CycloneDX SBOM attestations ([Releasing](../release/releasing.md)). Attestation steps run only in CI and add zero network code to CurveBook binaries.
 
-- Untrusted `.curvebook`, `.cbtemplate`, `.csv`, `.pzfx`, or `.prism` archive/file parsing (bounded ZIP, XML, cell-count, and float-finite checks)
-- Path traversal or symlink escape across `--workdir` or unpacked `.curvebook.d/` saves
-- Loopback `--control` token validation and request framing limits
-- PDF / SVG / PNG / TIFF / EMF export integer/pixel/memory resource limits.
+---
+
+## Licensing, dependencies, and attributions {#licensing}
+
+- **Dual licence:** CurveBook source code is dual-licensed under **`MIT OR Apache-2.0`** ([Cargo.toml](../../Cargo.toml), [NOTICE](../../NOTICE)).
+- **Permissive dependency allowlist:** CI checks (`cargo deny check` and `cargo xtask licenses`) enforce permissive SPDX licences only (`MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib`, `Unicode-3.0`, `CC0-1.0`). Copyleft dependencies (`GPL-*`, `AGPL-*`, `LGPL-*`) are forbidden (see [Licence & Attribution Policy](../licences.md)).
+- **Release notices and fonts:** Releases include `THIRD-PARTY-LICENSES.html`, [`ATTRIBUTION.md`](../../ATTRIBUTION.md), and [`NOTICE`](../../NOTICE). CurveBook ships **zero bundled binary font files**; custom builds using `CURVEBOOK_FONTS_DIR` read only user-supplied fonts.
+
+---
+
+## Clean-room implementation statement {#clean-room}
+
+CurveBook is an original clean-room scientific software suite. Statistical methods, nonlinear least-squares solvers, probability distributions, vector graphics renderers, container parsers, and UI components are written independently in Rust from peer-reviewed literature.
+
+Citations are documented across the numerical modules, [Analysis Kinds Registry](registry/tables.html#analysis-kinds), and [Parametric Equations Registry](registry/equations.html), and validated against NIST StRD and open-source reference oracles. Automated checks (`cargo xtask brands`, `cargo xtask cleanroom`, `cargo xtask citations`) enforce clean-room boundaries continuously. Support for `.pzfx files` and `.prism files` is isolated at the external file-format import boundary.
+
+---
+
+## Vulnerability reporting {#security-reporting}
+
+Report security vulnerabilities, crashes, parser bugs, path-escape bypasses, or archive integrity defects according to [SECURITY.md](../../SECURITY.md). In-scope trust boundaries include:
+
+- Parsing untrusted `.curvebook`, `.cbtemplate`, `.csv`, `.pzfx`, or `.prism` files (ZIP, XML, cell-count, and float checks)
+- Path traversal or symlink escapes across `--workdir` or unpacked `.curvebook.d/` saves
+- Loopback `--control` token checks and request framing caps
+- PDF, SVG, PNG, TIFF, and EMF export dimension and memory limits.

@@ -1,118 +1,132 @@
-# Concepts & Document Architecture
+# Concepts & document architecture
 
-CurveBook stores an entire statistical and graphing study inside a single deterministic project (`ProjectDocument`) organized into five typed workspace sections, connected by a reactive directed acyclic graph (DAG), and protected by non-destructive cell exclusions, bounded session undo/redo, and explicit schema versioning.
+CurveBook stores an entire statistical and graphing study inside one deterministic project. Projects are organized into five workspace sections, connected by a reactive directed acyclic graph (DAG), and protected by non-destructive exclusions, bounded undo/redo, and explicit schema versioning.
 
 ---
 
-## Projects, Identifiers & Document Limits {#projects-identifiers-and-limits}
+## Projects, identifiers & document limits {#projects-identifiers-and-limits}
 
-A `ProjectDocument` pairs a project title, persistent analysis/workspace metadata, optional checkpoints, and an ordered collection of typed sheets. All structural sizes obey explicit upper bounds enforced during editing and archive validation:
+A project pairs a title, workspace metadata, optional checkpoints, and an ordered set of typed sheets. Every sheet carries a unique, non-whitespace sheet ID and an editable display title.
 
-| Limit Constant | Value | Scope |
+Editing and archive validation enforce these structural limits:
+
+| Limit | Value | Scope |
 |---|---:|---|
-| `CURRENT_SCHEMA_VERSION` | `8` | Active project document JSON schema version |
-| `MAX_SHEETS_PER_PROJECT` | `500` | Maximum sheets across all five navigator sections in one project |
-| `MAX_ROWS` | `1,000,000` | Maximum rows per individual data table |
-| `MAX_DATA_SETS` | `1,024` | Maximum dataset/group/variable columns per data table |
-| `MAX_SUBCOLUMNS` | `512` | Maximum replicate subcolumns per dataset (`RawReplicates(n)`) |
-| `MAX_SHEET_CELLS` | `30,000,000` | Maximum total dense cells (`rows * cols * subcols`) in one table |
-| `MAX_PROJECT_CELLS` | `50,000,000` | Maximum total cells across all data sheets in one project |
-| `MAX_TITLE_BYTES` | `4,096` | Maximum UTF-8 byte length for project or sheet titles |
-| `MAX_SHEET_ID_BYTES` | `256` | Maximum UTF-8 byte length for a `SheetId` |
-| `MAX_CHECKPOINTS_PER_PROJECT` | `32` (creation) / `64` (archive ceiling) | `project.createCheckpoint` allows up to `32` per project; archive/loader validation accepts up to `64` |
+| Document schema version | 8 | Active project JSON schema version |
+| Sheets per project | 500 | Total sheets across all five navigator sections |
+| Rows per table | 1,000,000 | Maximum rows in one data table |
+| Datasets per table | 1,024 | Maximum dataset, group, or variable columns |
+| Replicate subcolumns | 512 | Maximum replicate subcolumns per dataset |
+| Cells per table | 30,000,000 | Total dense cells (rows × columns × subcolumns) |
+| Cells per project | 50,000,000 | Total cells across all data tables |
+| Title length | 4,096 bytes | Maximum UTF-8 byte length for project or sheet titles |
+| Sheet ID length | 256 bytes | Maximum UTF-8 byte length for a sheet ID |
+| Named checkpoints | 32 (64 on open) | Creation limit vs. archive validation ceiling |
 
-Every sheet carries a stable, non-whitespace `SheetId` (distinct across the project) and a mutable display `title`.
-
----
-
-## Sheet Sections & Sheet Families {#sheet-sections-and-families}
-
-CurveBook organizes sheets into five canonical `SheetSection` navigator folders:
-
-| Section | Sheet Type | Role in the Workspace |
-|---|---|---|
-| **Data** | `DataSheet` | Typed data grid holding one of the [eight table archetypes](tables.md#table-archetypes), row titles, excluded-cell masks, exclusion provenance notes, calculated-variable formulas, and linked data regions. |
-| **Info** | `InfoSheet` | Free-form notes plus typed key/value experiment constants (`Text`, `Number`, `Boolean`), including standard metadata keys (`ExperimentDate`, `Experimenter`, `Protocol`, `ProjectCode`, `NotebookId`, `LotNumber`, `Instrument`, `Notes`). Can be linked upstream via `HookSource` parameters. |
-| **Analyses** | `ResultSheet` | Multi-tab statistical, transform, simulation, or curve-fitting output derived from an upstream `DataSheet` (or analyzable upstream `ResultSheet`), accompanied by diagnostic checklists (`QOL-7`), hookable scalars, curve overlays, and optional `floating_notes`. |
-| **Graphs** | `GraphSheet` | Publication graph specification (`GraphSpec`) referencing one or more upstream `DataSheet`s and optional `ResultSheet` overlays (fitted curves, comparison brackets, compact letter display, live $\TeX$ equation boxes). |
-| **Layouts** | `LayoutSheet` | Multi-panel physical page composition (`LayoutSpec`, up to `64` `LayoutItem` panels) arranging `GraphSheet`s, live `ResultSheet` tables, embedded raster images, and supporting text/badges with physical paper sizes and journal column-width presets. |
-
-### Sheet Families (`family_anchor_sheet_id`) {#sheet-families}
-
-Each sheet tracks its lineage to a root `DataSheet` via `family_anchor_sheet_id`, allowing downstream `ResultSheet`s, derived `DataSheet`s (from transforms), `GraphSheet`s, and `LayoutSheet`s to be inspected together or cloned coherently via `sheet.duplicateFamily` and `sheet.clonePipeline` (see [Command Reference](../commands.md)).
+`project.createCheckpoint` allows creating up to 32 checkpoints per project. Opening an existing archive accepts up to 64 checkpoints.
 
 ---
 
-## Reactive DAG & Recalculation Lifecycle {#reactive-dag}
+## Sheet sections & sheet families {#sheet-sections-and-families}
 
-Dependencies between sheets form a strict **directed acyclic graph (DAG)** evaluated by `curvebook-engine` (`crates/engine/src/dag.rs`):
+CurveBook organizes sheets into five navigator sections:
+
+| Section | Role in the workspace |
+|---|---|
+| **Data** | Typed grids for the [eight table archetypes](tables.md#table-archetypes), exclusions, and calculated formulas. |
+| **Info** | Free-form study notes and typed key/value experiment constants. |
+| **Analyses** | Multi-tab statistical, transform, simulation, or curve-fitting results. |
+| **Graphs** | Publication figures referencing data tables and analysis overlays. |
+| **Layouts** | Multi-panel physical pages combining graphs, live tables, images, and badges. |
+
+Key workspace behaviors across sections:
+
+- **Data tables:** Store row titles, non-destructive exclusion masks, exclusion provenance notes, `=` Calculated Variables, and linked data regions.
+- **Info sheets:** Hold text, numeric, or boolean constants—including standard metadata keys (`ExperimentDate`, `Experimenter`, `Protocol`, `ProjectCode`, `NotebookId`, `LotNumber`, `Instrument`, `Notes`)—that can be hooked into formulas, analyses, and graph text.
+- **Results sheets:** Derive from a data table or another analyzable results sheet. Each results sheet includes assumption diagnostics, hookable scalar outputs, curve overlays, and optional floating notes.
+- **Graphs and page layouts:** Graphs reference one or more data tables plus optional overlays (fitted curves, comparison brackets, compact letter display, and live $\TeX$ equations). Page layouts hold up to 64 panels with physical paper sizes and journal column-width presets.
+
+### Sheet families {#sheet-families}
+
+Each sheet tracks its root data table via `family_anchor_sheet_id`. Downstream results sheets, derived transform tables, graphs, and page layouts stay linked to that anchor. You can inspect a family together or clone an entire pipeline coherently with `sheet.duplicateFamily` and `sheet.clonePipeline` (see the [Command Reference](../commands.md)).
+
+---
+
+## Reactive DAG & recalculation lifecycle {#reactive-dag}
+
+Dependencies between sheets form a strict **directed acyclic graph (DAG)** evaluated by the CurveBook engine:
 
 ```text
-InfoSheet (HookSource constants) ──┐
-DataSheet (raw observations)       ├──► Formula (= Calculated Variables)
-                                   ├──► LinkedDataRegion (paste / transform links)
-                                   ├──► ResultSheet (Transform / Stats / Fit) ──► HookSource scalars
-                                   └──► GraphSheet (series + fit overlays + CLD/TeX) ──► LayoutSheet
+Info sheet (hook constants) ──┐
+Data table (raw observations) ├──► Formulas (= Calculated Variables)
+                              ├──► Linked data regions (paste / transform links)
+                              ├──► Results sheet (transform / stats / fit) ──► Hook scalars
+                              └──► Graph (series + fit overlays + CLD/TeX) ──► Page layout
 ```
 
-- **Cycle detection:** Formula circularity, linked-region loops (`detect_link_cycles`), and cyclic `HookSource` parameter bindings are rejected with `ErrorCode::CycleDetected` before committing edits or running recalculation.
-- **Dirty propagation & topological order:** Editing a cell, toggling an exclusion, updating an `InfoSheet` constant, or modifying an `AnalysisSpec` marks downstream dependents dirty and recalculates them in deterministic topological order (`project.recalculate`).
-- **Freezing (`sheet.freeze` / `sheet.unfreeze`):** Sets `frozen: bool` on a sheet (`DataSheet`, `ResultSheet`, `GraphSheet`, `LayoutSheet`). A frozen `DataSheet` (`frozen: true`) rejects direct mutations with `ErrorCode::FrozenSheet`; a frozen `ResultSheet` retains its snapshot instead of recomputing when upstream data change.
-- **`ResultStatus` lifecycle:** Every `ResultSheet` reports one of three statuses:
-  - `Dirty`: Upstream inputs or `AnalysisSpec` parameters changed and recalculation is pending.
-  - `UpToDate`: Computed tabs, scalars, pairwise comparisons, fitted curves, and checklist reflect current upstream inputs without error.
-  - `Failed { code, message }`: Most recent recalculation could not succeed for current inputs (e.g., all rows excluded or singular model); `lookup_scalar` returns `None` while failed so invalid results never propagate through hooks. When valid upstream data are restored, recalculation resumes `UpToDate` results automatically.
+- **Cycle detection:** Circular formulas, linked-region loops, and cyclic hook parameter bindings are rejected (`CycleDetected`) before any edit or recalculation commits.
+- **Dirty propagation:** Editing a cell, toggling an exclusion, updating an info constant, or changing analysis parameters marks downstream dependents dirty. Recalculation then runs in deterministic topological order (`project.recalculate`).
+- **Freezing sheets:** `sheet.freeze` and `sheet.unfreeze` toggle the `frozen` flag on any data, results, graph, or layout sheet. A frozen data table rejects direct mutations (`FrozenSheet`). A frozen results sheet keeps its existing snapshot when upstream data change.
+- **Result status lifecycle:** Every results sheet reports one of three states:
+  - **Dirty:** Upstream inputs or analysis parameters changed and recalculation is pending.
+  - **Up to date:** Tabs, scalars, pairwise comparisons, fitted curves, and diagnostics match current inputs.
+  - **Failed:** Recalculation could not succeed for current inputs (for example, all rows excluded or a singular model). Scalar hooks return no value while failed so invalid results never propagate; restoring valid upstream inputs returns results to up to date automatically.
 
 ---
 
-## Non-Destructive Cell Exclusions & Provenance {#cell-exclusions}
+## Non-destructive cell exclusions & provenance {#cell-exclusions}
 
-Every numeric or text cell stores `excluded: bool` independently of `value: CellValue`. Marking a cell excluded:
+Every numeric or text cell stores its `excluded` flag independently of its value. Marking a cell excluded has four effects:
 
-1. Preserves the underlying raw numeric or text value in memory, `.curvebook` archives, and `.curvebook.d/` sheet CSVs (written with a leading `*` prefix such as `*12.4` when `parse_asterisk_exclusions` is active).
-2. Excludes the observation from descriptive summaries, statistical tests, curve fits, transforms, and plotted points/error bars, and omits it from selection [Quick Statistics](qol.md#quick-statistics).
+1. Preserves the raw numeric or text value in memory, `.curvebook` archives, and `.curvebook.d/` CSV files (written with a leading `*`, such as `*12.4`, when `parse_asterisk_exclusions` is active).
+2. Excludes the observation from descriptive summaries, statistical tests, curve fits, transforms, plotted points and error bars, and selection [Quick Statistics](qol.md#quick-statistics).
 3. Propagates as missing in [`=` Calculated Variables](tables.md#calculated-variables).
-4. Supports optional structured provenance tags via `DataSheet::exclusion_notes: Vec<CellExclusionNote>` (`QOL-3`), storing `(coord, reason_tag, note, timestamp_utc)` (`table.excludeCellsWithReason` and `table.exclusionAuditReport`) for reproducible audit trails without touching hot numerical loops.
+4. Supports optional structured audit notes storing cell coordinate, `reason_tag`, `note`, and `timestamp_utc` (`table.excludeCellsWithReason` and `table.exclusionAuditReport`) without affecting numerical computations.
 
 ---
 
-## Session Undo/Redo & Named Checkpoints {#undo-and-checkpoints}
+## Session undo/redo & named checkpoints {#undo-and-checkpoints}
 
-### Bounded Session Undo/Redo {#undo-redo}
+### Bounded session undo/redo {#undo-redo}
 
-Every mutating engine command executes inside `Session` (`crates/engine/src/lib.rs`) as an atomic undoable step (`edit.undo`, `edit.redo`), subject to three simultaneous memory-safety caps:
+Every mutating engine command executes as one atomic undoable step (`edit.undo`, `edit.redo`). The undo stack obeys three simultaneous memory limits:
 
-| Undo Bound | Value | Purpose |
+| Limit | Value | Purpose |
 |---|---:|---|
-| `MAX_UNDO_ENTRIES` | `64` | Maximum undo steps retained in memory per open session |
-| `MAX_UNDO_CELL_BUDGET` | `25,000,000` | Cumulative table cell count cap across retained undo snapshots |
-| `MAX_UNDO_CHECKPOINT_BYTES_BUDGET` | `16,777,216` (`16 MiB`) | Byte budget for full serialized snapshots in the undo stack |
+| Undo steps | 64 | Maximum steps retained in memory per open session |
+| Retained cells | 25,000,000 | Cumulative table cell cap across retained snapshots |
+| Snapshot memory | 16 MiB | Byte budget for full serialized snapshots in memory |
 
-Undo/redo history lives only in the active session and is intentionally not written inside `.curvebook` archives. Crash resilience between saves is handled separately by the [WAL `CrashRecoveryJournal`](files.md#crash-recovery).
+Undo/redo history lives only in the active session and is not written inside `.curvebook` archives. Crash resilience between saves is handled separately by the [WAL crash recovery journal](files.md#crash-recovery).
 
-### Named In-File Checkpoints (`NamedCheckpoint`) {#named-checkpoints}
+### Named in-file checkpoints {#named-checkpoints}
 
-For persistent milestone snapshots across sessions, `ProjectDocument` supports named in-file checkpoints (`project.createCheckpoint`, `project.listCheckpoints`, `project.restoreCheckpoint`, `project.deleteCheckpoint`, up to `32` created per project via `project.createCheckpoint`, with `crates/format` permitting up to `64` on archive validation). Each `NamedCheckpoint` stores an `id`, human-readable `name`, optional `note`, UTC timestamp, and a complete validated JSON snapshot of the project at creation time (subject to `MAX_ARCHIVE_FILE_BYTES = 128 MiB` on restore). Restoring a checkpoint creates a single undoable action in the live session.
+Use named checkpoints for milestone snapshots that persist across sessions (`project.createCheckpoint`, `project.listCheckpoints`, `project.restoreCheckpoint`, `project.deleteCheckpoint`). You can create up to 32 checkpoints per project, and opening existing archives accepts up to 64.
 
----
-
-## Number Formatting & *P*-Value Conventions {#number-and-pvalue-formatting}
-
-- **Data & Tick Formatting (`LocaleNumberPolicy`, `AxisTickFormat`, `TickLabelFormat`):** Graphs and tables separate stored IEEE-754 `f64` precision from display formatting. `LocaleNumberPolicy` controls decimal separators (`.` vs `,`) and thousands grouping, while numeric axis ticks (`AxisTickFormat`) support `Decimal`, `PowerOfTenSuperscript`, `ScientificE`, `Antilog`, and `EngineeringSi` (with `TickLabelFormat` adding `Categorical(CategoricalTickSource)`) without rounding underlying computed data.
-- ***P*-Value Display (`PValueFormat`):** Stored per `AnalysisSpec` (`curvebook-math`):
-  - Exact numeric formats: `FourDecimal` (default, floor `< 0.0001`, up to `****`), `Apa` (`.123`, floor `< .001`, up to `***`), `Nejm` (`0.123`, floor `< 0.001`, up to `***`), and `Custom { decimals, scientific_below }` (`decimals` in `1..=15` with optional positive scientific-notation cutoff).
-  - Formatting affects presentation only; multiplicity procedures and hypothesis decisions operate on full unrounded IEEE-754 probabilities.
+Each checkpoint stores an `id`, display `name`, optional `note`, UTC timestamp, and a validated JSON snapshot of the project (subject to the 128 MiB archive limit on restore). Restoring a checkpoint creates a single undoable action in the active session.
 
 ---
 
-## Persisted Analysis Settings (`AnalysisSpec`) {#persisted-analysis-settings}
+## Number formatting & *P*-value conventions {#number-and-pvalue-formatting}
 
-Every `ResultSheet` embeds the complete `AnalysisSpec` that generated it, recording:
+- **Data and tick formatting:** Tables and graphs separate stored IEEE-754 double-precision values from display formatting. Locale settings control decimal separators (`.` or `,`) and thousands grouping. Numeric axis ticks support decimal, power-of-ten superscript, scientific E, antilog, engineering SI, and categorical labels without rounding underlying data.
+- ***P*-value display:** Configured per analysis with four format modes:
+  - **Four decimals** (default): floor `< 0.0001`, up to `****`.
+  - **APA:** `.123` style, floor `< .001`, up to `***`.
+  - **NEJM:** `0.123` style, floor `< 0.001`, up to `***`.
+  - **Custom:** `1` to `15` decimal places with an optional scientific-notation cutoff.
+- Display formatting never rounds numerical calculations. Multiplicity procedures and hypothesis decisions always use full IEEE-754 probabilities.
 
-- `id`, `title`, and `source_sheet_id`
-- `kind: AnalysisKind` and its method-specific option struct (test selection, tails, pairing, sphericity/REML df method, multiplicity procedure, weighting scheme, fit method, parameter rules, or power targets)
-- `selected_data_sets: Vec<usize>` (empty selects all compatible columns/datasets)
-- `confidence_level: ConfidenceLevel` (continuous percentage `(0, 100)`, defaulting to `95%`)
-- `p_value_format: PValueFormat`
+---
 
-Because `AnalysisSpec` travels inside both `.curvebook` / `.curvebook.d/` projects and `.cbtemplate` reusable templates, re-running (`analysis.run`), modifying parameters (`analysis.updateParams`), or retargeting to new experimental data (`analysis.retargetData`) preserves every statistical choice deterministically. See [Command Reference](../commands.md), [Automation: MCP](automation/mcp.md), and [Automation: CLI](automation/cli.md) for programmatic parameter schemas.
+## Persisted analysis settings {#persisted-analysis-settings}
+
+Every results sheet embeds the complete analysis specification that produced it:
+
+- Sheet `id`, `title`, and `source_sheet_id`.
+- Analysis kind and method-specific options (test selection, tails, pairing, degrees of freedom, multiplicity, weighting, fit method, parameter rules, or power targets).
+- `selected_data_sets` (empty selects all compatible columns).
+- `confidence_level` (continuous percentage in `(0, 100)`, defaulting to 95%).
+- `p_value_format`.
+
+These settings travel inside `.curvebook` archives, `.curvebook.d/` directories, and `.cbtemplate` templates. Re-running (`analysis.run`), updating options (`analysis.updateParams`), or retargeting to new data (`analysis.retargetData`) reproduces every choice deterministically. See the [Command Reference](../commands.md), [Automation: MCP](automation/mcp.md), and [Automation: CLI](automation/cli.md) for programmatic parameter schemas.

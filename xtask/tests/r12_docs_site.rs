@@ -32,7 +32,7 @@ impl SimRepoTemplate {
         }
 
         // Collect only the docs subtrees that `docs-site` reads or resolves links against,
-        // skipping archival/planning directories (`docs/{history,audit,planning,evidence,implementation}`)
+        // skipping archival/planning directories (`docs/{history,audit,planning,implementation}`)
         // and internal tracking tables (`ROADMAP.md`, `STATUS.md`, `gui-workflows.md`).
         let mut docs_paths = Vec::new();
         collect_docs_subset(&root, &mut docs_paths)?;
@@ -92,7 +92,7 @@ fn collect_docs_subset(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String
             if !matches!(name, "STATUS.md" | "gui-workflows.md") {
                 out.push(Path::new("docs").join(name));
             }
-        } else if p.is_dir() && matches!(name, "images" | "schemas" | "release" | "reference") {
+        } else if p.is_dir() && matches!(name, "images" | "schemas" | "release" | "reference" | "evidence") {
             collect_rel_files_recursive(root, &p, out)?;
         }
     }
@@ -274,6 +274,8 @@ fn docs_site_check_passes_and_output_is_deterministic() -> Result<(), String> {
 fn assert_beta_site_contents(map_a: &BTreeMap<String, String>) -> Result<(), String> {
     for key in [
         "index.html",
+        "reference.html",
+        "support.html",
         "az-index.html",
         "analyses.html",
         "automation/mcp.html",
@@ -314,40 +316,14 @@ fn assert_beta_site_contents(map_a: &BTreeMap<String, String>) -> Result<(), Str
         assert!(contrib_index.contains(&expected_url), "section-contribute.html missing GitHub main link `{expected_url}`");
     }
 
-    // Verify grouped Manual Home sections, static math/callouts/figures on live pages, and registry upgrades.
-    let home_html = map_a.get("index.html").ok_or("missing index.html")?;
-    for group in [
-        "class=\"section-group\"",
-        "Start Here",
-        "Scientific &amp; Graphing Reference",
-        "Files, Automation &amp; Settings",
-        "Support &amp; Contribute",
-        "aria-current=\"page\"",
-    ] {
-        assert!(home_html.contains(group), "index.html missing `{group}`");
-    }
+    assert_nav_hubs_and_r12_14_fixes(map_a)?;
 
-    let glossary_html = map_a.get("glossary.html").ok_or("missing glossary.html")?;
-    assert!(glossary_html.contains("<span class=\"math\">"), "glossary.html must render math spans");
-    assert!(!glossary_html.contains("$\\text{AIC}_c$"), "glossary.html leaked raw TeX");
-
-    let desktop_html = map_a.get("desktop-gui.html").ok_or("missing desktop-gui.html")?;
-    assert!(desktop_html.contains("<figure class=\"doc-figure\">"), "desktop-gui.html should wrap standalone screenshots in <figure>");
-
-    let equations_html = map_a.get("registry/equations.html").ok_or("missing registry/equations.html")?;
-    assert!(equations_html.contains("<span class=\"math-frac\">"), "registry/equations.html must render static math fractions");
-    assert!(equations_html.contains("<code>Y ="), "registry/equations.html must retain copyable TeX inside <code>");
-
-    let graphs_html = map_a.get("registry/graphs.html").ok_or("missing registry/graphs.html")?;
-    assert!(graphs_html.contains("id=\"graph-layout-features\""), "registry/graphs.html missing R13 features section");
-    assert!(graphs_html.contains("EqualizeScaleMode") || graphs_html.contains("layout.equalizeScaling"));
-
-    // AUD-12-19: Math-containing headings in live docs must produce clean slug IDs and plain TOC text.
+    // AUD-12-19: Math-containing headings in live docs must produce clean slug IDs and nested TOC text.
     let fitting_html = map_a.get("fitting.html").ok_or("missing fitting.html")?;
     assert!(fitting_html.contains("id=\"hougaard-skewness-g1\""), "fitting.html must render clean heading ID `hougaard-skewness-g1` (AUD-12-19)");
     assert!(
-        fitting_html.contains("href=\"#hougaard-skewness-g1\">— Hougaard Skewness (g1)</a>"),
-        "fitting.html TOC must render clean plain math text for Hougaard Skewness (AUD-12-19)"
+        fitting_html.contains("href=\"#hougaard-skewness-g1\">Hougaard Skewness (g1)</a>"),
+        "fitting.html nested TOC must render clean plain math text for Hougaard Skewness (AUD-12-19)"
     );
 
     // Contributor docs linked from automation pages must rewrite directly to GitHub blob URLs.
@@ -359,6 +335,89 @@ fn assert_beta_site_contents(map_a: &BTreeMap<String, String>) -> Result<(), Str
     assert!(!map_a.contains_key("ROADMAP.html"));
     assert!(!map_a.contains_key("STATUS.html"));
 
+    Ok(())
+}
+
+fn assert_nav_hubs_and_r12_14_fixes(map_a: &BTreeMap<String, String>) -> Result<(), String> {
+    // Verify grouped Manual Home sections, flat chrome, R12.13 navigation, and R12.14 fixes.
+    let home_html = map_a.get("index.html").ok_or("missing index.html")?;
+    for group in [
+        "class=\"site-shell is-manual\"",
+        "class=\"manual-layout\"",
+        "class=\"manual-sidebar\"",
+        "class=\"section-group\"",
+        "Start Here",
+        "Scientific &amp; Graphing Reference",
+        "Files, Automation &amp; Settings",
+        "Support &amp; Contribute",
+        "aria-current=\"page\"",
+        "Development build · main",
+        "1 page",
+        "href=\"concepts.html\"",
+    ] {
+        assert!(home_html.contains(group), "index.html missing `{group}`");
+    }
+    for forbidden in ["desktop-window", "title-bar", "window-status", "window-statusbar", "1 pages", "class=\"breadcrumbs\"", "class=\"pager\""] {
+        assert!(!home_html.contains(forbidden), "index.html contains unexpected `{forbidden}`");
+    }
+    assert!(map_a.contains_key("section-concepts.html"), "backwards-compatible section-concepts.html must still be emitted");
+
+    let reference_html = map_a.get("reference.html").ok_or("missing reference.html")?;
+    for expected in [
+        "Core concepts &amp; data",
+        "Statistics &amp; curve fitting",
+        "Graphs, files &amp; settings",
+        "Terminology",
+        "href=\"concepts.html\"",
+        "href=\"analyses.html\"",
+    ] {
+        assert!(reference_html.contains(expected), "reference.html missing `{expected}`");
+    }
+    let support_html = map_a.get("support.html").ok_or("missing support.html")?;
+    for expected in ["href=\"troubleshooting.html\"", "href=\"privacy-security.html\"", "href=\"section-contribute.html\""] {
+        assert!(support_html.contains(expected), "support.html missing `{expected}`");
+    }
+
+    let get_started_sec = map_a.get("section-get-started.html").ok_or("missing section-get-started.html")?;
+    assert!(get_started_sec.contains("Getting started</h1>") && get_started_sec.contains("href=\"get-started.html\">Install CurveBook</a>"));
+
+    let az_html = map_a.get("az-index.html").ok_or("missing az-index.html")?;
+    assert!(az_html.contains("class=\"az-letters\"") && !az_html.contains("class=\"toc\""), "az-index.html must not emit duplicate vertical TOC");
+
+    let get_started_html = map_a.get("get-started.html").ok_or("missing get-started.html")?;
+    let gs_h1 = get_started_html.find("<h1 ").ok_or("get-started.html missing h1")?;
+    let gs_toc = get_started_html.find("class=\"toc\"").ok_or("get-started.html missing toc")?;
+    assert!(gs_h1 < gs_toc, "TOC must appear below H1 on get-started.html");
+    let (_, sidebar_slice) = get_started_html.split_once("class=\"manual-sidebar\"").ok_or("missing sidebar on get-started.html")?;
+    let (sidebar_only, _) = sidebar_slice.split_once("</aside>").ok_or("unclosed sidebar on get-started.html")?;
+    assert!(
+        sidebar_only.contains("href=\"desktop-gui.html\"") && !sidebar_only.contains("href=\"registry/tables.html\""),
+        "sidebar must expand only active section on get-started.html"
+    );
+
+    let tables_html = map_a.get("tables.html").ok_or("missing tables.html")?;
+    assert!(tables_html.contains("<td><code>||</code>, <code>OR</code></td>"), "Disjunction table row must keep intact `||` code span");
+
+    let glossary_html = map_a.get("glossary.html").ok_or("missing glossary.html")?;
+    assert!(glossary_html.contains("<span class=\"math\">"), "glossary.html must render math spans");
+    assert!(!glossary_html.contains("$\\text{AIC}_c$"), "glossary.html leaked raw TeX");
+
+    let desktop_html = map_a.get("desktop-gui.html").ok_or("missing desktop-gui.html")?;
+    assert!(desktop_html.contains("<figure class=\"doc-figure\">"), "desktop-gui.html should wrap standalone screenshots in <figure>");
+
+    let equations_html = map_a.get("registry/equations.html").ok_or("missing registry/equations.html")?;
+    assert!(equations_html.contains("<span class=\"math-frac\">"), "registry/equations.html must render static math fractions");
+    assert!(equations_html.contains("<code>Y ="), "registry/equations.html must retain copyable TeX inside <code>");
+    assert!(
+        equations_html.contains("<span class=\"math-text\">Bottom</span> + <span class=\"math-frac\">"),
+        "missing left-side space before `+` in math"
+    );
+    assert!(equations_html.contains("1e-30"), "registry/equations.html missing clean scientific bound `1e-30`");
+    assert!(!equations_html.contains("0.000000000000000000000000000001"), "registry/equations.html leaked unformatted decimal bound");
+
+    let graphs_html = map_a.get("registry/graphs.html").ok_or("missing registry/graphs.html")?;
+    assert!(graphs_html.contains("id=\"graph-layout-features\""), "registry/graphs.html missing R13 features section");
+    assert!(graphs_html.contains("EqualizeScaleMode") || graphs_html.contains("layout.equalizeScaling"));
     Ok(())
 }
 
@@ -424,11 +483,17 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
         ),
         ("desktop-gui", "# Desktop GUI Overview\n\nSee [Commands](../commands.md).\n"),
         ("concepts", "# Concepts\n\nSee [Tables](tables.md).\n"),
-        ("tables", "# Data Tables\n\nSee [Formats](files.md).\n"),
+        ("tables", "# Data Tables\n\nSee [Formats](files.md).\n\n## Table Archetypes {#table-archetypes}\n\nXY, Column, and Grouped tables.\n"),
         ("fitting", "# Curve Fitting\n\nSee [Equations Registry](registry/equations.html#eq-michaelis_menten).\n"),
-        ("graphs", "# Graphs & Page Layouts\n\n![Workspace](../images/workspace-split-fit.png)\n"),
+        (
+            "graphs",
+            "# Graphs & Page Layouts\n\n![Workspace](../images/workspace-split-fit.png)\n\n## Graph Families {#graph-families}\n\nPlot types.\n\n## Page Layouts {#page-layouts}\n\nMulti-panel figures.\n",
+        ),
         ("qol", "# Calculators & Quality-of-Life\n\nSee [Graphs](graphs.md).\n"),
-        ("files", "# Files, Import & Export\n\nSee [Batch Schema](../schemas/batch-v1.schema.json).\n"),
+        (
+            "files",
+            "# Files, Import & Export\n\nSee [Batch Schema](../schemas/batch-v1.schema.json).\n\n## Native Formats {#native-formats}\n\nProject archives.\n",
+        ),
         ("settings", "# Settings & Languages\n\nSee [Preferences Schema](../schemas/preferences.schema.json).\n"),
         ("privacy-security", "# Privacy & Security\n\nSee [Security](../../SECURITY.md).\n"),
         (
@@ -512,17 +577,20 @@ fn assert_release_snapshot_outputs(sim_root: &Path, manual_out: &Path, head_sha:
         let html = fs::read_to_string(&path).map_err(|e| e.to_string())?;
         assert!(html.contains(&format!("<meta http-equiv=\"refresh\" content=\"0; url={refresh}\">")));
         assert!(html.contains(&format!("href=\"{href}\"")));
+        assert!(html.contains("class=\"site-shell\""));
+        assert!(!html.contains("desktop-window") && !html.contains("title-bar") && !html.contains("window-statusbar"));
         assert!(!html.contains("<script"));
     }
 
     let snap_home = fs::read_to_string(manual_out.join("v0.1/index.html")).map_err(|e| e.to_string())?;
     for needle in [
-        "Product Home</a>",
+        "Product site</a>",
         "Privacy Policy</a>",
+        "Documents v0.1.0-alpha.2",
         "aria-current=\"page\"",
         "<link rel=\"canonical\" href=\"https://curvebook.org/manual/latest/index.html\">",
     ] {
-        assert!(snap_home.contains(needle));
+        assert!(snap_home.contains(needle), "missing `{needle}` in release index.html");
     }
     assert_eq!(fs::read_to_string(manual_out.join("latest/index.html")).map_err(|e| e.to_string())?, snap_home);
 
@@ -619,7 +687,8 @@ fn assert_aud12_snapshot_and_guard_regressions(sim_root: &Path, manual_out: &Pat
     fs::write(&snap_latest_index, &injected_html).map_err(|e| e.to_string())?;
     run_xtask_fail(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str], "<script>")?;
     fs::write(&snap_v01_index, &orig_snap_html).map_err(|e| e.to_string())?;
-    fs::write(&snap_latest_index, orig_snap_html.replace("Manual Home", "Stale Manual Home")).map_err(|e| e.to_string())?;
+    fs::write(&snap_latest_index, orig_snap_html.replace("CurveBook Reference Manual", "Stale CurveBook Reference Manual"))
+        .map_err(|e| e.to_string())?;
     run_xtask_fail(sim_root, &["docs-site", "--check", "--manual-dir", manual_str, "--output", preview_str], "does not match")?;
     fs::write(&snap_latest_index, &orig_snap_html).map_err(|e| e.to_string())?;
 
@@ -685,7 +754,7 @@ fn docs_site_renders_math_callouts_figures_toc_and_rejects_leaks_and_broken_root
         "<div class=\"callout callout-important\" role=\"note\">\n<p class=\"callout-title\">Important</p>",
         "<div class=\"callout callout-warning\" role=\"note\">\n<p class=\"callout-title\">Warning</p>",
         "<div class=\"callout callout-caution\" role=\"note\">\n<p class=\"callout-title\">Caution</p>",
-        "<details open class=\"toc\">\n          <summary class=\"toc-title\">On this page</summary>",
+        "<details class=\"toc\">\n          <summary class=\"toc-title\">On this page</summary>",
         "<figure class=\"doc-figure\"><img src=\"images/workspace-split-fit.png\" alt=\"Split fit screenshot\" loading=\"lazy\"><figcaption>Split fit screenshot</figcaption></figure>",
         "<div class=\"math-block\"><span class=\"math\">",
         "<span class=\"math-frac\">",

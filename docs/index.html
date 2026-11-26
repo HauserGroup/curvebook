@@ -22,24 +22,22 @@
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
-  <div class="desktop-window wrap">
+  <div class="site-shell">
     <header class="site-header">
-      <a class="title-bar" href="index.html" aria-current="page">
-        <span class="wordmark">
-          <img src="images/curvebook.png" width="64" height="64" alt="">
+      <div class="header-inner">
+        <a class="wordmark" href="index.html">
+          <img src="images/curvebook.png" width="32" height="32" alt="">
           <span>CurveBook</span>
-        </span>
-        <span class="window-status">Beta</span>
-      </a>
-      <nav aria-label="Main navigation">
-        <a href="index.html" aria-current="page">Home</a>
-        <a href="manual/latest/index.html">Documentation</a>
-        <a href="open-pzfx-files.html">.pzfx &amp; .prism</a>
-        <a href="linux.html">Linux</a>
-        <a href="faq.html">FAQ</a>
-        <a href="privacy.html">Privacy</a>
-        <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
-      </nav>
+        </a>
+        <nav class="site-nav" aria-label="Main navigation">
+          <a href="index.html" aria-current="page">Home</a>
+          <a href="manual/latest/index.html">Documentation</a>
+          <a href="open-pzfx-files.html">.pzfx &amp; .prism</a>
+          <a href="linux.html">Linux</a>
+          <a href="faq.html">FAQ</a>
+          <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
     </header>
 
     <main id="main" tabindex="-1">
@@ -56,157 +54,104 @@
             <meta itemprop="price" content="0">
             <meta itemprop="priceCurrency" content="USD">
           </span>
-          <div class="document-brand"><img src="images/curvebook.png" width="64" height="64" alt=""><span>CurveBook</span></div>
-          <p class="eyebrow">Open-source scientific software</p>
           <h1 id="intro-title">Biostatistics.<br>Curve fitting.<br><span>Scientific graphs.</span></h1>
-          <p class="lead"><strong>CurveBook</strong> is an open-source, clean-room biostatistics, nonlinear regression, and scientific graphing application written entirely from scratch in pure Rust—built to run locally across an offline desktop interface, deterministic CLI, and built-in MCP server.</p>
-          <ul class="pill-row" aria-label="Core project guarantees">
-            <li class="pill">Pure Rust</li>
-            <li class="pill">Zero Telemetry</li>
-            <li class="pill">MIT OR Apache-2.0</li>
-            <li class="pill">Desktop · CLI · MCP</li>
-          </ul>
+          <p class="lead"><strong>CurveBook</strong> is free software for analyzing lab data, fitting curves, and making publication-ready graphs. It runs on your own computer and works offline.</p>
           <div class="action-row">
-            <a class="button primary" href="#downloads">Get CurveBook <span aria-hidden="true">↓</span></a>
-            <a class="button secondary" href="manual/index.html">Read the Manual <span aria-hidden="true">→</span></a>
+            <a class="button primary" href="#downloads">Download</a>
+            <a class="button secondary" href="manual/latest/index.html">Read the manual</a>
           </div>
+          <ul class="pill-row" aria-label="At a glance">
+            <li class="pill">Free &amp; open source</li>
+            <li class="pill">Works offline</li>
+            <li class="pill">No tracking</li>
+            <li class="pill">macOS · Windows · Linux</li>
+          </ul>
         </section>
 
-        <section class="screenshot-showcase" aria-labelledby="showcase-title">
-          <h2 id="showcase-title">Desktop workspace in action</h2>
-          <p class="section-lead">Structured tables, live curve-fitting diagnostics, and multi-panel figure layouts recalculate reactively from one shared scientific engine.</p>
-          <figure class="screenshot-card">
-            <img src="images/workspace-split-fit.png" width="1440" height="900" fetchpriority="high" alt="CurveBook light-theme split workspace showing an XY dose-response data table alongside a live four-parameter logistic curve fit, confidence ribbons, fit summary table, and Graph Inspector.">
-            <figcaption><strong>Split Data &amp; Live Curve Fitting:</strong> Edit XY replicates or exclude observations without altering raw values while nonlinear fits, 95% confidence ribbons, and the Graph Inspector update together.</figcaption>
-          </figure>
-          <div class="screenshot-grid">
-            <figure class="screenshot-card">
-              <img src="images/workspace-layout-dark.png" width="1440" height="900" loading="lazy" decoding="async" alt="CurveBook dark-theme Page Layout Composer showing millimeter rulers, a two-panel figure with dose-response fit and potency bar chart with significance brackets, embedded summary data table, and layout controls.">
-              <figcaption><strong>Page Layout Composer (Dark Theme):</strong> Compose multi-panel journal figures on millimeter presets with aligned plot origins, significance brackets, scale bars, and embedded summary tables.</figcaption>
-            </figure>
-            <figure class="screenshot-card">
-              <img src="images/workspace-anova-results.png" width="1440" height="900" loading="lazy" decoding="async" alt="CurveBook light-theme split workspace showing a multi-tab One-Way ANOVA ResultSheet on Multiple comparisons, QOL-7 Brown-Forsythe diagnostic banner, Results Interpret inspector, and linked Column graph with Compact Letter Display letters and significance brackets.">
-              <figcaption><strong>ANOVA Diagnostics &amp; Significance Brackets:</strong> Inspect multiple-comparison tables, non-blocking <code>QOL-7</code> assumption diagnostics, Compact Letter Display labels, and pairwise significance brackets side by side.</figcaption>
-            </figure>
-          </div>
-        </section>
+        <figure class="screenshot-card hero-shot">
+          <img src="images/workspace-split-fit.png" width="1440" height="900" fetchpriority="high" alt="CurveBook showing an XY dose-response data table next to a live four-parameter logistic curve fit with confidence ribbons, a fit summary table, and the Graph Inspector.">
+          <figcaption>Edit your data and watch the curve fit update next to it.</figcaption>
+        </figure>
 
         <section id="features" class="features-section" aria-labelledby="features-title" tabindex="-1">
-          <h2 id="features-title">Four pillars of one reproducible workspace</h2>
-          <p class="section-lead">Interactive desktop workflows, scripted batches, and AI assistants operate on the same typed tables, statistical methods, and vector graphics pipeline.</p>
-          <div class="pillar-grid">
-            <article class="pillar-card">
-              <h3>Structured Data Tables &amp; Formulas</h3>
-              <p>Typed archetypes (<code>XY</code>, <code>Column</code>, <code>Grouped</code>, <code>Contingency</code>, <code>Survival</code>, <code>Parts of Whole</code>, <code>Multiple Variables</code>, and <code>Nested</code>), raw replicate and pre-summarized subcolumns, live <code>=</code> Calculated Variables, auditable non-destructive exclusions, plus microplate and tidy-long import.</p>
-            </article>
-            <article class="pillar-card">
-              <h3>Biostatistics &amp; Curve Fitting</h3>
-              <p>Group comparisons, multi-way and multifactor ANOVA, REML mixed models, multiplicity adjustments and Compact Letter Display, survival and Cox proportional hazards, contingency, ROC, GLMs, PCA and clustering, power planning, and parametric, custom DSL, or ODE nonlinear regression with profile-likelihood CIs and ROUT outlier handling.</p>
-            </article>
-            <article class="pillar-card">
-              <h3>Publication Graphs &amp; Page Layouts</h3>
-              <p>Scientific plot families, nonlinear and broken axes, live TeX best-fit equations, CVD-safe Okabe–Ito and Paul Tol palettes with live CVD preview, multi-panel physical millimeter layouts, native vector clipboard, and <code>SVG</code>, <code>%PDF-1.7</code>, <code>PNG</code>, <code>TIFF</code>, and <code>.emf</code> export.</p>
-            </article>
-            <article class="pillar-card">
-              <h3>Desktop GUI, CLI &amp; Local AI (MCP)</h3>
-              <p>Offline GPU-accelerated desktop window, deterministic headless <code>curvebook-cli</code> batch execution, and built-in stdio MCP server (<code>curvebook-cli mcp</code>) supporting <code>--workdir</code> filesystem confinement and live desktop <code>--control-port</code> attachment.</p>
-            </article>
-          </div>
+          <h2 id="features-title">Features</h2>
+          <ul class="feature-grid">
+            <li class="feature-card">
+              <h3><a href="manual/latest/tables.html#table-archetypes">Organize your data <span aria-hidden="true">→</span></a></h3>
+              <p>Tables built for XY, grouped, survival, contingency, and other common lab data.</p>
+            </li>
+            <li class="feature-card">
+              <h3><a href="manual/latest/analyses.html">Run statistics <span aria-hidden="true">→</span></a></h3>
+              <p><em>t</em> tests, ANOVA, survival, contingency, ROC, and more, with assumption checks.</p>
+            </li>
+            <li class="feature-card">
+              <h3><a href="manual/latest/fitting.html">Fit curves <span aria-hidden="true">→</span></a></h3>
+              <p>Dose-response and other built-in models, or type in your own equation.</p>
+            </li>
+            <li class="feature-card">
+              <h3><a href="manual/latest/graphs.html#graph-families">Make graphs <span aria-hidden="true">→</span></a></h3>
+              <p>Publication-ready plots with significance brackets and color-blind-safe palettes.</p>
+            </li>
+            <li class="feature-card">
+              <h3><a href="manual/latest/graphs.html#page-layouts">Build figures <span aria-hidden="true">→</span></a></h3>
+              <p>Arrange multi-panel figures at journal sizes and export to SVG, PDF, PNG, or TIFF.</p>
+            </li>
+            <li class="feature-card">
+              <h3><a href="open-pzfx-files.html">Open .pzfx &amp; .prism files <span aria-hidden="true">→</span></a></h3>
+              <p>Bring in the data tables from existing files and export them to CSV.</p>
+            </li>
+            <li class="feature-card">
+              <h3><a href="manual/latest/mcp-for-beginners.html">Work with an AI assistant <span aria-hidden="true">→</span></a></h3>
+              <p>Ask your AI assistant to build tables, run analyses, and draw graphs for you.</p>
+            </li>
+            <li class="feature-card">
+              <h3><a href="manual/latest/automation/cli.html">Automate repeat work <span aria-hidden="true">→</span></a></h3>
+              <p>Rerun the same analysis on new data from the command line.</p>
+            </li>
+            <li class="feature-card">
+              <h3><a href="manual/latest/files.html#native-formats">Keep it all in one file <span aria-hidden="true">→</span></a></h3>
+              <p>Data, analyses, and graphs save together in one project, with crash recovery.</p>
+            </li>
+          </ul>
         </section>
 
-        <section id="workspace" class="workspace" aria-labelledby="workspace-title" tabindex="-1">
-          <div class="panel-title">Your complete workspace</div>
-          <p class="file-type"><code>.curvebook</code> · <code>.curvebook.d/</code> · <code>.cbtemplate</code></p>
-          <h2 id="workspace-title">Share your full workspace.<br>All at once.</h2>
-          <p>Data, analyses, graphs, page layouts, and notes stay together in one deterministic project archive—or as an unpacked <code>.curvebook.d/</code> folder for clean Git diffs.</p>
-          <div class="workspace-note">
-            <p>Send a <code>.curvebook</code> project or reusable <code>.cbtemplate</code> to a collaborator so they can reopen the complete workspace in CurveBook. This is manual project-file sharing rather than hosted live collaboration; linked external CSV or TSV paths keep provenance metadata without automatically bundling files outside the project.</p>
-            <p>Have data in <code>.pzfx</code> or <code>.prism</code> files? <a href="open-pzfx-files.html">Open them in CurveBook and export the tables to CSV</a>.</p>
+        <section id="downloads" class="downloads" aria-labelledby="downloads-title" tabindex="-1">
+          <h2 id="downloads-title">Get CurveBook <span class="badge-beta">Beta</span></h2>
+          <p class="section-lead">Free for macOS, Windows, and Linux. CurveBook is in Beta, so check the known issues before relying on it for published work.</p>
+          <div class="download-actions">
+            <a class="button primary" href="https://github.com/HauserGroup/curvebook/releases">Download from GitHub Releases <span aria-hidden="true">↗</span></a>
+            <div class="download-links">
+              <a href="manual/latest/get-started.html">Install guide</a>
+              <a href="manual/latest/troubleshooting.html#known-issues">Known issues</a>
+            </div>
           </div>
+          <div class="platform-grid" role="region" aria-label="Downloads by operating system">
+            <article class="platform-card">
+              <h3>macOS</h3>
+              <p>Open the <code>.dmg</code> file and drag CurveBook to Applications.</p>
+            </article>
+            <article class="platform-card">
+              <h3>Windows</h3>
+              <p>Download and run the <code>.msi</code> installer.</p>
+            </article>
+            <article class="platform-card">
+              <h3>Linux</h3>
+              <p>Download and run the portable AppImage (<a href="linux.html">Linux guide</a>).</p>
+            </article>
+          </div>
+          <p class="download-footnote">Command-line tools, FreeBSD archives, and download checksums are covered in the <a href="manual/latest/get-started.html">install guide</a>.</p>
         </section>
       </div>
-
-      <section id="downloads" class="downloads" aria-labelledby="downloads-title" tabindex="-1">
-        <div class="panel-title">Get CurveBook</div>
-        <div class="download-content">
-          <div>
-            <h2 id="downloads-title">Download Beta releases</h2>
-            <p>Choose an installer or archive for your computer from the latest release’s <strong>Assets</strong> list (avoid GitHub’s automatic source tarballs unless building from source). Desktop packages bundle both the <code>curvebook</code> desktop app and <code>curvebook-cli</code> (FreeBSD ships a Tier 2 CLI-only archive).</p>
-            <div class="download-links">
-              <a href="https://github.com/HauserGroup/curvebook/releases">GitHub Releases <span aria-hidden="true">↗</span></a>
-              <a href="manual/index.html">Online Manual</a>
-              <a href="manual/latest/get-started.html">Install &amp; Checksums</a>
-              <a href="manual/latest/mcp-for-beginners.html">AI Assistant (MCP) Setup</a>
-            </div>
-          </div>
-
-          <aside class="release-status" aria-label="Release status">
-            <p><strong>Beta · desktop GUI, CLI &amp; MCP</strong></p>
-            <p>The native desktop GUI (verified across automated five-stage workflows), <code>curvebook-cli</code>, local MCP, and Developer ID notarized macOS packages are ready in Beta. FreeBSD ships as a Tier 2 CLI-only archive, Windows <code>.msi</code> installers ship unsigned until Authenticode signing lands, and manual cross-OS human walkthroughs, RTL GUI mirroring, and the WebAssembly browser app (<code>curvebook-web</code>) remain scoped for <code>1.0</code>.</p>
-            <div class="download-links">
-              <a href="manual/latest/troubleshooting.html#known-issues">Beta known issues</a>
-              <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/STATUS.md">Engineering status <span aria-hidden="true">↗</span></a>
-            </div>
-          </aside>
-
-          <div class="platform-grid" role="region" aria-label="Beta release packages by operating system">
-            <article class="platform-card">
-              <div class="platform-card-head">
-                <h3>macOS Universal (<code>arm64</code> + <code>x86_64</code>)</h3>
-                <span class="platform-tag">Signed &amp; Notarized</span>
-              </div>
-              <p class="platform-asset"><code>curvebook-&lt;version&gt;-macos-universal.dmg</code></p>
-              <p>Developer ID signed and Apple-notarized disk image. Drag <code>CurveBook.app</code> to Applications; <code>curvebook-cli</code> is bundled inside <code>Contents/MacOS/</code>.</p>
-            </article>
-
-            <article class="platform-card">
-              <div class="platform-card-head">
-                <h3>Windows (<code>x64</code> / <code>arm64</code>)</h3>
-                <span class="platform-tag is-unsigned">Unsigned Beta</span>
-              </div>
-              <p class="platform-asset"><code>curvebook-&lt;version&gt;-windows-x64.msi</code><br><code>curvebook-&lt;version&gt;-windows-arm64.msi</code></p>
-              <p>Per-user or per-machine installer bundling <code>curvebook.exe</code> and <code>curvebook-cli.exe</code>. Verify <code>SHA256SUMS.txt</code> and Sigstore provenance before bypassing Defender SmartScreen (Windows 11 Smart App Control blocks unsigned installers until Authenticode signing lands).</p>
-            </article>
-
-            <article class="platform-card">
-              <div class="platform-card-head">
-                <h3>Linux (<code>x86_64</code> / <code>aarch64</code>)</h3>
-                <span class="platform-tag">AppImage</span>
-              </div>
-              <p class="platform-asset"><code>curvebook-&lt;version&gt;-linux-x86_64.AppImage</code><br><code>curvebook-&lt;version&gt;-linux-aarch64.AppImage</code></p>
-              <p>Portable desktop GUI and CLI package. Supports <code>--appimage-extract</code> on systems without FUSE v2 (<code>libfuse2</code>). <a href="linux.html">Linux guide &amp; quick start</a>.</p>
-            </article>
-
-            <article class="platform-card">
-              <div class="platform-card-head">
-                <h3>FreeBSD (<code>x86_64</code>)</h3>
-                <span class="platform-tag">Tier 2 · CLI</span>
-              </div>
-              <p class="platform-asset"><code>curvebook-&lt;version&gt;-freebsd-x86_64.tar.gz</code></p>
-              <p>Headless CLI and local MCP tarball for <code>x86_64</code> (no desktop GUI). Verify integrity against <code>SHA256SUMS.txt</code> and Sigstore provenance before running.</p>
-            </article>
-          </div>
-
-          <div class="download-verify-bar">
-            <p><strong>Release verification &amp; notices:</strong> Every release includes <code>SHA256SUMS.txt</code>, keyless GitHub Sigstore build provenance attestations (<code>gh attestation verify</code>), and <code>THIRD-PARTY-LICENSES.html</code>.</p>
-          </div>
-        </div>
-      </section>
     </main>
 
     <footer class="site-footer">
-      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
-      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
-      <p class="privacy">CurveBook runs locally and collects no telemetry. GitHub Pages logs visitor IP addresses for security. Read the <a href="privacy.html">Privacy Policy</a> or the <a href="faq.html">FAQ</a>.</p>
-      <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+      <p><strong>License:</strong> MIT OR Apache-2.0. Clean-room implementation from published scientific references without commercial software or copied proprietary assets. CurveBook runs locally with zero telemetry; GitHub Pages logs visitor IP addresses for security.</p>
+      <p class="footer-links">
+        <a href="privacy.html">Privacy Policy</a>
+        <a href="faq.html">FAQ</a>
+        <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+      </p>
     </footer>
-
-    <div class="window-statusbar" aria-label="Application summary">
-      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
-      <span class="status-cell">Pure Rust</span>
-      <span class="status-cell">Zero Telemetry</span>
-      <span class="status-cell">MIT / Apache-2.0</span>
-    </div>
   </div>
 </body>
 </html>

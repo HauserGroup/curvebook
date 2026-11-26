@@ -1,125 +1,140 @@
-# Graphs, Page Layouts & Export Capabilities
+# Graphs, page layouts & export capabilities
 
-CurveBook compiles every graph specification (`GraphSheet`) and multi-panel composition (`LayoutSheet`) into a device-independent vector intermediate representation (`ChartScene`, `crates/chart`), guaranteeing identical geometry across desktop canvas rendering, SVG, `%PDF-1.7`, PNG/TIFF rasterization, and ECMA-234 Enhanced Metafiles (`.emf`).
+CurveBook compiles every graph and multi-panel page layout into one device-independent vector scene. This guarantees identical geometry across the desktop canvas, SVG, PDF 1.7, PNG/TIFF rasters, and ECMA-234 Enhanced Metafiles (`.emf`).
 
-See [Command Reference](../commands.md), [Automation: MCP](automation/mcp.md), [Analysis Kinds Registry](registry/tables.html#analysis-kinds), and [Parametric Equations Registry](registry/equations.html) for graph/layout and overlay parameters.
+See the [Command Reference](../commands.md), [Automation: MCP](automation/mcp.md), [Analysis Kinds Registry](registry/tables.html#analysis-kinds), and [Parametric Equations Registry](registry/equations.html) for full graph, layout, and overlay parameters.
 
 ---
 
-## Graph Families & Accepted Table Types (`GraphKind`) {#graph-families}
+## Graph families & accepted table types {#graph-families}
 
-CurveBook exposes eight `GraphKind` families (`crates/doc/src/graph.rs`), each bound to compatible `DataSheet` or `ResultSheet` inputs:
+CurveBook provides eight graph families, each bound to compatible data tables or results sheets:
 
-| `GraphKind` Family | Accepted Sources | Built-In Visual Representations (`GraphicalDataObject` / Layout) |
+| Graph family | Accepted sources | Built-in representations |
 |---|---|---|
-| `Xy` | `Xy`, `MultipleVariables` | Scatter symbols, connecting lines (`PointToPoint`, `Staircase`, Fritsch–Carlson / Steffen `MonotonicCubicSpline`, `AkimaSpline`), longitudinal replicate trajectories (`IndividualReplicateTrajectories` spaghetti plots), error envelopes, fitted curve & confidence/prediction band overlays (`FittedCurveOverlay`), AUC shading, before-after connections. |
-| `Column` | `Column`, `Nested` | Column/vertical or horizontal (`CartesianOrientation::Horizontal`) bars with error bars, superimposed replicate dots (`DeterministicBeeswarm` or `AlignedColumn`), mean/median summary lines, before-after paired trajectories, box-and-whisker (`Tukey1_5Iqr`, `MinToMax`, `Percentile10To90`, `Percentile5To95`, `Percentile2_5To97_5`, `Percentile1To99`), kernel violin plots, and truncated/truncated+raw combinations. |
-| `Grouped` | `Grouped`, `Nested` | Vertical or horizontal (`CartesianOrientation::Horizontal`, including back-to-back stacked Population Pyramids) bars/boxes/violins/points arranged via `GroupedArrangement` (`Interleaved`, `Separated`, `Stacked`, `Superimposed`) for two-way and three-way designs. |
-| `Contingency` | `Contingency` | Grouped count bars, stacked count bars, and `100%` normalized fraction stacked bars (`PartsOfWholeLayout` / categorical layout). |
-| `PartsOfWhole` | `PartsOfWhole` | `Pie`, `Donut` (annular cutout with optional center total), `StackedFractionBar` (`100%` horizontal bar), and `Waffle10x10` (`10×10` grid colored by rounded percentage). |
-| `Survival` | `Survival`, `Survival` `ResultSheet` | Kaplan–Meier curves rendered in `SurvivalDisplayMetric` (`PercentSurvival`, `PercentCumulativeEvent`, or `FractionSurvival`) as `staircase` steps or point-to-point polylines, censored-subject tick marks, selectable Greenwood error display (`ConfidenceInterval95` bands or `Sem`), median survival crosshairs, and aligned **Number at Risk** tables. |
-| `MultipleVariables` | `MultipleVariables` | Bubble/scatter encoding via `MultivariateGraphEncoding` mapping categorical/continuous columns independently to X, Y, `ColorChannelMapping`, `SizeChannelMapping`, or marker symbol/split panels. |
-| `Diagnostic(DiagnosticPlotKind)` | `ResultSheet` / specialized inputs | Exploratory & regression diagnostic plots: `Heatmap` (continuous ramp + configurable `HeatmapLabelSpec` row/column labels & `0°`/`45°`/`90°` angles, optionally auto-created from `transform.run` with `create_graph: true`), `Volcano` ($-\log_{10} P$ / adjusted $q$ vs. effect fold change), `BlandAltman` (bias & limits of agreement), `RocCurve` (sensitivity vs. $1 - \text{specificity}$ + diagonal reference), `ForestPlot` (regression estimates or pre-summarized `Grouped`/`Column` study bounds `UpperLowerLimits`/`MeanLowHigh` with optional pooled diamond and reference lines), `ResidualPlot` (residuals vs. fitted/order), and `NormalQqPlot` (sample vs. Blom normal quantiles). |
+| **XY** (`Xy`) | XY, Multiple Variables | Scatter points, connecting lines, splines, spaghetti trajectories, error envelopes, fitted curves, and AUC shading. |
+| **Column** (`Column`) | Column, Nested | Vertical or horizontal bars, replicate dots, summary lines, before-after lines, box plots, and violin plots. |
+| **Grouped** (`Grouped`) | Grouped, Nested | Interleaved, separated, stacked, or superimposed bars, boxes, violins, and points (including population pyramids). |
+| **Contingency** (`Contingency`) | Contingency | Grouped count bars, stacked count bars, and 100% normalized fraction stacked bars. |
+| **Parts of Whole** (`PartsOfWhole`) | Parts of Whole | Pie, donut (with optional center total), 100% horizontal stacked bar, and 10×10 waffle grid. |
+| **Survival** (`Survival`) | Survival table or results | Kaplan–Meier step or polyline curves, censor ticks, error bands/SEM, median crosshairs, and Number at Risk tables. |
+| **Multiple Variables** (`MultipleVariables`) | Multiple Variables | Bubble and scatter plots mapping columns to X, Y, colour, size, marker symbol, or split panels. |
+| **Diagnostic** (`Diagnostic`) | Results sheets & specialized inputs | Heatmaps, volcano plots, Bland–Altman, ROC curves, forest plots, residual plots, and normal Q–Q plots. |
+
+Notable representation options across families:
+
+- **XY curves and trajectories:** Connecting lines support point-to-point, staircase, Fritsch–Carlson / Steffen monotonic cubic spline, Akima spline, before-after connections, longitudinal individual-replicate spaghetti trajectories, and fitted curve confidence/prediction band overlays.
+- **Column and Grouped options:** Both support horizontal orientation (including back-to-back stacked population pyramids) and two-way or three-way designs. Replicate overlays support deterministic beeswarm or aligned columns; box-and-whisker plots support Tukey 1.5×IQR, min-to-max, 10–90, 5–95, 2.5–97.5, and 1–99 percentiles; violin plots support full, truncated, and raw-point combinations.
+- **Survival metrics:** Curves display percent survival, percent cumulative events, or fraction survival, with selectable Greenwood 95% confidence bands or SEM error bars.
+- **Diagnostic plots:** Heatmaps support continuous ramps, configurable row/column labels at 0°, 45°, or 90°, and optional auto-creation from `transform.run` (`create_graph: true`). Forest plots accept regression estimates or pre-summarized study bounds (`UpperLowerLimits`, `MeanLowHigh`) with optional pooled diamonds and reference lines. Volcano plots map $-\log_{10} P$ or adjusted $q$ against effect fold change, Bland–Altman shows bias and limits of agreement, ROC plots sensitivity vs. $1 - \text{specificity}$ with a diagonal reference, and normal Q–Q plots compare sample values to Blom normal quantiles.
 
 ---
 
-## Series Styling, Error Bars & Overrides {#series-styling}
+## Series styling, error bars & overrides {#series-styling}
 
-- **Series Controls (`SeriesSpec`):** Per-dataset visibility, label, colour with RGBA opacity/alpha, secondary `y2_axis` assignment, marker shape (`MarkerShape` circles/squares/triangles/diamonds/crosses), fill mode (`MarkerFillMode` solid/open/translucent), marker size in points, stroke dash style (`LineDashStyle` solid/dashed/dotted/dash-dot), summary measure (`SummaryMeasure::{Mean, Median, GeometricMean}`), connecting curve style (including `ReplicateLineMode::IndividualReplicateTrajectories` for longitudinal trajectories), composite horizontal/point nudging (`offset` `{ x_data, x_pt, y_pt }`, with `x_data` included in auto-axis bounds), optional bar width/border overrides (`bar_width_override_pt`, `bar_border_width_pt`), independent `show_raw_data` & fitted-curve overlay visibility (so subset-filtered fits draw cleanly without duplicate markers), and `all_series: true` batch updates across all datasets in a graph (`graph.setSeries`).
-- **Error Bars (`ErrorBarSpec`):** Configurable `ErrorBarMetric`:
-  - `Sd` ($\pm 1\text{ SD}$, $n - 1$ denominator)
-  - `Sem` ($\pm 1\text{ SEM} = \text{SD}/\sqrt{n}$)
-  - `ConfidenceInterval95` (two-sided $95\%$ Student-*t* interval around the sample mean)
-  - `InterquartileRange` (asymmetric $[Q_1, Q_3]$ quartiles)
-  - `Range` (`[min, max]`)
-  - `ExplicitSubcolumns` (pre-summarized bounds read directly from `MeanSdN`, `MeanSemN`, `MeanCvN`, `MeanLowHigh`, `UpperLowerLimits`, or `MedianIqr` subcolumns)
-  with directional options (`ErrorBarDirection::{Both, UpperOnly, LowerOnly}`) and selectable end caps/stroke patterns. On log scales, non-positive lower error bounds clamp safely to the axis floor and increment `ScaleDiagnostics::log_error_bars_clamped`.
-- **Per-Point Overrides (`PointStyleOverride`):** Targets `(series_index, point_index, optional subcol)` (`graph.formatSelectedPoints`) to highlight, restyle, or hide single replicates without mutating upstream cell data; exact `subcol` rules take precedence over wildcard overrides.
+- **Series styling (`graph.setSeries`):** Controls per-dataset visibility, label, RGBA colour and opacity, and secondary `y2_axis` assignment. Also configures marker shape (circle, square, triangle, diamond, cross), fill (solid, open, translucent), size, line dash style, and summary measure (mean, median, geometric mean). Pass `all_series: true` to update all datasets at once.
+- **Positioning and overlays:** Supports individual-replicate trajectory lines and horizontal or point nudging (`offset` `{ x_data, x_pt, y_pt }`, with `x_data` included in auto-axis bounds). Bar width and border overrides (`bar_width_override_pt`, `bar_border_width_pt`) and independent `show_raw_data` vs. fitted-curve visibility let subset-filtered fits draw without duplicate markers.
+- **Error bars:** Supports six error bar metrics with selectable direction (both, upper only, lower only), end caps, and stroke patterns:
+  - **SD:** $\pm 1\text{ SD}$ ($n - 1$ denominator).
+  - **SEM:** $\pm 1\text{ SEM} = \text{SD}/\sqrt{n}$.
+  - **95% CI:** Two-sided 95% Student-*t* confidence interval around the mean.
+  - **IQR:** Asymmetric $[Q_1, Q_3]$ quartiles.
+  - **Range:** Full `[min, max]` interval.
+  - **Explicit subcolumns:** Pre-summarized bounds read from `MeanSdN`, `MeanSemN`, `MeanCvN`, `MeanLowHigh`, `UpperLowerLimits`, or `MedianIqr`.
+  On log scales, non-positive lower error bounds clamp safely to the axis floor and are tracked in scale diagnostics.
+- **Per-point overrides (`graph.formatSelectedPoints`):** Targets `(series_index, point_index, subcol)` to highlight, restyle, or hide single replicates without modifying table cells. Exact `subcol` rules take precedence over wildcard overrides.
 
 ---
 
-## Axis Scales, Broken Axes & Frames {#axes-and-scales}
+## Axis scales, broken axes & frames {#axes-and-scales}
 
-### The Seven Axis Scales (`AxisScale` / `GraphAxisScale`) {#axis-scales}
+### The seven axis scales {#axis-scales}
 
-Configured per axis (`x_axis`, `y_axis`, secondary `y2_axis` in `crates/doc/src/graph.rs`, `crates/chart/src/scales/`):
+Configured independently on `x_axis`, `y_axis`, and secondary `y2_axis`:
 
-| Scale Variant | Forward Mapping | Valid Domain |
+| Scale | Forward mapping | Valid domain |
 |---|---|---|
-| `Linear` | $x$ | All finite real numbers |
-| `Log10` | $\log_{10}(x)$ | Strictly positive $x > 0$ |
-| `Log2` | $\log_2(x)$ | Strictly positive $x > 0$ |
-| `Ln` | $\ln(x)$ | Strictly positive $x > 0$ |
-| `Logit(LogitDomain)` | $\ln\!\left(\frac{p}{1 - p}\right)$ (unit `[0, 1]` or `[0, 100]`% domain) | Strictly open interior $0 < p < 1$ (or $0 < p < 100$) |
-| `Probit` | $\Phi^{-1}(u / 100)$ | Strictly open percentage interior $u \in (0, 100)$ |
-| `Reciprocal` | $1 / x$ (with direction reversal option) | Non-zero $x \ne 0$ |
+| **Linear** | $x$ | All finite real numbers. |
+| **Log10** | $\log_{10}(x)$ | Strictly positive $x > 0$. |
+| **Log2** | $\log_2(x)$ | Strictly positive $x > 0$. |
+| **Ln** | $\ln(x)$ | Strictly positive $x > 0$. |
+| **Logit** | $\ln\!\left(\frac{p}{1 - p}\right)$ (unit `[0, 1]` or `[0, 100]`%) | Open interior $0 < p < 1$ (or $0 < p < 100$). |
+| **Probit** | $\Phi^{-1}(u / 100)$ | Open percentage interior $u \in (0, 100)$. |
+| **Reciprocal** | $1 / x$ (optional direction reversal) | Non-zero $x \ne 0$. |
 
-Observations outside a non-linear axis domain (or non-finite points) are safely omitted and counted in `ScaleDiagnostics` (`non_positive_log_skipped`, `out_of_domain_logit_skipped`, `out_of_domain_probit_skipped`, `zero_reciprocal_skipped`, `non_finite_skipped`) rather than collapsing or panicking. Each segment generates at most `MAX_TICKS_PER_SEGMENT = 256` ticks using `TickLabelFormat` (`Decimal`, `AbsoluteDecimal` for unsigned back-to-back pyramid magnitudes, `PowerOfTenSuperscript`, `ScientificE`, `Antilog`, `EngineeringSi`, `Categorical`), paired with per-axis `TickDirection` (`Outside`, `Inside`, `Both`, `None`) and `show_tick_labels` visibility toggles.
+Points outside a non-linear domain or non-finite values are skipped cleanly and counted in scale diagnostics rather than failing. Each axis segment generates up to 256 ticks in decimal, unsigned absolute decimal (for back-to-back pyramids), power-of-ten superscript, scientific E, antilog, engineering SI, or categorical format. Tick direction (outside, inside, both, none) and label visibility (`show_tick_labels`) are configured per axis.
 
-### Discontinuous / Broken Axes (`AxisSegment`) {#broken-axes}
+### Discontinuous / broken axes {#broken-axes}
 
-Every axis (`AxisSpec::segments`) supports **`1` to `3` contiguous `AxisSegment` ranges** (`MAX_SEGMENTS_PER_AXIS = 3`), each specifying its `[min, max]` interval and proportional visual share, separated by `gap_width_pt` with a selectable `BreakOrnament` (`DoubleSlash`, `Zigzag`, `BlankGap`). Series bars, lines, and points clip cleanly at break boundaries.
+Every axis supports 1 to 3 contiguous range segments, each with a `[min, max]` interval and proportional visual share. Segments are separated by `gap_width_pt` using a double-slash, zigzag, or blank-gap break ornament, and bars, lines, and points clip cleanly at break boundaries.
 
-### Frame Presets, Thresholds & Additional Ticks {#frames-and-ticks}
+### Frame presets, thresholds & additional ticks {#frames-and-ticks}
 
-- **`FramePreset`:** `OpenL` (default left-and-bottom L frame), `OffsetRangeTufte` (`DEFAULT_AXIS_OFFSET_PT = 6.0` pt offset range-trimmed spines), `PlainBoxed` (4-sided box), `DualYSecondaryRight` (primary left *Y* paired with secondary right `y2_axis`), and `OriginCrossing` (axes intersecting at `(0, 0)`).
-- **`AxisThreshold` & `AdditionalTick`:** Horizontal/vertical dashed or shaded threshold bands (`graph.setAxes`), custom labelled tick marks (`graph.setAdditionalTicks`), and vertical reference gridlines (for example null-effect lines on `ForestPlot`).
-- **Canvas & Paper Backgrounds (`paper_fill`, `background_fill`):** Solid fills or transparent (`None`) plot/page fills (`graph.setStyle` / **Format Graph › Page**), enabling axis-free transparent foreground overlays and insets in multi-panel layouts.
-
----
-
-## Annotations, Pairwise Brackets, Piepho CLD & Live TeX Equations {#annotations-and-significance}
-
-- **Geometric & Text Annotations (`GraphAnnotation`):** Lines, arrows, rectangles, ellipses, shaded spans, free-form rich text callouts (subscripts/superscripts, Greek Unicode, **Info constant hooks** `{{Info:Key}}` and **Result scalar hooks** expanded automatically), and legend placement (`LegendSpec`).
-- **Live Embedded Result Tables (`GraphAnnotation::EmbeddedResultTable` & `LayoutItem::LiveTable`):** Reactive rectangular cell slices (`selected_rows`, `selected_cols`) pasted directly from a `ResultSheet` (`edit.pasteResultTable`) with configurable `EmbeddedTableStyle` (`transpose`, `show_column_titles`, `show_row_titles`, `bold_headers`, `font_size_pt`, `outer_border_width_pt`, `gridline_width_pt`, `border_color`, `fill_color`), re-evaluating via the DAG across RGBA, SVG, `%PDF-1.7`, and `.emf`.
-- **Embedded Raster Images (`GraphAnnotation::EmbeddedImage` & `LayoutItem::EmbeddedImage`):** Content-addressed `ProjectImageAsset` items inserted from **PNG**, **JPEG**, or **TIFF** payloads (`graph.insertImage`, `layout.insertImage`, `edit.pasteImage`, `graph.updateImage`, `layout.updateImage`) with `CropInsetsPt`, `ImageBorderSpec`, `rotation_deg`, and `lock_aspect_ratio`. SVG image payloads (`<svg`/`<?xml`) are rejected under clean-room/licence policy and zero remote URL fetches are performed; decoding enforces `MAX_IMAGE_ASSET_BYTES = 32 MiB`, `MAX_IMAGE_DIM_PX = 16,384` px, and `MAX_IMAGE_PIXELS = 67,108,864` total pixels per asset and per compiled layout.
-- **Live TeX Best-Fit Model Equations (`QOL-16` / `R10.19`):** `GraphAnnotation::ModelEquation` (`graph.addAnnotation` kind `model_equation`, `ui.graph.insertModelEquation`) links a graph directly to a `LinearRegression`, `NonlinearRegression`, or `PassingBablok` `ResultSheet` dataset. Supports `EquationDisplayMode::Symbolic` or `EquationDisplayMode::Substituted` (refreshing coefficients automatically on fit recalculation) and renders using two-dimensional Knuth TeXbook Appendix G math box typesetting (`crates/chart/src/equation_box/`: stacked `\frac`/`\dfrac`/`\tfrac`/`\binom`, `\sqrt` with vinculum, stacked super/subscripts, scaled delimiters `\left...\right`, Greek parameters).
-- **Pairwise Significance Brackets & Compact Letter Display (`PairwiseDisplayMode`):**
-  - `BracketsOnly`: Horizontal/stepped comparison brackets (`PairwiseBracketSpec`) with `BracketStyle` and `BracketLabelMode` (stars `*`..`****`/`ns`, formatted *P*-value, or custom text).
-  - `CompactLetterDisplayOnly` (`graph.setCompactLetterDisplay`): Computes exact minimal equivalence letter sets (`"a"`, `"ab"`, `"b"`, ...) directly from pairwise comparison significance records using Piepho's (2004) insert-and-absorb plus sweeping algorithm (`CldOrdering::{DescendingMean, AscendingMean}`), placing conflict-free letter annotations above bars/boxes/violins.
-  - `BracketsAndCompactLetterDisplay`: Renders both non-overlapping brackets and compact letters simultaneously.
+- **Frame presets:** Open L (default left-and-bottom spines), offset range-trimmed Tufte spines (default 6.0 pt offset), plain 4-sided box, dual-Y with secondary right `y2_axis`, and origin-crossing axes at `(0, 0)`.
+- **Thresholds and custom ticks:** Add dashed or shaded threshold bands (`graph.setAxes`), custom labelled tick marks (`graph.setAdditionalTicks`), and vertical reference gridlines (such as null-effect lines on forest plots).
+- **Canvas and paper backgrounds:** Set solid or transparent (`None`) plot and page fills (`graph.setStyle` or **Format Graph › Page**) for axis-free foreground overlays and insets in multi-panel layouts.
 
 ---
 
-## Colour Palettes, Colormaps & CVD Preview {#palettes-and-cvd}
+## Annotations, pairwise brackets, Piepho CLD & live TeX equations {#annotations-and-significance}
 
-- **Qualitative Scientific Palettes (`PaletteId`, `crates/palette`):** `OkabeIto` (default CVD-safe 8-colour palette), `PaulTolBright`, `PaulTolMuted`, `PaulTolHighContrast`, `PaulTolVibrant`, and `MonochromePrint`.
-- **Continuous Colormaps (`ColormapId`):** Perceptually uniform Oklab-interpolated ramps (`Viridis`, `Cividis`, `Plasma`, `DivergingBlueRed`, `Grayscale`) plus custom user stops up to `MAX_CUSTOM_STOPS = 256` and discrete sampling up to `MAX_DISCRETE_SAMPLES = 4,096`.
-- **Live CVD & Grayscale Canvas Preview (`QOL-9`):** Applies Machado (2009) physiologically validated colour-vision-deficiency transformation matrices (`CanvasPreviewFilter::{Normal, Deuteranopia, Protanopia, Tritanopia, GrayscalePrint}`, serialized `"grayscale"` for grayscale print) in the viewport rasterizer (`crates/render`) without altering stored graph specs or exported vector files.
-
----
-
-## Batch Creation & Selective Style Inheritance (`graph.create`, `graph.applyStyleFrom`) {#style-inheritance}
-
-- **Batch One-Graph-Per-Data-Set (`graph.create`):** Passing `one_per_data_set: true` (plus optional shared `y_axis_title`) atomically creates one single-series `GraphSheet` per dataset from any `DataSheet` or transform `ResultSheet` (`Transpose`, `Normalize`, `SelectAndTransform`), checking `MAX_SHEETS_PER_PROJECT` before mutating the document.
-- **Multi-Target Style Cloning (`graph.applyStyleFrom`):** `apply_style_from_selective` (`crates/doc/src/graph.rs`) copies selected styling facets (axis scales/ticks/frame, palette/series styling, fonts, error bar defaults, legend placement, or canvas preset dimensions) from a donor `GraphSheet` onto one target or multiple `target_sheet_ids` in a single atomic undo step while preserving each target's upstream data bindings, series titles, and fitted overlays.
+- **Geometric and text annotations:** Lines, arrows, rectangles, ellipses, shaded spans, legend placement, and rich text callouts supporting subscripts, superscripts, Greek Unicode, info constant hooks (`{{Info:Key}}`), and result scalar hooks.
+- **Live embedded result tables (`edit.pasteResultTable`):** Pastes reactive rectangular cell slices (`selected_rows`, `selected_cols`) from a results sheet onto graphs or page layouts. Supports `transpose`, column/row title toggles, bold headers, font size, outer border and gridline widths, and border/fill colours, updating via the DAG across RGBA, SVG, PDF 1.7, and `.emf`.
+- **Embedded raster images:** Inserts content-addressed PNG, JPEG, or TIFF images (`graph.insertImage`, `layout.insertImage`, `edit.pasteImage`, `graph.updateImage`, `layout.updateImage`) with crop insets, borders, `rotation_deg`, and `lock_aspect_ratio`. SVG payloads are rejected and zero remote URLs are fetched. Decoding caps assets at 32 MiB, 16,384 px per side, and 67,108,864 total pixels per asset and per compiled layout.
+- **Live TeX best-fit model equations (`graph.addAnnotation` kind `model_equation`, `ui.graph.insertModelEquation`):** Links a graph to a linear regression, nonlinear regression, or Passing–Bablok results dataset. Renders symbolic or live coefficient-substituted equations (refreshing automatically on refit) using two-dimensional Knuth TeXbook Appendix G math box typesetting (stacked `\frac`/`\dfrac`/`\tfrac`/`\binom`, `\sqrt` with vinculum, stacked super/subscripts, scaled `\left...\right` delimiters, and Greek parameters).
+- **Pairwise significance brackets & compact letter display:**
+  - **Brackets only:** Horizontal or stepped comparison brackets showing stars (`*` to `****` / `ns`), formatted *P*-values, or custom text.
+  - **Compact letter display (`graph.setCompactLetterDisplay`):** Computes exact minimal equivalence letter sets (`"a"`, `"ab"`, `"b"`, …) from pairwise significance records using Piepho's (2004) insert-and-absorb and sweeping algorithm. Letters order by descending or ascending mean and sit conflict-free above bars, boxes, or violins.
+  - **Brackets and compact letter display:** Renders both non-overlapping brackets and compact letters simultaneously.
 
 ---
 
-## Page Layout Composition (`LayoutSpec`) {#page-layouts}
+## Colour palettes, colormaps & CVD preview {#palettes-and-cvd}
 
-`LayoutSheet` composes publication multi-panel figures (`MAX_LAYOUT_ITEMS = 64` per page):
-
-- **Physical Units & Presets:** Coordinates and margins in `PhysicalUnit` (`Points`, `Millimeters`, `Inches`), supporting `JournalWidthPreset` (`SingleColumn85Mm`, `SingleColumn89Mm`, `OneAndHalfColumn120Mm`, `OneAndHalfColumn136Mm`, `DoubleColumn174Mm` default, `DoubleColumn183Mm`, `LetterPortrait`, etc.), `FigureCanvasPreset` (`SingleColumn88mm`, `ColumnAndHalf130mm`, `DoubleColumn180mm`, `FullPagePortrait`, `Slide16x9`, `PosterPanel`), `PageOrientation` (`Portrait`, `Landscape`), and `CanvasResizeMode` (`KeepTypographyPt` to preserve exact `pt` sizes & line weights when resizing, vs. `ProportionalScale`).
-- **Panel Arrangement, Equalization, Z-Order & Badges:** Embedded `LiveGraph` panels, `LiveTable` blocks, `EmbeddedImage` items, shared origin alignment (`layout.alignOrigins`), plot-scale equalization (`layout.equalizeScaling` with `EqualizeScaleMode::{MatchSmallest, MatchLargest, ExplicitPercent}` normalizing inner `plot_rect_pt` scaling ratios within `<= 0.25 pt`), Z-order stacking (`layout.reorderPanel`: `bring_to_front`, `bring_forward`, `send_backward`, `send_to_back`), transparent foreground overlays/insets (`paper_fill: None`, hidden axis ticks/labels), decorative shapes/text headers, and automatic `PanelBadgeStyle` (`UpperCaseLetters` `"A", "B", ...`, `LowerCaseLetters` `"a", "b", ...`, or `None`).
+- **Qualitative scientific palettes:** Okabe–Ito (default CVD-safe 8-colour palette), Paul Tol Bright, Paul Tol Muted, Paul Tol High Contrast, Paul Tol Vibrant, and Monochrome Print.
+- **Continuous colormaps:** Perceptually uniform Oklab-interpolated ramps (Viridis, Cividis, Plasma, Diverging Blue–Red, Grayscale), plus custom ramps with up to 256 stops and discrete sampling up to 4,096 samples.
+- **Live CVD & grayscale preview:** Applies Machado (2009) deuteranopia, protanopia, tritanopia, and grayscale-print (`"grayscale"`) transformation matrices in the canvas viewport without altering stored figure colours or exported vector files.
 
 ---
 
-## Publication Preflight & Export Capabilities & Limits {#export-capabilities}
+## Batch creation & selective style inheritance (`graph.create`, `graph.applyStyleFrom`) {#style-inheritance}
 
-### Canvas Print Preflight (`graph.preflightCheck`, `QOL-8`) {#preflight}
+- **One graph per dataset (`graph.create`):** Passing `one_per_data_set: true` (with an optional shared `y_axis_title`) creates one single-series graph per dataset atomically. Works on any data table or transform results sheet (Transpose, Normalize, Select and Transform) and checks the project sheet limit first.
+- **Multi-target style cloning (`graph.applyStyleFrom`):** Copies selected styling facets—axes, palette and series styles, fonts, error bars, legend placement, or canvas dimensions—from a donor graph onto one or more `target_sheet_ids` in one undoable step. Each target keeps its own data bindings, series titles, and fitted overlays.
 
-`preflight_check_scene` inspects compiled `ChartScene` primitives prior to export and emits non-blocking warnings when:
+---
 
-- Any visible text element or subscript/superscript span renders below `5.0 pt` (`min_font_size`)
-- Any stroked path renders below `0.25 pt` (`hairline_stroke`)
-- Text anchor or bounding box clips outside the canvas or clip rectangle (`text_outside_canvas`)
+## Page layout composition {#page-layouts}
 
-### Supported Export Formats & Hard Safety Limits {#export-formats}
+Page layouts compose publication multi-panel figures with up to 64 items per page:
 
-| Format | Engine Commands | Capabilities & Options | Enforced Limits |
+- **Physical units & presets:** Coordinates and margins use points, millimeters, or inches in portrait or landscape orientation. Journal presets cover single-column (85, 88, 89 mm), 1.5-column (120, 130, 136 mm), double-column (174 mm default, 180, 183 mm), full page (including US Letter), 16:9 slide, and poster panel. Resizing can lock exact point typography and line weights or scale proportionally.
+- **Arrangement, equalization, Z-order & badges:** Combines live graphs, live result tables, embedded images, shapes, and text headers. Supports shared origin alignment (`layout.alignOrigins`), inner plot-scale equalization within 0.25 pt (`layout.equalizeScaling`: match smallest, match largest, or explicit percent), and Z-order stacking (`layout.reorderPanel`: `bring_to_front`, `bring_forward`, `send_backward`, `send_to_back`). Transparent overlays (`paper_fill: None`, hidden ticks/labels) and automatic panel badges (uppercase `"A", "B", …`, lowercase `"a", "b", …`, or none) are built in.
+
+---
+
+## Publication preflight & export capabilities & limits {#export-capabilities}
+
+### Canvas print preflight (`graph.preflightCheck`) {#preflight}
+
+Preflight inspects compiled vector primitives before export and emits non-blocking warnings when:
+
+- Any visible text or subscript/superscript renders below 5.0 pt (`min_font_size`).
+- Any stroked path renders thinner than 0.25 pt (`hairline_stroke`).
+- A text anchor or bounding box clips outside the canvas or clip rectangle (`text_outside_canvas`).
+
+### Supported export formats & hard safety limits {#export-formats}
+
+| Format | Commands | Key capabilities | Enforced limits |
 |---|---|---|---|
-| **SVG 1.1** (`curvebook-svg`) | `export.svg`, `graph.exportSvg` | Exact cubic/quadratic paths, CSS/attribute styling, `pretty`, `include_xml_declaration`, `include_metadata`, `embed_fonts` (when runtime TTF faces present), `outline_text` glyph paths, coordinate `precision` (`0..=6`, default `3`). Validated structurally via `validate_svg_structure`. | Finite bounds, precision capped at `6` |
-| **`%PDF-1.7` Vector** (`curvebook-pdf`) | `export.pdf`, `graph.exportPdf` | Zlib-compressed vector streams (`compress_streams`), selectable Core-14 WinAnsi + Adobe Symbol text or optional embedded TrueType / `outline_text` vector glyphs, alpha ExtGState transparency, sRGB / CMYK / Grayscale colour spaces (`PdfColorSpace`), multi-page compilation, physical `trim_pt` / `bleed_pt` boxes, BiDi RTL reordering. | `MAX_PDF_PAGES = 64` pages, `MAX_PDF_TOTAL_PRIMITIVES = 500,000` primitives, `MAX_PDF_OUTPUT_BYTES = 32 MiB` |
-| **PNG & TIFF Raster** (`curvebook-render`) | `export.png`, `export.tiff`, `graph.exportPng` | 4x4 subpixel coverage antialiasing (`BEZIER_FLATNESS_TOL_PX = 0.15`), DPI-based or explicit pixel sizing, physical `pHYs` / TIFF resolution metadata (`dpi`), TIFF compression (`None`, `Lzw`, `Deflate`). Aspect ratio is strictly preserved on DPI scaling; oversize uniform targets return an explicit limit error rather than stretching dimensions. | `MAX_RASTER_DIM_PX = 16,384` px per side, `MAX_RASTER_PIXELS = 67,108,864` total pixels (`8192 × 8192` equivalent) |
-| **Windows Enhanced Metafile `.emf`** (`curvebook-render`) | `graph.exportEmf`, `layout.exportEmf` | Clean-room little-endian ECMA-234 vector records (`MM_ANISOTROPIC`, 0.01 mm `rclFrame`, 20 twips/pt logical precision, `EMR_POLYBEZIERTO`, Unicode `EMR_EXTTEXTOUTW`, optional BGRA DIB fallback raster). | Finite positive dimensions fitting 32-bit EMF `nBytes` |
+| **SVG 1.1** | `export.svg`, `graph.exportSvg` | Exact vector paths, font embedding or outlined glyphs, structural validation. | Finite bounds; coordinate precision 0 to 6 (default 3). |
+| **PDF 1.7** | `export.pdf`, `graph.exportPdf` | Zlib-compressed vectors, sRGB/CMYK/Grayscale, multi-page, trim/bleed boxes, RTL BiDi. | 64 pages, 500,000 primitives, 32 MiB output. |
+| **PNG & TIFF** | `export.png`, `export.tiff`, `graph.exportPng` | 4×4 subpixel antialiasing, DPI or pixel sizing, resolution metadata, LZW/Deflate TIFF. | 16,384 px per side; 67,108,864 total pixels (8,192 × 8,192 eq.). |
+| **Windows EMF (`.emf`)** | `graph.exportEmf`, `layout.exportEmf` | Clean-room little-endian ECMA-234 vector records with Unicode text. | Finite positive dimensions within 32-bit EMF byte cap. |
+
+Format-specific export options:
+
+- **SVG:** Supports `pretty`, `include_xml_declaration`, `include_metadata`, `embed_fonts` (when runtime TrueType faces are available), `outline_text` glyph paths, and coordinate `precision`.
+- **PDF 1.7:** Supports `compress_streams`, Core-14 WinAnsi + Adobe Symbol text or embedded TrueType / `outline_text` vector glyphs, alpha transparency, sRGB/CMYK/Grayscale colour spaces, and physical `trim_pt` and `bleed_pt` boxes.
+- **PNG & TIFF:** Uses 4×4 subpixel coverage antialiasing (0.15 px Bézier flatness tolerance), embeds PNG `pHYs` and TIFF `dpi` metadata, and supports uncompressed, LZW, or Deflate TIFF compression. Aspect ratio is preserved strictly; oversize uniform DPI targets return an explicit limit error rather than stretching.
+- **Windows EMF:** Emits `MM_ANISOTROPIC` mapping with 0.01 mm frame coordinates, 20 twips/pt logical precision, cubic Bézier curves, Unicode text records, and optional BGRA DIB raster fallback.

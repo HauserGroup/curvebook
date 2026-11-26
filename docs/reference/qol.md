@@ -1,36 +1,49 @@
-# Calculators & Quality-of-Life Capabilities
+# Calculators & quality-of-life capabilities
 
-CurveBook augments its statistical and graphing core with non-destructive workflow tools and live diagnostics designed to keep raw measurements intact, maintain reproducible provenance, and surface assumption evidence cleanly.
-
----
-
-## Selection Quick Statistics {#quick-statistics}
-
-Selecting a single cell or rectangular range `[r0..=r1, flat0..=flat1]` in any `DataSheet` computes live summary statistics over all included finite numeric values inside the selection (`SelectionQuickStats` / `GridQuickStats` in `crates/ui-egui/src/grid_view.rs`):
-
-- **Computed fields:** `selected_cells` (total cell count in selection), `n` (active finite numeric values), `excluded` (count of excluded cells inside the selection), `sum`, `mean`, `sd` (sample standard deviation, $n - 1$ denominator; `None` when $n < 2$), `sem` ($\text{SD}/\sqrt{n}$; `None` when $n < 2$), `median`, `min`, and `max`.
-- **Filtering semantics:** Excluded cells (`excluded: true`), blank cells, text cells, and non-finite values are excluded from `n` and every summary moment without altering document state.
+CurveBook augments its statistical and graphing engine with non-destructive workflow tools and live diagnostics. These tools keep raw measurements intact, preserve provenance, and report statistical assumptions objectively.
 
 ---
 
-## Active Quality-of-Life Capabilities (`R9`) {#active-qol}
+## Selection quick statistics {#quick-statistics}
 
-| ID | Capability | Engine / UI Seam | Scope & Behavior |
-|---|---|---|---|
-| **QOL-1** | **Non-destructive table archetype conversion** | `table.convertArchetype` | Converts `DataSheet` layouts among `Column`, `Grouped`, `Xy`, `MultipleVariables`, and `Contingency` with a non-mutating `ConversionPreview` (`preserved_cells`, `dropped_cells`, `preserved_exclusions`, `warnings`, `lossy`), preserving `excluded` flags and remapping `CellExclusionNote`s. Lossy conversions require explicit `allow_lossy: true`. |
-| **QOL-2** | **96/384-well microplate & tidy long-to-wide reshape** | `table.importPlateMap`, `table.importTidyLong` | Maps `8×12` and `16×24` plate grids, existing `DataSheet`s (via kinetic reducers `row_index`, `x_window_mean`, `min`, `max`), or `UpToDate` analyzable `ResultSheet`s (such as `AreaUnderCurve` `value_column`) into typed `Xy`, `Column`, `Grouped`, or `MultipleVariables` tables. The desktop `ImportReshape` dialog includes a color-coded interactive `8×12`/`16×24` plate editor (click/drag rectangle selection, Role/Group/constant-$X$ assignment, linear/multiplicative **Fill Dilution Series**, Paste Label/X Grid, Load Layout/X Sheet) and atomic Save/Load of versioned **`.cbplate`** layout files (`format_version = 1`, `docs/schemas/plate-map.schema.json`). |
-| **QOL-3** | **Auditable cell exclusion reasons & provenance tags** | `table.excludeCellsWithReason`, `table.exclusionAuditReport`, `DataSheet::plate_well_origins` | Attaches sparse `(reason_tag, note, timestamp_utc)` `CellExclusionNote` records alongside boolean `excluded` masks without changing numerical results or requiring reasons on plain `Cmd/Ctrl+E` toggles. On microplate-mapped tables, hovering or selecting a cell displays **`Source well: <well>`** (e.g., `Source well: G12`) from `plate_well_origins`, preserving physical well traceability across exclusions, row shifts, coordinate-remappable transforms, and `.curvebook` `v8` archive reloads. |
-| **QOL-4** | **Side-by-side split workspace** | `ui.split.toggle` (and inspector/workspace layout) | Docks a live `Graph` or `Result` pane adjacent to the active `Data` or `Result` sheet so cell edits, exclusions, and analysis/fit parameter updates re-render immediately through the reactive DAG. |
-| **QOL-5** | **Two-way data-to-graph point brushing** | `SourceCellId` metadata on `ChartScene` | Links plotted point glyphs (`sheet_id, row, col, subcol`) with source grid cells for hover inspection, split-pane highlighting, jumping to source coordinates, and context-menu observation exclusion/inclusion. |
-| **QOL-6** | **One-click statistical reporting generator** | `result.generateReport` | Produces deterministic, read-only ICMJE/ARRIVE-aligned statistical methods and summary paragraphs in `plain`, `markdown`, or `latex` directly from stored `AnalysisSpec`, `DataSheet`, and `ResultSheet` values without modifying numbers. |
-| **QOL-7** | **Diagnostics-only inline assumption banners** | `ResultSheet::checklist`, `ui.result.inspectDiagnostics` | Summarizes executed assumption checks (normality, variance homogeneity, sphericity, proportional hazards, separation, collinearity, lack of fit, runs) with status (`Pass`, `Warn`, `Fail`, `Inconclusive`, `NotApplicable`), diagnostic statistics, and methodological limits. Strictly **diagnostics-only**: never recommends alternative tests, ranks procedures, or triggers automatic exclusions/remediations. |
-| **QOL-8** | **Journal figure dimension & typography lock presets** | `graph.applyCanvasPreset`, `layout.applyCanvasPreset`, `graph.preflightCheck` | Resizes graphs and page layouts to standard publication column targets (`88 mm`, `130 mm`, `180 mm`, full page, `16:9`, poster) with `CanvasResizeMode::KeepTypographyPt` keeping point typography and hairline strokes intact, plus export preflight warnings below `5.0 pt` text or `0.25 pt` strokes. |
-| **QOL-9** | **Live CVD & grayscale canvas preview** | `CanvasPreviewFilter` (`ui.previewFilter.set`) | Applies Machado (2009) `Deuteranopia`, `Protanopia`, `Tritanopia`, or `GrayscalePrint` viewport filters non-destructively on the rendered canvas without modifying stored figure colours or exported files. |
-| **QOL-12** | **Categorical & continuous analysis completions** | [Analysis Kinds Registry](registry/tables.html#analysis-kinds) | Adds `ResultTabKind::MultipleComparisons` post-hoc tabs inside `FactorialAnova`, weighted Cohen's $\kappa$ (`Unweighted`, `Linear`, `Quadratic`) & Fleiss' $\kappa$, inverted Altman `NNTB`/`NNTH` bounds from Newcombe RD CIs, McNemar discordant-pair OR CIs, custom expected proportions for `PartsOfWhole` $\chi^2$ GOF, exact one-sample Binomial & paired Sign tests, exact $\chi^2$ `sd_ci`, and direct `MeanSdN` / `MeanSemN` support in two-group and one-sample *t*-tests. |
-| **QOL-14** | **Seeded randomization, subset sampling & distribution generation** | `table.randomizeGroups`, `table.randomSampleRows`, `table.simulateDistributions` | Performs deterministic seeded complete or permuted-block group randomization (writing ARRIVE randomization keys into `InfoSheet`), uniform/stratified $k$-of-$N$ sampling without replacement, and seeded univariate distribution simulation over `DeterministicRng`. |
-| **QOL-16** | **Live $\TeX$ model equation annotations** | `graph.addAnnotation` (`model_equation`), `ui.graph.insertModelEquation` | Places symbolic or live coefficient-substituted $\TeX$-subset regression equations on fitted `XY` graphs (`R10.19` Knuth TeXbook Appendix G 2D box typesetting across screen, SVG, PDF, and EMF), updating automatically when upstream fits recalculate. |
+Selecting a single cell or rectangular range in any data table computes live summary statistics over all active numeric values inside the selection.
+
+- **Counts:** `selected_cells` (total selected cells), `n` (active finite numbers), and `excluded` (excluded cells in the selection).
+- **Moments & quantiles:** `sum`, `mean`, `median`, `min`, `max`, sample `sd` ($n - 1$ denominator; omitted when $n < 2$), and `sem` ($\text{SD}/\sqrt{n}$; omitted when $n < 2$).
+- **Filtering rules:** Excluded cells, blank cells, text cells, and non-finite values are skipped from `n` and every summary moment without modifying the table.
+
+---
+
+## Active quality-of-life capabilities {#active-qol}
+
+| Capability | Commands / UI entry | Summary |
+|---|---|---|
+| **Non-destructive archetype conversion** | `table.convertArchetype` | Converts data tables among Column, Grouped, XY, Multiple Variables, and Contingency with a non-mutating preview. |
+| **Microplate & tidy-long reshaping** | `table.importPlateMap`, `table.importTidyLong` | Maps 96-well or 384-well plates, sheets, or analyzable results into typed tables and pivots tidy long rows. |
+| **Auditable cell exclusion reasons** | `table.excludeCellsWithReason`, `table.exclusionAuditReport` | Attaches optional reason tags, notes, and timestamps to excluded cells while preserving plate well origins. |
+| **Side-by-side split workspace** | `ui.split.toggle` | Docks a live graph or results pane beside the active sheet for immediate reactive updates. |
+| **Two-way data-to-graph brushing** | Interactive canvas & grid | Links plotted points to source cells for hover details, split-pane highlighting, jump-to-cell, and quick exclusion. |
+| **One-click methods report** | `result.generateReport` | Produces deterministic ICMJE/ARRIVE-aligned methods paragraphs in `plain`, `markdown`, or `latex`. |
+| **Diagnostics-only assumption banners** | `ui.result.inspectDiagnostics` | Summarizes executed assumption checks objectively without recommending replacement tests or automatic edits. |
+| **Journal figure presets & preflight** | `graph.applyCanvasPreset`, `layout.applyCanvasPreset`, `graph.preflightCheck` | Resizes figures to journal column widths while locking point typography and warning on tiny text or strokes. |
+| **Live CVD & grayscale preview** | `ui.previewFilter.set` | Simulates color-vision deficiency and grayscale print on the canvas without changing stored colours or exports. |
+| **Expanded statistical coverage** | [Analysis Kinds Registry](registry/tables.html#analysis-kinds) | Adds factorial ANOVA post-hoc tables, weighted/Fleiss' $\kappa$, NNTB/NNTH intervals, exact Binomial/Sign tests, and summary-data *t*-tests. |
+| **Seeded randomization & simulation** | `table.randomizeGroups`, `table.randomSampleRows`, `table.simulateDistributions` | Generates deterministic treatment schedules, stratified row samples, and simulated univariate distributions. |
+| **Live $\TeX$ model equations** | `graph.addAnnotation`, `ui.graph.insertModelEquation` | Places symbolic or live coefficient-substituted $\TeX$ equations on fitted XY graphs. |
+
+### Capability details & guards
+
+- **Archetype conversion:** Preview reports preserved cells, dropped cells, preserved exclusions, warnings, and whether the conversion is lossy. Exclusion flags and exclusion notes are preserved and remapped; lossy conversions require `allow_lossy: true`.
+- **Interactive microplate editor:** The desktop **Import / Reshape** dialog offers a colour-coded 8×12 (96-well) and 16×24 (384-well) grid editor. It supports drag selection, role/group/constant-$X$ assignment, linear or multiplicative **Fill Dilution Series**, grid pasting, and sheet loading. Readings accept direct values, data tables (via `row_index`, `x_window_mean`, `min`, or `max`), or up-to-date analyzable results (such as Area Under the Curve `value_column`), and layouts save atomically as `.cbplate` files (see [`plate-map.schema.json`](../schemas/plate-map.schema.json)).
+- **Exclusion and well traceability:** Plain **Cmd/Ctrl+E** exclusion toggles never require a reason. On plate-mapped tables, hovering or selecting a cell displays `Source well: <well>` (such as `Source well: G12`), preserved across exclusions, row shifts, coordinate-remappable transforms, and `.curvebook` reloads.
+- **Diagnostics-only policy:** Assumption banners summarize normality, variance homogeneity, sphericity, proportional hazards, separation, collinearity, lack of fit, and runs checks. Each item shows status (pass, warn, fail, inconclusive, or not applicable), statistics, and methodological limits without recommending replacement tests or applying automatic edits.
+- **Journal presets and preflight:** Standard targets cover 88 mm, 130 mm, 180 mm, full page, 16:9 slide, and poster panels. Locking point typography keeps font sizes and stroke weights intact during resizing, and export preflight warns on text below 5.0 pt or strokes below 0.25 pt.
+- **Colour-vision preview:** Applies Machado (2009) deuteranopia, protanopia, tritanopia, and grayscale-print viewport filters without modifying stored figure colours or exported vector files.
+- **Expanded statistical routines:** Adds factorial ANOVA multiple-comparison tabs, weighted Cohen's $\kappa$ (unweighted, linear, quadratic), Fleiss' $\kappa$, and inverted Altman NNTB/NNTH bounds from Newcombe risk-difference intervals. Also adds McNemar discordant-pair OR intervals, custom expected proportions for parts-of-whole $\chi^2$ goodness-of-fit, exact one-sample Binomial and paired Sign tests, exact $\chi^2$ SD intervals, and pre-summarized mean/SD/N or mean/SEM/N entry in one-sample and two-group *t*-tests.
+- **Randomization and simulation:** Complete and permuted-block randomization writes ARRIVE metadata into an info sheet. Uniform and stratified $k$-of-$N$ row sampling runs without replacement, and univariate distribution generation is deterministic given the recorded 64-bit seed.
+- **Live $\TeX$ equations:** Uses two-dimensional math box typesetting (Knuth TeXbook Appendix G) across screen, SVG, PDF, and EMF exports, updating coefficients automatically when upstream fits recalculate.
 
 > [!NOTE]
-> Instant table-free distribution/Bayesian calculators (`QOL-13`) and wet-lab molarity/dilution/radiochemical calculators (`QOL-15`), along with standalone browser-folder WASM collaboration extensions (`QOL-10`, `QOL-11`), are deferred outside the Beta release scope and are not registered as active commands.
+> Standalone table-free distribution, Bayesian, molarity, dilution, and radiochemical calculators—along with browser-folder collaboration tools—are outside the Beta release scope and are not registered as active commands.
 
 See [Graphs & Page Layouts](graphs.md), [Analysis Kinds Registry](registry/tables.html#analysis-kinds), and [Command Reference](../commands.md) for command arguments and rendering details.

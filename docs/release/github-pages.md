@@ -4,11 +4,38 @@ The site consists of [`index.html`](../index.html), [`faq.html`](../faq.html), [
 
 ## Design decisions
 
-Initial decisions: 2026-11-16–18. **Beta overhaul recorded: 2026-11-23.** Scope: the public GitHub Pages landing page ([`index.html`](../index.html)), privacy policy ([`privacy.html`](../privacy.html)), fallback manual index (`manual/index.html`), shared stylesheet ([`site.css`](../site.css)), and generated static reference manual.
+Initial decisions: 2026-11-16–18. **Beta overhaul recorded: 2026-11-23.** **Flat readability overhaul recorded: 2026-11-26 (`R12.11`).** Scope: the public GitHub Pages landing pages ([`index.html`](../index.html), [`faq.html`](../faq.html), [`open-pzfx-files.html`](../open-pzfx-files.html), [`linux.html`](../linux.html), [`privacy.html`](../privacy.html)), fallback manual index (`manual/index.html`), shared stylesheet ([`site.css`](../site.css)), and generated static reference manual.
 
 ### Scope
 
-This record governs the public CurveBook website and its GitHub Pages presentation: page structure, visitor-facing copy, visual styling, links, accessibility, and publication. It does not prescribe the desktop application interface, browser application interface, application themes, menus, dialogs, or scientific graph styles (governed separately by [`design-language.md`](../design-language.md)). References to windows, title bars, or desktop styling below describe the website's visual treatment only.
+This record governs the public CurveBook website and its GitHub Pages presentation: page structure, visitor-facing copy, visual styling, links, accessibility, and publication. It does not prescribe the desktop application interface, browser application interface, application themes, menus, dialogs, or scientific graph styles (governed separately by [`design-language.md`](../design-language.md)). References to windows, title bars, or desktop styling below describe historical website treatments only.
+
+### Flat readability overhaul (2026-11-26, R12.11)
+
+Retired the Classic coral beveled desktop window frame (`.desktop-window`, `.title-bar`, `.window-status`, `.window-statusbar`, 2px raised/recessed bevels, hard `3px 3px 0` drop shadows, and redundant `.document-brand` mastheads) in one coordinated pass across [`site.css`](../site.css), the five hand-written landing pages, and the generated static manual template (`xtask/src/docs_site/template.rs`):
+
+- **Why the window frame was retired:** On dense scientific reference guides and multi-section manual pages, nested beveled window chrome, a dark title bar, a stacked two-row navigation strip, a verbose version strip, and a four-paragraph footer plus fake status bar competed visually with technical prose and equations while pushing headings below the fold. Switching to a calm flat two-surface layout preserves all zero-JS, strict-CSP, `no-referrer`, offline, and print guarantees while maximizing scannability and reading comfort.
+- **Flat two-surface tokens and verified WCAG 2.2 contrast:** Replaced beveled grey chrome (`--chrome`, `--shadow`, `--deep`) with a warm stone backdrop (`--desktop`), crisp white reading canvas (`--paper`), faint subtle tint (`--surface-subtle`), 1px hairline borders (`--border`, `--border-strong`), dark blue WCAG AAA links (`--link`, `--link-hover`), and coral (`--accent`, `--accent-hover`) reserved strictly for the primary CTA button, hero accent, and warning/caution accents. Removed `-webkit-font-smoothing: antialiased` so native subpixel rendering stays crisp on non-Retina displays.
+
+| Role | CSS token | Color | Verified WCAG 2.2 contrast |
+|---|---|---|---|
+| Page backdrop | `--desktop` | `#f5f4f0` | `--ink` on `--desktop`: `13.88:1` (AAA) |
+| Content canvas | `--paper` | `#ffffff` | `--ink` on `--paper`: `15.27:1` (AAA) |
+| Subtle surface (cards, callouts, TOC, code, zebra rows) | `--surface-subtle` | `#f7f6f2` | `--ink` on `--surface-subtle`: `14.12:1` (AAA) |
+| Hairline borders | `--border` / `--border-strong` | `#dcd8d0` / `#c2bdb3` | Structural separation (paired with `2px solid var(--title)` focus outlines) |
+| Primary text | `--ink` | `#1e2630` | `15.27:1` on `--paper`, `14.12:1` on `--surface-subtle` (AAA) |
+| Headings & active navigation | `--title` | `#243752` | `12.05:1` on `--paper`, `10.95:1` on `--desktop` (AAA) |
+| Secondary / muted text | `--muted` | `#525963` | `7.08:1` on `--paper` (AAA), `6.54:1` on `--surface-subtle`, `6.43:1` on `--desktop` (AA) |
+| Links | `--link` | `#1d4f91` | `8.14:1` on `--paper`, `7.53:1` on `--surface-subtle`, `7.40:1` on `--desktop` (AAA) |
+| Link hover | `--link-hover` | `#143a6d` | `11.32:1` on `--paper`, `10.28:1` on `--desktop` (AAA) |
+| Coral primary CTA & hero accent | `--accent` | `#b83d37` | `--paper` on `--accent`: `5.58:1` (AA); `--accent` on `--paper`: `5.58:1` (AA) |
+| Coral hover & warning titles | `--accent-hover` | `#962f2b` | `--paper` on `--accent-hover`: `7.67:1` (AAA); `--accent-hover` on `--surface-subtle`: `7.09:1` (AAA) |
+| File-type & signed-status accent | `--file-ink` | `#156260` | `7.12:1` on `--paper` (AAA), `6.59:1` on `--surface-subtle` (AA) |
+
+- **Single-row header & sticky manual sidebar:** Replaced the two-tier title bar + nav strip with `.site-shell` (`max-width: 1040px` on landing pages; `.site-shell.is-manual` `max-width: 1220px` on manual pages) and a single-row `.site-header` / `.header-inner` pairing a `32×32` `.wordmark` with six non-underlined `.site-nav` links (`aria-current="page"` indicated by bold `--title` text and a `2px` bottom rule) and, on manual snapshots, a quiet right-aligned `.header-utility` (`Product site`) link. At `>= 980px`, `.site-header` stays on one row and combined header + `.version-banner` height stays under `120px` at `1280px`. Manual pages pair a sticky `240px` left `.manual-sidebar` with a `minmax(0, 1fr)` main reading column in `.manual-layout`, collapsing cleanly to single-column flow below `980px`.
+- **Compact single-block footer preserving required disclosures:** Replaced the four-paragraph footer plus fake `.window-statusbar` with one compact `.site-footer` separated by a top `1px solid var(--border)` hairline that states each required disclosure once: explicit `MIT OR Apache-2.0` license, one-sentence clean-room statement, zero-telemetry plus GitHub Pages IP-log notice, `Privacy Policy` link, `FAQ`, and `Source code & credits ↗`.
+- **Unified reading measure & typography:** Enforced a `66ch` reading measure across prose paragraphs, lists, blockquotes, definition lists, `.callout`, and `.toc` blocks—including inside `<section>` and `<article>` wrappers on `faq.html`, `linux.html`, `open-pzfx-files.html`, and `privacy.html`—while letting `.table-wrap`, `<pre>`, `.doc-figure`, `.screenshot-card`, and card grids use the full column cleanly. Replaced `overflow-wrap: anywhere` on `.doc-body`, `th`, and `td` with `overflow-wrap: break-word` so wide tables scroll horizontally cleanly instead of breaking words mid-letter. Removed colliding `h2` bottom borders below `<hr>`, softened inline `<code>` to faint `--surface-subtle` with a `1px solid #e6e3dc` hairline, reserved monospace strictly for code/filenames/tabular figures (removing decorative monospace from `.pill`, `.platform-tag`, and `.badge`), and made whole `.section-card` tiles clickable via stretched title pseudo-elements.
+- **Simplified top-placed download section (`index.html`, `site.css`):** Moved `#downloads` (**Get CurveBook**) directly after the hero `.intro` section (before screenshots, features, and workspace sharing), removed the duplicate hero download CTA so `.intro` flows straight into the single primary **Download from GitHub Releases ↗** button, and replaced technical packaging metadata with three plain-language desktop cards (macOS `.dmg`, Windows `.msi`, Linux AppImage), quiet secondary links (`Install guide`, `AI assistant (MCP) setup`, `Known issues`), and a single-line footnote pointing CLI, FreeBSD, and checksum details to `manual/latest/get-started.html`.
 
 ### Warm Stone Coral & readability refinement (2026-11-23)
 

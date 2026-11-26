@@ -1,74 +1,79 @@
-# Settings, Shortcuts & Languages
+# Settings, shortcuts & languages
 
-CurveBook stores interface preferences and custom keyboard bindings locally in plain versioned JSON files with zero remote syncing or cloud accounts.
+CurveBook stores interface preferences and custom keyboard bindings locally in plain versioned JSON files. It uses no cloud accounts or remote syncing.
 
 ---
 
-## Preference Keys & Storage Paths {#preferences}
+## Preference keys & storage paths {#preferences}
 
-Desktop GUI settings persist in `preferences.json`, governed by [`docs/schemas/preferences.schema.json`](../schemas/preferences.schema.json) (`CURRENT_PREFERENCES_VERSION = 1`, `MAX_PREFERENCES_FILE_BYTES = 4 MiB`):
+Desktop GUI settings persist in `preferences.json` (schema version 1, maximum size 4 MiB), governed by [`preferences.schema.json`](../schemas/preferences.schema.json):
 
-| Key | JSON Type | Allowed Values / Meaning |
+| Key | JSON type | Allowed values |
 |---|---|---|
-| `version` | integer (`0..=1`) | Schema version (`1` written by current CurveBook; files with `version > 1` are refused rather than overwritten). |
-| `locale` | string \| `null` | BCP-47 UI locale code (e.g., `"en"`, `"de"`, `"pt-BR"`, `"ar"`). Defaults to `"en"` when omitted or `null`. |
-| `theme` | string \| `null` | Desktop theme mode: `"light"`, `"dark"`, or `"high-contrast"`. |
-| `shortcuts` | object \| `null` | Map of `command_id` -> key-combo string (e.g., `{"ui.gallery.toggle": "Ctrl+Alt+G"}`), merged atop default bindings. |
+| `version` | integer (`0` or `1`) | Schema version (`1` written by current releases). |
+| `locale` | string \| `null` | BCP-47 UI locale code (e.g., `"en"`, `"de"`, `"pt-BR"`, `"ar"`). |
+| `theme` | string \| `null` | Desktop theme: `"light"`, `"dark"`, or `"high-contrast"`. |
+| `shortcuts` | object \| `null` | Map of command ID to key combo (e.g., `{"ui.gallery.toggle": "Ctrl+Alt+G"}`). |
 
-Forward-compatible extension keys (`additionalProperties: true`) are preserved on deserialize/upgrade; corrupt `preferences.json` or `shortcuts.json` files emit a stderr warning and fall back cleanly to built-in defaults rather than blocking startup.
+Preference file behavior:
 
-### Storage Paths & Environment Overrides {#storage-paths}
+- Omitting `locale` or setting it to `null` defaults to `"en"`.
+- Entries in `shortcuts` merge on top of CurveBook's built-in defaults.
+- Files with `version > 1` are refused rather than overwritten, while unknown extension keys are preserved on load and upgrade.
+- If `preferences.json` or `shortcuts.json` is corrupt, CurveBook prints a warning to `stderr` and starts cleanly with built-in defaults.
 
-By default (unless overridden), `curvebook` resolves configuration (`preferences.json`, `shortcuts.json`) and recovery (`recovery/`) paths (`apps/curvebook/src/main.rs`) in priority order:
+### Storage paths & environment overrides {#storage-paths}
 
-1. `--portable-dir <dir>` CLI flag -> `<dir>/curvebook-data/`
-2. `CURVEBOOK_CONFIG_DIR` environment variable -> `<CURVEBOOK_CONFIG_DIR>/`
-3. Portable marker file `portable.txt` located beside the `curvebook` binary -> `<exe_dir>/curvebook-data/`
-4. **Platform Standard Directories:**
-   - **macOS:** `~/Library/Application Support/CurveBook/` (both preferences and recovery)
-   - **Windows:** `%APPDATA%\CurveBook\` (preferences/shortcuts) and `%LOCALAPPDATA%\CurveBook\` (recovery data)
-   - **Linux & FreeBSD:** `$XDG_CONFIG_HOME/curvebook/` (fallback `~/.config/curvebook/`) and `$XDG_DATA_HOME/curvebook/` (fallback `~/.local/share/curvebook/`), with strict UID `0700` fallback validation when `$HOME` is unset.
+Unless overridden, `curvebook` resolves configuration (`preferences.json`, `shortcuts.json`) and recovery (`recovery/`) directories in this priority order:
 
-Setting `CURVEBOOK_NO_PREFS=1` (or `true`/`yes`/`on`) runs in stateless mode without loading or writing preferences, shortcuts, or recovery journals.
+1. `--portable-dir <dir>` CLI flag → `<dir>/curvebook-data/`
+2. `CURVEBOOK_CONFIG_DIR` environment variable → `<CURVEBOOK_CONFIG_DIR>/`
+3. A `portable.txt` marker file beside the `curvebook` binary → `<exe_dir>/curvebook-data/`
+4. **Platform standard directories:**
+   - **macOS:** `~/Library/Application Support/CurveBook/` (both preferences and recovery).
+   - **Windows:** `%APPDATA%\CurveBook\` (preferences and shortcuts) and `%LOCALAPPDATA%\CurveBook\` (recovery data).
+   - **Linux & FreeBSD:** `$XDG_CONFIG_HOME/curvebook/` (fallback `~/.config/curvebook/`) and `$XDG_DATA_HOME/curvebook/` (fallback `~/.local/share/curvebook/`). When `$HOME` is unset, CurveBook validates a strict UID-owned `0700` fallback directory.
 
----
-
-## Keyboard Shortcut Customization {#keyboard-shortcuts}
-
-All engine commands (`cmd::registry()`) and interactive UI commands (`UI_COMMANDS`) register customizable bindings in `ShortcutRegistry` (`crates/ui-egui/src/menus/shortcuts.rs`):
-
-- **Context Scoping (`ShortcutScope`):** Bindings declare `Global`, `ResultSheet`, or `NonResultSheet` scope so context-sensitive shortcuts (such as `Cmd/Ctrl+T` switching parameters on a `ResultSheet` vs. creating a data table elsewhere) coexist without false conflicts.
-- **Persistence & Conflict Detection:** Overrides save atomically to `preferences.json` (`shortcuts` map) and `shortcuts.json`, enforce conflict detection across overlapping `ShortcutScope`s, and can be reset individually or wholesale to defaults (`shortcuts.reset_all()`).
+Set `CURVEBOOK_NO_PREFS=1` (or `true`, `yes`, `on`) to run statelessly without reading or writing preferences, shortcuts, or recovery journals.
 
 ---
 
-## UI Locales & Beta Translation Status (`[Draft]`) {#locales}
+## Keyboard shortcut customization {#keyboard-shortcuts}
 
-CurveBook's i18n catalog (`crates/ui-egui/src/i18n.rs`) provides full key coverage across every supported BCP-47 locale (`LOCALES`, verified at zero missing keys via `cargo xtask i18n-report`):
+All engine commands and interactive desktop actions support customizable keyboard shortcuts:
 
-| Region / Group | Locale Codes | Script Direction | Beta Review Status |
+- **Context scopes:** Bindings use global, results-sheet, or non-results-sheet scopes. Context-sensitive shortcuts—such as **Cmd/Ctrl+T** editing analysis parameters on a results sheet versus creating a data table elsewhere—coexist without false conflicts.
+- **Saving and conflict checks:** Custom bindings save atomically to `preferences.json` (under `shortcuts`) and `shortcuts.json`. CurveBook rejects conflicts across overlapping scopes and supports resetting individual shortcuts or restoring all defaults.
+
+---
+
+## UI locales & Beta translation status (`[Draft]`) {#locales}
+
+CurveBook provides complete UI string coverage across all supported BCP-47 locales with zero missing keys (verified by `cargo xtask i18n-report`):
+
+| Region / group | Locale codes | Script direction | Beta review status |
 |---|---|---|---|
 | **English** | `en` | LTR | Primary reviewed source (`English (en)`) |
-| **Tier-1 Scientific** | `de`, `es`, `fr`, `ja`, `ko`, `pt-BR`, `zh-CN`, `zh-TW` | LTR | Marked **`[Draft]`** in Beta pending native-speaker scientific review |
-| **Tier-2 European** | `it`, `nl`, `pl`, `ru`, `tr` | LTR | Marked **`[Draft]`** in Beta pending native-speaker scientific review |
-| **Right-to-Left (RTL)** | `ar`, `he` | RTL | Catalog & PDF/SVG BiDi ready; desktop GUI picker deferred to `1.0` (`normalize_beta_gui_locale` falls back to `"en"` in Beta) |
+| **Tier-1 scientific** | `de`, `es`, `fr`, `ja`, `ko`, `pt-BR`, `zh-CN`, `zh-TW` | LTR | Marked **`[Draft]`** pending native scientific review |
+| **Tier-2 European** | `it`, `nl`, `pl`, `ru`, `tr` | LTR | Marked **`[Draft]`** pending native scientific review |
+| **Right-to-left (RTL)** | `ar`, `he` | RTL | Catalog and PDF/SVG BiDi ready; GUI picker deferred to 1.0 |
 
-- **`[Draft]` Beta indicator:** Every non-English entry in the UI locale picker appends `[Draft]` (`<Autonym> (<code>) [Draft]`) to indicate machine-drafted translations awaiting community/native review.
-- **Locale normalization (`normalize_locale`):** Regional variants normalize cleanly onto supported tags (e.g., `en-US` -> `en`, `zh-Hans` -> `zh-CN`, `zh-Hant` -> `zh-TW`, `pt` -> `pt-BR`). See [Localization Architecture](../localization.md).
-
----
-
-## Right-to-Left (RTL) & Bidirectional Text {#rtl-mirroring}
-
-Full desktop GUI layout mirroring (`ar` and `he`, `is_rtl_locale == true`) is deferred to **`1.0`** under `R12.5`. In **Beta**, the desktop **View › Language** picker exposes only active LTR/CJK locales (`BETA_ACTIVE_LOCALES`), and `normalize_beta_gui_locale` falls back cleanly to `"en"` if an RTL code is loaded from `preferences.json`.
-
-Unicode bidirectional visual run reordering (`reorder_visual_bidi` in `curvebook-text`) remains active for multi-script figure labels and PDF/SVG exports, while the `ar`/`he` translation entries and horizontal layout mirroring primitives (`mirror_x_for_rtl` in `crates/ui-egui`) remain built in ahead of `1.0` enablement.
+- **`[Draft]` indicator:** Every non-English entry in the locale picker displays `[Draft]` (`<Autonym> (<code>) [Draft]`) to show that machine-drafted translations await native scientific review.
+- **Locale normalization:** Regional variants map cleanly to supported tags (such as `en-US` → `en`, `zh-Hans` → `zh-CN`, `zh-Hant` → `zh-TW`, `pt` → `pt-BR`). See [Localization Architecture](../localization.md).
 
 ---
 
-## Locale Number, Tick & Delimiter Formatting {#locale-formatting}
+## Right-to-left (RTL) & bidirectional text {#rtl-mirroring}
 
-UI locale selection integrates with `LocaleNumberPolicy` (`crates/text/src/number.rs`) and `CsvOptions` defaults without altering stored `f64` values or numerical computations:
+Full desktop GUI layout mirroring for Arabic (`ar`) and Hebrew (`he`) is deferred to the 1.0 release. In Beta, **View › Language** lists only active LTR and CJK locales, and loading an RTL tag from `preferences.json` falls back cleanly to `"en"`.
 
-- **Decimal & Thousands Formatting:** Continental European locales default cleanly to `,` decimal display and `;`-delimited regional CSV presets (`CsvOptions::european_csv()`), while English/CJK locales default to `.` decimals and `,`-delimited CSVs.
-- **Statistical Precision:** Internally, every transform, statistical hypothesis test, nonlinear solver, and Monte Carlo RNG evaluates over IEEE-754 double-precision values independent of active display locale.
+Unicode bidirectional visual run reordering stays active in Beta for multi-script figure labels and PDF/SVG exports. The `ar` and `he` translation catalogs and horizontal layout mirroring support remain built in ahead of 1.0 enablement.
+
+---
+
+## Locale number, tick & delimiter formatting {#locale-formatting}
+
+UI locale selection updates display formatting and CSV defaults without altering stored numeric values or calculations:
+
+- **Decimal and delimiter defaults:** Continental European locales default to `,` decimal display and `;`-delimited CSV presets. English and CJK locales default to `.` decimals and `,`-delimited CSVs.
+- **Statistical precision:** Every transform, hypothesis test, nonlinear solver, and random number generator computes in IEEE-754 double precision regardless of the active display locale.

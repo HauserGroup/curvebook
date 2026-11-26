@@ -22,7 +22,7 @@
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
-  <div class="desktop-window wrap" itemscope itemtype="https://schema.org/SoftwareApplication">
+  <div class="site-shell" itemscope itemtype="https://schema.org/SoftwareApplication">
     <meta itemprop="name" content="CurveBook">
     <meta itemprop="applicationCategory" content="ScientificApplication">
     <meta itemprop="operatingSystem" content="Linux">
@@ -30,28 +30,25 @@
     <meta itemprop="isAccessibleForFree" content="true">
     <meta itemprop="url" content="https://curvebook.org/linux.html">
     <header class="site-header">
-      <a class="title-bar" href="index.html">
-        <span class="wordmark">
-          <img src="images/curvebook.png" width="64" height="64" alt="">
+      <div class="header-inner">
+        <a class="wordmark" href="index.html">
+          <img src="images/curvebook.png" width="32" height="32" alt="">
           <span>CurveBook</span>
-        </span>
-        <span class="window-status">Linux · AppImage</span>
-      </a>
-      <nav aria-label="Main navigation">
-        <a href="index.html">Home</a>
-        <a href="manual/latest/index.html">Documentation</a>
-        <a href="open-pzfx-files.html">.pzfx &amp; .prism</a>
-        <a href="linux.html" aria-current="page">Linux</a>
-        <a href="faq.html">FAQ</a>
-        <a href="privacy.html">Privacy</a>
-        <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
-      </nav>
+        </a>
+        <nav class="site-nav" aria-label="Main navigation">
+          <a href="index.html">Home</a>
+          <a href="manual/latest/index.html">Documentation</a>
+          <a href="open-pzfx-files.html">.pzfx &amp; .prism</a>
+          <a href="linux.html" aria-current="page">Linux</a>
+          <a href="faq.html">FAQ</a>
+          <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
     </header>
 
     <main id="main" tabindex="-1">
       <div class="overview doc-body">
         <section id="summary" aria-labelledby="page-title" tabindex="-1">
-          <div class="document-brand"><img src="images/curvebook.png" width="64" height="64" alt=""><span>CurveBook</span></div>
           <p class="eyebrow">Linux · <code>x86_64</code> · <code>aarch64</code></p>
           <h1 id="page-title">Biostatistics and curve fitting on Linux.<br><span>Native, offline, and open source.</span></h1>
           <p class="lead"><strong>CurveBook</strong> runs natively on Linux without Wine, virtual machines, or cloud accounts. Each portable <code>.AppImage</code> bundles the pure-Rust desktop GUI, the headless <code>curvebook-cli</code> runner, and the local stdio MCP server — opening <code>.pzfx</code>, <code>.prism</code>, <code>.xlsx</code>, and CSV/TSV data tables offline with zero telemetry.</p>
@@ -63,13 +60,14 @@
           </ul>
           <div class="action-row">
             <a class="button primary" href="https://github.com/HauserGroup/curvebook/releases">Download Linux AppImage <span aria-hidden="true">↗</span></a>
-            <a class="button secondary" href="manual/latest/get-started.html#install-linux">Install &amp; Checksums <span aria-hidden="true">→</span></a>
+            <a class="button secondary" href="manual/latest/get-started.html#install-linux">Install &amp; checksums <span aria-hidden="true">→</span></a>
           </div>
           <nav class="toc" aria-label="On this page">
             <p class="toc-title">On this page</p>
             <ul>
               <li><a href="#install">Install and run on Linux</a></li>
-              <li><a href="#capabilities">Capabilities</a></li>
+              <li><a href="#capabilities">What you can do on Linux</a></li>
+              <li><a href="#packaging">Beta Linux packaging notes</a></li>
             </ul>
           </nav>
         </section>
@@ -98,8 +96,8 @@
           <ul>
             <li><strong>Open existing lab files:</strong> read data tables from <code>.pzfx</code> and <code>.prism</code> files (<a href="open-pzfx-files.html">file-format guide</a>), Excel <code>.xlsx</code> workbooks, and CSV/TSV files, or work natively in <code>.curvebook</code> archives and Git-friendly <code>.curvebook.d/</code> directories.</li>
             <li><strong>Biostatistics &amp; nonlinear regression:</strong> run <em>t</em>-tests, nonparametric comparisons, ordinary, repeated-measures, and REML mixed-effects ANOVA with multiple-comparison post tests, Kaplan–Meier and Cox proportional hazards survival analysis, contingency and ROC analyses, GLMs, PCA and clustering, power planning, and weighted or robust nonlinear curve fitting (including custom DSL and ODE models). See the <a href="manual/latest/analyses.html">analyses reference</a> and <a href="manual/latest/fitting.html">curve fitting reference</a>.</li>
-            <li><strong>Publication figures &amp; layouts:</strong> compose multi-panel figures on physical millimeter presets with significance brackets, compact letter display, live TeX equations, and colorblind-safe palettes, then export vector <code>SVG</code>, <code>PDF</code>, <code>EMF</code>, and raster <code>PNG</code> / <code>TIFF</code>. See <a href="manual/latest/graphs.html">graphs and layouts</a>.</li>
-            <li><strong>Headless CLI &amp; local AI automation (MCP):</strong> run reproducible batch pipelines with <code>curvebook-cli</code> or connect local MCP assistants via <code>curvebook-cli mcp --workdir &lt;folder&gt;</code>. See the <a href="manual/latest/mcp-for-beginners.html">Beginner's MCP Guide</a>.</li>
+            <li><strong>Publication figures &amp; layouts:</strong> compose multi-panel figures on physical millimeter presets with significance brackets, compact letter display, live TeX equations, and colorblind-safe palettes, then export vector SVG, PDF, EMF, and raster PNG or TIFF. See <a href="manual/latest/graphs.html">graphs and layouts</a>.</li>
+            <li><strong>Headless CLI &amp; local AI automation (MCP):</strong> run reproducible batch pipelines with <code>curvebook-cli</code> or connect local MCP assistants via <code>curvebook-cli mcp --workdir &lt;folder&gt;</code>. See the <a href="manual/latest/mcp-for-beginners.html">beginner's MCP guide</a>.</li>
           </ul>
         </section>
 
@@ -118,17 +116,13 @@
     </main>
 
     <footer class="site-footer">
-      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
-      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
-      <p class="privacy">CurveBook runs locally and collects no telemetry. GitHub Pages logs visitor IP addresses for security. Read the <a href="privacy.html">Privacy Policy</a> · <a href="faq.html">FAQ</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+      <p><strong>License:</strong> MIT OR Apache-2.0. Clean-room implementation from published scientific references without commercial software or copied proprietary assets. CurveBook runs locally with zero telemetry; GitHub Pages logs visitor IP addresses for security.</p>
+      <p class="footer-links">
+        <a href="privacy.html">Privacy Policy</a>
+        <a href="faq.html">FAQ</a>
+        <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+      </p>
     </footer>
-
-    <div class="window-statusbar" aria-label="Application summary">
-      <span class="status-cell is-grow">Ready · Linux AppImage · Offline Desktop · CLI · Local MCP</span>
-      <span class="status-cell">Pure Rust</span>
-      <span class="status-cell">Zero Telemetry</span>
-      <span class="status-cell">MIT / Apache-2.0</span>
-    </div>
   </div>
 </body>
 </html>

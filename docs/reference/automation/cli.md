@@ -1,10 +1,10 @@
-# CLI Reference (`curvebook-cli`)
+# CLI reference (`curvebook-cli`)
 
-`curvebook-cli` is the headless command-line runner and stdio MCP entry point for CurveBook. Command names, usage lines, flags, defaults, and exit codes in the [CLI Reference Registry](../registry/cli.html) and in `curvebook-cli --help` are generated from the same typed Rust catalog (`cli_catalog.rs`).
+`curvebook-cli` is CurveBook's headless command-line runner and stdio MCP server. Command names, usage lines, flags, defaults, and exit codes in the [CLI Reference Registry](../registry/cli.html) and `curvebook-cli --help` come from the same typed catalog.
 
-## Global Syntax and Options
+## Global syntax and options
 
-Single-call top-level invocation forms:
+Top-level invocation forms:
 
 ```sh
 curvebook-cli <command> [args]
@@ -13,45 +13,45 @@ curvebook-cli --help
 curvebook-cli --version
 ```
 
-- `-h`, `--help`, `help [subcommand]`: Print the command catalog or subcommand flag help and exit with `0`.
-- `-V`, `--version`, `version`: Print the `curvebook-cli` package version and exit with `0`.
+- `-h`, `--help`, `help [subcommand]`: Print the command catalog or subcommand help and exit with `0`.
+- `-V`, `--version`, `version`: Print the `curvebook-cli` version and exit with `0`.
 
-## Subcommands Summary
+## Subcommands summary
 
-Every built-in subcommand accepts `-h` / `--help` and follows deterministic single-call flag syntax:
+Every subcommand accepts `-h` or `--help` and runs in a single deterministic call:
 
 - `info <file> [--json]` — Inspect tables, info sheets, analyses, graphs, and layouts in an archive or project file.
 - `commands [--group <group>] [--json]` — List registered engine commands with schemas, effects, and shortcuts (see the [Engine Command Registry](../registry/commands.html)).
-- `<command-id> [--in <file>] [--out <file>] [--workdir <dir>] [--json] [--<param> <val> ...]` — Invoke any registered engine command directly with schema-typed flags (`--no-<param>` negates booleans).
-- `run <script> [--workdir <dir>] [--json]` — Execute an NDJSON or JSON-array command stream headlessly (`-` reads `stdin`).
-- `batch <manifest> [--workdir <dir>] [--json]` — Execute a `curvebook.batch.v1` manifest headlessly (see [Control Protocol & Batch Reference](control-and-batch.md#batch-manifest)).
-- `convert <in> <out> [--format <fmt>] [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]` — Convert archives, `.curvebook.d/` unpacked directories, templates, or interchange data files, or export tables and figures.
-- `export <in> (<out> | --out <out>) [--format <fmt>] [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]` — Export a specific table, graph, layout, or project to SVG, PDF, EMF, PNG, TIFF, CSV, TSV, JSON, `.curvebook`, or `.curvebook.d`.
-- `bench <file> [--json]` — Measure parse, recalculation, scene compilation, and export timings on a project file.
+- `<command-id> [--in <file>] [--out <file>] [--workdir <dir>] [--json] [--<param> <val> ...]` — Run any engine command directly with schema-typed flags (`--no-<param>` sets booleans to `false`).
+- `run <script> [--workdir <dir>] [--json]` — Run an NDJSON or JSON-array command stream headlessly (`-` reads standard input).
+- `batch <manifest> [--workdir <dir>] [--json]` — Run a `curvebook.batch.v1` manifest headlessly (see [Control protocol & batch reference](control-and-batch.md#batch-manifest)).
+- `convert <in> <out> [--format <fmt>] [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]` — Convert archives, `.curvebook.d/` folders, templates, or data files, or export tables and figures.
+- `export <in> (<out> | --out <out>) [--format <fmt>] [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]` — Export a table, graph, layout, or project to SVG, PDF, EMF, PNG, TIFF, CSV, TSV, JSON, `.curvebook`, or `.curvebook.d`.
+- `bench <file> [--json]` — Time parsing, recalculation, scene compilation, and export on a project file.
 - `perf [--json] [--require-release]` — Run synthetic performance budget checks.
-- `mcp [--control-port <port>] [--workdir <dir>] [--control-token <token>]` — Start the stdio [MCP Server](mcp.md).
+- `mcp [--control-port <port>] [--workdir <dir>] [--control-token <token>]` — Start the stdio [MCP server](mcp.md).
 
-Full argument, flag, default value, and option descriptions for every subcommand live in the generated [CLI Reference Registry](../registry/cli.html).
+Full flags, defaults, and option descriptions for every subcommand appear in the [CLI Reference Registry](../registry/cli.html).
 
-## Direct Command Flag Mapping
+## Direct command flag mapping
 
-When invoking an engine command ID directly on the command line (for example `curvebook-cli sheet.createData --in proj.curvebook --out proj.curvebook --kind xy`), CLI flags are validated against the command's JSON parameter schema:
+When calling an engine command directly (for example `curvebook-cli sheet.createData --in proj.curvebook --out proj.curvebook --kind xy`), flags are validated against its JSON schema:
 
-- String, integer, float, and array parameters accept `--<param> <value>` or `--<param>=<value>` (JSON arrays/objects are parsed when the schema expects structured fields).
-- Boolean parameters accept `--<param>` (sets `true`), `--<param>=true|false`, or `--no-<param>` (sets `false`).
-- Unknown parameters, wrong types, or `--workdir` path escapes fail immediately before mutation with exit code `2`.
+- String, number, and array options accept `--<param> <value>` or `--<param>=<value>`. Structured fields accept JSON arrays or objects.
+- Boolean options accept `--<param>` (`true`), `--<param>=true|false`, or `--no-<param>` (`false`).
+- Unknown options, type mismatches, and `--workdir` path escapes fail before mutating anything and exit with code 2.
 
-## Exit Codes and Structured JSON Errors {#exit-codes}
+## Exit codes and structured JSON errors {#exit-codes}
 
-| Code | Constant | Condition |
-|---|---|---|
-| `0` | `EXIT_OK` | Command completed cleanly. |
-| `1` | `EXIT_RUNTIME` | I/O error, archive/format error, solver/math failure, or engine runtime error. |
-| `2` | `EXIT_USAGE_OR_POLICY` | Invalid CLI syntax, unknown flag/command, malformed batch schema, or `--workdir` containment violation. |
-| `130` | `EXIT_INTERRUPTED` | Cancelled or interrupted (`SIGINT` / `ErrorCode::Cancelled`). |
+| Code | Name | Condition |
+|---:|---|---|
+| `0` | Success | Command finished cleanly. |
+| `1` | Runtime error | I/O failure, invalid file format, solver failure, or engine error. |
+| `2` | Usage or policy error | Invalid flag, unknown command, bad batch schema, or `--workdir` escape. |
+| `130` | Interrupted | Cancelled by `SIGINT` or cancellation request. |
 
-Passing `--json` before `--` guarantees that failures write a structured JSON `CliErrorEnvelope` (`{"error":{"code","category","message","retryable","remediation","details"}}`) to standard output rather than plain text on standard error.
+Pass `--json` before `--` to emit failures as a structured JSON error envelope (`{"error":{"code","category","message","retryable","remediation","details"}}`) on standard output instead of plain text on standard error.
 
-## Format and PDF Options
+## Format and PDF options
 
-For interchange format descriptors and accepted file extensions (`.curvebook`, `.curvebook.d`, `.cbtemplate`, `.pzfx`, `.prism`, `.csv`, `.tsv`, `.svg`, `.pdf`, `.emf`, `.png`, `.tiff`, `.json`), see the [Formats & Schemas Registry](../registry/formats.html) and [Files, Import & Export](../files.md). PDF export defaults to version `1.7` (`--pdf-version 1.4|1.7`) and accepts `--ttf-font <path>` for TrueType subset embedding.
+For supported file formats and extensions (`.curvebook`, `.curvebook.d`, `.cbtemplate`, `.pzfx`, `.prism`, `.csv`, `.tsv`, `.svg`, `.pdf`, `.emf`, `.png`, `.tiff`, `.json`), see the [Formats & Schemas Registry](../registry/formats.html) and [Files, import & export](../files.md). PDF export defaults to version `1.7` (`--pdf-version 1.4|1.7`) and accepts `--ttf-font <path>` to embed a TrueType font subset.
